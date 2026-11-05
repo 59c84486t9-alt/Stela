@@ -117,3 +117,62 @@ kernel void encode_draws(device Commands &c [[buffer(0)]], constant float4 *rect
     command.set_fragment_buffer(colors + i, 0);
     command.draw_primitives(primitive_type::triangle_strip, 0, 4, 1, 0);
 }
+
+// A kernel that encodes everything a compute command can hold: its own
+// pipeline, a dispatch of threads leaving a partial threadgroup, a
+// barrier, and threadgroup memory for a second dispatch that sums each
+// 64-element block of what the first wrote.
+struct FullCommands {
+    command_buffer commands [[id(0)]];
+    compute_pipeline_state scale [[id(1)]];
+    compute_pipeline_state sum [[id(2)]];
+};
+
+kernel void encode_full_dispatches(device FullCommands &c [[buffer(0)]], device uint *data [[buffer(1)]],
+                                   device uint *sums [[buffer(2)]])
+{
+    compute_command first(c.commands, 0);
+    first.set_compute_pipeline_state(c.scale);
+    first.set_kernel_buffer(data, 0);
+    first.concurrent_dispatch_threads(uint3(100, 1, 1), uint3(64, 1, 1));
+    compute_command second(c.commands, 1);
+    second.set_compute_pipeline_state(c.sum);
+    second.set_kernel_buffer(data, 0);
+    second.set_kernel_buffer(sums, 1);
+    second.set_threadgroup_memory_length(64 * 4, 0);
+    second.set_barrier();
+    second.concurrent_dispatch_threadgroups(uint3(4, 1, 1), uint3(64, 1, 1));
+}
+
+kernel void icb_block_sum(device const uint *data [[buffer(0)]], device uint *sums [[buffer(1)]],
+                          threadgroup uint *scratch [[threadgroup(0)]], uint t [[thread_index_in_threadgroup]],
+                          uint g [[threadgroup_position_in_grid]])
+{
+    scratch[t] = data[g * 64 + t];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (t == 0) {
+        uint total = 0;
+        for (uint k = 0; k < 64; k++)
+            total += scratch[k];
+        sums[g] = total;
+    }
+}
+
+// Indexed rectangle draws encoded by a kernel: four corners from the
+// shared corner buffer, by the index buffer, with the pipeline the
+// argument buffer holds.
+struct IndexedCommands {
+    command_buffer commands [[id(0)]];
+    render_pipeline_state pipeline [[id(1)]];
+};
+
+kernel void encode_indexed_draws(device IndexedCommands &c [[buffer(0)]], constant float4 *rects [[buffer(1)]],
+                                 constant float4 *colors [[buffer(2)]], constant ushort *indices [[buffer(3)]],
+                                 uint i [[thread_position_in_grid]])
+{
+    render_command command(c.commands, i);
+    command.set_render_pipeline_state(c.pipeline);
+    command.set_vertex_buffer(rects + i, 0);
+    command.set_fragment_buffer(colors + i, 0);
+    command.draw_indexed_primitives(primitive_type::triangle, 6, indices, 1, 0, 0);
+}

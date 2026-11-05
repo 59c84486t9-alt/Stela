@@ -612,6 +612,10 @@ pub struct Library {
     pub source: String,
     pub version: String,
     pub flags: Vec<String>,
+    /// A dynamic library, installed as `@loader_path/NAME.metallib`.
+    pub dynamic: bool,
+    /// The dynamic libraries it links against.
+    pub links: Vec<String>,
 }
 
 /// Which functions of each guarded corpus source Apple's compiler refuses
@@ -658,10 +662,26 @@ impl Plan {
                     source: source.into(),
                     version: version.into(),
                     flags: all,
+                    dynamic: false,
+                    links: vec![],
                 },
             );
         }
         name.into()
+    }
+
+    /// A dynamic library of a corpus source, which other libraries link
+    /// against and pipelines may preload.
+    pub fn dynamic_library(&mut self, name: &str, source: &str, version: &str) -> String {
+        let name = self.library(name, source, &[], version);
+        self.libraries.get_mut(&name).unwrap().dynamic = true;
+        name
+    }
+
+    /// Links `name` against the dynamic libraries `dependencies`.
+    pub fn link(&mut self, name: &str, dependencies: &[&str]) {
+        self.libraries.get_mut(name).unwrap().links =
+            dependencies.iter().map(|d| d.to_string()).collect();
     }
 
     /// The functions of a source that `probe` found Apple's compiler
@@ -778,14 +798,24 @@ impl Plan {
             .iter()
             .filter(|c| selects(only, name_of(c)))
             .collect();
-        let used: BTreeSet<&str> = selected
+        let mut used: BTreeSet<&str> = selected
             .iter()
             .flat_map(|c| {
                 let steps = c["steps"].as_array().into_iter().flatten();
-                std::iter::once(&c["library"]).chain(steps.map(|s| &s["library"]))
+                let preloads = c["preload"].as_array().into_iter().flatten();
+                std::iter::once(&c["library"])
+                    .chain(steps.map(|s| &s["library"]))
+                    .chain(preloads)
             })
             .filter_map(Value::as_str)
             .collect();
+        // A used library's dynamic libraries are used too.
+        let linked: Vec<&str> = used
+            .iter()
+            .filter_map(|n| self.libraries.get(*n))
+            .flat_map(|l| l.links.iter().map(String::as_str))
+            .collect();
+        used.extend(linked);
         let mut libraries = Map::new();
         let mut builds = Map::new();
         for (name, library) in &self.libraries {
@@ -796,11 +826,13 @@ impl Plan {
                 source,
                 version,
                 flags,
+                dynamic,
+                links,
             } = library;
             libraries.insert(name.clone(), format!("lib/{name}.metallib").into());
             builds.insert(
                 name.clone(),
-                json!({"source": source, "version": version, "flags": flags}),
+                json!({"source": source, "version": version, "flags": flags, "dynamic": dynamic, "links": links}),
             );
         }
         let body = serde_json::to_string(&json!({"libraries": libraries, "cases": selected}))?;

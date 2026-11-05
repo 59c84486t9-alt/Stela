@@ -29,6 +29,7 @@ mod check;
 mod compute;
 mod convert;
 mod coverage;
+mod extras;
 mod features;
 mod guest;
 mod integer;
@@ -198,6 +199,7 @@ fn build(plan: &mut plan::Plan) {
     sequences::build(plan);
     stages::build(plan);
     resources::build(plan);
+    extras::build(plan);
 }
 
 fn availability() -> Result<plan::Availability> {

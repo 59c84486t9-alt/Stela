@@ -46,7 +46,11 @@ fn mac_script(plan: &Value) -> String {
         "cd \"$(dirname \"$0\")\"".into(),
         "mkdir -p lib".into(),
     ];
-    for (name, build) in plan["builds"].as_object().into_iter().flatten() {
+    // Dynamic libraries first: the libraries linking them need them built.
+    let mut builds: Vec<(&String, &Value)> =
+        plan["builds"].as_object().into_iter().flatten().collect();
+    builds.sort_by_key(|(_, b)| b["dynamic"].as_bool() != Some(true));
+    for (name, build) in builds {
         let source = Path::new(build["source"].as_str().unwrap())
             .file_name()
             .unwrap()
@@ -62,9 +66,22 @@ fn mac_script(plan: &Value) -> String {
             "xcrun -sdk macosx metal {} -c sources/{source} -o lib/{name}.air",
             flags.join(" ")
         ));
-        lines.push(format!(
-            "xcrun -sdk macosx metallib lib/{name}.air -o lib/{name}.metallib"
-        ));
+        let links: String = build["links"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(|l| format!(" lib/{l}.metallib"))
+            .collect();
+        lines.push(if build["dynamic"].as_bool() == Some(true) {
+            format!(
+                "xcrun -sdk macosx metal -dynamiclib -install_name @loader_path/{name}.metallib lib/{name}.air -o lib/{name}.metallib"
+            )
+        } else if !links.is_empty() {
+            format!("xcrun -sdk macosx metal lib/{name}.air{links} -o lib/{name}.metallib")
+        } else {
+            format!("xcrun -sdk macosx metallib lib/{name}.air -o lib/{name}.metallib")
+        });
     }
     lines.push(
         "clang -fobjc-arc -arch arm64 -mmacosx-version-min=14.0 -O1 -Wall -Wextra -Wno-unused-parameter \

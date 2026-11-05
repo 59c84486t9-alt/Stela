@@ -143,33 +143,52 @@ fn argument_buffers(plan: &mut Plan, library: &str) {
     }
     let texture =
         |name: &str, data: &[f64]| Texture::d2(name, "rgba32float", 4, 1).data(f32s(data));
-    plan.add(
-        Case::compute1("arguments.argument_buffer", library, "argument_buffer", n as u32)
-            .requires(&[], &["argument_buffers_tier2"])
-            .buffer(Buffer::data("args", 0, args))
+    // The same arguments written as Tier 2 layouts and through the
+    // argument encoder the function's buffer describes, by [[id]] in
+    // member order, the inline count set as constant data.
+    let tier2 = json!([
+        {"buffer": "args", "entries": [
+            entry("buffer", 0, "values"), entry("texture", 8, "image"), entry("sampler", 16, "linear"),
+            entry("buffer", 24, "counter"), entry("texture", 32, "layer0"), entry("texture", 40, "layer1"),
+            entry("texture", 48, "layer2"), entry("buffer", 56, "inner")]},
+        {"buffer": "inner", "entries": [entry("buffer", 0, "inner_values")]}
+    ]);
+    let id =
+        |kind: &str, id: u32, resource: &str| json!({"kind": kind, "id": id, "resource": resource});
+    let encoded = json!([
+        {"buffer": "args", "encoder": {"function": "argument_buffer", "index": 0}, "entries": [
+            id("buffer", 0, "values"), id("texture", 1, "image"), id("sampler", 2, "linear"),
+            id("buffer", 3, "counter"), id("texture", 4, "layer0"), id("texture", 5, "layer1"),
+            id("texture", 6, "layer2"), id("buffer", 7, "inner"), {"kind": "constant", "id": 8, "value": count}]},
+        {"buffer": "inner", "entries": [entry("buffer", 0, "inner_values")]}
+    ]);
+    for (name, arguments, features) in [
+        (
+            "arguments.argument_buffer",
+            tier2,
+            &["argument_buffers_tier2"][..],
+        ),
+        ("arguments.argument_buffer.encoder", encoded, &[][..]),
+    ] {
+        plan.add(
+        Case::compute1(name, library, "argument_buffer", n as u32)
+            .requires(&[], features)
+            .buffer(Buffer::data("args", 0, args.clone()))
             .buffer(Buffer::zeroed("out", 1, n * 32))
             .buffer(Buffer::data("values", 0, f32s(&values)).unbound())
             .buffer(Buffer::zeroed("counter", 0, 16).unbound())
-            .buffer(Buffer::data("inner", 0, inner).unbound())
+            .buffer(Buffer::data("inner", 0, inner.clone()).unbound())
             .buffer(Buffer::data("inner_values", 0, u32s(&inner_values)).unbound())
             .texture(texture("image", &image))
             .texture(texture("layer0", &layers[0]))
             .texture(texture("layer1", &layers[1]))
             .texture(texture("layer2", &layers[2]))
             .sampler(json!({"name": "linear", "min": "linear", "mag": "linear", "argument_buffers": true}))
-            .set(
-                "arguments",
-                json!([
-                    {"buffer": "args", "entries": [
-                        entry("buffer", 0, "values"), entry("texture", 8, "image"), entry("sampler", 16, "linear"),
-                        entry("buffer", 24, "counter"), entry("texture", 32, "layer0"), entry("texture", 40, "layer1"),
-                        entry("texture", 48, "layer2"), entry("buffer", 56, "inner")]},
-                    {"buffer": "inner", "entries": [entry("buffer", 0, "inner_values")]}
-                ]),
-            )
+            .set("arguments", arguments)
             .output(Output::new("out", Dtype::F32, Tolerance::ulp(1.0)).expect_same(f32s(&expected)))
             .output(Output::new("counter", Dtype::U32, Tolerance::exact()).expect_same(u32s(&[n as u32, 0, 0, 0]))),
     );
+    }
     // An array of four { pointer, float } structs, 16 bytes apart.
     let sources: Vec<Vec<f64>> = (0..4)
         .map(|_| (0..n).map(|_| f32r(rng.uniform(-5.0, 5.0))).collect())
@@ -182,16 +201,42 @@ fn argument_buffers(plan: &mut Plan, library: &str) {
     let expected: Vec<f64> = (0..n)
         .map(|i| f32r(sources[i % 4][i] + f64::from(biases[i % 4])))
         .collect();
-    let mut case = Case::compute1("arguments.argument_array", library, "argument_array", n as u32)
-        .requires(&[], &["argument_buffers_tier2"])
-        .buffer(Buffer::data("items", 0, items))
-        .buffer(Buffer::zeroed("out", 1, n * 4))
-        .set("arguments", json!([{"buffer": "items", "entries": (0..4).map(|k| entry("buffer", 16 * k, &format!("source{k}"))).collect::<Vec<_>>()}]))
-        .output(Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected)));
-    for (k, s) in sources.iter().enumerate() {
-        case = case.buffer(Buffer::data(&format!("source{k}"), 0, f32s(s)).unbound());
+    // The sources resident by useResource, and by a residency set alone.
+    for residency_set in [false, true] {
+        let entries: Vec<Value> = (0..4)
+            .map(|k| {
+                let mut e = entry("buffer", 16 * k, &format!("source{k}"));
+                e["residency_set"] = residency_set.into();
+                e
+            })
+            .collect();
+        let name = if residency_set {
+            "arguments.argument_array.residency_set"
+        } else {
+            "arguments.argument_array"
+        };
+        let mut case = Case::compute1(name, library, "argument_array", n as u32)
+            .requires(&[], &["argument_buffers_tier2"])
+            .buffer(Buffer::data("items", 0, items.clone()))
+            .buffer(Buffer::zeroed("out", 1, n * 4))
+            .set(
+                "arguments",
+                json!([{"buffer": "items", "entries": entries}]),
+            )
+            .output(
+                Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected)),
+            );
+        if residency_set {
+            case = case.set(
+                "residency_set",
+                json!(["source0", "source1", "source2", "source3"]),
+            );
+        }
+        for (k, s) in sources.iter().enumerate() {
+            case = case.buffer(Buffer::data(&format!("source{k}"), 0, f32s(s)).unbound());
+        }
+        plan.add(case);
     }
-    plan.add(case);
 }
 
 fn function_pointers(plan: &mut Plan, library: &str) {
@@ -221,6 +266,30 @@ fn function_pointers(plan: &mut Plan, library: &str) {
             .requires(&[], &["function_pointers"])
             .set(
                 "visible_functions",
+                json!(["twice", "square", "negate_plus"]),
+            )
+            .set(
+                "function_tables",
+                json!([{"index": 1, "functions": ["twice", "square", "negate_plus"]}]),
+            )
+            .buffer(Buffer::data("in", 0, f32s(&input)))
+            .buffer(Buffer::zeroed("out", 2, n * 4))
+            .buffer(Buffer::data("which", 3, u32s(&which)))
+            .output(
+                Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected)),
+            ),
+        );
+        // The same functions compiled to binaries and linked as such.
+        plan.add(
+            Case::compute1(
+                "arguments.visible_function_table.binary",
+                library,
+                "visible_table",
+                n as u32,
+            )
+            .requires(&[], &["function_pointers"])
+            .set(
+                "binary_functions",
                 json!(["twice", "square", "negate_plus"]),
             )
             .set(
@@ -313,11 +382,64 @@ fn function_pointers(plan: &mut Plan, library: &str) {
     }
 }
 
+/// Dynamic libraries: a kernel calling into one Metal loads by its
+/// install name, the same with the library preloaded, and a fragment
+/// function calling into it.
+fn dynamic_libraries(plan: &mut Plan, rng: &mut Random) {
+    let dynamic = plan.dynamic_library("dynamic", "dynamic.metal", LATEST);
+    let user = plan.library("dynamic_user", "dynamic_user.metal", &[], LATEST);
+    plan.link(&user, &[&dynamic]);
+    let n = 256usize;
+    let input: Vec<f64> = (0..n).map(|_| f32r(rng.uniform(-4.0, 4.0))).collect();
+    let expected: Vec<f64> = input.iter().map(|&x| f32r(f32r(x * 3.0) + 1.0)).collect();
+    let fused: Vec<f64> = input.iter().map(|&x| f32r(x * 3.0 + 1.0)).collect();
+    for (name, preload) in [("loaded", json!([])), ("preloaded", json!([dynamic]))] {
+        plan.add(
+            Case::compute1(
+                &format!("arguments.dynamic_library.{name}"),
+                &user,
+                "use_dynamic",
+                n as u32,
+            )
+            .requires(&[], &["dynamic_libraries"])
+            .set("preload", preload)
+            .buffer(Buffer::data("in", 0, f32s(&input)))
+            .buffer(Buffer::zeroed("out", 1, n * 4))
+            .output(
+                Output::new("out", Dtype::F32, Tolerance::exact())
+                    .expect_same(f32s(&expected))
+                    .expect_alternative(f32s(&fused)),
+            ),
+        );
+    }
+    let color = [0.25, 0.5, 0.75, 0.125];
+    let tinted = [color[2], color[1], color[0], 1.0 - color[3]];
+    plan.add(
+        Case::render(
+            "arguments.dynamic_library.fragment",
+            &user,
+            "vert_full",
+            Some("frag_dynamic"),
+            json!({"colors": [{"texture": "target", "clear": [0, 0, 0, 0]}], "preload": [dynamic],
+                   "primitive": "triangle_strip", "vertex_count": 4}),
+        )
+        .requires(&[], &["render_dynamic_libraries"])
+        .set("preload", json!([dynamic]))
+        .buffer(Buffer::data("color", 0, f32s(&color)).stage("fragment"))
+        .texture(Texture::d2("target", "rgba32float", 8, 8).usage(&["render"]))
+        .output(
+            Output::new("target", Dtype::F32, Tolerance::exact())
+                .expect_same(f32s(&tinted.repeat(64))),
+        ),
+    );
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("arguments", SOURCE, &[], LATEST);
     constants(plan, &library);
     argument_buffers(plan, &library);
     function_pointers(plan, &library);
+    dynamic_libraries(plan, &mut Random::new(1004));
 }
 
 #[cfg(test)]

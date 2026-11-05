@@ -272,6 +272,20 @@ static id<MTLLibrary> library_named(id<MTLDevice> device, NSDictionary *plan, NS
 	@throw failure(@"library %@ is not present", name);
 }
 
+/* The dynamic libraries a pipeline preloads, by plan library name. */
+static NSArray<id<MTLDynamicLibrary>> *preloaded(Case *c, NSArray *names)
+{
+	NSMutableArray *out = [NSMutableArray new];
+	for (NSString *name in names) {
+		NSError *error = nil;
+		id<MTLDynamicLibrary> dylib = [c.device newDynamicLibrary:library_named(c.device, c.plan, name, c.libraries) error:&error];
+		if (!dylib)
+			@throw failure(@"dynamic library %@: %@", name, error.localizedDescription);
+		[out addObject:dylib];
+	}
+	return out;
+}
+
 static MTLFunctionConstantValues *constants_of(NSArray *constants)
 {
 	MTLFunctionConstantValues *values = [MTLFunctionConstantValues new];
@@ -624,6 +638,36 @@ static void encode_arguments(Case *c, NSDictionary *a)
 	if (!buffer)
 		@throw failure(@"argument buffer %@ is not a buffer", a[@"buffer"]);
 	uint8_t *bytes = buffer.contents;
+	/* The case's library, loaded only by entries that name functions. */
+	id<MTLLibrary> (^library)(void) = ^{
+		return library_named(c.device, c.plan, c.spec[@"library"], c.libraries);
+	};
+	if (a[@"encoder"]) {
+		/* The argument encoder a function's buffer argument describes,
+		 * each entry at its [[id]]: the path before Tier 2 layouts. */
+		id<MTLFunction> f = function_named(library(), a[@"encoder"][@"function"], nil);
+		id<MTLArgumentEncoder> ae = [f newArgumentEncoderWithBufferIndex:number(a[@"encoder"], @"index", 0)];
+		[ae setArgumentBuffer:buffer offset:number(a, @"offset", 0)];
+		for (NSDictionary *e in a[@"entries"]) {
+			NSString *kind = e[@"kind"], *name = e[@"resource"];
+			NSUInteger index = number(e, @"id", 0);
+			if ([kind isEqualToString:@"buffer"]) {
+				[ae setBuffer:c.buffers[name] offset:number(e, @"resource_offset", 0) atIndex:index];
+				[c.resident addObject:c.buffers[name]];
+			} else if ([kind isEqualToString:@"texture"]) {
+				[ae setTexture:c.textures[name] atIndex:index];
+				[c.resident addObject:c.textures[name]];
+			} else if ([kind isEqualToString:@"sampler"]) {
+				[ae setSamplerState:c.samplers[name] atIndex:index];
+			} else if ([kind isEqualToString:@"constant"]) {
+				uint32_t value = (uint32_t)number(e, @"value", 0);
+				memcpy([ae constantDataAtIndex:index], &value, 4);
+			} else {
+				@throw failure(@"unknown encoded argument kind %@", kind);
+			}
+		}
+		return;
+	}
 	for (NSDictionary *e in a[@"entries"]) {
 		NSUInteger offset = number(e, @"offset", 0);
 		NSString *kind = e[@"kind"], *name = e[@"resource"];
@@ -632,8 +676,9 @@ static void encode_arguments(Case *c, NSDictionary *a)
 			if (!target) @throw failure(@"argument %@ names no buffer", name);
 			uint64_t address = target.gpuAddress + number(e, @"resource_offset", 0);
 			memcpy(bytes + offset, &address, 8);
-			/* A heap's resources are made resident by useHeap. */
-			if (!target.heap)
+			/* A heap's resources are made resident by useHeap, and a
+			 * residency set's by the set. */
+			if (!target.heap && ![e[@"residency_set"] boolValue])
 				[c.resident addObject:target];
 		} else if ([kind isEqualToString:@"texture"]) {
 			id<MTLTexture> target = c.textures[name];
@@ -653,6 +698,32 @@ static void encode_arguments(Case *c, NSDictionary *a)
 			if (!target) @throw failure(@"argument %@ names no sampler", name);
 			MTLResourceID id_ = target.gpuResourceID;
 			memcpy(bytes + offset, &id_, 8);
+		} else if ([kind isEqualToString:@"compute_pipeline"]) {
+			/* A pipeline an indirect command sets, by its resource ID. */
+			MTLComputePipelineDescriptor *pd = [MTLComputePipelineDescriptor new];
+			pd.computeFunction = function_named(library(), e[@"function"], nil);
+			pd.supportIndirectCommandBuffers = YES;
+			NSError *error = nil;
+			id<MTLComputePipelineState> pipeline = [c.device newComputePipelineStateWithDescriptor:pd options:MTLPipelineOptionNone
+												   reflection:nil error:&error];
+			if (!pipeline)
+				@throw failure(@"argument compute pipeline: %@", error.localizedDescription);
+			MTLResourceID id_ = pipeline.gpuResourceID;
+			memcpy(bytes + offset, &id_, 8);
+			[c.resident addObject:pipeline];
+		} else if ([kind isEqualToString:@"render_pipeline"]) {
+			MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+			pd.vertexFunction = function_named(library(), e[@"vertex"], nil);
+			pd.fragmentFunction = function_named(library(), e[@"fragment"], nil);
+			pd.colorAttachments[0].pixelFormat = lookup(pixel_formats(), @"pixel format", e[@"format"]);
+			pd.supportIndirectCommandBuffers = YES;
+			NSError *error = nil;
+			id<MTLRenderPipelineState> pipeline = [c.device newRenderPipelineStateWithDescriptor:pd error:&error];
+			if (!pipeline)
+				@throw failure(@"argument render pipeline: %@", error.localizedDescription);
+			MTLResourceID id_ = pipeline.gpuResourceID;
+			memcpy(bytes + offset, &id_, 8);
+			[c.resident addObject:pipeline];
 		} else {
 			@throw failure(@"unknown argument kind %@", kind);
 		}
@@ -817,9 +888,43 @@ static id<MTLComputeCommandEncoder> encode_compute(Case *c, id<MTLCommandBuffer>
 	MTLComputePipelineDescriptor *d = [MTLComputePipelineDescriptor new];
 	d.computeFunction = function;
 	d.supportIndirectCommandBuffers = [spec[@"supports_icb"] boolValue];
+	if (spec[@"preload"])
+		d.preloadedLibraries = preloaded(c, spec[@"preload"]);
+	if (spec[@"stage_input"]) {
+		/* Compute stage-in: attributes fetched by grid position. */
+		MTLStageInputOutputDescriptor *si = [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
+		for (NSDictionary *a in spec[@"stage_input"][@"attributes"]) {
+			MTLAttributeDescriptor *ad = si.attributes[number(a, @"index", 0)];
+			ad.format = (MTLAttributeFormat)lookup(vertex_formats(), @"attribute format", a[@"format"]);
+			ad.offset = number(a, @"offset", 0);
+			ad.bufferIndex = number(a, @"buffer", 0);
+		}
+		NSDictionary *steps = @{@"grid_x" : @(MTLStepFunctionThreadPositionInGridX), @"grid_y" : @(MTLStepFunctionThreadPositionInGridY),
+					@"constant" : @(MTLStepFunctionConstant)};
+		for (NSDictionary *l in spec[@"stage_input"][@"layouts"]) {
+			MTLBufferLayoutDescriptor *ld = si.layouts[number(l, @"buffer", 0)];
+			ld.stride = number(l, @"stride", 16);
+			ld.stepFunction = lookup(steps, @"step function", l[@"step"] ?: @"grid_x");
+			ld.stepRate = number(l, @"rate", 1);
+		}
+		d.stageInputDescriptor = si;
+	}
 	NSMutableArray *linked = [NSMutableArray new];
 	for (NSString *name in spec[@"visible_functions"])
 		[linked addObject:function_named(library, name, nil)];
+	/* Visible functions compiled to binaries on their own, then linked. */
+	NSMutableArray *binaries = [NSMutableArray new];
+	for (NSString *name in spec[@"binary_functions"]) {
+		MTLFunctionDescriptor *fd = [MTLFunctionDescriptor functionDescriptor];
+		fd.name = name;
+		fd.options = MTLFunctionOptionCompileToBinary;
+		NSError *error = nil;
+		id<MTLFunction> f = [library newFunctionWithDescriptor:fd error:&error];
+		if (!f)
+			@throw failure(@"binary function %@: %@", name, error.localizedDescription);
+		[binaries addObject:f];
+		[linked addObject:f];
+	}
 	NSMutableDictionary *stitched = [NSMutableDictionary new];
 	for (NSDictionary *g in spec[@"stitched"]) {
 		id<MTLFunction> f = stitched_function(c, library, g);
@@ -828,7 +933,10 @@ static id<MTLComputeCommandEncoder> encode_compute(Case *c, id<MTLCommandBuffer>
 	}
 	if (linked.count) {
 		MTLLinkedFunctions *l = [MTLLinkedFunctions new];
-		l.functions = linked;
+		NSMutableArray *source = [linked mutableCopy];
+		[source removeObjectsInArray:binaries];
+		l.functions = source;
+		l.binaryFunctions = binaries;
 		d.linkedFunctions = l;
 	}
 	NSError *error = nil;
@@ -876,9 +984,13 @@ static id<MTLComputeCommandEncoder> encode_compute(Case *c, id<MTLCommandBuffer>
 		[e executeCommandsInBuffer:c.icbs[x[@"icb"]] withRange:NSMakeRange(number(x, @"start", 0), number(x, @"count", 1))];
 	} else if (spec[@"indirect"]) {
 		NSDictionary *i = spec[@"indirect"];
+		if (spec[@"stage_input"])
+			[e setStageInRegion:MTLRegionMake3D(0, 0, 0, g.width, g.height, g.depth)];
 		[e dispatchThreadgroupsWithIndirectBuffer:c.buffers[i[@"buffer"]] indirectBufferOffset:number(i, @"offset", 0)
 				    threadsPerThreadgroup:t];
 	} else if ([spec[@"dispatch"] isEqualToString:@"threads"]) {
+		if (spec[@"stage_input"])
+			[e setStageInRegion:MTLRegionMake3D(0, 0, 0, g.width, g.height, g.depth)];
 		[e dispatchThreads:g threadsPerThreadgroup:t];
 	} else {
 		[e dispatchThreadgroups:MTLSizeMake((g.width + t.width - 1) / t.width, (g.height + t.height - 1) / t.height,
@@ -891,6 +1003,22 @@ static id<MTLComputeCommandEncoder> encode_compute(Case *c, id<MTLCommandBuffer>
 static void run_compute(Case *c, id<MTLCommandQueue> queue, id<MTLLibrary> library, NSDictionary *spec)
 {
 	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	if (spec[@"residency_set"]) {
+		/* The named buffers resident through a residency set alone. */
+		if (@available(macOS 15.0, *)) {
+			NSError *error = nil;
+			id<MTLResidencySet> set = [c.device newResidencySetWithDescriptor:[MTLResidencySetDescriptor new] error:&error];
+			if (!set)
+				@throw failure(@"residency set: %@", error.localizedDescription);
+			for (NSString *name in spec[@"residency_set"])
+				[set addAllocation:c.buffers[name]];
+			[set commit];
+			[set requestResidency];
+			[cb useResidencySet:set];
+		} else {
+			@throw [NSException exceptionWithName:@"CaseUnsupported" reason:@"residency sets need macOS 15" userInfo:nil];
+		}
+	}
 	id<MTLComputeCommandEncoder> e = encode_compute(c, cb, nil, library, spec);
 	update_fences(c, e, spec);
 	[e endEncoding];
@@ -905,6 +1033,10 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 	if (!mesh)
 		d.vertexFunction = function_named(library, spec[@"vertex"], spec[@"constants"]);
 	d.maxVertexAmplificationCount = number(r[@"amplification"], @"count", 1);
+	if (r[@"preload"]) {
+		d.vertexPreloadedLibraries = preloaded(c, r[@"preload"]);
+		d.fragmentPreloadedLibraries = d.vertexPreloadedLibraries;
+	}
 	NSMutableArray *fragment_linked = [NSMutableArray new];
 	for (NSString *name in r[@"fragment_visible_functions"])
 		[fragment_linked addObject:function_named(library, name, nil)];
@@ -925,7 +1057,10 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 					@"fractional_even" : @(MTLTessellationPartitionModeFractionalEven)};
 		d.tessellationPartitionMode = lookup(modes, @"partition mode", tess[@"partition"] ?: @"integer");
 		d.maxTessellationFactor = number(tess, @"max_factor", 16);
-		d.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
+		/* Instances read their own factors only when the draw gives them a
+		 * stride. */
+		d.tessellationFactorStepFunction = tess[@"instance_stride"] ? MTLTessellationFactorStepFunctionPerPatchAndPerInstance
+									    : MTLTessellationFactorStepFunctionPerPatch;
 		d.tessellationOutputWindingOrder = [tess[@"winding"] isEqualToString:@"cw"] ? MTLWindingClockwise : MTLWindingCounterClockwise;
 		d.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
 	}
@@ -1000,7 +1135,7 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 		MTLRenderPassColorAttachmentDescriptor *ca = pass.colorAttachments[i];
 		ca.texture = t;
 		/* An array target is layered: the vertex function picks the slice. */
-		if (t.textureType == MTLTextureType2DArray)
+		if (t.textureType == MTLTextureType2DArray || t.textureType == MTLTextureType2DMultisampleArray)
 			pass.renderTargetArrayLength = t.arrayLength;
 		NSArray *clear = a[@"clear"];
 		ca.loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
@@ -1009,7 +1144,8 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 		ca.storeAction = MTLStoreActionStore;
 		if (a[@"resolve"]) {
 			ca.resolveTexture = c.textures[a[@"resolve"]];
-			ca.storeAction = MTLStoreActionStoreAndMultisampleResolve;
+			ca.storeAction = [a[@"store"] isEqualToString:@"resolve"] ? MTLStoreActionMultisampleResolve
+										   : MTLStoreActionStoreAndMultisampleResolve;
 		}
 	}
 	MTLDepthStencilDescriptor *ds = [MTLDepthStencilDescriptor new];
@@ -1074,7 +1210,9 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 	if (!pipeline)
 		@throw failure(@"render pipeline: %@", error.localizedDescription);
 	id<MTLDepthStencilState> depth_stencil = [c.device newDepthStencilStateWithDescriptor:ds];
-	id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+	/* Everything an encoder of this pass records, from `spec` and its
+	 * bindings: once, or once per sub-encoder of a parallel encoder. */
+	void (^encode)(id<MTLRenderCommandEncoder>, NSDictionary *) = ^(id<MTLRenderCommandEncoder> e, NSDictionary *spec) {
 	wait_fences(c, e, spec);
 	[e setRenderPipelineState:pipeline];
 	[e setDepthStencilState:depth_stencil];
@@ -1158,10 +1296,19 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 		};
 		[e drawMeshThreadgroups:size(g) threadsPerObjectThreadgroup:size(o) threadsPerMeshThreadgroup:size(t)];
 	} else if (tess) {
-		[e setTessellationFactorBuffer:c.buffers[tess[@"factors"]] offset:0 instanceStride:0];
-		[e drawPatches:number(tess, @"control_points", 4) patchStart:number(tess, @"patch_start", 0)
-			patchCount:number(tess, @"patch_count", 1) patchIndexBuffer:nil patchIndexBufferOffset:0
-		     instanceCount:1 baseInstance:0];
+		/* Factors per patch, and per instance at a stride; patches by
+		 * index buffer and draws from an indirect buffer when named. */
+		[e setTessellationFactorBuffer:c.buffers[tess[@"factors"]] offset:0
+				instanceStride:number(tess, @"instance_stride", 0)];
+		id<MTLBuffer> index = tess[@"patch_index"] ? c.buffers[tess[@"patch_index"]] : nil;
+		NSUInteger points = number(tess, @"control_points", 4);
+		if (tess[@"indirect"])
+			[e drawPatches:points patchIndexBuffer:index patchIndexBufferOffset:0
+				indirectBuffer:c.buffers[tess[@"indirect"]] indirectBufferOffset:0];
+		else
+			[e drawPatches:points patchStart:number(tess, @"patch_start", 0)
+				patchCount:number(tess, @"patch_count", 1) patchIndexBuffer:index patchIndexBufferOffset:0
+			     instanceCount:number(tess, @"instance_count", 1) baseInstance:0];
 	} else if (r[@"execute_icb"]) {
 		NSDictionary *x = r[@"execute_icb"];
 		for (id res in c.resident)
@@ -1186,6 +1333,25 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 	}
 	update_fences(c, e, spec);
 	[e endEncoding];
+	};
+	NSArray *parts = r[@"parallel"];
+	if (parts) {
+		/* Each part's bindings replace the step's; the parts' encoders
+		 * execute in the order they were created. */
+		id<MTLParallelRenderCommandEncoder> pe = [cb parallelRenderCommandEncoderWithDescriptor:pass];
+		NSMutableArray *encoders = [NSMutableArray new];
+		for (NSUInteger k = 0; k < parts.count; k++)
+			[encoders addObject:[pe renderCommandEncoder]];
+		/* Recorded last part first: order comes from creation alone. */
+		for (NSUInteger k = parts.count; k-- > 0;) {
+			NSMutableDictionary *part = [spec mutableCopy];
+			[part addEntriesFromDictionary:parts[k]];
+			encode(encoders[k], part);
+		}
+		[pe endEncoding];
+	} else {
+		encode([cb renderCommandEncoderWithDescriptor:pass], spec);
+	}
 }
 
 static void run_render(Case *c, id<MTLCommandQueue> queue, id<MTLLibrary> library, NSDictionary *spec)
@@ -1241,6 +1407,13 @@ static void encode_blits(Case *c, id<MTLCommandBuffer> cb, NSDictionary *spec)
 			     destinationOrigin:origin_of(op[@"dst_origin"])];
 		} else if ([kind isEqualToString:@"generate_mipmaps"]) {
 			[e generateMipmapsForTexture:c.textures[op[@"texture"]]];
+		} else if ([kind isEqualToString:@"reset_icb"]) {
+			[e resetCommandsInBuffer:c.icbs[op[@"icb"]] withRange:NSMakeRange(number(op, @"start", 0), number(op, @"count", 1))];
+		} else if ([kind isEqualToString:@"optimize_icb"]) {
+			[e optimizeIndirectCommandBuffer:c.icbs[op[@"icb"]] withRange:NSMakeRange(number(op, @"start", 0), number(op, @"count", 1))];
+		} else if ([kind isEqualToString:@"copy_icb"]) {
+			[e copyIndirectCommandBuffer:c.icbs[op[@"src"]] sourceRange:NSMakeRange(number(op, @"start", 0), number(op, @"count", 1))
+					 destination:c.icbs[op[@"dst"]] destinationIndex:number(op, @"dst_start", 0)];
 		} else {
 			@throw failure(@"unknown blit %@", kind);
 		}
@@ -1259,7 +1432,7 @@ static void run_blits(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 static id<MTLEvent> event_named(Case *c, NSString *name)
 {
 	if (!c.events[name])
-		c.events[name] = [c.device newEvent];
+		c.events[name] = [c.device newSharedEvent];
 	return c.events[name];
 }
 
@@ -1313,6 +1486,16 @@ static void run_sequence(Case *c, id<MTLCommandQueue> queue, NSDictionary *plan,
 		update_fences(c, open, open_step);
 		[open endEncoding];
 	}
+	/* Values the host signals once everything is committed, after a
+	 * delay, so the GPU's waits for them are real. */
+	NSArray *host = spec[@"host_signals"];
+	for (NSArray *h in host)
+		event_named(c, h[0]);
+	if (host.count)
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+			for (NSArray *h in host)
+				((id<MTLSharedEvent>)c.events[h[0]]).signaledValue = [h[1] unsignedLongLongValue];
+		});
 	wait_for(cb, spec);
 }
 
@@ -1472,8 +1655,11 @@ static id<MTLIndirectCommandBuffer> make_icb(Case *c, NSDictionary *b)
 {
 	MTLIndirectCommandBufferDescriptor *d = [MTLIndirectCommandBufferDescriptor new];
 	BOOL draw = [b[@"type"] isEqualToString:@"draw"];
-	d.commandTypes = draw ? MTLIndirectCommandTypeDraw : MTLIndirectCommandTypeConcurrentDispatch;
-	d.inheritPipelineState = [b[@"inherit_pipeline"] boolValue] || draw;
+	d.commandTypes = draw ? MTLIndirectCommandTypeDraw | MTLIndirectCommandTypeDrawIndexed
+			      : MTLIndirectCommandTypeConcurrentDispatch | MTLIndirectCommandTypeConcurrentDispatchThreads;
+	/* Draws inherit the executing encoder's pipeline unless told not to;
+	 * their commands then set their own. */
+	d.inheritPipelineState = b[@"inherit_pipeline"] ? [b[@"inherit_pipeline"] boolValue] : draw;
 	d.inheritBuffers = [b[@"inherit_buffers"] boolValue];
 	NSUInteger bindings = number(b, @"max_buffers", 8);
 	if (draw) {
@@ -1504,11 +1690,22 @@ static id<MTLIndirectCommandBuffer> make_icb(Case *c, NSDictionary *b)
 			}
 			NSDictionary *primitives = @{@"point" : @(MTLPrimitiveTypePoint), @"triangle" : @(MTLPrimitiveTypeTriangle),
 						     @"triangle_strip" : @(MTLPrimitiveTypeTriangleStrip)};
-			[r drawPrimitives:lookup(primitives, @"primitive", command[@"primitive"] ?: @"triangle")
-			      vertexStart:number(command, @"vertex_start", 0)
-			      vertexCount:number(command, @"vertex_count", 3)
-			    instanceCount:number(command, @"instance_count", 1)
-			     baseInstance:number(command, @"base_instance", 0)];
+			MTLPrimitiveType primitive = lookup(primitives, @"primitive", command[@"primitive"] ?: @"triangle");
+			if (command[@"indices"]) {
+				id<MTLBuffer> indices = c.buffers[command[@"indices"]];
+				[c.resident addObject:indices];
+				[r drawIndexedPrimitives:primitive indexCount:number(command, @"index_count", 3)
+					       indexType:[command[@"index_type"] isEqualToString:@"uint32"] ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16
+					     indexBuffer:indices indexBufferOffset:number(command, @"index_offset", 0)
+					   instanceCount:number(command, @"instance_count", 1)
+					      baseVertex:[command[@"base_vertex"] integerValue]
+					    baseInstance:number(command, @"base_instance", 0)];
+			} else {
+				[r drawPrimitives:primitive vertexStart:number(command, @"vertex_start", 0)
+				      vertexCount:number(command, @"vertex_count", 3)
+				    instanceCount:number(command, @"instance_count", 1)
+				     baseInstance:number(command, @"base_instance", 0)];
+			}
 		} else {
 			id<MTLIndirectComputeCommand> k_ = [icb indirectComputeCommandAtIndex:k];
 			if (command[@"function"]) {
@@ -1523,6 +1720,8 @@ static id<MTLIndirectCommandBuffer> make_icb(Case *c, NSDictionary *b)
 													error:&error];
 				if (!pipeline)
 					@throw failure(@"indirect compute pipeline: %@", error.localizedDescription);
+				/* The command buffer does not retain its pipelines. */
+				[c.resident addObject:pipeline];
 				[k_ setComputePipelineState:pipeline];
 			}
 			for (NSDictionary *u in command[@"buffers"]) {

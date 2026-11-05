@@ -73,3 +73,12 @@ kernel void read_samples4(texture2d_ms<float> t [[texture(0)]], device float4 *o
     for (uint s = 0; s < 4; s++)
         out[(p.y * t.get_width() + p.x) * 4 + s] = t.read(p, s);
 }
+
+// Two textures a placement heap holds at their own offsets.
+kernel void read_two(texture2d<float> a [[texture(0)]], texture2d<float> b [[texture(1)]],
+                     device float4 *out [[buffer(0)]], uint2 p [[thread_position_in_grid]])
+{
+    uint i = p.y * a.get_width() + p.x;
+    out[i * 2] = a.read(p);
+    out[i * 2 + 1] = b.read(p);
+}

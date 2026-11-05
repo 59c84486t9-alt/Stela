@@ -488,6 +488,259 @@ fn indirect_commands(plan: &mut Plan, library: &str, rng: &mut Random) {
     );
 }
 
+/// More indirect command buffers: a kernel encoding commands with their
+/// own pipelines, a dispatch of threads, threadgroup memory and a barrier;
+/// indexed draws from the CPU and from a kernel that sets the pipeline;
+/// and commands copied, reset and optimized by blits before running.
+fn indirect_commands_more(plan: &mut Plan, library: &str, rng: &mut Random) {
+    let slice = 64u32;
+    let v: Vec<u32> = (0..slice * 4).map(|_| rng.u32() >> 4).collect();
+    let mut data = v.clone();
+    for x in &mut data[..100] {
+        *x = x.wrapping_mul(3).wrapping_add(1);
+    }
+    let sums: Vec<u32> = data
+        .chunks(64)
+        .map(|c| c.iter().fold(0u32, |a, &x| a.wrapping_add(x)))
+        .collect();
+    plan.add(
+        Case::sequence(
+            "sequence.icb.gpu_full_dispatches",
+            library,
+            vec![
+                Step::compute("encode_full_dispatches", grid(1), [1, 1, 1])
+                    .bind(&[("commands", 0), ("data", 1), ("sums", 2)]),
+                Step::compute("icb_scale", grid(slice), [slice, 1, 1])
+                    .set("supports_icb", true)
+                    .set("use", json!(["data", "sums"]))
+                    .set("execute_icb", json!({"icb": "icb", "count": 2})),
+            ],
+        )
+        .buffer(Buffer::data("data", 0, u32s(&v)).unbound())
+        .buffer(Buffer::zeroed("sums", 0, 16).unbound())
+        .buffer(Buffer::zeroed("commands", 0, 24).unbound())
+        .set("icbs", json!([{"name": "icb", "type": "dispatch", "count": 2, "inherit_pipeline": false, "max_buffers": 2}]))
+        .set("arguments", json!([{"buffer": "commands", "entries": [
+            {"kind": "icb", "offset": 0, "resource": "icb"},
+            {"kind": "compute_pipeline", "offset": 8, "function": "icb_scale"},
+            {"kind": "compute_pipeline", "offset": 16, "function": "icb_block_sum"}]}]))
+        .output(exact("data", Dtype::U32, u32s(&data)))
+        .output(exact("sums", Dtype::U32, u32s(&sums))),
+    );
+    // Indexed rectangles: corners 0..3 as two triangles.
+    let (w, h) = (8u32, 8u32);
+    let rects = [[-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]];
+    let colors = [[0.25, 0.5, 0.75, 1.0], [1.0, 0.0, 0.5, 0.25]];
+    let image: Vec<f64> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            if x < w / 2 {
+                colors[0]
+            } else if y < h / 2 {
+                colors[1]
+            } else {
+                [0.0; 4]
+            }
+        })
+        .collect();
+    let indices: Vec<u8> = [0u16, 1, 2, 2, 1, 3]
+        .iter()
+        .flat_map(|i| i.to_le_bytes())
+        .collect();
+    let target = |execute: serde_json::Value| json!({"colors": [{"texture": "a", "clear": [0, 0, 0, 0]}], "supports_icb": true, "execute_icb": execute});
+    let draws: Vec<serde_json::Value> = (0..2)
+        .map(|k| {
+            json!({"primitive": "triangle", "indices": "indices", "index_count": 6, "buffers": [
+                {"name": format!("rect{k}"), "stage": "vertex", "index": 0},
+                {"name": format!("color{k}"), "stage": "fragment", "index": 0}]})
+        })
+        .collect();
+    let mut cpu = Case::sequence(
+        "sequence.icb.cpu_indexed_draw",
+        library,
+        vec![Step::render(
+            "vert_rect",
+            "frag_constant",
+            target(json!({"icb": "icb", "count": 2})),
+        )],
+    )
+    .buffer(Buffer::data("indices", 0, indices.clone()).unbound())
+    .texture(Texture::d2("a", "rgba32float", w, h).usage(&["render"]))
+    .set(
+        "icbs",
+        json!([{"name": "icb", "type": "draw", "count": 2, "max_buffers": 1, "commands": draws}]),
+    )
+    .output(exact("a", Dtype::F32, f32s(&image)));
+    for k in 0..2 {
+        cpu = cpu
+            .buffer(Buffer::data(&format!("rect{k}"), 0, f32s(&rects[k])).unbound())
+            .buffer(Buffer::data(&format!("color{k}"), 0, f32s(&colors[k])).unbound());
+    }
+    plan.add(cpu);
+    plan.add(
+        Case::sequence(
+            "sequence.icb.gpu_indexed_draw",
+            library,
+            vec![
+                Step::compute("encode_indexed_draws", grid(2), [2, 1, 1])
+                    .bind(&[("commands", 0), ("rects", 1), ("colors", 2), ("indices", 3)]),
+                Step::render("vert_rect", "frag_constant", target(json!({"icb": "icb", "count": 2})))
+                    .set("use", json!(["rects", "colors", "indices"])),
+            ],
+        )
+        .buffer(Buffer::data("rects", 0, f32s(&rects.concat())).unbound())
+        .buffer(Buffer::data("colors", 0, f32s(&colors.concat())).unbound())
+        .buffer(Buffer::data("indices", 0, indices).unbound())
+        .buffer(Buffer::zeroed("commands", 0, 16).unbound())
+        .texture(Texture::d2("a", "rgba32float", w, h).usage(&["render"]))
+        .set("icbs", json!([{"name": "icb", "type": "draw", "count": 2, "inherit_pipeline": false, "max_buffers": 1}]))
+        .set("arguments", json!([{"buffer": "commands", "entries": [
+            {"kind": "icb", "offset": 0, "resource": "icb"},
+            {"kind": "render_pipeline", "offset": 8, "vertex": "vert_rect", "fragment": "frag_constant", "format": "rgba32float"}]}]))
+        .output(exact("a", Dtype::F32, f32s(&image))),
+    );
+    // CPU commands copied into another buffer, the second reset to a no-op,
+    // then optimized and run.
+    let step = |x: u32, k: u32| x.wrapping_mul(2).wrapping_add(k);
+    let part = |s: u32| v[(s * slice) as usize..((s + 1) * slice) as usize].to_vec();
+    let uses = |name: &str, index: u32, offset: u32| json!({"name": name, "index": index, "offset": offset});
+    let commands = json!([
+        {"function": "icb_step", "buffers": [uses("data", 0, 0), uses("k1", 1, 0)], "threadgroups": [1], "threadgroup": [slice]},
+        {"function": "icb_step", "buffers": [uses("data", 0, 0), uses("k2", 1, 0)], "threadgroups": [1], "threadgroup": [slice], "barrier": true},
+        {"function": "icb_scale", "buffers": [uses("data", 0, slice * 4)], "threadgroups": [1], "threadgroup": [slice]},
+    ]);
+    let expected = |first: &dyn Fn(u32) -> u32| -> Vec<u32> {
+        [
+            part(0).into_iter().map(first).collect::<Vec<_>>(),
+            scaled(&part(1)),
+            part(2),
+            part(3),
+        ]
+        .concat()
+    };
+    let (all, without_second) = (
+        expected(&|x| step(step(x, 1), 2)),
+        expected(&|x| step(x, 1)),
+    );
+    let copy = json!({"op": "copy_icb", "src": "source", "dst": "icb", "start": 0, "count": 3});
+    let reset = |icb: &str| json!({"op": "reset_icb", "icb": icb, "start": 1, "count": 1});
+    let optimize = |icb: &str| json!({"op": "optimize_icb", "icb": icb, "start": 0, "count": 3});
+    for (name, ops, icb, expected) in [
+        ("copy", json!([copy]), "icb", &all),
+        (
+            "copy_reset",
+            json!([copy, reset("icb")]),
+            "icb",
+            &without_second,
+        ),
+        (
+            "copy_reset_optimize",
+            json!([copy, reset("icb"), optimize("icb")]),
+            "icb",
+            &without_second,
+        ),
+        (
+            "reset_optimize",
+            json!([reset("source"), optimize("source")]),
+            "source",
+            &without_second,
+        ),
+    ] {
+        plan.add(
+            Case::sequence(
+                &format!("sequence.icb.{name}"),
+                library,
+                vec![
+                    Step::blit(ops),
+                    Step::compute("icb_scale", grid(slice), [slice, 1, 1])
+                        .set("supports_icb", true)
+                        .set("execute_icb", json!({"icb": icb, "count": 3})),
+                ],
+            )
+            .buffer(Buffer::data("data", 0, u32s(&v)).unbound())
+            .buffer(Buffer::data("k1", 0, u32s(&[1])).unbound())
+            .buffer(Buffer::data("k2", 0, u32s(&[2])).unbound())
+            .set("icbs", json!([{"name": "source", "type": "dispatch", "count": 3, "max_buffers": 2, "commands": commands},
+                                {"name": "icb", "type": "dispatch", "count": 3, "max_buffers": 2}]))
+            .output(exact("data", Dtype::U32, u32s(expected))),
+        );
+    }
+}
+
+/// Ordering that the API, not a resource, defines: a parallel render
+/// encoder's sub-encoders, recorded in reverse, blend in the order they
+/// were created; a command buffer waits for a value the host signals on a
+/// shared event; and a multisampled pass stores only its resolve.
+fn api_ordering(plan: &mut Plan, library: &str, rng: &mut Random) {
+    let (w, h) = (8u32, 8u32);
+    let over =
+        json!({"rgb": "add", "src_rgb": "source_alpha", "dst_rgb": "one_minus_source_alpha"});
+    let part = |color: &str| {
+        json!({"buffers": [{"name": "full", "stage": "vertex", "index": 0},
+                                               {"name": color, "stage": "fragment", "index": 0}]})
+    };
+    // A then B over a cleared target: B * 0.5 + A * 0.5 * 0.5.
+    let blended: Vec<f64> = (0..w * h).flat_map(|_| [0.25, 0.0, 0.5, 0.5]).collect();
+    plan.add(
+        Case::sequence(
+            "sequence.parallel_render_order",
+            library,
+            vec![Step::render(
+                "vert_rect",
+                "frag_constant",
+                json!({"colors": [{"texture": "a", "clear": [0, 0, 0, 0], "blend": over}],
+                       "primitive": "triangle_strip", "vertex_count": 4,
+                       "parallel": [part("first"), part("second")]}),
+            )],
+        )
+        .buffer(Buffer::data("full", 0, f32s(&[-1.0, -1.0, 1.0, 1.0])).unbound())
+        .buffer(Buffer::data("first", 0, f32s(&[1.0, 0.0, 0.0, 0.5])).unbound())
+        .buffer(Buffer::data("second", 0, f32s(&[0.0, 0.0, 1.0, 0.5])).unbound())
+        .texture(Texture::d2("a", "rgba32float", w, h).usage(&["render"]))
+        .output(exact("a", Dtype::F32, f32s(&blended))),
+    );
+    let v: Vec<u32> = (0..N).map(|_| rng.u32()).collect();
+    plan.add(
+        Case::sequence(
+            "sequence.event.host_signal",
+            library,
+            vec![
+                Step::compute("scale", grid(N), [64, 1, 1]).bind(&[("in", 0), ("mid", 1)]),
+                Step::compute("neighbours", grid(N), [64, 1, 1])
+                    .bind(&[("mid", 0), ("out", 1), ("n", 2)])
+                    .new_command_buffer()
+                    .wait_events(&[("host", 1)]),
+            ],
+        )
+        .buffer(Buffer::data("in", 0, u32s(&v)).unbound())
+        .buffer(Buffer::zeroed("mid", 0, N as usize * 4).unbound())
+        .buffer(Buffer::zeroed("out", 0, N as usize * 4).unbound())
+        .buffer(Buffer::data("n", 0, u32s(&[N])).unbound())
+        .set("host_signals", json!([["host", 1]]))
+        .output(exact("out", Dtype::U32, u32s(&neighbours(&scaled(&v))))),
+    );
+    let color = [0.25, 0.75, 0.5, 1.0];
+    plan.add(
+        Case::sequence(
+            "sequence.msaa_resolve_only",
+            library,
+            vec![Step::render(
+                "vert_rect",
+                "frag_constant",
+                json!({"colors": [{"texture": "ms", "clear": [0, 0, 0, 0], "resolve": "c", "store": "resolve"}],
+                       "samples": 4, "primitive": "triangle_strip", "vertex_count": 4}),
+            )
+            .bind_stage("vertex", &[("full", 0)])
+            .bind_stage("fragment", &[("color", 0)])],
+        )
+        .buffer(Buffer::data("full", 0, f32s(&[-1.0, -1.0, 1.0, 1.0])).unbound())
+        .buffer(Buffer::data("color", 0, f32s(&color)).unbound())
+        .texture(Texture::new("ms", "rgba16float", "2d_ms", [w, h, 1]).samples(4).usage(&["render"]))
+        .texture(Texture::d2("c", "rgba16float", w, h).usage(&["render"]))
+        .output(exact("c", Dtype::F16, super::values::floats(Dtype::F16, &color.repeat((w * h) as usize)))),
+    );
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("sequences", SOURCE, &[], super::plan::LATEST);
     let mut rng = Random::new(5150);
@@ -495,4 +748,6 @@ pub fn build(plan: &mut Plan) {
     indirect(plan, &library);
     passes(plan, &library);
     indirect_commands(plan, &library, &mut rng);
+    indirect_commands_more(plan, &library, &mut rng);
+    api_ordering(plan, &library, &mut rng);
 }

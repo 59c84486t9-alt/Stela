@@ -198,6 +198,176 @@ fn fractional(plan: &mut Plan, library: &str) {
     }
 }
 
+/// A value linear in clip space, which every patch below shares, so the
+/// image is exact whichever patch or triangle owns a pixel.
+fn linear(x: f64, y: f64) -> f64 {
+    0.3 + 0.2 * x + 0.1 * y
+}
+
+/// The linear value at every pixel centre, or 0 where `covered` says not.
+fn linear_image(covered: impl Fn(f64, f64) -> bool) -> Vec<f64> {
+    pixels()
+        .flat_map(|(x, y)| {
+            if covered(x, y) {
+                [linear(x, y), 0.0, 0.0, 1.0]
+            } else {
+                [0.0; 4]
+            }
+        })
+        .collect()
+}
+
+/// Control points (x, y, value) at the corners given.
+fn corners(points: &[[f64; 2]]) -> Vec<f64> {
+    points
+        .iter()
+        .flat_map(|&[x, y]| [x, y, linear(x, y)])
+        .collect()
+}
+
+/// The two halves of clip space as quad patches, corners in the order
+/// tess_quad expects.
+fn halves() -> Vec<f64> {
+    corners(&[
+        [-1.0, -1.0],
+        [0.0, -1.0],
+        [0.0, 1.0],
+        [-1.0, 1.0],
+        [0.0, -1.0],
+        [1.0, -1.0],
+        [1.0, 1.0],
+        [0.0, 1.0],
+    ])
+}
+
+fn half_factors(per_patch: &[f64]) -> Vec<u8> {
+    per_patch
+        .iter()
+        .flat_map(|&f| f16_bits(f).to_le_bytes())
+        .collect()
+}
+
+/// Tessellation the specification leaves the points of: triangle patches,
+/// uneven factors, patches chosen by an index buffer or drawn from an
+/// indirect buffer, instances with their own factors, and patches with no
+/// control points. Each image is asserted.
+fn tessellation_images(plan: &mut Plan, library: &str) {
+    let layout = |stride: u32, attributes: bool| {
+        if attributes {
+            json!({"attributes": [{"index": 0, "format": "float2", "offset": 0, "buffer": 0},
+                                  {"index": 1, "format": "float", "offset": 8, "buffer": 0}],
+                   "layouts": [{"buffer": 0, "stride": stride, "step": "patch_control_point"}]})
+        } else {
+            json!({"attributes": [], "layouts": []})
+        }
+    };
+    let case = |name: &str,
+                vertex: &str,
+                tess: serde_json::Value,
+                controls: Option<Vec<f64>>,
+                image: Vec<f64>| {
+        let mut state =
+            json!({"colors": [{"texture": "target", "clear": [0, 0, 0, 0]}], "tessellation": tess});
+        if controls.is_some() {
+            state["vertex_descriptor"] = layout(12, true);
+        }
+        let mut case = Case::render(
+            &format!("stages.tessellation.{name}"),
+            library,
+            vertex,
+            Some("frag_tessellated"),
+            state,
+        )
+        .texture(Texture::d2("target", "rgba32float", SIZE, SIZE).usage(&["render"]))
+        .output(Output::new("target", Dtype::F32, Tolerance::abs(IMAGE)).expect_same(f32s(&image)));
+        if let Some(c) = controls {
+            case = case.buffer(Buffer::data("controls", 0, f32s(&c)).stage("vertex"));
+        }
+        case
+    };
+    let full = linear_image(|_, _| true);
+    let right = linear_image(|x, _| x > 0.0);
+    let left = linear_image(|x, _| x < 0.0);
+    // Two triangles covering clip space, sharing its diagonal.
+    let triangles = corners(&[
+        [-1.0, -1.0],
+        [1.0, -1.0],
+        [-1.0, 1.0],
+        [1.0, -1.0],
+        [1.0, 1.0],
+        [-1.0, 1.0],
+    ]);
+    for (name, partition, factors) in [
+        ("triangle.integer_3", "integer", [3.0, 3.0, 3.0, 3.0]),
+        ("triangle.uneven", "integer", [1.0, 3.0, 5.0, 2.0]),
+        (
+            "triangle.fractional_odd_2.5",
+            "fractional_odd",
+            [2.5, 2.5, 2.5, 2.5],
+        ),
+        (
+            "triangle.fractional_even_4.75",
+            "fractional_even",
+            [4.75, 3.0, 1.5, 4.75],
+        ),
+    ] {
+        plan.add(
+            case(name, "tess_triangle",
+                 json!({"partition": partition, "max_factor": 16, "factors": "factors", "control_points": 3, "patch_count": 2}),
+                 Some(triangles.clone()), full.clone())
+            .buffer(Buffer::data("factors", 0, half_factors(&[factors, factors].concat())).unbound()),
+        );
+    }
+    let quad = |e: [f64; 6]| half_factors(&[e, e].concat());
+    plan.add(
+        case("quad.uneven", "tess_quad",
+             json!({"partition": "integer", "max_factor": 16, "factors": "factors", "control_points": 4, "patch_count": 2}),
+             Some(halves()), full.clone())
+        .buffer(Buffer::data("factors", 0, quad([1.0, 2.0, 3.0, 4.0, 5.0, 2.0])).unbound()),
+    );
+    // Patch 1 twice by index buffer; patch 1 alone from an indirect draw.
+    plan.add(
+        case("quad.indexed", "tess_quad",
+             json!({"partition": "integer", "max_factor": 16, "factors": "factors", "control_points": 4,
+                    "patch_count": 2, "patch_index": "index"}),
+             Some(halves()), right.clone())
+        .buffer(Buffer::data("factors", 0, quad([4.0; 6])).unbound())
+        .buffer(Buffer::data("index", 0, u32s(&[1, 1])).unbound()),
+    );
+    plan.add(
+        case("quad.indirect", "tess_quad",
+             json!({"partition": "integer", "max_factor": 16, "factors": "factors", "control_points": 4,
+                    "indirect": "arguments"}),
+             Some(halves()), right.clone())
+        .buffer(Buffer::data("factors", 0, quad([4.0; 6])).unbound())
+        .buffer(Buffer::data("arguments", 0, u32s(&[1, 1, 1, 0])).unbound()),
+    );
+    // The left patch drawn twice, the second instance one unit right, each
+    // with its own factors: both live, or one culled by a zero edge.
+    let cut = [3.0, 0.0, 3.0, 3.0, 3.0, 3.0];
+    for (name, first, second, image) in [
+        ("quad.instances", [2.0; 6], [3.0; 6], full.clone()),
+        ("quad.instance_culled", [2.0; 6], cut, left.clone()),
+        ("quad.first_instance_culled", cut, [3.0; 6], right.clone()),
+    ] {
+        plan.add(
+            case(name, "tess_quad_instanced",
+                 json!({"partition": "integer", "max_factor": 16, "factors": "factors", "control_points": 4,
+                        "patch_count": 1, "instance_count": 2, "instance_stride": 12}),
+                 Some(halves()[..12].to_vec()), image)
+            .buffer(Buffer::data("factors", 0, half_factors(&[first, second].concat())).unbound()),
+        );
+    }
+    // No control points: each patch reads its rectangle by patch id.
+    plan.add(
+        case("quad.no_control_points", "tess_quad_free",
+             json!({"partition": "integer", "max_factor": 16, "factors": "factors", "control_points": 0, "patch_count": 2}),
+             None, full)
+        .buffer(Buffer::data("rects", 0, f32s(&[-1.0, -1.0, 0.0, 1.0, 0.0, -1.0, 1.0, 1.0])).stage("vertex"))
+        .buffer(Buffer::data("factors", 0, quad([3.0; 6])).unbound()),
+    );
+}
+
 /// Pixel centres in clip space, row by row from the top.
 fn pixels() -> impl Iterator<Item = (f64, f64)> {
     (0..SIZE).flat_map(|y| {
@@ -332,11 +502,75 @@ fn amplification(plan: &mut Plan, library: &str) {
     }
 }
 
+/// Mesh outputs that route primitives: to target layers, to viewports, and
+/// cut by a per-vertex clip distance.
+fn mesh_routing(plan: &mut Plan, library: &str) {
+    let half = f64::from(SIZE / 2);
+    let full = f64::from(SIZE);
+    let color = |k: usize| COLORS[k];
+    let layers: Vec<f64> = (0..2)
+        .flat_map(|k| pixels().flat_map(move |_| color(k)))
+        .collect();
+    let halves: Vec<f64> = pixels()
+        .flat_map(|(x, _)| color(usize::from(x > 0.0)))
+        .collect();
+    let clipped: Vec<f64> = pixels()
+        .flat_map(|(x, _)| if x > 0.0 { color(0) } else { [0.0; 4] })
+        .collect();
+    for (name, groups, texture, route, clip, viewports, expected) in [
+        (
+            "layers",
+            2,
+            Texture::new("target", "rgba32float", "2d_array", [SIZE, SIZE, 1]).array(2),
+            [0u32, 0, 1, 0],
+            [-2.0, -2.0],
+            json!([[0, 0, full, full]]),
+            layers,
+        ),
+        (
+            "viewports",
+            2,
+            Texture::d2("target", "rgba32float", SIZE, SIZE),
+            [0, 0, 0, 1],
+            [-2.0, -2.0],
+            json!([[0, 0, half, full], [half, 0, half, full]]),
+            halves,
+        ),
+        (
+            "clip_distance",
+            1,
+            Texture::d2("target", "rgba32float", SIZE, SIZE),
+            [0, 0, 0, 0],
+            [0.0, 0.0],
+            json!([[0, 0, full, full]]),
+            clipped,
+        ),
+    ] {
+        plan.add(
+            Case::render(
+                &format!("stages.mesh.{name}"),
+                library,
+                "mesh_routed",
+                Some("frag_routed"),
+                json!({"colors": [{"texture": "target", "clear": [0, 0, 0, 0]}], "viewports": viewports,
+                       "mesh": {"mesh": "mesh_routed", "threadgroups": [groups], "mesh_threads": [6]}}),
+            )
+            .buffer(Buffer::data("colors", 0, f32s(&COLORS.concat())).stage("mesh"))
+            .buffer(Buffer::data("clip", 1, f32s(&clip)).stage("mesh"))
+            .buffer(Buffer::data("route", 2, u32s(&route)).stage("mesh"))
+            .texture(texture.usage(&["render"]))
+            .output(Output::new("target", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected))),
+        );
+    }
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("stages", SOURCE, &[], super::plan::LATEST);
     tessellation(plan, &library);
     fractional(plan, &library);
+    tessellation_images(plan, &library);
     mesh(plan, &library);
+    mesh_routing(plan, &library);
     amplification(plan, &library);
 }
 

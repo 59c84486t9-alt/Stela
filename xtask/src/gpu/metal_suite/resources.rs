@@ -458,10 +458,68 @@ fn sample_positions(plan: &mut Plan, library: &str) {
     }
 }
 
+/// More heaps: two textures a private placement heap holds at their own
+/// offsets, and an untracked heap whose buffers a fence orders.
+fn heaps_more(plan: &mut Plan, library: &str, rng: &mut Random) {
+    let (w, h) = (8u32, 8u32);
+    let a: Vec<f64> = (0..w * h * 4)
+        .map(|_| f64::from(rng.below(256) as u32) / 4.0)
+        .collect();
+    let b: Vec<f64> = (0..w * h * 4)
+        .map(|_| f64::from(rng.below(256) as u32) / 8.0)
+        .collect();
+    let both: Vec<f64> = a
+        .chunks(4)
+        .zip(b.chunks(4))
+        .flat_map(|(x, y)| [x, y].concat())
+        .collect();
+    plan.add(
+        Case::compute("heap.placement_textures", library, "read_two", [w, h, 1], [8, 8, 1])
+            .dispatch_threads()
+            .set("heaps", json!([{"name": "p", "type": "placement", "storage": "private", "untracked": true, "size": 1 << 22}]))
+            .texture(Texture::d2("a", "rgba32float", w, h).data(f32s(&a)).set("heap", "p").set("heap_offset", 0).index(0))
+            .texture(
+                Texture::d2("b", "rgba32float", w, h)
+                    .data(f32s(&b))
+                    .set("heap", "p")
+                    .set("heap_offset", 1 << 21)
+                    .index(1),
+            )
+            .set("use_heaps", json!(["p"]))
+            .buffer(Buffer::zeroed("out", 0, (w * h * 32) as usize))
+            .output(exact("out", Dtype::F32, f32s(&both))),
+    );
+    let v: Vec<u32> = (0..N).map(|_| rng.u32()).collect();
+    let bytes = N as usize * 4;
+    plan.add(
+        Case::sequence(
+            "heap.untracked_fence",
+            library,
+            vec![
+                Step::compute("scale_words", [N, 1, 1], [64, 1, 1])
+                    .bind(&[("in", 0), ("mid", 1)])
+                    .update_fences(&["f"]),
+                Step::compute("scale_words", [N, 1, 1], [64, 1, 1])
+                    .bind(&[("mid", 0), ("out", 1)])
+                    .wait_fences(&["f"]),
+            ],
+        )
+        .set(
+            "heaps",
+            json!([{"name": "u", "type": "automatic", "untracked": true, "size": 1 << 20}]),
+        )
+        .buffer(Buffer::data("in", 0, u32s(&v)).unbound().set("heap", "u"))
+        .buffer(Buffer::zeroed("mid", 0, bytes).unbound().set("heap", "u"))
+        .buffer(Buffer::zeroed("out", 0, bytes).unbound().set("heap", "u"))
+        .output(exact("out", Dtype::U32, u32s(&scaled(&scaled(&v))))),
+    );
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("resources", SOURCE, &[], super::plan::LATEST);
     let mut rng = Random::new(4242);
     heaps(plan, &library, &mut rng);
+    heaps_more(plan, &library, &mut rng);
     views(plan, &library, &mut rng);
     sample_positions(plan, &library);
 }

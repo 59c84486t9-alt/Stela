@@ -124,3 +124,80 @@ vertex AmplifiedVertex vert_amplified(uint v [[vertex_id]], ushort view [[amplif
 
 fragment float4 frag_amplified(AmplifiedVertex in [[stage_in]])
 { return in.color; }
+
+// More tessellation: triangle patches, instances placed side by side, and
+// patches with no control points, which read their rectangles by patch.
+struct TrianglePatch {
+    patch_control_point<ControlPoint> points;
+};
+
+[[patch(triangle, 3)]]
+vertex Tessellated tess_triangle(TrianglePatch patch [[stage_in]], float3 b [[position_in_patch]])
+{
+    float2 p = b.x * patch.points[0].position + b.y * patch.points[1].position + b.z * patch.points[2].position;
+    float v = b.x * patch.points[0].value + b.y * patch.points[1].value + b.z * patch.points[2].value;
+    return {float4(p, 0.0f, 1.0f), v};
+}
+
+[[patch(quad, 4)]]
+vertex Tessellated tess_quad_instanced(Patch patch [[stage_in]], float2 uv [[position_in_patch]],
+                                       uint instance [[instance_id]])
+{
+    Tessellated t = evaluate(patch, uv);
+    t.position.x += float(instance);
+    t.value += float(instance) * 0.2f;
+    return t;
+}
+
+// (x0, y0, x1, y1) per patch; the value is linear in clip space.
+[[patch(quad)]]
+vertex Tessellated tess_quad_free(float2 uv [[position_in_patch]], uint id [[patch_id]],
+                                  constant float4 *rects [[buffer(0)]])
+{
+    float4 r = rects[id];
+    float2 p = mix(r.xy, r.zw, uv);
+    return {float4(p, 0.0f, 1.0f), 0.3f + 0.2f * p.x + 0.1f * p.y};
+}
+
+// Mesh outputs beyond position: a target layer and a viewport per
+// primitive, and a clip distance per vertex.
+struct RoutedVertex {
+    float4 position [[position]];
+    float clip [[clip_distance]] [1];
+};
+
+struct RoutedPrimitive {
+    float4 color [[flat]];
+    uint layer [[render_target_array_index]];
+    uint viewport [[viewport_array_index]];
+};
+
+using RoutedMesh = metal::mesh<RoutedVertex, RoutedPrimitive, 4, 2, topology::triangle>;
+
+// Threadgroup g covers clip space in colour g, routed to the (layer,
+// viewport) route[g] gives, and clipped where x < clip_x[g].
+[[mesh]] void mesh_routed(RoutedMesh m, constant float4 *colors [[buffer(0)]], constant float *clip_x [[buffer(1)]],
+                          constant uint2 *route [[buffer(2)]], uint g [[threadgroup_position_in_grid]],
+                          uint t [[thread_index_in_threadgroup]])
+{
+    if (t < 4) {
+        float x = t & 1 ? 1.0f : -1.0f;
+        m.set_vertex(t, {float4(x, t & 2 ? 1.0f : -1.0f, 0.0f, 1.0f), {x - clip_x[g]}});
+    }
+    if (t < 2)
+        m.set_primitive(t, {colors[g], route[g].x, route[g].y});
+    if (t < 6) {
+        const uint indices[6] = {0, 1, 2, 2, 1, 3};
+        m.set_index(t, indices[t]);
+    }
+    if (t == 0)
+        m.set_primitive_count(2);
+}
+
+// The fragment reads the primitive's colour alone.
+struct RoutedFragment {
+    float4 color [[flat]];
+};
+
+fragment float4 frag_routed(RoutedFragment in [[stage_in]])
+{ return in.color; }
