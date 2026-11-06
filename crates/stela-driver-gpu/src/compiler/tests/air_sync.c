@@ -302,6 +302,21 @@ air_atomics_follow_their_names(void)
       "call void @air.atomic.global.store.i32(ptr addrspace(1) %out, i32 %o, i32 0, i32 2, i32 0, i1 false)\n"
       "ret void\n",
       qualified, ARRAY_SIZE(qualified));
+   /* An optimizer addresses a threadgroup array's constant elements by
+    * constant expressions. */
+   const nir_atomic_op constant[] = {nir_atomic_op_imin, nir_atomic_op_imax};
+   expect_atomics(
+      "declare void @air.atomic.local.store.i32(ptr addrspace(3), i32, i32, i32, i32, i1)\n"
+      "declare i32 @air.atomic.local.min.s.i32(ptr addrspace(3), i32, i32, i32, i32, i1)\n"
+      "declare i32 @air.atomic.local.max.s.i32(ptr addrspace(3), i32, i32, i32, i32, i1)\n",
+      "call void @air.atomic.local.store.i32(ptr addrspace(3) getelementptr inbounds ([64 x i32],"
+      " ptr addrspace(3) @s, i64 0, i64 1), i32 7, i32 0, i32 1, i32 0, i1 false)\n"
+      "%v = load i32, ptr addrspace(1) %out, align 4\n"
+      "%a = call i32 @air.atomic.local.min.s.i32(ptr addrspace(3) @s, i32 %v, i32 0, i32 1, i32 0, i1 false)\n"
+      "%b = call i32 @air.atomic.local.max.s.i32(ptr addrspace(3) getelementptr inbounds ([64 x i32],"
+      " ptr addrspace(3) @s, i64 0, i64 2), i32 %a, i32 0, i32 1, i32 0, i1 false)\n"
+      "store i32 %b, ptr addrspace(1) %out, align 4\nret void\n",
+      constant, ARRAY_SIZE(constant));
    /* Loads and stores are coherent accesses; a compare-exchange compares
     * and receives through its thread pointer; 64-bit min and max return
     * nothing. */

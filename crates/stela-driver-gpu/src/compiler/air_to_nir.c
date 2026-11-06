@@ -5226,10 +5226,108 @@ cfg_block(struct translator *t, LLVMBasicBlockRef llvm)
    return entry ? entry->data : NULL;
 }
 
+/* Whether an instruction of `user` reads the constant expression `value`
+ * as an instruction the translator handles: a GEP or a pointer cast; operand
+ * reads handle constant bitcasts.
+ * Calls keep their constant-space pointers, which name the strings and
+ * tables they read. */
+static bool
+expandable(LLVMValueRef user, LLVMValueRef value)
+{
+   if (!LLVMIsAConstantExpr(value))
+      return false;
+   switch (LLVMGetConstOpcode(value)) {
+   case LLVMGetElementPtr:
+   case LLVMAddrSpaceCast:
+   case LLVMPtrToInt:
+   case LLVMIntToPtr:
+      break;
+   default:
+      return false;
+   }
+   LLVMTypeRef type = LLVMTypeOf(value);
+   bool pointer = LLVMGetTypeKind(type) == LLVMPointerTypeKind;
+   if (!LLVMIsACallInst(user))
+      return true;
+   return pointer && LLVMGetPointerAddressSpace(type) != 2;
+}
+
+/* The instructions computing the constant expression `value`, built at
+ * `builder`'s position. */
+static LLVMValueRef
+expand_constant(LLVMBuilderRef builder, LLVMValueRef user, LLVMValueRef value)
+{
+   unsigned count = LLVMGetNumOperands(value);
+   LLVMValueRef operands[count ? count : 1];
+   for (unsigned i = 0; i < count; i++) {
+      operands[i] = LLVMGetOperand(value, i);
+      if (expandable(user, operands[i]))
+         operands[i] = expand_constant(builder, user, operands[i]);
+   }
+   /* The builder folds constant operands back into an expression, so the
+    * instruction is built over a placeholder its own operand replaces. */
+   LLVMValueRef placeholder = LLVMBuildFreeze(builder, operands[0], "");
+   LLVMOpcode opcode = LLVMGetConstOpcode(value);
+   LLVMValueRef inst;
+   if (opcode != LLVMGetElementPtr) {
+      inst = LLVMBuildCast(builder, opcode, placeholder, LLVMTypeOf(value), "");
+   } else {
+      LLVMTypeRef source = LLVMGetGEPSourceElementType(value);
+      inst = LLVMIsInBounds(value) ?
+         LLVMBuildInBoundsGEP2(builder, source, placeholder, &operands[1], count - 1, "") :
+         LLVMBuildGEP2(builder, source, placeholder, &operands[1], count - 1, "");
+   }
+   LLVMSetOperand(inst, 0, operands[0]);
+   LLVMInstructionEraseFromParent(placeholder);
+   return inst;
+}
+
+/* Rewrites `fn`'s constant-expression addresses and casts as instructions,
+ * as an optimizer leaves a threadgroup array's constant element: values the
+ * translator follows as it does any other address. A phi's operand computes
+ * at the end of its incoming block, once for each block. */
+static bool
+expand_constant_expressions(struct translator *t, LLVMValueRef fn)
+{
+   LLVMBuilderRef builder = LLVMCreateBuilderInContext(t->context);
+   if (!builder)
+      return fail(t, STELA_AIR_ALLOCATION, "LLVM builder allocation failed");
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         bool phi = LLVMIsAPHINode(inst);
+         unsigned count = LLVMGetNumOperands(inst);
+         for (unsigned i = 0; i < count; i++) {
+            LLVMValueRef value = LLVMGetOperand(inst, i);
+            if (!expandable(inst, value))
+               continue;
+            LLVMValueRef expanded = NULL;
+            if (phi) {
+               LLVMBasicBlockRef from = LLVMGetIncomingBlock(inst, i);
+               for (unsigned j = 0; j < i && !expanded; j++) {
+                  if (LLVMGetIncomingBlock(inst, j) == from && !LLVMIsAConstant(LLVMGetOperand(inst, j)))
+                     expanded = LLVMGetOperand(inst, j);
+               }
+               if (!expanded)
+                  LLVMPositionBuilderBefore(builder, LLVMGetBasicBlockTerminator(from));
+            } else {
+               LLVMPositionBuilderBefore(builder, inst);
+            }
+            if (!expanded)
+               expanded = expand_constant(builder, inst, value);
+            LLVMSetOperand(inst, i, expanded);
+         }
+      }
+   }
+   LLVMDisposeBuilder(builder);
+   return true;
+}
+
 static bool
 cfg_prepare(struct translator *t, LLVMValueRef fn)
 {
-   if (!legalize_switches(t, fn))
+   if (!expand_constant_expressions(t, fn) || !legalize_switches(t, fn))
       return false;
    t->block_count = LLVMCountBasicBlocks(fn);
    if (!t->block_count || t->block_count > t->options->max_instructions)
