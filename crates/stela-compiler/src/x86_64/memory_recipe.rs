@@ -725,6 +725,14 @@ pub(super) fn pair(
         address(code, checks, location, bytes, access, recipe.as_deref_mut());
     }
     let (at, displacement) = place.unwrap_or((Gpr::Rax, 0));
+    // The second element stages in RDX in pinned code where no pending
+    // writeback holds it, which leaves R8 to a run's locals
+    // (`pinned::Span`).
+    let second_stage = if code.is_pinned() && (place.is_some() || mode == AddressMode::Offset) {
+        Gpr::Rdx
+    } else {
+        FRAME_PAIR_RESULTS[1]
+    };
     match transfer {
         MemoryTransfer::Store => {
             let first = match code.host(data[0]) {
@@ -750,8 +758,10 @@ pub(super) fn pair(
                 None => {
                     let start = code.checkpoint();
                     match code.asm().guest(data[1]) {
-                        Some(storage) => code.asm().mov_load(Size::Qword, Gpr::R8, storage),
-                        None => code.asm().alu(Alu::Xor, Size::Dword, Gpr::R8, Gpr::R8),
+                        Some(storage) => code.asm().mov_load(Size::Qword, second_stage, storage),
+                        None => code
+                            .asm()
+                            .alu(Alu::Xor, Size::Dword, second_stage, second_stage),
                     }
                     mark(
                         &mut recipe,
@@ -759,11 +769,11 @@ pub(super) fn pair(
                         start,
                         Kind::Stage {
                             element: 1,
-                            host: Gpr::R8,
+                            host: second_stage,
                         },
-                        mask(Gpr::R8),
+                        mask(second_stage),
                     );
-                    memory_store::Source::R8
+                    memory_store::Source::Host(second_stage)
                 }
             };
             for (element, source) in [(0, first), (1, second)] {
@@ -786,7 +796,7 @@ pub(super) fn pair(
                 // The second element's own load is the last to need the base.
                 place
                     .and_then(|_| code.host(data[1]))
-                    .unwrap_or(FRAME_PAIR_RESULTS[1])
+                    .unwrap_or(second_stage)
             }];
             for (element, host, source) in [
                 (0, hosts[0], Mem::base(at, displacement)),

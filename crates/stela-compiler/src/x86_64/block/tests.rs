@@ -3403,8 +3403,8 @@ fn pinned_conditional_increment_consumes_the_preceding_compare_flags() {
     // CMP X0, #1; CSINC W8, W2, W8, HI; RET.
     let csinc = 0x1a88_8448;
     for (select, prefix) in [
-        (cset, &[0x0f, 0x94, 0xc0][..]),                            // SETE AL
-        (csinc, &[0x44, 0x8b, 0xc6, 0x45, 0x8d, 0x40, 0x01, 0xf5]), // MOV, LEA, CMC
+        (cset, &[0x0f, 0x94, 0xc0][..]),                // SETE AL
+        (csinc, &[0x8b, 0xd6, 0x8d, 0x52, 0x01, 0xf5]), // MOV EDX, LEA, CMC
     ] {
         let source: Vec<_> = [0xf100_041fu32, select, 0xd65f_03c0]
             .into_iter()

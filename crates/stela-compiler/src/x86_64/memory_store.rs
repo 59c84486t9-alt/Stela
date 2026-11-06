@@ -16,8 +16,8 @@ const VECTOR_BYTES: u8 = 16;
 #[derive(Clone, Copy)]
 pub(super) enum Source {
     Rcx,
-    R8,
-    /// A register that holds a guest register ([`super::pinned`]).
+    /// A register that holds a guest register ([`super::pinned`]), or
+    /// that a pair's second element stages in.
     Host(Gpr),
     Xmm(u8),
 }
@@ -63,7 +63,7 @@ pub(super) fn emit_to(code: &mut Code, bytes: u8, target: Mem, source: Source) {
             VECTOR_BYTES => asm.movdqu_store(target, xmm),
             _ => unreachable!("narrow vectors are staged through RCX"),
         },
-        Source::Rcx | Source::R8 | Source::Host(_) => {
+        Source::Rcx | Source::Host(_) => {
             debug_assert!(bytes <= QWORD_BYTES);
             let size = match bytes {
                 1 => Size::Byte,
@@ -72,7 +72,6 @@ pub(super) fn emit_to(code: &mut Code, bytes: u8, target: Mem, source: Source) {
                 _ => Size::Qword,
             };
             let register = match source {
-                Source::R8 => Gpr::R8,
                 Source::Host(host) => host,
                 _ => Gpr::Rcx,
             };

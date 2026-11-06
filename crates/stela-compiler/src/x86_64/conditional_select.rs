@@ -63,6 +63,9 @@ pub(super) fn emit_compare(code: &mut Code, operand: &CompareOperand, live_nzcv:
 
 pub(super) fn emit(code: &mut Code, operand: &Operand, live_nzcv: bool) {
     let size = Size::of(operand.width == Width::X64);
+    // The false arm's scratch: RDX in pinned code, whose predicates leave it
+    // alone, which leaves R8 to a run's locals (`pinned::Span`).
+    let spare = if code.is_pinned() { Rdx } else { R8 };
     let destination = code.host(operand.destination);
     let output = destination.unwrap_or(Rax);
     if operand.left == Register::Zero
@@ -90,18 +93,19 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, live_nzcv: bool) {
     {
         Some(source)
     } else {
-        // Prepare the false arm before the predicate. R8 survives predicate
-        // emission, and the true arm is a MOV that leaves host flags intact.
+        // Prepare the false arm before the predicate. The spare survives
+        // predicate emission, and the true arm is a MOV that leaves host
+        // flags intact.
         let mut asm = code.asm();
-        select_input(&mut asm, R8, size, operand.right);
+        select_input(&mut asm, spare, size, operand.right);
         match operand.otherwise {
-            Otherwise::Increment if live_nzcv => asm.lea(size, R8, Mem::base(R8, 1)),
-            Otherwise::Increment => asm.inc(size, R8),
-            Otherwise::Invert => asm.unary(Unary::Not, size, R8),
-            Otherwise::Negate => asm.unary(Unary::Neg, size, R8),
+            Otherwise::Increment if live_nzcv => asm.lea(size, spare, Mem::base(spare, 1)),
+            Otherwise::Increment => asm.inc(size, spare),
+            Otherwise::Invert => asm.unary(Unary::Not, size, spare),
+            Otherwise::Negate => asm.unary(Unary::Neg, size, spare),
             Otherwise::Unchanged => {}
         }
-        Some(Rm::Reg(R8))
+        Some(Rm::Reg(spare))
     };
     // If the unchanged false arm already lives in the result register,
     // keep it there and conditionally move the true arm instead.
@@ -110,8 +114,8 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, live_nzcv: bool) {
     let (initial, alternate) = if keep_false {
         let mut asm = code.asm();
         let source = asm.guest(operand.left).unwrap_or_else(|| {
-            asm.mov_imm32(R8, 0);
-            Rm::Reg(R8)
+            asm.mov_imm32(spare, 0);
+            Rm::Reg(spare)
         });
         (operand.destination, Some(source))
     } else {

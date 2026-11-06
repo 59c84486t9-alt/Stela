@@ -125,10 +125,9 @@ fn effects(operation: &Operation) -> Option<Effects> {
                 operand.destination,
             ),
         },
-        Operation::ConditionalSelect(operand) => Effects {
-            takes_r8: true,
-            ..alu(&[operand.left, operand.right], operand.destination)
-        },
+        Operation::ConditionalSelect(operand) => {
+            alu(&[operand.left, operand.right], operand.destination)
+        }
         Operation::ConditionalCompare(operand) => Effects {
             takes_r8: true,
             ..alu(
@@ -179,8 +178,9 @@ fn effects(operation: &Operation) -> Option<Effects> {
                     MemoryTransfer::Store => 0,
                     MemoryTransfer::Load { .. } => bits(&data),
                 },
-            // A pair stages its frame-resident elements in RCX and R8.
-            takes_r8: true,
+            // A pair stages its frame-resident elements in RCX and RDX,
+            // or R8 where RDX holds the address's pending writeback.
+            takes_r8: mode != AddressMode::Offset,
             memory: true,
         },
         Operation::MemoryRegisterOffset(operand) => Effects {
