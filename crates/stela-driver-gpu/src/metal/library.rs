@@ -421,6 +421,14 @@ pub struct Function<'a> {
     module: &'a [u8],
 }
 
+impl Function<'_> {
+    /// The MTLB stage of an extern function: a declaration, with its
+    /// argument and return reflection, of a function another library or the
+    /// source that links it defines. `functionNames` omits it and
+    /// `externFunctionNames` lists it.
+    pub const EXTERN: u8 = 5;
+}
+
 impl<'a> Function<'a> {
     fn parse(
         data: &'a [u8],

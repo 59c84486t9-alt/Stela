@@ -5581,6 +5581,27 @@ static void host_library_loading(Case *c, id<MTLCommandQueue> queue, NSDictionar
 	put(c, @"props", 2, [[from_main.functionNames sortedArrayUsingSelector:@selector(compare:)] isEqualToArray:names]);
 }
 
+/* Metal's SPI for a library's extern functions. */
+@protocol StelaExternFunctions
+- (NSArray<NSString *> *)externFunctionNames;
+@end
+
+/* A library of extern functions, which Core Image declares for the kernels
+ * it compiles and finds its stitchable functions by: it names no function
+ * of its own and lists them as externFunctionNames. */
+static void host_extern_functions(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	NSString *path = @"/System/Library/Frameworks/CoreImage.framework/Resources/ci_stdlib.metallib";
+	NSError *error = nil;
+	id<MTLLibrary> library = [c.device newLibraryWithURL:[NSURL fileURLWithPath:path] error:&error];
+	if (!library) @throw failure(@"%@: %@", path, error);
+	NSArray *externs = [library respondsToSelector:@selector(externFunctionNames)]
+				   ? [(id<StelaExternFunctions>)library externFunctionNames]
+				   : nil;
+	put(c, @"props", 0, library.functionNames.count == 0);
+	put(c, @"props", 1, [externs containsObject:@"_ci_premul"]);
+}
+
 /* Debug groups, signposts and markers around real work, which they leave
  * alone, and a barrier between two encoders' dispatches by stage. */
 static void host_debug(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
@@ -5647,6 +5668,7 @@ static void run_host(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 		@"queues" : [NSValue valueWithPointer:host_queues],
 		@"function_reflection" : [NSValue valueWithPointer:host_function_reflection],
 		@"library_loading" : [NSValue valueWithPointer:host_library_loading],
+		@"extern_functions" : [NSValue valueWithPointer:host_extern_functions],
 		@"debug" : [NSValue valueWithPointer:host_debug],
 		@"depth_bounds" : [NSValue valueWithPointer:host_depth_bounds],
 	};

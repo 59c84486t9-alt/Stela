@@ -32,6 +32,10 @@ const OPERATIONS: &[(&str, Reach)] = &[
     ("Commit", Reach::Without("every command buffer")),
     ("NewLibrary", Reach::Call("newLibraryWithData:")),
     ("LibraryFunctionNames", Reach::Call("functionNames")),
+    (
+        "LibraryExternFunctionNames",
+        Reach::Call("externFunctionNames"),
+    ),
     ("LibraryIdentity", Reach::Call("installName")),
     ("LibraryData", Reach::Call("[dynamic serializeToURL:")),
     ("NewSourceLibrary", Reach::Call("newLibraryWithSource:")),

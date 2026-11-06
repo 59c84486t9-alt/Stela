@@ -793,12 +793,13 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 
 @implementation StelaGPULibrary
 
-- (NSArray *)functionNames
+/* The names `operation` lists of the library. */
+- (NSArray *)namesFrom:(uint32_t)operation
 {
 	StelaLibraryFunctionNamesRequest request = {.library = _handle};
 	StelaLength response = {};
-	const char *names = read_variable(&_device->_gate, StelaOperationLibraryFunctionNames, &request,
-					  sizeof(request), &request.out, &response, sizeof(response), &response.length);
+	const char *names = read_variable(&_device->_gate, operation, &request, sizeof(request), &request.out,
+					  &response, sizeof(response), &response.length);
 	NSMutableArray *list = [NSMutableArray arrayWithCapacity:8];
 	if (names) {
 		for (size_t at = 0; at < response.length; at += strlen(names + at) + 1) {
@@ -807,6 +808,18 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 		free((void *)names);
 	}
 	return list;
+}
+
+- (NSArray *)functionNames
+{
+	return [self namesFrom:StelaOperationLibraryFunctionNames];
+}
+
+/* Metal's SPI: the functions the library declares extern, which name none of
+ * its own and which Core Image looks its stitchable functions up by. */
+- (NSArray *)externFunctionNames
+{
+	return [self namesFrom:StelaOperationLibraryExternFunctionNames];
 }
 
 /* What the library says of itself, once: a library's bytes never change. */

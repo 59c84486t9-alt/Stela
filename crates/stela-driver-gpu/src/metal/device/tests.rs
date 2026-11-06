@@ -45,7 +45,7 @@ use crate::metal::{
 use alloc::{string::String, vec::Vec};
 
 use super::fixture::{LIBRARY, MockBackend, MockCompiler, TestDevice, device, device_on};
-use crate::metal::library::tests::fixture;
+use crate::metal::library::{self, Function, tests::fixture};
 
 fn options(storage_mode: StorageMode) -> ResourceOptions {
     ResourceOptions {
@@ -1296,6 +1296,31 @@ fn libraries_of_held_bytes_share_them() {
     // Each lives on without the other.
     device.destroy_library(LIBRARY).unwrap();
     assert!(device.new_function(shared, "kernel", Some(&[])).is_ok());
+}
+
+#[test]
+fn extern_functions_are_named_apart_and_make_no_function() {
+    let mut device = device();
+    let air = b"BC\xc0\xde\0\0\0\0";
+    let data = library::assemble(
+        air,
+        &[("kernel", 2), ("declared", Function::EXTERN)],
+        0,
+        None,
+    );
+    let library = device.new_library(data).unwrap();
+    assert_eq!(
+        device.library_function_names(library),
+        Ok(&[String::from("kernel")][..])
+    );
+    assert_eq!(
+        device.library_extern_function_names(library),
+        Ok(&[String::from("declared")][..])
+    );
+    assert_eq!(
+        device.new_function(library, "declared", Some(&[])),
+        Err(Error::Unsupported("the function of an extern declaration"))
+    );
 }
 
 #[test]

@@ -895,6 +895,15 @@ fn properties(plan: &mut Plan, library: &str, rng: &mut Random) {
         .buffer(props(4))
         .output(Output::exact("props", Dtype::U32, u32s(&[1, 1, 1, 0]))),
     );
+    plan.add(
+        Case::host(
+            "host.extern_functions",
+            library,
+            json!({"kind": "extern_functions"}),
+        )
+        .buffer(props(4))
+        .output(Output::exact("props", Dtype::U32, u32s(&[1, 1, 0, 0]))),
+    );
     let values: Vec<u32> = (0..n as u32).map(|i| i * 3 + 1).collect();
     let doubled: Vec<u32> = values.iter().map(|&x| x * 2).collect();
     plan.add(

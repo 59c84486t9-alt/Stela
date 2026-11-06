@@ -67,11 +67,22 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         call.reply(&handle)
     }
 
-    pub(super) fn library_function_names(&mut self, call: &mut Call) -> Result<(), Fault> {
+    /// The names of the library's functions, or with `externs` of its
+    /// extern functions.
+    pub(super) fn library_function_names(
+        &mut self,
+        call: &mut Call,
+        externs: bool,
+    ) -> Result<(), Fault> {
         let request: LibraryFunctionNamesRequest = call.request()?;
         let library = self.object::<LibraryId>(call.connection, request.library)?;
+        let listed = if externs {
+            self.device.library_extern_function_names(library)?
+        } else {
+            self.device.library_function_names(library)?
+        };
         let mut names = Vec::new();
-        for name in self.device.library_function_names(library)? {
+        for name in listed {
             names.extend_from_slice(name.as_bytes());
             names.push(0);
         }

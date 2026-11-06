@@ -15,7 +15,7 @@ use crate::metal::{
     abi::{DataType, FunctionType, PrimitiveTopologyClass},
     command_buffer::{BoundPipeline, ComputePipelineState, IndirectCompute, RenderPipelineState},
     error::{Error, Result, ensure, require},
-    library::{self, Header, Library},
+    library::{self, Function, Header, Library},
     pipeline::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
         RenderTargets, StageThreads, TessellatedVertex, TessellationDescriptor,
@@ -75,6 +75,8 @@ impl Users {
 struct LibraryObject {
     library: u64,
     names: Vec<String>,
+    /// Its extern functions' names, which name no function of its own.
+    extern_names: Vec<String>,
     dynamic: bool,
     install_name: Option<String>,
     /// `MTLCompileOptions.libraries` and a stitched library's functions'
@@ -549,17 +551,24 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `newLibraryWithData:`: keeps a Metal library for its functions.
     pub fn new_library(&mut self, data: Vec<u8>) -> Result<LibraryId> {
         let parsed = Library::parse(&data).map_err(|_| Error::Invalid("Metal library"))?;
-        let names = parsed
+        let (externs, functions): (Vec<_>, Vec<_>) = parsed
             .functions()
             .iter()
-            .map(|function| String::from(function.name))
-            .collect();
+            .partition(|function| function.kind == Function::EXTERN);
+        let names = |functions: Vec<&Function>| {
+            functions
+                .into_iter()
+                .map(|function| String::from(function.name))
+                .collect()
+        };
+        let (names, extern_names) = (names(functions), names(externs));
         let dynamic = parsed.header.kind == Header::DYNAMIC;
         let install_name = parsed.install_name.map(String::from);
         let library = self.compiler.add_library(data)?;
         let index = self.pipelines.libraries.insert(LibraryObject {
             library,
             names,
+            extern_names,
             dynamic,
             install_name,
             dependencies: Vec::new(),
@@ -593,6 +602,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let object = LibraryObject {
             library: self.compiler.share_library(held.library)?,
             names: held.names.clone(),
+            extern_names: held.extern_names.clone(),
             dynamic: held.dynamic,
             install_name: held.install_name.clone(),
             dependencies: Vec::new(),
@@ -606,6 +616,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `functionNames`.
     pub fn library_function_names(&self, id: LibraryId) -> Result<&[String]> {
         Ok(&self.pipelines.libraries.get(id.0)?.names)
+    }
+
+    /// `externFunctionNames`.
+    pub fn library_extern_function_names(&self, id: LibraryId) -> Result<&[String]> {
+        Ok(&self.pipelines.libraries.get(id.0)?.extern_names)
     }
 
     /// `type` and `installName`.
@@ -707,6 +722,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     ) -> Result<FunctionId> {
         let kept = Kept::library(library);
         self.pipelines.ensure_created(&kept)?;
+        // Metal answers a function of its own kind, which no pipeline
+        // takes, for an extern function's name.
+        require(
+            !self
+                .pipelines
+                .libraries
+                .get(library.0)?
+                .extern_names
+                .iter()
+                .any(|name| name == entry),
+            "the function of an extern declaration",
+        )?;
         let compiled = self.pipelines.library(library)?;
         let values = match values {
             Some(values) => values,

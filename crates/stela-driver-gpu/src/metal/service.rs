@@ -473,7 +473,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 call.reply(&wire::Empty {})
             }
             Operation::NewLibrary => self.new_library(&mut call),
-            Operation::LibraryFunctionNames => self.library_function_names(&mut call),
+            Operation::LibraryFunctionNames => self.library_function_names(&mut call, false),
+            Operation::LibraryExternFunctionNames => self.library_function_names(&mut call, true),
             Operation::LibraryIdentity => self.library_identity(&mut call),
             Operation::LibraryData => self.library_data(&mut call),
             Operation::NewSourceLibrary => self.new_source_library(&mut call),
