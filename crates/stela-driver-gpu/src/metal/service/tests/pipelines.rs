@@ -237,7 +237,7 @@ fn stitched_libraries_take_visible_functions() {
     };
     let (kernel, visible) = (function(library, "kernel"), function(library, "visible"));
     // `f(a) = visible(a)`.
-    let words = [1u32, 2, 2, 0x66, 0, 0, 1, 1, 0];
+    let words = [1u32, 2, 2, 0, 0x66, 0, 0, 1, 1, 0];
     let graphs: alloc::vec::Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
     let graphs = memory.put(&graphs);
     let mut stitched = |functions: &[u64], memory: &mut Memory| {

@@ -1060,6 +1060,23 @@ fn a_stitched_function_links_what_it_calls() {
     };
     assert_eq!(libraries(&linking.functions), [2]);
     assert_eq!(libraries(&linking.private_functions), [1, 0]);
+
+    // A stitched kernel links them as its own calls.
+    let stitched_kernel = device.new_function(library, "kernel", Some(&[])).unwrap();
+    let request = ComputePipelineRequest {
+        compute_function: stitched_kernel,
+        linked_functions: LinkedFunctions::default(),
+        ..request
+    };
+    let pipeline = device.new_compute_pipeline(&request).unwrap();
+    device
+        .compute_variant(u64::from(pipeline.0), &dispatch)
+        .unwrap();
+    let linking = &device.compiler.compiled.last().unwrap().linking;
+    assert!(linking.functions.is_empty());
+    assert_eq!(libraries(&linking.private_functions), [1, 0]);
+    // The libraries it keeps for them preload nothing.
+    assert!(linking.libraries.is_empty());
 }
 
 #[test]

@@ -1,6 +1,7 @@
 //! `MTLFunctionStitchingGraph`s, as the frontend's [`decode`] stream carries
 //! them: little-endian 32-bit words, each graph
-//! `[name bytes, node count, output + 1]`, its padded name and its nodes, an
+//! `[name bytes, node count, output + 1, kernel]`, its padded name and its
+//! nodes, an
 //! input `[0, argument index]`, a builtin `[u32::MAX, builtin]`, a buffer
 //! address `[u32::MAX - 1, buffer index, offset low, offset high, dereference]`,
 //! an early return `[u32::MAX - 2, condition node index, value node index + 1]`,
@@ -16,11 +17,11 @@ use alloc::{string::String, vec::Vec};
 pub enum StitchedNode {
     /// The stitched function's argument.
     Input(u32),
-    /// A builtin of the function the stitched function inlines into.
+    /// A builtin of the stitched kernel.
     Builtin(StitchedBuiltin),
     /// `MTLFunctionStitchingInputBufferAddress`: `offset` bytes into the
-    /// buffer the function the stitched function inlines into binds at
-    /// `index`, or with `dereference` the value there.
+    /// buffer the stitched kernel binds at `index`, or with `dereference` the
+    /// value there.
     BufferAddress {
         index: u32,
         offset: u64,
@@ -33,8 +34,8 @@ pub enum StitchedNode {
         condition: u32,
         value: Option<u32>,
     },
-    /// `MTLFunctionStitchingInputTexture`: the texture the function the
-    /// stitched function inlines into binds at the index.
+    /// `MTLFunctionStitchingInputTexture`: the texture the stitched kernel
+    /// binds at the index.
     Texture(u32),
     /// `MTLFunctionStitchingInputSampler`: likewise its sampler.
     Sampler(u32),
@@ -75,6 +76,9 @@ pub struct StitchedGraph {
     pub nodes: Vec<StitchedNode>,
     /// The node whose result the function returns.
     pub output: Option<u32>,
+    /// The graph is a kernel's, as `MTLFunctionStitchingAttributeKernel`
+    /// makes it, rather than a visible function's.
+    pub kernel: bool,
 }
 
 const MALFORMED: Error = Error::Invalid("stitched function graph");
@@ -178,6 +182,11 @@ pub fn decode(stream: &[u8], functions: usize) -> Result<Vec<StitchedGraph>> {
         let name_bytes = words.word()? as usize;
         let count = words.word()? as usize;
         let output = words.word()?.checked_sub(1);
+        let kernel = match words.word()? {
+            0 => false,
+            1 => true,
+            _ => return Err(MALFORMED),
+        };
         let name = words.name(name_bytes)?;
         if name.is_empty() || name.contains('\0') {
             return Err(MALFORMED);
@@ -195,6 +204,7 @@ pub fn decode(stream: &[u8], functions: usize) -> Result<Vec<StitchedGraph>> {
             name,
             nodes,
             output,
+            kernel,
         });
     }
     Ok(graphs)
@@ -212,7 +222,7 @@ mod tests {
     #[test]
     fn nodes_decode_in_their_order() {
         // `f(a) = g(g(a))`.
-        let words = [1, 3, 3, 0x66, 0, 0, 1, 1, 0, 1, 1, 1];
+        let words = [1, 3, 3, 0, 0x66, 0, 0, 1, 1, 0, 1, 1, 1];
         assert_eq!(
             decode(&stream(&words), 1).unwrap(),
             [StitchedGraph {
@@ -229,16 +239,19 @@ mod tests {
                     },
                 ],
                 output: Some(2),
+                kernel: false,
             }]
         );
     }
 
     #[test]
     fn builtins_decode_and_unknown_ones_are_refused() {
-        // `f() = g(thread_position_in_grid)`.
-        let words = [1, 2, 2, 0x66, u32::MAX, 1, 1, 1, 0];
+        // `kernel f() { g(thread_position_in_grid); }`.
+        let words = [1, 2, 0, 1, 0x66, u32::MAX, 1, 1, 1, 0];
+        let graph = &decode(&stream(&words), 1).unwrap()[0];
+        assert!(graph.kernel);
         assert_eq!(
-            decode(&stream(&words), 1).unwrap()[0].nodes,
+            graph.nodes,
             [
                 StitchedNode::Builtin(StitchedBuiltin::ThreadPositionInGrid),
                 StitchedNode::Call {
@@ -248,17 +261,18 @@ mod tests {
             ]
         );
         let mut unknown = words;
-        unknown[5] = 3;
+        unknown[6] = 3;
         assert!(decode(&stream(&unknown), 1).is_err());
     }
 
     #[test]
     fn textures_samplers_and_threadgroups_decode_their_indices() {
-        // `f() = g(texture 3, sampler 1, threadgroup 2)`.
+        // `kernel f() { g(texture 3, sampler 1, threadgroup 2); }`.
         let words = [
             1,
             4,
-            4,
+            0,
+            1,
             0x66,
             u32::MAX - 3,
             3,
@@ -284,8 +298,8 @@ mod tests {
 
     #[test]
     fn buffer_addresses_decode_their_offsets() {
-        // `f() = g(*(buffer 3 + 2^32 + 8))`.
-        let words = [1, 2, 2, 0x66, u32::MAX - 1, 3, 8, 1, 1, 1, 1, 0];
+        // `kernel f() { g(*(buffer 3 + 2^32 + 8)); }`.
+        let words = [1, 2, 0, 1, 0x66, u32::MAX - 1, 3, 8, 1, 1, 1, 1, 0];
         assert_eq!(
             decode(&stream(&words), 1).unwrap()[0].nodes[0],
             StitchedNode::BufferAddress {
@@ -295,14 +309,14 @@ mod tests {
             }
         );
         let mut unknown = words;
-        unknown[8] = 2;
+        unknown[9] = 2;
         assert!(decode(&stream(&unknown), 1).is_err());
     }
 
     #[test]
     fn early_returns_name_an_earlier_condition() {
         // `f(a) { if (g(a)) return g(a); }`.
-        let words = [1, 3, 0, 0x66, 0, 0, 1, 1, 0, u32::MAX - 2, 1, 2];
+        let words = [1, 3, 0, 0, 0x66, 0, 0, 1, 1, 0, u32::MAX - 2, 1, 2];
         assert_eq!(
             decode(&stream(&words), 1).unwrap()[0].nodes[2],
             StitchedNode::EarlyReturn {
@@ -311,7 +325,7 @@ mod tests {
             }
         );
         let mut nothing = words;
-        nothing[11] = 0;
+        nothing[12] = 0;
         assert_eq!(
             decode(&stream(&nothing), 1).unwrap()[0].nodes[2],
             StitchedNode::EarlyReturn {
@@ -319,7 +333,7 @@ mod tests {
                 value: None,
             }
         );
-        for (at, later) in [(10, 2), (11, 3)] {
+        for (at, later) in [(11, 2), (12, 3)] {
             let mut bad = words;
             bad[at] = later;
             assert!(decode(&stream(&bad), 1).is_err(), "{at}");
@@ -328,14 +342,16 @@ mod tests {
 
     #[test]
     fn refuses_what_a_graph_cannot_be() {
-        let good = [1, 2, 2, 0x66, 0, 0, 1, 1, 0];
+        let good = [1, 2, 2, 0, 0x66, 0, 0, 1, 1, 0];
         assert!(decode(&stream(&good), 1).is_ok());
         for (at, value) in [
-            // The function, a later node, an output past the nodes, no name.
-            (6, 2),
-            (8, 1),
+            // The function, a later node, an output past the nodes, no name,
+            // a kind of graph past the two.
+            (7, 2),
+            (9, 1),
             (2, 3),
             (0, 0),
+            (3, 2),
             // A node count past the stream.
             (1, u32::MAX),
         ] {
@@ -343,6 +359,6 @@ mod tests {
             bad[at] = value;
             assert!(decode(&stream(&bad), 1).is_err(), "{at}");
         }
-        assert!(decode(&stream(&good)[..30], 1).is_err());
+        assert!(decode(&stream(&good)[..34], 1).is_err());
     }
 }

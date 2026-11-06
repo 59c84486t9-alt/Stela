@@ -1,17 +1,19 @@
 /* SPDX-License-Identifier: MIT */
 /* Stitched functions: MTLFunctionStitchingGraph as a module of visible
- * functions, each of whose body calls its nodes' functions in order. The
- * functions it calls stay declarations, so a pipeline that links a stitched
- * function links their modules too, with their own function constant values.
+ * functions and kernels, each of whose body calls its nodes' functions in
+ * order. The functions it calls stay declarations, so a pipeline of or
+ * linking a stitched function links their modules too, with their own
+ * function constant values.
  *
  * Nodes follow what they use, so calling each once in order keeps every
  * dependency, control or data. An input becomes an argument of the type and
- * metadata of the parameter it feeds, a builtin or buffer address a call of
- * the Stela function that the translation of the kernel it inlines into
- * answers, an early return a branch to a return, and a stitched function
- * returns what its output node's function returns. */
+ * metadata of the parameter it feeds, a kernel's builtin or bound resource a
+ * call of the Stela function that the kernel's translation answers, an early
+ * return a branch to a return, and a stitched function returns what its
+ * output node's function returns. */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_metadata.h"
+#include "air_texture.h"
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
 #include "llvm-c/BitWriter.h"
@@ -144,11 +146,12 @@ buffer_address(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleR
 }
 
 /* The texture, sampler or threadgroup memory node's value, read from the
- * binding the function the stitched function inlines into has at its index,
- * as the `type` of the parameters it feeds. */
+ * stitched kernel's binding at its index, as the `type` of the parameters it
+ * feeds. */
 static LLVMValueRef
 bound_resource(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef out,
-               LLVMBuilderRef builder, const struct stela_air_stitch_node *node, LLVMTypeRef type)
+               LLVMBuilderRef builder, const struct stela_air_stitch_node *node, LLVMTypeRef type,
+               const struct stela_air_texture *texture)
 {
    static const struct {
       uint32_t function;
@@ -175,7 +178,33 @@ bound_resource(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleR
    if (!read)
       read = LLVMAddFunction(out, kinds[kind].name, LLVMFunctionType(type, &index_type, 1, false));
    LLVMValueRef index = LLVMConstInt(index_type, node->input, false);
-   return LLVMBuildCall2(builder, LLVMGlobalGetValueType(read), read, &index, 1, "");
+   LLVMValueRef value = LLVMBuildCall2(builder, LLVMGlobalGetValueType(read), read, &index, 1, "");
+   if (node->function == STELA_AIR_STITCH_TEXTURE && texture->type) {
+      LLVMTypeRef word = LLVMInt32TypeInContext(context);
+      LLVMValueRef fields[] = {
+         LLVMConstInt(word, texture->type, false), LLVMConstInt(word, texture->access, false),
+         LLVMConstInt(word, texture->primitive, false),
+         LLVMConstInt(LLVMInt1TypeInContext(context), texture->depth, false),
+      };
+      const char *kind = STELA_AIR_STITCH_TEXTURE_METADATA;
+      LLVMSetMetadata(value, LLVMGetMDKindIDInContext(context, kind, (unsigned)strlen(kind)),
+                      LLVMMDNodeInContext(context, fields, ARRAY_SIZE(fields)));
+   }
+   return value;
+}
+
+/* Merges into *texture what the texture calls that take `parameter` say of
+ * it; a parameter its function passes on says nothing here. */
+static void
+describe_texture(LLVMValueRef parameter, struct stela_air_texture *texture)
+{
+   for (LLVMUseRef use = LLVMGetFirstUse(parameter); use; use = LLVMGetNextUse(use)) {
+      LLVMValueRef user = LLVMGetUser(use);
+      struct stela_air_texture merged = *texture;
+      if (LLVMIsACallInst(user) && LLVMGetOperand(user, 0) == parameter &&
+          stela_air_texture_use(user, &merged))
+         *texture = merged;
+   }
 }
 
 /* Node `index` of graph if it is a call before node `before`. */
@@ -210,13 +239,33 @@ static bool
 stitch_graph(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef out,
              const struct source *sources, const struct stela_air_stitch_graph *graph)
 {
+   /* As Metal's, a kernel's graph takes no inputs and returns nothing, and
+    * only it reads builtins and bindings. */
+   for (unsigned i = 0; i < graph->node_count; i++) {
+      uint32_t kind = graph->nodes[i].function;
+      bool bound = kind == STELA_AIR_STITCH_BUILTIN || kind == STELA_AIR_STITCH_BUFFER_ADDRESS ||
+                   kind == STELA_AIR_STITCH_TEXTURE || kind == STELA_AIR_STITCH_SAMPLER ||
+                   kind == STELA_AIR_STITCH_THREADGROUP;
+      if (graph->kernel && kind == STELA_AIR_STITCH_INPUT)
+         return fail(m, STELA_AIR_INPUT, "a stitched kernel takes an input");
+      if (!graph->kernel && bound)
+         return fail(m, STELA_AIR_INPUT, "a stitched visible function reads a builtin or binding");
+   }
+   if (graph->kernel && graph->output != STELA_AIR_STITCH_NO_OUTPUT)
+      return fail(m, STELA_AIR_INPUT, "a stitched kernel returns a value");
    LLVMTypeRef types[AIR_MAX_METADATA_OPERANDS] = {0};
    LLVMValueRef inputs[AIR_MAX_METADATA_OPERANDS] = {0};
    unsigned parameters = 0;
-   /* Each builtin or buffer address node's type, the parameters' it feeds. */
+   /* Each builtin or buffer address node's type, the parameters' it feeds,
+    * and each texture node's texture, as their texture calls take it: zero,
+    * sampled and of no known type until one does. */
    LLVMTypeRef *builtins = calloc(graph->node_count, sizeof(*builtins));
-   if (!builtins)
+   struct stela_air_texture *textures = calloc(graph->node_count, sizeof(*textures));
+   if (!builtins || !textures) {
+      free(builtins);
+      free(textures);
       return fail(m, STELA_AIR_ALLOCATION, "stitched nodes");
+   }
    for (unsigned i = 0; i < graph->node_count; i++) {
       const struct stela_air_stitch_node *node = &graph->nodes[i];
       if (node->function == STELA_AIR_STITCH_EARLY_RETURN) {
@@ -235,6 +284,7 @@ stitch_graph(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef
                "a stitched early return of no earlier call of the output's type" : NULL;
          if (refusal) {
             free(builtins);
+            free(textures);
             return fail(m, STELA_AIR_INPUT, refusal);
          }
          continue;
@@ -244,6 +294,7 @@ stitch_graph(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef
       const struct source *source = &sources[node->function];
       if (node->argument_count != LLVMCountParams(source->function)) {
          free(builtins);
+         free(textures);
          return fail(m, STELA_AIR_INPUT, "a stitched call has the wrong number of arguments");
       }
       for (unsigned j = 0; j < node->argument_count; j++) {
@@ -251,6 +302,7 @@ stitch_graph(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef
          LLVMTypeRef type = LLVMTypeOf(LLVMGetParam(source->function, j));
          if (argument->function == STELA_AIR_STITCH_EARLY_RETURN) {
             free(builtins);
+            free(textures);
             return fail(m, STELA_AIR_INPUT, "a stitched early return is a call's argument");
          }
          if (argument->function == STELA_AIR_STITCH_BUILTIN ||
@@ -261,9 +313,12 @@ stitch_graph(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef
             LLVMTypeRef *builtin = &builtins[node->arguments[j]];
             if (*builtin && *builtin != type) {
                free(builtins);
+               free(textures);
                return fail(m, STELA_AIR_INPUT, "a stitched builtin or resource of two types");
             }
             *builtin = type;
+            if (argument->function == STELA_AIR_STITCH_TEXTURE)
+               describe_texture(LLVMGetParam(source->function, j), &textures[node->arguments[j]]);
             continue;
          }
          if (argument->function != STELA_AIR_STITCH_INPUT)
@@ -271,6 +326,7 @@ stitch_graph(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef
          unsigned index = argument->input;
          if (index >= ARRAY_SIZE(types) || (types[index] && types[index] != type)) {
             free(builtins);
+            free(textures);
             return fail(m, STELA_AIR_INPUT, index >= ARRAY_SIZE(types) ?
                                                "a stitched function's argument index" :
                                                "a stitched argument of two types");
@@ -295,8 +351,6 @@ stitch_graph(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef
       graph->output == STELA_AIR_STITCH_NO_OUTPUT ? NULL : &graph->nodes[graph->output];
    if (!refusal && output && output->function == STELA_AIR_STITCH_INPUT)
       refusal = "a stitched function outputs an input";
-   if (!refusal && output && output->function == STELA_AIR_STITCH_BUILTIN)
-      refusal = "a stitched function outputs a builtin";
    if (!refusal && output && output->function >= STELA_AIR_STITCH_CALLS)
       refusal = "a stitched function outputs what is no call";
    if (!refusal && LLVMGetNamedFunction(out, graph->name))
@@ -306,6 +360,7 @@ stitch_graph(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef
       refusal = "stitched nodes", refused = STELA_AIR_ALLOCATION;
    if (refusal) {
       free(builtins);
+      free(textures);
       return fail(m, refused, refusal);
    }
    LLVMTypeRef result = LLVMVoidTypeInContext(context);
@@ -352,7 +407,7 @@ stitch_graph(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef
           node->function == STELA_AIR_STITCH_THREADGROUP) {
          if (!builtins[i])
             continue;
-         values[i] = bound_resource(m, context, out, builder, node, builtins[i]);
+         values[i] = bound_resource(m, context, out, builder, node, builtins[i], &textures[i]);
          stitched = values[i] != NULL;
          continue;
       }
@@ -392,13 +447,14 @@ stitch_graph(struct stela_air_metadata *m, LLVMContextRef context, LLVMModuleRef
    LLVMDisposeBuilder(builder);
    free(values);
    free(builtins);
+   free(textures);
    if (!stitched)
       return false;
 
    LLVMValueRef empty = LLVMMDNodeInContext(context, NULL, 0);
    LLVMValueRef entry[] = {function, output ? sources[output->function].outputs : empty,
                            LLVMMDNodeInContext(context, arguments, parameters)};
-   LLVMAddNamedMetadataOperand(out, "air.visible",
+   LLVMAddNamedMetadataOperand(out, graph->kernel ? "air.kernel" : "air.visible",
                                LLVMMDNodeInContext(context, entry, ARRAY_SIZE(entry)));
    return true;
 }

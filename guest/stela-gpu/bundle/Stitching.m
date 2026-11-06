@@ -1,8 +1,10 @@
 /*
  * MTLFunctionStitchingGraph as the stream `metal/stitching.rs` reads: the nodes
  * a graph reaches, each after what it uses, whether as an argument or as a
- * control dependency. Metal's attributes need nothing, since every call inlines,
- * and a builtin node reads the builtin of the kernel the call inlines into.
+ * control dependency, and whether it is a kernel's. A kernel's graph, which
+ * MTLFunctionStitchingAttributeKernel or Metal's own SPI graph class makes,
+ * reads its builtins and bindings; inlining needs no attribute, since every
+ * call inlines.
  */
 #include "Bundle.h"
 
@@ -11,6 +13,7 @@
 - (NSArray *)functionGraphs;
 - (NSArray *)functions;
 - (NSArray *)nodes;
+- (NSArray *)attributes;
 - (id)outputNode;
 - (NSString *)functionName;
 - (NSString *)name;
@@ -240,11 +243,17 @@ static BOOL refuse(StelaFailure *failure, const char *reason)
 	if (output && ![self addNode:output failure:failure]) {
 		return NO;
 	}
+	BOOL kernel = [graph isKindOfClass:NSClassFromString(@"MTLFunctionStitchingGraphSPI")];
+	NSArray *attributes = [graph attributes];
+	for (NSUInteger index = 0; !kernel && index < attributes.count; index++) {
+		kernel = [attributes[index] isKindOfClass:NSClassFromString(@"MTLFunctionStitchingAttributeKernel")];
+	}
 	const char *name = [graph functionName].UTF8String;
 	uint32_t header[] = {
 		(uint32_t)strlen(name),
 		(uint32_t)_nodes.count,
 		output ? (uint32_t)[_nodes indexOfObjectIdenticalTo:output] + 1 : 0,
+		kernel,
 	};
 	static const uint8_t padding[4];
 	[_stream appendBytes:header length:sizeof(header)];

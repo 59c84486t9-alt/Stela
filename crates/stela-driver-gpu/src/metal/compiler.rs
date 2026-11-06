@@ -473,6 +473,7 @@ impl Compiler for AirCompiler {
                     nodes: nodes.as_ptr(),
                     node_count: count(nodes.len())?,
                     output: graph.output.unwrap_or(u32::MAX),
+                    kernel: graph.kernel,
                 })
             })
             .collect::<Result<Vec<_>>>()?;

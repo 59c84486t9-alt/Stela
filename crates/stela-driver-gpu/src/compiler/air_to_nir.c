@@ -614,9 +614,9 @@ named_after(const char *name, size_t name_length, const char *stem)
    return name_length > length + 1 && !memcmp(name, stem, length) && name[length] == '.';
 }
 
-/* A stitched function's read of a builtin of the function it inlines into,
- * as air_stitch.c declares it: a call of `name.TYPE` that returns the builtin
- * as an integer scalar or vector of up to three lanes. */
+/* A stitched kernel's read of its builtin, as air_stitch.c declares it: a
+ * call of `name.TYPE` that returns the builtin as an integer scalar or vector
+ * of up to three lanes. */
 static bool
 stitched_builtin_call(struct translator *t, LLVMValueRef call, LLVMValueRef callee, const char *name,
                       size_t name_length, bool *lowered)
@@ -720,8 +720,8 @@ stitched_texture(struct translator *t, LLVMValueRef call, unsigned index, bool t
    return put_resource(t, call, &described, NULL);
 }
 
-/* The resources the stitched functions inlined into fn read: calls on a
- * constant index, bound in the prelude as arguments are. */
+/* The resources stitched kernel fn reads: calls on a constant index, bound
+ * in the prelude as arguments are. */
 static bool
 stitched_resources(struct translator *t, LLVMValueRef fn)
 {

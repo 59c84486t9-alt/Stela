@@ -12,6 +12,7 @@ use crate::metal::{
     },
     nvidia::{CHIPS, fixture::nvk},
     shader::{LinkedFunction, Linking, Patch, PatchDomain},
+    stitching::StitchedBuiltin,
     vertex::{STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
 };
 use alloc::vec;
@@ -439,6 +440,7 @@ unsafe extern "C" fn stitch(
         sources.len() as u8,
         graphs.len() as u8,
         graphs[0].node_count as u8,
+        u8::from(graphs[0].kernel),
     ];
     // SAFETY: the callback takes the bytes for the call.
     unsafe { visit(data, names.as_ptr().cast(), names.len()) };
@@ -1038,10 +1040,29 @@ fn stitching_gives_the_service_each_source_and_graph() {
             },
         ],
         output: Some(1),
+        kernel: false,
     };
     assert_eq!(
-        compiler.stitch(&[(library, "kernel")], &[graph]).unwrap(),
-        [1, 1, 2]
+        compiler
+            .stitch(&[(library, "kernel")], core::slice::from_ref(&graph))
+            .unwrap(),
+        [1, 1, 2, 0]
+    );
+    let kernel = StitchedGraph {
+        nodes: vec![
+            StitchedNode::Builtin(StitchedBuiltin::ThreadPositionInGrid),
+            StitchedNode::Call {
+                function: 0,
+                arguments: vec![0],
+            },
+        ],
+        output: None,
+        kernel: true,
+        ..graph
+    };
+    assert_eq!(
+        compiler.stitch(&[(library, "kernel")], &[kernel]).unwrap(),
+        [1, 1, 2, 1]
     );
     assert!(compiler.stitch(&[(library, "absent")], &[]).is_err());
 }

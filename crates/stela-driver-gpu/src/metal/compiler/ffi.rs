@@ -383,6 +383,7 @@ pub struct StitchGraph {
     pub(super) nodes: *const StitchNode,
     pub(super) node_count: u32,
     pub(super) output: u32,
+    pub(super) kernel: bool,
 }
 
 /// `stela_air_visit_bytes`.

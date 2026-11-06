@@ -2662,6 +2662,101 @@ entry_stage(struct stela_air_metadata *m, const char *entry, unsigned *stage)
    return found || fail(m, STELA_AIR_ARGUMENT, "entry is not a listed AIR function");
 }
 
+/* Whether `name` is `stem`, or with `suffixed` `stem.` and more. */
+static bool
+stitched_read(const char *name, size_t bytes, const char *stem, bool suffixed)
+{
+   size_t length = strlen(stem);
+   return suffixed ? bytes > length + 1 && !memcmp(name, stem, length) && name[length] == '.' :
+                     bytes == length && !memcmp(name, stem, length);
+}
+
+/* Appends to the *count arguments of args, which hold AIR_MAX_ARGUMENTS, the
+ * resources fn binds through air_stitch.c's reads, as a stitched kernel
+ * does: each binding once, with the access all its reads take. */
+static bool
+stitched_arguments(struct stela_air_metadata *m, LLVMValueRef fn,
+                   struct stela_air_argument_info *args, unsigned *count)
+{
+   const char *texture_metadata = STELA_AIR_STITCH_TEXTURE_METADATA;
+   unsigned texture_kind = LLVMGetMDKindIDInContext(LLVMGetModuleContext(m->module),
+                                                    texture_metadata,
+                                                    (unsigned)strlen(texture_metadata));
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         LLVMValueRef callee = LLVMIsACallInst(inst) ? LLVMGetCalledValue(inst) : NULL;
+         size_t bytes = 0;
+         const char *name =
+            callee && LLVMIsAFunction(callee) ? LLVMGetValueName2(callee, &bytes) : "";
+         bool buffer = stitched_read(name, bytes, STELA_AIR_STITCH_BUFFER_ADDRESS_NAME, true);
+         bool texture = stitched_read(name, bytes, STELA_AIR_STITCH_TEXTURE_NAME, false);
+         bool sampler = stitched_read(name, bytes, STELA_AIR_STITCH_SAMPLER_NAME, false);
+         bool threadgroup = stitched_read(name, bytes, STELA_AIR_STITCH_THREADGROUP_NAME, false);
+         if (!buffer && !texture && !sampler && !threadgroup)
+            continue;
+         LLVMValueRef index = LLVMGetNumArgOperands(inst) == 1 ? LLVMGetOperand(inst, 0) : NULL;
+         if (!index || !LLVMIsAConstantInt(index) ||
+             LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMPointerTypeKind)
+            return fail(m, STELA_AIR_INPUT, "a stitched resource of an unknown form");
+         unsigned bound = (unsigned)LLVMConstIntGetZExtValue(index);
+         unsigned space = LLVMGetPointerAddressSpace(LLVMTypeOf(inst));
+         /* Metal names none of them. */
+         struct stela_air_argument_info read = {
+            .kind = texture ? 3 : sampler ? 4 : 1, .name = "", .type_name = "", .used = true};
+         if (texture) {
+            /* A texture no texture call takes is never read. */
+            LLVMValueRef described = LLVMGetMetadata(inst, texture_kind);
+            LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+            unsigned field_count;
+            if (!described)
+               continue;
+            if (!stela_air_md_node(m, described, fields, &field_count) || field_count != 4)
+               return fail(m, STELA_AIR_METADATA, "a stitched texture's description");
+            for (unsigned i = 0; i < field_count; i++) {
+               if (!LLVMIsAConstantInt(fields[i]))
+                  return fail(m, STELA_AIR_METADATA, "a stitched texture's description");
+            }
+            read.texture = (struct stela_air_texture){
+               .argument = bound, .index = bound,
+               .type = (enum stela_air_texture_type)LLVMConstIntGetZExtValue(fields[0]),
+               .access = (enum stela_air_texture_access)LLVMConstIntGetZExtValue(fields[1]),
+               .primitive = (enum stela_air_primitive)LLVMConstIntGetZExtValue(fields[2]),
+               .depth = LLVMConstIntGetZExtValue(fields[3]) != 0};
+         } else if (sampler) {
+            read.sampler = (struct stela_air_sampler){.argument = bound, .index = bound};
+         } else {
+            read.buffer = (struct stela_air_buffer){
+               .argument = bound, .index = bound, .address_space = threadgroup ? 3 : space,
+               .access = space == 2 ? STELA_AIR_READ : STELA_AIR_READ_WRITE};
+         }
+         bool held = false;
+         for (unsigned i = 0; !held && i < *count; i++) {
+            struct stela_air_argument_info *earlier = &args[i];
+            if (earlier->kind != read.kind)
+               continue;
+            if (texture && earlier->texture.index == bound) {
+               earlier->texture.access |= read.texture.access;
+               held = true;
+            } else if (sampler && earlier->sampler.index == bound) {
+               held = true;
+            } else if (!texture && !sampler && earlier->buffer.index == bound &&
+                       (earlier->buffer.address_space == 3) == threadgroup) {
+               earlier->buffer.access |= read.buffer.access;
+               held = true;
+            }
+         }
+         if (held)
+            continue;
+         if (*count == AIR_MAX_ARGUMENTS)
+            return fail(m, STELA_AIR_LIMIT, "a stitched kernel's resources exceed its arguments");
+         args[(*count)++] = read;
+      }
+   }
+   return true;
+}
+
 static bool
 inspect(const void *bitcode, size_t size, const struct stela_air_constants *constants,
         unsigned max_entries,
@@ -2816,9 +2911,12 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
             .absent = arg->absent, .layout = (const struct stela_air_layout *)arg->layout,
          };
       }
+      unsigned argument_count = entries[i].kernel.count;
+      if (!stitched_arguments(&m, entries[i].fn, args, &argument_count))
+         goto done;
       struct stela_air_entry entry = {
          .name = entries[i].name, .name_bytes = entries[i].name_bytes,
-         .argument_count = entries[i].kernel.count, .arguments = args,
+         .argument_count = argument_count, .arguments = args,
          .reflection_complete = complete_reflection(&m, entries[i].fn, &entries[i].kernel),
          .max_threads = entries[i].kernel.max_threads,
       };

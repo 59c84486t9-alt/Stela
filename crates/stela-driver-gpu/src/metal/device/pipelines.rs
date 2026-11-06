@@ -80,6 +80,10 @@ struct LibraryObject {
     /// `MTLCompileOptions.libraries` and a stitched library's functions'
     /// libraries, which it keeps.
     dependencies: Vec<LibraryId>,
+    /// The dependencies are `MTLCompileOptions.libraries`, which load with
+    /// whatever links the library's functions; a stitched library's only
+    /// stay while it does, as `stitched` links their functions.
+    preloads: bool,
     /// What a pipeline linking its functions links too: stitched functions'
     /// calls stay declarations.
     stitched: Vec<LinkedFunction>,
@@ -494,7 +498,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         for &id in dependencies {
             self.pipelines.libraries.get_mut(id.0)?.users.others += 1;
         }
-        self.pipelines.libraries.get_mut(library.0)?.dependencies = dependencies.to_vec();
+        let held = self.pipelines.libraries.get_mut(library.0)?;
+        held.dependencies = dependencies.to_vec();
+        held.preloads = true;
         Ok(library)
     }
 
@@ -534,7 +540,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             stitched.extend_from_slice(below);
         }
         let library = self.new_source_library(&air, None, &libraries)?;
-        self.pipelines.libraries.get_mut(library.0)?.stitched = stitched;
+        let held = self.pipelines.libraries.get_mut(library.0)?;
+        held.stitched = stitched;
+        held.preloads = false;
         Ok(library)
     }
 
@@ -555,6 +563,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             dynamic,
             install_name,
             dependencies: Vec::new(),
+            preloads: false,
             stitched: Vec::new(),
             users: Users::CREATED,
         });
@@ -587,6 +596,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             dynamic: held.dynamic,
             install_name: held.install_name.clone(),
             dependencies: Vec::new(),
+            preloads: false,
             stitched: Vec::new(),
             users: Users::CREATED,
         };
@@ -877,12 +887,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let function = self.pipelines.functions.get(id.0)?;
         let library = self.pipelines.library(function.library)?;
         let mut linking = specialization.linking;
-        for &dependency in &self
-            .pipelines
-            .libraries
-            .get(function.library.0)?
-            .dependencies
-        {
+        let held = self.pipelines.libraries.get(function.library.0)?;
+        let preloaded = if held.preloads {
+            held.dependencies.as_slice()
+        } else {
+            &[]
+        };
+        for &dependency in preloaded {
             let dependency = self.pipelines.library(dependency)?;
             if !linking.libraries.contains(&dependency) {
                 linking.libraries.push(dependency);
@@ -1329,7 +1340,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             Kept::new([function], [&request.linked_functions]).with_archives(&request.archives);
         self.pipelines.ensure_created(&kept)?;
         let sources = self.pipelines.sources(&request.archives)?;
-        let linked = self.link(&request.linked_functions, false)?;
+        let mut linked = self.link(&request.linked_functions, false)?;
+        // A stitched kernel's calls link the functions it stitches.
+        let library = self.pipelines.functions.get(function.0)?.library;
+        let stitched = &self.pipelines.libraries.get(library.0)?.stitched;
+        linked.linking.private_functions.extend_from_slice(stitched);
         let interface = self.pipelines.interface(function)?.clone();
         let descriptor = ComputePipelineDescriptor {
             compute_function: &interface,

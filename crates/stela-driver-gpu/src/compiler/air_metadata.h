@@ -418,15 +418,15 @@ enum stela_air_stitch_builtin {
    STELA_AIR_STITCH_THREAD_POSITION_IN_GRID = 1,
    STELA_AIR_STITCH_THREAD_POSITION_IN_THREADGROUP = 2,
 };
-/* The function a stitched function calls for a builtin: it takes nothing and
- * returns the builtin as the type of the parameter it feeds, which the kernel
- * the stitched function inlines into supplies. */
+/* The function a stitched kernel calls for a builtin: it takes nothing and
+ * returns the builtin as the type of the parameter it feeds, which the
+ * kernel's translation supplies. */
 #define STELA_AIR_STITCH_THREAD_POSITION_IN_GRID_NAME "stela.thread_position_in_grid"
 #define STELA_AIR_STITCH_THREAD_POSITION_IN_THREADGROUP_NAME "stela.thread_position_in_threadgroup"
-/* The functions a stitched function calls for the address of the buffer the
- * function it inlines into binds at a constant index, which that function's
- * translation answers: `name.pN`, ptr addrspace(N) (i32 index) for device (1)
- * or constant (2) memory. */
+/* The functions a stitched kernel calls for the address of the buffer it
+ * binds at a constant index, which the kernel's translation answers:
+ * `name.pN`, ptr addrspace(N) (i32 index) for device (1) or constant (2)
+ * memory. */
 #define STELA_AIR_STITCH_BUFFER_ADDRESS_NAME "stela.buffer_address"
 /* Likewise the texture, sampler and threadgroup memory bound at a constant
  * index: ptr addrspace(1), ptr addrspace(2) and ptr addrspace(3), each
@@ -434,6 +434,13 @@ enum stela_air_stitch_builtin {
 #define STELA_AIR_STITCH_TEXTURE_NAME "stela.texture"
 #define STELA_AIR_STITCH_SAMPLER_NAME "stela.sampler"
 #define STELA_AIR_STITCH_THREADGROUP_NAME "stela.threadgroup"
+/* A texture read's metadata, of this kind, describes the texture as the
+ * texture calls of the parameters it feeds do: !{i32 type, i32 access,
+ * i32 primitive, i1 depth}, of enum stela_air_texture_type,
+ * stela_air_texture_access and stela_air_primitive. Without it no texture
+ * call takes the texture. A stitched kernel's reflection lists the
+ * resources its reads bind. */
+#define STELA_AIR_STITCH_TEXTURE_METADATA "stela.texture"
 /* A node of a stitched function: an input, argument `input` of the function;
  * a builtin, `input` of enum stela_air_stitch_builtin; a buffer address,
  * `offset` bytes into the buffer bound at `input`, or with `dereference` the
@@ -449,11 +456,15 @@ struct stela_air_stitch_node {
    bool dereference;
    uint64_t offset;
 };
+/* A graph is a visible function's, whose inputs are its arguments, or with
+ * `kernel` a kernel's, which takes and returns nothing and whose builtins and
+ * bound resources are the only nodes either kind does not share. */
 struct stela_air_stitch_graph {
    const char *name;
    const struct stela_air_stitch_node *nodes;
    uint32_t node_count;
    uint32_t output; /* The node whose result it returns. */
+   bool kernel;
 };
 /* Calls visit with the bitcode of a module of the graphs: air_stitch.c. */
 typedef void (*stela_air_visit_bytes)(void *, const void *, size_t);
