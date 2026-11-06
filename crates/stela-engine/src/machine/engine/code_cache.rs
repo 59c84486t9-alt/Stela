@@ -466,7 +466,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.targets
                 .forget_where(pcs, |entry| detached(entry.block as usize));
         }
-        for entry in &mut self.jump {
+        // A jump cache entry sits in its PC's slot alone.
+        for &(_, pc) in &gone {
+            let entry = &mut self.jump[(pc / INSTRUCTION) as usize % JUMP_CACHE];
             if entry.as_ref().is_some_and(|entry| detached(entry.block)) {
                 *entry = None;
             }
