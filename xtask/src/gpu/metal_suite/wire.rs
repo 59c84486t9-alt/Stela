@@ -168,6 +168,18 @@ const OPERATIONS: &[(&str, Reach)] = &[
         Reach::Call("setBufferOffset:"),
     ),
     ("ComputeCode::SetBytes", Reach::Call("setBytes:")),
+    (
+        "ComputeCode::SetBufferStride",
+        Reach::Call("[ce setBuffer:b offset:offset attributeStride:"),
+    ),
+    (
+        "ComputeCode::SetBufferOffsetStride",
+        Reach::Call("[ce setBufferOffset:offset attributeStride:"),
+    ),
+    (
+        "ComputeCode::SetBytesStride",
+        Reach::Call("[ce setBytes:bytes length:length attributeStride:"),
+    ),
     ("ComputeCode::SetTexture", Reach::Call("setTexture:")),
     ("ComputeCode::SetSampler", Reach::Call("setSamplerState:")),
     (
@@ -317,6 +329,10 @@ const OPERATIONS: &[(&str, Reach)] = &[
     (
         "IndirectComputeCode::SetBuffer",
         Reach::Call("setKernelBuffer:"),
+    ),
+    (
+        "IndirectComputeCode::SetBufferStride",
+        Reach::Call("[k_ setKernelBuffer:buffer offset:number(u, @\"offset\", 0) attributeStride:"),
     ),
     (
         "IndirectComputeCode::SetThreadgroupMemory",

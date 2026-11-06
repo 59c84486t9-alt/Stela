@@ -398,10 +398,53 @@ fn records_hold_only_what_the_gpu_executes() {
         [1, 2, 3, 4, 5, 6, 1]
     );
     assert_eq!(word(record, 144), 64);
+    assert_eq!((layout.strides, layout.stride_count), (148, 0));
 
     buffer.commands[0].pipeline = Some(CommandPipeline { id: 1, handle: 0 });
     assert!(
         matches!(buffer.resident_image(), Err(Error::Invalid(_))),
         "the pipeline has no handle"
+    );
+}
+
+#[test]
+fn compute_records_hold_dynamic_attribute_strides() {
+    let caps = capabilities();
+    let compute = IndirectCommandBufferDescriptor {
+        support_dynamic_attribute_stride: true,
+        ..descriptor(IndirectCommandType::CONCURRENT_DISPATCH)
+    };
+    let mut buffer = IndirectCommandBuffer::new(&caps, &compute, 1).unwrap();
+    let mut command = buffer.compute_command(0).unwrap();
+    command
+        .set_kernel_buffer_with_stride(buffer_ref(3), 16, 24, 2)
+        .unwrap();
+    let (layout, image) = buffer.resident_image().unwrap();
+    assert_eq!(
+        (
+            layout.words,
+            layout.word_count,
+            layout.strides,
+            layout.stride_count
+        ),
+        (144, 1, 148, 4)
+    );
+    assert_eq!(layout.stride, 176);
+    let header = layout.header();
+    assert_eq!(word(&header, RecordLayout::HEADER_STRIDES), 148);
+    assert_eq!(word(&header, RecordLayout::HEADER_STRIDE_COUNT), 4);
+    let record = &image[64..];
+    assert_eq!(word(record, 148 + 8), 24);
+    assert_eq!(word(record, 148), 0, "unbound buffers have no stride");
+
+    let fixed = descriptor(IndirectCommandType::CONCURRENT_DISPATCH);
+    let mut buffer = IndirectCommandBuffer::new(&caps, &fixed, 1).unwrap();
+    assert!(
+        buffer
+            .compute_command(0)
+            .unwrap()
+            .set_kernel_buffer_with_stride(buffer_ref(3), 0, 24, 2)
+            .is_err(),
+        "the descriptor supports no dynamic strides"
     );
 }

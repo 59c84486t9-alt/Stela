@@ -269,7 +269,7 @@ pub fn stage_input(descriptor: &StageInputDescriptor) -> Result<()> {
             "stage-in buffer layouts are unique",
         )?;
         ensure(
-            layout.stride.is_multiple_of(4),
+            layout.stride == STRIDE_DYNAMIC || layout.stride.is_multiple_of(4),
             "stage-in strides are multiples of four",
         )?;
         ensure(
@@ -307,7 +307,7 @@ pub fn stage_input(descriptor: &StageInputDescriptor) -> Result<()> {
             .iter()
             .find(|layout| layout.buffer_index == attribute.buffer_index)
             .ok_or(Error::Invalid("stage-in attribute names no buffer layout"))?;
-        if layout.step_function != StageInStep::Constant {
+        if layout.stride != STRIDE_DYNAMIC && layout.step_function != StageInStep::Constant {
             ensure(
                 attribute.offset + attribute.format.vulkan().1 <= layout.stride,
                 "stage-in attribute extends past its stride",

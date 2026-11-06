@@ -567,7 +567,10 @@ impl DispatchArguments {
     pub const REGION_OFFSET: u32 = 0;
     pub const SHAPE_OFFSET: u32 = 24;
     pub const OFFSETS_OFFSET: u32 = 36;
-    pub const BYTES: u32 = Self::OFFSETS_OFFSET + 4 * MAX_BUFFER_BINDINGS;
+    /// Each buffer's attribute stride, by Metal index, which stage-in
+    /// layouts of a dynamic stride read.
+    pub const STRIDES_OFFSET: u32 = Self::OFFSETS_OFFSET + 4 * MAX_BUFFER_BINDINGS;
+    pub const BYTES: u32 = Self::STRIDES_OFFSET + 4 * MAX_BUFFER_BINDINGS;
     pub const ALIGNMENT: u64 = 16;
 }
 
@@ -915,6 +918,11 @@ mod tests {
                 "STELA_METAL_INDIRECT_WORD_COUNT",
                 RecordLayout::HEADER_WORD_COUNT,
             ),
+            ("STELA_METAL_INDIRECT_STRIDES", RecordLayout::HEADER_STRIDES),
+            (
+                "STELA_METAL_INDIRECT_STRIDE_COUNT",
+                RecordLayout::HEADER_STRIDE_COUNT,
+            ),
             ("STELA_METAL_RECORD_ACTION", RecordLayout::ACTION),
             ("STELA_METAL_RECORD_BARRIER", RecordLayout::BARRIER),
             ("STELA_METAL_RECORD_PIPELINE", RecordLayout::PIPELINE),
@@ -1025,6 +1033,10 @@ mod tests {
             (
                 "STELA_METAL_DISPATCH_OFFSETS",
                 DispatchArguments::OFFSETS_OFFSET,
+            ),
+            (
+                "STELA_METAL_DISPATCH_STRIDES",
+                DispatchArguments::STRIDES_OFFSET,
             ),
             ("STELA_METAL_DISPATCH_BYTES", DispatchArguments::BYTES),
             (

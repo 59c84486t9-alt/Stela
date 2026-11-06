@@ -75,6 +75,10 @@ pub struct RecordLayout {
     /// Record offset of the words.
     pub words: u32,
     pub word_count: u32,
+    /// Record offset and count of a compute record's kernel buffer
+    /// attribute strides.
+    pub strides: u32,
+    pub stride_count: u32,
 }
 
 impl RecordLayout {
@@ -85,6 +89,8 @@ impl RecordLayout {
     pub const HEADER_TABLE_SLOTS: u32 = 16;
     pub const HEADER_WORDS: u32 = 24;
     pub const HEADER_WORD_COUNT: u32 = 28;
+    pub const HEADER_STRIDES: u32 = 32;
+    pub const HEADER_STRIDE_COUNT: u32 = 36;
     pub const RECORD_ALIGNMENT: u32 = 16;
 
     /// The prefix every record shares.
@@ -162,9 +168,14 @@ impl RecordLayout {
             true => 0,
             false => slots(descriptor.max_kernel_threadgroup_memory_bind_count),
         };
+        let stride_count = match renders {
+            false if descriptor.support_dynamic_attribute_stride => table_slots[0],
+            _ => 0,
+        };
         let second = Self::PREFIX_BYTES + 16 * table_slots[0];
         let words = second + 16 * table_slots[1];
-        let stride = (words + 4 * word_count).next_multiple_of(Self::RECORD_ALIGNMENT);
+        let strides = words + 4 * word_count;
+        let stride = (strides + 4 * stride_count).next_multiple_of(Self::RECORD_ALIGNMENT);
         let layout = Self {
             renders,
             stride,
@@ -173,6 +184,8 @@ impl RecordLayout {
             table_slots,
             words,
             word_count,
+            strides,
+            stride_count,
         };
         ensure(
             layout.bytes() <= u64::from(u32::MAX),
@@ -202,6 +215,8 @@ impl RecordLayout {
             self.table_slots[1],
             self.words,
             self.word_count,
+            self.strides,
+            self.stride_count,
         ];
         for (index, word) in words.iter().enumerate() {
             header[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
@@ -411,11 +426,15 @@ impl RecordLayout {
         let slots = self.table_slots[table];
         record.put(start + 8 * slot, &address.to_le_bytes());
         record.put(start + 8 * (slots + slot), &length.to_le_bytes());
-        if self.renders && table == 0 && slot < self.word_count {
+        let strides = match self.renders {
+            true => (self.words, self.word_count),
+            false => (self.strides, self.stride_count),
+        };
+        if table == 0 && slot < strides.1 {
             let stride = binding.and_then(|binding| binding.stride).unwrap_or(0);
             let stride =
-                u32::try_from(stride).map_err(|_| Error::Invalid("vertex attribute stride"))?;
-            record.put(self.words + 4 * slot, &stride.to_le_bytes());
+                u32::try_from(stride).map_err(|_| Error::Invalid("buffer attribute stride"))?;
+            record.put(strides.0 + 4 * slot, &stride.to_le_bytes());
         }
         Ok(())
     }

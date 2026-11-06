@@ -270,6 +270,13 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 self.compute_command(id, index)?
                     .set_kernel_buffer(buffer, offset, slot)?;
             }
+            IndirectComputeCode::SetBufferStride => {
+                let request: VertexBufferStride = payload.record()?;
+                let buffer = self.buffer_ref(connection, request.buffer)?;
+                let slot = binding(request.index)?;
+                self.compute_command(id, index)?
+                    .set_kernel_buffer_with_stride(buffer, request.offset, request.stride, slot)?;
+            }
             IndirectComputeCode::SetThreadgroupMemory => {
                 let SetThreadgroupMemory {
                     length,

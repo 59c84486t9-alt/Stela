@@ -5,16 +5,18 @@
 //! the hazard tracker; a concurrent one orders only against earlier
 //! encoders and explicit memory barriers, as Metal does. A stage-in
 //! pipeline's dispatches carry the address of their stage-in region in the
-//! push constants' `arguments`.
+//! push constants' `arguments`, followed by the buffers' attribute strides
+//! when a stage-in layout's stride is dynamic.
 use super::{BoundPipeline, BufferRef, CommandBuffer, ComputePipelineState, Encoder, Resolver};
 use crate::metal::{
     abi::{BarrierScope, DispatchType},
-    binding::ResourceId,
-    capabilities::Size,
+    binding::{DispatchArguments, ResourceId},
+    capabilities::{MAX_BUFFER_BINDINGS, Size},
     error::{Error, Result, ensure},
     hazard::Use,
     pipeline::compute_variant,
     shader::Stage,
+    vertex::STRIDE_DYNAMIC,
     vulkan::{Access, PipelineBindPoint, PipelineStages, command::Command, object::Pipeline},
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -42,6 +44,9 @@ pub(super) struct ComputeState {
     pub(super) threadgroup_lengths: Vec<(u32, u64)>,
     pub(super) bound: Option<Pipeline>,
     pub(super) stage_in: Option<StageInRegion>,
+    /// `setBuffer:offset:attributeStride:atIndex:`'s stride of each buffer
+    /// index.
+    pub(super) attribute_strides: [Option<u32>; MAX_BUFFER_BINDINGS as usize],
 }
 
 pub(super) fn compute(encoder: &mut Encoder) -> Result<&mut ComputeState> {
@@ -65,6 +70,7 @@ impl CommandBuffer {
             threadgroup_lengths: Vec::new(),
             bound: None,
             stage_in: None,
+            attribute_strides: [None; MAX_BUFFER_BINDINGS as usize],
         }));
         Ok(())
     }
@@ -81,7 +87,20 @@ impl CommandBuffer {
         offset: u64,
         index: u32,
     ) -> Result<()> {
-        compute(&mut self.encoder)?;
+        self.set_attribute_stride(None, index)?;
+        self.bindings
+            .set_buffer(Stage::Kernel, buffer, offset, index)
+    }
+
+    /// `setBuffer:offset:attributeStride:atIndex:`.
+    pub fn set_compute_buffer_with_stride(
+        &mut self,
+        buffer: Option<BufferRef>,
+        offset: u64,
+        stride: u64,
+        index: u32,
+    ) -> Result<()> {
+        self.set_attribute_stride(Some(stride), index)?;
         self.bindings
             .set_buffer(Stage::Kernel, buffer, offset, index)
     }
@@ -92,16 +111,66 @@ impl CommandBuffer {
             .set_buffer_offset(Stage::Kernel, offset, index)
     }
 
+    /// `setBufferOffset:attributeStride:atIndex:`.
+    pub fn set_compute_buffer_offset_with_stride(
+        &mut self,
+        offset: u64,
+        stride: u64,
+        index: u32,
+    ) -> Result<()> {
+        self.set_attribute_stride(Some(stride), index)?;
+        self.bindings
+            .set_buffer_offset(Stage::Kernel, offset, index)
+    }
+
     pub fn set_compute_bytes(
         &mut self,
         resolver: &mut dyn Resolver,
         bytes: &[u8],
         index: u32,
     ) -> Result<()> {
-        compute(&mut self.encoder)?;
+        self.set_attribute_stride(None, index)?;
         let buffer = self.upload_bytes(resolver, bytes)?;
         self.bindings
             .set_buffer(Stage::Kernel, Some(buffer), 0, index)
+    }
+
+    /// `setBytes:length:attributeStride:atIndex:`.
+    pub fn set_compute_bytes_with_stride(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        bytes: &[u8],
+        stride: u64,
+        index: u32,
+    ) -> Result<()> {
+        self.set_attribute_stride(Some(stride), index)?;
+        let buffer = self.upload_bytes(resolver, bytes)?;
+        self.bindings
+            .set_buffer(Stage::Kernel, Some(buffer), 0, index)
+    }
+
+    /// Keeps the attribute stride of buffer `index`, which stage-in layouts
+    /// of a dynamic stride read, or forgets it.
+    fn set_attribute_stride(&mut self, stride: Option<u64>, index: u32) -> Result<()> {
+        let state = compute(&mut self.encoder)?;
+        let slot = state
+            .attribute_strides
+            .get_mut(index as usize)
+            .ok_or(Error::Invalid("buffer index exceeds the argument table"))?;
+        *slot = match stride {
+            None => None,
+            Some(stride) => {
+                ensure(
+                    stride.is_multiple_of(4),
+                    "attribute strides are multiples of four",
+                )?;
+                Some(
+                    u32::try_from(stride)
+                        .map_err(|_| Error::Invalid("attribute strides within 32 bits"))?,
+                )
+            }
+        };
+        Ok(())
     }
 
     pub fn set_compute_texture(&mut self, texture: ResourceId, index: u32) -> Result<()> {
@@ -275,6 +344,22 @@ impl CommandBuffer {
             (Some(_), Some(region)) => Some(region),
             (Some(_), None) => return Err(Error::Invalid("no stage-in region is set")),
         };
+        // The attribute strides of the stage-in layouts whose stride is
+        // dynamic, which the dispatch arguments carry after the region.
+        let mut strides = [0; MAX_BUFFER_BINDINGS as usize];
+        let mut dynamic = false;
+        let layouts = pipeline
+            .plan
+            .stage_in
+            .iter()
+            .flat_map(|input| &input.layouts);
+        for layout in layouts.filter(|layout| layout.stride == STRIDE_DYNAMIC) {
+            let index = layout.buffer_index as usize;
+            strides[index] = state.attribute_strides[index].ok_or(Error::Invalid(
+                "a dynamic-stride stage-in buffer was bound without an attribute stride",
+            ))?;
+            dynamic = true;
+        }
         if rebind {
             self.recorder.push(Command::BindPipeline {
                 bind_point: PipelineBindPoint::Compute,
@@ -283,7 +368,22 @@ impl CommandBuffer {
         }
         self.bindings.constants.arguments = match stage_in {
             None => self.bindings.constants.arguments,
+            Some(StageInRegion::Indirect(_)) if dynamic => {
+                return Err(Error::Unsupported(
+                    "GPU stage-in regions of kernels whose stage-in strides are dynamic",
+                ));
+            }
             Some(StageInRegion::Indirect(address)) => address,
+            Some(StageInRegion::Direct(region)) if dynamic => {
+                let mut words = [0u32; DispatchArguments::BYTES as usize / 4];
+                let at = DispatchArguments::REGION_OFFSET as usize / 4;
+                words[at..at + region.len()].copy_from_slice(&region);
+                let at = DispatchArguments::STRIDES_OFFSET as usize / 4;
+                words[at..at + strides.len()].copy_from_slice(&strides);
+                let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+                let alignment = DispatchArguments::ALIGNMENT;
+                self.recorder.upload(resolver, &bytes, alignment)?.address
+            }
             Some(StageInRegion::Direct(region)) => {
                 let bytes: Vec<u8> = region
                     .iter()

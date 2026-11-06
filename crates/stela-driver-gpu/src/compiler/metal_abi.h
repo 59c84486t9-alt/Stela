@@ -104,9 +104,10 @@
 /* indirect/record.rs RecordLayout: a GPU-resident indirect command buffer
  * at its gpuResourceID. A header of uint words leads: the record stride and
  * count, the record offsets of the two buffer tables (vertex and fragment,
- * or kernel), their slot counts, and the record offset and count of the
+ * or kernel), their slot counts, the record offset and count of the
  * words (vertex strides, zero for the pipeline's, or threadgroup memory
- * lengths). Records follow the header. Each opens with its uint action,
+ * lengths), and of a compute record's kernel buffer attribute strides.
+ * Records follow the header. Each opens with its uint action,
  * uint barrier flag and 64-bit pipeline handle; render records then hold
  * their vertex or index count, instance count, first vertex, base vertex,
  * base instance and MTLPrimitiveType, then the index buffer's 64-bit address,
@@ -120,6 +121,8 @@
 #define STELA_METAL_INDIRECT_TABLE_SLOTS 16u
 #define STELA_METAL_INDIRECT_WORDS 24u
 #define STELA_METAL_INDIRECT_WORD_COUNT 28u
+#define STELA_METAL_INDIRECT_STRIDES 32u
+#define STELA_METAL_INDIRECT_STRIDE_COUNT 36u
 #define STELA_METAL_RECORD_ACTION 0u
 #define STELA_METAL_RECORD_BARRIER 4u
 #define STELA_METAL_RECORD_PIPELINE 8u
@@ -152,11 +155,13 @@
  * constants' arguments address: the stage-in region's origin and size,
  * where a stage-in kernel's arguments hold them, then the threadgroup's
  * shape and each threadgroup buffer's offset in threadgroup memory, by
- * Metal index. */
+ * Metal index, then each buffer's attribute stride, which a stage-in
+ * layout of a dynamic stride reads. */
 #define STELA_METAL_DISPATCH_REGION 0u
 #define STELA_METAL_DISPATCH_SHAPE 24u
 #define STELA_METAL_DISPATCH_OFFSETS 36u
-#define STELA_METAL_DISPATCH_BYTES 160u
+#define STELA_METAL_DISPATCH_STRIDES 160u
+#define STELA_METAL_DISPATCH_BYTES 284u
 
 /* TessellationArguments, which a patch draw's stages read at the push
  * constants' arguments address. Bindings are (address, length); the draw's
@@ -400,7 +405,8 @@ struct stela_metal_stage_in_layout {
 /* A stage-in layout by attribute and buffer index: an MTLVertexDescriptor
  * or MTLStageInputOutputDescriptor, whose indexed steps read the index
  * buffer at index_buffer of index_bytes, 2 or 4, indices. Offsets and
- * strides are multiples of four. */
+ * strides are multiples of four; a kernel's dynamic strides are its
+ * dispatch's (STELA_METAL_DISPATCH_STRIDES). */
 struct stela_metal_stage_in {
    struct stela_metal_stage_in_attribute attributes[AIR_MAX_VERTEX_ATTRIBUTES];
    struct stela_metal_stage_in_layout layouts[STELA_METAL_BUFFERS];

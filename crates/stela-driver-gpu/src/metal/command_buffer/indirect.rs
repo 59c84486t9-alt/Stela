@@ -20,6 +20,7 @@ use super::{
 use crate::metal::{
     abi::{BarrierScope, DispatchType, RenderStages},
     binding::SelectArguments,
+    capabilities::MAX_BUFFER_BINDINGS,
     error::{Error, Result, ensure},
     hazard::{RENDER_PASS, Use},
     indirect::{
@@ -62,6 +63,7 @@ struct SavedCompute {
     pipeline: Option<ComputePipelineState>,
     threadgroup_lengths: Vec<(u32, u64)>,
     stage_in: Option<StageInRegion>,
+    attribute_strides: [Option<u32>; MAX_BUFFER_BINDINGS as usize],
     bindings: Bindings,
 }
 
@@ -405,6 +407,7 @@ impl CommandBuffer {
             pipeline: state.pipeline.clone(),
             threadgroup_lengths: state.threadgroup_lengths.clone(),
             stage_in: state.stage_in,
+            attribute_strides: state.attribute_strides,
             bindings: self.bindings.clone(),
         };
         let mut replayed = Ok(());
@@ -421,6 +424,7 @@ impl CommandBuffer {
         state.pipeline = saved.pipeline;
         state.threadgroup_lengths = saved.threadgroup_lengths;
         state.stage_in = saved.stage_in;
+        state.attribute_strides = saved.attribute_strides;
         self.restore_bindings(saved.bindings);
         replayed
     }
@@ -456,7 +460,16 @@ impl CommandBuffer {
         if !descriptor.inherit_buffers && *buffers != Some(command.buffers.as_slice()) {
             self.bindings.clear_buffers(&[Stage::Kernel]);
             for binding in &command.buffers {
-                self.set_compute_buffer(Some(binding.buffer), binding.offset, binding.index)?;
+                let buffer = Some(binding.buffer);
+                match binding.stride {
+                    Some(stride) => self.set_compute_buffer_with_stride(
+                        buffer,
+                        binding.offset,
+                        stride,
+                        binding.index,
+                    )?,
+                    None => self.set_compute_buffer(buffer, binding.offset, binding.index)?,
+                }
             }
             *buffers = Some(&command.buffers);
         }

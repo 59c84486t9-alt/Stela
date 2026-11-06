@@ -796,6 +796,34 @@ static void kernel_stage_in_reads_within_its_region(void)
    ralloc_free(b.shader);
 }
 
+/* A dynamic stride is the dispatch arguments' word of the buffer. */
+static void kernel_stage_in_reads_dynamic_strides(void)
+{
+   struct stela_metal_stage_in stage_in = {0};
+   stage_in.attributes[1] = (struct stela_metal_stage_in_attribute){37, 8, 3};
+   stage_in.layouts[3] = (struct stela_metal_stage_in_layout){
+      STELA_METAL_STRIDE_DYNAMIC, STELA_METAL_STEP_THREAD_POSITION_IN_GRID_X, 1};
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "kernel");
+   nir_def *position = nir_load_global_invocation_id(&b, 32);
+   assert(stela_metal_fetch_stage_in(&b, &stage_in, 1, position, true));
+   bool stride = false;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
+         nir_alu_instr *address = load->intrinsic == nir_intrinsic_load_global &&
+                                  nir_def_is_alu(load->src[0].ssa) ?
+                                  nir_def_as_alu(load->src[0].ssa) : NULL;
+         stride |= address && address->op == nir_op_iadd && load->def.bit_size == 32 &&
+                   nir_src_is_const(address->src[1].src) &&
+                   nir_src_as_uint(address->src[1].src) == STELA_METAL_DISPATCH_STRIDES + 12;
+      }
+   }
+   assert(stride);
+   ralloc_free(b.shader);
+}
+
 int main(void)
 {
    glsl_type_singleton_init_or_ref();
@@ -814,6 +842,7 @@ int main(void)
    evaluation_stages_read_their_patch_ids();
    patch_attributes_fetch_their_step_functions_element();
    kernel_stage_in_reads_within_its_region();
+   kernel_stage_in_reads_dynamic_strides();
    tessellation_control_reads_factors_by_step();
    attributes_decode_metal_vertex_formats();
    glsl_type_singleton_decref();

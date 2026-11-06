@@ -15,8 +15,8 @@ use crate::metal::{
         VisibilityResultMode, VisibilityResultType,
     },
     binding::{
-        AccumulateArguments, ArgumentTable, BufferBinding, GeneratedSequence, PushConstants,
-        ResolveArguments, TessellationArguments,
+        AccumulateArguments, ArgumentTable, BufferBinding, DispatchArguments, GeneratedSequence,
+        PushConstants, ResolveArguments, TessellationArguments,
     },
     capabilities::Size,
     error::Error,
@@ -1288,6 +1288,109 @@ fn stage_in_dispatches_pass_their_region() {
         .collect();
     assert_eq!(region, &expected[..]);
     assert_eq!(pushed[1].arguments, (9 << 32) + 8);
+}
+
+#[test]
+fn dynamic_stage_in_strides_follow_the_region() {
+    let kernel = shader(Stage::Kernel, |interface| {
+        interface.attributes = alloc::vec![AttributeUse {
+            index: 0,
+            numeric: NumericClass::Float,
+            components: 4,
+            patch_control_point: false
+        }];
+    });
+    let layout = StageInputDescriptor {
+        attributes: alloc::vec![Attribute {
+            index: 0,
+            format: VertexFormat::Float4,
+            offset: 0,
+            buffer_index: 3,
+        }],
+        layouts: alloc::vec![StageInLayout {
+            buffer_index: 3,
+            stride: STRIDE_DYNAMIC,
+            step_function: StageInStep::ThreadPositionInGridX,
+            step_rate: 1,
+        }],
+        index_type: IndexType::UInt16,
+        index_buffer_index: 0,
+    };
+    let descriptor = ComputePipelineDescriptor {
+        compute_function: &kernel.interface,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 0,
+        stage_input: Some(&layout),
+    };
+    let state = ComputePipelineState {
+        id: 1,
+        plan: compute_pipeline(&capabilities(), &descriptor).unwrap(),
+        interface: kernel.interface,
+        indirect: None,
+    };
+    let threads = Size {
+        width: 32,
+        height: 1,
+        depth: 1,
+    };
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_compute(DispatchType::Serial).unwrap();
+    commands.set_compute_pipeline_state(&state).unwrap();
+    commands.set_stage_in_region([0, 0, 0], [8, 1, 1]).unwrap();
+    commands
+        .set_compute_buffer(Some(buffer(5, 256)), 0, 3)
+        .unwrap();
+    assert_eq!(
+        commands.dispatch_threadgroups(&mut resolver, [1, 1, 1], threads),
+        Err(Error::Invalid(
+            "a dynamic-stride stage-in buffer was bound without an attribute stride"
+        ))
+    );
+    assert_eq!(
+        commands.set_compute_buffer_offset_with_stride(0, 6, 3),
+        Err(Error::Invalid("attribute strides are multiples of four"))
+    );
+    commands
+        .set_compute_buffer_offset_with_stride(16, 24, 3)
+        .unwrap();
+    commands
+        .dispatch_threadgroups(&mut resolver, [1, 1, 1], threads)
+        .unwrap();
+    commands
+        .set_stage_in_region_indirect(buffer(9, 64), 8)
+        .unwrap();
+    assert_eq!(
+        commands.dispatch_threadgroups(&mut resolver, [1, 1, 1], threads),
+        Err(Error::Unsupported(
+            "GPU stage-in regions of kernels whose stage-in strides are dynamic"
+        ))
+    );
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let arguments = recording.segments[0]
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            Command::PushConstants(constants) => Some(constants.arguments),
+            _ => None,
+        })
+        .unwrap();
+    let (chunk, bytes) = &recording.uploads[0];
+    let block = &bytes[(arguments - chunk.address) as usize..][..DispatchArguments::BYTES as usize];
+    assert_eq!(
+        &block[..24],
+        &[0u32, 0, 0, 8, 1, 1]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<u8>>()[..]
+    );
+    let strides = DispatchArguments::STRIDES_OFFSET as usize;
+    assert_eq!(&block[strides + 12..strides + 16], &24u32.to_le_bytes());
+    assert!(
+        block[strides..strides + 12].iter().all(|&byte| byte == 0),
+        "unbound strides are zero"
+    );
 }
 
 fn barriers(recording: &Recording) -> usize {

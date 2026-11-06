@@ -508,6 +508,46 @@ static StelaRegionRecord region_record(NSUInteger slice, NSUInteger level, MTLOr
 	stela_stream_entry(_stream, StelaComputeCodeSetBytes, &command, sizeof(command), bytes, length);
 }
 
+- (void)setBuffer:(StelaGPUBuffer *)buffer
+	     offset:(NSUInteger)offset
+    attributeStride:(NSUInteger)stride
+	    atIndex:(NSUInteger)index
+{
+	[_commands use:buffer];
+	StelaVertexBufferStride command = {
+		.buffer = buffer ? buffer->_handle : 0,
+		.offset = offset,
+		.stride = stride,
+		.index = index,
+	};
+	ENTRY(StelaComputeCodeSetBufferStride, command);
+}
+
+- (void)setBufferOffset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index
+{
+	StelaVertexOffsetStride command = {.offset = offset, .stride = stride, .index = index};
+	ENTRY(StelaComputeCodeSetBufferOffsetStride, command);
+}
+
+- (void)setBuffers:(const id __unsafe_unretained[])buffers
+	      offsets:(const NSUInteger[])offsets
+     attributeStrides:(const NSUInteger[])strides
+	    withRange:(NSRange)range
+{
+	for (NSUInteger i = 0; i < range.length; i++) {
+		[self setBuffer:buffers[i] offset:offsets[i] attributeStride:strides[i] atIndex:range.location + i];
+	}
+}
+
+- (void)setBytes:(const void *)bytes
+	     length:(NSUInteger)length
+    attributeStride:(NSUInteger)stride
+	    atIndex:(NSUInteger)index
+{
+	StelaSetBytesStride command = {.stride = stride, .index = index};
+	stela_stream_entry(_stream, StelaComputeCodeSetBytesStride, &command, sizeof(command), bytes, length);
+}
+
 - (void)setTexture:(StelaGPUTexture *)texture atIndex:(NSUInteger)index
 {
 	[_commands use:texture];

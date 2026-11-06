@@ -274,35 +274,6 @@ ABSENT((id)functionHandleWithBinaryFunction:(id)function, BINARY_LINKING, nil)
 	REFUSE("setIntersectionFunctionTables:withBufferRange:", INTERSECTION);
 }
 
-- (void)setBuffer:(id)buffer
-	     offset:(NSUInteger)offset
-    attributeStride:(NSUInteger)stride
-	    atIndex:(NSUInteger)index
-{
-	REFUSE("setBuffer:offset:attributeStride:atIndex:", STAGE_IN_STRIDE);
-}
-
-- (void)setBufferOffset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index
-{
-	REFUSE("setBufferOffset:attributeStride:atIndex:", STAGE_IN_STRIDE);
-}
-
-- (void)setBuffers:(const id __unsafe_unretained[])buffers
-	      offsets:(const NSUInteger[])offsets
-     attributeStrides:(const NSUInteger[])strides
-	    withRange:(NSRange)range
-{
-	REFUSE("setBuffers:offsets:attributeStrides:withRange:", STAGE_IN_STRIDE);
-}
-
-- (void)setBytes:(const void *)bytes
-	     length:(NSUInteger)length
-    attributeStride:(NSUInteger)stride
-	    atIndex:(NSUInteger)index
-{
-	REFUSE("setBytes:length:attributeStride:atIndex:", STAGE_IN_STRIDE);
-}
-
 - (void)setImageblockWidth:(NSUInteger)width height:(NSUInteger)height
 {
 	REFUSE("setImageblockWidth:height:", IMAGEBLOCKS);
@@ -315,14 +286,6 @@ ABSENT((id)functionHandleWithBinaryFunction:(id)function, BINARY_LINKING, nil)
 - (void)setImageblockWidth:(NSUInteger)width height:(NSUInteger)height
 {
 	REFUSE("setImageblockWidth:height:", IMAGEBLOCKS);
-}
-
-- (void)setKernelBuffer:(id)buffer
-		 offset:(NSUInteger)offset
-	attributeStride:(NSUInteger)stride
-		atIndex:(NSUInteger)index
-{
-	REFUSE("setKernelBuffer:offset:attributeStride:atIndex:", STAGE_IN_STRIDE);
 }
 
 @end

@@ -165,7 +165,8 @@ pub struct IndirectBuffer {
     pub index: u32,
     pub buffer: BufferRef,
     pub offset: u64,
-    /// `setVertexBuffer:offset:attributeStride:atIndex:`.
+    /// `setVertexBuffer:offset:attributeStride:atIndex:` or
+    /// `setKernelBuffer:offset:attributeStride:atIndex:`.
     pub stride: Option<u64>,
 }
 
@@ -881,6 +882,28 @@ impl IndirectComputeCommand<'_> {
             buffer,
             offset,
             stride: None,
+        };
+        self.target.set_buffer(&self.descriptor, binding)
+    }
+
+    /// `setKernelBuffer:offset:attributeStride:atIndex:`.
+    pub fn set_kernel_buffer_with_stride(
+        &mut self,
+        buffer: BufferRef,
+        offset: u64,
+        stride: u64,
+        index: u32,
+    ) -> Result<()> {
+        ensure(
+            self.descriptor.support_dynamic_attribute_stride,
+            "the indirect command buffer has no dynamic attribute strides",
+        )?;
+        let binding = IndirectBuffer {
+            stage: Stage::Kernel,
+            index,
+            buffer,
+            offset,
+            stride: Some(stride),
         };
         self.target.set_buffer(&self.descriptor, binding)
     }

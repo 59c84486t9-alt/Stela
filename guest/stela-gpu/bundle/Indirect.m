@@ -278,6 +278,20 @@
 	ENCODE(StelaIndirectComputeCodeSetBuffer, record);
 }
 
+- (void)setKernelBuffer:(StelaGPUBuffer *)buffer
+		 offset:(NSUInteger)offset
+	attributeStride:(NSUInteger)stride
+		atIndex:(NSUInteger)index
+{
+	StelaVertexBufferStride record = {
+		.buffer = buffer->_handle,
+		.offset = offset,
+		.stride = stride,
+		.index = index,
+	};
+	ENCODE(StelaIndirectComputeCodeSetBufferStride, record);
+}
+
 - (void)setThreadgroupMemoryLength:(NSUInteger)length atIndex:(NSUInteger)index
 {
 	StelaSetThreadgroupMemory record = {.length = length, .index = index};

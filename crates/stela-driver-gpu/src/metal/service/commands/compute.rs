@@ -10,8 +10,9 @@ use crate::metal::{
             Fault,
             commands::{
                 BeginCompute, BufferOffset, ComputeCode, Dispatch, DispatchIndirect, MemoryBarrier,
-                SetBuffer, SetBufferOffset, SetBytes, SetPipeline, SetSampler, SetTexture,
-                SetThreadgroupMemory, StageInRegion,
+                SetBuffer, SetBufferOffset, SetBytes, SetBytesStride, SetPipeline, SetSampler,
+                SetTexture, SetThreadgroupMemory, StageInRegion, VertexBufferStride,
+                VertexOffsetStride,
             },
         },
     },
@@ -58,6 +59,35 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 commands.set_compute_bytes(
                     &mut self.device.resolver(),
                     bytes.bytes(),
+                    binding(index)?,
+                )?;
+            }
+            ComputeCode::SetBufferStride => {
+                let request: VertexBufferStride = payload.record()?;
+                let buffer = self.optional_buffer(connection, request.buffer)?;
+                let index = binding(request.index)?;
+                commands.set_compute_buffer_with_stride(
+                    buffer,
+                    request.offset,
+                    request.stride,
+                    index,
+                )?;
+            }
+            ComputeCode::SetBufferOffsetStride => {
+                let request: VertexOffsetStride = payload.record()?;
+                let index = binding(request.index)?;
+                commands.set_compute_buffer_offset_with_stride(
+                    request.offset,
+                    request.stride,
+                    index,
+                )?;
+            }
+            ComputeCode::SetBytesStride => {
+                let (SetBytesStride { stride, index }, bytes) = payload.split()?;
+                commands.set_compute_bytes_with_stride(
+                    &mut self.device.resolver(),
+                    bytes.bytes(),
+                    stride,
                     binding(index)?,
                 )?;
             }

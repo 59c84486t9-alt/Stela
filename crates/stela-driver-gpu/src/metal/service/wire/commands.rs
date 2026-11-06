@@ -64,6 +64,12 @@ records! {
         pub index: u64,
     }
 
+    /// `setBytes:length:attributeStride:atIndex:`, followed by the bytes.
+    pub struct SetBytesStride {
+        pub stride: u64,
+        pub index: u64,
+    }
+
     /// `set*Texture:atIndex:`.
     pub struct SetTexture {
         pub texture: u64,
@@ -354,7 +360,8 @@ records! {
         pub reserved: u32,
     }
 
-    /// `setVertexBuffer:offset:attributeStride:atIndex:`.
+    /// `setVertexBuffer:offset:attributeStride:atIndex:`, or the compute
+    /// encoder's `setBuffer:offset:attributeStride:atIndex:`.
     pub struct VertexBufferStride {
         pub buffer: u64,
         pub offset: u64,
@@ -660,6 +667,12 @@ raw_enum! {
         SetStageInRegion = 0x010d,
         /// `BufferOffset`.
         SetStageInRegionIndirect = 0x010e,
+        /// `VertexBufferStride`.
+        SetBufferStride = 0x010f,
+        /// `VertexOffsetStride`.
+        SetBufferOffsetStride = 0x0110,
+        /// `SetBytesStride` and the bytes.
+        SetBytesStride = 0x0111,
     }
 }
 
@@ -772,6 +785,8 @@ raw_enum! {
         DispatchThreads = 0x0708,
         /// No record.
         Reset = 0x0709,
+        /// `VertexBufferStride`.
+        SetBufferStride = 0x070a,
     }
 }
 

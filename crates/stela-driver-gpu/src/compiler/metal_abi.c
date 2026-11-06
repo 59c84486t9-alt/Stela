@@ -280,9 +280,8 @@ static void put(struct stela_air_command_encoding *encoding, nir_def *address, n
       (struct stela_air_command_store){address, value, valid};
 }
 
-/* A buffer slot of the record's table of the stage, and a vertex buffer's
- * stride word, zero for the pipeline's. A kernel buffer's stride has no
- * reader: kernels whose stage-in strides are dynamic do not compile. */
+/* A buffer slot of the record's table of the stage, and a vertex or kernel
+ * buffer's stride word, zero for the pipeline's. */
 static void bind_buffer(nir_builder *b, const struct record *record,
                         const struct stela_air_command *command,
                         struct stela_air_command_encoding *encoding)
@@ -297,10 +296,14 @@ static void bind_buffer(nir_builder *b, const struct record *record,
    put(encoding, record_part(b, record, address, 0), command->binding.address, valid);
    put(encoding, record_part(b, record, length, 0),
        nir_imm_int64(b, STELA_METAL_RECORD_UNBOUNDED), valid);
-   if (command->binding.stage != STELA_AIR_VERTEX)
+   bool kernel = !command->binding.stage;
+   if (command->binding.stage != STELA_AIR_VERTEX && !kernel)
       return;
-   nir_def *words = load(b, record->buffer, STELA_METAL_INDIRECT_WORDS, 32);
-   nir_def *word_count = load(b, record->buffer, STELA_METAL_INDIRECT_WORD_COUNT, 32);
+   nir_def *words = load(b, record->buffer,
+                         kernel ? STELA_METAL_INDIRECT_STRIDES : STELA_METAL_INDIRECT_WORDS, 32);
+   nir_def *word_count = load(b, record->buffer,
+                              kernel ? STELA_METAL_INDIRECT_STRIDE_COUNT :
+                                       STELA_METAL_INDIRECT_WORD_COUNT, 32);
    nir_def *stride = command->binding.stride;
    put(encoding, record_part(b, record, nir_iadd(b, words, nir_imul_imm(b, slot, 4)), 0),
        nir_bcsel(b, nir_ieq_imm(b, stride, -1), nir_imm_int(b, 0), nir_u2u32(b, stride)),
@@ -782,6 +785,17 @@ nir_shader *stela_metal_resolve_dispatches_kernel(const nir_shader_compiler_opti
       nir_store_var(&b, offset, nir_iadd(&b, at, rounded), 1);
    }
    pop_count(&b, counter, index);
+
+   /* The kernel buffers' attribute strides, which dynamic stage-in layouts
+    * read, zero past the record's. */
+   nir_def *strides =
+      nir_iadd(&b, record, nir_u2u64(&b, load(&b, header, STELA_METAL_INDIRECT_STRIDES, 32)));
+   nir_def *stride_count = load(&b, header, STELA_METAL_INDIRECT_STRIDE_COUNT, 32);
+   nir_def *slot = push_count(&b, counter, nir_imm_int(&b, STELA_METAL_BUFFERS));
+   nir_def *stride = nir_bcsel(&b, nir_ult(&b, slot, stride_count),
+                               load(&b, element(&b, strides, slot, 4), 0, 32), nir_imm_int(&b, 0));
+   store(&b, stride, element(&b, dispatch, slot, 4), STELA_METAL_DISPATCH_STRIDES);
+   pop_count(&b, counter, slot);
    nir_pop_if(&b, NULL);
    return finish(&b);
 }
@@ -1050,8 +1064,6 @@ nir_def *stela_metal_fetch_stage_in(nir_builder *b, const struct stela_metal_sta
    if (!attribute)
       return NULL;
    const struct stela_metal_stage_in_layout *layout = &stage_in->layouts[attribute->buffer];
-   if (layout->stride == STELA_METAL_STRIDE_DYNAMIC)
-      return NULL;
    nir_def *region = load_push(b, 1, 64, STELA_METAL_PUSH_ARGUMENTS);
    nir_def *inside = nir_imm_true(b), *origin[3];
    for (unsigned axis = 0; axis < 3; axis++) {
@@ -1087,7 +1099,10 @@ nir_def *stela_metal_fetch_stage_in(nir_builder *b, const struct stela_metal_sta
    default:
       return NULL;
    }
-   return fetch_element(b, attribute, element, nir_imm_int(b, (int)layout->stride), inside);
+   nir_def *stride = layout->stride == STELA_METAL_STRIDE_DYNAMIC ?
+      load(b, region, STELA_METAL_DISPATCH_STRIDES + 4u * attribute->buffer, 32) :
+      nir_imm_int(b, (int)layout->stride);
+   return fetch_element(b, attribute, element, stride, inside);
 }
 
 nir_def *stela_metal_tessellation_factor(nir_builder *b, nir_def *factor, nir_def *scale,
