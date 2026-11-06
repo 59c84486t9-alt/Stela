@@ -141,6 +141,15 @@ Class objc_getClass(const char *name);
 	return _dataType;
 }
 
+/* Metal gives an array of textures or samplers no stride, since its
+ * elements are resources rather than bytes; the encoder still steps
+ * through their slots. */
+- (NSUInteger)stride
+{
+	NSUInteger element = self.elementType;
+	return element == MTLDataTypeTexture || element == MTLDataTypeSampler ? 0 : _stride;
+}
+
 /* One class serves every type, each of which is the kind of Metal's class
  * its data type names: what applications tell types apart by. */
 - (BOOL)isKindOfClass:(Class)class
@@ -319,7 +328,7 @@ static StelaGPUType *type_at(NSArray *types, uint32_t index)
 		type.elementType = info->element_data_type;
 		type->_element = type_at(objects, info->element);
 		type.arrayLength = info->length;
-		type.stride = info->stride;
+		type->_stride = info->stride;
 		type.argumentIndexStride = info->argument_index_stride;
 		type.access = info->access;
 		type.alignment = info->alignment;
@@ -472,7 +481,7 @@ static void air_slice(const void **bytes, NSUInteger *length)
 {
 	if (type->_dataType == MTLDataTypeArray) {
 		for (NSUInteger i = 0; i < type.arrayLength; i++) {
-			NSUInteger at = offset + i * type.stride;
+			NSUInteger at = offset + i * type->_stride;
 			NSUInteger slot = index + i * type.argumentIndexStride;
 			if (type->_element) {
 				[self addType:type->_element offset:at index:slot];

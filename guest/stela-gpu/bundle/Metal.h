@@ -203,6 +203,7 @@ enum {
 	MTLDataTypeUChar = 49,
 	MTLDataTypeBool = 53,
 	MTLDataTypeTexture = 58,
+	MTLDataTypeSampler = 59,
 	MTLDataTypePointer = 60,
 	MTLDataTypeLong = 81,
 	MTLDataTypeULong = 85,

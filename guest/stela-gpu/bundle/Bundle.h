@@ -278,11 +278,14 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	NSUInteger _dataType;
 	StelaGPUType *_element;
 	NSArray *_members;
+	/* How far an array's elements are apart in an argument buffer. */
+	NSUInteger _stride;
 }
-@property NSUInteger elementType, arrayLength, stride, argumentIndexStride;
+@property NSUInteger elementType, arrayLength, argumentIndexStride;
 @property NSUInteger access, alignment, dataSize, textureType, textureDataType;
 @property BOOL elementIsArgumentBuffer, isDepthTexture;
 - (NSUInteger)dataType;
+- (NSUInteger)stride;
 @end
 
 /* `MTLStructMember`. */
