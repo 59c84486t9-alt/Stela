@@ -25,6 +25,8 @@ static const char *module =
    " <2 x float>, float, i1, <2 x i32>, i1, float, float, i32)\n"
    "declare { <4 x float>, i8 } @air.gather_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2),"
    " <2 x float>, i1, <2 x i32>, i32, i32)\n"
+   "declare { <4 x float>, i8 } @air.gather_compare_depth_2d.f32(ptr addrspace(1), ptr addrspace(2),"
+   " i32, <2 x float>, float, i1, <2 x i32>, i32)\n"
    "declare { <4 x i32>, i8 } @air.read_texture_2d_array.u.v4i32(ptr addrspace(1), <2 x i32>, i32,"
    " i32, i32)\n"
    "declare { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1), <2 x i32>, i32, i32)\n"
@@ -215,7 +217,12 @@ static const char *fragment_body =
    " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.5>, i1 true, <2 x i32> zeroinitializer,"
    " i32 2, i32 0)\n"
    "%gc = extractvalue { <4 x float>, i8 } %g, 0\n"
-   "%v = fadd <4 x float> %c, %gc\n"
+   "%dg = call { <4 x float>, i8 } @air.gather_compare_depth_2d.f32(ptr addrspace(1) %depth,"
+   " ptr addrspace(2) %smp, i32 1, <2 x float> <float 0.5, float 0.5>, float 0.75, i1 true,"
+   " <2 x i32> zeroinitializer, i32 0)\n"
+   "%dgc = extractvalue { <4 x float>, i8 } %dg, 0\n"
+   "%gs = fadd <4 x float> %gc, %dgc\n"
+   "%v = fadd <4 x float> %c, %gs\n"
    "ret <4 x float> %v\n}\n";
 
 static const char *fragment_metadata =
@@ -377,7 +384,7 @@ fragments_sample_with_derivatives_compare_and_gather(void)
    nir_validate_shader(shader, "texture fragment");
    struct census census = count(shader);
    /* Implicit derivatives, and the shadow compare with its reference. */
-   assert(census.tex[nir_texop_tex] == 2 && census.tex[nir_texop_tg4] == 1);
+   assert(census.tex[nir_texop_tex] == 2 && census.tex[nir_texop_tg4] == 2);
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
@@ -386,10 +393,11 @@ fragments_sample_with_derivatives_compare_and_gather(void)
             nir_tex_instr *tex = nir_instr_as_tex(instr);
             bool shadow = nir_tex_instr_src_index(tex, nir_tex_src_comparator) >= 0;
             assert(shadow == tex->is_shadow);
+            /* A comparison is one value; a compare gather is four. */
             if (shadow)
-               assert(tex->def.num_components == 1);
+               assert(tex->def.num_components == (tex->op == nir_texop_tg4 ? 4 : 1));
             if (tex->op == nir_texop_tg4)
-               assert(tex->component == 2 && tex->def.num_components == 4);
+               assert((shadow || tex->component == 2) && tex->def.num_components == 4);
             assert(nir_tex_instr_src_index(tex, nir_tex_src_lod) < 0);
             assert(nir_tex_instr_src_index(tex, nir_tex_src_bias) < 0);
          }

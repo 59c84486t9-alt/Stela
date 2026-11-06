@@ -454,7 +454,9 @@ emit(const struct call *call, const struct tex *t)
    tex->sampler_dim = t->faces ? GLSL_SAMPLER_DIM_2D : call->shape->dim;
    tex->is_array = t->faces || call->shape->array;
    tex->is_shadow = t->shadow;
-   tex->is_new_style_shadow = t->shadow;
+   /* A comparison returns one value, but a gather four: NIR reads a
+    * new-style shadow op's result as a single component. */
+   tex->is_new_style_shadow = t->shadow && t->op != nir_texop_tg4;
    tex->is_sparse = call->sparse;
    tex->component = t->component;
    if (t->coord)
