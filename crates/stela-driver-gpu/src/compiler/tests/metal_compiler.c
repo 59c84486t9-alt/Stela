@@ -1151,10 +1151,11 @@ framebuffer_reads_access_storage_attachments(void)
    LLVMMemoryBufferRef input = bitcode(blended);
    const void *air = LLVMGetBufferStart(input);
    size_t size = LLVMGetBufferSize(input);
-   /* Without the attachment's layout the read is refused. */
+   /* A pipeline without the attachment reads zero, outside any interlock. */
    const struct stela_metal_specialization plain = {0};
-   assert(!stela_metal_compile(air, size, "blended", &interlocked, &plain, &error) &&
-          error.kind == STELA_AIR_ARGUMENT);
+   nir_shader *absent = stela_metal_compile(air, size, "blended", &interlocked, &plain, &error);
+   assert(absent && !absent->info.fs.pixel_interlock_ordered);
+   stela_metal_release(absent);
    /* Source-over blending of an sRGB attachment. */
    struct stela_metal_attachment attachments[8] = {{
       .format = VK_FORMAT_B8G8R8A8_SRGB, .bytes = 4, .blend = 1, .write_mask = 0xf,

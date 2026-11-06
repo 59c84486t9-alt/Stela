@@ -2226,11 +2226,11 @@ static nir_def *
 attachment_input(struct translator *t, const struct stela_air_stage_io *io)
 {
    nir_builder *b = &t->b;
+   /* A pipeline routes every attachment it reads and has; Metal leaves the
+    * value of one it lacks undefined, which reads as zero. */
+   if (!storage_attachment(t, io->location))
+      return nir_imm_zero(b, io->components, stage_bits(io->primitive));
    /* The interlock section loads the attachment's texel. */
-   if (!storage_attachment(t, io->location)) {
-      fail(t, STELA_AIR_ARGUMENT, "render target input %u is not a storage attachment", io->location);
-      return NULL;
-   }
    if (t->attachment_read_count == ARRAY_SIZE(t->attachment_reads)) {
       fail(t, STELA_AIR_LIMIT, "too many render target inputs");
       return NULL;
