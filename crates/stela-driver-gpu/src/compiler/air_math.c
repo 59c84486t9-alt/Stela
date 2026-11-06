@@ -177,6 +177,16 @@ approximate(enum operation operation)
    }
 }
 
+/* Operations whose fast forms take the precise lowering: Metal bounds fast
+ * asin, acos, atan and atan2 at 5 ulp, which NIR's approximations miss,
+ * and tanpi's poles take their sign from an exact reduction. */
+static bool
+precise_when_fast(enum operation operation)
+{
+   return operation == ASIN || operation == ACOS || operation == ATAN || operation == ATAN2 ||
+          operation == TANPI;
+}
+
 static nir_def *
 length(nir_builder *b, nir_def *x)
 {
@@ -610,8 +620,9 @@ lower(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef ca
       for (unsigned i = 0; i < count; i++)
          s[i] = s[i] ? nir_f2f32(b, s[i]) : NULL;
    }
-   *result = approximate(operation) && !fast ? precise_value(b, operation, count, s, &second) :
-                                               floating_value(b, operation, s, &second);
+   bool precise = approximate(operation) && (!fast || precise_when_fast(operation));
+   *result = precise ? precise_value(b, operation, count, s, &second) :
+                       floating_value(b, operation, s, &second);
    if (narrow) {
       *result = nir_f2f16(b, *result);
       second = second ? nir_f2f16(b, second) : NULL;

@@ -510,6 +510,27 @@ conversions_follow_their_names(void)
    CHECK_FOLD("", "i32", "bitcast <2 x half> <half 0xH3C00, half 0xH4000> to i32", 0x40003c00u);
 }
 
+/* Fast inverse trigonometry meets Metal's 5 ulp bound, fast tanpi's poles
+ * keep their sign, and a fast half quotient rounds once. */
+static void
+fast_functions_meet_their_bounds(void)
+{
+   uint64_t asin = fold("declare float @air.fast_asin.f32(float)\n", "float",
+                        "call float @air.fast_asin.f32(float 0.5)");
+   int64_t asin_error = (int64_t)asin - (int64_t)f32(0.52359877559829887f);
+   assert(asin_error >= -5 && asin_error <= 5);
+   uint64_t atan = fold("declare float @air.fast_atan.f32(float)\n", "float",
+                        "call float @air.fast_atan.f32(float 1.0)");
+   int64_t atan_error = (int64_t)atan - (int64_t)f32(0.78539816339744831f);
+   assert(atan_error >= -5 && atan_error <= 5);
+   CHECK_FOLD("declare float @air.fast_tanpi.f32(float)\n", "float",
+              "call float @air.fast_tanpi.f32(float 0.5)", f32(INFINITY));
+   CHECK_FOLD("declare float @air.fast_tanpi.f32(float)\n", "float",
+              "call float @air.fast_tanpi.f32(float -0.5)", f32(-INFINITY));
+   /* 11.96875 / 2.5625 rounds once from single precision. */
+   CHECK_FOLD("", "half", "fdiv fast half 0xH49FC, 0xH4120", 0x44ac);
+}
+
 static void
 bfloats_round_to_nearest_even(void)
 {
@@ -825,6 +846,7 @@ main(void)
    bools_reduce();
    conversions_follow_their_names();
    bfloats_round_to_nearest_even();
+   fast_functions_meet_their_bounds();
    refuses_misnamed_and_misplaced_functions();
    half_declares_its_float_controls();
    fma_follows_its_backend();

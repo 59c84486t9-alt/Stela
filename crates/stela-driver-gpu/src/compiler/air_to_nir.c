@@ -4330,6 +4330,10 @@ instruction(struct translator *t, LLVMValueRef inst)
          value = nir_fsub(&t->b, a, b);
       else if (op == LLVMFMul)
          value = nir_fmul(&t->b, a, b);
+      /* Metal bounds even a fast half quotient to 1 ulp, which a half
+       * reciprocal misses: divide in single precision and round once. */
+      else if (op == LLVMFDiv && a->bit_size == 16)
+         value = nir_f2f16_rtne(&t->b, nir_fdiv(&t->b, nir_f2f32(&t->b, a), nir_f2f32(&t->b, b)));
       else if (op == LLVMFDiv)
          value = nir_fdiv(&t->b, a, b);
       /* LLVM's frem is C's fmod. */
