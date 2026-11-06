@@ -14,7 +14,10 @@
 //! Every PE on a core of its own allocates at once, so each core the engine
 //! runs on keeps a small cache of free blocks per class ([`Heap::tag_cpu`]),
 //! which it takes from and gives back to without the lock, moving them to
-//! and from the class lists [`BATCH`] at a time under it.
+//! and from the class lists [`BATCH`] at a time under it. The cache and the
+//! counts only that core writes lie in cache lines of their own ([`Core`]):
+//! counts packed beside other cores' would move their line between the
+//! cores on every allocation and free.
 //!
 //! Small blocks that live for different lengths of time leave holes, and a
 //! long run can hold a fifth of the heap free with no extent of a few MiB, so
@@ -148,6 +151,31 @@ impl Cache {
         blocks: [[ptr::null_mut(); CACHED]; CLASSES],
         counts: [0; CLASSES],
     };
+}
+
+/// What one core alone writes, apart from every other core's lines.
+#[repr(C, align(64))]
+struct Core {
+    cache: UnsafeCell<Cache>,
+    /// The core's bytes allocated from its cache less those freed to it,
+    /// which [`State::live`] does not count.
+    cached: AtomicIsize,
+    /// The core's bytes allocated less those it freed, by every route:
+    /// what its own work holds, which other cores' allocations leave alone.
+    own: AtomicIsize,
+    /// [`Self::own`]'s size-class blocks by class.
+    own_classes: [AtomicIsize; CLASSES],
+}
+
+impl Core {
+    const fn new() -> Self {
+        Self {
+            cache: UnsafeCell::new(Cache::EMPTY),
+            cached: AtomicIsize::new(0),
+            own: AtomicIsize::new(0),
+            own_classes: [const { AtomicIsize::new(0) }; CLASSES],
+        }
+    }
 }
 /// Size buckets of the free list's live allocations: from 4 KiB, each a
 /// power of two, the last holding everything from 128 MiB.
@@ -388,16 +416,8 @@ pub struct Heap {
     /// Where the first failed allocation is reported; it must not allocate.
     failure_sink: fn(core::fmt::Arguments<'_>),
     state: UnsafeCell<State>,
-    caches: [UnsafeCell<Cache>; CPUS],
-    /// Each core's bytes allocated from its cache less those freed to it,
-    /// which [`State::live`] does not count; written by that core alone.
-    cached: [AtomicIsize; CPUS],
-    /// Each core's bytes allocated less those it freed, by every route:
-    /// what its own work holds, which other cores' allocations leave
-    /// alone; written by that core alone.
-    own: [AtomicIsize; CPUS],
-    /// [`Self::own`]'s size-class blocks by class, from each core's tagging.
-    own_classes: [[AtomicIsize; CLASSES]; CPUS],
+    /// Each tagged core's cache and counts.
+    cores: [Core; CPUS],
     /// Cores tagged so far, and whether any is.
     tagged: AtomicUsize,
     any_tagged: AtomicBool,
@@ -435,10 +455,7 @@ impl Heap {
             held: AtomicBool::new(false),
             failure_reported: AtomicBool::new(false),
             failure_sink: |_| {},
-            caches: [const { UnsafeCell::new(Cache::EMPTY) }; CPUS],
-            cached: [const { AtomicIsize::new(0) }; CPUS],
-            own: [const { AtomicIsize::new(0) }; CPUS],
-            own_classes: [const { [const { AtomicIsize::new(0) }; CLASSES] }; CPUS],
+            cores: [const { Core::new() }; CPUS],
             tagged: AtomicUsize::new(0),
             any_tagged: AtomicBool::new(false),
             live: AtomicUsize::new(0),
@@ -744,7 +761,7 @@ impl Heap {
     /// Bytes the caches allocated less those freed to them.
     fn cached_live(&self) -> isize {
         (0..self.tagged.load(Ordering::Relaxed).min(CPUS))
-            .map(|cpu| self.cached[cpu].load(Ordering::Relaxed))
+            .map(|cpu| self.cores[cpu].cached.load(Ordering::Relaxed))
             .sum()
     }
 
@@ -796,7 +813,7 @@ impl Heap {
     /// On core `cpu`, with interrupts disabled.
     unsafe fn take_cached(&self, cpu: usize, class: usize) -> *mut u8 {
         // SAFETY: only this core reaches its cache, and nothing interrupts.
-        let cache = unsafe { &mut *self.caches[cpu].get() };
+        let cache = unsafe { &mut *self.cores[cpu].cache.get() };
         if cache.counts[class] == 0 {
             let _guard = self.lock();
             // SAFETY: the guard excludes all free-list writers, while
@@ -837,7 +854,7 @@ impl Heap {
     /// `class`.
     unsafe fn give_cached(&self, cpu: usize, class: usize, block: *mut u8) {
         // SAFETY: only this core reaches its cache, and nothing interrupts.
-        let cache = unsafe { &mut *self.caches[cpu].get() };
+        let cache = unsafe { &mut *self.cores[cpu].cache.get() };
         if cache.counts[class] == CACHED {
             let _guard = self.lock();
             // SAFETY: the guard excludes all free-list writers, while
@@ -862,7 +879,7 @@ impl Heap {
 
     /// Add `bytes` to core `cpu`'s count, which only it writes.
     fn count_cached(&self, cpu: usize, bytes: isize) {
-        let count = &self.cached[cpu];
+        let count = &self.cores[cpu].cached;
         count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
     }
 
@@ -875,26 +892,28 @@ impl Heap {
     /// The calling core's bytes allocated less those it freed, once it is
     /// tagged.
     pub fn own(&self) -> Option<isize> {
-        self.cpu().map(|cpu| self.own[cpu].load(Ordering::Relaxed))
+        self.cpu()
+            .map(|cpu| self.cores[cpu].own.load(Ordering::Relaxed))
     }
 
     /// Each tagged core's bytes allocated less those it freed: a block one
     /// core allocates and another frees moves between their counts.
     pub fn owned(&self) -> impl Iterator<Item = isize> + '_ {
         let cores = self.tagged.load(Ordering::Relaxed).min(CPUS);
-        self.own[..cores]
+        self.cores[..cores]
             .iter()
-            .map(|own| own.load(Ordering::Relaxed))
+            .map(|core| core.own.load(Ordering::Relaxed))
     }
 
     /// Add `bytes` to the calling core's own count, which only it writes.
     fn count_own(&self, cpu: usize, layout: Layout, class: Option<usize>, allocated: bool) {
         let bytes = class.map_or(layout.size(), |class| SMALLEST << class) as isize;
         let bytes = if allocated { bytes } else { -bytes };
-        let count = &self.own[cpu];
+        let core = &self.cores[cpu];
+        let count = &core.own;
         count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
         if let Some(class) = class {
-            let count = &self.own_classes[cpu][class];
+            let count = &core.own_classes[class];
             count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
         }
     }
@@ -904,9 +923,9 @@ impl Heap {
     pub fn class_live(&self) -> [isize; CLASSES] {
         let cores = self.tagged.load(Ordering::Relaxed).min(CPUS);
         core::array::from_fn(|class| {
-            self.own_classes[..cores]
+            self.cores[..cores]
                 .iter()
-                .map(|classes| classes[class].load(Ordering::Relaxed))
+                .map(|core| core.own_classes[class].load(Ordering::Relaxed))
                 .sum()
         })
     }

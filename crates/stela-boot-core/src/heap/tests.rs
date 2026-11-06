@@ -765,6 +765,18 @@ fn constrained_alignment_and_ordinary_pages_coalesce_together() {
     }
 }
 
+/// A core's cache and counts share no cache line with another core's.
+#[test]
+fn each_cores_writes_stay_in_lines_of_its_own() {
+    const LINE: usize = 64;
+    assert_eq!(core::mem::align_of::<Core>() % LINE, 0);
+    assert_eq!(core::mem::size_of::<Core>() % LINE, 0);
+    let heap = Heap::new();
+    let at = |cpu: usize| &raw const heap.cores[cpu] as usize;
+    assert_eq!(at(0) % LINE, 0);
+    assert_eq!(at(1) - at(0), core::mem::size_of::<Core>());
+}
+
 #[test]
 fn core_caches_move_blocks_between_cores_in_batches() {
     let heap = Heap::new();
@@ -791,7 +803,7 @@ fn core_caches_move_blocks_between_cores_in_batches() {
             heap.give_cached(1, class, block);
         }
         assert_eq!(heap.usage().live, 0);
-        assert_eq!((*heap.caches[1].get()).counts[class], CACHED);
+        assert_eq!((*heap.cores[1].cache.get()).counts[class], CACHED);
         // The other core's allocations reuse the blocks the list holds.
         let reused = heap.alloc(layout);
         assert!(blocks.contains(&reused));
