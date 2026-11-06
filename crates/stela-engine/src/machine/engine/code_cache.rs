@@ -370,11 +370,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Forget the blocks and leaves whose code lies in `range`, which the
-    /// host reclaimed. A block of the same page may chain into an evicted
-    /// one, so an evicted block's page is forgotten whole, as an IC IVAU
-    /// forgets it: its other blocks become unreachable and are freed when
-    /// their own code is reclaimed. A block no longer indexed has no live
-    /// chain into it, as its page was forgotten whole then.
+    /// host reclaimed. The other blocks of their pages stay: they chain into
+    /// them no more ([`Self::detach`]), and take an exit to the engine
+    /// there until it links them to the blocks compiled again. Only indexed
+    /// blocks are reached: one replaced in the index was detached then,
+    /// and the blocks of a page an IC IVAU forgot whole reach only each
+    /// other, in contexts no lookup or jump names since.
     pub(super) fn evict_code(&mut self, range: core::ops::Range<usize>) {
         // A host with nothing to release says so with an empty range, and
         // while memory stays low that comes before every compile.
@@ -390,14 +391,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .map(|slot| slot as u32)
                 .collect()
         });
+        let mut evicted = evicted;
+        evicted.sort_unstable();
+        self.detach(&evicted);
         for slot in evicted.iter().map(|&slot| slot as usize) {
             let block = &self.blocks[slot];
-            let found = self
-                .index
-                .get(&self.blocks, block.pc, block.physical, block.variant);
-            if found == Some(slot) {
-                self.index.forget_page(block.physical & !(FETCH_PAGE - 1));
-            }
+            self.index.forget(block.physical, slot);
         }
         for slot in evicted.iter().map(|&slot| slot as usize) {
             let block = &mut self.blocks[slot];
@@ -414,10 +413,62 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.scalable_leaves
             .retain(|_, leaf| !range.contains(&leaf.code.0));
         if !evicted.is_empty() {
-            // The jump cache and lookup entries hold no generation per
-            // block.
-            self.code_generation += 1;
             self.statistics.code_evictions += 1;
+        }
+    }
+
+    /// Make the blocks in the sorted `slots` unreachable: the indexed blocks
+    /// of their pages undo their links to their PCs (a link names the
+    /// block a PC and variant have, so any of the page's blocks of the PC
+    /// may be the one it reached), and their lookup and jump cache
+    /// entries go.
+    pub(super) fn detach(&mut self, slots: &[u32]) {
+        let detached = |slot: usize| slots.binary_search(&(slot as u32)).is_ok();
+        let mut gone: Vec<(u64, u64)> = slots
+            .iter()
+            .map(|&slot| {
+                let block = &self.blocks[slot as usize];
+                (block.physical & !(FETCH_PAGE - 1), block.pc)
+            })
+            .collect();
+        gone.sort_unstable();
+        gone.dedup();
+        let mut sources = core::mem::take(&mut self.page_blocks);
+        let mut unlinks = Vec::new();
+        for page in gone.chunk_by(|a, b| a.0 == b.0) {
+            sources.extend(self.index.page(page[0].0));
+            for &source in &sources {
+                if detached(source) {
+                    continue;
+                }
+                for exit in self.blocks[source].successors.iter_mut() {
+                    if exit.linked && page.binary_search(&(page[0].0, exit.target.0)).is_ok() {
+                        exit.linked = false;
+                        let at = exit.site - u64::from(exit.slot);
+                        unlinks.push((at, chain::unlinked(exit.slot.into(), exit.target)));
+                    }
+                }
+            }
+            sources.clear();
+        }
+        self.page_blocks = sources;
+        for (at, bytes) in unlinks {
+            self.patch_native(NativeCode(at as usize), &bytes);
+            self.statistics.unlinks += 1;
+        }
+        // Lookup entries go by PC, in runs of the pages the PCs are in.
+        let mut pages: Vec<u64> = gone.iter().map(|&(_, pc)| pc & !(FETCH_PAGE - 1)).collect();
+        pages.sort_unstable();
+        pages.dedup();
+        for run in pages.chunk_by(|a, b| a + FETCH_PAGE == *b) {
+            let pcs = run[0]..=run[run.len() - 1] + (FETCH_PAGE - 1);
+            self.targets
+                .forget_where(pcs, |entry| detached(entry.block as usize));
+        }
+        for entry in &mut self.jump {
+            if entry.as_ref().is_some_and(|entry| detached(entry.block)) {
+                *entry = None;
+            }
         }
     }
 

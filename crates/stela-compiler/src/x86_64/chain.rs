@@ -351,6 +351,17 @@ impl LookupTable {
     /// Forget the entries of the PCs in `pcs` in the contexts of `salts`, a
     /// mask of salt numbers: whether the PCs had entries to look at.
     pub fn forget_range(&mut self, pcs: core::ops::RangeInclusive<u64>, salts: u64) -> bool {
+        let span = pcs.clone();
+        self.forget_where(pcs, |entry| entry.reached(&span, salts))
+    }
+
+    /// Forget the entries of the PCs in `pcs`, in any context, that
+    /// `forget` names: whether the PCs had entries to look at.
+    pub fn forget_where(
+        &mut self,
+        pcs: core::ops::RangeInclusive<u64>,
+        mut forget: impl FnMut(&LookupEntry) -> bool,
+    ) -> bool {
         let granules = *pcs.start() >> GRANULE_SHIFT..=*pcs.end() >> GRANULE_SHIFT;
         let mut emptied = Vec::new();
         let mut found = false;
@@ -360,7 +371,7 @@ impl LookupTable {
             listed.sets.retain(|&set| {
                 let set = &mut self.sets[set as usize];
                 for entry in &mut set.0 {
-                    if entry.reached(&pcs, salts) {
+                    if entry.context != 0 && pcs.contains(&entry.pc) && forget(entry) {
                         *entry = LookupEntry::default();
                     }
                 }
@@ -574,6 +585,20 @@ pub(super) fn empty_link(asm: &mut crate::x86_64::asm::Asm, bytes: usize) {
             asm.int3();
         }
         asm.bind(exit);
+    }
+}
+
+/// What undoes the [`link`] of an exit to `target` with a link slot of
+/// `slot` bytes, or the [`jump`] to a [`thunk`] of one without, written
+/// `slot` bytes before the exit: the empty slot, or the start of the
+/// direct exit the jump replaced.
+pub fn unlinked(slot: usize, target: GuestAddress) -> Vec<u8> {
+    if slot != 0 {
+        let mut code = Code::new();
+        empty_link(&mut code.asm(), slot);
+        code.into_bytes()
+    } else {
+        direct_exit(target, ExitKind::Direct)[..JUMP_BYTES].to_vec()
     }
 }
 
@@ -894,6 +919,26 @@ mod tests {
             let mut emitted = Code::new();
             super::super::block::direct_exit_with(&mut emitted.asm(), GuestAddress(target), word);
             assert_eq!(emitted, direct_exit(GuestAddress(target), word));
+        }
+    }
+
+    /// Undoing a link writes back the empty slot the block emitter leaves
+    /// before an exit, and undoing a thunk's jump the start of the exit.
+    #[test]
+    fn unlinked_exits_are_what_blocks_emit() {
+        let block = 0x4000;
+        for target in [0x4040, block] {
+            let target = GuestAddress(target);
+            let mut emitted = Code::new();
+            emitted.set_linked_block(block);
+            super::super::block::direct_exit_with(&mut emitted.asm(), target, ExitKind::Direct);
+            let slot = link_slot(Some(block), target, ExitKind::Direct);
+            assert_ne!(slot, 0);
+            let emitted = emitted.into_bytes();
+            let linked = link(0x10_0000, slot, 3, 7, 0x10_8000).unwrap();
+            assert_ne!(linked, emitted[..slot]);
+            assert_eq!(unlinked(slot, target), emitted[..slot]);
+            assert_eq!(unlinked(0, target), emitted[slot..slot + JUMP_BYTES]);
         }
     }
 

@@ -500,7 +500,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 site: code.0 as u64 + exit.offset as u64,
                 target: exit.target,
                 word: exit.word(),
-                slot: chain::link_slot(Some(pc), exit.target, exit.kind),
+                slot: chain::link_slot(Some(pc), exit.target, exit.kind) as u8,
+                linked: false,
             })
             .collect();
         // RET, BR and BLR end the code with their exit to the target in
@@ -558,7 +559,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.code_slots
             .record(code.0, index, || self.host.code_partitions());
         self.fault_recovery.insert(index, compiled.installed());
-        self.index.insert(&self.blocks, index);
+        if let Some(replaced) = self.index.insert(&self.blocks, index) {
+            // Only indexed blocks are reached, which eviction relies on.
+            self.detach(&[replaced as u32]);
+        }
         self.mirrors.close_code_page();
         Ok(Fetched::Block(index))
     }
@@ -602,6 +606,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             slot: 0,
             target: GuestAddress(pc + INSTRUCTION),
             word: ExitKind::Fallthrough.into(),
+            linked: false,
         });
         let dynamic = thunk
             .dynamic
@@ -696,6 +701,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             slot: 0,
             target: GuestAddress(pc + INSTRUCTION),
             word: ExitKind::Fallthrough.into(),
+            linked: false,
         })
     }
 

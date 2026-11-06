@@ -735,7 +735,7 @@ pub(super) fn beat_report<H: Host>(
     let shadow = host::statistics();
     output::arguments(format_args!(
         "BEAT blocks={} pc={:#x} {}{} lr={:#x} ticks/block={} native={}% \
-         compiled={} discards={}{} evictions={} chained={}% exceptions={} interrupts={} \
+         compiled={} discards={}{} evictions={} unlinks={} chained={}% exceptions={} interrupts={} \
          waits={} \
          heap={}M/{}M carved={}M peak={}M largest={}M extents={} carves={} \
          shadow_peak={}M/{}M/{}M exhausted={} code_peak={}M/{}M\n",
@@ -750,6 +750,7 @@ pub(super) fn beat_report<H: Host>(
         machine.statistics.code_discards.iter().sum::<u64>(),
         discard_causes(&machine.statistics.code_discards),
         machine.statistics.code_evictions,
+        machine.statistics.unlinks,
         (next.chained - last.chained) * 100 / blocks,
         next.events.0 - last.events.0,
         next.events.1 - last.events.1,

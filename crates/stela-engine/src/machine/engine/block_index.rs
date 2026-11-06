@@ -100,8 +100,9 @@ impl BlockIndex {
             .map(|entry| entry.slot as usize)
     }
 
-    /// Find the block in `slot` by its key, in place of any block of the key.
-    pub(super) fn insert(&mut self, blocks: &Table<Block>, slot: usize) {
+    /// Find the block in `slot` by its key, in place of any block of the
+    /// key: the slot of the block it replaces.
+    pub(super) fn insert(&mut self, blocks: &Table<Block>, slot: usize) -> Option<usize> {
         let block = &blocks[slot];
         let (frame, offset) = split(block.physical);
         let page = match self.page_of(frame) {
@@ -125,15 +126,41 @@ impl BlockIndex {
                 other.pc == block.pc && other.variant == block.variant
             });
         match same {
-            Some(position) => entries[start + position].slot = slot as u32,
-            None => entries.insert(
-                start,
-                Entry {
-                    offset,
-                    slot: slot as u32,
-                },
-            ),
+            Some(position) => {
+                let replaced = core::mem::replace(&mut entries[start + position].slot, slot as u32);
+                (replaced as usize != slot).then_some(replaced as usize)
+            }
+            None => {
+                entries.insert(
+                    start,
+                    Entry {
+                        offset,
+                        slot: slot as u32,
+                    },
+                );
+                None
+            }
         }
+    }
+
+    /// Stop finding the block in `slot`, at `physical`: whether it was found.
+    pub(super) fn forget(&mut self, physical: u64, slot: usize) -> bool {
+        let (frame, offset) = split(physical);
+        let Some(page) = self.page_of(frame) else {
+            return false;
+        };
+        let entries = &mut self.entries[page];
+        let Some(position) = entries
+            .iter()
+            .position(|entry| entry.offset == offset && entry.slot as usize == slot)
+        else {
+            return false;
+        };
+        entries.remove(position);
+        if entries.is_empty() {
+            self.forget_page(frame);
+        }
+        true
     }
 
     /// Stop finding the blocks of the page at `frame`: whether it had any.
@@ -216,7 +243,7 @@ mod tests {
 
     fn add(blocks: &mut Table<Block>, index: &mut BlockIndex, block: Block) -> usize {
         let slot = blocks.push(block);
-        index.insert(blocks, slot);
+        assert_eq!(index.insert(blocks, slot), None);
         slot
     }
 
@@ -243,9 +270,16 @@ mod tests {
         assert_eq!(index.get(&blocks, 0x1010, PAGE + 0x10, id(2)), None);
 
         // A recompilation of a key takes its place.
-        let again = add(&mut blocks, &mut index, block(0x1040, PAGE + 0x40, 0));
+        let again = blocks.push(block(0x1040, PAGE + 0x40, 0));
+        assert_eq!(index.insert(&blocks, again), Some(late));
         assert_eq!(index.get(&blocks, 0x1040, PAGE + 0x40, id(0)), Some(again));
         assert_eq!(index.sweep(None).count(), 5);
+        // Forgetting one block keeps the rest of its page.
+        assert!(!index.forget(PAGE + 0x40, late));
+        assert!(index.forget(PAGE + 0x40, again));
+        assert_eq!(index.get(&blocks, 0x1040, PAGE + 0x40, id(0)), None);
+        assert_eq!(index.get(&blocks, 0x1010, PAGE + 0x10, id(0)), Some(early));
+        assert_eq!(index.sweep(None).count(), 4);
 
         // A sweep goes on past its cursor, across pages.
         let order: Vec<usize> = index.sweep(None).map(|(_, slot)| slot).collect();
@@ -261,5 +295,8 @@ mod tests {
             index.sweep(None).map(|(_, slot)| slot).collect::<Vec<_>>(),
             [next]
         );
+        // The page of the last block forgotten goes with it.
+        assert!(index.forget(PAGE + FETCH_PAGE, next));
+        assert!(index.is_empty());
     }
 }

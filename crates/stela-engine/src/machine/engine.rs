@@ -438,8 +438,9 @@ struct Block {
     /// The guest instructions it retires.
     instructions: u16,
     variant: VariantId,
-    /// Direct exits to static successors not yet chained, its own and its
-    /// PAC thunk's.
+    /// Direct exits to static successors, its own and its PAC thunk's: not
+    /// yet chained, or chained into a block of its page, which an eviction
+    /// of that block undoes.
     successors: Box<[Successor]>,
     /// The host address of the exit to the target in RAX that its RET, BR
     /// or BLR form (or that form's PAC thunk) ends with, until a lookup dispatcher
@@ -534,7 +535,9 @@ struct Successor {
     target: GuestAddress,
     word: ExitWord,
     /// The bytes before `site` kept for a link ([`chain::link_slot`]).
-    slot: usize,
+    slot: u8,
+    /// Chained into the block of its page at `target`.
+    linked: bool,
 }
 
 #[derive(Clone, Copy)]

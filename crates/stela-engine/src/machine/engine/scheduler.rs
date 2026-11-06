@@ -349,7 +349,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             block
                 .successors
                 .iter()
-                .any(|exit| exit.target.0 == next_pc && exit.word.kind == kind)
+                .any(|exit| !exit.linked && exit.target.0 == next_pc && exit.word.kind == kind)
         } else {
             return None;
         };
@@ -392,7 +392,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(position) = block
             .successors
             .iter()
-            .position(|exit| exit.target.0 == next_pc && exit.word == word)
+            .position(|exit| !exit.linked && exit.target.0 == next_pc && exit.word == word)
         else {
             return;
         };
@@ -417,9 +417,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let entry = self.blocks[target].code.0 as u64;
         if exit.slot != 0 {
             let at = site - exit.slot as u64;
-            if let Some(code) = chain::link(at, exit.slot, retired, target as u32, entry) {
+            if let Some(code) = chain::link(at, exit.slot.into(), retired, target as u32, entry) {
                 self.patch_native(NativeCode(at as usize), &code);
-                self.settle_successor(index, position);
+                self.blocks[index].successors[position].linked = true;
                 self.statistics.links += 1;
             }
             return;
@@ -436,12 +436,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         self.patch_native(thunk, &code);
         self.patch_native(NativeCode(site as usize), &jump);
-        self.settle_successor(index, position);
+        self.blocks[index].successors[position].linked = true;
         self.statistics.links += 1;
     }
 
-    /// Drop block `index`'s exit at `position`, now chained: most blocks
-    /// chain all theirs, and then keep no list.
+    /// Drop block `index`'s exit at `position`, now served by a lookup
+    /// dispatcher, which names no block.
     fn settle_successor(&mut self, index: usize, position: usize) {
         let successors = &mut self.blocks[index].successors;
         let mut remaining = core::mem::take(successors).into_vec();

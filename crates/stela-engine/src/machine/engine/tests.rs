@@ -2152,7 +2152,7 @@ fn all_chip_performance_monitors_count_retirement_and_signal_their_overflow_fiq(
 }
 
 #[test]
-fn a_full_arena_reclaims_its_oldest_part_and_forgets_those_pages() {
+fn a_full_arena_reclaims_its_oldest_part_and_keeps_the_rest_of_its_pages() {
     for indexed in [false, true] {
         check_code_arena_reclamation(indexed);
     }
@@ -2178,13 +2178,12 @@ fn check_code_arena_reclamation(indexed: bool) {
         slots.push(slot);
     }
     // The parts held pages 0 and 1, then page 0 again and page 2; page
-    // 3 needed the first part back, whose reclaim forgot pages 0 and 1
-    // whole, page 0's block in the second part too, and whose slots
-    // took the next blocks.
+    // 3 needed the first part back, whose reclaim forgot its two blocks
+    // alone, and whose slots took the next blocks.
     let left: Vec<u64> = (machine.index.sweep(None))
         .map(|(_, slot)| machine.blocks[slot].pc)
         .collect();
-    assert_eq!(left, [page(1) + 8, page(2), page(3)]);
+    assert_eq!(left, [page(0) + 4, page(1) + 8, page(2), page(3)]);
     assert_eq!(machine.statistics.code_evictions, 1);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
     assert_eq!(machine.blocks.len(), 4);
@@ -2199,7 +2198,7 @@ fn check_code_arena_reclamation(indexed: bool) {
 }
 
 #[test]
-fn a_fetch_that_reclaims_code_looks_up_in_a_new_context() {
+fn a_fetch_that_reclaims_code_forgets_the_lookup_entries_of_its_blocks_alone() {
     const RET: u32 = 0xd65f_03c0;
     let mut machine = machine(&vec![RET; 3 * FETCH_PAGE as usize / 4]);
     machine.host.ring = Some(1);
@@ -2207,17 +2206,81 @@ fn a_fetch_that_reclaims_code_looks_up_in_a_new_context() {
     assert!(machine.fetch_block(base, false).is_ok());
     let first = machine.chain.contexts();
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-    assert_eq!(machine.chain.contexts(), first);
-    // The third part reclaims the first, whose block a lookup entry of
-    // the first context names.
+    // The third part reclaims the first, whose block a lookup entry names.
     let pc = base + 2 * FETCH_PAGE;
     assert!(machine.fetch_block(pc, false).is_ok());
     assert_eq!(machine.statistics.code_evictions, 1);
-    assert_ne!(machine.chain.contexts(), first);
+    assert_eq!(machine.chain.contexts(), first);
+    assert_ne!(machine.targets[target_slot(&machine, base)].pc, base);
+    for kept in [base + FETCH_PAGE, pc] {
+        let entry = machine.targets[target_slot(&machine, kept)];
+        assert_eq!(
+            (entry.pc, entry.context),
+            (kept, machine.chain.contexts()[chain::half(kept)])
+        );
+    }
+}
+
+/// The page of an evicted block keeps its other blocks, whose links into it
+/// are undone: their exits there return to the engine again.
+#[test]
+fn eviction_undoes_the_links_into_evicted_blocks_and_keeps_their_pages() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const RET: u32 = 0xd65f_03c0;
+    let mut words = vec![RET; 2 * FETCH_PAGE as usize / 4];
+    words[..5].copy_from_slice(&[ADD, 0x1400_0002, 0, ADD, 0x17ff_fffc]);
+    let mut machine = machine(&words);
+    machine.host.ring = Some(1);
+    let base = machine.cpu.pc;
+    let direct = |next_pc| NativeExit::Exit {
+        next_pc,
+        kind: ExitKind::Direct as u64,
+    };
+    // Each block of the page links into the other.
+    machine.host.exits = vec![direct(base + 12), direct(base), direct(base + 12)];
+    for _ in 0..3 {
+        machine.step().unwrap();
+    }
+    assert_eq!(machine.statistics.links, 2);
+    let first_physical = machine.blocks[0].physical;
+    // The next page's block takes the first block's part.
+    assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
+    assert_eq!(machine.statistics.code_evictions, 1);
+    assert_eq!(machine.statistics.unlinks, 1);
+    assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
+    let second = &machine.blocks[1];
+    let exit = second.successors[0];
+    assert!(!exit.linked);
     assert_eq!(
-        machine.targets[target_slot(&machine, pc)].context,
-        machine.chain.contexts()[chain::half(pc)]
+        machine.host.patches.last(),
+        Some(&(
+            (exit.site - exit.slot as u64) as usize,
+            chain::unlinked(exit.slot.into(), GuestAddress(base))
+        ))
     );
+    let (variant, physical) = (second.variant, second.physical);
+    assert_eq!(
+        machine
+            .index
+            .get(&machine.blocks, base + 12, physical, variant),
+        Some(1)
+    );
+    assert_eq!(
+        machine
+            .index
+            .get(&machine.blocks, base, first_physical, variant),
+        None
+    );
+    assert_eq!(
+        machine.targets[target_slot(&machine, base + 12)].pc,
+        base + 12
+    );
+    assert_ne!(machine.targets[target_slot(&machine, base)].pc, base);
+    // The second block runs on, and exits to the engine at the first.
+    machine.host.exits = vec![direct(base)];
+    machine.step().unwrap();
+    assert_eq!(machine.cpu.pc, base);
+    assert_eq!(machine.statistics.links, 2);
 }
 
 #[test]
@@ -2483,7 +2546,7 @@ fn side_exits_retire_the_instructions_that_ran() {
     assert_eq!(*at as u64, exit.site - exit.slot as u64);
     assert_eq!(
         Some(code.clone()),
-        chain::link(*at as u64, exit.slot, 1, 1, entry)
+        chain::link(*at as u64, exit.slot.into(), 1, 1, entry)
     );
 }
 
@@ -2521,7 +2584,7 @@ fn direct_exits_chain_into_their_successors_in_the_page() {
         let at = site - slot;
         let expected = chain::link(at as u64, slot, 2, index, to.code.0 as u64);
         assert_eq!((patch.0, Some(patch.1.clone())), (at, expected));
-        assert!(from.successors.is_empty());
+        assert!(from.successors.iter().all(|exit| exit.linked));
     }
     // The first block chains into the second, which exits to the first.
     let (blocks, retired) = (machine.statistics.blocks, machine.cpu.retired);
@@ -5647,6 +5710,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
             site: (installed + thunk.next.unwrap()) as u64,
             target: GuestAddress(base + 8),
             word: ExitKind::Fallthrough.into(),
+            linked: false,
         }]
     );
     // Other System reads keep their exit.

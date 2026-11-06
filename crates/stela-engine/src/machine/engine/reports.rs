@@ -350,6 +350,8 @@ pub struct Statistics {
     pub chained: u64,
     /// Direct exits redirected into their successors.
     pub links: u64,
+    /// Links undone, as the blocks they chained into went.
+    pub unlinks: u64,
     /// Exits redirected through a lookup of their target (returns and
     /// direct exits out of their page), and the transfers those made.
     pub lookups: u64,
@@ -446,6 +448,7 @@ impl core::ops::AddAssign for Statistics {
             replaced_retired,
             chained,
             links,
+            unlinks,
             lookups,
             lookup_hits,
             exit_kinds,
@@ -503,6 +506,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.blocks, blocks),
             (&mut self.chained, chained),
             (&mut self.links, links),
+            (&mut self.unlinks, unlinks),
             (&mut self.lookups, lookups),
             (&mut self.lookup_hits, lookup_hits),
             (&mut self.compiled, compiled),
