@@ -968,6 +968,7 @@ impl stela_contracts::gate::GateService for ReadingService {
     fn signaled(&self) -> bool {
         false
     }
+    fn bundle(&self, _: stela_contracts::gate::BundleReport) {}
 }
 
 #[test]

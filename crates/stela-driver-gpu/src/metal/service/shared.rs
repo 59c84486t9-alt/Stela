@@ -30,7 +30,7 @@ use core::{
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use stela_contracts::gate::{CallerFault, CallerMemory, GateService, MemoryRange};
+use stela_contracts::gate::{BundleReport, CallerFault, CallerMemory, GateService, MemoryRange};
 
 pub struct SharedService<B: Backend, C: Compiler> {
     service: UnsafeCell<Service<B, C>>,
@@ -74,6 +74,9 @@ pub struct ServiceHost {
     /// Asks the platform to call [`SharedService::interrupted`] again soon,
     /// outside this turn: a turn held the service when the GPU interrupted.
     pub wake: fn(),
+    /// Told what the kext found of the Metal plugin, which the platform's
+    /// boot decides on: the plugin is the boot's.
+    pub bundle: fn(BundleReport),
 }
 
 /// A guest call the gate served, in the platform's ticks: the PE that rang
@@ -362,5 +365,9 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
 
     fn signaled(&self) -> bool {
         self.completed.swap(false, Ordering::Acquire)
+    }
+
+    fn bundle(&self, report: BundleReport) {
+        (self.host.bundle)(report);
     }
 }

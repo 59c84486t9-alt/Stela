@@ -192,6 +192,7 @@ const HOST: ServiceHost = ServiceHost {
     ticks: || 0,
     served: |_| {},
     wake: || panic!("no turn kept an interrupt from looking"),
+    bundle: |_| panic!("no kext reports"),
 };
 
 /// The GPU finishes what was committed.
@@ -412,6 +413,22 @@ fn interrupt_completion_queries_use_the_services_stack() {
     assert_eq!(RUNS.load(Ordering::Relaxed), 0);
     shared.interrupted();
     assert_eq!(RUNS.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn the_kexts_plugin_report_goes_to_the_platform() {
+    use stela_contracts::gate::BundleReport;
+    static REPORTS: AtomicUsize = AtomicUsize::new(0);
+    let host = ServiceHost {
+        bundle: |report| {
+            assert_eq!(report, BundleReport::Missing);
+            REPORTS.fetch_add(1, Ordering::Relaxed);
+        },
+        ..HOST
+    };
+    let shared = SharedService::new(service(), host);
+    shared.bundle(BundleReport::Missing);
+    assert_eq!(REPORTS.load(Ordering::Relaxed), 1);
 }
 
 #[test]

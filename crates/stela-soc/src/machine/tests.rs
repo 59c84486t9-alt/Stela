@@ -3906,6 +3906,7 @@ fn a_gate_store_is_served_in_its_own_pes_step() {
         fn signaled(&self) -> bool {
             false
         }
+        fn bundle(&self, _: stela_contracts::gate::BundleReport) {}
     }
     struct Caller;
     impl CallerMemory for Caller {

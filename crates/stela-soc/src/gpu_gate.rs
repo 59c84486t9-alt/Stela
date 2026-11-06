@@ -26,11 +26,11 @@ use core::num::NonZeroU64;
 use stela_contracts::{
     bus::AdvancePolicy,
     gate::{
-        CallerFault, GateAnswer, GateCall, GateRequest, GateService, MemoryRange,
+        BundleReport, CallerFault, GateAnswer, GateCall, GateRequest, GateService, MemoryRange,
         window::{
-            ACK, CALL, CLOSE, COUNT, FAULT, FAULT_DENIED, FAULT_NOT_RAM, FAULT_UNSUPPORTED, IMPORT,
-            IMPORT_ADDRESS, IMPORT_BYTES, IMPORT_TOKEN, IMPORTED, OPEN, OPENED, PAGE, RETIRE,
-            RETIRED, STATUS,
+            ACK, BUNDLE, CALL, CLOSE, COUNT, FAULT, FAULT_DENIED, FAULT_NOT_RAM, FAULT_UNSUPPORTED,
+            IMPORT, IMPORT_ADDRESS, IMPORT_BYTES, IMPORT_TOKEN, IMPORTED, OPEN, OPENED, PAGE,
+            RETIRE, RETIRED, STATUS,
         },
     },
     interrupt::{AicInput, Wire},
@@ -136,6 +136,7 @@ impl Gate {
                 self.retired = token.map_or(0, NonZeroU64::get);
                 self.reachable -= u64::from(token.is_some());
             }
+            GateAnswer::Reported => {}
         }
     }
 
@@ -274,6 +275,11 @@ impl MmioDevice for Gate {
                 self.retired = 0;
                 self.pending.insert(access.cpu, GateRequest::Retire);
             }
+            (0, BUNDLE) => {
+                let report =
+                    BundleReport::from_raw(value).ok_or_else(|| refused("no such report"))?;
+                self.pending.insert(access.cpu, GateRequest::Bundle(report));
+            }
             (_, CALL) => {
                 let gate = gate_index(page).ok_or_else(|| refused("no such register"))?;
                 let Slot::Open(connection) = self.slots[gate] else {
@@ -313,6 +319,7 @@ mod tests {
         imported: Vec<(u64, Vec<MemoryRange>, u64)>,
         retired: Vec<u64>,
         quiesced: bool,
+        bundles: Vec<BundleReport>,
     }
 
     struct Service(Mutex<Log>);
@@ -366,6 +373,10 @@ mod tests {
 
         fn signaled(&self) -> bool {
             core::mem::take(&mut self.0.lock().unwrap().signaled)
+        }
+
+        fn bundle(&self, report: BundleReport) {
+            self.0.lock().unwrap().bundles.push(report);
         }
     }
 
@@ -606,5 +617,22 @@ mod tests {
         gate.write(ACK, Width::Double, 0, &mut Access::new(0, 0, &mut line))
             .unwrap();
         assert_eq!((line.0, load(&mut gate, STATUS)), (Some(false), 0));
+    }
+
+    #[test]
+    fn the_kext_reports_its_plugin_through_the_service() {
+        let log = Arc::new(Service(Mutex::default()));
+        let mut gate = gate(&log);
+        use stela_contracts::gate::window::{BUNDLE_MISSING, BUNDLE_UPDATED};
+        for value in [BUNDLE_UPDATED, BUNDLE_MISSING] {
+            store(&mut gate, 0, BUNDLE, value).unwrap();
+            serve(&mut gate, 0);
+        }
+        assert!(store(&mut gate, 0, BUNDLE, 0).is_err());
+        assert!(store(&mut gate, 0, BUNDLE, 5).is_err());
+        assert_eq!(
+            log.0.lock().unwrap().bundles,
+            [BundleReport::Updated, BundleReport::Missing]
+        );
     }
 }

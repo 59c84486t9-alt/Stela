@@ -18,6 +18,7 @@
 #include <IOKit/IOLocks.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOWorkLoop.h>
+#include <kern/thread.h>
 
 #include "IOAccelerator.h"
 
@@ -44,6 +45,14 @@ public:
 	uint64_t importMemory(uint64_t page, task_t task, mach_vm_address_t address, mach_vm_size_t length);
 
 private:
+	/*
+	 * Installs the plugin the kext carries over /Library/GPUBundles' and
+	 * reports it to the gate, then publishes the accelerator if Metal may
+	 * load the plugin. A kernel thread's, holding a reference on `parameter`.
+	 */
+	static void installPlugin(void *parameter, wait_result_t);
+	/* Whether stop has closed admission. */
+	bool isStopping();
 	/* Unwires what the gate says the GPU no longer reaches. */
 	void retireMemory();
 	/* Maps the gate's control page and takes its interrupt. */

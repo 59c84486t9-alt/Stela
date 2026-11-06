@@ -49,6 +49,7 @@ fn from_disk(
     if options.single_user {
         defaults.boot_args.push_str(" -s");
     }
+    gpu::single_user(options.single_user);
     let result = if options.upgrade {
         bundle::upgrade_from_disk(partition, options.boot_volume, &defaults)
     } else if let Some(kind) = options.recovery {

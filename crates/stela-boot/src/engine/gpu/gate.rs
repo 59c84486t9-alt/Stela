@@ -19,7 +19,7 @@ use core::{
     ptr::{self, NonNull},
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
 };
-use stela_contracts::gate::{GateService, MemoryRange, window};
+use stela_contracts::gate::{BundleReport, GateService, MemoryRange, window};
 use stela_drivers::gpu::metal::{
     compiler::{self, AirCompiler},
     device::lifecycle::QuiesceStatus,
@@ -110,6 +110,44 @@ fn note(text: &str) {
     static SEEN: [AtomicU64; 512] = [const { AtomicU64::new(0) }; 512];
     if first_time(&SEEN, text) {
         output::arguments(format_args!("GPU {text}\n"));
+    }
+}
+
+/// Whether this boot is single-user: macOS starts no Metal client, and a
+/// maintenance installation may put the plugin in place.
+static SINGLE_USER: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn single_user(single_user: bool) {
+    SINGLE_USER.store(single_user, Ordering::Relaxed);
+}
+
+/// What the kext found of the Metal plugin, the bundle whose code this boot's
+/// trust cache lists. A multi-user boot's Metal clients cannot start without
+/// it, so the boot stops with the remedy rather than let WindowServer fail.
+fn bundle(report: BundleReport) {
+    let single_user = SINGLE_USER.load(Ordering::Relaxed);
+    match report {
+        BundleReport::Current => {
+            output::arguments(format_args!("GPU StelaGPU.bundle is this stela.efi's\n"));
+        }
+        BundleReport::Updated => {
+            output::arguments(format_args!(
+                "GPU StelaGPU.bundle updated to this stela.efi's\n"
+            ));
+        }
+        BundleReport::Missing | BundleReport::Failed if single_user => {
+            output::arguments(format_args!(
+                "GPU StelaGPU.bundle is not installed ({report:?}); this single-user boot may install it\n"
+            ));
+        }
+        BundleReport::Missing => output::fatal(
+            "StelaGPU.bundle is not installed in /Library/GPUBundles, and a kext cannot create \
+             its directories: install it from a single-user maintenance boot \
+             (docs/installation.md)",
+        ),
+        BundleReport::Failed => output::fatal(
+            "the StelaGPU kext could not install StelaGPU.bundle; its StelaGPU lines above say why",
+        ),
     }
 }
 
@@ -339,6 +377,7 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
             ticks: host::rdtsc,
             served,
             wake: look_again,
+            bundle,
         },
     )))
 }

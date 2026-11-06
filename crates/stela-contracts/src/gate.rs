@@ -62,6 +62,36 @@ pub trait GateService: Send + Sync {
     /// Whether the GPU completed work since this last answered true. Under
     /// the board's lock, so it answers at once.
     fn signaled(&self) -> bool;
+    /// Told what the kext found of the Metal plugin it installs.
+    fn bundle(&self, report: BundleReport);
+}
+
+/// What the kext found of the Metal plugin `/Library/GPUBundles` holds,
+/// against the one it carries, whose code the boot's trust cache lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleReport {
+    /// Every file was the kext's.
+    Current,
+    /// The kext rewrote the files that differed.
+    Updated,
+    /// The plugin's directories are absent, and the kernel cannot create
+    /// directories for a kext.
+    Missing,
+    /// Reading or writing a file failed.
+    Failed,
+}
+
+impl BundleReport {
+    /// The report a store of `value` to [`window::BUNDLE`] makes.
+    pub fn from_raw(value: u64) -> Option<Self> {
+        match value {
+            window::BUNDLE_CURRENT => Some(Self::Current),
+            window::BUNDLE_UPDATED => Some(Self::Updated),
+            window::BUNDLE_MISSING => Some(Self::Missing),
+            window::BUNDLE_FAILED => Some(Self::Failed),
+            _ => None,
+        }
+    }
 }
 
 /// What a store to a gate window asks of the service.
@@ -80,6 +110,7 @@ pub enum GateRequest {
         token: NonZeroU64,
     },
     Retire,
+    Bundle(BundleReport),
 }
 
 /// A request's result, for the gate at `window` of the board to record.
@@ -101,6 +132,7 @@ pub enum GateAnswer {
     },
     Imported(Option<NonZeroU64>),
     Retired(Option<NonZeroU64>),
+    Reported,
 }
 
 /// A store's request, taken from the gate to run in that store's own step
@@ -142,6 +174,10 @@ impl GateCall {
                 token,
             } => GateAnswer::Imported(self.service.import(connection, &ranges, token).ok()),
             GateRequest::Retire => GateAnswer::Retired(self.service.retired()),
+            GateRequest::Bundle(report) => {
+                self.service.bundle(report);
+                GateAnswer::Reported
+            }
         };
         GateOutcome {
             window: self.window,
@@ -203,6 +239,10 @@ pub mod window {
         RETIRE = 0x58;
         /// Control: the token that found, 0 for none.
         RETIRED = 0x60;
+        /// Control: a store reports what the kext found of the Metal
+        /// plugin, one of the `BUNDLE_` answers, before it publishes the
+        /// accelerator.
+        BUNDLE = 0x68;
 
         /// Gate: a store names a call record.
         CALL = 0x00;
@@ -215,5 +255,14 @@ pub mod window {
         FAULT_NOT_RAM = 2;
         /// `FAULT`: the caller's translation is one the model lacks.
         FAULT_UNSUPPORTED = 3;
+
+        /// `BUNDLE`: every file of the plugin was the kext's.
+        BUNDLE_CURRENT = 1;
+        /// `BUNDLE`: the kext rewrote the files that differed.
+        BUNDLE_UPDATED = 2;
+        /// `BUNDLE`: the plugin's directories are absent.
+        BUNDLE_MISSING = 3;
+        /// `BUNDLE`: reading or writing a file of the plugin failed.
+        BUNDLE_FAILED = 4;
     }
 }

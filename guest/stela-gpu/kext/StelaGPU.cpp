@@ -21,7 +21,17 @@ StelaGPU::start(IOService *provider)
 	 * none of.
 	 */
 	setProperty("GetGPUMaxPower", 0ULL, 32);
-	registerService();
+	// Metal loads the plugin the accelerator names, so the accelerator is
+	// published once the plugin is the one this boot trusts.
+	retain();
+	thread_t installer;
+	if (kernel_thread_start(&StelaGPU::installPlugin, this, &installer) != KERN_SUCCESS) {
+		release();
+		IOLog("StelaGPU: cannot start the plugin's installer\n");
+		stop(provider);
+		return false;
+	}
+	thread_deallocate(installer);
 	return true;
 }
 
