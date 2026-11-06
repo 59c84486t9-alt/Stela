@@ -452,7 +452,8 @@ records! {
         pub levels: [u64; 2],
         pub slices: [u64; 2],
         pub swizzle: [u8; 4],
-        pub reserved: u32,
+        /// `MTLTextureViewDescriptor.minLOD`; zero for the other selectors.
+        pub min_lod: f32,
     }
 
     /// `newTextureWithDescriptor:offset:bytesPerRow:` of a buffer.

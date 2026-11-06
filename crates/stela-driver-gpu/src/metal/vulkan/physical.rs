@@ -279,6 +279,8 @@ pub struct Features {
     pub vertex_input_dynamic_state: bool,
     pub vertex_attribute_instance_rate_divisor: bool,
     pub depth_clip_enable: bool,
+    /// `VK_EXT_image_view_min_lod` `minLod`.
+    pub image_view_min_lod: bool,
     pub fragment_shader_barycentric: bool,
     pub task_shader: bool,
     pub mesh_shader: bool,

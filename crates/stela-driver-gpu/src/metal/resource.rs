@@ -198,7 +198,7 @@ pub enum CpuAccess {
 
 /// The views shaders use. Vulkan storage views need identity swizzles, so a
 /// swizzled texture that shaders also write has two.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ShaderViews {
     pub sampled: Option<ImageViewInfo>,
     /// A sampled cube's faces as a 2D array, through which shaders read its
@@ -216,7 +216,7 @@ pub const fn sampled_descriptors(view_type: ImageViewType) -> u32 {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TexturePlan {
     pub image: ImageInfo,
     pub memory: MemoryRequest,
@@ -284,6 +284,7 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
         descriptor.swizzle,
         range,
         image.usage,
+        0.0,
     );
     attachment_storage(capabilities, descriptor.pixel_format, usage, &mut image);
     Ok(TexturePlan {
@@ -673,6 +674,7 @@ fn shader_views(
     swizzle: SwizzleChannels,
     range: SubresourceRange,
     image_usage: ImageUsage,
+    min_lod: f32,
 ) -> ShaderViews {
     let components = compose_swizzle(realization.swizzle, swizzle);
     let view = |usage, components| ImageViewInfo {
@@ -681,17 +683,22 @@ fn shader_views(
         components,
         range,
         usage,
+        min_lod,
     };
     let sampled = image_usage.contains(ImageUsage::SAMPLED);
     let storage = image_usage.contains(ImageUsage::STORAGE);
-    let (sampled, storage) = if components == IDENTITY {
+    // A minimum LOD bounds sampling only, so storage keeps a view without it.
+    let (sampled, storage) = if components == IDENTITY && min_lod == 0.0 {
         let usage = image_usage & (ImageUsage::SAMPLED | ImageUsage::STORAGE);
         let shared = (!usage.is_empty()).then(|| view(usage, IDENTITY));
         (shared.filter(|_| sampled), shared.filter(|_| storage))
     } else {
         (
             sampled.then(|| view(ImageUsage::SAMPLED, components)),
-            storage.then(|| view(ImageUsage::STORAGE, IDENTITY)),
+            storage.then(|| ImageViewInfo {
+                min_lod: 0.0,
+                ..view(ImageUsage::STORAGE, IDENTITY)
+            }),
         )
     };
     let faces = sampled
@@ -708,13 +715,15 @@ fn shader_views(
 }
 
 /// `newTextureViewWithPixelFormat:textureType:levels:slices:swizzle:`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TextureViewDescriptor {
     pub pixel_format: PixelFormat,
     pub texture_type: TextureType,
     pub levels: Range<u64>,
     pub slices: Range<u64>,
     pub swizzle: SwizzleChannels,
+    /// `minLOD`, in the view's levels.
+    pub min_lod: f32,
 }
 
 pub fn texture_view(
@@ -758,6 +767,15 @@ pub fn texture_view(
     if parent_description.is_color() {
         ensure(description.is_color(), "color textures have color views")?;
     }
+    let last_level = (view.levels.end - view.levels.start - 1) as f32;
+    ensure(
+        (0.0..=last_level).contains(&view.min_lod),
+        "view minLOD outside its levels",
+    )?;
+    require(
+        view.min_lod == 0.0 || capabilities.view_min_lod,
+        "texture view minimum LODs",
+    )?;
 
     let mut usage = ImageUsage::EMPTY;
     let parent_format = capabilities.format(parent.pixel_format);
@@ -781,12 +799,19 @@ pub fn texture_view(
         base_array_layer: view.slices.start as u32,
         layer_count: slices_u32(slices),
     };
+    // Vulkan counts the minimum in the image's levels, Metal in the view's.
+    let min_lod = if view.min_lod == 0.0 {
+        0.0
+    } else {
+        range.base_mip_level as f32 + view.min_lod
+    };
     Ok(shader_views(
         view_type(view.texture_type),
         realization,
         view.swizzle,
         range,
         usage,
+        min_lod,
     ))
 }
 
@@ -915,6 +940,7 @@ pub fn linear_texture(
         descriptor.swizzle,
         range,
         image.usage,
+        0.0,
     );
     attachment_storage(capabilities, descriptor.pixel_format, usage, &mut image);
     Ok(TexturePlan {

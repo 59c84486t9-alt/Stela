@@ -282,7 +282,11 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 {
 	StelaTextureDescriptorRecord record;
 	stela_texture_record(descriptor, &record);
-	return [self initWithDevice:device response:response record:&record];
+	self = [self initWithDevice:device response:response record:&record];
+	if (self && [descriptor respondsToSelector:@selector(allowGPUOptimizedContents)]) {
+		_gpuOptimized = [descriptor allowGPUOptimizedContents];
+	}
+	return self;
 }
 
 - (instancetype)initWithDevice:(StelaGPUDevice *)device
@@ -310,6 +314,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 		_usage = record->usage;
 		_swizzle = (MTLTextureSwizzleChannels){record->swizzle[0], record->swizzle[1],
 						       record->swizzle[2], record->swizzle[3]};
+		_gpuOptimized = YES;
 	}
 	return self;
 }
@@ -371,7 +376,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 
 - (BOOL)allowGPUOptimizedContents
 {
-	return YES;
+	return _gpuOptimized;
 }
 
 - (NSUInteger)compressionType
@@ -401,7 +406,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 
 - (float)minLOD
 {
-	return 0;
+	return _minLOD;
 }
 
 - (NSInteger)sparseTextureTier
@@ -409,13 +414,14 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 	return 0;
 }
 
+static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NSUInteger type, NSRange levels,
+    NSRange slices, MTLTextureSwizzleChannels swizzle, float min_lod);
+
 - (id)newTextureViewWithDescriptor:(id)descriptor
 {
-	return [self newTextureViewWithPixelFormat:[descriptor pixelFormat]
-				       textureType:[descriptor textureType]
-					    levels:[descriptor levelRange]
-					    slices:[descriptor sliceRange]
-					   swizzle:[descriptor swizzle]];
+	float min_lod = [descriptor respondsToSelector:@selector(minLOD)] ? [descriptor minLOD] : 0;
+	return new_view(self, [descriptor pixelFormat], [descriptor textureType], [descriptor levelRange],
+	    [descriptor sliceRange], [descriptor swizzle], min_lod);
 }
 
 - (id)parentTexture
@@ -569,39 +575,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 			     slices:(NSRange)slices
 			    swizzle:(MTLTextureSwizzleChannels)swizzle
 {
-	StelaNewTextureViewRequest request = {
-		.texture = _handle,
-		.pixel_format = format,
-		.texture_type = type,
-		.levels = {levels.location, levels.length},
-		.slices = {slices.location, slices.length},
-		.swizzle = {swizzle.red, swizzle.green, swizzle.blue, swizzle.alpha},
-	};
-	StelaTextureResponse response;
-	StelaFailure failure;
-	if (STELA_CALL(&_device->_gate, NewTextureView, &request, &response, &failure) != StelaStatusOk) {
-		stela_report("a texture view", &failure);
-		return nil;
-	}
-	StelaGPUTexture *view = [StelaGPUTexture alloc];
-	view = [view initWithDevice:_device handle:response.handle];
-	view->_options = _options;
-	view->_allocatedSize = response.allocated_size;
-	view->_resourceID = response.resource_id;
-	view->_textureType = type;
-	view->_pixelFormat = format;
-	view->_width = _width >> levels.location ?: 1;
-	view->_height = _height >> levels.location ?: 1;
-	view->_depth = _depth >> levels.location ?: 1;
-	view->_mipmapLevelCount = levels.length;
-	view->_sampleCount = _sampleCount;
-	view->_arrayLength = slices.length;
-	view->_usage = _usage;
-	view->_swizzle = swizzle;
-	view->_parent = self;
-	view->_parentLevel = levels.location;
-	view->_parentSlice = slices.location;
-	return view;
+	return new_view(self, format, type, levels, slices, swizzle, 0);
 }
 
 - (id)newTextureViewWithPixelFormat:(NSUInteger)format
@@ -1158,3 +1132,44 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 }
 
 @end
+
+static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NSUInteger type, NSRange levels,
+    NSRange slices, MTLTextureSwizzleChannels swizzle, float min_lod)
+{
+	StelaNewTextureViewRequest request = {
+		.texture = texture->_handle,
+		.pixel_format = format,
+		.texture_type = type,
+		.levels = {levels.location, levels.length},
+		.slices = {slices.location, slices.length},
+		.swizzle = {swizzle.red, swizzle.green, swizzle.blue, swizzle.alpha},
+		.min_lod = min_lod,
+	};
+	StelaTextureResponse response;
+	StelaFailure failure;
+	if (STELA_CALL(&texture->_device->_gate, NewTextureView, &request, &response, &failure) != StelaStatusOk) {
+		stela_report("a texture view", &failure);
+		return nil;
+	}
+	StelaGPUTexture *view = [StelaGPUTexture alloc];
+	view = [view initWithDevice:texture->_device handle:response.handle];
+	view->_options = texture->_options;
+	view->_allocatedSize = response.allocated_size;
+	view->_resourceID = response.resource_id;
+	view->_textureType = type;
+	view->_pixelFormat = format;
+	view->_width = texture->_width >> levels.location ?: 1;
+	view->_height = texture->_height >> levels.location ?: 1;
+	view->_depth = texture->_depth >> levels.location ?: 1;
+	view->_mipmapLevelCount = levels.length;
+	view->_sampleCount = texture->_sampleCount;
+	view->_arrayLength = slices.length;
+	view->_usage = texture->_usage;
+	view->_swizzle = swizzle;
+	view->_minLOD = min_lod;
+	view->_gpuOptimized = texture->_gpuOptimized;
+	view->_parent = texture;
+	view->_parentLevel = levels.location;
+	view->_parentSlice = slices.location;
+	return view;
+}

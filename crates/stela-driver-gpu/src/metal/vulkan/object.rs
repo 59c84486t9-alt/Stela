@@ -80,14 +80,17 @@ pub struct SubresourceRange {
     pub layer_count: u32,
 }
 
-/// `VkImageViewCreateInfo` with `VkImageViewUsageCreateInfo`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// `VkImageViewCreateInfo` with `VkImageViewUsageCreateInfo` and, when
+/// `min_lod` is nonzero, `VkImageViewMinLodCreateInfoEXT`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ImageViewInfo {
     pub view_type: ImageViewType,
     pub format: Format,
     pub components: [ComponentSwizzle; 4],
     pub range: SubresourceRange,
     pub usage: ImageUsage,
+    /// The lowest level sampling reaches, in the image's levels.
+    pub min_lod: f32,
 }
 
 /// `VkBufferViewCreateInfo`.

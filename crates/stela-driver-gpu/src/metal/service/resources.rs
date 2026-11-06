@@ -107,6 +107,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             levels: range(request.levels)?,
             slices: range(request.slices)?,
             swizzle: swizzle(request.swizzle)?,
+            min_lod: request.min_lod,
         };
         let texture = self.device.new_texture_view(parent, &view)?;
         let response = self.adopt_texture(call.connection, texture)?;

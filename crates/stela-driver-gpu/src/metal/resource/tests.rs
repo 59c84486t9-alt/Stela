@@ -345,6 +345,7 @@ fn views_follow_metal_format_and_type_compatibility() {
             levels,
             slices,
             swizzle: SwizzleChannels::IDENTITY,
+            min_lod: 0.0,
         }
     };
     let cube = texture_view(
@@ -410,6 +411,34 @@ fn views_follow_metal_format_and_type_compatibility() {
 }
 
 #[test]
+fn view_minimum_lods_bound_sampling_in_the_images_levels() {
+    let capabilities = capabilities();
+    let mut parent = descriptor(TextureType::D2, PixelFormat::Rgba8Unorm);
+    parent.width = 16;
+    parent.height = 16;
+    parent.mipmap_level_count = 5;
+    parent.usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
+    let view = |levels: Range<u64>, min_lod| TextureViewDescriptor {
+        pixel_format: PixelFormat::Rgba8Unorm,
+        texture_type: TextureType::D2,
+        levels,
+        slices: 0..1,
+        swizzle: SwizzleChannels::IDENTITY,
+        min_lod,
+    };
+    let views = texture_view(&capabilities, &parent, &view(1..4, 1.5)).unwrap();
+    // Vulkan counts from the image's first level, Metal from the view's.
+    assert_eq!(views.sampled.unwrap().min_lod, 2.5);
+    assert_eq!(views.storage.unwrap().min_lod, 0.0);
+    assert!(texture_view(&capabilities, &parent, &view(1..4, 2.5)).is_err());
+    assert!(texture_view(&capabilities, &parent, &view(1..4, -1.0)).is_err());
+    let mut lacking = capabilities.clone();
+    lacking.view_min_lod = false;
+    assert!(texture_view(&lacking, &parent, &view(1..4, 1.0)).is_err());
+    assert!(texture_view(&lacking, &parent, &view(1..4, 0.0)).is_ok());
+}
+
+#[test]
 fn stencil_views_read_the_stencil_aspect() {
     let capabilities = capabilities();
     let parent = descriptor(TextureType::D2, PixelFormat::Depth32FloatStencil8);
@@ -419,6 +448,7 @@ fn stencil_views_read_the_stencil_aspect() {
         levels: 0..1,
         slices: 0..1,
         swizzle: SwizzleChannels::IDENTITY,
+        min_lod: 0.0,
     };
     let view = texture_view(&capabilities, &parent, &stencil)
         .unwrap()

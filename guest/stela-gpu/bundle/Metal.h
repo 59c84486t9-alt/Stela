@@ -354,8 +354,11 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (NSUInteger)storageMode;
 - (NSUInteger)usage;
 - (MTLTextureSwizzleChannels)swizzle;
+- (BOOL)allowGPUOptimizedContents;
+/* MTLTextureViewDescriptor. */
 - (NSRange)levelRange;
 - (NSRange)sliceRange;
+- (float)minLOD;
 - (NSUInteger)size;
 - (NSUInteger)type;
 - (NSUInteger)sparsePageSize;

@@ -702,6 +702,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             } else {
                 crate::metal::vulkan::ImageUsage::DEPTH_STENCIL_ATTACHMENT
             },
+            min_lod: 0.0,
         };
         let created = self.backend.create_image_view(image, &info)?;
         self.resources
@@ -740,6 +741,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             components: [crate::metal::vulkan::ComponentSwizzle::Identity; 4],
             range: view.range,
             usage: crate::metal::vulkan::ImageUsage::STORAGE,
+            min_lod: 0.0,
         };
         let created = self.backend.create_image_view(image, &info)?;
         let descriptor = match self.descriptor(Descriptor::StorageImage(created)) {

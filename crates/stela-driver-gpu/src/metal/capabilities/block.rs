@@ -77,6 +77,8 @@ option_set! {
         const MEMORYLESS_RENDER_TARGETS = 1 << 33;
         /// `isFramebufferReadSupported`.
         const FRAMEBUFFER_READS = 1 << 34;
+        /// `MTLTextureViewDescriptor.minLOD`.
+        const VIEW_MIN_LOD = 1 << 35;
     }
 }
 
@@ -355,6 +357,7 @@ impl Block {
             alpha_to_one: has(Flags::ALPHA_TO_ONE),
             depth_clamp: has(Flags::DEPTH_CLAMP),
             wireframe: has(Flags::WIREFRAME),
+            view_min_lod: has(Flags::VIEW_MIN_LOD),
             timestamp_frequency: self.timestamp_frequency,
             statistic_counters: has(Flags::STATISTIC_COUNTERS),
             memoryless_render_targets: has(Flags::MEMORYLESS_RENDER_TARGETS),
@@ -605,6 +608,7 @@ impl Capabilities {
             .with(Flags::ALPHA_TO_ONE, self.alpha_to_one)
             .with(Flags::DEPTH_CLAMP, self.depth_clamp)
             .with(Flags::WIREFRAME, self.wireframe)
+            .with(Flags::VIEW_MIN_LOD, self.view_min_lod)
             .with(Flags::STATISTIC_COUNTERS, self.statistic_counters)
             .with(
                 Flags::MEMORYLESS_RENDER_TARGETS,

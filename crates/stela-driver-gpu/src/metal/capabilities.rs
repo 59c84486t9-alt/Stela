@@ -303,6 +303,8 @@ pub struct Capabilities {
     pub depth_clamp: bool,
     /// `MTLTriangleFillModeLines`.
     pub wireframe: bool,
+    /// `MTLTextureViewDescriptor.minLOD`.
+    pub view_min_lod: bool,
     /// Timestamp ticks per second; zero without timestamp counters.
     pub timestamp_frequency: u64,
     /// `MTLCommonCounterSetStatistic` is among `counterSets`.
@@ -823,6 +825,10 @@ impl Derivation<'_> {
                 && features.extended_dynamic_state3_depth_clamp_enable
                 && features.extended_dynamic_state3_depth_clip_enable,
         ));
+        let view_min_lod = self.check(driver(
+            "texture view minimum LODs",
+            features.image_view_min_lod,
+        ));
         let wireframe = self.check(driver(
             "triangle line fill",
             features.fill_mode_non_solid && features.extended_dynamic_state3_polygon_mode,
@@ -948,6 +954,7 @@ impl Derivation<'_> {
             alpha_to_one,
             depth_clamp,
             wireframe,
+            view_min_lod,
             timestamp_frequency: if timestamps {
                 (1e9 / f64::from(limits.timestamp_period)) as u64
             } else {

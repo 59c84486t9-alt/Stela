@@ -242,7 +242,8 @@ pub(super) fn image_view<T>(
     let range = info.range;
     let mut usage = vk::ImageViewUsageCreateInfo::default()
         .usage(vk::ImageUsageFlags::from_raw(info.usage.bits()));
-    let create = vk::ImageViewCreateInfo::default()
+    let mut min_lod = vk::ImageViewMinLodCreateInfoEXT::default().min_lod(info.min_lod);
+    let mut create = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(vk::ImageViewType::from_raw(info.view_type.raw() as i32))
         .format(format(info.format))
@@ -260,6 +261,9 @@ pub(super) fn image_view<T>(
             layer_count: range.layer_count,
         })
         .push_next(&mut usage);
+    if info.min_lod != 0.0 {
+        create = create.push_next(&mut min_lod);
+    }
     build(&create)
 }
 

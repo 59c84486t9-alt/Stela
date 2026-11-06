@@ -218,7 +218,7 @@ fn textures_trade_regions_with_guest_memory() {
         levels: [0, 1],
         slices: [0, 1],
         swizzle: IDENTITY,
-        reserved: 0,
+        min_lod: 0.0,
     };
     let view: Result<TextureResponse, _> = call(
         &mut service,

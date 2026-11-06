@@ -45,7 +45,7 @@ impl Default for UnifiedImageLayoutsFeatures {
 
 /// Extensions the device enables when the driver offers them. The
 /// requirements decide which absences refuse the device.
-const ENABLED: [&CStr; 28] = [
+const ENABLED: [&CStr; 29] = [
     UNIFIED_IMAGE_LAYOUTS,
     generated::NAME,
     ext::robustness2::NAME,
@@ -66,6 +66,7 @@ const ENABLED: [&CStr; 28] = [
     khr::vertex_attribute_divisor::NAME,
     ext::depth_bias_control::NAME,
     ext::depth_clip_enable::NAME,
+    ext::image_view_min_lod::NAME,
     ext::vertex_input_dynamic_state::NAME,
     ext::fragment_shader_interlock::NAME,
     khr::fragment_shader_barycentric::NAME,
@@ -141,6 +142,7 @@ pub(super) struct FeatureChain {
     divisor: vk::PhysicalDeviceVertexAttributeDivisorFeaturesKHR<'static>,
     depth_bias: vk::PhysicalDeviceDepthBiasControlFeaturesEXT<'static>,
     depth_clip: vk::PhysicalDeviceDepthClipEnableFeaturesEXT<'static>,
+    view_min_lod: vk::PhysicalDeviceImageViewMinLodFeaturesEXT<'static>,
     vertex_input: vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT<'static>,
     interlock: vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT<'static>,
     barycentric: vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR<'static>,
@@ -190,6 +192,7 @@ impl FeatureChain {
             divisor if extensions.has(khr::vertex_attribute_divisor::NAME);
             depth_bias if extensions.has(ext::depth_bias_control::NAME);
             depth_clip if extensions.has(ext::depth_clip_enable::NAME);
+            view_min_lod if extensions.has(ext::image_view_min_lod::NAME);
             vertex_input if extensions.has(ext::vertex_input_dynamic_state::NAME);
             interlock if extensions.has(ext::fragment_shader_interlock::NAME);
             barycentric if extensions.has(khr::fragment_shader_barycentric::NAME);
@@ -359,6 +362,7 @@ impl FeatureChain {
                 .divisor
                 .vertex_attribute_instance_rate_divisor),
             depth_clip_enable: on(self.depth_clip.depth_clip_enable),
+            image_view_min_lod: on(self.view_min_lod.min_lod),
             fragment_shader_barycentric: on(self.barycentric.fragment_shader_barycentric),
             task_shader: on(self.mesh.task_shader),
             mesh_shader: on(self.mesh.mesh_shader),

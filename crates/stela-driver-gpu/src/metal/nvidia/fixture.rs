@@ -314,6 +314,7 @@ fn features(chip: &Chip) -> Features {
         vertex_input_dynamic_state: true,
         vertex_attribute_instance_rate_divisor: true,
         depth_clip_enable: true,
+        image_view_min_lod: true,
         fragment_shader_barycentric: true,
         task_shader: true,
         mesh_shader: true,

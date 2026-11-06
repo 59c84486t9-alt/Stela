@@ -194,6 +194,7 @@ fn textures_publish_descriptors_and_release_them() {
                 levels: 0..1,
                 slices: 0..1,
                 swizzle: SwizzleChannels::IDENTITY,
+                min_lod: 0.0,
             },
         )
         .unwrap_or_else(|error| panic!("{error:?}"));

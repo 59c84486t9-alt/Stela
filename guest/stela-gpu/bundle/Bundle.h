@@ -187,7 +187,9 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	NSUInteger _bufferOffset, _bufferBytesPerRow, _firstMipmapInTail, _tailSizeInBytes;
 	NSUInteger _parentLevel, _parentSlice;
 	MTLTextureSwizzleChannels _swizzle;
-	BOOL _sparse, _shareable;
+	/* A view's minLOD, in its levels. */
+	float _minLOD;
+	BOOL _sparse, _shareable, _gpuOptimized;
 	id _buffer, _parent;
 	IOSurfaceRef _surface;
 	NSUInteger _surfacePlane;
