@@ -593,6 +593,70 @@ void_functions_write_nothing(void)
    ralloc_free(shader);
 }
 
+/* A sample's position and the pass's sample count, from the fragment table. */
+static const char *sampled =
+   "define <4 x float> @fragment(i32 %sample) {\n"
+   "%p = call <2 x float> @air.get_sample_position.v2f32(i32 %sample, i32 0)\n"
+   "%n = call i32 @air.get_num_samples.i32(i32 0)\n"
+   "%f = uitofp i32 %n to float\n"
+   "%x = extractelement <2 x float> %p, i32 0\n%y = extractelement <2 x float> %p, i32 1\n"
+   "%v0 = insertelement <4 x float> undef, float %x, i32 0\n"
+   "%v1 = insertelement <4 x float> %v0, float %y, i32 1\n"
+   "%v2 = insertelement <4 x float> %v1, float %f, i32 2\n"
+   "%v3 = insertelement <4 x float> %v2, float 1.0, i32 3\n"
+   "ret <4 x float> %v3\n}\n"
+   "declare <2 x float> @air.get_sample_position.v2f32(i32, i32)\n"
+   "declare i32 @air.get_num_samples.i32(i32)\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @fragment, !3, !4}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"color\"}\n"
+   "!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.sample_id\", !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\","
+   " !\"sample\"}\n";
+
+/* The global loads of `components` lanes at `offset` from the stage's table. */
+static unsigned
+table_loads(nir_shader *shader, unsigned components, unsigned offset)
+{
+   unsigned loads = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
+            if (load->intrinsic != nir_intrinsic_load_global || load->num_components != components)
+               continue;
+            nir_scalar address = nir_scalar_resolved(load->src[0].ssa, 0);
+            if (nir_scalar_is_alu(address) && nir_scalar_alu_op(address) == nir_op_iadd &&
+                nir_scalar_is_const(nir_scalar_chase_alu_src(address, 1)) &&
+                nir_scalar_as_uint(nir_scalar_chase_alu_src(address, 1)) == offset)
+               loads++;
+         }
+      }
+   }
+   return loads;
+}
+
+static void
+fragment_functions_read_their_pass_samples(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = translate(sampled, STELA_AIR_FRAGMENT, false, &error);
+   if (!shader)
+      fprintf(stderr, "sampled: %u %s\n", error.kind, error.detail);
+   assert(shader && error.kind == STELA_AIR_OK);
+   assert(table_loads(shader, 4, STELA_METAL_TABLE_SAMPLE_POSITIONS) == 1);
+   assert(table_loads(shader, 1, STELA_METAL_TABLE_SAMPLE_COUNT) == 1);
+   ralloc_free(shader);
+   /* The trailing operand of another meaning is refused. */
+   char *other = change(sampled, "get_num_samples.i32(i32 0)", "get_num_samples.i32(i32 1)");
+   assert(!translate(other, STELA_AIR_FRAGMENT, false, &error) &&
+          error.kind == STELA_AIR_INSTRUCTION);
+   free(other);
+}
+
 static void
 refuses_unrepresentable_render_io(void)
 {
@@ -676,6 +740,7 @@ main(void)
    fragment_functions_interpolate_and_write_targets();
    fragment_functions_interpolate_their_interpolants();
    void_functions_write_nothing();
+   fragment_functions_read_their_pass_samples();
    refuses_unrepresentable_render_io();
    glsl_type_singleton_decref();
    puts("air render io: ok");

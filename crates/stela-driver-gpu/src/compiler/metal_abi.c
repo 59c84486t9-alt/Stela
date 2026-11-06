@@ -27,7 +27,7 @@ nir_def *stela_metal_load_table(nir_builder *b, enum stela_metal_table table)
 nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_value value,
                                        void *stage)
 {
-   (void)stage;
+   const struct stela_metal_stage *metal = stage;
    switch (value) {
    case STELA_AIR_DISPATCH_GRID:
       return load_push(b, 3, 32, STELA_METAL_PUSH_GRID);
@@ -44,6 +44,13 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
                              nir_iadd_imm(b, load_push(b, 1, 64, STELA_METAL_PUSH_ARGUMENTS),
                                           STELA_METAL_DISPATCH_SHAPE),
                              .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 4);
+   case STELA_AIR_SAMPLE_COUNT:
+      return load(b, stela_metal_load_table(b, metal->table), STELA_METAL_TABLE_SAMPLE_COUNT, 32);
+   case STELA_AIR_SAMPLE_POSITIONS:
+      return nir_load_global(b, 4, 32,
+                             nir_iadd_imm(b, stela_metal_load_table(b, metal->table),
+                                          STELA_METAL_TABLE_SAMPLE_POSITIONS),
+                             .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
    case STELA_AIR_PATCH_IDS: {
       /* The tessellation control stage's PATCH0. */
       nir_variable *ids = nir_variable_create(b->shader, nir_var_shader_in, glsl_uvec_type(3),

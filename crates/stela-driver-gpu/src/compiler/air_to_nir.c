@@ -539,7 +539,8 @@ device_value(struct translator *t, enum stela_air_device_value value)
    }
    nir_def *def = t->options->load_device_value(&t->b, value, t->options->binding_data);
    unsigned components = value == STELA_AIR_DISPATCH_GRID || value == STELA_AIR_PATCH_IDS ||
-                         value == STELA_AIR_THREADGROUP_SHAPE ? 3 : 1;
+                         value == STELA_AIR_THREADGROUP_SHAPE ? 3 :
+                         value == STELA_AIR_SAMPLE_POSITIONS  ? 4 : 1;
    if (!def || def->num_components != components || def->bit_size != 32 || !binding_prelude(t)) {
       fail(t, STELA_AIR_ARGUMENT, "invalid device value");
       return NULL;
@@ -2436,6 +2437,43 @@ interpolant_call(struct translator *t, LLVMValueRef inst, const char *name, size
    return put_value(t, inst, stage_narrow(&t->b, def, io->primitive), 0);
 }
 
+/* "air.get_num_samples.i32" and "air.get_sample_position.v2f32", whose last
+ * operand is 0, from the pass's samples; an index past them reads one of the
+ * 16 positions the pass holds. */
+static bool
+sample_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name_length,
+            bool *lowered)
+{
+   bool count = stela_air_call_named(name, name_length, "air.get_num_samples.i32");
+   *lowered = count || stela_air_call_named(name, name_length, "air.get_sample_position.v2f32");
+   if (!*lowered)
+      return true;
+   unsigned operands = count ? 1 : 2;
+   LLVMValueRef last = LLVMGetNumArgOperands(inst) == operands ?
+      LLVMGetOperand(inst, operands - 1) : NULL;
+   if (!last || !LLVMIsAConstantInt(last) || LLVMConstIntGetZExtValue(last))
+      return fail(t, STELA_AIR_INSTRUCTION, "a sample query of another kind");
+   if (!t->stage_options || t->stage_options->stage != STELA_AIR_FRAGMENT)
+      return fail(t, STELA_AIR_INSTRUCTION, "sample queries exist only in fragment functions");
+   if (count) {
+      nir_def *samples = device_value(t, STELA_AIR_SAMPLE_COUNT);
+      return samples && put_value(t, inst, samples, 0);
+   }
+   nir_def *index = get_value(t, LLVMGetOperand(inst, 0));
+   if (!index || index->num_components != 1 || index->bit_size != 32)
+      return fail(t, STELA_AIR_TYPE, "a sample index is one uint");
+   nir_def *positions = device_value(t, STELA_AIR_SAMPLE_POSITIONS);
+   if (!positions)
+      return false;
+   nir_builder *b = &t->b;
+   index = nir_iand_imm(b, index, 15);
+   nir_def *word = nir_vector_extract(b, positions, nir_ushr_imm(b, index, 2));
+   nir_def *byte = nir_ubitfield_extract(b, word, nir_imul_imm(b, nir_iand_imm(b, index, 3), 8),
+                                         nir_imm_int(b, 8));
+   nir_def *sixteenths = nir_vec2(b, nir_iand_imm(b, byte, 0xf), nir_ushr_imm(b, byte, 4));
+   return put_value(t, inst, nir_fmul_imm(b, nir_u2f32(b, sixteenths), 1.0 / 16.0), 0);
+}
+
 static bool
 stage_arguments(struct translator *t, LLVMValueRef fn)
 {
@@ -4106,6 +4144,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       if (lowered)
          return true;
       if (!interpolant_call(t, inst, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
+      if (!sample_call(t, inst, name, name_length, &lowered))
          return false;
       if (lowered)
          return true;

@@ -310,8 +310,9 @@ impl CommandBuffer {
             pass.visibility_results == visibility_buffer.is_some(),
             "the visibility result buffer was not resolved",
         )?;
+        let pass_samples = pass.samples()?;
         self.bindings.reset();
-        self.bindings.set_attachments(pass.inputs.textures);
+        self.bindings.set_pass(pass.inputs.textures, pass_samples);
         for &(sample, boundary) in &samples {
             if let (CounterSample::Statistic(destination), true) = (sample, boundary.starts()) {
                 self.recorder.sample_statistics(resolver, destination)?;

@@ -179,6 +179,9 @@ pub struct ArgumentTable {
     pub samplers: [ResourceId; MAX_SAMPLER_BINDINGS as usize],
     /// The pass's color attachments, which `[[color(n)]]` inputs read.
     pub attachments: [ResourceId; MAX_COLOR_ATTACHMENTS],
+    /// The pass's samples, which `get_num_samples` and
+    /// `get_sample_position` read.
+    pub samples: PassSamples,
 }
 
 impl Default for ArgumentTable {
@@ -188,6 +191,47 @@ impl Default for ArgumentTable {
             textures: [ResourceId::NULL; MAX_TEXTURE_BINDINGS as usize],
             samplers: [ResourceId::NULL; MAX_SAMPLER_BINDINGS as usize],
             attachments: [ResourceId::NULL; MAX_COLOR_ATTACHMENTS],
+            samples: PassSamples::default(),
+        }
+    }
+}
+
+/// A render pass's samples per pixel and their positions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PassSamples {
+    /// A byte per sample, the first lowest: x in 1/16 pixel in the low
+    /// nibble, y in the high.
+    pub positions: u128,
+    pub count: u32,
+}
+
+impl Default for PassSamples {
+    /// One sample at the pixel's centre.
+    fn default() -> Self {
+        Self {
+            positions: 0x88,
+            count: 1,
+        }
+    }
+}
+
+impl PassSamples {
+    /// The most samples the table holds.
+    pub const MAX: usize = 16;
+
+    /// Samples at `positions` in [0, 1) from the pixel's top left, on the
+    /// 1/16 pixel grid.
+    pub fn new(positions: &[[f32; 2]]) -> Self {
+        debug_assert!(!positions.is_empty() && positions.len() <= Self::MAX);
+        let sixteenths = |coordinate: f32| (coordinate * 16.0) as u128 & 0xf;
+        Self {
+            positions: positions
+                .iter()
+                .enumerate()
+                .fold(0, |packed, (sample, &[x, y])| {
+                    packed | (sixteenths(x) | sixteenths(y) << 4) << (8 * sample)
+                }),
+            count: positions.len() as u32,
         }
     }
 }
@@ -198,7 +242,10 @@ impl ArgumentTable {
     pub const TEXTURES_OFFSET: u32 = Self::BUFFER_LENGTHS_OFFSET + MAX_BUFFER_BINDINGS * 8;
     pub const SAMPLERS_OFFSET: u32 = Self::TEXTURES_OFFSET + MAX_TEXTURE_BINDINGS * 8;
     pub const ATTACHMENTS_OFFSET: u32 = Self::SAMPLERS_OFFSET + MAX_SAMPLER_BINDINGS * 8;
-    pub const BYTES: u32 = Self::ATTACHMENTS_OFFSET + MAX_COLOR_ATTACHMENTS as u32 * 8;
+    pub const SAMPLE_POSITIONS_OFFSET: u32 =
+        Self::ATTACHMENTS_OFFSET + MAX_COLOR_ATTACHMENTS as u32 * 8;
+    pub const SAMPLE_COUNT_OFFSET: u32 = Self::SAMPLE_POSITIONS_OFFSET + 16;
+    pub const BYTES: u32 = Self::SAMPLE_COUNT_OFFSET + 16;
     /// Tables are placed at this alignment in the upload ring.
     pub const ALIGNMENT: u64 = 16;
 
@@ -222,6 +269,11 @@ impl ArgumentTable {
             .chain(&self.samplers)
             .chain(&self.attachments)
             .for_each(|id| writer.u64(id.0));
+        writer.u64(self.samples.positions as u64);
+        writer.u64((self.samples.positions >> 64) as u64);
+        [self.samples.count, 0, 0, 0]
+            .into_iter()
+            .for_each(|word| writer.u32(word));
     }
 }
 
@@ -806,6 +858,14 @@ mod tests {
                 "STELA_METAL_TABLE_ATTACHMENTS",
                 ArgumentTable::ATTACHMENTS_OFFSET,
             ),
+            (
+                "STELA_METAL_TABLE_SAMPLE_POSITIONS",
+                ArgumentTable::SAMPLE_POSITIONS_OFFSET,
+            ),
+            (
+                "STELA_METAL_TABLE_SAMPLE_COUNT",
+                ArgumentTable::SAMPLE_COUNT_OFFSET,
+            ),
             ("STELA_METAL_TABLE_BYTES", ArgumentTable::BYTES),
             (
                 "STELA_METAL_ACCUMULATE_RESULTS",
@@ -1181,7 +1241,8 @@ mod tests {
         assert_eq!(ArgumentTable::TEXTURES_OFFSET, 496);
         assert_eq!(ArgumentTable::SAMPLERS_OFFSET, 1520);
         assert_eq!(ArgumentTable::ATTACHMENTS_OFFSET, 1648);
-        assert_eq!(ArgumentTable::BYTES, 1712);
+        assert_eq!(ArgumentTable::SAMPLE_POSITIONS_OFFSET, 1712);
+        assert_eq!(ArgumentTable::BYTES, 1744);
         assert_eq!(
             u64::from(ArgumentTable::BYTES) % ArgumentTable::ALIGNMENT,
             0
@@ -1194,6 +1255,13 @@ mod tests {
         };
         table.textures[1] = ResourceId::new(7, 9);
         table.samplers[15] = ResourceId::new(3, 4);
+        // Sixteen samples, the last at (1/16, 0).
+        table.samples = PassSamples::new(
+            &[[0.5, 0.5]; 15]
+                .into_iter()
+                .chain([[0.0625, 0.0]])
+                .collect::<Vec<_>>(),
+        );
         let bytes = table.encode();
         let u64_at =
             |offset: u32| u64::from_le_bytes(bytes[offset as usize..][..8].try_into().unwrap());
@@ -1201,6 +1269,15 @@ mod tests {
         assert_eq!(u64_at(ArgumentTable::BUFFER_LENGTHS_OFFSET + 30 * 8), 64);
         assert_eq!(u64_at(ArgumentTable::TEXTURES_OFFSET + 8), 9 << 32 | 7);
         assert_eq!(u64_at(ArgumentTable::SAMPLERS_OFFSET + 15 * 8), 4 << 32 | 3);
+        assert_eq!(
+            u64_at(ArgumentTable::SAMPLE_POSITIONS_OFFSET),
+            0x8888_8888_8888_8888
+        );
+        assert_eq!(
+            u64_at(ArgumentTable::SAMPLE_POSITIONS_OFFSET + 8),
+            0x0188_8888_8888_8888
+        );
+        assert_eq!(bytes[ArgumentTable::SAMPLE_COUNT_OFFSET as usize], 16);
     }
 
     #[test]

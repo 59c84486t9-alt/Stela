@@ -11,7 +11,7 @@ use super::{
         LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, StoreAction,
         StoreActionOptions, TextureType, TextureUsage,
     },
-    binding::ResourceId,
+    binding::{PassSamples, ResourceId},
     capabilities::{Capabilities, FormatCapabilities as C},
     error::{Error, Result, ensure, require},
     pipeline::MAX_COLOR_ATTACHMENTS,
@@ -142,7 +142,72 @@ pub enum AttachmentSlot {
     Stencil,
 }
 
+/// Vulkan's standard sample positions, which are Metal's defaults, in
+/// [0, 1) from the pixel's top left.
+fn standard_sample_positions(samples: u32) -> Option<&'static [[f32; 2]]> {
+    const ONE: [[f32; 2]; 1] = [[0.5, 0.5]];
+    const TWO: [[f32; 2]; 2] = [[0.75, 0.75], [0.25, 0.25]];
+    const FOUR: [[f32; 2]; 4] = [
+        [0.375, 0.125],
+        [0.875, 0.375],
+        [0.125, 0.625],
+        [0.625, 0.875],
+    ];
+    const EIGHT: [[f32; 2]; 8] = [
+        [0.5625, 0.3125],
+        [0.4375, 0.6875],
+        [0.8125, 0.5625],
+        [0.3125, 0.1875],
+        [0.1875, 0.8125],
+        [0.0625, 0.4375],
+        [0.6875, 0.9375],
+        [0.9375, 0.0625],
+    ];
+    const SIXTEEN: [[f32; 2]; 16] = [
+        [0.5625, 0.5625],
+        [0.4375, 0.3125],
+        [0.3125, 0.625],
+        [0.75, 0.4375],
+        [0.1875, 0.375],
+        [0.625, 0.8125],
+        [0.8125, 0.6875],
+        [0.6875, 0.1875],
+        [0.375, 0.875],
+        [0.5, 0.0625],
+        [0.25, 0.125],
+        [0.125, 0.75],
+        [0.0, 0.5],
+        [0.9375, 0.25],
+        [0.875, 0.9375],
+        [0.0625, 0.0],
+    ];
+    match samples {
+        1 => Some(&ONE),
+        2 => Some(&TWO),
+        4 => Some(&FOUR),
+        8 => Some(&EIGHT),
+        16 => Some(&SIXTEEN),
+        _ => None,
+    }
+}
+
 impl<T: Copy> RenderPassPlan<T> {
+    /// The samples fragment functions read: the pass's custom positions, or
+    /// the standard ones.
+    pub fn samples(&self) -> Result<PassSamples> {
+        let positions = if self.sample_locations.is_empty() {
+            standard_sample_positions(self.sample_count)
+                .ok_or(Error::Invalid("a sample count without standard positions"))?
+        } else {
+            &self.sample_locations[..]
+        };
+        ensure(
+            positions.len() <= PassSamples::MAX,
+            "a pass has at most 16 samples",
+        )?;
+        Ok(PassSamples::new(positions))
+    }
+
     fn attachment(&mut self, slot: AttachmentSlot) -> Option<&mut RenderingAttachment<T>> {
         match slot {
             AttachmentSlot::Color(index) => self.color.get_mut(index).and_then(Option::as_mut),

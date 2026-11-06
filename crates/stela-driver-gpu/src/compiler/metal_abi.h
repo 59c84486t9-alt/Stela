@@ -29,7 +29,11 @@
 #define STELA_METAL_TABLE_TEXTURES 496u
 #define STELA_METAL_TABLE_SAMPLERS 1520u
 #define STELA_METAL_TABLE_ATTACHMENTS 1648u
-#define STELA_METAL_TABLE_BYTES 1712u
+/* A fragment table's pass's sample positions, STELA_AIR_SAMPLE_POSITIONS's
+ * 16 bytes, and its uint sample count. */
+#define STELA_METAL_TABLE_SAMPLE_POSITIONS 1712u
+#define STELA_METAL_TABLE_SAMPLE_COUNT 1728u
+#define STELA_METAL_TABLE_BYTES 1744u
 
 /* MTLStageInRegionIndirectArguments, which a kernel with stage-in reads at
  * the push constants' arguments address: uint origin[3], then size[3]. */

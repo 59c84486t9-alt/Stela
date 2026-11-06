@@ -239,6 +239,12 @@ enum stela_air_device_value {
    STELA_AIR_THREADGROUP_SHAPE,
    /* The address of the buffer os_log appends to, zero for none. */
    STELA_AIR_LOG_BUFFER,
+   /* A fragment function's pass's samples per pixel, as a uint. */
+   STELA_AIR_SAMPLE_COUNT,
+   /* Its pass's sample positions as a uvec4 of a byte per sample for up to
+    * 16, first sample lowest: x in 1/16 pixel in the low nibble, y in the
+    * high. */
+   STELA_AIR_SAMPLE_POSITIONS,
 };
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);

@@ -289,6 +289,30 @@ fn passes_without_attachments_and_apple_only_features() {
     let plan = render_pass(&capabilities(), &descriptor).unwrap();
     assert_eq!((plan.extent, plan.sample_count), ([1920, 1080], 4));
     assert_eq!(plan.sample_locations.len(), 4);
+    // Fragment functions read a byte of sixteenths per sample, x low.
+    let custom = plan.samples().unwrap();
+    assert_eq!((custom.count, custom.positions), (4, 0xea_a2_6e_26));
+    descriptor.sample_positions = alloc::vec![[0.5, 0.0625]; 4];
+    let moved = render_pass(&capabilities(), &descriptor)
+        .unwrap()
+        .samples()
+        .unwrap();
+    assert_eq!(moved.positions, 0x18_18_18_18);
+    // Without custom positions they are the standard ones.
+    descriptor.sample_positions.clear();
+    assert_eq!(
+        render_pass(&capabilities(), &descriptor)
+            .unwrap()
+            .samples()
+            .unwrap(),
+        custom
+    );
+    descriptor.sample_positions = alloc::vec![
+        [0.375, 0.125],
+        [0.875, 0.375],
+        [0.125, 0.625],
+        [0.625, 0.875]
+    ];
 
     descriptor.sample_positions.pop();
     assert_eq!(
