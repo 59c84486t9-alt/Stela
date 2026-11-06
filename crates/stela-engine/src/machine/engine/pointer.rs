@@ -98,10 +98,20 @@ pub(super) struct PointerService {
     pub(super) tags: [u64; pointer::TAG_WORDS],
     /// Instruction/data XPAC masks, independent of cryptographic key state.
     pub(super) strips: [pointer::strip::Cell; 2],
+    /// [`SERVICE`]'s address, which blocks completing PAC instructions
+    /// inside themselves call through (`x86_64::pointer::inline`).
+    routine: u64,
 }
 
 /// The routine a thunk calls on a memo miss.
 pub(super) const SERVICE: pointer::ServiceRoutine = complete;
+
+/// Where blocks find the service's tag words, strip cells and routine.
+pub(super) const CELLS: pointer::inline::Cells = pointer::inline::Cells {
+    tags: offset_of!(PointerService, tags) as u32,
+    strips: offset_of!(PointerService, strips) as u32,
+    routine: offset_of!(PointerService, routine) as u32,
+};
 
 /// Where native code finds the service's tag words.
 pub(super) const TAGS: Place = Place::new(Anchor::Pointer, offset_of!(PointerService, tags));
@@ -125,6 +135,7 @@ impl PointerService {
             generations: 0,
             tags: [0; pointer::TAG_WORDS],
             strips: [pointer::strip::Cell::default(); 2],
+            routine: SERVICE as usize as u64,
         }
     }
 

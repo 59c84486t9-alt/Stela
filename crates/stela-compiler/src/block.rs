@@ -24,7 +24,7 @@ pub use analysis::{
     BlockAnalysis, BlockAnalysisError, DynamicEdge, DynamicEdgeKind, StaticSuccessor,
     SuccessorKind, analyze, analyze_with_profile, source_bytes, source_bytes_with_profile,
 };
-use analysis::{ParsedBlock, analyze_parsed, parse, parse_admitted};
+use analysis::{ParsedBlock, analyze_parsed, parse_admitted, parse_with};
 pub use features::{BlockProfile, Features};
 pub use host_gprs::HostGprSnapshot;
 pub use memory::{
@@ -301,7 +301,12 @@ pub fn analyze_and_plan(
     base: GuestAddress,
     options: &crate::Options,
 ) -> Result<(BlockAnalysis, Result<CompilationPlan, CompileError>), BlockAnalysisError> {
-    let parsed = parse(source, base, options.profile())?;
+    let parsed = parse_with(
+        source,
+        base,
+        options.profile(),
+        options.native_system().pointer.is_some(),
+    )?;
     let analysis = analyze_parsed(&parsed);
     Ok((
         analysis,
@@ -350,7 +355,8 @@ impl CompilationPlan {
         let profile = BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(checked);
         let options = crate::Options::new(profile, target);
         options.validate()?;
-        let parsed = parse_admitted(source, base, profile, admit).map_err(CompileError::from)?;
+        let parsed =
+            parse_admitted(source, base, profile, false, admit).map_err(CompileError::from)?;
         if parsed.source_bytes == 0 {
             return Ok(None);
         }
@@ -387,7 +393,9 @@ impl CompilationPlan {
                 source_bytes: source.len(),
             },
             _ => {
-                let parsed = parse(source, base, profile).map_err(CompileError::from)?;
+                let inline_pointer = options.native_system().pointer.is_some();
+                let parsed = parse_with(source, base, profile, inline_pointer)
+                    .map_err(CompileError::from)?;
                 return Self::block(parsed, options);
             }
         };

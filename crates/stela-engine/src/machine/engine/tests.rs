@@ -5278,9 +5278,9 @@ fn implicit_pac_forms_repeat_their_results_until_the_keys_change() {
     assert_ne!(sign(&mut machine), signed);
 }
 
-/// A block ending in a PAC exit has it redirected through a thunk that
-/// completes the instruction from the memo, whose exit onward the block
-/// may chain; a PAC exit opens the key's tag word under the current
+/// A system-mode block completes a PAC instruction that writes a register
+/// inside itself from the memo (`x86_64::pointer::inline`), with no PAC
+/// exit to redirect; a PAC exit opens the key's tag word under the current
 /// memo, and a change of derived state closes it again.
 #[test]
 fn pac_exits_complete_natively_from_the_memo_under_open_tags() {
@@ -5289,35 +5289,20 @@ fn pac_exits_complete_natively_from_the_memo_under_open_tags() {
     let mut machine = machine(&[ADD, PACIBSP, ADD]);
     let base = machine.cpu.pc;
     machine.host.exits = vec![NativeExit::Exit {
-        next_pc: base + 8,
+        next_pc: base + 12,
         kind: ExitKind::Fallthrough as u64,
     }];
     machine.step().unwrap();
     let block = &machine.blocks[0];
-    let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
-    let thunk = x86_64_pointer::thunk(
-        x86_64_pointer::Form::of(block::PointerAuthenticationOperation::SignIbSp).unwrap(),
-        GuestAddress(base + 4),
-        TAGS,
-        SERVICE as usize as u64,
+    assert!(
+        block.terminal_pc() > base + 8,
+        "the block runs past PACIBSP"
     );
-    let installed = machine.host.installed.len() * NATIVE_CODE_STRIDE;
     assert_eq!(
-        machine.host.installed[installed / NATIVE_CODE_STRIDE - 1],
-        thunk.code
+        machine.host.installed.len(),
+        block.code.0 / NATIVE_CODE_STRIDE
     );
-    let site = block.code.0 + code.len() - chain::DIRECT_EXIT_BYTES;
-    let jump = chain::jump(site as u64, installed as u64).unwrap().to_vec();
-    assert_eq!(machine.host.patches, [(site, jump)]);
-    assert_eq!(
-        *block.successors,
-        [Successor {
-            slot: 0,
-            site: (installed + thunk.next.unwrap()) as u64,
-            target: GuestAddress(base + 8),
-            word: ExitKind::Fallthrough.into(),
-        }]
-    );
+    assert!(machine.host.patches.is_empty());
     let mut machine = pac_machine();
     assert_eq!(machine.pointer.tags, [0; x86_64_pointer::TAG_WORDS]);
     machine
@@ -5350,6 +5335,9 @@ fn pac_exits_complete_natively_from_the_memo_under_open_tags() {
     );
 }
 
+/// A system-mode block strips inside itself through the regime's masks
+/// (`x86_64::pointer::inline`), with no PAC exit; the masks need no key
+/// enable and close on derived changes that keep them.
 #[test]
 fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
     const ADD: u32 = 0x9100_0400;
@@ -5357,23 +5345,17 @@ fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
     let mut native = machine(&[ADD, XPACD_X17, ADD]);
     let base = native.cpu.pc;
     native.host.exits = vec![NativeExit::Exit {
-        next_pc: base + 8,
+        next_pc: base + 12,
         kind: ExitKind::Fallthrough as u64,
     }];
     native.step().unwrap();
-    let thunk =
-        x86_64_pointer::strip::thunk(GuestAddress(base + 4), 17, strip_place(true)).unwrap();
-    assert_eq!(native.host.installed.last(), Some(&thunk.code));
-    let installed = native.host.installed.len() * NATIVE_CODE_STRIDE;
+    let block = &native.blocks[0];
+    assert!(block.terminal_pc() > base + 8, "the block runs past XPACD");
     assert_eq!(
-        *native.blocks[0].successors,
-        [Successor {
-            slot: 0,
-            site: (installed + thunk.next.unwrap()) as u64,
-            target: GuestAddress(base + 8),
-            word: ExitKind::Fallthrough.into(),
-        }]
+        native.host.installed.len(),
+        block.code.0 / NATIVE_CODE_STRIDE
     );
+    assert!(native.host.patches.is_empty());
     let mut machine = pac_machine();
     machine.cpu.registers.set(SystemRegister::SCTLR_EL1, 0, 0);
     machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, 0);

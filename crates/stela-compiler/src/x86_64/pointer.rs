@@ -28,7 +28,7 @@
 //! clobbers RAX, RCX, RDX, R8, R9 and flags; a service call every register
 //! the SysV ABI lets a call clobber, which no block keeps live across its
 //! exit. The call aligns the stack to 16 bytes itself.
-use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, ShiftOp, Size, resolve};
+use crate::x86_64::asm::{Alu, Asm, Code, Cond, Gpr, Mem, Patch, ShiftOp, Size, resolve};
 use crate::{
     Anchor, GuestAddress, Place,
     aarch64::Register,
@@ -39,6 +39,7 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+pub mod inline;
 pub mod strip;
 
 /// Entries in the memo.
@@ -253,15 +254,20 @@ pub struct Thunk {
     pub dynamic: Option<usize>,
 }
 
-/// The thunk completing the PAC instruction of `form` at `pc` from the memo
-/// ([`Anchor::Memo`]) under the tag words at `tags`, or through `service`, a
-/// [`ServiceRoutine`], else exiting at `pc` for the engine.
-pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
-    use Gpr::{R8, R9, R11, Rax, Rcx, Rdi, Rdx, Rsi, Rsp};
+/// Where a memo lookup goes besides its hit, which leaves the result in RAX:
+/// to the original exit while the key is not open, to the completion with the
+/// pointer itself while it is disabled, and to the service on a miss.
+struct Lookup {
+    closed: Patch,
+    identity: Patch,
+    misses: Vec<Patch>,
+}
+
+/// The memo lookup of `form`'s operands, the pointer in RAX and the modifier
+/// in RDX, under the tag words at `tags`. Clobbers RCX, R8, R9 and flags.
+fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Lookup {
+    use Gpr::{R8, R9, Rax, Rcx, Rdx};
     use Size::{Dword, Qword};
-    let mut code = Code::pinned();
-    let mut asm = code.asm();
-    let mut exits = Vec::new();
     let pointer = asm.guest(Register::X(form.pointer)).expect("X0..X30");
     asm.mov_load(Qword, Rax, pointer);
     match form.modifier {
@@ -282,7 +288,7 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     asm.mov_load(Qword, R8, Mem::base(R8, 0));
     asm.test(Qword, R8, R8);
     // The key is not open.
-    exits.push(asm.jcc(Cond::E));
+    let closed = asm.jcc(Cond::E);
     // The result is the pointer in RAX.
     asm.alu_imm8(Alu::Cmp, Qword, R8, DISABLED as i8);
     let identity = asm.jcc(Cond::E);
@@ -305,6 +311,74 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(Rcx, TAG));
     misses.push(asm.jcc(Cond::Ne));
     asm.mov_load(Qword, Rax, Mem::base(Rcx, VALUE));
+    Lookup {
+        closed,
+        identity,
+        misses,
+    }
+}
+
+/// How native code reaches the service routine.
+#[derive(Clone, Copy)]
+enum Routine {
+    /// At this host address, in a thunk the engine installs.
+    Address(u64),
+    /// Through the word this far from [`Anchor::Pointer`], in a block.
+    Cell(u32),
+}
+
+/// The service call on a lookup's miss, the pointer in RAX and the modifier
+/// in RDX: `service(state, request, pointer, modifier)` on a 16-byte aligned
+/// stack, which leaves a completed result in RAX. The jump taken when the
+/// service does not complete it.
+fn call_service(asm: &mut Asm, form: Form, routine: Routine) -> Patch {
+    use Gpr::{R11, Rax, Rcx, Rdi, Rdx, Rsi, Rsp};
+    use Size::Qword;
+    asm.mov(Qword, R11, Rsp);
+    asm.alu_imm8(Alu::And, Qword, Rsp, -16);
+    asm.push(R11);
+    asm.push(Rdi);
+    // The one pinned register a call may change, and the alignment.
+    asm.push(Rsi);
+    asm.push(Rsi);
+    asm.mov(Qword, Rcx, Rdx);
+    asm.mov(Qword, Rdx, Rax);
+    asm.mov_imm32(Rsi, form.request());
+    asm.place(Rdi, Place::new(Anchor::Pointer, 0));
+    match routine {
+        Routine::Address(service) => {
+            asm.mov_imm64(Rax, service);
+            asm.call_rm(Rax);
+        }
+        Routine::Cell(offset) => {
+            let offset = i32::try_from(offset).expect("a field of the service");
+            asm.call_rm(Mem::base(Rdi, offset));
+        }
+    }
+    asm.pop(Rsi);
+    asm.pop(Rsi);
+    asm.pop(Rdi);
+    asm.pop(Rsp);
+    asm.test(Qword, Rax, Rax);
+    // Not completed.
+    let failed = asm.jcc(Cond::E);
+    asm.mov(Qword, Rax, Rdx);
+    failed
+}
+
+/// The thunk completing the PAC instruction of `form` at `pc` from the memo
+/// ([`Anchor::Memo`]) under the tag words at `tags`, or through `service`, a
+/// [`ServiceRoutine`], else exiting at `pc` for the engine.
+pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
+    use Gpr::{Rax, Rcx};
+    use Size::Qword;
+    let mut code = Code::pinned();
+    let mut asm = code.asm();
+    let Lookup {
+        closed,
+        identity,
+        misses,
+    } = lookup(&mut asm, form, tags);
     asm.bind(identity);
     let complete = asm.len();
     let next_pc = GuestAddress(pc.0.wrapping_add(4));
@@ -339,32 +413,10 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     for miss in misses {
         asm.bind(miss);
     }
-    // service(state, request, pointer, modifier) on a 16-byte aligned stack.
-    asm.mov(Qword, R11, Rsp);
-    asm.alu_imm8(Alu::And, Qword, Rsp, -16);
-    asm.push(R11);
-    asm.push(Rdi);
-    // The one pinned register a call may change, and the alignment.
-    asm.push(Rsi);
-    asm.push(Rsi);
-    asm.mov(Qword, Rcx, Rdx);
-    asm.mov(Qword, Rdx, Rax);
-    asm.mov_imm32(Rsi, form.request());
-    asm.place(Rdi, Place::new(Anchor::Pointer, 0));
-    asm.mov_imm64(Rax, service);
-    asm.call_rm(Rax);
-    asm.pop(Rsi);
-    asm.pop(Rsi);
-    asm.pop(Rdi);
-    asm.pop(Rsp);
-    asm.test(Qword, Rax, Rax);
-    // Not completed.
-    exits.push(asm.jcc(Cond::E));
-    asm.mov(Qword, Rax, Rdx);
+    let failed = call_service(&mut asm, form, Routine::Address(service));
     let back = asm.jmp();
-    for exit in exits {
-        asm.bind(exit);
-    }
+    asm.bind(closed);
+    asm.bind(failed);
     super::block::direct_exit_with(&mut asm, pc, ExitKind::PointerAuthentication);
     resolve(&mut code, back, complete);
     Thunk {

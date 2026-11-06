@@ -242,13 +242,25 @@ pub(super) fn parse(
     base: GuestAddress,
     profile: BlockProfile,
 ) -> Result<ParsedBlock, BlockAnalysisError> {
-    parse_admitted(source, base, profile, |_| true)
+    parse_admitted(source, base, profile, false, |_| true)
+}
+
+/// [`parse`], with the PAC instructions a block completes inside itself
+/// (`x86_64::pointer::inline`) parsed as instructions where `inline_pointer`.
+pub(super) fn parse_with(
+    source: &[u8],
+    base: GuestAddress,
+    profile: BlockProfile,
+    inline_pointer: bool,
+) -> Result<ParsedBlock, BlockAnalysisError> {
+    parse_admitted(source, base, profile, inline_pointer, |_| true)
 }
 
 pub(super) fn parse_admitted(
     source: &[u8],
     base: GuestAddress,
     profile: BlockProfile,
+    inline_pointer: bool,
     mut admit: impl FnMut(u32) -> bool,
 ) -> Result<ParsedBlock, BlockAnalysisError> {
     if source.is_empty() || !source.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
@@ -297,6 +309,13 @@ pub(super) fn parse_admitted(
                     kind: error.kind,
                 })?
             {
+                if inline_pointer && crate::x86_64::pointer::inline::inlines(decoded.operation) {
+                    instructions.push(Instruction {
+                        pc,
+                        operation: Operation::PointerAuthentication(decoded.operation),
+                    });
+                    continue;
+                }
                 terminal = Some((pc, Terminator::PointerAuthentication(decoded)));
                 break;
             }

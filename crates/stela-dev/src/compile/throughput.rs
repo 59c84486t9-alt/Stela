@@ -8,7 +8,7 @@ use clap::Args;
 use std::{path::PathBuf, time::Instant};
 use stela_compiler::x86_64::{MemoryChecks, NativeSystem, RangeCheck};
 use stela_contracts::Chip;
-use stela_engine::machine::engine::{Description, Preparation, Prepared, window};
+use stela_engine::machine::engine::{Description, POINTER_CELLS, Preparation, Prepared, window};
 
 #[derive(Args)]
 pub(crate) struct CompileThroughput {
@@ -70,7 +70,11 @@ impl CompileThroughput {
                 checks
             },
             scalable: None,
-            system: NativeSystem::NONE,
+            // The engine's blocks complete PAC instructions inside themselves.
+            system: NativeSystem {
+                pointer: Some(POINTER_CELLS),
+                ..NativeSystem::NONE
+            },
             withheld: 0,
         })
         .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;

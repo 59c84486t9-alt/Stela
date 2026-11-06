@@ -366,6 +366,8 @@ fn emit_selected(
         pinned && checks.guest_range && checks.every_access_masked && !checks.translated;
     let mut bases = super::masked_base::Tracker::default();
     let mut emitted_alone = true;
+    // The out-of-line paths of the PAC instructions completed inline.
+    let mut pointer_paths = vec![];
     while cursor < instructions.len() {
         let held = core::mem::replace(&mut after, Held::NOTHING);
         // A group emitted otherwise may have used the slots.
@@ -770,6 +772,22 @@ fn emit_selected(
             cursor += 1;
             continue;
         }
+        if let Operation::PointerAuthentication(operation) = instruction.operation {
+            let cells = native
+                .pointer
+                .expect("blocks hold PAC instructions only given the service's cells");
+            pointer_paths.push(super::pointer::inline::emit(
+                code,
+                operation,
+                instruction.pc,
+                cells,
+            ));
+            // A service call may change both masked-base slots.
+            bases.reset();
+            emitted_alone = true;
+            cursor += 1;
+            continue;
+        }
         if reuse_bases {
             code.set_base_request(bases.plan(&instructions[cursor..]));
         }
@@ -805,6 +823,16 @@ fn emit_selected(
         "ordinary instruction prefix cannot branch"
     );
     out_of_line.place(code);
+    // Before the terminal, whose direct exits end the code.
+    if let Some(cells) = native.pointer
+        && !pointer_paths.is_empty()
+    {
+        let over = code.asm().jmp();
+        for path in pointer_paths {
+            super::pointer::inline::place(code, path, cells);
+        }
+        code.asm().bind(over);
+    }
     if let Some(fast) = prefix_sum {
         code.asm().bind(fast);
         // All fast-path state is settled. The scalar source rows describe

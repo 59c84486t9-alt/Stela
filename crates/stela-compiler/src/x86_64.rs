@@ -179,6 +179,10 @@ pub struct NativeSystem {
     pub cache_clean: cache_clean::Operations,
     /// PEs run on host cores of their own, and exclusives pass by value.
     pub exclusive: bool,
+    /// Where the engine's PAC service keeps what native code completes PAC
+    /// instructions from, which blocks then complete inside themselves
+    /// rather than ending at one (`x86_64::pointer::inline`).
+    pub pointer: Option<pointer::inline::Cells>,
 }
 
 impl NativeSystem {
@@ -187,6 +191,7 @@ impl NativeSystem {
         zero_block: None,
         cache_clean: cache_clean::Operations::NONE,
         exclusive: false,
+        pointer: None,
     };
 }
 
@@ -1238,6 +1243,9 @@ pub(crate) fn emit_instruction(
         }
         Operation::FloatingPoint(_) => {
             unreachable!("numerical instructions require block emission")
+        }
+        Operation::PointerAuthentication(_) => {
+            unreachable!("PAC instructions inside a block require its emission")
         }
         Operation::FloatingPointRegister(operand) => fp_register::emit(code, &operand),
         Operation::Simd(operand) => simd::emit_for_target(code, &operand, target, checks),

@@ -97,6 +97,9 @@ use pointer::{PointerInputs, PointerOperation, PointerResult, SERVICE, TAGS, str
 #[cfg(test)]
 pub(crate) use prepare::test_preparation;
 pub use prepare::{Description, Preparation, Prepared, Refused, window};
+/// Where system-mode blocks find the PAC service's cells
+/// (`x86_64::pointer::inline`), as this engine compiles them.
+pub const POINTER_CELLS: stela_compiler::x86_64::pointer::inline::Cells = pointer::CELLS;
 pub use processors::publication;
 pub use processors::{
     PeerState, PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,

@@ -417,7 +417,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             variant.fp,
             variant.checks,
             variant.scalable,
-            variant.system,
+            // A single instruction's variant leaves every PAC instruction to
+            // the engine, as it installs no thunk for one.
+            NativeSystem {
+                pointer: variant.system.pointer.filter(|_| !variant.single),
+                ..variant.system
+            },
         ));
         self.preparations.insert(variant, preparation.clone());
         preparation

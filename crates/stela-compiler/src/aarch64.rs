@@ -226,6 +226,9 @@ impl From<simd::refinement::Operand> for FloatingPointOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operation {
     CheckedPointer(checked_pointer::Operand),
+    /// A PAC instruction a system-mode block completes inside itself
+    /// (`x86_64::pointer::inline`); any other ends its block.
+    PointerAuthentication(crate::block::PointerAuthenticationOperation),
     Exclusive(exclusive::Operand),
     FloatingPoint(FloatingPointOperation),
     FloatingPointRegister(fp_register::Operand),

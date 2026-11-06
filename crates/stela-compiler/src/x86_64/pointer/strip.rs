@@ -5,7 +5,7 @@
 //! and closes this cell whenever derived state changes. A closed cell takes
 //! the original instruction exit, without changing architectural state.
 use super::Thunk;
-use crate::x86_64::asm::{Alu, BitTest, Code, Cond, Gpr, Mem, Size};
+use crate::x86_64::asm::{Alu, Asm, BitTest, Code, Cond, Gpr, Mem, Patch, Size};
 use crate::{GuestAddress, Place, aarch64::Register, block::ExitKind};
 
 /// Fixed-address state read by a strip thunk. Each keep mask excludes the
@@ -25,35 +25,40 @@ const UPPER: i32 = LOWER + 8;
 const UPPER_EXTENSION: i32 = core::mem::offset_of!(Cell, upper_extension) as i32;
 const REGION_BIT: u8 = 55;
 
+/// XPAC of X`register` (below 31) from `cell`, in place; the jump taken
+/// while the cell is closed, before any change. Clobbers RAX, RCX, RDX, R8
+/// and host flags.
+pub(super) fn strip(asm: &mut Asm, register: u8, cell: Place) -> Patch {
+    use Gpr::{R8, Rax, Rcx, Rdx};
+    use Size::Qword;
+    let pointer = asm.guest(Register::X(register)).expect("X0..X30");
+    asm.place(Rdx, cell);
+    asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rdx, 0), 0);
+    let closed = asm.jcc(Cond::E);
+    asm.mov_load(Qword, Rax, pointer);
+    asm.mov_load(Qword, Rcx, Mem::base(Rdx, LOWER));
+    asm.bit_imm(BitTest::Bt, Qword, Rax, REGION_BIT);
+    asm.cmov(Cond::B, Qword, Rcx, Mem::base(Rdx, UPPER));
+    // Bit 55 replicated.
+    asm.alu(Alu::Sbb, Qword, R8, R8);
+    asm.alu_load(Alu::And, Qword, R8, Mem::base(Rdx, UPPER_EXTENSION));
+    asm.alu(Alu::And, Qword, Rax, Rcx);
+    asm.alu(Alu::Or, Qword, Rax, R8);
+    asm.mov_store(Qword, pointer, Rax);
+    closed
+}
+
 /// Complete XPAC on `register`, with no key access, from `cell` while open.
 /// Only RAX, RCX, RDX, R8 and host flags are clobbered, as at a block exit;
 /// guest NZCV, SP and every other register remain in their canonical frame.
 pub fn thunk(pc: GuestAddress, register: u8, cell: Place) -> Option<Thunk> {
-    use Gpr::{R8, Rax, Rcx, Rdx};
-    use Size::Qword;
     if register > 31 {
         return None;
     }
     let mut code = Code::pinned();
     let mut asm = code.asm();
-    let mut closed = None;
     // XZR has no effect and depends on no regime state.
-    if register != 31 {
-        let pointer = asm.guest(Register::X(register)).expect("X0..X30");
-        asm.place(Rdx, cell);
-        asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rdx, 0), 0);
-        closed = Some(asm.jcc(Cond::E));
-        asm.mov_load(Qword, Rax, pointer);
-        asm.mov_load(Qword, Rcx, Mem::base(Rdx, LOWER));
-        asm.bit_imm(BitTest::Bt, Qword, Rax, REGION_BIT);
-        asm.cmov(Cond::B, Qword, Rcx, Mem::base(Rdx, UPPER));
-        // Bit 55 replicated.
-        asm.alu(Alu::Sbb, Qword, R8, R8);
-        asm.alu_load(Alu::And, Qword, R8, Mem::base(Rdx, UPPER_EXTENSION));
-        asm.alu(Alu::And, Qword, Rax, Rcx);
-        asm.alu(Alu::Or, Qword, Rax, R8);
-        asm.mov_store(Qword, pointer, Rax);
-    }
+    let closed = (register != 31).then(|| strip(&mut asm, register, cell));
     let next = asm.len();
     let fallthrough = GuestAddress(pc.0.wrapping_add(4));
     super::super::block::direct_exit_with(&mut asm, fallthrough, ExitKind::Fallthrough);
