@@ -358,9 +358,6 @@ impl FeatureChain {
             vertex_attribute_instance_rate_divisor: on(self
                 .divisor
                 .vertex_attribute_instance_rate_divisor),
-            vertex_attribute_instance_rate_zero_divisor: on(self
-                .divisor
-                .vertex_attribute_instance_rate_zero_divisor),
             depth_clip_enable: on(self.depth_clip.depth_clip_enable),
             fragment_shader_barycentric: on(self.barycentric.fragment_shader_barycentric),
             task_shader: on(self.mesh.task_shader),

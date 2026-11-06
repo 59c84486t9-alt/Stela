@@ -307,8 +307,6 @@ pub struct Capabilities {
     pub timestamp_frequency: u64,
     /// `MTLCommonCounterSetStatistic` is among `counterSets`.
     pub statistic_counters: bool,
-    /// `MTLVertexStepFunctionConstant`, which needs zero divisors.
-    pub constant_vertex_step: bool,
     /// `supportsMemorylessRenderTargets`: memoryless textures, backed by
     /// device memory that no pass loads or stores.
     pub memoryless_render_targets: bool,
@@ -814,10 +812,6 @@ impl Derivation<'_> {
             "vertex step rates",
             features.vertex_attribute_instance_rate_divisor,
         ));
-        let constant_vertex_step = self.check(driver(
-            "constant vertex step function",
-            features.vertex_attribute_instance_rate_zero_divisor,
-        ));
         let vertex_formats = self.vertex_formats();
         let dual_source_blending =
             self.check(driver("dual-source blending", features.dual_src_blend));
@@ -960,7 +954,6 @@ impl Derivation<'_> {
                 0
             },
             statistic_counters: statistics,
-            constant_vertex_step,
             memoryless_render_targets: true,
             framebuffer_reads,
             counter_sampling,

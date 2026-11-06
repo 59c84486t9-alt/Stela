@@ -68,7 +68,6 @@ option_set! {
         const DEPTH_CLAMP = 1 << 27;
         const WIREFRAME = 1 << 28;
         const STATISTIC_COUNTERS = 1 << 29;
-        const CONSTANT_VERTEX_STEP = 1 << 30;
         /// Sparse 3D textures.
         const SPARSE_VOLUMES = 1 << 31;
         /// Texel buffers of power-of-two texels align to one texel when that
@@ -358,7 +357,6 @@ impl Block {
             wireframe: has(Flags::WIREFRAME),
             timestamp_frequency: self.timestamp_frequency,
             statistic_counters: has(Flags::STATISTIC_COUNTERS),
-            constant_vertex_step: has(Flags::CONSTANT_VERTEX_STEP),
             memoryless_render_targets: has(Flags::MEMORYLESS_RENDER_TARGETS),
             framebuffer_reads: has(Flags::FRAMEBUFFER_READS),
             counter_sampling,
@@ -608,7 +606,6 @@ impl Capabilities {
             .with(Flags::DEPTH_CLAMP, self.depth_clamp)
             .with(Flags::WIREFRAME, self.wireframe)
             .with(Flags::STATISTIC_COUNTERS, self.statistic_counters)
-            .with(Flags::CONSTANT_VERTEX_STEP, self.constant_vertex_step)
             .with(
                 Flags::MEMORYLESS_RENDER_TARGETS,
                 self.memoryless_render_targets,

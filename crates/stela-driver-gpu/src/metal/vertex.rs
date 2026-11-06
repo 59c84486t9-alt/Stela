@@ -327,27 +327,23 @@ pub fn vertex_input(
     let limits = &capabilities.limits;
     let mut input = VertexInput::default();
     for layout in &descriptor.layouts {
-        let (input_rate, divisor) = match layout.step_function {
+        let stride = (layout.stride != STRIDE_DYNAMIC).then_some(layout.stride as u32);
+        let (input_rate, divisor, stride) = match layout.step_function {
             StepFunction::PerVertex => {
                 ensure(layout.stride != 0, "per-vertex layouts have a stride")?;
-                (VertexInputRate::Vertex, 1)
+                (VertexInputRate::Vertex, 1, stride)
             }
             StepFunction::PerInstance => {
                 require(
                     layout.step_rate <= limits.max_vertex_step_rate,
                     "per-instance step rate",
                 )?;
-                (VertexInputRate::Instance, layout.step_rate as u32)
+                (VertexInputRate::Instance, layout.step_rate as u32, stride)
             }
-            // Instance rate with divisor zero fetches element zero for every
-            // vertex and instance.
-            StepFunction::Constant => {
-                require(
-                    capabilities.constant_vertex_step,
-                    "constant vertex step function",
-                )?;
-                (VertexInputRate::Instance, 0)
-            }
+            // A zero stride fetches element zero for every vertex and
+            // instance. Instance rate with divisor zero would not: Vulkan
+            // fetches the draw's first instance's element.
+            StepFunction::Constant => (VertexInputRate::Vertex, 1, Some(0)),
             StepFunction::PerPatch | StepFunction::PerPatchControlPoint => {
                 return Err(Error::Invalid(
                     "patch step functions need a post-tessellation vertex function",
@@ -358,7 +354,7 @@ pub fn vertex_input(
             binding: layout.buffer_index,
             input_rate,
             divisor,
-            stride: (layout.stride != STRIDE_DYNAMIC).then_some(layout.stride as u32),
+            stride,
         });
     }
     for attribute in &descriptor.attributes {
@@ -514,7 +510,8 @@ mod tests {
             layouts: alloc::vec![
                 layout(0, 16, StepFunction::PerVertex, 1),
                 layout(1, 4, StepFunction::PerInstance, 3),
-                layout(2, 0, StepFunction::Constant, 0),
+                // A constant layout reads element zero whatever its stride.
+                layout(2, 16, StepFunction::Constant, 0),
             ],
         };
         let input = vertex_input(&capabilities(), &descriptor).unwrap();
@@ -535,8 +532,8 @@ mod tests {
                 },
                 VertexBinding {
                     binding: 2,
-                    input_rate: VertexInputRate::Instance,
-                    divisor: 0,
+                    input_rate: VertexInputRate::Vertex,
+                    divisor: 1,
                     stride: Some(0)
                 },
             ]

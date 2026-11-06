@@ -278,7 +278,6 @@ pub struct Features {
     pub extended_dynamic_state3_depth_clip_enable: bool,
     pub vertex_input_dynamic_state: bool,
     pub vertex_attribute_instance_rate_divisor: bool,
-    pub vertex_attribute_instance_rate_zero_divisor: bool,
     pub depth_clip_enable: bool,
     pub fragment_shader_barycentric: bool,
     pub task_shader: bool,

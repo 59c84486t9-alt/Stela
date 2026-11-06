@@ -313,7 +313,6 @@ fn features(chip: &Chip) -> Features {
         extended_dynamic_state3_depth_clip_enable: true,
         vertex_input_dynamic_state: true,
         vertex_attribute_instance_rate_divisor: true,
-        vertex_attribute_instance_rate_zero_divisor: true,
         depth_clip_enable: true,
         fragment_shader_barycentric: true,
         task_shader: true,
