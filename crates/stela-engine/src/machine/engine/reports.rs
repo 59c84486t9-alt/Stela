@@ -364,8 +364,8 @@ pub struct Statistics {
     /// context, the chain budget was spent, or the entry refused the BTYPE.
     pub lookup_misses: [u64; 5],
     /// Forgotten lookup entries: halves whose contexts went for an ASIDE1 or
-    /// a TLBI of everything, scans of the table for a TLBI by VA too wide to
-    /// clear slot by slot, and halves whose contexts went for any other
+    /// a TLBI of everything, halves a TLBI by VA reached entries of, and
+    /// halves whose contexts went for any other
     /// change (an unscoped translation change, the host's fetch permissions,
     /// the upper half's first non-global fetch).
     pub lookup_forgets: [u64; 4],

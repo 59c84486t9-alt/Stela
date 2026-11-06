@@ -1734,7 +1734,7 @@ fn a_mapped_address_outside_the_native_ranges_runs_its_page_translated() {
     for cause in [FaultCause::NonCanonical; 2] {
         machine.translated_pages.clear();
         let slot = target_slot(&machine, BASE);
-        machine.targets[slot] = chain::LookupEntry::default();
+        machine.targets.set(slot, chain::LookupEntry::default());
         let kind = stela_compiler::block::RecoverySiteKind::GuestAccess;
         run(&mut machine, cause, kind).unwrap();
         assert_eq!(machine.cpu.pc, BASE, "{cause:?}");
@@ -2880,13 +2880,16 @@ fn a_tlbi_by_va_drops_the_lookup_entries_of_its_leaf_in_every_context() {
     let pcs = [PAGE - 4, PAGE, PAGE + 0x3ffc, PAGE + 0x4000];
     for (context, pc) in pcs.into_iter().enumerate() {
         let slot = target_slot(&machine, pc);
-        machine.targets[slot] = chain::LookupEntry {
-            pc,
-            context: context as u64 + 1,
-            entry: 1,
-            block: 0,
-            targets: 1,
-        };
+        machine.targets.set(
+            slot,
+            chain::LookupEntry {
+                pc,
+                context: context as u64 + 1,
+                entry: 1,
+                block: 0,
+                targets: 1,
+            },
+        );
     }
     let tlbi = |machine: &mut Machine<FakeHost, NoDevices>, reach| {
         machine.tlb_maintained(reach, Everywhere::Addresses(reach), None)
@@ -2908,26 +2911,29 @@ fn a_tlbi_by_va_drops_the_lookup_entries_of_its_leaf_in_every_context() {
     let (near, inside) = (2 * LEAF - 4, 2 * LEAF);
     for pc in [near, inside] {
         let slot = target_slot(&machine, pc);
-        machine.targets[slot] = chain::LookupEntry {
-            pc,
-            context: 1,
-            entry: 1,
-            block: 0,
-            targets: 1,
-        };
+        machine.targets.set(
+            slot,
+            chain::LookupEntry {
+                pc,
+                context: 1,
+                entry: 1,
+                block: 0,
+                targets: 1,
+            },
+        );
     }
     tlbi(&mut machine, Reach::Containing(3 * LEAF));
     assert_eq!(machine.targets[target_slot(&machine, near)].pc, near);
     tlbi(&mut machine, Reach::Containing(LEAF + 0x8000));
     assert_eq!(machine.targets[target_slot(&machine, near)].pc, 0);
     assert_eq!(machine.targets[target_slot(&machine, inside)].pc, inside);
-    // A leaf too wide to clear slot by slot scans the table, and no context
-    // goes with it.
+    // However wide the leaf, its PCs' entries go and no context goes with
+    // them.
     machine.fetched_through(0, 0, 1 << 30, true);
-    let scans = machine.statistics.lookup_forgets[2];
+    let reaches = machine.statistics.lookup_forgets[2];
     tlbi(&mut machine, Reach::Containing(PAGE));
     assert_eq!(machine.targets[target_slot(&machine, inside)].pc, 0);
-    assert_eq!(machine.statistics.lookup_forgets[2], scans + 1);
+    assert_eq!(machine.statistics.lookup_forgets[2], reaches + 1);
     assert_eq!(machine.contexts(2, variant), contexts);
 }
 
@@ -2959,7 +2965,7 @@ fn a_new_context_learns_the_blocks_its_page_fetched_in_others() {
 }
 
 /// A TLBI by VA of one process leaves the other processes' entries of the
-/// same VAs, by probe or by table scan, unless a global page shares them.
+/// same VAs, however wide its span, unless a global page shares them.
 #[test]
 fn a_tlbi_by_va_and_asid_leaves_the_entries_of_other_asids() {
     use mmu::tlbi::{Everywhere, Reach};
@@ -2977,13 +2983,16 @@ fn a_tlbi_by_va_and_asid_leaves_the_entries_of_other_asids() {
     let (five, six) = (context(5), context(6));
     let fill = |machine: &mut Machine<FakeHost, NoDevices>| {
         for context in [five, six] {
-            machine.targets[chain::lookup_slot(PC, context)] = chain::LookupEntry {
-                pc: PC,
-                context,
-                entry: 1,
-                block: 0,
-                targets: 1,
-            };
+            machine.targets.set(
+                chain::lookup_slot(PC, context),
+                chain::LookupEntry {
+                    pc: PC,
+                    context,
+                    entry: 1,
+                    block: 0,
+                    targets: 1,
+                },
+            );
         }
     };
     let held = |machine: &Machine<FakeHost, NoDevices>| {
@@ -2997,12 +3006,12 @@ fn a_tlbi_by_va_and_asid_leaves_the_entries_of_other_asids() {
     fill(&mut machine);
     tlbi(&mut machine);
     assert_eq!(held(&machine), [false, true]);
-    // A span too wide to probe scans the table, as narrowly.
+    // A span of any width forgets as narrowly.
     machine.fetched_through(0, 0, 1 << 40, false);
     fill(&mut machine);
     tlbi(&mut machine);
     assert_eq!(held(&machine), [false, true]);
-    assert_eq!(machine.statistics.lookup_forgets[2], 1);
+    assert_eq!(machine.statistics.lookup_forgets[2], 2);
     // A global page in the span is every process's.
     machine.fetched_through(0, PC, 0x4000, true);
     fill(&mut machine);
@@ -3124,7 +3133,7 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     let page = (base / FETCH_PAGE) as usize % FETCH_CACHE;
     machine.fetch[page].as_mut().unwrap().guarded = true;
     let slot = target_slot(&machine, base + 8);
-    machine.targets[slot] = chain::LookupEntry::default();
+    machine.targets.set(slot, chain::LookupEntry::default());
     machine.cpu.pc = base + 8;
     machine.cpu.pstate.btype = 0;
     machine.step().unwrap();

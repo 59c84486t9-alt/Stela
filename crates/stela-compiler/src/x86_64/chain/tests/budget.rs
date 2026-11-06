@@ -472,13 +472,16 @@ fn native_interruption_gate_costs() {
         ] {
             let native = Mapping::new();
             let code = if lookup {
-                table[lookup_slot(TARGET.0, 0)] = LookupEntry {
-                    pc: TARGET.0,
-                    context: 5,
-                    entry: native.address(),
-                    block: 3,
-                    targets: 15,
-                };
+                table.set(
+                    lookup_slot(TARGET.0, 0),
+                    LookupEntry {
+                        pc: TARGET.0,
+                        context: 5,
+                        entry: native.address(),
+                        block: 3,
+                        targets: 15,
+                    },
+                );
                 lookup_with_policy(7, Some(TARGET), ExitKind::Direct, 0, policy).unwrap()
             } else {
                 direct(&native, policy)

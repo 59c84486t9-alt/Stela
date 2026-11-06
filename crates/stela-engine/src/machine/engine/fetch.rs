@@ -221,19 +221,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }) as u64
     }
 
-    /// The salts `half`'s contexts hold, bit `s` for salt `s`: where a
-    /// lookup could find an entry of that half.
-    pub(super) fn live_salts(&self, half: usize) -> u64 {
-        let spaces = self.spaces[half].iter().map(|space| space.number);
-        let recent = self.recent[half]
-            .iter()
-            .flatten()
-            .map(|recent| recent.number);
-        spaces.chain(recent).fold(0, |salts, number| {
-            salts | 1 << (number % chain::LOOKUP_SALTS as u64)
-        })
-    }
-
     /// Both halves' contexts at `el` in `variant`.
     pub(super) fn contexts(&mut self, el: u8, variant: Variant) -> [u64; 2] {
         [0, 1].map(|half| self.context(el, variant, half))

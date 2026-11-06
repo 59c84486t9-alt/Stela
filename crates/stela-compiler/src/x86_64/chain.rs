@@ -45,7 +45,7 @@ use crate::x86_64::asm::{
     Size::{self, Dword, Qword},
 };
 use crate::{Anchor, GuestAddress, Place, block::ExitKind};
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
 
 /// Bytes in a direct exit: `movabs rax, target` and a [`DYNAMIC_EXIT_BYTES`]
 /// exit.
@@ -205,27 +205,59 @@ const fn neighbour(slot: usize) -> usize {
     slot ^ 1
 }
 
-/// The [`LookupEntry`] table, by [`lookup_slot`].
-pub struct LookupTable(Box<[LookupSet]>);
+/// The PCs one [`Granule`] of the table's index covers: 16 KiB, the
+/// largest translation granule, so a TLBI's span of a fetched leaf is whole
+/// granules.
+const GRANULE_SHIFT: u32 = 14;
+
+/// The sets the entries of one granule's PCs were put in, in any context:
+/// every set holding such an entry is listed, some perhaps twice or no
+/// longer holding one. A list that reaches `limit` drops those, then may
+/// grow to twice what is left, so it stays within a small multiple of the
+/// granule's live entries.
+#[derive(Debug, Clone, Default)]
+struct Granule {
+    sets: Vec<u32>,
+    limit: usize,
+}
+
+/// A granule's list starts compacting at this many sets.
+const GRANULE_SETS: usize = 64;
+
+/// The [`LookupEntry`] table, by [`lookup_slot`], and an index of the sets
+/// each 16 KiB granule's entries are in. A TLBI forgets the entries of a
+/// span of PCs in every context, whose slots the contexts' salts scatter
+/// across the table: the index visits only the sets those PCs were put in,
+/// where probing each PC's slot in each context costs thousands of probes a
+/// page, and a scan the whole table, at each of the thousands of TLBIs a
+/// second a system's processes make.
+pub struct LookupTable {
+    sets: Box<[LookupSet]>,
+    granules: BTreeMap<u64, Granule>,
+}
 
 impl LookupTable {
     pub fn new() -> Self {
         let sets = vec![LookupSet::default(); LOOKUP_ENTRIES / 2];
-        Self(sets.into_boxed_slice())
+        Self {
+            sets: sets.into_boxed_slice(),
+            granules: BTreeMap::new(),
+        }
     }
 
     /// The table's host address, for `ChainControl::table`.
     pub fn address(&self) -> u64 {
-        self.0.as_ptr() as u64
+        self.sets.as_ptr() as u64
     }
 
     pub fn clear(&mut self) {
-        self.0.fill(LookupSet::default());
+        self.sets.fill(LookupSet::default());
+        self.granules.clear();
     }
 
     /// Whether every entry is empty.
     pub fn is_empty(&self) -> bool {
-        self.0
+        self.sets
             .iter()
             .flat_map(|set| &set.0)
             .all(|entry| *entry == LookupEntry::default())
@@ -235,7 +267,7 @@ impl LookupTable {
     /// there is one, as a thunk would find it, else one in another context.
     #[inline]
     pub fn find(&self, slot: usize, pc: u64, context: u64) -> LookupEntry {
-        let set = &self.0[slot / 2].0;
+        let set = &self.sets[slot / 2].0;
         let first = &set[slot % 2];
         if first.pc == pc && first.context == context {
             return *first;
@@ -248,31 +280,77 @@ impl LookupTable {
     /// beside it unless that is the entry's own older self.
     pub fn insert(&mut self, slot: usize, entry: LookupEntry) {
         let resident = self[slot];
-        if resident.context != 0 && (resident.pc != entry.pc || resident.context != entry.context) {
-            self[neighbour(slot)] = resident;
+        if resident == entry {
+            return;
         }
-        self[slot] = entry;
+        if resident.context != 0 && (resident.pc != entry.pc || resident.context != entry.context) {
+            // The same set, which the resident's granule lists already.
+            *self.slot_mut(neighbour(slot)) = resident;
+        }
+        self.set(slot, entry);
+    }
+
+    /// Put `entry` in `slot` alone.
+    pub fn set(&mut self, slot: usize, entry: LookupEntry) {
+        *self.slot_mut(slot) = entry;
+        if entry.context == 0 {
+            return;
+        }
+        let set = (slot / 2) as u32;
+        let granule = entry.pc >> GRANULE_SHIFT;
+        let sets = &self.sets;
+        let listed = self.granules.entry(granule).or_default();
+        if listed.sets.last() == Some(&set) {
+            return;
+        }
+        if listed.sets.len() >= listed.limit.max(GRANULE_SETS) {
+            listed.sets.sort_unstable();
+            listed.sets.dedup();
+            listed
+                .sets
+                .retain(|&set| holds(&sets[set as usize], granule));
+            listed.limit = 2 * listed.sets.len();
+        }
+        listed.sets.push(set);
     }
 
     /// Forget the entries of the PCs in `pcs` in the contexts of `salts`, a
-    /// mask of salt numbers.
-    pub fn forget_range(&mut self, pcs: core::ops::RangeInclusive<u64>, salts: u64) {
-        for entry in self.0.iter_mut().flat_map(|set| &mut set.0) {
-            if entry.reached(&pcs, salts) {
-                *entry = LookupEntry::default();
+    /// mask of salt numbers: whether the PCs had entries to look at.
+    pub fn forget_range(&mut self, pcs: core::ops::RangeInclusive<u64>, salts: u64) -> bool {
+        let granules = *pcs.start() >> GRANULE_SHIFT..=*pcs.end() >> GRANULE_SHIFT;
+        let mut emptied = Vec::new();
+        let mut found = false;
+        for (&granule, listed) in self.granules.range_mut(granules) {
+            found = true;
+            listed.sets.retain(|&set| {
+                let set = &mut self.sets[set as usize];
+                for entry in &mut set.0 {
+                    if entry.reached(&pcs, salts) {
+                        *entry = LookupEntry::default();
+                    }
+                }
+                holds(set, granule)
+            });
+            if listed.sets.is_empty() {
+                emptied.push(granule);
             }
         }
+        for granule in emptied {
+            self.granules.remove(&granule);
+        }
+        found
     }
 
-    /// Forget what `slot`'s set holds of the PCs in `pcs` in the contexts of
-    /// `salts`.
-    pub fn forget(&mut self, slot: usize, pcs: core::ops::RangeInclusive<u64>, salts: u64) {
-        for slot in [slot, neighbour(slot)] {
-            if self[slot].reached(&pcs, salts) {
-                self[slot] = LookupEntry::default();
-            }
-        }
+    fn slot_mut(&mut self, slot: usize) -> &mut LookupEntry {
+        &mut self.sets[slot / 2].0[slot % 2]
     }
+}
+
+/// Whether `set` holds an entry of a PC in `granule`.
+fn holds(set: &LookupSet, granule: u64) -> bool {
+    set.0
+        .iter()
+        .any(|entry| entry.context != 0 && entry.pc >> GRANULE_SHIFT == granule)
 }
 
 impl Default for LookupTable {
@@ -285,13 +363,7 @@ impl core::ops::Index<usize> for LookupTable {
     type Output = LookupEntry;
 
     fn index(&self, slot: usize) -> &LookupEntry {
-        &self.0[slot / 2].0[slot % 2]
-    }
-}
-
-impl core::ops::IndexMut<usize> for LookupTable {
-    fn index_mut(&mut self, slot: usize) -> &mut LookupEntry {
-        &mut self.0[slot / 2].0[slot % 2]
+        &self.sets[slot / 2].0[slot % 2]
     }
 }
 
@@ -693,6 +765,60 @@ mod tests {
     use crate::x86_64::asm::Code;
     use alloc::vec;
 
+    /// A span's entries go in every context its salts reach, wherever their
+    /// sets are, and only theirs; a granule's index survives its compaction
+    /// and the entries that moved beside a newer one.
+    #[test]
+    fn forgetting_a_span_finds_its_entries_in_every_context() {
+        const PAGE: u64 = 0xffff_fe00_0123_4000;
+        let entry = |pc: u64, context: u64| LookupEntry {
+            pc,
+            context,
+            entry: 1,
+            block: 0,
+            targets: 1,
+        };
+        let mut table = LookupTable::new();
+        let put = |table: &mut LookupTable, pc: u64, context: u64| {
+            table.insert(lookup_slot(pc, context), entry(pc, context));
+        };
+        let held = |table: &LookupTable, pc: u64, context: u64| {
+            table.find(lookup_slot(pc, context), pc, context).pc == pc
+        };
+        // Enough PCs and contexts in one granule that its list compacts.
+        let pcs: Vec<u64> = (0..96).map(|n| PAGE + 0x80 * n).collect();
+        for context in 1..=3 {
+            for &pc in &pcs {
+                put(&mut table, pc, context);
+            }
+        }
+        // Another PC of the first's slot moves the first beside it.
+        let other = PAGE ^ (1 << (2 + LOOKUP_BITS) | 1 << 2);
+        assert_eq!(lookup_slot(other, 1), lookup_slot(PAGE, 1));
+        put(&mut table, other, 1);
+        let next = PAGE + 0x4000;
+        put(&mut table, next, 2);
+        // Salt 1 alone: context 1's entries of the page go.
+        assert!(table.forget_range(PAGE..=PAGE + 0x3fff, 1 << 1));
+        assert!(pcs.iter().all(|&pc| !held(&table, pc, 1)));
+        assert!(
+            pcs.iter()
+                .all(|&pc| held(&table, pc, 2) && held(&table, pc, 3))
+        );
+        assert!(held(&table, other, 1) && held(&table, next, 2));
+        // Every salt: the page's entries go, the next page's stay.
+        assert!(table.forget_range(PAGE..=PAGE + 0x3fff, u64::MAX));
+        assert!(
+            pcs.iter()
+                .all(|&pc| !held(&table, pc, 2) && !held(&table, pc, 3))
+        );
+        assert!(held(&table, other, 1) && held(&table, next, 2));
+        assert!(!table.forget_range(PAGE..=PAGE + 0x3fff, u64::MAX));
+        assert!(table.forget_range(0..=u64::MAX, u64::MAX));
+        assert!(table.is_empty());
+        assert!(table.granules.is_empty());
+    }
+
     #[test]
     fn direct_exits_match_the_block_emitter() {
         let mut emitted = Code::new();
@@ -828,7 +954,7 @@ mod tests {
                 block: 42,
                 targets: 0b0111,
             };
-            table[lookup_slot(TARGET, 7)] = entry;
+            table.set(lookup_slot(TARGET, 7), entry);
             control.budget = 2;
             assert_eq!(exit(dynamic(frame, TARGET)), (0x5151, 99));
             assert_eq!(
@@ -862,9 +988,14 @@ mod tests {
             control.retired = retired;
             control.hits = hits;
             control.budget = 5;
-            table[neighbour(lookup_slot(TARGET, 7))] = LookupEntry::default();
-            table[lookup_slot(TARGET, 7)] = entry;
-            table[lookup_slot(TARGET, 7)].context = 6;
+            table.set(neighbour(lookup_slot(TARGET, 7)), LookupEntry::default());
+            table.set(
+                lookup_slot(TARGET, 7),
+                LookupEntry {
+                    context: 6,
+                    ..entry
+                },
+            );
             assert_eq!(
                 exit(dynamic(frame, TARGET)),
                 (TARGET, ExitKind::Return as u64)
@@ -873,23 +1004,35 @@ mod tests {
             assert_eq!((control.budget, control.hits, control.block), (5, 2, 42));
             // The lower half's context names a lower-half target's entries.
             let lower = TARGET & !(1 << 55);
-            table[lookup_slot(lower, 5)] = LookupEntry { pc: lower, ..entry };
+            table.set(lookup_slot(lower, 5), LookupEntry { pc: lower, ..entry });
             assert_eq!(
                 exit(dynamic(frame, lower)),
                 (lower, ExitKind::Return as u64)
             );
-            table[lookup_slot(lower, 5)].context = 5;
+            table.set(
+                lookup_slot(lower, 5),
+                LookupEntry {
+                    pc: lower,
+                    context: 5,
+                    ..entry
+                },
+            );
             assert_eq!(exit(dynamic(frame, lower)), (0x5151, 99));
             assert_eq!((control.budget, control.hits), (4, 3));
-            table[lookup_slot(TARGET, 7)] = entry;
             // A BR with BTYPE 0b11 needs the entry to accept it, and names
             // the BTYPE beside the block.
-            table[lookup_slot(TARGET, 7)].context = 7;
+            table.set(lookup_slot(TARGET, 7), entry);
             assert_eq!(
                 exit(branch(frame, TARGET)),
                 (TARGET, ExitKind::Indirect as u64)
             );
-            table[lookup_slot(TARGET, 7)].targets = 0b1001;
+            table.set(
+                lookup_slot(TARGET, 7),
+                LookupEntry {
+                    targets: 0b1001,
+                    ..entry
+                },
+            );
             assert_eq!(exit(branch(frame, TARGET)), (0x5151, 99));
             assert_eq!(
                 (control.budget, control.retired, control.hits, control.block),

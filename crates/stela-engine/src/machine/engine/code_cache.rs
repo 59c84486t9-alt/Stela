@@ -207,9 +207,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// while no global page was fetched in its span of the lower half, which
     /// only such a page shares. A process's exit reaches the shared libraries
     /// this way, which every other process's entries still hold good for.
-    /// Probes that would cover the table scan it instead.
+    /// The table finds the entries of the span's PCs in every context from
+    /// its index of where each granule's went (`chain::LookupTable`).
     /// Contexts stay: the hot PCs of one that went would each cost an exit on
-    /// every PE that runs them, far more than a scan.
+    /// every PE that runs them.
     pub(super) fn forget_lookups(&mut self, reach: mmu::tlbi::Reach, asid: Option<u16>) {
         let (first, last) = match reach {
             mmu::tlbi::Reach::Nothing => return,
@@ -223,26 +224,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             };
             let (global_first, global_last) = self.lower_globals;
             let scoped = asid.filter(|_| half == 0 && (last < global_first || first > global_last));
-            let (salts, reached) = match scoped {
-                Some(asid) => {
-                    let salts = self.asid_salts(half, asid);
-                    (salts, salts)
-                }
-                None => (self.live_salts(half), u64::MAX),
+            let reached = match scoped {
+                Some(asid) => self.asid_salts(half, asid),
+                None => u64::MAX,
             };
-            // Two consecutive PCs from an even one share a set.
-            let sets = (last - first) / (2 * INSTRUCTION) + 1;
-            if sets.saturating_mul(salts.count_ones().into()) >= (chain::LOOKUP_ENTRIES / 2) as u64
-            {
+            if self.targets.forget_range(first..=last, reached) {
                 self.statistics.lookup_forgets[2] += 1;
-                self.targets.forget_range(first..=last, reached);
-                continue;
-            }
-            for salt in (0..chain::LOOKUP_SALTS as u64).filter(|salt| salts >> salt & 1 != 0) {
-                for pc in (first..=last).step_by(2 * INSTRUCTION as usize) {
-                    self.targets
-                        .forget(chain::lookup_slot(pc, salt), first..=last, reached);
-                }
             }
         }
     }
