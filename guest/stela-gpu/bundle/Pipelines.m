@@ -145,10 +145,34 @@ static id binary_functions_error(NSError **error, const char *reason)
 	return nil;
 }
 
+/* The deprecated `MTLArgument`s are the bindings, whose values agree. A
+ * pipeline here has no tile function, so it has no tile arguments. */
 @implementation StelaGPURenderReflection
+
+- (NSArray *)vertexArguments
+{
+	return self.vertexBindings;
+}
+
+- (NSArray *)fragmentArguments
+{
+	return self.fragmentBindings;
+}
+
+- (NSArray *)tileArguments
+{
+	return [NSArray array];
+}
+
 @end
 
 @implementation StelaGPUComputeReflection
+
+- (NSArray *)arguments
+{
+	return self.bindings;
+}
+
 @end
 
 @implementation StelaGPUFunctionHandle

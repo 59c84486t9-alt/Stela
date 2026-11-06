@@ -132,11 +132,33 @@ static void hook(Class class, SEL selector, id block)
 @implementation StelaGPUFunctionConstant
 @end
 
+Class objc_getClass(const char *name);
+
 @implementation StelaGPUType
 
 - (NSUInteger)dataType
 {
 	return _dataType;
+}
+
+/* One class serves every type, each of which is the kind of Metal's class
+ * its data type names: what applications tell types apart by. */
+- (BOOL)isKindOfClass:(Class)class
+{
+	const char *name = _dataType == MTLDataTypeStruct  ? "MTLStructType" :
+			   _dataType == MTLDataTypeArray   ? "MTLArrayType" :
+			   _dataType == MTLDataTypePointer ? "MTLPointerType" :
+			   _dataType == MTLDataTypeTexture ? "MTLTextureReferenceType" :
+							     NULL;
+	if (class && (class == objc_getClass("MTLType") || (name && class == objc_getClass(name)))) {
+		return YES;
+	}
+	return [super isKindOfClass:class];
+}
+
+- (NSArray *)members
+{
+	return _members;
 }
 
 - (id)memberByName:(NSString *)name
@@ -213,9 +235,17 @@ static void hook(Class class, SEL selector, id block)
 	return _used;
 }
 
+/* Every binding here is one of the function's own arguments. */
 - (BOOL)isArgument
 {
-	return !_used;
+	return YES;
+}
+
+/* `MTLArgument`, which the deprecated reflection answers with the same
+ * objects: its type and index values are its binding's. */
+- (BOOL)isActive
+{
+	return _used;
 }
 
 - (id)bufferStructType
@@ -736,6 +766,13 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 {
 	if (reflection) {
 		*reflection = nil;
+		NSArray *bindings = [StelaGPUReflection bindingsOfFunction:self];
+		for (NSUInteger i = 0; i < bindings.count; i++) {
+			StelaGPUBinding *binding = [bindings objectAtIndex:i];
+			if (binding.type == MTLBindingTypeBuffer && binding.index == index) {
+				*reflection = binding;
+			}
+		}
 	}
 	return [self newArgumentEncoderWithBufferIndex:index];
 }
