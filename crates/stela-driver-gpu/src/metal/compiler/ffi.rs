@@ -433,6 +433,8 @@ pub struct Specialization {
     pub(super) attachments: *const Attachment,
     pub(super) attachment_count: u32,
     pub(super) samples: u32,
+    pub(super) round_toward_zero: u32,
+    pub(super) reserved: u32,
 }
 
 /// `struct stela_metal_attachment`: a color attachment a fragment function

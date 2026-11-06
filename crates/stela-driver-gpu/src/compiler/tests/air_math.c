@@ -39,8 +39,8 @@ static const char *kernel_metadata =
 static struct stela_metal_stage primary = {.table = STELA_METAL_TABLE_PRIMARY};
 
 static nir_shader *
-translate(const char *declarations, const char *body, const nir_shader_compiler_options *options,
-          stela_air_bind_buffer bind, struct stela_air_error *error)
+translate_rounded(const char *declarations, const char *body, const nir_shader_compiler_options *options,
+                  stela_air_bind_buffer bind, bool round_toward_zero, struct stela_air_error *error)
 {
    char definition[2048], all[2048];
    snprintf(definition, sizeof(definition), "define void @kernel(ptr addrspace(1) %%out) {\n%s}\n", body);
@@ -50,11 +50,19 @@ translate(const char *declarations, const char *body, const nir_shader_compiler_
       .workgroup_size = {1, 1, 1}, .max_instructions = 10000,
       .bind_buffer = bind, .binding_data = &primary,
       .fp_profile = STELA_AIR_FP_METAL, .max_private_bytes = 64,
+      .round_toward_zero = round_toward_zero,
    };
    nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
                                          "kernel", options, &o, error);
    LLVMDisposeMemoryBuffer(input);
    return shader;
+}
+
+static nir_shader *
+translate(const char *declarations, const char *body, const nir_shader_compiler_options *options,
+          stela_air_bind_buffer bind, struct stela_air_error *error)
+{
+   return translate_rounded(declarations, body, options, bind, false, error);
 }
 
 static nir_shader *
@@ -632,6 +640,23 @@ count_alu(nir_shader *shader, nir_op op)
    return count;
 }
 
+/* Narrowing to half rounds as the compile options select. */
+static void
+narrowing_follows_the_rounding_mode(void)
+{
+   const char *body =
+      "%a = load float, ptr addrspace(1) %out, align 4\n"
+      "%r = fptrunc float %a to half\n"
+      "store half %r, ptr addrspace(1) %out, align 2\nret void\n";
+   for (unsigned zero = 0; zero < 2; zero++) {
+      struct stela_air_error error = {0};
+      nir_shader *shader = translate_rounded("", body, &nir_options, stela_metal_bind_buffer, zero, &error);
+      assert(shader);
+      assert(count_alu(shader, nir_op_f2f16_rtz) == zero && count_alu(shader, nir_op_f2f16_rtne) == !zero);
+      ralloc_free(shader);
+   }
+}
+
 /* A backend without a fused multiply-add gets the weak form it can lower. */
 static void
 fma_follows_its_backend(void)
@@ -850,6 +875,7 @@ main(void)
    refuses_misnamed_and_misplaced_functions();
    half_declares_its_float_controls();
    fma_follows_its_backend();
+   narrowing_follows_the_rounding_mode();
    functions_compile();
    fragments_take_derivatives_and_discard();
    glsl_type_singleton_decref();

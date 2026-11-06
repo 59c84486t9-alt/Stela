@@ -1091,6 +1091,10 @@ static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
 		.air = stela_span(air.bytes, air.length),
 		.install_name = stela_span(install_name, install_name ? strlen(install_name) : 0),
 		.libraries = stela_span(handles, libraries.count * sizeof(*handles)),
+		// Narrowing conversions' rounding, an option since macOS 27.
+		.conversion_rounding = [options respondsToSelector:@selector(floatingPointConversionRoundingMode)]
+			? [options floatingPointConversionRoundingMode]
+			: 0,
 	};
 	StelaHandle response = {};
 	StelaFailure failure;

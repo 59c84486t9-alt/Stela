@@ -1,6 +1,6 @@
 //! Libraries and their functions.
 use super::{
-    Call, Object, Service,
+    Call, Object, Service, known,
     wire::{
         self, ArchiveDataRequest, AttributeInfo, ConstantInfo, ConstantRecord, Fault,
         FunctionReflectionRequest, FunctionReflectionResponse, LibraryDataRequest,
@@ -10,7 +10,7 @@ use super::{
     },
 };
 use crate::metal::{
-    abi::DataType,
+    abi::{ConversionRounding, DataType},
     device::{
         ArchiveId, FunctionId, LibraryId,
         pipelines::{ConstantKey, ConstantValue},
@@ -47,9 +47,13 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             .into_iter()
             .map(|handle| self.object::<LibraryId>(call.connection, handle))
             .collect::<Result<Vec<_>, Fault>>()?;
-        let library = self
-            .device
-            .new_source_library(&air, install_name.as_deref(), &libraries)?;
+        let rounding = known(
+            ConversionRounding::from_raw(request.conversion_rounding),
+            "conversion rounding mode",
+        )?;
+        let library =
+            self.device
+                .new_source_library(&air, install_name.as_deref(), &libraries, rounding)?;
         let handle = self.hold(call.connection, Object::Library(library))?;
         call.reply(&handle)
     }

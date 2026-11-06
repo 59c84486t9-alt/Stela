@@ -172,8 +172,11 @@ struct stela_metal_specialization {
     * and its pipeline's samples per pixel. */
    const struct stela_metal_attachment *attachments;
    uint32_t attachment_count, samples;
+   /* Narrowing floating-point conversions round toward zero, as the
+    * library's MTLCompileOptions ask, not to nearest even. */
+   uint32_t round_toward_zero, reserved;
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 136u
+#define STELA_METAL_SPECIALIZATION_BYTES 144u
 #define STELA_METAL_ATTACHMENT_BYTES 16u
 #define STELA_METAL_CONSTEXPR_SAMPLER_BYTES 16u
 #define STELA_METAL_MODULE_BYTES 32u

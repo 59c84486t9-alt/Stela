@@ -479,6 +479,7 @@ fn source_libraries_arrive_as_air() {
         air: memory.put(b"BC\xc0\xde\0\0\0\0"),
         install_name: memory.put(b"lib/source"),
         libraries: memory.put(&dependency.to_le_bytes()),
+        conversion_rounding: 1,
     };
     let library = call::<_, Handle>(
         &mut service,

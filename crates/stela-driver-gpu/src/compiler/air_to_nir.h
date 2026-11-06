@@ -359,6 +359,9 @@ struct stela_air_options {
    /* The pipeline stage's maxCallStackDepth: how deeply calls through
     * tables nest when they recurse. */
    unsigned max_call_stack_depth;
+   /* Narrowing floating-point conversions round toward zero rather than to
+    * nearest even (MTLCompileOptions.floatingPointConversionRoundingMode). */
+   bool round_toward_zero;
 };
 
 /* Additive VS/FS frontend. No runtime/Metal pipeline is constructed. resources

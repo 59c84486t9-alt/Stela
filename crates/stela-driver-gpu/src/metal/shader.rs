@@ -532,6 +532,9 @@ pub struct Specialization {
     /// as storage, and its pipeline's samples per pixel.
     pub storage_attachments: [Option<StorageAttachment>; MAX_COLOR_ATTACHMENTS],
     pub samples: u32,
+    /// The function's library's narrowing floating-point conversions round
+    /// toward zero (`MTLFloatingPointConversionRoundingModeTowardZero`).
+    pub round_toward_zero: bool,
 }
 
 /// A color attachment a fragment function reads, which the function also

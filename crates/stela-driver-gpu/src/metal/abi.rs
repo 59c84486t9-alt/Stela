@@ -545,6 +545,15 @@ raw_enum! {
 }
 
 raw_enum! {
+    /// `MTLFloatingPointConversionRoundingMode`: how a library's narrowing
+    /// floating-point conversions round.
+    pub enum ConversionRounding: u64 {
+        ToNearestEven = 0,
+        TowardZero = 1,
+    }
+}
+
+raw_enum! {
     /// `MTLVisibilityResultType`: whether a pass's results replace what
     /// the buffer holds or add to it.
     pub enum VisibilityResultType: u64 {

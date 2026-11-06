@@ -336,6 +336,7 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (NSUInteger)optimizationLevel;
 - (NSUInteger)compileSymbolVisibility;
 - (NSUInteger)libraryType;
+- (NSUInteger)floatingPointConversionRoundingMode;
 - (BOOL)preserveInvariance;
 - (BOOL)enableLogging;
 - (NSDictionary *)preprocessorMacros;

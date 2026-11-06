@@ -165,12 +165,14 @@ records! {
     }
 
     /// `NewSourceLibrary`: the AIR the source compiled to, the install name
-    /// of a dynamic library, empty for an executable one, and a span of
-    /// handles of the libraries it loads with.
+    /// of a dynamic library, empty for an executable one, a span of handles
+    /// of the libraries it loads with, and its options'
+    /// `MTLFloatingPointConversionRoundingMode`, which the back end applies.
     pub struct NewSourceLibraryRequest {
         pub air: Span,
         pub install_name: Span,
         pub libraries: Span,
+        pub conversion_rounding: u64,
     }
 
     /// `newLibraryWithStitchedDescriptor:error:`: the handles of its

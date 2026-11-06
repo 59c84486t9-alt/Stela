@@ -9,8 +9,8 @@ use super::{
 };
 use crate::metal::{
     abi::{
-        CpuCacheMode, DataType, DispatchType, FunctionType, HazardTrackingMode, HeapType,
-        IndirectCommandType, LoadAction, MultisampleDepthResolveFilter,
+        ConversionRounding, CpuCacheMode, DataType, DispatchType, FunctionType, HazardTrackingMode,
+        HeapType, IndirectCommandType, LoadAction, MultisampleDepthResolveFilter,
         MultisampleStencilResolveFilter, PrimitiveTopologyClass, PrimitiveType, ResourceOptions,
         SparsePageSize, SparseTextureMappingMode, StorageMode, StoreAction, StoreActionOptions,
         SwizzleChannels, TessellationPartitionMode, TextureType, TextureUsage,
@@ -1228,7 +1228,12 @@ fn source_libraries_name_their_functions_and_keep_what_they_load_with() {
     let air = b"BC\xc0\xde\0\0\0\0";
     let dependency = device.new_library(fixture(false)).unwrap();
     let library = device
-        .new_source_library(air, Some("lib/source"), &[dependency])
+        .new_source_library(
+            air,
+            Some("lib/source"),
+            &[dependency],
+            ConversionRounding::TowardZero,
+        )
         .unwrap();
     assert_eq!(
         device.library_function_names(library),
@@ -1266,13 +1271,19 @@ fn source_libraries_name_their_functions_and_keep_what_they_load_with() {
 
     // And they load for as long as it does.
     let kept = device.new_library(fixture(false)).unwrap();
-    let keeper = device.new_source_library(air, None, &[kept]).unwrap();
+    let keeper = device
+        .new_source_library(air, None, &[kept], ConversionRounding::ToNearestEven)
+        .unwrap();
     assert_eq!(device.library_identity(keeper), Ok((false, None)));
     device.destroy_library(kept).unwrap();
     assert!(device.compiler.libraries[3].is_some());
     device.destroy_library(keeper).unwrap();
     assert!(device.compiler.libraries[3].is_none());
-    assert!(device.new_source_library(air, None, &[kept]).is_err());
+    assert!(
+        device
+            .new_source_library(air, None, &[kept], ConversionRounding::ToNearestEven)
+            .is_err()
+    );
 }
 
 #[test]

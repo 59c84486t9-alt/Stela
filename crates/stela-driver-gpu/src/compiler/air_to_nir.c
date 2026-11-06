@@ -253,6 +253,14 @@ leaf_shape(LLVMTypeRef type)
    return value_shape(type, &components, &bits);
 }
 
+/* A narrowing conversion of `value` to half, rounded as the compile options
+ * select. */
+static nir_def *
+narrow_to_half(struct translator *t, nir_def *value)
+{
+   return t->options->round_toward_zero ? nir_f2f16_rtz(&t->b, value) : nir_f2f16_rtne(&t->b, value);
+}
+
 static bool
 fp_environment(struct translator *t)
 {
@@ -3586,7 +3594,7 @@ fp_conversion(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
          return fail(t, STELA_AIR_TYPE, "unsupported floating-point conversion types");
       nir_def *value = op == LLVMFPToSI ? nir_f2iN(&t->b, single, bits) :
                        op == LLVMFPToUI ? nir_f2uN(&t->b, single, bits) :
-                       bits == 16       ? nir_f2f16_rtne(&t->b, single) : single;
+                       bits == 16       ? narrow_to_half(t, single) : single;
       return put_value(t, inst, value, 0);
    }
    if (!(to_float ? float_shape(result, &components, &bits) : shape(result, &components, &bits)) ||
@@ -3603,7 +3611,7 @@ fp_conversion(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
    switch (op) {
    case LLVMFPExt:
    case LLVMFPTrunc:
-      value = bits == 16 ? nir_f2f16_rtne(&t->b, a) : nir_f2fN(&t->b, a, bits);
+      value = bits == 16 ? narrow_to_half(t, a) : nir_f2fN(&t->b, a, bits);
       break;
    case LLVMFPToSI: value = nir_f2iN(&t->b, a, bits); break;
    case LLVMFPToUI: value = nir_f2uN(&t->b, a, bits); break;

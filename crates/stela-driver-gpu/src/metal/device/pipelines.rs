@@ -12,7 +12,7 @@ use super::{
     ArchiveId, BufferId, ComputePipelineId, Device, FunctionId, LibraryId, RenderPipelineId, Slab,
 };
 use crate::metal::{
-    abi::{DataType, FunctionType, PrimitiveTopologyClass},
+    abi::{ConversionRounding, DataType, FunctionType, PrimitiveTopologyClass},
     command_buffer::{BoundPipeline, ComputePipelineState, IndirectCompute, RenderPipelineState},
     error::{Error, Result, ensure, require},
     library::{self, Function, Header, Library},
@@ -89,6 +89,8 @@ struct LibraryObject {
     /// What a pipeline linking its functions links too: stitched functions'
     /// calls stay declarations.
     stitched: Vec<LinkedFunction>,
+    /// Its functions' narrowing floating-point conversions round toward zero.
+    round_toward_zero: bool,
     users: Users,
 }
 
@@ -486,6 +488,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         air: &[u8],
         install_name: Option<&str>,
         dependencies: &[LibraryId],
+        rounding: ConversionRounding,
     ) -> Result<LibraryId> {
         for &id in dependencies {
             ensure(self.pipelines.libraries.get(id.0)?.users.creator, DESTROYED)?;
@@ -503,6 +506,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let held = self.pipelines.libraries.get_mut(library.0)?;
         held.dependencies = dependencies.to_vec();
         held.preloads = true;
+        held.round_toward_zero = rounding == ConversionRounding::TowardZero;
         Ok(library)
     }
 
@@ -541,7 +545,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             let below = &self.pipelines.libraries.get(id.0)?.stitched;
             stitched.extend_from_slice(below);
         }
-        let library = self.new_source_library(&air, None, &libraries)?;
+        // A stitched library has no compile options of its own.
+        let library =
+            self.new_source_library(&air, None, &libraries, ConversionRounding::ToNearestEven)?;
         let held = self.pipelines.libraries.get_mut(library.0)?;
         held.stitched = stitched;
         held.preloads = false;
@@ -574,6 +580,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             dependencies: Vec::new(),
             preloads: false,
             stitched: Vec::new(),
+            round_toward_zero: false,
             users: Users::CREATED,
         });
         Ok(LibraryId(index))
@@ -608,6 +615,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             dependencies: Vec::new(),
             preloads: false,
             stitched: Vec::new(),
+            // A library of the same bytes, not of the same source options.
+            round_toward_zero: false,
             users: Users::CREATED,
         };
         Ok(Some(LibraryId(self.pipelines.libraries.insert(object))))
@@ -929,6 +938,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let specialization = Specialization {
             constants: function.prepared.constants.clone(),
             linking,
+            round_toward_zero: held.round_toward_zero,
             ..specialization
         };
         let samplers = self
