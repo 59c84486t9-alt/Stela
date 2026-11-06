@@ -339,6 +339,12 @@ pub fn common_native_target(
     const LZCNT: u32 = 1 << 5;
     const CX8: u32 = 1 << 8;
     const CX16: u32 = 1 << 13;
+    const MOVBE: u32 = 1 << 22;
+    const AVX: u32 = 1 << 28;
+    const BMI1: u32 = 1 << 3;
+    const BMI2: u32 = 1 << 8;
+    /// AMD's first family whose PDEP and PEXT are not microcoded (Zen 3).
+    const FAST_PDEP_FAMILY: u32 = 0x19;
     if observations.is_empty() || observations.len() > MAX_CORES {
         return Err(CapabilityRefusal::InvalidSnapshot);
     }
@@ -346,6 +352,12 @@ pub fn common_native_target(
         (u32::MAX, u32::MAX, u32::MAX, u32::MAX);
     let mut atomic16 = true;
     let mut lzcnt = true;
+    // VEX-encoded scalar GPR extensions, which use no extended state:
+    // Intel's Pentium and Celeron parts without AVX fault on them.
+    let mut vex = true;
+    // AMD's Zen 1 and Zen 2, and Hygon's Zen-derived cores, microcode PDEP
+    // and PEXT; the display family tells them apart.
+    let mut fast_pdep = true;
     for snapshot in observations {
         let vendor = snapshot
             .get(0, 0)
@@ -369,9 +381,19 @@ pub fn common_native_target(
             && snapshot
                 .get(0x8000_0001, 0)
                 .is_some_and(|record| record.ecx & LZCNT != 0);
-        atomic16 &=
-            TargetCpu::atomic_load16_guaranteed([vendor.ebx, vendor.edx, vendor.ecx], basic.ecx);
+        let vendor = [vendor.ebx, vendor.edx, vendor.ecx];
+        atomic16 &= TargetCpu::atomic_load16_guaranteed(vendor, basic.ecx);
+        vex &= vendor != TargetCpu::INTEL_VENDOR || basic.ecx & AVX != 0;
+        let base_family = (basic.eax >> 8) & 0xf;
+        let family = if base_family == 0xf {
+            base_family + ((basic.eax >> 20) & 0xff)
+        } else {
+            base_family
+        };
+        let zen = vendor == TargetCpu::AMD_VENDOR || vendor == TargetCpu::HYGON_VENDOR;
+        fast_pdep &= !zen || family >= FAST_PDEP_FAMILY;
     }
+    let bmi2 = vex && structured_ebx & BMI2 != 0;
     let mut target = match (ecx & SSSE3 != 0, ecx & SSE41 != 0, ecx & SSE42 != 0) {
         (true, true, true) => TargetCpu::Sse42,
         (true, true, false) => TargetCpu::Sse41,
@@ -391,6 +413,10 @@ pub fn common_native_target(
         (edx & CX8 != 0, TargetCpu::with_cx8),
         (ecx & CX16 != 0, TargetCpu::with_cx16),
         (atomic16, TargetCpu::with_atomic_load16),
+        (vex && structured_ebx & BMI1 != 0, TargetCpu::with_bmi1),
+        (bmi2, TargetCpu::with_bmi2),
+        (bmi2 && fast_pdep, TargetCpu::with_fast_pdep),
+        (ecx & MOVBE != 0, TargetCpu::with_movbe),
     ] {
         if present {
             target = with(target);

@@ -600,7 +600,11 @@ fn common_target_keeps_only_features_present_on_every_assigned_worker() {
     let mut weaker = target_snapshot(TargetCpu::AMD_VENDOR);
     weaker.records[0].ecx &= !((1 << 1) | (1 << 25) | (1 << 28));
     weaker.records[2].ebx = 0;
-    let expected = TargetCpu::Sse42.with_popcnt().with_cx8().with_cx16();
+    let expected = TargetCpu::Sse42
+        .with_popcnt()
+        .with_cx8()
+        .with_cx16()
+        .with_movbe();
     assert_eq!(common_native_target(&[&rich, &weaker]), Ok(expected));
     assert_eq!(common_native_target(&[&weaker, &rich]), Ok(expected));
     // Removing a worker recomputes a future cold-registration ceiling;
@@ -621,6 +625,38 @@ fn common_target_keeps_only_features_present_on_every_assigned_worker() {
     ] {
         assert!(!solo.supports(excluded));
     }
+}
+
+/// BMI1 and BMI2 need VEX decoding, which an Intel worker without AVX
+/// lacks, and fast PDEP a Zen 3 or later AMD core on every worker.
+#[test]
+fn common_target_keeps_scalar_gpr_extensions_every_worker_decodes() {
+    use stela_compiler::TargetCpu;
+    const BMI: u32 = (1 << 3) | (1 << 8);
+    let with_family = |vendor, family: u32| {
+        let mut snapshot = target_snapshot(vendor);
+        snapshot.records[2].ebx |= BMI;
+        snapshot.records[0].eax = (0xf << 8) | (family - 0xf) << 20;
+        snapshot
+    };
+    let zen4 = with_family(TargetCpu::AMD_VENDOR, 0x19);
+    let zen2 = with_family(TargetCpu::AMD_VENDOR, 0x17);
+    let intel = with_family(TargetCpu::INTEL_VENDOR, 0x10);
+    let fast = common_native_target(&[&zen4, &intel]).unwrap();
+    for kept in [
+        TargetCpu::Bmi1,
+        TargetCpu::Bmi2,
+        TargetCpu::FastPdep,
+        TargetCpu::Movbe,
+    ] {
+        assert!(fast.supports(kept));
+    }
+    let slow = common_native_target(&[&zen4, &zen2]).unwrap();
+    assert!(slow.supports(TargetCpu::Bmi2) && !slow.supports(TargetCpu::FastPdep));
+    let mut without_avx = intel;
+    without_avx.records[0].ecx &= !(1 << 28);
+    let none = common_native_target(&[&zen4, &without_avx]).unwrap();
+    assert!(!none.supports(TargetCpu::Bmi1) && !none.supports(TargetCpu::Bmi2));
 }
 
 #[test]
