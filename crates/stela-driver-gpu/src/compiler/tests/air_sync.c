@@ -664,6 +664,44 @@ matrix_products_follow_rows_and_columns(void)
    }
 }
 
+/* The current form of the same accesses: Apple's compiler passes the
+ * transposed load at 16 elements a row and origin (1, 2) as extent (8, 16),
+ * strides (16, 1) and origin (2, 1), and the store likewise. */
+static void
+matrix_memory_takes_extents_strides_and_origins(void)
+{
+   uint8_t memory[2048] = {0};
+   for (unsigned i = 0; i < 160; i++)
+      put_float(memory, i, (float)i);
+   run_simdgroup("declare <64 x float> @air.simdgroup_matrix_8x8_load.v64f32.p1f32(ptr addrspace(1),"
+                 " <2 x i64>, <2 x i64>, <2 x i64>)\n"
+                 "declare void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float>,"
+                 " ptr addrspace(1), <2 x i64>, <2 x i64>, <2 x i64>)\n",
+                 "%b = call <64 x float> @air.simdgroup_matrix_8x8_load.v64f32.p1f32(ptr addrspace(1)"
+                 " %out, <2 x i64> <i64 8, i64 16>, <2 x i64> <i64 16, i64 1>, <2 x i64> <i64 2, i64 1>)\n"
+                 "%pd = getelementptr float, ptr addrspace(1) %out, i64 192\n"
+                 "call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %b,"
+                 " ptr addrspace(1) %pd, <2 x i64> <i64 8, i64 12>, <2 x i64> <i64 12, i64 1>,"
+                 " <2 x i64> <i64 1, i64 3>)\n"
+                 "%c = call <64 x float> @air.simdgroup_matrix_8x8_load.v64f32.p1f32(ptr addrspace(1)"
+                 " %out, <2 x i64> <i64 16, i64 8>, <2 x i64> <i64 1, i64 16>, <2 x i64> <i64 1, i64 2>)\n"
+                 "%pc = getelementptr float, ptr addrspace(1) %out, i64 320\n"
+                 "call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %c,"
+                 " ptr addrspace(1) %pc, <2 x i64> splat (i64 8), <2 x i64> <i64 1, i64 8>,"
+                 " <2 x i64> zeroinitializer)\n"
+                 "ret void\n",
+                 memory, sizeof(memory));
+   for (unsigned r = 0; r < 8; r++) {
+      for (unsigned c = 0; c < 8; c++) {
+         /* As the earlier form's: element (r, c) loads from row 2 + c,
+          * column 1 + r and stores to row 1 + c, column 3 + r. */
+         assert(float_at(memory, 192 + (1 + c) * 12 + 3 + r) == (float)((2 + c) * 16 + 1 + r));
+         /* Untransposed, from row 2 + r, column 1 + c. */
+         assert(float_at(memory, 320 + 8 * r + c) == (float)((2 + r) * 16 + 1 + c));
+      }
+   }
+}
+
 /* Loads and stores place the matrix at their origin's column x and row y in
  * rows of their stride, transposed when asked; a diagonal is the identity
  * scaled. */
@@ -816,6 +854,7 @@ main(void)
    simd_functions_lower_to_subgroup_operations();
    matrix_products_follow_rows_and_columns();
    matrix_memory_takes_origins_strides_and_transposes();
+   matrix_memory_takes_extents_strides_and_origins();
    matrix_elements_and_narrow_types();
    refuses_misused_matrices();
    glsl_type_singleton_decref();

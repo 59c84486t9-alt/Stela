@@ -3,18 +3,24 @@
  *
  *   air.simdgroup_matrix_8x8_init_filled.<m>.<t>(t value)
  *   air.simdgroup_matrix_8x8_init_diag.<m>.<t>(t value)
- *   air.simdgroup_matrix_8x8_load.<m>.p<space><t>(ptr, i64 elements_per_row,
- *                                                 <2 x i64> origin, i1 transpose)
- *   air.simdgroup_matrix_8x8_store.<m>.p<space><t>(<m>, ptr, i64 elements_per_row,
- *                                                  <2 x i64> origin, i1 transpose)
+ *   air.simdgroup_matrix_8x8_load.<m>.p<space><t>(ptr, <2 x i64> extent,
+ *                                                 <2 x i64> strides, <2 x i64> origin)
+ *   air.simdgroup_matrix_8x8_store.<m>.p<space><t>(<m>, ptr, <2 x i64> extent,
+ *                                                  <2 x i64> strides, <2 x i64> origin)
  *   air.simdgroup_matrix_8x8_multiply_accumulate.<d>.<a>.<b>.<c>(a, b, c)
+ *
+ * Earlier compilers spelled a load's and store's last three operands
+ * (i64 elements_per_row, <2 x i64> origin, i1 transpose), which are strides
+ * (1, elements_per_row) and that origin, or transposed strides
+ * (elements_per_row, 1) and the origin's swapped coordinates.
  *
  * <m> is "v64f32", "v64f16" or "v64bf16" and <t> its element. An AIR matrix
  * is opaque storage whose elements 0 and 1 are the thread's
  * thread_elements(). Each of a SIMD-group's 32 lanes holds two: lane l the
- * elements of row l / 4 at columns 2 (l % 4) and 2 (l % 4) + 1. Memory is
- * accessed element by element at the origin's column x and row y, transposed
- * when asked. A product gathers each row of a and column of b by shuffles and
+ * elements of row l / 4 at columns 2 (l % 4) and 2 (l % 4) + 1. Memory holds
+ * column c and row r at element (origin.x + c) strides.x + (origin.y + r)
+ * strides.y; the extent, the elements a row and the matrix's rows in that
+ * order, bounds nothing. A product gathers each row of a and column of b by shuffles and
  * accumulates in single precision, rounding once to its result's type. */
 #include "air_matrix.h"
 #include "compiler/nir/nir_builtin_builder.h"
@@ -115,34 +121,39 @@ multiply_accumulate(nir_builder *b, LLVMTypeRef result, LLVMValueRef call, nir_d
    return narrow(b, sum, element_kind(result));
 }
 
-/* The byte offset of this lane's element `e` in memory holding the matrix at
- * column origin.x and row origin.y, `stride` elements per row, transposed
- * when `transpose`. */
+/* The byte offset of this lane's element `e` in memory holding the matrix's
+ * column c and row r at element (origin.x + c) strides.x + (origin.y + r)
+ * strides.y. */
 static nir_def *
-element_offset(nir_builder *b, unsigned e, unsigned bytes, nir_def *stride, nir_def *origin,
-               nir_def *transpose)
+element_offset(nir_builder *b, unsigned e, unsigned bytes, nir_def *strides, nir_def *origin)
 {
    nir_def *row, *column;
    position(b, &row, &column);
-   row = nir_u2u64(b, row);
-   column = nir_u2u64(b, nir_iadd_imm(b, column, e));
-   nir_def *memory_row = nir_bcsel(b, transpose, column, row);
-   nir_def *memory_column = nir_bcsel(b, transpose, row, column);
-   nir_def *index = nir_iadd(b, nir_imul(b, nir_iadd(b, nir_channel(b, origin, 1), memory_row), stride),
-                             nir_iadd(b, nir_channel(b, origin, 0), memory_column));
+   nir_def *x = nir_iadd(b, nir_channel(b, origin, 0), nir_u2u64(b, nir_iadd_imm(b, column, e)));
+   nir_def *y = nir_iadd(b, nir_channel(b, origin, 1), nir_u2u64(b, row));
+   nir_def *index = nir_iadd(b, nir_imul(b, x, nir_channel(b, strides, 0)),
+                             nir_imul(b, y, nir_channel(b, strides, 1)));
    return nir_imul_imm(b, index, bytes);
 }
 
-/* Whether a memory function's last three operands are an i64 stride, a
- * <2 x i64> origin and an i1 transpose, starting at operand `first`. */
-static bool
+enum addressing { ADDRESSING_NONE, ADDRESSING_STRIDES, ADDRESSING_TRANSPOSE };
+
+/* How a memory function's last three operands, from operand `first`,
+ * address its matrix: an extent, strides and an origin, or an earlier
+ * compiler's i64 elements a row, origin and i1 transpose. */
+static enum addressing
 addressing(LLVMValueRef call, unsigned first)
 {
    LLVMContextRef context = LLVMGetTypeContext(LLVMTypeOf(call));
-   LLVMTypeRef i64 = LLVMInt64TypeInContext(context);
-   return LLVMTypeOf(LLVMGetOperand(call, first)) == i64 &&
-          LLVMTypeOf(LLVMGetOperand(call, first + 1)) == LLVMVectorType(i64, 2) &&
-          LLVMTypeOf(LLVMGetOperand(call, first + 2)) == LLVMInt1TypeInContext(context);
+   LLVMTypeRef i64 = LLVMInt64TypeInContext(context), pair = LLVMVectorType(i64, 2);
+   LLVMTypeRef a = LLVMTypeOf(LLVMGetOperand(call, first));
+   LLVMTypeRef origin = LLVMTypeOf(LLVMGetOperand(call, first + 1));
+   LLVMTypeRef last = LLVMTypeOf(LLVMGetOperand(call, first + 2));
+   if (a == pair && origin == pair && last == pair)
+      return ADDRESSING_STRIDES;
+   if (a == i64 && origin == pair && last == LLVMInt1TypeInContext(context))
+      return ADDRESSING_TRANSPOSE;
+   return ADDRESSING_NONE;
 }
 
 /* A load's or store's matrix, its memory at `pointer`: device, constant or
@@ -158,20 +169,32 @@ memory(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef c
                     LLVMGetPointerAddressSpace(pointer_type) : 0;
    if (!stela_air_call_plain(c, call, callee, first + 3))
       return STELA_AIR_CALL_FAILED;
-   if (!stela_air_matrix_type(matrix, &bits) || !addressing(call, first) ||
+   enum addressing form = addressing(call, first);
+   if (!stela_air_matrix_type(matrix, &bits) || form == ADDRESSING_NONE ||
        (space != 1 && space != 3 && (store || space != 2)))
       return stela_air_call_fail(c, STELA_AIR_TYPE, "unsupported SIMD-group matrix memory types"),
              STELA_AIR_CALL_FAILED;
    nir_builder *b = c->b;
-   nir_def *stride = c->operand(c->translator, LLVMGetOperand(call, first));
-   nir_def *origin = stride ? c->operand(c->translator, LLVMGetOperand(call, first + 1)) : NULL;
-   nir_def *transpose = origin ? c->operand(c->translator, LLVMGetOperand(call, first + 2)) : NULL;
-   nir_def *value = transpose && store ? c->operand(c->translator, LLVMGetOperand(call, 0)) : NULL;
-   if (!transpose || (store && !value))
+   nir_def *strides, *origin;
+   if (form == ADDRESSING_STRIDES) {
+      strides = c->operand(c->translator, LLVMGetOperand(call, first + 1));
+      origin = strides ? c->operand(c->translator, LLVMGetOperand(call, first + 2)) : NULL;
+   } else {
+      nir_def *row = c->operand(c->translator, LLVMGetOperand(call, first));
+      nir_def *at = row ? c->operand(c->translator, LLVMGetOperand(call, first + 1)) : NULL;
+      nir_def *transpose = at ? c->operand(c->translator, LLVMGetOperand(call, first + 2)) : NULL;
+      if (!transpose)
+         return STELA_AIR_CALL_FAILED;
+      nir_def *one = nir_imm_int64(b, 1);
+      strides = nir_bcsel(b, transpose, nir_vec2(b, row, one), nir_vec2(b, one, row));
+      origin = nir_bcsel(b, transpose, nir_swizzle(b, at, (unsigned[]){1, 0}, 2), at);
+   }
+   nir_def *value = origin && store ? c->operand(c->translator, LLVMGetOperand(call, 0)) : NULL;
+   if (!origin || (store && !value))
       return STELA_AIR_CALL_FAILED;
    nir_def *elements[2];
    for (unsigned e = 0; e < 2; e++) {
-      nir_def *offset = element_offset(b, e, bits / 8, stride, origin, transpose);
+      nir_def *offset = element_offset(b, e, bits / 8, strides, origin);
       if (store ? !c->store(c->translator, pointer, offset, nir_channel(b, value, e)) :
                   !(elements[e] = c->load(c->translator, pointer, offset, bits)))
          return STELA_AIR_CALL_FAILED;
