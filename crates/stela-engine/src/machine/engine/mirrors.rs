@@ -53,8 +53,12 @@ pub(super) const MRS_READ: u32 = 1 << 21;
 /// ones a kernel reads around each exception and thread switch, FPCR and
 /// FPSR, and the core counters a sampler reads in bursts
 /// ([`Devices::register_storage`]). When there are more, the rest take System
-/// exits.
-pub(super) const STORED_CELLS: usize = 64;
+/// exits. Cells go to registers in the order code naming them is first
+/// installed, which for a kernel is boot's, so there are cells for every
+/// register a boot reads: macOS reads over 64 before its first process, and
+/// its processes' every MRS of TPIDRRO_EL0, their thread pointer, then took
+/// an exit, over 100,000 a second on each PE running them.
+pub(super) const STORED_CELLS: usize = 256;
 
 /// The cells of the [`MIRRORED`] registers, in its order, and the
 /// [`STORED_CELLS`]: native code reads those of the PE's EL and GXF state,
