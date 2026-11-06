@@ -632,7 +632,9 @@ boolean(LLVMTypeRef type)
 }
 
 /* "air.convert.<to>.<from>": each type is "f." with a float type, or "s."
- * or "u." with an integer type; a bool is "u.i1", true converting to one. */
+ * or "u." with an integer type; a bool is "u.i1", true converting to one.
+ * A bfloat converts through single precision, exact for every source but an
+ * integer, which would round twice and is refused. */
 static enum stela_air_call_status
 convert(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef callee,
         const char *name, size_t bytes, nir_def **result)
@@ -643,7 +645,9 @@ convert(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef 
    unsigned to_lanes, from_lanes;
    stela_air_call_element(to, &to_lanes);
    stela_air_call_element(from, &from_lanes);
-   bool to_float = stela_air_call_floating(to), from_float = stela_air_call_floating(from);
+   bool to_bfloat = stela_air_call_bfloat(to), from_bfloat = stela_air_call_bfloat(from);
+   bool to_float = stela_air_call_floating(to) || to_bfloat;
+   bool from_float = stela_air_call_floating(from) || from_bfloat;
    bool to_bool = boolean(to), from_bool = boolean(from);
    if ((!to_float && !to_bool && !stela_air_call_integer(to)) ||
        (!from_float && !from_bool && !stela_air_call_integer(from)) || to_lanes != from_lanes)
@@ -668,14 +672,18 @@ convert(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef 
    if (to_sign < 0)
       return stela_air_call_fail(c, STELA_AIR_INSTRUCTION, "conversion name disagrees with its types"),
              STELA_AIR_CALL_FAILED;
+   if (to_bfloat && !from_float && !from_bool)
+      return stela_air_call_fail(c, STELA_AIR_TYPE, "integer to bfloat conversion"), STELA_AIR_CALL_FAILED;
    if ((to_float || from_float) && !c->fp_environment(c->translator))
       return STELA_AIR_CALL_FAILED;
    nir_def *x = c->operand(c->translator, LLVMGetOperand(call, 0));
    if (!x)
       return STELA_AIR_CALL_FAILED;
+   nir_builder *b = c->b;
+   if (from_bfloat)
+      x = stela_air_bfloat_to_float(b, x);
    unsigned to_bits = to_float ? (LLVMGetTypeKind(stela_air_call_element(to, &to_lanes)) == LLVMHalfTypeKind ? 16 : 32) :
                       LLVMGetIntTypeWidth(stela_air_call_element(to, &to_lanes));
-   nir_builder *b = c->b;
    if (from_bool)
       *result = to_bool ? x : to_float ? nir_b2fN(b, x, to_bits) : nir_b2iN(b, x, to_bits);
    else if (to_bool)
@@ -688,6 +696,8 @@ convert(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef 
       *result = to_sign == 0 ? nir_f2iN(b, x, to_bits) : nir_f2uN(b, x, to_bits);
    else
       *result = from_sign == 0 ? nir_i2iN(b, x, to_bits) : nir_u2uN(b, x, to_bits);
+   if (to_bfloat)
+      *result = stela_air_float_to_bfloat(b, *result);
    return STELA_AIR_CALL_LOWERED;
 }
 

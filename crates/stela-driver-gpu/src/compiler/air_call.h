@@ -49,9 +49,20 @@ LLVMTypeRef stela_air_call_element(LLVMTypeRef type, unsigned *lanes);
 /* A half or float scalar, or a vector of 2 to 4 of them. */
 bool stela_air_call_floating(LLVMTypeRef type);
 
+/* A bfloat scalar, or a vector of 2 to 4 of them. */
+bool stela_air_call_bfloat(LLVMTypeRef type);
+
+/* bfloats, which NIR holds as their 16 bits, in single precision: each is a
+ * float's high half. */
+nir_def *stela_air_bfloat_to_float(nir_builder *b, nir_def *bits);
+
+/* Single-precision values rounded to bfloats to nearest even, as their 16
+ * bits; a NaN stays a quiet NaN. */
+nir_def *stela_air_float_to_bfloat(nir_builder *b, nir_def *value);
+
 /* An 8-, 16-, 32- or 64-bit integer scalar, or a vector of 2 to 4 of them. */
 bool stela_air_call_integer(LLVMTypeRef type);
 
-/* A type's AIR overload: "f32", "v4f16", "i32". */
+/* A type's AIR overload: "f32", "v4f16", "v2bf16", "i32". */
 void stela_air_call_overload(LLVMTypeRef type, char *name, size_t size);
 #endif

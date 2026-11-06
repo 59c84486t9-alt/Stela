@@ -208,10 +208,21 @@ float_shape(LLVMTypeRef type, unsigned *components, unsigned *bits)
    return LLVMGetTypeKind(type) == LLVMFloatTypeKind || LLVMGetTypeKind(type) == LLVMHalfTypeKind;
 }
 
+/* A bfloat's 16 bits, which only conversions and memory read as a number:
+ * its arithmetic is refused rather than taken for a half's. */
+static bool
+bfloat_shape(LLVMTypeRef type, unsigned *components, unsigned *bits)
+{
+   *components = LLVMGetTypeKind(type) == LLVMVectorTypeKind ? LLVMGetVectorSize(type) : 1;
+   *bits = 16;
+   return stela_air_call_bfloat(type);
+}
+
 static bool
 value_shape(LLVMTypeRef type, unsigned *components, unsigned *bits)
 {
-   return shape(type, components, bits) || float_shape(type, components, bits);
+   return shape(type, components, bits) || float_shape(type, components, bits) ||
+          bfloat_shape(type, components, bits);
 }
 
 /* An aggregate leaf: an integer, float or half scalar or vector. */
@@ -1218,9 +1229,10 @@ constant_bytes(struct translator *t, LLVMValueRef value, LLVMTypeRef type, uint8
        !LLVMABISizeOfType(t->layout, type))
       return true;
    LLVMTypeKind kind = LLVMGetTypeKind(type);
-   if (kind == LLVMIntegerTypeKind || kind == LLVMHalfTypeKind || kind == LLVMFloatTypeKind) {
+   if (kind == LLVMIntegerTypeKind || kind == LLVMHalfTypeKind || kind == LLVMBFloatTypeKind ||
+       kind == LLVMFloatTypeKind) {
       unsigned bits = kind == LLVMIntegerTypeKind ? LLVMGetIntTypeWidth(type) :
-                      kind == LLVMHalfTypeKind ? 16 : 32;
+                      kind == LLVMFloatTypeKind ? 32 : 16;
       /* LLVM serializes its APFloat bits, as for immediate operands. */
       LLVMValueRef encoded = kind == LLVMIntegerTypeKind ? value :
          LLVMConstBitCast(value, LLVMIntTypeInContext(t->context, bits));
@@ -3023,7 +3035,9 @@ call_store(void *translator, LLVMValueRef pointer, nir_def *offset, nir_def *val
    return t->error->kind == STELA_AIR_OK;
 }
 
-/* LLVM's conversions to, from and between half and float. */
+/* LLVM's conversions to, from and between half, float and bfloat, which
+ * converts through single precision: exactly, but from an integer, which
+ * would round twice and is refused. */
 static bool
 fp_conversion(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
 {
@@ -3031,6 +3045,25 @@ fp_conversion(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
    LLVMTypeRef result = LLVMTypeOf(inst), source = LLVMTypeOf(LLVMGetOperand(inst, 0));
    bool to_float = op != LLVMFPToSI && op != LLVMFPToUI;
    bool from_float = op != LLVMSIToFP && op != LLVMUIToFP;
+   bool to_bfloat = stela_air_call_bfloat(result), from_bfloat = stela_air_call_bfloat(source);
+   if (to_bfloat || from_bfloat) {
+      if (to_bfloat && !from_float)
+         return fail(t, STELA_AIR_TYPE, "integer to bfloat conversion");
+      if (!fp_environment(t))
+         return false;
+      nir_def *a = get_value(t, LLVMGetOperand(inst, 0));
+      if (!a)
+         return false;
+      nir_def *single = from_bfloat ? stela_air_bfloat_to_float(&t->b, a) : nir_f2f32(&t->b, a);
+      if (to_bfloat)
+         return put_value(t, inst, stela_air_float_to_bfloat(&t->b, single), 0);
+      if (!value_shape(result, &components, &bits) || bits == 1)
+         return fail(t, STELA_AIR_TYPE, "unsupported floating-point conversion types");
+      nir_def *value = op == LLVMFPToSI ? nir_f2iN(&t->b, single, bits) :
+                       op == LLVMFPToUI ? nir_f2uN(&t->b, single, bits) :
+                       bits == 16       ? nir_f2f16_rtne(&t->b, single) : single;
+      return put_value(t, inst, value, 0);
+   }
    if (!(to_float ? float_shape(result, &components, &bits) : shape(result, &components, &bits)) ||
        !(from_float ? float_shape(source, &source_components, &source_bits) :
                       shape(source, &source_components, &source_bits)) ||

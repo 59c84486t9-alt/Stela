@@ -66,7 +66,7 @@ widen(nir_builder *b, nir_def *pair, LLVMTypeKind element)
 {
    switch (element) {
    case LLVMHalfTypeKind: return nir_f2f32(b, pair);
-   case LLVMBFloatTypeKind: return nir_ishl_imm(b, nir_u2u32(b, pair), 16);
+   case LLVMBFloatTypeKind: return stela_air_bfloat_to_float(b, pair);
    default: return pair;
    }
 }
@@ -77,13 +77,7 @@ narrow(nir_builder *b, nir_def *pair, LLVMTypeKind element)
 {
    switch (element) {
    case LLVMHalfTypeKind: return nir_f2f16_rtne(b, pair);
-   case LLVMBFloatTypeKind: {
-      /* bfloats are floats' high halves; NaN stays a quiet NaN. */
-      nir_def *odd = nir_iand_imm(b, nir_ushr_imm(b, pair, 16), 1);
-      nir_def *rounded = nir_iadd(b, pair, nir_iadd_imm(b, odd, 0x7fff));
-      nir_def *bits = nir_bcsel(b, nir_fisnan(b, pair), nir_ior_imm(b, pair, 0x400000), rounded);
-      return nir_u2u16(b, nir_ushr_imm(b, bits, 16));
-   }
+   case LLVMBFloatTypeKind: return stela_air_float_to_bfloat(b, pair);
    default: return pair;
    }
 }

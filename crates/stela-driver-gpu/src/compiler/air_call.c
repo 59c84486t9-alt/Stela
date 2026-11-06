@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_call.h"
+#include "compiler/nir/nir_builtin_builder.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -73,6 +74,28 @@ stela_air_call_floating(LLVMTypeRef type)
 }
 
 bool
+stela_air_call_bfloat(LLVMTypeRef type)
+{
+   LLVMTypeRef element = shaped(type);
+   return element && LLVMGetTypeKind(element) == LLVMBFloatTypeKind;
+}
+
+nir_def *
+stela_air_bfloat_to_float(nir_builder *b, nir_def *bits)
+{
+   return nir_ishl_imm(b, nir_u2u32(b, bits), 16);
+}
+
+nir_def *
+stela_air_float_to_bfloat(nir_builder *b, nir_def *value)
+{
+   nir_def *odd = nir_iand_imm(b, nir_ushr_imm(b, value, 16), 1);
+   nir_def *rounded = nir_iadd(b, value, nir_iadd_imm(b, odd, 0x7fff));
+   nir_def *bits = nir_bcsel(b, nir_fisnan(b, value), nir_ior_imm(b, value, 0x400000), rounded);
+   return nir_u2u16(b, nir_ushr_imm(b, bits, 16));
+}
+
+bool
 stela_air_call_integer(LLVMTypeRef type)
 {
    LLVMTypeRef element = shaped(type);
@@ -91,7 +114,9 @@ stela_air_call_overload(LLVMTypeRef type, char *name, size_t size)
    if (LLVMGetTypeKind(scalar) == LLVMIntegerTypeKind)
       snprintf(base, sizeof(base), "i%u", LLVMGetIntTypeWidth(scalar));
    else
-      snprintf(base, sizeof(base), LLVMGetTypeKind(scalar) == LLVMHalfTypeKind ? "f16" : "f32");
+      snprintf(base, sizeof(base), LLVMGetTypeKind(scalar) == LLVMHalfTypeKind     ? "f16" :
+                                   LLVMGetTypeKind(scalar) == LLVMBFloatTypeKind ? "bf16" :
+                                                                                   "f32");
    if (lanes > 1)
       snprintf(name, size, "v%u%s", lanes, base);
    else

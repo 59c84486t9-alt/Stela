@@ -511,6 +511,27 @@ conversions_follow_their_names(void)
 }
 
 static void
+bfloats_round_to_nearest_even(void)
+{
+   CHECK_FOLD("", "bfloat", "fptrunc float 1.0 to bfloat", 0x3f80);
+   /* Halfway cases round to the even neighbor: 1 + 2^-8 down, 1 + 3 2^-8 up. */
+   CHECK_FOLD("", "bfloat", "fptrunc float 0x3FF0100000000000 to bfloat", 0x3f80);
+   CHECK_FOLD("", "bfloat", "fptrunc float 0x3FF0300000000000 to bfloat", 0x3f82);
+   /* A signaling NaN becomes quiet rather than rounding to infinity. */
+   CHECK_FOLD("", "bfloat", "fptrunc float 0x7FF0000020000000 to bfloat", 0x7fc0);
+   CHECK_FOLD("", "float", "fpext bfloat 0xR4049 to float", f32(3.140625f));
+   CHECK_FOLD("", "i32", "fptosi bfloat 0xRC040 to i32", 0xfffffffdu);
+   CHECK_FOLD("declare bfloat @air.convert.f.bf16.f.f32(float)\n", "bfloat",
+              "call bfloat @air.convert.f.bf16.f.f32(float 3.0)", 0x4040);
+   CHECK_FOLD("declare half @air.convert.f.f16.f.bf16(bfloat)\n", "half",
+              "call half @air.convert.f.f16.f.bf16(bfloat 0xR3FC0)", 0x3e00);
+   assert(fold_lane("declare <2 x bfloat> @air.convert.f.v2bf16.f.v2f32(<2 x float>)\n",
+                    "<2 x bfloat>", "bfloat",
+                    "call <2 x bfloat> @air.convert.f.v2bf16.f.v2f32(<2 x float> <float 1.0, float -2.0>)",
+                    1) == 0xc000);
+}
+
+static void
 refuses_misnamed_and_misplaced_functions(void)
 {
    const struct {
@@ -525,6 +546,12 @@ refuses_misnamed_and_misplaced_functions(void)
        "call i16 @air.convert.s.i32.f.f32(float 1.0)", STELA_AIR_INSTRUCTION},
       {"declare float @air.convert.s.f32.f.f32(float)\n", "float",
        "call float @air.convert.s.f32.f.f32(float 1.0)", STELA_AIR_INSTRUCTION},
+      /* An integer would round twice on its way to a bfloat. */
+      {"declare bfloat @air.convert.f.bf16.s.i32(i32)\n", "bfloat",
+       "call bfloat @air.convert.f.bf16.s.i32(i32 3)", STELA_AIR_TYPE},
+      {"", "bfloat", "sitofp i32 3 to bfloat", STELA_AIR_TYPE},
+      /* A bfloat's arithmetic is not a half's. */
+      {"", "bfloat", "fadd bfloat 0xR3F80, 0xR3F80", STELA_AIR_TYPE},
       /* A function's name spells its overload. */
       {"declare float @air.sqrt.f16(float)\n", "float", "call float @air.sqrt.f16(float 1.0)",
        STELA_AIR_INSTRUCTION},
@@ -797,6 +824,7 @@ main(void)
    small_floats_pack_as_vulkan_converts();
    bools_reduce();
    conversions_follow_their_names();
+   bfloats_round_to_nearest_even();
    refuses_misnamed_and_misplaced_functions();
    half_declares_its_float_controls();
    fma_follows_its_backend();
