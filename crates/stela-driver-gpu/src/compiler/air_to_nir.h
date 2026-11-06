@@ -258,6 +258,9 @@ enum stela_air_device_value {
     * 16, first sample lowest: x in 1/16 pixel in the low nibble, y in the
     * high. */
    STELA_AIR_SAMPLE_POSITIONS,
+   /* A stage-in dispatch's region's origin and size, each a uvec3. */
+   STELA_AIR_STAGE_IN_ORIGIN,
+   STELA_AIR_STAGE_IN_SIZE,
 };
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);

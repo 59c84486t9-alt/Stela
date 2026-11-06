@@ -595,7 +595,8 @@ device_value(struct translator *t, enum stela_air_device_value value)
    }
    nir_def *def = t->options->load_device_value(&t->b, value, t->options->binding_data);
    unsigned components = value == STELA_AIR_DISPATCH_GRID || value == STELA_AIR_PATCH_IDS ||
-                         value == STELA_AIR_THREADGROUP_SHAPE ? 3 :
+                         value == STELA_AIR_THREADGROUP_SHAPE || value == STELA_AIR_STAGE_IN_ORIGIN ||
+                         value == STELA_AIR_STAGE_IN_SIZE ? 3 :
                          value == STELA_AIR_SAMPLE_POSITIONS ||
                          value == STELA_AIR_BLEND_COLOR ? 4 : 1;
    if (!def || def->num_components != components || def->bit_size != 32 || !binding_prelude(t)) {
@@ -915,6 +916,15 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
       nir_def *uniform = nir_imul(b, nir_load_num_workgroups(b), shape);
       return nir_bcsel(b, nir_ieq_imm(b, nir_channel(b, grid, 0), 0), uniform, grid);
    }
+   case STELA_AIR_STAGE_IN_GRID_ORIGIN:
+   case STELA_AIR_STAGE_IN_GRID_SIZE:
+      /* Only a dispatch of a pipeline with stage-in attributes has a region. */
+      if (!t->options->fetch_attribute) {
+         fail(t, STELA_AIR_ARGUMENT, "a stage-in region needs the pipeline's stage-in attributes");
+         return NULL;
+      }
+      return device_value(t, builtin == STELA_AIR_STAGE_IN_GRID_ORIGIN ? STELA_AIR_STAGE_IN_ORIGIN :
+                                                                          STELA_AIR_STAGE_IN_SIZE);
    case STELA_AIR_THREAD_INDEX_IN_THREADGROUP:
       return nir_load_local_invocation_index(b);
    case STELA_AIR_SIMDGROUP_INDEX_IN_THREADGROUP:

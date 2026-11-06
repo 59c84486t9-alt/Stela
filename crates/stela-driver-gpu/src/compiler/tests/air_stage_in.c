@@ -369,6 +369,68 @@ kernels_fetch_their_stage_in_at_their_position(void)
    free(text);
 }
 
+/* A kernel storing its stage-in region's origin and size. */
+static const char *region =
+   "define void @kernel(<4 x float> %value, ptr addrspace(1) %out, <3 x i32> %origin,"
+   " <3 x i32> %size) {\n"
+   "%o = extractelement <3 x i32> %origin, i64 0\n%s = extractelement <3 x i32> %size, i64 2\n"
+   "%sum = add i32 %o, %s\n"
+   "store i32 %sum, ptr addrspace(1) %out, align 4\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n"
+   "!4 = !{!40, !42, !43, !44}\n"
+   "!40 = !{i32 0, !\"air.stage_in\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"value\"}\n"
+   "!42 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"out\"}\n"
+   "!43 = !{i32 2, !\"air.stage_in_grid_origin\", !\"air.arg_type_name\", !\"uint3\","
+   " !\"air.arg_name\", !\"origin\"}\n"
+   "!44 = !{i32 3, !\"air.stage_in_grid_size\", !\"air.arg_type_name\", !\"uint3\","
+   " !\"air.arg_name\", !\"size\"}\n";
+
+static unsigned region_reads;
+
+static nir_def *
+region_value(nir_builder *b, enum stela_air_device_value value, void *data)
+{
+   (void)data;
+   /* A uniform dispatch's grid is zero. */
+   if (value == STELA_AIR_DISPATCH_GRID)
+      return nir_imm_ivec3(b, 0, 0, 0);
+   assert(value == STELA_AIR_STAGE_IN_ORIGIN || value == STELA_AIR_STAGE_IN_SIZE);
+   region_reads |= 1u << (value == STELA_AIR_STAGE_IN_SIZE);
+   return nir_imm_ivec3(b, 1, 2, 3);
+}
+
+/* The region is the dispatch's, which only a stage-in pipeline has. */
+static void
+kernels_read_their_stage_in_region(void)
+{
+   for (unsigned staged = 0; staged < 2; staged++) {
+      LLVMMemoryBufferRef input = bitcode(region);
+      const struct stela_air_options o = {
+         .max_instructions = 10000, .workgroup_size = {64, 1, 1}, .bind_buffer = bind_buffer,
+         .fp_profile = STELA_AIR_FP_METAL, .fetch_attribute = staged ? fetch_attribute : NULL,
+         .load_device_value = region_value,
+      };
+      struct stela_air_error error = {0};
+      region_reads = 0;
+      nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                            "kernel", &nir_options, &o, &error);
+      LLVMDisposeMemoryBuffer(input);
+      if (staged) {
+         if (!shader)
+            fprintf(stderr, "region: %u %s\n", error.kind, error.detail);
+         assert(shader && region_reads == 3);
+         ralloc_free(shader);
+      } else {
+         assert(!shader && error.kind == STELA_AIR_ARGUMENT);
+      }
+   }
+}
+
 int
 main(void)
 {
@@ -377,6 +439,7 @@ main(void)
    patch_functions_refuse_what_they_cannot_read();
    uncounted_patches_refuse_their_size();
    kernels_fetch_their_stage_in_at_their_position();
+   kernels_read_their_stage_in_region();
    printf("AIR stage-in tests passed\n");
    return 0;
 }

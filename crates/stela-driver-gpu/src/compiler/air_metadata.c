@@ -988,6 +988,8 @@ builtin_input(LLVMValueRef kind, const struct stela_air_render *render, unsigned
       {"air.quadgroups_per_threadgroup", STELA_AIR_QUADGROUPS_PER_THREADGROUP, KERNEL, 1},
       {"air.dispatch_quadgroups_per_threadgroup", STELA_AIR_DISPATCH_QUADGROUPS_PER_THREADGROUP,
        KERNEL, 1},
+      {"air.stage_in_grid_origin", STELA_AIR_STAGE_IN_GRID_ORIGIN, KERNEL, 3},
+      {"air.stage_in_grid_size", STELA_AIR_STAGE_IN_GRID_SIZE, KERNEL, 3},
       {"air.thread_index_in_simdgroup", STELA_AIR_THREAD_INDEX_IN_SIMDGROUP, ALL, 1},
       {"air.threads_per_simdgroup", STELA_AIR_THREADS_PER_SIMDGROUP, ALL, 1},
       {"air.thread_execution_width", STELA_AIR_THREAD_EXECUTION_WIDTH, ALL, 1},

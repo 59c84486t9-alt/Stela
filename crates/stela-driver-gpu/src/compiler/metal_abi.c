@@ -44,6 +44,14 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
                              nir_iadd_imm(b, load_push(b, 1, 64, STELA_METAL_PUSH_ARGUMENTS),
                                           STELA_METAL_DISPATCH_SHAPE),
                              .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 4);
+   case STELA_AIR_STAGE_IN_ORIGIN:
+   case STELA_AIR_STAGE_IN_SIZE:
+      /* A stage-in dispatch's arguments are its region. */
+      return nir_load_global(b, 3, 32,
+                             nir_iadd_imm(b, load_push(b, 1, 64, STELA_METAL_PUSH_ARGUMENTS),
+                                          value == STELA_AIR_STAGE_IN_ORIGIN ? STELA_METAL_STAGE_IN_ORIGIN :
+                                                                               STELA_METAL_STAGE_IN_SIZE),
+                             .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 4);
    case STELA_AIR_SAMPLE_COUNT:
       return load(b, stela_metal_load_table(b, metal->table), STELA_METAL_TABLE_SAMPLE_COUNT, 32);
    case STELA_AIR_BLEND_COLOR:
