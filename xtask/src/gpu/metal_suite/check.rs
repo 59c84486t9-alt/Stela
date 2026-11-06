@@ -547,6 +547,15 @@ pub fn run(
             lines.extend(broken.iter().map(|d| format!("MISMATCH  {name}: {d}")));
             continue;
         }
+        // The policy holds the device under test, which only a comparison
+        // with the reference names: one run alone may be the Mac's.
+        if case["kind"] == "device" && case["policy"].is_object() {
+            summary.add("unchecked");
+            lines.push(format!(
+                "UNCHECKED {name}: its policy needs a reference run"
+            ));
+            continue;
+        }
         if case["kind"] == "device" {
             let differences = device_differences(reference_root, test, name)?;
             summary.add(if differences.is_empty() {
