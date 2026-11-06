@@ -388,6 +388,17 @@ fn energy_accumulates_the_modeled_core_power_in_clpc_units() {
     }
     let hid = lookup(HID4).unwrap();
     assert!(registers.energy(hid, at(0, E_CORE)).is_err());
+    // Native code reads what the engine would, from the first reading on.
+    assert_eq!(Registers::default().energy_storage(core), None);
+    assert!(registers.energy_storage(core).is_some());
+    assert_eq!(registers.energy_storage(hid), None);
+    for count in [0, 1_000, 1_000 + FREQUENCY, 5 * FREQUENCY] {
+        assert_eq!(
+            registers.energy_at(core, count),
+            registers.energy(core, at(count, E_CORE)).ok()
+        );
+        assert_eq!(registers.energy_at(sram, count), Some(0));
+    }
 }
 
 #[test]

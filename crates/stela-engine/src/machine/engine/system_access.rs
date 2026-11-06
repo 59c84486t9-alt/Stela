@@ -437,6 +437,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .or_else(|| self.devices.register_storage(self.current, encoding))
                 .or_else(|| self.cpu.apple_read_storage(encoding))
                 .or_else(|| {
+                    // A reading at the clock's last count, as native code
+                    // reads the clock.
+                    let read = self.cpu.state.x[usize::from(access.rt())];
+                    self.cpu
+                        .energy_storage(encoding, self.clock.last())
+                        .filter(|&(_, reading)| reading == read)
+                        .map(|(storage, _)| storage)
+                })
+                .or_else(|| {
                     pstate_field(encoding).map(|(index, _)| self.mirrors.field_storage(index))
                 })
         };

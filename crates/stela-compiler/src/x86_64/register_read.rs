@@ -52,7 +52,8 @@
 //! publishes in a [`CountState`] at the host's TSC, through the reader's
 //! [`Count`], less the cell's `value`. It also clobbers RCX and RDX, which
 //! are dead at every block exit (the direct exit returns in RAX and RDX,
-//! and chaining uses RCX).
+//! and chaining uses RCX). An [`energy_thunk`] scales the count it reads
+//! into an energy accumulator's reading.
 use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, Rm, ShiftOp, Size, Unary};
 use super::pointer::Thunk;
 use crate::{GuestAddress, GuestState, Place, aarch64::Register, block::ExitKind};
@@ -461,12 +462,75 @@ pub fn mask_read_thunk(pc: GuestAddress, rt: u8, cell: Place) -> Thunk {
 /// at `pc`. It spins while a writer publishes; `lfence` keeps the TSC
 /// sample between the two sequence reads (Intel SDM Vol. 2B, RDTSC).
 pub fn count_thunk(pc: GuestAddress, rt: u8, cell: Place, count: Place) -> Thunk {
+    use Gpr::{Rax, Rdx};
+    use Size::Qword;
+    let (mut code, miss) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    read_count(&mut asm, count);
+    if rt != 31 {
+        asm.place(Rax, cell);
+        asm.alu_load(Alu::Sub, Qword, Rdx, Mem::base_disp8(Rax, VALUE));
+        asm.mov_store(Qword, register(rt), Rdx);
+    }
+    finish(code, miss, pc)
+}
+
+/// What an [`energy_thunk`]'s cell `value` points at: an accumulator's
+/// reading is `(count - origin) * scale / frequency` of the system count.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Energy {
+    pub origin: u64,
+    pub scale: u64,
+    pub frequency: u64,
+}
+
+/// The thunk completing `MRS Xt, <accumulator>` at `pc` with the reading the
+/// [`Energy`] the `value` of the cell at `cell` points at gives at the count
+/// of the reader at `count`, else exiting at `pc`: as the cell's register's
+/// model computes it, so a reading never goes back. A quotient that would
+/// not fit in 64 bits exits too. It also clobbers RCX and RDX.
+pub fn energy_thunk(pc: GuestAddress, rt: u8, cell: Place, count: Place) -> Thunk {
     use Gpr::{Rax, Rcx, Rdx};
     use Size::Qword;
     let (mut code, miss) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    read_count(&mut asm, count);
+    asm.place(Rax, cell);
+    asm.mov_load(Qword, Rcx, Mem::base_disp8(Rax, VALUE));
+    let energy = |field| Mem::base_disp8(Rcx, field as i8);
+    // The ticks since the origin, none before it.
+    asm.mov(Qword, Rax, Rdx);
+    asm.alu(Alu::Xor, Size::Dword, Rdx, Rdx);
+    asm.alu_load(
+        Alu::Sub,
+        Qword,
+        Rax,
+        energy(core::mem::offset_of!(Energy, origin)),
+    );
+    asm.cmov(Cond::B, Qword, Rax, Rdx);
+    asm.unary(
+        Unary::Mul,
+        Qword,
+        energy(core::mem::offset_of!(Energy, scale)),
+    );
+    let frequency = energy(core::mem::offset_of!(Energy, frequency));
+    asm.alu_load(Alu::Cmp, Qword, Rdx, frequency);
+    let wide = asm.jcc(Cond::Ae);
+    asm.unary(Unary::Div, Qword, frequency);
+    if rt != 31 {
+        asm.mov_store(Qword, register(rt), Rax);
+    }
+    finish_unless(code, [miss, wide], pc)
+}
+
+/// The count of the reader at `count` into RDX, as [`count_thunk`] reads
+/// it. Clobbers RAX and RCX.
+fn read_count(asm: &mut Asm<'_>, count: Place) {
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::Qword;
     let field = |offset| Mem::base_disp8(Rcx, offset);
     let state = |offset| Mem::base_disp8(Rax, offset);
-    let mut asm = Asm::new(&mut code);
     asm.place(Rcx, count);
     let start = asm.jmp8();
     let busy = asm.len();
@@ -500,12 +564,6 @@ pub fn count_thunk(pc: GuestAddress, rt: u8, cell: Place, count: Place) -> Thunk
     asm.alu_load(Alu::Cmp, Qword, Rdx, field(LAST));
     asm.cmov(Cond::B, Qword, Rdx, field(LAST));
     asm.mov_store(Qword, field(LAST), Rdx);
-    if rt != 31 {
-        asm.place(Rax, cell);
-        asm.alu_load(Alu::Sub, Qword, Rdx, Mem::base_disp8(Rax, VALUE));
-        asm.mov_store(Qword, register(rt), Rdx);
-    }
-    finish(code, miss, pc)
 }
 
 /// Load `cell` and branch to the miss while it is not readable.
@@ -966,5 +1024,43 @@ mod tests {
         let discard = count_thunk(PC, 31, CELL, READER);
         assert_eq!(run(&discard.code, &mut state), NEXT);
         assert_eq!((state.x, last()), (before, 500));
+    }
+
+    /// An energy read scales the ticks of the count since the origin, none
+    /// before it, and leaves a reading too wide for 64 bits to the engine.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn energy_thunks_scale_the_ticks_since_the_origin() {
+        use crate::GuestState;
+        use core::sync::atomic::Ordering::Relaxed;
+        let mut energy = alloc::boxed::Box::new(Energy {
+            origin: 40,
+            scale: 3_000,
+            frequency: 24,
+        });
+        let mut cell = alloc::boxed::Box::new(Cell {
+            readable: 1,
+            value: &mut *energy as *mut Energy as u64,
+        });
+        let published = alloc::boxed::Box::new(CountState::default());
+        published.offset.store(100, Relaxed);
+        published.ceiling.store(u64::MAX, Relaxed);
+        let mut count = alloc::boxed::Box::new(Count {
+            state: &*published as *const CountState as u64,
+            ..Count::default()
+        });
+        let read = energy_thunk(PC, 3, CELL, READER);
+        let mut state = GuestState::default();
+        state.anchors[Anchor::Mirrors] = &mut *cell as *mut Cell as u64;
+        state.anchors[Anchor::Count] = &mut *count as *mut Count as u64;
+        assert_eq!(run(&read.code, &mut state), NEXT);
+        assert_eq!(state.x[3], 60 * 3_000 / 24);
+        energy.origin = 200;
+        assert_eq!(run(&read.code, &mut state), NEXT);
+        assert_eq!(state.x[3], 0);
+        energy.origin = 0;
+        energy.scale = u64::MAX;
+        energy.frequency = 50;
+        assert_eq!(run(&read.code, &mut state), MISS);
     }
 }

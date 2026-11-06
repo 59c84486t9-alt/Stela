@@ -745,6 +745,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let counter = self.cpu.pmu.as_ref().and_then(|pmu| pmu.counter(encoding));
             let storable = storable(encoding)
                 || counter.is_some()
+                || self.cpu.energy_accumulator(encoding)
                 || self.cpu.apple_read_storage(encoding).is_some()
                 || self
                     .devices
@@ -789,6 +790,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if encoding == STACK_ZERO {
             let selected = SELECTED;
             return Some(register_read::selected_stored_thunk(pc, rt, cell, selected));
+        }
+        if self.cpu.energy_accumulator(encoding) {
+            self.clock.native(self.host.tsc_counter()?);
+            let count = Place::new(Anchor::Count, 0);
+            return Some(register_read::energy_thunk(pc, rt, cell, count));
         }
         Some(match encoding {
             FPCR => {

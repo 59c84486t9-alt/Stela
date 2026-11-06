@@ -964,6 +964,24 @@ impl Cpu {
         }
     }
 
+    /// Whether `encoding` is one of Apple's energy accumulators.
+    pub fn energy_accumulator(&self, encoding: Encoding) -> bool {
+        impdef::lookup(encoding, self.registers.chip())
+            .is_some_and(|entry| entry.class == impdef::Class::Energy)
+    }
+
+    /// Where native code reads Apple's energy accumulator `encoding` and what
+    /// it reads at system count `count`, once the PE took an energy reading.
+    pub fn energy_storage(&self, encoding: Encoding, count: u64) -> Option<(u64, u64)> {
+        let entry = impdef::lookup(encoding, self.registers.chip())
+            .filter(|entry| entry.class == impdef::Class::Energy)?;
+        let impdef = &self.apple.impdef;
+        Some((
+            impdef.energy_storage(entry)?,
+            impdef.energy_at(entry, count)?,
+        ))
+    }
+
     /// The address of Apple's register `encoding` and the bits of a value
     /// that take a write more than a store there, if one without them takes
     /// no more here.

@@ -1826,6 +1826,14 @@ const NANOJOULES_PER_MILLIWATT_SECOND: u128 = 1_000_000;
 /// milliwatts: Stela's fixed choice, not a measurement of any Apple core.
 pub const CORE_MILLIWATTS: [u128; 2] = [250, 1000];
 
+/// An accumulator's reading at system count `count`: the ticks since the
+/// origin, none before it, times the scale over the frequency, saturated.
+fn energy_reading(rate: stela_compiler::x86_64::register_read::Energy, count: u64) -> u64 {
+    let ticks = u128::from(count.saturating_sub(rate.origin));
+    let units = ticks * u128::from(rate.scale) / u128::from(rate.frequency);
+    u64::try_from(units).unwrap_or(u64::MAX)
+}
+
 /// What an energy reading accumulates over: the system counter's value and
 /// frequency and the reading PE's MPIDR_EL1.
 #[derive(Debug, Clone, Copy)]
@@ -1886,6 +1894,10 @@ pub struct Registers {
     values: Values,
     /// The system count of the PE's first energy reading.
     energy_origin: Option<u64>,
+    /// How CORE_NRG_ACC_DAT and CORE_SRM_NRG_ACC_DAT read, from the PE's
+    /// first energy reading on, in that order: native code reads them too
+    /// (`x86_64::register_read::energy_thunk`).
+    energy_rates: [stela_compiler::x86_64::register_read::Energy; 2],
     /// The `Scope::Cluster` values, shared with the cluster's other PEs.
     cluster: super::shared::Shared<BTreeMap<u16, u64>>,
     pub reads: BTreeMap<u16, u64>,
@@ -1934,15 +1946,38 @@ impl Registers {
         }
         *self.reads.entry(entry.encoding.selector()).or_default() += 1;
         let origin = *self.energy_origin.get_or_insert(activity.count);
-        if entry.encoding != CORE_NRG_ACC_DAT {
-            return Ok(0);
-        }
-        let ticks = u128::from(activity.count.saturating_sub(origin));
         let milliwatts = CORE_MILLIWATTS[usize::from(activity.mpidr & MPIDR_PNE != 0)];
-        let units =
-            ticks * milliwatts * NANOJOULES_PER_MILLIWATT_SECOND * ENERGY_UNITS_PER_NANOJOULE
-                / u128::from(activity.frequency);
-        Ok(u64::try_from(units).unwrap_or(u64::MAX))
+        let core = milliwatts * NANOJOULES_PER_MILLIWATT_SECOND * ENERGY_UNITS_PER_NANOJOULE;
+        for (rate, scale) in self.energy_rates.iter_mut().zip([core, 0]) {
+            *rate = stela_compiler::x86_64::register_read::Energy {
+                origin,
+                scale: u64::try_from(scale).expect("a modeled power fits"),
+                frequency: activity.frequency,
+            };
+        }
+        let index = usize::from(entry.encoding != CORE_NRG_ACC_DAT);
+        Ok(energy_reading(self.energy_rates[index], activity.count))
+    }
+
+    /// Where native code reads energy accumulator `entry` once the PE took
+    /// an energy reading.
+    pub fn energy_storage(&self, entry: &Entry) -> Option<u64> {
+        let index = match entry.encoding {
+            CORE_NRG_ACC_DAT => 0,
+            CORE_SRM_NRG_ACC_DAT => 1,
+            _ => return None,
+        };
+        let rate = &self.energy_rates[index];
+        (self.energy_origin.is_some() && rate.frequency != 0)
+            .then_some(rate as *const stela_compiler::x86_64::register_read::Energy as u64)
+    }
+
+    /// What energy accumulator `entry` reads at system count `count`, if
+    /// native code reads it at [`Self::energy_storage`].
+    pub fn energy_at(&self, entry: &Entry, count: u64) -> Option<u64> {
+        let index = usize::from(entry.encoding != CORE_NRG_ACC_DAT);
+        self.energy_storage(entry)
+            .map(|_| energy_reading(self.energy_rates[index], count))
     }
 
     /// A read, or why it cannot complete.
