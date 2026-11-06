@@ -260,6 +260,9 @@ floating_functions_follow_metal(void)
               "call i32 @___metal_ilogb_float(float 0x7FF0000000000000, i32 0)", 0x7fffffffu);
    CHECK_FOLD("declare i32 @___metal_ilogb_half(half, i32)\n", "i32",
               "call i32 @___metal_ilogb_half(half 0xH0001, i32 0)", (uint32_t)-24);
+   CHECK_FOLD("declare i32 @air.ilogb.f32(float)\n", "i32", "call i32 @air.ilogb.f32(float 10.0)", 3);
+   CHECK_FOLD("declare i32 @air.ilogb.f16(half)\n", "i32", "call i32 @air.ilogb.f16(half 0xH0000)",
+              0x80000000u);
 }
 
 static void
@@ -375,6 +378,13 @@ second_results_store_through_thread_pointers(void)
                       "float", "call float @___metal_frexp_float_pthreadint32(float 0.0, ptr %p)",
                       &result) == 0);
    assert(result == 0);
+   /* Metal 4.1's spellings. */
+   assert(fold_second("declare float @air.frexp.f32(float, ptr)\n", "i32", "float",
+                      "call float @air.frexp.f32(float 12.0, ptr %p)", &result) == 4);
+   assert(result == f32(0.75f));
+   assert(fold_second("declare half @air.frexp.f16(half, ptr)\n", "i32", "half",
+                      "call half @air.frexp.f16(half 0xH0001, ptr %p)", &result) == (uint32_t)-23);
+   assert(result == 0x3800);
 }
 
 /* Formats pack their first component lowest, rounding to even; NaN packs as

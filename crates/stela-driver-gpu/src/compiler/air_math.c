@@ -10,9 +10,10 @@
  *                                  "s." or "u."
  *   air.[un]pack.<format>.<type>   packing, <type> naming the float vector
  *
- * A type is "f32", "f16" or "iN", prefixed "vN" for vectors. Apple's compiler
- * leaves frexp and ilogb to its function library, named in that library's
- * spelling: ___metal_frexp_v2half_pthreadv2int32, ___metal_ilogb_float. This
+ * A type is "f32", "f16" or "iN", prefixed "vN" for vectors. Before Metal
+ * 4.1, Apple's compiler leaves frexp and ilogb to its function library, named
+ * in that library's spelling: ___metal_frexp_v2half_pthreadv2int32,
+ * ___metal_ilogb_float; from 4.1 they are air.frexp and air.ilogb. This
  * file rebuilds each name, LLVM's intrinsics' included, from the call's own
  * types, so a call whose name and types disagree is refused rather than
  * guessed.
@@ -78,7 +79,7 @@ static const struct function floating[] = {
    {"mix", MIX, 3}, {"fmax3", FMAX3, 3}, {"fmin3", FMIN3, 3}, {"fmedian3", FMEDIAN3, 3},
    {"normalize", NORMALIZE, 1}, {"cross", CROSS, 2}, {"dot", DOT, 2}, {"length", LENGTH, 1},
    {"distance", DISTANCE, 2}, {"sign", SIGN, 1}, {"nextafter", NEXTAFTER, 2},
-   {"ldexp", LDEXP, 2}, {"sincos", SINCOS, 2},
+   {"ldexp", LDEXP, 2}, {"sincos", SINCOS, 2}, {"frexp", FREXP, 2}, {"ilogb", ILOGB, 1},
 };
 
 /* Derivatives, which have no fast variant. */
