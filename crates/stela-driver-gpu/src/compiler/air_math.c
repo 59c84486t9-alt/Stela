@@ -103,17 +103,32 @@ static const struct function unsigned_integer[] = {
 };
 
 /* The formats air.pack and air.unpack convert, named as Metal names pixel
- * formats: the first component in the least significant bits. */
+ * formats: the first component in the least significant bits. Normalized
+ * components, unsigned floats of 5 exponent bits, or 9-bit mantissas over a
+ * shared 5-bit exponent. */
 static const struct format {
    const char *name;
    unsigned components, bits[4];
    bool snorm, srgb;
+   enum { NORMALIZED, SMALL_FLOAT, SHARED_EXPONENT } kind;
 } formats[] = {
    {"unorm4x8", 4, {8, 8, 8, 8}}, {"snorm4x8", 4, {8, 8, 8, 8}, .snorm = true},
    {"unorm2x16", 2, {16, 16}}, {"snorm2x16", 2, {16, 16}, .snorm = true},
    {"unorm4x8.srgb", 4, {8, 8, 8, 8}, .srgb = true}, {"unorm.rgb10a2", 4, {10, 10, 10, 2}},
-   {"unorm.rgb565", 3, {5, 6, 5}},
+   {"snorm.rgb10a2", 4, {10, 10, 10, 2}, .snorm = true}, {"unorm.rgb565", 3, {5, 6, 5}},
+   {"unorm.rg11b10f", 3, {11, 11, 10}, .kind = SMALL_FLOAT},
+   {"unorm.rgb9e5", 3, {9, 9, 9}, .kind = SHARED_EXPONENT},
 };
+
+/* The bits of the integer a format packs to. */
+static unsigned
+format_width(const struct format *format)
+{
+   unsigned width = format->kind == SHARED_EXPONENT ? 5 : 0;
+   for (unsigned i = 0; i < format->components; i++)
+      width += format->bits[i];
+   return width;
+}
 
 /* LLVM's intrinsics with these semantics. */
 static const struct {
@@ -698,9 +713,45 @@ color(nir_builder *b, nir_def *c, nir_def *(*convert)(nir_builder *, nir_def *))
                    nir_channel(b, c, 3));
 }
 
+/* A 32-bit float as an unsigned float of 5 exponent bits and `mantissa`
+ * bits, as GL_EXT_packed_float and Vulkan convert: rounded to nearest even,
+ * negative values and -inf to zero, finite values above the largest to the
+ * largest, +inf to infinity and NaN to a NaN. */
+static nir_def *
+small_float(nir_builder *b, nir_def *x, unsigned mantissa)
+{
+   const unsigned infinity = 31u << mantissa;
+   /* The largest finite value: exponent 30 with every mantissa bit. */
+   const float largest = ldexpf((float)((2u << mantissa) - 1), 15 - (int)mantissa);
+   nir_def *nan = nir_fisnan(b, x);
+   nir_def *inf = nir_feq_imm(b, x, INFINITY);
+   nir_def *v = nir_bcsel(b, nir_fge_imm(b, x, 0.0), nir_fabs(b, x), nir_imm_float(b, 0.0f));
+   v = nir_bcsel(b, nan, nir_imm_float(b, 0.0f), nir_fmin(b, v, nir_imm_float(b, largest)));
+   /* The step at v's exponent, which is never below the denormal step:
+    * scaling by powers of two and rounding are exact, so the rounded value
+    * converts to a half exactly and keeps only bits the format holds. */
+   nir_def *exponent = nir_imax_imm(b, nir_iadd_imm(b, nir_ushr_imm(b, v, 23), -127), -14);
+   nir_def *step = nir_ishl_imm(b, nir_iadd_imm(b, exponent, 127 - (int)mantissa), 23);
+   nir_def *steps = nir_ishl_imm(b, nir_isub_imm(b, 127 + mantissa, exponent), 23);
+   nir_def *rounded = nir_fmul(b, nir_fround_even(b, nir_fmul(b, v, steps)), step);
+   nir_def *half = nir_u2u32(b, nir_f2f16_rtne(b, rounded));
+   nir_def *bits = nir_ushr_imm(b, half, 10 - mantissa);
+   bits = nir_bcsel(b, inf, nir_imm_int(b, infinity), bits);
+   return nir_bcsel(b, nan, nir_imm_int(b, infinity | 1), bits);
+}
+
+/* RGB as two 11-bit and one 10-bit unsigned float. */
+static nir_def *
+pack_11f11f10f(nir_builder *b, nir_def *rgb)
+{
+   nir_def *packed = small_float(b, nir_channel(b, rgb, 0), 6);
+   packed = nir_ior(b, packed, nir_ishl_imm(b, small_float(b, nir_channel(b, rgb, 1), 6), 11));
+   return nir_ior(b, packed, nir_ishl_imm(b, small_float(b, nir_channel(b, rgb, 2), 5), 22));
+}
+
 /* "air.pack.<format>.<type>" and "air.unpack.<format>.<type>": a format's
  * normalized components to and from an integer of their bits, <type> naming
- * the float vector. NaN packs as zero. */
+ * the float vector. A normalized format packs NaN as zero. */
 static enum stela_air_call_status
 pack(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef callee,
      const char *name, size_t bytes, bool unpack, nir_def **result)
@@ -726,10 +777,8 @@ pack(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef cal
       return STELA_AIR_CALL_OTHER;
    if (!stela_air_call_plain(c, call, callee, 1))
       return STELA_AIR_CALL_FAILED;
-   unsigned lanes, width = 0;
+   unsigned lanes, width = format_width(format);
    LLVMTypeRef element = stela_air_call_element(vector, &lanes);
-   for (unsigned i = 0; i < format->components; i++)
-      width += format->bits[i];
    if (lanes != format->components || LLVMGetTypeKind(packed) != LLVMIntegerTypeKind ||
        LLVMGetIntTypeWidth(packed) != width)
       return stela_air_call_fail(c, STELA_AIR_TYPE, "packing types disagree with their format"),
@@ -738,6 +787,15 @@ pack(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef cal
    if (!c->fp_environment(c->translator) || !(x = c->operand(c->translator, LLVMGetOperand(call, 0))))
       return STELA_AIR_CALL_FAILED;
    nir_builder *b = c->b;
+   unsigned size = LLVMGetTypeKind(element) == LLVMHalfTypeKind ? 16 : 32;
+   if (format->kind != NORMALIZED) {
+      bool small = format->kind == SMALL_FLOAT;
+      x = unpack ? (small ? nir_format_unpack_11f11f10f(b, x) : nir_format_unpack_r9g9b9e5(b, x)) :
+                   (small ? pack_11f11f10f(b, nir_f2f32(b, x)) :
+                            nir_format_pack_r9g9b9e5(b, nir_f2f32(b, x)));
+      *result = unpack ? nir_f2fN(b, x, size) : x;
+      return STELA_AIR_CALL_LOWERED;
+   }
    if (unpack) {
       nir_def *fields = format->snorm ?
          nir_format_unpack_sint(b, nir_u2u32(b, x), format->bits, format->components) :
@@ -746,7 +804,7 @@ pack(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef cal
                                    nir_format_unorm_to_float(b, fields, format->bits);
       if (format->srgb)
          f = color(b, f, nir_format_srgb_to_linear);
-      *result = nir_f2fN(b, f, LLVMGetTypeKind(element) == LLVMHalfTypeKind ? 16 : 32);
+      *result = nir_f2fN(b, f, size);
       return STELA_AIR_CALL_LOWERED;
    }
    x = nir_f2f32(b, x);

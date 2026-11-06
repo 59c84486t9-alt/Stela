@@ -418,6 +418,48 @@ packing_follows_metal(void)
           f32(1.0f));
    assert(fold_lane("declare <2 x half> @air.unpack.unorm2x16.v2f16(i32)\n", "<2 x half>", "half",
                     "call <2 x half> @air.unpack.unorm2x16.v2f16(i32 65535)", 0) == 0x3c00);
+   /* A 2-bit signed alpha holds -1, 0 and 1. */
+   CHECK_FOLD("declare i32 @air.pack.snorm.rgb10a2.v4f32(<4 x float>)\n", "i32",
+              "call i32 @air.pack.snorm.rgb10a2.v4f32(<4 x float> <float -1.0, float 1.0, float 0.0,"
+              " float -1.0>)", 0xc007fe01u);
+   const char *snorm10 = "declare <4 x float> @air.unpack.snorm.rgb10a2.v4f32(i32)\n";
+   assert(fold_lane(snorm10, "<4 x float>", "float",
+                    "call <4 x float> @air.unpack.snorm.rgb10a2.v4f32(i32 -1073741312)", 0) ==
+          f32(-1.0f));
+   assert(fold_lane(snorm10, "<4 x float>", "float",
+                    "call <4 x float> @air.unpack.snorm.rgb10a2.v4f32(i32 -1073741312)", 3) ==
+          f32(-1.0f));
+}
+
+/* Unsigned 11- and 10-bit floats round to nearest even, denormals included;
+ * negative values and -inf are zero, finite values above the largest are
+ * the largest, +inf is infinity and NaN a NaN. */
+static void
+small_floats_pack_as_vulkan_converts(void)
+{
+   const char *pack = "declare i32 @air.pack.unorm.rg11b10f.v3f32(<3 x float>)\n";
+   CHECK_FOLD(pack, "i32",
+              "call i32 @air.pack.unorm.rg11b10f.v3f32(<3 x float> <float 1.0,"
+              " float 0x7FF8000000000000, float -2.0>)", 0x3e0bc0u);
+   CHECK_FOLD(pack, "i32",
+              "call i32 @air.pack.unorm.rg11b10f.v3f32(<3 x float> <float 0x3FF0200000000000,"
+              " float 0x3FF0600000000000, float 1.0e9>)", 0xf7de13c0u);
+   CHECK_FOLD(pack, "i32",
+              "call i32 @air.pack.unorm.rg11b10f.v3f32(<3 x float> <float 0x3EB0000000000000,"
+              " float 0x3EA0000000000000, float 0x3EB8000000000000>)", 0x400001u);
+   CHECK_FOLD(pack, "i32",
+              "call i32 @air.pack.unorm.rg11b10f.v3f32(<3 x float> <float 0x7FF0000000000000,"
+              " float 0xFFF0000000000000, float 65024.0>)", 0xf7c007c0u);
+   assert(fold_lane("declare <3 x float> @air.unpack.unorm.rg11b10f.v3f32(i32)\n", "<3 x float>",
+                    "float", "call <3 x float> @air.unpack.unorm.rg11b10f.v3f32(i32 -138412032)",
+                    2) == f32(64512.0f));
+   /* Nine-bit mantissas over the exponent the largest component needs. */
+   CHECK_FOLD("declare i32 @air.pack.unorm.rgb9e5.v3f32(<3 x float>)\n", "i32",
+              "call i32 @air.pack.unorm.rgb9e5.v3f32(<3 x float> <float 1.0, float 0.5, float 0.0>)",
+              0x80010100u);
+   assert(fold_lane("declare <3 x float> @air.unpack.unorm.rgb9e5.v3f32(i32)\n", "<3 x float>",
+                    "float", "call <3 x float> @air.unpack.unorm.rgb9e5.v3f32(i32 -2147417856)", 1) ==
+          f32(0.5f));
 }
 
 static void
@@ -742,6 +784,7 @@ main(void)
    integer_functions_follow_metal();
    second_results_store_through_thread_pointers();
    packing_follows_metal();
+   small_floats_pack_as_vulkan_converts();
    bools_reduce();
    conversions_follow_their_names();
    refuses_misnamed_and_misplaced_functions();
