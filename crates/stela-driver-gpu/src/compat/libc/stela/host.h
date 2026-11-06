@@ -17,6 +17,8 @@ _Noreturn void stela_libc_fatal(const char *message);
 uint64_t stela_libc_now_ns(void);
 /* The bytes this image can allocate. */
 uint64_t stela_libc_memory_bytes(void);
+/* Of those, the bytes not yet allocated. */
+uint64_t stela_libc_available_memory_bytes(void);
 /* This host processor or Mesa thread, below STELA_LIBC_CORES. */
 unsigned int stela_libc_core(void);
 #define STELA_LIBC_PROCESSORS 256

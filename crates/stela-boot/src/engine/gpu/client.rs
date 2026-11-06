@@ -1024,6 +1024,15 @@ extern "C" fn stela_libc_memory_bytes() -> u64 {
 }
 
 #[unsafe(no_mangle)]
+extern "C" fn stela_libc_available_memory_bytes() -> u64 {
+    installed().map_or(0, |gpu| {
+        let usage = crate::ALLOCATOR.usage();
+        let free = usage.total.saturating_sub(usage.live);
+        gpu.heap_bytes.min(free as u64)
+    })
+}
+
+#[unsafe(no_mangle)]
 extern "C" fn stela_libc_now_ns() -> u64 {
     installed().map_or(0, |gpu| nanoseconds(host::rdtsc(), gpu.tsc_hz))
 }

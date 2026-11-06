@@ -20,6 +20,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <stela/host.h>
 #include "host.h"
@@ -230,6 +231,25 @@ static void test_anonymous_files(void)
 	CHECK(mmap(place, 4096, PROT_READ, MAP_SHARED | MAP_FIXED | MAP_ANONYMOUS, -1, 0) == place);
 	CHECK(file_mapped_fd == -1 && file_mapped_address == place);
 	CHECK(!close(file));
+}
+
+static void test_meminfo(void)
+{
+	char text[256];
+	int file = open("/proc/meminfo", O_RDONLY);
+	CHECK(file >= 0);
+	struct stat status;
+	CHECK(!fstat(file, &status) && S_ISREG(status.st_mode) && status.st_size > 0);
+	ssize_t size = read(file, text, sizeof(text) - 1);
+	CHECK(size == status.st_size && read(file, text, 1) == 0);
+	text[size] = 0;
+	unsigned long long total, available;
+	CHECK(sscanf(strstr(text, "MemTotal:"), "MemTotal: %llu", &total) == 1 && total == 4194304);
+	CHECK(sscanf(strstr(text, "MemAvailable:"), "MemAvailable: %llu", &available) == 1);
+	CHECK(available == 3145728);
+	CHECK(!close(file) && read(file, text, 1) == -1 && errno == EBADF);
+	errno = 0;
+	CHECK(open("/proc/cpuinfo", O_RDONLY) == -1 && errno == ENOENT);
 }
 
 static void test_refusals(void)
@@ -636,6 +656,7 @@ int main(void)
 	test_allocation();
 	test_unmap_refusal();
 	test_anonymous_files();
+	test_meminfo();
 	test_refusals();
 	test_division();
 	test_system();

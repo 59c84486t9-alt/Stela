@@ -104,6 +104,11 @@ uint64_t stela_libc_memory_bytes(void)
 	return 1ull << 32;
 }
 
+uint64_t stela_libc_available_memory_bytes(void)
+{
+	return 3ull << 30;
+}
+
 uint64_t stela_libc_now_ns(void)
 {
 	struct {

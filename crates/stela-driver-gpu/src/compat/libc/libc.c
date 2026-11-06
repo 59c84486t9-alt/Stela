@@ -819,9 +819,47 @@ static int checked(int result)
 	return result < 0 ? fail(-result) : result;
 }
 
+/* Linux's /proc/meminfo, the one procfs file Mesa reads, as a snapshot per
+ * descriptor from TEXT_BASE, below the anonymous files. */
+#define TEXT_BASE (1 << 23)
+#define TEXT_FILES 16
+static struct text_file {
+	int used;
+	size_t size, offset;
+	char data[128];
+} text_files[TEXT_FILES];
+
+static struct text_file *text_file(int fd)
+{
+	unsigned int index = (unsigned int)(fd - TEXT_BASE);
+	if (fd < TEXT_BASE || index >= TEXT_FILES || !__atomic_load_n(&text_files[index].used, __ATOMIC_ACQUIRE))
+		return NULL;
+	return &text_files[index];
+}
+
+static int open_meminfo(void)
+{
+	for (unsigned int index = 0; index < TEXT_FILES; index++) {
+		struct text_file *file = &text_files[index];
+		if (__atomic_exchange_n(&file->used, 1, __ATOMIC_ACQUIRE))
+			continue;
+		unsigned long long total = stela_libc_memory_bytes() >> 10;
+		unsigned long long available = stela_libc_available_memory_bytes() >> 10;
+		int size = snprintf(file->data, sizeof(file->data),
+				    "MemTotal: %llu kB\nMemFree: %llu kB\nMemAvailable: %llu kB\n", total,
+				    available, available);
+		file->size = (size_t)size < sizeof(file->data) ? (size_t)size : sizeof(file->data) - 1;
+		file->offset = 0;
+		return TEXT_BASE + (int)index;
+	}
+	return fail(EMFILE);
+}
+
 int open(const char *path, int flags, ...)
 {
 	(void)flags;
+	if (!strcmp(path, "/proc/meminfo"))
+		return open_meminfo();
 	static const char prefix[] = "/dev/dri/renderD";
 	if (strncmp(path, prefix, sizeof(prefix) - 1))
 		return fail(ENOENT);
@@ -830,6 +868,11 @@ int open(const char *path, int flags, ...)
 
 int close(int fd)
 {
+	struct text_file *text = text_file(fd);
+	if (text) {
+		__atomic_store_n(&text->used, 0, __ATOMIC_RELEASE);
+		return 0;
+	}
 	if (fd >= STELA_LIBC_FILE_BASE)
 		return checked(stela_libc_file_close(fd));
 	return checked(stela_libc_drm_close(fd));
@@ -929,6 +972,13 @@ int madvise(void *address, size_t size, int advice)
 
 int fstat(int fd, struct stat *result)
 {
+	struct text_file *text = text_file(fd);
+	if (text) {
+		memset(result, 0, sizeof(*result));
+		result->st_mode = S_IFREG | 0444;
+		result->st_size = (off_t)text->size;
+		return 0;
+	}
 	long device = stela_libc_drm_rdev(fd);
 	if (device < 0)
 		return fail((int)-device);
@@ -939,7 +989,7 @@ int fstat(int fd, struct stat *result)
 	return 0;
 }
 
-/* The only named files are DRM's nodes, which open answers. */
+/* The only named files are DRM's nodes and /proc/meminfo, which open answers. */
 int stat(const char *path, struct stat *result)
 {
 	int fd = open(path, O_RDWR);
@@ -1002,10 +1052,13 @@ int mkstemp(char *path)
 
 ssize_t read(int fd, void *buffer, size_t size)
 {
-	(void)fd;
-	(void)buffer;
-	(void)size;
-	return fail(EBADF);
+	struct text_file *text = text_file(fd);
+	if (!text)
+		return fail(EBADF);
+	size_t count = text->size - text->offset < size ? text->size - text->offset : size;
+	memcpy(buffer, text->data + text->offset, count);
+	text->offset += count;
+	return (ssize_t)count;
 }
 
 ssize_t write(int fd, const void *buffer, size_t size)
