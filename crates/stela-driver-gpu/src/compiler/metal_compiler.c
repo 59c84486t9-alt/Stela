@@ -842,3 +842,87 @@ stela_metal_release(nir_shader *shader)
 {
    ralloc_free(shader);
 }
+
+/* The buffer slots def's address derives from, one bit each: loads of a
+ * stage table's buffer addresses (metal_abi.h) at constant offsets, through
+ * address arithmetic and selections. */
+static uint32_t
+address_slots(nir_def *def, unsigned depth)
+{
+   if (!depth)
+      return 0;
+   nir_instr *instr = nir_def_instr(def);
+   if (instr->type == nir_instr_type_phi) {
+      uint32_t slots = 0;
+      nir_foreach_phi_src(src, nir_instr_as_phi(instr))
+         slots |= address_slots(src->src.ssa, depth - 1);
+      return slots;
+   }
+   if (instr->type == nir_instr_type_alu) {
+      nir_alu_instr *alu = nir_instr_as_alu(instr);
+      uint32_t slots = 0;
+      for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
+         if (alu->src[i].src.ssa->bit_size == 64)
+            slots |= address_slots(alu->src[i].src.ssa, depth - 1);
+      }
+      return slots;
+   }
+   if (instr->type != nir_instr_type_intrinsic)
+      return 0;
+   nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
+   nir_instr *sum = nir_def_instr(load->src[0].ssa);
+   if (load->intrinsic != nir_intrinsic_load_global || def->bit_size != 64 ||
+       sum->type != nir_instr_type_alu || nir_instr_as_alu(sum)->op != nir_op_iadd)
+      return 0;
+   nir_alu_instr *add = nir_instr_as_alu(sum);
+   for (unsigned i = 0; i < 2; i++) {
+      nir_instr *table = nir_def_instr(add->src[i].src.ssa);
+      nir_instr *offset = nir_def_instr(add->src[!i].src.ssa);
+      if (table->type != nir_instr_type_intrinsic || offset->type != nir_instr_type_load_const)
+         continue;
+      nir_intrinsic_instr *push = nir_instr_as_intrinsic(table);
+      if (push->intrinsic != nir_intrinsic_load_push_constant || !nir_src_is_const(push->src[0]) ||
+          nir_src_as_uint(push->src[0]) + nir_intrinsic_base(push) - STELA_METAL_PUSH_TABLES >=
+             8u * (STELA_METAL_TABLE_MESH + 1u))
+         continue;
+      uint64_t at = nir_const_value_as_uint(
+                       nir_instr_as_load_const(offset)->value[add->src[!i].swizzle[0]], 64) -
+                    STELA_METAL_TABLE_BUFFER_ADDRESSES;
+      if (at % 8u || at >= 8u * STELA_METAL_BUFFERS)
+         continue;
+      uint32_t slots = 0;
+      for (unsigned c = 0; c < def->num_components && at / 8u + c < STELA_METAL_BUFFERS; c++)
+         slots |= 1u << (at / 8u + c);
+      return slots;
+   }
+   return 0;
+}
+
+uint32_t
+stela_metal_buffer_reads(const nir_shader *shader)
+{
+   uint32_t reads = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *access = nir_instr_as_intrinsic(instr);
+            switch (access->intrinsic) {
+            case nir_intrinsic_load_global:
+            case nir_intrinsic_load_global_constant:
+            case nir_intrinsic_global_atomic:
+            case nir_intrinsic_global_atomic_swap:
+               reads |= address_slots(access->src[0].ssa, 16);
+               break;
+            case nir_intrinsic_store_global:
+               reads |= address_slots(access->src[1].ssa, 16);
+               break;
+            default:
+               break;
+            }
+         }
+      }
+   }
+   return reads;
+}

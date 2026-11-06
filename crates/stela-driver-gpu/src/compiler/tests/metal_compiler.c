@@ -62,6 +62,34 @@ static const char *kernel =
    "!42 = !{i32 2, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
    " !\"air.arg_name\", !\"tid\"}\n";
 
+/* Reads buffer 1 on every thread and buffer 4 on thread 0 alone. */
+static const char *guarded =
+   "define void @guarded(ptr addrspace(1) %out, ptr addrspace(1) %extra, i32 %tid) {\n"
+   "%i = zext i32 %tid to i64\n"
+   "%q = getelementptr i32, ptr addrspace(1) %out, i64 %i\n"
+   "%v = load i32, ptr addrspace(1) %q, align 4\n"
+   "%first = icmp eq i32 %tid, 0\n"
+   "br i1 %first, label %more, label %done\n"
+   "more:\n"
+   "%e = load i32, ptr addrspace(1) %extra, align 4\n"
+   "%sum = add i32 %v, %e\n"
+   "br label %done\n"
+   "done:\n"
+   "%r = phi i32 [ %v, %0 ], [ %sum, %more ]\n"
+   "store i32 %r, ptr addrspace(1) %q, align 4\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @guarded, !3, !4}\n!3 = !{}\n"
+   "!4 = !{!40, !41, !42}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"out\"}\n"
+   "!41 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 4, i32 1, !\"air.read\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4,"
+   " !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"extra\"}\n"
+   "!42 = !{i32 2, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
 /* Stores its stage-in value at its thread position; it never reads its
  * index. */
 static const char *staged =
@@ -2656,6 +2684,19 @@ harness(void)
    exit(0);
 }
 
+/* Each buffer a function loads from or stores to, on any path. */
+static void
+buffer_reads_name_each_accessed_slot(void)
+{
+   struct stela_air_error error = {0};
+   struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   nir_shader *shader = compile(guarded, "guarded", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "guarded: %u %s\n", error.kind, error.detail);
+   assert(shader && stela_metal_buffer_reads(shader) == ((1u << 1) | (1u << 4)));
+   stela_metal_release(shader);
+}
+
 int
 main(void)
 {
@@ -2697,6 +2738,7 @@ main(void)
    recursion_unrolls_to_the_call_stack_depth();
    linked_modules_specialize_their_function_constants();
    command_encoding_reflects_barriers();
+   buffer_reads_name_each_accessed_slot();
    glsl_type_singleton_decref();
    puts("metal compiler: ok");
    return 0;

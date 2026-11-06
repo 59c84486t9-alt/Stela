@@ -66,6 +66,7 @@ unsafe extern "C" {
     fn stela_metal_resolve_draws_kernel(options: *const c_void) -> *mut c_void;
     fn stela_metal_resolve_dispatches_kernel(options: *const c_void) -> *mut c_void;
     fn stela_metal_release(shader: *mut c_void);
+    fn stela_metal_buffer_reads(shader: *const c_void) -> u32;
 }
 
 impl Service {
@@ -98,6 +99,7 @@ impl Service {
             resolve_draws_kernel: stela_metal_resolve_draws_kernel,
             resolve_dispatches_kernel: stela_metal_resolve_dispatches_kernel,
             release: stela_metal_release,
+            buffer_reads: stela_metal_buffer_reads,
             nir_options,
         }
     }

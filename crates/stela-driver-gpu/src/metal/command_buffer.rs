@@ -305,9 +305,52 @@ struct Bindings {
     pushed: Option<PushConstants>,
 }
 
+/// Why a draw is refused when a buffer one of its functions accesses is
+/// unbound, by stage and buffer index.
+macro_rules! unbound {
+    ($stage:literal: $($index:literal)*) => {
+        [$(concat!("the ", $stage, " function accesses buffer ", stringify!($index),
+                   ", which is unbound")),*]
+    };
+}
+const UNBOUND: [[&str; super::capabilities::MAX_BUFFER_BINDINGS as usize]; 4] = [
+    unbound!("vertex": 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30),
+    unbound!("fragment": 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30),
+    unbound!("object": 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30),
+    unbound!("mesh": 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30),
+];
+
 impl Bindings {
     fn table(&mut self, stage: Stage) -> &mut Table {
         &mut self.tables[stage.table().raw() as usize]
+    }
+
+    /// Fails unless each buffer the functions access is bound. Metal
+    /// requires a draw to bind every buffer its functions reference; one
+    /// left unbound would be read at address zero, which faults the device
+    /// for every process.
+    fn require_buffers(&self, interfaces: &[Interface]) -> Result<()> {
+        for interface in interfaces {
+            let table = &self.tables[interface.stage.table().raw() as usize];
+            let unbound = table
+                .slots
+                .buffers
+                .iter()
+                .enumerate()
+                .find(|&(index, buffer)| {
+                    interface.buffer_reads & (1 << index) != 0 && buffer.address == 0
+                });
+            if let Some((index, _)) = unbound {
+                let stage = match interface.stage {
+                    Stage::Fragment => 1,
+                    Stage::Object => 2,
+                    Stage::Mesh => 3,
+                    _ => 0,
+                };
+                return Err(Error::Invalid(UNBOUND[stage][index]));
+            }
+        }
+        Ok(())
     }
 
     fn set_buffer(

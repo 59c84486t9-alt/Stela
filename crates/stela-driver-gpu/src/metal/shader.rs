@@ -281,6 +281,10 @@ pub struct Interface {
     pub command_barriers: bool,
     /// The color attachments a fragment function reads, one bit each.
     pub attachment_reads: u32,
+    /// The buffers a compiled specialization accesses, one bit per index:
+    /// the arguments it references, which a draw must bind. A reflection
+    /// alone accesses none it knows of.
+    pub buffer_reads: u32,
     pub constants: Vec<FunctionConstant>,
     pub features: ShaderFeatures,
 }
@@ -779,6 +783,7 @@ pub(crate) mod tests {
             amplification: false,
             command_barriers: false,
             attachment_reads: 0,
+            buffer_reads: 0,
             constants: Vec::new(),
             features: ShaderFeatures::EMPTY,
         }

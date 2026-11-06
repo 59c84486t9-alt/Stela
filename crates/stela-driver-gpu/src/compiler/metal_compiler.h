@@ -280,4 +280,8 @@ void stela_metal_tessellation_stages(const struct stela_metal_target *target,
                                      nir_shader *stages[2]);
 
 void stela_metal_release(nir_shader *shader);
+
+/* The buffer slots a compiled function accesses through its stage's table,
+ * one bit each: the arguments it references, which Metal requires bound. */
+uint32_t stela_metal_buffer_reads(const nir_shader *shader);
 #endif

@@ -449,6 +449,11 @@ unsafe extern "C" fn release(shader: *mut c_void) {
     FAKE.with_borrow_mut(|fake| fake.released.push(shader.addr()));
 }
 
+/// Every fake compilation accesses buffers 1 and 3.
+unsafe extern "C" fn buffer_reads(_: *const c_void) -> u32 {
+    0b1010
+}
+
 fn service() -> Service {
     Service {
         reflect,
@@ -463,6 +468,7 @@ fn service() -> Service {
         resolve_draws_kernel: kernel::<2>,
         resolve_dispatches_kernel: kernel::<3>,
         release,
+        buffer_reads,
         nir_options: NonNull::dangling(),
     }
 }
@@ -694,7 +700,14 @@ fn reflections_become_interfaces_with_their_provenance() {
     let compiled = compiler
         .compile(library, "kernel", &Specialization::default())
         .unwrap();
-    assert_eq!(compiled.interface, interface);
+    // The compiled specialization adds the buffers it accesses.
+    assert_eq!(
+        compiled.interface,
+        Interface {
+            buffer_reads: 0b1010,
+            ..interface.clone()
+        }
+    );
     assert_eq!(
         compiled.provenance,
         Provenance {
@@ -752,8 +765,13 @@ fn prepared_compilation_reuses_only_the_same_specialization() {
         .unwrap();
     assert_eq!(shader.provenance, prepared.provenance);
     assert_eq!(shader.provenance.build_id, IDENT);
+    // The compilation adds only the buffers it accesses to the reflection.
+    assert_eq!(shader.interface.buffer_reads, 0b1010);
     assert_eq!(
-        Reflection::Stage(Box::new(shader.interface)),
+        Reflection::Stage(Box::new(Interface {
+            buffer_reads: 0,
+            ..shader.interface
+        })),
         prepared.reflection
     );
     compiler.release(shader.code);

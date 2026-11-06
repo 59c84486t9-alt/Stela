@@ -1369,6 +1369,7 @@ impl CommandBuffer {
             class == PrimitiveTopologyClass::Unspecified || class == primitive.class(),
             "the primitive type is outside the pipeline's topology class",
         )?;
+        self.bindings.require_buffers(&pipeline.interfaces)?;
         let topology = primitive_topology(primitive);
         let mut commands = Vec::new();
         if render.topology != Some(topology) {
@@ -1453,6 +1454,7 @@ impl CommandBuffer {
         let tessellation = pipeline.plan.tessellation.as_ref().ok_or(Error::Invalid(
             "patch draws need a post-tessellation vertex function",
         ))?;
+        self.bindings.require_buffers(&pipeline.interfaces)?;
         ensure(
             (1..=MAX_PATCH_CONTROL_POINTS).contains(&source.control_points),
             "patch control point count",
@@ -1552,6 +1554,7 @@ impl CommandBuffer {
             state.plan.mesh.is_some(),
             "vertex pipelines draw with drawPrimitives",
         )?;
+        self.bindings.require_buffers(&state.interfaces)?;
         ensure(
             !mesh_threads.contains(&0),
             "mesh threadgroups have at least one thread",

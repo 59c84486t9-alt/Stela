@@ -161,6 +161,8 @@ pub struct Service {
     pub resolve_dispatches_kernel: KernelBuilder,
     /// `stela_metal_release`.
     pub release: unsafe extern "C" fn(*mut c_void),
+    /// `stela_metal_buffer_reads`.
+    pub buffer_reads: unsafe extern "C" fn(*const c_void) -> u32,
     /// The Vulkan driver's `nir_shader_compiler_options`.
     pub nir_options: NonNull<c_void>,
 }
@@ -893,6 +895,9 @@ impl AirCompiler {
         if shader.is_null() {
             return Err(refuse(&mut self.refusal, entry, &error));
         }
+        let mut interface = interface;
+        // SAFETY: the compiler's live NIR, which the call only reads.
+        interface.buffer_reads = unsafe { (self.service.buffer_reads)(shader) };
         Ok(CompiledShader {
             code: ShaderCode(shader as usize as u64),
             interface,
@@ -1462,6 +1467,7 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         amplification: r.amplification != 0,
         command_barriers: r.command_barriers != 0,
         attachment_reads: r.attachment_reads,
+        buffer_reads: 0,
         constants,
         features,
     };

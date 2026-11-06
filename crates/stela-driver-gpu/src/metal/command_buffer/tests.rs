@@ -655,6 +655,47 @@ fn count(commands: &[Command], matches: impl Fn(&Command) -> bool) -> usize {
 }
 
 #[test]
+fn a_draw_binds_every_buffer_its_functions_access() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    let mut state = render_state(1);
+    state.interfaces[1].buffer_reads = 1 << 1;
+    commands.set_render_pipeline_state(&state).unwrap();
+    commands
+        .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
+        .unwrap();
+    let draw = |commands: &mut CommandBuffer, resolver: &mut MockResolver| {
+        commands.draw_primitives(resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
+    };
+    // Unbound, the fragment function would read its buffer at address zero.
+    assert_eq!(
+        draw(&mut commands, &mut resolver),
+        Err(Error::Invalid(
+            "the fragment function accesses buffer 1, which is unbound"
+        ))
+    );
+    // A vertex buffer at that index binds the other stage's table.
+    commands
+        .set_render_buffer(Stage::Vertex, Some(buffer(4, 256)), 0, 1)
+        .unwrap();
+    assert!(draw(&mut commands, &mut resolver).is_err());
+    // Inline bytes bind it as a buffer does.
+    commands
+        .set_render_bytes(&mut resolver, Stage::Fragment, &[9; 12], 1)
+        .unwrap();
+    draw(&mut commands, &mut resolver).unwrap();
+}
+
+#[test]
 fn a_draw_binds_state_buffers_and_tables() {
     let color = texture(PixelFormat::Rgba8Unorm);
     let mut resolver = MockResolver::default();
