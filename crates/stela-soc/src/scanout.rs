@@ -380,11 +380,15 @@ fn blend_row(pixels: &[u8], out: &mut [u8], premultiplied: bool) {
 }
 
 /// Present a matching fullscreen layer directly to a sink that can hide
-/// unfinished rows. Other compositions need the complete packed frame.
+/// unfinished rows. Other compositions need the complete packed frame,
+/// composed in `frame`, whose storage the next one takes again: a frame is
+/// megabytes, which a heap shared with the engine may not have in one piece
+/// each time.
 pub(crate) fn present(
     sink: &mut dyn Scanout,
     layers: &[Layer],
     mut read: impl FnMut(u64, &mut [u8]) -> bool,
+    frame: &mut Vec<u8>,
 ) -> Result<()> {
     let mode = sink.mode();
     if let [layer] = layers
@@ -398,7 +402,8 @@ pub(crate) fn present(
     {
         return Ok(());
     }
-    sink.present(&compose(layers, mode, read)?)
+    compose_into(layers, mode, read, frame)?;
+    sink.present(frame)
 }
 
 /// Compose `layers`, bottom to top, over opaque black on `mode`'s screen and
@@ -419,8 +424,20 @@ pub(crate) fn present(
 pub fn compose(
     layers: &[Layer],
     mode: Mode,
-    mut read: impl FnMut(u64, &mut [u8]) -> bool,
+    read: impl FnMut(u64, &mut [u8]) -> bool,
 ) -> Result<Vec<u8>> {
+    let mut frame = Vec::new();
+    compose_into(layers, mode, read, &mut frame)?;
+    Ok(frame)
+}
+
+/// [`compose`] into `frame`, whatever it held.
+pub fn compose_into(
+    layers: &[Layer],
+    mode: Mode,
+    mut read: impl FnMut(u64, &mut [u8]) -> bool,
+    frame: &mut Vec<u8>,
+) -> Result<()> {
     let width = mode.width as usize;
     let (red, blue) = mode
         .format
@@ -431,11 +448,11 @@ pub fn compose(
     // routing the pixels through the scratch row.
     let direct_base = layers.first().is_some_and(|layer| layer.covers_mode(mode));
     let pixels = width * mode.height as usize;
-    let mut frame = if direct_base {
-        alloc::vec![0; pixels * 4]
-    } else {
-        [0, 0, 0, 0xff].repeat(pixels)
-    };
+    // The direct base layer writes every byte of the frame.
+    frame.resize(pixels * 4, 0);
+    if !direct_base {
+        frame.as_chunks_mut::<4>().0.fill([0, 0, 0, 0xff]);
+    }
     let mut row = Vec::new();
     let mut drawn: Vec<([usize; 2], [usize; 2])> = Vec::new();
     for (index, layer) in layers.iter().enumerate() {
@@ -500,7 +517,7 @@ pub fn compose(
         }
         drawn.push((xs, ys));
     }
-    Ok(frame)
+    Ok(())
 }
 
 /// Reject a translucent group at once while ignoring the colour bytes.
@@ -641,6 +658,42 @@ mod tests {
         };
         let frame = compose(&[layer], rgba, reader(&memory)).unwrap();
         assert_eq!(&frame[0..4], &[2, 1, 0, 0xff]);
+    }
+
+    /// The last frame's storage, whatever it holds, composes the next
+    /// frame as fresh storage does: over the screen a layer covers, and
+    /// over opaque black elsewhere.
+    #[test]
+    fn a_frame_composed_in_the_last_ones_storage_is_the_same() {
+        let mut memory = alloc::vec![0u8; 0x3000];
+        memory[0x1000..0x1020].fill(0x40);
+        memory[0x2000..0x2004].copy_from_slice(&[0x80, 0, 0, 0x80]);
+        let whole = Layer::new(
+            surface(4, 2, 16, 0x1000),
+            Rect::whole(4, 2),
+            Rect::whole(4, 2),
+            false,
+        )
+        .unwrap();
+        let corner = Layer::new(
+            surface(1, 1, 4, 0x2000),
+            Rect::whole(1, 1),
+            Rect::whole(1, 1),
+            true,
+        )
+        .unwrap();
+        for layers in [&[whole][..], &[corner], &[whole, corner]] {
+            let fresh = compose(layers, MODE, reader(&memory)).unwrap();
+            for stale in [
+                alloc::vec![0x5a; fresh.len()],
+                alloc::vec![0x5a; 3],
+                Vec::new(),
+            ] {
+                let mut frame = stale;
+                compose_into(layers, MODE, reader(&memory), &mut frame).unwrap();
+                assert_eq!(frame, fresh);
+            }
+        }
     }
 
     #[test]
@@ -963,25 +1016,35 @@ mod tests {
             let old_visible = sink.visible.clone();
             let mut reads = Vec::new();
             assert!(
-                present(&mut sink, &layers, |iova, row| {
-                    reads.push((iova, row.len()));
-                    reader(&memory)(iova, row) && iova != 76
-                })
+                present(
+                    &mut sink,
+                    &layers,
+                    |iova, row| {
+                        reads.push((iova, row.len()));
+                        reader(&memory)(iova, row) && iova != 76
+                    },
+                    &mut Vec::new()
+                )
                 .is_err()
             );
             assert_eq!(reads, [(44, 16), (76, 16)]);
             assert_eq!(sink.visible, old_visible);
             reads.clear();
-            present(&mut sink, &layers, |iova, row| {
-                reads.push((iova, row.len()));
-                reader(&memory)(iova, row)
-            })
+            present(
+                &mut sink,
+                &layers,
+                |iova, row| {
+                    reads.push((iova, row.len()));
+                    reader(&memory)(iova, row)
+                },
+                &mut Vec::new(),
+            )
             .unwrap();
             assert_eq!(reads, [(44, 16), (76, 16)]);
             assert_eq!(sink.visible, reference(&layers, MODE, &memory));
         }
         assert_eq!(sink.streamed, 2);
-        present(&mut sink, &[layer; 2], reader(&memory)).unwrap();
+        present(&mut sink, &[layer; 2], reader(&memory), &mut Vec::new()).unwrap();
         assert_eq!(sink.visible, reference(&[layer; 2], MODE, &memory));
         assert_eq!(sink.streamed, 2);
     }

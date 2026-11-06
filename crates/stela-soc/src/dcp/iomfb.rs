@@ -149,6 +149,9 @@ struct Outgoing {
 /// scanout.
 pub struct Methods {
     scanout: Box<dyn Scanout>,
+    /// The storage of the last composed frame, for the next
+    /// ([`scanout::present`]).
+    frame: Vec<u8>,
     /// The one mode, or why the scanout's mode cannot be advertised.
     advertised: Result<Advertised>,
     /// Why the last call refused, with the tag and its interface row.
@@ -244,6 +247,7 @@ impl Methods {
         let advertised = Advertised::new(scanout.mode());
         Self {
             scanout,
+            frame: Vec::new(),
             advertised,
             last_refusal: None,
             unmodeled: BTreeSet::new(),
@@ -352,7 +356,7 @@ impl Methods {
         let Some(frame) = self.frames.front() else {
             return Ok(());
         };
-        scanout::present(self.scanout.as_mut(), &frame.layers, read)?;
+        scanout::present(self.scanout.as_mut(), &frame.layers, read, &mut self.frame)?;
         // Both the surface DMA and host sink can refuse. The submitted swap
         // owns its surfaces until presentation succeeds, or the AP explicitly
         // aborts/shuts down; neither failure consumes it or queues D594.
