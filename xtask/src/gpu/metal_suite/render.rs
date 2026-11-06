@@ -2895,7 +2895,7 @@ pub fn build(plan: &mut Plan) {
             "families.apple5": false, "families.apple6": false, "families.apple7": false,
             "families.apple8": false, "families.apple9": false, "families.apple10": false,
             "families.apple11": false, "families.metal3": false, "families.metal4": false,
-            "features.raytracing": false, "features.raster_order_groups": false,
+            "features.raytracing": false, "features.raster_order_groups": true,
             "features.primitive_motion_blur": false, "features.memoryless_render_targets": true,
         }),
     ));

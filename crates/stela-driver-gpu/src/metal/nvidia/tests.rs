@@ -252,7 +252,7 @@ fn missing_families_name_the_layer_that_lacks_them() {
     assert_eq!(cause("GPU family Common3"), None);
     assert_eq!(cause("GPU family Metal3"), Some(Cause::Driver));
     assert_eq!(cause("ray tracing"), Some(Cause::Driver));
-    assert_eq!(cause("raster order groups"), Some(Cause::Driver));
+    assert_eq!(cause("raster order groups"), None);
     assert_eq!(cause("GPU family Metal4"), Some(Cause::AppleArchitecture));
     assert_eq!(cause("ASTC LDR pixel formats"), Some(Cause::Driver));
     assert!(!capabilities.supports_family(GpuFamily::Apple7));

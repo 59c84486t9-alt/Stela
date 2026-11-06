@@ -319,6 +319,8 @@ fn features(chip: &Chip) -> Features {
         fragment_shader_barycentric: true,
         task_shader: true,
         mesh_shader: true,
+        // NVK's fragment shader interlock (Mesa's patch series).
+        fragment_shader_pixel_interlock: true,
         unified_image_layouts: true,
         null_descriptor: true,
         dynamic_rendering_unused_attachments: true,
