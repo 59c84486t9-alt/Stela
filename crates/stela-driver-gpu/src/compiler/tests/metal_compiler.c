@@ -2212,7 +2212,8 @@ stitched_kernels_read_their_builtins(void)
                                                   STELA_AIR_STITCH_NO_OUTPUT, true};
    assert(stela_metal_stitch(sources, 2, &locally, 1, keep_stitched, &stitched, &error));
    shader = compile_stitched(stitched, "positioned", source, kept, NULL, 0, &error);
-   assert(shader && count_intrinsic(shader, nir_intrinsic_load_local_invocation_id) >= 1);
+   /* The local position is the invocation index's in the running shape. */
+   assert(shader && count_intrinsic(shader, nir_intrinsic_load_local_invocation_index) >= 1);
    stela_metal_release(shader);
    LLVMDisposeMemoryBuffer(stitched);
 

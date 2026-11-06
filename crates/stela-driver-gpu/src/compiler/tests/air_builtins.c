@@ -199,15 +199,18 @@ kernel_builtins_read_the_dispatch(void)
    nir_validate_shader(shader, "builtin kernel");
    struct census census = count(shader);
    assert(census.intrinsics[nir_intrinsic_load_workgroup_id]);
-   assert(census.intrinsics[nir_intrinsic_load_local_invocation_id]);
+   /* A grid's thread positions come from the invocation index in the shape
+    * the threadgroup runs, which an edge cuts short. */
+   assert(!census.intrinsics[nir_intrinsic_load_local_invocation_id]);
    assert(census.intrinsics[nir_intrinsic_load_num_workgroups]);
    assert(census.intrinsics[nir_intrinsic_load_local_invocation_index]);
    assert(census.intrinsics[nir_intrinsic_load_subgroup_id]);
    assert(census.intrinsics[nir_intrinsic_load_num_subgroups]);
    assert(census.intrinsics[nir_intrinsic_load_subgroup_size]);
    assert(census.intrinsics[nir_intrinsic_load_subgroup_invocation]);
-   /* The guard, threads_per_grid and both dispatch-size reads. */
-   assert(census.grid_loads == 5);
+   /* Each read the grid's edge cuts: the guard, the positions, the running
+    * sizes and threads_per_grid; CSE joins them later. */
+   assert(census.grid_loads == 7);
    /* ushort2 and ushort forms. */
    assert(census.narrowed == 2);
    ralloc_free(shader);
@@ -227,11 +230,21 @@ kernels_without_device_values_run_whole_threadgroups(void)
    assert(!census.intrinsics[nir_intrinsic_load_push_constant]);
    ralloc_free(shader);
 
-   /* Device-supplied builtins need the device. */
+   /* The dispatched size is the workgroup's, a constant. */
    shader = translate(
       "define void @kernel(<3 x i32> %size) {\nret void\n}\n",
       "!air.kernel = !{!2}\n!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
       BUILTIN(40, 0, "dispatch_threads_per_threadgroup", "uint3"),
+      "kernel", 0, false, &error);
+   assert(shader && error.kind == STELA_AIR_OK);
+   assert(!count(shader).intrinsics[nir_intrinsic_load_push_constant]);
+   ralloc_free(shader);
+
+   /* Device-supplied builtins need the device. */
+   shader = translate(
+      "define void @kernel(<3 x i32> %grid) {\nret void\n}\n",
+      "!air.kernel = !{!2}\n!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!40}\n"
+      BUILTIN(40, 0, "threads_per_grid", "uint3"),
       "kernel", 0, false, &error);
    assert(!shader && error.kind == STELA_AIR_ARGUMENT);
 }

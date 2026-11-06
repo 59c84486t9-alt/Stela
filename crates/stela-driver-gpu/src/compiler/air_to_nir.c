@@ -621,15 +621,57 @@ threadgroup_shape(struct translator *t)
                                       workgroup_size(t);
 }
 
-/* The thread's position in its threadgroup; in a dynamic kernel, its
- * linear index's in the shape. */
+/* Whether the function's threads past a dispatchThreads grid skip it. */
+static bool
+grid_bounded(const struct translator *t)
+{
+   return !t->stage_options ? t->options->load_device_value != NULL :
+                              compute_like(t) && t->stage_options->launched_by_grid;
+}
+
+/* The threads of this threadgroup that a dispatchThreads grid holds. */
+static nir_def *
+dispatch_size(struct translator *t)
+{
+   nir_def *grid = device_value(t, STELA_AIR_DISPATCH_GRID);
+   nir_def *size = threadgroup_shape(t);
+   if (!grid || !size)
+      return NULL;
+   nir_def *first = nir_imul(&t->b, nir_load_workgroup_id(&t->b), size);
+   nir_def *edge = nir_umin(&t->b, size, nir_isub(&t->b, grid, first));
+   return nir_bcsel(&t->b, nir_ieq_imm(&t->b, nir_channel(&t->b, grid, 0), 0), size, edge);
+}
+
+/* The threadgroup's shape as it runs: Metal's threads_per_threadgroup, cut
+ * short at a dispatchThreads grid's edge. */
+static nir_def *
+running_shape(struct translator *t)
+{
+   return grid_bounded(t) ? dispatch_size(t) : threadgroup_shape(t);
+}
+
+static nir_def *
+volume(nir_builder *b, nir_def *size)
+{
+   return nir_imul(b, nir_imul(b, nir_channel(b, size, 0), nir_channel(b, size, 1)),
+                   nir_channel(b, size, 2));
+}
+
+/* The thread's position in its threadgroup: its linear index's in the shape
+ * the threadgroup runs. A threadgroup at a dispatchThreads grid's edge is
+ * smaller than the workgroup, and Metal numbers its threads, and fills its
+ * SIMD-groups, in its own shape, so the workgroup's leading invocations take
+ * its positions; a full threadgroup's are the invocations' own. */
 static nir_def *
 local_position(struct translator *t)
 {
    nir_builder *b = &t->b;
-   if (!t->options->dynamic_shape)
+   const unsigned *size = t->options->workgroup_size;
+   if (!t->options->dynamic_shape && !grid_bounded(t))
       return nir_load_local_invocation_id(b);
-   nir_def *shape = threadgroup_shape(t);
+   if (!t->options->dynamic_shape && size[1] == 1 && size[2] == 1)
+      return nir_vec3(b, nir_load_local_invocation_index(b), nir_imm_int(b, 0), nir_imm_int(b, 0));
+   nir_def *shape = running_shape(t);
    if (!shape)
       return NULL;
    /* Threads of an empty shape skip the function; avoid dividing by zero. */
@@ -830,25 +872,6 @@ stitched_resources(struct translator *t, LLVMValueRef fn)
    return true;
 }
 
-/* The threads of this threadgroup that a dispatchThreads grid holds. */
-static nir_def *
-dispatch_size(struct translator *t)
-{
-   nir_def *grid = device_value(t, STELA_AIR_DISPATCH_GRID);
-   nir_def *size = threadgroup_shape(t);
-   if (!grid || !size)
-      return NULL;
-   nir_def *first = nir_imul(&t->b, nir_load_workgroup_id(&t->b), size);
-   nir_def *edge = nir_umin(&t->b, size, nir_isub(&t->b, grid, first));
-   return nir_bcsel(&t->b, nir_ieq_imm(&t->b, nir_channel(&t->b, grid, 0), 0), size, edge);
-}
-
-static nir_def *
-volume(nir_builder *b, nir_def *size)
-{
-   return nir_imul(b, nir_imul(b, nir_channel(b, size, 0), nir_channel(b, size, 1)),
-                   nir_channel(b, size, 2));
-}
 
 /* A fragment input the rasterizer supplies as a flat uint varying. */
 static nir_def *
@@ -879,9 +902,9 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
    case STELA_AIR_THREADGROUP_POSITION_IN_GRID:
       return nir_load_workgroup_id(b);
    case STELA_AIR_THREADS_PER_THREADGROUP:
-      return threadgroup_shape(t);
+      return running_shape(t);
    case STELA_AIR_DISPATCH_THREADS_PER_THREADGROUP:
-      return dispatch_size(t);
+      return threadgroup_shape(t);
    case STELA_AIR_THREADGROUPS_PER_GRID:
       return nir_load_num_workgroups(b);
    case STELA_AIR_THREADS_PER_GRID: {
@@ -897,33 +920,28 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
    case STELA_AIR_SIMDGROUP_INDEX_IN_THREADGROUP:
       return nir_load_subgroup_id(b);
    case STELA_AIR_SIMDGROUPS_PER_THREADGROUP:
-      if (!t->options->dynamic_shape)
+   case STELA_AIR_DISPATCH_SIMDGROUPS_PER_THREADGROUP: {
+      bool running = builtin == STELA_AIR_SIMDGROUPS_PER_THREADGROUP;
+      if (!t->options->dynamic_shape && !(running && grid_bounded(t)))
          return nir_load_num_subgroups(b);
-      value = threadgroup_shape(t);
+      value = running ? running_shape(t) : threadgroup_shape(t);
       if (!value)
          return NULL;
       return nir_udiv(b, nir_iadd(b, volume(b, value), nir_iadd_imm(b, nir_load_subgroup_size(b), -1)),
                       nir_load_subgroup_size(b));
-   case STELA_AIR_DISPATCH_SIMDGROUPS_PER_THREADGROUP:
-      value = dispatch_size(t);
-      if (!value)
-         return NULL;
-      return nir_udiv(b, nir_iadd(b, volume(b, value), nir_iadd_imm(b, nir_load_subgroup_size(b), -1)),
-                      nir_load_subgroup_size(b));
+   }
    case STELA_AIR_QUADGROUP_INDEX_IN_THREADGROUP:
       return nir_ushr_imm(b, nir_load_local_invocation_index(b), 2);
    case STELA_AIR_QUADGROUPS_PER_THREADGROUP:
-      if (!t->options->dynamic_shape)
+   case STELA_AIR_DISPATCH_QUADGROUPS_PER_THREADGROUP: {
+      bool running = builtin == STELA_AIR_QUADGROUPS_PER_THREADGROUP;
+      if (!t->options->dynamic_shape && !(running && grid_bounded(t)))
          return nir_imm_int(b, (int)DIV_ROUND_UP(size[0] * size[1] * size[2], 4));
-      value = threadgroup_shape(t);
+      value = running ? running_shape(t) : threadgroup_shape(t);
       if (!value)
          return NULL;
       return nir_ushr_imm(b, nir_iadd_imm(b, volume(b, value), 3), 2);
-   case STELA_AIR_DISPATCH_QUADGROUPS_PER_THREADGROUP:
-      value = dispatch_size(t);
-      if (!value)
-         return NULL;
-      return nir_ushr_imm(b, nir_iadd_imm(b, volume(b, value), 3), 2);
+   }
    case STELA_AIR_THREAD_INDEX_IN_SIMDGROUP:
       return nir_load_subgroup_invocation(b);
    case STELA_AIR_THREADS_PER_SIMDGROUP:
@@ -5542,10 +5560,8 @@ cfg_declare(struct translator *t)
    t->b.cursor = nir_after_block(entry);
    t->exit = t->b.impl->end_block;
    /* The device value belongs to the straight-line prelude. */
-   bool grid_bounded = !t->stage_options ? t->options->load_device_value != NULL :
-                       compute_like(t) && t->stage_options->launched_by_grid;
-   nir_def *grid = grid_bounded ? device_value(t, STELA_AIR_DISPATCH_GRID) : NULL;
-   if (grid_bounded && !grid)
+   nir_def *shape = grid_bounded(t) || t->options->dynamic_shape ? running_shape(t) : NULL;
+   if ((grid_bounded(t) || t->options->dynamic_shape) && !shape)
       return false;
    if (t->mesh_state) {
       /* Every thread clears the state before any sets it. */
@@ -5556,23 +5572,10 @@ cfg_declare(struct translator *t)
       if (!(t->exit = new_block(t)))
          return false;
    }
-   /* Threads outside a dispatchThreads grid or a dynamic kernel's shape
-    * skip the function. */
-   nir_def *runs = NULL;
-   if (grid) {
-      nir_def *position = grid_position(t);
-      if (!position)
-         return false;
-      runs = nir_ior(&t->b, nir_ball(&t->b, nir_ult(&t->b, position, grid)),
-                     nir_ieq_imm(&t->b, nir_channel(&t->b, grid, 0), 0));
-   }
-   if (t->options->dynamic_shape) {
-      nir_def *shape = threadgroup_shape(t);
-      if (!shape)
-         return false;
-      nir_def *inside = nir_ult(&t->b, nir_load_local_invocation_index(&t->b), volume(&t->b, shape));
-      runs = runs ? nir_iand(&t->b, runs, inside) : inside;
-   }
+   /* Invocations past the threads a threadgroup runs, at a dispatchThreads
+    * grid's edge or past a dynamic kernel's shape, skip the function. */
+   nir_def *runs = shape ? nir_ult(&t->b, nir_load_local_invocation_index(&t->b), volume(&t->b, shape)) :
+                           NULL;
    if (runs) {
       nir_block *body = new_block(t);
       if (!body)
