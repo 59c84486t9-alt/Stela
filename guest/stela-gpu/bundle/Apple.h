@@ -180,13 +180,7 @@ void NSLog(NSString *format, ...);
 Class NSClassFromString(NSString *name);
 
 /* The Objective-C runtime. */
-#define OBJC_ASSOCIATION_RETAIN 01401
 Method class_getInstanceMethod(Class class, SEL selector);
-IMP method_getImplementation(Method method);
-IMP method_setImplementation(Method method, IMP implementation);
-IMP imp_implementationWithBlock(id block);
-id objc_getAssociatedObject(id object, const void *key);
-void objc_setAssociatedObject(id object, const void *key, id value, uintptr_t policy);
 
 /* libsystem, IOKit and libdispatch. */
 extern mach_port_t mach_task_self_;

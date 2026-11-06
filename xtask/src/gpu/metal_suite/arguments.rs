@@ -102,6 +102,28 @@ fn constants(plan: &mut Plan, library: &str) {
                 .expect_same(u32s(&[words[0], words[1], words[2], 0])),
         ),
     );
+    // A constant set again takes its last value.
+    plan.add(
+        Case::compute(
+            "arguments.constants.set_again",
+            library,
+            "constant_range",
+            [1, 1, 1],
+            [1, 1, 1],
+        )
+        .set(
+            "constants",
+            json!([
+                {"type": "uint", "range": [40, 3], "bytes": base64(&u32s(&words))},
+                constant("uint", 41, 9),
+            ]),
+        )
+        .buffer(Buffer::zeroed("out", 0, 16))
+        .output(
+            Output::new("out", Dtype::U32, Tolerance::exact())
+                .expect_same(u32s(&[words[0], 9, words[2], 0])),
+        ),
+    );
     let mut rng = Random::new(1001);
     let input: Vec<f64> = (0..256).map(|_| f32r(rng.uniform(-10.0, 10.0))).collect();
     for (count, negate) in [(0, false), (3, true), (17, false)] {

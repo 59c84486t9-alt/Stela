@@ -28,104 +28,6 @@ static NSUInteger data_type_bytes(NSUInteger type)
 	return 0;
 }
 
-/* The constant values an MTLFunctionConstantValues was given. */
-@interface StelaGPUConstant : NSObject {
-@public
-	NSUInteger _type, _index;
-}
-@property(copy) NSString *name;
-@property(copy) NSData *value;
-@end
-
-@implementation StelaGPUConstant
-@end
-
-/*
- * MTLFunctionConstantValues has no public getters, so its public setters note
- * what they are given in an object of the instance's own.
- */
-static const void *const CONSTANTS = &CONSTANTS;
-
-static NSMutableArray *constants_of(id values)
-{
-	NSMutableArray *constants = objc_getAssociatedObject(values, CONSTANTS);
-	if (!constants) {
-		constants = [NSMutableArray arrayWithCapacity:4];
-		objc_setAssociatedObject(values, CONSTANTS, constants, OBJC_ASSOCIATION_RETAIN);
-	}
-	return constants;
-}
-
-static void note_constant(id values, const void *value, NSUInteger type, NSUInteger index, NSString *name)
-{
-	StelaGPUConstant *constant = [StelaGPUConstant new];
-	constant->_type = type;
-	constant->_index = index;
-	constant.name = name;
-	constant.value = [NSData dataWithBytes:value length:data_type_bytes(type)];
-	[constants_of(values) addObject:constant];
-}
-
-static void hook(Class class, SEL selector, id block)
-{
-	Method method = class_getInstanceMethod(class, selector);
-	if (method) {
-		method_setImplementation(method, imp_implementationWithBlock(block));
-	}
-}
-
-@interface StelaGPUConstantHooks : NSObject
-@end
-
-@implementation StelaGPUConstantHooks
-
-+ (void)load
-{
-	Class class = [[NSClassFromString(@"MTLFunctionConstantValues") new] class];
-	IMP atIndex = method_getImplementation(class_getInstanceMethod(class, @selector(setConstantValue:type:atIndex:)));
-	IMP withName = method_getImplementation(class_getInstanceMethod(class, @selector(setConstantValue:type:withName:)));
-	IMP inRange = method_getImplementation(class_getInstanceMethod(class, @selector(setConstantValues:type:withRange:)));
-	IMP reset = method_getImplementation(class_getInstanceMethod(class, @selector(reset)));
-	IMP copied = method_getImplementation(class_getInstanceMethod(class, @selector(copyWithZone:)));
-	hook(class, @selector(setConstantValue:type:atIndex:),
-	     ^(id self, const void *value, NSUInteger type, NSUInteger index) {
-		     note_constant(self, value, type, index, nil);
-		     ((void (*)(id, SEL, const void *, NSUInteger, NSUInteger))atIndex)(
-			     self, @selector(setConstantValue:type:atIndex:), value, type, index);
-	     });
-	hook(class, @selector(setConstantValue:type:withName:), ^(id self, const void *value, NSUInteger type, NSString *name) {
-		note_constant(self, value, type, 0, name);
-		((void (*)(id, SEL, const void *, NSUInteger, NSString *))withName)(
-			self, @selector(setConstantValue:type:withName:), value, type, name);
-	});
-	hook(class, @selector(setConstantValues:type:withRange:), ^(id self, const void *values, NSUInteger type, NSRange range) {
-		NSUInteger stride = data_type_bytes(type);
-		/* Three-lane vectors keep a fourth lane's room in an array. */
-		if (stride == 3 || stride == 6 || stride == 12 || stride == 24) {
-			stride = stride / 3 * 4;
-		}
-		for (NSUInteger i = 0; i < range.length; i++) {
-			note_constant(self, (const uint8_t *)values + i * stride, type, range.location + i, nil);
-		}
-		((void (*)(id, SEL, const void *, NSUInteger, NSRange))inRange)(
-			self, @selector(setConstantValues:type:withRange:), values, type, range);
-	});
-	hook(class, @selector(reset), ^(id self) {
-		[constants_of(self) removeAllObjects];
-		((void (*)(id, SEL))reset)(self, @selector(reset));
-	});
-	hook(class, @selector(copyWithZone:), ^id(id self, void *zone) {
-		id copy = ((id (*)(id, SEL, void *))copied)(self, @selector(copyWithZone:), zone);
-		NSMutableArray *constants = constants_of(self);
-		for (NSUInteger i = 0; copy != self && i < constants.count; i++) {
-			[constants_of(copy) addObject:[constants objectAtIndex:i]];
-		}
-		return copy;
-	});
-}
-
-@end
-
 @implementation StelaGPUAttribute
 @end
 
@@ -875,21 +777,33 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 
 - (id)newFunctionWithName:(NSString *)name constantValues:(id)values error:(NSError **)error
 {
-	NSArray *constants = values ? [constants_of(values) copy] : [NSArray array];
-	NSUInteger count = constants.count;
+	if (values && !([values respondsToSelector:@selector(newIndexedConstantArray)] &&
+			[values respondsToSelector:@selector(newNamedConstantArray)])) {
+		StelaFailure failure = {.reason = "constant values that keep no array of themselves"};
+		stela_report([[NSString stringWithFormat:@"function %@", name] UTF8String], &failure);
+		if (error) {
+			*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorUnsupported, &failure);
+		}
+		return nil;
+	}
+	NSArray *indexed = values ? [values newIndexedConstantArray] : [NSArray array];
+	NSArray *named = values ? [values newNamedConstantArray] : [NSArray array];
+	NSUInteger count = indexed.count + named.count;
 	StelaConstantRecord *records = calloc(count + 1, sizeof(*records));
 	StelaSpan *spans = calloc(2 * count + 2, sizeof(*spans));
 	const char *utf8 = name.UTF8String;
 	size_t used = 0;
 	spans[used++] = stela_span(utf8, strlen(utf8));
 	for (NSUInteger i = 0; i < count; i++) {
-		StelaGPUConstant *constant = [constants objectAtIndex:i];
-		const char *key = constant.name.UTF8String;
+		BOOL byName = i >= indexed.count;
+		id constant = byName ? [named objectAtIndex:i - indexed.count] : [indexed objectAtIndex:i];
+		const char *key = byName ? [constant name].UTF8String : NULL;
+		NSUInteger type = [constant dataType];
 		records[i] = (StelaConstantRecord){
-			.data_type = constant->_type,
-			.index = constant->_index,
+			.data_type = type,
+			.index = byName ? 0 : [constant index],
 			.name = key ? stela_span(key, strlen(key)) : stela_span(NULL, 0),
-			.value = stela_span(constant.value.bytes, constant.value.length),
+			.value = stela_span([constant data], data_type_bytes(type)),
 		};
 		spans[used++] = records[i].name;
 		spans[used++] = records[i].value;

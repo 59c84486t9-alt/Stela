@@ -528,6 +528,12 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (NSUInteger)dataType;
 - (NSUInteger)index;
 - (NSUInteger)constantBlockAlignment;
+/* MTLFunctionConstantValues, which keeps the last value given each constant
+ * as an MTLIndexedConstantValue or MTLNamedConstantValue (`dataType`, `index`
+ * or `name`, and `data`: its lanes packed, a three-lane vector's in four). */
+- (NSArray *)newIndexedConstantArray;
+- (NSArray *)newNamedConstantArray;
+- (const void *)data;
 /* MTLFunctionDescriptor and MTLComputePassDescriptor. */
 - (id)constantValues;
 - (NSUInteger)dispatchType;
