@@ -648,51 +648,55 @@ pub fn run(
             }
             let dtype = dtype_of(output)?;
             let stride = output["stride"].as_u64().unwrap_or(1).max(1) as usize;
-            let (expected, alternatives, tol, mask) = if let Some(root) = reference_root {
-                (
-                    actual(root, output)?,
-                    vec![],
-                    Tolerance::from_json(output.get("tolerance")),
-                    mask_of(&output["mask"]),
-                )
-            } else if let Some(file) = output["expect"].as_str() {
-                let read = |f: &str| -> Result<Elements> {
-                    let data = fs::read(plan_dir.join(f)).with_context(|| f.to_string())?;
-                    // A derived output's expectation is the property itself.
-                    let dtype = if output["derive"].is_null() {
-                        dtype
-                    } else {
-                        Dtype::U32
+            // An output whose value Metal leaves open within bounds the plan
+            // states is held to them on every device, not to another's.
+            let bounded = output["judge"] == "expectation";
+            let (expected, alternatives, tol, mask) =
+                if let Some(root) = reference_root.filter(|_| !bounded) {
+                    (
+                        actual(root, output)?,
+                        vec![],
+                        Tolerance::from_json(output.get("tolerance")),
+                        mask_of(&output["mask"]),
+                    )
+                } else if let Some(file) = output["expect"].as_str() {
+                    let read = |f: &str| -> Result<Elements> {
+                        let data = fs::read(plan_dir.join(f)).with_context(|| f.to_string())?;
+                        // A derived output's expectation is the property itself.
+                        let dtype = if output["derive"].is_null() {
+                            dtype
+                        } else {
+                            Dtype::U32
+                        };
+                        let e = Elements::of(dtype, &data);
+                        Ok(if output["sorted_compare"].as_bool() == Some(true) {
+                            e.sorted()
+                        } else {
+                            e
+                        })
                     };
-                    let e = Elements::of(dtype, &data);
-                    Ok(if output["sorted_compare"].as_bool() == Some(true) {
-                        e.sorted()
+                    let alternatives = output["expect_alternatives"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .map(read)
+                        .collect::<Result<Vec<_>>>()?;
+                    let tol = output.get("expect_tolerance").or(output.get("tolerance"));
+                    let mask = if output["expect_mask"].is_null() {
+                        &output["mask"]
                     } else {
-                        e
-                    })
-                };
-                let alternatives = output["expect_alternatives"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(Value::as_str)
-                    .map(read)
-                    .collect::<Result<Vec<_>>>()?;
-                let tol = output.get("expect_tolerance").or(output.get("tolerance"));
-                let mask = if output["expect_mask"].is_null() {
-                    &output["mask"]
+                        &output["expect_mask"]
+                    };
+                    (
+                        read(file)?,
+                        alternatives,
+                        Tolerance::from_json(tol),
+                        mask_of(mask),
+                    )
                 } else {
-                    &output["expect_mask"]
+                    continue;
                 };
-                (
-                    read(file)?,
-                    alternatives,
-                    Tolerance::from_json(tol),
-                    mask_of(mask),
-                )
-            } else {
-                continue;
-            };
             checked += 1;
             let result = compare(
                 &expected,

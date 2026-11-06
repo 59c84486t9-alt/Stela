@@ -1432,7 +1432,9 @@ fn blending(plan: &mut Plan, library: &str) {
                 .map(|(l, h)| h - l)
                 .max()
                 .unwrap_or(0);
-            let mut output = Output::new("c", Dtype::U8, tol.clone()).expect(expected, tol);
+            let mut output = Output::new("c", Dtype::U8, tol.clone())
+                .expect(expected, tol)
+                .judged_by_expectation();
             for step in 0..=widest.div_ceil(3) {
                 let at = |(&l, &h): (&u8, &u8)| l.saturating_add(step.saturating_mul(3)).min(h);
                 output = output.expect_alternative(lows.iter().zip(&highs).map(at).collect());

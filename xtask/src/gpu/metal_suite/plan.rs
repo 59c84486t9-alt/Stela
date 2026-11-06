@@ -449,6 +449,12 @@ impl Output {
         self.set("expect_mask", json!(mask))
     }
 
+    /// Holds every device to the expectation and its alternatives, which
+    /// bound a result Metal leaves open, rather than to a reference run.
+    pub fn judged_by_expectation(self) -> Self {
+        self.set("judge", "expectation")
+    }
+
     /// Which elements (cycling, `stride` apart) any comparison covers.
     pub fn mask(self, mask: Vec<u8>) -> Self {
         self.set("mask", json!(mask))
