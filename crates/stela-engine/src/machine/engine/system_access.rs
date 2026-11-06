@@ -436,6 +436,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .and_then(|(register, index)| self.cpu.registers.address(register, index))
                 .or_else(|| self.devices.register_storage(self.current, encoding))
                 .or_else(|| self.cpu.apple_read_storage(encoding))
+                .or_else(|| {
+                    pstate_field(encoding).map(|(index, _)| self.mirrors.field_storage(index))
+                })
         };
         if let (Ok(()), true, Some(value)) = (&step, self.position() == before, value) {
             self.mirrors[MIRRORED.len() + cell] = register_read::Cell { readable: 1, value };
@@ -456,7 +459,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let before = self.completion_point();
         let step = self.register_access(word, access);
-        let storage = self.cpu.apple_write_storage(encoding);
+        let storage = self.write_storage(encoding);
         if let (Ok(()), true, Some((value, _))) = (&step, self.position() == before, storage) {
             self.mirrors[stored_write_cell(cell)] = register_read::Cell { readable: 1, value };
         }

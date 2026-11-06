@@ -5801,6 +5801,59 @@ fn implementation_defined_values_complete_natively_after_the_engine_does() {
     assert_eq!(machine.host.installed.last(), Some(&thunk.code));
 }
 
+/// MSR and MRS of PSTATE.DIT complete natively on the word PSTATE takes
+/// back when native code returns, after the engine completed one plainly.
+#[test]
+fn pstate_fields_complete_natively_after_the_engine_does() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const MSR: u32 = 0xd51b_42a2; // msr dit, x2
+    const MRS: u32 = 0xd53b_42a2; // mrs x2, dit
+    const DIT: u64 = 1 << 24;
+    let mut machine = machine(&[ADD, MSR, ADD, MRS, ADD]);
+    if machine.timing_target().is_some() {
+        // PSTATE.DIT changes code there, so its writes take exits.
+        assert_eq!(machine.write_storage(PSTATE_FIELDS[0].0), None);
+        return;
+    }
+    let base = machine.cpu.pc;
+    let fall = |next_pc| NativeExit::Exit {
+        next_pc,
+        kind: ExitKind::Fallthrough as u64,
+    };
+    machine.cpu.pstate = Pstate::reset(1);
+    machine.derived_changed();
+    machine.host.exits = vec![fall(base + 8), fall(base + 16)];
+    machine.step().unwrap();
+    assert_eq!(machine.stored_writes, [PSTATE_FIELDS[0].0]);
+    let write = cell_place(stored_write_cell(0));
+    let written = register_read::Written { keep: DIT, set: 0 };
+    let thunk = register_read::stored_write_thunk(GuestAddress(base + 4), 2, write, written);
+    assert_eq!(machine.host.installed.last(), Some(&thunk.code));
+    // The engine's write takes the field's bit alone and opens the cell.
+    machine.cpu.pc = base + 4;
+    machine.cpu.state.x[2] = DIT | 0xff;
+    machine.system_instruction(MSR).unwrap();
+    assert!(machine.cpu.pstate.dit);
+    let address = machine.mirrors.field_storage(0);
+    let cell = machine.mirrors[stored_write_cell(0)];
+    assert_eq!((cell.readable, cell.value), (1, address));
+    machine.step().unwrap();
+    assert_eq!(machine.stored_reads, [PSTATE_FIELDS[0].0]);
+    machine.cpu.pc = base + 12;
+    machine.system_instruction(MRS).unwrap();
+    assert_eq!(machine.cpu.state.x[2], DIT);
+    let cell = machine.mirrors[MIRRORED.len()];
+    assert_eq!((cell.readable, cell.value), (1, address));
+    // Native code sees PSTATE in the words and leaves what it wrote there.
+    machine.cpu.pstate.ssbs = true;
+    machine.mirrors.enter(machine.cpu.pstate);
+    assert_eq!(machine.mirrors.fields, [DIT, 0, 1 << 12]);
+    machine.mirrors.fields = [0, 1 << 23, 0];
+    machine.mirrors.leave(&mut machine.cpu.pstate);
+    let pstate = machine.cpu.pstate;
+    assert_eq!((pstate.dit, pstate.uao, pstate.ssbs), (false, true, false));
+}
+
 #[test]
 fn writes_that_change_nothing_a_read_follows_keep_the_cells() {
     const MRS: u32 = 0xd538_d088; // mrs x8, tpidr_el1

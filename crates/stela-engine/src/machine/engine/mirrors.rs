@@ -76,6 +76,10 @@ pub(super) struct Mirrors {
     /// those can hold open.
     entered: u8,
     pub(super) selected: u64,
+    /// PSTATE.DIT, UAO and SSBS as their registers read, in
+    /// [`PSTATE_FIELDS`] order, while native code runs: their reads and
+    /// writes complete here ([`pstate_field`]).
+    pub(super) fields: [u64; 3],
 }
 
 /// Where native code finds the cell at `index` of the PE's state.
@@ -164,8 +168,29 @@ impl Default for Mirrors {
             state: 0,
             entered: 1,
             selected: 0,
+            fields: [0; 3],
         }
     }
+}
+
+/// The PSTATE fields with registers of their own that a kernel saves and
+/// restores around each exception, which only the engine reads besides
+/// MRS: DIT, UAO and SSBS, by encoding and register bit. A plain MRS or MSR
+/// of one opens a stored cell on its [`Mirrors::fields`] word, which
+/// [`Mirrors::enter`] and [`Mirrors::leave`] keep with PSTATE around native
+/// code. A write takes the field's bit alone, as the register's do.
+pub(super) const PSTATE_FIELDS: [(Encoding, u64); 3] = [
+    (Encoding::new(3, 3, 4, 2, 5), 1 << 24),
+    (Encoding::new(3, 0, 4, 2, 4), 1 << 23),
+    (Encoding::new(3, 3, 4, 2, 6), 1 << 12),
+];
+
+/// The [`PSTATE_FIELDS`] index and bit of `encoding`, if it is one.
+pub(super) fn pstate_field(encoding: Encoding) -> Option<(usize, u64)> {
+    PSTATE_FIELDS
+        .iter()
+        .position(|&(field, _)| field == encoding)
+        .map(|index| (index, PSTATE_FIELDS[index].1))
 }
 
 /// The cell of `WRITTEN[index]`.
@@ -184,6 +209,23 @@ impl Mirrors {
     /// The cells of the PE's state, at what [`Anchor::Cells`] holds.
     pub(super) fn cells(&self) -> &[register_read::Cell; CELLS] {
         &self.banks[self.state]
+    }
+
+    /// Native code is entered with PSTATE `pstate`.
+    pub(super) fn enter(&mut self, pstate: Pstate) {
+        let bit = |set: bool, index: usize| if set { PSTATE_FIELDS[index].1 } else { 0 };
+        self.fields = [bit(pstate.dit, 0), bit(pstate.uao, 1), bit(pstate.ssbs, 2)];
+    }
+
+    /// Native code returned: `pstate` takes the fields it wrote.
+    pub(super) fn leave(&self, pstate: &mut Pstate) {
+        let [dit, uao, ssbs] = self.fields.map(|word| word != 0);
+        (pstate.dit, pstate.uao, pstate.ssbs) = (dit, uao, ssbs);
+    }
+
+    /// The address native code reads and writes field `index` at.
+    pub(super) fn field_storage(&self, index: usize) -> u64 {
+        &self.fields[index] as *const u64 as u64
     }
 
     /// The PE is in state `to`: native code reads its cells.

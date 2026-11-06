@@ -672,7 +672,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let access = msr_access(pc, word)?;
             let (index, refused) = self.stored_write_cell(access.encoding())?;
             let cell = cell_place(stored_write_cell(index));
-            register_read::checked_write_thunk(GuestAddress(pc), access.rt(), cell, refused)
+            let (pc, rt) = (GuestAddress(pc), access.rt());
+            if let Some((_, bit)) = pstate_field(access.encoding()) {
+                let written = register_read::Written { keep: bit, set: 0 };
+                register_read::stored_write_thunk(pc, rt, cell, written)
+            } else {
+                register_read::checked_write_thunk(pc, rt, cell, refused)
+            }
         };
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
@@ -704,6 +710,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return register_read::key_write_thunk(pc, rt, cell, pointer::TAGS, words);
         }
         register_read::stored_write_thunk(pc, rt, cell, written)
+    }
+
+    /// Where a store completes MSR of `encoding` and the bits of a value that
+    /// take a write more than that, if one without them takes no more: an
+    /// Apple register's storage or a [`PSTATE_FIELDS`] word. PSTATE.DIT
+    /// changes code compiled for a timing target, so its writes stay the
+    /// engine's there.
+    pub(super) fn write_storage(&self, encoding: Encoding) -> Option<(u64, u64)> {
+        if let Some((index, _)) = pstate_field(encoding) {
+            let timed = index == 0 && self.timing_target().is_some();
+            return (!timed).then(|| (self.mirrors.field_storage(index), 0));
+        }
+        self.cpu.apple_write_storage(encoding)
     }
 
     /// The bits of `register` a write takes and those it holds.
@@ -739,7 +758,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The index of `encoding` in [`Self::stored_writes`], made if there is
     /// room, and the bits of a value its writes leave to the engine.
     fn stored_write_cell(&mut self, encoding: Encoding) -> Option<(usize, u64)> {
-        let (_, refused) = self.cpu.apple_write_storage(encoding)?;
+        let (_, refused) = self.write_storage(encoding)?;
         let known = self
             .stored_writes
             .iter()

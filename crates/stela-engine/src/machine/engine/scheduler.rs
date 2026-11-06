@@ -241,6 +241,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.state.daif = u32::from(self.cpu.pstate.daif);
         self.mirrors.selected = u64::from(self.cpu.pstate.sp);
         self.mirrors.transition(self.mirror_state());
+        self.mirrors.enter(self.cpu.pstate);
         self.cpu.state.pan = u64::from(self.cpu.pstate.pan);
         self.cpu.state.anchors = self.anchors();
         let entered = self.timing_start();
@@ -250,6 +251,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let returned = self.timing_charge(step_timing::Phase::Native, entered);
         self.cpu.pstate.daif = self.cpu.state.daif as u8;
         self.cpu.pstate.sp = self.mirrors.selected != 0;
+        self.mirrors.leave(&mut self.cpu.pstate);
         if self.cpu.pstate.pan != (self.cpu.state.pan != 0) {
             self.cpu.pstate.pan = !self.cpu.pstate.pan;
             self.sync_host_regime();
