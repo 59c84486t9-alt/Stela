@@ -496,12 +496,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let direct_exits = compiled.direct_exits();
         let mut successors: Vec<Successor> = direct_exits
             .iter()
-            .map(|exit| Successor {
-                site: code.0 as u64 + exit.offset as u64,
-                target: exit.target,
-                word: exit.word(),
-                slot: chain::link_slot(Some(pc), exit.target, exit.kind) as u8,
-                linked: false,
+            .map(|exit| {
+                Successor::new(
+                    code.0 as u64 + exit.offset as u64,
+                    exit.target,
+                    exit.word(),
+                    chain::link_slot(Some(pc), exit.target, exit.kind),
+                )
             })
             .collect();
         // RET, BR and BLR end the code with their exit to the target in
@@ -601,12 +602,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
         self.patch_native(NativeCode(site as usize), &jump);
-        let successor = thunk.next.map(|next| Successor {
-            site: installed.0 as u64 + next as u64,
-            slot: 0,
-            target: GuestAddress(pc + INSTRUCTION),
-            word: ExitKind::Fallthrough.into(),
-            linked: false,
+        let successor = thunk.next.map(|next| {
+            Successor::new(
+                installed.0 as u64 + next as u64,
+                GuestAddress(pc + INSTRUCTION),
+                ExitKind::Fallthrough.into(),
+                0,
+            )
         });
         let dynamic = thunk
             .dynamic
@@ -696,12 +698,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
         self.patch_native(NativeCode(site as usize), &jump);
-        thunk.next.map(|next| Successor {
-            site: installed.0 as u64 + next as u64,
-            slot: 0,
-            target: GuestAddress(pc + INSTRUCTION),
-            word: ExitKind::Fallthrough.into(),
-            linked: false,
+        thunk.next.map(|next| {
+            Successor::new(
+                installed.0 as u64 + next as u64,
+                GuestAddress(pc + INSTRUCTION),
+                ExitKind::Fallthrough.into(),
+                0,
+            )
         })
     }
 

@@ -528,16 +528,40 @@ pub struct StaleCode {
 }
 
 /// A direct exit in native code to a static successor: its host address,
-/// the successor's PC and the exit's kind.
+/// the successor's PC and the exit's word, its kind's byte and the
+/// instructions it skips apart, as linked ones stay in their lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Successor {
     site: u64,
     target: GuestAddress,
-    word: ExitWord,
+    kind: u8,
+    skipped: u16,
     /// The bytes before `site` kept for a link ([`chain::link_slot`]).
     slot: u8,
     /// Chained into the block of its page at `target`.
     linked: bool,
+}
+
+const _: () = assert!(size_of::<Successor>() == 24);
+
+impl Successor {
+    fn new(site: u64, target: GuestAddress, word: ExitWord, slot: usize) -> Self {
+        Self {
+            site,
+            target,
+            kind: word.kind as u8,
+            skipped: word.skipped,
+            slot: u8::try_from(slot).expect("a link slot is a few bytes"),
+            linked: false,
+        }
+    }
+
+    fn word(&self) -> ExitWord {
+        ExitWord {
+            kind: ExitKind::try_from(u64::from(self.kind)).expect("a successor's own kind"),
+            skipped: self.skipped,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

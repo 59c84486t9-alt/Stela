@@ -349,7 +349,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             block
                 .successors
                 .iter()
-                .any(|exit| !exit.linked && exit.target.0 == next_pc && exit.word.kind == kind)
+                .any(|exit| !exit.linked && exit.target.0 == next_pc && exit.kind == kind as u8)
         } else {
             return None;
         };
@@ -392,7 +392,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(position) = block
             .successors
             .iter()
-            .position(|exit| !exit.linked && exit.target.0 == next_pc && exit.word == word)
+            .position(|exit| !exit.linked && exit.target.0 == next_pc && exit.word() == word)
         else {
             return;
         };

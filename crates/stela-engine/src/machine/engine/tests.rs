@@ -2538,7 +2538,7 @@ fn side_exits_retire_the_instructions_that_ran() {
     let exit = *machine.blocks[0]
         .successors
         .iter()
-        .find(|exit| exit.word == word)
+        .find(|exit| exit.word() == word)
         .unwrap();
     machine.step().unwrap();
     let (at, code) = machine.host.patches.last().unwrap();
@@ -5705,13 +5705,12 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     assert_eq!(machine.host.patches, [(site, jump)]);
     assert_eq!(
         *block.successors,
-        [Successor {
-            slot: 0,
-            site: (installed + thunk.next.unwrap()) as u64,
-            target: GuestAddress(base + 8),
-            word: ExitKind::Fallthrough.into(),
-            linked: false,
-        }]
+        [Successor::new(
+            (installed + thunk.next.unwrap()) as u64,
+            GuestAddress(base + 8),
+            ExitKind::Fallthrough.into(),
+            0,
+        )]
     );
     // Other System reads keep their exit.
     let mut other = super::tests::machine(&[ADD, 0xd538_0008]); // mrs x8, midr_el1
