@@ -719,6 +719,22 @@ null_textures_bind_nothing(void)
    nir_validate_shader(shader, "null texture kernel");
    assert(!count(shader).first[nir_texop_txl]);
    ralloc_free(shader);
+   /* A null depth texture is one too. */
+   static const char *depth =
+      "declare ptr addrspace(1) @air.get_null_depth_2d()\n"
+      "declare i1 @air.is_null_depth_2d(ptr addrspace(1))\n"
+      "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+      " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+      "%none = call ptr addrspace(1) @air.get_null_depth_2d()\n"
+      "%null = call i1 @air.is_null_depth_2d(ptr addrspace(1) %none)\n"
+      "%bit = zext i1 %null to i32\n"
+      "store i32 %bit, ptr addrspace(1) %out, align 4\n"
+      "ret void\n}\n";
+   shader = kernel(depth, kernel_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "null depth: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   ralloc_free(shader);
 }
 
 /* Two samples join through a PHI of their results, without their residency. */

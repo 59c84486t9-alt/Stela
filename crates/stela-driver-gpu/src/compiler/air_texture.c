@@ -703,13 +703,25 @@ stela_air_read_sampler(LLVMValueRef value)
    return name && bytes == strlen("air.get_read_sampler") && !memcmp(name, "air.get_read_sampler", bytes);
 }
 
+/* Whether `name` is `stem` and a texture type: texture_2d, depth_2d and the
+ * like. */
+static bool
+null_named(const char *name, size_t bytes, const char *stem)
+{
+   size_t length = strlen(stem);
+   if (bytes <= length || memcmp(name, stem, length))
+      return false;
+   name += length;
+   bytes -= length;
+   return (bytes > 8 && !memcmp(name, "texture_", 8)) || (bytes > 6 && !memcmp(name, "depth_", 6));
+}
+
 bool
 stela_air_null_texture(LLVMValueRef value)
 {
    size_t bytes;
    const char *name = called_name(value, &bytes);
-   size_t stem = strlen("air.get_null_texture_");
-   return name && bytes > stem && !memcmp(name, "air.get_null_texture_", stem);
+   return name && null_named(name, bytes, "air.get_null_");
 }
 
 bool
@@ -1134,8 +1146,7 @@ static enum stela_air_texture_status
 null_call(const struct stela_air_texture_context *context, LLVMValueRef inst, const char *name,
           size_t name_bytes, nir_def **result, bool *pair)
 {
-   size_t stem = strlen("air.is_null_texture_");
-   if (name_bytes > stem && !memcmp(name, "air.is_null_texture_", stem)) {
+   if (null_named(name, name_bytes, "air.is_null_")) {
       *result = nir_imm_true(context->b);
       return STELA_AIR_TEXTURE_LOWERED;
    }
