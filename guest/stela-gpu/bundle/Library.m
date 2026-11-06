@@ -908,6 +908,19 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 	return [self newFunctionWithName:name constantValues:nil error:NULL];
 }
 
+/* `MTLFunctionReflection`: the bindings of the function as the library
+ * holds it, which carries no user annotation. */
+- (id)reflectionForFunctionWithName:(NSString *)name
+{
+	StelaGPUFunction *function = [self newFunctionWithName:name];
+	if (!function) {
+		return nil;
+	}
+	StelaGPUFunctionReflection *reflection = [StelaGPUFunctionReflection new];
+	reflection.bindings = [StelaGPUReflection bindingsOfFunction:function];
+	return reflection;
+}
+
 - (void)newFunctionWithName:(NSString *)name
 	     constantValues:(id)values
 	  completionHandler:(void (^)(id, NSError *))handler

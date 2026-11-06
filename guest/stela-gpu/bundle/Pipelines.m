@@ -166,6 +166,9 @@ static id binary_functions_error(NSError **error, const char *reason)
 
 @end
 
+@implementation StelaGPUFunctionReflection
+@end
+
 @implementation StelaGPUComputeReflection
 
 - (NSArray *)arguments

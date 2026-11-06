@@ -321,6 +321,12 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 @property(copy) NSArray *vertexBindings, *fragmentBindings, *objectBindings, *meshBindings;
 @end
 
+/* `MTLFunctionReflection`. */
+@interface StelaGPUFunctionReflection : NSObject
+@property(copy) NSArray *bindings;
+@property(copy) NSString *userAnnotation;
+@end
+
 /* `MTLComputePipelineReflection`. */
 @interface StelaGPUComputeReflection : NSObject
 @property(copy) NSArray *bindings;

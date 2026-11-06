@@ -125,9 +125,6 @@ ABSENT((MTLResourceID)gpuResourceID, "this device has no depth stencil states in
 
 @implementation StelaGPULibrary (Refused)
 
-ABSENT((id)reflectionForFunctionWithName:(NSString *)name, "this device reflects functions through their pipelines",
-       nil)
-
 - (void)newIntersectionFunctionWithDescriptor:(id)descriptor completionHandler:(void (^)(id, NSError *))handler
 {
 	REFUSE("newIntersectionFunctionWithDescriptor:completionHandler:", INTERSECTION);
