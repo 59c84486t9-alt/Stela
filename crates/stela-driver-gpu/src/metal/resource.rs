@@ -5,7 +5,9 @@
 //! (`VK_KHR_unified_image_layouts`), so lowering never schedules layout
 //! transitions. Storage modes map to memory as a discrete Mac GPU realizes
 //! them: shared and managed resources live in host-visible memory, private
-//! resources in device-local memory, and memoryless storage is refused.
+//! resources in device-local memory. Memoryless textures live in device-local
+//! memory too: a pass may neither load nor store them, so no content outlives
+//! the pass, which is all memoryless storage promises.
 use super::{
     abi::{
         CpuCacheMode, ResourceOptions, StorageMode, SwizzleChannels, TextureSwizzle, TextureType,
@@ -65,9 +67,9 @@ pub fn memory(options: ResourceOptions) -> Result<MemoryRequest> {
             preferred: M::EMPTY,
             mapped: false,
         }),
-        // Lazily allocated attachments are the only Vulkan equivalent, and
-        // Mac GPUs outside the Apple families have none.
-        StorageMode::Memoryless => Err(super::error::Error::Unsupported("memoryless storage")),
+        StorageMode::Memoryless => Err(super::error::Error::Invalid(
+            "memoryless storage holds only textures",
+        )),
     }
 }
 
@@ -243,7 +245,7 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
         )?;
     }
     let cpu_access = match descriptor.options.storage_mode {
-        StorageMode::Private => CpuAccess::None,
+        StorageMode::Private | StorageMode::Memoryless => CpuAccess::None,
         // Apple's frameworks expect shared textures whatever the device's memory.
         StorageMode::Managed | StorageMode::Shared
             if descriptor.sample_count == 1
@@ -259,9 +261,6 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
             return Err(super::error::Error::Unsupported(
                 "shared storage of a format without host image copy",
             ));
-        }
-        StorageMode::Memoryless => {
-            return Err(super::error::Error::Unsupported("memoryless storage"));
         }
     };
 

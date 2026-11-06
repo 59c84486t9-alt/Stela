@@ -74,6 +74,8 @@ option_set! {
         /// Texel buffers of power-of-two texels align to one texel when that
         /// is less than their alignment.
         const SINGLE_TEXEL_ALIGNMENT = 1 << 32;
+        /// `supportsMemorylessRenderTargets`.
+        const MEMORYLESS_RENDER_TARGETS = 1 << 33;
     }
 }
 
@@ -355,6 +357,7 @@ impl Block {
             timestamp_frequency: self.timestamp_frequency,
             statistic_counters: has(Flags::STATISTIC_COUNTERS),
             constant_vertex_step: has(Flags::CONSTANT_VERTEX_STEP),
+            memoryless_render_targets: has(Flags::MEMORYLESS_RENDER_TARGETS),
             counter_sampling,
             sparse_volumes: has(Flags::SPARSE_VOLUMES),
             sparse_samples: formats(
@@ -603,6 +606,10 @@ impl Capabilities {
             .with(Flags::WIREFRAME, self.wireframe)
             .with(Flags::STATISTIC_COUNTERS, self.statistic_counters)
             .with(Flags::CONSTANT_VERTEX_STEP, self.constant_vertex_step)
+            .with(
+                Flags::MEMORYLESS_RENDER_TARGETS,
+                self.memoryless_render_targets,
+            )
             .with(Flags::SPARSE_VOLUMES, self.sparse_volumes)
             .with(
                 Flags::SINGLE_TEXEL_ALIGNMENT,

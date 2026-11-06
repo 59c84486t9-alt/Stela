@@ -225,6 +225,58 @@ fn multisample_resolves_choose_vulkan_resolve_modes() {
 }
 
 #[test]
+fn memoryless_attachments_are_neither_loaded_nor_stored() {
+    let mut msaa = texture(TextureType::D2Multisample, PixelFormat::Bgra8Unorm, 4);
+    msaa.options.storage_mode = StorageMode::Memoryless;
+    let resolved = texture(TextureType::D2, PixelFormat::Bgra8Unorm, 1);
+    let resolving = |load_action, store_action| {
+        let mut descriptor = pass();
+        descriptor.color_attachments[0] = Some(AttachmentDescriptor {
+            resolve: Some(target(2, &resolved)),
+            load_action,
+            ..attachment(target(1, &msaa), store_action, [0.0; 4])
+        });
+        render_pass(&capabilities(), &descriptor)
+    };
+    let plan = resolving(LoadAction::Clear, StoreAction::MultisampleResolve).unwrap();
+    assert!(plan.color[0].unwrap().memoryless);
+    assert_eq!(
+        resolving(LoadAction::Load, StoreAction::MultisampleResolve).unwrap_err(),
+        Error::Invalid("memoryless attachments are never loaded")
+    );
+    assert_eq!(
+        resolving(
+            LoadAction::DontCare,
+            StoreAction::StoreAndMultisampleResolve
+        )
+        .unwrap_err(),
+        Error::Invalid("memoryless attachments are never stored")
+    );
+
+    let mut plan = resolving(LoadAction::Clear, StoreAction::Unknown).unwrap();
+    assert_eq!(
+        plan.set_store_action(AttachmentSlot::Color(0), StoreAction::Store),
+        Err(Error::Invalid("memoryless attachments are never stored"))
+    );
+    plan.set_store_action(AttachmentSlot::Color(0), StoreAction::MultisampleResolve)
+        .unwrap();
+    assert_eq!(plan.finish(), Ok(()));
+
+    let plain = texture(TextureType::D2Multisample, PixelFormat::Bgra8Unorm, 4);
+    let mut into_memoryless = resolved;
+    into_memoryless.options.storage_mode = StorageMode::Memoryless;
+    let mut descriptor = pass();
+    descriptor.color_attachments[0] = Some(AttachmentDescriptor {
+        resolve: Some(target(2, &into_memoryless)),
+        ..attachment(target(1, &plain), StoreAction::MultisampleResolve, [0.0; 4])
+    });
+    assert_eq!(
+        render_pass(&capabilities(), &descriptor).unwrap_err(),
+        Error::Invalid("resolve textures hold memory")
+    );
+}
+
+#[test]
 fn unknown_store_actions_are_set_before_the_pass_ends() {
     let msaa = texture(TextureType::D2Multisample, PixelFormat::Rgba8Unorm, 4);
     let resolved = texture(TextureType::D2, PixelFormat::Rgba8Unorm, 1);

@@ -25,6 +25,7 @@
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <QuartzCore/CAMetalLayer.h>
 #include <mach/mach.h>
+#include <objc/message.h>
 #include <stdio.h>
 
 static NSString *plan_dir;
@@ -3485,6 +3486,13 @@ static BOOL logging_available(void)
 	return NO;
 }
 
+/* A capability MTLDevice answers outside its public header, as the
+ * frameworks ask it; no for a device without the query. */
+static BOOL device_answers(id<MTLDevice> d, SEL query)
+{
+	return [d respondsToSelector:query] && ((BOOL (*)(id, SEL))objc_msgSend)(d, query);
+}
+
 static NSNumber *feature(id<MTLDevice> d, NSString *name)
 {
 	if ([name hasPrefix:@"samples"])
@@ -3507,6 +3515,7 @@ static NSNumber *feature(id<MTLDevice> d, NSString *name)
 		@"argument_buffers_tier2" : @(d.argumentBuffersSupport >= MTLArgumentBuffersTier2),
 		@"read_write_textures_tier2" : @(d.readWriteTextureSupport >= MTLReadWriteTextureTier2),
 		@"primitive_motion_blur" : @(d.supportsPrimitiveMotionBlur),
+		@"memoryless_render_targets" : @(device_answers(d, @selector(supportsMemorylessRenderTargets))),
 		@"vertex_amplification2" : @([d supportsVertexAmplificationCount:2]),
 		@"simd_reduction" : @([d supportsFamily:MTLGPUFamilyApple7] || [d supportsFamily:MTLGPUFamilyMac2]),
 		@"counters_stage_boundary" : @([d supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]),
@@ -3553,7 +3562,8 @@ static NSDictionary *device_properties(id<MTLDevice> d)
 				   @"render_dynamic_libraries", @"float32_filtering", @"float32_msaa", @"bc_compression",
 				   @"query_texture_lod", @"barycentrics", @"pull_model_interpolation", @"raster_order_groups",
 				   @"programmable_sample_positions", @"depth24_stencil8", @"argument_buffers_tier2",
-				   @"read_write_textures_tier2", @"primitive_motion_blur", @"vertex_amplification2",
+				   @"read_write_textures_tier2", @"primitive_motion_blur", @"memoryless_render_targets",
+				   @"vertex_amplification2",
 				   @"samples1", @"samples2", @"samples4", @"samples8", @"samples16" ])
 		features[name] = feature(d, name);
 	/* The older name for barycentric support, and the compiler's

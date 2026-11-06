@@ -309,6 +309,9 @@ pub struct Capabilities {
     pub statistic_counters: bool,
     /// `MTLVertexStepFunctionConstant`, which needs zero divisors.
     pub constant_vertex_step: bool,
+    /// `supportsMemorylessRenderTargets`: memoryless textures, backed by
+    /// device memory that no pass loads or stores.
+    pub memoryless_render_targets: bool,
     counter_sampling: [bool; 5],
     /// Sparse 3D textures, with Vulkan's 3D residency and block shapes.
     sparse_volumes: bool,
@@ -947,6 +950,7 @@ impl Derivation<'_> {
             },
             statistic_counters: statistics,
             constant_vertex_step,
+            memoryless_render_targets: true,
             counter_sampling,
             sparse_volumes,
             sparse_samples,

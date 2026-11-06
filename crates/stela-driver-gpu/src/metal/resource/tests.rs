@@ -47,7 +47,21 @@ fn storage_modes_select_discrete_gpu_memory() {
     );
     assert_eq!(
         memory(options(StorageMode::Memoryless)),
-        Err(Error::Unsupported("memoryless storage"))
+        Err(Error::Invalid("memoryless storage holds only textures"))
+    );
+}
+
+#[test]
+fn memoryless_textures_live_in_device_memory_out_of_the_cpu_reach() {
+    let mut memoryless = descriptor(TextureType::D2Multisample, PixelFormat::Depth32Float);
+    memoryless.sample_count = 4;
+    memoryless.usage = TextureUsage::RENDER_TARGET;
+    memoryless.options = options(StorageMode::Memoryless);
+    let plan = texture(&capabilities(), &memoryless).unwrap();
+    assert_eq!(plan.cpu_access, CpuAccess::None);
+    assert_eq!(
+        (plan.memory.required, plan.memory.mapped),
+        (M::DEVICE_LOCAL, false)
     );
 }
 

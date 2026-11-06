@@ -374,6 +374,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     store_op: attachment.store_op,
                     clear: attachment.clear,
                     store_action: attachment.store_action,
+                    memoryless: attachment.memoryless,
                 })
             };
         let color = plan

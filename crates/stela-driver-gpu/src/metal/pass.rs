@@ -8,8 +8,8 @@
 //! the pass's commands are submitted.
 use super::{
     abi::{
-        LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, StoreAction,
-        StoreActionOptions, TextureType, TextureUsage,
+        LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, StorageMode,
+        StoreAction, StoreActionOptions, TextureType, TextureUsage,
     },
     binding::{PassSamples, ResourceId},
     capabilities::{Capabilities, FormatCapabilities as C},
@@ -104,6 +104,8 @@ pub struct RenderingAttachment<T> {
     pub clear: ClearValue,
     /// Metal's store action, kept to apply a deferred `Unknown` action.
     pub store_action: StoreAction,
+    /// The texture is memoryless, so no store action may keep its content.
+    pub memoryless: bool,
 }
 
 /// What a fragment function's `[[color(n)]]` inputs read.
@@ -233,6 +235,10 @@ impl<T: Copy> RenderPassPlan<T> {
         ensure(
             !action.resolves() || attachment.resolve.is_some(),
             "a resolving store action needs a resolve texture",
+        )?;
+        ensure(
+            !(attachment.memoryless && action.stores()),
+            "memoryless attachments are never stored",
         )?;
         attachment.store_action = action;
         attachment.store_op = store_op(action);
@@ -490,6 +496,15 @@ impl Builder<'_> {
     ) -> Result<RenderingAttachment<T>> {
         let (view, extent) = self.view(&attachment.target, aspect)?;
         let source = attachment.target.texture.descriptor;
+        let memoryless = source.options.storage_mode == StorageMode::Memoryless;
+        ensure(
+            !(memoryless && attachment.load_action == LoadAction::Load),
+            "memoryless attachments are never loaded",
+        )?;
+        ensure(
+            !(memoryless && attachment.store_action.stores()),
+            "memoryless attachments are never stored",
+        )?;
         let samples = source.sample_count as u32;
         let format = self.capabilities.format(source.pixel_format);
         require(
@@ -526,6 +541,10 @@ impl Builder<'_> {
                 }
                 let resolved = target.texture.descriptor;
                 ensure(
+                    resolved.options.storage_mode != StorageMode::Memoryless,
+                    "resolve textures hold memory",
+                )?;
+                ensure(
                     resolved.sample_count == 1,
                     "resolve textures have one sample",
                 )?;
@@ -556,6 +575,7 @@ impl Builder<'_> {
             store_op: store_op(attachment.store_action),
             clear,
             store_action: attachment.store_action,
+            memoryless,
         })
     }
 
