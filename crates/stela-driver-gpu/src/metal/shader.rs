@@ -456,10 +456,15 @@ pub struct Provenance {
     pub entry: String,
 }
 
-/// A specialized function and the reflection of its exact AIR input.
+/// A function, specialized or as its library holds it, and the reflection
+/// of its exact AIR input.
 #[derive(Debug)]
 pub struct PreparedFunction {
     pub(crate) library: u64,
+    /// Whether the function was given constant values; one that was not
+    /// reflects, but no pipeline takes it while a required constant has no
+    /// value.
+    pub(crate) specialized: bool,
     pub(crate) constants: Vec<(u32, Vec<u8>)>,
     pub(crate) reflection: Reflection,
     pub(crate) provenance: Provenance,
@@ -654,20 +659,23 @@ pub trait Compiler {
         specialization: &Specialization,
     ) -> Result<Reflection>;
 
-    /// Reflects a specialized function for later pipeline compilation.
+    /// Reflects a function for later pipeline compilation, specialized with
+    /// `constants` or, without them, as its library holds it.
     fn prepare_function(
         &mut self,
         library: u64,
         entry: &str,
-        constants: Vec<(u32, Vec<u8>)>,
+        constants: Option<Vec<(u32, Vec<u8>)>>,
     ) -> Result<PreparedFunction> {
+        let specialized = constants.is_some();
         let specialization = Specialization {
-            constants,
+            constants: constants.unwrap_or_default(),
             ..Specialization::default()
         };
         let reflection = self.reflect(library, entry, &specialization)?;
         Ok(PreparedFunction {
             library,
+            specialized,
             constants: specialization.constants,
             reflection,
             provenance: Provenance {
@@ -689,12 +697,13 @@ pub trait Compiler {
 
     /// The bindings of `entry` of `library` specialized with
     /// `specialization`'s function constant values, without those a false
-    /// `[[function_constant]]` makes absent.
+    /// `[[function_constant]]` makes absent; without a specialization, those
+    /// of the function as its library holds it.
     fn bindings(
         &mut self,
         library: u64,
         entry: &str,
-        specialization: &Specialization,
+        specialization: Option<&Specialization>,
     ) -> Result<Vec<Binding>>;
 
     /// The constexpr sampler states of `entry` of `library` and of the

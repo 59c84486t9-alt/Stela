@@ -134,7 +134,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 })
             })
             .collect::<Result<Vec<_>, Fault>>()?;
-        let function = self.device.new_function(library, &name, &values)?;
+        let values = (request.specialized != 0).then_some(values.as_slice());
+        let function = self.device.new_function(library, &name, values)?;
         let handle = self.hold(call.connection, Object::Function(function))?;
         call.reply(&handle)
     }

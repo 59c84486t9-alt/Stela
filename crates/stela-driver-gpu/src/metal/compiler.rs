@@ -528,18 +528,19 @@ impl Compiler for AirCompiler {
         &mut self,
         library: u64,
         entry: &str,
-        constants: Vec<(u32, Vec<u8>)>,
+        constants: Option<Vec<(u32, Vec<u8>)>>,
     ) -> Result<PreparedFunction> {
         let selected = select(&self.libraries, library, entry)?;
-        let specialization = Specialization {
+        let specialization = constants.map(|constants| Specialization {
             constants,
             ..Specialization::default()
-        };
+        });
         let (reflection, provenance) =
-            selected.reflect(&self.service, Some(&specialization), &mut self.refusal)?;
+            selected.reflect(&self.service, specialization.as_ref(), &mut self.refusal)?;
         Ok(PreparedFunction {
             library,
-            constants: specialization.constants,
+            specialized: specialization.is_some(),
+            constants: specialization.map_or_else(Vec::new, |known| known.constants),
             reflection,
             provenance,
             reflection_service: self
@@ -559,14 +560,14 @@ impl Compiler for AirCompiler {
         &mut self,
         library: u64,
         entry: &str,
-        specialization: &Specialization,
+        specialization: Option<&Specialization>,
     ) -> Result<Vec<Binding>> {
         let selected = select(&self.libraries, library, entry)?;
         let mut bindings = ffi::Bindings::zeroed();
         let mut error = ffi::AirError::NONE;
         let air = selected.module.bitcode;
-        let values = constant_values(&specialization.constants);
-        let count = u32::try_from(values.len()).map_err(|_| MALFORMED)?;
+        let values = specialization.map(|known| constant_values(&known.constants));
+        let count = u32::try_from(values.as_ref().map_or(0, Vec::len)).map_err(|_| MALFORMED)?;
         // SAFETY: the AIR, entry and values outlive the call, which writes
         // only the bindings and the error.
         let reflected = unsafe {
@@ -574,7 +575,9 @@ impl Compiler for AirCompiler {
                 air.as_ptr().cast(),
                 air.len(),
                 selected.entry.as_ptr(),
-                values.as_ptr(),
+                values
+                    .as_ref()
+                    .map_or(core::ptr::null(), |values| values.as_ptr()),
                 count,
                 &mut *bindings,
                 &mut error,

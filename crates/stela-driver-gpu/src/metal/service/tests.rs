@@ -361,6 +361,8 @@ fn new_function(
         library,
         name: memory.put(name.as_bytes()),
         constants: memory.records(constants),
+        specialized: 1,
+        reserved: 0,
     };
     call(
         service,

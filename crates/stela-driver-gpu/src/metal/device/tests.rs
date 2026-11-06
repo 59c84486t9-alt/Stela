@@ -377,7 +377,7 @@ fn samplers_are_shared_and_clamped_variants_cached() {
 #[test]
 fn constexpr_samplers_are_created_once_and_reach_compilation() {
     let mut device = device();
-    let kernel = device.new_function(LIBRARY, "sampling", &[]).unwrap();
+    let kernel = device.new_function(LIBRARY, "sampling", Some(&[])).unwrap();
     // Indirect command support compiles the pipeline's function at once.
     let request = ComputePipelineRequest {
         compute_function: kernel,
@@ -496,8 +496,8 @@ fn color_targets() -> RenderTargets {
 #[test]
 fn indirect_pipelines_share_execution_sets_by_state() {
     let mut device = device();
-    let vertex = device.new_function(LIBRARY, "vertex", &[]).unwrap();
-    let fragment = device.new_function(LIBRARY, "fragment", &[]).unwrap();
+    let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
     let request = RenderPipelineRequest {
         vertex_function: vertex,
         fragment_function: Some(fragment),
@@ -594,7 +594,7 @@ fn indirect_pipelines_share_execution_sets_by_state() {
 #[test]
 fn indirect_compute_pipelines_share_the_compute_execution_set() {
     let mut device = device();
-    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
     let request = ComputePipelineRequest {
         compute_function: kernel,
         threadgroup_size_is_multiple_of_thread_execution_width: false,
@@ -712,8 +712,8 @@ fn generated_layouts_are_created_once_per_key() {
 #[test]
 fn amplified_pipelines_compile_amplified_vertex_functions() {
     let mut device = device();
-    let vertex = device.new_function(LIBRARY, "vertex", &[]).unwrap();
-    let fragment = device.new_function(LIBRARY, "fragment", &[]).unwrap();
+    let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
     let request = RenderPipelineRequest {
         vertex_function: vertex,
         fragment_function: Some(fragment),
@@ -770,7 +770,7 @@ fn functions_take_values_for_their_function_constants() {
     ];
     for (constants, reason) in refused {
         assert_eq!(
-            device.new_function(LIBRARY, "constants", &constants),
+            device.new_function(LIBRARY, "constants", Some(&constants)),
             Err(Error::Invalid(reason))
         );
     }
@@ -787,10 +787,32 @@ fn functions_take_values_for_their_function_constants() {
     ] {
         assert!(
             device
-                .new_function(LIBRARY, "constants", &constants)
+                .new_function(LIBRARY, "constants", Some(&constants))
                 .is_ok()
         );
     }
+}
+
+#[test]
+fn a_function_made_without_values_reflects_but_becomes_no_pipeline() {
+    let mut device = device();
+    let constants = device.new_function(LIBRARY, "constants", None).unwrap();
+    let reflection = device.function_reflection(constants).unwrap();
+    assert!(
+        reflection
+            .constants()
+            .iter()
+            .any(|constant| constant.required)
+    );
+    assert!(device.function_bindings(constants).is_ok());
+    assert_eq!(
+        device.new_compute_pipeline(&archived_compute(constants, PipelineArchives::default())),
+        Err(Error::Invalid("a required function constant has no value"))
+    );
+    // One whose constants are all optional takes their defaults.
+    let kernel = device.new_function(LIBRARY, "kernel", None).unwrap();
+    let request = archived_compute(kernel, PipelineArchives::default());
+    assert!(device.new_compute_pipeline(&request).is_ok());
 }
 
 fn archived_compute(function: FunctionId, archives: PipelineArchives) -> ComputePipelineRequest {
@@ -823,7 +845,7 @@ fn added_to(archive: ArchiveId) -> PipelineArchives {
 #[test]
 fn binary_archives_hold_what_was_added_and_outlive_their_files() {
     let mut device = device();
-    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
     let empty = device.new_archive(&[]).unwrap();
     assert_eq!(
         device.new_compute_pipeline(&archived_compute(kernel, required(empty))),
@@ -866,7 +888,7 @@ fn binary_archives_hold_what_was_added_and_outlive_their_files() {
 #[test]
 fn binary_archives_learn_the_shapes_dispatches_compile() {
     let mut device = device();
-    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
     let archive = device.new_archive(&[]).unwrap();
     let searched = PipelineArchives {
         searched: alloc::vec![archive],
@@ -890,7 +912,7 @@ fn binary_archives_learn_the_shapes_dispatches_compile() {
 #[test]
 fn pipelines_keep_their_binary_archives() {
     let mut device = device();
-    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
     let archive = device.new_archive(&[]).unwrap();
     let searched = PipelineArchives {
         searched: alloc::vec![archive],
@@ -931,7 +953,7 @@ fn pipelines_keep_their_binary_archives() {
 #[test]
 fn render_pipelines_come_from_binary_archives() {
     let mut device = device();
-    let vertex = device.new_function(LIBRARY, "vertex", &[]).unwrap();
+    let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
     let archive = device.new_archive(&[]).unwrap();
     let request = |archives| RenderPipelineRequest {
         vertex_function: vertex,
@@ -966,7 +988,7 @@ fn render_pipelines_come_from_binary_archives() {
 #[test]
 fn mesh_pipelines_answer_for_binary_archives_at_creation() {
     let mut device = device();
-    let mesh = device.new_function(LIBRARY, "mesh", &[]).unwrap();
+    let mesh = device.new_function(LIBRARY, "mesh", Some(&[])).unwrap();
     let archive = device.new_archive(&[]).unwrap();
     let request = |archives| MeshPipelineRequest {
         object_function: None,
@@ -997,17 +1019,17 @@ fn mesh_pipelines_answer_for_binary_archives_at_creation() {
 #[test]
 fn a_stitched_function_links_what_it_calls() {
     let mut device = device();
-    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
-    let visible = device.new_function(LIBRARY, "visible", &[]).unwrap();
+    let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
+    let visible = device.new_function(LIBRARY, "visible", Some(&[])).unwrap();
     assert_eq!(
         device.new_stitched_library(&[kernel], &[]),
         Err(Error::Invalid("stitched functions are visible functions"))
     );
     let library = device.new_stitched_library(&[visible], &[]).unwrap();
-    let stitched = device.new_function(library, "visible", &[]).unwrap();
+    let stitched = device.new_function(library, "visible", Some(&[])).unwrap();
     // A second stitch of the first links what the first calls too.
     let library = device.new_stitched_library(&[stitched], &[]).unwrap();
-    let outer = device.new_function(library, "visible", &[]).unwrap();
+    let outer = device.new_function(library, "visible", Some(&[])).unwrap();
     device.destroy_function(visible).unwrap();
     device.destroy_function(stitched).unwrap();
 
@@ -1043,14 +1065,14 @@ fn a_stitched_function_links_what_it_calls() {
 #[test]
 fn stages_link_visible_functions_and_name_them_by_handle() {
     let mut device = device();
-    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
-    let visible = device.new_function(LIBRARY, "visible", &[]).unwrap();
+    let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
+    let visible = device.new_function(LIBRARY, "visible", Some(&[])).unwrap();
     let tint = 1.0f32.to_le_bytes().to_vec();
     let tinted = device
         .new_function(
             LIBRARY,
             "tinted",
-            &[ConstantValue::at(0, DataType::Float, tint.clone())],
+            Some(&[ConstantValue::at(0, DataType::Float, tint.clone())]),
         )
         .unwrap();
     let dynamic = device.new_library(fixture(false)).unwrap();
@@ -1120,8 +1142,8 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
         }]
     );
 
-    let vertex = device.new_function(LIBRARY, "vertex", &[]).unwrap();
-    let fragment = device.new_function(LIBRARY, "fragment", &[]).unwrap();
+    let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
     let render = RenderPipelineRequest {
         vertex_function: vertex,
         fragment_function: Some(fragment),
@@ -1197,7 +1219,7 @@ fn source_libraries_name_their_functions_and_keep_what_they_load_with() {
     );
 
     // Its functions link what the options named.
-    let kernel = device.new_function(library, "kernel", &[]).unwrap();
+    let kernel = device.new_function(library, "kernel", Some(&[])).unwrap();
     let pipeline = device
         .new_compute_pipeline(&ComputePipelineRequest {
             compute_function: kernel,
@@ -1256,7 +1278,7 @@ fn libraries_of_held_bytes_share_them() {
 
     // Each lives on without the other.
     device.destroy_library(LIBRARY).unwrap();
-    assert!(device.new_function(shared, "kernel", &[]).is_ok());
+    assert!(device.new_function(shared, "kernel", Some(&[])).is_ok());
 }
 
 #[test]
@@ -1271,8 +1293,8 @@ fn pipelines_keep_their_functions_and_libraries() {
         device.new_library(alloc::vec![0; 16]),
         Err(Error::Invalid("Metal library"))
     );
-    let kernel = device.new_function(library, "kernel", &[]).unwrap();
-    let visible = device.new_function(library, "visible", &[]).unwrap();
+    let kernel = device.new_function(library, "kernel", Some(&[])).unwrap();
+    let visible = device.new_function(library, "visible", Some(&[])).unwrap();
     let pipeline = device
         .new_compute_pipeline(&ComputePipelineRequest {
             compute_function: kernel,
@@ -1292,7 +1314,10 @@ fn pipelines_keep_their_functions_and_libraries() {
     device.destroy_library(library).unwrap();
     // Nothing new may use them, nor destroy them twice...
     let destroyed = Error::Invalid("unknown or destroyed object");
-    assert_eq!(device.new_function(library, "kernel", &[]), Err(destroyed));
+    assert_eq!(
+        device.new_function(library, "kernel", Some(&[])),
+        Err(destroyed)
+    );
     assert_eq!(device.destroy_function(kernel), Err(destroyed));
     assert_eq!(device.destroy_library(library), Err(destroyed));
     // ...but the pipeline still compiles from them and names its functions.
@@ -1320,15 +1345,15 @@ fn render_pipelines_compile_their_functions_once() {
         .new_function(
             LIBRARY,
             "vertex",
-            &[ConstantValue::at(
+            Some(&[ConstantValue::at(
                 0,
                 DataType::UInt,
                 alloc::vec![1, 0, 0, 0],
-            )],
+            )]),
         )
         .unwrap();
-    let fragment = device.new_function(LIBRARY, "fragment", &[]).unwrap();
-    assert!(device.new_function(LIBRARY, "missing", &[]).is_err());
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
+    assert!(device.new_function(LIBRARY, "missing", Some(&[])).is_err());
     let request = RenderPipelineRequest {
         vertex_function: vertex,
         fragment_function: Some(fragment),
@@ -1381,7 +1406,7 @@ fn render_pipelines_compile_their_functions_once() {
         "failed pipelines release their NIR"
     );
 
-    let unlinked = device.new_function(LIBRARY, "unlinked", &[]).unwrap();
+    let unlinked = device.new_function(LIBRARY, "unlinked", Some(&[])).unwrap();
     let unlinked = RenderPipelineRequest {
         fragment_function: Some(unlinked),
         ..request
@@ -1585,8 +1610,8 @@ fn texture_transfers_keep_strided_padding_and_coalesce_contiguous_rows() {
 #[test]
 fn post_tessellation_functions_compile_with_their_feeding_stages() {
     let mut device = device();
-    let patch = device.new_function(LIBRARY, "patch", &[]).unwrap();
-    let fragment = device.new_function(LIBRARY, "fragment", &[]).unwrap();
+    let patch = device.new_function(LIBRARY, "patch", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
     let request = RenderPipelineRequest {
         vertex_function: patch,
         fragment_function: Some(fragment),
@@ -1666,7 +1691,7 @@ fn post_tessellation_functions_compile_with_their_feeding_stages() {
 #[test]
 fn compute_and_mesh_variants_compile_per_shape() {
     let mut device = device();
-    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
     let pipeline = device
         .new_compute_pipeline(&ComputePipelineRequest {
             compute_function: kernel,
@@ -1714,9 +1739,9 @@ fn compute_and_mesh_variants_compile_per_shape() {
         "argument tables reach the upload chunk"
     );
 
-    let object = device.new_function(LIBRARY, "object", &[]).unwrap();
-    let mesh = device.new_function(LIBRARY, "mesh", &[]).unwrap();
-    let fragment = device.new_function(LIBRARY, "fragment", &[]).unwrap();
+    let object = device.new_function(LIBRARY, "object", Some(&[])).unwrap();
+    let mesh = device.new_function(LIBRARY, "mesh", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
     let request = MeshPipelineRequest {
         object_function: Some(object),
         mesh_function: mesh,
@@ -2199,7 +2224,7 @@ fn indirect_mapping_updates_bind_once_their_arguments_are_read() {
 #[test]
 fn indirect_commands_execute_snapshots_of_their_buffer() {
     let mut device = device();
-    let kernel = device.new_function(LIBRARY, "kernel", &[]).unwrap();
+    let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
     let pipeline = device
         .new_compute_pipeline(&ComputePipelineRequest {
             compute_function: kernel,
@@ -2310,9 +2335,9 @@ fn functions_that_set_command_barriers_order_resident_buffers() {
     let later = device.new_indirect_command_buffer(&draws(), 1).unwrap();
     let barriers =
         |device: &Device<_, _>, id| device.indirect_command_buffer(id).unwrap().has_barriers();
-    device.new_function(LIBRARY, "visible", &[]).unwrap();
+    device.new_function(LIBRARY, "visible", Some(&[])).unwrap();
     assert!(!barriers(&device, resident));
-    device.new_function(LIBRARY, "barriers", &[]).unwrap();
+    device.new_function(LIBRARY, "barriers", Some(&[])).unwrap();
     assert!(barriers(&device, resident));
     device.indirect_command_buffer_resource_id(later).unwrap();
     assert!(barriers(&device, later));

@@ -885,6 +885,8 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 		.library = _handle,
 		.name = spans[0],
 		.constants = stela_span(records, count * sizeof(*records)),
+		/* Without values, the function is as the library holds it. */
+		.specialized = values != nil,
 	};
 	spans[used++] = request.constants;
 	StelaHandle response = {};

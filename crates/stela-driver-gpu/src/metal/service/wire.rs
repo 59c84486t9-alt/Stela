@@ -214,11 +214,15 @@ records! {
         pub out: Span,
     }
 
-    /// `NewFunction`: the function's name and its `ConstantRecord`s.
+    /// `NewFunction`: the function's name and its `ConstantRecord`s, which
+    /// specialize it when `specialized` is nonzero: when values were given,
+    /// even none.
     pub struct NewFunctionRequest {
         pub library: u64,
         pub name: Span,
         pub constants: Span,
+        pub specialized: u32,
+        pub reserved: u32,
     }
 
     /// A function constant value: an `MTLDataType` and the value's packed

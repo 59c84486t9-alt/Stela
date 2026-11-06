@@ -728,7 +728,7 @@ fn custom_compilation_receives_the_full_reflection_of_a_prepared_function() {
     });
     let (mut compiler, library) = with_library();
     let function = compiler
-        .prepare_function(library, "kernel", Vec::new())
+        .prepare_function(library, "kernel", Some(Vec::new()))
         .unwrap();
     assert!(function.reflection_service.is_none());
     assert_eq!(function.entry(), "kernel");
@@ -756,7 +756,7 @@ fn prepared_compilation_reuses_only_the_same_specialization() {
         ..Specialization::default()
     };
     let prepared = compiler
-        .prepare_function(library, "kernel", specialization.constants.clone())
+        .prepare_function(library, "kernel", Some(specialization.constants.clone()))
         .unwrap();
     let reflections = FAKE.with_borrow(|fake| fake.reflected.len());
     FAKE.with_borrow_mut(|fake| fake.expect_projected = true);
@@ -1402,7 +1402,7 @@ fn post_tessellation_vertex_functions_compile_with_their_stage_in() {
         }),
     };
     let prepared = compiler
-        .prepare_function(library, "kernel", Vec::new())
+        .prepare_function(library, "kernel", Some(Vec::new()))
         .unwrap();
     FAKE.with_borrow_mut(|fake| fake.expect_projected = true);
     let stages = compiler
@@ -1558,14 +1558,14 @@ fn bindings_are_reflected_specialized() {
     };
     FAKE.with_borrow_mut(|fake| fake.reflected.clear());
     assert_eq!(
-        compiler.bindings(library, "kernel", &specialization),
+        compiler.bindings(library, "kernel", Some(&specialization)),
         Ok(Vec::new())
     );
     let reflected = FAKE.with_borrow(|fake| fake.reflected.clone());
     assert_eq!(reflected, [vec![(1, vec![7, 0, 0, 0])]]);
     FAKE.with_borrow_mut(|fake| fake.refuse_reflection = Some((ffi::kind::LIMIT, 0, "members")));
     assert_eq!(
-        compiler.bindings(library, "kernel", &specialization),
+        compiler.bindings(library, "kernel", Some(&specialization)),
         Err(Error::Unsupported("AIR beyond the compiler's limits"))
     );
     FAKE.with_borrow_mut(|fake| fake.refuse_reflection = None);

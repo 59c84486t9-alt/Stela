@@ -137,7 +137,7 @@ impl Sources {
     }
 }
 
-/// A specialized function (`newFunctionWithName:constantValues:`).
+/// A function (`newFunctionWithName:constantValues:`).
 #[derive(Debug)]
 struct FunctionObject {
     library: LibraryId,
@@ -148,10 +148,26 @@ struct FunctionObject {
 impl FunctionObject {
     /// The interface of a function that becomes a pipeline stage.
     fn interface(&self) -> Result<&Interface> {
+        self.specialized()?;
         match &self.prepared.reflection {
             Reflection::Stage(interface) => Ok(interface.as_ref()),
             Reflection::Visible { .. } => Err(Error::Invalid("a visible function is not a stage")),
         }
+    }
+
+    /// Refuses a function whose required constants have no values: one
+    /// made without values, which only reflects.
+    fn specialized(&self) -> Result<()> {
+        ensure(
+            self.prepared.specialized
+                || self
+                    .prepared
+                    .reflection
+                    .constants()
+                    .iter()
+                    .all(|constant| !constant.required),
+            "a required function constant has no value",
+        )
     }
 }
 
@@ -497,6 +513,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 matches!(function.prepared.reflection, Reflection::Visible { .. }),
                 "stitched functions are visible functions",
             )?;
+            function.specialized()?;
             let mut constants = function.prepared.constants.clone();
             constants.sort_unstable_by_key(|&(index, _)| index);
             stitched.push(LinkedFunction {
@@ -669,15 +686,31 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `newFunctionWithName:constantValues:`: reflects the function without
     /// compiling it. Values of constants the function does not declare are
     /// ignored, as one set of values often serves several functions.
+    /// Without values (`values` is `None`), a function whose constants are
+    /// required is the function as its library holds it, which reflects but
+    /// becomes no pipeline.
     pub fn new_function(
         &mut self,
         library: LibraryId,
         entry: &str,
-        values: &[ConstantValue],
+        values: Option<&[ConstantValue]>,
     ) -> Result<FunctionId> {
         let kept = Kept::library(library);
         self.pipelines.ensure_created(&kept)?;
         let compiled = self.pipelines.library(library)?;
+        let values = match values {
+            Some(values) => values,
+            None if self
+                .compiler
+                .constants(compiled, entry)?
+                .iter()
+                .any(|constant| constant.required) =>
+            {
+                let prepared = self.compiler.prepare_function(compiled, entry, None)?;
+                return self.hold_function(library, prepared, &kept);
+            }
+            None => &[],
+        };
         // Values set by name take their constants' indices, which the
         // function's declarations give whatever its values.
         let declared = if values
@@ -709,10 +742,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .iter()
             .map(|&(index, value)| (index, value.value.clone()))
             .collect();
-        let prepared = self.compiler.prepare_function(compiled, entry, constants)?;
-        let reflection = &prepared.reflection;
-        reflection.validate()?;
-        for constant in reflection.constants() {
+        let prepared = self
+            .compiler
+            .prepare_function(compiled, entry, Some(constants))?;
+        for constant in prepared.reflection.constants() {
             match indexed.iter().find(|(index, _)| *index == constant.index) {
                 Some((_, value)) => ensure(
                     value.data_type == constant.data_type && constant.accepts(&value.value),
@@ -724,7 +757,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 )?,
             }
         }
-        if reflection.command_barriers() {
+        self.hold_function(library, prepared, &kept)
+    }
+
+    fn hold_function(
+        &mut self,
+        library: LibraryId,
+        prepared: PreparedFunction,
+        kept: &Kept,
+    ) -> Result<FunctionId> {
+        prepared.reflection.validate()?;
+        if prepared.reflection.command_barriers() {
             self.note_command_barriers();
         }
         let function = FunctionObject {
@@ -732,7 +775,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             prepared,
             users: Users::CREATED,
         };
-        self.keep(&kept)?;
+        self.keep(kept)?;
         Ok(FunctionId(self.pipelines.functions.insert(function)))
     }
 
@@ -760,8 +803,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             constants: function.prepared.constants.clone(),
             ..Specialization::default()
         };
+        let specialization = function.prepared.specialized.then_some(&specialization);
         self.compiler
-            .bindings(library, function.prepared.entry(), &specialization)
+            .bindings(library, function.prepared.entry(), specialization)
     }
 
     pub fn function_type(&self, id: FunctionId) -> Result<FunctionType> {
@@ -1504,6 +1548,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 matches!(function.prepared.reflection, Reflection::Visible { .. }),
                 "linked functions are visible functions",
             )?;
+            function.specialized()?;
         }
         let entries = |ids: &[FunctionId]| -> Result<Vec<LinkedFunction>> {
             ids.iter()

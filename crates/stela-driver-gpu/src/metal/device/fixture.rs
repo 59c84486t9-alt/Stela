@@ -542,7 +542,12 @@ impl Compiler for MockCompiler {
             _ => reflected(entry).map(|interface| Reflection::Stage(Box::new(interface))),
         }
     }
-    fn bindings(&mut self, _: u64, entry: &str, _: &Specialization) -> Result<Vec<Binding>> {
+    fn bindings(
+        &mut self,
+        _: u64,
+        entry: &str,
+        _: Option<&Specialization>,
+    ) -> Result<Vec<Binding>> {
         reflected(entry).map(|_| bound())
     }
     fn sampler_states(&mut self, _: u64, entry: &str, _: &Specialization) -> Result<Vec<u64>> {
