@@ -172,24 +172,25 @@ Class objc_getClass(const char *name);
 	return nil;
 }
 
+/* A pointer to a scalar or a vector has no element type. */
 - (id)elementArrayType
 {
-	return _element->_dataType == MTLDataTypeArray ? _element : nil;
+	return _element && _element->_dataType == MTLDataTypeArray ? _element : nil;
 }
 
 - (id)elementStructType
 {
-	return _element->_dataType == MTLDataTypeStruct ? _element : nil;
+	return _element && _element->_dataType == MTLDataTypeStruct ? _element : nil;
 }
 
 - (id)elementPointerType
 {
-	return _element->_dataType == MTLDataTypePointer ? _element : nil;
+	return _element && _element->_dataType == MTLDataTypePointer ? _element : nil;
 }
 
 - (id)elementTextureReferenceType
 {
-	return _element->_dataType == MTLDataTypeTexture ? _element : nil;
+	return _element && _element->_dataType == MTLDataTypeTexture ? _element : nil;
 }
 
 - (id)elementIndirectCommandBufferType
