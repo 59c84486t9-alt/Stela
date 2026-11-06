@@ -12,7 +12,7 @@ use crate::metal::{
         HazardTrackingMode, IndexType, IndirectCommandType, LoadAction, PrimitiveTopologyClass,
         PrimitiveType, RenderStages, ResourceOptions, StorageMode, StoreAction, StoreActionOptions,
         SwizzleChannels, TessellationControlPointIndexType, TextureType, TextureUsage,
-        VisibilityResultMode,
+        VisibilityResultMode, VisibilityResultType,
     },
     binding::{
         AccumulateArguments, ArgumentTable, BufferBinding, GeneratedSequence, PushConstants,
@@ -899,6 +899,18 @@ fn deferred_store_actions_must_be_set() {
 
 #[test]
 fn visibility_results_copy_or_sum_their_queries() {
+    // An accumulating pass sums each offset's queries after what the
+    // buffer holds there.
+    for kind in [
+        VisibilityResultType::Reset,
+        VisibilityResultType::Accumulate,
+    ] {
+        visibility_results(kind);
+    }
+}
+
+fn visibility_results(kind: VisibilityResultType) {
+    let accumulate = kind == VisibilityResultType::Accumulate;
     let color = texture(PixelFormat::Rgba8Unorm);
     let visibility = buffer(8, 64);
     let mut resolver = MockResolver::default();
@@ -907,7 +919,7 @@ fn visibility_results_copy_or_sum_their_queries() {
         .begin_render(
             &mut resolver,
             pass(&color, StoreAction::Store, true),
-            Some(visibility),
+            Some((visibility, kind)),
             Vec::new(),
         )
         .unwrap();
@@ -967,8 +979,16 @@ fn visibility_results_copy_or_sum_their_queries() {
         let destination = u64::from_le_bytes(encoded[at + 8..][..8].try_into().unwrap());
         (word(0), word(4), destination)
     };
-    assert_eq!(run(0), (0, 2, 8 << 32));
-    assert_eq!(run(1), (2, 1, (8 << 32) + 8));
+    let held = u32::from(accumulate);
+    assert_eq!(run(0), (0, 2 + held, 8 << 32));
+    assert_eq!(run(1), (2 + held, 1 + held, (8 << 32) + 8));
+    assert_eq!(
+        count(commands, |command| matches!(
+            command,
+            Command::CopyBuffer { .. }
+        )),
+        2 * held as usize
+    );
     let end = commands
         .iter()
         .position(|command| *command == Command::EndRendering)

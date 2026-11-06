@@ -18,7 +18,7 @@ use super::{
 use crate::metal::{
     abi::{
         LoadAction, MultisampleDepthResolveFilter, MultisampleStencilResolveFilter, StoreAction,
-        StoreActionOptions,
+        StoreActionOptions, VisibilityResultType,
     },
     binding::ResourceId,
     command_buffer::{
@@ -181,6 +181,7 @@ pub struct RenderPassRequest {
     pub stencil_attachment: Option<AttachmentRequest<u32>>,
     pub stencil_resolve_filter: MultisampleStencilResolveFilter,
     pub visibility_result_buffer: Option<BufferId>,
+    pub visibility_result_type: VisibilityResultType,
     pub render_target_array_length: u64,
     pub render_target_width: u64,
     pub render_target_height: u64,
@@ -305,7 +306,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let plan = self.resolve_views(plan)?;
         let visibility = request
             .visibility_result_buffer
-            .map(|buffer| self.buffer(buffer))
+            .map(|buffer| Ok((self.buffer(buffer)?, request.visibility_result_type)))
             .transpose()?;
         let samples = request
             .counter_samples

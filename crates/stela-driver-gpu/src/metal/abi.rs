@@ -545,6 +545,15 @@ raw_enum! {
 }
 
 raw_enum! {
+    /// `MTLVisibilityResultType`: whether a pass's results replace what
+    /// the buffer holds or add to it.
+    pub enum VisibilityResultType: u64 {
+        Reset = 0,
+        Accumulate = 1,
+    }
+}
+
+raw_enum! {
     /// `MTLTessellationPartitionMode`.
     pub enum TessellationPartitionMode: u64 {
         Pow2 = 0,

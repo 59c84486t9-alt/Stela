@@ -470,6 +470,7 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (id)depthAttachment;
 - (id)stencilAttachment;
 - (id)visibilityResultBuffer;
+- (NSInteger)visibilityResultType;
 - (NSUInteger)renderTargetArrayLength;
 - (NSUInteger)renderTargetWidth;
 - (NSUInteger)renderTargetHeight;

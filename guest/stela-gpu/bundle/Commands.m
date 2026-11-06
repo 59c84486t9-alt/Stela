@@ -510,6 +510,7 @@ static void pass_attachment(id attachment, StelaPassAttachmentRecord *record)
 	StelaGPUBuffer *visibility = [descriptor visibilityResultBuffer];
 	[self use:visibility];
 	begin.visibility_result_buffer = visibility ? visibility->_handle : 0;
+	begin.visibility_result_type = (uint64_t)[descriptor visibilityResultType];
 	begin.render_target_array_length = [descriptor renderTargetArrayLength];
 	begin.render_target_width = [descriptor renderTargetWidth];
 	begin.render_target_height = [descriptor renderTargetHeight];

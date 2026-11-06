@@ -294,6 +294,8 @@ records! {
         pub depth_attachment: PassDepthRecord,
         pub stencil_attachment: PassStencilRecord,
         pub visibility_result_buffer: u64,
+        /// `MTLVisibilityResultType`.
+        pub visibility_result_type: u64,
         pub render_target_array_length: u64,
         pub render_target_width: u64,
         pub render_target_height: u64,

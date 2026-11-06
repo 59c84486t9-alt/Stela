@@ -4,7 +4,7 @@ use crate::metal::{
     abi::{
         BarrierScope, CullMode, DepthClipMode, LoadAction, MultisampleDepthResolveFilter,
         MultisampleStencilResolveFilter, RenderStages, StoreAction, StoreActionOptions,
-        TriangleFillMode, VisibilityResultMode, Winding,
+        TriangleFillMode, VisibilityResultMode, VisibilityResultType, Winding,
     },
     command_buffer::{
         CommandBuffer,
@@ -412,6 +412,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             visibility_result_buffer: (record.visibility_result_buffer != 0)
                 .then(|| self.object::<BufferId>(connection, record.visibility_result_buffer))
                 .transpose()?,
+            visibility_result_type: known(
+                VisibilityResultType::from_raw(record.visibility_result_type),
+                "visibility result type",
+            )?,
             render_target_array_length: record.render_target_array_length,
             render_target_width: record.render_target_width,
             render_target_height: record.render_target_height,

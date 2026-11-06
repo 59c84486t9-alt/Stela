@@ -14,6 +14,7 @@ use crate::metal::{
         MultisampleStencilResolveFilter, PrimitiveTopologyClass, PrimitiveType, ResourceOptions,
         SparsePageSize, SparseTextureMappingMode, StorageMode, StoreAction, StoreActionOptions,
         SwizzleChannels, TessellationPartitionMode, TextureType, TextureUsage,
+        VisibilityResultType,
     },
     capabilities::Size,
     command_buffer::{
@@ -1889,6 +1890,7 @@ fn render_passes_resolve_cached_attachment_views() {
         stencil_attachment: None,
         stencil_resolve_filter: MultisampleStencilResolveFilter::Sample0,
         visibility_result_buffer: None,
+        visibility_result_type: VisibilityResultType::Reset,
         render_target_array_length: 0,
         render_target_width: 0,
         render_target_height: 0,

@@ -21,7 +21,8 @@ use crate::metal::{
     abi::{
         BarrierScope, CullMode as MtlCullMode, DepthClipMode, IndexType as MtlIndexType,
         PrimitiveTopologyClass, PrimitiveType, RenderStages, StoreAction, StoreActionOptions,
-        TessellationControlPointIndexType, TriangleFillMode, VisibilityResultMode, Winding,
+        TessellationControlPointIndexType, TriangleFillMode, VisibilityResultMode,
+        VisibilityResultType, Winding,
     },
     binding::{
         AccumulateArguments, BufferBinding, ResourceId, SequenceVertexBuffer, TessellationArguments,
@@ -37,7 +38,7 @@ use crate::metal::{
         Access, AttachmentLoadOp, AttachmentStoreOp, CullMode, FrontFace, IndexType,
         PipelineBindPoint, PipelineStages, PolygonMode, PrimitiveTopology, SampleCounts,
         command::{
-            Attachment, Barrier, Command, DepthStencil, Rect, Rendering, VertexBuffer,
+            Attachment, Barrier, BufferCopy, Command, DepthStencil, Rect, Rendering, VertexBuffer,
             Viewport as VkViewport,
         },
         object::{Buffer, ImageView, QueryPool, QueryType},
@@ -192,6 +193,8 @@ fn patch_strides(
 #[derive(Debug, Default)]
 struct Visibility {
     buffer: Option<BufferRef>,
+    /// The pass adds its results to what the buffer holds.
+    accumulate: bool,
     mode: Option<(VisibilityResultMode, u64)>,
     pool: Option<(QueryPool, u32, u32)>,
     active: Option<(QueryPool, u32)>,
@@ -347,7 +350,7 @@ impl CommandBuffer {
         &mut self,
         resolver: &mut dyn Resolver,
         pass: RenderPassPlan<ImageView>,
-        visibility_buffer: Option<BufferRef>,
+        visibility_buffer: Option<(BufferRef, VisibilityResultType)>,
         samples: Vec<(CounterSample, PassBoundary)>,
     ) -> Result<()> {
         self.idle()?;
@@ -384,7 +387,9 @@ impl CommandBuffer {
             factor_scale: 1.0,
             raster: RasterState::default(),
             visibility: Visibility {
-                buffer: visibility_buffer,
+                buffer: visibility_buffer.map(|(buffer, _)| buffer),
+                accumulate: visibility_buffer
+                    .is_some_and(|(_, kind)| kind == VisibilityResultType::Accumulate),
                 ..Visibility::default()
             },
             samples,
@@ -525,9 +530,9 @@ impl CommandBuffer {
         }
         self.recorder.access(Use::new(
             PipelineStages::ALL_TRANSFER,
-            Access::TRANSFER_WRITE,
+            Access::TRANSFER_READ | Access::TRANSFER_WRITE,
         ));
-        if offsets.len() == visibility.queries.len() {
+        if offsets.len() == visibility.queries.len() && !visibility.accumulate {
             for &(pool, query, offset) in &visibility.queries {
                 let (dst, offset) = (buffer.buffer, buffer.at(offset, 8)?);
                 self.recorder.push(Command::CopyQueryResults {
@@ -542,14 +547,34 @@ impl CommandBuffer {
             }
             return Ok(());
         }
-        // Gather each offset's results contiguously, then sum them.
-        let scratch =
-            self.recorder
-                .upload(resolver, &alloc::vec![0; visibility.queries.len() * 8], 8)?;
+        // Gather each offset's results contiguously, after what the buffer
+        // holds there for an accumulating pass, then sum them.
+        let held = if visibility.accumulate {
+            offsets.len()
+        } else {
+            0
+        };
+        let scratch = self.recorder.upload(
+            resolver,
+            &alloc::vec![0; (visibility.queries.len() + held) * 8],
+            8,
+        )?;
         let mut runs = Vec::with_capacity(offsets.len());
         let mut next = 0u32;
         for &offset in &offsets {
             let first = next;
+            if visibility.accumulate {
+                self.recorder.push(Command::CopyBuffer {
+                    src: buffer.buffer,
+                    dst: scratch.buffer,
+                    region: BufferCopy {
+                        src_offset: buffer.at(offset, 8)?,
+                        dst_offset: scratch.offset + u64::from(next) * 8,
+                        size: 8,
+                    },
+                });
+                next += 1;
+            }
             for &(pool, query, _) in visibility.queries.iter().filter(|query| query.2 == offset) {
                 let at = scratch.offset + u64::from(next) * 8;
                 let dst = scratch.buffer;
