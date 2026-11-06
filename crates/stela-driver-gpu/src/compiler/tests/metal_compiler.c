@@ -808,6 +808,28 @@ static const char *selected =
    "!41 = !{i32 1, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
    " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n";
 
+/* Returns twice its render target's color in the first row or column of
+ * pixels and the color itself elsewhere, by a branch that either test takes:
+ * the structurizer joins the color's paths through a register. */
+static const char *bypassed =
+   "define <4 x float> @bypassed(<4 x float> %previous, <4 x float> %position) {\n"
+   "entry:\n%x = extractelement <4 x float> %position, i64 0\n%left = fcmp olt float %x, 1.0\n"
+   "br i1 %left, label %twice, label %row\nrow:\n"
+   "%y = extractelement <4 x float> %position, i64 1\n%top = fcmp olt float %y, 1.0\n"
+   "br i1 %top, label %twice, label %done\ntwice:\n"
+   "%doubled = fmul <4 x float> %previous, <float 2.0, float 2.0, float 2.0, float 2.0>\nbr label %done\n"
+   "done:\n%r = phi <4 x float> [ %doubled, %twice ], [ %previous, %row ]\n"
+   "ret <4 x float> %r\n}\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @bypassed, !3, !4}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"color\"}\n"
+   "!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.render_target\", i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"previous\"}\n"
+   "!41 = !{i32 1, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n";
+
 /* Reads its barycentric coordinates and interpolates its uv at the
  * centroid. */
 static const char *pulled =
@@ -1136,6 +1158,19 @@ intrinsics(nir_shader *shader, nir_intrinsic_op *ops, unsigned capacity)
    return count;
 }
 
+/* Whether shader computes anything from an undefined value. */
+static bool
+undefined(nir_shader *shader)
+{
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_undef && !nir_def_is_unused(&nir_instr_as_undef(instr)->def))
+            return true;
+      }
+   }
+   return false;
+}
+
 /* A function reading its render target accesses it as storage in its
  * interlock section: it loads the texel, blends its output over it and
  * stores it, and writes no color output for the blend unit. */
@@ -1213,6 +1248,16 @@ framebuffer_reads_access_storage_attachments(void)
       fprintf(stderr, "selected: %u %s\n", error.kind, error.detail);
    count = intrinsics(shader, ops, ARRAY_SIZE(ops));
    assert(shader && count == 4 && ops[1] == nir_intrinsic_image_deref_load);
+   stela_metal_release(shader);
+   LLVMDisposeMemoryBuffer(input);
+   /* Every path to a use of a read carries its texel, including those the
+    * structurizer joins. */
+   input = bitcode(bypassed);
+   shader = stela_metal_compile(LLVMGetBufferStart(input), LLVMGetBufferSize(input), "bypassed",
+                                &interlocked, &storage, &error);
+   if (!shader)
+      fprintf(stderr, "bypassed: %u %s\n", error.kind, error.detail);
+   assert(shader && !undefined(shader));
    stela_metal_release(shader);
    LLVMDisposeMemoryBuffer(input);
 }

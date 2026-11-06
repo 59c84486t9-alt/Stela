@@ -119,8 +119,9 @@ struct translator {
    nir_def *patch_ids;
    /* A fragment function's storage attachments (stela_air_attachment_access):
     * their mask, each one's heap image and the descriptor index the prelude
-    * resolved, its output, the blend color, and the reads of each, which
-    * stand for the texel until the interlock section loads it. */
+    * resolved, its output, the blend color, and the reads of each: a load of
+    * a variable nothing stores, which stands for the texel until the
+    * interlock section loads it. */
    unsigned storage_attachments;
    nir_variable *attachment_heaps[AIR_MAX_RENDER_TARGETS];
    nir_def *attachment_indices[AIR_MAX_RENDER_TARGETS];
@@ -2235,7 +2236,14 @@ attachment_input(struct translator *t, const struct stela_air_stage_io *io)
       fail(t, STELA_AIR_LIMIT, "too many render target inputs");
       return NULL;
    }
-   nir_def *placeholder = nir_undef(b, io->components, stage_bits(io->primitive));
+   /* Unlike an undefined value, which NIR may replace by any other, each
+    * use of the load stays one until the section replaces it. Only function
+    * temporaries become SSA values before then. */
+   unsigned bits = stage_bits(io->primitive);
+   const struct glsl_type *type = glsl_vector_type(
+      bits == 8 ? GLSL_TYPE_UINT8 : bits == 16 ? GLSL_TYPE_UINT16 : GLSL_TYPE_UINT, io->components);
+   nir_variable *texel = nir_variable_create(b->shader, nir_var_shader_temp, type, "attachment texel");
+   nir_def *placeholder = nir_load_var(b, texel);
    t->attachment_reads[t->attachment_read_count++] =
       (struct attachment_read){.io = io, .placeholder = placeholder};
    return placeholder;
@@ -2863,7 +2871,11 @@ order_fragments(struct translator *t)
       const struct attachment_read *read = &t->attachment_reads[i];
       nir_def *texel = nir_trim_vector(b, texels[read->io->location], read->io->components);
       nir_def_rewrite_uses(read->placeholder, stage_narrow(b, texel, read->io->primitive));
-      nir_instr_remove(nir_def_instr(read->placeholder));
+      nir_intrinsic_instr *load = nir_instr_as_intrinsic(nir_def_instr(read->placeholder));
+      nir_deref_instr *deref = nir_src_as_deref(load->src[0]);
+      nir_instr_remove(&load->instr);
+      exec_node_remove(&deref->var->node);
+      nir_deref_instr_remove_if_unused(deref);
    }
    if (storage) {
       b->cursor = nir_after_block_before_jump(nir_impl_last_block(impl));
