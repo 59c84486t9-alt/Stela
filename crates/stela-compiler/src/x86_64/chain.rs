@@ -45,7 +45,12 @@ use crate::x86_64::asm::{
     Size::{self, Dword, Qword},
 };
 use crate::{Anchor, GuestAddress, Place, block::ExitKind};
-use alloc::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
+use alloc::{
+    boxed::Box,
+    collections::{BTreeMap, btree_map},
+    vec,
+    vec::Vec,
+};
 
 /// Bytes in a direct exit: `movabs rax, target` and a [`DYNAMIC_EXIT_BYTES`]
 /// exit.
@@ -233,7 +238,14 @@ const GRANULE_SETS: usize = 64;
 /// second a system's processes make.
 pub struct LookupTable {
     sets: Box<[LookupSet]>,
-    granules: BTreeMap<u64, Granule>,
+    /// Each indexed granule's list in `lists`.
+    granules: BTreeMap<u64, u32>,
+    lists: Vec<Granule>,
+    /// Lists no granule has, which keep their capacity for the next.
+    free: Vec<u32>,
+    /// The granule [`Self::set`] indexed last and its list: the blocks of a
+    /// page a context first reaches go in one after another.
+    last: Option<(u64, u32)>,
 }
 
 impl LookupTable {
@@ -242,6 +254,9 @@ impl LookupTable {
         Self {
             sets: sets.into_boxed_slice(),
             granules: BTreeMap::new(),
+            lists: Vec::new(),
+            free: Vec::new(),
+            last: None,
         }
     }
 
@@ -253,6 +268,9 @@ impl LookupTable {
     pub fn clear(&mut self) {
         self.sets.fill(LookupSet::default());
         self.granules.clear();
+        self.lists.clear();
+        self.free.clear();
+        self.last = None;
     }
 
     /// Whether every entry is empty.
@@ -298,8 +316,24 @@ impl LookupTable {
         }
         let set = (slot / 2) as u32;
         let granule = entry.pc >> GRANULE_SHIFT;
+        let place = match self.last {
+            Some((last, place)) if last == granule => place,
+            _ => {
+                let place = match self.granules.entry(granule) {
+                    btree_map::Entry::Occupied(listed) => *listed.get(),
+                    btree_map::Entry::Vacant(vacant) => {
+                        *vacant.insert(self.free.pop().unwrap_or_else(|| {
+                            self.lists.push(Granule::default());
+                            (self.lists.len() - 1) as u32
+                        }))
+                    }
+                };
+                self.last = Some((granule, place));
+                place
+            }
+        };
         let sets = &self.sets;
-        let listed = self.granules.entry(granule).or_default();
+        let listed = &mut self.lists[place as usize];
         if listed.sets.last() == Some(&set) {
             return;
         }
@@ -320,8 +354,9 @@ impl LookupTable {
         let granules = *pcs.start() >> GRANULE_SHIFT..=*pcs.end() >> GRANULE_SHIFT;
         let mut emptied = Vec::new();
         let mut found = false;
-        for (&granule, listed) in self.granules.range_mut(granules) {
+        for (&granule, &place) in self.granules.range(granules) {
             found = true;
+            let listed = &mut self.lists[place as usize];
             listed.sets.retain(|&set| {
                 let set = &mut self.sets[set as usize];
                 for entry in &mut set.0 {
@@ -332,11 +367,17 @@ impl LookupTable {
                 holds(set, granule)
             });
             if listed.sets.is_empty() {
+                listed.limit = 0;
                 emptied.push(granule);
             }
         }
         for granule in emptied {
-            self.granules.remove(&granule);
+            if let Some(place) = self.granules.remove(&granule) {
+                self.free.push(place);
+            }
+            if self.last.is_some_and(|(last, _)| last == granule) {
+                self.last = None;
+            }
         }
         found
     }
@@ -817,6 +858,12 @@ mod tests {
         assert!(table.forget_range(0..=u64::MAX, u64::MAX));
         assert!(table.is_empty());
         assert!(table.granules.is_empty());
+        assert_eq!(table.free.len(), table.lists.len());
+        // A new granule takes a freed list.
+        put(&mut table, next, 1);
+        assert_eq!(table.free.len() + 1, table.lists.len());
+        assert!(table.forget_range(next..=next, u64::MAX));
+        assert!(!held(&table, next, 1));
     }
 
     #[test]
