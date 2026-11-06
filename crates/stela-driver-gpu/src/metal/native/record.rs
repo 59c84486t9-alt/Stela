@@ -391,7 +391,11 @@ impl Recorder<'_> {
                 }
                 &Command::SetDepthClamp(clamp) => {
                     let state3 = unsupported(fns.dynamic_state3.as_ref(), "dynamic depth clamp")?;
-                    state3.cmd_set_depth_clamp_enable(buffer, clamp);
+                    // Metal clamps every fragment's depth, a shader's output
+                    // too, to the viewport's range in both clip modes, which
+                    // Vulkan does only with depth clamp on; the mode only
+                    // chooses whether primitives are also clipped.
+                    state3.cmd_set_depth_clamp_enable(buffer, true);
                     state3.cmd_set_depth_clip_enable(buffer, !clamp);
                 }
                 Command::SetSampleLocations { samples, locations } => {
