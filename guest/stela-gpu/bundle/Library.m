@@ -746,9 +746,10 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 	return _functionType == MTLFunctionTypeVertex ? _attributes : nil;
 }
 
+/* A vertex function's attributes are its stage inputs too. */
 - (NSArray *)stageInputAttributes
 {
-	return _functionType == MTLFunctionTypeKernel ? _attributes : nil;
+	return _functionType == MTLFunctionTypeVertex || _functionType == MTLFunctionTypeKernel ? _attributes : nil;
 }
 
 - (NSDictionary *)functionConstantsDictionary
