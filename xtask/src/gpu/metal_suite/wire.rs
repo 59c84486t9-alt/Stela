@@ -382,6 +382,10 @@ const OPERATIONS: &[(&str, Reach)] = &[
         "RenderCode::SetVertexBufferStride",
         Reach::Call("attributeStride:8"),
     ),
+    (
+        "RenderCode::SetVertexBufferOffsetStride",
+        Reach::Call("[re setVertexBufferOffset:offset attributeStride:"),
+    ),
     ("RenderCode::SetViewports", Reach::Call("setViewports:")),
     (
         "RenderCode::SetScissorRects",

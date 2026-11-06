@@ -436,17 +436,4 @@ ABSENT((void)setColorAttachmentMap:(id)map, "this device has no color attachment
 	REFUSE("setTileVisibleFunctionTables:withBufferRange:", TILE);
 }
 
-- (void)setVertexBufferOffset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index
-{
-	REFUSE("setVertexBufferOffset:attributeStride:atIndex:", STAGE_IN_STRIDE);
-}
-
-- (void)setVertexBytes:(const void *)bytes
-		 length:(NSUInteger)length
-	attributeStride:(NSUInteger)stride
-		atIndex:(NSUInteger)index
-{
-	REFUSE("setVertexBytes:length:attributeStride:atIndex:", STAGE_IN_STRIDE);
-}
-
 @end

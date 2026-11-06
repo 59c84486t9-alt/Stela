@@ -362,6 +362,14 @@ records! {
         pub index: u64,
     }
 
+    /// `setVertexBufferOffset:attributeStride:atIndex:` of the bound buffer,
+    /// or the compute encoder's `setBufferOffset:attributeStride:atIndex:`.
+    pub struct VertexOffsetStride {
+        pub offset: u64,
+        pub stride: u64,
+        pub index: u64,
+    }
+
     /// `MTLViewport`.
     pub struct ViewportRecord {
         pub origin_x: f64,
@@ -879,6 +887,8 @@ raw_enum! {
         SetStencilStoreActionOptions = 0x0326,
         /// `SetThreadgroupMemory`.
         SetObjectThreadgroupMemory = 0x0327,
+        /// `VertexOffsetStride`.
+        SetVertexBufferOffsetStride = 0x0328,
     }
 }
 

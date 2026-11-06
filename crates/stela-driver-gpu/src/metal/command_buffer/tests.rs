@@ -603,8 +603,13 @@ fn patch_draws_bind_their_stage_in_strides() {
         draw(&mut commands).is_err(),
         "offsets are multiples of four"
     );
+    assert_eq!(
+        commands.set_vertex_buffer_offset_with_stride(16, 32, 3),
+        Err(Error::Invalid("no vertex buffer is bound at the index"))
+    );
+    // The bound buffer moves to an offset and stride of its own.
     commands
-        .set_vertex_buffer_with_stride(buffer(7, 256), 16, 32, 2)
+        .set_vertex_buffer_offset_with_stride(16, 32, 2)
         .unwrap();
     draw(&mut commands).unwrap();
     commands.end_encoding(&mut resolver).unwrap();

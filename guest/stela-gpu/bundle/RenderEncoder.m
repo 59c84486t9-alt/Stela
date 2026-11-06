@@ -164,6 +164,22 @@ STAGE_BINDINGS(Mesh, MTLRenderStageMesh)
 	ENTRY(StelaRenderCodeSetVertexBufferStride, command);
 }
 
+- (void)setVertexBufferOffset:(NSUInteger)offset attributeStride:(NSUInteger)stride atIndex:(NSUInteger)index
+{
+	StelaVertexOffsetStride command = {.offset = offset, .stride = stride, .index = index};
+	ENTRY(StelaRenderCodeSetVertexBufferOffsetStride, command);
+}
+
+/* The bytes bind as a buffer that then takes the stride. */
+- (void)setVertexBytes:(const void *)bytes
+		 length:(NSUInteger)length
+	attributeStride:(NSUInteger)stride
+		atIndex:(NSUInteger)index
+{
+	[self setVertexBytes:bytes length:length atIndex:index];
+	[self setVertexBufferOffset:0 attributeStride:stride atIndex:index];
+}
+
 - (void)setVertexBuffers:(const id __unsafe_unretained[])buffers
 		 offsets:(const NSUInteger[])offsets
 	attributeStrides:(const NSUInteger[])strides

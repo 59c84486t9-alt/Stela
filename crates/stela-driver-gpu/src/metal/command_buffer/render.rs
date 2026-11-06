@@ -783,6 +783,24 @@ impl CommandBuffer {
             .set_buffer(Stage::Vertex, Some(buffer), offset, index)
     }
 
+    /// `setVertexBufferOffset:attributeStride:atIndex:`: the bound buffer's
+    /// offset and dynamic stride.
+    pub fn set_vertex_buffer_offset_with_stride(
+        &mut self,
+        offset: u64,
+        stride: u64,
+        index: u32,
+    ) -> Result<()> {
+        let render = render(&mut self.encoder)?;
+        let binding = render.vertex_buffers[buffer_slot(index)?]
+            .as_mut()
+            .ok_or(Error::Invalid("no vertex buffer is bound at the index"))?;
+        binding.offset = offset;
+        binding.stride = Some(stride);
+        self.bindings
+            .set_buffer_offset(Stage::Vertex, offset, index)
+    }
+
     pub fn set_render_buffer_offset(
         &mut self,
         stage: Stage,

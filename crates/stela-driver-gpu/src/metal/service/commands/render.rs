@@ -28,8 +28,8 @@ use crate::metal::{
                 FactorBuffer, FactorScale, Mode, PassAttachmentRecord, PassBoundaryCode,
                 RenderBarrier, RenderCode, ScissorRecord, SetPipeline, SetThreadgroupMemory,
                 StageBuffer, StageBufferOffset, StageBytes, StageSampler, StageTexture,
-                StencilReference, VertexBufferStride, ViewMappingRecord, ViewportRecord,
-                VisibilityMode,
+                StencilReference, VertexBufferStride, VertexOffsetStride, ViewMappingRecord,
+                ViewportRecord, VisibilityMode,
             },
         },
     },
@@ -116,6 +116,14 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 let buffer = self.buffer_ref(connection, request.buffer)?;
                 commands.set_vertex_buffer_with_stride(
                     buffer,
+                    request.offset,
+                    request.stride,
+                    binding(request.index)?,
+                )?;
+            }
+            RenderCode::SetVertexBufferOffsetStride => {
+                let request: VertexOffsetStride = payload.record()?;
+                commands.set_vertex_buffer_offset_with_stride(
                     request.offset,
                     request.stride,
                     binding(request.index)?,
