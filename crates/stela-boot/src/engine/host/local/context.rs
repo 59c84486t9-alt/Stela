@@ -18,9 +18,13 @@ use stela_drivers::{bus::mmio::owned::PhysicalSpan, platform::work::WorkError};
 const IF: u64 = 1 << 9;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 
+/// This processor's GS base, as its record's self pointer names it. Every
+/// owner and identity here belongs to an activated processor, whose GS base
+/// is its own record from activation on, so a record of another processor
+/// names that processor's base. The clock and IRQ checks run this many times
+/// per guest clock read, where RDMSR would cost far more than the read.
 fn gs_base() -> u64 {
-    // SAFETY: CPL0 architectural observation at this native entry.
-    unsafe { crate::cpu::msr::GS_BASE.read() }
+    current() as u64
 }
 fn root() -> u64 {
     let value;
@@ -171,12 +175,8 @@ impl RootIdentity {
             return Err(WorkError::WrongCpu);
         }
         // SAFETY: immutable architectural observation; original owner kept.
-        let observed = unsafe { interrupts::observe() };
-        if observed.gs != self.gs
-            || observed.gdt != self.gdt
-            || observed.idt != self.idt
-            || observed.task != self.task
-        {
+        let observed = unsafe { interrupts::observe_descriptors() };
+        if observed.gdt != self.gdt || observed.idt != self.idt || observed.task != self.task {
             return Err(WorkError::CorruptContext);
         }
         Ok(())

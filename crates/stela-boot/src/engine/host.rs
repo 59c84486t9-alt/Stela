@@ -75,6 +75,7 @@ pub(super) mod local;
 use stela_boot_core::native_profile as profile;
 use stela_boot_core::ram;
 mod translated;
+pub(crate) use local::activated_base;
 pub(crate) use local::context::{RootContext, RootExecution, RootIdentity, RootProcessScope};
 #[cfg(feature = "nvk")]
 pub(crate) use local::processor;

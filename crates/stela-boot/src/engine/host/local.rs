@@ -345,6 +345,13 @@ fn current() -> *mut Local {
     pointer
 }
 
+/// This processor's GS base, read through its record's self pointer rather
+/// than with RDMSR. Once [`activate`] has run on it: from then on GS is the
+/// record, whose `this` names it.
+pub(crate) fn activated_base() -> u64 {
+    current() as u64
+}
+
 /// This processor's index, dense from zero. Once [`activate`] has run on it.
 /// The BSP installs its record before any AP starts.
 pub(crate) fn processor() -> u32 {

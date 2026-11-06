@@ -118,12 +118,13 @@ pub(super) fn entered_loader_root(owner: &crate::paging::loader::LoaderTables) -
     if !HOST_DRIVERS.load(Ordering::Acquire) {
         return false;
     }
-    let (root, gs): (u64, u64);
+    let root: u64;
     // SAFETY: this internal query follows RootIdentity's CPL0/CPU admission.
     unsafe {
         asm!("mov {}, cr3", out(reg) root, options(nomem, nostack, preserves_flags));
-        gs = crate::cpu::msr::GS_BASE.read();
     }
+    // RootIdentity's admission is of an activated processor.
+    let gs = super::host::activated_base();
     // The context is 0 only without PCIDs, whose CR3 holds none.
     let context = root & CONTEXT;
     gs != 0

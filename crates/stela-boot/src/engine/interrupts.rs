@@ -536,24 +536,51 @@ pub(crate) struct Observation {
 /// CPL0 with this processor's permanently pinned descriptor/GS storage active.
 /// The private tables cannot be changed concurrently with these observations.
 pub(crate) unsafe fn observe() -> Observation {
-    let mut gdt = Pointer { limit: 0, base: 0 };
-    let mut idt = Pointer { limit: 0, base: 0 };
-    let (rsp, task): (u64, u16);
+    // SAFETY: the caller's contract.
+    let descriptors = unsafe { observe_descriptors() };
+    let rsp: u64;
     let gs: u64;
-    // SAFETY: caller is the owning CPL0 processor with stable private tables.
+    // SAFETY: caller is the owning CPL0 processor.
     unsafe {
-        asm!("sgdt [{}]", in(reg) &mut gdt, options(nostack, preserves_flags));
-        asm!("sidt [{}]", in(reg) &mut idt, options(nostack, preserves_flags));
-        asm!("str {0:x}", out(reg) task, options(nostack, preserves_flags));
         asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags));
         gs = crate::cpu::msr::GS_BASE.read();
     }
     Observation {
         rsp,
+        gdt: descriptors.gdt,
+        idt: descriptors.idt,
+        task: descriptors.task,
+        gs,
+    }
+}
+
+/// The descriptor-table bases and task register of [`Observation`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Descriptors {
+    pub gdt: u64,
+    pub idt: u64,
+    pub task: u16,
+}
+
+/// [`observe`] without its stack pointer and GS base, for checks that run
+/// per guest clock read: the GS read is an RDMSR.
+///
+/// # Safety
+/// As for [`observe`].
+pub(crate) unsafe fn observe_descriptors() -> Descriptors {
+    let mut gdt = Pointer { limit: 0, base: 0 };
+    let mut idt = Pointer { limit: 0, base: 0 };
+    let task: u16;
+    // SAFETY: caller is the owning CPL0 processor with stable private tables.
+    unsafe {
+        asm!("sgdt [{}]", in(reg) &mut gdt, options(nostack, preserves_flags));
+        asm!("sidt [{}]", in(reg) &mut idt, options(nostack, preserves_flags));
+        asm!("str {0:x}", out(reg) task, options(nostack, preserves_flags));
+    }
+    Descriptors {
         gdt: gdt.base,
         idt: idt.base,
         task,
-        gs,
     }
 }
 
