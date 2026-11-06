@@ -1282,6 +1282,33 @@ impl Blend {
         ];
         unit(out)
     }
+
+    /// The least and greatest results over d of a source that may carry
+    /// half a unit of an 8-bit target in each component, in the encoded
+    /// space for an sRGB target's color: blending need be no more precise
+    /// than the destination. The blend is monotonic in each component, so
+    /// the corners of that box bound it.
+    fn bounds(&self, s: [f64; 4], d: [f64; 4], c: [f64; 4], srgb_target: bool) -> [[f64; 4]; 2] {
+        const HALF: f64 = 0.5 / 255.0;
+        let mut bounds = [[f64::INFINITY; 4], [f64::NEG_INFINITY; 4]];
+        for corner in 0..81u32 {
+            let s: [f64; 4] = std::array::from_fn(|k| {
+                let e = f64::from(corner / 3u32.pow(k as u32) % 3) - 1.0;
+                let v = s[k].clamp(0.0, 1.0);
+                if srgb_target && k < 3 {
+                    srgb((srgb_encode(v) + e * HALF).clamp(0.0, 1.0))
+                } else {
+                    (v + e * HALF).clamp(0.0, 1.0)
+                }
+            });
+            let out = self.apply(s, s, d, c, true);
+            for k in 0..4 {
+                bounds[0][k] = bounds[0][k].min(out[k]);
+                bounds[1][k] = bounds[1][k].max(out[k]);
+            }
+        }
+        bounds
+    }
 }
 
 const FACTORS: [&str; 15] = [
@@ -1388,20 +1415,35 @@ fn blending(plan: &mut Plan, library: &str) {
                     v
                 }
             };
-            let mut expected = vec![];
+            let (mut expected, mut lows, mut highs) = (vec![], vec![], vec![]);
             for (s, b) in s.iter().zip(&stored) {
                 let out = blend.apply(*s, *s, decode(*b), blend_color, true);
-                let (bytes, _) = store(format, out);
-                expected.extend(bytes);
+                expected.extend(store(format, out).0);
+                let [low, high] = blend.bounds(*s, decode(*b), blend_color, srgb_target);
+                lows.extend(store(format, low).0);
+                highs.extend(store(format, high).0);
             }
+            // Any result within the bounds, by alternatives a tolerance
+            // apart.
             let tol = Tolerance::units(1.0);
+            let widest = lows
+                .iter()
+                .zip(&highs)
+                .map(|(l, h)| h - l)
+                .max()
+                .unwrap_or(0);
+            let mut output = Output::new("c", Dtype::U8, tol.clone()).expect(expected, tol);
+            for step in 0..=widest.div_ceil(3) {
+                let at = |(&l, &h): (&u8, &u8)| l.saturating_add(step.saturating_mul(3)).min(h);
+                output = output.expect_alternative(lows.iter().zip(&highs).map(at).collect());
+            }
             let name = format!("render.blend.{format}.{label}");
             read.push(name.clone());
             plan.add(
                 full(&name, library, "frag_color", &s.concat(),
                      json!({"colors": [{"texture": "c", "blend": blend.json()}], "blend_color": blend_color}))
                 .texture(target("c", format).data(stored.concat()))
-                .output(Output::new("c", Dtype::U8, tol.clone()).expect(expected, tol)),
+                .output(output),
             );
         }
     }
