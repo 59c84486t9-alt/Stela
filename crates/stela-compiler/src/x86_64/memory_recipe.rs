@@ -2,10 +2,11 @@
 //! Regions replace address/staging spans and copy the remaining bytes with
 //! their encoder counts. Internal branches and call descriptors stay together.
 use super::asm::{Alu, Checkpoint, Code, Gpr, Mem, Size, Span};
+use super::masked_base::Plan;
 use super::{
     Access, AddressMode, ImmediateAddress, MemoryChecks, MemoryTransfer, Register, Shift, Width,
-    accessed, address_add, address_checks, load, memory_store, memory_writeback, right_operand,
-    stack_alignment_check, stack_alignment_check_register,
+    accessed, address_add, address_checks, alignment_check, load, memory_store, memory_writeback,
+    right_operand, stack_alignment_check, stack_alignment_check_register,
 };
 use crate::{
     GuestAddress,
@@ -182,6 +183,66 @@ fn direct_writeback(code: &mut Code, host: Gpr, address: ImmediateAddress) {
     }
 }
 
+/// The masked-base plan offered for the access at `address`
+/// ([`super::masked_base`]), in pinned code whose every access checks its
+/// masked address and outside a recipe, whose spans regions rearrange.
+fn base_plan(
+    code: &Code,
+    checks: MemoryChecks,
+    address: ImmediateAddress,
+    alone: bool,
+) -> Option<Plan> {
+    (alone
+        && code.is_pinned()
+        && checks.guest_range
+        && checks.every_access_masked
+        && !checks.translated)
+        .then(|| code.base_plan(address))
+        .flatten()
+}
+
+/// The slot and displacement a [`Plan::Reuse`] access addresses directly,
+/// once SP's alignment is checked. `None` for what needs the address in
+/// RAX, as with [`direct`].
+fn reused(
+    code: &mut Code,
+    checks: MemoryChecks,
+    address: ImmediateAddress,
+    unit: u8,
+    loads_base: bool,
+    alone: bool,
+) -> Option<(Gpr, i32)> {
+    let Some(Plan::Reuse { host, delta }) = base_plan(code, checks, address, alone) else {
+        return None;
+    };
+    if (checks.alignment && unit > 1) || (loads_base && address.mode != AddressMode::Offset) {
+        return None;
+    }
+    if address.base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
+        let stack = code
+            .host(Register::Sp)
+            .expect("pinned code keeps SP in a host register");
+        code.asm().test_imm(Size::Byte, stack, 15);
+        code.check_failure(super::asm::Cond::Ne);
+    }
+    code.apply_base_plan();
+    Some((host, delta))
+}
+
+/// A [`reused`] access's writeback of its base, once its faults are behind it.
+fn reused_writeback(code: &mut Code, address: ImmediateAddress) {
+    if address.mode == AddressMode::Offset {
+        return;
+    }
+    match code.host(address.base) {
+        Some(host) => direct_writeback(code, host, address),
+        None => {
+            load(code, address.base);
+            direct_writeback(code, Gpr::Rax, address);
+        }
+    }
+}
+
 pub(super) fn address(
     code: &mut Code,
     checks: MemoryChecks,
@@ -195,6 +256,36 @@ pub(super) fn address(
         displacement,
         mode,
     } = address;
+    let plan = base_plan(code, checks, address, recipe.is_none());
+    if let Some(Plan::Reuse { host, delta }) = plan {
+        // The pending writeback still moves the guest's base.
+        if mode != AddressMode::Offset {
+            let source = code.host(base).unwrap_or_else(|| {
+                load(code, base);
+                Gpr::Rax
+            });
+            code.asm()
+                .lea(Size::Qword, Gpr::Rdx, Mem::base(source, displacement));
+        }
+        code.asm()
+            .lea(Size::Qword, Gpr::Rax, Mem::base(host, delta));
+        if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
+            let stack = code
+                .host(Register::Sp)
+                .expect("pinned code keeps SP in a host register");
+            stack_alignment_check_register(code, stack);
+        }
+        alignment_check(code, checks, unit);
+        code.apply_base_plan();
+        return;
+    }
+    // The checked, masked address, for later accesses to reuse.
+    let keep = |code: &mut Code| {
+        if let Some(Plan::Keep(host)) = plan {
+            code.asm().mov(Size::Qword, host, Gpr::Rax);
+            code.apply_base_plan();
+        }
+    };
     // Through a pinned base the address needs no copy of it.
     if let (Some(host), AddressMode::Offset) = (code.host(base), mode) {
         code.asm()
@@ -203,6 +294,7 @@ pub(super) fn address(
             stack_alignment_check_register(code, host);
         }
         address_checks(code, checks, unit, access);
+        keep(code);
         return;
     }
     let start = code.checkpoint();
@@ -231,6 +323,7 @@ pub(super) fn address(
         Kind::Checks,
         mask(Gpr::Rax) | mask(Gpr::Rcx),
     );
+    keep(code);
 }
 const FRAME_PAIR_RESULTS: [Gpr; 2] = [Gpr::Rcx, Gpr::R8];
 
@@ -531,7 +624,8 @@ pub(super) fn scalar(
     let ImmediateAddress { base, mode, .. } = location;
     let access = Access::of(transfer == MemoryTransfer::Store, bytes.into());
     let loads_base = data == base && transfer != MemoryTransfer::Store;
-    let place = direct(code, checks, location, bytes, loads_base);
+    let reuse = reused(code, checks, location, bytes, loads_base, recipe.is_none());
+    let place = reuse.or_else(|| direct(code, checks, location, bytes, loads_base));
     if place.is_none() {
         address(code, checks, location, bytes, access, recipe.as_deref_mut());
     }
@@ -598,6 +692,10 @@ pub(super) fn scalar(
         }
     }
     // Commit writeback only after all faultable element accesses succeed.
+    if reuse.is_some() {
+        reused_writeback(code, location);
+        return;
+    }
     if let Some((host, _)) = place {
         direct_writeback(code, host, location);
         return;
@@ -621,7 +719,8 @@ pub(super) fn pair(
     let ImmediateAddress { base, mode, .. } = location;
     let access = Access::of(transfer == MemoryTransfer::Store, 2 * u16::from(bytes));
     let loads_base = data.contains(&base) && transfer != MemoryTransfer::Store;
-    let place = direct(code, checks, location, bytes, loads_base);
+    let reuse = reused(code, checks, location, bytes, loads_base, recipe.is_none());
+    let place = reuse.or_else(|| direct(code, checks, location, bytes, loads_base));
     if place.is_none() {
         address(code, checks, location, bytes, access, recipe.as_deref_mut());
     }
@@ -723,6 +822,10 @@ pub(super) fn pair(
         }
     }
     // Commit writeback only after all faultable element accesses succeed.
+    if reuse.is_some() {
+        reused_writeback(code, location);
+        return;
+    }
     if let Some((host, _)) = place {
         direct_writeback(code, host, location);
         return;

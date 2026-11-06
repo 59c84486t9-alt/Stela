@@ -21,6 +21,10 @@ pub(crate) struct Code {
     /// Jumps to check failures, which the block places after its exits,
     /// with the instructions they fail.
     failures: Vec<(super::Patch, usize)>,
+    /// The masked-base plan for the access being emitted, and the plan the
+    /// access applied ([`super::super::masked_base`]).
+    base_request: Option<super::super::masked_base::Request>,
+    base_applied: Option<super::super::masked_base::Plan>,
 }
 
 /// Exact faulting instruction interval, separate from source retirement.
@@ -86,6 +90,8 @@ impl Code {
             linked_block: None,
             instruction: 0,
             failures: Vec::new(),
+            base_request: None,
+            base_applied: None,
         }
     }
     /// Code that keeps [`super::super::pinned`] guest registers in host
@@ -99,6 +105,31 @@ impl Code {
     /// The instructions from here on have `index` in the block's source map.
     pub(crate) fn set_instruction(&mut self, index: usize) {
         self.instruction = index;
+    }
+    /// Offer the access the next instruction emits `request`
+    /// ([`super::super::masked_base`]).
+    pub(crate) fn set_base_request(&mut self, request: Option<super::super::masked_base::Request>) {
+        self.base_request = request;
+        self.base_applied = None;
+    }
+    /// The plan offered for the access at `address`, which the access then
+    /// applies with [`Self::apply_base_plan`].
+    pub(in crate::x86_64) fn base_plan(
+        &self,
+        address: super::super::ImmediateAddress,
+    ) -> Option<super::super::masked_base::Plan> {
+        self.base_request
+            .filter(|request| request.is_for(address))
+            .map(|request| request.plan)
+    }
+    /// The access applied the plan [`Self::base_plan`] gave.
+    pub(crate) fn apply_base_plan(&mut self) {
+        self.base_applied = self.base_request.take().map(|request| request.plan);
+    }
+    /// The plan the instruction applied, if any, ending the offer.
+    pub(crate) fn finish_base_request(&mut self) -> Option<super::super::masked_base::Plan> {
+        self.base_request = None;
+        self.base_applied.take()
     }
     /// Fail the instruction being emitted if `failed` holds: a jump never
     /// taken costs no more than the mask a guest range check would pay for,
@@ -306,6 +337,8 @@ impl Code {
             linked_block: self.linked_block,
             instruction: self.instruction,
             failures,
+            base_request: None,
+            base_applied: None,
         };
         self.instructions = at.instructions;
         tail

@@ -360,8 +360,18 @@ fn emit_selected(
     // Each branch the block runs past: its jump to a side exit, its target
     // and the instructions up to it.
     let mut side_exits = vec![];
+    // Accesses that address memory from an earlier access's masked address
+    // (`masked_base`), which the instructions emitted alone keep track of.
+    let reuse_bases =
+        pinned && checks.guest_range && checks.every_access_masked && !checks.translated;
+    let mut bases = super::masked_base::Tracker::default();
+    let mut emitted_alone = true;
     while cursor < instructions.len() {
         let held = core::mem::replace(&mut after, Held::NOTHING);
+        // A group emitted otherwise may have used the slots.
+        if !core::mem::take(&mut emitted_alone) {
+            bases.reset();
+        }
         if fuse_simd
             && let Some(group) = super::simd::sha256::HashGroup::recognize(&instructions[cursor..])
         {
@@ -712,6 +722,9 @@ fn emit_selected(
             if code.host(address.destination).is_none() {
                 after.rax = super::Rax::Guest(address.destination);
             }
+            bases.after(instruction, None);
+            bases.after(second, None);
+            emitted_alone = true;
             cursor += 2;
             continue;
         }
@@ -752,8 +765,13 @@ fn emit_selected(
             let taken = branch_condition(code, &instruction.operation, held.rax)
                 .expect("a conditional branch's condition");
             side_exits.push((code.asm().jcc(taken), target, block.source_map.len()));
+            bases.after(instruction, None);
+            emitted_alone = true;
             cursor += 1;
             continue;
+        }
+        if reuse_bases {
+            code.set_base_request(bases.plan(&instructions[cursor..]));
         }
         let frame_bound = pinned && super::pinned::frame_bound(&instruction.operation);
         if frame_bound {
@@ -777,6 +795,9 @@ fn emit_selected(
             super::pinned::reload(code);
             code.set_pinned(true);
         }
+        let applied = code.finish_base_request();
+        bases.after(instruction, applied);
+        emitted_alone = true;
         cursor += 1;
     }
     debug_assert!(

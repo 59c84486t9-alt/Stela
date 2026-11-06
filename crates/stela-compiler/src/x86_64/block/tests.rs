@@ -3562,3 +3562,79 @@ fn pinned_conditional_compare_consumes_the_preceding_flags() {
         }
     }
 }
+
+/// Under FEAT_CSV3 masking, accesses that reuse an earlier access's masked
+/// address (`masked_base`) through writebacks, moved copies of the base,
+/// SIMD accesses and a side exit run as the block that leaves those checks
+/// to `guest_range` does.
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn masked_base_reuse_matches_the_unmasked_block() {
+    use crate::{
+        Options, TargetCpu,
+        block::{BlockProfile, CompilationPlan, Features},
+        context::ExecutionContext,
+        x86_64::{MemoryChecks, asm::vector_extensions::execution::Native, pinned::entered},
+    };
+    let words = [
+        0xa9be_7bfdu32, // STP X29,X30,[SP,#-32]!
+        0x9100_03fd,    // MOV X29,SP
+        0xf900_0be0,    // STR X0,[SP,#16]
+        0xf940_0ba1,    // LDR X1,[X29,#16]
+        0x9100_23a2,    // ADD X2,X29,#8
+        0xf900_0041,    // STR X1,[X2]
+        0xa8c2_13e3,    // LDP X3,X4,[SP],#32
+        0xf85f_03e5,    // LDUR X5,[SP,#-16]
+        0x1100_04c6,    // ADD W6,W6,#1
+        0x3cde_0fe1,    // LDR Q1,[SP,#-32]!
+        0x3d80_07e1,    // STR Q1,[SP,#16]
+        0xb400_0049,    // CBZ X9,#8
+        0xf940_0bea,    // LDR X10,[SP,#16]
+        0xa901_17aa,    // STP X10,X5,[X29,#16]
+        0xf85f_8c4b,    // LDR X11,[X2,#-8]!
+        0xf840_844c,    // LDR X12,[X2],#8
+    ];
+    let compile = |every_access_masked| {
+        let source: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let options = Options::new(
+            BlockProfile::new(Features::SYSTEM_MODE),
+            TargetCpu::Baseline,
+        )
+        .with_memory_checks(MemoryChecks::system(true, false, true, every_access_masked));
+        CompilationPlan::new(&source, GuestAddress(0x1000), &options)
+            .unwrap()
+            .compile()
+            .unwrap()
+            .native
+            .x86_64_code
+    };
+    let masked = compile(true);
+    let unmasked = compile(false);
+    const KEEP_R11: [u8; 3] = [0x49, 0x89, 0xc3]; // mov r11,rax
+    assert!(masked.windows(3).any(|bytes| bytes == KEEP_R11));
+    let masked = Native::new(&entered(&masked));
+    let unmasked = Native::new(&entered(&unmasked));
+    let mut memory = [0u128; 32];
+    let stack = memory.as_mut_ptr() as u64 + 256;
+    for x9 in [0, 0x99] {
+        let mut original = crate::GuestState {
+            sp: stack,
+            ..Default::default()
+        };
+        for (index, register) in original.x.iter_mut().enumerate() {
+            *register = 0x0123_4567_89ab_cdefu64.wrapping_mul(index as u64 + 3);
+        }
+        original.x[9] = x9;
+        let mut runs = Vec::new();
+        for native in [&masked, &unmasked] {
+            for (index, slot) in memory.iter_mut().enumerate() {
+                *slot = 0x1111_2222_3333_4444_5555_6666_7777_8888u128.wrapping_mul(index as u128);
+            }
+            let mut state = original.clone();
+            native.run(&mut state, &mut ExecutionContext::default());
+            runs.push((state, memory));
+        }
+        assert_eq!(runs[0], runs[1], "X9 = {x9:#x}");
+        assert_eq!(runs[0].0.sp, stack - 32);
+    }
+}

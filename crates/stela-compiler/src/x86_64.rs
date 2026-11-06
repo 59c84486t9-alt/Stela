@@ -104,6 +104,7 @@ mod integer_minmax;
 mod integer_unary;
 pub mod isa;
 mod literal;
+mod masked_base;
 pub(crate) mod memory_context;
 mod memory_recipe;
 #[cfg(all(
@@ -388,10 +389,11 @@ pub struct MemoryChecks {
     /// ([`plain_ordering`]). The direct system-mode profile sets it for every block, and no
     /// other profile does.
     pub(crate) single_agent: bool,
-    /// FEAT_CSV3: every access checks the guest range, those
+    /// FEAT_CSV3: every access's address is masked ([`RangeCheck`]), those
     /// [`guest_range`] would leave to an earlier check through the same base
-    /// included. A mispredicted check then never runs an access whose
-    /// address its own check did not mask ([`RangeCheck`]).
+    /// included: by its own check, or in pinned blocks derived by data from
+    /// an earlier access's masked address ([`masked_base`]). A mispredicted
+    /// check then never runs an access whose address no check masked.
     pub every_access_masked: bool,
     /// An earlier access of the block checked SP's alignment, which holds
     /// since ([`stack_alignment::checks`]): an access through SP relies on

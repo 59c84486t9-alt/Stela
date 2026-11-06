@@ -399,7 +399,9 @@ fn system_mode_blocks_check_every_access_against_the_guest_ranges() {
         |options| options,
     );
     assert_eq!(count(&system), 4);
-    // Under FEAT_CSV3 each access checks, so each masks its own address.
+    // Under FEAT_CSV3 each access masks its address, but the LDR and LDP
+    // after the first LDR, and the LDR Q and STP Q after the STR, address
+    // memory from the masked address kept before them (`x86_64::masked_base`).
     let masked = compile(
         &words,
         BlockProfile::new(Features::SYSTEM_MODE),
@@ -407,7 +409,7 @@ fn system_mode_blocks_check_every_access_against_the_guest_ranges() {
             options.with_memory_checks(crate::x86_64::MemoryChecks::system(true, false, true, true))
         },
     );
-    assert_eq!(count(&masked), words.len() - 2);
+    assert_eq!(count(&masked), words.len() - 6);
     // A four-level host's blocks, clean-load regions included, check
     // against its placement's ranges.
     const FOUR_LEVEL: crate::x86_64::MemoryChecks =
