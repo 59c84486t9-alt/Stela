@@ -12,7 +12,7 @@
 //! - Sample positions: the samples an edge covers at positions the render
 //!   pass sets, read back sample by sample.
 use super::plan::{Buffer, Case, Output, Plan, Step, Texture, Tolerance};
-use super::textures::srgb;
+use super::textures::{srgb, srgb_decode};
 use super::values::{Dtype, Random, f16_bits, f32s, u32s};
 use serde_json::json;
 
@@ -192,7 +192,7 @@ fn views(plan: &mut Plan, library: &str, rng: &mut Random) {
             1,
             1,
         )
-        .output(Output::new("out", Dtype::F32, Tolerance::abs(6e-4)).expect_same(f32s(&decoded))),
+        .output(Output::new("out", Dtype::F32, srgb_decode()).expect_same(f32s(&decoded))),
     );
     let halves: Vec<u16> = (0..texels * 4)
         .map(|_| f16_bits(rng.uniform(-8.0, 8.0)))

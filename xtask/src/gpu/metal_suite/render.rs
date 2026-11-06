@@ -753,7 +753,12 @@ fn srgb_encode(v: f64) -> f64 {
 
 /// Values a target of this resolution stores exactly: a lattice of its
 /// steps, off the rounding midpoints by up to 0.3 of a step, with values
-/// outside [0, 1] where the format clamps.
+/// outside the range the format clamps to.
+///
+/// Vulkan lets a store round to either of the two nearest codes. A lane of
+/// eight or more bits rounds to the nearest on every device, but NVIDIA's
+/// ROP narrows 4-, 5- and 6-bit lanes from an 8-bit rounding, so those take
+/// only values on the lattice, which each rule stores alike.
 fn lattice(rng: &mut Random, steps: f64, signed: bool) -> f64 {
     let n = steps as u32;
     let k = if signed {
@@ -761,8 +766,14 @@ fn lattice(rng: &mut Random, steps: f64, signed: bool) -> f64 {
     } else {
         f64::from(rng.u32() % (n + 1))
     };
-    let v = (k + rng.uniform(-0.3, 0.3)) / steps;
+    let offset = rng.uniform(-0.3, 0.3);
+    let v = if steps >= 255.0 {
+        (k + offset) / steps
+    } else {
+        k / steps
+    };
     match rng.u32() % 16 {
+        0 if signed => -1.5,
         0 => -0.5,
         1 => 1.5,
         _ => f32r(v),
@@ -982,8 +993,7 @@ fn targets(plan: &mut Plan, library: &str) {
             expected.extend(bytes);
             dtype = d;
         }
-        // sRGB encoding is approximate; 5- and 6-bit lattices are coarser
-        // than the offsets keep exact.
+        // sRGB encoding is approximate.
         let tol = if format.contains("srgb") {
             Tolerance::units(1.0)
         } else {
@@ -1374,12 +1384,14 @@ fn blending(plan: &mut Plan, library: &str) {
             .collect();
         let tol = Tolerance::ulp(3.0).with_abs(2f64.powi(-12));
         let name = format!("render.blend.rgba16float.{label}");
+        // Two devices, each within the bound of the exact blend.
+        let cross = tol.doubled();
         read.push(name.clone());
         plan.add(
             full(&name, library, "frag_color", &s.concat(),
                  json!({"colors": [{"texture": "c", "blend": blend.json()}], "blend_color": blend_color}))
             .texture(target("c", "rgba16float").data(floats(Dtype::F16, &d.concat())))
-            .output(Output::new("c", Dtype::F16, tol.clone()).expect(floats(Dtype::F16, &expected), tol)),
+            .output(Output::new("c", Dtype::F16, cross).expect(floats(Dtype::F16, &expected), tol)),
         );
     }
     // Normalized targets clamp sources, factors and results; sRGB targets

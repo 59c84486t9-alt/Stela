@@ -277,18 +277,29 @@ pub fn build(plan: &mut Plan, library: &str) {
                 expect.extend(decoded[block][((y % 4) * 4 + x % 4) as usize]);
             }
         }
-        // Two steps of the endpoints' precision, through the sRGB curve's
-        // steepest slope for sRGB formats.
+        // BC1 to BC5 interpolate palettes between endpoints at a precision
+        // neither Metal nor Vulkan fixes: Apple's weights are sixty-fourths,
+        // and NVIDIA's texture unit widens endpoints to 8 bits and weighs
+        // them up to 2.7% of their span from k/7, k/5 and k/3, sRGB ones in
+        // linear space, so those take 3% of the channel's range. The others
+        // take two steps of the endpoints' precision, through the sRGB
+        // curve's steepest slope for sRGB formats.
+        let palette = ["bc1", "bc2", "bc3", "bc4", "bc5"]
+            .iter()
+            .any(|p| f.name.starts_with(p));
+        let range = if f.name.contains("snorm") { 2.0 } else { 1.0 };
         let tol = if f.half {
             Tolerance::ulp(1.0)
+        } else if palette {
+            Tolerance::abs(0.03 * range)
         } else if f.name.ends_with("srgb") {
             Tolerance::abs(0.02)
-        } else if f.name.contains("snorm") {
-            Tolerance::abs(2.0 / 127.0)
         } else {
             Tolerance::abs(2.0 / 255.0)
         }
         .with_ftz(false);
+        // Two decoders, each within the bound of the exact palette.
+        let cross = if palette { tol.doubled() } else { tol.clone() };
         plan.add(
             Case::compute1(
                 &format!("texture.compressed.{}", f.name),
@@ -303,7 +314,7 @@ pub fn build(plan: &mut Plan, library: &str) {
                 points.iter().flat_map(|v: &u32| v.to_le_bytes()).collect(),
             ))
             .buffer(Buffer::zeroed("out", 1, (w * h * 16) as usize))
-            .output(Output::new("out", Dtype::F32, tol.clone()).expect(f32s(&expect), tol))
+            .output(Output::new("out", Dtype::F32, cross).expect(f32s(&expect), tol))
             .texture(
                 Texture::d2("t", f.name, w, h)
                     .index(0)

@@ -345,9 +345,23 @@ pub(super) fn decode(f: &Format, texel: &[u8]) -> Texel {
     }
 }
 
+/// An 8-bit sRGB code decoded to linear. Neither Metal nor Vulkan fixes the
+/// conversion's precision. NVIDIA's texture unit decodes to a few bits less
+/// than an exact table (at worst 0.43 of the gap to a neighbouring code), so
+/// the bound is about half that gap: every code stays distinct and ordered.
+pub(super) fn srgb_decode() -> Tolerance {
+    Tolerance::abs(2.5e-4).with_rel(5e-3)
+}
+
 pub(super) fn read_tolerance(f: &Format) -> Tolerance {
     match f.kind {
-        Kind::Float if f.name.contains("srgb") => Tolerance::abs(2.5e-4),
+        Kind::Float if f.name.contains("srgb") => srgb_decode(),
+        // NVIDIA's texture unit widens 5- and 6-bit lanes to 8 bits by
+        // replicating their high bits, within 0.7 of an 8-bit step of
+        // c / (2^b - 1); every code stays distinct and ordered.
+        Kind::Float if matches!(f.name, "b5g6r5unorm" | "a1bgr5unorm" | "bgr5a1unorm") => {
+            Tolerance::abs(1.0 / 255.0)
+        }
         Kind::Float => Tolerance::ulp(1.0),
         _ => Tolerance::default(),
     }
@@ -909,7 +923,9 @@ fn sampling(plan: &mut Plan, library: &str) {
                 filter()
             };
             if name.contains("srgb") {
-                tol.abs = Some(tol.abs.unwrap_or(0.0).max(2.5e-4));
+                let decode = srgb_decode();
+                tol.abs = Some(tol.abs.unwrap_or(0.0).max(decode.abs.unwrap_or(0.0)));
+                tol.rel = Some(tol.rel.unwrap_or(0.0).max(decode.rel.unwrap_or(0.0)));
             }
             let coords: Vec<f64> = points
                 .iter()
