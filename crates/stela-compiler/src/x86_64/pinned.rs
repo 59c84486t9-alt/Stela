@@ -46,7 +46,7 @@ pub(crate) fn host(register: Register) -> Option<Gpr> {
 }
 
 mod span;
-pub(super) use span::Span;
+pub(super) use span::{Dirty, Run, Span};
 
 const LOCAL_HOSTS: [Gpr; 4] = [Gpr::R8, Gpr::R9, Gpr::R10, Gpr::R11];
 pub(super) type LocalRegisters = [Option<Register>; LOCAL_HOSTS.len()];
@@ -885,8 +885,9 @@ mod tests {
     const BASES: [u32; 3] = [19, 20, 31];
     const INDEX: u32 = 5;
 
-    /// One random instruction of the common forms.
-    fn instruction(random: &mut Random) -> u32 {
+    /// One random instruction of the common forms, with selects, compares
+    /// and, given `branches`, forward conditional branches past the next one.
+    fn instruction(random: &mut Random, branches: bool) -> u32 {
         let wide = random.below(2);
         let (rd, rn, rm) = (random.pick(&DATA), random.pick(&DATA), random.pick(&DATA));
         let zero_or = |random: &mut Random, register: u32| {
@@ -895,7 +896,7 @@ mod tests {
         let rn = zero_or(random, rn);
         let rm = zero_or(random, rm);
         let base = random.pick(&BASES);
-        match random.below(15) {
+        match random.below(19) {
             // ADD and SUB immediate; a target or source of 31 is SP, so
             // only compares use it.
             0 => {
@@ -1019,6 +1020,30 @@ mod tests {
             // SP moves as code moves it.
             12 => 0x9100_43ff,
             13 => 0xd100_43ff,
+            // CSEL, CSINC, CSINV and CSNEG.
+            14 => {
+                wide << 31
+                    | random.below(2) << 30
+                    | 0x1a80_0000
+                    | rm << 16
+                    | random.below(14) << 12
+                    | random.below(2) << 10
+                    | rn << 5
+                    | rd
+            }
+            // CCMP and CCMN of a register.
+            15 => {
+                wide << 31
+                    | random.below(2) << 30
+                    | 0x3a40_0000
+                    | rm << 16
+                    | random.below(14) << 12
+                    | rn << 5
+                    | random.below(16)
+            }
+            // B.cond, CBZ and CBNZ past the next instruction.
+            16 if branches => 0x5400_0040 | random.below(14),
+            17 if branches => wide << 31 | random.below(2) << 24 | 0x3400_0040 | rd,
             _ => 0xd503_201f,
         }
     }
@@ -1042,7 +1067,7 @@ mod tests {
         let middle = (memory.as_mut_ptr() as u64 + (1 << 15)) & !15;
         for round in 0..3000 {
             let words: alloc::vec::Vec<u32> = (0..1 + random.below(24))
-                .map(|_| instruction(&mut random))
+                .map(|_| instruction(&mut random, false))
                 .collect();
             let source: alloc::vec::Vec<u8> =
                 words.iter().flat_map(|word| word.to_le_bytes()).collect();
@@ -1402,6 +1427,79 @@ mod tests {
             compared += 1;
         }
         assert!(compared > 1000, "{compared} blocks compared");
+    }
+
+    /// Blocks whose runs keep guest registers in scratch registers
+    /// ([`Span`]) against the same blocks without them, as data independent
+    /// timing compiles them, through side exits and both kinds of checks.
+    #[test]
+    fn runs_compute_what_pinned_code_without_them_computes() {
+        use crate::{
+            GuestAddress, Options, TargetCpu,
+            block::{BlockProfile, Features},
+        };
+        const BASE: GuestAddress = GuestAddress(0x4000_0000);
+        let mut random = Random(0x6a09_e667_f3bc_c908);
+        let mut memory = alloc::vec![0u8; 1 << 16];
+        for byte in &mut memory {
+            *byte = random.next() as u8;
+        }
+        let start = memory.clone();
+        let middle = (memory.as_mut_ptr() as u64 + (1 << 15)) & !15;
+        let mut differing = 0;
+        for target in [TargetCpu::Baseline, TargetCpu::detect()] {
+            for masked in [false, true] {
+                let checks = super::super::MemoryChecks::system(true, false, true, masked);
+                let options = |target| {
+                    Options::new(BlockProfile::new(Features::SYSTEM_MODE), target)
+                        .with_memory_checks(checks)
+                };
+                let runs = options(target);
+                let without = options(target.with_data_independent_timing());
+                for round in 0..3000 {
+                    let words: alloc::vec::Vec<u32> = (0..1 + random.below(24))
+                        .map(|_| instruction(&mut random, true))
+                        .collect();
+                    let source: alloc::vec::Vec<u8> =
+                        words.iter().flat_map(|word| word.to_le_bytes()).collect();
+                    let (Ok(one), Ok(other)) = (
+                        crate::compile(&source, BASE, &runs),
+                        crate::compile(&source, BASE, &without),
+                    ) else {
+                        continue;
+                    };
+                    assert_eq!(one.source_bytes, other.source_bytes);
+                    differing += usize::from(one.native.x86_64_code != other.native.x86_64_code);
+                    let mut initial = GuestState::default();
+                    for slot in &mut initial.x {
+                        *slot = u64::from(random.next()) << 32 | u64::from(random.next());
+                    }
+                    initial.x[19] = middle;
+                    initial.x[20] = middle - 0x2000;
+                    initial.x[INDEX as usize] = 0x20;
+                    initial.sp = middle + 0x2000;
+                    initial.nzcv = random.below(16) << 28;
+                    memory.copy_from_slice(&start);
+                    let mut expected = initial.clone();
+                    let next = crate::x86_64::native::run(
+                        &entered(&other.native.x86_64_code),
+                        &mut expected,
+                    );
+                    let kept = memory.clone();
+                    memory.copy_from_slice(&start);
+                    let mut state = initial.clone();
+                    let pc =
+                        crate::x86_64::native::run(&entered(&one.native.x86_64_code), &mut state);
+                    let source = alloc::format!("round {round}: {words:08x?}");
+                    assert_eq!(pc, next, "{source}");
+                    assert_eq!(state.x, expected.x, "{source}");
+                    assert_eq!(state.sp, expected.sp, "{source}");
+                    assert_eq!(state.nzcv, expected.nzcv, "{source}");
+                    assert!(memory == kept, "{source}");
+                }
+            }
+        }
+        assert!(differing > 1000, "{differing} blocks kept locals");
     }
 
     /// The crypto forms, which random vector words seldom reach, with their

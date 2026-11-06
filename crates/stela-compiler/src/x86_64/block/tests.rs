@@ -1464,18 +1464,18 @@ fn pinned_carry_matches_fallback_for_widths_aliases_and_zero_registers() {
 }
 
 #[test]
-fn pinned_scalar_span_settles_before_the_next_access() {
+fn a_pinned_run_access_recovers_the_locals_it_wrote() {
     use crate::{
         Options, TargetCpu,
-        block::{BlockProfile, CompilationPlan, Features, RecoverySiteKind},
+        block::{BlockProfile, CompilationPlan, Features, RecoveryBinding, RecoverySiteKind},
     };
 
     let words = [
-        0x8b06_02d5u32, // ADD X21,X22,X6
-        0x8b06_0259,    // ADD X25,X18,X6
-        0xd100_0eb2,    // SUB X18,X21,#3
-        0xd100_0f26,    // SUB X6,X25,#3
-        0x3940_0cd3,    // LDRB W19,[X6,#3]
+        0x9100_0449u32, // ADD X9,X2,#1
+        0x9100_086a,    // ADD X10,X3,#2
+        0x8b0a_012b,    // ADD X11,X9,X10
+        0xcb0b_012c,    // SUB X12,X9,X11
+        0x3940_0d2d,    // LDRB W13,[X9,#3]
     ];
     let start = GuestAddress(0x1000045d4);
     let compile = |words: &[u32], start, target| {
@@ -1488,55 +1488,46 @@ fn pinned_scalar_span_settles_before_the_next_access() {
     };
     let target = TargetCpu::Baseline;
     let dit = target.with_data_independent_timing();
-    let grouped = compile(&words, start, target);
-    let fallback = compile(&words, start, dit);
-    assert_eq!(grouped.native.source_map.len(), words.len());
-    for (index, (pc, _)) in grouped.native.source_map.iter().enumerate() {
+    let run = compile(&words, start, target);
+    let without = compile(&words, start, dit);
+    assert_eq!(run.native.source_map.len(), words.len());
+    for (index, (pc, _)) in run.native.source_map.iter().enumerate() {
         assert_eq!(pc.0, start.0 + index as u64 * 4);
     }
     assert!(
-        grouped
-            .native
+        run.native
             .source_map
             .windows(2)
             .all(|rows| rows[0].1 < rows[1].1)
     );
-    assert!(grouped.native.source_map[4].1 < fallback.native.source_map[4].1);
-    let access = grouped
+    assert!(run.native.x86_64_code.len() < without.native.x86_64_code.len());
+    // X9 is the run's local in R9: the access finds the value the run
+    // wrote there, which the frame does not hold yet.
+    let access = run
         .fault_recovery
         .iter()
         .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
         .unwrap();
     assert_eq!(
         access.retirement.instruction_pc(),
-        grouped.native.source_map[4].0
+        run.native.source_map[4].0
     );
     assert_eq!(access.retirement.retired_before(), 4);
-    assert!(access.start >= grouped.native.source_map[4].1);
-    assert!(access.bindings.is_empty());
-    let mut scratch = Code::default();
-    let load_x6 = super::super::register_load(&mut scratch, Register::X(6), true).unwrap();
-    assert!(!grouped.native.x86_64_code[grouped.native.source_map[4].1..].starts_with(load_x6));
-
-    // A shortened prefix, or an independent entry at its second row,
-    // has fewer than two beneficial values and retains its direct body.
-    for (input, pc) in [
-        (&words[..2], start),
-        (&words[1..4], GuestAddress(start.0 + 4)),
-    ] {
-        let compiled = compile(input, pc, target);
-        assert_eq!(
-            compiled.native.x86_64_code,
-            compile(input, pc, dit).native.x86_64_code
-        );
-    }
+    assert!(access.start >= run.native.source_map[4].1);
+    assert_eq!(access.bindings, [RecoveryBinding::gpr(9, 9)]);
+    let without_access = without
+        .fault_recovery
+        .iter()
+        .find(|row| row.site.kind() == RecoverySiteKind::GuestAccess)
+        .unwrap();
+    assert!(without_access.bindings.is_empty());
 
     // Execute an X/W mix through the real pinned ABI with stale high input
     // bits, unchanged flags and unmodified permanently pinned values.
     #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
     {
         use crate::x86_64::asm::vector_extensions::execution::Native;
-        let mut mixed = [words[0] & !(1 << 31), words[1], words[2], words[3]];
+        let mixed = [words[0] & !(1 << 31), words[1], words[2], words[3]];
         let native = compile(&mixed, start, target).native;
         let original = compile(&mixed, start, dit).native;
         assert!(native.x86_64_code.len() < original.x86_64_code.len());
@@ -1550,22 +1541,15 @@ fn pinned_scalar_span_settles_before_the_next_access() {
             *register = 0xfedc_ba98_7654_3210u64.wrapping_mul(index as u64 + 1);
         }
         let mut expected = initial.clone();
-        expected.x[21] = initial.x[22].wrapping_add(initial.x[6]) as u32 as u64;
-        expected.x[25] = initial.x[18].wrapping_add(initial.x[6]);
-        expected.x[18] = expected.x[21].wrapping_sub(3);
-        expected.x[6] = expected.x[25].wrapping_sub(3);
+        expected.x[9] = initial.x[2].wrapping_add(1) as u32 as u64;
+        expected.x[10] = initial.x[3].wrapping_add(2);
+        expected.x[11] = expected.x[9].wrapping_add(expected.x[10]);
+        expected.x[12] = expected.x[9].wrapping_sub(expected.x[11]);
         body.run(
             &mut initial,
             &mut crate::context::ExecutionContext::default(),
         );
         assert_eq!(initial, expected);
-
-        // A flag-setting row must split the proposal instead of exposing
-        // an incompletely settled value to another recipe.
-        mixed[2] |= 1 << 29;
-        let split = compile(&mixed, start, target).native;
-        assert_eq!(split.source_map.len(), mixed.len());
-        assert_eq!(split.source_map[2], original.source_map[2]);
     }
 }
 

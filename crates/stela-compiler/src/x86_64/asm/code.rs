@@ -11,6 +11,9 @@ pub(crate) struct Code {
     /// Whether guest registers live in host registers ([`super::super::pinned`]).
     pub(super) pinned: bool,
     locals: Option<super::super::pinned::LocalRegisters>,
+    /// The locals whose guest values only their hosts hold
+    /// ([`super::super::pinned::Span`]), which a fault recovers from there.
+    dirty: super::super::pinned::Dirty,
     /// The block's PC, in code whose exits keep a link slot
     /// ([`super::super::chain::link_slot`]).
     pub(super) linked_block: Option<u64>,
@@ -19,8 +22,8 @@ pub(crate) struct Code {
     /// Index in the block's source map of the instruction being emitted.
     instruction: usize,
     /// Jumps to check failures, which the block places after its exits,
-    /// with the instructions they fail.
-    failures: Vec<(super::Patch, usize)>,
+    /// with the instructions they fail and the locals dirty there.
+    failures: Vec<(super::Patch, usize, super::super::pinned::Dirty)>,
     /// The masked-base plan for the access being emitted, and the plan the
     /// access applied ([`super::super::masked_base`]).
     base_request: Option<super::super::masked_base::Request>,
@@ -37,6 +40,8 @@ pub(crate) struct EmissionSite {
     pub stack: Option<u8>,
     /// The instruction this site belongs to, where the code is out of line.
     pub source: Option<usize>,
+    /// The locals whose guest values only their hosts hold at the site.
+    pub locals: super::super::pinned::Dirty,
 }
 
 /// A byte and instruction position captured at an emission boundary.
@@ -86,6 +91,7 @@ impl Code {
             sites: Vec::new(),
             pinned: false,
             locals: None,
+            dirty: Default::default(),
             constant_time: false,
             linked_block: None,
             instruction: 0,
@@ -136,14 +142,17 @@ impl Code {
     /// and needs no address in RAX.
     pub(crate) fn check_failure(&mut self, failed: super::Cond) {
         let jump = self.asm().jcc(failed);
-        self.failures.push((jump, self.instruction));
+        self.failures.push((jump, self.instruction, self.dirty));
     }
     /// Place the check failures: a UD2 each, whose site names its instruction.
     pub(crate) fn place_failures(&mut self) {
-        for (jump, instruction) in core::mem::take(&mut self.failures) {
+        for (jump, instruction, dirty) in core::mem::take(&mut self.failures) {
             let mut asm = self.asm();
             asm.bind(jump);
             asm.guest_check_of(instruction);
+            if let Some(site) = self.sites.last_mut() {
+                site.locals = dirty;
+            }
         }
     }
     /// Whether emitters must keep to data operand independent instructions.
@@ -175,6 +184,10 @@ impl Code {
         debug_assert!(self.pinned);
         self.locals = locals;
     }
+    /// The locals a fault in what follows recovers from their hosts.
+    pub(in crate::x86_64) fn set_dirty_locals(&mut self, dirty: super::super::pinned::Dirty) {
+        self.dirty = dirty;
+    }
     /// Give the exits from here on a link slot, in the block at `pc`.
     pub(crate) fn set_linked_block(&mut self, pc: u64) {
         self.linked_block = Some(pc);
@@ -188,6 +201,7 @@ impl Code {
             sites: Some(&mut self.sites),
             pinned: self.pinned,
             locals: self.locals,
+            dirty: self.dirty,
             linked_block: self.linked_block,
         }
     }
@@ -214,6 +228,7 @@ impl Code {
             site: crate::block::RecoverySite::guest_access(),
             stack: None,
             source: None,
+            locals: self.dirty,
         });
     }
     pub(crate) fn sites(&self) -> &[EmissionSite] {
@@ -236,14 +251,18 @@ impl Code {
                 end: base + site.end,
                 ..site
             }));
-        self.failures
-            .extend(other.failures.into_iter().map(|(jump, instruction)| {
-                let moved = super::Patch {
-                    at: base + jump.at,
-                    ..jump
-                };
-                (moved, instruction)
-            }));
+        self.failures.extend(
+            other
+                .failures
+                .into_iter()
+                .map(|(jump, instruction, dirty)| {
+                    let moved = super::Patch {
+                        at: base + jump.at,
+                        ..jump
+                    };
+                    (moved, instruction, dirty)
+                }),
+        );
         self.bytes.extend(other.bytes);
         self.instructions += other.instructions;
     }
@@ -318,13 +337,13 @@ impl Code {
             .collect();
         let failures = self
             .failures
-            .extract_if(.., |(jump, _)| jump.at >= at.bytes)
-            .map(|(jump, instruction)| {
+            .extract_if(.., |(jump, _, _)| jump.at >= at.bytes)
+            .map(|(jump, instruction, dirty)| {
                 let moved = super::Patch {
                     at: jump.at - at.bytes,
                     ..jump
                 };
-                (moved, instruction)
+                (moved, instruction, dirty)
             })
             .collect();
         let tail = Self {
@@ -333,6 +352,7 @@ impl Code {
             sites,
             pinned: self.pinned,
             locals: None,
+            dirty: Default::default(),
             constant_time: self.constant_time,
             linked_block: self.linked_block,
             instruction: self.instruction,
@@ -353,7 +373,7 @@ impl Code {
             "truncate preserves complete faulting instructions"
         );
         self.sites.retain(|site| site.end <= at.bytes);
-        self.failures.retain(|(jump, _)| jump.at < at.bytes);
+        self.failures.retain(|(jump, _, _)| jump.at < at.bytes);
         self.bytes.truncate(at.bytes);
         self.instructions = at.instructions;
     }
@@ -383,7 +403,7 @@ impl Code {
         if let Some(index) = removed_site {
             self.sites.remove(index);
         }
-        for (jump, _) in self.failures.iter_mut().rev() {
+        for (jump, _, _) in self.failures.iter_mut().rev() {
             if jump.at < range.end {
                 break;
             }

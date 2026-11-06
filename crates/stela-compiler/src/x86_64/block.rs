@@ -351,6 +351,11 @@ fn emit_selected(
     };
     let mut cursor = 0;
     let mut next_pinned_span = 0;
+    // The run of locals being emitted (`pinned::Span`), where it ends, and
+    // the instructions emitted in it so far.
+    let mut run: Option<(super::pinned::Run, usize)> = None;
+    let mut run_emitted = 0;
+    let runs = pinned && !code.constant_time() && !checks.translated;
     // What the last instruction emitted left in registers.
     let mut after = Held::NOTHING;
     let mut out_of_line = OutOfLine::default();
@@ -373,6 +378,34 @@ fn emit_selected(
         // A group emitted otherwise may have used the slots.
         if !core::mem::take(&mut emitted_alone) {
             bases.reset();
+        }
+        // A run keeps the guest registers it uses most in scratch registers
+        // (`pinned::Span`). A fault in its next instruction recovers the
+        // ones it has written from there; its end stores them.
+        if let Some((active, end)) = run.as_mut() {
+            active.emitted(code, &instructions[run_emitted..cursor]);
+            run_emitted = cursor;
+            if cursor >= *end
+                && let Some((active, _)) = run.take()
+            {
+                active.leave(code);
+            }
+        }
+        if runs && run.is_none() && cursor >= next_pinned_span {
+            let (count, plan) = super::pinned::Span::plan(&instructions[cursor..]);
+            next_pinned_span = cursor + count.max(1);
+            if let Some(plan) = plan {
+                // Its locals overwrite the slots' kept addresses.
+                if plan.takes_slots() {
+                    bases.reset();
+                }
+                let held_register = match held.rax {
+                    super::Rax::Guest(register) => Some(register),
+                    _ => None,
+                };
+                run = Some((plan.enter(code, held_register), cursor + plan.rows()));
+                run_emitted = cursor;
+            }
         }
         if fuse_simd
             && let Some(group) = super::simd::sha256::HashGroup::recognize(&instructions[cursor..])
@@ -476,54 +509,10 @@ fn emit_selected(
             cursor += count;
             continue;
         }
-        // Pure spans do not cross a guest fault or a native observer.
-        // Flush their frame values before resuming the ordinary pinned path.
-        if pinned && !code.constant_time() && cursor >= next_pinned_span {
-            let (count, plan) = super::pinned::Span::plan(&instructions[cursor..]);
-            next_pinned_span = cursor + count.max(1);
-            if let Some(plan) = plan {
-                let chunk = &instructions[cursor..cursor + count];
-                let (candidate, starts) = plan.emit(chunk, target);
-                let mut baseline = Code::pinned();
-                let mut baseline_after = held;
-                let mut baseline_fixups = vec![];
-                for (index, instruction) in chunk.iter().enumerate() {
-                    baseline_after = emit_single(
-                        &mut baseline,
-                        &mut scratch,
-                        None,
-                        instruction,
-                        &mut baseline_fixups,
-                        SingleOptions {
-                            target,
-                            checks: checks_at(cursor + index),
-                            live_nzcv: false,
-                        },
-                        baseline_after,
-                    );
-                }
-                debug_assert!(baseline_fixups.is_empty());
-                debug_assert!(baseline.sites().is_empty() && candidate.sites().is_empty());
-                if candidate.len() < baseline.len()
-                    && candidate.instructions() <= baseline.instructions()
-                {
-                    let offset = code.len();
-                    block.source_map.extend(
-                        chunk
-                            .iter()
-                            .zip(starts)
-                            .map(|(row, start)| (row.pc, offset + start)),
-                    );
-                    code.append(candidate);
-                    // The last destination is outside the local assignment,
-                    // and settlement MOVs do not touch RAX or the XMM registers.
-                    after = baseline_after;
-                    cursor += count;
-                    continue;
-                }
-            }
-        }
+        // The pair's second fault finds the first's result, which a run's
+        // dirty locals at the pair's start do not hold.
         if (pinned || fuse_pairs)
+            && run.is_none()
             && !code.constant_time()
             && !checks.checks_every_access()
             && matches!(
@@ -766,6 +755,12 @@ fn emit_selected(
         if let Some(target) = instruction.operation.conditional_target() {
             let taken = branch_condition(code, &instruction.operation, held.rax)
                 .expect("a conditional branch's condition");
+            // A side exit's stub is its link slot and exit alone, which is
+            // where `successor_exits` finds it: what the run has written is
+            // stored before the branch, flags untouched.
+            if let Some((active, _)) = run.as_mut() {
+                active.flush(code);
+            }
             side_exits.push((code.asm().jcc(taken), target, block.source_map.len()));
             bases.after(instruction, None);
             emitted_alone = true;
@@ -817,6 +812,10 @@ fn emit_selected(
         bases.after(instruction, applied);
         emitted_alone = true;
         cursor += 1;
+    }
+    if let Some((mut active, _)) = run.take() {
+        active.emitted(code, &instructions[run_emitted..]);
+        active.leave(code);
     }
     debug_assert!(
         fixups.is_empty(),

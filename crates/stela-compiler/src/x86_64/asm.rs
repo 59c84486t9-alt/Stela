@@ -34,6 +34,8 @@ pub(crate) struct Asm<'a> {
     sites: Option<&'a mut Vec<EmissionSite>>,
     pinned: bool,
     locals: Option<super::pinned::LocalRegisters>,
+    /// The locals a fault recovers from their hosts ([`super::pinned::Span`]).
+    dirty: super::pinned::Dirty,
     linked_block: Option<u64>,
 }
 
@@ -62,6 +64,7 @@ impl<'a> Asm<'a> {
             sites: None,
             pinned: false,
             locals: None,
+            dirty: Default::default(),
             linked_block: None,
         }
     }
@@ -127,6 +130,7 @@ impl<'a> Asm<'a> {
                 site: crate::block::RecoverySite::translated_helper(bytes, flags),
                 stack: None,
                 source: None,
+                locals: self.dirty,
             });
         }
     }
@@ -156,6 +160,7 @@ impl<'a> Asm<'a> {
                 site,
                 stack,
                 source: None,
+                locals: self.dirty,
             });
         }
     }

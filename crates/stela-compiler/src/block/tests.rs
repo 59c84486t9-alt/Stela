@@ -636,6 +636,71 @@ fn system_mode_blocks_report_their_direct_successor_exits() {
     }
 }
 
+/// A run's side exits keep the stubs `successor_exits` finds, so a link
+/// patches each exit's own slot: SPTM's chained-fixup loop, whose run keeps
+/// X3 in R9 past both branches.
+#[test]
+fn a_pinned_runs_side_exits_are_where_its_successors_say() {
+    use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit};
+    const BASE: u64 = 0x4100;
+    let words = [
+        0xf940_0043_u32, // ldr x3, [x2]
+        0x7100_183f,     // cmp w1, #6
+        0x5400_01a1,     // b.ne +0x34
+        0xb7f8_03e3,     // tbnz x3, #63, +0x7c
+        0x9240_8c70,     // and x16, x3, #0xfffffffff
+        0xd364_fc71,     // lsr x17, x3, #36
+        0x8b0c_0210,     // add x16, x16, x12
+        0x8b11_e210,     // add x16, x16, x17, lsl #56
+        0xf900_0050,     // str x16, [x2]
+        0xd373_fc70,     // lsr x16, x3, #51
+        0xf100_021f,     // cmp x16, #0
+        0x1a9f_17f0,     // cset w16, eq
+        0xd371_fc71,     // lsr x17, x3, #49
+        0x927e_2e31,     // and x17, x17, #0x3ffc
+        0x17ff_ffec,     // b -0x50
+    ];
+    let source: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+    let compiled = crate::testing::block_for(
+        &source,
+        GuestAddress(BASE),
+        BlockProfile::new(Features::SYSTEM_MODE),
+        crate::TargetCpu::Baseline,
+    )
+    .unwrap();
+    let code = &compiled.native.x86_64_code;
+    // MOV [RDI+0x18], R9: the run stores X3 from its local.
+    assert!(
+        code.windows(4)
+            .any(|bytes| bytes == [0x4c, 0x89, 0x4f, 0x18])
+    );
+    let exits: Vec<_> = compiled
+        .direct_exits
+        .iter()
+        .map(|exit| {
+            assert_eq!(
+                code[exit.offset..exit.offset + DIRECT_EXIT_BYTES],
+                direct_exit(exit.target, exit.word())
+            );
+            (exit.target.0, exit.skipped)
+        })
+        .collect();
+    assert_eq!(
+        exits,
+        [
+            (BASE + 0x38 - 0x50, 0),
+            (BASE + 0x3c, 12),
+            (BASE + 0x88, 11)
+        ]
+    );
+    // The range check's failure follows the exits.
+    let last = compiled.direct_exits.last().unwrap();
+    assert_eq!(
+        last.offset + DIRECT_EXIT_BYTES,
+        crate::x86_64::chain::without_failures(code).len()
+    );
+}
+
 /// With a DC ZVA block size, a terminal DC ZVA zeroes natively and falls
 /// through a chainable direct exit; every other System instruction, and
 /// DC ZVA without one, keeps its System exit.

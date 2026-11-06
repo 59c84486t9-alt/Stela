@@ -41,6 +41,10 @@ pub(super) fn bind(
                 row.start <= marker.start && marker.end <= row.end,
                 "a faulting instruction has one complete location plan"
             );
+            debug_assert!(
+                marker.locals.iter().all(Option::is_none),
+                "regions keep no pinned locals"
+            );
             matched = true;
             output.push(FaultRecovery {
                 start: marker.start,
@@ -71,10 +75,19 @@ pub(super) fn bind(
                 start: marker.start,
                 end: marker.end,
                 site: marker.site,
+                // SP's host if the access moved it, and the locals whose
+                // values only their hosts hold (`pinned::Span`).
                 bindings: marker
                     .stack
                     .map(|host| RecoveryBinding::gpr(STACK_POINTER, host))
                     .into_iter()
+                    .chain(
+                        marker
+                            .locals
+                            .into_iter()
+                            .flatten()
+                            .map(|(guest, host)| RecoveryBinding::gpr(guest, host.number())),
+                    )
                     .collect(),
                 retirement: RetirementPoint::before(
                     pc,
