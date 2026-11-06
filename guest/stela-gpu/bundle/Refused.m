@@ -187,8 +187,6 @@ ABSENT((id)functionHandleWithBinaryFunction:(id)function, BINARY_LINKING, nil)
 
 @implementation StelaGPUArgumentEncoder (Refused)
 
-ABSENT((id)newArgumentEncoderForBufferAtIndex:(NSUInteger)index, ARGUMENT_OBJECT, nil)
-
 - (void)setAccelerationStructure:(id)structure atIndex:(NSUInteger)index
 {
 	REFUSE("setAccelerationStructure:atIndex:", RAY_TRACING);

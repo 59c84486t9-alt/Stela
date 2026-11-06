@@ -404,7 +404,9 @@ static void air_slice(const void **bytes, NSUInteger *length)
 	NSMutableData *_slotBytes;
 	uint8_t *_base;
 	id _buffer;
-	NSMutableDictionary *_nested;
+	/* The pointers to structs, and the index of each. */
+	NSMutableArray *_pointers;
+	NSMutableData *_pointerIndices;
 }
 
 - (instancetype)initWithDevice:(StelaGPUDevice *)device
@@ -417,7 +419,8 @@ static void air_slice(const void **bytes, NSUInteger *length)
 		_encodedLength = length;
 		_alignment = alignment;
 		_slotBytes = [NSMutableData dataWithLength:0];
-		_nested = [NSMutableDictionary dictionary];
+		_pointers = [NSMutableArray arrayWithCapacity:1];
+		_pointerIndices = [NSMutableData dataWithLength:0];
 	}
 	return self;
 }
@@ -449,6 +452,12 @@ static void air_slice(const void **bytes, NSUInteger *length)
 		return;
 	}
 	if (type->_dataType != MTLDataTypeStruct) {
+		/* A pointer to a struct is encoded through an encoder of its own. */
+		if (type->_dataType == MTLDataTypePointer && type->_element &&
+		    type->_element->_dataType == MTLDataTypeStruct) {
+			[_pointers addObject:type];
+			[_pointerIndices appendBytes:&index length:sizeof(index)];
+		}
 		[self addSlotAt:index offset:offset];
 		return;
 	}
@@ -582,6 +591,27 @@ static void air_slice(const void **bytes, NSUInteger *length)
 - (void *)constantDataAtIndex:(NSUInteger)index
 {
 	return [self slot:index];
+}
+
+/* The encoder of the struct the pointer at `index` points to, which a
+ * pointer type sizes and aligns as its element; nil for any other index. */
+- (id)newArgumentEncoderForBufferAtIndex:(NSUInteger)index
+{
+	const NSUInteger *indices = _pointerIndices.bytes;
+	StelaGPUType *pointer = nil;
+	for (NSUInteger i = 0; i < _pointers.count; i++) {
+		if (indices[i] == index) {
+			pointer = [_pointers objectAtIndex:i];
+		}
+	}
+	if (!pointer) {
+		return nil;
+	}
+	StelaGPUArgumentEncoder *encoder = [[StelaGPUArgumentEncoder alloc] initWithDevice:_device
+									     encodedLength:pointer.dataSize
+										 alignment:pointer.alignment];
+	[encoder addType:pointer->_element offset:0 index:0];
+	return encoder;
 }
 
 @end
