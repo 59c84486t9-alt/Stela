@@ -437,7 +437,7 @@ fn automatic_heaps_place_and_alias_resources() {
         .new_heap_buffer(heap, 1000, options(StorageMode::Private), None)
         .unwrap();
     // Each starts where a linear texture over it can bind.
-    assert_eq!(device.heap_usage(heap, 1).unwrap().0, 8192);
+    assert_eq!(device.heap_usage(heap, 1).unwrap().0, 2048);
     assert!(
         device
             .new_heap_buffer(heap, 64, options(StorageMode::Shared), None)
@@ -451,7 +451,7 @@ fn automatic_heaps_place_and_alias_resources() {
         "automatic heaps place"
     );
     device.make_buffer_aliasable(a).unwrap();
-    assert_eq!(device.heap_usage(heap, 1).unwrap().0, 4096);
+    assert_eq!(device.heap_usage(heap, 1).unwrap().0, 1024);
     assert!(device.make_buffer_aliasable(a).is_err());
     let c = device
         .new_heap_buffer(heap, 1000, options(StorageMode::Private), None)

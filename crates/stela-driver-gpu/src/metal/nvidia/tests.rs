@@ -458,7 +458,7 @@ fn linear_and_texture_buffer_alignments() {
     let capabilities = complete(Chip::find(0x1b2).unwrap());
     assert_eq!(
         capabilities.minimum_linear_texture_alignment(P::Rgba8Unorm),
-        4096
+        32
     );
     assert_eq!(capabilities.minimum_linear_texture_alignment(P::Bc1Rgba), 0);
     assert_eq!(

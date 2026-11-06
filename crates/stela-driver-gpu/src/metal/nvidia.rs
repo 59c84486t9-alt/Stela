@@ -111,9 +111,11 @@ pub struct Attachment {
 /// NVK's explicit linear layouts need 32-byte row pitches on Maxwell B and
 /// later (NIL `Image::new_linear`).
 const LINEAR_ROW_ALIGNMENT: u64 = 32;
-/// NVK binds image memory at the kernel's page granularity
-/// (`nvkmd_nouveau` `bind_align_B`), which also aligns linear image offsets.
-const LINEAR_OFFSET_ALIGNMENT: u64 = 4096;
+/// NIL aligns linear images of an explicit row pitch to 32 bytes on Maxwell B
+/// and later, and NVK binds an image without a PTE kind at its memory's
+/// address plus the offset (`nvk_image_plane_bind`), mapping no pages of its
+/// own.
+const LINEAR_OFFSET_ALIGNMENT: u64 = 32;
 /// nouveau's sparse binding uses the GPU's 64 KiB big pages, matching
 /// Vulkan's standard sparse block shapes.
 const SPARSE_PAGE_BYTES: u64 = 64 << 10;

@@ -264,8 +264,8 @@ fn heaps_place_resources_and_report_their_usage() {
         memory,
     )
     .unwrap();
-    // NVK binds a linear texture over a buffer only at a page.
-    assert_eq!(size.align, 4096);
+    // A buffer starts where a linear texture over it can bind.
+    assert_eq!(size.align, 256);
     let placed = NewHeapBufferRequest {
         heap: heap.handle,
         length: 1000,
