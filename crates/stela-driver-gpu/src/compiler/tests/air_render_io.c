@@ -657,6 +657,25 @@ fragment_functions_read_their_pass_samples(void)
    free(other);
 }
 
+/* A value declared uniform is, and the assumption that says so adds nothing. */
+static void
+uniform_values_are_assumed(void)
+{
+   char *assumed = change(sampled, "%f = uitofp", "%u = call i1 @air.is_uniform.i32(i32 %n)\n"
+                                                  "call void @llvm.assume(i1 %u)\n%f = uitofp");
+   char *declared = change(assumed, "declare i32 @air.get_num_samples.i32(i32)\n",
+                           "declare i32 @air.get_num_samples.i32(i32)\n"
+                           "declare i1 @air.is_uniform.i32(i32)\ndeclare void @llvm.assume(i1)\n");
+   struct stela_air_error error = {0};
+   nir_shader *shader = translate(declared, STELA_AIR_FRAGMENT, false, &error);
+   if (!shader)
+      fprintf(stderr, "assumed: %u %s\n", error.kind, error.detail);
+   assert(shader && error.kind == STELA_AIR_OK);
+   ralloc_free(shader);
+   free(assumed);
+   free(declared);
+}
+
 static void
 refuses_unrepresentable_render_io(void)
 {
@@ -741,6 +760,7 @@ main(void)
    fragment_functions_interpolate_their_interpolants();
    void_functions_write_nothing();
    fragment_functions_read_their_pass_samples();
+   uniform_values_are_assumed();
    refuses_unrepresentable_render_io();
    glsl_type_singleton_decref();
    puts("air render io: ok");

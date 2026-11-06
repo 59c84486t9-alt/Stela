@@ -2437,6 +2437,21 @@ interpolant_call(struct translator *t, LLVMValueRef inst, const char *name, size
    return put_value(t, inst, stage_narrow(&t->b, def, io->primitive), 0);
 }
 
+/* "air.is_uniform.<type>", which states what make_uniform guarantees. */
+static bool
+uniform_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name_length,
+             bool *lowered)
+{
+   static const char uniform[] = "air.is_uniform.";
+   *lowered = name_length > strlen(uniform) && !memcmp(name, uniform, strlen(uniform));
+   if (!*lowered)
+      return true;
+   if (LLVMGetNumArgOperands(inst) != 1 ||
+       LLVMTypeOf(inst) != LLVMInt1TypeInContext(LLVMGetTypeContext(LLVMTypeOf(inst))))
+      return fail(t, STELA_AIR_TYPE, "is_uniform answers a bool of one value");
+   return put_value(t, inst, nir_imm_true(&t->b), 0);
+}
+
 /* "air.get_num_samples.i32" and "air.get_sample_position.v2f32", whose last
  * operand is 0, from the pass's samples; an index past them reads one of the
  * 16 positions the pass holds. */
@@ -4071,6 +4086,10 @@ instruction(struct translator *t, LLVMValueRef inst)
             return false;
          if (lowered)
             return true;
+         /* An assumption only permits optimization, so honoring none is exact. */
+         unsigned assume = LLVMLookupIntrinsicID("llvm.assume", strlen("llvm.assume"));
+         if (assume && LLVMGetIntrinsicID(callee) == assume)
+            return true;
       }
       if (LLVMIsAFunction(callee)) {
          unsigned intrinsic = LLVMGetIntrinsicID(callee);
@@ -4148,6 +4167,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       if (lowered)
          return true;
       if (!sample_call(t, inst, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
+      if (!uniform_call(t, inst, name, name_length, &lowered))
          return false;
       if (lowered)
          return true;
