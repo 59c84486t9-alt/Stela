@@ -1511,6 +1511,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(())
     }
 
+    /// A heap's size and how many resources live in it.
+    pub fn heap_occupancy(&self, id: HeapId) -> Result<(u64, u32)> {
+        let heap = self.resources.heaps.get(id.0)?;
+        Ok((heap.descriptor.size, heap.resources))
+    }
+
     /// `usedSize` and `maxAvailableSizeWithAlignment:` of a heap.
     pub fn heap_usage(&self, id: HeapId, alignment: u64) -> Result<(u64, u64)> {
         let heap = self.resources.heaps.get(id.0)?;

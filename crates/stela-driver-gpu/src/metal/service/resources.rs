@@ -278,18 +278,28 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let Ok(required) = self.device.heap_texture_size_and_align(descriptor) else {
             return;
         };
-        let (Ok((used, aligned)), Ok((_, largest))) = (
+        let (Ok((used, aligned)), Ok((_, largest)), Ok((size, resources))) = (
             self.device.heap_usage(heap, required.align),
             self.device.heap_usage(heap, 1),
+            self.device.heap_occupancy(heap),
         ) else {
             return;
         };
         self.noted = Some(alloc::format!(
-            "HEAP FULL used={used} largest={largest} largest_aligned={aligned} texture={}@{:#x} \
-             asked_alignment={:#x}",
+            "HEAP FULL size={size} resources={resources} used={used} largest={largest} \
+             largest_aligned={aligned} texture={}@{:#x} asked_alignment={:#x} \
+             extent={}x{}x{} format={:?} levels={} samples={} layers={} usage={:?}",
             required.size,
             required.align,
-            self.asked_alignment
+            self.asked_alignment,
+            descriptor.width,
+            descriptor.height,
+            descriptor.depth,
+            descriptor.pixel_format,
+            descriptor.mipmap_level_count,
+            descriptor.sample_count,
+            descriptor.array_length,
+            descriptor.usage,
         ));
     }
 
