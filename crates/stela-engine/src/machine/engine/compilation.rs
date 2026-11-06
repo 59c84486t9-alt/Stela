@@ -741,7 +741,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn stored_cell(&mut self, encoding: Encoding) -> Option<usize> {
         let known = self.stored_reads.iter().position(|&read| read == encoding);
         let cell = known.or_else(|| {
+            // A performance counter's reads are stored while it is idle.
+            let counter = self.cpu.pmu.as_ref().and_then(|pmu| pmu.counter(encoding));
             let storable = storable(encoding)
+                || counter.is_some()
                 || self.cpu.apple_read_storage(encoding).is_some()
                 || self
                     .devices

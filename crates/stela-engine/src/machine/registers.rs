@@ -952,6 +952,11 @@ impl Cpu {
                 .reads_storage()
                 .then(|| self.apple.impdef.storage(entry));
         }
+        if let Some(pmu) = &self.pmu
+            && Pmu::owns_on(self.registers.chip(), encoding)
+        {
+            return pmu.idle_storage(encoding);
+        }
         match self.apple(encoding)?.ok()? {
             Apple::SprrPerm(index) => Some(&self.apple.sprr_perm[index] as *const u64 as u64),
             Apple::SprrFields(which) => Some(&self.apple.sprr_fields[which] as *const u64 as u64),

@@ -565,3 +565,22 @@ fn undescribed_settings_and_unwritten_controls_refuse() {
     assert_eq!(pmu.read(PMSR, 0, 0, KERNEL), Ok(1 << 9));
     assert!(Pmu::owns(PMC[8]) && !Pmu::owns(monitor(1, 0, 3)));
 }
+
+/// A counter PMCR0 leaves disabled is read from its storage, which holds
+/// what its last write left; an enabled one counts, so it has none.
+#[test]
+fn idle_counters_are_read_from_their_storage() {
+    let mut pmu = configured(CLOCK);
+    assert_eq!(pmu.idle_storage(PMC[0]), None);
+    assert_eq!(pmu.idle_storage(PMCR0), None);
+    pmu.write(PMC[6], 0x1234, 0, 0, KERNEL).unwrap();
+    let address = pmu.idle_storage(PMC[6]).unwrap();
+    // SAFETY: the counter's storage in `pmu`, which outlives the read.
+    assert_eq!(unsafe { *(address as *const u64) }, 0x1234);
+    assert_eq!(pmu.read(PMC[6], 1_000, 1_000, KERNEL), Ok(0x1234));
+    // Disabling the instruction counter leaves it to its storage too.
+    assert_eq!(pmu.idle_storage(PMC[1]), None);
+    pmu.write(PMCR0, PMCR0_INIT & !(1 << 1), 0, 0, KERNEL)
+        .unwrap();
+    assert!(pmu.idle_storage(PMC[1]).is_some());
+}

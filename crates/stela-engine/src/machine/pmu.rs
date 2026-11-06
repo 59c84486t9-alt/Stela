@@ -368,6 +368,19 @@ impl Pmu {
             && !(self.event(n) == Some(Event::Cycles) && context.waiting)
     }
 
+    /// The index of the counter `encoding` names, if it is one.
+    pub fn counter(&self, encoding: Encoding) -> Option<usize> {
+        self.layout.counters.iter().position(|&pmc| pmc == encoding)
+    }
+
+    /// The address of counter `encoding` while PMCR0 leaves it disabled,
+    /// where a read finds what the last write or count left until a write
+    /// of the monitor changes it.
+    pub fn idle_storage(&self, encoding: Encoding) -> Option<u64> {
+        let n = self.counter(encoding)?;
+        (self.pmcr0 & counter_bit(0, 32, n) == 0).then(|| &self.counters[n] as *const u64 as u64)
+    }
+
     /// Whether an enabled event depends on the core clock.
     pub fn timed(&self) -> bool {
         (0..COUNTERS).any(|n| {
@@ -539,7 +552,7 @@ impl Pmu {
                 .fold(0, |status, n| status | self.layout.status_bit(n)),
             PC_CAPTURE => return Err("PMI PC capture is not modelled"),
             KPC_C5_1 => stored(self.kpc_c5_1)?,
-            _ => match self.layout.counters.iter().position(|&pmc| pmc == encoding) {
+            _ => match self.counter(encoding) {
                 Some(n) => self.counters[n],
                 None => {
                     let index = EXTENSION.iter().position(|&register| register == encoding);
@@ -610,7 +623,7 @@ impl Pmu {
                 return Err("M5 kpc configuration S3_1_C15_C5_1 is not modelled");
             }
             KPC_C5_1 => self.kpc_c5_1 = Some(0),
-            _ => match self.layout.counters.iter().position(|&pmc| pmc == encoding) {
+            _ => match self.counter(encoding) {
                 Some(n) => self.counters[n] = value & self.layout.width.mask(),
                 None => {
                     let index = EXTENSION
