@@ -5801,6 +5801,46 @@ fn implementation_defined_values_complete_natively_after_the_engine_does() {
     assert_eq!(machine.host.installed.last(), Some(&thunk.code));
 }
 
+/// SEVL and a WFE that finds an event complete natively on the event
+/// register once the engine completed one; a WFE that waits opens nothing.
+#[test]
+fn event_instructions_complete_natively_after_the_engine_does() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const SEVL: u32 = 0xd503_20bf;
+    const WFE: u32 = 0xd503_205f;
+    let mut machine = machine(&[ADD, SEVL, ADD, WFE, ADD]);
+    let base = machine.cpu.pc;
+    let fall = |next_pc| NativeExit::Exit {
+        next_pc,
+        kind: ExitKind::Fallthrough as u64,
+    };
+    machine.cpu.pstate = Pstate::reset(1);
+    machine.derived_changed();
+    machine.host.exits = vec![fall(base + 8), fall(base + 16)];
+    machine.step().unwrap();
+    let send = register_read::send_event_thunk(GuestAddress(base + 4), cell_place(SEND_EVENT));
+    assert_eq!(machine.host.installed.last(), Some(&send.code));
+    machine.step().unwrap();
+    let wait = register_read::event_wait_thunk(GuestAddress(base + 12), cell_place(EVENT_WAIT));
+    assert_eq!(machine.host.installed.last(), Some(&wait.code));
+    let event = register_read::Cell {
+        readable: 1,
+        value: machine.cpu.event_storage(),
+    };
+    machine.cpu.pc = base + 4;
+    machine.system_instruction(SEVL).unwrap();
+    assert_eq!(machine.mirrors[SEND_EVENT], event);
+    assert!(machine.cpu.event_is_set());
+    machine.cpu.pc = base + 12;
+    machine.system_instruction(WFE).unwrap();
+    assert_eq!(machine.mirrors[EVENT_WAIT], event);
+    assert!(!machine.cpu.event_is_set());
+    machine.derived_changed();
+    machine.cpu.pc = base + 12;
+    machine.system_instruction(WFE).unwrap();
+    assert_eq!(machine.mirrors[EVENT_WAIT].readable, 0);
+}
+
 /// MSR and MRS of PSTATE.DIT complete natively on the word PSTATE takes
 /// back when native code returns, after the engine completed one plainly.
 #[test]

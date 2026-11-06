@@ -136,6 +136,12 @@ impl EventEndpoint {
         }
     }
 
+    /// Where native code sets and consumes the event register, a byte other
+    /// PEs set too (`x86_64::register_read::event_wait_thunk`).
+    pub(crate) fn event_address(&self) -> u64 {
+        &self.event.event as *const AtomicBool as u64
+    }
+
     pub(crate) fn same_domain(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.domain, &other.domain)
     }

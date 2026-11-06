@@ -633,6 +633,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else if let Some(pan) = pan_write(word).filter(|_| self.host.pan_in_flags()) {
             let cell = cell_place(PAN_WRITES);
             register_read::pan_thunk(GuestAddress(pc), pan, cell)
+        } else if let Some(send) = event_instruction(pc, word) {
+            let (pc, cell) = (GuestAddress(pc), cell_place(EVENT_WAIT));
+            if send {
+                register_read::send_event_thunk(pc, cell_place(SEND_EVENT))
+            } else {
+                register_read::event_wait_thunk(pc, cell)
+            }
         } else if data_barrier(pc, word) {
             let cell = cell_place(DATA_BARRIER);
             register_read::barrier_thunk(GuestAddress(pc), cell)

@@ -429,6 +429,15 @@ impl Cpu {
             .as_ref()
             .map_or(self.event, |memory| memory.event_endpoint().is_set())
     }
+    /// Where native code sets and consumes the event register: one byte,
+    /// at the PE's slot of the machine while it runs.
+    pub fn event_storage(&self) -> u64 {
+        self.canonical_memory
+            .as_ref()
+            .map_or(&self.event as *const bool as u64, |memory| {
+                memory.event_endpoint().event_address()
+            })
+    }
     /// Publish an event to this PE, coalescing with concurrent monitor signals.
     pub fn signal_event(&mut self) {
         if let Some(memory) = &self.canonical_memory {

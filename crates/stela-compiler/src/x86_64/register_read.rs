@@ -54,6 +54,10 @@
 //! are dead at every block exit (the direct exit returns in RAX and RDX,
 //! and chaining uses RCX). An [`energy_thunk`] scales the count it reads
 //! into an energy accumulator's reading.
+//!
+//! A [`send_event_thunk`] sets the event register byte the cell's `value`
+//! names, and an [`event_wait_thunk`] consumes a set one; both clobber RCX
+//! and RDX.
 use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, Rm, ShiftOp, Size, Unary};
 use super::pointer::Thunk;
 use crate::{GuestAddress, GuestState, Place, aarch64::Register, block::ExitKind};
@@ -405,6 +409,34 @@ pub fn barrier_thunk(pc: GuestAddress, cell: Place) -> Thunk {
     let (mut code, miss) = open(cell);
     Asm::new(&mut code).mfence();
     finish(code, miss, pc)
+}
+
+/// The thunk completing SEVL at `pc` while the cell at `cell` is open: it
+/// sets the event register, the byte the cell's `value` points at, else
+/// exits at `pc`. It also clobbers RCX and RDX.
+pub fn send_event_thunk(pc: GuestAddress, cell: Place) -> Thunk {
+    let (mut code, miss) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base_disp8(Gpr::Rax, VALUE));
+    asm.mov_imm32(Gpr::Rdx, 1);
+    asm.mov_store(Size::Byte, Mem::base(Gpr::Rcx, 0), Gpr::Rdx);
+    finish(code, miss, pc)
+}
+
+/// The thunk completing WFE at `pc` while the cell at `cell` is open and the
+/// event register, the byte the cell's `value` points at, is set: it clears
+/// the register in one exchange, as another PE may set it, and completes;
+/// else it exits at `pc` for the engine to wait. It also clobbers RCX and
+/// RDX.
+pub fn event_wait_thunk(pc: GuestAddress, cell: Place) -> Thunk {
+    let (mut code, miss) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    asm.mov_load(Size::Qword, Gpr::Rcx, Mem::base_disp8(Gpr::Rax, VALUE));
+    asm.alu(Alu::Xor, Size::Dword, Gpr::Rdx, Gpr::Rdx);
+    asm.xchg(Size::Byte, Mem::base(Gpr::Rcx, 0), Gpr::Rdx);
+    asm.test(Size::Byte, Gpr::Rdx, Gpr::Rdx);
+    let clear = asm.jcc(Cond::E);
+    finish_unless(code, [miss, clear], pc)
 }
 
 /// The thunk completing `write` at `pc` in the frame while the cell at
@@ -1024,6 +1056,30 @@ mod tests {
         let discard = count_thunk(PC, 31, CELL, READER);
         assert_eq!(run(&discard.code, &mut state), NEXT);
         assert_eq!((state.x, last()), (before, 500));
+    }
+
+    /// SEVL sets the event register; WFE clears a set one and completes, and
+    /// leaves a clear one, or a closed cell, to the engine.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn event_thunks_set_and_consume_the_event_register() {
+        use crate::GuestState;
+        let mut event = alloc::boxed::Box::new(0u8);
+        let mut cell = alloc::boxed::Box::new(Cell::default());
+        let (send, wait) = (send_event_thunk(PC, CELL), event_wait_thunk(PC, CELL));
+        let mut state = GuestState::default();
+        state.anchors[Anchor::Mirrors] = &mut *cell as *mut Cell as u64;
+        assert_eq!(run(&send.code, &mut state), MISS);
+        *cell = Cell {
+            readable: 1,
+            value: &mut *event as *mut u8 as u64,
+        };
+        assert_eq!(run(&wait.code, &mut state), MISS);
+        assert_eq!(run(&send.code, &mut state), NEXT);
+        assert_eq!(*event, 1);
+        assert_eq!(run(&wait.code, &mut state), NEXT);
+        assert_eq!(*event, 0);
+        assert_eq!(run(&wait.code, &mut state), MISS);
     }
 
     /// An energy read scales the ticks of the count since the origin, none

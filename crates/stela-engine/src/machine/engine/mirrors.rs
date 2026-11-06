@@ -108,8 +108,14 @@ pub(super) const PAN_WRITES: usize = CODE_PAGE + 1;
 /// completion until this PE has maintenance for another to complete.
 pub(super) const DATA_BARRIER: usize = PAN_WRITES + 1;
 
+/// The cells of SEVL and WFE (`x86_64::register_read::send_event_thunk`,
+/// `event_wait_thunk`), open on the event register once one completed
+/// plainly in the state; WFE completes natively only when an event is set.
+pub(super) const SEND_EVENT: usize = DATA_BARRIER + 1;
+pub(super) const EVENT_WAIT: usize = SEND_EVENT + 1;
+
 /// The cell of the first of the [`STORED_WRITES`].
-const STORED_WRITE_CELLS: usize = DATA_BARRIER + 1;
+const STORED_WRITE_CELLS: usize = EVENT_WAIT + 1;
 
 /// The IMPLEMENTATION DEFINED registers that a store completes writes of
 /// that get a cell of their own the first time code naming them is installed
@@ -518,6 +524,21 @@ pub(super) fn data_barrier(pc: u64, word: u32) -> bool {
             Synchronization::DataCompletion { nxs: false, .. }
         ))
     )
+}
+
+/// Whether `word` at `pc` is SEVL (true) or WFE without a timeout (false),
+/// if it is one.
+pub(super) fn event_instruction(pc: u64, word: u32) -> Option<bool> {
+    use stela_compiler::aarch64::system::synchronization::WaitKind;
+    let instruction = block::decode_system_mode_instruction(GuestAddress(pc), word).ok()??;
+    match instruction.operation {
+        SystemOperation::SendEvent { local: true } => Some(true),
+        SystemOperation::Wait {
+            kind: WaitKind::Event,
+            timeout_register: None,
+        } => Some(false),
+        _ => None,
+    }
 }
 
 /// Xt of the IC IVAU `word`, if it is one.

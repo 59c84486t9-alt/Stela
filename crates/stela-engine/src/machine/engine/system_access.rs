@@ -122,6 +122,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             },
             SystemOperation::SendEvent { local } => {
                 self.send_event(local);
+                if local {
+                    let value = self.cpu.event_storage();
+                    self.mirrors[SEND_EVENT] = register_read::Cell { readable: 1, value };
+                }
                 self.next()
             }
             SystemOperation::Wait {
