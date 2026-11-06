@@ -237,6 +237,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                         .iter()
                         .map(|binding| (binding.binding, binding.stride))
                         .collect(),
+                    // Members share their blending, so a member may access
+                    // as storage any attachment the class's blend unit
+                    // leaves unwritten.
+                    storage_attachments: attachment_mask(info, |blend| blend.is_empty()),
+                    blended_attachments: attachment_mask(info, |blend| !blend.is_empty()),
                 })
             })
             .collect()
@@ -287,4 +292,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .generated_commands_requirements(layout, set, sequences, request)?;
         Ok((layout, requirements))
     }
+}
+
+/// The color attachments `info` has whose write mask meets `matches`, one
+/// bit each.
+fn attachment_mask(
+    info: &crate::metal::vulkan::object::GraphicsPipelineInfo,
+    matches: impl Fn(crate::metal::vulkan::ColorComponents) -> bool,
+) -> u32 {
+    info.color_formats
+        .iter()
+        .zip(&info.color_blend)
+        .enumerate()
+        .filter(|(_, (format, blend))| format.is_some() && matches(blend.write_mask))
+        .fold(0, |mask, (index, _)| mask | 1 << index)
 }

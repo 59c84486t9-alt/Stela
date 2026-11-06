@@ -1011,6 +1011,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .map(|id| pipelines.interface(id))
             .transpose()?;
         let varyings = pipeline::link_varyings(function, fragment_function)?;
+        let storage_attachments = fragment_function
+            .map(|fragment| {
+                pipeline::storage_attachments(&self.capabilities, fragment, &request.targets)
+            })
+            .transpose()?
+            .unwrap_or_default();
         let tessellation = pipeline::tessellation(
             &self.capabilities,
             function,
@@ -1039,6 +1045,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let linked = Specialization {
             varyings,
             linking: fragment_linked.linking.clone(),
+            storage_attachments,
+            samples: request.targets.raster_sample_count as u32,
             ..Specialization::default()
         };
         let fragment = match request.fragment_function {
@@ -1158,11 +1166,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             pipelines.interface(request.mesh_function)?,
             fragment_function,
         )?;
+        let storage_attachments = fragment_function
+            .map(|fragment| {
+                pipeline::storage_attachments(&self.capabilities, fragment, &request.targets)
+            })
+            .transpose()?
+            .unwrap_or_default();
         let fragment = match request.fragment_function {
             Some(id) => {
                 let specialization = Specialization {
                     varyings: varyings.clone(),
                     linking: linked[2].1.linking.clone(),
+                    storage_attachments,
+                    samples: request.targets.raster_sample_count as u32,
                     ..Specialization::default()
                 };
                 Some(self.compile(id, specialization)?)

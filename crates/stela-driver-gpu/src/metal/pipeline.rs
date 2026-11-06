@@ -27,7 +27,8 @@ use super::{
     pixel_format::{Kind, PixelFormat},
     sampler::test_op,
     shader::{
-        CompiledShader, Interface, NumericClass, Specialization, Stage, Tessellation, Varying,
+        CompiledShader, Interface, NumericClass, Specialization, Stage, StorageAttachment,
+        Tessellation, Varying,
     },
     vertex::{
         Attribute, StageInputDescriptor, VertexDescriptor, patch_input, stage_input, vertex_input,
@@ -564,6 +565,64 @@ pub fn mesh_render_pipeline(
     Ok(plan)
 }
 
+/// The color attachments `fragment` reads, each of which it accesses as
+/// storage in its fragment shader interlock section, as the function's
+/// specialization for a pipeline of `targets`. Its texels then pass the
+/// fragment tests before the function writes them, so it may not write
+/// depth, stencil or coverage, nor discard with a depth or stencil
+/// attachment that a test would write.
+pub fn storage_attachments(
+    capabilities: &Capabilities,
+    fragment: &Interface,
+    targets: &RenderTargets,
+) -> Result<[Option<StorageAttachment>; MAX_COLOR_ATTACHMENTS]> {
+    let mut attachments = [None; MAX_COLOR_ATTACHMENTS];
+    if fragment.attachment_reads == 0 || !targets.rasterization_enabled {
+        return Ok(attachments);
+    }
+    require(capabilities.framebuffer_reads, "framebuffer reads")?;
+    let depth_stencil = targets.depth_attachment_pixel_format.is_some()
+        || targets.stencil_attachment_pixel_format.is_some();
+    require(
+        !(fragment.writes_depth
+            || fragment.writes_stencil
+            || fragment.writes_sample_mask
+            || fragment.discards && depth_stencil
+            || targets.alpha_to_coverage_enabled
+            || targets.alpha_to_one_enabled),
+        "framebuffer reads by a function that writes depth, stencil or coverage",
+    )?;
+    for (index, attachment) in targets.color_attachments.iter().enumerate() {
+        let Some(format) = attachment
+            .pixel_format
+            .filter(|_| fragment.attachment_reads & 1 << index != 0)
+        else {
+            continue;
+        };
+        require(
+            !attachment.uses_source1(),
+            "framebuffer reads of an attachment that blends a second source",
+        )?;
+        let description = format.describe();
+        let realization = description
+            .realization
+            .map_err(|_| Error::Unsupported("framebuffer reads of the pixel format"))?;
+        let raw = |value: u64| value as u8;
+        attachments[index] = Some(StorageAttachment {
+            format: realization.format.raw(),
+            bytes: description.block.bytes,
+            blend: attachment.blending_enabled,
+            write_mask: attachment.write_mask.bits() as u8,
+            operations: [
+                raw(attachment.rgb_blend_operation.raw()),
+                raw(attachment.alpha_blend_operation.raw()),
+            ],
+            factors: attachment.factors().map(|factor| raw(factor.raw())),
+        });
+    }
+    Ok(attachments)
+}
+
 fn amplification(capabilities: &Capabilities, count: u64) -> Result<u32> {
     ensure(count >= 1, "vertex amplification count is at least one")?;
     require(
@@ -642,7 +701,17 @@ fn targets(
             )?;
         }
         color_formats.push(format);
-        color_blend.push(attachment.vulkan());
+        // The function writes the attachments it accesses as storage.
+        let storage = outputs.is_some_and(|outputs| outputs.storage_attachments & 1 << index != 0);
+        color_blend.push(if storage {
+            ColorBlendAttachment {
+                blend_enable: false,
+                write_mask: ColorComponents::EMPTY,
+                ..attachment.vulkan()
+            }
+        } else {
+            attachment.vulkan()
+        });
     }
 
     let depth_format = targets.depth_attachment_pixel_format;

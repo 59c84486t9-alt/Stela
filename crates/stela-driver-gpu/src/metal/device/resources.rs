@@ -19,7 +19,7 @@ use crate::metal::{
     shader::Compiler,
     sparse::{self, MappingRequest, SparseLayout, SparsePages, SparseTexture},
     vulkan::{
-        BufferCreate, BufferUsage, ImageAspects, MemoryProperties,
+        BufferCreate, BufferUsage, ImageAspects, ImageViewType, MemoryProperties,
         backend::{Backend, BufferAllocation, Descriptor, Object},
         command::{BufferImageCopy, Command, SparseBind},
         object::{
@@ -102,6 +102,9 @@ struct TextureObject {
     views: Vec<ImageView>,
     texel_views: Vec<BufferView>,
     attachment_views: Vec<(AttachmentView<()>, ImageView)>,
+    /// Raw texel storage views of attached subresources, with their storage
+    /// descriptors, which framebuffer reads access.
+    attachment_storage: Vec<(AttachmentView<()>, ImageView, u32)>,
     cpu_access: CpuAccess,
     backing: Backing,
     /// The texture's own allocation, when `backing` is `Owned`.
@@ -390,6 +393,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             views,
             texel_views: Vec::new(),
             attachment_views: Vec::new(),
+            attachment_storage: Vec::new(),
             cpu_access: plan.cpu_access,
             backing,
             memory,
@@ -559,6 +563,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             views: created,
             texel_views: Vec::new(),
             attachment_views: Vec::new(),
+            attachment_storage: Vec::new(),
             cpu_access: CpuAccess::None,
             backing: Backing::Owned(0),
             memory: None,
@@ -615,6 +620,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 views: Vec::new(),
                 texel_views: alloc::vec![view],
                 attachment_views: Vec::new(),
+                attachment_storage: Vec::new(),
                 cpu_access: CpuAccess::Linear,
                 backing: Backing::Buffer(buffer_id),
                 memory: None,
@@ -654,6 +660,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 views,
                 texel_views: Vec::new(),
                 attachment_views: Vec::new(),
+                attachment_storage: Vec::new(),
                 cpu_access: CpuAccess::Linear,
                 backing: Backing::Buffer(buffer_id),
                 memory: None,
@@ -703,6 +710,51 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .attachment_views
             .push((view, created));
         Ok(created)
+    }
+
+    /// The `gpuResourceID`-shaped identifier through which framebuffer
+    /// reads access a pass's color attachment: a storage view of the raw
+    /// texels of its attached level and layers, created on first use and
+    /// kept with the texture.
+    pub fn attachment_storage(
+        &mut self,
+        id: TextureId,
+        view: AttachmentView<()>,
+    ) -> Result<ResourceId> {
+        let texture = self.resources.textures.get(id.0)?;
+        if let Some(&(_, _, descriptor)) = texture
+            .attachment_storage
+            .iter()
+            .find(|(key, ..)| *key == view)
+        {
+            return Ok(ResourceId::texture(NULL_DESCRIPTOR, descriptor, 1));
+        }
+        let image = texture
+            .image
+            .ok_or(Error::Invalid("texture buffers are not attachments"))?;
+        let format = resource::raw_texel_format(texture.descriptor.pixel_format)
+            .ok_or(Error::Unsupported("framebuffer reads of the pixel format"))?;
+        let info = ImageViewInfo {
+            view_type: ImageViewType::D2Array,
+            format,
+            components: [crate::metal::vulkan::ComponentSwizzle::Identity; 4],
+            range: view.range,
+            usage: crate::metal::vulkan::ImageUsage::STORAGE,
+        };
+        let created = self.backend.create_image_view(image, &info)?;
+        let descriptor = match self.descriptor(Descriptor::StorageImage(created)) {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                self.backend.destroy(Object::ImageView(created));
+                return Err(error);
+            }
+        };
+        self.resources
+            .textures
+            .get_mut(id.0)?
+            .attachment_storage
+            .push((view, created, descriptor));
+        Ok(ResourceId::texture(NULL_DESCRIPTOR, descriptor, 1))
     }
 
     /// `region` as bands that each hold whole block rows of one image, whose
@@ -973,8 +1025,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .views
             .iter()
             .chain(texture.attachment_views.iter().map(|(_, view)| view))
+            .chain(texture.attachment_storage.iter().map(|(_, view, _)| view))
         {
             self.defer(Object::ImageView(*view));
+        }
+        for &(_, _, descriptor) in &texture.attachment_storage {
+            self.descriptors
+                .release_run(HeapArray::StorageImages, descriptor, 1, self.submitted);
         }
         for view in texture.texel_views {
             self.defer(Object::BufferView(view));

@@ -282,25 +282,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             rasterization_rate_map: request.rasterization_rate_map,
         };
         let mut plan = pass::render_pass(&self.capabilities, &descriptor)?;
-        plan.inputs.ordered = self
-            .backend
-            .physical_device()
-            .features
-            .rasterization_order_color;
-        for (input, color) in plan
-            .inputs
-            .textures
-            .iter_mut()
-            .zip(&request.color_attachments)
-        {
-            if let Some(color) = color {
-                let texture = self.texture_descriptor(color.texture)?;
-                if texture.texture_type == crate::metal::abi::TextureType::D2
-                    && texture.sample_count == 1
-                    && color.level == 0
-                    && color.slice == 0
+        // Framebuffer reads access each color attachment's raw texels.
+        if self.capabilities.framebuffer_reads {
+            for (input, color) in plan.inputs.textures.iter_mut().zip(&plan.color) {
+                let Some(color) = color else { continue };
+                let texture = self.texture_descriptor(color.view.texture)?;
+                if texture.texture_type != crate::metal::abi::TextureType::D3
+                    && crate::metal::resource::raw_texel_format(texture.pixel_format).is_some()
+                    && texture
+                        .usage
+                        .contains(crate::metal::abi::TextureUsage::RENDER_TARGET)
                 {
-                    *input = self.texture_resource_id(color.texture)?;
+                    let view = AttachmentView {
+                        texture: (),
+                        view_type: color.view.view_type,
+                        range: color.view.range,
+                    };
+                    *input = self.attachment_storage(color.view.texture, view)?;
                 }
             }
         }

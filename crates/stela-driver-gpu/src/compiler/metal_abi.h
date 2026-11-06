@@ -33,7 +33,9 @@
  * 16 bytes, and its uint sample count. */
 #define STELA_METAL_TABLE_SAMPLE_POSITIONS 1712u
 #define STELA_METAL_TABLE_SAMPLE_COUNT 1728u
-#define STELA_METAL_TABLE_BYTES 1744u
+/* A fragment table's render encoder blend color, four floats. */
+#define STELA_METAL_TABLE_BLEND_COLOR 1744u
+#define STELA_METAL_TABLE_BYTES 1760u
 
 /* MTLStageInRegionIndirectArguments, which a kernel with stage-in reads at
  * the push constants' arguments address: uint origin[3], then size[3]. */

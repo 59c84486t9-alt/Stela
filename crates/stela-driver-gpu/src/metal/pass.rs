@@ -111,11 +111,11 @@ pub struct RenderingAttachment<T> {
 /// What a fragment function's `[[color(n)]]` inputs read.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AttachmentInputs {
-    /// Each color attachment's texture. Null for what a read cannot address:
-    /// an absent attachment, or one but a whole 2D texture's first level.
+    /// Each color attachment's raw texel storage view
+    /// ([`Device::attachment_storage`](super::device::Device::attachment_storage)).
+    /// Null for what a read cannot address: an absent attachment or a 3D
+    /// texture's depth plane.
     pub textures: [ResourceId; MAX_COLOR_ATTACHMENTS],
-    /// A read sees earlier fragments of its pixel with no barrier.
-    pub ordered: bool,
 }
 
 /// `VkRenderingInfo` and what the encoder checks against it.

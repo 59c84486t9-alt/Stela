@@ -417,6 +417,15 @@ impl Bindings {
         table.address = None;
     }
 
+    fn set_blend_color(&mut self, color: [f32; 4]) {
+        let color = color.map(f32::to_bits);
+        let table = self.table(Stage::Fragment);
+        if table.slots.blend_color != color {
+            table.slots.blend_color = color;
+            table.address = None;
+        }
+    }
+
     fn set_sampler(&mut self, stage: Stage, sampler: ResourceId, index: u32) -> Result<()> {
         ensure(
             (index as usize) < self.tables[0].slots.samplers.len(),

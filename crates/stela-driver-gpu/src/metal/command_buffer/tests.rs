@@ -2441,6 +2441,8 @@ fn resident_draws_switch_pipelines_through_execution_sets() {
         rasterization: true,
         topology: PrimitiveTopologyClass::Triangle,
         vertex_buffers: alloc::vec![(0, Some(16)), (3, None)],
+        storage_attachments: 0,
+        blended_attachments: 1,
     };
     resolver.classes = alloc::vec![class(0, 70), class(2, 71)];
     let color = texture(PixelFormat::Rgba8Unorm);

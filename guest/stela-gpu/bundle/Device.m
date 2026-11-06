@@ -596,6 +596,7 @@ FLAG(supportsDynamicLibraries, DYNAMIC_LIBRARIES)
 FLAG(supportsRenderDynamicLibraries, RENDER_DYNAMIC_LIBRARIES)
 FLAG(supportsPlacementSparse, PLACEMENT_SPARSE)
 FLAG(supportsMemorylessRenderTargets, MEMORYLESS_RENDER_TARGETS)
+FLAG(isFramebufferReadSupported, FRAMEBUFFER_READS)
 
 LIMIT(maxThreadgroupMemoryLength, max_threadgroup_memory_length)
 LIMIT(maxBufferLength, max_buffer_length)

@@ -243,6 +243,8 @@ pub(super) struct RenderState {
     samples: Vec<(CounterSample, PassBoundary)>,
     /// Timestamp queries the pass writes, reset before it begins.
     pub(super) timestamp_resets: Vec<(QueryPool, u32)>,
+    /// What last accessed each color attachment in the pass instance.
+    attachment_paths: [AttachmentPath; MAX_COLOR_ATTACHMENTS],
 }
 
 impl RenderState {
@@ -287,13 +289,56 @@ pub(super) fn render(encoder: &mut Encoder) -> Result<&mut RenderState> {
     }
 }
 
-/// The color attachments `state`'s functions read, one bit each.
-fn attachment_reads(state: &RenderPipelineState) -> u32 {
+/// The color attachments `state`'s fragment function accesses as storage
+/// ([`StorageAttachment`](crate::metal::shader::StorageAttachment)), one bit
+/// each.
+pub(super) fn storage_attachments(state: &RenderPipelineState) -> u32 {
     state
         .interfaces
         .iter()
-        .fold(0, |reads, interface| reads | interface.attachment_reads)
+        .fold(0, |mask, interface| mask | interface.storage_attachments)
 }
+
+/// The color attachments `state`'s blend unit writes, one bit each.
+pub(super) fn blended_attachments(state: &RenderPipelineState) -> u32 {
+    let info = &state.plan.info;
+    (0..MAX_COLOR_ATTACHMENTS)
+        .filter(|&index| {
+            info.color_formats.get(index).is_some_and(Option::is_some)
+                && info
+                    .color_blend
+                    .get(index)
+                    .is_some_and(|blend| !blend.write_mask.is_empty())
+        })
+        .fold(0, |mask, index| mask | 1 << index)
+}
+
+/// What last accessed a color attachment in the pass instance, which a draw
+/// accessing it by the other path waits for.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum AttachmentPath {
+    /// Nothing since the last barrier.
+    #[default]
+    None,
+    /// The blend unit, or the instance's load operation.
+    Blend,
+    /// A fragment function's storage accesses, which follow each other in
+    /// their interlock.
+    Storage,
+}
+
+/// Orders the blend unit's and the load and store operations' accesses of
+/// attachments against fragment functions' storage accesses of them, each
+/// pixel's after its earlier ones.
+const ATTACHMENT_PATHS: Barrier = Barrier {
+    src_stages: PipelineStages::FRAGMENT_SHADER.union(PipelineStages::COLOR_ATTACHMENT_OUTPUT),
+    src_access: Access::SHADER_WRITE.union(Access::COLOR_ATTACHMENT_WRITE),
+    dst_stages: PipelineStages::FRAGMENT_SHADER.union(PipelineStages::COLOR_ATTACHMENT_OUTPUT),
+    dst_access: Access::SHADER_READ
+        .union(Access::SHADER_WRITE)
+        .union(Access::COLOR_ATTACHMENT_READ)
+        .union(Access::COLOR_ATTACHMENT_WRITE),
+};
 
 impl CommandBuffer {
     /// `renderCommandEncoderWithDescriptor:` for a pass whose attachment
@@ -344,6 +389,7 @@ impl CommandBuffer {
             },
             samples,
             timestamp_resets: Vec::new(),
+            attachment_paths: [AttachmentPath::Blend; MAX_COLOR_ATTACHMENTS],
         };
         for &(sample, boundary) in &state.samples {
             if let (CounterSample::Timestamp { pool, query }, true) = (sample, boundary.starts()) {
@@ -424,6 +470,10 @@ impl CommandBuffer {
             }
         }
         self.recorder.pause_statistics();
+        // The store operations follow the functions' storage writes.
+        if state.attachment_paths.contains(&AttachmentPath::Storage) {
+            self.recorder.push(Command::RegionBarrier(ATTACHMENT_PATHS));
+        }
         self.recorder.push(Command::EndRendering);
         self.recorder.resume_statistics(resolver, false)?;
         for &(sample, boundary) in &state.samples {
@@ -637,12 +687,12 @@ impl CommandBuffer {
             matches(plan.stencil_format, pass.stencil_format),
             "pipeline stencil format differs from the pass",
         )?;
-        let reads = attachment_reads(state);
-        if (0..MAX_COLOR_ATTACHMENTS)
-            .any(|index| reads & 1 << index != 0 && pass.inputs.textures[index] == ResourceId::NULL)
-        {
+        let storage = storage_attachments(state);
+        if (0..MAX_COLOR_ATTACHMENTS).any(|index| {
+            storage & 1 << index != 0 && pass.inputs.textures[index] == ResourceId::NULL
+        }) {
             return Err(Error::Unsupported(
-                "reading an attachment but a whole 2D texture's first level",
+                "framebuffer reads of a 3D texture's depth plane",
             ));
         }
         let rebind = render
@@ -860,6 +910,7 @@ impl CommandBuffer {
     pub fn set_blend_color(&mut self, color: [f32; 4]) -> Result<()> {
         render(&mut self.encoder)?;
         self.recorder.push(Command::SetBlendConstants(color));
+        self.bindings.set_blend_color(color);
         Ok(())
     }
 
@@ -1037,6 +1088,12 @@ impl CommandBuffer {
         let render = render(&mut self.encoder)?;
         end_query(&mut self.recorder, &mut render.visibility);
         self.recorder.pause_statistics();
+        // The instance's store operations follow its storage writes, and the
+        // next one's load operations are the blend unit's.
+        if render.attachment_paths.contains(&AttachmentPath::Storage) {
+            self.recorder.push(Command::RegionBarrier(ATTACHMENT_PATHS));
+        }
+        render.attachment_paths = [AttachmentPath::Blend; MAX_COLOR_ATTACHMENTS];
         self.recorder.push(Command::EndRendering);
         between(&mut self.recorder);
         let index = self.recorder.commands().len();
@@ -1416,7 +1473,7 @@ impl CommandBuffer {
         commands
             .into_iter()
             .for_each(|command| self.recorder.push(command));
-        self.order_attachment_reads(resolver)?;
+        self.order_attachments()?;
         self.begin_query(resolver)?;
         self.bindings.flush(
             &mut self.recorder,
@@ -1425,22 +1482,44 @@ impl CommandBuffer {
         )
     }
 
-    /// A draw reading attachments follows the draws before it. Where a read
-    /// does not see them by itself, the pass splits behind a barrier;
-    /// primitives overlapping within one draw stay unordered there, as
-    /// Vulkan offers nothing finer without fragment shader interlock.
-    fn order_attachment_reads(&mut self, resolver: &mut dyn Resolver) -> Result<()> {
+    /// A draw accessing a color attachment by one path follows the pass
+    /// instance's accesses of it by the other: the blend unit's and its
+    /// load operation's, or fragment functions' storage accesses, which
+    /// follow each other through their interlock.
+    fn order_attachments(&mut self) -> Result<()> {
         let render = render(&mut self.encoder)?;
-        let reads = render.pipeline.as_ref().map_or(0, attachment_reads);
-        if reads == 0 || render.pass.inputs.ordered {
+        let Some(pipeline) = render.pipeline.as_ref() else {
             return Ok(());
+        };
+        let storage = storage_attachments(pipeline);
+        let blended = blended_attachments(pipeline);
+        self.order_attachment_paths(storage, blended)
+    }
+
+    /// Orders a draw that accesses the `storage` attachments as storage
+    /// and writes the `blended` ones through the blend unit.
+    pub(super) fn order_attachment_paths(&mut self, storage: u32, blended: u32) -> Result<()> {
+        let render = render(&mut self.encoder)?;
+        let blended = blended & !storage;
+        let waits = (0..MAX_COLOR_ATTACHMENTS).any(|index| {
+            let path = render.attachment_paths[index];
+            storage & 1 << index != 0 && path == AttachmentPath::Blend
+                || blended & 1 << index != 0 && path == AttachmentPath::Storage
+        });
+        if waits {
+            render.attachment_paths = [AttachmentPath::None; MAX_COLOR_ATTACHMENTS];
         }
-        self.render_memory_barrier(
-            resolver,
-            BarrierScope::RENDER_TARGETS,
-            RenderStages::FRAGMENT,
-            RenderStages::FRAGMENT,
-        )
+        for (index, path) in render.attachment_paths.iter_mut().enumerate() {
+            if storage & 1 << index != 0 {
+                *path = AttachmentPath::Storage;
+            } else if blended & 1 << index != 0 && *path == AttachmentPath::None {
+                *path = AttachmentPath::Blend;
+            }
+        }
+        if waits {
+            self.recorder.push(Command::RegionBarrier(ATTACHMENT_PATHS));
+        }
+        Ok(())
     }
 
     /// Validates the pipeline and buffers of a patch draw, uploads its
@@ -1530,7 +1609,7 @@ impl CommandBuffer {
             TessellationArguments::ALIGNMENT,
         )?;
         self.bindings.constants.arguments = upload.address;
-        self.order_attachment_reads(resolver)?;
+        self.order_attachments()?;
         self.begin_query(resolver)?;
         self.bindings.flush(
             &mut self.recorder,
@@ -1571,7 +1650,7 @@ impl CommandBuffer {
             pipeline,
         });
         self.bindings.constants.grid = grid;
-        self.order_attachment_reads(resolver)?;
+        self.order_attachments()?;
         self.begin_query(resolver)?;
         self.bindings.flush(
             &mut self.recorder,

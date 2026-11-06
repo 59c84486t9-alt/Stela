@@ -10,6 +10,7 @@
 #include "util/blob.h"
 #include "llvm-c/BitReader.h"
 #include "util/ralloc.h"
+#include "vulkan/vulkan_core.h"
 #include <assert.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -788,6 +789,25 @@ static const char *blended =
    "!40 = !{i32 0, !\"air.render_target\", i32 0, !\"air.arg_type_name\", !\"float4\","
    " !\"air.arg_name\", !\"previous\"}\n";
 
+/* Returns its render target's color in the first column of pixels and twice
+ * its position elsewhere: a read that only a phi uses. */
+static const char *selected =
+   "define <4 x float> @selected(<4 x float> %previous, <4 x float> %position) {\n"
+   "entry:\n%x = extractelement <4 x float> %position, i64 0\n%first = fcmp olt float %x, 1.0\n"
+   "br i1 %first, label %done, label %other\nother:\n"
+   "%twice = fmul <4 x float> %position, <float 2.0, float 2.0, float 2.0, float 2.0>\nbr label %done\n"
+   "done:\n%r = phi <4 x float> [ %previous, %entry ], [ %twice, %other ]\n"
+   "ret <4 x float> %r\n}\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @selected, !3, !4}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"color\"}\n"
+   "!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.render_target\", i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"previous\"}\n"
+   "!41 = !{i32 1, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n";
+
 /* Reads its barycentric coordinates and interpolates its uv at the
  * centroid. */
 static const char *pulled =
@@ -1093,6 +1113,107 @@ render_stages_compile_at_their_linked_locations(void)
    /* A function reading its render target says so, for its pipeline's draws. */
    assert(reflect(blended, "blended", &reflection, &error));
    assert(reflection.attachment_reads == 1u);
+}
+
+/* The intrinsics of shader, in order. */
+static unsigned
+intrinsics(nir_shader *shader, nir_intrinsic_op *ops, unsigned capacity)
+{
+   unsigned count = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+         if (op == nir_intrinsic_begin_invocation_interlock ||
+             op == nir_intrinsic_end_invocation_interlock || op == nir_intrinsic_image_deref_load ||
+             op == nir_intrinsic_image_deref_store) {
+            assert(count < capacity);
+            ops[count++] = op;
+         }
+      }
+   }
+   return count;
+}
+
+/* A function reading its render target accesses it as storage in its
+ * interlock section: it loads the texel, blends its output over it and
+ * stores it, and writes no color output for the blend unit. */
+static void
+framebuffer_reads_access_storage_attachments(void)
+{
+   struct stela_air_error error;
+   const struct stela_metal_target interlocked = {
+      .nir = &nir_options, .max_instructions = 10000, .max_threadgroup_bytes = 32768,
+      .max_private_bytes = 4096, .max_constant_bytes = 65536, .max_varying_slots = 16,
+      .raster_order_groups = 1,
+   };
+   LLVMMemoryBufferRef input = bitcode(blended);
+   const void *air = LLVMGetBufferStart(input);
+   size_t size = LLVMGetBufferSize(input);
+   /* Without the attachment's layout the read is refused. */
+   const struct stela_metal_specialization plain = {0};
+   assert(!stela_metal_compile(air, size, "blended", &interlocked, &plain, &error) &&
+          error.kind == STELA_AIR_ARGUMENT);
+   /* Source-over blending of an sRGB attachment. */
+   struct stela_metal_attachment attachments[8] = {{
+      .format = VK_FORMAT_B8G8R8A8_SRGB, .bytes = 4, .blend = 1, .write_mask = 0xf,
+      .source_rgb = STELA_AIR_BLEND_SOURCE_ALPHA,
+      .destination_rgb = STELA_AIR_BLEND_ONE_MINUS_SOURCE_ALPHA,
+      .source_alpha = STELA_AIR_BLEND_ONE,
+      .destination_alpha = STELA_AIR_BLEND_ONE_MINUS_SOURCE_ALPHA,
+   }};
+   struct stela_metal_specialization storage = {
+      .attachments = attachments, .attachment_count = 8, .samples = 1};
+   /* A device without interlock cannot order them. */
+   assert(!stela_metal_compile(air, size, "blended", &target, &storage, &error) &&
+          error.kind == STELA_AIR_TARGET);
+   nir_shader *shader = stela_metal_compile(air, size, "blended", &interlocked, &storage, &error);
+   if (!shader)
+      fprintf(stderr, "blended: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.fs.pixel_interlock_ordered && shader->info.fs.early_fragment_tests);
+   nir_intrinsic_op ops[8];
+   unsigned count = intrinsics(shader, ops, ARRAY_SIZE(ops));
+   assert(count == 4 && ops[0] == nir_intrinsic_begin_invocation_interlock &&
+          ops[1] == nir_intrinsic_image_deref_load && ops[2] == nir_intrinsic_image_deref_store &&
+          ops[3] == nir_intrinsic_end_invocation_interlock);
+   nir_foreach_variable_with_modes(var, shader, nir_var_shader_out)
+      assert(var->data.location != FRAG_RESULT_DATA0);
+   assert(!shader->info.fs.uses_sample_shading);
+   stela_metal_release(shader);
+   /* Multisampled, it runs per sample. */
+   storage.samples = 4;
+   shader = stela_metal_compile(air, size, "blended", &interlocked, &storage, &error);
+   assert(shader && shader->info.fs.uses_sample_shading);
+   stela_metal_release(shader);
+   storage.samples = 1;
+   /* A masked-off attachment is only read. */
+   attachments[0].write_mask = 0;
+   shader = stela_metal_compile(air, size, "blended", &interlocked, &storage, &error);
+   count = intrinsics(shader, ops, ARRAY_SIZE(ops));
+   assert(shader && count == 3 && ops[1] == nir_intrinsic_image_deref_load);
+   stela_metal_release(shader);
+   attachments[0].write_mask = 0xf;
+   /* The texel bytes must be the format's, and the format renderable. */
+   attachments[0].bytes = 8;
+   assert(!stela_metal_compile(air, size, "blended", &interlocked, &storage, &error) &&
+          error.kind == STELA_AIR_INPUT);
+   attachments[0] = (struct stela_metal_attachment){.format = VK_FORMAT_BC1_RGB_UNORM_BLOCK, .bytes = 8};
+   assert(!stela_metal_compile(air, size, "blended", &interlocked, &storage, &error) &&
+          error.kind == STELA_AIR_INPUT);
+   LLVMDisposeMemoryBuffer(input);
+   /* A read only a phi uses is loaded before the branch leading to it. */
+   attachments[0] = (struct stela_metal_attachment){
+      .format = VK_FORMAT_R16G16B16A16_SFLOAT, .bytes = 8, .write_mask = 0xf};
+   input = bitcode(selected);
+   shader = stela_metal_compile(LLVMGetBufferStart(input), LLVMGetBufferSize(input), "selected",
+                                &interlocked, &storage, &error);
+   if (!shader)
+      fprintf(stderr, "selected: %u %s\n", error.kind, error.detail);
+   count = intrinsics(shader, ops, ARRAY_SIZE(ops));
+   assert(shader && count == 4 && ops[1] == nir_intrinsic_image_deref_load);
+   stela_metal_release(shader);
+   LLVMDisposeMemoryBuffer(input);
 }
 
 static void
@@ -2773,6 +2894,7 @@ main(void)
    linked_modules_specialize_their_function_constants();
    command_encoding_reflects_barriers();
    buffer_reads_name_each_accessed_slot();
+   framebuffer_reads_access_storage_attachments();
    glsl_type_singleton_decref();
    puts("metal compiler: ok");
    return 0;

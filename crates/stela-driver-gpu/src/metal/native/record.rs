@@ -162,15 +162,18 @@ impl Recorder<'_> {
         }
     }
 
-    fn barrier(&self, barrier: &Barrier) {
+    fn barrier(&self, barrier: &Barrier, flags: vk::DependencyFlags) {
         let barriers = [vk::MemoryBarrier2::default()
             .src_stage_mask(stages(barrier.src_stages))
             .src_access_mask(access(barrier.src_access))
             .dst_stage_mask(stages(barrier.dst_stages))
             .dst_access_mask(access(barrier.dst_access))];
-        let dependency = vk::DependencyInfo::default().memory_barriers(&barriers);
-        // SAFETY: a global memory barrier outside or inside a render pass
-        // the Metal layer split for it.
+        let dependency = vk::DependencyInfo::default()
+            .dependency_flags(flags)
+            .memory_barriers(&barriers);
+        // SAFETY: a global memory barrier outside a render pass or inside
+        // one the Metal layer split for it, or a by-region barrier among
+        // framebuffer-space stages within a pass instance.
         unsafe {
             self.device()
                 .cmd_pipeline_barrier2(self.buffer, &dependency)
@@ -299,7 +302,10 @@ impl Recorder<'_> {
         // state it sets is dynamic in the bound pipeline.
         unsafe {
             match command {
-                Command::Barrier(barrier) => self.barrier(barrier),
+                Command::Barrier(barrier) => self.barrier(barrier, vk::DependencyFlags::empty()),
+                Command::RegionBarrier(barrier) => {
+                    self.barrier(barrier, vk::DependencyFlags::BY_REGION)
+                }
                 Command::BeginRendering(rendering) => self.begin_rendering(rendering),
                 Command::EndRendering => device.cmd_end_rendering(buffer),
                 &Command::BindPipeline {

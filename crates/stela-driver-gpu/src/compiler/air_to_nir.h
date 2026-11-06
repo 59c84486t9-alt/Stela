@@ -44,8 +44,12 @@ typedef nir_deref_instr *(*stela_air_bind_texture)(nir_builder *b,
                                                    const struct glsl_type *type, bool faces,
                                                    nir_def *level, void *data);
 
-/* Resolve render target `location`, a 2D texture of type, for a fragment
- * function's read of it. Returning NULL refuses compilation. */
+/* Resolve render target `location` for a fragment function's access of it:
+ * a 2D texture of type for a read, or, for an attachment its function
+ * accesses as storage (stela_air_attachment_access), a 2D or 2D multisample
+ * array image of type of the attached level, its layers from the attached
+ * slice, whose texels are the format's raw bits. Returning NULL refuses
+ * compilation. */
 typedef nir_deref_instr *(*stela_air_bind_attachment)(nir_builder *b, unsigned location,
                                                       const struct glsl_type *type, void *data);
 
@@ -241,6 +245,8 @@ enum stela_air_device_value {
    STELA_AIR_LOG_BUFFER,
    /* A fragment function's pass's samples per pixel, as a uint. */
    STELA_AIR_SAMPLE_COUNT,
+   /* The render encoder's blend color as a vec4. */
+   STELA_AIR_BLEND_COLOR,
    /* Its pass's sample positions as a uvec4 of a byte per sample for up to
     * 16, first sample lowest: x in 1/16 pixel in the low nibble, y in the
     * high. */
@@ -362,6 +368,49 @@ struct stela_air_options {
  * aggregate constants remain unsupported. The source path awaits qualification.
  * As with the compute entrypoint, nir_options must outlive the returned shader;
  * the owned vendor compiler wrapper must retain a stable qualified options copy. */
+/* MTLBlendFactor and MTLBlendOperation. */
+enum stela_air_blend_factor {
+   STELA_AIR_BLEND_ZERO,
+   STELA_AIR_BLEND_ONE,
+   STELA_AIR_BLEND_SOURCE_COLOR,
+   STELA_AIR_BLEND_ONE_MINUS_SOURCE_COLOR,
+   STELA_AIR_BLEND_SOURCE_ALPHA,
+   STELA_AIR_BLEND_ONE_MINUS_SOURCE_ALPHA,
+   STELA_AIR_BLEND_DESTINATION_COLOR,
+   STELA_AIR_BLEND_ONE_MINUS_DESTINATION_COLOR,
+   STELA_AIR_BLEND_DESTINATION_ALPHA,
+   STELA_AIR_BLEND_ONE_MINUS_DESTINATION_ALPHA,
+   STELA_AIR_BLEND_SOURCE_ALPHA_SATURATED,
+   STELA_AIR_BLEND_COLOR_FACTOR,
+   STELA_AIR_BLEND_ONE_MINUS_COLOR_FACTOR,
+   STELA_AIR_BLEND_ALPHA_FACTOR,
+   STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR,
+};
+enum stela_air_blend_op {
+   STELA_AIR_BLEND_ADD,
+   STELA_AIR_BLEND_SUBTRACT,
+   STELA_AIR_BLEND_REVERSE_SUBTRACT,
+   STELA_AIR_BLEND_MIN,
+   STELA_AIR_BLEND_MAX,
+};
+
+/* A color attachment a fragment function reads, which it accesses as
+ * storage instead of through the blend unit: the function loads the texel
+ * where it first uses the read and, if it writes the attachment, blends,
+ * masks and stores its output when it ends, all in one fragment shader
+ * interlock section, so overlapping fragments read and write each texel in
+ * primitive order. The pipeline writes no color to the attachment. */
+struct stela_air_attachment_access {
+   /* The texel layout; PIPE_FORMAT_NONE leaves the attachment to the blend
+    * unit. */
+   enum pipe_format format;
+   bool blend;
+   /* Bit i writes channel i: red, green, blue, alpha. */
+   unsigned write_mask;
+   enum stela_air_blend_op rgb_op, alpha_op;
+   enum stela_air_blend_factor source_rgb, destination_rgb, source_alpha, destination_alpha;
+};
+
 struct stela_air_stage_options {
    enum stela_air_stage stage;
    struct stela_air_options resources;
@@ -383,6 +432,12 @@ struct stela_air_stage_options {
    /* Whether a fragment function may order its accesses after those of
     * overlapping fragments: the device's fragment shader pixel interlock. */
    bool raster_order_groups;
+   /* A fragment function's color attachments, indexed by location, of a
+    * pipeline of samples per pixel; NULL accesses none as storage. Storage
+    * access needs raster_order_groups, and runs per sample for more than
+    * one sample. */
+   const struct stela_air_attachment_access *attachments;
+   unsigned samples;
 };
 nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
                                   const nir_shader_compiler_options *,

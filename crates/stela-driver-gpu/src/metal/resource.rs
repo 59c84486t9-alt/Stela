@@ -285,6 +285,7 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
         range,
         image.usage,
     );
+    attachment_storage(capabilities, descriptor.pixel_format, usage, &mut image);
     Ok(TexturePlan {
         image,
         memory: MemoryRequest {
@@ -472,6 +473,53 @@ fn effective_usage(
         TextureUsage::SHADER_READ,
         usage.contains(TextureUsage::RENDER_TARGET) && format.contains(C::READ),
     ))
+}
+
+/// The format of a color attachment's raw texel view, which a fragment
+/// function reading the attachment accesses as storage
+/// ([`StorageAttachment`](super::shader::StorageAttachment)): an unsigned
+/// integer format of its texel's size. Vulkan keeps `A8_UNORM` apart from
+/// every other format, so it has none.
+pub fn raw_texel_format(format: PixelFormat) -> Option<Format> {
+    let description = format.describe();
+    if !description.is_color() || format == PixelFormat::A8Unorm {
+        return None;
+    }
+    match description.block.bytes {
+        1 => Some(Format::R8Uint),
+        2 => Some(Format::R16Uint),
+        4 => Some(Format::R32Uint),
+        8 => Some(Format::R32G32Uint),
+        16 => Some(Format::R32G32B32A32Uint),
+        _ => None,
+    }
+}
+
+/// Lets a color render target be viewed by its raw texels as storage, which
+/// framebuffer reads access. Its typed shader views are unchanged.
+fn attachment_storage(
+    capabilities: &Capabilities,
+    format: PixelFormat,
+    usage: TextureUsage,
+    image: &mut ImageInfo,
+) {
+    let Some(raw) = raw_texel_format(format)
+        .filter(|_| capabilities.framebuffer_reads && usage.contains(TextureUsage::RENDER_TARGET))
+    else {
+        return;
+    };
+    // An empty list with a mutable format admits every compatible format.
+    let any = image.flags.contains(ImageCreate::MUTABLE_FORMAT) && image.view_formats.is_empty();
+    image.flags |= ImageCreate::MUTABLE_FORMAT | ImageCreate::EXTENDED_USAGE;
+    image.usage |= ImageUsage::STORAGE;
+    if !any {
+        if image.view_formats.is_empty() {
+            image.view_formats.push(image.format);
+        }
+        if !image.view_formats.contains(&raw) {
+            image.view_formats.push(raw);
+        }
+    }
 }
 
 fn image_info(
@@ -868,6 +916,7 @@ pub fn linear_texture(
         range,
         image.usage,
     );
+    attachment_storage(capabilities, descriptor.pixel_format, usage, &mut image);
     Ok(TexturePlan {
         image,
         memory: memory(descriptor.options)?,

@@ -268,8 +268,6 @@ pub struct Features {
     pub synchronization2: bool,
     pub dynamic_rendering: bool,
     pub dynamic_rendering_local_read: bool,
-    /// `rasterizationOrderColorAttachmentAccess`.
-    pub rasterization_order_color: bool,
     pub maintenance4: bool,
     pub maintenance5: bool,
     pub host_image_copy: bool,

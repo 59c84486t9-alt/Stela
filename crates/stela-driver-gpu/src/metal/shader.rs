@@ -16,6 +16,7 @@ use super::{
         MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_TEXTURE_BINDINGS, ShaderFeatures,
     },
     error::{Result, ensure},
+    pipeline::MAX_COLOR_ATTACHMENTS,
     pixel_format::Numeric,
     reflection::Binding,
     stitching::StitchedGraph,
@@ -281,6 +282,10 @@ pub struct Interface {
     pub command_barriers: bool,
     /// The color attachments a fragment function reads, one bit each.
     pub attachment_reads: u32,
+    /// The color attachments a compiled fragment function accesses as
+    /// storage ([`StorageAttachment`]), one bit each; the blend unit writes
+    /// none of them.
+    pub storage_attachments: u32,
     /// The buffers a compiled specialization accesses, one bit per index:
     /// the arguments it references, which a draw must bind. A reflection
     /// alone accesses none it knows of.
@@ -523,6 +528,28 @@ pub struct Specialization {
     /// linking declare ([`Compiler::sampler_states`]), as (state,
     /// `gpuResourceID`).
     pub samplers: Vec<(u64, u64)>,
+    /// A fragment function's color attachments it reads, which it accesses
+    /// as storage, and its pipeline's samples per pixel.
+    pub storage_attachments: [Option<StorageAttachment>; MAX_COLOR_ATTACHMENTS],
+    pub samples: u32,
+}
+
+/// A color attachment a fragment function reads, which the function also
+/// writes in its fragment shader interlock section rather than through the
+/// blend unit, so overlapping fragments of one draw read and write each
+/// texel in primitive order (`metal/README.md`).
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct StorageAttachment {
+    /// The raw `VkFormat` realizing its pixel format, and its texel bytes.
+    pub format: u32,
+    pub bytes: u32,
+    /// Whether it blends; its `MTLColorWriteMask`; its `MTLBlendOperation`s
+    /// of color and alpha; and its `MTLBlendFactor`s of source and
+    /// destination color, then of source and destination alpha.
+    pub blend: bool,
+    pub write_mask: u8,
+    pub operations: [u8; 2],
+    pub factors: [u8; 4],
 }
 
 /// What a pipeline stage links into its function (`MTLLinkedFunctions` and
@@ -792,6 +819,7 @@ pub(crate) mod tests {
             amplification: false,
             command_barriers: false,
             attachment_reads: 0,
+            storage_attachments: 0,
             buffer_reads: 0,
             constants: Vec::new(),
             features: ShaderFeatures::EMPTY,

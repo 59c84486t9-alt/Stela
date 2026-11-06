@@ -76,6 +76,8 @@ option_set! {
         const SINGLE_TEXEL_ALIGNMENT = 1 << 32;
         /// `supportsMemorylessRenderTargets`.
         const MEMORYLESS_RENDER_TARGETS = 1 << 33;
+        /// `isFramebufferReadSupported`.
+        const FRAMEBUFFER_READS = 1 << 34;
     }
 }
 
@@ -358,6 +360,7 @@ impl Block {
             statistic_counters: has(Flags::STATISTIC_COUNTERS),
             constant_vertex_step: has(Flags::CONSTANT_VERTEX_STEP),
             memoryless_render_targets: has(Flags::MEMORYLESS_RENDER_TARGETS),
+            framebuffer_reads: has(Flags::FRAMEBUFFER_READS),
             counter_sampling,
             sparse_volumes: has(Flags::SPARSE_VOLUMES),
             sparse_samples: formats(
@@ -610,6 +613,7 @@ impl Capabilities {
                 Flags::MEMORYLESS_RENDER_TARGETS,
                 self.memoryless_render_targets,
             )
+            .with(Flags::FRAMEBUFFER_READS, self.framebuffer_reads)
             .with(Flags::SPARSE_VOLUMES, self.sparse_volumes)
             .with(
                 Flags::SINGLE_TEXEL_ALIGNMENT,

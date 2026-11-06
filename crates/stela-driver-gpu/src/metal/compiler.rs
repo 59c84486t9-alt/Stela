@@ -859,6 +859,24 @@ impl AirCompiler {
             .iter()
             .map(|&(state, id)| ffi::ConstexprSampler { state, id })
             .collect();
+        let attachments = specialization.storage_attachments.map(|attachment| {
+            attachment.map_or(ffi::Attachment::default(), |attachment| ffi::Attachment {
+                format: attachment.format,
+                bytes: attachment.bytes,
+                blend: attachment.blend.into(),
+                write_mask: attachment.write_mask,
+                rgb_op: attachment.operations[0],
+                alpha_op: attachment.operations[1],
+                source_rgb: attachment.factors[0],
+                destination_rgb: attachment.factors[1],
+                source_alpha: attachment.factors[2],
+                destination_alpha: attachment.factors[3],
+            })
+        });
+        let storage = specialization
+            .storage_attachments
+            .iter()
+            .any(Option::is_some);
         let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
         let raw = ffi::Specialization {
             workgroup_size: specialization.workgroup_size.unwrap_or_default(),
@@ -880,6 +898,13 @@ impl AirCompiler {
             max_call_stack_depth: linking.max_call_stack_depth,
             sampler_count: count(samplers.len())?,
             samplers: samplers.as_ptr(),
+            attachments: attachments.as_ptr(),
+            attachment_count: if storage {
+                count(attachments.len())?
+            } else {
+                0
+            },
+            samples: specialization.samples.max(1),
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.module.bitcode;
@@ -904,6 +929,12 @@ impl AirCompiler {
         let mut interface = interface;
         // SAFETY: the compiler's live NIR, which the call only reads.
         interface.buffer_reads = unsafe { (self.service.buffer_reads)(shader) };
+        interface.storage_attachments = specialization
+            .storage_attachments
+            .iter()
+            .enumerate()
+            .filter(|(_, attachment)| attachment.is_some())
+            .fold(0, |mask, (index, _)| mask | 1 << index);
         Ok(CompiledShader {
             code: ShaderCode(shader as usize as u64),
             interface,
@@ -1473,6 +1504,7 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         amplification: r.amplification != 0,
         command_barriers: r.command_barriers != 0,
         attachment_reads: r.attachment_reads,
+        storage_attachments: 0,
         buffer_reads: 0,
         constants,
         features,

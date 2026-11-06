@@ -10,6 +10,7 @@
 #include "air_precise.h"
 #include "air_simd.h"
 #include "air_texture.h"
+#include "compiler/nir/nir_format_convert.h"
 #include "llvm-c/Analysis.h"
 #include "llvm-c/BitReader.h"
 #include "llvm-c/Core.h"
@@ -116,6 +117,20 @@ struct translator {
    nir_variable *layer, *viewport;
    /* A post-tessellation vertex function's STELA_AIR_PATCH_IDS. */
    nir_def *patch_ids;
+   /* A fragment function's storage attachments (stela_air_attachment_access):
+    * their mask, each one's heap image and the descriptor index the prelude
+    * resolved, its output, the blend color, and the reads of each, which
+    * stand for the texel until the interlock section loads it. */
+   unsigned storage_attachments;
+   nir_variable *attachment_heaps[AIR_MAX_RENDER_TARGETS];
+   nir_def *attachment_indices[AIR_MAX_RENDER_TARGETS];
+   nir_variable *attachment_outputs[AIR_MAX_RENDER_TARGETS];
+   nir_def *blend_color;
+   struct attachment_read {
+      const struct stela_air_stage_io *io;
+      nir_def *placeholder;
+   } attachment_reads[AIR_MAX_ARGUMENTS];
+   unsigned attachment_read_count;
    struct stela_air_error *error;
    unsigned air_minor;
    unsigned language_major, language_minor;
@@ -551,7 +566,8 @@ device_value(struct translator *t, enum stela_air_device_value value)
    nir_def *def = t->options->load_device_value(&t->b, value, t->options->binding_data);
    unsigned components = value == STELA_AIR_DISPATCH_GRID || value == STELA_AIR_PATCH_IDS ||
                          value == STELA_AIR_THREADGROUP_SHAPE ? 3 :
-                         value == STELA_AIR_SAMPLE_POSITIONS  ? 4 : 1;
+                         value == STELA_AIR_SAMPLE_POSITIONS ||
+                         value == STELA_AIR_BLEND_COLOR ? 4 : 1;
    if (!def || def->num_components != components || def->bit_size != 32 || !binding_prelude(t)) {
       fail(t, STELA_AIR_ARGUMENT, "invalid device value");
       return NULL;
@@ -2192,33 +2208,37 @@ stage_widen(nir_builder *b, nir_def *def, enum stela_air_primitive p)
    return stage_signed(p) ? nir_i2i32(b, def) : nir_u2u32(b, def);
 }
 
-/* The texel of the render target under the fragment, as the input's type. */
+/* The access of color attachment location as storage, or NULL for one the
+ * blend unit writes. */
+static const struct stela_air_attachment_access *
+storage_attachment(const struct translator *t, unsigned location)
+{
+   const struct stela_air_attachment_access *attachments =
+      t->stage_options ? t->stage_options->attachments : NULL;
+   return attachments && location < AIR_MAX_RENDER_TARGETS &&
+          attachments[location].format != PIPE_FORMAT_NONE ? &attachments[location] : NULL;
+}
+
+/* The texel of the render target under the fragment, as the input's type,
+ * for which the function's interlock section loads its storage
+ * attachment's texel. */
 static nir_def *
 attachment_input(struct translator *t, const struct stela_air_stage_io *io)
 {
    nir_builder *b = &t->b;
-   enum glsl_base_type base = io->primitive == STELA_AIR_FLOAT || io->primitive == STELA_AIR_HALF ?
-      GLSL_TYPE_FLOAT : stage_signed(io->primitive) ? GLSL_TYPE_INT : GLSL_TYPE_UINT;
-   nir_deref_instr *texture = t->options->bind_attachment ?
-      t->options->bind_attachment(b, io->location, glsl_texture_type(GLSL_SAMPLER_DIM_2D, false, base),
-                                  t->options->binding_data) : NULL;
-   if (!texture) {
-      fail(t, STELA_AIR_ARGUMENT, "unbound render target input %u", io->location);
+   /* The interlock section loads the attachment's texel. */
+   if (!storage_attachment(t, io->location)) {
+      fail(t, STELA_AIR_ARGUMENT, "render target input %u is not a storage attachment", io->location);
       return NULL;
    }
-   b->shader->info.fs.origin_upper_left = true;
-   nir_tex_instr *tex = nir_tex_instr_create(b->shader, 3);
-   tex->op = nir_texop_txf;
-   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
-   tex->dest_type = nir_get_nir_type_for_glsl_base_type(base);
-   tex->coord_components = 2;
-   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_texture_deref, &texture->def);
-   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_coord,
-                                     nir_f2i32(b, nir_trim_vector(b, nir_load_frag_coord(b), 2)));
-   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
-   nir_def_init(&tex->instr, &tex->def, 4, 32);
-   nir_builder_instr_insert(b, &tex->instr);
-   return stage_narrow(b, nir_trim_vector(b, &tex->def, io->components), io->primitive);
+   if (t->attachment_read_count == ARRAY_SIZE(t->attachment_reads)) {
+      fail(t, STELA_AIR_LIMIT, "too many render target inputs");
+      return NULL;
+   }
+   nir_def *placeholder = nir_undef(b, io->components, stage_bits(io->primitive));
+   t->attachment_reads[t->attachment_read_count++] =
+      (struct attachment_read){.io = io, .placeholder = placeholder};
+   return placeholder;
 }
 
 static nir_variable *
@@ -2522,28 +2542,291 @@ shared_memory_access(const nir_instr *instr)
    }
 }
 
-/* A fragment function with raster order groups: its device buffer and
- * texture accesses, from the first to the last, form a critical section
- * that the overlapping fragments before it leave first, in primitive order.
- * The section opens and closes once in the function's top-level control
- * flow, as fragment shader interlock requires, around the nodes holding
- * those accesses. Groups are not told apart: one order is also each
- * group's. */
+/* Whether src is a storage attachment read's placeholder. */
 static bool
-order_raster_groups(struct translator *t)
+placeholder_source(nir_src *src, void *data)
 {
+   const struct translator *t = data;
+   for (unsigned i = 0; i < t->attachment_read_count; i++) {
+      if (src->ssa == t->attachment_reads[i].placeholder)
+         return false;
+   }
+   return true;
+}
+
+/* Whether instr must follow the overlapping fragments before it: a device
+ * buffer or texture access of a function with raster order groups, or a use
+ * of a storage attachment's texel. */
+static bool
+ordered_instr(struct translator *t, nir_instr *instr)
+{
+   if (t->render.entry.raster_ordered && shared_memory_access(instr))
+      return true;
+   return t->attachment_read_count && !nir_foreach_src(instr, placeholder_source, t);
+}
+
+/* Storage attachment n's image at the cursor. */
+static nir_deref_instr *
+attachment_image(struct translator *t, unsigned n)
+{
+   nir_builder *b = &t->b;
+   return nir_build_deref_array(b, nir_build_deref_var(b, t->attachment_heaps[n]),
+                                t->attachment_indices[n]);
+}
+
+/* The texel under the fragment: its pixel, the layer it renders to and, of
+ * multisampled attachments, its sample. */
+static void
+attachment_texel(struct translator *t, nir_def **coord, nir_def **sample)
+{
+   nir_builder *b = &t->b;
+   nir_def *xy = nir_f2i32(b, nir_trim_vector(b, nir_load_frag_coord(b), 2));
+   *coord = nir_vec4(b, nir_channel(b, xy, 0), nir_channel(b, xy, 1), nir_load_layer_id(b),
+                     nir_imm_int(b, 0));
+   *sample = t->stage_options->samples > 1 ? nir_load_sample_id(b) : nir_imm_int(b, 0);
+}
+
+/* Storage attachment n's texel bits, a 32-bit word per four bytes. */
+static nir_def *
+load_attachment(struct translator *t, unsigned n)
+{
+   nir_builder *b = &t->b;
+   const struct stela_air_attachment_access *access = storage_attachment(t, n);
+   nir_def *coord, *sample;
+   attachment_texel(t, &coord, &sample);
+   bool multisample = t->stage_options->samples > 1;
+   nir_def *texel = nir_image_deref_load(b, 4, 32, &attachment_image(t, n)->def, coord, sample,
+                                         nir_imm_int(b, 0),
+                                         .image_dim = multisample ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
+                                         .image_array = true, .format = PIPE_FORMAT_NONE,
+                                         .access = ACCESS_COHERENT, .dest_type = nir_type_uint32);
+   return nir_trim_vector(b, texel, DIV_ROUND_UP(util_format_get_blocksizebits(access->format), 32));
+}
+
+static void
+store_attachment(struct translator *t, unsigned n, nir_def *bits)
+{
+   nir_builder *b = &t->b;
+   nir_def *coord, *sample;
+   attachment_texel(t, &coord, &sample);
+   bool multisample = t->stage_options->samples > 1;
+   nir_def *words = nir_pad_vector_imm_int(b, bits, 0, 4);
+   nir_image_deref_store(b, &attachment_image(t, n)->def, coord, sample, words, nir_imm_int(b, 0),
+                         .image_dim = multisample ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
+                         .image_array = true, .format = PIPE_FORMAT_NONE,
+                         .access = ACCESS_COHERENT, .src_type = nir_type_uint32);
+}
+
+/* The bits of format's channel `rgba` (red, green, blue or alpha) in each of
+ * its texel's words; zero for a channel it lacks. */
+static void
+channel_bits(enum pipe_format format, unsigned rgba, uint32_t words[4])
+{
+   const struct util_format_description *desc = util_format_description(format);
+   memset(words, 0, 4 * sizeof(*words));
+   for (unsigned c = 0; c < desc->nr_channels; c++) {
+      if (desc->swizzle[rgba] != PIPE_SWIZZLE_X + c)
+         continue;
+      unsigned shift = desc->channel[c].shift, size = desc->channel[c].size;
+      words[shift / 32] |= (uint32_t)BITFIELD64_MASK(size) << (shift % 32);
+   }
+}
+
+/* A factor of Metal's blend equation for the color or alpha part. */
+static nir_def *
+blend_factor(struct translator *t, enum stela_air_blend_factor factor, bool alpha,
+             nir_def *source, nir_def *destination, nir_def *constant)
+{
+   nir_builder *b = &t->b;
+   unsigned components = alpha ? 1 : 3;
+   nir_def *one = nir_imm_float(b, 1.0f);
+   nir_def *part;
+#define PART(v) (alpha ? nir_channel(b, (v), 3) : nir_trim_vector(b, (v), 3))
+#define ALPHA(v) (nir_channel(b, (v), 3))
+   switch (factor) {
+   case STELA_AIR_BLEND_ZERO: part = nir_imm_float(b, 0.0f); break;
+   case STELA_AIR_BLEND_ONE: part = one; break;
+   case STELA_AIR_BLEND_SOURCE_COLOR: part = PART(source); break;
+   case STELA_AIR_BLEND_ONE_MINUS_SOURCE_COLOR: part = nir_fsub(b, one, PART(source)); break;
+   case STELA_AIR_BLEND_SOURCE_ALPHA: part = ALPHA(source); break;
+   case STELA_AIR_BLEND_ONE_MINUS_SOURCE_ALPHA: part = nir_fsub(b, one, ALPHA(source)); break;
+   case STELA_AIR_BLEND_DESTINATION_COLOR: part = PART(destination); break;
+   case STELA_AIR_BLEND_ONE_MINUS_DESTINATION_COLOR: part = nir_fsub(b, one, PART(destination)); break;
+   case STELA_AIR_BLEND_DESTINATION_ALPHA: part = ALPHA(destination); break;
+   case STELA_AIR_BLEND_ONE_MINUS_DESTINATION_ALPHA: part = nir_fsub(b, one, ALPHA(destination)); break;
+   case STELA_AIR_BLEND_SOURCE_ALPHA_SATURATED:
+      part = alpha ? one : nir_fmin(b, ALPHA(source), nir_fsub(b, one, ALPHA(destination)));
+      break;
+   case STELA_AIR_BLEND_COLOR_FACTOR: part = PART(constant); break;
+   case STELA_AIR_BLEND_ONE_MINUS_COLOR_FACTOR: part = nir_fsub(b, one, PART(constant)); break;
+   case STELA_AIR_BLEND_ALPHA_FACTOR: part = ALPHA(constant); break;
+   case STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR: part = nir_fsub(b, one, ALPHA(constant)); break;
+   default: UNREACHABLE("validated blend factor");
+   }
+#undef PART
+#undef ALPHA
+   return part->num_components == components ? part : nir_replicate(b, part, components);
+}
+
+static nir_def *
+blend_part(struct translator *t, const struct stela_air_attachment_access *access, bool alpha,
+           nir_def *source, nir_def *destination, nir_def *constant)
+{
+   nir_builder *b = &t->b;
+   enum stela_air_blend_op op = alpha ? access->alpha_op : access->rgb_op;
+   nir_def *s = alpha ? nir_channel(b, source, 3) : nir_trim_vector(b, source, 3);
+   nir_def *d = alpha ? nir_channel(b, destination, 3) : nir_trim_vector(b, destination, 3);
+   if (op == STELA_AIR_BLEND_MIN)
+      return nir_fmin(b, s, d);
+   if (op == STELA_AIR_BLEND_MAX)
+      return nir_fmax(b, s, d);
+   nir_def *sf = nir_fmul(b, s, blend_factor(t, alpha ? access->source_alpha : access->source_rgb,
+                                             alpha, source, destination, constant));
+   nir_def *df = nir_fmul(b, d, blend_factor(t, alpha ? access->destination_alpha :
+                                                        access->destination_rgb,
+                                             alpha, source, destination, constant));
+   return op == STELA_AIR_BLEND_ADD ? nir_fadd(b, sf, df) :
+          op == STELA_AIR_BLEND_SUBTRACT ? nir_fsub(b, sf, df) : nir_fsub(b, df, sf);
+}
+
+/* Metal's blend of source over destination, both RGBA, for a normalized or
+ * float attachment: a normalized one clamps its inputs to its range. */
+static nir_def *
+blend(struct translator *t, const struct stela_air_attachment_access *access, nir_def *source,
+      nir_def *destination)
+{
+   nir_builder *b = &t->b;
+   const struct util_format_description *desc = util_format_description(access->format);
+   int channel = util_format_get_first_non_void_channel(access->format);
+   nir_def *constant = t->blend_color;
+   if (channel >= 0 && desc->channel[channel].normalized) {
+      bool snorm = desc->channel[channel].type == UTIL_FORMAT_TYPE_SIGNED;
+      nir_def *low = nir_imm_float(b, snorm ? -1.0f : 0.0f), *high = nir_imm_float(b, 1.0f);
+      source = nir_fclamp(b, source, low, high);
+      if (constant)
+         constant = nir_fclamp(b, constant, low, high);
+   }
+   nir_def *rgb = blend_part(t, access, false, source, destination, constant);
+   nir_def *a = blend_part(t, access, true, source, destination, constant);
+   return nir_vector_insert_imm(b, nir_pad_vector(b, rgb, 4), a, 3);
+}
+
+/* Writes storage attachment n with the function's output: blended, written
+ * where its mask allows, the rest of the texel kept. */
+static void
+write_attachment(struct translator *t, unsigned n, nir_def *destination, nir_def *bits)
+{
+   nir_builder *b = &t->b;
+   const struct stela_air_attachment_access *access = storage_attachment(t, n);
+   nir_variable *output = t->attachment_outputs[n];
+   unsigned mask = access->write_mask & 0xf;
+   if (!output || !mask)
+      return;
+   bool integer = util_format_is_pure_integer(access->format);
+   nir_def *value = nir_load_var(b, output);
+   nir_def *defaults[4] = {
+      integer ? nir_imm_int(b, 0) : nir_imm_float(b, 0.0f),
+      integer ? nir_imm_int(b, 0) : nir_imm_float(b, 0.0f),
+      integer ? nir_imm_int(b, 0) : nir_imm_float(b, 0.0f),
+      integer ? nir_imm_int(b, 1) : nir_imm_float(b, 1.0f),
+   };
+   nir_def *channels[4];
+   for (unsigned i = 0; i < 4; i++)
+      channels[i] = i < value->num_components ? nir_channel(b, value, i) : defaults[i];
+   nir_def *source = nir_vec(b, channels, 4);
+   if (access->blend && !integer)
+      source = blend(t, access, source, destination);
+   nir_def *packed = nir_format_pack_rgba(b, access->format, source);
+   if (mask != 0xf) {
+      if (access->format == PIPE_FORMAT_R9G9B9E5_FLOAT) {
+         /* Its channels share their exponent: the kept ones pack again. */
+         nir_def *merged[4];
+         for (unsigned i = 0; i < 4; i++)
+            merged[i] = nir_channel(b, mask & 1u << i ? source : destination, i);
+         packed = nir_format_pack_rgba(b, access->format, nir_vec(b, merged, 4));
+      } else {
+         uint32_t written[4] = {0};
+         for (unsigned i = 0; i < 4; i++) {
+            if (!(mask & 1u << i))
+               continue;
+            uint32_t words[4];
+            channel_bits(access->format, i, words);
+            for (unsigned w = 0; w < 4; w++)
+               written[w] |= words[w];
+         }
+         nir_def *keep[4];
+         for (unsigned w = 0; w < packed->num_components; w++) {
+            keep[w] = nir_ior(b, nir_iand_imm(b, nir_channel(b, packed, w), written[w]),
+                              nir_iand_imm(b, nir_channel(b, bits, w), ~written[w]));
+         }
+         packed = nir_vec(b, keep, packed->num_components);
+      }
+   }
+   /* A helper invocation writes nothing. */
+   nir_push_if(b, nir_inot(b, nir_is_helper_invocation(b, 1)));
+   store_attachment(t, n, packed);
+   nir_pop_if(b, NULL);
+}
+
+/* Turns storage attachment outputs into the function's own variables, which
+ * write_attachment reads where the function ends. */
+static bool
+attachment_outputs(struct translator *t)
+{
+   for (unsigned i = 0; i < t->render.entry.output_count; i++) {
+      const struct stela_air_stage_io *io = &t->render.outputs[i];
+      if (io->absent || !t->outputs[i])
+         continue;
+      if (io->semantic == STELA_AIR_DEPTH || io->semantic == STELA_AIR_STENCIL ||
+          io->semantic == STELA_AIR_SAMPLE_MASK)
+         return fail(t, STELA_AIR_ARGUMENT,
+                     "storage attachments run after the fragment tests, so their function may not write depth, stencil or coverage");
+      if (io->semantic != STELA_AIR_RENDER_TARGET || !storage_attachment(t, io->location))
+         continue;
+      if (io->index)
+         return fail(t, STELA_AIR_ARGUMENT, "a storage attachment has no second blend source");
+      nir_variable *var = t->outputs[i];
+      exec_node_remove(&var->node);
+      var->data.mode = nir_var_function_temp;
+      exec_list_push_tail(&t->b.impl->locals, &var->node);
+      t->attachment_outputs[io->location] = var;
+   }
+   nir_fixup_deref_modes(t->b.shader);
+   return true;
+}
+
+/* A fragment function with raster order groups or storage attachments: its
+ * accesses that must follow those of the overlapping fragments before it,
+ * from the first to the last, form a critical section that those fragments
+ * leave first, in primitive order. The section opens and closes once in the
+ * function's top-level control flow, as fragment shader interlock requires,
+ * around the nodes holding those accesses. It opens loading each storage
+ * attachment's texel and closes storing each one the function writes, where
+ * the function ends. Raster order groups are not told apart: one order is
+ * also each group's. */
+static bool
+order_fragments(struct translator *t)
+{
+   bool storage = t->storage_attachments != 0;
+   if (!storage && !t->render.entry.raster_ordered)
+      return true;
    if (!t->stage_options->raster_order_groups)
       return fail(t, STELA_AIR_TARGET, "raster order groups need the device's fragment shader interlock");
+   if (storage && !attachment_outputs(t))
+      return false;
    nir_function_impl *impl = nir_shader_get_entrypoint(t->b.shader);
    nir_cursor begin = {0}, end = {0};
    bool found = false;
    foreach_list_typed(nir_cf_node, node, node, &impl->body) {
       if (node->type == nir_cf_node_block) {
          nir_foreach_instr(instr, nir_cf_node_as_block(node)) {
-            if (!shared_memory_access(instr))
+            if (!ordered_instr(t, instr))
                continue;
+            /* A phi uses its sources where its predecessors end, in the
+             * node before its block. */
             if (!found)
-               begin = nir_before_instr(instr);
+               begin = instr->type == nir_instr_type_phi ? nir_before_cf_node(nir_cf_node_prev(node))
+                                                          : nir_before_instr(instr);
             end = nir_after_instr(instr);
             found = true;
          }
@@ -2552,7 +2835,7 @@ order_raster_groups(struct translator *t)
       bool accesses = false;
       nir_foreach_block_in_cf_node(block, node) {
          nir_foreach_instr(instr, block)
-            accesses |= shared_memory_access(instr);
+            accesses |= ordered_instr(t, instr);
       }
       if (!accesses)
          continue;
@@ -2562,17 +2845,42 @@ order_raster_groups(struct translator *t)
       found = true;
    }
    /* A function whose grouped arguments go unused orders nothing. */
-   if (!found)
+   if (!found && !storage)
       return true;
+   if (!found)
+      begin = nir_after_block_before_jump(nir_impl_last_block(impl));
    nir_variable_mode modes = nir_var_mem_global | nir_var_mem_ssbo | nir_var_image;
    nir_builder *b = &t->b;
-   b->cursor = end;
-   nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_RELEASE, modes);
-   nir_end_invocation_interlock(b);
    b->cursor = begin;
    nir_begin_invocation_interlock(b);
    nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_ACQUIRE, modes);
+   nir_def *bits[AIR_MAX_RENDER_TARGETS] = {0}, *texels[AIR_MAX_RENDER_TARGETS] = {0};
+   u_foreach_bit(n, t->storage_attachments) {
+      bits[n] = load_attachment(t, n);
+      texels[n] = nir_format_unpack_rgba(b, bits[n], storage_attachment(t, n)->format);
+   }
+   for (unsigned i = 0; i < t->attachment_read_count; i++) {
+      const struct attachment_read *read = &t->attachment_reads[i];
+      nir_def *texel = nir_trim_vector(b, texels[read->io->location], read->io->components);
+      nir_def_rewrite_uses(read->placeholder, stage_narrow(b, texel, read->io->primitive));
+      nir_instr_remove(nir_def_instr(read->placeholder));
+   }
+   if (storage) {
+      b->cursor = nir_after_block_before_jump(nir_impl_last_block(impl));
+      u_foreach_bit(n, t->storage_attachments)
+         write_attachment(t, n, texels[n], bits[n]);
+   } else {
+      b->cursor = end;
+   }
+   nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_RELEASE, modes);
+   nir_end_invocation_interlock(b);
    t->b.shader->info.fs.pixel_interlock_ordered = true;
+   nir_progress(true, impl, nir_metadata_none);
+   if (storage) {
+      /* The fragment tests decide which fragments write the attachments. */
+      t->b.shader->info.fs.early_fragment_tests = true;
+      nir_lower_vars_to_ssa(t->b.shader);
+   }
    return true;
 }
 
@@ -2628,11 +2936,95 @@ sample_call(struct translator *t, LLVMValueRef inst, const char *name, size_t na
    return put_value(t, inst, nir_fmul_imm(b, nir_u2f32(b, sixteenths), 1.0 / 16.0), 0);
 }
 
+/* Whether a factor of access reads the blend color. */
+static bool
+reads_blend_color(const struct stela_air_attachment_access *access)
+{
+   const enum stela_air_blend_factor factors[] = {
+      access->source_rgb, access->destination_rgb, access->source_alpha, access->destination_alpha,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(factors); i++) {
+      if (factors[i] >= STELA_AIR_BLEND_COLOR_FACTOR && factors[i] <= STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR)
+         return true;
+   }
+   return false;
+}
+
+/* Whether the texel layout of format is one storage attachments convert: a
+ * plain color layout of 1, 2, 4, 8 or 16 bytes, or a packed float one. */
+static bool
+storage_format(enum pipe_format format)
+{
+   if (format == PIPE_FORMAT_R9G9B9E5_FLOAT || format == PIPE_FORMAT_R11G11B10_FLOAT)
+      return true;
+   const struct util_format_description *desc = util_format_description(format);
+   if (!desc || desc->layout != UTIL_FORMAT_LAYOUT_PLAIN || desc->block.width != 1 ||
+       desc->block.height != 1 || (desc->colorspace != UTIL_FORMAT_COLORSPACE_RGB &&
+                                   desc->colorspace != UTIL_FORMAT_COLORSPACE_SRGB))
+      return false;
+   if (desc->block.bits != 8 && desc->block.bits != 16 && desc->block.bits != 32 &&
+       desc->block.bits != 64 && desc->block.bits != 128)
+      return false;
+   for (unsigned c = 0; c < desc->nr_channels; c++) {
+      if (desc->channel[c].type == UTIL_FORMAT_TYPE_FIXED)
+         return false;
+      /* Wider layouts unpack channels of one size, the narrow ones in
+       * order. */
+      if (desc->block.bits > 32 && desc->channel[c].size != desc->channel[0].size)
+         return false;
+      if (c && desc->block.bits <= 32 &&
+          desc->channel[c].shift != desc->channel[c - 1].shift + desc->channel[c - 1].size)
+         return false;
+   }
+   return true;
+}
+
+/* Resolves each storage attachment's image in the prelude, with the blend
+ * color its factors read. */
+static bool
+attachment_prelude(struct translator *t)
+{
+   for (unsigned n = 0; n < AIR_MAX_RENDER_TARGETS; n++) {
+      const struct stela_air_attachment_access *access = storage_attachment(t, n);
+      if (!access)
+         continue;
+      if (!t->stage_options->raster_order_groups)
+         return fail(t, STELA_AIR_TARGET, "storage attachments need the device's fragment shader interlock");
+      if (!storage_format(access->format))
+         return fail(t, STELA_AIR_ARGUMENT, "render target %u has no storage texel layout", n);
+      if (!t->options->bind_attachment)
+         return fail(t, STELA_AIR_ARGUMENT, "unbound render target %u", n);
+      bool multisample = t->stage_options->samples > 1;
+      const struct glsl_type *type =
+         glsl_image_type(multisample ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D, true, GLSL_TYPE_UINT);
+      nir_deref_instr *image = t->options->bind_attachment(&t->b, n, type, t->options->binding_data);
+      if (!image || !binding_prelude(t))
+         return fail(t, STELA_AIR_ARGUMENT, "unbound render target %u", n);
+      nir_deref_instr *parent = image->deref_type == nir_deref_type_array ?
+         nir_deref_instr_parent(image) : NULL;
+      if (!parent || parent->deref_type != nir_deref_type_var || !glsl_type_is_image(image->type))
+         return fail(t, STELA_AIR_ARGUMENT, "render target %u is not a heap image", n);
+      /* The interlock section derefs it again where it accesses it; the
+       * structurizer drops this deref. */
+      t->attachment_heaps[n] = parent->var;
+      t->attachment_indices[n] = image->arr.index.ssa;
+      if (access->blend && reads_blend_color(access) && !t->blend_color &&
+          !(t->blend_color = device_value(t, STELA_AIR_BLEND_COLOR)))
+         return false;
+      t->storage_attachments |= 1u << n;
+   }
+   if (t->storage_attachments)
+      t->b.shader->info.fs.origin_upper_left = true;
+   return true;
+}
+
 static bool
 stage_arguments(struct translator *t, LLVMValueRef fn)
 {
    bool slots[UINT8_MAX + 1] = {0};
    t->fields = t->render.arguments.fields;
+   if (t->stage_options->stage == STELA_AIR_FRAGMENT && !attachment_prelude(t))
+      return false;
    /* Its builtins and stage-in read the patch's IDs. */
    if (t->render.entry.patch && !(t->patch_ids = device_value(t, STELA_AIR_PATCH_IDS)))
       return false;
@@ -5501,10 +5893,11 @@ translate(const void *bitcode, size_t size, const char *entry,
       nir_lower_explicit_io(t.b.shader, nir_var_function_temp, nir_address_format_32bit_offset);
       nir_remove_dead_variables(t.b.shader, nir_var_function_temp, NULL);
    }
+   if (stage && stage->stage == STELA_AIR_FRAGMENT && !order_fragments(&t))
+      goto done;
    if (stage && stage->stage == STELA_AIR_FRAGMENT)
       shade_per_sample(t.b.shader);
-   if (stage && t.render.entry.raster_ordered && !order_raster_groups(&t))
-      goto done;
+
    if (stage || t.shared_resources || t.shared_barriers)
       nir_shader_gather_info(t.b.shader, nir_shader_get_entrypoint(t.b.shader));
    nir_validate_shader(t.b.shader, stage ? "AIR bounded render translation" : "AIR bounded compute translation");

@@ -182,6 +182,10 @@ pub struct VertexBuffer {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Barrier(Barrier),
+    /// A barrier within a pass instance (`dynamicRenderingLocalRead`) among
+    /// framebuffer-space stages: each pixel's accesses follow its earlier
+    /// ones (`VK_DEPENDENCY_BY_REGION_BIT`).
+    RegionBarrier(Barrier),
     BeginRendering(Rendering),
     EndRendering,
     BindPipeline {

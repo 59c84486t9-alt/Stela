@@ -125,6 +125,18 @@ struct stela_metal_linked_varying {
 
 #define STELA_METAL_CONSTANT_VALUE_BYTES 24u
 
+/* A color attachment a fragment function reads and writes as storage
+ * (stela_air_attachment_access): the VkFormat realizing its pixel format,
+ * zero for one the blend unit writes, and its texel bytes; then its
+ * MTLRenderPipelineColorAttachmentDescriptor's blending: whether it blends,
+ * its MTLColorWriteMask, its MTLBlendOperations of color and alpha, and its
+ * MTLBlendFactors of source and destination color and alpha. */
+struct stela_metal_attachment {
+   uint32_t format, bytes;
+   uint8_t blend, write_mask, rgb_op, alpha_op;
+   uint8_t source_rgb, destination_rgb, source_alpha, destination_alpha;
+};
+
 /* shader.rs Specialization, with a post-tessellation vertex function's
  * pipeline tessellation, and the stage-in layout a kernel or
  * post-tessellation vertex function fetches by; either may be NULL, and
@@ -156,8 +168,13 @@ struct stela_metal_specialization {
     * linked modules (stela_metal_sampler_states). */
    uint32_t sampler_count;
    const struct stela_air_constexpr_sampler *samplers;
+   /* A fragment function's color attachments, attachment_count of them,
+    * and its pipeline's samples per pixel. */
+   const struct stela_metal_attachment *attachments;
+   uint32_t attachment_count, samples;
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 120u
+#define STELA_METAL_SPECIALIZATION_BYTES 136u
+#define STELA_METAL_ATTACHMENT_BYTES 16u
 #define STELA_METAL_CONSTEXPR_SAMPLER_BYTES 16u
 #define STELA_METAL_MODULE_BYTES 32u
 #define STELA_METAL_LINKED_FUNCTION_BYTES 16u

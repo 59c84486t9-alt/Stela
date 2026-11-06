@@ -61,6 +61,10 @@ pub struct IndirectRenderClass {
     /// The vertex buffer indices the pipelines read, with their static
     /// strides.
     pub vertex_buffers: Vec<(u32, Option<u32>)>,
+    /// The color attachments its pipelines' fragment functions may access
+    /// as storage, and those their blend unit writes, one bit each.
+    pub storage_attachments: u32,
+    pub blended_attachments: u32,
 }
 
 /// What an indirect commands layout over a [`GeneratedSequence`] binds.
@@ -275,6 +279,7 @@ impl CommandBuffer {
             }
             for (slot, execution) in executions.iter().enumerate() {
                 let class = &classes[execution.class];
+                self.order_attachment_paths(class.storage_attachments, class.blended_attachments)?;
                 let last = bound.replace((execution.class, execution.primitive));
                 // Executions that switch shaders leave no pipeline bound.
                 if class.set.is_some() || last.is_none_or(|(known, _)| known != execution.class) {
@@ -425,6 +430,8 @@ impl CommandBuffer {
                 .iter()
                 .map(|binding| (binding.binding, binding.stride))
                 .collect(),
+            storage_attachments: super::render::storage_attachments(state),
+            blended_attachments: super::render::blended_attachments(state),
         }])
     }
 

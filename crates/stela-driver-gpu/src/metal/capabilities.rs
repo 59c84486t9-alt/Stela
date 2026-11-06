@@ -312,6 +312,11 @@ pub struct Capabilities {
     /// `supportsMemorylessRenderTargets`: memoryless textures, backed by
     /// device memory that no pass loads or stores.
     pub memoryless_render_targets: bool,
+    /// `isFramebufferReadSupported`: `[[color(n)]]` reads of any color
+    /// attachment, ordered among the overlapping fragments of a draw, which
+    /// read and write the attachment as storage in a fragment shader
+    /// interlock section.
+    pub framebuffer_reads: bool,
     counter_sampling: [bool; 5],
     /// Sparse 3D textures, with Vulkan's 3D residency and block shapes.
     sparse_volumes: bool,
@@ -690,6 +695,12 @@ impl Derivation<'_> {
             features.fragment_shader_pixel_interlock,
             ShaderFeatures::RASTER_ORDER_GROUPS,
         ));
+        let framebuffer_reads = raster_order_groups
+            && self.check(api(
+                "framebuffer reads",
+                features.dynamic_rendering_local_read && features.shader_storage_image_multisample,
+                ApiFeatures::EMPTY,
+            ));
         let raytracing = self.check(shader(
             "ray tracing",
             features.acceleration_structure && features.ray_query,
@@ -951,6 +962,7 @@ impl Derivation<'_> {
             statistic_counters: statistics,
             constant_vertex_step,
             memoryless_render_targets: true,
+            framebuffer_reads,
             counter_sampling,
             sparse_volumes,
             sparse_samples,
@@ -1391,7 +1403,8 @@ impl Derivation<'_> {
             // Metal format only on a device in this family. It predates tile
             // shaders, and it alone stands: the families below it steer Core
             // Animation to tile memory.
-            (GpuFamily::Apple3, mac2),
+            // Programmable blending is among the family's features.
+            (GpuFamily::Apple3, mac2 && capabilities.framebuffer_reads),
             (GpuFamily::Common1, common1),
             (GpuFamily::Common2, common2),
             (GpuFamily::Common3, common3),

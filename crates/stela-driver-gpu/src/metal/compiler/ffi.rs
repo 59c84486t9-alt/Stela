@@ -430,6 +430,27 @@ pub struct Specialization {
     pub(super) max_call_stack_depth: u32,
     pub(super) sampler_count: u32,
     pub(super) samplers: *const ConstexprSampler,
+    pub(super) attachments: *const Attachment,
+    pub(super) attachment_count: u32,
+    pub(super) samples: u32,
+}
+
+/// `struct stela_metal_attachment`: a color attachment a fragment function
+/// reads and writes as storage, by its realized `VkFormat` and texel bytes,
+/// and its pipeline's raw Metal blending.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Attachment {
+    pub(super) format: u32,
+    pub(super) bytes: u32,
+    pub(super) blend: u8,
+    pub(super) write_mask: u8,
+    pub(super) rgb_op: u8,
+    pub(super) alpha_op: u8,
+    pub(super) source_rgb: u8,
+    pub(super) destination_rgb: u8,
+    pub(super) source_alpha: u8,
+    pub(super) destination_alpha: u8,
 }
 
 /// `struct stela_metal_tessellation`: the raw values of the pipeline's
@@ -533,6 +554,7 @@ mod tests {
                 "STELA_METAL_CONSTEXPR_SAMPLER_BYTES",
                 size_of::<ConstexprSampler>(),
             ),
+            ("STELA_METAL_ATTACHMENT_BYTES", size_of::<Attachment>()),
         ];
         for (name, value) in expected {
             assert_eq!(define(name), value, "{name}");

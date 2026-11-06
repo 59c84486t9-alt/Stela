@@ -102,7 +102,18 @@ fn cube_arrays_become_cube_compatible_layered_images() {
             .usage
             .contains(ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT)
     );
-    assert!(!plan.image.usage.contains(ImageUsage::STORAGE));
+    // Framebuffer reads view its raw texels as storage; shaders see none.
+    assert!(plan.image.usage.contains(ImageUsage::STORAGE));
+    assert!(
+        plan.image
+            .flags
+            .contains(ImageCreate::MUTABLE_FORMAT | ImageCreate::EXTENDED_USAGE)
+    );
+    assert_eq!(
+        plan.image.view_formats,
+        [Format::R16G16B16A16Sfloat, Format::R32G32Uint]
+    );
+    assert!(plan.views.storage.is_none());
     let sampled = plan.views.sampled.unwrap();
     assert_eq!(
         (

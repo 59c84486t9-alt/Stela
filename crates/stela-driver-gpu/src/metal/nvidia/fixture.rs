@@ -303,7 +303,6 @@ fn features(chip: &Chip) -> Features {
         synchronization2: true,
         dynamic_rendering: true,
         dynamic_rendering_local_read: true,
-        rasterization_order_color: false,
         maintenance4: true,
         maintenance5: true,
         host_image_copy: true,

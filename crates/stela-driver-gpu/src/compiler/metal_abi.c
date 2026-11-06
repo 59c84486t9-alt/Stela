@@ -46,6 +46,11 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
                              .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 4);
    case STELA_AIR_SAMPLE_COUNT:
       return load(b, stela_metal_load_table(b, metal->table), STELA_METAL_TABLE_SAMPLE_COUNT, 32);
+   case STELA_AIR_BLEND_COLOR:
+      return nir_load_global(b, 4, 32,
+                             nir_iadd_imm(b, stela_metal_load_table(b, metal->table),
+                                          STELA_METAL_TABLE_BLEND_COLOR),
+                             .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
    case STELA_AIR_SAMPLE_POSITIONS:
       return nir_load_global(b, 4, 32,
                              nir_iadd_imm(b, stela_metal_load_table(b, metal->table),

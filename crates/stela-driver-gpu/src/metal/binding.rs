@@ -182,6 +182,9 @@ pub struct ArgumentTable {
     /// The pass's samples, which `get_num_samples` and
     /// `get_sample_position` read.
     pub samples: PassSamples,
+    /// The render encoder's blend color, as each float's bits, which
+    /// functions blending the attachments they access as storage read.
+    pub blend_color: [u32; 4],
 }
 
 impl Default for ArgumentTable {
@@ -192,6 +195,7 @@ impl Default for ArgumentTable {
             samplers: [ResourceId::NULL; MAX_SAMPLER_BINDINGS as usize],
             attachments: [ResourceId::NULL; MAX_COLOR_ATTACHMENTS],
             samples: PassSamples::default(),
+            blend_color: [0; 4],
         }
     }
 }
@@ -245,7 +249,8 @@ impl ArgumentTable {
     pub const SAMPLE_POSITIONS_OFFSET: u32 =
         Self::ATTACHMENTS_OFFSET + MAX_COLOR_ATTACHMENTS as u32 * 8;
     pub const SAMPLE_COUNT_OFFSET: u32 = Self::SAMPLE_POSITIONS_OFFSET + 16;
-    pub const BYTES: u32 = Self::SAMPLE_COUNT_OFFSET + 16;
+    pub const BLEND_COLOR_OFFSET: u32 = Self::SAMPLE_COUNT_OFFSET + 16;
+    pub const BYTES: u32 = Self::BLEND_COLOR_OFFSET + 16;
     /// Tables are placed at this alignment in the upload ring.
     pub const ALIGNMENT: u64 = 16;
 
@@ -274,6 +279,9 @@ impl ArgumentTable {
         [self.samples.count, 0, 0, 0]
             .into_iter()
             .for_each(|word| writer.u32(word));
+        self.blend_color
+            .into_iter()
+            .for_each(|channel| writer.u32(channel));
     }
 }
 
@@ -866,6 +874,10 @@ mod tests {
                 "STELA_METAL_TABLE_SAMPLE_COUNT",
                 ArgumentTable::SAMPLE_COUNT_OFFSET,
             ),
+            (
+                "STELA_METAL_TABLE_BLEND_COLOR",
+                ArgumentTable::BLEND_COLOR_OFFSET,
+            ),
             ("STELA_METAL_TABLE_BYTES", ArgumentTable::BYTES),
             (
                 "STELA_METAL_ACCUMULATE_RESULTS",
@@ -1242,7 +1254,8 @@ mod tests {
         assert_eq!(ArgumentTable::SAMPLERS_OFFSET, 1520);
         assert_eq!(ArgumentTable::ATTACHMENTS_OFFSET, 1648);
         assert_eq!(ArgumentTable::SAMPLE_POSITIONS_OFFSET, 1712);
-        assert_eq!(ArgumentTable::BYTES, 1744);
+        assert_eq!(ArgumentTable::BLEND_COLOR_OFFSET, 1744);
+        assert_eq!(ArgumentTable::BYTES, 1760);
         assert_eq!(
             u64::from(ArgumentTable::BYTES) % ArgumentTable::ALIGNMENT,
             0

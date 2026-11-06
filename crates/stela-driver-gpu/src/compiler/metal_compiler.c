@@ -2,6 +2,7 @@
 #include "metal_compiler.h"
 #include "threadgroup.h"
 #include "util/ralloc.h"
+#include "vulkan/vulkan_core.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +24,8 @@ static_assert(sizeof(struct stela_air_linked_function) == STELA_METAL_LINKED_FUN
               "metal/compiler.rs mirrors the linked functions");
 static_assert(sizeof(struct stela_metal_tessellation) == STELA_METAL_PIPELINE_TESSELLATION_BYTES,
               "metal/compiler.rs mirrors the pipeline tessellation");
+static_assert(sizeof(struct stela_metal_attachment) == STELA_METAL_ATTACHMENT_BYTES,
+              "metal_compiler.h storage attachment layout");
 static_assert(sizeof(struct stela_metal_stage_in) == STELA_METAL_STAGE_IN_BYTES,
               "metal/compiler.rs mirrors the stage-in layout");
 static_assert(STELA_METAL_FUNCTION_CONSTANTS == AIR_MAX_FUNCTION_CONSTANTS,
@@ -678,6 +681,120 @@ varying_rows(const struct stela_metal_reflection *reflection,
    return true;
 }
 
+/* The texel layout of a renderable color VkFormat, as Mesa's Vulkan
+ * runtime maps it (vk_format_to_pipe_format), which the hosted compiler
+ * does not link; PIPE_FORMAT_NONE for any other. */
+static enum pipe_format
+attachment_format(uint32_t format)
+{
+   switch ((VkFormat)format) {
+   case VK_FORMAT_A8_UNORM_KHR: return PIPE_FORMAT_A8_UNORM;
+   case VK_FORMAT_R8_UNORM: return PIPE_FORMAT_R8_UNORM;
+   case VK_FORMAT_R8_SRGB: return PIPE_FORMAT_R8_SRGB;
+   case VK_FORMAT_R8_SNORM: return PIPE_FORMAT_R8_SNORM;
+   case VK_FORMAT_R8_UINT: return PIPE_FORMAT_R8_UINT;
+   case VK_FORMAT_R8_SINT: return PIPE_FORMAT_R8_SINT;
+   case VK_FORMAT_R16_UNORM: return PIPE_FORMAT_R16_UNORM;
+   case VK_FORMAT_R16_SNORM: return PIPE_FORMAT_R16_SNORM;
+   case VK_FORMAT_R16_UINT: return PIPE_FORMAT_R16_UINT;
+   case VK_FORMAT_R16_SINT: return PIPE_FORMAT_R16_SINT;
+   case VK_FORMAT_R16_SFLOAT: return PIPE_FORMAT_R16_FLOAT;
+   case VK_FORMAT_R8G8_UNORM: return PIPE_FORMAT_R8G8_UNORM;
+   case VK_FORMAT_R8G8_SRGB: return PIPE_FORMAT_R8G8_SRGB;
+   case VK_FORMAT_R8G8_SNORM: return PIPE_FORMAT_R8G8_SNORM;
+   case VK_FORMAT_R8G8_UINT: return PIPE_FORMAT_R8G8_UINT;
+   case VK_FORMAT_R8G8_SINT: return PIPE_FORMAT_R8G8_SINT;
+   case VK_FORMAT_R5G6B5_UNORM_PACK16: return PIPE_FORMAT_B5G6R5_UNORM;
+   case VK_FORMAT_R5G5B5A1_UNORM_PACK16: return PIPE_FORMAT_A1B5G5R5_UNORM;
+   case VK_FORMAT_R4G4B4A4_UNORM_PACK16: return PIPE_FORMAT_A4B4G4R4_UNORM;
+   case VK_FORMAT_A1R5G5B5_UNORM_PACK16: return PIPE_FORMAT_B5G5R5A1_UNORM;
+   case VK_FORMAT_R8G8B8_UNORM: return PIPE_FORMAT_R8G8B8_UNORM;
+   case VK_FORMAT_R8G8B8_SNORM: return PIPE_FORMAT_R8G8B8_SNORM;
+   case VK_FORMAT_R8G8B8_UINT: return PIPE_FORMAT_R8G8B8_UINT;
+   case VK_FORMAT_R8G8B8_SINT: return PIPE_FORMAT_R8G8B8_SINT;
+   case VK_FORMAT_R32_UINT: return PIPE_FORMAT_R32_UINT;
+   case VK_FORMAT_R32_SINT: return PIPE_FORMAT_R32_SINT;
+   case VK_FORMAT_R32_SFLOAT: return PIPE_FORMAT_R32_FLOAT;
+   case VK_FORMAT_R16G16_UNORM: return PIPE_FORMAT_R16G16_UNORM;
+   case VK_FORMAT_R16G16_SNORM: return PIPE_FORMAT_R16G16_SNORM;
+   case VK_FORMAT_R16G16_UINT: return PIPE_FORMAT_R16G16_UINT;
+   case VK_FORMAT_R16G16_SINT: return PIPE_FORMAT_R16G16_SINT;
+   case VK_FORMAT_R16G16_SFLOAT: return PIPE_FORMAT_R16G16_FLOAT;
+   case VK_FORMAT_R8G8B8A8_UNORM: return PIPE_FORMAT_R8G8B8A8_UNORM;
+   case VK_FORMAT_R8G8B8A8_SRGB: return PIPE_FORMAT_R8G8B8A8_SRGB;
+   case VK_FORMAT_R8G8B8A8_SNORM: return PIPE_FORMAT_R8G8B8A8_SNORM;
+   case VK_FORMAT_R8G8B8A8_UINT: return PIPE_FORMAT_R8G8B8A8_UINT;
+   case VK_FORMAT_R8G8B8A8_SINT: return PIPE_FORMAT_R8G8B8A8_SINT;
+   case VK_FORMAT_B8G8R8A8_UNORM: return PIPE_FORMAT_B8G8R8A8_UNORM;
+   case VK_FORMAT_B8G8R8A8_SRGB: return PIPE_FORMAT_B8G8R8A8_SRGB;
+   case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return PIPE_FORMAT_R10G10B10A2_UNORM;
+   case VK_FORMAT_A2B10G10R10_UINT_PACK32: return PIPE_FORMAT_R10G10B10A2_UINT;
+   case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return PIPE_FORMAT_R11G11B10_FLOAT;
+   case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32: return PIPE_FORMAT_R9G9B9E5_FLOAT;
+   case VK_FORMAT_A2R10G10B10_UNORM_PACK32: return PIPE_FORMAT_B10G10R10A2_UNORM;
+   case VK_FORMAT_R16G16B16_UNORM: return PIPE_FORMAT_R16G16B16_UNORM;
+   case VK_FORMAT_R16G16B16_SNORM: return PIPE_FORMAT_R16G16B16_SNORM;
+   case VK_FORMAT_R16G16B16_UINT: return PIPE_FORMAT_R16G16B16_UINT;
+   case VK_FORMAT_R16G16B16_SINT: return PIPE_FORMAT_R16G16B16_SINT;
+   case VK_FORMAT_R16G16B16_SFLOAT: return PIPE_FORMAT_R16G16B16_FLOAT;
+   case VK_FORMAT_R32G32_UINT: return PIPE_FORMAT_R32G32_UINT;
+   case VK_FORMAT_R32G32_SINT: return PIPE_FORMAT_R32G32_SINT;
+   case VK_FORMAT_R32G32_SFLOAT: return PIPE_FORMAT_R32G32_FLOAT;
+   case VK_FORMAT_R16G16B16A16_UNORM: return PIPE_FORMAT_R16G16B16A16_UNORM;
+   case VK_FORMAT_R16G16B16A16_SNORM: return PIPE_FORMAT_R16G16B16A16_SNORM;
+   case VK_FORMAT_R16G16B16A16_UINT: return PIPE_FORMAT_R16G16B16A16_UINT;
+   case VK_FORMAT_R16G16B16A16_SINT: return PIPE_FORMAT_R16G16B16A16_SINT;
+   case VK_FORMAT_R16G16B16A16_SFLOAT: return PIPE_FORMAT_R16G16B16A16_FLOAT;
+   case VK_FORMAT_R32G32B32_UINT: return PIPE_FORMAT_R32G32B32_UINT;
+   case VK_FORMAT_R32G32B32_SINT: return PIPE_FORMAT_R32G32B32_SINT;
+   case VK_FORMAT_R32G32B32_SFLOAT: return PIPE_FORMAT_R32G32B32_FLOAT;
+   case VK_FORMAT_R32G32B32A32_UINT: return PIPE_FORMAT_R32G32B32A32_UINT;
+   case VK_FORMAT_R32G32B32A32_SINT: return PIPE_FORMAT_R32G32B32A32_SINT;
+   case VK_FORMAT_R32G32B32A32_SFLOAT: return PIPE_FORMAT_R32G32B32A32_FLOAT;
+   default: return PIPE_FORMAT_NONE;
+   }
+}
+
+/* The specialization's storage attachments as the translator takes them. */
+static bool
+attachment_accesses(const struct stela_metal_specialization *specialization,
+                    struct stela_air_attachment_access *accesses, struct stela_air_error *error)
+{
+   if (!specialization->attachment_count)
+      return true;
+   if (specialization->attachment_count > AIR_MAX_RENDER_TARGETS || !specialization->attachments ||
+       !specialization->samples)
+      return fail(error, STELA_AIR_INPUT, "invalid storage attachments");
+   for (uint32_t n = 0; n < specialization->attachment_count; n++) {
+      const struct stela_metal_attachment *attachment = &specialization->attachments[n];
+      if (!attachment->format)
+         continue;
+      enum pipe_format format = attachment_format(attachment->format);
+      if (format == PIPE_FORMAT_NONE || util_format_get_blocksize(format) != attachment->bytes ||
+          attachment->rgb_op > STELA_AIR_BLEND_MAX || attachment->alpha_op > STELA_AIR_BLEND_MAX ||
+          attachment->source_rgb > STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR ||
+          attachment->destination_rgb > STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR ||
+          attachment->source_alpha > STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR ||
+          attachment->destination_alpha > STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR ||
+          attachment->write_mask > 0xf)
+         return fail(error, STELA_AIR_INPUT, "invalid storage attachment");
+      /* MTLColorWriteMask names red to alpha from its fourth bit down. */
+      unsigned mask = attachment->write_mask;
+      accesses[n] = (struct stela_air_attachment_access){
+         .format = format,
+         .blend = attachment->blend != 0,
+         .write_mask = (mask >> 3 & 1) | (mask >> 1 & 2) | (mask << 1 & 4) | (mask << 3 & 8),
+         .rgb_op = attachment->rgb_op,
+         .alpha_op = attachment->alpha_op,
+         .source_rgb = attachment->source_rgb,
+         .destination_rgb = attachment->destination_rgb,
+         .source_alpha = attachment->source_alpha,
+         .destination_alpha = attachment->destination_alpha,
+      };
+   }
+   return true;
+}
+
 nir_shader *
 stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
                               const struct stela_metal_target *target,
@@ -800,6 +917,9 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       [STELA_METAL_VERTEX] = STELA_AIR_VERTEX, [STELA_METAL_FRAGMENT] = STELA_AIR_FRAGMENT,
       [STELA_METAL_MESH] = STELA_AIR_MESH, [STELA_METAL_OBJECT] = STELA_AIR_OBJECT,
    };
+   struct stela_air_attachment_access attachments[AIR_MAX_RENDER_TARGETS] = {0};
+   if (!attachment_accesses(specialization, attachments, error))
+      goto done;
    struct stela_air_stage_options options = {
       .stage = air_stages[stage],
       .resources = resources,
@@ -813,6 +933,8 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       .max_mesh_primitives = target->max_mesh_primitives,
       .stencil_export = target->stencil_export != 0,
       .raster_order_groups = target->raster_order_groups != 0,
+      .attachments = specialization->attachment_count ? attachments : NULL,
+      .samples = specialization->samples,
    };
    shader = stela_air_metal_stage_to_nir(air, size, entry, target->nir, &options, error);
 done:
