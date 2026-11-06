@@ -151,7 +151,13 @@ impl Flat {
             ty: NO_TYPE,
         };
         match &binding.kind {
-            BindingKind::Buffer(pointer) => record.ty = self.pointer(pointer)?,
+            BindingKind::Buffer(pointer) => {
+                // `bufferDataSize` and `bufferAlignment`, which size an
+                // argument encoder made from the binding.
+                record.alignment = pointer.alignment;
+                record.data_size = pointer.data_size;
+                record.ty = self.pointer(pointer)?;
+            }
             BindingKind::Texture {
                 texture,
                 array_length,

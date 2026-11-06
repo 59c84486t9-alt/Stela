@@ -82,6 +82,8 @@ fn bindings_flatten_their_types_before_them() {
         ),
         (DataType::Pointer.raw(), DataType::Struct.raw(), 16, 96)
     );
+    // The binding sizes and aligns as its pointee, as an encoder of it does.
+    assert_eq!((uniforms.alignment, uniforms.data_size), (16, 96));
     let structure = types[pointer.element as usize];
     assert_eq!(
         (structure.member_count, structure.data_type),

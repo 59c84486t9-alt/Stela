@@ -292,8 +292,8 @@ records! {
     /// `ty` is the index of a `TypeInfo`, or `NO_TYPE`. A buffer's is its
     /// pointer type, whose element gives `bufferDataType` and
     /// `bufferStructType`; a texture's its texture reference type. A
-    /// threadgroup buffer or payload has an alignment and data size, and a
-    /// texture or sampler an array length.
+    /// buffer, threadgroup buffer or payload has an alignment and data size,
+    /// and a texture or sampler an array length.
     pub struct BindingInfo {
         pub name: u32,
         pub name_length: u32,
