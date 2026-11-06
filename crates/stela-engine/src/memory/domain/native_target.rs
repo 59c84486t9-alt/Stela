@@ -1,6 +1,7 @@
 //! A conservative limit, never CPU or memory execution permission. Keep the
-//! legacy XMM recipes both sides have, which is what blocks compile for;
-//! wider state and DIT cannot be enabled by a caller-provided declaration.
+//! legacy XMM and scalar GPR recipes both sides have, which is what blocks
+//! compile for; wider state and DIT cannot be enabled by a caller-provided
+//! declaration.
 use stela_compiler::TargetCpu;
 
 pub(in crate::memory) fn restrict(actual: TargetCpu, limit: TargetCpu) -> TargetCpu {
@@ -21,6 +22,11 @@ pub(in crate::memory) fn restrict(actual: TargetCpu, limit: TargetCpu) -> Target
         (TargetCpu::Cx8, TargetCpu::with_cx8),
         (TargetCpu::Cx16, TargetCpu::with_cx16),
         (TargetCpu::AtomicLoad16, TargetCpu::with_atomic_load16),
+        // Scalar GPR extensions, which use no extended register state.
+        (TargetCpu::Bmi1, TargetCpu::with_bmi1),
+        (TargetCpu::Bmi2, TargetCpu::with_bmi2),
+        (TargetCpu::FastPdep, TargetCpu::with_fast_pdep),
+        (TargetCpu::Movbe, TargetCpu::with_movbe),
     ] {
         if actual.supports(capability) && limit.supports(capability) {
             target = with(target);
@@ -101,11 +107,14 @@ mod tests {
             TargetCpu::F16c,
             TargetCpu::Avx2,
             TargetCpu::Avx512f,
-            TargetCpu::Bmi1,
             TargetCpu::Doit,
             TargetCpu::LineAtomic,
         ] {
             assert!(!common.supports(excluded));
+        }
+        // Scalar GPR extensions use no extended state.
+        for kept in [TargetCpu::Bmi1, TargetCpu::Bmi2, TargetCpu::Movbe] {
+            assert!(common.supports(kept));
         }
     }
 }

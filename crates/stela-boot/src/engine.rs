@@ -269,6 +269,18 @@ fn target(parallel: bool) -> TargetCpu {
         basic.ecx & (1 << 19) != 0,
         basic.ecx & (1 << 20) != 0,
     );
+    let vendor_id = [vendor.ebx, vendor.edx, vendor.ecx];
+    let vex = vendor_id != TargetCpu::INTEL_VENDOR || basic.ecx & (1 << 28) != 0;
+    // AMD's Zen 1 and Zen 2, and Hygon's Zen-derived cores, microcode PDEP
+    // and PEXT; the display family tells them apart.
+    let base_family = (basic.eax >> 8) & 0xf;
+    let family = if base_family == 0xf {
+        base_family + ((basic.eax >> 20) & 0xff)
+    } else {
+        base_family
+    };
+    let zen = vendor_id == TargetCpu::AMD_VENDOR || vendor_id == TargetCpu::HYGON_VENDOR;
+    let fast_pdep = !zen || family >= 0x19;
     let mut target = match (ssse3, sse41, sse42) {
         (true, true, true) => TargetCpu::Sse42,
         (true, true, false) => TargetCpu::Sse41,
@@ -289,7 +301,15 @@ fn target(parallel: bool) -> TargetCpu {
             TargetCpu::atomic_load16_guaranteed([vendor.ebx, vendor.edx, vendor.ecx], basic.ecx),
             TargetCpu::with_atomic_load16,
         ),
-        (extended.ebx & (1 << 3) != 0, TargetCpu::with_bmi1),
+        // VEX-encoded scalar GPR extensions, which use no extended state:
+        // Intel's Pentium and Celeron parts without AVX fault on them.
+        (vex && extended.ebx & (1 << 3) != 0, TargetCpu::with_bmi1),
+        (vex && extended.ebx & (1 << 8) != 0, TargetCpu::with_bmi2),
+        (
+            vex && extended.ebx & (1 << 8) != 0 && fast_pdep,
+            TargetCpu::with_fast_pdep,
+        ),
+        (basic.ecx & (1 << 22) != 0, TargetCpu::with_movbe),
         (extended.ebx & (1 << 29) != 0, TargetCpu::with_sha),
         (
             [vendor.ebx, vendor.edx, vendor.ecx] == TargetCpu::INTEL_VENDOR,

@@ -9,6 +9,7 @@ fn baseline() -> Observation {
             extended_edx: CPUID_LONG_NX,
             cpuid7_ebx: 0,
             cpuid7_ecx: 0,
+            family: 6,
             identity: IdentityProbe::Topology(0x1f),
         },
         controls: NativeControls {
@@ -70,12 +71,48 @@ fn legacy_xmm_floor_never_invents_extended_features() {
     assert_eq!(actual.target(), Ok(expected));
     actual.controls.cr4 |= 1 << 18; // OSXSAVE does not admit AVX or a wider target.
     actual.declarations.cpuid1_ecx |= !(1 << 28);
+    let expected = expected.with_movbe();
     assert_eq!(actual.target(), Ok(expected));
     actual.controls.cr4 |= 1 << 12;
     assert_eq!(actual.target(), Err(Refusal::Controls));
     actual.declarations.cpuid7_ecx |= 1 << 16;
     assert_eq!(actual.target(), Ok(expected));
 }
+/// BMI1 and BMI2 need VEX decoding alone, which Intel parts without AVX
+/// lack; PDEP and PEXT count as fast except on Zen 1, Zen 2 and Hygon.
+#[test]
+fn scalar_vex_extensions_follow_vex_decoding_and_fast_bit_deposit() {
+    let mut actual = baseline();
+    actual.declarations.cpuid7_ebx = CPUID_BMI1 | CPUID_BMI2;
+    assert_eq!(actual.target(), Ok(TargetCpu::Baseline));
+    actual.declarations.cpuid1_ecx |= CPUID_AVX;
+    let fast = TargetCpu::AtomicLoad16
+        .with_bmi1()
+        .with_bmi2()
+        .with_fast_pdep();
+    assert_eq!(actual.target(), Ok(fast));
+    actual.declarations.cpuid1_ecx &= !CPUID_AVX;
+    for (vendor, family, pdep) in [
+        (TargetCpu::AMD_VENDOR, 0x17, false),
+        (TargetCpu::HYGON_VENDOR, 0x18, false),
+        (TargetCpu::AMD_VENDOR, 0x19, true),
+        (TargetCpu::AMD_VENDOR, 0x1a, true),
+    ] {
+        actual.declarations.vendor = vendor;
+        actual.declarations.family = family;
+        let target = actual.target().unwrap();
+        assert!(target.supports(TargetCpu::Baseline.with_bmi1().with_bmi2()));
+        assert_eq!(target.supports(TargetCpu::Baseline.with_fast_pdep()), pdep);
+    }
+    actual.declarations.cpuid1_ecx |= CPUID_MOVBE;
+    assert!(
+        actual
+            .target()
+            .unwrap()
+            .supports(TargetCpu::Baseline.with_movbe())
+    );
+}
+
 #[test]
 fn aligned_atomic_legacy_xmm_capability_is_independent_of_os_avx_state() {
     let mut actual = baseline();

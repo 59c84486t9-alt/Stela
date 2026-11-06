@@ -62,6 +62,9 @@ struct CpuDeclarations {
     extended_edx: u32,
     cpuid7_ebx: u32,
     cpuid7_ecx: u32,
+    /// The display family (SDM Vol. 2A, CPUID leaf 1), which tells AMD's
+    /// microcoded PDEP and PEXT apart.
+    family: u32,
     identity: IdentityProbe,
 }
 
@@ -73,6 +76,14 @@ const CPUID_SSE41: u32 = 1 << 19;
 const CPUID_SSE42: u32 = 1 << 20;
 const CPUID_POPCNT: u32 = 1 << 23;
 const CPUID_AES: u32 = 1 << 25;
+const CPUID_MOVBE: u32 = 1 << 22;
+/// AVX hardware: Intel's Pentium and Celeron parts without it enumerate BMI1
+/// and BMI2 but fault on their VEX encodings.
+const CPUID_AVX: u32 = 1 << 28;
+const CPUID_BMI1: u32 = 1 << 3;
+const CPUID_BMI2: u32 = 1 << 8;
+/// AMD's first family whose PDEP and PEXT are not microcoded (Zen 3).
+const FAST_PDEP_FAMILY: u32 = 0x19;
 #[cfg(any(
     test,
     all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))
@@ -84,7 +95,8 @@ const CPUID1_ECX_READ: u32 = CPUID_PCLMULQDQ
     | CPUID_SSE42
     | CPUID_POPCNT
     | CPUID_AES
-    | (1 << 28);
+    | CPUID_MOVBE
+    | CPUID_AVX;
 const CPUID_SHA: u32 = 1 << 29;
 const CPUID_GFNI: u32 = 1 << 8;
 const CPUID_LZCNT: u32 = 1 << 5;
@@ -172,13 +184,32 @@ impl Observation {
         if d.cpuid1_ecx & CPUID_CX16 != 0 {
             target = target.with_cx16();
         }
+        // Scalar GPR extensions: VEX-encoded BMI1 and BMI2 use no extended
+        // register state, so they need no XCR0, only VEX decoding.
+        let intel = d.vendor == TargetCpu::INTEL_VENDOR;
+        let vex = !intel || d.cpuid1_ecx & CPUID_AVX != 0;
+        if vex && d.cpuid7_ebx & CPUID_BMI1 != 0 {
+            target = target.with_bmi1();
+        }
+        if vex && d.cpuid7_ebx & CPUID_BMI2 != 0 {
+            target = target.with_bmi2();
+            // AMD's Zen 1 and Zen 2, and Hygon's Zen-derived cores,
+            // microcode them at tens of cycles.
+            let zen = d.vendor == TargetCpu::AMD_VENDOR || d.vendor == TargetCpu::HYGON_VENDOR;
+            if !zen || d.family >= FAST_PDEP_FAMILY {
+                target = target.with_fast_pdep();
+            }
+        }
+        if d.cpuid1_ecx & CPUID_MOVBE != 0 {
+            target = target.with_movbe();
+        }
         // Intel SDM 325462-089 Vol.3A and AMD APM24593rev3.44 §7.3.2:
         // AVX hardware establishes aligned WB load atomicity, independently
         // of OS AVX state. The recipe uses only legacy XMM/SSE2.
         if TargetCpu::atomic_load16_guaranteed(d.vendor, d.cpuid1_ecx) {
             target = target.with_atomic_load16();
         }
-        // No VEX/AVX, FMA, cache-line atomicity or DOIT recipe is admitted.
+        // No AVX, FMA, cache-line atomicity or DOIT recipe is admitted.
         Ok(target)
     }
 }
@@ -473,12 +504,28 @@ fn enumerate(mut cpuid: impl FnMut(u32, u32) -> Cpuid) -> Result<(CpuDeclaration
             cpuid1_edx: basic.edx & (CPUID_FLOOR_EDX | (1 << 8)),
             extended_ecx: ext.ecx & CPUID_LZCNT,
             extended_edx: ext.edx & CPUID_LONG_NX,
-            cpuid7_ebx: leaf7.ebx & CPUID_SHA,
+            cpuid7_ebx: leaf7.ebx & (CPUID_SHA | CPUID_BMI1 | CPUID_BMI2),
             cpuid7_ecx: leaf7.ecx & ((1 << 16) | CPUID_GFNI),
+            family: display_family(basic.eax),
             identity: probe,
         },
         apic_id,
     ))
+}
+
+/// The display family of a CPUID leaf 1 EAX: the base family plus, for
+/// family 0FH, the extended family.
+#[cfg(any(
+    test,
+    all(target_arch = "x86_64", target_os = "uefi", not(feature = "std"))
+))]
+const fn display_family(eax: u32) -> u32 {
+    let base = (eax >> 8) & 0xf;
+    if base == 0xf {
+        base + ((eax >> 20) & 0xff)
+    } else {
+        base
+    }
 }
 
 #[cfg(all(target_arch = "x86_64", target_os = "uefi", not(feature = "std")))]
