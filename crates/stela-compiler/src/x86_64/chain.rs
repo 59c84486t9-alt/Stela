@@ -219,7 +219,8 @@ const GRANULE_SHIFT: u32 = 14;
 /// every set holding such an entry is listed, some perhaps twice or no
 /// longer holding one. A list that reaches `limit` drops those, then may
 /// grow to twice what is left, so it stays within a small multiple of the
-/// granule's live entries.
+/// granule's live entries. Most granules hold an entry or two: the table's
+/// entries spread over as many granules as they have, each with a list.
 #[derive(Debug, Clone, Default)]
 struct Granule {
     sets: Vec<u32>,
@@ -227,7 +228,10 @@ struct Granule {
 }
 
 /// A granule's list starts compacting at this many sets.
-const GRANULE_SETS: usize = 64;
+const GRANULE_SETS: usize = 8;
+
+/// The fewest granules [`LookupTable::sweep`] runs at.
+const SWEEP_GRANULES: usize = 1 << 12;
 
 /// The [`LookupEntry`] table, by [`lookup_slot`], and an index of the sets
 /// each 16 KiB granule's entries are in. A TLBI forgets the entries of a
@@ -241,11 +245,14 @@ pub struct LookupTable {
     /// Each indexed granule's list in `lists`.
     granules: BTreeMap<u64, u32>,
     lists: Vec<Granule>,
-    /// Lists no granule has, which keep their capacity for the next.
+    /// Lists no granule has, which keep a small capacity for the next.
     free: Vec<u32>,
     /// The granule [`Self::set`] indexed last and its list: the blocks of a
     /// page a context first reaches go in one after another.
     last: Option<(u64, u32)>,
+    /// The granules indexed at which [`Self::set`] sweeps: twice those left
+    /// by the last sweep.
+    sweep_at: usize,
 }
 
 impl LookupTable {
@@ -257,6 +264,7 @@ impl LookupTable {
             lists: Vec::new(),
             free: Vec::new(),
             last: None,
+            sweep_at: SWEEP_GRANULES,
         }
     }
 
@@ -281,6 +289,7 @@ impl LookupTable {
         self.lists.clear();
         self.free.clear();
         self.last = None;
+        self.sweep_at = SWEEP_GRANULES;
     }
 
     /// Whether every entry is empty.
@@ -329,6 +338,9 @@ impl LookupTable {
         let place = match self.last {
             Some((last, place)) if last == granule => place,
             _ => {
+                if self.granules.len() >= self.sweep_at {
+                    self.sweep();
+                }
                 let place = match self.granules.entry(granule) {
                     btree_map::Entry::Occupied(listed) => *listed.get(),
                     btree_map::Entry::Vacant(vacant) => {
@@ -354,8 +366,52 @@ impl LookupTable {
                 .sets
                 .retain(|&set| holds(&sets[set as usize], granule));
             listed.limit = 2 * listed.sets.len();
+            let kept = 2 * listed.limit.max(GRANULE_SETS);
+            if listed.sets.capacity() > 2 * kept {
+                listed.sets.shrink_to(kept);
+            }
         }
         listed.sets.push(set);
+    }
+
+    /// Drop the sets of each granule's list that hold none of its entries,
+    /// and the granules no set holds an entry of. Entries another PC's took
+    /// the place of leave their granules listed, which only a sweep finds:
+    /// the granules a stream of new PCs (processes of new layouts) reaches
+    /// would grow the index on, while the table holds a bounded number.
+    fn sweep(&mut self) {
+        let sets = &self.sets;
+        let mut emptied = Vec::new();
+        for (&granule, &place) in &self.granules {
+            let listed = &mut self.lists[place as usize];
+            listed.sets.sort_unstable();
+            listed.sets.dedup();
+            listed
+                .sets
+                .retain(|&set| holds(&sets[set as usize], granule));
+            listed.limit = 2 * listed.sets.len();
+            if listed.sets.is_empty() {
+                emptied.push(granule);
+            }
+        }
+        self.release(emptied);
+        self.sweep_at = (2 * self.granules.len()).max(SWEEP_GRANULES);
+    }
+
+    /// Let the `emptied` granules' lists go to the free lists.
+    fn release(&mut self, emptied: Vec<u64>) {
+        for granule in emptied {
+            if let Some(place) = self.granules.remove(&granule) {
+                let listed = &mut self.lists[place as usize];
+                listed.sets.clear();
+                listed.sets.shrink_to(GRANULE_SETS);
+                listed.limit = 0;
+                self.free.push(place);
+            }
+            if self.last.is_some_and(|(last, _)| last == granule) {
+                self.last = None;
+            }
+        }
     }
 
     /// Forget the entries of the PCs in `pcs` in the contexts of `salts`, a
@@ -388,18 +444,10 @@ impl LookupTable {
                 holds(set, granule)
             });
             if listed.sets.is_empty() {
-                listed.limit = 0;
                 emptied.push(granule);
             }
         }
-        for granule in emptied {
-            if let Some(place) = self.granules.remove(&granule) {
-                self.free.push(place);
-            }
-            if self.last.is_some_and(|(last, _)| last == granule) {
-                self.last = None;
-            }
-        }
+        self.release(emptied);
         found
     }
 
@@ -912,6 +960,36 @@ mod tests {
         assert_eq!(table.free.len() + 1, table.lists.len());
         assert!(table.forget_range(next..=next, u64::MAX));
         assert!(!held(&table, next, 1));
+    }
+
+    /// Entries of new PCs taking the places of others' leave the index no
+    /// larger than the table's own entries need, and every entry left is
+    /// still found by a span's forgetting.
+    #[test]
+    fn a_stream_of_new_granules_keeps_the_index_bounded() {
+        let mut table = LookupTable::new();
+        let granules = 4 * LOOKUP_ENTRIES as u64;
+        for granule in 0..granules {
+            let pc = 0x1_0000_0000 + (granule << GRANULE_SHIFT) + 4 * (granule % 64);
+            let entry = LookupEntry {
+                pc,
+                context: 1 + granule % 3,
+                entry: 1,
+                block: 0,
+                targets: 1,
+            };
+            table.insert(lookup_slot(pc, entry.context), entry);
+        }
+        assert!(table.granules.len() <= 2 * LOOKUP_ENTRIES);
+        assert!(
+            table.index_bytes() <= LOOKUP_ENTRIES * 160,
+            "{}",
+            table.index_bytes()
+        );
+        let end = 0x1_0000_0000 + (granules << GRANULE_SHIFT);
+        assert!(table.forget_range(0x1_0000_0000..=end, u64::MAX));
+        assert!(table.is_empty());
+        assert!(table.granules.is_empty());
     }
 
     #[test]
