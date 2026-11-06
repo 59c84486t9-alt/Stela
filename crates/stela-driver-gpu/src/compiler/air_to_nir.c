@@ -897,6 +897,8 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
    case STELA_AIR_FRONT_FACING:
       return nir_load_front_face(b, 1);
    case STELA_AIR_SAMPLE_ID:
+      /* A fragment function that names its sample runs once per sample. */
+      b->shader->info.fs.uses_sample_shading = true;
       return nir_load_sample_id(b);
    case STELA_AIR_SAMPLE_MASK_IN:
       return nir_load_sample_mask_in(b);
@@ -2267,6 +2269,10 @@ stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool o
          var->data.interpolation = INTERP_MODE_FLAT;
          var->data.centroid = var->data.sample = false;
       }
+      /* A fragment function that interpolates an input at its sample runs
+       * once per sample. */
+      if (var->data.sample && t->b.shader->info.stage == MESA_SHADER_FRAGMENT)
+         t->b.shader->info.fs.uses_sample_shading = true;
    }
    return var;
 }

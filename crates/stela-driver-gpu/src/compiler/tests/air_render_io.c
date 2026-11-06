@@ -454,6 +454,8 @@ fragment_functions_interpolate_and_write_targets(void)
    nir_variable *s = variable(shader, nir_var_shader_in, VARYING_SLOT_VAR2, 0);
    assert(typed(s, GLSL_TYPE_FLOAT, 1) && s->data.interpolation == INTERP_MODE_NOPERSPECTIVE &&
           s->data.sample);
+   /* Its sample-interpolated input shades it per sample. */
+   assert(shader->info.fs.uses_sample_shading);
    assert(typed(variable(shader, nir_var_shader_out, FRAG_RESULT_DATA0, 0), GLSL_TYPE_FLOAT, 4));
    assert(typed(variable(shader, nir_var_shader_out, FRAG_RESULT_DATA1, 0), GLSL_TYPE_UINT, 4));
    assert(typed(variable(shader, nir_var_shader_out, FRAG_RESULT_DEPTH, 0), GLSL_TYPE_FLOAT, 1));
@@ -514,6 +516,8 @@ fragment_functions_interpolate_their_interpolants(void)
    if (!shader)
       fprintf(stderr, "pulled: %u %s\n", error.kind, error.detail);
    assert(shader);
+   /* So does its sample ID. */
+   assert(shader->info.fs.uses_sample_shading);
    NIR_PASS(_, shader, nir_opt_constant_folding);
    nir_variable *color = variable(shader, nir_var_shader_in, VARYING_SLOT_VAR0, 0);
    assert(typed(color, GLSL_TYPE_FLOAT, 2) && color->data.interpolation == INTERP_MODE_SMOOTH &&
@@ -581,6 +585,7 @@ void_functions_write_nothing(void)
    if (!shader)
       fprintf(stderr, "early: %u %s\n", error.kind, error.detail);
    assert(shader && shader->info.fs.early_fragment_tests);
+   assert(!shader->info.fs.uses_sample_shading);
    assert(!variable(shader, nir_var_shader_out, FRAG_RESULT_DATA0, 0));
    ralloc_free(shader);
    shader = translate(coverage, STELA_AIR_FRAGMENT, false, &error);
