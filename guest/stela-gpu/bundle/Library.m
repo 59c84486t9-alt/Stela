@@ -518,15 +518,16 @@ static void air_slice(const void **bytes, NSUInteger *length)
 	}
 }
 
-- (void)setVisibleFunctionTable:(StelaGPUFunctionTable *)table atBufferIndex:(NSUInteger)index
+/* A table's gpuResourceID, the address its argument binds. */
+- (void)setVisibleFunctionTable:(StelaGPUFunctionTable *)table atIndex:(NSUInteger)index
 {
 	[self store:table ? table->_gpuAddress : 0 atIndex:index];
 }
 
-- (void)setVisibleFunctionTables:(const id __unsafe_unretained[])tables withBufferRange:(NSRange)range
+- (void)setVisibleFunctionTables:(const id __unsafe_unretained[])tables withRange:(NSRange)range
 {
 	for (NSUInteger i = 0; i < range.length; i++) {
-		[self setVisibleFunctionTable:tables[i] atBufferIndex:range.location + i];
+		[self setVisibleFunctionTable:tables[i] atIndex:range.location + i];
 	}
 }
 

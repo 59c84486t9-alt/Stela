@@ -209,16 +209,6 @@ ABSENT((id)functionHandleWithBinaryFunction:(id)function, BINARY_LINKING, nil)
 	REFUSE("setIntersectionFunctionTables:withRange:", INTERSECTION);
 }
 
-- (void)setVisibleFunctionTable:(id)table atIndex:(NSUInteger)index
-{
-	REFUSE("setVisibleFunctionTable:atIndex:", ARGUMENT_OBJECT);
-}
-
-- (void)setVisibleFunctionTables:(const id __unsafe_unretained[])tables withRange:(NSRange)range
-{
-	REFUSE("setVisibleFunctionTables:withRange:", ARGUMENT_OBJECT);
-}
-
 @end
 
 @implementation StelaGPUEncoder (Refused)

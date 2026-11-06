@@ -495,6 +495,8 @@ enum stela_air_field_kind {
    STELA_AIR_FIELD_COMMANDS,
    STELA_AIR_FIELD_RENDER_PIPELINE,
    STELA_AIR_FIELD_COMPUTE_PIPELINE,
+   /* A visible function table's address, as a table argument binds it. */
+   STELA_AIR_FIELD_FUNCTION_TABLE,
 };
 /* A member of a layout: its offset, the bytes of one element, its element
  * count (zero for one), and its MSL type spelling and name. layout is the

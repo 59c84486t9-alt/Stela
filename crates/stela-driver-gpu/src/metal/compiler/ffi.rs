@@ -212,6 +212,7 @@ pub(super) mod field {
     pub const COMMANDS: u32 = 5;
     pub const RENDER_PIPELINE: u32 = 6;
     pub const COMPUTE_PIPELINE: u32 = 7;
+    pub const FUNCTION_TABLE: u32 = 8;
 }
 
 /// `struct stela_metal_binding`.

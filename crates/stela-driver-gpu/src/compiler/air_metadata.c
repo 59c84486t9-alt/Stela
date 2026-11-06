@@ -1262,6 +1262,7 @@ field_kind(LLVMValueRef name, enum stela_air_field_kind *kind)
       {"air.command_buffer", STELA_AIR_FIELD_COMMANDS},
       {"air.render_pipeline_state", STELA_AIR_FIELD_RENDER_PIPELINE},
       {"air.compute_pipeline_state", STELA_AIR_FIELD_COMPUTE_PIPELINE},
+      {"air.visible_function_table", STELA_AIR_FIELD_FUNCTION_TABLE},
    };
    for (unsigned k = 0; k < ARRAY_SIZE(kinds); k++) {
       if (stela_air_md_string(name, kinds[k].name)) {
@@ -1288,6 +1289,7 @@ argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LL
    if (!field_kind(operands[1], &field->kind))
       return fail(m, STELA_AIR_ARGUMENT, "unsupported argument buffer field kind");
    bool texture = field->kind == STELA_AIR_FIELD_TEXTURE;
+   bool table = field->kind == STELA_AIR_FIELD_FUNCTION_TABLE;
    bool buffer = field->kind == STELA_AIR_FIELD_BUFFER || field->kind == STELA_AIR_FIELD_ARGUMENTS;
    bool has_location = false, has_access = false, has_space = false, has_size = false;
    unsigned index = 0, access = 0, keyed, buffer_size = 0;
@@ -1308,7 +1310,7 @@ argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LL
          has_location = true;
          f += 2;
       } else if (field_access(key, texture, &keyed)) {
-         if (has_access || (!buffer && !texture))
+         if (has_access || (!buffer && !texture && !table))
             return fail(m, STELA_AIR_METADATA, "duplicate/inapplicable argument buffer field access");
          access = keyed;
          has_access = true;
@@ -1360,6 +1362,12 @@ argument_field(struct stela_air_metadata *m, struct stela_air_kernel *kernel, LL
       return (type_name && type_name_bytes == strlen("sampler") &&
               !memcmp(type_name, "sampler", type_name_bytes)) ||
          fail(m, STELA_AIR_ARGUMENT, "unsupported argument buffer sampler");
+   case STELA_AIR_FIELD_FUNCTION_TABLE:
+      /* Tables are only read, through their handles. */
+      field->buffer = (struct stela_air_buffer){.argument = argument, .index = index,
+                                                .access = STELA_AIR_READ, .address_space = 1};
+      return (!has_access || access == STELA_AIR_READ) ||
+         fail(m, STELA_AIR_ARGUMENT, "a visible function table is only read");
    case STELA_AIR_FIELD_BUFFER:
    case STELA_AIR_FIELD_ARGUMENTS:
       break;

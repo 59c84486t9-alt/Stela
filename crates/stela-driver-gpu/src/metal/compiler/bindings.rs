@@ -136,6 +136,7 @@ impl Reader<'_> {
                 ffi::field::COMMANDS => Type::Data(DataType::IndirectCommandBuffer),
                 ffi::field::RENDER_PIPELINE => Type::Data(DataType::RenderPipeline),
                 ffi::field::COMPUTE_PIPELINE => Type::Data(DataType::ComputePipeline),
+                ffi::field::FUNCTION_TABLE => Type::Data(DataType::VisibleFunctionTable),
                 _ => return Err(MALFORMED),
             }
         };

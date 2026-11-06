@@ -4379,6 +4379,7 @@ field_space(const struct stela_air_field *field)
    case STELA_AIR_FIELD_COMMANDS:
    case STELA_AIR_FIELD_RENDER_PIPELINE:
    case STELA_AIR_FIELD_COMPUTE_PIPELINE:
+   case STELA_AIR_FIELD_FUNCTION_TABLE:
       return 1;
    }
    return 0;
