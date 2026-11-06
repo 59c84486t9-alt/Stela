@@ -1,0 +1,185 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mary Guillemard <mary@mary.zone>
+Date: Sun, 2 Nov 2025 14:45:20 +0100
+Subject: [PATCH] nvk: Upload ticket buffer
+
+Co-authored-by: Lorenzo Rossi <git@rossilorenzo.dev>
+Signed-off-by: Mary Guillemard <mary@mary.zone>
+Signed-off-by: Lorenzo Rossi <git@rossilorenzo.dev>
+---
+ src/nouveau/compiler/nak.h          | 12 ++++++++++++
+ src/nouveau/vulkan/nvk_cmd_buffer.h |  4 ++--
+ src/nouveau/vulkan/nvk_cmd_draw.c   | 18 ++++++++++++++++++
+ src/nouveau/vulkan/nvk_queue.c      | 25 +++++++++++++++++++++++++
+ src/nouveau/vulkan/nvk_queue.h      |  3 +++
+ src/nouveau/vulkan/nvk_shader.c     |  5 +++++
+ 6 files changed, 65 insertions(+), 2 deletions(-)
+
+diff --git a/src/nouveau/compiler/nak.h b/src/nouveau/compiler/nak.h
+index 64549faf95ee10ddeb2587df8a5e89a23fc1ad01..d259a1b2de0293647e7d91187f7e718a6079a8bb 100644
+--- a/src/nouveau/compiler/nak.h
++++ b/src/nouveau/compiler/nak.h
+@@ -97,6 +97,18 @@ struct nak_constant_offset_info {
+     * The offset into printf_cb for the printf buffer pointer.
+     */
+    uint32_t printf_buffer_offset;
++
++   /**
++    * The constant buffer index at which the interlock ticket buffer pointer
++    * lives.
++    */
++   uint8_t interlock_ticket_buffer_cb;
++
++   /**
++    * The offset into interlock_ticket_buffer_cb for the interlock ticket buffer
++    * pointer.
++    */
++   uint32_t interlock_ticket_buffer_offset;
+ };
+ const extern struct nak_constant_offset_info nak_const_offsets_base;
+ const extern struct nak_constant_offset_info nak_const_offsets_turing_graphics;
+diff --git a/src/nouveau/vulkan/nvk_cmd_buffer.h b/src/nouveau/vulkan/nvk_cmd_buffer.h
+index e844b0ff4df65c0efe2ace573ef3efac02c414f6..0b05a08326bc17be5a7e36cf89a5b134c78b4302 100644
+--- a/src/nouveau/vulkan/nvk_cmd_buffer.h
++++ b/src/nouveau/vulkan/nvk_cmd_buffer.h
+@@ -45,7 +45,7 @@ struct nvk_root_descriptor_table {
+          uint32_t view_index;
+          struct nak_sample_location sample_locations[NVK_MAX_SAMPLES];
+          struct nak_sample_mask sample_masks[NVK_MAX_SAMPLES];
+-         uint32_t __padding;
++         uint64_t interlock_ticket_buffer;
+       } draw;
+       struct {
+          uint32_t base_group[3];
+@@ -64,7 +64,7 @@ struct nvk_root_descriptor_table {
+    uint64_t printf_buffer_addr;
+ 
+    /* enfore total structure alignment to 0x100 as needed pre pascal */
+-   uint8_t __padding[0xa0];
++   uint8_t __padding[0x98];
+ 
+    /*
+     * Arrays with dynamic (shader-provided) indices need to fit in a single
+diff --git a/src/nouveau/vulkan/nvk_cmd_draw.c b/src/nouveau/vulkan/nvk_cmd_draw.c
+index 362d8c50e43ae776463ccbd86dafeb0e1a2af663..821a6f12538d60d43ca84ddc44fa5afe40dbebb7 100644
+--- a/src/nouveau/vulkan/nvk_cmd_draw.c
++++ b/src/nouveau/vulkan/nvk_cmd_draw.c
+@@ -691,6 +691,24 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
+    for (uint32_t dw = 0; dw < NVK_DRAW_CB0_SIZE / 4; dw++)
+       P_INLINE_DATA(p, 0);
+ 
++   /* Initialize the interlock ticket buffer address (for FSI) */
++   uint64_t fsi_addr = queue->fsi_memory->va->addr;
++   if (nvk_use_hw_root_table(&pdev->info, true)) {
++      P_1INC(p, NVC597, SET_ROOT_TABLE_SELECTOR);
++      P_NVC597_SET_ROOT_TABLE_SELECTOR(p, {
++         .root_table = nvk_hw_root_table_index(draw.interlock_ticket_buffer),
++         .offset = nvk_hw_root_table_offset(draw.interlock_ticket_buffer),
++      });
++      P_INLINE_DATA(p, fsi_addr);
++      P_INLINE_DATA(p, fsi_addr >> 32);
++   } else {
++      P_1INC(p, NV9097, LOAD_CONSTANT_BUFFER_OFFSET);
++      P_NV9097_LOAD_CONSTANT_BUFFER_OFFSET(
++         p, nvk_root_descriptor_offset(draw.interlock_ticket_buffer));
++      P_INLINE_DATA(p, fsi_addr);
++      P_INLINE_DATA(p, fsi_addr >> 32);
++   }
++
+    /* These are shadowed in cb0 so they need to be zeroed as well for
+     * consistency.
+     */
+diff --git a/src/nouveau/vulkan/nvk_queue.c b/src/nouveau/vulkan/nvk_queue.c
+index 4061705eb56056ba336bcf84ae7977d99fb5535b..1777899e4ce59ef15b077c5d45834fc8842657cb 100644
+--- a/src/nouveau/vulkan/nvk_queue.c
++++ b/src/nouveau/vulkan/nvk_queue.c
+@@ -16,6 +16,7 @@
+ #include "nv_push_cl90b5.h"
+ #include "nv_push_cla0c0.h"
+ #include "cla1c0.h"
++#include "clb197.h"
+ #include "nv_push_clc3c0.h"
+ #include "nv_push_clc397.h"
+ 
+@@ -431,6 +432,23 @@ nvk_queue_create(struct nvk_device *dev,
+                                    &queue->draw_cb0);
+       if (result != VK_SUCCESS)
+          goto fail_exec_ctx;
++
++      if (pdev->info.cls_eng3d >= MAXWELL_B &&
++          queue->engines & NVKMD_ENGINE_3D) {
++         uint32_t interlock_buffer_size =
++            pdev->info.gpc_count * 0x100 * sizeof(uint32_t);
++         result = nvkmd_dev_alloc_mem(dev->nvkmd, &dev->vk.base,
++                                      interlock_buffer_size, 0, NVKMD_MEM_LOCAL,
++                                      &queue->fsi_memory);
++         if (result != VK_SUCCESS)
++            goto fail_draw_cb0;
++
++         result = nvk_upload_queue_fill(dev, &dev->upload,
++                                        queue->fsi_memory->va->addr, 0,
++                                        queue->fsi_memory->size_B);
++         if (result != VK_SUCCESS)
++            goto fail_fsi_upload;
++      }
+    }
+ 
+    if (queue_family->queue_flags & VK_QUEUE_SPARSE_BINDING_BIT) {
+@@ -458,6 +476,9 @@ fail_push_stream:
+ fail_bind_ctx:
+    if (queue->bind_ctx != NULL)
+       nvkmd_ctx_destroy(queue->bind_ctx);
++fail_fsi_upload:
++   if (queue->fsi_memory != NULL)
++      nvkmd_mem_unref(queue->fsi_memory);
+ fail_draw_cb0:
+    if (queue->draw_cb0 != NULL)
+       nvkmd_mem_unref(queue->draw_cb0);
+@@ -478,6 +499,10 @@ nvk_queue_destroy(struct nvk_device *dev, struct nvk_queue *queue)
+ {
+    nvk_mem_stream_sync(dev, &queue->push_stream, queue->exec_ctx);
+    nvk_mem_stream_finish(dev, &queue->push_stream);
++   if (queue->fsi_memory != NULL) {
++      nvk_upload_queue_sync(dev, &dev->upload);
++      nvkmd_mem_unref(queue->fsi_memory);
++   }
+    if (queue->draw_cb0 != NULL) {
+       nvk_upload_queue_sync(dev, &dev->upload);
+       nvkmd_mem_unref(queue->draw_cb0);
+diff --git a/src/nouveau/vulkan/nvk_queue.h b/src/nouveau/vulkan/nvk_queue.h
+index 1e72efc4fd6b65ccb4838f90d1104044e01d2ae2..226d8b12a12738f49602b756c60b88bc98966118 100644
+--- a/src/nouveau/vulkan/nvk_queue.h
++++ b/src/nouveau/vulkan/nvk_queue.h
+@@ -51,6 +51,9 @@ struct nvk_queue {
+ 
+    /* CB0 for all draw commands on this queue */
+    struct nvkmd_mem *draw_cb0;
++
++   /* Scratch memory usage for fragment shader interlock */
++   struct nvkmd_mem *fsi_memory;
+ };
+ 
+ static inline struct nvk_device *
+diff --git a/src/nouveau/vulkan/nvk_shader.c b/src/nouveau/vulkan/nvk_shader.c
+index f3bddc831b690be1eb208821008db0970b4fbfd9..7e94caa94544f60d33827efb097e1b4b16364577 100644
+--- a/src/nouveau/vulkan/nvk_shader.c
++++ b/src/nouveau/vulkan/nvk_shader.c
+@@ -42,6 +42,8 @@ const struct nak_constant_offset_info nak_const_offsets_base = {
+    .sample_masks_offset = nvk_root_descriptor_offset(draw.sample_masks),
+    .printf_cb = 0,
+    .printf_buffer_offset = nvk_root_descriptor_offset(printf_buffer_addr),
++   .interlock_ticket_buffer_cb = 0,
++   .interlock_ticket_buffer_offset = nvk_root_descriptor_offset(draw.interlock_ticket_buffer),
+ };
+ 
+ const struct nak_constant_offset_info nak_const_offsets_turing_graphics = {
+@@ -52,6 +54,9 @@ const struct nak_constant_offset_info nak_const_offsets_turing_graphics = {
+    .printf_cb = NVK_HW_ROOT_TABLE_FIRST_CB +
+                 nvk_hw_root_table_index(printf_buffer_addr),
+    .printf_buffer_offset = nvk_hw_root_table_offset(printf_buffer_addr),
++   .interlock_ticket_buffer_cb = NVK_HW_ROOT_TABLE_FIRST_CB +
++                                 nvk_hw_root_table_index(draw.interlock_ticket_buffer),
++   .interlock_ticket_buffer_offset = nvk_root_descriptor_offset(draw.interlock_ticket_buffer),
+ };
+ static_assert(nvk_hw_root_table_index(draw.sample_locations) ==
+               nvk_hw_root_table_index(draw.sample_masks),

@@ -1,0 +1,188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mary Guillemard <mary@mary.zone>
+Date: Sat, 1 Nov 2025 20:19:17 +0100
+Subject: [PATCH] nak: Report proper pixel control
+
+Co-authored-by: Lorenzo Rossi <git@rossilorenzo.dev>
+Signed-off-by: Mary Guillemard <mary@mary.zone>
+Signed-off-by: Lorenzo Rossi <git@rossilorenzo.dev>
+---
+ src/nouveau/compiler/nak.h           | 10 ++++++++-
+ src/nouveau/compiler/nak/api.rs      |  4 +++-
+ src/nouveau/compiler/nak/from_nir.rs | 20 +++++++++++++++++-
+ src/nouveau/compiler/nak/ir.rs       | 10 +++++++++
+ src/nouveau/vulkan/nvk_shader.c      | 31 +++++++++++++++++++++++++++-
+ 5 files changed, 71 insertions(+), 4 deletions(-)
+
+diff --git a/src/nouveau/compiler/nak.h b/src/nouveau/compiler/nak.h
+index 54a31230f642667f388e6f370430a94615949274..64549faf95ee10ddeb2587df8a5e89a23fc1ad01 100644
+--- a/src/nouveau/compiler/nak.h
++++ b/src/nouveau/compiler/nak.h
+@@ -132,6 +132,12 @@ enum PACKED nak_mesh_topology {
+    NAK_MESH_TOPOLOGY_TRIANGLES = 4,
+ };
+ 
++enum ENUM_PACKED nak_fs_interlock_mode {
++   NAK_FS_INTERLOCK_MODE_DISABLED = 0,
++   NAK_FS_INTERLOCK_MODE_SAMPLE = 1,
++   NAK_FS_INTERLOCK_MODE_PIXEL = 2,
++};
++
+ struct nak_xfb_info {
+    uint32_t stride[4];
+    uint8_t stream[4];
+@@ -208,8 +214,10 @@ struct nak_shader_info {
+          bool post_depth_coverage;
+          bool uses_sample_shading;
+          bool early_fragment_tests;
++         enum nak_fs_interlock_mode interlock_mode;
++         bool interlock_unordered;
+ 
+-         uint8_t _pad[135];
++         uint8_t _pad[133];
+       } fs;
+ 
+       struct {
+diff --git a/src/nouveau/compiler/nak/api.rs b/src/nouveau/compiler/nak/api.rs
+index f091e3d3702c648dd0e3ec61f0cc019f6cf102fc..aba2b1036e21a8527840bbd6793f8ee8c2779573 100644
+--- a/src/nouveau/compiler/nak/api.rs
++++ b/src/nouveau/compiler/nak/api.rs
+@@ -315,7 +315,9 @@ impl ShaderBin {
+                             post_depth_coverage: fs_info.post_depth_coverage,
+                             uses_sample_shading: fs_info.uses_sample_shading,
+                             early_fragment_tests: fs_info.early_fragment_tests,
+-                            _pad: [0; 135],
++                            interlock_mode: fs_info.interlock_mode as u8,
++                            interlock_unordered: fs_info.interlock_unordered,
++                            _pad: [0; 133],
+                         },
+                     }
+                 }
+diff --git a/src/nouveau/compiler/nak/from_nir.rs b/src/nouveau/compiler/nak/from_nir.rs
+index 6045d6f7ea74801baed487f6d1956208b61053d7..77c08534f6ad198955fdc68f9e06783f8467c059 100644
+--- a/src/nouveau/compiler/nak/from_nir.rs
++++ b/src/nouveau/compiler/nak/from_nir.rs
+@@ -74,12 +74,28 @@ fn init_info_from_nir(
+             }),
+             MESA_SHADER_FRAGMENT => {
+                 let info_fs = unsafe { &nir.info.__bindgen_anon_1.fs };
++                let has_interlock = info_fs.pixel_interlock_ordered()
++                    || info_fs.sample_interlock_ordered()
++                    || info_fs.pixel_interlock_unordered()
++                    || info_fs.sample_interlock_unordered();
++                let interlock_mode = match (
++                    has_interlock,
++                    info_fs.sample_interlock_ordered()
++                        || info_fs.sample_interlock_unordered(),
++                ) {
++                    (true, false) => FragmentInterlockMode::Pixel,
++                    (true, true) => FragmentInterlockMode::Sample,
++                    (false, _) => FragmentInterlockMode::Disabled,
++                };
+                 ShaderStageInfo::Fragment(FragmentShaderInfo {
+                     uses_kill: false,
+                     reads_interlock_ticket: false,
+                     post_depth_coverage: info_fs.post_depth_coverage(),
+                     early_fragment_tests: info_fs.early_fragment_tests(),
+                     uses_sample_shading: info_fs.uses_sample_shading(),
++                    interlock_mode,
++                    interlock_unordered: info_fs.pixel_interlock_unordered()
++                        || info_fs.sample_interlock_unordered(),
+                 })
+             }
+             MESA_SHADER_GEOMETRY => {
+@@ -3499,7 +3515,9 @@ impl<'a> ShaderFromNir<'a> {
+                 let idx = u8::try_from(intrin.base()).unwrap();
+ 
+                 if idx == NAK_SV_ORDERING_TICKET {
+-                    if let ShaderStageInfo::Fragment(info) = &mut self.info.stage {
++                    if let ShaderStageInfo::Fragment(info) =
++                        &mut self.info.stage
++                    {
+                         info.reads_interlock_ticket = true;
+                     } else {
+                         panic!("Ordering ticket is only available in fragment shaders");
+diff --git a/src/nouveau/compiler/nak/ir.rs b/src/nouveau/compiler/nak/ir.rs
+index 109dab7d50f879bb5514a79303b97f886ccae3f0..08f41484f38bde546c706c6878c542deba4d44df 100644
+--- a/src/nouveau/compiler/nak/ir.rs
++++ b/src/nouveau/compiler/nak/ir.rs
+@@ -9327,6 +9327,8 @@ pub struct FragmentShaderInfo {
+     pub post_depth_coverage: bool,
+     pub early_fragment_tests: bool,
+     pub uses_sample_shading: bool,
++    pub interlock_mode: FragmentInterlockMode,
++    pub interlock_unordered: bool,
+ }
+ 
+ #[derive(Debug)]
+@@ -9380,6 +9382,14 @@ pub struct TessellationInitShaderInfo {
+     pub common: TesselationCommonShaderInfo,
+ }
+ 
++#[repr(u8)]
++#[derive(Clone, Copy, Debug)]
++pub enum FragmentInterlockMode {
++    Disabled = NAK_FS_INTERLOCK_MODE_DISABLED,
++    Pixel = NAK_FS_INTERLOCK_MODE_PIXEL,
++    Sample = NAK_FS_INTERLOCK_MODE_SAMPLE,
++}
++
+ #[derive(Debug)]
+ pub struct TessellationShaderInfo {
+     pub domain: TessellationDomain,
+diff --git a/src/nouveau/vulkan/nvk_shader.c b/src/nouveau/vulkan/nvk_shader.c
+index 6f649f8572649d11ec15895d188a47da9796da34..f3bddc831b690be1eb208821008db0970b4fbfd9 100644
+--- a/src/nouveau/vulkan/nvk_shader.c
++++ b/src/nouveau/vulkan/nvk_shader.c
+@@ -745,6 +745,18 @@ mesa_to_nv9097_shader_type(mesa_shader_stage stage, bool has_task_shader)
+    return mesa_to_nv9097[stage];
+ }
+ 
++static uint32_t
++mesa_to_nvb197_interlock_mode(enum nak_fs_interlock_mode mode)
++{
++   STATIC_ASSERT(NAK_FS_INTERLOCK_MODE_DISABLED ==
++                 NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_NO_CONFLICT_DETECT);
++   STATIC_ASSERT(NAK_FS_INTERLOCK_MODE_SAMPLE ==
++                 NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_CONFLICT_DETECT_SAMPLE);
++   STATIC_ASSERT(NAK_FS_INTERLOCK_MODE_PIXEL ==
++                 NVB197_SET_PIXEL_SHADER_INTERLOCK_CONTROL_TILE_COALESCER_MODE_CONFLICT_DETECT_PIXEL);
++   return mode;
++}
++
+ uint32_t
+ nvk_pipeline_bind_group(mesa_shader_stage stage, bool has_task_shader)
+ {
+@@ -775,7 +787,7 @@ nvk_max_shader_push_dw(const struct nvk_physical_device *pdev,
+       max_dw_count += 2;
+ 
+    if (stage == MESA_SHADER_FRAGMENT)
+-      max_dw_count += 13;
++      max_dw_count += 15;
+ 
+    if (stage == MESA_SHADER_TASK)
+       max_dw_count += 2;
+@@ -951,6 +963,23 @@ nvk_shader_fill_push(struct nvk_device *dev,
+          .z_max_unbounded_enable = shader->info.fs.writes_depth,
+       });
+ 
++      if (pdev->info.cls_eng3d >= MAXWELL_B) {
++         max_dw_count += 2;
++
++         int coalescer_mode = shader->info.fs.interlock_mode;
++         if (shader->sample_shading_enable && coalescer_mode == NAK_FS_INTERLOCK_MODE_PIXEL) {
++            /* Force sample interlock even for pixel locks when
++             * sample_shading is enabled (otherwise the GPU faults?)
++             */
++            coalescer_mode = NAK_FS_INTERLOCK_MODE_SAMPLE;
++         }
++         P_IMMD(p, NVB197, SET_PIXEL_SHADER_INTERLOCK_CONTROL, {
++            .tile_coalescer_mode = mesa_to_nvb197_interlock_mode(coalescer_mode),
++            .tile_coalescer_tile_size = TILE_COALESCER_TILE_SIZE_TC_TILE_SIZE_16X16,
++            .tile_coalescer_fragment_order = shader->info.fs.interlock_unordered,
++         });
++      }
++
+       if (pdev->info.cls_eng3d >= TURING_A) {
+          /* From the Vulkan 1.3.297 spec:
+           *

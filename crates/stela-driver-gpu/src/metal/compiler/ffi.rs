@@ -296,6 +296,8 @@ pub struct Target {
     pub(super) max_mesh_primitives: u32,
     /// Nonzero when fragment shaders may write the stencil reference.
     pub(super) stencil_export: u32,
+    /// Nonzero when fragment shaders may use raster order groups.
+    pub(super) raster_order_groups: u32,
 }
 
 #[repr(C)]

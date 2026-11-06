@@ -1,0 +1,90 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mary Guillemard <mary@mary.zone>
+Date: Sun, 15 Jun 2025 16:09:56 +0200
+Subject: [PATCH] nak: Use official names for inner coverage and interlock sph
+ bits
+
+Signed-off-by: Mary Guillemard <mary@mary.zone>
+Reviewed-by: Mel Henning <mhenning@darkrefraction.com>
+---
+ src/nouveau/compiler/nak/from_nir.rs |  2 +-
+ src/nouveau/compiler/nak/ir.rs       |  2 +-
+ src/nouveau/compiler/nak/sph.rs      | 13 +++++++------
+ 3 files changed, 9 insertions(+), 8 deletions(-)
+
+diff --git a/src/nouveau/compiler/nak/from_nir.rs b/src/nouveau/compiler/nak/from_nir.rs
+index fa3dd21f507138cdf5efbf00242c6350e717ed53..03b213f2827889b50c81b962e9d5276e31930b06 100644
+--- a/src/nouveau/compiler/nak/from_nir.rs
++++ b/src/nouveau/compiler/nak/from_nir.rs
+@@ -76,7 +76,7 @@ fn init_info_from_nir(
+                 let info_fs = unsafe { &nir.info.__bindgen_anon_1.fs };
+                 ShaderStageInfo::Fragment(FragmentShaderInfo {
+                     uses_kill: false,
+-                    does_interlock: false,
++                    reads_interlock_ticket: false,
+                     post_depth_coverage: info_fs.post_depth_coverage(),
+                     early_fragment_tests: info_fs.early_fragment_tests(),
+                     uses_sample_shading: info_fs.uses_sample_shading(),
+diff --git a/src/nouveau/compiler/nak/ir.rs b/src/nouveau/compiler/nak/ir.rs
+index 2dc82058b4a95a2b893b6a3641465ec0e968cca0..109dab7d50f879bb5514a79303b97f886ccae3f0 100644
+--- a/src/nouveau/compiler/nak/ir.rs
++++ b/src/nouveau/compiler/nak/ir.rs
+@@ -9323,7 +9323,7 @@ pub struct VertexShaderInfo {
+ #[derive(Debug)]
+ pub struct FragmentShaderInfo {
+     pub uses_kill: bool,
+-    pub does_interlock: bool,
++    pub reads_interlock_ticket: bool,
+     pub post_depth_coverage: bool,
+     pub early_fragment_tests: bool,
+     pub uses_sample_shading: bool,
+diff --git a/src/nouveau/compiler/nak/sph.rs b/src/nouveau/compiler/nak/sph.rs
+index dd568d5148ebb8a8fec771a64dac90de2703174d..ce151eb6d6dd3297e05dc86323e7fcb7cea04ca8 100644
+--- a/src/nouveau/compiler/nak/sph.rs
++++ b/src/nouveau/compiler/nak/sph.rs
+@@ -13,6 +13,7 @@ use bitview::{
+ };
+ use nak_bindings::*;
+ use nvidia_headers::classes::cla097::sph::*;
++use nvidia_headers::classes::clc797::sph::*;
+ use std::ops::Range;
+ 
+ pub const _SPHV3_SHADER_HEADER_SIZE: usize = 20;
+@@ -445,15 +446,15 @@ impl ShaderProgramHeader {
+     }
+ 
+     #[inline]
+-    pub fn set_does_interlock(&mut self, does_interlock: bool) {
++    pub fn set_reads_interlock_ticket(&mut self, reads_interlock_ticket: bool) {
+         assert!(self.shader_type == ShaderType::Fragment);
+-        self.set_bit(610, does_interlock);
++        self.set_field(SPHV4_T2_READS_INTERLOCK_TICKET, reads_interlock_ticket);
+     }
+ 
+     #[inline]
+-    pub fn set_uses_underestimate(&mut self, uses_underestimate: bool) {
++    pub fn set_uses_inner_coverage(&mut self, uses_inner_coverage: bool) {
+         assert!(self.shader_type == ShaderType::Fragment);
+-        self.set_bit(611, uses_underestimate);
++        self.set_field(SPHV4_T2_USES_INNER_COVERAGE, uses_inner_coverage);
+     }
+ 
+     #[inline]
+@@ -546,7 +547,7 @@ pub fn encode_header(
+             sph.set_omap_sample_mask(io.writes_sample_mask);
+             sph.set_omap_depth(io.writes_depth);
+             sph.set_omap_targets(io.writes_color);
+-            sph.set_uses_underestimate(uses_underestimate);
++            sph.set_uses_inner_coverage(uses_underestimate);
+ 
+             for (index, value) in io.barycentric_attr_in.iter().enumerate() {
+                 sph.set_pervertex_imap_vector(index, *value);
+@@ -562,7 +563,7 @@ pub fn encode_header(
+         ShaderStageInfo::Fragment(stage) => {
+             let zs_self_dep = fs_key.is_some_and(|key| key.zs_self_dep);
+             sph.set_kills_pixels(stage.uses_kill || zs_self_dep);
+-            sph.set_does_interlock(stage.does_interlock);
++            sph.set_reads_interlock_ticket(stage.reads_interlock_ticket);
+         }
+         ShaderStageInfo::Geometry(stage) => {
+             sph.set_gs_passthrough_enable(stage.passthrough_enable);

@@ -380,6 +380,9 @@ struct stela_air_stage_options {
    unsigned max_payload_bytes, max_mesh_vertices, max_mesh_primitives;
    /* Whether a fragment function may write the stencil reference. */
    bool stencil_export;
+   /* Whether a fragment function may order its accesses after those of
+    * overlapping fragments: the device's fragment shader pixel interlock. */
+   bool raster_order_groups;
 };
 nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
                                   const nir_shader_compiler_options *,

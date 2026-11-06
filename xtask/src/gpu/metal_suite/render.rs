@@ -2813,6 +2813,26 @@ fn layers_and_clipping(plan: &mut Plan, library: &str) {
         .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected)))
         .requires(&["apple3"], &[]),
     );
+    // Overlapping primitives of one draw access a raster order group's
+    // device memory in their order: every pixel counts all 64 instances,
+    // each seeing exactly those before it.
+    const INSTANCES: u32 = 64;
+    let counts: Vec<u32> = pixels().flat_map(|_| [INSTANCES; 2]).collect();
+    plan.add(
+        Case::render(
+            "render.raster_order_groups",
+            library,
+            "vert_ordered",
+            Some("frag_raster_ordered"),
+            json!({"colors": [{"texture": "c", "clear": [0, 0, 0, 0]}],
+                   "vertex_count": 3, "instance_count": INSTANCES}),
+        )
+        .texture(target("c", "rgba32float"))
+        .buffer(Buffer::zeroed("counts", 0, (W * H * 8) as usize).stage("fragment"))
+        .buffer(Buffer::data("width", 1, u32s(&[W])).stage("fragment"))
+        .output(Output::new("counts", Dtype::U32, Tolerance::exact()).expect_same(u32s(&counts)))
+        .requires(&[], &["raster_order_groups"]),
+    );
 }
 
 /// Early fragment tests: an occluding instance, then one over the whole

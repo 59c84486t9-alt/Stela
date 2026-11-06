@@ -157,6 +157,8 @@ static const struct stela_air_varying_slot varyings[] = {
 static struct stela_metal_stage primary = {.table = STELA_METAL_TABLE_PRIMARY};
 /* Whether the target device exports a fragment stencil reference. */
 static bool stencil_export = true;
+/* Whether the target device has fragment shader pixel interlock. */
+static bool raster_order_groups = true;
 
 static char *
 change(const char *source, const char *old, const char *replacement)
@@ -186,6 +188,7 @@ translate(const char *text, enum stela_air_stage stage, bool amplified,
    struct stela_air_stage_options o = {
       .stage = stage, .max_varying_slots = 16, .varyings = varyings,
       .varying_count = ARRAY_SIZE(varyings), .amplified = amplified, .stencil_export = stencil_export,
+      .raster_order_groups = raster_order_groups,
       .resources = {
          .max_instructions = 10000, .bind_buffer = stela_metal_bind_buffer, .binding_data = &primary,
          .fp_profile = STELA_AIR_FP_METAL,
@@ -668,6 +671,114 @@ fragment_functions_read_their_pass_samples(void)
    free(other);
 }
 
+/* A fragment function counting the fragments before it in a buffer of a
+ * raster order group, after work of its own that needs no order. */
+static const char *grouped =
+   "define <4 x float> @fragment(<4 x float> %p, ptr addrspace(1) %counts) {\n"
+   "%x = extractelement <4 x float> %p, i32 0\n"
+   "%s = fmul float %x, 2.0\n"
+   "%n = load i32, ptr addrspace(1) %counts, align 4\n"
+   "%m = add i32 %n, 1\n"
+   "store i32 %m, ptr addrspace(1) %counts, align 4\n"
+   "%v = insertelement <4 x float> %p, float %s, i32 1\n"
+   "ret <4 x float> %v\n}\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @fragment, !3, !4}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.render_target\", i32 0, i32 0, !\"air.raster_order_group\", i32 0,"
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"color\"}\n"
+   "!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n"
+   "!41 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.raster_order_group\", i32 0, !\"air.arg_type_size\","
+   " i32 4, !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"counts\"}\n";
+
+/* Whether instr reads or writes device memory. */
+static bool
+device_access(nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+   switch (intrinsic->intrinsic) {
+   case nir_intrinsic_load_global:
+   case nir_intrinsic_store_global:
+      return !(nir_intrinsic_access(intrinsic) & ACCESS_CAN_REORDER);
+   case nir_intrinsic_load_deref:
+   case nir_intrinsic_store_deref:
+      return nir_deref_mode_may_be(nir_src_as_deref(intrinsic->src[0]), nir_var_mem_global);
+   default:
+      return false;
+   }
+}
+
+/* The buffer's accesses run in a critical section, opened once after the
+ * work before them and closed once after the last. */
+static void
+raster_order_groups_order_device_accesses(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = translate(grouped, STELA_AIR_FRAGMENT, false, &error);
+   if (!shader)
+      fprintf(stderr, "grouped: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.fs.pixel_interlock_ordered);
+   unsigned begins = 0, ends = 0, accesses = 0, before = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         nir_intrinsic_instr *intrinsic =
+            instr->type == nir_instr_type_intrinsic ? nir_instr_as_intrinsic(instr) : NULL;
+         if (intrinsic && intrinsic->intrinsic == nir_intrinsic_begin_invocation_interlock) {
+            assert(block->cf_node.parent->type == nir_cf_node_function);
+            begins++;
+         } else if (intrinsic && intrinsic->intrinsic == nir_intrinsic_end_invocation_interlock) {
+            assert(block->cf_node.parent->type == nir_cf_node_function);
+            ends++;
+         } else if (device_access(instr)) {
+            assert(begins == 1 && !ends);
+            accesses++;
+         } else if (instr->type == nir_instr_type_alu &&
+                    nir_instr_as_alu(instr)->op == nir_op_fmul) {
+            before += !begins;
+         }
+      }
+   }
+   assert(begins == 1 && ends == 1 && accesses >= 2 && before == 1);
+   ralloc_free(shader);
+
+   /* Unused, the buffer orders nothing. */
+   char *unused = change(grouped, "!\"air.arg_name\", !\"counts\"}",
+                         "!\"air.arg_name\", !\"counts\", !\"air.arg_unused\"}");
+   char *bodiless = change(unused, "%n = load i32, ptr addrspace(1) %counts, align 4\n"
+                                   "%m = add i32 %n, 1\n"
+                                   "store i32 %m, ptr addrspace(1) %counts, align 4\n", "");
+   shader = translate(bodiless, STELA_AIR_FRAGMENT, false, &error);
+   assert(shader && !shader->info.fs.pixel_interlock_ordered);
+   ralloc_free(shader);
+   free(unused);
+   free(bodiless);
+
+   /* A device without fragment shader interlock cannot order them. */
+   raster_order_groups = false;
+   assert(!translate(grouped, STELA_AIR_FRAGMENT, false, &error) && error.kind == STELA_AIR_TARGET);
+   raster_order_groups = true;
+
+   /* A group is one number, given once. */
+   char *twice = change(grouped, "!\"air.raster_order_group\", i32 0, !\"air.arg_type_size\"",
+                        "!\"air.raster_order_group\", i32 0, !\"air.raster_order_group\", i32 1,"
+                        " !\"air.arg_type_size\"");
+   assert(!translate(twice, STELA_AIR_FRAGMENT, false, &error) && error.kind == STELA_AIR_METADATA);
+   free(twice);
+
+   /* Only fragment functions have raster order. */
+   char *vertex_group = with_buffer(1, "ret <4 x float> %p\n");
+   char *grouped_vertex = change(vertex_group, "!\"air.read_write\",",
+                                 "!\"air.read_write\", !\"air.raster_order_group\", i32 0,");
+   assert(!translate(grouped_vertex, STELA_AIR_VERTEX, false, &error) && error.kind == STELA_AIR_ARGUMENT);
+   free(vertex_group);
+   free(grouped_vertex);
+}
+
 /* A value declared uniform is, and the assumption that says so adds nothing. */
 static void
 uniform_values_are_assumed(void)
@@ -772,6 +883,7 @@ main(void)
    void_functions_write_nothing();
    fragment_functions_read_their_pass_samples();
    uniform_values_are_assumed();
+   raster_order_groups_order_device_accesses();
    refuses_unrepresentable_render_io();
    glsl_type_singleton_decref();
    puts("air render io: ok");

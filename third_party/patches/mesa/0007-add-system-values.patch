@@ -1,0 +1,27 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mary Guillemard <mary.guillemard@collabora.com>
+Date: Sun, 15 Jun 2025 15:37:57 +0200
+Subject: [PATCH] nvk: Add system values for interlock
+
+Signed-off-by: Mary Guillemard <mary@mary.zone>
+Reviewed-by: Mel Henning <mhenning@darkrefraction.com>
+---
+ src/nouveau/compiler/nak_private.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/nouveau/compiler/nak_private.h b/src/nouveau/compiler/nak_private.h
+index 0d79e959998f45eec23b30de22734ec4c0cc2b09..17e54d10bc7e1873e3ce26e3daaa252ff53fbad3 100644
+--- a/src/nouveau/compiler/nak_private.h
++++ b/src/nouveau/compiler/nak_private.h
+@@ -112,9 +112,11 @@ enum ENUM_PACKED nak_sv {
+    NAK_SV_LANE_ID          = 0x00,
+    NAK_SV_VIRTCFG          = 0x02,
+    NAK_SV_VIRTID           = 0x03,
++   NAK_SV_ORDERING_TICKET  = 0x0f,
+    NAK_SV_PRIM_TYPE        = 0x10,
+    NAK_SV_INVOCATION_ID    = 0x11,
+    NAK_SV_THREAD_KILL      = 0x13,
++   NAK_SV_AFFINITY         = 0x1c,
+    NAK_SV_INVOCATION_INFO  = 0x1d,
+    NAK_SV_COMBINED_TID     = 0x20,
+    NAK_SV_TID_X            = 0x21,

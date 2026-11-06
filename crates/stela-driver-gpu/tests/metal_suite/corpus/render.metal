@@ -474,6 +474,32 @@ fragment float4 frag_fetch(Full in [[stage_in]], float4 target [[color(0)]], dev
                            constant uint &width [[buffer(1)]])
 { return target * 0.5f + c[pixel(in.position, width)]; }
 
+// Instances of one full-target triangle, all in one draw. Each counts, in
+// device memory of a raster order group, the fragments before it at its pixel
+// in x and, in y, whether those were exactly the instances before it, so an
+// access that misses an earlier fragment's write or sees a later one loses a
+// count.
+struct Ordered {
+    float4 position [[position]];
+    uint instance [[flat]];
+};
+
+vertex Ordered vert_ordered(uint v [[vertex_id]], uint i [[instance_id]])
+{
+    float2 p = float2((v << 1) & 2, v & 2);
+    return {float4(p * 2.0f - 1.0f, 0.5f, 1.0f), i};
+}
+
+fragment float4 frag_raster_ordered(Ordered in [[stage_in]],
+                                    device uint2 *counts [[buffer(0), raster_order_group(0)]],
+                                    constant uint &width [[buffer(1)]])
+{
+    device uint2 &count = counts[pixel(in.position, width)];
+    uint2 seen = count;
+    count = uint2(seen.x + 1, seen.y + uint(seen.x == in.instance));
+    return float4(0.0f);
+}
+
 // Two instances in order: an occluder over the left half at depth 0.25,
 // then the whole target at 0.75. With early fragment tests the hidden
 // fragments of the second never run, so each instance counts exactly the

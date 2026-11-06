@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mary Guillemard <mary@mary.zone>
+Date: Sun, 2 Nov 2025 14:43:51 +0100
+Subject: [PATCH] nvk: Advertise VK_EXT_fragment_shader_interlock
+
+Co-authored-by: Lorenzo Rossi <git@rossilorenzo.dev>
+Signed-off-by: Mary Guillemard <mary@mary.zone>
+Signed-off-by: Lorenzo Rossi <git@rossilorenzo.dev>
+---
+ src/nouveau/vulkan/nvk_physical_device.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/nouveau/vulkan/nvk_physical_device.c b/src/nouveau/vulkan/nvk_physical_device.c
+index 71242e72cd91dc34258f161860ee551394799f99..22416126eb3bf82ef56d28a7bc690ac47786fb34 100644
+--- a/src/nouveau/vulkan/nvk_physical_device.c
++++ b/src/nouveau/vulkan/nvk_physical_device.c
+@@ -243,6 +243,7 @@ nvk_get_device_extensions(const struct nvk_instance *instance,
+       .EXT_extended_dynamic_state2 = true,
+       .EXT_extended_dynamic_state3 = true,
+       .EXT_external_memory_dma_buf = true,
++      .EXT_fragment_shader_interlock = info->cls_eng3d >= MAXWELL_B,
+       .EXT_global_priority = true,
+       .EXT_global_priority_query = true,
+       .EXT_graphics_pipeline_library = true,
+@@ -674,6 +675,12 @@ nvk_get_device_features(const struct nv_device_info *info,
+       .extendedDynamicState3RepresentativeFragmentTestEnable = false,
+       .extendedDynamicState3ShadingRateImageEnable = false,
+ 
++      /* VK_EXT_fragment_shader_interlock */
++      .fragmentShaderSampleInterlock = info->cls_eng3d >= MAXWELL_B,
++      .fragmentShaderPixelInterlock = info->cls_eng3d >= MAXWELL_B,
++      /* TODO: Need common code wiring */
++      .fragmentShaderShadingRateInterlock = false,
++
+       /* VK_EXT_graphics_pipeline_library */
+       .graphicsPipelineLibrary = true,
+ 
+@@ -1318,7 +1325,7 @@ nvk_get_device_properties(const struct nvk_instance *instance,
+       .fragmentShadingRateWithSampleMask = true,
+       .fragmentShadingRateWithShaderSampleMask = true,
+       .fragmentShadingRateWithConservativeRasterization = true,
+-      //.fragmentShadingRateWithFragmentShaderInterlock = true,
++      .fragmentShadingRateWithFragmentShaderInterlock = true,
+       .fragmentShadingRateWithCustomSampleLocations = true,
+       .fragmentShadingRateStrictMultiplyCombiner = true,
+ 

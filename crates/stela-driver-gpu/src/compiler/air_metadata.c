@@ -1063,6 +1063,13 @@ output_reflection(struct stela_air_metadata *m, const LLVMValueRef *fields, unsi
          else if (stela_air_md_string(value, "air.less")) io->depth = STELA_AIR_DEPTH_LESS;
          else return fail(m, STELA_AIR_METADATA, "invalid depth qualifier");
          qualified = true;
+      } else if (io->semantic == STELA_AIR_RENDER_TARGET &&
+                 stela_air_md_string(key, "air.raster_order_group")) {
+         /* Color writes already land in raster order, and [[color(n)]]
+          * reads keep programmable blending's own order. */
+         unsigned group;
+         if (f == n || !stela_air_md_uint(fields[f++], &group))
+            return fail(m, STELA_AIR_METADATA, "invalid raster order group");
       } else return fail(m, STELA_AIR_METADATA, "unsupported output metadata");
    }
    return true;
@@ -1921,7 +1928,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             return false;
          first_field = fields_count;
       }
-      bool unused = false;
+      bool unused = false, grouped = false;
       LLVMValueRef struct_info = NULL;
       bool has_location = false, has_as = false, has_size = false, has_align = false;
       bool has_name = false, has_type_name = false, has_buffer_size = false;
@@ -2021,6 +2028,15 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          } else if (builtin == STELA_AIR_SAMPLE_MASK_IN &&
                     stela_air_md_string(key, "air.post_depth_coverage")) {
             render->entry.post_depth_coverage = true;
+         } else if ((buffer || texture) && stela_air_md_string(key, "air.raster_order_group")) {
+            /* Every group shares one order, which also orders each group. */
+            unsigned group;
+            if (grouped || f == fields_count || !stela_air_md_uint(fields[f++], &group))
+               return fail(t, STELA_AIR_METADATA, "invalid/duplicate raster order group");
+            if (!render || render->entry.stage != STELA_AIR_FRAGMENT)
+               return fail(t, STELA_AIR_ARGUMENT, "raster order groups exist only in fragment functions");
+            grouped = true;
+            render->entry.raster_ordered |= claims;
          } else if (!tool_generated(key)) {
             unsigned length;
             const char *text = md_text(key, &length);

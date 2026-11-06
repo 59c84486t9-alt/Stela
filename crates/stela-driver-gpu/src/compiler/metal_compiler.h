@@ -106,6 +106,8 @@ struct stela_metal_target {
    uint32_t max_varying_slots, max_payload_bytes, max_mesh_vertices, max_mesh_primitives;
    /* Nonzero when fragment shaders may write the stencil reference. */
    uint32_t stencil_export;
+   /* Nonzero when fragment shaders may use raster order groups. */
+   uint32_t raster_order_groups;
 };
 #define STELA_METAL_TARGET_BYTES 48u
 

@@ -2485,6 +2485,97 @@ shade_per_sample(nir_shader *shader)
    shader->info.fs.uses_sample_shading = per_sample;
 }
 
+/* Whether instr reads or writes memory another fragment may also access:
+ * a device buffer or a texture. Loads free to reorder read memory nothing
+ * writes during the draw, such as the argument tables. */
+static bool
+shared_memory_access(const nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+   if (nir_intrinsic_has_access(intrinsic) && nir_intrinsic_access(intrinsic) & ACCESS_CAN_REORDER)
+      return false;
+   switch (intrinsic->intrinsic) {
+   case nir_intrinsic_load_global:
+   case nir_intrinsic_store_global:
+   case nir_intrinsic_global_atomic:
+   case nir_intrinsic_global_atomic_swap:
+   case nir_intrinsic_load_ssbo:
+   case nir_intrinsic_store_ssbo:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap:
+   case nir_intrinsic_image_deref_load:
+   case nir_intrinsic_image_deref_sparse_load:
+   case nir_intrinsic_image_deref_store:
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap:
+      return true;
+   case nir_intrinsic_load_deref:
+   case nir_intrinsic_store_deref:
+   case nir_intrinsic_deref_atomic:
+   case nir_intrinsic_deref_atomic_swap:
+      return nir_deref_mode_may_be(nir_src_as_deref(intrinsic->src[0]),
+                                   nir_var_mem_global | nir_var_mem_ssbo | nir_var_image);
+   default:
+      return false;
+   }
+}
+
+/* A fragment function with raster order groups: its device buffer and
+ * texture accesses, from the first to the last, form a critical section
+ * that the overlapping fragments before it leave first, in primitive order.
+ * The section opens and closes once in the function's top-level control
+ * flow, as fragment shader interlock requires, around the nodes holding
+ * those accesses. Groups are not told apart: one order is also each
+ * group's. */
+static bool
+order_raster_groups(struct translator *t)
+{
+   if (!t->stage_options->raster_order_groups)
+      return fail(t, STELA_AIR_TARGET, "raster order groups need the device's fragment shader interlock");
+   nir_function_impl *impl = nir_shader_get_entrypoint(t->b.shader);
+   nir_cursor begin = {0}, end = {0};
+   bool found = false;
+   foreach_list_typed(nir_cf_node, node, node, &impl->body) {
+      if (node->type == nir_cf_node_block) {
+         nir_foreach_instr(instr, nir_cf_node_as_block(node)) {
+            if (!shared_memory_access(instr))
+               continue;
+            if (!found)
+               begin = nir_before_instr(instr);
+            end = nir_after_instr(instr);
+            found = true;
+         }
+         continue;
+      }
+      bool accesses = false;
+      nir_foreach_block_in_cf_node(block, node) {
+         nir_foreach_instr(instr, block)
+            accesses |= shared_memory_access(instr);
+      }
+      if (!accesses)
+         continue;
+      if (!found)
+         begin = nir_before_cf_node(node);
+      end = nir_after_cf_node(node);
+      found = true;
+   }
+   /* A function whose grouped arguments go unused orders nothing. */
+   if (!found)
+      return true;
+   nir_variable_mode modes = nir_var_mem_global | nir_var_mem_ssbo | nir_var_image;
+   nir_builder *b = &t->b;
+   b->cursor = end;
+   nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_RELEASE, modes);
+   nir_end_invocation_interlock(b);
+   b->cursor = begin;
+   nir_begin_invocation_interlock(b);
+   nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_ACQUIRE, modes);
+   t->b.shader->info.fs.pixel_interlock_ordered = true;
+   return true;
+}
+
 /* "air.is_uniform.<type>", which states what make_uniform guarantees. */
 static bool
 uniform_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name_length,
@@ -5412,6 +5503,8 @@ translate(const void *bitcode, size_t size, const char *entry,
    }
    if (stage && stage->stage == STELA_AIR_FRAGMENT)
       shade_per_sample(t.b.shader);
+   if (stage && t.render.entry.raster_ordered && !order_raster_groups(&t))
+      goto done;
    if (stage || t.shared_resources || t.shared_barriers)
       nir_shader_gather_info(t.b.shader, nir_shader_get_entrypoint(t.b.shader));
    nir_validate_shader(t.b.shader, stage ? "AIR bounded render translation" : "AIR bounded compute translation");

@@ -379,6 +379,10 @@ struct stela_air_stage_entry {
    /* A fragment function's [[early_fragment_tests]], and a [[sample_mask]]
     * input's post_depth_coverage. */
    bool early_fragment_tests, post_depth_coverage;
+   /* A fragment function with a buffer or texture argument in a
+    * [[raster_order_group]]: its accesses follow those of the overlapping
+    * fragments before it. */
+   bool raster_ordered;
 };
 typedef bool (*stela_air_visit_stage)(const struct stela_air_inspection *,
                                      const struct stela_air_stage_entry *, void *);

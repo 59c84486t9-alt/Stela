@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Mary Guillemard <mary@mary.zone>
+Date: Sun, 15 Jun 2025 16:10:51 +0200
+Subject: [PATCH] nak: Track interlock ticket reads via load_sysval_nv
+
+Signed-off-by: Mary Guillemard <mary@mary.zone>
+Reviewed-by: Mel Henning <mhenning@darkrefraction.com>
+---
+ src/nouveau/compiler/nak/from_nir.rs | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/nouveau/compiler/nak/from_nir.rs b/src/nouveau/compiler/nak/from_nir.rs
+index 03b213f2827889b50c81b962e9d5276e31930b06..6045d6f7ea74801baed487f6d1956208b61053d7 100644
+--- a/src/nouveau/compiler/nak/from_nir.rs
++++ b/src/nouveau/compiler/nak/from_nir.rs
+@@ -3497,6 +3497,15 @@ impl<'a> ShaderFromNir<'a> {
+             }
+             nir_intrinsic_load_sysval_nv => {
+                 let idx = u8::try_from(intrin.base()).unwrap();
++
++                if idx == NAK_SV_ORDERING_TICKET {
++                    if let ShaderStageInfo::Fragment(info) = &mut self.info.stage {
++                        info.reads_interlock_ticket = true;
++                    } else {
++                        panic!("Ordering ticket is only available in fragment shaders");
++                    }
++                }
++
+                 debug_assert!(intrin.def.num_components == 1);
+                 debug_assert!(
+                     intrin.def.bit_size == 32 || intrin.def.bit_size == 64
