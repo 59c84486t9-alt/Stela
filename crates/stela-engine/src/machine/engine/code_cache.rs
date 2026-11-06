@@ -363,6 +363,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return;
         }
         self.reclaimed_at = Some(live);
+        self.statistics.code_releases += 1;
         match self.host.release_oldest_code() {
             Some(range) => self.evict_code(range),
             None => self.discard_code(Discard::Memory),

@@ -404,6 +404,8 @@ pub struct Statistics {
     pub code_discards: [u64; Discard::ALL.len()],
     /// Parts of the code arena reclaimed for new code, oldest first.
     pub code_evictions: u64,
+    /// Parts of the code arena released for heap pressure.
+    pub code_releases: u64,
     /// Pages of compiled code an IC IVAU made stale.
     pub code_invalidations: u64,
     pub waits: u64,
@@ -473,6 +475,7 @@ impl core::ops::AddAssign for Statistics {
             device_accesses,
             code_discards,
             code_evictions,
+            code_releases,
             code_invalidations,
             waits,
             switches,
@@ -527,6 +530,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.system_exits, system_exits),
             (&mut self.device_accesses, device_accesses),
             (&mut self.code_evictions, code_evictions),
+            (&mut self.code_releases, code_releases),
             (&mut self.code_invalidations, code_invalidations),
             (&mut self.waits, waits),
             (&mut self.switches, switches),

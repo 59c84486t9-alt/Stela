@@ -577,6 +577,10 @@ impl Heartbeat {
             // Per PE: the interval's share compiling, reading and hashing
             // fetch pages, finding shared blocks and installing blocks.
             let mut fetches = String::from("PES FETCH compile%/page%/shared%/install%");
+            // Per PE: the blocks it holds, its block table's slots, the
+            // pages its index finds blocks in, and the code arena parts it
+            // released for heap pressure since the last beat.
+            let mut code = String::from("PES CODE live/slots/pages/releases");
             // Per PE: device transfers whose deadline came and device line
             // queries, each as a count and, with `--profile`, a share of the
             // interval.
@@ -617,6 +621,13 @@ impl Heartbeat {
                     percent(now.shared_ticks.saturating_sub(before.shared_ticks)),
                     percent(now.install_ticks.saturating_sub(before.install_ticks)),
                 ));
+                code.push_str(&format!(
+                    " {pe}:{}/{}/{}/{}",
+                    now.live_blocks,
+                    now.block_slots,
+                    now.indexed_pages,
+                    now.code_releases.saturating_sub(before.code_releases),
+                ));
                 device_work.push_str(&format!(
                     " {pe}:{}/{}/{}/{}",
                     now.due_transfers.saturating_sub(before.due_transfers),
@@ -653,6 +664,7 @@ impl Heartbeat {
             self.lock_waits = waits;
             output::arguments(format_args!("{shares}\n"));
             output::arguments(format_args!("{fetches}\n"));
+            output::arguments(format_args!("{code}\n"));
             output::arguments(format_args!("{device_work}\n"));
             if machine.step_timing().is_some() {
                 output::arguments(format_args!("{phases}\n"));

@@ -195,6 +195,13 @@ pub struct Counts {
     /// Blocks it compiled, and blocks another PE compiled that it installed.
     pub compiled: u64,
     pub shared: u64,
+    /// Blocks it holds, the slots its block table has, the pages its
+    /// index finds blocks in, and the parts of its code arena it released
+    /// for heap pressure.
+    pub live_blocks: u64,
+    pub block_slots: u64,
+    pub indexed_pages: u64,
+    pub code_releases: u64,
     pub compile_ticks: u64,
     /// Counter ticks it spent reading and hashing fetch pages, finding
     /// shared blocks and copying them, and installing blocks
@@ -1373,6 +1380,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             retired: self.retired_instructions() as u64,
             compiled: statistics.compiled,
             shared: statistics.shared,
+            live_blocks: (self.blocks.len() - self.free_blocks.len()) as u64,
+            block_slots: self.blocks.len() as u64,
+            indexed_pages: self.index.pages() as u64,
+            code_releases: statistics.code_releases,
             compile_ticks: statistics.compile_ticks,
             page_ticks: statistics.page_ticks,
             shared_ticks: statistics.shared_ticks,

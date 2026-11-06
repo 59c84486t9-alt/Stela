@@ -203,7 +203,6 @@ impl BlockIndex {
         })
     }
 
-    #[cfg(all(feature = "std", feature = "native-profile"))]
     pub(super) fn pages(&self) -> usize {
         self.pages.len()
     }
