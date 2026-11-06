@@ -23,7 +23,7 @@
 #import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
-#import <QuartzCore/CAMetalLayer.h>
+#import <QuartzCore/QuartzCore.h>
 #include <mach/mach.h>
 #include <objc/message.h>
 #include <stdio.h>
@@ -3850,13 +3850,139 @@ static id<MTLIndirectCommandBuffer> make_icb(Case *c, NSDictionary *b)
 	return icb;
 }
 
+/* A Core Animation filter of `type`, by its private class. */
+static id ca_filter(NSString *type)
+{
+	return ((id (*)(id, SEL, id))objc_msgSend)(NSClassFromString(@"CAFilter"), sel_registerName("filterWithType:"),
+						    type);
+}
+
+/* A horizontal red and vertical green ramp over blue 0.6, `w` by `h`. */
+static CGImageRef ca_gradient(size_t w, size_t h)
+{
+	CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+	CGContextRef context = CGBitmapContextCreate(NULL, w, h, 8, w * 4, rgb,
+						     (CGBitmapInfo)kCGImageAlphaPremultipliedFirst);
+	for (size_t y = 0; y < h; y++)
+		for (size_t x = 0; x < w; x++) {
+			CGContextSetRGBFillColor(context, x / (double)w, y / (double)h, 0.6, 1);
+			CGContextFillRect(context, CGRectMake(x, y, 1, 1));
+		}
+	CGImageRef image = CGBitmapContextCreateImage(context);
+	CGContextRelease(context);
+	CGColorSpaceRelease(rgb);
+	return image;
+}
+
+/* The layer `scene` names, over the gradient: a translucent orange rounded
+ * panel, which no blend mode leaves the gradient under, alone or compositing
+ * by `compositing`, or a backdrop layer of the same shape filtering what lies
+ * below it. */
+static CALayer *ca_scene(NSDictionary *f)
+{
+	CGRect frame = CGRectMake(12, 20, 40, 24);
+	NSArray *backdrop = f[@"backdrop"];
+	if (backdrop) {
+		CALayer *layer = [NSClassFromString(@"CABackdropLayer") layer];
+		layer.frame = frame;
+		layer.cornerRadius = 8;
+		layer.masksToBounds = YES;
+		NSMutableArray *filters = [NSMutableArray new];
+		for (NSDictionary *spec in backdrop) {
+			id filter = ca_filter(spec[@"type"]);
+			for (NSString *key in spec[@"values"])
+				[filter setValue:spec[@"values"][key] forKey:key];
+			if (spec[@"matrix"]) {
+				float m[20];
+				for (int i = 0; i < 20; i++)
+					m[i] = [spec[@"matrix"][i] floatValue];
+				[filter setValue:[NSValue valueWithBytes:m objCType:"{CAColorMatrix=ffffffffffffffffffff}"]
+					  forKey:@"inputColorMatrix"];
+			}
+			[filters addObject:filter];
+		}
+		layer.filters = filters;
+		return layer;
+	}
+	CALayer *layer = [CALayer layer];
+	layer.frame = frame;
+	layer.cornerRadius = 8;
+	CGColorRef orange = CGColorCreateGenericRGB(0.9, 0.3, 0.1, 0.7);
+	layer.backgroundColor = orange;
+	CGColorRelease(orange);
+	NSDictionary *compositing = f[@"compositing"];
+	if (compositing) {
+		id filter = ca_filter(compositing[@"type"]);
+		if (compositing[@"matrix"]) {
+			float m[20];
+			for (int i = 0; i < 20; i++)
+				m[i] = [compositing[@"matrix"][i] floatValue];
+			[filter setValue:[NSValue valueWithBytes:m objCType:"{CAColorMatrix=ffffffffffffffffffff}"]
+				  forKey:@"inputColorMatrix"];
+		}
+		layer.compositingFilter = filter;
+	}
+	if (f[@"filter"])
+		layer.filters = @[ ca_filter(f[@"filter"]) ];
+	return layer;
+}
+
+/* Core Animation's renderer drawing a scene into the case's `out`, on the
+ * case's queue. Core Animation builds pipelines its archive lacks while it
+ * draws and leaves their layers out until they are ready, so frames repeat
+ * until two in a row are identical. */
+static void run_core_animation(Case *c, id<MTLCommandQueue> queue, NSDictionary *f)
+{
+	id<MTLTexture> out = c.textures[@"out"];
+	if (!out)
+		@throw failure(@"core animation draws into an `out` texture");
+	CARenderer *renderer = [CARenderer rendererWithMTLTexture:out options:@{kCARendererMetalCommandQueue : queue}];
+	CALayer *root = [CALayer layer];
+	root.frame = CGRectMake(0, 0, out.width, out.height);
+	CALayer *ground = [CALayer layer];
+	ground.frame = root.bounds;
+	CGImageRef gradient = ca_gradient(out.width, out.height);
+	ground.contents = (__bridge id)gradient;
+	CGImageRelease(gradient);
+	[root addSublayer:ground];
+	[root addSublayer:ca_scene(f)];
+	renderer.layer = root;
+	renderer.bounds = root.bounds;
+	[CATransaction flush];
+	NSUInteger bytes = out.width * out.height * 4;
+	id<MTLBuffer> frames[2] = {[c.device newBufferWithLength:bytes options:MTLResourceStorageModeShared],
+				   [c.device newBufferWithLength:bytes options:MTLResourceStorageModeShared]};
+	for (unsigned frame = 0;; frame++) {
+		[renderer beginFrameAtTime:CACurrentMediaTime() timeStamp:NULL];
+		[renderer addUpdateRect:renderer.bounds];
+		[renderer render];
+		[renderer endFrame];
+		id<MTLCommandBuffer> cb = [queue commandBuffer];
+		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+		[blit copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+			   sourceSize:MTLSizeMake(out.width, out.height, 1) toBuffer:frames[frame % 2]
+		    destinationOffset:0 destinationBytesPerRow:out.width * 4 destinationBytesPerImage:bytes];
+		[blit endEncoding];
+		wait_for(cb, c.spec);
+		if (frame > 0 && !memcmp(frames[0].contents, frames[1].contents, bytes))
+			return;
+		if (frame == 7)
+			@throw failure(@"core animation's frames never settled");
+		usleep(250000);
+	}
+}
+
 /* Work Apple's frameworks encode with their own shaders: an MPS matrix
- * product and box filter, and a Core Image filter, each over the case's
- * resources. */
+ * product and box filter, a Core Image filter and a Core Animation scene,
+ * each over the case's resources. */
 static void run_framework(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 {
 	NSDictionary *f = spec[@"framework"];
 	NSString *kind = f[@"kind"];
+	if ([kind isEqualToString:@"core_animation"]) {
+		run_core_animation(c, queue, f);
+		return;
+	}
 	id<MTLCommandBuffer> cb = [queue commandBuffer];
 	if ([kind hasPrefix:@"mps"] && !MPSSupportsMTLDevice(c.device))
 		@throw [NSException exceptionWithName:@"CaseUnsupported" reason:@"MPS does not support the device" userInfo:nil];

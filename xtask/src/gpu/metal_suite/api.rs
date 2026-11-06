@@ -1336,6 +1336,61 @@ fn frameworks(plan: &mut Plan, rng: &mut Random) {
     );
 }
 
+/// Core Animation's renderer drawing its materials over a gradient: a
+/// translucent panel, backdrop filters, compositing filters and glass. What
+/// Core Animation draws is its own, so each frame is held to the reference
+/// device's within a few units.
+fn core_animation(plan: &mut Plan) {
+    // Red and blue swapped, alpha kept.
+    let swap = json!([0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+    let blur = json!({"type": "gaussianBlur", "values": {"inputRadius": 6}});
+    let mut scenes: Vec<(String, Value)> = [
+        ("panel", json!({})),
+        ("backdrop.blur", json!({"backdrop": [blur]})),
+        (
+            "backdrop.color_matrix",
+            json!({"backdrop": [{"type": "colorMatrix", "matrix": swap}]}),
+        ),
+        (
+            "backdrop.blur_saturate",
+            json!({"backdrop": [blur, {"type": "colorSaturate", "values": {"inputAmount": 2}}]}),
+        ),
+        (
+            "backdrop.glass",
+            json!({"backdrop": [{"type": "glassBackground"}]}),
+        ),
+        ("glass_foreground", json!({"filter": "glassForeground"})),
+        (
+            "compositing.vibrant_color_matrix",
+            json!({"compositing": {"type": "vibrantColorMatrix", "matrix": swap}}),
+        ),
+    ]
+    .into_iter()
+    .map(|(label, scene)| (label.to_string(), scene))
+    .collect();
+    for (label, mode) in [
+        ("vibrant_light", "vibrantLight"),
+        ("vibrant_dark", "vibrantDark"),
+        ("plus_darker", "plusD"),
+        ("plus_lighter", "plusL"),
+        ("multiply", "multiplyBlendMode"),
+        ("overlay", "overlayBlendMode"),
+    ] {
+        scenes.push((
+            format!("compositing.{label}"),
+            json!({"compositing": {"type": mode}}),
+        ));
+    }
+    for (label, mut scene) in scenes {
+        scene["kind"] = "core_animation".into();
+        plan.add(
+            Case::framework(&format!("api.framework.core_animation.{label}"), scene)
+                .texture(Texture::d2("out", "bgra8unorm", 64, 64).usage(&["read", "render"]))
+                .output(Output::new("out", Dtype::U8, Tolerance::units(3.0))),
+        );
+    }
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("api", SOURCE, &[], super::plan::LATEST);
     let mut rng = Random::new(1201);
@@ -1356,4 +1411,5 @@ pub fn build(plan: &mut Plan) {
     depth_stencil_formats(plan, &library);
     limits(plan, &library);
     frameworks(plan, &mut rng);
+    core_animation(plan);
 }
