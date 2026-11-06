@@ -163,8 +163,11 @@ nir_deref_instr *stela_metal_bind_sampler_id(nir_builder *b, nir_def *id, bool i
                                              void *stage)
 {
    (void)stage;
-   return heap_element(b, id_half(b, id, integer), STELA_METAL_HEAP_SAMPLERS,
-                       glsl_bare_sampler_type(), nir_var_uniform);
+   nir_def *index = id_half(b, id, integer);
+   if (integer)
+      index = nir_iand_imm(b, index, ~STELA_METAL_SAMPLER_NEVER);
+   return heap_element(b, index, STELA_METAL_HEAP_SAMPLERS, glsl_bare_sampler_type(),
+                       nir_var_uniform);
 }
 
 nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air_texture *texture,
@@ -219,6 +222,17 @@ nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air
       return NULL;
    return stela_metal_bind_sampler_id(
       b, table_id(b, stage, STELA_METAL_TABLE_SAMPLERS + 8u * sampler->index), integer, stage);
+}
+
+nir_def *stela_metal_sampler_never(nir_builder *b, const struct stela_air_sampler *sampler,
+                                   nir_def *id, void *stage)
+{
+   if (!id) {
+      if (sampler->index >= STELA_METAL_SAMPLERS)
+         return NULL;
+      id = table_id(b, stage, STELA_METAL_TABLE_SAMPLERS + 8u * sampler->index);
+   }
+   return nir_test_mask(b, id_half(b, id, true), STELA_METAL_SAMPLER_NEVER);
 }
 
 nir_def *stela_metal_resource_id(nir_builder *b, const struct stela_air_texture *texture,

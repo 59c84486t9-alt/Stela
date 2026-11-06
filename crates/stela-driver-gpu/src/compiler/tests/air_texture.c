@@ -367,6 +367,13 @@ kernels_sample_write_read_and_query(void)
    ralloc_free(shader);
 }
 
+/* Every sampler compares with Never. */
+static nir_def *
+always_never(nir_builder *b, const struct stela_air_sampler *sampler, nir_def *id, void *data)
+{
+   return nir_imm_true(b);
+}
+
 static void
 fragments_sample_with_derivatives_compare_and_gather(void)
 {
@@ -403,6 +410,27 @@ fragments_sample_with_derivatives_compare_and_gather(void)
          }
       }
    }
+   ralloc_free(shader);
+
+   /* A Never sampler fails each compared channel: the two comparisons'
+    * one and the compare gather's four. */
+   o.resources.sampler_never = always_never;
+   shader = stela_air_stage_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input), "fragment",
+                                   &nir_options, &o, &error);
+   assert(shader);
+   unsigned failed = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_alu || nir_instr_as_alu(instr)->op != nir_op_bcsel)
+               continue;
+            nir_alu_instr *select = nir_instr_as_alu(instr);
+            failed += nir_src_is_const(select->src[0].src) && nir_src_as_bool(select->src[0].src) &&
+                      nir_src_is_const(select->src[1].src) && nir_src_as_float(select->src[1].src) == 0.0;
+         }
+      }
+   }
+   assert(failed == 6);
    ralloc_free(shader);
    LLVMDisposeMemoryBuffer(input);
 }

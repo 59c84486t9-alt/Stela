@@ -182,9 +182,11 @@
  * texel buffer, its high half its storage texel buffer or storage images, one
  * per level from the index below STELA_METAL_LEVEL_SHIFT, whose bits from
  * there count them less one; a sampler's low half names its float-border
- * sampler, its high half its integer-border twin. */
+ * sampler, its high half its integer-border twin, with STELA_METAL_SAMPLER_NEVER
+ * set when the sampler compares with Never. */
 #define STELA_METAL_HEAP_SET 0u
 #define STELA_METAL_LEVEL_SHIFT 27u
+#define STELA_METAL_SAMPLER_NEVER 0x80000000u
 enum stela_metal_heap_array {
    STELA_METAL_HEAP_SAMPLED_IMAGES,
    STELA_METAL_HEAP_STORAGE_IMAGES,
@@ -243,6 +245,11 @@ nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_textu
 /* stela_air_texture_query: whether the texture's MTLResourceID is the null one. */
 nir_def *stela_metal_texture_null(nir_builder *b, const struct stela_air_texture *texture,
                                   nir_def *id, void *stage);
+
+/* stela_air_sampler_query: whether the sampler's MTLResourceID carries
+ * STELA_METAL_SAMPLER_NEVER. */
+nir_def *stela_metal_sampler_never(nir_builder *b, const struct stela_air_sampler *sampler,
+                                   nir_def *id, void *stage);
 
 /* stela_air_bind_sampler likewise, of the sampler's float- or integer-border
  * descriptor. */

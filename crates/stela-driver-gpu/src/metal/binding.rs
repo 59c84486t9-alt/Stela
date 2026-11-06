@@ -72,6 +72,22 @@ impl ResourceId {
         Self(low as u64 | (high as u64) << 32)
     }
 
+    /// The high-half bit of a sampler that compares with Never, through
+    /// which a comparison is zero: its Vulkan samplers do not compare.
+    pub const SAMPLER_NEVER: u32 = 1 << 31;
+
+    /// A sampler's ID: its float-border descriptor, its integer-border twin,
+    /// and whether it compares with Never.
+    pub const fn sampler(float: u32, integer: u32, never: bool) -> Self {
+        debug_assert!(integer & Self::SAMPLER_NEVER == 0);
+        Self::new(float, integer | if never { Self::SAMPLER_NEVER } else { 0 })
+    }
+
+    /// A sampler ID's integer-border descriptor.
+    pub const fn sampler_integer(self) -> u32 {
+        self.high() & !Self::SAMPLER_NEVER
+    }
+
     /// A texture's ID: its read descriptor, and its `levels` write
     /// descriptors from `storage`.
     pub const fn texture(sampled: u32, storage: u32, levels: u32) -> Self {
@@ -855,6 +871,7 @@ mod tests {
             ("STELA_METAL_SAMPLERS", MAX_SAMPLER_BINDINGS),
             ("STELA_METAL_HEAP_SET", HEAP_SET),
             ("STELA_METAL_LEVEL_SHIFT", ResourceId::LEVEL_SHIFT),
+            ("STELA_METAL_SAMPLER_NEVER", ResourceId::SAMPLER_NEVER),
             (
                 "STELA_METAL_TABLE_BUFFER_ADDRESSES",
                 ArgumentTable::BUFFER_ADDRESSES_OFFSET,
@@ -1494,6 +1511,9 @@ mod tests {
         assert_eq!((id.low(), id.high_index(), id.high_count()), (7, 9, 15));
         let sampler = ResourceId::new(3, 4);
         assert_eq!((sampler.high_index(), sampler.high_count()), (4, 1));
+        let never = ResourceId::sampler(3, 4, true);
+        assert_eq!((never.low(), never.sampler_integer()), (3, 4));
+        assert_eq!(ResourceId::sampler(3, 4, false), sampler);
         assert_eq!(ResourceId::MAX_LEVELS, 32);
     }
 

@@ -175,11 +175,36 @@ static void loaded_ids_index_the_heap(void)
    assert(first->op == nir_op_iand);
    assert(nir_def_as_alu(first->src[0].src.ssa)->op == nir_op_unpack_64_2x32_split_y);
 
+   /* The integer-border twin is the high half without the Never flag. */
    deref = stela_metal_bind_sampler_id(&b, id, true, NULL);
    check_heap(deref, STELA_METAL_HEAP_SAMPLERS, nir_var_uniform, glsl_bare_sampler_type());
-   assert(nir_def_as_alu(deref->arr.index.ssa)->op == nir_op_unpack_64_2x32_split_y);
-   assert(nir_def_as_alu(deref->arr.index.ssa)->src[0].src.ssa == id);
+   nir_alu_instr *twin = nir_def_as_alu(deref->arr.index.ssa);
+   assert(twin->op == nir_op_iand && nir_src_as_uint(twin->src[1].src) == ~STELA_METAL_SAMPLER_NEVER);
+   assert(nir_def_as_alu(twin->src[0].src.ssa)->op == nir_op_unpack_64_2x32_split_y);
+   assert(nir_def_as_alu(twin->src[0].src.ssa)->src[0].src.ssa == id);
    ralloc_free(b.shader);
+}
+
+/* A sampler comparing with Never says so in its ID's high half, which its
+ * integer-border index leaves out. */
+static void never_samplers_flag_their_ids(void)
+{
+   const uint64_t ids[][3] = {
+      {(uint64_t)(4u | STELA_METAL_SAMPLER_NEVER) << 32 | 3u, 1, 4},
+      {(uint64_t)4u << 32 | 3u, 0, 4},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(ids); i++) {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "never");
+      nir_def *id = nir_imm_int64(&b, ids[i][0]);
+      nir_def *never = stela_metal_sampler_never(&b, NULL, id, NULL);
+      nir_deref_instr *deref = stela_metal_bind_sampler_id(&b, id, true, NULL);
+      nir_intrinsic_instr *store =
+         nir_store_global(&b, nir_b2i32(&b, never), nir_imm_int64(&b, 0), .align_mul = 4);
+      nir_opt_constant_folding(b.shader);
+      assert(nir_src_is_const(store->src[0]) && nir_src_as_uint(store->src[0]) == ids[i][1]);
+      assert(nir_src_is_const(deref->arr.index) && nir_src_as_uint(deref->arr.index) == ids[i][2]);
+      ralloc_free(b.shader);
+   }
 }
 
 /* An array element's ID loads from the array's slots, its element clamped
@@ -830,6 +855,7 @@ int main(void)
    buffers_load_their_table_slot();
    textures_and_samplers_index_the_heap();
    loaded_ids_index_the_heap();
+   never_samplers_flag_their_ids();
    array_elements_load_within_their_slots();
    storage_levels_index_their_run();
    cube_faces_follow_their_cube();

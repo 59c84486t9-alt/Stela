@@ -1,7 +1,10 @@
 //! Buffers, textures, samplers and heaps.
 use super::{BufferId, Device, HeapId, MemoryId, SamplerId, Slab, TextureId};
 use crate::metal::{
-    abi::{CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions, StorageMode, TextureType},
+    abi::{
+        CompareFunction, CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions, StorageMode,
+        TextureType,
+    },
     binding::{HeapArray, NULL_DESCRIPTOR, ResourceId},
     command_buffer::{
         BufferRef, MappedRange,
@@ -1119,7 +1122,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
             None => float_index,
         };
-        Ok((ResourceId::new(float_index, integer_index), samplers))
+        let never = descriptor.compare_function == CompareFunction::Never;
+        Ok((
+            ResourceId::sampler(float_index, integer_index, never),
+            samplers,
+        ))
     }
 
     /// The sampler of a constexpr sampler state.
@@ -1187,9 +1194,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         for id in ids.collect::<Vec<_>>() {
             let low = ResourceId::new(id.low(), super::super::binding::NULL_DESCRIPTOR);
             self.release_id(low, [HeapArray::Samplers; 2], 1);
-            if id.high() != id.low() {
+            if id.sampler_integer() != id.low() {
                 self.release_id(
-                    ResourceId::new(id.high(), super::super::binding::NULL_DESCRIPTOR),
+                    ResourceId::new(id.sampler_integer(), super::super::binding::NULL_DESCRIPTOR),
                     [HeapArray::Samplers; 2],
                     1,
                 );

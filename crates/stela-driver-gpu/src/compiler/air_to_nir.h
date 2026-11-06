@@ -86,6 +86,13 @@ typedef nir_def *(*stela_air_texture_query)(nir_builder *b,
                                             const struct stela_air_texture *texture,
                                             nir_def *id, void *data);
 
+/* Whether a sampler argument, or with id the identifier an argument buffer
+ * holds (sampler is then NULL), compares with Metal's Never: a comparison
+ * through it is zero, though Vulkan's sampler for it does not compare. */
+typedef nir_def *(*stela_air_sampler_query)(nir_builder *b,
+                                            const struct stela_air_sampler *sampler,
+                                            nir_def *id, void *data);
+
 /* AIR's indirect command functions (air_commands.c), as Metal's
  * render_command and compute_command methods. */
 enum stela_air_command_op {
@@ -320,6 +327,9 @@ struct stela_air_options {
    stela_air_texture_query texture_levels;
    /* Whether a texture is unbound; NULL refuses is_null_texture. */
    stela_air_texture_query texture_null;
+   /* Whether a sampler never compares; NULL leaves comparisons to the
+    * sampler bind_sampler resolves. */
+   stela_air_sampler_query sampler_never;
    /* Indirect command buffers and pipeline states in argument buffers;
     * NULL refuses AIR's command functions. */
    stela_air_command_count command_count;

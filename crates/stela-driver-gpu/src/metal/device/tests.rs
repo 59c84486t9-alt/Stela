@@ -349,9 +349,11 @@ fn samplers_are_shared_and_clamped_variants_cached() {
     let id = device.sampler_resource_id(first).unwrap();
     assert_eq!(
         id.low(),
-        id.high(),
+        id.sampler_integer(),
         "no border: the float sampler serves integer textures"
     );
+    // Metal's default compares with Never: comparisons through it are zero.
+    assert_ne!(id.high() & ResourceId::SAMPLER_NEVER, 0);
     let mut resolver = device.resolver();
     let clamped =
         crate::metal::command_buffer::Resolver::clamped_sampler(&mut resolver, id, 1.0, 4.0)

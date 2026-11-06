@@ -95,6 +95,8 @@ struct call {
    /* Whether the call's residency is read, and then its value. */
    bool sparse;
    nir_def *residency;
+   /* Whether the call's sampler compares with Never, or NULL. */
+   nir_def *never;
 };
 
 static bool
@@ -416,6 +418,8 @@ sampler_deref(struct call *call)
       fail(call, "a sampler is unbound");
       return NULL;
    }
+   if (options->sampler_never)
+      call->never = options->sampler_never(call->b, id ? NULL : sampler, id, options->binding_data);
    return deref;
 }
 
@@ -476,6 +480,17 @@ emit(const struct call *call, const struct tex *t)
    }
    nir_def_init(&tex->instr, &tex->def, nir_tex_instr_dest_size(tex), 32);
    nir_builder_instr_insert(call->b, &tex->instr);
+   /* A Never comparison fails every texel; the sparse residency stays. */
+   if (t->shadow && call->never) {
+      nir_def *channels[NIR_MAX_VEC_COMPONENTS];
+      unsigned compared = tex->def.num_components - call->sparse;
+      for (unsigned i = 0; i < tex->def.num_components; i++) {
+         channels[i] = nir_channel(call->b, &tex->def, i);
+         if (i < compared)
+            channels[i] = nir_bcsel(call->b, call->never, nir_imm_float(call->b, 0.0f), channels[i]);
+      }
+      return nir_vec(call->b, channels, tex->def.num_components);
+   }
    return &tex->def;
 }
 
