@@ -3656,7 +3656,7 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
    const struct stela_air_texture_context context = {
       .b = &t->b, .options = t->options, .error = t->error, .translator = t,
       .operand = texture_operand, .texture = texture_argument, .sampler = sampler_argument,
-      .load_word = texture_load_word, .store_word = texture_store_word,
+      .load_word = texture_load_word, .store_word = texture_store_word, .store_at = call_store,
    };
    nir_def *result, *residency;
    bool pair;

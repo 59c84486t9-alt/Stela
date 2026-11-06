@@ -707,6 +707,43 @@ sparse_texels_report_their_residency(void)
    ralloc_free(shader);
 }
 
+/* A block of 1 by 2 texels into thread memory, the last stored. */
+static const char *block_body =
+   "declare void @air.block_read_texture_2d.v4f32(ptr addrspace(1), ptr addrspace(2), <2 x i32>,"
+   " <2 x i32>, i32, i32, ptr, ptr, <2 x i32>)\n"
+   "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+   " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+   "%block = alloca [2 x <4 x float>], align 16\n"
+   "call void @air.block_read_texture_2d.v4f32(ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+   " <2 x i32> <i32 1, i32 2>, <2 x i32> <i32 0, i32 1>, i32 1, i32 0, ptr %block, ptr null,"
+   " <2 x i32> <i32 1, i32 2>)\n"
+   "%last = getelementptr [2 x <4 x float>], ptr %block, i64 0, i64 1\n"
+   "%v = load <4 x float>, ptr %last, align 16\n"
+   "%x = extractelement <4 x float> %v, i64 0\n%i = fptoui float %x to i32\n"
+   "store i32 %i, ptr addrspace(1) %out, align 4\n"
+   "ret void\n}\n";
+
+/* Each texel of a block is a fetch at its place in the block. */
+static void
+block_reads_fetch_each_texel(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(block_body, kernel_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "block: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "block read kernel");
+   struct census census = count(shader);
+   assert(census.tex[nir_texop_txf] == 2);
+   /* Each fetch is of level 1. */
+   nir_tex_instr *first = census.first[nir_texop_txf];
+   assert(nir_tex_instr_src_index(first, nir_tex_src_lod) >= 0);
+   ralloc_free(shader);
+   /* A residency destination has nothing to receive. */
+   const char *resident = replace(block_body, "ptr %block, ptr null", "ptr %block, ptr %block");
+   assert(!kernel(resident, kernel_metadata, &error));
+}
+
 /* A null texture has no descriptor to bind, and reads zero. */
 static void
 null_textures_bind_nothing(void)
@@ -1055,6 +1092,7 @@ main(void)
    storage_levels_select_their_descriptor();
    sparse_texels_report_their_residency();
    null_textures_bind_nothing();
+   block_reads_fetch_each_texel();
    samples_join_through_phis();
    short_indices_widen_their_positions();
    array_arguments_bind_their_elements();

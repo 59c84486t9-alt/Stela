@@ -23,6 +23,9 @@ struct stela_air_texture_context {
     * NULL or false after reporting why. */
    nir_def *(*load_word)(void *translator, LLVMValueRef pointer);
    bool (*store_word)(void *translator, LLVMValueRef pointer, nir_def *value);
+   /* Stores value at byte offset from what a pointer operand addresses;
+    * false after reporting why. */
+   bool (*store_at)(void *translator, LLVMValueRef pointer, nir_def *offset, nir_def *value);
 };
 
 /* Whether value is a call of air.get_read_sampler, the placeholder Metal 4's

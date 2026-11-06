@@ -63,7 +63,7 @@ static const struct shape {
 enum operation {
    SAMPLE, SAMPLE_COMPARE, SAMPLE_GRAD, SAMPLE_COMPARE_GRAD, READ, WRITE, GATHER, GATHER_COMPARE,
    WIDTH, HEIGHT, DEPTH, ARRAY_SIZE, MIP_LEVELS, SAMPLES, CLAMPED_LOD, UNCLAMPED_LOD, FENCE,
-   IS_NULL,
+   IS_NULL, BLOCK_READ,
 };
 
 /* Each operation's name stem, and whether its name ends in the texel type. */
@@ -79,6 +79,7 @@ static const struct {
    [ARRAY_SIZE] = {"get_array_size"}, [MIP_LEVELS] = {"get_num_mip_levels"},
    [SAMPLES] = {"get_num_samples"}, [CLAMPED_LOD] = {"calculate_clamped_lod"},
    [UNCLAMPED_LOD] = {"calculate_unclamped_lod"}, [FENCE] = {"fence"}, [IS_NULL] = {"is_null"},
+   [BLOCK_READ] = {"block_read", true},
 };
 
 struct call {
@@ -781,7 +782,8 @@ stela_air_texture_use(LLVMValueRef inst, struct stela_air_texture *texture)
       texture->primitive = STELA_AIR_FLOAT;
    bool writes = op == WRITE, reads = op == READ;
    bool samples = op == SAMPLE || op == SAMPLE_COMPARE || op == SAMPLE_GRAD ||
-                  op == SAMPLE_COMPARE_GRAD || op == GATHER || op == GATHER_COMPARE;
+                  op == SAMPLE_COMPARE_GRAD || op == GATHER || op == GATHER_COMPARE ||
+                  op == BLOCK_READ;
    bool wrote = texture->access == STELA_AIR_TEXTURE_WRITE ||
                 texture->access == STELA_AIR_TEXTURE_READ_WRITE;
    bool read = texture->access == STELA_AIR_TEXTURE_READ ||
@@ -854,6 +856,65 @@ read_texel(struct call *call, nir_def **result)
       value = emit(call, &t);
    }
    *result = texel(call, resident(call, value), false);
+   return true;
+}
+
+/* A block of texels into thread memory: the sampler, the block's position
+ * and offset, the level, a zero, the texels' destination, a residency
+ * destination this device has none to write to, and the block's constant
+ * width and height. Texel (x, y) of the block is at position + offset +
+ * (x, y), and its destination's element y * width + x. */
+static bool
+block_read(struct call *call)
+{
+   const struct shape *shape = call->shape;
+   const struct stela_air_texture *texture = call->texture;
+   if (texture->access != STELA_AIR_TEXTURE_SAMPLE || shape->dim != GLSL_SAMPLER_DIM_2D ||
+       shape->array || texture->depth || !shape->mipmapped)
+      return fail(call, "block reads read 2D sampled color textures");
+   if (!call->c->store_at)
+      return fail(call, "block reads need thread memory");
+   if (LLVMGetTypeKind(LLVMTypeOf(call->inst)) != LLVMVoidTypeKind)
+      return fail(call, "a block read returns nothing");
+   LLVMValueRef sampler = take(call);
+   if (!sampler || LLVMGetTypeKind(LLVMTypeOf(sampler)) != LLVMPointerTypeKind)
+      return fail(call, "a block read takes a sampler");
+   nir_def *position = index_operand(call, 2);
+   nir_def *offset = position ? index_operand(call, 2) : NULL;
+   nir_def *level = offset ? uint_operand(call) : NULL;
+   if (!level || !expect(call, 32, 0, "block read operand"))
+      return false;
+   LLVMValueRef destination = take(call), residency = destination ? take(call) : NULL;
+   LLVMValueRef size = residency ? take(call) : NULL;
+   if (!size)
+      return false;
+   if (!LLVMIsAConstantPointerNull(residency))
+      return fail(call, "a block read's residency");
+   if (!type_is(LLVMTypeOf(size), 2, LLVMIntegerTypeKind, 32) || !LLVMIsAConstant(size) ||
+       !LLVMIsAConstantInt(LLVMGetAggregateElement(size, 0)) ||
+       !LLVMIsAConstantInt(LLVMGetAggregateElement(size, 1)))
+      return fail(call, "a block read's size must be a constant uint2");
+   uint64_t width = LLVMConstIntGetZExtValue(LLVMGetAggregateElement(size, 0));
+   uint64_t height = LLVMConstIntGetZExtValue(LLVMGetAggregateElement(size, 1));
+   if (!width || !height || width * height > 64)
+      return fail(call, "a block read of %llu by %llu texels", (unsigned long long)width,
+                  (unsigned long long)height);
+   if (!finished(call))
+      return false;
+   nir_deref_instr *deref = texture_deref(call, NULL);
+   if (!deref)
+      return false;
+   nir_builder *b = call->b;
+   nir_def *origin = nir_iadd(b, position, offset);
+   for (uint64_t i = 0; i < width * height; i++) {
+      nir_def *at = nir_iadd(b, origin, nir_imm_ivec2(b, (int)(i % width), (int)(i / width)));
+      struct tex t = {.op = nir_texop_txf, .texture = deref, .coord = at, .lod = level};
+      nir_def *value = texel(call, emit(call, &t), false);
+      unsigned bytes = value->num_components * value->bit_size / 8;
+      if (!call->c->store_at(call->c->translator, destination, nir_imm_int64(b, (int64_t)(i * bytes)),
+                             value))
+         return false;
+   }
    return true;
 }
 
@@ -1249,6 +1310,9 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
       break;
    case IS_NULL:
       lowered = is_null(&call, result);
+      break;
+   case BLOCK_READ:
+      lowered = block_read(&call);
       break;
    default:
       lowered = query(&call, (enum operation)op, result);
