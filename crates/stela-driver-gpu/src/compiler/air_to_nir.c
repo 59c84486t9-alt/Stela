@@ -214,7 +214,11 @@ static bool
 float_shape(LLVMTypeRef type, unsigned *components, unsigned *bits)
 {
    *components = 1;
-   if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
+   if (stela_air_matrix_type(type, bits)) {
+      /* A SIMD-group matrix's arithmetic is its thread elements'. */
+      *components = 2;
+      type = LLVMGetElementType(type);
+   } else if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
       *components = LLVMGetVectorSize(type);
       if (*components < 2 || *components > 4)
          return false;
@@ -444,8 +448,25 @@ get_value(struct translator *t, LLVMValueRef llvm)
    if (LLVMIsAConstantPointerNull(llvm))
       return nir_imm_int64(&t->b, 0);
    unsigned components, bits;
-   if (stela_air_matrix_type(LLVMTypeOf(llvm), &bits) && LLVMIsNull(llvm))
-      return nir_imm_zero(&t->b, 2, bits);
+   if (stela_air_matrix_type(LLVMTypeOf(llvm), &bits)) {
+      if (LLVMIsNull(llvm))
+         return nir_imm_zero(&t->b, 2, bits);
+      if (LLVMIsUndef(llvm))
+         return nir_undef(&t->b, 2, bits);
+      /* A constant fills both of a thread's elements only when it fills every
+       * element alike. */
+      LLVMValueRef first = LLVMGetAggregateElement(llvm, 0);
+      for (unsigned i = 1; first && i < 64; i++) {
+         if (LLVMGetAggregateElement(llvm, i) != first)
+            first = NULL;
+      }
+      if (!first) {
+         fail(t, STELA_AIR_TYPE, "SIMD-group matrix constants vary by element");
+         return NULL;
+      }
+      nir_def *element = get_value(t, first);
+      return element ? nir_vec2(&t->b, element, element) : NULL;
+   }
    if (!value_shape(LLVMTypeOf(llvm), &components, &bits)) {
       fail(t, STELA_AIR_TYPE, "unsupported AIR operand type");
       return NULL;
@@ -2102,6 +2123,15 @@ vector_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
       lanes[i] = channel < a->components ? value_lane(t, a, channel) : value_lane(t, b, channel - a->components);
    }
    return put_lanes(t, inst, lanes, n, a->bits);
+}
+
+/* Whether `op` computes each element of a SIMD-group matrix from the same
+ * element of its operands, as each thread's two elements compute. */
+static bool
+matrix_elementwise(LLVMOpcode op)
+{
+   return op == LLVMFNeg || op == LLVMFAdd || op == LLVMFSub || op == LLVMFMul || op == LLVMFDiv ||
+          op == LLVMFRem;
 }
 
 /* A SIMD-group matrix's thread elements, its storage's elements 0 and 1,
@@ -4600,7 +4630,7 @@ instruction(struct translator *t, LLVMValueRef inst)
       return true;
    if (op != LLVMStore && op != LLVMGetElementPtr && op != LLVMBitCast && op != LLVMCall &&
        !value_shape(LLVMTypeOf(inst), &components, &bits) &&
-       !(op == LLVMSelect && stela_air_matrix_type(LLVMTypeOf(inst), &bits)))
+       !((op == LLVMSelect || matrix_elementwise(op)) && stela_air_matrix_type(LLVMTypeOf(inst), &bits)))
       return fail(t, STELA_AIR_TYPE, "unsupported AIR instruction result type (opcode %u)", op);
    if (op == LLVMGetElementPtr) {
       const struct value *origin;

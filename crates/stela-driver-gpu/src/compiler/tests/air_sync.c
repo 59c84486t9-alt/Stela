@@ -816,6 +816,31 @@ matrix_elements_and_narrow_types(void)
    }
 }
 
+/* Arithmetic computes each element, a constant filling every element:
+ * -(a * 2 + a) / 3 is -a, plus 0.5. */
+static void
+matrix_arithmetic_is_elementwise(void)
+{
+   uint8_t memory[1024] = {0};
+   for (unsigned i = 0; i < 64; i++)
+      put_float(memory, i, (float)(i % 11) - 3.0f);
+   run_simdgroup(MATRIX_DECLARATIONS,
+                 "%a = call <64 x float> @air.simdgroup_matrix_8x8_load.v64f32.p1f32(ptr addrspace(1)"
+                 " %out, i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+                 "%twice = fmul fast <64 x float> %a, splat (float 2.0)\n"
+                 "%thrice = fadd <64 x float> %twice, %a\n"
+                 "%once = fdiv fast <64 x float> %thrice, splat (float 3.0)\n"
+                 "%negated = fneg <64 x float> %once\n"
+                 "%shifted = fsub <64 x float> %negated, splat (float -0.5)\n"
+                 "%pd = getelementptr float, ptr addrspace(1) %out, i64 64\n"
+                 "call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %shifted,"
+                 " ptr addrspace(1) %pd, i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+                 "ret void\n",
+                 memory, sizeof(memory));
+   for (unsigned i = 0; i < 64; i++)
+      assert(float_at(memory, 64 + i) == 0.5f - float_at(memory, i));
+}
+
 static void
 refuses_misused_matrices(void)
 {
@@ -834,6 +859,19 @@ refuses_misused_matrices(void)
        "call void @air.simdgroup_matrix_8x8_store.v64f32.p2f32(<64 x float> zeroinitializer,"
        " ptr addrspace(2) null, i64 8, <2 x i64> zeroinitializer, i1 false)\nret void\n", "type"},
       /* A fill is of the matrix's element. */
+      /* Only a constant filling every element is each thread's pair. */
+      {MATRIX_DECLARATIONS,
+       "%m = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float 1.0)\n"
+       "%n = fmul <64 x float> %m, <float 2.0"
+       ", float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0"
+       ", float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0"
+       ", float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0"
+       ", float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0"
+       ", float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0"
+       ", float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0"
+       ", float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0"
+       ", float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0, float 1.0>\n"
+       "ret void\n", "type"},
       {"declare <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(half)\n",
        "%m = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(half 0xH3C00)\n"
        "ret void\n", "type"},
@@ -856,6 +894,7 @@ main(void)
    matrix_memory_takes_origins_strides_and_transposes();
    matrix_memory_takes_extents_strides_and_origins();
    matrix_elements_and_narrow_types();
+   matrix_arithmetic_is_elementwise();
    refuses_misused_matrices();
    glsl_type_singleton_decref();
    puts("air sync: ok");
