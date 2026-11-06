@@ -183,8 +183,12 @@ fn atomics(plan: &mut Plan, library: &str) {
         .buffer(Buffer::data("counter", 0, u32s(&[0])))
         .buffer(Buffer::zeroed("seen", 1, n * 4))
         .output(Output::exact("counter", Dtype::U32, u32s(&[total])).set("length", 4))
-        .output(Output::new("seen", Dtype::U32, Tolerance::default()).set("sorted_compare", true))
-        .note("seen holds each fetch-add return; the compare sorts them"),
+        .output(
+            Output::exact("seen", Dtype::U32, u32s(&vec![1; n]))
+                .set("sorted_compare", true)
+                .set("derive", "fetch_add"),
+        )
+        .note("seen holds each fetch-add return in the order the threads ran"),
     );
     let all: Vec<u32> = (0..=n as u32).collect();
     plan.add(

@@ -51,9 +51,12 @@ impl Elements {
     }
 
     /// The property an output's `derive` names, element by element:
-    /// `nonzero` (1 where an element is not zero) or `ordered` (1 where it
-    /// is not zero and not below the element before it), for results whose
-    /// values Metal leaves open but whose relations it fixes.
+    /// `nonzero` (1 where an element is not zero), `ordered` (1 where it
+    /// is not zero and not below the element before it) or `fetch_add`
+    /// (sorted elements that each encode a fetch-add's return times eight
+    /// plus its addend less one: 1 where the return is the previous one plus
+    /// the previous addend, or zero first), for results whose values Metal
+    /// leaves open but whose relations it fixes.
     fn derive(self, kind: &str) -> Result<Self> {
         fn property<T: PartialOrd + Default>(v: &[T], kind: &str) -> Result<Vec<i128>> {
             let zero = T::default();
@@ -64,6 +67,23 @@ impl Elements {
                     .collect(),
                 other => bail!("unknown derived property {other}"),
             })
+        }
+        if kind == "fetch_add" {
+            let Self::Int(v) = &self else {
+                bail!("fetch-add returns are integers");
+            };
+            let next = |i: usize| {
+                if i == 0 {
+                    0
+                } else {
+                    (v[i - 1] >> 3) + (v[i - 1] & 7) + 1
+                }
+            };
+            return Ok(Self::Int(
+                (0..v.len())
+                    .map(|i| i128::from(v[i] >> 3 == next(i)))
+                    .collect(),
+            ));
         }
         Ok(Self::Int(match &self {
             Self::Int(v) => property(v, kind)?,
@@ -922,6 +942,18 @@ mod tests {
             Elements::Int(vec![1, 0, 1, 0, 1])
         );
         assert!(Elements::Int(vec![]).derive("other").is_err());
+        // Returns 0, 3 and 4 of addends 3, 1 and 2, sorted; a return the
+        // previous addend does not reach breaks the chain.
+        let chain = Elements::Int(vec![2, 3 * 8, 4 * 8 + 1]);
+        assert_eq!(
+            chain.derive("fetch_add").unwrap(),
+            Elements::Int(vec![1, 1, 1])
+        );
+        let broken = Elements::Int(vec![2, 2 * 8, 4 * 8 + 1]);
+        assert_eq!(
+            broken.derive("fetch_add").unwrap(),
+            Elements::Int(vec![1, 0, 0])
+        );
     }
 
     #[test]

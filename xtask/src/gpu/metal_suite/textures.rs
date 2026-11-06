@@ -1852,10 +1852,12 @@ fn texture_atomic_ops(plan: &mut Plan, library: &str, rng: &mut Random) {
             Case::compute1(&format!("texture.atomics.ops.{format}"), library, kernel, n)
                 .buffer(Buffer::data("values", 0, u32s(&values)))
                 .buffer(Buffer::zeroed("wins", 1, 16))
+                // Row 1 holds the exchange's winner and its last exchanger,
+                // which the threads' order chooses: wins counts the one.
                 .output(
                     Output::new("t", Dtype::U32, Tolerance::default())
                         .expect_same(expected)
-                        .expect_mask([vec![1; 8], vec![0; 8]].concat()),
+                        .mask([vec![1; 8], vec![0; 8]].concat()),
                 )
                 .output(
                     Output::new("wins", Dtype::U32, Tolerance::default())
