@@ -12,18 +12,25 @@ use crate::metal::{
     abi::DataType,
     argument::{self, ArgumentDescriptor},
     device::FunctionId,
-    reflection::{Binding, BindingKind, PointerType, StructType, TextureReferenceType, Type},
+    reflection::{
+        Binding, BindingKind, PointerType, StructMember, StructType, TextureReferenceType, Type,
+    },
     shader::Compiler,
     vulkan::backend::Backend,
 };
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use core::mem::size_of;
 
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn function_bindings(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: FunctionBindingsRequest = call.request()?;
         let function = self.object::<FunctionId>(call.connection, request.function)?;
-        let bindings = self.device.function_bindings(function)?;
+        let bindings: Vec<Binding> = self
+            .device
+            .function_bindings(function)?
+            .into_iter()
+            .map(as_metal_reflects)
+            .collect();
         // Records first, then the names they point into.
         let (types, members) = bindings.iter().fold((0, 0), |(types, members), binding| {
             let (more_types, more_members) = binding_counts(binding);
@@ -92,6 +99,24 @@ pub(super) fn argument_layout(call: &mut Call) -> Result<(), Fault> {
         alignment: layout.alignment,
         length: offsets.len() as u64,
     })
+}
+
+/// `binding` as Metal reflects it: a buffer of scalars or vectors points to
+/// a structure of one member, `__s`, of their type at offset 0.
+pub(super) fn as_metal_reflects(mut binding: Binding) -> Binding {
+    if let BindingKind::Buffer(pointer) = &mut binding.kind
+        && let Type::Data(data_type) = *pointer.element
+    {
+        *pointer.element = Type::Struct(StructType {
+            members: alloc::vec![StructMember {
+                name: String::from("__s"),
+                offset: 0,
+                ty: Type::Data(data_type),
+                argument_index: 0,
+            }],
+        });
+    }
+    binding
 }
 
 /// The `TypeInfo`s and `MemberInfo`s a binding reaches.
