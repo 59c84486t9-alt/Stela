@@ -155,6 +155,13 @@ fragment float4 frag_color(Full in [[stage_in]], device const float4 *c [[buffer
     return c[pixel(in.position, width)];
 }
 
+// frag_color with the target also read, which only a zero width returns.
+fragment float4 frag_color_read(Full in [[stage_in]], float4 target [[color(0)]],
+                                device const float4 *c [[buffer(0)]], constant uint &width [[buffer(1)]])
+{
+    return width == 0 ? target : c[pixel(in.position, width)];
+}
+
 // Integer outputs for integer targets, from the same per-pixel buffer.
 fragment uint4 frag_color_uint(Full in [[stage_in]], device const uint4 *c [[buffer(0)]],
                                constant uint &width [[buffer(1)]])
@@ -474,11 +481,10 @@ fragment float4 frag_fetch(Full in [[stage_in]], float4 target [[color(0)]], dev
                            constant uint &width [[buffer(1)]])
 { return target * 0.5f + c[pixel(in.position, width)]; }
 
-// Instances of one full-target triangle, all in one draw. Each counts, in
-// device memory of a raster order group, the fragments before it at its pixel
-// in x and, in y, whether those were exactly the instances before it, so an
-// access that misses an earlier fragment's write or sees a later one loses a
-// count.
+// Instances of one full-target triangle, all in one draw. Each counts the
+// fragments before it at its pixel in x and, in y, whether those were exactly
+// the instances before it, so an access that misses an earlier fragment's
+// write or sees a later one loses a count.
 struct Ordered {
     float4 position [[position]];
     uint instance [[flat]];
@@ -488,6 +494,12 @@ vertex Ordered vert_ordered(uint v [[vertex_id]], uint i [[instance_id]])
 {
     float2 p = float2((v << 1) & 2, v & 2);
     return {float4(p * 2.0f - 1.0f, 0.5f, 1.0f), i};
+}
+
+// The same count kept in the target, read in the shader.
+fragment float4 frag_ordered(Ordered in [[stage_in]], float4 target [[color(0)]])
+{
+    return float4(target.x + 1.0f, target.y + float(target.x == float(in.instance)), 0.0f, 1.0f);
 }
 
 fragment float4 frag_raster_ordered(Ordered in [[stage_in]],

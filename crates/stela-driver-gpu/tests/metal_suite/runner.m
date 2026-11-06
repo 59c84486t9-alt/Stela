@@ -3516,6 +3516,7 @@ static NSNumber *feature(id<MTLDevice> d, NSString *name)
 		@"read_write_textures_tier2" : @(d.readWriteTextureSupport >= MTLReadWriteTextureTier2),
 		@"primitive_motion_blur" : @(d.supportsPrimitiveMotionBlur),
 		@"memoryless_render_targets" : @(device_answers(d, @selector(supportsMemorylessRenderTargets))),
+		@"framebuffer_reads" : @(device_answers(d, @selector(isFramebufferReadSupported))),
 		@"vertex_amplification2" : @([d supportsVertexAmplificationCount:2]),
 		@"simd_reduction" : @([d supportsFamily:MTLGPUFamilyApple7] || [d supportsFamily:MTLGPUFamilyMac2]),
 		@"counters_stage_boundary" : @([d supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]),
@@ -3563,7 +3564,7 @@ static NSDictionary *device_properties(id<MTLDevice> d)
 				   @"query_texture_lod", @"barycentrics", @"pull_model_interpolation", @"raster_order_groups",
 				   @"programmable_sample_positions", @"depth24_stencil8", @"argument_buffers_tier2",
 				   @"read_write_textures_tier2", @"primitive_motion_blur", @"memoryless_render_targets",
-				   @"vertex_amplification2",
+				   @"framebuffer_reads", @"vertex_amplification2",
 				   @"samples1", @"samples2", @"samples4", @"samples8", @"samples16" ])
 		features[name] = feature(d, name);
 	/* The older name for barycentric support, and the compiler's

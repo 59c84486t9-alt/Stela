@@ -1311,6 +1311,10 @@ fn blending(plan: &mut Plan, library: &str) {
             .map(|_| std::array::from_fn(|_| f16r(rng.uniform(lo, hi))))
             .collect()
     };
+    // Every case but dual-source blending is repeated with the target's
+    // value also read in the shader, which leaves the fixed-function
+    // blend and write mask to the read's ordered write.
+    let mut read: Vec<String> = vec![];
     let mut blends: Vec<(String, Blend)> = vec![];
     for f in FACTORS {
         blends.push((format!("src.{f}"), Blend::simple("add", f, "one")));
@@ -1342,8 +1346,10 @@ fn blending(plan: &mut Plan, library: &str) {
             .flat_map(|(&s, &d)| blend.apply(s, s, d, blend_color, false))
             .collect();
         let tol = Tolerance::ulp(3.0).with_abs(2f64.powi(-12));
+        let name = format!("render.blend.rgba16float.{label}");
+        read.push(name.clone());
         plan.add(
-            full(&format!("render.blend.rgba16float.{label}"), library, "frag_color", &s.concat(),
+            full(&name, library, "frag_color", &s.concat(),
                  json!({"colors": [{"texture": "c", "blend": blend.json()}], "blend_color": blend_color}))
             .texture(target("c", "rgba16float").data(floats(Dtype::F16, &d.concat())))
             .output(Output::new("c", Dtype::F16, tol.clone()).expect(floats(Dtype::F16, &expected), tol)),
@@ -1389,8 +1395,10 @@ fn blending(plan: &mut Plan, library: &str) {
                 expected.extend(bytes);
             }
             let tol = Tolerance::units(1.0);
+            let name = format!("render.blend.{format}.{label}");
+            read.push(name.clone());
             plan.add(
-                full(&format!("render.blend.{format}.{label}"), library, "frag_color", &s.concat(),
+                full(&name, library, "frag_color", &s.concat(),
                      json!({"colors": [{"texture": "c", "blend": blend.json()}], "blend_color": blend_color}))
                 .texture(target("c", format).data(stored.concat()))
                 .output(Output::new("c", Dtype::U8, tol.clone()).expect(expected, tol)),
@@ -1463,13 +1471,15 @@ fn blending(plan: &mut Plan, library: &str) {
             color["blend"] = blend.json();
         }
         let tol = Tolerance::ulp(1.0);
+        let name = format!(
+            "render.write_mask.{}{}",
+            if mask.is_empty() { "none" } else { mask },
+            if blended { ".blended" } else { "" }
+        );
+        read.push(name.clone());
         plan.add(
             full(
-                &format!(
-                    "render.write_mask.{}{}",
-                    if mask.is_empty() { "none" } else { mask },
-                    if blended { ".blended" } else { "" }
-                ),
+                &name,
                 library,
                 "frag_color",
                 &s.concat(),
@@ -1481,6 +1491,12 @@ fn blending(plan: &mut Plan, library: &str) {
                     .expect(floats(Dtype::F16, &expected), tol),
             ),
         );
+    }
+    for name in &read {
+        plan.vary(name, "framebuffer_read", |case| {
+            case.set("fragment", "frag_color_read")
+                .requires(&["apple3"], &[])
+        });
     }
 }
 
@@ -2813,10 +2829,28 @@ fn layers_and_clipping(plan: &mut Plan, library: &str) {
         .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected)))
         .requires(&["apple3"], &[]),
     );
-    // Overlapping primitives of one draw access a raster order group's
-    // device memory in their order: every pixel counts all 64 instances,
-    // each seeing exactly those before it.
+    // Overlapping primitives of one draw read the target in their order:
+    // every pixel counts all 64 instances, each seeing exactly those
+    // before it.
     const INSTANCES: u32 = 64;
+    let expected: Vec<f64> = pixels()
+        .flat_map(|_| [f64::from(INSTANCES), f64::from(INSTANCES), 0.0, 1.0])
+        .collect();
+    plan.add(
+        Case::render(
+            "render.framebuffer_fetch.within_draw",
+            library,
+            "vert_ordered",
+            Some("frag_ordered"),
+            json!({"colors": [{"texture": "c", "clear": [0, 0, 0, 0]}],
+                   "vertex_count": 3, "instance_count": INSTANCES}),
+        )
+        .texture(target("c", "rgba32float"))
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected)))
+        .requires(&["apple3"], &[]),
+    );
+    // Overlapping primitives of one draw access a raster order group's
+    // device memory in the same order.
     let counts: Vec<u32> = pixels().flat_map(|_| [INSTANCES; 2]).collect();
     plan.add(
         Case::render(
@@ -2896,6 +2930,7 @@ pub fn build(plan: &mut Plan) {
             "families.apple8": false, "families.apple9": false, "families.apple10": false,
             "families.apple11": false, "families.metal3": false, "families.metal4": false,
             "features.raytracing": false, "features.raster_order_groups": true,
+            "features.framebuffer_reads": true,
             "features.primitive_motion_blur": false, "features.memoryless_render_targets": true,
         }),
     ));
