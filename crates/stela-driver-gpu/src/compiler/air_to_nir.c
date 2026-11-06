@@ -897,8 +897,6 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
    case STELA_AIR_FRONT_FACING:
       return nir_load_front_face(b, 1);
    case STELA_AIR_SAMPLE_ID:
-      /* A fragment function that names its sample runs once per sample. */
-      b->shader->info.fs.uses_sample_shading = true;
       return nir_load_sample_id(b);
    case STELA_AIR_SAMPLE_MASK_IN:
       return nir_load_sample_mask_in(b);
@@ -2269,10 +2267,6 @@ stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool o
          var->data.interpolation = INTERP_MODE_FLAT;
          var->data.centroid = var->data.sample = false;
       }
-      /* A fragment function that interpolates an input at its sample runs
-       * once per sample. */
-      if (var->data.sample && t->b.shader->info.stage == MESA_SHADER_FRAGMENT)
-         t->b.shader->info.fs.uses_sample_shading = true;
    }
    return var;
 }
@@ -2441,6 +2435,42 @@ interpolant_call(struct translator *t, LLVMValueRef inst, const char *name, size
       def = nir_interp_deref_at_offset(&t->b, io->components, 32, deref, offset);
    }
    return put_value(t, inst, stage_narrow(&t->b, def, io->primitive), 0);
+}
+
+/* A fragment function runs once per sample when, its function constants
+ * folded, it still reads its sample ID or an input interpolated at its
+ * sample; declaring them alone does not. A copy finds the live reads, so
+ * the translation keeps its own form. */
+static void
+shade_per_sample(nir_shader *shader)
+{
+   nir_shader *live = nir_shader_clone(NULL, shader);
+   bool progress;
+   do {
+      progress = false;
+      NIR_PASS(progress, live, nir_opt_constant_folding);
+      NIR_PASS(progress, live, nir_opt_dead_cf);
+      NIR_PASS(progress, live, nir_opt_dce);
+   } while (progress);
+   bool per_sample = false;
+   nir_foreach_function_impl(impl, live) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+            if (intrinsic->intrinsic == nir_intrinsic_load_sample_id ||
+                intrinsic->intrinsic == nir_intrinsic_load_sample_pos) {
+               per_sample = true;
+            } else if (intrinsic->intrinsic == nir_intrinsic_load_deref) {
+               nir_variable *var = nir_deref_instr_get_variable(nir_src_as_deref(intrinsic->src[0]));
+               per_sample |= var && var->data.mode == nir_var_shader_in && var->data.sample;
+            }
+         }
+      }
+   }
+   ralloc_free(live);
+   shader->info.fs.uses_sample_shading = per_sample;
 }
 
 /* "air.is_uniform.<type>", which states what make_uniform guarantees. */
@@ -5343,6 +5373,8 @@ translate(const void *bitcode, size_t size, const char *entry,
       nir_lower_explicit_io(t.b.shader, nir_var_function_temp, nir_address_format_32bit_offset);
       nir_remove_dead_variables(t.b.shader, nir_var_function_temp, NULL);
    }
+   if (stage && stage->stage == STELA_AIR_FRAGMENT)
+      shade_per_sample(t.b.shader);
    if (stage || t.shared_resources || t.shared_barriers)
       nir_shader_gather_info(t.b.shader, nir_shader_get_entrypoint(t.b.shader));
    nir_validate_shader(t.b.shader, stage ? "AIR bounded render translation" : "AIR bounded compute translation");

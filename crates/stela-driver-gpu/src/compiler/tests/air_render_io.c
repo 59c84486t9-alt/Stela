@@ -454,12 +454,18 @@ fragment_functions_interpolate_and_write_targets(void)
    nir_variable *s = variable(shader, nir_var_shader_in, VARYING_SLOT_VAR2, 0);
    assert(typed(s, GLSL_TYPE_FLOAT, 1) && s->data.interpolation == INTERP_MODE_NOPERSPECTIVE &&
           s->data.sample);
-   /* Its sample-interpolated input shades it per sample. */
+   /* Its sample-interpolated input shades it per sample... */
    assert(shader->info.fs.uses_sample_shading);
    assert(typed(variable(shader, nir_var_shader_out, FRAG_RESULT_DATA0, 0), GLSL_TYPE_FLOAT, 4));
    assert(typed(variable(shader, nir_var_shader_out, FRAG_RESULT_DATA1, 0), GLSL_TYPE_UINT, 4));
    assert(typed(variable(shader, nir_var_shader_out, FRAG_RESULT_DEPTH, 0), GLSL_TYPE_FLOAT, 1));
    assert(shader->info.fs.depth_layout == FRAG_DEPTH_LAYOUT_GREATER);
+   ralloc_free(shader);
+   /* ...but only while it reads it. */
+   char *unread = change(fragment, "float %s, 2", "float 0.5, 2");
+   shader = translate(unread, STELA_AIR_FRAGMENT, false, &error);
+   assert(shader && !shader->info.fs.uses_sample_shading);
+   free(unread);
    assert(typed(variable(shader, nir_var_shader_out, FRAG_RESULT_SAMPLE_MASK, 0), GLSL_TYPE_INT, 1));
    assert(typed(variable(shader, nir_var_shader_out, FRAG_RESULT_STENCIL, 0), GLSL_TYPE_INT, 1));
    ralloc_free(shader);
