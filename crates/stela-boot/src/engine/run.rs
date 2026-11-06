@@ -532,6 +532,10 @@ impl Heartbeat {
             suspension_report(machine);
             cost.mark("suspension");
         }
+        if self.beats.is_multiple_of(FOOTPRINT_BEATS) {
+            footprint_report(machine);
+            cost.mark("footprint");
+        }
         cost.report(tsc_hz);
     }
 
@@ -888,6 +892,27 @@ pub(super) fn call_chain<const N: usize, H: Host>(
 
 /// Heartbeats between reports of the suspended guest threads.
 pub(super) const SUSPENSION_BEATS: u64 = 6;
+
+/// Heartbeats between reports of the home PE's code bookkeeping, which
+/// walk its blocks.
+const FOOTPRINT_BEATS: u64 = 6;
+
+/// `ENGINE MEMORY pe=0 blocks=36M owners=12M …`: the heap bytes of the home
+/// PE's code bookkeeping, by structure ([`Machine::footprint`]).
+fn footprint_report<H: Host>(machine: &Machine<H, parallel::Board>) {
+    let footprint = machine.footprint();
+    output::arguments(format_args!(
+        "ENGINE MEMORY pe={} blocks={}M owners={}M successors={}M rows={}M index={}M lookup={}M pages={}M\n",
+        machine.processor(),
+        footprint.blocks >> 20,
+        footprint.owners >> 20,
+        footprint.successors >> 20,
+        footprint.rows >> 20,
+        footprint.index >> 20,
+        footprint.lookup >> 20,
+        footprint.pages >> 20,
+    ));
+}
 
 /// The return addresses a suspended thread's chain keeps.
 pub(super) const SUSPENSION_CHAIN: usize = 12;

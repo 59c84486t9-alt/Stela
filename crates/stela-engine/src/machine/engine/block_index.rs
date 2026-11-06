@@ -203,6 +203,17 @@ impl BlockIndex {
         })
     }
 
+    /// The heap bytes it holds.
+    pub(super) fn heap_bytes(&self) -> usize {
+        let entries: usize = self.entries.iter().map(Vec::capacity).sum();
+        entries * size_of::<Entry>()
+            + self.entries.capacity() * size_of::<Vec<Entry>>()
+            + self.free.capacity() * size_of::<u32>()
+            + self.front.len() * size_of::<(u64, u32)>()
+            // A B-tree entry and its share of a node about half full.
+            + self.pages.len() * 2 * size_of::<(u64, u32)>()
+    }
+
     pub(super) fn pages(&self) -> usize {
         self.pages.len()
     }

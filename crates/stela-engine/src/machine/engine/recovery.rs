@@ -73,6 +73,20 @@ pub(super) struct Owners {
 }
 
 impl Owners {
+    /// The heap bytes its table and its owners' rows hold.
+    pub(super) fn heap_bytes(&self) -> (usize, usize) {
+        let rows = self
+            .slots
+            .iter()
+            .flatten()
+            .map(|owner| match &owner.rows {
+                Rows::Qualified { rows, .. } => rows.heap_bytes(),
+                _ => 0,
+            })
+            .sum();
+        (self.slots.heap_bytes(), rows)
+    }
+
     pub(super) const fn new() -> Self {
         Self {
             slots: Table::new(),

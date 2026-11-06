@@ -65,6 +65,11 @@ impl<T> Table<T> {
         self.len - 1
     }
 
+    /// The bytes its chunks hold.
+    pub(super) fn heap_bytes(&self) -> usize {
+        self.chunks.len() * CHUNK * size_of::<T>() + self.chunks.capacity() * size_of::<Vec<T>>()
+    }
+
     pub(super) fn iter(&self) -> impl Iterator<Item = &T> {
         self.chunks.iter().flatten()
     }

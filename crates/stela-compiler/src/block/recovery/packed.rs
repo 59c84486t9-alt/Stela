@@ -79,6 +79,11 @@ impl Reader<'_> {
 }
 
 impl PackedRecovery {
+    /// The heap bytes it holds.
+    pub fn heap_bytes(&self) -> usize {
+        self.0.len()
+    }
+
     pub fn new(rows: &[FaultRecovery]) -> Self {
         if rows.is_empty() {
             return Self(Box::default());

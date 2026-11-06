@@ -260,6 +260,16 @@ impl LookupTable {
         }
     }
 
+    /// The heap bytes its index of granules holds, beside the table.
+    pub fn index_bytes(&self) -> usize {
+        let lists: usize = self.lists.iter().map(|list| list.sets.capacity()).sum();
+        lists * size_of::<u32>()
+            + self.lists.capacity() * size_of::<Granule>()
+            + self.free.capacity() * size_of::<u32>()
+            // A B-tree entry and its share of a node about half full.
+            + self.granules.len() * 2 * size_of::<(u64, u32)>()
+    }
+
     /// The table's host address, for `ChainControl::table`.
     pub fn address(&self) -> u64 {
         self.sets.as_ptr() as u64

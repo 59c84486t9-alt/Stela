@@ -551,3 +551,40 @@ impl core::ops::AddAssign for Statistics {
         }
     }
 }
+
+/// The heap bytes of a machine's code bookkeeping, by structure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Footprint {
+    /// The block table and the recovery owners' table.
+    pub blocks: usize,
+    pub owners: usize,
+    /// The live blocks' direct exit lists and recovery rows.
+    pub successors: usize,
+    pub rows: usize,
+    /// The block index and the lookup table's index of granules.
+    pub index: usize,
+    pub lookup: usize,
+    /// The fetch pages kept for the translation store.
+    pub pages: usize,
+}
+
+impl<H: Host, D: Devices> Machine<H, D> {
+    /// What its code bookkeeping holds now: a walk of every block, for
+    /// reports.
+    pub fn footprint(&self) -> Footprint {
+        let (owners, rows) = self.fault_recovery.heap_bytes();
+        Footprint {
+            blocks: self.blocks.heap_bytes(),
+            owners,
+            successors: self
+                .blocks
+                .iter()
+                .map(|block| block.successors.len() * size_of::<super::Successor>())
+                .sum(),
+            rows,
+            index: self.index.heap_bytes(),
+            lookup: self.targets.index_bytes(),
+            pages: self.pages.len() * crate::translations::PAGE_BYTES,
+        }
+    }
+}
