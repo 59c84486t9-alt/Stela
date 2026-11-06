@@ -2379,6 +2379,10 @@ static id<MTLComputeCommandEncoder> encode_compute(Case *c, id<MTLCommandBuffer>
 				[text appendFormat:@"state=%@\n", pipeline.reflection ? bindings_text(pipeline.reflection.bindings, YES) : @"none"];
 		}
 		write_text(c, spec[@"reflection"], text);
+		/* Reflection alone: the function's resources stay unbound, which
+		 * no dispatch may leave them. */
+		if ([spec[@"reflection_only"] boolValue])
+			return open ?: [cb computeCommandEncoder];
 	}
 	id<MTLComputeCommandEncoder> e = open;
 	/* A barrier between dispatches of one encoder, scoped as named. */

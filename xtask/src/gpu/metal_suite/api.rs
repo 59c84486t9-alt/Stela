@@ -408,6 +408,7 @@ fn reflection(plan: &mut Plan, library: &str) {
     plan.add(
         Case::compute1("api.reflection.compute", library, "reflected", 64)
             .set("reflection", "reflection")
+            .set("reflection_only", true)
             .buffer(Buffer::zeroed("reflection", 0, 2048).unbound())
             .output(Output::exact(
                 "reflection",
@@ -457,6 +458,7 @@ fn reflection_types(plan: &mut Plan, library: &str) {
     plan.add(
         Case::compute1("api.reflection.compute.arguments", library, "reflected", 64)
             .set("reflection", "reflection")
+            .set("reflection_only", true)
             .set("reflection_arguments", true)
             .buffer(Buffer::zeroed("reflection", 0, 4096).unbound())
             .output(Output::exact(
