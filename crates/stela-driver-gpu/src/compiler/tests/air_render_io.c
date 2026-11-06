@@ -155,6 +155,8 @@ static const struct stela_air_varying_slot varyings[] = {
 };
 
 static struct stela_metal_stage primary = {.table = STELA_METAL_TABLE_PRIMARY};
+/* Whether the target device exports a fragment stencil reference. */
+static bool stencil_export = true;
 
 static char *
 change(const char *source, const char *old, const char *replacement)
@@ -183,7 +185,7 @@ translate(const char *text, enum stela_air_stage stage, bool amplified,
    free(source);
    struct stela_air_stage_options o = {
       .stage = stage, .max_varying_slots = 16, .varyings = varyings,
-      .varying_count = ARRAY_SIZE(varyings), .amplified = amplified,
+      .varying_count = ARRAY_SIZE(varyings), .amplified = amplified, .stencil_export = stencil_export,
       .resources = {
          .max_instructions = 10000, .bind_buffer = stela_metal_bind_buffer, .binding_data = &primary,
          .fp_profile = STELA_AIR_FP_METAL,
@@ -473,6 +475,12 @@ fragment_functions_interpolate_and_write_targets(void)
    free(plain);
    assert(shader && variable(shader, nir_var_shader_out, FRAG_RESULT_DATA1, 0));
    ralloc_free(shader);
+
+   /* A device without shader stencil export cannot take the stencil output. */
+   stencil_export = false;
+   error = (struct stela_air_error){0};
+   assert(!translate(fragment, STELA_AIR_FRAGMENT, false, &error) && error.kind == STELA_AIR_TARGET);
+   stencil_export = true;
 }
 
 /* The intrinsics of the shader's entry point. */

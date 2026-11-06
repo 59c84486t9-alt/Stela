@@ -104,8 +104,10 @@ struct stela_metal_target {
    const nir_shader_compiler_options *nir;
    uint32_t max_instructions, max_threadgroup_bytes, max_private_bytes, max_constant_bytes;
    uint32_t max_varying_slots, max_payload_bytes, max_mesh_vertices, max_mesh_primitives;
+   /* Nonzero when fragment shaders may write the stencil reference. */
+   uint32_t stencil_export;
 };
-#define STELA_METAL_TARGET_BYTES 40u
+#define STELA_METAL_TARGET_BYTES 48u
 
 /* A threadgroup buffer's setThreadgroupMemoryLength:atIndex:. */
 struct stela_metal_threadgroup_length {

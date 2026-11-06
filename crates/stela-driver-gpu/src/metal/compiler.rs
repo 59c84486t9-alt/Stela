@@ -265,6 +265,7 @@ impl AirCompiler {
             max_payload_bytes: mesh.map_or(0, |mesh| mesh.max_task_payload_size),
             max_mesh_vertices: mesh.map_or(0, |mesh| mesh.max_mesh_output_vertices),
             max_mesh_primitives: mesh.map_or(0, |mesh| mesh.max_mesh_output_primitives),
+            stencil_export: limits.stencil_export.into(),
         };
         // The boot image mounts the linked AIR compiler. Hosted all-feature
         // builds also expose `Service::linked`, but only pull in its external

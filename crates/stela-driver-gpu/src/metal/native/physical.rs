@@ -45,7 +45,7 @@ impl Default for UnifiedImageLayoutsFeatures {
 
 /// Extensions the device enables when the driver offers them. The
 /// requirements decide which absences refuse the device.
-const ENABLED: [&CStr; 28] = [
+const ENABLED: [&CStr; 29] = [
     UNIFIED_IMAGE_LAYOUTS,
     generated::NAME,
     ext::robustness2::NAME,
@@ -60,6 +60,7 @@ const ENABLED: [&CStr; 28] = [
     ext::memory_budget::NAME,
     khr::external_memory_fd::NAME,
     ext::external_memory_dma_buf::NAME,
+    ext::shader_stencil_export::NAME,
     ext::pci_bus_info::NAME,
     ext::image_drm_format_modifier::NAME,
     khr::vertex_attribute_divisor::NAME,
@@ -504,6 +505,7 @@ pub(super) fn probe(
         .then(|| generated::limits(&generated));
     limits.dma_buf_import = extensions.has(khr::external_memory_fd::NAME)
         && extensions.has(ext::external_memory_dma_buf::NAME);
+    limits.stencil_export = extensions.has(ext::shader_stencil_export::NAME);
     Some(PhysicalDevice {
         identity,
         limits,
@@ -651,6 +653,7 @@ fn limits(
         }),
         generated_commands: None,
         dma_buf_import: false,
+        stencil_export: false,
         sparse: SparseLimits {
             residency_standard_2d_block_shape: on(sparse.residency_standard2_d_block_shape),
             residency_standard_2d_multisample_block_shape: on(

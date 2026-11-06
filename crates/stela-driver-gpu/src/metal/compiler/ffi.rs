@@ -294,6 +294,8 @@ pub struct Target {
     pub(super) max_payload_bytes: u32,
     pub(super) max_mesh_vertices: u32,
     pub(super) max_mesh_primitives: u32,
+    /// Nonzero when fragment shaders may write the stencil reference.
+    pub(super) stencil_export: u32,
 }
 
 #[repr(C)]

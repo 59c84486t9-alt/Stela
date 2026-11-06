@@ -372,6 +372,8 @@ struct stela_air_stage_options {
    /* Target limits on an object payload's bytes and a mesh function's
     * vertices and primitives; zero refuses them. */
    unsigned max_payload_bytes, max_mesh_vertices, max_mesh_primitives;
+   /* Whether a fragment function may write the stencil reference. */
+   bool stencil_export;
 };
 nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
                                   const nir_shader_compiler_options *,

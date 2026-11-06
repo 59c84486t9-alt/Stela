@@ -139,6 +139,9 @@ pub struct Limits {
     /// `VK_EXT_external_memory_dma_buf`, by which what a CPU reaches enters
     /// the device.
     pub dma_buf_import: bool,
+    /// `VK_EXT_shader_stencil_export`, by which a fragment shader writes the
+    /// stencil reference.
+    pub stencil_export: bool,
     /// `VkPhysicalDeviceSparseProperties`.
     pub sparse: SparseLimits,
 }

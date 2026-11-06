@@ -2232,6 +2232,10 @@ stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool o
    bool mesh = t->stage_options->stage == STELA_AIR_MESH;
    if (mesh)
       type = glsl_array_type(type, io->per_primitive ? entry->max_primitives : entry->max_vertices, 0);
+   if (output && io->semantic == STELA_AIR_STENCIL && !t->stage_options->stencil_export) {
+      fail(t, STELA_AIR_TARGET, "a stencil output needs the device's shader stencil export");
+      return NULL;
+   }
    nir_variable *var = nir_variable_create(t->b.shader, output ? nir_var_shader_out : nir_var_shader_in,
                                            type, name);
    if (!var) { fail(t, STELA_AIR_ALLOCATION, "render IO variable allocation failed"); return NULL; }

@@ -811,6 +811,7 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       .max_payload_bytes = target->max_payload_bytes,
       .max_mesh_vertices = target->max_mesh_vertices,
       .max_mesh_primitives = target->max_mesh_primitives,
+      .stencil_export = target->stencil_export != 0,
    };
    shader = stela_air_metal_stage_to_nir(air, size, entry, target->nir, &options, error);
 done:
