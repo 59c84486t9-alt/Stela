@@ -711,8 +711,9 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 		attribute.attributeType = attributes[i].data_type;
 		attribute.attributeIndex = attributes[i].index;
 		attribute.active = attributes[i].active != 0;
-		attribute.patchData = _patchType != 0;
+		/* A post-tessellation function's control points are not per patch. */
 		attribute.patchControlPointData = attributes[i].patch_control_point != 0;
+		attribute.patchData = _patchType != 0 && !attribute.patchControlPointData;
 		[list addObject:attribute];
 	}
 	_attributes = list;
