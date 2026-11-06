@@ -1,6 +1,6 @@
 //! Keep the unpinned guest registers a run of a block's instructions uses
-//! most in scratch registers across that run: ALU rows, accesses and the
-//! conditional branches the block runs past.
+//! most in scratch registers across that run: ALU rows, general and vector
+//! accesses, prefetches and the conditional branches the block runs past.
 //!
 //! The run's first instruction loads the locals it reads before writing them,
 //! and its end stores the ones it wrote, as does each conditional branch it
@@ -16,7 +16,7 @@ use super::{LOCAL_HOSTS, LocalRegisters, PINNED};
 use crate::{
     aarch64::{
         AddressMode, Instruction, MemoryTransfer, Operation, Register, WideMove, bitfield,
-        conditional_select::CompareRight, integer_math,
+        conditional_select::CompareRight, integer_math, prefetch, simd,
     },
     x86_64::asm::{Code, Gpr, Mem, Size},
 };
@@ -195,6 +195,22 @@ fn effects(operation: &Operation) -> Option<Effects> {
             },
             takes_r8: false,
             memory: true,
+        },
+        // A vector access reaches only its base among the general
+        // registers, through the address and writeback the others take.
+        Operation::Simd(
+            simd::Operand::Memory { base, mode, .. } | simd::Operand::MemoryPair { base, mode, .. },
+        ) => Effects {
+            reads: bit(base),
+            writes: writeback(base, mode),
+            takes_r8: false,
+            memory: true,
+        },
+        // A prefetch reads its address registers into RAX and RCX.
+        Operation::Prefetch(operand) => match operand.address {
+            prefetch::Address::Immediate { base, .. } => alu(&[base], Register::Zero),
+            prefetch::Address::Register { base, index, .. } => alu(&[base, index], Register::Zero),
+            prefetch::Address::Literal(_) => alu(&[], Register::Zero),
         },
         Operation::BranchCondition { condition, .. } if condition < 14 => alu(&[], Register::Zero),
         Operation::BranchZero { source, .. } | Operation::BranchBit { source, .. } => {

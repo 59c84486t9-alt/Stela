@@ -1202,6 +1202,10 @@ mod tests {
         (0x4c00_8000, 0x0040_0000, [V, B, F, F]),
         (0x4d00_0000, 0x0040_1c00, [V, B, F, F]),
         (0x4d40_c000, 0x0000_0000, [V, B, F, F]),
+        // Prefetches: immediate, unscaled and register-offset.
+        (0xf980_0000, 0x003f_fc1f, [F, B, F, F]),
+        (0xf880_0000, 0x001f_f01f, [F, B, F, F]),
+        (0xf8a0_6800, 0x0000_101f, [F, B, F, I]),
         // General registers to and from vectors.
         (0x9e66_0000, 0x0000_0000, [D, V, F, F]),
         (0x9e67_0000, 0x0000_0000, [V, D, F, F]),
