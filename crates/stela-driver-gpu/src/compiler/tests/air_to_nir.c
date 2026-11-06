@@ -1708,6 +1708,30 @@ shared_pointer_equality(void)
       LLVMDisposeMemoryBuffer(raw);
    }
    free(dynamic);
+   /* No threadgroup address, of a variable or an argument, is null. */
+   const char *null_body =
+      "entry:\n%q = getelementptr i32, ptr addrspace(3) @scratch, i32 %tid\n"
+      "%eq = icmp eq ptr addrspace(3) @scratch, null\n%ne = icmp ne ptr addrspace(3) null, %q\n"
+      "%a = zext i1 %eq to i32\n%b = zext i1 %ne to i32\n"
+      "%b2 = shl i32 %b, 1\n%value = or i32 %a, %b2\n"
+      "store i32 %value, ptr addrspace(1) %out, align 4\nret void\n";
+   first = replace_once(null_body, "@scratch", "%scratch");
+   char *null_dynamic = replace_once(first, "@scratch", "%scratch"); free(first);
+   for (unsigned mode = 0; mode < 2; mode++) {
+      LLVMMemoryBufferRef raw = shared_bitcode(mode ? null_dynamic : null_body, mode != 0,
+         mode ? "" : "@scratch = internal addrspace(3) global [3 x i32] undef, align 4\n");
+      struct shared_bindings bindings = {.view = {12, 4, STELA_AIR_READ_WRITE}};
+      struct stela_air_error error;
+      nir_shader *nir = shared_translate(raw, &test_nir_options, &bindings, 12, &error);
+      CHECK(nir);
+      const uint64_t address = 0x100000;
+      const uint32_t value = 2;
+      specialize_loop(nir, 1);
+      check_stores(nir, &address, &value, 1);
+      ralloc_free(nir);
+      LLVMDisposeMemoryBuffer(raw);
+   }
+   free(null_dynamic);
    for (unsigned ne = 0; ne < 2; ne++) {
       char compare_body[192];
       snprintf(compare_body, sizeof(compare_body),

@@ -5005,6 +5005,12 @@ instruction(struct translator *t, LLVMValueRef inst)
       if (t->error->kind != STELA_AIR_OK)
          return false;
       LLVMValueRef a_llvm = LLVMGetOperand(inst, 0), b_llvm = LLVMGetOperand(inst, 1);
+      /* Threadgroup, thread and constant memory is an allocation, which no
+       * address within is null. */
+      bool a_null = LLVMIsAConstantPointerNull(a_llvm), b_null = LLVMIsAConstantPointerNull(b_llvm);
+      const struct value *allocated = a_null ? b : b_null ? a : NULL;
+      if (allocated && !allocated->null && (allocated->storage || allocated->constant_data))
+         return put_value(t, inst, nir_imm_bool(&t->b, predicate == LLVMIntNE), 0);
       if ((!joined_pointer(a, b_llvm, b) && !joined_pointer(b, a_llvm, a)) || !a->def || !b->def ||
           a->def->num_components != 1 || b->def->num_components != 1 ||
           a->def->bit_size != 64 || b->def->bit_size != 64)
