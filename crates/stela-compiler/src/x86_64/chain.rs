@@ -519,11 +519,26 @@ const ENTRY_CODE: i32 = core::mem::offset_of!(LookupEntry, entry) as i32;
 const ENTRY_BLOCK: i32 = core::mem::offset_of!(LookupEntry, block) as i32;
 const ENTRY_TARGETS: i32 = core::mem::offset_of!(LookupEntry, targets) as i32;
 
-/// A direct exit to `target` with `kind`, as every block emits it.
+/// A direct exit to `target` with `kind`, as every block emits it: MOVABS
+/// RAX with the target, then the dynamic exit. The engine compares and
+/// patches these at every install, so they are built without an assembler.
 pub fn direct_exit(target: GuestAddress, kind: impl Into<ExitWord>) -> [u8; DIRECT_EXIT_BYTES] {
-    let mut code = Code::new();
-    super::block::direct_exit_with(&mut code.asm(), target, kind);
-    code.try_into().expect("a direct exit's length")
+    const MOVABS_RAX: [u8; 2] = [0x48, 0xb8];
+    let mut bytes = [0; DIRECT_EXIT_BYTES];
+    bytes[..2].copy_from_slice(&MOVABS_RAX);
+    bytes[2..10].copy_from_slice(&target.0.to_le_bytes());
+    bytes[10..].copy_from_slice(&exit_word_bytes(kind.into()));
+    bytes
+}
+
+/// MOV EDX with `word`, RET and the four INT3s of the room a
+/// [`lookup_exit`] takes ([`super::block::exit_kind_with`]).
+const fn exit_word_bytes(word: ExitWord) -> [u8; DYNAMIC_EXIT_BYTES] {
+    const MOV_EDX: u8 = 0xba;
+    const RET: u8 = 0xc3;
+    const INT3: u8 = 0xcc;
+    let [a, b, c, d] = word.encoded().to_le_bytes();
+    [MOV_EDX, a, b, c, d, RET, INT3, INT3, INT3, INT3]
 }
 
 /// The bytes the direct exit of `kind` to `target` keeps before it for a
@@ -771,9 +786,7 @@ fn lookup_with_policy(
 
 /// The exit to a dynamic target in RAX that blocks end with.
 pub fn dynamic_exit(kind: ExitKind) -> [u8; DYNAMIC_EXIT_BYTES] {
-    let mut code = Code::new();
-    super::block::exit_kind_with(&mut code.asm(), kind);
-    code.try_into().expect("a dynamic exit's length")
+    exit_word_bytes(ExitWord::from(kind))
 }
 
 /// `code` without the check failures that end a block, after its exits.
@@ -868,9 +881,20 @@ mod tests {
 
     #[test]
     fn direct_exits_match_the_block_emitter() {
-        let mut emitted = Code::new();
-        super::super::block::direct_exit(&mut emitted, GuestAddress(0x1234), ExitKind::Direct);
-        assert_eq!(emitted, direct_exit(GuestAddress(0x1234), ExitKind::Direct));
+        let side = ExitWord {
+            kind: ExitKind::Direct,
+            skipped: 300,
+        };
+        for (target, word) in [
+            (0x1234, ExitWord::from(ExitKind::Direct)),
+            (0xffff_fe00_1576_42fc, side),
+            (u64::MAX, ExitKind::PointerAuthentication.into()),
+            (0, ExitKind::Fallthrough.into()),
+        ] {
+            let mut emitted = Code::new();
+            super::super::block::direct_exit_with(&mut emitted.asm(), GuestAddress(target), word);
+            assert_eq!(emitted, direct_exit(GuestAddress(target), word));
+        }
     }
 
     #[test]
@@ -908,9 +932,11 @@ mod tests {
 
     #[test]
     fn dynamic_exits_match_the_block_emitter() {
-        let mut emitted = Code::new();
-        super::super::block::exit_kind(&mut emitted, ExitKind::Return);
-        assert_eq!(emitted, dynamic_exit(ExitKind::Return));
+        for kind in [ExitKind::Return, ExitKind::Call, ExitKind::System] {
+            let mut emitted = Code::new();
+            super::super::block::exit_kind(&mut emitted, kind);
+            assert_eq!(emitted, dynamic_exit(kind));
+        }
         let span = 4 * LOOKUP_ENTRIES as u64;
         assert_eq!(lookup_slot(4, 0), 1);
         assert_eq!(lookup_slot(span, 0), 1);
