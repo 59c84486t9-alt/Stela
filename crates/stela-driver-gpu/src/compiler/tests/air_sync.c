@@ -219,6 +219,43 @@ llvm_atomics_are_relaxed_device_and_threadgroup_atomics(void)
    ralloc_free(shader);
 }
 
+/* coherent(device) loads and stores are coherent accesses, not atomics. */
+static void
+coherent_accesses_are_coherent(void)
+{
+   nir_shader *shader = lowered(
+      "declare void @air.store.device_coherent.i32.p1i32(i32, ptr addrspace(1))\n"
+      "declare <2 x float> @air.load.device_coherent.v2f32.p1v2f32(ptr addrspace(1))\n",
+      "call void @air.store.device_coherent.i32.p1i32(i32 7, ptr addrspace(1) %out)\n"
+      "%p = getelementptr i8, ptr addrspace(1) %out, i64 8\n"
+      "%v = call <2 x float> @air.load.device_coherent.v2f32.p1v2f32(ptr addrspace(1) %p)\n"
+      "%x = extractelement <2 x float> %v, i64 1\n"
+      "store float %x, ptr addrspace(1) %out, align 4\nret void\n");
+   unsigned coherent[2] = {0};
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            bool load = intr->intrinsic == nir_intrinsic_load_global || intr->intrinsic == nir_intrinsic_load_ssbo;
+            bool store = intr->intrinsic == nir_intrinsic_store_global || intr->intrinsic == nir_intrinsic_store_ssbo;
+            if ((load || store) && (nir_intrinsic_access(intr) & ACCESS_COHERENT)) {
+               assert(!(nir_intrinsic_access(intr) & ACCESS_ATOMIC));
+               coherent[store]++;
+               if (load)
+                  assert(intr->def.num_components == 2);
+            }
+         }
+      }
+   }
+   assert(coherent[0] == 1 && coherent[1] == 1);
+   ralloc_free(shader);
+   refused("declare void @air.store.device_coherent.i32.p1i32(i32, ptr addrspace(3))\n",
+           "call void @air.store.device_coherent.i32.p1i32(i32 7, ptr addrspace(3) null)\nret void\n",
+           STELA_AIR_INSTRUCTION);
+}
+
 static void
 air_atomics_follow_their_names(void)
 {
@@ -887,6 +924,7 @@ main(void)
    glsl_type_singleton_init_or_ref();
    llvm_atomics_are_relaxed_device_and_threadgroup_atomics();
    air_atomics_follow_their_names();
+   coherent_accesses_are_coherent();
    refuses_unqualified_atomics();
    barriers_and_fences_follow_their_flags();
    simd_functions_lower_to_subgroup_operations();

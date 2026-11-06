@@ -3899,6 +3899,45 @@ pair_member(struct translator *t, LLVMValueRef inst, const struct value *pair)
  * scopes need no lowering, as NIR's atomics are device-scope. A
  * compare-exchange returns the old value and writes it through expected, a
  * thread pointer. The 64-bit min and max return nothing. */
+/* A coherent(device) load or store: air.load.device_coherent.<type>.p1<type>
+ * and air.store.device_coherent.<type>.p1<type>, which other threadgroups'
+ * accesses see once a device fence orders them. */
+static bool
+coherent_call(struct translator *t, LLVMValueRef inst, const char *name, size_t length, bool *lowered)
+{
+   static const char load[] = "air.load.device_coherent.", store[] = "air.store.device_coherent.";
+   bool storing = length > strlen(store) && !memcmp(name, store, strlen(store));
+   *lowered = storing || (length > strlen(load) && !memcmp(name, load, strlen(load)));
+   if (!*lowered)
+      return true;
+   unsigned arguments = LLVMGetNumArgOperands(inst);
+   if (arguments != (storing ? 2u : 1u))
+      return fail(t, STELA_AIR_INSTRUCTION, "unsupported coherent device access %.*s",
+                  (int)MIN2(length, 160), name);
+   LLVMValueRef pointer = LLVMGetOperand(inst, storing ? 1 : 0);
+   LLVMValueRef value = storing ? LLVMGetOperand(inst, 0) : inst;
+   LLVMTypeRef type = LLVMTypeOf(value);
+   char overload[16], expected[64];
+   stela_air_call_overload(type, overload, sizeof(overload));
+   snprintf(expected, sizeof(expected), "%s%s.p1", storing ? store : load, overload);
+   unsigned components, bits;
+   if (length <= strlen(expected) || memcmp(name, expected, strlen(expected)) ||
+       !value_shape(type, &components, &bits) ||
+       LLVMGetTypeKind(LLVMTypeOf(pointer)) != LLVMPointerTypeKind ||
+       LLVMGetPointerAddressSpace(LLVMTypeOf(pointer)) != 1)
+      return fail(t, STELA_AIR_INSTRUCTION, "unsupported coherent device access %.*s",
+                  (int)MIN2(length, 160), name);
+   const struct value *address = pointer_value(t, pointer);
+   if (!address || !(address->access & (storing ? STELA_AIR_WRITE : STELA_AIR_READ)))
+      return fail(t, STELA_AIR_MEMORY, "coherent access lacks a device pointer");
+   nir_def *stored = storing ? get_value(t, value) : NULL;
+   if (storing && !stored)
+      return false;
+   nir_def *loaded = memory_access(t, address, stored, NULL, ACCESS_COHERENT, components, bits,
+                                   LLVMABIAlignmentOfType(t->layout, type));
+   return storing ? t->error->kind == STELA_AIR_OK : put_value(t, inst, loaded, 0);
+}
+
 static bool
 air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, const char *name,
                 size_t length, bool *lowered)
@@ -4813,6 +4852,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       if (lowered)
          return true;
       if (!synchronization_call(t, inst, callee, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
+      if (!coherent_call(t, inst, name, name_length, &lowered))
          return false;
       if (lowered)
          return true;
