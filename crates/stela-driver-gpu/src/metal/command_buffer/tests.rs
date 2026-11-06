@@ -328,10 +328,21 @@ fn render_state(amplification: u64) -> RenderPipelineState {
 /// points, indexed by 16-bit control point indices, which fetches its
 /// stage-in by `layout`.
 fn patch_state(layout: Option<&VertexDescriptor>) -> RenderPipelineState {
+    patch_state_of(layout, Some(4), false)
+}
+
+/// A pipeline of a quad patch function of `control_points`, whose
+/// attributes are `layout`'s, each a control point's when
+/// `reads_control_points`.
+fn patch_state_of(
+    layout: Option<&VertexDescriptor>,
+    control_points: Option<u32>,
+    reads_control_points: bool,
+) -> RenderPipelineState {
     let evaluation = shader(Stage::Vertex, |interface| {
         interface.patch = Some(Patch {
             domain: PatchDomain::Quad,
-            control_points: Some(4),
+            control_points,
         });
         if let Some(layout) = layout {
             interface.attributes = layout
@@ -341,7 +352,7 @@ fn patch_state(layout: Option<&VertexDescriptor>) -> RenderPipelineState {
                     index: attribute.index,
                     numeric: NumericClass::Float,
                     components: 4,
-                    patch_control_point: false,
+                    patch_control_point: reads_control_points,
                 })
                 .collect();
         }
@@ -477,6 +488,55 @@ fn patch_draws_upload_their_tessellation_arguments() {
         strides: [0; 31],
     };
     assert_eq!(arguments, expected.encode());
+}
+
+/// A patch function that reads no control points draws patches of none.
+#[test]
+fn patches_of_no_control_points_draw_when_none_are_read() {
+    let layout = VertexDescriptor {
+        attributes: alloc::vec![Attribute {
+            index: 0,
+            format: VertexFormat::Float4,
+            offset: 0,
+            buffer_index: 2,
+        }],
+        layouts: alloc::vec![Layout {
+            buffer_index: 2,
+            stride: 16,
+            step_function: StepFunction::PerPatchControlPoint,
+            step_rate: 1,
+        }],
+    };
+    for reads in [false, true] {
+        let color = texture(PixelFormat::Rgba8Unorm);
+        let mut resolver = MockResolver::default();
+        let mut commands = CommandBuffer::new(FEATURES);
+        commands
+            .begin_render(
+                &mut resolver,
+                pass(&color, StoreAction::Store, false),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        commands
+            .set_render_pipeline_state(&patch_state_of(reads.then_some(&layout), None, reads))
+            .unwrap();
+        commands
+            .set_tessellation_factor_buffer(Some(buffer(4, 1024)), 0, 48)
+            .unwrap();
+        let source = PatchSource {
+            control_points: 0,
+            patch_indices: None,
+            control_point_indices: Some((buffer(5, 4096), 0)),
+        };
+        assert_eq!(
+            commands
+                .draw_patches(&mut resolver, &source, 0, 2, 1, 0)
+                .is_ok(),
+            !reads
+        );
+    }
 }
 
 /// The evaluation stage fetches stage-in from the bound vertex buffers, at

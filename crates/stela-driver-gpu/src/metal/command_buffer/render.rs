@@ -1560,8 +1560,17 @@ impl CommandBuffer {
             "patch draws need a post-tessellation vertex function",
         ))?;
         self.bindings.require_buffers(&pipeline.interfaces)?;
+        // Each patch draws as one point the stage fetches its control points
+        // for: a function that reads none takes patches of none.
+        let reads_control_points = pipeline.interfaces.first().is_some_and(|interface| {
+            interface
+                .attributes
+                .iter()
+                .any(|attribute| attribute.patch_control_point)
+        });
         ensure(
-            (1..=MAX_PATCH_CONTROL_POINTS).contains(&source.control_points),
+            source.control_points <= MAX_PATCH_CONTROL_POINTS
+                && (source.control_points != 0 || !reads_control_points),
             "patch control point count",
         )?;
         ensure(
