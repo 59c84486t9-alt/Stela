@@ -129,6 +129,9 @@ struct translator {
     * the samples it covers, and whether it accesses the data. */
    nir_def *imageblock_pass, *imageblock_pixel, *imageblock_mask;
    bool tile_explicit, fragment_imageblock;
+   /* The first air.imageblock_data call, which stands for the origin of
+    * every pointer into the imageblock. */
+   LLVMValueRef imageblock_root;
    /* An amplified vertex function's layer and viewport outputs. */
    nir_variable *layer, *viewport;
    /* A post-tessellation vertex function's STELA_AIR_PATCH_IDS. */
@@ -3042,6 +3045,7 @@ attachment_outputs(struct translator *t)
 
 static bool repeat(void *translator, nir_def *count, bool (*body)(void *data, nir_def *index),
                    void *data);
+static struct value *imageblock_authority(struct translator *t, struct value *authority);
 
 /* Refuses the outputs the fragment tests read, which run before a function
  * that writes memory in raster order. */
@@ -4436,6 +4440,19 @@ tile_memory_copy(struct translator *t, bool in)
    return true;
 }
 
+/* The authority of every pointer into a function's explicit imageblock: a
+ * kernel's threadgroup memory, or a tile function's pass's data. */
+static struct value *
+imageblock_authority(struct translator *t, struct value *authority)
+{
+   *authority = (struct value){.access = STELA_AIR_READ_WRITE, .pointer_root = t->imageblock_root};
+   if (t->imageblock) {
+      authority->storage = t->imageblock;
+      authority->storage_size = t->imageblock_width * t->imageblock_height * t->imageblock_element;
+   }
+   return authority;
+}
+
 /* Metal's imageblock functions in a kernel, apart from the slice writes
  * texture_call lowers: an element's pointer, and the dimensions. */
 static bool
@@ -4489,7 +4506,8 @@ imageblock_call(struct translator *t, LLVMValueRef inst, const char *name, size_
       nir_def *address = imageblock_address(t, tile_pixel(t, at), which, nir_imm_int(b, samples));
       if (!put_value(t, inst, address, STELA_AIR_READ_WRITE))
          return false;
-      find_value(t, inst)->pointer_root = inst;
+      struct value authority;
+      pointer_authority(find_value(t, inst), imageblock_authority(t, &authority));
       return true;
    }
    if (LLVMConstIntGetZExtValue(index) || LLVMConstIntGetZExtValue(sample))
@@ -4500,10 +4518,8 @@ imageblock_call(struct translator *t, LLVMValueRef inst, const char *name, size_
    nir_def *offset = nir_u2u64(b, nir_imul_imm(b, pixel, t->imageblock_element));
    if (!put_value(t, inst, offset, STELA_AIR_READ_WRITE))
       return false;
-   struct value *value = find_value(t, inst);
-   value->pointer_root = inst;
-   value->storage = t->imageblock;
-   value->storage_size = t->imageblock_width * t->imageblock_height * t->imageblock_element;
+   struct value authority;
+   pointer_authority(find_value(t, inst), imageblock_authority(t, &authority));
    return true;
 }
 
@@ -6348,7 +6364,7 @@ pointer_node(struct translator *t, LLVMValueRef llvm)
 static bool
 pointer_anchor(struct translator *t, LLVMValueRef llvm)
 {
-   if (LLVMIsALoadInst(llvm))
+   if (LLVMIsALoadInst(llvm) || imageblock_data_call(llvm))
       return true;
    struct value *value = find_value(t, llvm);
    if (!value && LLVMIsAAllocaInst(llvm))
@@ -6415,7 +6431,8 @@ pointer_component(struct translator *t, struct pointer_node **stack,
          } else {
             if (!pointer_anchor(t, dependency))
                return false;
-            candidate = dependency;
+            /* Every pointer into the imageblock has one origin. */
+            candidate = imageblock_data_call(dependency) ? t->imageblock_root : dependency;
          }
          if (root && root != candidate)
             return fail(t, STELA_AIR_MEMORY, "pointer PHI joins distinct resource origins");
@@ -6512,6 +6529,8 @@ pointer_provenance(struct translator *t)
          if (LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMPointerTypeKind)
             continue;
          LLVMOpcode op = LLVMGetInstructionOpcode(inst);
+         if (imageblock_data_call(inst) && !t->imageblock_root)
+            t->imageblock_root = inst;
          if (op == LLVMAlloca || op == LLVMLoad || stela_air_read_sampler(inst) ||
              stela_air_null_texture(inst) || stitched_resource_call(inst) ||
              imageblock_data_call(inst))
@@ -6643,7 +6662,10 @@ cfg_declare_phi(struct translator *t, LLVMValueRef inst)
       struct pointer_node *node = pointer_node(t, inst);
       if (node && LLVMIsALoadInst(node->root))
          return fail(t, STELA_AIR_MEMORY, "pointer PHI of an address loaded from an argument buffer");
-      struct value *root = node ? pointer_value(t, node->root) : NULL;
+      struct value authority;
+      struct value *root = !node ? NULL :
+                           node->root && node->root == t->imageblock_root ? imageblock_authority(t, &authority) :
+                                                              pointer_value(t, node->root);
       if (!root)
          return fail(t, STELA_AIR_MEMORY, "pointer PHI lacks completed provenance proof");
       pointer_authority(value, root);

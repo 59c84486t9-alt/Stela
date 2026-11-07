@@ -1003,10 +1003,46 @@ tile_functions_access_imageblock_data(void)
    assert(intrinsics(shader, nir_intrinsic_store_global) >= 2);
    assert(!intrinsics(shader, nir_intrinsic_load_shared));
    ralloc_free(shader);
-   /* Outside a tile function, data of a later color is refused. */
+   /* Pointers from separate calls join in a PHI, as optimized loops do. */
+   static const char *joined =
+      "%block_t = type { ptr addrspace(4) }\n"
+      "declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)\n"
+      "define void @kernel(%block_t %block, <2 x i16> %tid, ptr addrspace(1) %out) {\n"
+      "%x = extractelement <2 x i16> %tid, i64 0\n"
+      "%odd = trunc i16 %x to i1\n"
+      "br i1 %odd, label %a, label %b\n"
+      "a:\n"
+      "%pa = call ptr addrspace(4) @air.imageblock_data(<2 x i16> %tid, i32 0, i16 0)\n"
+      "br label %j\n"
+      "b:\n"
+      "%pb = call ptr addrspace(4) @air.imageblock_data(<2 x i16> zeroinitializer, i32 0, i16 0)\n"
+      "%pc = getelementptr inbounds i8, ptr addrspace(4) %pb, i64 16\n"
+      "br label %j\n"
+      "j:\n"
+      "%p = phi ptr addrspace(4) [ %pa, %a ], [ %pc, %b ]\n"
+      "%v = load <4 x float>, ptr addrspace(4) %p, align 16\n"
+      "store <4 x float> %v, ptr addrspace(1) %out, align 16\n"
+      "ret void\n}\n";
+   shader = kernel_with(joined, tile_explicit_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "joined tile imageblock pointers: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   ralloc_free(shader);
+   /* Outside a tile function, data of a later color is refused, and a
+    * kernel's imageblock pointers join as a tile function's do. */
    o.tile = NULL;
    o.dynamic_shape = false;
    assert(!kernel_with(tile_explicit_body, tile_explicit_metadata, &o, &error));
+   o.workgroup_size[0] = 8;
+   o.workgroup_size[1] = 8;
+   o.workgroup_size[2] = 1;
+   o.max_threadgroup_bytes = 32768;
+   shader = kernel_with(joined, tile_explicit_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "joined kernel imageblock pointers: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   assert(intrinsics(shader, nir_intrinsic_load_shared) >= 1);
+   ralloc_free(shader);
 }
 
 /* A null texture has no descriptor to bind, and reads zero. */
