@@ -93,6 +93,18 @@ records! {
         pub index: u64,
     }
 
+    /// `setThreadgroupMemoryLength:offset:atIndex:` of a render encoder.
+    pub struct TileThreadgroupMemory {
+        pub length: u64,
+        pub offset: u64,
+        pub index: u64,
+    }
+
+    /// `dispatchThreadsPerTile:`.
+    pub struct TileDispatch {
+        pub threads: [u64; 3],
+    }
+
     /// `setImageblockWidth:height:`.
     pub struct ImageblockSize {
         pub width: u64,
@@ -299,8 +311,7 @@ records! {
 
     /// `renderCommandEncoderWithDescriptor:`; `sample_position_count`
     /// `[f32; 2]` sample positions follow, then `counter_sample_count`
-    /// `CounterSampleRecord`s. Tile memory is any nonzero imageblock
-    /// sample length, threadgroup memory length or tile size.
+    /// `CounterSampleRecord`s.
     pub struct BeginRender {
         pub color_attachments: [PassColorRecord; 8],
         pub depth_attachment: PassDepthRecord,
@@ -312,10 +323,14 @@ records! {
         pub render_target_width: u64,
         pub render_target_height: u64,
         pub default_raster_sample_count: u64,
-        pub tile_memory: u32,
+        pub tile_width: u64,
+        pub tile_height: u64,
+        pub threadgroup_memory_length: u64,
+        pub imageblock_sample_length: u64,
         pub rasterization_rate_map: u32,
         pub sample_position_count: u32,
         pub counter_sample_count: u32,
+        pub reserved: u32,
     }
 
     /// A sample a pass writes at one of its boundaries
@@ -912,6 +927,13 @@ raw_enum! {
         SetObjectThreadgroupMemory = 0x0327,
         /// `VertexOffsetStride`.
         SetVertexBufferOffsetStride = 0x0328,
+        /// `SetPipeline` of a tile pipeline. Tile bindings are the stage
+        /// commands' of the tile stage.
+        SetTilePipeline = 0x0329,
+        /// `TileThreadgroupMemory`.
+        SetTileThreadgroupMemory = 0x032a,
+        /// `TileDispatch`.
+        DispatchThreadsPerTile = 0x032b,
     }
 }
 

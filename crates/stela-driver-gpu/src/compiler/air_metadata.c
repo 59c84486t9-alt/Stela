@@ -1833,6 +1833,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
    bool payloads = false, meshes = false, grids = false, positions_in_patch = false;
    kernel->field_count = 0;
    kernel->imageblock_size = 0;
+   kernel->implicit_imageblock = false;
    for (unsigned a = 0; a < argc; a++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
       unsigned fields_count, index;
@@ -1934,19 +1935,25 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             .name = input->name, .name_bytes = input->name_bytes};
          continue;
       }
-      /* A kernel's explicit imageblock, which only air.imageblock_data
-       * reads: its element size is all the translator needs. */
+      /* A kernel's imageblock, which only the imageblock functions read:
+       * an explicit one's element size is all the translator needs, and an
+       * implicit one's calls name the color attachments they access. */
       if (!render && stela_air_md_string(fields[1], "air.imageblock")) {
          unsigned size = 0;
          bool explicit_layout = fields_count > 2 && stela_air_md_string(fields[2], "explicit");
+         bool implicit_layout = fields_count > 2 && stela_air_md_string(fields[2], "implicit");
          for (unsigned f = 2; f + 1 < fields_count; f++)
             if (stela_air_md_string(fields[f], "air.imageblock_data_size") &&
                 !stela_air_md_uint(fields[f + 1], &size))
                size = 0;
-         if (!explicit_layout || !size || kernel->imageblock_size)
-            return fail(t, STELA_AIR_ARGUMENT, "a kernel takes one explicit imageblock of known size");
-         if (claims)
-            kernel->imageblock_size = size;
+         if ((!explicit_layout || !size) && !implicit_layout)
+            return fail(t, STELA_AIR_ARGUMENT, "a kernel's imageblock of an unknown layout");
+         if (kernel->imageblock_size || kernel->implicit_imageblock)
+            return fail(t, STELA_AIR_ARGUMENT, "a kernel takes one imageblock");
+         if (claims) {
+            kernel->imageblock_size = explicit_layout ? size : 0;
+            kernel->implicit_imageblock = implicit_layout;
+         }
          kernel->arguments[a] = (struct stela_air_argument){
             .value = param, .is_imageblock = true, .absent = !claims};
          continue;

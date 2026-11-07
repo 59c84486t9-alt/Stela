@@ -192,7 +192,7 @@ pub struct RenderPassRequest {
     pub render_target_width: u64,
     pub render_target_height: u64,
     pub default_raster_sample_count: u64,
-    pub tile_memory: bool,
+    pub tile_memory: crate::metal::pass::TileMemory,
     pub sample_positions: Vec<[f32; 2]>,
     pub rasterization_rate_map: bool,
     /// `sampleBufferAttachments`: (sample buffer, sample index, boundary).
@@ -409,6 +409,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let stencil = plan.stencil.map(&mut attachment).transpose()?;
         Ok(RenderPassPlan {
             extent: plan.extent,
+            tile: plan.tile,
             layer_count: plan.layer_count,
             color,
             depth,

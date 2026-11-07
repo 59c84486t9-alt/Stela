@@ -1123,6 +1123,104 @@ pub fn compute_variant(
     })
 }
 
+/// A tile pipeline's pass (`MTLTileRenderPipelineDescriptor`): the
+/// formats of its color attachments, which its tile function's implicit
+/// imageblock accesses as storage, and its samples per pixel.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct TileTarget {
+    pub attachments: [Option<StorageAttachment>; MAX_COLOR_ATTACHMENTS],
+    pub samples: u32,
+    /// `threadgroupSizeMatchesTileSize`.
+    pub matches_tile_size: bool,
+}
+
+/// Validates a tile pipeline's color attachments and samples.
+pub fn tile_target(
+    capabilities: &Capabilities,
+    formats: &[Option<PixelFormat>; MAX_COLOR_ATTACHMENTS],
+    samples: u64,
+    matches_tile_size: bool,
+) -> Result<TileTarget> {
+    require(capabilities.framebuffer_reads, "tile functions")?;
+    let samples = samples.max(1);
+    require(
+        capabilities.supports_texture_sample_count(samples),
+        "tile pipeline sample count",
+    )?;
+    let mut attachments = [None; MAX_COLOR_ATTACHMENTS];
+    for (attachment, format) in attachments.iter_mut().zip(formats) {
+        let Some(format) = *format else { continue };
+        let description = format.describe();
+        ensure(
+            description.is_color(),
+            "tile pipeline color attachments are color formats",
+        )?;
+        let realization = description
+            .realization
+            .map_err(|_| Error::Unsupported("tile functions of the pixel format"))?;
+        require(
+            raw_texel_format(format).is_some(),
+            "tile functions of the pixel format",
+        )?;
+        *attachment = Some(StorageAttachment {
+            format: realization.format.raw(),
+            bytes: description.stored_block_bytes(),
+            ..StorageAttachment::default()
+        });
+    }
+    Ok(TileTarget {
+        attachments,
+        samples: samples as u32,
+        matches_tile_size,
+    })
+}
+
+/// Validates a tile dispatch's threads per tile against its pipeline,
+/// returning the specialization its Vulkan pipeline is compiled for: a
+/// dynamic kernel whose workgroup is exactly the tile's threads, so none
+/// skips the function, and its threadgroup buffers placed per dispatch.
+pub fn tile_variant(
+    plan: &ComputePipelinePlan,
+    target: &TileTarget,
+    threads: Size,
+    tile: [u32; 2],
+) -> Result<Specialization> {
+    ensure(
+        threads.width >= 1 && threads.height >= 1 && threads.depth == 1,
+        "threads per tile are a nonempty rectangle",
+    )?;
+    if target.matches_tile_size {
+        ensure(
+            [threads.width, threads.height] == tile.map(u64::from),
+            "a tile pipeline whose threadgroup size matches the tile size dispatches the tile's threads",
+        )?;
+    }
+    let limit = plan.max_threads_per_threadgroup;
+    ensure(
+        threads.width <= limit.width && threads.height <= limit.height,
+        "threadgroup dimension exceeds the limit",
+    )?;
+    let total = threads.width * threads.height;
+    ensure(
+        total <= plan.max_total_threads_per_threadgroup,
+        "threadgroup exceeds maxTotalThreadsPerThreadgroup",
+    )?;
+    if plan.full_subgroups {
+        ensure(
+            total.is_multiple_of(plan.thread_execution_width),
+            "threadgroup is not a multiple of the thread execution width",
+        )?;
+    }
+    Ok(Specialization {
+        workgroup_size: Some([total as u32, 1, 1]),
+        dynamic_threadgroups: true,
+        tile: true,
+        storage_attachments: target.attachments,
+        samples: target.samples,
+        ..Specialization::default()
+    })
+}
+
 /// One face's stencil test (`MTLStencilDescriptor`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StencilDescriptor {

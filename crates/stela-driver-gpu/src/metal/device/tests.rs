@@ -2101,7 +2101,7 @@ fn render_passes_resolve_cached_attachment_views() {
         render_target_width: 0,
         render_target_height: 0,
         default_raster_sample_count: 0,
-        tile_memory: false,
+        tile_memory: Default::default(),
         sample_positions: Vec::new(),
         rasterization_rate_map: false,
         counter_samples: Vec::new(),

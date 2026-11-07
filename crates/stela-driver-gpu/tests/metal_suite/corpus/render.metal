@@ -552,3 +552,66 @@ fragment float4 frag_vertex_values(PerVertex in [[stage_in]])
     return float4(in.single.get(vertex_index::first), in.single.get(vertex_index::second),
                   in.single.get(vertex_index::third), 1.0f);
 }
+
+// Tile functions over a pass's float4 color attachment.
+struct TileColor {
+    float4 c [[color(0)]];
+};
+
+// Every pixel of the tile, its threads striding over it: the read color
+// plus the pixel's place in the tile, and the tile's position and width.
+kernel void tile_rewrite(imageblock<TileColor, imageblock_layout_implicit> block,
+                         ushort2 tid [[thread_position_in_threadgroup]],
+                         ushort2 tpt [[threads_per_threadgroup]],
+                         ushort2 tile [[threadgroup_position_in_grid]])
+{
+    for (ushort y = tid.y; y < block.get_height(); y += tpt.y) {
+        for (ushort x = tid.x; x < block.get_width(); x += tpt.x) {
+            TileColor v = block.read(ushort2(x, y));
+            v.c = float4(v.c.x + float(x), v.c.y + float(y), float(tile.x),
+                         float(tile.y) + float(block.get_width()) * 0.25f);
+            block.write(v, ushort2(x, y));
+        }
+    }
+}
+
+// Leaves a value of its tile in the tile's threadgroup memory.
+kernel void tile_remember(imageblock<TileColor, imageblock_layout_implicit> block,
+                          threadgroup uint *memory [[threadgroup(0)]],
+                          ushort2 tid [[thread_position_in_threadgroup]],
+                          ushort2 tile [[threadgroup_position_in_grid]])
+{
+    if (tid.x == 0 && tid.y == 0)
+        memory[1] = uint(tile.x) + 10u * uint(tile.y) + 100u;
+}
+
+// Writes what an earlier dispatch left in the tile's threadgroup memory
+// into the red channel of each pixel.
+kernel void tile_recall(imageblock<TileColor, imageblock_layout_implicit> block,
+                        threadgroup uint *memory [[threadgroup(0)]],
+                        ushort2 tid [[thread_position_in_threadgroup]],
+                        ushort2 tpt [[threads_per_threadgroup]])
+{
+    for (ushort y = tid.y; y < block.get_height(); y += tpt.y) {
+        for (ushort x = tid.x; x < block.get_width(); x += tpt.x) {
+            TileColor v = block.read(ushort2(x, y));
+            v.c.x = float(memory[1]);
+            block.write(v, ushort2(x, y));
+        }
+    }
+}
+
+// The tile's dimensions and the grid of tiles, at the tile's pixels.
+kernel void tile_dimensions(imageblock<TileColor, imageblock_layout_implicit> block,
+                            ushort2 tid [[thread_position_in_threadgroup]],
+                            ushort2 tpt [[threads_per_threadgroup]],
+                            ushort2 tiles [[threadgroups_per_grid]])
+{
+    for (ushort y = tid.y; y < block.get_height(); y += tpt.y) {
+        for (ushort x = tid.x; x < block.get_width(); x += tpt.x) {
+            TileColor v = {float4(float(block.get_width()), float(block.get_height()), float(tiles.x),
+                                  float(tiles.y))};
+            block.write(v, ushort2(x, y));
+        }
+    }
+}

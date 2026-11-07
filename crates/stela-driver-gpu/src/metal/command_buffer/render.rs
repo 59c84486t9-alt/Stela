@@ -250,9 +250,16 @@ pub(super) struct RenderState {
     pub(super) timestamp_resets: Vec<(QueryPool, u32)>,
     /// What last accessed each color attachment in the pass instance.
     attachment_paths: [AttachmentPath; MAX_COLOR_ATTACHMENTS],
+    /// The encoder's tile pipeline and threadgroup memory, and the pass's
+    /// tile memory.
+    pub(super) tile: super::tile::TileState,
 }
 
 impl RenderState {
+    pub(super) fn pass(&self) -> &RenderPassPlan<ImageView> {
+        &self.pass
+    }
+
     /// The encoder's vertex buffers as a generated command sequence binds
     /// them, with their own strides.
     pub(super) fn sequence_vertex_buffers(
@@ -397,6 +404,7 @@ impl CommandBuffer {
             samples,
             timestamp_resets: Vec::new(),
             attachment_paths: [AttachmentPath::Blend; MAX_COLOR_ATTACHMENTS],
+            tile: super::tile::TileState::default(),
         };
         for &(sample, boundary) in &state.samples {
             if let (CounterSample::Timestamp { pool, query }, true) = (sample, boundary.starts()) {

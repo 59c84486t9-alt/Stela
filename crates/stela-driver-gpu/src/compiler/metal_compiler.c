@@ -981,6 +981,27 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       fail(error, STELA_AIR_INPUT, "invalid extended-range attachments");
       goto done;
    }
+   struct stela_air_tile tile = {.samples = specialization->samples};
+   if (specialization->tile) {
+      if (stage != STELA_METAL_KERNEL || !specialization->dynamic_threadgroups ||
+          specialization->attachment_count > AIR_MAX_RENDER_TARGETS ||
+          (specialization->attachment_count && !specialization->attachments)) {
+         fail(error, STELA_AIR_INPUT, "a tile function is a kernel of dynamic threadgroups");
+         goto done;
+      }
+      for (uint32_t n = 0; n < specialization->attachment_count; n++) {
+         const struct stela_metal_attachment *attachment = &specialization->attachments[n];
+         if (!attachment->format)
+            continue;
+         tile.formats[n] = attachment_format(attachment->format);
+         if (tile.formats[n] == PIPE_FORMAT_NONE ||
+             util_format_get_blocksize(tile.formats[n]) != attachment->bytes) {
+            fail(error, STELA_AIR_INPUT, "invalid tile color attachment");
+            goto done;
+         }
+      }
+      resources.tile = &tile;
+   }
    if (stage == STELA_METAL_KERNEL) {
       shader = stela_air_to_nir(air, size, entry, target->nir, &resources, error);
       goto done;

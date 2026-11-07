@@ -553,6 +553,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::NewRenderPipeline => self.new_render_pipeline(&mut call),
             Operation::NewMeshPipeline => self.new_mesh_pipeline(&mut call),
             Operation::NewComputePipeline => self.new_compute_pipeline(&mut call),
+            Operation::NewTilePipeline => self.new_tile_pipeline(&mut call),
             Operation::FunctionHandle => self.function_handle(&mut call),
             Operation::NewFunctionTable => self.new_function_table(&mut call),
             Operation::SetFunctions => self.set_functions(&mut call),

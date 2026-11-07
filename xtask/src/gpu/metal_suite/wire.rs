@@ -112,6 +112,10 @@ const OPERATIONS: &[(&str, Reach)] = &[
         Reach::Call("newRenderPipelineStateWithMeshDescriptor:"),
     ),
     (
+        "NewTilePipeline",
+        Reach::Call("newRenderPipelineStateWithTileDescriptor:"),
+    ),
+    (
         "NewComputePipeline",
         Reach::Call("newComputePipelineStateWithDescriptor:"),
     ),
@@ -517,6 +521,18 @@ const OPERATIONS: &[(&str, Reach)] = &[
     (
         "RenderCode::SetObjectThreadgroupMemory",
         Reach::Call("[e setObjectThreadgroupMemoryLength:"),
+    ),
+    (
+        "RenderCode::SetTilePipeline",
+        Reach::Call("[e setRenderPipelineState:tile_pipelines[k]]"),
+    ),
+    (
+        "RenderCode::SetTileThreadgroupMemory",
+        Reach::Call("[e setThreadgroupMemoryLength:"),
+    ),
+    (
+        "RenderCode::DispatchThreadsPerTile",
+        Reach::Call("dispatchThreadsPerTile:"),
     ),
 ];
 

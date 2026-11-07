@@ -148,6 +148,29 @@ STAGE_BINDINGS(Vertex, MTLRenderStageVertex)
 STAGE_BINDINGS(Fragment, MTLRenderStageFragment)
 STAGE_BINDINGS(Object, MTLRenderStageObject)
 STAGE_BINDINGS(Mesh, MTLRenderStageMesh)
+STAGE_BINDINGS(Tile, MTLRenderStageTile)
+
+- (NSUInteger)tileWidth
+{
+	return _tileWidth;
+}
+
+- (NSUInteger)tileHeight
+{
+	return _tileHeight;
+}
+
+- (void)setThreadgroupMemoryLength:(NSUInteger)length offset:(NSUInteger)offset atIndex:(NSUInteger)index
+{
+	StelaTileThreadgroupMemory command = {.length = length, .offset = offset, .index = index};
+	ENTRY(StelaRenderCodeSetTileThreadgroupMemory, command);
+}
+
+- (void)dispatchThreadsPerTile:(MTLSize)threads
+{
+	StelaTileDispatch command = {.threads = {threads.width, threads.height, threads.depth}};
+	ENTRY(StelaRenderCodeDispatchThreadsPerTile, command);
+}
 
 - (void)setVertexBuffer:(StelaGPUBuffer *)buffer
 		 offset:(NSUInteger)offset
@@ -197,7 +220,7 @@ STAGE_BINDINGS(Mesh, MTLRenderStageMesh)
 {
 	[_commands use:pipeline];
 	StelaSetPipeline command = {.pipeline = pipeline->_handle};
-	ENTRY(StelaRenderCodeSetPipeline, command);
+	ENTRY(pipeline->_tile ? StelaRenderCodeSetTilePipeline : StelaRenderCodeSetPipeline, command);
 }
 
 - (void)setViewport:(MTLViewport)viewport
@@ -709,6 +732,8 @@ patchIndexBufferOffset:(NSUInteger)patchOffset
 {
 	StelaStream *stream = calloc(1, sizeof(*stream));
 	StelaGPUChildEncoder *child = [[StelaGPUChildEncoder alloc] initWithCommandBuffer:_commands stream:stream];
+	child->_tileWidth = _tileWidth;
+	child->_tileHeight = _tileHeight;
 	[child setCullMode:MTLCullModeNone];
 	[child setFrontFacingWinding:MTLWindingClockwise];
 	[child setTriangleFillMode:MTLTriangleFillModeFill];

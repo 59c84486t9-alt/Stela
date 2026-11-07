@@ -69,9 +69,9 @@ pub struct RenderPassDescriptor<'a, T> {
     pub render_target_width: u64,
     pub render_target_height: u64,
     pub default_raster_sample_count: u64,
-    /// Tile memory: imageblock sample length, threadgroup memory length and
-    /// tile size. Any nonzero value needs an Apple GPU.
-    pub tile_memory: bool,
+    /// Tile memory: tile size, threadgroup memory length and imageblock
+    /// sample length.
+    pub tile_memory: TileMemory,
     /// `samplePositions`, in [0, 1) from the pixel's top left.
     pub sample_positions: Vec<[f32; 2]>,
     pub rasterization_rate_map: bool,
@@ -130,6 +130,8 @@ pub struct AttachmentInputs {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderPassPlan<T> {
     pub extent: [u32; 2],
+    /// The tiles tile functions run on and their persistent memory.
+    pub tile: Tile,
     pub layer_count: u32,
     pub color: Vec<Option<RenderingAttachment<T>>>,
     pub depth: Option<RenderingAttachment<T>>,
@@ -142,6 +144,48 @@ pub struct RenderPassPlan<T> {
     /// Custom sample positions in Vulkan's [0, 1) pixel space.
     pub sample_locations: Vec<[f32; 2]>,
     pub inputs: AttachmentInputs,
+}
+
+/// `tileWidth`, `tileHeight`, `threadgroupMemoryLength` and
+/// `imageblockSampleLength` of a render pass descriptor; zero sizes take
+/// Metal's defaults.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TileMemory {
+    pub width: u64,
+    pub height: u64,
+    pub threadgroup_memory_length: u64,
+    pub imageblock_sample_length: u64,
+}
+
+/// A pass's tiles: the pixels of each, and the bytes of each tile's
+/// threadgroup memory, which persists across its tile dispatches.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Tile {
+    pub size: [u32; 2],
+    pub threadgroup_memory_length: u32,
+}
+
+/// A pass's tiles as Apple's GPUs size them: 32 by 32 pixels by default, a
+/// width of 16 or 32, and a height from 16 to the width.
+fn tile(capabilities: &Capabilities, memory: &TileMemory) -> Result<Tile> {
+    let width = if memory.width == 0 { 32 } else { memory.width };
+    ensure(
+        width == 16 || width == 32,
+        "tile widths are 16 or 32 pixels",
+    )?;
+    let height = if memory.height == 0 {
+        32
+    } else {
+        memory.height
+    };
+    ensure(
+        memory.threadgroup_memory_length <= capabilities.limits.max_threadgroup_memory_length,
+        "tile threadgroup memory exceeds the device limit",
+    )?;
+    Ok(Tile {
+        size: [width as u32, height.clamp(16, width) as u32],
+        threadgroup_memory_length: memory.threadgroup_memory_length.next_multiple_of(16) as u32,
+    })
 }
 
 /// An attachment of a pass, named for deferred store actions.
@@ -296,7 +340,7 @@ pub fn render_pass<T: Copy + Eq>(
     capabilities: &Capabilities,
     descriptor: &RenderPassDescriptor<T>,
 ) -> Result<RenderPassPlan<T>> {
-    require(!descriptor.tile_memory, "tile memory")?;
+    let tile = tile(capabilities, &descriptor.tile_memory)?;
     require(
         !descriptor.rasterization_rate_map,
         "rasterization rate maps",
@@ -480,6 +524,7 @@ pub fn render_pass<T: Copy + Eq>(
 
     Ok(RenderPassPlan {
         extent,
+        tile,
         layer_count: layer_count as u32,
         color,
         depth,

@@ -250,7 +250,7 @@ fn pass(
         render_target_width: 0,
         render_target_height: 0,
         default_raster_sample_count: 0,
-        tile_memory: false,
+        tile_memory: Default::default(),
         sample_positions: Vec::new(),
         rasterization_rate_map: false,
     };
@@ -924,6 +924,97 @@ fn render_barriers_split_the_pass_and_keep_its_contents() {
             == Command::EndRendering),
         2
     );
+}
+
+/// A tile dispatch runs between pass instances: a threadgroup of the tile's
+/// threads per tile, its arguments carrying the tile and the pass's
+/// persistent tile memory, and its tables the encoder's tile bindings.
+#[test]
+fn tile_dispatches_run_a_threadgroup_per_tile() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    let mut plan = pass(&color, StoreAction::Store, false);
+    plan.tile.threadgroup_memory_length = 32;
+    commands
+        .begin_render(&mut resolver, plan, None, Vec::new())
+        .unwrap();
+    let mut state = kernel_state(true);
+    state.interface.threadgroup = alloc::vec![crate::metal::shader::ThreadgroupUse {
+        index: 2,
+        declared_bytes: 16,
+    }];
+    let mut formats = [None; MAX_COLOR_ATTACHMENTS];
+    formats[0] = Some(PixelFormat::Rgba8Unorm);
+    let target = crate::metal::pipeline::tile_target(&capabilities(), &formats, 1, false).unwrap();
+    commands.set_tile_pipeline_state(&state, target).unwrap();
+    commands.set_tile_buffer(Some(buffer(3, 64)), 0, 0).unwrap();
+    let threads = Size {
+        width: 16,
+        height: 8,
+        depth: 1,
+    };
+    // Its threadgroup buffer needs a place in the tile's memory.
+    assert!(
+        commands
+            .dispatch_threads_per_tile(&mut resolver, threads)
+            .is_err()
+    );
+    commands.set_tile_threadgroup_memory(16, 32, 2).unwrap();
+    assert!(
+        commands
+            .dispatch_threads_per_tile(&mut resolver, threads)
+            .is_err()
+    );
+    commands.set_tile_threadgroup_memory(16, 16, 2).unwrap();
+    commands
+        .dispatch_threads_per_tile(&mut resolver, threads)
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let specialization = resolver.compiled.last().unwrap().clone();
+    assert!(specialization.tile && specialization.dynamic_threadgroups);
+    assert_eq!(specialization.workgroup_size, Some([128, 1, 1]));
+    assert_eq!(specialization.storage_attachments, target.attachments);
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let commands = &recording.segments[0].commands;
+    // 64 by 32 pixels are two tiles of 32 by 32.
+    assert_eq!(
+        count(commands, |command| *command == Command::Dispatch([2, 1, 1])),
+        1
+    );
+    assert_eq!(
+        count(commands, |command| *command == Command::EndRendering),
+        2
+    );
+    let pushed = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::PushConstants(constants) if constants.arguments != 0 => Some(*constants),
+            _ => None,
+        })
+        .unwrap();
+    let table = uploaded(&recording, pushed.tables[0]);
+    assert_eq!(
+        double(table, ArgumentTable::BUFFER_ADDRESSES_OFFSET as usize),
+        3 << 32
+    );
+    let arguments = uploaded(&recording, pushed.arguments);
+    assert_eq!(
+        word(arguments, DispatchArguments::SHAPE_OFFSET as usize),
+        16
+    );
+    assert_eq!(
+        word(arguments, DispatchArguments::SHAPE_OFFSET as usize + 4),
+        8
+    );
+    assert_eq!(
+        word(arguments, DispatchArguments::OFFSETS_OFFSET as usize + 8),
+        16
+    );
+    let tile = DispatchArguments::TILE_OFFSET as usize;
+    assert_eq!(word(arguments, tile), 32 | 32 << 16);
+    assert_eq!(word(arguments, tile + 4), 32);
+    assert_ne!(double(arguments, tile + 8), 0);
 }
 
 #[test]
@@ -2116,7 +2207,7 @@ fn raw_rendered_attachments_resolve_where_the_pass_ends() {
         render_target_width: 0,
         render_target_height: 0,
         default_raster_sample_count: 0,
-        tile_memory: false,
+        tile_memory: Default::default(),
         sample_positions: Vec::new(),
         rasterization_rate_map: false,
     };

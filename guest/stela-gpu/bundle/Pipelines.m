@@ -155,8 +155,7 @@ static id binary_functions_error(NSError **error, const char *reason)
 	return nil;
 }
 
-/* The deprecated `MTLArgument`s are the bindings, whose values agree. A
- * pipeline here has no tile function, so it has no tile arguments. */
+/* The deprecated `MTLArgument`s are the bindings, whose values agree. */
 @implementation StelaGPURenderReflection
 
 - (NSArray *)vertexArguments
@@ -171,7 +170,7 @@ static id binary_functions_error(NSError **error, const char *reason)
 
 - (NSArray *)tileArguments
 {
-	return [NSArray array];
+	return self.tileBindings ?: [NSArray array];
 }
 
 @end
@@ -318,7 +317,7 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 	return _maxTotalThreadsPerObjectThreadgroup;
 }
 
-/* A pipeline lives in the service, and no tile stage exists. */
+/* A pipeline lives in the service. */
 - (NSUInteger)allocatedSize
 {
 	return 0;
@@ -331,12 +330,12 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 
 - (NSUInteger)maxTotalThreadsPerThreadgroup
 {
-	return 0;
+	return _maxTotalThreadsPerTileThreadgroup;
 }
 
 - (BOOL)threadgroupSizeMatchesTileSize
 {
-	return NO;
+	return _threadgroupSizeMatchesTileSize;
 }
 
 - (NSUInteger)maxTotalThreadgroupsPerMeshGrid
@@ -392,6 +391,10 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 
 - (id)functionHandleWithFunction:(id)function stage:(NSUInteger)stage
 {
+	/* A tile pipeline's function links as a kernel's. */
+	if (_tile) {
+		return stage == MTLRenderStageTile ? function_handle(_device, _handle, function, 0) : nil;
+	}
 	return function_handle(_device, _handle, function, stage);
 }
 
@@ -401,9 +404,10 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 		    : stage == MTLRenderStageFragment ? _fragmentLinked
 		    : stage == MTLRenderStageObject   ? _objectLinked
 		    : stage == MTLRenderStageMesh     ? _meshLinked
+		    : stage == MTLRenderStageTile     ? _tileLinked
 						      : nil;
 	id function = linked_named(linked, name);
-	return function ? function_handle(_device, _handle, function, stage) : nil;
+	return function ? [self functionHandleWithFunction:function stage:stage] : nil;
 }
 
 - (id)newVisibleFunctionTableWithDescriptor:(id)descriptor stage:(NSUInteger)stage
@@ -764,20 +768,73 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	});
 }
 
-/* Tile shading needs tile memory, which only Apple's GPUs have. */
+/* A tile pipeline is a kernel of its pass's tiles in the service. */
 - (id)newRenderPipelineStateWithTileDescriptor:(id)descriptor
 				       options:(NSUInteger)options
 				    reflection:(id *)reflection
 					 error:(NSError **)error
 {
-	(void)descriptor;
-	(void)options;
-	(void)reflection;
-	if (error) {
-		StelaFailure failure = {.status = StelaStatusUnsupported, .reason = "tile shading"};
-		*error = pipeline_error(&failure);
+	StelaGPUFunction *function = [descriptor tileFunction];
+	StelaNewTilePipelineRequest request = {
+		.tile_function = function->_handle,
+		.max_total_threads_per_threadgroup = [descriptor maxTotalThreadsPerThreadgroup],
+		.raster_sample_count = [descriptor rasterSampleCount],
+		.flags = [descriptor threadgroupSizeMatchesTileSize] ? StelaPipelineFlags_THREADGROUP_SIZE_MATCHES_TILE_SIZE
+								     : 0,
+	};
+	id colors = [descriptor colorAttachments];
+	for (NSUInteger i = 0; i < 8; i++) {
+		request.color_formats[i] = [[colors objectAtIndexedSubscript:i] pixelFormat];
 	}
-	return nil;
+	NSArray *libraries;
+	if (!stage_libraries(function, [descriptor preloadedLibraries], &libraries, error)) {
+		return nil;
+	}
+	Linked linked = {};
+	linked_functions(&linked, [descriptor linkedFunctions], libraries, [descriptor maxCallStackDepth],
+			 &request.linked_functions);
+	request.archives = archives_record(&linked, descriptor, options, 0);
+	StelaComputePipelineResponse response;
+	StelaFailure failure;
+	StelaSpans spans = {.reads = linked.spans, .read_count = linked.used};
+	uint32_t status = STELA_CALL_SPANS(&_gate, NewTilePipeline, &request, &response, spans, &failure);
+	linked_free(&linked);
+	if (status != StelaStatusOk) {
+		if (error) {
+			*error = pipeline_error(&failure);
+		}
+		return nil;
+	}
+	if (reflection) {
+		StelaGPURenderReflection *gathered = [StelaGPURenderReflection new];
+		if (options & MTLPipelineOptionBindingInfo) {
+			gathered.tileBindings = [StelaGPUReflection bindingsOfFunction:function];
+		}
+		*reflection = gathered;
+	}
+	StelaGPURenderPipeline *pipeline = [[StelaGPURenderPipeline alloc] initWithDevice:self
+										   handle:response.handle];
+	pipeline->_tile = YES;
+	pipeline->_threadgroupSizeMatchesTileSize = [descriptor threadgroupSizeMatchesTileSize];
+	pipeline->_maxTotalThreadsPerTileThreadgroup = response.max_total_threads_per_threadgroup;
+	pipeline->_tileLinked = [[descriptor linkedFunctions] copy];
+	pipeline.label = [descriptor label];
+	return pipeline;
+}
+
+- (void)newRenderPipelineStateWithTileDescriptor:(id)descriptor
+					 options:(NSUInteger)options
+			       completionHandler:(void (^)(id, id, NSError *))handler
+{
+	dispatch_async(dispatch_get_global_queue(0, 0), ^{
+		id reflection = nil;
+		NSError *error = nil;
+		id pipeline = [self newRenderPipelineStateWithTileDescriptor:descriptor
+								     options:options
+								  reflection:&reflection
+								       error:&error];
+		handler(pipeline, reflection, error);
+	});
 }
 
 - (id)newComputePipelineStateWithDescriptor:(id)descriptor

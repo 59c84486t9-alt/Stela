@@ -22,7 +22,6 @@
 
 #define RAY_TRACING "this device has no acceleration structures"
 #define INTERSECTION "this device has no intersection functions"
-#define TILE "this device has no tile shaders"
 #define TENSORS "this device has no tensors"
 #define IMAGEBLOCKS "indirect commands' kernels take their threadgroup's imageblock size"
 #define BINARY_LINKING "this device links no binary functions into a pipeline"
@@ -278,91 +277,11 @@ ABSENT_TABLES(Vertex)
 ABSENT_TABLES(Fragment)
 ABSENT_TABLES(Tile)
 
-ABSENT((NSUInteger)tileWidth, TILE, 0)
-ABSENT((NSUInteger)tileHeight, TILE, 0)
 ABSENT((void)setColorAttachmentMap:(id)map, "this device has no color attachment maps", )
 
 - (void)setDepthTestMinBound:(float)minimum maxBound:(float)maximum
 {
 	REFUSE("setDepthTestMinBound:maxBound:", "this device has no depth bounds test");
-}
-
-- (void)setThreadgroupMemoryLength:(NSUInteger)length offset:(NSUInteger)offset atIndex:(NSUInteger)index
-{
-	REFUSE("setThreadgroupMemoryLength:offset:atIndex:", TILE);
-}
-
-- (void)dispatchThreadsPerTile:(MTLSize)threads
-{
-	REFUSE("dispatchThreadsPerTile:", TILE);
-}
-
-- (void)setTileBuffer:(id)buffer offset:(NSUInteger)offset atIndex:(NSUInteger)index
-{
-	REFUSE("setTileBuffer:offset:atIndex:", TILE);
-}
-
-- (void)setTileBufferOffset:(NSUInteger)offset atIndex:(NSUInteger)index
-{
-	REFUSE("setTileBufferOffset:atIndex:", TILE);
-}
-
-- (void)setTileBuffers:(const id __unsafe_unretained[])buffers
-	       offsets:(const NSUInteger[])offsets
-	     withRange:(NSRange)range
-{
-	REFUSE("setTileBuffers:offsets:withRange:", TILE);
-}
-
-- (void)setTileBytes:(const void *)bytes length:(NSUInteger)length atIndex:(NSUInteger)index
-{
-	REFUSE("setTileBytes:length:atIndex:", TILE);
-}
-
-- (void)setTileSamplerState:(id)sampler atIndex:(NSUInteger)index
-{
-	REFUSE("setTileSamplerState:atIndex:", TILE);
-}
-
-- (void)setTileSamplerState:(id)sampler
-		lodMinClamp:(float)minimum
-		lodMaxClamp:(float)maximum
-		    atIndex:(NSUInteger)index
-{
-	REFUSE("setTileSamplerState:lodMinClamp:lodMaxClamp:atIndex:", TILE);
-}
-
-- (void)setTileSamplerStates:(const id __unsafe_unretained[])samplers withRange:(NSRange)range
-{
-	REFUSE("setTileSamplerStates:withRange:", TILE);
-}
-
-- (void)setTileSamplerStates:(const id __unsafe_unretained[])samplers
-		lodMinClamps:(const float[])minimums
-		lodMaxClamps:(const float[])maximums
-		   withRange:(NSRange)range
-{
-	REFUSE("setTileSamplerStates:lodMinClamps:lodMaxClamps:withRange:", TILE);
-}
-
-- (void)setTileTexture:(id)texture atIndex:(NSUInteger)index
-{
-	REFUSE("setTileTexture:atIndex:", TILE);
-}
-
-- (void)setTileTextures:(const id __unsafe_unretained[])textures withRange:(NSRange)range
-{
-	REFUSE("setTileTextures:withRange:", TILE);
-}
-
-- (void)setTileVisibleFunctionTable:(id)table atBufferIndex:(NSUInteger)index
-{
-	REFUSE("setTileVisibleFunctionTable:atBufferIndex:", TILE);
-}
-
-- (void)setTileVisibleFunctionTables:(const id __unsafe_unretained[])tables withBufferRange:(NSRange)range
-{
-	REFUSE("setTileVisibleFunctionTables:withBufferRange:", TILE);
 }
 
 @end

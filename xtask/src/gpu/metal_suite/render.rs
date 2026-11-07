@@ -2993,6 +2993,89 @@ fn layers_and_clipping(plan: &mut Plan, library: &str) {
     );
 }
 
+/// Tile functions after a draw of per-pixel colors over a target that ends
+/// partway through its last tiles: each threadgroup reads and writes its
+/// tile's pixels, and its threadgroup memory persists across the pass's
+/// tile dispatches.
+fn tiles(plan: &mut Plan, library: &str) {
+    const TW: u32 = 48;
+    const TH: u32 = 40;
+    let mut rng = Random::new(4417);
+    let colors: Vec<f64> = (0..TW * TH * 4)
+        .map(|_| (rng.uniform(-16.0, 16.0) * 4.0).round() / 4.0)
+        .collect();
+    let at = |x: u32, y: u32| &colors[((y * TW + x) * 4) as usize..][..4];
+    let image = |texel: &dyn Fn(u32, u32) -> [f64; 4]| -> Vec<f64> {
+        (0..TH)
+            .flat_map(|y| (0..TW).map(move |x| (x, y)))
+            .flat_map(|(x, y)| texel(x, y))
+            .collect()
+    };
+    let case = |name: &str, tiles: Value, state: Value| {
+        let mut render = json!({"vertex_count": 3, "colors": [{"texture": "c"}], "tiles": tiles});
+        for (k, v) in state.as_object().unwrap() {
+            render[k] = v.clone();
+        }
+        Case::render(name, library, "vert_full", Some("frag_color"), render)
+            .buffer(Buffer::data("colors", 0, f32s(&colors)).stage("fragment"))
+            .buffer(Buffer::data("width", 1, u32s(&[TW])).stage("fragment"))
+            .buffer(Buffer::data("depth", 2, f32s(&[0.5])).stage("vertex"))
+            .texture(Texture::d2("c", "rgba32float", TW, TH).usage(&["render"]))
+    };
+    let rewritten = image(&|x, y| {
+        let c = at(x, y);
+        [
+            c[0] + f64::from(x % 16),
+            c[1] + f64::from(y % 16),
+            f64::from(x / 16),
+            f64::from(y / 16) + 4.0,
+        ]
+    });
+    plan.add(
+        case(
+            "render.tile.rewrite",
+            json!([{"function": "tile_rewrite", "threads": [16, 8]}]),
+            json!({"tile_size": [16, 16]}),
+        )
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&rewritten))),
+    );
+    // Threadgroups the size of the tile.
+    plan.add(
+        case(
+            "render.tile.rewrite.matching_threads",
+            json!([{"function": "tile_rewrite", "threads": [16, 16], "matches_tile_size": true}]),
+            json!({"tile_size": [16, 16]}),
+        )
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&rewritten))),
+    );
+    let recalled = image(&|x, y| {
+        let c = at(x, y);
+        [f64::from(x / 32 + 10 * (y / 32) + 100), c[1], c[2], c[3]]
+    });
+    let memory = json!([{"index": 0, "length": 16, "offset": 16}]);
+    plan.add(
+        case(
+            "render.tile.threadgroup_memory_persists",
+            json!([
+                {"function": "tile_remember", "threads": [32, 4], "threadgroup_memory": memory},
+                {"function": "tile_recall", "threads": [16, 16], "threadgroup_memory": memory}
+            ]),
+            json!({"tile_memory": 32}),
+        )
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&recalled))),
+    );
+    // Tiles of 32 by 16: two by three of them.
+    let dimensions = image(&|_, _| [32.0, 16.0, 2.0, 3.0]);
+    plan.add(
+        case(
+            "render.tile.dimensions",
+            json!([{"function": "tile_dimensions", "threads": [8, 8]}]),
+            json!({"tile_size": [32, 16]}),
+        )
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&dimensions))),
+    );
+}
+
 /// Early fragment tests: an occluding instance, then one over the whole
 /// target behind it, whose fragment function counts its runs. The hidden
 /// fragments are rejected before they run, so the counts are exact.
@@ -3200,6 +3283,7 @@ pub fn build(plan: &mut Plan) {
     points(plan, &library);
     edges(plan, &library);
     fetch(plan, &library);
+    tiles(plan, &library);
     fragment_queries(plan, &library);
     layers_and_clipping(plan, &library);
     plan.add(Case::device("device.properties"));

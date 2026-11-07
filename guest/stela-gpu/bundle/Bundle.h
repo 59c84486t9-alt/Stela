@@ -376,7 +376,7 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 
 /* `MTLRenderPipelineReflection`. */
 @interface StelaGPURenderReflection : NSObject
-@property(copy) NSArray *vertexBindings, *fragmentBindings, *objectBindings, *meshBindings;
+@property(copy) NSArray *vertexBindings, *fragmentBindings, *objectBindings, *meshBindings, *tileBindings;
 @end
 
 /* `MTLFunctionReflection`. */
@@ -427,6 +427,12 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	BOOL _supportIndirectCommandBuffers;
 	/* Each stage's linked functions, which handles are found by name in. */
 	id _vertexLinked, _fragmentLinked, _objectLinked, _meshLinked;
+	/* A tile pipeline, which the service holds as a kernel: its most
+	 * threads per tile, whether they match the tile, and its linked
+	 * functions. */
+	BOOL _tile, _threadgroupSizeMatchesTileSize;
+	NSUInteger _maxTotalThreadsPerTileThreadgroup;
+	id _tileLinked;
 }
 @end
 
@@ -595,7 +601,11 @@ id stela_empty_logs(void);
 }
 @end
 
-@interface StelaGPURenderEncoder : StelaGPUEncoder <MTLRenderCommandEncoder>
+@interface StelaGPURenderEncoder : StelaGPUEncoder <MTLRenderCommandEncoder> {
+@public
+	/* The pass's tile size, which tile dispatches cover the targets with. */
+	NSUInteger _tileWidth, _tileHeight;
+}
 - (void)setCullMode:(NSUInteger)mode;
 - (void)setFrontFacingWinding:(NSUInteger)winding;
 - (void)setTriangleFillMode:(NSUInteger)mode;
@@ -610,5 +620,12 @@ id stela_empty_logs(void);
 @interface StelaGPUResourceStateEncoder : StelaGPUEncoder <MTLResourceStateCommandEncoder>
 @end
 
-@interface StelaGPUParallelEncoder : StelaGPUEncoder <MTLParallelRenderCommandEncoder>
+@interface StelaGPUParallelEncoder : StelaGPUEncoder <MTLParallelRenderCommandEncoder> {
+@public
+	NSUInteger _tileWidth, _tileHeight;
+}
 @end
+
+/* A render pass descriptor's tile size as Apple's GPUs take it: 32 by 32
+ * pixels by default, a height of at least 16 and at most the width. */
+void stela_tile_size(id descriptor, NSUInteger *width, NSUInteger *height);

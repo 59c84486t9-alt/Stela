@@ -272,6 +272,12 @@ enum stela_air_device_value {
    /* A stage-in dispatch's region's origin and size, each a uvec3. */
    STELA_AIR_STAGE_IN_ORIGIN,
    STELA_AIR_STAGE_IN_SIZE,
+   /* A tile function's dispatch, as a uvec4: the pass's tile width in the
+    * low half of x and its height in the high half, then the bytes of each
+    * tile's threadgroup memory that persist across the pass's dispatches,
+    * and the 64-bit address, low word first, of the memory that holds them
+    * between dispatches, tile after tile in rows. */
+   STELA_AIR_TILE,
 };
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);
@@ -285,11 +291,25 @@ typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_de
 typedef nir_def *(*stela_air_fetch_attribute)(nir_builder *, unsigned location, nir_def *at,
                                               nir_def *point, bool integer, void *binding_data);
 
+/* A tile function's render pass: the texel layouts of its color attachments,
+ * by location, PIPE_FORMAT_NONE where it has none, and its samples per pixel.
+ * The function, a dynamic kernel, runs a threadgroup per tile, and its
+ * implicit imageblock is the attachments' texels under the tile, which it
+ * accesses as storage. Its threadgroup memory, which its dispatches place
+ * buffers in, persists across the pass's dispatches as STELA_AIR_TILE gives
+ * it. */
+struct stela_air_tile {
+   enum pipe_format formats[8];
+   unsigned samples;
+};
+
 struct stela_air_options {
    unsigned workgroup_size[3]; /* Exact nonzero pipeline specialization. */
    /* A kernel's explicit imageblock's width and height, as its encoder's
     * setImageblockWidth:height: gives them; zero for the threadgroup's. */
    unsigned imageblock_size[2];
+   /* A tile function's pass; NULL for a kernel that is not one. */
+   const struct stela_air_tile *tile;
    unsigned max_instructions; /* Nonzero caller-supplied compilation budget. */
    stela_air_bind_buffer bind_buffer;
    void *binding_data;

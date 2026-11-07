@@ -439,6 +439,7 @@ pub struct Specialization {
     pub(super) extended_range: u32,
     pub(super) vertex_formats: [u8; 32],
     pub(super) imageblock_size: [u32; 2],
+    pub(super) tile: u32,
 }
 
 /// `struct stela_metal_attachment`: a color attachment a fragment function

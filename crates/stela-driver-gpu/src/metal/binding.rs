@@ -755,7 +755,13 @@ impl DispatchArguments {
     /// Each buffer's attribute stride, by Metal index, which stage-in
     /// layouts of a dynamic stride read.
     pub const STRIDES_OFFSET: u32 = Self::OFFSETS_OFFSET + 4 * MAX_BUFFER_BINDINGS;
-    pub const BYTES: u32 = Self::STRIDES_OFFSET + 4 * MAX_BUFFER_BINDINGS;
+    /// A tile dispatch's tile: its width in the low half of a `u32` and its
+    /// height in the high half, the `u32` bytes of each tile's threadgroup
+    /// memory that persist across the pass's dispatches, and the `u64`
+    /// address of the memory that holds them, tile after tile in rows.
+    pub const TILE_OFFSET: u32 =
+        (Self::STRIDES_OFFSET + 4 * MAX_BUFFER_BINDINGS).next_multiple_of(16);
+    pub const BYTES: u32 = Self::TILE_OFFSET + 16;
     pub const ALIGNMENT: u64 = 16;
 }
 
@@ -1344,6 +1350,7 @@ mod tests {
                 "STELA_METAL_DISPATCH_STRIDES",
                 DispatchArguments::STRIDES_OFFSET,
             ),
+            ("STELA_METAL_DISPATCH_TILE", DispatchArguments::TILE_OFFSET),
             ("STELA_METAL_DISPATCH_BYTES", DispatchArguments::BYTES),
             (
                 "STELA_METAL_SEQUENCE_PIPELINE",

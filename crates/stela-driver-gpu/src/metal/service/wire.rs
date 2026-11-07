@@ -738,6 +738,20 @@ records! {
         pub flags: u64,
     }
 
+    /// `newRenderPipelineStateWithTileDescriptor:`: a tile function,
+    /// `rasterSampleCount` (zero for one), each color attachment's
+    /// `MTLPixelFormat` (zero for none), and `PipelineFlags`. The pipeline
+    /// answers as a compute pipeline, which only render encoders set.
+    pub struct NewTilePipelineRequest {
+        pub tile_function: u64,
+        pub max_total_threads_per_threadgroup: u64,
+        pub raster_sample_count: u64,
+        pub color_formats: [u64; 8],
+        pub linked_functions: LinkedFunctionsRecord,
+        pub archives: PipelineArchivesRecord,
+        pub flags: u64,
+    }
+
     /// A new compute pipeline: its `gpuResourceID` (zero when indirect
     /// command buffers cannot switch to it),
     /// `maxTotalThreadsPerThreadgroup`, `threadExecutionWidth`,
@@ -902,6 +916,8 @@ option_set! {
         const OBJECT_THREADGROUP_SIZE_IS_MULTIPLE_OF_WIDTH = 1 << 3;
         /// `meshThreadgroupSizeIsMultipleOfThreadExecutionWidth`.
         const MESH_THREADGROUP_SIZE_IS_MULTIPLE_OF_WIDTH = 1 << 4;
+        /// `threadgroupSizeMatchesTileSize`.
+        const THREADGROUP_SIZE_MATCHES_TILE_SIZE = 1 << 5;
     }
 }
 
@@ -1093,6 +1109,7 @@ operations! {
     /// `gpuAddress` is the table's `gpuResourceID`.
     NewFunctionTable = 0x0305 => NewFunctionTableRequest, BufferResponse;
     SetFunctions = 0x0306 => SetFunctionsRequest, Empty;
+    NewTilePipeline = 0x0307 => NewTilePipelineRequest, ComputePipelineResponse;
     /// `newEvent` and `newSharedEvent`.
     NewEvent = 0x0401 => Empty, Handle;
     /// `signaledValue`.

@@ -7,8 +7,9 @@ use super::{
         self, AttributeRecord, ColorAttachmentRecord, ComputePipelineResponse, Empty, Fault,
         FunctionHandleRequest, FunctionHandleResponse, LayoutRecord, LinkedFunctionsRecord,
         NewComputePipelineRequest, NewFunctionTableRequest, NewMeshPipelineRequest,
-        NewRenderPipelineRequest, PipelineArchivesRecord, PipelineFlags, RenderPipelineResponse,
-        RenderTargetsRecord, SetFunctionsRequest, Status, TessellationRecord,
+        NewRenderPipelineRequest, NewTilePipelineRequest, PipelineArchivesRecord, PipelineFlags,
+        RenderPipelineResponse, RenderTargetsRecord, SetFunctionsRequest, Status,
+        TessellationRecord,
     },
 };
 use crate::metal::{
@@ -24,7 +25,10 @@ use crate::metal::{
             PipelineArchives, RenderPipelineRequest,
         },
     },
-    pipeline::{ColorAttachmentDescriptor, RenderTargets, StageThreads, TessellationDescriptor},
+    pipeline::{
+        self, ColorAttachmentDescriptor, MAX_COLOR_ATTACHMENTS, RenderTargets, StageThreads,
+        TessellationDescriptor,
+    },
     pixel_format::PixelFormat,
     shader::{Compiler, Stage},
     vertex::{
@@ -180,6 +184,54 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Ok(ComputePipelineResponse {
                 handle: 0,
                 resource_id: device.compute_pipeline_resource_id(pipeline)?,
+                max_total_threads_per_threadgroup: plan.max_total_threads_per_threadgroup,
+                thread_execution_width: plan.thread_execution_width,
+                static_threadgroup_memory_length: plan.static_threadgroup_memory_length,
+                imageblock_bytes: plan.imageblock_bytes.into(),
+            })
+        })?;
+        call.reply(&ComputePipelineResponse {
+            handle: handle.handle,
+            ..response
+        })
+    }
+
+    pub(super) fn new_tile_pipeline(&mut self, call: &mut Call) -> Result<(), Fault> {
+        let request: NewTilePipelineRequest = call.request()?;
+        let flags = flags(request.flags)?;
+        let connection = call.connection;
+        let mut formats = [None; MAX_COLOR_ATTACHMENTS];
+        for (format, &raw) in formats.iter_mut().zip(&request.color_formats) {
+            if raw != 0 {
+                *format = Some(pixel_format(raw)?);
+            }
+        }
+        let target = pipeline::tile_target(
+            self.device.capabilities(),
+            &formats,
+            request.raster_sample_count,
+            flags.contains(PipelineFlags::THREADGROUP_SIZE_MATCHES_TILE_SIZE),
+        )?;
+        let pipeline = ComputePipelineRequest {
+            compute_function: self.object(connection, request.tile_function)?,
+            threadgroup_size_is_multiple_of_thread_execution_width: false,
+            max_total_threads_per_threadgroup: request.max_total_threads_per_threadgroup,
+            stage_input: None,
+            linked_functions: self.linked(
+                connection,
+                &mut *call.memory,
+                &request.linked_functions,
+            )?,
+            support_indirect_command_buffers: false,
+            archives: self.archives(connection, &mut *call.memory, &request.archives)?,
+        };
+        let pipeline = self.device.new_tile_pipeline(&pipeline, target)?;
+        let object = Object::ComputePipeline(pipeline);
+        let (handle, response) = self.adopt(connection, object, |device| {
+            let plan = &device.compute_pipeline_state(pipeline)?.plan;
+            Ok(ComputePipelineResponse {
+                handle: 0,
+                resource_id: 0,
                 max_total_threads_per_threadgroup: plan.max_total_threads_per_threadgroup,
                 thread_execution_width: plan.thread_execution_width,
                 static_threadgroup_memory_length: plan.static_threadgroup_memory_length,

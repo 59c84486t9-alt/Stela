@@ -36,6 +36,7 @@ pub mod generated;
 pub mod indirect;
 pub mod render;
 pub mod resource_state;
+pub mod tile;
 
 /// A Metal buffer as commands see it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -305,10 +306,33 @@ struct Table {
     address: Option<u64>,
 }
 
+/// The argument table a binding goes to: a stage's, or a render encoder's
+/// tile functions', which tile dispatches read as a kernel's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Slot {
+    Stage(Stage),
+    Tile,
+}
+
+impl Slot {
+    const fn index(self) -> usize {
+        match self {
+            Self::Stage(stage) => stage.table().raw() as usize,
+            Self::Tile => 3,
+        }
+    }
+}
+
+impl From<Stage> for Slot {
+    fn from(stage: Stage) -> Self {
+        Self::Stage(stage)
+    }
+}
+
 /// Bindings shared by the stages of an encoder.
 #[derive(Clone, Debug, Default)]
 struct Bindings {
-    tables: [Table; 3],
+    tables: [Table; 4],
     constants: PushConstants,
     pushed: Option<PushConstants>,
 }
@@ -321,16 +345,17 @@ macro_rules! unbound {
                    ", which is unbound")),*]
     };
 }
-const UNBOUND: [[&str; super::capabilities::MAX_BUFFER_BINDINGS as usize]; 4] = [
+const UNBOUND: [[&str; super::capabilities::MAX_BUFFER_BINDINGS as usize]; 5] = [
     unbound!("vertex": 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30),
     unbound!("fragment": 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30),
     unbound!("object": 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30),
     unbound!("mesh": 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30),
+    unbound!("tile": 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30),
 ];
 
 impl Bindings {
-    fn table(&mut self, stage: Stage) -> &mut Table {
-        &mut self.tables[stage.table().raw() as usize]
+    fn table(&mut self, slot: impl Into<Slot>) -> &mut Table {
+        &mut self.tables[slot.into().index()]
     }
 
     /// Fails unless each buffer the functions access is bound. Metal
@@ -338,8 +363,16 @@ impl Bindings {
     /// left unbound would be read at address zero, which faults the device
     /// for every process.
     fn require_buffers(&self, interfaces: &[Interface]) -> Result<()> {
-        for interface in interfaces {
-            let table = &self.tables[interface.stage.table().raw() as usize];
+        interfaces
+            .iter()
+            .try_for_each(|interface| self.require_buffers_of(interface.stage.into(), interface))
+    }
+
+    /// Fails unless each buffer `interface` accesses is bound in `slot`'s
+    /// table.
+    fn require_buffers_of(&self, slot: Slot, interface: &Interface) -> Result<()> {
+        {
+            let table = &self.tables[slot.index()];
             let unbound = table
                 .slots
                 .buffers
@@ -349,10 +382,11 @@ impl Bindings {
                     interface.buffer_reads & (1 << index) != 0 && buffer.address == 0
                 });
             if let Some((index, _)) = unbound {
-                let stage = match interface.stage {
-                    Stage::Fragment => 1,
-                    Stage::Object => 2,
-                    Stage::Mesh => 3,
+                let stage = match (slot, interface.stage) {
+                    (Slot::Tile, _) => 4,
+                    (_, Stage::Fragment) => 1,
+                    (_, Stage::Object) => 2,
+                    (_, Stage::Mesh) => 3,
                     _ => 0,
                 };
                 return Err(Error::Invalid(UNBOUND[stage][index]));
@@ -363,11 +397,12 @@ impl Bindings {
 
     fn set_buffer(
         &mut self,
-        stage: Stage,
+        slot: impl Into<Slot>,
         buffer: Option<BufferRef>,
         offset: u64,
         index: u32,
     ) -> Result<()> {
+        let target = slot.into();
         let slot = buffer_slot(index)?;
         let binding = match buffer {
             Some(buffer) => {
@@ -379,7 +414,7 @@ impl Bindings {
             }
             None => BufferBinding::default(),
         };
-        let table = self.table(stage);
+        let table = self.table(target);
         table.slots.buffers[slot] = binding;
         table.buffers[slot] = buffer;
         table.address = None;
@@ -387,10 +422,11 @@ impl Bindings {
     }
 
     /// `set*BufferOffset:atIndex:` keeps the buffer and moves its offset.
-    fn set_buffer_offset(&mut self, stage: Stage, offset: u64, index: u32) -> Result<()> {
-        let bound = self.table(stage).buffers[buffer_slot(index)?];
+    fn set_buffer_offset(&mut self, slot: impl Into<Slot>, offset: u64, index: u32) -> Result<()> {
+        let slot = slot.into();
+        let bound = self.table(slot).buffers[buffer_slot(index)?];
         let bound = bound.ok_or(Error::Invalid("no buffer is bound at that index"))?;
-        self.set_buffer(stage, Some(bound), offset, index)
+        self.set_buffer(slot, Some(bound), offset, index)
     }
 
     /// Unbinds the buffers of `stages`, keeping their textures and samplers.
@@ -405,12 +441,17 @@ impl Bindings {
         }
     }
 
-    fn set_texture(&mut self, stage: Stage, texture: ResourceId, index: u32) -> Result<()> {
+    fn set_texture(
+        &mut self,
+        slot: impl Into<Slot>,
+        texture: ResourceId,
+        index: u32,
+    ) -> Result<()> {
         ensure(
             (index as usize) < self.tables[0].slots.textures.len(),
             "texture index exceeds the argument table",
         )?;
-        let table = self.table(stage);
+        let table = self.table(slot);
         table.slots.textures[index as usize] = texture;
         table.address = None;
         Ok(())
@@ -419,10 +460,12 @@ impl Bindings {
     /// The textures of the pass's color attachments, for `[[color(n)]]`,
     /// and its samples.
     fn set_pass(&mut self, textures: [ResourceId; MAX_COLOR_ATTACHMENTS], samples: PassSamples) {
-        let table = self.table(Stage::Fragment);
-        table.slots.attachments = textures;
-        table.slots.samples = samples;
-        table.address = None;
+        for slot in [Slot::Stage(Stage::Fragment), Slot::Tile] {
+            let table = self.table(slot);
+            table.slots.attachments = textures;
+            table.slots.samples = samples;
+            table.address = None;
+        }
     }
 
     fn set_blend_color(&mut self, color: [f32; 4]) {
@@ -434,12 +477,17 @@ impl Bindings {
         }
     }
 
-    fn set_sampler(&mut self, stage: Stage, sampler: ResourceId, index: u32) -> Result<()> {
+    fn set_sampler(
+        &mut self,
+        slot: impl Into<Slot>,
+        sampler: ResourceId,
+        index: u32,
+    ) -> Result<()> {
         ensure(
             (index as usize) < self.tables[0].slots.samplers.len(),
             "sampler index exceeds the argument table",
         )?;
-        let table = self.table(stage);
+        let table = self.table(slot);
         table.slots.samplers[index as usize] = sampler;
         table.address = None;
         Ok(())
@@ -453,29 +501,36 @@ impl Bindings {
         resolver: &mut dyn Resolver,
         stages: &[Stage],
     ) -> Result<()> {
-        for stage in stages {
-            let slot = stage.table().raw() as usize;
-            let table = &mut self.tables[slot];
-            let address = match table.address {
-                Some(address) => address,
-                None => {
-                    let (upload, bytes) = recorder.uploads.zeroed(
-                        resolver,
-                        ArgumentTable::BYTES as usize,
-                        ArgumentTable::ALIGNMENT,
-                    )?;
-                    table.slots.encode_into(bytes);
-                    table.address = Some(upload.address);
-                    upload.address
-                }
-            };
-            self.constants.tables[slot] = address;
+        for &stage in stages {
+            let address = self.upload_table(recorder, resolver, stage.into())?;
+            self.constants.tables[stage.table().raw() as usize] = address;
         }
         if self.pushed != Some(self.constants) {
             recorder.push(Command::PushConstants(self.constants));
             self.pushed = Some(self.constants);
         }
         Ok(())
+    }
+
+    /// The address of `slot`'s table, uploaded when it changed.
+    fn upload_table(
+        &mut self,
+        recorder: &mut Recorder,
+        resolver: &mut dyn Resolver,
+        slot: Slot,
+    ) -> Result<u64> {
+        let table = &mut self.tables[slot.index()];
+        if let Some(address) = table.address {
+            return Ok(address);
+        }
+        let (upload, bytes) = recorder.uploads.zeroed(
+            resolver,
+            ArgumentTable::BYTES as usize,
+            ArgumentTable::ALIGNMENT,
+        )?;
+        table.slots.encode_into(bytes);
+        table.address = Some(upload.address);
+        Ok(upload.address)
     }
 
     /// Bindings carry over between encoders only through the table memory

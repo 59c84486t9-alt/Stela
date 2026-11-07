@@ -187,8 +187,12 @@ struct stela_metal_specialization {
    /* A kernel's explicit imageblock's width and height, its encoder's
     * setImageblockWidth:height:, or zero for its threadgroup's. */
    uint32_t imageblock_size[2];
+   /* A tile function of dynamic threadgroups: its pass's color attachments
+    * are attachments' formats, which its implicit imageblock accesses, and
+    * samples its samples per pixel. */
+   uint32_t tile;
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 184u
+#define STELA_METAL_SPECIALIZATION_BYTES 192u
 #define STELA_METAL_ATTACHMENT_BYTES 16u
 #define STELA_METAL_CONSTEXPR_SAMPLER_BYTES 16u
 #define STELA_METAL_MODULE_BYTES 32u

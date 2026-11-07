@@ -553,6 +553,10 @@ pub struct Specialization {
     /// `setImageblockWidth:height:` gives them; `None` for the
     /// threadgroup's. Only kernels with an imageblock take one.
     pub imageblock_size: Option<[u32; 2]>,
+    /// A tile function, of `dynamic_threadgroups`: its implicit imageblock
+    /// is its pass's color attachments, which `storage_attachments` give
+    /// the formats of, of `samples` per pixel.
+    pub tile: bool,
 }
 
 /// A color attachment a fragment function reads, which the function also

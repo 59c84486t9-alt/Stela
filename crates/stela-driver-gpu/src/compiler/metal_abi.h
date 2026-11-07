@@ -281,12 +281,14 @@ enum stela_metal_average_format {
  * where a stage-in kernel's arguments hold them, then the threadgroup's
  * shape and each threadgroup buffer's offset in threadgroup memory, by
  * Metal index, then each buffer's attribute stride, which a stage-in
- * layout of a dynamic stride reads. */
+ * layout of a dynamic stride reads, then a tile dispatch's
+ * STELA_AIR_TILE. */
 #define STELA_METAL_DISPATCH_REGION 0u
 #define STELA_METAL_DISPATCH_SHAPE 24u
 #define STELA_METAL_DISPATCH_OFFSETS 36u
 #define STELA_METAL_DISPATCH_STRIDES 160u
-#define STELA_METAL_DISPATCH_BYTES 284u
+#define STELA_METAL_DISPATCH_TILE 288u
+#define STELA_METAL_DISPATCH_BYTES 304u
 
 /* TessellationArguments, which a patch draw's stages read at the push
  * constants' arguments address. Bindings are (address, length); the draw's

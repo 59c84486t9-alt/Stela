@@ -67,7 +67,7 @@ fn pass<'a>() -> RenderPassDescriptor<'a, u32> {
         render_target_width: 0,
         render_target_height: 0,
         default_raster_sample_count: 0,
-        tile_memory: false,
+        tile_memory: Default::default(),
         sample_positions: Vec::new(),
         rasterization_rate_map: false,
     }
@@ -372,9 +372,50 @@ fn passes_without_attachments_and_apple_only_features() {
         Error::Invalid("one sample position per sample")
     );
     descriptor.sample_positions.clear();
-    descriptor.tile_memory = true;
+}
+
+/// Tiles are sized as on Apple's GPUs: 32 by 32 by default, 16 or 32 wide,
+/// and from 16 to the width tall.
+#[test]
+fn tiles_take_apple_sizes() {
+    let color = texture(TextureType::D2, PixelFormat::Rgba16Float, 1);
+    let mut descriptor = pass();
+    descriptor.color_attachments[0] =
+        Some(attachment(target(1, &color), StoreAction::Store, [0.0; 4]));
     assert_eq!(
-        render_pass(&capabilities(), &descriptor).unwrap_err(),
-        Error::Unsupported("tile memory")
+        render_pass(&capabilities(), &descriptor).unwrap().tile.size,
+        [32, 32]
+    );
+    for ([width, height], size) in [
+        ([16, 8], [16, 16]),
+        ([16, 32], [16, 16]),
+        ([32, 8], [32, 16]),
+        ([32, 16], [32, 16]),
+        ([16, 0], [16, 16]),
+    ] {
+        descriptor.tile_memory.width = width;
+        descriptor.tile_memory.height = height;
+        assert_eq!(
+            render_pass(&capabilities(), &descriptor).unwrap().tile.size,
+            size
+        );
+    }
+    for width in [8, 24, 64] {
+        descriptor.tile_memory.width = width;
+        assert_eq!(
+            render_pass(&capabilities(), &descriptor).unwrap_err(),
+            Error::Invalid("tile widths are 16 or 32 pixels")
+        );
+    }
+    descriptor.tile_memory = TileMemory {
+        threadgroup_memory_length: 40,
+        ..TileMemory::default()
+    };
+    assert_eq!(
+        render_pass(&capabilities(), &descriptor)
+            .unwrap()
+            .tile
+            .threadgroup_memory_length,
+        48
     );
 }

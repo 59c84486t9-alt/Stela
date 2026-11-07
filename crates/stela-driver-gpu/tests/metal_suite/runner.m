@@ -1316,7 +1316,7 @@ static NSUInteger inline_length(NSDictionary *b, id<MTLBuffer> buffer)
 
 /* The stages a binding names, as bits of a mask: a compute encoder has
  * one, a render encoder four, and "both" is the vertex and fragment. */
-typedef NS_ENUM(NSUInteger, Stage) { StageCompute, StageVertex, StageFragment, StageObject, StageMesh, StageCount };
+typedef NS_ENUM(NSUInteger, Stage) { StageCompute, StageVertex, StageFragment, StageObject, StageMesh, StageTile, StageCount };
 
 enum { buffer_slots = 31, texture_slots = 128, sampler_slots = 16 };
 
@@ -1338,7 +1338,7 @@ static NSUInteger stages_of(NSDictionary *binding, BOOL compute)
 		return 1u << StageCompute;
 	NSDictionary *stages = @{@"vertex" : @(1u << StageVertex), @"fragment" : @(1u << StageFragment),
 				 @"both" : @(1u << StageVertex | 1u << StageFragment), @"object" : @(1u << StageObject),
-				 @"mesh" : @(1u << StageMesh)};
+				 @"mesh" : @(1u << StageMesh), @"tile" : @(1u << StageTile)};
 	return lookup(stages, @"binding stage", binding[@"stage"] ?: @"fragment");
 }
 
@@ -1370,6 +1370,7 @@ static void set_buffer(id e, Stage s, id<MTLBuffer> b, NSUInteger offset, NSUInt
 	case StageFragment: [re setFragmentBuffer:b offset:offset atIndex:i]; break;
 	case StageObject: [re setObjectBuffer:b offset:offset atIndex:i]; break;
 	case StageMesh: [re setMeshBuffer:b offset:offset atIndex:i]; break;
+	case StageTile: [re setTileBuffer:b offset:offset atIndex:i]; break;
 	default: break;
 	}
 }
@@ -1396,6 +1397,7 @@ static void set_offset(id e, Stage s, NSUInteger offset, NSUInteger stride, NSUI
 	case StageFragment: [re setFragmentBufferOffset:offset atIndex:i]; break;
 	case StageObject: [re setObjectBufferOffset:offset atIndex:i]; break;
 	case StageMesh: [re setMeshBufferOffset:offset atIndex:i]; break;
+	case StageTile: [re setTileBufferOffset:offset atIndex:i]; break;
 	default: break;
 	}
 }
@@ -1427,6 +1429,7 @@ static void set_buffers(id e, Stage s, Slots *t, NSRange r)
 	case StageFragment: [re setFragmentBuffers:b offsets:o withRange:r]; break;
 	case StageObject: [re setObjectBuffers:b offsets:o withRange:r]; break;
 	case StageMesh: [re setMeshBuffers:b offsets:o withRange:r]; break;
+	case StageTile: [re setTileBuffers:b offsets:o withRange:r]; break;
 	default: break;
 	}
 }
@@ -1453,6 +1456,7 @@ static void set_bytes(id e, Stage s, const void *bytes, NSUInteger length, NSUIn
 	case StageFragment: [re setFragmentBytes:bytes length:length atIndex:i]; break;
 	case StageObject: [re setObjectBytes:bytes length:length atIndex:i]; break;
 	case StageMesh: [re setMeshBytes:bytes length:length atIndex:i]; break;
+	case StageTile: [re setTileBytes:bytes length:length atIndex:i]; break;
 	default: break;
 	}
 }
@@ -1470,6 +1474,7 @@ static void set_textures(id e, Stage s, Slots *t, NSRange r)
 		case StageFragment: [re setFragmentTexture:x[0] atIndex:i]; break;
 		case StageObject: [re setObjectTexture:x[0] atIndex:i]; break;
 		case StageMesh: [re setMeshTexture:x[0] atIndex:i]; break;
+		case StageTile: [re setTileTexture:x[0] atIndex:i]; break;
 		default: break;
 		}
 		return;
@@ -1480,6 +1485,7 @@ static void set_textures(id e, Stage s, Slots *t, NSRange r)
 	case StageFragment: [re setFragmentTextures:x withRange:r]; break;
 	case StageObject: [re setObjectTextures:x withRange:r]; break;
 	case StageMesh: [re setMeshTextures:x withRange:r]; break;
+	case StageTile: [re setTileTextures:x withRange:r]; break;
 	default: break;
 	}
 }
@@ -1526,6 +1532,12 @@ static void set_samplers(id e, Stage s, Slots *t, NSRange r)
 			else
 				[re setMeshSamplerState:x[0] atIndex:i];
 			break;
+		case StageTile:
+			if (clamped)
+				[re setTileSamplerState:x[0] lodMinClamp:lo[0] lodMaxClamp:hi[0] atIndex:i];
+			else
+				[re setTileSamplerState:x[0] atIndex:i];
+			break;
 		default: break;
 		}
 		return;
@@ -1560,6 +1572,12 @@ static void set_samplers(id e, Stage s, Slots *t, NSRange r)
 			[re setMeshSamplerStates:x lodMinClamps:lo lodMaxClamps:hi withRange:r];
 		else
 			[re setMeshSamplerStates:x withRange:r];
+		break;
+	case StageTile:
+		if (clamped)
+			[re setTileSamplerStates:x lodMinClamps:lo lodMaxClamps:hi withRange:r];
+		else
+			[re setTileSamplerStates:x withRange:r];
 		break;
 	default: break;
 	}
@@ -2754,6 +2772,11 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 		sa.endOfFragmentSampleIndex = 3;
 		resolve_counters_after(c, cb, samples, 4, r[@"timestamps"]);
 	}
+	if (r[@"tile_size"]) {
+		pass.tileWidth = [r[@"tile_size"][0] unsignedIntegerValue];
+		pass.tileHeight = [r[@"tile_size"][1] unsignedIntegerValue];
+	}
+	pass.threadgroupMemoryLength = number(r, @"tile_memory", 0);
 	if (r[@"target_size"]) {
 		pass.renderTargetWidth = [r[@"target_size"][0] unsignedIntegerValue];
 		pass.renderTargetHeight = [r[@"target_size"][1] unsignedIntegerValue];
@@ -2984,6 +3007,24 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 	if (!pipeline)
 		@throw failure(@"render pipeline: %@", error.localizedDescription);
 	id<MTLDepthStencilState> depth_stencil = [c.device newDepthStencilStateWithDescriptor:ds];
+	/* Tile pipelines of the pass's color attachments, which dispatch after
+	 * the draws in order. */
+	NSMutableArray<id<MTLRenderPipelineState>> *tile_pipelines = [NSMutableArray new];
+	for (NSDictionary *tile in r[@"tiles"]) {
+		MTLTileRenderPipelineDescriptor *td = [MTLTileRenderPipelineDescriptor new];
+		td.tileFunction = function_named(library, tile[@"function"], spec[@"constants"]);
+		td.rasterSampleCount = number(r, @"samples", 1);
+		td.threadgroupSizeMatchesTileSize = [tile[@"matches_tile_size"] boolValue];
+		for (NSUInteger i = 0; i < colors.count; i++)
+			td.colorAttachments[i].pixelFormat = c.textures[colors[i][@"texture"]].pixelFormat;
+		id<MTLRenderPipelineState> tp = [c.device newRenderPipelineStateWithTileDescriptor:td
+											   options:0
+											reflection:nil
+											     error:&error];
+		if (!tp)
+			@throw failure(@"tile pipeline: %@", error.localizedDescription);
+		[tile_pipelines addObject:tp];
+	}
 	/* Everything an encoder of this pass records, from `spec` and its
 	 * bindings: once, or once per sub-encoder of a parallel encoder. */
 	void (^encode)(id<MTLRenderCommandEncoder>, NSDictionary *) = ^(id<MTLRenderCommandEncoder> e, NSDictionary *spec) {
@@ -3166,6 +3207,16 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 			[e drawPrimitives:primitive vertexStart:start vertexCount:count instanceCount:number(r, @"instance_count", 1)];
 		else
 			[e drawPrimitives:primitive vertexStart:start vertexCount:count];
+	}
+	NSArray *tiles = r[@"tiles"];
+	for (NSUInteger k = 0; k < tiles.count; k++) {
+		[e setRenderPipelineState:tile_pipelines[k]];
+		for (NSDictionary *m in tiles[k][@"threadgroup_memory"])
+			[e setThreadgroupMemoryLength:number(m, @"length", 16)
+					       offset:number(m, @"offset", 0)
+					      atIndex:number(m, @"index", 0)];
+		NSArray *threads = tiles[k][@"threads"];
+		[e dispatchThreadsPerTile:MTLSizeMake([threads[0] unsignedIntegerValue], [threads[1] unsignedIntegerValue], 1)];
 	}
 	update_fences(c, e, spec);
 	[e endEncoding];

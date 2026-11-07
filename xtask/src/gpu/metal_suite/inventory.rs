@@ -651,7 +651,10 @@ const API_WORDS_LEFT_OUT: [(&str, &str); 17] = [
         "color attachment mapping belongs to the Metal4 family, left out",
     ),
     ("tensor", "tensors belong to the Metal4 family, left out"),
-    ("tile", "tile shading is left out"),
+    (
+        "tile",
+        "tile pipelines' archives, function tables and reflection are left out",
+    ),
     ("imageblock", "imageblocks are left out"),
     ("sparse", "sparse resources are left out"),
     (
@@ -673,7 +676,7 @@ const API_WORDS_LEFT_OUT: [(&str, &str); 17] = [
 
 /// Single entries left out, as `Class entry`.
 #[cfg(test)]
-const API_ENTRIES_LEFT_OUT: [(&str, &str); 27] = [
+const API_ENTRIES_LEFT_OUT: [(&str, &str); 25] = [
     (
         "MTLBlitCommandEncoder getTextureAccessCounters:region:mipLevel:slice:resetCounters:countersBuffer:countersBufferOffset:",
         "texture access counters count sparse texture use",
@@ -689,14 +692,6 @@ const API_ENTRIES_LEFT_OUT: [(&str, &str); 27] = [
     (
         "MTLTexture .tailSizeInBytes",
         "a mipmap tail is a sparse texture's",
-    ),
-    (
-        "MTLRenderCommandEncoder setThreadgroupMemoryLength:offset:atIndex:",
-        "tile shading is left out",
-    ),
-    (
-        "MTLRenderPassDescriptor .threadgroupMemoryLength",
-        "tile shading is left out",
     ),
     (
         "MTLDevice newArchiveWithURL:error:",

@@ -980,6 +980,7 @@ impl AirCompiler {
             extended_range: specialization.extended_range,
             vertex_formats: vertex_formats(&specialization.vertex_words),
             imageblock_size: specialization.imageblock_size.unwrap_or_default(),
+            tile: specialization.tile.into(),
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.module.bitcode;

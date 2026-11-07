@@ -1,5 +1,5 @@
 //! Commands of `MTLRenderCommandEncoder`.
-use super::{Payload, binding, count, depth_stencil_state, grid, index_type, primitive};
+use super::{Payload, binding, count, depth_stencil_state, grid, index_type, primitive, size};
 use crate::metal::{
     abi::{
         BarrierScope, CullMode, DepthClipMode, LoadAction, MultisampleDepthResolveFilter,
@@ -11,10 +11,10 @@ use crate::metal::{
         render::{PassBoundary, ScissorRect, Viewport},
     },
     device::{
-        BufferId, CounterBufferId, RenderPipelineId, TextureId,
+        BufferId, ComputePipelineId, CounterBufferId, RenderPipelineId, TextureId,
         queue::{AttachmentRequest, RenderPassRequest},
     },
-    pass::AttachmentSlot,
+    pass::{AttachmentSlot, TileMemory},
     pipeline::MAX_COLOR_ATTACHMENTS,
     service::{
         Service, boolean, known,
@@ -28,8 +28,8 @@ use crate::metal::{
                 FactorBuffer, FactorScale, Mode, PassAttachmentRecord, PassBoundaryCode,
                 RenderBarrier, RenderCode, ScissorRecord, SetPipeline, SetThreadgroupMemory,
                 StageBuffer, StageBufferOffset, StageBytes, StageSampler, StageTexture,
-                StencilReference, VertexBufferStride, VertexOffsetStride, ViewMappingRecord,
-                ViewportRecord, VisibilityMode,
+                StencilReference, TileDispatch, TileThreadgroupMemory, VertexBufferStride,
+                VertexOffsetStride, ViewMappingRecord, ViewportRecord, VisibilityMode,
             },
         },
     },
@@ -38,6 +38,9 @@ use crate::metal::{
 };
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
+
+/// `MTLRenderStageTile`, whose bindings tile dispatches read.
+const TILE_STAGE: u64 = 4;
 
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn render(
@@ -66,12 +69,16 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     index,
                 } = payload.record()?;
                 let buffer = self.optional_buffer(connection, buffer)?;
-                commands.set_render_buffer(
-                    render_stage(stage)?,
-                    buffer,
-                    offset,
-                    binding(index)?,
-                )?;
+                if stage == TILE_STAGE {
+                    commands.set_tile_buffer(buffer, offset, binding(index)?)?;
+                } else {
+                    commands.set_render_buffer(
+                        render_stage(stage)?,
+                        buffer,
+                        offset,
+                        binding(index)?,
+                    )?;
+                }
             }
             RenderCode::SetBufferOffset => {
                 let StageBufferOffset {
@@ -79,16 +86,29 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     offset,
                     index,
                 } = payload.record()?;
-                commands.set_render_buffer_offset(render_stage(stage)?, offset, binding(index)?)?;
+                if stage == TILE_STAGE {
+                    commands.set_tile_buffer_offset(offset, binding(index)?)?;
+                } else {
+                    commands.set_render_buffer_offset(
+                        render_stage(stage)?,
+                        offset,
+                        binding(index)?,
+                    )?;
+                }
             }
             RenderCode::SetBytes => {
                 let (StageBytes { stage, index }, bytes) = payload.split()?;
-                commands.set_render_bytes(
-                    &mut self.device.resolver(),
-                    render_stage(stage)?,
-                    bytes.bytes(),
-                    binding(index)?,
-                )?;
+                let resolver = &mut self.device.resolver();
+                if stage == TILE_STAGE {
+                    commands.set_tile_bytes(resolver, bytes.bytes(), binding(index)?)?;
+                } else {
+                    commands.set_render_bytes(
+                        resolver,
+                        render_stage(stage)?,
+                        bytes.bytes(),
+                        binding(index)?,
+                    )?;
+                }
             }
             RenderCode::SetTexture => {
                 let StageTexture {
@@ -97,19 +117,28 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     index,
                 } = payload.record()?;
                 let texture = self.texture_id(connection, texture)?;
-                commands.set_render_texture(render_stage(stage)?, texture, binding(index)?)?;
+                if stage == TILE_STAGE {
+                    commands.set_tile_texture(texture, binding(index)?)?;
+                } else {
+                    commands.set_render_texture(render_stage(stage)?, texture, binding(index)?)?;
+                }
             }
             RenderCode::SetSampler => {
                 let request: StageSampler = payload.record()?;
                 let sampler = self.sampler_id(connection, request.sampler)?;
                 let clamp = boolean(request.clamped)?.then_some((request.lod_min, request.lod_max));
-                commands.set_render_sampler(
-                    &mut self.device.resolver(),
-                    render_stage(request.stage)?,
-                    sampler,
-                    clamp,
-                    binding(request.index)?,
-                )?;
+                let resolver = &mut self.device.resolver();
+                if request.stage == TILE_STAGE {
+                    commands.set_tile_sampler(resolver, sampler, clamp, binding(request.index)?)?;
+                } else {
+                    commands.set_render_sampler(
+                        resolver,
+                        render_stage(request.stage)?,
+                        sampler,
+                        clamp,
+                        binding(request.index)?,
+                    )?;
+                }
             }
             RenderCode::SetVertexBufferStride => {
                 let request: VertexBufferStride = payload.record()?;
@@ -177,6 +206,24 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             RenderCode::SetDepthStencilState => {
                 let state = depth_stencil_state(&payload.record()?)?;
                 commands.set_depth_stencil_state(Some(&state))?;
+            }
+            RenderCode::SetTilePipeline => {
+                let SetPipeline { pipeline } = payload.record()?;
+                let pipeline = self.object::<ComputePipelineId>(connection, pipeline)?;
+                let (state, target) = self.device.tile_pipeline_state(pipeline)?;
+                commands.set_tile_pipeline_state(state, target)?;
+            }
+            RenderCode::SetTileThreadgroupMemory => {
+                let TileThreadgroupMemory {
+                    length,
+                    offset,
+                    index,
+                } = payload.record()?;
+                commands.set_tile_threadgroup_memory(length, offset, binding(index)?)?;
+            }
+            RenderCode::DispatchThreadsPerTile => {
+                let TileDispatch { threads } = payload.record()?;
+                commands.dispatch_threads_per_tile(&mut self.device.resolver(), size(threads))?;
             }
             RenderCode::SetObjectThreadgroupMemory => {
                 let SetThreadgroupMemory { length, index } = payload.record()?;
@@ -428,7 +475,12 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             render_target_width: record.render_target_width,
             render_target_height: record.render_target_height,
             default_raster_sample_count: record.default_raster_sample_count,
-            tile_memory: boolean(record.tile_memory)?,
+            tile_memory: TileMemory {
+                width: record.tile_width,
+                height: record.tile_height,
+                threadgroup_memory_length: record.threadgroup_memory_length,
+                imageblock_sample_length: record.imageblock_sample_length,
+            },
             sample_positions: wire::read_array(positions)?,
             rasterization_rate_map: boolean(record.rasterization_rate_map)?,
             counter_samples: samples

@@ -699,6 +699,8 @@ struct stela_air_kernel {
    /* The bytes of each element of a kernel's explicit imageblock, or zero
     * for a kernel without one. */
    unsigned imageblock_size;
+   /* Its imageblock is implicit: a tile function's color attachments. */
+   bool implicit_imageblock;
    struct stela_air_argument arguments[AIR_MAX_ARGUMENTS];
    struct stela_air_field fields[AIR_MAX_FIELDS];
 };

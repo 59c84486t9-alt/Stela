@@ -412,6 +412,8 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (id)computeFunction;
 - (id)objectFunction;
 - (id)meshFunction;
+- (id)tileFunction;
+- (BOOL)threadgroupSizeMatchesTileSize;
 - (id)vertexDescriptor;
 - (id)stageInputDescriptor;
 - (id)colorAttachments;

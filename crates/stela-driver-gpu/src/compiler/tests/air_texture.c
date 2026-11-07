@@ -823,6 +823,123 @@ imageblocks_live_in_threadgroup_memory(void)
    assert(!kernel_with(imageblock_body, imageblock_metadata, &o, &error));
 }
 
+/* A tile function's implicit imageblock, its threadgroup buffer and its
+ * threads' positions in their tile. */
+static const char *tile_metadata =
+   "!air.kernel = !{!2}\n"
+   "!air.version = !{!20}\n!air.language_version = !{!21}\n"
+   "!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7}\n"
+   "!5 = !{i32 0, !\"air.imageblock\", !\"implicit\", !\"air.arg_type_align_size\", i32 8,"
+   " !\"air.arg_type_name\", !\"imageblock<Color, layout_implicit>\", !\"air.arg_name\", !\"block\"}\n"
+   "!6 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 3, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"shared\"}\n"
+   "!7 = !{i32 2, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"ushort2\","
+   " !\"air.arg_name\", !\"tid\"}\n"
+   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
+
+/* Each thread reads its pixel's color, writes it back with the tile's
+ * width in green, and counts into the tile's threadgroup memory. */
+static const char *tile_body =
+   "%block_t = type { ptr addrspace(4) }\n"
+   "declare <4 x half> @air.load.implicit_imageblock.v4f16(i32, <2 x i16>, i32, i16)\n"
+   "declare void @air.store.implicit_imageblock.v4f16(<4 x half>, i32, <2 x i16>, i32, i16)\n"
+   "declare void @air.store.implicit_imageblock.mask.v4f16(<4 x half>, i32, <2 x i16>, i16)\n"
+   "declare i16 @air.get_imageblock_width()\n"
+   "declare i16 @air.get_imageblock_num_colors(<2 x i16>)\n"
+   "define void @kernel(%block_t %block, ptr addrspace(3) %shared, <2 x i16> %tid) {\n"
+   "%v = call <4 x half> @air.load.implicit_imageblock.v4f16(i32 0, <2 x i16> %tid, i32 0, i16 0)\n"
+   "%w = call i16 @air.get_imageblock_width()\n"
+   "%colors = call i16 @air.get_imageblock_num_colors(<2 x i16> %tid)\n"
+   "%sum = add i16 %w, %colors\n"
+   "%h = uitofp i16 %sum to half\n"
+   "%g = insertelement <4 x half> %v, half %h, i64 1\n"
+   "call void @air.store.implicit_imageblock.v4f16(<4 x half> %g, i32 0, <2 x i16> %tid, i32 0, i16 0)\n"
+   "call void @air.store.implicit_imageblock.mask.v4f16(<4 x half> %v, i32 0, <2 x i16> %tid, i16 1)\n"
+   "%old = load i32, ptr addrspace(3) %shared, align 4\n"
+   "%new = add i32 %old, 1\n"
+   "store i32 %new, ptr addrspace(3) %shared, align 4\n"
+   "ret void\n}\n";
+
+static unsigned
+intrinsics(nir_shader *shader, nir_intrinsic_op op)
+{
+   unsigned n = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block)
+            n += instr->type == nir_instr_type_intrinsic &&
+                 nir_instr_as_intrinsic(instr)->intrinsic == op;
+      }
+   }
+   return n;
+}
+
+/* A tile function's imageblock is its pass's attachments' texels at its
+ * tile's pixels, and its threadgroup memory is copied in from the tile's
+ * persistent memory before it runs and out after. */
+static void
+tile_functions_access_their_attachments(void)
+{
+   struct stela_air_error error = {0};
+   struct stela_air_options o = options(&primary, true);
+   struct stela_air_tile tile = {.formats = {PIPE_FORMAT_R16G16B16A16_FLOAT}, .samples = 1};
+   o.dynamic_shape = true;
+   o.load_device_value = stela_metal_load_device_value;
+   o.bind_attachment = stela_metal_bind_attachment;
+   o.max_threadgroup_bytes = 32768;
+   o.dynamic_threadgroup_bytes = 1024;
+   o.threadgroup_offset = stela_metal_threadgroup_offset;
+   o.tile = &tile;
+   nir_shader *shader = kernel_with(tile_body, tile_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "tile: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "tile function");
+   struct census census = count(shader);
+   assert(census.load && census.store);
+   assert(nir_intrinsic_image_dim(census.store) == GLSL_SAMPLER_DIM_2D);
+   /* The persistent memory's copies in and out. */
+   assert(intrinsics(shader, nir_intrinsic_load_global) >= 1);
+   assert(intrinsics(shader, nir_intrinsic_store_global) >= 1);
+   ralloc_free(shader);
+   /* A multisampled pass's pixels have a color per sample unless all agree. */
+   tile.samples = 4;
+   shader = kernel_with(tile_body, tile_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "multisampled tile: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   assert(nir_intrinsic_image_dim(count(shader).store) == GLSL_SAMPLER_DIM_MS);
+   ralloc_free(shader);
+   tile.samples = 3;
+   assert(!kernel_with(tile_body, tile_metadata, &o, &error));
+   tile.samples = 1;
+   /* A color without an attachment, a tile function whose dispatches do
+    * not shape it, and an implicit imageblock outside one are refused. */
+   tile.formats[0] = PIPE_FORMAT_NONE;
+   assert(!kernel_with(tile_body, tile_metadata, &o, &error));
+   tile.formats[0] = PIPE_FORMAT_R16G16B16A16_FLOAT;
+   o.dynamic_shape = false;
+   o.dynamic_threadgroup_bytes = 0;
+   assert(!kernel_with(tile_body, tile_metadata, &o, &error));
+   o.tile = NULL;
+   assert(!kernel_with(tile_body, tile_metadata, &o, &error));
+   /* An integer color of a float attachment is refused. */
+   o.tile = &tile;
+   o.dynamic_shape = true;
+   o.dynamic_threadgroup_bytes = 1024;
+   static const char *integer =
+      "%block_t = type { ptr addrspace(4) }\n"
+      "declare <4 x i16> @air.load.implicit_imageblock.v4i16(i32, <2 x i16>, i32, i16)\n"
+      "define void @kernel(%block_t %block, ptr addrspace(3) %shared, <2 x i16> %tid) {\n"
+      "%v = call <4 x i16> @air.load.implicit_imageblock.v4i16(i32 0, <2 x i16> %tid, i32 0, i16 0)\n"
+      "%x = extractelement <4 x i16> %v, i64 0\n"
+      "%w = zext i16 %x to i32\n"
+      "store i32 %w, ptr addrspace(3) %shared, align 4\n"
+      "ret void\n}\n";
+   assert(!kernel_with(integer, tile_metadata, &o, &error));
+}
+
 /* A null texture has no descriptor to bind, and reads zero. */
 static void
 null_textures_bind_nothing(void)
@@ -1241,6 +1358,7 @@ main(void)
    textures_choose_null_at_run_time();
    block_reads_fetch_each_texel();
    imageblocks_live_in_threadgroup_memory();
+   tile_functions_access_their_attachments();
    samples_join_through_phis();
    short_indices_widen_their_positions();
    array_arguments_bind_their_elements();
@@ -1253,6 +1371,6 @@ main(void)
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
         "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics, "
-        "constexpr samplers, cube reads, null textures, imageblocks, joined samples and refusals passed");
+        "constexpr samplers, cube reads, null textures, imageblocks, tile functions, joined samples and refusals passed");
    return 0;
 }

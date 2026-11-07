@@ -500,13 +500,25 @@ static CFTimeInterval host_time(void)
 - (id)renderCommandEncoderWithDescriptor:(id)descriptor
 {
 	[self beginRender:descriptor];
-	return [[StelaGPURenderEncoder alloc] initWithCommandBuffer:self stream:&_stream];
+	StelaGPURenderEncoder *encoder = [[StelaGPURenderEncoder alloc] initWithCommandBuffer:self stream:&_stream];
+	stela_tile_size(descriptor, &encoder->_tileWidth, &encoder->_tileHeight);
+	return encoder;
 }
 
 - (id)parallelRenderCommandEncoderWithDescriptor:(id)descriptor
 {
 	[self beginRender:descriptor];
-	return [[StelaGPUParallelEncoder alloc] initWithCommandBuffer:self stream:&_stream];
+	StelaGPUParallelEncoder *encoder = [[StelaGPUParallelEncoder alloc] initWithCommandBuffer:self
+											   stream:&_stream];
+	stela_tile_size(descriptor, &encoder->_tileWidth, &encoder->_tileHeight);
+	return encoder;
+}
+
+void stela_tile_size(id descriptor, NSUInteger *width, NSUInteger *height)
+{
+	NSUInteger w = [descriptor tileWidth] ?: 32, h = [descriptor tileHeight] ?: 32;
+	*width = w;
+	*height = h < 16 ? 16 : h > w ? w : h;
 }
 
 static void pass_attachment(id attachment, StelaPassAttachmentRecord *record)
@@ -560,8 +572,10 @@ static void pass_attachment(id attachment, StelaPassAttachmentRecord *record)
 	begin.render_target_width = [descriptor renderTargetWidth];
 	begin.render_target_height = [descriptor renderTargetHeight];
 	begin.default_raster_sample_count = [descriptor defaultRasterSampleCount];
-	begin.tile_memory = [descriptor imageblockSampleLength] != 0 || [descriptor threadgroupMemoryLength] != 0
-			    || [descriptor tileWidth] != 0 || [descriptor tileHeight] != 0;
+	begin.tile_width = [descriptor tileWidth];
+	begin.tile_height = [descriptor tileHeight];
+	begin.threadgroup_memory_length = [descriptor threadgroupMemoryLength];
+	begin.imageblock_sample_length = [descriptor imageblockSampleLength];
 	begin.rasterization_rate_map = [descriptor rasterizationRateMap] != nil;
 
 	MTLSamplePosition positions[16];

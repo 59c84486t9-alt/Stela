@@ -13,12 +13,13 @@ use super::{
 };
 use crate::metal::{
     abi::{ConversionRounding, DataType, FunctionType, PrimitiveTopologyClass},
+    capabilities::Size,
     command_buffer::{BoundPipeline, ComputePipelineState, IndirectCompute, RenderPipelineState},
     error::{Error, Result, ensure, require},
     library::{self, Function, Header, Library},
     pipeline::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
-        RenderTargets, StageThreads, TessellatedVertex, TessellationDescriptor,
+        RenderTargets, StageThreads, TessellatedVertex, TessellationDescriptor, TileTarget,
     },
     reflection::Binding,
     shader::{
@@ -282,6 +283,8 @@ struct ComputeObject {
     linked: Linked,
     sources: Sources,
     variants: Vec<(Specialization, Pipeline)>,
+    /// A tile pipeline's pass.
+    tile: Option<TileTarget>,
 }
 
 #[derive(Debug, Default)]
@@ -1441,6 +1444,41 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self,
         request: &ComputePipelineRequest,
     ) -> Result<ComputePipelineId> {
+        self.compute_object(request, None)
+    }
+
+    /// `newRenderPipelineStateWithTileDescriptor:`: a kernel run on the
+    /// tiles of `target`'s passes, whose variants compile per dispatch's
+    /// threads per tile.
+    pub fn new_tile_pipeline(
+        &mut self,
+        request: &ComputePipelineRequest,
+        target: TileTarget,
+    ) -> Result<ComputePipelineId> {
+        ensure(
+            request.stage_input.is_none() && !request.support_indirect_command_buffers,
+            "tile pipelines take no stage input or indirect commands",
+        )?;
+        self.compute_object(request, Some(target))
+    }
+
+    /// A tile pipeline's kernel and pass.
+    pub fn tile_pipeline_state(
+        &self,
+        id: ComputePipelineId,
+    ) -> Result<(&ComputePipelineState, TileTarget)> {
+        let compute = self.pipelines.compute.get(id.0)?;
+        let tile = compute
+            .tile
+            .ok_or(Error::Invalid("the pipeline state is not a tile pipeline"))?;
+        Ok((&compute.state, tile))
+    }
+
+    fn compute_object(
+        &mut self,
+        request: &ComputePipelineRequest,
+        tile: Option<TileTarget>,
+    ) -> Result<ComputePipelineId> {
         let function = request.compute_function;
         let kept =
             Kept::new([function], [&request.linked_functions]).with_archives(&request.archives);
@@ -1464,9 +1502,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let bindable =
             generated.is_some_and(|limits| limits.pipeline_stages.contains(ShaderStages::COMPUTE));
         let subgroups = (plan.thread_execution_width as u32, plan.full_subgroups);
+        // A tile pipeline compiles for its passes' default tiles, or the
+        // largest square tile its threadgroups hold.
+        let variant = match &tile {
+            None => pipeline::indirect_compute_variant(&plan),
+            Some(target) => {
+                let square = |side: u64| Size {
+                    width: side,
+                    height: side,
+                    depth: 1,
+                };
+                pipeline::tile_variant(&plan, target, square(32), [32; 2])
+                    .or_else(|_| pipeline::tile_variant(&plan, target, square(16), [16; 2]))?
+            }
+        };
         let variant = Specialization {
             linking: linked.linking.clone(),
-            ..pipeline::indirect_compute_variant(&plan)
+            ..variant
         };
         if sources.compiles_at_creation() {
             let pipeline =
@@ -1500,6 +1552,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             linked,
             sources: sources.of_variants(),
             variants: Vec::new(),
+            tile,
         });
         self.pipelines.compute.get_mut(index)?.state.id = u64::from(index);
         Ok(ComputePipelineId(index))
