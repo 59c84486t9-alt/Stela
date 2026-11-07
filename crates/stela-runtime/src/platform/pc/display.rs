@@ -20,12 +20,12 @@
 //! The guest's display caps the choice ([`guest_takes`]): the modeled DCP
 //! advertises the screen's mode to macOS as an EDID detailed timing
 //! (`stela_soc::dcp::modes`), which holds at most 4095 pixels on each
-//! axis and a 655.35 MHz pixel clock at 60 Hz. 3840x2160 fits; a 5K or 6K
+//! axis and a 655.35 MHz pixel clock. 3840x2160 at 60 Hz fits; a 5K or 6K
 //! panel runs the largest smaller mode its firmware offers.
 use core::{cmp::Reverse, fmt};
 use stela_soc::{
     dcp::modes::Advertised,
-    scanout::{Mode as ScanoutMode, PixelFormat},
+    scanout::{DEFAULT_REFRESH_MILLIHERTZ, Mode as ScanoutMode, PixelFormat},
 };
 
 /// One of the firmware's graphics modes.
@@ -79,31 +79,61 @@ const EDID_BLOCK: usize = 128;
 /// preferred one too).
 const PREFERRED_TIMING: usize = 0x36;
 
-/// The active width and height of an EDID's preferred timing: the panel's
-/// native resolution. `None` for a block whose header or checksum is wrong,
-/// or whose first descriptor is not a detailed timing (pixel clock 0).
-pub fn native(edid: &[u8]) -> Option<(u32, u32)> {
+/// An EDID's preferred timing descriptor. `None` for a block whose header or
+/// checksum is wrong, or whose first descriptor is not a detailed timing
+/// (pixel clock 0).
+fn preferred_timing(edid: &[u8]) -> Option<&[u8]> {
     let block = edid.get(..EDID_BLOCK)?;
     if block[..8] != EDID_HEADER || block.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) != 0 {
         return None;
     }
     let d = &block[PREFERRED_TIMING..PREFERRED_TIMING + 18];
-    if d[0] == 0 && d[1] == 0 {
-        return None;
-    }
+    (d[0] != 0 || d[1] != 0).then_some(d)
+}
+
+/// The active width and height of an EDID's preferred timing: the panel's
+/// native resolution.
+pub fn native(edid: &[u8]) -> Option<(u32, u32)> {
+    let d = preferred_timing(edid)?;
     let width = u32::from(d[2]) | u32::from(d[4] >> 4) << 8;
     let height = u32::from(d[5]) | u32::from(d[7] >> 4) << 8;
     (width != 0 && height != 0).then_some((width, height))
 }
 
+/// The refresh of an EDID's preferred timing in millihertz, rounded: its
+/// pixel clock over its total pixels, active and blanking, a frame (a
+/// field, for an interlaced timing, whose descriptor counts field lines).
+pub fn refresh(edid: &[u8]) -> Option<u32> {
+    let d = preferred_timing(edid)?;
+    let clock = u64::from(u16::from_le_bytes([d[0], d[1]])) * 10_000;
+    let axis = |active: u8, blank: u8, high: u8| {
+        u64::from(u32::from(active) | u32::from(high >> 4) << 8)
+            + u64::from(u32::from(blank) | u32::from(high & 0xf) << 8)
+    };
+    let total = axis(d[2], d[3], d[4]) * axis(d[5], d[6], d[7]);
+    (total != 0)
+        .then(|| (clock * 1000 + total / 2) / total)
+        .and_then(|refresh| u32::try_from(refresh).ok())
+        .filter(|&refresh| refresh != 0)
+}
+
 /// Whether the guest's display can run a `width` by `height` screen: the
-/// DCP model can advertise it.
+/// DCP model can advertise it at 60 Hz.
 pub fn guest_takes(width: u32, height: u32) -> bool {
-    Advertised::new(ScanoutMode {
-        width,
-        height,
-        format: PixelFormat::Bgra8888,
-    })
+    guest_takes_at(width, height, DEFAULT_REFRESH_MILLIHERTZ)
+}
+
+/// Whether the DCP model can advertise a `width` by `height` screen at
+/// `refresh` millihertz.
+pub fn guest_takes_at(width: u32, height: u32, refresh: u32) -> bool {
+    Advertised::at(
+        ScanoutMode {
+            width,
+            height,
+            format: PixelFormat::Bgra8888,
+        },
+        refresh,
+    )
     .is_ok()
 }
 
@@ -158,12 +188,33 @@ mod tests {
     /// A base block whose preferred timing is `width` by `height`, built by
     /// the DCP model's own EDID encoder.
     fn edid(width: u32, height: u32) -> [u8; 128] {
-        stela_soc::dcp::modes::edid(ScanoutMode {
-            width,
-            height,
-            format: PixelFormat::Bgra8888,
-        })
+        stela_soc::dcp::modes::edid(
+            ScanoutMode {
+                width,
+                height,
+                format: PixelFormat::Bgra8888,
+            },
+            60_000,
+        )
         .unwrap()
+    }
+
+    #[test]
+    fn the_refresh_is_the_preferred_timings() {
+        assert_eq!(refresh(&edid(1920, 1080)), Some(60_000));
+        let fast = stela_soc::dcp::modes::edid(
+            ScanoutMode {
+                width: 2560,
+                height: 1440,
+                format: PixelFormat::Bgra8888,
+            },
+            144_000,
+        )
+        .unwrap();
+        assert_eq!(refresh(&fast), Some(144_000));
+        let mut bad = fast;
+        bad[127] ^= 1;
+        assert_eq!(refresh(&bad), None);
     }
 
     #[test]

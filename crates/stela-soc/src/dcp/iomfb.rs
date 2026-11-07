@@ -93,8 +93,14 @@ const SWAP_COMPLETE: [u8; 4] = *b"D594";
 /// registered client, with no reply. It fills in the other two values itself
 /// when they are zero, and Core Animation stops presenting without it.
 const SWAP_NOTIFY: [u8; 4] = *b"D588";
-/// The fixed 60 Hz mode's refresh, in ticks of the 24 MHz counter.
-const REFRESH_TICKS: u64 = 24_000_000 / 60;
+/// The ticks per second of the counter refreshes are timed by.
+const COUNTER_HZ: u64 = 24_000_000;
+
+/// The refresh period of `refresh` millihertz in counter ticks, rounded.
+fn refresh_ticks(refresh: u32) -> u64 {
+    let refresh = u64::from(refresh.max(1));
+    (COUNTER_HZ * 1000 + refresh / 2) / refresh
+}
 /// Original T6000 `D594_callback__` (container file 0x3daec14) reads this
 /// flag at VA 0xfffffe000adb2cec and passes nullptr for bit0=1. The AP
 /// skips absent statistics at 0xfffffe000ad9cb68 and still completes the
@@ -162,6 +168,8 @@ pub struct Methods {
     notified: bool,
     /// The counter value of the next refresh.
     next_refresh: u64,
+    /// The monitor's refresh period, in counter ticks.
+    refresh_ticks: u64,
     /// The refresh waiting to leave, if any. A later one replaces it, as a
     /// display drops the tick it could not deliver.
     refresh: Option<u64>,
@@ -244,7 +252,8 @@ impl Methods {
         scanout: Box<dyn Scanout>,
         display: Rc<RefCell<DisplayState>>,
     ) -> Self {
-        let advertised = Advertised::new(scanout.mode());
+        let refresh = scanout.refresh_millihertz();
+        let advertised = Advertised::at(scanout.mode(), refresh);
         Self {
             scanout,
             frame: Vec::new(),
@@ -253,6 +262,7 @@ impl Methods {
             unmodeled: BTreeSet::new(),
             notified: false,
             next_refresh: 0,
+            refresh_ticks: refresh_ticks(refresh),
             refresh: None,
             color_remap_mode: 0,
             log: VecDeque::new(),
@@ -340,7 +350,16 @@ impl Methods {
     /// Note the refresh due at counter `now`, for the AP's notification clients.
     pub fn refresh(&mut self, now: u64) {
         if self.notified && !self.shut_down && now >= self.next_refresh {
-            self.next_refresh = now + REFRESH_TICKS;
+            // Refreshes keep their phase: a late look takes the refresh it
+            // missed and the next falls on the same grid, so the rate holds
+            // however late the counter is read. A first look, or one more
+            // than a period late, starts the grid at `now`.
+            let late = now - self.next_refresh;
+            self.next_refresh = if self.next_refresh == 0 || late >= self.refresh_ticks {
+                now + self.refresh_ticks
+            } else {
+                self.next_refresh + self.refresh_ticks
+            };
             self.refresh = Some(now);
         }
     }
@@ -579,7 +598,7 @@ impl Service for Methods {
             // set_parameter_dcp(param, value[4], count) -> u32. Asahi zeroes
             // adaptive sync, and WindowServer sets others of unknown meaning as
             // it opens the display, retrying a failure forever. Zero leaves the
-            // fixed 60 Hz mode as it is; anything else is a recorded gap.
+            // one fixed mode as it is; anything else is a recorded gap.
             b"A450" => {
                 fields.u32()?;
                 let mut values = [0u64; 4];

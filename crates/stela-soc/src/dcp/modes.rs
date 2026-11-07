@@ -46,7 +46,7 @@
 //! extension), its being preferred and the color's sRGB colorimetry (the EDID
 //! declares sRGB its default color space) are Inferred from the EDID the
 //! model serves; docs/research/display-gpu.md section 8.6 is the row.
-use super::super::scanout::Mode;
+use super::super::scanout::{DEFAULT_REFRESH_MILLIHERTZ, Mode};
 use crate::Result;
 use alloc::string::String;
 use core::fmt::Write;
@@ -64,8 +64,6 @@ pub const COLOR_ID: u32 = 2;
 pub const TIMING_BYTES: usize = 0x50;
 /// `sizeof(IOAVVideoColorData)`: `A364`'s second argument.
 pub const COLOR_BYTES: usize = 0x20;
-/// The refresh rate the EDID's detailed timing is built for.
-const REFRESH: u32 = 60;
 
 /// `IOAVVideoPixelEncoding` RGB 4:4:4.
 const RGB_444: u32 = 0;
@@ -115,31 +113,72 @@ const H_BLANK: u32 = 320;
 const V_FRONT: u32 = 3;
 const V_SYNC: u32 = 10;
 const V_BLANK: u32 = 45;
+/// CVT reduced blanking v2's horizontal blanking (VESA CVT 2.0 section
+/// 5.2: front porch 8, sync 32, back porch 40), which a mode takes when its
+/// nominal blanking needs more pixel clock than a detailed timing holds.
+const RB_H_FRONT: u32 = 8;
+const RB_H_BLANK: u32 = 80;
+/// CVT's minimum vertical blanking time, in nanoseconds.
+const RB_V_BLANK_NANOS: u64 = 460_000;
+/// A detailed timing's pixel clock, in its 10 kHz units.
+const MAX_CLOCK: u64 = 0xffff;
 
-/// An 18-byte EDID detailed timing descriptor for `mode` at 60 Hz, digital
-/// separate sync, both polarities positive. A mode whose fields do not fit
-/// the descriptor refuses rather than wraps.
-pub fn detailed_timing(mode: Mode) -> Result<[u8; 18]> {
+/// A detailed timing's blanking: `(h_front, h_blank, v_blank)`, with the
+/// syncs and the vertical front porch fixed.
+type Blanking = (u32, u32, u32);
+
+/// The pixel clock, in 10 kHz units, of `width` by `height` with `blanking`
+/// at `refresh` millihertz, rounded to the nearest unit.
+fn clock(width: u32, height: u32, (_, h_blank, v_blank): Blanking, refresh: u32) -> u64 {
+    let total = u64::from(width + h_blank) * u64::from(height + v_blank);
+    (total * u64::from(refresh) + 5_000_000) / 10_000_000
+}
+
+/// The blanking of `width` by `height` at `refresh` millihertz: the nominal
+/// one, or reduced blanking (vertical blanking of at least CVT's 460 us)
+/// when the nominal clock does not fit a detailed timing.
+fn blanking(width: u32, height: u32, refresh: u32) -> Blanking {
+    let nominal = (H_FRONT, H_BLANK, V_BLANK);
+    if clock(width, height, nominal, refresh) <= MAX_CLOCK {
+        return nominal;
+    }
+    // A fraction k of each frame is blank: v_blank / (height + v_blank) >= k,
+    // with k = 460 us * refresh.
+    let k = RB_V_BLANK_NANOS * u64::from(refresh) / 1000;
+    let lines = (k * u64::from(height)).div_ceil(1_000_000_000u64.saturating_sub(k).max(1));
+    let v_blank = (lines as u32).max(V_FRONT + V_SYNC + 1);
+    (RB_H_FRONT, RB_H_BLANK, v_blank)
+}
+
+/// An 18-byte EDID detailed timing descriptor for `mode` at `refresh`
+/// millihertz, digital separate sync, both polarities positive. A mode
+/// whose fields do not fit the descriptor refuses rather than wraps.
+pub fn detailed_timing(mode: Mode, refresh: u32) -> Result<[u8; 18]> {
     let (w, h) = (mode.width, mode.height);
     if w == 0 || h == 0 || w > 0xfff || h > 0xfff {
         return Err(refuse!("DCP mode does not fit an EDID detailed timing"));
     }
-    let clock = u64::from(w + H_BLANK) * u64::from(h + V_BLANK) * u64::from(REFRESH) / 10_000;
-    let clock = u16::try_from(clock)
+    let (h_front, h_blank, v_blank) = blanking(w, h, refresh);
+    let clock = u16::try_from(clock(w, h, (h_front, h_blank, v_blank), refresh))
         .ok()
         .filter(|&clock| clock != 0)
         .ok_or(refuse!(
             "DCP mode's pixel clock does not fit an EDID detailed timing"
         ))?;
+    if v_blank > 0xfff {
+        return Err(refuse!(
+            "DCP mode's vertical blanking does not fit an EDID detailed timing"
+        ));
+    }
     let mut d = [0u8; 18];
     d[0..2].copy_from_slice(&clock.to_le_bytes());
     d[2] = w as u8;
-    d[3] = H_BLANK as u8;
-    d[4] = (((w >> 8) << 4) | (H_BLANK >> 8)) as u8;
+    d[3] = h_blank as u8;
+    d[4] = (((w >> 8) << 4) | (h_blank >> 8)) as u8;
     d[5] = h as u8;
-    d[6] = V_BLANK as u8;
-    d[7] = (((h >> 8) << 4) | (V_BLANK >> 8)) as u8;
-    d[8] = H_FRONT as u8;
+    d[6] = v_blank as u8;
+    d[7] = (((h >> 8) << 4) | (v_blank >> 8)) as u8;
+    d[8] = h_front as u8;
     d[9] = H_SYNC as u8;
     d[10] = ((V_FRONT << 4) | V_SYNC) as u8;
     d[11] = 0;
@@ -152,8 +191,33 @@ pub fn detailed_timing(mode: Mode) -> Result<[u8; 18]> {
     Ok(d)
 }
 
-/// A truthful EDID 1.4 base block whose one detailed timing is `mode`'s.
-pub fn edid(mode: Mode) -> Result<[u8; 128]> {
+/// The range limits descriptor's five rate bytes (E-EDID 1.4 section
+/// 3.10.3.3) for detailed timing `d`: vertical rates in Hz and horizontal
+/// in kHz, each range holding the timing's and at least 50..=75 Hz and
+/// 30..=80 kHz, and the maximum pixel clock in 10 MHz units.
+fn range_limits(d: &[u8; 18]) -> Result<[u8; 5]> {
+    let clock = u64::from(u16::from_le_bytes([d[0], d[1]])) * 10_000;
+    let h_total = u64::from(u32::from(d[2]) | u32::from(d[4] >> 4) << 8)
+        + u64::from(u32::from(d[3]) | u32::from(d[4] & 0xf) << 8);
+    let v_total = u64::from(u32::from(d[5]) | u32::from(d[7] >> 4) << 8)
+        + u64::from(u32::from(d[6]) | u32::from(d[7] & 0xf) << 8);
+    let line = clock / h_total;
+    let frame = line / v_total;
+    let byte = |value: u64| {
+        u8::try_from(value).map_err(|_| refuse!("DCP mode's rates exceed EDID range limits"))
+    };
+    Ok([
+        byte(frame.min(50))?,
+        byte(line.div_ceil(v_total).max(75))?,
+        byte((line / 1000).min(30))?,
+        byte(line.div_ceil(1000).max(80))?,
+        byte(clock.div_ceil(10_000_000).max(17))?,
+    ])
+}
+
+/// A truthful EDID 1.4 base block whose one detailed timing is `mode`'s at
+/// `refresh` millihertz.
+pub fn edid(mode: Mode, refresh: u32) -> Result<[u8; 128]> {
     let mut e = [0u8; 128];
     e[0..8].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
     // Manufacturer "STE" (Stela), product 1, serial 1, week 1, year 2026.
@@ -172,11 +236,12 @@ pub fn edid(mode: Mode) -> Result<[u8; 128]> {
     e[23] = 0x78; // gamma 2.2
     e[24] = 0x06; // RGB, sRGB default color space, preferred timing native
     e[25..35].copy_from_slice(&[0xee, 0x91, 0xa3, 0x54, 0x4c, 0x99, 0x26, 0x0f, 0x50, 0x54]);
-    e[54..72].copy_from_slice(&detailed_timing(mode)?);
+    let timing = detailed_timing(mode, refresh)?;
+    e[54..72].copy_from_slice(&timing);
     e[75] = 0xfc; // display name
     e[77..77 + 6].copy_from_slice(b"Stela\n");
     e[93] = 0xfd; // range limits
-    e[95..95 + 6].copy_from_slice(&[0x32, 0x4b, 0x1e, 0x50, 0x11, 0x00]);
+    e[95..95 + 5].copy_from_slice(&range_limits(&timing)?);
     e[101] = 0x0a;
     e[111] = 0x10; // dummy descriptor
     let sum = e[0..127].iter().fold(0u8, |a, b| a.wrapping_add(*b));
@@ -425,10 +490,16 @@ pub struct Advertised {
 }
 
 impl Advertised {
-    /// The one mode for the scanout's `mode`, or why it cannot be
+    /// The one mode for the scanout's `mode` at 60 Hz, or why it cannot be
     /// advertised.
     pub fn new(mode: Mode) -> Result<Self> {
-        let edid = edid(mode)?;
+        Self::at(mode, DEFAULT_REFRESH_MILLIHERTZ)
+    }
+
+    /// The one mode for the scanout's `mode` at `refresh` millihertz, or why
+    /// it cannot be advertised.
+    pub fn at(mode: Mode, refresh: u32) -> Result<Self> {
+        let edid = edid(mode, refresh)?;
         let dtd: [u8; 18] = edid[54..72].try_into().expect("18 bytes");
         Ok(Self {
             edid,
@@ -566,7 +637,7 @@ mod tests {
 
     #[test]
     fn the_edid_is_well_formed_for_the_mode() {
-        let e = edid(FULL_HD).unwrap();
+        let e = edid(FULL_HD, 60_000).unwrap();
         assert_eq!(&e[0..8], &[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
         assert_eq!(e.iter().fold(0u8, |a, b| a.wrapping_add(*b)), 0, "checksum");
         let dtd = &e[54..72];
@@ -576,7 +647,10 @@ mod tests {
             width: 5120,
             ..FULL_HD
         };
-        assert!(edid(huge).is_err());
+        assert!(edid(huge, 60_000).is_err());
+        // The range limits are the old fixed 50..=75 Hz, 30..=80 kHz, 170 MHz
+        // for a mode within them.
+        assert_eq!(&e[95..101], &[0x32, 0x4b, 0x1e, 0x50, 0x11, 0x00]);
     }
 
     #[test]
@@ -613,6 +687,47 @@ mod tests {
         assert_eq!(get(t, 0x4c), 0);
         // 124 MHz of active pixels at 60 Hz.
         assert_eq!(timing_score(t), 184);
+    }
+
+    /// The timing record's vertical rate in Hz, rounded.
+    fn hertz(a: &Advertised) -> u32 {
+        (get(&a.timing, 0x38) + 0x8000) >> 16
+    }
+
+    #[test]
+    fn a_fast_monitor_is_advertised_at_its_refresh() {
+        let qhd = Mode {
+            width: 2560,
+            height: 1440,
+            ..FULL_HD
+        };
+        // 2880 by 1485 at 144 Hz fits a detailed timing with the nominal
+        // blanking: 615.86 MHz.
+        let a = Advertised::at(qhd, 144_000).unwrap();
+        assert_eq!(hertz(&a), 144);
+        assert_eq!((get(&a.timing, 0x04), get(&a.timing, 0x24)), (2880, 1485));
+        assert_eq!(get(&a.timing, 0x44), 615_860_000);
+        // The range limits hold the timing's 144 Hz and 214 kHz, 620 MHz.
+        assert_eq!(&a.edid[95..100], &[50, 144, 30, 214, 62]);
+        // 2560x1600 at 144 Hz needs reduced blanking: 80 pixels, and 114
+        // lines for 460 us.
+        let wide = Mode {
+            height: 1600,
+            ..qhd
+        };
+        let a = Advertised::at(wide, 144_000).unwrap();
+        assert_eq!(hertz(&a), 144);
+        assert_eq!((get(&a.timing, 0x04), get(&a.timing, 0x24)), (2640, 1714));
+        assert_eq!([get(&a.timing, 0x14), get(&a.timing, 0x10)], [8, 40]);
+        // Without it the clock would not fit, and 4K at 120 Hz does not even
+        // with it.
+        let uhd = Mode {
+            width: 3840,
+            height: 2160,
+            ..FULL_HD
+        };
+        assert_eq!(hertz(&Advertised::at(uhd, 60_000).unwrap()), 60);
+        assert!(Advertised::at(uhd, 120_000).is_err());
     }
 
     #[test]

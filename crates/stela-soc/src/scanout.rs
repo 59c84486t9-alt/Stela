@@ -69,12 +69,20 @@ pub struct Mode {
     pub format: PixelFormat,
 }
 
+/// The refresh of a scanout that reports none: 60 Hz, in millihertz.
+pub const DEFAULT_REFRESH_MILLIHERTZ: u32 = 60_000;
+
 /// The host's presentation sink. The boot crate implements it over the GOP
 /// framebuffer; a swap is presented one row at a time.
 pub trait Scanout {
     /// The fixed mode the one connected monitor runs. The model's EDID and
     /// mode answers are this mode; swaps are composed onto it.
     fn mode(&self) -> Mode;
+    /// The monitor's refresh rate in millihertz, which the model advertises
+    /// with the mode and paces the guest's display clients by.
+    fn refresh_millihertz(&self) -> u32 {
+        DEFAULT_REFRESH_MILLIHERTZ
+    }
     /// Present one completed frame: `rows` are its pixels top to bottom, each
     /// `width` pixels of the scanout's format, already composed and clipped
     /// to the mode. Called once per completed swap, before the swap completes.

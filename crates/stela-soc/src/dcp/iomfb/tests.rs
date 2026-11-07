@@ -653,6 +653,8 @@ fn refused_tiled_surface_preserves_started_swap_and_prior_frames() {
 
 #[test]
 fn clients_are_told_of_each_refresh_and_a_late_one_replaces_the_last() {
+    // 60 Hz on the 24 MHz counter.
+    const REFRESH_TICKS: u64 = 400_000;
     let mut methods = methods();
     methods.refresh(1000);
     assert!(methods.take_callback().is_none());
@@ -672,6 +674,43 @@ fn clients_are_told_of_each_refresh_and_a_late_one_replaces_the_last() {
     assert_eq!(callback.input.len(), 0x18);
     assert_eq!(callback.input[..8], (1000 + REFRESH_TICKS).to_le_bytes());
     assert_eq!(callback.output, 0);
+}
+
+/// A screen of the default mode at a given refresh.
+struct FastScreen(u32);
+impl Scanout for FastScreen {
+    fn mode(&self) -> Mode {
+        FULL_HD
+    }
+    fn refresh_millihertz(&self) -> u32 {
+        self.0
+    }
+    fn present(&mut self, _: &[u8]) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn refreshes_keep_the_monitors_rate_and_phase_when_looked_at_late() {
+    let mut methods = Methods::new(Box::new(FastScreen(144_000)));
+    let mut clients = [0; 0x6c];
+    clients[24] = 1;
+    assert!(returned(methods.call(*b"A033", &clients, 0)).is_empty());
+    // 144 Hz: 166_667 ticks of the 24 MHz counter.
+    let period = 166_667;
+    methods.refresh(10);
+    assert_eq!(methods.refresh_deadline(), Some(10 + period));
+    // A look 5000 ticks late keeps the grid rather than starting it again.
+    methods.refresh(10 + period + 5000);
+    assert_eq!(methods.refresh_deadline(), Some(10 + 2 * period));
+    // One more than a period late starts a new grid where it was looked at.
+    let late = 10 + 4 * period;
+    methods.refresh(late);
+    assert_eq!(methods.refresh_deadline(), Some(late + period));
+    // The advertised timing is the monitor's rate.
+    let advertised = methods.advertised.as_ref().unwrap();
+    let rate = u32::from_le_bytes(advertised.timing[0x38..0x3c].try_into().unwrap());
+    assert_eq!((rate + 0x8000) >> 16, 144);
 }
 
 #[test]
