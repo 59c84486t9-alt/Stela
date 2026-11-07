@@ -876,7 +876,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .pixel_format
             .describe()
             .realization
-            .map_err(|_| Error::Unsupported("stencil feedback with the pixel format"))?
+            .map_err(|_| Error::Unsupported("depth and stencil copies of the pixel format"))?
             .format;
         let (format, encoding, aspect) = if stencil {
             (Format::R8Uint, 0, ImageAspects::STENCIL)
@@ -887,7 +887,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 Format::D32Sfloat | Format::D32SfloatS8Uint => {
                     (Format::R32Uint, 3, ImageAspects::DEPTH)
                 }
-                _ => return Err(Error::Unsupported("stencil feedback with the pixel format")),
+                _ => {
+                    return Err(Error::Unsupported(
+                        "depth and stencil copies of the pixel format",
+                    ));
+                }
             }
         };
         let level = view.range.base_mip_level;

@@ -379,6 +379,24 @@ static unsigned alu_count(nir_shader *shader, nir_op op)
    return count;
 }
 
+/* ALU instructions of op none of whose sources is a constant. */
+static unsigned varying_alu_count(nir_shader *shader, nir_op op)
+{
+   unsigned count = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_alu || nir_instr_as_alu(instr)->op != op)
+            continue;
+         nir_alu_instr *alu = nir_instr_as_alu(instr);
+         bool varying = true;
+         for (unsigned i = 0; i < nir_op_infos[op].num_inputs; i++)
+            varying &= !nir_src_is_const(alu->src[i].src);
+         count += varying;
+      }
+   }
+   return count;
+}
+
 /* The texel kernels convert one texel per thread through a raw storage
  * view: the store kernel writes it once per encoding, the load kernel reads
  * it once and writes the buffer once per encoding. */
@@ -409,9 +427,15 @@ static void average_kernel_resolves_each_format(void)
    unsigned formats = STELA_METAL_AVERAGE_R4G4B4A4_UNORM - STELA_METAL_AVERAGE_R8_SRGB + 1;
    nir_shader *average = stela_metal_average_samples_kernel(NULL);
    check_kernel(average);
-   /* Up to eight samples of each format, and one store each. */
-   assert(intrinsic_count(average, nir_intrinsic_image_deref_load) == 8 * formats);
-   assert(intrinsic_count(average, nir_intrinsic_image_deref_store) == formats);
+   /* Up to eight samples of each format, and one store each; a stencil
+    * resolve following depth reads up to eight depth samples and the chosen
+    * stencil sample, and stores it. */
+   assert(intrinsic_count(average, nir_intrinsic_image_deref_load) == 8 * formats + 8 + 1);
+   assert(intrinsic_count(average, nir_intrinsic_image_deref_store) == formats + 1);
+   /* Ties keep the first sample: comparisons of two samples' depths, the
+    * only ones with no constant operand, are strict. */
+   assert(varying_alu_count(average, nir_op_flt) == 2 * 7);
+   assert(varying_alu_count(average, nir_op_fge) == 0);
    assert(intrinsic_count(average, nir_intrinsic_store_global) == 0);
    ralloc_free(average);
 }

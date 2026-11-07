@@ -113,6 +113,12 @@ pub struct RenderingAttachment<T> {
     /// the average samples kernel runs where the pass ends; Vulkan's
     /// rendering resolves none of it.
     pub averaged: bool,
+    /// A stencil attachment whose resolve follows the depth resolve's
+    /// sample, its resolve mode being the depth's `MIN` or `MAX`: the
+    /// average samples kernel resolves it where the pass ends, from
+    /// [`AttachmentInputs::follows_depth`], and Vulkan's rendering resolves
+    /// none of it.
+    pub follows_depth: bool,
 }
 
 /// What a fragment function's `[[color(n)]]` inputs read.
@@ -132,6 +138,19 @@ pub struct AttachmentInputs {
     /// device that has such pipelines.
     pub depth_copy: Option<TestedCopy>,
     pub stencil_copy: Option<TestedCopy>,
+    /// The copies a stencil resolve following the depth resolve reads and
+    /// writes ([`RenderingAttachment::follows_depth`]).
+    pub follows_depth: Option<FollowedStencil>,
+}
+
+/// Storage copies of a pass's depth and stencil samples and of its stencil
+/// resolve texture's stencil, through which the stencil resolve follows a
+/// min or max depth resolve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FollowedStencil {
+    pub depth: TestedCopy,
+    pub stencil: TestedCopy,
+    pub resolve: TestedCopy,
 }
 
 /// A depth or stencil attachment's storage copy: its view's ID and image,
@@ -459,25 +478,33 @@ pub fn render_pass<T: Copy + Eq>(
                 stencil_format.is_some_and(|format| format.describe().has_stencil()),
                 "the stencil attachment has no stencil",
             )?;
-            let mode = match descriptor.stencil_resolve_filter {
-                MultisampleStencilResolveFilter::Sample0 => ResolveModes::SAMPLE_ZERO,
-                // Following depth is sample 0 only when depth resolves sample 0.
-                MultisampleStencilResolveFilter::DepthResolvedSample
-                    if depth_mode == ResolveModes::SAMPLE_ZERO =>
-                {
-                    ResolveModes::SAMPLE_ZERO
-                }
-                MultisampleStencilResolveFilter::DepthResolvedSample => {
-                    return Err(Error::Unsupported(
+            let follows_depth = descriptor.stencil_resolve_filter
+                == MultisampleStencilResolveFilter::DepthResolvedSample
+                && depth_mode != ResolveModes::SAMPLE_ZERO;
+            // Following depth is sample 0 only when depth resolves sample 0;
+            // otherwise the stencil takes the mode of the depth it follows.
+            let mode = if follows_depth {
+                ensure(
+                    descriptor.depth_attachment.is_some(),
+                    "a stencil resolve following depth has a depth attachment",
+                )?;
+                if attachment.resolve.is_some() {
+                    require(
+                        capabilities.stencil_follows_depth,
                         "stencil resolve following a min or max depth resolve",
-                    ));
+                    )?;
                 }
+                depth_mode
+            } else {
+                ResolveModes::SAMPLE_ZERO
             };
             let clear = ClearValue::DepthStencil {
                 depth: 0.0,
                 stencil: attachment.clear,
             };
-            Some(pass.attachment(attachment, ImageAspects::STENCIL, mode, clear)?)
+            let mut planned = pass.attachment(attachment, ImageAspects::STENCIL, mode, clear)?;
+            planned.follows_depth = follows_depth;
+            Some(planned)
         }
         None => None,
     };
@@ -666,6 +693,7 @@ impl Builder<'_> {
             store_action: attachment.store_action,
             memoryless,
             averaged: false,
+            follows_depth: false,
         })
     }
 

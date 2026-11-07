@@ -277,6 +277,7 @@ fn missing_families_name_the_layer_that_lacks_them() {
     // Stencil outputs run the fragment tests in their function instead.
     assert_eq!(cause("stencil feedback"), None);
     assert!(capabilities.fragment_tests);
+    assert!(capabilities.stencil_follows_depth);
     assert_eq!(cause("fast resource loading"), None);
     assert_eq!(cause("MetalFX upscaling"), None);
     assert_eq!(cause("raster order groups"), None);

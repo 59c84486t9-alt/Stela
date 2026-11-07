@@ -3766,3 +3766,144 @@ fn fragment_testing_draws_run_on_copies_of_the_depth_and_stencil() {
         5
     );
 }
+
+/// A stencil resolve following a min depth resolve: Vulkan resolves the
+/// depth alone and stores both aspects' samples, which the average samples
+/// kernel reads through copies where the pass ends, writing a copy of the
+/// resolve texture's stencil that then fills it.
+#[test]
+fn stencil_resolves_following_min_depth_run_on_copies_of_the_samples() {
+    use crate::metal::{
+        pass::{FollowedStencil, TestedCopy},
+        vulkan::{AttachmentStoreOp, ImageAspects, ResolveModes},
+    };
+    let mut ms = texture(PixelFormat::Depth32FloatStencil8);
+    ms.texture_type = TextureType::D2Multisample;
+    ms.sample_count = 4;
+    ms.mipmap_level_count = 1;
+    let mut resolved = texture(PixelFormat::Depth32FloatStencil8);
+    resolved.mipmap_level_count = 1;
+    fn attachment<'a, Clear>(
+        ms: &'a TextureDescriptor,
+        resolved: &'a TextureDescriptor,
+        clear: Clear,
+    ) -> AttachmentDescriptor<'a, ImageView, Clear> {
+        let target = |texture: ImageView, descriptor| Target {
+            texture: AttachedTexture {
+                texture,
+                descriptor,
+            },
+            level: 0,
+            slice: 0,
+            depth_plane: 0,
+        };
+        AttachmentDescriptor {
+            target: target(ImageView(8), ms),
+            resolve: Some(target(ImageView(9), resolved)),
+            load_action: LoadAction::Clear,
+            store_action: StoreAction::MultisampleResolve,
+            store_action_options: StoreActionOptions::EMPTY,
+            clear,
+        }
+    }
+    let descriptor = RenderPassDescriptor {
+        color_attachments: [None; MAX_COLOR_ATTACHMENTS],
+        depth_attachment: Some(attachment(&ms, &resolved, 1.0)),
+        depth_resolve_filter: crate::metal::abi::MultisampleDepthResolveFilter::Min,
+        stencil_attachment: Some(attachment(&ms, &resolved, 0)),
+        stencil_resolve_filter:
+            crate::metal::abi::MultisampleStencilResolveFilter::DepthResolvedSample,
+        visibility_results: false,
+        render_target_array_length: 0,
+        render_target_width: 0,
+        render_target_height: 0,
+        default_raster_sample_count: 0,
+        tile_memory: Default::default(),
+        sample_positions: Vec::new(),
+        rasterization_rate_map: false,
+    };
+    let mut plan = render_pass(&capabilities(), &descriptor).unwrap();
+    let stencil = plan.stencil.as_ref().unwrap();
+    assert!(stencil.follows_depth);
+    assert_eq!(stencil.resolve.unwrap().0, ResolveModes::MIN);
+    let copy = |id: u32, image: u64, attachment: u64, aspect| TestedCopy {
+        id: ResourceId::texture(0, id, 1),
+        image: Image(image),
+        attachment: Image(attachment),
+        aspect,
+        level: 0,
+        base_layer: 0,
+        layers: 1,
+        extent: [64, 32],
+        encoding: 3,
+    };
+    plan.inputs.follows_depth = Some(FollowedStencil {
+        depth: copy(1, 101, 8, ImageAspects::DEPTH),
+        stencil: copy(2, 102, 8, ImageAspects::STENCIL),
+        resolve: copy(3, 103, 9, ImageAspects::STENCIL),
+    });
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(&mut resolver, plan, None, Vec::new())
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let commands = &recording.segments[0].commands;
+    let Some(Command::BeginRendering(rendering)) = commands
+        .iter()
+        .find(|command| matches!(command, Command::BeginRendering(_)))
+    else {
+        panic!("no rendering")
+    };
+    let (depth, stencil) = (
+        rendering.depth.as_ref().unwrap(),
+        rendering.stencil.as_ref().unwrap(),
+    );
+    assert_eq!(depth.resolve.map(|(mode, _)| mode), Some(ResolveModes::MIN));
+    assert_eq!(stencil.resolve, None, "Vulkan follows no depth resolve");
+    assert_eq!(
+        (depth.store_op, stencil.store_op),
+        (AttachmentStoreOp::Store, AttachmentStoreOp::Store),
+        "the kernel reads the samples a resolving store action discards"
+    );
+    let order: Vec<(Image, Image)> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::CopyImage { src, dst, .. } => Some((*src, *dst)),
+            Command::AverageSamples { .. } => Some((Image(0), Image(0))),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [
+            (Image(8), Image(101)),
+            (Image(8), Image(102)),
+            (Image(0), Image(0)),
+            (Image(103), Image(9)),
+        ]
+    );
+    let Some(&Command::AverageSamples { arguments, count }) = commands
+        .iter()
+        .find(|command| matches!(command, Command::AverageSamples { .. }))
+    else {
+        panic!("no average")
+    };
+    assert_eq!(count, 64 * 32);
+    let encoded = uploaded(&recording, arguments);
+    assert_eq!(
+        [0, 8, 40].map(|at| double(encoded, at)),
+        [2, 3, 1].map(|id| ResourceId::texture(0, id, 1).0)
+    );
+    assert_eq!(
+        [16, 20, 24, 28, 32].map(|at| word(encoded, at)),
+        [
+            64 * 32,
+            crate::metal::binding::AverageArguments::FOLLOW_DEPTH | 3,
+            64,
+            32,
+            4
+        ]
+    );
+}

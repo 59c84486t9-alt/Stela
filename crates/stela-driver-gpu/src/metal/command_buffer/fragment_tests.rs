@@ -43,7 +43,7 @@ impl TestState {
 }
 
 /// The attachments' accesses the copies follow and precede.
-const ATTACHMENT: (PipelineStages, Access) = (
+pub(super) const ATTACHMENT: (PipelineStages, Access) = (
     PipelineStages::EARLY_FRAGMENT_TESTS.union(PipelineStages::LATE_FRAGMENT_TESTS),
     Access::DEPTH_STENCIL_ATTACHMENT_READ.union(Access::DEPTH_STENCIL_ATTACHMENT_WRITE),
 );
@@ -52,12 +52,16 @@ const STORAGE: (PipelineStages, Access) = (
     PipelineStages::FRAGMENT_SHADER,
     Access::SHADER_READ.union(Access::SHADER_WRITE),
 );
-const TRANSFER: (PipelineStages, Access) = (
+pub(super) const TRANSFER: (PipelineStages, Access) = (
     PipelineStages::ALL_TRANSFER,
     Access::TRANSFER_READ.union(Access::TRANSFER_WRITE),
 );
 
-fn barrier(recorder: &mut Recorder, src: (PipelineStages, Access), dst: (PipelineStages, Access)) {
+pub(super) fn barrier(
+    recorder: &mut Recorder,
+    src: (PipelineStages, Access),
+    dst: (PipelineStages, Access),
+) {
     recorder.push(Command::Barrier(Barrier {
         src_stages: src.0,
         src_access: src.1,
@@ -75,6 +79,12 @@ fn copy(recorder: &mut Recorder, copies: &[TestedCopy], back: bool) {
         (ATTACHMENT, STORAGE)
     };
     barrier(recorder, before, TRANSFER);
+    copy_images(recorder, copies, back);
+    barrier(recorder, TRANSFER, after);
+}
+
+/// The image copies of [`copy`], without its barriers.
+pub(super) fn copy_images(recorder: &mut Recorder, copies: &[TestedCopy], back: bool) {
     for copy in copies {
         let attachment = Subresource {
             aspects: copy.aspect,
@@ -105,7 +115,6 @@ fn copy(recorder: &mut Recorder, copies: &[TestedCopy], back: bool) {
             }],
         });
     }
-    barrier(recorder, TRANSFER, after);
 }
 
 /// A face's stencil word (`air_to_nir.h`).

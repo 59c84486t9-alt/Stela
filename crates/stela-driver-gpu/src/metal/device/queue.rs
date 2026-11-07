@@ -348,6 +348,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 plan.inputs.stencil_copy = Some(self.tested_copy(texture, view, true)?);
             }
         }
+        // A stencil resolve following the depth resolve reads copies of the
+        // samples and writes a copy of the resolve texture's stencil.
+        if let (Some(depth), Some(stencil)) = (&plan.depth, &plan.stencil)
+            && let Some((_, resolve)) = stencil.resolve.filter(|_| stencil.follows_depth)
+        {
+            let view = |view: &AttachmentView<TextureId>| AttachmentView {
+                texture: (),
+                view_type: view.view_type,
+                range: view.range,
+            };
+            let followed = crate::metal::pass::FollowedStencil {
+                depth: self.tested_copy(depth.view.texture, view(&depth.view), false)?,
+                stencil: self.tested_copy(stencil.view.texture, view(&stencil.view), true)?,
+                resolve: self.tested_copy(resolve.texture, view(&resolve), true)?,
+            };
+            plan.inputs.follows_depth = Some(followed);
+        }
         let plan = self.resolve_views(plan)?;
         let visibility = request
             .visibility_result_buffer
@@ -420,6 +437,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     store_action: attachment.store_action,
                     memoryless: attachment.memoryless,
                     averaged: attachment.averaged,
+                    follows_depth: attachment.follows_depth,
                 })
             };
         let color = plan

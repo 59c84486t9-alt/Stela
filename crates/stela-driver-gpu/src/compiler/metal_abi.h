@@ -143,7 +143,8 @@ enum stela_metal_block_codec {
  * the push constants' arguments address: the resource IDs of raw storage
  * views of a multisampled attachment and of its resolve texture, the texel
  * count, the attachment's format (enum stela_metal_average_format), its
- * width and height, and its samples per texel. */
+ * width and height, its samples per texel, and for a stencil resolve
+ * following the depth resolve, the ID of the depth samples' storage copy. */
 #define STELA_METAL_AVERAGE_SOURCE 0u
 #define STELA_METAL_AVERAGE_DESTINATION 8u
 #define STELA_METAL_AVERAGE_COUNT 16u
@@ -151,7 +152,8 @@ enum stela_metal_block_codec {
 #define STELA_METAL_AVERAGE_WIDTH 24u
 #define STELA_METAL_AVERAGE_HEIGHT 28u
 #define STELA_METAL_AVERAGE_SAMPLES 32u
-#define STELA_METAL_AVERAGE_BYTES 40u
+#define STELA_METAL_AVERAGE_DEPTH 40u
+#define STELA_METAL_AVERAGE_BYTES 48u
 
 /* The formats an attachment renders through its raw texels in, which the
  * average samples kernel resolves: R8Unorm_sRGB and ABGR4Unorm's Vulkan
@@ -160,6 +162,15 @@ enum stela_metal_average_format {
    STELA_METAL_AVERAGE_R8_SRGB = 1,
    STELA_METAL_AVERAGE_R4G4B4A4_UNORM,
 };
+
+/* A stencil resolve following a min or max depth resolve, which Vulkan does
+ * not have: each texel takes the stencil of the first sample holding the
+ * least depth, or with FOLLOW_MAX the greatest. The source and destination
+ * are R8 copies of the stencil samples and of the resolve texture's stencil;
+ * the format's low bits are the depth copy's enum stela_air_depth_format. */
+#define STELA_METAL_AVERAGE_FOLLOW_DEPTH 0x10u
+#define STELA_METAL_AVERAGE_FOLLOW_MAX 0x20u
+#define STELA_METAL_AVERAGE_DEPTH_FORMAT_MASK 0xfu
 
 /* ResolveArguments, which the resolve kernels read at the push constants'
  * arguments address: the 64-bit addresses of an indirect command buffer

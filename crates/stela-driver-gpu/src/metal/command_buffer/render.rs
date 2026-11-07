@@ -15,7 +15,7 @@
 //! and maps unchanged.
 use super::{
     BoundPipeline, BufferRef, CommandBuffer, Encoder, Recorder, RenderPipelineState, Resolver,
-    buffer_slot, counters::CounterSample,
+    buffer_slot, counters::CounterSample, fragment_tests,
 };
 use crate::metal::{
     abi::{
@@ -31,14 +31,15 @@ use crate::metal::{
     capabilities::MAX_BUFFER_BINDINGS,
     error::{Error, Result, ensure},
     hazard::{RENDER_PASS, Use},
-    pass::{AttachmentSlot, RenderPassPlan, RenderingAttachment},
+    pass::{AttachmentSlot, FollowedStencil, RenderPassPlan, RenderingAttachment},
     pipeline::{DepthStencilState, MAX_COLOR_ATTACHMENTS},
     resource::raw_rendered,
     shader::{Interface, MAX_PATCH_CONTROL_POINTS, Stage},
     vertex::{STRIDE_DYNAMIC, VertexDescriptor},
     vulkan::{
         Access, AttachmentLoadOp, AttachmentStoreOp, CullMode, FrontFace, IndexType,
-        PipelineBindPoint, PipelineStages, PolygonMode, PrimitiveTopology, SampleCounts,
+        PipelineBindPoint, PipelineStages, PolygonMode, PrimitiveTopology, ResolveModes,
+        SampleCounts,
         command::{
             Attachment, Barrier, BufferCopy, Command, DepthStencil, Rect, Rendering, VertexBuffer,
             Viewport as VkViewport,
@@ -557,6 +558,7 @@ impl CommandBuffer {
             commands.splice(at..at, resets.collect::<Vec<_>>());
         }
         self.average_samples(resolver, &state.pass)?;
+        self.follow_depth(resolver, &state.pass)?;
         self.resolve_visibility(resolver, state.visibility)
     }
 
@@ -600,6 +602,7 @@ impl CommandBuffer {
                 width,
                 height,
                 samples: pass.sample_count,
+                depth: 0,
             };
             let upload =
                 self.recorder
@@ -613,6 +616,81 @@ impl CommandBuffer {
                 count,
             });
         }
+        Ok(())
+    }
+
+    /// Resolves a stencil that follows a min or max depth resolve
+    /// ([`RenderingAttachment::follows_depth`]) once the pass's last
+    /// instance has stored its samples: the average samples kernel picks
+    /// each texel's stencil from copies of the depth and stencil samples
+    /// into a copy of the resolve texture's stencil, which then fills it.
+    fn follow_depth(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        pass: &RenderPassPlan<ImageView>,
+    ) -> Result<()> {
+        let Some(followed) = follows_depth(pass) else {
+            return Ok(());
+        };
+        let Some((mode, _)) = pass.stencil.as_ref().and_then(|stencil| stencil.resolve) else {
+            return Ok(());
+        };
+        let [width, height] = pass.extent;
+        let count = width
+            .checked_mul(height)
+            .and_then(|texels| texels.checked_mul(pass.layer_count))
+            .ok_or(Error::Unsupported("resolves of 4 Gi texels"))?;
+        if count == 0 {
+            return Ok(());
+        }
+        let greatest = if mode == ResolveModes::MAX {
+            AverageArguments::FOLLOW_MAX
+        } else {
+            0
+        };
+        let arguments = AverageArguments {
+            source: followed.stencil.id.0,
+            destination: followed.resolve.id.0,
+            count,
+            format: AverageArguments::FOLLOW_DEPTH | greatest | followed.depth.encoding,
+            width,
+            height,
+            samples: pass.sample_count,
+            depth: followed.depth.id.0,
+        };
+        let upload =
+            self.recorder
+                .upload(resolver, &arguments.encode(), AverageArguments::ALIGNMENT)?;
+        let transfer = Use::new(
+            PipelineStages::ALL_TRANSFER,
+            Access::TRANSFER_READ.union(Access::TRANSFER_WRITE),
+        );
+        // The stores of the pass's last instance precede the copies.
+        self.recorder.access(transfer);
+        fragment_tests::barrier(
+            &mut self.recorder,
+            fragment_tests::ATTACHMENT,
+            fragment_tests::TRANSFER,
+        );
+        fragment_tests::copy_images(
+            &mut self.recorder,
+            &[followed.depth, followed.stencil],
+            false,
+        );
+        self.recorder.access(Use::new(
+            PipelineStages::COMPUTE_SHADER,
+            Access::SHADER_READ.union(Access::SHADER_WRITE),
+        ));
+        self.recorder.push(Command::AverageSamples {
+            arguments: upload.address,
+            count,
+        });
+        self.recorder.access(transfer);
+        fragment_tests::copy_images(&mut self.recorder, &[followed.resolve], true);
+        // Later passes may attach the resolve texture.
+        self.recorder.full_barrier();
+        // The kernel replaced the pipeline and push constants.
+        self.bindings.reset();
         Ok(())
     }
 
@@ -729,39 +807,58 @@ fn end_query(recorder: &mut Recorder, visibility: &mut Visibility) {
     }
 }
 
+/// The copies through which the pass's stencil resolve follows its depth
+/// resolve, when its store action resolves.
+fn follows_depth(pass: &RenderPassPlan<ImageView>) -> Option<FollowedStencil> {
+    pass.stencil
+        .as_ref()
+        .filter(|stencil| {
+            stencil.follows_depth && stencil.resolve.is_some() && stencil.store_action.resolves()
+        })
+        .and(pass.inputs.follows_depth)
+}
+
 /// The `VkRenderingInfo` of one instance of a pass: only the first loads
 /// as Metal asked and only the last stores and resolves as Metal asked.
 fn rendering(pass: &RenderPassPlan<ImageView>, first: bool, last: bool) -> Rendering {
-    let attachment = |attachment: &RenderingAttachment<ImageView>| Attachment {
-        view: attachment.view.texture,
-        // The average samples kernel resolves an averaged attachment.
-        resolve: if last && !attachment.averaged {
-            attachment.resolve.map(|(mode, view)| (mode, view.texture))
-        } else {
-            None
-        },
-        load_op: if first {
-            attachment.load_op
-        } else {
-            AttachmentLoadOp::Load
-        },
-        store_op: if last {
-            attachment.store_op
-        } else {
-            AttachmentStoreOp::Store
-        },
-        clear: attachment.clear,
-    };
+    // A stencil resolve following the depth resolve reads the stored depth
+    // and stencil samples once the pass ends.
+    let follows = follows_depth(pass).is_some();
+    let attachment =
+        |attachment: &RenderingAttachment<ImageView>, depth_stencil: bool| Attachment {
+            view: attachment.view.texture,
+            // The average samples kernel resolves an averaged attachment and a
+            // stencil following the depth resolve.
+            resolve: if last && !attachment.averaged && !attachment.follows_depth {
+                attachment.resolve.map(|(mode, view)| (mode, view.texture))
+            } else {
+                None
+            },
+            load_op: if first {
+                attachment.load_op
+            } else {
+                AttachmentLoadOp::Load
+            },
+            store_op: if last && !(follows && depth_stencil) {
+                attachment.store_op
+            } else {
+                AttachmentStoreOp::Store
+            },
+            clear: attachment.clear,
+        };
     Rendering {
         extent: pass.extent,
         layer_count: pass.layer_count,
         color: pass
             .color
             .iter()
-            .map(|color| color.as_ref().map(attachment))
+            .map(|color| color.as_ref().map(|color| attachment(color, false)))
             .collect(),
-        depth: pass.depth.as_ref().map(attachment),
-        stencil: pass.stencil.as_ref().map(attachment),
+        depth: pass.depth.as_ref().map(|depth| attachment(depth, true)),
+        stencil: pass
+            .stencil
+            .as_ref()
+            .map(|stencil| attachment(stencil, true)),
     }
 }
 

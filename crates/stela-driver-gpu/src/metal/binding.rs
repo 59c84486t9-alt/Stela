@@ -524,7 +524,10 @@ impl TexelArguments {
 /// multisampled attachment, counted along rows, then rows, then layers,
 /// from the raw storage view `source` into the raw storage view
 /// `destination` of its resolve texture, decoding and encoding its samples
-/// by `format` (`enum stela_metal_average_format`).
+/// by `format` (`enum stela_metal_average_format`). With
+/// [`FOLLOW_DEPTH`](Self::FOLLOW_DEPTH), it resolves a stencil following a
+/// min or max depth resolve instead, from storage copies of the stencil and
+/// `depth` samples into a copy of the resolve texture's stencil.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AverageArguments {
     pub source: u64,
@@ -534,6 +537,7 @@ pub struct AverageArguments {
     pub width: u32,
     pub height: u32,
     pub samples: u32,
+    pub depth: u64,
 }
 
 impl AverageArguments {
@@ -544,8 +548,16 @@ impl AverageArguments {
     pub const WIDTH_OFFSET: u32 = 24;
     pub const HEIGHT_OFFSET: u32 = 28;
     pub const SAMPLES_OFFSET: u32 = 32;
-    pub const BYTES: u32 = 40;
+    pub const DEPTH_OFFSET: u32 = 40;
+    pub const BYTES: u32 = 48;
     pub const ALIGNMENT: u64 = 16;
+    /// A format of a stencil resolve following the depth resolve, whose
+    /// low bits are the depth copy's `enum stela_air_depth_format`
+    /// ([`TestedCopy::encoding`](crate::metal::pass::TestedCopy::encoding)).
+    pub const FOLLOW_DEPTH: u32 = 0x10;
+    /// With [`FOLLOW_DEPTH`](Self::FOLLOW_DEPTH), follows the greatest
+    /// depth rather than the least.
+    pub const FOLLOW_MAX: u32 = 0x20;
     /// Threads per workgroup of the kernel.
     pub const WORKGROUP_SIZE: u32 = 64;
 
@@ -562,6 +574,8 @@ impl AverageArguments {
         writer.u32(self.width);
         writer.u32(self.height);
         writer.u32(self.samples);
+        writer.u32(0);
+        writer.u64(self.depth);
         bytes
     }
 }
@@ -1247,7 +1261,16 @@ mod tests {
                 "STELA_METAL_AVERAGE_SAMPLES",
                 AverageArguments::SAMPLES_OFFSET,
             ),
+            ("STELA_METAL_AVERAGE_DEPTH", AverageArguments::DEPTH_OFFSET),
             ("STELA_METAL_AVERAGE_BYTES", AverageArguments::BYTES),
+            (
+                "STELA_METAL_AVERAGE_FOLLOW_DEPTH",
+                AverageArguments::FOLLOW_DEPTH,
+            ),
+            (
+                "STELA_METAL_AVERAGE_FOLLOW_MAX",
+                AverageArguments::FOLLOW_MAX,
+            ),
             ("STELA_METAL_REORDER_ROWS", ReorderArguments::ROWS_OFFSET),
             ("STELA_METAL_REORDER_LEVEL", ReorderArguments::LEVEL_OFFSET),
             ("STELA_METAL_REORDER_COUNT", ReorderArguments::COUNT_OFFSET),

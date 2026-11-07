@@ -1588,6 +1588,61 @@ static const enum pipe_format average_formats[] = {
    [STELA_METAL_AVERAGE_R4G4B4A4_UNORM] = PIPE_FORMAT_A4B4G4R4_UNORM,
 };
 
+/* A depth sample's bits, from a copy of an enum stela_air_depth_format, as a
+ * float of the same order: unorm depth widened, and float depth as it is. */
+static nir_def *depth_value(nir_builder *b, nir_def *bits, nir_def *encoding)
+{
+   nir_def *mask = nir_bcsel(b, nir_ieq_imm(b, encoding, STELA_AIR_DEPTH_UNORM16),
+                             nir_imm_int(b, 0xffff), nir_imm_int(b, 0xffffff));
+   return nir_bcsel(b, nir_ieq_imm(b, encoding, STELA_AIR_DEPTH_FLOAT32), bits,
+                    nir_u2f32(b, nir_iand(b, bits, mask)));
+}
+
+/* STELA_METAL_AVERAGE_FOLLOW_DEPTH: the stencil of the first sample whose
+ * depth is the least, or the greatest, which a min or max depth resolve
+ * keeps. */
+static void follow_depth(nir_builder *b, nir_def *arguments, nir_def *format, nir_def *samples,
+                         nir_def *coord, nir_def *stencils, nir_def *destination)
+{
+   const struct glsl_type *ms = glsl_image_type(GLSL_SAMPLER_DIM_MS, true, GLSL_TYPE_UINT);
+   nir_deref_instr *depths = stela_metal_bind_texture_id(
+      b, load(b, arguments, STELA_METAL_AVERAGE_DEPTH, 64), ms, false, NULL, NULL);
+   nir_def *encoding = nir_iand_imm(b, format, STELA_METAL_AVERAGE_DEPTH_FORMAT_MASK);
+   nir_def *greatest = nir_ine_imm(b, nir_iand_imm(b, format, STELA_METAL_AVERAGE_FOLLOW_MAX), 0);
+   nir_variable *best = nir_local_variable_create(b->impl, glsl_float_type(), "best depth");
+   nir_variable *chosen = nir_local_variable_create(b->impl, glsl_uint_type(), "chosen sample");
+   for (unsigned s = 0; s < 8; s++) {
+      nir_push_if(b, nir_ult(b, nir_imm_int(b, s), samples));
+      nir_def *bits = nir_channel(
+         b, nir_image_deref_load(b, 4, 32, &depths->def, coord, nir_imm_int(b, s), nir_imm_int(b, 0),
+                                 .image_dim = GLSL_SAMPLER_DIM_MS, .image_array = true,
+                                 .format = PIPE_FORMAT_NONE, .dest_type = nir_type_uint32),
+         0);
+      nir_def *depth = depth_value(b, bits, encoding);
+      if (s == 0) {
+         nir_store_var(b, best, depth, 1);
+         nir_store_var(b, chosen, nir_imm_int(b, 0), 1);
+      } else {
+         /* Strict, so that ties keep the first sample. */
+         nir_def *kept = nir_load_var(b, best);
+         nir_push_if(b, nir_bcsel(b, greatest, nir_flt(b, kept, depth), nir_flt(b, depth, kept)));
+         nir_store_var(b, best, depth, 1);
+         nir_store_var(b, chosen, nir_imm_int(b, s), 1);
+         nir_pop_if(b, NULL);
+      }
+      nir_pop_if(b, NULL);
+   }
+   nir_def *stencil = nir_image_deref_load(
+      b, 4, 32, stencils, coord, nir_load_var(b, chosen), nir_imm_int(b, 0),
+      .image_dim = GLSL_SAMPLER_DIM_MS, .image_array = true, .format = PIPE_FORMAT_NONE,
+      .dest_type = nir_type_uint32);
+   nir_image_deref_store(b, destination, coord, nir_undef(b, 1, 32),
+                         nir_vec4(b, nir_channel(b, stencil, 0), nir_imm_int(b, 0),
+                                  nir_imm_int(b, 0), nir_imm_int(b, 0)),
+                         nir_imm_int(b, 0), .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = true,
+                         .format = PIPE_FORMAT_NONE, .src_type = nir_type_uint32);
+}
+
 nir_shader *stela_metal_average_samples_kernel(const nir_shader_compiler_options *options)
 {
    nir_def *arguments, *thread;
@@ -1634,6 +1689,9 @@ nir_shader *stela_metal_average_samples_kernel(const nir_shader_compiler_options
                             .format = PIPE_FORMAT_NONE, .src_type = nir_type_uint32);
       nir_pop_if(&b, NULL);
    }
+   nir_push_if(&b, nir_ine_imm(&b, nir_iand_imm(&b, format, STELA_METAL_AVERAGE_FOLLOW_DEPTH), 0));
+   follow_depth(&b, arguments, format, samples, coord, &source->def, &destination->def);
+   nir_pop_if(&b, NULL);
    return finish(&b);
 }
 

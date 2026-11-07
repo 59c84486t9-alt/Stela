@@ -334,6 +334,12 @@ pub struct Capabilities {
     /// attachments in their interlock section, for a device without stencil
     /// export.
     pub fragment_tests: bool,
+    /// A stencil resolve following a min or max depth resolve
+    /// (`MTLMultisampleStencilResolveFilterDepthResolvedSample`), which
+    /// Vulkan does not have: the average samples kernel resolves the
+    /// stencil from copies of the attachments' samples where the pass ends,
+    /// and Vulkan's rendering resolves the depth alone.
+    pub stencil_follows_depth: bool,
     counter_sampling: [bool; 5],
     /// Sparse 3D textures, with Vulkan's 3D residency and block shapes.
     sparse_volumes: bool,
@@ -595,17 +601,23 @@ fn tessellation(features: &Features) -> Requirement {
     }
 }
 
-/// Whether a fragment function writing the stencil reference on `device`,
-/// which has no stencil export, runs the fragment tests itself: on storage
-/// copies of the attachments in its interlock section, which image copies
-/// between depth or stencil aspects and color images fill.
-pub fn fragment_tests(device: &PhysicalDevice) -> bool {
+/// Whether shaders on `device` access storage copies of depth and stencil
+/// attachments, multisampled ones included, which image copies between
+/// depth or stencil aspects and color images fill.
+pub fn depth_stencil_copies(device: &PhysicalDevice) -> bool {
     let features = &device.features;
-    !device.limits.stencil_export
-        && features.fragment_shader_pixel_interlock
-        && features.maintenance8
+    features.maintenance8
         && features.shader_storage_image_multisample
         && features.shader_storage_image_read_without_format
+}
+
+/// Whether a fragment function writing the stencil reference on `device`,
+/// which has no stencil export, runs the fragment tests itself: on storage
+/// copies of the attachments in its interlock section.
+pub fn fragment_tests(device: &PhysicalDevice) -> bool {
+    !device.limits.stencil_export
+        && device.features.fragment_shader_pixel_interlock
+        && depth_stencil_copies(device)
 }
 
 impl Derivation<'_> {
@@ -735,6 +747,10 @@ impl Derivation<'_> {
         // fragments on storage copies of the attachments, which image copies
         // between depth or stencil aspects and color images fill.
         let fragment_tests = raster_order_groups && fragment_tests(self.device);
+        // Vulkan resolves the depth while the stencil, which follows it,
+        // resolves from copies of the samples.
+        let stencil_follows_depth =
+            depth_stencil_copies(self.device) && limits.independent_resolve_none;
         let raytracing = self.check(shader(
             "ray tracing",
             features.acceleration_structure && features.ray_query,
@@ -1000,6 +1016,7 @@ impl Derivation<'_> {
             memoryless_render_targets: true,
             framebuffer_reads,
             fragment_tests,
+            stencil_follows_depth,
             counter_sampling,
             sparse_volumes,
             sparse_samples,
@@ -1536,10 +1553,16 @@ impl Derivation<'_> {
         let apple5 = apple4
             && self.check_all(
                 "GPU family Apple5",
-                &[driver(
-                    "stencil resolve",
-                    !capabilities.stencil_resolve_modes.is_empty(),
-                )],
+                &[
+                    driver(
+                        "stencil resolve",
+                        !capabilities.stencil_resolve_modes.is_empty(),
+                    ),
+                    driver(
+                        "stencil resolve following a min or max depth resolve",
+                        capabilities.stencil_follows_depth,
+                    ),
+                ],
             );
         // NVIDIA's fragment shaders have no stencil output: functions that
         // write one run the fragment tests themselves.
