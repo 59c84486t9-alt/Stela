@@ -2418,6 +2418,36 @@ stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool o
    return var;
 }
 
+/* In *def, a vertex input its pipeline fetches as 32-bit words, decoded
+ * into its type; *def stays NULL for one fetched in its own format. False
+ * after failing. */
+static bool
+vertex_input_words(struct translator *t, const struct stela_air_stage_io *io, nir_def **def)
+{
+   const struct stela_air_stage_options *options = t->stage_options;
+   unsigned words = options->vertex_input_words && io->location < AIR_MAX_VERTEX_ATTRIBUTES ?
+      options->vertex_input_words[io->location] : 0;
+   *def = NULL;
+   if (!words)
+      return true;
+   if (words > 4 || !options->decode_vertex_input)
+      return fail(t, STELA_AIR_ARGUMENT, "vertex input %u has no decoding of its words",
+                  io->location);
+   char name[32];
+   snprintf(name, sizeof(name), "air.vertex_words%u", io->location);
+   nir_variable *var = nir_variable_create(t->b.shader, nir_var_shader_in,
+                                           glsl_vector_type(GLSL_TYPE_UINT, words), name);
+   if (!var)
+      return fail(t, STELA_AIR_ALLOCATION, "render IO variable allocation failed");
+   var->data.location = VERT_ATTRIB_GENERIC0 + io->location;
+   nir_def *lanes = options->decode_vertex_input(&t->b, io->location, nir_load_var(&t->b, var),
+                                                 options->resources.binding_data);
+   if (!lanes || lanes->num_components != 4 || lanes->bit_size != 32)
+      return fail(t, STELA_AIR_ARGUMENT, "vertex input %u does not decode", io->location);
+   *def = stage_narrow(&t->b, nir_trim_vector(&t->b, lanes, io->components), io->primitive);
+   return true;
+}
+
 /* A mesh function's shader info and outputs: its data and primitive
  * indices. */
 static bool
@@ -3225,6 +3255,13 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       } else {
          /* A vertex input the function never reads is not fetched. */
          if (io->semantic == STELA_AIR_VERTEX_INPUT && !io->used) continue;
+         if (io->semantic == STELA_AIR_VERTEX_INPUT) {
+            if (!vertex_input_words(t, io, &def)) return false;
+            if (def) {
+               if (!put_value(t, param, def, io->buffer.access)) return false;
+               continue;
+            }
+         }
          nir_variable *var = stage_variable(t, io, false);
          if (!var) return false;
          if (io->interpolant) continue; /* Calls interpolate it. */

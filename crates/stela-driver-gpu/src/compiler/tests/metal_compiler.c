@@ -1391,6 +1391,32 @@ kernels_compile_with_their_stage_in(void)
    assert(!compile(vertex, "vertex", &fetched, &error) && error.kind == STELA_AIR_INPUT);
 }
 
+/* A vertex input in a format the device's vertex input lacks arrives as its
+ * words, which the vertex function decodes; no other function, and no format
+ * of no whole words, takes them. */
+static void
+vertex_inputs_decode_their_words(void)
+{
+   struct stela_air_error error = {0};
+   const struct stela_metal_linked_varying linked[] = {{"user(uv)", 8, 0}};
+   /* MTLVertexFormatFloatRGB9E5 at the function's location 3. */
+   struct stela_metal_specialization specialization = {.varyings = linked, .varying_count = 1};
+   specialization.vertex_formats[3] = 55;
+   nir_shader *shader = compile(vertex, "vertex", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "vertex words: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_variable *words = varying(shader, nir_var_shader_in, VERT_ATTRIB_GENERIC0 + 3);
+   assert(words && glsl_get_base_type(words->type) == GLSL_TYPE_UINT &&
+          glsl_get_vector_elements(words->type) == 1);
+   stela_metal_release(shader);
+
+   assert(!compile(fragment, "fragment", &specialization, &error) && error.kind == STELA_AIR_INPUT);
+   /* MTLVertexFormatUChar3 is three bytes. */
+   specialization.vertex_formats[3] = 2;
+   assert(!compile(vertex, "vertex", &specialization, &error) && error.kind == STELA_AIR_INPUT);
+}
+
 static void
 mesh_stages_compile_with_their_launch(void)
 {
@@ -3135,6 +3161,7 @@ main(void)
    render_stages_compile_at_their_linked_locations();
    patch_functions_compile_behind_their_tessellation_stages();
    kernels_compile_with_their_stage_in();
+   vertex_inputs_decode_their_words();
    mesh_stages_compile_with_their_launch();
    function_constants_reflect_and_specialize();
    derived_constants_are_constructed_from_their_function_constants();

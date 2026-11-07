@@ -650,6 +650,41 @@ fetch_attribute(nir_builder *b, unsigned location, nir_def *at, nir_def *point, 
    return point ? NULL : stela_metal_fetch_stage_in(b, specialization->stage_in, location, at, integer);
 }
 
+/* decode_vertex_input of the vertex inputs the pipeline fetches as words,
+ * in the formats the specialization names. */
+static nir_def *
+decode_vertex_input(nir_builder *b, unsigned location, nir_def *words, void *data)
+{
+   const struct stela_metal_specialization *specialization =
+      ((const struct binding *)data)->specialization;
+   unsigned format = location < ARRAY_SIZE(specialization->vertex_formats) ?
+      specialization->vertex_formats[location] : 0;
+   unsigned bytes = stela_metal_vertex_format_bytes(format);
+   if (!bytes || words->bit_size != 32 || words->num_components * 4 != bytes)
+      return NULL;
+   return stela_metal_decode_attribute(b, words, format);
+}
+
+/* The 32-bit words of each vertex input the pipeline fetches as words, by
+ * location; false when a format named is none of whole words. */
+static bool
+vertex_words(const struct stela_metal_specialization *specialization,
+             uint8_t words[static AIR_MAX_VERTEX_ATTRIBUTES], bool *any)
+{
+   *any = false;
+   for (unsigned location = 0; location < ARRAY_SIZE(specialization->vertex_formats); location++) {
+      unsigned format = specialization->vertex_formats[location];
+      if (!format)
+         continue;
+      unsigned bytes = stela_metal_vertex_format_bytes(format);
+      if (location >= AIR_MAX_VERTEX_ATTRIBUTES || !bytes || bytes % 4)
+         return false;
+      words[location] = bytes / 4;
+      *any = true;
+   }
+   return true;
+}
+
 static enum stela_metal_table
 stage_table(enum stela_metal_function_stage stage)
 {
@@ -866,6 +901,14 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       fail(error, STELA_AIR_INPUT, "stage-in for a function that does not fetch it");
       goto done;
    }
+   /* Only a vertex input fetches words, for a vertex function. */
+   uint8_t words[AIR_MAX_VERTEX_ATTRIBUTES] = {0};
+   bool fetches_words;
+   if (!vertex_words(specialization, words, &fetches_words) ||
+       (fetches_words && (stage != STELA_METAL_VERTEX || patch))) {
+      fail(error, STELA_AIR_INPUT, "vertex input words for a function that does not take them");
+      goto done;
+   }
    struct binding binding = {{stage_table(stage)}, specialization};
    struct stela_air_options resources = {
       .max_instructions = target->max_instructions,
@@ -947,6 +990,8 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       .raster_order_groups = target->raster_order_groups != 0,
       .attachments = specialization->attachment_count ? attachments : NULL,
       .samples = specialization->samples,
+      .vertex_input_words = fetches_words ? words : NULL,
+      .decode_vertex_input = decode_vertex_input,
    };
    shader = stela_air_metal_stage_to_nir(air, size, entry, target->nir, &options, error);
 done:

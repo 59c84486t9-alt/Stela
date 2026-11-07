@@ -454,6 +454,14 @@ struct stela_air_stage_options {
     * one sample. */
    const struct stela_air_attachment_access *attachments;
    unsigned samples;
+   /* A vertex function's inputs, by location, that its pipeline fetches as
+    * this many 32-bit words, the vertex input lacking their formats: each
+    * reads as decode_vertex_input makes four 32-bit lanes of its words, with
+    * the resources' binding data. NULL, or zero words, for an input fetched
+    * in its own format. */
+   const uint8_t *vertex_input_words;
+   nir_def *(*decode_vertex_input)(nir_builder *, unsigned location, nir_def *words,
+                                   void *binding_data);
 };
 nir_shader *stela_air_stage_to_nir(const void *, size_t, const char *entry,
                                   const nir_shader_compiler_options *,

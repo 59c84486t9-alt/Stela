@@ -41,7 +41,7 @@ use super::{
         Stage, Tessellation, TessellationStages, TextureUse, ThreadgroupUse, Varying,
     },
     stitching::{StitchedGraph, StitchedNode},
-    vertex::{Attribute, STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor},
+    vertex::{Attribute, STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor, VertexFormat},
     vulkan::{object::ShaderCode, physical::PhysicalDevice},
 };
 use alloc::{
@@ -956,6 +956,7 @@ impl AirCompiler {
             samples: specialization.samples.max(1),
             round_toward_zero: specialization.round_toward_zero.into(),
             reserved: 0,
+            vertex_formats: vertex_formats(&specialization.vertex_words),
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.module.bitcode;
@@ -1562,4 +1563,15 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
     };
     interface.validate()?;
     Ok(interface)
+}
+
+/// The raw `MTLVertexFormat` of each vertex input fetched as words, zero for
+/// the rest.
+fn vertex_formats(words: &[Option<VertexFormat>]) -> [u8; 32] {
+    let mut raw = [0; 32];
+    for (slot, format) in raw.iter_mut().zip(words) {
+        // Every format's value is below 64.
+        *slot = format.map_or(0, |format| format.raw() as u8);
+    }
+    raw
 }

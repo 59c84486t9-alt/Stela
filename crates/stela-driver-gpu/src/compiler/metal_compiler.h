@@ -175,8 +175,12 @@ struct stela_metal_specialization {
    /* Narrowing floating-point conversions round toward zero, as the
     * library's MTLCompileOptions ask, not to nearest even. */
    uint32_t round_toward_zero, reserved;
+   /* A vertex function's MTLVertexFormat of each input, by location, that
+    * its pipeline fetches as 32-bit words, the device's vertex input
+    * lacking the format; zero for the rest. */
+   uint8_t vertex_formats[32];
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 144u
+#define STELA_METAL_SPECIALIZATION_BYTES 176u
 #define STELA_METAL_ATTACHMENT_BYTES 16u
 #define STELA_METAL_CONSTEXPR_SAMPLER_BYTES 16u
 #define STELA_METAL_MODULE_BYTES 32u

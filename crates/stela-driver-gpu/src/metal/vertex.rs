@@ -357,19 +357,61 @@ pub fn vertex_input(
             stride,
         });
     }
+    let words = word_formats(capabilities, descriptor);
     for attribute in &descriptor.attributes {
-        require(
-            capabilities.supports_vertex_format(attribute.format),
-            "vertex attribute format",
-        )?;
+        let format = match words.get(attribute.index as usize).copied().flatten() {
+            Some(format) => word_format(format),
+            None => {
+                require(
+                    capabilities.supports_vertex_format(attribute.format),
+                    "vertex attribute format",
+                )?;
+                attribute.format.vulkan().0
+            }
+        };
         input.attributes.push(VertexAttribute {
             location: attribute.index,
             binding: attribute.buffer_index,
-            format: attribute.format.vulkan().0,
+            format,
             offset: attribute.offset as u32,
         });
     }
     Ok(input)
+}
+
+/// The formats of a vertex descriptor's attributes that the device's vertex
+/// input does not fetch, by location: the pipeline fetches each as its
+/// 32-bit words, and its vertex function decodes them
+/// ([`Specialization::vertex_words`]). `None` for the attributes fetched in
+/// their own formats, and for those of no whole number of words, which stay
+/// refused.
+///
+/// [`Specialization::vertex_words`]: super::shader::Specialization::vertex_words
+pub fn word_formats(
+    capabilities: &Capabilities,
+    descriptor: &VertexDescriptor,
+) -> [Option<VertexFormat>; MAX_VERTEX_ATTRIBUTES as usize] {
+    let mut words = [None; MAX_VERTEX_ATTRIBUTES as usize];
+    for attribute in &descriptor.attributes {
+        let format = attribute.format;
+        if !capabilities.supports_vertex_format(format)
+            && format.vulkan().1.is_multiple_of(4)
+            && let Some(slot) = words.get_mut(attribute.index as usize)
+        {
+            *slot = Some(format);
+        }
+    }
+    words
+}
+
+/// The format of the words a format's attribute is fetched as.
+fn word_format(format: VertexFormat) -> Format {
+    match format.vulkan().1 / 4 {
+        1 => Format::R32Uint,
+        2 => Format::R32G32Uint,
+        3 => Format::R32G32B32Uint,
+        _ => Format::R32G32B32A32Uint,
+    }
 }
 
 /// Validates the stage-in layout of a post-tessellation vertex function,
@@ -668,12 +710,32 @@ mod tests {
             ),
             Err(Error::Unsupported("vertex attribute offset"))
         );
+    }
+
+    #[test]
+    fn formats_the_device_cannot_fetch_are_fetched_as_words() {
+        let descriptor = VertexDescriptor {
+            attributes: alloc::vec![
+                attribute(0, VertexFormat::Float2, 0, 0),
+                attribute(3, VertexFormat::FloatRgb9E5, 8, 0),
+            ],
+            layouts: alloc::vec![layout(0, 12, StepFunction::PerVertex, 1)],
+        };
+        let capabilities = capabilities();
+        assert!(!capabilities.supports_vertex_format(VertexFormat::FloatRgb9E5));
+        let words = word_formats(&capabilities, &descriptor);
+        assert_eq!(words[3], Some(VertexFormat::FloatRgb9E5));
+        assert_eq!(words.iter().flatten().count(), 1);
+        let input = vertex_input(&capabilities, &descriptor).unwrap();
+        assert_eq!(input.attributes[0].format, Format::R32G32Sfloat);
         assert_eq!(
-            check(
-                alloc::vec![attribute(0, VertexFormat::FloatRgb9E5, 0, 0)],
-                alloc::vec![per_vertex]
-            ),
-            Err(Error::Unsupported("vertex attribute format"))
+            input.attributes[1],
+            VertexAttribute {
+                location: 3,
+                binding: 0,
+                format: Format::R32Uint,
+                offset: 8
+            }
         );
     }
 }

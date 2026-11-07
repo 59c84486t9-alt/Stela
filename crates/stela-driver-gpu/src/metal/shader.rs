@@ -13,14 +13,15 @@ use super::{
     },
     binding::TableSlot,
     capabilities::{
-        MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_TEXTURE_BINDINGS, ShaderFeatures,
+        MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_TEXTURE_BINDINGS, MAX_VERTEX_ATTRIBUTES,
+        ShaderFeatures,
     },
     error::{Result, ensure},
     pipeline::MAX_COLOR_ATTACHMENTS,
     pixel_format::Numeric,
     reflection::Binding,
     stitching::StitchedGraph,
-    vertex::{StageInputDescriptor, VertexDescriptor},
+    vertex::{StageInputDescriptor, VertexDescriptor, VertexFormat},
     vulkan::{ShaderStages, object::ShaderCode},
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
@@ -535,6 +536,12 @@ pub struct Specialization {
     /// The function's library's narrowing floating-point conversions round
     /// toward zero (`MTLFloatingPointConversionRoundingModeTowardZero`).
     pub round_toward_zero: bool,
+    /// A vertex function's inputs, by location, that its pipeline fetches
+    /// as 32-bit words in these formats, which the device's vertex input
+    /// lacks ([`word_formats`]): the function decodes them.
+    ///
+    /// [`word_formats`]: super::vertex::word_formats
+    pub vertex_words: [Option<VertexFormat>; MAX_VERTEX_ATTRIBUTES as usize],
 }
 
 /// A color attachment a fragment function reads, which the function also

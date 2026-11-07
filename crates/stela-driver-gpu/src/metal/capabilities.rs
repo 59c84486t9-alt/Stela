@@ -1041,14 +1041,20 @@ impl Derivation<'_> {
     }
 
     fn vertex_formats(&mut self) -> Vec<VertexFormat> {
-        let (supported, refused): (Vec<_>, Vec<_>) = VertexFormat::ALL.iter().partition(|format| {
-            self.device
-                .formats
-                .get(format.vulkan().0)
-                .buffer
-                .contains(FormatFeatures::VERTEX_BUFFER)
-        });
-        if !refused.is_empty() {
+        let (supported, refused): (Vec<VertexFormat>, Vec<VertexFormat>) =
+            VertexFormat::ALL.iter().partition(|format| {
+                self.device
+                    .formats
+                    .get(format.vulkan().0)
+                    .buffer
+                    .contains(FormatFeatures::VERTEX_BUFFER)
+            });
+        // Vertex functions decode the formats of whole words that the
+        // pipeline fetches as words (`vertex::word_formats`).
+        if refused
+            .iter()
+            .any(|format| !format.vulkan().1.is_multiple_of(4))
+        {
             self.gap("vertex formats the driver cannot fetch", Cause::Driver);
         }
         supported

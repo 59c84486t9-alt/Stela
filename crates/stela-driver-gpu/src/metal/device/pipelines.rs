@@ -26,7 +26,7 @@ use crate::metal::{
         Specialization, Stage, Tessellation, TessellationStages, Varying,
     },
     stitching::StitchedGraph,
-    vertex::{StageInputDescriptor, VertexDescriptor},
+    vertex::{self, StageInputDescriptor, VertexDescriptor},
     vulkan::{
         ShaderStages,
         backend::{Backend, Object},
@@ -1055,10 +1055,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             &request.tessellation,
             request.vertex_descriptor.as_ref(),
         )?;
+        // The evaluation stage of a tessellated pipeline fetches its
+        // stage-in itself; a vertex input fetches the rest.
+        let vertex_words = match (&tessellation, &request.vertex_descriptor) {
+            (None, Some(layout)) => vertex::word_formats(&self.capabilities, layout),
+            _ => Default::default(),
+        };
         let specialization = Specialization {
             amplified: request.max_vertex_amplification_count > 1,
             varyings: varyings.clone(),
             linking: vertex_linked.linking.clone(),
+            vertex_words,
             ..Specialization::default()
         };
         let (vertex, feeding) = match &tessellation {
