@@ -664,6 +664,33 @@ impl Case {
     }
 }
 
+/// The `stela_air__NAME` placeholder functions a corpus source calls for
+/// AIR builtins no public header declares, which the Mac's build renames
+/// in the library's IR ([`air_name`]).
+pub fn air_placeholders(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = text
+        .match_indices("stela_air__")
+        .map(|(at, _)| {
+            let name: String = text[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect();
+            name
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// The AIR builtin a placeholder names: `stela_air__a__b` is `air.a.b`.
+pub fn air_name(placeholder: &str) -> String {
+    let rest = placeholder
+        .strip_prefix("stela_air__")
+        .unwrap_or(placeholder);
+    format!("air.{}", rest.replace("__", "."))
+}
+
 /// A corpus source the Mac compiles at an MSL version with flags.
 #[derive(Clone)]
 pub struct Library {
@@ -1039,10 +1066,11 @@ impl Plan {
                 continue;
             }
             libraries.insert(name.clone(), format!("lib/{name}.metallib").into());
+            let air_names = air_placeholders(&self.source_text(source, corpus)?);
             builds.insert(
                 name.clone(),
                 json!({"source": source, "version": version, "flags": flags, "dynamic": dynamic, "links": links,
-                       "default": default}),
+                       "default": default, "air_names": air_names}),
             );
         }
         let body = serde_json::to_string(&json!({"libraries": libraries, "cases": selected}))?;

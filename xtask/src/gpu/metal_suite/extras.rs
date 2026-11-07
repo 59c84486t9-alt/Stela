@@ -668,6 +668,40 @@ fn overlap_row(size: u32) -> Vec<(u8, f32, u8)> {
 /// Stencil feedback with the fragment tests: overlapping fragments of one
 /// draw test against each other's stencil and depth, with each of the
 /// stencil operations, at one sample and at four resolved from sample 0.
+/// SIMD-group asynchronous copies into threadgroup memory, by one
+/// SIMD-group: a 5x3 tile of 13-element rows into an 8x8 tile padded with
+/// zeros and then with its edge, a run of 20 elements, and a 4x2 tile of
+/// every other element; what no copy writes keeps its 0xdead.
+fn async_copies(plan: &mut Plan, library: &str) {
+    let src: Vec<u32> = (0..64).map(|i| 1000 + i).collect();
+    let mut tiles = vec![0xdead_u32; 4 * 64];
+    for y in 0..8 {
+        for x in 0..8 {
+            tiles[y * 8 + x] = if x < 5 && y < 3 { src[y * 13 + x] } else { 0 };
+            tiles[64 + y * 8 + x] = src[y.min(2) * 13 + x.min(4)];
+        }
+    }
+    tiles[128..148].copy_from_slice(&src[..20]);
+    for y in 0..2 {
+        for x in 0..4 {
+            tiles[192 + y * 4 + x] = src[y * 13 + x * 2];
+        }
+    }
+    plan.add(
+        Case::compute(
+            "extras.async_copies",
+            library,
+            "async_copies",
+            [32, 1, 1],
+            [32, 1, 1],
+        )
+        .dispatch_threads()
+        .buffer(Buffer::data("src", 0, u32s(&src)))
+        .buffer(Buffer::zeroed("out", 1, 4 * 64 * 4))
+        .output(Output::exact("out", Dtype::U32, u32s(&tiles))),
+    );
+}
+
 fn stencil_feedback(plan: &mut Plan, library: &str) {
     let size = 8u32;
     let row = overlap_row(size);
@@ -832,6 +866,13 @@ pub fn build(plan: &mut Plan) {
     stage_in(plan, &library, &mut rng);
     stencil_export(plan, &library);
     stencil_feedback(plan, &library);
+    let builtins = plan.library(
+        "air_builtins",
+        "air_builtins.metal",
+        &[],
+        super::plan::LATEST,
+    );
+    async_copies(plan, &builtins);
     invariance(plan, &library);
     bfloat_scalar(plan, &library, &mut rng);
 }

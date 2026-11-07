@@ -62,10 +62,38 @@ fn mac_script(plan: &Value) -> String {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        lines.push(format!(
-            "xcrun -sdk macosx metal {} -c sources/{source} -o lib/{name}.air",
-            flags.join(" ")
-        ));
+        let placeholders: Vec<&str> = build["air_names"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if placeholders.is_empty() {
+            lines.push(format!(
+                "xcrun -sdk macosx metal {} -c sources/{source} -o lib/{name}.air",
+                flags.join(" ")
+            ));
+        } else {
+            // Apple's compiler takes no AIR names in source: its IR calls
+            // placeholders, which take the names before it compiles that IR.
+            lines.push(format!(
+                "xcrun -sdk macosx metal {} -S -emit-llvm -c sources/{source} -o lib/{name}.ll",
+                flags.join(" ")
+            ));
+            let renames: String = placeholders
+                .iter()
+                .map(|p| {
+                    format!(
+                        " -e 's/@_Z[0-9]*{p}[A-Za-z0-9_]*/@{}/g'",
+                        super::plan::air_name(p)
+                    )
+                })
+                .collect();
+            lines.push(format!("sed{renames} lib/{name}.ll > lib/{name}.named.ll"));
+            lines.push(format!(
+                "xcrun -sdk macosx metal -c -x ir lib/{name}.named.ll -o lib/{name}.air"
+            ));
+        }
         let links: String = build["links"]
             .as_array()
             .into_iter()
@@ -469,5 +497,26 @@ mod tests {
         assert!(script.contains("runner.m -o runner.bin"));
         assert!(script.contains("<string>com.stela.metal-suite.share</string>"));
         assert!(script.contains("exec \"$(dirname \"$0\")/Runner.app/Contents/MacOS/runner\""));
+    }
+
+    /// A library calling AIR builtins through placeholders compiles its
+    /// IR with the placeholders' mangled names replaced by AIR's.
+    #[test]
+    fn mac_script_names_air_builtins_in_ir() {
+        let source =
+            "void stela_air__wait_simdgroup_events(int);\nstela_air__wait_simdgroup_events(1);";
+        let names = super::super::plan::air_placeholders(source);
+        assert_eq!(names, ["stela_air__wait_simdgroup_events"]);
+        let plan = json!({"builds": {"b": {"source": "b.metal", "flags": [], "air_names": names}}});
+        let script = mac_script(&plan);
+        assert!(script.contains("metal  -S -emit-llvm -c sources/b.metal -o lib/b.ll"));
+        assert!(script.contains(
+            "sed -e 's/@_Z[0-9]*stela_air__wait_simdgroup_events[A-Za-z0-9_]*/@air.wait_simdgroup_events/g'"
+        ));
+        assert!(script.contains("metal -c -x ir lib/b.named.ll -o lib/b.air"));
+        assert_eq!(
+            super::super::plan::air_name("stela_air__simdgroup_async_copy_2d__p3i8__p1i8"),
+            "air.simdgroup_async_copy_2d.p3i8.p1i8"
+        );
     }
 }
