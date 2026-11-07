@@ -425,23 +425,46 @@ hide_entry_points(struct stela_air_metadata *m)
    return true;
 }
 
-/* Whether two target triples name one target, whatever their deployment
- * versions: air64_v29-apple-macosx27.0.0 links with ...-macosx27.2.0. */
+/* A target triple's architecture, vendor and system, past its AIR version
+ * and deployment version: air64_v28-apple-macosx27.0.0 as air64, then
+ * -apple-macosx. */
+static void
+target_parts(const char *triple, size_t *arch, const char **rest, size_t *rest_bytes)
+{
+   const char *dash = strchr(triple, '-');
+   size_t bytes = dash ? (size_t)(dash - triple) : strlen(triple);
+   size_t name = bytes;
+   while (name && isdigit((unsigned char)triple[name - 1]))
+      name--;
+   if (name != bytes && name >= 2 && triple[name - 1] == 'v' && triple[name - 2] == '_')
+      bytes = name - 2;
+   *arch = bytes;
+   *rest = dash ? dash : triple + strlen(triple);
+   *rest_bytes = strlen(*rest);
+   while (*rest_bytes && (isdigit((unsigned char)(*rest)[*rest_bytes - 1]) || (*rest)[*rest_bytes - 1] == '.'))
+      (*rest_bytes)--;
+}
+
+/* Whether two target triples name one target, whatever AIR version and
+ * deployment version each was compiled for: a dynamic library the system's
+ * compiler builds at run time, air64_v29-apple-macosx27.2.0, links under a
+ * kernel an older toolchain built, air64_v28-apple-macosx27.0.0. */
 static bool
 same_target(const char *a, const char *b)
 {
-   size_t a_bytes = strlen(a), b_bytes = strlen(b);
-   while (a_bytes && (isdigit((unsigned char)a[a_bytes - 1]) || a[a_bytes - 1] == '.'))
-      a_bytes--;
-   while (b_bytes && (isdigit((unsigned char)b[b_bytes - 1]) || b[b_bytes - 1] == '.'))
-      b_bytes--;
-   return a_bytes == b_bytes && !memcmp(a, b, a_bytes);
+   size_t a_arch, a_rest, b_arch, b_rest;
+   const char *a_tail, *b_tail;
+   target_parts(a, &a_arch, &a_tail, &a_rest);
+   target_parts(b, &b_arch, &b_tail, &b_rest);
+   return a_arch == b_arch && !memcmp(a, b, a_arch) && a_rest == b_rest && !memcmp(a_tail, b_tail, a_rest);
 }
 
 /* Whether module is valid AIR compiled as m's module was, after
- * specializing its function constants with values. Its llvm.ident names
- * only the compiler build that made it: an offline-built dynamic library
- * links under a kernel compiled at run time. */
+ * specializing its function constants with values. Its llvm.ident, AIR
+ * version and language version name only the compiler that made it, whose
+ * metadata it is read by: an offline-built dynamic library links under a
+ * kernel compiled at run time, and one the system compiles at run time
+ * under an offline-built kernel. */
 static bool
 prepared(struct stela_air_metadata *m, LLVMModuleRef module,
          const struct stela_air_constant_value *values, unsigned count)
@@ -455,14 +478,15 @@ prepared(struct stela_air_metadata *m, LLVMModuleRef module,
       return fail(m, STELA_AIR_INPUT, "a linked module is not valid AIR");
    const char *differs = !same_target(LLVMGetTarget(module), LLVMGetTarget(m->module)) ? "target" :
       strcmp(LLVMGetDataLayoutStr(module), LLVMGetDataLayoutStr(m->module)) ? "data layout" :
-      linked.air_major != m->air_major || linked.air_minor != m->air_minor ? "AIR version" :
-      linked.language_major != m->language_major || linked.language_minor != m->language_minor ?
-         "language version" :
       linked.denorms_disable != m->denorms_disable ? "denormal mode" :
       linked.fast_math != m->fast_math ? "fast math" : NULL;
    if (differs) {
-      char detail[64];
-      snprintf(detail, sizeof(detail), "a linked module was compiled with another %s", differs);
+      char detail[256];
+      if (!strcmp(differs, "target"))
+         snprintf(detail, sizeof(detail), "a linked module was compiled for %s, not %s",
+                  LLVMGetTarget(module), LLVMGetTarget(m->module));
+      else
+         snprintf(detail, sizeof(detail), "a linked module was compiled with another %s", differs);
       return fail(m, STELA_AIR_INPUT, detail);
    }
    if (!name_references(&linked) || !hide_entry_points(&linked))
@@ -503,8 +527,16 @@ stela_air_link_modules(struct stela_air_metadata *m, const struct stela_air_modu
          LLVMDisposeModule(module);
          return false;
       }
-      /* The linker consumes the module. */
-      if (LLVMLinkModules2(m->module, module))
+      /* The linker consumes the module, and takes its triple, which may
+       * name another AIR version: the program keeps the kernel's own, whose
+       * metadata it is read by. */
+      char *target = strdup(LLVMGetTarget(m->module));
+      if (!target)
+         return fail(m, STELA_AIR_ALLOCATION, "linked target allocation failed");
+      bool twice = LLVMLinkModules2(m->module, module);
+      LLVMSetTarget(m->module, target);
+      free(target);
+      if (twice)
          return fail(m, STELA_AIR_INPUT, "linked modules define a function twice");
    }
    return true;

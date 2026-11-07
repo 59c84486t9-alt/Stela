@@ -2705,6 +2705,66 @@ linked_functions_resolve_tables_and_externals(void)
       stela_metal_release(shader);
       LLVMDisposeMemoryBuffer(built);
    }
+   /* One an older toolchain built for an older AIR and language links
+    * under one the system compiles, and the reverse; one for another system
+    * does not. */
+   {
+      static const char *older =
+         "!air.version = !{!20}\n!air.language_version = !{!21}\n"
+         "!air.compile_options = !{!23, !24, !25}\n"
+         "!20 = !{i32 2, i32 8, i32 0}\n!21 = !{!\"Metal\", i32 3, i32 2, i32 0}\n"
+         "!23 = !{!\"air.compile.denorms_disable\"}\n!24 = !{!\"air.compile.fast_math_enable\"}\n"
+         "!25 = !{!\"air.compile.framebuffer_fetch_enable\"}\n";
+      const char *triples[] = {"air64_v28-apple-macosx27.0.0", "air64_v29-apple-ios27.0.0"};
+      for (unsigned t = 0; t < 2; t++) {
+         size_t bytes = strlen(linked) + 128;
+         char *source = malloc(bytes);
+         snprintf(source, bytes, "target triple = \"%s\"\n%s", triples[t], linked);
+         LLVMMemoryBufferRef built = bitcode_built(source, older);
+         const struct stela_air_module modules[] = {{LLVMGetBufferStart(built), LLVMGetBufferSize(built)}};
+         struct stela_air_linked_function named[3];
+         for (unsigned i = 0; i < 3; i++)
+            named[i] = (struct stela_air_linked_function){functions[i], strlen(functions[i])};
+         const struct stela_metal_specialization specialization = {
+            .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 1,
+            .linked_functions = named, .linked_function_count = 3,
+         };
+         shader = compile(tables, "tables", &specialization, &error);
+         if (t == 0) {
+            if (!shader)
+               fprintf(stderr, "older: %u %s\n", error.kind, error.detail);
+            assert(shader);
+            stela_metal_release(shader);
+         } else {
+            assert(!shader && error.kind == STELA_AIR_INPUT && strstr(error.detail, "compiled for"));
+         }
+         LLVMDisposeMemoryBuffer(built);
+         free(source);
+      }
+      /* An older kernel links the system's newer library, and keeps its own
+       * target, which its metadata is read by. */
+      size_t bytes = strlen(tables) + 128;
+      char *older_tables = malloc(bytes);
+      snprintf(older_tables, bytes, "target triple = \"%s\"\n%s", triples[0], tables);
+      LLVMMemoryBufferRef kernel = bitcode_built(older_tables, older), newer = bitcode(linked);
+      const struct stela_air_module modules[] = {{LLVMGetBufferStart(newer), LLVMGetBufferSize(newer)}};
+      struct stela_air_linked_function named[3];
+      for (unsigned i = 0; i < 3; i++)
+         named[i] = (struct stela_air_linked_function){functions[i], strlen(functions[i])};
+      const struct stela_metal_specialization specialization = {
+         .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 1,
+         .linked_functions = named, .linked_function_count = 3,
+      };
+      shader = stela_metal_compile(LLVMGetBufferStart(kernel), LLVMGetBufferSize(kernel), "tables",
+                                   &target, &specialization, &error);
+      if (!shader)
+         fprintf(stderr, "older kernel: %u %s\n", error.kind, error.detail);
+      assert(shader);
+      stela_metal_release(shader);
+      LLVMDisposeMemoryBuffer(kernel);
+      LLVMDisposeMemoryBuffer(newer);
+      free(older_tables);
+   }
    shader = compile_linked(tested, "tables", &linked, 1, functions, 3, &error);
    if (!shader)
       fprintf(stderr, "tested: %u %s\n", error.kind, error.detail);
