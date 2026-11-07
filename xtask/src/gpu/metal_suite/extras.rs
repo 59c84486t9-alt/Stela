@@ -212,7 +212,9 @@ fn packing(plan: &mut Plan, library: &str, rng: &mut Random) {
 }
 
 /// A multisampled depth target and a two-slice multisampled colour array,
-/// drawn over in slice 0 and cleared, then read sample by sample.
+/// slice 1 cleared by one pass and slice 0 drawn over with the depth target
+/// by another, then read sample by sample. A layered pass would need a depth
+/// array: every attachment has the pass's render target array length.
 fn multisampled(plan: &mut Plan, library: &str) {
     let (w, h, samples) = (4u32, 4u32, 4u32);
     let texels = (w * h * samples) as usize;
@@ -230,7 +232,13 @@ fn multisampled(plan: &mut Plan, library: &str) {
                 Step::render(
                     "vert_full",
                     "frag_first",
-                    json!({"colors": [{"texture": "layers", "clear": clear}], "samples": samples,
+                    json!({"colors": [{"texture": "layers", "slice": 1, "clear": clear}],
+                           "samples": samples, "draws": []}),
+                ),
+                Step::render(
+                    "vert_full",
+                    "frag_first",
+                    json!({"colors": [{"texture": "layers", "slice": 0, "clear": clear}], "samples": samples,
                            "depth": {"texture": "depth", "clear": 0.75, "compare": "always"},
                            "primitive": "triangle_strip", "vertex_count": 4}),
                 ),
