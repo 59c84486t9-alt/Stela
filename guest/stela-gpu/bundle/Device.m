@@ -876,6 +876,12 @@ TABLE(maxVertexAttributes, 31)
 	*gpu = times.gpu;
 }
 
+/* The rate of the ticks counter heaps' timestamps hold; zero without them. */
+- (uint64_t)queryTimestampFrequency
+{
+	return _capabilities->timestamp_frequency;
+}
+
 - (NSArray *)counterSets
 {
 	StelaGPUCounterSet *sets[2];
