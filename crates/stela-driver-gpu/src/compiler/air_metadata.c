@@ -254,6 +254,28 @@ retention_list(LLVMValueRef global)
            (bytes == strlen("llvm.compiler.used") && !memcmp(name, "llvm.compiler.used", bytes)));
 }
 
+/* A dynamic library user's tables of the libraries it loads and the
+ * functions it imports, which only llvm.used keeps: the loader's, which no
+ * function reads. */
+static bool
+dyld_table(LLVMValueRef global)
+{
+   const char *section = LLVMGetSection(global);
+   if (!section || (strcmp(section, "air.dyld_lib_table") && strcmp(section, "air.dyld_str_table") &&
+                    strcmp(section, "air.dyld_flat_table")))
+      return false;
+   for (LLVMUseRef use = LLVMGetFirstUse(global); use; use = LLVMGetNextUse(use)) {
+      LLVMValueRef user = LLVMGetUser(use);
+      if (!LLVMIsAConstant(user))
+         return false;
+      LLVMUseRef held = LLVMGetFirstUse(user);
+      if (!held || LLVMGetNextUse(held) || !LLVMIsAGlobalVariable(LLVMGetUser(held)) ||
+          !retention_list(LLVMGetUser(held)))
+         return false;
+   }
+   return true;
+}
+
 bool
 stela_air_metadata_globals(struct stela_air_metadata *t, bool *threadgroup)
 {
@@ -266,7 +288,7 @@ stela_air_metadata_globals(struct stela_air_metadata *t, bool *threadgroup)
       struct stela_air_global info;
       if (++count > AIR_MAX_GLOBALS)
          return fail(t, STELA_AIR_LIMIT, "global count exceeded");
-      if (global == constructors || retention_list(global) ||
+      if (global == constructors || retention_list(global) || dyld_table(global) ||
           stela_air_metadata_is_function_constant(t, global) || stela_air_log_only(global))
          continue;
       if (!stela_air_metadata_global(t, global, &info))
