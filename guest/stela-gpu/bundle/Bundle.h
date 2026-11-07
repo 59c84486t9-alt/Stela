@@ -158,6 +158,8 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	NSUInteger _allocatedSize, _heapOffset;
 	id _heap;
 	BOOL _aliasable;
+	/* Its MTLPurgeableState, zero for the NonVolatile it starts in. */
+	NSUInteger _purgeable;
 }
 @end
 
@@ -228,9 +230,16 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	uint64_t _mappedBytes;
 	/* The device's pooled buffers placed in it that are not yet released. */
 	NSUInteger _pooled;
+	/* Its MTLPurgeableState, zero for the NonVolatile it starts in. */
+	NSUInteger _purgeable;
 }
 - (id)newBufferWithLength:(NSUInteger)length options:(NSUInteger)options;
 @end
+
+/* setPurgeableState: of what `slot` holds: the state it was in. The device
+ * never reclaims memory, so a volatile resource stays volatile until set
+ * otherwise; an emptied one's contents are undefined. */
+NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state);
 
 @interface StelaGPUFence : NSObject <MTLFence> {
 @public

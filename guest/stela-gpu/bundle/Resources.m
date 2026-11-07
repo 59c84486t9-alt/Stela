@@ -93,6 +93,19 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 
 @end
 
+NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state)
+{
+	NSUInteger previous;
+	if (state == MTLPurgeableStateNonVolatile || state == MTLPurgeableStateVolatile ||
+	    state == MTLPurgeableStateEmpty) {
+		previous = __atomic_exchange_n(slot, state == MTLPurgeableStateNonVolatile ? 0 : state,
+					       __ATOMIC_RELAXED);
+	} else {
+		previous = __atomic_load_n(slot, __ATOMIC_RELAXED);
+	}
+	return previous ? previous : MTLPurgeableStateNonVolatile;
+}
+
 @implementation StelaGPUResource
 
 - (NSUInteger)resourceOptions
@@ -116,10 +129,13 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record)
 }
 
 /* Memory stays resident: everything is nonvolatile, as a query or a request. */
+/* A heap's resources take its state, which they cannot set apart from it. */
 - (NSUInteger)setPurgeableState:(NSUInteger)state
 {
-	(void)state;
-	return MTLPurgeableStateNonVolatile;
+	if (_heap) {
+		return [(StelaGPUHeap *)_heap setPurgeableState:MTLPurgeableStateKeepCurrent];
+	}
+	return stela_purgeable_state(&_purgeable, state);
 }
 
 - (NSUInteger)allocatedSize
@@ -670,8 +686,7 @@ static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NS
 
 - (NSUInteger)setPurgeableState:(NSUInteger)state
 {
-	(void)state;
-	return MTLPurgeableStateNonVolatile;
+	return stela_purgeable_state(&_purgeable, state);
 }
 
 - (StelaHeapUsageResponse)usageForAlignment:(NSUInteger)alignment

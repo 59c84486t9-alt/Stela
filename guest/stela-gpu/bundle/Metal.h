@@ -329,6 +329,8 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (NSUInteger)initialCapacity;
 /* MTLAllocation. */
 - (NSUInteger)allocatedSize;
+/* MTLResource and MTLHeap. */
+- (NSUInteger)setPurgeableState:(NSUInteger)state;
 /* MTLCompileOptions. */
 - (NSUInteger)languageVersion;
 - (NSUInteger)mathMode;
