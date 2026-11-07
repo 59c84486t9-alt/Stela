@@ -3072,13 +3072,16 @@ fn raw_rendered(plan: &mut Plan, library: &str) {
                 pairs.iter().map(|p| p.1).collect(),
             )
         };
-        let mut initial = vec![];
-        let mut expected = vec![];
+        let over = Blend::simple("add", "source_alpha", "one_minus_source_alpha");
+        let (mut initial, mut expected, mut lows, mut highs) = (vec![], vec![], vec![], vec![]);
         let mut dtype = Dtype::U8;
         for (s, d) in texels.iter().zip(&stored) {
             initial.extend(store(format, *d).0);
             let out = if srgb_target {
                 let a = s[3];
+                let [low, high] = over.bounds(*s, *d, [0.0; 4], true);
+                lows.extend(store(format, low).0);
+                highs.extend(store(format, high).0);
                 std::array::from_fn(|lane| s[lane] * a + d[lane] * (1.0 - a))
             } else {
                 std::array::from_fn(|lane| s[lane] + d[lane])
@@ -3087,10 +3090,27 @@ fn raw_rendered(plan: &mut Plan, library: &str) {
             expected.extend(bytes);
             dtype = d;
         }
-        let tol = if srgb_target {
-            Tolerance::units(1.0)
+        let output = if srgb_target {
+            // A blend unit may take the source at the target's precision,
+            // as the sRGB blends do: any result within the bounds, by
+            // alternatives a tolerance apart.
+            let tol = Tolerance::units(1.0);
+            let widest = lows
+                .iter()
+                .zip(&highs)
+                .map(|(l, h)| h - l)
+                .max()
+                .unwrap_or(0);
+            let mut output = Output::new("c", dtype, tol.clone())
+                .expect(expected, tol)
+                .judged_by_expectation();
+            for step in 0..=widest.div_ceil(3) {
+                let at = |(&l, &h): (&u8, &u8)| l.saturating_add(step.saturating_mul(3)).min(h);
+                output = output.expect_alternative(lows.iter().zip(&highs).map(at).collect());
+            }
+            output
         } else {
-            Tolerance::exact()
+            Output::new("c", dtype, Tolerance::exact()).expect(expected, Tolerance::exact())
         };
         plan.add(
             full(
@@ -3101,8 +3121,13 @@ fn raw_rendered(plan: &mut Plan, library: &str) {
                 json!({"colors": [{"texture": "c", "blend": blend}]}),
             )
             .texture(target("c", format).data(initial))
-            .output(Output::new("c", dtype, tol.clone()).expect(expected, tol.clone())),
+            .output(output),
         );
+        let tol = if srgb_target {
+            Tolerance::units(1.0)
+        } else {
+            Tolerance::exact()
+        };
 
         // A 4x resolve of a slanted triangle's coverage: each pixel's mean
         // of its samples, decoded and encoded by the format.
