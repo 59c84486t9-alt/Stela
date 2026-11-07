@@ -435,9 +435,15 @@ vertex_functions_read_constant_data(void)
    ralloc_free(shader);
    free(table);
 
-   /* Render functions have no threadgroup memory. */
+   /* Render functions have no threadgroup memory, which a kernel of their
+    * module may. */
    char *shared = change(position_only, "define", "@s = internal addrspace(3) global i32 undef, align 4\ndefine");
-   assert(!translate(shared, STELA_AIR_VERTEX, false, &error) && error.kind == STELA_AIR_TARGET);
+   shader = translate(shared, STELA_AIR_VERTEX, false, &error);
+   assert(shader);
+   ralloc_free(shader);
+   char *using = change(shared, "ret <4 x float> %p", "store i32 0, ptr addrspace(3) @s, align 4\nret <4 x float> %p");
+   assert(!translate(using, STELA_AIR_VERTEX, false, &error) && error.kind == STELA_AIR_TARGET);
+   free(using);
    free(shared);
 }
 

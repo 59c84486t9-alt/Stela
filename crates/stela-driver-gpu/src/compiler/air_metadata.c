@@ -637,6 +637,23 @@ used_in(LLVMValueRef value, LLVMValueRef fn, unsigned depth)
    return false;
 }
 
+/* Whether fn uses a threadgroup global. */
+static bool
+uses_threadgroup(struct stela_air_metadata *m, LLVMValueRef fn)
+{
+   LLVMValueRef constructors = stela_air_metadata_constructors(m->module);
+   for (LLVMValueRef global = LLVMGetFirstGlobal(m->module); global;
+        global = LLVMGetNextGlobal(global)) {
+      struct stela_air_global info;
+      if (global == constructors || retention_list(global) || dyld_table(global) ||
+          stela_air_metadata_is_function_constant(m, global) || stela_air_log_only(global))
+         continue;
+      if (stela_air_metadata_global(m, global, &info) && !info.constant && used_in(global, fn, 0))
+         return true;
+   }
+   return false;
+}
+
 /* The bytes of the threadgroup globals fn uses, in module order at their
  * alignments, and whether it calls air.discard_fragment. Globals are
  * qualified by compilation, which refuses the rest; here they add nothing. */
@@ -2374,7 +2391,8 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
    bool threadgroup;
    if (!stela_air_metadata_globals(m, &threadgroup))
       return false;
-   if (threadgroup && !compute)
+   /* A kernel of the same module may have threadgroup memory. */
+   if (threadgroup && !compute && uses_threadgroup(m, fn))
       return fail(m, STELA_AIR_TARGET, "render functions have no threadgroup memory");
    *r = (struct stela_air_render){0};
    r->entry.stage = stage;
