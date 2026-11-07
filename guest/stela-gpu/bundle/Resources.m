@@ -21,6 +21,8 @@ static bool cpu_visible(NSUInteger options)
 
 /* The public bits of MTLTextureUsage; the rest are Apple's drivers' own hints. */
 #define TEXTURE_USAGE_KNOWN 0x37ull
+/* The usage Apple's drivers report for a texture made with Unknown usage. */
+#define TEXTURE_USAGE_UNKNOWN 0x17ull
 
 void stela_texture_record(id descriptor, StelaTextureDescriptorRecord *record)
 {
@@ -327,7 +329,9 @@ NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state)
 		_mipmapLevelCount = record->mipmap_level_count;
 		_sampleCount = record->sample_count;
 		_arrayLength = record->array_length;
-		_usage = record->usage;
+		/* Unknown usage admits every use, and Apple's drivers report it so:
+		 * shader reads and writes, rendering and pixel format views. */
+		_usage = record->usage ? record->usage : TEXTURE_USAGE_UNKNOWN;
 		_swizzle = (MTLTextureSwizzleChannels){record->swizzle[0], record->swizzle[1],
 						       record->swizzle[2], record->swizzle[3]};
 		_gpuOptimized = YES;
