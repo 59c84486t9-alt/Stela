@@ -430,6 +430,8 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (id)objectLinkedFunctions;
 - (id)meshLinkedFunctions;
 - (id)linkedFunctions;
+- (MTLSize)requiredThreadsPerThreadgroup;
+- (NSInteger)forwardProgressUsage;
 - (id)functions;
 - (id)privateFunctions;
 - (id)binaryFunctions;

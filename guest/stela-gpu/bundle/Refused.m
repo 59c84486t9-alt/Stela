@@ -26,8 +26,6 @@
 #define TENSORS "this device has no tensors"
 #define IMAGEBLOCKS "this device has no imageblocks"
 #define BINARY_LINKING "this device links no binary functions into a pipeline"
-#define SPECIALIZATION "this device cannot look functions up by name in a pipeline"
-#define STAGE_IN_STRIDE "this device takes no attribute stride for this binding"
 #define ARGUMENT_OBJECT "this device encodes no such object in an argument buffer"
 #define NO_TILED_TEXTURE "this device has no tiled textures over caller memory"
 #define INDIRECT_ARGUMENT_LAYOUT "this device has no indirect argument layouts"
@@ -138,12 +136,6 @@ ABSENT((MTLResourceID)gpuResourceID, "this device has no depth stencil states in
 
 ABSENT((id)reflection, "this device hands reflection out when a pipeline is made", nil)
 
-- (id)functionHandleWithName:(NSString *)name stage:(NSUInteger)stage
-{
-	REFUSE("functionHandleWithName:stage:", SPECIALIZATION);
-	return nil;
-}
-
 - (id)functionHandleWithBinaryFunction:(id)function stage:(NSUInteger)stage
 {
 	REFUSE("functionHandleWithBinaryFunction:stage:", BINARY_LINKING);
@@ -161,7 +153,6 @@ ABSENT((id)reflection, "this device hands reflection out when a pipeline is made
 @implementation StelaGPUComputePipeline (Refused)
 
 ABSENT((id)reflection, "this device hands reflection out when a pipeline is made", nil)
-ABSENT((id)functionHandleWithName:(NSString *)name, SPECIALIZATION, nil)
 ABSENT((id)functionHandleWithBinaryFunction:(id)function, BINARY_LINKING, nil)
 
 - (id)newComputePipelineStateWithBinaryFunctions:(id)functions error:(NSError **)error

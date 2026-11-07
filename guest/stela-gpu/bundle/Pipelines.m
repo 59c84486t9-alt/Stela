@@ -256,6 +256,22 @@ static id function_handle(StelaGPUDevice *device, uint64_t pipeline, StelaGPUFun
 	return handle;
 }
 
+static id named_in(NSArray *functions, NSString *name)
+{
+	for (NSUInteger i = 0; i < functions.count; i++) {
+		if ([[functions[i] name] isEqualToString:name]) {
+			return functions[i];
+		}
+	}
+	return nil;
+}
+
+/* The visible function of `name` that `linked` links, by function or binary. */
+static id linked_named(id linked, NSString *name)
+{
+	return named_in([linked functions], name) ?: named_in([linked binaryFunctions], name);
+}
+
 static id function_table(StelaGPUDevice *device, id descriptor)
 {
 	StelaNewFunctionTableRequest request = {.function_count = [descriptor functionCount]};
@@ -369,6 +385,17 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 	return function_handle(_device, _handle, function, stage);
 }
 
+- (id)functionHandleWithName:(NSString *)name stage:(NSUInteger)stage
+{
+	id linked = stage == MTLRenderStageVertex	? _vertexLinked
+		    : stage == MTLRenderStageFragment ? _fragmentLinked
+		    : stage == MTLRenderStageObject   ? _objectLinked
+		    : stage == MTLRenderStageMesh     ? _meshLinked
+						      : nil;
+	id function = linked_named(linked, name);
+	return function ? function_handle(_device, _handle, function, stage) : nil;
+}
+
 - (id)newVisibleFunctionTableWithDescriptor:(id)descriptor stage:(NSUInteger)stage
 {
 	(void)stage;
@@ -431,12 +458,18 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 
 - (NSInteger)forwardProgressUsage
 {
-	return 0;
+	return _forwardProgress;
 }
 
 - (MTLSize)requiredThreadsPerThreadgroup
 {
-	return (MTLSize){0};
+	return _requiredThreads;
+}
+
+- (id)functionHandleWithName:(NSString *)name
+{
+	id function = linked_named(_linked, name);
+	return function ? function_handle(_device, _handle, function, 0) : nil;
 }
 
 - (NSUInteger)recommendedPersistentThreadgroupsPerGridForThreadsPerThreadgroup:(MTLSize)threads
@@ -506,6 +539,13 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	pipeline->_objectThreadExecutionWidth = response->object_thread_execution_width;
 	pipeline->_meshThreadExecutionWidth = response->mesh_thread_execution_width;
 	pipeline->_supportIndirectCommandBuffers = indirect;
+	if (mesh) {
+		pipeline->_objectLinked = [[descriptor objectLinkedFunctions] copy];
+		pipeline->_meshLinked = [[descriptor meshLinkedFunctions] copy];
+	} else {
+		pipeline->_vertexLinked = [[descriptor vertexLinkedFunctions] copy];
+	}
+	pipeline->_fragmentLinked = [[descriptor fragmentLinkedFunctions] copy];
 	if (!mesh && ([descriptor supportAddingVertexBinaryFunctions] || [descriptor supportAddingFragmentBinaryFunctions])) {
 		pipeline->_descriptor = [descriptor copy];
 		[pipeline->_descriptor setVertexLinkedFunctions:[[descriptor vertexLinkedFunctions] copy]];
@@ -768,6 +808,13 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	pipeline->_threadExecutionWidth = response.thread_execution_width;
 	pipeline->_staticThreadgroupMemoryLength = response.static_threadgroup_memory_length;
 	pipeline->_supportIndirectCommandBuffers = indirect;
+	if ([descriptor respondsToSelector:@selector(requiredThreadsPerThreadgroup)]) {
+		pipeline->_requiredThreads = [descriptor requiredThreadsPerThreadgroup];
+	}
+	if ([descriptor respondsToSelector:@selector(forwardProgressUsage)]) {
+		pipeline->_forwardProgress = [descriptor forwardProgressUsage];
+	}
+	pipeline->_linked = [[descriptor linkedFunctions] copy];
 	if ([descriptor supportAddingBinaryFunctions]) {
 		pipeline->_descriptor = [descriptor copy];
 		[pipeline->_descriptor setLinkedFunctions:[[descriptor linkedFunctions] copy]];

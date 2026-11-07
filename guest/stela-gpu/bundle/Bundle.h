@@ -379,6 +379,8 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	NSUInteger _maxTotalThreadsPerObjectThreadgroup, _maxTotalThreadsPerMeshThreadgroup;
 	NSUInteger _objectThreadExecutionWidth, _meshThreadExecutionWidth;
 	BOOL _supportIndirectCommandBuffers;
+	/* Each stage's linked functions, which handles are found by name in. */
+	id _vertexLinked, _fragmentLinked, _objectLinked, _meshLinked;
 }
 @end
 
@@ -389,6 +391,11 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	NSUInteger _maxTotalThreadsPerThreadgroup, _threadExecutionWidth;
 	NSUInteger _staticThreadgroupMemoryLength;
 	BOOL _supportIndirectCommandBuffers;
+	/* What the descriptor fixes: the threadgroup size, zero for none, and
+	 * the forward progress usage. */
+	MTLSize _requiredThreads;
+	NSInteger _forwardProgress;
+	id _linked;
 }
 @end
 
