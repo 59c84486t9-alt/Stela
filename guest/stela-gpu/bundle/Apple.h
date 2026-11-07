@@ -33,6 +33,7 @@ typedef struct dispatch_group_s *dispatch_group_t;
 typedef const void *CFTypeRef;
 typedef struct __IOSurface *IOSurfaceRef;
 typedef const struct __CFString *CFStringRef;
+typedef const struct __CFDictionary *CFDictionaryRef;
 typedef const struct objc_method *Method;
 typedef void (*IMP)(void);
 
@@ -133,6 +134,11 @@ __attribute__((objc_root_class)) @interface NSObject {
 @interface NSValue : NSObject
 + (instancetype)valueWithNonretainedObject:(id)object;
 @property(readonly) id nonretainedObjectValue;
+@end
+
+@interface NSNumber : NSValue
++ (NSNumber *)numberWithUnsignedLongLong:(unsigned long long)value;
+@property(readonly) unsigned long long unsignedLongLongValue;
 @end
 
 @interface NSError : NSObject
@@ -238,6 +244,14 @@ size_t IOSurfaceGetBytesPerElement(IOSurfaceRef surface);
 size_t IOSurfaceGetBytesPerRow(IOSurfaceRef surface);
 size_t IOSurfaceGetPlaneCount(IOSurfaceRef surface);
 uint32_t IOSurfaceGetPixelFormat(IOSurfaceRef surface);
+IOSurfaceRef IOSurfaceCreate(CFDictionaryRef properties);
+CFTypeRef IOSurfaceCopyValue(IOSurfaceRef surface, CFStringRef key);
+mach_port_t IOSurfaceCreateMachPort(IOSurfaceRef surface);
+IOSurfaceRef IOSurfaceLookupFromMachPort(mach_port_t port);
+kern_return_t mach_port_deallocate(task_t task, mach_port_t name);
+
+#define OBJC_ASSOCIATION_RETAIN_NONATOMIC 1
+void objc_setAssociatedObject(id object, const void *key, id value, uintptr_t policy);
 
 #define DISPATCH_TIME_FOREVER (~0ull)
 typedef struct dispatch_queue_attr_s *dispatch_queue_attr_t;

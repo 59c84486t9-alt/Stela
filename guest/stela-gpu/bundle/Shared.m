@@ -1,7 +1,11 @@
 /*
- * Events and textures other processes open. A handle crosses as the token the
- * service knows its object by, which any coder carries. A handle keeps its
- * object alive in the task that made it; a token alone holds nothing.
+ * Events and textures other processes open. A handle is Metal's own class, as
+ * Apple's drivers' handles are, so a process decodes one before it loads any
+ * driver: a texture's wraps an IOSurface, and an event's the mach port of one.
+ * The surface carries, in its creation properties, the token the service
+ * knows the object by, beside the registry ID and texture properties Metal's
+ * handle and Apple's drivers record there. A handle keeps its object alive in
+ * the task that made it; a token alone holds nothing.
  */
 #include "Bundle.h"
 
@@ -9,6 +13,26 @@ typedef struct {
 	uint64_t token[2];
 	uint64_t registry;
 } StelaShare;
+
+/* What Metal's handles hold that this device reads back. */
+@interface MTLSharedTextureHandle (Stela)
+- (instancetype)initWithIOSurface:(IOSurfaceRef)surface label:(NSString *)label;
+- (IOSurfaceRef)ioSurface;
+- (NSString *)label;
+@end
+
+@interface MTLSharedEventHandle (Stela)
+- (instancetype)initWithSharedEvent:(id)event;
+- (mach_port_t)eventPort;
+- (NSString *)label;
+@end
+
+/* The creation property holding a share, and a texture's descriptor. */
+#define SHARE_KEY @"StelaGPUShare"
+#define RECORD_KEY @"StelaGPUTextureRecord"
+
+/* The object a handle keeps alive, by association. */
+static char shared_object;
 
 static BOOL share_object(StelaGPUObject *object, StelaShare *share, const char *what)
 {
@@ -27,100 +51,81 @@ static BOOL share_object(StelaGPUObject *object, StelaShare *share, const char *
 	return YES;
 }
 
-static BOOL decode_bytes(NSCoder *coder, NSString *key, void *bytes, NSUInteger length)
+static NSNumber *number(uint64_t value)
 {
-	NSUInteger decoded = 0;
-	const uint8_t *from = [coder decodeBytesForKey:key returnedLength:&decoded];
-	if (decoded != length) {
+	return [NSNumber numberWithUnsignedLongLong:value];
+}
+
+/* A surface of no texels carrying a share, and a texture's descriptor as
+ * Apple's drivers record a shared texture's. */
+static IOSurfaceRef carrier(const StelaShare *share, const StelaTextureDescriptorRecord *record, const char *what)
+{
+	NSMutableDictionary *properties = [NSMutableDictionary dictionary];
+	[properties setObject:number(1) forKey:@"IOSurfaceAllocSize"];
+	[properties setObject:@"Metal" forKey:@"IOSurfaceName"];
+	[properties setObject:number(share->registry) forKey:@"kMetalRegistryID"];
+	[properties setObject:[NSData dataWithBytes:share length:sizeof(*share)] forKey:SHARE_KEY];
+	if (record) {
+		[properties setObject:[NSData dataWithBytes:record length:sizeof(*record)] forKey:RECORD_KEY];
+		[properties setObject:number(record->texture_type) forKey:@"kMetalTextureType"];
+		[properties setObject:number(record->pixel_format) forKey:@"kMetalTexturePixelFormat"];
+		[properties setObject:number(record->width) forKey:@"kMetalTextureWidth"];
+		[properties setObject:number(record->height) forKey:@"kMetalTextureHeight"];
+		[properties setObject:number(record->depth) forKey:@"kMetalTextureDepth"];
+		[properties setObject:number(record->mipmap_level_count) forKey:@"kMetalTextureMipmapLevelCount"];
+		[properties setObject:number(record->array_length) forKey:@"kMetalTextureArrayLength"];
+		[properties setObject:number(record->sample_count) forKey:@"kMetalTextureSampleCount"];
+		[properties setObject:number(record->usage) forKey:@"kMetalTextureUsage"];
+		[properties setObject:number(record->options) forKey:@"kMetalTextureResourceOptions"];
+	}
+	IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef)properties);
+	if (!surface) {
+		StelaFailure failure = {.reason = "IOSurface refused the surface carrying the share"};
+		stela_report(what, &failure);
+	}
+	return surface;
+}
+
+/* The bytes of key a carrier surface was created with, exactly length of
+ * them. */
+static BOOL carried(IOSurfaceRef surface, NSString *key, void *bytes, NSUInteger length)
+{
+	if (!surface) {
 		return NO;
 	}
-	memcpy(bytes, from, length);
+	NSDictionary *creation =
+		(__bridge_transfer NSDictionary *)IOSurfaceCopyValue(surface, (__bridge CFStringRef)@"CreationProperties");
+	id value = [creation objectForKey:key];
+	if (![value isKindOfClass:[NSData class]] || [value length] != length) {
+		return NO;
+	}
+	memcpy(bytes, [value bytes], length);
 	return YES;
 }
 
-@interface StelaGPUSharedEventHandle : MTLSharedEventHandle {
+/* What Metal's event handle reads of the event it is made from. */
+@interface StelaGPUEventShare : NSObject {
 @public
-	StelaShare _share;
-	/* In the task that shared it, the event. */
-	id _event;
+	mach_port_t _port;
+	NSString *_label;
 }
-@property(copy) NSString *label;
 @end
 
-@implementation StelaGPUSharedEventHandle
+@implementation StelaGPUEventShare
 
-+ (BOOL)supportsSecureCoding
+- (mach_port_t)eventPort
 {
-	return YES;
+	return _port;
 }
 
-- (void)encodeWithCoder:(NSCoder *)coder
+- (NSString *)label
 {
-	[coder encodeBytes:(const uint8_t *)&_share length:sizeof(_share) forKey:@"share"];
-	[coder encodeObject:self.label forKey:@"label"];
+	return _label;
 }
 
-- (instancetype)initWithCoder:(NSCoder *)coder
+- (uint64_t)labelTraceID
 {
-	self = [super init];
-	if (self) {
-		if (!decode_bytes(coder, @"share", &_share, sizeof(_share))) {
-			return nil;
-		}
-		self.label = [coder decodeObjectOfClass:[NSString class] forKey:@"label"];
-	}
-	return self;
-}
-
-@end
-
-@interface StelaGPUSharedTextureHandle : MTLSharedTextureHandle {
-@public
-	StelaShare _share;
-	StelaTextureDescriptorRecord _record;
-	/* In the task that shared it, the texture. */
-	id _texture;
-}
-@property(copy) NSString *label;
-@end
-
-@implementation StelaGPUSharedTextureHandle
-
-+ (BOOL)supportsSecureCoding
-{
-	return YES;
-}
-
-- (void)encodeWithCoder:(NSCoder *)coder
-{
-	[coder encodeBytes:(const uint8_t *)&_share length:sizeof(_share) forKey:@"share"];
-	[coder encodeBytes:(const uint8_t *)&_record length:sizeof(_record) forKey:@"record"];
-	[coder encodeObject:self.label forKey:@"label"];
-}
-
-- (instancetype)initWithCoder:(NSCoder *)coder
-{
-	self = [super init];
-	if (self) {
-		if (!decode_bytes(coder, @"share", &_share, sizeof(_share))
-		    || !decode_bytes(coder, @"record", &_record, sizeof(_record))) {
-			return nil;
-		}
-		self.label = [coder decodeObjectOfClass:[NSString class] forKey:@"label"];
-	}
-	return self;
-}
-
-- (id)device
-{
-	NSArray *devices = MTLCopyAllDevices();
-	for (NSUInteger index = 0; index < devices.count; index++) {
-		id device = devices[index];
-		if ([device registryID] == _share.registry) {
-			return device;
-		}
-	}
-	return nil;
+	return 0;
 }
 
 @end
@@ -129,12 +134,24 @@ static BOOL decode_bytes(NSCoder *coder, NSString *key, void *bytes, NSUInteger 
 
 - (id)newSharedEventHandle
 {
-	StelaGPUSharedEventHandle *handle = [StelaGPUSharedEventHandle new];
-	if (!share_object(self, &handle->_share, "newSharedEventHandle")) {
+	StelaShare share;
+	if (!share_object(self, &share, "newSharedEventHandle")) {
 		return nil;
 	}
-	handle->_event = self;
-	handle.label = self.label;
+	IOSurfaceRef surface = carrier(&share, NULL, "newSharedEventHandle");
+	if (!surface) {
+		return nil;
+	}
+	StelaGPUEventShare *event = [StelaGPUEventShare new];
+	event->_port = IOSurfaceCreateMachPort(surface);
+	event->_label = self.label;
+	/* The handle takes its own right to the port. */
+	MTLSharedEventHandle *handle = [[MTLSharedEventHandle alloc] initWithSharedEvent:event];
+	mach_port_deallocate(mach_task_self(), event->_port);
+	CFRelease(surface);
+	if (handle) {
+		objc_setAssociatedObject(handle, &shared_object, self, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
 	return handle;
 }
 
@@ -149,13 +166,19 @@ static BOOL decode_bytes(NSCoder *coder, NSString *key, void *bytes, NSUInteger 
 		stela_report("newSharedTextureHandle", &failure);
 		return nil;
 	}
-	StelaGPUSharedTextureHandle *handle = [StelaGPUSharedTextureHandle new];
-	if (!share_object(self, &handle->_share, "newSharedTextureHandle")) {
+	StelaShare share;
+	if (!share_object(self, &share, "newSharedTextureHandle")) {
 		return nil;
 	}
-	handle->_record = _record;
-	handle->_texture = self;
-	handle.label = self.label;
+	IOSurfaceRef surface = carrier(&share, &_record, "newSharedTextureHandle");
+	if (!surface) {
+		return nil;
+	}
+	MTLSharedTextureHandle *handle = [[MTLSharedTextureHandle alloc] initWithIOSurface:surface label:self.label];
+	CFRelease(surface);
+	if (handle) {
+		objc_setAssociatedObject(handle, &shared_object, self, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+	}
 	return handle;
 }
 
@@ -166,19 +189,26 @@ static BOOL decode_bytes(NSCoder *coder, NSString *key, void *bytes, NSUInteger 
 - (id)newSharedEventWithHandle:(id)handle
 {
 	StelaFailure failure = {.reason = "that handle is not this device's"};
-	if (![handle isKindOfClass:[StelaGPUSharedEventHandle class]]) {
+	StelaShare share;
+	IOSurfaceRef surface = [handle isKindOfClass:[MTLSharedEventHandle class]]
+				       ? IOSurfaceLookupFromMachPort([handle eventPort])
+				       : NULL;
+	BOOL found = carried(surface, SHARE_KEY, &share, sizeof(share));
+	if (surface) {
+		CFRelease(surface);
+	}
+	if (!found || share.registry != [self registryID]) {
 		stela_report("newSharedEventWithHandle:", &failure);
 		return nil;
 	}
-	StelaGPUSharedEventHandle *shared = handle;
-	StelaShareToken request = {.token = {shared->_share.token[0], shared->_share.token[1]}};
+	StelaShareToken request = {.token = {share.token[0], share.token[1]}};
 	StelaHandle response;
 	if (STELA_CALL(&_gate, OpenSharedEvent, &request, &response, &failure) != StelaStatusOk) {
 		stela_report("newSharedEventWithHandle:", &failure);
 		return nil;
 	}
 	StelaGPUEvent *event = [[StelaGPUEvent alloc] initWithDevice:self handle:response.handle];
-	event.label = shared.label;
+	event.label = [handle label];
 	return event;
 }
 
@@ -199,12 +229,15 @@ static BOOL decode_bytes(NSCoder *coder, NSString *key, void *bytes, NSUInteger 
 - (id)newSharedTextureWithHandle:(id)handle
 {
 	StelaFailure failure = {.reason = "that handle is not this device's"};
-	if (![handle isKindOfClass:[StelaGPUSharedTextureHandle class]]) {
+	StelaShare share;
+	StelaTextureDescriptorRecord record;
+	IOSurfaceRef surface = [handle isKindOfClass:[MTLSharedTextureHandle class]] ? [handle ioSurface] : NULL;
+	if (!carried(surface, SHARE_KEY, &share, sizeof(share)) || !carried(surface, RECORD_KEY, &record, sizeof(record))
+	    || share.registry != [self registryID]) {
 		stela_report("newSharedTextureWithHandle:", &failure);
 		return nil;
 	}
-	StelaGPUSharedTextureHandle *shared = handle;
-	StelaShareToken request = {.token = {shared->_share.token[0], shared->_share.token[1]}};
+	StelaShareToken request = {.token = {share.token[0], share.token[1]}};
 	StelaTextureResponse response;
 	if (STELA_CALL(&_gate, OpenSharedTexture, &request, &response, &failure) != StelaStatusOk) {
 		stela_report("newSharedTextureWithHandle:", &failure);
@@ -212,9 +245,9 @@ static BOOL decode_bytes(NSCoder *coder, NSString *key, void *bytes, NSUInteger 
 	}
 	StelaGPUTexture *texture = [[StelaGPUTexture alloc] initWithDevice:self
 								  response:&response
-								    record:&shared->_record];
+								    record:&record];
 	texture->_shareable = YES;
-	texture.label = shared.label;
+	texture.label = [handle label];
 	return texture;
 }
 
