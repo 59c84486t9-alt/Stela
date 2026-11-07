@@ -122,7 +122,10 @@ static CFTimeInterval host_time(void)
 		_device = queue->_device;
 		_retains = retains;
 		_referencesLock = OS_UNFAIR_LOCK_INIT;
-		_retained = retains ? [NSMutableArray arrayWithCapacity:64] : nil;
+		/* The stream names its objects by handle until the service takes
+		 * it, so even a buffer without retained references keeps them
+		 * that long; one with them keeps them to completion. */
+		_retained = [NSMutableArray arrayWithCapacity:64];
 		_scheduling = dispatch_group_create();
 		_completion = dispatch_group_create();
 		_scheduledHandlers = [NSMutableArray arrayWithCapacity:2];
@@ -240,7 +243,13 @@ static CFTimeInterval host_time(void)
 	StelaValue serial = {};
 	StelaFailure failure;
 	StelaSpans spans = {.reads = &request.commands, .read_count = 1};
-	if (STELA_CALL_SPANS(&_device->_gate, Commit, &request, &serial, spans, &failure) != StelaStatusOk) {
+	uint32_t status = STELA_CALL_SPANS(&_device->_gate, Commit, &request, &serial, spans, &failure);
+	if (!_retains) {
+		os_unfair_lock_lock(&_referencesLock);
+		[_retained removeAllObjects];
+		os_unfair_lock_unlock(&_referencesLock);
+	}
+	if (status != StelaStatusOk) {
 		_kernelEnd = host_time();
 		[_device failed:self with:failure];
 		return;
