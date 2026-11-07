@@ -1891,6 +1891,27 @@ bindings_reflect_their_structures(void)
    LLVMDisposeMemoryBuffer(input);
 }
 
+/* An unspecialized function's reflection lists the arguments its constants
+ * may leave out; a specialized one, those they keep. */
+static void
+bindings_list_conditional_arguments_until_specialized(void)
+{
+   static struct stela_metal_bindings bindings;
+   struct stela_air_error error;
+   LLVMMemoryBufferRef input = bitcode(conditional);
+   assert(stela_metal_reflect_bindings(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                       "conditional", NULL, 0, &bindings, &error));
+   assert(bindings.binding_count == 3);
+   assert(NAMED(&bindings.bindings[1], "tint") && bindings.bindings[1].index == 1);
+   assert(NAMED(&bindings.bindings[2], "plain") && bindings.bindings[2].index == 1);
+   const uint8_t on = 1;
+   const struct stela_air_constant_value values[] = {{0, &on, 1}};
+   assert(stela_metal_reflect_bindings(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                       "conditional", values, 1, &bindings, &error));
+   assert(bindings.binding_count == 2 && NAMED(&bindings.bindings[1], "tint"));
+   LLVMDisposeMemoryBuffer(input);
+}
+
 #undef NAMED
 #undef TYPED
 
@@ -2968,6 +2989,7 @@ main(void)
    specialized_fragment_calls_preserve_graph_admission();
    arrays_reflect_each_slot();
    bindings_reflect_their_structures();
+   bindings_list_conditional_arguments_until_specialized();
    defined_functions_inline_into_their_callers();
    unresolved_calls_are_rejected_without_a_call_graph();
    stitched_functions_call_their_nodes_in_order();

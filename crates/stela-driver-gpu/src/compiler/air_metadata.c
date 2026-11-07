@@ -1814,6 +1814,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
       }
       /* An argument its predicate may yet leave out reads nothing. */
       bool claims = known && !absent;
+      bool conditional = !known;
       absent = !claims;
       LLVMValueRef param = LLVMGetParam(fn, index);
       unsigned attributes_count = LLVMGetAttributeCountAtIndex(fn, index + 1);
@@ -2206,6 +2207,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          io->type_name = type_name; io->type_name_bytes = type_name_bytes;
          io->used = LLVMGetFirstUse(param) != NULL;
          io->absent = absent;
+         io->conditional = conditional;
          io->layout = (const struct stela_air_layout *)struct_info;
          if (unused && io->used)
             return fail(t, STELA_AIR_METADATA, "used stage argument marked unused");
@@ -2221,7 +2223,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          .plain_buffer_type = primitive != STELA_AIR_PRIMITIVE_UNKNOWN,
          .name = name, .name_bytes = name_bytes, .type_name = type_name, .type_name_bytes = type_name_bytes,
          .primitive = primitive, .type_components = type_components, .used = LLVMGetFirstUse(param) != NULL,
-         .absent = absent,
+         .absent = absent, .conditional = conditional,
       };
    }
    kernel->count = argc;
@@ -2934,7 +2936,8 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
             .name = arg->name, .name_bytes = arg->name_bytes,
             .type_name = arg->type_name, .type_name_bytes = arg->type_name_bytes,
             .primitive = arg->primitive, .type_components = arg->type_components, .used = arg->used,
-            .absent = arg->absent, .layout = (const struct stela_air_layout *)arg->layout,
+            .absent = arg->absent, .conditional = arg->conditional,
+            .layout = (const struct stela_air_layout *)arg->layout,
          };
       }
       unsigned argument_count = entries[i].kernel.count;

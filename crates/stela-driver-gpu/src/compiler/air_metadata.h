@@ -239,6 +239,9 @@ struct stela_air_argument_info {
    unsigned type_components; /* 1..4 only for known reflected builtin types. */
    bool used; /* Actual uses in this AIR module, not a final machine-code liveness claim. */
    bool absent; /* Its [[function_constant]] is false. */
+   /* Its [[function_constant]] is unspecialized: absent, but in the
+    * function's own reflection. */
+   bool conditional;
    const struct stela_air_layout *layout; /* kind 1: the structure it points to, or NULL. */
 };
 struct stela_air_entry {
@@ -333,6 +336,7 @@ struct stela_air_stage_io {
    enum stela_air_depth_qualifier depth; /* Only DEPTH. */
    bool used, invariant;
    bool absent; /* An argument or output whose [[function_constant]] is false. */
+   bool conditional; /* An argument absent until its [[function_constant]] is known. */
    bool argument_buffer; /* Only STAGE_BUFFER: an air.indirect_buffer. */
    /* A VARYING the function interpolates itself, an interpolant<T, P>: its
     * argument is an opaque pointer the air.interpolate_* calls read, and it
@@ -677,6 +681,8 @@ struct stela_air_argument {
    /* Its [[function_constant]] is false: it has no binding, and its index
     * is another argument's to take. */
    bool absent;
+   /* Absent only because its [[function_constant]] is not yet known. */
+   bool conditional;
 };
 struct stela_air_kernel {
    unsigned count, field_count;

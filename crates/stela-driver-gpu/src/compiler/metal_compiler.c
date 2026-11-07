@@ -517,7 +517,9 @@ bind_kernel(const struct stela_air_inspection *info, const struct stela_air_entr
    r->info = info;
    for (unsigned i = 0; i < entry->argument_count; i++) {
       const struct stela_air_argument_info *a = &entry->arguments[i];
-      bool added = a->absent ? true :
+      /* The unspecialized function's reflection lists the arguments its
+       * constants may yet leave out. */
+      bool added = a->absent && !a->conditional ? true :
                    a->kind == 1 ? add_buffer_binding(r, &a->buffer, a->argument_buffer, a->name,
                                                      a->name_bytes, a->type_name,
                                                      a->type_name_bytes, a->used, a->layout) :
@@ -541,7 +543,7 @@ bind_stage(const struct stela_air_inspection *info, const struct stela_air_stage
    r->info = info;
    for (unsigned i = 0; i < entry->input_count; i++) {
       const struct stela_air_stage_io *io = &entry->inputs[i];
-      bool added = io->absent ? true :
+      bool added = io->absent && !io->conditional ? true :
                    io->semantic == STELA_AIR_STAGE_BUFFER || io->semantic == STELA_AIR_PAYLOAD ?
                       add_buffer_binding(r, &io->buffer, io->argument_buffer, io->name,
                                          io->name_bytes, io->type_name, io->type_name_bytes,
