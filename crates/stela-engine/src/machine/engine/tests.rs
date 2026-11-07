@@ -838,6 +838,9 @@ struct PairFaultDevice {
     failed_transfer: Option<usize>,
     /// Fails the transfer of the step whose store made `call`.
     failed_with_call: bool,
+    /// Reports a failure after consuming each store, as a board whose
+    /// settlement failed does.
+    failed_write: bool,
     reads: Vec<u64>,
     stores: Vec<(u64, u64)>,
     transfers: usize,
@@ -878,7 +881,10 @@ impl Devices for PairFaultDevice {
             return Err(DeviceError::Refused("injected register refusal".into()));
         }
         self.stores.push((physical, value));
-        Ok(())
+        match self.failed_write {
+            true => Err(DeviceError::Refused("injected settlement failure".into())),
+            false => Ok(()),
+        }
     }
     fn take_call(&mut self, _: usize) -> Option<GateCall> {
         self.call.take()
@@ -1026,12 +1032,39 @@ fn a_call_runs_in_its_step_when_another_devices_dma_fails() {
     assert!(!machine.host.reaches.is_empty());
 }
 
+#[test]
+fn a_call_runs_in_its_step_when_its_stores_settlement_fails() {
+    const DEVICE: u64 = 0x2_3b3c_0a00;
+    let request = stela_contracts::gate::GateRequest::Serve {
+        gate: 0,
+        connection: core::num::NonZeroU64::MIN,
+        record: u64::MAX - 0xfff,
+    };
+    let devices = PairFaultDevice {
+        call: Some(GateCall::new(0, Arc::new(ReadingService), request)),
+        failed_write: true,
+        ..pair_fault_device()
+    };
+    let mut machine = board(&[], devices, Vec::new());
+    // str x2, [x1]
+    machine.write_register(Register::X(1), DEVICE);
+    machine
+        .device_access(0xf900_0022, DEVICE, DEVICE, true)
+        .unwrap();
+    assert_eq!(machine.devices.stores.len(), 1);
+    assert_eq!(machine.take_unmodeled().len(), 1);
+    // The call ran: its record was out of reach, so the caller's
+    // translations went.
+    assert!(!machine.host.reaches.is_empty());
+}
+
 fn pair_fault_device() -> PairFaultDevice {
     PairFaultDevice {
         call: None,
         refused: None,
         failed_transfer: None,
         failed_with_call: false,
+        failed_write: false,
         reads: Vec::new(),
         stores: Vec::new(),
         transfers: 0,

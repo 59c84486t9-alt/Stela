@@ -88,19 +88,37 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // to: the caller reads its answer at the next instruction, and a call
         // left pending would run at a later step, on a record its stack has
         // since reused.
+        let lock = memory.lock;
+        self.run_call(work, lock);
+        let result = match result {
+            Ok(()) => Ok(()),
+            Err(DeviceError::Refused(reason) | DeviceError::TransferRefused(reason)) => {
+                Err(DeviceError::TransferRefused(reason))
+            }
+            Err(DeviceError::NoDevice) => Err(DeviceError::TransferRefused(refuse!(
+                "device DMA has no service model"
+            ))),
+        };
+        self.observe_parallel_source(SourcePhase::DeviceAdvanceExit);
+        result
+    }
+
+    /// Run the call PE `current`'s store made through a call gate, if any,
+    /// on the address space of the thread that made it.
+    fn run_call(&mut self, work: u64, lock: super::super::mmu::MemoryLocks) {
         if let Some(call) = self.devices.take_call(self.current) {
             // A call from EL0 holds no lock the kernel times, so the count
             // need not wait for it: a compile or a GPU wait can take
             // milliseconds. Any other holds it at what its work earned.
             let at_el0 = self.cpu.pstate.el == 0;
-            let released = self.clock.leave(|| memory.host.counter(), work, at_el0);
+            let released = self.clock.leave(|| self.host.counter(), work, at_el0);
             let mut caller = caller::CallerSpace {
                 controls: self.cpu.controls(self.cpu.regime()),
                 requester: mmu::Requester {
                     unprivileged: true,
                     ..self.cpu.requester()
                 },
-                lock: memory.lock,
+                lock,
                 refused: None,
                 host: &mut self.host,
             };
@@ -126,17 +144,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 );
             }
         }
-        let result = match result {
-            Ok(()) => Ok(()),
-            Err(DeviceError::Refused(reason) | DeviceError::TransferRefused(reason)) => {
-                Err(DeviceError::TransferRefused(reason))
-            }
-            Err(DeviceError::NoDevice) => Err(DeviceError::TransferRefused(refuse!(
-                "device DMA has no service model"
-            ))),
-        };
-        self.observe_parallel_source(SourcePhase::DeviceAdvanceExit);
-        result
+    }
+
+    /// The call a store whose write reported a failure made: what failed
+    /// may have followed the register write, which queued the call.
+    pub(super) fn run_refused_store_call(&mut self) {
+        let work = self.work();
+        let lock = self.devices.memory_lock();
+        self.run_call(work, lock);
     }
 
     /// Carry out the devices' due work around an access. What a device
@@ -271,6 +286,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let written = self.device_write(physical, bytes, value, now);
             if written.is_ok() {
                 self.settle_devices(now);
+            } else {
+                self.run_refused_store_call();
             }
             if let Err(error) = written
                 && let Some(step) =
@@ -395,6 +412,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         let written = self.device_write(element, bytes, value, now);
                         if written.is_ok() {
                             self.settle_devices(now);
+                        } else {
+                            self.run_refused_store_call();
                         }
                         if let Err(error) = written {
                             let at = address + (element - physical);
