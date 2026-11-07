@@ -66,6 +66,9 @@ struct value {
    const struct stela_air_sampler *sampler;
    nir_def *id;
    bool array;
+   /* A texture chosen at run time between this one and a null texture: true
+    * where it is this one. NULL for a texture always present. */
+   nir_def *present;
    /* The argument buffer field of an indirect command buffer or pipeline
     * state whose gpuResourceID is id, which only command calls use. */
    const struct stela_air_field *object;
@@ -390,6 +393,20 @@ pointer_authority(struct value *target, const struct value *root)
    target->sampler = root->sampler;
 }
 
+/* Whether v is a texture argument, or one chosen with null textures, which
+ * a PHI or select may choose with null textures. */
+static bool
+texture_choice_root(const struct value *v)
+{
+   return v && v->texture && !v->array && !v->id && v->pointer_root;
+}
+
+/* Whether a choice the texture choice `target` makes takes `incoming`: the
+ * same texture, a choice of it, or a null texture. *present is where it is
+ * the texture; NULL after reporting why not. */
+static nir_def *texture_choice_present(struct translator *t, const struct value *target,
+                                       LLVMValueRef incoming);
+
 static uint64_t
 gcd(uint64_t a, uint64_t b)
 {
@@ -565,6 +582,9 @@ put_resource(struct translator *t, LLVMValueRef param, const struct stela_air_te
          return fail(t, STELA_AIR_ALLOCATION, "AIR texture allocation failed");
       *copy = *texture;
       value->texture = copy;
+      /* The root of the choices a PHI or select makes with null textures. */
+      if (!length)
+         value->pointer_root = param;
    } else {
       struct stela_air_sampler *copy = ralloc(t->values, struct stela_air_sampler);
       if (!copy)
@@ -3724,9 +3744,32 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
       .operand = texture_operand, .texture = texture_argument, .sampler = sampler_argument,
       .load_word = texture_load_word, .store_word = texture_store_word, .store_at = call_store,
    };
+   /* A texture chosen with null textures is null where the choice is not
+    * it; its other calls are the texture's, made only where it is, and
+    * answer zero elsewhere as a null texture's do. */
+   const struct value *chosen =
+      LLVMGetNumArgOperands(inst) ? find_value(t, LLVMGetOperand(inst, 0)) : NULL;
+   nir_def *present = chosen && chosen->texture ? chosen->present : NULL;
+   static const char is_null[] = "air.is_null_";
+   if (present && name_length > sizeof(is_null) - 1 && !memcmp(name, is_null, sizeof(is_null) - 1)) {
+      *lowered = true;
+      return put_value(t, inst, nir_inot(&t->b, present), 0);
+   }
+   struct memory_guard guard;
+   if (present && !memory_guard_begin(t, present, &guard))
+      return false;
    nir_def *result, *residency;
    bool pair;
-   switch (stela_air_texture_call(&context, inst, name, name_length, &result, &pair, &residency)) {
+   enum stela_air_texture_status status =
+      stela_air_texture_call(&context, inst, name, name_length, &result, &pair, &residency);
+   if (present && status == STELA_AIR_TEXTURE_LOWERED) {
+      if (residency)
+         return fail(t, STELA_AIR_INSTRUCTION, "the residency of a texture chosen with null ones");
+      result = memory_guard_end(t, &guard, result);
+   } else if (present && status == STELA_AIR_TEXTURE_OTHER) {
+      return fail(t, STELA_AIR_MEMORY, "a texture chosen with null ones used other than by texture calls");
+   }
+   switch (status) {
    case STELA_AIR_TEXTURE_OTHER:
       *lowered = false;
       return true;
@@ -4652,6 +4695,24 @@ pointer_select(struct translator *t, LLVMValueRef inst)
 {
    nir_def *condition = get_value(t, LLVMGetOperand(inst, 0));
    LLVMValueRef yes_llvm = LLVMGetOperand(inst, 1), no_llvm = LLVMGetOperand(inst, 2);
+   /* A texture or null textures: that texture, where the choice is it. */
+   const struct value *chosen = find_value(t, yes_llvm);
+   if (!texture_choice_root(chosen))
+      chosen = find_value(t, no_llvm);
+   if (texture_choice_root(chosen) || (stela_air_null_texture(yes_llvm) && stela_air_null_texture(no_llvm))) {
+      if (!texture_choice_root(chosen))
+         return fail(t, STELA_AIR_MEMORY, "a texture choice between null textures only");
+      nir_def *yes = condition ? texture_choice_present(t, chosen, yes_llvm) : NULL;
+      nir_def *no = yes ? texture_choice_present(t, chosen, no_llvm) : NULL;
+      struct value *value = no ? rzalloc(t->values, struct value) : NULL;
+      if (!no)
+         return false;
+      if (!value || !_mesa_hash_table_insert(t->values, inst, value))
+         return fail(t, STELA_AIR_ALLOCATION, "AIR texture choice allocation failed");
+      pointer_authority(value, chosen);
+      value->present = nir_bcsel(&t->b, condition, yes, no);
+      return true;
+   }
    const struct value *yes = pointer_value(t, yes_llvm);
    const struct value *no = yes ? pointer_value(t, no_llvm) : NULL;
    if (!condition || t->error->kind != STELA_AIR_OK)
@@ -5422,6 +5483,8 @@ pointer_anchor(struct translator *t, LLVMValueRef llvm)
       value = private_allocation(t, llvm);
    else if (!value && (LLVMIsAGlobalVariable(llvm) || LLVMIsAConstantPointerNull(llvm)))
       value = pointer_value(t, llvm);
+   if (texture_choice_root(value) && value->pointer_root == llvm)
+      return true;
    return (value && value->access && value->pointer_root == llvm &&
            pointer_space(LLVMTypeOf(llvm)) && value->def &&
            value->def->num_components == 1 && value->def->bit_size == 64) ||
@@ -5463,7 +5526,9 @@ pointer_component(struct translator *t, struct pointer_node **stack,
          LLVMValueRef dependency = pointer_dependency(t, node, j);
          if (!dependency)
             continue;
-         if (LLVMIsAConstantPointerNull(dependency)) {
+         if (LLVMIsAConstantPointerNull(dependency) || stela_air_null_texture(dependency)) {
+            if (null && stela_air_null_texture(null) != stela_air_null_texture(dependency))
+               return fail(t, STELA_AIR_MEMORY, "pointer PHI joins a null texture with a null pointer");
             null = dependency;
             continue;
          }
@@ -5485,9 +5550,11 @@ pointer_component(struct translator *t, struct pointer_node **stack,
          root = candidate;
       }
    }
+   const struct value *rooted = root ? find_value(t, root) : NULL;
    if (!root)
       root = null;
-   else if (null && !numeric_address(find_value(t, root)))
+   else if (null && stela_air_null_texture(null) ? !texture_choice_root(rooted) :
+            null && !numeric_address(rooted))
       return fail(t, STELA_AIR_MEMORY, "pointer PHI joins null with an offset into a resource");
    if (!root)
       return fail(t, STELA_AIR_MEMORY, "pointer PHI has a rootless dependency cycle");
@@ -5638,6 +5705,38 @@ cfg_phi_leaf(struct translator *t, LLVMTypeRef type)
    return value;
 }
 
+/* A PHI choosing a texture or null textures: that texture, with where the
+ * choice is it. */
+static bool
+texture_choice_phi(struct translator *t, LLVMValueRef inst, const struct value *root)
+{
+   struct value *value = rzalloc(t->values, struct value);
+   nir_phi_instr *phi = nir_phi_instr_create(t->b.shader);
+   if (!value || !phi)
+      return fail(t, STELA_AIR_ALLOCATION, "AIR texture PHI allocation failed");
+   nir_def_init(&phi->instr, &phi->def, 1, 1);
+   nir_builder_instr_insert(&t->b, &phi->instr);
+   pointer_authority(value, root);
+   value->present = &phi->def;
+   return _mesa_hash_table_insert(t->values, inst, value) != NULL ||
+      fail(t, STELA_AIR_ALLOCATION, "AIR PHI value map allocation failed");
+}
+
+static nir_def *
+texture_choice_present(struct translator *t, const struct value *target, LLVMValueRef incoming)
+{
+   if (stela_air_null_texture(incoming))
+      return nir_imm_false(&t->b);
+   if (LLVMIsUndef(incoming))
+      return nir_undef(&t->b, 1, 1);
+   const struct value *v = find_value(t, incoming);
+   if (!texture_choice_root(v) || v->pointer_root != target->pointer_root) {
+      fail(t, STELA_AIR_MEMORY, "a texture choice joins distinct textures");
+      return NULL;
+   }
+   return v->present ? v->present : nir_imm_true(&t->b);
+}
+
 static bool
 cfg_declare_phi(struct translator *t, LLVMValueRef inst)
 {
@@ -5645,6 +5744,12 @@ cfg_declare_phi(struct translator *t, LLVMValueRef inst)
    unsigned leaves;
    if (!cfg_phi_shape(t, type, &leaves))
       return false;
+   if (pointer_space(type)) {
+      struct pointer_node *node = pointer_node(t, inst);
+      const struct value *root = node && !LLVMIsALoadInst(node->root) ? find_value(t, node->root) : NULL;
+      if (texture_choice_root(root))
+         return texture_choice_phi(t, inst, root);
+   }
    struct value *value;
    if (leaves) {
       value = rzalloc(t->values, struct value);
@@ -5823,6 +5928,16 @@ cfg_emit(struct translator *t)
             /* Constants are materialized before the predecessor's jump. Uses
              * of loop-carried PHIs retain their original simultaneous defs. */
             t->b.cursor = nir_before_instr(nir_block_last_instr(pred->end));
+            if (target->present) {
+               nir_def *present = texture_choice_present(t, target, incoming);
+               if (!present)
+                  return false;
+               nir_phi_instr *phi = nir_instr_as_phi(nir_def_instr(target->present));
+               nir_phi_src *source = nir_phi_instr_add_src(phi, pred->end, present);
+               list_addtail(&source->src.use_link, &present->uses);
+               sources++;
+               continue;
+            }
             if (target->pointer_root && !joined_pointer(target, incoming, find_value(t, incoming)))
                return fail(t, STELA_AIR_MEMORY, "pointer PHI incoming authority differs from proof");
             struct value *aggregate = target->aggregate_count ? aggregate_value(t, incoming) : NULL;

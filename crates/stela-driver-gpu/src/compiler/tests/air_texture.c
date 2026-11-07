@@ -774,6 +774,58 @@ null_textures_bind_nothing(void)
    ralloc_free(shader);
 }
 
+/* Textures chosen at run time between a bound one and a null one, through a
+ * PHI and a select: each call on the bound texture runs only where it was
+ * chosen, and is_null_texture reports the choice. */
+static void
+textures_choose_null_at_run_time(void)
+{
+   static const char *chosen =
+      "declare ptr addrspace(1) @air.get_null_texture_2d()\n"
+      "declare i1 @air.is_null_texture_2d(ptr addrspace(1))\n"
+      "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+      " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+      "%use = icmp ne i32 %tid, 0\n"
+      "br i1 %use, label %join, label %none\n"
+      "none:\n"
+      "%null = call ptr addrspace(1) @air.get_null_texture_2d()\n"
+      "br label %join\n"
+      "join:\n"
+      "%t = phi ptr addrspace(1) [ %null, %none ], [ %src, %0 ]\n"
+      "%n = call ptr addrspace(1) @air.get_null_texture_2d()\n"
+      "%d = select i1 %use, ptr addrspace(1) %dst, ptr addrspace(1) %n\n"
+      "%s = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %t,"
+      " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.25>, i1 true, <2 x i32> zeroinitializer,"
+      " i1 false, float 0.0, float 0.0, i32 0)\n"
+      "%texel = extractvalue { <4 x float>, i8 } %s, 0\n"
+      "call void @air.write_texture_2d.v4f32(ptr addrspace(1) %d, <2 x i32> <i32 3, i32 4>,"
+      " <4 x float> %texel, i32 0, i32 2)\n"
+      "%is = call i1 @air.is_null_texture_2d(ptr addrspace(1) %t)\n"
+      "%w = call i32 @air.get_width_texture_2d(ptr addrspace(1) %t, i32 0)\n"
+      "%bit = zext i1 %is to i32\n"
+      "%v = add i32 %w, %bit\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\n"
+      "ret void\n}\n";
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(chosen, kernel_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "chosen: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "chosen null texture kernel");
+   assert(count(shader).first[nir_texop_txl]);
+   ralloc_free(shader);
+   /* Two different bound textures are no choice a null one makes. */
+   static const char *distinct =
+      "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+      " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+      "%use = icmp ne i32 %tid, 0\n"
+      "%t = select i1 %use, ptr addrspace(1) %src, ptr addrspace(1) %dst\n"
+      "%w = call i32 @air.get_width_texture_2d(ptr addrspace(1) %t, i32 0)\n"
+      "store i32 %w, ptr addrspace(1) %out, align 4\n"
+      "ret void\n}\n";
+   assert(!kernel(distinct, kernel_metadata, &error));
+}
+
 /* Two samples join through a PHI of their results, without their residency. */
 static void
 samples_join_through_phis(void)
@@ -1092,6 +1144,7 @@ main(void)
    storage_levels_select_their_descriptor();
    sparse_texels_report_their_residency();
    null_textures_bind_nothing();
+   textures_choose_null_at_run_time();
    block_reads_fetch_each_texel();
    samples_join_through_phis();
    short_indices_widen_their_positions();
