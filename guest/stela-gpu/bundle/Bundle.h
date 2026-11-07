@@ -141,6 +141,12 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 		error:(NSError **)error;
 @end
 
+/* Library.m: the dynamic library in the file at path, which the libraries
+ * linking it load by install name. */
+@interface StelaGPUDevice (Libraries)
+- (id)dynamicLibraryAtPath:(NSString *)path error:(NSError **)error;
+@end
+
 /* Stitching.m; an archive checks the libraries added to it. */
 @interface StelaGPUDevice (Stitching)
 - (id)newLibraryWithStitchedDescriptor:(id)descriptor error:(NSError **)error;
@@ -261,8 +267,20 @@ NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state);
 	BOOL _identified;
 	NSUInteger _type;
 	NSString *_installName;
+	/* The path of the file it was read from, whose directory `@loader_path`
+	 * names. */
+	NSString *_path;
+	/* The dynamic libraries it links, by install name, loaded as pipelines
+	 * first need them. */
+	NSArray *_linkedNames;
+	NSMutableDictionary *_linked;
+	os_unfair_lock _linkLock;
 }
 - (NSUInteger)type;
+/* Libraries to `preloaded`, the dynamic libraries this one links that none
+ * of them provides: nil, with *error set, when one does not load. */
+- (NSArray *)libraries:(NSArray *)preloaded withLinked:(NSError **)error;
+- (BOOL)link:(NSMutableArray *)libraries error:(NSError **)error;
 @end
 
 /* The AIR Metal `source` compiles to under `MTLCompileOptions`. */

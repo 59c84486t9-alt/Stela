@@ -295,6 +295,8 @@ int sysctlbyname(const char *name, void *value, size_t *size, void *new_value, s
 int snprintf(char *text, size_t size, const char *format, ...);
 int dprintf(int file, const char *format, ...);
 char *strchr(const char *text, int character);
+char *strrchr(const char *text, int character);
+int _NSGetExecutablePath(char *path, uint32_t *size);
 void *memchr(const void *bytes, int value, size_t length);
 int open(const char *path, int flags, ...);
 int close(int file);

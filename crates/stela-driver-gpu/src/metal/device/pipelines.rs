@@ -79,6 +79,9 @@ struct LibraryObject {
     extern_names: Vec<String>,
     dynamic: bool,
     install_name: Option<String>,
+    /// The install names of the dynamic libraries its bytes say it links,
+    /// which the frontend loads where they are installed.
+    linked: Vec<String>,
     /// `MTLCompileOptions.libraries` and a stitched library's functions'
     /// libraries, which it keeps.
     dependencies: Vec<LibraryId>,
@@ -581,6 +584,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let (names, extern_names) = (names(functions), names(externs));
         let dynamic = parsed.header.kind == Header::DYNAMIC;
         let install_name = parsed.install_name.map(String::from);
+        let linked = parsed.linked.iter().copied().map(String::from).collect();
         let library = self.compiler.add_library(data)?;
         let index = self.pipelines.libraries.insert(LibraryObject {
             library,
@@ -588,6 +592,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             extern_names,
             dynamic,
             install_name,
+            linked,
             dependencies: Vec::new(),
             preloads: false,
             stitched: Vec::new(),
@@ -623,6 +628,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             extern_names: held.extern_names.clone(),
             dynamic: held.dynamic,
             install_name: held.install_name.clone(),
+            linked: held.linked.clone(),
             dependencies: Vec::new(),
             preloads: false,
             stitched: Vec::new(),
@@ -641,6 +647,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `externFunctionNames`.
     pub fn library_extern_function_names(&self, id: LibraryId) -> Result<&[String]> {
         Ok(&self.pipelines.libraries.get(id.0)?.extern_names)
+    }
+
+    /// The install names of the dynamic libraries the library links.
+    pub fn library_linked_names(&self, id: LibraryId) -> Result<&[String]> {
+        Ok(&self.pipelines.libraries.get(id.0)?.linked)
     }
 
     /// `type` and `installName`.

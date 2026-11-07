@@ -206,6 +206,9 @@ pub struct Library<'a> {
     /// A dynamic library's install name, in the section its `HDYN` tag
     /// locates.
     pub install_name: Option<&'a str>,
+    /// The install names of the dynamic libraries it links, that section's
+    /// `DYNL` tags in order, which Metal loads to resolve its imports.
+    pub linked: Vec<&'a str>,
 }
 
 impl<'a> Library<'a> {
@@ -286,11 +289,13 @@ impl<'a> Library<'a> {
         } else {
             None
         };
+        let (install_name, linked) = dynamic_names(data, header_extensions)?;
         Ok(Self {
             header,
             functions,
             header_extensions,
-            install_name: install_name(data, header_extensions)?,
+            install_name,
+            linked,
         })
     }
 
@@ -384,8 +389,12 @@ fn name(value: &[u8], offset: usize) -> Result<&str> {
     str::from_utf8(name).map_err(|_| error(offset, ErrorKind::Name))
 }
 
-/// The `NAME` of the tagged section an `HDYN` tag locates by offset and size.
-fn install_name<'a>(data: &'a [u8], extensions: Option<Tags<'a>>) -> Result<Option<&'a str>> {
+/// The `NAME` of the tagged section an `HDYN` tag locates by offset and
+/// size, and the install names its `DYNL` tags list.
+fn dynamic_names<'a>(
+    data: &'a [u8],
+    extensions: Option<Tags<'a>>,
+) -> Result<(Option<&'a str>, Vec<&'a str>)> {
     for tag in extensions.into_iter().flatten() {
         let tag = tag?;
         if tag.name != *b"HDYN" {
@@ -396,14 +405,18 @@ fn install_name<'a>(data: &'a [u8], extensions: Option<Tags<'a>>) -> Result<Opti
         }
         let offset = host_size(u64_at(tag.value, 0)?, tag.offset)?;
         let size = host_size(u64_at(tag.value, 8)?, tag.offset)?;
+        let (mut install_name, mut linked) = (None, Vec::new());
         for tag in Tags::checked(bytes(data, offset, size)?, offset)? {
             let tag = tag?;
-            if tag.name == *b"NAME" {
-                return name(tag.value, tag.offset).map(Some);
+            if tag.name == *b"NAME" && install_name.is_none() {
+                install_name = Some(name(tag.value, tag.offset)?);
+            } else if tag.name == *b"DYNL" {
+                linked.push(name(tag.value, tag.offset)?);
             }
         }
+        return Ok((install_name, linked));
     }
-    Ok(None)
+    Ok((None, Vec::new()))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -621,12 +634,18 @@ pub(crate) mod tests {
 
     /// A library of `kind` whose module's wrapper names `cpu_type`.
     pub(crate) fn container(duplicate: bool, kind: u8, cpu_type: u32) -> Vec<u8> {
-        container_named(duplicate, kind, cpu_type, None)
+        container_named(duplicate, kind, cpu_type, None, &[])
     }
 
     /// A dynamic library of the given install name tag value.
     pub(crate) fn dynamic(install_name: &[u8]) -> Vec<u8> {
-        container_named(false, Header::DYNAMIC, u32::MAX, Some(install_name))
+        container_named(false, Header::DYNAMIC, u32::MAX, Some(install_name), &[])
+    }
+
+    /// An executable library named `file` that links the dynamic libraries
+    /// of the install name tag values `linked`, as Metal's linker writes it.
+    pub(crate) fn linking(file: &[u8], linked: &[&[u8]]) -> Vec<u8> {
+        container_named(false, 0, u32::MAX, Some(file), linked)
     }
 
     fn container_named(
@@ -634,6 +653,7 @@ pub(crate) mod tests {
         kind: u8,
         cpu_type: u32,
         install_name: Option<&[u8]>,
+        linked: &[&[u8]],
     ) -> Vec<u8> {
         let mut module = vec![];
         for word in [LLVM_WRAPPER_MAGIC, 0, 20, 8, cpu_type] {
@@ -691,6 +711,9 @@ pub(crate) mod tests {
         if let (Some(field), Some(name)) = (dynamic_header, install_name) {
             let section = data.len();
             tag(&mut data, b"NAME", name);
+            for linked in linked {
+                tag(&mut data, b"DYNL", linked);
+            }
             data.extend_from_slice(b"ENDT");
             let size = data.len() - section;
             u64_field(&mut data, field, section);
@@ -771,6 +794,28 @@ pub(crate) mod tests {
         assert_eq!(library.header.kind, Header::DYNAMIC);
         assert_eq!(library.install_name, Some("lib/name"));
         assert_eq!(library.functions()[0].air().unwrap().bitcode, air);
+    }
+
+    #[test]
+    fn libraries_name_the_dynamic_libraries_they_link() {
+        let data = linking(
+            b"user.metallib\0",
+            &[b"@loader_path/dynamic.metallib\0", b"/abs/other.metallib\0"],
+        );
+        let library = Library::parse(&data).unwrap();
+        assert_eq!(
+            library.linked,
+            ["@loader_path/dynamic.metallib", "/abs/other.metallib"]
+        );
+        assert!(Library::parse(&fixture(false)).unwrap().linked.is_empty());
+        assert!(
+            Library::parse(&dynamic(b"lib\0"))
+                .unwrap()
+                .linked
+                .is_empty()
+        );
+        let data = linking(b"user.metallib\0", &[b"unterminated"]);
+        assert_eq!(Library::parse(&data).unwrap_err().kind, ErrorKind::Name);
     }
 
     #[test]

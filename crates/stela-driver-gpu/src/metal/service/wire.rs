@@ -157,8 +157,9 @@ records! {
         pub data: Span,
     }
 
-    /// `LibraryFunctionNames` and `LibraryExternFunctionNames`: the span
-    /// receiving the names, each ended by a zero byte.
+    /// `LibraryFunctionNames`, `LibraryExternFunctionNames` and
+    /// `LibraryLinkedNames`: the span receiving the names, each ended by a
+    /// zero byte.
     pub struct LibraryFunctionNamesRequest {
         pub library: u64,
         pub out: Span,
@@ -1031,6 +1032,9 @@ operations! {
     LibraryFunctionNames = 0x0102 => LibraryFunctionNamesRequest, Length;
     /// `externFunctionNames`, as `LibraryFunctionNames` gives names.
     LibraryExternFunctionNames = 0x010d => LibraryFunctionNamesRequest, Length;
+    /// The install names of the dynamic libraries a library links, as
+    /// `LibraryFunctionNames` gives names.
+    LibraryLinkedNames = 0x010e => LibraryFunctionNamesRequest, Length;
     /// `type` and `installName`.
     LibraryIdentity = 0x0107 => LibraryIdentityRequest, LibraryIdentityResponse;
     /// The bytes `serializeToURL:` writes.

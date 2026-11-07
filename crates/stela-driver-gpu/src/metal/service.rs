@@ -35,6 +35,7 @@ use core::{
     ops::Range,
 };
 use identity::{DeviceEpoch, ObjectHandle, ObjectTable};
+use libraries::LibraryNames;
 pub use shared::{Served, ServiceHost, SharedService};
 use stela_contracts::gate::MemoryRange;
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
@@ -473,8 +474,13 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 call.reply(&wire::Empty {})
             }
             Operation::NewLibrary => self.new_library(&mut call),
-            Operation::LibraryFunctionNames => self.library_function_names(&mut call, false),
-            Operation::LibraryExternFunctionNames => self.library_function_names(&mut call, true),
+            Operation::LibraryFunctionNames => {
+                self.library_names(&mut call, LibraryNames::Functions)
+            }
+            Operation::LibraryExternFunctionNames => {
+                self.library_names(&mut call, LibraryNames::Externs)
+            }
+            Operation::LibraryLinkedNames => self.library_names(&mut call, LibraryNames::Linked),
             Operation::LibraryIdentity => self.library_identity(&mut call),
             Operation::LibraryData => self.library_data(&mut call),
             Operation::NewSourceLibrary => self.new_source_library(&mut call),

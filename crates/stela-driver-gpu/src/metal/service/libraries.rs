@@ -21,6 +21,15 @@ use crate::metal::{
 };
 use alloc::{string::String, vec::Vec};
 
+/// Which names of a library `LibraryFunctionNames` and the operations
+/// like it list.
+#[derive(Clone, Copy)]
+pub(super) enum LibraryNames {
+    Functions,
+    Externs,
+    Linked,
+}
+
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn new_library(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewLibraryRequest = call.request()?;
@@ -71,19 +80,19 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         call.reply(&handle)
     }
 
-    /// The names of the library's functions, or with `externs` of its
-    /// extern functions.
-    pub(super) fn library_function_names(
+    /// The names of the library's functions, its extern functions or the
+    /// dynamic libraries it links, as `names` says.
+    pub(super) fn library_names(
         &mut self,
         call: &mut Call,
-        externs: bool,
+        names: LibraryNames,
     ) -> Result<(), Fault> {
         let request: LibraryFunctionNamesRequest = call.request()?;
         let library = self.object::<LibraryId>(call.connection, request.library)?;
-        let listed = if externs {
-            self.device.library_extern_function_names(library)?
-        } else {
-            self.device.library_function_names(library)?
+        let listed = match names {
+            LibraryNames::Functions => self.device.library_function_names(library)?,
+            LibraryNames::Externs => self.device.library_extern_function_names(library)?,
+            LibraryNames::Linked => self.device.library_linked_names(library)?,
         };
         let mut names = Vec::new();
         for name in listed {

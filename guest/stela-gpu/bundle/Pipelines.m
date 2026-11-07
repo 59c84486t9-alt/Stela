@@ -49,6 +49,16 @@ typedef struct {
 	size_t used;
 } Linked;
 
+/* The libraries a stage links: those it preloads, and the dynamic libraries
+ * its function's library links that none of those provides. NO, with
+ * *error set, when one of those does not load. */
+static BOOL stage_libraries(StelaGPUFunction *function, NSArray *preloaded, NSArray **libraries, NSError **error)
+{
+	StelaGPULibrary *library = function ? function->_library : nil;
+	*libraries = library ? [library libraries:preloaded withLinked:error] : preloaded;
+	return !library || *libraries;
+}
+
 static void linked_functions(Linked *linked, id functions, NSArray *libraries, NSUInteger depth,
 			     StelaLinkedFunctionsRecord *record)
 {
@@ -599,10 +609,15 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	if (layout) {
 		attributes_record(layout, request.vertex_descriptor.attributes, request.vertex_descriptor.layouts);
 	}
+	NSArray *vertexLibraries, *fragmentLibraries;
+	if (!stage_libraries(vertex, [descriptor vertexPreloadedLibraries], &vertexLibraries, error) ||
+	    !stage_libraries(fragment, [descriptor fragmentPreloadedLibraries], &fragmentLibraries, error)) {
+		return nil;
+	}
 	Linked linked = {};
-	linked_functions(&linked, [descriptor vertexLinkedFunctions], [descriptor vertexPreloadedLibraries],
+	linked_functions(&linked, [descriptor vertexLinkedFunctions], vertexLibraries,
 			 [descriptor maxVertexCallStackDepth], &request.vertex_linked_functions);
-	linked_functions(&linked, [descriptor fragmentLinkedFunctions], [descriptor fragmentPreloadedLibraries],
+	linked_functions(&linked, [descriptor fragmentLinkedFunctions], fragmentLibraries,
 			 [descriptor maxFragmentCallStackDepth], &request.fragment_linked_functions);
 	request.archives = archives_record(&linked, descriptor, options, archive);
 	StelaRenderPipelineResponse response;
@@ -692,10 +707,16 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 				    : 0),
 	};
 	targets_record(descriptor, &request.targets);
+	NSArray *objectLibraries, *meshLibraries, *fragmentLibraries;
+	if (!stage_libraries(object, nil, &objectLibraries, error) || !stage_libraries(mesh, nil, &meshLibraries, error) ||
+	    !stage_libraries(fragment, nil, &fragmentLibraries, error)) {
+		return nil;
+	}
 	Linked linked = {};
-	linked_functions(&linked, [descriptor objectLinkedFunctions], nil, 1, &request.object_linked_functions);
-	linked_functions(&linked, [descriptor meshLinkedFunctions], nil, 1, &request.mesh_linked_functions);
-	linked_functions(&linked, [descriptor fragmentLinkedFunctions], nil, 1, &request.fragment_linked_functions);
+	linked_functions(&linked, [descriptor objectLinkedFunctions], objectLibraries, 1, &request.object_linked_functions);
+	linked_functions(&linked, [descriptor meshLinkedFunctions], meshLibraries, 1, &request.mesh_linked_functions);
+	linked_functions(&linked, [descriptor fragmentLinkedFunctions], fragmentLibraries, 1,
+			 &request.fragment_linked_functions);
 	request.archives = archives_record(&linked, descriptor, options, archive);
 	StelaRenderPipelineResponse response;
 	StelaFailure failure;
@@ -784,9 +805,13 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 		request.stage_input.index_type = [input indexType];
 		request.stage_input.index_buffer_index = [input indexBufferIndex];
 	}
+	NSArray *libraries;
+	if (!stage_libraries(function, [descriptor preloadedLibraries], &libraries, error)) {
+		return nil;
+	}
 	Linked linked = {};
-	linked_functions(&linked, [descriptor linkedFunctions], [descriptor preloadedLibraries],
-			 [descriptor maxCallStackDepth], &request.linked_functions);
+	linked_functions(&linked, [descriptor linkedFunctions], libraries, [descriptor maxCallStackDepth],
+			 &request.linked_functions);
 	request.archives = archives_record(&linked, descriptor, options, archive);
 	StelaComputePipelineResponse response;
 	StelaFailure failure;

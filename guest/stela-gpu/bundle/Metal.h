@@ -174,6 +174,8 @@ enum {
 };
 enum {
 	MTLDynamicLibraryErrorInvalidFile = 1,
+	MTLDynamicLibraryErrorUnresolvedInstallName = 3,
+	MTLDynamicLibraryErrorDependencyLoadFailure = 4,
 	MTLDynamicLibraryErrorUnsupported = 5,
 };
 enum {

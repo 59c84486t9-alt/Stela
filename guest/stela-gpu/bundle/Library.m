@@ -745,6 +745,107 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 	return [self namesFrom:StelaOperationLibraryExternFunctionNames];
 }
 
+/* Where an install name puts a dynamic library, into path: beside the
+ * library at loader that links it, beside the executable, or at an absolute
+ * path. NO for a name that says none of those. */
+static BOOL install_path(const char *name, NSString *loader, char *path, size_t size)
+{
+	static const char loaderPath[] = "@loader_path/", executablePath[] = "@executable_path/";
+	char directory[1024];
+	const char *rest;
+	if (!strncmp(name, loaderPath, sizeof(loaderPath) - 1)) {
+		if (!loader || strlcpy(directory, loader.UTF8String, sizeof(directory)) >= sizeof(directory)) {
+			return NO;
+		}
+		rest = name + sizeof(loaderPath) - 1;
+	} else if (!strncmp(name, executablePath, sizeof(executablePath) - 1)) {
+		uint32_t length = sizeof(directory);
+		if (_NSGetExecutablePath(directory, &length) != 0) {
+			return NO;
+		}
+		rest = name + sizeof(executablePath) - 1;
+	} else {
+		return name[0] == '/' && strlcpy(path, name, size) < size;
+	}
+	char *slash = strrchr(directory, '/');
+	if (!slash) {
+		return NO;
+	}
+	slash[1] = 0;
+	return (size_t)snprintf(path, size, "%s%s", directory, rest) < size;
+}
+
+- (NSArray *)libraries:(NSArray *)preloaded withLinked:(NSError **)error
+{
+	NSMutableArray *libraries = [NSMutableArray arrayWithCapacity:preloaded.count + 1];
+	for (NSUInteger i = 0; i < preloaded.count; i++) {
+		[libraries addObject:preloaded[i]];
+	}
+	return [self link:libraries error:error] ? libraries : nil;
+}
+
+/* Adds to libraries the dynamic libraries this one links, and theirs, that
+ * none there already provides. */
+- (BOOL)link:(NSMutableArray *)libraries error:(NSError **)error
+{
+	/* The lock guards the names and loaded libraries, never a load, which
+	 * links further libraries under their own locks. */
+	os_unfair_lock_lock(&_linkLock);
+	if (!_linkedNames) {
+		_linkedNames = [self namesFrom:StelaOperationLibraryLinkedNames];
+		_linked = [NSMutableDictionary dictionary];
+	}
+	NSArray *names = _linkedNames;
+	os_unfair_lock_unlock(&_linkLock);
+	for (NSUInteger i = 0; i < names.count; i++) {
+		NSString *name = names[i];
+		/* A library of that install name resolves its imports. */
+		BOOL provided = NO;
+		for (NSUInteger j = 0; j < libraries.count; j++) {
+			provided |= [[libraries[j] installName] isEqualToString:name];
+		}
+		if (provided) {
+			continue;
+		}
+		os_unfair_lock_lock(&_linkLock);
+		StelaGPULibrary *library = _linked[name];
+		os_unfair_lock_unlock(&_linkLock);
+		if (!library) {
+			char path[1024];
+			BOOL placed = install_path(name.UTF8String, _path, path, sizeof(path));
+			library = placed ? [_device dynamicLibraryAtPath:[NSString stringWithUTF8String:path] error:NULL]
+					 : nil;
+			if (!library) {
+				StelaFailure failure = {};
+				snprintf(failure.reason, sizeof(failure.reason), "the dynamic library %s it links %s",
+					 name.UTF8String, placed ? "did not load" : "is at no place its install name says");
+				stela_report("a library's linked dynamic library", &failure);
+				if (error) {
+					*error = stela_error(MTLDynamicLibraryDomain,
+							     placed ? MTLDynamicLibraryErrorDependencyLoadFailure
+								    : MTLDynamicLibraryErrorUnresolvedInstallName,
+							     &failure);
+				}
+				return NO;
+			}
+			os_unfair_lock_lock(&_linkLock);
+			/* Another pipeline may have loaded it meanwhile. */
+			StelaGPULibrary *loaded = _linked[name];
+			if (loaded) {
+				library = loaded;
+			} else {
+				[_linked setObject:library forKey:name];
+			}
+			os_unfair_lock_unlock(&_linkLock);
+		}
+		[libraries addObject:library];
+		if (![library link:libraries error:error]) {
+			return NO;
+		}
+	}
+	return YES;
+}
+
 /* What the library says of itself, once: a library's bytes never change. */
 - (void)identify
 {
@@ -1044,13 +1145,21 @@ static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
 		stela_report([[NSString stringWithFormat:@"a library at %@", url] UTF8String], &failure);
 		return nil;
 	}
-	return [self libraryWithBytes:data.bytes length:data.length error:error];
+	StelaGPULibrary *library = [self libraryWithBytes:data.bytes length:data.length error:error];
+	if (library) {
+		library->_path = [NSString stringWithUTF8String:url.fileSystemRepresentation];
+	}
+	return library;
 }
 
 - (id)newLibraryWithFile:(NSString *)path error:(NSError **)error
 {
 	NSData *data = [NSData dataWithContentsOfFile:path options:STELA_DATA_MAPPED error:error];
-	return data ? [self libraryWithBytes:data.bytes length:data.length error:error] : nil;
+	StelaGPULibrary *library = data ? [self libraryWithBytes:data.bytes length:data.length error:error] : nil;
+	if (library) {
+		library->_path = path;
+	}
+	return library;
 }
 
 - (id)newDefaultLibraryWithBundle:(id)bundle error:(NSError **)error
@@ -1100,6 +1209,19 @@ static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
 {
 	NSData *data = [NSData dataWithContentsOfURL:url options:0 error:error];
 	StelaGPULibrary *library = data ? [self libraryWithBytes:data.bytes length:data.length error:error] : nil;
+	if (library) {
+		library->_path = [NSString stringWithUTF8String:url.fileSystemRepresentation];
+	}
+	return library ? [self dynamicLibrary:library error:error] : nil;
+}
+
+- (id)dynamicLibraryAtPath:(NSString *)path error:(NSError **)error
+{
+	NSData *data = [NSData dataWithContentsOfFile:path options:0 error:error];
+	StelaGPULibrary *library = data ? [self libraryWithBytes:data.bytes length:data.length error:error] : nil;
+	if (library) {
+		library->_path = path;
+	}
 	return library ? [self dynamicLibrary:library error:error] : nil;
 }
 

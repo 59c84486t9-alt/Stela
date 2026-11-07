@@ -36,6 +36,12 @@ const OPERATIONS: &[(&str, Reach)] = &[
         "LibraryExternFunctionNames",
         Reach::Call("externFunctionNames"),
     ),
+    (
+        "LibraryLinkedNames",
+        Reach::Without(
+            "pipelines of a library loaded from a file load the dynamic libraries it links",
+        ),
+    ),
     ("LibraryIdentity", Reach::Call("installName")),
     ("LibraryData", Reach::Call("[dynamic serializeToURL:")),
     ("NewSourceLibrary", Reach::Call("newLibraryWithSource:")),

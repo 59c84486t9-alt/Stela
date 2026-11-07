@@ -46,7 +46,10 @@ use crate::metal::{
 use alloc::{string::String, vec::Vec};
 
 use super::fixture::{LIBRARY, MockBackend, MockCompiler, TestDevice, device, device_on};
-use crate::metal::library::{self, Function, tests::fixture};
+use crate::metal::library::{
+    self, Function,
+    tests::{fixture, linking},
+};
 
 fn options(storage_mode: StorageMode) -> ResourceOptions {
     ResourceOptions {
@@ -1316,6 +1319,28 @@ fn libraries_of_held_bytes_share_them() {
     // Each lives on without the other.
     device.destroy_library(LIBRARY).unwrap();
     assert!(device.new_function(shared, "kernel", Some(&[])).is_ok());
+}
+
+#[test]
+fn libraries_name_the_dynamic_libraries_they_link() {
+    let mut device = device();
+    let data = linking(b"user.metallib\0", &[b"@loader_path/dynamic.metallib\0"]);
+    let library = device.new_library(data.clone()).unwrap();
+    assert_eq!(
+        device.library_linked_names(library),
+        Ok(&[String::from("@loader_path/dynamic.metallib")][..])
+    );
+    // A library of the same bytes links the same.
+    let shared = device
+        .share_library::<Error>(data.len() as u64, |held| Ok(held == data.as_slice()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        device.library_linked_names(shared),
+        device.library_linked_names(library)
+    );
+    let plain = device.new_library(fixture(false)).unwrap();
+    assert_eq!(device.library_linked_names(plain), Ok(&[][..]));
 }
 
 #[test]
