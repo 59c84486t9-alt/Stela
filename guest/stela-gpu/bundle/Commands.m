@@ -25,6 +25,8 @@ static CFTimeInterval host_time(void)
 		_device = device;
 		_lock = OS_UNFAIR_LOCK_INIT;
 		_enqueued = [NSMutableArray arrayWithCapacity:16];
+		_gpuPriority = 1;
+		_backgroundGPUPriority = 2;
 	}
 	return self;
 }

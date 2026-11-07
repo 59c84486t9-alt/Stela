@@ -24,10 +24,38 @@
 {
 }
 
-/* Every queue here runs at the device's one priority. */
+/* Every queue here runs at the device's one priority, and answers the
+ * priorities its callers set. */
 - (BOOL)setGPUPriority:(NSUInteger)priority
 {
+	_gpuPriority = priority;
 	return YES;
+}
+
+- (BOOL)setGPUPriority:(NSUInteger)priority offset:(NSUInteger)offset
+{
+	return [self setGPUPriority:priority];
+}
+
+- (NSUInteger)getGPUPriority
+{
+	return _gpuPriority;
+}
+
+- (BOOL)setBackgroundGPUPriority:(NSUInteger)priority
+{
+	_backgroundGPUPriority = priority;
+	return YES;
+}
+
+- (BOOL)setBackgroundGPUPriority:(NSUInteger)priority offset:(NSUInteger)offset
+{
+	return [self setBackgroundGPUPriority:priority];
+}
+
+- (NSUInteger)getBackgroundGPUPriority
+{
+	return _backgroundGPUPriority;
 }
 
 @end
