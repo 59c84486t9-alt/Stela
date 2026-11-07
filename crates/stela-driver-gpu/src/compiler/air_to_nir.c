@@ -5429,6 +5429,257 @@ barrier_stays(LLVMValueRef inst, LLVMValueRef callee)
    return false;
 }
 
+/* Whether inst calls a SIMD-group asynchronous copy, whose event pointer
+ * simdgroup_events leaves unused. */
+static bool
+async_copy_call_named(LLVMValueRef inst)
+{
+   LLVMValueRef callee = LLVMIsACallInst(inst) ? LLVMGetCalledValue(inst) : NULL;
+   size_t length = 0;
+   const char *name = callee && LLVMIsAFunction(callee) ? LLVMGetValueName2(callee, &length) : NULL;
+   return name && (named_after(name, length, "air.simdgroup_async_copy_1d") ||
+                   named_after(name, length, "air.simdgroup_async_copy_2d"));
+}
+
+/* The callee name of a call to a declared function, or NULL. */
+static const char *
+declared_callee(LLVMValueRef inst, size_t *length)
+{
+   LLVMValueRef callee = LLVMIsACallInst(inst) ? LLVMGetCalledValue(inst) : NULL;
+   if (!callee || !LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee))
+      return NULL;
+   return LLVMGetValueName2(callee, length);
+}
+
+/* SIMD-group asynchronous copies complete where they are made
+ * (async_copy_call), so every event is null: waits have nothing to wait for
+ * and go, a copy's event is not null, and the null event is. Events then
+ * reach no memory, so stack slots holding them promote away. */
+static bool
+simdgroup_events(struct translator *t, LLVMValueRef fn)
+{
+   unsigned count = 0, capacity = 16;
+   LLVMValueRef *calls = ralloc_array(t->cfg_scratch, LLVMValueRef, capacity);
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block && calls;
+        block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst && calls;
+           inst = LLVMGetNextInstruction(inst)) {
+         size_t length;
+         const char *name = declared_callee(inst, &length);
+         if (!name || (!stela_air_call_named(name, length, "air.is_null_simdgroup_event") &&
+                       !stela_air_call_named(name, length, "air.get_null_simdgroup_event") &&
+                       !stela_air_call_named(name, length, "air.wait_simdgroup_events") &&
+                       !async_copy_call_named(inst)))
+            continue;
+         if (count == capacity)
+            calls = reralloc(t->cfg_scratch, calls, LLVMValueRef, capacity *= 2);
+         if (calls)
+            calls[count++] = inst;
+      }
+   }
+   if (!calls)
+      return fail(t, STELA_AIR_ALLOCATION, "SIMD-group event list allocation failed");
+   LLVMBuilderRef builder = LLVMCreateBuilderInContext(LLVMGetModuleContext(t->module));
+   if (!builder)
+      return fail(t, STELA_AIR_ALLOCATION, "LLVM builder allocation failed");
+   LLVMTypeRef i1 = LLVMInt1TypeInContext(LLVMGetModuleContext(t->module));
+   /* Null checks first, while their events are still the calls made. */
+   for (unsigned i = 0; i < count; i++) {
+      size_t length;
+      const char *name = declared_callee(calls[i], &length);
+      if (!stela_air_call_named(name, length, "air.is_null_simdgroup_event"))
+         continue;
+      if (LLVMGetNumArgOperands(calls[i]) != 1) {
+         LLVMDisposeBuilder(builder);
+         return fail(t, STELA_AIR_INSTRUCTION, "unsupported SIMD-group event check signature");
+      }
+      LLVMValueRef event = LLVMGetOperand(calls[i], 0);
+      LLVMValueRef answer;
+      if (async_copy_call_named(event)) {
+         answer = LLVMConstInt(i1, 0, false);
+      } else {
+         LLVMPositionBuilderBefore(builder, calls[i]);
+         answer = LLVMBuildICmp(builder, LLVMIntEQ, event,
+                                LLVMConstPointerNull(LLVMTypeOf(event)), "");
+      }
+      LLVMReplaceAllUsesWith(calls[i], answer);
+      LLVMInstructionEraseFromParent(calls[i]);
+      calls[i] = NULL;
+   }
+   LLVMDisposeBuilder(builder);
+   for (unsigned i = 0; i < count; i++) {
+      size_t length;
+      const char *name = calls[i] ? declared_callee(calls[i], &length) : NULL;
+      if (!name)
+         continue;
+      if (stela_air_call_named(name, length, "air.wait_simdgroup_events")) {
+         LLVMInstructionEraseFromParent(calls[i]);
+         continue;
+      }
+      LLVMTypeRef type = LLVMTypeOf(calls[i]);
+      if (LLVMGetTypeKind(type) != LLVMPointerTypeKind)
+         return fail(t, STELA_AIR_INSTRUCTION, "unsupported SIMD-group event signature");
+      LLVMReplaceAllUsesWith(calls[i], LLVMConstPointerNull(type));
+      if (stela_air_call_named(name, length, "air.get_null_simdgroup_event"))
+         LLVMInstructionEraseFromParent(calls[i]);
+   }
+   return true;
+}
+
+/* A SIMD-group asynchronous copy, which the SIMD-group's threads run at
+ * once, element by element in turn: a destination tile of width x height
+ * elements of `bytes` bytes, rows dst_row elements apart and elements
+ * dst_stride apart, from the source's, whose tile of src_width x
+ * src_height elements the rest of the destination reads past as zero, or
+ * with `edge` as the nearest edge element. */
+struct async_copy {
+   struct translator *t;
+   struct value dst, src;
+   nir_def *dst_row, *dst_stride, *src_row, *src_stride;
+   nir_def *width, *src_width, *src_height, *count, *lane, *lanes;
+   unsigned bytes;
+   bool edge;
+};
+
+/* The byte offset of element (x, y), rows `row` elements apart and
+ * elements `stride` apart, as a 64-bit value. */
+static nir_def *
+element_offset(nir_builder *b, nir_def *x, nir_def *y, nir_def *row, nir_def *stride,
+               unsigned bytes)
+{
+   nir_def *elements = nir_iadd(b, nir_imul(b, nir_u2u64(b, y), row), nir_imul(b, nir_u2u64(b, x), stride));
+   return nir_imul_imm(b, elements, bytes);
+}
+
+static struct value
+offset_pointer(nir_builder *b, const struct value *base, nir_def *offset)
+{
+   struct value address = *base;
+   address.def = nir_iadd(b, base->def, nir_u2uN(b, offset, base->def->bit_size));
+   address.offset_known = false;
+   return address;
+}
+
+static bool
+async_copy_element(void *data, nir_def *iteration)
+{
+   struct async_copy *c = data;
+   struct translator *t = c->t;
+   nir_builder *b = &t->b;
+   nir_def *index = nir_iadd(b, nir_imul(b, iteration, c->lanes), c->lane);
+   struct memory_guard within;
+   if (!memory_guard_begin(t, nir_ult(b, index, c->count), &within))
+      return false;
+   nir_def *y = nir_udiv(b, index, c->width);
+   nir_def *x = nir_isub(b, index, nir_imul(b, y, c->width));
+   nir_def *sx = x, *sy = y;
+   nir_def *read;
+   if (c->edge) {
+      sx = nir_umin(b, x, nir_iadd_imm(b, c->src_width, -1));
+      sy = nir_umin(b, y, nir_iadd_imm(b, c->src_height, -1));
+      read = nir_iand(b, nir_ine_imm(b, c->src_width, 0), nir_ine_imm(b, c->src_height, 0));
+   } else {
+      read = nir_iand(b, nir_ult(b, x, c->src_width), nir_ult(b, y, c->src_height));
+   }
+   unsigned bits = MIN2(c->bytes, 4) * 8, components = MAX2(c->bytes / 4, 1);
+   struct memory_guard reading;
+   if (!memory_guard_begin(t, read, &reading))
+      return false;
+   struct value from =
+      offset_pointer(b, &c->src, element_offset(b, sx, sy, c->src_row, c->src_stride, c->bytes));
+   nir_def *value = memory_access(t, &from, NULL, NULL, 0, components, bits,
+                                  c->bytes);
+   if (!value)
+      return false;
+   /* Zero past the source's tile. */
+   value = memory_guard_end(t, &reading, value);
+   if (!value)
+      return false;
+   struct value to =
+      offset_pointer(b, &c->dst, element_offset(b, x, y, c->dst_row, c->dst_stride, c->bytes));
+   memory_access(t, &to, value, NULL, 0, components, bits, c->bytes);
+   memory_guard_end(t, &within, NULL);
+   return t->error->kind == STELA_AIR_OK;
+}
+
+/* air.simdgroup_async_copy_2d(size, alignment, dst, dst elements per row,
+ * dst element stride, dst tile, src, src elements per row, src element
+ * stride, src tile, offset in src tile, clamp mode) and
+ * air.simdgroup_async_copy_1d(size, alignment, dst, src, elements): the copy
+ * runs where it is made, and the SIMD-group barrier after it shows each
+ * thread's elements to the others, so its event completes at once. */
+static bool
+async_copy_call(struct translator *t, LLVMValueRef inst, const char *name, size_t length,
+                bool *lowered)
+{
+   bool two_d = named_after(name, length, "air.simdgroup_async_copy_2d");
+   if (!two_d && !named_after(name, length, "air.simdgroup_async_copy_1d"))
+      return *lowered = false, true;
+   *lowered = true;
+   nir_builder *b = &t->b;
+   unsigned count = LLVMGetNumArgOperands(inst);
+   if (count != (two_d ? 12u : 5u))
+      return fail(t, STELA_AIR_INSTRUCTION, "unsupported SIMD-group copy signature");
+   LLVMValueRef size = LLVMGetOperand(inst, 0), alignment = LLVMGetOperand(inst, 1);
+   if (!LLVMIsAConstantInt(size) || !LLVMIsAConstantInt(alignment))
+      return fail(t, STELA_AIR_INSTRUCTION, "SIMD-group copies of elements of a dynamic size");
+   uint64_t bytes = LLVMConstIntGetZExtValue(size), align = LLVMConstIntGetZExtValue(alignment);
+   if ((bytes != 1 && bytes != 2 && bytes != 4 && bytes != 8 && bytes != 16) || align < bytes)
+      return fail(t, STELA_AIR_INSTRUCTION, "SIMD-group copies of %llu-byte elements aligned to %llu",
+                  (unsigned long long)bytes, (unsigned long long)align);
+   struct async_copy c = {.t = t, .bytes = bytes};
+   const struct value *dst = pointer_value(t, LLVMGetOperand(inst, 2));
+   const struct value *src = pointer_value(t, LLVMGetOperand(inst, two_d ? 6 : 3));
+   if (!dst || !src)
+      return fail(t, STELA_AIR_INSTRUCTION, "a SIMD-group copy's memory has no provenance");
+   c.dst = *dst;
+   c.src = *src;
+   if (two_d) {
+      LLVMValueRef offset = LLVMGetOperand(inst, 10), mode = LLVMGetOperand(inst, 11);
+      if (!LLVMIsNull(offset))
+         return fail(t, STELA_AIR_INSTRUCTION, "SIMD-group copies at an offset in their source");
+      if (!LLVMIsAConstantInt(mode) || LLVMConstIntGetZExtValue(mode) > 1)
+         return fail(t, STELA_AIR_INSTRUCTION, "unsupported SIMD-group copy clamp mode");
+      c.edge = LLVMConstIntGetZExtValue(mode) == 1;
+      nir_def *dst_tile = get_value(t, LLVMGetOperand(inst, 5));
+      nir_def *src_tile = get_value(t, LLVMGetOperand(inst, 9));
+      c.dst_row = get_value(t, LLVMGetOperand(inst, 3));
+      c.dst_stride = get_value(t, LLVMGetOperand(inst, 4));
+      c.src_row = get_value(t, LLVMGetOperand(inst, 7));
+      c.src_stride = get_value(t, LLVMGetOperand(inst, 8));
+      if (!dst_tile || !src_tile || !c.dst_row || !c.dst_stride || !c.src_row || !c.src_stride ||
+          dst_tile->num_components != 2 || src_tile->num_components != 2)
+         return fail(t, STELA_AIR_INSTRUCTION, "unsupported SIMD-group copy signature");
+      c.width = nir_u2u32(b, nir_channel(b, dst_tile, 0));
+      c.count = nir_imul(b, c.width, nir_u2u32(b, nir_channel(b, dst_tile, 1)));
+      c.src_width = nir_u2u32(b, nir_channel(b, src_tile, 0));
+      c.src_height = nir_u2u32(b, nir_channel(b, src_tile, 1));
+   } else {
+      nir_def *elements = get_value(t, LLVMGetOperand(inst, 4));
+      if (!elements)
+         return false;
+      c.width = c.count = c.src_width = nir_u2u32(b, elements);
+      c.src_height = nir_imm_int(b, 1);
+      c.dst_row = c.src_row = nir_u2u64(b, elements);
+      c.dst_stride = c.src_stride = nir_imm_int64(b, 1);
+   }
+   c.dst_row = nir_u2u64(b, c.dst_row);
+   c.dst_stride = nir_u2u64(b, c.dst_stride);
+   c.src_row = nir_u2u64(b, c.src_row);
+   c.src_stride = nir_u2u64(b, c.src_stride);
+   c.lane = nir_load_subgroup_invocation(b);
+   c.lanes = nir_load_subgroup_size(b);
+   /* Each thread copies every lanes-th element; a zero-width tile none. */
+   nir_def *rounds = nir_udiv(b, nir_iadd(b, c.count, nir_iadd_imm(b, c.lanes, -1)), c.lanes);
+   rounds = nir_bcsel(b, nir_ieq_imm(b, c.width, 0), nir_imm_int(b, 0), rounds);
+   if (!repeat(t, rounds, async_copy_element, &c))
+      return false;
+   nir_barrier(b, .execution_scope = SCOPE_SUBGROUP, .memory_scope = SCOPE_WORKGROUP,
+               .memory_semantics = NIR_MEMORY_ACQ_REL,
+               .memory_modes = nir_var_mem_shared | nir_var_mem_global | nir_var_mem_ssbo);
+   return true;
+}
+
 /* AIR's barriers and fences, with memory flags 1 device, 2 threadgroup, 4
  * texture and 8 imageblock memory. A barrier is (flags, scope), as Apple's compiler emits, or
  * (flags, order, scope); a fence is (flags, order, scope). Orders are C++'s,
@@ -6316,6 +6567,10 @@ instruction(struct translator *t, LLVMValueRef inst)
          return false;
       if (lowered)
          return true;
+      if (!async_copy_call(t, inst, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
       if (!coherent_call(t, inst, name, name_length, &lowered))
          return false;
       if (lowered)
@@ -7133,8 +7388,8 @@ pointer_provenance(struct translator *t)
             t->imageblock_root = inst;
          if (op == LLVMAlloca || op == LLVMLoad || stela_air_read_sampler(inst) ||
              stela_air_null_texture(inst) || stitched_resource_call(inst) ||
-             imageblock_data_call(inst))
-            continue; /* Roots, like arguments and globals. */
+             imageblock_data_call(inst) || async_copy_call_named(inst))
+            continue; /* Roots, like arguments and globals; a copy's event is unused. */
          if (op != LLVMPHI && op != LLVMSelect && op != LLVMGetElementPtr && op != LLVMBitCast &&
              op != LLVMAddrSpaceCast)
             return fail(t, STELA_AIR_TYPE, "unsupported pointer provenance producer %d", op);
@@ -7720,7 +7975,8 @@ translate(const void *bitcode, size_t size, const char *entry,
       fail(&t, STELA_AIR_ARGUMENT, "entry must be a defined nonvariadic void C-convention kernel");
       goto done;
    }
-   if (((t.metadata.unoptimized || stores_pointer(fn)) && !promote_memory(&t, fn)) ||
+   if (!simdgroup_events(&t, fn) ||
+       ((t.metadata.unoptimized || stores_pointer(fn)) && !promote_memory(&t, fn)) ||
        !stela_air_fold_constants(&t.metadata, fn))
       goto done;
    if (stage && (!stela_air_metadata_stage(&t.metadata, fn, stage->stage, &t.render) ||

@@ -456,6 +456,81 @@ barriers_and_fences_follow_their_flags(void)
    }
 }
 
+/* SIMD-group asynchronous copies run where they are made, every thread
+ * copying its share of the tile, and a SIMD-group barrier shows the copy to
+ * the others: their events are complete, so waits go and a copy's event is
+ * not null. */
+static const char *async_copies =
+   "declare ptr @air.simdgroup_async_copy_2d.p3i8.p1i8(i64, i64, ptr addrspace(3), i64, i64,"
+   " <2 x i64>, ptr addrspace(1), i64, i64, <2 x i64>, <2 x i64>, i32)\n"
+   "declare ptr @air.simdgroup_async_copy_1d.p3i8.p1i8(i64, i64, ptr addrspace(3),"
+   " ptr addrspace(1), i64)\n"
+   "declare ptr @air.get_null_simdgroup_event()\n"
+   "declare i1 @air.is_null_simdgroup_event(ptr)\n"
+   "declare void @air.wait_simdgroup_events(i32, ptr)\n";
+
+static void
+simdgroup_copies_complete_where_they_are_made(void)
+{
+   const char *body =
+      "%slots = alloca [2 x ptr], align 8\n"
+      "%e = call ptr @air.simdgroup_async_copy_2d.p3i8.p1i8(i64 4, i64 4, ptr addrspace(3) @s,"
+      " i64 8, i64 1, <2 x i64> <i64 8, i64 8>, ptr addrspace(1) %out, i64 13, i64 1,"
+      " <2 x i64> <i64 5, i64 3>, <2 x i64> zeroinitializer, i32 %MODE)\n"
+      "%f = call ptr @air.simdgroup_async_copy_1d.p3i8.p1i8(i64 4, i64 4, ptr addrspace(3) @s,"
+      " ptr addrspace(1) %out, i64 20)\n"
+      "%z = call ptr @air.get_null_simdgroup_event()\n"
+      "%second = getelementptr [2 x ptr], ptr %slots, i64 0, i64 1\n"
+      "store ptr %e, ptr %slots, align 8\nstore ptr %f, ptr %second, align 8\n"
+      "%pending = call i1 @air.is_null_simdgroup_event(ptr %e)\n"
+      "%none = call i1 @air.is_null_simdgroup_event(ptr %z)\n"
+      "call void @air.wait_simdgroup_events(i32 2, ptr %slots)\n"
+      "%a = zext i1 %pending to i32\n%b = zext i1 %none to i32\n%sum = add i32 %a, %b\n"
+      "store i32 %sum, ptr addrspace(1) %out, align 4\nret void\n";
+   for (unsigned mode = 0; mode < 2; mode++) {
+      char text[2048];
+      snprintf(text, sizeof(text), "%s", body);
+      char *at = strstr(text, "%MODE");
+      memcpy(at, mode ? "1    " : "0    ", 5);
+      nir_shader *shader = lowered(async_copies, text);
+      /* One SIMD-group barrier after each copy. */
+      unsigned barriers = 0;
+      nir_foreach_function_impl(impl, shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+               barriers += intrinsic->intrinsic == nir_intrinsic_barrier &&
+                           nir_intrinsic_execution_scope(intrinsic) == SCOPE_SUBGROUP;
+               /* The events are a copy's, which is not null, and the null
+                * event: one is null. */
+               if (intrinsic->intrinsic == nir_intrinsic_store_global &&
+                   nir_src_is_const(intrinsic->src[0]))
+                  assert(nir_src_as_uint(intrinsic->src[0]) == 1);
+            }
+         }
+      }
+      assert(barriers == 2);
+      assert(count(shader, nir_intrinsic_load_global) >= 2);
+      ralloc_free(shader);
+   }
+   const char *refusals[] = {
+      /* Elements of a dynamic size, at an offset, or clamped otherwise. */
+      "%n = load i32, ptr addrspace(1) %out, align 4\n%w = zext i32 %n to i64\n"
+      "%e = call ptr @air.simdgroup_async_copy_1d.p3i8.p1i8(i64 %w, i64 4, ptr addrspace(3) @s,"
+      " ptr addrspace(1) %out, i64 4)\nret void\n",
+      "%e = call ptr @air.simdgroup_async_copy_2d.p3i8.p1i8(i64 4, i64 4, ptr addrspace(3) @s,"
+      " i64 8, i64 1, <2 x i64> <i64 8, i64 8>, ptr addrspace(1) %out, i64 13, i64 1,"
+      " <2 x i64> <i64 5, i64 3>, <2 x i64> <i64 1, i64 0>, i32 0)\nret void\n",
+      "%e = call ptr @air.simdgroup_async_copy_2d.p3i8.p1i8(i64 4, i64 4, ptr addrspace(3) @s,"
+      " i64 8, i64 1, <2 x i64> <i64 8, i64 8>, ptr addrspace(1) %out, i64 13, i64 1,"
+      " <2 x i64> <i64 5, i64 3>, <2 x i64> zeroinitializer, i32 2)\nret void\n",
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(refusals); i++)
+      refused(async_copies, refusals[i], STELA_AIR_INSTRUCTION);
+}
+
 /* The barriers in shader, in order, as (memory semantics, modes). */
 static unsigned
 barrier_semantics(nir_shader *shader, unsigned *semantics, nir_variable_mode *modes, unsigned max)
@@ -1027,6 +1102,7 @@ main(void)
    barriers_and_fences_follow_their_flags();
    ordered_atomics_and_fences_are_barriers();
    simd_functions_lower_to_subgroup_operations();
+   simdgroup_copies_complete_where_they_are_made();
    matrix_products_follow_rows_and_columns();
    matrix_memory_takes_origins_strides_and_transposes();
    matrix_memory_takes_extents_strides_and_origins();
