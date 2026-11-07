@@ -440,6 +440,9 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	uint64_t _resourceID;
 }
 - (void)flush;
+/* The address shaders encode commands through, which makes the buffer
+ * GPU-resident when first asked for. */
+- (MTLResourceID)gpuResourceID;
 @end
 
 /* A command of an indirect command buffer, which encoding addresses. */

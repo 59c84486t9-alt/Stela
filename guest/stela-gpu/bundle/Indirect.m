@@ -345,6 +345,8 @@
 @implementation StelaGPUIndirectCommandBuffer {
 	StelaStream _encoding;
 	os_unfair_lock _lock;
+	/* Held while the buffer's address is first asked for. */
+	os_unfair_lock _residence;
 }
 
 - (void)dealloc
@@ -358,9 +360,26 @@
 	return _size;
 }
 
+/* Handing out the buffer's address makes it GPU-resident, its commands
+ * records shaders may write, so a buffer holds records only once asked for
+ * it: one only the CPU encodes keeps every command it may hold, such as
+ * patch draws, which records cannot express. */
 - (MTLResourceID)gpuResourceID
 {
-	return (MTLResourceID){_resourceID};
+	os_unfair_lock_lock(&_residence);
+	if (!_resourceID) {
+		[self flush];
+		StelaHandle identified = {.handle = _handle};
+		StelaValue resource = {};
+		StelaFailure failure;
+		if (STELA_CALL(&_device->_gate, IndirectResourceId, &identified, &resource, &failure) != StelaStatusOk) {
+			stela_report("an indirect command buffer's resource ID", &failure);
+		}
+		_resourceID = resource.value;
+	}
+	uint64_t resource = _resourceID;
+	os_unfair_lock_unlock(&_residence);
+	return (MTLResourceID){resource};
 }
 
 - (id)indirectRenderCommandAtIndex:(NSUInteger)index
@@ -462,18 +481,10 @@
 		stela_report("an indirect command buffer", &failure);
 		return nil;
 	}
-	StelaHandle identified = {.handle = response.handle};
-	StelaValue resource = {};
-	if (STELA_CALL(&_gate, IndirectResourceId, &identified, &resource, &failure) != StelaStatusOk) {
-		stela_report("an indirect command buffer's resource ID", &failure);
-		[self releaseHandle:response.handle];
-		return nil;
-	}
 	StelaGPUIndirectCommandBuffer *buffer = [[StelaGPUIndirectCommandBuffer alloc] initWithDevice:self
 											       handle:response.handle];
 	buffer->_options = options;
 	buffer->_size = count;
-	buffer->_resourceID = resource.value;
 	return buffer;
 }
 

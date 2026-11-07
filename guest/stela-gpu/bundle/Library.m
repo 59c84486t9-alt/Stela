@@ -528,7 +528,7 @@ static void air_slice(const void **bytes, NSUInteger *length)
 
 - (void)setIndirectCommandBuffer:(StelaGPUIndirectCommandBuffer *)buffer atIndex:(NSUInteger)index
 {
-	[self store:buffer ? buffer->_resourceID : 0 atIndex:index];
+	[self store:buffer ? [buffer gpuResourceID]._impl : 0 atIndex:index];
 }
 
 - (void)setIndirectCommandBuffers:(const id __unsafe_unretained[])buffers withRange:(NSRange)range
