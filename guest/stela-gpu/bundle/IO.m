@@ -5,8 +5,9 @@
  * command buffers, its barriers are dispatch barriers, and a command buffer's
  * own barriers hold by its order. After a failed or cancelled load the other
  * loads are skipped; status copies and events still run, as work on the GPU may
- * wait for them. Metal's container of compressed files is undocumented, so
- * compressed handles are refused.
+ * wait for them. A compressed handle reads through Metal's own reader of the
+ * files MTLIOCompressionContext writes, which every Metal driver's handles
+ * build on.
  */
 #include "Bundle.h"
 
@@ -41,6 +42,18 @@
 	destinationOrigin:(MTLOrigin)origin;
 - (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds;
 - (void)setSignaledValue:(uint64_t)value;
+/* Metal's reader of compressed files, `_MTLIOHandleCompressed`. */
+- (id)initWithDevice:(id)device
+		   path:(const char *)path
+	compressionType:(NSInteger)method
+		  error:(NSError **)error
+	       uncached:(BOOL)uncached;
+- (NSUInteger)stagingBufferSize:(NSUInteger)size offset:(NSUInteger)offset;
+- (long)read:(void *)bytes
+		 size:(NSUInteger)size
+	       offset:(NSUInteger)offset
+	stagingBuffer:(void *)staging
+    stagingBufferSize:(NSUInteger)stagingSize;
 @end
 
 @class StelaGPUIOCommandBuffer;
@@ -50,6 +63,8 @@ typedef void (^StelaIOCommand)(StelaGPUIOCommandBuffer *buffer);
 @interface StelaGPUIOFileHandle : NSObject <MTLIOFileHandle> {
 @public
 	int _file;
+	/* Metal's reader of a compressed file, or nil for a plain one. */
+	id _compressed;
 }
 @property(copy) NSString *label;
 @end
@@ -79,6 +94,18 @@ typedef void (^StelaIOCommand)(StelaGPUIOCommandBuffer *buffer);
 
 static BOOL read_file(StelaGPUIOFileHandle *handle, void *bytes, NSUInteger length, NSUInteger offset)
 {
+	if (handle->_compressed) {
+		NSUInteger size = [handle->_compressed stagingBufferSize:length offset:offset];
+		void *staging = malloc(size ? size : 1);
+		long count = staging ? [handle->_compressed read:bytes
+							  size:length
+							offset:offset
+						 stagingBuffer:staging
+					     stagingBufferSize:size]
+				     : -1;
+		free(staging);
+		return count >= 0 && (NSUInteger)count == length;
+	}
 	uint8_t *to = bytes;
 	while (length) {
 		long count = pread(handle->_file, to, length, offset);
@@ -135,7 +162,9 @@ static BOOL load_private_buffer(StelaGPUIOCommandQueue *queue, id buffer, NSUInt
 
 - (void)dealloc
 {
-	close(_file);
+	if (_file >= 0) {
+		close(_file);
+	}
 }
 
 @end
@@ -461,11 +490,28 @@ sourceHandleOffset:(NSUInteger)from
 
 - (id)newIOFileHandleWithURL:(NSURL *)url compressionMethod:(NSInteger)method error:(NSError **)error
 {
-	if (error) {
-		StelaFailure failure = {.reason = "this device reads no compressed Metal I/O files"};
-		*error = stela_error(MTLIOErrorDomain, MTLIOErrorInternal, &failure);
+	Class reader = NSClassFromString(@"_MTLIOHandleCompressed");
+	if (!reader) {
+		if (error) {
+			StelaFailure failure = {.reason = "Metal has no reader of compressed files"};
+			*error = stela_error(MTLIOErrorDomain, MTLIOErrorInternal, &failure);
+		}
+		return nil;
 	}
-	return nil;
+	/* Its errors are Metal's own, such as a file MTLIOCompressionContext
+	 * did not write. */
+	id compressed = [[reader alloc] initWithDevice:self
+						  path:url.fileSystemRepresentation
+				       compressionType:method
+						 error:error
+					      uncached:NO];
+	if (!compressed) {
+		return nil;
+	}
+	StelaGPUIOFileHandle *handle = [StelaGPUIOFileHandle new];
+	handle->_file = -1;
+	handle->_compressed = compressed;
+	return handle;
 }
 
 - (id)newIOHandleWithURL:(NSURL *)url error:(NSError **)error
