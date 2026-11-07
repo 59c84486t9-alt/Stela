@@ -427,6 +427,9 @@ impl Function<'_> {
     /// source that links it defines. `functionNames` omits it and
     /// `externFunctionNames` lists it.
     pub const EXTERN: u8 = 5;
+    /// The MTLB stage of a function a dynamic library exports for other
+    /// libraries to link: a plain definition, not an entry point.
+    pub const EXPORTED: u8 = 3;
 }
 
 impl<'a> Function<'a> {

@@ -128,6 +128,14 @@ pub struct Service {
         *mut c_void,
         *mut ffi::AirError,
     ) -> bool,
+    /// `stela_metal_exports`.
+    pub exports: unsafe extern "C" fn(
+        *const c_void,
+        usize,
+        ffi::VisitFunction,
+        *mut c_void,
+        *mut ffi::AirError,
+    ) -> bool,
     /// `stela_metal_stitch`.
     pub stitch: unsafe extern "C" fn(
         *const ffi::StitchSource,
@@ -369,6 +377,47 @@ impl Compiler for AirCompiler {
             return Err(refuse(&mut self.refusal, "the library", &error));
         }
         Ok(functions)
+    }
+
+    fn exports(&mut self, air: &[u8]) -> Result<Vec<String>> {
+        unsafe extern "C" fn visit(
+            data: *mut c_void,
+            name: *const c_char,
+            name_bytes: usize,
+            _: u32,
+        ) -> bool {
+            // SAFETY: the data is the list below, and the service's name is
+            // `name_bytes` long for the call.
+            let (list, name) = unsafe {
+                (
+                    &mut *data.cast::<Vec<String>>(),
+                    slice::from_raw_parts(name.cast::<u8>(), name_bytes),
+                )
+            };
+            let Ok(name) = str::from_utf8(name) else {
+                return false;
+            };
+            list.push(String::from(name));
+            true
+        }
+        let air = Air::parse(air).map_err(|_| Error::Invalid("AIR"))?;
+        let mut exports = Vec::new();
+        let mut error = ffi::AirError::NONE;
+        // SAFETY: the bitcode and the list outlive the call, which writes
+        // the list through `visit` and the error.
+        let listed = unsafe {
+            (self.service.exports)(
+                air.bitcode.as_ptr().cast(),
+                air.bitcode.len(),
+                visit,
+                ptr::from_mut(&mut exports).cast(),
+                &mut error,
+            )
+        };
+        if !listed {
+            return Err(refuse(&mut self.refusal, "the library", &error));
+        }
+        Ok(exports)
     }
 
     fn stitch(&mut self, sources: &[(u64, &str)], graphs: &[StitchedGraph]) -> Result<Vec<u8>> {

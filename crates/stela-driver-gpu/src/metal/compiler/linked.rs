@@ -38,6 +38,13 @@ unsafe extern "C" {
         data: *mut c_void,
         error: *mut ffi::AirError,
     ) -> bool;
+    fn stela_metal_exports(
+        air: *const c_void,
+        size: usize,
+        visit: ffi::VisitFunction,
+        data: *mut c_void,
+        error: *mut ffi::AirError,
+    ) -> bool;
     fn stela_metal_stitch(
         sources: *const ffi::StitchSource,
         source_count: u32,
@@ -91,6 +98,7 @@ impl Service {
             reflect_bindings: stela_metal_reflect_bindings,
             sampler_states: stela_metal_sampler_states,
             functions: stela_metal_functions,
+            exports: stela_metal_exports,
             stitch: stela_metal_stitch,
             compile: stela_metal_compile_reflected,
             tessellation_stages: stela_metal_tessellation_stages,

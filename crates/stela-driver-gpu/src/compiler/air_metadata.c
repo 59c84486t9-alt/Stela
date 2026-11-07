@@ -3069,6 +3069,54 @@ stela_air_functions(const void *bitcode, size_t size, stela_air_visit_function v
    return visited;
 }
 
+/* Whether an entry list names fn. */
+static bool
+listed_entry(struct stela_air_metadata *m, LLVMValueRef fn)
+{
+   for (unsigned list = 0; list < ARRAY_SIZE(entry_lists); list++) {
+      LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+      unsigned count;
+      if (!stela_air_named_md(m, entry_lists[list], nodes, &count))
+         return false;
+      for (unsigned i = 0; i < count; i++) {
+         LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+         unsigned fields_count;
+         if (stela_air_md_node(m, nodes[i], fields, &fields_count) && fields_count &&
+             fields[0] == fn)
+            return true;
+      }
+   }
+   return false;
+}
+
+bool
+stela_air_exports(const void *bitcode, size_t size, stela_air_visit_function visit, void *data,
+                  struct stela_air_error *error)
+{
+   struct stela_air_error local = {0};
+   struct stela_air_metadata m = {.error = error ? error : &local};
+   *m.error = (struct stela_air_error){0};
+   if (!valid_bitcode(bitcode, size) || !visit)
+      return fail(&m, STELA_AIR_INPUT, "invalid AIR export list query");
+   LLVMContextRef context;
+   bool visited = parse_metadata(&m, bitcode, size, &context);
+   for (LLVMValueRef fn = visited ? LLVMGetFirstFunction(m.module) : NULL; visited && fn;
+        fn = LLVMGetNextFunction(fn)) {
+      size_t name_bytes;
+      const char *name = LLVMGetValueName2(fn, &name_bytes);
+      bool intrinsic = (name_bytes > 4 && !memcmp(name, "air.", 4)) ||
+                       (name_bytes > 5 && !memcmp(name, "llvm.", 5));
+      if (LLVMIsDeclaration(fn) || intrinsic || LLVMGetLinkage(fn) != LLVMExternalLinkage ||
+          LLVMGetVisibility(fn) != LLVMDefaultVisibility || listed_entry(&m, fn))
+         continue;
+      visited = visit(data, name, name_bytes, 0);
+   }
+   if (!visited && m.error->kind == STELA_AIR_OK)
+      fail(&m, STELA_AIR_METADATA, "a function the module exports");
+   close_module(&m, context);
+   return visited;
+}
+
 bool
 stela_air_sampler_states(const void *bitcode, size_t size, uint64_t *states, unsigned *count,
                          struct stela_air_error *error)

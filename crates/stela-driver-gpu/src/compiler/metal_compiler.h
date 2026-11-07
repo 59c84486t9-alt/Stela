@@ -260,6 +260,11 @@ typedef bool (*stela_metal_visit_function)(void *data, const char *name, size_t 
                                            enum stela_metal_function_stage stage);
 bool stela_metal_functions(const void *air, size_t size, stela_metal_visit_function visit,
                            void *data, struct stela_air_error *error);
+/* Calls visit with each function a dynamic library of the module exports,
+ * its stage STELA_METAL_KERNEL, which nothing reads. False after
+ * reporting why, or when visit refuses one. */
+bool stela_metal_exports(const void *air, size_t size, stela_metal_visit_function visit,
+                         void *data, struct stela_air_error *error);
 
 /* Calls visit with the AIR of a module of stitched functions, whose calls
  * stay declarations a pipeline links. False after reporting why. */

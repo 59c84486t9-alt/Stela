@@ -502,6 +502,9 @@ impl Compiler for MockCompiler {
             (String::from("visible"), FunctionType::Visible),
         ])
     }
+    fn exports(&mut self, _: &[u8]) -> Result<Vec<String>> {
+        Ok(alloc::vec![String::from("_Z6helperf")])
+    }
     fn stitch(&mut self, _: &[(u64, &str)], _: &[StitchedGraph]) -> Result<Vec<u8>> {
         Ok(b"BC\xc0\xde\0\0\0\0".to_vec())
     }

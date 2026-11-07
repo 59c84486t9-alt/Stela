@@ -674,6 +674,10 @@ pub trait Compiler {
     /// source, whose compiler makes no container.
     fn functions(&mut self, air: &[u8]) -> Result<Vec<(String, FunctionType)>>;
 
+    /// The functions a dynamic library of an AIR module exports: its
+    /// definitions other modules link against, which no entry list names.
+    fn exports(&mut self, air: &[u8]) -> Result<Vec<String>>;
+
     /// A module of `graphs`, whose calls index `sources`: a library and a
     /// function of it. The calls stay declarations a pipeline links.
     fn stitch(&mut self, sources: &[(u64, &str)], graphs: &[StitchedGraph]) -> Result<Vec<u8>>;

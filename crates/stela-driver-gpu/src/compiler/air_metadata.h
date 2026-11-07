@@ -408,6 +408,11 @@ typedef bool (*stela_air_visit_function)(void *, const char *name, size_t name_b
                                          unsigned stage);
 bool stela_air_functions(const void *, size_t, stela_air_visit_function, void *,
                          struct stela_air_error *);
+/* Calls visit, with stage zero, with each function a dynamic library of the
+ * module exports: every definition of default visibility and external
+ * linkage the entry lists do not name, until it refuses one. */
+bool stela_air_exports(const void *, size_t, stela_air_visit_function, void *,
+                       struct stela_air_error *);
 /* A visible function a stitched function calls, and the module defining it. */
 struct stela_air_stitch_source {
    const void *bitcode;

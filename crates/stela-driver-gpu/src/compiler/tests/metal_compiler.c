@@ -1040,6 +1040,35 @@ modules_list_their_functions(void)
    assert(count == 1);
 }
 
+static bool
+list_export(void *data, const char *name, size_t name_bytes, enum stela_metal_function_stage stage)
+{
+   (void)stage;
+   assert(name_bytes == strlen("_Z3dynf") && !memcmp(name, "_Z3dynf", name_bytes));
+   (*(unsigned *)data)++;
+   return true;
+}
+
+/* A dynamic library exports its definitions of default visibility that are
+ * not entry points, as Metal's compiler lists them. */
+static void
+modules_list_their_exports(void)
+{
+   char *fixture = ralloc_asprintf(NULL,
+                                   "%s"
+                                   "define float @_Z3dynf(float %%x) {\nret float %%x\n}\n"
+                                   "define hidden float @_Z6hiddenf(float %%x) {\nret float %%x\n}\n"
+                                   "define internal float @_Z5localf(float %%x) {\nret float %%x\n}\n",
+                                   vertex);
+   LLVMMemoryBufferRef input = bitcode(fixture);
+   ralloc_free(fixture);
+   unsigned count = 0;
+   assert(stela_metal_exports(LLVMGetBufferStart(input), LLVMGetBufferSize(input), list_export,
+                              &count, NULL));
+   LLVMDisposeMemoryBuffer(input);
+   assert(count == 1);
+}
+
 static void
 discovery_reports_malformed_metadata(void)
 {
@@ -2968,6 +2997,7 @@ main(void)
    glsl_type_singleton_init_or_ref();
    harness();
    modules_list_their_functions();
+   modules_list_their_exports();
    discovery_reports_malformed_metadata();
    reflection_requires_a_unique_listed_entry();
    kernels_reflect_and_compile_their_threadgroup_memory();

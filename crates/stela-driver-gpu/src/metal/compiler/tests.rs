@@ -462,6 +462,7 @@ fn service() -> Service {
         reflect_bindings,
         sampler_states,
         functions,
+        exports: functions,
         stitch,
         compile,
         tessellation_stages,

@@ -344,6 +344,14 @@ stela_metal_functions(const void *air, size_t size, stela_metal_visit_function v
 }
 
 bool
+stela_metal_exports(const void *air, size_t size, stela_metal_visit_function visit, void *data,
+                    struct stela_air_error *error)
+{
+   struct listing listing = {visit, data};
+   return stela_air_exports(air, size, list_function, &listing, error);
+}
+
+bool
 stela_metal_stitch(const struct stela_air_stitch_source *sources, uint32_t source_count,
                    const struct stela_air_stitch_graph *graphs, uint32_t graph_count,
                    stela_air_visit_bytes visit, void *data, struct stela_air_error *error)

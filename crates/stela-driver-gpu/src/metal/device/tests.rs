@@ -1235,9 +1235,14 @@ fn source_libraries_name_their_functions_and_keep_what_they_load_with() {
             ConversionRounding::TowardZero,
         )
         .unwrap();
+    // A dynamic one lists what it exports too, as Metal's compiler does.
     assert_eq!(
         device.library_function_names(library),
-        Ok(&[String::from("kernel"), String::from("visible")][..])
+        Ok(&[
+            String::from("kernel"),
+            String::from("visible"),
+            String::from("_Z6helperf")
+        ][..])
     );
     assert_eq!(
         device.library_identity(library),

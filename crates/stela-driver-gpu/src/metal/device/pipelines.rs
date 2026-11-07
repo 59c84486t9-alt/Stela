@@ -494,9 +494,20 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             ensure(self.pipelines.libraries.get(id.0)?.users.creator, DESTROYED)?;
         }
         let functions = self.compiler.functions(air)?;
+        // A dynamic library lists the definitions it exports, as Metal's
+        // compiler does, so pipelines linking it find their modules.
+        let exports = match install_name {
+            Some(_) => self.compiler.exports(air)?,
+            None => Vec::new(),
+        };
         let stages: Vec<_> = functions
             .iter()
             .map(|(name, function_type)| (name.as_str(), mtlb_stage(*function_type)))
+            .chain(
+                exports
+                    .iter()
+                    .map(|name| (name.as_str(), Function::EXPORTED)),
+            )
             .collect();
         let kind = install_name.map_or(0, |_| Header::DYNAMIC);
         let library = self.new_library(library::assemble(air, &stages, kind, install_name))?;
