@@ -376,4 +376,8 @@ impl<B: Backend + Send, C: Compiler + Send> GateService for SharedService<B, C> 
     fn bundle(&self, report: BundleReport) {
         (self.host.bundle)(report);
     }
+
+    fn dropped(&self, reason: &'static str) {
+        (self.host.report)(reason);
+    }
 }

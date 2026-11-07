@@ -64,6 +64,9 @@ pub trait GateService: Send + Sync {
     fn signaled(&self) -> bool;
     /// Told what the kext found of the Metal plugin it installs.
     fn bundle(&self, report: BundleReport);
+    /// Told that the gate dropped a request its PE's store made before the
+    /// store's step took it, and why: the caller found its record unserved.
+    fn dropped(&self, _reason: &'static str) {}
 }
 
 /// What the kext found of the Metal plugin `/Library/GPUBundles` holds,

@@ -158,11 +158,20 @@ impl Gate {
         self.reachable
     }
 
+    /// Holds `request` for PE `cpu`'s step. A request the PE's last store
+    /// left, which its step never took, is lost: the service is told.
+    fn hold(&mut self, cpu: usize, request: GateRequest) {
+        if self.pending.insert(cpu, request).is_some() {
+            self.service
+                .dropped("a gate store replaced one its PE's step never ran");
+        }
+    }
+
     fn open(&mut self, cpu: usize) {
         self.opened = 0;
         if let Some(gate) = self.slots.iter().position(|&slot| slot == Slot::Free) {
             self.slots[gate] = Slot::Opening;
-            self.pending.insert(cpu, GateRequest::Open);
+            self.hold(cpu, GateRequest::Open);
         }
     }
 
@@ -172,10 +181,15 @@ impl Gate {
             return Err("a closed gate");
         };
         self.slots[gate] = Slot::Free;
+        let before = self.pending.len();
         self.pending.retain(
             |_, request| !matches!(request, GateRequest::Serve { gate: other, .. } if *other == gate),
         );
-        self.pending.insert(cpu, GateRequest::Close(connection));
+        if self.pending.len() != before {
+            self.service
+                .dropped("a gate's close dropped a call another PE's step never ran");
+        }
+        self.hold(cpu, GateRequest::Close(connection));
         Ok(())
     }
 
@@ -192,7 +206,7 @@ impl Gate {
             ranges,
             token,
         };
-        self.pending.insert(cpu, request);
+        self.hold(cpu, request);
         Ok(())
     }
 }
@@ -273,12 +287,12 @@ impl MmioDevice for Gate {
             (0, IMPORT) => self.import(access.cpu, value).map_err(refused)?,
             (0, RETIRE) => {
                 self.retired = 0;
-                self.pending.insert(access.cpu, GateRequest::Retire);
+                self.hold(access.cpu, GateRequest::Retire);
             }
             (0, BUNDLE) => {
                 let report =
                     BundleReport::from_raw(value).ok_or_else(|| refused("no such report"))?;
-                self.pending.insert(access.cpu, GateRequest::Bundle(report));
+                self.hold(access.cpu, GateRequest::Bundle(report));
             }
             (_, CALL) => {
                 let gate = gate_index(page).ok_or_else(|| refused("no such register"))?;
@@ -290,7 +304,7 @@ impl MmioDevice for Gate {
                     connection,
                     record: value,
                 };
-                self.pending.insert(access.cpu, request);
+                self.hold(access.cpu, request);
             }
             _ => return Err(refused("no such register")),
         }
@@ -320,6 +334,7 @@ mod tests {
         retired: Vec<u64>,
         quiesced: bool,
         bundles: Vec<BundleReport>,
+        dropped: Vec<&'static str>,
     }
 
     struct Service(Mutex<Log>);
@@ -377,6 +392,10 @@ mod tests {
 
         fn bundle(&self, report: BundleReport) {
             self.0.lock().unwrap().bundles.push(report);
+        }
+
+        fn dropped(&self, reason: &'static str) {
+            self.0.lock().unwrap().dropped.push(reason);
         }
     }
 
@@ -496,6 +515,37 @@ mod tests {
 
     fn gate(log: &Arc<Service>) -> Gate {
         Gate::new(0, log.clone(), IRQ)
+    }
+
+    #[test]
+    fn a_request_its_step_never_took_is_reported_when_dropped() {
+        let log = Arc::new(Service(Mutex::default()));
+        let mut gate = gate(&log);
+        let (first, second) = (opened(&mut gate), opened(&mut gate));
+        let call = |page| page * PAGE + CALL;
+        // Each step takes its store's call: nothing is lost.
+        store(&mut gate, 0, call(first), 0x10).unwrap();
+        serve(&mut gate, 0);
+        assert!(log.0.lock().unwrap().dropped.is_empty());
+        // A second store before the first one's step ran replaces it.
+        store(&mut gate, 0, call(first), 0x20).unwrap();
+        store(&mut gate, 0, call(first), 0x30).unwrap();
+        assert_eq!(log.0.lock().unwrap().dropped.len(), 1);
+        serve(&mut gate, 0);
+        // Closing a gate drops another PE's call through it.
+        store(&mut gate, 1, call(second), 0x40).unwrap();
+        store(&mut gate, 0, CLOSE, second).unwrap();
+        assert_eq!(log.0.lock().unwrap().dropped.len(), 2);
+        assert_eq!(
+            log.0
+                .lock()
+                .unwrap()
+                .served
+                .iter()
+                .map(|s| s.1)
+                .collect::<Vec<_>>(),
+            [0x10, 0x30]
+        );
     }
 
     #[test]
