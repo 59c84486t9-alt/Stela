@@ -103,6 +103,9 @@ fn gop() -> Option<(Handle, ScopedProtocol<GraphicsOutput>)> {
 }
 
 static FIRMWARE_ACCESS: Access = Access::new();
+/// The display refused to show its second frame: every frame goes to the
+/// first.
+static FLIP_REFUSED: AtomicBool = AtomicBool::new(false);
 
 struct ScreenUse(Option<Permit<'static>>);
 
@@ -128,6 +131,10 @@ pub struct Framebuffer {
     firmware: bool,
     /// The monitor's refresh in millihertz.
     refresh_millihertz: u32,
+    /// The address of the registers that choose which of two frames in
+    /// video memory shows, the one at `base` or the one after it, when the
+    /// display has them (QEMU's standard VGA's DISPI registers).
+    pub(crate) flip: Option<usize>,
     pub(crate) pci_source: Option<crate::pci_io::FramebufferSource>,
 }
 
@@ -165,6 +172,16 @@ impl Framebuffer {
                 "GOP PCI source observation refused: {error}\n"
             )),
         }
+        let frame = screen.frame_bytes();
+        if let Some(registers) =
+            crate::pci_io::qemu_vga_flip(handle, screen.base as u64, screen.stride, frame as u64)
+        {
+            screen.flip = Some(registers as usize);
+            screen.bytes = screen.bytes.max(2 * frame);
+            crate::output::arguments(format_args!(
+                "DISPLAY presents into a hidden second frame and flips to it\n"
+            ));
+        }
         Ok(Some(screen))
     }
 
@@ -183,6 +200,7 @@ impl Framebuffer {
             encoding,
             firmware: true,
             refresh_millihertz: mode::refresh(width, height),
+            flip: None,
             pci_source: None,
         };
         (framebuffer.stride * framebuffer.height * BYTES_PER_PIXEL <= framebuffer.bytes)
@@ -201,13 +219,26 @@ impl Framebuffer {
             encoding: Encoding::Bgr,
             firmware: false,
             refresh_millihertz: stela_soc::scanout::DEFAULT_REFRESH_MILLIHERTZ,
+            flip: None,
             pci_source: None,
         }
     }
 
-    /// The same mode reached at another address (the engine's physmap).
+    /// The same mode reached at another address (the engine's physmap,
+    /// which moves its flip registers by as much).
     pub fn relocated(self, base: usize) -> Self {
-        Self { base, ..self }
+        Self {
+            base,
+            flip: self
+                .flip
+                .map(|registers| registers.wrapping_add(base.wrapping_sub(self.base))),
+            ..self
+        }
+    }
+
+    /// The bytes of one frame in video memory.
+    fn frame_bytes(&self) -> usize {
+        self.stride * self.height * BYTES_PER_PIXEL
     }
 
     /// Visible pixels across and down.
@@ -236,7 +267,9 @@ impl Framebuffer {
     }
 
     /// Present one complete frame with a single permit, including the
-    /// console's transfer to guest scanout.
+    /// console's transfer to guest scanout. With two frames in video memory
+    /// it fills the hidden one and then shows it, so the display never reads
+    /// a frame half written.
     pub(crate) fn show_frame(&self, rows: &[u8], before: impl FnOnce() -> bool) -> bool {
         let Some(_access) = self.use_screen() else {
             return false;
@@ -245,10 +278,61 @@ impl Framebuffer {
         if row_bytes == 0 || !before() {
             return false;
         }
+        let hidden = self.hidden_frame();
+        let first = hidden.map_or(0, |lines| lines * self.stride * BYTES_PER_PIXEL);
         for (y, pixels) in rows.chunks_exact(row_bytes).take(self.height).enumerate() {
-            self.write_row(y, pixels);
+            self.write_row(self.base + first, y, pixels);
+        }
+        if let Some(lines) = hidden {
+            let shown = self.show_lines_from(lines);
+            if shown != u16::try_from(lines).ok() {
+                // The display kept a frame: present into the one it shows.
+                FLIP_REFUSED.store(true, Ordering::Relaxed);
+                crate::output::arguments(format_args!(
+                    "DISPLAY refused the flip to its second frame; presents into the one it shows\n"
+                ));
+                let shown = shown.map_or(0, usize::from);
+                let at = if shown == self.height { shown } else { 0 };
+                for (y, pixels) in rows.chunks_exact(row_bytes).take(self.height).enumerate() {
+                    self.write_row(self.base + at * self.stride * BYTES_PER_PIXEL, y, pixels);
+                }
+            }
         }
         true
+    }
+
+    /// The first line of the frame not on screen, when the display has two.
+    fn hidden_frame(&self) -> Option<usize> {
+        if FLIP_REFUSED.load(Ordering::Relaxed) {
+            return None;
+        }
+        let shown = usize::from(self.dispi(crate::pci_io::DISPI_Y_OFFSET, None)?);
+        Some(if shown == 0 { self.height } else { 0 })
+    }
+
+    /// Show the frame from line `lines`, once this CPU's stores to it are
+    /// complete. The first line the display then shows.
+    fn show_lines_from(&self, lines: usize) -> Option<u16> {
+        // SAFETY: SFENCE is available on x86-64. The frame's write-combining
+        // stores complete before the register write that shows it.
+        unsafe { core::arch::asm!("sfence", options(nostack, preserves_flags)) };
+        self.dispi(
+            crate::pci_io::DISPI_Y_OFFSET,
+            Some(u16::try_from(lines).ok()?),
+        )
+    }
+
+    /// Write DISPI register `index` when given a value, then read it.
+    fn dispi(&self, index: u64, value: Option<u16>) -> Option<u16> {
+        let register = (self.flip? + index as usize * 2) as *mut u16;
+        // SAFETY: `flip` is the uncached mapping of the display's DISPI
+        // registers, 16-bit each, that `qemu_vga_flip` observed.
+        unsafe {
+            if let Some(value) = value {
+                register.write_volatile(value);
+            }
+            Some(register.read_volatile())
+        }
     }
 
     /// Row `y` from 32-bit pixels with blue in the low byte, as many as fit.
@@ -259,17 +343,18 @@ impl Framebuffer {
         let Some(_access) = self.use_screen() else {
             return;
         };
-        self.write_row(y, pixels);
+        self.write_row(self.base, y, pixels);
     }
 
-    fn write_row(&self, y: usize, pixels: &[u8]) {
-        let line = (self.base + y * self.stride * BYTES_PER_PIXEL) as *mut u32;
+    /// Row `y` of the frame at `base`.
+    fn write_row(&self, base: usize, y: usize, pixels: &[u8]) {
+        let line = (base + y * self.stride * BYTES_PER_PIXEL) as *mut u32;
         let (pixels, _) = pixels.as_chunks::<BYTES_PER_PIXEL>();
         let pixels = &pixels[..pixels.len().min(self.width)];
         for (column, pixel) in pixels.iter().enumerate() {
             let value = self.encoding.encode(u32::from_le_bytes(*pixel));
-            // SAFETY: `column < width` and `y < height`, inside the mode's
-            // visible framebuffer.
+            // SAFETY: `column < width` and `y < height`, inside one of the
+            // mode's frames in video memory.
             unsafe { line.add(column).write_volatile(value) };
         }
     }
@@ -344,6 +429,10 @@ impl Framebuffer {
 
     /// Stela's background under its header.
     fn clear(&self) {
+        // Text is drawn in the first frame: show it.
+        if self.flip.is_some() {
+            let _ = self.dispi(crate::pci_io::DISPI_Y_OFFSET, Some(0));
+        }
         let background = self.encoding.encode(ui::BACKGROUND);
         self.rectangle(0, 0, self.width, self.height, background);
         if let Some(font) = font::console() {

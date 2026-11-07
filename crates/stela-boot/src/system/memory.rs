@@ -54,6 +54,12 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
         .iter()
         .map(|r| r.1 as u64)
         .chain(screen.iter().map(|s| (s.base + s.bytes) as u64))
+        .chain(
+            screen
+                .iter()
+                .filter_map(|s| s.flip)
+                .map(|r| r as u64 + PAGE),
+        )
         .chain(core::iter::once(apic + PAGE))
         .max()
         .unwrap_or(0);
@@ -247,6 +253,11 @@ pub(super) fn map(
             end.next_multiple_of(PAGE) - start,
             video,
         )?;
+        // The registers that flip between its frames are device registers.
+        if let Some(registers) = screen.flip {
+            let page = registers as u64 & !(PAGE - 1);
+            tables::map_page(frames, root, page, page, PRESENT | WRITABLE | NX | UNCACHED)?;
+        }
     }
     // The window: the engine image with section rights, heap, stack, code.
     let bytes = engine.bytes;
@@ -358,6 +369,10 @@ pub(super) fn map(
                 end - start,
                 video,
             )?;
+        }
+        if let Some(registers) = screen.flip {
+            let page = registers as u64 & !(PAGE - 1);
+            tables::map_page(frames, root, layout::physical(page), page, data | UNCACHED)?;
         }
     }
     // The xAPIC page must be strong uncacheable (Intel SDM Vol. 3A 11.4.1);

@@ -206,6 +206,62 @@ pub(crate) fn qemu_vga_edid(handle: Handle) -> Option<Vec<u8>> {
     read.is_success().then_some(edid)
 }
 
+/// The Bochs DISPI registers in QEMU's standard VGA's MMIO BAR, 16 bits
+/// each (`docs/specs/standard-vga.rst`: 0x0500..0x0516), by index
+/// (`include/hw/display/bochs-vbe.h`).
+pub(crate) const DISPI_REGISTERS: u64 = 0x500;
+pub(crate) const DISPI_VIRT_WIDTH: u64 = 6;
+pub(crate) const DISPI_X_OFFSET: u64 = 8;
+pub(crate) const DISPI_Y_OFFSET: u64 = 9;
+const DISPI_VIDEO_MEMORY_64K: u64 = 0xa;
+
+/// The physical address of the DISPI registers of QEMU's standard VGA on
+/// GOP `handle`, when its screen at `base` starts its video memory, shows
+/// rows of `stride` pixels from its top and the video memory holds a second
+/// frame of `frame_bytes` after it: the screen can then show either.
+pub(crate) fn qemu_vga_flip(
+    handle: Handle,
+    base: u64,
+    stride: usize,
+    frame_bytes: u64,
+) -> Option<u64> {
+    let mut pci = gop_pci(handle)?;
+    let header = pci.read_header().ok()?;
+    if u32::from_le_bytes(header[..4].try_into().ok()?) != QEMU_VGA {
+        return None;
+    }
+    let single = |regions: Vec<BarRegion>| match regions.as_slice() {
+        [region] => Some(region.host.clone()),
+        _ => None,
+    };
+    let memory = single(pci.bar_regions(0).ok()?)?;
+    let registers = single(pci.bar_regions(QEMU_VGA_MMIO_BAR).ok()?)?;
+    let mut register = |index: u64| {
+        let mut value = 0u16;
+        // SAFETY: live boot protocol; EfiPciIoWidthUint16 (1) reads one
+        // register into the local.
+        let read = unsafe {
+            (pci.mem_read)(
+                &mut *pci,
+                1,
+                QEMU_VGA_MMIO_BAR,
+                DISPI_REGISTERS + index * 2,
+                1,
+                ptr::from_mut(&mut value).cast(),
+            )
+        };
+        read.is_success().then_some(value)
+    };
+    let video_memory = u64::from(register(DISPI_VIDEO_MEMORY_64K)?) << 16;
+    let fits = memory.start == base
+        && 2 * frame_bytes <= video_memory.min(memory.end - memory.start)
+        && usize::from(register(DISPI_VIRT_WIDTH)?) == stride
+        && register(DISPI_X_OFFSET)? == 0
+        && register(DISPI_Y_OFFSET)? == 0
+        && registers.end - registers.start >= DISPI_REGISTERS + 0x20;
+    fits.then_some(registers.start + DISPI_REGISTERS)
+}
+
 fn status(value: Status) -> Result<(), Error> {
     if value.is_success() {
         Ok(())
