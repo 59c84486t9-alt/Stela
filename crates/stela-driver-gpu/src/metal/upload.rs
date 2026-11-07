@@ -56,6 +56,23 @@ impl UploadArena {
         Ok(upload)
     }
 
+    /// Device memory of its own chunk that commit writes nothing into: its
+    /// contents are undefined.
+    pub(super) fn scratch(&mut self, source: &mut dyn ChunkSource, length: u64) -> Result<Upload> {
+        let chunk = source.acquire(length.max(CHUNK_BYTES))?;
+        if chunk.size < length {
+            return Err(Error::OutOfMemory);
+        }
+        // Before the last chunk, which later uploads fill.
+        let at = self.chunks.len().saturating_sub(1);
+        self.chunks.insert(at, (chunk, Vec::new()));
+        Ok(Upload {
+            buffer: chunk.buffer,
+            offset: 0,
+            address: chunk.address,
+        })
+    }
+
     /// Appends storage for a payload encoded directly into the arena.
     pub(super) fn zeroed(
         &mut self,

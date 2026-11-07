@@ -147,6 +147,10 @@ impl CommandBuffer {
                 "the tile pipeline's color attachments are the pass's",
             )?;
         }
+        ensure(
+            state.interface.imageblock_bytes <= tile.imageblock_sample_length,
+            "the tile function's imageblock exceeds the pass's imageblockSampleLength",
+        )?;
         let specialization = tile_variant(&state.plan, &target, threads, tile.size)?;
         // Each threadgroup buffer the function uses lies in the tile's
         // threadgroup memory.

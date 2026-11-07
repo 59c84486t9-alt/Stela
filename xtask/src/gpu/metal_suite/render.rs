@@ -3086,6 +3086,67 @@ fn tiles(plan: &mut Plan, library: &str) {
         )
         .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&dimensions))),
     );
+    // A pass's imageblock data: a tile function sets each pixel's from its
+    // position before two draws, which each add to it in raster order and
+    // color the pixel with it, and another writes it out after them. Each
+    // sample's tile memory holds its color attachments' texels and the
+    // data, all of a tile's within Apple's 32 KiB.
+    let add = [0.5, 0.25, 2.0, 0.0];
+    let data = image(&|x, y| {
+        let (x, y) = (f64::from(x), f64::from(y));
+        [
+            x + 2.0 * add[0],
+            y + 2.0 * add[1],
+            2.0 * add[2],
+            x + 100.0 * y + 2000.0,
+        ]
+    });
+    let colored = image(&|x, y| {
+        let (x, y) = (f64::from(x), f64::from(y));
+        [x + 2.0 * add[0], y + 2.0 * add[1], 2.0 * add[2], 1.0]
+    });
+    for samples in [1, 2] {
+        let multisampled = samples > 1;
+        let colors = if multisampled {
+            json!([{"texture": "ms", "clear": [0, 0, 0, 0]}])
+        } else {
+            json!([{"texture": "c", "clear": [0, 0, 0, 0]}])
+        };
+        let tiles = json!([
+            {"function": "tile_ib_init", "threads": [16, 16], "before": true},
+            {"function": "tile_ib_resolve", "threads": [16, 16]}
+        ]);
+        let mut render = json!({"vertex_count": 3, "instance_count": 2, "colors": colors,
+                                "tiles": tiles, "tile_size": [16, 16],
+                                "imageblock_sample_length": 48});
+        if multisampled {
+            render["samples"] = json!(samples);
+        }
+        let name = if multisampled {
+            "render.imageblock.fragment_data.multisampled"
+        } else {
+            "render.imageblock.fragment_data"
+        };
+        let mut case = Case::render(name, library, "vert_full", Some("frag_ib_add"), render)
+            .buffer(Buffer::data("add", 0, f32s(&add)).stage("fragment"))
+            .buffer(Buffer::data("depth", 2, f32s(&[0.5])).stage("vertex"))
+            .buffer(Buffer::zeroed("out", 0, (TW * TH * 16) as usize).stage("tile"))
+            .buffer(Buffer::data("size", 1, u32s(&[TW, TH])).stage("tile"))
+            .output(Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&data)));
+        case = if multisampled {
+            case.texture(
+                Texture::new("ms", "rgba32float", "2d_ms", [TW, TH, 1])
+                    .samples(2)
+                    .usage(&["render"]),
+            )
+        } else {
+            case.texture(Texture::d2("c", "rgba32float", TW, TH).usage(&["render"]))
+                .output(
+                    Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&colored)),
+                )
+        };
+        plan.add(case);
+    }
     // Pipelines made from an archive given their functions, by completion
     // handler.
     plan.add(

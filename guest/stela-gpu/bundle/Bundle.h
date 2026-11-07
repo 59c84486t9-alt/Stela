@@ -439,6 +439,9 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	NSUInteger _maxTotalThreadsPerTileThreadgroup;
 	MTLSize _requiredTileThreads;
 	id _tileLinked;
+	/* The bytes of each sample of its fragment function's imageblock data,
+	 * or of its tile function's explicit imageblock. */
+	NSUInteger _imageblockSampleLength;
 }
 @end
 

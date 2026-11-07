@@ -700,6 +700,88 @@ static const char *grouped =
    " i32 4, !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"uint\","
    " !\"air.arg_name\", !\"counts\"}\n";
 
+/* A fragment reading its pixel's imageblock data and returning it changed,
+ * with a color. */
+static const char *imageblock_data =
+   "%data = type { <4 x float>, i32, [12 x i8] }\n"
+   "define <{ %data, <4 x float> }> @fragment(<4 x float> %position, %data %in) {\n"
+   "%a = extractvalue %data %in, 0\n"
+   "%n = extractvalue %data %in, 1\n"
+   "%m = add i32 %n, 2\n"
+   "%c = fmul <4 x float> %a, %position\n"
+   "%d = insertvalue %data %in, i32 %m, 1\n"
+   "%r0 = insertvalue <{ %data, <4 x float> }> undef, %data %d, 0\n"
+   "%r = insertvalue <{ %data, <4 x float> }> %r0, <4 x float> %c, 1\n"
+   "ret <{ %data, <4 x float> }> %r\n}\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @fragment, !3, !4}\n!3 = !{!30, !31}\n"
+   "!30 = !{!\"air.imageblock_data\", !\"air.imageblock_data_size\", i32 32,"
+   " !\"air.struct_type_info\", !32, !\"air.arg_type_align_size\", i32 16,"
+   " !\"air.arg_type_name\", !\"Data\", !\"air.arg_name\", !\"d\"}\n"
+   "!31 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"c\"}\n"
+   "!32 = !{i32 0, i32 16, i32 0, !\"float4\", !\"a\", !\"air.raster_order_group\", i32 0,"
+   " i32 16, i32 4, i32 0, !\"uint\", !\"n\", !\"air.raster_order_group\", i32 0}\n"
+   "!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n"
+   "!41 = !{i32 1, !\"air.imageblock_data\", !\"air.imageblock_data_size\", i32 32,"
+   " !\"air.struct_type_info\", !32, !\"air.arg_type_align_size\", i32 16,"
+   " !\"air.arg_type_name\", !\"Data\", !\"air.arg_name\", !\"in\"}\n";
+
+static unsigned
+intrinsic_count(nir_shader *shader, nir_intrinsic_op op)
+{
+   unsigned n = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block)
+         n += instr->type == nir_instr_type_intrinsic &&
+              nir_instr_as_intrinsic(instr)->intrinsic == op;
+   }
+   return n;
+}
+
+/* Imageblock data is its pixel's covered samples' in the pass's memory,
+ * read where the function's critical section opens with the function and
+ * written to each covered sample where it closes, after the fragment
+ * tests. */
+static void
+fragments_read_and_write_imageblock_data(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = translate(imageblock_data, STELA_AIR_FRAGMENT, false, &error);
+   if (!shader)
+      fprintf(stderr, "imageblock data: %u %s\n", error.kind, error.detail);
+   assert(shader && shader->info.fs.pixel_interlock_ordered && shader->info.fs.early_fragment_tests);
+   assert(intrinsic_count(shader, nir_intrinsic_begin_invocation_interlock) == 1);
+   assert(intrinsic_count(shader, nir_intrinsic_end_invocation_interlock) == 1);
+   assert(intrinsic_count(shader, nir_intrinsic_load_sample_mask_in) >= 1);
+   /* The float4 and uint leaves load; every leaf stores. */
+   assert(intrinsic_count(shader, nir_intrinsic_load_global) >= 2);
+   assert(intrinsic_count(shader, nir_intrinsic_store_global) >= 2);
+   nir_intrinsic_instr *first = NULL;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         if (!first && instr->type == nir_instr_type_intrinsic)
+            first = nir_instr_as_intrinsic(instr);
+      }
+   }
+   assert(first && first->intrinsic == nir_intrinsic_begin_invocation_interlock);
+   ralloc_free(shader);
+
+   /* A device without fragment shader interlock cannot order them. */
+   raster_order_groups = false;
+   assert(!translate(imageblock_data, STELA_AIR_FRAGMENT, false, &error) &&
+          error.kind == STELA_AIR_TARGET);
+   raster_order_groups = true;
+   /* Its input and output are one imageblock's data. */
+   char *sizes = change(imageblock_data,
+                        "!41 = !{i32 1, !\"air.imageblock_data\", !\"air.imageblock_data_size\", i32 32,",
+                        "!41 = !{i32 1, !\"air.imageblock_data\", !\"air.imageblock_data_size\", i32 48,");
+   assert(!translate(sizes, STELA_AIR_FRAGMENT, false, &error) && error.kind == STELA_AIR_ARGUMENT);
+   free(sizes);
+}
+
 /* Whether instr reads or writes device memory. */
 static bool
 device_access(nir_instr *instr)
@@ -890,6 +972,7 @@ main(void)
    fragment_functions_read_their_pass_samples();
    uniform_values_are_assumed();
    raster_order_groups_order_device_accesses();
+   fragments_read_and_write_imageblock_data();
    refuses_unrepresentable_render_io();
    glsl_type_singleton_decref();
    puts("air render io: ok");

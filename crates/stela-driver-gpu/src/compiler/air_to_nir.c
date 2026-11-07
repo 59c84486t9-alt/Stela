@@ -124,6 +124,11 @@ struct translator {
     * persists, which its exit block copies out. */
    nir_def *tile;
    bool tile_memory;
+   /* STELA_AIR_IMAGEBLOCK of a tile function with an explicit imageblock
+    * or a fragment function with imageblock data; the fragment's pixel and
+    * the samples it covers, and whether it accesses the data. */
+   nir_def *imageblock_pass, *imageblock_pixel, *imageblock_mask;
+   bool tile_explicit, fragment_imageblock;
    /* An amplified vertex function's layer and viewport outputs. */
    nir_variable *layer, *viewport;
    /* A post-tessellation vertex function's STELA_AIR_PATCH_IDS. */
@@ -628,7 +633,7 @@ device_value(struct translator *t, enum stela_air_device_value value)
                          value == STELA_AIR_THREADGROUP_SHAPE || value == STELA_AIR_STAGE_IN_ORIGIN ||
                          value == STELA_AIR_STAGE_IN_SIZE ? 3 :
                          value == STELA_AIR_SAMPLE_POSITIONS || value == STELA_AIR_TILE ||
-                         value == STELA_AIR_BLEND_COLOR ? 4 : 1;
+                         value == STELA_AIR_BLEND_COLOR || value == STELA_AIR_IMAGEBLOCK ? 4 : 1;
    if (!def || def->num_components != components || def->bit_size != 32 || !binding_prelude(t)) {
       fail(t, STELA_AIR_ARGUMENT, "invalid device value");
       return NULL;
@@ -1188,10 +1193,14 @@ compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
             return fail(t, STELA_AIR_ARGUMENT, "an implicit imageblock outside a tile function");
          if (kernel->implicit_imageblock)
             continue;
-         /* Tile memory a pass's fragment functions share: not yet the
-          * threadgroup's. */
-         if (t->tile)
-            return fail(t, STELA_AIR_TARGET, "a tile function's explicit imageblock");
+         /* A tile function's is its pass's imageblock data, which the
+          * pass's fragment functions share. */
+         if (t->tile) {
+            t->tile_explicit = true;
+            if (!(t->imageblock_pass = device_value(t, STELA_AIR_IMAGEBLOCK)))
+               return false;
+            continue;
+         }
          if (!imageblock_memory(t, kernel->imageblock_size))
             return false;
          continue;
@@ -3031,6 +3040,124 @@ attachment_outputs(struct translator *t)
    return true;
 }
 
+static bool repeat(void *translator, nir_def *count, bool (*body)(void *data, nir_def *index),
+                   void *data);
+
+/* Refuses the outputs the fragment tests read, which run before a function
+ * that writes memory in raster order. */
+static bool
+tested_outputs(struct translator *t)
+{
+   for (unsigned i = 0; i < t->render.entry.output_count; i++) {
+      const struct stela_air_stage_io *io = &t->render.outputs[i];
+      if (!io->absent && (io->semantic == STELA_AIR_DEPTH || io->semantic == STELA_AIR_STENCIL ||
+                          io->semantic == STELA_AIR_SAMPLE_MASK))
+         return fail(t, STELA_AIR_ARGUMENT,
+                     "imageblock data is written after the fragment tests, so its function may not write depth, stencil or coverage");
+   }
+   return true;
+}
+
+/* The address of sample `sample` of the pass's imageblock data at pixel,
+ * of `samples` per pixel. */
+static nir_def *
+imageblock_address(struct translator *t, nir_def *pixel, nir_def *sample, nir_def *samples)
+{
+   nir_builder *b = &t->b;
+   nir_def *pass = t->imageblock_pass;
+   nir_def *index = nir_iadd(b, nir_imul(b, nir_channel(b, pixel, 1), nir_channel(b, pass, 1)),
+                             nir_channel(b, pixel, 0));
+   index = nir_iadd(b, nir_imul(b, index, samples), sample);
+   nir_def *base = nir_pack_64_2x32_split(b, nir_channel(b, pass, 2), nir_channel(b, pass, 3));
+   return nir_iadd(b, base, nir_imul(b, nir_u2u64(b, index), nir_u2u64(b, nir_channel(b, pass, 0))));
+}
+
+/* A fragment function's pixel and the samples it covers, for its
+ * imageblock data. */
+static bool
+fragment_imageblock_prelude(struct translator *t)
+{
+   if (t->fragment_imageblock)
+      return true;
+   nir_builder *b = &t->b;
+   nir_def *samples = device_value(t, STELA_AIR_SAMPLE_COUNT);
+   if (!samples || !(t->imageblock_pass = device_value(t, STELA_AIR_IMAGEBLOCK)))
+      return false;
+   t->imageblock_pixel = nir_f2u32(b, nir_trim_vector(b, nir_load_frag_coord(b), 2));
+   nir_def *all = nir_iadd_imm(b, nir_ishl(b, nir_imm_int(b, 1), samples), -1);
+   t->imageblock_mask = nir_iand(b, nir_load_sample_mask_in(b), all);
+   t->fragment_imageblock = true;
+   return true;
+}
+
+static nir_def *
+fragment_samples(struct translator *t)
+{
+   return device_value(t, STELA_AIR_SAMPLE_COUNT);
+}
+
+/* A fragment's [[imageblock_data]] input: its first covered sample's, which
+ * its interlock section loads. */
+static bool
+imageblock_data_input(struct translator *t, LLVMValueRef param)
+{
+   if (!fragment_imageblock_prelude(t))
+      return false;
+   nir_builder *b = &t->b;
+   nir_def *samples = fragment_samples(t);
+   if (!samples)
+      return false;
+   nir_def *first = nir_umin(b, nir_find_lsb(b, t->imageblock_mask), nir_iadd_imm(b, samples, -1));
+   struct value address = {
+      .def = imageblock_address(t, t->imageblock_pixel, first, samples),
+      .access = STELA_AIR_READ, .components = 1, .bits = 64};
+   LLVMTypeRef type = LLVMTypeOf(param);
+   struct value *loaded = aggregate_access(t, &address, type, 0, NULL, ACCESS_COHERENT,
+                                           LLVMABIAlignmentOfType(t->layout, type));
+   return loaded && (_mesa_hash_table_insert(t->values, param, loaded) != NULL ||
+                     fail(t, STELA_AIR_ALLOCATION, "imageblock data map failed"));
+}
+
+struct imageblock_store {
+   struct translator *t;
+   const struct value *data;
+   LLVMTypeRef type;
+   nir_def *samples;
+};
+
+static bool
+imageblock_store_sample(void *data, nir_def *sample)
+{
+   const struct imageblock_store *store = data;
+   struct translator *t = store->t;
+   nir_builder *b = &t->b;
+   nir_def *covered = nir_i2b(b, nir_iand(b, nir_ushr(b, t->imageblock_mask, sample), nir_imm_int(b, 1)));
+   struct memory_guard guard;
+   if (!memory_guard_begin(t, nir_iand(b, covered, nir_inot(b, nir_is_helper_invocation(b, 1))), &guard))
+      return false;
+   struct value address = {
+      .def = imageblock_address(t, t->imageblock_pixel, sample, store->samples),
+      .access = STELA_AIR_WRITE, .components = 1, .bits = 64};
+   if (!aggregate_access(t, &address, store->type, 0, store->data, ACCESS_COHERENT,
+                         LLVMABIAlignmentOfType(t->layout, store->type)))
+      return false;
+   memory_guard_end(t, &guard, NULL);
+   return true;
+}
+
+/* A fragment's [[imageblock_data]] output, which every sample it covers
+ * holds once its interlock section ends. */
+static bool
+imageblock_data_output(struct translator *t, const struct value *data, LLVMTypeRef type)
+{
+   if (!data->aggregate_count)
+      return fail(t, STELA_AIR_TYPE, "imageblock data of an unknown form");
+   if (!fragment_imageblock_prelude(t))
+      return false;
+   struct imageblock_store store = {.t = t, .data = data, .type = type, .samples = fragment_samples(t)};
+   return store.samples && repeat(t, store.samples, imageblock_store_sample, &store);
+}
+
 /* A fragment function with raster order groups or storage attachments: its
  * accesses that must follow those of the overlapping fragments before it,
  * from the first to the last, form a critical section that those fragments
@@ -3043,12 +3170,14 @@ attachment_outputs(struct translator *t)
 static bool
 order_fragments(struct translator *t)
 {
-   bool storage = t->storage_attachments != 0;
-   if (!storage && !t->render.entry.raster_ordered)
+   bool storage = t->storage_attachments != 0, imageblock = t->fragment_imageblock;
+   if (!storage && !imageblock && !t->render.entry.raster_ordered)
       return true;
    if (!t->stage_options->raster_order_groups)
       return fail(t, STELA_AIR_TARGET, "raster order groups need the device's fragment shader interlock");
    if (storage && !attachment_outputs(t))
+      return false;
+   if (imageblock && !tested_outputs(t))
       return false;
    nir_function_impl *impl = nir_shader_get_entrypoint(t->b.shader);
    nir_cursor begin = {0}, end = {0};
@@ -3078,6 +3207,13 @@ order_fragments(struct translator *t)
       if (!found)
          begin = nir_before_cf_node(node);
       end = nir_after_cf_node(node);
+      found = true;
+   }
+   /* Imageblock data is read where the function starts and written where
+    * it ends. */
+   if (imageblock) {
+      begin = nir_before_impl(impl);
+      end = nir_after_block_before_jump(nir_impl_last_block(impl));
       found = true;
    }
    /* A function whose grouped arguments go unused orders nothing. */
@@ -3116,8 +3252,11 @@ order_fragments(struct translator *t)
    nir_end_invocation_interlock(b);
    t->b.shader->info.fs.pixel_interlock_ordered = true;
    nir_progress(true, impl, nir_metadata_none);
+   /* The fragment tests decide which fragments write the attachments and
+    * the imageblock data. */
+   if (imageblock)
+      t->b.shader->info.fs.early_fragment_tests = true;
    if (storage) {
-      /* The fragment tests decide which fragments write the attachments. */
       t->b.shader->info.fs.early_fragment_tests = true;
       nir_lower_vars_to_ssa(t->b.shader);
    }
@@ -3329,6 +3468,12 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
       } else if (io->semantic == STELA_AIR_ATTACHMENT) {
          if (!(def = attachment_input(t, io)))
             return false;
+      } else if (io->semantic == STELA_AIR_IMAGEBLOCK_DATA) {
+         if (!io->used && !LLVMGetFirstUse(param))
+            continue;
+         if (!imageblock_data_input(t, param))
+            return false;
+         continue;
       } else if (io->semantic == STELA_AIR_CONTROL_POINTS) {
          continue; /* Calls of its function read it. */
       } else if (io->semantic == STELA_AIR_BARYCENTRIC) {
@@ -3375,7 +3520,8 @@ stage_arguments(struct translator *t, LLVMValueRef fn)
    }
    for (unsigned i = 0; i < t->render.entry.output_count; i++) {
       const struct stela_air_stage_io *io = &t->render.outputs[i];
-      if (io->absent) continue;
+      /* Imageblock data is memory, not an output. */
+      if (io->absent || io->semantic == STELA_AIR_IMAGEBLOCK_DATA) continue;
       if (!(t->outputs[i] = stage_variable(t, io, true))) return false;
       if (io->semantic == STELA_AIR_LAYER) t->layer = t->outputs[i];
       if (io->semantic == STELA_AIR_VIEWPORT) t->viewport = t->outputs[i];
@@ -3409,6 +3555,10 @@ stage_return(struct translator *t, LLVMValueRef inst)
       const struct value *leaf = aggregate ? aggregate->elements[i] : NULL;
       /* An output the function leaves undefined holds anything, so it stays
        * unwritten. */
+      if (io->semantic == STELA_AIR_IMAGEBLOCK_DATA) {
+         values[i] = NULL;
+         continue;
+      }
       if (io->semantic == STELA_AIR_CLIP_DISTANCE) {
          for (unsigned j = 0; j < io->clip_distances; j++) {
             /* A lone distance need not be an array. */
@@ -3428,6 +3578,12 @@ stage_return(struct translator *t, LLVMValueRef inst)
       const struct stela_air_stage_io *io = &t->render.outputs[i];
       if (io->absent)
          continue;
+      if (io->semantic == STELA_AIR_IMAGEBLOCK_DATA) {
+         const struct value *data = aggregate ? aggregate->elements[i] : NULL;
+         if (data && !imageblock_data_output(t, data, LLVMStructGetTypeAtIndex(LLVMTypeOf(returned), i)))
+            return false;
+         continue;
+      }
       if (io->semantic == STELA_AIR_CLIP_DISTANCE) {
          nir_deref_instr *array = nir_build_deref_var(&t->b, t->outputs[i]);
          for (unsigned j = 0; j < io->clip_distances; j++) {
@@ -4069,6 +4225,17 @@ tile_pack(struct translator *t, enum pipe_format format, nir_def *value, bool fl
    return nir_format_pack_rgba(b, format, nir_vec(b, channels, 4));
 }
 
+/* The pixel of the pass at a position in the tile. */
+static nir_def *
+tile_pixel(struct translator *t, nir_def *at)
+{
+   nir_builder *b = &t->b;
+   nir_def *size = nir_channel(b, t->tile, 0);
+   nir_def *extent = nir_vec2(b, nir_iand_imm(b, size, 0xffff), nir_ushr_imm(b, size, 16));
+   nir_def *origin = nir_imul(b, nir_trim_vector(b, nir_load_workgroup_id(b), 2), extent);
+   return nir_iadd(b, origin, nir_u2u32(b, at));
+}
+
 /* A tile function's implicit imageblock functions: a color's load and
  * stores, which access its pass's color attachments at the tile's pixels,
  * and the samples and colors at a pixel. Each sample holds its own color
@@ -4083,7 +4250,8 @@ tile_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name
    bool store = !masked && named_after(name, name_length, "air.store.implicit_imageblock");
    bool samples = stela_air_call_named(name, name_length, "air.get_imageblock_samples");
    bool colors = stela_air_call_named(name, name_length, "air.get_imageblock_num_colors");
-   *lowered = load || masked || store || samples || colors;
+   bool coverage = stela_air_call_named(name, name_length, "air.get_color_coverage_mask");
+   *lowered = load || masked || store || samples || colors || coverage;
    if (!*lowered)
       return true;
    if (!t->tile)
@@ -4097,9 +4265,10 @@ tile_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name
          return fail(t, STELA_AIR_TYPE, "an imageblock's samples of an unknown form");
       return put_value(t, inst, nir_imm_intN_t(b, tile->samples, 16), 0);
    }
-   /* (value,) color, position, then a rate and index or a coverage mask. */
-   unsigned first = load ? 0 : 1, at_operand = colors ? 0 : first + 1;
-   unsigned expected = colors ? 1 : load || masked ? 4 : 5;
+   /* (value,) color, position, then a rate and index or a coverage mask;
+    * a position, and a color's index. */
+   unsigned first = load ? 0 : 1, at_operand = colors || coverage ? 0 : first + 1;
+   unsigned expected = colors ? 1 : coverage ? 2 : load || masked ? 4 : 5;
    unsigned components, bits;
    if (operands != expected ||
        !value_shape(LLVMTypeOf(LLVMGetOperand(inst, at_operand)), &components, &bits) ||
@@ -4108,21 +4277,37 @@ tile_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name
    nir_def *at = get_value(t, LLVMGetOperand(inst, at_operand));
    if (!at)
       return false;
-   nir_def *size = nir_channel(b, t->tile, 0);
-   nir_def *extent = nir_vec2(b, nir_iand_imm(b, size, 0xffff), nir_ushr_imm(b, size, 16));
-   nir_def *origin = nir_imul(b, nir_trim_vector(b, nir_load_workgroup_id(b), 2), extent);
-   nir_def *pixel = nir_iadd(b, origin, nir_u2u32(b, at));
+   nir_def *pixel = tile_pixel(t, at);
+   /* An explicit imageblock's samples each hold a color. */
    if (colors) {
       if (LLVMTypeOf(inst) != i16)
          return fail(t, STELA_AIR_TYPE, "an imageblock's colors of an unknown form");
-      nir_def *count = nir_imm_intN_t(b, 1, 16);
-      if (tile->samples > 1) {
+      nir_def *count = nir_imm_intN_t(b, t->tile_explicit ? tile->samples : 1, 16);
+      if (tile->samples > 1 && !t->tile_explicit) {
          nir_def *one = tile_one_color(t, pixel);
          if (!one)
             return false;
          count = nir_bcsel(b, one, count, nir_imm_intN_t(b, tile->samples, 16));
       }
       return put_value(t, inst, count, 0);
+   }
+   /* The samples a color covers: its own, or all of one color's. */
+   if (coverage) {
+      nir_def *color = get_value(t, LLVMGetOperand(inst, 1));
+      if (!color || color->bit_size != 16 || LLVMTypeOf(inst) != i16)
+         return fail(t, STELA_AIR_TYPE, "a color coverage mask of an unknown form");
+      color = nir_u2u32(b, color);
+      nir_def *mask = nir_bcsel(b, nir_ult_imm(b, color, tile->samples),
+                                nir_ishl(b, nir_imm_int(b, 1), color), nir_imm_int(b, 0));
+      if (tile->samples > 1 && !t->tile_explicit) {
+         nir_def *one = tile_one_color(t, pixel);
+         if (!one)
+            return false;
+         nir_def *all = nir_bcsel(b, nir_ieq_imm(b, color, 0),
+                                  nir_imm_int(b, BITFIELD_MASK(tile->samples)), nir_imm_int(b, 0));
+         mask = nir_bcsel(b, one, all, mask);
+      }
+      return put_value(t, inst, nir_u2u16(b, mask), 0);
    }
    LLVMValueRef color = LLVMGetOperand(inst, first);
    unsigned n = LLVMIsAConstantInt(color) ? (unsigned)LLVMConstIntGetZExtValue(color) : UINT_MAX;
@@ -4146,12 +4331,13 @@ tile_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name
       LLVMValueRef rate = LLVMGetOperand(inst, first + 2);
       uint64_t sample_rate = LLVMIsAConstantInt(rate) ? LLVMConstIntGetZExtValue(rate) : 1;
       nir_def *index = get_value(t, LLVMGetOperand(inst, first + 3));
-      if ((sample_rate != 0 && sample_rate != 2) || !index || index->bit_size != 16)
+      /* The first color, a color by index or a sample. */
+      if (sample_rate > 2 || !index || index->bit_size != 16)
          return fail(t, STELA_AIR_TYPE, "an imageblock access of an unknown rate or index");
       sample = nir_u2u32(b, index);
       if (store) {
          mask = nir_ishl(b, nir_imm_int(b, 1), sample);
-         if (sample_rate == 0 && tile->samples > 1) {
+         if (sample_rate != 2 && tile->samples > 1) {
             nir_def *one = tile_one_color(t, pixel);
             if (!one)
                return false;
@@ -4271,7 +4457,7 @@ imageblock_call(struct translator *t, LLVMValueRef inst, const char *name, size_
       nir_def *size = nir_channel(b, t->tile, 0);
       return put_value(t, inst, nir_u2u16(b, width ? size : nir_ushr_imm(b, size, 16)), 0);
    }
-   if (!t->imageblock)
+   if (!t->imageblock && !t->tile_explicit)
       return fail(t, STELA_AIR_INSTRUCTION, "%.*s in a function without an explicit imageblock",
                   (int)name_length, name);
    if (!data) {
@@ -4284,15 +4470,30 @@ imageblock_call(struct translator *t, LLVMValueRef inst, const char *name, size_
    LLVMValueRef index = position ? LLVMGetOperand(inst, 1) : NULL, sample = position ? LLVMGetOperand(inst, 2) : NULL;
    unsigned components, bits;
    if (!position || !value_shape(LLVMTypeOf(position), &components, &bits) || components != 2 ||
-       bits != 16 || !LLVMIsAConstantInt(index) || !LLVMIsAConstantInt(sample) ||
+       bits != 16 || !LLVMIsAConstantInt(index) || (!t->tile_explicit && !LLVMIsAConstantInt(sample)) ||
        LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMPointerTypeKind ||
        LLVMGetPointerAddressSpace(LLVMTypeOf(inst)) != 4)
       return fail(t, STELA_AIR_TYPE, "imageblock data of an unknown form");
-   if (LLVMConstIntGetZExtValue(index) || LLVMConstIntGetZExtValue(sample))
-      return fail(t, STELA_AIR_INSTRUCTION, "imageblock data of a later index or sample");
    nir_def *at = get_value(t, position);
    if (!at)
       return false;
+   /* A tile function's is its pass's at the tile's pixel: the first color,
+    * or a color or sample by index, each sample a color. */
+   if (t->tile_explicit) {
+      uint64_t rate = LLVMConstIntGetZExtValue(index);
+      nir_def *which = get_value(t, sample);
+      if (rate > 2 || !which)
+         return fail(t, STELA_AIR_TYPE, "imageblock data of an unknown rate");
+      unsigned samples = t->options->tile->samples;
+      which = rate ? nir_umin_imm(b, nir_u2u32(b, which), samples - 1) : nir_imm_int(b, 0);
+      nir_def *address = imageblock_address(t, tile_pixel(t, at), which, nir_imm_int(b, samples));
+      if (!put_value(t, inst, address, STELA_AIR_READ_WRITE))
+         return false;
+      find_value(t, inst)->pointer_root = inst;
+      return true;
+   }
+   if (LLVMConstIntGetZExtValue(index) || LLVMConstIntGetZExtValue(sample))
+      return fail(t, STELA_AIR_INSTRUCTION, "imageblock data of a later index or sample");
    at = nir_u2u32(b, at);
    nir_def *pixel = nir_iadd(b, nir_imul_imm(b, nir_channel(b, at, 1), t->imageblock_width),
                              nir_channel(b, at, 0));

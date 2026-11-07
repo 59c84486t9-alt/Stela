@@ -10,7 +10,9 @@
 //! Encoder state is the command buffer's: one encoder is active at a time,
 //! as in Metal. Its operations are in [`render`], [`compute`] and [`blit`].
 use super::{
-    binding::{ArgumentTable, BufferBinding, PassSamples, PushConstants, ResourceId},
+    binding::{
+        ArgumentTable, BufferBinding, PassImageblock, PassSamples, PushConstants, ResourceId,
+    },
     error::{Error, Result, ensure},
     hazard::{FULL, Hazards, Use},
     indirect::{IndirectCommandBuffer, IndirectCommandBufferId, IndirectPipeline, RecordLayout},
@@ -458,12 +460,18 @@ impl Bindings {
     }
 
     /// The textures of the pass's color attachments, for `[[color(n)]]`,
-    /// and its samples.
-    fn set_pass(&mut self, textures: [ResourceId; MAX_COLOR_ATTACHMENTS], samples: PassSamples) {
+    /// its samples and its imageblock data.
+    fn set_pass(
+        &mut self,
+        textures: [ResourceId; MAX_COLOR_ATTACHMENTS],
+        samples: PassSamples,
+        imageblock: PassImageblock,
+    ) {
         for slot in [Slot::Stage(Stage::Fragment), Slot::Tile] {
             let table = self.table(slot);
             table.slots.attachments = textures;
             table.slots.samples = samples;
+            table.slots.imageblock = imageblock;
             table.address = None;
         }
     }

@@ -163,6 +163,9 @@ pub struct TileMemory {
 pub struct Tile {
     pub size: [u32; 2],
     pub threadgroup_memory_length: u32,
+    /// `imageblockSampleLength`, a multiple of 16: the bytes of each
+    /// sample's imageblock data.
+    pub imageblock_sample_length: u32,
 }
 
 /// A pass's tiles as Apple's GPUs size them: 32 by 32 pixels by default, a
@@ -182,9 +185,14 @@ fn tile(capabilities: &Capabilities, memory: &TileMemory) -> Result<Tile> {
         memory.threadgroup_memory_length <= capabilities.limits.max_threadgroup_memory_length,
         "tile threadgroup memory exceeds the device limit",
     )?;
+    ensure(
+        memory.imageblock_sample_length <= capabilities.limits.max_threadgroup_memory_length,
+        "imageblock sample length exceeds the device limit",
+    )?;
     Ok(Tile {
         size: [width as u32, height.clamp(16, width) as u32],
         threadgroup_memory_length: memory.threadgroup_memory_length.next_multiple_of(16) as u32,
+        imageblock_sample_length: memory.imageblock_sample_length.next_multiple_of(16) as u32,
     })
 }
 

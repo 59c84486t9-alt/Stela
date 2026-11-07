@@ -926,6 +926,59 @@ fn render_barriers_split_the_pass_and_keep_its_contents() {
     );
 }
 
+/// A pass with an `imageblockSampleLength` places its imageblock data in
+/// whole tiles, which its fragment and tile tables name; a function whose
+/// imageblock is larger is refused.
+#[test]
+fn passes_place_imageblock_data_in_whole_tiles() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    let mut plan = pass(&color, StoreAction::Store, false);
+    plan.tile.size = [32, 16];
+    plan.tile.imageblock_sample_length = 32;
+    commands
+        .begin_render(&mut resolver, plan, None, Vec::new())
+        .unwrap();
+    let mut state = kernel_state(true);
+    state.interface.imageblock_bytes = 48;
+    let mut formats = [None; MAX_COLOR_ATTACHMENTS];
+    formats[0] = Some(PixelFormat::Rgba8Unorm);
+    let target = crate::metal::pipeline::tile_target(&capabilities(), &formats, 1, false).unwrap();
+    commands.set_tile_pipeline_state(&state, target).unwrap();
+    let threads = Size {
+        width: 32,
+        height: 16,
+        depth: 1,
+    };
+    assert!(
+        commands
+            .dispatch_threads_per_tile(&mut resolver, threads)
+            .is_err()
+    );
+    state.interface.imageblock_bytes = 32;
+    commands.set_tile_pipeline_state(&state, target).unwrap();
+    commands
+        .dispatch_threads_per_tile(&mut resolver, threads)
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let pushed = recording.segments[0]
+        .commands
+        .iter()
+        .find_map(|command| match command {
+            Command::PushConstants(constants) if constants.arguments != 0 => Some(*constants),
+            _ => None,
+        })
+        .unwrap();
+    let table = uploaded(&recording, pushed.tables[0]);
+    let at = ArgumentTable::IMAGEBLOCK_OFFSET as usize;
+    // 64 by 32 pixels are whole tiles of 32 by 16.
+    assert_eq!(word(table, at), 32);
+    assert_eq!(word(table, at + 4), 64);
+    assert_ne!(double(table, at + 8), 0);
+}
+
 /// A tile dispatch runs between pass instances: a threadgroup of the tile's
 /// threads per tile, its arguments carrying the tile and the pass's
 /// persistent tile memory, and its tables the encoder's tile bindings.

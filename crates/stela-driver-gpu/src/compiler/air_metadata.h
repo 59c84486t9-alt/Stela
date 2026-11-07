@@ -300,6 +300,9 @@ enum stela_air_stage_semantic {
    STELA_AIR_PRIMITIVE_CULLED, /* A mesh primitive's bool [[primitive_culled]]. */
    /* Fragment outputs. */
    STELA_AIR_DEPTH, STELA_AIR_SAMPLE_MASK, STELA_AIR_STENCIL,
+   /* A fragment's [[imageblock_data]] input or output: a struct of its
+    * pixel's explicit imageblock data. */
+   STELA_AIR_IMAGEBLOCK_DATA,
 };
 enum stela_air_interpolation {
    STELA_AIR_INTERPOLATION_NONE, STELA_AIR_PERSPECTIVE,
@@ -392,6 +395,9 @@ struct stela_air_stage_entry {
     * [[raster_order_group]]: its accesses follow those of the overlapping
     * fragments before it. */
    bool raster_ordered;
+   /* The bytes of each sample of a fragment function's [[imageblock_data]]
+    * input and output, zero without either. */
+   unsigned imageblock_bytes;
 };
 typedef bool (*stela_air_visit_stage)(const struct stela_air_inspection *,
                                      const struct stela_air_stage_entry *, void *);

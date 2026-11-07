@@ -201,6 +201,18 @@ pub struct ArgumentTable {
     /// The render encoder's blend color, as each float's bits, which
     /// functions blending the attachments they access as storage read.
     pub blend_color: [u32; 4],
+    /// The pass's imageblock data, which fragment and tile functions
+    /// access.
+    pub imageblock: PassImageblock,
+}
+
+/// A render pass's imageblock data: `stride` bytes for each sample, each
+/// pixel's samples in turn, `pitch` pixels to a row, at `address`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PassImageblock {
+    pub stride: u32,
+    pub pitch: u32,
+    pub address: u64,
 }
 
 impl Default for ArgumentTable {
@@ -212,6 +224,7 @@ impl Default for ArgumentTable {
             attachments: [ResourceId::NULL; MAX_COLOR_ATTACHMENTS],
             samples: PassSamples::default(),
             blend_color: [0; 4],
+            imageblock: PassImageblock::default(),
         }
     }
 }
@@ -266,7 +279,8 @@ impl ArgumentTable {
         Self::ATTACHMENTS_OFFSET + MAX_COLOR_ATTACHMENTS as u32 * 8;
     pub const SAMPLE_COUNT_OFFSET: u32 = Self::SAMPLE_POSITIONS_OFFSET + 16;
     pub const BLEND_COLOR_OFFSET: u32 = Self::SAMPLE_COUNT_OFFSET + 16;
-    pub const BYTES: u32 = Self::BLEND_COLOR_OFFSET + 16;
+    pub const IMAGEBLOCK_OFFSET: u32 = Self::BLEND_COLOR_OFFSET + 16;
+    pub const BYTES: u32 = Self::IMAGEBLOCK_OFFSET + 16;
     /// Tables are placed at this alignment in the upload ring.
     pub const ALIGNMENT: u64 = 16;
 
@@ -298,6 +312,9 @@ impl ArgumentTable {
         self.blend_color
             .into_iter()
             .for_each(|channel| writer.u32(channel));
+        writer.u32(self.imageblock.stride);
+        writer.u32(self.imageblock.pitch);
+        writer.u64(self.imageblock.address);
     }
 }
 
@@ -1082,6 +1099,10 @@ mod tests {
                 "STELA_METAL_TABLE_BLEND_COLOR",
                 ArgumentTable::BLEND_COLOR_OFFSET,
             ),
+            (
+                "STELA_METAL_TABLE_IMAGEBLOCK",
+                ArgumentTable::IMAGEBLOCK_OFFSET,
+            ),
             ("STELA_METAL_TABLE_BYTES", ArgumentTable::BYTES),
             (
                 "STELA_METAL_ACCUMULATE_RESULTS",
@@ -1611,7 +1632,8 @@ mod tests {
         assert_eq!(ArgumentTable::ATTACHMENTS_OFFSET, 1648);
         assert_eq!(ArgumentTable::SAMPLE_POSITIONS_OFFSET, 1712);
         assert_eq!(ArgumentTable::BLEND_COLOR_OFFSET, 1744);
-        assert_eq!(ArgumentTable::BYTES, 1760);
+        assert_eq!(ArgumentTable::IMAGEBLOCK_OFFSET, 1760);
+        assert_eq!(ArgumentTable::BYTES, 1776);
         assert_eq!(
             u64::from(ArgumentTable::BYTES) % ArgumentTable::ALIGNMENT,
             0
@@ -1647,6 +1669,18 @@ mod tests {
             0x0188_8888_8888_8888
         );
         assert_eq!(bytes[ArgumentTable::SAMPLE_COUNT_OFFSET as usize], 16);
+        table.imageblock = PassImageblock {
+            stride: 48,
+            pitch: 64,
+            address: 0x10_0000_0040,
+        };
+        let bytes = table.encode();
+        let at = ArgumentTable::IMAGEBLOCK_OFFSET as usize;
+        assert_eq!(bytes[at..at + 8], [48, 0, 0, 0, 64, 0, 0, 0]);
+        assert_eq!(
+            u64::from_le_bytes(bytes[at + 8..at + 16].try_into().unwrap()),
+            0x10_0000_0040
+        );
     }
 
     #[test]

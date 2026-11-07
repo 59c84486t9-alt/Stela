@@ -724,6 +724,9 @@ records! {
         pub max_total_threads_per_mesh_threadgroup: u64,
         pub object_thread_execution_width: u64,
         pub mesh_thread_execution_width: u64,
+        /// `imageblockSampleLength`: the bytes of its fragment function's
+        /// imageblock data, zero without any.
+        pub imageblock_sample_length: u64,
     }
 
     /// `newComputePipelineStateWithDescriptor:`; zero total threads leaves

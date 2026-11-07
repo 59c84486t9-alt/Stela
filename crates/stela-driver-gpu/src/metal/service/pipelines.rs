@@ -297,10 +297,22 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         pipeline: RenderPipelineId,
     ) -> Result<(), Fault> {
         let object = Object::RenderPipeline(pipeline);
-        let (handle, (resource_id, mesh)) = self.adopt(call.connection, object, |device| {
-            let mesh = device.render_pipeline_state(pipeline)?.plan.mesh;
-            Ok((device.render_pipeline_resource_id(pipeline)?, mesh))
-        })?;
+        let (handle, (resource_id, mesh, imageblock)) =
+            self.adopt(call.connection, object, |device| {
+                let state = device.render_pipeline_state(pipeline)?;
+                let mesh = state.plan.mesh;
+                let imageblock = state
+                    .interfaces
+                    .iter()
+                    .map(|interface| interface.imageblock_bytes)
+                    .max()
+                    .unwrap_or(0);
+                Ok((
+                    device.render_pipeline_resource_id(pipeline)?,
+                    mesh,
+                    imageblock,
+                ))
+            })?;
         let (object, mesh, width) = mesh.map_or((None, None, 0), |threads| {
             (
                 threads.object,
@@ -318,6 +330,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             max_total_threads_per_mesh_threadgroup: threads(mesh),
             object_thread_execution_width: widths(object),
             mesh_thread_execution_width: widths(mesh),
+            imageblock_sample_length: u64::from(imageblock),
         })
     }
 

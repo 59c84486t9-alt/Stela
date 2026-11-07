@@ -69,6 +69,11 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
                              nir_iadd_imm(b, stela_metal_load_table(b, metal->table),
                                           STELA_METAL_TABLE_SAMPLE_POSITIONS),
                              .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
+   case STELA_AIR_IMAGEBLOCK:
+      return nir_load_global(b, 4, 32,
+                             nir_iadd_imm(b, stela_metal_load_table(b, metal->table),
+                                          STELA_METAL_TABLE_IMAGEBLOCK),
+                             .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
    case STELA_AIR_PATCH_IDS: {
       /* The tessellation control stage's PATCH0. */
       nir_variable *ids = nir_variable_create(b->shader, nir_var_shader_in, glsl_uvec_type(3),

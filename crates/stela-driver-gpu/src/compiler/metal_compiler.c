@@ -295,6 +295,7 @@ reflect_stage(const struct stela_air_inspection *info, const struct stela_air_st
    r->out->max_total_threads = entry->max_threads;
    r->out->threadgroup_bytes = entry->threadgroup_bytes;
    r->out->discards = entry->discards;
+   r->out->imageblock_bytes = entry->imageblock_bytes;
    r->out->patch = entry->patch;
    r->out->patch_control_points = entry->patch_control_points;
    for (unsigned i = 0; i < entry->input_count; i++) {

@@ -380,13 +380,12 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 
 - (NSUInteger)imageblockSampleLength
 {
-	return 0;
+	return _imageblockSampleLength;
 }
 
 - (NSUInteger)imageblockMemoryLengthForDimensions:(MTLSize)size
 {
-	(void)size;
-	return 0;
+	return size.width * size.height * _imageblockSampleLength;
 }
 
 - (id)functionHandleWithFunction:(id)function stage:(NSUInteger)stage
@@ -560,6 +559,7 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	pipeline->_maxTotalThreadsPerMeshThreadgroup = response->max_total_threads_per_mesh_threadgroup;
 	pipeline->_objectThreadExecutionWidth = response->object_thread_execution_width;
 	pipeline->_meshThreadExecutionWidth = response->mesh_thread_execution_width;
+	pipeline->_imageblockSampleLength = response->imageblock_sample_length;
 	pipeline->_supportIndirectCommandBuffers = indirect;
 	if (mesh) {
 		pipeline->_maxTotalThreadgroupsPerMeshGrid = [descriptor maxTotalThreadgroupsPerMeshGrid];
@@ -835,6 +835,7 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	pipeline->_tile = YES;
 	pipeline->_threadgroupSizeMatchesTileSize = [descriptor threadgroupSizeMatchesTileSize];
 	pipeline->_maxTotalThreadsPerTileThreadgroup = response.max_total_threads_per_threadgroup;
+	pipeline->_imageblockSampleLength = response.imageblock_bytes;
 	pipeline->_tileLinked = [[descriptor linkedFunctions] copy];
 	if ([descriptor respondsToSelector:@selector(requiredThreadsPerThreadgroup)]) {
 		pipeline->_requiredTileThreads = [descriptor requiredThreadsPerThreadgroup];

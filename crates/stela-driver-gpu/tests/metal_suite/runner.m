@@ -2781,6 +2781,7 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 		pass.tileHeight = [r[@"tile_size"][1] unsignedIntegerValue];
 	}
 	pass.threadgroupMemoryLength = number(r, @"tile_memory", 0);
+	pass.imageblockSampleLength = number(r, @"imageblock_sample_length", 0);
 	if (r[@"target_size"]) {
 		pass.renderTargetWidth = [r[@"target_size"][0] unsignedIntegerValue];
 		pass.renderTargetHeight = [r[@"target_size"][1] unsignedIntegerValue];
@@ -3163,6 +3164,26 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 	bind_resources(c, e, spec, NO,
 		       MTLRenderStageVertex | MTLRenderStageFragment | (mesh ? MTLRenderStageObject | MTLRenderStageMesh : 0)
 			       | (r[@"tiles"] ? MTLRenderStageTile : 0));
+	/* The tile dispatches before the draws or after them, in order. */
+	NSArray *tiles = r[@"tiles"];
+	void (^dispatch_tiles)(BOOL) = ^(BOOL before) {
+		for (NSUInteger k = 0; k < tiles.count; k++) {
+			if ([tiles[k][@"before"] boolValue] != before)
+				continue;
+			[e setRenderPipelineState:tile_pipelines[k]];
+			bind_tables(e, StageTile, tile_tables[k], [spec[@"bind"] isEqual:@"ranges"]);
+			for (NSDictionary *m in tiles[k][@"threadgroup_memory"])
+				[e setThreadgroupMemoryLength:number(m, @"length", 16)
+						       offset:number(m, @"offset", 0)
+						      atIndex:number(m, @"index", 0)];
+			NSArray *threads = tiles[k][@"threads"];
+			[e dispatchThreadsPerTile:MTLSizeMake([threads[0] unsignedIntegerValue],
+							      [threads[1] unsignedIntegerValue], 1)];
+			if (before)
+				[e setRenderPipelineState:pipeline];
+		}
+	};
+	dispatch_tiles(YES);
 	/* Each stage's tables of the functions linked to it. */
 	BOOL ranges = [spec[@"bind"] isEqual:@"ranges"];
 	for (NSString *stage in @[ @"vertex", @"fragment" ]) {
@@ -3302,17 +3323,7 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 		else
 			[e drawPrimitives:primitive vertexStart:start vertexCount:count];
 	}
-	NSArray *tiles = r[@"tiles"];
-	for (NSUInteger k = 0; k < tiles.count; k++) {
-		[e setRenderPipelineState:tile_pipelines[k]];
-		bind_tables(e, StageTile, tile_tables[k], [spec[@"bind"] isEqual:@"ranges"]);
-		for (NSDictionary *m in tiles[k][@"threadgroup_memory"])
-			[e setThreadgroupMemoryLength:number(m, @"length", 16)
-					       offset:number(m, @"offset", 0)
-					      atIndex:number(m, @"index", 0)];
-		NSArray *threads = tiles[k][@"threads"];
-		[e dispatchThreadsPerTile:MTLSizeMake([threads[0] unsignedIntegerValue], [threads[1] unsignedIntegerValue], 1)];
-	}
+	dispatch_tiles(NO);
 	update_fences(c, e, spec);
 	[e endEncoding];
 	};

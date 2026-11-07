@@ -1140,6 +1140,33 @@ clip_distance_size(struct stela_air_metadata *m, const LLVMValueRef *fields, uns
 }
 
 /* Whether an output's reflected type suits its semantic. */
+/* A fragment's [[imageblock_data]] input or output from its descriptor's
+ * keys from f: a struct of the size its descriptor names, which every one
+ * of the function's shares. */
+static bool
+imageblock_data(struct stela_air_metadata *m, const LLVMValueRef *fields, unsigned f, unsigned n,
+                LLVMTypeRef type, struct stela_air_stage_io *io, unsigned *bytes)
+{
+   unsigned size = 0;
+   for (; f + 1 < n; f++) {
+      if (stela_air_md_string(fields[f], "air.imageblock_data_size") &&
+          !stela_air_md_uint(fields[f + 1], &size))
+         size = 0;
+      else if (stela_air_md_string(fields[f], "air.arg_type_name"))
+         metadata_text(m, fields[f + 1], &io->type_name, &io->type_name_bytes);
+      else if (stela_air_md_string(fields[f], "air.arg_name"))
+         metadata_text(m, fields[f + 1], &io->name, &io->name_bytes);
+   }
+   if (!size || LLVMGetTypeKind(type) != LLVMStructTypeKind || LLVMIsOpaqueStruct(type))
+      return fail(m, STELA_AIR_ARGUMENT, "imageblock data of an unknown layout");
+   if (io->absent)
+      return true;
+   if (*bytes && *bytes != size)
+      return fail(m, STELA_AIR_ARGUMENT, "a fragment's imageblock data of two sizes");
+   *bytes = size;
+   return true;
+}
+
 static bool
 output_type(const struct stela_air_stage_io *io)
 {
@@ -1935,6 +1962,23 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             .name = input->name, .name_bytes = input->name_bytes};
          continue;
       }
+      /* A fragment's imageblock data: its pixel's explicit imageblock
+       * struct, which the function reads in raster order. */
+      if (render && render->entry.stage == STELA_AIR_FRAGMENT &&
+          stela_air_md_string(fields[1], "air.imageblock_data")) {
+         struct stela_air_stage_io *input = &render->inputs[a];
+         *input = (struct stela_air_stage_io){.argument = index,
+                                              .semantic = STELA_AIR_IMAGEBLOCK_DATA,
+                                              .absent = !claims};
+         if (!imageblock_data(t, fields, 2, fields_count, LLVMTypeOf(param), input,
+                              &render->entry.imageblock_bytes))
+            return false;
+         input->used = LLVMGetFirstUse(param) != NULL;
+         kernel->arguments[a] = (struct stela_air_argument){
+            .value = param, .used = input->used, .absent = !claims,
+            .name = input->name, .name_bytes = input->name_bytes};
+         continue;
+      }
       /* A kernel's imageblock, which only the imageblock functions read:
        * an explicit one's element size is all the translator needs, and an
        * implicit one's calls name the color attachments they access. */
@@ -2555,6 +2599,16 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
          io->semantic = STELA_AIR_SAMPLE_MASK;
       } else if (fragment && stela_air_md_string(fields[0], "air.stencil")) {
          io->semantic = STELA_AIR_STENCIL;
+      } else if (fragment && stela_air_md_string(fields[0], "air.imageblock_data")) {
+         io->semantic = STELA_AIR_IMAGEBLOCK_DATA;
+         LLVMTypeRef type = aggregate ? LLVMStructGetTypeAtIndex(result, i) : result;
+         if (!imageblock_data(m, fields, 1, n, type, io, &r->entry.imageblock_bytes))
+            return false;
+         for (unsigned j = 0; j < i; j++) {
+            if (!io->absent && !r->outputs[j].absent && r->outputs[j].semantic == io->semantic)
+               return fail(m, STELA_AIR_METADATA, "duplicate render output");
+         }
+         continue;
       } else return fail(m, STELA_AIR_METADATA, "unsupported stage output semantic");
       if (!output_reflection(m, fields, f, n, io))
          return false;

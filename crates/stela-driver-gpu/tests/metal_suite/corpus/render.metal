@@ -616,6 +616,56 @@ kernel void tile_dimensions(imageblock<TileColor, imageblock_layout_implicit> bl
     }
 }
 
+// A pass's explicit imageblock data: tile functions set and read it, and
+// fragment functions change it in raster order.
+struct IbData {
+    float4 a [[raster_order_group(0)]];
+    float4 n [[raster_order_group(0)]];
+};
+
+struct IbOut {
+    IbData d [[imageblock_data]];
+    float4 c [[color(0)]];
+};
+
+// Every color of each pixel's data from the pixel's position.
+kernel void tile_ib_init(imageblock<IbData, imageblock_layout_explicit> block,
+                         ushort2 tid [[thread_position_in_threadgroup]],
+                         ushort2 tile [[threadgroup_position_in_grid]])
+{
+    ushort2 p = tile * ushort2(block.get_width(), block.get_height()) + tid;
+    for (ushort i = 0; i < block.get_num_colors(tid); i++) {
+        threadgroup_imageblock IbData *d = block.data(tid, i, imageblock_data_rate::color);
+        d->a = float4(float(p.x), float(p.y), 0.0f, 1.0f);
+        d->n = float4(float(p.x) + 100.0f * float(p.y), 0.0f, 0.0f, 0.0f);
+    }
+}
+
+// Adds to its pixel's data, and colors the pixel with it.
+fragment IbOut frag_ib_add(float4 pos [[position]], IbData in [[imageblock_data]],
+                           constant float4 &add [[buffer(0)]])
+{
+    IbOut o;
+    o.d.a = in.a + add;
+    o.d.n = in.n + float4(1000.0f, 0.0f, 0.0f, 0.0f);
+    o.c = o.d.a;
+    return o;
+}
+
+// Each pixel's first color's data, and its colors.
+kernel void tile_ib_resolve(imageblock<IbData, imageblock_layout_explicit> block,
+                            device float4 *out [[buffer(0)]],
+                            constant uint2 &size [[buffer(1)]],
+                            ushort2 tid [[thread_position_in_threadgroup]],
+                            ushort2 tile [[threadgroup_position_in_grid]])
+{
+    ushort2 p = tile * ushort2(block.get_width(), block.get_height()) + tid;
+    if (p.x >= size.x || p.y >= size.y)
+        return;
+    threadgroup_imageblock IbData *d = block.data(tid);
+    out[p.y * size.x + p.x] = float4(d->a.xyz, d->n.x);
+}
+
 // Functions a tile function's tables call on a pixel's color, given its
 // position in the tile.
 [[visible]] float4 tile_offset(float4 c, ushort2 p)

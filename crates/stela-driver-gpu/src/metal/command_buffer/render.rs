@@ -25,8 +25,8 @@ use crate::metal::{
         VisibilityResultType, Winding,
     },
     binding::{
-        AccumulateArguments, AverageArguments, BufferBinding, ResourceId, SequenceVertexBuffer,
-        TessellationArguments,
+        AccumulateArguments, AverageArguments, BufferBinding, PassImageblock, ResourceId,
+        SequenceVertexBuffer, TessellationArguments,
     },
     capabilities::MAX_BUFFER_BINDINGS,
     error::{Error, Result, ensure},
@@ -352,7 +352,38 @@ const ATTACHMENT_PATHS: Barrier = Barrier {
         .union(Access::COLOR_ATTACHMENT_WRITE),
 };
 
+/// The most bytes of imageblock data a pass allocates.
+const MAX_IMAGEBLOCK_MEMORY: u64 = 1 << 30;
+
 impl CommandBuffer {
+    /// A pass's imageblock data, when it has an `imageblockSampleLength`:
+    /// whole tiles of samples, whose contents are undefined until written.
+    fn pass_imageblock(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        pass: &RenderPassPlan<ImageView>,
+    ) -> Result<PassImageblock> {
+        let tile = pass.tile;
+        if tile.imageblock_sample_length == 0 {
+            return Ok(PassImageblock::default());
+        }
+        let pitch = pass.extent[0].next_multiple_of(tile.size[0]);
+        let rows = pass.extent[1].next_multiple_of(tile.size[1]);
+        let bytes = u64::from(tile.imageblock_sample_length)
+            * u64::from(pitch)
+            * u64::from(rows)
+            * u64::from(pass.sample_count.max(1));
+        if bytes > MAX_IMAGEBLOCK_MEMORY {
+            return Err(Error::Unsupported("imageblock data of a pass this large"));
+        }
+        let upload = self.recorder.uploads.scratch(resolver, bytes.max(16))?;
+        Ok(PassImageblock {
+            stride: tile.imageblock_sample_length,
+            pitch,
+            address: upload.address,
+        })
+    }
+
     /// `renderCommandEncoderWithDescriptor:` for a pass whose attachment
     /// views the device resolved.
     pub fn begin_render(
@@ -368,8 +399,10 @@ impl CommandBuffer {
             "the visibility result buffer was not resolved",
         )?;
         let pass_samples = pass.samples()?;
+        let imageblock = self.pass_imageblock(resolver, &pass)?;
         self.bindings.reset();
-        self.bindings.set_pass(pass.inputs.textures, pass_samples);
+        self.bindings
+            .set_pass(pass.inputs.textures, pass_samples, imageblock);
         for &(sample, boundary) in &samples {
             if let (CounterSample::Statistic(destination), true) = (sample, boundary.starts()) {
                 self.recorder.sample_statistics(resolver, destination)?;
@@ -765,6 +798,13 @@ impl CommandBuffer {
         ensure(
             plan.sample_count == pass.sample_count,
             "pipeline and pass sample counts differ",
+        )?;
+        ensure(
+            state
+                .interfaces
+                .iter()
+                .all(|interface| interface.imageblock_bytes <= pass.tile.imageblock_sample_length),
+            "the pipeline's imageblock data exceeds the pass's imageblockSampleLength",
         )?;
         let matches = |pipeline: Option<_>, pass: Option<_>| pipeline.is_none() || pipeline == pass;
         ensure(

@@ -940,6 +940,75 @@ tile_functions_access_their_attachments(void)
    assert(!kernel_with(integer, tile_metadata, &o, &error));
 }
 
+/* A tile function's explicit imageblock: each color of its pixel doubled,
+ * then the first color's coverage. */
+static const char *tile_explicit_metadata =
+   "!air.kernel = !{!2}\n"
+   "!air.version = !{!20}\n!air.language_version = !{!21}\n"
+   "!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7}\n"
+   "!5 = !{i32 0, !\"air.imageblock\", !\"explicit\", !\"air.imageblock_data_size\", i32 32,"
+   " !\"air.arg_type_align_size\", i32 16, !\"air.arg_type_name\","
+   " !\"imageblock<Data, layout_explicit>\", !\"air.arg_name\", !\"block\"}\n"
+   "!6 = !{i32 1, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"ushort2\","
+   " !\"air.arg_name\", !\"tid\"}\n"
+   "!7 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+   " i32 16, !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"out\"}\n"
+   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
+
+static const char *tile_explicit_body =
+   "%block_t = type { ptr addrspace(4) }\n"
+   "declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)\n"
+   "declare i16 @air.get_imageblock_num_colors(<2 x i16>)\n"
+   "declare i16 @air.get_color_coverage_mask(<2 x i16>, i16)\n"
+   "define void @kernel(%block_t %block, <2 x i16> %tid, ptr addrspace(1) %out) {\n"
+   "%n = call i16 @air.get_imageblock_num_colors(<2 x i16> %tid)\n"
+   "%none = icmp eq i16 %n, 0\n"
+   "br i1 %none, label %done, label %loop\n"
+   "loop:\n"
+   "%i = phi i16 [ 0, %0 ], [ %next, %loop ]\n"
+   "%p = call ptr addrspace(4) @air.imageblock_data(<2 x i16> %tid, i32 1, i16 %i)\n"
+   "%v = load <4 x float>, ptr addrspace(4) %p, align 16\n"
+   "%w = fmul <4 x float> %v, <float 2.0, float 2.0, float 2.0, float 2.0>\n"
+   "store <4 x float> %w, ptr addrspace(4) %p, align 16\n"
+   "%next = add i16 %i, 1\n"
+   "%end = icmp eq i16 %next, %n\n"
+   "br i1 %end, label %done, label %loop\n"
+   "done:\n"
+   "%m = call i16 @air.get_color_coverage_mask(<2 x i16> %tid, i16 0)\n"
+   "%f = uitofp i16 %m to float\n"
+   "%s = insertelement <4 x float> zeroinitializer, float %f, i64 0\n"
+   "store <4 x float> %s, ptr addrspace(1) %out, align 16\n"
+   "ret void\n}\n";
+
+/* A tile function's explicit imageblock is its pass's imageblock data at
+ * its tile's pixels, each sample a color. */
+static void
+tile_functions_access_imageblock_data(void)
+{
+   struct stela_air_error error = {0};
+   struct stela_air_options o = options(&primary, true);
+   struct stela_air_tile tile = {.samples = 4};
+   o.dynamic_shape = true;
+   o.load_device_value = stela_metal_load_device_value;
+   o.bind_attachment = stela_metal_bind_attachment;
+   o.tile = &tile;
+   nir_shader *shader = kernel_with(tile_explicit_body, tile_explicit_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "tile explicit: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "tile explicit imageblock");
+   /* The pass's data and the output, through global memory alone. */
+   assert(intrinsics(shader, nir_intrinsic_load_global) >= 2);
+   assert(intrinsics(shader, nir_intrinsic_store_global) >= 2);
+   assert(!intrinsics(shader, nir_intrinsic_load_shared));
+   ralloc_free(shader);
+   /* Outside a tile function, data of a later color is refused. */
+   o.tile = NULL;
+   o.dynamic_shape = false;
+   assert(!kernel_with(tile_explicit_body, tile_explicit_metadata, &o, &error));
+}
+
 /* A null texture has no descriptor to bind, and reads zero. */
 static void
 null_textures_bind_nothing(void)
@@ -1359,6 +1428,7 @@ main(void)
    block_reads_fetch_each_texel();
    imageblocks_live_in_threadgroup_memory();
    tile_functions_access_their_attachments();
+   tile_functions_access_imageblock_data();
    samples_join_through_phis();
    short_indices_widen_their_positions();
    array_arguments_bind_their_elements();

@@ -278,6 +278,11 @@ enum stela_air_device_value {
     * and the 64-bit address, low word first, of the memory that holds them
     * between dispatches, tile after tile in rows. */
    STELA_AIR_TILE,
+   /* A render pass's explicit imageblock data, as a uvec4: the bytes each
+    * sample takes, the pixels in each row, and the 64-bit address, low
+    * word first, of the data, each pixel's samples in turn, row after row;
+    * the rows and their pixels are whole tiles'. */
+   STELA_AIR_IMAGEBLOCK,
 };
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);
