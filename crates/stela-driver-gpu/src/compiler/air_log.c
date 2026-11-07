@@ -94,8 +94,9 @@ constant_string(LLVMValueRef value, size_t *bytes)
    return text;
 }
 
-/* An os_log's strings. os_log_default is a declaration, of no subsystem or
- * category. */
+/* An os_log's strings. os_log_default, of no subsystem or category, is a
+ * declaration, or a library's definition of a null subsystem and an
+ * all-ones category. */
 static bool
 log_strings(LLVMValueRef object, const char *strings[2], size_t bytes[2])
 {
@@ -105,11 +106,13 @@ log_strings(LLVMValueRef object, const char *strings[2], size_t bytes[2])
    for (unsigned i = 0; i < 2; i++) {
       strings[i] = "";
       bytes[i] = 0;
-      if (initializer) {
-         strings[i] = constant_string(LLVMGetAggregateElement(initializer, i), &bytes[i]);
-         if (!strings[i])
-            return false;
-      }
+      LLVMValueRef element = initializer ? LLVMGetAggregateElement(initializer, i) : NULL;
+      if (!element || LLVMIsAConstantPointerNull(element) ||
+          (LLVMIsAConstantExpr(element) && LLVMGetConstOpcode(element) == LLVMIntToPtr))
+         continue;
+      strings[i] = constant_string(element, &bytes[i]);
+      if (!strings[i])
+         return false;
    }
    return true;
 }

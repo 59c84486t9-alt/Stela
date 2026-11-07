@@ -208,15 +208,17 @@ static NSString *record_string(const char *bytes, size_t length)
 		return;
 	}
 	StelaLogArguments reader = {arguments, arguments + record->arguments};
-	NSString *subsystem = record_string(text, record->subsystem);
-	NSString *category = record_string(text + record->subsystem, record->category);
+	// os_log_default has neither, which Metal hands its handlers as nil.
+	NSString *subsystem = record->subsystem ? record_string(text, record->subsystem) : nil;
+	NSString *category = record->category ? record_string(text + record->subsystem, record->category) : nil;
 	NSString *message = format_message(text + record->subsystem + record->category, record->format, &reader);
 	for (NSUInteger index = 0; index < handlers.count; index++) {
 		void (^handler)(NSString *, NSString *, NSInteger, NSString *) = handlers[index];
 		handler(subsystem, category, level, message);
 	}
 	if (!handlers.count && _standardError) {
-		dprintf(2, "%s %s: %s\n", subsystem.UTF8String, category.UTF8String, message.UTF8String);
+		dprintf(2, "%s %s: %s\n", subsystem ? subsystem.UTF8String : "", category ? category.UTF8String : "",
+			message.UTF8String);
 	} else if (!handlers.count) {
 		NSLog(@"%@ %@: %@", subsystem, category, message);
 	}

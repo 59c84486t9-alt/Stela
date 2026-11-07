@@ -1991,6 +1991,23 @@ os_log_appends_self_contained_records(void)
    stela_metal_release(shader);
    /* A double any other instruction reads is no promotion. */
    assert(!compile(logging, "promotes", &specialization, &error));
+   /* A library defines os_log_default with a null subsystem and an all-ones
+    * category: of neither, as its declaration is. */
+   static const char declared[] = "@default = external addrspace(2) global %log\n";
+   static const char defined[] = "@default = internal addrspace(2) global %log { ptr addrspace(2) null,"
+                                 " ptr addrspace(2) inttoptr (i64 -1 to ptr addrspace(2)) }\n";
+   const char *at = strstr(logging, declared);
+   assert(at);
+   size_t before = (size_t)(at - logging), bytes = strlen(logging) + sizeof(defined);
+   char *library = malloc(bytes);
+   assert(library);
+   snprintf(library, bytes, "%.*s%s%s", (int)before, logging, defined, at + strlen(declared));
+   shader = compile(library, "logs", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "defined default: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
+   free(library);
 }
 
 static const char *stitching_kernel =
