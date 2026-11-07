@@ -829,8 +829,17 @@ stitched_texture(struct translator *t, LLVMValueRef call, unsigned index, bool t
    return put_resource(t, call, &described, NULL);
 }
 
-/* The resources stitched kernel fn reads: calls on a constant index, bound
- * in the prelude as arguments are. */
+/* Whether `name` is one of air_stitch.c's reads of a builtin. */
+static bool
+stitched_builtin_name(const char *name, size_t name_length)
+{
+   return named_after(name, name_length, STELA_AIR_STITCH_THREAD_POSITION_IN_GRID_NAME) ||
+          named_after(name, name_length, STELA_AIR_STITCH_THREAD_POSITION_IN_THREADGROUP_NAME);
+}
+
+/* The builtins and resources stitched kernel fn reads, in the prelude as a
+ * kernel's arguments are: a thread position may need the dispatch's device
+ * values, and the kernel's early returns come before calls that read it. */
 static bool
 stitched_resources(struct translator *t, LLVMValueRef fn)
 {
@@ -838,6 +847,18 @@ stitched_resources(struct translator *t, LLVMValueRef fn)
         read = LLVMGetNextFunction(read)) {
       size_t name_length;
       const char *name = LLVMGetValueName2(read, &name_length);
+      if (stitched_builtin_name(name, name_length)) {
+         for (LLVMUseRef use = LLVMGetFirstUse(read); use; use = LLVMGetNextUse(use)) {
+            LLVMValueRef call = LLVMGetUser(use);
+            bool lowered;
+            if (!LLVMIsACallInst(call) || LLVMGetCalledValue(call) != read)
+               return fail(t, STELA_AIR_INPUT, "a stitched builtin that is not called");
+            if (LLVMGetBasicBlockParent(LLVMGetInstructionParent(call)) == fn &&
+                !stitched_builtin_call(t, call, read, name, name_length, &lowered))
+               return false;
+         }
+         continue;
+      }
       if (!stitched_resource_name(name, name_length))
          continue;
       bool buffer = named_after(name, name_length, STELA_AIR_STITCH_BUFFER_ADDRESS_NAME);
@@ -4881,8 +4902,9 @@ instruction(struct translator *t, LLVMValueRef inst)
             return fail(t, STELA_AIR_INSTRUCTION, "the size of a patch that declares no control points");
          return put_value(t, inst, nir_imm_int(&t->b, points), 0);
       }
-      /* The prelude bound it. */
-      if (stitched_resource_name(name, name_length))
+      /* The prelude bound or lowered it. */
+      if (stitched_resource_name(name, name_length) ||
+          (stitched_builtin_name(name, name_length) && find_value(t, inst)))
          return true;
       bool lowered;
       if (!stitched_builtin_call(t, inst, callee, name, name_length, &lowered))

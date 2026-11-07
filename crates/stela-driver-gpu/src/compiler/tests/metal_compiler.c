@@ -2474,6 +2474,42 @@ stitched_early_returns_skip_what_follows(void)
    const struct stela_air_stitch_graph untyped = {"untyped", valuing, 3, 0};
    assert(!stela_metal_stitch(sources, 2, &untyped, 1, keep_stitched, &stitched, &error) &&
           strstr(error.detail, "no earlier call of the output's type"));
+
+   /* A two-dimensional kernel reads a thread position after an early
+    * return, as Core Image's graphs do: the position, whose running shape
+    * needs the dispatch's grid, is read in the prelude.
+    * kernel late() { if (outside(grid.x)) return; kept(buffer 0, local.x); } */
+   LLVMMemoryBufferRef kept = bitcode(keeps);
+   const struct stela_air_stitch_source late_sources[] = {
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source), "outside"},
+      {LLVMGetBufferStart(kept), LLVMGetBufferSize(kept), "kept"},
+   };
+   const uint32_t grid = 0, condition = 1, stored[] = {4, 3};
+   const struct stela_air_stitch_node late[] = {
+      {.function = STELA_AIR_STITCH_BUILTIN, .input = STELA_AIR_STITCH_THREAD_POSITION_IN_GRID},
+      {.function = 0, .arguments = &grid, .argument_count = 1},
+      {.function = STELA_AIR_STITCH_EARLY_RETURN, .input = condition},
+      {.function = STELA_AIR_STITCH_BUILTIN, .input = STELA_AIR_STITCH_THREAD_POSITION_IN_THREADGROUP},
+      {.function = STELA_AIR_STITCH_BUFFER_ADDRESS, .input = 0},
+      {.function = 1, .arguments = stored, .argument_count = 2},
+   };
+   const struct stela_air_stitch_graph lately = {"late", late, 6, STELA_AIR_STITCH_NO_OUTPUT, true};
+   assert(stela_metal_stitch(late_sources, 2, &lately, 1, keep_stitched, &stitched, &error));
+   const struct stela_air_module late_modules[] = {
+      {LLVMGetBufferStart(source), LLVMGetBufferSize(source)},
+      {LLVMGetBufferStart(kept), LLVMGetBufferSize(kept)},
+   };
+   const struct stela_metal_specialization square = {
+      .workgroup_size = {8, 8, 1}, .modules = late_modules, .module_count = 2,
+   };
+   shader = stela_metal_compile(LLVMGetBufferStart(stitched), LLVMGetBufferSize(stitched), "late",
+                                &target, &square, &error);
+   if (!shader)
+      fprintf(stderr, "late: %u %s\n", error.kind, error.detail);
+   assert(shader && count_intrinsic(shader, nir_intrinsic_store_global) == 1);
+   stela_metal_release(shader);
+   LLVMDisposeMemoryBuffer(stitched);
+   LLVMDisposeMemoryBuffer(kept);
    LLVMDisposeMemoryBuffer(source);
 }
 
