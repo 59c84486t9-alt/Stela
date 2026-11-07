@@ -238,7 +238,7 @@ impl MmioDevice for Gate {
         &mut self,
         offset: u64,
         width: Width,
-        _access: &mut Access<'_>,
+        access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
         let refused = |reason| refuse(NAME, offset, width, Direction::Read, reason);
         if width != Width::Double {
@@ -253,6 +253,16 @@ impl MmioDevice for Gate {
             (0, RETIRED) => Ok(self.retired),
             (_, FAULT) => {
                 let gate = gate_index(page).ok_or_else(|| refused("no such register"))?;
+                // The frontend reads the fault after a call its store's step
+                // did not serve: a request still held for this PE was never
+                // taken there, and runs late if at all.
+                if matches!(
+                    self.pending.get(&access.cpu),
+                    Some(GateRequest::Serve { .. })
+                ) {
+                    self.service
+                        .dropped("a gate call was still pending at its PE's next gate access");
+                }
                 Ok(self.faults[gate])
             }
             _ => Err(refused("no such register")),
@@ -527,6 +537,17 @@ mod tests {
         store(&mut gate, 0, call(first), 0x10).unwrap();
         serve(&mut gate, 0);
         assert!(log.0.lock().unwrap().dropped.is_empty());
+        // A fault read while the PE's call is held finds it untaken.
+        store(&mut gate, 0, call(first), 0x18).unwrap();
+        gate.read(
+            first * PAGE + FAULT,
+            Width::Double,
+            &mut Access::new(0, 0, &mut NoInterrupts),
+        )
+        .unwrap();
+        assert_eq!(log.0.lock().unwrap().dropped.len(), 1);
+        serve(&mut gate, 0);
+        log.0.lock().unwrap().dropped.clear();
         // A second store before the first one's step ran replaces it.
         store(&mut gate, 0, call(first), 0x20).unwrap();
         store(&mut gate, 0, call(first), 0x30).unwrap();
@@ -544,7 +565,7 @@ mod tests {
                 .iter()
                 .map(|s| s.1)
                 .collect::<Vec<_>>(),
-            [0x10, 0x30]
+            [0x10, 0x18, 0x30]
         );
     }
 
