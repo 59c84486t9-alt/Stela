@@ -1,5 +1,6 @@
 //! A run's QEMU machine: its CPU, memory, firmware, devices other than
 //! storage and network, console and debugging.
+use super::host_display;
 use super::{
     Display, Firmware, Iommu, Run, UsbDiskModel, option_path, overlay, qemu_accelerator, qemu_cpu,
     qemu_machine,
@@ -165,11 +166,13 @@ pub(super) fn attach_exit(arguments: &Run, output: &Path, command: &mut Process)
     }
 }
 
-/// The display a bundle's kernel draws on through the mount's GOP, and
+/// The display a bundle's kernel draws on through the mount's GOP, a panel
+/// of the host monitor's mode and refresh ([`host_display`]), and
 /// `--input`'s virtio keyboard and tablet.
 pub(super) fn attach_display(arguments: &Run, bundle: bool, command: &mut Process) {
     if bundle {
-        command.args(["-device", "VGA"]);
+        let panel = host_display::host().and_then(host_display::emulated);
+        command.arg("-device").arg(host_display::vga_device(panel));
     }
     if arguments.input {
         command.args([

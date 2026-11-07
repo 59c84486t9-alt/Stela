@@ -40,6 +40,7 @@ use {
 mod audio_check;
 mod disks;
 mod fat32;
+mod host_display;
 mod host_firmware;
 mod lan;
 mod machine;
