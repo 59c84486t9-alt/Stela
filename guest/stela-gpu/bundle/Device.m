@@ -58,7 +58,7 @@ enum {
 	POOL_KINDS = POOL_CACHE_MODES * POOL_HAZARD_MODES,
 	/* MTLHeapDescriptor's defaults. */
 	POOL_HEAP_AUTOMATIC = 0,
-	POOL_SPARSE_PAGE_16 = 101,
+	POOL_SPARSE_PAGE_16 = MTLSparsePageSize16,
 };
 
 /* A handle whose release waits for the GPU, and the heap kept until then. */
@@ -690,8 +690,22 @@ TABLE(maxVertexAttributes, 31)
 - (NSUInteger)sparseTileSizeInBytesForSparsePageSize:(NSInteger)page
 {
 	NSUInteger bytes = _capabilities->limits.sparse_tile_bytes;
-	/* MTLSparsePageSize's raw values are the size in KiB. */
-	return (NSUInteger)page * 1024 == bytes ? bytes : 0;
+	/* MTLSparsePageSize's raw values are not its sizes. */
+	NSUInteger kib;
+	switch (page) {
+	case MTLSparsePageSize16:
+		kib = 16;
+		break;
+	case MTLSparsePageSize64:
+		kib = 64;
+		break;
+	case MTLSparsePageSize256:
+		kib = 256;
+		break;
+	default:
+		return 0;
+	}
+	return kib * 1024 == bytes ? bytes : 0;
 }
 
 - (MTLSize)sparseTileSizeWithTextureType:(NSUInteger)type

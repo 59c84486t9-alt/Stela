@@ -68,6 +68,11 @@ enum {
 #define MTLResourceHazardTrackingModeShift 8
 #define MTLResourceHazardTrackingModeMask (0x3UL << MTLResourceHazardTrackingModeShift)
 enum {
+	MTLSparsePageSize16 = 101,
+	MTLSparsePageSize64 = 102,
+	MTLSparsePageSize256 = 103,
+};
+enum {
 	MTLPurgeableStateKeepCurrent = 1,
 	MTLPurgeableStateNonVolatile = 2,
 	MTLPurgeableStateVolatile = 3,
