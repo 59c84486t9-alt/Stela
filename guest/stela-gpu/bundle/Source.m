@@ -94,7 +94,7 @@ static NSString *options_line(id options)
 		[line appendFormat:@" -Os"];
 	}
 	if ([options compileSymbolVisibility] == MTLCompileSymbolVisibilityHidden) {
-		[line appendFormat:@" -fvisibility=hidden"];
+		[line appendFormat:@" -fvisibility hidden"];
 	}
 	if ([options preserveInvariance]) {
 		[line appendFormat:@" -fpreserve-invariance"];
