@@ -1086,6 +1086,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             linking: fragment_linked.linking.clone(),
             storage_attachments,
             samples: request.targets.raster_sample_count as u32,
+            extended_range: pipeline::extended_range_attachments(&request.targets),
             ..Specialization::default()
         };
         let fragment = match request.fragment_function {
@@ -1218,6 +1219,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     linking: linked[2].1.linking.clone(),
                     storage_attachments,
                     samples: request.targets.raster_sample_count as u32,
+                    extended_range: pipeline::extended_range_attachments(&request.targets),
                     ..Specialization::default()
                 };
                 Some(self.compile(id, specialization)?)

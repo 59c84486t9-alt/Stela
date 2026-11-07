@@ -9,7 +9,7 @@
 use super::{BufferRef, CommandBuffer, Encoder, MappedRange, Resolver};
 use crate::metal::{
     abi::BlitOption,
-    error::{Error, Result, ensure},
+    error::{Error, Result, ensure, require},
     hazard::Use,
     pixel_format::{Description, Kind},
     resource::TextureDescriptor,
@@ -454,6 +454,13 @@ fn check_copy_compatible(src: &BlitTexture, dst: &BlitTexture) -> Result<()> {
         "copied textures share a sample count",
     )?;
     let (a, b) = (src.description(), dst.description());
+    // A stored encoding's texels mean its own format's values alone.
+    if !a.encoding().is_exact() || !b.encoding().is_exact() {
+        return ensure(
+            from.pixel_format == to.pixel_format,
+            "copied textures have compatible pixel formats",
+        );
+    }
     let same = from.pixel_format == to.pixel_format
         || from.pixel_format.srgb_pair() == Some(to.pixel_format);
     ensure(
@@ -469,6 +476,11 @@ fn buffer_image_copy(
     region: &Region,
     options: BlitOption,
 ) -> Result<BufferImageCopy> {
+    // A buffer holds Metal's bytes, which a stored encoding's texels are not.
+    require(
+        texture.description().encoding().is_exact(),
+        "buffer copies of extended-range textures",
+    )?;
     let aspect = texture.copy_aspect(options)?;
     let (subresource, offset, extent) = region.resolve(texture.descriptor, aspect)?;
     let block = texture.description().block;

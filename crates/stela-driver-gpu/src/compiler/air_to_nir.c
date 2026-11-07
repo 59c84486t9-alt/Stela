@@ -2856,6 +2856,36 @@ blend(struct translator *t, const struct stela_air_attachment_access *access, ni
    return nir_vector_insert_imm(b, nir_pad_vector(b, rgb, 4), a, 3);
 }
 
+/* An output of color attachment location clamped to what its
+ * extended-range format encodes: its color to the codes' range, its alpha
+ * to [0, 1]. Other attachments' outputs are returned as they are. */
+static nir_def *
+clamp_extended_range(struct translator *t, unsigned location, nir_def *value)
+{
+   unsigned kinds = t->stage_options ? t->stage_options->extended_range : 0;
+   unsigned kind = location < AIR_MAX_RENDER_TARGETS
+                      ? kinds >> (location * STELA_AIR_EXTENDED_RANGE_BITS) &
+                           BITFIELD_MASK(STELA_AIR_EXTENDED_RANGE_BITS)
+                      : STELA_AIR_EXTENDED_RANGE_NONE;
+   /* The pipeline gives these attachments only floating-point outputs. */
+   if (kind == STELA_AIR_EXTENDED_RANGE_NONE || value->bit_size < 16)
+      return value;
+   nir_builder *b = &t->b;
+   /* Codes 0 and 1023, as (code - 384) / 510, linear or through the curve:
+    * -((384 / 510 + 0.055) / 1.055)^2.4 and ((639 / 510 + 0.055) / 1.055)^2.4. */
+   bool srgb = kind == STELA_AIR_EXTENDED_RANGE_SRGB;
+   float low = srgb ? -0.52711513f : -384.0f / 510.0f;
+   float high = srgb ? 1.67496527f : 639.0f / 510.0f;
+   nir_def *channels[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < value->num_components; i++) {
+      nir_def *channel = nir_channel(b, value, i);
+      channels[i] = i == 3 ? nir_fsat(b, channel)
+                           : nir_fclamp(b, channel, nir_imm_floatN_t(b, low, channel->bit_size),
+                                        nir_imm_floatN_t(b, high, channel->bit_size));
+   }
+   return nir_vec(b, channels, value->num_components);
+}
+
 /* Writes storage attachment n with the function's output: blended, written
  * where its mask allows, the rest of the texel kept. */
 static void
@@ -2880,7 +2910,7 @@ write_attachment(struct translator *t, unsigned n, nir_def *destination, nir_def
       channels[i] = i < value->num_components ? nir_channel(b, value, i) : defaults[i];
    nir_def *source = nir_vec(b, channels, 4);
    if (access->blend && !integer)
-      source = blend(t, access, source, destination);
+      source = clamp_extended_range(t, n, blend(t, access, source, destination));
    nir_def *packed = nir_format_pack_rgba(b, access->format, source);
    if (mask != 0xf) {
       if (access->format == PIPE_FORMAT_R9G9B9E5_FLOAT) {
@@ -3345,8 +3375,11 @@ stage_return(struct translator *t, LLVMValueRef inst)
          layer = value;
       else if (t->stage_options->amplified && t->outputs[i] == t->viewport)
          viewport = value;
-      else
+      else {
+         if (io->semantic == STELA_AIR_RENDER_TARGET && !io->index)
+            value = clamp_extended_range(t, io->location, value);
          nir_store_var(&t->b, t->outputs[i], value, BITFIELD_MASK(value->num_components));
+      }
    }
    if (t->stage_options->amplified) {
       nir_def *mapping = device_value(t, STELA_AIR_VIEW_MAPPING);

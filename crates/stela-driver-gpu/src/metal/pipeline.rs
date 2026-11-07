@@ -24,7 +24,7 @@ use super::{
     },
     capabilities::{Capabilities, FormatCapabilities, Size},
     error::{Error, Result, ensure, require},
-    pixel_format::{Kind, PixelFormat},
+    pixel_format::{Encoding, Kind, PixelFormat},
     sampler::test_op,
     shader::{
         CompiledShader, Interface, NumericClass, Specialization, Stage, StorageAttachment,
@@ -154,6 +154,32 @@ impl ColorAttachmentDescriptor {
         ]
     }
 
+    /// The channels a draw writes: an extended-range format without alpha
+    /// keeps the opaque alpha its texels hold.
+    fn stored_write_mask(&self) -> ColorWriteMask {
+        match self.pixel_format.map(|format| format.describe().encoding()) {
+            Some(Encoding::ExtendedRange(codes)) if !codes.alpha => {
+                self.write_mask.difference(ColorWriteMask::ALPHA)
+            }
+            _ => self.write_mask,
+        }
+    }
+
+    /// The extended-range kind the fragment function clamps this
+    /// attachment's output to (`enum stela_air_extended_range`).
+    fn extended_range(&self) -> u32 {
+        match self.pixel_format.map(|format| format.describe().encoding()) {
+            Some(Encoding::ExtendedRange(codes)) => {
+                if codes.srgb {
+                    EXTENDED_RANGE_SRGB
+                } else {
+                    EXTENDED_RANGE_LINEAR
+                }
+            }
+            _ => 0,
+        }
+    }
+
     fn uses_source1(&self) -> bool {
         self.blending_enabled && self.factors().iter().any(|factor| factor.uses_source1())
     }
@@ -168,7 +194,7 @@ impl ColorAttachmentDescriptor {
             dst_alpha: blend_factor(self.destination_alpha_blend_factor),
             alpha_op: blend_op(self.alpha_blend_operation),
             write_mask: if self.pixel_format.is_some() {
-                write_mask(self.write_mask)
+                write_mask(self.stored_write_mask())
             } else {
                 ColorComponents::EMPTY
             },
@@ -571,6 +597,26 @@ pub fn mesh_render_pipeline(
 /// fragment tests before the function writes them, so it may not write
 /// depth, stencil or coverage, nor discard with a depth or stencil
 /// attachment that a test would write.
+/// `enum stela_air_extended_range`'s kinds.
+const EXTENDED_RANGE_LINEAR: u32 = 1;
+const EXTENDED_RANGE_SRGB: u32 = 2;
+
+/// A fragment function's extended-range color attachments, two bits each
+/// by index ([`Specialization::extended_range`]), whose outputs it clamps
+/// to what their formats encode.
+pub fn extended_range_attachments(targets: &RenderTargets) -> u32 {
+    if !targets.rasterization_enabled {
+        return 0;
+    }
+    targets
+        .color_attachments
+        .iter()
+        .enumerate()
+        .fold(0, |kinds, (index, attachment)| {
+            kinds | attachment.extended_range() << (2 * index)
+        })
+}
+
 pub fn storage_attachments(
     capabilities: &Capabilities,
     fragment: &Interface,
@@ -610,9 +656,9 @@ pub fn storage_attachments(
         let raw = |value: u64| value as u8;
         attachments[index] = Some(StorageAttachment {
             format: realization.format.raw(),
-            bytes: description.block.bytes,
+            bytes: description.stored_block_bytes(),
             blend: attachment.blending_enabled,
-            write_mask: attachment.write_mask.bits() as u8,
+            write_mask: attachment.stored_write_mask().bits() as u8,
             operations: [
                 raw(attachment.rgb_blend_operation.raw()),
                 raw(attachment.alpha_blend_operation.raw()),

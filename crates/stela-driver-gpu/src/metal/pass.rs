@@ -15,7 +15,7 @@ use super::{
     capabilities::{Capabilities, FormatCapabilities as C},
     error::{Error, Result, ensure, require},
     pipeline::MAX_COLOR_ATTACHMENTS,
-    pixel_format::{Kind, Numeric, PixelFormat},
+    pixel_format::{Description, Encoding, Kind, Numeric, PixelFormat},
     resource::{TextureDescriptor, vulkan_format},
     vulkan::{
         AttachmentLoadOp, AttachmentStoreOp, ImageAspects, ImageViewType, ResolveModes,
@@ -326,7 +326,7 @@ pub fn render_pass<T: Copy + Eq>(
             attachment,
             ImageAspects::COLOR,
             mode,
-            clear_color(numeric, attachment.clear),
+            clear_color(format.describe(), numeric, attachment.clear),
         )?));
     }
 
@@ -662,8 +662,12 @@ pub const fn store_op(action: StoreAction) -> AttachmentStoreOp {
     }
 }
 
-/// Metal's double clear color in the attachment's numeric class.
-fn clear_color(numeric: Numeric, clear: [f64; 4]) -> ClearValue {
+/// Metal's double clear color in the attachment's numeric class; an
+/// extended-range attachment clears to the codes it stores.
+fn clear_color(description: &Description, numeric: Numeric, clear: [f64; 4]) -> ClearValue {
+    if let Encoding::ExtendedRange(codes) = description.encoding() {
+        return ClearValue::Float(codes.quantize(clear.map(|channel| channel as f32)));
+    }
     match numeric {
         Numeric::Uint => ClearValue::Uint(clear.map(|channel| channel as u32)),
         Numeric::Sint => ClearValue::Sint(clear.map(|channel| channel as i32)),

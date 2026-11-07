@@ -427,6 +427,18 @@ struct stela_air_attachment_access {
    enum stela_air_blend_factor source_rgb, destination_rgb, source_alpha, destination_alpha;
 };
 
+/* How an extended-range color attachment encodes its color channels. Its
+ * alpha, where it has one, holds [0, 1]. */
+enum stela_air_extended_range {
+   STELA_AIR_EXTENDED_RANGE_NONE,
+   /* [-384, 639] / 510. */
+   STELA_AIR_EXTENDED_RANGE_LINEAR,
+   /* The same codes through the sRGB curve, mirrored below zero; the
+    * attachment holds the linear values. */
+   STELA_AIR_EXTENDED_RANGE_SRGB,
+};
+#define STELA_AIR_EXTENDED_RANGE_BITS 2u
+
 struct stela_air_stage_options {
    enum stela_air_stage stage;
    struct stela_air_options resources;
@@ -454,6 +466,11 @@ struct stela_air_stage_options {
     * one sample. */
    const struct stela_air_attachment_access *attachments;
    unsigned samples;
+   /* A fragment function's color attachments of Apple's extended-range
+    * formats, two bits each by location (enum stela_air_extended_range),
+    * which the device stores as half floats: the function clamps its
+    * outputs to the range the formats encode, as their stores do. */
+   unsigned extended_range;
    /* A vertex function's inputs, by location, that its pipeline fetches as
     * this many 32-bit words, the vertex input lacking their formats: each
     * reads as decode_vertex_input makes four 32-bit lanes of its words, with

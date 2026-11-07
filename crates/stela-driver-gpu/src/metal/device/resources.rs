@@ -14,6 +14,7 @@ use crate::metal::{
     hazard::FULL,
     heap::{self, HeapAllocator, HeapDescriptor, SizeAndAlign},
     pass::AttachmentView,
+    pixel_format::{Encoding, extended_range},
     resource::{
         self, CpuAccess, ShaderViews, SubresourceLayout, TextureDescriptor, TexturePlan,
         TextureViewDescriptor,
@@ -934,7 +935,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "texture buffers are written through their buffer",
         ))?;
         let Some(copy) = &texture.cpu_copy else {
-            return self.backend.copy_to_image(image, region, bytes);
+            return match texture.descriptor.pixel_format.describe().encoding() {
+                Encoding::Exact => self.backend.copy_to_image(image, region, bytes),
+                Encoding::ExtendedRange(codes) => {
+                    let texels = bytes.len() / codes.metal_bytes();
+                    let mut stored = alloc::vec![0; texels * extended_range::STORED_BYTES];
+                    codes.store(bytes, &mut stored);
+                    self.backend.copy_to_image(image, region, &stored)
+                }
+            };
         };
         let (memory, rows) = (
             copy.memory,
@@ -966,7 +975,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "texture buffers are read through their buffer",
         ))?;
         let Some(copy) = &texture.cpu_copy else {
-            return self.backend.copy_from_image(image, region, bytes);
+            return match texture.descriptor.pixel_format.describe().encoding() {
+                Encoding::Exact => self.backend.copy_from_image(image, region, bytes),
+                Encoding::ExtendedRange(codes) => {
+                    let texels = bytes.len() / codes.metal_bytes();
+                    let mut stored = alloc::vec![0; texels * extended_range::STORED_BYTES];
+                    self.backend.copy_from_image(image, region, &mut stored)?;
+                    codes.load(&stored, bytes);
+                    Ok(())
+                }
+            };
         };
         let (memory, rows) = (
             copy.memory,

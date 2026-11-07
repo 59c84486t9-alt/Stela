@@ -31,7 +31,7 @@ use crate::metal::{
         ColorAttachmentDescriptor, MAX_COLOR_ATTACHMENTS, RenderTargets, StageThreads,
         TessellationDescriptor,
     },
-    pixel_format::PixelFormat,
+    pixel_format::{PixelFormat, extended_range},
     resource::TextureDescriptor,
     sampler::SamplerDescriptor,
     shader::{LinkedFunction, Linking, Specialization, Stage},
@@ -1505,6 +1505,50 @@ fn render_pipelines_compile_their_functions_once() {
         compiled,
         "unlinked functions compile nothing"
     );
+}
+
+#[test]
+fn extended_range_texels_cross_the_cpu_as_metal_bytes() {
+    let mut device = device_on(MockBackend::new());
+    let descriptor = TextureDescriptor {
+        width: 2,
+        height: 1,
+        options: options(StorageMode::Shared),
+        ..texture(PixelFormat::Bgr10Xr, TextureUsage::SHADER_READ)
+    };
+    let texture = device.new_texture(&descriptor).unwrap();
+    let region = Region {
+        slice: 0,
+        level: 0,
+        origin: [0, 0, 0],
+        size: [2, 1, 1],
+    };
+    let tight = Strides {
+        bytes_per_row: 8,
+        bytes_per_image: 0,
+    };
+    // Red 1023, green 894, blue 384; then every channel at 0.
+    let pack = |red: u32, green: u32, blue: u32| blue | green << 10 | red << 20 | 3 << 30;
+    let written: Vec<u8> = [pack(1023, 894, 384), pack(0, 0, 0)]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    device
+        .replace_region(texture, &region, &written, tight)
+        .unwrap();
+    let image = device.texture_image(texture).unwrap();
+    let stored = &device.backend.image_bytes[&image.0];
+    let half =
+        |at: usize| extended_range::f16_value(u16::from_le_bytes([stored[at], stored[at + 1]]));
+    assert_eq!(stored.len(), 16, "half floats, four channels a texel");
+    assert!((half(0) - 639.0 / 510.0).abs() < 1e-3);
+    assert_eq!([half(2), half(4), half(6)], [1.0, 0.0, 1.0]);
+    assert!((half(8) + 384.0 / 510.0).abs() < 1e-3);
+    let mut read = [0; 8];
+    device
+        .get_bytes(texture, &region, &mut read, tight)
+        .unwrap();
+    assert_eq!(read[..], written[..]);
 }
 
 #[test]

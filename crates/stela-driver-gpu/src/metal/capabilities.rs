@@ -14,7 +14,7 @@ use super::{
         ArgumentBuffersTier, CounterSamplingPoint, DeviceLocation, GpuFamily, ReadWriteTextureTier,
         SparsePageSize, TextureType,
     },
-    pixel_format::{Compression, Description, Kind, PixelFormat},
+    pixel_format::{Compression, Description, Kind, PixelFormat, Realization},
     vertex::VertexFormat,
     vulkan::{
         FormatFeatures, PhysicalDeviceType, ResolveModes, SampleCounts,
@@ -992,7 +992,7 @@ impl Derivation<'_> {
             *capabilities = match description.realization {
                 Ok(realization) => {
                     let support = self.device.formats.get(realization.format);
-                    self.format_capabilities(description, support, realization.is_identity())
+                    self.format_capabilities(description, support, &realization)
                 }
                 Err(_) => FormatCapabilities::EMPTY,
             };
@@ -1005,7 +1005,7 @@ impl Derivation<'_> {
                 format.describe().realization.is_err() && capabilities.is_empty()
             })
         {
-            self.gap("extended-range and 4:2:2 pixel formats", Cause::Driver);
+            self.gap("4:2:2 pixel formats", Cause::Driver);
         }
         formats
     }
@@ -1016,6 +1016,9 @@ impl Derivation<'_> {
             .iter()
             .filter_map(|format| {
                 let realization = format.describe().realization.ok()?;
+                if !realization.encoding.is_exact() {
+                    return None;
+                }
                 let counts = self.sparse_counts(self.device.formats.get(realization.format));
                 (!counts.is_empty()).then_some((*format, counts))
             })
@@ -1084,7 +1087,7 @@ impl Derivation<'_> {
         &self,
         description: &Description,
         support: FormatSupport,
-        identity: bool,
+        realization: &Realization,
     ) -> FormatCapabilities {
         use FormatCapabilities as C;
         use FormatFeatures as F;
@@ -1095,8 +1098,13 @@ impl Derivation<'_> {
         let integer = matches!(description.kind, Kind::Color(numeric) if numeric.is_integer());
         let multisample = support.sample_counts.contains(SampleCounts::C4);
         let raster = shaders.contains(ShaderFeatures::VERTEX_FRAGMENT);
+        // Shader writes would skip a stored encoding's clamping, and only
+        // an exact encoding's texels lie in a buffer or sparse tile as Metal's.
+        let exact = realization.encoding.is_exact();
+        let identity = realization.is_identity();
         let storage = color
             && identity
+            && exact
             && optimal.contains(F::STORAGE_IMAGE | F::STORAGE_WRITE_WITHOUT_FORMAT)
             && features.shader_storage_image_write_without_format
             && shaders.contains(ShaderFeatures::TEXTURE_READ_WRITE);
@@ -1104,7 +1112,10 @@ impl Derivation<'_> {
             && features.shader_storage_image_read_without_format;
         let sampled =
             optimal.contains(F::SAMPLED_IMAGE) && shaders.contains(ShaderFeatures::TEXTURE_SAMPLE);
-        let attachment = color && identity && raster && optimal.contains(F::COLOR_ATTACHMENT);
+        let attachment = color
+            && realization.writes_through()
+            && raster
+            && optimal.contains(F::COLOR_ATTACHMENT);
         let depth_stencil = !color
             && !description.view_only
             && raster
@@ -1127,7 +1138,7 @@ impl Derivation<'_> {
             .with(C::MSAA, (attachment || depth_stencil) && multisample)
             .with(
                 C::SPARSE,
-                self.sparse_counts(support).contains(SampleCounts::C1),
+                exact && self.sparse_counts(support).contains(SampleCounts::C1),
             )
             .with(
                 C::ATOMIC,
@@ -1159,7 +1170,7 @@ impl Derivation<'_> {
                 .contains(ResolveModes::SAMPLE_ZERO);
         capabilities = capabilities.with(C::RESOLVE, color_resolve || depth_resolve);
 
-        if color && identity && !description.is_compressed() {
+        if color && identity && exact && !description.is_compressed() {
             let buffer = support.buffer;
             let buffer_write = buffer.contains(F::STORAGE_TEXEL_BUFFER)
                 && shaders.contains(ShaderFeatures::TEXTURE_READ_WRITE)

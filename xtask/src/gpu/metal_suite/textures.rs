@@ -298,6 +298,49 @@ fn formats() -> Vec<Format> {
             word(b) as u32 as i32 as f64,
             word(&b[4..]) as u32 as i32 as f64
         ])),
+        entry!("bgr10_xr", 4, Float, |b| bgr10_xr(b, false)),
+        entry!("bgr10_xr_srgb", 4, Float, |b| bgr10_xr(b, true)),
+        entry!("bgra10_xr", 8, Float, |b| bgra10_xr(b, false)),
+        entry!("bgra10_xr_srgb", 8, Float, |b| bgra10_xr(b, true)),
+    ]
+}
+
+/// An extended-range code's value: `(c - 384) / 510`, through the sRGB
+/// curve (mirrored below zero) for the `sRGB` variants.
+pub(super) fn xr(code: u64, srgb_curve: bool) -> f64 {
+    let v = (code as f64 - 384.0) / 510.0;
+    if srgb_curve {
+        v.signum() * srgb(v.abs())
+    } else {
+        v
+    }
+}
+
+/// An extended-range alpha code's value, in [0, 1].
+fn xr_alpha(code: u64) -> f64 {
+    xr(code, false).clamp(0.0, 1.0)
+}
+
+/// `BGR10_XR`: blue, green and red in ten bits each from bit 0.
+fn bgr10_xr(b: &[u8], srgb_curve: bool) -> Texel {
+    let q = fields(word(b), &[10, 10, 10]);
+    [
+        xr(q[2], srgb_curve),
+        xr(q[1], srgb_curve),
+        xr(q[0], srgb_curve),
+        1.0,
+    ]
+}
+
+/// `BGRA10_XR`: blue, green, red and alpha in the top ten bits of a
+/// 16-bit word each.
+fn bgra10_xr(b: &[u8], srgb_curve: bool) -> Texel {
+    let code = |i: usize| short(b, i) >> 6;
+    [
+        xr(code(2), srgb_curve),
+        xr(code(1), srgb_curve),
+        xr(code(0), srgb_curve),
+        xr_alpha(code(3)),
     ]
 }
 
@@ -355,6 +398,10 @@ pub(super) fn srgb_decode() -> Tolerance {
 
 pub(super) fn read_tolerance(f: &Format) -> Tolerance {
     match f.kind {
+        // Metal leaves the decode's precision open: an Apple GPU returns
+        // sRGB values to 1/8192, and a device storing the values as half
+        // floats to half a half's step, a quarter of a code's.
+        Kind::Float if f.name.contains("_xr") => Tolerance::abs(6e-4).with_rel(4e-4),
         Kind::Float if f.name.contains("srgb") => srgb_decode(),
         // NVIDIA's texture unit widens 5- and 6-bit lanes to 8 bits by
         // replicating their high bits, within 0.7 of an 8-bit step of

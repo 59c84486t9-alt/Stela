@@ -800,6 +800,19 @@ attachment_format(uint32_t format)
    }
 }
 
+/* Each attachment's two bits name an enum stela_air_extended_range. */
+static bool
+extended_range_valid(uint32_t kinds)
+{
+   for (unsigned n = 0; n < 32 / STELA_AIR_EXTENDED_RANGE_BITS; n++) {
+      unsigned kind = kinds >> (n * STELA_AIR_EXTENDED_RANGE_BITS) &
+                      BITFIELD_MASK(STELA_AIR_EXTENDED_RANGE_BITS);
+      if (kind > STELA_AIR_EXTENDED_RANGE_SRGB || (kind && n >= AIR_MAX_RENDER_TARGETS))
+         return false;
+   }
+   return true;
+}
+
 /* The specialization's storage attachments as the translator takes them. */
 static bool
 attachment_accesses(const struct stela_metal_specialization *specialization,
@@ -960,6 +973,11 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       resources.dynamic_threadgroup_bytes = (unsigned)(free_bytes & ~(uint64_t)15);
       resources.threadgroup_offset = stela_metal_threadgroup_offset;
    }
+   if (!extended_range_valid(specialization->extended_range) ||
+       (specialization->extended_range && stage != STELA_METAL_FRAGMENT)) {
+      fail(error, STELA_AIR_INPUT, "invalid extended-range attachments");
+      goto done;
+   }
    if (stage == STELA_METAL_KERNEL) {
       shader = stela_air_to_nir(air, size, entry, target->nir, &resources, error);
       goto done;
@@ -990,6 +1008,7 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       .raster_order_groups = target->raster_order_groups != 0,
       .attachments = specialization->attachment_count ? attachments : NULL,
       .samples = specialization->samples,
+      .extended_range = specialization->extended_range,
       .vertex_input_words = fetches_words ? words : NULL,
       .decode_vertex_input = decode_vertex_input,
    };

@@ -255,6 +255,13 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
         {
             CpuAccess::HostImageCopy
         }
+        // A staged copy holds the image's texels, which only an exact
+        // encoding lays out as Metal's.
+        StorageMode::Managed if !description.encoding().is_exact() => {
+            return Err(super::error::Error::Unsupported(
+                "managed storage of an extended-range format without host image copy",
+            ));
+        }
         StorageMode::Managed => CpuAccess::Staged,
         // A staged copy only meets the GPU's writes at a synchronize.
         StorageMode::Shared => {
@@ -486,7 +493,7 @@ pub fn raw_texel_format(format: PixelFormat) -> Option<Format> {
     if !description.is_color() || format == PixelFormat::A8Unorm {
         return None;
     }
-    match description.block.bytes {
+    match description.stored_block_bytes() {
         1 => Some(Format::R8Uint),
         2 => Some(Format::R16Uint),
         4 => Some(Format::R32Uint),
@@ -824,7 +831,16 @@ fn slices_u32(count: u64) -> u32 {
 /// format of the same block size and footprint.
 fn view_format_compatible(parent: &TextureDescriptor, format: PixelFormat) -> bool {
     use PixelFormat as P;
-    if format == parent.pixel_format || parent.pixel_format.srgb_pair() == Some(format) {
+    if format == parent.pixel_format {
+        return true;
+    }
+    // A stored encoding holds the values its own format reads, which no
+    // other format's view reinterprets.
+    let (a, b) = (parent.pixel_format.describe(), format.describe());
+    if !a.encoding().is_exact() || !b.encoding().is_exact() {
+        return false;
+    }
+    if parent.pixel_format.srgb_pair() == Some(format) {
         return true;
     }
     if matches!(
@@ -833,7 +849,6 @@ fn view_format_compatible(parent: &TextureDescriptor, format: PixelFormat) -> bo
     ) {
         return true;
     }
-    let (a, b) = (parent.pixel_format.describe(), format.describe());
     parent.usage.contains(TextureUsage::PIXEL_FORMAT_VIEW)
         && a.is_color()
         && b.is_color()

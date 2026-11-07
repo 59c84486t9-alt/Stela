@@ -10,7 +10,7 @@
 //! conversion to their formats' resolution, and the depth, stencil and
 //! blend equations exactly.
 use super::plan::{Buffer, Case, LATEST, Output, Plan, Texture, Tolerance};
-use super::textures::srgb;
+use super::textures::{srgb, xr};
 use super::values::{Dtype, Random, f16_bits, f16r, f32r, f32s, floats, ints, libm, u32s};
 use serde_json::{Value, json};
 
@@ -907,7 +907,63 @@ fn store(format: &str, texel: [f64; 4]) -> (Vec<u8>, Dtype) {
                 Dtype::U32,
             )
         }
+        "bgr10_xr" | "bgr10_xr_srgb" => {
+            let curve = format.ends_with("srgb");
+            let code = |v: f64| xr_code(v, curve);
+            (
+                u32s(&[(code(b) | code(g) << 10 | code(r) << 20 | 3 << 30) as u32]),
+                Dtype::U32,
+            )
+        }
+        "bgra10_xr" | "bgra10_xr_srgb" => {
+            let curve = format.ends_with("srgb");
+            let codes = [
+                xr_code(b, curve),
+                xr_code(g, curve),
+                xr_code(r, curve),
+                xr_alpha_code(a),
+            ];
+            (u16s(&codes.map(|code| code << 6)), Dtype::U16)
+        }
         _ => panic!("no store for {format}"),
+    }
+}
+
+/// The code an extended-range target stores for a written value: its
+/// nearest, through the sRGB curve mirrored below zero for the `sRGB`
+/// variants, clamped to the ten bits.
+fn xr_code(v: f64, srgb_curve: bool) -> u64 {
+    let encoded = if !srgb_curve {
+        v
+    } else if v.abs() <= 0.0031308 {
+        v * 12.92
+    } else {
+        v.signum() * (1.055 * libm::pow(v.abs(), 1.0 / 2.4) - 0.055)
+    };
+    (encoded * 510.0 + 384.0).round().clamp(0.0, 1023.0) as u64
+}
+
+/// An extended-range alpha's code, in [384, 894].
+fn xr_alpha_code(a: f64) -> u64 {
+    (a * 510.0 + 384.0).round().clamp(384.0, 894.0) as u64
+}
+
+/// A value to write to an extended-range target: mostly a code's value
+/// (near it, for the linear variants), sometimes one beyond the range the
+/// target clamps to. Alpha holds [0, 1].
+fn xr_value(rng: &mut Random, srgb_curve: bool, lane: usize) -> f64 {
+    if rng.u32().is_multiple_of(8) {
+        return if rng.u32().is_multiple_of(2) { -2.0 } else { 2.0 };
+    }
+    if lane == 3 {
+        return xr(u64::from(384 + rng.u32() % 511), false);
+    }
+    let code = u64::from(rng.u32() % 1024);
+    if srgb_curve {
+        // An Apple GPU's curve misses the exact one by most of half a code.
+        xr(code, true)
+    } else {
+        xr(code, false) + rng.uniform(-0.2, 0.2) / 510.0
     }
 }
 
@@ -959,8 +1015,13 @@ fn targets(plan: &mut Plan, library: &str) {
         "abgr4unorm",
         "a1bgr5unorm",
         "bgr5a1unorm",
+        "bgr10_xr",
+        "bgr10_xr_srgb",
+        "bgra10_xr",
+        "bgra10_xr_srgb",
     ] {
         let float = format.contains("float");
+        let extended = format.contains("_xr");
         let snorm = format.contains("snorm");
         let steps = |lane: usize| match format {
             "b5g6r5unorm" if lane == 1 => 63.0,
@@ -978,7 +1039,9 @@ fn targets(plan: &mut Plan, library: &str) {
         let texels: Vec<[f64; 4]> = (0..W * H)
             .map(|_| {
                 std::array::from_fn(|lane| {
-                    if float {
+                    if extended {
+                        xr_value(&mut rng, format.ends_with("srgb"), lane)
+                    } else if float {
                         exact_float(format, &mut rng, lane)
                     } else {
                         lattice(&mut rng, steps(lane), snorm)
@@ -993,8 +1056,9 @@ fn targets(plan: &mut Plan, library: &str) {
             expected.extend(bytes);
             dtype = d;
         }
-        // sRGB encoding is approximate.
-        let tol = if format.contains("srgb") {
+        // sRGB encoding is approximate; extended-range values lie at
+        // their codes, or clamp.
+        let tol = if format.contains("srgb") && !extended {
             Tolerance::units(1.0)
         } else {
             Tolerance::exact()

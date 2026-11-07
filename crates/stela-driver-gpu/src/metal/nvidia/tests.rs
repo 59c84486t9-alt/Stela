@@ -321,7 +321,15 @@ fn pixel_format_capabilities_follow_the_driver_tables() {
     );
     assert!(capabilities.format(P::Astc4x4Ldr).is_empty());
     assert!(capabilities.format(P::Etc2Rgb8).is_empty());
-    assert!(capabilities.format(P::Bgra10Xr).is_empty());
+    // Extended-range formats render and filter through half floats, which
+    // no shader write, buffer, linear or sparse texture shares.
+    for format in [P::Bgra10Xr, P::Bgr10Xr, P::Bgr10XrSrgb] {
+        let xr = capabilities.format(format);
+        assert!(xr.contains(C::READ | C::FILTER | C::COLOR | C::BLEND | C::MSAA | C::RESOLVE));
+        assert!(!xr.intersects(
+            C::WRITE | C::READ_WRITE | C::ATOMIC | C::SPARSE | C::LINEAR | C::TEXTURE_BUFFER_READ
+        ));
+    }
     assert!(
         capabilities
             .format(P::Rgb8Unorm)

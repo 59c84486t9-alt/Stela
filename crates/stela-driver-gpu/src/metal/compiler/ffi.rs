@@ -435,7 +435,7 @@ pub struct Specialization {
     pub(super) attachment_count: u32,
     pub(super) samples: u32,
     pub(super) round_toward_zero: u32,
-    pub(super) reserved: u32,
+    pub(super) extended_range: u32,
     pub(super) vertex_formats: [u8; 32],
 }
 

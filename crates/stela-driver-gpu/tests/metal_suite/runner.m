@@ -160,6 +160,9 @@ static NSDictionary<NSString *, NSNumber *> *pixel_formats(void)
 			@"depth16unorm" : @(MTLPixelFormatDepth16Unorm), @"depth32float" : @(MTLPixelFormatDepth32Float),
 			@"stencil8" : @(MTLPixelFormatStencil8),
 			@"depth32float_stencil8" : @(MTLPixelFormatDepth32Float_Stencil8),
+			@"bgr10_xr" : @(MTLPixelFormatBGR10_XR), @"bgr10_xr_srgb" : @(MTLPixelFormatBGR10_XR_sRGB),
+			@"bgra10_xr" : @(MTLPixelFormatBGRA10_XR),
+			@"bgra10_xr_srgb" : @(MTLPixelFormatBGRA10_XR_sRGB),
 		};
 	return t;
 }
@@ -658,6 +661,7 @@ static NSUInteger pixel_bytes(MTLPixelFormat f, NSUInteger *block)
 	case MTLPixelFormatRG32Uint: case MTLPixelFormatRG32Sint: case MTLPixelFormatRG32Float:
 	case MTLPixelFormatRGBA16Unorm: case MTLPixelFormatRGBA16Snorm: case MTLPixelFormatRGBA16Uint:
 	case MTLPixelFormatRGBA16Sint: case MTLPixelFormatRGBA16Float:
+	case MTLPixelFormatBGRA10_XR: case MTLPixelFormatBGRA10_XR_sRGB:
 		return 8;
 	case MTLPixelFormatRGBA32Uint: case MTLPixelFormatRGBA32Sint: case MTLPixelFormatRGBA32Float:
 		return 16;

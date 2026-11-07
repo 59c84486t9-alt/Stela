@@ -4,8 +4,11 @@
 //! Metal names packed formats from the least significant bits (`B5G6R5Unorm`
 //! keeps blue in bits 0-4); Vulkan names them from the most significant bits,
 //! so the realizations reverse the component order. A format without an
-//! exact Vulkan equivalent records why instead of approximating it.
+//! exact Vulkan equivalent is stored in another format that holds every
+//! value it encodes ([`Encoding`]), or records why it has none.
 use super::vulkan::{ComponentSwizzle, Format as VkFormat, ImageAspects};
+
+pub mod extended_range;
 
 raw_enum! {
     /// `MTLPixelFormat`, excluding `Invalid` (0) and the Metal 4 pipeline
@@ -256,8 +259,6 @@ impl Block {
 /// Why a Metal format has no Vulkan realization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Unrealized {
-    /// Apple's extended-range 10-bit encodings have no Vulkan format.
-    ExtendedRange,
     /// Vulkan samples 4:2:2 formats only through an immutable Y'CbCr
     /// conversion sampler, which Metal's separate texture and sampler
     /// bindings cannot supply.
@@ -271,11 +272,36 @@ pub struct Realization {
     pub format: VkFormat,
     pub view_aspects: ImageAspects,
     pub swizzle: [ComponentSwizzle; 4],
+    pub encoding: Encoding,
 }
 
 impl Realization {
     pub fn is_identity(&self) -> bool {
         self.swizzle == IDENTITY
+    }
+
+    /// Whether views and attachments may write through the realization: its
+    /// swizzle is the identity, or makes a format without alpha read opaque.
+    pub fn writes_through(&self) -> bool {
+        self.swizzle == IDENTITY
+            || self.swizzle == OPAQUE
+                && matches!(self.encoding, Encoding::ExtendedRange(codes) if !codes.alpha)
+    }
+}
+
+/// How the image's texels hold the Metal format's.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Encoding {
+    /// The image holds the Metal format's own bytes.
+    Exact,
+    /// Apple's extended-range codes, held as the half floats they read as
+    /// ([`extended_range`]). The CPU's bytes convert; a buffer's do not.
+    ExtendedRange(extended_range::Codes),
+}
+
+impl Encoding {
+    pub const fn is_exact(self) -> bool {
+        matches!(self, Self::Exact)
     }
 }
 
@@ -322,6 +348,20 @@ impl Description {
     /// Bytes of one tightly packed row of `width` texels.
     pub const fn row_bytes(&self, width: u64) -> u64 {
         self.block.columns(width) * self.block.bytes as u64
+    }
+
+    /// The image's encoding of the format's texels.
+    pub fn encoding(&self) -> Encoding {
+        self.realization
+            .map_or(Encoding::Exact, |realization| realization.encoding)
+    }
+
+    /// Bytes of one block as the image stores it.
+    pub fn stored_block_bytes(&self) -> u32 {
+        match self.encoding() {
+            Encoding::Exact => self.block.bytes,
+            Encoding::ExtendedRange(_) => extended_range::STORED_BYTES as u32,
+        }
     }
 }
 
@@ -404,6 +444,7 @@ const fn vk(format: VkFormat, view_aspects: ImageAspects) -> Result<Realization,
         format,
         view_aspects,
         swizzle: IDENTITY,
+        encoding: Encoding::Exact,
     })
 }
 
@@ -465,6 +506,7 @@ const fn compressed(
             format: realization,
             view_aspects: ImageAspects::COLOR,
             swizzle,
+            encoding: Encoding::Exact,
         }),
     }
 }
@@ -558,20 +600,23 @@ const fn astc(
     )
 }
 
-const fn unrealized(
-    format: PixelFormat,
-    srgb: bool,
-    bytes: u32,
-    reason: Unrealized,
-) -> Description {
+/// An extended-range format, held as half floats; one without alpha reads
+/// opaque.
+const fn extended(format: PixelFormat, alpha: bool, srgb: bool) -> Description {
+    let codes = extended_range::Codes { alpha, srgb };
     Description {
         format,
-        kind: Kind::Color(Numeric::Unorm),
+        kind: Kind::Color(Numeric::Float),
         srgb,
         compression: Compression::None,
-        block: Block::texel(bytes),
+        block: Block::texel(codes.metal_bytes() as u32),
         view_only: false,
-        realization: Err(reason),
+        realization: Ok(Realization {
+            format: V::R16G16B16A16Sfloat,
+            view_aspects: ImageAspects::COLOR,
+            swizzle: if alpha { IDENTITY } else { OPAQUE },
+            encoding: Encoding::ExtendedRange(codes),
+        }),
     }
 }
 
@@ -840,10 +885,10 @@ static DESCRIPTIONS: &[Description] = &[
         V::D24UnormS8Uint,
         STENCIL,
     ),
-    unrealized(P::Bgra10Xr, false, 8, Unrealized::ExtendedRange),
-    unrealized(P::Bgra10XrSrgb, true, 8, Unrealized::ExtendedRange),
-    unrealized(P::Bgr10Xr, false, 4, Unrealized::ExtendedRange),
-    unrealized(P::Bgr10XrSrgb, true, 4, Unrealized::ExtendedRange),
+    extended(P::Bgra10Xr, true, false),
+    extended(P::Bgra10XrSrgb, true, true),
+    extended(P::Bgr10Xr, false, false),
+    extended(P::Bgr10XrSrgb, false, true),
 ];
 
 const _: () = {
@@ -971,11 +1016,46 @@ mod tests {
     }
 
     #[test]
-    fn formats_without_exact_vulkan_equivalents_say_why() {
-        assert_eq!(
-            P::Bgra10Xr.describe().realization,
-            Err(Unrealized::ExtendedRange)
+    fn extended_range_formats_are_held_as_half_floats() {
+        for (format, alpha, srgb, bytes) in [
+            (P::Bgra10Xr, true, false, 8),
+            (P::Bgra10XrSrgb, true, true, 8),
+            (P::Bgr10Xr, false, false, 4),
+            (P::Bgr10XrSrgb, false, true, 4),
+        ] {
+            let description = format.describe();
+            let realization = description.realization.unwrap();
+            assert_eq!(realization.format, V::R16G16B16A16Sfloat);
+            assert_eq!(
+                realization.encoding,
+                Encoding::ExtendedRange(extended_range::Codes { alpha, srgb })
+            );
+            assert_eq!(description.block.bytes, bytes);
+            assert_eq!(
+                realization.swizzle[3],
+                if alpha { S::Identity } else { S::One }
+            );
+            assert!(realization.writes_through());
+        }
+        assert!(
+            P::Rgba8Unorm
+                .describe()
+                .realization
+                .unwrap()
+                .encoding
+                .is_exact()
         );
+        assert!(
+            !P::PvrtcRgb4bpp
+                .describe()
+                .realization
+                .unwrap()
+                .writes_through()
+        );
+    }
+
+    #[test]
+    fn formats_without_vulkan_equivalents_say_why() {
         assert_eq!(
             P::Gbgr422.describe().realization,
             Err(Unrealized::YcbcrConversion)

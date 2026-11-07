@@ -955,7 +955,7 @@ impl AirCompiler {
             },
             samples: specialization.samples.max(1),
             round_toward_zero: specialization.round_toward_zero.into(),
-            reserved: 0,
+            extended_range: specialization.extended_range,
             vertex_formats: vertex_formats(&specialization.vertex_words),
         };
         let mut error = ffi::AirError::NONE;

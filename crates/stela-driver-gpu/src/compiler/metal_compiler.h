@@ -173,8 +173,10 @@ struct stela_metal_specialization {
    const struct stela_metal_attachment *attachments;
    uint32_t attachment_count, samples;
    /* Narrowing floating-point conversions round toward zero, as the
-    * library's MTLCompileOptions ask, not to nearest even. */
-   uint32_t round_toward_zero, reserved;
+    * library's MTLCompileOptions ask, not to nearest even. Then a fragment
+    * function's extended-range color attachments, two bits each by location
+    * (air_to_nir.h enum stela_air_extended_range). */
+   uint32_t round_toward_zero, extended_range;
    /* A vertex function's MTLVertexFormat of each input, by location, that
     * its pipeline fetches as 32-bit words, the device's vertex input
     * lacking the format; zero for the rest. */

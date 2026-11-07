@@ -816,6 +816,17 @@ static const char *selected =
    "!41 = !{i32 1, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
    " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n";
 
+/* Returns its position as its render target's color. */
+static const char *positioned =
+   "define <4 x float> @positioned(<4 x float> %position) {\nret <4 x float> %position\n}\n"
+   "!air.fragment = !{!2}\n"
+   "!2 = !{ptr @positioned, !3, !4}\n!3 = !{!30}\n"
+   "!30 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\","
+   " !\"air.arg_name\", !\"color\"}\n"
+   "!4 = !{!40}\n"
+   "!40 = !{i32 0, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n";
+
 /* Returns twice its render target's color in the first row or column of
  * pixels and the color itself elsewhere, by a branch that either test takes:
  * the structurizer joins the color's paths through a register. */
@@ -994,6 +1005,54 @@ name(const struct stela_metal_reflection *reflection, uint32_t offset, uint32_t 
    memcpy(text, reflection->names + offset, bytes);
    text[bytes] = 0;
    return text;
+}
+
+/* How many ALU instructions of op shader holds. */
+static unsigned
+alu_count(nir_shader *shader, nir_op op)
+{
+   unsigned count = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block)
+         count += instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->op == op;
+   }
+   return count;
+}
+
+/* An extended-range attachment's output is clamped to what its codes
+ * encode, its alpha to [0, 1]; other attachments' are left alone. */
+static void
+extended_range_outputs_clamp(void)
+{
+   struct stela_air_error error;
+   const struct stela_metal_specialization plain = {0};
+   nir_shader *shader = compile(positioned, "positioned", &plain, &error);
+   assert(shader && !alu_count(shader, nir_op_fmin) && !alu_count(shader, nir_op_fsat));
+   stela_metal_release(shader);
+   for (uint32_t kind = STELA_AIR_EXTENDED_RANGE_LINEAR; kind <= STELA_AIR_EXTENDED_RANGE_SRGB;
+        kind++) {
+      const struct stela_metal_specialization clamped = {.extended_range = kind};
+      shader = compile(positioned, "positioned", &clamped, &error);
+      if (!shader)
+         fprintf(stderr, "positioned: %u %s\n", error.kind, error.detail);
+      assert(shader && alu_count(shader, nir_op_fmin) == 3 && alu_count(shader, nir_op_fmax) == 3 &&
+             alu_count(shader, nir_op_fsat) == 1);
+      stela_metal_release(shader);
+   }
+   /* Another location's kind leaves location 0 alone. */
+   const struct stela_metal_specialization other = {
+      .extended_range = STELA_AIR_EXTENDED_RANGE_LINEAR << STELA_AIR_EXTENDED_RANGE_BITS};
+   shader = compile(positioned, "positioned", &other, &error);
+   assert(shader && !alu_count(shader, nir_op_fmin));
+   stela_metal_release(shader);
+   /* Kinds past sRGB, locations past the eighth and other stages are refused. */
+   const struct stela_metal_specialization unknown = {.extended_range = 3};
+   assert(!compile(positioned, "positioned", &unknown, &error) && error.kind == STELA_AIR_INPUT);
+   const struct stela_metal_specialization ninth = {.extended_range = 1u << 16};
+   assert(!compile(positioned, "positioned", &ninth, &error) && error.kind == STELA_AIR_INPUT);
+   const struct stela_metal_specialization unrendered = {.extended_range = 1};
+   assert(!compile(vertex, "vertex", &unrendered, &error) && error.kind == STELA_AIR_INPUT);
+   assert(!compile(kernel, "kernel", &unrendered, &error) && error.kind == STELA_AIR_INPUT);
 }
 
 static void
@@ -3193,6 +3252,7 @@ main(void)
    command_encoding_reflects_barriers();
    buffer_reads_name_each_accessed_slot();
    framebuffer_reads_access_storage_attachments();
+   extended_range_outputs_clamp();
    glsl_type_singleton_decref();
    puts("metal compiler: ok");
    return 0;

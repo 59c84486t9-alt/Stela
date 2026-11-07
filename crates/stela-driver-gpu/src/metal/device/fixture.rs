@@ -70,6 +70,9 @@ pub(crate) struct MockBackend {
     pub(crate) layouts: Vec<IndirectCommandsLayoutInfo>,
     /// Each execution set's pipelines by index.
     pub(crate) execution_sets: BTreeMap<u64, BTreeMap<u32, Pipeline>>,
+    /// The bytes of each host image copy into an image, which copies out
+    /// of it read back.
+    pub(crate) image_bytes: BTreeMap<u64, Vec<u8>>,
 }
 
 impl MockBackend {
@@ -299,10 +302,20 @@ impl Backend for MockBackend {
         self.invalidated.push((memory, offset, size));
         Ok(())
     }
-    fn copy_to_image(&mut self, _: Image, _: &BufferImageCopy, _: &[u8]) -> Result<()> {
+    fn copy_to_image(&mut self, image: Image, _: &BufferImageCopy, bytes: &[u8]) -> Result<()> {
+        self.image_bytes.insert(image.0, bytes.to_vec());
         Ok(())
     }
-    fn copy_from_image(&mut self, _: Image, _: &BufferImageCopy, _: &mut [u8]) -> Result<()> {
+    fn copy_from_image(
+        &mut self,
+        image: Image,
+        _: &BufferImageCopy,
+        bytes: &mut [u8],
+    ) -> Result<()> {
+        if let Some(written) = self.image_bytes.get(&image.0) {
+            let count = written.len().min(bytes.len());
+            bytes[..count].copy_from_slice(&written[..count]);
+        }
         Ok(())
     }
     fn reset_queries(&mut self, pool: QueryPool, first: u32, count: u32) {

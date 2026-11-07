@@ -222,10 +222,16 @@ fn unsupported_formats_and_uses_are_refused_by_capability() {
         texture(&capabilities, &astc),
         Err(Error::Unsupported("shader reads of this pixel format"))
     );
-    let xr = descriptor(TextureType::D2, PixelFormat::Bgra10Xr);
+    // Extended-range textures are half-float images; shader writes would
+    // skip the clamping their stores do.
+    let mut xr = descriptor(TextureType::D2, PixelFormat::Bgra10Xr);
+    xr.usage = TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET;
+    let plan = texture(&capabilities, &xr).unwrap();
+    assert_eq!(plan.image.format, Format::R16G16B16A16Sfloat);
+    xr.usage = TextureUsage::SHADER_WRITE;
     assert_eq!(
         texture(&capabilities, &xr),
-        Err(Error::Unsupported("pixel format"))
+        Err(Error::Unsupported("shader writes to this pixel format"))
     );
     let mut bc_target = descriptor(TextureType::D2, PixelFormat::Bc1Rgba);
     bc_target.usage = TextureUsage::RENDER_TARGET;
