@@ -40,6 +40,27 @@ impl EdidActive {
 
 /// Whether [`select`] has chosen the mode.
 static SELECTED: Global<bool> = Global(RefCell::new(false));
+/// The panel's native resolution and its refresh in millihertz, from the
+/// EDID [`select`] read.
+static NATIVE: Global<Option<(u32, u32, u32)>> = Global(RefCell::new(None));
+
+/// The refresh in millihertz of a `width` by `height` screen: the EDID's
+/// preferred timing's when that is the screen's resolution and the guest's
+/// display can advertise it, else 60 Hz, which every monitor runs a mode it
+/// lists at.
+pub(super) fn refresh(width: usize, height: usize) -> u32 {
+    let native = NATIVE.0.try_borrow().ok().and_then(|native| *native);
+    match native {
+        Some((w, h, refresh))
+            if usize::try_from(w).ok() == Some(width)
+                && usize::try_from(h).ok() == Some(height)
+                && display::guest_takes_at(w, h, refresh) =>
+        {
+            refresh
+        }
+        _ => stela_soc::scanout::DEFAULT_REFRESH_MILLIHERTZ,
+    }
+}
 
 /// `1920x1080 Bgr`.
 fn describe(mode: &ModeInfo) -> String {
@@ -83,9 +104,17 @@ fn choose(handle: Handle, gop: &mut GraphicsOutput) {
         line.push_str(&describe(mode.info()));
     }
     output::arguments(format_args!("{line}\n"));
+    let refresh = edid.as_ref().and_then(|(bytes, _)| display::refresh(bytes));
+    if let (Some((width, height)), Some(refresh), Ok(mut slot)) =
+        (native, refresh, NATIVE.0.try_borrow_mut())
+    {
+        *slot = Some((width, height, refresh));
+    }
     match (&edid, native) {
         (Some((_, source)), Some((width, height))) => output::arguments(format_args!(
-            "DISPLAY EDID ({source}) prefers {width}x{height}\n"
+            "DISPLAY EDID ({source}) prefers {width}x{height} at {}.{:03} Hz\n",
+            refresh.unwrap_or(0) / 1000,
+            refresh.unwrap_or(0) % 1000
         )),
         (Some((bytes, source)), None) => output::arguments(format_args!(
             "DISPLAY EDID ({source}, {} bytes) has no preferred timing\n",
@@ -145,6 +174,7 @@ fn edid(handle: Handle) -> Option<(Vec<u8>, &'static str)> {
             discovered(only(handles::<EdidDiscovered>())?)
                 .map(|edid| (edid, "discovered, the only display's"))
         })
+        .or_else(|| crate::pci_io::qemu_vga_edid(handle).map(|edid| (edid, "QEMU VGA's registers")))
 }
 
 fn handles<P: ProtocolPointer + ?Sized>() -> Option<Vec<Handle>> {

@@ -12,6 +12,25 @@ fn mode(width: u16, height: u16, kind: u32) -> ModeInfo {
     }
 }
 
+#[test]
+fn a_modes_refresh_is_its_clock_over_its_totals() {
+    // CVT-RB 2560x1440 at 144 Hz: 2720 by 1525 at 597.31 MHz.
+    let fast = ModeInfo {
+        clock: 597_310,
+        timing_h: [2608, 2640, 2720, 0],
+        timing_v: [1443, 1448, 1525, 0],
+        vrefresh: 144,
+        ..mode(2560, 1440, 0)
+    };
+    assert_eq!(refresh(&fast), 144_000);
+    let untimed = ModeInfo {
+        vrefresh: 75,
+        ..mode(1280, 800, 0)
+    };
+    assert_eq!(refresh(&untimed), 75_000);
+    assert_eq!(refresh(&mode(1280, 800, 0)), 60_000);
+}
+
 /// A GPU of two connectors, the second connected with `modes`.
 struct Card {
     modes: Vec<ModeInfo>,

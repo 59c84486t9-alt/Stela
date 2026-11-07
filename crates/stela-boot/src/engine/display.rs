@@ -59,6 +59,10 @@ impl Scanout for MirroredScanout {
         self.scanout.mode()
     }
 
+    fn refresh_millihertz(&self) -> u32 {
+        self.scanout.refresh_millihertz()
+    }
+
     fn present(&mut self, rows: &[u8]) -> Result<()> {
         if self.frame.len() != rows.len() {
             self.frame = vec![0; rows.len()].into_boxed_slice();
@@ -92,6 +96,10 @@ impl Scanout for GopScanout {
             // show_row takes blue-low pixels and re-encodes them for the mode.
             format: ScanoutFormat::Bgra8888,
         }
+    }
+
+    fn refresh_millihertz(&self) -> u32 {
+        self.screen.refresh_millihertz()
     }
 
     fn present(&mut self, rows: &[u8]) -> Result<()> {

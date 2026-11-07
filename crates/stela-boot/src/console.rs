@@ -126,6 +126,8 @@ pub struct Framebuffer {
     stride: usize,
     encoding: Encoding,
     firmware: bool,
+    /// The monitor's refresh in millihertz.
+    refresh_millihertz: u32,
     pub(crate) pci_source: Option<crate::pci_io::FramebufferSource>,
 }
 
@@ -180,6 +182,7 @@ impl Framebuffer {
             stride: mode.stride(),
             encoding,
             firmware: true,
+            refresh_millihertz: mode::refresh(width, height),
             pci_source: None,
         };
         (framebuffer.stride * framebuffer.height * BYTES_PER_PIXEL <= framebuffer.bytes)
@@ -197,6 +200,7 @@ impl Framebuffer {
             stride,
             encoding: Encoding::Bgr,
             firmware: false,
+            refresh_millihertz: stela_soc::scanout::DEFAULT_REFRESH_MILLIHERTZ,
             pci_source: None,
         }
     }
@@ -209,6 +213,12 @@ impl Framebuffer {
     /// Visible pixels across and down.
     pub fn resolution(&self) -> (usize, usize) {
         (self.width, self.height)
+    }
+
+    /// The monitor's refresh in millihertz: its EDID's for its native mode,
+    /// else 60 Hz.
+    pub fn refresh_millihertz(&self) -> u32 {
+        self.refresh_millihertz
     }
 
     pub(crate) fn available(&self) -> bool {

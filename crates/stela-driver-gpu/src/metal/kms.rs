@@ -217,6 +217,8 @@ pub struct Display<D> {
     crtc: u32,
     width: u32,
     height: u32,
+    /// The mode's refresh in millihertz.
+    refresh: u32,
     /// What the engine reads, then the one the next frame fills.
     /// The newest frame, the one before it and the one that shows neither.
     buffers: [Buffer; 3],
@@ -235,6 +237,21 @@ impl<D: Drm> PreparedFrame<'_, D> {
     pub fn present(self) -> Result<(), Error> {
         self.0.flip()
     }
+}
+
+/// `mode`'s refresh in millihertz: its pixel clock (kHz) over its totals,
+/// rounded, as `drm_mode_vrefresh` computes it in hertz; its `vrefresh`
+/// when the totals or clock are missing, and 60 Hz without either.
+fn refresh(mode: &ModeInfo) -> u32 {
+    let total = u64::from(mode.timing_h[2]) * u64::from(mode.timing_v[2]);
+    let timed = (total != 0)
+        .then(|| (u64::from(mode.clock) * 1_000_000 + total / 2) / total)
+        .and_then(|refresh| u32::try_from(refresh).ok());
+    [timed, Some(mode.vrefresh.saturating_mul(1000))]
+        .into_iter()
+        .flatten()
+        .find(|&refresh| refresh != 0)
+        .unwrap_or(60_000)
 }
 
 fn call<D: Drm, T>(drm: &mut D, request: u32, argument: &mut T) -> Result<(), Error> {
@@ -436,6 +453,7 @@ impl<D: Drm> Display<D> {
             crtc,
             width,
             height,
+            refresh: refresh(&mode),
             buffers: [front, back, spare],
         })
     }
@@ -443,6 +461,11 @@ impl<D: Drm> Display<D> {
     /// Pixels across and down.
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// The mode's refresh in millihertz.
+    pub fn refresh_millihertz(&self) -> u32 {
+        self.refresh
     }
 
     /// The buffer on screen and the bytes between its rows, for what draws

@@ -44,6 +44,10 @@ impl Scanout for KmsScanout {
         }
     }
 
+    fn refresh_millihertz(&self) -> u32 {
+        self.0.refresh_millihertz()
+    }
+
     fn present(&mut self, rows: &[u8]) -> Result<()> {
         console::release();
         let presented = self.0.present(rows);

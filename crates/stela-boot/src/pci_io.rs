@@ -23,6 +23,8 @@ use uefi::{
 // Unused slots are opaque pointer-sized fields, never invoked. They preserve
 // the protocol's exact EFI_PCI_IO_PROTOCOL_ACCESS pairs and vtable ordering.
 type Read = unsafe extern "efiapi" fn(*mut PciIo, u32, u32, usize, *mut c_void) -> Status;
+/// `EFI_PCI_IO_PROTOCOL_IO_MEM`: width, BAR, offset in it, count, buffer.
+type MemRead = unsafe extern "efiapi" fn(*mut PciIo, u32, u8, u64, usize, *mut c_void) -> Status;
 type Location =
     unsafe extern "efiapi" fn(*mut PciIo, *mut usize, *mut usize, *mut usize, *mut usize) -> Status;
 type BarAttributes =
@@ -30,7 +32,9 @@ type BarAttributes =
 #[repr(C)]
 #[unsafe_protocol("4cf5b200-68b8-4ca5-9eec-b23e3f50029a")]
 pub struct PciIo {
-    poll_mem_poll_io_mem_io: [usize; 6],
+    poll_mem_poll_io: [usize; 2],
+    mem_read: MemRead,
+    mem_write_io: [usize; 3],
     config_read: Read,
     config_write_copy_map_unmap_alloc_free_flush: [usize; 7],
     location: Location,
@@ -44,6 +48,7 @@ pub struct PciIo {
 const _: () = {
     assert!(size_of::<usize>() == 8);
     assert!(size_of::<PciIo>() == 160);
+    assert!(offset_of!(PciIo, mem_read) == 16);
     assert!(offset_of!(PciIo, config_read) == 48);
     assert!(offset_of!(PciIo, location) == 112);
     assert!(offset_of!(PciIo, bar_attributes) == 128);
@@ -166,6 +171,41 @@ pub(crate) fn framebuffer_source(
     )
     .map(|bar| FramebufferSource { address, bar }))
 }
+/// QEMU's standard VGA (`hw/display/vga-pci.c`), vendor and device.
+const QEMU_VGA: u32 = 0x1111_1234;
+/// Its MMIO BAR, whose first bytes hold the EDID with `edid=on`
+/// (`docs/specs/standard-vga.rst`: 0x0000..0x0400 "edid data blob").
+const QEMU_VGA_MMIO_BAR: u8 = 2;
+const EDID_BYTES: usize = 128;
+
+/// The EDID base block QEMU's standard VGA on GOP `handle` serves in its
+/// registers, which OVMF reads to pick its first mode but does not install
+/// as a protocol. `None` for another device or when the read fails; the
+/// caller checks the block.
+pub(crate) fn qemu_vga_edid(handle: Handle) -> Option<Vec<u8>> {
+    let mut pci = gop_pci(handle)?;
+    let header = pci.read_header().ok()?;
+    if u32::from_le_bytes(header[..4].try_into().ok()?) != QEMU_VGA {
+        return None;
+    }
+    let mut edid = Vec::new();
+    edid.try_reserve_exact(EDID_BYTES).ok()?;
+    edid.resize(EDID_BYTES, 0);
+    // SAFETY: live boot protocol; EfiPciIoWidthUint8 (0) reads `EDID_BYTES`
+    // single bytes from the BAR into the writable buffer of that length.
+    let read = unsafe {
+        (pci.mem_read)(
+            &mut *pci,
+            0,
+            QEMU_VGA_MMIO_BAR,
+            0,
+            EDID_BYTES,
+            edid.as_mut_ptr().cast(),
+        )
+    };
+    read.is_success().then_some(edid)
+}
+
 fn status(value: Status) -> Result<(), Error> {
     if value.is_success() {
         Ok(())
