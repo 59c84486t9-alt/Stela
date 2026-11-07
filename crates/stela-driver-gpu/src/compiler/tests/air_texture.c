@@ -739,9 +739,30 @@ block_reads_fetch_each_texel(void)
    nir_tex_instr *first = census.first[nir_texop_txf];
    assert(nir_tex_instr_src_index(first, nir_tex_src_lod) >= 0);
    ralloc_free(shader);
-   /* A residency destination has nothing to receive. */
-   const char *resident = replace(block_body, "ptr %block, ptr null", "ptr %block, ptr %block");
-   assert(!kernel(resident, kernel_metadata, &error));
+   /* A residency destination receives each texel's residency from a sparse
+    * fetch. */
+   char *destined = strdup(replace(block_body, "ptr %block, ptr null", "ptr %block, ptr %residency"));
+   const char *resident = replace(
+      destined, "%block = alloca [2 x <4 x float>], align 16\n",
+      "%block = alloca [2 x <4 x float>], align 16\n%residency = alloca [2 x i8], align 1\n");
+   free(destined);
+   shader = kernel(resident, kernel_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "resident block: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "resident block read kernel");
+   unsigned sparse = 0, residencies = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_tex)
+            sparse += nir_instr_as_tex(instr)->is_sparse;
+         residencies += instr->type == nir_instr_type_intrinsic &&
+                        nir_instr_as_intrinsic(instr)->intrinsic ==
+                           nir_intrinsic_is_sparse_texels_resident;
+      }
+   }
+   assert(sparse == 2 && residencies == 2);
+   ralloc_free(shader);
 }
 
 /* A kernel's explicit imageblock of 8-byte elements, its texture and its

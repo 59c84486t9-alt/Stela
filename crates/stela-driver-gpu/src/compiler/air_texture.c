@@ -899,9 +899,10 @@ read_texel(struct call *call, nir_def **result)
 
 /* A block of texels into thread memory: the sampler, the block's position
  * and offset, the level, a zero, the texels' destination, a residency
- * destination this device has none to write to, and the block's constant
- * width and height. Texel (x, y) of the block is at position + offset +
- * (x, y), and its destination's element y * width + x. */
+ * destination or null, and the block's constant width and height. Texel
+ * (x, y) of the block is at position + offset + (x, y), its destination's
+ * element y * width + x, and its residency that byte of the residency
+ * destination, coded as a sparse read's is. */
 static bool
 block_read(struct call *call)
 {
@@ -926,8 +927,7 @@ block_read(struct call *call)
    LLVMValueRef size = residency ? take(call) : NULL;
    if (!size)
       return false;
-   if (!LLVMIsAConstantPointerNull(residency))
-      return fail(call, "a block read's residency");
+   call->sparse = !LLVMIsAConstantPointerNull(residency);
    if (!type_is(LLVMTypeOf(size), 2, LLVMIntegerTypeKind, 32) || !LLVMIsAConstant(size) ||
        !LLVMIsAConstantInt(LLVMGetAggregateElement(size, 0)) ||
        !LLVMIsAConstantInt(LLVMGetAggregateElement(size, 1)))
@@ -947,10 +947,14 @@ block_read(struct call *call)
    for (uint64_t i = 0; i < width * height; i++) {
       nir_def *at = nir_iadd(b, origin, nir_imm_ivec2(b, (int)(i % width), (int)(i / width)));
       struct tex t = {.op = nir_texop_txf, .texture = deref, .coord = at, .lod = level};
-      nir_def *value = texel(call, emit(call, &t), false);
+      nir_def *value = texel(call, resident(call, emit(call, &t)), false);
       unsigned bytes = value->num_components * value->bit_size / 8;
       if (!call->c->store_at(call->c->translator, destination, nir_imm_int64(b, (int64_t)(i * bytes)),
                              value))
+         return false;
+      if (call->sparse &&
+          !call->c->store_at(call->c->translator, residency, nir_imm_int64(b, (int64_t)i),
+                             call->residency))
          return false;
    }
    return true;
