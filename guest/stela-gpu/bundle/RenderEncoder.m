@@ -296,6 +296,15 @@ STAGE_BINDINGS(Tile, MTLRenderStageTile)
 	ENTRY(StelaRenderCodeSetBlendColor, command);
 }
 
+/* Only a pipeline whose colorAttachmentMappingState inherits the encoder's
+ * map renders through it, and only an MTL4 compiler builds one; this
+ * device's pipelines map each logical attachment to its physical one, as
+ * an Apple GPU's from an MTLRenderPipelineDescriptor do, whatever the map. */
+- (void)setColorAttachmentMap:(id)map
+{
+	(void)map;
+}
+
 - (void)setTriangleFillMode:(NSUInteger)mode
 {
 	StelaMode command = {.mode = mode};

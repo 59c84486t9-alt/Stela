@@ -915,6 +915,42 @@ fn properties(plan: &mut Plan, library: &str, rng: &mut Random) {
             .output(Output::exact("mapped", Dtype::F32, f32s(&mapped)))
             .output(Output::exact("image", Dtype::U8, left)),
     );
+    // A pipeline from an MTLRenderPipelineDescriptor maps each logical
+    // output to its own attachment, whatever map the encoder sets.
+    let gray = [128, 128, 128, 255];
+    let images: Vec<u8> = (0..3)
+        .flat_map(|attachment| {
+            (0..8 * 4).flat_map(move |i| {
+                let clear = [
+                    if attachment == 0 { 255 } else { 0 },
+                    if attachment == 1 { 255 } else { 0 },
+                    if attachment == 2 { 255 } else { 0 },
+                    255,
+                ];
+                match (attachment, i % 8 < 6) {
+                    (0, true) => gray,
+                    (0, false) => [255; 4],
+                    (1, false) => [255, 255, 0, 255],
+                    _ => clear,
+                }
+            })
+        })
+        .collect();
+    plan.add(
+        Case::host(
+            "host.color_attachment_map",
+            library,
+            json!({"kind": "color_attachment_map"}),
+        )
+        .buffer(Buffer::zeroed("facts", 0, 14 * 4).unbound())
+        .buffer(Buffer::zeroed("images", 1, 3 * 8 * 4 * 4).unbound())
+        .output(Output::exact(
+            "facts",
+            Dtype::U32,
+            u32s(&COLOR_ATTACHMENT_MAP_FACTS),
+        ))
+        .output(Output::exact("images", Dtype::U8, images)),
+    );
     plan.add(
         Case::host(
             "host.library_loading",
@@ -944,6 +980,12 @@ fn properties(plan: &mut Plan, library: &str, rng: &mut Random) {
             .output(Output::exact("copied", Dtype::U32, u32s(&doubled))),
     );
 }
+
+/// A fresh map's physical index of logical indices 0 to 7; logical 3's
+/// once set to 5, in a copy, after a reset, and in the copy after it; and
+/// the render pass and indirect command buffer descriptors' default
+/// `supportColorAttachmentMapping`.
+const COLOR_ATTACHMENT_MAP_FACTS: [u32; 14] = [0, 1, 2, 3, 4, 5, 6, 7, 5, 5, 3, 5, 0, 0];
 
 /// Each function's type, patch type and control points; its vertex and
 /// stage-in attributes (index:data type, active, patch data, control

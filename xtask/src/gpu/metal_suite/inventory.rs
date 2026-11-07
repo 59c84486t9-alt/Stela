@@ -621,7 +621,7 @@ const API_HEADERS_LEFT_OUT: [(&str, &str); 10] = [
 /// Words that leave out every class or entry whose name holds them,
 /// ignoring case, in headers that are otherwise in scope.
 #[cfg(test)]
-const API_WORDS_LEFT_OUT: [(&str, &str); 14] = [
+const API_WORDS_LEFT_OUT: [(&str, &str); 13] = [
     ("MTL4", "the Metal4 family is left out"),
     ("accelerationStructure", "ray tracing is not claimed"),
     ("intersectionFunction", "ray tracing is not claimed"),
@@ -633,10 +633,6 @@ const API_WORDS_LEFT_OUT: [(&str, &str); 14] = [
     (
         "counterHeap",
         "counter heaps belong to the Metal4 family, left out",
-    ),
-    (
-        "colorAttachmentMap",
-        "color attachment mapping belongs to the Metal4 family, left out",
     ),
     ("tensor", "tensors belong to the Metal4 family, left out"),
     ("sparse", "sparse resources are left out"),

@@ -276,8 +276,6 @@ ABSENT_TABLES(Vertex)
 ABSENT_TABLES(Fragment)
 ABSENT_TABLES(Tile)
 
-ABSENT((void)setColorAttachmentMap:(id)map, "this device has no color attachment maps", )
-
 - (void)setDepthTestMinBound:(float)minimum maxBound:(float)maximum
 {
 	REFUSE("setDepthTestMinBound:maxBound:", "this device has no depth bounds test");

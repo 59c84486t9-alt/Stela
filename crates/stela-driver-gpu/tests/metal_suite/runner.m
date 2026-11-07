@@ -5753,6 +5753,93 @@ static void host_aliasable(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
  * that size and a coordinate mapped there and back; a map of no layers; a
  * decoder over the full map's parameter data; and a pass with a map drawing
  * the left half red. */
+/* A map's defaults and reset, then draws through maps that would send
+ * logical outputs to other attachments: columns 0-1 to attachment 2, 2-3 to
+ * 1, 4-5 through no map, and 6-7 swapping two outputs. Pipelines from an
+ * MTLRenderPipelineDescriptor map each output to its own attachment
+ * whatever the encoder's map. */
+API_AVAILABLE(macos(26.0))
+static void color_attachment_map(Case *c, id<MTLCommandQueue> queue)
+{
+	MTLLogicalToPhysicalColorAttachmentMap *fresh = [MTLLogicalToPhysicalColorAttachmentMap new];
+	for (NSUInteger i = 0; i < 8; i++)
+		put(c, @"facts", i, (uint32_t)[fresh getPhysicalIndexForLogicalIndex:i]);
+	[fresh setPhysicalIndex:5 forLogicalIndex:3];
+	put(c, @"facts", 8, (uint32_t)[fresh getPhysicalIndexForLogicalIndex:3]);
+	MTLLogicalToPhysicalColorAttachmentMap *copy = [fresh copy];
+	put(c, @"facts", 9, (uint32_t)[copy getPhysicalIndexForLogicalIndex:3]);
+	[fresh reset];
+	put(c, @"facts", 10, (uint32_t)[fresh getPhysicalIndexForLogicalIndex:3]);
+	put(c, @"facts", 11, (uint32_t)[copy getPhysicalIndexForLogicalIndex:3]);
+	put(c, @"facts", 12, [MTLRenderPassDescriptor new].supportColorAttachmentMapping);
+	put(c, @"facts", 13, [MTLIndirectCommandBufferDescriptor new].supportColorAttachmentMapping);
+
+	/* Pipelines name every attachment of the pass; those their functions
+	 * leave unwritten keep their contents. */
+	NSError *error = nil;
+	MTLRenderPipelineDescriptor *pd[2] = {[MTLRenderPipelineDescriptor new], [MTLRenderPipelineDescriptor new]};
+	for (NSUInteger p = 0; p < 2; p++)
+		for (NSUInteger i = 0; i < 3; i++) {
+			pd[p].colorAttachments[i].pixelFormat = MTLPixelFormatRGBA8Unorm;
+			if (i > p)
+				pd[p].colorAttachments[i].writeMask = MTLColorWriteMaskNone;
+		}
+	id<MTLRenderPipelineState> one =
+		host_render_pipeline(c, pd[0], @"vert_offset_rect", @"frag_constant", MTLPixelFormatRGBA8Unorm, &error);
+	id<MTLRenderPipelineState> two =
+		one ? host_render_pipeline(c, pd[1], @"vert_offset_rect", @"frag_two_colors", MTLPixelFormatRGBA8Unorm, &error) : nil;
+	if (!two)
+		@throw failure(@"attachment map pipelines: %@", error.localizedDescription);
+	MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.supportColorAttachmentMapping = YES;
+	id<MTLTexture> targets[3];
+	for (NSUInteger i = 0; i < 3; i++) {
+		targets[i] = host_target(c, MTLPixelFormatRGBA8Unorm, 8, 4);
+		pass.colorAttachments[i].texture = targets[i];
+		pass.colorAttachments[i].loadAction = MTLLoadActionClear;
+		pass.colorAttachments[i].clearColor = MTLClearColorMake(i == 0, i == 1, i == 2, 1);
+		pass.colorAttachments[i].storeAction = MTLStoreActionStore;
+	}
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLRenderCommandEncoder> r = [cb renderCommandEncoderWithDescriptor:pass];
+	float gray[] = {0.5f, 0.5f, 0.5f, 1};
+	MTLLogicalToPhysicalColorAttachmentMap *map = [MTLLogicalToPhysicalColorAttachmentMap new];
+	[r setRenderPipelineState:one];
+	[r setFragmentBytes:gray length:sizeof gray atIndex:0];
+	for (NSUInteger column = 0; column < 4; column++) {
+		float rect[] = {column * 0.5f - 1, -1, column * 0.5f - 0.5f, 1, 0};
+		if (column == 0)
+			[map setPhysicalIndex:2 forLogicalIndex:0];
+		if (column == 1)
+			[map setPhysicalIndex:1 forLogicalIndex:0];
+		if (column == 3) {
+			[map setPhysicalIndex:1 forLogicalIndex:0];
+			[map setPhysicalIndex:0 forLogicalIndex:1];
+			[r setRenderPipelineState:two];
+		}
+		[r setColorAttachmentMap:column == 2 ? nil : map];
+		[r setVertexBytes:rect length:sizeof rect atIndex:0];
+		[r drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+	}
+	[r endEncoding];
+	id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+	for (NSUInteger i = 0; i < 3; i++)
+		[b copyFromTexture:targets[i] sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+			sourceSize:MTLSizeMake(8, 4, 1) toBuffer:c.buffers[@"images"] destinationOffset:i * 8 * 4 * 4
+		   destinationBytesPerRow:8 * 4 destinationBytesPerImage:8 * 4 * 4];
+	[b endEncoding];
+	wait_for(cb, c.spec);
+}
+
+static void host_color_attachment_map(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	(void)h;
+	if (@available(macOS 26.0, *))
+		color_attachment_map(c, queue);
+	else
+		@throw failure(@"color attachment maps need macOS 26");
+}
+
 static void host_rate_maps(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
 {
 	id<MTLDevice> d = c.device;
@@ -6246,6 +6333,7 @@ static void run_host(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 		@"debug" : [NSValue valueWithPointer:host_debug],
 		@"depth_bounds" : [NSValue valueWithPointer:host_depth_bounds],
 		@"rate_maps" : [NSValue valueWithPointer:host_rate_maps],
+		@"color_attachment_map" : [NSValue valueWithPointer:host_color_attachment_map],
 	};
 	NSValue *v = work[h[@"kind"]];
 	if (!v)

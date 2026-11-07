@@ -278,3 +278,15 @@ kernel void rate_map_decode(constant rasterization_rate_map_data &data [[buffer(
     out[i * 2] = map.map_screen_to_physical_coordinates(in[i], i & 1);
     out[i * 2 + 1] = map.map_physical_to_screen_coordinates(in[i], i & 1);
 }
+
+struct TwoColors {
+    float4 first [[color(0)]];
+    float4 second [[color(1)]];
+};
+
+// Two logical outputs, which a color attachment map sends to any physical
+// attachments.
+fragment TwoColors frag_two_colors()
+{
+    return {float4(1.0f), float4(1.0f, 1.0f, 0.0f, 1.0f)};
+}
