@@ -282,8 +282,9 @@ impl Realization {
 
     /// Whether views and attachments may write through the realization: its
     /// swizzle is the identity, or makes a format without alpha read opaque.
+    /// Only the decode kernels write decoded texels, which mean blocks.
     pub fn writes_through(&self) -> bool {
-        self.swizzle == IDENTITY
+        self.swizzle == IDENTITY && !matches!(self.encoding, Encoding::Decoded(_))
             || self.swizzle == OPAQUE
                 && matches!(self.encoding, Encoding::ExtendedRange(codes) if !codes.alpha)
             || self.swizzle == PADDED && self.encoding == Encoding::Padded
@@ -306,6 +307,44 @@ pub enum Encoding {
     /// zero and alpha one: `RG8Unorm_sRGB`, which NVIDIA has no two-channel
     /// sRGB format for, as `R8G8B8A8_SRGB`.
     Padded,
+    /// A compressed format's blocks decoded to texels, for a format the
+    /// device samples no blocks of: the CPU and buffer copies reach a copy
+    /// of the blocks, which the decode kernels expand into the image.
+    Decoded(Codec),
+}
+
+/// A compressed format the decode kernels expand into an image: the
+/// kernels' `enum stela_metal_block_codec`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Codec {
+    Etc2Rgb8 = 1,
+    Etc2Rgb8A1,
+    EacRgba8,
+    EacR11,
+    EacR11Snorm,
+    EacRg11,
+    EacRg11Snorm,
+}
+
+/// The decode kernel that expands a codec's blocks.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum BlockKernel {
+    /// `stela_metal_decode_etc_kernel`.
+    Etc,
+}
+
+impl Codec {
+    pub const fn kernel(self) -> BlockKernel {
+        BlockKernel::Etc
+    }
+
+    /// Bytes of the decoded texel: 8-bit RGBA, or EAC's 16-bit channels.
+    pub const fn decoded_bytes(self) -> u32 {
+        match self {
+            Self::EacR11 | Self::EacR11Snorm => 2,
+            _ => 4,
+        }
+    }
 }
 
 impl Encoding {
@@ -323,6 +362,7 @@ impl Encoding {
             }
             Self::Rotated => 5,
             Self::Padded => 6,
+            Self::Decoded(codec) => codec as u32,
         }
     }
 
@@ -332,12 +372,16 @@ impl Encoding {
             Self::Exact | Self::Rotated => metal_bytes,
             Self::ExtendedRange(_) => extended_range::STORED_BYTES as u32,
             Self::Padded => 2 * metal_bytes,
+            Self::Decoded(codec) => codec.decoded_bytes(),
         }
     }
 
     /// Converts whole Metal texels of `metal_bytes` each to the image's.
+    /// A decoded encoding's CPU copy holds its blocks, which only the
+    /// decode kernels expand.
     pub fn store(self, metal: &[u8], stored: &mut [u8]) {
         match self {
+            Self::Decoded(_) => unreachable!("decoded textures keep their blocks in a CPU copy"),
             Self::Exact => stored.copy_from_slice(metal),
             Self::ExtendedRange(codes) => codes.store(metal, stored),
             Self::Rotated => rotate(metal, stored, u16::rotate_right),
@@ -353,6 +397,7 @@ impl Encoding {
     /// Converts whole image texels to Metal's.
     pub fn load(self, stored: &[u8], metal: &mut [u8]) {
         match self {
+            Self::Decoded(_) => unreachable!("decoded textures keep their blocks in a CPU copy"),
             Self::Exact => metal.copy_from_slice(stored),
             Self::ExtendedRange(codes) => codes.load(stored, metal),
             Self::Rotated => rotate(stored, metal, u16::rotate_left),
@@ -431,6 +476,19 @@ impl Description {
     /// Bytes of one block as the image stores it.
     pub fn stored_block_bytes(&self) -> u32 {
         self.encoding().stored_bytes(self.block.bytes)
+    }
+
+    /// For a format whose image holds its blocks decoded, the kernel that
+    /// decodes them and its `TexelArguments` encoding: the codec, then the
+    /// block's width and height a byte each.
+    pub fn decoder(&self) -> Option<(BlockKernel, u32)> {
+        match self.encoding() {
+            Encoding::Decoded(codec) => Some((
+                codec.kernel(),
+                codec as u32 | self.block.width << 8 | self.block.height << 16,
+            )),
+            _ => None,
+        }
     }
 }
 
@@ -610,6 +668,7 @@ const fn compressed(
     bytes: u32,
     realization: VkFormat,
     swizzle: [ComponentSwizzle; 4],
+    encoding: Encoding,
 ) -> Description {
     Description {
         format,
@@ -626,7 +685,7 @@ const fn compressed(
             format: realization,
             view_aspects: ImageAspects::COLOR,
             swizzle,
-            encoding: Encoding::Exact,
+            encoding,
         }),
     }
 }
@@ -648,15 +707,19 @@ const fn bc(
         bytes,
         realization,
         IDENTITY,
+        Encoding::Exact,
     )
 }
 
+/// Devices without ETC2 and EAC sampling hold the blocks decoded
+/// ([`Encoding::Decoded`]) in `decoded`.
 const fn etc(
     format: PixelFormat,
     numeric: Numeric,
     srgb: bool,
     bytes: u32,
-    realization: VkFormat,
+    codec: Codec,
+    decoded: VkFormat,
 ) -> Description {
     compressed(
         format,
@@ -666,8 +729,9 @@ const fn etc(
         4,
         4,
         bytes,
-        realization,
+        decoded,
         IDENTITY,
+        Encoding::Decoded(codec),
     )
 }
 
@@ -692,6 +756,7 @@ const fn pvrtc(
         8,
         realization,
         swizzle,
+        Encoding::Exact,
     )
 }
 
@@ -717,6 +782,7 @@ const fn astc(
         16,
         realization,
         IDENTITY,
+        Encoding::Exact,
     )
 }
 
@@ -953,16 +1019,79 @@ static DESCRIPTIONS: &[Description] = &[
         true,
         V::Pvrtc14bppSrgbBlockImg,
     ),
-    etc(P::EacR11Unorm, Unorm, false, 8, V::EacR11UnormBlock),
-    etc(P::EacR11Snorm, Snorm, false, 8, V::EacR11SnormBlock),
-    etc(P::EacRg11Unorm, Unorm, false, 16, V::EacR11G11UnormBlock),
-    etc(P::EacRg11Snorm, Snorm, false, 16, V::EacR11G11SnormBlock),
-    etc(P::EacRgba8, Unorm, false, 16, V::Etc2R8G8B8A8UnormBlock),
-    etc(P::EacRgba8Srgb, Unorm, true, 16, V::Etc2R8G8B8A8SrgbBlock),
-    etc(P::Etc2Rgb8, Unorm, false, 8, V::Etc2R8G8B8UnormBlock),
-    etc(P::Etc2Rgb8Srgb, Unorm, true, 8, V::Etc2R8G8B8SrgbBlock),
-    etc(P::Etc2Rgb8A1, Unorm, false, 8, V::Etc2R8G8B8A1UnormBlock),
-    etc(P::Etc2Rgb8A1Srgb, Unorm, true, 8, V::Etc2R8G8B8A1SrgbBlock),
+    etc(P::EacR11Unorm, Unorm, false, 8, Codec::EacR11, V::R16Unorm),
+    etc(
+        P::EacR11Snorm,
+        Snorm,
+        false,
+        8,
+        Codec::EacR11Snorm,
+        V::R16Snorm,
+    ),
+    etc(
+        P::EacRg11Unorm,
+        Unorm,
+        false,
+        16,
+        Codec::EacRg11,
+        V::R16G16Unorm,
+    ),
+    etc(
+        P::EacRg11Snorm,
+        Snorm,
+        false,
+        16,
+        Codec::EacRg11Snorm,
+        V::R16G16Snorm,
+    ),
+    etc(
+        P::EacRgba8,
+        Unorm,
+        false,
+        16,
+        Codec::EacRgba8,
+        V::R8G8B8A8Unorm,
+    ),
+    etc(
+        P::EacRgba8Srgb,
+        Unorm,
+        true,
+        16,
+        Codec::EacRgba8,
+        V::R8G8B8A8Srgb,
+    ),
+    etc(
+        P::Etc2Rgb8,
+        Unorm,
+        false,
+        8,
+        Codec::Etc2Rgb8,
+        V::R8G8B8A8Unorm,
+    ),
+    etc(
+        P::Etc2Rgb8Srgb,
+        Unorm,
+        true,
+        8,
+        Codec::Etc2Rgb8,
+        V::R8G8B8A8Srgb,
+    ),
+    etc(
+        P::Etc2Rgb8A1,
+        Unorm,
+        false,
+        8,
+        Codec::Etc2Rgb8A1,
+        V::R8G8B8A8Unorm,
+    ),
+    etc(
+        P::Etc2Rgb8A1Srgb,
+        Unorm,
+        true,
+        8,
+        Codec::Etc2Rgb8A1,
+        V::R8G8B8A8Srgb,
+    ),
     astc(P::Astc4x4Srgb, b's', 4, 4, V::Astc4x4SrgbBlock),
     astc(P::Astc5x4Srgb, b's', 5, 4, V::Astc5x4SrgbBlock),
     astc(P::Astc5x5Srgb, b's', 5, 5, V::Astc5x5SrgbBlock),

@@ -1296,6 +1296,29 @@ mod tests {
                 );
             }
         };
+        // The block codecs count from one, as their encodings.
+        let codecs: Vec<&str> = enumerators("stela_metal_block_codec")
+            .into_iter()
+            .map(|enumerator| enumerator.trim_end_matches(" = 1"))
+            .collect();
+        use crate::metal::pixel_format::Codec;
+        let expected = [
+            ("STELA_METAL_BLOCKS_ETC2_RGB8", Codec::Etc2Rgb8),
+            ("STELA_METAL_BLOCKS_ETC2_RGB8A1", Codec::Etc2Rgb8A1),
+            ("STELA_METAL_BLOCKS_EAC_RGBA8", Codec::EacRgba8),
+            ("STELA_METAL_BLOCKS_EAC_R11", Codec::EacR11),
+            ("STELA_METAL_BLOCKS_EAC_R11_SNORM", Codec::EacR11Snorm),
+            ("STELA_METAL_BLOCKS_EAC_RG11", Codec::EacRg11),
+            ("STELA_METAL_BLOCKS_EAC_RG11_SNORM", Codec::EacRg11Snorm),
+        ];
+        assert_eq!(codecs.len(), expected.len());
+        for (enumerator, codec) in expected {
+            assert_eq!(
+                codecs.iter().position(|&declared| declared == enumerator),
+                Some(codec as usize - 1),
+                "{enumerator}"
+            );
+        }
         check_enum(
             "stela_metal_heap_array",
             &[

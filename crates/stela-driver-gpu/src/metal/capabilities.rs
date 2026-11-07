@@ -14,7 +14,7 @@ use super::{
         ArgumentBuffersTier, CounterSamplingPoint, DeviceLocation, GpuFamily, ReadWriteTextureTier,
         SparsePageSize, TextureType,
     },
-    pixel_format::{Compression, Description, Kind, PixelFormat, Realization},
+    pixel_format::{Compression, Description, Encoding, Kind, PixelFormat, Realization},
     resource::{raw_rendered, raw_texel_format},
     vertex::VertexFormat,
     vulkan::{
@@ -1191,9 +1191,12 @@ impl Derivation<'_> {
                     && shaders.contains(ShaderFeatures::DEPTH_COMPARE_SAMPLE),
             )
             .with(C::BLIT, optimal.contains(F::TRANSFER_SRC | F::TRANSFER_DST))
+            // The CPU reaches a decoded format's blocks, not its image.
             .with(
                 C::HOST_TRANSFER,
-                features.host_image_copy && optimal.contains(F::HOST_IMAGE_TRANSFER),
+                features.host_image_copy
+                    && optimal.contains(F::HOST_IMAGE_TRANSFER)
+                    && !matches!(realization.encoding, Encoding::Decoded(_)),
             );
 
         // Vulkan averages only float and normalized color attachments.

@@ -174,6 +174,8 @@ pub struct Service {
     pub load_texels_kernel: KernelBuilder,
     /// `stela_metal_average_samples_kernel`.
     pub average_samples_kernel: KernelBuilder,
+    /// `stela_metal_decode_etc_kernel`.
+    pub decode_etc_kernel: KernelBuilder,
     /// `stela_metal_release`.
     pub release: unsafe extern "C" fn(*mut c_void),
     /// `stela_metal_buffer_reads`.
@@ -195,7 +197,7 @@ impl Service {
     pub unsafe fn internal_kernels(&self) -> Result<InternalKernelCode> {
         let mut kernels = InternalKernelCode {
             release: self.release,
-            code: [ShaderCode(0); 7],
+            code: [ShaderCode(0); 8],
         };
         let builders = [
             self.accumulate_kernel,
@@ -205,6 +207,7 @@ impl Service {
             self.store_texels_kernel,
             self.load_texels_kernel,
             self.average_samples_kernel,
+            self.decode_etc_kernel,
         ];
         for (code, build) in kernels.code.iter_mut().zip(builders) {
             // SAFETY: the caller guarantees the builder and the options it
@@ -223,13 +226,13 @@ impl Service {
 /// own copy of its shader.
 pub struct InternalKernelCode {
     release: unsafe extern "C" fn(*mut c_void),
-    code: [ShaderCode; 7],
+    code: [ShaderCode; 8],
 }
 
 impl InternalKernelCode {
     /// The accumulate, select, resolve draws, resolve dispatches, store
     /// texels, load texels and average samples kernels.
-    pub fn code(&self) -> [ShaderCode; 7] {
+    pub fn code(&self) -> [ShaderCode; 8] {
         self.code
     }
 }

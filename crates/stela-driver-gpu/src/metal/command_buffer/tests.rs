@@ -33,7 +33,7 @@ use crate::metal::{
         TessellatedVertex, TessellationDescriptor, compute_pipeline, mesh_render_pipeline,
         render_pipeline, tessellation,
     },
-    pixel_format::PixelFormat,
+    pixel_format::{BlockKernel, PixelFormat},
     resource::TextureDescriptor,
     shader::{
         Access as ShaderAccess, AttributeUse, BufferUse, CompiledShader, NumericClass, Patch,
@@ -1595,6 +1595,7 @@ fn buffer_texture_copies_use_texel_strides() {
         image: Image(9),
         descriptor: &color,
         storage: ResourceId::NULL,
+        blocks: None,
     };
     commands
         .copy_buffer_to_texture(&mut resolver, source, target, region, BlitOption::EMPTY)
@@ -1613,6 +1614,7 @@ fn buffer_texture_copies_use_texel_strides() {
         image: Image(10),
         descriptor: &depth,
         storage: ResourceId::NULL,
+        blocks: None,
     };
     assert_eq!(
         commands.copy_buffer_to_texture(
@@ -1811,6 +1813,7 @@ fn extended_range_buffer_copies_run_the_texel_kernels() {
         image: Image(9),
         descriptor: &color,
         storage: ResourceId(0x77),
+        blocks: None,
     };
     commands
         .copy_buffer_to_texture(&mut resolver, layout, target, region, BlitOption::EMPTY)
@@ -1868,6 +1871,120 @@ fn extended_range_buffer_copies_run_the_texel_kernels() {
             [16, 8, 512, 8, 4, 0]
         );
     }
+}
+
+#[test]
+fn decoded_buffer_copies_move_blocks_and_decode_them() {
+    let etc = texture(PixelFormat::Etc2Rgb8);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_blit().unwrap();
+    let layout = BufferLayout {
+        buffer: buffer(2, 1 << 16),
+        offset: 256,
+        bytes_per_row: 512,
+        bytes_per_image: 0,
+    };
+    // Level 1's 8x4 blocks of 8 bytes follow level 0's 1024; the region is
+    // 4x2 blocks from block (2, 1).
+    let region = Region {
+        slice: 0,
+        level: 1,
+        origin: [8, 4, 0],
+        size: [16, 8, 1],
+    };
+    let target = BlitTexture {
+        image: Image(9),
+        descriptor: &etc,
+        storage: ResourceId(0x77),
+        blocks: Some(buffer(3, etc.cpu_copy_bytes())),
+    };
+    commands
+        .copy_buffer_to_texture(&mut resolver, layout, target, region, BlitOption::EMPTY)
+        .unwrap();
+    commands
+        .copy_texture_to_buffer(&mut resolver, target, region, layout, BlitOption::EMPTY)
+        .unwrap();
+    let view = BlitTexture {
+        blocks: None,
+        ..target
+    };
+    assert_eq!(
+        commands.copy_buffer_to_texture(&mut resolver, layout, view, region, BlitOption::EMPTY),
+        Err(Error::Unsupported(
+            "copies through views of compressed textures the device samples decoded"
+        ))
+    );
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let commands = &recording.segments[0].commands;
+    let rows = |src, dst, [a, b]: [u64; 2], [c, d]: [u64; 2]| Command::CopyBufferRegions {
+        src: Buffer(src),
+        dst: Buffer(dst),
+        regions: alloc::vec![
+            BufferCopy {
+                src_offset: a,
+                dst_offset: c,
+                size: 32,
+            },
+            BufferCopy {
+                src_offset: b,
+                dst_offset: d,
+                size: 32,
+            },
+        ],
+    };
+    let copies: Vec<_> = commands
+        .iter()
+        .filter(|command| matches!(command, Command::CopyBufferRegions { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(
+        copies,
+        [
+            rows(2, 3, [256, 768], [1104, 1168]),
+            rows(3, 2, [1104, 1168], [256, 768]),
+        ]
+    );
+    let decodes: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match *command {
+            Command::DecodeBlocks {
+                kernel,
+                arguments,
+                count,
+            } => Some((kernel, arguments, count)),
+            _ => None,
+        })
+        .collect();
+    let [(kernel, arguments, 128)] = decodes[..] else {
+        panic!("one decode of the region's texels: {decodes:?}");
+    };
+    assert_eq!(kernel, BlockKernel::Etc);
+    let encoded = uploaded(&recording, arguments);
+    assert_eq!(
+        double(encoded, 0),
+        (3 << 32) + 1104,
+        "the region's first block"
+    );
+    assert_eq!(
+        word(encoded, 12),
+        1 | 4 << 8 | 4 << 16,
+        "ETC2 RGB8 in 4x4 blocks"
+    );
+    assert_eq!(double(encoded, 16), 0x77);
+    assert_eq!(
+        [24, 28, 32, 36, 40, 44, 48].map(|at| word(encoded, at)),
+        [16, 8, 64, 0, 8, 4, 0]
+    );
+    assert_eq!(
+        count(commands, |command| matches!(
+            command,
+            Command::CopyBufferToImage { .. } | Command::CopyImageToBuffer { .. }
+        )),
+        0,
+        "the image holds texels, not the buffer's blocks"
+    );
 }
 
 #[test]

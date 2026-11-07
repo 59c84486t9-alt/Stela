@@ -11,6 +11,7 @@ use crate::metal::{
     command_buffer::Segment,
     error::{Error, Result},
     pass::ClearValue,
+    pixel_format::BlockKernel,
     vulkan::{
         Access, StencilOp,
         command::{Attachment, Barrier, Command, DepthStencil, Rendering, VertexBuffer},
@@ -512,6 +513,22 @@ impl Recorder<'_> {
                         .regions(core::slice::from_ref(&region));
                     device.cmd_copy_buffer2(buffer, &info);
                 }
+                Command::CopyBufferRegions { src, dst, regions } => {
+                    let regions: Vec<_> = regions
+                        .iter()
+                        .map(|region| {
+                            vk::BufferCopy2::default()
+                                .src_offset(region.src_offset)
+                                .dst_offset(region.dst_offset)
+                                .size(region.size)
+                        })
+                        .collect();
+                    let info = vk::CopyBufferInfo2::default()
+                        .src_buffer(handle(src.0))
+                        .dst_buffer(handle(dst.0))
+                        .regions(&regions);
+                    device.cmd_copy_buffer2(buffer, &info);
+                }
                 Command::CopyBufferToImage { src, dst, region } => {
                     let region = buffer_image(region);
                     let info = vk::CopyBufferToImageInfo2::default()
@@ -658,6 +675,16 @@ impl Recorder<'_> {
                 ),
                 &Command::LoadTexels { arguments, count } => self.internal(
                     self.backend.load_texels,
+                    arguments,
+                    count,
+                    TexelArguments::WORKGROUP_SIZE,
+                ),
+                &Command::DecodeBlocks {
+                    kernel: BlockKernel::Etc,
+                    arguments,
+                    count,
+                } => self.internal(
+                    self.backend.decode_etc,
                     arguments,
                     count,
                     TexelArguments::WORKGROUP_SIZE,

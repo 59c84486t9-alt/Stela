@@ -155,6 +155,29 @@ static NSDictionary<NSString *, NSNumber *> *pixel_formats(void)
 			@"bc2_rgba_srgb" : @(MTLPixelFormatBC2_RGBA_sRGB), @"bc3_rgba_srgb" : @(MTLPixelFormatBC3_RGBA_sRGB),
 			@"bc4_rsnorm" : @(MTLPixelFormatBC4_RSnorm), @"bc5_rgsnorm" : @(MTLPixelFormatBC5_RGSnorm),
 			@"bc6h_rgbfloat" : @(MTLPixelFormatBC6H_RGBFloat), @"bc6h_rgbufloat" : @(MTLPixelFormatBC6H_RGBUfloat),
+			@"etc2_rgb8" : @(MTLPixelFormatETC2_RGB8), @"etc2_rgb8_srgb" : @(MTLPixelFormatETC2_RGB8_sRGB),
+			@"etc2_rgb8a1" : @(MTLPixelFormatETC2_RGB8A1), @"etc2_rgb8a1_srgb" : @(MTLPixelFormatETC2_RGB8A1_sRGB),
+			@"eac_rgba8" : @(MTLPixelFormatEAC_RGBA8), @"eac_rgba8_srgb" : @(MTLPixelFormatEAC_RGBA8_sRGB),
+			@"eac_r11unorm" : @(MTLPixelFormatEAC_R11Unorm), @"eac_r11snorm" : @(MTLPixelFormatEAC_R11Snorm),
+			@"eac_rg11unorm" : @(MTLPixelFormatEAC_RG11Unorm), @"eac_rg11snorm" : @(MTLPixelFormatEAC_RG11Snorm),
+			@"astc_4x4_ldr" : @(MTLPixelFormatASTC_4x4_LDR), @"astc_4x4_srgb" : @(MTLPixelFormatASTC_4x4_sRGB),
+			@"astc_5x4_ldr" : @(MTLPixelFormatASTC_5x4_LDR), @"astc_5x4_srgb" : @(MTLPixelFormatASTC_5x4_sRGB),
+			@"astc_5x5_ldr" : @(MTLPixelFormatASTC_5x5_LDR), @"astc_5x5_srgb" : @(MTLPixelFormatASTC_5x5_sRGB),
+			@"astc_6x5_ldr" : @(MTLPixelFormatASTC_6x5_LDR), @"astc_6x5_srgb" : @(MTLPixelFormatASTC_6x5_sRGB),
+			@"astc_6x6_ldr" : @(MTLPixelFormatASTC_6x6_LDR), @"astc_6x6_srgb" : @(MTLPixelFormatASTC_6x6_sRGB),
+			@"astc_8x5_ldr" : @(MTLPixelFormatASTC_8x5_LDR), @"astc_8x5_srgb" : @(MTLPixelFormatASTC_8x5_sRGB),
+			@"astc_8x6_ldr" : @(MTLPixelFormatASTC_8x6_LDR), @"astc_8x6_srgb" : @(MTLPixelFormatASTC_8x6_sRGB),
+			@"astc_8x8_ldr" : @(MTLPixelFormatASTC_8x8_LDR), @"astc_8x8_srgb" : @(MTLPixelFormatASTC_8x8_sRGB),
+			@"astc_10x5_ldr" : @(MTLPixelFormatASTC_10x5_LDR), @"astc_10x5_srgb" : @(MTLPixelFormatASTC_10x5_sRGB),
+			@"astc_10x6_ldr" : @(MTLPixelFormatASTC_10x6_LDR), @"astc_10x6_srgb" : @(MTLPixelFormatASTC_10x6_sRGB),
+			@"astc_10x8_ldr" : @(MTLPixelFormatASTC_10x8_LDR), @"astc_10x8_srgb" : @(MTLPixelFormatASTC_10x8_sRGB),
+			@"astc_10x10_ldr" : @(MTLPixelFormatASTC_10x10_LDR), @"astc_10x10_srgb" : @(MTLPixelFormatASTC_10x10_sRGB),
+			@"astc_12x10_ldr" : @(MTLPixelFormatASTC_12x10_LDR), @"astc_12x10_srgb" : @(MTLPixelFormatASTC_12x10_sRGB),
+			@"astc_12x12_ldr" : @(MTLPixelFormatASTC_12x12_LDR), @"astc_12x12_srgb" : @(MTLPixelFormatASTC_12x12_sRGB),
+			@"pvrtc_rgb_2bpp" : @(MTLPixelFormatPVRTC_RGB_2BPP), @"pvrtc_rgb_2bpp_srgb" : @(MTLPixelFormatPVRTC_RGB_2BPP_sRGB),
+			@"pvrtc_rgb_4bpp" : @(MTLPixelFormatPVRTC_RGB_4BPP), @"pvrtc_rgb_4bpp_srgb" : @(MTLPixelFormatPVRTC_RGB_4BPP_sRGB),
+			@"pvrtc_rgba_2bpp" : @(MTLPixelFormatPVRTC_RGBA_2BPP), @"pvrtc_rgba_2bpp_srgb" : @(MTLPixelFormatPVRTC_RGBA_2BPP_sRGB),
+			@"pvrtc_rgba_4bpp" : @(MTLPixelFormatPVRTC_RGBA_4BPP), @"pvrtc_rgba_4bpp_srgb" : @(MTLPixelFormatPVRTC_RGBA_4BPP_sRGB),
 			@"depth24unorm_stencil8" : @(MTLPixelFormatDepth24Unorm_Stencil8),
 			@"x32_stencil8" : @(MTLPixelFormatX32_Stencil8), @"x24_stencil8" : @(MTLPixelFormatX24_Stencil8),
 			@"depth16unorm" : @(MTLPixelFormatDepth16Unorm), @"depth32float" : @(MTLPixelFormatDepth32Float),
@@ -641,11 +664,11 @@ static id<MTLBuffer> make_buffer(Case *c, NSDictionary *b)
 	return buffer;
 }
 
-/* Bytes of one block of a format the runner uploads or reads back; blocks
- * are 1x1 except for the compressed formats. */
-static NSUInteger pixel_bytes(MTLPixelFormat f, NSUInteger *block)
+/* Bytes of one block of a format the runner uploads or reads back, and its
+ * width and height: 1x1 except for the compressed formats. */
+static NSUInteger pixel_bytes(MTLPixelFormat f, NSUInteger *block, NSUInteger *block_height)
 {
-	*block = 1;
+	*block = *block_height = 1;
 	switch (f) {
 	case MTLPixelFormatA8Unorm: case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Unorm_sRGB:
 	case MTLPixelFormatR8Snorm: case MTLPixelFormatR8Uint: case MTLPixelFormatR8Sint:
@@ -666,12 +689,81 @@ static NSUInteger pixel_bytes(MTLPixelFormat f, NSUInteger *block)
 	case MTLPixelFormatRGBA32Uint: case MTLPixelFormatRGBA32Sint: case MTLPixelFormatRGBA32Float:
 		return 16;
 	case MTLPixelFormatBC1_RGBA: case MTLPixelFormatBC1_RGBA_sRGB: case MTLPixelFormatBC4_RUnorm: case MTLPixelFormatBC4_RSnorm:
-		*block = 4;
+		*block = *block_height = 4;
 		return 8;
 	case MTLPixelFormatBC2_RGBA: case MTLPixelFormatBC2_RGBA_sRGB: case MTLPixelFormatBC3_RGBA: case MTLPixelFormatBC3_RGBA_sRGB:
 	case MTLPixelFormatBC5_RGUnorm: case MTLPixelFormatBC5_RGSnorm: case MTLPixelFormatBC6H_RGBFloat:
 	case MTLPixelFormatBC6H_RGBUfloat: case MTLPixelFormatBC7_RGBAUnorm: case MTLPixelFormatBC7_RGBAUnorm_sRGB:
+	case MTLPixelFormatEAC_RGBA8: case MTLPixelFormatEAC_RGBA8_sRGB: case MTLPixelFormatEAC_RG11Unorm:
+	case MTLPixelFormatEAC_RG11Snorm:
+		*block = *block_height = 4;
+		return 16;
+	case MTLPixelFormatETC2_RGB8: case MTLPixelFormatETC2_RGB8_sRGB: case MTLPixelFormatETC2_RGB8A1:
+	case MTLPixelFormatETC2_RGB8A1_sRGB: case MTLPixelFormatEAC_R11Unorm: case MTLPixelFormatEAC_R11Snorm:
+	case MTLPixelFormatPVRTC_RGB_4BPP: case MTLPixelFormatPVRTC_RGB_4BPP_sRGB:
+	case MTLPixelFormatPVRTC_RGBA_4BPP: case MTLPixelFormatPVRTC_RGBA_4BPP_sRGB:
+		*block = *block_height = 4;
+		return 8;
+	case MTLPixelFormatPVRTC_RGB_2BPP: case MTLPixelFormatPVRTC_RGB_2BPP_sRGB:
+	case MTLPixelFormatPVRTC_RGBA_2BPP: case MTLPixelFormatPVRTC_RGBA_2BPP_sRGB:
+		*block = 8;
+		*block_height = 4;
+		return 8;
+	case MTLPixelFormatASTC_4x4_LDR: case MTLPixelFormatASTC_4x4_sRGB:
 		*block = 4;
+		*block_height = 4;
+		return 16;
+	case MTLPixelFormatASTC_5x4_LDR: case MTLPixelFormatASTC_5x4_sRGB:
+		*block = 5;
+		*block_height = 4;
+		return 16;
+	case MTLPixelFormatASTC_5x5_LDR: case MTLPixelFormatASTC_5x5_sRGB:
+		*block = 5;
+		*block_height = 5;
+		return 16;
+	case MTLPixelFormatASTC_6x5_LDR: case MTLPixelFormatASTC_6x5_sRGB:
+		*block = 6;
+		*block_height = 5;
+		return 16;
+	case MTLPixelFormatASTC_6x6_LDR: case MTLPixelFormatASTC_6x6_sRGB:
+		*block = 6;
+		*block_height = 6;
+		return 16;
+	case MTLPixelFormatASTC_8x5_LDR: case MTLPixelFormatASTC_8x5_sRGB:
+		*block = 8;
+		*block_height = 5;
+		return 16;
+	case MTLPixelFormatASTC_8x6_LDR: case MTLPixelFormatASTC_8x6_sRGB:
+		*block = 8;
+		*block_height = 6;
+		return 16;
+	case MTLPixelFormatASTC_8x8_LDR: case MTLPixelFormatASTC_8x8_sRGB:
+		*block = 8;
+		*block_height = 8;
+		return 16;
+	case MTLPixelFormatASTC_10x5_LDR: case MTLPixelFormatASTC_10x5_sRGB:
+		*block = 10;
+		*block_height = 5;
+		return 16;
+	case MTLPixelFormatASTC_10x6_LDR: case MTLPixelFormatASTC_10x6_sRGB:
+		*block = 10;
+		*block_height = 6;
+		return 16;
+	case MTLPixelFormatASTC_10x8_LDR: case MTLPixelFormatASTC_10x8_sRGB:
+		*block = 10;
+		*block_height = 8;
+		return 16;
+	case MTLPixelFormatASTC_10x10_LDR: case MTLPixelFormatASTC_10x10_sRGB:
+		*block = 10;
+		*block_height = 10;
+		return 16;
+	case MTLPixelFormatASTC_12x10_LDR: case MTLPixelFormatASTC_12x10_sRGB:
+		*block = 12;
+		*block_height = 10;
+		return 16;
+	case MTLPixelFormatASTC_12x12_LDR: case MTLPixelFormatASTC_12x12_sRGB:
+		*block = 12;
+		*block_height = 12;
 		return 16;
 	default:
 		return 4;
@@ -693,7 +785,7 @@ struct region {
 static NSArray<NSValue *> *regions_of(id<MTLTexture> t, NSString *aspect, NSUInteger *total)
 {
 	NSMutableArray *out = [NSMutableArray new];
-	NSUInteger block, bytes = pixel_bytes(t.pixelFormat, &block), offset = 0;
+	NSUInteger block, block_height, bytes = pixel_bytes(t.pixelFormat, &block, &block_height), offset = 0;
 	if (t.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || t.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8)
 		bytes = [aspect isEqualToString:@"stencil"] ? 1 : 4;
 	NSUInteger slices = t.arrayLength * (t.textureType == MTLTextureTypeCube || t.textureType == MTLTextureTypeCubeArray ? 6 : 1);
@@ -702,7 +794,7 @@ static NSArray<NSValue *> *regions_of(id<MTLTexture> t, NSString *aspect, NSUInt
 			struct region r = {slice, level, offset, 0, 0, MTLSizeMake(0, 0, 0)};
 			r.size = MTLSizeMake(level_extent(t.width, level), level_extent(t.height, level), level_extent(t.depth, level));
 			r.bytes_per_row = (r.size.width + block - 1) / block * bytes;
-			r.bytes_per_image = r.bytes_per_row * ((r.size.height + block - 1) / block);
+			r.bytes_per_image = r.bytes_per_row * ((r.size.height + block_height - 1) / block_height);
 			offset += r.bytes_per_image * r.size.depth;
 			[out addObject:[NSValue value:&r withObjCType:@encode(struct region)]];
 		}
@@ -739,8 +831,8 @@ static id<MTLTexture> make_texture_buffer(Case *c, NSDictionary *t)
 	if (!storage)
 		@throw failure(@"texture buffer %@ names no buffer", t[@"name"]);
 	MTLPixelFormat format = lookup(pixel_formats(), @"pixel format", t[@"format"]);
-	NSUInteger block, width = number(t, @"width", 1);
-	NSUInteger row = width * pixel_bytes(format, &block);
+	NSUInteger block, block_height, width = number(t, @"width", 1);
+	NSUInteger row = width * pixel_bytes(format, &block, &block_height);
 	NSUInteger align = [c.device minimumTextureBufferAlignmentForPixelFormat:format];
 	MTLTextureDescriptor *d = [MTLTextureDescriptor textureBufferDescriptorWithPixelFormat:format width:width
 									    resourceOptions:storage.resourceOptions
@@ -4094,7 +4186,7 @@ static void clear_and_draw_left(Case *c, id<MTLCommandBuffer> cb, id<MTLRenderPi
 static void host_drawables(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
 {
 	MTLPixelFormat format = lookup(pixel_formats(), @"pixel format", h[@"format"]);
-	NSUInteger w = number(h, @"width", 1), height = number(h, @"height", 1), count = number(h, @"count", 1), block = 1;
+	NSUInteger w = number(h, @"width", 1), height = number(h, @"height", 1), count = number(h, @"count", 1), block = 1, block_height = 1;
 	BOOL framebuffer_only = [h[@"framebuffer_only"] boolValue];
 	CAMetalLayer *layer = [CAMetalLayer layer];
 	layer.device = c.device;
@@ -4107,7 +4199,7 @@ static void host_drawables(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
 		host_render_pipeline(c, [MTLRenderPipelineDescriptor new], @"vert_left_half", @"frag_constant", format, &error);
 	if (!p)
 		@throw failure(@"drawable pipeline: %@", error.localizedDescription);
-	NSUInteger texel = pixel_bytes(format, &block), image = w * height * texel;
+	NSUInteger texel = pixel_bytes(format, &block, &block_height), image = w * height * texel;
 	for (NSUInteger i = 0; i < count; i++) {
 		id<CAMetalDrawable> drawable = [layer nextDrawable];
 		if (!drawable)

@@ -266,6 +266,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             image: self.device.texture_image(id)?,
             descriptor: self.device.texture_descriptor(id)?,
             storage: ResourceId::NULL,
+            blocks: self.device.texture_blocks(id)?,
         })
     }
 }

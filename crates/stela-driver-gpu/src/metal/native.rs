@@ -130,8 +130,8 @@ unsafe extern "system" fn forward(
 /// The backend's own kernels: the NIR of `stela_metal_accumulate_kernel`,
 /// `stela_metal_select_kernel`, `stela_metal_resolve_draws_kernel`,
 /// `stela_metal_resolve_dispatches_kernel`, `stela_metal_store_texels_kernel`,
-/// `stela_metal_load_texels_kernel` and `stela_metal_average_samples_kernel`
-/// (`compiler/metal_abi.h`).
+/// `stela_metal_load_texels_kernel`, `stela_metal_average_samples_kernel`
+/// and `stela_metal_decode_etc_kernel` (`compiler/metal_abi.h`).
 #[derive(Clone, Copy, Debug)]
 pub struct InternalKernels {
     /// Sums query results per
@@ -158,6 +158,10 @@ pub struct InternalKernels {
     /// [`AverageArguments`](super::binding::AverageArguments), one thread
     /// per texel in workgroups of `WORKGROUP_SIZE`.
     pub average_samples: ShaderCode,
+    /// Decodes a buffer's ETC2 and EAC blocks into a texture's image per
+    /// [`TexelArguments`](super::binding::TexelArguments), one thread per
+    /// texel in workgroups of `WORKGROUP_SIZE`.
+    pub decode_etc: ShaderCode,
 }
 
 /// How the driver takes memory a CPU reaches: its kernel driver maps a dma-buf.
@@ -329,6 +333,7 @@ pub struct NativeBackend {
     store_texels: vk::Pipeline,
     load_texels: vk::Pipeline,
     average_samples: vk::Pipeline,
+    decode_etc: vk::Pipeline,
 }
 
 impl NativeBackend {
@@ -526,6 +531,7 @@ impl NativeBackend {
             store_texels: vk::Pipeline::null(),
             load_texels: vk::Pipeline::null(),
             average_samples: vk::Pipeline::null(),
+            decode_etc: vk::Pipeline::null(),
         };
         // Dropping a partly built backend destroys what was created.
         let kernels = kernels?;
@@ -545,6 +551,7 @@ impl NativeBackend {
         backend.store_texels = backend.create_compute(&kernel(kernels.store_texels))?;
         backend.load_texels = backend.create_compute(&kernel(kernels.load_texels))?;
         backend.average_samples = backend.create_compute(&kernel(kernels.average_samples))?;
+        backend.decode_etc = backend.create_compute(&kernel(kernels.decode_etc))?;
         Ok(backend)
     }
 
@@ -868,6 +875,7 @@ impl Drop for NativeBackend {
             self.device.destroy_pipeline(self.store_texels, None);
             self.device.destroy_pipeline(self.load_texels, None);
             self.device.destroy_pipeline(self.average_samples, None);
+            self.device.destroy_pipeline(self.decode_etc, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline_layout(self.layout, None);
             self.device.destroy_sampler(self.null_sampler, None);

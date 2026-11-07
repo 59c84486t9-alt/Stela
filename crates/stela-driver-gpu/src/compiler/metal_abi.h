@@ -86,6 +86,22 @@ enum stela_metal_texel_encoding {
    STELA_METAL_TEXELS_PADDED8X2,
 };
 
+/* The compressed formats the decode kernels expand into a texture's image
+ * (pixel_format.rs Codec), in the TexelArguments encoding's low byte; its
+ * next two bytes hold the block's width and height in texels. The buffer
+ * holds the region's blocks at the bytes per row and image of their block
+ * rows. Each decodes to the raw texel of its image's format: ETC2 and
+ * EAC RGBA8 to 8-bit RGBA, EAC R11 and RG11 to 16-bit unorm or snorm. */
+enum stela_metal_block_codec {
+   STELA_METAL_BLOCKS_ETC2_RGB8 = 1,
+   STELA_METAL_BLOCKS_ETC2_RGB8A1,
+   STELA_METAL_BLOCKS_EAC_RGBA8,
+   STELA_METAL_BLOCKS_EAC_R11,
+   STELA_METAL_BLOCKS_EAC_R11_SNORM,
+   STELA_METAL_BLOCKS_EAC_RG11,
+   STELA_METAL_BLOCKS_EAC_RG11_SNORM,
+};
+
 /* AverageArguments (binding.rs), which the average samples kernel reads at
  * the push constants' arguments address: the resource IDs of raw storage
  * views of a multisampled attachment and of its resolve texture, the texel
@@ -381,6 +397,17 @@ nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *op
  * along rows, then rows, then layers: the mean of its samples' values,
  * decoded and encoded by the format, as Metal's resolve stores. */
 nir_shader *stela_metal_average_samples_kernel(const nir_shader_compiler_options *options);
+
+/* Thread n decodes texel n of the TexelArguments' region, counted along
+ * rows, then rows, then images, from the buffer's ETC2 or EAC blocks into
+ * the image's raw texel. */
+nir_shader *stela_metal_decode_etc_kernel(const nir_shader_compiler_options *options);
+
+/* The raw texel at x and y of an ETC2 or EAC block of codec (enum
+ * stela_metal_block_codec): words holds the block's little-endian 32-bit
+ * words, of which an 8-byte block's are the first two. */
+nir_def *stela_metal_decode_etc(nir_builder *b, nir_def *words, nir_def *x, nir_def *y,
+                                nir_def *codec);
 
 /* MTLTessellationPartitionMode, MTLTessellationFactorStepFunction and
  * MTLWinding, in their raw values. */

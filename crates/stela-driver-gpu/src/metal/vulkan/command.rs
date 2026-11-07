@@ -110,6 +110,17 @@ pub struct BufferCopy {
     pub size: u64,
 }
 
+impl BufferCopy {
+    /// The copy the other way.
+    pub const fn reversed(self) -> Self {
+        Self {
+            src_offset: self.dst_offset,
+            dst_offset: self.src_offset,
+            size: self.size,
+        }
+    }
+}
+
 /// `VkImageSubresourceLayers`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Subresource {
@@ -266,6 +277,13 @@ pub enum Command {
         dst: Buffer,
         region: BufferCopy,
     },
+    /// Copies of several regions between two buffers: a decoded format's
+    /// block rows.
+    CopyBufferRegions {
+        src: Buffer,
+        dst: Buffer,
+        regions: Vec<BufferCopy>,
+    },
     CopyBufferToImage {
         src: Buffer,
         dst: Image,
@@ -370,6 +388,14 @@ pub enum Command {
     /// The backend's load texels kernel likewise: a buffer copy out of such
     /// a texture.
     LoadTexels {
+        arguments: u64,
+        count: u32,
+    },
+    /// A decode kernel likewise, whose `TexelArguments` buffer holds a
+    /// region's compressed blocks: the image of a format the device samples
+    /// no blocks of receives them decoded.
+    DecodeBlocks {
+        kernel: crate::metal::pixel_format::BlockKernel,
         arguments: u64,
         count: u32,
     },

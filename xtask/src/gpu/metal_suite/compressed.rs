@@ -3,6 +3,8 @@
 //! functional specification of BC1 to BC7, which Metal's formats follow)
 //! fixes them. Endpoint interpolation rounds as each decoder chooses, so
 //! normalized results are held to two steps of their endpoints' precision.
+//! ETC2 and EAC blocks, which the Khronos Data Format Specification decodes
+//! exactly, are held to a fraction of a step.
 use super::plan::{Buffer, Case, Output, Plan, Texture, Tolerance};
 use super::textures::srgb;
 use super::values::{Dtype, Random, f16_from_bits, f32s};
@@ -175,6 +177,222 @@ fn bc6h_mode11(block: &[u8], signed: bool) -> Vec<Texel> {
         .collect()
 }
 
+/// An ETC2 or EAC block as the big-endian 64-bit word the Khronos Data
+/// Format Specification numbers its bits in.
+fn big_endian(block: &[u8]) -> u64 {
+    block[..8].iter().fold(0, |v, &b| v << 8 | u64::from(b))
+}
+
+fn field(v: u64, high: u32, low: u32) -> i32 {
+    ((v >> low) & ((1 << (high - low + 1)) - 1)) as i32
+}
+
+fn extend(v: i32, bits: u32) -> i32 {
+    v << (8 - bits) | v >> (2 * bits - 8)
+}
+
+const ETC_DISTANCES: [i32; 8] = [3, 6, 11, 16, 23, 32, 41, 64];
+
+/// An ETC2 RGB block's texels in rows, 8-bit codes; a punch-through
+/// block's transparent texels are all zero.
+fn etc2_codes(block: &[u8], punch_through: bool) -> Vec<[i32; 4]> {
+    const MODIFIERS: [[i32; 2]; 8] = [
+        [2, 8],
+        [5, 17],
+        [9, 29],
+        [13, 42],
+        [18, 60],
+        [24, 80],
+        [33, 106],
+        [47, 183],
+    ];
+    let v = big_endian(block);
+    let (diff, flip) = (field(v, 33, 33) == 1, field(v, 32, 32) == 1);
+    let opaque = !punch_through || diff;
+    let (r, g, b) = (field(v, 63, 59), field(v, 55, 51), field(v, 47, 43));
+    let (dr, dg, db) = [field(v, 58, 56), field(v, 50, 48), field(v, 42, 40)]
+        .map(|d| if d & 4 != 0 { d - 8 } else { d })
+        .into();
+    let outside = |c: i32| !(0..=31).contains(&c);
+    let mut texels = Vec::new();
+    for y in 0..4u32 {
+        for x in 0..4u32 {
+            let p = x * 4 + y;
+            let index = (field(v, p + 16, p + 16) << 1 | field(v, p, p)) as usize;
+            let sub = if flip { y >= 2 } else { x >= 2 };
+            let planar =
+                (punch_through || diff) && !outside(r + dr) && !outside(g + dg) && outside(b + db);
+            let color: [i32; 3] = if !punch_through && !diff {
+                let shift = |c: u32| 63 - 8 * c - 4 * u32::from(sub);
+                let base = [0, 1, 2].map(|c| extend(field(v, shift(c), shift(c) - 3), 4));
+                let table = if sub {
+                    field(v, 36, 34)
+                } else {
+                    field(v, 39, 37)
+                } as usize;
+                let m = MODIFIERS[table][index & 1] * if index & 2 != 0 { -1 } else { 1 };
+                base.map(|c| c + m)
+            } else if outside(r + dr) {
+                let c0 = [
+                    field(v, 60, 59) << 2 | field(v, 57, 56),
+                    field(v, 55, 52),
+                    field(v, 51, 48),
+                ]
+                .map(|c| extend(c, 4));
+                let c1 =
+                    [field(v, 47, 44), field(v, 43, 40), field(v, 39, 36)].map(|c| extend(c, 4));
+                let d = ETC_DISTANCES[(field(v, 35, 34) << 1 | field(v, 32, 32)) as usize];
+                [0, 1, 2].map(|c| [c0[c], c1[c] + d, c1[c], c1[c] - d][index])
+            } else if outside(g + dg) {
+                let c0 = [
+                    field(v, 62, 59),
+                    field(v, 58, 56) << 1 | field(v, 52, 52),
+                    field(v, 51, 51) << 3 | field(v, 49, 47),
+                ];
+                let c1 = [field(v, 46, 43), field(v, 42, 39), field(v, 38, 35)];
+                let key = |c: [i32; 3]| c[0] << 8 | c[1] << 4 | c[2];
+                let order = i32::from(key(c0) >= key(c1));
+                let d =
+                    ETC_DISTANCES[(field(v, 34, 34) << 2 | field(v, 32, 32) << 1 | order) as usize];
+                let (c0, c1) = (c0.map(|c| extend(c, 4)), c1.map(|c| extend(c, 4)));
+                [0, 1, 2].map(|c| [c0[c] + d, c0[c] - d, c1[c] + d, c1[c] - d][index])
+            } else if planar {
+                let o = [
+                    extend(field(v, 62, 57), 6),
+                    extend(field(v, 56, 56) << 6 | field(v, 54, 49), 7),
+                    extend(
+                        field(v, 48, 48) << 5 | field(v, 44, 43) << 3 | field(v, 41, 39),
+                        6,
+                    ),
+                ];
+                let h = [
+                    extend(field(v, 38, 34) << 1 | field(v, 32, 32), 6),
+                    extend(field(v, 31, 25), 7),
+                    extend(field(v, 24, 19), 6),
+                ];
+                let w = [
+                    extend(field(v, 18, 13), 6),
+                    extend(field(v, 12, 6), 7),
+                    extend(field(v, 5, 0), 6),
+                ];
+                let (x, y) = (x as i32, y as i32);
+                [0, 1, 2].map(|c| (x * (h[c] - o[c]) + y * (w[c] - o[c]) + 4 * o[c] + 2) >> 2)
+            } else {
+                let base = if sub {
+                    [r + dr, g + dg, b + db]
+                } else {
+                    [r, g, b]
+                }
+                .map(|c| extend(c, 5));
+                let table = if sub {
+                    field(v, 36, 34)
+                } else {
+                    field(v, 39, 37)
+                } as usize;
+                let mut m = MODIFIERS[table][index & 1] * if index & 2 != 0 { -1 } else { 1 };
+                if !opaque && index & 1 == 0 {
+                    m = 0;
+                }
+                base.map(|c| c + m)
+            };
+            let color = color.map(|c| c.clamp(0, 255));
+            texels.push(if !opaque && !planar && index == 2 {
+                [0; 4]
+            } else {
+                [color[0], color[1], color[2], 255]
+            });
+        }
+    }
+    texels
+}
+
+const ALPHA_MODIFIERS: [[i32; 8]; 16] = [
+    [-3, -6, -9, -15, 2, 5, 8, 14],
+    [-3, -7, -10, -13, 2, 6, 9, 12],
+    [-2, -5, -8, -13, 1, 4, 7, 12],
+    [-2, -4, -6, -13, 1, 3, 5, 12],
+    [-3, -6, -8, -12, 2, 5, 7, 11],
+    [-3, -7, -9, -11, 2, 6, 8, 10],
+    [-4, -7, -8, -11, 3, 6, 7, 10],
+    [-3, -5, -8, -11, 2, 4, 7, 10],
+    [-2, -6, -8, -10, 1, 5, 7, 9],
+    [-2, -5, -8, -10, 1, 4, 7, 9],
+    [-2, -4, -8, -10, 1, 3, 7, 9],
+    [-2, -5, -7, -10, 1, 4, 6, 9],
+    [-3, -4, -7, -10, 2, 3, 6, 9],
+    [-1, -2, -3, -10, 0, 1, 2, 9],
+    [-4, -6, -8, -9, 3, 5, 7, 8],
+    [-3, -5, -7, -9, 2, 4, 6, 8],
+];
+
+/// An ETC2 alpha or EAC block's base, multiplier and modifier per texel,
+/// in rows.
+fn eac_parts(block: &[u8]) -> Vec<(i32, i32, i32)> {
+    let v = big_endian(block);
+    let table = &ALPHA_MODIFIERS[field(v, 51, 48) as usize];
+    (0..16u32)
+        .map(|i| {
+            let p = i % 4 * 4 + i / 4;
+            let index = field(v, 47 - 3 * p, 45 - 3 * p) as usize;
+            (field(v, 63, 56), field(v, 55, 52), table[index])
+        })
+        .collect()
+}
+
+/// An EAC R11 block's values in rows.
+fn eac(block: &[u8], signed: bool) -> Vec<f64> {
+    eac_parts(block)
+        .into_iter()
+        .map(|(base, multiplier, modifier)| {
+            let multiplier = if multiplier == 0 { 1 } else { multiplier * 8 };
+            if signed {
+                let base = (base as u8 as i8).max(-127) as i32;
+                f64::from((base * 8 + modifier * multiplier).clamp(-1023, 1023)) / 1023.0
+            } else {
+                f64::from((base * 8 + 4 + modifier * multiplier).clamp(0, 2047)) / 2047.0
+            }
+        })
+        .collect()
+}
+
+fn etc2(block: &[u8], punch_through: bool) -> Vec<Texel> {
+    etc2_codes(block, punch_through)
+        .into_iter()
+        .map(|c| c.map(|c| f64::from(c) / 255.0))
+        .collect()
+}
+
+fn etc2_eac(block: &[u8]) -> Vec<Texel> {
+    let alpha = eac_parts(&block[..8]);
+    etc2(&block[8..], false)
+        .into_iter()
+        .zip(alpha)
+        .map(|([r, g, b, _], (base, multiplier, modifier))| {
+            [
+                r,
+                g,
+                b,
+                f64::from((base + modifier * multiplier).clamp(0, 255)) / 255.0,
+            ]
+        })
+        .collect()
+}
+
+fn eac_rg(block: &[u8], signed: bool) -> Vec<Texel> {
+    eac(&block[..8], signed)
+        .into_iter()
+        .zip(eac(&block[8..], signed))
+        .map(|(r, g)| [r, g, 0.0, 1.0])
+        .collect()
+}
+
+fn eac_r(block: &[u8], signed: bool) -> Vec<Texel> {
+    eac(block, signed)
+        .into_iter()
+        .map(|r| [r, 0.0, 0.0, 1.0])
+        .collect()
+}
+
 struct Format {
     name: &'static str,
     bytes: usize,
@@ -245,6 +463,16 @@ fn formats() -> Vec<Format> {
         f("bc6h_rgbfloat", 16, true, |b| bc6h_mode11(b, true)),
         f("bc7_rgbaunorm", 16, false, bc7_mode6),
         f("bc7_rgbaunorm_srgb", 16, false, |b| with_srgb(bc7_mode6(b))),
+        f("etc2_rgb8", 8, false, |b| etc2(b, false)),
+        f("etc2_rgb8_srgb", 8, false, |b| with_srgb(etc2(b, false))),
+        f("etc2_rgb8a1", 8, false, |b| etc2(b, true)),
+        f("etc2_rgb8a1_srgb", 8, false, |b| with_srgb(etc2(b, true))),
+        f("eac_rgba8", 16, false, etc2_eac),
+        f("eac_rgba8_srgb", 16, false, |b| with_srgb(etc2_eac(b))),
+        f("eac_r11unorm", 8, false, |b| eac_r(b, false)),
+        f("eac_r11snorm", 8, false, |b| eac_r(b, true)),
+        f("eac_rg11unorm", 16, false, |b| eac_rg(b, false)),
+        f("eac_rg11snorm", 16, false, |b| eac_rg(b, true)),
     ]
 }
 
@@ -258,6 +486,16 @@ fn block(f: &Format, rng: &mut Random) -> Vec<u8> {
         b[0] = (b[0] & 0xE0) | 0x03;
     }
     b
+}
+
+/// Shared textures receive their blocks from the CPU, private ones from a
+/// blit: half the ETC2 and EAC formats take each way.
+fn storage(texture: Texture, shared: bool) -> Texture {
+    if shared {
+        texture.set("storage", "shared")
+    } else {
+        texture
+    }
 }
 
 pub fn build(plan: &mut Plan, library: &str) {
@@ -288,7 +526,16 @@ pub fn build(plan: &mut Plan, library: &str) {
             .iter()
             .any(|p| f.name.starts_with(p));
         let range = if f.name.contains("snorm") { 2.0 } else { 1.0 };
-        let tol = if f.half {
+        let etc = f.name.starts_with("etc2") || f.name.starts_with("eac");
+        let tol = if etc {
+            // Exact codes: ETC2's 8-bit ones within half a step, EAC's
+            // 11-bit ones at a 16-bit image's precision.
+            Tolerance::abs(if f.name.contains("11") {
+                1e-4
+            } else {
+                0.5 / 255.0
+            })
+        } else if f.half {
             Tolerance::ulp(1.0)
         } else if palette {
             Tolerance::abs(0.03 * range)
@@ -298,6 +545,12 @@ pub fn build(plan: &mut Plan, library: &str) {
             Tolerance::abs(2.0 / 255.0)
         }
         .with_ftz(false);
+        // Every Apple family samples ETC2 and EAC.
+        let (families, features): (&[&str], &[&str]) = if etc {
+            (&["apple1"], &[])
+        } else {
+            (&[], &["bc_compression"])
+        };
         // Two decoders, each within the bound of the exact palette.
         let cross = if palette { tol.doubled() } else { tol.clone() };
         plan.add(
@@ -307,7 +560,7 @@ pub fn build(plan: &mut Plan, library: &str) {
                 "read2d_float",
                 w * h,
             )
-            .requires(&[], &["bc_compression"])
+            .requires(families, features)
             .buffer(Buffer::data(
                 "coords",
                 0,
@@ -315,11 +568,12 @@ pub fn build(plan: &mut Plan, library: &str) {
             ))
             .buffer(Buffer::zeroed("out", 1, (w * h * 16) as usize))
             .output(Output::new("out", Dtype::F32, cross).expect(f32s(&expect), tol))
-            .texture(
+            .texture(storage(
                 Texture::d2("t", f.name, w, h)
                     .index(0)
                     .data(blocks.concat()),
-            ),
+                etc && (f.name.ends_with("srgb") || f.name.contains("snorm")),
+            )),
         );
     }
 }

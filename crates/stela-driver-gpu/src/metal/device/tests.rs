@@ -31,7 +31,7 @@ use crate::metal::{
         ColorAttachmentDescriptor, MAX_COLOR_ATTACHMENTS, RenderTargets, StageThreads,
         TessellationDescriptor,
     },
-    pixel_format::{PixelFormat, extended_range},
+    pixel_format::{BlockKernel, PixelFormat, extended_range},
     resource::TextureDescriptor,
     sampler::SamplerDescriptor,
     shader::{LinkedFunction, Linking, Specialization, Stage},
@@ -1674,6 +1674,88 @@ fn managed_textures_keep_a_cpu_copy_without_host_image_copy() {
             .iter()
             .any(|command| matches!(command, Command::CopyBufferToImage { .. })),
         "each write uploads once"
+    );
+}
+
+#[test]
+fn decoded_textures_keep_their_blocks_and_decode_written_subresources() {
+    let mut device = device();
+    let descriptor = TextureDescriptor {
+        width: 8,
+        height: 8,
+        array_length: 2,
+        texture_type: TextureType::D2Array,
+        options: options(StorageMode::Shared),
+        ..texture(PixelFormat::EacRgba8, TextureUsage::SHADER_READ)
+    };
+    let texture = device.new_texture(&descriptor).unwrap();
+    assert_eq!(
+        device.texture_cpu_copy(texture, 0, 0),
+        Ok(None),
+        "the blocks are no staged copy"
+    );
+    let blocks = device.texture_blocks(texture).unwrap().unwrap();
+    assert_eq!(blocks.length, 2 * 2 * 2 * 16);
+    // The second slice's two lower blocks, rows of 32 bytes.
+    let region = Region {
+        slice: 1,
+        level: 0,
+        origin: [0, 4, 0],
+        size: [8, 4, 1],
+    };
+    let strides = Strides {
+        bytes_per_row: 32,
+        bytes_per_image: 0,
+    };
+    let written: Vec<u8> = (0..32).collect();
+    device
+        .replace_region(texture, &region, &written, strides)
+        .unwrap();
+    // Twice: the slice decodes once.
+    device
+        .replace_region(texture, &region, &written, strides)
+        .unwrap();
+    let mut read = [0; 32];
+    device
+        .get_bytes(texture, &region, &mut read, strides)
+        .unwrap();
+    assert_eq!(read[..], written[..], "reads return the blocks");
+
+    submit(&mut device);
+    let segment = &device.backend().submissions.last().unwrap()[0];
+    let decodes: Vec<_> = segment
+        .commands
+        .iter()
+        .filter_map(|command| match *command {
+            Command::DecodeBlocks { kernel, count, .. } => Some((kernel, count)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        decodes,
+        [(BlockKernel::Etc, 64)],
+        "the written slice decodes whole"
+    );
+    assert!(
+        !segment
+            .commands
+            .iter()
+            .any(|command| matches!(command, Command::CopyBufferToImage { .. })),
+        "the image holds texels, not blocks"
+    );
+
+    device
+        .replace_region(texture, &region, &written, strides)
+        .unwrap();
+    device.destroy_texture(texture).unwrap();
+    submit(&mut device);
+    let segment = &device.backend().submissions.last().unwrap()[0];
+    assert!(
+        !segment
+            .commands
+            .iter()
+            .any(|command| matches!(command, Command::DecodeBlocks { .. })),
+        "a destroyed texture's decodes are dropped"
     );
 }
 

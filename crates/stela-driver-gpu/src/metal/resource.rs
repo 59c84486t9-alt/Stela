@@ -15,7 +15,7 @@ use super::{
     },
     capabilities::{Capabilities, FormatCapabilities as C},
     error::{Result, ensure, require},
-    pixel_format::{Description, Kind, PixelFormat, Realization},
+    pixel_format::{Description, Encoding, Kind, PixelFormat, Realization},
     vulkan::{
         BufferCreate, BufferUsage, ComponentSwizzle, Format, ImageAspects, ImageCreate,
         ImageTiling, ImageType, ImageUsage, ImageViewType, MemoryProperties as M, SampleCounts,
@@ -194,6 +194,11 @@ pub enum CpuAccess {
     Staged,
     /// The texture aliases a buffer's mapped rows.
     Linear,
+    /// A decoded compressed format's blocks, in a host-visible buffer of
+    /// the CPU copy's layout that every write reaches: the CPU's and
+    /// buffer copies' blocks, which the decode kernels expand into the
+    /// image, and the blocks that reads and copies out return.
+    Blocks,
 }
 
 /// The views shaders use. Vulkan storage views need identity swizzles, so a
@@ -244,8 +249,16 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
             "depth, stencil and multisample textures use private storage",
         )?;
     }
+    let decoded = matches!(description.encoding(), Encoding::Decoded(_));
+    if decoded && descriptor.texture_type == TextureType::D3 {
+        return Err(super::error::Error::Unsupported(
+            "3D textures of compressed formats the device samples decoded",
+        ));
+    }
     let cpu_access = match descriptor.options.storage_mode {
-        StorageMode::Private | StorageMode::Memoryless => CpuAccess::None,
+        StorageMode::Memoryless => CpuAccess::None,
+        _ if decoded => CpuAccess::Blocks,
+        StorageMode::Private => CpuAccess::None,
         // Apple's frameworks expect shared textures whatever the device's memory.
         StorageMode::Managed | StorageMode::Shared
             if descriptor.sample_count == 1

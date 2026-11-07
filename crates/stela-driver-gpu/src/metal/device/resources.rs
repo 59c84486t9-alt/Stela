@@ -5,7 +5,7 @@ use crate::metal::{
         CompareFunction, CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions, StorageMode,
         TextureType,
     },
-    binding::{HeapArray, NULL_DESCRIPTOR, ResourceId},
+    binding::{HeapArray, NULL_DESCRIPTOR, ResourceId, TexelArguments},
     capabilities::FormatCapabilities,
     command_buffer::{
         BufferRef, MappedRange,
@@ -117,7 +117,9 @@ struct TextureObject {
     /// The texture this one views; views keep their parent alive.
     parent: Option<TextureId>,
     dependents: u32,
-    /// A managed texture's CPU copy, when the CPU cannot reach the image.
+    /// A managed texture's CPU copy, when the CPU cannot reach the image,
+    /// or a decoded format's blocks ([`CpuAccess::Blocks`]), followed by
+    /// the decode kernels' arguments for each subresource.
     cpu_copy: Option<BufferAllocation>,
 }
 
@@ -163,6 +165,9 @@ pub(super) struct Resources {
     heaps: Slab<HeapObject>,
     /// CPU-copy regions of managed textures that the next commit uploads.
     cpu_copy_uploads: Vec<(TextureId, BufferImageCopy)>,
+    /// Decodes of subresources whose blocks the CPU wrote, by texture,
+    /// level and slice, that the next commit runs.
+    block_decodes: Vec<((TextureId, u64, u64), Command)>,
     /// Sparse textures by image, with their heaps.
     sparse: BTreeMap<Image, (HeapId, SparseTexture)>,
     /// The samplers of constexpr sampler states by state. Any pipeline
@@ -403,7 +408,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         memory: Option<Memory>,
     ) -> Result<TextureId> {
         let cpu_copy = match plan.cpu_access {
-            CpuAccess::Staged => self.new_cpu_copy(descriptor).map(Some),
+            CpuAccess::Staged => self.new_cpu_copy(descriptor, false).map(Some),
+            CpuAccess::Blocks => self.new_cpu_copy(descriptor, true).map(Some),
             _ => Ok(None),
         };
         let created = cpu_copy.and_then(|cpu_copy| match self.shader_views(image, &plan.views) {
@@ -441,11 +447,26 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(TextureId(self.resources.textures.insert(texture)))
     }
 
-    /// The host-visible buffer behind a managed texture's CPU copy.
-    fn new_cpu_copy(&mut self, descriptor: &TextureDescriptor) -> Result<BufferAllocation> {
+    /// The host-visible buffer behind a managed texture's CPU copy, or
+    /// behind a decoded format's `blocks` and their decode arguments, which
+    /// the decode kernels read by address.
+    fn new_cpu_copy(
+        &mut self,
+        descriptor: &TextureDescriptor,
+        blocks: bool,
+    ) -> Result<BufferAllocation> {
+        let (size, usage) = if blocks {
+            let arguments = descriptor.mipmap_level_count * descriptor.slice_count();
+            (
+                decode_arguments_offset(descriptor) + arguments * DECODE_ARGUMENTS_STRIDE,
+                BufferUsage::SHADER_DEVICE_ADDRESS,
+            )
+        } else {
+            (descriptor.cpu_copy_bytes(), BufferUsage::EMPTY)
+        };
         let info = BufferInfo {
-            size: descriptor.cpu_copy_bytes(),
-            usage: BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+            size,
+            usage: BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST | usage,
             flags: BufferCreate::EMPTY,
         };
         let request = MemoryRequest {
@@ -999,6 +1020,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             buffer_offset: first,
             ..*region
         };
+        if texture.cpu_access == CpuAccess::Blocks {
+            let subresource = region.subresource;
+            let level = u64::from(subresource.mip_level);
+            let first = u64::from(subresource.base_array_layer);
+            for slice in first..first + u64::from(subresource.layer_count) {
+                let key = (id, level, slice);
+                if !self.resources.block_decodes.iter().any(|(k, _)| *k == key) {
+                    let decode = self.decode_subresource(id, level, slice)?;
+                    self.resources.block_decodes.push((key, decode));
+                }
+            }
+            return Ok(());
+        }
         let upload = cpu_copy_region(&texture.descriptor, upload);
         self.resources.cpu_copy_uploads.push((id, upload));
         Ok(())
@@ -1048,6 +1082,35 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         slice: u64,
     ) -> Result<Option<BufferLayout>> {
         let texture = self.resources.textures.get(id.0)?;
+        if texture.cpu_access != CpuAccess::Staged {
+            return Ok(None);
+        }
+        self.cpu_copy_layout(texture, level, slice)
+    }
+
+    /// A decoded format's blocks in the CPU copy's layout, which buffer and
+    /// texture copies read and write in place of its image; `None` for a
+    /// texture whose image holds its format's blocks or texels.
+    pub fn texture_blocks(&self, id: TextureId) -> Result<Option<BufferRef>> {
+        let texture = self.resources.textures.get(id.0)?;
+        Ok(texture
+            .cpu_copy
+            .as_ref()
+            .filter(|_| texture.cpu_access == CpuAccess::Blocks)
+            .map(|copy| BufferRef {
+                buffer: copy.buffer,
+                offset: 0,
+                address: copy.address,
+                length: texture.descriptor.cpu_copy_bytes(),
+            }))
+    }
+
+    fn cpu_copy_layout(
+        &self,
+        texture: &TextureObject,
+        level: u64,
+        slice: u64,
+    ) -> Result<Option<BufferLayout>> {
         let Some(copy) = &texture.cpu_copy else {
             return Ok(None);
         };
@@ -1071,9 +1134,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     }
 
     /// Commands that bring images up to date with CPU-copy writes since the
-    /// last commit, ending in a barrier; empty when there are none.
+    /// last commit, ending in a barrier; empty when there are none. A
+    /// decoded format's written subresources decode whole from its blocks.
     pub(super) fn take_cpu_copy_uploads(&mut self) -> Vec<Command> {
         let uploads = core::mem::take(&mut self.resources.cpu_copy_uploads);
+        let decodes = core::mem::take(&mut self.resources.block_decodes);
         let textures = &self.resources.textures;
         let mut commands: Vec<Command> = uploads
             .into_iter()
@@ -1087,10 +1152,59 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 })
             })
             .collect();
+        commands.extend(
+            decodes
+                .into_iter()
+                .filter(|((id, ..), _)| textures.get(id.0).is_ok())
+                .map(|(_, decode)| decode),
+        );
         if !commands.is_empty() {
             commands.push(Command::Barrier(FULL));
         }
         commands
+    }
+
+    /// The decode of a decoded format's whole subresource from its blocks,
+    /// whose arguments the blocks' buffer keeps after them.
+    fn decode_subresource(&mut self, id: TextureId, level: u64, slice: u64) -> Result<Command> {
+        let storage = self.texel_storage(id, level, slice)?;
+        let texture = self.resources.textures.get(id.0)?;
+        let descriptor = texture.descriptor;
+        let copy = texture
+            .cpu_copy
+            .as_ref()
+            .ok_or(Error::Invalid("decoded textures keep their blocks"))?;
+        let (memory, address) = (copy.memory, copy.address);
+        let (kernel, encoding) = descriptor
+            .pixel_format
+            .describe()
+            .decoder()
+            .ok_or(Error::Invalid("the texture holds no decoded blocks"))?;
+        let layout = descriptor.subresource_layout(level, slice);
+        let [width, height, _] = descriptor.level_extent(level);
+        let narrow = |value: u64| {
+            u32::try_from(value).map_err(|_| Error::Unsupported("decodes of 4 GiB of texels"))
+        };
+        let arguments = TexelArguments {
+            buffer: address + layout.offset,
+            count: narrow(width * height)?,
+            encoding,
+            image: storage.0,
+            width: narrow(width)?,
+            height: narrow(height)?,
+            bytes_per_row: narrow(layout.bytes_per_row)?,
+            bytes_per_image: narrow(layout.bytes_per_image)?,
+            origin: [0; 3],
+        };
+        let offset = decode_arguments_offset(&descriptor)
+            + (level * descriptor.slice_count() + slice) * DECODE_ARGUMENTS_STRIDE;
+        self.backend
+            .write_memory(memory, offset, &arguments.encode())?;
+        Ok(Command::DecodeBlocks {
+            kernel,
+            arguments: address + offset,
+            count: arguments.count,
+        })
     }
 
     fn cpu_access(&self, texture: &TextureObject) -> Result<()> {
@@ -1099,7 +1213,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "private textures have no CPU access",
         )?;
         match texture.cpu_access {
-            CpuAccess::HostImageCopy | CpuAccess::Linear | CpuAccess::Staged => Ok(()),
+            CpuAccess::HostImageCopy
+            | CpuAccess::Linear
+            | CpuAccess::Staged
+            | CpuAccess::Blocks => Ok(()),
             CpuAccess::None => Err(Error::Invalid("the texture has no CPU access")),
         }
     }
@@ -1110,6 +1227,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "views of the texture are still alive",
         )?;
         let texture = self.resources.textures.remove(id.0)?;
+        // Its decodes would write a view destroyed with it.
+        self.resources
+            .block_decodes
+            .retain(|((decoded, ..), _)| *decoded != id);
         let arrays = if texture.texel_views.is_empty() {
             TEXTURE_ARRAYS
         } else {
@@ -1790,6 +1911,17 @@ impl Iterator for CopyRows {
 /// Bytes of the image's texels holding `metal_len` bytes of Metal's.
 fn stored_len(description: &Description, metal_len: usize) -> usize {
     metal_len / description.block.bytes as usize * description.stored_block_bytes() as usize
+}
+
+/// Bytes of each subresource's decode arguments after a decoded format's
+/// blocks.
+const DECODE_ARGUMENTS_STRIDE: u64 = 64;
+
+/// Where a decoded format's decode arguments start in its blocks' buffer.
+fn decode_arguments_offset(descriptor: &TextureDescriptor) -> u64 {
+    descriptor
+        .cpu_copy_bytes()
+        .next_multiple_of(TexelArguments::ALIGNMENT)
 }
 
 fn cpu_copy_rows(

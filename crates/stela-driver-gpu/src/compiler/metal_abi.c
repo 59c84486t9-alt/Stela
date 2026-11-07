@@ -1509,3 +1509,317 @@ nir_shader *stela_metal_average_samples_kernel(const nir_shader_compiler_options
    }
    return finish(&b);
 }
+
+/* Bits offset to offset + count of x, unsigned or sign-extended: NAK takes
+ * no ubfe or ibfe. */
+static nir_def *field(nir_builder *b, nir_def *x, unsigned offset, unsigned count)
+{
+   return nir_iand_imm(b, nir_ushr_imm(b, x, offset), BITFIELD_MASK(count));
+}
+
+static nir_def *signed_field(nir_builder *b, nir_def *x, unsigned offset, unsigned count)
+{
+   return nir_ishr_imm(b, nir_ishl_imm(b, x, 32 - offset - count), 32 - count);
+}
+
+/* A word's bytes in the other order: ETC and EAC blocks are big-endian. */
+static nir_def *byte_swap(nir_builder *b, nir_def *x)
+{
+   nir_def *low = nir_ior(b, nir_ishl_imm(b, nir_iand_imm(b, x, 0xff), 24),
+                          nir_ishl_imm(b, nir_iand_imm(b, x, 0xff00), 8));
+   nir_def *high =
+      nir_ior(b, nir_iand_imm(b, nir_ushr_imm(b, x, 8), 0xff00), nir_ushr_imm(b, x, 24));
+   return nir_ior(b, low, high);
+}
+
+/* table[index] for an index below count. */
+static nir_def *lookup(nir_builder *b, const unsigned *table, unsigned count, nir_def *index)
+{
+   nir_def *result = nir_imm_int(b, table[0]);
+   for (unsigned i = 1; i < count; i++)
+      result = nir_bcsel(b, nir_ieq_imm(b, index, i), nir_imm_int(b, table[i]), result);
+   return result;
+}
+
+static nir_def *clamp_int(nir_builder *b, nir_def *v, int low, int high)
+{
+   return nir_imin(b, nir_imax(b, v, nir_imm_int(b, low)), nir_imm_int(b, high));
+}
+
+/* A channel of bits widened to 8 by repeating its top bits. */
+static nir_def *widen(nir_builder *b, nir_def *v, unsigned bits)
+{
+   return nir_ior(b, nir_ishl_imm(b, v, 8 - bits), nir_ushr_imm(b, v, 2 * bits - 8));
+}
+
+static nir_def *widen3(nir_builder *b, nir_def *r, nir_def *g, nir_def *bl, unsigned bits)
+{
+   return nir_vec3(b, widen(b, r, bits), widen(b, g, bits), widen(b, bl, bits));
+}
+
+/* An ETC2 alpha or EAC block's base, multiplier and modifier at pixel
+ * index p, x * 4 + y; hi and lo are its big-endian words. */
+struct etc_alpha {
+   nir_def *base, *multiplier, *modifier, *hi;
+};
+
+static struct etc_alpha etc_alpha(nir_builder *b, nir_def *first, nir_def *second, nir_def *p)
+{
+   nir_def *hi = byte_swap(b, first), *lo = byte_swap(b, second);
+   static const unsigned magnitudes[16] = {0xe852, 0xc962, 0xc741, 0xc531, 0xb752, 0xa862,
+                                           0xa763, 0xa742, 0x9751, 0x9741, 0x9731, 0x9641,
+                                           0x9632, 0x9210, 0x8753, 0x8642};
+   /* Pixel p's 3-bit index starts at bit 45 - 3p of the block; its top bit
+    * may lie in the other word. */
+   nir_def *offset = nir_isub_imm(b, 45, nir_imul_imm(b, p, 3));
+   nir_def *top = nir_iadd_imm(b, offset, 2);
+   nir_def *low = nir_bcsel(b, nir_uge_imm(b, offset, 32), hi, lo);
+   nir_def *high = nir_bcsel(b, nir_uge_imm(b, top, 32), hi, lo);
+   nir_def *index = nir_iand_imm(b, nir_ushr(b, low, nir_iand_imm(b, offset, 31)), 3);
+   nir_def *sign = nir_iand_imm(b, nir_ushr(b, high, nir_iand_imm(b, top, 31)), 1);
+   nir_def *table = lookup(b, magnitudes, 16, field(b, hi, 16, 4));
+   nir_def *magnitude = nir_iand_imm(b, nir_ushr(b, table, nir_imul_imm(b, index, 4)), 0xf);
+   /* A clear sign bit negates the magnitude less one: -3 for 2. */
+   return (struct etc_alpha){
+      .base = field(b, hi, 24, 8),
+      .multiplier = field(b, hi, 20, 4),
+      .modifier = nir_ixor(b, magnitude, nir_iadd_imm(b, sign, -1)),
+      .hi = hi,
+   };
+}
+
+/* An EAC channel's 11-bit value as its 16-bit unorm or snorm code. */
+static nir_def *eac_channel(nir_builder *b, nir_def *first, nir_def *second, nir_def *p,
+                            nir_def *is_signed)
+{
+   struct etc_alpha a = etc_alpha(b, first, second, p);
+   nir_def *multiplier = nir_imax(b, nir_imul_imm(b, a.multiplier, 8), nir_imm_int(b, 1));
+   /* A signed base of -128 counts as -127. */
+   nir_def *signed_base =
+      nir_imul_imm(b, nir_imax(b, signed_field(b, a.hi, 24, 8), nir_imm_int(b, -127)), 8);
+   nir_def *base = nir_bcsel(b, is_signed, signed_base, nir_iadd_imm(b, nir_imul_imm(b, a.base, 8), 4));
+   nir_def *value = nir_iadd(b, base, nir_imul(b, a.modifier, multiplier));
+   nir_def *unorm = nir_udiv_imm(
+      b, nir_iadd_imm(b, nir_imul_imm(b, clamp_int(b, value, 0, 2047), 65535), 1023), 2047);
+   nir_def *snorm = clamp_int(b, value, -1023, 1023);
+   nir_def *magnitude =
+      nir_udiv_imm(b, nir_iadd_imm(b, nir_imul_imm(b, nir_iabs(b, snorm), 32767), 511), 1023);
+   snorm = nir_bcsel(b, nir_ilt_imm(b, snorm, 0), nir_ineg(b, magnitude), magnitude);
+   return nir_iand_imm(b, nir_bcsel(b, is_signed, snorm, unorm), 0xffff);
+}
+
+/* An ETC2 RGB block's color at x and y, 8 bits a channel, and whether a
+ * punch-through alpha block leaves the texel transparent. */
+static nir_def *etc_color(nir_builder *b, nir_def *first, nir_def *second, nir_def *x,
+                          nir_def *y, nir_def *punch_through, nir_def **transparent)
+{
+   static const unsigned distances[8] = {3, 6, 11, 16, 23, 32, 41, 64};
+   static const unsigned small[8] = {2, 5, 9, 13, 18, 24, 33, 47};
+   static const unsigned large[8] = {8, 17, 29, 42, 60, 80, 106, 183};
+   nir_def *hi = byte_swap(b, first), *lo = byte_swap(b, second);
+   /* Pixel p, x * 4 + y, has its index's low bit at bit p and high bit at
+    * bit p + 16; msb holds the high bit in place, 0 or 2. */
+   nir_def *p = nir_iadd(b, nir_imul_imm(b, x, 4), y);
+   nir_def *lsb = nir_iand_imm(b, nir_ushr(b, lo, p), 1);
+   nir_def *msb = nir_iand_imm(b, nir_ushr(b, lo, nir_iadd_imm(b, p, 15)), 2);
+   nir_def *index = nir_ior(b, msb, lsb);
+   nir_def *flip = nir_test_mask(b, hi, 1);
+   /* The differential bit, which punch-through blocks spend on opacity. */
+   nir_def *diff = nir_test_mask(b, hi, 2);
+   nir_def *subblock = nir_ushr_imm(b, nir_bcsel(b, flip, y, x), 1);
+   nir_def *non_opaque = nir_iand(b, punch_through, nir_inot(b, diff));
+   nir_def *individual = nir_iand(b, nir_inot(b, punch_through), nir_inot(b, diff));
+
+   nir_def *nibbles[3];
+   for (unsigned i = 0; i < 3; i++) {
+      nir_def *shift = nir_isub_imm(b, 28 - 8 * i, nir_imul_imm(b, subblock, 4));
+      nibbles[i] = widen(b, nir_iand_imm(b, nir_ushr(b, hi, shift), 0xf), 4);
+   }
+   nir_def *individual_base = nir_vec(b, nibbles, 3);
+   nir_def *rb = field(b, hi, 27, 5), *gb = field(b, hi, 19, 5), *bb = field(b, hi, 11, 5);
+   nir_def *r1 = nir_iadd(b, rb, signed_field(b, hi, 24, 3));
+   nir_def *g1 = nir_iadd(b, gb, signed_field(b, hi, 16, 3));
+   nir_def *b1 = nir_iadd(b, bb, signed_field(b, hi, 8, 3));
+   nir_def *second_sub = nir_ine_imm(b, subblock, 0);
+   nir_def *differential_base =
+      widen3(b, nir_bcsel(b, second_sub, r1, rb), nir_bcsel(b, second_sub, g1, gb),
+             nir_bcsel(b, second_sub, b1, bb), 5);
+   /* A differential channel past 5 bits selects T, H or planar mode. */
+   nir_def *t_mode = nir_iand(b, nir_inot(b, individual), nir_ugt_imm(b, r1, 31));
+   nir_def *h_mode =
+      nir_iand(b, nir_iand(b, nir_inot(b, individual), nir_inot(b, t_mode)), nir_ugt_imm(b, g1, 31));
+   nir_def *planar = nir_iand(b, nir_iand(b, nir_inot(b, individual), nir_inot(b, t_mode)),
+                              nir_iand(b, nir_inot(b, h_mode), nir_ugt_imm(b, b1, 31)));
+
+   /* Individual and differential modes modify their subblock's base. */
+   nir_def *table = nir_iand_imm(b, nir_ushr(b, hi, nir_isub_imm(b, 5, nir_imul_imm(b, subblock, 3))), 7);
+   nir_def *magnitude = nir_bcsel(b, nir_ine_imm(b, lsb, 0), lookup(b, large, 8, table),
+                                  lookup(b, small, 8, table));
+   nir_def *sign = nir_isub_imm(b, 1, msb);
+   /* Punch-through's index 0 is unmodified and 2 transparent. */
+   sign = nir_bcsel(b, non_opaque, nir_imul(b, sign, lsb), sign);
+   nir_def *etc1 = nir_iadd(b, nir_bcsel(b, individual, individual_base, differential_base),
+                            nir_imul(b, magnitude, sign));
+
+   /* T mode: index 0 paints the first color, the rest the second moved by
+    * a distance. */
+   nir_def *t_first = widen3(b, nir_ior(b, field(b, hi, 24, 2), nir_ishl_imm(b, field(b, hi, 27, 2), 2)),
+                             field(b, hi, 20, 4), field(b, hi, 16, 4), 4);
+   nir_def *t_second = widen3(b, field(b, hi, 12, 4), field(b, hi, 8, 4), field(b, hi, 4, 4), 4);
+   nir_def *t_distance =
+      lookup(b, distances, 8, nir_ior(b, nir_ishl_imm(b, field(b, hi, 2, 2), 1), field(b, hi, 0, 1)));
+   nir_def *t = nir_bcsel(b, nir_ieq_imm(b, index, 0), t_first,
+                          nir_iadd(b, t_second, nir_imul(b, t_distance, nir_isub_imm(b, 2, index))));
+
+   /* H mode: the high bit picks a color, the low bit the distance's sign;
+    * the colors' order is the distance's lowest bit. */
+   nir_def *h_r0 = field(b, hi, 27, 4);
+   nir_def *h_g0 = nir_ior(b, nir_ishl_imm(b, field(b, hi, 24, 3), 1), field(b, hi, 20, 1));
+   nir_def *h_b0 = nir_ior(b, field(b, hi, 15, 3), nir_ishl_imm(b, field(b, hi, 19, 1), 3));
+   nir_def *h_r2 = field(b, hi, 11, 4), *h_g2 = field(b, hi, 7, 4), *h_b2 = field(b, hi, 3, 4);
+   nir_def *order0 = nir_ior(b, nir_ishl_imm(b, h_r0, 16), nir_ior(b, nir_ishl_imm(b, h_g0, 8), h_b0));
+   nir_def *order2 = nir_ior(b, nir_ishl_imm(b, h_r2, 16), nir_ior(b, nir_ishl_imm(b, h_g2, 8), h_b2));
+   nir_def *h_index = nir_ior(b, nir_ior(b, nir_iand_imm(b, hi, 4), nir_ishl_imm(b, field(b, hi, 0, 1), 1)),
+                              nir_b2i32(b, nir_uge(b, order0, order2)));
+   nir_def *h_base = nir_bcsel(b, nir_ine_imm(b, msb, 0), widen3(b, h_r2, h_g2, h_b2, 4),
+                               widen3(b, h_r0, h_g0, h_b0, 4));
+   nir_def *h = nir_iadd(b, h_base, nir_imul(b, lookup(b, distances, 8, h_index),
+                                             nir_isub_imm(b, 1, nir_imul_imm(b, lsb, 2))));
+
+   /* Planar mode: a plane through the origin, horizontal and vertical
+    * colors. */
+   nir_def *origin = nir_vec3(
+      b, widen(b, field(b, hi, 25, 6), 6),
+      widen(b, nir_ior(b, field(b, hi, 17, 6), nir_ishl_imm(b, field(b, hi, 24, 1), 6)), 7),
+      widen(b, nir_ior(b, nir_ior(b, nir_ishl_imm(b, field(b, hi, 11, 2), 3),
+                                  nir_ishl_imm(b, field(b, hi, 16, 1), 5)),
+                       field(b, hi, 7, 3)),
+            6));
+   nir_def *horizontal = nir_vec3(
+      b, widen(b, nir_ior(b, field(b, hi, 0, 1), nir_ishl_imm(b, field(b, hi, 2, 5), 1)), 6),
+      widen(b, field(b, lo, 25, 7), 7), widen(b, field(b, lo, 19, 6), 6));
+   nir_def *vertical = nir_vec3(b, widen(b, field(b, lo, 13, 6), 6), widen(b, field(b, lo, 6, 7), 7),
+                                widen(b, field(b, lo, 0, 6), 6));
+   nir_def *dx = nir_imul(b, nir_isub(b, horizontal, origin), x);
+   nir_def *dy = nir_imul(b, nir_isub(b, vertical, origin), y);
+   nir_def *plane = nir_iadd(b, origin, nir_ishr_imm(b, nir_iadd_imm(b, nir_iadd(b, dx, dy), 2), 2));
+
+   nir_def *rgb = nir_bcsel(b, t_mode, t, nir_bcsel(b, h_mode, h, nir_bcsel(b, planar, plane, etc1)));
+   *transparent = nir_iand(b, nir_iand(b, non_opaque, nir_inot(b, planar)), nir_ieq_imm(b, index, 2));
+   return nir_vec3(b, clamp_int(b, nir_channel(b, rgb, 0), 0, 255),
+                   clamp_int(b, nir_channel(b, rgb, 1), 0, 255),
+                   clamp_int(b, nir_channel(b, rgb, 2), 0, 255));
+}
+
+nir_def *stela_metal_decode_etc(nir_builder *b, nir_def *words, nir_def *x, nir_def *y,
+                                nir_def *codec)
+{
+   nir_def *w[4];
+   for (unsigned i = 0; i < 4; i++)
+      w[i] = nir_channel(b, words, i);
+   nir_def *p = nir_iadd(b, nir_imul_imm(b, x, 4), y);
+   nir_def *rgba8 = nir_ieq_imm(b, codec, STELA_METAL_BLOCKS_EAC_RGBA8);
+   nir_def *punch_through = nir_ieq_imm(b, codec, STELA_METAL_BLOCKS_ETC2_RGB8A1);
+   /* An RGBA8 block's alpha block precedes its color block. */
+   nir_def *transparent;
+   nir_def *rgb = etc_color(b, nir_bcsel(b, rgba8, w[2], w[0]), nir_bcsel(b, rgba8, w[3], w[1]),
+                            x, y, punch_through, &transparent);
+   struct etc_alpha a = etc_alpha(b, w[0], w[1], p);
+   nir_def *alpha = nir_bcsel(
+      b, rgba8, clamp_int(b, nir_iadd(b, a.base, nir_imul(b, a.modifier, a.multiplier)), 0, 255),
+      nir_imm_int(b, 255));
+   nir_def *color = nir_ior(b, nir_ior(b, nir_channel(b, rgb, 0), nir_ishl_imm(b, nir_channel(b, rgb, 1), 8)),
+                            nir_ior(b, nir_ishl_imm(b, nir_channel(b, rgb, 2), 16), nir_ishl_imm(b, alpha, 24)));
+   color = nir_bcsel(b, transparent, nir_imm_int(b, 0), color);
+
+   nir_def *is_signed = nir_ior(b, nir_ieq_imm(b, codec, STELA_METAL_BLOCKS_EAC_R11_SNORM),
+                                nir_ieq_imm(b, codec, STELA_METAL_BLOCKS_EAC_RG11_SNORM));
+   nir_def *red = eac_channel(b, w[0], w[1], p, is_signed);
+   nir_def *green = eac_channel(b, w[2], w[3], p, is_signed);
+   nir_def *two = nir_ior(b, nir_ieq_imm(b, codec, STELA_METAL_BLOCKS_EAC_RG11),
+                          nir_ieq_imm(b, codec, STELA_METAL_BLOCKS_EAC_RG11_SNORM));
+   nir_def *eac = nir_bcsel(b, two, nir_ior(b, red, nir_ishl_imm(b, green, 16)), red);
+   return nir_bcsel(b, nir_uge_imm(b, codec, STELA_METAL_BLOCKS_EAC_R11), eac, color);
+}
+
+/* The decode kernels' common part: the thread's image coordinate, its
+ * coordinate in its block, the block's words, and the codec. The region
+ * starts on a block boundary. */
+struct blocks {
+   nir_def *codec, *coord, *x, *y, *words;
+   nir_deref_instr *image;
+};
+
+static nir_builder blocks(const nir_shader_compiler_options *options, const char *name,
+                          nir_def *(*block_bytes)(nir_builder *, nir_def *), struct blocks *k)
+{
+   nir_def *arguments, *thread;
+   nir_builder b = kernel(options, name, STELA_METAL_TEXELS_COUNT, &arguments, &thread);
+   nir_def *width = load(&b, arguments, STELA_METAL_TEXELS_WIDTH, 32);
+   nir_def *height = load(&b, arguments, STELA_METAL_TEXELS_HEIGHT, 32);
+   nir_def *per_image = nir_imul(&b, width, height);
+   nir_def *z = nir_udiv(&b, thread, per_image);
+   nir_def *rest = nir_isub(&b, thread, nir_imul(&b, z, per_image));
+   nir_def *y = nir_udiv(&b, rest, width);
+   nir_def *x = nir_isub(&b, rest, nir_imul(&b, y, width));
+   nir_def *origin[3];
+   for (unsigned i = 0; i < 3; i++)
+      origin[i] = load(&b, arguments, STELA_METAL_TEXELS_ORIGIN + 4 * i, 32);
+   k->coord = nir_vec4(&b, nir_iadd(&b, x, origin[0]), nir_iadd(&b, y, origin[1]),
+                       nir_iadd(&b, z, origin[2]), nir_imm_int(&b, 0));
+   nir_def *encoding = load(&b, arguments, STELA_METAL_TEXELS_ENCODING, 32);
+   k->codec = nir_iand_imm(&b, encoding, 0xff);
+   nir_def *block_width = field(&b, encoding, 8, 8);
+   nir_def *block_height = field(&b, encoding, 16, 8);
+   nir_def *column = nir_udiv(&b, x, block_width);
+   nir_def *row = nir_udiv(&b, y, block_height);
+   k->x = nir_isub(&b, x, nir_imul(&b, column, block_width));
+   k->y = nir_isub(&b, y, nir_imul(&b, row, block_height));
+   nir_def *bytes = block_bytes(&b, k->codec);
+   nir_def *offset = nir_iadd(
+      &b, nir_imul(&b, z, load(&b, arguments, STELA_METAL_TEXELS_IMAGE_BYTES, 32)),
+      nir_iadd(&b, nir_imul(&b, row, load(&b, arguments, STELA_METAL_TEXELS_ROW, 32)),
+               nir_imul(&b, column, bytes)));
+   nir_def *address = nir_iadd(&b, load(&b, arguments, STELA_METAL_TEXELS_BUFFER, 64),
+                               nir_u2u64(&b, offset));
+   /* An 8-byte block's words end it: the buffer may too. */
+   nir_def *low = nir_load_global(&b, 2, 32, address, .align_mul = 8);
+   nir_def *zero = nir_imm_ivec2(&b, 0, 0);
+   nir_push_if(&b, nir_ieq_imm(&b, bytes, 16));
+   nir_def *loaded = nir_load_global(&b, 2, 32, nir_iadd_imm(&b, address, 8), .align_mul = 8);
+   nir_pop_if(&b, NULL);
+   nir_def *high = nir_if_phi(&b, loaded, zero);
+   k->words = nir_vec4(&b, nir_channel(&b, low, 0), nir_channel(&b, low, 1),
+                       nir_channel(&b, high, 0), nir_channel(&b, high, 1));
+   const struct glsl_type *type = glsl_image_type(GLSL_SAMPLER_DIM_2D, true, GLSL_TYPE_UINT);
+   k->image = stela_metal_bind_texture_id(&b, load(&b, arguments, STELA_METAL_TEXELS_IMAGE, 64),
+                                          type, false, NULL, NULL);
+   return b;
+}
+
+/* Stores a decoded texel's raw bits, whose image format keeps as many as
+ * it holds. */
+static nir_shader *store_decoded(nir_builder *b, const struct blocks *k, nir_def *raw)
+{
+   nir_def *texel = nir_pad_vector_imm_int(b, raw, 0, 4);
+   nir_image_deref_store(b, &k->image->def, k->coord, nir_undef(b, 1, 32), texel,
+                         nir_imm_int(b, 0), .image_dim = GLSL_SAMPLER_DIM_2D,
+                         .image_array = true, .format = PIPE_FORMAT_NONE,
+                         .src_type = nir_type_uint32);
+   return finish(b);
+}
+
+static nir_def *etc_block_bytes(nir_builder *b, nir_def *codec)
+{
+   nir_def *wide = nir_ior(b, nir_ieq_imm(b, codec, STELA_METAL_BLOCKS_EAC_RGBA8),
+                           nir_ior(b, nir_ieq_imm(b, codec, STELA_METAL_BLOCKS_EAC_RG11),
+                                   nir_ieq_imm(b, codec, STELA_METAL_BLOCKS_EAC_RG11_SNORM)));
+   return nir_bcsel(b, wide, nir_imm_int(b, 16), nir_imm_int(b, 8));
+}
+
+nir_shader *stela_metal_decode_etc_kernel(const nir_shader_compiler_options *options)
+{
+   struct blocks k;
+   nir_builder b = blocks(options, "stela_metal_decode_etc", etc_block_bytes, &k);
+   return store_decoded(&b, &k, stela_metal_decode_etc(&b, k.words, k.x, k.y, k.codec));
+}

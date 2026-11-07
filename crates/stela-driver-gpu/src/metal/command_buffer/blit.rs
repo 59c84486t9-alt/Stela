@@ -14,12 +14,12 @@ use crate::metal::{
     binding::{ResourceId, TexelArguments},
     error::{Error, Result, ensure, require},
     hazard::Use,
-    pixel_format::{Description, Kind},
+    pixel_format::{Description, Encoding, Kind},
     resource::TextureDescriptor,
     vulkan::{
         Access, Filter, ImageAspects, PipelineStages,
         command::{BufferCopy, BufferImageCopy, Command, ImageBlit, ImageCopy, Subresource},
-        object::Image,
+        object::{Buffer, Image},
     },
 };
 use alloc::vec::Vec;
@@ -38,6 +38,10 @@ pub struct BlitTexture<'a> {
     /// a raw storage view of the copied level's slice, which the texel
     /// kernels convert through; [`ResourceId::NULL`] otherwise.
     pub storage: ResourceId,
+    /// A decoded format's blocks in the CPU copy's layout
+    /// ([`CpuAccess::Blocks`](crate::metal::resource::CpuAccess::Blocks)),
+    /// which copies read and write in place of its image.
+    pub blocks: Option<BufferRef>,
 }
 
 /// A texel region of one slice and level: `MTLOrigin` and `MTLSize`.
@@ -201,6 +205,11 @@ impl CommandBuffer {
         options: BlitOption,
     ) -> Result<()> {
         self.blit()?;
+        if let Some(blocks) = dst.blocks {
+            let (copies, held) = buffer_blocks(&src, &dst, blocks, &region)?;
+            self.copy_regions(src.buffer.buffer, blocks.buffer, copies);
+            return self.decode_blocks(resolver, &dst, held, &region);
+        }
         if let Some(arguments) = texel_arguments(&src, &dst, &region, options)? {
             return self.convert_texels(resolver, arguments, true);
         }
@@ -224,6 +233,12 @@ impl CommandBuffer {
         options: BlitOption,
     ) -> Result<()> {
         self.blit()?;
+        if let Some(blocks) = src.blocks {
+            let (copies, _) = buffer_blocks(&dst, &src, blocks, &region)?;
+            let copies = copies.into_iter().map(BufferCopy::reversed).collect();
+            self.copy_regions(blocks.buffer, dst.buffer.buffer, copies);
+            return Ok(());
+        }
         if let Some(arguments) = texel_arguments(&dst, &src, &region, options)? {
             return self.convert_texels(resolver, arguments, false);
         }
@@ -268,6 +283,7 @@ impl CommandBuffer {
         if extent.contains(&0) {
             return Ok(());
         }
+        self.copy_held_blocks(&src, &src_region, &dst, &dst_region)?;
         self.recorder.access(TRANSFER);
         self.recorder.push(Command::CopyImage {
             src: src.image,
@@ -313,14 +329,19 @@ impl CommandBuffer {
                     origin: [0; 3],
                     size,
                 };
-                let (src, src_offset, extent) = region(src_slice + slice, src_level + level)
-                    .resolve(src.descriptor, aspects)?;
-                let (dst, dst_offset, _) = region(dst_slice + slice, dst_level + level)
-                    .resolve(dst.descriptor, aspects)?;
+                let (src_region, dst_region) = (
+                    region(src_slice + slice, src_level + level),
+                    region(dst_slice + slice, dst_level + level),
+                );
+                self.copy_held_blocks(&src, &src_region, &dst, &dst_region)?;
+                let (src_subresource, src_offset, extent) =
+                    src_region.resolve(src.descriptor, aspects)?;
+                let (dst_subresource, dst_offset, _) =
+                    dst_region.resolve(dst.descriptor, aspects)?;
                 regions.push(ImageCopy {
-                    src,
+                    src: src_subresource,
                     src_offset,
-                    dst,
+                    dst: dst_subresource,
                     dst_offset,
                     extent,
                 });
@@ -460,6 +481,91 @@ impl CommandBuffer {
         self.synchronize()
     }
 
+    /// Copies between two buffers' regions, after the pending work.
+    fn copy_regions(&mut self, src: Buffer, dst: Buffer, regions: Vec<BufferCopy>) {
+        if regions.is_empty() {
+            return;
+        }
+        self.recorder.access(TRANSFER);
+        self.recorder
+            .push(Command::CopyBufferRegions { src, dst, regions });
+    }
+
+    /// For a copy between textures of a decoded format, the copy of the
+    /// region's blocks, which their images hold decoded.
+    fn copy_held_blocks(
+        &mut self,
+        src: &BlitTexture,
+        src_region: &Region,
+        dst: &BlitTexture,
+        dst_region: &Region,
+    ) -> Result<()> {
+        let decoded = |texture: &BlitTexture| texture.description().decoder().is_some();
+        let (Some(from), Some(to)) = (src.blocks, dst.blocks) else {
+            return require(
+                !decoded(src) && !decoded(dst),
+                "copies through views of compressed textures the device samples decoded",
+            );
+        };
+        let (from_start, from_pitch) = held_start(src, from, src_region);
+        let (to_start, to_pitch) = held_start(dst, to, dst_region);
+        let (rows, row_bytes) = block_rows(src, src_region);
+        let copies = row_copies(from_start, from_pitch, to_start, to_pitch, rows, row_bytes);
+        self.copy_regions(from.buffer, to.buffer, copies);
+        Ok(())
+    }
+
+    /// Decodes a region of a decoded format's blocks, `held` from the
+    /// region's first, into its image, after their copy.
+    fn decode_blocks(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        texture: &BlitTexture,
+        held: BufferLayout,
+        region: &Region,
+    ) -> Result<()> {
+        let (kernel, encoding) = texture
+            .description()
+            .decoder()
+            .ok_or(Error::Invalid("the texture holds no decoded blocks"))?;
+        require(
+            texture.storage != ResourceId::NULL,
+            "buffer copies of 1D and 3D textures of a stored encoding",
+        )?;
+        let narrow = |value: u64| {
+            u32::try_from(value).map_err(|_| Error::Unsupported("buffer copies of 4 GiB of texels"))
+        };
+        let [width, height, _] = region.size;
+        let arguments = TexelArguments {
+            buffer: held.buffer.address + held.offset,
+            count: narrow(width * height)?,
+            encoding,
+            image: texture.storage.0,
+            width: narrow(width)?,
+            height: narrow(height)?,
+            bytes_per_row: narrow(held.bytes_per_row)?,
+            bytes_per_image: narrow(held.bytes_per_image)?,
+            // The view holds the copied slice alone.
+            origin: [narrow(region.origin[0])?, narrow(region.origin[1])?, 0],
+        };
+        if arguments.count == 0 {
+            return Ok(());
+        }
+        let upload =
+            self.recorder
+                .upload(resolver, &arguments.encode(), TexelArguments::ALIGNMENT)?;
+        self.recorder.access(Use::new(
+            PipelineStages::COMPUTE_SHADER,
+            Access::SHADER_READ.union(Access::SHADER_WRITE),
+        ));
+        self.recorder.push(Command::DecodeBlocks {
+            kernel,
+            arguments: upload.address,
+            count: arguments.count,
+        });
+        Ok(())
+    }
+
     /// Runs a texel kernel over a copy's texels: `store` from the buffer
     /// into the texture, else back.
     fn convert_texels(
@@ -488,6 +594,88 @@ impl CommandBuffer {
     }
 }
 
+/// A decoded format's region's block rows and the bytes of each.
+fn block_rows(texture: &BlitTexture, region: &Region) -> (u64, u64) {
+    let block = texture.description().block;
+    (
+        region.size[1].div_ceil(u64::from(block.height)),
+        region.size[0].div_ceil(u64::from(block.width)) * u64::from(block.bytes),
+    )
+}
+
+/// Where a region's first block lies in a decoded format's `blocks`,
+/// within its buffer, and the bytes per block row there.
+fn held_start(texture: &BlitTexture, blocks: BufferRef, region: &Region) -> (u64, u64) {
+    let block = texture.description().block;
+    let layout = texture
+        .descriptor
+        .subresource_layout(region.level, region.slice);
+    let start = blocks.offset
+        + layout.offset
+        + region.origin[1] / u64::from(block.height) * layout.bytes_per_row
+        + region.origin[0] / u64::from(block.width) * u64::from(block.bytes);
+    (start, layout.bytes_per_row)
+}
+
+/// Copies of `rows` rows of `row_bytes`, one copy when both sides pack them.
+fn row_copies(
+    src: u64,
+    src_pitch: u64,
+    dst: u64,
+    dst_pitch: u64,
+    rows: u64,
+    row_bytes: u64,
+) -> Vec<BufferCopy> {
+    if rows == 0 || row_bytes == 0 {
+        return Vec::new();
+    }
+    if src_pitch == row_bytes && dst_pitch == row_bytes {
+        return alloc::vec![BufferCopy {
+            src_offset: src,
+            dst_offset: dst,
+            size: rows * row_bytes,
+        }];
+    }
+    (0..rows)
+        .map(|row| BufferCopy {
+            src_offset: src + row * src_pitch,
+            dst_offset: dst + row * dst_pitch,
+            size: row_bytes,
+        })
+        .collect()
+}
+
+/// A buffer copy of a decoded format's region as copies of its block rows
+/// from the buffer into the texture's `blocks`, and where the region's
+/// blocks lie there.
+fn buffer_blocks(
+    layout: &BufferLayout,
+    texture: &BlitTexture,
+    blocks: BufferRef,
+    region: &Region,
+) -> Result<(Vec<BufferCopy>, BufferLayout)> {
+    // Validated as Metal validates a copy of the format's blocks.
+    let copy = buffer_image_copy(layout, texture, region, BlitOption::EMPTY)?;
+    ensure(region.size[2] <= 1, "copies of 2D textures hold one image")?;
+    let (start, pitch) = held_start(texture, blocks, region);
+    let (rows, row_bytes) = block_rows(texture, region);
+    let copies = row_copies(
+        copy.buffer_offset,
+        layout.bytes_per_row,
+        start,
+        pitch,
+        rows,
+        row_bytes,
+    );
+    let held = BufferLayout {
+        buffer: blocks,
+        offset: start - blocks.offset,
+        bytes_per_row: pitch,
+        bytes_per_image: 0,
+    };
+    Ok((copies, held))
+}
+
 /// The texel kernels' arguments for a buffer copy of a texture whose image
 /// stores another encoding than its format's bytes; `None` for one whose
 /// image holds them, which a transfer copies.
@@ -501,6 +689,11 @@ fn texel_arguments(
     if encoding.is_exact() {
         return Ok(None);
     }
+    // A decoded format's view holds no blocks of its own.
+    require(
+        !matches!(encoding, Encoding::Decoded(_)),
+        "copies through views of compressed textures the device samples decoded",
+    )?;
     require(
         texture.storage != ResourceId::NULL,
         "buffer copies of 1D and 3D textures of a stored encoding",

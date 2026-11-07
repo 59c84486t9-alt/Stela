@@ -5,7 +5,7 @@ use crate::metal::{
     binding::ResourceId,
     capabilities::FormatCapabilities,
     command_buffer::{
-        CommandBuffer,
+        BufferRef, CommandBuffer,
         blit::{BlitTexture, Region},
     },
     device::TextureId,
@@ -55,13 +55,14 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 let request: CopyBufferToTexture = payload.record()?;
                 let source = self.buffer_layout(connection, request.source)?;
                 let region = region(&request.region);
-                let (image, descriptor, storage) =
+                let (image, descriptor, storage, blocks) =
                     self.copied_texture(connection, request.texture, &region)?;
                 let options = blit_options(request.options)?;
                 let texture = BlitTexture {
                     image,
                     descriptor: &descriptor,
                     storage,
+                    blocks,
                 };
                 commands.copy_buffer_to_texture(
                     &mut self.device.resolver(),
@@ -74,7 +75,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             BlitCode::CopyTextureToBuffer => {
                 let request: CopyTextureToBuffer = payload.record()?;
                 let region = region(&request.region);
-                let (image, descriptor, storage) =
+                let (image, descriptor, storage, blocks) =
                     self.copied_texture(connection, request.texture, &region)?;
                 let destination = self.buffer_layout(connection, request.destination)?;
                 let options = blit_options(request.options)?;
@@ -82,6 +83,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     image,
                     descriptor: &descriptor,
                     storage,
+                    blocks,
                 };
                 commands.copy_texture_to_buffer(
                     &mut self.device.resolver(),
@@ -183,17 +185,18 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// A texture a buffer copy of `region` reads or writes: its image, its
     /// descriptor and, when its image stores another encoding than its
     /// format's bytes, the raw storage view of the region's level and slice
-    /// that the texel kernels convert through.
+    /// that the texel kernels convert through, and a decoded format's blocks.
     fn copied_texture(
         &mut self,
         connection: NonZeroU64,
         handle: u64,
         region: &Region,
-    ) -> Result<(Image, TextureDescriptor, ResourceId), Fault> {
+    ) -> Result<CopiedTexture, Fault> {
         let id = self.object::<TextureId>(connection, handle)?;
         let descriptor = *self.device.texture_descriptor(id)?;
         let storage = self.device.texel_storage(id, region.level, region.slice)?;
-        Ok((self.device.texture_image(id)?, descriptor, storage))
+        let blocks = self.device.texture_blocks(id)?;
+        Ok((self.device.texture_image(id)?, descriptor, storage, blocks))
     }
 
     /// Synchronizes subresources of a managed texture: each is copied to
@@ -232,6 +235,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     image,
                     descriptor: &descriptor,
                     storage: ResourceId::NULL,
+                    blocks: None,
                 };
                 commands.synchronize_texture(
                     &mut self.device.resolver(),
@@ -244,6 +248,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         Ok(())
     }
 }
+
+/// A copied texture's image, descriptor, raw storage view and blocks.
+type CopiedTexture = (Image, TextureDescriptor, ResourceId, Option<BufferRef>);
 
 fn blit_options(raw: u64) -> Result<BlitOption, Fault> {
     known(BlitOption::from_bits(raw), "blit options")

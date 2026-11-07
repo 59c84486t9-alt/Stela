@@ -139,6 +139,14 @@ stela_metal_abi_test = executable(
   link_with : stela_metal_abi,
 )
 test('stela_metal_abi', stela_metal_abi_test, suite : 'stela')
+stela_metal_blocks_test = executable(
+  'stela_metal_blocks_test',
+  'tests/metal_blocks.c',
+  include_directories : [inc_include, inc_src, inc_gpu],
+  dependencies : [idep_nir, idep_mesautil],
+  link_with : stela_metal_abi,
+)
+test('stela_metal_blocks', stela_metal_blocks_test, suite : 'stela')
 if with_nvidia
   stela_metal_abi_nak_test = executable(
     'stela_metal_abi_nak_test',

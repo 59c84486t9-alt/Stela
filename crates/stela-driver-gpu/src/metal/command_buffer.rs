@@ -264,6 +264,7 @@ impl Workload {
                 | Command::DispatchIndirect { .. }
                 | Command::AverageSamples { .. } => self.dispatches += 1,
                 Command::CopyBuffer { .. }
+                | Command::CopyBufferRegions { .. }
                 | Command::CopyBufferToImage { .. }
                 | Command::CopyImageToBuffer { .. }
                 | Command::CopyImage { .. }
@@ -276,7 +277,9 @@ impl Workload {
                 | Command::ResolveDraws { .. }
                 | Command::ResolveDispatches { .. }
                 | Command::ExecuteGeneratedCommands(_) => self.internal += 1,
-                Command::StoreTexels { .. } | Command::LoadTexels { .. } => self.transfers += 1,
+                Command::StoreTexels { .. }
+                | Command::LoadTexels { .. }
+                | Command::DecodeBlocks { .. } => self.transfers += 1,
                 _ => {}
             }
         }

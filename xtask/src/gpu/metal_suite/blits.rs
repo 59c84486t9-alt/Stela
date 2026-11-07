@@ -406,8 +406,67 @@ fn stored_encodings(plan: &mut Plan, rng: &mut Random) {
     }
 }
 
+/// Copies of formats a device may sample decoded carry their blocks: into
+/// a texture from a buffer, out of one and between two, which reads return.
+fn held_blocks(plan: &mut Plan, rng: &mut Random) {
+    // 8x8 texels: two block rows of two blocks.
+    for (format, block) in [("eac_rgba8", 16usize), ("etc2_rgb8a1", 8)] {
+        let texture = bytes(rng, 4 * block);
+        // The right column's two blocks, from rows a block and a half apart.
+        let row = 2 * block + block;
+        let row = row.next_multiple_of(block);
+        let staging = bytes(rng, 2 * row);
+        let mut copied = texture.clone();
+        for y in 0..2 {
+            let at = (y * 2 + 1) * block;
+            copied[at..at + block].copy_from_slice(&staging[y * row..y * row + block]);
+        }
+        plan.add(
+            Case::blit(
+                &format!("blit.buffer_to_texture.{format}"),
+                json!([{"op": "buffer_to_texture", "src": "staging", "bytes_per_row": row, "bytes_per_image": 2 * row,
+                        "size": [4, 8, 1], "dst": "t", "origin": [4, 0, 0]}]),
+            )
+            .requires(&["apple1"], &[])
+            .buffer(Buffer::data("staging", 0, staging).unbound())
+            .texture(Texture::d2("t", format, 8, 8).data(texture.clone()))
+            .output(exact("t", copied)),
+        );
+        // The lower block row, into rows padded by a block.
+        let row = 3 * block;
+        let mut read = vec![0x5A; row];
+        read[..2 * block].copy_from_slice(&texture[2 * block..]);
+        plan.add(
+            Case::blit(
+                &format!("blit.texture_to_buffer.{format}"),
+                json!([{"op": "texture_to_buffer", "src": "t", "origin": [0, 4, 0], "size": [8, 4, 1], "dst": "out",
+                        "bytes_per_row": row, "bytes_per_image": row}]),
+            )
+            .requires(&["apple1"], &[])
+            .buffer(Buffer::data("out", 0, vec![0x5A; row]).unbound())
+            .texture(Texture::d2("t", format, 8, 8).data(texture.clone()))
+            .output(exact("out", read)),
+        );
+        let other = bytes(rng, 4 * block);
+        let mut moved = other.clone();
+        moved[3 * block..].copy_from_slice(&texture[..block]);
+        plan.add(
+            Case::blit(
+                &format!("blit.copy_texture.{format}"),
+                json!([{"op": "copy_texture", "src": "a", "src_origin": [0, 0, 0], "size": [4, 4, 1], "dst": "b",
+                        "dst_origin": [4, 4, 0]}]),
+            )
+            .requires(&["apple1"], &[])
+            .texture(Texture::d2("a", format, 8, 8).data(texture))
+            .texture(Texture::d2("b", format, 8, 8).data(other))
+            .output(exact("b", moved)),
+        );
+    }
+}
+
 pub fn build(plan: &mut Plan) {
     let mut rng = Random::new(1101);
+    held_blocks(plan, &mut Random::new(1104));
     more(plan, &mut Random::new(1102));
     stored_encodings(plan, &mut Random::new(1103));
     // Copies and fills at 4-byte aligned offsets and sizes, overlapping
