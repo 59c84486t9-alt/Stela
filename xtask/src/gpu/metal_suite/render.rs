@@ -3184,9 +3184,9 @@ pub fn build(plan: &mut Plan) {
     plan.add(Case::device("device.policy").set(
         "policy",
         json!({
-            "families.apple3": true, "families.common1": true, "families.common2": true,
-            "families.common3": true, "families.mac2": true,
-            "families.apple1": false, "families.apple2": false, "families.apple4": false,
+            "families.apple1": true, "families.apple2": true, "families.apple3": true,
+            "families.common1": true, "families.common2": true, "families.common3": true,
+            "families.mac2": true, "families.apple4": false,
             "families.apple5": false, "families.apple6": false, "families.apple7": false,
             "families.apple8": false, "families.apple9": false, "families.apple10": false,
             "families.apple11": false, "families.metal3": false, "families.metal4": false,

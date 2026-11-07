@@ -149,6 +149,8 @@ fn every_turing_and_later_chip_derives_the_same_metal_profile() {
         assert_eq!(
             capabilities.families(),
             [
+                GpuFamily::Apple1,
+                GpuFamily::Apple2,
                 GpuFamily::Apple3,
                 GpuFamily::Common1,
                 GpuFamily::Common2,

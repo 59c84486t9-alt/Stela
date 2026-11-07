@@ -6,9 +6,10 @@
 //! lowers the shader constructs; and this layer implements the API path.
 //! Each refusal is recorded once as a [`Gap`] naming the layer that lacks it,
 //! so negative answers stay explicit. A GPU family is the conjunction of its
-//! requirements; Apple GPU families and Metal 4, which presuppose Apple's
-//! tile-based architecture, are not claimed for another GPU, but for Apple3,
-//! which macOS's compositor requires of its display surfaces.
+//! requirements. Apple GPU families from Apple4 and Metal 4, which presuppose
+//! Apple's tile-based architecture, are not claimed for another GPU; Apple1
+//! to Apple3 are, with their formats and programmable blending, as macOS's
+//! compositor requires Apple3 of its display surfaces.
 use super::{
     abi::{
         ArgumentBuffersTier, CounterSamplingPoint, DeviceLocation, GpuFamily, ReadWriteTextureTier,
@@ -1448,20 +1449,54 @@ impl Derivation<'_> {
                     api("MetalFX upscaling", true, ApiFeatures::METALFX),
                 ],
             );
-        self.gap(
-            "Apple GPU families other than Apple3",
-            Cause::AppleArchitecture,
-        );
+        // Apple1 and Apple2, which Apple3 contains, add the formats of
+        // Apple's first GPUs: ETC2, EAC and PVRTC blocks and the 16-bit
+        // packed formats, then ASTC LDR blocks, which this device samples
+        // decoded as Apple's do.
+        let readable = |compression: Compression| {
+            PixelFormat::ALL
+                .iter()
+                .filter(|format| format.describe().compression == compression)
+                .all(|format| {
+                    capabilities
+                        .format(*format)
+                        .contains(FormatCapabilities::READ | FormatCapabilities::FILTER)
+                })
+        };
+        let packed16 = [
+            PixelFormat::B5G6R5Unorm,
+            PixelFormat::A1Bgr5Unorm,
+            PixelFormat::Abgr4Unorm,
+            PixelFormat::Bgr5A1Unorm,
+        ]
+        .into_iter()
+        .all(|packed| format(packed, render | FormatCapabilities::FILTER));
+        let apple3 = mac2 && capabilities.framebuffer_reads;
+        let apple1 = apple3
+            && self.check_all(
+                "GPU family Apple1",
+                &[
+                    driver("ETC2 and EAC sampling", readable(Compression::Etc2Eac)),
+                    driver("PVRTC sampling", readable(Compression::Pvrtc)),
+                    driver("16-bit packed render targets", packed16),
+                ],
+            );
+        let apple2 = apple1
+            && self.check_all(
+                "GPU family Apple2",
+                &[driver("ASTC LDR sampling", readable(Compression::AstcLdr))],
+            );
+        self.gap("Apple GPU families from Apple4", Cause::AppleArchitecture);
         self.gap("GPU family Metal4", Cause::AppleArchitecture);
 
         let mut families = Vec::new();
         for (family, held) in [
+            (GpuFamily::Apple1, apple1),
+            (GpuFamily::Apple2, apple2),
             // Core Animation maps WindowServer's two-plane framebuffers to a
-            // Metal format only on a device in this family. It predates tile
-            // shaders, and it alone stands: the families below it steer Core
-            // Animation to tile memory.
-            // Programmable blending is among the family's features.
-            (GpuFamily::Apple3, mac2 && capabilities.framebuffer_reads),
+            // Metal format only on a device in this family, which predates
+            // tile shaders. Programmable blending is among its features.
+            (GpuFamily::Apple3, apple3),
             (GpuFamily::Common1, common1),
             (GpuFamily::Common2, common2),
             (GpuFamily::Common3, common3),
