@@ -190,6 +190,30 @@ fn atomics(plan: &mut Plan, library: &str) {
         )
         .note("seen holds each fetch-add return in the order the threads ran"),
     );
+    // Values published in acquire-release order: the last of the threads
+    // to take a ticket sees every thread's value.
+    let published = (0..n as u32).fold(0u32, |sum, id| sum.wrapping_add(id * 3 + 1));
+    for (name, function, cells) in [
+        (
+            "compute.atomics.ordered",
+            "atomics_ordered",
+            [n as u32, published, n as u32],
+        ),
+        (
+            "compute.atomics.fenced",
+            "atomics_fenced",
+            [n as u32, published, 0],
+        ),
+    ] {
+        if plan.has(SOURCE, function) {
+            plan.add(
+                Case::compute1(name, library, function, n as u32)
+                    .buffer(Buffer::data("cells", 0, u32s(&[0; 3])))
+                    .buffer(Buffer::zeroed("values", 1, n * 4))
+                    .output(Output::exact("cells", Dtype::U32, u32s(&cells))),
+            );
+        }
+    }
     let all: Vec<u32> = (0..=n as u32).collect();
     plan.add(
         Case::compute1(

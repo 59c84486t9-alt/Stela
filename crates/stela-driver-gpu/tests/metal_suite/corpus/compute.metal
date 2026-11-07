@@ -101,6 +101,40 @@ kernel void atomics_returns(device atomic_uint *counter [[buffer(0)]], device ui
     seen[id] = atomic_fetch_add_explicit(counter, (id % 5) + 1, memory_order_relaxed) * 8 + (id % 5);
 }
 
+// Each thread stores its value, then takes a ticket in acquire-release
+// order: the thread with the last ticket sees every value, which other
+// threadgroups see only as coherent(device) memory, and stores their sum
+// with a sequentially consistent atomic_store.
+kernel void atomics_ordered(device atomic_uint *cells [[buffer(0)]], coherent(device) device uint *values [[buffer(1)]],
+                            uint id [[thread_position_in_grid]], uint n [[threads_per_grid]])
+{
+    values[id] = id * 3u + 1u;
+    uint ticket = atomic_fetch_add_explicit(&cells[0], 1u, memory_order_acq_rel, mem_flags::mem_device);
+    if (ticket != n - 1u)
+        return;
+    uint sum = 0;
+    for (uint i = 0; i < n; i++)
+        sum += values[i];
+    atomic_store(&cells[1], sum);
+    atomic_store_explicit(&cells[2], atomic_load(&cells[0]), memory_order_release, mem_flags::mem_device);
+}
+
+// The same with a relaxed ticket between release and acquire fences.
+kernel void atomics_fenced(device atomic_uint *cells [[buffer(0)]], coherent(device) device uint *values [[buffer(1)]],
+                           uint id [[thread_position_in_grid]], uint n [[threads_per_grid]])
+{
+    values[id] = id * 3u + 1u;
+    atomic_thread_fence(mem_flags::mem_device, memory_order_release, thread_scope_device);
+    uint ticket = atomic_fetch_add_explicit(&cells[0], 1u, memory_order_relaxed);
+    if (ticket != n - 1u)
+        return;
+    atomic_thread_fence(mem_flags::mem_device, memory_order_acquire, thread_scope_device);
+    uint sum = 0;
+    for (uint i = 0; i < n; i++)
+        sum += values[i];
+    atomic_store_explicit(&cells[1], sum, memory_order_relaxed);
+}
+
 // Exchange returns every value once: the old values and the final value
 // together are the inputs and the initial value.
 kernel void atomics_exchange(device atomic_uint *cell [[buffer(0)]], device uint *seen [[buffer(1)]],

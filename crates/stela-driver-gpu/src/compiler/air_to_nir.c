@@ -4700,6 +4700,55 @@ pair_member(struct translator *t, LLVMValueRef inst, const struct value *pair)
    return put_value(t, inst, pair->members[index], 0);
 }
 
+static bool atomic_form(struct translator *t, LLVMValueRef inst, unsigned form, unsigned space,
+                        LLVMValueRef pointer, LLVMValueRef operand, unsigned operands,
+                        LLVMTypeRef type, const char *name, size_t length);
+
+/* The memory a set of Metal memory flags names: 1 device, 2 threadgroup,
+ * 4 texture, 8 threadgroup imageblock and 16 object data memory. A kernel's
+ * explicit imageblock is threadgroup memory; a tile function's implicit one
+ * is its attachments' images and its explicit one device memory. */
+static nir_variable_mode
+memory_flag_modes(const struct translator *t, unsigned flags)
+{
+   bool tile = t->tile != NULL;
+   return (flags & 1 || (flags & 8 && tile) ? nir_var_mem_ssbo | nir_var_mem_global : 0) |
+          (flags & 2 || (flags & 8 && !tile) ? nir_var_mem_shared : 0) |
+          (flags & 4 || (flags & 8 && tile) ? nir_var_image : 0) |
+          (flags & 16 ? nir_var_mem_task_payload : 0);
+}
+
+/* A C++ memory order's semantics, 0 relaxed to 5 sequentially consistent:
+ * consume is acquire, and sequential consistency acquire and release, as
+ * SPIR-V's is. */
+static nir_memory_semantics
+order_semantics(unsigned order)
+{
+   return order == 1 || order == 2 ? NIR_MEMORY_ACQUIRE :
+          order == 3 ? NIR_MEMORY_RELEASE :
+          order >= 4 ? NIR_MEMORY_ACQ_REL : 0;
+}
+
+/* Metal's scope of memory: 1 threadgroup, 4 SIMD-group and otherwise
+ * device (2, or Metal 1's 3). */
+static mesa_scope
+memory_scope(unsigned scope)
+{
+   return scope == 1 ? SCOPE_WORKGROUP : scope == 4 ? SCOPE_SUBGROUP : SCOPE_DEVICE;
+}
+
+/* The part of an ordered atomic's semantics a barrier on one side of it
+ * implements: release before it, acquire after. */
+static void
+atomic_order_barrier(struct translator *t, nir_memory_semantics semantics, unsigned scope,
+                     nir_variable_mode modes)
+{
+   if (!semantics || !modes)
+      return;
+   nir_barrier(&t->b, .execution_scope = SCOPE_NONE, .memory_scope = memory_scope(scope),
+               .memory_semantics = semantics, .memory_modes = modes);
+}
+
 /* AIR's relaxed atomics, as Apple's compiler names them:
  *
  *   air.atomic.<global|local>.load.<type>(pointer, order, scope, volatile)
@@ -4711,12 +4760,16 @@ pair_member(struct translator *t, LLVMValueRef inst, const struct value *pair)
  *   air.atomic.<global|local>.<add|sub|and|or|xor|min|max>.<sign><type>(
  *       pointer, value, order, scope, volatile)
  *
- * From AIR 2.9 an i32 follows the scope. Apple's compiler emits 0, the only
- * value taken; the volatility, when present, stays last.
+ * From AIR 2.9 an i32 follows the scope: the memory flags an ordered
+ * atomic orders, which a relaxed one leaves 0. The volatility, when
+ * present, stays last.
  *
  * A floating-point type is bare ("f32"); an integer one carries its sign
- * ("s.i32") for arithmetic, which selects min and max. Orders are relaxed;
- * scopes need no lowering, as NIR's atomics are device-scope. A
+ * ("s.i32") for arithmetic, which selects min and max. An order other than
+ * relaxed is barriers around the atomic over its flags' memory: release
+ * before, acquire after. Without flags (before AIR 2.9) it orders the
+ * atomic's own memory. The atomic itself needs no scope, as NIR's are
+ * device-scope. A
  * compare-exchange returns the old value and writes it through expected, a
  * thread pointer. The 64-bit min and max return nothing. */
 /* A coherent(device) load or store: air.load.device_coherent.<type>.p1<type>
@@ -4819,18 +4872,49 @@ air_atomic_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, co
           LLVMGetIntTypeWidth(LLVMTypeOf(value)) != (volatility ? 1u : 32u) ||
           (i > scope && !volatility && !qualifier))
          return fail(t, STELA_AIR_INSTRUCTION, "AIR atomic order, scope and volatility must be constants");
-      if (i < scope && LLVMConstIntGetZExtValue(value))
-         return fail(t, STELA_AIR_MEMORY, "only relaxed AIR atomics are supported");
-      if (qualifier && LLVMConstIntGetZExtValue(value))
-         return fail(t, STELA_AIR_MEMORY, "unsupported AIR atomic scope qualifier");
+      uint64_t constant = LLVMConstIntGetZExtValue(value);
+      if (i < scope && constant > 5)
+         return fail(t, STELA_AIR_MEMORY, "unsupported AIR atomic order");
+      if (qualifier && constant & ~31u)
+         return fail(t, STELA_AIR_MEMORY, "unsupported AIR atomic memory flags");
    }
+   /* A compare-exchange orders as its success order, which is at least as
+    * strong as its failure's. */
+   unsigned order = (unsigned)LLVMConstIntGetZExtValue(LLVMGetOperand(inst, operands));
+   unsigned memory = (unsigned)LLVMConstIntGetZExtValue(LLVMGetOperand(inst, scope));
+   bool flagged = count > scope + 1 &&
+                  LLVMGetIntTypeWidth(LLVMTypeOf(LLVMGetOperand(inst, scope + 1))) == 32;
+   unsigned flags = flagged ? (unsigned)LLVMConstIntGetZExtValue(LLVMGetOperand(inst, scope + 1)) :
+                              space ? 2u : 1u;
+   nir_memory_semantics semantics = order_semantics(order);
+   nir_variable_mode modes = memory_flag_modes(t, flags);
+   atomic_order_barrier(t, semantics & NIR_MEMORY_RELEASE, memory, modes);
+   bool done = atomic_form(t, inst, form, space, pointer, operand, operands, type, name, length);
+   if (done)
+      atomic_order_barrier(t, semantics & NIR_MEMORY_ACQUIRE, memory, modes);
+   return done;
+}
+
+/* An AIR atomic's access itself, once its call is validated. */
+static bool
+atomic_form(struct translator *t, LLVMValueRef inst, unsigned form, unsigned space,
+            LLVMValueRef pointer, LLVMValueRef operand, unsigned operands, LLVMTypeRef type,
+            const char *name, size_t length)
+{
+   enum form { LOAD, STORE, EXCHANGE, COMPARE, ARITHMETIC };
+   static const char *const spaces[] = {"air.atomic.global.", "air.atomic.local."};
+   static const char *const form_names[] = {
+      [LOAD] = "load.", [STORE] = "store.", [EXCHANGE] = "xchg.", [COMPARE] = "cmpxchg.weak.",
+      [ARITHMETIC] = "",
+   };
+   bool returns = LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMVoidTypeKind;
    char overload[16], expected[64];
    stela_air_call_overload(type, overload, sizeof(overload));
    bool floating = LLVMGetTypeKind(type) == LLVMFloatTypeKind;
    unsigned alignment = LLVMABIAlignmentOfType(t->layout, type);
    unsigned components, bits;
    if (form != ARITHMETIC) {
-      snprintf(expected, sizeof(expected), "%s%s%s", spaces[space], forms[form].name, overload);
+      snprintf(expected, sizeof(expected), "%s%s%s", spaces[space], form_names[form], overload);
       if (!stela_air_call_named(name, length, expected))
          return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR atomic function");
       if (!value_shape(type, &components, &bits) || components != 1 ||
@@ -5023,13 +5107,11 @@ synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef calle
    /* Flag 8 is mem_threadgroup_imageblock: a kernel's explicit imageblock
     * is threadgroup memory, and a tile function's implicit one its
     * attachments' images. */
-   if (flags & ~15u || (kind == FENCE ? order != 0 && order != 5 : order != 5) ||
+   if (flags & ~31u || (kind == FENCE ? order > 5 : order != 5) ||
        (kind == FENCE ? scope != 1 && scope != 2 && scope != 4 :
         kind == THREADGROUP_BARRIER ? scope != 1 : scope != 1 && scope != 4))
       return fail(t, STELA_AIR_INSTRUCTION, "unsupported barrier or fence memory flags/order/scope");
-   nir_variable_mode modes = (flags & 1 ? nir_var_mem_ssbo | nir_var_mem_global : 0) |
-                             (flags & 10 ? nir_var_mem_shared : 0) |
-                             (flags & 4 || (flags & 8 && t->tile) ? nir_var_image : 0);
+   nir_variable_mode modes = memory_flag_modes(t, flags);
    bool ordered = modes && order;
    mesa_scope execution = kind == THREADGROUP_BARRIER ? SCOPE_WORKGROUP :
                           kind == SIMDGROUP_BARRIER ? SCOPE_SUBGROUP : SCOPE_NONE;
@@ -5037,9 +5119,9 @@ synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef calle
    if (!ordered && execution == SCOPE_NONE)
       return true;
    nir_barrier(&t->b, .execution_scope = execution,
-               .memory_scope = !ordered ? SCOPE_NONE : scope == 2 ? SCOPE_DEVICE :
-                               scope == 4 ? SCOPE_SUBGROUP : SCOPE_WORKGROUP,
-               .memory_semantics = ordered ? NIR_MEMORY_ACQ_REL : 0, .memory_modes = ordered ? modes : 0);
+               .memory_scope = !ordered ? SCOPE_NONE : memory_scope(scope),
+               .memory_semantics = ordered ? order_semantics(order) : 0,
+               .memory_modes = ordered ? modes : 0);
    t->shared_barriers++;
    return true;
 }

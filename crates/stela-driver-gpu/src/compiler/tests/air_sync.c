@@ -366,12 +366,13 @@ refuses_unqualified_atomics(void)
            "%a = call i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %out, ptr addrspace(1) %out,"
            " i32 1, i32 0, i32 0, i32 2, i1 true)\nret void\n",
            STELA_AIR_MEMORY);
+   /* Orders run from relaxed to sequentially consistent, and memory flags
+    * name five kinds of memory. */
    refused("declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i1)\n",
-           "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 5, i32 3, i1 true)\nret void\n",
+           "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 6, i32 3, i1 true)\nret void\n",
            STELA_AIR_MEMORY);
-   /* A qualifier other than the 0 Apple's compiler emits is not taken. */
    refused("declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i32, i1)\n",
-           "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 0, i32 2, i32 1, i1 false)\nret void\n",
+           "%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 0, i32 2, i32 32, i1 false)\nret void\n",
            STELA_AIR_MEMORY);
    /* Nothing follows the volatility. */
    refused("declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i1, i32)\n",
@@ -440,12 +441,12 @@ barriers_and_fences_follow_their_flags(void)
    /* A relaxed fence orders nothing. */
    check_barrier(fence, "call void @air.atomic.fence(i32 3, i32 0, i32 1)", SCOPE_NONE, SCOPE_NONE, 0);
    const char *refusals[][2] = {
-      {threadgroup, "call void @air.wg.barrier(i32 16, i32 5, i32 1) convergent"},
+      {threadgroup, "call void @air.wg.barrier(i32 32, i32 5, i32 1) convergent"},
       {threadgroup, "call void @air.wg.barrier(i32 2, i32 0, i32 1) convergent"},
       {threadgroup, "call void @air.wg.barrier(i32 2, i32 5, i32 2) convergent"},
       {simdgroup, "call void @air.simdgroup.barrier(i32 2, i32 2) convergent"},
       {"declare void @air.wg.barrier(i32, i32, i32)\n", "call void @air.wg.barrier(i32 2, i32 5, i32 1)"},
-      {fence, "call void @air.atomic.fence(i32 1, i32 2, i32 2)"},
+      {fence, "call void @air.atomic.fence(i32 1, i32 6, i32 2)"},
       {fence, "call void @air.atomic.fence(i32 1, i32 5, i32 0)"},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(refusals); i++) {
@@ -453,6 +454,85 @@ barriers_and_fences_follow_their_flags(void)
       snprintf(body, sizeof(body), "%s\nret void\n", refusals[i][1]);
       refused(refusals[i][0], body, STELA_AIR_INSTRUCTION);
    }
+}
+
+/* The barriers in shader, in order, as (memory semantics, modes). */
+static unsigned
+barrier_semantics(nir_shader *shader, unsigned *semantics, nir_variable_mode *modes, unsigned max)
+{
+   unsigned n = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic ||
+                nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_barrier)
+               continue;
+            nir_intrinsic_instr *barrier = nir_instr_as_intrinsic(instr);
+            if (n < max) {
+               semantics[n] = nir_intrinsic_memory_semantics(barrier);
+               modes[n] = nir_intrinsic_memory_modes(barrier);
+            }
+            n++;
+         }
+      }
+   }
+   return n;
+}
+
+/* Metal 4.1's ordered atomics: release is a barrier over the flags' memory
+ * before the atomic, acquire one after, and sequential consistency both;
+ * plain atomic loads and stores are sequentially consistent over all
+ * memory. A fence takes any order. */
+static void
+ordered_atomics_and_fences_are_barriers(void)
+{
+   const nir_variable_mode device = nir_var_mem_ssbo | nir_var_mem_global;
+   const nir_atomic_op ops[] = {nir_atomic_op_iadd};
+   unsigned semantics[4];
+   nir_variable_mode modes[4];
+   static const char *add = "declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i32, i1)\n";
+   struct {
+      const char *call;
+      unsigned count, first, second;
+      nir_variable_mode memory;
+   } cases[] = {
+      {"%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 2, i32 2, i32 1, i1 false)\n",
+       1, NIR_MEMORY_ACQUIRE, 0, device},
+      {"%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 3, i32 2, i32 1, i1 false)\n",
+       1, NIR_MEMORY_RELEASE, 0, device},
+      {"%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 5, i32 2, i32 2, i1 false)\n",
+       2, NIR_MEMORY_RELEASE, NIR_MEMORY_ACQUIRE, nir_var_mem_shared},
+      {"%a = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %out, i32 1, i32 0, i32 2, i32 0, i1 false)\n",
+       0, 0, 0, 0},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
+      char body[512];
+      snprintf(body, sizeof(body), "%sstore i32 %%a, ptr addrspace(1) %%out, align 4\nret void\n",
+               cases[i].call);
+      nir_shader *shader = lowered(add, body);
+      nir_atomic_op seen[4];
+      assert(atomics(shader, seen, ARRAY_SIZE(seen)) == 1 && seen[0] == ops[0]);
+      assert(barrier_semantics(shader, semantics, modes, ARRAY_SIZE(semantics)) == cases[i].count);
+      assert(!cases[i].count || (semantics[0] == cases[i].first && modes[0] == cases[i].memory));
+      assert(cases[i].count < 2 || (semantics[1] == cases[i].second && modes[1] == cases[i].memory));
+      ralloc_free(shader);
+   }
+   /* atomic_store and atomic_load: sequentially consistent, all memory. */
+   nir_shader *shader = lowered(
+      "declare void @air.atomic.global.store.i32(ptr addrspace(1), i32, i32, i32, i32, i1)\n"
+      "declare i32 @air.atomic.global.load.i32(ptr addrspace(1), i32, i32, i32, i1)\n",
+      "call void @air.atomic.global.store.i32(ptr addrspace(1) %out, i32 5, i32 5, i32 2, i32 31, i1 false)\n"
+      "%l = call i32 @air.atomic.global.load.i32(ptr addrspace(1) %out, i32 5, i32 2, i32 31, i1 false)\n"
+      "store i32 %l, ptr addrspace(1) %out, align 4\nret void\n");
+   assert(barrier_semantics(shader, semantics, modes, ARRAY_SIZE(semantics)) == 4);
+   assert(modes[0] & device && modes[0] & nir_var_mem_shared && modes[0] & nir_var_image);
+   ralloc_free(shader);
+   /* An acquire fence. */
+   shader = lowered("declare void @air.atomic.fence(i32, i32, i32)\n",
+                    "call void @air.atomic.fence(i32 1, i32 2, i32 2)\nret void\n");
+   assert(barrier_semantics(shader, semantics, modes, ARRAY_SIZE(semantics)) == 1 &&
+          semantics[0] == NIR_MEMORY_ACQUIRE && modes[0] == device);
+   ralloc_free(shader);
 }
 
 static void
@@ -945,6 +1025,7 @@ main(void)
    coherent_accesses_are_coherent();
    refuses_unqualified_atomics();
    barriers_and_fences_follow_their_flags();
+   ordered_atomics_and_fences_are_barriers();
    simd_functions_lower_to_subgroup_operations();
    matrix_products_follow_rows_and_columns();
    matrix_memory_takes_origins_strides_and_transposes();
