@@ -198,36 +198,39 @@ fn the_queue_answers_its_serials_and_clocks() {
 }
 
 #[test]
-fn allocated_size_retires_completed_work_first() {
+fn each_connection_counts_the_allocations_it_holds() {
     let mut service = service_on(MockBackend::new());
-    let connection = connect(&mut service);
-    let buffer = new_buffer(&mut service, connection, StorageMode::Private);
-    let serial = commit(&mut service, connection, &Stream::default())
-        .unwrap()
-        .value;
+    let first = connect(&mut service);
+    let second = connect(&mut service);
+    let allocated = |service: &mut TestService, connection| {
+        let size: Value = call(
+            service,
+            connection,
+            Operation::AllocatedSize,
+            &Empty {},
+            &mut Memory::default(),
+        )
+        .unwrap();
+        size.value
+    };
+    let buffer = new_buffer(&mut service, first, StorageMode::Private);
+    new_buffer(&mut service, second, StorageMode::Shared);
+    let shared = allocated(&mut service, second);
+    assert_eq!(allocated(&mut service, first), 256);
+    assert!(shared >= 256, "imported memory counts as its buffer's");
+    assert_eq!(service.device().current_allocated_size(), 256 + shared);
+    // A released buffer leaves its process's count at once, though work
+    // in flight keeps the device's memory until it retires.
+    commit(&mut service, first, &Stream::default()).unwrap();
     call::<_, Empty>(
         &mut service,
-        connection,
+        first,
         Operation::Release,
         &Handle { handle: buffer },
         &mut Memory::default(),
     )
     .unwrap();
-    assert_eq!(
-        service.device().current_allocated_size(),
-        256,
-        "in-flight work still holds the buffer"
-    );
-    let backend = service.device().backend();
-    let timeline = *backend.semaphores.keys().next().unwrap();
-    backend.semaphores.insert(timeline, serial);
-    let allocated: Value = call(
-        &mut service,
-        connection,
-        Operation::AllocatedSize,
-        &Empty {},
-        &mut Memory::default(),
-    )
-    .unwrap();
-    assert_eq!(allocated.value, 0, "the completed work released it");
+    assert_eq!(allocated(&mut service, first), 0);
+    assert_eq!(service.device().current_allocated_size(), 256 + shared);
+    assert_eq!(allocated(&mut service, second), shared);
 }

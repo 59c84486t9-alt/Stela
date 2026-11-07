@@ -191,6 +191,38 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     }
 
     /// Imported memory no object took.
+    /// The bytes an object allocated itself, which `currentAllocatedSize`
+    /// counts for the process holding it: imported memory, and buffers,
+    /// textures and heaps of their own memory; none for one placed in a
+    /// heap or over a buffer, which its heap or buffer counts.
+    pub fn import_bytes(&self, id: MemoryId) -> u64 {
+        self.resources
+            .imports
+            .get(id.0)
+            .map_or(0, |import| import.bytes)
+    }
+
+    pub fn buffer_bytes(&self, id: BufferId) -> u64 {
+        self.resources
+            .buffers
+            .get(id.0)
+            .map_or(0, |buffer| owned_bytes(buffer.backing))
+    }
+
+    pub fn texture_bytes(&self, id: TextureId) -> u64 {
+        self.resources
+            .textures
+            .get(id.0)
+            .map_or(0, |texture| owned_bytes(texture.backing))
+    }
+
+    pub fn heap_bytes(&self, id: HeapId) -> u64 {
+        self.resources
+            .heaps
+            .get(id.0)
+            .map_or(0, |heap| heap.descriptor.size)
+    }
+
     pub fn release_import(&mut self, id: MemoryId) -> Result<()> {
         let import = self.resources.imports.remove(id.0)?;
         self.release_memory(import.memory, import.bytes);
@@ -1601,6 +1633,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let heap = self.resources.heaps.remove(id.0)?;
         self.release_memory(heap.memory, heap.descriptor.size);
         Ok(())
+    }
+}
+
+fn owned_bytes(backing: Backing) -> u64 {
+    match backing {
+        Backing::Owned(bytes) => bytes,
+        _ => 0,
     }
 }
 

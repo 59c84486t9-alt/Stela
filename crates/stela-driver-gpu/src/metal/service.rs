@@ -165,10 +165,15 @@ kinds! {
 struct Entry {
     object: Object,
     made: u64,
+    /// The bytes the object allocated itself, which its connection counts.
+    bytes: u64,
 }
 
 struct Connection {
     objects: ObjectTable<Entry>,
+    /// `currentAllocatedSize`: the bytes of the objects it holds, as each
+    /// process's device counts only its own.
+    allocated: u64,
     /// Objects made so far, which orders them.
     made: u64,
     negotiated: bool,
@@ -305,6 +310,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Connection {
                 objects: ObjectTable::new(id, self.epoch, MAX_OBJECTS),
                 made: 0,
+                allocated: 0,
                 negotiated: false,
             },
         );
@@ -374,11 +380,14 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         // otherwise also queue a retirement token for that same descriptor.
         let reserved = held.objects.reserve(connection, self.epoch)?;
         let memory = self.device.import_memory(ranges, token)?;
+        let bytes = self.device.import_bytes(memory);
         let handle = reserved.insert(Entry {
             object: Object::Memory(memory),
             made,
+            bytes,
         });
         held.made = made;
+        held.allocated += bytes;
         Ok(NonZeroU64::new(handle.encode()).expect("live generations are nonzero"))
     }
 
@@ -398,9 +407,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let memory = self.object::<MemoryId>(connection, handle)?;
         let epoch = self.epoch;
         let handle = ObjectHandle::decode(handle).ok_or(Fault::STALE)?;
-        self.connection(connection)?
-            .objects
-            .remove(connection, epoch, handle)?;
+        let held = self.connection(connection)?;
+        let entry = held.objects.remove(connection, epoch, handle)?;
+        held.allocated -= entry.bytes;
         Ok(memory)
     }
 
@@ -533,13 +542,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 call.reply(&wire::TimestampsResponse { cpu, gpu })
             }
             Operation::AllocatedSize => {
-                // Objects released while work was in flight stay charged until
-                // that work retires; retire what completed so the answer is
-                // the size now, not whenever the gate next polled.
-                self.device.poll()?;
-                call.reply(&wire::Value {
-                    value: self.device.current_allocated_size(),
-                })
+                let allocated = self.connection(call.connection)?.allocated;
+                call.reply(&wire::Value { value: allocated })
             }
             Operation::Poll => {
                 let value = self.device.poll()?;
@@ -597,6 +601,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// again if the connection cannot hold it.
     fn hold(&mut self, connection: NonZeroU64, object: Object) -> Result<Handle, Fault> {
         let epoch = self.epoch;
+        let bytes = self.bytes(object);
         let held = self.connection(connection).and_then(|held| {
             held.made = held.made.checked_add(1).ok_or(Fault::new(
                 Status::OutOfMemory,
@@ -605,10 +610,14 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             let entry = Entry {
                 object,
                 made: held.made,
+                bytes,
             };
-            held.objects
+            let handle = held
+                .objects
                 .insert(connection, epoch, entry)
-                .map_err(|refused| Fault::from(refused.error))
+                .map_err(|refused| Fault::from(refused.error))?;
+            held.allocated += bytes;
+            Ok(handle)
         });
         match held {
             Ok(handle) => Ok(Handle {
@@ -642,10 +651,21 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let held = self.connection(connection)?;
         let object = held.objects.get(connection, epoch, handle)?.object;
         self.destroy(object)?;
-        self.connection(connection)?
-            .objects
-            .remove(connection, epoch, handle)?;
+        let held = self.connection(connection)?;
+        let entry = held.objects.remove(connection, epoch, handle)?;
+        held.allocated -= entry.bytes;
         Ok(())
+    }
+
+    /// The bytes `object` allocated itself.
+    fn bytes(&self, object: Object) -> u64 {
+        match object {
+            Object::Memory(id) => self.device.import_bytes(id),
+            Object::Buffer(id) => self.device.buffer_bytes(id),
+            Object::Texture(id) => self.device.texture_bytes(id),
+            Object::Heap(id) => self.device.heap_bytes(id),
+            _ => 0,
+        }
     }
 
     /// Gives up a handle's hold of `object`, destroying it with the last.
