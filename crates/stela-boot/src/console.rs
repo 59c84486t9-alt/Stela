@@ -346,11 +346,26 @@ impl Framebuffer {
         self.write_row(self.base, y, pixels);
     }
 
-    /// Row `y` of the frame at `base`.
+    /// Row `y` of the frame at `base`. A blue-low mode takes the pixels as
+    /// they are, in one copy whose wide stores combine; the screen use's
+    /// closing SFENCE, opaque to the compiler, keeps them.
     fn write_row(&self, base: usize, y: usize, pixels: &[u8]) {
         let line = (base + y * self.stride * BYTES_PER_PIXEL) as *mut u32;
         let (pixels, _) = pixels.as_chunks::<BYTES_PER_PIXEL>();
         let pixels = &pixels[..pixels.len().min(self.width)];
+        if let Encoding::Bgr = self.encoding {
+            // SAFETY: at most `width` pixels of row `y < height`, inside one
+            // of the mode's frames in video memory, which no Rust reference
+            // covers.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    pixels.as_ptr().cast::<u8>(),
+                    line.cast::<u8>(),
+                    pixels.len() * BYTES_PER_PIXEL,
+                )
+            };
+            return;
+        }
         for (column, pixel) in pixels.iter().enumerate() {
             let value = self.encoding.encode(u32::from_le_bytes(*pixel));
             // SAFETY: `column < width` and `y < height`, inside one of the
