@@ -729,6 +729,84 @@ fn pvrtc_cases(plan: &mut Plan, library: &str, rng: &mut Random) {
     }
 }
 
+/// ASTC LDR textures of every block size, a block short of whole blocks on
+/// each side, compared with Apple's decode: a legal block of a common mode
+/// with one partition, one with up to four, a void extent and a random
+/// block, mostly illegal. Apple returns a linear texel's top 12 bits of
+/// the Khronos UNORM16 result and an sRGB texel's 8.
+fn astc_cases(plan: &mut Plan, library: &str, rng: &mut Random) {
+    const MODES: [u32; 12] = [
+        0x0042, 0x0053, 0x0063, 0x0102, 0x0142, 0x0182, 0x0242, 0x0442, 0x0542, 0x0843, 0x0101,
+        0x0151,
+    ];
+    let sizes = [
+        (4, 4),
+        (5, 4),
+        (5, 5),
+        (6, 5),
+        (6, 6),
+        (8, 5),
+        (8, 6),
+        (8, 8),
+        (10, 5),
+        (10, 6),
+        (10, 8),
+        (10, 10),
+        (12, 10),
+        (12, 12),
+    ];
+    for (i, (bw, bh)) in sizes.into_iter().enumerate() {
+        for srgb in [false, true] {
+            let name = format!("astc_{bw}x{bh}_{}", if srgb { "srgb" } else { "ldr" });
+            let mut blocks = Vec::new();
+            for kind in 0..4 {
+                let mut words: [u32; 4] = std::array::from_fn(|_| rng.u32());
+                match kind {
+                    0 => words[0] = (words[0] & !0x1fff) | MODES[rng.u32() as usize % MODES.len()],
+                    1 => words[0] = (words[0] & !0x7ff) | MODES[rng.u32() as usize % MODES.len()],
+                    2 => {
+                        words[0] = 0xffff_fdfc;
+                        words[1] = u32::MAX;
+                    }
+                    _ => {}
+                }
+                blocks.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+            }
+            let (width, height) = (2 * bw - 1, 2 * bh - 1);
+            let points: Vec<u32> = (0..width * height)
+                .flat_map(|i| [i % width, i / width, 0, 0])
+                .collect();
+            let tol = if srgb {
+                Tolerance::abs(0.5 / 255.0)
+            } else {
+                // Apple's 12 bits, held widened to 16.
+                Tolerance::abs(2e-5)
+            }
+            .with_ftz(false);
+            plan.add(
+                Case::compute1(
+                    &format!("texture.compressed.{name}"),
+                    library,
+                    "read2d_float",
+                    width * height,
+                )
+                .requires(&["apple2"], &[])
+                .buffer(Buffer::data(
+                    "coords",
+                    0,
+                    points.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                ))
+                .buffer(Buffer::zeroed("out", 1, (width * height * 16) as usize))
+                .output(Output::new("out", Dtype::F32, tol))
+                .texture(storage(
+                    Texture::d2("t", &name, width, height).index(0).data(blocks),
+                    i % 2 == 0,
+                )),
+            );
+        }
+    }
+}
+
 /// Shared textures receive their blocks from the CPU, private ones from a
 /// blit: half the ETC2 and EAC formats take each way.
 fn storage(texture: Texture, shared: bool) -> Texture {
@@ -741,6 +819,7 @@ fn storage(texture: Texture, shared: bool) -> Texture {
 
 pub fn build(plan: &mut Plan, library: &str) {
     pvrtc_cases(plan, library, &mut Random::new(4094));
+    astc_cases(plan, library, &mut Random::new(4095));
     let mut rng = Random::new(4093);
     let (w, h) = (8u32, 8u32);
     for f in formats() {

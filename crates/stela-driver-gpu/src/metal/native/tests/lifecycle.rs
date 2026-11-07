@@ -181,6 +181,7 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         decode_etc: vk::Pipeline::null(),
         decode_pvrtc: vk::Pipeline::null(),
         reorder_blocks: vk::Pipeline::null(),
+        decode_astc: vk::Pipeline::null(),
     }
 }
 

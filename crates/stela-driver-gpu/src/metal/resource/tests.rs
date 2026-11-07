@@ -217,7 +217,7 @@ fn shape_rules_follow_metal() {
 #[test]
 fn unsupported_formats_and_uses_are_refused_by_capability() {
     let capabilities = capabilities();
-    let astc = descriptor(TextureType::D2, PixelFormat::Astc4x4Ldr);
+    let astc = descriptor(TextureType::D2, PixelFormat::Astc4x4Hdr);
     assert_eq!(
         texture(&capabilities, &astc),
         Err(Error::Unsupported("shader reads of this pixel format"))

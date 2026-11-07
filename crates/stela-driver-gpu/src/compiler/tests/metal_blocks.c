@@ -518,12 +518,94 @@ static void reorder_kernel_twiddles_regions(void)
    ralloc_free(shader);
 }
 
+void stela_astc_reference(const uint8_t block[16], unsigned width, unsigned height, bool srgb,
+                          uint32_t (*texels)[2]);
+
+/* ASTC blocks of every size, random, void extents and blocks of the block
+ * modes common encoders pick, decode as Apple's do: as Mesa's reference
+ * decoder with Apple's void-extent rule, which matches Apple's texels. */
+static void astc_blocks_decode_as_apple_does(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "astc");
+   nir_def *base = nir_imm_int64(&b, BASE);
+   nir_def *words = nir_load_global(&b, 4, 32, base, .align_mul = 16);
+   nir_def *inputs = nir_load_global(&b, 4, 32, nir_iadd_imm(&b, base, 16), .align_mul = 16);
+   nir_def *srgb = nir_ine_imm(&b, nir_load_global(&b, 1, 32, nir_iadd_imm(&b, base, 40), .align_mul = 4), 0);
+   nir_def *raw = stela_metal_decode_astc(&b, words, nir_channel(&b, inputs, 0), nir_channel(&b, inputs, 1),
+                                          nir_channel(&b, inputs, 2), nir_channel(&b, inputs, 3), srgb);
+   nir_store_global(&b, raw, nir_iadd_imm(&b, base, 32), .align_mul = 8);
+   nir_validate_shader(b.shader, "astc");
+   nir_index_ssa_defs(nir_shader_get_entrypoint(b.shader));
+   static const unsigned sizes[][2] = {{4, 4}, {5, 4}, {5, 5}, {6, 5}, {6, 6}, {8, 5}, {8, 6},
+                                       {8, 8}, {10, 5}, {10, 6}, {10, 8}, {10, 10}, {12, 10}, {12, 12}};
+   static const uint32_t modes[] = {0x0042, 0x0053, 0x0063, 0x0102, 0x0142, 0x0182,
+                                    0x0242, 0x0442, 0x0542, 0x0843, 0x0101, 0x0151};
+   unsigned blocks = 0;
+   for (unsigned s = 0; s < ARRAY_SIZE(sizes); s++) {
+      unsigned width = sizes[s][0], height = sizes[s][1];
+      for (unsigned rep = 0; rep < 24; rep++) {
+         bool srgb = rep & 1;
+         uint8_t block[16];
+         uint32_t expected[12 * 12][2];
+         uint32_t magenta[2] = {srgb ? 0xffff00ffu : 0x0000ffffu, srgb ? 0 : 0xffffffffu};
+         /* Six random blocks, mostly illegal; three void extents; and
+          * fifteen legal blocks of the common modes, of 1 to 4 partitions. */
+         for (bool legal = false; !legal;) {
+            random_block(block);
+            uint32_t first = get32(block);
+            if (rep >= 6 && rep < 9) {
+               /* Unbounded, LDR or HDR, its reserved bits right in two. */
+               uint32_t reserved = rep == 8 ? first & 0xc00u : 0xc00u;
+               first = (first & 0x200u) | reserved | 0x1fc | 0xfffff000u;
+               put32(block + 4, 0xffffffffu);
+            } else if (rep >= 9) {
+               first = (first & ~0x7ffu) | modes[random32() % ARRAY_SIZE(modes)];
+            }
+            put32(block, first);
+            stela_astc_reference(block, width, height, srgb, expected);
+            legal = rep < 9;
+            for (unsigned i = 0; i < width * height; i++)
+               legal |= expected[i][0] != magenta[0] || expected[i][1] != magenta[1];
+         }
+         uint8_t memory[64] = {0};
+         memcpy(memory, block, 16);
+         put32(memory + 40, srgb);
+         for (unsigned y = 0; y < height; y++) {
+            for (unsigned x = 0; x < width; x++) {
+               uint32_t in[4] = {x, y, width, height};
+               memcpy(memory + 16, in, sizeof(in));
+               const struct air_effect_environment environment = {
+                  .base = BASE, .bytes = memory, .size = sizeof(memory),
+               };
+               struct air_effect_store trace[4];
+               struct air_effect_run result =
+                  air_effect_execute_in(b.shader, 1000000, trace, ARRAY_SIZE(trace), &environment);
+               if (result.status != AIR_EFFECT_COMPLETE)
+                  fprintf(stderr, "astc: %s\n", result.detail);
+               assert(result.status == AIR_EFFECT_COMPLETE);
+               uint32_t got[2] = {get32(memory + 32), get32(memory + 36)};
+               uint32_t *want = expected[y * width + x];
+               if (got[0] != want[0] || got[1] != want[1])
+                  fprintf(stderr, "astc %ux%u%s %08x %08x %08x %08x (%u, %u): %08x %08x, expected %08x %08x\n",
+                          width, height, srgb ? " srgb" : "", get32(block), get32(block + 4),
+                          get32(block + 8), get32(block + 12), x, y, got[0], got[1], want[0], want[1]);
+               assert(got[0] == want[0] && got[1] == want[1]);
+            }
+         }
+         blocks++;
+      }
+   }
+   assert(blocks == ARRAY_SIZE(sizes) * 24);
+   ralloc_free(b.shader);
+}
+
 int main(void)
 {
    glsl_type_singleton_init_or_ref();
    etc_blocks_decode_as_specified();
    pvrtc_blocks_decode_as_apple_does();
    reorder_kernel_twiddles_regions();
+   astc_blocks_decode_as_apple_does();
    glsl_type_singleton_decref();
    puts("metal blocks: ok");
    return 0;

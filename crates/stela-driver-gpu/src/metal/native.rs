@@ -131,8 +131,9 @@ unsafe extern "system" fn forward(
 /// `stela_metal_select_kernel`, `stela_metal_resolve_draws_kernel`,
 /// `stela_metal_resolve_dispatches_kernel`, `stela_metal_store_texels_kernel`,
 /// `stela_metal_load_texels_kernel`, `stela_metal_average_samples_kernel`,
-/// `stela_metal_decode_etc_kernel`, `stela_metal_decode_pvrtc_kernel` and
-/// `stela_metal_reorder_blocks_kernel` (`compiler/metal_abi.h`).
+/// `stela_metal_decode_etc_kernel`, `stela_metal_decode_pvrtc_kernel`,
+/// `stela_metal_reorder_blocks_kernel` and `stela_metal_decode_astc_kernel`
+/// (`compiler/metal_abi.h`).
 #[derive(Clone, Copy, Debug)]
 pub struct InternalKernels {
     /// Sums query results per
@@ -169,6 +170,9 @@ pub struct InternalKernels {
     /// order per [`ReorderArguments`](super::binding::ReorderArguments),
     /// one thread per block in workgroups of `WORKGROUP_SIZE`.
     pub reorder_blocks: ShaderCode,
+    /// Decodes a buffer's ASTC LDR blocks into a texture's image as
+    /// [`decode_etc`](Self::decode_etc) does.
+    pub decode_astc: ShaderCode,
 }
 
 /// How the driver takes memory a CPU reaches: its kernel driver maps a dma-buf.
@@ -343,6 +347,7 @@ pub struct NativeBackend {
     decode_etc: vk::Pipeline,
     decode_pvrtc: vk::Pipeline,
     reorder_blocks: vk::Pipeline,
+    decode_astc: vk::Pipeline,
 }
 
 impl NativeBackend {
@@ -543,6 +548,7 @@ impl NativeBackend {
             decode_etc: vk::Pipeline::null(),
             decode_pvrtc: vk::Pipeline::null(),
             reorder_blocks: vk::Pipeline::null(),
+            decode_astc: vk::Pipeline::null(),
         };
         // Dropping a partly built backend destroys what was created.
         let kernels = kernels?;
@@ -565,6 +571,7 @@ impl NativeBackend {
         backend.decode_etc = backend.create_compute(&kernel(kernels.decode_etc))?;
         backend.decode_pvrtc = backend.create_compute(&kernel(kernels.decode_pvrtc))?;
         backend.reorder_blocks = backend.create_compute(&kernel(kernels.reorder_blocks))?;
+        backend.decode_astc = backend.create_compute(&kernel(kernels.decode_astc))?;
         Ok(backend)
     }
 
@@ -891,6 +898,7 @@ impl Drop for NativeBackend {
             self.device.destroy_pipeline(self.decode_etc, None);
             self.device.destroy_pipeline(self.decode_pvrtc, None);
             self.device.destroy_pipeline(self.reorder_blocks, None);
+            self.device.destroy_pipeline(self.decode_astc, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline_layout(self.layout, None);
             self.device.destroy_sampler(self.null_sampler, None);

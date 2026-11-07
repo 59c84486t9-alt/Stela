@@ -1746,7 +1746,7 @@ nir_def *stela_metal_decode_etc(nir_builder *b, nir_def *words, nir_def *x, nir_
  * coordinate in its block, the block's words, and the codec. The region
  * starts on a block boundary. */
 struct blocks {
-   nir_def *codec, *coord, *x, *y, *words;
+   nir_def *codec, *coord, *x, *y, *words, *block_width, *block_height;
    nir_deref_instr *image;
 };
 
@@ -1771,6 +1771,8 @@ static nir_builder blocks(const nir_shader_compiler_options *options, const char
    k->codec = nir_iand_imm(&b, encoding, 0xff);
    nir_def *block_width = field(&b, encoding, 8, 8);
    nir_def *block_height = field(&b, encoding, 16, 8);
+   k->block_width = block_width;
+   k->block_height = block_height;
    nir_def *column = nir_udiv(&b, x, block_width);
    nir_def *row = nir_udiv(&b, y, block_height);
    k->x = nir_isub(&b, x, nir_imul(&b, column, block_width));
@@ -2053,4 +2055,595 @@ nir_shader *stela_metal_reorder_blocks_kernel(const nir_shader_compiler_options 
    nir_def *to = nir_bcsel(&b, to_rows, rows_address, level_address);
    nir_store_global(&b, nir_load_global(&b, 2, 32, from, .align_mul = 8), to, .align_mul = 8);
    return finish(&b);
+}
+
+/* ASTC: a block's word, zero past its last. */
+static nir_def *astc_word(nir_builder *b, nir_def *const w[4], nir_def *index)
+{
+   nir_def *word = nir_imm_int(b, 0);
+   for (unsigned i = 0; i < 4; i++)
+      word = nir_bcsel(b, nir_ieq_imm(b, index, i), w[i], word);
+   return word;
+}
+
+/* count bits, at most 24, of a block's stream from offset; those from end
+ * on read zero, as an integer sequence's missing bits do. */
+static nir_def *astc_bits(nir_builder *b, nir_def *const w[4], nir_def *offset, nir_def *count,
+                          nir_def *end)
+{
+   nir_def *index = nir_ushr_imm(b, offset, 5), *shift = nir_iand_imm(b, offset, 31);
+   nir_def *low = astc_word(b, w, index), *high = astc_word(b, w, nir_iadd_imm(b, index, 1));
+   /* The next word shifts in twice, so that a zero shift moves none. */
+   nir_def *bits = nir_ior(b, nir_ushr(b, low, shift),
+                           nir_ishl(b, nir_ishl_imm(b, high, 1), nir_isub_imm(b, 31, shift)));
+   nir_def *kept = nir_imax(b, nir_imin(b, count, nir_isub(b, end, offset)), nir_imm_int(b, 0));
+   return nir_iand(b, bits, nir_iadd_imm(b, nir_ishl(b, nir_imm_int(b, 1), kept), -1));
+}
+
+static nir_def *astc_at(nir_builder *b, nir_def *const w[4], nir_def *offset, unsigned count)
+{
+   return astc_bits(b, w, offset, nir_imm_int(b, count), nir_imm_int(b, 128));
+}
+
+/* Bits offset to offset + count of the block. */
+static nir_def *astc_field(nir_builder *b, nir_def *const w[4], unsigned offset, unsigned count)
+{
+   unsigned i = offset / 32, shift = offset % 32;
+   nir_def *bits = nir_ushr_imm(b, w[i], shift);
+   if (shift + count > 32)
+      bits = nir_ior(b, bits, nir_ishl_imm(b, w[i + 1], 32 - shift));
+   return nir_iand_imm(b, bits, BITFIELD_MASK(count));
+}
+
+static nir_def *pick(nir_builder *b, nir_def *const *values, unsigned count, nir_def *index)
+{
+   nir_def *value = values[0];
+   for (unsigned i = 1; i < count; i++)
+      value = nir_bcsel(b, nir_ieq_imm(b, index, i), values[i], value);
+   return value;
+}
+
+static nir_def *flip(nir_builder *b, nir_def *bit)
+{
+   return nir_ixor(b, bit, nir_imm_int(b, 1));
+}
+
+/* The k'th of the five trits an integer sequence block's 8 bits t hold. */
+static nir_def *astc_trit(nir_builder *b, nir_def *t, nir_def *k)
+{
+   nir_def *two = nir_imm_int(b, 2);
+   nir_def *high = nir_ieq_imm(b, field(b, t, 2, 3), 7);
+   nir_def *c = nir_bcsel(b, high, nir_ior(b, nir_ishl_imm(b, field(b, t, 5, 3), 2), field(b, t, 0, 2)),
+                          field(b, t, 0, 5));
+   nir_def *t65 = field(b, t, 5, 2), *t7 = field(b, t, 7, 1);
+   nir_def *both = nir_ieq_imm(b, t65, 3);
+   nir_def *t4 = nir_bcsel(b, nir_ior(b, high, both), two, t7);
+   nir_def *t3 = nir_bcsel(b, high, two, nir_bcsel(b, both, t7, t65));
+   nir_def *c4 = field(b, c, 4, 1), *c3 = field(b, c, 3, 1), *c2 = field(b, c, 2, 1);
+   nir_def *c1 = field(b, c, 1, 1), *c0 = field(b, c, 0, 1);
+   nir_def *low3 = nir_ieq_imm(b, field(b, c, 0, 2), 3);
+   nir_def *mid3 = nir_ieq_imm(b, field(b, c, 2, 2), 3);
+   nir_def *t2 = nir_bcsel(b, nir_ior(b, low3, mid3), two, c4);
+   nir_def *t1 = nir_bcsel(b, low3, c4, nir_bcsel(b, mid3, two, field(b, c, 2, 2)));
+   nir_def *t0 = nir_bcsel(
+      b, low3, nir_ior(b, nir_ishl_imm(b, c3, 1), nir_iand(b, c2, flip(b, c3))),
+      nir_bcsel(b, mid3, field(b, c, 0, 2), nir_ior(b, nir_ishl_imm(b, c1, 1), nir_iand(b, c0, flip(b, c1)))));
+   nir_def *trits[5] = {t0, t1, t2, t3, t4};
+   return pick(b, trits, 5, k);
+}
+
+/* The k'th of the three quints an integer sequence block's 7 bits q hold. */
+static nir_def *astc_quint(nir_builder *b, nir_def *q, nir_def *k)
+{
+   nir_def *four = nir_imm_int(b, 4);
+   nir_def *q0 = field(b, q, 0, 1), *q3 = field(b, q, 3, 1), *q4 = field(b, q, 4, 1);
+   nir_def *q21 = field(b, q, 1, 2), *q65 = field(b, q, 5, 2);
+   nir_def *special = nir_iand(b, nir_ieq_imm(b, q21, 3), nir_ieq_imm(b, q65, 0));
+   nir_def *n0 = flip(b, q0);
+   nir_def *s2 = nir_ior(b, nir_ishl_imm(b, q0, 2),
+                         nir_ior(b, nir_ishl_imm(b, nir_iand(b, q4, n0), 1), nir_iand(b, q3, n0)));
+   nir_def *wide = nir_ieq_imm(b, q21, 3);
+   nir_def *inverted = nir_ixor(b, q65, nir_imm_int(b, 3));
+   nir_def *c = nir_bcsel(
+      b, wide,
+      nir_ior(b, nir_ior(b, nir_ishl_imm(b, q4, 4), nir_ishl_imm(b, q3, 3)),
+              nir_ior(b, nir_ishl_imm(b, field(b, inverted, 1, 1), 2),
+                      nir_ior(b, nir_ishl_imm(b, field(b, inverted, 0, 1), 1), q0))),
+      field(b, q, 0, 5));
+   nir_def *e2 = nir_bcsel(b, wide, four, q65);
+   nir_def *five = nir_ieq_imm(b, field(b, c, 0, 3), 5);
+   nir_def *e1 = nir_bcsel(b, five, four, field(b, c, 3, 2));
+   nir_def *e0 = nir_bcsel(b, five, field(b, c, 3, 2), field(b, c, 0, 3));
+   nir_def *quints[3] = {nir_bcsel(b, special, four, e0), nir_bcsel(b, special, four, e1),
+                         nir_bcsel(b, special, s2, e2)};
+   return pick(b, quints, 3, k);
+}
+
+/* An integer sequence of values of `bits` bits with a trit or quint each,
+ * or neither, from start to end of a stream. */
+struct astc_sequence {
+   nir_def *start, *end, *bits, *trits, *quints;
+};
+
+/* The index'th value of a sequence, its trit or quint above its bits. */
+static nir_def *astc_value(nir_builder *b, nir_def *const w[4], const struct astc_sequence *s,
+                           nir_def *index)
+{
+   nir_def *m = s->bits;
+#define AT(base, ms, extra) nir_iadd(b, base, nir_iadd_imm(b, nir_imul_imm(b, m, ms), extra))
+   nir_def *plain = astc_bits(b, w, nir_iadd(b, s->start, nir_imul(b, index, m)), m, s->end);
+
+   /* Five values to 8 bits of trits, interleaved after each value. */
+   nir_def *g5 = nir_udiv_imm(b, index, 5), *k5 = nir_isub(b, index, nir_imul_imm(b, g5, 5));
+   nir_def *base5 = nir_iadd(b, s->start, nir_imul(b, g5, nir_iadd_imm(b, nir_imul_imm(b, m, 5), 8)));
+   nir_def *two = nir_imm_int(b, 2), *one = nir_imm_int(b, 1);
+   nir_def *t = nir_ior(
+      b, nir_ior(b, astc_bits(b, w, AT(base5, 1, 0), two, s->end),
+                 nir_ishl_imm(b, astc_bits(b, w, AT(base5, 2, 2), two, s->end), 2)),
+      nir_ior(b, nir_ishl_imm(b, astc_bits(b, w, AT(base5, 3, 4), one, s->end), 4),
+              nir_ior(b, nir_ishl_imm(b, astc_bits(b, w, AT(base5, 4, 5), two, s->end), 5),
+                      nir_ishl_imm(b, astc_bits(b, w, AT(base5, 5, 7), one, s->end), 7))));
+   static const unsigned trit_gaps[5] = {0, 2, 4, 5, 7};
+   nir_def *low5 = astc_bits(
+      b, w, nir_iadd(b, base5, nir_iadd(b, nir_imul(b, k5, m), lookup(b, trit_gaps, 5, k5))), m, s->end);
+   nir_def *trit = nir_ior(b, nir_ishl(b, astc_trit(b, t, k5), m), low5);
+
+   /* Three values to 7 bits of quints. */
+   nir_def *g3 = nir_udiv_imm(b, index, 3), *k3 = nir_isub(b, index, nir_imul_imm(b, g3, 3));
+   nir_def *base3 = nir_iadd(b, s->start, nir_imul(b, g3, nir_iadd_imm(b, nir_imul_imm(b, m, 3), 7)));
+   nir_def *q = nir_ior(
+      b, astc_bits(b, w, AT(base3, 1, 0), nir_imm_int(b, 3), s->end),
+      nir_ior(b, nir_ishl_imm(b, astc_bits(b, w, AT(base3, 2, 3), two, s->end), 3),
+              nir_ishl_imm(b, astc_bits(b, w, AT(base3, 3, 5), two, s->end), 5)));
+   static const unsigned quint_gaps[3] = {0, 3, 5};
+   nir_def *low3 = astc_bits(
+      b, w, nir_iadd(b, base3, nir_iadd(b, nir_imul(b, k3, m), lookup(b, quint_gaps, 3, k3))), m, s->end);
+   nir_def *quint = nir_ior(b, nir_ishl(b, astc_quint(b, q, k3), m), low3);
+#undef AT
+   return nir_bcsel(b, s->trits, trit, nir_bcsel(b, s->quints, quint, plain));
+}
+
+/* A trit or quint value's bits m, its unquantization's B and C, from
+ * Khronos's tables: T = D * C + B, xored with A, keeps A's top bit. */
+static nir_def *astc_unquantize(nir_builder *b, nir_def *v, nir_def *m, nir_def *bv, nir_def *cv,
+                                unsigned a_mask, unsigned top)
+{
+   nir_def *a = nir_bcsel(b, nir_test_mask(b, v, 1), nir_imm_int(b, a_mask), nir_imm_int(b, 0));
+   nir_def *d = nir_ushr(b, v, m);
+   nir_def *t = nir_ixor(b, nir_iadd(b, nir_imul(b, d, cv), bv), a);
+   return nir_ior(b, nir_iand_imm(b, a, top), nir_ushr_imm(b, t, 2));
+}
+
+/* A color endpoint value widened to 8 bits. */
+static nir_def *astc_color_value(nir_builder *b, nir_def *v, const struct astc_sequence *s)
+{
+   nir_def *m = s->bits;
+   /* Bits alone repeat to 8. */
+   nir_def *repeated[9] = {
+      nir_imm_int(b, 0),
+      nir_imul_imm(b, v, 0xff),
+      nir_imul_imm(b, v, 0x55),
+      nir_ior(b, nir_ior(b, nir_ishl_imm(b, v, 5), nir_ishl_imm(b, v, 2)), nir_ushr_imm(b, v, 1)),
+      nir_imul_imm(b, v, 0x11),
+      nir_ior(b, nir_ishl_imm(b, v, 3), nir_ushr_imm(b, v, 2)),
+      nir_ior(b, nir_ishl_imm(b, v, 2), nir_ushr_imm(b, v, 4)),
+      nir_ior(b, nir_ishl_imm(b, v, 1), nir_ushr_imm(b, v, 6)),
+      v,
+   };
+   nir_def *plain = pick(b, repeated, 9, m);
+   nir_def *t2 = field(b, v, 1, 2), *t3 = field(b, v, 1, 3), *t4 = field(b, v, 1, 4), *t5 = field(b, v, 1, 5);
+   nir_def *b2 = nir_bcsel(b, nir_test_mask(b, v, 2), nir_imm_int(b, 0x116), nir_imm_int(b, 0));
+   nir_def *trit_b[7] = {
+      nir_imm_int(b, 0),
+      nir_imm_int(b, 0),
+      b2,
+      nir_ior(b, nir_ior(b, t2, nir_ishl_imm(b, t2, 2)), nir_ishl_imm(b, t2, 7)),
+      nir_ior(b, t3, nir_ishl_imm(b, t3, 6)),
+      nir_ior(b, nir_ushr_imm(b, t4, 2), nir_ishl_imm(b, t4, 5)),
+      nir_ior(b, nir_ishl_imm(b, t5, 4), nir_ushr_imm(b, t5, 4)),
+   };
+   static const unsigned trit_c[7] = {0, 204, 93, 44, 22, 11, 5};
+   nir_def *q2 = nir_bcsel(b, nir_test_mask(b, v, 2), nir_imm_int(b, 0x10c), nir_imm_int(b, 0));
+   nir_def *quint_b[6] = {
+      nir_imm_int(b, 0),
+      nir_imm_int(b, 0),
+      q2,
+      nir_ior(b, nir_ior(b, nir_ushr_imm(b, t2, 1), nir_ishl_imm(b, t2, 1)), nir_ishl_imm(b, t2, 7)),
+      nir_ior(b, nir_ushr_imm(b, t3, 1), nir_ishl_imm(b, t3, 6)),
+      nir_ishl_imm(b, t4, 5),
+   };
+   static const unsigned quint_c[6] = {0, 113, 54, 26, 13, 6};
+   nir_def *trit = astc_unquantize(b, v, m, pick(b, trit_b, 7, m), lookup(b, trit_c, 7, m), 0x1ff, 0x80);
+   nir_def *quint = astc_unquantize(b, v, m, pick(b, quint_b, 6, m), lookup(b, quint_c, 6, m), 0x1ff, 0x80);
+   return nir_bcsel(b, s->trits, trit, nir_bcsel(b, s->quints, quint, plain));
+}
+
+/* A weight unquantized to 0 to 64. */
+static nir_def *astc_weight_value(nir_builder *b, nir_def *v, const struct astc_sequence *s)
+{
+   nir_def *m = s->bits;
+   nir_def *repeated[6] = {
+      nir_imm_int(b, 0),
+      nir_imul_imm(b, v, 63),
+      nir_imul_imm(b, v, 21),
+      nir_imul_imm(b, v, 9),
+      nir_ior(b, nir_ushr_imm(b, v, 2), nir_ishl_imm(b, v, 2)),
+      nir_ior(b, nir_ushr_imm(b, v, 4), nir_ishl_imm(b, v, 1)),
+   };
+   nir_def *plain = pick(b, repeated, 6, m);
+   nir_def *t2 = field(b, v, 1, 2);
+   nir_def *trit_b[4] = {
+      nir_imm_int(b, 0),
+      nir_imm_int(b, 0),
+      nir_bcsel(b, nir_test_mask(b, v, 2), nir_imm_int(b, 0x45), nir_imm_int(b, 0)),
+      nir_ior(b, t2, nir_ishl_imm(b, t2, 5)),
+   };
+   static const unsigned trit_c[4] = {0, 50, 23, 11};
+   nir_def *quint_b[3] = {
+      nir_imm_int(b, 0),
+      nir_imm_int(b, 0),
+      nir_bcsel(b, nir_test_mask(b, v, 2), nir_imm_int(b, 0x42), nir_imm_int(b, 0)),
+   };
+   static const unsigned quint_c[3] = {0, 28, 13};
+   nir_def *trit = astc_unquantize(b, v, m, pick(b, trit_b, 4, m), lookup(b, trit_c, 4, m), 0x7f, 0x20);
+   nir_def *quint = astc_unquantize(b, v, m, pick(b, quint_b, 3, m), lookup(b, quint_c, 3, m), 0x7f, 0x20);
+   nir_def *quantized = nir_bcsel(b, s->trits, trit, nir_bcsel(b, s->quints, quint, plain));
+   nir_def *widened = nir_iadd(b, quantized, nir_b2i32(b, nir_uge_imm(b, quantized, 33)));
+   /* Without bits, three trits or five quints spread over 0 to 64 alone. */
+   nir_def *bare = nir_bcsel(b, s->trits, nir_imul_imm(b, v, 32), nir_imul_imm(b, v, 16));
+   nir_def *unpadded = nir_iand(b, nir_ieq_imm(b, m, 0), nir_ior(b, s->trits, s->quints));
+   return nir_bcsel(b, unpadded, bare, widened);
+}
+
+/* Which of count partitions holds texel x, y: Khronos's hash of the
+ * block's seed. */
+static nir_def *astc_partition(nir_builder *b, nir_def *seed, nir_def *count, nir_def *x, nir_def *y,
+                               nir_def *small)
+{
+   x = nir_bcsel(b, small, nir_ishl_imm(b, x, 1), x);
+   y = nir_bcsel(b, small, nir_ishl_imm(b, y, 1), y);
+   nir_def *r = nir_iadd(b, seed, nir_imul_imm(b, nir_iadd_imm(b, count, -1), 1024));
+   r = nir_ixor(b, r, nir_ushr_imm(b, r, 15));
+   r = nir_isub(b, r, nir_ishl_imm(b, r, 17));
+   r = nir_iadd(b, r, nir_ishl_imm(b, r, 7));
+   r = nir_iadd(b, r, nir_ishl_imm(b, r, 4));
+   r = nir_ixor(b, r, nir_ushr_imm(b, r, 5));
+   r = nir_iadd(b, r, nir_ishl_imm(b, r, 16));
+   r = nir_ixor(b, r, nir_ushr_imm(b, r, 7));
+   r = nir_ixor(b, r, nir_ushr_imm(b, r, 3));
+   r = nir_ixor(b, r, nir_ishl_imm(b, r, 6));
+   r = nir_ixor(b, r, nir_ushr_imm(b, r, 17));
+   nir_def *three = nir_ieq_imm(b, count, 3);
+   nir_def *four_or_five = nir_bcsel(b, nir_test_mask(b, seed, 2), nir_imm_int(b, 4), nir_imm_int(b, 5));
+   nir_def *six_or_five = nir_bcsel(b, three, nir_imm_int(b, 6), nir_imm_int(b, 5));
+   nir_def *odd = nir_test_mask(b, seed, 1);
+   nir_def *sh1 = nir_bcsel(b, odd, four_or_five, six_or_five);
+   nir_def *sh2 = nir_bcsel(b, odd, six_or_five, four_or_five);
+   nir_def *s[8];
+   for (unsigned i = 0; i < 8; i++) {
+      nir_def *v = field(b, r, 4 * i, 4);
+      s[i] = nir_ushr(b, nir_imul(b, v, v), i % 2 ? sh2 : sh1);
+   }
+   nir_def *at[4];
+   for (unsigned i = 0; i < 4; i++)
+      at[i] = nir_iand_imm(b, nir_iadd(b, nir_iadd(b, nir_imul(b, s[2 * i], x), nir_imul(b, s[2 * i + 1], y)),
+                                       nir_ushr_imm(b, r, 14 - 4 * i)), 0x3f);
+   at[2] = nir_bcsel(b, nir_ult_imm(b, count, 3), nir_imm_int(b, 0), at[2]);
+   at[3] = nir_bcsel(b, nir_ult_imm(b, count, 4), nir_imm_int(b, 0), at[3]);
+   nir_def *first = nir_iand(b, nir_uge(b, at[0], at[1]), nir_iand(b, nir_uge(b, at[0], at[2]), nir_uge(b, at[0], at[3])));
+   nir_def *second = nir_iand(b, nir_uge(b, at[1], at[2]), nir_uge(b, at[1], at[3]));
+   nir_def *third = nir_uge(b, at[2], at[3]);
+   return nir_bcsel(b, first, nir_imm_int(b, 0),
+                    nir_bcsel(b, second, nir_imm_int(b, 1), nir_bcsel(b, third, nir_imm_int(b, 2), nir_imm_int(b, 3))));
+}
+
+/* bit_transfer_signed: an offset's top bit moves to its base, and it
+ * keeps a signed 6 bits. */
+static void astc_transfer(nir_builder *b, nir_def **offset, nir_def **base)
+{
+   *base = nir_ior(b, nir_ushr_imm(b, *base, 1), nir_iand_imm(b, *offset, 0x80));
+   *offset = signed_field(b, *offset, 1, 6);
+}
+
+static nir_def *astc_contract(nir_builder *b, nir_def *r, nir_def *g, nir_def *bl, nir_def *a)
+{
+   return nir_vec4(b, nir_ishr_imm(b, nir_iadd(b, r, bl), 1), nir_ishr_imm(b, nir_iadd(b, g, bl), 1), bl, a);
+}
+
+static nir_def *astc_clamp(nir_builder *b, nir_def *v)
+{
+   return nir_imin(b, nir_imax(b, v, nir_imm_int(b, 0)), nir_imm_int(b, 255));
+}
+
+/* A partition's endpoints from its values in an LDR endpoint mode. */
+static void astc_endpoints(nir_builder *b, nir_def *cem, nir_def *const v[8], nir_def **e0, nir_def **e1)
+{
+   nir_def *opaque = nir_imm_int(b, 255);
+   nir_def *lum[2], *lum_a[2], *lum_offset[2], *scaled[2], *direct[2], *offset[2];
+   lum[0] = nir_vec4(b, v[0], v[0], v[0], opaque);
+   lum[1] = nir_vec4(b, v[1], v[1], v[1], opaque);
+   nir_def *l0 = nir_ior(b, nir_ushr_imm(b, v[0], 2), nir_iand_imm(b, v[1], 0xc0));
+   nir_def *l1 = nir_imin(b, nir_iadd(b, l0, nir_iand_imm(b, v[1], 0x3f)), opaque);
+   nir_def *luminance_offset[2] = {nir_vec4(b, l0, l0, l0, opaque), nir_vec4(b, l1, l1, l1, opaque)};
+   lum_a[0] = nir_vec4(b, v[0], v[0], v[0], v[2]);
+   lum_a[1] = nir_vec4(b, v[1], v[1], v[1], v[3]);
+   nir_def *o[8], *base[8];
+   for (unsigned i = 0; i < 8; i += 2) {
+      o[i + 1] = v[i + 1];
+      base[i] = v[i];
+      astc_transfer(b, &o[i + 1], &base[i]);
+   }
+   nir_def *la = nir_iadd(b, base[0], o[1]);
+   lum_offset[0] = nir_vec4(b, base[0], base[0], base[0], base[2]);
+   lum_offset[1] = astc_clamp(b, nir_vec4(b, la, la, la, nir_iadd(b, base[2], o[3])));
+   /* Base and scale; with two alphas when cem is 10. */
+   nir_def *alpha = nir_ieq_imm(b, cem, 10);
+   scaled[0] = nir_vec4(b, nir_ushr_imm(b, nir_imul(b, v[0], v[3]), 8), nir_ushr_imm(b, nir_imul(b, v[1], v[3]), 8),
+                        nir_ushr_imm(b, nir_imul(b, v[2], v[3]), 8), nir_bcsel(b, alpha, v[4], opaque));
+   scaled[1] = nir_vec4(b, v[0], v[1], v[2], nir_bcsel(b, alpha, v[5], opaque));
+   /* Direct and base-offset RGB, with alpha when cem is 12 or 13. */
+   nir_def *with_alpha = nir_uge_imm(b, cem, 12);
+   nir_def *a0 = nir_bcsel(b, with_alpha, v[6], opaque), *a1 = nir_bcsel(b, with_alpha, v[7], opaque);
+   nir_def *s0 = nir_iadd(b, nir_iadd(b, v[0], v[2]), v[4]);
+   nir_def *s1 = nir_iadd(b, nir_iadd(b, v[1], v[3]), v[5]);
+   nir_def *ordered = nir_uge(b, s1, s0);
+   direct[0] = nir_bcsel(b, ordered, nir_vec4(b, v[0], v[2], v[4], a0), astc_contract(b, v[1], v[3], v[5], a1));
+   direct[1] = nir_bcsel(b, ordered, nir_vec4(b, v[1], v[3], v[5], a1), astc_contract(b, v[0], v[2], v[4], a0));
+   nir_def *b6 = nir_bcsel(b, with_alpha, base[6], opaque);
+   nir_def *sum6 = nir_bcsel(b, with_alpha, nir_iadd(b, base[6], o[7]), opaque);
+   nir_def *r = nir_iadd(b, base[0], o[1]), *g = nir_iadd(b, base[2], o[3]), *bl = nir_iadd(b, base[4], o[5]);
+   nir_def *forward = nir_ige_imm(b, nir_iadd(b, nir_iadd(b, o[1], o[3]), o[5]), 0);
+   offset[0] = nir_bcsel(b, forward, nir_vec4(b, base[0], base[2], base[4], b6),
+                         astc_clamp(b, astc_contract(b, r, g, bl, sum6)));
+   offset[1] = nir_bcsel(b, forward, astc_clamp(b, nir_vec4(b, r, g, bl, sum6)),
+                         astc_contract(b, base[0], base[2], base[4], b6));
+   for (unsigned e = 0; e < 2; e++) {
+      nir_def *result = direct[e];
+      result = nir_bcsel(b, nir_ieq_imm(b, cem, 0), lum[e], result);
+      result = nir_bcsel(b, nir_ieq_imm(b, cem, 1), luminance_offset[e], result);
+      result = nir_bcsel(b, nir_ieq_imm(b, cem, 4), lum_a[e], result);
+      result = nir_bcsel(b, nir_ieq_imm(b, cem, 5), lum_offset[e], result);
+      result = nir_bcsel(b, nir_ior(b, nir_ieq_imm(b, cem, 6), nir_ieq_imm(b, cem, 10)), scaled[e], result);
+      result = nir_bcsel(b, nir_ior(b, nir_ieq_imm(b, cem, 9), nir_ieq_imm(b, cem, 13)), offset[e], result);
+      if (e)
+         *e1 = result;
+      else
+         *e0 = result;
+   }
+}
+
+nir_def *stela_metal_decode_astc(nir_builder *b, nir_def *words, nir_def *x, nir_def *y,
+                                 nir_def *block_width, nir_def *block_height, nir_def *srgb)
+{
+   nir_def *w[4];
+   for (unsigned i = 0; i < 4; i++)
+      w[i] = nir_channel(b, words, i);
+   nir_def *mode = astc_field(b, w, 0, 11);
+
+   /* The weight grid: Khronos's block mode layouts. */
+   nir_def *a = field(b, mode, 5, 2), *bb = field(b, mode, 7, 2);
+   nir_def *layout = field(b, mode, 2, 2);
+   nir_def *tall = nir_test_mask(b, bb, 2);
+   nir_def *a2 = nir_iadd_imm(b, a, 2);
+   nir_def *wide_w = nir_bcsel(
+      b, nir_ieq_imm(b, layout, 0), nir_iadd_imm(b, bb, 4),
+      nir_bcsel(b, nir_ieq_imm(b, layout, 1), nir_iadd_imm(b, bb, 8),
+                nir_bcsel(b, nir_ior(b, nir_ieq_imm(b, layout, 2), nir_inot(b, tall)), a2,
+                          nir_iadd_imm(b, nir_iand_imm(b, bb, 1), 2))));
+   nir_def *wide_h = nir_bcsel(
+      b, nir_ult_imm(b, layout, 2), a2,
+      nir_bcsel(b, nir_ieq_imm(b, layout, 2), nir_iadd_imm(b, bb, 8),
+                nir_bcsel(b, tall, a2, nir_iadd_imm(b, bb, 6))));
+   nir_def *wide_range = nir_ior(b, nir_ishl_imm(b, field(b, mode, 0, 2), 1), field(b, mode, 4, 1));
+   nir_def *other = field(b, mode, 7, 2), *bit5 = nir_test_mask(b, mode, 1 << 5);
+   nir_def *square = nir_ieq_imm(b, other, 2);
+   nir_def *narrow_w = nir_bcsel(
+      b, nir_ieq_imm(b, other, 0), nir_imm_int(b, 12),
+      nir_bcsel(b, nir_ieq_imm(b, other, 1), a2,
+                nir_bcsel(b, square, nir_iadd_imm(b, a, 6),
+                          nir_bcsel(b, bit5, nir_imm_int(b, 10), nir_imm_int(b, 6)))));
+   nir_def *narrow_h = nir_bcsel(
+      b, nir_ieq_imm(b, other, 0), a2,
+      nir_bcsel(b, nir_ieq_imm(b, other, 1), nir_imm_int(b, 12),
+                nir_bcsel(b, square, nir_iadd_imm(b, field(b, mode, 9, 2), 6),
+                          nir_bcsel(b, bit5, nir_imm_int(b, 6), nir_imm_int(b, 10)))));
+   nir_def *narrow_range = nir_ior(b, field(b, mode, 4, 1), nir_ishl_imm(b, field(b, mode, 2, 2), 1));
+   nir_def *narrow = nir_ieq_imm(b, field(b, mode, 0, 2), 0);
+   nir_def *grid_w = nir_bcsel(b, narrow, narrow_w, wide_w);
+   nir_def *grid_h = nir_bcsel(b, narrow, narrow_h, wide_h);
+   nir_def *range = nir_bcsel(b, narrow, narrow_range, wide_range);
+   nir_def *plain = nir_iand(b, narrow, square);
+   nir_def *dual = nir_iand(b, nir_test_mask(b, mode, 1 << 10), nir_inot(b, plain));
+   nir_def *precise = nir_iand(b, nir_test_mask(b, mode, 1 << 9), nir_inot(b, plain));
+   nir_def *void_extent = nir_ieq_imm(b, nir_iand_imm(b, mode, 0x1ff), 0x1fc);
+   nir_def *reserved = nir_iand(
+      b, narrow, nir_ior(b, nir_iand(b, nir_ieq_imm(b, field(b, mode, 6, 3), 7), nir_inot(b, void_extent)),
+                         nir_ieq_imm(b, field(b, mode, 0, 4), 0)));
+
+   /* The weights' sequence, from the block's top bit down. */
+   nir_def *quant = nir_iadd(b, range, nir_bcsel(b, precise, nir_imm_int(b, 8), nir_imm_int(b, 0)));
+   static const unsigned weight_trits[16] = {0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0};
+   static const unsigned weight_quints[16] = {0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0};
+   static const unsigned weight_bits[16] = {0, 0, 1, 0, 2, 0, 1, 3, 0, 0, 1, 2, 4, 2, 3, 5};
+   nir_def *planes = nir_bcsel(b, dual, nir_imm_int(b, 2), nir_imm_int(b, 1));
+   nir_def *count = nir_imul(b, nir_imul(b, grid_w, grid_h), planes);
+   struct astc_sequence weights = {
+      .start = nir_imm_int(b, 0),
+      .bits = lookup(b, weight_bits, 16, quant),
+      .trits = nir_ine_imm(b, lookup(b, weight_trits, 16, quant), 0),
+      .quints = nir_ine_imm(b, lookup(b, weight_quints, 16, quant), 0),
+   };
+   nir_def *weight_size = nir_iadd(
+      b, nir_imul(b, count, weights.bits),
+      nir_bcsel(b, weights.trits, nir_udiv_imm(b, nir_iadd_imm(b, nir_imul_imm(b, count, 8), 4), 5),
+                nir_bcsel(b, weights.quints, nir_udiv_imm(b, nir_iadd_imm(b, nir_imul_imm(b, count, 7), 2), 3),
+                          nir_imm_int(b, 0))));
+   weights.end = weight_size;
+   nir_def *top = nir_isub_imm(b, 128, weight_size);
+
+   /* Partitions and their endpoint modes. */
+   nir_def *partitions = nir_iadd_imm(b, astc_field(b, w, 11, 2), 1);
+   nir_def *single = nir_ieq_imm(b, partitions, 1);
+   nir_def *selector = astc_field(b, w, 23, 6);
+   nir_def *shared = nir_ior(b, single, nir_ieq_imm(b, nir_iand_imm(b, selector, 3), 0));
+   nir_def *class = nir_iadd_imm(b, nir_iand_imm(b, selector, 3), -1);
+   nir_def *two = nir_ieq_imm(b, partitions, 2), *three = nir_ieq_imm(b, partitions, 3);
+   nir_def *at[4] = {
+      nir_iadd_imm(b, top, -8), nir_iadd_imm(b, top, -6), nir_iadd_imm(b, top, -4), nir_iadd_imm(b, top, -2),
+   };
+   nir_def *low[4] = {
+      nir_bcsel(b, two, astc_field(b, w, 27, 2),
+                nir_bcsel(b, three,
+                          nir_ior(b, astc_field(b, w, 28, 1),
+                                  nir_ishl_imm(b, astc_at(b, w, nir_iadd_imm(b, top, -5), 1), 1)),
+                          astc_at(b, w, at[0], 2))),
+      nir_bcsel(b, two, astc_at(b, w, at[3], 2),
+                nir_bcsel(b, three, astc_at(b, w, at[2], 2), astc_at(b, w, at[1], 2))),
+      nir_bcsel(b, three, astc_at(b, w, at[3], 2), astc_at(b, w, at[2], 2)),
+      astc_at(b, w, at[3], 2),
+   };
+   nir_def *one_mode = nir_bcsel(b, single, astc_field(b, w, 13, 4), nir_ushr_imm(b, selector, 2));
+   nir_def *cems[4], *value_counts[4];
+   nir_def *values = nir_imm_int(b, 0);
+   for (unsigned p = 0; p < 4; p++) {
+      nir_def *own = nir_ior(b, nir_ishl_imm(b, nir_iadd(b, class, astc_field(b, w, 25 + p, 1)), 2), low[p]);
+      cems[p] = nir_bcsel(b, shared, one_mode, own);
+      value_counts[p] = nir_bcsel(b, nir_ult_imm(b, partitions, p + 1), nir_imm_int(b, 0),
+                                  nir_iadd_imm(b, nir_ushr_imm(b, nir_iand_imm(b, cems[p], ~3u), 1), 2));
+      values = nir_iadd(b, values, value_counts[p]);
+   }
+   nir_def *extra = nir_bcsel(b, shared, nir_imm_int(b, 0),
+                              nir_bcsel(b, two, nir_imm_int(b, 2), nir_bcsel(b, three, nir_imm_int(b, 5), nir_imm_int(b, 8))));
+   nir_def *config = nir_bcsel(b, single, nir_imm_int(b, 17), nir_iadd_imm(b, extra, 29));
+   nir_def *selector_bits = nir_bcsel(b, dual, nir_imm_int(b, 2), nir_imm_int(b, 0));
+   nir_def *remaining = nir_isub(b, nir_isub(b, top, config), selector_bits);
+
+   /* The endpoints' sequence: the finest range that fits what is left. */
+   static const unsigned color_trits[17] = {1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0};
+   static const unsigned color_quints[17] = {0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0};
+   static const unsigned color_bits[17] = {1, 3, 1, 2, 4, 2, 3, 5, 3, 4, 6, 4, 5, 7, 5, 6, 8};
+   struct astc_sequence colors = {
+      .start = nir_bcsel(b, single, nir_imm_int(b, 17), nir_imm_int(b, 29)),
+      .bits = nir_imm_int(b, 0),
+      .trits = nir_imm_false(b),
+      .quints = nir_imm_false(b),
+   };
+   nir_def *color_size = nir_imm_int(b, 0);
+   for (unsigned i = 0; i < 17; i++) {
+      nir_def *size = nir_imul_imm(b, values, color_bits[i]);
+      if (color_trits[i])
+         size = nir_iadd(b, size, nir_udiv_imm(b, nir_iadd_imm(b, nir_imul_imm(b, values, 8), 4), 5));
+      if (color_quints[i])
+         size = nir_iadd(b, size, nir_udiv_imm(b, nir_iadd_imm(b, nir_imul_imm(b, values, 7), 2), 3));
+      nir_def *fits = nir_ige(b, remaining, size);
+      colors.bits = nir_bcsel(b, fits, nir_imm_int(b, color_bits[i]), colors.bits);
+      colors.trits = nir_bcsel(b, fits, nir_imm_bool(b, color_trits[i]), colors.trits);
+      colors.quints = nir_bcsel(b, fits, nir_imm_bool(b, color_quints[i]), colors.quints);
+      color_size = nir_bcsel(b, fits, size, color_size);
+   }
+   colors.end = nir_iadd(b, colors.start, color_size);
+
+   nir_def *error = nir_ior(
+      b, nir_ior(b, reserved, nir_ior(b, nir_ult(b, block_width, grid_w), nir_ult(b, block_height, grid_h))),
+      nir_ior(b, nir_iand(b, dual, nir_ieq_imm(b, partitions, 4)),
+              nir_ior(b, nir_ior(b, nir_ugt_imm(b, count, 64), nir_ult_imm(b, weight_size, 24)),
+                      nir_ior(b, nir_ugt_imm(b, weight_size, 96),
+                              nir_ior(b, nir_ugt_imm(b, values, 18),
+                                      nir_ilt(b, remaining,
+                                              nir_udiv_imm(b, nir_iadd_imm(b, nir_imul_imm(b, values, 13), 4), 5)))))));
+
+   /* The texel's partition, its endpoint mode and values. */
+   nir_def *small = nir_ult_imm(b, nir_imul(b, block_width, block_height), 31);
+   nir_def *partition = nir_bcsel(b, single, nir_imm_int(b, 0),
+                                  astc_partition(b, astc_field(b, w, 13, 10), partitions, x, y, small));
+   nir_def *firsts[4] = {nir_imm_int(b, 0), value_counts[0], nir_iadd(b, value_counts[0], value_counts[1]),
+                         nir_iadd(b, nir_iadd(b, value_counts[0], value_counts[1]), value_counts[2])};
+   nir_def *first = pick(b, firsts, 4, partition);
+   nir_def *cem = pick(b, cems, 4, partition);
+   nir_def *v[8];
+   for (unsigned i = 0; i < 8; i++)
+      v[i] = astc_color_value(b, astc_value(b, w, &colors, nir_iadd_imm(b, first, i)), &colors);
+   nir_def *e0, *e1;
+   astc_endpoints(b, cem, v, &e0, &e1);
+   nir_def *hdr = nir_ior(b, nir_ior(b, nir_ieq_imm(b, cem, 2), nir_ieq_imm(b, cem, 3)),
+                          nir_ior(b, nir_ieq_imm(b, cem, 7),
+                                  nir_ior(b, nir_ieq_imm(b, cem, 11), nir_uge_imm(b, cem, 14))));
+
+   /* The texel's weights, bilinear between the grid's. */
+   nir_def *reversed[4];
+   for (unsigned i = 0; i < 4; i++)
+      reversed[i] = nir_bitfield_reverse(b, w[3 - i]);
+   nir_def *ds = nir_udiv(b, nir_iadd_imm(b, nir_ushr_imm(b, block_width, 1), 1024), nir_iadd_imm(b, block_width, -1));
+   nir_def *dt = nir_udiv(b, nir_iadd_imm(b, nir_ushr_imm(b, block_height, 1), 1024), nir_iadd_imm(b, block_height, -1));
+   nir_def *gs = nir_ushr_imm(b, nir_iadd_imm(b, nir_imul(b, nir_imul(b, ds, x), nir_iadd_imm(b, grid_w, -1)), 32), 6);
+   nir_def *gt = nir_ushr_imm(b, nir_iadd_imm(b, nir_imul(b, nir_imul(b, dt, y), nir_iadd_imm(b, grid_h, -1)), 32), 6);
+   nir_def *fs = nir_iand_imm(b, gs, 15), *ft = nir_iand_imm(b, gt, 15);
+   nir_def *v0 = nir_iadd(b, nir_ushr_imm(b, gs, 4), nir_imul(b, nir_ushr_imm(b, gt, 4), grid_w));
+   nir_def *w11 = nir_ushr_imm(b, nir_iadd_imm(b, nir_imul(b, fs, ft), 8), 4);
+   nir_def *factors[4] = {nir_iadd(b, nir_isub(b, nir_isub_imm(b, 16, fs), ft), w11), nir_isub(b, fs, w11),
+                          nir_isub(b, ft, w11), w11};
+   nir_def *corners[4] = {v0, nir_iadd_imm(b, v0, 1), nir_iadd(b, v0, grid_w), nir_iadd_imm(b, nir_iadd(b, v0, grid_w), 1)};
+   nir_def *infill[2];
+   for (unsigned plane = 0; plane < 2; plane++) {
+      nir_def *sum = nir_imm_int(b, 8);
+      for (unsigned i = 0; i < 4; i++) {
+         nir_def *index = nir_iadd_imm(b, nir_imul(b, corners[i], planes), plane);
+         nir_def *value = astc_weight_value(b, astc_value(b, reversed, &weights, index), &weights);
+         sum = nir_iadd(b, sum, nir_imul(b, value, factors[i]));
+      }
+      infill[plane] = nir_ushr_imm(b, sum, 4);
+   }
+   nir_def *component = astc_at(b, w, nir_isub(b, nir_iadd_imm(b, top, -2), extra), 2);
+   nir_def *weight[4];
+   for (unsigned c = 0; c < 4; c++)
+      weight[c] = nir_bcsel(b, nir_iand(b, dual, nir_ieq_imm(b, component, c)), infill[1], infill[0]);
+   nir_def *wv = nir_vec4(b, weight[0], weight[1], weight[2], weight[3]);
+
+   /* Endpoints widened to 16 bits, sRGB's with its half-step, blended. */
+   nir_def *half = nir_imm_int(b, 0x80);
+   nir_def *c0 = nir_ior(b, nir_ishl_imm(b, e0, 8), nir_bcsel(b, srgb, half, e0));
+   nir_def *c1 = nir_ior(b, nir_ishl_imm(b, e1, 8), nir_bcsel(b, srgb, half, e1));
+   nir_def *color = nir_ushr_imm(
+      b, nir_iadd_imm(b, nir_iadd(b, nir_imul(b, c0, nir_isub_imm(b, 64, wv)), nir_imul(b, c1, wv)), 32), 6);
+
+   /* A void extent's constant color; it is LDR, with its reserved bits
+    * set, and its extent all ones or not empty. */
+   nir_def *constant = nir_vec4(b, astc_field(b, w, 64, 16), astc_field(b, w, 80, 16),
+                                astc_field(b, w, 96, 16), astc_field(b, w, 112, 16));
+   nir_def *min_s = astc_field(b, w, 12, 13), *max_s = astc_field(b, w, 25, 13);
+   nir_def *min_t = astc_field(b, w, 38, 13), *max_t = astc_field(b, w, 51, 13);
+   nir_def *unbounded = nir_iand(b, nir_iand(b, nir_ieq_imm(b, min_s, 0x1fff), nir_ieq_imm(b, max_s, 0x1fff)),
+                                 nir_iand(b, nir_ieq_imm(b, min_t, 0x1fff), nir_ieq_imm(b, max_t, 0x1fff)));
+   nir_def *empty = nir_ior(b, nir_uge(b, min_s, max_s), nir_uge(b, min_t, max_t));
+   nir_def *bad_void = nir_ior(b, nir_ine_imm(b, astc_field(b, w, 9, 3), 6), nir_iand(b, nir_inot(b, unbounded), empty));
+
+   nir_def *magenta = nir_imm_ivec4(b, 0xffff, 0, 0xffff, 0xffff);
+   color = nir_bcsel(b, nir_ior(b, error, hdr), magenta, color);
+   color = nir_bcsel(b, void_extent, nir_bcsel(b, bad_void, magenta, constant), color);
+
+   /* sRGB keeps 8 bits; linear 12, read as unorm and widened to 16. */
+   nir_def *byte = nir_ushr_imm(b, color, 8);
+   nir_def *twelve = nir_ushr_imm(b, color, 4);
+   nir_def *wide = nir_ior(b, nir_ishl_imm(b, twelve, 4), nir_ushr_imm(b, twelve, 8));
+   nir_def *packed8 = nir_ior(b, nir_ior(b, nir_channel(b, byte, 0), nir_ishl_imm(b, nir_channel(b, byte, 1), 8)),
+                              nir_ior(b, nir_ishl_imm(b, nir_channel(b, byte, 2), 16),
+                                      nir_ishl_imm(b, nir_channel(b, byte, 3), 24)));
+   nir_def *low16 = nir_ior(b, nir_channel(b, wide, 0), nir_ishl_imm(b, nir_channel(b, wide, 1), 16));
+   nir_def *high16 = nir_ior(b, nir_channel(b, wide, 2), nir_ishl_imm(b, nir_channel(b, wide, 3), 16));
+   return nir_vec2(b, nir_bcsel(b, srgb, packed8, low16), nir_bcsel(b, srgb, nir_imm_int(b, 0), high16));
+}
+
+static nir_def *astc_block_bytes(nir_builder *b, nir_def *codec)
+{
+   (void)codec;
+   return nir_imm_int(b, 16);
+}
+
+nir_shader *stela_metal_decode_astc_kernel(const nir_shader_compiler_options *options)
+{
+   struct blocks k;
+   nir_builder b = blocks(options, "stela_metal_decode_astc", astc_block_bytes, &k);
+   nir_def *srgb = nir_ieq_imm(&b, k.codec, STELA_METAL_BLOCKS_ASTC_SRGB);
+   return store_decoded(&b, &k, stela_metal_decode_astc(&b, k.words, k.x, k.y, k.block_width,
+                                                        k.block_height, srgb));
 }

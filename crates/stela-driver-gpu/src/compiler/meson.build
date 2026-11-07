@@ -142,6 +142,7 @@ test('stela_metal_abi', stela_metal_abi_test, suite : 'stela')
 stela_metal_blocks_test = executable(
   'stela_metal_blocks_test',
   'tests/metal_blocks.c',
+  'tests/astc_reference.cpp',
   include_directories : [inc_include, inc_src, inc_gpu],
   dependencies : [idep_nir, idep_mesautil],
   link_with : stela_metal_abi,

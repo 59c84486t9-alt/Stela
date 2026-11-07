@@ -105,6 +105,13 @@ enum stela_metal_block_codec {
     * the region is always a whole level. */
    STELA_METAL_BLOCKS_PVRTC_4BPP,
    STELA_METAL_BLOCKS_PVRTC_2BPP,
+   /* ASTC LDR as Apple decodes it: linear blocks to the top 12 bits of the
+    * Khronos UNORM16 result, which a 16-bit RGBA texel holds widened, and
+    * sRGB ones to 8-bit RGBA. An HDR endpoint mode's partition, an HDR or
+    * malformed void extent and every illegal block read the error color,
+    * opaque magenta. */
+   STELA_METAL_BLOCKS_ASTC,
+   STELA_METAL_BLOCKS_ASTC_SRGB,
 };
 
 /* ReorderArguments (binding.rs), which the reorder blocks kernel reads at
@@ -440,6 +447,12 @@ nir_shader *stela_metal_decode_pvrtc_kernel(const nir_shader_compiler_options *o
 /* Thread n copies block n of the ReorderArguments' region, counted along
  * rows, between the buffer's rows of blocks and the PVRTC level's Morton
  * order. */
+/* An ASTC LDR block's texel at x, y of its block_width x block_height
+ * texels: four 16-bit channels packed in two words, or for sRGB four
+ * 8-bit ones in one (enum stela_metal_block_codec). */
+nir_def *stela_metal_decode_astc(nir_builder *b, nir_def *words, nir_def *x, nir_def *y,
+                                 nir_def *block_width, nir_def *block_height, nir_def *srgb);
+nir_shader *stela_metal_decode_astc_kernel(const nir_shader_compiler_options *options);
 nir_shader *stela_metal_reorder_blocks_kernel(const nir_shader_compiler_options *options);
 
 /* The raw texel at x and y of a level of PVRTC blocks of codec, columns

@@ -1392,6 +1392,8 @@ mod tests {
             ("STELA_METAL_BLOCKS_EAC_RG11_SNORM", Codec::EacRg11Snorm),
             ("STELA_METAL_BLOCKS_PVRTC_4BPP", Codec::Pvrtc4),
             ("STELA_METAL_BLOCKS_PVRTC_2BPP", Codec::Pvrtc2),
+            ("STELA_METAL_BLOCKS_ASTC", Codec::Astc),
+            ("STELA_METAL_BLOCKS_ASTC_SRGB", Codec::AstcSrgb),
         ];
         assert_eq!(codecs.len(), expected.len());
         for (enumerator, codec) in expected {

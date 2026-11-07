@@ -699,6 +699,16 @@ impl Recorder<'_> {
                     count,
                     TexelArguments::WORKGROUP_SIZE,
                 ),
+                &Command::DecodeBlocks {
+                    kernel: BlockKernel::Astc,
+                    arguments,
+                    count,
+                } => self.internal(
+                    self.backend.decode_astc,
+                    arguments,
+                    count,
+                    TexelArguments::WORKGROUP_SIZE,
+                ),
                 &Command::ReorderBlocks { arguments, count } => self.internal(
                     self.backend.reorder_blocks,
                     arguments,

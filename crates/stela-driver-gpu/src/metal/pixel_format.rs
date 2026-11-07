@@ -326,6 +326,8 @@ pub enum Codec {
     EacRg11Snorm,
     Pvrtc4,
     Pvrtc2,
+    Astc,
+    AstcSrgb,
 }
 
 /// The decode kernel that expands a codec's blocks.
@@ -335,12 +337,15 @@ pub enum BlockKernel {
     Etc,
     /// `stela_metal_decode_pvrtc_kernel`.
     Pvrtc,
+    /// `stela_metal_decode_astc_kernel`.
+    Astc,
 }
 
 impl Codec {
     pub const fn kernel(self) -> BlockKernel {
         match self {
             Self::Pvrtc4 | Self::Pvrtc2 => BlockKernel::Pvrtc,
+            Self::Astc | Self::AstcSrgb => BlockKernel::Astc,
             _ => BlockKernel::Etc,
         }
     }
@@ -352,10 +357,12 @@ impl Codec {
         matches!(self, Self::Pvrtc4 | Self::Pvrtc2)
     }
 
-    /// Bytes of the decoded texel: 8-bit RGBA, or EAC's 16-bit channels.
+    /// Bytes of the decoded texel: 8-bit RGBA, EAC's 16-bit channels, or
+    /// linear ASTC's 16-bit RGBA.
     pub const fn decoded_bytes(self) -> u32 {
         match self {
             Self::EacR11 | Self::EacR11Snorm => 2,
+            Self::Astc => 8,
             _ => 4,
         }
     }
@@ -789,23 +796,42 @@ const fn pvrtc(format: PixelFormat, srgb: bool, two_bpp: bool, alpha: bool) -> D
     )
 }
 
-const fn astc(
+/// Devices sample no ASTC LDR blocks as Apple's GPUs decode them, so the
+/// blocks are held decoded ([`Encoding::Decoded`]): Apple reads a linear
+/// texel's top 12 bits of the Khronos UNORM16 result, which 16-bit unorm
+/// channels hold, and an sRGB texel's 8.
+const fn astc(format: PixelFormat, srgb: bool, width: u32, height: u32) -> Description {
+    let (codec, realization) = if srgb {
+        (Codec::AstcSrgb, V::R8G8B8A8Srgb)
+    } else {
+        (Codec::Astc, V::R16G16B16A16Unorm)
+    };
+    compressed(
+        format,
+        Compression::AstcLdr,
+        Numeric::Unorm,
+        srgb,
+        width,
+        height,
+        16,
+        realization,
+        IDENTITY,
+        Encoding::Decoded(codec),
+    )
+}
+
+/// ASTC HDR blocks, which only a device that samples them holds.
+const fn astc_hdr(
     format: PixelFormat,
-    kind: u8,
     width: u32,
     height: u32,
     realization: VkFormat,
 ) -> Description {
-    let (compression, numeric, srgb) = match kind {
-        b'h' => (Compression::AstcHdr, Numeric::Float, false),
-        b's' => (Compression::AstcLdr, Numeric::Unorm, true),
-        _ => (Compression::AstcLdr, Numeric::Unorm, false),
-    };
     compressed(
         format,
-        compression,
-        numeric,
-        srgb,
+        Compression::AstcHdr,
+        Numeric::Float,
+        false,
         width,
         height,
         16,
@@ -1073,48 +1099,48 @@ static DESCRIPTIONS: &[Description] = &[
         Codec::Etc2Rgb8A1,
         V::R8G8B8A8Srgb,
     ),
-    astc(P::Astc4x4Srgb, b's', 4, 4, V::Astc4x4SrgbBlock),
-    astc(P::Astc5x4Srgb, b's', 5, 4, V::Astc5x4SrgbBlock),
-    astc(P::Astc5x5Srgb, b's', 5, 5, V::Astc5x5SrgbBlock),
-    astc(P::Astc6x5Srgb, b's', 6, 5, V::Astc6x5SrgbBlock),
-    astc(P::Astc6x6Srgb, b's', 6, 6, V::Astc6x6SrgbBlock),
-    astc(P::Astc8x5Srgb, b's', 8, 5, V::Astc8x5SrgbBlock),
-    astc(P::Astc8x6Srgb, b's', 8, 6, V::Astc8x6SrgbBlock),
-    astc(P::Astc8x8Srgb, b's', 8, 8, V::Astc8x8SrgbBlock),
-    astc(P::Astc10x5Srgb, b's', 10, 5, V::Astc10x5SrgbBlock),
-    astc(P::Astc10x6Srgb, b's', 10, 6, V::Astc10x6SrgbBlock),
-    astc(P::Astc10x8Srgb, b's', 10, 8, V::Astc10x8SrgbBlock),
-    astc(P::Astc10x10Srgb, b's', 10, 10, V::Astc10x10SrgbBlock),
-    astc(P::Astc12x10Srgb, b's', 12, 10, V::Astc12x10SrgbBlock),
-    astc(P::Astc12x12Srgb, b's', 12, 12, V::Astc12x12SrgbBlock),
-    astc(P::Astc4x4Ldr, b'l', 4, 4, V::Astc4x4UnormBlock),
-    astc(P::Astc5x4Ldr, b'l', 5, 4, V::Astc5x4UnormBlock),
-    astc(P::Astc5x5Ldr, b'l', 5, 5, V::Astc5x5UnormBlock),
-    astc(P::Astc6x5Ldr, b'l', 6, 5, V::Astc6x5UnormBlock),
-    astc(P::Astc6x6Ldr, b'l', 6, 6, V::Astc6x6UnormBlock),
-    astc(P::Astc8x5Ldr, b'l', 8, 5, V::Astc8x5UnormBlock),
-    astc(P::Astc8x6Ldr, b'l', 8, 6, V::Astc8x6UnormBlock),
-    astc(P::Astc8x8Ldr, b'l', 8, 8, V::Astc8x8UnormBlock),
-    astc(P::Astc10x5Ldr, b'l', 10, 5, V::Astc10x5UnormBlock),
-    astc(P::Astc10x6Ldr, b'l', 10, 6, V::Astc10x6UnormBlock),
-    astc(P::Astc10x8Ldr, b'l', 10, 8, V::Astc10x8UnormBlock),
-    astc(P::Astc10x10Ldr, b'l', 10, 10, V::Astc10x10UnormBlock),
-    astc(P::Astc12x10Ldr, b'l', 12, 10, V::Astc12x10UnormBlock),
-    astc(P::Astc12x12Ldr, b'l', 12, 12, V::Astc12x12UnormBlock),
-    astc(P::Astc4x4Hdr, b'h', 4, 4, V::Astc4x4SfloatBlock),
-    astc(P::Astc5x4Hdr, b'h', 5, 4, V::Astc5x4SfloatBlock),
-    astc(P::Astc5x5Hdr, b'h', 5, 5, V::Astc5x5SfloatBlock),
-    astc(P::Astc6x5Hdr, b'h', 6, 5, V::Astc6x5SfloatBlock),
-    astc(P::Astc6x6Hdr, b'h', 6, 6, V::Astc6x6SfloatBlock),
-    astc(P::Astc8x5Hdr, b'h', 8, 5, V::Astc8x5SfloatBlock),
-    astc(P::Astc8x6Hdr, b'h', 8, 6, V::Astc8x6SfloatBlock),
-    astc(P::Astc8x8Hdr, b'h', 8, 8, V::Astc8x8SfloatBlock),
-    astc(P::Astc10x5Hdr, b'h', 10, 5, V::Astc10x5SfloatBlock),
-    astc(P::Astc10x6Hdr, b'h', 10, 6, V::Astc10x6SfloatBlock),
-    astc(P::Astc10x8Hdr, b'h', 10, 8, V::Astc10x8SfloatBlock),
-    astc(P::Astc10x10Hdr, b'h', 10, 10, V::Astc10x10SfloatBlock),
-    astc(P::Astc12x10Hdr, b'h', 12, 10, V::Astc12x10SfloatBlock),
-    astc(P::Astc12x12Hdr, b'h', 12, 12, V::Astc12x12SfloatBlock),
+    astc(P::Astc4x4Srgb, true, 4, 4),
+    astc(P::Astc5x4Srgb, true, 5, 4),
+    astc(P::Astc5x5Srgb, true, 5, 5),
+    astc(P::Astc6x5Srgb, true, 6, 5),
+    astc(P::Astc6x6Srgb, true, 6, 6),
+    astc(P::Astc8x5Srgb, true, 8, 5),
+    astc(P::Astc8x6Srgb, true, 8, 6),
+    astc(P::Astc8x8Srgb, true, 8, 8),
+    astc(P::Astc10x5Srgb, true, 10, 5),
+    astc(P::Astc10x6Srgb, true, 10, 6),
+    astc(P::Astc10x8Srgb, true, 10, 8),
+    astc(P::Astc10x10Srgb, true, 10, 10),
+    astc(P::Astc12x10Srgb, true, 12, 10),
+    astc(P::Astc12x12Srgb, true, 12, 12),
+    astc(P::Astc4x4Ldr, false, 4, 4),
+    astc(P::Astc5x4Ldr, false, 5, 4),
+    astc(P::Astc5x5Ldr, false, 5, 5),
+    astc(P::Astc6x5Ldr, false, 6, 5),
+    astc(P::Astc6x6Ldr, false, 6, 6),
+    astc(P::Astc8x5Ldr, false, 8, 5),
+    astc(P::Astc8x6Ldr, false, 8, 6),
+    astc(P::Astc8x8Ldr, false, 8, 8),
+    astc(P::Astc10x5Ldr, false, 10, 5),
+    astc(P::Astc10x6Ldr, false, 10, 6),
+    astc(P::Astc10x8Ldr, false, 10, 8),
+    astc(P::Astc10x10Ldr, false, 10, 10),
+    astc(P::Astc12x10Ldr, false, 12, 10),
+    astc(P::Astc12x12Ldr, false, 12, 12),
+    astc_hdr(P::Astc4x4Hdr, 4, 4, V::Astc4x4SfloatBlock),
+    astc_hdr(P::Astc5x4Hdr, 5, 4, V::Astc5x4SfloatBlock),
+    astc_hdr(P::Astc5x5Hdr, 5, 5, V::Astc5x5SfloatBlock),
+    astc_hdr(P::Astc6x5Hdr, 6, 5, V::Astc6x5SfloatBlock),
+    astc_hdr(P::Astc6x6Hdr, 6, 6, V::Astc6x6SfloatBlock),
+    astc_hdr(P::Astc8x5Hdr, 8, 5, V::Astc8x5SfloatBlock),
+    astc_hdr(P::Astc8x6Hdr, 8, 6, V::Astc8x6SfloatBlock),
+    astc_hdr(P::Astc8x8Hdr, 8, 8, V::Astc8x8SfloatBlock),
+    astc_hdr(P::Astc10x5Hdr, 10, 5, V::Astc10x5SfloatBlock),
+    astc_hdr(P::Astc10x6Hdr, 10, 6, V::Astc10x6SfloatBlock),
+    astc_hdr(P::Astc10x8Hdr, 10, 8, V::Astc10x8SfloatBlock),
+    astc_hdr(P::Astc10x10Hdr, 10, 10, V::Astc10x10SfloatBlock),
+    astc_hdr(P::Astc12x10Hdr, 12, 10, V::Astc12x10SfloatBlock),
+    astc_hdr(P::Astc12x12Hdr, 12, 12, V::Astc12x12SfloatBlock),
     subsampled(P::Gbgr422),
     subsampled(P::Bgrg422),
     depth_stencil(P::Depth16Unorm, Kind::Depth, 2, false, V::D16Unorm, DEPTH),
@@ -1228,6 +1254,26 @@ mod tests {
             );
             assert_eq!(view.image_aspects(), parent.image_aspects());
         }
+    }
+
+    #[test]
+    fn astc_ldr_decodes_to_apples_precision_through_its_block_size() {
+        // Linear ASTC keeps 12 bits in 16-bit channels, sRGB its 8.
+        let linear = P::Astc10x6Ldr.describe();
+        assert_eq!(linear.realization.unwrap().format, V::R16G16B16A16Unorm);
+        assert_eq!(linear.realization.unwrap().encoding.stored_bytes(16), 8);
+        assert_eq!(
+            linear.decoder(),
+            Some((BlockKernel::Astc, 10 | 10 << 8 | 6 << 16))
+        );
+        let srgb = P::Astc12x12Srgb.describe();
+        assert_eq!(srgb.realization.unwrap().format, V::R8G8B8A8Srgb);
+        assert_eq!(
+            srgb.decoder(),
+            Some((BlockKernel::Astc, 11 | 12 << 8 | 12 << 16))
+        );
+        // HDR blocks stay the device's own.
+        assert_eq!(P::Astc4x4Hdr.describe().decoder(), None);
     }
 
     #[test]

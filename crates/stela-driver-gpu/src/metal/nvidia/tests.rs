@@ -256,7 +256,8 @@ fn missing_families_name_the_layer_that_lacks_them() {
     assert_eq!(cause("framebuffer reads"), None);
     assert!(capabilities.framebuffer_reads);
     assert_eq!(cause("GPU family Metal4"), Some(Cause::AppleArchitecture));
-    assert_eq!(cause("ASTC LDR pixel formats"), Some(Cause::Driver));
+    assert_eq!(cause("ASTC LDR pixel formats"), None);
+    assert_eq!(cause("ASTC HDR pixel formats"), Some(Cause::Driver));
     assert!(!capabilities.supports_family(GpuFamily::Apple7));
     let names: alloc::vec::Vec<_> = capabilities
         .gaps()
@@ -319,9 +320,9 @@ fn pixel_format_capabilities_follow_the_driver_tables() {
         capabilities.format(P::Bc7RgbaUnorm),
         C::READ | C::FILTER | C::SPARSE | C::BLIT | C::HOST_TRANSFER
     );
-    assert!(capabilities.format(P::Astc4x4Ldr).is_empty());
-    // ETC2, EAC and PVRTC, which NVIDIA samples no blocks of, sample
-    // decoded.
+    assert!(capabilities.format(P::Astc4x4Hdr).is_empty());
+    // ETC2, EAC, PVRTC and ASTC LDR, which NVIDIA samples no blocks of or
+    // none as Apple decodes them, sample decoded.
     for format in [
         P::Etc2Rgb8,
         P::Etc2Rgb8A1Srgb,
@@ -330,6 +331,8 @@ fn pixel_format_capabilities_follow_the_driver_tables() {
         P::EacRg11Unorm,
         P::PvrtcRgb2bpp,
         P::PvrtcRgba4bppSrgb,
+        P::Astc4x4Ldr,
+        P::Astc12x10Srgb,
     ] {
         assert_eq!(capabilities.format(format), C::READ | C::FILTER | C::BLIT);
     }
