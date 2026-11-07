@@ -432,6 +432,11 @@ pub struct RenderPipelinePlan {
     pub mesh: Option<MeshThreads>,
     /// Draws are patch draws (`drawPatches`).
     pub tessellation: Option<Tessellation>,
+    /// Its fragment function writes the stencil reference and runs the
+    /// fragment tests itself ([`Capabilities::fragment_tests`]): its draws
+    /// test no depth or stencil in the pipeline, and the pass's depth and
+    /// stencil live in their copies while they draw.
+    pub tests_fragments: bool,
 }
 
 pub fn render_pipeline(
@@ -810,6 +815,18 @@ fn targets(
     if targets.alpha_to_one_enabled {
         require(capabilities.alpha_to_one, "alpha to one")?;
     }
+    // Without stencil export, a stencil output's function tests fragments
+    // before the pipeline's coverage changes: alpha to coverage would drop
+    // samples it already wrote.
+    let tests_fragments = capabilities.fragment_tests
+        && targets.rasterization_enabled
+        && outputs.is_some_and(|outputs| outputs.writes_stencil);
+    if tests_fragments {
+        require(
+            !targets.alpha_to_coverage_enabled,
+            "alpha to coverage with stencil feedback",
+        )?;
+    }
 
     let mut dynamic_states = BASE_DYNAMIC_STATES.to_vec();
     if capabilities.programmable_sample_positions {
@@ -856,6 +873,7 @@ fn targets(
         stencil_format,
         mesh: None,
         tessellation: None,
+        tests_fragments,
     })
 }
 

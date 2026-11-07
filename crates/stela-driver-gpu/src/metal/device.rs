@@ -131,6 +131,12 @@ pub struct Device<B: Backend, C: Compiler> {
     /// A function's module may set or copy indirect commands' barriers, so
     /// any GPU-resident buffer's commands may have them.
     command_barriers: bool,
+    /// A render pipeline runs the fragment tests in its fragment function
+    /// ([`RenderPipelinePlan::tests_fragments`]), so passes keep storage
+    /// copies of their depth and stencil attachments.
+    ///
+    /// [`RenderPipelinePlan::tests_fragments`]: super::pipeline::RenderPipelinePlan::tests_fragments
+    tests_fragments: bool,
     queue: queue::Queue,
 }
 
@@ -201,6 +207,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             execution_sets: execution_sets::ExecutionSets::default(),
             indirect: Slab::default(),
             command_barriers: false,
+            tests_fragments: false,
             queue: queue::Queue::default(),
         })
     }

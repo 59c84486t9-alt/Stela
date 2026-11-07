@@ -272,6 +272,9 @@ pub struct Features {
     pub dynamic_rendering_local_read: bool,
     pub maintenance4: bool,
     pub maintenance5: bool,
+    /// `VK_KHR_maintenance8`: image copies between a depth or stencil
+    /// aspect and a color image of its texel size.
+    pub maintenance8: bool,
     pub host_image_copy: bool,
     pub extended_dynamic_state: bool,
     pub extended_dynamic_state2: bool,

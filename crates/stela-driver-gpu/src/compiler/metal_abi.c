@@ -74,6 +74,13 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
                              nir_iadd_imm(b, stela_metal_load_table(b, metal->table),
                                           STELA_METAL_TABLE_IMAGEBLOCK),
                              .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
+   case STELA_AIR_DEPTH_STENCIL:
+   case STELA_AIR_DEPTH_RANGE:
+      return nir_load_global(b, 4, 32,
+                             nir_iadd_imm(b, stela_metal_load_table(b, metal->table),
+                                          value == STELA_AIR_DEPTH_STENCIL ? STELA_METAL_TABLE_DEPTH_STENCIL :
+                                                                             STELA_METAL_TABLE_DEPTH_RANGE),
+                             .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
    case STELA_AIR_PATCH_IDS: {
       /* The tessellation control stage's PATCH0. */
       nir_variable *ids = nir_variable_create(b->shader, nir_var_shader_in, glsl_uvec_type(3),
@@ -213,6 +220,14 @@ nir_deref_instr *stela_metal_bind_attachment(nir_builder *b, unsigned location,
 {
    return stela_metal_bind_texture_id(
       b, table_id(b, stage, STELA_METAL_TABLE_ATTACHMENTS + 8u * location), type, false, NULL,
+      stage);
+}
+
+nir_deref_instr *stela_metal_bind_depth_stencil(nir_builder *b, bool stencil,
+                                                const struct glsl_type *type, void *stage)
+{
+   return stela_metal_bind_texture_id(
+      b, table_id(b, stage, STELA_METAL_TABLE_DEPTH_COPIES + (stencil ? 8u : 0u)), type, false, NULL,
       stage);
 }
 

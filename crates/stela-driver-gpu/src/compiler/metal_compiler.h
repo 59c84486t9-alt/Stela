@@ -111,8 +111,11 @@ struct stela_metal_target {
    uint32_t stencil_export;
    /* Nonzero when fragment shaders may use raster order groups. */
    uint32_t raster_order_groups;
+   /* Nonzero when a fragment function writing the stencil reference without
+    * stencil export runs the fragment tests itself. */
+   uint32_t fragment_tests;
 };
-#define STELA_METAL_TARGET_BYTES 48u
+#define STELA_METAL_TARGET_BYTES 56u
 
 /* A threadgroup buffer's setThreadgroupMemoryLength:atIndex:. */
 struct stela_metal_threadgroup_length {

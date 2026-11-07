@@ -1144,6 +1144,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         // The driver compiles the NIR into the pipeline, which outlives it.
         let created =
             pipeline::render_pipeline(&self.capabilities, &descriptor).and_then(|mut plan| {
+                // Indirect commands draw without the copies' round trips.
+                require(
+                    !(plan.tests_fragments && request.support_indirect_command_buffers),
+                    "stencil feedback in indirect command buffers",
+                )?;
                 plan.info.indirect_bindable = request.support_indirect_command_buffers
                     && plan.tessellation.is_none()
                     && plan.amplification_count == 1
@@ -1156,6 +1161,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             });
         codes.iter().for_each(|code| self.compiler.release(*code));
         let (vulkan, plan) = created?;
+        self.tests_fragments |= plan.tests_fragments;
         let interfaces: Vec<Interface> = core::iter::once(vertex.interface)
             .chain(fragment.map(|shader| shader.interface))
             .collect();
@@ -1282,6 +1288,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 return Err(error);
             }
         };
+        self.tests_fragments |= plan.tests_fragments;
         self.keep(&kept)?;
         let index = self.pipelines.render.insert(RenderObject {
             kept,

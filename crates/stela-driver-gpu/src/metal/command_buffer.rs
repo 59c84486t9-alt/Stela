@@ -34,6 +34,7 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 pub mod blit;
 pub mod compute;
 pub mod counters;
+pub mod fragment_tests;
 pub mod generated;
 pub mod indirect;
 pub mod render;
@@ -476,6 +477,15 @@ impl Bindings {
         }
     }
 
+    /// What a fragment function testing fragments itself reads.
+    fn set_fragment_tests(&mut self, tests: crate::metal::binding::FragmentTests) {
+        let table = self.table(Stage::Fragment);
+        if table.slots.fragment_tests != tests {
+            table.slots.fragment_tests = tests;
+            table.address = None;
+        }
+    }
+
     fn set_blend_color(&mut self, color: [f32; 4]) {
         let color = color.map(f32::to_bits);
         let table = self.table(Stage::Fragment);
@@ -696,7 +706,17 @@ impl CommandBuffer {
     pub fn end_encoding(&mut self, resolver: &mut dyn Resolver) -> Result<()> {
         match core::mem::replace(&mut self.encoder, Encoder::None) {
             Encoder::None => Err(Error::Invalid("no encoder is encoding")),
-            Encoder::Render(state) => self.end_render(resolver, *state),
+            Encoder::Render(state) => {
+                // The copies return to the attachments in a pass instance
+                // before the last, whose store operations follow them.
+                self.encoder = Encoder::Render(state);
+                self.finish_fragment_tests(resolver)?;
+                let Encoder::Render(state) = core::mem::replace(&mut self.encoder, Encoder::None)
+                else {
+                    unreachable!("the render encoder was just restored")
+                };
+                self.end_render(resolver, *state)
+            }
             Encoder::Compute(_) | Encoder::Blit | Encoder::ResourceState => Ok(()),
         }?;
         self.bindings.reset();

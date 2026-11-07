@@ -625,6 +625,123 @@ fn stencil_export(plan: &mut Plan, library: &str) {
     );
 }
 
+/// Overlapping quads in one draw, each exporting its own stencil value as
+/// its reference: (x0, x1, depth, value), drawn in order.
+const OVERLAPS: [[f64; 4]; 4] = [
+    [-1.0, 0.5, 0.6, 5.0],
+    [-0.5, 1.0, 0.4, 9.0],
+    [-1.0, 1.0, 0.8, 3.0],
+    [-1.0, 1.0, 0.9, 255.0],
+];
+
+/// What each pixel of a row of `size` holds after the overlapping quads,
+/// in primitive order: the stencil test passes where the reference is
+/// greater, then the depth test where the depth is less, and the stencil
+/// inverts on failure, increments on depth failure and takes the
+/// reference where both pass. Returns the stencil, depth and the value of
+/// the last fragment that passed, of each pixel.
+fn overlap_row(size: u32) -> Vec<(u8, f32, u8)> {
+    (0..size)
+        .map(|x| {
+            let centre = (f64::from(x) + 0.5) / f64::from(size) * 2.0 - 1.0;
+            let (mut stencil, mut depth, mut color) = (4u8, 1.0f32, 0u8);
+            for [x0, x1, z, value] in OVERLAPS {
+                if centre < x0 || centre > x1 {
+                    continue;
+                }
+                let reference = value as u8;
+                if reference <= stencil {
+                    stencil = !stencil;
+                } else if (z as f32) >= depth {
+                    stencil = stencil.saturating_add(1);
+                } else {
+                    stencil = reference;
+                    depth = z as f32;
+                    color = reference;
+                }
+            }
+            (stencil, depth, color)
+        })
+        .collect()
+}
+
+/// Stencil feedback with the fragment tests: overlapping fragments of one
+/// draw test against each other's stencil and depth, with each of the
+/// stencil operations, at one sample and at four resolved from sample 0.
+fn stencil_feedback(plan: &mut Plan, library: &str) {
+    let size = 8u32;
+    let row = overlap_row(size);
+    let pixels = |f: &dyn Fn(&(u8, f32, u8)) -> f64| -> Vec<f64> {
+        (0..size).flat_map(|_| row.iter().map(f)).collect()
+    };
+    let stencils: Vec<u8> = (0..size).flat_map(|_| row.iter().map(|p| p.0)).collect();
+    let quads: Vec<f64> = OVERLAPS.iter().flatten().copied().collect();
+    for samples in [1u32, 4] {
+        let multisampled = samples > 1;
+        let target = if multisampled { "ms" } else { "ds" };
+        let mut depth = json!({"texture": target, "clear": 1.0, "compare": "less", "write": true});
+        let mut stencil = json!({"texture": target, "clear": 4, "compare": "greater", "fail": "invert",
+                                 "depth_fail": "increment_clamp", "pass": "replace"});
+        if multisampled {
+            depth["resolve"] = json!("ds");
+            depth["resolve_filter"] = json!("sample0");
+            stencil["resolve"] = json!("ds");
+            stencil["resolve_filter"] = json!("sample0");
+        }
+        let name = if multisampled {
+            "extras.stencil_feedback.multisampled"
+        } else {
+            "extras.stencil_feedback"
+        };
+        let mut case = Case::render(
+            name,
+            library,
+            "vert_overlap",
+            Some("frag_overlap"),
+            json!({"samples": samples, "colors": [{"texture": "c", "clear": [0, 0, 0, 0]}],
+                   "depth": depth, "stencil": stencil,
+                   "primitive": "triangle", "vertex_count": 6 * OVERLAPS.len()}),
+        )
+        .buffer(Buffer::data("quads", 0, f32s(&quads)).stage("vertex"))
+        .texture(Texture::d2("ds", "depth32float_stencil8", size, size).usage(&["render"]))
+        .output(
+            Output::new("ds", Dtype::U8, Tolerance::exact())
+                .set("aspect", "stencil")
+                .set("as", "stencil")
+                .expect_same(stencils.clone()),
+        )
+        .output(
+            Output::new("ds", Dtype::F32, Tolerance::exact())
+                .set("aspect", "depth")
+                .expect_same(f32s(&pixels(&|p| f64::from(p.1)))),
+        );
+        if multisampled {
+            case = case.texture(
+                Texture::new("ms", "depth32float_stencil8", "2d_ms", [size, size, 1])
+                    .samples(4)
+                    .usage(&["render"]),
+            );
+            case = case.texture(
+                Texture::new("c", "rgba8unorm", "2d_ms", [size, size, 1])
+                    .samples(4)
+                    .usage(&["render"]),
+            );
+        } else {
+            case = case
+                .texture(Texture::d2("c", "rgba8unorm", size, size).usage(&["render"]))
+                .output(
+                    Output::new("c", Dtype::U8, Tolerance::exact()).expect_same(
+                        pixels(&|p| f64::from(p.2))
+                            .into_iter()
+                            .flat_map(|v| [v as u8; 4])
+                            .collect::<Vec<u8>>(),
+                    ),
+                );
+        }
+        plan.add(case);
+    }
+}
+
 /// An invariant position: a second pass with another fragment function
 /// and depth test "equal" covers every pixel the first pass wrote.
 fn invariance(plan: &mut Plan, library: &str) {
@@ -714,6 +831,7 @@ pub fn build(plan: &mut Plan) {
     gradients(plan, &library);
     stage_in(plan, &library, &mut rng);
     stencil_export(plan, &library);
+    stencil_feedback(plan, &library);
     invariance(plan, &library);
     bfloat_scalar(plan, &library, &mut rng);
 }

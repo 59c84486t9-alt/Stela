@@ -455,8 +455,8 @@ static void expect_words(const uint8_t *bytes, const uint32_t *words, unsigned c
 #define RECORD_BYTES 128u
 #define WORDS 112u
 #define ENCODER 0x200u
-#define RANGE 0x900u
-#define ARGUMENTS 0xa00u
+#define RANGE 0xa00u
+#define ARGUMENTS 0xb00u
 #define SEQUENCES 0x1000u
 #define TABLES 0x1800u
 #define MEMORY (TABLES + 4 * STELA_METAL_TABLE_BYTES)

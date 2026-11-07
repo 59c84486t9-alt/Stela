@@ -32,6 +32,31 @@ struct UnifiedImageLayoutsFeatures {
     unified_image_layouts_video: vk::Bool32,
 }
 
+/// `VK_KHR_maintenance8`, newer than the bindings: copies between depth or
+/// stencil aspects and color images.
+pub(super) const MAINTENANCE8: &CStr = c"VK_KHR_maintenance8";
+
+/// `VkPhysicalDeviceMaintenance8FeaturesKHR`
+/// (`VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR` is
+/// 1000574000 in Mesa 26.2.5's `vulkan_core.h`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Maintenance8Features {
+    s_type: vk::StructureType,
+    p_next: *mut c_void,
+    maintenance8: vk::Bool32,
+}
+
+impl Default for Maintenance8Features {
+    fn default() -> Self {
+        Self {
+            s_type: vk::StructureType::from_raw(1_000_574_000),
+            p_next: ptr::null_mut(),
+            maintenance8: vk::FALSE,
+        }
+    }
+}
+
 impl Default for UnifiedImageLayoutsFeatures {
     fn default() -> Self {
         Self {
@@ -45,8 +70,9 @@ impl Default for UnifiedImageLayoutsFeatures {
 
 /// Extensions the device enables when the driver offers them. The
 /// requirements decide which absences refuse the device.
-const ENABLED: [&CStr; 29] = [
+const ENABLED: [&CStr; 30] = [
     UNIFIED_IMAGE_LAYOUTS,
+    MAINTENANCE8,
     generated::NAME,
     ext::robustness2::NAME,
     ext::dynamic_rendering_unused_attachments::NAME,
@@ -132,6 +158,7 @@ pub(super) struct FeatureChain {
     v12: vk::PhysicalDeviceVulkan12Features<'static>,
     v13: vk::PhysicalDeviceVulkan13Features<'static>,
     maintenance5: vk::PhysicalDeviceMaintenance5FeaturesKHR<'static>,
+    maintenance8: Maintenance8Features,
     unified: UnifiedImageLayoutsFeatures,
     robustness2: vk::PhysicalDeviceRobustness2FeaturesEXT<'static>,
     unused_attachments: vk::PhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT<'static>,
@@ -182,6 +209,7 @@ impl FeatureChain {
             v12 if true;
             v13 if true;
             maintenance5 if extensions.has(khr::maintenance5::NAME);
+            maintenance8 if extensions.has(MAINTENANCE8);
             unified if extensions.has(UNIFIED_IMAGE_LAYOUTS);
             robustness2 if extensions.has(ext::robustness2::NAME);
             unused_attachments if extensions.has(ext::dynamic_rendering_unused_attachments::NAME);
@@ -344,6 +372,7 @@ impl FeatureChain {
             dynamic_rendering_local_read: on(self.local_read.dynamic_rendering_local_read),
             maintenance4: on(v13.maintenance4),
             maintenance5: on(self.maintenance5.maintenance5),
+            maintenance8: on(self.maintenance8.maintenance8),
             host_image_copy: on(self.host_image_copy.host_image_copy),
             // Core, without feature bits, in Vulkan 1.3.
             extended_dynamic_state: vulkan_1_3,

@@ -326,6 +326,28 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             };
             *average = self.attachment_storage(resolve.texture, view)?;
         }
+        // Fragment functions that run the fragment tests themselves access
+        // copies of the depth and stencil attachments.
+        if self.tests_fragments {
+            let copy = |attachment: &Option<crate::metal::pass::RenderingAttachment<TextureId>>| {
+                attachment.as_ref().map(|attachment| {
+                    (
+                        attachment.view.texture,
+                        AttachmentView {
+                            texture: (),
+                            view_type: attachment.view.view_type,
+                            range: attachment.view.range,
+                        },
+                    )
+                })
+            };
+            if let Some((texture, view)) = copy(&plan.depth) {
+                plan.inputs.depth_copy = Some(self.tested_copy(texture, view, false)?);
+            }
+            if let Some((texture, view)) = copy(&plan.stencil) {
+                plan.inputs.stencil_copy = Some(self.tested_copy(texture, view, true)?);
+            }
+        }
         let plan = self.resolve_views(plan)?;
         let visibility = request
             .visibility_result_buffer

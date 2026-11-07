@@ -306,6 +306,7 @@ fn features(chip: &Chip) -> Features {
         dynamic_rendering_local_read: true,
         maintenance4: true,
         maintenance5: true,
+        maintenance8: true,
         host_image_copy: true,
         extended_dynamic_state: true,
         extended_dynamic_state2: true,

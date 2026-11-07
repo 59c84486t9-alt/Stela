@@ -53,6 +53,14 @@ typedef nir_deref_instr *(*stela_air_bind_texture)(nir_builder *b,
 typedef nir_deref_instr *(*stela_air_bind_attachment)(nir_builder *b, unsigned location,
                                                       const struct glsl_type *type, void *data);
 
+/* Resolve the pass's depth or stencil copy for a fragment function that
+ * tests and updates them itself (stela_air_stage_options::stencil_export):
+ * a 2D or 2D multisample array image of type, its layers from the attached
+ * slice, whose texels are the attachment's raw depth (16 or 32 bits) or
+ * stencil (8) bits. Returning NULL refuses compilation. */
+typedef nir_deref_instr *(*stela_air_bind_depth_stencil)(nir_builder *b, bool stencil,
+                                                         const struct glsl_type *type, void *data);
+
 /* Resolve a sampler argument for a use with a texture whose texels are
  * integers (integer is the border color class), as bind_texture does, to a
  * deref of glsl_bare_sampler_type(). */
@@ -290,6 +298,34 @@ enum stela_air_device_value {
     * word first, of the data, each pixel's samples in turn, row after row;
     * the rows and their pixels are whole tiles'. */
    STELA_AIR_IMAGEBLOCK,
+   /* The depth and stencil state a fragment function that tests them itself
+    * applies, as a uvec4: the depth word, the front and back faces' stencil
+    * words, laid out below, and a zero. */
+   STELA_AIR_DEPTH_STENCIL,
+   /* The viewport's near and far depths as a uvec4 of float bits, then two
+    * zeros. */
+   STELA_AIR_DEPTH_RANGE,
+};
+
+/* STELA_AIR_DEPTH_STENCIL's depth word: the MTLCompareFunction of the depth
+ * test in bits 0 to 2, which Vulkan's VkCompareOp numbers alike, depth
+ * writes in bit 3, the depth attachment's encoding in bits 4 and 5, a
+ * stencil attachment in bit 6, and depth clamping to the viewport's range in
+ * bit 7. A face's stencil word: its compare function in bits 0 to 2, its
+ * MTLStencilOperations (VkStencilOp alike) on stencil failure, depth failure
+ * and pass in bits 3 to 5, 6 to 8 and 9 to 11, its read mask in bits 16 to
+ * 23 and its write mask in bits 24 to 31. A pass without a depth attachment
+ * passes every depth test; one without a stencil attachment, every stencil
+ * test. */
+#define STELA_AIR_DEPTH_WRITE 8u
+#define STELA_AIR_DEPTH_FORMAT_SHIFT 4u
+#define STELA_AIR_DEPTH_STENCIL_ATTACHED 64u
+#define STELA_AIR_DEPTH_CLAMP 128u
+enum stela_air_depth_format {
+   STELA_AIR_DEPTH_NONE,
+   STELA_AIR_DEPTH_UNORM16,
+   STELA_AIR_DEPTH_UNORM24,
+   STELA_AIR_DEPTH_FLOAT32,
 };
 typedef nir_def *(*stela_air_load_device_value)(nir_builder *, enum stela_air_device_value,
                                                 void *binding_data);
@@ -359,6 +395,9 @@ struct stela_air_options {
    stela_air_bind_sampler bind_sampler;
    /* [[color(n)]] inputs; zero refuses them. */
    stela_air_bind_attachment bind_attachment;
+   /* The depth and stencil copies of a function that tests them itself;
+    * zero refuses stencil outputs without stencil export. */
+   stela_air_bind_depth_stencil bind_depth_stencil;
    /* Textures and samplers in argument buffers; zero refuses them. Argument
     * buffers hold device addresses, so they require bind_buffer. */
    stela_air_bind_texture_id bind_texture_id;
@@ -504,8 +543,15 @@ struct stela_air_stage_options {
    /* Target limits on an object payload's bytes and a mesh function's
     * vertices and primitives; zero refuses them. */
    unsigned max_payload_bytes, max_mesh_vertices, max_mesh_primitives;
-   /* Whether a fragment function may write the stencil reference. */
-   bool stencil_export;
+   /* Whether a fragment function may write the stencil reference. Without
+    * it, a function writing one runs the pass's depth and stencil tests and
+    * updates itself, in its interlock section where it ends, on copies of
+    * the attachments (bind_depth_stencil): it takes its stencil output as
+    * each fragment's reference, as Metal does, and covers only the samples
+    * that pass. Its pipeline tests no depth or stencil itself. That needs
+    * raster_order_groups, and runs for each sample the fragment covers, of
+    * `samples` per pixel. */
+   bool stencil_export, fragment_tests;
    /* Whether a fragment function may order its accesses after those of
     * overlapping fragments: the device's fragment shader pixel interlock. */
    bool raster_order_groups;

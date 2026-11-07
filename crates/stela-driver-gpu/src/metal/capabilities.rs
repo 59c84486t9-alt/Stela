@@ -329,6 +329,11 @@ pub struct Capabilities {
     /// read and write the attachment as storage in a fragment shader
     /// interlock section.
     pub framebuffer_reads: bool,
+    /// Fragment functions that write the stencil reference run the
+    /// fragment tests themselves, on copies of the pass's depth and stencil
+    /// attachments in their interlock section, for a device without stencil
+    /// export.
+    pub fragment_tests: bool,
     counter_sampling: [bool; 5],
     /// Sparse 3D textures, with Vulkan's 3D residency and block shapes.
     sparse_volumes: bool,
@@ -590,6 +595,19 @@ fn tessellation(features: &Features) -> Requirement {
     }
 }
 
+/// Whether a fragment function writing the stencil reference on `device`,
+/// which has no stencil export, runs the fragment tests itself: on storage
+/// copies of the attachments in its interlock section, which image copies
+/// between depth or stencil aspects and color images fill.
+pub fn fragment_tests(device: &PhysicalDevice) -> bool {
+    let features = &device.features;
+    !device.limits.stencil_export
+        && features.fragment_shader_pixel_interlock
+        && features.maintenance8
+        && features.shader_storage_image_multisample
+        && features.shader_storage_image_read_without_format
+}
+
 impl Derivation<'_> {
     fn cause(&self, requirement: &Requirement) -> Option<Cause> {
         if !requirement.driver {
@@ -713,6 +731,10 @@ impl Derivation<'_> {
                 features.dynamic_rendering_local_read && features.shader_storage_image_multisample,
                 ApiFeatures::EMPTY,
             ));
+        // A stencil output without stencil export: the function tests
+        // fragments on storage copies of the attachments, which image copies
+        // between depth or stencil aspects and color images fill.
+        let fragment_tests = raster_order_groups && fragment_tests(self.device);
         let raytracing = self.check(shader(
             "ray tracing",
             features.acceleration_structure && features.ray_query,
@@ -977,6 +999,7 @@ impl Derivation<'_> {
             statistic_counters: statistics,
             memoryless_render_targets: true,
             framebuffer_reads,
+            fragment_tests,
             counter_sampling,
             sparse_volumes,
             sparse_samples,
@@ -1518,9 +1541,9 @@ impl Derivation<'_> {
                     !capabilities.stencil_resolve_modes.is_empty(),
                 )],
             );
-        // NVIDIA's fragment shaders have no stencil output; pipelines that
-        // write one are refused.
-        if !self.device.limits.stencil_export {
+        // NVIDIA's fragment shaders have no stencil output: functions that
+        // write one run the fragment tests themselves.
+        if !self.device.limits.stencil_export && !capabilities.fragment_tests {
             self.gap("stencil feedback", Cause::Driver);
         }
         let apple6 = apple5

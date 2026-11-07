@@ -3643,3 +3643,126 @@ fn resident_dispatches_with_barriers_run_one_execution_each() {
         }
     }
 }
+
+/// A pass with depth and stencil copies whose pipeline tests fragments
+/// itself: its draws run on the copies, which the attachments fill before
+/// the first such draw and which return before a draw testing in its
+/// pipeline and where the pass ends.
+#[test]
+fn fragment_testing_draws_run_on_copies_of_the_depth_and_stencil() {
+    use crate::metal::pass::TestedCopy;
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let depth = texture(PixelFormat::Depth32FloatStencil8);
+    let mut plan = pass(&color, StoreAction::Store, false);
+    let mut descriptor = RenderPassDescriptor {
+        color_attachments: [None; MAX_COLOR_ATTACHMENTS],
+        depth_attachment: None,
+        depth_resolve_filter: crate::metal::abi::MultisampleDepthResolveFilter::Sample0,
+        stencil_attachment: None,
+        stencil_resolve_filter: crate::metal::abi::MultisampleStencilResolveFilter::Sample0,
+        visibility_results: false,
+        render_target_array_length: 0,
+        render_target_width: 0,
+        render_target_height: 0,
+        default_raster_sample_count: 0,
+        tile_memory: Default::default(),
+        sample_positions: Vec::new(),
+        rasterization_rate_map: false,
+    };
+    let target = Target {
+        texture: AttachedTexture {
+            texture: ImageView(8),
+            descriptor: &depth,
+        },
+        level: 0,
+        slice: 0,
+        depth_plane: 0,
+    };
+    descriptor.depth_attachment = Some(AttachmentDescriptor {
+        target,
+        resolve: None,
+        load_action: LoadAction::Clear,
+        store_action: StoreAction::Store,
+        store_action_options: StoreActionOptions::EMPTY,
+        clear: 1.0,
+    });
+    descriptor.stencil_attachment = Some(AttachmentDescriptor {
+        target,
+        resolve: None,
+        load_action: LoadAction::Clear,
+        store_action: StoreAction::Store,
+        store_action_options: StoreActionOptions::EMPTY,
+        clear: 0,
+    });
+    let with_depth = render_pass(&capabilities(), &descriptor).unwrap();
+    plan.depth = with_depth.depth;
+    plan.stencil = with_depth.stencil;
+    plan.depth_format = with_depth.depth_format;
+    plan.stencil_format = with_depth.stencil_format;
+    let copy = |id: u32, aspect| TestedCopy {
+        id: ResourceId::texture(0, id, 1),
+        image: Image(100 + u64::from(id)),
+        attachment: Image(8),
+        aspect,
+        level: 0,
+        base_layer: 0,
+        layers: 1,
+        extent: [64, 32],
+        encoding: 3,
+    };
+    plan.inputs.depth_copy = Some(copy(1, crate::metal::vulkan::ImageAspects::DEPTH));
+    plan.inputs.stencil_copy = Some(copy(2, crate::metal::vulkan::ImageAspects::STENCIL));
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(&mut resolver, plan, None, Vec::new())
+        .unwrap();
+    let mut testing = render_state(1);
+    testing.plan.tests_fragments = true;
+    let plain = render_state(1);
+    commands
+        .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
+        .unwrap();
+    let draw = |commands: &mut CommandBuffer, resolver: &mut MockResolver| {
+        commands
+            .draw_primitives(resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
+            .unwrap()
+    };
+    commands.set_render_pipeline_state(&testing).unwrap();
+    draw(&mut commands, &mut resolver);
+    draw(&mut commands, &mut resolver);
+    // A draw that tests nothing in its pipeline leaves the copies in place.
+    commands.set_render_pipeline_state(&plain).unwrap();
+    draw(&mut commands, &mut resolver);
+    let tested =
+        crate::metal::pipeline::depth_stencil(&crate::metal::pipeline::DepthStencilDescriptor {
+            depth_compare_function: crate::metal::abi::CompareFunction::Less,
+            depth_write_enabled: true,
+            ..Default::default()
+        });
+    commands.set_depth_stencil_state(Some(&tested)).unwrap();
+    draw(&mut commands, &mut resolver);
+    commands.set_render_pipeline_state(&testing).unwrap();
+    draw(&mut commands, &mut resolver);
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let copies: Vec<(Image, Image)> = recording.segments[0]
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::CopyImage { src, dst, .. } => Some((*src, *dst)),
+            _ => None,
+        })
+        .collect();
+    let (to, from) = (
+        [(Image(8), Image(101)), (Image(8), Image(102))],
+        [(Image(101), Image(8)), (Image(102), Image(8))],
+    );
+    // In, back before the testing draw, in again, back where the pass ends.
+    assert_eq!(copies, [to, from, to, from].concat());
+    assert_eq!(
+        count(&recording.segments[0].commands, |command| *command
+            == Command::EndRendering),
+        5
+    );
+}

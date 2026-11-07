@@ -14,7 +14,7 @@ use crate::metal::{
     error::{Error, Result, ensure, require},
     hazard::FULL,
     heap::{self, HeapAllocator, HeapDescriptor, SizeAndAlign},
-    pass::AttachmentView,
+    pass::{AttachmentView, TestedCopy},
     pixel_format::{Description, Encoding},
     resource::{
         self, CpuAccess, ShaderViews, SubresourceLayout, TextureDescriptor, TexturePlan,
@@ -24,12 +24,13 @@ use crate::metal::{
     shader::Compiler,
     sparse::{self, MappingRequest, SparseLayout, SparsePages, SparseTexture},
     vulkan::{
-        BufferCreate, BufferUsage, ImageAspects, ImageViewType, MemoryProperties,
+        BufferCreate, BufferUsage, Format, ImageAspects, ImageCreate, ImageTiling, ImageType,
+        ImageUsage, ImageViewType, MemoryProperties, SampleCounts,
         backend::{Backend, BufferAllocation, Descriptor, Object},
         command::{BufferImageCopy, Command, SparseBind},
         object::{
-            Buffer, BufferInfo, BufferView, Image, ImageView, ImageViewInfo, Memory, MemoryRequest,
-            Sampler, SubresourceRange,
+            Buffer, BufferInfo, BufferView, Image, ImageInfo, ImageView, ImageViewInfo, Memory,
+            MemoryRequest, Sampler, SubresourceRange,
         },
     },
 };
@@ -110,6 +111,9 @@ struct TextureObject {
     /// Raw texel storage views of attached subresources, with their storage
     /// descriptors, which framebuffer reads access.
     attachment_storage: Vec<(AttachmentView<()>, ImageView, u32)>,
+    /// Copies of attached depth or stencil subresources, which fragment
+    /// functions testing fragments themselves access as storage.
+    tested_copies: Vec<TestedCopyObject>,
     cpu_access: CpuAccess,
     backing: Backing,
     /// The texture's own allocation, when `backing` is `Owned`.
@@ -121,6 +125,19 @@ struct TextureObject {
     /// or a decoded format's blocks ([`CpuAccess::Blocks`]), followed by
     /// the decode kernels' arguments for each subresource.
     cpu_copy: Option<BufferAllocation>,
+}
+
+/// A depth or stencil subresource's storage copy ([`TestedCopy`]): what it
+/// copies, and its image, memory, view and storage descriptor.
+#[derive(Debug)]
+struct TestedCopyObject {
+    view: AttachmentView<()>,
+    stencil: bool,
+    copy: TestedCopy,
+    memory: Memory,
+    bytes: u64,
+    image_view: ImageView,
+    descriptor: u32,
 }
 
 #[derive(Debug)]
@@ -437,6 +454,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             texel_views: Vec::new(),
             attachment_views: Vec::new(),
             attachment_storage: Vec::new(),
+            tested_copies: Vec::new(),
             cpu_access: plan.cpu_access,
             backing,
             memory,
@@ -622,6 +640,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             texel_views: Vec::new(),
             attachment_views: Vec::new(),
             attachment_storage: Vec::new(),
+            tested_copies: Vec::new(),
             cpu_access: CpuAccess::None,
             backing: Backing::Owned(0),
             memory: None,
@@ -679,6 +698,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 texel_views: alloc::vec![view],
                 attachment_views: Vec::new(),
                 attachment_storage: Vec::new(),
+                tested_copies: Vec::new(),
                 cpu_access: CpuAccess::Linear,
                 backing: Backing::Buffer(buffer_id),
                 memory: None,
@@ -719,6 +739,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 texel_views: Vec::new(),
                 attachment_views: Vec::new(),
                 attachment_storage: Vec::new(),
+                tested_copies: Vec::new(),
                 cpu_access: CpuAccess::Linear,
                 backing: Backing::Buffer(buffer_id),
                 memory: None,
@@ -826,6 +847,133 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .attachment_storage
             .push((view, created, descriptor));
         Ok(ResourceId::texture(NULL_DESCRIPTOR, descriptor, 1))
+    }
+
+    /// The storage copy of an attached depth (or, with `stencil`, stencil)
+    /// subresource, created on first use and kept with the texture: an
+    /// image of the aspect's raw texels, a 16- or 32-bit word of depth or a
+    /// byte of stencil, with the view's layers and the texture's samples,
+    /// which image copies fill from the attachment and return to it.
+    pub fn tested_copy(
+        &mut self,
+        id: TextureId,
+        view: AttachmentView<()>,
+        stencil: bool,
+    ) -> Result<TestedCopy> {
+        let texture = self.resources.textures.get(id.0)?;
+        if let Some(object) = texture
+            .tested_copies
+            .iter()
+            .find(|object| object.view == view && object.stencil == stencil)
+        {
+            return Ok(object.copy);
+        }
+        let attachment = texture
+            .image
+            .ok_or(Error::Invalid("texture buffers are not attachments"))?;
+        let descriptor = texture.descriptor;
+        let realized = descriptor
+            .pixel_format
+            .describe()
+            .realization
+            .map_err(|_| Error::Unsupported("stencil feedback with the pixel format"))?
+            .format;
+        let (format, encoding, aspect) = if stencil {
+            (Format::R8Uint, 0, ImageAspects::STENCIL)
+        } else {
+            match realized {
+                Format::D16Unorm => (Format::R16Uint, 1, ImageAspects::DEPTH),
+                Format::D24UnormS8Uint => (Format::R32Uint, 2, ImageAspects::DEPTH),
+                Format::D32Sfloat | Format::D32SfloatS8Uint => {
+                    (Format::R32Uint, 3, ImageAspects::DEPTH)
+                }
+                _ => return Err(Error::Unsupported("stencil feedback with the pixel format")),
+            }
+        };
+        let level = view.range.base_mip_level;
+        let extent = [
+            (descriptor.width >> level).max(1) as u32,
+            (descriptor.height >> level).max(1) as u32,
+        ];
+        let layers = view.range.layer_count;
+        let info = ImageInfo {
+            flags: ImageCreate::EMPTY,
+            image_type: ImageType::D2,
+            format,
+            extent: [extent[0], extent[1], 1],
+            mip_levels: 1,
+            array_layers: layers,
+            samples: SampleCounts::single(descriptor.sample_count.max(1) as u32)
+                .ok_or(Error::Invalid("texture sample count"))?,
+            tiling: ImageTiling::Optimal,
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC | ImageUsage::TRANSFER_DST,
+            view_formats: Vec::new(),
+            linear: None,
+        };
+        let request = MemoryRequest {
+            required: MemoryProperties::DEVICE_LOCAL,
+            preferred: MemoryProperties::EMPTY,
+            mapped: false,
+        };
+        let (image, memory, bytes) = self.backend.create_image(&info, request)?;
+        self.allocated += bytes;
+        let view_info = ImageViewInfo {
+            view_type: ImageViewType::D2Array,
+            format,
+            components: [crate::metal::vulkan::ComponentSwizzle::Identity; 4],
+            range: SubresourceRange {
+                aspects: ImageAspects::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: layers,
+            },
+            usage: ImageUsage::STORAGE,
+            min_lod: 0.0,
+        };
+        let created = match self.backend.create_image_view(image, &view_info) {
+            Ok(image_view) => match self.descriptor(Descriptor::StorageImage(image_view)) {
+                Ok(descriptor) => Ok((image_view, descriptor)),
+                Err(error) => {
+                    self.backend.destroy(Object::ImageView(image_view));
+                    Err(error)
+                }
+            },
+            Err(error) => Err(error),
+        };
+        let (image_view, storage) = match created {
+            Ok(created) => created,
+            Err(error) => {
+                self.backend.destroy(Object::Image(image));
+                self.release_memory(memory, bytes);
+                return Err(error);
+            }
+        };
+        let copy = TestedCopy {
+            id: ResourceId::texture(NULL_DESCRIPTOR, storage, 1),
+            image,
+            attachment,
+            aspect,
+            level,
+            base_layer: view.range.base_array_layer,
+            layers,
+            extent,
+            encoding,
+        };
+        self.resources
+            .textures
+            .get_mut(id.0)?
+            .tested_copies
+            .push(TestedCopyObject {
+                view,
+                stencil,
+                copy,
+                memory,
+                bytes,
+                image_view,
+                descriptor: storage,
+            });
+        Ok(copy)
     }
 
     /// For a buffer copy of `level` and `slice` of a texture whose image
@@ -1277,6 +1425,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         for &(_, _, descriptor) in &texture.attachment_storage {
             self.descriptors
                 .release_run(HeapArray::StorageImages, descriptor, 1, self.submitted);
+        }
+        for copy in texture.tested_copies {
+            self.defer(Object::ImageView(copy.image_view));
+            self.descriptors.release_run(
+                HeapArray::StorageImages,
+                copy.descriptor,
+                1,
+                self.submitted,
+            );
+            self.defer(Object::Image(copy.copy.image));
+            self.release_memory(copy.memory, copy.bytes);
         }
         for view in texture.texel_views {
             self.defer(Object::BufferView(view));

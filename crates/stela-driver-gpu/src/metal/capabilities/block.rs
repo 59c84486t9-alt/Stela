@@ -79,6 +79,8 @@ option_set! {
         const FRAMEBUFFER_READS = 1 << 34;
         /// `MTLTextureViewDescriptor.minLOD`.
         const VIEW_MIN_LOD = 1 << 35;
+        /// Stencil outputs run the fragment tests in their function.
+        const FRAGMENT_TESTS = 1 << 36;
     }
 }
 
@@ -362,6 +364,7 @@ impl Block {
             statistic_counters: has(Flags::STATISTIC_COUNTERS),
             memoryless_render_targets: has(Flags::MEMORYLESS_RENDER_TARGETS),
             framebuffer_reads: has(Flags::FRAMEBUFFER_READS),
+            fragment_tests: has(Flags::FRAGMENT_TESTS),
             counter_sampling,
             sparse_volumes: has(Flags::SPARSE_VOLUMES),
             sparse_samples: formats(
@@ -615,6 +618,7 @@ impl Capabilities {
                 self.memoryless_render_targets,
             )
             .with(Flags::FRAMEBUFFER_READS, self.framebuffer_reads)
+            .with(Flags::FRAGMENT_TESTS, self.fragment_tests)
             .with(Flags::SPARSE_VOLUMES, self.sparse_volumes)
             .with(
                 Flags::SINGLE_TEXEL_ALIGNMENT,

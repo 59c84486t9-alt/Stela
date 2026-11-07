@@ -253,6 +253,11 @@ pub(super) struct RenderState {
     /// The encoder's tile pipeline and threadgroup memory, and the pass's
     /// tile memory.
     pub(super) tile: super::tile::TileState,
+    /// Where the pass's depth and stencil are, for pipelines that run the
+    /// fragment tests themselves.
+    pub(super) tests: super::fragment_tests::TestState,
+    /// The first viewport's near and far depths.
+    pub(super) depth_range: [f32; 2],
 }
 
 impl RenderState {
@@ -438,6 +443,8 @@ impl CommandBuffer {
             timestamp_resets: Vec::new(),
             attachment_paths: [AttachmentPath::Blend; MAX_COLOR_ATTACHMENTS],
             tile: super::tile::TileState::default(),
+            tests: super::fragment_tests::TestState::default(),
+            depth_range: [0.0, 1.0],
         };
         for &(sample, boundary) in &state.samples {
             if let (CounterSample::Timestamp { pool, query }, true) = (sample, boundary.starts()) {
@@ -769,7 +776,7 @@ fn flip(viewport: Viewport) -> VkViewport {
     }
 }
 
-fn depth_stencil(state: &DepthStencilState) -> DepthStencil {
+pub(super) fn depth_stencil(state: &DepthStencilState) -> DepthStencil {
     let face = |face: &crate::metal::pipeline::StencilFace| {
         (
             face.fail_op,
@@ -964,11 +971,12 @@ impl CommandBuffer {
     }
 
     pub fn set_viewports(&mut self, viewports: &[Viewport]) -> Result<()> {
-        render(&mut self.encoder)?;
+        let render = render(&mut self.encoder)?;
         ensure(
             (1..=16).contains(&viewports.len()),
             "between 1 and 16 viewports",
         )?;
+        render.depth_range = [viewports[0].znear as f32, viewports[0].zfar as f32];
         self.recorder.push(Command::SetViewports(
             viewports.iter().copied().map(flip).collect(),
         ));
@@ -1036,9 +1044,14 @@ impl CommandBuffer {
 
     pub fn set_depth_stencil_state(&mut self, state: Option<&DepthStencilState>) -> Result<()> {
         let state = state.copied().unwrap_or_default();
-        render(&mut self.encoder)?.raster.depth_stencil = state;
-        self.recorder
-            .push(Command::SetDepthStencil(depth_stencil(&state)));
+        let render = render(&mut self.encoder)?;
+        render.raster.depth_stencil = state;
+        // A pipeline testing fragments itself keeps the tests off; its draws
+        // read the state from their table.
+        if !render.tests.untested() {
+            self.recorder
+                .push(Command::SetDepthStencil(depth_stencil(&state)));
+        }
         Ok(())
     }
 
@@ -1624,6 +1637,7 @@ impl CommandBuffer {
         commands
             .into_iter()
             .for_each(|command| self.recorder.push(command));
+        self.prepare_fragment_tests(resolver)?;
         self.order_attachments()?;
         self.begin_query(resolver)?;
         self.bindings.flush(
@@ -1769,6 +1783,7 @@ impl CommandBuffer {
             TessellationArguments::ALIGNMENT,
         )?;
         self.bindings.constants.arguments = upload.address;
+        self.prepare_fragment_tests(resolver)?;
         self.order_attachments()?;
         self.begin_query(resolver)?;
         self.bindings.flush(
@@ -1810,6 +1825,7 @@ impl CommandBuffer {
             pipeline,
         });
         self.bindings.constants.grid = grid;
+        self.prepare_fragment_tests(resolver)?;
         self.order_attachments()?;
         self.begin_query(resolver)?;
         self.bindings.flush(

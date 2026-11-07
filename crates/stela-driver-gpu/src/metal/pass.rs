@@ -19,7 +19,7 @@ use super::{
     resource::{TextureDescriptor, vulkan_format},
     vulkan::{
         AttachmentLoadOp, AttachmentStoreOp, ImageAspects, ImageViewType, ResolveModes,
-        object::SubresourceRange,
+        object::{Image, SubresourceRange},
     },
 };
 use alloc::vec::Vec;
@@ -126,6 +126,29 @@ pub struct AttachmentInputs {
     /// The raw texel storage view of each averaged attachment's resolve
     /// texture ([`RenderingAttachment::averaged`]); null for the others.
     pub averages: [ResourceId; MAX_COLOR_ATTACHMENTS],
+    /// The storage copies of the depth and stencil attachments, which
+    /// fragment functions running the fragment tests themselves access
+    /// ([`Device::tested_copy`](super::device::Device::tested_copy)), for a
+    /// device that has such pipelines.
+    pub depth_copy: Option<TestedCopy>,
+    pub stencil_copy: Option<TestedCopy>,
+}
+
+/// A depth or stencil attachment's storage copy: its view's ID and image,
+/// and the attachment's image, aspect, level, first layer and the layers
+/// and extent the copy holds; a depth copy's `encoding` is its
+/// `enum stela_air_depth_format`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TestedCopy {
+    pub id: ResourceId,
+    pub image: Image,
+    pub attachment: Image,
+    pub aspect: ImageAspects,
+    pub level: u32,
+    pub base_layer: u32,
+    pub layers: u32,
+    pub extent: [u32; 2],
+    pub encoding: u32,
 }
 
 /// `VkRenderingInfo` and what the encoder checks against it.

@@ -213,6 +213,33 @@ pub struct ArgumentTable {
     /// The pass's imageblock data, which fragment and tile functions
     /// access.
     pub imageblock: PassImageblock,
+    /// What a fragment function that runs the fragment tests itself reads.
+    pub fragment_tests: FragmentTests,
+}
+
+/// The fragment tests a fragment function writing the stencil reference
+/// runs itself on a device without stencil export
+/// ([`Capabilities::fragment_tests`]): the state words of
+/// `STELA_AIR_DEPTH_STENCIL` (`air_to_nir.h`), the viewport's depth range,
+/// and the storage views of the pass's depth and stencil copies.
+///
+/// [`Capabilities::fragment_tests`]: super::capabilities::Capabilities::fragment_tests
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FragmentTests {
+    pub state: [u32; 3],
+    /// The near and far depths' bits.
+    pub range: [u32; 2],
+    pub depth: ResourceId,
+    pub stencil: ResourceId,
+}
+
+impl FragmentTests {
+    /// The depth word's depth writes, encoding shift, stencil attachment
+    /// and clamping bits.
+    pub const DEPTH_WRITE: u32 = 1 << 3;
+    pub const DEPTH_FORMAT_SHIFT: u32 = 4;
+    pub const STENCIL_ATTACHED: u32 = 1 << 6;
+    pub const DEPTH_CLAMP: u32 = 1 << 7;
 }
 
 /// A render pass's imageblock data: `stride` bytes for each sample, each
@@ -234,6 +261,7 @@ impl Default for ArgumentTable {
             samples: PassSamples::default(),
             blend_color: [0; 4],
             imageblock: PassImageblock::default(),
+            fragment_tests: FragmentTests::default(),
         }
     }
 }
@@ -289,7 +317,10 @@ impl ArgumentTable {
     pub const SAMPLE_COUNT_OFFSET: u32 = Self::SAMPLE_POSITIONS_OFFSET + 16;
     pub const BLEND_COLOR_OFFSET: u32 = Self::SAMPLE_COUNT_OFFSET + 16;
     pub const IMAGEBLOCK_OFFSET: u32 = Self::BLEND_COLOR_OFFSET + 16;
-    pub const BYTES: u32 = Self::IMAGEBLOCK_OFFSET + 16;
+    pub const DEPTH_STENCIL_OFFSET: u32 = Self::IMAGEBLOCK_OFFSET + 16;
+    pub const DEPTH_RANGE_OFFSET: u32 = Self::DEPTH_STENCIL_OFFSET + 16;
+    pub const DEPTH_COPIES_OFFSET: u32 = Self::DEPTH_RANGE_OFFSET + 16;
+    pub const BYTES: u32 = Self::DEPTH_COPIES_OFFSET + 16;
     /// Tables are placed at this alignment in the upload ring.
     pub const ALIGNMENT: u64 = 16;
 
@@ -324,6 +355,14 @@ impl ArgumentTable {
         writer.u32(self.imageblock.stride);
         writer.u32(self.imageblock.pitch);
         writer.u64(self.imageblock.address);
+        let tests = &self.fragment_tests;
+        tests.state.into_iter().for_each(|word| writer.u32(word));
+        writer.u32(0);
+        [tests.range[0], tests.range[1], 0, 0]
+            .into_iter()
+            .for_each(|word| writer.u32(word));
+        writer.u64(tests.depth.0);
+        writer.u64(tests.stencil.0);
     }
 }
 
@@ -1040,6 +1079,30 @@ mod tests {
     };
 
     #[test]
+    fn fragment_test_words_match_the_compiler() {
+        let header = include_str!("../compiler/air_to_nir.h");
+        let define = |name: &str| -> u32 {
+            header
+                .lines()
+                .find_map(|line| {
+                    let value = line.strip_prefix("#define ")?.strip_prefix(name)?;
+                    value.strip_prefix(' ')?.strip_suffix('u')?.parse().ok()
+                })
+                .unwrap_or_else(|| panic!("air_to_nir.h does not define {name}"))
+        };
+        assert_eq!(define("STELA_AIR_DEPTH_WRITE"), FragmentTests::DEPTH_WRITE);
+        assert_eq!(
+            define("STELA_AIR_DEPTH_FORMAT_SHIFT"),
+            FragmentTests::DEPTH_FORMAT_SHIFT
+        );
+        assert_eq!(
+            define("STELA_AIR_DEPTH_STENCIL_ATTACHED"),
+            FragmentTests::STENCIL_ATTACHED
+        );
+        assert_eq!(define("STELA_AIR_DEPTH_CLAMP"), FragmentTests::DEPTH_CLAMP);
+    }
+
+    #[test]
     fn compiler_header_matches_the_layouts() {
         let header = include_str!("../compiler/metal_abi.h");
         let define = |name: &str| -> u32 {
@@ -1112,6 +1175,18 @@ mod tests {
             (
                 "STELA_METAL_TABLE_IMAGEBLOCK",
                 ArgumentTable::IMAGEBLOCK_OFFSET,
+            ),
+            (
+                "STELA_METAL_TABLE_DEPTH_STENCIL",
+                ArgumentTable::DEPTH_STENCIL_OFFSET,
+            ),
+            (
+                "STELA_METAL_TABLE_DEPTH_RANGE",
+                ArgumentTable::DEPTH_RANGE_OFFSET,
+            ),
+            (
+                "STELA_METAL_TABLE_DEPTH_COPIES",
+                ArgumentTable::DEPTH_COPIES_OFFSET,
             ),
             ("STELA_METAL_TABLE_BYTES", ArgumentTable::BYTES),
             (
@@ -1643,7 +1718,9 @@ mod tests {
         assert_eq!(ArgumentTable::SAMPLE_POSITIONS_OFFSET, 1712);
         assert_eq!(ArgumentTable::BLEND_COLOR_OFFSET, 1744);
         assert_eq!(ArgumentTable::IMAGEBLOCK_OFFSET, 1760);
-        assert_eq!(ArgumentTable::BYTES, 1776);
+        assert_eq!(ArgumentTable::DEPTH_STENCIL_OFFSET, 1776);
+        assert_eq!(ArgumentTable::DEPTH_COPIES_OFFSET, 1808);
+        assert_eq!(ArgumentTable::BYTES, 1824);
         assert_eq!(
             u64::from(ArgumentTable::BYTES) % ArgumentTable::ALIGNMENT,
             0
@@ -1691,6 +1768,19 @@ mod tests {
             u64::from_le_bytes(bytes[at + 8..at + 16].try_into().unwrap()),
             0x10_0000_0040
         );
+        table.fragment_tests = FragmentTests {
+            state: [0x17, 0x2, 0x3],
+            range: [0.25f32.to_bits(), 1.0f32.to_bits()],
+            depth: ResourceId::new(0, 5),
+            stencil: ResourceId::new(0, 6),
+        };
+        let bytes = table.encode();
+        let u32_at =
+            |offset: u32| u32::from_le_bytes(bytes[offset as usize..][..4].try_into().unwrap());
+        assert_eq!(u32_at(ArgumentTable::DEPTH_STENCIL_OFFSET), 0x17);
+        assert_eq!(u32_at(ArgumentTable::DEPTH_STENCIL_OFFSET + 8), 0x3);
+        assert_eq!(u32_at(ArgumentTable::DEPTH_RANGE_OFFSET), 0.25f32.to_bits());
+        assert_eq!(u32_at(ArgumentTable::DEPTH_COPIES_OFFSET + 12), 6);
     }
 
     #[test]

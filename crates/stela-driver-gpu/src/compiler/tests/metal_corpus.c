@@ -259,6 +259,7 @@ main(int argc, char **argv)
       .nir = nak_nir_options(nak), .max_instructions = 1u << 20, .max_threadgroup_bytes = 49152,
       .max_private_bytes = 1u << 16, .max_constant_bytes = 65536, .max_varying_slots = 31,
       .max_payload_bytes = 16384, .max_mesh_vertices = 256, .max_mesh_primitives = 512,
+      .raster_order_groups = 1, .fragment_tests = 1,
    };
    unsigned refused = 0;
    for (int i = first; i < argc; i++)

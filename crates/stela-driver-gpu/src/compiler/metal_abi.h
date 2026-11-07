@@ -36,7 +36,13 @@
 /* A fragment table's render encoder blend color, four floats. */
 #define STELA_METAL_TABLE_BLEND_COLOR 1744u
 #define STELA_METAL_TABLE_IMAGEBLOCK 1760u
-#define STELA_METAL_TABLE_BYTES 1776u
+/* A fragment table's STELA_AIR_DEPTH_STENCIL and STELA_AIR_DEPTH_RANGE, a
+ * uvec4 each, then the MTLResourceIDs of the pass's depth and stencil
+ * copies, which a function testing them itself accesses. */
+#define STELA_METAL_TABLE_DEPTH_STENCIL 1776u
+#define STELA_METAL_TABLE_DEPTH_RANGE 1792u
+#define STELA_METAL_TABLE_DEPTH_COPIES 1808u
+#define STELA_METAL_TABLE_BYTES 1824u
 
 /* MTLStageInRegionIndirectArguments, which a kernel with stage-in reads at
  * the push constants' arguments address: uint origin[3], then size[3]. */
@@ -369,6 +375,11 @@ nir_deref_instr *stela_metal_bind_texture(nir_builder *b, const struct stela_air
  * attachment. */
 nir_deref_instr *stela_metal_bind_attachment(nir_builder *b, unsigned location,
                                              const struct glsl_type *type, void *stage);
+
+/* stela_air_bind_depth_stencil: the storage image of the copy the table
+ * holds. */
+nir_deref_instr *stela_metal_bind_depth_stencil(nir_builder *b, bool stencil,
+                                                const struct glsl_type *type, void *stage);
 
 /* stela_air_texture_query: the count the texture's MTLResourceID carries. */
 nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_texture *texture,

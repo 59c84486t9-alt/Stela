@@ -138,6 +138,27 @@ struct Exported {
 fragment Exported frag_stencil(Pixel in [[stage_in]])
 { return {float4(1.0f), uint(in.position.x) * 16u + uint(in.position.y)}; }
 
+// Overlapping quads in one draw, each at its own depth and exporting its
+// own stencil value: x from x0 to x1, at depth z, of value v.
+struct Overlap {
+    float4 position [[position]];
+    uint value [[flat]];
+};
+
+constant uint overlap_corners[6] = {0, 1, 2, 2, 1, 3};
+
+vertex Overlap vert_overlap(constant float4 *quads [[buffer(0)]], uint v [[vertex_id]])
+{
+    float4 q = quads[v / 6];
+    uint corner = overlap_corners[v % 6];
+    float x = corner & 1 ? q.y : q.x;
+    float y = corner & 2 ? 1.0f : -1.0f;
+    return {float4(x, y, q.z, 1.0f), uint(q.w)};
+}
+
+fragment Exported frag_overlap(Overlap in [[stage_in]])
+{ return {float4(float(in.value) / 255.0f), in.value}; }
+
 // An invariant position: a later pass with depth test "equal" matches the
 // depth an earlier pass wrote with another fragment function.
 struct Invariant {

@@ -168,6 +168,9 @@ struct translator {
       nir_def *placeholder;
    } attachment_reads[AIR_MAX_ARGUMENTS];
    unsigned attachment_read_count;
+   /* A fragment function that runs the depth and stencil tests itself
+    * (stela_air_stage_options::stencil_export): whether it does. */
+   bool tests_fragments;
    struct stela_air_error *error;
    unsigned air_minor;
    unsigned language_major, language_minor;
@@ -2532,8 +2535,13 @@ stage_variable(struct translator *t, const struct stela_air_stage_io *io, bool o
    if (mesh)
       type = glsl_array_type(type, io->per_primitive ? entry->max_primitives : entry->max_vertices, 0);
    if (output && io->semantic == STELA_AIR_STENCIL && !t->stage_options->stencil_export) {
-      fail(t, STELA_AIR_TARGET, "a stencil output needs the device's shader stencil export");
-      return NULL;
+      if (!t->stage_options->fragment_tests || !t->stage_options->raster_order_groups ||
+          !t->options->bind_depth_stencil) {
+         fail(t, STELA_AIR_TARGET,
+              "a stencil output needs the device's shader stencil export or fragment shader interlock");
+         return NULL;
+      }
+      t->tests_fragments = true;
    }
    nir_variable *var = nir_variable_create(t->b.shader, output ? nir_var_shader_out : nir_var_shader_in,
                                            type, name);
@@ -3243,6 +3251,256 @@ imageblock_data_output(struct translator *t, const struct value *data, LLVMTypeR
       return false;
    struct imageblock_store store = {.t = t, .data = data, .type = type, .samples = fragment_samples(t)};
    return store.samples && repeat(t, store.samples, imageblock_store_sample, &store);
+}
+
+/* The fragment tests' comparison `function` (MTLCompareFunction, a mask of
+ * less, equal and greater) of a against b. */
+static nir_def *
+compare_fragment(nir_builder *b, nir_def *function, nir_def *lt, nir_def *eq, nir_def *gt)
+{
+   nir_def *bit = nir_imm_int(b, 0);
+   nir_def *result = nir_imm_false(b);
+   nir_def *outcomes[3] = {lt, eq, gt};
+   for (unsigned i = 0; i < 3; i++) {
+      bit = nir_i2b(b, nir_iand_imm(b, nir_ushr_imm(b, function, i), 1));
+      result = nir_ior(b, result, nir_iand(b, bit, outcomes[i]));
+   }
+   return result;
+}
+
+/* MTLStencilOperation `op` on the 8-bit value with reference ref. */
+static nir_def *
+stencil_operation(nir_builder *b, nir_def *op, nir_def *value, nir_def *ref)
+{
+   nir_def *results[8] = {
+      value,
+      nir_imm_int(b, 0),
+      ref,
+      nir_umin(b, nir_iadd_imm(b, value, 1), nir_imm_int(b, 0xff)),
+      nir_bcsel(b, nir_ieq_imm(b, value, 0), value, nir_iadd_imm(b, value, -1)),
+      nir_iand_imm(b, nir_inot(b, value), 0xff),
+      nir_iand_imm(b, nir_iadd_imm(b, value, 1), 0xff),
+      nir_iand_imm(b, nir_iadd_imm(b, value, -1), 0xff),
+   };
+   nir_def *result = results[7];
+   for (int i = 6; i >= 0; i--)
+      result = nir_bcsel(b, nir_ieq_imm(b, op, i), results[i], result);
+   return result;
+}
+
+/* Turns a fragment output into the function's own variable, whose value
+ * the fragment tests read where the function ends; NULL for none. */
+static nir_variable *
+tested_output(struct translator *t, enum stela_air_stage_semantic semantic)
+{
+   for (unsigned i = 0; i < t->render.entry.output_count; i++) {
+      const struct stela_air_stage_io *io = &t->render.outputs[i];
+      if (io->absent || !t->outputs[i] || io->semantic != semantic)
+         continue;
+      nir_variable *var = t->outputs[i];
+      exec_node_remove(&var->node);
+      var->data.mode = nir_var_function_temp;
+      exec_list_push_tail(&t->b.impl->locals, &var->node);
+      return var;
+   }
+   return NULL;
+}
+
+/* A copy of the pass's depth or stencil attachment, resolved at the cursor:
+ * its heap image and descriptor index. */
+struct tested_image {
+   nir_variable *heap;
+   nir_def *index;
+};
+
+static bool
+tested_image(struct translator *t, bool stencil, struct tested_image *image)
+{
+   bool multisample = t->stage_options->samples > 1;
+   const struct glsl_type *type =
+      glsl_image_type(multisample ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D, true, GLSL_TYPE_UINT);
+   nir_deref_instr *deref = t->options->bind_depth_stencil(&t->b, stencil, type, t->options->binding_data);
+   nir_deref_instr *parent = deref && deref->deref_type == nir_deref_type_array ?
+      nir_deref_instr_parent(deref) : NULL;
+   if (!parent || parent->deref_type != nir_deref_type_var || !glsl_type_is_image(deref->type))
+      return fail(t, STELA_AIR_ARGUMENT, "the pass's %s copy is not a heap image",
+                  stencil ? "stencil" : "depth");
+   image->heap = parent->var;
+   image->index = deref->arr.index.ssa;
+   return true;
+}
+
+static nir_def *
+tested_load(struct translator *t, const struct tested_image *image, nir_def *coord, unsigned sample)
+{
+   nir_builder *b = &t->b;
+   bool multisample = t->stage_options->samples > 1;
+   nir_deref_instr *deref = nir_build_deref_array(b, nir_build_deref_var(b, image->heap), image->index);
+   nir_def *texel = nir_image_deref_load(b, 4, 32, &deref->def, coord, nir_imm_int(b, sample),
+                                         nir_imm_int(b, 0),
+                                         .image_dim = multisample ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
+                                         .image_array = true, .format = PIPE_FORMAT_NONE,
+                                         .access = ACCESS_COHERENT, .dest_type = nir_type_uint32);
+   return nir_channel(b, texel, 0);
+}
+
+static void
+tested_store(struct translator *t, const struct tested_image *image, nir_def *coord, unsigned sample,
+             nir_def *value)
+{
+   nir_builder *b = &t->b;
+   bool multisample = t->stage_options->samples > 1;
+   nir_deref_instr *deref = nir_build_deref_array(b, nir_build_deref_var(b, image->heap), image->index);
+   nir_image_deref_store(b, &deref->def, coord, nir_imm_int(b, sample),
+                         nir_pad_vector_imm_int(b, value, 0, 4), nir_imm_int(b, 0),
+                         .image_dim = multisample ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
+                         .image_array = true, .format = PIPE_FORMAT_NONE,
+                         .access = ACCESS_COHERENT, .src_type = nir_type_uint32);
+}
+
+/* A fragment function that writes the stencil reference on a device
+ * without stencil export runs the fragment tests itself, as Metal orders
+ * them, on copies of the pass's depth and stencil attachments: where it
+ * ends, in its interlock section, each sample it covers and keeps takes the
+ * stencil test against its own reference, then the depth test at the
+ * sample's depth, and the stencil operation and depth write they choose.
+ * Its coverage becomes the samples that pass. The depth at a sample is the
+ * fragment's plane at the sample's position, from the depth and its fine
+ * derivatives the function takes where it starts, or the depth it writes. */
+static bool
+test_fragments(struct translator *t)
+{
+   if (t->storage_attachments || t->fragment_imageblock || t->render.entry.raster_ordered)
+      return fail(t, STELA_AIR_TARGET,
+                  "a stencil output without stencil export cannot also read attachments, imageblocks or raster order groups");
+   if (t->render.entry.early_fragment_tests)
+      return fail(t, STELA_AIR_ARGUMENT, "early fragment tests precede a stencil output");
+   nir_builder *b = &t->b;
+   nir_function_impl *impl = nir_shader_get_entrypoint(b->shader);
+   unsigned samples = MAX2(t->stage_options->samples, 1);
+   nir_variable *stencil_var = tested_output(t, STELA_AIR_STENCIL);
+   nir_variable *depth_var = tested_output(t, STELA_AIR_DEPTH);
+   nir_variable *mask_var = tested_output(t, STELA_AIR_SAMPLE_MASK);
+   nir_fixup_deref_modes(b->shader);
+   if (!stencil_var)
+      return fail(t, STELA_AIR_ARGUMENT, "the stencil output has no variable");
+
+   /* Where the function starts: the state, the copies and the fragment's
+    * depth plane, in uniform control flow. */
+   b->cursor = nir_before_impl(impl);
+   nir_def *state = t->options->load_device_value(b, STELA_AIR_DEPTH_STENCIL, t->options->binding_data);
+   nir_def *range = t->options->load_device_value(b, STELA_AIR_DEPTH_RANGE, t->options->binding_data);
+   nir_def *positions = t->options->load_device_value(b, STELA_AIR_SAMPLE_POSITIONS, t->options->binding_data);
+   if (!state || !range || !positions || state->num_components != 4 || range->num_components != 4 ||
+       positions->num_components != 4)
+      return fail(t, STELA_AIR_ARGUMENT, "the fragment tests' state is not supplied");
+   struct tested_image depth_image, stencil_image;
+   if (!tested_image(t, false, &depth_image) || !tested_image(t, true, &stencil_image))
+      return false;
+   nir_def *frag = nir_load_frag_coord(b);
+   nir_def *z = nir_channel(b, frag, 2);
+   nir_def *dzdx = nir_ddx_fine(b, z), *dzdy = nir_ddy_fine(b, z);
+
+   /* Where it ends. */
+   b->cursor = nir_after_block_before_jump(nir_impl_last_block(impl));
+   nir_def *ref = nir_iand_imm(b, nir_load_var(b, stencil_var), 0xff);
+   nir_def *written_depth = depth_var ? nir_load_var(b, depth_var) : NULL;
+   nir_def *kept = mask_var ? nir_load_var(b, mask_var) : nir_imm_int(b, ~0);
+   nir_def *covered = nir_iand(b, nir_load_sample_mask_in(b), kept);
+   nir_def *depth_word = nir_channel(b, state, 0);
+   nir_def *format = nir_iand_imm(b, nir_ushr_imm(b, depth_word, STELA_AIR_DEPTH_FORMAT_SHIFT), 3);
+   nir_def *has_depth = nir_ine_imm(b, format, STELA_AIR_DEPTH_NONE);
+   nir_def *has_stencil = nir_i2b(b, nir_iand_imm(b, depth_word, STELA_AIR_DEPTH_STENCIL_ATTACHED));
+   nir_def *writes_depth = nir_iand(b, has_depth, nir_i2b(b, nir_iand_imm(b, depth_word, STELA_AIR_DEPTH_WRITE)));
+   nir_def *face = nir_bcsel(b, nir_load_front_face(b, 1), nir_channel(b, state, 1), nir_channel(b, state, 2));
+   nir_def *read_mask = nir_iand_imm(b, nir_ushr_imm(b, face, 16), 0xff);
+   nir_def *write_mask = nir_ushr_imm(b, face, 24);
+   nir_def *near = nir_channel(b, range, 0), *far = nir_channel(b, range, 1);
+   nir_def *low = nir_fmin(b, near, far), *high = nir_fmax(b, near, far);
+   nir_def *clamps = nir_i2b(b, nir_iand_imm(b, depth_word, STELA_AIR_DEPTH_CLAMP));
+   nir_def *xy = nir_ffloor(b, nir_trim_vector(b, frag, 2));
+   nir_def *pixel = nir_f2i32(b, xy);
+   nir_def *coord = nir_vec4(b, nir_channel(b, pixel, 0), nir_channel(b, pixel, 1), nir_load_layer_id(b),
+                             nir_imm_int(b, 0));
+
+   nir_variable_mode modes = nir_var_image;
+   nir_begin_invocation_interlock(b);
+   nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_ACQUIRE, modes);
+   /* Zero, built ahead of the branches: their phis follow them directly,
+    * and each takes it where its branch is skipped. */
+   nir_def *passed = nir_imm_int(b, 0);
+   /* A helper invocation, or a fragment the function discarded, tests
+    * nothing. */
+   nir_push_if(b, nir_inot(b, nir_is_helper_invocation(b, 1)));
+   nir_def *tested = nir_imm_int(b, 0);
+   for (unsigned s = 0; s < samples; s++) {
+      nir_push_if(b, nir_i2b(b, nir_iand_imm(b, nir_ushr_imm(b, covered, s), 1)));
+      nir_def *depth;
+      if (written_depth) {
+         depth = written_depth;
+      } else {
+         nir_def *position = nir_ubitfield_extract_imm(b, nir_channel(b, positions, s / 4), 8 * (s % 4), 8);
+         nir_def *sx = nir_fmul_imm(b, nir_u2f32(b, nir_iand_imm(b, position, 0xf)), 1.0 / 16.0);
+         nir_def *sy = nir_fmul_imm(b, nir_u2f32(b, nir_ushr_imm(b, position, 4)), 1.0 / 16.0);
+         nir_def *dx = nir_fsub(b, nir_fadd(b, nir_channel(b, xy, 0), sx), nir_channel(b, frag, 0));
+         nir_def *dy = nir_fsub(b, nir_fadd(b, nir_channel(b, xy, 1), sy), nir_channel(b, frag, 1));
+         depth = nir_ffma(b, dzdy, dy, nir_ffma(b, dzdx, dx, z));
+      }
+      depth = nir_bcsel(b, clamps, nir_fmin(b, nir_fmax(b, depth, low), high), depth);
+      depth = nir_fsat(b, depth);
+      /* The sample's depth as the attachment holds it, and comparable. */
+      nir_def *unorm16 = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, depth, 65535.0)));
+      nir_def *unorm24 = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, depth, 16777215.0)));
+      nir_def *bits = nir_bcsel(b, nir_ieq_imm(b, format, STELA_AIR_DEPTH_UNORM16), unorm16,
+                                nir_bcsel(b, nir_ieq_imm(b, format, STELA_AIR_DEPTH_UNORM24), unorm24, depth));
+      nir_def *held = tested_load(t, &depth_image, coord, s);
+      held = nir_bcsel(b, nir_ieq_imm(b, format, STELA_AIR_DEPTH_UNORM24), nir_iand_imm(b, held, 0xffffff),
+                       nir_bcsel(b, nir_ieq_imm(b, format, STELA_AIR_DEPTH_UNORM16), nir_iand_imm(b, held, 0xffff),
+                                 held));
+      nir_def *is_float = nir_ieq_imm(b, format, STELA_AIR_DEPTH_FLOAT32);
+      nir_def *lt = nir_bcsel(b, is_float, nir_flt(b, depth, held), nir_ult(b, bits, held));
+      nir_def *eq = nir_bcsel(b, is_float, nir_feq(b, depth, held), nir_ieq(b, bits, held));
+      nir_def *gt = nir_bcsel(b, is_float, nir_flt(b, held, depth), nir_ult(b, held, bits));
+      nir_def *depth_passes = nir_ior(b, nir_inot(b, has_depth),
+                                      compare_fragment(b, nir_iand_imm(b, depth_word, 7), lt, eq, gt));
+      nir_def *stencil = nir_iand_imm(b, tested_load(t, &stencil_image, coord, s), 0xff);
+      nir_def *a = nir_iand(b, ref, read_mask), *h = nir_iand(b, stencil, read_mask);
+      nir_def *stencil_passes = nir_ior(b, nir_inot(b, has_stencil),
+                                        compare_fragment(b, nir_iand_imm(b, face, 7), nir_ult(b, a, h),
+                                                         nir_ieq(b, a, h), nir_ult(b, h, a)));
+      nir_def *op = nir_bcsel(b, stencil_passes,
+                              nir_bcsel(b, depth_passes, nir_ubitfield_extract_imm(b, face, 9, 3),
+                                        nir_ubitfield_extract_imm(b, face, 6, 3)),
+                              nir_ubitfield_extract_imm(b, face, 3, 3));
+      nir_def *updated = stencil_operation(b, op, stencil, ref);
+      updated = nir_ior(b, nir_iand(b, updated, write_mask), nir_iand(b, stencil, nir_inot(b, write_mask)));
+      nir_push_if(b, nir_iand(b, has_stencil, nir_ine(b, updated, stencil)));
+      tested_store(t, &stencil_image, coord, s, updated);
+      nir_pop_if(b, NULL);
+      nir_def *passes = nir_iand(b, stencil_passes, depth_passes);
+      nir_push_if(b, nir_iand(b, passes, writes_depth));
+      tested_store(t, &depth_image, coord, s, bits);
+      nir_pop_if(b, NULL);
+      nir_def *bit = nir_bcsel(b, passes, nir_imm_int(b, 1u << s), nir_imm_int(b, 0));
+      nir_pop_if(b, NULL);
+      tested = nir_ior(b, tested, nir_if_phi(b, bit, passed));
+   }
+   nir_pop_if(b, NULL);
+   passed = nir_if_phi(b, tested, passed);
+   nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_RELEASE, modes);
+   nir_end_invocation_interlock(b);
+
+   /* The samples that pass are the fragment's coverage. */
+   nir_variable *mask = nir_variable_create(b->shader, nir_var_shader_out, glsl_int_type(), "tested coverage");
+   if (!mask)
+      return fail(t, STELA_AIR_ALLOCATION, "render IO variable allocation failed");
+   mask->data.location = FRAG_RESULT_SAMPLE_MASK;
+   nir_store_var(b, mask, nir_iand(b, passed, kept), 1);
+   b->shader->info.fs.pixel_interlock_ordered = true;
+   b->shader->info.fs.early_fragment_tests = false;
+   nir_progress(true, impl, nir_metadata_none);
+   nir_lower_vars_to_ssa(b->shader);
+   return true;
 }
 
 /* A fragment function with raster order groups or storage attachments: its
@@ -7512,6 +7770,8 @@ translate(const void *bitcode, size_t size, const char *entry,
       nir_lower_explicit_io(t.b.shader, nir_var_function_temp, nir_address_format_32bit_offset);
       nir_remove_dead_variables(t.b.shader, nir_var_function_temp, NULL);
    }
+   if (stage && stage->stage == STELA_AIR_FRAGMENT && t.tests_fragments && !test_fragments(&t))
+      goto done;
    if (stage && stage->stage == STELA_AIR_FRAGMENT && !order_fragments(&t))
       goto done;
    if (stage && stage->stage == STELA_AIR_FRAGMENT) {

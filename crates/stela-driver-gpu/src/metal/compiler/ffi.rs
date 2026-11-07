@@ -301,6 +301,9 @@ pub struct Target {
     pub(super) stencil_export: u32,
     /// Nonzero when fragment shaders may use raster order groups.
     pub(super) raster_order_groups: u32,
+    /// Nonzero when a stencil output's function runs the fragment tests
+    /// itself, without stencil export.
+    pub(super) fragment_tests: u32,
 }
 
 #[repr(C)]
