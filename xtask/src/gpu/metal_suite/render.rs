@@ -2910,6 +2910,30 @@ fn layers_and_clipping(plan: &mut Plan, library: &str) {
         .texture(Texture::new("c", "rgba32float", "2d_array", [W, H, 1]).array(3).usage(&["render"]))
         .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected))),
     );
+    // The same into a multisampled array, each layer resolved.
+    plan.add(
+        Case::render(
+            "render.layered.multisampled",
+            library,
+            "vert_layered",
+            Some("frag_layer"),
+            json!({"colors": [{"texture": "ms", "clear": CLEAR, "resolve": "c"}], "samples": 4,
+                   "vertex_count": 3, "instance_count": 3, "viewports": viewports,
+                   "input_primitive": "triangle"}),
+        )
+        .texture(
+            Texture::new("ms", "rgba32float", "2d_ms_array", [W, H, 1])
+                .array(3)
+                .samples(4)
+                .usage(&["render"]),
+        )
+        .texture(
+            Texture::new("c", "rgba32float", "2d_array", [W, H, 1])
+                .array(3)
+                .usage(&["render"]),
+        )
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected))),
+    );
     // Clip distances x + 1/4 and 1/2 - y keep the pixels right of x = 6 and
     // below y = 4.
     let expected: Vec<f64> = pixels()
