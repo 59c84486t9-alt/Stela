@@ -152,6 +152,10 @@ fn every_turing_and_later_chip_derives_the_same_metal_profile() {
                 GpuFamily::Apple1,
                 GpuFamily::Apple2,
                 GpuFamily::Apple3,
+                GpuFamily::Apple4,
+                GpuFamily::Apple5,
+                GpuFamily::Apple6,
+                GpuFamily::Apple7,
                 GpuFamily::Common1,
                 GpuFamily::Common2,
                 GpuFamily::Common3,
@@ -159,6 +163,7 @@ fn every_turing_and_later_chip_derives_the_same_metal_profile() {
                 GpuFamily::Mac2,
                 GpuFamily::MacCatalyst1,
                 GpuFamily::MacCatalyst2,
+                GpuFamily::Metal3,
             ],
             "{}",
             chip.name
@@ -188,16 +193,30 @@ fn every_turing_and_later_chip_derives_the_same_metal_profile() {
 }
 
 #[test]
-fn nvidia_hardware_reaches_mac2_and_ray_tracing_blocks_metal3() {
+fn nvidia_hardware_reaches_apple7_and_metal3_without_ray_tracing() {
     let capabilities = with_api(Chip::find(0x1b3).unwrap(), ApiFeatures::KNOWN);
-    assert!(capabilities.supports_family(GpuFamily::Mac2));
-    assert!(capabilities.supports_family(GpuFamily::Common3));
-    assert!(!capabilities.supports_family(GpuFamily::Metal3));
-    let metal3 = capabilities
-        .gaps()
-        .iter()
-        .find(|gap| gap.capability == "GPU family Metal3");
-    assert_eq!(metal3.map(|gap| gap.cause), Some(Cause::Driver));
+    for family in [
+        GpuFamily::Mac2,
+        GpuFamily::Common3,
+        GpuFamily::Apple7,
+        GpuFamily::Metal3,
+    ] {
+        assert!(capabilities.supports_family(family), "{family:?}");
+    }
+    assert!(!capabilities.supports_family(GpuFamily::Apple8));
+    let cause = |name: &str| {
+        capabilities
+            .gaps()
+            .iter()
+            .find(|gap| gap.capability == name)
+            .map(|gap| gap.cause)
+    };
+    assert_eq!(cause("GPU family Metal3"), None);
+    assert_eq!(cause("ray tracing"), Some(Cause::Driver));
+    assert_eq!(
+        cause("Apple GPU families from Apple8"),
+        Some(Cause::AppleArchitecture)
+    );
 }
 
 #[test]
@@ -252,8 +271,10 @@ fn missing_families_name_the_layer_that_lacks_them() {
     };
     assert_eq!(cause("tessellation"), None);
     assert_eq!(cause("GPU family Common3"), None);
-    assert_eq!(cause("GPU family Metal3"), Some(Cause::Driver));
+    assert_eq!(cause("GPU family Metal3"), None);
+    assert_eq!(cause("GPU family Apple7"), None);
     assert_eq!(cause("ray tracing"), Some(Cause::Driver));
+    assert_eq!(cause("stencil feedback"), Some(Cause::Driver));
     assert_eq!(cause("fast resource loading"), None);
     assert_eq!(cause("MetalFX upscaling"), None);
     assert_eq!(cause("raster order groups"), None);
@@ -262,7 +283,7 @@ fn missing_families_name_the_layer_that_lacks_them() {
     assert_eq!(cause("GPU family Metal4"), Some(Cause::AppleArchitecture));
     assert_eq!(cause("ASTC LDR pixel formats"), None);
     assert_eq!(cause("ASTC HDR pixel formats"), Some(Cause::Driver));
-    assert!(!capabilities.supports_family(GpuFamily::Apple7));
+    assert!(capabilities.supports_family(GpuFamily::Apple7));
     let names: alloc::vec::Vec<_> = capabilities
         .gaps()
         .iter()

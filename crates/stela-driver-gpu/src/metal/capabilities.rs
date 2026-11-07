@@ -6,10 +6,12 @@
 //! lowers the shader constructs; and this layer implements the API path.
 //! Each refusal is recorded once as a [`Gap`] naming the layer that lacks it,
 //! so negative answers stay explicit. A GPU family is the conjunction of its
-//! requirements. Apple GPU families from Apple4 and Metal 4, which presuppose
-//! Apple's tile-based architecture, are not claimed for another GPU; Apple1
-//! to Apple3 are, with their formats and programmable blending, as macOS's
-//! compositor requires Apple3 of its display surfaces.
+//! requirements. Apple1 to Apple7 are claimed, with their formats,
+//! programmable blending, imageblocks and tile functions, as macOS's
+//! compositor requires Apple3 of its display surfaces and every Mac that runs
+//! macOS 27 has an Apple7 GPU. Metal 3 is claimed without ray tracing, which
+//! `supportsRaytracing` refuses; Metal 4 and Apple8 and later, which
+//! presuppose Apple's architecture, are not.
 use super::{
     abi::{
         ArgumentBuffersTier, CounterSamplingPoint, DeviceLocation, GpuFamily, ReadWriteTextureTier,
@@ -60,6 +62,8 @@ option_set! {
         /// Sparse samples, reads and gathers report whether their texels
         /// are resident (`sparse_color`).
         const SPARSE_FEEDBACK = 1 << 24;
+        /// Imageblocks, tile functions and their threadgroup memory.
+        const IMAGEBLOCKS = 1 << 25;
     }
 }
 
@@ -1442,7 +1446,6 @@ impl Derivation<'_> {
                 "GPU family Metal3",
                 &[
                     driver("mesh shaders", capabilities.supports_mesh_shaders),
-                    driver("ray tracing", capabilities.supports_raytracing),
                     driver("function pointers", capabilities.supports_function_pointers),
                     driver("dynamic libraries", capabilities.supports_dynamic_libraries),
                     api(
@@ -1490,7 +1493,69 @@ impl Derivation<'_> {
                 "GPU family Apple2",
                 &[driver("ASTC LDR sampling", readable(Compression::AstcLdr))],
             );
-        self.gap("Apple GPU families from Apple4", Cause::AppleArchitecture);
+        // Apple4 to Apple7 add what the feature set tables give them below
+        // ray tracing, which Metal leaves to `supportsRaytracing`.
+        let apple4 = apple2
+            && self.check_all(
+                "GPU family Apple4",
+                &[
+                    shader(
+                        "imageblocks and tile functions",
+                        true,
+                        ShaderFeatures::IMAGEBLOCKS,
+                    ),
+                    driver("raster order groups", capabilities.raster_order_groups),
+                ],
+            );
+        // Apple5's RG11B10 and RGB9E5 vertex formats are single words, which
+        // vertex functions decode when the driver cannot fetch them
+        // (`vertex::word_formats`).
+        let apple5 = apple4
+            && self.check_all(
+                "GPU family Apple5",
+                &[driver(
+                    "stencil resolve",
+                    !capabilities.stencil_resolve_modes.is_empty(),
+                )],
+            );
+        // NVIDIA's fragment shaders have no stencil output; pipelines that
+        // write one are refused.
+        if !self.device.limits.stencil_export {
+            self.gap("stencil feedback", Cause::Driver);
+        }
+        let apple6 = apple5
+            && self.check_all(
+                "GPU family Apple6",
+                &[
+                    driver("sparse textures", limits.sparse_tile_bytes != 0),
+                    driver(
+                        "vertex amplification",
+                        capabilities.supports_vertex_amplification_count(2),
+                    ),
+                    driver(
+                        "function pointers in render pipelines",
+                        capabilities.supports_function_pointers_from_render,
+                    ),
+                    driver(
+                        "render dynamic libraries",
+                        capabilities.supports_render_dynamic_libraries,
+                    ),
+                    shader("texture atomics", true, ShaderFeatures::TEXTURE_ATOMICS),
+                ],
+            );
+        let apple7 = apple6
+            && metal3
+            && self.check_all(
+                "GPU family Apple7",
+                &[
+                    shader("simdgroup matrices", true, ShaderFeatures::SIMDGROUP_MATRIX),
+                    driver(
+                        "barycentric coordinates",
+                        capabilities.supports_shader_barycentric_coordinates,
+                    ),
+                ],
+            );
+        self.gap("Apple GPU families from Apple8", Cause::AppleArchitecture);
         self.gap("GPU family Metal4", Cause::AppleArchitecture);
 
         let mut families = Vec::new();
@@ -1501,6 +1566,10 @@ impl Derivation<'_> {
             // Metal format only on a device in this family, which predates
             // tile shaders. Programmable blending is among its features.
             (GpuFamily::Apple3, apple3),
+            (GpuFamily::Apple4, apple4),
+            (GpuFamily::Apple5, apple5),
+            (GpuFamily::Apple6, apple6),
+            (GpuFamily::Apple7, apple7),
             (GpuFamily::Common1, common1),
             (GpuFamily::Common2, common2),
             (GpuFamily::Common3, common3),

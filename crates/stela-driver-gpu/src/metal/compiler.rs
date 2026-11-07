@@ -83,7 +83,9 @@ const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
     .union(ShaderFeatures::SPARSE_FEEDBACK)
     .union(ShaderFeatures::FUNCTION_POINTERS)
     .union(ShaderFeatures::DYNAMIC_LIBRARIES)
-    .union(ShaderFeatures::RASTER_ORDER_GROUPS);
+    .union(ShaderFeatures::RASTER_ORDER_GROUPS)
+    .union(ShaderFeatures::IMAGEBLOCKS)
+    .union(ShaderFeatures::SIMDGROUP_MATRIX);
 
 /// LLVM instructions one compilation may lower, legalization included. Far
 /// beyond the functions Metal compiles, it bounds the work of hostile input.
