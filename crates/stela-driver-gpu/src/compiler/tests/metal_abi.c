@@ -185,35 +185,22 @@ static void loaded_ids_index_the_heap(void)
    ralloc_free(b.shader);
 }
 
-/* A view pool entry's ID loads its view's ID, under a branch on the pool
- * flag, from the word its address names; other IDs pass through. */
-static void pool_ids_load_their_views(void)
+/* A view pool entry's ID names, by its pool flag, the word at its address,
+ * the shift dropping the flag. */
+static void pool_ids_name_their_views(void)
 {
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "pool ids");
    nir_def *id = nir_load_global(&b, 1, 64, nir_imm_int64(&b, 0x1000), .align_mul = 8);
-   nir_def *view = stela_metal_texture_view_id(&b, id, NULL);
-   nir_instr *phi = nir_def_instr(view);
-   assert(phi->type == nir_instr_type_phi);
-   nir_if *branch = nir_cf_node_as_if(nir_cf_node_prev(&phi->block->cf_node));
-   nir_alu_instr *flag = nir_def_as_alu(branch->condition.ssa);
-   assert(flag->op == nir_op_ine);
+   nir_def *address = NULL;
+   nir_def *named = stela_metal_texture_view_word(&b, id, &address, NULL);
+   nir_alu_instr *flag = nir_def_as_alu(named);
+   assert(flag->op == nir_op_ine && nir_src_as_uint(flag->src[1].src) == 0);
    nir_alu_instr *mask = nir_def_as_alu(flag->src[0].src.ssa);
    assert(mask->op == nir_op_iand && nir_src_as_uint(mask->src[1].src) == STELA_METAL_POOL_VIEW);
-   nir_block *then = nir_if_first_then_block(branch);
-   nir_intrinsic_instr *word = NULL;
-   nir_foreach_instr(instr, then) {
-      if (instr->type == nir_instr_type_intrinsic &&
-          nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global)
-         word = nir_instr_as_intrinsic(instr);
-   }
-   assert(word && !(nir_intrinsic_access(word) & ACCESS_CAN_REORDER));
-   nir_alu_instr *address = nir_def_as_alu(word->src[0].ssa);
-   assert(address->op == nir_op_ishl && address->src[0].src.ssa == id &&
-          nir_src_as_uint(address->src[1].src) == 3);
-   bool passes = false;
-   nir_foreach_phi_src(src, nir_instr_as_phi(phi))
-      passes |= src->src.ssa == id;
-   assert(passes);
+   assert(nir_def_as_alu(mask->src[0].src.ssa)->op == nir_op_unpack_64_2x32_split_y);
+   nir_alu_instr *shift = nir_def_as_alu(address);
+   assert(shift->op == nir_op_ishl && shift->src[0].src.ssa == id &&
+          nir_src_as_uint(shift->src[1].src) == 3);
    ralloc_free(b.shader);
 }
 
@@ -1041,7 +1028,7 @@ int main(void)
    buffers_load_their_table_slot();
    textures_and_samplers_index_the_heap();
    loaded_ids_index_the_heap();
-   pool_ids_load_their_views();
+   pool_ids_name_their_views();
    never_samplers_flag_their_ids();
    array_elements_load_within_their_slots();
    storage_levels_index_their_run();

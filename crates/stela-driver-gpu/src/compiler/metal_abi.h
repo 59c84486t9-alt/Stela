@@ -395,9 +395,10 @@ nir_def *stela_metal_resource_id(nir_builder *b, const struct stela_air_texture 
                                  const struct stela_air_sampler *sampler, nir_def *element,
                                  void *stage);
 
-/* stela_air_texture_view_id: a view pool entry's ID resolved to its view's,
- * which the entry's word holds; any other ID as it is. */
-nir_def *stela_metal_texture_view_id(nir_builder *b, nir_def *id, void *stage);
+/* stela_air_texture_view_word: whether an ID is a view pool entry's, whose
+ * word holds its view's ID. */
+nir_def *stela_metal_texture_view_word(nir_builder *b, nir_def *id, nir_def **address,
+                                       void *stage);
 
 /* stela_air_bind_texture_id and stela_air_bind_sampler_id: the heap element
  * a loaded MTLResourceID names, as for an argument table's. */

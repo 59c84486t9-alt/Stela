@@ -5417,8 +5417,20 @@ argument_load(struct translator *t, LLVMValueRef inst)
       return false;
    switch (field->kind) {
    case STELA_AIR_FIELD_TEXTURE:
-      if (t->options->texture_view_id)
-         loaded = t->options->texture_view_id(&t->b, loaded, t->options->binding_data);
+      if (t->options->texture_view_word) {
+         nir_def *word = NULL;
+         nir_def *named =
+            t->options->texture_view_word(&t->b, loaded, &word, t->options->binding_data);
+         struct memory_guard guard;
+         if (!memory_guard_begin(t, named, &guard))
+            return false;
+         nir_def *view = nir_load_global(&t->b, 1, 64, word, .access = ACCESS_NON_WRITEABLE,
+                                         .align_mul = 8);
+         view = memory_guard_end(t, &guard, view);
+         if (!view)
+            return false;
+         loaded = nir_bcsel(&t->b, named, view, loaded);
+      }
       return put_id(t, inst, &field->texture, NULL, loaded);
    case STELA_AIR_FIELD_SAMPLER:
       return put_id(t, inst, NULL, &field->sampler, loaded);
