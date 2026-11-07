@@ -45,6 +45,37 @@ fn nanoseconds(ticks: u64, tsc_hz: u64) -> u64 {
     (u128::from(ticks) * 1_000_000_000 / u128::from(tsc_hz)) as u64
 }
 
+/// Mesa's `CLOCK_MONOTONIC`: Linux's own clock, carried to Mesa's cores by
+/// the TSC from one reading on the boot CPU, where Linux's clock reads.
+/// The absolute deadlines Mesa gives DRM waits then name the instant Linux
+/// waits for; a TSC count from reset would place each one later by however
+/// long the boot ran before Linux's clock started.
+#[derive(Clone, Copy)]
+pub(super) struct LibcClock {
+    tsc: u64,
+    ns: u64,
+}
+
+impl LibcClock {
+    /// Pairs Linux's clock with the TSC read around it.
+    pub(super) fn anchor(
+        linux_ns: impl FnOnce() -> Result<u64, WorkError>,
+    ) -> Result<Self, WorkError> {
+        let before = host::rdtsc();
+        let ns = linux_ns()?;
+        let after = host::rdtsc();
+        Ok(Self {
+            tsc: before + after.saturating_sub(before) / 2,
+            ns,
+        })
+    }
+
+    fn now_ns(self, tsc: u64, tsc_hz: u64) -> u64 {
+        self.ns
+            .saturating_add(nanoseconds(tsc.saturating_sub(self.tsc), tsc_hz))
+    }
+}
+
 const ENODEV: i64 = -19;
 const EFAULT: i64 = -14;
 const ENOMEM: i64 = -12;
@@ -1034,7 +1065,7 @@ extern "C" fn stela_libc_available_memory_bytes() -> u64 {
 
 #[unsafe(no_mangle)]
 extern "C" fn stela_libc_now_ns() -> u64 {
-    installed().map_or(0, |gpu| nanoseconds(host::rdtsc(), gpu.tsc_hz))
+    installed().map_or(0, |gpu| gpu.libc_clock.now_ns(host::rdtsc(), gpu.tsc_hz))
 }
 
 #[unsafe(no_mangle)]
@@ -1070,7 +1101,7 @@ unsafe extern "C" fn stela_libc_wait(word: *const c_uint, value: c_uint, deadlin
     sleeping.store(word.cast_mut(), Ordering::SeqCst);
     let left = match deadline {
         u64::MAX => u64::MAX,
-        _ => deadline.saturating_sub(nanoseconds(host::rdtsc(), gpu.tsc_hz)),
+        _ => deadline.saturating_sub(gpu.libc_clock.now_ns(host::rdtsc(), gpu.tsc_hz)),
     };
     let mut sleep = || {
         // SAFETY: entered, on a task, and the C library's word outlives its wait.

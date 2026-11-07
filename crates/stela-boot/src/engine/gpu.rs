@@ -1260,6 +1260,8 @@ struct Installed {
     window: &'static Window,
     tsc_hz: u64,
     #[cfg(feature = "nvk")]
+    libc_clock: client::LibcClock,
+    #[cfg(feature = "nvk")]
     heap_bytes: u64,
     /// Clients' mappings with their sizes in pages, by address. For tasks.
     #[cfg(feature = "nvk")]
@@ -1389,6 +1391,8 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         .collect();
     let clock = work.service_clock().map_err(environment_error)?;
     let epoch = clock.epoch().map_err(environment_error)?;
+    #[cfg(feature = "nvk")]
+    let libc_clock = client::LibcClock::anchor(|| epoch.now_ns()).map_err(environment_error)?;
     let time = clock.clock();
     let events = Arc::new(Events {
         clock: clock.clone(),
@@ -1472,6 +1476,8 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         #[cfg(feature = "nvk")]
         window,
         tsc_hz,
+        #[cfg(feature = "nvk")]
+        libc_clock,
         #[cfg(feature = "nvk")]
         heap_bytes,
         #[cfg(feature = "nvk")]
