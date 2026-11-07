@@ -1354,8 +1354,11 @@ static nir_def *store_xr(nir_builder *b, nir_def *lo, nir_def *hi, bool alpha, b
       return halves(b, xr_value(b, red, srgb), xr_value(b, green, srgb), xr_value(b, blue, srgb),
                     nir_imm_float(b, 1.0f));
    }
-   nir_def *blue = nir_ubfe_imm(b, lo, 6, 10), *green = nir_ubfe_imm(b, lo, 22, 10);
-   nir_def *red = nir_ubfe_imm(b, hi, 6, 10), *code = nir_ubfe_imm(b, hi, 22, 10);
+   /* NAK takes no ubfe; each code is the top ten bits of a half word. */
+   nir_def *blue = nir_iand_imm(b, nir_ushr_imm(b, lo, 6), 0x3ff);
+   nir_def *green = nir_ushr_imm(b, lo, 22);
+   nir_def *red = nir_iand_imm(b, nir_ushr_imm(b, hi, 6), 0x3ff);
+   nir_def *code = nir_ushr_imm(b, hi, 22);
    nir_def *a = nir_fsat(b, xr_value(b, code, false));
    return halves(b, xr_value(b, red, srgb), xr_value(b, green, srgb), xr_value(b, blue, srgb), a);
 }
@@ -1414,9 +1417,12 @@ nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *op
       nir_store_global(&b, nir_u2u16(&b, metal), address, .align_mul = 2);
    }
    nir_pop_if(&b, NULL);
-   nir_def *red_green = nir_unpack_half_2x16(&b, rg), *blue_alpha = nir_unpack_half_2x16(&b, ba);
-   nir_def *r = nir_channel(&b, red_green, 0), *g = nir_channel(&b, red_green, 1);
-   nir_def *bl = nir_channel(&b, blue_alpha, 0), *a = nir_channel(&b, blue_alpha, 1);
+   /* Each half, widened: NAK has no vector unpack_32_2x16, which
+    * unpack_half_2x16 scalarizes to. */
+   nir_def *r = nir_f2f32(&b, nir_unpack_32_2x16_split_x(&b, rg));
+   nir_def *g = nir_f2f32(&b, nir_unpack_32_2x16_split_y(&b, rg));
+   nir_def *bl = nir_f2f32(&b, nir_unpack_32_2x16_split_x(&b, ba));
+   nir_def *a = nir_f2f32(&b, nir_unpack_32_2x16_split_y(&b, ba));
    for (unsigned e = STELA_METAL_TEXELS_XR10; e <= STELA_METAL_TEXELS_XR10X4_SRGB; e++) {
       bool alpha = e >= STELA_METAL_TEXELS_XR10X4;
       bool srgb = e == STELA_METAL_TEXELS_XR10_SRGB || e == STELA_METAL_TEXELS_XR10X4_SRGB;

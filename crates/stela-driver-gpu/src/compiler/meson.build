@@ -139,6 +139,16 @@ stela_metal_abi_test = executable(
   link_with : stela_metal_abi,
 )
 test('stela_metal_abi', stela_metal_abi_test, suite : 'stela')
+if with_nvidia
+  stela_metal_abi_nak_test = executable(
+    'stela_metal_abi_nak_test',
+    'tests/metal_abi_nak.c',
+    include_directories : [inc_include, inc_src, inc_gpu],
+    dependencies : [idep_nir, idep_mesautil, idep_nak],
+    link_with : [stela_metal_abi, stela_nak],
+  )
+  test('stela_metal_abi_nak', stela_metal_abi_nak_test, suite : 'stela')
+endif
 
 if with_amd_llvm
   stela_amd_llvm_float = static_library(
