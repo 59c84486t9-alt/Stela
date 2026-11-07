@@ -240,7 +240,8 @@ if stela_air_llvm != ''
     include_directories : [inc_include, inc_src, inc_gpu],
     dependencies : [idep_stela_air],
     link_with : stela_metal_threadgroup,
-    c_args : ['-Wall', '-Wextra', '-Wno-missing-field-initializers'],
+    c_args : ['-Wall', '-Wextra', '-Wno-missing-field-initializers',
+              '-Wno-sign-compare', '-Wno-type-limits'],
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_threadgroup_nir', stela_threadgroup_nir_test, suite : 'stela')
