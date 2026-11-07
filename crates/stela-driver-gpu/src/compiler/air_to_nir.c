@@ -6711,10 +6711,23 @@ expand_constant(LLVMBuilderRef builder, LLVMValueRef user, LLVMValueRef value)
       if (expandable(user, operands[i]))
          operands[i] = expand_constant(builder, user, operands[i]);
    }
+   LLVMOpcode opcode = LLVMGetConstOpcode(value);
+   /* Constant folding writes a constant offset off a null pointer, a buffer
+    * a function constant left out, as the integer it is: the translator
+    * follows it as that offset off null, which reaches no memory. */
+   if (opcode == LLVMIntToPtr && LLVMIsAConstantInt(operands[0])) {
+      LLVMTypeRef type = LLVMTypeOf(value);
+      LLVMValueRef null = LLVMConstPointerNull(type);
+      LLVMValueRef base = LLVMBuildFreeze(builder, null, "");
+      LLVMTypeRef byte = LLVMInt8TypeInContext(LLVMGetTypeContext(type));
+      LLVMValueRef inst = LLVMBuildGEP2(builder, byte, base, &operands[0], 1, "");
+      LLVMSetOperand(inst, 0, null);
+      LLVMInstructionEraseFromParent(base);
+      return inst;
+   }
    /* The builder folds constant operands back into an expression, so the
     * instruction is built over a placeholder its own operand replaces. */
    LLVMValueRef placeholder = LLVMBuildFreeze(builder, operands[0], "");
-   LLVMOpcode opcode = LLVMGetConstOpcode(value);
    LLVMValueRef inst;
    if (opcode != LLVMGetElementPtr) {
       inst = LLVMBuildCast(builder, opcode, placeholder, LLVMTypeOf(value), "");

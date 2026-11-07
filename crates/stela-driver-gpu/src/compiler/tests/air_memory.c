@@ -259,6 +259,33 @@ null_joins_device_addresses(void)
    ralloc_free(shader);
 }
 
+/* Constant folding writes a constant offset off a null pointer, a buffer a
+ * function constant left out, as an integer cast to a pointer: an access
+ * through it reaches no memory, as through null. */
+static void
+folded_offsets_off_null_reach_no_memory(void)
+{
+   nir_shader *shader = compiled("",
+      "%v = load i32, ptr addrspace(1) inttoptr (i64 16 to ptr addrspace(1)), align 4\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n");
+   /* The only load is the buffer's address; the store writes zero. */
+   assert(count(shader, nir_intrinsic_store_global) == 1);
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+            if (intrinsic->intrinsic == nir_intrinsic_load_global)
+               assert(intrinsic->def.bit_size == 64);
+            if (intrinsic->intrinsic == nir_intrinsic_store_global)
+               assert(nir_src_is_const(intrinsic->src[0]) && !nir_src_as_uint(intrinsic->src[0]));
+         }
+      }
+   }
+   ralloc_free(shader);
+}
+
 /* Generic pointers, cast from device and thread memory: a choice between
  * them reaches the chosen root, and the space queries ask which it is. */
 static void
@@ -550,6 +577,7 @@ main(void)
    thread_memory_lowers_to_scratch();
    memory_intrinsics_lower_to_chunks();
    null_joins_device_addresses();
+   folded_offsets_off_null_reach_no_memory();
    generic_pointers_choose_their_memory();
    constant_data_lowers_to_load_constant();
    kernels_read_constant_buffers();
