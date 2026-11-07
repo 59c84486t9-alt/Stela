@@ -419,6 +419,9 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             self.pending_device_write = Some(Pending::Terminal(stop.clone()));
             return Err(stop);
         }
+        // The store's own step runs what it started, a gate call above all:
+        // its thread reads the call's answer at the next instruction.
+        self.settle_devices(now);
         self.follow_memory_lock();
         self.pending_device_write = None;
         self.finish_device_access(held)

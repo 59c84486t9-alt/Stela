@@ -19,8 +19,14 @@ struct Device {
     write_result: Option<Result<engine::ConsumedWrite, DeviceError>>,
     clock: bool,
     clock_commits: usize,
+    /// The writes consumed by each call taken.
+    calls: Vec<usize>,
 }
 impl Devices for Device {
+    fn take_call(&mut self, _: usize) -> Option<engine::GateCall> {
+        self.calls.push(self.writes.len());
+        None
+    }
     fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
         panic!("raw/replayed read")
     }
@@ -243,6 +249,7 @@ fn pending_at(word: u32, fail: bool, base: u64) -> (TestMachine, Arc<RegisteredS
             write_result: None,
             clock: false,
             clock_commits: 0,
+            calls: Vec::new(),
         },
         profile,
         ram.target(),
@@ -559,6 +566,15 @@ fn new_host_points_preserve_an_already_entered_bus_continuation() {
         assert!(unsafe { machine.complete_native_device_access() }.is_err());
         assert_eq!(machine.devices.reads + machine.devices.writes.len(), 1);
     }
+}
+#[test]
+fn a_write_takes_its_call_in_its_own_step() {
+    let (mut machine, _) = pending(0xf9000020, false);
+    // SAFETY: this single-threaded test machine owns its registered RAM, with no DMA, device
+    // worker or other writer admitted.
+    unsafe { machine.complete_device_write() }.unwrap();
+    assert_eq!(machine.devices.writes.len(), 1);
+    assert_eq!(machine.devices.calls.last(), Some(&1));
 }
 #[test]
 fn sequential_memory_and_processor_leases_complete_under_one_stop() {
