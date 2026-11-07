@@ -14,7 +14,7 @@ use crate::metal::{
     hazard::FULL,
     heap::{self, HeapAllocator, HeapDescriptor, SizeAndAlign},
     pass::AttachmentView,
-    pixel_format::{Encoding, extended_range},
+    pixel_format::{Description, Encoding},
     resource::{
         self, CpuAccess, ShaderViews, SubresourceLayout, TextureDescriptor, TexturePlan,
         TextureViewDescriptor,
@@ -965,12 +965,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "texture buffers are written through their buffer",
         ))?;
         let Some(copy) = &texture.cpu_copy else {
-            return match texture.descriptor.pixel_format.describe().encoding() {
+            let description = texture.descriptor.pixel_format.describe();
+            return match description.encoding() {
                 Encoding::Exact => self.backend.copy_to_image(image, region, bytes),
-                Encoding::ExtendedRange(codes) => {
-                    let texels = bytes.len() / codes.metal_bytes();
-                    let mut stored = alloc::vec![0; texels * extended_range::STORED_BYTES];
-                    codes.store(bytes, &mut stored);
+                encoding => {
+                    let mut stored = alloc::vec![0; stored_len(description, bytes.len())];
+                    encoding.store(bytes, &mut stored);
                     self.backend.copy_to_image(image, region, &stored)
                 }
             };
@@ -1005,13 +1005,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "texture buffers are read through their buffer",
         ))?;
         let Some(copy) = &texture.cpu_copy else {
-            return match texture.descriptor.pixel_format.describe().encoding() {
+            let description = texture.descriptor.pixel_format.describe();
+            return match description.encoding() {
                 Encoding::Exact => self.backend.copy_from_image(image, region, bytes),
-                Encoding::ExtendedRange(codes) => {
-                    let texels = bytes.len() / codes.metal_bytes();
-                    let mut stored = alloc::vec![0; texels * extended_range::STORED_BYTES];
+                encoding => {
+                    let mut stored = alloc::vec![0; stored_len(description, bytes.len())];
                     self.backend.copy_from_image(image, region, &mut stored)?;
-                    codes.load(&stored, bytes);
+                    encoding.load(&stored, bytes);
                     Ok(())
                 }
             };
@@ -1768,6 +1768,11 @@ impl Iterator for CopyRows {
 
 /// Validates a tightly packed region of `length` bytes against the texture
 /// and locates its rows in the CPU copy.
+/// Bytes of the image's texels holding `metal_len` bytes of Metal's.
+fn stored_len(description: &Description, metal_len: usize) -> usize {
+    metal_len / description.block.bytes as usize * description.stored_block_bytes() as usize
+}
+
 fn cpu_copy_rows(
     descriptor: &TextureDescriptor,
     region: &BufferImageCopy,

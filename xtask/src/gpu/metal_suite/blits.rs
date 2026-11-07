@@ -3,7 +3,8 @@
 //! 3D region or depth-stencil plane, texture copies of a region, of whole
 //! textures and of slice and level ranges, of compressed blocks, mipmap
 //! generation for 2D, array, cube and 3D textures, and access hints that
-//! leave contents as they were, and copies of extended-range texels.
+//! leave contents as they were, and copies of texels held in another
+//! encoding.
 use super::plan::{Buffer, Case, Output, Plan, Texture, Tolerance};
 use super::values::{Dtype, Random, u32s};
 use serde_json::json;
@@ -325,10 +326,15 @@ fn more(plan: &mut Plan, rng: &mut Random) {
     );
 }
 
-/// Texels of an extended-range format as Metal holds them: codes in their
-/// bits with the padding a device writes, alpha within [0, 1]. A device may
-/// store the values rather than the bits, so other padding need not survive.
-fn xr_texels(rng: &mut Random, count: usize, alpha: bool) -> Vec<u8> {
+/// Texels of a format as Metal holds them. An extended-range format's are
+/// codes in their bits with the padding a device writes and alpha within
+/// [0, 1]: a device may store the values rather than the bits, so other
+/// padding need not survive. A 16-bit format's are any bits.
+fn stored_texels(rng: &mut Random, count: usize, format: &str) -> Vec<u8> {
+    if format == "a1bgr5unorm" {
+        return bytes(rng, 2 * count);
+    }
+    let alpha = format.starts_with("bgra");
     let mut out = Vec::new();
     for _ in 0..count {
         let mut code = || u64::from(rng.u32() % 1024);
@@ -346,19 +352,22 @@ fn xr_texels(rng: &mut Random, count: usize, alpha: bool) -> Vec<u8> {
     out
 }
 
-/// Buffer copies into and out of extended-range textures carry the codes.
-fn extended_range(plan: &mut Plan, rng: &mut Random) {
+/// Buffer copies into and out of textures whose images hold their texels
+/// in another encoding carry Metal's bytes: extended-range codes, and
+/// A1BGR5 texels, which a device may hold rotated.
+fn stored_encodings(plan: &mut Plan, rng: &mut Random) {
     let (w, h, ox, oy, rw, rh) = (8usize, 8usize, 2usize, 3usize, 5usize, 3usize);
-    for (format, alpha, into) in [
-        ("bgra10_xr_srgb", true, true),
-        ("bgr10_xr", false, true),
-        ("bgra10_xr", true, false),
-        ("bgr10_xr_srgb", false, false),
+    for (format, texel, into) in [
+        ("bgra10_xr_srgb", 8, true),
+        ("bgr10_xr", 4, true),
+        ("bgra10_xr", 8, false),
+        ("bgr10_xr_srgb", 4, false),
+        ("a1bgr5unorm", 2, true),
+        ("a1bgr5unorm", 2, false),
     ] {
-        let texel = if alpha { 8 } else { 4 };
         let row = rw * texel + 24;
-        let texture = xr_texels(rng, w * h, alpha);
-        let staging = xr_texels(rng, row / texel * rh, alpha);
+        let texture = stored_texels(rng, w * h, format);
+        let staging = stored_texels(rng, row / texel * rh, format);
         let mut copied = texture.clone();
         let mut read = vec![0x5Au8; row * rh];
         for y in 0..rh {
@@ -397,7 +406,7 @@ fn extended_range(plan: &mut Plan, rng: &mut Random) {
 pub fn build(plan: &mut Plan) {
     let mut rng = Random::new(1101);
     more(plan, &mut Random::new(1102));
-    extended_range(plan, &mut Random::new(1103));
+    stored_encodings(plan, &mut Random::new(1103));
     // Copies and fills at 4-byte aligned offsets and sizes, overlapping
     // nothing, then a copy within one buffer to a disjoint range.
     let (src, dst) = (bytes(&mut rng, 256), bytes(&mut rng, 256));

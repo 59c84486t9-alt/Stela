@@ -79,6 +79,8 @@ enum stela_metal_texel_encoding {
    STELA_METAL_TEXELS_XR10_SRGB,
    STELA_METAL_TEXELS_XR10X4,
    STELA_METAL_TEXELS_XR10X4_SRGB,
+   /* A 16-bit texel rotated right by one bit (A1BGR5 as A1R5G5B5). */
+   STELA_METAL_TEXELS_ROTATED16,
 };
 
 /* ResolveArguments, which the resolve kernels read at the push constants'

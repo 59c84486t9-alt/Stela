@@ -295,8 +295,12 @@ pub enum Encoding {
     /// The image holds the Metal format's own bytes.
     Exact,
     /// Apple's extended-range codes, held as the half floats they read as
-    /// ([`extended_range`]). The CPU's bytes convert; a buffer's do not.
+    /// ([`extended_range`]).
     ExtendedRange(extended_range::Codes),
+    /// A 16-bit texel rotated right by one bit, so a channel in its lowest
+    /// bit moves to its highest: `A1BGR5Unorm`'s alpha, which no NVIDIA
+    /// layout keeps in bit 0, held as `A1R5G5B5`'s.
+    Rotated,
 }
 
 impl Encoding {
@@ -312,7 +316,45 @@ impl Encoding {
             Self::ExtendedRange(extended_range::Codes { alpha, srgb }) => {
                 1 + 2 * alpha as u32 + srgb as u32
             }
+            Self::Rotated => 5,
         }
+    }
+
+    /// Bytes of the image's texel holding one of `metal_bytes`.
+    pub const fn stored_bytes(self, metal_bytes: u32) -> u32 {
+        match self {
+            Self::Exact | Self::Rotated => metal_bytes,
+            Self::ExtendedRange(_) => extended_range::STORED_BYTES as u32,
+        }
+    }
+
+    /// Converts whole Metal texels of `metal_bytes` each to the image's.
+    pub fn store(self, metal: &[u8], stored: &mut [u8]) {
+        match self {
+            Self::Exact => stored.copy_from_slice(metal),
+            Self::ExtendedRange(codes) => codes.store(metal, stored),
+            Self::Rotated => rotate(metal, stored, u16::rotate_right),
+        }
+    }
+
+    /// Converts whole image texels to Metal's.
+    pub fn load(self, stored: &[u8], metal: &mut [u8]) {
+        match self {
+            Self::Exact => metal.copy_from_slice(stored),
+            Self::ExtendedRange(codes) => codes.load(stored, metal),
+            Self::Rotated => rotate(stored, metal, u16::rotate_left),
+        }
+    }
+}
+
+fn rotate(from: &[u8], to: &mut [u8], turn: fn(u16, u32) -> u16) {
+    for (texel, out) in from
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(to.as_chunks_mut::<2>().0)
+    {
+        *out = turn(u16::from_le_bytes(*texel), 1).to_le_bytes();
     }
 }
 
@@ -369,10 +411,7 @@ impl Description {
 
     /// Bytes of one block as the image stores it.
     pub fn stored_block_bytes(&self) -> u32 {
-        match self.encoding() {
-            Encoding::Exact => self.block.bytes,
-            Encoding::ExtendedRange(_) => extended_range::STORED_BYTES as u32,
-        }
+        self.encoding().stored_bytes(self.block.bytes)
     }
 }
 
@@ -631,6 +670,24 @@ const fn extended(format: PixelFormat, alpha: bool, srgb: bool) -> Description {
     }
 }
 
+/// A 16-bit format held rotated right by one bit ([`Encoding::Rotated`]).
+const fn rotated(format: PixelFormat, realization: VkFormat) -> Description {
+    Description {
+        format,
+        kind: Kind::Color(Numeric::Unorm),
+        srgb: false,
+        compression: Compression::None,
+        block: Block::texel(2),
+        view_only: false,
+        realization: Ok(Realization {
+            format: realization,
+            view_aspects: ImageAspects::COLOR,
+            swizzle: IDENTITY,
+            encoding: Encoding::Rotated,
+        }),
+    }
+}
+
 const fn subsampled(format: PixelFormat) -> Description {
     Description {
         format,
@@ -691,7 +748,7 @@ static DESCRIPTIONS: &[Description] = &[
     color(P::Rg8Uint, Uint, 2, V::R8G8Uint),
     color(P::Rg8Sint, Sint, 2, V::R8G8Sint),
     color(P::B5G6R5Unorm, Unorm, 2, V::R5G6B5UnormPack16),
-    color(P::A1Bgr5Unorm, Unorm, 2, V::R5G5B5A1UnormPack16),
+    rotated(P::A1Bgr5Unorm, V::A1R5G5B5UnormPack16),
     color(P::Abgr4Unorm, Unorm, 2, V::R4G4B4A4UnormPack16),
     color(P::Bgr5A1Unorm, Unorm, 2, V::A1R5G5B5UnormPack16),
     color(P::Rgb8Unorm, Unorm, 3, V::R8G8B8Unorm),
@@ -938,7 +995,6 @@ mod tests {
     fn packed_formats_reverse_component_order() {
         let packed = [
             (P::B5G6R5Unorm, V::R5G6B5UnormPack16),
-            (P::A1Bgr5Unorm, V::R5G5B5A1UnormPack16),
             (P::Abgr4Unorm, V::R4G4B4A4UnormPack16),
             (P::Bgr5A1Unorm, V::A1R5G5B5UnormPack16),
             (P::Rgb10A2Unorm, V::A2B10G10R10UnormPack32),
@@ -1024,6 +1080,24 @@ mod tests {
         assert_eq!(P::Bc1Rgba.describe().row_bytes(5), 16);
         assert_eq!(P::Astc12x12Ldr.describe().row_bytes(13), 32);
         assert_eq!(P::Rgb16Float.describe().row_bytes(3), 18);
+    }
+
+    #[test]
+    fn a1bgr5_texels_rotate_into_a1r5g5b5() {
+        let description = P::A1Bgr5Unorm.describe();
+        let realization = description.realization.unwrap();
+        assert_eq!(realization.format, V::A1R5G5B5UnormPack16);
+        assert!(realization.writes_through());
+        assert_eq!(description.stored_block_bytes(), 2);
+        // Metal's alpha in bit 0, blue, green and red above it; Vulkan's
+        // blue from bit 0 and alpha in bit 15.
+        let metal = (1u16 | 3 << 1 | 5 << 6 | 7 << 11).to_le_bytes();
+        let mut stored = [0; 2];
+        Encoding::Rotated.store(&metal, &mut stored);
+        assert_eq!(u16::from_le_bytes(stored), 3 | 5 << 5 | 7 << 10 | 1 << 15);
+        let mut back = [0; 2];
+        Encoding::Rotated.load(&stored, &mut back);
+        assert_eq!(back, metal);
     }
 
     #[test]

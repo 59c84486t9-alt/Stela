@@ -352,7 +352,7 @@ static unsigned intrinsic_count(nir_shader *shader, nir_intrinsic_op op)
  * it once and writes the buffer once per encoding. */
 static void texel_kernels_convert_each_encoding(void)
 {
-   unsigned encodings = STELA_METAL_TEXELS_XR10X4_SRGB - STELA_METAL_TEXELS_XR10 + 1;
+   unsigned encodings = STELA_METAL_TEXELS_ROTATED16 - STELA_METAL_TEXELS_XR10 + 1;
    nir_shader *store = stela_metal_store_texels_kernel(NULL);
    check_kernel(store);
    assert(intrinsic_count(store, nir_intrinsic_image_deref_store) == encodings);

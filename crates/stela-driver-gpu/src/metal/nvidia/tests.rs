@@ -330,6 +330,14 @@ fn pixel_format_capabilities_follow_the_driver_tables() {
             C::WRITE | C::READ_WRITE | C::ATOMIC | C::SPARSE | C::LINEAR | C::TEXTURE_BUFFER_READ
         ));
     }
+    // A1BGR5 renders as A1R5G5B5, its texels rotated by a bit, which only
+    // the CPU and the texel kernels see.
+    let rotated = capabilities.format(P::A1Bgr5Unorm);
+    assert!(
+        rotated
+            .contains(C::READ | C::FILTER | C::COLOR | C::BLEND | C::MSAA | C::RESOLVE | C::BLIT)
+    );
+    assert!(!rotated.intersects(C::WRITE | C::SPARSE | C::LINEAR | C::TEXTURE_BUFFER_READ));
     assert!(
         capabilities
             .format(P::Rgb8Unorm)

@@ -1320,8 +1320,11 @@ static nir_builder texels(const nir_shader_compiler_options *options, const char
    t->coord = nir_vec4(&b, nir_iadd(&b, x, origin[0]), nir_iadd(&b, y, origin[1]),
                        nir_iadd(&b, z, origin[2]), nir_imm_int(&b, 0));
    t->encoding = load(&b, arguments, STELA_METAL_TEXELS_ENCODING, 32);
-   nir_def *wide = nir_uge_imm(&b, t->encoding, STELA_METAL_TEXELS_XR10X4);
-   nir_def *texel_bytes = nir_bcsel(&b, wide, nir_imm_int(&b, 8), nir_imm_int(&b, 4));
+   nir_def *wide = nir_ior(&b, nir_ieq_imm(&b, t->encoding, STELA_METAL_TEXELS_XR10X4),
+                           nir_ieq_imm(&b, t->encoding, STELA_METAL_TEXELS_XR10X4_SRGB));
+   nir_def *narrow = nir_ieq_imm(&b, t->encoding, STELA_METAL_TEXELS_ROTATED16);
+   nir_def *texel_bytes = nir_bcsel(&b, wide, nir_imm_int(&b, 8),
+                                    nir_bcsel(&b, narrow, nir_imm_int(&b, 2), nir_imm_int(&b, 4)));
    nir_def *offset = nir_iadd(
       &b, nir_imul(&b, z, load(&b, arguments, STELA_METAL_TEXELS_IMAGE_BYTES, 32)),
       nir_iadd(&b, nir_imul(&b, y, load(&b, arguments, STELA_METAL_TEXELS_ROW, 32)),
@@ -1362,6 +1365,19 @@ nir_shader *stela_metal_store_texels_kernel(const nir_shader_compiler_options *o
    struct texels t;
    nir_builder b = texels(options, "stela_metal_store_texels", &t);
    nir_def *address = nir_iadd(&b, t.buffer, t.offset);
+   nir_push_if(&b, nir_ieq_imm(&b, t.encoding, STELA_METAL_TEXELS_ROTATED16));
+   {
+      nir_def *word = nir_u2u32(&b, nir_load_global(&b, 1, 16, address, .align_mul = 2));
+      nir_def *rotated = nir_ior(&b, nir_ushr_imm(&b, word, 1),
+                                 nir_ishl_imm(&b, nir_iand_imm(&b, word, 1), 15));
+      nir_image_deref_store(&b, &t.image->def, t.coord, nir_undef(&b, 1, 32),
+                            nir_vec4(&b, rotated, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                                     nir_imm_int(&b, 1)),
+                            nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D,
+                            .image_array = true, .format = PIPE_FORMAT_NONE,
+                            .src_type = nir_type_uint32);
+   }
+   nir_push_else(&b, NULL);
    nir_def *lo = nir_load_global(&b, 1, 32, address, .align_mul = 4);
    for (unsigned e = STELA_METAL_TEXELS_XR10; e <= STELA_METAL_TEXELS_XR10X4_SRGB; e++) {
       bool alpha = e >= STELA_METAL_TEXELS_XR10X4;
@@ -1375,6 +1391,7 @@ nir_shader *stela_metal_store_texels_kernel(const nir_shader_compiler_options *o
                             .format = PIPE_FORMAT_NONE, .src_type = nir_type_uint32);
       nir_pop_if(&b, NULL);
    }
+   nir_pop_if(&b, NULL);
    return finish(&b);
 }
 
@@ -1388,6 +1405,15 @@ nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *op
                                           .image_array = true, .format = PIPE_FORMAT_NONE,
                                           .dest_type = nir_type_uint32);
    nir_def *rg = nir_channel(&b, stored, 0), *ba = nir_channel(&b, stored, 1);
+   nir_push_if(&b, nir_ieq_imm(&b, t.encoding, STELA_METAL_TEXELS_ROTATED16));
+   {
+      /* Bit 15 returns to bit 0. */
+      nir_def *word = nir_iand_imm(&b, rg, 0xffff);
+      nir_def *metal = nir_ior(&b, nir_iand_imm(&b, nir_ishl_imm(&b, word, 1), 0xffff),
+                               nir_ushr_imm(&b, word, 15));
+      nir_store_global(&b, nir_u2u16(&b, metal), address, .align_mul = 2);
+   }
+   nir_pop_if(&b, NULL);
    nir_def *red_green = nir_unpack_half_2x16(&b, rg), *blue_alpha = nir_unpack_half_2x16(&b, ba);
    nir_def *r = nir_channel(&b, red_green, 0), *g = nir_channel(&b, red_green, 1);
    nir_def *bl = nir_channel(&b, blue_alpha, 0), *a = nir_channel(&b, blue_alpha, 1);
