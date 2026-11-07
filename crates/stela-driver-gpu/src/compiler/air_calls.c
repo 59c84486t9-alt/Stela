@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <string.h>
 
 /* Beyond any call chain Metal compiles, it bounds the walk of hostile input,
@@ -424,6 +425,19 @@ hide_entry_points(struct stela_air_metadata *m)
    return true;
 }
 
+/* Whether two target triples name one target, whatever their deployment
+ * versions: air64_v29-apple-macosx27.0.0 links with ...-macosx27.2.0. */
+static bool
+same_target(const char *a, const char *b)
+{
+   size_t a_bytes = strlen(a), b_bytes = strlen(b);
+   while (a_bytes && (isdigit((unsigned char)a[a_bytes - 1]) || a[a_bytes - 1] == '.'))
+      a_bytes--;
+   while (b_bytes && (isdigit((unsigned char)b[b_bytes - 1]) || b[b_bytes - 1] == '.'))
+      b_bytes--;
+   return a_bytes == b_bytes && !memcmp(a, b, a_bytes);
+}
+
 /* Whether module is valid AIR compiled as m's module was, after
  * specializing its function constants with values. */
 static bool
@@ -437,7 +451,7 @@ prepared(struct stela_air_metadata *m, LLVMModuleRef module,
    LLVMDisposeMessage(verification);
    if (!verified || !stela_air_metadata_layout(&linked) || !stela_air_metadata_validate(&linked))
       return fail(m, STELA_AIR_INPUT, "a linked module is not valid AIR");
-   if (strcmp(LLVMGetTarget(module), LLVMGetTarget(m->module)) ||
+   if (!same_target(LLVMGetTarget(module), LLVMGetTarget(m->module)) ||
        strcmp(LLVMGetDataLayoutStr(module), LLVMGetDataLayoutStr(m->module)) ||
        linked.air_major != m->air_major || linked.air_minor != m->air_minor ||
        linked.language_major != m->language_major ||

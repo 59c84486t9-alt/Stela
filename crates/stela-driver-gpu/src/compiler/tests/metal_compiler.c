@@ -2592,6 +2592,18 @@ linked_functions_resolve_tables_and_externals(void)
    shader = compile_linked(sized, "tables", &linked, 1, functions, 3, &error);
    assert(shader);
    stela_metal_release(shader);
+   /* A library deployed to another version of the same target links. */
+   static const char *redeployed_linked =
+      "target triple = \"air64_v29-apple-macosx27.0.0\"\n"
+      "define i32 @external(i32 %x) {\n%y = add i32 %x, 7\nret i32 %y\n}\n"
+      "define i32 @negated(i32 %x) {\n%y = sub i32 0, %x\nret i32 %y\n}\n"
+      "define i64 @wide(i64 %x) {\nret i64 %x\n}\n"
+      "!air.visible = !{}\n";
+   shader = compile_linked(tables, "tables", &redeployed_linked, 1, functions, 3, &error);
+   if (!shader)
+      fprintf(stderr, "redeployed: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
    shader = compile_linked(tested, "tables", &linked, 1, functions, 3, &error);
    if (!shader)
       fprintf(stderr, "tested: %u %s\n", error.kind, error.detail);
