@@ -25,6 +25,7 @@ use super::{
     capabilities::{Capabilities, FormatCapabilities, Size},
     error::{Error, Result, ensure, require},
     pixel_format::{Encoding, Kind, PixelFormat},
+    resource::raw_texel_format,
     sampler::test_op,
     shader::{
         CompiledShader, Interface, NumericClass, Specialization, Stage, StorageAttachment,
@@ -155,12 +156,16 @@ impl ColorAttachmentDescriptor {
     }
 
     /// The channels a draw writes: an extended-range format without alpha
-    /// keeps the opaque alpha its texels hold.
+    /// keeps the opaque alpha its texels hold, and a padded one its blue
+    /// zero and alpha one.
     fn stored_write_mask(&self) -> ColorWriteMask {
         match self.pixel_format.map(|format| format.describe().encoding()) {
             Some(Encoding::ExtendedRange(codes)) if !codes.alpha => {
                 self.write_mask.difference(ColorWriteMask::ALPHA)
             }
+            Some(Encoding::Padded) => self
+                .write_mask
+                .difference(ColorWriteMask::BLUE.union(ColorWriteMask::ALPHA)),
             _ => self.write_mask,
         }
     }
@@ -623,31 +628,58 @@ pub fn storage_attachments(
     targets: &RenderTargets,
 ) -> Result<[Option<StorageAttachment>; MAX_COLOR_ATTACHMENTS]> {
     let mut attachments = [None; MAX_COLOR_ATTACHMENTS];
-    if fragment.attachment_reads == 0 || !targets.rasterization_enabled {
+    if !targets.rasterization_enabled {
         return Ok(attachments);
     }
-    require(capabilities.framebuffer_reads, "framebuffer reads")?;
+    // Attachments rendering through their raw texels are written as storage
+    // whether or not the function reads them.
+    let raw = targets
+        .color_attachments
+        .iter()
+        .enumerate()
+        .filter(|(_, attachment)| {
+            attachment.pixel_format.is_some_and(|format| {
+                capabilities
+                    .format(format)
+                    .contains(FormatCapabilities::RAW_RENDER)
+            })
+        })
+        .fold(0, |mask, (index, _)| mask | 1 << index);
+    let accessed = fragment.attachment_reads | raw;
+    if accessed == 0 {
+        return Ok(attachments);
+    }
     let depth_stencil = targets.depth_attachment_pixel_format.is_some()
         || targets.stencil_attachment_pixel_format.is_some();
-    require(
-        !(fragment.writes_depth
-            || fragment.writes_stencil
-            || fragment.writes_sample_mask
-            || fragment.discards && depth_stencil
-            || targets.alpha_to_coverage_enabled
-            || targets.alpha_to_one_enabled),
-        "framebuffer reads by a function that writes depth, stencil or coverage",
-    )?;
+    let tests_first = !(fragment.writes_depth
+        || fragment.writes_stencil
+        || fragment.writes_sample_mask
+        || fragment.discards && depth_stencil
+        || targets.alpha_to_coverage_enabled
+        || targets.alpha_to_one_enabled);
+    if fragment.attachment_reads != 0 {
+        require(capabilities.framebuffer_reads, "framebuffer reads")?;
+        require(
+            tests_first,
+            "framebuffer reads by a function that writes depth, stencil or coverage",
+        )?;
+    }
+    if raw != 0 {
+        require(
+            tests_first,
+            "rendering to this pixel format by a function that writes depth, stencil or coverage",
+        )?;
+    }
     for (index, attachment) in targets.color_attachments.iter().enumerate() {
         let Some(format) = attachment
             .pixel_format
-            .filter(|_| fragment.attachment_reads & 1 << index != 0)
+            .filter(|_| accessed & 1 << index != 0)
         else {
             continue;
         };
         require(
             !attachment.uses_source1(),
-            "framebuffer reads of an attachment that blends a second source",
+            "storage attachments that blend a second source",
         )?;
         let description = format.describe();
         let realization = description
@@ -876,6 +908,10 @@ fn color_format(
             caps.contains(FormatCapabilities::MSAA),
             "multisampled attachment pixel format",
         )?;
+    }
+    // A format rendering through its raw texels attaches them.
+    if caps.contains(FormatCapabilities::RAW_RENDER) {
+        return raw_texel_format(format).ok_or(Error::Unsupported("color attachment pixel format"));
     }
     Ok(description
         .realization

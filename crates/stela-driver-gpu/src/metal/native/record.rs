@@ -5,7 +5,8 @@ use super::{
 };
 use crate::metal::{
     binding::{
-        AccumulateArguments, PushConstants, ResolveArguments, SelectArguments, TexelArguments,
+        AccumulateArguments, AverageArguments, PushConstants, ResolveArguments, SelectArguments,
+        TexelArguments,
     },
     command_buffer::Segment,
     error::{Error, Result},
@@ -660,6 +661,12 @@ impl Recorder<'_> {
                     arguments,
                     count,
                     TexelArguments::WORKGROUP_SIZE,
+                ),
+                &Command::AverageSamples { arguments, count } => self.internal(
+                    self.backend.average_samples,
+                    arguments,
+                    count,
+                    AverageArguments::WORKGROUP_SIZE,
                 ),
                 &Command::BeginConditionalRendering {
                     buffer: flags,

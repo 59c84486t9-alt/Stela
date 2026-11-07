@@ -259,7 +259,10 @@ impl Workload {
         for command in segments.iter().flat_map(|segment| &segment.commands) {
             match command {
                 Command::BeginRendering(_) => self.passes += 1,
-                Command::Dispatch(_) | Command::DispatchIndirect { .. } => self.dispatches += 1,
+                // A pass resolving through its raw texels averages in a dispatch.
+                Command::Dispatch(_)
+                | Command::DispatchIndirect { .. }
+                | Command::AverageSamples { .. } => self.dispatches += 1,
                 Command::CopyBuffer { .. }
                 | Command::CopyBufferToImage { .. }
                 | Command::CopyImageToBuffer { .. }

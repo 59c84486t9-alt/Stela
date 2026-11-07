@@ -188,7 +188,7 @@ static SRGB_MIDPOINTS: [f32; 1023] = {
 
 /// The natural logarithm of a positive finite `x`, to within a few units in
 /// the last place, for building the tables.
-const fn ln(x: f64) -> f64 {
+pub(super) const fn ln(x: f64) -> f64 {
     // x = m * 2^e with m in [sqrt(1/2), sqrt(2)); ln m = 2 atanh((m - 1) / (m + 1)).
     let mut m = x;
     let mut e = 0.0;
@@ -214,7 +214,7 @@ const fn ln(x: f64) -> f64 {
 }
 
 /// `e^x` for the tables' small arguments.
-const fn exp(x: f64) -> f64 {
+pub(super) const fn exp(x: f64) -> f64 {
     // e^x = (e^(x / 2^8))^(2^8), the inner one by its series.
     let y = x / 256.0;
     let mut term = 1.0;

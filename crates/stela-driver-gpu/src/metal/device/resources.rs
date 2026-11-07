@@ -6,6 +6,7 @@ use crate::metal::{
         TextureType,
     },
     binding::{HeapArray, NULL_DESCRIPTOR, ResourceId},
+    capabilities::FormatCapabilities,
     command_buffer::{
         BufferRef, MappedRange,
         blit::{BufferLayout, Region},
@@ -727,7 +728,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let image = texture
             .image
             .ok_or(Error::Invalid("texture buffers are not attachments"))?;
-        let format = resource::vulkan_format(texture.descriptor.pixel_format)?;
+        let pixel_format = texture.descriptor.pixel_format;
+        // A format rendering through its raw texels attaches them.
+        let format = if self
+            .capabilities
+            .format(pixel_format)
+            .contains(FormatCapabilities::RAW_RENDER)
+        {
+            resource::raw_texel_format(pixel_format)
+                .ok_or(Error::Unsupported("rendering to this pixel format"))?
+        } else {
+            resource::vulkan_format(pixel_format)?
+        };
         let info = ImageViewInfo {
             view_type: view.view_type,
             format,

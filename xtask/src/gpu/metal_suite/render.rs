@@ -3024,6 +3024,142 @@ fn early_fragment_tests(plan: &mut Plan, library: &str) {
     );
 }
 
+/// Formats a device may render through their raw texels: blended and
+/// resolved as Metal's are, and cleared to the texel a clear color rounds
+/// to.
+fn raw_rendered(plan: &mut Plan, library: &str) {
+    let mut rng = Random::new(907);
+    let n = (W * H) as usize;
+    for format in ["r8unorm_srgb", "rg8unorm_srgb", "abgr4unorm"] {
+        let srgb_target = format.ends_with("srgb");
+        // Over: the source's alpha mixes it with the target, in linear
+        // space for sRGB. ABGR4 adds lattice values whose sums stay on it.
+        let (blend, texels, stored): (Value, Vec<[f64; 4]>, Vec<[f64; 4]>) = if srgb_target {
+            let s = (0..n)
+                .map(|_| std::array::from_fn(|_| f32r(rng.uniform(0.0, 1.0))))
+                .collect();
+            let d = (0..n)
+                .map(|_| {
+                    std::array::from_fn(|lane| match lane {
+                        0 | 1 => srgb(f64::from(rng.u32() % 256) / 255.0),
+                        2 => 0.0,
+                        _ => 1.0,
+                    })
+                })
+                .collect();
+            (
+                Blend::simple("add", "source_alpha", "one_minus_source_alpha").json(),
+                s,
+                d,
+            )
+        } else {
+            let pairs: Vec<([f64; 4], [f64; 4])> = (0..n)
+                .map(|_| {
+                    let mut s = [0.0; 4];
+                    let mut d = [0.0; 4];
+                    for lane in 0..4 {
+                        let a = rng.u32() % 16;
+                        let b = rng.u32() % (16 - a);
+                        s[lane] = f64::from(a) / 15.0;
+                        d[lane] = f64::from(b) / 15.0;
+                    }
+                    (s, d)
+                })
+                .collect();
+            (
+                Blend::simple("add", "one", "one").json(),
+                pairs.iter().map(|p| p.0).collect(),
+                pairs.iter().map(|p| p.1).collect(),
+            )
+        };
+        let mut initial = vec![];
+        let mut expected = vec![];
+        let mut dtype = Dtype::U8;
+        for (s, d) in texels.iter().zip(&stored) {
+            initial.extend(store(format, *d).0);
+            let out = if srgb_target {
+                let a = s[3];
+                std::array::from_fn(|lane| s[lane] * a + d[lane] * (1.0 - a))
+            } else {
+                std::array::from_fn(|lane| s[lane] + d[lane])
+            };
+            let (bytes, d) = store(format, out);
+            expected.extend(bytes);
+            dtype = d;
+        }
+        let tol = if srgb_target {
+            Tolerance::units(1.0)
+        } else {
+            Tolerance::exact()
+        };
+        plan.add(
+            full(
+                &format!("render.blend.{format}.raw"),
+                library,
+                "frag_color",
+                &texels.concat(),
+                json!({"colors": [{"texture": "c", "blend": blend}]}),
+            )
+            .texture(target("c", format).data(initial))
+            .output(Output::new("c", dtype, tol.clone()).expect(expected, tol.clone())),
+        );
+
+        // A 4x resolve of a slanted triangle's coverage: each pixel's mean
+        // of its samples, decoded and encoded by the format.
+        let full_vp = [0.0, 0.0, W as f64, H as f64];
+        let c = [
+            clip(0.5, 1.25, 0.5, 1.0, full_vp),
+            clip(15.5, 6.75, 0.5, 1.0, full_vp),
+            clip(3.25, 15.0, 0.5, 1.0, full_vp),
+        ];
+        let t = c.map(|v| window(v, full_vp));
+        // 0.8 in quarters stays on ABGR4's lattice: 0.2 k is 3 k / 15.
+        let attrs = [[0.8; 4]; 3];
+        let mut resolved = vec![];
+        for (x, y) in pixels() {
+            let k = f64::from(coverage(&t, x, y).unwrap_or(0));
+            resolved.extend(store(format, [0.8 * k / 4.0; 4]).0);
+        }
+        plan.add(
+            Case::render(
+                &format!("render.msaa4.resolve.{format}"),
+                library,
+                "vert_plain",
+                Some("frag_attribute"),
+                json!({"colors": [{"texture": "ms", "clear": [0, 0, 0, 0], "resolve": "c"}],
+                       "samples": 4, "vertex_count": 3}),
+            )
+            .buffer(Buffer::data("positions", 0, f32s(&c.concat())).stage("vertex"))
+            .buffer(Buffer::data("attributes", 1, f32s(&attrs.concat())).stage("vertex"))
+            .texture(
+                Texture::new("ms", format, "2d_ms", [W, H, 1])
+                    .samples(4)
+                    .usage(&["render"]),
+            )
+            .texture(target("c", format))
+            .output(Output::new("c", dtype, tol.clone()).expect(resolved, tol.clone())),
+        );
+
+        // A clear and nothing drawn.
+        // Away from ABGR4's rounding ties.
+        let clear = [0.32, 0.55, 0.8, 0.45];
+        let cleared: Vec<u8> = (0..n).flat_map(|_| store(format, clear).0).collect();
+        plan.add(
+            Case::render(
+                &format!("render.clear.{format}"),
+                library,
+                "vert_plain",
+                Some("frag_one"),
+                json!({"colors": [{"texture": "c", "clear": clear}], "vertex_count": 0}),
+            )
+            .buffer(Buffer::data("positions", 0, f32s(&[0.0; 4])).stage("vertex"))
+            .buffer(Buffer::data("attributes", 1, f32s(&[0.0; 4])).stage("vertex"))
+            .texture(target("c", format))
+            .output(Output::new("c", dtype, tol.clone()).expect(cleared, tol)),
+        );
+    }
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("render", SOURCE, &[], LATEST);
     early_fragment_tests(plan, &library);
@@ -3035,6 +3171,7 @@ pub fn build(plan: &mut Plan) {
     depth(plan, &library);
     stencil(plan, &library);
     multisampling(plan, &library);
+    raw_rendered(plan, &library);
     points(plan, &library);
     edges(plan, &library);
     fetch(plan, &library);

@@ -15,6 +15,7 @@ use super::{
         SparsePageSize, TextureType,
     },
     pixel_format::{Compression, Description, Kind, PixelFormat, Realization},
+    resource::{raw_rendered, raw_texel_format},
     vertex::VertexFormat,
     vulkan::{
         FormatFeatures, PhysicalDeviceType, ResolveModes, SampleCounts,
@@ -160,6 +161,10 @@ option_set! {
         /// Copied between host memory and the texture without a GPU pass
         /// (`VK_EXT_host_image_copy`).
         const HOST_TRANSFER = 1 << 17;
+        /// Not Apple's: attachments render through the image's raw texels
+        /// ([`resource::raw_rendered`](super::resource::raw_rendered)), as
+        /// the driver renders no view of its format.
+        const RAW_RENDER = 1 << 18;
     }
 }
 
@@ -1025,6 +1030,16 @@ impl Derivation<'_> {
             .collect()
     }
 
+    /// Whether fragment functions may write attachments as storage in their
+    /// interlock section: framebuffer reads' requirements, unrecorded.
+    fn storage_attachments(&self) -> bool {
+        let features = &self.device.features;
+        features.fragment_shader_pixel_interlock
+            && features.dynamic_rendering_local_read
+            && features.shader_storage_image_multisample
+            && self.shaders.contains(ShaderFeatures::RASTER_ORDER_GROUPS)
+    }
+
     /// A format's sparse 2D sample counts: multisample counts need the
     /// standard multisample block shapes.
     fn sparse_counts(&self, support: FormatSupport) -> SampleCounts {
@@ -1116,6 +1131,24 @@ impl Derivation<'_> {
             && realization.writes_through()
             && raster
             && optimal.contains(F::COLOR_ATTACHMENT);
+        // A format the driver neither renders nor blends renders through
+        // its raw texels: the fragment function blends and writes them in
+        // its interlock section, and the average samples kernel resolves.
+        let raw_support = raw_texel_format(description.format)
+            .filter(|_| {
+                color
+                    && identity
+                    && exact
+                    && raster
+                    && raw_rendered(description.format).is_some()
+                    && !optimal.contains(F::COLOR_ATTACHMENT)
+                    && self.storage_attachments()
+            })
+            .map(|raw| self.device.formats.get(raw))
+            .filter(|raw| raw.optimal.contains(F::COLOR_ATTACHMENT | F::STORAGE_IMAGE));
+        let raw_render = raw_support.is_some();
+        let raw_multisample =
+            raw_support.is_some_and(|raw| raw.sample_counts.contains(SampleCounts::C4));
         let depth_stencil = !color
             && !description.view_only
             && raster
@@ -1129,13 +1162,17 @@ impl Derivation<'_> {
             )
             .with(C::WRITE, storage)
             .with(C::READ_WRITE, storage && storage_read)
-            .with(C::COLOR, attachment)
+            .with(C::COLOR, attachment || raw_render)
             .with(
                 C::BLEND,
-                attachment && optimal.contains(F::COLOR_ATTACHMENT_BLEND),
+                attachment && optimal.contains(F::COLOR_ATTACHMENT_BLEND) || raw_render,
             )
+            .with(C::RAW_RENDER, raw_render)
             .with(C::DEPTH_STENCIL, depth_stencil)
-            .with(C::MSAA, (attachment || depth_stencil) && multisample)
+            .with(
+                C::MSAA,
+                (attachment || depth_stencil) && multisample || raw_multisample,
+            )
             .with(
                 C::SPARSE,
                 exact && self.sparse_counts(support).contains(SampleCounts::C1),
@@ -1160,7 +1197,7 @@ impl Derivation<'_> {
             );
 
         // Vulkan averages only float and normalized color attachments.
-        let color_resolve = attachment && multisample && !integer;
+        let color_resolve = attachment && multisample && !integer || raw_multisample;
         let depth_resolve = depth_stencil
             && multisample
             && self

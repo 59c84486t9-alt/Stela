@@ -503,6 +503,19 @@ pub fn raw_texel_format(format: PixelFormat) -> Option<Format> {
     }
 }
 
+/// For a format an attachment may render in through its raw texels
+/// ([`FormatCapabilities::RAW_RENDER`](C::RAW_RENDER)), its
+/// `enum stela_metal_average_format`, by which the average samples kernel
+/// resolves it: the formats Apple renders that the compiler's storage
+/// attachments blend and NVIDIA has no render target format of.
+pub const fn raw_rendered(format: PixelFormat) -> Option<u32> {
+    match format {
+        PixelFormat::R8UnormSrgb => Some(1),
+        PixelFormat::Abgr4Unorm => Some(2),
+        _ => None,
+    }
+}
+
 /// Whether textures of `texture_type` have raw 2D array storage views of
 /// their levels, through which the texel kernels copy buffers.
 pub fn has_texel_storage(texture_type: TextureType) -> bool {
@@ -579,6 +592,7 @@ fn image_info(
         Vec::new()
     } else if let Some(pair) = descriptor.pixel_format.srgb_pair()
         && let Ok(paired) = pair.describe().realization
+        && paired.encoding == realization.encoding
     {
         flags |= ImageCreate::MUTABLE_FORMAT | ImageCreate::EXTENDED_USAGE;
         vec![realization.format, paired.format]

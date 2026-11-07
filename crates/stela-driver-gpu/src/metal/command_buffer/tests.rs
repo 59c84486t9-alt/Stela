@@ -1870,6 +1870,90 @@ fn extended_range_buffer_copies_run_the_texel_kernels() {
     }
 }
 
+#[test]
+fn raw_rendered_attachments_resolve_where_the_pass_ends() {
+    let mut ms = texture(PixelFormat::Abgr4Unorm);
+    ms.texture_type = TextureType::D2Multisample;
+    ms.sample_count = 4;
+    ms.mipmap_level_count = 1;
+    let mut resolved = texture(PixelFormat::Abgr4Unorm);
+    resolved.mipmap_level_count = 1;
+    let target = |texture: ImageView, descriptor| Target {
+        texture: AttachedTexture {
+            texture,
+            descriptor,
+        },
+        level: 0,
+        slice: 0,
+        depth_plane: 0,
+    };
+    let mut descriptor = RenderPassDescriptor {
+        color_attachments: [None; MAX_COLOR_ATTACHMENTS],
+        depth_attachment: None,
+        depth_resolve_filter: crate::metal::abi::MultisampleDepthResolveFilter::Sample0,
+        stencil_attachment: None,
+        stencil_resolve_filter: crate::metal::abi::MultisampleStencilResolveFilter::Sample0,
+        visibility_results: false,
+        render_target_array_length: 0,
+        render_target_width: 0,
+        render_target_height: 0,
+        default_raster_sample_count: 0,
+        tile_memory: false,
+        sample_positions: Vec::new(),
+        rasterization_rate_map: false,
+    };
+    descriptor.color_attachments[0] = Some(AttachmentDescriptor {
+        target: target(ImageView(7), &ms),
+        resolve: Some(target(ImageView(8), &resolved)),
+        load_action: LoadAction::Clear,
+        store_action: StoreAction::MultisampleResolve,
+        store_action_options: StoreActionOptions::EMPTY,
+        clear: [1.0, 0.5, 0.0, 0.2],
+    });
+    let mut plan = render_pass(&capabilities(), &descriptor).unwrap();
+    let color = plan.color[0].as_ref().unwrap();
+    assert!(color.averaged);
+    // R4G4B4A4: red 15, green 8, blue 0 and alpha 3 from the top bits.
+    assert_eq!(
+        color.clear,
+        crate::metal::pass::ClearValue::Uint([0xf803, 0, 0, 0])
+    );
+    plan.inputs.textures[0] = ResourceId(0x55);
+    plan.inputs.averages[0] = ResourceId(0x66);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(&mut resolver, plan, None, Vec::new())
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let commands = &recording.segments[0].commands;
+    let Some(Command::BeginRendering(rendering)) = commands
+        .iter()
+        .find(|command| matches!(command, Command::BeginRendering(_)))
+    else {
+        panic!("no rendering")
+    };
+    assert_eq!(
+        rendering.color[0].as_ref().unwrap().resolve,
+        None,
+        "Vulkan averages no raw texels"
+    );
+    let Some(&Command::AverageSamples { arguments, count }) = commands
+        .iter()
+        .find(|command| matches!(command, Command::AverageSamples { .. }))
+    else {
+        panic!("no average")
+    };
+    assert_eq!(count, 64 * 32);
+    let encoded = uploaded(&recording, arguments);
+    assert_eq!((double(encoded, 0), double(encoded, 8)), (0x55, 0x66));
+    assert_eq!(
+        [16, 20, 24, 28, 32].map(|at| word(encoded, at)),
+        [64 * 32, 2, 64, 32, 4]
+    );
+}
+
 /// The bytes uploaded at `address`.
 fn uploaded(recording: &Recording, address: u64) -> &[u8] {
     let (chunk, bytes) = recording

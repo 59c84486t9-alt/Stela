@@ -352,10 +352,11 @@ static unsigned intrinsic_count(nir_shader *shader, nir_intrinsic_op op)
  * it once and writes the buffer once per encoding. */
 static void texel_kernels_convert_each_encoding(void)
 {
-   unsigned encodings = STELA_METAL_TEXELS_ROTATED16 - STELA_METAL_TEXELS_XR10 + 1;
+   unsigned encodings = STELA_METAL_TEXELS_PADDED8X2 - STELA_METAL_TEXELS_XR10 + 1;
    nir_shader *store = stela_metal_store_texels_kernel(NULL);
    check_kernel(store);
-   assert(intrinsic_count(store, nir_intrinsic_image_deref_store) == encodings);
+   /* The 16-bit encodings share one store. */
+   assert(intrinsic_count(store, nir_intrinsic_image_deref_store) == encodings - 1);
    assert(intrinsic_count(store, nir_intrinsic_image_deref_load) == 0);
    assert(intrinsic_count(store, nir_intrinsic_store_global) == 0);
    ralloc_free(store);
@@ -365,6 +366,18 @@ static void texel_kernels_convert_each_encoding(void)
    assert(intrinsic_count(load, nir_intrinsic_image_deref_store) == 0);
    assert(intrinsic_count(load, nir_intrinsic_store_global) == encodings);
    ralloc_free(load);
+}
+
+static void average_kernel_resolves_each_format(void)
+{
+   unsigned formats = STELA_METAL_AVERAGE_R4G4B4A4_UNORM - STELA_METAL_AVERAGE_R8_SRGB + 1;
+   nir_shader *average = stela_metal_average_samples_kernel(NULL);
+   check_kernel(average);
+   /* Up to eight samples of each format, and one store each. */
+   assert(intrinsic_count(average, nir_intrinsic_image_deref_load) == 8 * formats);
+   assert(intrinsic_count(average, nir_intrinsic_image_deref_store) == formats);
+   assert(intrinsic_count(average, nir_intrinsic_store_global) == 0);
+   ralloc_free(average);
 }
 
 static void put32(uint8_t *bytes, uint32_t value)
@@ -895,6 +908,7 @@ int main(void)
    select_flags_each_command();
    resolve_writes_each_command_sequence();
    texel_kernels_convert_each_encoding();
+   average_kernel_resolves_each_format();
    resolve_dispatches_writes_each_command_sequence();
    tessellation_factors_follow_metal_rules();
    tessellation_vertex_passes_the_draw_indices();

@@ -15,7 +15,7 @@ use super::{
     capabilities::{Capabilities, FormatCapabilities as C},
     error::{Error, Result, ensure, require},
     pipeline::MAX_COLOR_ATTACHMENTS,
-    pixel_format::{Description, Encoding, Kind, Numeric, PixelFormat},
+    pixel_format::{self, Description, Encoding, Kind, Numeric, PixelFormat},
     resource::{TextureDescriptor, vulkan_format},
     vulkan::{
         AttachmentLoadOp, AttachmentStoreOp, ImageAspects, ImageViewType, ResolveModes,
@@ -106,6 +106,11 @@ pub struct RenderingAttachment<T> {
     pub store_action: StoreAction,
     /// The texture is memoryless, so no store action may keep its content.
     pub memoryless: bool,
+    /// The attachment renders through its raw texels
+    /// ([`FormatCapabilities::RAW_RENDER`](C::RAW_RENDER)), whose resolve
+    /// the average samples kernel runs where the pass ends; Vulkan's
+    /// rendering resolves none of it.
+    pub averaged: bool,
 }
 
 /// What a fragment function's `[[color(n)]]` inputs read.
@@ -116,6 +121,9 @@ pub struct AttachmentInputs {
     /// Null for what a read cannot address: an absent attachment or a 3D
     /// texture's depth plane.
     pub textures: [ResourceId; MAX_COLOR_ATTACHMENTS],
+    /// The raw texel storage view of each averaged attachment's resolve
+    /// texture ([`RenderingAttachment::averaged`]); null for the others.
+    pub averages: [ResourceId; MAX_COLOR_ATTACHMENTS],
 }
 
 /// `VkRenderingInfo` and what the encoder checks against it.
@@ -322,12 +330,19 @@ pub fn render_pass<T: Copy + Eq>(
             ResolveModes::AVERAGE
         };
         color_formats[index] = Some(format);
-        color.push(Some(pass.attachment(
-            attachment,
-            ImageAspects::COLOR,
-            mode,
-            clear_color(format.describe(), numeric, attachment.clear),
-        )?));
+        let averaged = capabilities.format(format).contains(C::RAW_RENDER);
+        // A 3D texture's depth planes have no raw texel views.
+        require(
+            !(averaged && attachment.target.texture.descriptor.texture_type == TextureType::D3),
+            "rendering to 3D textures of this pixel format",
+        )?;
+        let clear = match pixel_format::raw_clear(format, attachment.clear) {
+            Some(bits) if averaged => ClearValue::Uint([bits, 0, 0, 0]),
+            _ => clear_color(format.describe(), numeric, attachment.clear),
+        };
+        let mut planned = pass.attachment(attachment, ImageAspects::COLOR, mode, clear)?;
+        planned.averaged = averaged;
+        color.push(Some(planned));
     }
 
     let depth_format = descriptor
@@ -576,6 +591,7 @@ impl Builder<'_> {
             clear,
             store_action: attachment.store_action,
             memoryless,
+            averaged: false,
         })
     }
 
@@ -665,8 +681,15 @@ pub const fn store_op(action: StoreAction) -> AttachmentStoreOp {
 /// Metal's double clear color in the attachment's numeric class; an
 /// extended-range attachment clears to the codes it stores.
 fn clear_color(description: &Description, numeric: Numeric, clear: [f64; 4]) -> ClearValue {
-    if let Encoding::ExtendedRange(codes) = description.encoding() {
-        return ClearValue::Float(codes.quantize(clear.map(|channel| channel as f32)));
+    match description.encoding() {
+        Encoding::ExtendedRange(codes) => {
+            return ClearValue::Float(codes.quantize(clear.map(|channel| channel as f32)));
+        }
+        // The padding keeps blue zero and alpha one.
+        Encoding::Padded => {
+            return ClearValue::Float([clear[0] as f32, clear[1] as f32, 0.0, 1.0]);
+        }
+        _ => {}
     }
     match numeric {
         Numeric::Uint => ClearValue::Uint(clear.map(|channel| channel as u32)),

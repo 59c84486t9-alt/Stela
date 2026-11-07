@@ -81,6 +81,31 @@ enum stela_metal_texel_encoding {
    STELA_METAL_TEXELS_XR10X4_SRGB,
    /* A 16-bit texel rotated right by one bit (A1BGR5 as A1R5G5B5). */
    STELA_METAL_TEXELS_ROTATED16,
+   /* Two 8-bit channels padded with a zero and a one (RG8Unorm_sRGB as
+    * R8G8B8A8_SRGB). */
+   STELA_METAL_TEXELS_PADDED8X2,
+};
+
+/* AverageArguments (binding.rs), which the average samples kernel reads at
+ * the push constants' arguments address: the resource IDs of raw storage
+ * views of a multisampled attachment and of its resolve texture, the texel
+ * count, the attachment's format (enum stela_metal_average_format), its
+ * width and height, and its samples per texel. */
+#define STELA_METAL_AVERAGE_SOURCE 0u
+#define STELA_METAL_AVERAGE_DESTINATION 8u
+#define STELA_METAL_AVERAGE_COUNT 16u
+#define STELA_METAL_AVERAGE_FORMAT 20u
+#define STELA_METAL_AVERAGE_WIDTH 24u
+#define STELA_METAL_AVERAGE_HEIGHT 28u
+#define STELA_METAL_AVERAGE_SAMPLES 32u
+#define STELA_METAL_AVERAGE_BYTES 40u
+
+/* The formats an attachment renders through its raw texels in, which the
+ * average samples kernel resolves: R8Unorm_sRGB and ABGR4Unorm's Vulkan
+ * layouts. */
+enum stela_metal_average_format {
+   STELA_METAL_AVERAGE_R8_SRGB = 1,
+   STELA_METAL_AVERAGE_R4G4B4A4_UNORM,
 };
 
 /* ResolveArguments, which the resolve kernels read at the push constants'
@@ -351,6 +376,11 @@ nir_shader *stela_metal_resolve_dispatches_kernel(const nir_shader_compiler_opti
  * bytes into the image's stored texel, the load kernel back. */
 nir_shader *stela_metal_store_texels_kernel(const nir_shader_compiler_options *options);
 nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *options);
+
+/* Thread n resolves texel n of the AverageArguments' attachment, counted
+ * along rows, then rows, then layers: the mean of its samples' values,
+ * decoded and encoded by the format, as Metal's resolve stores. */
+nir_shader *stela_metal_average_samples_kernel(const nir_shader_compiler_options *options);
 
 /* MTLTessellationPartitionMode, MTLTessellationFactorStepFunction and
  * MTLWinding, in their raw values. */

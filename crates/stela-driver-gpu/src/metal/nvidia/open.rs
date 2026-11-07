@@ -101,6 +101,7 @@ pub unsafe fn stack(
             resolve_dispatches,
             store_texels,
             load_texels,
+            average_samples,
         ] = kernels.code();
         // The kernels last until the pipelines hold their own copies.
         built = Some((service, kernels));
@@ -111,6 +112,7 @@ pub unsafe fn stack(
             resolve_dispatches,
             store_texels,
             load_texels,
+            average_samples,
         })
     };
     // SAFETY: the caller guarantees the entry point, and the kernels are the

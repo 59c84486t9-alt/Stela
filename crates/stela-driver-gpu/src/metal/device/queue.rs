@@ -309,6 +309,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 }
             }
         }
+        // The average samples kernel writes an averaged attachment's resolve
+        // texture through its raw texels.
+        for (average, color) in plan.inputs.averages.iter_mut().zip(&plan.color) {
+            let Some((_, resolve)) = color
+                .as_ref()
+                .filter(|color| color.averaged)
+                .and_then(|color| color.resolve)
+            else {
+                continue;
+            };
+            let view = AttachmentView {
+                texture: (),
+                view_type: resolve.view_type,
+                range: resolve.range,
+            };
+            *average = self.attachment_storage(resolve.texture, view)?;
+        }
         let plan = self.resolve_views(plan)?;
         let visibility = request
             .visibility_result_buffer
@@ -380,6 +397,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     clear: attachment.clear,
                     store_action: attachment.store_action,
                     memoryless: attachment.memoryless,
+                    averaged: attachment.averaged,
                 })
             };
         let color = plan

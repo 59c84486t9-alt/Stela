@@ -373,6 +373,14 @@ pub enum Command {
         arguments: u64,
         count: u32,
     },
+    /// The backend's average samples kernel, with `count` threads and the
+    /// address of its `AverageArguments`: the resolve of an attachment
+    /// rendered through its raw texels, which Vulkan's resolve modes
+    /// would not average.
+    AverageSamples {
+        arguments: u64,
+        count: u32,
+    },
     /// `vkCmdBeginConditionalRenderingEXT`: draws and dispatches up to the
     /// end run only if the 32-bit value at `offset` is nonzero.
     BeginConditionalRendering {

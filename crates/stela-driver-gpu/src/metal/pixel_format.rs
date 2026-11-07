@@ -286,6 +286,7 @@ impl Realization {
         self.swizzle == IDENTITY
             || self.swizzle == OPAQUE
                 && matches!(self.encoding, Encoding::ExtendedRange(codes) if !codes.alpha)
+            || self.swizzle == PADDED && self.encoding == Encoding::Padded
     }
 }
 
@@ -301,6 +302,10 @@ pub enum Encoding {
     /// bit moves to its highest: `A1BGR5Unorm`'s alpha, which no NVIDIA
     /// layout keeps in bit 0, held as `A1R5G5B5`'s.
     Rotated,
+    /// Two 8-bit channels held in a four-channel image whose blue reads
+    /// zero and alpha one: `RG8Unorm_sRGB`, which NVIDIA has no two-channel
+    /// sRGB format for, as `R8G8B8A8_SRGB`.
+    Padded,
 }
 
 impl Encoding {
@@ -317,6 +322,7 @@ impl Encoding {
                 1 + 2 * alpha as u32 + srgb as u32
             }
             Self::Rotated => 5,
+            Self::Padded => 6,
         }
     }
 
@@ -325,6 +331,7 @@ impl Encoding {
         match self {
             Self::Exact | Self::Rotated => metal_bytes,
             Self::ExtendedRange(_) => extended_range::STORED_BYTES as u32,
+            Self::Padded => 2 * metal_bytes,
         }
     }
 
@@ -334,6 +341,12 @@ impl Encoding {
             Self::Exact => stored.copy_from_slice(metal),
             Self::ExtendedRange(codes) => codes.store(metal, stored),
             Self::Rotated => rotate(metal, stored, u16::rotate_right),
+            Self::Padded => {
+                let texels = metal.as_chunks::<2>().0;
+                for (&[r, g], out) in texels.iter().zip(stored.as_chunks_mut::<4>().0) {
+                    *out = [r, g, 0, 0xff];
+                }
+            }
         }
     }
 
@@ -343,6 +356,12 @@ impl Encoding {
             Self::Exact => metal.copy_from_slice(stored),
             Self::ExtendedRange(codes) => codes.load(stored, metal),
             Self::Rotated => rotate(stored, metal, u16::rotate_left),
+            Self::Padded => {
+                let texels = stored.as_chunks::<4>().0;
+                for (&[r, g, ..], out) in texels.iter().zip(metal.as_chunks_mut::<2>().0) {
+                    *out = [r, g];
+                }
+            }
         }
     }
 }
@@ -413,6 +432,56 @@ impl Description {
     pub fn stored_block_bytes(&self) -> u32 {
         self.encoding().stored_bytes(self.block.bytes)
     }
+}
+
+/// The linear value halfway between each pair of neighboring 8-bit sRGB
+/// codes, ascending.
+static SRGB8_MIDPOINTS: [f64; 255] = {
+    let mut midpoints = [0.0; 255];
+    let mut code = 0;
+    while code < 255 {
+        let encoded = (code as f64 + 0.5) / 255.0;
+        midpoints[code] = if encoded <= 0.04045 {
+            encoded / 12.92
+        } else {
+            extended_range::exp(2.4 * extended_range::ln((encoded + 0.055) / 1.055))
+        };
+        code += 1;
+    }
+    midpoints
+};
+
+/// The 8-bit sRGB code of a linear value nearest it once decoded.
+fn srgb8(value: f64) -> u32 {
+    let value = if value.is_nan() { 0.0 } else { value };
+    SRGB8_MIDPOINTS.partition_point(|&midpoint| midpoint < value) as u32
+}
+
+/// The `n`-bit unorm code of a value, ties to even.
+fn unorm(value: f64, bits: u32) -> u32 {
+    let max = (1u32 << bits) - 1;
+    let scaled = if value.is_nan() {
+        0.0
+    } else {
+        value.clamp(0.0, 1.0)
+    } * f64::from(max);
+    let floor = scaled as u32;
+    let fraction = scaled - f64::from(floor);
+    (floor + u32::from(fraction > 0.5 || fraction == 0.5 && floor & 1 == 1)).min(max)
+}
+
+/// A clear color as the raw texel of a format rendering through its raw
+/// texels (`resource::raw_rendered`), in its unsigned integer view.
+pub fn raw_clear(format: PixelFormat, clear: [f64; 4]) -> Option<u32> {
+    let [r, g, b, a] = clear;
+    Some(match format {
+        PixelFormat::R8UnormSrgb => srgb8(r),
+        // R4G4B4A4_UNORM_PACK16: red in the top bits, alpha in the bottom.
+        PixelFormat::Abgr4Unorm => {
+            unorm(r, 4) << 12 | unorm(g, 4) << 8 | unorm(b, 4) << 4 | unorm(a, 4)
+        }
+        _ => return None,
+    })
 }
 
 impl PixelFormat {
@@ -488,6 +557,7 @@ use VkFormat as V;
 
 const IDENTITY: [ComponentSwizzle; 4] = [S::Identity, S::Identity, S::Identity, S::Identity];
 const OPAQUE: [ComponentSwizzle; 4] = [S::Identity, S::Identity, S::Identity, S::One];
+const PADDED: [ComponentSwizzle; 4] = [S::Identity, S::Identity, S::Zero, S::One];
 
 const fn vk(format: VkFormat, view_aspects: ImageAspects) -> Result<Realization, Unrealized> {
     Ok(Realization {
@@ -670,6 +740,25 @@ const fn extended(format: PixelFormat, alpha: bool, srgb: bool) -> Description {
     }
 }
 
+/// A two-channel sRGB format held in a four-channel one
+/// ([`Encoding::Padded`]).
+const fn padded(format: PixelFormat, realization: VkFormat) -> Description {
+    Description {
+        format,
+        kind: Kind::Color(Numeric::Unorm),
+        srgb: true,
+        compression: Compression::None,
+        block: Block::texel(2),
+        view_only: false,
+        realization: Ok(Realization {
+            format: realization,
+            view_aspects: ImageAspects::COLOR,
+            swizzle: PADDED,
+            encoding: Encoding::Padded,
+        }),
+    }
+}
+
 /// A 16-bit format held rotated right by one bit ([`Encoding::Rotated`]).
 const fn rotated(format: PixelFormat, realization: VkFormat) -> Description {
     Description {
@@ -743,7 +832,7 @@ static DESCRIPTIONS: &[Description] = &[
     color(P::R16Sint, Sint, 2, V::R16Sint),
     color(P::R16Float, Float, 2, V::R16Sfloat),
     color(P::Rg8Unorm, Unorm, 2, V::R8G8Unorm),
-    srgb(P::Rg8UnormSrgb, 2, V::R8G8Srgb),
+    padded(P::Rg8UnormSrgb, V::R8G8B8A8Srgb),
     color(P::Rg8Snorm, Snorm, 2, V::R8G8Snorm),
     color(P::Rg8Uint, Uint, 2, V::R8G8Uint),
     color(P::Rg8Sint, Sint, 2, V::R8G8Sint),
@@ -1080,6 +1169,43 @@ mod tests {
         assert_eq!(P::Bc1Rgba.describe().row_bytes(5), 16);
         assert_eq!(P::Astc12x12Ldr.describe().row_bytes(13), 32);
         assert_eq!(P::Rgb16Float.describe().row_bytes(3), 18);
+    }
+
+    #[test]
+    fn raw_clears_pack_the_texel_metal_stores() {
+        // Linear 0.5 is sRGB code 188 (0.7354); codes 127 and 128 meet at
+        // linear 0.21404.
+        assert_eq!(raw_clear(P::R8UnormSrgb, [0.5, 0.0, 0.0, 1.0]), Some(188));
+        assert_eq!(
+            raw_clear(P::R8UnormSrgb, [0.2141, 0.0, 0.0, 1.0]),
+            Some(128)
+        );
+        assert_eq!(
+            raw_clear(P::R8UnormSrgb, [0.2139, 0.0, 0.0, 1.0]),
+            Some(127)
+        );
+        assert_eq!(raw_clear(P::R8UnormSrgb, [-1.0, 0.0, 0.0, 1.0]), Some(0));
+        assert_eq!(raw_clear(P::R8UnormSrgb, [2.0, 0.0, 0.0, 1.0]), Some(255));
+        assert_eq!(
+            raw_clear(P::Abgr4Unorm, [1.0, 0.5, 0.0, 0.2]),
+            Some(0xf << 12 | 8 << 8 | 3)
+        );
+        assert_eq!(raw_clear(P::Rgba8Unorm, [0.0; 4]), None);
+    }
+
+    #[test]
+    fn rg8_srgb_texels_pad_into_rgba8_srgb() {
+        let realization = P::Rg8UnormSrgb.describe().realization.unwrap();
+        assert_eq!(realization.format, V::R8G8B8A8Srgb);
+        assert_eq!(realization.swizzle, PADDED);
+        assert!(realization.writes_through());
+        assert_eq!(P::Rg8UnormSrgb.describe().stored_block_bytes(), 4);
+        let mut stored = [0; 8];
+        Encoding::Padded.store(&[1, 2, 3, 4], &mut stored);
+        assert_eq!(stored, [1, 2, 0, 0xff, 3, 4, 0, 0xff]);
+        let mut metal = [0; 4];
+        Encoding::Padded.load(&[5, 6, 7, 8, 9, 10, 11, 12], &mut metal);
+        assert_eq!(metal, [5, 6, 9, 10]);
     }
 
     #[test]

@@ -133,6 +133,11 @@ fragment float4 frag_one(Plain in [[stage_in]])
     return float4(1.0f);
 }
 
+fragment float4 frag_attribute(Plain in [[stage_in]])
+{
+    return in.p;
+}
+
 // Window-filling triangle; per-pixel data from buffer 0.
 struct Full {
     float4 position [[position]];

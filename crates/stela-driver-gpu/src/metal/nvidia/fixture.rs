@@ -361,7 +361,12 @@ fn formats() -> FormatTable {
                 }
             }
             (Kind::Color(numeric), Compression::None) => {
-                let renderable = block_bytes != 12;
+                // NIL samples these but neither renders nor stores them.
+                let texture_only = matches!(
+                    realization.format,
+                    Format::R8Srgb | Format::R4G4B4A4UnormPack16 | Format::E5B9G9R9UfloatPack32
+                );
+                let renderable = block_bytes != 12 && !texture_only;
                 let filter = !numeric.is_integer();
                 let atomic = matches!(
                     realization.format,

@@ -454,6 +454,53 @@ impl TexelArguments {
     }
 }
 
+/// What the backend's average samples kernel reads at the push constants'
+/// `arguments`: thread `n` below `count` resolves texel `n` of a
+/// multisampled attachment, counted along rows, then rows, then layers,
+/// from the raw storage view `source` into the raw storage view
+/// `destination` of its resolve texture, decoding and encoding its samples
+/// by `format` (`enum stela_metal_average_format`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AverageArguments {
+    pub source: u64,
+    pub destination: u64,
+    pub count: u32,
+    pub format: u32,
+    pub width: u32,
+    pub height: u32,
+    pub samples: u32,
+}
+
+impl AverageArguments {
+    pub const SOURCE_OFFSET: u32 = 0;
+    pub const DESTINATION_OFFSET: u32 = 8;
+    pub const COUNT_OFFSET: u32 = 16;
+    pub const FORMAT_OFFSET: u32 = 20;
+    pub const WIDTH_OFFSET: u32 = 24;
+    pub const HEIGHT_OFFSET: u32 = 28;
+    pub const SAMPLES_OFFSET: u32 = 32;
+    pub const BYTES: u32 = 40;
+    pub const ALIGNMENT: u64 = 16;
+    /// Threads per workgroup of the kernel.
+    pub const WORKGROUP_SIZE: u32 = 64;
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = alloc::vec![0; Self::BYTES as usize];
+        let mut writer = Writer {
+            bytes: &mut bytes,
+            offset: 0,
+        };
+        writer.u64(self.source);
+        writer.u64(self.destination);
+        writer.u32(self.count);
+        writer.u32(self.format);
+        writer.u32(self.width);
+        writer.u32(self.height);
+        writer.u32(self.samples);
+        bytes
+    }
+}
+
 /// What the backend's internal select kernel reads at the push constants'
 /// `arguments`. Thread `n` below `count` writes the 32-bit flag
 /// `flags[n]`: 1 when the `MTLIndirectCommandBufferExecutionRange` at
@@ -992,6 +1039,29 @@ mod tests {
             ),
             ("STELA_METAL_TEXELS_ORIGIN", TexelArguments::ORIGIN_OFFSET),
             ("STELA_METAL_TEXELS_BYTES", TexelArguments::BYTES),
+            (
+                "STELA_METAL_AVERAGE_SOURCE",
+                AverageArguments::SOURCE_OFFSET,
+            ),
+            (
+                "STELA_METAL_AVERAGE_DESTINATION",
+                AverageArguments::DESTINATION_OFFSET,
+            ),
+            ("STELA_METAL_AVERAGE_COUNT", AverageArguments::COUNT_OFFSET),
+            (
+                "STELA_METAL_AVERAGE_FORMAT",
+                AverageArguments::FORMAT_OFFSET,
+            ),
+            ("STELA_METAL_AVERAGE_WIDTH", AverageArguments::WIDTH_OFFSET),
+            (
+                "STELA_METAL_AVERAGE_HEIGHT",
+                AverageArguments::HEIGHT_OFFSET,
+            ),
+            (
+                "STELA_METAL_AVERAGE_SAMPLES",
+                AverageArguments::SAMPLES_OFFSET,
+            ),
+            ("STELA_METAL_AVERAGE_BYTES", AverageArguments::BYTES),
             (
                 "STELA_METAL_INDIRECT_HEADER_BYTES",
                 RecordLayout::HEADER_BYTES,

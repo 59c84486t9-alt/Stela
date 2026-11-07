@@ -1322,7 +1322,8 @@ static nir_builder texels(const nir_shader_compiler_options *options, const char
    t->encoding = load(&b, arguments, STELA_METAL_TEXELS_ENCODING, 32);
    nir_def *wide = nir_ior(&b, nir_ieq_imm(&b, t->encoding, STELA_METAL_TEXELS_XR10X4),
                            nir_ieq_imm(&b, t->encoding, STELA_METAL_TEXELS_XR10X4_SRGB));
-   nir_def *narrow = nir_ieq_imm(&b, t->encoding, STELA_METAL_TEXELS_ROTATED16);
+   nir_def *narrow = nir_ior(&b, nir_ieq_imm(&b, t->encoding, STELA_METAL_TEXELS_ROTATED16),
+                             nir_ieq_imm(&b, t->encoding, STELA_METAL_TEXELS_PADDED8X2));
    nir_def *texel_bytes = nir_bcsel(&b, wide, nir_imm_int(&b, 8),
                                     nir_bcsel(&b, narrow, nir_imm_int(&b, 2), nir_imm_int(&b, 4)));
    nir_def *offset = nir_iadd(
@@ -1368,11 +1369,16 @@ nir_shader *stela_metal_store_texels_kernel(const nir_shader_compiler_options *o
    struct texels t;
    nir_builder b = texels(options, "stela_metal_store_texels", &t);
    nir_def *address = nir_iadd(&b, t.buffer, t.offset);
-   nir_push_if(&b, nir_ieq_imm(&b, t.encoding, STELA_METAL_TEXELS_ROTATED16));
+   nir_def *narrow = nir_ior(&b, nir_ieq_imm(&b, t.encoding, STELA_METAL_TEXELS_ROTATED16),
+                             nir_ieq_imm(&b, t.encoding, STELA_METAL_TEXELS_PADDED8X2));
+   nir_push_if(&b, narrow);
    {
       nir_def *word = nir_u2u32(&b, nir_load_global(&b, 1, 16, address, .align_mul = 2));
-      nir_def *rotated = nir_ior(&b, nir_ushr_imm(&b, word, 1),
-                                 nir_ishl_imm(&b, nir_iand_imm(&b, word, 1), 15));
+      /* Rotated right by a bit, or padded with blue zero and alpha one. */
+      nir_def *rotated = nir_bcsel(
+         &b, nir_ieq_imm(&b, t.encoding, STELA_METAL_TEXELS_ROTATED16),
+         nir_ior(&b, nir_ushr_imm(&b, word, 1), nir_ishl_imm(&b, nir_iand_imm(&b, word, 1), 15)),
+         nir_ior_imm(&b, word, 0xffu << 24));
       nir_image_deref_store(&b, &t.image->def, t.coord, nir_undef(&b, 1, 32),
                             nir_vec4(&b, rotated, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
                                      nir_imm_int(&b, 1)),
@@ -1417,6 +1423,10 @@ nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *op
       nir_store_global(&b, nir_u2u16(&b, metal), address, .align_mul = 2);
    }
    nir_pop_if(&b, NULL);
+   nir_push_if(&b, nir_ieq_imm(&b, t.encoding, STELA_METAL_TEXELS_PADDED8X2));
+   /* Red and green, without the padding. */
+   nir_store_global(&b, nir_u2u16(&b, rg), address, .align_mul = 2);
+   nir_pop_if(&b, NULL);
    /* Each half, widened: NAK has no vector unpack_32_2x16, which
     * unpack_half_2x16 scalarizes to. */
    nir_def *r = nir_f2f32(&b, nir_unpack_32_2x16_split_x(&b, rg));
@@ -1440,6 +1450,61 @@ nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *op
          nir_def *hi = nir_ior(&b, nir_ishl_imm(&b, codes[2], 6), nir_ishl_imm(&b, alpha_code, 22));
          nir_store_global(&b, nir_vec2(&b, lo, hi), address, .align_mul = 4);
       }
+      nir_pop_if(&b, NULL);
+   }
+   return finish(&b);
+}
+
+/* enum stela_metal_average_format's layouts. */
+static const enum pipe_format average_formats[] = {
+   [STELA_METAL_AVERAGE_R8_SRGB] = PIPE_FORMAT_R8_SRGB,
+   [STELA_METAL_AVERAGE_R4G4B4A4_UNORM] = PIPE_FORMAT_A4B4G4R4_UNORM,
+};
+
+nir_shader *stela_metal_average_samples_kernel(const nir_shader_compiler_options *options)
+{
+   nir_def *arguments, *thread;
+   nir_builder b = kernel(options, "stela_metal_average_samples", STELA_METAL_AVERAGE_COUNT,
+                          &arguments, &thread);
+   nir_def *width = load(&b, arguments, STELA_METAL_AVERAGE_WIDTH, 32);
+   nir_def *height = load(&b, arguments, STELA_METAL_AVERAGE_HEIGHT, 32);
+   nir_def *per_layer = nir_imul(&b, width, height);
+   nir_def *layer = nir_udiv(&b, thread, per_layer);
+   nir_def *rest = nir_isub(&b, thread, nir_imul(&b, layer, per_layer));
+   nir_def *y = nir_udiv(&b, rest, width);
+   nir_def *x = nir_isub(&b, rest, nir_imul(&b, y, width));
+   nir_def *coord = nir_vec4(&b, x, y, layer, nir_imm_int(&b, 0));
+   nir_def *samples = load(&b, arguments, STELA_METAL_AVERAGE_SAMPLES, 32);
+   nir_def *format = load(&b, arguments, STELA_METAL_AVERAGE_FORMAT, 32);
+   const struct glsl_type *ms = glsl_image_type(GLSL_SAMPLER_DIM_MS, true, GLSL_TYPE_UINT);
+   const struct glsl_type *single = glsl_image_type(GLSL_SAMPLER_DIM_2D, true, GLSL_TYPE_UINT);
+   nir_deref_instr *source = stela_metal_bind_texture_id(
+      &b, load(&b, arguments, STELA_METAL_AVERAGE_SOURCE, 64), ms, false, NULL, NULL);
+   nir_deref_instr *destination = stela_metal_bind_texture_id(
+      &b, load(&b, arguments, STELA_METAL_AVERAGE_DESTINATION, 64), single, false, NULL, NULL);
+   nir_variable *sum = nir_local_variable_create(b.impl, glsl_vec4_type(), "sum");
+   for (unsigned f = 1; f < ARRAY_SIZE(average_formats); f++) {
+      enum pipe_format pipe = average_formats[f];
+      unsigned words = DIV_ROUND_UP(util_format_get_blocksizebits(pipe), 32);
+      nir_push_if(&b, nir_ieq_imm(&b, format, f));
+      nir_store_var(&b, sum, nir_imm_vec4(&b, 0.0f, 0.0f, 0.0f, 0.0f), 0xf);
+      /* Metal's multisampled textures hold at most eight samples. */
+      for (unsigned s = 0; s < 8; s++) {
+         nir_push_if(&b, nir_ult(&b, nir_imm_int(&b, s), samples));
+         nir_def *bits = nir_image_deref_load(
+            &b, 4, 32, &source->def, coord, nir_imm_int(&b, s), nir_imm_int(&b, 0),
+            .image_dim = GLSL_SAMPLER_DIM_MS, .image_array = true, .format = PIPE_FORMAT_NONE,
+            .dest_type = nir_type_uint32);
+         nir_def *value = nir_format_unpack_rgba(&b, nir_trim_vector(&b, bits, words), pipe);
+         nir_store_var(&b, sum, nir_fadd(&b, nir_load_var(&b, sum), value), 0xf);
+         nir_pop_if(&b, NULL);
+      }
+      nir_def *mean = nir_fmul(&b, nir_load_var(&b, sum), nir_frcp(&b, nir_u2f32(&b, samples)));
+      nir_def *packed = nir_format_pack_rgba(&b, pipe, mean);
+      nir_image_deref_store(&b, &destination->def, coord, nir_undef(&b, 1, 32),
+                            nir_pad_vector_imm_int(&b, packed, 0, 4), nir_imm_int(&b, 0),
+                            .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = true,
+                            .format = PIPE_FORMAT_NONE, .src_type = nir_type_uint32);
       nir_pop_if(&b, NULL);
    }
    return finish(&b);

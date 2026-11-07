@@ -25,13 +25,15 @@ use crate::metal::{
         VisibilityResultType, Winding,
     },
     binding::{
-        AccumulateArguments, BufferBinding, ResourceId, SequenceVertexBuffer, TessellationArguments,
+        AccumulateArguments, AverageArguments, BufferBinding, ResourceId, SequenceVertexBuffer,
+        TessellationArguments,
     },
     capabilities::MAX_BUFFER_BINDINGS,
     error::{Error, Result, ensure},
     hazard::{RENDER_PASS, Use},
     pass::{AttachmentSlot, RenderPassPlan, RenderingAttachment},
     pipeline::{DepthStencilState, MAX_COLOR_ATTACHMENTS},
+    resource::raw_rendered,
     shader::{Interface, MAX_PATCH_CONTROL_POINTS, Stage},
     vertex::{STRIDE_DYNAMIC, VertexDescriptor},
     vulkan::{
@@ -506,7 +508,64 @@ impl CommandBuffer {
             let at = state.begins[0];
             commands.splice(at..at, resets.collect::<Vec<_>>());
         }
+        self.average_samples(resolver, &state.pass)?;
         self.resolve_visibility(resolver, state.visibility)
+    }
+
+    /// Resolves each attachment rendering through its raw texels whose
+    /// store action resolves, with the average samples kernel, once the
+    /// pass's last instance has stored it.
+    fn average_samples(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        pass: &RenderPassPlan<ImageView>,
+    ) -> Result<()> {
+        for (index, color) in pass.color.iter().enumerate() {
+            let Some(_) = color.as_ref().filter(|color| {
+                color.averaged && color.resolve.is_some() && color.store_action.resolves()
+            }) else {
+                continue;
+            };
+            let format = pass.color_formats[index]
+                .and_then(raw_rendered)
+                .ok_or(Error::Invalid(
+                    "an averaged attachment renders a raw format",
+                ))?;
+            let (source, destination) = (pass.inputs.textures[index], pass.inputs.averages[index]);
+            ensure(
+                source != ResourceId::NULL && destination != ResourceId::NULL,
+                "an averaged attachment and its resolve texture have raw texel views",
+            )?;
+            let [width, height] = pass.extent;
+            let count = width
+                .checked_mul(height)
+                .and_then(|texels| texels.checked_mul(pass.layer_count))
+                .ok_or(Error::Unsupported("resolves of 4 Gi texels"))?;
+            if count == 0 {
+                continue;
+            }
+            let arguments = AverageArguments {
+                source: source.0,
+                destination: destination.0,
+                count,
+                format,
+                width,
+                height,
+                samples: pass.sample_count,
+            };
+            let upload =
+                self.recorder
+                    .upload(resolver, &arguments.encode(), AverageArguments::ALIGNMENT)?;
+            self.recorder.access(Use::new(
+                PipelineStages::COMPUTE_SHADER,
+                Access::SHADER_READ.union(Access::SHADER_WRITE),
+            ));
+            self.recorder.push(Command::AverageSamples {
+                arguments: upload.address,
+                count,
+            });
+        }
+        Ok(())
     }
 
     /// Writes each used offset's sample count (or nonzero flag) into the
@@ -627,7 +686,8 @@ fn end_query(recorder: &mut Recorder, visibility: &mut Visibility) {
 fn rendering(pass: &RenderPassPlan<ImageView>, first: bool, last: bool) -> Rendering {
     let attachment = |attachment: &RenderingAttachment<ImageView>| Attachment {
         view: attachment.view.texture,
-        resolve: if last {
+        // The average samples kernel resolves an averaged attachment.
+        resolve: if last && !attachment.averaged {
             attachment.resolve.map(|(mode, view)| (mode, view.texture))
         } else {
             None

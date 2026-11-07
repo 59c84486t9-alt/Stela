@@ -331,7 +331,7 @@ fn more(plan: &mut Plan, rng: &mut Random) {
 /// [0, 1]: a device may store the values rather than the bits, so other
 /// padding need not survive. A 16-bit format's are any bits.
 fn stored_texels(rng: &mut Random, count: usize, format: &str) -> Vec<u8> {
-    if format == "a1bgr5unorm" {
+    if matches!(format, "a1bgr5unorm" | "rg8unorm_srgb") {
         return bytes(rng, 2 * count);
     }
     let alpha = format.starts_with("bgra");
@@ -353,8 +353,9 @@ fn stored_texels(rng: &mut Random, count: usize, format: &str) -> Vec<u8> {
 }
 
 /// Buffer copies into and out of textures whose images hold their texels
-/// in another encoding carry Metal's bytes: extended-range codes, and
-/// A1BGR5 texels, which a device may hold rotated.
+/// in another encoding carry Metal's bytes: extended-range codes, A1BGR5
+/// texels, which a device may hold rotated, and RG8Unorm_sRGB ones, which
+/// it may hold padded.
 fn stored_encodings(plan: &mut Plan, rng: &mut Random) {
     let (w, h, ox, oy, rw, rh) = (8usize, 8usize, 2usize, 3usize, 5usize, 3usize);
     for (format, texel, into) in [
@@ -364,6 +365,8 @@ fn stored_encodings(plan: &mut Plan, rng: &mut Random) {
         ("bgr10_xr_srgb", 4, false),
         ("a1bgr5unorm", 2, true),
         ("a1bgr5unorm", 2, false),
+        ("rg8unorm_srgb", 2, true),
+        ("rg8unorm_srgb", 2, false),
     ] {
         let row = rw * texel + 24;
         let texture = stored_texels(rng, w * h, format);

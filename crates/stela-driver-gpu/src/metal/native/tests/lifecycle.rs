@@ -177,6 +177,7 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         resolve_dispatches: vk::Pipeline::null(),
         store_texels: vk::Pipeline::null(),
         load_texels: vk::Pipeline::null(),
+        average_samples: vk::Pipeline::null(),
     }
 }
 
