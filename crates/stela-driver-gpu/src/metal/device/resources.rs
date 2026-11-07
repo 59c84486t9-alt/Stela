@@ -1636,18 +1636,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(())
     }
 
-    /// `makeAliasable` of a heap buffer: its range returns to the heap now.
+    /// `makeAliasable` of a heap buffer: its range returns to the heap now,
+    /// once.
     pub fn make_buffer_aliasable(&mut self, id: BufferId) -> Result<()> {
         let buffer = self.resources.buffers.get_mut(id.0)?;
-        let backing = make_aliasable(&mut buffer.backing)?;
-        self.free_heap_range(backing)
+        match make_aliasable(&mut buffer.backing)? {
+            Some(range) => self.free_heap_range(range),
+            None => Ok(()),
+        }
     }
 
     /// `makeAliasable` of a heap texture.
     pub fn make_texture_aliasable(&mut self, id: TextureId) -> Result<()> {
         let texture = self.resources.textures.get_mut(id.0)?;
-        let backing = make_aliasable(&mut texture.backing)?;
-        self.free_heap_range(backing)
+        match make_aliasable(&mut texture.backing)? {
+            Some(range) => self.free_heap_range(range),
+            None => Ok(()),
+        }
     }
 
     fn free_heap_range(&mut self, (heap, offset, size): (HeapId, u64, u64)) -> Result<()> {
@@ -1691,7 +1696,9 @@ fn owned_bytes(backing: Backing) -> u64 {
     }
 }
 
-fn make_aliasable(backing: &mut Backing) -> Result<(HeapId, u64, u64)> {
+/// The heap range a resource gives back as it becomes aliasable; none for
+/// one already aliasable, which Metal leaves as it is.
+fn make_aliasable(backing: &mut Backing) -> Result<Option<(HeapId, u64, u64)>> {
     match backing {
         Backing::Heap {
             heap,
@@ -1699,9 +1706,9 @@ fn make_aliasable(backing: &mut Backing) -> Result<(HeapId, u64, u64)> {
             size,
             aliasable,
         } => {
-            ensure(!*aliasable, "the resource is already aliasable")?;
+            let first = !*aliasable;
             *aliasable = true;
-            Ok((*heap, *offset, *size))
+            Ok(first.then_some((*heap, *offset, *size)))
         }
         _ => Err(Error::Invalid("only heap resources become aliasable")),
     }

@@ -457,7 +457,9 @@ fn automatic_heaps_place_and_alias_resources() {
     );
     device.make_buffer_aliasable(a).unwrap();
     assert_eq!(device.heap_usage(heap, 1).unwrap().0, 1024);
-    assert!(device.make_buffer_aliasable(a).is_err());
+    // Again changes nothing: the range returned once.
+    device.make_buffer_aliasable(a).unwrap();
+    assert_eq!(device.heap_usage(heap, 1).unwrap().0, 1024);
     let c = device
         .new_heap_buffer(heap, 1000, options(StorageMode::Private), None)
         .unwrap();
