@@ -453,13 +453,18 @@ prepared(struct stela_air_metadata *m, LLVMModuleRef module,
    LLVMDisposeMessage(verification);
    if (!verified || !stela_air_metadata_layout(&linked) || !stela_air_metadata_validate(&linked))
       return fail(m, STELA_AIR_INPUT, "a linked module is not valid AIR");
-   if (!same_target(LLVMGetTarget(module), LLVMGetTarget(m->module)) ||
-       strcmp(LLVMGetDataLayoutStr(module), LLVMGetDataLayoutStr(m->module)) ||
-       linked.air_major != m->air_major || linked.air_minor != m->air_minor ||
-       linked.language_major != m->language_major ||
-       linked.language_minor != m->language_minor || linked.denorms_disable != m->denorms_disable ||
-       linked.fast_math != m->fast_math)
-      return fail(m, STELA_AIR_INPUT, "a linked module was compiled differently");
+   const char *differs = !same_target(LLVMGetTarget(module), LLVMGetTarget(m->module)) ? "target" :
+      strcmp(LLVMGetDataLayoutStr(module), LLVMGetDataLayoutStr(m->module)) ? "data layout" :
+      linked.air_major != m->air_major || linked.air_minor != m->air_minor ? "AIR version" :
+      linked.language_major != m->language_major || linked.language_minor != m->language_minor ?
+         "language version" :
+      linked.denorms_disable != m->denorms_disable ? "denormal mode" :
+      linked.fast_math != m->fast_math ? "fast math" : NULL;
+   if (differs) {
+      char detail[64];
+      snprintf(detail, sizeof(detail), "a linked module was compiled with another %s", differs);
+      return fail(m, STELA_AIR_INPUT, detail);
+   }
    if (!name_references(&linked) || !hide_entry_points(&linked))
       return fail(m, error.kind, error.detail);
    if (!LLVMGetNamedMetadataNumOperands(module, "air.function_constants"))
