@@ -377,6 +377,10 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	id _descriptor;
 	uint64_t _resourceID;
 	NSUInteger _maxTotalThreadsPerObjectThreadgroup, _maxTotalThreadsPerMeshThreadgroup;
+	/* The most threadgroups a mesh grid launches, as the descriptor fixes it. */
+	NSUInteger _maxTotalThreadgroupsPerMeshGrid;
+	/* The object and mesh threadgroup sizes it fixes, zero for none. */
+	MTLSize _requiredObjectThreads, _requiredMeshThreads;
 	NSUInteger _objectThreadExecutionWidth, _meshThreadExecutionWidth;
 	BOOL _supportIndirectCommandBuffers;
 	/* Each stage's linked functions, which handles are found by name in. */

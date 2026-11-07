@@ -308,7 +308,7 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 	return _maxTotalThreadsPerObjectThreadgroup;
 }
 
-/* A pipeline lives in the service, and no tile stage or fixed mesh grid exists. */
+/* A pipeline lives in the service, and no tile stage exists. */
 - (NSUInteger)allocatedSize
 {
 	return 0;
@@ -331,7 +331,7 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 
 - (NSUInteger)maxTotalThreadgroupsPerMeshGrid
 {
-	return 0;
+	return _maxTotalThreadgroupsPerMeshGrid;
 }
 
 - (MTLSize)requiredThreadsPerTileThreadgroup
@@ -341,12 +341,12 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 
 - (MTLSize)requiredThreadsPerObjectThreadgroup
 {
-	return (MTLSize){0};
+	return _requiredObjectThreads;
 }
 
 - (MTLSize)requiredThreadsPerMeshThreadgroup
 {
-	return (MTLSize){0};
+	return _requiredMeshThreads;
 }
 
 - (id)newRenderPipelineDescriptorForSpecialization
@@ -540,6 +540,11 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	pipeline->_meshThreadExecutionWidth = response->mesh_thread_execution_width;
 	pipeline->_supportIndirectCommandBuffers = indirect;
 	if (mesh) {
+		pipeline->_maxTotalThreadgroupsPerMeshGrid = [descriptor maxTotalThreadgroupsPerMeshGrid];
+		if ([descriptor respondsToSelector:@selector(requiredThreadsPerObjectThreadgroup)]) {
+			pipeline->_requiredObjectThreads = [descriptor requiredThreadsPerObjectThreadgroup];
+			pipeline->_requiredMeshThreads = [descriptor requiredThreadsPerMeshThreadgroup];
+		}
 		pipeline->_objectLinked = [[descriptor objectLinkedFunctions] copy];
 		pipeline->_meshLinked = [[descriptor meshLinkedFunctions] copy];
 	} else {
