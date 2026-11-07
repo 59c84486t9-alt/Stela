@@ -833,14 +833,33 @@ static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NS
 
 @implementation StelaGPUCounterSet
 
+/* The statistics a sample holds: every MTLCounterResultStatistic member but
+ * fragments passed, which Vulkan's pipeline statistics do not count. */
+#define STATISTIC_COUNTERS 7
+
 + (instancetype)setWithCode:(uint64_t)code
 {
 	StelaGPUCounterSet *set = [StelaGPUCounterSet new];
 	set->_code = code;
-	set.name = code == StelaCounterSetCodeTimestamp ? MTLCommonCounterSetTimestamp : MTLCommonCounterSetStatistic;
-	StelaGPUCounter *counter = [StelaGPUCounter new];
-	counter.name = code == StelaCounterSetCodeTimestamp ? MTLCommonCounterTimestamp : set.name;
-	set.counters = [NSArray arrayWithObjects:&counter count:1];
+	BOOL timestamp = code == StelaCounterSetCodeTimestamp;
+	set.name = timestamp ? MTLCommonCounterSetTimestamp : MTLCommonCounterSetStatistic;
+	NSString *names[STATISTIC_COUNTERS] = {
+		MTLCommonCounterTessellationInputPatches,
+		MTLCommonCounterVertexInvocations,
+		MTLCommonCounterPostTessellationVertexInvocations,
+		MTLCommonCounterClipperInvocations,
+		MTLCommonCounterClipperPrimitivesOut,
+		MTLCommonCounterFragmentInvocations,
+		MTLCommonCounterComputeKernelInvocations,
+	};
+	NSUInteger count = timestamp ? 1 : STATISTIC_COUNTERS;
+	NSMutableArray *counters = [NSMutableArray arrayWithCapacity:count];
+	for (NSUInteger i = 0; i < count; i++) {
+		StelaGPUCounter *counter = [StelaGPUCounter new];
+		counter.name = timestamp ? MTLCommonCounterTimestamp : names[i];
+		[counters addObject:counter];
+	}
+	set.counters = counters;
 	return set;
 }
 
