@@ -1336,6 +1336,51 @@ fn frameworks(plan: &mut Plan, rng: &mut Random) {
     );
 }
 
+/// MetalFX's spatial and temporal upscalers doubling a checkerboard with
+/// gradients, as the reference device's within a few units. The scalers'
+/// kernels are MetalFX's own, the same on every device MetalFX supports;
+/// their arithmetic rounds differently across GPUs, which the spatial
+/// scaler's sharpening amplifies to 4 units of the gradients. MetalFX makes
+/// a temporal scaler only for a device in Apple7.
+fn metalfx(plan: &mut Plan) {
+    let (w, h) = (32u32, 32u32);
+    let texels: Vec<u8> = (0..h)
+        .flat_map(|y| {
+            (0..w).flat_map(move |x| {
+                let check = if (x / 8 + y / 8) % 2 == 0 { 200 } else { 40 };
+                [check, (x * 8) as u8, (y * 8) as u8, 255]
+            })
+        })
+        .collect();
+    plan.add(
+        Case::framework(
+            "api.framework.metalfx_spatial",
+            json!({"kind": "metalfx_spatial"}),
+        )
+        .texture(Texture::d2("in", "rgba8unorm", w, h).data(texels.clone()))
+        .texture(Texture::d2("out", "rgba8unorm", 2 * w, 2 * h).usage(&["read", "write", "render"]))
+        .output(Output::new("out", Dtype::U8, Tolerance::units(4.0))),
+    );
+    let color: Vec<u8> = texels
+        .iter()
+        .flat_map(|&v| f16_bits(f64::from(v) / 255.0).to_le_bytes())
+        .collect();
+    let pixels = (w * h) as usize;
+    plan.add(
+        Case::framework(
+            "api.framework.metalfx_temporal",
+            json!({"kind": "metalfx_temporal"}),
+        )
+        .texture(Texture::d2("color", "rgba16float", w, h).data(color))
+        .texture(Texture::d2("depth", "depth32float", w, h).data(f32s(&vec![0.5; pixels])))
+        .texture(Texture::d2("motion", "rg16float", w, h).data(vec![0; pixels * 4]))
+        .texture(
+            Texture::d2("out", "rgba16float", 2 * w, 2 * h).usage(&["read", "write", "render"]),
+        )
+        .output(Output::new("out", Dtype::F16, Tolerance::abs(0.02))),
+    );
+}
+
 /// Core Animation's renderer drawing its materials over a gradient: a
 /// translucent panel, backdrop filters, compositing filters and glass. What
 /// Core Animation draws is its own, so each frame is held to the reference
@@ -1411,5 +1456,6 @@ pub fn build(plan: &mut Plan) {
     depth_stencil_formats(plan, &library);
     limits(plan, &library);
     frameworks(plan, &mut rng);
+    metalfx(plan);
     core_animation(plan);
 }

@@ -680,6 +680,13 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	return [self meshPipeline:descriptor options:options reflection:reflection archive:0 error:error];
 }
 
+/* Metal's base device answers its short forms with nil, so each is the full
+ * form without options or reflection. */
+- (id)newRenderPipelineStateWithMeshDescriptor:(id)descriptor error:(NSError **)error
+{
+	return [self newRenderPipelineStateWithMeshDescriptor:descriptor options:0 reflection:NULL error:error];
+}
+
 - (id)meshPipeline:(id)descriptor
 	   options:(NSUInteger)options
 	reflection:(id *)reflection
@@ -879,6 +886,20 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 						   options:options
 						reflection:reflection
 						     error:error];
+}
+
+- (id)newComputePipelineStateWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	return [self newComputePipelineStateWithDescriptor:descriptor options:0 reflection:NULL error:error];
+}
+
+- (void)newComputePipelineStateWithDescriptor:(id)descriptor completionHandler:(void (^)(id, NSError *))handler
+{
+	dispatch_async(dispatch_get_global_queue(0, 0), ^{
+		NSError *error = nil;
+		id pipeline = [self newComputePipelineStateWithDescriptor:descriptor error:&error];
+		handler(pipeline, error);
+	});
 }
 
 - (id)newComputePipelineStateWithFunction:(id)function error:(NSError **)error

@@ -22,6 +22,7 @@
 #import <CoreImage/CoreImage.h>
 #import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
+#import <MetalFX/MetalFX.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <QuartzCore/QuartzCore.h>
 #include <mach/mach.h>
@@ -4069,8 +4070,8 @@ static void run_core_animation(Case *c, id<MTLCommandQueue> queue, NSDictionary 
 }
 
 /* Work Apple's frameworks encode with their own shaders: an MPS matrix
- * product and box filter, a Core Image filter and a Core Animation scene,
- * each over the case's resources. */
+ * product and box filter, MetalFX's spatial and temporal upscalers, a Core
+ * Image filter and a Core Animation scene, each over the case's resources. */
 static void run_framework(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 {
 	NSDictionary *f = spec[@"framework"];
@@ -4098,6 +4099,59 @@ static void run_framework(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec
 		MPSImageBox *box = [[MPSImageBox alloc] initWithDevice:c.device kernelWidth:3 kernelHeight:3];
 		box.edgeMode = MPSImageEdgeModeClamp;
 		[box encodeToCommandBuffer:cb sourceTexture:c.textures[@"in"] destinationTexture:c.textures[@"out"]];
+	} else if ([kind isEqualToString:@"metalfx_spatial"]) {
+		/* MetalFX's spatial upscaler, from the input's size to the output's. */
+		if (![MTLFXSpatialScalerDescriptor supportsDevice:c.device])
+			@throw [NSException exceptionWithName:@"CaseUnsupported" reason:@"MetalFX has no spatial scaler for the device" userInfo:nil];
+		id<MTLTexture> in = c.textures[@"in"], out = c.textures[@"out"];
+		MTLFXSpatialScalerDescriptor *d = [MTLFXSpatialScalerDescriptor new];
+		d.inputWidth = in.width;
+		d.inputHeight = in.height;
+		d.outputWidth = out.width;
+		d.outputHeight = out.height;
+		d.colorTextureFormat = in.pixelFormat;
+		d.outputTextureFormat = out.pixelFormat;
+		d.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+		id<MTLFXSpatialScaler> scaler = [d newSpatialScalerWithDevice:c.device];
+		if (!scaler)
+			@throw failure(@"MetalFX made no spatial scaler");
+		scaler.colorTexture = in;
+		scaler.outputTexture = out;
+		scaler.inputContentWidth = in.width;
+		scaler.inputContentHeight = in.height;
+		[scaler encodeToCommandBuffer:cb];
+	} else if ([kind isEqualToString:@"metalfx_temporal"]) {
+		/* MetalFX's temporal upscaler on its first frame: no jitter, no
+		 * motion and no history, so the output is the color upscaled.
+		 * MetalFX makes one only for a device in Apple7. */
+		if (![MTLFXTemporalScalerDescriptor supportsDevice:c.device])
+			@throw [NSException exceptionWithName:@"CaseUnsupported" reason:@"MetalFX has no temporal scaler for the device" userInfo:nil];
+		id<MTLTexture> color = c.textures[@"color"], depth = c.textures[@"depth"];
+		id<MTLTexture> motion = c.textures[@"motion"], out = c.textures[@"out"];
+		MTLFXTemporalScalerDescriptor *d = [MTLFXTemporalScalerDescriptor new];
+		d.inputWidth = color.width;
+		d.inputHeight = color.height;
+		d.outputWidth = out.width;
+		d.outputHeight = out.height;
+		d.colorTextureFormat = color.pixelFormat;
+		d.depthTextureFormat = depth.pixelFormat;
+		d.motionTextureFormat = motion.pixelFormat;
+		d.outputTextureFormat = out.pixelFormat;
+		id<MTLFXTemporalScaler> scaler = [d newTemporalScalerWithDevice:c.device];
+		if (!scaler)
+			@throw failure(@"MetalFX made no temporal scaler");
+		scaler.colorTexture = color;
+		scaler.depthTexture = depth;
+		scaler.motionTexture = motion;
+		scaler.outputTexture = out;
+		scaler.inputContentWidth = color.width;
+		scaler.inputContentHeight = color.height;
+		scaler.jitterOffsetX = 0;
+		scaler.jitterOffsetY = 0;
+		scaler.motionVectorScaleX = 1;
+		scaler.motionVectorScaleY = 1;
+		scaler.reset = YES;
+		[scaler encodeToCommandBuffer:cb];
 	} else if ([kind isEqualToString:@"core_image_invert"]) {
 		/* No colour management: the filter sees the texels as stored. */
 		CIContext *context = [CIContext contextWithMTLDevice:c.device
