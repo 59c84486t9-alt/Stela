@@ -949,7 +949,10 @@ fn properties(plan: &mut Plan, library: &str, rng: &mut Random) {
             Dtype::U32,
             u32s(&COLOR_ATTACHMENT_MAP_FACTS),
         ))
-        .output(Output::exact("images", Dtype::U8, images)),
+        // Gray's 0.5 lies halfway between two unorm8 values, which
+        // conversion may round either way; a misplaced output differs
+        // by 255.
+        .output(Output::new("images", Dtype::U8, Tolerance::units(1.0)).expect_same(images)),
     );
     // A pool's views read as their textures do, through the IDs its
     // setters return, which follow its base ID and stay with their entries;
