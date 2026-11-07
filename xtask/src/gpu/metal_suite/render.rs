@@ -3446,10 +3446,10 @@ pub fn build(plan: &mut Plan) {
         json!({
             "families.apple1": true, "families.apple2": true, "families.apple3": true,
             "families.common1": true, "families.common2": true, "families.common3": true,
-            "families.mac2": true, "families.apple4": false,
-            "families.apple5": false, "families.apple6": false, "families.apple7": false,
+            "families.mac2": true, "families.apple4": true,
+            "families.apple5": true, "families.apple6": true, "families.apple7": true,
             "families.apple8": false, "families.apple9": false, "families.apple10": false,
-            "families.apple11": false, "families.metal3": false, "families.metal4": false,
+            "families.apple11": false, "families.metal3": true, "families.metal4": false,
             "features.raytracing": false, "features.raster_order_groups": true,
             "features.framebuffer_reads": true,
             "features.primitive_motion_blur": false, "features.memoryless_render_targets": true,
