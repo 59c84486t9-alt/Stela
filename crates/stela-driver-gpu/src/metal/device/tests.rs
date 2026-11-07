@@ -851,6 +851,40 @@ fn added_to(archive: ArchiveId) -> PipelineArchives {
     }
 }
 
+/// A pipeline cache header of `vendor`, `device` and `uuid`.
+fn cache_header(vendor: u32, device: u32, uuid: [u8; 16]) -> Vec<u8> {
+    [32, 1, vendor, device]
+        .iter()
+        .flat_map(|word: &u32| word.to_le_bytes())
+        .chain(uuid)
+        .collect()
+}
+
+#[test]
+fn archive_files_hold_pipelines_only_under_this_devices_header() {
+    let mut device = device();
+    let identity = device.backend().physical_device().identity.clone();
+    let (vendor, id, uuid) = (
+        identity.vendor_id,
+        identity.device_id,
+        identity.pipeline_cache_uuid,
+    );
+    assert!(device.archive_header_matches(&cache_header(vendor, id, uuid)));
+    let mut other_uuid = uuid;
+    other_uuid[15] ^= 1;
+    assert!(!device.archive_header_matches(&cache_header(vendor, id, other_uuid)));
+    assert!(!device.archive_header_matches(&cache_header(vendor, id + 1, uuid)));
+    assert!(!device.archive_header_matches(&cache_header(0x106b, id, uuid)));
+    let mut version_two = cache_header(vendor, id, uuid);
+    version_two[4] = 2;
+    assert!(!device.archive_header_matches(&version_two));
+    let mut short = cache_header(vendor, id, uuid);
+    short[0] = 16;
+    assert!(!device.archive_header_matches(&short));
+    assert!(!device.archive_header_matches(&cache_header(vendor, id, uuid)[..31]));
+    assert!(!device.archive_header_matches(&[]));
+}
+
 #[test]
 fn binary_archives_hold_what_was_added_and_outlive_their_files() {
     let mut device = device();

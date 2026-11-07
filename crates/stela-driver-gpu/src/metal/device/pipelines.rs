@@ -482,6 +482,10 @@ pub struct MeshPipelineRequest {
     pub archives: PipelineArchives,
 }
 
+/// The bytes of a `VkPipelineCacheHeaderVersionOne`, which an archive file
+/// begins with when it holds this device's pipelines.
+pub const ARCHIVE_HEADER_BYTES: u64 = 32;
+
 impl<B: Backend, C: Compiler> Device<B, C> {
     /// `newLibraryWithSource:` of the AIR the source compiled to.
     /// `dependencies` are `MTLCompileOptions.libraries`, which load with the
@@ -663,6 +667,24 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// The library's bytes, which `serializeToURL:` writes.
     pub fn library_data(&self, id: LibraryId) -> Result<&[u8]> {
         self.compiler.library_data(self.pipelines.library(id)?)
+    }
+
+    /// Whether an archive file beginning with `header` may hold this
+    /// device's pipelines: a pipeline cache header of version one naming
+    /// its vendor, device and pipeline cache UUID. The driver ignores any
+    /// other data, such as another GPU's archive, so it need not be read.
+    pub fn archive_header_matches(&self, header: &[u8]) -> bool {
+        let identity = &self.backend.physical_device().identity;
+        let word = |at: usize| {
+            header
+                .get(at..at + 4)
+                .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("four bytes")))
+        };
+        word(0).is_some_and(|size| u64::from(size) >= ARCHIVE_HEADER_BYTES)
+            && word(4) == Some(1)
+            && word(8) == Some(identity.vendor_id)
+            && word(12) == Some(identity.device_id)
+            && header.get(16..32) == Some(&identity.pipeline_cache_uuid[..])
     }
 
     /// `newBinaryArchiveWithDescriptor:error:` of `data`, a file's bytes:

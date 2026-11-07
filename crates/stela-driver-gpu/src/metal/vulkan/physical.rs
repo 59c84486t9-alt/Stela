@@ -30,6 +30,8 @@ pub struct Identity {
     pub driver_version: u32,
     pub vendor_id: u32,
     pub device_id: u32,
+    /// `pipelineCacheUUID`, which a pipeline cache's data names.
+    pub pipeline_cache_uuid: [u8; 16],
     pub device_type: PhysicalDeviceType,
     pub device_name: String,
     /// `conformanceVersion` as major, minor, subminor, patch; all zero when

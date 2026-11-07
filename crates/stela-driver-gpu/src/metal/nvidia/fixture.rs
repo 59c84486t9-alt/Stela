@@ -55,6 +55,7 @@ pub(crate) fn nvk(chip: &Chip, vram: u64) -> PhysicalDevice {
             driver_version: 0,
             vendor_id: super::VENDOR_ID,
             device_id: 0x2c02,
+            pipeline_cache_uuid: [0x5a; 16],
             device_type: PhysicalDeviceType::DiscreteGpu,
             device_name: String::from("NVIDIA test GPU"),
             conformance_version: match chip.architecture {

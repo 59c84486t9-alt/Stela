@@ -101,6 +101,25 @@ fn archives_read_back_and_answer_for_pipelines() {
     assert_eq!(memory.read(out).unwrap(), [1, 0, 0, 0]);
 }
 
+#[test]
+fn foreign_archive_files_are_read_only_to_their_header() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    // Another GPU's archive, of a megabyte.
+    let data = memory.put(&alloc::vec![0xa5; 1 << 20]);
+    memory.longest = 0;
+    let created = call::<_, Handle>(
+        &mut service,
+        connection,
+        Operation::NewArchive,
+        &NewArchiveRequest { data },
+        memory,
+    );
+    assert!(created.is_ok());
+    assert!(memory.longest <= 32, "{}", memory.longest);
+}
+
 fn handle(
     service: &mut TestService,
     connection: NonZeroU64,

@@ -458,6 +458,7 @@ pub(super) fn probe(
         driver_version: core.driver_version,
         vendor_id: core.vendor_id,
         device_id: core.device_id,
+        pipeline_cache_uuid: core.pipeline_cache_uuid,
         device_type: PhysicalDeviceType::from_raw(core.device_type.as_raw() as u32)
             .unwrap_or(PhysicalDeviceType::Other),
         device_name: name,

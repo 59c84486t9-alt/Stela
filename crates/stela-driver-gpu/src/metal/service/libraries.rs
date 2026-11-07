@@ -6,14 +6,14 @@ use super::{
         FunctionReflectionRequest, FunctionReflectionResponse, LibraryDataRequest,
         LibraryFunctionNamesRequest, LibraryIdentityRequest, LibraryIdentityResponse,
         NewArchiveRequest, NewFunctionRequest, NewLibraryRequest, NewSourceLibraryRequest,
-        NewStitchedLibraryRequest,
+        NewStitchedLibraryRequest, Span,
     },
 };
 use crate::metal::{
     abi::{ConversionRounding, DataType},
     device::{
         ArchiveId, FunctionId, LibraryId,
-        pipelines::{ConstantKey, ConstantValue},
+        pipelines::{ARCHIVE_HEADER_BYTES, ConstantKey, ConstantValue},
     },
     shader::{Compiler, PatchDomain, Reflection},
     stitching,
@@ -123,7 +123,17 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 
     pub(super) fn new_archive(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewArchiveRequest = call.request()?;
-        let data = call.memory.read(request.data)?;
+        // Another device's archive, as large as its pipelines, holds none
+        // of this one's: only its header is read.
+        let span = request.data;
+        let header = call.memory.read(Span {
+            address: span.address,
+            length: span.length.min(ARCHIVE_HEADER_BYTES),
+        })?;
+        let data = match self.device.archive_header_matches(&header) {
+            true => call.memory.read(span)?,
+            false => Vec::new(),
+        };
         let archive = self.device.new_archive(&data)?;
         let handle = self.hold(call.connection, Object::Archive(archive))?;
         call.reply(&handle)
