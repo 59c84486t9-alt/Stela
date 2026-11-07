@@ -321,6 +321,13 @@ int *__error(void);
 
 void *dlopen(const char *path, int mode);
 void *dlsym(void *library, const char *symbol);
+typedef struct {
+	const char *dli_fname;
+	void *dli_fbase;
+	const char *dli_sname;
+	void *dli_saddr;
+} Dl_info;
+int dladdr(const void *address, Dl_info *info);
 
 typedef struct {
 	uint32_t opaque;

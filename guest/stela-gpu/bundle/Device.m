@@ -792,26 +792,89 @@ TABLE(maxVertexAttributes, 31)
 	return (blocks * format.block_bytes + alignment - 1) / alignment * alignment;
 }
 
-- (BOOL)supportsFamily:(NSInteger)family
+/* Call sites whose unclaimed family was reported, open addressed by the
+ * family and the caller; more than fit report again through `stela_report`,
+ * which keeps each message once. */
+#define ASKED 1024
+static _Atomic uintptr_t asked[ASKED];
+
+/* Reports once per call site a family or feature set this device does not
+ * claim, naming the image and offset that asked, so the path a caller takes
+ * without it stays visible. */
+static void report_unclaimed(const char *kind, NSInteger value, void *caller)
 {
-	for (uint32_t i = 0; i < _capabilities->family_count; i++) {
-		if (_capabilities->families[i] == (uint64_t)family) {
+	uintptr_t key = (uintptr_t)caller ^ ((uintptr_t)value << 48);
+	size_t at = key >> 2;
+	for (size_t probe = 0; probe < ASKED; probe++, at++) {
+		uintptr_t expected = 0;
+		if (atomic_compare_exchange_strong(&asked[at % ASKED], &expected, key)) {
+			break;
+		}
+		if (expected == key) {
+			return;
+		}
+	}
+	char named[24];
+	if (value > 1000 && value < 1100) {
+		snprintf(named, sizeof(named), "Apple%ld", (long)(value - 1000));
+	} else if (value > 2000 && value < 2100) {
+		snprintf(named, sizeof(named), "Mac%ld", (long)(value - 2000));
+	} else if (value > 3000 && value < 3100) {
+		snprintf(named, sizeof(named), "Common%ld", (long)(value - 3000));
+	} else if (value > 4000 && value < 4100) {
+		snprintf(named, sizeof(named), "MacCatalyst%ld", (long)(value - 4000));
+	} else if (value > 5000 && value < 5100) {
+		snprintf(named, sizeof(named), "Metal%ld", (long)(value - 4998));
+	} else {
+		snprintf(named, sizeof(named), "%ld", (long)value);
+	}
+	Dl_info image = {};
+	const char *name = "an unknown image";
+	uintptr_t offset = (uintptr_t)caller;
+	if (dladdr(caller, &image) && image.dli_fname) {
+		name = image.dli_fname;
+		offset -= (uintptr_t)image.dli_fbase;
+	}
+	char what[320];
+	snprintf(what, sizeof(what), "%s %s, asked by %s+0x%lx", kind, named, name, (unsigned long)offset);
+	StelaFailure failure = {.reason = "this device does not claim it"};
+	stela_report(what, &failure);
+}
+
+static BOOL claims(const StelaBlock *capabilities, NSInteger family)
+{
+	for (uint32_t i = 0; i < capabilities->family_count; i++) {
+		if (capabilities->families[i] == (uint64_t)family) {
 			return YES;
 		}
 	}
 	return NO;
 }
 
+- (BOOL)supportsFamily:(NSInteger)family
+{
+	BOOL claimed = claims(_capabilities, family);
+	if (!claimed) {
+		report_unclaimed("GPU family", family, __builtin_return_address(0));
+	}
+	return claimed;
+}
+
 /* The deprecated macOS sets; iOS and tvOS sets are unknown here. */
 - (BOOL)supportsFeatureSet:(NSUInteger)set
 {
+	BOOL claimed = NO;
 	if (set == MTLFeatureSet_macOS_ReadWriteTextureTier2) {
-		return _capabilities->read_write_texture_tier >= 2;
+		claimed = _capabilities->read_write_texture_tier >= 2;
+	} else if (set >= MTLFeatureSet_macOS_GPUFamily1_v1 && set <= MTLFeatureSet_macOS_GPUFamily1_v4) {
+		claimed = claims(_capabilities, MTLGPUFamilyMac1);
+	} else if (set == MTLFeatureSet_macOS_GPUFamily2_v1) {
+		claimed = claims(_capabilities, MTLGPUFamilyMac2);
 	}
-	if (set >= MTLFeatureSet_macOS_GPUFamily1_v1 && set <= MTLFeatureSet_macOS_GPUFamily1_v4) {
-		return [self supportsFamily:MTLGPUFamilyMac1];
+	if (!claimed) {
+		report_unclaimed("feature set", (NSInteger)set, __builtin_return_address(0));
 	}
-	return set == MTLFeatureSet_macOS_GPUFamily2_v1 && [self supportsFamily:MTLGPUFamilyMac2];
+	return claimed;
 }
 
 - (BOOL)supportsTextureSampleCount:(NSUInteger)count
