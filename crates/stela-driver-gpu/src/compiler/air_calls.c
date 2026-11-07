@@ -670,13 +670,71 @@ table_sizes(struct stela_air_metadata *m)
    return lowered;
 }
 
+/* Lowers each null table to a null address, through which every access reads
+ * zero: its size and handles. */
+static bool
+null_tables(struct stela_air_metadata *m)
+{
+   LLVMValueRef get = LLVMGetNamedFunction(m->module, "air.get_null_visible_function_table");
+   if (!get || !LLVMGetFirstUse(get))
+      return true;
+   LLVMContextRef context = LLVMGetModuleContext(m->module);
+   LLVMTypeRef table = LLVMPointerTypeInContext(context, 1);
+   if (!LLVMIsDeclaration(get) || LLVMGlobalGetValueType(get) != LLVMFunctionType(table, NULL, 0, false))
+      return fail(m, STELA_AIR_TYPE, "unsupported air.get_null_visible_function_table");
+   LLVMUseRef use;
+   while ((use = LLVMGetFirstUse(get))) {
+      LLVMValueRef call = LLVMGetUser(use);
+      if (!LLVMIsACallInst(call) || LLVMGetCalledValue(call) != get)
+         return fail(m, STELA_AIR_INSTRUCTION, "air.get_null_visible_function_table is only called");
+      LLVMReplaceAllUsesWith(call, LLVMConstPointerNull(table));
+      LLVMInstructionEraseFromParent(call);
+   }
+   return true;
+}
+
+/* Lowers each test for a null table to a comparison of its address, which a
+ * table the encoder leaves unset holds as zero. */
+static bool
+table_nulls(struct stela_air_metadata *m)
+{
+   LLVMValueRef is_null = LLVMGetNamedFunction(m->module, "air.is_null_visible_function_table");
+   if (!is_null || !LLVMGetFirstUse(is_null))
+      return true;
+   LLVMContextRef context = LLVMGetModuleContext(m->module);
+   LLVMTypeRef bit = LLVMInt1TypeInContext(context), table = LLVMPointerTypeInContext(context, 1);
+   if (!LLVMIsDeclaration(is_null) ||
+       LLVMGlobalGetValueType(is_null) != LLVMFunctionType(bit, &table, 1, false))
+      return fail(m, STELA_AIR_TYPE, "unsupported air.is_null_visible_function_table");
+   LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
+   if (!builder)
+      return fail(m, STELA_AIR_ALLOCATION, "function table test allocation failed");
+   LLVMUseRef use;
+   bool lowered = true;
+   while (lowered && (use = LLVMGetFirstUse(is_null))) {
+      LLVMValueRef call = LLVMGetUser(use);
+      lowered = LLVMIsACallInst(call) && LLVMGetCalledValue(call) == is_null;
+      if (!lowered) {
+         fail(m, STELA_AIR_INSTRUCTION, "air.is_null_visible_function_table is only called");
+         break;
+      }
+      LLVMPositionBuilderBefore(builder, call);
+      LLVMValueRef test = LLVMBuildICmp(builder, LLVMIntEQ, LLVMGetOperand(call, 0),
+                                        LLVMConstPointerNull(table), "");
+      LLVMReplaceAllUsesWith(call, test);
+      LLVMInstructionEraseFromParent(call);
+   }
+   LLVMDisposeBuilder(builder);
+   return lowered;
+}
+
 bool
 stela_air_dispatch_tables(struct stela_air_metadata *m,
                           const struct stela_air_linked_function *functions, unsigned count)
 {
    if (count && !functions)
       return fail(m, STELA_AIR_INPUT, "invalid linked functions");
-   if (!table_sizes(m))
+   if (!null_tables(m) || !table_sizes(m) || !table_nulls(m))
       return false;
    LLVMValueRef get = LLVMGetNamedFunction(m->module, "air.get_function_pointer_visible_function_table");
    if (!get || !LLVMGetFirstUse(get))

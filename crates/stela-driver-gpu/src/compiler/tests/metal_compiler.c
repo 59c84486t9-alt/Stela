@@ -618,6 +618,14 @@ static const char *recast = TABLES("%g = bitcast ptr %f to ptr\n%v = call i32 %g
 static const char *sized =
    TABLES("%n = call i32 @air.get_size_visible_function_table(ptr addrspace(1) %table)\n"
           "%v = call i32 %f(i32 %n)\n");
+/* A call with whether the table is null, and the size of a null table. */
+static const char *tested =
+   "declare i1 @air.is_null_visible_function_table(ptr addrspace(1))\n"
+   "declare ptr addrspace(1) @air.get_null_visible_function_table()\n"
+   TABLES("%null = call i1 @air.is_null_visible_function_table(ptr addrspace(1) %table)\n"
+          "%none = call ptr addrspace(1) @air.get_null_visible_function_table()\n"
+          "%empty = call i32 @air.get_size_visible_function_table(ptr addrspace(1) %none)\n"
+          "%n = zext i1 %null to i32\n%m = add i32 %n, %empty\n%v = call i32 %f(i32 %m)\n");
 /* A table's pointer used as other than a callee. */
 static const char *escaping = TABLES("%v = ptrtoint ptr %f to i32\n");
 /* The library linked with it: the external function and two visible
@@ -2582,6 +2590,11 @@ linked_functions_resolve_tables_and_externals(void)
    assert(shader);
    stela_metal_release(shader);
    shader = compile_linked(sized, "tables", &linked, 1, functions, 3, &error);
+   assert(shader);
+   stela_metal_release(shader);
+   shader = compile_linked(tested, "tables", &linked, 1, functions, 3, &error);
+   if (!shader)
+      fprintf(stderr, "tested: %u %s\n", error.kind, error.detail);
    assert(shader);
    stela_metal_release(shader);
 

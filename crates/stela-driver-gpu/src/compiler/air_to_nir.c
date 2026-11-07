@@ -5990,6 +5990,8 @@ translate(const void *bitcode, size_t size, const char *entry,
        !LLVMGetNamedMetadataNumOperands(t.module, "air.visible") &&
        !LLVMGetNamedMetadataNumOperands(t.module, "air.visible_function_references") &&
        !LLVMGetNamedFunction(t.module, "air.get_size_visible_function_table") &&
+       !LLVMGetNamedFunction(t.module, "air.is_null_visible_function_table") &&
+       !LLVMGetNamedFunction(t.module, "air.get_null_visible_function_table") &&
        !LLVMGetNamedFunction(t.module, "air.get_function_pointer_visible_function_table") &&
        !LLVMGetNamedFunction(t.module, "air.os_log"))
       specialized = LLVMGetNamedFunction(t.module, entry);
