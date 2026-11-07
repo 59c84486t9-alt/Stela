@@ -175,6 +175,8 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         select: vk::Pipeline::null(),
         resolve_draws: vk::Pipeline::null(),
         resolve_dispatches: vk::Pipeline::null(),
+        store_texels: vk::Pipeline::null(),
+        load_texels: vk::Pipeline::null(),
     }
 }
 

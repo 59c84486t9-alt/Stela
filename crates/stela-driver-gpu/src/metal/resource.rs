@@ -293,7 +293,7 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
         image.usage,
         0.0,
     );
-    attachment_storage(capabilities, descriptor.pixel_format, usage, &mut image);
+    attachment_storage(capabilities, descriptor, usage, &mut image);
     Ok(TexturePlan {
         image,
         memory: MemoryRequest {
@@ -503,17 +503,30 @@ pub fn raw_texel_format(format: PixelFormat) -> Option<Format> {
     }
 }
 
-/// Lets a color render target be viewed by its raw texels as storage, which
-/// framebuffer reads access. Its typed shader views are unchanged.
+/// Whether textures of `texture_type` have raw 2D array storage views of
+/// their levels, through which the texel kernels copy buffers.
+pub fn has_texel_storage(texture_type: TextureType) -> bool {
+    !matches!(
+        texture_type,
+        TextureType::D1 | TextureType::D1Array | TextureType::D3 | TextureType::TextureBuffer
+    ) && !texture_type.is_multisample()
+}
+
+/// Lets a color texture be viewed by its raw texels as storage: a render
+/// target, which framebuffer reads access, and a texture whose image stores
+/// another encoding than its format's bytes, which the texel kernels convert
+/// buffer copies through. Its typed shader views are unchanged.
 fn attachment_storage(
     capabilities: &Capabilities,
-    format: PixelFormat,
+    descriptor: &TextureDescriptor,
     usage: TextureUsage,
     image: &mut ImageInfo,
 ) {
-    let Some(raw) = raw_texel_format(format)
-        .filter(|_| capabilities.framebuffer_reads && usage.contains(TextureUsage::RENDER_TARGET))
-    else {
+    let format = descriptor.pixel_format;
+    let attachment = capabilities.framebuffer_reads && usage.contains(TextureUsage::RENDER_TARGET);
+    let converted =
+        !format.describe().encoding().is_exact() && has_texel_storage(descriptor.texture_type);
+    let Some(raw) = raw_texel_format(format).filter(|_| attachment || converted) else {
         return;
     };
     // An empty list with a mutable format admits every compatible format.
@@ -957,7 +970,7 @@ pub fn linear_texture(
         image.usage,
         0.0,
     );
-    attachment_storage(capabilities, descriptor.pixel_format, usage, &mut image);
+    attachment_storage(capabilities, descriptor, usage, &mut image);
     Ok(TexturePlan {
         image,
         memory: memory(descriptor.options)?,

@@ -795,6 +795,36 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(ResourceId::texture(NULL_DESCRIPTOR, descriptor, 1))
     }
 
+    /// For a buffer copy of `level` and `slice` of a texture whose image
+    /// stores another encoding than its format's bytes, the raw storage view
+    /// of that subresource the texel kernels convert through, created on
+    /// first use and kept with the texture. Null for an exact encoding, which
+    /// a transfer copies, and for 1D and 3D textures, which have no such view.
+    pub fn texel_storage(&mut self, id: TextureId, level: u64, slice: u64) -> Result<ResourceId> {
+        let descriptor = *self.texture_descriptor(id)?;
+        if descriptor.pixel_format.describe().encoding().is_exact()
+            || !resource::has_texel_storage(descriptor.texture_type)
+        {
+            return Ok(ResourceId::NULL);
+        }
+        ensure(
+            level < descriptor.mipmap_level_count && slice < descriptor.slice_count(),
+            "subresource outside the texture",
+        )?;
+        let view = AttachmentView {
+            texture: (),
+            view_type: ImageViewType::D2Array,
+            range: SubresourceRange {
+                aspects: ImageAspects::COLOR,
+                base_mip_level: level as u32,
+                level_count: 1,
+                base_array_layer: slice as u32,
+                layer_count: 1,
+            },
+        };
+        self.attachment_storage(id, view)
+    }
+
     /// `region` as bands that each hold whole block rows of one image, whose
     /// bytes span at most [`CPU_BAND_BYTES`] of the caller's layout (one row
     /// at least). A transfer that moves a band at a time holds a bounded

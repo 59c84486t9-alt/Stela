@@ -2,6 +2,7 @@
 use super::Payload;
 use crate::metal::{
     abi::{BlitOption, StorageMode},
+    binding::ResourceId,
     capabilities::FormatCapabilities,
     command_buffer::{
         CommandBuffer,
@@ -9,6 +10,7 @@ use crate::metal::{
     },
     device::TextureId,
     error::ensure,
+    resource::TextureDescriptor,
     service::{
         Object, Service, known, region,
         wire::{
@@ -20,7 +22,7 @@ use crate::metal::{
         },
     },
     shader::Compiler,
-    vulkan::backend::Backend,
+    vulkan::{backend::Backend, object::Image},
 };
 use core::{num::NonZeroU64, ops::Range};
 
@@ -52,23 +54,39 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             BlitCode::CopyBufferToTexture => {
                 let request: CopyBufferToTexture = payload.record()?;
                 let source = self.buffer_layout(connection, request.source)?;
-                let texture = self.blit_texture(connection, request.texture)?;
+                let region = region(&request.region);
+                let (image, descriptor, storage) =
+                    self.copied_texture(connection, request.texture, &region)?;
                 let options = blit_options(request.options)?;
+                let texture = BlitTexture {
+                    image,
+                    descriptor: &descriptor,
+                    storage,
+                };
                 commands.copy_buffer_to_texture(
+                    &mut self.device.resolver(),
                     source,
                     texture,
-                    region(&request.region),
+                    region,
                     options,
                 )?;
             }
             BlitCode::CopyTextureToBuffer => {
                 let request: CopyTextureToBuffer = payload.record()?;
-                let texture = self.blit_texture(connection, request.texture)?;
+                let region = region(&request.region);
+                let (image, descriptor, storage) =
+                    self.copied_texture(connection, request.texture, &region)?;
                 let destination = self.buffer_layout(connection, request.destination)?;
                 let options = blit_options(request.options)?;
+                let texture = BlitTexture {
+                    image,
+                    descriptor: &descriptor,
+                    storage,
+                };
                 commands.copy_texture_to_buffer(
+                    &mut self.device.resolver(),
                     texture,
-                    region(&request.region),
+                    region,
                     destination,
                     options,
                 )?;
@@ -162,17 +180,33 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         Ok(())
     }
 
+    /// A texture a buffer copy of `region` reads or writes: its image, its
+    /// descriptor and, when its image stores another encoding than its
+    /// format's bytes, the raw storage view of the region's level and slice
+    /// that the texel kernels convert through.
+    fn copied_texture(
+        &mut self,
+        connection: NonZeroU64,
+        handle: u64,
+        region: &Region,
+    ) -> Result<(Image, TextureDescriptor, ResourceId), Fault> {
+        let id = self.object::<TextureId>(connection, handle)?;
+        let descriptor = *self.device.texture_descriptor(id)?;
+        let storage = self.device.texel_storage(id, region.level, region.slice)?;
+        Ok((self.device.texture_image(id)?, descriptor, storage))
+    }
+
     /// Synchronizes subresources of a managed texture: each is copied to
     /// the texture's CPU copy, or, without one, host image copies read the
     /// texture once the command buffer completes.
     fn synchronize_texture(
-        &self,
+        &mut self,
         commands: &mut CommandBuffer,
         id: TextureId,
         slices: Range<u64>,
         levels: Range<u64>,
     ) -> Result<(), Fault> {
-        let descriptor = self.device.texture_descriptor(id)?;
+        let descriptor = *self.device.texture_descriptor(id)?;
         ensure(
             descriptor.options.storage_mode == StorageMode::Managed,
             "synchronizeResource: is for managed resources",
@@ -181,10 +215,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             levels.end <= descriptor.mipmap_level_count && slices.end <= descriptor.slice_count(),
             "subresource outside the texture",
         )?;
-        let texture = BlitTexture {
-            image: self.device.texture_image(id)?,
-            descriptor,
-        };
+        // Only an exact encoding keeps a CPU copy, which a transfer fills.
+        let image = self.device.texture_image(id)?;
         for level in levels {
             for slice in slices.clone() {
                 let Some(staging) = self.device.texture_cpu_copy(id, level, slice)? else {
@@ -196,7 +228,17 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     origin: [0; 3],
                     size: descriptor.level_extent(level),
                 };
-                commands.synchronize_texture(texture, staging, region)?;
+                let texture = BlitTexture {
+                    image,
+                    descriptor: &descriptor,
+                    storage: ResourceId::NULL,
+                };
+                commands.synchronize_texture(
+                    &mut self.device.resolver(),
+                    texture,
+                    staging,
+                    region,
+                )?;
             }
         }
         Ok(())

@@ -128,8 +128,9 @@ unsafe extern "system" fn forward(
 }
 
 /// The backend's own kernels: the NIR of `stela_metal_accumulate_kernel`,
-/// `stela_metal_select_kernel`, `stela_metal_resolve_draws_kernel` and
-/// `stela_metal_resolve_dispatches_kernel` (`compiler/metal_abi.h`).
+/// `stela_metal_select_kernel`, `stela_metal_resolve_draws_kernel`,
+/// `stela_metal_resolve_dispatches_kernel`, `stela_metal_store_texels_kernel`
+/// and `stela_metal_load_texels_kernel` (`compiler/metal_abi.h`).
 #[derive(Clone, Copy, Debug)]
 pub struct InternalKernels {
     /// Sums query results per
@@ -146,6 +147,12 @@ pub struct InternalKernels {
     pub resolve_draws: ShaderCode,
     /// Resolves GPU-resident compute indirect commands likewise.
     pub resolve_dispatches: ShaderCode,
+    /// Converts a buffer's Metal texels into a texture's stored ones per
+    /// [`TexelArguments`](super::binding::TexelArguments), one thread per
+    /// texel in workgroups of `WORKGROUP_SIZE`.
+    pub store_texels: ShaderCode,
+    /// Converts a texture's stored texels into a buffer's Metal ones likewise.
+    pub load_texels: ShaderCode,
 }
 
 /// How the driver takes memory a CPU reaches: its kernel driver maps a dma-buf.
@@ -314,6 +321,8 @@ pub struct NativeBackend {
     select: vk::Pipeline,
     resolve_draws: vk::Pipeline,
     resolve_dispatches: vk::Pipeline,
+    store_texels: vk::Pipeline,
+    load_texels: vk::Pipeline,
 }
 
 impl NativeBackend {
@@ -508,6 +517,8 @@ impl NativeBackend {
             select: vk::Pipeline::null(),
             resolve_draws: vk::Pipeline::null(),
             resolve_dispatches: vk::Pipeline::null(),
+            store_texels: vk::Pipeline::null(),
+            load_texels: vk::Pipeline::null(),
         };
         // Dropping a partly built backend destroys what was created.
         let kernels = kernels?;
@@ -524,6 +535,8 @@ impl NativeBackend {
         backend.select = backend.create_compute(&kernel(kernels.select))?;
         backend.resolve_draws = backend.create_compute(&kernel(kernels.resolve_draws))?;
         backend.resolve_dispatches = backend.create_compute(&kernel(kernels.resolve_dispatches))?;
+        backend.store_texels = backend.create_compute(&kernel(kernels.store_texels))?;
+        backend.load_texels = backend.create_compute(&kernel(kernels.load_texels))?;
         Ok(backend)
     }
 
@@ -844,6 +857,8 @@ impl Drop for NativeBackend {
             self.device.destroy_pipeline(self.resolve_draws, None);
             self.device.destroy_pipeline(self.resolve_dispatches, None);
             self.device.destroy_pipeline(self.select, None);
+            self.device.destroy_pipeline(self.store_texels, None);
+            self.device.destroy_pipeline(self.load_texels, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_pipeline_layout(self.layout, None);
             self.device.destroy_sampler(self.null_sampler, None);

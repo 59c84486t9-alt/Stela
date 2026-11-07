@@ -953,7 +953,11 @@ fn xr_alpha_code(a: f64) -> u64 {
 /// target clamps to. Alpha holds [0, 1].
 fn xr_value(rng: &mut Random, srgb_curve: bool, lane: usize) -> f64 {
     if rng.u32().is_multiple_of(8) {
-        return if rng.u32().is_multiple_of(2) { -2.0 } else { 2.0 };
+        return if rng.u32().is_multiple_of(2) {
+            -2.0
+        } else {
+            2.0
+        };
     }
     if lane == 3 {
         return xr(u64::from(384 + rng.u32() % 511), false);

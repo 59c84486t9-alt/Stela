@@ -3,7 +3,7 @@
 //! 3D region or depth-stencil plane, texture copies of a region, of whole
 //! textures and of slice and level ranges, of compressed blocks, mipmap
 //! generation for 2D, array, cube and 3D textures, and access hints that
-//! leave contents as they were.
+//! leave contents as they were, and copies of extended-range texels.
 use super::plan::{Buffer, Case, Output, Plan, Texture, Tolerance};
 use super::values::{Dtype, Random, u32s};
 use serde_json::json;
@@ -325,9 +325,79 @@ fn more(plan: &mut Plan, rng: &mut Random) {
     );
 }
 
+/// Texels of an extended-range format as Metal holds them: codes in their
+/// bits with the padding a device writes, alpha within [0, 1]. A device may
+/// store the values rather than the bits, so other padding need not survive.
+fn xr_texels(rng: &mut Random, count: usize, alpha: bool) -> Vec<u8> {
+    let mut out = Vec::new();
+    for _ in 0..count {
+        let mut code = || u64::from(rng.u32() % 1024);
+        if alpha {
+            let (b, g, r) = (code(), code(), code());
+            let a = 384 + u64::from(rng.u32() % 511);
+            for word in [b, g, r, a] {
+                out.extend_from_slice(&((word << 6) as u16).to_le_bytes());
+            }
+        } else {
+            let bits = code() | code() << 10 | code() << 20 | 3 << 30;
+            out.extend_from_slice(&(bits as u32).to_le_bytes());
+        }
+    }
+    out
+}
+
+/// Buffer copies into and out of extended-range textures carry the codes.
+fn extended_range(plan: &mut Plan, rng: &mut Random) {
+    let (w, h, ox, oy, rw, rh) = (8usize, 8usize, 2usize, 3usize, 5usize, 3usize);
+    for (format, alpha, into) in [
+        ("bgra10_xr_srgb", true, true),
+        ("bgr10_xr", false, true),
+        ("bgra10_xr", true, false),
+        ("bgr10_xr_srgb", false, false),
+    ] {
+        let texel = if alpha { 8 } else { 4 };
+        let row = rw * texel + 24;
+        let texture = xr_texels(rng, w * h, alpha);
+        let staging = xr_texels(rng, row / texel * rh, alpha);
+        let mut copied = texture.clone();
+        let mut read = vec![0x5Au8; row * rh];
+        for y in 0..rh {
+            let at = ((oy + y) * w + ox) * texel;
+            if into {
+                copied[at..at + rw * texel]
+                    .copy_from_slice(&staging[y * row..y * row + rw * texel]);
+            } else {
+                read[y * row..y * row + rw * texel].copy_from_slice(&texture[at..at + rw * texel]);
+            }
+        }
+        let texture = Texture::d2("t", format, w as u32, h as u32).data(texture);
+        let case = if into {
+            Case::blit(
+                &format!("blit.buffer_to_texture.{format}"),
+                json!([{"op": "buffer_to_texture", "src": "staging", "bytes_per_row": row, "bytes_per_image": row * rh,
+                        "size": [rw, rh, 1], "dst": "t", "origin": [ox, oy, 0]}]),
+            )
+            .buffer(Buffer::data("staging", 0, staging).unbound())
+            .texture(texture)
+            .output(exact("t", copied))
+        } else {
+            Case::blit(
+                &format!("blit.texture_to_buffer.{format}"),
+                json!([{"op": "texture_to_buffer", "src": "t", "origin": [ox, oy, 0], "size": [rw, rh, 1], "dst": "out",
+                        "bytes_per_row": row, "bytes_per_image": row * rh}]),
+            )
+            .buffer(Buffer::data("out", 0, vec![0x5A; row * rh]).unbound())
+            .texture(texture)
+            .output(exact("out", read))
+        };
+        plan.add(case);
+    }
+}
+
 pub fn build(plan: &mut Plan) {
     let mut rng = Random::new(1101);
     more(plan, &mut Random::new(1102));
+    extended_range(plan, &mut Random::new(1103));
     // Copies and fills at 4-byte aligned offsets and sizes, overlapping
     // nothing, then a copy within one buffer to a disjoint range.
     let (src, dst) = (bytes(&mut rng, 256), bytes(&mut rng, 256));

@@ -273,6 +273,7 @@ impl Workload {
                 | Command::ResolveDraws { .. }
                 | Command::ResolveDispatches { .. }
                 | Command::ExecuteGeneratedCommands(_) => self.internal += 1,
+                Command::StoreTexels { .. } | Command::LoadTexels { .. } => self.transfers += 1,
                 _ => {}
             }
         }

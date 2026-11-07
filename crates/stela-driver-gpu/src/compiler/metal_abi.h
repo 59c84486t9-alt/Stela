@@ -54,6 +54,33 @@
 #define STELA_METAL_SELECT_COUNT 16u
 #define STELA_METAL_KERNEL_WORKGROUP 64u
 
+/* TexelArguments (binding.rs), which the texel kernels read at the push
+ * constants' arguments address: the buffer's address, the texel count and
+ * its encoding (enum stela_metal_texel_encoding), the resource ID of a raw
+ * storage view of the texture's level, the region's width and height, the
+ * buffer's bytes per row and image, and the region's origin and first
+ * layer in the view. */
+#define STELA_METAL_TEXELS_BUFFER 0u
+#define STELA_METAL_TEXELS_COUNT 8u
+#define STELA_METAL_TEXELS_ENCODING 12u
+#define STELA_METAL_TEXELS_IMAGE 16u
+#define STELA_METAL_TEXELS_WIDTH 24u
+#define STELA_METAL_TEXELS_HEIGHT 28u
+#define STELA_METAL_TEXELS_ROW 32u
+#define STELA_METAL_TEXELS_IMAGE_BYTES 36u
+#define STELA_METAL_TEXELS_ORIGIN 40u
+#define STELA_METAL_TEXELS_BYTES 56u
+
+/* The layouts a texture's image stores in place of its Metal format's
+ * bytes (pixel_format.rs Encoding): the extended-range codes of BGR10_XR
+ * and BGRA10_XR, linear or through the sRGB curve, as four half floats. */
+enum stela_metal_texel_encoding {
+   STELA_METAL_TEXELS_XR10 = 1,
+   STELA_METAL_TEXELS_XR10_SRGB,
+   STELA_METAL_TEXELS_XR10X4,
+   STELA_METAL_TEXELS_XR10X4_SRGB,
+};
+
 /* ResolveArguments, which the resolve kernels read at the push constants'
  * arguments address: the 64-bit addresses of an indirect command buffer
  * (its header), of its execution range (uint location, length), of the
@@ -316,6 +343,12 @@ nir_shader *stela_metal_resolve_draws_kernel(const nir_shader_compiler_options *
  * or a compute pipeline's handle, whose index it writes; else it
  * dispatches no threadgroups with execution set index 0. */
 nir_shader *stela_metal_resolve_dispatches_kernel(const nir_shader_compiler_options *options);
+
+/* Thread n converts texel n of the TexelArguments' region, counted along
+ * rows, then rows, then images: the store kernel from the buffer's Metal
+ * bytes into the image's stored texel, the load kernel back. */
+nir_shader *stela_metal_store_texels_kernel(const nir_shader_compiler_options *options);
+nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *options);
 
 /* MTLTessellationPartitionMode, MTLTessellationFactorStepFunction and
  * MTLWinding, in their raw values. */

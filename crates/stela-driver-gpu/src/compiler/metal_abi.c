@@ -1262,3 +1262,153 @@ nir_shader *stela_metal_tessellation_control(const nir_shader_compiler_options *
    nir_store_var(&b, patch_ids, nir_vec3(&b, id, instance, nir_channel(&b, vertex, 2)), 0x7);
    return validated(&b);
 }
+
+/* An extended-range code's value: (code - 384) / 510, through the sRGB curve
+ * mirrored below zero for the sRGB encodings. */
+static nir_def *xr_value(nir_builder *b, nir_def *code, bool srgb)
+{
+   nir_def *v = nir_fmul_imm(b, nir_fadd_imm(b, nir_u2f32(b, code), -384.0), 1.0 / 510.0);
+   if (!srgb)
+      return v;
+   nir_def *m = nir_fabs(b, v);
+   nir_def *curve = nir_fpow(b, nir_fmul_imm(b, nir_fadd_imm(b, m, 0.055), 1.0 / 1.055),
+                             nir_imm_float(b, 2.4f));
+   nir_def *linear = nir_bcsel(b, nir_fge(b, nir_imm_float(b, 0.04045f), m),
+                               nir_fmul_imm(b, m, 1.0 / 12.92), curve);
+   return nir_bcsel(b, nir_flt(b, v, nir_imm_float(b, 0.0f)), nir_fneg(b, linear), linear);
+}
+
+/* The nearest code of a value, ties to even, in [low, high]. */
+static nir_def *xr_code(nir_builder *b, nir_def *v, bool srgb, float low, float high)
+{
+   if (srgb) {
+      nir_def *m = nir_fabs(b, v);
+      nir_def *curve = nir_fadd_imm(
+         b, nir_fmul_imm(b, nir_fpow(b, m, nir_imm_float(b, 1.0f / 2.4f)), 1.055), -0.055);
+      nir_def *encoded = nir_bcsel(b, nir_fge(b, nir_imm_float(b, 0.0031308f), m),
+                                   nir_fmul_imm(b, m, 12.92), curve);
+      v = nir_bcsel(b, nir_flt(b, v, nir_imm_float(b, 0.0f)), nir_fneg(b, encoded), encoded);
+   }
+   nir_def *code = nir_fround_even(b, nir_fadd_imm(b, nir_fmul_imm(b, v, 510.0), 384.0));
+   code = nir_fmin(b, nir_fmax(b, code, nir_imm_float(b, low)), nir_imm_float(b, high));
+   return nir_f2u32(b, code);
+}
+
+/* The texel kernels' common part: thread's image coordinate, its byte offset
+ * in the buffer for texels of texel_bytes, and its texture's raw view. */
+struct texels {
+   nir_def *arguments, *buffer, *encoding, *coord, *offset;
+   nir_deref_instr *image;
+};
+
+static nir_builder texels(const nir_shader_compiler_options *options, const char *name,
+                          struct texels *t)
+{
+   nir_def *thread;
+   nir_builder b = kernel(options, name, STELA_METAL_TEXELS_COUNT, &t->arguments, &thread);
+   nir_def *arguments = t->arguments;
+   nir_def *width = load(&b, arguments, STELA_METAL_TEXELS_WIDTH, 32);
+   nir_def *height = load(&b, arguments, STELA_METAL_TEXELS_HEIGHT, 32);
+   nir_def *per_image = nir_imul(&b, width, height);
+   nir_def *z = nir_udiv(&b, thread, per_image);
+   nir_def *rest = nir_isub(&b, thread, nir_imul(&b, z, per_image));
+   nir_def *y = nir_udiv(&b, rest, width);
+   nir_def *x = nir_isub(&b, rest, nir_imul(&b, y, width));
+   nir_def *origin[3];
+   for (unsigned i = 0; i < 3; i++)
+      origin[i] = load(&b, arguments, STELA_METAL_TEXELS_ORIGIN + 4 * i, 32);
+   t->coord = nir_vec4(&b, nir_iadd(&b, x, origin[0]), nir_iadd(&b, y, origin[1]),
+                       nir_iadd(&b, z, origin[2]), nir_imm_int(&b, 0));
+   t->encoding = load(&b, arguments, STELA_METAL_TEXELS_ENCODING, 32);
+   nir_def *wide = nir_uge_imm(&b, t->encoding, STELA_METAL_TEXELS_XR10X4);
+   nir_def *texel_bytes = nir_bcsel(&b, wide, nir_imm_int(&b, 8), nir_imm_int(&b, 4));
+   nir_def *offset = nir_iadd(
+      &b, nir_imul(&b, z, load(&b, arguments, STELA_METAL_TEXELS_IMAGE_BYTES, 32)),
+      nir_iadd(&b, nir_imul(&b, y, load(&b, arguments, STELA_METAL_TEXELS_ROW, 32)),
+               nir_imul(&b, x, texel_bytes)));
+   t->buffer = load(&b, arguments, STELA_METAL_TEXELS_BUFFER, 64);
+   t->offset = nir_u2u64(&b, offset);
+   const struct glsl_type *type = glsl_image_type(GLSL_SAMPLER_DIM_2D, true, GLSL_TYPE_UINT);
+   t->image = stela_metal_bind_texture_id(&b, load(&b, arguments, STELA_METAL_TEXELS_IMAGE, 64),
+                                          type, false, NULL, NULL);
+   return b;
+}
+
+/* Half floats of red, green, blue and alpha, two to a word. */
+static nir_def *halves(nir_builder *b, nir_def *r, nir_def *g, nir_def *bl, nir_def *a)
+{
+   return nir_vec4(b, nir_pack_half_2x16_split(b, r, g), nir_pack_half_2x16_split(b, bl, a),
+                   nir_imm_int(b, 0), nir_imm_int(b, 0));
+}
+
+/* The stored texel of a BGR10_XR word or a BGRA10_XR pair of words. */
+static nir_def *store_xr(nir_builder *b, nir_def *lo, nir_def *hi, bool alpha, bool srgb)
+{
+   if (!alpha) {
+      nir_def *blue = nir_iand_imm(b, lo, 0x3ff);
+      nir_def *green = nir_iand_imm(b, nir_ushr_imm(b, lo, 10), 0x3ff);
+      nir_def *red = nir_iand_imm(b, nir_ushr_imm(b, lo, 20), 0x3ff);
+      return halves(b, xr_value(b, red, srgb), xr_value(b, green, srgb), xr_value(b, blue, srgb),
+                    nir_imm_float(b, 1.0f));
+   }
+   nir_def *blue = nir_ubfe_imm(b, lo, 6, 10), *green = nir_ubfe_imm(b, lo, 22, 10);
+   nir_def *red = nir_ubfe_imm(b, hi, 6, 10), *code = nir_ubfe_imm(b, hi, 22, 10);
+   nir_def *a = nir_fsat(b, xr_value(b, code, false));
+   return halves(b, xr_value(b, red, srgb), xr_value(b, green, srgb), xr_value(b, blue, srgb), a);
+}
+
+nir_shader *stela_metal_store_texels_kernel(const nir_shader_compiler_options *options)
+{
+   struct texels t;
+   nir_builder b = texels(options, "stela_metal_store_texels", &t);
+   nir_def *address = nir_iadd(&b, t.buffer, t.offset);
+   nir_def *lo = nir_load_global(&b, 1, 32, address, .align_mul = 4);
+   for (unsigned e = STELA_METAL_TEXELS_XR10; e <= STELA_METAL_TEXELS_XR10X4_SRGB; e++) {
+      bool alpha = e >= STELA_METAL_TEXELS_XR10X4;
+      bool srgb = e == STELA_METAL_TEXELS_XR10_SRGB || e == STELA_METAL_TEXELS_XR10X4_SRGB;
+      nir_push_if(&b, nir_ieq_imm(&b, t.encoding, e));
+      nir_def *hi = alpha ? nir_load_global(&b, 1, 32, nir_iadd_imm(&b, address, 4), .align_mul = 4)
+                          : NULL;
+      nir_image_deref_store(&b, &t.image->def, t.coord, nir_undef(&b, 1, 32),
+                            store_xr(&b, lo, hi, alpha, srgb), nir_imm_int(&b, 0),
+                            .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = true,
+                            .format = PIPE_FORMAT_NONE, .src_type = nir_type_uint32);
+      nir_pop_if(&b, NULL);
+   }
+   return finish(&b);
+}
+
+nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *options)
+{
+   struct texels t;
+   nir_builder b = texels(options, "stela_metal_load_texels", &t);
+   nir_def *address = nir_iadd(&b, t.buffer, t.offset);
+   nir_def *stored = nir_image_deref_load(&b, 4, 32, &t.image->def, t.coord, nir_undef(&b, 1, 32),
+                                          nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D,
+                                          .image_array = true, .format = PIPE_FORMAT_NONE,
+                                          .dest_type = nir_type_uint32);
+   nir_def *rg = nir_channel(&b, stored, 0), *ba = nir_channel(&b, stored, 1);
+   nir_def *red_green = nir_unpack_half_2x16(&b, rg), *blue_alpha = nir_unpack_half_2x16(&b, ba);
+   nir_def *r = nir_channel(&b, red_green, 0), *g = nir_channel(&b, red_green, 1);
+   nir_def *bl = nir_channel(&b, blue_alpha, 0), *a = nir_channel(&b, blue_alpha, 1);
+   for (unsigned e = STELA_METAL_TEXELS_XR10; e <= STELA_METAL_TEXELS_XR10X4_SRGB; e++) {
+      bool alpha = e >= STELA_METAL_TEXELS_XR10X4;
+      bool srgb = e == STELA_METAL_TEXELS_XR10_SRGB || e == STELA_METAL_TEXELS_XR10X4_SRGB;
+      nir_push_if(&b, nir_ieq_imm(&b, t.encoding, e));
+      nir_def *codes[3] = {xr_code(&b, bl, srgb, 0, 1023), xr_code(&b, g, srgb, 0, 1023),
+                           xr_code(&b, r, srgb, 0, 1023)};
+      if (!alpha) {
+         /* Blue, green and red from bit 0; the top two bits are ones. */
+         nir_def *word = nir_ior(&b, nir_ior(&b, codes[0], nir_ishl_imm(&b, codes[1], 10)),
+                                 nir_ior_imm(&b, nir_ishl_imm(&b, codes[2], 20), 3u << 30));
+         nir_store_global(&b, word, address, .align_mul = 4);
+      } else {
+         nir_def *alpha_code = xr_code(&b, a, false, 384, 894);
+         nir_def *lo = nir_ior(&b, nir_ishl_imm(&b, codes[0], 6), nir_ishl_imm(&b, codes[1], 22));
+         nir_def *hi = nir_ior(&b, nir_ishl_imm(&b, codes[2], 6), nir_ishl_imm(&b, alpha_code, 22));
+         nir_store_global(&b, nir_vec2(&b, lo, hi), address, .align_mul = 4);
+      }
+      nir_pop_if(&b, NULL);
+   }
+   return finish(&b);
+}

@@ -358,6 +358,21 @@ pub enum Command {
         arguments: u64,
         count: u32,
     },
+    /// The backend's store texels kernel over `count` texels, with a
+    /// [`TexelArguments`](crate::metal::binding::TexelArguments) upload's
+    /// address in the push constants, like
+    /// [`AccumulateResults`](Self::AccumulateResults): a buffer copy into a
+    /// texture whose image stores another encoding.
+    StoreTexels {
+        arguments: u64,
+        count: u32,
+    },
+    /// The backend's load texels kernel likewise: a buffer copy out of such
+    /// a texture.
+    LoadTexels {
+        arguments: u64,
+        count: u32,
+    },
     /// `vkCmdBeginConditionalRenderingEXT`: draws and dispatches up to the
     /// end run only if the 32-bit value at `offset` is nonzero.
     BeginConditionalRendering {

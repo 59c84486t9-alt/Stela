@@ -72,6 +72,8 @@ unsafe extern "C" {
     fn stela_metal_select_kernel(options: *const c_void) -> *mut c_void;
     fn stela_metal_resolve_draws_kernel(options: *const c_void) -> *mut c_void;
     fn stela_metal_resolve_dispatches_kernel(options: *const c_void) -> *mut c_void;
+    fn stela_metal_store_texels_kernel(options: *const c_void) -> *mut c_void;
+    fn stela_metal_load_texels_kernel(options: *const c_void) -> *mut c_void;
     fn stela_metal_release(shader: *mut c_void);
     fn stela_metal_buffer_reads(shader: *const c_void) -> u32;
 }
@@ -106,6 +108,8 @@ impl Service {
             select_kernel: stela_metal_select_kernel,
             resolve_draws_kernel: stela_metal_resolve_draws_kernel,
             resolve_dispatches_kernel: stela_metal_resolve_dispatches_kernel,
+            store_texels_kernel: stela_metal_store_texels_kernel,
+            load_texels_kernel: stela_metal_load_texels_kernel,
             release: stela_metal_release,
             buffer_reads: stela_metal_buffer_reads,
             nir_options,

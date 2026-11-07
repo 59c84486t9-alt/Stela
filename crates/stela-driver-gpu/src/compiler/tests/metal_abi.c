@@ -335,6 +335,38 @@ static void resolve_writes_each_command_sequence(void)
    ralloc_free(shader);
 }
 
+/* How many intrinsics of op shader holds. */
+static unsigned intrinsic_count(nir_shader *shader, nir_intrinsic_op op)
+{
+   unsigned count = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block)
+         count += instr->type == nir_instr_type_intrinsic &&
+                  nir_instr_as_intrinsic(instr)->intrinsic == op;
+   }
+   return count;
+}
+
+/* The texel kernels convert one texel per thread through a raw storage
+ * view: the store kernel writes it once per encoding, the load kernel reads
+ * it once and writes the buffer once per encoding. */
+static void texel_kernels_convert_each_encoding(void)
+{
+   unsigned encodings = STELA_METAL_TEXELS_XR10X4_SRGB - STELA_METAL_TEXELS_XR10 + 1;
+   nir_shader *store = stela_metal_store_texels_kernel(NULL);
+   check_kernel(store);
+   assert(intrinsic_count(store, nir_intrinsic_image_deref_store) == encodings);
+   assert(intrinsic_count(store, nir_intrinsic_image_deref_load) == 0);
+   assert(intrinsic_count(store, nir_intrinsic_store_global) == 0);
+   ralloc_free(store);
+   nir_shader *load = stela_metal_load_texels_kernel(NULL);
+   check_kernel(load);
+   assert(intrinsic_count(load, nir_intrinsic_image_deref_load) == 1);
+   assert(intrinsic_count(load, nir_intrinsic_image_deref_store) == 0);
+   assert(intrinsic_count(load, nir_intrinsic_store_global) == encodings);
+   ralloc_free(load);
+}
+
 static void put32(uint8_t *bytes, uint32_t value)
 {
    memcpy(bytes, &value, sizeof(value));
@@ -862,6 +894,7 @@ int main(void)
    accumulate_sums_each_run_in_a_loop();
    select_flags_each_command();
    resolve_writes_each_command_sequence();
+   texel_kernels_convert_each_encoding();
    resolve_dispatches_writes_each_command_sequence();
    tessellation_factors_follow_metal_rules();
    tessellation_vertex_passes_the_draw_indices();

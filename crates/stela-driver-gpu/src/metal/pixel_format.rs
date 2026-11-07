@@ -303,6 +303,17 @@ impl Encoding {
     pub const fn is_exact(self) -> bool {
         matches!(self, Self::Exact)
     }
+
+    /// The texel kernels' `enum stela_metal_texel_encoding`; zero for the
+    /// exact encoding, which they never convert.
+    pub const fn texel_kernel(self) -> u32 {
+        match self {
+            Self::Exact => 0,
+            Self::ExtendedRange(extended_range::Codes { alpha, srgb }) => {
+                1 + 2 * alpha as u32 + srgb as u32
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

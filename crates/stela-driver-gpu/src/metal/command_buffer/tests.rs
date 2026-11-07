@@ -1594,9 +1594,10 @@ fn buffer_texture_copies_use_texel_strides() {
     let target = BlitTexture {
         image: Image(9),
         descriptor: &color,
+        storage: ResourceId::NULL,
     };
     commands
-        .copy_buffer_to_texture(source, target, region, BlitOption::EMPTY)
+        .copy_buffer_to_texture(&mut resolver, source, target, region, BlitOption::EMPTY)
         .unwrap();
     let outside = Region {
         level: 1,
@@ -1605,19 +1606,27 @@ fn buffer_texture_copies_use_texel_strides() {
     };
     assert!(
         commands
-            .copy_buffer_to_texture(source, target, outside, BlitOption::EMPTY)
+            .copy_buffer_to_texture(&mut resolver, source, target, outside, BlitOption::EMPTY)
             .is_err()
     );
     let depth_target = BlitTexture {
         image: Image(10),
         descriptor: &depth,
+        storage: ResourceId::NULL,
     };
     assert_eq!(
-        commands.copy_buffer_to_texture(source, depth_target, region, BlitOption::EMPTY),
+        commands.copy_buffer_to_texture(
+            &mut resolver,
+            source,
+            depth_target,
+            region,
+            BlitOption::EMPTY
+        ),
         Err(Error::Invalid("depth-stencil copies name one aspect"))
     );
     commands
         .copy_buffer_to_texture(
+            &mut resolver,
             source,
             depth_target,
             region,
@@ -1630,7 +1639,13 @@ fn buffer_texture_copies_use_texel_strides() {
         ..source
     };
     commands
-        .copy_texture_to_buffer(target, region, destination, BlitOption::EMPTY)
+        .copy_texture_to_buffer(
+            &mut resolver,
+            target,
+            region,
+            destination,
+            BlitOption::EMPTY,
+        )
         .unwrap();
     commands.generate_mipmaps(target, true).unwrap();
     commands.end_encoding(&mut resolver).unwrap();
@@ -1772,6 +1787,87 @@ fn bindings_validate_slots_and_offsets() {
             .set_compute_sampler(&mut resolver, ResourceId(5), None, 16)
             .is_err()
     );
+}
+
+#[test]
+fn extended_range_buffer_copies_run_the_texel_kernels() {
+    let color = texture(PixelFormat::Bgra10XrSrgb);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_blit().unwrap();
+    let layout = BufferLayout {
+        buffer: buffer(2, 1 << 16),
+        offset: 256,
+        bytes_per_row: 512,
+        bytes_per_image: 0,
+    };
+    let region = Region {
+        slice: 0,
+        level: 1,
+        origin: [8, 4, 0],
+        size: [16, 8, 1],
+    };
+    let target = BlitTexture {
+        image: Image(9),
+        descriptor: &color,
+        storage: ResourceId(0x77),
+    };
+    commands
+        .copy_buffer_to_texture(&mut resolver, layout, target, region, BlitOption::EMPTY)
+        .unwrap();
+    commands
+        .copy_texture_to_buffer(&mut resolver, target, region, layout, BlitOption::EMPTY)
+        .unwrap();
+    let unviewed = BlitTexture {
+        storage: ResourceId::NULL,
+        ..target
+    };
+    assert_eq!(
+        commands.copy_buffer_to_texture(&mut resolver, layout, unviewed, region, BlitOption::EMPTY),
+        Err(Error::Unsupported(
+            "buffer copies of 1D and 3D textures of a stored encoding"
+        ))
+    );
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let commands = &recording.segments[0].commands;
+    assert_eq!(
+        count(commands, |command| matches!(
+            command,
+            Command::CopyBufferToImage { .. } | Command::CopyImageToBuffer { .. }
+        )),
+        0,
+        "the image holds half floats, not the buffer's codes"
+    );
+    let kernels: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match *command {
+            Command::StoreTexels { arguments, count } => Some((true, arguments, count)),
+            Command::LoadTexels { arguments, count } => Some((false, arguments, count)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kernels
+            .iter()
+            .map(|&(store, _, count)| (store, count))
+            .collect::<Vec<_>>(),
+        [(true, 128), (false, 128)]
+    );
+    for &(_, arguments, _) in &kernels {
+        let encoded = uploaded(&recording, arguments);
+        assert_eq!(
+            double(encoded, 0),
+            (2 << 32) + 256,
+            "buffer address and offset"
+        );
+        assert_eq!(word(encoded, 12), 4, "sRGB BGRA10_XR");
+        assert_eq!(double(encoded, 16), 0x77);
+        assert_eq!(
+            [24, 28, 32, 40, 44, 48].map(|at| word(encoded, at)),
+            [16, 8, 512, 8, 4, 0]
+        );
+    }
 }
 
 /// The bytes uploaded at `address`.

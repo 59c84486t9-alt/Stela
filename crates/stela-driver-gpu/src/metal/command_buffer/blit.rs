@@ -1,7 +1,9 @@
 //! `MTLBlitCommandEncoder`.
 //!
 //! Copies map to Vulkan transfer commands with Metal's byte strides
-//! converted to Vulkan's texel strides; fills split unaligned edges into
+//! converted to Vulkan's texel strides, or, for a texture whose image stores
+//! another encoding than its format's bytes, to the texel kernels, which
+//! convert each texel through a raw storage view; fills split unaligned edges into
 //! copies from upload memory; mipmap generation is a chain of linear blits.
 //! Hints with no Vulkan counterpart in the general image layout
 //! (`optimizeContentsFor*Access`) record nothing, and fences need no
@@ -9,6 +11,7 @@
 use super::{BufferRef, CommandBuffer, Encoder, MappedRange, Resolver};
 use crate::metal::{
     abi::BlitOption,
+    binding::{ResourceId, TexelArguments},
     error::{Error, Result, ensure, require},
     hazard::Use,
     pixel_format::{Description, Kind},
@@ -31,6 +34,10 @@ pub(super) const TRANSFER: Use = Use::new(
 pub struct BlitTexture<'a> {
     pub image: Image,
     pub descriptor: &'a TextureDescriptor,
+    /// For a buffer copy of a texture whose image stores another encoding,
+    /// a raw storage view of the copied level's slice, which the texel
+    /// kernels convert through; [`ResourceId::NULL`] otherwise.
+    pub storage: ResourceId,
 }
 
 /// A texel region of one slice and level: `MTLOrigin` and `MTLSize`.
@@ -187,12 +194,16 @@ impl CommandBuffer {
     /// `copyFromBuffer:…toTexture:…options:`.
     pub fn copy_buffer_to_texture(
         &mut self,
+        resolver: &mut dyn Resolver,
         src: BufferLayout,
         dst: BlitTexture,
         region: Region,
         options: BlitOption,
     ) -> Result<()> {
         self.blit()?;
+        if let Some(arguments) = texel_arguments(&src, &dst, &region, options)? {
+            return self.convert_texels(resolver, arguments, true);
+        }
         let copy = buffer_image_copy(&src, &dst, &region, options)?;
         self.recorder.access(TRANSFER);
         self.recorder.push(Command::CopyBufferToImage {
@@ -206,12 +217,16 @@ impl CommandBuffer {
     /// `copyFromTexture:…toBuffer:…options:`.
     pub fn copy_texture_to_buffer(
         &mut self,
+        resolver: &mut dyn Resolver,
         src: BlitTexture,
         region: Region,
         dst: BufferLayout,
         options: BlitOption,
     ) -> Result<()> {
         self.blit()?;
+        if let Some(arguments) = texel_arguments(&dst, &src, &region, options)? {
+            return self.convert_texels(resolver, arguments, false);
+        }
         let copy = buffer_image_copy(&dst, &src, &region, options)?;
         self.recorder.access(TRANSFER);
         self.recorder.push(Command::CopyImageToBuffer {
@@ -436,13 +451,78 @@ impl CommandBuffer {
     /// is a staging buffer: the region is copied there, then published.
     pub fn synchronize_texture(
         &mut self,
+        resolver: &mut dyn Resolver,
         texture: BlitTexture,
         staging: BufferLayout,
         region: Region,
     ) -> Result<()> {
-        self.copy_texture_to_buffer(texture, region, staging, BlitOption::EMPTY)?;
+        self.copy_texture_to_buffer(resolver, texture, region, staging, BlitOption::EMPTY)?;
         self.synchronize()
     }
+
+    /// Runs a texel kernel over a copy's texels: `store` from the buffer
+    /// into the texture, else back.
+    fn convert_texels(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        arguments: TexelArguments,
+        store: bool,
+    ) -> Result<()> {
+        if arguments.count == 0 {
+            return Ok(());
+        }
+        let upload =
+            self.recorder
+                .upload(resolver, &arguments.encode(), TexelArguments::ALIGNMENT)?;
+        self.recorder.access(Use::new(
+            PipelineStages::COMPUTE_SHADER,
+            Access::SHADER_READ.union(Access::SHADER_WRITE),
+        ));
+        let (arguments, count) = (upload.address, arguments.count);
+        self.recorder.push(if store {
+            Command::StoreTexels { arguments, count }
+        } else {
+            Command::LoadTexels { arguments, count }
+        });
+        Ok(())
+    }
+}
+
+/// The texel kernels' arguments for a buffer copy of a texture whose image
+/// stores another encoding than its format's bytes; `None` for one whose
+/// image holds them, which a transfer copies.
+fn texel_arguments(
+    layout: &BufferLayout,
+    texture: &BlitTexture,
+    region: &Region,
+    options: BlitOption,
+) -> Result<Option<TexelArguments>> {
+    let encoding = texture.description().encoding();
+    if encoding.is_exact() {
+        return Ok(None);
+    }
+    require(
+        texture.storage != ResourceId::NULL,
+        "buffer copies of 1D and 3D textures of a stored encoding",
+    )?;
+    let copy = buffer_image_copy(layout, texture, region, options)?;
+    let narrow = |value: u64| {
+        u32::try_from(value).map_err(|_| Error::Unsupported("buffer copies of 4 GiB of texels"))
+    };
+    let [width, height, depth] = copy.extent;
+    let image_bytes = u64::from(copy.buffer_image_height) * layout.bytes_per_row;
+    Ok(Some(TexelArguments {
+        buffer: layout.buffer.address + layout.offset,
+        count: narrow(u64::from(width) * u64::from(height) * u64::from(depth))?,
+        encoding: encoding.texel_kernel(),
+        image: texture.storage.0,
+        width,
+        height,
+        bytes_per_row: narrow(layout.bytes_per_row)?,
+        bytes_per_image: narrow(image_bytes)?,
+        // The view holds the copied slice alone.
+        origin: [copy.offset[0] as u32, copy.offset[1] as u32, 0],
+    }))
 }
 
 /// Metal copies between textures of one format, sRGB pairs or equal block
@@ -476,11 +556,6 @@ fn buffer_image_copy(
     region: &Region,
     options: BlitOption,
 ) -> Result<BufferImageCopy> {
-    // A buffer holds Metal's bytes, which a stored encoding's texels are not.
-    require(
-        texture.description().encoding().is_exact(),
-        "buffer copies of extended-range textures",
-    )?;
     let aspect = texture.copy_aspect(options)?;
     let (subresource, offset, extent) = region.resolve(texture.descriptor, aspect)?;
     let block = texture.description().block;

@@ -397,6 +397,63 @@ impl AccumulateArguments {
     }
 }
 
+/// What the backend's texel kernels read at the push constants'
+/// `arguments`: a buffer copy of a region of one level between Metal's
+/// bytes in the buffer and a texture's stored texels, which a raw storage
+/// view of the level's layers holds. Thread `n` converts texel `n`, counted
+/// along rows, then rows, then images; `origin` is the region's x, y and
+/// first layer in the view.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TexelArguments {
+    pub buffer: u64,
+    pub count: u32,
+    /// `enum stela_metal_texel_encoding`.
+    pub encoding: u32,
+    /// The raw storage view's `gpuResourceID`-shaped identifier.
+    pub image: u64,
+    pub width: u32,
+    pub height: u32,
+    pub bytes_per_row: u32,
+    pub bytes_per_image: u32,
+    pub origin: [u32; 3],
+}
+
+impl TexelArguments {
+    pub const BUFFER_OFFSET: u32 = 0;
+    pub const COUNT_OFFSET: u32 = 8;
+    pub const ENCODING_OFFSET: u32 = 12;
+    pub const IMAGE_OFFSET: u32 = 16;
+    pub const WIDTH_OFFSET: u32 = 24;
+    pub const HEIGHT_OFFSET: u32 = 28;
+    pub const ROW_OFFSET: u32 = 32;
+    pub const IMAGE_BYTES_OFFSET: u32 = 36;
+    pub const ORIGIN_OFFSET: u32 = 40;
+    pub const BYTES: u32 = 56;
+    pub const ALIGNMENT: u64 = 16;
+    /// Threads per workgroup of the kernels.
+    pub const WORKGROUP_SIZE: u32 = 64;
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = alloc::vec![0; Self::BYTES as usize];
+        let mut writer = Writer {
+            bytes: &mut bytes,
+            offset: 0,
+        };
+        writer.u64(self.buffer);
+        writer.u32(self.count);
+        writer.u32(self.encoding);
+        writer.u64(self.image);
+        writer.u32(self.width);
+        writer.u32(self.height);
+        writer.u32(self.bytes_per_row);
+        writer.u32(self.bytes_per_image);
+        for coordinate in self.origin {
+            writer.u32(coordinate);
+        }
+        bytes
+    }
+}
+
 /// What the backend's internal select kernel reads at the push constants'
 /// `arguments`. Thread `n` below `count` writes the 32-bit flag
 /// `flags[n]`: 1 when the `MTLIndirectCommandBufferExecutionRange` at
@@ -919,6 +976,22 @@ mod tests {
                 "STELA_METAL_ACCUMULATE_RUN_BYTES",
                 AccumulateArguments::RUN_BYTES,
             ),
+            ("STELA_METAL_TEXELS_BUFFER", TexelArguments::BUFFER_OFFSET),
+            ("STELA_METAL_TEXELS_COUNT", TexelArguments::COUNT_OFFSET),
+            (
+                "STELA_METAL_TEXELS_ENCODING",
+                TexelArguments::ENCODING_OFFSET,
+            ),
+            ("STELA_METAL_TEXELS_IMAGE", TexelArguments::IMAGE_OFFSET),
+            ("STELA_METAL_TEXELS_WIDTH", TexelArguments::WIDTH_OFFSET),
+            ("STELA_METAL_TEXELS_HEIGHT", TexelArguments::HEIGHT_OFFSET),
+            ("STELA_METAL_TEXELS_ROW", TexelArguments::ROW_OFFSET),
+            (
+                "STELA_METAL_TEXELS_IMAGE_BYTES",
+                TexelArguments::IMAGE_BYTES_OFFSET,
+            ),
+            ("STELA_METAL_TEXELS_ORIGIN", TexelArguments::ORIGIN_OFFSET),
+            ("STELA_METAL_TEXELS_BYTES", TexelArguments::BYTES),
             (
                 "STELA_METAL_INDIRECT_HEADER_BYTES",
                 RecordLayout::HEADER_BYTES,

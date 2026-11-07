@@ -94,7 +94,14 @@ pub unsafe fn stack(
         let service = compiler(physical);
         // SAFETY: the caller guarantees the service and its options.
         let kernels = unsafe { service.internal_kernels() }?;
-        let [accumulate, select, resolve_draws, resolve_dispatches] = kernels.code();
+        let [
+            accumulate,
+            select,
+            resolve_draws,
+            resolve_dispatches,
+            store_texels,
+            load_texels,
+        ] = kernels.code();
         // The kernels last until the pipelines hold their own copies.
         built = Some((service, kernels));
         Ok(InternalKernels {
@@ -102,6 +109,8 @@ pub unsafe fn stack(
             select,
             resolve_draws,
             resolve_dispatches,
+            store_texels,
+            load_texels,
         })
     };
     // SAFETY: the caller guarantees the entry point, and the kernels are the

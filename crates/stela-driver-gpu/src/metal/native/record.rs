@@ -4,7 +4,9 @@ use super::{
     objects::{self, extent, offset, stages, subresource},
 };
 use crate::metal::{
-    binding::{AccumulateArguments, PushConstants, ResolveArguments, SelectArguments},
+    binding::{
+        AccumulateArguments, PushConstants, ResolveArguments, SelectArguments, TexelArguments,
+    },
     command_buffer::Segment,
     error::{Error, Result},
     pass::ClearValue,
@@ -646,6 +648,18 @@ impl Recorder<'_> {
                     arguments,
                     count,
                     ResolveArguments::WORKGROUP_SIZE,
+                ),
+                &Command::StoreTexels { arguments, count } => self.internal(
+                    self.backend.store_texels,
+                    arguments,
+                    count,
+                    TexelArguments::WORKGROUP_SIZE,
+                ),
+                &Command::LoadTexels { arguments, count } => self.internal(
+                    self.backend.load_texels,
+                    arguments,
+                    count,
+                    TexelArguments::WORKGROUP_SIZE,
                 ),
                 &Command::BeginConditionalRendering {
                     buffer: flags,
