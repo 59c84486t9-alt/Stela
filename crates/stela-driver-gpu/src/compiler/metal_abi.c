@@ -359,6 +359,41 @@ static void draw(nir_builder *b, const struct record *record,
        nir_vec2(b, length, nir_imm_int(b, command->draw.index_bytes == 4)), valid);
 }
 
+/* A patch draw's action and arguments in six stores; buffers a shader
+ * names come without lengths, so the record bounds them as unbounded. */
+static void draw_patches(nir_builder *b, const struct record *record,
+                         const struct stela_air_command *command,
+                         struct stela_air_command_encoding *encoding)
+{
+   bool indexed = command->op == STELA_AIR_COMMAND_DRAW_INDEXED_PATCHES;
+   nir_def *valid = record->valid, *zero = nir_imm_int(b, 0);
+   nir_def *unbounded = nir_imm_int(b, STELA_METAL_RECORD_UNBOUNDED);
+   nir_def *control_point_indices = nir_unpack_64_2x32(b, command->patches.control_point_indices);
+   nir_def *patch_indices = nir_unpack_64_2x32(b, command->patches.patch_indices);
+   nir_def *factors = nir_unpack_64_2x32(b, command->patches.factors);
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_ACTION),
+       nir_imm_int(b, indexed ? STELA_METAL_RECORD_DRAW_INDEXED_PATCHES :
+                                STELA_METAL_RECORD_DRAW_PATCHES),
+       valid);
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_VERTICES),
+       nir_vec4(b, command->patches.count, command->patches.instances, command->patches.start,
+                command->patches.control_points),
+       valid);
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_BASE_INSTANCE),
+       nir_vec2(b, command->patches.base_instance, zero), valid);
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_CONTROL_POINT_INDICES),
+       nir_vec4(b, nir_channel(b, control_point_indices, 0),
+                nir_channel(b, control_point_indices, 1), indexed ? unbounded : zero,
+                command->patches.instance_stride),
+       valid);
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_PATCH_INDICES),
+       nir_vec4(b, nir_channel(b, patch_indices, 0), nir_channel(b, patch_indices, 1),
+                nir_channel(b, factors, 0), nir_channel(b, factors, 1)),
+       valid);
+   put(encoding, record_part(b, record, NULL, STELA_METAL_RECORD_PATCH_INDEX_LENGTH),
+       nir_vec4(b, unbounded, unbounded, command->patches.scale, nir_imm_int(b, 1)), valid);
+}
+
 bool stela_metal_encode_command(nir_builder *b, const struct stela_air_command *command,
                                 struct stela_air_command_encoding *encoding, void *stage)
 {
@@ -412,6 +447,10 @@ bool stela_metal_encode_command(nir_builder *b, const struct stela_air_command *
    case STELA_AIR_COMMAND_DRAW:
    case STELA_AIR_COMMAND_DRAW_INDEXED:
       draw(b, &record, command, encoding);
+      return true;
+   case STELA_AIR_COMMAND_DRAW_PATCHES:
+   case STELA_AIR_COMMAND_DRAW_INDEXED_PATCHES:
+      draw_patches(b, &record, command, encoding);
       return true;
    case STELA_AIR_COMMAND_DISPATCH_THREADGROUPS:
    case STELA_AIR_COMMAND_DISPATCH_THREADS: {
@@ -569,11 +608,15 @@ static nir_def *resolve_table(nir_builder *b, nir_def *arguments, nir_def *heade
 
 /* Writes a thread's vertex buffer bindings: the encoder's when the buffer
  * inherits buffers, else the vertex table's, each of its own stride or else
- * the class's. */
+ * the class's. Each buffer's own stride also goes to the sequence's
+ * TessellationArguments, whose evaluation stage fetches layouts of dynamic
+ * stride by it. */
 static void resolve_vertex_buffers(nir_builder *b, nir_def *arguments, nir_def *header,
                                    nir_def *record, nir_def *sequence, nir_def *class,
                                    nir_def *inherit_buffers, nir_variable *counter)
 {
+   nir_def *tessellation_strides = nir_iadd_imm(
+      b, sequence, STELA_METAL_SEQUENCE_TESSELLATION + STELA_METAL_TESSELLATION_STRIDES);
    nir_def *table =
       nir_iadd(b, record, nir_u2u64(b, load(b, header, STELA_METAL_INDIRECT_TABLES, 32)));
    nir_def *slots = load(b, header, STELA_METAL_INDIRECT_TABLE_SLOTS, 32);
@@ -614,8 +657,46 @@ static void resolve_vertex_buffers(nir_builder *b, nir_def *arguments, nir_def *
       store(b, address, target, 0);
       store(b, nir_u2u32(b, nir_umin(b, length, nir_imm_int64(b, UINT32_MAX))), target, 8);
       store(b, nir_bcsel(b, nir_ine_imm(b, own, 0), own, pipeline), target, 12);
+      store(b, own, element(b, tessellation_strides, index, 4), 0);
    }
    pop_count(b, counter, index);
+}
+
+/* A (64-bit address, uint byte length) binding of a record as a
+ * TessellationArguments binding at offset. */
+static void tessellation_binding(nir_builder *b, nir_def *record, unsigned address,
+                                 unsigned length, nir_def *arguments, unsigned offset)
+{
+   store(b, load(b, record, address, 64), arguments, offset);
+   store(b, nir_u2u64(b, load(b, record, length, 32)), arguments, offset + 8);
+}
+
+/* A patch draw's TessellationArguments, in the sequence its push constants'
+ * arguments then address: the record's bindings, control points and
+ * instance stride, and its factor scale where it gave one and the pipeline
+ * scales factors, else the CPU-encoded draws' scale. */
+static void resolve_tessellation(nir_builder *b, nir_def *arguments, nir_def *record,
+                                 nir_def *sequence, nir_def *flags)
+{
+   nir_def *tessellation = nir_iadd_imm(b, sequence, STELA_METAL_SEQUENCE_TESSELLATION);
+   store(b, tessellation, sequence, STELA_METAL_SEQUENCE_PUSH + STELA_METAL_PUSH_ARGUMENTS);
+   tessellation_binding(b, record, STELA_METAL_RECORD_FACTORS, STELA_METAL_RECORD_FACTOR_LENGTH,
+                        tessellation, STELA_METAL_TESSELLATION_FACTORS);
+   tessellation_binding(b, record, STELA_METAL_RECORD_PATCH_INDICES,
+                        STELA_METAL_RECORD_PATCH_INDEX_LENGTH, tessellation,
+                        STELA_METAL_TESSELLATION_PATCH_INDICES);
+   tessellation_binding(b, record, STELA_METAL_RECORD_CONTROL_POINT_INDICES,
+                        STELA_METAL_RECORD_CONTROL_POINT_INDEX_LENGTH, tessellation,
+                        STELA_METAL_TESSELLATION_CONTROL_POINT_INDICES);
+   store(b, load(b, record, STELA_METAL_RECORD_INSTANCE_STRIDE, 32), tessellation,
+         STELA_METAL_TESSELLATION_INSTANCE_STRIDE);
+   nir_def *own = nir_iand(b, nir_ine_imm(b, load(b, record, STELA_METAL_RECORD_SCALED, 32), 0),
+                           nir_test_mask(b, flags, STELA_METAL_RESOLVE_SCALES));
+   nir_def *scale = nir_bcsel(b, own, load(b, record, STELA_METAL_RECORD_FACTOR_SCALE, 32),
+                              load(b, arguments, STELA_METAL_RESOLVE_FACTOR_SCALE, 32));
+   store(b, scale, tessellation, STELA_METAL_TESSELLATION_FACTOR_SCALE);
+   store(b, load(b, record, STELA_METAL_RECORD_CONTROL_POINTS, 32), tessellation,
+         STELA_METAL_TESSELLATION_CONTROL_POINTS);
 }
 
 /* The record of the thread's command, and whether the execution range
@@ -690,6 +771,9 @@ nir_shader *stela_metal_resolve_draws_kernel(const nir_shader_compiler_options *
          STELA_METAL_SEQUENCE_INDEX_BUFFER + 12);
    resolve_vertex_buffers(&b, arguments, header, record, sequence, class, inherit_buffers,
                           counter);
+   nir_push_if(&b, nir_uge_imm(&b, nir_load_var(&b, matched[1]), STELA_METAL_RECORD_DRAW_PATCHES));
+   resolve_tessellation(&b, arguments, record, sequence, flags);
+   nir_pop_if(&b, NULL);
 
    /* (vertex count, instance count, first vertex, base instance), and
     * (index count, instance count, first index, base vertex, base instance)

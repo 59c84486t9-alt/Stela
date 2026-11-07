@@ -618,6 +618,12 @@ pub struct ResolveArguments {
     pub inherit_pipeline: bool,
     pub inherit_buffers: bool,
     pub class_count: u32,
+    /// The factor scale of patch draws the CPU encoded: the encoder's when
+    /// its pipeline enables scaling, else one.
+    pub factor_scale: f32,
+    /// Whether the encoder's pipeline scales factors, so that the scale a
+    /// shader encoded with a patch draw applies.
+    pub scales: bool,
     /// The encoder's push constants, whose tables the commands' tables
     /// copy.
     pub constants: PushConstants,
@@ -657,6 +663,7 @@ impl ResolveArguments {
     pub const SLOT_COUNT_OFFSET: u32 = 56;
     pub const FLAGS_OFFSET: u32 = 60;
     pub const CLASS_COUNT_OFFSET: u32 = 64;
+    pub const FACTOR_SCALE_OFFSET: u32 = 68;
     pub const PUSH_OFFSET: u32 = 72;
     /// The kernel loads each 16-byte vertex buffer and slot as one vector,
     /// so both arrays start on 16-byte boundaries.
@@ -665,6 +672,7 @@ impl ResolveArguments {
     pub const SLOT_BYTES: u32 = 16;
     pub const INHERIT_PIPELINE: u32 = 1;
     pub const INHERIT_BUFFERS: u32 = 2;
+    pub const SCALES: u32 = 4;
     pub const ALIGNMENT: u64 = 16;
     /// Threads per workgroup of the kernel.
     pub const WORKGROUP_SIZE: u32 = 64;
@@ -688,13 +696,15 @@ impl ResolveArguments {
         }
         let flag = |set: bool, flag: u32| if set { flag } else { 0 };
         let flags = flag(self.inherit_pipeline, Self::INHERIT_PIPELINE)
-            | flag(self.inherit_buffers, Self::INHERIT_BUFFERS);
+            | flag(self.inherit_buffers, Self::INHERIT_BUFFERS)
+            | flag(self.scales, Self::SCALES);
         for word in [
             self.count,
             self.first,
             self.slots.len() as u32,
             flags,
             self.class_count,
+            self.factor_scale.to_bits(),
         ] {
             writer.u32(word);
         }
@@ -752,9 +762,10 @@ impl DispatchArguments {
 /// The offsets of a command's device-generated sequence, which the resolve
 /// kernels write and each indirect commands layout reads at its own token
 /// offsets: the execution set index and push constants, then a render
-/// command's index buffer, vertex buffers and draws, or a compute command's
-/// dispatch and the [`DispatchArguments`] its push constants' `arguments`
-/// address.
+/// command's index buffer, vertex buffers and draws, and a patch draw's
+/// [`TessellationArguments`] its push constants' `arguments` address, or a
+/// compute command's dispatch and the [`DispatchArguments`] its push
+/// constants' `arguments` address.
 pub struct GeneratedSequence;
 
 impl GeneratedSequence {
@@ -773,7 +784,9 @@ impl GeneratedSequence {
     /// `VkDispatchIndirectCommand`.
     pub const DISPATCH_OFFSET: u32 = 72;
     pub const DISPATCH_ARGUMENTS_OFFSET: u32 = 96;
-    pub const BYTES: u32 = 640;
+    /// [`TessellationArguments`].
+    pub const TESSELLATION_OFFSET: u32 = 624;
+    pub const BYTES: u32 = 816;
     pub const ALIGNMENT: u64 = 16;
 }
 
@@ -791,6 +804,12 @@ const _: () = assert!(
             .is_multiple_of(DispatchArguments::ALIGNMENT)
         && GeneratedSequence::DISPATCH_ARGUMENTS_OFFSET + DispatchArguments::BYTES
             <= GeneratedSequence::BYTES
+        && GeneratedSequence::DRAW_INDEXED_OFFSET + 20 <= GeneratedSequence::TESSELLATION_OFFSET
+        && (GeneratedSequence::TESSELLATION_OFFSET as u64)
+            .is_multiple_of(TessellationArguments::ALIGNMENT)
+        && GeneratedSequence::TESSELLATION_OFFSET + TessellationArguments::BYTES
+            <= GeneratedSequence::BYTES
+        && (GeneratedSequence::BYTES as u64).is_multiple_of(GeneratedSequence::ALIGNMENT)
 );
 
 struct Writer<'a> {
@@ -1203,6 +1222,48 @@ mod tests {
                 "STELA_METAL_RECORD_DRAW_INDEXED",
                 RecordLayout::DRAW_INDEXED,
             ),
+            (
+                "STELA_METAL_RECORD_DRAW_PATCHES",
+                RecordLayout::DRAW_PATCHES,
+            ),
+            (
+                "STELA_METAL_RECORD_DRAW_INDEXED_PATCHES",
+                RecordLayout::DRAW_INDEXED_PATCHES,
+            ),
+            (
+                "STELA_METAL_RECORD_CONTROL_POINTS",
+                RecordLayout::CONTROL_POINTS,
+            ),
+            (
+                "STELA_METAL_RECORD_CONTROL_POINT_INDICES",
+                RecordLayout::CONTROL_POINT_INDICES,
+            ),
+            (
+                "STELA_METAL_RECORD_CONTROL_POINT_INDEX_LENGTH",
+                RecordLayout::CONTROL_POINT_INDEX_LENGTH,
+            ),
+            (
+                "STELA_METAL_RECORD_INSTANCE_STRIDE",
+                RecordLayout::INSTANCE_STRIDE,
+            ),
+            (
+                "STELA_METAL_RECORD_PATCH_INDICES",
+                RecordLayout::PATCH_INDICES,
+            ),
+            ("STELA_METAL_RECORD_FACTORS", RecordLayout::FACTORS),
+            (
+                "STELA_METAL_RECORD_PATCH_INDEX_LENGTH",
+                RecordLayout::PATCH_INDEX_LENGTH,
+            ),
+            (
+                "STELA_METAL_RECORD_FACTOR_LENGTH",
+                RecordLayout::FACTOR_LENGTH,
+            ),
+            (
+                "STELA_METAL_RECORD_FACTOR_SCALE",
+                RecordLayout::FACTOR_SCALE,
+            ),
+            ("STELA_METAL_RECORD_SCALED", RecordLayout::SCALED),
             ("STELA_METAL_RECORD_DISPATCH", RecordLayout::DISPATCH),
             (
                 "STELA_METAL_RECORD_DISPATCH_THREADS",
@@ -1244,6 +1305,11 @@ mod tests {
                 "STELA_METAL_RESOLVE_CLASS_COUNT",
                 ResolveArguments::CLASS_COUNT_OFFSET,
             ),
+            (
+                "STELA_METAL_RESOLVE_FACTOR_SCALE",
+                ResolveArguments::FACTOR_SCALE_OFFSET,
+            ),
+            ("STELA_METAL_RESOLVE_SCALES", ResolveArguments::SCALES),
             ("STELA_METAL_RESOLVE_PUSH", ResolveArguments::PUSH_OFFSET),
             (
                 "STELA_METAL_RESOLVE_VERTEX_BUFFERS",
@@ -1291,6 +1357,10 @@ mod tests {
             (
                 "STELA_METAL_SEQUENCE_DISPATCH_ARGUMENTS",
                 GeneratedSequence::DISPATCH_ARGUMENTS_OFFSET,
+            ),
+            (
+                "STELA_METAL_SEQUENCE_TESSELLATION",
+                GeneratedSequence::TESSELLATION_OFFSET,
             ),
             (
                 "STELA_METAL_SEQUENCE_INDEX_BUFFER",

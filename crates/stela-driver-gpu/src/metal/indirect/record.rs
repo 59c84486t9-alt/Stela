@@ -15,6 +15,7 @@ use super::{IndirectAction, IndirectCommand, IndirectCommandBufferDescriptor};
 use crate::metal::{
     abi::{IndirectCommandType, PrimitiveType},
     capabilities::Size,
+    command_buffer::BufferRef,
     error::{Error, Result, ensure},
     shader::Stage,
 };
@@ -117,27 +118,54 @@ impl RecordLayout {
     pub const STAGE_IN_ORIGIN: u32 = 40;
     pub const STAGE_IN_SIZE: u32 = 52;
     pub const STAGE_IN: u32 = 64;
-    pub const PREFIX_BYTES: u32 = 80;
+    /// Patch arguments, which draw as the render arguments' points: patch
+    /// count at `VERTICES`, instance count, patch start at `FIRST_VERTEX`,
+    /// control points per patch, base instance and a zero primitive type;
+    /// then the control point indices' address and byte length, the
+    /// factors' instance stride, the patch indices' and factors' addresses,
+    /// their byte lengths, and the factor scale with a flag that the
+    /// command gave it, without which the encoder's applies.
+    pub const CONTROL_POINTS: u32 = 28;
+    pub const CONTROL_POINT_INDICES: u32 = 40;
+    pub const CONTROL_POINT_INDEX_LENGTH: u32 = 48;
+    pub const INSTANCE_STRIDE: u32 = 52;
+    pub const PATCH_INDICES: u32 = 56;
+    pub const FACTORS: u32 = 64;
+    pub const PATCH_INDEX_LENGTH: u32 = 72;
+    pub const FACTOR_LENGTH: u32 = 76;
+    pub const FACTOR_SCALE: u32 = 80;
+    pub const SCALED: u32 = 84;
+    pub const PREFIX_BYTES: u32 = 96;
 
-    /// Actions: render records draw or draw indexed, compute records
-    /// dispatch threadgroups or threads; zero does nothing.
+    /// Actions: render records draw, draw indexed or draw patches with or
+    /// without control point indices, compute records dispatch threadgroups
+    /// or threads; zero does nothing.
     pub const DRAW: u32 = 1;
     pub const DRAW_INDEXED: u32 = 2;
+    pub const DRAW_PATCHES: u32 = 3;
+    pub const DRAW_INDEXED_PATCHES: u32 = 4;
     pub const DISPATCH: u32 = 1;
     pub const DISPATCH_THREADS: u32 = 2;
 
     /// The layout of a buffer of `count` commands, refusing commands
-    /// records cannot hold: patch and mesh draws, which need the CPU's
-    /// per-draw arguments and pipeline variants, and rasterizer state the
-    /// encoder does not provide.
+    /// records cannot hold: mesh draws, which need pipeline variants per
+    /// draw, patch draws of pipelines the commands set, which no execution
+    /// set holds, and rasterizer state the encoder does not provide.
     pub fn new(descriptor: &IndirectCommandBufferDescriptor, count: usize) -> Result<Self> {
+        let patches = IndirectCommandType::DRAW_PATCHES | IndirectCommandType::DRAW_INDEXED_PATCHES;
         let recordable = IndirectCommandType::DRAW
             | IndirectCommandType::DRAW_INDEXED
             | IndirectCommandType::CONCURRENT_DISPATCH
-            | IndirectCommandType::CONCURRENT_DISPATCH_THREADS;
+            | IndirectCommandType::CONCURRENT_DISPATCH_THREADS
+            | patches;
         if !recordable.contains(descriptor.command_types) {
             return Err(Error::Unsupported(
-                "patch and mesh draws in GPU-resident indirect command buffers",
+                "mesh draws in GPU-resident indirect command buffers",
+            ));
+        }
+        if descriptor.command_types.intersects(patches) && !descriptor.inherit_pipeline_state {
+            return Err(Error::Unsupported(
+                "GPU-resident patch draws of pipelines the commands set",
             ));
         }
         let renders = descriptor.renders();
@@ -374,6 +402,66 @@ impl RecordLayout {
                     &words(&[length as u32, index_type.raw() as u32]),
                 );
             }
+            Some(&IndirectAction::DrawPatches {
+                source,
+                patch_start,
+                patch_count,
+                instance_count,
+                base_instance,
+                factors: (factors, factor_offset, instance_stride),
+            }) => {
+                let binding = |(buffer, offset): (BufferRef, u64), alignment: u64| {
+                    ensure(
+                        offset.is_multiple_of(alignment),
+                        "patch buffer offsets are aligned to their elements",
+                    )?;
+                    buffer.at(offset, 0)?;
+                    let length = (buffer.length - offset).min(u32::MAX.into()) as u32;
+                    Ok::<_, Error>((buffer.address + offset, length))
+                };
+                let none = (0, 0);
+                let factors = binding((factors, factor_offset), 4)?;
+                let patch_indices = source
+                    .patch_indices
+                    .map_or(Ok(none), |indices| binding(indices, 4))?;
+                // The pipeline's index type, 2 or 4 bytes, aligns them.
+                let control_point_indices = source
+                    .control_point_indices
+                    .map_or(Ok(none), |indices| binding(indices, 2))?;
+                let instance_stride = u32::try_from(instance_stride)
+                    .map_err(|_| Error::Invalid("tessellation factor instance stride"))?;
+                let action = match source.control_point_indices {
+                    Some(_) => Self::DRAW_INDEXED_PATCHES,
+                    None => Self::DRAW_PATCHES,
+                };
+                record.put(Self::ACTION, &action.to_le_bytes());
+                record.put(
+                    Self::VERTICES,
+                    &words(&[
+                        patch_count,
+                        instance_count,
+                        patch_start,
+                        source.control_points,
+                        base_instance,
+                        0,
+                    ]),
+                );
+                record.put(
+                    Self::CONTROL_POINT_INDICES,
+                    &control_point_indices.0.to_le_bytes(),
+                );
+                record.put(
+                    Self::CONTROL_POINT_INDEX_LENGTH,
+                    &words(&[control_point_indices.1, instance_stride]),
+                );
+                record.put(Self::PATCH_INDICES, &patch_indices.0.to_le_bytes());
+                record.put(Self::FACTORS, &factors.0.to_le_bytes());
+                // The encoder's factor scale applies to CPU-encoded draws.
+                record.put(
+                    Self::PATCH_INDEX_LENGTH,
+                    &words(&[patch_indices.1, factors.1, 0, 0]),
+                );
+            }
             Some(IndirectAction::Dispatch {
                 threadgroups,
                 threads,
@@ -389,7 +477,7 @@ impl RecordLayout {
             }
             Some(_) => {
                 return Err(Error::Unsupported(
-                    "patch and mesh draws in GPU-resident indirect command buffers",
+                    "mesh draws in GPU-resident indirect command buffers",
                 ));
             }
         }

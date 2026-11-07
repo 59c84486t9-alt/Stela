@@ -43,7 +43,11 @@ static const char *module =
    "declare void @air.concurrent_dispatch_threads_compute_command(ptr addrspace(1), i32, <3 x i32>,"
    " <3 x i32>)\n"
    "declare void @air.draw_patches_render_command.p1i32.p1i8(ptr addrspace(1), i32, i32, i32, i32,"
-   " ptr addrspace(1), i32, i32, ptr addrspace(1), i32, float)\n";
+   " ptr addrspace(1), i32, i32, ptr addrspace(1), i32, float)\n"
+   "declare void @air.draw_indexed_patches_render_command.p1i32.p1i8.p1i8(ptr addrspace(1), i32,"
+   " i32, i32, i32, ptr addrspace(1), ptr addrspace(1), i32, i32, ptr addrspace(1), i32, float)\n"
+   "declare void @air.draw_mesh_threads_render_command(ptr addrspace(1), i32, <3 x i32>,"
+   " <3 x i32>, <3 x i32>)\n";
 
 #define KERNEL(body) \
    "define void @kernel(ptr addrspace(1) %icb, ptr addrspace(1) %vertices," \
@@ -177,8 +181,8 @@ translated(const char *body, const char *metadata)
 struct layout {
    uint32_t stride, count, tables[2], table_slots[2], words, word_count;
 };
-static const struct layout render_layout = {224, 3, {80, 144}, {4, 4}, 208, 4};
-static const struct layout compute_layout = {160, 2, {80, 0}, {4, 0}, 144, 4};
+static const struct layout render_layout = {240, 3, {96, 160}, {4, 4}, 224, 4};
+static const struct layout compute_layout = {176, 2, {96, 0}, {4, 0}, 160, 4};
 
 static uint8_t memory[MEMORY];
 static uint8_t push[STELA_METAL_PUSH_BYTES];
@@ -333,6 +337,55 @@ kernels_encode_compute_commands(void)
    ralloc_free(shader);
 }
 
+/* Patch draws, with and without control point indices; the buffers a
+ * shader names are unbounded and its factor scale applies. */
+static void
+kernels_encode_patch_draws(void)
+{
+   const char *body = KERNEL(
+      "call void @air.draw_indexed_patches_render_command.p1i32.p1i8.p1i8(ptr addrspace(1) %cb,"
+      " i32 1, i32 4, i32 5, i32 7, ptr addrspace(1) %indices, ptr addrspace(1) %vertices, i32 2,"
+      " i32 1, ptr addrspace(1) %out, i32 48, float 2.0)\n"
+      "call void @air.draw_patches_render_command.p1i32.p1i8(ptr addrspace(1) %cb, i32 0, i32 3,"
+      " i32 0, i32 2, ptr addrspace(1) null, i32 1, i32 0, ptr addrspace(1) %vertices, i32 0,"
+      " float 1.0)\n");
+   nir_shader *shader = translated(body, metadata(false));
+   const struct layout *l = &render_layout;
+   run(shader, l);
+   const uint8_t *r = record(COMMANDS, l, 1);
+   assert(get32(r + STELA_METAL_RECORD_ACTION) == STELA_METAL_RECORD_DRAW_INDEXED_PATCHES);
+   /* Patch count, instances, patch start, control points, base instance
+    * and no primitive type. */
+   const uint32_t arguments[] = {7, 2, 5, 4, 1, 0};
+   for (unsigned i = 0; i < ARRAY_SIZE(arguments); i++)
+      assert(get32(r + STELA_METAL_RECORD_VERTICES + 4 * i) == arguments[i]);
+   assert(get64(r + STELA_METAL_RECORD_CONTROL_POINT_INDICES) == VERTICES);
+   assert(get32(r + STELA_METAL_RECORD_CONTROL_POINT_INDEX_LENGTH) ==
+          STELA_METAL_RECORD_UNBOUNDED);
+   assert(get32(r + STELA_METAL_RECORD_INSTANCE_STRIDE) == 48);
+   assert(get64(r + STELA_METAL_RECORD_PATCH_INDICES) == INDICES);
+   assert(get64(r + STELA_METAL_RECORD_FACTORS) == BASE + OUT);
+   assert(get32(r + STELA_METAL_RECORD_PATCH_INDEX_LENGTH) == STELA_METAL_RECORD_UNBOUNDED);
+   assert(get32(r + STELA_METAL_RECORD_FACTOR_LENGTH) == STELA_METAL_RECORD_UNBOUNDED);
+   assert(get32(r + STELA_METAL_RECORD_FACTOR_SCALE) == 0x40000000u);
+   assert(get32(r + STELA_METAL_RECORD_SCALED) == 1);
+   /* The draw keeps the command's pipeline, barrier and tables. */
+   assert(untouched(r + STELA_METAL_RECORD_BARRIER, 12));
+   assert(untouched(r + l->tables[0], l->stride - l->tables[0]));
+
+   r = record(COMMANDS, l, 0);
+   assert(get32(r + STELA_METAL_RECORD_ACTION) == STELA_METAL_RECORD_DRAW_PATCHES);
+   assert(get32(r + STELA_METAL_RECORD_VERTICES) == 2);
+   assert(get32(r + STELA_METAL_RECORD_CONTROL_POINTS) == 3);
+   assert(get64(r + STELA_METAL_RECORD_PATCH_INDICES) == 0);
+   assert(get64(r + STELA_METAL_RECORD_CONTROL_POINT_INDICES) == 0);
+   assert(get32(r + STELA_METAL_RECORD_CONTROL_POINT_INDEX_LENGTH) == 0);
+   assert(get64(r + STELA_METAL_RECORD_FACTORS) == VERTICES);
+   assert(get32(r + STELA_METAL_RECORD_FACTOR_SCALE) == 0x3f800000u);
+   assert(untouched(record(COMMANDS, l, 2), l->stride));
+   ralloc_free(shader);
+}
+
 /* Before Metal 3.1 a buffer command takes no stride. */
 static void
 older_kernels_set_buffers_without_strides(void)
@@ -362,8 +415,15 @@ refused(const char *body, const char *metadata, enum stela_air_error_kind kind)
 static void
 unsupported_commands_are_refused(void)
 {
-   /* Patch draws are not lowered. */
-   refused(KERNEL("call void @air.draw_patches_render_command.p1i32.p1i8(ptr addrspace(1) %cb,"
+   /* Mesh draws are not lowered. */
+   refused(KERNEL("call void @air.draw_mesh_threads_render_command(ptr addrspace(1) %cb, i32 0,"
+                  " <3 x i32> <i32 1, i32 1, i32 1>, <3 x i32> <i32 1, i32 1, i32 1>,"
+                  " <3 x i32> <i32 1, i32 1, i32 1>)\n"),
+           metadata(false), STELA_AIR_INSTRUCTION);
+   /* A patch draw whose patch indices are not uints. */
+   refused("declare void @air.draw_patches_render_command.p1i8.p1i8(ptr addrspace(1), i32, i32,"
+           " i32, i32, ptr addrspace(1), i32, i32, ptr addrspace(1), i32, float)\n"
+           KERNEL("call void @air.draw_patches_render_command.p1i8.p1i8(ptr addrspace(1) %cb,"
                   " i32 0, i32 3, i32 0, i32 1, ptr addrspace(1) %indices, i32 1, i32 0,"
                   " ptr addrspace(1) %vertices, i32 0, float 1.0)\n"),
            metadata(false), STELA_AIR_INSTRUCTION);
@@ -392,6 +452,7 @@ main(void)
    glsl_type_singleton_init_or_ref();
    kernels_encode_render_commands();
    kernels_encode_compute_commands();
+   kernels_encode_patch_draws();
    older_kernels_set_buffers_without_strides();
    unsupported_commands_are_refused();
    glsl_type_singleton_decref();

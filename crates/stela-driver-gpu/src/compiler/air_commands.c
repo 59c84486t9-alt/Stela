@@ -4,7 +4,8 @@
  * takes the command_buffer an argument buffer holds and the command's
  * index, then the method's arguments. A buffer setter's name carries its
  * pointer's overload, ".p1i8" or ".p2i8", and an indexed draw's that of its
- * indices, ".p1i16" or ".p1i32". */
+ * indices, ".p1i16" or ".p1i32"; a patch draw's names each pointer's, its
+ * patch indices' as uints and the rest as bytes. */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_commands.h"
 #include <stdio.h>
@@ -12,7 +13,7 @@
 
 /* One function. Its signature spells the operands after the buffer and the
  * index: C a command_buffer, S a pipeline state, P a buffer pointer, u a
- * uint, l a 64-bit stride (~0 for none) and v a uint3. */
+ * uint, l a 64-bit stride (~0 for none), f a float and v a uint3. */
 struct form {
    const char *name; /* Between "air." and any overload. */
    enum stela_air_command_op op;
@@ -43,13 +44,16 @@ static const struct form forms[] = {
    {"set_stage_in_region_compute_command", STELA_AIR_COMMAND_STAGE_IN_REGION, false, 0, "vv"},
    {"draw_primitives_render_command", STELA_AIR_COMMAND_DRAW, true, 0, "uuuuu"},
    {"draw_indexed_primitives_render_command", STELA_AIR_COMMAND_DRAW_INDEXED, true, 0, "uuPuuu"},
+   {"draw_patches_render_command", STELA_AIR_COMMAND_DRAW_PATCHES, true, 0, "uuuPuuPuf"},
+   {"draw_indexed_patches_render_command", STELA_AIR_COMMAND_DRAW_INDEXED_PATCHES, true, 0,
+    "uuuPPuuPuf"},
    {"concurrent_dispatch_threadgroups_compute_command", STELA_AIR_COMMAND_DISPATCH_THREADGROUPS,
     false, 0, "vv"},
    {"concurrent_dispatch_threads_compute_command", STELA_AIR_COMMAND_DISPATCH_THREADS, false, 0,
     "vv"},
 };
 
-#define MAX_OPERANDS 8u
+#define MAX_OPERANDS 12u
 
 static bool
 ends_with(const char *name, size_t bytes, const char *suffix)
@@ -80,6 +84,8 @@ operand_type(LLVMTypeRef type, char kind)
       return integer(type, 32);
    case 'l':
       return integer(type, 64);
+   case 'f':
+      return LLVMGetTypeKind(type) == LLVMFloatTypeKind;
    default:
       return LLVMGetTypeKind(type) == LLVMVectorTypeKind && LLVMGetVectorSize(type) == 3 &&
              integer(LLVMGetElementType(type), 32);
@@ -103,10 +109,25 @@ typed(const struct stela_air_command_context *c, LLVMValueRef call, LLVMValueRef
 }
 
 /* The name a form's call must have: its pointer operand's overload, and for
- * an indexed draw that of its index_bytes indices. */
+ * an indexed draw that of its index_bytes indices; for a patch draw each
+ * pointer's, the patch indices' a uint's and the others a byte's. */
 static void
 form_name(const struct form *form, LLVMValueRef call, unsigned index_bytes, char *name, size_t size)
 {
+   if (form->op == STELA_AIR_COMMAND_DRAW_PATCHES ||
+       form->op == STELA_AIR_COMMAND_DRAW_INDEXED_PATCHES) {
+      int length = snprintf(name, size, "air.%s", form->name);
+      bool first = true;
+      for (unsigned i = 0; form->signature[i] && length >= 0 && (size_t)length < size; i++) {
+         if (form->signature[i] != 'P')
+            continue;
+         LLVMTypeRef type = LLVMTypeOf(LLVMGetOperand(call, 2 + i));
+         length += snprintf(name + length, size - (size_t)length, ".p%ui%u",
+                            LLVMGetPointerAddressSpace(type), first ? 32 : 8);
+         first = false;
+      }
+      return;
+   }
    const char *pointer = strchr(form->signature, 'P');
    if (!pointer) {
       snprintf(name, size, "air.%s", form->name);
@@ -183,6 +204,22 @@ fill(nir_builder *b, const struct form *form, nir_def *const *values, unsigned i
       command->draw.base_vertex = v[4];
       command->draw.base_instance = v[5];
       break;
+   case STELA_AIR_COMMAND_DRAW_PATCHES:
+   case STELA_AIR_COMMAND_DRAW_INDEXED_PATCHES: {
+      bool indexed = form->op == STELA_AIR_COMMAND_DRAW_INDEXED_PATCHES;
+      command->patches.control_points = v[0];
+      command->patches.start = v[1];
+      command->patches.count = v[2];
+      command->patches.patch_indices = v[3];
+      command->patches.control_point_indices = indexed ? v[4] : nir_imm_int64(b, 0);
+      v += indexed;
+      command->patches.instances = v[4];
+      command->patches.base_instance = v[5];
+      command->patches.factors = v[6];
+      command->patches.instance_stride = v[7];
+      command->patches.scale = v[8];
+      break;
+   }
    case STELA_AIR_COMMAND_DISPATCH_THREADGROUPS:
    case STELA_AIR_COMMAND_DISPATCH_THREADS:
       command->dispatch.grid = v[0];

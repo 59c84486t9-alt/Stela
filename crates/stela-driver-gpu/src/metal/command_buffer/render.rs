@@ -242,7 +242,7 @@ pub(super) struct RenderState {
     restart: Option<bool>,
     pub(super) amplification: Amplification,
     pub(super) factors: Option<FactorBuffer>,
-    factor_scale: f32,
+    pub(super) factor_scale: f32,
     pub(super) raster: RasterState,
     visibility: Visibility,
     samples: Vec<(CounterSample, PassBoundary)>,

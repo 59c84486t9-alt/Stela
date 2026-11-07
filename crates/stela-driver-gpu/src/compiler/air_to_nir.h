@@ -106,6 +106,8 @@ enum stela_air_command_op {
    STELA_AIR_COMMAND_STAGE_IN_REGION,
    STELA_AIR_COMMAND_DRAW,
    STELA_AIR_COMMAND_DRAW_INDEXED,
+   STELA_AIR_COMMAND_DRAW_PATCHES,
+   STELA_AIR_COMMAND_DRAW_INDEXED_PATCHES,
    STELA_AIR_COMMAND_DISPATCH_THREADGROUPS,
    STELA_AIR_COMMAND_DISPATCH_THREADS,
 };
@@ -146,6 +148,15 @@ struct stela_air_command {
             *base_instance;
          unsigned index_bytes;
       } draw;
+      /* DRAW_PATCHES and DRAW_INDEXED_PATCHES: the control points per
+       * patch, patch start and count, the patch indices' 64-bit address
+       * (zero for none), an indexed draw's control point indices' 64-bit
+       * address, the instance count and base instance, the factors' 64-bit
+       * address and instance stride, and the factor scale, a float. */
+      struct {
+         nir_def *control_points, *start, *count, *patch_indices, *control_point_indices,
+            *instances, *base_instance, *factors, *instance_stride, *scale;
+      } patches;
       /* DISPATCH_*: the threadgroups or threads of the grid, and the
        * threads per threadgroup, as uvec3s. */
       struct {

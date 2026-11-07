@@ -3012,6 +3012,111 @@ fn resident_draws_execute_one_generated_sequence_per_slot() {
 }
 
 #[test]
+fn resident_patch_draws_run_as_point_draws_of_the_encoders_pipeline() {
+    let descriptor = IndirectCommandBufferDescriptor {
+        inherit_pipeline_state: true,
+        inherit_cull_mode: true,
+        ..icb_descriptor(IndirectCommandType::DRAW_INDEXED_PATCHES)
+    };
+    let mut icb = IndirectCommandBuffer::new(&capabilities(), &descriptor, 2).unwrap();
+    let source = PatchSource {
+        control_points: 4,
+        patch_indices: None,
+        control_point_indices: Some((buffer(5, 4096), 64)),
+    };
+    for index in 0..2 {
+        icb.render_command(index)
+            .unwrap()
+            .draw_patches(&source, 0, 2, 1, 0, (buffer(4, 1024), 96, 48))
+            .unwrap();
+    }
+    let mut resolver = MockResolver {
+        indirect: alloc::vec![Arc::new(icb)],
+        ..MockResolver::default()
+    };
+    resolver
+        .indirect_records(IndirectCommandBufferId(0))
+        .unwrap();
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    let state = patch_state(None);
+    commands.set_render_pipeline_state(&state).unwrap();
+    commands.set_tessellation_factor_scale(2.0).unwrap();
+    commands
+        .execute_commands(
+            &mut resolver,
+            IndirectCommandBufferId(0),
+            ExecutionRange::Direct(0..2),
+        )
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    // No vertex buffer feeds the patches' points.
+    assert_eq!(
+        resolver
+            .layouts
+            .iter()
+            .map(|key| &key.work)
+            .collect::<Vec<_>>(),
+        [&GeneratedWork::Draw {
+            indexed: false,
+            vertex_buffers: Vec::new(),
+        }]
+    );
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let commands = &recording.segments[0].commands;
+    let Some(&Command::ResolveDraws { arguments, .. }) = commands
+        .iter()
+        .find(|command| matches!(command, Command::ResolveDraws { .. }))
+    else {
+        panic!("no resolve");
+    };
+    let arguments = uploaded(&recording, arguments);
+    assert_eq!(
+        word(arguments, ResolveArguments::FLAGS_OFFSET as usize),
+        ResolveArguments::INHERIT_PIPELINE | ResolveArguments::SCALES
+    );
+    assert_eq!(
+        word(arguments, ResolveArguments::FACTOR_SCALE_OFFSET as usize),
+        2.0f32.to_bits(),
+        "the pipeline scales its factors"
+    );
+    assert_eq!(
+        word(arguments, ResolveArguments::SLOT_COUNT_OFFSET as usize),
+        1
+    );
+    let slot = ResolveArguments::SLOTS_OFFSET as usize;
+    assert_eq!(
+        [word(arguments, slot + 4), word(arguments, slot + 8)],
+        [RecordLayout::DRAW_INDEXED_PATCHES, 0]
+    );
+    // One execution per command, each a patch list's.
+    assert_eq!(generated(commands).len(), 2);
+    let topologies: Vec<_> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::SetPrimitiveTopology(topology) => Some(*topology),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        topologies,
+        [crate::metal::vulkan::PrimitiveTopology::PatchList]
+    );
+    assert!(commands.contains(&Command::BindPipeline {
+        bind_point: PipelineBindPoint::Graphics,
+        pipeline: Pipeline(43),
+    }));
+}
+
+#[test]
 fn resident_draws_switch_pipelines_through_execution_sets() {
     let descriptor = IndirectCommandBufferDescriptor {
         inherit_cull_mode: true,
@@ -3026,6 +3131,7 @@ fn resident_draws_switch_pipelines_through_execution_sets() {
         stages: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
         rasterization: true,
         topology: PrimitiveTopologyClass::Triangle,
+        patches: None,
         vertex_buffers: alloc::vec![(0, Some(16)), (3, None)],
         storage_attachments: 0,
         blended_attachments: 1,

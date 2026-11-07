@@ -9,7 +9,12 @@
 //! one execution per slot, each limited to the command's count of that
 //! slot, so at most one draws. Before each, the slot's class binds one of
 //! its pipelines, its rasterizer discard and the slot's topology; the
-//! execution set token then switches to the command's shaders.
+//! execution set token then switches to the command's shaders. A
+//! tessellated pipeline's patch draws, which the encoder's pipeline makes
+//! when the buffer inherits it, draw their patches as points with the
+//! [`TessellationArguments`](crate::metal::binding::TessellationArguments)
+//! the resolve writes into each sequence, in a statistics interval of
+//! their own, as direct patch draws do.
 //!
 //! In a compute encoder, the dispatch resolve gives each command its
 //! dispatch, zero threadgroups when it runs nothing, and the
@@ -25,7 +30,10 @@ use super::{
     render::{primitive_topology, render},
 };
 use crate::metal::{
-    abi::{BarrierScope, IndirectCommandType, PrimitiveTopologyClass, PrimitiveType, RenderStages},
+    abi::{
+        BarrierScope, IndirectCommandType, PrimitiveTopologyClass, PrimitiveType, RenderStages,
+        TessellationControlPointIndexType,
+    },
     binding::{ArgumentTable, GeneratedSequence, PushConstants, ResolveArguments, ResolveSlot},
     error::{Error, Result, ensure},
     hazard::{RENDER_PASS, Use},
@@ -35,7 +43,7 @@ use crate::metal::{
     },
     shader::Stage,
     vulkan::{
-        Access, PipelineBindPoint, PipelineStages, ShaderStages,
+        Access, PipelineBindPoint, PipelineStages, PrimitiveTopology, ShaderStages,
         backend::Requirements,
         command::{Command, GeneratedCommands},
         object::{
@@ -58,6 +66,10 @@ pub struct IndirectRenderClass {
     pub stages: ShaderStages,
     pub rasterization: bool,
     pub topology: PrimitiveTopologyClass,
+    /// The record action of a tessellated class's patch draws, with or
+    /// without control point indices by its pipeline's index type; `None`
+    /// for vertex pipelines.
+    pub patches: Option<u32>,
     /// The vertex buffer indices the pipelines read, with their static
     /// strides.
     pub vertex_buffers: Vec<(u32, Option<u32>)>,
@@ -136,7 +148,8 @@ impl GeneratedLayoutKey {
 /// One execution of each render command: its slot and how it runs.
 struct Execution {
     class: usize,
-    primitive: PrimitiveType,
+    /// The slot's primitive type; `None` for patches.
+    primitive: Option<PrimitiveType>,
     layout: IndirectCommandsLayout,
     preprocess: Requirements,
 }
@@ -196,6 +209,7 @@ impl CommandBuffer {
             first: first as u32,
             inherit_pipeline: descriptor.inherit_pipeline_state,
             inherit_buffers: descriptor.inherit_buffers,
+            factor_scale: 1.0,
             ..ResolveArguments::default()
         };
         let barriers = buffer.has_barriers();
@@ -214,12 +228,58 @@ impl CommandBuffer {
         barriers: bool,
     ) -> Result<()> {
         let classes = self.indirect_classes(resolver, descriptor.inherit_pipeline_state)?;
+        // Patch draws scale their factors as the encoder's pipeline does:
+        // CPU-encoded ones by the encoder's scale, shader-encoded ones by
+        // their own.
+        let render = render(&mut self.encoder)?;
+        let scales = descriptor.inherit_pipeline_state
+            && render
+                .pipeline
+                .as_ref()
+                .and_then(|state| state.plan.tessellation.as_ref())
+                .is_some_and(|tessellation| tessellation.factor_scale);
+        arguments.scales = scales;
+        arguments.factor_scale = if scales { render.factor_scale } else { 1.0 };
         let mut executions = Vec::new();
         let draws = [
             (IndirectCommandType::DRAW, false),
             (IndirectCommandType::DRAW_INDEXED, true),
         ];
         for (index, class) in classes.iter().enumerate() {
+            if let Some(action) = class.patches {
+                let kind = match action {
+                    RecordLayout::DRAW_INDEXED_PATCHES => IndirectCommandType::DRAW_INDEXED_PATCHES,
+                    _ => IndirectCommandType::DRAW_PATCHES,
+                };
+                if !descriptor.command_types.contains(kind) {
+                    continue;
+                }
+                // Each patch is one point of a patch list, which no vertex
+                // buffer feeds.
+                let key = GeneratedLayoutKey {
+                    stages: class.stages,
+                    execution_set: class.set.is_some(),
+                    work: GeneratedWork::Draw {
+                        indexed: false,
+                        vertex_buffers: Vec::new(),
+                    },
+                };
+                let (layout, preprocess) = resolver.generated_layout(&key, class.set, 1)?;
+                executions.push((
+                    ResolveSlot {
+                        class: class.index,
+                        action,
+                        primitive: 0,
+                    },
+                    Execution {
+                        class: index,
+                        primitive: None,
+                        layout,
+                        preprocess,
+                    },
+                ));
+                continue;
+            }
             for (_, indexed) in draws
                 .iter()
                 .filter(|(kind, _)| descriptor.command_types.contains(*kind))
@@ -249,7 +309,7 @@ impl CommandBuffer {
                         },
                         Execution {
                             class: index,
-                            primitive,
+                            primitive: Some(primitive),
                             layout,
                             preprocess,
                         },
@@ -291,12 +351,20 @@ impl CommandBuffer {
                         .push(Command::SetRasterizerDiscard(!class.rasterization));
                 }
                 if last.is_none_or(|(_, known)| known != execution.primitive) {
-                    let topology = primitive_topology(execution.primitive);
+                    let (topology, restart) = match execution.primitive {
+                        Some(primitive) => (primitive_topology(primitive), primitive.is_strip()),
+                        None => (PrimitiveTopology::PatchList, false),
+                    };
                     self.recorder.push(Command::SetPrimitiveTopology(topology));
-                    self.recorder
-                        .push(Command::SetPrimitiveRestart(execution.primitive.is_strip()));
+                    self.recorder.push(Command::SetPrimitiveRestart(restart));
                 }
                 let preprocess = regions.next().expect("a region per execution");
+                // A patch draw's synthesized vertex stage is not a Metal
+                // vertex function, so its statistics count apart.
+                let patches = execution.primitive.is_none();
+                if patches {
+                    self.recorder.split_statistics(resolver, true)?;
+                }
                 self.recorder
                     .push(Command::ExecuteGeneratedCommands(GeneratedCommands {
                         stages: class.stages,
@@ -309,6 +377,9 @@ impl CommandBuffer {
                         sequences: 1,
                         count: Some(counts + (command * slot_count + slot as u64) * 4),
                     }));
+                if patches {
+                    self.recorder.split_statistics(resolver, false)?;
+                }
             }
         }
         self.after_generated_commands()
@@ -405,11 +476,18 @@ impl CommandBuffer {
             .as_ref()
             .ok_or(Error::Invalid("no render pipeline state is set"))?;
         let plan = &state.plan;
-        if plan.mesh.is_some() || plan.tessellation.is_some() {
+        if plan.mesh.is_some() {
             return Err(Error::Unsupported(
-                "GPU-resident indirect draws of mesh and tessellated pipelines",
+                "GPU-resident indirect draws of mesh pipelines",
             ));
         }
+        let patches =
+            plan.tessellation
+                .as_ref()
+                .map(|tessellation| match tessellation.control_point_index {
+                    TessellationControlPointIndexType::None => RecordLayout::DRAW_PATCHES,
+                    _ => RecordLayout::DRAW_INDEXED_PATCHES,
+                });
         Ok(alloc::vec![IndirectRenderClass {
             index: 0,
             set: None,
@@ -423,6 +501,7 @@ impl CommandBuffer {
                 .fold(ShaderStages::EMPTY, |stages, &(stage, _)| stages | stage),
             rasterization: plan.rasterization_enabled,
             topology: plan.topology_class,
+            patches,
             vertex_buffers: plan
                 .info
                 .vertex_input

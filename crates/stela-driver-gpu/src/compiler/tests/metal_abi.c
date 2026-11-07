@@ -329,9 +329,11 @@ static void resolve_writes_each_command_sequence(void)
    assert(census.loops == 6);
    /* The execution set index, 16 push constant words, per stage a table
     * word, its two slot fields and its address, the index buffer's three
-    * fields, a vertex buffer's three, the draws' one and five, and a
-    * count. */
-   assert(census.stores == 1 + 16 + 2 * 4 + 3 + 3 + 1 + 5 + 1);
+    * fields, a vertex buffer's three and its tessellation stride, a patch
+    * draw's arguments address, its three bindings' two fields, instance
+    * stride, factor scale and control points, the draws' one and five, and
+    * a count. */
+   assert(census.stores == 1 + 16 + 2 * 4 + 3 + 4 + 1 + 3 * 2 + 3 + 1 + 5 + 1);
    ralloc_free(shader);
 }
 
@@ -548,6 +550,98 @@ static void resolve_dispatches_writes_each_command_sequence(void)
    put32(memory + RANGE + 4, 1);
    resolve_dispatch(shader, 1, STELA_METAL_RESOLVE_INHERIT_PIPELINE);
    expect_words(sequence + STELA_METAL_SEQUENCE_DISPATCH, (const uint32_t[]){0, 0, 0}, 3);
+   ralloc_free(shader);
+}
+
+/* The draw resolve's memory beyond the dispatch resolve's: the pipeline
+ * classes' static strides and the counts the kernel writes. */
+#define CLASS_STRIDES 0x880u
+#define COUNTS 0x980u
+
+/* A render buffer of one patch draw of the encoder's pipeline, with two
+ * vertex buffers, the second of a dynamic stride. */
+static void resolve_draws_write_patch_tessellation_arguments(void)
+{
+   nir_shader *shader = stela_metal_resolve_draws_kernel(NULL);
+   check_kernel(shader);
+   memset(memory, 0, sizeof(memory));
+   enum { STRIDE = 144, TABLE = 96, RECORD_WORDS = 128 };
+   const uint32_t words[] = {STRIDE, 1, TABLE, RECORD_WORDS, 2, 0, RECORD_WORDS, 2};
+   for (unsigned i = 0; i < 8; i++)
+      put32(memory + HEADER + 4 * i, words[i]);
+   uint8_t *record = memory + HEADER + STELA_METAL_INDIRECT_HEADER_BYTES;
+   put32(record + STELA_METAL_RECORD_ACTION, STELA_METAL_RECORD_DRAW_INDEXED_PATCHES);
+   const uint32_t arguments[] = {7, 2, 5, 4, 1, 0};
+   for (unsigned i = 0; i < 6; i++)
+      put32(record + STELA_METAL_RECORD_VERTICES + 4 * i, arguments[i]);
+   put64(record + STELA_METAL_RECORD_CONTROL_POINT_INDICES, 0xc000);
+   put32(record + STELA_METAL_RECORD_CONTROL_POINT_INDEX_LENGTH, 64);
+   put32(record + STELA_METAL_RECORD_INSTANCE_STRIDE, 48);
+   put64(record + STELA_METAL_RECORD_PATCH_INDICES, 0xd000);
+   put64(record + STELA_METAL_RECORD_FACTORS, 0xe000);
+   put32(record + STELA_METAL_RECORD_PATCH_INDEX_LENGTH, 32);
+   put32(record + STELA_METAL_RECORD_FACTOR_LENGTH, 96);
+   put32(record + STELA_METAL_RECORD_FACTOR_SCALE, 0x40000000u);
+   put32(record + STELA_METAL_RECORD_SCALED, 1);
+   put64(record + TABLE, 0xa000);
+   put64(record + TABLE + 8, 0xb000);
+   put64(record + TABLE + 16, 64);
+   put64(record + TABLE + 24, 128);
+   put32(record + RECORD_WORDS + 4, 24);
+
+   put32(memory + RANGE + 4, 1);
+   uint8_t *at = memory + ARGUMENTS;
+   put64(at + STELA_METAL_RESOLVE_HEADER, BASE + HEADER);
+   put64(at + STELA_METAL_RESOLVE_RANGE, BASE + RANGE);
+   put64(at + STELA_METAL_RESOLVE_SEQUENCES, BASE + SEQUENCES);
+   put64(at + STELA_METAL_RESOLVE_COUNTS, BASE + COUNTS);
+   put64(at + STELA_METAL_RESOLVE_TABLES, BASE + TABLES);
+   put64(at + STELA_METAL_RESOLVE_STRIDES, BASE + CLASS_STRIDES);
+   put32(at + STELA_METAL_RESOLVE_COUNT, 1);
+   put32(at + STELA_METAL_RESOLVE_SLOT_COUNT, 1);
+   put32(at + STELA_METAL_RESOLVE_CLASS_COUNT, 1);
+   put32(at + STELA_METAL_RESOLVE_FACTOR_SCALE, 0x40400000u);
+   for (unsigned stage = 0; stage < 2; stage++)
+      put64(at + STELA_METAL_RESOLVE_PUSH + STELA_METAL_PUSH_TABLES + 8 * stage, BASE + ENCODER);
+   put64(at + STELA_METAL_RESOLVE_PUSH + STELA_METAL_PUSH_ARGUMENTS, 0x1234);
+   put32(at + STELA_METAL_RESOLVE_SLOTS + 4, STELA_METAL_RECORD_DRAW_INDEXED_PATCHES);
+
+   const uint8_t *sequence = memory + SEQUENCES;
+   const uint8_t *push = sequence + STELA_METAL_SEQUENCE_PUSH;
+   const uint8_t *tessellation = sequence + STELA_METAL_SEQUENCE_TESSELLATION;
+   resolve_dispatch(shader, 0, STELA_METAL_RESOLVE_INHERIT_PIPELINE | STELA_METAL_RESOLVE_SCALES);
+   assert(get64(push + STELA_METAL_PUSH_ARGUMENTS) ==
+          BASE + SEQUENCES + STELA_METAL_SEQUENCE_TESSELLATION);
+   assert(get64(tessellation + STELA_METAL_TESSELLATION_FACTORS) == 0xe000);
+   assert(get64(tessellation + STELA_METAL_TESSELLATION_FACTORS + 8) == 96);
+   assert(get64(tessellation + STELA_METAL_TESSELLATION_PATCH_INDICES) == 0xd000);
+   assert(get64(tessellation + STELA_METAL_TESSELLATION_PATCH_INDICES + 8) == 32);
+   assert(get64(tessellation + STELA_METAL_TESSELLATION_CONTROL_POINT_INDICES) == 0xc000);
+   assert(get64(tessellation + STELA_METAL_TESSELLATION_CONTROL_POINT_INDICES + 8) == 64);
+   assert(get32(tessellation + STELA_METAL_TESSELLATION_INSTANCE_STRIDE) == 48);
+   assert(get32(tessellation + STELA_METAL_TESSELLATION_FACTOR_SCALE) == 0x40000000u);
+   assert(get32(tessellation + STELA_METAL_TESSELLATION_CONTROL_POINTS) == 4);
+   expect_words(tessellation + STELA_METAL_TESSELLATION_STRIDES, (const uint32_t[]){0, 24}, 2);
+   /* Patch count, instances, patch start and base instance: the patches'
+    * point draw, and the count of its slot. */
+   expect_words(sequence + STELA_METAL_SEQUENCE_DRAW, (const uint32_t[]){7, 2, 5, 1}, 4);
+   assert(get32(memory + COUNTS) == 1);
+   assert(get64(push + STELA_METAL_PUSH_TABLES) == BASE + TABLES);
+   assert(get64(memory + TABLES + STELA_METAL_TABLE_BUFFER_ADDRESSES + 8) == 0xb000);
+
+   /* A pipeline that does not scale its factors takes the CPU's scale, as
+    * a CPU-encoded draw does. */
+   resolve_dispatch(shader, 0, STELA_METAL_RESOLVE_INHERIT_PIPELINE);
+   assert(get32(tessellation + STELA_METAL_TESSELLATION_FACTOR_SCALE) == 0x40400000u);
+   put32(record + STELA_METAL_RECORD_SCALED, 0);
+   resolve_dispatch(shader, 0, STELA_METAL_RESOLVE_INHERIT_PIPELINE | STELA_METAL_RESOLVE_SCALES);
+   assert(get32(tessellation + STELA_METAL_TESSELLATION_FACTOR_SCALE) == 0x40400000u);
+
+   /* Other draws keep the encoder's arguments, and match no patch slot. */
+   put32(record + STELA_METAL_RECORD_ACTION, STELA_METAL_RECORD_DRAW);
+   resolve_dispatch(shader, 0, STELA_METAL_RESOLVE_INHERIT_PIPELINE);
+   assert(get64(push + STELA_METAL_PUSH_ARGUMENTS) == 0x1234);
+   assert(get32(memory + COUNTS) == 0);
    ralloc_free(shader);
 }
 
@@ -925,6 +1019,7 @@ int main(void)
    texel_kernels_convert_each_encoding();
    average_kernel_resolves_each_format();
    resolve_dispatches_writes_each_command_sequence();
+   resolve_draws_write_patch_tessellation_arguments();
    tessellation_factors_follow_metal_rules();
    tessellation_vertex_passes_the_draw_indices();
    evaluation_stages_read_their_patch_ids();

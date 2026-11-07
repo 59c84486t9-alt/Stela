@@ -160,7 +160,9 @@ enum stela_metal_average_format {
  * sequences, counts and argument tables the kernel writes, and of the
  * pipeline classes' static vertex strides (uint [classes][buffers], zero
  * for none); the uint thread count, command of thread 0, slot count, flags
- * and class count; the encoder's push constants, and its vertex buffers as
+ * and class count, and the float factor scale of patch draws the CPU
+ * encoded (flag SCALES: the pipeline also scales those a shader encoded);
+ * the encoder's push constants, and its vertex buffers as
  * a sequence binds them; then the slots (uint class, action and
  * MTLPrimitiveType, and padding). Dispatches read neither counts, strides,
  * classes, vertex buffers nor slots. */
@@ -175,19 +177,23 @@ enum stela_metal_average_format {
 #define STELA_METAL_RESOLVE_SLOT_COUNT 56u
 #define STELA_METAL_RESOLVE_FLAGS 60u
 #define STELA_METAL_RESOLVE_CLASS_COUNT 64u
+#define STELA_METAL_RESOLVE_FACTOR_SCALE 68u
 #define STELA_METAL_RESOLVE_PUSH 72u
 #define STELA_METAL_RESOLVE_VERTEX_BUFFERS 144u
 #define STELA_METAL_RESOLVE_SLOTS 640u
 #define STELA_METAL_RESOLVE_SLOT_BYTES 16u
 #define STELA_METAL_RESOLVE_INHERIT_PIPELINE 1u
 #define STELA_METAL_RESOLVE_INHERIT_BUFFERS 2u
+#define STELA_METAL_RESOLVE_SCALES 4u
 
 /* One command's device-generated sequence, which each indirect commands
  * layout reads at its own token offsets: the uint execution set index and
  * the push constants, then a render command's
  * VkBindIndexBufferIndirectCommandEXT, a
  * VkBindVertexBufferIndirectCommandEXT per vertex buffer index, a
- * VkDrawIndirectCommand and a VkDrawIndexedIndirectCommand, or a compute
+ * VkDrawIndirectCommand and a VkDrawIndexedIndirectCommand, and the
+ * TessellationArguments a patch draw's push constants' arguments address,
+ * or a compute
  * command's VkDispatchIndirectCommand and the DispatchArguments its push
  * constants' arguments address. */
 #define STELA_METAL_SEQUENCE_PIPELINE 0u
@@ -199,7 +205,8 @@ enum stela_metal_average_format {
 #define STELA_METAL_SEQUENCE_DRAW_INDEXED 600u
 #define STELA_METAL_SEQUENCE_DISPATCH 72u
 #define STELA_METAL_SEQUENCE_DISPATCH_ARGUMENTS 96u
-#define STELA_METAL_SEQUENCE_BYTES 640u
+#define STELA_METAL_SEQUENCE_TESSELLATION 624u
+#define STELA_METAL_SEQUENCE_BYTES 816u
 
 /* indirect/record.rs RecordLayout: a GPU-resident indirect command buffer
  * at its gpuResourceID. A header of uint words leads: the record stride and
@@ -211,7 +218,13 @@ enum stela_metal_average_format {
  * uint barrier flag and 64-bit pipeline handle; render records then hold
  * their vertex or index count, instance count, first vertex, base vertex,
  * base instance and MTLPrimitiveType, then the index buffer's 64-bit address,
- * uint byte length and MTLIndexType; compute records the uint grid and
+ * uint byte length and MTLIndexType; patch records, which draw as points,
+ * the patch count, instance count, patch start, control points per patch,
+ * base instance and a zero primitive type, then the control point indices'
+ * 64-bit address and uint byte length, the factors' uint instance stride,
+ * the patch indices' and factors' 64-bit addresses, their uint byte
+ * lengths, and the float factor scale with a uint flag that the command
+ * gave it, else the encoder's applies; compute records the uint grid and
  * threadgroup size, and the stage-in region's origin, size and set flag. A
  * table holds its slots' 64-bit addresses, then their 64-bit lengths. */
 #define STELA_METAL_INDIRECT_HEADER_BYTES 64u
@@ -235,6 +248,16 @@ enum stela_metal_average_format {
 #define STELA_METAL_RECORD_INDEX_ADDRESS 40u
 #define STELA_METAL_RECORD_INDEX_LENGTH 48u
 #define STELA_METAL_RECORD_INDEX_TYPE 52u
+#define STELA_METAL_RECORD_CONTROL_POINTS 28u
+#define STELA_METAL_RECORD_CONTROL_POINT_INDICES 40u
+#define STELA_METAL_RECORD_CONTROL_POINT_INDEX_LENGTH 48u
+#define STELA_METAL_RECORD_INSTANCE_STRIDE 52u
+#define STELA_METAL_RECORD_PATCH_INDICES 56u
+#define STELA_METAL_RECORD_FACTORS 64u
+#define STELA_METAL_RECORD_PATCH_INDEX_LENGTH 72u
+#define STELA_METAL_RECORD_FACTOR_LENGTH 76u
+#define STELA_METAL_RECORD_FACTOR_SCALE 80u
+#define STELA_METAL_RECORD_SCALED 84u
 #define STELA_METAL_RECORD_GRID 16u
 #define STELA_METAL_RECORD_THREADS 28u
 #define STELA_METAL_RECORD_STAGE_IN_ORIGIN 40u
@@ -242,6 +265,8 @@ enum stela_metal_average_format {
 #define STELA_METAL_RECORD_STAGE_IN 64u
 #define STELA_METAL_RECORD_DRAW 1u
 #define STELA_METAL_RECORD_DRAW_INDEXED 2u
+#define STELA_METAL_RECORD_DRAW_PATCHES 3u
+#define STELA_METAL_RECORD_DRAW_INDEXED_PATCHES 4u
 #define STELA_METAL_RECORD_DISPATCH 1u
 #define STELA_METAL_RECORD_DISPATCH_THREADS 2u
 /* The high half of a compute pipeline's handle; its low half is its index

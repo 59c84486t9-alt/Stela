@@ -231,6 +231,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                         .fold(ShaderStages::EMPTY, |stages, &(stage, _)| stages | stage),
                     rasterization: class.key.rasterization,
                     topology: class.key.topology,
+                    patches: None,
                     vertex_buffers: info
                         .vertex_input
                         .bindings

@@ -263,18 +263,18 @@ fn resident_images_hold_each_command_as_a_record() {
     buffer.commands[1].pipeline = Some(CommandPipeline { id: 7, handle });
 
     let (layout, image) = buffer.resident_image().unwrap();
-    assert_eq!(layout.tables, [80, 144]);
+    assert_eq!(layout.tables, [96, 160]);
     assert_eq!(layout.table_slots, [4, 2]);
     assert_eq!(
         (layout.words, layout.word_count, layout.stride),
-        (176, 4, 192)
+        (192, 4, 208)
     );
     assert_eq!(image.len() as u64, layout.bytes());
     assert_eq!(&image[..64], &layout.header());
-    assert_eq!(word(&image, RecordLayout::HEADER_STRIDE), 192);
+    assert_eq!(word(&image, RecordLayout::HEADER_STRIDE), 208);
     let start = layout.record(1) as usize;
     assert!(image[64..start].iter().all(|&byte| byte == 0), "reset");
-    let record = &image[start..start + 192];
+    let record = &image[start..start + 208];
     assert_eq!(
         word(record, RecordLayout::ACTION),
         RecordLayout::DRAW_INDEXED
@@ -288,11 +288,11 @@ fn resident_images_hold_each_command_as_a_record() {
     assert_eq!(double(record, RecordLayout::INDEX_ADDRESS), (3 << 32) + 8);
     assert_eq!(word(record, RecordLayout::INDEX_LENGTH), 248);
     assert_eq!(word(record, RecordLayout::INDEX_TYPE), 1);
-    assert_eq!(double(record, 80 + 16), (1 << 32) + 16);
-    assert_eq!(double(record, 80 + 8 * 6), 240);
-    assert_eq!(word(record, 176 + 8), 12);
-    assert_eq!(double(record, 144 + 8), 2 << 32);
-    assert_eq!(double(record, 144 + 8 * 3), 256);
+    assert_eq!(double(record, 96 + 16), (1 << 32) + 16);
+    assert_eq!(double(record, 96 + 8 * 6), 240);
+    assert_eq!(word(record, 192 + 8), 12);
+    assert_eq!(double(record, 160 + 8), 2 << 32);
+    assert_eq!(double(record, 160 + 8 * 3), 256);
 }
 
 #[test]
@@ -334,8 +334,8 @@ fn resident_buffers_write_what_cpu_encoding_changes() {
     assert_eq!(
         buffer.take_writes(),
         [
-            (base + 88, (1u64 << 32).to_le_bytes().to_vec()),
-            (base + 80 + 8 * 5, 256u64.to_le_bytes().to_vec()),
+            (base + 104, (1u64 << 32).to_le_bytes().to_vec()),
+            (base + 96 + 8 * 5, 256u64.to_le_bytes().to_vec()),
             (base, RecordLayout::DRAW.to_le_bytes().to_vec()),
             (base + 16, draw),
         ]
@@ -380,10 +380,10 @@ fn records_hold_only_what_the_gpu_executes() {
         .concurrent_dispatch_threadgroups([2, 3, 1], threads)
         .unwrap();
     let (layout, image) = buffer.resident_image().unwrap();
-    assert_eq!((layout.tables, layout.table_slots), ([80, 144], [4, 0]));
+    assert_eq!((layout.tables, layout.table_slots), ([96, 160], [4, 0]));
     assert_eq!(
         (layout.words, layout.word_count, layout.stride),
-        (144, 1, 160)
+        (160, 1, 176)
     );
     let record = &image[64..];
     assert_eq!(word(record, RecordLayout::ACTION), RecordLayout::DISPATCH);
@@ -397,14 +397,91 @@ fn records_hold_only_what_the_gpu_executes() {
         words(RecordLayout::STAGE_IN_ORIGIN, 7),
         [1, 2, 3, 4, 5, 6, 1]
     );
-    assert_eq!(word(record, 144), 64);
-    assert_eq!((layout.strides, layout.stride_count), (148, 0));
+    assert_eq!(word(record, 160), 64);
+    assert_eq!((layout.strides, layout.stride_count), (164, 0));
 
     buffer.commands[0].pipeline = Some(CommandPipeline { id: 1, handle: 0 });
     assert!(
         matches!(buffer.resident_image(), Err(Error::Invalid(_))),
         "the pipeline has no handle"
     );
+}
+
+#[test]
+fn inherited_patch_draws_are_records_of_their_arguments() {
+    let caps = capabilities();
+    let types = IndirectCommandType::DRAW_PATCHES | IndirectCommandType::DRAW_INDEXED_PATCHES;
+    let patches = IndirectCommandBufferDescriptor {
+        inherit_pipeline_state: true,
+        ..descriptor(types)
+    };
+    let mut buffer = IndirectCommandBuffer::new(&caps, &patches, 2).unwrap();
+    let indexed = PatchSource {
+        control_points: 4,
+        patch_indices: Some((buffer_ref(1), 8)),
+        control_point_indices: Some((buffer_ref(2), 16)),
+    };
+    let plain = PatchSource {
+        control_points: 3,
+        patch_indices: None,
+        control_point_indices: None,
+    };
+    buffer
+        .render_command(0)
+        .unwrap()
+        .draw_patches(&indexed, 5, 7, 2, 1, (buffer_ref(3), 24, 48))
+        .unwrap();
+    buffer
+        .render_command(1)
+        .unwrap()
+        .draw_patches(&plain, 0, 2, 1, 0, (buffer_ref(4), 0, 0))
+        .unwrap();
+    let (layout, image) = buffer.resident_image().unwrap();
+    let record = |index: usize| {
+        let start = layout.record(index) as usize;
+        &image[start..start + layout.stride as usize]
+    };
+    let first = record(0);
+    assert_eq!(
+        word(first, RecordLayout::ACTION),
+        RecordLayout::DRAW_INDEXED_PATCHES
+    );
+    // Patch count, instances, patch start, control points, base instance
+    // and no primitive type: the point draw of the patches.
+    let arguments: Vec<u32> = (0..6)
+        .map(|index| word(first, RecordLayout::VERTICES + 4 * index))
+        .collect();
+    assert_eq!(arguments, [7, 2, 5, 4, 1, 0]);
+    assert_eq!(
+        double(first, RecordLayout::CONTROL_POINT_INDICES),
+        (2 << 32) + 16
+    );
+    assert_eq!(word(first, RecordLayout::CONTROL_POINT_INDEX_LENGTH), 240);
+    assert_eq!(word(first, RecordLayout::INSTANCE_STRIDE), 48);
+    assert_eq!(double(first, RecordLayout::PATCH_INDICES), (1 << 32) + 8);
+    assert_eq!(word(first, RecordLayout::PATCH_INDEX_LENGTH), 248);
+    assert_eq!(double(first, RecordLayout::FACTORS), (3 << 32) + 24);
+    assert_eq!(word(first, RecordLayout::FACTOR_LENGTH), 232);
+    assert_eq!(word(first, RecordLayout::SCALED), 0, "the encoder's scale");
+    let second = record(1);
+    assert_eq!(
+        word(second, RecordLayout::ACTION),
+        RecordLayout::DRAW_PATCHES
+    );
+    assert_eq!(double(second, RecordLayout::PATCH_INDICES), 0);
+    assert_eq!(double(second, RecordLayout::CONTROL_POINT_INDICES), 0);
+    assert_eq!(double(second, RecordLayout::FACTORS), 4 << 32);
+
+    // Commands that set their pipeline name none an execution set holds.
+    let own = IndirectCommandBuffer::new(&caps, &descriptor(types), 1).unwrap();
+    assert!(matches!(own.resident_image(), Err(Error::Unsupported(_))));
+    let mut misaligned = IndirectCommandBuffer::new(&caps, &patches, 1).unwrap();
+    misaligned
+        .render_command(0)
+        .unwrap()
+        .draw_patches(&plain, 0, 1, 1, 0, (buffer_ref(4), 2, 0))
+        .unwrap();
+    assert!(misaligned.resident_image().is_err(), "misaligned factors");
 }
 
 #[test]
@@ -427,15 +504,15 @@ fn compute_records_hold_dynamic_attribute_strides() {
             layout.strides,
             layout.stride_count
         ),
-        (144, 1, 148, 4)
+        (160, 1, 164, 4)
     );
-    assert_eq!(layout.stride, 176);
+    assert_eq!(layout.stride, 192);
     let header = layout.header();
-    assert_eq!(word(&header, RecordLayout::HEADER_STRIDES), 148);
+    assert_eq!(word(&header, RecordLayout::HEADER_STRIDES), 164);
     assert_eq!(word(&header, RecordLayout::HEADER_STRIDE_COUNT), 4);
     let record = &image[64..];
-    assert_eq!(word(record, 148 + 8), 24);
-    assert_eq!(word(record, 148), 0, "unbound buffers have no stride");
+    assert_eq!(word(record, 164 + 8), 24);
+    assert_eq!(word(record, 164), 0, "unbound buffers have no stride");
 
     let fixed = descriptor(IndirectCommandType::CONCURRENT_DISPATCH);
     let mut buffer = IndirectCommandBuffer::new(&caps, &fixed, 1).unwrap();
