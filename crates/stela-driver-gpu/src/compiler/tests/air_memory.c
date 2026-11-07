@@ -460,6 +460,48 @@ kernels_read_constant_buffers(void)
           error.kind == STELA_AIR_ARGUMENT);
 }
 
+/* A rasterization rate map decoder maps a coordinate by its layer's scale
+ * and offset in the map's parameter data, a constant buffer of no stated
+ * size. */
+static void
+rate_map_decoders_read_their_parameters(void)
+{
+   static const char *kernel_metadata = KERNEL_ARGUMENTS("!40, !42")
+      "!42 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read\","
+      " !\"air.address_space\", i32 2, !\"air.arg_type_name\","
+      " !\"metal::rasterization_rate_map_data\", !\"air.arg_name\", !\"data\"}\n";
+   static const char *declarations =
+      "declare <2 x float> @air.map_screen_to_physical_coordinates.v2f32.p2i8.i32(<2 x float>, ptr addrspace(2), i32)\n"
+      "declare <2 x float> @air.map_physical_to_screen_coordinates.v2f32.p2i8.i32(<2 x float>, ptr addrspace(2), i32)\n";
+   static const char *definition =
+      "define void @kernel(ptr addrspace(1) %out, ptr addrspace(2) %data) {\n"
+      "%l = load i32, ptr addrspace(1) %out, align 4\n"
+      "%p = call <2 x float> @air.map_screen_to_physical_coordinates.v2f32.p2i8.i32("
+      "<2 x float> <float 3.0, float 5.0>, ptr addrspace(2) %data, i32 %l)\n"
+      "%s = call <2 x float> @air.map_physical_to_screen_coordinates.v2f32.p2i8.i32("
+      "<2 x float> %p, ptr addrspace(2) %data, i32 %l)\n"
+      "store <2 x float> %s, ptr addrspace(1) %out, align 4\nret void\n}\n";
+   struct stela_air_error error;
+   nir_shader *shader = translate_kernel(declarations, definition, kernel_metadata, &nir_options,
+                                         stela_metal_bind_buffer, &defaults, &error);
+   if (!shader)
+      fprintf(stderr, "rate map decoder: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   unsigned vectors = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_intrinsic_infos[nir_instr_as_intrinsic(instr)->intrinsic].has_dest &&
+                nir_instr_as_intrinsic(instr)->def.num_components == 4)
+               vectors++;
+         }
+      }
+   }
+   assert(vectors == 2);
+   ralloc_free(shader);
+}
+
 /* A struct or array crosses memory leaf by leaf at its layout offsets; an
  * undefined leaf stores nothing. */
 static void
@@ -511,6 +553,7 @@ main(void)
    generic_pointers_choose_their_memory();
    constant_data_lowers_to_load_constant();
    kernels_read_constant_buffers();
+   rate_map_decoders_read_their_parameters();
    aggregates_load_and_store_by_leaf();
    stack_pointers_keep_their_origin();
    glsl_type_singleton_decref();

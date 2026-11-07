@@ -888,12 +888,6 @@ static BOOL claims(const StelaBlock *capabilities, NSInteger family)
 	return count != 0 && count <= _capabilities->limits.max_vertex_amplification_count;
 }
 
-- (BOOL)supportsRasterizationRateMapWithLayerCount:(NSUInteger)count
-{
-	(void)count;
-	return NO;
-}
-
 - (BOOL)supportsCounterSampling:(NSUInteger)point
 {
 	return point < 32 && (_capabilities->counter_sampling >> point & 1) != 0;

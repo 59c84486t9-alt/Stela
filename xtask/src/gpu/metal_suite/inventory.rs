@@ -58,7 +58,7 @@ const HEADERS_LEFT_OUT: [(&str, &str); 7] = [
 
 /// Functions outside the suite's scope, in headers that are otherwise in it.
 #[cfg(test)]
-const FUNCTIONS_LEFT_OUT: [(&str, &str); 31] = [
+const FUNCTIONS_LEFT_OUT: [(&str, &str); 28] = [
     ("sparse_color", "sparse textures are left out"),
     ("sparse_gather", "sparse textures are left out"),
     ("sparse_gather_compare", "sparse textures are left out"),
@@ -66,18 +66,6 @@ const FUNCTIONS_LEFT_OUT: [(&str, &str); 31] = [
     ("sparse_sample", "sparse textures are left out"),
     ("sparse_sample_compare", "sparse textures are left out"),
     ("set_imageblock_size", "imageblocks are left out"),
-    (
-        "rasterization_rate_map_decoder",
-        "rasterization rate maps are left out",
-    ),
-    (
-        "map_physical_to_screen_coordinates",
-        "rasterization rate maps are left out",
-    ),
-    (
-        "map_screen_to_physical_coordinates",
-        "rasterization rate maps are left out",
-    ),
     ("function_handle", "function handles exist for ray tracing"),
     (
         "is_null_function_handle",
@@ -633,7 +621,7 @@ const API_HEADERS_LEFT_OUT: [(&str, &str); 10] = [
 /// Words that leave out every class or entry whose name holds them,
 /// ignoring case, in headers that are otherwise in scope.
 #[cfg(test)]
-const API_WORDS_LEFT_OUT: [(&str, &str); 15] = [
+const API_WORDS_LEFT_OUT: [(&str, &str); 14] = [
     ("MTL4", "the Metal4 family is left out"),
     ("accelerationStructure", "ray tracing is not claimed"),
     ("intersectionFunction", "ray tracing is not claimed"),
@@ -656,7 +644,6 @@ const API_WORDS_LEFT_OUT: [(&str, &str); 15] = [
         "resourceState",
         "resource state encoders map sparse texture tiles, left out",
     ),
-    ("rasterizationRate", "rasterization rate maps are left out"),
     (
         "remote",
         "views of resources on another device are left out",

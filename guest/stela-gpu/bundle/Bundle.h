@@ -265,6 +265,16 @@ NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state);
 @property(copy) NSString *label;
 @end
 
+/* A rasterization rate map, which renders at full quality: RateMap.m. */
+@interface StelaGPURateMap : NSObject <MTLRasterizationRateMap> {
+@public
+	StelaGPUDevice *_device;
+	MTLSize _screenSize;
+	NSUInteger _layerCount;
+}
+@property(copy) NSString *label;
+@end
+
 /*
  * A shared event is a kernel IOSurface event, as Apple's are, so its port
  * reaches IOSurface clients, the display and other processes, and a service

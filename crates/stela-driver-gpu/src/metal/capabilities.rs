@@ -410,11 +410,11 @@ impl Capabilities {
         self.counter_sampling[point.raw() as usize]
     }
 
-    /// Rasterization rate maps need Apple's variable-resolution rasterizer;
-    /// Vulkan's fragment shading rate shades coarsely but cannot render into
-    /// a smaller physical target, so no layer count is supported.
-    pub fn supports_rasterization_rate_map(&self, _layer_count: u64) -> bool {
-        false
+    /// Rasterization rate maps of one or two layers, as Apple's: each renders
+    /// every region at full quality, which Metal allows as it may round a
+    /// layer's samples up, so a pass with one renders as without.
+    pub fn supports_rasterization_rate_map(&self, layer_count: u64) -> bool {
+        (1..=2).contains(&layer_count)
     }
 
     /// `sparseTileSizeInBytesForSparsePageSize:`; `None` for page sizes the

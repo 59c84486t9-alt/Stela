@@ -268,3 +268,13 @@ kernel void sample_min_lod(texture2d<float> t [[texture(0)]], sampler s [[sample
         }
     }
 }
+
+// A rasterization rate map decoder over the map's parameter data: odd
+// threads map at layer 1.
+kernel void rate_map_decode(constant rasterization_rate_map_data &data [[buffer(0)]], device const float2 *in [[buffer(1)]],
+                            device float2 *out [[buffer(2)]], uint i [[thread_position_in_grid]])
+{
+    rasterization_rate_map_decoder map(data);
+    out[i * 2] = map.map_screen_to_physical_coordinates(in[i], i & 1);
+    out[i * 2 + 1] = map.map_physical_to_screen_coordinates(in[i], i & 1);
+}

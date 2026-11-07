@@ -31,7 +31,6 @@
 
 @implementation StelaGPUDevice (Refused)
 
-ABSENT((id)newRasterizationRateMapWithDescriptor:(id)descriptor, "this device has no rasterization rate maps", nil)
 ABSENT((MTLAccelerationStructureSizes)accelerationStructureSizesWithDescriptor:(id)descriptor, RAY_TRACING,
        (MTLAccelerationStructureSizes){0})
 ABSENT((MTLSizeAndAlign)heapAccelerationStructureSizeAndAlignWithSize:(NSUInteger)size, RAY_TRACING,

@@ -5747,6 +5747,103 @@ static void host_aliasable(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
 	wait_for(cb, c.spec);
 }
 
+/* Rasterization rate maps: the layer counts the device takes; a two-layer
+ * full-quality map's sizes, granularity, parameter data size and mappings; a
+ * lower-quality map's physical size within its screen, its corner mapped to
+ * that size and a coordinate mapped there and back; a map of no layers; a
+ * decoder over the full map's parameter data; and a pass with a map drawing
+ * the left half red. */
+static void host_rate_maps(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	id<MTLDevice> d = c.device;
+	for (NSUInteger i = 0; i < 4; i++)
+		put(c, @"facts", i, [d supportsRasterizationRateMapWithLayerCount:i]);
+	float one = 1, horizontal[] = {1, 0.5f, 1}, vertical[] = {1, 0.25f};
+	MTLRasterizationRateLayerDescriptor *full =
+		[[MTLRasterizationRateLayerDescriptor alloc] initWithSampleCount:MTLSizeMake(1, 1, 0) horizontal:&one vertical:&one];
+	MTLRasterizationRateLayerDescriptor *low =
+		[[MTLRasterizationRateLayerDescriptor alloc] initWithSampleCount:MTLSizeMake(3, 2, 0) horizontal:horizontal vertical:vertical];
+	MTLRasterizationRateMapDescriptor *two = [MTLRasterizationRateMapDescriptor new];
+	two.screenSize = MTLSizeMake(640, 480, 0);
+	[two setLayer:full atIndex:0];
+	[two setLayer:full atIndex:1];
+	id<MTLRasterizationRateMap> map = [d newRasterizationRateMapWithDescriptor:two];
+	put(c, @"facts", 4, map != nil);
+	if (!map)
+		@throw failure(@"no rasterization rate map");
+	MTLSize screen = map.screenSize, granularity = map.physicalGranularity;
+	MTLSizeAndAlign parameters = map.parameterBufferSizeAndAlign;
+	uint32_t sizes[] = {(uint32_t)screen.width, (uint32_t)screen.height, (uint32_t)map.layerCount,
+			    (uint32_t)granularity.width, (uint32_t)granularity.height, (uint32_t)granularity.depth,
+			    (uint32_t)parameters.size, (uint32_t)parameters.align};
+	for (NSUInteger i = 0; i < 8; i++)
+		put(c, @"facts", 5 + i, sizes[i]);
+	for (NSUInteger layer = 0; layer < 2; layer++) {
+		MTLSize physical = [map physicalSizeForLayer:layer];
+		put(c, @"facts", 13 + layer * 2, (uint32_t)physical.width);
+		put(c, @"facts", 14 + layer * 2, (uint32_t)physical.height);
+	}
+	MTLCoordinate2D point = MTLCoordinate2DMake(100.5f, 7.25f);
+	MTLCoordinate2D to = [map mapScreenToPhysicalCoordinates:point forLayer:1];
+	MTLCoordinate2D from = [map mapPhysicalToScreenCoordinates:point forLayer:1];
+	float mapped[] = {to.x, to.y, from.x, from.y};
+	for (NSUInteger i = 0; i < 4; i++) {
+		uint32_t bits;
+		memcpy(&bits, &mapped[i], sizeof bits);
+		put(c, @"facts", 17 + i, bits);
+	}
+	id<MTLRasterizationRateMap> lower = [d newRasterizationRateMapWithDescriptor:
+		[MTLRasterizationRateMapDescriptor rasterizationRateMapDescriptorWithScreenSize:MTLSizeMake(640, 480, 0) layer:low]];
+	MTLSize shrunk = [lower physicalSizeForLayer:0];
+	MTLCoordinate2D corner = [lower mapScreenToPhysicalCoordinates:MTLCoordinate2DMake(640, 480) forLayer:0];
+	MTLCoordinate2D back = [lower mapPhysicalToScreenCoordinates:[lower mapScreenToPhysicalCoordinates:point forLayer:0] forLayer:0];
+	put(c, @"facts", 21, lower && shrunk.width <= 640 && shrunk.height <= 480 && shrunk.width && shrunk.height);
+	put(c, @"facts", 22, fabsf(corner.x - shrunk.width) < 0.01f && fabsf(corner.y - shrunk.height) < 0.01f);
+	put(c, @"facts", 23, fabsf(back.x - point.x) < 0.01f && fabsf(back.y - point.y) < 0.01f);
+	MTLRasterizationRateMapDescriptor *empty = [MTLRasterizationRateMapDescriptor new];
+	empty.screenSize = MTLSizeMake(64, 64, 0);
+	put(c, @"facts", 24, [d newRasterizationRateMapWithDescriptor:empty] != nil);
+
+	id<MTLBuffer> data = [d newBufferWithLength:parameters.size options:MTLResourceStorageModeShared];
+	[map copyParameterDataToBuffer:data offset:0];
+	float coordinates[16];
+	for (NSUInteger i = 0; i < 8; i++) {
+		coordinates[i * 2] = i * 10.5f;
+		coordinates[i * 2 + 1] = i * 3.25f;
+	}
+	id<MTLBuffer> in = [d newBufferWithBytes:coordinates length:sizeof coordinates options:MTLResourceStorageModeShared];
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	[e setComputePipelineState:host_pipeline(c, @"rate_map_decode")];
+	[e setBuffer:data offset:0 atIndex:0];
+	[e setBuffer:in offset:0 atIndex:1];
+	[e setBuffer:c.buffers[@"mapped"] offset:0 atIndex:2];
+	[e dispatchThreads:MTLSizeMake(8, 1, 1) threadsPerThreadgroup:MTLSizeMake(8, 1, 1)];
+	[e endEncoding];
+
+	NSError *error = nil;
+	id<MTLRenderPipelineState> p =
+		host_render_pipeline(c, [MTLRenderPipelineDescriptor new], @"vert_left_half", @"frag_constant", MTLPixelFormatRGBA8Unorm, &error);
+	if (!p)
+		@throw failure(@"rate map pipeline: %@", error.localizedDescription);
+	id<MTLTexture> t = host_target(c, MTLPixelFormatRGBA8Unorm, 8, 4);
+	MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture = t;
+	pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+	pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	pass.rasterizationRateMap = [d newRasterizationRateMapWithDescriptor:
+		[MTLRasterizationRateMapDescriptor rasterizationRateMapDescriptorWithScreenSize:MTLSizeMake(8, 4, 0) layer:full]];
+	id<MTLRenderCommandEncoder> r = [cb renderCommandEncoderWithDescriptor:pass];
+	float red[] = {1, 0, 0, 1};
+	[r setRenderPipelineState:p];
+	[r setFragmentBytes:red length:sizeof red atIndex:0];
+	[r drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+	[r endEncoding];
+	read_back(cb, t, c.buffers[@"image"], 4, MTLBlitOptionNone);
+	wait_for(cb, c.spec);
+}
+
 /* A left half drawn at depth 0.25, then the whole target drawn with the
  * depth bounds test passing only stored depths in [0.5, 1]: the second
  * colour reaches the right half alone. */
@@ -6148,6 +6245,7 @@ static void run_host(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 		@"extern_functions" : [NSValue valueWithPointer:host_extern_functions],
 		@"debug" : [NSValue valueWithPointer:host_debug],
 		@"depth_bounds" : [NSValue valueWithPointer:host_depth_bounds],
+		@"rate_maps" : [NSValue valueWithPointer:host_rate_maps],
 	};
 	NSValue *v = work[h[@"kind"]];
 	if (!v)

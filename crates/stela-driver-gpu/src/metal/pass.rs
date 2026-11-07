@@ -74,6 +74,8 @@ pub struct RenderPassDescriptor<'a, T> {
     pub tile_memory: TileMemory,
     /// `samplePositions`, in [0, 1) from the pixel's top left.
     pub sample_positions: Vec<[f32; 2]>,
+    /// `rasterizationRateMap` is set. Every map renders at full quality, so
+    /// its physical size is the screen's and the pass renders as without.
     pub rasterization_rate_map: bool,
 }
 
@@ -349,10 +351,6 @@ pub fn render_pass<T: Copy + Eq>(
     descriptor: &RenderPassDescriptor<T>,
 ) -> Result<RenderPassPlan<T>> {
     let tile = tile(capabilities, &descriptor.tile_memory)?;
-    require(
-        !descriptor.rasterization_rate_map,
-        "rasterization rate maps",
-    )?;
     let layer_count = descriptor.render_target_array_length.max(1);
     require(
         layer_count <= capabilities.limits.max_texture_array_length,

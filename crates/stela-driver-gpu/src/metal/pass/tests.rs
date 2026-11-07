@@ -374,6 +374,26 @@ fn passes_without_attachments_and_apple_only_features() {
     descriptor.sample_positions.clear();
 }
 
+/// A rasterization rate map renders at full quality, so a pass with one
+/// plans as it does without.
+#[test]
+fn rate_maps_render_at_full_quality() {
+    let color = texture(TextureType::D2, PixelFormat::Rgba8Unorm, 1);
+    let mut descriptor = pass();
+    descriptor.color_attachments[0] = Some(attachment(
+        target(1, &color),
+        StoreAction::Store,
+        [0.0, 0.0, 0.0, 0.0],
+    ));
+    let without = render_pass(&capabilities(), &descriptor).unwrap();
+    descriptor.rasterization_rate_map = true;
+    let with = render_pass(&capabilities(), &descriptor).unwrap();
+    assert_eq!(
+        (with.extent, with.layer_count, with.sample_count),
+        (without.extent, without.layer_count, without.sample_count)
+    );
+}
+
 /// Tiles are sized as on Apple's GPUs: 32 by 32 by default, 16 or 32 wide,
 /// and from 16 to the width tall.
 #[test]

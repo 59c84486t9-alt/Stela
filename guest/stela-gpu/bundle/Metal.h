@@ -23,6 +23,9 @@ typedef struct {
 	NSUInteger size, align;
 } MTLSizeAndAlign;
 typedef struct {
+	float x, y;
+} MTLCoordinate2D;
+typedef struct {
 	NSUInteger accelerationStructureSize, buildScratchBufferSize, refitScratchBufferSize;
 } MTLAccelerationStructureSizes;
 typedef struct {
@@ -274,6 +277,7 @@ enum {
 	X(MTLSamplerState)                                                                         \
 	X(MTLDepthStencilState)                                                                    \
 	X(MTLFence)                                                                                \
+	X(MTLRasterizationRateMap)                                                                 \
 	X(MTLEvent)                                                                                \
 	X(MTLSharedEvent)                                                                          \
 	X(MTLLogState)                                                                             \
@@ -502,6 +506,9 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (NSUInteger)tileWidth;
 - (NSUInteger)tileHeight;
 - (id)rasterizationRateMap;
+/* MTLRasterizationRateMapDescriptor. */
+- (MTLSize)screenSize;
+- (NSUInteger)layerCount;
 - (id)sampleBufferAttachments;
 - (NSUInteger)getSamplePositions:(MTLSamplePosition *)positions count:(NSUInteger)count;
 - (id)texture;

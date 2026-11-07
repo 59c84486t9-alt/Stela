@@ -141,7 +141,7 @@ static void forward(id self, SEL selector, id invocation)
 	Class classes[] = {
 		[StelaGPUDevice class],	       [StelaGPUResource class],      [StelaGPUBuffer class],
 		[StelaGPUTexture class],       [StelaGPUSampler class],	      [StelaGPUDepthStencil class],
-		[StelaGPUHeap class],	       [StelaGPUFence class],	      [StelaGPUEvent class],
+		[StelaGPUHeap class],	       [StelaGPUFence class],	      [StelaGPURateMap class],	      [StelaGPUEvent class],
 		[StelaGPULibrary class],       [StelaGPUBinaryArchive class], [StelaGPUArgumentEncoder class],
 		[StelaGPUFunction class],      [StelaGPURenderPipeline class], [StelaGPUComputePipeline class],
 		[StelaGPUFunctionHandle class], [StelaGPUFunctionTable class], [StelaGPUIndirectCommandBuffer class],

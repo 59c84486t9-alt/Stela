@@ -886,6 +886,35 @@ fn properties(plan: &mut Plan, library: &str, rng: &mut Random) {
         .buffer(Buffer::zeroed("image", 0, 8 * 4 * 4).unbound())
         .output(Output::exact("image", Dtype::U8, bounded)),
     );
+    // A full-quality map is the identity at Apple's granularity and
+    // parameter size; a lower-quality map shrinks within its screen. A pass
+    // with a map draws as one without.
+    let facts: Vec<u32> = [
+        0, 1, 1, 0, 1, 640, 480, 2, 32, 32, 1, 24624, 4, 640, 480, 640, 480,
+    ]
+    .into_iter()
+    .chain([100.5f32, 7.25, 100.5, 7.25].map(f32::to_bits))
+    .chain([1, 1, 1, 1])
+    .collect();
+    let mapped: Vec<f64> = (0..8)
+        .flat_map(|i| {
+            let point = [f64::from(i) * 10.5, f64::from(i) * 3.25];
+            [point, point]
+        })
+        .flatten()
+        .collect();
+    let left: Vec<u8> = (0..8 * 4)
+        .flat_map(|i| if i % 8 < 4 { [255, 0, 0, 255] } else { [0; 4] })
+        .collect();
+    plan.add(
+        Case::host("host.rate_maps", library, json!({"kind": "rate_maps"}))
+            .buffer(Buffer::zeroed("facts", 0, 25 * 4).unbound())
+            .buffer(Buffer::zeroed("mapped", 1, 16 * 8).unbound())
+            .buffer(Buffer::zeroed("image", 2, 8 * 4 * 4).unbound())
+            .output(Output::exact("facts", Dtype::U32, u32s(&facts)))
+            .output(Output::exact("mapped", Dtype::F32, f32s(&mapped)))
+            .output(Output::exact("image", Dtype::U8, left)),
+    );
     plan.add(
         Case::host(
             "host.library_loading",

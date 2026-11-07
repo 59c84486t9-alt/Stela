@@ -5780,6 +5780,47 @@ pointer_space_call(struct translator *t, LLVMValueRef inst, const char *name, si
    return put_value(t, inst, in, 0);
 }
 
+/* A rasterization rate map decoder's `map_screen_to_physical_coordinates`
+ * and `map_physical_to_screen_coordinates` of a float2 at a layer, from the
+ * map's parameter data: per layer, a scale and offset from screen to
+ * physical coordinates for each axis, as the bundle's maps write them. */
+static bool
+rate_map_call(struct translator *t, LLVMValueRef inst, const char *name, size_t length,
+              bool *lowered)
+{
+   static const char to_physical[] = "air.map_screen_to_physical_coordinates.";
+   static const char to_screen[] = "air.map_physical_to_screen_coordinates.";
+   bool physical = length > strlen(to_physical) && !memcmp(name, to_physical, strlen(to_physical));
+   bool screen = length > strlen(to_screen) && !memcmp(name, to_screen, strlen(to_screen));
+   *lowered = physical || screen;
+   if (!*lowered)
+      return true;
+   LLVMTypeRef float2 = LLVMVectorType(LLVMFloatTypeInContext(t->context), 2);
+   if (LLVMGetNumArgOperands(inst) != 3 || LLVMTypeOf(inst) != float2 ||
+       LLVMTypeOf(LLVMGetOperand(inst, 0)) != float2 ||
+       LLVMTypeOf(LLVMGetOperand(inst, 2)) != LLVMInt32TypeInContext(t->context))
+      return fail(t, STELA_AIR_INSTRUCTION, "%.*s of an unknown form", (int)length, name);
+   nir_builder *b = &t->b;
+   nir_def *coordinate = get_value(t, LLVMGetOperand(inst, 0));
+   nir_def *layer = get_value(t, LLVMGetOperand(inst, 2));
+   const struct value *data = pointer_value(t, LLVMGetOperand(inst, 1));
+   if (!coordinate || !layer)
+      return false;
+   if (!data || !(data->access & STELA_AIR_READ))
+      return fail(t, STELA_AIR_MEMORY, "%.*s of parameter data without provenance", (int)length,
+                  name);
+   struct value at = *data;
+   at.def = nir_iadd(b, data->def, nir_u2u64(b, nir_imul_imm(b, layer, 16)));
+   nir_def *mapping = memory_access(t, &at, NULL, NULL, 0, 4, 32, 4);
+   if (!mapping)
+      return false;
+   nir_def *scale = nir_vec2(b, nir_channel(b, mapping, 0), nir_channel(b, mapping, 2));
+   nir_def *offset = nir_vec2(b, nir_channel(b, mapping, 1), nir_channel(b, mapping, 3));
+   nir_def *mapped = physical ? nir_ffma(b, coordinate, scale, offset) :
+                                nir_fdiv(b, nir_fsub(b, coordinate, offset), scale);
+   return put_value(t, inst, mapped, 0);
+}
+
 static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
@@ -5931,6 +5972,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       const char *name = LLVMGetValueName2(callee, &name_length);
       bool lowered;
       if (!pointer_space_call(t, inst, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
+      if (!rate_map_call(t, inst, name, name_length, &lowered))
          return false;
       if (lowered)
          return true;

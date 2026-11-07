@@ -411,7 +411,9 @@ fn device_queries_follow_nvk_limits() {
     assert!(capabilities.supports_tessellation);
     assert!(capabilities.memoryless_render_targets);
     assert_eq!(capabilities.limits.max_tessellation_factor, 64);
-    assert!(!capabilities.supports_rasterization_rate_map(1));
+    assert!(capabilities.supports_rasterization_rate_map(1));
+    assert!(capabilities.supports_rasterization_rate_map(2));
+    assert!(!capabilities.supports_rasterization_rate_map(3));
     assert!(capabilities.supports_feature_set(10002));
     assert_eq!(
         capabilities.supports_feature_set(10005),
