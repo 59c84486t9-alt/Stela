@@ -116,6 +116,10 @@ struct translator {
    LLVMValueRef mesh, mesh_grid;
    nir_variable *payload, *indices, *mesh_state;
    nir_block *exit;
+   /* A kernel's explicit imageblock: threadgroup memory of width by height
+    * elements of element bytes, row by row. */
+   nir_variable *imageblock;
+   unsigned imageblock_width, imageblock_height, imageblock_element;
    /* An amplified vertex function's layer and viewport outputs. */
    nir_variable *layer, *viewport;
    /* A post-tessellation vertex function's STELA_AIR_PATCH_IDS. */
@@ -428,13 +432,13 @@ pointer_offset(struct value *target, const struct value *origin, uint64_t offset
    target->steps = gcd(origin->steps, steps);
 }
 
-/* Thread, device, constant, threadgroup or object data memory; roots
- * validate the rest. */
+/* Thread, device, constant, threadgroup, imageblock or object data memory;
+ * roots validate the rest. */
 static bool
 pointer_space(LLVMTypeRef type)
 {
    return LLVMGetTypeKind(type) == LLVMPointerTypeKind &&
-          (LLVMGetPointerAddressSpace(type) <= 3 || LLVMGetPointerAddressSpace(type) == 6);
+          (LLVMGetPointerAddressSpace(type) <= 4 || LLVMGetPointerAddressSpace(type) == 6);
 }
 
 /* A kernel, object or mesh function. */
@@ -806,6 +810,16 @@ stitched_resource_call(LLVMValueRef inst)
    return stitched_resource_name(name, name_length);
 }
 
+/* Whether inst is air.imageblock_data, whose pointer is a root. */
+static bool
+imageblock_data_call(LLVMValueRef inst)
+{
+   LLVMValueRef callee = LLVMIsACallInst(inst) ? LLVMGetCalledValue(inst) : NULL;
+   size_t name_length = 0;
+   const char *name = callee && LLVMIsAFunction(callee) ? LLVMGetValueName2(callee, &name_length) : "";
+   return stela_air_call_named(name, name_length, "air.imageblock_data");
+}
+
 /* The texture or sampler a stitched function's call reads from the binding
  * at `index`. A texture's type, texel type and access are what the texture
  * calls that take it need, since a stitched parameter's metadata names only
@@ -1115,6 +1129,25 @@ payload_argument(struct translator *t, LLVMValueRef param, const struct stela_ai
    return true;
 }
 
+/* A kernel's explicit imageblock of element-byte elements, which Metal
+ * keeps in tile memory: threadgroup memory here, of the dimensions the
+ * dispatch's encoder sets, or the threadgroup's width and height. */
+static bool
+imageblock_memory(struct translator *t, unsigned element)
+{
+   const unsigned *given = t->options->imageblock_size;
+   unsigned width = given[0] ? given[0] : t->options->workgroup_size[0];
+   unsigned height = given[0] ? given[1] : t->options->workgroup_size[1];
+   if (t->options->dynamic_shape || !width || !height || width > UINT16_MAX || height > UINT16_MAX)
+      return fail(t, STELA_AIR_ARGUMENT, "an imageblock of %ux%u in a kernel %s", width, height,
+                  t->options->dynamic_shape ? "its dispatches shape" : "without its dimensions");
+   t->imageblock = shared_resource(t, (uint64_t)width * height * element, 16);
+   t->imageblock_width = width;
+   t->imageblock_height = height;
+   t->imageblock_element = element;
+   return t->imageblock != NULL;
+}
+
 /* Whether an argument is absent, its [[function_constant]] false: it binds
  * nothing. A buffer's accesses that folding leaves go through null. */
 static bool
@@ -1140,6 +1173,13 @@ compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
          return false;
       if (absent)
          continue;
+      if (argument->is_imageblock) {
+         if (LLVMGetFirstUse(param))
+            return fail(t, STELA_AIR_ARGUMENT, "an imageblock read other than through its functions");
+         if (!imageblock_memory(t, kernel->imageblock_size))
+            return false;
+         continue;
+      }
       if (argument->is_mesh || argument->is_mesh_grid) {
          /* Only the mesh setters take these. */
          *(argument->is_mesh ? &t->mesh : &t->mesh_grid) = param;
@@ -3829,6 +3869,104 @@ texture_store_word(void *translator, LLVMValueRef pointer, nir_def *value)
    return t->error->kind == STELA_AIR_OK;
 }
 
+/* Element `pixel` of the imageblock's member that slice points to, of
+ * `components` lanes of `bits`. */
+static nir_def *
+imageblock_load(void *translator, LLVMValueRef slice, nir_def *pixel, unsigned components,
+                unsigned bits)
+{
+   struct translator *t = translator;
+   const struct value *base = pointer_value(t, slice);
+   if (!base || !t->imageblock || base->storage != t->imageblock) {
+      fail(t, STELA_AIR_MEMORY, "an imageblock slice that names no member of the imageblock");
+      return NULL;
+   }
+   nir_builder *b = &t->b;
+   struct value address = *base;
+   nir_def *member = nir_umod_imm(b, base->def, t->imageblock_element);
+   address.def = nir_iadd(b, member, nir_u2u64(b, nir_imul_imm(b, pixel, t->imageblock_element)));
+   address.offset_known = false;
+   return memory_access(t, &address, NULL, NULL, 0, components, bits, bits / 8);
+}
+
+/* Runs body count times, a loop of the flat CFG, with the 32-bit index of
+ * each iteration. */
+static bool
+repeat(void *translator, nir_def *count, bool (*body)(void *data, nir_def *index), void *data)
+{
+   struct translator *t = translator;
+   nir_builder *b = &t->b;
+   nir_block *entry = nir_cursor_current_block(b->cursor);
+   nir_block *header = new_block(t), *start = new_block(t), *exit = new_block(t);
+   nir_phi_instr *phi = nir_phi_instr_create(b->shader);
+   if (!header || !start || !exit || !phi)
+      return fail(t, STELA_AIR_ALLOCATION, "AIR loop allocation failed");
+   nir_def *zero = nir_imm_int(b, 0);
+   nir_goto(b, header);
+   nir_def_init(&phi->instr, &phi->def, 1, 32);
+   b->cursor = nir_after_block(header);
+   nir_goto_if(b, start, nir_ult(b, &phi->def, count), exit);
+   b->cursor = nir_after_block(start);
+   if (!body(data, &phi->def))
+      return false;
+   nir_block *end = nir_cursor_current_block(b->cursor);
+   nir_def *next = nir_iadd_imm(b, &phi->def, 1);
+   nir_goto(b, header);
+   nir_phi_instr_add_src(phi, entry, zero);
+   nir_phi_instr_add_src(phi, end, next);
+   nir_instr_insert(nir_before_block(header), &phi->instr);
+   b->cursor = nir_after_block(exit);
+   return true;
+}
+
+/* Metal's imageblock functions in a kernel, apart from the slice writes
+ * texture_call lowers: an element's pointer, and the dimensions. */
+static bool
+imageblock_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name_length,
+                bool *lowered)
+{
+   bool data = stela_air_call_named(name, name_length, "air.imageblock_data");
+   bool width = stela_air_call_named(name, name_length, "air.get_imageblock_width");
+   bool height = stela_air_call_named(name, name_length, "air.get_imageblock_height");
+   *lowered = data || width || height;
+   if (!*lowered)
+      return true;
+   if (!t->imageblock)
+      return fail(t, STELA_AIR_INSTRUCTION, "%.*s in a function without an explicit imageblock",
+                  (int)name_length, name);
+   nir_builder *b = &t->b;
+   if (!data) {
+      if (LLVMGetNumArgOperands(inst) || LLVMTypeOf(inst) != LLVMInt16TypeInContext(t->context))
+         return fail(t, STELA_AIR_TYPE, "an imageblock dimension of an unknown form");
+      return put_value(t, inst, nir_imm_intN_t(b, width ? t->imageblock_width : t->imageblock_height, 16), 0);
+   }
+   /* The element at a position, of the first data and sample. */
+   LLVMValueRef position = LLVMGetNumArgOperands(inst) == 3 ? LLVMGetOperand(inst, 0) : NULL;
+   LLVMValueRef index = position ? LLVMGetOperand(inst, 1) : NULL, sample = position ? LLVMGetOperand(inst, 2) : NULL;
+   unsigned components, bits;
+   if (!position || !value_shape(LLVMTypeOf(position), &components, &bits) || components != 2 ||
+       bits != 16 || !LLVMIsAConstantInt(index) || !LLVMIsAConstantInt(sample) ||
+       LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMPointerTypeKind ||
+       LLVMGetPointerAddressSpace(LLVMTypeOf(inst)) != 4)
+      return fail(t, STELA_AIR_TYPE, "imageblock data of an unknown form");
+   if (LLVMConstIntGetZExtValue(index) || LLVMConstIntGetZExtValue(sample))
+      return fail(t, STELA_AIR_INSTRUCTION, "imageblock data of a later index or sample");
+   nir_def *at = get_value(t, position);
+   if (!at)
+      return false;
+   at = nir_u2u32(b, at);
+   nir_def *pixel = nir_iadd(b, nir_imul_imm(b, nir_channel(b, at, 1), t->imageblock_width),
+                             nir_channel(b, at, 0));
+   nir_def *offset = nir_u2u64(b, nir_imul_imm(b, pixel, t->imageblock_element));
+   if (!put_value(t, inst, offset, STELA_AIR_READ_WRITE))
+      return false;
+   struct value *value = find_value(t, inst);
+   value->pointer_root = inst;
+   value->storage = t->imageblock;
+   value->storage_size = t->imageblock_width * t->imageblock_height * t->imageblock_element;
+   return true;
+}
+
 /* A call of one of AIR's texture functions; false with no error when the
  * call is something else. */
 static bool
@@ -3839,6 +3977,9 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
       .b = &t->b, .options = t->options, .error = t->error, .translator = t,
       .operand = texture_operand, .texture = texture_argument, .sampler = sampler_argument,
       .load_word = texture_load_word, .store_word = texture_store_word, .store_at = call_store,
+      .imageblock_width = t->imageblock ? t->imageblock_width : 0,
+      .imageblock_height = t->imageblock_height, .imageblock_load = imageblock_load,
+      .repeat = repeat,
    };
    /* A texture chosen with null textures is null where the choice is not
     * it; its other calls are the texture's, made only where it is, and
@@ -4292,8 +4433,8 @@ barrier_stays(LLVMValueRef inst, LLVMValueRef callee)
    return false;
 }
 
-/* AIR's barriers and fences, with memory flags 1 device, 2 threadgroup and 4
- * texture memory. A barrier is (flags, scope), as Apple's compiler emits, or
+/* AIR's barriers and fences, with memory flags 1 device, 2 threadgroup, 4
+ * texture and 8 imageblock memory. A barrier is (flags, scope), as Apple's compiler emits, or
  * (flags, order, scope); a fence is (flags, order, scope). Orders are C++'s,
  * 0 relaxed and 5 sequentially consistent, which NIR's acquire-release
  * barrier implements as SPIR-V's does. Scopes are 1 threadgroup, 2 device and
@@ -4339,12 +4480,14 @@ synchronization_call(struct translator *t, LLVMValueRef inst, LLVMValueRef calle
    }
    unsigned flags = values[0], order = count == 3 ? values[1] : 5, scope = values[count - 1];
    /* Simdgroup barriers name their scope 1 before Metal 3.2. */
-   if (flags & ~7u || (kind == FENCE ? order != 0 && order != 5 : order != 5) ||
+   /* Flag 8 is mem_threadgroup_imageblock: a kernel's imageblock is
+    * threadgroup memory. */
+   if (flags & ~15u || (kind == FENCE ? order != 0 && order != 5 : order != 5) ||
        (kind == FENCE ? scope != 1 && scope != 2 && scope != 4 :
         kind == THREADGROUP_BARRIER ? scope != 1 : scope != 1 && scope != 4))
       return fail(t, STELA_AIR_INSTRUCTION, "unsupported barrier or fence memory flags/order/scope");
    nir_variable_mode modes = (flags & 1 ? nir_var_mem_ssbo | nir_var_mem_global : 0) |
-                             (flags & 2 ? nir_var_mem_shared : 0) | (flags & 4 ? nir_var_image : 0);
+                             (flags & 10 ? nir_var_mem_shared : 0) | (flags & 4 ? nir_var_image : 0);
    bool ordered = modes && order;
    mesa_scope execution = kind == THREADGROUP_BARRIER ? SCOPE_WORKGROUP :
                           kind == SIMDGROUP_BARRIER ? SCOPE_SUBGROUP : SCOPE_NONE;
@@ -4971,6 +5114,11 @@ instruction(struct translator *t, LLVMValueRef inst)
       }
       size_t name_length = 0;
       const char *name = LLVMGetValueName2(callee, &name_length);
+      bool lowered;
+      if (!imageblock_call(t, inst, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
       if (stela_air_call_named(name, name_length, "air.get_num_patch_control_points")) {
          unsigned points = t->render.entry.patch_control_points;
          if (!points)
@@ -4981,7 +5129,6 @@ instruction(struct translator *t, LLVMValueRef inst)
       if (stitched_resource_name(name, name_length) ||
           (stitched_builtin_name(name, name_length) && find_value(t, inst)))
          return true;
-      bool lowered;
       if (!stitched_builtin_call(t, inst, callee, name, name_length, &lowered))
          return false;
       if (lowered)
@@ -5738,7 +5885,8 @@ pointer_provenance(struct translator *t)
             continue;
          LLVMOpcode op = LLVMGetInstructionOpcode(inst);
          if (op == LLVMAlloca || op == LLVMLoad || stela_air_read_sampler(inst) ||
-             stela_air_null_texture(inst) || stitched_resource_call(inst))
+             stela_air_null_texture(inst) || stitched_resource_call(inst) ||
+             imageblock_data_call(inst))
             continue; /* Roots, like arguments and globals. */
          if (op != LLVMPHI && op != LLVMSelect && op != LLVMGetElementPtr && op != LLVMBitCast)
             return fail(t, STELA_AIR_TYPE, "unsupported pointer provenance producer %d", op);

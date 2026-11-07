@@ -615,6 +615,12 @@ static StelaRegionRecord region_record(NSUInteger slice, NSUInteger level, MTLOr
 	ENTRY(StelaComputeCodeSetThreadgroupMemory, command);
 }
 
+- (void)setImageblockWidth:(NSUInteger)width height:(NSUInteger)height
+{
+	StelaImageblockSize command = {.width = width, .height = height};
+	ENTRY(StelaComputeCodeSetImageblockSize, command);
+}
+
 - (void)setVisibleFunctionTable:(id)table atBufferIndex:(NSUInteger)index
 {
 	[self setBuffer:table offset:0 atIndex:index];

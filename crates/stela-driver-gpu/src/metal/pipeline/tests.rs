@@ -440,6 +440,7 @@ fn compute_variants_validate_dispatch_shape_and_memory() {
         &kernel.interface,
         size(64, 2, 1),
         &[(0, 4096), (1, 64)],
+        None,
     )
     .unwrap();
     assert_eq!(variant.workgroup_size, Some([64, 2, 1]));
@@ -450,7 +451,7 @@ fn compute_variants_validate_dispatch_shape_and_memory() {
     );
 
     let check = |threads: Size, lengths: &[(u32, u64)]| {
-        compute_variant(&plan, &kernel.interface, threads, lengths)
+        compute_variant(&plan, &kernel.interface, threads, lengths, None)
     };
     assert!(
         check(size(16, 1, 1), &[(1, 64)]).is_err(),

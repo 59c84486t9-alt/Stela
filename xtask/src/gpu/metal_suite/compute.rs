@@ -5,8 +5,8 @@
 //! Apple's GPUs and NVIDIA's warps both have; the builtins case records the
 //! width. The order in which atomics return their values is the device's
 //! choice, so those outputs are compared sorted.
-use super::plan::{Buffer, Case, Output, Plan, Tolerance};
-use super::values::{Dtype, Random, bits32, f16r, f32r, f32s, floats, ints, sum, u32s};
+use super::plan::{Buffer, Case, Output, Plan, Texture, Tolerance};
+use super::values::{Dtype, Random, bits32, f16_bits, f16r, f32r, f32s, floats, ints, sum, u32s};
 use serde_json::json;
 
 const SIMD: usize = 32;
@@ -723,6 +723,118 @@ fn control(plan: &mut Plan, library: &str) {
     );
 }
 
+/// RGBA texels of a width-wide texture, zero but where `texel` gives one,
+/// as half or float bytes.
+fn texels(
+    width: u32,
+    height: u32,
+    half: bool,
+    texel: impl Fn(u32, u32) -> Option<[f64; 4]>,
+) -> Vec<u8> {
+    let mut bytes = vec![];
+    for y in 0..height {
+        for x in 0..width {
+            for v in texel(x, y).unwrap_or([0.0; 4]) {
+                if half {
+                    bytes.extend(f16_bits(v).to_le_bytes());
+                } else {
+                    bytes.extend((v as f32).to_le_bytes());
+                }
+            }
+        }
+    }
+    bytes
+}
+
+/// Compute kernels' explicit imageblocks: elements in tile memory that one
+/// thread writes to a texture as a slice.
+fn imageblocks(plan: &mut Plan, library: &str) {
+    if plan.has(SOURCE, "imageblock_tiles") {
+        let expected = texels(16, 16, true, |x, y| {
+            let (group_x, group_y) = (f64::from(x / 8), f64::from(y / 8));
+            Some([
+                f64::from(x % 8) / 8.0,
+                f64::from(y % 8) / 8.0,
+                group_x / 2.0 + group_y / 4.0,
+                1.0,
+            ])
+        });
+        // The static threadgroup memory, indirect command support and
+        // required threadgroup size, then two sizes' imageblock memory of
+        // its 8-byte elements.
+        let fixed = [0, 0, 0, 0, 0, 8 * 8 * 8, 32 * 32 * 8, 0];
+        plan.add(
+            Case::compute(
+                "compute.imageblock.tiles",
+                library,
+                "imageblock_tiles",
+                [16, 16, 1],
+                [8, 8, 1],
+            )
+            .set("imageblock", json!([8, 8]))
+            .set("imageblock_lengths", json!([[8, 8], [32, 32]]))
+            .set(
+                "pipeline_properties",
+                json!({"fixed": "fixed", "limits": "limits"}),
+            )
+            .buffer(Buffer::zeroed("fixed", 0, 32).unbound())
+            .buffer(Buffer::zeroed("limits", 0, 16).unbound())
+            .output(Output::exact("fixed", Dtype::U32, u32s(&fixed)))
+            .output(Output::new("t", Dtype::U8, Tolerance::exact()).expect_same(expected))
+            .texture(
+                Texture::d2("t", "rgba16float", 16, 16)
+                    .index(0)
+                    .usage(&["read", "write"]),
+            ),
+        );
+    }
+    if plan.has(SOURCE, "imageblock_member") {
+        let expected = texels(8, 4, true, |x, y| {
+            ((2..5).contains(&x) && (1..3).contains(&y))
+                .then(|| [f64::from(x - 2) / 4.0, f64::from(y - 1) / 4.0, 1.0, 0.5])
+        });
+        plan.add(
+            Case::compute(
+                "compute.imageblock.member_region",
+                library,
+                "imageblock_member",
+                [4, 4, 1],
+                [4, 4, 1],
+            )
+            .set("imageblock", json!([4, 4]))
+            .output(Output::new("t", Dtype::U8, Tolerance::exact()).expect_same(expected))
+            .texture(
+                Texture::d2("t", "rgba16float", 8, 4)
+                    .index(0)
+                    .usage(&["read", "write"])
+                    .data(vec![0; 8 * 4 * 8]),
+            ),
+        );
+    }
+    if plan.has(SOURCE, "imageblock_clipped") {
+        let expected = texels(8, 8, false, |x, y| {
+            (x >= 4 && y >= 4).then(|| [f64::from(x - 4) / 8.0, f64::from(y - 4) / 8.0, 0.25, 1.0])
+        });
+        plan.add(
+            Case::compute(
+                "compute.imageblock.clipped",
+                library,
+                "imageblock_clipped",
+                [8, 8, 1],
+                [8, 8, 1],
+            )
+            .set("imageblock", json!([8, 8]))
+            .output(Output::new("t", Dtype::U8, Tolerance::exact()).expect_same(expected))
+            .texture(
+                Texture::d2("t", "rgba32float", 8, 8)
+                    .index(0)
+                    .usage(&["read", "write"])
+                    .data(vec![0; 8 * 8 * 16]),
+            ),
+        );
+    }
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("compute", SOURCE, &[], super::plan::LATEST);
     builtins(plan, &library);
@@ -731,4 +843,5 @@ pub fn build(plan: &mut Plan) {
     simd(plan, &library);
     memory(plan, &library);
     control(plan, &library);
+    imageblocks(plan, &library);
 }

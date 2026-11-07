@@ -1698,6 +1698,10 @@ static void bind_resources(Case *c, id e, NSDictionary *spec, BOOL compute, MTLR
 				[ce useHeap:h];
 		for (NSDictionary *m in spec[@"threadgroup_memory"])
 			[ce setThreadgroupMemoryLength:number(m, @"length", 16) atIndex:number(m, @"index", 0)];
+		/* A kernel's explicit imageblock's width and height. */
+		NSArray *imageblock = spec[@"imageblock"];
+		if (imageblock)
+			[ce setImageblockWidth:[imageblock[0] unsignedIntegerValue] height:[imageblock[1] unsignedIntegerValue]];
 		return;
 	}
 	id<MTLRenderCommandEncoder> re = e;
@@ -2316,6 +2320,10 @@ static void store_compute_properties(Case *c, NSDictionary *spec, id<MTLComputeP
 	if (@available(macOS 26.0, *))
 		[fixed addObjectsFromArray:@[ @(p.requiredThreadsPerThreadgroup.width), @(p.requiredThreadsPerThreadgroup.height),
 					      @(p.requiredThreadsPerThreadgroup.depth) ]];
+	/* The imageblock memory of each width and height. */
+	for (NSArray *size in spec[@"imageblock_lengths"])
+		[fixed addObject:@([p imageblockMemoryLengthForDimensions:MTLSizeMake([size[0] unsignedIntegerValue],
+										      [size[1] unsignedIntegerValue], 1)])];
 	NSMutableArray *limits = [NSMutableArray arrayWithObjects:@(p.threadExecutionWidth), @(p.maxTotalThreadsPerThreadgroup), nil];
 	if (@available(macOS 27.0, *)) {
 		/* Automatic usage leaves the pipeline's to the device. */

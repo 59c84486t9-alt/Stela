@@ -499,8 +499,7 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 
 - (NSUInteger)imageblockMemoryLengthForDimensions:(MTLSize)size
 {
-	(void)size;
-	return 0;
+	return size.width * size.height * _imageblockBytes;
 }
 
 - (id)functionHandleWithFunction:(id)function
@@ -844,6 +843,7 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	pipeline->_maxTotalThreadsPerThreadgroup = response.max_total_threads_per_threadgroup;
 	pipeline->_threadExecutionWidth = response.thread_execution_width;
 	pipeline->_staticThreadgroupMemoryLength = response.static_threadgroup_memory_length;
+	pipeline->_imageblockBytes = response.imageblock_bytes;
 	pipeline->_supportIndirectCommandBuffers = indirect;
 	if ([descriptor respondsToSelector:@selector(requiredThreadsPerThreadgroup)]) {
 		pipeline->_requiredThreads = [descriptor requiredThreadsPerThreadgroup];

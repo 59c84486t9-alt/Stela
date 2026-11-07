@@ -436,6 +436,8 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	uint64_t _resourceID;
 	NSUInteger _maxTotalThreadsPerThreadgroup, _threadExecutionWidth;
 	NSUInteger _staticThreadgroupMemoryLength;
+	/* The bytes of each element of the kernel's explicit imageblock. */
+	NSUInteger _imageblockBytes;
 	BOOL _supportIndirectCommandBuffers;
 	/* What the descriptor fixes: the threadgroup size, zero for none, and
 	 * the forward progress usage. */

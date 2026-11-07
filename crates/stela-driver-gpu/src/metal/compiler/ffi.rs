@@ -170,6 +170,7 @@ pub struct Reflection {
     pub(super) commands: u32,
     pub(super) command_barriers: u32,
     pub(super) attachment_reads: u32,
+    pub(super) imageblock_bytes: u32,
     pub(super) buffers: [BufferUse; MAX_BUFFER_BINDINGS as usize],
     pub(super) textures: [TextureUse; MAX_TEXTURE_BINDINGS as usize],
     pub(super) samplers: [u32; MAX_SAMPLER_BINDINGS as usize],
@@ -437,6 +438,7 @@ pub struct Specialization {
     pub(super) round_toward_zero: u32,
     pub(super) extended_range: u32,
     pub(super) vertex_formats: [u8; 32],
+    pub(super) imageblock_size: [u32; 2],
 }
 
 /// `struct stela_metal_attachment`: a color attachment a fragment function

@@ -44,6 +44,8 @@ pub(super) struct ComputeState {
     pub(super) threadgroup_lengths: Vec<(u32, u64)>,
     pub(super) bound: Option<Pipeline>,
     pub(super) stage_in: Option<StageInRegion>,
+    /// `setImageblockWidth:height:`, or `None` for the threadgroup's.
+    pub(super) imageblock_size: Option<[u32; 2]>,
     /// `setBuffer:offset:attributeStride:atIndex:`'s stride of each buffer
     /// index.
     pub(super) attribute_strides: [Option<u32>; MAX_BUFFER_BINDINGS as usize],
@@ -70,6 +72,7 @@ impl CommandBuffer {
             threadgroup_lengths: Vec::new(),
             bound: None,
             stage_in: None,
+            imageblock_size: None,
             attribute_strides: [None; MAX_BUFFER_BINDINGS as usize],
         }));
         Ok(())
@@ -205,6 +208,22 @@ impl CommandBuffer {
         Ok(())
     }
 
+    /// `setImageblockWidth:height:`: the dimensions of the explicit
+    /// imageblock of the kernels this encoder dispatches after it.
+    pub fn set_imageblock_size(&mut self, width: u64, height: u64) -> Result<()> {
+        let state = compute(&mut self.encoder)?;
+        let dimension = |size: u64| {
+            u32::try_from(size)
+                .ok()
+                .filter(|size| (1..=u32::from(u16::MAX)).contains(size))
+                .ok_or(Error::Invalid(
+                    "imageblock dimensions are 1 to 65535 pixels",
+                ))
+        };
+        state.imageblock_size = Some([dimension(width)?, dimension(height)?]);
+        Ok(())
+    }
+
     /// `dispatchThreadgroups:threadsPerThreadgroup:`.
     pub fn dispatch_threadgroups(
         &mut self,
@@ -316,6 +335,7 @@ impl CommandBuffer {
             &pipeline.interface,
             threads,
             &state.threadgroup_lengths,
+            state.imageblock_size,
         )?;
         let variant = resolver.compute_pipeline(pipeline, &specialization)?;
         let serial = state.dispatch_type == DispatchType::Serial;

@@ -269,6 +269,56 @@ kernel void simdgroup_elements(device const float *in [[buffer(0)]], device floa
 }
 #endif
 
+#ifndef SKIP_imageblock_tiles
+// Each thread fills its element of an explicit imageblock, then one thread
+// writes the whole block where its threadgroup's tile lies.
+struct ImageblockPixel { half4 color; };
+kernel void imageblock_tiles(imageblock<ImageblockPixel, imageblock_layout_explicit> block,
+                             texture2d<half, access::write> out [[texture(0)]],
+                             ushort2 tid [[thread_position_in_threadgroup]],
+                             ushort2 group [[threadgroup_position_in_grid]])
+{
+    threadgroup_imageblock ImageblockPixel *p = block.data(tid);
+    p->color = half4(half(tid.x) / 8, half(tid.y) / 8, half(group.x) / 2 + half(group.y) / 4, 1);
+    threadgroup_barrier(mem_flags::mem_threadgroup_imageblock);
+    if (tid.x == 0 && tid.y == 0)
+        out.write(block.slice(block.data(ushort2(0))->color),
+                  group * ushort2(block.get_width(), block.get_height()));
+}
+#endif
+
+#ifndef SKIP_imageblock_member
+// A member of a larger element, a 3x2 region of the block, written at an
+// offset.
+struct ImageblockData { float pad; half4 color; ushort tag; };
+kernel void imageblock_member(imageblock<ImageblockData, imageblock_layout_explicit> block,
+                              texture2d<half, access::write> out [[texture(0)]],
+                              ushort2 tid [[thread_position_in_threadgroup]])
+{
+    threadgroup_imageblock ImageblockData *p = block.data(tid);
+    p->pad = 9;
+    p->color = half4(half(tid.x) / 4, half(tid.y) / 4, 1, 0.5h);
+    p->tag = tid.x;
+    threadgroup_barrier(mem_flags::mem_threadgroup_imageblock);
+    if (tid.x == 0 && tid.y == 0)
+        out.write(block.slice(block.data(ushort2(0))->color, ushort2(3, 2)), ushort2(2, 1));
+}
+#endif
+
+#ifndef SKIP_imageblock_clipped
+// A half slice into a float texture, whose edge cuts the block.
+kernel void imageblock_clipped(imageblock<ImageblockPixel, imageblock_layout_explicit> block,
+                               texture2d<float, access::write> out [[texture(0)]],
+                               ushort2 tid [[thread_position_in_threadgroup]])
+{
+    threadgroup_imageblock ImageblockPixel *p = block.data(tid);
+    p->color = half4(half(tid.x) / 8, half(tid.y) / 8, 0.25h, 1);
+    threadgroup_barrier(mem_flags::mem_threadgroup_imageblock);
+    if (tid.x == 0 && tid.y == 0)
+        out.write(block.slice(block.data(ushort2(0))->color), ushort2(4, 4));
+}
+#endif
+
 #ifndef SKIP_address_spaces
 // The address space of a pointer into each: 1 device, 2 threadgroup,
 // 4 thread.

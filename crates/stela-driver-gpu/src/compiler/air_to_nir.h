@@ -287,6 +287,9 @@ typedef nir_def *(*stela_air_fetch_attribute)(nir_builder *, unsigned location, 
 
 struct stela_air_options {
    unsigned workgroup_size[3]; /* Exact nonzero pipeline specialization. */
+   /* A kernel's explicit imageblock's width and height, as its encoder's
+    * setImageblockWidth:height: gives them; zero for the threadgroup's. */
+   unsigned imageblock_size[2];
    unsigned max_instructions; /* Nonzero caller-supplied compilation budget. */
    stela_air_bind_buffer bind_buffer;
    void *binding_data;

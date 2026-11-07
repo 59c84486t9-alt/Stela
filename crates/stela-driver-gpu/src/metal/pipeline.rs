@@ -972,6 +972,9 @@ pub struct ComputePipelinePlan {
     pub max_total_threads_per_threadgroup: u64,
     pub thread_execution_width: u64,
     pub static_threadgroup_memory_length: u64,
+    /// The bytes of each element of the kernel's explicit imageblock, zero
+    /// without one.
+    pub imageblock_bytes: u32,
     pub full_subgroups: bool,
     /// The device's per-dimension threadgroup limits.
     pub max_threads_per_threadgroup: Size,
@@ -1016,6 +1019,7 @@ pub fn compute_pipeline(
         max_total_threads_per_threadgroup: max_threads,
         thread_execution_width: limits.thread_execution_width,
         static_threadgroup_memory_length: interface.static_threadgroup_bytes,
+        imageblock_bytes: interface.imageblock_bytes,
         full_subgroups: descriptor.threadgroup_size_is_multiple_of_thread_execution_width,
         max_threads_per_threadgroup: limits.max_threads_per_threadgroup,
         max_threadgroup_memory_length: limits.max_threadgroup_memory_length,
@@ -1051,6 +1055,7 @@ pub fn compute_variant(
     interface: &Interface,
     threads: Size,
     threadgroup_lengths: &[(u32, u64)],
+    imageblock_size: Option<[u32; 2]>,
 ) -> Result<Specialization> {
     let dimensions = [threads.width, threads.height, threads.depth];
     let limit = plan.max_threads_per_threadgroup;
@@ -1104,10 +1109,16 @@ pub fn compute_variant(
         bytes <= plan.max_threadgroup_memory_length,
         "threadgroup memory exceeds the device limit",
     )?;
+    // Only a kernel with an imageblock compiles for its size, which defaults
+    // to the threadgroup's width and height.
+    let workgroup = dimensions.map(|size| size as u32);
+    let imageblock_size = imageblock_size
+        .filter(|&size| plan.imageblock_bytes != 0 && size != [workgroup[0], workgroup[1]]);
     Ok(Specialization {
         stage_in: plan.stage_in.clone(),
-        workgroup_size: Some(dimensions.map(|size| size as u32)),
+        workgroup_size: Some(workgroup),
         threadgroup_lengths: lengths,
+        imageblock_size,
         ..Specialization::default()
     })
 }

@@ -86,6 +86,9 @@ struct stela_metal_reflection {
    uint32_t commands, command_barriers;
    /* The color attachments a fragment function reads, one bit each. */
    uint32_t attachment_reads;
+   /* The bytes of each element of a kernel's explicit imageblock, or zero
+    * for a function without one. */
+   uint32_t imageblock_bytes;
    struct stela_metal_buffer_use buffers[STELA_METAL_BUFFERS];
    struct stela_metal_texture_use textures[STELA_METAL_TEXTURES];
    uint32_t samplers[STELA_METAL_SAMPLERS];
@@ -181,8 +184,11 @@ struct stela_metal_specialization {
     * its pipeline fetches as 32-bit words, the device's vertex input
     * lacking the format; zero for the rest. */
    uint8_t vertex_formats[32];
+   /* A kernel's explicit imageblock's width and height, its encoder's
+    * setImageblockWidth:height:, or zero for its threadgroup's. */
+   uint32_t imageblock_size[2];
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 176u
+#define STELA_METAL_SPECIALIZATION_BYTES 184u
 #define STELA_METAL_ATTACHMENT_BYTES 16u
 #define STELA_METAL_CONSTEXPR_SAMPLER_BYTES 16u
 #define STELA_METAL_MODULE_BYTES 32u

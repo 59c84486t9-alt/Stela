@@ -1832,6 +1832,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
    bool patch = render && render->entry.patch;
    bool payloads = false, meshes = false, grids = false, positions_in_patch = false;
    kernel->field_count = 0;
+   kernel->imageblock_size = 0;
    for (unsigned a = 0; a < argc; a++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
       unsigned fields_count, index;
@@ -1931,6 +1932,23 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          kernel->arguments[a] = (struct stela_air_argument){
             .value = param, .used = input->used, .absent = !claims,
             .name = input->name, .name_bytes = input->name_bytes};
+         continue;
+      }
+      /* A kernel's explicit imageblock, which only air.imageblock_data
+       * reads: its element size is all the translator needs. */
+      if (!render && stela_air_md_string(fields[1], "air.imageblock")) {
+         unsigned size = 0;
+         bool explicit_layout = fields_count > 2 && stela_air_md_string(fields[2], "explicit");
+         for (unsigned f = 2; f + 1 < fields_count; f++)
+            if (stela_air_md_string(fields[f], "air.imageblock_data_size") &&
+                !stela_air_md_uint(fields[f + 1], &size))
+               size = 0;
+         if (!explicit_layout || !size || kernel->imageblock_size)
+            return fail(t, STELA_AIR_ARGUMENT, "a kernel takes one explicit imageblock of known size");
+         if (claims)
+            kernel->imageblock_size = size;
+         kernel->arguments[a] = (struct stela_air_argument){
+            .value = param, .is_imageblock = true, .absent = !claims};
          continue;
       }
       if (!buffer && !builtin && !interpolated && !vertex_input && !texture && !sampler &&
@@ -2968,7 +2986,8 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
          const struct stela_air_argument *arg = &entries[i].kernel.arguments[a];
          args[a] = (struct stela_air_argument_info) {
             .buffer = arg->buffer,
-            .kind = arg->is_buffer ? 1 : arg->is_texture ? 3 : arg->is_sampler ? 4 : arg->is_stage_in ? 5 : 2,
+            .kind = arg->is_buffer ? 1 : arg->is_texture ? 3 : arg->is_sampler ? 4 :
+                    arg->is_stage_in ? 5 : arg->is_imageblock ? 6 : 2,
             .texture = arg->texture, .sampler = arg->sampler, .builtin = arg->builtin,
             .location = arg->location,
             .components = arg->components,
@@ -2988,6 +3007,7 @@ inspect(const void *bitcode, size_t size, const struct stela_air_constants *cons
          .argument_count = argument_count, .arguments = args,
          .reflection_complete = complete_reflection(&m, entries[i].fn, &entries[i].kernel),
          .max_threads = entries[i].kernel.max_threads,
+         .imageblock_bytes = entries[i].kernel.imageblock_size,
       };
       bool discards;
       entry_facts(&m, entries[i].fn, &entry.threadgroup_bytes, &discards);

@@ -225,7 +225,7 @@ enum stela_air_builtin {
 
 struct stela_air_argument_info {
    struct stela_air_buffer buffer;
-   unsigned kind; /* 1=buffer, 2=builtin, 3=texture, 4=sampler, 5=stage-in. */
+   unsigned kind; /* 1=buffer, 2=builtin, 3=texture, 4=sampler, 5=stage-in, 6=imageblock. */
    enum stela_air_builtin builtin; /* kind 2 */
    unsigned location; /* kind 5: the attribute. */
    struct stela_air_texture texture; /* kind 3 */
@@ -254,6 +254,8 @@ struct stela_air_entry {
    /* The threadgroup globals the entry uses, in module order, each placed at
     * its alignment. */
    uint64_t threadgroup_bytes;
+   /* The bytes of each element of its explicit imageblock, or zero. */
+   unsigned imageblock_bytes;
 };
 typedef bool (*stela_air_visit_entry)(const struct stela_air_inspection *,
                                      const struct stela_air_entry *, void *);
@@ -672,6 +674,8 @@ struct stela_air_argument {
    /* Object and mesh inputs; the payload's buffer holds its size, alignment
     * and access. */
    bool is_payload, is_mesh, is_mesh_grid;
+   /* A kernel's explicit imageblock, whose size the kernel holds. */
+   bool is_imageblock;
    /* A stage-in attribute at location: a kernel's air.stage_in. */
    bool is_stage_in;
    unsigned location;
@@ -692,6 +696,9 @@ struct stela_air_argument {
 struct stela_air_kernel {
    unsigned count, field_count;
    unsigned max_threads; /* A kernel's air.max_work_group_size, or zero. */
+   /* The bytes of each element of a kernel's explicit imageblock, or zero
+    * for a kernel without one. */
+   unsigned imageblock_size;
    struct stela_air_argument arguments[AIR_MAX_ARGUMENTS];
    struct stela_air_field fields[AIR_MAX_FIELDS];
 };

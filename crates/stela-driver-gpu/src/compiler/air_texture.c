@@ -63,7 +63,7 @@ static const struct shape {
 enum operation {
    SAMPLE, SAMPLE_COMPARE, SAMPLE_GRAD, SAMPLE_COMPARE_GRAD, READ, WRITE, GATHER, GATHER_COMPARE,
    WIDTH, HEIGHT, DEPTH, ARRAY_SIZE, MIP_LEVELS, SAMPLES, CLAMPED_LOD, UNCLAMPED_LOD, FENCE,
-   IS_NULL, BLOCK_READ,
+   IS_NULL, BLOCK_READ, SLICE_WRITE,
 };
 
 /* Each operation's name stem, and whether its name ends in the texel type. */
@@ -80,6 +80,8 @@ static const struct {
    [SAMPLES] = {"get_num_samples"}, [CLAMPED_LOD] = {"calculate_clamped_lod"},
    [UNCLAMPED_LOD] = {"calculate_unclamped_lod"}, [FENCE] = {"fence"}, [IS_NULL] = {"is_null"},
    [BLOCK_READ] = {"block_read", true},
+   /* Its suffix is the slice's member type, which need not be the texel's. */
+   [SLICE_WRITE] = {"write_imageblock_slice_to"},
 };
 
 struct call {
@@ -780,7 +782,7 @@ stela_air_texture_use(LLVMValueRef inst, struct stela_air_texture *texture)
    }
    if (depth)
       texture->primitive = STELA_AIR_FLOAT;
-   bool writes = op == WRITE, reads = op == READ;
+   bool writes = op == WRITE || op == SLICE_WRITE, reads = op == READ;
    bool samples = op == SAMPLE || op == SAMPLE_COMPARE || op == SAMPLE_GRAD ||
                   op == SAMPLE_COMPARE_GRAD || op == GATHER || op == GATHER_COMPARE ||
                   op == BLOCK_READ;
@@ -955,6 +957,144 @@ write_texel(struct call *call)
                          .image_array = shape->array, .access = image_access(call, level),
                          .src_type = nir_get_nir_type_for_glsl_base_type(base_type(texture)));
    return true;
+}
+
+/* The member type a slice write's name ends in: f16, f32, i8, i16 or i32,
+ * or a vector of 2 to 4 of them, as v4f16. */
+static bool
+slice_type(const char *text, size_t bytes, unsigned *components, bool *floating, unsigned *bits)
+{
+   *components = 1;
+   if (bytes > 2 && text[0] == 'v' && text[1] >= '2' && text[1] <= '4') {
+      *components = (unsigned)(text[1] - '0');
+      text += 2;
+      bytes -= 2;
+   }
+   static const struct {
+      const char *name;
+      bool floating;
+      unsigned bits;
+   } types[] = {{"f16", true, 16}, {"f32", true, 32}, {"i8", false, 8}, {"i16", false, 16},
+                {"i32", false, 32}};
+   for (unsigned i = 0; i < ARRAY_SIZE(types); i++) {
+      if (bytes == strlen(types[i].name) && !memcmp(text, types[i].name, bytes)) {
+         *floating = types[i].floating;
+         *bits = types[i].bits;
+         return true;
+      }
+   }
+   return false;
+}
+
+struct slice {
+   struct call *call;
+   LLVMValueRef member;
+   nir_def *level, *position, *width;
+   unsigned components, bits;
+   bool floating;
+};
+
+/* Pixel index of a slice's region, row by row, to its texel. */
+static bool
+slice_pixel(void *data, nir_def *index)
+{
+   struct slice *slice = data;
+   struct call *call = slice->call;
+   nir_builder *b = call->b;
+   nir_def *x = nir_umod(b, index, slice->width), *y = nir_udiv(b, index, slice->width);
+   nir_def *pixel = nir_iadd(b, nir_imul_imm(b, y, call->c->imageblock_width), x);
+   nir_def *value = call->c->imageblock_load(call->c->translator, slice->member, pixel,
+                                             slice->components, slice->bits);
+   /* Derefs stay in the block that uses them. */
+   nir_deref_instr *deref = value ? texture_deref(call, slice->level) : NULL;
+   if (!deref)
+      return false;
+   bool is_signed = base_type(call->texture) == GLSL_TYPE_INT;
+   value = slice->floating ? nir_f2f32(b, value) : is_signed ? nir_i2i32(b, value) :
+                                                             nir_u2u32(b, value);
+   nir_def *lanes[4];
+   for (unsigned i = 0; i < 4; i++)
+      lanes[i] = i < slice->components ? nir_channel(b, value, i) :
+                 slice->floating ? nir_imm_float(b, i == 3) : nir_imm_int(b, i == 3);
+   nir_def *at = nir_iadd(b, slice->position, nir_vec2(b, x, y));
+   nir_image_deref_store(b, &deref->def, image_coord(call, at, NULL, NULL), nir_undef(b, 1, 32),
+                         nir_vec(b, lanes, 4), nir_imm_int(b, 0),
+                         .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = false,
+                         .access = image_access(call, slice->level),
+                         .src_type = nir_get_nir_type_for_glsl_base_type(base_type(call->texture)));
+   return true;
+}
+
+/* An imageblock slice into a texture, as texture2d::write(slice, position,
+ * lod) emits it:
+ *
+ *   air.write_imageblock_slice_to_texture_2d[.i16].<member type>: texture,
+ *     slice, i1 sized, <2 x i16> zero, <2 x i16> size, position, lod,
+ *     i1 implicit layout, i32 access
+ *
+ * The slice is one member of every element of a kernel's explicit
+ * imageblock. Pixel (x, y) of the block, within size when sized and the
+ * whole block otherwise, goes to texel position + (x, y); those past the
+ * texture's edge go nowhere. */
+static bool
+slice_write(struct call *call, const char *member_type, size_t member_type_bytes)
+{
+   const struct stela_air_texture *texture = call->texture;
+   const struct stela_air_texture_context *c = call->c;
+   struct slice slice = {.call = call};
+   if (!storage(texture) || texture->depth || call->shape->dim != GLSL_SAMPLER_DIM_2D ||
+       call->shape->array)
+      return fail(call, "imageblock slices write 2D color textures with write access");
+   if (!c->imageblock_width || !c->imageblock_load || !c->repeat)
+      return fail(call, "an imageblock slice write in a function without an explicit imageblock");
+   if (!slice_type(member_type, member_type_bytes, &slice.components, &slice.floating, &slice.bits))
+      return fail(call, "an imageblock slice of member type %.*s", (int)member_type_bytes,
+                  member_type);
+   if (slice.floating == integer_texels(texture))
+      return fail(call, "an imageblock slice of another kind than its texture's texels");
+   if (LLVMGetTypeKind(LLVMTypeOf(call->inst)) != LLVMVoidTypeKind)
+      return fail(call, "an imageblock slice write has a result");
+   slice.member = take(call);
+   if (!slice.member)
+      return false;
+   if (LLVMGetTypeKind(LLVMTypeOf(slice.member)) != LLVMPointerTypeKind ||
+       LLVMGetPointerAddressSpace(LLVMTypeOf(slice.member)) != 4)
+      return fail(call, "an imageblock slice write takes an imageblock member");
+   uint64_t sized;
+   if (!constant(call, 1, &sized))
+      return false;
+   LLVMValueRef origin = take(call);
+   if (!origin)
+      return false;
+   if (!type_is(LLVMTypeOf(origin), 2, LLVMIntegerTypeKind, 16) ||
+       !(LLVMIsNull(origin) || LLVMIsUndef(origin)))
+      return fail(call, "an imageblock slice from other than the block's origin");
+   nir_def *size;
+   if (sized) {
+      size = operand(call, 2, LLVMIntegerTypeKind, 16);
+   } else {
+      LLVMValueRef unsized = take(call);
+      size = unsized ? nir_imm_ivec2(call->b, 0, 0) : NULL;
+   }
+   slice.position = size ? index_operand(call, 2) : NULL;
+   if (!slice.position || !image_level(call, &slice.level) ||
+       !expect(call, 1, 0, "imageblock slice layout") || !access_operand(call, texture->access) ||
+       !finished(call))
+      return false;
+   nir_deref_instr *deref = texture_deref(call, slice.level);
+   if (!deref)
+      return false;
+   nir_builder *b = call->b;
+   nir_def *extent = nir_imm_ivec2(b, (int)c->imageblock_width, (int)c->imageblock_height);
+   if (sized)
+      extent = nir_umin(b, nir_u2u32(b, size), extent);
+   nir_def *texels = nir_image_deref_size(b, 2, 32, &deref->def, nir_imm_int(b, 0),
+                                          .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = false,
+                                          .access = image_access(call, slice.level));
+   extent = nir_umin(b, extent, nir_usub_sat(b, texels, slice.position));
+   slice.width = nir_channel(b, extent, 0);
+   return c->repeat(c->translator, nir_imul(b, slice.width, nir_channel(b, extent, 1)),
+                    slice_pixel, &slice);
 }
 
 /* Texture atomics, as DXMT records them:
@@ -1263,6 +1403,22 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
    if (atomic_index >= 0)
       return atomic(&call, (unsigned)atomic_index, is_signed, result) ? STELA_AIR_TEXTURE_LOWERED :
                                                                        STELA_AIR_TEXTURE_FAILED;
+   /* A slice write's name ends in its member type. */
+   char stem[96];
+   int stem_bytes = snprintf(stem, sizeof(stem), "air.%s_%s", operations[SLICE_WRITE].stem,
+                             call.shape->name);
+   if (stem_bytes > 0 && name_bytes > (size_t)stem_bytes + 1 && !memcmp(name, stem, (size_t)stem_bytes) &&
+       name[stem_bytes] == '.') {
+      const char *rest = name + stem_bytes + 1;
+      size_t rest_bytes = name_bytes - (size_t)stem_bytes - 1;
+      if (rest_bytes > 4 && !memcmp(rest, "i16.", 4)) {
+         call.short_indices = true;
+         rest += 4;
+         rest_bytes -= 4;
+      }
+      return slice_write(&call, rest, rest_bytes) ? STELA_AIR_TEXTURE_LOWERED :
+                                                    STELA_AIR_TEXTURE_FAILED;
+   }
    int op = -1;
    for (unsigned o = 0; o < ARRAY_SIZE(operations) && op < 0; o++) {
       bool forms = o == READ || o == WRITE;

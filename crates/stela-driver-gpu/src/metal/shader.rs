@@ -274,6 +274,9 @@ pub struct Interface {
     pub early_fragment_tests: bool,
     /// Bytes of `threadgroup` variables declared inside the function.
     pub static_threadgroup_bytes: u64,
+    /// The bytes of each element of a kernel's explicit imageblock, zero for
+    /// a function without one.
+    pub imageblock_bytes: u32,
     /// `[[max_total_threads_per_threadgroup]]`, when declared.
     pub max_total_threads: Option<u32>,
     /// The function reads `[[amplification_id]]`.
@@ -546,6 +549,10 @@ pub struct Specialization {
     ///
     /// [`word_formats`]: super::vertex::word_formats
     pub vertex_words: [Option<VertexFormat>; MAX_VERTEX_ATTRIBUTES as usize],
+    /// A kernel's explicit imageblock's width and height, as its encoder's
+    /// `setImageblockWidth:height:` gives them; `None` for the
+    /// threadgroup's. Only kernels with an imageblock take one.
+    pub imageblock_size: Option<[u32; 2]>,
 }
 
 /// A color attachment a fragment function reads, which the function also
@@ -833,6 +840,7 @@ pub(crate) mod tests {
             discards: false,
             early_fragment_tests: false,
             static_threadgroup_bytes: 0,
+            imageblock_bytes: 0,
             max_total_threads: None,
             amplification: false,
             command_barriers: false,

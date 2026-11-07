@@ -744,6 +744,85 @@ block_reads_fetch_each_texel(void)
    assert(!kernel(resident, kernel_metadata, &error));
 }
 
+/* A kernel's explicit imageblock of 8-byte elements, its texture and its
+ * threads' positions in their threadgroup. */
+static const char *imageblock_metadata =
+   "!air.kernel = !{!2}\n"
+   "!air.version = !{!20}\n!air.language_version = !{!21}\n"
+   "!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7}\n"
+   "!5 = !{i32 0, !\"air.imageblock\", !\"explicit\", !\"air.imageblock_data_size\", i32 8,"
+   " !\"air.arg_type_align_size\", i32 8, !\"air.arg_type_name\","
+   " !\"imageblock<Pixel, layout_explicit>\", !\"air.arg_name\", !\"block\"}\n"
+   "!6 = !{i32 1, !\"air.texture\", !\"air.location_index\", i32 0, i32 1, !\"air.write\","
+   " !\"air.arg_type_name\", !\"texture2d<half, write>\", !\"air.arg_name\", !\"out\"}\n"
+   "!7 = !{i32 2, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"ushort2\","
+   " !\"air.arg_name\", !\"tid\"}\n"
+   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
+
+/* As Core Animation's downsample kernels do: each thread stores its pixel,
+ * and after a barrier one writes a region of the block's half4 member. */
+static const char *imageblock_body =
+   "%block_t = type { ptr addrspace(4) }\n"
+   "declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)\n"
+   "declare i16 @air.get_imageblock_width()\n"
+   "declare void @air.wg.barrier(i32, i32, i32) convergent\n"
+   "declare void @air.write_imageblock_slice_to_texture_2d.i16.v4f16(ptr addrspace(1),"
+   " ptr addrspace(4), i1, <2 x i16>, <2 x i16>, <2 x i16>, i16, i1, i32)\n"
+   "define void @kernel(%block_t %block, ptr addrspace(1) %out, <2 x i16> %tid) {\n"
+   "%p = call ptr addrspace(4) @air.imageblock_data(<2 x i16> %tid, i32 0, i16 0)\n"
+   "%w = call i16 @air.get_imageblock_width()\n"
+   "%x = extractelement <2 x i16> %tid, i64 0\n"
+   "%sum = add i16 %x, %w\n"
+   "%h = uitofp i16 %sum to half\n"
+   "%v = insertelement <4 x half> zeroinitializer, half %h, i64 0\n"
+   "store <4 x half> %v, ptr addrspace(4) %p, align 8\n"
+   "call void @air.wg.barrier(i32 8, i32 5, i32 1) convergent\n"
+   "%first = call ptr addrspace(4) @air.imageblock_data(<2 x i16> zeroinitializer, i32 0, i16 0)\n"
+   "call void @air.write_imageblock_slice_to_texture_2d.i16.v4f16(ptr addrspace(1) %out,"
+   " ptr addrspace(4) %first, i1 true, <2 x i16> zeroinitializer, <2 x i16> <i16 3, i16 2>,"
+   " <2 x i16> <i16 1, i16 1>, i16 0, i1 false, i32 2)\n"
+   "ret void\n}\n";
+
+/* The imageblock is threadgroup memory of its dimensions' elements, and
+ * the slice write a loop of image stores. */
+static void
+imageblocks_live_in_threadgroup_memory(void)
+{
+   struct stela_air_error error = {0};
+   struct stela_air_options o = options(&primary, true);
+   o.workgroup_size[0] = 4, o.workgroup_size[1] = 4;
+   o.max_threadgroup_bytes = 32768;
+   nir_shader *shader = kernel_with(imageblock_body, imageblock_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "imageblock: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "imageblock kernel");
+   assert(shader->info.shared_size == 4 * 4 * 8);
+   assert(count(shader).store);
+   bool looped = false;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         for (nir_cf_node *node = block->cf_node.parent; node; node = node->parent)
+            looped |= node->type == nir_cf_node_loop;
+      }
+   }
+   assert(looped);
+   ralloc_free(shader);
+   /* The encoder's dimensions size it instead. */
+   o.imageblock_size[0] = 8, o.imageblock_size[1] = 2;
+   shader = kernel_with(imageblock_body, imageblock_metadata, &o, &error);
+   assert(shader);
+   assert(shader->info.shared_size == 8 * 2 * 8);
+   ralloc_free(shader);
+   /* Only the block's origin starts a slice, and a dynamic kernel has no
+    * dimensions to give it. */
+   const char *offset = replace(imageblock_body, "i1 true, <2 x i16> zeroinitializer",
+                                "i1 true, <2 x i16> <i16 1, i16 0>");
+   assert(!kernel_with(offset, imageblock_metadata, &o, &error));
+   o.dynamic_shape = true;
+   assert(!kernel_with(imageblock_body, imageblock_metadata, &o, &error));
+}
+
 /* A null texture has no descriptor to bind, and reads zero. */
 static void
 null_textures_bind_nothing(void)
@@ -1146,6 +1225,7 @@ main(void)
    null_textures_bind_nothing();
    textures_choose_null_at_run_time();
    block_reads_fetch_each_texel();
+   imageblocks_live_in_threadgroup_memory();
    samples_join_through_phis();
    short_indices_widen_their_positions();
    array_arguments_bind_their_elements();
@@ -1158,6 +1238,6 @@ main(void)
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
         "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics, "
-        "constexpr samplers, cube reads, null textures, joined samples and refusals passed");
+        "constexpr samplers, cube reads, null textures, imageblocks, joined samples and refusals passed");
    return 0;
 }

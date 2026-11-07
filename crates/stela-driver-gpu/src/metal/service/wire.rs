@@ -740,14 +740,16 @@ records! {
 
     /// A new compute pipeline: its `gpuResourceID` (zero when indirect
     /// command buffers cannot switch to it),
-    /// `maxTotalThreadsPerThreadgroup`, `threadExecutionWidth` and
-    /// `staticThreadgroupMemoryLength`.
+    /// `maxTotalThreadsPerThreadgroup`, `threadExecutionWidth`,
+    /// `staticThreadgroupMemoryLength`, and the bytes of each element of its
+    /// kernel's explicit imageblock, zero without one.
     pub struct ComputePipelineResponse {
         pub handle: u64,
         pub resource_id: u64,
         pub max_total_threads_per_threadgroup: u64,
         pub thread_execution_width: u64,
         pub static_threadgroup_memory_length: u64,
+        pub imageblock_bytes: u64,
     }
 
     /// `functionHandleWithFunction:` (`stage` zero) or

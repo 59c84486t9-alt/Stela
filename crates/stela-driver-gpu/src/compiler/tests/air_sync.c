@@ -417,6 +417,9 @@ barriers_and_fences_follow_their_flags(void)
                  SCOPE_WORKGROUP, SCOPE_WORKGROUP, device | nir_var_mem_shared | nir_var_image);
    check_barrier(threadgroup, "call void @air.wg.barrier(i32 0, i32 5, i32 1) convergent",
                  SCOPE_WORKGROUP, SCOPE_NONE, 0);
+   /* Imageblock memory is threadgroup memory. */
+   check_barrier(threadgroup, "call void @air.wg.barrier(i32 8, i32 5, i32 1) convergent",
+                 SCOPE_WORKGROUP, SCOPE_WORKGROUP, nir_var_mem_shared);
    check_barrier("declare void @air.wg.barrier(i32, i32) convergent\n",
                  "call void @air.wg.barrier(i32 1, i32 1) convergent",
                  SCOPE_WORKGROUP, SCOPE_WORKGROUP, device);
@@ -437,7 +440,7 @@ barriers_and_fences_follow_their_flags(void)
    /* A relaxed fence orders nothing. */
    check_barrier(fence, "call void @air.atomic.fence(i32 3, i32 0, i32 1)", SCOPE_NONE, SCOPE_NONE, 0);
    const char *refusals[][2] = {
-      {threadgroup, "call void @air.wg.barrier(i32 8, i32 5, i32 1) convergent"},
+      {threadgroup, "call void @air.wg.barrier(i32 16, i32 5, i32 1) convergent"},
       {threadgroup, "call void @air.wg.barrier(i32 2, i32 0, i32 1) convergent"},
       {threadgroup, "call void @air.wg.barrier(i32 2, i32 5, i32 2) convergent"},
       {simdgroup, "call void @air.simdgroup.barrier(i32 2, i32 2) convergent"},

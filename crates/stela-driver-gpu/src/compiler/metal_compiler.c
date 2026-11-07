@@ -196,6 +196,7 @@ reflect_kernel(const struct stela_air_inspection *info, const struct stela_air_e
    r->found = true;
    r->out->max_total_threads = entry->max_threads;
    r->out->threadgroup_bytes = entry->threadgroup_bytes;
+   r->out->imageblock_bytes = entry->imageblock_bytes;
    for (unsigned i = 0; i < entry->argument_count; i++) {
       const struct stela_air_argument_info *argument = &entry->arguments[i];
       bool added = argument->absent ? true :
@@ -957,6 +958,8 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
    if (compute) {
       memcpy(resources.workgroup_size, specialization->workgroup_size,
              sizeof(resources.workgroup_size));
+      memcpy(resources.imageblock_size, specialization->imageblock_size,
+             sizeof(resources.imageblock_size));
       resources.bind_threadgroup = bind_threadgroup;
       resources.max_threadgroup_bytes = target->max_threadgroup_bytes;
    }

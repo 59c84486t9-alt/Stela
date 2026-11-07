@@ -9,10 +9,10 @@ use crate::metal::{
         wire::{
             Fault,
             commands::{
-                BeginCompute, BufferOffset, ComputeCode, Dispatch, DispatchIndirect, MemoryBarrier,
-                SetBuffer, SetBufferOffset, SetBytes, SetBytesStride, SetPipeline, SetSampler,
-                SetTexture, SetThreadgroupMemory, StageInRegion, VertexBufferStride,
-                VertexOffsetStride,
+                BeginCompute, BufferOffset, ComputeCode, Dispatch, DispatchIndirect,
+                ImageblockSize, MemoryBarrier, SetBuffer, SetBufferOffset, SetBytes,
+                SetBytesStride, SetPipeline, SetSampler, SetTexture, SetThreadgroupMemory,
+                StageInRegion, VertexBufferStride, VertexOffsetStride,
             },
         },
     },
@@ -106,6 +106,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             ComputeCode::SetThreadgroupMemory => {
                 let SetThreadgroupMemory { length, index } = payload.record()?;
                 commands.set_threadgroup_memory_length(length, binding(index)?)?;
+            }
+            ComputeCode::SetImageblockSize => {
+                let ImageblockSize { width, height } = payload.record()?;
+                commands.set_imageblock_size(width, height)?;
             }
             ComputeCode::DispatchThreadgroups => {
                 let Dispatch {

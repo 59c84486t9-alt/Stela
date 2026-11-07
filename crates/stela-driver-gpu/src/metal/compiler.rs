@@ -979,6 +979,7 @@ impl AirCompiler {
             round_toward_zero: specialization.round_toward_zero.into(),
             extended_range: specialization.extended_range,
             vertex_formats: vertex_formats(&specialization.vertex_words),
+            imageblock_size: specialization.imageblock_size.unwrap_or_default(),
         };
         let mut error = ffi::AirError::NONE;
         let air = selected.module.bitcode;
@@ -1574,6 +1575,7 @@ fn interface(reflection: &ffi::Reflection) -> Result<Interface> {
         // The frontend refuses metadata it does not lower, this among it.
         early_fragment_tests: false,
         static_threadgroup_bytes: r.threadgroup_bytes,
+        imageblock_bytes: r.imageblock_bytes,
         max_total_threads: (r.max_total_threads != 0).then_some(r.max_total_threads),
         amplification: r.amplification != 0,
         command_barriers: r.command_barriers != 0,

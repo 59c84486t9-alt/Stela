@@ -93,6 +93,12 @@ records! {
         pub index: u64,
     }
 
+    /// `setImageblockWidth:height:`.
+    pub struct ImageblockSize {
+        pub width: u64,
+        pub height: u64,
+    }
+
     /// `dispatchThreadgroups:threadsPerThreadgroup:`, whose `size` counts
     /// threadgroups, and `dispatchThreads:threadsPerThreadgroup:`, whose
     /// `size` counts threads.
@@ -673,6 +679,8 @@ raw_enum! {
         SetBufferOffsetStride = 0x0110,
         /// `SetBytesStride` and the bytes.
         SetBytesStride = 0x0111,
+        /// `ImageblockSize`.
+        SetImageblockSize = 0x0112,
     }
 }
 

@@ -183,6 +183,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 max_total_threads_per_threadgroup: plan.max_total_threads_per_threadgroup,
                 thread_execution_width: plan.thread_execution_width,
                 static_threadgroup_memory_length: plan.static_threadgroup_memory_length,
+                imageblock_bytes: plan.imageblock_bytes.into(),
             })
         })?;
         call.reply(&ComputePipelineResponse {

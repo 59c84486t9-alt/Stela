@@ -193,6 +193,10 @@ const OPERATIONS: &[(&str, Reach)] = &[
         Reach::Call("[ce setThreadgroupMemoryLength:"),
     ),
     (
+        "ComputeCode::SetImageblockSize",
+        Reach::Call("setImageblockWidth:"),
+    ),
+    (
         "ComputeCode::DispatchThreadgroups",
         Reach::Call("dispatchThreadgroups:"),
     ),
