@@ -75,6 +75,15 @@ uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *reques
 	failure->status = call.status;
 	size_t length = call.reason_length < sizeof(failure->reason) ? call.reason_length : sizeof(failure->reason) - 1;
 	failure->reason[call.status == StelaStatusOk ? 0 : length] = 0;
+	/* A call the service never read has no reason of its own: name the
+	 * operation and the gate's fault, and say so once. */
+	if (call.status == StelaStatusClosed && length == 0) {
+		snprintf(failure->reason, sizeof(failure->reason), "operation %u did not reach the device: gate fault %llu",
+			 operation, failure->fault);
+		if (operation != StelaOperationReport) {
+			stela_report("a gate call", failure);
+		}
+	}
 	return call.status;
 }
 
