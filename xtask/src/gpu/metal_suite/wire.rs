@@ -101,7 +101,7 @@ const OPERATIONS: &[(&str, Reach)] = &[
     ),
     (
         "SparseTileSize",
-        Reach::Without("sparse resources are left out"),
+        Reach::Call("sparseTileSizeWithTextureType:"),
     ),
     (
         "NewRenderPipeline",
@@ -375,19 +375,19 @@ const OPERATIONS: &[(&str, Reach)] = &[
     ("IndirectComputeCode::Reset", Reach::Call("[k_ reset]")),
     (
         "ResourceStateCode::Begin",
-        Reach::Without("sparse resources are left out"),
+        Reach::Call("resourceStateCommandEncoder]"),
     ),
     (
         "ResourceStateCode::UpdateMappings",
-        Reach::Without("sparse resources are left out"),
+        Reach::Call("updateTextureMappings:t mode:"),
     ),
     (
         "ResourceStateCode::UpdateMappingIndirect",
-        Reach::Without("sparse resources are left out"),
+        Reach::Call("indirectBuffer:indirect indirectBufferOffset:"),
     ),
     (
         "ResourceStateCode::MoveMappings",
-        Reach::Without("sparse resources are left out"),
+        Reach::Call("moveTextureMappingsFromTexture:"),
     ),
     (
         "RenderCode::Begin",

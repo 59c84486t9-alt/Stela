@@ -301,3 +301,52 @@ kernel void pool_views(constant PoolViews &pool [[buffer(0)]], device float4 *ou
 {
     out[i] = pool.views[i].read(uint2(0));
 }
+
+// The centre texel of each of a 2 x 2 tile texture's tiles: its RGB, and
+// whether it is resident as alpha.
+kernel void sparse_probe(texture2d<float, access::read> t [[texture(0)]], constant uint2 &tile [[buffer(0)]],
+                         device float4 *out [[buffer(1)]], uint i [[thread_position_in_grid]])
+{
+    sparse_color<float4> c = t.sparse_read(uint2(i & 1, i >> 1) * tile + tile / 2);
+    out[i] = float4(c.value().rgb, c.resident() ? 1.0f : 0.0f);
+}
+
+// Each sparse texture function at each tile's centre, as its value's first
+// channel and whether it is resident: a sample, a gather, a read through a
+// sampler, depth compares of a texture that is not sparse, and a block
+// across the tiles of the centre's row.
+kernel void sparse_functions(texture2d<float> t [[texture(0)]], depth2d<float> z [[texture(1)]],
+                             sampler s [[sampler(0)]], constant uint2 &tile [[buffer(0)]],
+                             device float2 *out [[buffer(1)]], uint i [[thread_position_in_grid]])
+{
+    uint2 texel = uint2(i & 1, i >> 1) * tile + tile / 2;
+    float2 uv = (float2(texel) + 0.5f) / float2(tile * 2);
+    constexpr sampler compare(filter::nearest, compare_func::less);
+    sparse_color<float4> sampled = t.sparse_sample(s, uv);
+    sparse_color<float4> gathered = t.sparse_gather(s, uv);
+    sparse_color<float4> read = t.sparse_read(s, int2(texel));
+    sparse_color<float> compared = z.sparse_sample_compare(compare, uv, 0.5f);
+    sparse_color<float4> gathered_compares = z.sparse_gather_compare(compare, uv, 0.5f);
+    auto block = t.sparse_block_read<2, 1>(s, int2(tile.x - 1, texel.y));
+    sparse_color<float4> left = get<0>(block), right = get<1>(block);
+    device float2 *o = out + i * 7;
+    o[0] = float2(sampled.value().x, sampled.resident());
+    o[1] = float2(gathered.value().x, gathered.resident());
+    o[2] = float2(read.value().x, read.resident());
+    o[3] = float2(compared.value(), compared.resident());
+    o[4] = float2(gathered_compares.value().x, gathered_compares.resident());
+    o[5] = float2(left.value().x, left.resident());
+    o[6] = float2(right.value().x, right.resident());
+}
+
+struct OneSample {
+    float depth [[depth(any)]];
+    uint mask [[sample_mask]];
+};
+
+// Covers sample k alone, at depth 0.1 * (k + 1); the draw's stencil
+// reference marks it.
+fragment OneSample frag_one_sample(constant uint &k [[buffer(0)]])
+{
+    return {0.1f * float(k + 1), 1u << k};
+}

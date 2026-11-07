@@ -5914,6 +5914,234 @@ static void host_color_attachment_map(Case *c, id<MTLCommandQueue> queue, NSDict
 		@throw failure(@"color attachment maps need macOS 26");
 }
 
+/* A sparse texture of 2 x 2 tiles on a sparse heap: tile sizes and region
+ * conversions, then probes of each tile's residency and contents after
+ * mapping tile 0 by region and tile 1 through an indirect buffer and
+ * clearing the texture, after unmapping tile 1 by a region list, and after moving tile 0's memory to a second texture, whose
+ * probes follow. */
+static void host_sparse_textures(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	(void)h;
+	id<MTLDevice> d = c.device;
+	/* Tile sizes are the device's own; they agree with its page sizes. */
+	MTLSize fallback = [d sparseTileSizeWithTextureType:MTLTextureType2D pixelFormat:MTLPixelFormatRGBA8Unorm sampleCount:1];
+	MTLSize tile = [d sparseTileSizeWithTextureType:MTLTextureType2D
+					    pixelFormat:MTLPixelFormatRGBA8Unorm
+					    sampleCount:1
+					 sparsePageSize:MTLSparsePageSize64];
+	NSUInteger page = [d sparseTileSizeInBytesForSparsePageSize:MTLSparsePageSize64];
+	put(c, @"facts", 0, tile.width * tile.height * 4 == page && page == 65536 && tile.depth == 1);
+	put(c, @"facts", 1, fallback.width * fallback.height * 4 == d.sparseTileSizeInBytes);
+	MTLRegion pixels = MTLRegionMake2D(1, 1, tile.width, tile.height), outward, inward, back;
+	[d convertSparsePixelRegions:&pixels toTileRegions:&outward withTileSize:tile
+		       alignmentMode:MTLSparseTextureRegionAlignmentModeOutward numRegions:1];
+	[d convertSparsePixelRegions:&pixels toTileRegions:&inward withTileSize:tile
+		       alignmentMode:MTLSparseTextureRegionAlignmentModeInward numRegions:1];
+	MTLRegion tiles = MTLRegionMake2D(1, 0, 1, 1);
+	[d convertSparseTileRegions:&tiles toPixelRegions:&back withTileSize:tile numRegions:1];
+	NSUInteger values[] = {outward.origin.x, outward.origin.y, outward.size.width, outward.size.height,
+			       inward.origin.x, inward.origin.y, inward.size.width, inward.size.height,
+			       back.origin.x / tile.width, back.origin.y, back.size.width / tile.width,
+			       back.size.height / tile.height};
+	for (NSUInteger i = 0; i < 12; i++)
+		put(c, @"facts", 2 + i, (uint32_t)values[i]);
+
+	MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+	hd.type = MTLHeapTypeSparse;
+	hd.storageMode = MTLStorageModePrivate;
+	hd.sparsePageSize = MTLSparsePageSize64;
+	hd.size = 4 * page;
+	id<MTLHeap> heap = [d newHeapWithDescriptor:hd];
+	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+										       width:tile.width * 2
+										      height:tile.height * 2
+										   mipmapped:NO];
+	td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageRenderTarget;
+	td.storageMode = MTLStorageModePrivate;
+	id<MTLTexture> t = [heap newTextureWithDescriptor:td];
+	id<MTLTexture> moved = t ? [heap newTextureWithDescriptor:td] : nil;
+	if (!moved)
+		@throw failure(@"no sparse textures");
+	put(c, @"facts", 14, heap.type == MTLHeapTypeSparse && t.isSparse && moved.isSparse);
+	put(c, @"facts", 15, (uint32_t)t.firstMipmapInTail);
+	put(c, @"facts", 16, (uint32_t)t.tailSizeInBytes);
+	if (@available(macOS 26.0, *))
+		put(c, @"facts", 17, t.sparseTextureTier >= MTLTextureSparseTier1 &&
+					     [d newBufferWithLength:16 options:0].sparseBufferTier == MTLBufferSparseTierNone);
+
+	uint32_t extents[] = {(uint32_t)tile.width, (uint32_t)tile.height}, *extent = extents;
+	id<MTLComputePipelineState> probe = host_pipeline(c, @"sparse_probe");
+	void (^probes)(id<MTLCommandBuffer>, id<MTLTexture>, NSUInteger) = ^(id<MTLCommandBuffer> cb, id<MTLTexture> texture,
+									     NSUInteger round) {
+		id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+		[e setComputePipelineState:probe];
+		[e setTexture:texture atIndex:0];
+		[e setBytes:extent length:sizeof extents atIndex:0];
+		[e setBuffer:c.buffers[@"probes"] offset:round * 4 * 16 atIndex:1];
+		[e dispatchThreads:MTLSizeMake(4, 1, 1) threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+		[e endEncoding];
+	};
+	/* The indirect buffer counts its mappings before them. */
+	struct {
+		uint32_t count;
+		MTLMapIndirectArguments mapping;
+	} last = {1, {.regionOriginX = 1, .regionOriginY = 0, .regionOriginZ = 0, .regionSizeWidth = 1,
+		      .regionSizeHeight = 1, .regionSizeDepth = 1, .mipMapLevel = 0, .sliceId = 0}};
+	id<MTLBuffer> indirect = [d newBufferWithBytes:&last length:sizeof last options:MTLResourceStorageModeShared];
+	/* Heap textures are untracked: each encoder waits for the last. */
+	void (^step)(void (^)(id<MTLCommandBuffer>)) = ^(void (^encode)(id<MTLCommandBuffer>)) {
+		id<MTLCommandBuffer> cb = [queue commandBuffer];
+		encode(cb);
+		wait_for(cb, c.spec);
+	};
+	step(^(id<MTLCommandBuffer> cb) {
+		id<MTLResourceStateCommandEncoder> r = [cb resourceStateCommandEncoder];
+		[r updateTextureMapping:t mode:MTLSparseTextureMappingModeMap region:MTLRegionMake2D(0, 0, 1, 1) mipLevel:0 slice:0];
+		[r updateTextureMapping:t mode:MTLSparseTextureMappingModeMap indirectBuffer:indirect indirectBufferOffset:0];
+		[r endEncoding];
+	});
+	step(^(id<MTLCommandBuffer> cb) {
+		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		pass.colorAttachments[0].texture = t;
+		pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+		pass.colorAttachments[0].clearColor = MTLClearColorMake(128 / 255.0, 64 / 255.0, 192 / 255.0, 1);
+		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+		[[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
+	});
+	step(^(id<MTLCommandBuffer> cb) { probes(cb, t, 0); });
+	/* Every sparse function over the cleared texture and a depth texture
+	 * of 0.25. */
+	MTLTextureDescriptor *zd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+										       width:td.width
+										      height:td.height
+										   mipmapped:NO];
+	zd.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+	zd.storageMode = MTLStorageModePrivate;
+	id<MTLTexture> z = [d newTextureWithDescriptor:zd];
+	MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+	id<MTLSamplerState> nearest = [d newSamplerStateWithDescriptor:sd];
+	id<MTLComputePipelineState> functions = host_pipeline(c, @"sparse_functions");
+	step(^(id<MTLCommandBuffer> cb) {
+		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		pass.depthAttachment.texture = z;
+		pass.depthAttachment.loadAction = MTLLoadActionClear;
+		pass.depthAttachment.clearDepth = 0.25;
+		pass.depthAttachment.storeAction = MTLStoreActionStore;
+		[[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
+		id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+		[e setComputePipelineState:functions];
+		[e setTexture:t atIndex:0];
+		[e setTexture:z atIndex:1];
+		[e setSamplerState:nearest atIndex:0];
+		[e setBytes:extent length:sizeof extents atIndex:0];
+		[e setBuffer:c.buffers[@"functions"] offset:0 atIndex:1];
+		[e dispatchThreads:MTLSizeMake(4, 1, 1) threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+		[e endEncoding];
+	});
+	step(^(id<MTLCommandBuffer> cb) {
+		id<MTLResourceStateCommandEncoder> r =
+			[cb resourceStateCommandEncoderWithDescriptor:[MTLResourceStatePassDescriptor resourceStatePassDescriptor]];
+		MTLRegion last = MTLRegionMake2D(1, 0, 1, 1);
+		NSUInteger level = 0, slice = 0;
+		[r updateTextureMappings:t mode:MTLSparseTextureMappingModeUnmap regions:&last mipLevels:&level slices:&slice numRegions:1];
+		[r endEncoding];
+	});
+	step(^(id<MTLCommandBuffer> cb) { probes(cb, t, 1); });
+	step(^(id<MTLCommandBuffer> cb) {
+		id<MTLResourceStateCommandEncoder> r = [cb resourceStateCommandEncoder];
+		[r moveTextureMappingsFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+				       sourceSize:MTLSizeMake(1, 1, 1) toTexture:moved destinationSlice:0
+				 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+		[r endEncoding];
+	});
+	step(^(id<MTLCommandBuffer> cb) {
+		probes(cb, t, 2);
+		probes(cb, moved, 3);
+	});
+}
+
+/* Stencil resolve without stencil export: four draws each cover one sample
+ * of a multisampled depth and stencil texture, at depth 0.1 * (k + 1), and
+ * replace its stencil with k + 1; passes resolve it by sample 0, and by the
+ * sample whose depth resolves by min and by max. */
+static void host_stencil_resolve(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	(void)h;
+	id<MTLDevice> d = c.device;
+	id<MTLLibrary> library = library_named(d, c.plan, c.spec[@"library"], c.libraries);
+	MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+	pd.vertexFunction = function_named(library, @"vert_offset_rect", nil);
+	pd.fragmentFunction = function_named(library, @"frag_one_sample", nil);
+	pd.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+	pd.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+	pd.rasterSampleCount = 4;
+	NSError *error = nil;
+	id<MTLRenderPipelineState> p = [d newRenderPipelineStateWithDescriptor:pd error:&error];
+	if (!p)
+		@throw failure(@"one-sample pipeline: %@", error.localizedDescription);
+	MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
+	dd.depthCompareFunction = MTLCompareFunctionAlways;
+	dd.depthWriteEnabled = YES;
+	MTLStencilDescriptor *stencil = [MTLStencilDescriptor new];
+	stencil.stencilCompareFunction = MTLCompareFunctionAlways;
+	stencil.depthStencilPassOperation = MTLStencilOperationReplace;
+	dd.frontFaceStencil = stencil;
+	dd.backFaceStencil = stencil;
+	id<MTLDepthStencilState> ds = [d newDepthStencilStateWithDescriptor:dd];
+	MTLTextureDescriptor *md = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+										       width:8 height:8 mipmapped:NO];
+	md.textureType = MTLTextureType2DMultisample;
+	md.sampleCount = 4;
+	md.usage = MTLTextureUsageRenderTarget;
+	md.storageMode = MTLStorageModePrivate;
+	MTLTextureDescriptor *rd = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+										       width:8 height:8 mipmapped:NO];
+	rd.usage = MTLTextureUsageRenderTarget;
+	rd.storageMode = MTLStorageModePrivate;
+	MTLMultisampleDepthResolveFilter depths[] = {MTLMultisampleDepthResolveFilterSample0, MTLMultisampleDepthResolveFilterMin,
+						     MTLMultisampleDepthResolveFilterMax};
+	MTLMultisampleStencilResolveFilter stencils[] = {MTLMultisampleStencilResolveFilterSample0,
+							 MTLMultisampleStencilResolveFilterDepthResolvedSample,
+							 MTLMultisampleStencilResolveFilterDepthResolvedSample};
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	for (NSUInteger i = 0; i < 3; i++) {
+		id<MTLTexture> ms = [d newTextureWithDescriptor:md], resolved = [d newTextureWithDescriptor:rd];
+		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		pass.depthAttachment.texture = ms;
+		pass.depthAttachment.loadAction = MTLLoadActionClear;
+		pass.depthAttachment.clearDepth = 1;
+		pass.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
+		pass.depthAttachment.resolveTexture = resolved;
+		pass.depthAttachment.depthResolveFilter = depths[i];
+		pass.stencilAttachment.texture = ms;
+		pass.stencilAttachment.loadAction = MTLLoadActionClear;
+		pass.stencilAttachment.clearStencil = 0;
+		pass.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
+		pass.stencilAttachment.resolveTexture = resolved;
+		pass.stencilAttachment.stencilResolveFilter = stencils[i];
+		id<MTLRenderCommandEncoder> r = [cb renderCommandEncoderWithDescriptor:pass];
+		float rect[] = {-1, -1, 1, 1, 0};
+		[r setRenderPipelineState:p];
+		[r setDepthStencilState:ds];
+		[r setVertexBytes:rect length:sizeof rect atIndex:0];
+		for (uint32_t k = 0; k < 4; k++) {
+			[r setStencilReferenceValue:k + 1];
+			[r setFragmentBytes:&k length:sizeof k atIndex:0];
+			[r drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+		}
+		[r endEncoding];
+		id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+		[b copyFromTexture:resolved sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+			sourceSize:MTLSizeMake(8, 8, 1) toBuffer:c.buffers[@"stencils"] destinationOffset:i * 64
+		   destinationBytesPerRow:8 destinationBytesPerImage:64 options:MTLBlitOptionStencilFromDepthStencil];
+		[b copyFromTexture:resolved sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+			sourceSize:MTLSizeMake(8, 8, 1) toBuffer:c.buffers[@"depths"] destinationOffset:i * 256
+		   destinationBytesPerRow:32 destinationBytesPerImage:256 options:MTLBlitOptionDepthFromDepthStencil];
+		[b endEncoding];
+	}
+	wait_for(cb, c.spec);
+}
+
 static void host_rate_maps(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
 {
 	id<MTLDevice> d = c.device;
@@ -6409,6 +6637,8 @@ static void run_host(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 		@"rate_maps" : [NSValue valueWithPointer:host_rate_maps],
 		@"color_attachment_map" : [NSValue valueWithPointer:host_color_attachment_map],
 		@"texture_view_pools" : [NSValue valueWithPointer:host_texture_view_pools],
+		@"sparse_textures" : [NSValue valueWithPointer:host_sparse_textures],
+		@"stencil_resolve" : [NSValue valueWithPointer:host_stencil_resolve],
 	};
 	NSValue *v = work[h[@"kind"]];
 	if (!v)

@@ -58,13 +58,7 @@ const HEADERS_LEFT_OUT: [(&str, &str); 7] = [
 
 /// Functions outside the suite's scope, in headers that are otherwise in it.
 #[cfg(test)]
-const FUNCTIONS_LEFT_OUT: [(&str, &str); 28] = [
-    ("sparse_color", "sparse textures are left out"),
-    ("sparse_gather", "sparse textures are left out"),
-    ("sparse_gather_compare", "sparse textures are left out"),
-    ("sparse_read", "sparse textures are left out"),
-    ("sparse_sample", "sparse textures are left out"),
-    ("sparse_sample_compare", "sparse textures are left out"),
+const FUNCTIONS_LEFT_OUT: [(&str, &str); 21] = [
     ("set_imageblock_size", "imageblocks are left out"),
     ("function_handle", "function handles exist for ray tracing"),
     (
@@ -131,7 +125,6 @@ const FUNCTIONS_LEFT_OUT: [(&str, &str); 28] = [
         "critical_section",
         "needs GPU family 11, which the M1 Pro reference lacks and Stela does not claim",
     ),
-    ("sparse_block_read", "sparse textures are left out"),
     (
         "pack",
         "how the pixel types store their values, not a function a shader calls",
@@ -587,7 +580,7 @@ pub fn sends(text: &str) -> (BTreeSet<String>, BTreeSet<String>) {
 /// Framework headers whose every declaration lies outside the suite's
 /// scope, by the start of their names.
 #[cfg(test)]
-const API_HEADERS_LEFT_OUT: [(&str, &str); 8] = [
+const API_HEADERS_LEFT_OUT: [(&str, &str); 7] = [
     ("MTL4", "the Metal4 family is left out"),
     ("MTLAccelerationStructure", "ray tracing is not claimed"),
     ("MTLIntersectionFunctionTable", "ray tracing is not claimed"),
@@ -596,10 +589,6 @@ const API_HEADERS_LEFT_OUT: [(&str, &str); 8] = [
         "rasterization rate maps are left out",
     ),
     ("MTLTensor", "tensors belong to the Metal4 family, left out"),
-    (
-        "MTLResourceState",
-        "resource state encoders map sparse texture tiles, left out",
-    ),
     (
         "MTLCapture",
         "GPU capture is a developer tool, not a path an application's work takes",
@@ -613,7 +602,7 @@ const API_HEADERS_LEFT_OUT: [(&str, &str); 8] = [
 /// Words that leave out every class or entry whose name holds them,
 /// ignoring case, in headers that are otherwise in scope.
 #[cfg(test)]
-const API_WORDS_LEFT_OUT: [(&str, &str); 13] = [
+const API_WORDS_LEFT_OUT: [(&str, &str); 12] = [
     ("MTL4", "the Metal4 family is left out"),
     ("accelerationStructure", "ray tracing is not claimed"),
     ("intersectionFunction", "ray tracing is not claimed"),
@@ -627,17 +616,16 @@ const API_WORDS_LEFT_OUT: [(&str, &str); 13] = [
         "counter heaps belong to the Metal4 family, left out",
     ),
     ("tensor", "tensors belong to the Metal4 family, left out"),
-    ("sparse", "sparse resources are left out"),
-    (
-        "resourceState",
-        "resource state encoders map sparse texture tiles, left out",
-    ),
     (
         "remote",
         "views of resources on another device are left out",
     ),
     ("peer", "peer groups of linked GPUs are left out"),
     ("shaderValidation", "shader validation is a developer tool"),
+    (
+        "placementSparse",
+        "placement sparse resources need Apple8 and Metal 4 command queues, left out",
+    ),
     (
         "indexedSubscript",
         "subscripts send these, which the parser cannot tell from C indexing; the descriptors they reach are set and read",
@@ -646,7 +634,7 @@ const API_WORDS_LEFT_OUT: [(&str, &str); 13] = [
 
 /// Single entries left out, as `Class entry`.
 #[cfg(test)]
-const API_ENTRIES_LEFT_OUT: [(&str, &str); 24] = [
+const API_ENTRIES_LEFT_OUT: [(&str, &str); 22] = [
     (
         "MTLBlitCommandEncoder getTextureAccessCounters:region:mipLevel:slice:resetCounters:countersBuffer:countersBufferOffset:",
         "texture access counters count sparse texture use",
@@ -654,14 +642,6 @@ const API_ENTRIES_LEFT_OUT: [(&str, &str); 24] = [
     (
         "MTLBlitCommandEncoder resetTextureAccessCounters:region:mipLevel:slice:",
         "texture access counters count sparse texture use",
-    ),
-    (
-        "MTLTexture .firstMipmapInTail",
-        "a mipmap tail is a sparse texture's",
-    ),
-    (
-        "MTLTexture .tailSizeInBytes",
-        "a mipmap tail is a sparse texture's",
     ),
     (
         "MTLDevice newArchiveWithURL:error:",

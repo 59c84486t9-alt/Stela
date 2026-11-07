@@ -787,9 +787,11 @@ impl Derivation<'_> {
             &[
                 api(
                     "sparse textures",
+                    // Metal's tier 1 reads unmapped tiles as zero.
                     features.sparse_binding
                         && features.sparse_residency_image_2d
                         && limits.sparse.residency_standard_2d_block_shape
+                        && limits.sparse.residency_non_resident_strict
                         && self.platform.sparse_page_bytes != 0,
                     ApiFeatures::SPARSE_TEXTURES,
                 ),

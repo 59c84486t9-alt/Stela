@@ -429,9 +429,11 @@ NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state)
 	return _minLOD;
 }
 
+/* Tier 1: unmapped tiles read zero and drop writes. Tier 2's per-tile
+ * activity counters are left out. */
 - (NSInteger)sparseTextureTier
 {
-	return 0;
+	return _sparse ? 1 : 0;
 }
 
 static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NSUInteger type, NSRange levels,

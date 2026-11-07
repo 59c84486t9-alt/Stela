@@ -979,6 +979,72 @@ fn properties(plan: &mut Plan, library: &str, rng: &mut Random) {
         ))
         .output(Output::exact("texels", Dtype::F32, f32s(&texels))),
     );
+    // Mapped tiles hold what a pass stores and read as resident; unmapped
+    // ones drop stores and read zero, and a moved tile's memory reads in its
+    // new texture.
+    let filled = [128.0 / 255.0, 64.0 / 255.0, 192.0 / 255.0, 1.0];
+    let empty = [0.0; 4];
+    let probes: Vec<f64> = [
+        [filled, filled, empty, empty],
+        [filled, empty, empty, empty],
+        [empty; 4],
+        [filled, empty, empty, empty],
+    ]
+    .into_iter()
+    .flatten()
+    .flatten()
+    .collect();
+    // Mapped tiles 0 and 1 read the clear and unmapped ones zero, each as
+    // resident or not; the depth texture is not sparse, and its compares of
+    // 0.5 less than 0.25 fail.
+    let red = 128.0 / 255.0;
+    let functions: Vec<f64> = (0..4)
+        .flat_map(|tile| {
+            let (value, resident) = if tile < 2 { (red, 1.0) } else { (0.0, 0.0) };
+            let colour = [value, resident];
+            [
+                colour,
+                colour,
+                colour,
+                [0.0, 1.0],
+                [0.0, 1.0],
+                colour,
+                colour,
+            ]
+        })
+        .flatten()
+        .collect();
+    plan.add(
+        Case::host(
+            "host.sparse_textures",
+            library,
+            json!({"kind": "sparse_textures"}),
+        )
+        .buffer(Buffer::zeroed("facts", 0, 18 * 4).unbound())
+        .buffer(Buffer::zeroed("probes", 1, 4 * 4 * 16).unbound())
+        .output(Output::exact("facts", Dtype::U32, u32s(&SPARSE_FACTS)))
+        .buffer(Buffer::zeroed("functions", 2, 4 * 7 * 8).unbound())
+        .output(Output::exact("probes", Dtype::F32, f32s(&probes)))
+        .output(Output::exact("functions", Dtype::F32, f32s(&functions))),
+    );
+    // Stencil resolves by sample 0 and by the sample whose depth resolves,
+    // each sample's stencil set by a draw that covers it alone.
+    let stencils: Vec<u8> = [1u8, 1, 4].iter().flat_map(|&s| [s; 64]).collect();
+    let depths: Vec<f64> = [0.1f32, 0.1, 0.4]
+        .iter()
+        .flat_map(|&depth| [f64::from(depth); 64])
+        .collect();
+    plan.add(
+        Case::host(
+            "host.stencil_resolve",
+            library,
+            json!({"kind": "stencil_resolve"}),
+        )
+        .buffer(Buffer::zeroed("stencils", 0, 3 * 64).unbound())
+        .buffer(Buffer::zeroed("depths", 1, 3 * 256).unbound())
+        .output(Output::exact("stencils", Dtype::U8, stencils))
+        .output(Output::exact("depths", Dtype::F32, f32s(&depths))),
+    );
     plan.add(
         Case::host(
             "host.library_loading",
@@ -1008,6 +1074,13 @@ fn properties(plan: &mut Plan, library: &str, rng: &mut Random) {
             .output(Output::exact("copied", Dtype::U32, u32s(&doubled))),
     );
 }
+
+/// Whether tile sizes in texels agree with 64 KiB pages and the default
+/// page size; a pixel region's tiles aligned outward and inward and a tile
+/// region's pixels in tiles, as origin and size; and the textures'
+/// sparseness, tail, and whether their sparse texture tier is 1 or more
+/// while a buffer's is none.
+const SPARSE_FACTS: [u32; 18] = [1, 1, 0, 0, 2, 2, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1];
 
 /// A fresh map's physical index of logical indices 0 to 7; logical 3's
 /// once set to 5, in a copy, after a reset, and in the copy after it; and
