@@ -91,6 +91,7 @@ impl ApiFeatures {
         .union(Self::STATISTIC_COUNTERS)
         .union(Self::PROGRAMMABLE_SAMPLE_POSITIONS)
         .union(Self::SHARED_EVENTS)
+        .union(Self::IO_COMMAND_QUEUES)
         .union(Self::TESSELLATION);
 }
 
