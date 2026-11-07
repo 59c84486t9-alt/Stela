@@ -141,6 +141,11 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 		error:(NSError **)error;
 @end
 
+/* Stitching.m; an archive checks the libraries added to it. */
+@interface StelaGPUDevice (Stitching)
+- (id)newLibraryWithStitchedDescriptor:(id)descriptor error:(NSError **)error;
+@end
+
 /* What holds a service handle. */
 @interface StelaGPUObject : NSObject {
 @public

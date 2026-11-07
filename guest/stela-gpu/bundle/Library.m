@@ -955,6 +955,15 @@ static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
 	return function ? YES : add_failed(error, MTLBinaryArchiveErrorUnexpectedElement, failure);
 }
 
+/* A stitched library's functions, like a visible function, compile into the
+ * pipelines linking them: the library is checked and only those are kept. */
+- (BOOL)addLibraryWithDescriptor:(id)descriptor error:(NSError **)error
+{
+	NSError *failure = nil;
+	id library = [_device newLibraryWithStitchedDescriptor:descriptor error:&failure];
+	return library ? YES : add_failed(error, MTLBinaryArchiveErrorCompilationFailure, failure);
+}
+
 - (BOOL)serializeToURL:(NSURL *)url error:(NSError **)error
 {
 	StelaArchiveDataRequest request = {.archive = _handle};

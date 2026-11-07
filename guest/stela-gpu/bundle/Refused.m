@@ -134,16 +134,6 @@ ABSENT((MTLResourceID)gpuResourceID, "this device has no depth stencil states in
 
 @end
 
-@implementation StelaGPUBinaryArchive (Refused)
-
-- (BOOL)addLibraryWithDescriptor:(id)descriptor error:(NSError **)error
-{
-	REFUSE("addLibraryWithDescriptor:error:", "this device archives pipelines, not libraries");
-	return NO;
-}
-
-@end
-
 @implementation StelaGPURenderPipeline (Refused)
 
 ABSENT((id)reflection, "this device hands reflection out when a pipeline is made", nil)
