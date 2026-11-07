@@ -951,6 +951,34 @@ fn properties(plan: &mut Plan, library: &str, rng: &mut Random) {
         ))
         .output(Output::exact("images", Dtype::U8, images)),
     );
+    // A pool's views read as their textures do, through the IDs its
+    // setters return, which follow its base ID and stay with their entries;
+    // a copy into another pool reads the same.
+    let texel = [64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0, 1.0];
+    let texels: Vec<f64> = [
+        texel,
+        [texel[2], texel[1], texel[0], 1.0],
+        [1.0, 0.0, 0.0, 1.0],
+        texel,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    plan.add(
+        Case::host(
+            "host.texture_view_pools",
+            library,
+            json!({"kind": "texture_view_pools"}),
+        )
+        .buffer(Buffer::zeroed("facts", 0, 7 * 4).unbound())
+        .buffer(Buffer::zeroed("texels", 1, 4 * 16).unbound())
+        .output(Output::exact(
+            "facts",
+            Dtype::U32,
+            u32s(&[4, 1, 1, 1, 1, 1, 1]),
+        ))
+        .output(Output::exact("texels", Dtype::F32, f32s(&texels))),
+    );
     plan.add(
         Case::host(
             "host.library_loading",

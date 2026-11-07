@@ -278,6 +278,8 @@ enum {
 	X(MTLDepthStencilState)                                                                    \
 	X(MTLFence)                                                                                \
 	X(MTLRasterizationRateMap)                                                                 \
+	X(MTLResourceViewPool)                                                                     \
+	X(MTLTextureViewPool)                                                                      \
 	X(MTLEvent)                                                                                \
 	X(MTLSharedEvent)                                                                          \
 	X(MTLLogState)                                                                             \
@@ -338,6 +340,11 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (BOOL)respondsToSelector:(SEL)selector;
 - (id)objectAtIndexedSubscript:(NSUInteger)index;
 - (NSString *)label;
+/* MTLResourceViewPoolDescriptor. */
+- (NSUInteger)resourceViewCount;
+/* MTLTexture and MTLBuffer views, which a view pool's entries are. */
+- (id)newTextureViewWithDescriptor:(id)descriptor;
+- (id)newTextureWithDescriptor:(id)descriptor offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow;
 /* MTLResidencySetDescriptor. */
 - (NSUInteger)initialCapacity;
 /* MTLAllocation. */

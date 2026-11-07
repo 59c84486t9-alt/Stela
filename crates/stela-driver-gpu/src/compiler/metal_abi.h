@@ -314,6 +314,10 @@ enum stela_metal_average_format {
  * set when the sampler compares with Never. */
 #define STELA_METAL_HEAP_SET 0u
 #define STELA_METAL_LEVEL_SHIFT 27u
+/* A texture view pool entry's ID sets this bit of its high half, which no
+ * texture's level count reaches; below it is the address over 8 of the word
+ * in the pool's buffer that holds the entry's view's ID. */
+#define STELA_METAL_POOL_VIEW 0x80000000u
 #define STELA_METAL_SAMPLER_NEVER 0x80000000u
 enum stela_metal_heap_array {
    STELA_METAL_HEAP_SAMPLED_IMAGES,
@@ -390,6 +394,10 @@ nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air
 nir_def *stela_metal_resource_id(nir_builder *b, const struct stela_air_texture *texture,
                                  const struct stela_air_sampler *sampler, nir_def *element,
                                  void *stage);
+
+/* stela_air_texture_view_id: a view pool entry's ID resolved to its view's,
+ * which the entry's word holds; any other ID as it is. */
+nir_def *stela_metal_texture_view_id(nir_builder *b, nir_def *id, void *stage);
 
 /* stela_air_bind_texture_id and stela_air_bind_sampler_id: the heap element
  * a loaded MTLResourceID names, as for an argument table's. */

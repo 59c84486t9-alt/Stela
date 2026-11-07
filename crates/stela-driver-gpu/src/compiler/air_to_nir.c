@@ -5417,6 +5417,8 @@ argument_load(struct translator *t, LLVMValueRef inst)
       return false;
    switch (field->kind) {
    case STELA_AIR_FIELD_TEXTURE:
+      if (t->options->texture_view_id)
+         loaded = t->options->texture_view_id(&t->b, loaded, t->options->binding_data);
       return put_id(t, inst, &field->texture, NULL, loaded);
    case STELA_AIR_FIELD_SAMPLER:
       return put_id(t, inst, NULL, &field->sampler, loaded);

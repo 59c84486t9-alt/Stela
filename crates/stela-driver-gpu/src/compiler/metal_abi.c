@@ -158,6 +158,19 @@ static nir_def *table_id(nir_builder *b, const struct stela_metal_stage *stage, 
    return load(b, stela_metal_load_table(b, stage->table), offset, 64);
 }
 
+nir_def *stela_metal_texture_view_id(nir_builder *b, nir_def *id, void *stage)
+{
+   (void)stage;
+   nir_def *high = id_half(b, id, true);
+   nir_push_if(b, nir_ine_imm(b, nir_iand_imm(b, high, STELA_METAL_POOL_VIEW), 0));
+   /* The shift drops the flag. The load stays under the branch: any other
+    * ID names no word. */
+   nir_def *view = nir_load_global(b, 1, 64, nir_ishl_imm(b, id, 3),
+                                   .access = ACCESS_NON_WRITEABLE, .align_mul = 8);
+   nir_pop_if(b, NULL);
+   return nir_if_phi(b, view, id);
+}
+
 nir_deref_instr *stela_metal_bind_texture_id(nir_builder *b, nir_def *id,
                                              const struct glsl_type *type, bool faces,
                                              nir_def *level, void *stage)

@@ -290,3 +290,14 @@ fragment TwoColors frag_two_colors()
 {
     return {float4(1.0f), float4(1.0f, 1.0f, 0.0f, 1.0f)};
 }
+
+struct PoolViews {
+    texture2d<float> views[4];
+};
+
+// Reads each view a texture view pool holds, through their resource IDs.
+kernel void pool_views(constant PoolViews &pool [[buffer(0)]], device float4 *out [[buffer(1)]],
+                       uint i [[thread_position_in_grid]])
+{
+    out[i] = pool.views[i].read(uint2(0));
+}

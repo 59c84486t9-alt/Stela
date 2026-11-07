@@ -21,6 +21,10 @@
 //! level, consecutive from the high half's index, which carries their count
 //! (see [`ResourceId::texture`]). A sampler's ID names its float-border
 //! descriptor in the low half and its integer-border twin in the high half.
+//! A texture view pool's entry has an ID of its own, flagged with
+//! [`ResourceId::POOL_VIEW`], which names the word in the pool's buffer that
+//! holds its view's ID; shaders load that ID for an argument buffer's
+//! flagged one.
 //!
 //! Encoders write a table to the command buffer's upload ring whenever its
 //! slots change and push its address before the next draw or dispatch.
@@ -65,8 +69,13 @@ impl ResourceId {
     /// The high half's bits from which it counts its descriptors, less one;
     /// the index is below them.
     pub const LEVEL_SHIFT: u32 = 27;
-    /// Descriptors one high half names: levels of a texture.
-    pub const MAX_LEVELS: u32 = 1 << (32 - Self::LEVEL_SHIFT);
+    /// Descriptors one high half names: levels of a texture, at most 16 in
+    /// Metal, which leave [`Self::POOL_VIEW`] clear.
+    pub const MAX_LEVELS: u32 = 1 << (31 - Self::LEVEL_SHIFT);
+    /// The high-half bit of a texture view pool entry's ID. Below it is
+    /// the address over 8 of the word in the pool's buffer that holds the
+    /// entry's view's ID, which shaders load in its place.
+    pub const POOL_VIEW: u32 = 1 << 31;
 
     pub const fn new(low: u32, high: u32) -> Self {
         Self(low as u64 | (high as u64) << 32)
@@ -1073,6 +1082,7 @@ mod tests {
             ("STELA_METAL_HEAP_SET", HEAP_SET),
             ("STELA_METAL_LEVEL_SHIFT", ResourceId::LEVEL_SHIFT),
             ("STELA_METAL_SAMPLER_NEVER", ResourceId::SAMPLER_NEVER),
+            ("STELA_METAL_POOL_VIEW", ResourceId::POOL_VIEW),
             (
                 "STELA_METAL_TABLE_BUFFER_ADDRESSES",
                 ArgumentTable::BUFFER_ADDRESSES_OFFSET,
@@ -1875,7 +1885,9 @@ mod tests {
         let never = ResourceId::sampler(3, 4, true);
         assert_eq!((never.low(), never.sampler_integer()), (3, 4));
         assert_eq!(ResourceId::sampler(3, 4, false), sampler);
-        assert_eq!(ResourceId::MAX_LEVELS, 32);
+        assert_eq!(ResourceId::MAX_LEVELS, 16);
+        let deepest = ResourceId::texture(7, 9, ResourceId::MAX_LEVELS);
+        assert_eq!(deepest.high() & ResourceId::POOL_VIEW, 0);
     }
 
     #[test]

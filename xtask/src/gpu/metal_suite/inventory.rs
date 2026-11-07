@@ -587,7 +587,7 @@ pub fn sends(text: &str) -> (BTreeSet<String>, BTreeSet<String>) {
 /// Framework headers whose every declaration lies outside the suite's
 /// scope, by the start of their names.
 #[cfg(test)]
-const API_HEADERS_LEFT_OUT: [(&str, &str); 10] = [
+const API_HEADERS_LEFT_OUT: [(&str, &str); 8] = [
     ("MTL4", "the Metal4 family is left out"),
     ("MTLAccelerationStructure", "ray tracing is not claimed"),
     ("MTLIntersectionFunctionTable", "ray tracing is not claimed"),
@@ -603,14 +603,6 @@ const API_HEADERS_LEFT_OUT: [(&str, &str); 10] = [
     (
         "MTLCapture",
         "GPU capture is a developer tool, not a path an application's work takes",
-    ),
-    (
-        "MTLResourceViewPool",
-        "view pools belong to the Metal4 family, left out",
-    ),
-    (
-        "MTLTextureViewPool",
-        "view pools belong to the Metal4 family, left out",
     ),
     (
         "MTLDeviceCertification",
@@ -654,7 +646,7 @@ const API_WORDS_LEFT_OUT: [(&str, &str); 13] = [
 
 /// Single entries left out, as `Class entry`.
 #[cfg(test)]
-const API_ENTRIES_LEFT_OUT: [(&str, &str); 25] = [
+const API_ENTRIES_LEFT_OUT: [(&str, &str); 24] = [
     (
         "MTLBlitCommandEncoder getTextureAccessCounters:region:mipLevel:slice:resetCounters:countersBuffer:countersBufferOffset:",
         "texture access counters count sparse texture use",
@@ -698,10 +690,6 @@ const API_ENTRIES_LEFT_OUT: [(&str, &str); 25] = [
     (
         "MTLDevice newPipelineDataSetSerializerWithDescriptor:",
         "the Metal4 family is left out",
-    ),
-    (
-        "MTLDevice newTextureViewPoolWithDescriptor:error:",
-        "view pools belong to the Metal4 family, left out",
     ),
     (
         "MTLRenderPipelineState newRenderPipelineDescriptorForSpecialization",

@@ -70,6 +70,11 @@ typedef nir_deref_instr *(*stela_air_bind_texture_id)(nir_builder *b, nir_def *i
 typedef nir_deref_instr *(*stela_air_bind_sampler_id)(nir_builder *b, nir_def *id, bool integer,
                                                       void *data);
 
+/* The MTLResourceID bind_texture_id resolves for a texture ID an argument
+ * buffer holds, which may name the ID it resolves to; id is the loaded
+ * identifier. */
+typedef nir_def *(*stela_air_texture_view_id)(nir_builder *b, nir_def *id, void *data);
+
 /* The 64-bit MTLResourceID of an element of a texture array argument, or of
  * a sampler array argument when texture is NULL, which bind_texture_id or
  * bind_sampler_id then resolve. element is the 64-bit index an access names;
@@ -356,6 +361,9 @@ struct stela_air_options {
     * buffers hold device addresses, so they require bind_buffer. */
    stela_air_bind_texture_id bind_texture_id;
    stela_air_bind_sampler_id bind_sampler_id;
+   /* An argument buffer's texture IDs as bind_texture_id takes them; NULL
+    * takes them as they are. */
+   stela_air_texture_view_id texture_view_id;
    /* Texture and sampler array arguments' elements, which also need
     * bind_texture_id or bind_sampler_id; zero refuses the arrays. */
    stela_air_resource_id resource_id;

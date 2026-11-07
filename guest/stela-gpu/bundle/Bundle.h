@@ -265,6 +265,20 @@ NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state);
 @property(copy) NSString *label;
 @end
 
+/* A texture view pool: a buffer of its entries' view IDs, ViewPool.m. */
+@interface StelaGPUTextureViewPool : NSObject <MTLTextureViewPool> {
+@public
+	StelaGPUDevice *_device;
+	NSUInteger _count;
+	/* The shared buffer of each entry's view ID, or zero. */
+	StelaGPUBuffer *_table;
+	/* Each entry's view, which the pool keeps. */
+	__strong id *_views;
+	os_unfair_lock _lock;
+}
+@property(copy) NSString *label;
+@end
+
 /* A rasterization rate map, which renders at full quality: RateMap.m. */
 @interface StelaGPURateMap : NSObject <MTLRasterizationRateMap> {
 @public

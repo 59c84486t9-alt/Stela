@@ -5831,6 +5831,80 @@ static void color_attachment_map(Case *c, id<MTLCommandQueue> queue)
 	wait_for(cb, c.spec);
 }
 
+/* A pool's views of a texture, a swizzled view, a buffer's view and a
+ * copy into another pool, read through their resource IDs; facts on its
+ * counts and IDs. */
+API_AVAILABLE(macos(26.0))
+static void texture_view_pools(Case *c, id<MTLCommandQueue> queue)
+{
+	id<MTLDevice> d = c.device;
+	MTLResourceViewPoolDescriptor *pd = [MTLResourceViewPoolDescriptor new];
+	pd.resourceViewCount = 4;
+	pd.label = @"pool";
+	NSError *error = nil;
+	id<MTLTextureViewPool> pool = [d newTextureViewPoolWithDescriptor:pd error:&error];
+	id<MTLTextureViewPool> other = pool ? [d newTextureViewPoolWithDescriptor:pd error:&error] : nil;
+	if (!other)
+		@throw failure(@"texture view pool: %@", error.localizedDescription);
+	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+										       width:1 height:1 mipmapped:NO];
+	td.usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
+	td.storageMode = MTLStorageModeShared;
+	id<MTLTexture> t = [d newTextureWithDescriptor:td];
+	uint8_t texel[] = {64, 128, 192, 255};
+	[t replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:texel bytesPerRow:4];
+	id<MTLBuffer> backing = [d newBufferWithLength:256 options:MTLResourceStorageModeShared];
+	uint8_t red[] = {255, 0, 0, 255};
+	memcpy(backing.contents, red, sizeof red);
+	MTLTextureViewDescriptor *vd = [MTLTextureViewDescriptor new];
+	vd.pixelFormat = MTLPixelFormatRGBA8Unorm;
+	vd.textureType = MTLTextureType2D;
+	vd.levelRange = NSMakeRange(0, 1);
+	vd.sliceRange = NSMakeRange(0, 1);
+	vd.swizzle = MTLTextureSwizzleChannelsMake(MTLTextureSwizzleBlue, MTLTextureSwizzleGreen, MTLTextureSwizzleRed,
+						   MTLTextureSwizzleOne);
+	MTLResourceID plain = [pool setTextureView:t atIndex:0];
+	MTLResourceID swizzled = [pool setTextureView:t descriptor:vd atIndex:1];
+	MTLResourceID buffered = [pool setTextureViewFromBuffer:backing descriptor:td offset:0 bytesPerRow:256 atIndex:2];
+	MTLResourceID copied = [other copyResourceViewsFromPool:pool sourceRange:NSMakeRange(0, 3) destinationIndex:1];
+	MTLResourceID base = pool.baseResourceID;
+	put(c, @"facts", 0, (uint32_t)pool.resourceViewCount);
+	/* An entry keeps its ID as its view changes. */
+	MTLResourceID first = [pool setTextureView:t descriptor:vd atIndex:3];
+	put(c, @"facts", 1, other.resourceViewCount == 4 && [pool setTextureView:t atIndex:3]._impl == first._impl);
+	put(c, @"facts", 2, pool.device == d);
+	put(c, @"facts", 3, plain._impl == base._impl);
+	put(c, @"facts", 4, swizzled._impl == base._impl + 1 && buffered._impl == base._impl + 2);
+	put(c, @"facts", 5, copied._impl == other.baseResourceID._impl + 1);
+	put(c, @"facts", 6, plain._impl != 0 && swizzled._impl != plain._impl && buffered._impl != plain._impl);
+
+	id<MTLBuffer> table = [d newBufferWithLength:4 * sizeof(MTLResourceID) options:MTLResourceStorageModeShared];
+	MTLResourceID *ids = table.contents;
+	ids[0] = plain;
+	ids[1] = swizzled;
+	ids[2] = buffered;
+	ids[3] = copied;
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	[e setComputePipelineState:host_pipeline(c, @"pool_views")];
+	[e setBuffer:table offset:0 atIndex:0];
+	[e setBuffer:c.buffers[@"texels"] offset:0 atIndex:1];
+	[e useResource:t usage:MTLResourceUsageRead];
+	[e useResource:backing usage:MTLResourceUsageRead];
+	[e dispatchThreads:MTLSizeMake(4, 1, 1) threadsPerThreadgroup:MTLSizeMake(4, 1, 1)];
+	[e endEncoding];
+	wait_for(cb, c.spec);
+}
+
+static void host_texture_view_pools(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	(void)h;
+	if (@available(macOS 26.0, *))
+		texture_view_pools(c, queue);
+	else
+		@throw failure(@"texture view pools need macOS 26");
+}
+
 static void host_color_attachment_map(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
 {
 	(void)h;
@@ -6334,6 +6408,7 @@ static void run_host(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 		@"depth_bounds" : [NSValue valueWithPointer:host_depth_bounds],
 		@"rate_maps" : [NSValue valueWithPointer:host_rate_maps],
 		@"color_attachment_map" : [NSValue valueWithPointer:host_color_attachment_map],
+		@"texture_view_pools" : [NSValue valueWithPointer:host_texture_view_pools],
 	};
 	NSValue *v = work[h[@"kind"]];
 	if (!v)
