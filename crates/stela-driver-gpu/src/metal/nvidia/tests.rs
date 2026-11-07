@@ -255,7 +255,7 @@ fn missing_families_name_the_layer_that_lacks_them() {
     assert_eq!(cause("GPU family Metal3"), Some(Cause::Driver));
     assert_eq!(cause("ray tracing"), Some(Cause::Driver));
     assert_eq!(cause("fast resource loading"), None);
-    assert_eq!(cause("MetalFX upscaling"), Some(Cause::Api));
+    assert_eq!(cause("MetalFX upscaling"), None);
     assert_eq!(cause("raster order groups"), None);
     assert_eq!(cause("framebuffer reads"), None);
     assert!(capabilities.framebuffer_reads);
