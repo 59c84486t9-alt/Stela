@@ -1338,11 +1338,20 @@ static nir_builder texels(const nir_shader_compiler_options *options, const char
    return b;
 }
 
+/* The nearest halves of x and y, ties to even, x in the low bits. NIR's
+ * pack_half_2x16_split leaves its rounding open, and backends with a
+ * truncating pack take that (nir_opt_algebraic), so each converts on its
+ * own. */
+static nir_def *nearest_halves(nir_builder *b, nir_def *x, nir_def *y)
+{
+   return nir_pack_32_2x16_split(b, nir_f2f16_rtne(b, x), nir_f2f16_rtne(b, y));
+}
+
 /* Half floats of red, green, blue and alpha, two to a word. */
 static nir_def *halves(nir_builder *b, nir_def *r, nir_def *g, nir_def *bl, nir_def *a)
 {
-   return nir_vec4(b, nir_pack_half_2x16_split(b, r, g), nir_pack_half_2x16_split(b, bl, a),
-                   nir_imm_int(b, 0), nir_imm_int(b, 0));
+   return nir_vec4(b, nearest_halves(b, r, g), nearest_halves(b, bl, a), nir_imm_int(b, 0),
+                   nir_imm_int(b, 0));
 }
 
 /* The stored texel of a BGR10_XR word or a BGRA10_XR pair of words. */

@@ -1020,14 +1020,16 @@ alu_count(nir_shader *shader, nir_op op)
 }
 
 /* An extended-range attachment's output is clamped to what its codes
- * encode, its alpha to [0, 1]; other attachments' are left alone. */
+ * encode, its alpha to [0, 1], and rounded to its nearest half; other
+ * attachments' are left alone. */
 static void
 extended_range_outputs_clamp(void)
 {
    struct stela_air_error error;
    const struct stela_metal_specialization plain = {0};
    nir_shader *shader = compile(positioned, "positioned", &plain, &error);
-   assert(shader && !alu_count(shader, nir_op_fmin) && !alu_count(shader, nir_op_fsat));
+   assert(shader && !alu_count(shader, nir_op_fmin) && !alu_count(shader, nir_op_fsat) &&
+          !alu_count(shader, nir_op_f2f16_rtne));
    stela_metal_release(shader);
    for (uint32_t kind = STELA_AIR_EXTENDED_RANGE_LINEAR; kind <= STELA_AIR_EXTENDED_RANGE_SRGB;
         kind++) {
@@ -1037,6 +1039,7 @@ extended_range_outputs_clamp(void)
          fprintf(stderr, "positioned: %u %s\n", error.kind, error.detail);
       assert(shader && alu_count(shader, nir_op_fmin) == 3 && alu_count(shader, nir_op_fmax) == 3 &&
              alu_count(shader, nir_op_fsat) == 1);
+      assert(alu_count(shader, nir_op_f2f16_rtne) == 4);
       stela_metal_release(shader);
    }
    /* Another location's kind leaves location 0 alone. */

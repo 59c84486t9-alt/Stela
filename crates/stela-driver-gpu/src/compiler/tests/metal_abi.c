@@ -347,6 +347,17 @@ static unsigned intrinsic_count(nir_shader *shader, nir_intrinsic_op op)
    return count;
 }
 
+/* How many ALU instructions of op shader holds. */
+static unsigned alu_count(nir_shader *shader, nir_op op)
+{
+   unsigned count = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block)
+         count += instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->op == op;
+   }
+   return count;
+}
+
 /* The texel kernels convert one texel per thread through a raw storage
  * view: the store kernel writes it once per encoding, the load kernel reads
  * it once and writes the buffer once per encoding. */
@@ -359,6 +370,10 @@ static void texel_kernels_convert_each_encoding(void)
    assert(intrinsic_count(store, nir_intrinsic_image_deref_store) == encodings - 1);
    assert(intrinsic_count(store, nir_intrinsic_image_deref_load) == 0);
    assert(intrinsic_count(store, nir_intrinsic_store_global) == 0);
+   /* Extended-range halves round to nearest: no pack whose rounding a
+    * backend may truncate. */
+   assert(alu_count(store, nir_op_pack_half_2x16_split) == 0);
+   assert(alu_count(store, nir_op_f2f16_rtne) > 0);
    ralloc_free(store);
    nir_shader *load = stela_metal_load_texels_kernel(NULL);
    check_kernel(load);

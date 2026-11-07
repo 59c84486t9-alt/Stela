@@ -2858,7 +2858,10 @@ blend(struct translator *t, const struct stela_air_attachment_access *access, ni
 
 /* An output of color attachment location clamped to what its
  * extended-range format encodes: its color to the codes' range, its alpha
- * to [0, 1]. Other attachments' outputs are returned as they are. */
+ * to [0, 1]. A 32-bit output is also rounded to its nearest half, which the
+ * half-float texels hold exactly: NVIDIA's color output narrows by
+ * truncating, which can store a code's value nearer the code below. Other
+ * attachments' outputs are returned as they are. */
 static nir_def *
 clamp_extended_range(struct translator *t, unsigned location, nir_def *value)
 {
@@ -2882,6 +2885,8 @@ clamp_extended_range(struct translator *t, unsigned location, nir_def *value)
       channels[i] = i == 3 ? nir_fsat(b, channel)
                            : nir_fclamp(b, channel, nir_imm_floatN_t(b, low, channel->bit_size),
                                         nir_imm_floatN_t(b, high, channel->bit_size));
+      if (channel->bit_size == 32)
+         channels[i] = nir_f2f32(b, nir_f2f16_rtne(b, channels[i]));
    }
    return nir_vec(b, channels, value->num_components);
 }
