@@ -210,6 +210,9 @@ enum {
 };
 enum {
 	MTLBindingTypeBuffer = 0,
+	MTLBindingTypeThreadgroupMemory = 1,
+	MTLBindingTypeTexture = 2,
+	MTLBindingTypeObjectPayload = 34,
 };
 enum {
 	MTLTextureTypeCube = 5,

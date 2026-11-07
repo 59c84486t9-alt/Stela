@@ -147,6 +147,25 @@ Class objc_getClass(const char *name);
 	return _used;
 }
 
+/* One class holds every kind of binding; each conforms to its own kind's
+ * protocol, as applications tell the kinds apart by. */
+- (BOOL)conformsToProtocol:(id)protocol
+{
+	if (protocol == @protocol(MTLBufferBinding)) {
+		return self.type == MTLBindingTypeBuffer;
+	}
+	if (protocol == @protocol(MTLTextureBinding)) {
+		return self.type == MTLBindingTypeTexture;
+	}
+	if (protocol == @protocol(MTLThreadgroupBinding)) {
+		return self.type == MTLBindingTypeThreadgroupMemory;
+	}
+	if (protocol == @protocol(MTLObjectPayloadBinding)) {
+		return self.type == MTLBindingTypeObjectPayload;
+	}
+	return [super conformsToProtocol:protocol];
+}
+
 /* Every binding here is one of the function's own arguments. */
 - (BOOL)isArgument
 {
@@ -261,7 +280,8 @@ static StelaGPUType *type_at(NSArray *types, uint32_t index)
 		binding.name = text_at(bytes, info->name, info->name_length);
 		binding.type = info->binding_type;
 		binding.access = info->access;
-		binding.index = info->index;
+		/* A payload has no argument table slot, which Metal reports as UINT32_MAX. */
+		binding.index = info->binding_type == MTLBindingTypeObjectPayload ? UINT32_MAX : info->index;
 		binding->_used = info->used != 0;
 		binding.arrayLength = info->array_length;
 		binding.bufferAlignment = info->alignment;
