@@ -3974,7 +3974,7 @@ static CGImageRef ca_gradient(size_t w, size_t h)
 /* The layer `scene` names, over the gradient: a translucent orange rounded
  * panel, which no blend mode leaves the gradient under, alone or compositing
  * by `compositing`, or a backdrop layer of the same shape filtering what lies
- * below it. */
+ * below it, shaped by an SDF sublayer when the scene has `sdf`. */
 static CALayer *ca_scene(NSDictionary *f)
 {
 	CGRect frame = CGRectMake(12, 20, 40, 24);
@@ -3982,11 +3982,34 @@ static CALayer *ca_scene(NSDictionary *f)
 	if (backdrop) {
 		CALayer *layer = [NSClassFromString(@"CABackdropLayer") layer];
 		layer.frame = frame;
-		layer.cornerRadius = 8;
-		layer.masksToBounds = YES;
+		NSDictionary *sdf = f[@"sdf"];
+		if (sdf) {
+			/* Glass as SwiftUI builds it: the shape is an SDF sublayer the
+			 * filters name, one rounded element over the whole backdrop. */
+			[layer setValue:@YES forKey:@"enabled"];
+			[layer setValue:@YES forKey:@"sourceSublayerDefinesBounds"];
+			[layer setValue:@0.5 forKey:@"marginWidth"];
+			[layer setValue:@0.5 forKey:@"scale"];
+			CALayer *shape = [NSClassFromString(@"CASDFLayer") layer];
+			shape.frame = layer.bounds;
+			shape.name = @"@0";
+			[shape setValue:[NSClassFromString(@"CASDFOutputEffect") new] forKey:@"effect"];
+			[shape setValue:@8 forKey:@"smoothness"];
+			CALayer *element = [NSClassFromString(@"CASDFElementLayer") layer];
+			element.frame = shape.bounds;
+			element.cornerRadius = [sdf[@"corner_radius"] doubleValue];
+			[element setValue:@"bounds" forKey:@"mode"];
+			[shape addSublayer:element];
+			[layer addSublayer:shape];
+		} else {
+			layer.cornerRadius = 8;
+			layer.masksToBounds = YES;
+		}
 		NSMutableArray *filters = [NSMutableArray new];
 		for (NSDictionary *spec in backdrop) {
 			id filter = ca_filter(spec[@"type"]);
+			if (sdf)
+				[filter setValue:@"@0" forKey:@"inputSourceSublayerName"];
 			for (NSString *key in spec[@"values"])
 				[filter setValue:spec[@"values"][key] forKey:key];
 			if (spec[@"matrix"]) {
@@ -4026,8 +4049,9 @@ static CALayer *ca_scene(NSDictionary *f)
 
 /* Core Animation's renderer drawing a scene into the case's `out`, on the
  * case's queue. Core Animation builds pipelines its archive lacks while it
- * draws and leaves their layers out until they are ready, so frames repeat
- * until two in a row are identical. */
+ * draws and leaves their layers out until they are ready, and glass eases
+ * toward the luma beneath it, so frames repeat until two in a row are
+ * identical. */
 static void run_core_animation(Case *c, id<MTLCommandQueue> queue, NSDictionary *f)
 {
 	id<MTLTexture> out = c.textures[@"out"];
@@ -4063,7 +4087,8 @@ static void run_core_animation(Case *c, id<MTLCommandQueue> queue, NSDictionary 
 		wait_for(cb, c.spec);
 		if (frame > 0 && !memcmp(frames[0].contents, frames[1].contents, bytes))
 			return;
-		if (frame == 7)
+		/* Glass adapts to the luma beneath it over about 25 frames. */
+		if (frame == 47)
 			@throw failure(@"core animation's frames never settled");
 		usleep(250000);
 	}

@@ -1382,13 +1382,33 @@ fn metalfx(plan: &mut Plan) {
 }
 
 /// Core Animation's renderer drawing its materials over a gradient: a
-/// translucent panel, backdrop filters, compositing filters and glass. What
+/// translucent panel, backdrop filters, compositing filters and SDF glass. What
 /// Core Animation draws is its own, so each frame is held to the reference
 /// device's within a few units.
 fn core_animation(plan: &mut Plan) {
     // Red and blue swapped, alpha kept.
     let swap = json!([0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
     let blur = json!({"type": "gaussianBlur", "values": {"inputRadius": 6}});
+    // The glass inputs SwiftUI gives an `NSGlassEffectView`.
+    let glass = json!({
+        "inputInnerRefractionAmount": -32, "inputInnerRefractionHeight": 16,
+        "inputRefractionDistance0": -1, "inputBlurRadius": 5,
+        "inputBlurOpacity0": 0.4, "inputBlurOpacity1": 0.4, "inputBlurOpacity2": 1, "inputBlurOpacity3": 1,
+        "inputFaceOpacity": 1, "inputFaceColorMatrixWhite": 1.125, "inputFaceColorMatrixBlack": 0.08,
+        "inputFaceColorMatrixSaturation": 1.3, "inputFaceColorMatrixMaxLuma": 0.6,
+        "inputFaceColorMatrixMaxLumaSDR": 0.6, "inputBleedAmount": 22.4, "inputBleedHeight": 22.4,
+        "inputBleedDistance0": 1, "inputBleedColorMatrixWhite": 0.5, "inputBleedColorMatrixBlack": 0.125,
+        "inputBleedColorMatrixSaturation": 1, "inputShadowColorMatrixWhite": 1,
+        "inputShadowColorMatrixSaturation": 1, "inputRingShadowOffset": 8, "inputRingShadowStrokeWidth": 4,
+        "inputRingShadowBlurRadius": 5, "inputRingShadowMask": 1, "inputKeyFillHighlightHeight": 0.5,
+        "inputKeyFillHighlightAngle": core::f64::consts::FRAC_PI_2, "inputKeyFillHighlightSpread": 2.0943951,
+        "inputKeyFillHighlightSpreadSDR": 2.0943951, "inputKeyFillHighlightAmount": 0.5,
+        "inputKeyFillHighlightEffectOffset": -0.5, "inputKeyFillHighlightColorBias": -0.1875,
+        "inputBlurFillBlurRadius": 8, "inputBlurFillDarkenOpacity": 0.9,
+        "inputBlurFillNormalOpacity": 0.6867394, "inputSDRHoldingToneWhite": 1,
+        "inputSDRGradientDistance0": 1, "inputSDRGradientDistance1": 1, "inputMaxHeadroom": 1.2,
+        "inputClamp": 1.308311,
+    });
     let mut scenes: Vec<(String, Value)> = [
         ("panel", json!({})),
         ("backdrop.blur", json!({"backdrop": [blur]})),
@@ -1400,11 +1420,12 @@ fn core_animation(plan: &mut Plan) {
             "backdrop.blur_saturate",
             json!({"backdrop": [blur, {"type": "colorSaturate", "values": {"inputAmount": 2}}]}),
         ),
+        // Liquid Glass as SwiftUI builds it: the filter takes its shape
+        // from the backdrop's SDF sublayer, and draws nothing without one.
         (
             "backdrop.glass",
-            json!({"backdrop": [{"type": "glassBackground"}]}),
+            json!({"backdrop": [{"type": "glassBackground", "values": glass}], "sdf": {"corner_radius": 8}}),
         ),
-        ("glass_foreground", json!({"filter": "glassForeground"})),
         (
             "compositing.vibrant_color_matrix",
             json!({"compositing": {"type": "vibrantColorMatrix", "matrix": swap}}),
