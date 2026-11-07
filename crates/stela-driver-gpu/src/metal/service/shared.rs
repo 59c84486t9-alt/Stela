@@ -243,6 +243,12 @@ impl<B: Backend, C: Compiler> SharedService<B, C> {
         result.expect("the platform runs what it is given")
     }
 
+    /// What the service holds, unless a call holds it now: a report never
+    /// waits for the service.
+    pub fn memory(&self) -> Option<super::MemoryReport> {
+        self.try_turn().map(|turn| turn.memory())
+    }
+
     /// The GPU interrupted: look for what completed now or, while a call
     /// holds the service, once it leaves.
     pub fn interrupted(&self) {

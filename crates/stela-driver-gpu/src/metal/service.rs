@@ -179,6 +179,21 @@ struct Connection {
     negotiated: bool,
 }
 
+/// What a service holds at one moment.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MemoryReport {
+    pub device: crate::metal::device::DeviceMemory,
+    pub connections: Vec<ConnectionMemory>,
+}
+
+/// A connection's objects and the bytes it counts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConnectionMemory {
+    pub id: NonZeroU64,
+    pub objects: usize,
+    pub allocated: u64,
+}
+
 /// How a call ended: its status and, unless it succeeded, why.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Outcome {
@@ -389,6 +404,23 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         held.made = made;
         held.allocated += bytes;
         Ok(NonZeroU64::new(handle.encode()).expect("live generations are nonzero"))
+    }
+
+    /// What the device and each connection hold: a connection's objects
+    /// and the bytes it counts in `currentAllocatedSize`.
+    pub fn memory(&self) -> MemoryReport {
+        MemoryReport {
+            device: self.device.memory(),
+            connections: self
+                .connections
+                .iter()
+                .map(|(&id, held)| ConnectionMemory {
+                    id,
+                    objects: held.objects.len(),
+                    allocated: held.allocated,
+                })
+                .collect(),
+        }
     }
 
     /// The token of imported memory the GPU no longer reaches.

@@ -233,4 +233,17 @@ fn each_connection_counts_the_allocations_it_holds() {
     assert_eq!(allocated(&mut service, first), 0);
     assert_eq!(service.device().current_allocated_size(), 256 + shared);
     assert_eq!(allocated(&mut service, second), shared);
+    // The report names what waits for the work and what each connection
+    // still counts.
+    let report = service.memory();
+    assert_eq!(report.device.allocated, 256 + shared);
+    assert_eq!(report.device.deferred_bytes, 256);
+    assert!(report.device.deferred >= 1 && report.device.in_flight == 1);
+    assert_eq!(report.device.completed + 1, report.device.submitted);
+    let counts: alloc::vec::Vec<_> = report
+        .connections
+        .iter()
+        .map(|connection| (connection.id, connection.objects, connection.allocated))
+        .collect();
+    assert_eq!(counts, [(first, 0, 0), (second, 1, shared)]);
 }

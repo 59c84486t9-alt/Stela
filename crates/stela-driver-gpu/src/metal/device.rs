@@ -134,7 +134,33 @@ pub struct Device<B: Backend, C: Compiler> {
     queue: queue::Queue,
 }
 
+/// What a device holds at one moment.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DeviceMemory {
+    /// `currentAllocatedSize`, with what waits for submitted work.
+    pub allocated: u64,
+    /// Objects destroyed once submitted work completes, and their bytes.
+    pub deferred: usize,
+    pub deferred_bytes: u64,
+    /// Submissions the queue has not finished.
+    pub in_flight: usize,
+    pub submitted: u64,
+    pub completed: u64,
+}
+
 impl<B: Backend, C: Compiler> Device<B, C> {
+    /// What the device holds now.
+    pub fn memory(&self) -> DeviceMemory {
+        DeviceMemory {
+            allocated: self.allocated,
+            deferred: self.deferred.len(),
+            deferred_bytes: self.deferred.iter().map(|&(_, _, bytes)| bytes).sum(),
+            in_flight: self.queue.in_flight_count(),
+            submitted: self.submitted,
+            completed: self.completed,
+        }
+    }
+
     /// The compiler's detail of the last function it refused, once.
     pub fn take_refusal(&mut self) -> Option<Refusal> {
         self.compiler.take_refusal()

@@ -157,6 +157,12 @@ pub(super) struct Queue {
     times: VecDeque<(u64, [u64; 2])>,
 }
 
+impl Queue {
+    pub(super) fn in_flight_count(&self) -> usize {
+        self.in_flight.len()
+    }
+}
+
 /// One attachment of a [`RenderPassRequest`].
 #[derive(Clone, Copy, Debug)]
 pub struct AttachmentRequest<Clear> {

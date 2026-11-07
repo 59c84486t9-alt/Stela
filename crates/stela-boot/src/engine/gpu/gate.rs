@@ -215,11 +215,46 @@ fn served(served: Served) {
         .fetch_add(posted_waited, Ordering::Relaxed);
 }
 
+/// What a device holds: its allocation with the part waiting for submitted
+/// work, that work, and the connections counting the most bytes, each as
+/// id:objects/MiB. Nothing while a call holds the service.
+fn report_memory(service: &Shared) {
+    const SHOWN: usize = 4;
+    let Some(mut memory) = service.memory() else {
+        return;
+    };
+    let mib = |bytes: u64| bytes >> 20;
+    let device = memory.device;
+    output::arguments(format_args!(
+        "GPU MEMORY allocated={}M deferred={}/{}M in_flight={} completed={}/{} connections={}",
+        mib(device.allocated),
+        device.deferred,
+        mib(device.deferred_bytes),
+        device.in_flight,
+        device.completed,
+        device.submitted,
+        memory.connections.len(),
+    ));
+    memory
+        .connections
+        .sort_unstable_by_key(|connection| core::cmp::Reverse(connection.allocated));
+    for connection in memory.connections.iter().take(SHOWN) {
+        output::arguments(format_args!(
+            " {}:{}/{}M",
+            connection.id,
+            connection.objects,
+            mib(connection.allocated)
+        ));
+    }
+    output::arguments(format_args!("\n"));
+}
+
 /// The operations whose calls held the service longest since the last
 /// report: each as count/held/longest/waited/unmapped/posted/posted_waited,
 /// microseconds between.
 pub(in crate::engine) fn report_calls(tsc_hz: u64) {
     const SHOWN: usize = 8;
+    shared().iter().for_each(|service| report_memory(service));
     let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
     let mut taken: Vec<_> = CALLS
         .iter()
