@@ -615,3 +615,34 @@ kernel void tile_dimensions(imageblock<TileColor, imageblock_layout_implicit> bl
         }
     }
 }
+
+// Functions a tile function's tables call on a pixel's color, given its
+// position in the tile.
+[[visible]] float4 tile_offset(float4 c, ushort2 p)
+{
+    return c + float4(float(p.x), float(p.y), 1.0f, 0.0f);
+}
+
+[[visible]] float4 tile_swap(float4 c, ushort2 p)
+{
+    return float4(c.y, c.x, c.w, float(p.x) * 2.0f + float(p.y));
+}
+
+// Each pixel's color through entry (x + y + shift) % 2 of the first table,
+// then entry 0 of the second.
+kernel void tile_call(imageblock<TileColor, imageblock_layout_implicit> block,
+                      visible_function_table<float4(float4, ushort2)> first [[buffer(0)]],
+                      visible_function_table<float4(float4, ushort2)> second [[buffer(1)]],
+                      constant uint &shift [[buffer(2)]],
+                      ushort2 tid [[thread_position_in_threadgroup]],
+                      ushort2 tpt [[threads_per_threadgroup]])
+{
+    for (ushort y = tid.y; y < block.get_height(); y += tpt.y) {
+        for (ushort x = tid.x; x < block.get_width(); x += tpt.x) {
+            ushort2 p = ushort2(x, y);
+            TileColor v = block.read(p);
+            v.c = second[0](first[(uint(x) + uint(y) + shift) & 1u](v.c, p), p);
+            block.write(v, p);
+        }
+    }
+}

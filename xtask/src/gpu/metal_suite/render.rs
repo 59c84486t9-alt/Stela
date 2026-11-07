@@ -2997,6 +2997,18 @@ fn layers_and_clipping(plan: &mut Plan, library: &str) {
 /// partway through its last tiles: each threadgroup reads and writes its
 /// tile's pixels, and its threadgroup memory persists across the pass's
 /// tile dispatches.
+/// What `render.tile.reflection` reports of `tile_call`.
+const TILE_REFLECTION: [&str; 8] = [
+    "tile",
+    "shift type=0 index=2 access=0 used=1 argument=1 size=4 align=4 data=33",
+    "block type=17 index=0 access=0 used=1 argument=1",
+    "first type=24 index=0 access=0 used=1 argument=1",
+    "second type=24 index=1 access=0 used=1 argument=1",
+    "arguments=4",
+    "required=16,16,1",
+    "",
+];
+
 fn tiles(plan: &mut Plan, library: &str) {
     const TW: u32 = 48;
     const TH: u32 = 40;
@@ -3073,6 +3085,60 @@ fn tiles(plan: &mut Plan, library: &str) {
             json!({"tile_size": [32, 16]}),
         )
         .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&dimensions))),
+    );
+    // Pipelines made from an archive given their functions, by completion
+    // handler.
+    plan.add(
+        case(
+            "render.tile.archived",
+            json!([{"function": "tile_rewrite", "threads": [16, 8], "archive": true, "made": "async"}]),
+            json!({"tile_size": [16, 16]}),
+        )
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&rewritten))),
+    );
+    // Visible function tables of tile functions: entry (x + y + 1) % 2 of
+    // the first, then the offset.
+    let offset = |c: [f64; 4], x: f64, y: f64| [c[0] + x, c[1] + y, c[2] + 1.0, c[3]];
+    let called = image(&|x, y| {
+        let c: [f64; 4] = at(x, y).try_into().unwrap();
+        let (lx, ly) = (f64::from(x % 16), f64::from(y % 16));
+        let first = if (x % 16 + y % 16 + 1) % 2 == 0 {
+            offset(c, lx, ly)
+        } else {
+            [c[1], c[0], c[3], lx * 2.0 + ly]
+        };
+        offset(first, lx, ly)
+    });
+    let tables = json!([
+        {"index": 0, "functions": ["tile_offset", "tile_swap"]},
+        {"index": 1, "functions": ["tile_offset"]}
+    ]);
+    let call = |name: &str, tile: Value| {
+        let mut entry = json!({"function": "tile_call", "threads": [16, 16], "tables": tables,
+                               "immutable_buffers": [2]});
+        for (k, v) in tile.as_object().unwrap() {
+            entry[k] = v.clone();
+        }
+        case(name, json!([entry]), json!({"tile_size": [16, 16]}))
+            .buffer(Buffer::data("shift", 2, u32s(&[1])).stage("tile"))
+            .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&called)))
+    };
+    let visible = json!({"visible_functions": ["tile_offset", "tile_swap"]});
+    plan.add(call("render.tile.function_tables", visible.clone()));
+    plan.add(call("render.tile.function_tables.ranges", visible.clone()).set("bind", "ranges"));
+    plan.add(call(
+        "render.tile.function_tables.binary_functions",
+        json!({"added_binary_functions": ["tile_offset", "tile_swap"]}),
+    ));
+    let mut reflected = visible;
+    reflected["reflection"] = json!("reflection");
+    reflected["required_threads"] = json!([16, 16, 1]);
+    let mut reflection = TILE_REFLECTION.join("\n").into_bytes();
+    reflection.resize(2048, 0);
+    plan.add(
+        call("render.tile.reflection", reflected)
+            .buffer(Buffer::zeroed("reflection", 0, 2048).unbound())
+            .output(Output::exact("reflection", Dtype::U8, reflection)),
     );
 }
 

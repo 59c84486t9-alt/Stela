@@ -140,6 +140,11 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	   reflection:(id *)reflection
 	      archive:(uint64_t)archive
 		error:(NSError **)error;
+- (id)tilePipeline:(id)descriptor
+	   options:(NSUInteger)options
+	reflection:(id *)reflection
+	   archive:(uint64_t)archive
+	     error:(NSError **)error;
 @end
 
 /* Library.m: the dynamic library in the file at path, which the libraries
@@ -432,6 +437,7 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	 * functions. */
 	BOOL _tile, _threadgroupSizeMatchesTileSize;
 	NSUInteger _maxTotalThreadsPerTileThreadgroup;
+	MTLSize _requiredTileThreads;
 	id _tileLinked;
 }
 @end

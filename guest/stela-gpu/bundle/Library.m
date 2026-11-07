@@ -1037,15 +1037,11 @@ static BOOL add_failed(NSError **error, NSInteger code, NSError *failure)
 	return pipeline ? YES : add_failed(error, MTLBinaryArchiveErrorCompilationFailure, failure);
 }
 
-/* Tile shading is an Apple family's, and no such family answers here. */
 - (BOOL)addTileRenderPipelineFunctionsWithDescriptor:(id)descriptor error:(NSError **)error
 {
-	(void)descriptor;
-	if (error) {
-		StelaFailure failure = {.reason = "this device has no tile shading"};
-		*error = stela_error(MTLBinaryArchiveDomain, MTLBinaryArchiveErrorUnexpectedElement, &failure);
-	}
-	return NO;
+	NSError *failure = nil;
+	id pipeline = [_device tilePipeline:descriptor options:0 reflection:NULL archive:_handle error:&failure];
+	return pipeline ? YES : add_failed(error, MTLBinaryArchiveErrorCompilationFailure, failure);
 }
 
 /* A visible function compiles into the stages linking it: only its pipelines are kept. */

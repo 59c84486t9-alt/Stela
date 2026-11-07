@@ -345,7 +345,7 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 
 - (MTLSize)requiredThreadsPerTileThreadgroup
 {
-	return (MTLSize){0};
+	return _requiredTileThreads;
 }
 
 - (MTLSize)requiredThreadsPerObjectThreadgroup
@@ -427,8 +427,17 @@ static id function_table(StelaGPUDevice *device, id descriptor)
 {
 	NSArray *vertex = [functions vertexAdditionalBinaryFunctions];
 	NSArray *fragment = [functions fragmentAdditionalBinaryFunctions];
-	if ([[functions tileAdditionalBinaryFunctions] count]) {
-		return binary_functions_error(error, "this device has no tile shading");
+	NSArray *tile = [functions tileAdditionalBinaryFunctions];
+	if (_tile) {
+		if (!_descriptor || (tile.count && ![_descriptor supportAddingBinaryFunctions])) {
+			return binary_functions_error(error, "the pipeline descriptor did not enable adding binary functions");
+		}
+		id descriptor = [_descriptor copy];
+		[descriptor setLinkedFunctions:additional_functions([_descriptor linkedFunctions], tile)];
+		return [_device tilePipeline:descriptor options:0 reflection:NULL archive:0 error:error];
+	}
+	if (tile.count) {
+		return binary_functions_error(error, "tile functions are a tile pipeline's");
 	}
 	if (!_descriptor || (vertex.count && ![_descriptor supportAddingVertexBinaryFunctions])
 	    || (fragment.count && ![_descriptor supportAddingFragmentBinaryFunctions])) {
@@ -768,11 +777,20 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	});
 }
 
-/* A tile pipeline is a kernel of its pass's tiles in the service. */
 - (id)newRenderPipelineStateWithTileDescriptor:(id)descriptor
 				       options:(NSUInteger)options
 				    reflection:(id *)reflection
 					 error:(NSError **)error
+{
+	return [self tilePipeline:descriptor options:options reflection:reflection archive:0 error:error];
+}
+
+/* A tile pipeline is a kernel of its pass's tiles in the service. */
+- (id)tilePipeline:(id)descriptor
+	   options:(NSUInteger)options
+	reflection:(id *)reflection
+	   archive:(uint64_t)archive
+	     error:(NSError **)error
 {
 	StelaGPUFunction *function = [descriptor tileFunction];
 	StelaNewTilePipelineRequest request = {
@@ -793,7 +811,7 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	Linked linked = {};
 	linked_functions(&linked, [descriptor linkedFunctions], libraries, [descriptor maxCallStackDepth],
 			 &request.linked_functions);
-	request.archives = archives_record(&linked, descriptor, options, 0);
+	request.archives = archives_record(&linked, descriptor, options, archive);
 	StelaComputePipelineResponse response;
 	StelaFailure failure;
 	StelaSpans spans = {.reads = linked.spans, .read_count = linked.used};
@@ -818,6 +836,13 @@ static id render_pipeline(StelaGPUDevice *device, const StelaRenderPipelineRespo
 	pipeline->_threadgroupSizeMatchesTileSize = [descriptor threadgroupSizeMatchesTileSize];
 	pipeline->_maxTotalThreadsPerTileThreadgroup = response.max_total_threads_per_threadgroup;
 	pipeline->_tileLinked = [[descriptor linkedFunctions] copy];
+	if ([descriptor respondsToSelector:@selector(requiredThreadsPerThreadgroup)]) {
+		pipeline->_requiredTileThreads = [descriptor requiredThreadsPerThreadgroup];
+	}
+	if ([descriptor supportAddingBinaryFunctions]) {
+		pipeline->_descriptor = [descriptor copy];
+		[pipeline->_descriptor setLinkedFunctions:[[descriptor linkedFunctions] copy]];
+	}
 	pipeline.label = [descriptor label];
 	return pipeline;
 }

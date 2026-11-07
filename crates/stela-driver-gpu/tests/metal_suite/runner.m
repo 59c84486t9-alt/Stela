@@ -1828,12 +1828,16 @@ static void bind_tables(id e, Stage s, NSDictionary<NSNumber *, id<MTLVisibleFun
 				[ce setVisibleFunctionTable:t[0] atBufferIndex:r.location];
 			else if (s == StageVertex)
 				[re setVertexVisibleFunctionTable:t[0] atBufferIndex:r.location];
+			else if (s == StageTile)
+				[re setTileVisibleFunctionTable:t[0] atBufferIndex:r.location];
 			else
 				[re setFragmentVisibleFunctionTable:t[0] atBufferIndex:r.location];
 		} else if (s == StageCompute) {
 			[ce setVisibleFunctionTables:t withBufferRange:r];
 		} else if (s == StageVertex) {
 			[re setVertexVisibleFunctionTables:t withBufferRange:r];
+		} else if (s == StageTile) {
+			[re setTileVisibleFunctionTables:t withBufferRange:r];
 		} else {
 			[re setFragmentVisibleFunctionTables:t withBufferRange:r];
 		}
@@ -3010,6 +3014,7 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 	/* Tile pipelines of the pass's color attachments, which dispatch after
 	 * the draws in order. */
 	NSMutableArray<id<MTLRenderPipelineState>> *tile_pipelines = [NSMutableArray new];
+	NSMutableArray<NSDictionary *> *tile_tables = [NSMutableArray new];
 	for (NSDictionary *tile in r[@"tiles"]) {
 		MTLTileRenderPipelineDescriptor *td = [MTLTileRenderPipelineDescriptor new];
 		td.tileFunction = function_named(library, tile[@"function"], spec[@"constants"]);
@@ -3017,13 +3022,100 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 		td.threadgroupSizeMatchesTileSize = [tile[@"matches_tile_size"] boolValue];
 		for (NSUInteger i = 0; i < colors.count; i++)
 			td.colorAttachments[i].pixelFormat = c.textures[colors[i][@"texture"]].pixelFormat;
-		id<MTLRenderPipelineState> tp = [c.device newRenderPipelineStateWithTileDescriptor:td
-											   options:0
-											reflection:nil
-											     error:&error];
+		for (NSNumber *i in tile[@"immutable_buffers"])
+			td.tileBuffers[i.unsignedIntegerValue].mutability = MTLMutabilityImmutable;
+		if (tile[@"required_threads"]) {
+			NSArray *t = tile[@"required_threads"];
+			if (@available(macOS 26.0, *))
+				td.requiredThreadsPerThreadgroup = MTLSizeMake([t[0] unsignedIntegerValue], [t[1] unsignedIntegerValue], [t[2] unsignedIntegerValue]);
+			else
+				@throw [NSException exceptionWithName:@"CaseUnsupported" reason:@"required tile threads need macOS 26" userInfo:nil];
+		}
+		NSMutableArray *linked = [NSMutableArray new];
+		for (id entry in tile[@"visible_functions"])
+			[linked addObject:linked_function(c, library, entry)];
+		td.linkedFunctions = stage_links(c, library, tile, @"", linked);
+		td.supportAddingBinaryFunctions = tile[@"added_binary_functions"] != nil;
+		/* An archive given the descriptor's functions, which then makes
+		 * the pipeline or fails. */
+		MTLPipelineOption options = tile[@"reflection"] ? MTLPipelineOptionBindingInfo | MTLPipelineOptionBufferTypeInfo : 0;
+		if ([tile[@"archive"] boolValue]) {
+			id<MTLBinaryArchive> archive = [c.device newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&error];
+			if (!archive || ![archive addTileRenderPipelineFunctionsWithDescriptor:td error:&error])
+				@throw failure(@"tile archive: %@", error.localizedDescription);
+			td.binaryArchives = @[ archive ];
+			options |= MTLPipelineOptionFailOnBinaryArchiveMiss;
+		}
+		__block id<MTLRenderPipelineState> tp = nil;
+		__block MTLRenderPipelineReflection *reflection = nil;
+		__block NSError *made_error = nil;
+		if ([tile[@"made"] isEqual:@"async"]) {
+			await_handler(^(dispatch_semaphore_t done) {
+				[c.device newRenderPipelineStateWithTileDescriptor:td
+									   options:options
+								 completionHandler:^(id<MTLRenderPipelineState> p, MTLRenderPipelineReflection *rr, NSError *e) {
+									 tp = p;
+									 reflection = rr;
+									 made_error = e;
+									 dispatch_semaphore_signal(done);
+								 }];
+			});
+		} else {
+			tp = [c.device newRenderPipelineStateWithTileDescriptor:td options:options reflection:&reflection error:&made_error];
+		}
 		if (!tp)
-			@throw failure(@"tile pipeline: %@", error.localizedDescription);
+			@throw failure(@"tile pipeline: %@", made_error.localizedDescription);
+		if (tile[@"added_binary_functions"]) {
+			/* Binary functions added to the finished pipeline, which its
+			 * table then calls. */
+			MTLRenderPipelineFunctionsDescriptor *fd = [MTLRenderPipelineFunctionsDescriptor new];
+			NSMutableArray *added = [NSMutableArray new];
+			for (NSString *name in tile[@"added_binary_functions"])
+				[added addObject:binary_function(library, name)];
+			fd.tileAdditionalBinaryFunctions = added;
+			[linked addObjectsFromArray:added];
+			tp = [tp newRenderPipelineStateWithAdditionalBinaryFunctions:fd error:&made_error];
+			if (!tp)
+				@throw failure(@"tile binary functions: %@", made_error.localizedDescription);
+		}
+		if (tile[@"reflection"]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+			NSUInteger arguments = [reflection.tileArguments count];
+#pragma clang diagnostic pop
+			MTLSize t = MTLSizeMake(0, 0, 0);
+			if (@available(macOS 26.0, *))
+				t = tp.requiredThreadsPerTileThreadgroup;
+			write_text(c, tile[@"reflection"],
+				   [NSString stringWithFormat:@"tile\n%@\narguments=%lu\nrequired=%lu,%lu,%lu\n",
+							      bindings_text(reflection.tileBindings, NO),
+							      (unsigned long)arguments, (unsigned long)t.width,
+							      (unsigned long)t.height, (unsigned long)t.depth]);
+		}
+		/* The tile's tables of its linked functions, by buffer index. */
+		NSMutableDictionary *tables = [NSMutableDictionary new];
+		for (NSDictionary *table in tile[@"tables"]) {
+			MTLVisibleFunctionTableDescriptor *vd = [MTLVisibleFunctionTableDescriptor visibleFunctionTableDescriptor];
+			NSArray *names = table[@"functions"];
+			vd.functionCount = names.count;
+			id<MTLVisibleFunctionTable> vft = [tp newVisibleFunctionTableWithDescriptor:vd stage:MTLRenderStageTile];
+			if (!vft)
+				@throw failure(@"tile visible function table creation failed");
+			NSMutableArray *handles = [NSMutableArray new];
+			for (NSString *name in names) {
+				id<MTLFunction> f = nil;
+				for (id<MTLFunction> l in linked)
+					if ([l.name isEqualToString:name]) f = l;
+				id<MTLFunctionHandle> handle = f ? [tp functionHandleWithFunction:f stage:MTLRenderStageTile] : nil;
+				if (!handle)
+					@throw failure(@"no tile function handle for %@", name);
+				[handles addObject:handle];
+			}
+			fill_table(vft, handles, [spec[@"bind"] isEqual:@"ranges"]);
+			tables[@(number(table, @"index", 0))] = vft;
+		}
 		[tile_pipelines addObject:tp];
+		[tile_tables addObject:tables];
 	}
 	/* Everything an encoder of this pass records, from `spec` and its
 	 * bindings: once, or once per sub-encoder of a parallel encoder. */
@@ -3068,7 +3160,9 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 		NSArray *s = r[@"scissor"];
 		[e setScissorRect:(MTLScissorRect){[s[0] unsignedIntegerValue], [s[1] unsignedIntegerValue], [s[2] unsignedIntegerValue], [s[3] unsignedIntegerValue]}];
 	}
-	bind_resources(c, e, spec, NO, MTLRenderStageVertex | MTLRenderStageFragment | (mesh ? MTLRenderStageObject | MTLRenderStageMesh : 0));
+	bind_resources(c, e, spec, NO,
+		       MTLRenderStageVertex | MTLRenderStageFragment | (mesh ? MTLRenderStageObject | MTLRenderStageMesh : 0)
+			       | (r[@"tiles"] ? MTLRenderStageTile : 0));
 	/* Each stage's tables of the functions linked to it. */
 	BOOL ranges = [spec[@"bind"] isEqual:@"ranges"];
 	for (NSString *stage in @[ @"vertex", @"fragment" ]) {
@@ -3211,6 +3305,7 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 	NSArray *tiles = r[@"tiles"];
 	for (NSUInteger k = 0; k < tiles.count; k++) {
 		[e setRenderPipelineState:tile_pipelines[k]];
+		bind_tables(e, StageTile, tile_tables[k], [spec[@"bind"] isEqual:@"ranges"]);
 		for (NSDictionary *m in tiles[k][@"threadgroup_memory"])
 			[e setThreadgroupMemoryLength:number(m, @"length", 16)
 					       offset:number(m, @"offset", 0)
