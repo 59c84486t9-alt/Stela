@@ -1,4 +1,6 @@
-use super::{Memory, TestService, call, connect, service_on, status};
+use super::{
+    Memory, StorageMode, Stream, TestService, call, commit, connect, new_buffer, service_on, status,
+};
 use crate::metal::{
     device::fixture::MockBackend,
     service::{
@@ -193,4 +195,39 @@ fn the_queue_answers_its_serials_and_clocks() {
     )
     .unwrap();
     assert_eq!(allocated.value, service.device().current_allocated_size());
+}
+
+#[test]
+fn allocated_size_retires_completed_work_first() {
+    let mut service = service_on(MockBackend::new());
+    let connection = connect(&mut service);
+    let buffer = new_buffer(&mut service, connection, StorageMode::Private);
+    let serial = commit(&mut service, connection, &Stream::default())
+        .unwrap()
+        .value;
+    call::<_, Empty>(
+        &mut service,
+        connection,
+        Operation::Release,
+        &Handle { handle: buffer },
+        &mut Memory::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        service.device().current_allocated_size(),
+        256,
+        "in-flight work still holds the buffer"
+    );
+    let backend = service.device().backend();
+    let timeline = *backend.semaphores.keys().next().unwrap();
+    backend.semaphores.insert(timeline, serial);
+    let allocated: Value = call(
+        &mut service,
+        connection,
+        Operation::AllocatedSize,
+        &Empty {},
+        &mut Memory::default(),
+    )
+    .unwrap();
+    assert_eq!(allocated.value, 0, "the completed work released it");
 }

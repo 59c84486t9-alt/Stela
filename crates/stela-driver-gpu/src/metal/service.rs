@@ -526,9 +526,15 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 let (cpu, gpu) = self.device.sample_timestamps()?;
                 call.reply(&wire::TimestampsResponse { cpu, gpu })
             }
-            Operation::AllocatedSize => call.reply(&wire::Value {
-                value: self.device.current_allocated_size(),
-            }),
+            Operation::AllocatedSize => {
+                // Objects released while work was in flight stay charged until
+                // that work retires; retire what completed so the answer is
+                // the size now, not whenever the gate next polled.
+                self.device.poll()?;
+                call.reply(&wire::Value {
+                    value: self.device.current_allocated_size(),
+                })
+            }
             Operation::Poll => {
                 let value = self.device.poll()?;
                 call.reply(&wire::Value { value })
