@@ -177,7 +177,7 @@ impl Flat {
                 record.alignment = *alignment;
                 record.data_size = *data_size;
             }
-            BindingKind::VisibleFunctionTable => {}
+            BindingKind::VisibleFunctionTable | BindingKind::Imageblock => {}
         }
         Ok(record)
     }

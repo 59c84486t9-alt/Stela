@@ -21,6 +21,7 @@ raw_enum! {
         ThreadgroupMemory = 1,
         Texture = 2,
         Sampler = 3,
+        Imageblock = 17,
         VisibleFunctionTable = 24,
         ObjectPayload = 34,
     }
@@ -56,6 +57,9 @@ pub enum BindingKind {
         array_length: u32,
     },
     VisibleFunctionTable,
+    /// A kernel's `imageblock<T>`: a tile function's color attachments or
+    /// its pass's imageblock data.
+    Imageblock,
     /// `MTLObjectPayloadBinding`.
     ObjectPayload {
         alignment: u32,
@@ -71,6 +75,7 @@ impl BindingKind {
             Self::Texture { .. } => BindingType::Texture,
             Self::Sampler { .. } => BindingType::Sampler,
             Self::VisibleFunctionTable => BindingType::VisibleFunctionTable,
+            Self::Imageblock => BindingType::Imageblock,
             Self::ObjectPayload { .. } => BindingType::ObjectPayload,
         }
     }

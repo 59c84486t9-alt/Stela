@@ -537,6 +537,12 @@ bind_kernel(const struct stela_air_inspection *info, const struct stela_air_entr
                                                       a->type_name, a->type_name_bytes, a->used) :
                    a->kind == 4 ? add_sampler_binding(r, &a->sampler, a->name, a->name_bytes,
                                                       a->type_name, a->type_name_bytes, a->used) :
+                   /* A kernel's one imageblock, which Metal lists at index 0. */
+                   a->kind == 6 ? add_binding(r, STELA_METAL_BINDING_IMAGEBLOCK, 0, 0, a->name,
+                                              a->name_bytes, a->type_name, a->type_name_bytes,
+                                              a->used, NULL,
+                                              (struct stela_metal_binding){
+                                                 .access = STELA_METAL_ACCESS_READ}) :
                                   true;
       if (!added)
          return false;

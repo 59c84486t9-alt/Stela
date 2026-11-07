@@ -201,6 +201,7 @@ pub(super) mod binding {
     pub const SAMPLER: u32 = 3;
     pub const FUNCTION_TABLE: u32 = 4;
     pub const OBJECT_PAYLOAD: u32 = 5;
+    pub const IMAGEBLOCK: u32 = 6;
 }
 
 /// `enum stela_air_field_kind`.

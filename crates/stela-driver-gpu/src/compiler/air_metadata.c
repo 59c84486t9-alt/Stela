@@ -1835,6 +1835,27 @@ argument_location(LLVMValueRef field, unsigned *location)
    return true;
 }
 
+/* Whether fn calls an imageblock function, which its imageblock's
+ * reflection reports as using it: an implicit imageblock's calls name the
+ * attachments, not the argument. */
+static bool
+calls_imageblock(LLVMValueRef fn)
+{
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         LLVMValueRef callee = LLVMIsACallInst(inst) ? LLVMGetCalledValue(inst) : NULL;
+         size_t bytes = 0;
+         const char *name =
+            callee && LLVMIsAFunction(callee) ? LLVMGetValueName2(callee, &bytes) : NULL;
+         if (name && bytes > 4 && !strncmp(name, "air.", 4) && strstr(name, "imageblock"))
+            return true;
+      }
+   }
+   return false;
+}
+
 static bool
 metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef args_node,
                    struct stela_air_kernel *kernel, struct stela_air_render *render)
@@ -1986,10 +2007,19 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          unsigned size = 0;
          bool explicit_layout = fields_count > 2 && stela_air_md_string(fields[2], "explicit");
          bool implicit_layout = fields_count > 2 && stela_air_md_string(fields[2], "implicit");
-         for (unsigned f = 2; f + 1 < fields_count; f++)
+         struct stela_air_argument block = {.value = param, .is_imageblock = true,
+                                            .absent = !claims,
+                                            .used = LLVMGetFirstUse(param) != NULL ||
+                                                    calls_imageblock(fn)};
+         for (unsigned f = 2; f + 1 < fields_count; f++) {
             if (stela_air_md_string(fields[f], "air.imageblock_data_size") &&
                 !stela_air_md_uint(fields[f + 1], &size))
                size = 0;
+            else if (stela_air_md_string(fields[f], "air.arg_name"))
+               metadata_text(t, fields[f + 1], &block.name, &block.name_bytes);
+            else if (stela_air_md_string(fields[f], "air.arg_type_name"))
+               metadata_text(t, fields[f + 1], &block.type_name, &block.type_name_bytes);
+         }
          if ((!explicit_layout || !size) && !implicit_layout)
             return fail(t, STELA_AIR_ARGUMENT, "a kernel's imageblock of an unknown layout");
          if (kernel->imageblock_size || kernel->implicit_imageblock)
@@ -1998,8 +2028,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             kernel->imageblock_size = explicit_layout ? size : 0;
             kernel->implicit_imageblock = implicit_layout;
          }
-         kernel->arguments[a] = (struct stela_air_argument){
-            .value = param, .is_imageblock = true, .absent = !claims};
+         kernel->arguments[a] = block;
          continue;
       }
       if (!buffer && !builtin && !interpolated && !vertex_input && !texture && !sampler &&

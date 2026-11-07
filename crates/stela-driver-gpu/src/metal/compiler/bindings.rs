@@ -66,6 +66,7 @@ impl Reader<'_> {
                 alignment: row.alignment,
                 data_size: row.size,
             },
+            ffi::binding::IMAGEBLOCK => BindingKind::Imageblock,
             _ => return Err(MALFORMED),
         };
         Ok(Binding {

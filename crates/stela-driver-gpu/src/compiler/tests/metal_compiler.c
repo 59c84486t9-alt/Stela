@@ -511,6 +511,25 @@ static const char *arrays =
 /* A kernel binding a uniform structure, which inlines an array of another,
  * an argument buffer of a texture array, a buffer and a constant, a texture,
  * a sampler and a threadgroup buffer; it reads only the uniforms. */
+/* A tile function: its implicit imageblock, which only names the color
+ * attachments its calls access, and a buffer. */
+static const char *tiled =
+   "%block_t = type { ptr addrspace(4) }\n"
+   "declare <4 x half> @air.load.implicit_imageblock.v4f16(i32, <2 x i16>, i32, i16)\n"
+   "define void @tiled(%block_t %block, ptr addrspace(1) %out, <2 x i16> %tid) {\n"
+   "%v = call <4 x half> @air.load.implicit_imageblock.v4f16(i32 0, <2 x i16> %tid, i32 0, i16 0)\n"
+   "store <4 x half> %v, ptr addrspace(1) %out, align 8\n"
+   "ret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @tiled, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7}\n"
+   "!5 = !{i32 0, !\"air.imageblock\", !\"implicit\", !\"air.arg_type_align_size\", i32 8,"
+   " !\"air.arg_type_name\", !\"imageblock<Color, layout_implicit>\", !\"air.arg_name\", !\"block\"}\n"
+   "!6 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 3, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 8, !\"air.arg_type_align_size\","
+   " i32 8, !\"air.arg_type_name\", !\"half4\", !\"air.arg_name\", !\"out\"}\n"
+   "!7 = !{i32 2, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"ushort2\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
 static const char *bound =
    "define void @bound(ptr addrspace(2) %u, ptr addrspace(2) %args, ptr addrspace(1) %rw,"
    " ptr addrspace(2) %s, ptr addrspace(3) %tg, ptr addrspace(1) %out) {\n"
@@ -2038,6 +2057,28 @@ bindings_list_conditional_arguments_until_specialized(void)
    LLVMDisposeMemoryBuffer(input);
 }
 
+/* A kernel's imageblock is a binding at index 0, used where the function
+ * calls an imageblock function. */
+static void
+imageblocks_are_bindings(void)
+{
+   static struct stela_metal_bindings bindings;
+   struct stela_air_error error;
+   LLVMMemoryBufferRef input = bitcode(tiled);
+   bool reflected = stela_metal_reflect_bindings(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                                 "tiled", NULL, 0, &bindings, &error);
+   if (!reflected)
+      fprintf(stderr, "tiled: %u %s\n", error.kind, error.detail);
+   assert(reflected && bindings.binding_count == 2);
+   const struct stela_metal_binding *block = &bindings.bindings[0];
+   assert(block->kind == STELA_METAL_BINDING_IMAGEBLOCK && block->index == 0 && block->used &&
+          block->access == STELA_METAL_ACCESS_READ && NAMED(block, "block") &&
+          TYPED(block, "imageblock<Color, layout_implicit>"));
+   assert(bindings.bindings[1].kind == STELA_METAL_BINDING_BUFFER &&
+          bindings.bindings[1].index == 3);
+   LLVMDisposeMemoryBuffer(input);
+}
+
 #undef NAMED
 #undef TYPED
 
@@ -3240,6 +3281,7 @@ main(void)
    arrays_reflect_each_slot();
    bindings_reflect_their_structures();
    bindings_list_conditional_arguments_until_specialized();
+   imageblocks_are_bindings();
    defined_functions_inline_into_their_callers();
    unresolved_calls_are_rejected_without_a_call_graph();
    stitched_functions_call_their_nodes_in_order();
