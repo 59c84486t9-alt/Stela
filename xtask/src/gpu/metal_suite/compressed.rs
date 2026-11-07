@@ -704,8 +704,14 @@ fn pvrtc_cases(plan: &mut Plan, library: &str, rng: &mut Random) {
             ]);
         }
         // Apple's decode is bit for bit Imagination's; its sRGB curve is
-        // a table within 0.0002 of the exact one.
-        let tol = Tolerance::abs(0.5 / 255.0).with_ftz(false);
+        // a table within 0.0002 of the exact one, and a texture unit's
+        // within the bound of an 8-bit sRGB read.
+        let tol = if srgb {
+            super::textures::srgb_decode()
+        } else {
+            Tolerance::abs(0.5 / 255.0)
+        }
+        .with_ftz(false);
         plan.add(
             Case::compute1(
                 &format!("texture.compressed.{name}"),
@@ -776,8 +782,10 @@ fn astc_cases(plan: &mut Plan, library: &str, rng: &mut Random) {
             let points: Vec<u32> = (0..width * height)
                 .flat_map(|i| [i % width, i / width, 0, 0])
                 .collect();
+            // An sRGB block's 8-bit codes decode within the bound of an
+            // 8-bit sRGB read.
             let tol = if srgb {
-                Tolerance::abs(0.5 / 255.0)
+                super::textures::srgb_decode()
             } else {
                 // Apple's 12 bits, held widened to 16.
                 Tolerance::abs(2e-5)
@@ -848,7 +856,11 @@ pub fn build(plan: &mut Plan, library: &str) {
             .any(|p| f.name.starts_with(p));
         let range = if f.name.contains("snorm") { 2.0 } else { 1.0 };
         let etc = f.name.starts_with("etc2") || f.name.starts_with("eac");
-        let tol = if etc {
+        let tol = if etc && f.name.ends_with("srgb") {
+            // Exact 8-bit codes, decoded within the bound of an 8-bit sRGB
+            // read.
+            super::textures::srgb_decode()
+        } else if etc {
             // Exact codes: ETC2's 8-bit ones within half a step, EAC's
             // 11-bit ones at a 16-bit image's precision.
             Tolerance::abs(if f.name.contains("11") {
