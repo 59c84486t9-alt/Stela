@@ -439,7 +439,9 @@ same_target(const char *a, const char *b)
 }
 
 /* Whether module is valid AIR compiled as m's module was, after
- * specializing its function constants with values. */
+ * specializing its function constants with values. Its llvm.ident names
+ * only the compiler build that made it: an offline-built dynamic library
+ * links under a kernel compiled at run time. */
 static bool
 prepared(struct stela_air_metadata *m, LLVMModuleRef module,
          const struct stela_air_constant_value *values, unsigned count)
@@ -456,8 +458,7 @@ prepared(struct stela_air_metadata *m, LLVMModuleRef module,
        linked.air_major != m->air_major || linked.air_minor != m->air_minor ||
        linked.language_major != m->language_major ||
        linked.language_minor != m->language_minor || linked.denorms_disable != m->denorms_disable ||
-       linked.fast_math != m->fast_math || linked.ident_bytes != m->ident_bytes ||
-       (m->ident_bytes && memcmp(linked.ident, m->ident, m->ident_bytes)))
+       linked.fast_math != m->fast_math)
       return fail(m, STELA_AIR_INPUT, "a linked module was compiled differently");
    if (!name_references(&linked) || !hide_entry_points(&linked))
       return fail(m, error.kind, error.detail);

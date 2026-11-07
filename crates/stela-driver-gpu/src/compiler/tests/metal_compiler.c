@@ -903,15 +903,23 @@ static const struct stela_metal_target target = {
 };
 
 /* A fixture's bitcode: its code and metadata, then the versions. */
+/* fixture's module, with the version metadata of the compiler build that
+ * fixed_versions names. */
 static LLVMMemoryBufferRef
-bitcode(const char *fixture)
+bitcode_built(const char *fixture, const char *fixed_versions)
 {
    const char *metadata = strstr(fixture, "\n!air.") + 1;
    char *body = ralloc_strndup(NULL, fixture, metadata - fixture);
-   char *tail = ralloc_asprintf(body, "%s%s", metadata, versions);
+   char *tail = ralloc_asprintf(body, "%s%s", metadata, fixed_versions);
    LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(module, body, tail, "");
    ralloc_free(body);
    return input;
+}
+
+static LLVMMemoryBufferRef
+bitcode(const char *fixture)
+{
+   return bitcode_built(fixture, versions);
 }
 
 /* Reflects entry specialized with the function constant values, or
@@ -2671,6 +2679,32 @@ linked_functions_resolve_tables_and_externals(void)
       fprintf(stderr, "redeployed: %u %s\n", error.kind, error.detail);
    assert(shader);
    stela_metal_release(shader);
+   /* A library another build of the compiler made links too: an
+    * offline-built dynamic library under a kernel compiled at run time. */
+   {
+      static const char *other_build =
+         "!air.version = !{!20}\n!air.language_version = !{!21}\n!llvm.ident = !{!22}\n"
+         "!air.compile_options = !{!23, !24, !25}\n"
+         "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n"
+         "!22 = !{!\"Apple metal version 32023.830 (metalfe-32023.830.2)\"}\n"
+         "!23 = !{!\"air.compile.denorms_disable\"}\n!24 = !{!\"air.compile.fast_math_enable\"}\n"
+         "!25 = !{!\"air.compile.framebuffer_fetch_enable\"}\n";
+      LLVMMemoryBufferRef built = bitcode_built(linked, other_build);
+      const struct stela_air_module modules[] = {{LLVMGetBufferStart(built), LLVMGetBufferSize(built)}};
+      struct stela_air_linked_function named[3];
+      for (unsigned i = 0; i < 3; i++)
+         named[i] = (struct stela_air_linked_function){functions[i], strlen(functions[i])};
+      const struct stela_metal_specialization specialization = {
+         .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 1,
+         .linked_functions = named, .linked_function_count = 3,
+      };
+      shader = compile(tables, "tables", &specialization, &error);
+      if (!shader)
+         fprintf(stderr, "other build: %u %s\n", error.kind, error.detail);
+      assert(shader);
+      stela_metal_release(shader);
+      LLVMDisposeMemoryBuffer(built);
+   }
    shader = compile_linked(tested, "tables", &linked, 1, functions, 3, &error);
    if (!shader)
       fprintf(stderr, "tested: %u %s\n", error.kind, error.detail);
