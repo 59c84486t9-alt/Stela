@@ -614,6 +614,7 @@ static id encoder_of_binding(StelaGPUDevice *device, StelaGPUBinding *binding)
 	_functionType = response.function_type;
 	_patchType = response.patch_type;
 	_patchControlPointCount = response.patch_control_points ? (NSInteger)response.patch_control_points : -1;
+	memcpy(_bitCodeHash, response.bitcode_hash, sizeof(_bitCodeHash));
 
 	const StelaConstantInfo *constants = (const void *)bytes;
 	const StelaAttributeInfo *attributes = (const void *)(constants + response.constant_count);

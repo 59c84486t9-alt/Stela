@@ -887,6 +887,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(&self.pipelines.functions.get(id.0)?.prepared.reflection)
     }
 
+    /// The SHA-256 of a function's AIR module, its `bitCodeHash`.
+    pub fn function_slice_hash(&self, id: FunctionId) -> Result<[u8; 32]> {
+        Ok(self
+            .pipelines
+            .functions
+            .get(id.0)?
+            .prepared
+            .provenance
+            .slice_hash)
+    }
+
     /// The bindings of a function specialized with its function constant
     /// values, for `MTLPipelineOptionBindingInfo` and argument encoders.
     pub fn function_bindings(&mut self, id: FunctionId) -> Result<Vec<Binding>> {

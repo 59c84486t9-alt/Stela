@@ -103,6 +103,17 @@ static os_unfair_lock userDictionaries = OS_UNFAIR_LOCK_INIT;
 
 @end
 
+@implementation StelaGPUFunction (SPI)
+
+/* The SHA-256 of the function's AIR module, which callers key caches by
+ * and read through the pointer. */
+- (const void *)bitCodeHash
+{
+	return _bitCodeHash;
+}
+
+@end
+
 @implementation StelaGPUResource (SPI)
 
 /* Work on a resource finishes with its command buffer, which callers wait on. */

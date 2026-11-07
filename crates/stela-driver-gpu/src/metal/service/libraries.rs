@@ -229,6 +229,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             constant_count: constants.len() as u32,
             attribute_count: attributes.len() as u32,
             length: data.len() as u64,
+            bitcode_hash: self.device.function_slice_hash(function)?,
         };
         call.write_fitting(request.out, &data)?;
         call.reply(&response)

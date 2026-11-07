@@ -439,6 +439,8 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 	NSInteger _patchControlPointCount;
 	NSArray *_attributes;
 	NSDictionary *_constants;
+	/* `bitCodeHash`: the SHA-256 of its AIR module. */
+	uint8_t _bitCodeHash[32];
 }
 - (instancetype)initWithLibrary:(StelaGPULibrary *)library handle:(uint64_t)handle name:(NSString *)name;
 @end

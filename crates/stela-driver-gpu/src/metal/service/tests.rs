@@ -22,7 +22,7 @@ use crate::metal::{
     },
     capabilities::block::Block,
     device::{
-        LibraryId,
+        FunctionId, LibraryId,
         fixture::{MockBackend, MockCompiler, device_on},
     },
     library::tests::fixture,
@@ -682,6 +682,12 @@ fn functions_reflect_their_constants_and_patches() {
     let patch = new_function(&mut service, connection, library, "patch", &[], memory)
         .unwrap()
         .handle;
+    // The hash of the function's AIR module, as the device's compiler gives it.
+    let id = service
+        .object::<FunctionId>(connection, constants)
+        .ok()
+        .unwrap();
+    let hash = service.device().function_slice_hash(id).unwrap();
     let mut reflect = |function, capacity| {
         let out = memory.put(&vec![0; capacity]);
         let request = FunctionReflectionRequest { function, out };
@@ -708,6 +714,7 @@ fn functions_reflect_their_constants_and_patches() {
             constant_count: 2,
             attribute_count: 0,
             length: length as u64,
+            bitcode_hash: hash,
         }
     );
     let (_, data) = reflect(constants, length);

@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 /// The protocol version a connection negotiates. A major version changes
 /// records; a minor version only adds operations.
-pub const MAJOR: u32 = 1;
+pub const MAJOR: u32 = 2;
 pub const MINOR: u32 = 0;
 
 /// A fixed-width wire record.
@@ -245,8 +245,9 @@ records! {
     }
 
     /// `functionType`, `patchType`, the control points the function
-    /// declares (zero for none), and the counts and length of the
-    /// reflection written when it fit.
+    /// declares (zero for none), the counts and length of the reflection
+    /// written when it fit, and `bitCodeHash`: the SHA-256 of the
+    /// function's AIR module.
     pub struct FunctionReflectionResponse {
         pub function_type: u64,
         pub patch_type: u64,
@@ -254,6 +255,7 @@ records! {
         pub constant_count: u32,
         pub attribute_count: u32,
         pub length: u64,
+        pub bitcode_hash: [u8; 32],
     }
 
     /// An entry of `functionConstantsDictionary`; names are offsets and
