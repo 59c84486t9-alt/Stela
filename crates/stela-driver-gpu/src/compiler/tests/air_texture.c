@@ -1096,7 +1096,7 @@ static const char *metal4_declarations =
    "declare <4 x i32> @air.atomic_fetch_add_explicit_texture_2d.u.v4i32(ptr addrspace(1), <2 x i32>,"
    " <2 x i32>, <4 x i32>, i32, i32)\n";
 
-/* Metal 4 reads through a placeholder sampler and past a zero offset. */
+/* Metal 4 reads through a placeholder sampler, at an offset. */
 static const char *metal4_read = SPELLED(
    "%none = call ptr addrspace(2) @air.get_read_sampler()\n"
    "%s = call { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1) %src,"
@@ -1178,11 +1178,26 @@ every_metal_version_spells_its_calls(void)
    assert(shader);
    ralloc_free(shader);
 
-   /* An offset is only ever zero. */
-   assert(!spelled("air64_v29-apple-macosx27.2.0", metal4_declarations,
-                   replace(metal4_read, "<2 x i32> zeroinitializer", "<2 x i32> <i32 1, i32 0>"),
-                   kernel_metadata, &error));
-   assert(error.kind == STELA_AIR_INSTRUCTION && strstr(error.detail, "at an offset"));
+   /* An offset moves the texel read, as Apple7 GPUs read. */
+   shader = spelled("air64_v29-apple-macosx27.2.0", metal4_declarations,
+                    replace(metal4_read, "<2 x i32> zeroinitializer", "<2 x i32> <i32 1, i32 -1>"),
+                    kernel_metadata, &error);
+   assert(shader);
+   /* (1, 2) + (1, -1) once folded. */
+   nir_opt_constant_folding(shader);
+   nir_opt_copy_prop(shader);
+   nir_tex_instr *fetch = count(shader).first[nir_texop_txf];
+   nir_src *coord = &fetch->src[nir_tex_instr_src_index(fetch, nir_tex_src_coord)].src;
+   assert(nir_src_is_const(*coord) && nir_src_comp_as_uint(*coord, 0) == 2 &&
+          nir_src_comp_as_uint(*coord, 1) == 1);
+   ralloc_free(shader);
+   /* Through a sampler, the read clamps to the level's edge. */
+   shader = spelled("air64_v29-apple-macosx27.2.0", metal4_declarations,
+                    replace(metal4_read, "ptr addrspace(2) %none, <2 x i32>",
+                            "ptr addrspace(2) %smp, <2 x i32>"),
+                    kernel_metadata, &error);
+   assert(shader && count(shader).tex[nir_texop_txs] == 1 && count(shader).tex[nir_texop_txf] == 1);
+   ralloc_free(shader);
 
    shader = spelled("air64_v29-apple-macosx27.2.0", metal4_declarations, metal4_atomic,
                     atomic_metadata, &error);

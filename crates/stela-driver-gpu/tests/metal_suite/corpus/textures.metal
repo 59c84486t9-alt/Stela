@@ -17,6 +17,17 @@ READ2D(read2d_int, int)
 READ2D(read2d_ushort, ushort)
 READ2D(read2d_short, short)
 
+#ifndef SKIP_read2d_offset
+// A read at an offset through a sampler, which clamps it to the texture's
+// edge.
+kernel void read2d_offset(texture2d<float> t [[texture(0)]], device const int4 *c [[buffer(0)]],
+                          device float4 *out [[buffer(1)]], uint i [[thread_position_in_grid]])
+{
+    constexpr sampler s(address::clamp_to_edge);
+    out[i] = t.read(s, c[i].xy, int2(1, -1));
+}
+#endif
+
 kernel void read1d(texture1d<float> t [[texture(0)]], device const uint4 *c [[buffer(0)]],
                    device float4 *out [[buffer(1)]], uint i [[thread_position_in_grid]])
 { out[i] = t.read(c[i].x); }

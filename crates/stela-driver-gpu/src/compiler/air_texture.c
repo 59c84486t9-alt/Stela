@@ -327,9 +327,10 @@ min_lod_operand(struct call *call, nir_def **min_lod)
    return value != NULL;
 }
 
-/* The offset Metal 4 places after a 2D or 3D position, always zero. */
+/* The signed texel offset Metal 4 places after a 2D or 3D position, added
+ * to *position. */
 static bool
-position_offset(struct call *call)
+position_offset(struct call *call, nir_def **position)
 {
    const struct shape *shape = call->shape;
    if ((shape->dim != GLSL_SAMPLER_DIM_2D && shape->dim != GLSL_SAMPLER_DIM_3D) ||
@@ -340,7 +341,13 @@ position_offset(struct call *call)
                 call->short_indices ? 16 : 32))
       return true;
    call->next++;
-   return LLVMIsNull(value) || fail(call, "accessing a texel at an offset");
+   if (LLVMIsNull(value))
+      return true;
+   nir_def *offset = call->c->operand(call->c->translator, value);
+   if (!offset)
+      return false;
+   *position = nir_iadd(call->b, *position, nir_i2i32(call->b, offset));
+   return true;
 }
 
 /* The optional texel offset: an i1 presence flag and the offset. */
@@ -801,6 +808,16 @@ stela_air_texture_use(LLVMValueRef inst, struct stela_air_texture *texture)
    return true;
 }
 
+/* A signed position clamped to the texels of a level whose size, and then
+ * layers, size holds. */
+static nir_def *
+edge_clamped(const struct call *call, nir_def *position, nir_def *size)
+{
+   nir_builder *b = call->b;
+   nir_def *last = nir_iadd_imm(b, nir_trim_vector(b, size, position->num_components), -1);
+   return nir_imin(b, nir_imax(b, position, nir_imm_zero(b, position->num_components, 32)), last);
+}
+
 static bool
 read_texel(struct call *call, nir_def **result)
 {
@@ -816,8 +833,13 @@ read_texel(struct call *call, nir_def **result)
    nir_deref_instr *deref = image ? NULL : faces ? faces_deref(call) : texture_deref(call, NULL);
    if (!image && !deref)
       return false;
-   call->next += call->next < call->count &&
-                 stela_air_read_sampler(LLVMGetOperand(call->inst, call->next));
+   /* Metal 4 reads take the placeholder, or a sampler, through which they
+    * clamp to the texture's edge as Apple7 GPUs read. */
+   LLVMValueRef sampler = call->next < call->count ? LLVMGetOperand(call->inst, call->next) : NULL;
+   bool clamps = sampler && !stela_air_read_sampler(sampler) &&
+                 LLVMGetTypeKind(LLVMTypeOf(sampler)) == LLVMPointerTypeKind &&
+                 LLVMGetPointerAddressSpace(LLVMTypeOf(sampler)) == 2;
+   call->next += clamps || (sampler && stela_air_read_sampler(sampler));
    if (texture->depth && !expect(call, 32, 1, "depth operand"))
       return false;
    nir_def *position = index_operand(call, shape->positions);
@@ -827,7 +849,7 @@ read_texel(struct call *call, nir_def **result)
    if (!position || (shape->dim == GLSL_SAMPLER_DIM_CUBE && !face) || (shape->array && !layer) ||
        (shape->dim == GLSL_SAMPLER_DIM_MS && !sample))
       return false;
-   if (!position_offset(call))
+   if (!position_offset(call, &position))
       return false;
    nir_builder *b = call->b;
    nir_def *value;
@@ -836,6 +858,13 @@ read_texel(struct call *call, nir_def **result)
       if (!image_level(call, &level) || !access_operand(call, texture->access) ||
           !finished(call) || !(deref = texture_deref(call, level)))
          return false;
+      if (clamps) {
+         nir_def *size = nir_image_deref_size(b, shape->positions + (face || layer), 32,
+                                              &deref->def, nir_imm_int(b, 0),
+                                              .image_dim = shape->dim, .image_array = shape->array,
+                                              .access = image_access(call, level));
+         position = edge_clamped(call, position, size);
+      }
       nir_def *coord = image_coord(call, position, face, layer);
       nir_def *index = sample ? sample : nir_undef(b, 1, 32);
       nir_alu_type type = nir_get_nir_type_for_glsl_base_type(base_type(texture));
@@ -847,12 +876,19 @@ read_texel(struct call *call, nir_def **result)
                               .image_dim = shape->dim, .image_array = shape->array,
                               .access = image_access(call, level), .dest_type = type);
    } else {
+      nir_def *lod = NULL;
+      if (shape->mipmapped && !(lod = uint_operand(call)))
+         return false;
+      if (clamps) {
+         struct tex size = {.op = nir_texop_txs, .texture = deref, .faces = faces,
+                            .lod = shape->dim == GLSL_SAMPLER_DIM_MS ? NULL :
+                                   lod ? lod : nir_imm_int(b, 0)};
+         position = edge_clamped(call, position, emit(call, &size));
+      }
       nir_def *coord = faces ? nir_trim_vector(b, image_coord(call, position, face, layer), 3) :
                                layered(call, position, layer, false);
       struct tex t = {.op = sample ? nir_texop_txf_ms : nir_texop_txf, .texture = deref,
-                      .coord = coord, .ms_index = sample, .faces = faces};
-      if (shape->mipmapped && !(t.lod = uint_operand(call)))
-         return false;
+                      .coord = coord, .ms_index = sample, .faces = faces, .lod = lod};
       if (!access_operand(call, texture->access) || !finished(call))
          return false;
       value = emit(call, &t);
@@ -1169,7 +1205,7 @@ atomic(struct call *call, unsigned index, bool is_signed, nir_def **result)
    nir_def *data = store ? operand(call, 4, LLVMIntegerTypeKind, 32) : NULL;
    nir_def *position = operand(call, shape->positions, LLVMIntegerTypeKind, 32);
    nir_def *layer = position && shape->array ? uint_operand(call) : NULL;
-   if (!position || (shape->array && !layer) || !position_offset(call))
+   if (!position || (shape->array && !layer) || !position_offset(call, &position))
       return false;
    LLVMValueRef expected = exchange ? take(call) : NULL;
    if (exchange && (!expected || LLVMGetTypeKind(LLVMTypeOf(expected)) != LLVMPointerTypeKind))

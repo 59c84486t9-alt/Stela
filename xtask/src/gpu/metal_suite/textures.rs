@@ -534,6 +534,36 @@ fn reads(plan: &mut Plan, library: &str) {
                 .data(texels.concat().concat()),
         ),
     );
+    if plan.has(SOURCE, "read2d_offset") {
+        // Positions inside, on and past each edge, read one right and one up.
+        let points: [[i32; 2]; 6] = [[1, 2], [3, 0], [-3, 1], [2, 9], [-1, -1], [7, 4]];
+        let texel = |x: i32, y: i32| [f64::from(x + 4 * y), f64::from(x), f64::from(y), 1.0];
+        let texels: Vec<f64> = (0..4)
+            .flat_map(|y| (0..4).flat_map(move |x| texel(x, y)))
+            .collect();
+        let expected: Vec<f64> = points
+            .iter()
+            .flat_map(|&[x, y]| texel((x + 1).clamp(0, 3), (y - 1).clamp(0, 3)))
+            .collect();
+        let positions: Vec<u8> = points
+            .iter()
+            .flat_map(|&[x, y]| [x, y, 0, 0])
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        plan.add(
+            Case::compute(
+                "texture.read.offset_clamped",
+                library,
+                "read2d_offset",
+                [6, 1, 1],
+                [6, 1, 1],
+            )
+            .buffer(Buffer::data("coords", 0, positions))
+            .buffer(Buffer::zeroed("out", 1, 6 * 16))
+            .output(Output::exact("out", Dtype::F32, f32s(&expected)))
+            .texture(t2d("t", "rgba32float", 4, 4).data(f32s(&texels))),
+        );
+    }
     // Texture types: 1D, 1D array, 2D array, 3D and cube, each texel once.
     for (name, kind, (width, height, depth, array), function) in [
         ("1d", "1d", (32, 1, 1, 1), "read1d"),
