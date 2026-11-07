@@ -108,7 +108,9 @@ void stela_report(const char *what, const StelaFailure *failure)
 		NSLog(@"StelaGPU: %@", message);
 		StelaGate *gate = reporting;
 		if (gate) {
-			StelaReportRequest request = {.text = stela_span(message.UTF8String, strlen(message.UTF8String))};
+			/* The host's log names the process each report came from. */
+			NSString *named = [NSString stringWithFormat:@"%s[%d] %@", getprogname(), getpid(), message];
+			StelaReportRequest request = {.text = stela_span(named.UTF8String, strlen(named.UTF8String))};
 			StelaEmpty empty;
 			STELA_CALL(gate, Report, &request, &empty, NULL);
 		}

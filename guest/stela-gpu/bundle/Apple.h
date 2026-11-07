@@ -297,6 +297,8 @@ int strncmp(const char *a, const char *b, size_t size);
 long strtol(const char *text, char **end, int base);
 char *getenv(const char *name);
 int usleep(unsigned int microseconds);
+const char *getprogname(void);
+int getpid(void);
 void abort(void) __attribute__((noreturn));
 int sscanf(const char *text, const char *format, ...);
 int sysctlbyname(const char *name, void *value, size_t *size, void *new_value, size_t new_size);
