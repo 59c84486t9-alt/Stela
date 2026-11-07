@@ -399,6 +399,14 @@ pub enum Command {
         arguments: u64,
         count: u32,
     },
+    /// The backend's reorder blocks kernel over `count` blocks, with a
+    /// [`ReorderArguments`](crate::metal::binding::ReorderArguments)
+    /// upload's address: a buffer copy into or out of a PVRTC texture, whose
+    /// level holds its blocks in Morton order.
+    ReorderBlocks {
+        arguments: u64,
+        count: u32,
+    },
     /// The backend's average samples kernel, with `count` threads and the
     /// address of its `AverageArguments`: the resolve of an attachment
     /// rendered through its raw texels, which Vulkan's resolve modes

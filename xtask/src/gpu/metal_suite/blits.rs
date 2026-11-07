@@ -464,8 +464,73 @@ fn held_blocks(plan: &mut Plan, rng: &mut Random) {
     }
 }
 
+/// PVRTC blits copy rows of a region's blocks, as other compressed formats'
+/// do, which the device keeps in each level's Morton order: the order in
+/// which shared textures receive and return their blocks from the CPU.
+fn pvrtc_rows(plan: &mut Plan, rng: &mut Random) {
+    // 16x16 texels: four rows of four 8-byte blocks.
+    for shared in [false, true] {
+        let at = |x: u32, y: u32| {
+            8 * if shared {
+                super::compressed::twiddle(4, 4, x, y)
+            } else {
+                (y * 4 + x) as usize
+            }
+        };
+        let storage = |texture: Texture| {
+            if shared {
+                texture.set("storage", "shared")
+            } else {
+                texture
+            }
+        };
+        let suffix = if shared { "_shared" } else { "" };
+        let texture = bytes(rng, 128);
+        let staging = bytes(rng, 64);
+        // The lower right 2x2 blocks, from rows of two.
+        let mut copied = texture.clone();
+        for y in 0..2 {
+            for x in 0..2 {
+                let (to, from) = (at(2 + x, 2 + y), (y * 16 + x * 8) as usize);
+                copied[to..to + 8].copy_from_slice(&staging[from..from + 8]);
+            }
+        }
+        plan.add(
+            Case::blit(
+                &format!("blit.buffer_to_texture.pvrtc_rgba_4bpp{suffix}"),
+                json!([{"op": "buffer_to_texture", "src": "staging", "bytes_per_row": 16, "bytes_per_image": 32,
+                        "size": [8, 8, 1], "dst": "t", "origin": [8, 8, 0]}]),
+            )
+            .requires(&["apple1"], &[])
+            .buffer(Buffer::data("staging", 0, staging).unbound())
+            .texture(storage(Texture::d2("t", "pvrtc_rgba_4bpp", 16, 16).data(texture.clone())))
+            .output(exact("t", copied)),
+        );
+        // The upper right 2x2 blocks, into rows padded by a block.
+        let mut read = vec![0x5A; 72];
+        for y in 0..2 {
+            for x in 0..2 {
+                let (to, from) = ((y * 24 + x * 8) as usize, at(2 + x, y));
+                read[to..to + 8].copy_from_slice(&texture[from..from + 8]);
+            }
+        }
+        plan.add(
+            Case::blit(
+                &format!("blit.texture_to_buffer.pvrtc_rgba_4bpp{suffix}"),
+                json!([{"op": "texture_to_buffer", "src": "t", "origin": [8, 0, 0], "size": [8, 8, 1], "dst": "out",
+                        "bytes_per_row": 24, "bytes_per_image": 48}]),
+            )
+            .requires(&["apple1"], &[])
+            .buffer(Buffer::data("out", 0, vec![0x5A; 72]).unbound())
+            .texture(storage(Texture::d2("t", "pvrtc_rgba_4bpp", 16, 16).data(texture)))
+            .output(exact("out", read)),
+        );
+    }
+}
+
 pub fn build(plan: &mut Plan) {
     let mut rng = Random::new(1101);
+    pvrtc_rows(plan, &mut Random::new(1105));
     held_blocks(plan, &mut Random::new(1104));
     more(plan, &mut Random::new(1102));
     stored_encodings(plan, &mut Random::new(1103));

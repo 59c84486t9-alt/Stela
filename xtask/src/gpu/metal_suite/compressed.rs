@@ -4,7 +4,8 @@
 //! fixes them. Endpoint interpolation rounds as each decoder chooses, so
 //! normalized results are held to two steps of their endpoints' precision.
 //! ETC2 and EAC blocks, which the Khronos Data Format Specification decodes
-//! exactly, are held to a fraction of a step.
+//! exactly, and PVRTC ones, which Apple's GPUs decode as Imagination's
+//! decompressor does, are held to a fraction of a step.
 use super::plan::{Buffer, Case, Output, Plan, Texture, Tolerance};
 use super::textures::srgb;
 use super::values::{Dtype, Random, f16_from_bits, f32s};
@@ -488,6 +489,246 @@ fn block(f: &Format, rng: &mut Random) -> Vec<u8> {
     b
 }
 
+/// A PVRTC level's block at column x, row y: Morton order, y's bits in
+/// the even places, the longer side's rest above the interleaved bits.
+pub(super) fn twiddle(columns: u32, rows: u32, x: u32, y: u32) -> usize {
+    let smaller = columns.min(rows);
+    let (mut out, mut shift) = (0, 0);
+    while 1 << shift < smaller {
+        out |= (y >> shift & 1) << (2 * shift) | (x >> shift & 1) << (2 * shift + 1);
+        shift += 1;
+    }
+    (out | (if columns > rows { x } else { y } >> shift) << (2 * shift)) as usize
+}
+
+/// A PVRTC block's two colors, 5 bits a color channel and 4 of alpha.
+fn pvrtc_colors(block: u64) -> [[i32; 4]; 2] {
+    let w4 = |v: u32| (v << 1 | v >> 3) as i32;
+    let color = (block >> 32) as u32;
+    let (a, b) = (color & 0xffff, color >> 16);
+    let first = if a & 0x8000 != 0 {
+        [
+            (a >> 10 & 31) as i32,
+            (a >> 5 & 31) as i32,
+            w4(a >> 1 & 15),
+            15,
+        ]
+    } else {
+        let blue = a >> 1 & 7;
+        [
+            w4(a >> 8 & 15),
+            w4(a >> 4 & 15),
+            (blue << 2 | blue >> 1) as i32,
+            ((a >> 12 & 7) << 1) as i32,
+        ]
+    };
+    let second = if b & 0x8000 != 0 {
+        [
+            (b >> 10 & 31) as i32,
+            (b >> 5 & 31) as i32,
+            (b & 31) as i32,
+            15,
+        ]
+    } else {
+        [
+            w4(b >> 8 & 15),
+            w4(b >> 4 & 15),
+            w4(b & 15),
+            ((b >> 12 & 7) << 1) as i32,
+        ]
+    };
+    [first, second]
+}
+
+const PVRTC_WEIGHTS: [i32; 4] = [0, 3, 5, 8];
+
+/// A 2-bpp block's weight at x, y and how it weighs the texels it stores
+/// none for: 0 not at all, 1 from four neighbors, 2 across, 3 along.
+fn pvrtc2_value(block: u64, x: u32, y: u32) -> (i32, u32) {
+    let mut bits = block as u32;
+    if block >> 32 & 1 == 0 {
+        return (if bits >> (y * 8 + x) & 1 != 0 { 8 } else { 0 }, 0);
+    }
+    let mut mode = 1;
+    if bits & 1 != 0 {
+        mode = if bits & 1 << 20 != 0 { 3 } else { 2 };
+        bits = if bits & 1 << 21 != 0 {
+            bits | 1 << 20
+        } else {
+            bits & !(1 << 20)
+        };
+    }
+    bits = if bits & 2 != 0 { bits | 1 } else { bits & !1 };
+    (
+        PVRTC_WEIGHTS[(bits >> (2 * (y * 4 + x / 2)) & 3) as usize],
+        mode,
+    )
+}
+
+/// A PVRTC level's texels in rows, as Imagination's decompressor and
+/// Apple's GPUs decode them: each texel blends the colors of the four
+/// blocks whose centers surround it, wrapping, and its block's modulation
+/// weighs the two.
+fn pvrtc(blocks: &[u8], size: u32, two_bpp: bool) -> Vec<[i32; 4]> {
+    let width = if two_bpp { 8 } else { 4 };
+    let (columns, rows) = (size.div_ceil(width).max(1), size.div_ceil(4).max(1));
+    let block = |x: u32, y: u32| {
+        let at = 8 * twiddle(columns, rows, x % columns, y % rows);
+        u64::from_le_bytes(blocks[at..at + 8].try_into().unwrap())
+    };
+    let mut texels = Vec::new();
+    for y in 0..size {
+        for x in 0..size {
+            let (sx, sy) = (x + columns * width - width / 2, y + rows * 4 - 2);
+            let (px, py, lx, ly) = (sx / width, sy / 4, sx % width, sy % 4);
+            let quad = [
+                block(px, py),
+                block(px + 1, py),
+                block(px, py + 1),
+                block(px + 1, py + 1),
+            ];
+            let weights = [
+                (width - lx) * (4 - ly),
+                lx * (4 - ly),
+                (width - lx) * ly,
+                lx * ly,
+            ];
+            let mut sums = [[0i32; 4]; 2];
+            for (block, weight) in quad.iter().zip(weights) {
+                for (sum, color) in sums.iter_mut().zip(pvrtc_colors(*block)) {
+                    for c in 0..4 {
+                        sum[c] += weight as i32 * color[c];
+                    }
+                }
+            }
+            let (qx, qy) = (lx + width / 2, ly + 2);
+            let (weight, punch) = if two_bpp {
+                let at = |x: u32, y: u32| {
+                    pvrtc2_value(
+                        quad[(usize::from(y >= 4) * 2) + usize::from(x >= 8)],
+                        x % 8,
+                        y % 4,
+                    )
+                };
+                let (stored, mode) = at(qx, qy);
+                let (l, r, u, d) = (
+                    at(qx - 1, qy).0,
+                    at(qx + 1, qy).0,
+                    at(qx, qy - 1).0,
+                    at(qx, qy + 1).0,
+                );
+                let weight = match mode {
+                    _ if mode == 0 || (qx ^ qy) & 1 == 0 => stored,
+                    1 => (l + r + u + d + 2) / 4,
+                    2 => (l + r + 1) / 2,
+                    _ => (u + d + 1) / 2,
+                };
+                (weight, false)
+            } else {
+                let own = quad[usize::from(qy >= 4) * 2 + usize::from(qx >= 4)];
+                let value = (own as u32 >> (2 * ((qy % 4) * 4 + qx % 4)) & 3) as usize;
+                if own >> 32 & 1 != 0 {
+                    ([0, 4, 4, 8][value], value == 2)
+                } else {
+                    (PVRTC_WEIGHTS[value], false)
+                }
+            };
+            let mut texel = [0; 4];
+            for c in 0..4 {
+                let widen = |s: i32| match (c < 3, two_bpp) {
+                    (true, false) => (s >> 1) + (s >> 6),
+                    (true, true) => (s >> 2) + (s >> 7),
+                    (false, false) => s + (s >> 4),
+                    (false, true) => (s >> 1) + (s >> 5),
+                };
+                texel[c] = (widen(sums[0][c]) * (8 - weight) + widen(sums[1][c]) * weight) / 8;
+            }
+            if punch {
+                texel[3] = 0;
+            }
+            texels.push(texel);
+        }
+    }
+    texels
+}
+
+/// PVRTC textures of each format, square and a power of two. Shared ones
+/// receive their level's blocks in its Morton order from the CPU; private
+/// ones receive rows of blocks from a blit, which reorders them.
+fn pvrtc_cases(plan: &mut Plan, library: &str, rng: &mut Random) {
+    for (name, two_bpp, alpha, srgb) in [
+        ("pvrtc_rgba_4bpp", false, true, false),
+        ("pvrtc_rgba_4bpp_srgb", false, true, true),
+        ("pvrtc_rgb_4bpp", false, false, false),
+        ("pvrtc_rgb_4bpp_srgb", false, false, true),
+        ("pvrtc_rgba_2bpp", true, true, false),
+        ("pvrtc_rgba_2bpp_srgb", true, true, true),
+        ("pvrtc_rgb_2bpp", true, false, false),
+        ("pvrtc_rgb_2bpp_srgb", true, false, true),
+    ] {
+        let size = 16u32;
+        let blocks: Vec<u8> = (0..size * size / if two_bpp { 4 } else { 2 })
+            .map(|_| (rng.u32() % 256) as u8)
+            .collect();
+        let mut points = vec![];
+        let mut expect = vec![];
+        let (columns, rows) = (size / if two_bpp { 8 } else { 4 }, size / 4);
+        let mut morton = blocks.clone();
+        if !srgb {
+            for y in 0..rows {
+                for x in 0..columns {
+                    let (to, from) = (
+                        twiddle(columns, rows, x, y) * 8,
+                        (y * columns + x) as usize * 8,
+                    );
+                    morton[to..to + 8].copy_from_slice(&blocks[from..from + 8]);
+                }
+            }
+        }
+        for (i, texel) in pvrtc(&morton, size, two_bpp).into_iter().enumerate() {
+            let i = i as u32;
+            points.extend([i % size, i / size, 0, 0]);
+            let unorm = |c: i32| f64::from(c) / 255.0;
+            let color = |c: i32| {
+                if srgb {
+                    super::textures::srgb(unorm(c))
+                } else {
+                    unorm(c)
+                }
+            };
+            expect.extend([
+                color(texel[0]),
+                color(texel[1]),
+                color(texel[2]),
+                if alpha { unorm(texel[3]) } else { 1.0 },
+            ]);
+        }
+        // Apple's decode is bit for bit Imagination's; its sRGB curve is
+        // a table within 0.0002 of the exact one.
+        let tol = Tolerance::abs(0.5 / 255.0).with_ftz(false);
+        plan.add(
+            Case::compute1(
+                &format!("texture.compressed.{name}"),
+                library,
+                "read2d_float",
+                size * size,
+            )
+            .requires(&["apple1"], &[])
+            .buffer(Buffer::data(
+                "coords",
+                0,
+                points.iter().flat_map(|v: &u32| v.to_le_bytes()).collect(),
+            ))
+            .buffer(Buffer::zeroed("out", 1, (size * size * 16) as usize))
+            .output(Output::new("out", Dtype::F32, tol.clone()).expect(f32s(&expect), tol))
+            .texture(storage(
+                Texture::d2("t", name, size, size).index(0).data(blocks),
+                srgb,
+            )),
+        );
+    }
+}
+
 /// Shared textures receive their blocks from the CPU, private ones from a
 /// blit: half the ETC2 and EAC formats take each way.
 fn storage(texture: Texture, shared: bool) -> Texture {
@@ -499,6 +740,7 @@ fn storage(texture: Texture, shared: bool) -> Texture {
 }
 
 pub fn build(plan: &mut Plan, library: &str) {
+    pvrtc_cases(plan, library, &mut Random::new(4094));
     let mut rng = Random::new(4093);
     let (w, h) = (8u32, 8u32);
     for f in formats() {

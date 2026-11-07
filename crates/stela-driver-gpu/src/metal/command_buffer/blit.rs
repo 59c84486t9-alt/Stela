@@ -11,7 +11,7 @@
 use super::{BufferRef, CommandBuffer, Encoder, MappedRange, Resolver};
 use crate::metal::{
     abi::BlitOption,
-    binding::{ResourceId, TexelArguments},
+    binding::{ReorderArguments, ResourceId, TexelArguments},
     error::{Error, Result, ensure, require},
     hazard::Use,
     pixel_format::{Description, Encoding, Kind},
@@ -99,6 +99,44 @@ impl Region {
             self.origin.map(|origin| origin as i32),
             self.size.map(|size| size as u32),
         ))
+    }
+}
+
+impl Region {
+    /// The region Metal copies of a format whose levels copy as runs of
+    /// their blocks ([`Codec::whole_levels`](crate::metal::pixel_format::Codec::whole_levels)):
+    /// as many blocks as `self` covers, from the level's first, whatever its
+    /// origin. Packed, they are the level's first block rows or the start of
+    /// its first; a run that ends within a later row is refused. Other
+    /// formats' regions are themselves. The caller's bytes are packed too.
+    pub fn block_run(&self, descriptor: &TextureDescriptor) -> Result<Self> {
+        let description = descriptor.pixel_format.describe();
+        if !matches!(description.encoding(), Encoding::Decoded(codec) if codec.whole_levels()) {
+            return Ok(*self);
+        }
+        self.resolve(descriptor, ImageAspects::COLOR)?;
+        let (width, height) = (
+            u64::from(description.block.width),
+            u64::from(description.block.height),
+        );
+        let [level_width, level_height, _] = descriptor.level_extent(self.level);
+        let columns = level_width.div_ceil(width);
+        let blocks = self.size[0].div_ceil(width) * self.size[1].div_ceil(height);
+        let size = if blocks < columns {
+            [blocks * width, height.min(level_height), self.size[2]]
+        } else {
+            require(
+                blocks.is_multiple_of(columns),
+                "PVRTC regions whose blocks end within a later row of their level",
+            )?;
+            let rows = blocks / columns;
+            [level_width, (rows * height).min(level_height), self.size[2]]
+        };
+        Ok(Self {
+            origin: [0; 3],
+            size,
+            ..*self
+        })
     }
 }
 
@@ -206,6 +244,16 @@ impl CommandBuffer {
     ) -> Result<()> {
         self.blit()?;
         if let Some(blocks) = dst.blocks {
+            if whole_levels(&dst) {
+                self.reorder_blocks(resolver, &src, &dst, blocks, &region, false)?;
+                let held = BufferLayout {
+                    buffer: blocks,
+                    offset: 0,
+                    bytes_per_row: 0,
+                    bytes_per_image: 0,
+                };
+                return self.decode_blocks(resolver, &dst, held, &region);
+            }
             let (copies, held) = buffer_blocks(&src, &dst, blocks, &region)?;
             self.copy_regions(src.buffer.buffer, blocks.buffer, copies);
             return self.decode_blocks(resolver, &dst, held, &region);
@@ -234,6 +282,9 @@ impl CommandBuffer {
     ) -> Result<()> {
         self.blit()?;
         if let Some(blocks) = src.blocks {
+            if whole_levels(&src) {
+                return self.reorder_blocks(resolver, &dst, &src, blocks, &region, true);
+            }
             let (copies, _) = buffer_blocks(&dst, &src, blocks, &region)?;
             let copies = copies.into_iter().map(BufferCopy::reversed).collect();
             self.copy_regions(blocks.buffer, dst.buffer.buffer, copies);
@@ -282,6 +333,16 @@ impl CommandBuffer {
         let (dst_subresource, dst_offset, _) = dst_region.resolve(dst.descriptor, aspects)?;
         if extent.contains(&0) {
             return Ok(());
+        }
+        if whole_levels(&src) {
+            let whole = |texture: &BlitTexture, region: &Region| {
+                region.origin == [0; 3]
+                    && region.size == texture.descriptor.level_extent(region.level)
+            };
+            require(
+                whole(&src, &src_region) && whole(&dst, &dst_region),
+                "copies between PVRTC textures of less than a whole level",
+            )?;
         }
         self.copy_held_blocks(&src, &src_region, &dst, &dst_region)?;
         self.recorder.access(TRANSFER);
@@ -535,6 +596,25 @@ impl CommandBuffer {
         let narrow = |value: u64| {
             u32::try_from(value).map_err(|_| Error::Unsupported("buffer copies of 4 GiB of texels"))
         };
+        // A texel of a format that decodes whole levels depends on blocks
+        // around its own.
+        let (held, region) = if whole_levels(texture) {
+            let level = Region {
+                origin: [0; 3],
+                size: texture.descriptor.level_extent(region.level),
+                ..*region
+            };
+            let (start, pitch) = held_start(texture, held.buffer, &level);
+            let held = BufferLayout {
+                offset: start - held.buffer.offset,
+                bytes_per_row: pitch,
+                ..held
+            };
+            (held, level)
+        } else {
+            (held, *region)
+        };
+        let region = &region;
         let [width, height, _] = region.size;
         let arguments = TexelArguments {
             buffer: held.buffer.address + held.offset,
@@ -560,6 +640,66 @@ impl CommandBuffer {
         ));
         self.recorder.push(Command::DecodeBlocks {
             kernel,
+            arguments: upload.address,
+            count: arguments.count,
+        });
+        Ok(())
+    }
+
+    /// Copies a buffer copy's region of blocks between the buffer's rows
+    /// and a PVRTC level's Morton order in the texture's `blocks`, into the
+    /// buffer when `to_rows`.
+    fn reorder_blocks(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        layout: &BufferLayout,
+        texture: &BlitTexture,
+        blocks: BufferRef,
+        region: &Region,
+        to_rows: bool,
+    ) -> Result<()> {
+        // Validated as Metal validates a copy of the format's blocks.
+        buffer_image_copy(layout, texture, region, BlitOption::EMPTY)?;
+        ensure(region.size[2] <= 1, "copies of 2D textures hold one image")?;
+        let block = texture.description().block;
+        let (width, height) = (u64::from(block.width), u64::from(block.height));
+        let [level_width, level_height, _] = texture.descriptor.level_extent(region.level);
+        let level = texture
+            .descriptor
+            .subresource_layout(region.level, region.slice)
+            .offset;
+        let narrow = |value: u64| {
+            u32::try_from(value).map_err(|_| Error::Unsupported("buffer copies of 4 GiB of texels"))
+        };
+        let (columns, rows) = (
+            region.size[0].div_ceil(width),
+            region.size[1].div_ceil(height),
+        );
+        let arguments = ReorderArguments {
+            rows: layout.buffer.address + layout.offset,
+            level: blocks.address + level,
+            count: narrow(columns * rows)?,
+            to_rows,
+            columns: narrow(level_width.div_ceil(width))?,
+            level_rows: narrow(level_height.div_ceil(height))?,
+            origin: [
+                narrow(region.origin[0] / width)?,
+                narrow(region.origin[1] / height)?,
+            ],
+            width: narrow(columns)?,
+            row_bytes: narrow(layout.bytes_per_row)?,
+        };
+        if arguments.count == 0 {
+            return Ok(());
+        }
+        let upload =
+            self.recorder
+                .upload(resolver, &arguments.encode(), ReorderArguments::ALIGNMENT)?;
+        self.recorder.access(Use::new(
+            PipelineStages::COMPUTE_SHADER,
+            Access::SHADER_READ.union(Access::SHADER_WRITE),
+        ));
+        self.recorder.push(Command::ReorderBlocks {
             arguments: upload.address,
             count: arguments.count,
         });
@@ -592,6 +732,16 @@ impl CommandBuffer {
         });
         Ok(())
     }
+}
+
+/// Whether a decoded format's texture decodes whole levels and orders its
+/// levels' blocks itself (`Codec::whole_levels`): PVRTC.
+fn whole_levels(texture: &BlitTexture) -> bool {
+    texture
+        .description()
+        .encoding()
+        .decoded()
+        .is_some_and(|codec| codec.whole_levels())
 }
 
 /// A decoded format's region's block rows and the bytes of each.

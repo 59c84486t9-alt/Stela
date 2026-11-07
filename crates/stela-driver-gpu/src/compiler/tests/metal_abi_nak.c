@@ -89,6 +89,8 @@ main(void)
    compiles(stela_metal_load_texels_kernel, "load texels");
    compiles(stela_metal_average_samples_kernel, "average samples");
    compiles(stela_metal_decode_etc_kernel, "decode etc");
+   compiles(stela_metal_decode_pvrtc_kernel, "decode pvrtc");
+   compiles(stela_metal_reorder_blocks_kernel, "reorder blocks");
    puts("metal abi kernels compile through NAK");
    glsl_type_singleton_decref();
    return 0;

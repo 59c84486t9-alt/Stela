@@ -320,13 +320,16 @@ fn pixel_format_capabilities_follow_the_driver_tables() {
         C::READ | C::FILTER | C::SPARSE | C::BLIT | C::HOST_TRANSFER
     );
     assert!(capabilities.format(P::Astc4x4Ldr).is_empty());
-    // ETC2 and EAC, which NVIDIA samples no blocks of, sample decoded.
+    // ETC2, EAC and PVRTC, which NVIDIA samples no blocks of, sample
+    // decoded.
     for format in [
         P::Etc2Rgb8,
         P::Etc2Rgb8A1Srgb,
         P::EacRgba8,
         P::EacR11Snorm,
         P::EacRg11Unorm,
+        P::PvrtcRgb2bpp,
+        P::PvrtcRgba4bppSrgb,
     ] {
         assert_eq!(capabilities.format(format), C::READ | C::FILTER | C::BLIT);
     }

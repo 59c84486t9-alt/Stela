@@ -5,8 +5,8 @@ use super::{
 };
 use crate::metal::{
     binding::{
-        AccumulateArguments, AverageArguments, PushConstants, ResolveArguments, SelectArguments,
-        TexelArguments,
+        AccumulateArguments, AverageArguments, PushConstants, ReorderArguments, ResolveArguments,
+        SelectArguments, TexelArguments,
     },
     command_buffer::Segment,
     error::{Error, Result},
@@ -688,6 +688,22 @@ impl Recorder<'_> {
                     arguments,
                     count,
                     TexelArguments::WORKGROUP_SIZE,
+                ),
+                &Command::DecodeBlocks {
+                    kernel: BlockKernel::Pvrtc,
+                    arguments,
+                    count,
+                } => self.internal(
+                    self.backend.decode_pvrtc,
+                    arguments,
+                    count,
+                    TexelArguments::WORKGROUP_SIZE,
+                ),
+                &Command::ReorderBlocks { arguments, count } => self.internal(
+                    self.backend.reorder_blocks,
+                    arguments,
+                    count,
+                    ReorderArguments::WORKGROUP_SIZE,
                 ),
                 &Command::AverageSamples { arguments, count } => self.internal(
                     self.backend.average_samples,

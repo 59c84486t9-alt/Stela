@@ -1823,3 +1823,234 @@ nir_shader *stela_metal_decode_etc_kernel(const nir_shader_compiler_options *opt
    nir_builder b = blocks(options, "stela_metal_decode_etc", etc_block_bytes, &k);
    return store_decoded(&b, &k, stela_metal_decode_etc(&b, k.words, k.x, k.y, k.codec));
 }
+
+/* The low 16 bits of x spread to the even bits. */
+static nir_def *spread(nir_builder *b, nir_def *x)
+{
+   x = nir_iand_imm(b, x, 0xffff);
+   x = nir_iand_imm(b, nir_ior(b, x, nir_ishl_imm(b, x, 8)), 0x00ff00ff);
+   x = nir_iand_imm(b, nir_ior(b, x, nir_ishl_imm(b, x, 4)), 0x0f0f0f0f);
+   x = nir_iand_imm(b, nir_ior(b, x, nir_ishl_imm(b, x, 2)), 0x33333333);
+   return nir_iand_imm(b, nir_ior(b, x, nir_ishl_imm(b, x, 1)), 0x55555555);
+}
+
+/* Block x, y's place in a PVRTC level of columns by rows blocks: the bits
+ * of both below the smaller dimension interleave, y's in the even bits,
+ * and the longer dimension's rest follows. */
+static nir_def *twiddled(nir_builder *b, nir_def *x, nir_def *y, nir_def *columns, nir_def *rows)
+{
+   nir_def *smaller = nir_umin(b, columns, rows);
+   nir_def *shift = nir_ufind_msb(b, smaller);
+   nir_def *low = nir_iadd_imm(b, smaller, -1);
+   nir_def *interleaved = nir_ior(b, spread(b, nir_iand(b, y, low)),
+                                  nir_ishl_imm(b, spread(b, nir_iand(b, x, low)), 1));
+   nir_def *rest = nir_ior(b, nir_ushr(b, x, shift), nir_ushr(b, y, shift));
+   return nir_ior(b, interleaved, nir_ishl(b, rest, nir_ishl_imm(b, shift, 1)));
+}
+
+/* A 4-bit channel widened to 5 by its top bit. */
+static nir_def *widen4(nir_builder *b, nir_def *v)
+{
+   return nir_ior(b, nir_ishl_imm(b, v, 1), nir_ushr_imm(b, v, 3));
+}
+
+/* A PVRTC block's first or second color, 5 bits a color channel and 4 of
+ * alpha: opaque colors hold 5, 5 and 4 or 5 bits and no alpha, translucent
+ * ones 3 bits of alpha and 4, 4 and 3 or 4 bits, each widened by its top
+ * bits. */
+static nir_def *pvrtc_color(nir_builder *b, nir_def *color, bool second)
+{
+   nir_def *v = second ? nir_ushr_imm(b, color, 16) : nir_iand_imm(b, color, 0xffff);
+   nir_def *b3 = field(b, v, 1, 3);
+   nir_def *opaque = nir_vec4(
+      b, field(b, v, 10, 5), field(b, v, 5, 5),
+      second ? field(b, v, 0, 5) : widen4(b, field(b, v, 1, 4)), nir_imm_int(b, 15));
+   nir_def *translucent = nir_vec4(
+      b, widen4(b, field(b, v, 8, 4)), widen4(b, field(b, v, 4, 4)),
+      second ? widen4(b, field(b, v, 0, 4))
+             : nir_ior(b, nir_ishl_imm(b, b3, 2), nir_ushr_imm(b, b3, 1)),
+      nir_ishl_imm(b, field(b, v, 12, 3), 1));
+   return nir_bcsel(b, nir_test_mask(b, v, 0x8000), opaque, translucent);
+}
+
+/* A 2-bit modulation value's weight in eighths of the second color. */
+static nir_def *pvrtc_weight(nir_builder *b, nir_def *value)
+{
+   static const unsigned weights[4] = {0, 3, 5, 8};
+   return lookup(b, weights, 4, value);
+}
+
+/* The weight a 2-bpp block stores for its texel x, y, which a 1-bit block
+ * holds for every texel and a 2-bit block for those whose x and y share a
+ * parity, and the block's way of weighing the others: 0 for none, 1 from
+ * four neighbors, 2 from horizontal and 3 from vertical ones. A 2-bit
+ * block's first value flags the one-axis modes, which then lend the bit
+ * at 20 to the center texel's value; both values copy their high bit. */
+static nir_def *pvrtc2_stored(nir_builder *b, nir_def *block, nir_def *x, nir_def *y,
+                              nir_def **mode)
+{
+   nir_def *bits = nir_channel(b, block, 0);
+   nir_def *two_bit = nir_test_mask(b, nir_channel(b, block, 1), 1);
+   nir_def *one_axis = nir_test_mask(b, bits, 1);
+   nir_def *vertical = nir_test_mask(b, bits, 1u << 20);
+   *mode = nir_bcsel(b, two_bit,
+                     nir_bcsel(b, one_axis, nir_bcsel(b, vertical, nir_imm_int(b, 3), nir_imm_int(b, 2)),
+                               nir_imm_int(b, 1)),
+                     nir_imm_int(b, 0));
+   nir_def *centered = nir_bcsel(
+      b, nir_test_mask(b, bits, 1u << 21), nir_ior_imm(b, bits, 1u << 20), nir_iand_imm(b, bits, ~(1u << 20)));
+   bits = nir_bcsel(b, one_axis, centered, bits);
+   bits = nir_bcsel(b, nir_test_mask(b, bits, 2), nir_ior_imm(b, bits, 1), nir_iand_imm(b, bits, ~1u));
+   nir_def *k = nir_iadd(b, nir_imul_imm(b, y, 4), nir_ushr_imm(b, x, 1));
+   nir_def *two = nir_iand_imm(b, nir_ushr(b, bits, nir_imul_imm(b, k, 2)), 3);
+   nir_def *one = nir_iand_imm(b, nir_ushr(b, nir_channel(b, block, 0), nir_iadd(b, nir_imul_imm(b, y, 8), x)), 1);
+   return pvrtc_weight(b, nir_bcsel(b, two_bit, two, nir_imul_imm(b, one, 3)));
+}
+
+/* The stored weight at x, y of the 16x8 texels four 2-bpp blocks cover,
+ * the first two above the others. */
+static nir_def *pvrtc2_at(nir_builder *b, nir_def *const quad[4], nir_def *x, nir_def *y,
+                          nir_def **mode)
+{
+   nir_def *right = nir_uge_imm(b, x, 8), *lower = nir_uge_imm(b, y, 4);
+   nir_def *block = nir_bcsel(b, lower, nir_bcsel(b, right, quad[3], quad[2]),
+                              nir_bcsel(b, right, quad[1], quad[0]));
+   nir_def *ignored;
+   return pvrtc2_stored(b, block, nir_iand_imm(b, x, 7), nir_iand_imm(b, y, 3),
+                        mode ? mode : &ignored);
+}
+
+nir_def *stela_metal_decode_pvrtc(nir_builder *b, nir_def *blocks, nir_def *columns,
+                                  nir_def *rows, nir_def *x, nir_def *y, nir_def *codec)
+{
+   nir_def *two_bpp = nir_ieq_imm(b, codec, STELA_METAL_BLOCKS_PVRTC_2BPP);
+   nir_def *width = nir_bcsel(b, two_bpp, nir_imm_int(b, 8), nir_imm_int(b, 4));
+   nir_def *width_shift = nir_bcsel(b, two_bpp, nir_imm_int(b, 3), nir_imm_int(b, 2));
+   /* The texel lies between the centers of four blocks, wrapping: the
+    * first at its upper left, at lx, ly from its center. */
+   nir_def *sx = nir_isub(b, nir_iadd(b, x, nir_imul(b, columns, width)), nir_ushr_imm(b, width, 1));
+   nir_def *sy = nir_iadd(b, y, nir_iadd_imm(b, nir_imul_imm(b, rows, 4), -2));
+   nir_def *px = nir_iand(b, nir_ushr(b, sx, width_shift), nir_iadd_imm(b, columns, -1));
+   nir_def *py = nir_iand(b, nir_ushr_imm(b, sy, 2), nir_iadd_imm(b, rows, -1));
+   nir_def *qx = nir_iand(b, nir_iadd_imm(b, px, 1), nir_iadd_imm(b, columns, -1));
+   nir_def *qy = nir_iand(b, nir_iadd_imm(b, py, 1), nir_iadd_imm(b, rows, -1));
+   nir_def *lx = nir_iand(b, sx, nir_iadd_imm(b, width, -1));
+   nir_def *ly = nir_iand_imm(b, sy, 3);
+   nir_def *quad[4];
+   nir_def *at[4][2] = {{px, py}, {qx, py}, {px, qy}, {qx, qy}};
+   for (unsigned i = 0; i < 4; i++) {
+      nir_def *index = twiddled(b, at[i][0], at[i][1], columns, rows);
+      nir_def *address = nir_iadd(b, blocks, nir_u2u64(b, nir_imul_imm(b, index, 8)));
+      quad[i] = nir_load_global(b, 2, 32, address, .align_mul = 8);
+   }
+   /* The colors at the texel, weighed by its distance to each center:
+    * sixteenths at 4 bpp, thirty-seconds at 2, widened to 8 bits. */
+   nir_def *rx = nir_isub(b, width, lx), *ry = nir_isub_imm(b, 4, ly);
+   nir_def *weights[4] = {nir_imul(b, rx, ry), nir_imul(b, lx, ry), nir_imul(b, rx, ly),
+                          nir_imul(b, lx, ly)};
+   nir_def *colors[2];
+   for (unsigned c = 0; c < 2; c++) {
+      nir_def *sum = nir_imm_ivec4(b, 0, 0, 0, 0);
+      for (unsigned i = 0; i < 4; i++)
+         sum = nir_iadd(b, sum, nir_imul(b, pvrtc_color(b, nir_channel(b, quad[i], 1), c), weights[i]));
+      nir_def *rgb = nir_trim_vector(b, sum, 3), *a = nir_channel(b, sum, 3);
+      nir_def *four_rgb = nir_iadd(b, nir_ushr_imm(b, rgb, 1), nir_ushr_imm(b, rgb, 6));
+      nir_def *two_rgb = nir_iadd(b, nir_ushr_imm(b, rgb, 2), nir_ushr_imm(b, rgb, 7));
+      nir_def *four_a = nir_iadd(b, a, nir_ushr_imm(b, a, 4));
+      nir_def *two_a = nir_iadd(b, nir_ushr_imm(b, a, 1), nir_ushr_imm(b, a, 5));
+      nir_def *widened = nir_bcsel(b, two_bpp, two_rgb, four_rgb);
+      colors[c] = nir_vec4(b, nir_channel(b, widened, 0), nir_channel(b, widened, 1),
+                           nir_channel(b, widened, 2), nir_bcsel(b, two_bpp, two_a, four_a));
+   }
+
+   /* The texel's own block weighs the second color: at 4 bpp by its
+    * 2-bit value, which a punch-through block reads as 0, 4, 4 with no
+    * alpha, or 8. */
+   nir_def *qlx = nir_iadd(b, lx, nir_ushr_imm(b, width, 1)), *qly = nir_iadd_imm(b, ly, 2);
+   nir_def *own4 = nir_bcsel(b, nir_uge_imm(b, qly, 4),
+                             nir_bcsel(b, nir_uge_imm(b, qlx, 4), quad[3], quad[2]),
+                             nir_bcsel(b, nir_uge_imm(b, qlx, 4), quad[1], quad[0]));
+   nir_def *index4 = nir_iadd(b, nir_imul_imm(b, nir_iand_imm(b, qly, 3), 4), nir_iand_imm(b, qlx, 3));
+   nir_def *value4 = nir_iand_imm(b, nir_ushr(b, nir_channel(b, own4, 0), nir_imul_imm(b, index4, 2)), 3);
+   nir_def *punch_mode = nir_test_mask(b, nir_channel(b, own4, 1), 1);
+   static const unsigned punched[4] = {0, 4, 4, 8};
+   nir_def *weight4 = nir_bcsel(b, punch_mode, lookup(b, punched, 4, value4), pvrtc_weight(b, value4));
+   nir_def *punch = nir_iand(b, punch_mode, nir_ieq_imm(b, value4, 2));
+
+   /* At 2 bpp a texel a 2-bit block stores no value for averages its
+    * neighbors', rounding to nearest. */
+   nir_def *mode;
+   nir_def *stored = pvrtc2_at(b, quad, qlx, qly, &mode);
+   nir_def *left = pvrtc2_at(b, quad, nir_iadd_imm(b, qlx, -1), qly, NULL);
+   nir_def *right = pvrtc2_at(b, quad, nir_iadd_imm(b, qlx, 1), qly, NULL);
+   nir_def *up = pvrtc2_at(b, quad, qlx, nir_iadd_imm(b, qly, -1), NULL);
+   nir_def *down = pvrtc2_at(b, quad, qlx, nir_iadd_imm(b, qly, 1), NULL);
+   nir_def *both = nir_ushr_imm(b, nir_iadd_imm(b, nir_iadd(b, nir_iadd(b, left, right), nir_iadd(b, up, down)), 2), 2);
+   nir_def *across = nir_ushr_imm(b, nir_iadd_imm(b, nir_iadd(b, left, right), 1), 1);
+   nir_def *along = nir_ushr_imm(b, nir_iadd_imm(b, nir_iadd(b, up, down), 1), 1);
+   nir_def *odd = nir_test_mask(b, nir_ixor(b, qlx, qly), 1);
+   nir_def *weight2 = nir_bcsel(
+      b, nir_ior(b, nir_ieq_imm(b, mode, 0), nir_inot(b, odd)), stored,
+      nir_bcsel(b, nir_ieq_imm(b, mode, 1), both, nir_bcsel(b, nir_ieq_imm(b, mode, 2), across, along)));
+
+   nir_def *weight = nir_bcsel(b, two_bpp, weight2, weight4);
+   nir_def *texel = nir_ushr_imm(
+      b, nir_iadd(b, nir_imul(b, colors[0], nir_isub_imm(b, 8, weight)), nir_imul(b, colors[1], weight)), 3);
+   nir_def *alpha = nir_bcsel(b, nir_iand(b, punch, nir_inot(b, two_bpp)), nir_imm_int(b, 0),
+                              nir_channel(b, texel, 3));
+   return nir_ior(b, nir_ior(b, nir_channel(b, texel, 0), nir_ishl_imm(b, nir_channel(b, texel, 1), 8)),
+                  nir_ior(b, nir_ishl_imm(b, nir_channel(b, texel, 2), 16), nir_ishl_imm(b, alpha, 24)));
+}
+
+nir_shader *stela_metal_decode_pvrtc_kernel(const nir_shader_compiler_options *options)
+{
+   nir_def *arguments, *thread;
+   nir_builder b = kernel(options, "stela_metal_decode_pvrtc", STELA_METAL_TEXELS_COUNT, &arguments,
+                          &thread);
+   nir_def *width = load(&b, arguments, STELA_METAL_TEXELS_WIDTH, 32);
+   nir_def *height = load(&b, arguments, STELA_METAL_TEXELS_HEIGHT, 32);
+   nir_def *y = nir_udiv(&b, thread, width);
+   nir_def *x = nir_isub(&b, thread, nir_imul(&b, y, width));
+   nir_def *codec = nir_iand_imm(&b, load(&b, arguments, STELA_METAL_TEXELS_ENCODING, 32), 0xff);
+   nir_def *block_width = nir_bcsel(&b, nir_ieq_imm(&b, codec, STELA_METAL_BLOCKS_PVRTC_2BPP),
+                                    nir_imm_int(&b, 8), nir_imm_int(&b, 4));
+   nir_def *columns = nir_udiv(&b, nir_iadd(&b, width, nir_iadd_imm(&b, block_width, -1)), block_width);
+   nir_def *rows = nir_ushr_imm(&b, nir_iadd_imm(&b, height, 3), 2);
+   nir_def *raw = stela_metal_decode_pvrtc(&b, load(&b, arguments, STELA_METAL_TEXELS_BUFFER, 64),
+                                           columns, rows, x, y, codec);
+   const struct glsl_type *type = glsl_image_type(GLSL_SAMPLER_DIM_2D, true, GLSL_TYPE_UINT);
+   nir_deref_instr *image = stela_metal_bind_texture_id(
+      &b, load(&b, arguments, STELA_METAL_TEXELS_IMAGE, 64), type, false, NULL, NULL);
+   nir_def *coord = nir_vec4(&b, x, y, load(&b, arguments, STELA_METAL_TEXELS_ORIGIN + 8, 32),
+                             nir_imm_int(&b, 0));
+   nir_image_deref_store(&b, &image->def, coord, nir_undef(&b, 1, 32),
+                         nir_vec4(&b, raw, nir_imm_int(&b, 0), nir_imm_int(&b, 0), nir_imm_int(&b, 1)),
+                         nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = true,
+                         .format = PIPE_FORMAT_NONE, .src_type = nir_type_uint32);
+   return finish(&b);
+}
+
+nir_shader *stela_metal_reorder_blocks_kernel(const nir_shader_compiler_options *options)
+{
+   nir_def *arguments, *thread;
+   nir_builder b = kernel(options, "stela_metal_reorder_blocks", STELA_METAL_REORDER_COUNT,
+                          &arguments, &thread);
+   nir_def *width = load(&b, arguments, STELA_METAL_REORDER_WIDTH, 32);
+   nir_def *row = nir_udiv(&b, thread, width);
+   nir_def *column = nir_isub(&b, thread, nir_imul(&b, row, width));
+   nir_def *rows_address = nir_iadd(
+      &b, load(&b, arguments, STELA_METAL_REORDER_ROWS, 64),
+      nir_u2u64(&b, nir_iadd(&b, nir_imul(&b, row, load(&b, arguments, STELA_METAL_REORDER_ROW_BYTES, 32)),
+                             nir_imul_imm(&b, column, 8))));
+   nir_def *x = nir_iadd(&b, column, load(&b, arguments, STELA_METAL_REORDER_ORIGIN, 32));
+   nir_def *y = nir_iadd(&b, row, load(&b, arguments, STELA_METAL_REORDER_ORIGIN + 4, 32));
+   nir_def *index = twiddled(&b, x, y, load(&b, arguments, STELA_METAL_REORDER_COLUMNS, 32),
+                             load(&b, arguments, STELA_METAL_REORDER_LEVEL_ROWS, 32));
+   nir_def *level_address = nir_iadd(&b, load(&b, arguments, STELA_METAL_REORDER_LEVEL, 64),
+                                     nir_u2u64(&b, nir_imul_imm(&b, index, 8)));
+   nir_def *to_rows = nir_ine_imm(&b, load(&b, arguments, STELA_METAL_REORDER_TO_ROWS, 32), 0);
+   nir_def *from = nir_bcsel(&b, to_rows, level_address, rows_address);
+   nir_def *to = nir_bcsel(&b, to_rows, rows_address, level_address);
+   nir_store_global(&b, nir_load_global(&b, 2, 32, from, .align_mul = 8), to, .align_mul = 8);
+   return finish(&b);
+}

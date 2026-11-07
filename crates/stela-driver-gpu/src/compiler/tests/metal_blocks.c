@@ -9,6 +9,7 @@
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <string.h>
 #ifdef NDEBUG
 #error "These tests require active assertions"
 #endif
@@ -296,10 +297,233 @@ static void etc_blocks_decode_as_specified(void)
    ralloc_free(d.shader);
 }
 
+/* PVRTC1, after Imagination's decompressor, which Apple's GPUs match bit
+ * for bit: a level's blocks in Morton order, each texel blending the four
+ * nearest blocks' colors and weighed by its modulation. */
+static unsigned twiddle(unsigned columns, unsigned rows, unsigned x, unsigned y)
+{
+   unsigned smaller = columns < rows ? columns : rows, out = 0, shift = 0;
+   for (unsigned bit = 1; bit < smaller; bit <<= 1, shift++)
+      out |= (y & bit ? 1u : 0u) << (2 * shift) | (x & bit ? 1u : 0u) << (2 * shift + 1);
+   return out | ((columns > rows ? x : y) >> shift) << (2 * shift);
+}
+
+static void pvrtc_colors(uint64_t block, int a[4], int b[4])
+{
+   uint32_t c = (uint32_t)(block >> 32), lo = c & 0xffff, hi = c >> 16;
+#define W4(v) ((v) << 1 | (v) >> 3)
+   if (lo & 0x8000) {
+      unsigned blue = lo >> 1 & 15;
+      a[0] = lo >> 10 & 31, a[1] = lo >> 5 & 31, a[2] = W4(blue), a[3] = 15;
+   } else {
+      unsigned blue = lo >> 1 & 7;
+      a[0] = W4(lo >> 8 & 15), a[1] = W4(lo >> 4 & 15), a[2] = blue << 2 | blue >> 1;
+      a[3] = (lo >> 12 & 7) << 1;
+   }
+   if (hi & 0x8000) {
+      b[0] = hi >> 10 & 31, b[1] = hi >> 5 & 31, b[2] = hi & 31, b[3] = 15;
+   } else {
+      b[0] = W4(hi >> 8 & 15), b[1] = W4(hi >> 4 & 15), b[2] = W4(hi & 15);
+      b[3] = (hi >> 12 & 7) << 1;
+   }
+#undef W4
+}
+
+static const int pvrtc_weights[4] = {0, 3, 5, 8};
+
+/* A 2-bpp block's value at x, y and its interpolation mode. */
+static int pvrtc2_value(uint64_t block, unsigned x, unsigned y, int *mode)
+{
+   uint32_t bits = (uint32_t)block;
+   if (!(block >> 32 & 1)) {
+      *mode = 0;
+      return bits >> (y * 8 + x) & 1 ? 8 : 0;
+   }
+   *mode = 1;
+   if (bits & 1) {
+      *mode = bits & 1u << 20 ? 3 : 2;
+      bits = bits & 1u << 21 ? bits | 1u << 20 : bits & ~(1u << 20);
+   }
+   bits = bits & 2 ? bits | 1 : bits & ~1u;
+   return pvrtc_weights[bits >> (2 * (y * 4 + x / 2)) & 3];
+}
+
+static uint32_t reference_pvrtc(const uint8_t *level, unsigned columns, unsigned rows, unsigned x,
+                                unsigned y, bool two_bpp)
+{
+   unsigned w = two_bpp ? 8 : 4;
+   int px = (int)((x + columns * w - w / 2) / w % columns);
+   int py = (int)((y + rows * 4 - 2) / 4 % rows);
+   unsigned lx = (x + columns * w - w / 2) % w, ly = (y + rows * 4 - 2) % 4;
+   uint64_t quad[4];
+   unsigned at[4][2] = {{px, py}, {(px + 1) % columns, py}, {px, (py + 1) % rows},
+                        {(px + 1) % columns, (py + 1) % rows}};
+   for (unsigned i = 0; i < 4; i++)
+      memcpy(&quad[i], level + 8 * twiddle(columns, rows, at[i][0], at[i][1]), 8);
+   int weights[4] = {(int)((w - lx) * (4 - ly)), (int)(lx * (4 - ly)), (int)((w - lx) * ly),
+                     (int)(lx * ly)};
+   int sum_a[4] = {0}, sum_b[4] = {0};
+   for (unsigned i = 0; i < 4; i++) {
+      int a[4], b[4];
+      pvrtc_colors(quad[i], a, b);
+      for (unsigned c = 0; c < 4; c++)
+         sum_a[c] += weights[i] * a[c], sum_b[c] += weights[i] * b[c];
+   }
+   unsigned qx = lx + w / 2, qy = ly + 2;
+   int weight;
+   bool punch = false;
+   if (!two_bpp) {
+      uint64_t own = quad[(qy >= 4) * 2 + (qx >= 4)];
+      unsigned value = (uint32_t)own >> (2 * ((qy % 4) * 4 + qx % 4)) & 3;
+      if (own >> 32 & 1) {
+         static const int punched[4] = {0, 4, 4, 8};
+         weight = punched[value];
+         punch = value == 2;
+      } else {
+         weight = pvrtc_weights[value];
+      }
+   } else {
+#define AT(X, Y, MODE) \
+      pvrtc2_value(quad[((Y) >= 4) * 2 + ((X) >= 8)], (X) % 8, (Y) % 4, MODE)
+      int mode, unused;
+      weight = AT(qx, qy, &mode);
+      if (mode && (qx ^ qy) & 1) {
+         int l = AT(qx - 1, qy, &unused), r = AT(qx + 1, qy, &unused);
+         int u = AT(qx, qy - 1, &unused), d = AT(qx, qy + 1, &unused);
+         weight = mode == 1 ? (l + r + u + d + 2) / 4 : mode == 2 ? (l + r + 1) / 2 : (u + d + 1) / 2;
+      }
+#undef AT
+   }
+   uint32_t texel = 0;
+   for (unsigned c = 0; c < 4; c++) {
+      int ua, ub;
+      if (c < 3 && !two_bpp)
+         ua = (sum_a[c] >> 1) + (sum_a[c] >> 6), ub = (sum_b[c] >> 1) + (sum_b[c] >> 6);
+      else if (c < 3)
+         ua = (sum_a[c] >> 2) + (sum_a[c] >> 7), ub = (sum_b[c] >> 2) + (sum_b[c] >> 7);
+      else if (!two_bpp)
+         ua = sum_a[c] + (sum_a[c] >> 4), ub = sum_b[c] + (sum_b[c] >> 4);
+      else
+         ua = (sum_a[c] >> 1) + (sum_a[c] >> 5), ub = (sum_b[c] >> 1) + (sum_b[c] >> 5);
+      int value = (ua * (8 - weight) + ub * weight) / 8;
+      if (c == 3 && punch)
+         value = 0;
+      texel |= (uint32_t)value << (8 * c);
+   }
+   return texel;
+}
+
+/* A decoder of a level in memory: its blocks at BASE + 64, then columns,
+ * rows, x, y and the codec at BASE; its raw texel is stored at BASE + 32. */
+static nir_def *pvrtc_inputs(nir_builder *b, nir_def *words, nir_def *x, nir_def *y,
+                             nir_def *codec)
+{
+   return stela_metal_decode_pvrtc(b, nir_imm_int64(b, BASE + 64), nir_channel(b, words, 0),
+                                   nir_channel(b, words, 1), x, y, codec);
+}
+
+static void pvrtc_blocks_decode_as_apple_does(void)
+{
+   static uint8_t memory[64 + 8 * 64];
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL, "pvrtc");
+   nir_def *base = nir_imm_int64(&b, BASE);
+   nir_def *words = nir_load_global(&b, 4, 32, base, .align_mul = 16);
+   nir_def *inputs = nir_load_global(&b, 3, 32, nir_iadd_imm(&b, base, 16), .align_mul = 4);
+   nir_def *raw = pvrtc_inputs(&b, words, nir_channel(&b, inputs, 0), nir_channel(&b, inputs, 1),
+                               nir_channel(&b, inputs, 2));
+   nir_store_global(&b, raw, nir_iadd_imm(&b, base, 32), .align_mul = 4);
+   nir_index_ssa_defs(nir_shader_get_entrypoint(b.shader));
+   /* Levels of one block to eight by eight, and 2-bpp levels twice as tall
+    * as wide in blocks. */
+   static const unsigned shapes[][3] = {{1, 1, 0}, {2, 2, 0}, {4, 4, 0}, {8, 8, 0},
+                                        {1, 1, 1}, {1, 2, 1}, {2, 4, 1}, {4, 8, 1}};
+   for (unsigned s = 0; s < ARRAY_SIZE(shapes); s++) {
+      unsigned columns = shapes[s][0], rows = shapes[s][1];
+      bool two_bpp = shapes[s][2];
+      unsigned codec = two_bpp ? STELA_METAL_BLOCKS_PVRTC_2BPP : STELA_METAL_BLOCKS_PVRTC_4BPP;
+      for (unsigned rep = 0; rep < 3; rep++) {
+         for (unsigned i = 0; i < 8 * columns * rows; i += 4)
+            put32(memory + 64 + i, random32());
+         unsigned width = columns * (two_bpp ? 8 : 4), height = rows * 4;
+         for (unsigned y = 0; y < height; y++) {
+            for (unsigned x = 0; x < width; x++) {
+               uint32_t inputs[8] = {columns, rows, 0, 0, x, y, codec, 0};
+               memcpy(memory, inputs, sizeof(inputs));
+               const struct air_effect_environment environment = {
+                  .base = BASE, .bytes = memory, .size = 64 + 8 * columns * rows,
+               };
+               struct air_effect_store trace[4];
+               struct air_effect_run result =
+                  air_effect_execute_in(b.shader, 100000, trace, ARRAY_SIZE(trace), &environment);
+               if (result.status != AIR_EFFECT_COMPLETE)
+                  fprintf(stderr, "pvrtc: %s\n", result.detail);
+               assert(result.status == AIR_EFFECT_COMPLETE);
+               uint32_t decoded = get32(memory + 32);
+               uint32_t expected = reference_pvrtc(memory + 64, columns, rows, x, y, two_bpp);
+               if (decoded != expected)
+                  fprintf(stderr, "pvrtc %ux%u%s (%u, %u): %08x, expected %08x\n", columns, rows,
+                          two_bpp ? " 2bpp" : "", x, y, decoded, expected);
+               assert(decoded == expected);
+            }
+         }
+      }
+   }
+   ralloc_free(b.shader);
+}
+
+/* The reorder kernel moves a region's rows of blocks to and from a level's
+ * Morton order. */
+static void reorder_kernel_twiddles_regions(void)
+{
+   nir_shader *shader = stela_metal_reorder_blocks_kernel(NULL);
+   nir_index_ssa_defs(nir_shader_get_entrypoint(shader));
+   /* A level of 4x8 blocks at 0, a buffer of rows 40 bytes apart at 1024,
+    * and the arguments at 2048: a 3x2 region from block (1, 5). */
+   static uint8_t memory[4096];
+   const uint64_t level = BASE, rows = BASE + 1024, arguments = BASE + 2048;
+   for (unsigned to_rows = 0; to_rows < 2; to_rows++) {
+      memset(memory, 0, sizeof(memory));
+      for (unsigned i = 0; i < 1024; i += 4)
+         put32(memory + i + (to_rows ? 0 : 1024), random32());
+      uint8_t before[2048];
+      memcpy(before, memory, sizeof(before));
+      uint8_t *a = memory + 2048;
+      memcpy(a + STELA_METAL_REORDER_ROWS, &rows, 8);
+      memcpy(a + STELA_METAL_REORDER_LEVEL, &level, 8);
+      const uint32_t words[] = {6, to_rows, 4, 8, 1, 5, 3, 40};
+      memcpy(a + STELA_METAL_REORDER_COUNT, words, sizeof(words));
+      uint8_t push[STELA_METAL_PUSH_BYTES] = {0};
+      memcpy(push + STELA_METAL_PUSH_ARGUMENTS, &arguments, 8);
+      for (unsigned thread = 0; thread < 7; thread++) {
+         const struct air_effect_environment environment = {
+            .base = BASE, .bytes = memory, .size = sizeof(memory), .push = push,
+            .push_size = sizeof(push), .local_index = thread,
+         };
+         struct air_effect_store trace[2];
+         struct air_effect_run run =
+            air_effect_execute_in(shader, 10000, trace, ARRAY_SIZE(trace), &environment);
+         if (run.status != AIR_EFFECT_COMPLETE)
+            fprintf(stderr, "reorder: %s\n", run.detail);
+         assert(run.status == AIR_EFFECT_COMPLETE && run.stores == (thread < 6));
+      }
+      for (unsigned y = 0; y < 2; y++) {
+         for (unsigned x = 0; x < 3; x++) {
+            unsigned in_level = 8 * twiddle(4, 8, 1 + x, 5 + y), in_rows = 1024 + 40 * y + 8 * x;
+            const uint8_t *moved = to_rows ? memory + in_rows : memory + in_level;
+            const uint8_t *source = to_rows ? before + in_level : before + in_rows;
+            assert(memcmp(moved, source, 8) == 0);
+         }
+      }
+   }
+   ralloc_free(shader);
+}
+
 int main(void)
 {
    glsl_type_singleton_init_or_ref();
    etc_blocks_decode_as_specified();
+   pvrtc_blocks_decode_as_apple_does();
+   reorder_kernel_twiddles_regions();
    glsl_type_singleton_decref();
    puts("metal blocks: ok");
    return 0;

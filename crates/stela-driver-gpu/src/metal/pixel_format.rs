@@ -324,6 +324,8 @@ pub enum Codec {
     EacR11Snorm,
     EacRg11,
     EacRg11Snorm,
+    Pvrtc4,
+    Pvrtc2,
 }
 
 /// The decode kernel that expands a codec's blocks.
@@ -331,11 +333,23 @@ pub enum Codec {
 pub enum BlockKernel {
     /// `stela_metal_decode_etc_kernel`.
     Etc,
+    /// `stela_metal_decode_pvrtc_kernel`.
+    Pvrtc,
 }
 
 impl Codec {
     pub const fn kernel(self) -> BlockKernel {
-        BlockKernel::Etc
+        match self {
+            Self::Pvrtc4 | Self::Pvrtc2 => BlockKernel::Pvrtc,
+            _ => BlockKernel::Etc,
+        }
+    }
+
+    /// Whether each texel depends on blocks around its own, wrapping, so
+    /// that only whole levels decode: PVRTC's, whose levels Metal also
+    /// copies as runs of blocks in their own order.
+    pub const fn whole_levels(self) -> bool {
+        matches!(self, Self::Pvrtc4 | Self::Pvrtc2)
     }
 
     /// Bytes of the decoded texel: 8-bit RGBA, or EAC's 16-bit channels.
@@ -350,6 +364,14 @@ impl Codec {
 impl Encoding {
     pub const fn is_exact(self) -> bool {
         matches!(self, Self::Exact)
+    }
+
+    /// The codec of a decoded encoding.
+    pub const fn decoded(self) -> Option<Codec> {
+        match self {
+            Self::Decoded(codec) => Some(codec),
+            _ => None,
+        }
     }
 
     /// The texel kernels' `enum stela_metal_texel_encoding`; zero for the
@@ -736,16 +758,23 @@ const fn etc(
 }
 
 /// PVRTC1 blocks are 4x4 texels at 4 bpp and 8x4 at 2 bpp; Metal's RGB
-/// variants ignore the encoded alpha.
-const fn pvrtc(
-    format: PixelFormat,
-    srgb: bool,
-    two_bpp: bool,
-    alpha: bool,
-    realization: VkFormat,
-) -> Description {
+/// variants ignore the encoded alpha. Devices without PVRTC sampling hold
+/// the blocks decoded to 8-bit RGBA ([`Encoding::Decoded`]).
+const fn pvrtc(format: PixelFormat, srgb: bool, two_bpp: bool, alpha: bool) -> Description {
     let width = if two_bpp { 8 } else { 4 };
     let swizzle = if alpha { IDENTITY } else { OPAQUE };
+    let (codec, realization) = (
+        if two_bpp {
+            Codec::Pvrtc2
+        } else {
+            Codec::Pvrtc4
+        },
+        if srgb {
+            V::R8G8B8A8Srgb
+        } else {
+            V::R8G8B8A8Unorm
+        },
+    );
     compressed(
         format,
         Compression::Pvrtc,
@@ -756,7 +785,7 @@ const fn pvrtc(
         8,
         realization,
         swizzle,
-        Encoding::Exact,
+        Encoding::Decoded(codec),
     )
 }
 
@@ -963,62 +992,14 @@ static DESCRIPTIONS: &[Description] = &[
     bc(P::Bc6hRgbUfloat, Float, false, 16, V::Bc6hUfloatBlock),
     bc(P::Bc7RgbaUnorm, Unorm, false, 16, V::Bc7UnormBlock),
     bc(P::Bc7RgbaUnormSrgb, Unorm, true, 16, V::Bc7SrgbBlock),
-    pvrtc(
-        P::PvrtcRgb2bpp,
-        false,
-        true,
-        false,
-        V::Pvrtc12bppUnormBlockImg,
-    ),
-    pvrtc(
-        P::PvrtcRgb2bppSrgb,
-        true,
-        true,
-        false,
-        V::Pvrtc12bppSrgbBlockImg,
-    ),
-    pvrtc(
-        P::PvrtcRgb4bpp,
-        false,
-        false,
-        false,
-        V::Pvrtc14bppUnormBlockImg,
-    ),
-    pvrtc(
-        P::PvrtcRgb4bppSrgb,
-        true,
-        false,
-        false,
-        V::Pvrtc14bppSrgbBlockImg,
-    ),
-    pvrtc(
-        P::PvrtcRgba2bpp,
-        false,
-        true,
-        true,
-        V::Pvrtc12bppUnormBlockImg,
-    ),
-    pvrtc(
-        P::PvrtcRgba2bppSrgb,
-        true,
-        true,
-        true,
-        V::Pvrtc12bppSrgbBlockImg,
-    ),
-    pvrtc(
-        P::PvrtcRgba4bpp,
-        false,
-        false,
-        true,
-        V::Pvrtc14bppUnormBlockImg,
-    ),
-    pvrtc(
-        P::PvrtcRgba4bppSrgb,
-        true,
-        false,
-        true,
-        V::Pvrtc14bppSrgbBlockImg,
-    ),
+    pvrtc(P::PvrtcRgb2bpp, false, true, false),
+    pvrtc(P::PvrtcRgb2bppSrgb, true, true, false),
+    pvrtc(P::PvrtcRgb4bpp, false, false, false),
+    pvrtc(P::PvrtcRgb4bppSrgb, true, false, false),
+    pvrtc(P::PvrtcRgba2bpp, false, true, true),
+    pvrtc(P::PvrtcRgba2bppSrgb, true, true, true),
+    pvrtc(P::PvrtcRgba4bpp, false, false, true),
+    pvrtc(P::PvrtcRgba4bppSrgb, true, false, true),
     etc(P::EacR11Unorm, Unorm, false, 8, Codec::EacR11, V::R16Unorm),
     etc(
         P::EacR11Snorm,

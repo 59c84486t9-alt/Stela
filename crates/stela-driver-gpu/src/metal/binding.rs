@@ -501,6 +501,61 @@ impl AverageArguments {
     }
 }
 
+/// What the backend's reorder blocks kernel reads at the push constants'
+/// `arguments`: thread `n` below `count` copies block `n` of a region,
+/// counted along its rows of `width` blocks, between `rows`, a buffer's
+/// rows `row_bytes` apart from the region's first block, and `level`, a
+/// PVRTC level of `columns` by `level_rows` blocks in their Morton order,
+/// into the buffer when `to_rows`. `origin` is the region's first column
+/// and row of blocks.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReorderArguments {
+    pub rows: u64,
+    pub level: u64,
+    pub count: u32,
+    pub to_rows: bool,
+    pub columns: u32,
+    pub level_rows: u32,
+    pub origin: [u32; 2],
+    pub width: u32,
+    pub row_bytes: u32,
+}
+
+impl ReorderArguments {
+    pub const ROWS_OFFSET: u32 = 0;
+    pub const LEVEL_OFFSET: u32 = 8;
+    pub const COUNT_OFFSET: u32 = 16;
+    pub const TO_ROWS_OFFSET: u32 = 20;
+    pub const COLUMNS_OFFSET: u32 = 24;
+    pub const LEVEL_ROWS_OFFSET: u32 = 28;
+    pub const ORIGIN_OFFSET: u32 = 32;
+    pub const WIDTH_OFFSET: u32 = 40;
+    pub const ROW_BYTES_OFFSET: u32 = 44;
+    pub const BYTES: u32 = 48;
+    pub const ALIGNMENT: u64 = 16;
+    /// Threads per workgroup of the kernel.
+    pub const WORKGROUP_SIZE: u32 = 64;
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut bytes = alloc::vec![0; Self::BYTES as usize];
+        let mut writer = Writer {
+            bytes: &mut bytes,
+            offset: 0,
+        };
+        writer.u64(self.rows);
+        writer.u64(self.level);
+        writer.u32(self.count);
+        writer.u32(u32::from(self.to_rows));
+        writer.u32(self.columns);
+        writer.u32(self.level_rows);
+        writer.u32(self.origin[0]);
+        writer.u32(self.origin[1]);
+        writer.u32(self.width);
+        writer.u32(self.row_bytes);
+        bytes
+    }
+}
+
 /// What the backend's internal select kernel reads at the push constants'
 /// `arguments`. Thread `n` below `count` writes the 32-bit flag
 /// `flags[n]`: 1 when the `MTLIndirectCommandBufferExecutionRange` at
@@ -1062,6 +1117,31 @@ mod tests {
                 AverageArguments::SAMPLES_OFFSET,
             ),
             ("STELA_METAL_AVERAGE_BYTES", AverageArguments::BYTES),
+            ("STELA_METAL_REORDER_ROWS", ReorderArguments::ROWS_OFFSET),
+            ("STELA_METAL_REORDER_LEVEL", ReorderArguments::LEVEL_OFFSET),
+            ("STELA_METAL_REORDER_COUNT", ReorderArguments::COUNT_OFFSET),
+            (
+                "STELA_METAL_REORDER_TO_ROWS",
+                ReorderArguments::TO_ROWS_OFFSET,
+            ),
+            (
+                "STELA_METAL_REORDER_COLUMNS",
+                ReorderArguments::COLUMNS_OFFSET,
+            ),
+            (
+                "STELA_METAL_REORDER_LEVEL_ROWS",
+                ReorderArguments::LEVEL_ROWS_OFFSET,
+            ),
+            (
+                "STELA_METAL_REORDER_ORIGIN",
+                ReorderArguments::ORIGIN_OFFSET,
+            ),
+            ("STELA_METAL_REORDER_WIDTH", ReorderArguments::WIDTH_OFFSET),
+            (
+                "STELA_METAL_REORDER_ROW_BYTES",
+                ReorderArguments::ROW_BYTES_OFFSET,
+            ),
+            ("STELA_METAL_REORDER_BYTES", ReorderArguments::BYTES),
             (
                 "STELA_METAL_INDIRECT_HEADER_BYTES",
                 RecordLayout::HEADER_BYTES,
@@ -1310,6 +1390,8 @@ mod tests {
             ("STELA_METAL_BLOCKS_EAC_R11_SNORM", Codec::EacR11Snorm),
             ("STELA_METAL_BLOCKS_EAC_RG11", Codec::EacRg11),
             ("STELA_METAL_BLOCKS_EAC_RG11_SNORM", Codec::EacRg11Snorm),
+            ("STELA_METAL_BLOCKS_PVRTC_4BPP", Codec::Pvrtc4),
+            ("STELA_METAL_BLOCKS_PVRTC_2BPP", Codec::Pvrtc2),
         ];
         assert_eq!(codecs.len(), expected.len());
         for (enumerator, codec) in expected {

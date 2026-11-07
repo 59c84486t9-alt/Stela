@@ -868,6 +868,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         region: &Region,
         strides: Strides,
     ) -> Result<Vec<CpuBand>> {
+        let (region, strides) = self.block_run(id, region, strides)?;
+        let region = &region;
         let descriptor = &self.resources.textures.get(id.0)?.descriptor;
         let shape = RowShape::of(descriptor, region, strides)?;
         let per_band = CPU_BAND_BYTES
@@ -913,6 +915,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         bytes: &[u8],
         strides: Strides,
     ) -> Result<()> {
+        let (region, strides) = self.block_run(id, region, strides)?;
+        let region = &region;
         let (copy, rows) = self.cpu_region(id, region, strides, bytes.len())?;
         if rows.tight() {
             return self.write_region(id, &copy, &bytes[..rows.packed_bytes]);
@@ -932,6 +936,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         bytes: &mut [u8],
         strides: Strides,
     ) -> Result<()> {
+        let (region, strides) = self.block_run(id, region, strides)?;
+        let region = &region;
         let (copy, rows) = self.cpu_region(id, region, strides, bytes.len())?;
         let mut packed = alloc::vec![0; rows.packed_bytes];
         self.read_region(id, &copy, &mut packed)?;
@@ -946,6 +952,27 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             packed = rest;
         }
         Ok(())
+    }
+
+    /// A CPU transfer's region and the caller's strides as
+    /// [`Region::block_run`] has them: a run of blocks is packed.
+    fn block_run(
+        &self,
+        id: TextureId,
+        region: &Region,
+        strides: Strides,
+    ) -> Result<(Region, Strides)> {
+        let descriptor = &self.resources.textures.get(id.0)?.descriptor;
+        let run = region.block_run(descriptor)?;
+        if run == *region {
+            return Ok((run, strides));
+        }
+        let block = descriptor.pixel_format.describe().block;
+        let packed = Strides {
+            bytes_per_row: run.size[0].div_ceil(u64::from(block.width)) * u64::from(block.bytes),
+            bytes_per_image: 0,
+        };
+        Ok((run, packed))
     }
 
     /// The copy of a color texture's `region` and the ranges of its rows in

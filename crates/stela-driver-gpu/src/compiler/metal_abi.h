@@ -100,7 +100,30 @@ enum stela_metal_block_codec {
    STELA_METAL_BLOCKS_EAC_R11_SNORM,
    STELA_METAL_BLOCKS_EAC_RG11,
    STELA_METAL_BLOCKS_EAC_RG11_SNORM,
+   /* PVRTC1 at 4 and 2 bits per texel, to 8-bit RGBA. A level's blocks are
+    * in Morton order and each texel blends the four nearest, wrapping, so
+    * the region is always a whole level. */
+   STELA_METAL_BLOCKS_PVRTC_4BPP,
+   STELA_METAL_BLOCKS_PVRTC_2BPP,
 };
+
+/* ReorderArguments (binding.rs), which the reorder blocks kernel reads at
+ * the push constants' arguments address: the address of a region's first
+ * block in a buffer of rows of blocks, the address of a PVRTC level's
+ * blocks in their Morton order, the region's block count, whether the
+ * copy runs into the buffer (else into the level), the level's columns
+ * and rows of blocks, the region's first column and row, its width in
+ * blocks and the buffer's bytes per row. */
+#define STELA_METAL_REORDER_ROWS 0u
+#define STELA_METAL_REORDER_LEVEL 8u
+#define STELA_METAL_REORDER_COUNT 16u
+#define STELA_METAL_REORDER_TO_ROWS 20u
+#define STELA_METAL_REORDER_COLUMNS 24u
+#define STELA_METAL_REORDER_LEVEL_ROWS 28u
+#define STELA_METAL_REORDER_ORIGIN 32u
+#define STELA_METAL_REORDER_WIDTH 40u
+#define STELA_METAL_REORDER_ROW_BYTES 44u
+#define STELA_METAL_REORDER_BYTES 48u
 
 /* AverageArguments (binding.rs), which the average samples kernel reads at
  * the push constants' arguments address: the resource IDs of raw storage
@@ -408,6 +431,21 @@ nir_shader *stela_metal_decode_etc_kernel(const nir_shader_compiler_options *opt
  * words, of which an 8-byte block's are the first two. */
 nir_def *stela_metal_decode_etc(nir_builder *b, nir_def *words, nir_def *x, nir_def *y,
                                 nir_def *codec);
+
+/* Thread n decodes texel n of the TexelArguments' level, counted along
+ * rows, then rows, from the buffer's PVRTC blocks into the image's raw
+ * texel. */
+nir_shader *stela_metal_decode_pvrtc_kernel(const nir_shader_compiler_options *options);
+
+/* Thread n copies block n of the ReorderArguments' region, counted along
+ * rows, between the buffer's rows of blocks and the PVRTC level's Morton
+ * order. */
+nir_shader *stela_metal_reorder_blocks_kernel(const nir_shader_compiler_options *options);
+
+/* The raw texel at x and y of a level of PVRTC blocks of codec, columns
+ * by rows blocks of powers of two, at the 64-bit address blocks. */
+nir_def *stela_metal_decode_pvrtc(nir_builder *b, nir_def *blocks, nir_def *columns,
+                                  nir_def *rows, nir_def *x, nir_def *y, nir_def *codec);
 
 /* MTLTessellationPartitionMode, MTLTessellationFactorStepFunction and
  * MTLWinding, in their raw values. */

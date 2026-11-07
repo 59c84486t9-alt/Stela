@@ -279,7 +279,8 @@ impl Workload {
                 | Command::ExecuteGeneratedCommands(_) => self.internal += 1,
                 Command::StoreTexels { .. }
                 | Command::LoadTexels { .. }
-                | Command::DecodeBlocks { .. } => self.transfers += 1,
+                | Command::DecodeBlocks { .. }
+                | Command::ReorderBlocks { .. } => self.transfers += 1,
                 _ => {}
             }
         }

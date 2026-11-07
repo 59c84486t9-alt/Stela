@@ -1988,6 +1988,107 @@ fn decoded_buffer_copies_move_blocks_and_decode_them() {
 }
 
 #[test]
+fn pvrtc_copies_reorder_blocks_and_decode_whole_levels() {
+    let pvrtc = TextureDescriptor {
+        width: 32,
+        height: 32,
+        mipmap_level_count: 1,
+        ..texture(PixelFormat::PvrtcRgba4bpp)
+    };
+    // CPU transfers copy as many blocks as a region covers from the level's
+    // first, whatever its origin and strides: 2x2 blocks are the start of
+    // the first row of 8, and 8x2 its first two rows.
+    let at = |origin: [u64; 2], size: [u64; 2]| Region {
+        slice: 0,
+        level: 0,
+        origin: [origin[0], origin[1], 0],
+        size: [size[0], size[1], 1],
+    };
+    assert_eq!(
+        at([8, 8], [8, 8]).block_run(&pvrtc),
+        Ok(at([0, 0], [16, 4]))
+    );
+    assert_eq!(
+        at([0, 16], [32, 8]).block_run(&pvrtc),
+        Ok(at([0, 0], [32, 8]))
+    );
+    assert_eq!(
+        at([0, 0], [16, 12]).block_run(&pvrtc),
+        Err(Error::Unsupported(
+            "PVRTC regions whose blocks end within a later row of their level"
+        ))
+    );
+    // Blits copy a region's rows of blocks, which the device reorders into
+    // and out of the level's Morton order.
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_blit().unwrap();
+    let layout = BufferLayout {
+        buffer: buffer(2, 1 << 16),
+        offset: 64,
+        bytes_per_row: 16,
+        bytes_per_image: 32,
+    };
+    let target = || BlitTexture {
+        image: Image(9),
+        descriptor: &pvrtc,
+        storage: ResourceId(0x77),
+        blocks: Some(buffer(3, pvrtc.cpu_copy_bytes())),
+    };
+    let region = at([8, 8], [8, 8]);
+    commands
+        .copy_buffer_to_texture(&mut resolver, layout, target(), region, BlitOption::EMPTY)
+        .unwrap();
+    commands
+        .copy_texture_to_buffer(&mut resolver, target(), region, layout, BlitOption::EMPTY)
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let commands = &recording.segments[0].commands;
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::CopyBufferRegions { .. })),
+        "{commands:?}"
+    );
+    let reorders = commands
+        .iter()
+        .filter_map(|command| match *command {
+            Command::ReorderBlocks { arguments, count } => Some((arguments, count)),
+            _ => None,
+        })
+        .collect::<alloc::vec::Vec<_>>();
+    assert_eq!(reorders.len(), 2, "{commands:?}");
+    for (&(arguments, count), to_rows) in reorders.iter().zip([0, 1]) {
+        assert_eq!(count, 4, "2x2 blocks");
+        let encoded = uploaded(&recording, arguments);
+        assert_eq!(double(encoded, 0), (2 << 32) + 64, "the buffer's rows");
+        assert_eq!(double(encoded, 8), 3 << 32, "the level's blocks");
+        assert_eq!(
+            [16, 20, 24, 28, 32, 36, 40, 44].map(|at| word(encoded, at)),
+            [4, to_rows, 8, 8, 2, 2, 2, 16]
+        );
+    }
+    let Some(&Command::DecodeBlocks {
+        kernel: BlockKernel::Pvrtc,
+        arguments,
+        count: 1024,
+    }) = commands
+        .iter()
+        .find(|command| matches!(command, Command::DecodeBlocks { .. }))
+    else {
+        panic!("a decode of the whole level: {commands:?}");
+    };
+    let encoded = uploaded(&recording, arguments);
+    assert_eq!(double(encoded, 0), 3 << 32, "the level's first block");
+    assert_eq!(word(encoded, 12), 8 | 4 << 8 | 4 << 16, "4-bpp PVRTC");
+    assert_eq!(
+        [24, 28, 40, 44, 48].map(|at| word(encoded, at)),
+        [32, 32, 0, 0, 0]
+    );
+}
+
+#[test]
 fn raw_rendered_attachments_resolve_where_the_pass_ends() {
     let mut ms = texture(PixelFormat::Abgr4Unorm);
     ms.texture_type = TextureType::D2Multisample;

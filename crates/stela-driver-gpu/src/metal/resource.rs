@@ -15,7 +15,7 @@ use super::{
     },
     capabilities::{Capabilities, FormatCapabilities as C},
     error::{Result, ensure, require},
-    pixel_format::{Description, Encoding, Kind, PixelFormat, Realization},
+    pixel_format::{Compression, Description, Encoding, Kind, PixelFormat, Realization},
     vulkan::{
         BufferCreate, BufferUsage, ComponentSwizzle, Format, ImageAspects, ImageCreate,
         ImageTiling, ImageType, ImageUsage, ImageViewType, MemoryProperties as M, SampleCounts,
@@ -250,6 +250,13 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
         )?;
     }
     let decoded = matches!(description.encoding(), Encoding::Decoded(_));
+    // Metal's own validation, which a PVRTC level's Morton order needs.
+    if description.compression == Compression::Pvrtc {
+        ensure(
+            descriptor.width == descriptor.height && descriptor.width.is_power_of_two(),
+            "PVRTC textures are square powers of two",
+        )?;
+    }
     if decoded && descriptor.texture_type == TextureType::D3 {
         return Err(super::error::Error::Unsupported(
             "3D textures of compressed formats the device samples decoded",

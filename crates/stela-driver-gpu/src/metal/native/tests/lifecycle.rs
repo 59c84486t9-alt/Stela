@@ -179,6 +179,8 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         load_texels: vk::Pipeline::null(),
         average_samples: vk::Pipeline::null(),
         decode_etc: vk::Pipeline::null(),
+        decode_pvrtc: vk::Pipeline::null(),
+        reorder_blocks: vk::Pipeline::null(),
     }
 }
 
