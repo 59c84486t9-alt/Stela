@@ -239,16 +239,68 @@ null_joins_device_addresses(void)
    assert(count(shader, nir_intrinsic_store_global) == 1);
    ralloc_free(shader);
 
-   refused("",
+   /* Null and an allocation choose: the store reaches the allocation only
+    * where it is chosen. */
+   shader = compiled("",
       "entry:\n%a = alloca i32, align 4\n%i = load i32, ptr addrspace(1) %out, align 4\n"
       "%c = icmp eq i32 %i, 0\nbr i1 %c, label %then, label %join\n"
       "then:\nbr label %join\n"
       "join:\n%p = phi ptr [null, %entry], [%a, %then]\n"
-      "store i32 1, ptr %p, align 4\nret void\n", &defaults, STELA_AIR_MEMORY);
-   refused("",
+      "store i32 1, ptr %p, align 4\n%v = load i32, ptr %a, align 4\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n");
+   assert(count(shader, nir_intrinsic_store_scratch) == 1);
+   ralloc_free(shader);
+   shader = compiled("",
       "%a = alloca i32, align 4\n%i = load i32, ptr addrspace(1) %out, align 4\n"
       "%c = icmp eq i32 %i, 0\n%p = select i1 %c, ptr null, ptr %a\n"
-      "store i32 1, ptr %p, align 4\nret void\n", &defaults, STELA_AIR_MEMORY);
+      "store i32 1, ptr %p, align 4\n%v = load i32, ptr %a, align 4\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n");
+   assert(count(shader, nir_intrinsic_store_scratch) == 1);
+   ralloc_free(shader);
+}
+
+/* Generic pointers, cast from device and thread memory: a choice between
+ * them reaches the chosen root, and the space queries ask which it is. */
+static void
+generic_pointers_choose_their_memory(void)
+{
+   const char *declarations =
+      "declare i1 @air.is_device_pointer(ptr addrspace(8))\n"
+      "declare i1 @air.is_threadgroup_pointer(ptr addrspace(8))\n"
+      "declare i1 @air.is_thread_pointer(ptr addrspace(8))\n";
+   nir_shader *shader = compiled(declarations,
+      "%a = alloca [2 x i32], align 4\n"
+      "store i32 11, ptr %a, align 4\n"
+      "%i = load i32, ptr addrspace(1) %out, align 4\n%c = icmp eq i32 %i, 0\n"
+      "%d = getelementptr i32, ptr addrspace(1) %out, i64 4\n"
+      "%gd = addrspacecast ptr addrspace(1) %d to ptr addrspace(8)\n"
+      "%ga = addrspacecast ptr %a to ptr addrspace(8)\n"
+      "%p = select i1 %c, ptr addrspace(8) %gd, ptr addrspace(8) %ga\n"
+      "%q = getelementptr i32, ptr addrspace(8) %p, i64 1\n"
+      "store i32 33, ptr addrspace(8) %q, align 4\n"
+      "%r = getelementptr i32, ptr addrspace(8) %ga, i64 1\n"
+      "%v = load i32, ptr addrspace(8) %r, align 4\n"
+      "%device = call i1 @air.is_device_pointer(ptr addrspace(8) %p)\n"
+      "%group = call i1 @air.is_threadgroup_pointer(ptr addrspace(8) %ga)\n"
+      "%thread = call i1 @air.is_thread_pointer(ptr addrspace(8) %p)\n"
+      "%dv = zext i1 %device to i32\n%gv = zext i1 %group to i32\n%tv = zext i1 %thread to i32\n"
+      "%w = add i32 %v, %dv\n%y = add i32 %w, %gv\n%x = add i32 %y, %tv\n"
+      "%back = addrspacecast ptr addrspace(8) %gd to ptr addrspace(1)\n"
+      "store i32 %x, ptr addrspace(1) %back, align 4\nret void\n");
+   /* The choice's store is a global store or a scratch store; the load of
+    * the allocation is thread memory alone. */
+   assert(count(shader, nir_intrinsic_store_global) == 2);
+   assert(count(shader, nir_intrinsic_store_scratch) == 2);
+   assert(count(shader, nir_intrinsic_load_scratch) == 1);
+   ralloc_free(shader);
+   refused(declarations,
+      "%a = alloca i32, align 4\n%g = addrspacecast ptr %a to ptr addrspace(8)\n"
+      "%o = atomicrmw add ptr addrspace(8) %g, i32 1 monotonic, align 4\nret void\n",
+      &defaults, STELA_AIR_MEMORY);
+   refused(declarations,
+      "%g = addrspacecast ptr addrspace(1) %out to ptr addrspace(8)\n"
+      "%c = addrspacecast ptr addrspace(8) %g to ptr addrspace(2)\n"
+      "%v = load i32, ptr addrspace(2) %c, align 4\nret void\n", &defaults, STELA_AIR_MEMORY);
 }
 
 /* memset, memcpy and memmove of constant lengths, in the largest chunks the
@@ -456,6 +508,7 @@ main(void)
    thread_memory_lowers_to_scratch();
    memory_intrinsics_lower_to_chunks();
    null_joins_device_addresses();
+   generic_pointers_choose_their_memory();
    constant_data_lowers_to_load_constant();
    kernels_read_constant_buffers();
    aggregates_load_and_store_by_leaf();

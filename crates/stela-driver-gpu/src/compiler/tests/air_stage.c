@@ -702,7 +702,8 @@ pointer_phi_stage_semantics(void)
       }
       LLVMDisposeMemoryBuffer(raw);
    }
-   /* Source roots with equal rights and type remain independent resources. */
+   /* Source roots with equal rights and type remain independent resources,
+    * which a join chooses between. */
    char *text = vertex_body(root);
    char *bad = change(text, "ptr addrspace(2) %buffer)", "ptr addrspace(2) %buffer, ptr addrspace(2) %other)");
    free(text); text = change(bad, "!4 = !{!5,!6}", "!4 = !{!5,!6,!26}"); free(bad);
@@ -711,7 +712,11 @@ pointer_phi_stage_semantics(void)
       "!\"air.struct_type_info\",!7,!\"air.arg_type_size\",i32 16,!\"air.arg_type_align_size\",i32 16,!\"air.arg_type_name\",!\"Input\",!\"air.arg_name\",!\"other\"}\n";
    size_t bytes = strlen(bad) + strlen(extra) + 1;
    text = malloc(bytes); CHECK(text); snprintf(text, bytes, "%s%s", bad, extra); free(bad);
-   refusal(text, "test_vertex", STELA_AIR_VERTEX, &o, STELA_AIR_MEMORY);
+   LLVMMemoryBufferRef joined = bitcode(text);
+   nir_shader *chosen = translate(joined, "test_vertex", &o);
+   CHECK(chosen);
+   ralloc_free(chosen);
+   LLVMDisposeMemoryBuffer(joined);
    free(text);
    puts("AS2 pointer PHIs join root and derived pointers of one resource and keep root identity");
 }

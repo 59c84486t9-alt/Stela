@@ -32,10 +32,26 @@ struct air_block {
    LLVMValueRef incoming_phi, incoming_value; /* Deduplicate one PHI in linear time. */
 };
 
+/* The most roots one pointer chooses among. */
+#define POINTER_CHOICES 8u
+
+/* The roots a pointer may be at run time, as a generic pointer cast from
+ * different address spaces or a join of different resources is: arguments,
+ * variables, allocations and null. */
+struct pointer_choices {
+   unsigned count;
+   LLVMValueRef roots[POINTER_CHOICES];
+};
+
 struct value {
    nir_def *def;
    unsigned access; /* Buffer provenance; zero for integer values. */
    LLVMValueRef pointer_root; /* Proven resource identity, never a numeric address. */
+   /* A pointer chosen among roots, whose accesses branch on choice, the
+    * index of the root it is; def is the address or offset that root takes.
+    * NULL for a pointer of one root. */
+   const struct pointer_choices *choices;
+   nir_def *choice;
    bool ssbo;
    unsigned ssbo_slot;
    /* Threadgroup or thread memory's variable, or, without one, constant data
@@ -94,6 +110,7 @@ stela_air_ssbo_view_valid(const struct stela_air_ssbo_view *view,
 
 struct pointer_node {
    LLVMValueRef llvm, root;
+   const struct pointer_choices *choices; /* Instead of root, for several. */
    unsigned index, low, next, component;
    bool active;
 };
@@ -397,6 +414,8 @@ static void
 pointer_authority(struct value *target, const struct value *root)
 {
    target->pointer_root = root->pointer_root;
+   target->choices = root->choices;
+   target->choice = root->choice;
    target->access = root->access;
    target->ssbo = root->ssbo;
    target->ssbo_slot = root->ssbo_slot;
@@ -446,13 +465,14 @@ pointer_offset(struct value *target, const struct value *origin, uint64_t offset
    target->steps = gcd(origin->steps, steps);
 }
 
-/* Thread, device, constant, threadgroup, imageblock or object data memory;
- * roots validate the rest. */
+/* Thread, device, constant, threadgroup, imageblock, object data or generic
+ * memory; roots validate the rest. */
 static bool
 pointer_space(LLVMTypeRef type)
 {
    return LLVMGetTypeKind(type) == LLVMPointerTypeKind &&
-          (LLVMGetPointerAddressSpace(type) <= 4 || LLVMGetPointerAddressSpace(type) == 6);
+          (LLVMGetPointerAddressSpace(type) <= 4 || LLVMGetPointerAddressSpace(type) == 6 ||
+           LLVMGetPointerAddressSpace(type) == 8);
 }
 
 /* A kernel, object or mesh function. */
@@ -1799,8 +1819,59 @@ global_access(struct translator *t, const struct value *address, nir_def *stored
 static nir_def *
 memory_access(struct translator *t, const struct value *address, nir_def *stored,
               const struct atomic *atomic, enum gl_access_qualifier access,
+              unsigned components, unsigned bits, unsigned alignment);
+
+/* A choice's root `i`: its value, or a null pointer's. */
+static struct value
+choice_root(struct translator *t, const struct pointer_choices *choices, unsigned i)
+{
+   if (LLVMIsAConstantPointerNull(choices->roots[i]))
+      return (struct value){.access = STELA_AIR_READ_WRITE, .pointer_root = choices->roots[i],
+                            .null = true, .components = 1, .bits = 64};
+   const struct value *root = find_value(t, choices->roots[i]);
+   return root ? *root : (struct value){0};
+}
+
+/* An access through a pointer chosen among roots: the chosen root's at the
+ * pointer's address or offset, each guarded by whether it is chosen. */
+static nir_def *
+choice_access(struct translator *t, const struct value *address, nir_def *stored,
+              const struct atomic *atomic, enum gl_access_qualifier access,
               unsigned components, unsigned bits, unsigned alignment)
 {
+   nir_builder *b = &t->b;
+   nir_def *result = NULL;
+   for (unsigned i = 0; i < address->choices->count; i++) {
+      struct value chosen = choice_root(t, address->choices, i);
+      if (!chosen.access) {
+         fail(t, STELA_AIR_MEMORY, "a pointer chooses a root without provenance");
+         return NULL;
+      }
+      chosen.def = address->def;
+      chosen.choices = NULL;
+      chosen.choice = NULL;
+      nir_def *taken = nir_ieq_imm(b, address->choice, i);
+      struct memory_guard guard;
+      if (!memory_guard_begin(t, taken, &guard))
+         return NULL;
+      nir_def *loaded = memory_access(t, &chosen, stored, atomic, access, components, bits,
+                                      alignment);
+      if (t->error->kind != STELA_AIR_OK)
+         return NULL;
+      loaded = memory_guard_end(t, &guard, loaded);
+      if (loaded)
+         result = result ? nir_bcsel(b, taken, loaded, result) : loaded;
+   }
+   return result;
+}
+
+static nir_def *
+memory_access(struct translator *t, const struct value *address, nir_def *stored,
+              const struct atomic *atomic, enum gl_access_qualifier access,
+              unsigned components, unsigned bits, unsigned alignment)
+{
+   if (address->choices)
+      return choice_access(t, address, stored, atomic, access, components, bits, alignment);
    if (address->array) {
       fail(t, STELA_AIR_MEMORY, "texture and sampler arrays are only read by element");
       return NULL;
@@ -1820,6 +1891,18 @@ memory_access(struct translator *t, const struct value *address, nir_def *stored
  * when `negate`; `expected` makes it a compare-exchange. Atomics act on 32-
  * and 64-bit integers, and on floats exchange, by their bits, and add. NIR's
  * atomics are device-scope, which refines every Metal scope. */
+/* Whether a pointer chosen among roots may be thread memory. */
+static bool
+chooses_thread_memory(struct translator *t, const struct value *address)
+{
+   for (unsigned i = 0; address->choices && i < address->choices->count; i++) {
+      struct value root = choice_root(t, address->choices, i);
+      if (thread_memory(&root))
+         return true;
+   }
+   return false;
+}
+
 static nir_def *
 atomic_old(struct translator *t, LLVMValueRef pointer, nir_atomic_op op, bool negate,
            LLVMTypeRef type, nir_def *data, nir_def *expected, unsigned alignment)
@@ -1839,7 +1922,7 @@ atomic_old(struct translator *t, LLVMValueRef pointer, nir_atomic_op op, bool ne
    }
    const struct value *address = pointer_value(t, pointer);
    if (!address || (address->access & STELA_AIR_READ_WRITE) != STELA_AIR_READ_WRITE ||
-       thread_memory(address)) {
+       thread_memory(address) || chooses_thread_memory(t, address)) {
       fail(t, STELA_AIR_MEMORY, "atomic access lacks a device or threadgroup read-write pointer");
       return NULL;
    }
@@ -5569,6 +5652,12 @@ precise_division(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
 }
 
 /* A choice between places in one resource. */
+static struct pointer_node *pointer_node(struct translator *t, LLVMValueRef llvm);
+static nir_def *choice_index(struct translator *t, const struct pointer_choices *choices,
+                             LLVMValueRef incoming);
+static void choose(struct translator *t, struct value *value,
+                   const struct pointer_choices *choices, nir_def *choice);
+
 static bool
 pointer_select(struct translator *t, LLVMValueRef inst)
 {
@@ -5592,6 +5681,18 @@ pointer_select(struct translator *t, LLVMValueRef inst)
       value->present = nir_bcsel(&t->b, condition, yes, no);
       return true;
    }
+   struct pointer_node *node = pointer_node(t, inst);
+   if (condition && node && node->choices) {
+      nir_def *yes_index = choice_index(t, node->choices, yes_llvm);
+      nir_def *no_index = yes_index ? choice_index(t, node->choices, no_llvm) : NULL;
+      nir_def *yes_def = no_index ? get_value(t, yes_llvm) : NULL;
+      nir_def *no_def = yes_def ? get_value(t, no_llvm) : NULL;
+      if (!no_def || !put_value(t, inst, nir_bcsel(&t->b, condition, yes_def, no_def), 0))
+         return false;
+      choose(t, find_value(t, inst), node->choices,
+             nir_bcsel(&t->b, condition, yes_index, no_index));
+      return true;
+   }
    const struct value *yes = pointer_value(t, yes_llvm);
    const struct value *no = yes ? pointer_value(t, no_llvm) : NULL;
    if (!condition || t->error->kind != STELA_AIR_OK)
@@ -5605,6 +5706,78 @@ pointer_select(struct translator *t, LLVMValueRef inst)
       return false;
    pointer_authority(find_value(t, inst), root);
    return true;
+}
+
+/* A cast between the generic address space and thread, device or
+ * threadgroup memory: the same pointer, of the same roots. */
+static bool
+address_space_cast(struct translator *t, LLVMValueRef inst)
+{
+   LLVMValueRef operand = LLVMGetOperand(inst, 0);
+   LLVMTypeRef from = LLVMTypeOf(operand), to = LLVMTypeOf(inst);
+   unsigned spaces[2] = {pointer_space(from) ? LLVMGetPointerAddressSpace(from) : UINT_MAX,
+                         pointer_space(to) ? LLVMGetPointerAddressSpace(to) : UINT_MAX};
+   unsigned other = spaces[0] == 8 ? spaces[1] : spaces[1] == 8 ? spaces[0] : UINT_MAX;
+   if (other != 0 && other != 1 && other != 3)
+      return fail(t, STELA_AIR_MEMORY, "address space cast from %u to %u", spaces[0], spaces[1]);
+   const struct value *origin = pointer_value(t, operand);
+   if (!origin || !origin->access || origin->texture || origin->sampler || origin->array ||
+       !put_value(t, inst, origin->def, origin->access))
+      return fail(t, STELA_AIR_MEMORY, "address space cast lacks buffer provenance");
+   pointer_authority(find_value(t, inst), origin);
+   pointer_offset(find_value(t, inst), origin, 0, 0);
+   return true;
+}
+
+/* Whether a root is device (1), threadgroup (3) or thread (0) memory. */
+static bool
+root_in_space(const struct value *root, unsigned space)
+{
+   if (root->null || root->constant_data || root->texture || root->sampler || root->array)
+      return false;
+   if (space == 1)
+      return !root->storage;
+   return root->storage &&
+          root->storage->data.mode == (space == 3 ? nir_var_mem_shared : nir_var_function_temp);
+}
+
+/* `air.is_device_pointer`, `air.is_threadgroup_pointer` and
+ * `air.is_thread_pointer` of a generic pointer: whether its root, or the
+ * one it chooses, is that memory. */
+static bool
+pointer_space_call(struct translator *t, LLVMValueRef inst, const char *name, size_t length,
+                   bool *lowered)
+{
+   static const struct {
+      const char *name;
+      unsigned space;
+   } queries[] = {
+      {"air.is_device_pointer", 1},
+      {"air.is_threadgroup_pointer", 3},
+      {"air.is_thread_pointer", 0},
+   };
+   unsigned space = UINT_MAX;
+   for (unsigned i = 0; i < ARRAY_SIZE(queries); i++) {
+      if (length == strlen(queries[i].name) && !memcmp(name, queries[i].name, length))
+         space = queries[i].space;
+   }
+   *lowered = space != UINT_MAX;
+   if (!*lowered)
+      return true;
+   if (LLVMGetNumArgOperands(inst) != 1 || LLVMTypeOf(inst) != LLVMInt1TypeInContext(t->context))
+      return fail(t, STELA_AIR_INSTRUCTION, "%.*s of an unknown form", (int)length, name);
+   const struct value *pointer = pointer_value(t, LLVMGetOperand(inst, 0));
+   if (!pointer || !pointer->access)
+      return fail(t, STELA_AIR_MEMORY, "%.*s of a pointer without provenance", (int)length, name);
+   if (!pointer->choices)
+      return put_value(t, inst, nir_imm_bool(&t->b, root_in_space(pointer, space)), 0);
+   nir_def *in = nir_imm_false(&t->b);
+   for (unsigned i = 0; i < pointer->choices->count; i++) {
+      struct value root = choice_root(t, pointer->choices, i);
+      if (root_in_space(&root, space))
+         in = nir_ior(&t->b, in, nir_ieq_imm(&t->b, pointer->choice, i));
+   }
+   return put_value(t, inst, in, 0);
 }
 
 static bool
@@ -5644,6 +5817,8 @@ instruction(struct translator *t, LLVMValueRef inst)
       return vector_instruction(t, inst, op);
    if (op == LLVMFPExt && stela_air_log_promotion(inst))
       return true;
+   if (op == LLVMAddrSpaceCast)
+      return address_space_cast(t, inst);
    if (op != LLVMStore && op != LLVMGetElementPtr && op != LLVMBitCast && op != LLVMCall &&
        !value_shape(LLVMTypeOf(inst), &components, &bits) &&
        !((op == LLVMSelect || matrix_elementwise(op)) && stela_air_matrix_type(LLVMTypeOf(inst), &bits)))
@@ -5755,6 +5930,10 @@ instruction(struct translator *t, LLVMValueRef inst)
       size_t name_length = 0;
       const char *name = LLVMGetValueName2(callee, &name_length);
       bool lowered;
+      if (!pointer_space_call(t, inst, name, name_length, &lowered))
+         return false;
+      if (lowered)
+         return true;
       if (!imageblock_call(t, inst, name, name_length, &lowered))
          return false;
       if (lowered)
@@ -5977,7 +6156,8 @@ instruction(struct translator *t, LLVMValueRef inst)
       if (!address || !(address->access & required) || LLVMGetVolatile(inst) ||
           (atomic && ordering != LLVMAtomicOrderingUnordered && ordering != LLVMAtomicOrderingMonotonic))
          return fail(t, STELA_AIR_MEMORY, "unsupported volatile/ordered/unbound/disallowed memory access");
-      if (atomic && (thread_memory(address) || address->constant_data))
+      if (atomic && (thread_memory(address) || address->constant_data ||
+                     chooses_thread_memory(t, address)))
          return fail(t, STELA_AIR_MEMORY, "atomic access to thread memory or constant data");
       if (op == LLVMStore && !value_shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &components, &bits)) {
          char *type = LLVMPrintTypeToString(LLVMTypeOf(LLVMGetOperand(inst, 0)));
@@ -6400,24 +6580,80 @@ pointer_dependency(struct translator *t, const struct pointer_node *node, unsign
 
 /* Resolve one SCC only from already-proven outgoing dependencies. In
  * particular, a rooted user cannot lend authority backward to a rootless cycle. */
+/* Joins a null pointer or null texture into a component's *null. */
+static bool
+join_null(struct translator *t, LLVMValueRef *null, LLVMValueRef dependency)
+{
+   if (*null && stela_air_null_texture(*null) != stela_air_null_texture(dependency))
+      return fail(t, STELA_AIR_MEMORY, "pointer PHI joins a null texture with a null pointer");
+   *null = dependency;
+   return true;
+}
+
+/* Adds root to a component's roots, once. */
+static bool
+join_root(struct translator *t, LLVMValueRef *roots, unsigned *count, LLVMValueRef root)
+{
+   for (unsigned i = 0; i < *count; i++) {
+      if (roots[i] == root)
+         return true;
+   }
+   if (*count == POINTER_CHOICES)
+      return fail(t, STELA_AIR_LIMIT, "a pointer chooses among more than %u resources",
+                  POINTER_CHOICES);
+   roots[(*count)++] = root;
+   return true;
+}
+
+/* The choices of a component of several roots, or of one root and null
+ * that a null address cannot stand for: each a resource accessed through
+ * its address or offset. */
+static const struct pointer_choices *
+component_choices(struct translator *t, const LLVMValueRef *roots, unsigned count,
+                  LLVMValueRef null)
+{
+   if (null && stela_air_null_texture(null)) {
+      fail(t, STELA_AIR_MEMORY, "a texture choice joins distinct textures or resources");
+      return NULL;
+   }
+   struct pointer_choices *choices = rzalloc(t->cfg_scratch, struct pointer_choices);
+   if (!choices) {
+      fail(t, STELA_AIR_ALLOCATION, "pointer choice allocation failed");
+      return NULL;
+   }
+   for (unsigned i = 0; i < count; i++) {
+      const struct value *root = LLVMIsALoadInst(roots[i]) ? NULL : find_value(t, roots[i]);
+      if (!root || roots[i] == t->imageblock_root || root->texture || root->sampler ||
+          root->array || root->object || root->fields.count || root->pointer_root != roots[i]) {
+         fail(t, STELA_AIR_MEMORY, "a pointer chooses among resources it cannot address alike: "
+              "loaded addresses, imageblocks, textures or argument buffers");
+         return NULL;
+      }
+      choices->roots[choices->count++] = roots[i];
+   }
+   if (null && !join_root(t, choices->roots, &choices->count, null))
+      return NULL;
+   return choices;
+}
+
 static bool
 pointer_component(struct translator *t, struct pointer_node **stack,
                   unsigned begin, unsigned end, unsigned component)
 {
-   LLVMValueRef root = NULL, null = NULL;
+   LLVMValueRef roots[POINTER_CHOICES], null = NULL;
+   unsigned count = 0;
    for (unsigned i = begin; i < end; i++)
       stack[i]->component = component;
    for (unsigned i = begin; i < end; i++) {
       struct pointer_node *node = stack[i];
-      unsigned count = pointer_dependencies(node);
-      for (unsigned j = 0; j < count; j++) {
+      unsigned dependencies = pointer_dependencies(node);
+      for (unsigned j = 0; j < dependencies; j++) {
          LLVMValueRef dependency = pointer_dependency(t, node, j);
          if (!dependency)
             continue;
          if (LLVMIsAConstantPointerNull(dependency) || stela_air_null_texture(dependency)) {
-            if (null && stela_air_null_texture(null) != stela_air_null_texture(dependency))
-               return fail(t, STELA_AIR_MEMORY, "pointer PHI joins a null texture with a null pointer");
-            null = dependency;
+            if (!join_null(t, &null, dependency))
+               return false;
             continue;
          }
          struct pointer_node *dep = pointer_node(t, dependency);
@@ -6427,28 +6663,47 @@ pointer_component(struct translator *t, struct pointer_node **stack,
                continue;
             if (dep->component == UINT_MAX)
                return fail(t, STELA_AIR_MEMORY, "unresolved pointer provenance component");
+            for (unsigned k = 0; dep->choices && k < dep->choices->count; k++) {
+               LLVMValueRef root = dep->choices->roots[k];
+               if (LLVMIsAConstantPointerNull(root) ? !join_null(t, &null, root) :
+                                                      !join_root(t, roots, &count, root))
+                  return false;
+            }
+            if (dep->choices)
+               continue;
             candidate = dep->root;
+            if (LLVMIsAConstantPointerNull(candidate) || stela_air_null_texture(candidate)) {
+               if (!join_null(t, &null, candidate))
+                  return false;
+               continue;
+            }
          } else {
             if (!pointer_anchor(t, dependency))
                return false;
             /* Every pointer into the imageblock has one origin. */
             candidate = imageblock_data_call(dependency) ? t->imageblock_root : dependency;
          }
-         if (root && root != candidate)
-            return fail(t, STELA_AIR_MEMORY, "pointer PHI joins distinct resource origins");
-         root = candidate;
+         if (!join_root(t, roots, &count, candidate))
+            return false;
       }
    }
-   const struct value *rooted = root ? find_value(t, root) : NULL;
-   if (!root)
-      root = null;
-   else if (null && stela_air_null_texture(null) ? !texture_choice_root(rooted) :
-            null && !numeric_address(rooted))
-      return fail(t, STELA_AIR_MEMORY, "pointer PHI joins null with an offset into a resource");
+   LLVMValueRef root = count ? roots[0] : null;
+   const struct value *rooted = count && !LLVMIsALoadInst(root) ? find_value(t, root) : NULL;
+   /* A join of null and a texture is a texture choice, and a numeric
+    * address's null is its own; null and an offset choose. */
+   bool chooses = count > 1 ||
+                  (count && null && !(stela_air_null_texture(null) ? texture_choice_root(rooted) :
+                                      numeric_address(rooted)));
+   const struct pointer_choices *choices =
+      chooses ? component_choices(t, roots, count, null) : NULL;
+   if (chooses && !choices)
+      return false;
    if (!root)
       return fail(t, STELA_AIR_MEMORY, "pointer PHI has a rootless dependency cycle");
-   for (unsigned i = begin; i < end; i++)
-      stack[i]->root = root;
+   for (unsigned i = begin; i < end; i++) {
+      stack[i]->root = choices ? NULL : root;
+      stack[i]->choices = choices;
+   }
    return true;
 }
 
@@ -6535,10 +6790,11 @@ pointer_provenance(struct translator *t)
              stela_air_null_texture(inst) || stitched_resource_call(inst) ||
              imageblock_data_call(inst))
             continue; /* Roots, like arguments and globals. */
-         if (op != LLVMPHI && op != LLVMSelect && op != LLVMGetElementPtr && op != LLVMBitCast)
+         if (op != LLVMPHI && op != LLVMSelect && op != LLVMGetElementPtr && op != LLVMBitCast &&
+             op != LLVMAddrSpaceCast)
             return fail(t, STELA_AIR_TYPE, "unsupported pointer provenance producer %d", op);
          if (!pointer_space(LLVMTypeOf(inst)) ||
-             (op != LLVMPHI && op != LLVMSelect &&
+             (op != LLVMPHI && op != LLVMSelect && op != LLVMAddrSpaceCast &&
               LLVMTypeOf(LLVMGetOperand(inst, 0)) != LLVMTypeOf(inst)))
             return fail(t, STELA_AIR_MEMORY, "unsupported pointer provenance address space");
          struct pointer_node *node = &t->pointers[next++];
@@ -6629,6 +6885,48 @@ texture_choice_present(struct translator *t, const struct value *target, LLVMVal
    return v->present ? v->present : nir_imm_true(&t->b);
 }
 
+/* Makes value a pointer chosen among choices by choice: accessible as every
+ * root is. */
+static void
+choose(struct translator *t, struct value *value, const struct pointer_choices *choices,
+       nir_def *choice)
+{
+   value->choices = choices;
+   value->choice = choice;
+   value->pointer_root = NULL;
+   value->access = STELA_AIR_READ_WRITE;
+   for (unsigned i = 0; i < choices->count; i++)
+      value->access &= choice_root(t, choices, i).access;
+}
+
+/* The index among choices of the root of `incoming`, or of the one it
+ * chooses; NULL after reporting why not. */
+static nir_def *
+choice_index(struct translator *t, const struct pointer_choices *choices, LLVMValueRef incoming)
+{
+   if (LLVMIsUndef(incoming))
+      return nir_undef(&t->b, 1, 32);
+   const struct value *v = LLVMIsAConstantPointerNull(incoming) ? NULL : find_value(t, incoming);
+   const struct pointer_choices *from = v ? v->choices : NULL;
+   unsigned count = from ? from->count : 1;
+   nir_def *index = NULL;
+   for (unsigned j = 0; j < count; j++) {
+      LLVMValueRef root = from ? from->roots[j] : v ? v->pointer_root : incoming;
+      unsigned k = 0;
+      while (k < choices->count && choices->roots[k] != root &&
+             !(LLVMIsAConstantPointerNull(choices->roots[k]) && root &&
+               LLVMIsAConstantPointerNull(root)))
+         k++;
+      if (k == choices->count) {
+         fail(t, STELA_AIR_MEMORY, "a pointer chooses a root its provenance does not");
+         return NULL;
+      }
+      nir_def *chosen = nir_imm_int(&t->b, k);
+      index = index ? nir_bcsel(&t->b, nir_ieq_imm(&t->b, v->choice, j), chosen, index) : chosen;
+   }
+   return index;
+}
+
 static bool
 cfg_declare_phi(struct translator *t, LLVMValueRef inst)
 {
@@ -6638,7 +6936,8 @@ cfg_declare_phi(struct translator *t, LLVMValueRef inst)
       return false;
    if (pointer_space(type)) {
       struct pointer_node *node = pointer_node(t, inst);
-      const struct value *root = node && !LLVMIsALoadInst(node->root) ? find_value(t, node->root) : NULL;
+      const struct value *root = node && node->root && !LLVMIsALoadInst(node->root) ?
+                                    find_value(t, node->root) : NULL;
       if (texture_choice_root(root))
          return texture_choice_phi(t, inst, root);
    }
@@ -6660,6 +6959,16 @@ cfg_declare_phi(struct translator *t, LLVMValueRef inst)
    }
    if (pointer_space(type)) {
       struct pointer_node *node = pointer_node(t, inst);
+      if (node && node->choices) {
+         nir_phi_instr *phi = nir_phi_instr_create(t->b.shader);
+         if (!phi)
+            return fail(t, STELA_AIR_ALLOCATION, "AIR pointer choice PHI allocation failed");
+         nir_def_init(&phi->instr, &phi->def, 1, 32);
+         nir_builder_instr_insert(&t->b, &phi->instr);
+         choose(t, value, node->choices, &phi->def);
+         return _mesa_hash_table_insert(t->values, inst, value) != NULL ||
+            fail(t, STELA_AIR_ALLOCATION, "AIR PHI value map allocation failed");
+      }
       if (node && LLVMIsALoadInst(node->root))
          return fail(t, STELA_AIR_MEMORY, "pointer PHI of an address loaded from an argument buffer");
       struct value authority;
@@ -6840,6 +7149,14 @@ cfg_emit(struct translator *t)
                list_addtail(&source->src.use_link, &present->uses);
                sources++;
                continue;
+            }
+            if (target->choices) {
+               nir_def *index = choice_index(t, target->choices, incoming);
+               if (!index)
+                  return false;
+               nir_phi_instr *phi = nir_instr_as_phi(nir_def_instr(target->choice));
+               nir_phi_src *source = nir_phi_instr_add_src(phi, pred->end, index);
+               list_addtail(&source->src.use_link, &index->uses);
             }
             if (target->pointer_root && !joined_pointer(target, incoming, find_value(t, incoming)))
                return fail(t, STELA_AIR_MEMORY, "pointer PHI incoming authority differs from proof");

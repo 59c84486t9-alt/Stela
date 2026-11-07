@@ -1185,9 +1185,26 @@ pointer_phi_authority_refusals(void)
       const struct stela_air_options options = {.workgroup_size = {32, 1, 1},
          .max_instructions = 100, .bind_buffer = bind_equal_pointer_roots, .binding_data = &callbacks};
       struct stela_air_error error;
-      CHECK(!stela_air_to_nir(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), "kernel",
-         &test_nir_options, &options, &error));
-      CHECK(callbacks == 2 && error.kind == STELA_AIR_MEMORY && strstr(error.detail, "distinct resource"));
+      nir_shader *nir = stela_air_to_nir(LLVMGetBufferStart(raw), LLVMGetBufferSize(raw), "kernel",
+         &test_nir_options, &options, &error);
+      /* Equal addresses grant no root identity: the join chooses between
+       * the buffers, storing to the one it chose, which each must allow. */
+      if (i == 0) {
+         CHECK(nir && callbacks == 2);
+         unsigned stores = 0;
+         nir_foreach_function_impl(impl, nir) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  stores += instr->type == nir_instr_type_intrinsic &&
+                            nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_store_global;
+               }
+            }
+         }
+         CHECK(stores == 2);
+         ralloc_free(nir);
+      } else {
+         CHECK(!nir && callbacks == 2 && error.kind == STELA_AIR_MEMORY);
+      }
       LLVMDisposeMemoryBuffer(raw);
    }
    for (unsigned ne = 0; ne < 2; ne++) {
@@ -1665,11 +1682,25 @@ shared_pointer_phi_semantics(void)
       LLVMDisposeMemoryBuffer(raw);
    }
    free(dynamic);
-   shared_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %a, label %b\n"
+   /* A join of two variables chooses between them: a store reaches the
+    * chosen one's. */
+   LLVMMemoryBufferRef joined = shared_bitcode(
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %a, label %b\n"
       "a:\nbr label %join\nb:\nbr label %join\n"
-      "join:\n%p = phi ptr addrspace(3) [@one, %a], [@two, %b]\nret void\n",
+      "join:\n%p = phi ptr addrspace(3) [@one, %a], [@two, %b]\n"
+      "store i32 %tid, ptr addrspace(3) %p, align 4\nret void\n", false,
       "@one = internal addrspace(3) global [1 x i32] undef, align 4\n"
-      "@two = internal addrspace(3) global [2 x i32] undef, align 4\n", STELA_AIR_MEMORY);
+      "@two = internal addrspace(3) global [2 x i32] undef, align 4\n");
+   struct shared_bindings joined_bindings = {0};
+   struct stela_air_error joined_error;
+   nir_shader *chosen = shared_translate(joined, &test_nir_options, &joined_bindings, 256,
+                                         &joined_error);
+   if (!chosen)
+      fprintf(stderr, "joined variables: %s\n", joined_error.detail);
+   CHECK(chosen);
+   check_shared_operations(chosen, 2, 0, 0);
+   ralloc_free(chosen);
+   LLVMDisposeMemoryBuffer(joined);
 }
 
 static void

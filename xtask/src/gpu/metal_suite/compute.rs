@@ -477,6 +477,39 @@ fn simd(plan: &mut Plan, library: &str) {
             .output(Output::exact("out", Dtype::U32, u32s(&[1, 2, 4, 0]))),
         );
     }
+    if plan.has(SOURCE, "generic_pointers") {
+        // Each thread's pointer is into its own device, threadgroup or thread
+        // memory by id % 3; it adds 7 to the next word into its word.
+        let mut out = vec![0u32; 64 + 64 * 4];
+        for id in 0..64u32 {
+            let words = 64 + id as usize * 4;
+            for i in 0..4 {
+                out[words + i] = id * 100 + i as u32;
+            }
+            let (next, word) = ((id + 1) & 3, (id & 3) as usize);
+            let (value, space) = match id % 3 {
+                0 => (id * 100 + next, 1),
+                1 => (id * 10 + next, 2),
+                _ => (id + next, 4),
+            };
+            out[id as usize] = value + 7 + space * 1000;
+            if id % 3 == 0 {
+                out[words + word] = value + 7;
+            }
+        }
+        plan.add(
+            Case::compute(
+                "compute.generic_pointers",
+                library,
+                "generic_pointers",
+                [64, 1, 1],
+                [32, 1, 1],
+            )
+            .buffer(Buffer::zeroed("out", 0, out.len() * 4))
+            .set("threadgroup_memory", json!([{"index": 0, "length": 512}]))
+            .output(Output::exact("out", Dtype::U32, u32s(&out))),
+        );
+    }
     plan.add(
         Case::compute(
             "compute.array_ref",

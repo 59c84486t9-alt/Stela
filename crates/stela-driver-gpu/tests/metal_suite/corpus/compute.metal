@@ -365,6 +365,40 @@ kernel void address_spaces(device uint *out [[buffer(0)]], threadgroup uint *sha
 }
 #endif
 
+#ifndef SKIP_generic_pointers
+// Metal 4.1's unqualified pointers are generic: helpers take one cast from
+// device, threadgroup or thread memory, chosen at run time, and ask which.
+__attribute__((noinline)) static uint generic_get(const uint *p, uint i)
+{
+    return p[i];
+}
+
+__attribute__((noinline)) static void generic_put(uint *p, uint i, uint v)
+{
+    p[i] = v;
+}
+
+__attribute__((noinline)) static uint generic_space(const uint *p)
+{
+    return is_device_addrspace(p) | is_threadgroup_addrspace(p) << 1 | is_thread_addrspace(p) << 2;
+}
+
+kernel void generic_pointers(device uint *out [[buffer(0)]], threadgroup uint *shared [[threadgroup(0)]],
+                             uint id [[thread_position_in_grid]], uint tid [[thread_index_in_threadgroup]])
+{
+    uint local[4] = {id, id + 1u, id + 2u, id + 3u};
+    for (uint i = 0; i < 4u; i++) {
+        shared[tid * 4u + i] = id * 10u + i;
+        out[64u + id * 4u + i] = id * 100u + i;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint *p = id % 3u == 0u ? (uint *)&out[64u + id * 4u] :
+              id % 3u == 1u ? (uint *)&shared[tid * 4u] : (uint *)local;
+    generic_put(p, id & 3u, generic_get(p, (id + 1u) & 3u) + 7u);
+    out[id] = generic_get(p, id & 3u) + generic_space(p) * 1000u;
+}
+#endif
+
 // Views of an array, one element and a slice, with their sizes; and the
 // size an array type holds.
 kernel void array_refs(device const uint *in [[buffer(0)]], device uint *out [[buffer(1)]])
