@@ -6315,8 +6315,19 @@ translate(const void *bitcode, size_t size, const char *entry,
    }
    if (stage && stage->stage == STELA_AIR_FRAGMENT && !order_fragments(&t))
       goto done;
-   if (stage && stage->stage == STELA_AIR_FRAGMENT)
+   if (stage && stage->stage == STELA_AIR_FRAGMENT) {
       shade_per_sample(t.b.shader);
+      /* A function running once per sample orders the fragments of each
+       * sample, not of each pixel: one invocation accesses one sample's
+       * texels, and NVIDIA's pixel conflict detection faults the GPU for
+       * sample-rate shading (NVK forces sample detection only for the
+       * pipeline's own sample shading). */
+      struct shader_info *info = &t.b.shader->info;
+      if (info->fs.pixel_interlock_ordered && info->fs.uses_sample_shading) {
+         info->fs.pixel_interlock_ordered = false;
+         info->fs.sample_interlock_ordered = true;
+      }
+   }
 
    if (stage || t.shared_resources || t.shared_barriers)
       nir_shader_gather_info(t.b.shader, nir_shader_get_entrypoint(t.b.shader));

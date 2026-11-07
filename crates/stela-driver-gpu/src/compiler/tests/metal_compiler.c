@@ -1321,10 +1321,11 @@ framebuffer_reads_access_storage_attachments(void)
       assert(var->data.location != FRAG_RESULT_DATA0);
    assert(!shader->info.fs.uses_sample_shading);
    stela_metal_release(shader);
-   /* Multisampled, it runs per sample. */
+   /* Multisampled, it runs per sample and orders each sample's fragments. */
    storage.samples = 4;
    shader = stela_metal_compile(air, size, "blended", &interlocked, &storage, &error);
    assert(shader && shader->info.fs.uses_sample_shading);
+   assert(shader->info.fs.sample_interlock_ordered && !shader->info.fs.pixel_interlock_ordered);
    stela_metal_release(shader);
    storage.samples = 1;
    /* A masked-off attachment is only read. */
