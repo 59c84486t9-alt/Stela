@@ -84,9 +84,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             lock: self.devices.memory_lock(),
         };
         let result = self.devices.transfer(self.current, &mut memory, now);
-        if result.is_ok()
-            && let Some(call) = self.devices.take_call(self.current)
-        {
+        // The call is this step's store's whatever other devices' DMA came
+        // to: the caller reads its answer at the next instruction, and a call
+        // left pending would run at a later step, on a record its stack has
+        // since reused.
+        if let Some(call) = self.devices.take_call(self.current) {
             // A call from EL0 holds no lock the kernel times, so the count
             // need not wait for it: a compile or a GPU wait can take
             // milliseconds. Any other holds it at what its work earned.

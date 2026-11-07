@@ -836,6 +836,8 @@ struct PairFaultDevice {
     call: Option<GateCall>,
     refused: Option<u64>,
     failed_transfer: Option<usize>,
+    /// Fails the transfer of the step whose store made `call`.
+    failed_with_call: bool,
     reads: Vec<u64>,
     stores: Vec<(u64, u64)>,
     transfers: usize,
@@ -883,7 +885,10 @@ impl Devices for PairFaultDevice {
     }
     fn transfer(&mut self, _: usize, memory: &mut dyn Memory, _: u64) -> Result<(), DeviceError> {
         if self.call.is_some() {
-            return Ok(());
+            return match self.failed_with_call {
+                true => Err(DeviceError::Refused("injected DMA failure".into())),
+                false => Ok(()),
+            };
         }
         let index = self.transfers;
         self.transfers += 1;
@@ -999,11 +1004,34 @@ fn a_call_the_tables_refuse_gives_up_every_translation_of_the_callers_asid() {
     assert!(machine.statistics.lookup_forgets[0] > forgets);
 }
 
+#[test]
+fn a_call_runs_in_its_step_when_another_devices_dma_fails() {
+    let request = stela_contracts::gate::GateRequest::Serve {
+        gate: 0,
+        connection: core::num::NonZeroU64::MIN,
+        record: u64::MAX - 0xfff,
+    };
+    let devices = PairFaultDevice {
+        call: Some(GateCall::new(0, Arc::new(ReadingService), request)),
+        failed_with_call: true,
+        ..pair_fault_device()
+    };
+    let mut machine = board(&[], devices, Vec::new());
+    assert!(matches!(
+        machine.device_transfer(0),
+        Err(DeviceError::TransferRefused(_))
+    ));
+    // The call ran: its record was out of reach, so the caller's
+    // translations went.
+    assert!(!machine.host.reaches.is_empty());
+}
+
 fn pair_fault_device() -> PairFaultDevice {
     PairFaultDevice {
         call: None,
         refused: None,
         failed_transfer: None,
+        failed_with_call: false,
         reads: Vec::new(),
         stores: Vec::new(),
         transfers: 0,
