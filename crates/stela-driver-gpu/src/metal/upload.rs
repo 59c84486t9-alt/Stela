@@ -42,6 +42,8 @@ pub struct Upload {
 pub struct UploadArena {
     /// Chunks in use, each with the bytes written so far.
     chunks: Vec<(Chunk, Vec<u8>)>,
+    /// Chunks of scratch memory, which no upload shares.
+    scratch: Vec<Chunk>,
 }
 
 impl UploadArena {
@@ -63,9 +65,7 @@ impl UploadArena {
         if chunk.size < length {
             return Err(Error::OutOfMemory);
         }
-        // Before the last chunk, which later uploads fill.
-        let at = self.chunks.len().saturating_sub(1);
-        self.chunks.insert(at, (chunk, Vec::new()));
+        self.scratch.push(chunk);
         Ok(Upload {
             buffer: chunk.buffer,
             offset: 0,
@@ -121,9 +121,12 @@ impl UploadArena {
         ))
     }
 
-    /// The chunks and the bytes to copy into each before submission.
+    /// The chunks and the bytes to copy into each before submission; a
+    /// scratch chunk has none.
     pub fn finish(self) -> Vec<(Chunk, Vec<u8>)> {
-        self.chunks
+        let mut chunks = self.chunks;
+        chunks.extend(self.scratch.into_iter().map(|chunk| (chunk, Vec::new())));
+        chunks
     }
 }
 
@@ -168,6 +171,29 @@ mod tests {
         assert_eq!(
             &chunks[0].1[..],
             &[[1; 10].as_slice(), &[0; 6], &[2; 4]].concat()[..]
+        );
+    }
+
+    /// Scratch memory has a chunk of its own that no later upload shares,
+    /// even when it is the arena's first.
+    #[test]
+    fn scratch_memory_is_never_shared() {
+        let mut pool = Pool::default();
+        let mut arena = UploadArena::default();
+        let scratch = arena.scratch(&mut pool, 64).unwrap();
+        let table = arena.write(&mut pool, &[5; 8], 16).unwrap();
+        assert_ne!(scratch.buffer, table.buffer);
+        let more = arena.scratch(&mut pool, 16).unwrap();
+        let next = arena.write(&mut pool, &[6; 8], 16).unwrap();
+        assert_ne!(more.buffer, next.buffer);
+        assert_eq!(next.buffer, table.buffer);
+        let chunks = arena.finish();
+        assert_eq!(chunks.len(), 3);
+        assert!(
+            chunks
+                .iter()
+                .filter(|(chunk, _)| chunk.buffer == scratch.buffer || chunk.buffer == more.buffer)
+                .all(|(_, data)| data.is_empty())
         );
     }
 }
