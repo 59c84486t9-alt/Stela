@@ -772,9 +772,54 @@ static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NS
 
 @end
 
+/* Where kernel signals a GPU wait listens for reach the service. */
+static MTLSharedEventListener *forwarding(void)
+{
+	static MTLSharedEventListener *listener;
+	static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+	os_unfair_lock_lock(&lock);
+	if (!listener) {
+		listener = [[MTLSharedEventListener alloc]
+			initWithDispatchQueue:dispatch_queue_create("com.stela.gpu.event-forwarding", NULL)];
+	}
+	MTLSharedEventListener *found = listener;
+	os_unfair_lock_unlock(&lock);
+	return found;
+}
+
 @implementation StelaGPUEvent
 
-- (uint64_t)signaledValue
+- (instancetype)initWithDevice:(StelaGPUDevice *)device handle:(uint64_t)handle port:(mach_port_t)port
+{
+	self = port ? [super initWithMachPort:port] : [super initWithOptions:0];
+	if (self) {
+		_device = device;
+		_handle = handle;
+	} else if (handle) {
+		[device releaseHandle:handle];
+	}
+	return self;
+}
+
+- (StelaGPUDevice *)device
+{
+	return _device;
+}
+
+- (void)dealloc
+{
+	if (_handle) {
+		[_device releaseHandle:_handle];
+	}
+}
+
+- (uint64_t)labelTraceID
+{
+	return 0;
+}
+
+/* The service's value; 0 when it cannot answer, which it reports. */
+- (uint64_t)serviceValue
 {
 	StelaHandle request = {.handle = _handle};
 	StelaValue value = {};
@@ -785,7 +830,8 @@ static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NS
 	return value.value;
 }
 
-- (void)setSignaledValue:(uint64_t)value
+/* Raises the service's value; it never lowers. */
+- (void)raiseService:(uint64_t)value
 {
 	StelaEventValueRequest request = {.event = _handle, .value = value};
 	StelaEmpty nothing;
@@ -795,10 +841,52 @@ static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NS
 	}
 }
 
+/* The later of the two values, which both then hold. */
+- (uint64_t)signaledValue
+{
+	uint64_t service = [self serviceValue];
+	uint64_t kernel = [super signaledValue];
+	if (kernel > service) {
+		[self raiseService:kernel];
+		return kernel;
+	}
+	if (service > kernel) {
+		[super setSignaledValue:service];
+	}
+	return service;
+}
+
+- (void)setSignaledValue:(uint64_t)value
+{
+	[self raiseService:value];
+	[super setSignaledValue:value];
+}
+
+- (void)publish
+{
+	uint64_t service = [self serviceValue];
+	if (service > [super signaledValue]) {
+		[super setSignaledValue:service];
+	}
+}
+
+- (void)forwardAt:(uint64_t)value
+{
+	if ([super signaledValue] >= value) {
+		[self raiseService:value];
+		return;
+	}
+	[super notifyListener:forwarding()
+		      atValue:value
+			block:^(id event, uint64_t reached) {
+				[(StelaGPUEvent *)event raiseService:reached];
+			}];
+}
+
 /*
  * A CPU waiter may be what the GPU waits for in the same command buffer as the
- * signal, so no completion need ever arrive: the event is read every
- * millisecond, each read also submitting what the signal released.
+ * signal, so no completion need ever arrive: both values are read every
+ * millisecond, each service read also submitting what the signal released.
  */
 - (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds
 {
@@ -811,6 +899,12 @@ static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NS
 			return NO;
 		}
 		if (response.reached) {
+			[self publish];
+			return YES;
+		}
+		uint64_t kernel = [super signaledValue];
+		if (kernel >= value) {
+			[self raiseService:kernel];
 			return YES;
 		}
 		if (waited >= milliseconds) {
@@ -831,6 +925,35 @@ static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NS
 }
 
 @end
+
+/* Each foreign IOSurface event's twin on this device, by association. */
+static char twin;
+
+StelaGPUEvent *stela_event(StelaGPUDevice *device, id event)
+{
+	if ([event isKindOfClass:[StelaGPUEvent class]] && ((StelaGPUEvent *)event)->_device == device) {
+		return event;
+	}
+	if (![event isKindOfClass:[IOSurfaceSharedEvent class]]) {
+		return nil;
+	}
+	static os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+	os_unfair_lock_lock(&lock);
+	StelaGPUEvent *found = objc_getAssociatedObject(event, &twin);
+	os_unfair_lock_unlock(&lock);
+	if (found) {
+		return found;
+	}
+	StelaGPUEvent *made = [device newSharedEventWithMachPort:[event eventPort]];
+	os_unfair_lock_lock(&lock);
+	found = objc_getAssociatedObject(event, &twin);
+	if (!found && made) {
+		objc_setAssociatedObject(event, &twin, made, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+		found = made;
+	}
+	os_unfair_lock_unlock(&lock);
+	return found;
+}
 
 @implementation StelaGPUCounter
 @end
@@ -1139,6 +1262,12 @@ static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NS
 
 - (id)newSharedEvent
 {
+	return [self newSharedEventWithMachPort:0];
+}
+
+/* A new event on a new kernel event, or on the one `port` names. */
+- (id)newSharedEventWithMachPort:(mach_port_t)port
+{
 	StelaEmpty nothing = {};
 	StelaHandle response;
 	StelaFailure failure;
@@ -1146,7 +1275,12 @@ static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NS
 		stela_report("an event", &failure);
 		return nil;
 	}
-	return [[StelaGPUEvent alloc] initWithDevice:self handle:response.handle];
+	return [[StelaGPUEvent alloc] initWithDevice:self handle:response.handle port:port];
+}
+
+- (id)newSharedEventWithOptions:(uint64_t)options
+{
+	return [self newSharedEvent];
 }
 
 - (id)newCounterSampleBufferWithDescriptor:(id)descriptor error:(NSError **)error

@@ -250,8 +250,21 @@ mach_port_t IOSurfaceCreateMachPort(IOSurfaceRef surface);
 IOSurfaceRef IOSurfaceLookupFromMachPort(mach_port_t port);
 kern_return_t mach_port_deallocate(task_t task, mach_port_t name);
 
+/* A kernel event IOSurface keeps, which Apple's Metal shared events are and
+ * which IOSurface clients and the display share by its mach port. */
+@interface IOSurfaceSharedEvent : NSObject
+- (instancetype)initWithOptions:(uint64_t)options;
+- (instancetype)initWithMachPort:(mach_port_t)port;
+- (mach_port_t)eventPort;
+- (uint64_t)signaledValue;
+- (void)setSignaledValue:(uint64_t)value;
+- (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds;
+- (void)notifyListener:(id)listener atValue:(uint64_t)value block:(void (^)(id, uint64_t))block;
+@end
+
 #define OBJC_ASSOCIATION_RETAIN_NONATOMIC 1
 void objc_setAssociatedObject(id object, const void *key, id value, uintptr_t policy);
+id objc_getAssociatedObject(id object, const void *key);
 
 #define DISPATCH_TIME_FOREVER (~0ull)
 typedef struct dispatch_queue_attr_s *dispatch_queue_attr_t;

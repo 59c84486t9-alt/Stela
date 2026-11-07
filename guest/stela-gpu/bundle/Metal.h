@@ -320,6 +320,10 @@ STELA_PROTOCOLS(STELA_DECLARE_PROTOCOL)
 @interface MTLSharedEventHandle : NSObject
 @end
 
+@interface MTLSharedEventListener : NSObject
+- (instancetype)initWithDispatchQueue:(dispatch_queue_t)queue;
+@end
+
 @interface MTLSharedTextureHandle : NSObject
 @end
 

@@ -120,6 +120,7 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 - (id)newBufferWithLength:(NSUInteger)length options:(NSUInteger)options;
 /* A heap of `record`, which imports the task's memory for a CPU-visible one. */
 - (id)newHeapWithRecord:(StelaHeapDescriptorRecord)record;
+- (id)newSharedEventWithMachPort:(mach_port_t)port;
 @end
 
 @interface StelaGPUDevice (Pipelines)
@@ -259,8 +260,31 @@ NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state);
 @property(copy) NSString *label;
 @end
 
-@interface StelaGPUEvent : StelaGPUObject <MTLSharedEvent>
+/*
+ * A shared event is a kernel IOSurface event, as Apple's are, so its port
+ * reaches IOSurface clients, the display and other processes, and a service
+ * event the GPU signals and waits on. The two meet at what each side can
+ * observe: a command buffer's completion raises the kernel event to the
+ * service's value, a GPU wait the GPU alone cannot satisfy listens for the
+ * kernel event, and CPU reads, sets and waits take both.
+ */
+@interface StelaGPUEvent : IOSurfaceSharedEvent <MTLSharedEvent> {
+@public
+	StelaGPUDevice *_device;
+	uint64_t _handle;
+}
+@property(copy) NSString *label;
+/* A new kernel event, or the one `port` names, beside service event `handle`. */
+- (instancetype)initWithDevice:(StelaGPUDevice *)device handle:(uint64_t)handle port:(mach_port_t)port;
+- (StelaGPUDevice *)device;
+/* After a command buffer that signals it completes. */
+- (void)publish;
+/* Before the GPU waits for `value`. */
+- (void)forwardAt:(uint64_t)value;
 @end
+
+/* This device's event for `event`, any IOSurface event; nil for another kind. */
+StelaGPUEvent *stela_event(StelaGPUDevice *device, id event);
 
 @interface StelaGPULibrary : StelaGPUObject <MTLLibrary, MTLDynamicLibrary> {
 @public

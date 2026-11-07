@@ -1,11 +1,12 @@
 /*
  * Events and textures other processes open. A handle is Metal's own class, as
  * Apple's drivers' handles are, so a process decodes one before it loads any
- * driver: a texture's wraps an IOSurface, and an event's the mach port of one.
- * The surface carries, in its creation properties, the token the service
- * knows the object by, beside the registry ID and texture properties Metal's
- * handle and Apple's drivers record there. A handle keeps its object alive in
- * the task that made it; a token alone holds nothing.
+ * driver: a texture's wraps an IOSurface, and an event's the port of its
+ * kernel IOSurface event, which a process opening it shares through a twin.
+ * A texture's surface carries, in its creation properties, the token the
+ * service knows the texture by, beside the registry ID and texture properties
+ * Metal's handle and Apple's drivers record there. A handle keeps its object
+ * alive in the task that made it; a token alone holds nothing.
  */
 #include "Bundle.h"
 
@@ -103,52 +104,12 @@ static BOOL carried(IOSurfaceRef surface, NSString *key, void *bytes, NSUInteger
 	return YES;
 }
 
-/* What Metal's event handle reads of the event it is made from. */
-@interface StelaGPUEventShare : NSObject {
-@public
-	mach_port_t _port;
-	NSString *_label;
-}
-@end
-
-@implementation StelaGPUEventShare
-
-- (mach_port_t)eventPort
-{
-	return _port;
-}
-
-- (NSString *)label
-{
-	return _label;
-}
-
-- (uint64_t)labelTraceID
-{
-	return 0;
-}
-
-@end
-
 @implementation StelaGPUEvent (Shared)
 
+/* Metal's handle holds the kernel event's port, as Apple's does. */
 - (id)newSharedEventHandle
 {
-	StelaShare share;
-	if (!share_object(self, &share, "newSharedEventHandle")) {
-		return nil;
-	}
-	IOSurfaceRef surface = carrier(&share, NULL, "newSharedEventHandle");
-	if (!surface) {
-		return nil;
-	}
-	StelaGPUEventShare *event = [StelaGPUEventShare new];
-	event->_port = IOSurfaceCreateMachPort(surface);
-	event->_label = self.label;
-	/* The handle takes its own right to the port. */
-	MTLSharedEventHandle *handle = [[MTLSharedEventHandle alloc] initWithSharedEvent:event];
-	mach_port_deallocate(mach_task_self(), event->_port);
-	CFRelease(surface);
+	MTLSharedEventHandle *handle = [[MTLSharedEventHandle alloc] initWithSharedEvent:self];
 	if (handle) {
 		objc_setAssociatedObject(handle, &shared_object, self, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	}
@@ -186,28 +147,15 @@ static BOOL carried(IOSurfaceRef surface, NSString *key, void *bytes, NSUInteger
 
 @implementation StelaGPUDevice (Shared)
 
+/* Any process's event handle: a twin on the kernel event its port names. */
 - (id)newSharedEventWithHandle:(id)handle
 {
-	StelaFailure failure = {.reason = "that handle is not this device's"};
-	StelaShare share;
-	IOSurfaceRef surface = [handle isKindOfClass:[MTLSharedEventHandle class]]
-				       ? IOSurfaceLookupFromMachPort([handle eventPort])
-				       : NULL;
-	BOOL found = carried(surface, SHARE_KEY, &share, sizeof(share));
-	if (surface) {
-		CFRelease(surface);
-	}
-	if (!found || share.registry != [self registryID]) {
+	if (![handle isKindOfClass:[MTLSharedEventHandle class]]) {
+		StelaFailure failure = {.reason = "not an event handle"};
 		stela_report("newSharedEventWithHandle:", &failure);
 		return nil;
 	}
-	StelaShareToken request = {.token = {share.token[0], share.token[1]}};
-	StelaHandle response;
-	if (STELA_CALL(&_gate, OpenSharedEvent, &request, &response, &failure) != StelaStatusOk) {
-		stela_report("newSharedEventWithHandle:", &failure);
-		return nil;
-	}
-	StelaGPUEvent *event = [[StelaGPUEvent alloc] initWithDevice:self handle:response.handle];
+	StelaGPUEvent *event = [self newSharedEventWithMachPort:[handle eventPort]];
 	event.label = [handle label];
 	return event;
 }

@@ -102,6 +102,8 @@ static CFTimeInterval host_time(void)
 	dispatch_group_t _scheduling;
 	dispatch_group_t _completion;
 	NSMutableArray *_scheduledHandlers, *_completedHandlers;
+	/* The events it signals or waits on, whose kernel events it raises at completion. */
+	NSMutableArray *_events;
 	NSError *_error;
 	_Atomic(NSUInteger) _status;
 	NSUInteger _errorOptions;
@@ -130,6 +132,7 @@ static CFTimeInterval host_time(void)
 		_completion = dispatch_group_create();
 		_scheduledHandlers = [NSMutableArray arrayWithCapacity:2];
 		_completedHandlers = [NSMutableArray arrayWithCapacity:2];
+		_events = [NSMutableArray arrayWithCapacity:2];
 		_status = MTLCommandBufferStatusNotEnqueued;
 		_logState = logState;
 		if (logState) {
@@ -279,6 +282,15 @@ static CFTimeInterval host_time(void)
 - (void)didCompleteWith:(const StelaFailure *)failure
 {
 	[self didSchedule];
+	/* What the GPU signaled reaches the kernel events before anyone learns
+	 * the buffer completed. */
+	os_unfair_lock_lock(&_referencesLock);
+	NSArray *events = [_events copy];
+	[_events removeAllObjects];
+	os_unfair_lock_unlock(&_referencesLock);
+	for (NSUInteger i = 0; i < events.count; i++) {
+		[(StelaGPUEvent *)[events objectAtIndex:i] publish];
+	}
 	if (failure) {
 		_error = stela_command_error(failure, _encoderInfos, _serial != 0);
 	}
@@ -397,17 +409,41 @@ static CFTimeInterval host_time(void)
 	}];
 }
 
-- (void)encodeSignalEvent:(StelaGPUEvent *)event value:(uint64_t)value
+/* This device's event for `event`, which the buffer holds to completion. */
+- (StelaGPUEvent *)eventFor:(id)event what:(const char *)what
 {
-	[self use:event];
-	StelaEventCommand command = {.event = event->_handle, .value = value};
+	StelaGPUEvent *ours = stela_event(_device, event);
+	if (!ours) {
+		StelaFailure failure = {.reason = "not an event: neither this device's nor an IOSurface event"};
+		stela_report(what, &failure);
+		return nil;
+	}
+	os_unfair_lock_lock(&_referencesLock);
+	if ([_events indexOfObjectIdenticalTo:ours] == NSNotFound) {
+		[_events addObject:ours];
+	}
+	os_unfair_lock_unlock(&_referencesLock);
+	return ours;
+}
+
+- (void)encodeSignalEvent:(id)event value:(uint64_t)value
+{
+	StelaGPUEvent *ours = [self eventFor:event what:"encodeSignalEvent:value:"];
+	if (!ours) {
+		return;
+	}
+	StelaEventCommand command = {.event = ours->_handle, .value = value};
 	stela_stream_entry(&_stream, StelaCommandBufferCodeSignalEvent, &command, sizeof(command), NULL, 0);
 }
 
-- (void)encodeWaitForEvent:(StelaGPUEvent *)event value:(uint64_t)value
+- (void)encodeWaitForEvent:(id)event value:(uint64_t)value
 {
-	[self use:event];
-	StelaEventCommand command = {.event = event->_handle, .value = value};
+	StelaGPUEvent *ours = [self eventFor:event what:"encodeWaitForEvent:value:"];
+	if (!ours) {
+		return;
+	}
+	[ours forwardAt:value];
+	StelaEventCommand command = {.event = ours->_handle, .value = value};
 	stela_stream_entry(&_stream, StelaCommandBufferCodeWaitForEvent, &command, sizeof(command), NULL, 0);
 }
 
