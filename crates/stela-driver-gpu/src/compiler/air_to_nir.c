@@ -137,6 +137,9 @@ struct translator {
     * elements of element bytes, row by row. */
    nir_variable *imageblock;
    unsigned imageblock_width, imageblock_height, imageblock_element;
+   /* The explicit imageblock's dimensions as the prelude defines them, at
+    * most imageblock_width x imageblock_height elements. */
+   nir_def *imageblock_extent;
    /* A tile function's STELA_AIR_TILE, and whether its threadgroup memory
     * persists, which its exit block copies out. */
    nir_def *tile;
@@ -1168,16 +1171,28 @@ payload_argument(struct translator *t, LLVMValueRef param, const struct stela_ai
 
 /* A kernel's explicit imageblock of element-byte elements, which Metal
  * keeps in tile memory: threadgroup memory here, of the dimensions the
- * dispatch's encoder sets, or the threadgroup's width and height. */
+ * dispatch's encoder sets, or the threadgroup's width and height. A dynamic
+ * kernel's threadgroups take their shape from its dispatches, so its
+ * memory holds as many elements as a threadgroup does threads, and its
+ * dimensions are the dispatch's. */
 static bool
 imageblock_memory(struct translator *t, unsigned element)
 {
    const unsigned *given = t->options->imageblock_size;
+   bool dispatched = t->options->dynamic_shape && !given[0];
    unsigned width = given[0] ? given[0] : t->options->workgroup_size[0];
    unsigned height = given[0] ? given[1] : t->options->workgroup_size[1];
-   if (t->options->dynamic_shape || !width || !height || width > UINT16_MAX || height > UINT16_MAX)
-      return fail(t, STELA_AIR_ARGUMENT, "an imageblock of %ux%u in a kernel %s", width, height,
-                  t->options->dynamic_shape ? "its dispatches shape" : "without its dimensions");
+   if (!width || !height || width > UINT16_MAX || height > UINT16_MAX)
+      return fail(t, STELA_AIR_ARGUMENT, "an imageblock of %ux%u in a kernel without its dimensions",
+                  width, height);
+   if (dispatched) {
+      nir_def *shape = threadgroup_shape(t);
+      if (!shape)
+         return false;
+      t->imageblock_extent = nir_trim_vector(&t->b, shape, 2);
+   } else {
+      t->imageblock_extent = nir_imm_ivec2(&t->b, (int)width, (int)height);
+   }
    t->imageblock = shared_resource(t, (uint64_t)width * height * element, 16);
    t->imageblock_width = width;
    t->imageblock_height = height;
@@ -4821,7 +4836,7 @@ imageblock_call(struct translator *t, LLVMValueRef inst, const char *name, size_
    if (!data) {
       if (LLVMGetNumArgOperands(inst) || LLVMTypeOf(inst) != LLVMInt16TypeInContext(t->context))
          return fail(t, STELA_AIR_TYPE, "an imageblock dimension of an unknown form");
-      return put_value(t, inst, nir_imm_intN_t(b, width ? t->imageblock_width : t->imageblock_height, 16), 0);
+      return put_value(t, inst, nir_u2u16(b, nir_channel(b, t->imageblock_extent, width ? 0 : 1)), 0);
    }
    /* The element at a position, of the first data and sample. */
    LLVMValueRef position = LLVMGetNumArgOperands(inst) == 3 ? LLVMGetOperand(inst, 0) : NULL;
@@ -4854,7 +4869,7 @@ imageblock_call(struct translator *t, LLVMValueRef inst, const char *name, size_
    if (LLVMConstIntGetZExtValue(index) || LLVMConstIntGetZExtValue(sample))
       return fail(t, STELA_AIR_INSTRUCTION, "imageblock data of a later index or sample");
    at = nir_u2u32(b, at);
-   nir_def *pixel = nir_iadd(b, nir_imul_imm(b, nir_channel(b, at, 1), t->imageblock_width),
+   nir_def *pixel = nir_iadd(b, nir_imul(b, nir_channel(b, at, 1), nir_channel(b, t->imageblock_extent, 0)),
                              nir_channel(b, at, 0));
    nir_def *offset = nir_u2u64(b, nir_imul_imm(b, pixel, t->imageblock_element));
    if (!put_value(t, inst, offset, STELA_AIR_READ_WRITE))
@@ -4874,8 +4889,8 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
       .b = &t->b, .options = t->options, .error = t->error, .translator = t,
       .operand = texture_operand, .texture = texture_argument, .sampler = sampler_argument,
       .load_word = texture_load_word, .store_word = texture_store_word, .store_at = call_store,
-      .imageblock_width = t->imageblock ? t->imageblock_width : 0,
-      .imageblock_height = t->imageblock_height, .imageblock_load = imageblock_load,
+      .imageblock_extent = t->imageblock ? t->imageblock_extent : NULL,
+      .imageblock_load = imageblock_load,
       .repeat = repeat,
    };
    /* A texture chosen with null textures is null where the choice is not

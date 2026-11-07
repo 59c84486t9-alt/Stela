@@ -814,13 +814,29 @@ imageblocks_live_in_threadgroup_memory(void)
    assert(shader);
    assert(shader->info.shared_size == 8 * 2 * 8);
    ralloc_free(shader);
-   /* Only the block's origin starts a slice, and a dynamic kernel has no
-    * dimensions to give it. */
+   /* Only the block's origin starts a slice. */
    const char *offset = replace(imageblock_body, "i1 true, <2 x i16> zeroinitializer",
                                 "i1 true, <2 x i16> <i16 1, i16 0>");
    assert(!kernel_with(offset, imageblock_metadata, &o, &error));
+   /* A dynamic kernel's imageblock keeps the encoder's dimensions, or
+    * without them holds a threadgroup's threads and takes its dispatch's
+    * threadgroup shape. */
    o.dynamic_shape = true;
-   assert(!kernel_with(imageblock_body, imageblock_metadata, &o, &error));
+   o.load_device_value = stela_metal_load_device_value;
+   o.workgroup_size[0] = 64, o.workgroup_size[1] = 1;
+   shader = kernel_with(imageblock_body, imageblock_metadata, &o, &error);
+   assert(shader);
+   assert(shader->info.shared_size == 8 * 2 * 8);
+   ralloc_free(shader);
+   o.imageblock_size[0] = 0, o.imageblock_size[1] = 0;
+   shader = kernel_with(imageblock_body, imageblock_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "dispatched imageblock: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "dispatched imageblock");
+   assert(shader->info.shared_size == 64 * 8);
+   assert(count(shader).store);
+   ralloc_free(shader);
 }
 
 /* A tile function's implicit imageblock, its threadgroup buffer and its

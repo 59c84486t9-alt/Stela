@@ -1038,7 +1038,7 @@ slice_pixel(void *data, nir_def *index)
    struct call *call = slice->call;
    nir_builder *b = call->b;
    nir_def *x = nir_umod(b, index, slice->width), *y = nir_udiv(b, index, slice->width);
-   nir_def *pixel = nir_iadd(b, nir_imul_imm(b, y, call->c->imageblock_width), x);
+   nir_def *pixel = nir_iadd(b, nir_imul(b, y, nir_channel(b, call->c->imageblock_extent, 0)), x);
    nir_def *value = call->c->imageblock_load(call->c->translator, slice->member, pixel,
                                              slice->components, slice->bits);
    /* Derefs stay in the block that uses them. */
@@ -1081,7 +1081,7 @@ slice_write(struct call *call, const char *member_type, size_t member_type_bytes
    if (!storage(texture) || texture->depth || call->shape->dim != GLSL_SAMPLER_DIM_2D ||
        call->shape->array)
       return fail(call, "imageblock slices write 2D color textures with write access");
-   if (!c->imageblock_width || !c->imageblock_load || !c->repeat)
+   if (!c->imageblock_extent || !c->imageblock_load || !c->repeat)
       return fail(call, "an imageblock slice write in a function without an explicit imageblock");
    if (!slice_type(member_type, member_type_bytes, &slice.components, &slice.floating, &slice.bits))
       return fail(call, "an imageblock slice of member type %.*s", (int)member_type_bytes,
@@ -1121,7 +1121,7 @@ slice_write(struct call *call, const char *member_type, size_t member_type_bytes
    if (!deref)
       return false;
    nir_builder *b = call->b;
-   nir_def *extent = nir_imm_ivec2(b, (int)c->imageblock_width, (int)c->imageblock_height);
+   nir_def *extent = c->imageblock_extent;
    if (sized)
       extent = nir_umin(b, nir_u2u32(b, size), extent);
    nir_def *texels = nir_image_deref_size(b, 2, 32, &deref->def, nir_imm_int(b, 0),

@@ -26,10 +26,11 @@ struct stela_air_texture_context {
    /* Stores value at byte offset from what a pointer operand addresses;
     * false after reporting why. */
    bool (*store_at)(void *translator, LLVMValueRef pointer, nir_def *offset, nir_def *value);
-   /* A kernel's explicit imageblock's dimensions, zero without one, and
-    * the element at pixel y * width + x of the member a slice operand
-    * points to; NULL after reporting why. */
-   unsigned imageblock_width, imageblock_height;
+   /* A kernel's explicit imageblock's dimensions, a 32-bit uvec2 the
+    * shader's prelude defines, NULL without one, and the element at pixel
+    * y * width + x of the member a slice operand points to; NULL after
+    * reporting why. */
+   nir_def *imageblock_extent;
    nir_def *(*imageblock_load)(void *translator, LLVMValueRef slice, nir_def *pixel,
                                unsigned components, unsigned bits);
    /* Emits body count times in a loop, with each iteration's 32-bit index;
