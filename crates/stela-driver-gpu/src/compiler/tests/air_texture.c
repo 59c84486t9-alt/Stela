@@ -804,8 +804,10 @@ static const char *imageblock_body =
    " <2 x i16> <i16 1, i16 1>, i16 0, i1 false, i32 2)\n"
    "ret void\n}\n";
 
-/* The imageblock is threadgroup memory of its dimensions' elements, and
- * the slice write a loop of image stores. */
+/* The imageblock is threadgroup memory of the encoder's dimensions'
+ * elements, and the slice write a loop of image stores. Without dimensions
+ * it is 0 x 0, as on Apple GPUs, over an element for each thread of a
+ * threadgroup's first row. */
 static void
 imageblocks_live_in_threadgroup_memory(void)
 {
@@ -813,12 +815,13 @@ imageblocks_live_in_threadgroup_memory(void)
    struct stela_air_options o = options(&primary, true);
    o.workgroup_size[0] = 4, o.workgroup_size[1] = 4;
    o.max_threadgroup_bytes = 32768;
+   o.imageblock_size[0] = 8, o.imageblock_size[1] = 2;
    nir_shader *shader = kernel_with(imageblock_body, imageblock_metadata, &o, &error);
    if (!shader)
       fprintf(stderr, "imageblock: %u %s\n", error.kind, error.detail);
    assert(shader);
    nir_validate_shader(shader, "imageblock kernel");
-   assert(shader->info.shared_size == 4 * 4 * 8);
+   assert(shader->info.shared_size == 8 * 2 * 8);
    assert(count(shader).store);
    bool looped = false;
    nir_foreach_function_impl(impl, shader) {
@@ -829,34 +832,25 @@ imageblocks_live_in_threadgroup_memory(void)
    }
    assert(looped);
    ralloc_free(shader);
-   /* The encoder's dimensions size it instead. */
-   o.imageblock_size[0] = 8, o.imageblock_size[1] = 2;
-   shader = kernel_with(imageblock_body, imageblock_metadata, &o, &error);
-   assert(shader);
-   assert(shader->info.shared_size == 8 * 2 * 8);
-   ralloc_free(shader);
    /* Only the block's origin starts a slice. */
    const char *offset = replace(imageblock_body, "i1 true, <2 x i16> zeroinitializer",
                                 "i1 true, <2 x i16> <i16 1, i16 0>");
    assert(!kernel_with(offset, imageblock_metadata, &o, &error));
-   /* A dynamic kernel's imageblock keeps the encoder's dimensions, or
-    * without them holds a threadgroup's threads and takes its dispatch's
-    * threadgroup shape. */
+   /* Unsized, in a kernel of a fixed and of a dynamic threadgroup shape. */
+   o.imageblock_size[0] = 0, o.imageblock_size[1] = 0;
+   shader = kernel_with(imageblock_body, imageblock_metadata, &o, &error);
+   assert(shader);
+   nir_validate_shader(shader, "unsized imageblock");
+   assert(shader->info.shared_size == 4 * 8);
+   ralloc_free(shader);
    o.dynamic_shape = true;
    o.load_device_value = stela_metal_load_device_value;
    o.workgroup_size[0] = 64, o.workgroup_size[1] = 1;
    shader = kernel_with(imageblock_body, imageblock_metadata, &o, &error);
-   assert(shader);
-   assert(shader->info.shared_size == 8 * 2 * 8);
-   ralloc_free(shader);
-   o.imageblock_size[0] = 0, o.imageblock_size[1] = 0;
-   shader = kernel_with(imageblock_body, imageblock_metadata, &o, &error);
    if (!shader)
-      fprintf(stderr, "dispatched imageblock: %u %s\n", error.kind, error.detail);
+      fprintf(stderr, "dynamic imageblock: %u %s\n", error.kind, error.detail);
    assert(shader);
-   nir_validate_shader(shader, "dispatched imageblock");
    assert(shader->info.shared_size == 64 * 8);
-   assert(count(shader).store);
    ralloc_free(shader);
 }
 

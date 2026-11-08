@@ -845,6 +845,29 @@ fn imageblocks(plan: &mut Plan, library: &str) {
             ),
         );
     }
+    if plan.has(SOURCE, "imageblock_dimensions") {
+        // Apple GPUs give a kernel's imageblock no dimensions of their own:
+        // without the encoder's it is 0 x 0, not the threadgroup's size.
+        for (name, size) in [("unsized", None), ("sized", Some([16, 8]))] {
+            let mut case = Case::compute(
+                &format!("compute.imageblock.dimensions.{name}"),
+                library,
+                "imageblock_dimensions",
+                [1, 1, 1],
+                [16, 16, 1],
+            )
+            .buffer(Buffer::zeroed("out", 0, 8))
+            .output(Output::exact(
+                "out",
+                Dtype::U32,
+                u32s(&size.unwrap_or([0, 0])),
+            ));
+            if let Some(size) = size {
+                case = case.set("imageblock", json!(size));
+            }
+            plan.add(case);
+        }
+    }
     if plan.has(SOURCE, "imageblock_member") {
         let expected = texels(8, 4, true, |x, y| {
             ((2..5).contains(&x) && (1..3).contains(&y))

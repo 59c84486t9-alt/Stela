@@ -321,6 +321,21 @@ kernel void imageblock_tiles(imageblock<ImageblockPixel, imageblock_layout_expli
 }
 #endif
 
+#ifndef SKIP_imageblock_dimensions
+// An explicit imageblock's dimensions: the encoder's, or 0 x 0 without them.
+struct ImageblockSample { half4 color; };
+kernel void imageblock_dimensions(imageblock<ImageblockSample, imageblock_layout_explicit> block,
+                                  device uint *out [[buffer(0)]],
+                                  ushort2 tid [[thread_position_in_threadgroup]])
+{
+    block.data(tid)->color = half4(1);
+    if (tid.x == 0 && tid.y == 0) {
+        out[0] = block.get_width();
+        out[1] = block.get_height();
+    }
+}
+#endif
+
 #ifndef SKIP_imageblock_member
 // A member of a larger element, a 3x2 region of the block, written at an
 // offset.

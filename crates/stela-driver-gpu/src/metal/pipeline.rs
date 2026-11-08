@@ -1127,11 +1127,10 @@ pub fn compute_variant(
         bytes <= plan.max_threadgroup_memory_length,
         "threadgroup memory exceeds the device limit",
     )?;
-    // Only a kernel with an imageblock compiles for its size, which defaults
-    // to the threadgroup's width and height.
+    // Only a kernel with an imageblock compiles for its size, which is 0 x 0
+    // until the encoder sets one, as on Apple GPUs.
     let workgroup = dimensions.map(|size| size as u32);
-    let imageblock_size = imageblock_size
-        .filter(|&size| plan.imageblock_bytes != 0 && size != [workgroup[0], workgroup[1]]);
+    let imageblock_size = imageblock_size.filter(|_| plan.imageblock_bytes != 0);
     Ok(Specialization {
         stage_in: plan.stage_in.clone(),
         workgroup_size: Some(workgroup),

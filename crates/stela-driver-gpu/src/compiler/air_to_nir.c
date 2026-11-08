@@ -137,9 +137,9 @@ struct translator {
    /* A kernel's explicit imageblock: threadgroup memory of width by height
     * elements of element bytes, row by row. */
    nir_variable *imageblock;
-   unsigned imageblock_width, imageblock_height, imageblock_element;
-   /* The explicit imageblock's dimensions as the prelude defines them, at
-    * most imageblock_width x imageblock_height elements. */
+   unsigned imageblock_elements, imageblock_element;
+   /* The explicit imageblock's dimensions, as the dispatch's encoder sets
+    * them, within its imageblock_elements elements. */
    nir_def *imageblock_extent;
    /* A tile function's STELA_AIR_TILE, and whether its threadgroup memory
     * persists, which its exit block copies out. */
@@ -1172,31 +1172,21 @@ payload_argument(struct translator *t, LLVMValueRef param, const struct stela_ai
 
 /* A kernel's explicit imageblock of element-byte elements, which Metal
  * keeps in tile memory: threadgroup memory here, of the dimensions the
- * dispatch's encoder sets, or the threadgroup's width and height. A dynamic
- * kernel's threadgroups take their shape from its dispatches, so its
- * memory holds as many elements as a threadgroup does threads, and its
- * dimensions are the dispatch's. */
+ * dispatch's encoder sets. Without them it is 0 x 0, as on Apple GPUs, and
+ * its memory holds an element for each thread of a threadgroup's first row,
+ * where a 0-wide imageblock's elements lie. */
 static bool
 imageblock_memory(struct translator *t, unsigned element)
 {
    const unsigned *given = t->options->imageblock_size;
-   bool dispatched = t->options->dynamic_shape && !given[0];
-   unsigned width = given[0] ? given[0] : t->options->workgroup_size[0];
-   unsigned height = given[0] ? given[1] : t->options->workgroup_size[1];
-   if (!width || !height || width > UINT16_MAX || height > UINT16_MAX)
-      return fail(t, STELA_AIR_ARGUMENT, "an imageblock of %ux%u in a kernel without its dimensions",
-                  width, height);
-   if (dispatched) {
-      nir_def *shape = threadgroup_shape(t);
-      if (!shape)
-         return false;
-      t->imageblock_extent = nir_trim_vector(&t->b, shape, 2);
-   } else {
-      t->imageblock_extent = nir_imm_ivec2(&t->b, (int)width, (int)height);
-   }
-   t->imageblock = shared_resource(t, (uint64_t)width * height * element, 16);
-   t->imageblock_width = width;
-   t->imageblock_height = height;
+   unsigned width = given[0], height = given[0] ? given[1] : 0;
+   unsigned elements = given[0] ? width * height : t->options->workgroup_size[0];
+   if (width > UINT16_MAX || height > UINT16_MAX || (given[0] && !height) || !elements)
+      return fail(t, STELA_AIR_ARGUMENT, "an imageblock of %ux%u in a kernel of %u threads", width,
+                  height, t->options->workgroup_size[0]);
+   t->imageblock_extent = nir_imm_ivec2(&t->b, (int)width, (int)height);
+   t->imageblock = shared_resource(t, (uint64_t)elements * element, 16);
+   t->imageblock_elements = elements;
    t->imageblock_element = element;
    return t->imageblock != NULL;
 }
@@ -4805,7 +4795,7 @@ imageblock_authority(struct translator *t, struct value *authority)
    *authority = (struct value){.access = STELA_AIR_READ_WRITE, .pointer_root = t->imageblock_root};
    if (t->imageblock) {
       authority->storage = t->imageblock;
-      authority->storage_size = t->imageblock_width * t->imageblock_height * t->imageblock_element;
+      authority->storage_size = t->imageblock_elements * t->imageblock_element;
    }
    return authority;
 }

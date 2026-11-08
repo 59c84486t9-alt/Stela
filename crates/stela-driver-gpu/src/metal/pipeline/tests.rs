@@ -409,6 +409,30 @@ fn mesh_pipelines_keep_the_fragment_for_their_variants() {
     assert!(mesh_render_pipeline(&capabilities(), &descriptor).is_err());
 }
 
+/// A kernel's imageblock compiles for the encoder's size, even the
+/// threadgroup's own, and is 0 x 0 without one, as on Apple GPUs.
+#[test]
+fn compute_variants_keep_the_encoders_imageblock_size() {
+    let capabilities = capabilities();
+    let kernel = shader(Stage::Kernel, 1, |interface| interface.imageblock_bytes = 8);
+    let descriptor = ComputePipelineDescriptor {
+        compute_function: &kernel.interface,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 0,
+        stage_input: None,
+    };
+    let plan = compute_pipeline(&capabilities, &descriptor).unwrap();
+    let threads = Size {
+        width: 32,
+        height: 32,
+        depth: 1,
+    };
+    let variant = |size| compute_variant(&plan, &kernel.interface, threads, &[], size).unwrap();
+    assert_eq!(variant(Some([32, 32])).imageblock_size, Some([32, 32]));
+    assert_eq!(variant(Some([16, 8])).imageblock_size, Some([16, 8]));
+    assert_eq!(variant(None).imageblock_size, None);
+}
+
 #[test]
 fn compute_variants_validate_dispatch_shape_and_memory() {
     let capabilities = capabilities();
