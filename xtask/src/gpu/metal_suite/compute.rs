@@ -545,6 +545,30 @@ fn simd(plan: &mut Plan, library: &str) {
             .requires(&[], &["simd_reduction"]),
         );
     }
+    if plan.has(SOURCE, "simdgroup_element_layout") {
+        // Apple GPUs give lane l row 4 (l / 16) + (l / 2) % 4 and columns
+        // 4 ((l / 8) % 2) + 2 (l % 2) and the next.
+        let indices: Vec<f64> = (0..64).map(f64::from).collect();
+        let expected: Vec<f64> = (0..32u32)
+            .flat_map(|l| {
+                let row = 4 * (l / 16) + (l / 2) % 4;
+                let column = 4 * ((l / 8) % 2) + 2 * (l % 2);
+                [row * 8 + column, row * 8 + column + 1].map(f64::from)
+            })
+            .collect();
+        plan.add(
+            Case::compute(
+                "compute.simdgroup_matrix.element_layout",
+                library,
+                "simdgroup_element_layout",
+                [32, 1, 1],
+                [32, 1, 1],
+            )
+            .buffer(Buffer::data("in", 0, f32s(&indices)))
+            .buffer(Buffer::zeroed("out", 1, 64 * 4))
+            .output(Output::exact("out", Dtype::F32, f32s(&expected))),
+        );
+    }
     if plan.has(SOURCE, "simdgroup_matrix_bfloat") {
         simdgroup_matrix_bfloat(plan, library);
     }

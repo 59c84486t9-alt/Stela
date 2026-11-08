@@ -16,8 +16,9 @@
  *
  * <m> is "v64f32", "v64f16" or "v64bf16" and <t> its element. An AIR matrix
  * is opaque storage whose elements 0 and 1 are the thread's
- * thread_elements(). Each of a SIMD-group's 32 lanes holds two: lane l the
- * elements of row l / 4 at columns 2 (l % 4) and 2 (l % 4) + 1. Memory holds
+ * thread_elements(). Each of a SIMD-group's 32 lanes holds two, as on Apple
+ * GPUs: lane l those of row 4 (l / 16) + (l / 2) % 4 at columns
+ * 4 ((l / 8) % 2) + 2 (l % 2) and the next. Memory holds
  * column c and row r at element (origin.x + c) strides.x + (origin.y + r)
  * strides.y; the extent, the elements a row and the matrix's rows in that
  * order, bounds nothing. A product gathers each row of a and column of b by shuffles and
@@ -62,8 +63,20 @@ static void
 position(nir_builder *b, nir_def **row, nir_def **column)
 {
    nir_def *lane = nir_load_subgroup_invocation(b);
-   *row = nir_ushr_imm(b, lane, 2);
-   *column = nir_ishl_imm(b, nir_iand_imm(b, lane, 3), 1);
+   *row = nir_iadd(b, nir_ishl_imm(b, nir_ushr_imm(b, lane, 4), 2),
+                   nir_iand_imm(b, nir_ushr_imm(b, lane, 1), 3));
+   *column = nir_iadd(b, nir_ishl_imm(b, nir_iand_imm(b, nir_ushr_imm(b, lane, 3), 1), 2),
+                      nir_ishl_imm(b, nir_iand_imm(b, lane, 1), 1));
+}
+
+/* The lane holding a row's columns 2 pair and 2 pair + 1. */
+static nir_def *
+lane_of(nir_builder *b, nir_def *row, nir_def *pair)
+{
+   nir_def *lane = nir_iadd(b, nir_ishl_imm(b, nir_ushr_imm(b, row, 2), 4),
+                            nir_ishl_imm(b, nir_ushr_imm(b, pair, 1), 3));
+   lane = nir_iadd(b, lane, nir_ishl_imm(b, nir_iand_imm(b, row, 3), 1));
+   return nir_iadd(b, lane, nir_iand_imm(b, pair, 1));
 }
 
 /* A pair of `element`s in single precision. */
@@ -98,9 +111,8 @@ from_lane(nir_builder *b, nir_def *pair, nir_def *source)
                    nir_shuffle(b, nir_channel(b, pair, 1), source));
 }
 
-/* a * x + c: this lane's row of a meets its two columns of x. Lane 4 r + j
- * holds a's row r at columns 2 j and 2 j + 1, and lane 4 k + l % 4 holds
- * x's row k at this lane's columns. */
+/* a * x + c: this lane's row of a meets its two columns of x, each pair of
+ * a's row and x's row k at this lane's columns from the lane holding it. */
 static nir_def *
 multiply_accumulate(nir_builder *b, LLVMTypeRef result, LLVMValueRef call, nir_def *a, nir_def *x,
                     nir_def *c)
@@ -112,9 +124,9 @@ multiply_accumulate(nir_builder *b, LLVMTypeRef result, LLVMValueRef call, nir_d
    LLVMTypeKind x_kind = element_kind(LLVMTypeOf(LLVMGetOperand(call, 1)));
    nir_def *sum = widen(b, c, element_kind(LLVMTypeOf(LLVMGetOperand(call, 2))));
    for (unsigned j = 0; j < 4; j++) {
-      nir_def *pair = widen(b, from_lane(b, a, nir_iadd_imm(b, nir_ishl_imm(b, row, 2), j)), a_kind);
+      nir_def *pair = widen(b, from_lane(b, a, lane_of(b, row, nir_imm_int(b, j))), a_kind);
       for (unsigned h = 0; h < 2; h++) {
-         nir_def *columns = widen(b, from_lane(b, x, nir_iadd_imm(b, quad, 4 * (2 * j + h))), x_kind);
+         nir_def *columns = widen(b, from_lane(b, x, lane_of(b, nir_imm_int(b, 2 * j + h), quad)), x_kind);
          sum = nir_ffma(b, nir_channel(b, pair, h), columns, sum);
       }
    }

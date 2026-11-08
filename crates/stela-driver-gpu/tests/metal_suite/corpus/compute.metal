@@ -303,6 +303,20 @@ kernel void simdgroup_elements(device const float *in [[buffer(0)]], device floa
 }
 #endif
 
+#ifndef SKIP_simdgroup_element_layout
+// Which elements of a SIMD-group matrix each lane holds: a matrix of its
+// element indices, each lane writing its two.
+kernel void simdgroup_element_layout(device const float *in [[buffer(0)]], device float *out [[buffer(1)]],
+                                     uint l [[thread_index_in_simdgroup]])
+{
+    simdgroup_float8x8 m;
+    simdgroup_load(m, in, 8);
+    auto held = m.thread_elements();
+    out[2 * l] = held[0];
+    out[2 * l + 1] = held[1];
+}
+#endif
+
 #ifndef SKIP_imageblock_tiles
 // Each thread fills its element of an explicit imageblock, then one thread
 // writes the whole block where its threadgroup's tile lies.
