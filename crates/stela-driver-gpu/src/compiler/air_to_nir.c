@@ -32,8 +32,9 @@ struct air_block {
    LLVMValueRef incoming_phi, incoming_value; /* Deduplicate one PHI in linear time. */
 };
 
-/* The most roots one pointer chooses among. */
-#define POINTER_CHOICES 8u
+/* The most roots one pointer chooses among: each buffer a function binds,
+ * of Metal's 31, and null. */
+#define POINTER_CHOICES 32u
 
 /* The roots a pointer may be at run time, as a generic pointer cast from
  * different address spaces or a join of different resources is: arguments,

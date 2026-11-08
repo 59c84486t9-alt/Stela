@@ -8,6 +8,7 @@
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #ifdef STELA_AIR_TEST_NAK
 #include "air_test_nak.h"
@@ -83,7 +84,7 @@ static nir_shader *
 translate(const char *globals, const char *body, const nir_shader_compiler_options *options,
           stela_air_bind_buffer bind, const struct limits *limits, struct stela_air_error *error)
 {
-   char definition[4096], declarations[4096];
+   char definition[16384], declarations[4096];
    snprintf(definition, sizeof(definition), "define void @kernel(ptr addrspace(1) %%out) {\n%s}\n", body);
    snprintf(declarations, sizeof(declarations), "%s%s", globals, intrinsics);
    return translate_kernel(declarations, definition, metadata, options, bind, limits, error);
@@ -315,6 +316,41 @@ pointer_slots_load_by_choice(void)
             "%p = load ptr addrspace(1), ptr %s1, align 8\n"
             "store i32 7, ptr addrspace(1) %p, align 4\nret void\n");
    refused("", body, &defaults, STELA_AIR_TYPE);
+}
+
+/* A pointer chosen among `roots` allocations by a loaded index, through
+ * which a value is read and stored. */
+static char *
+chosen_among(unsigned roots)
+{
+   char *body = malloc(roots * 160 + 256);
+   assert(body);
+   char *at = body;
+   at += sprintf(at, "%%i = load i32, ptr addrspace(1) %%out, align 4\n");
+   for (unsigned k = 0; k < roots; k++)
+      at += sprintf(at, "%%a%u = alloca i32, align 4\nstore i32 %u, ptr %%a%u, align 4\n", k, k, k);
+   at += sprintf(at, "%%p0 = getelementptr i32, ptr %%a0, i64 0\n");
+   for (unsigned k = 1; k < roots; k++)
+      at += sprintf(at, "%%c%u = icmp eq i32 %%i, %u\n%%p%u = select i1 %%c%u, ptr %%a%u, ptr %%p%u\n",
+                    k, k, k, k, k, k - 1);
+   sprintf(at, "%%v = load i32, ptr %%p%u, align 4\nstore i32 %%v, ptr addrspace(1) %%out, align 4\n"
+               "ret void\n", roots - 1);
+   return body;
+}
+
+/* A pointer chooses among as many roots as a function binds buffers, and
+ * null: here allocations, each a guarded access. */
+static void
+pointers_choose_among_every_binding(void)
+{
+   char *body = chosen_among(13);
+   nir_shader *shader = compiled("", body);
+   assert(count(shader, nir_intrinsic_store_global) == 1);
+   ralloc_free(shader);
+   free(body);
+   body = chosen_among(33);
+   refused("", body, &defaults, STELA_AIR_LIMIT);
+   free(body);
 }
 
 /* Generic pointers, cast from device and thread memory: a choice between
@@ -610,6 +646,7 @@ main(void)
    null_joins_device_addresses();
    folded_offsets_off_null_reach_no_memory();
    pointer_slots_load_by_choice();
+   pointers_choose_among_every_binding();
    generic_pointers_choose_their_memory();
    constant_data_lowers_to_load_constant();
    kernels_read_constant_buffers();
