@@ -476,7 +476,7 @@ simdgroup_copies_complete_where_they_are_made(void)
       "%slots = alloca [2 x ptr], align 8\n"
       "%e = call ptr @air.simdgroup_async_copy_2d.p3i8.p1i8(i64 4, i64 4, ptr addrspace(3) @s,"
       " i64 8, i64 1, <2 x i64> <i64 8, i64 8>, ptr addrspace(1) %out, i64 13, i64 1,"
-      " <2 x i64> <i64 5, i64 3>, <2 x i64> zeroinitializer, i32 %MODE)\n"
+      " <2 x i64> <i64 5, i64 3>, <2 x i64> <i64 -2, i64 1>, i32 %MODE)\n"
       "%f = call ptr @air.simdgroup_async_copy_1d.p3i8.p1i8(i64 4, i64 4, ptr addrspace(3) @s,"
       " ptr addrspace(1) %out, i64 20)\n"
       "%z = call ptr @air.get_null_simdgroup_event()\n"
@@ -516,13 +516,10 @@ simdgroup_copies_complete_where_they_are_made(void)
       ralloc_free(shader);
    }
    const char *refusals[] = {
-      /* Elements of a dynamic size, at an offset, or clamped otherwise. */
+      /* Elements of a dynamic size, or clamped otherwise. */
       "%n = load i32, ptr addrspace(1) %out, align 4\n%w = zext i32 %n to i64\n"
       "%e = call ptr @air.simdgroup_async_copy_1d.p3i8.p1i8(i64 %w, i64 4, ptr addrspace(3) @s,"
       " ptr addrspace(1) %out, i64 4)\nret void\n",
-      "%e = call ptr @air.simdgroup_async_copy_2d.p3i8.p1i8(i64 4, i64 4, ptr addrspace(3) @s,"
-      " i64 8, i64 1, <2 x i64> <i64 8, i64 8>, ptr addrspace(1) %out, i64 13, i64 1,"
-      " <2 x i64> <i64 5, i64 3>, <2 x i64> <i64 1, i64 0>, i32 0)\nret void\n",
       "%e = call ptr @air.simdgroup_async_copy_2d.p3i8.p1i8(i64 4, i64 4, ptr addrspace(3) @s,"
       " i64 8, i64 1, <2 x i64> <i64 8, i64 8>, ptr addrspace(1) %out, i64 13, i64 1,"
       " <2 x i64> <i64 5, i64 3>, <2 x i64> zeroinitializer, i32 2)\nret void\n",

@@ -5529,14 +5529,16 @@ simdgroup_events(struct translator *t, LLVMValueRef fn)
 /* A SIMD-group asynchronous copy, which the SIMD-group's threads run at
  * once, element by element in turn: a destination tile of width x height
  * elements of `bytes` bytes, rows dst_row elements apart and elements
- * dst_stride apart, from the source's, whose tile of src_width x
- * src_height elements the rest of the destination reads past as zero, or
- * with `edge` as the nearest edge element. */
+ * dst_stride apart, from the source's. Element (x, y) reads the source's
+ * at (x, y) + offset, signed, which past its tile of src_width x src_height
+ * elements reads as zero, or with `edge` as the nearest element of the
+ * tile. */
 struct async_copy {
    struct translator *t;
    struct value dst, src;
    nir_def *dst_row, *dst_stride, *src_row, *src_stride;
    nir_def *width, *src_width, *src_height, *count, *lane, *lanes;
+   nir_def *offset_x, *offset_y;
    unsigned bytes;
    bool edge;
 };
@@ -5572,14 +5574,16 @@ async_copy_element(void *data, nir_def *iteration)
       return false;
    nir_def *y = nir_udiv(b, index, c->width);
    nir_def *x = nir_isub(b, index, nir_imul(b, y, c->width));
-   nir_def *sx = x, *sy = y;
+   nir_def *sx = nir_iadd(b, x, c->offset_x), *sy = nir_iadd(b, y, c->offset_y);
    nir_def *read;
    if (c->edge) {
-      sx = nir_umin(b, x, nir_iadd_imm(b, c->src_width, -1));
-      sy = nir_umin(b, y, nir_iadd_imm(b, c->src_height, -1));
+      nir_def *zero = nir_imm_int(b, 0);
+      sx = nir_imin(b, nir_imax(b, sx, zero), nir_iadd_imm(b, c->src_width, -1));
+      sy = nir_imin(b, nir_imax(b, sy, zero), nir_iadd_imm(b, c->src_height, -1));
       read = nir_iand(b, nir_ine_imm(b, c->src_width, 0), nir_ine_imm(b, c->src_height, 0));
    } else {
-      read = nir_iand(b, nir_ult(b, x, c->src_width), nir_ult(b, y, c->src_height));
+      /* A coordinate before the tile is negative, so past it unsigned. */
+      read = nir_iand(b, nir_ult(b, sx, c->src_width), nir_ult(b, sy, c->src_height));
    }
    unsigned bits = MIN2(c->bytes, 4) * 8, components = MAX2(c->bytes / 4, 1);
    struct memory_guard reading;
@@ -5604,7 +5608,7 @@ async_copy_element(void *data, nir_def *iteration)
 
 /* air.simdgroup_async_copy_2d(size, alignment, dst, dst elements per row,
  * dst element stride, dst tile, src, src elements per row, src element
- * stride, src tile, offset in src tile, clamp mode) and
+ * stride, src tile, offset of the source's elements, clamp mode) and
  * air.simdgroup_async_copy_1d(size, alignment, dst, src, elements): the copy
  * runs where it is made, and the SIMD-group barrier after it shows each
  * thread's elements to the others, so its event completes at once. */
@@ -5636,30 +5640,33 @@ async_copy_call(struct translator *t, LLVMValueRef inst, const char *name, size_
    c.src = *src;
    if (two_d) {
       LLVMValueRef offset = LLVMGetOperand(inst, 10), mode = LLVMGetOperand(inst, 11);
-      if (!LLVMIsNull(offset))
-         return fail(t, STELA_AIR_INSTRUCTION, "SIMD-group copies at an offset in their source");
       if (!LLVMIsAConstantInt(mode) || LLVMConstIntGetZExtValue(mode) > 1)
          return fail(t, STELA_AIR_INSTRUCTION, "unsupported SIMD-group copy clamp mode");
       c.edge = LLVMConstIntGetZExtValue(mode) == 1;
       nir_def *dst_tile = get_value(t, LLVMGetOperand(inst, 5));
       nir_def *src_tile = get_value(t, LLVMGetOperand(inst, 9));
+      nir_def *shift = get_value(t, offset);
       c.dst_row = get_value(t, LLVMGetOperand(inst, 3));
       c.dst_stride = get_value(t, LLVMGetOperand(inst, 4));
       c.src_row = get_value(t, LLVMGetOperand(inst, 7));
       c.src_stride = get_value(t, LLVMGetOperand(inst, 8));
       if (!dst_tile || !src_tile || !c.dst_row || !c.dst_stride || !c.src_row || !c.src_stride ||
-          dst_tile->num_components != 2 || src_tile->num_components != 2)
+          !shift || dst_tile->num_components != 2 || src_tile->num_components != 2 ||
+          shift->num_components != 2)
          return fail(t, STELA_AIR_INSTRUCTION, "unsupported SIMD-group copy signature");
       c.width = nir_u2u32(b, nir_channel(b, dst_tile, 0));
       c.count = nir_imul(b, c.width, nir_u2u32(b, nir_channel(b, dst_tile, 1)));
       c.src_width = nir_u2u32(b, nir_channel(b, src_tile, 0));
       c.src_height = nir_u2u32(b, nir_channel(b, src_tile, 1));
+      c.offset_x = nir_u2u32(b, nir_channel(b, shift, 0));
+      c.offset_y = nir_u2u32(b, nir_channel(b, shift, 1));
    } else {
       nir_def *elements = get_value(t, LLVMGetOperand(inst, 4));
       if (!elements)
          return false;
       c.width = c.count = c.src_width = nir_u2u32(b, elements);
       c.src_height = nir_imm_int(b, 1);
+      c.offset_x = c.offset_y = nir_imm_int(b, 0);
       c.dst_row = c.src_row = nir_u2u64(b, elements);
       c.dst_stride = c.src_stride = nir_imm_int64(b, 1);
    }

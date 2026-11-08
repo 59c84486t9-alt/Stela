@@ -674,7 +674,7 @@ fn overlap_row(size: u32) -> Vec<(u8, f32, u8)> {
 /// every other element; what no copy writes keeps its 0xdead.
 fn async_copies(plan: &mut Plan, library: &str) {
     let src: Vec<u32> = (0..64).map(|i| 1000 + i).collect();
-    let mut tiles = vec![0xdead_u32; 4 * 64];
+    let mut tiles = vec![0xdead_u32; 6 * 64];
     for y in 0..8 {
         for x in 0..8 {
             tiles[y * 8 + x] = if x < 5 && y < 3 { src[y * 13 + x] } else { 0 };
@@ -687,6 +687,21 @@ fn async_copies(plan: &mut Plan, library: &str) {
             tiles[192 + y * 4 + x] = src[y * 13 + x * 2];
         }
     }
+    // Element (x, y) reads the source's at (x, y) + offset: zero past the
+    // tile, or its nearest element.
+    for y in 0..8i64 {
+        for x in 0..8i64 {
+            let (sx, sy) = (x + 2, y + 1);
+            let i = (y * 8 + x) as usize;
+            tiles[256 + i] = if sx < 5 && sy < 3 {
+                src[(sy * 13 + sx) as usize]
+            } else {
+                0
+            };
+            let (sx, sy) = ((x - 2).clamp(0, 4), (y - 1).clamp(0, 2));
+            tiles[320 + i] = src[(sy * 13 + sx) as usize];
+        }
+    }
     plan.add(
         Case::compute(
             "extras.async_copies",
@@ -697,7 +712,7 @@ fn async_copies(plan: &mut Plan, library: &str) {
         )
         .dispatch_threads()
         .buffer(Buffer::data("src", 0, u32s(&src)))
-        .buffer(Buffer::zeroed("out", 1, 4 * 64 * 4))
+        .buffer(Buffer::zeroed("out", 1, 6 * 64 * 4))
         .output(Output::exact("out", Dtype::U32, u32s(&tiles))),
     );
 }
