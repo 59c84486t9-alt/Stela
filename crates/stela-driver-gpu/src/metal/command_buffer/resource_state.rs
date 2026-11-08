@@ -10,8 +10,11 @@
 use super::{BufferRef, CommandBuffer, Encoder, Resolver, blit::TRANSFER};
 use crate::metal::{
     abi::SparseTextureMappingMode,
-    error::{Result, ensure},
-    sparse::{MAP_INDIRECT_ARGUMENTS_BYTES, Mapping, MappingRequest, MappingUpdate, MoveEnd},
+    error::{Error, Result, ensure},
+    sparse::{
+        MAP_INDIRECT_ARGUMENTS_BYTES, MAP_INDIRECT_MAPPINGS, Mapping, MappingRequest,
+        MappingUpdate, MoveEnd,
+    },
     vulkan::{
         command::{BufferCopy, Command},
         object::Image,
@@ -77,11 +80,20 @@ impl CommandBuffer {
             offset.is_multiple_of(4),
             "indirect buffer offsets are 4-byte aligned",
         )?;
-        let size = MAP_INDIRECT_ARGUMENTS_BYTES as u64;
+        // The count, then as many mappings as the rest of the buffer holds,
+        // up to the most one update applies.
+        let record = MAP_INDIRECT_ARGUMENTS_BYTES as u64;
+        let rest = buffer
+            .length
+            .checked_sub(offset)
+            .filter(|&rest| rest >= 4)
+            .ok_or(Error::Invalid("range extends past the buffer"))?;
+        let capacity = ((rest - 4) / record).min(MAP_INDIRECT_MAPPINGS);
+        let size = 4 + capacity * record;
         let src_offset = buffer.at(offset, size)?;
         let arguments = self
             .recorder
-            .upload(resolver, &[0; MAP_INDIRECT_ARGUMENTS_BYTES], 4)?;
+            .upload(resolver, &alloc::vec![0; size as usize], 4)?;
         self.recorder.access(TRANSFER);
         self.recorder.push(Command::CopyBuffer {
             src: buffer.buffer,
@@ -102,6 +114,7 @@ impl CommandBuffer {
             image,
             mode,
             arguments,
+            capacity,
         })
     }
 

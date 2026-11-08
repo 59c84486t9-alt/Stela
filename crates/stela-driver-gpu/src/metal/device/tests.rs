@@ -2385,7 +2385,7 @@ fn indirect_mapping_updates_bind_once_their_arguments_are_read() {
         buffer: Buffer(99),
         offset: 0,
         address: 99 << 32,
-        length: 64,
+        length: 96,
     };
     let encode = |device: &mut TestDevice, offset| {
         let mut commands = device.new_command_buffer();
@@ -2407,13 +2407,14 @@ fn indirect_mapping_updates_bind_once_their_arguments_are_read() {
         "offsets are 4-byte aligned"
     );
     assert!(
-        encode(&mut device, 40).is_err(),
-        "the arguments are in the buffer"
+        encode(&mut device, 94).is_err(),
+        "the count is in the buffer"
     );
 
     // Commits an update and plays the GPU: its copy of the arguments lands
     // and signals its step.
-    let copied = |device: &mut TestDevice, words: [u32; 8]| {
+    // `MTLMapIndirectBufferFormat`: a count, then its mappings.
+    let copied = |device: &mut TestDevice, words: &[u32]| {
         let submitted = device.backend().submissions.len();
         let copy = device.backend().submissions.last().unwrap().clone();
         assert_eq!(copy.len(), 1, "the segments from the update's on are held");
@@ -2439,7 +2440,7 @@ fn indirect_mapping_updates_bind_once_their_arguments_are_read() {
     device.commit(commands).unwrap();
     submit(&mut device);
     // Origin (1, 0, 0), size (1, 2, 1), level 0, slice 0: the right column.
-    let (submitted, steps, step) = copied(&mut device, [1, 0, 0, 1, 2, 1, 0, 0]);
+    let (submitted, steps, step) = copied(&mut device, &[1, 1, 0, 0, 1, 2, 1, 0, 0]);
     assert_eq!(device.poll(), Ok(0));
     assert_eq!(
         device.backend().submissions.len(),
@@ -2454,10 +2455,26 @@ fn indirect_mapping_updates_bind_once_their_arguments_are_read() {
     assert!(submissions[submitted + 1][0].binds.is_empty());
     assert_eq!(device.heap_usage(heap, 1), Ok((2 << 16, 2 << 16)));
 
-    // Arguments naming no region of the texture map nothing.
+    // Of two mappings, one naming no region of the texture maps nothing
+    // and the other its tile.
+    let commands = encode(&mut device, 0).unwrap();
+    device.commit(commands).unwrap();
+    let (_, steps, step) = copied(
+        &mut device,
+        &[2, 0, 0, 0, 1, 1, 1, 5, 0, 0, 0, 0, 1, 1, 1, 0, 0],
+    );
+    device.backend().signal_semaphore(steps, step).unwrap();
+    assert_eq!(device.poll(), Ok(0));
+    assert_eq!(
+        device.backend().submissions.last().unwrap()[0].binds.len(),
+        1
+    );
+    assert_eq!(device.heap_usage(heap, 1), Ok((3 << 16, 1 << 16)));
+
+    // A count of none maps nothing.
     let commands = encode(&mut device, 0).unwrap();
     let serial = device.commit(commands).unwrap();
-    let (_, steps, step) = copied(&mut device, [0, 0, 0, 1, 1, 1, 5, 0]);
+    let (_, steps, step) = copied(&mut device, &[0]);
     device.backend().signal_semaphore(steps, step).unwrap();
     assert_eq!(device.poll(), Ok(0));
     assert!(
@@ -2465,7 +2482,7 @@ fn indirect_mapping_updates_bind_once_their_arguments_are_read() {
             .binds
             .is_empty()
     );
-    assert_eq!(device.heap_usage(heap, 1), Ok((2 << 16, 2 << 16)));
+    assert_eq!(device.heap_usage(heap, 1), Ok((3 << 16, 1 << 16)));
     complete(&mut device, serial);
     device.destroy_texture(sparse).unwrap();
     device.destroy_heap(heap).unwrap();

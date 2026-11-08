@@ -273,6 +273,10 @@ pub struct MappingUpdate {
 /// `sizeof(MTLMapIndirectArguments)`.
 pub const MAP_INDIRECT_ARGUMENTS_BYTES: usize = 32;
 
+/// The most `MTLMapIndirectArguments` one indirect update applies; the
+/// rest of a larger count are reported and left unmapped.
+pub const MAP_INDIRECT_MAPPINGS: u64 = 4096;
+
 impl MappingUpdate {
     /// `MTLMapIndirectArguments`: the region's origin and size in tiles,
     /// then its level and slice, as `uint32_t`s.
@@ -295,12 +299,14 @@ impl MappingUpdate {
 pub enum Mapping {
     Request(MappingRequest),
     /// `updateTextureMapping:mode:indirectBuffer:indirectBufferOffset:`:
-    /// the GPU copies the `MTLMapIndirectArguments` to `arguments`, in
-    /// host-visible memory.
+    /// the GPU copies `MTLMapIndirectBufferFormat`, a `uint32_t` count
+    /// then that many `MTLMapIndirectArguments`, to `arguments`, in
+    /// host-visible memory, with room for `capacity` of them.
     Indirect {
         image: Image,
         mode: SparseTextureMappingMode,
         arguments: Upload,
+        capacity: u64,
     },
 }
 
@@ -314,7 +320,7 @@ pub enum MappingRequest {
         updates: Vec<MappingUpdate>,
     },
     /// `moveTextureMappingsFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toTexture:destinationSlice:destinationLevel:destinationOrigin:`,
-    /// with a size in pixels.
+    /// with a size in tiles.
     Move {
         source: MoveEnd,
         destination: MoveEnd,

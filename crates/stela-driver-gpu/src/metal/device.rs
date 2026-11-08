@@ -138,6 +138,11 @@ pub struct Device<B: Backend, C: Compiler> {
     /// [`RenderPipelinePlan::tests_fragments`]: super::pipeline::RenderPipelinePlan::tests_fragments
     tests_fragments: bool,
     queue: queue::Queue,
+    /// What the device left undone with no call to refuse, such as work it
+    /// submits later, each reported once: those reported, and the one the
+    /// next call reports.
+    unsupported: Vec<&'static str>,
+    unreported: Option<&'static str>,
 }
 
 /// What a device holds at one moment.
@@ -165,6 +170,20 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             submitted: self.submitted,
             completed: self.completed,
         }
+    }
+
+    /// Reports `what` the device leaves undone, once.
+    fn unsupported(&mut self, what: &'static str) {
+        if !self.unsupported.contains(&what) {
+            self.unsupported.push(what);
+            self.unreported = Some(what);
+        }
+    }
+
+    /// What the device left undone since the last call, which no call's
+    /// status reports.
+    pub fn take_unsupported(&mut self) -> Option<&'static str> {
+        self.unreported.take()
     }
 
     /// The compiler's detail of the last function it refused, once.
@@ -209,6 +228,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             command_barriers: false,
             tests_fragments: false,
             queue: queue::Queue::default(),
+            unsupported: Vec::new(),
+            unreported: None,
         })
     }
 

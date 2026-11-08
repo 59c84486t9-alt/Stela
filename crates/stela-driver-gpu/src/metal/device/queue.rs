@@ -37,7 +37,9 @@ use crate::metal::{
     pipeline::MAX_COLOR_ATTACHMENTS,
     resource::TextureDescriptor,
     shader::{Compiler, Specialization},
-    sparse::{MAP_INDIRECT_ARGUMENTS_BYTES, Mapping, MappingRequest, MappingUpdate},
+    sparse::{
+        MAP_INDIRECT_ARGUMENTS_BYTES, MAP_INDIRECT_MAPPINGS, Mapping, MappingRequest, MappingUpdate,
+    },
     upload::{Chunk, ChunkSource},
     vulkan::{
         BufferCreate, BufferUsage, MemoryProperties, PipelineStages, PipelineStatistics,
@@ -717,7 +719,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// Makes held segments' binds, reading indirect regions from the copies
     /// of their arguments, and submits the segments. Metal leaves regions
     /// outside a texture undefined, as it does textures destroyed while in
-    /// use; neither maps anything.
+    /// use, and counts past the buffer's end; none maps anything. A count
+    /// past [`MAP_INDIRECT_MAPPINGS`] maps that many and is reported.
     fn submit_held(&mut self, mut held: Held) -> Result<()> {
         for (segment, mapping) in held.mappings {
             let request = match mapping {
@@ -726,15 +729,40 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     image,
                     mode,
                     arguments,
+                    capacity,
                 } => {
                     let memory = self.chunk_memory(arguments.buffer)?;
-                    let mut bytes = [0; MAP_INDIRECT_ARGUMENTS_BYTES];
+                    let mut count = [0; 4];
                     self.backend
-                        .read_memory(memory, arguments.offset, &mut bytes)?;
+                        .read_memory(memory, arguments.offset, &mut count)?;
+                    let count = u64::from(u32::from_le_bytes(count));
+                    if count > capacity && capacity == MAP_INDIRECT_MAPPINGS {
+                        self.unsupported(
+                            "indirect sparse mapping updates of more than 4096 regions",
+                        );
+                    }
+                    let mut bytes = alloc::vec![0; (count.min(capacity) as usize) * MAP_INDIRECT_ARGUMENTS_BYTES];
+                    self.backend
+                        .read_memory(memory, arguments.offset + 4, &mut bytes)?;
+                    // A region outside the texture maps nothing of its own.
+                    let updates = bytes
+                        .as_chunks::<MAP_INDIRECT_ARGUMENTS_BYTES>()
+                        .0
+                        .iter()
+                        .map(MappingUpdate::from_indirect)
+                        .filter(|update| {
+                            self.check_mapping(&MappingRequest::Update {
+                                image,
+                                mode,
+                                updates: alloc::vec![*update],
+                            })
+                            .is_ok()
+                        })
+                        .collect();
                     MappingRequest::Update {
                         image,
                         mode,
-                        updates: alloc::vec![MappingUpdate::from_indirect(&bytes)],
+                        updates,
                     }
                 }
             };

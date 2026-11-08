@@ -89,6 +89,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let mut call: GateCall = wire::read(&raw).expect("a record of its own size");
         let mut caller = Caller(caller);
         let outcome = self.dispatch_gate(connection, &call, &mut caller);
+        if let Some(what) = self.device.take_unsupported() {
+            self.refused = Some(format!("{what}: unsupported, left undone"));
+        }
         let (status, reason) = match outcome {
             Ok(()) => (Status::Ok, ""),
             Err(fault) => {
