@@ -36,7 +36,9 @@ struct objc_method_description *protocol_copyMethodDescriptionList(void *protoco
 #define REPORTED 4096
 static const char *reported[REPORTED];
 
-static void report(SEL selector)
+/* Reports `selector` once, with the image and offset of the code that sent
+ * it when `caller` is known. */
+static void report(SEL selector, const void *caller)
 {
 	const char *name = sel_getName(selector);
 	size_t at = (uintptr_t)name >> 3;
@@ -45,7 +47,15 @@ static void report(SEL selector)
 		if (__atomic_compare_exchange_n(&reported[at % REPORTED], &expected, name, false, __ATOMIC_RELAXED,
 						__ATOMIC_RELAXED)) {
 			StelaFailure failure = {.reason = "Metal's SPI asked for what this device has no answer to"};
-			stela_report(name, &failure);
+			Dl_info image = {};
+			if (!caller || !dladdr(caller, &image) || !image.dli_fname) {
+				stela_report(name, &failure);
+				return;
+			}
+			char what[320];
+			snprintf(what, sizeof(what), "%s, asked by %s+0x%lx", name, image.dli_fname,
+				 (unsigned long)((uintptr_t)caller - (uintptr_t)image.dli_fbase));
+			stela_report(what, &failure);
 			return;
 		}
 		if (expected == name) {
@@ -57,19 +67,19 @@ static void report(SEL selector)
 /* Pointers, integers and structs of two words come back in x0 and x1. */
 static unsigned __int128 absent(id self, SEL selector)
 {
-	report(selector);
+	report(selector, __builtin_return_address(0));
 	return 0;
 }
 
 static double absent_float(id self, SEL selector)
 {
-	report(selector);
+	report(selector, __builtin_return_address(0));
 	return 0;
 }
 
 static MTLSize absent_size(id self, SEL selector)
 {
-	report(selector);
+	report(selector, __builtin_return_address(0));
 	return (MTLSize){0};
 }
 
@@ -128,7 +138,7 @@ static id forwarding_signature(id self, SEL selector, SEL wanted)
 /* An invocation's return value starts zeroed. */
 static void forward(id self, SEL selector, id invocation)
 {
-	report([invocation selector]);
+	report([invocation selector], NULL);
 }
 
 @interface StelaGPUAbsent : NSObject
