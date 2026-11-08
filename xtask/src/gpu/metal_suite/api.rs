@@ -1279,6 +1279,30 @@ fn frameworks(plan: &mut Plan, rng: &mut Random) {
         .buffer(Buffer::zeroed("c", 0, n * n * 4).unbound())
         .output(Output::exact("c", Dtype::F32, f32s(&c))),
     );
+    // Shapes MPS tiles differently: whole tiles, edges in each dimension,
+    // and a product smaller than any tile.
+    for (m, n, k) in [
+        (128usize, 128usize, 128usize),
+        (64, 32, 16),
+        (17, 5, 3),
+        (96, 160, 40),
+    ] {
+        let a: Vec<f64> = (0..m * k).map(|_| f64::from(rng.u32() % 7) - 3.0).collect();
+        let b: Vec<f64> = (0..k * n).map(|_| f64::from(rng.u32() % 7) - 3.0).collect();
+        let c: Vec<f64> = (0..m * n)
+            .map(|i| (0..k).map(|j| a[i / n * k + j] * b[j * n + i % n]).sum())
+            .collect();
+        plan.add(
+            Case::framework(
+                &format!("api.framework.mps_matrix_multiply.{m}x{n}x{k}"),
+                json!({"kind": "mps_matrix_multiply", "rows": m, "columns": n, "interior": k}),
+            )
+            .buffer(Buffer::data("a", 0, f32s(&a)).unbound())
+            .buffer(Buffer::data("b", 0, f32s(&b)).unbound())
+            .buffer(Buffer::zeroed("c", 0, m * n * 4).unbound())
+            .output(Output::exact("c", Dtype::F32, f32s(&c))),
+        );
+    }
     let (w, h) = (16usize, 8usize);
     let texels: Vec<u8> = (0..w * h * 4)
         .map(|i| {
