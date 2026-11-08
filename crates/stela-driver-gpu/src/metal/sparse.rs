@@ -322,8 +322,8 @@ pub enum MappingRequest {
     },
 }
 
-/// One texture's side of a mapping move: a tile-aligned pixel origin in
-/// one level and slice.
+/// One texture's side of a mapping move: an origin in tiles in one level
+/// and slice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MoveEnd {
     pub image: Image,
@@ -468,38 +468,16 @@ impl SparseTexture {
         Ok(())
     }
 
-    /// The tiles of a move's tile-aligned pixel region.
+    /// The tiles of a move's region, whose origin and size count tiles as
+    /// a mapping update's region does.
     fn region_tiles(&self, end: &MoveEnd, size: [u64; 3]) -> Result<Vec<Tile>> {
-        let MoveEnd {
-            level,
-            slice,
-            origin,
-            ..
-        } = *end;
-        let layout = &self.layout;
-        ensure(
-            level < layout.levels.len() as u64,
-            "mipmap level beyond the texture",
-        )?;
-        let extent = layout.levels[level as usize];
-        let mut region = SparseRegion::default();
-        for axis in 0..3 {
-            let end = origin[axis]
-                .checked_add(size[axis])
-                .filter(|&end| end <= extent[axis])
-                .ok_or(Error::Invalid("region beyond the level"))?;
-            ensure(
-                origin[axis].is_multiple_of(layout.tile[axis])
-                    && (end.is_multiple_of(layout.tile[axis]) || end == extent[axis]),
-                "moved regions are tile aligned",
-            )?;
-            region.origin[axis] = origin[axis] / layout.tile[axis];
-            region.size[axis] = end.div_ceil(layout.tile[axis]) - region.origin[axis];
-        }
         self.tiles(&MappingUpdate {
-            level,
-            slice,
-            region,
+            level: end.level,
+            slice: end.slice,
+            region: SparseRegion {
+                origin: end.origin,
+                size,
+            },
         })
     }
 

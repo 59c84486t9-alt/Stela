@@ -297,9 +297,11 @@ fn moves_carry_pages_between_textures() {
         image: Image(8),
         level: 0,
         slice: 0,
-        origin: [128, 0, 0],
+        origin: [1, 0, 0],
     };
-    let size = [128, 128, 1];
+    // Origins and sizes count tiles, as on Apple GPUs; a region past the
+    // level's tiles moves nothing.
+    let size = [1, 1, 1];
     assert!(
         source
             .check_move(
