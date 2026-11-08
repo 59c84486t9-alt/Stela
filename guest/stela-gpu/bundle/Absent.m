@@ -135,10 +135,33 @@ static id forwarding_signature(id self, SEL selector, SEL wanted)
 	return [(id)objc_getClass("NSMethodSignature") signatureWithObjCTypes:types];
 }
 
+/* The return address of the code that sent a forwarded message: the first
+ * frame outside this bundle, the Objective-C runtime and CoreFoundation's
+ * forwarding. */
+static const void *forwarded_sender(void)
+{
+	void *frames[12];
+	int count = backtrace(frames, 12);
+	Dl_info own = {};
+	dladdr((const void *)forwarded_sender, &own);
+	for (int i = 1; i < count; i++) {
+		Dl_info image = {};
+		if (!dladdr(frames[i], &image) || !image.dli_fname) {
+			continue;
+		}
+		if (image.dli_fbase == own.dli_fbase || strstr(image.dli_fname, "CoreFoundation") ||
+		    strstr(image.dli_fname, "libobjc")) {
+			continue;
+		}
+		return frames[i];
+	}
+	return NULL;
+}
+
 /* An invocation's return value starts zeroed. */
 static void forward(id self, SEL selector, id invocation)
 {
-	report([invocation selector], NULL);
+	report([invocation selector], forwarded_sender());
 }
 
 @interface StelaGPUAbsent : NSObject

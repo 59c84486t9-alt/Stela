@@ -324,6 +324,7 @@ int sysctlbyname(const char *name, void *value, size_t *size, void *new_value, s
 int snprintf(char *text, size_t size, const char *format, ...);
 int dprintf(int file, const char *format, ...);
 char *strchr(const char *text, int character);
+char *strstr(const char *text, const char *part);
 char *strrchr(const char *text, int character);
 int _NSGetExecutablePath(char *path, uint32_t *size);
 void *memchr(const void *bytes, int value, size_t length);
@@ -341,6 +342,7 @@ typedef struct {
 	void *dli_saddr;
 } Dl_info;
 int dladdr(const void *address, Dl_info *info);
+int backtrace(void **frames, int size);
 
 typedef struct {
 	uint32_t opaque;
