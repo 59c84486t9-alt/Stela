@@ -286,6 +286,37 @@ folded_offsets_off_null_reach_no_memory(void)
    ralloc_free(shader);
 }
 
+/* A pointer array in thread memory read at a run-time index: the load
+ * chooses among the slots' pointers, which keep their buffer, and the array
+ * leaves memory. A store at a run-time index has no such choice. */
+static void
+pointer_slots_load_by_choice(void)
+{
+   const char *slots =
+      "%a = alloca [2 x ptr addrspace(1)], align 8\n"
+      "%s0 = getelementptr inbounds [2 x ptr addrspace(1)], ptr %a, i64 0, i64 0\n"
+      "store ptr addrspace(1) %out, ptr %s0, align 8\n"
+      "%s1 = getelementptr inbounds [2 x ptr addrspace(1)], ptr %a, i64 0, i64 1\n"
+      "%o4 = getelementptr inbounds i32, ptr addrspace(1) %out, i64 4\n"
+      "store ptr addrspace(1) %o4, ptr %s1, align 8\n"
+      "%i = load i32, ptr addrspace(1) %out, align 4\n%j = and i32 %i, 1\n"
+      "%k = zext i32 %j to i64\n"
+      "%d = getelementptr inbounds [2 x ptr addrspace(1)], ptr %a, i64 0, i64 %k\n";
+   char body[2048];
+   snprintf(body, sizeof(body), "%s%s", slots,
+            "%p = load ptr addrspace(1), ptr %d, align 8\n"
+            "store i32 7, ptr addrspace(1) %p, align 4\nret void\n");
+   nir_shader *shader = compiled("", body);
+   assert(count(shader, nir_intrinsic_store_global) == 1);
+   assert(!count(shader, nir_intrinsic_load_scratch) && !count(shader, nir_intrinsic_store_scratch));
+   ralloc_free(shader);
+   snprintf(body, sizeof(body), "%s%s", slots,
+            "store ptr addrspace(1) %out, ptr %d, align 8\n"
+            "%p = load ptr addrspace(1), ptr %s1, align 8\n"
+            "store i32 7, ptr addrspace(1) %p, align 4\nret void\n");
+   refused("", body, &defaults, STELA_AIR_TYPE);
+}
+
 /* Generic pointers, cast from device and thread memory: a choice between
  * them reaches the chosen root, and the space queries ask which it is. */
 static void
@@ -578,6 +609,7 @@ main(void)
    memory_intrinsics_lower_to_chunks();
    null_joins_device_addresses();
    folded_offsets_off_null_reach_no_memory();
+   pointer_slots_load_by_choice();
    generic_pointers_choose_their_memory();
    constant_data_lowers_to_load_constant();
    kernels_read_constant_buffers();

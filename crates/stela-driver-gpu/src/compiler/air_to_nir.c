@@ -6923,6 +6923,84 @@ stores_pointer(LLVMValueRef fn)
    return false;
 }
 
+/* The most slots of a pointer array that a load at a run-time index
+ * chooses among. */
+#define STELA_AIR_POINTER_SLOTS 8
+
+/* Whether `gep` indexes slot `index` of the array its alloca is, and only
+ * loads read through it. */
+static bool
+loaded_slot(LLVMValueRef gep, LLVMTypeRef array, LLVMValueRef *index)
+{
+   if (!LLVMIsAGetElementPtrInst(gep) || LLVMGetNumOperands(gep) != 3 ||
+       LLVMGetGEPSourceElementType(gep) != array || !LLVMIsAConstantInt(LLVMGetOperand(gep, 1)) ||
+       LLVMConstIntGetZExtValue(LLVMGetOperand(gep, 1)))
+      return false;
+   *index = LLVMGetOperand(gep, 2);
+   for (LLVMUseRef use = LLVMGetFirstUse(gep); use; use = LLVMGetNextUse(use)) {
+      LLVMValueRef user = LLVMGetUser(use);
+      if (!LLVMIsALoadInst(user) || LLVMTypeOf(user) != LLVMGetElementType(array))
+         return false;
+   }
+   return true;
+}
+
+/* Rewrites each load of a small array of pointers at a run-time index as a
+ * choice among its slots' loads at constant indices, so that SROA promotes
+ * the array and the pointers keep their provenance; an index past the
+ * array is undefined. */
+static void
+choose_pointer_slots(struct translator *t, LLVMValueRef fn)
+{
+   LLVMBuilderRef builder = NULL;
+   LLVMBasicBlockRef entry = LLVMGetEntryBasicBlock(fn);
+   for (LLVMValueRef alloca = LLVMGetFirstInstruction(entry); alloca;
+        alloca = LLVMGetNextInstruction(alloca)) {
+      if (!LLVMIsAAllocaInst(alloca))
+         continue;
+      LLVMTypeRef array = LLVMGetAllocatedType(alloca);
+      if (LLVMGetTypeKind(array) != LLVMArrayTypeKind ||
+          LLVMGetTypeKind(LLVMGetElementType(array)) != LLVMPointerTypeKind ||
+          LLVMGetArrayLength2(array) > STELA_AIR_POINTER_SLOTS)
+         continue;
+      unsigned slots = (unsigned)LLVMGetArrayLength2(array);
+      LLVMTypeRef element = LLVMGetElementType(array);
+      LLVMUseRef next;
+      for (LLVMUseRef use = LLVMGetFirstUse(alloca); use; use = next) {
+         next = LLVMGetNextUse(use);
+         LLVMValueRef gep = LLVMGetUser(use), index;
+         if (!loaded_slot(gep, array, &index) || LLVMIsAConstant(index))
+            continue;
+         /* The GEP's uses are loads, which go with it. */
+         while (next && LLVMGetUser(next) == gep)
+            next = LLVMGetNextUse(next);
+         if (!builder)
+            builder = LLVMCreateBuilderInContext(t->context);
+         LLVMTypeRef index_type = LLVMTypeOf(index);
+         LLVMValueRef load;
+         while ((load = LLVMGetFirstUse(gep) ? LLVMGetUser(LLVMGetFirstUse(gep)) : NULL)) {
+            LLVMPositionBuilderBefore(builder, load);
+            LLVMValueRef chosen = NULL;
+            for (unsigned slot = 0; slot < slots; slot++) {
+               LLVMValueRef at[2] = {LLVMGetOperand(gep, 1), LLVMConstInt(index_type, slot, false)};
+               LLVMValueRef address = LLVMBuildInBoundsGEP2(builder, array, alloca, at, 2, "");
+               LLVMValueRef value = LLVMBuildLoad2(builder, element, address, "");
+               LLVMSetAlignment(value, LLVMGetAlignment(load));
+               chosen = !chosen ? value :
+                        LLVMBuildSelect(builder,
+                                        LLVMBuildICmp(builder, LLVMIntEQ, index, at[1], ""),
+                                        value, chosen, "");
+            }
+            LLVMReplaceAllUsesWith(load, chosen);
+            LLVMInstructionEraseFromParent(load);
+         }
+         LLVMInstructionEraseFromParent(gep);
+      }
+   }
+   if (builder)
+      LLVMDisposeBuilder(builder);
+}
+
 /* An unoptimized build keeps every value in memory and bars every pass from
  * its functions, which an optimizing build has no need to undo, unless it
  * left a pointer in a stack slot: only an SSA value keeps its provenance. */
@@ -6931,6 +7009,7 @@ promote_memory(struct translator *t, LLVMValueRef fn)
 {
    LLVMRemoveEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex,
                                   LLVMGetEnumAttributeKindForName("optnone", 7));
+   choose_pointer_slots(t, fn);
    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
    if (!options)
       return fail(t, STELA_AIR_ALLOCATION, "LLVM pass options allocation failed");
