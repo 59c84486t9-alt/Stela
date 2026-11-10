@@ -582,8 +582,9 @@ fn route_checked(options: Vec<u8>, consume: bool) -> Result<(Vec<u8>, bool), Ref
         output::arguments(format_args!("NVRAM boot refusal: {error:#}\n"));
         Refusal::Other("stela.cfg cannot boot what NVRAM chose")
     })?;
-    // Only an installed-system boot has a choice to report.
-    if selection.is_some() {
+    // Only an installed-system boot has a choice to report, and only the
+    // boot that uses it: a `peek` before the menu would repeat the line.
+    if consume && selection.is_some() {
         output::arguments(format_args!("BOOT {log}\n"));
     }
     Ok((routed.into_bytes(), installed_system))

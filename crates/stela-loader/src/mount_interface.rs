@@ -13,8 +13,8 @@
 //!   line and one entry per line, each a name, a tab and a complete
 //!   `stela.cfg` option line. The first entry is the default, the one
 //!   `stela.cfg` itself holds. `stela.efi` lists the entries, waits up to the
-//!   timeout for a digit (0 waits only when a key is already pressed) and
-//!   boots the chosen line in place of `stela.cfg`.
+//!   timeout for a digit ([`opening`]; 0 waits only when a key is already
+//!   pressed) and boots the chosen line in place of `stela.cfg`.
 use crate::Result;
 use alloc::{format, string::String, vec::Vec};
 use stela_contracts::refuse;
@@ -70,6 +70,34 @@ pub fn with_disk(options: &str, disk: Option<&str>) -> Option<String> {
         });
     }
     Some(words.join(" "))
+}
+
+/// How the startup menu opens for a boot nothing holds at the menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opening {
+    /// The first entry starts at once unless a key is held or pressed
+    /// within a short glance, as a Mac shows its startup options only when
+    /// asked.
+    Glance,
+    /// A countdown of this many seconds starts the first entry.
+    Countdown(u32),
+    /// The menu waits for a choice.
+    Wait,
+}
+
+/// How the menu opens with the file's `timeout_seconds`, `first_mac` telling
+/// whether its first entry starts the Mac (`Some`) and whether that Mac can
+/// start now (`true`), and `ready_macs` Mac entries that can start now. Only
+/// a real choice keeps the countdown: one ready Mac, the first entry, starts
+/// at once, and Install macOS and recovery stay a key away. A timeout of 0
+/// reaches the menu only when a key was already pressed, which asked for it.
+pub fn opening(timeout_seconds: u32, first_mac: Option<bool>, ready_macs: usize) -> Opening {
+    match first_mac {
+        None => Opening::Wait,
+        Some(_) if timeout_seconds == 0 => Opening::Wait,
+        Some(true) if ready_macs == 1 => Opening::Glance,
+        Some(_) => Opening::Countdown(timeout_seconds),
+    }
 }
 
 /// The keys that choose entries, in order: one per entry.
@@ -364,6 +392,23 @@ mod tests {
             with_disk("--system --bundle x", None).as_deref(),
             Some("--system --bundle x")
         );
+    }
+
+    #[test]
+    fn only_a_real_choice_counts_down() {
+        // One installed Mac starts at once; the menu is a key away.
+        assert_eq!(opening(5, Some(true), 1), Opening::Glance);
+        // None ready, or several, is a choice to make.
+        assert_eq!(opening(5, Some(false), 0), Opening::Countdown(5));
+        assert_eq!(opening(5, Some(true), 2), Opening::Countdown(5));
+        assert_eq!(opening(5, Some(false), 1), Opening::Countdown(5));
+        // A first entry that is not the Mac, such as Install macOS while no
+        // macOS is installed, waits for a choice.
+        assert_eq!(opening(5, None, 0), Opening::Wait);
+        assert_eq!(opening(5, None, 1), Opening::Wait);
+        // A timeout of 0 opened the menu because a key asked for it.
+        assert_eq!(opening(0, Some(true), 1), Opening::Wait);
+        assert_eq!(opening(0, Some(true), 2), Opening::Wait);
     }
 
     #[test]

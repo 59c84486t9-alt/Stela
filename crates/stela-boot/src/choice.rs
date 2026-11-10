@@ -6,10 +6,13 @@
 //! prepared its SSD, and Install macOS once it has (`selection::ready`). Up and Down move the
 //! highlight, Enter starts the highlighted entry, and an entry's key (`1`-`9`,
 //! then `a`-`z`) starts it at once; a firmware entry restarts the PC into it.
-//! A countdown from the file's timeout starts the first entry, the one
-//! `stela.cfg` holds; any key stops it. A timeout of 0 opens the menu only
-//! when a key is already pressed, as a Mac shows its startup options only
-//! when asked. A file that cannot be read or parsed is reported and
+//! When the first entry, the one `stela.cfg` holds, is the only Mac that
+//! can start now, it starts at once unless a key is held or pressed within
+//! [`GLANCE`], as a Mac shows its startup options only when asked
+//! (`mount_interface::opening`). When there is a choice to make, a
+//! countdown from the file's timeout starts the first entry; any key stops
+//! it. A timeout of 0 opens the menu only when a key is already pressed.
+//! A file that cannot be read or parsed is reported and
 //! `stela.cfg` boots, so a damaged file never stops the default boot. A
 //! machine that can only be set up waits at the menu with no countdown and
 //! its setup entry highlighted ([`hold`]).
@@ -25,7 +28,7 @@ use alloc::{format, string::String, vec::Vec};
 use core::time::Duration;
 use stela_contracts::refuse;
 use stela_loader::mount_interface::{
-    CHOICES_FILE, CHOSEN_DISK, ChoiceKind, Choices, DISK_FILE, with_disk,
+    CHOICES_FILE, CHOSEN_DISK, ChoiceKind, Choices, DISK_FILE, Opening, opening, with_disk,
 };
 use uefi::{
     CString16,
@@ -35,6 +38,10 @@ use uefi::{
 };
 
 const TICK: Duration = Duration::from_secs(1);
+/// How long a key may still come to open the menu when the first entry
+/// starts without one: longer than a held key's repeat and a USB keyboard's
+/// polling, short enough not to be a wait.
+const GLANCE: Duration = Duration::from_millis(250);
 
 pub(crate) enum Press {
     Up,
@@ -196,6 +203,8 @@ struct Menu<'a> {
     selected: usize,
     /// Seconds before the first entry starts, while the countdown runs.
     countdown: Option<u32>,
+    /// The first entry starts unless a key asks for the menu.
+    glance: bool,
     /// Why the last firmware entry chosen did not start.
     notice: Option<&'static str>,
 }
@@ -271,13 +280,30 @@ impl<'a> Menu<'a> {
                 .unwrap_or(0),
             None => 0,
         };
-        // The countdown starts the first entry when it starts the Mac.
-        let starts_mac = matches!(items.first(), Some(Item::Choice(_, ChoiceKind::Mac)));
+        // The first entry starts by itself only when it starts the Mac,
+        // with no countdown when that Mac is the only one ready.
+        let first_mac = match items.first() {
+            Some(Item::Choice(n, ChoiceKind::Mac)) => Some(readiness[*n] == Readiness::Ready),
+            _ => None,
+        };
+        let ready_macs = items
+            .iter()
+            .filter(|item| {
+                matches!(item, Item::Choice(n, ChoiceKind::Mac) if readiness[*n] == Readiness::Ready)
+            })
+            .count();
+        let opens = match held {
+            Some(_) => Opening::Wait,
+            None => opening(choices.timeout_seconds, first_mac, ready_macs),
+        };
         Self {
             choices,
             disk,
-            countdown: (held.is_none() && starts_mac && choices.timeout_seconds > 0)
-                .then_some(choices.timeout_seconds),
+            countdown: match opens {
+                Opening::Countdown(seconds) => Some(seconds),
+                Opening::Glance | Opening::Wait => None,
+            },
+            glance: opens == Opening::Glance,
             items,
             selected,
             notice: None,
@@ -376,13 +402,17 @@ fn chosen(choices: &Choices, index: usize, disk: Option<&str>) -> Vec<u8> {
         .into_bytes()
 }
 
-/// The menu of `choices` until one of them is chosen; its options. Install
-/// macOS on a disk not chosen yet opens the disk picker first
-/// ([`installer::choose`]), and returns to the menu when it is left. A
-/// firmware entry chosen restarts the PC into it. `None` without console
-/// input to choose with.
-fn menu(volume: &mut FileSystem, choices: &Choices, held: Option<&str>) -> Option<Vec<u8>> {
-    let mut menu = Menu::new(choices, held, chosen_disk(volume));
+/// Whether a key asks for the menu: one already pressed or held, or one
+/// pressed within [`GLANCE`].
+fn asked() -> bool {
+    pressed().is_some() || matches!(key(Some(GLANCE)), Wait::Key(_))
+}
+
+/// `menu` until one of `choices` is chosen; its options. Install macOS on a
+/// disk not chosen yet opens the disk picker first ([`installer::choose`]),
+/// and returns to the menu when it is left. A firmware entry chosen
+/// restarts the PC into it. `None` without console input to choose with.
+fn menu(volume: &mut FileSystem, choices: &Choices, mut menu: Menu<'_>) -> Option<Vec<u8>> {
     loop {
         let index = menu.run()?;
         match &menu.items[index] {
@@ -423,7 +453,14 @@ pub fn choose(volume: &mut FileSystem, options: Vec<u8>, held: Option<&str>) -> 
     if choices.timeout_seconds == 0 && pressed().is_none() {
         return chosen(&choices, 0, chosen_disk(volume).as_deref());
     }
-    menu(volume, &choices, None)
+    let opened = Menu::new(&choices, None, chosen_disk(volume));
+    if opened.glance
+        && !asked()
+        && let Some(Item::Choice(n, _)) = opened.items.first()
+    {
+        return chosen(&choices, *n, opened.disk.as_deref());
+    }
+    menu(volume, &choices, opened)
         .unwrap_or_else(|| chosen(&choices, 0, chosen_disk(volume).as_deref()))
 }
 
@@ -435,5 +472,6 @@ pub fn choose(volume: &mut FileSystem, options: Vec<u8>, held: Option<&str>) -> 
 pub fn hold(volume: &mut FileSystem, reason: &str) -> Option<Vec<u8>> {
     let choices = read(volume)?;
     output::arguments(format_args!("HOLD {reason}\n"));
-    menu(volume, &choices, Some(reason))
+    let held = Menu::new(&choices, Some(reason), chosen_disk(volume));
+    menu(volume, &choices, held)
 }
