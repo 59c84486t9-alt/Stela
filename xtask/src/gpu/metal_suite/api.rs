@@ -1618,7 +1618,8 @@ fn core_animation(plan: &mut Plan) {
 /// Animation then draws it as a text layer, as an alpha-only image it tints,
 /// as an A8 backing store a delegate draws (SwiftUI's text), with SwiftUI's
 /// vibrant color matrix, through a portal that hides its source, and so
-/// above glass, as SwiftUI composes a glass button; and AppKit's own glass
+/// above glass, as SwiftUI composes a glass button; glass lettering, whose
+/// fill and highlight follow the glyphs' SDF; and AppKit's own glass
 /// button, where a window server session allows one. What Core Text and Core
 /// Animation draw is their own, so each is held to the reference device's.
 fn text(plan: &mut Plan, glass: &Value) {
@@ -1662,6 +1663,23 @@ fn text(plan: &mut Plan, glass: &Value) {
             "core_animation.text.glass_portal",
             json!({"text": {"kind": "backing", "vibrant": true, "portal": true},
                    "backdrop": backdrop, "sdf": {"corner_radius": 12}}),
+        ),
+        // Glass lettering as SwiftUI builds the login window's clock: glass
+        // refracting by the glyphs' SDF, a gradient fill and a key and fill
+        // highlight of the same SDF, each through a portal of the glyphs.
+        // The highlight reads the distances the pass keeps in a memoryless
+        // attachment.
+        (
+            "core_animation.text.glass_sdf",
+            json!({"glass_text": {"parts": ["fill", "highlight"]}}),
+        ),
+        (
+            "core_animation.text.glass_sdf_fill",
+            json!({"glass_text": {"parts": ["fill"]}}),
+        ),
+        (
+            "core_animation.text.glass_sdf_highlight",
+            json!({"glass_text": {"parts": ["highlight"]}}),
         ),
         // The glass button AppKit resolves in the light appearance on a
         // display without extended range at scale 1: a white face fill,

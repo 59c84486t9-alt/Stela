@@ -4462,15 +4462,166 @@ static CALayer *ca_text(NSDictionary *text, NSDictionary *scene)
 	return host;
 }
 
+/* Two discs joined by a bar as glyph-like coverage, `w` by `h` pixels, in a
+ * 10-bit RGB image whose two high bits mark covered pixels, as SwiftUI hands
+ * glass text its glyphs: Core Animation takes such contents as data, not
+ * color. */
+static CGImageRef ca_glyphs10(size_t w, size_t h)
+{
+	CGContextRef context = CGBitmapContextCreate(NULL, w, h, 8, w, NULL, (CGBitmapInfo)kCGImageAlphaOnly);
+	CGContextSetRGBFillColor(context, 0, 0, 0, 1);
+	CGContextFillEllipseInRect(context, CGRectMake(4, 4, h - 8, h - 8));
+	CGContextFillEllipseInRect(context, CGRectMake(w - h + 4, 4, h - 8, h - 8));
+	CGContextFillRect(context, CGRectMake(h / 2, h / 2 - 5, w - h, 10));
+	const uint8_t *coverage = CGBitmapContextGetData(context);
+	size_t stride = CGBitmapContextGetBytesPerRow(context);
+	NSMutableData *pixels = [NSMutableData dataWithLength:w * h * 4];
+	uint32_t *p = pixels.mutableBytes;
+	for (size_t y = 0; y < h; y++)
+		for (size_t x = 0; x < w; x++) {
+			uint32_t v = (coverage[y * stride + x] * 1023u + 127) / 255;
+			p[y * w + x] = (v ? 3u << 30 : 0) | v << 20 | v << 10 | v;
+		}
+	CGContextRelease(context);
+	CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+	CGDataProviderRef data = CGDataProviderCreateWithCFData((__bridge CFDataRef)pixels);
+	CGImageRef image = CGImageCreate(w, h, 10, 32, w * 4, srgb,
+					 kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Little | kCGImagePixelFormatRGB101010,
+					 data, NULL, true, kCGRenderingIntentDefault);
+	CGDataProviderRelease(data);
+	CGColorSpaceRelease(srgb);
+	if (!image)
+		@throw failure(@"no 10-bit image");
+	return image;
+}
+
+/* A vibrant color matrix filter of row-major `m`, aware of the backdrop or
+ * not, clamping at `clamp`. */
+static id ca_vibrant(const float m[20], BOOL aware, float clamp)
+{
+	id filter = ca_filter(@"vibrantColorMatrix");
+	[filter setValue:[NSValue valueWithBytes:m objCType:"{CAColorMatrix=ffffffffffffffffffff}"] forKey:@"inputColorMatrix"];
+	if (aware)
+		[filter setValue:@YES forKey:@"inputBackdropAware"];
+	[filter setValue:@(clamp) forKey:@"inputClamp"];
+	return filter;
+}
+
+/* Glass text as SwiftUI builds it for large glass lettering such as the
+ * login window's clock: a backdrop layer whose glass filter refracts by the
+ * SDF of an element's 10-bit glyph contents, then, as `f` lists in "parts",
+ * a gradient "fill" of that SDF and a key and fill "highlight" of it, each
+ * seen through a portal of the element and lifted by a vibrant color
+ * matrix. The fill writes the glyphs' distances to a memoryless attachment
+ * and the highlight reads them back in the same pass. */
+static CALayer *ca_glass_text(NSDictionary *f, CGRect frame)
+{
+	NSArray *parts = f[@"parts"];
+	CALayer *group = [CALayer layer];
+	group.frame = frame;
+	CGRect b = group.bounds;
+	CALayer *backdrop = [NSClassFromString(@"CABackdropLayer") layer];
+	backdrop.frame = b;
+	backdrop.name = @"@0";
+	[backdrop setValue:@YES forKey:@"enabled"];
+	[backdrop setValue:@YES forKey:@"sourceSublayerDefinesBounds"];
+	[backdrop setValue:@0.5 forKey:@"marginWidth"];
+	[backdrop setValue:@0.25 forKey:@"scale"];
+	CALayer *shape = [NSClassFromString(@"CASDFLayer") layer];
+	shape.frame = b;
+	shape.name = @"@0";
+	[shape setValue:[NSClassFromString(@"CASDFOutputEffect") new] forKey:@"effect"];
+	/* The glyphs' container, which the portals show. */
+	CALayer *glyphs = [CALayer layer];
+	CALayer *element = [NSClassFromString(@"CASDFElementLayer") layer];
+	element.frame = CGRectInset(b, -2, -2);
+	element.contentsScale = 2;
+	CGImageRef contents = ca_glyphs10((size_t)(element.frame.size.width * 2), (size_t)(element.frame.size.height * 2));
+	element.contents = (__bridge id)contents;
+	CGImageRelease(contents);
+	[element setValue:@"contents" forKey:@"mode"];
+	[element setValue:@1.5 forKey:@"contentsZeroValueDistance"];
+	[element setValue:@-24 forKey:@"contentsOneValueDistance"];
+	[glyphs addSublayer:element];
+	[shape addSublayer:glyphs];
+	[backdrop addSublayer:shape];
+	id glass = ca_filter(@"glassBackground");
+	NSDictionary *values = @{
+		@"inputSourceSublayerName" : @"@0", @"inputInnerRefractionAmount" : @-57.7, @"inputInnerRefractionHeight" : @6,
+		@"inputRefractionDistance0" : @-1, @"inputRefractionDistance1" : @10, @"inputBlurRadius" : @3,
+		@"inputBlurOpacity0" : @0.5, @"inputBlurOpacity1" : @1, @"inputBlurOpacity2" : @0.5, @"inputBlurOpacity3" : @1,
+		@"inputBlurDistance0" : @-24, @"inputBlurDistance1" : @-1, @"inputFaceOpacity" : @0,
+		@"inputFaceColorMatrixBlack" : @0.5, @"inputMaxHeadroom" : @1.2, @"inputClamp" : @1,
+		@"inputKeyFillHighlightHeight" : @1, @"inputKeyFillHighlightSpread" : @(M_PI / 2),
+		@"inputKeyFillHighlightColorBias" : @-0.2,
+	};
+	for (NSString *key in values)
+		[glass setValue:values[key] forKey:key];
+	backdrop.filters = @[ glass ];
+	[group addSublayer:backdrop];
+	CGColorSpaceRef extended = CGColorSpaceCreateWithName(kCGColorSpaceExtendedSRGB);
+	CGFloat one[4] = {1, 1, 1, 1};
+	CGColorRef white = CGColorCreate(extended, one);
+	if ([parts containsObject:@"fill"]) {
+		CALayer *fill = [CALayer layer];
+		fill.frame = b;
+		fill.name = @"@1";
+		CALayer *gradient = [NSClassFromString(@"CASDFLayer") layer];
+		gradient.frame = b;
+		gradient.name = @"@0";
+		id effect = [NSClassFromString(@"CASDFGradientEffect") new];
+		[effect setValue:@[ (__bridge id)white, (__bridge id)white ] forKey:@"colors"];
+		[effect setValue:@[ @-1, @0, @0 ] forKey:@"distances"];
+		[gradient setValue:effect forKey:@"effect"];
+		const float lift[20] = {1.389f, -0.372f, -0.037f, 0, 0, -0.11f, 1.2f, -0.09f, 0, 0,
+					-0.11f, -0.37f, 1.48f, 0, 0, 0, 0, 0, 1, 0};
+		gradient.filters = @[ ca_vibrant(lift, YES, 1.2f) ];
+		CALayer *portal = [NSClassFromString(@"CAPortalLayer") layer];
+		[portal setValue:glyphs forKey:@"sourceLayer"];
+		[gradient addSublayer:portal];
+		[fill addSublayer:gradient];
+		[group addSublayer:fill];
+	}
+	if ([parts containsObject:@"highlight"]) {
+		CALayer *highlight = [NSClassFromString(@"CASDFLayer") layer];
+		highlight.frame = b;
+		highlight.name = @"@2";
+		id effect = [NSClassFromString(@"CASDFKeyFillHighlightEffect") new];
+		[effect setValue:(__bridge id)white forKey:@"keyColor"];
+		[effect setValue:(__bridge id)white forKey:@"fillColor"];
+		NSDictionary *light = @{
+			@"keyHeight" : @0.75, @"keyAngle" : @0, @"keySpread" : @0.8727, @"keyAmount" : @0.5,
+			@"fillHeight" : @0.75, @"fillAngle" : @(M_PI), @"fillSpread" : @0.8727, @"fillAmount" : @0.5,
+			@"curvature" : @0.7,
+		};
+		for (NSString *key in light)
+			[effect setValue:light[key] forKey:key];
+		[highlight setValue:effect forKey:@"effect"];
+		const float lift[20] = {1.325f, -0.477f, -0.048f, 0, 0, -0.14f, 1.26f, -0.12f, 0, 0,
+					-0.14f, -0.48f, 1.62f, 0, 0, 0, 0, 0, 1, 0};
+		highlight.filters = @[ ca_vibrant(lift, NO, 1.2f) ];
+		CALayer *portal = [NSClassFromString(@"CAPortalLayer") layer];
+		[portal setValue:glyphs forKey:@"sourceLayer"];
+		[highlight addSublayer:portal];
+		[group addSublayer:highlight];
+	}
+	CGColorRelease(white);
+	CGColorSpaceRelease(extended);
+	return group;
+}
+
 /* The layer `scene` names, over the gradient: a translucent orange rounded
  * panel, which no blend mode leaves the gradient under, alone or compositing
- * by `compositing`, a backdrop layer of the same shape (ca_backdrop), or a
- * button's label when the scene has `text` (ca_text). */
+ * by `compositing`, a backdrop layer of the same shape (ca_backdrop), a
+ * button's label when the scene has `text` (ca_text), or glass lettering
+ * when it has `glass_text` (ca_glass_text). */
 static CALayer *ca_scene(NSDictionary *f)
 {
 	CGRect frame = CGRectMake(12, 20, 40, 24);
 	if (f[@"text"])
 		return ca_text(f[@"text"], f);
+	if (f[@"glass_text"])
+		return ca_glass_text(f[@"glass_text"], CGRectMake(8, 6, 144, 36));
 	if (f[@"backdrop"])
 		return ca_backdrop(f, frame);
 	CALayer *layer = [CALayer layer];
