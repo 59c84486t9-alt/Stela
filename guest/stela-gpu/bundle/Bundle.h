@@ -41,6 +41,10 @@ typedef struct {
 uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *request, size_t request_bytes,
 			 void *response, size_t response_bytes, StelaSpans spans, StelaFailure *failure);
 
+/* The Mach-O CPU type of a universal library's AIR slice, the code this device
+ * compiles and its target architecture. */
+#define CPU_TYPE_AIR64 0x01000017u
+
 /* A call of operation `name`, whose records' types the compiler checks. */
 #define STELA_CALL_SPANS(gate, name, request, response, spans, failure)                            \
 	({                                                                                         \
@@ -79,7 +83,7 @@ void stela_stream_free(StelaStream *stream);
 void stela_texture_record(id descriptor, StelaTextureDescriptorRecord *record);
 void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 
-@class StelaGPUCommandBuffer, StelaGPUFunction, StelaGPUIndirectCommandBuffer;
+@class StelaGPUCommandBuffer, StelaGPUEvent, StelaGPUFunction, StelaGPUIndirectCommandBuffer;
 
 /* MTLAddDevice asserts both protocols on the device itself. */
 @interface StelaGPUDevice : _MTLDevice <MTLDevice, MTLDeviceSPI> {
@@ -98,6 +102,9 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 - (void)track:(StelaGPUCommandBuffer *)buffer;
 /* Completes `buffer`, whose commit `failure` refused. */
 - (void)failed:(StelaGPUCommandBuffer *)buffer with:(StelaFailure)failure;
+/* Publishes `event` at each completion until the service reaches `value`,
+ * which a refused command buffer's replayed signal applies. */
+- (void)settle:(StelaGPUEvent *)event at:(uint64_t)value;
 - (void)releaseHandle:(uint64_t)handle;
 /* Releases `handle` once the GPU completes everything committed so far,
  * keeping `slab` until then. */
@@ -113,6 +120,12 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 - (void)forgetIndirect:(StelaGPUIndirectCommandBuffer *)buffer;
 - (void)flushIndirect;
 - (StelaFormatAlignmentsResponse)alignmentsOfFormat:(NSUInteger)format;
+/* Event waiters sleep between completion notifications: `wakes` counts the
+ * notifications and the CPU signals of this process's events, and a waiter
+ * sleeps until the count passes the one it read, or for `milliseconds`. */
+- (uint64_t)wakes;
+- (void)wakeWaiters;
+- (void)waitForWakeAfter:(uint64_t)wakes milliseconds:(uint64_t)milliseconds;
 @end
 
 @interface StelaGPUDevice (Resources)
@@ -177,6 +190,8 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	BOOL _aliasable;
 	/* Its MTLPurgeableState, zero for the NonVolatile it starts in. */
 	NSUInteger _purgeable;
+	/* The process its memory counts toward, as `setResponsibleProcess:` names it. */
+	int _responsibleProcess;
 }
 @end
 
@@ -196,6 +211,12 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 		      response:(const StelaBufferResponse *)response
 		       options:(NSUInteger)options
 			length:(NSUInteger)length;
+- (id)newTextureWithDescriptor:(id)descriptor
+			offset:(NSUInteger)offset
+		   bytesPerRow:(NSUInteger)bytesPerRow
+		  secondOffset:(NSUInteger)secondOffset
+	     secondBytesPerRow:(NSUInteger)secondBytesPerRow
+		 surfaceFormat:(uint32_t)surfaceFormat;
 @end
 
 @interface StelaGPUTexture : StelaGPUResource <MTLTexture> {
@@ -208,7 +229,9 @@ void stela_depth_stencil_record(id descriptor, StelaDepthStencilRecord *record);
 	MTLTextureSwizzleChannels _swizzle;
 	/* A view's minLOD, in its levels. */
 	float _minLOD;
-	BOOL _sparse, _shareable, _gpuOptimized;
+	/* _drawable: made for a layer's drawable (a descriptor's private
+	 * isDrawable), as a view of one is. */
+	BOOL _sparse, _shareable, _gpuOptimized, _drawable;
 	id _buffer, _parent;
 	IOSurfaceRef _surface;
 	NSUInteger _surfacePlane;
@@ -308,6 +331,8 @@ NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state);
 - (StelaGPUDevice *)device;
 /* After a command buffer that signals it completes. */
 - (void)publish;
+/* Publishes, and whether the service's value reached `value`. */
+- (BOOL)publishReaching:(uint64_t)value;
 /* Before the GPU waits for `value`. */
 - (void)forwardAt:(uint64_t)value;
 @end
@@ -612,6 +637,19 @@ id stela_empty_logs(void);
 - (void)beginRender:(id)descriptor;
 /* The service finished the command buffer, or `failure` ended it. */
 - (void)didCompleteWith:(const StelaFailure *)failure;
+/* Metal's synchronization notifications (SPI of `_MTLCommandBuffer`, probed
+ * on macOS 27.2): `addSynchronizationNotification:` keeps a block, which is
+ * called with the command buffer and a StelaSynchronization at each memory
+ * barrier an encoder encodes (phase 0, with the barrier's scope or
+ * resources), at each encoder's end (phase 1) and at commit (phase 2). A
+ * block that answers YES is done and dropped; phases 2 and 3 drop every
+ * block. MetalFX waits for them. */
+- (void)addSynchronizationNotification:(BOOL (^)(id, const void *))block;
+- (void)executeSynchronizationNotifications:(int)phase;
+- (void)executeSynchronizationNotifications:(int)phase
+				      scope:(uint64_t)scope
+				  resources:(const id __unsafe_unretained *)resources
+				      count:(uint64_t)count;
 @end
 
 /* The commands an encoder writes, into its command buffer's stream or its own. */

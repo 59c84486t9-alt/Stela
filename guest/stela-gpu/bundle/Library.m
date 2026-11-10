@@ -316,7 +316,6 @@ typedef struct {
  * other than Apple's own compiles; the rest are code for Apple's GPUs. */
 #define UNIVERSAL_MAGIC 0xcafebabeu
 #define UNIVERSAL_SLICE_WORDS 5
-#define CPU_TYPE_AIR64 0x01000017u
 
 static uint32_t big_endian(const uint8_t *bytes, size_t word)
 {
@@ -946,7 +945,11 @@ static BOOL install_path(const char *name, NSString *loader, char *path, size_t 
 	free(spans);
 	free(records);
 	if (status != StelaStatusOk) {
-		stela_report([[NSString stringWithFormat:@"function %@", name] UTF8String], &failure);
+		/* A name the library lacks is Metal's nil, which callers probing
+		 * libraries expect. */
+		if (status != StelaStatusDeclined) {
+			stela_report([[NSString stringWithFormat:@"function %@", name] UTF8String], &failure);
+		}
 		if (error) {
 			*error = stela_error(MTLLibraryErrorDomain, MTLLibraryErrorFunctionNotFound, &failure);
 		}
@@ -984,14 +987,32 @@ static BOOL install_path(const char *name, NSString *loader, char *path, size_t 
 	});
 }
 
+/* A descriptor's specialized name, when it has one, is the function's name,
+ * by which stitched graphs and pipelines name it. */
+static StelaGPUFunction *named_as_specialized(StelaGPUFunction *function, id descriptor)
+{
+	NSString *specialized = [descriptor specializedName];
+	if (function && specialized.length) {
+		function->_name = [specialized copy];
+	}
+	return function;
+}
+
 - (id)newFunctionWithDescriptor:(id)descriptor error:(NSError **)error
 {
-	return [self newFunctionWithName:[descriptor name] constantValues:[descriptor constantValues] error:error];
+	return named_as_specialized([self newFunctionWithName:[descriptor name]
+					       constantValues:[descriptor constantValues]
+							error:error],
+				    descriptor);
 }
 
 - (void)newFunctionWithDescriptor:(id)descriptor completionHandler:(void (^)(id, NSError *))handler
 {
-	[self newFunctionWithName:[descriptor name] constantValues:[descriptor constantValues] completionHandler:handler];
+	[self newFunctionWithName:[descriptor name]
+		   constantValues:[descriptor constantValues]
+		completionHandler:^(id function, NSError *error) {
+			handler(named_as_specialized(function, descriptor), error);
+		}];
 }
 
 - (id)newIntersectionFunctionWithDescriptor:(id)descriptor error:(NSError **)error

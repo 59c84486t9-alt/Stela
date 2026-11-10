@@ -23,7 +23,6 @@
 #define RAY_TRACING "this device has no acceleration structures"
 #define INTERSECTION "this device has no intersection functions"
 #define TENSORS "this device has no tensors"
-#define IMAGEBLOCKS "indirect commands' kernels take their threadgroup's imageblock size"
 #define BINARY_LINKING "this device links no binary functions into a pipeline"
 #define ARGUMENT_OBJECT "this device encodes no such object in an argument buffer"
 #define NO_TILED_TEXTURE "this device has no tiled textures over caller memory"
@@ -241,15 +240,6 @@ ABSENT((id)functionHandleWithBinaryFunction:(id)function, BINARY_LINKING, nil)
 - (void)setIntersectionFunctionTables:(const id __unsafe_unretained[])tables withBufferRange:(NSRange)range
 {
 	REFUSE("setIntersectionFunctionTables:withBufferRange:", INTERSECTION);
-}
-
-@end
-
-@implementation StelaGPUIndirectComputeCommand (Refused)
-
-- (void)setImageblockWidth:(NSUInteger)width height:(NSUInteger)height
-{
-	REFUSE("setImageblockWidth:height:", IMAGEBLOCKS);
 }
 
 @end

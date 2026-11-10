@@ -121,7 +121,9 @@ void stela_report(const char *what, const StelaFailure *failure)
 			NSString *named = [NSString stringWithFormat:@"%s[%d] %@", getprogname(), getpid(), message];
 			StelaReportRequest request = {.text = stela_span(named.UTF8String, strlen(named.UTF8String))};
 			StelaEmpty empty;
-			STELA_CALL(gate, Report, &request, &empty, NULL);
+			/* The text is a span the call reads, so its pages are mapped first. */
+			StelaSpans spans = {.reads = &request.text, .read_count = 1};
+			STELA_CALL_SPANS(gate, Report, &request, &empty, spans, NULL);
 		}
 	}
 }

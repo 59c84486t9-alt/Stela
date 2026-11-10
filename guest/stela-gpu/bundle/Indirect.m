@@ -298,6 +298,12 @@
 	ENCODE(StelaIndirectComputeCodeSetThreadgroupMemory, record);
 }
 
+- (void)setImageblockWidth:(NSUInteger)width height:(NSUInteger)height
+{
+	StelaImageblockSize record = {.width = width, .height = height};
+	ENCODE(StelaIndirectComputeCodeSetImageblockSize, record);
+}
+
 - (void)setStageInRegion:(MTLRegion)region
 {
 	StelaStageInRegion record = {

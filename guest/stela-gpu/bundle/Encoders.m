@@ -63,6 +63,7 @@ static StelaRegionRecord region_record(NSUInteger slice, NSUInteger level, MTLOr
 		[self sampleCountersInBuffer:_endSamples[i].buffer atSampleIndex:_endSamples[i].index withBarrier:YES];
 	}
 	stela_stream_entry(_stream, StelaCommandBufferCodeEndEncoding, NULL, 0, NULL, 0);
+	[_commands executeSynchronizationNotifications:1];
 }
 
 - (void)insertDebugSignpost:(NSString *)name
@@ -680,25 +681,30 @@ static StelaRegionRecord region_record(NSUInteger slice, NSUInteger level, MTLOr
 	ENTRY(StelaComputeCodeDispatchIndirect, command);
 }
 
-- (void)memoryBarrierWithScope:(NSUInteger)scope
+- (void)barrier:(NSUInteger)scope
 {
 	StelaMemoryBarrier command = {.scope = scope};
 	ENTRY(StelaComputeCodeMemoryBarrier, command);
+}
+
+- (void)memoryBarrierWithScope:(NSUInteger)scope
+{
+	[_commands executeSynchronizationNotifications:0 scope:scope resources:NULL count:0];
+	[self barrier:scope];
 }
 
 - (void)barrierAfterQueueStages:(NSUInteger)after beforeStages:(NSUInteger)before
 {
 	(void)after;
 	(void)before;
-	[self memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+	[self barrier:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
 }
 
 /* A barrier on all the kinds of resources is the wider one the hardware has. */
 - (void)memoryBarrierWithResources:(const id __unsafe_unretained[])resources count:(NSUInteger)count
 {
-	(void)resources;
-	(void)count;
-	[self memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
+	[_commands executeSynchronizationNotifications:0 scope:0 resources:resources count:count];
+	[self barrier:MTLBarrierScopeBuffers | MTLBarrierScopeTextures];
 }
 
 - (void)executeCommandsInBuffer:(StelaGPUIndirectCommandBuffer *)buffer withRange:(NSRange)range

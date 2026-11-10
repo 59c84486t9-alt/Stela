@@ -237,6 +237,7 @@ void *IOSurfaceGetBaseAddress(IOSurfaceRef surface);
 void *IOSurfaceGetBaseAddressOfPlane(IOSurfaceRef surface, size_t plane);
 size_t IOSurfaceGetBytesPerRowOfPlane(IOSurfaceRef surface, size_t plane);
 size_t IOSurfaceGetElementHeightOfPlane(IOSurfaceRef surface, size_t plane);
+size_t IOSurfaceGetWidthOfPlane(IOSurfaceRef surface, size_t plane);
 size_t IOSurfaceGetAllocSize(IOSurfaceRef surface);
 size_t IOSurfaceGetWidth(IOSurfaceRef surface);
 size_t IOSurfaceGetHeight(IOSurfaceRef surface);
@@ -266,6 +267,7 @@ kern_return_t mach_port_deallocate(task_t task, mach_port_t name);
 void objc_setAssociatedObject(id object, const void *key, id value, uintptr_t policy);
 id objc_getAssociatedObject(id object, const void *key);
 
+#define DISPATCH_TIME_NOW (0ull)
 #define DISPATCH_TIME_FOREVER (~0ull)
 typedef struct dispatch_queue_attr_s *dispatch_queue_attr_t;
 typedef struct dispatch_semaphore_s *dispatch_semaphore_t;
@@ -280,6 +282,7 @@ dispatch_queue_attr_t dispatch_queue_attr_make_with_qos_class(dispatch_queue_att
 dispatch_semaphore_t dispatch_semaphore_create(long value);
 long dispatch_semaphore_wait(dispatch_semaphore_t semaphore, uint64_t timeout);
 long dispatch_semaphore_signal(dispatch_semaphore_t semaphore);
+uint64_t dispatch_time(uint64_t when, int64_t delta);
 void dispatch_barrier_async(dispatch_queue_t queue, void (^block)(void));
 dispatch_queue_t dispatch_get_global_queue(long priority, unsigned long flags);
 dispatch_group_t dispatch_group_create(void);

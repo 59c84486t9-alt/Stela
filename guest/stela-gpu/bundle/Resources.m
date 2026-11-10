@@ -243,7 +243,31 @@ NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state)
 
 - (id)newTextureWithDescriptor:(id)descriptor offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow
 {
-	StelaNewBufferTextureRequest request = {.buffer = _handle, .offset = offset, .bytes_per_row = bytesPerRow};
+	return [self newTextureWithDescriptor:descriptor
+				       offset:offset
+				  bytesPerRow:bytesPerRow
+				 secondOffset:0
+			    secondBytesPerRow:0
+				surfaceFormat:0];
+}
+
+/* A two-plane format's texture also names its second plane's bytes, and
+ * the surface's pixel format, whose range YCbCr converts in. */
+- (id)newTextureWithDescriptor:(id)descriptor
+			offset:(NSUInteger)offset
+		   bytesPerRow:(NSUInteger)bytesPerRow
+		  secondOffset:(NSUInteger)secondOffset
+	     secondBytesPerRow:(NSUInteger)secondBytesPerRow
+		 surfaceFormat:(uint32_t)surfaceFormat
+{
+	StelaNewBufferTextureRequest request = {
+		.buffer = _handle,
+		.offset = offset,
+		.bytes_per_row = bytesPerRow,
+		.second_offset = secondOffset,
+		.second_bytes_per_row = secondBytesPerRow,
+		.surface_format = surfaceFormat,
+	};
 	stela_texture_record(descriptor, &request.descriptor);
 	StelaTextureResponse response;
 	StelaFailure failure;
@@ -303,6 +327,10 @@ NSUInteger stela_purgeable_state(NSUInteger *slot, NSUInteger state)
 	self = [self initWithDevice:device response:response record:&record];
 	if (self && [descriptor respondsToSelector:@selector(allowGPUOptimizedContents)]) {
 		_gpuOptimized = [descriptor allowGPUOptimizedContents];
+	}
+	/* Core Animation marks the descriptors of its layers' drawables. */
+	if (self && [descriptor respondsToSelector:@selector(isDrawable)]) {
+		_drawable = [descriptor isDrawable];
 	}
 	return self;
 }
@@ -862,14 +890,21 @@ static MTLSharedEventListener *forwarding(void)
 {
 	[self raiseService:value];
 	[super setSignaledValue:value];
+	[_device wakeWaiters];
 }
 
 - (void)publish
+{
+	[self publishReaching:0];
+}
+
+- (BOOL)publishReaching:(uint64_t)value
 {
 	uint64_t service = [self serviceValue];
 	if (service > [super signaledValue]) {
 		[super setSignaledValue:service];
 	}
+	return service >= value;
 }
 
 - (void)forwardAt:(uint64_t)value
@@ -886,13 +921,24 @@ static MTLSharedEventListener *forwarding(void)
 }
 
 /*
- * A CPU waiter may be what the GPU waits for in the same command buffer as the
- * signal, so no completion need ever arrive: both values are read every
- * millisecond, each service read also submitting what the signal released.
+ * A GPU signal is seen at the completion notification that follows it, so the
+ * waiter sleeps between notifications and asks the service once after each.
+ * A CPU waiter may also be what the GPU waits for in the same command buffer as
+ * the signal, so no completion need ever arrive, and another process's CPU
+ * signal reaches only the kernel's value: both values are also read when a
+ * sleep times out, at intervals doubling from 1 ms to FALLBACK_MS, each
+ * service read also submitting what the signal released.
  */
+#define FALLBACK_MS 16u
+
 - (BOOL)waitUntilSignaledValue:(uint64_t)value timeoutMS:(uint64_t)milliseconds
 {
-	for (uint64_t waited = 0;; waited++) {
+	mach_timebase_info_data_t timebase;
+	mach_timebase_info(&timebase);
+	uint64_t start = mach_absolute_time();
+	uint64_t interval = 1;
+	for (;;) {
+		uint64_t wakes = [_device wakes];
 		StelaWaitEventRequest request = {.event = _handle, .value = value};
 		StelaWaitResponse response = {};
 		StelaFailure failure;
@@ -909,10 +955,14 @@ static MTLSharedEventListener *forwarding(void)
 			[self raiseService:kernel];
 			return YES;
 		}
+		uint64_t waited = (mach_absolute_time() - start) * timebase.numer / timebase.denom / 1000000;
 		if (waited >= milliseconds) {
 			return NO;
 		}
-		usleep(1000);
+		[_device waitForWakeAfter:wakes
+			     milliseconds:interval < milliseconds - waited ? interval : milliseconds - waited];
+		/* A notification restarts the fallback's intervals; a timeout doubles them. */
+		interval = [_device wakes] != wakes ? 1 : (interval * 2 < FALLBACK_MS ? interval * 2 : FALLBACK_MS);
 	}
 }
 
@@ -1083,6 +1133,11 @@ StelaGPUEvent *stela_event(StelaGPUDevice *device, id event)
 		       options:(NSUInteger)options
 		   deallocator:(void (^)(void *, NSUInteger))deallocator
 {
+	/* Metal answers nil for an empty buffer, as Apple GPUs do (measured on
+	 * an M1 Pro); it is no failure to report. */
+	if (length == 0) {
+		return nil;
+	}
 	StelaFailure failure;
 	uint64_t memory = [self importAddress:bytes length:page_aligned(length) failure:&failure];
 	if (memory == 0) {
@@ -1139,7 +1194,26 @@ StelaGPUEvent *stela_event(StelaGPUDevice *device, id event)
 		CFRelease(surface);
 		return nil;
 	}
-	StelaGPUTexture *texture = [buffer newTextureWithDescriptor:descriptor offset:offset bytesPerRow:bytesPerRow];
+	/* Apple's two-plane formats take both of a surface's planes from its
+	 * first; other formats ignore the second, whose texels are pairs of the
+	 * first's elements. Its rows count as the first's do. */
+	NSUInteger secondOffset = 0, secondBytesPerRow = 0;
+	if (plane == 0 && IOSurfaceGetPlaneCount(surface) >= 2) {
+		secondOffset = (uint8_t *)IOSurfaceGetBaseAddressOfPlane(surface, 1) - base;
+		secondBytesPerRow = IOSurfaceGetBytesPerRowOfPlane(surface, 1) / IOSurfaceGetElementHeightOfPlane(surface, 1);
+		/* A pair of 8- or 16-bit components, as the format's first plane's
+		 * element is one. */
+		NSUInteger secondRow = IOSurfaceGetWidthOfPlane(surface, 1) * 2 * format.block_bytes;
+		if (IOSurfaceGetPixelFormat(surface) >> 24 == '&' && secondBytesPerRow < secondRow) {
+			secondBytesPerRow = secondRow;
+		}
+	}
+	StelaGPUTexture *texture = [buffer newTextureWithDescriptor:descriptor
+							     offset:offset
+							bytesPerRow:bytesPerRow
+						       secondOffset:secondOffset
+						  secondBytesPerRow:secondBytesPerRow
+						      surfaceFormat:IOSurfaceGetPixelFormat(surface)];
 	if (texture) {
 		texture->_surface = surface;
 		texture->_surfacePlane = plane;
@@ -1147,13 +1221,16 @@ StelaGPUEvent *stela_event(StelaGPUDevice *device, id event)
 		uint32_t fourcc = IOSurfaceGetPixelFormat(surface);
 		StelaFailure failure = {.reason = "no texture of this surface"};
 		stela_report([[NSString stringWithFormat:@"pixel format %lu of surface %c%c%c%c, %zux%zu, "
-							 "%zu bytes an element, %zu a row, %zu planes, %zu in all",
+							 "%zu bytes an element, %zu a row, %zu planes, %zu in all; "
+							 "plane %lu at %lu, %lu a row; second plane at %lu, %lu a row",
 							 (unsigned long)[descriptor pixelFormat], fourcc >> 24,
 							 (fourcc >> 16) & 0xff, (fourcc >> 8) & 0xff, fourcc & 0xff,
 							 IOSurfaceGetWidth(surface), IOSurfaceGetHeight(surface),
 							 IOSurfaceGetBytesPerElement(surface),
 							 IOSurfaceGetBytesPerRow(surface), IOSurfaceGetPlaneCount(surface),
-							 IOSurfaceGetAllocSize(surface)] UTF8String],
+							 IOSurfaceGetAllocSize(surface), (unsigned long)plane,
+							 (unsigned long)offset, (unsigned long)bytesPerRow,
+							 (unsigned long)secondOffset, (unsigned long)secondBytesPerRow] UTF8String],
 			     &failure);
 	}
 	return texture;
@@ -1342,6 +1419,7 @@ static StelaGPUTexture *new_view(StelaGPUTexture *texture, NSUInteger format, NS
 	view->_swizzle = swizzle;
 	view->_minLOD = min_lod;
 	view->_gpuOptimized = texture->_gpuOptimized;
+	view->_drawable = texture->_drawable;
 	view->_parent = texture;
 	view->_parentLevel = levels.location;
 	view->_parentSlice = slices.location;

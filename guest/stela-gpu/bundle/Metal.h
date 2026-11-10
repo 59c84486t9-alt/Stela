@@ -85,6 +85,9 @@ enum {
 	MTLFeatureSet_macOS_GPUFamily2_v1 = 10005,
 };
 enum {
+	MTLGPUFamilyApple4 = 1004,
+	MTLGPUFamilyApple6 = 1006,
+	MTLGPUFamilyApple7 = 1007,
 	MTLGPUFamilyMac1 = 2001,
 	MTLGPUFamilyMac2 = 2002,
 };
@@ -383,6 +386,7 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (NSUInteger)usage;
 - (MTLTextureSwizzleChannels)swizzle;
 - (BOOL)allowGPUOptimizedContents;
+- (BOOL)isDrawable;
 /* MTLTextureViewDescriptor. */
 - (NSRange)levelRange;
 - (NSRange)sliceRange;
@@ -580,6 +584,7 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (id)constantValues;
 - (NSUInteger)dispatchType;
 - (NSString *)name;
+- (NSString *)specializedName;
 - (void)setComputeFunction:(id)function;
 /* MTLDrawable and MTLSharedEventListener. */
 - (void)present;

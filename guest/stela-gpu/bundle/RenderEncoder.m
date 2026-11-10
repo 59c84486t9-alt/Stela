@@ -366,12 +366,18 @@ STAGE_BINDINGS(Tile, MTLRenderStageTile)
 	ENTRY(StelaRenderCodeSetStencilStoreActionOptions, command);
 }
 
+- (void)barrier:(NSUInteger)scope after:(NSUInteger)after before:(NSUInteger)before
+{
+	StelaRenderBarrier command = {.scope = scope, .after = after, .before = before};
+	ENTRY(StelaRenderCodeMemoryBarrier, command);
+}
+
 - (void)memoryBarrierWithScope:(NSUInteger)scope
 		   afterStages:(NSUInteger)after
 		  beforeStages:(NSUInteger)before
 {
-	StelaRenderBarrier command = {.scope = scope, .after = after, .before = before};
-	ENTRY(StelaRenderCodeMemoryBarrier, command);
+	[_commands executeSynchronizationNotifications:0 scope:scope resources:NULL count:0];
+	[self barrier:scope after:after before:before];
 }
 
 /* A barrier on all the kinds of resources is the wider one the hardware has. */
@@ -380,11 +386,10 @@ STAGE_BINDINGS(Tile, MTLRenderStageTile)
 		       afterStages:(NSUInteger)after
 		      beforeStages:(NSUInteger)before
 {
-	(void)resources;
-	(void)count;
-	[self memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures | MTLBarrierScopeRenderTargets
-			 afterStages:after
-			beforeStages:before];
+	[_commands executeSynchronizationNotifications:0 scope:0 resources:resources count:count];
+	[self barrier:MTLBarrierScopeBuffers | MTLBarrierScopeTextures | MTLBarrierScopeRenderTargets
+		after:after
+	       before:before];
 }
 
 /* The render stages keep their bits among `MTLStages`; earlier work's stages are all vertex or later. */
@@ -394,16 +399,14 @@ STAGE_BINDINGS(Tile, MTLRenderStageTile)
 				  | MTLRenderStageObject | MTLRenderStageMesh;
 	NSUInteger first = after & render ?: MTLRenderStageVertex | MTLRenderStageFragment;
 	NSUInteger second = before & render ?: MTLRenderStageVertex | MTLRenderStageFragment;
-	[self memoryBarrierWithScope:MTLBarrierScopeBuffers | MTLBarrierScopeTextures | MTLBarrierScopeRenderTargets
-			 afterStages:first
-			beforeStages:second];
+	[self barrier:MTLBarrierScopeBuffers | MTLBarrierScopeTextures | MTLBarrierScopeRenderTargets
+		after:first
+	       before:second];
 }
 
 - (void)textureBarrier
 {
-	[self memoryBarrierWithScope:MTLBarrierScopeTextures
-			 afterStages:MTLRenderStageFragment
-			beforeStages:MTLRenderStageFragment];
+	[self barrier:MTLBarrierScopeTextures after:MTLRenderStageFragment before:MTLRenderStageFragment];
 }
 
 - (void)drawPrimitives:(NSUInteger)primitive

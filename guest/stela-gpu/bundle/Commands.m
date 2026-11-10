@@ -106,10 +106,14 @@ static CFTimeInterval host_time(void)
 	NSMutableArray *_scheduledHandlers, *_completedHandlers;
 	/* The events it signals or waits on, whose kernel events it raises at completion. */
 	NSMutableArray *_events;
+	/* What it signals, as [event, value], for a refused commit to settle. */
+	NSMutableArray *_signals;
 	NSError *_error;
 	_Atomic(NSUInteger) _status;
 	NSUInteger _errorOptions;
 	NSMutableArray *_encoderInfos;
+	/* Synchronization notification blocks, in the order added. */
+	NSMutableArray *_synchronization;
 	os_unfair_lock _referencesLock;
 	CFTimeInterval _kernelStart, _kernelEnd;
 	bool _enqueued;
@@ -232,6 +236,7 @@ static CFTimeInterval host_time(void)
 
 - (void)commit
 {
+	[self executeSynchronizationNotifications:2];
 	[self enqueue];
 	_status = MTLCommandBufferStatusCommitted;
 	_committed = true;
@@ -293,6 +298,14 @@ static CFTimeInterval host_time(void)
 	for (NSUInteger i = 0; i < events.count; i++) {
 		[(StelaGPUEvent *)[events objectAtIndex:i] publish];
 	}
+	if (failure && _serial == 0) {
+		/* Refused: the service still applies its signals once its waits
+		 * are met, which later completions publish. */
+		for (NSUInteger i = 0; i < _signals.count; i++) {
+			NSArray *pair = [_signals objectAtIndex:i];
+			[_device settle:[pair objectAtIndex:0] at:[[pair objectAtIndex:1] unsignedLongLongValue]];
+		}
+	}
 	if (failure) {
 		_error = stela_command_error(failure, _encoderInfos, _serial != 0);
 	}
@@ -332,6 +345,52 @@ static CFTimeInterval host_time(void)
 
 - (void)useResidencySets:(const id __unsafe_unretained[])sets count:(NSUInteger)count
 {
+}
+
+/* What a synchronization notification block is told, as Metal lays it out. */
+typedef struct {
+	uint32_t phase, reserved;
+	uint64_t scope;
+	const id __unsafe_unretained *resources;
+	uint64_t count;
+} StelaSynchronization;
+
+- (void)addSynchronizationNotification:(BOOL (^)(id, const void *))block
+{
+	if (!block)
+		return;
+	if (!_synchronization)
+		_synchronization = [NSMutableArray arrayWithCapacity:2];
+	[_synchronization addObject:[block copy]];
+}
+
+- (void)executeSynchronizationNotifications:(int)phase
+{
+	[self executeSynchronizationNotifications:phase scope:0 resources:NULL count:0];
+}
+
+- (void)executeSynchronizationNotifications:(int)phase
+				      scope:(uint64_t)scope
+				  resources:(const id __unsafe_unretained *)resources
+				      count:(uint64_t)count
+{
+	if (!_synchronization.count)
+		return;
+	StelaSynchronization info = {
+		.phase = (uint32_t)phase, .scope = scope, .resources = resources, .count = count,
+	};
+	bool final = (phase & ~1) == 2;
+	/* A block may add another while it runs; that one waits for the next call. */
+	NSUInteger count_before = _synchronization.count;
+	for (NSUInteger i = 0; i < count_before;) {
+		BOOL (^block)(id, const void *) = [_synchronization objectAtIndex:i];
+		if (block(self, &info) || final) {
+			[_synchronization removeObjectAtIndex:i];
+			count_before--;
+		} else {
+			i++;
+		}
+	}
 }
 
 - (void)addCompletedHandler:(void (^)(id))handler
@@ -434,6 +493,10 @@ static CFTimeInterval host_time(void)
 	if (!ours) {
 		return;
 	}
+	if (!_signals) {
+		_signals = [NSMutableArray arrayWithCapacity:2];
+	}
+	[_signals addObject:@[ ours, @(value) ]];
 	StelaEventCommand command = {.event = ours->_handle, .value = value};
 	stela_stream_entry(&_stream, StelaCommandBufferCodeSignalEvent, &command, sizeof(command), NULL, 0);
 }

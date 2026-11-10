@@ -19,6 +19,7 @@ BOOL class_respondsToSelector(Class class, SEL selector);
 Class object_getClass(id object);
 const char *method_getTypeEncoding(Method method);
 Class objc_getClass(const char *name);
+const char *class_getName(Class class);
 
 @interface NSObject (StelaForwarding)
 + (id)signatureWithObjCTypes:(const char *)types;
@@ -32,54 +33,68 @@ struct objc_method_description {
 struct objc_method_description *protocol_copyMethodDescriptionList(void *protocol, BOOL required, BOOL instance,
 								   unsigned *count);
 
-/* Selectors reported so far, open addressed; more than fit stay unreported. */
+/* Class and selector pairs reported so far, by a key of both, open
+ * addressed. Past the table's size a pair is not remembered: the first one
+ * says so, and later ones are not reported. */
 #define REPORTED 4096
-static const char *reported[REPORTED];
+static uint64_t reported[REPORTED];
+static bool overflowed;
 
-/* Reports `selector` once, with the image and offset of the code that sent
- * it when `caller` is known. */
-static void report(SEL selector, const void *caller)
+/* Reports `selector` sent to an object of `class` once, with the image and
+ * offset of the code that sent it when `caller` is known. */
+static void report(Class class, SEL selector, const void *caller)
 {
 	const char *name = sel_getName(selector);
-	size_t at = (uintptr_t)name >> 3;
+	const char *receiver = class ? class_getName(class) : "nil";
+	/* Zero marks a free slot. */
+	uint64_t key = ((uint64_t)(uintptr_t)name * 0x9e3779b97f4a7c15ull) ^ (uint64_t)(uintptr_t)class;
+	key = key ? key : 1;
+	size_t at = (size_t)(key >> 7);
 	for (size_t probe = 0; probe < REPORTED; probe++, at++) {
-		const char *expected = NULL;
-		if (__atomic_compare_exchange_n(&reported[at % REPORTED], &expected, name, false, __ATOMIC_RELAXED,
+		uint64_t expected = 0;
+		if (__atomic_compare_exchange_n(&reported[at % REPORTED], &expected, key, false, __ATOMIC_RELAXED,
 						__ATOMIC_RELAXED)) {
 			StelaFailure failure = {.reason = "Metal's SPI asked for what this device has no answer to"};
+			char what[384];
 			Dl_info image = {};
 			if (!caller || !dladdr(caller, &image) || !image.dli_fname) {
-				stela_report(name, &failure);
-				return;
+				snprintf(what, sizeof(what), "-[%s %s]", receiver, name);
+			} else {
+				snprintf(what, sizeof(what), "-[%s %s], asked by %s+0x%lx", receiver, name,
+					 image.dli_fname, (unsigned long)((uintptr_t)caller - (uintptr_t)image.dli_fbase));
 			}
-			char what[320];
-			snprintf(what, sizeof(what), "%s, asked by %s+0x%lx", name, image.dli_fname,
-				 (unsigned long)((uintptr_t)caller - (uintptr_t)image.dli_fbase));
 			stela_report(what, &failure);
 			return;
 		}
-		if (expected == name) {
+		if (expected == key) {
 			return;
 		}
+	}
+	if (!__atomic_exchange_n(&overflowed, true, __ATOMIC_RELAXED)) {
+		StelaFailure failure = {.reason = "more absent selectors than the report table holds; later ones are "
+						  "not reported"};
+		char what[320];
+		snprintf(what, sizeof(what), "-[%s %s]", receiver, name);
+		stela_report(what, &failure);
 	}
 }
 
 /* Pointers, integers and structs of two words come back in x0 and x1. */
 static unsigned __int128 absent(id self, SEL selector)
 {
-	report(selector, __builtin_return_address(0));
+	report(object_getClass(self), selector, __builtin_return_address(0));
 	return 0;
 }
 
 static double absent_float(id self, SEL selector)
 {
-	report(selector, __builtin_return_address(0));
+	report(object_getClass(self), selector, __builtin_return_address(0));
 	return 0;
 }
 
 static MTLSize absent_size(id self, SEL selector)
 {
-	report(selector, __builtin_return_address(0));
+	report(object_getClass(self), selector, __builtin_return_address(0));
 	return (MTLSize){0};
 }
 
@@ -161,7 +176,7 @@ static const void *forwarded_sender(void)
 /* An invocation's return value starts zeroed. */
 static void forward(id self, SEL selector, id invocation)
 {
-	report([invocation selector], forwarded_sender());
+	report(object_getClass(self), [invocation selector], forwarded_sender());
 }
 
 @interface StelaGPUAbsent : NSObject

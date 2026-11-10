@@ -93,6 +93,9 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 	os_unfair_lock _lock;
 	/* Committed command buffers, by serial. */
 	NSMutableArray *_inFlight;
+	/* What refused command buffers signal, as [event, value]: the service
+	 * still applies it, in order, and each completion publishes it. */
+	NSMutableArray *_settling;
 	NSMutableArray *_indirect;
 	uint64_t _seen;
 	bool _lost;
@@ -110,6 +113,12 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 	 * last. */
 	NSMutableArray *_slabs[POOL_KINDS];
 	os_unfair_lock _poolLock;
+	/* Completion notifications and CPU signals seen, and the event waiters
+	 * sleeping on `_wake` until the next. */
+	os_unfair_lock _wakeLock;
+	dispatch_semaphore_t _wake;
+	uint64_t _wakes;
+	long _sleepers;
 }
 
 - (instancetype)initWithAcceleratorPort:(io_service_t)port
@@ -122,6 +131,7 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 	IOObjectRetain(port);
 	_lock = OS_UNFAIR_LOCK_INIT;
 	_inFlight = [NSMutableArray arrayWithCapacity:64];
+	_settling = [NSMutableArray arrayWithCapacity:2];
 	_indirect = [NSMutableArray arrayWithCapacity:4];
 	_deferred = [NSMutableArray arrayWithCapacity:64];
 	for (NSUInteger i = 0; i < POOL_KINDS; i++) {
@@ -129,6 +139,8 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 	}
 	_deferLock = OS_UNFAIR_LOCK_INIT;
 	_poolLock = OS_UNFAIR_LOCK_INIT;
+	_wakeLock = OS_UNFAIR_LOCK_INIT;
+	_wake = dispatch_semaphore_create(0);
 	mach_vm_address_t page = 0;
 	mach_vm_size_t bytes = 0;
 	if (IOServiceOpen(port, mach_task_self(), kStelaGPUUserClientType, &_gate.connect) != KERN_SUCCESS) {
@@ -255,12 +267,58 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 		[done addObject:buffer];
 		[_inFlight removeObjectAtIndex:0];
 	}
+	NSArray *settling = [_settling copy];
 	os_unfair_lock_unlock(&_lock);
 	for (NSUInteger i = 0; i < done.count; i++) {
 		[[done objectAtIndex:i] didCompleteWith:lost ? &failure : NULL];
 	}
+	[self publishSettling:settling lost:lost];
 	[self releaseDeferredReaching:lost ? UINT64_MAX : reached.value];
+	[self wakeWaiters];
 	[self arm];
+}
+
+- (uint64_t)wakes
+{
+	os_unfair_lock_lock(&_wakeLock);
+	uint64_t wakes = _wakes;
+	os_unfair_lock_unlock(&_wakeLock);
+	return wakes;
+}
+
+/* Wakes every sleeper counted since the last wake, one signal each. */
+- (void)wakeWaiters
+{
+	os_unfair_lock_lock(&_wakeLock);
+	_wakes++;
+	long sleepers = _sleepers;
+	_sleepers = 0;
+	os_unfair_lock_unlock(&_wakeLock);
+	while (sleepers-- > 0) {
+		dispatch_semaphore_signal(_wake);
+	}
+}
+
+- (void)waitForWakeAfter:(uint64_t)wakes milliseconds:(uint64_t)milliseconds
+{
+	os_unfair_lock_lock(&_wakeLock);
+	if (_wakes != wakes) {
+		os_unfair_lock_unlock(&_wakeLock);
+		return;
+	}
+	_sleepers++;
+	os_unfair_lock_unlock(&_wakeLock);
+	if (dispatch_semaphore_wait(_wake, dispatch_time(DISPATCH_TIME_NOW, (int64_t)milliseconds * 1000000)) == 0) {
+		return;
+	}
+	/* Timed out: still counted unless a wake came since. That wake's signal
+	 * for this sleeper stays, and wakes a later one early, which then only
+	 * looks again. */
+	os_unfair_lock_lock(&_wakeLock);
+	if (_wakes == wakes) {
+		_sleepers--;
+	}
+	os_unfair_lock_unlock(&_wakeLock);
 }
 
 - (void)noteSubmitted:(uint64_t)serial
@@ -375,6 +433,11 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 		buffer->_slab = slab;
 	}
 	os_unfair_lock_unlock(&_poolLock);
+	/* Metal zero-fills a new buffer. A heap range is not: it may hold the
+	 * bytes of a buffer freed from it before. */
+	if (buffer && buffer->_contents) {
+		memset(buffer->_contents, 0, length);
+	}
 	return buffer;
 }
 
@@ -394,6 +457,37 @@ static void completed(void *reference, int result, void *count)
 		[buffer didSchedule];
 		[self completionsReached:self->_seen];
 	});
+}
+
+- (void)settle:(StelaGPUEvent *)event at:(uint64_t)value
+{
+	os_unfair_lock_lock(&_lock);
+	[_settling addObject:@[ event, @(value) ]];
+	os_unfair_lock_unlock(&_lock);
+}
+
+/* Publishes what refused command buffers signal, dropping each value the
+ * kernel event reached, or all of them once the device is lost. */
+- (void)publishSettling:(NSArray *)settling lost:(bool)lost
+{
+	NSMutableArray *reached = [NSMutableArray arrayWithCapacity:settling.count];
+	for (NSUInteger i = 0; i < settling.count; i++) {
+		NSArray *pair = [settling objectAtIndex:i];
+		StelaGPUEvent *event = [pair objectAtIndex:0];
+		if (lost || [event publishReaching:[[pair objectAtIndex:1] unsignedLongLongValue]]) {
+			[reached addObject:pair];
+		}
+	}
+	if (reached.count) {
+		os_unfair_lock_lock(&_lock);
+		for (NSUInteger i = 0; i < reached.count; i++) {
+			NSUInteger index = [_settling indexOfObjectIdenticalTo:[reached objectAtIndex:i]];
+			if (index != NSNotFound) {
+				[_settling removeObjectAtIndex:index];
+			}
+		}
+		os_unfair_lock_unlock(&_lock);
+	}
 }
 
 - (void)failed:(StelaGPUCommandBuffer *)buffer with:(StelaFailure)failure
@@ -872,6 +966,38 @@ static BOOL claims(const StelaBlock *capabilities, NSInteger family)
 		report_unclaimed("GPU family", family, __builtin_return_address(0));
 	}
 	return claimed;
+}
+
+/* Private queries Apple's drivers answer from the GPU family and Metal's base
+ * class answers NO. Core Animation sizes its work by them: a glass backdrop's
+ * capture margin, for one. Each family claim already checks its feature:
+ * imageblocks, tile functions and raster order groups for Apple4, SIMD-group
+ * functions for Apple6 and their reductions for Apple7. */
+- (BOOL)supportsTileShaders
+{
+	return claims(_capabilities, MTLGPUFamilyApple4);
+}
+
+- (BOOL)supportsRasterOrderGroups
+{
+	return (_capabilities->flags & StelaFlags_RASTER_ORDER_GROUPS) != 0;
+}
+
+- (BOOL)supportsSIMDGroup
+{
+	return claims(_capabilities, MTLGPUFamilyApple6);
+}
+
+- (BOOL)supportsSIMDReduction
+{
+	return claims(_capabilities, MTLGPUFamilyApple7);
+}
+
+/* Half-precision arithmetic runs at its own width: every Apple family and the
+ * NVIDIA GPUs the driver presents as one. */
+- (BOOL)supportsNativeHardwareFP16
+{
+	return claims(_capabilities, MTLGPUFamilyApple4);
 }
 
 /* The deprecated macOS sets; iOS and tvOS sets are unknown here. */

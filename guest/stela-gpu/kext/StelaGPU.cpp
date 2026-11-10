@@ -141,16 +141,18 @@ StelaGPU::copyGateMemory(uint64_t page)
 	return IODeviceMemory::withSubRange(window, page * STELA_GATE_PAGE, STELA_GATE_PAGE);
 }
 
+/* The wired descriptor, or null with why prepare refused it in refused. */
 static IOMemoryDescriptor *
-wireMemory(task_t task, mach_vm_address_t address, mach_vm_size_t length, IODirection direction)
+wireMemory(task_t task, mach_vm_address_t address, mach_vm_size_t length, IODirection direction,
+	   IOReturn *refused)
 {
 	IOMemoryDescriptor *memory = IOMemoryDescriptor::withAddressRange(address, length, direction, task);
 	if (!memory) {
+		*refused = kIOReturnNoMemory;
 		return nullptr;
 	}
-	IOReturn prepared = memory->prepare();
-	if (prepared != kIOReturnSuccess) {
-		IOLog("StelaGPU: wiring %llx bytes at %llx refused: %x\n", length, address, prepared);
+	*refused = memory->prepare();
+	if (*refused != kIOReturnSuccess) {
 		memory->release();
 		return nullptr;
 	}
@@ -164,17 +166,23 @@ wireMemory(task_t task, mach_vm_address_t address, mach_vm_size_t length, IODire
 uint64_t
 StelaGPU::importMemory(uint64_t page, task_t task, mach_vm_address_t address, mach_vm_size_t length)
 {
-	IOMemoryDescriptor *memory = wireMemory(task, address, length, kIODirectionOutIn);
+	IOReturn refused;
+	IOMemoryDescriptor *memory = wireMemory(task, address, length, kIODirectionOutIn, &refused);
 	if (!memory) {
-		// A read-only mapping wires for the GPU's reads alone.
-		memory = wireMemory(task, address, length, kIODirectionOut);
+		// A read-only mapping refuses that with a protection failure, and
+		// wires for the GPU's reads alone.
+		memory = wireMemory(task, address, length, kIODirectionOut, &refused);
 	}
 	if (!memory) {
+		IOLog("StelaGPU: wiring %llx bytes at %llx refused: %x\n", length, address, refused);
 		return 0;
 	}
 	IOLockLock(lock);
 	if (stopping || imports == ~uint64_t(0)) {
+		bool stopped = stopping;
 		IOLockUnlock(lock);
+		IOLog("StelaGPU: import of %llx bytes at %llx refused: %s\n", length, address,
+		    stopped ? "the GPU is stopping" : "the import count is exhausted");
 		memory->complete();
 		memory->release();
 		return 0;
