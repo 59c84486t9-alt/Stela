@@ -46,11 +46,13 @@ use {
 };
 mod register_context;
 
-/// The FPCR fields of every chip: AHP, DN, FZ, RMode and FZ16 (FEAT_FP16).
-/// The trap enables IOE, DZE, OFE, UFE, IXE and IDE are RAZ/WI because the M2
-/// does not trap FP exceptions (inferred: macOS on Apple silicon cannot
-/// enable FP traps); FEAT_EBF16 and AArch32's Len and Stride are on no chip.
-const FPCR_FIELDS: u32 = 0x07c8_0000;
+/// The FPCR fields of every chip: AHP, DN, FZ, RMode and FZ16 (FEAT_FP16),
+/// and the trap enables IOE, DZE, OFE, UFE, IXE and IDE, which an M1 Pro
+/// keeps and traps on (measured at EL0 with `cargo xtask cpu-reference`;
+/// XNU reports `hw.optional.arm.FP_SyncExceptions` 1 there). The engine
+/// takes the trap (`Machine::take_floating_point_exception`). FEAT_EBF16 and AArch32's
+/// Len and Stride are on no chip.
+const FPCR_FIELDS: u32 = 0x07c8_0000 | FPCR_TRAP_ENABLES;
 /// FPCR's floating-point exception trap enables: IOE, DZE, OFE, UFE, IXE
 /// and IDE.
 const FPCR_TRAP_ENABLES: u32 = 0x9f00;
@@ -148,10 +150,10 @@ const ACTLR_REFUSED: [(u64, &str); 3] = [
 ///   writes: the SPTM copies the guarded level's AFSR1 into AFSR1_EL2 and
 ///   the hypervisor saves and restores AFSRn_EL12, both expecting the value
 ///   back.
-/// - ACTLR_ELx bit 1, EnTSO, asks for total store order. Every execution
-///   here is already sequentially consistent (one PE runs at a time and its
-///   accesses complete in program order), so the bit needs no further
-///   effect. Bit 9 is held: XNU's context switch copies a Rosetta thread's
+/// - ACTLR_ELx bit 1, EnTSO, asks for total store order. x86 hosts give
+///   every translated plain access total store order already, and the
+///   ordered accesses, atomics and barriers are at least as strong, so the
+///   bit needs no further effect. Bit 9 is held: XNU's context switch copies a Rosetta thread's
 ///   flag into it while the `icdsb` boot argument (1 by default) is
 ///   nonzero, and the name ties it to instruction-cache maintenance and
 ///   DSB. Whatever ordering it adds to them, this machine already completes
@@ -173,7 +175,7 @@ const ACTLR_REFUSED: [(u64, &str); 3] = [
 ///   they stop.
 /// - AMAIR_ELx refine MAIR_ELx's attributes, and Arm lets that refinement
 ///   have no effect. Stela's memory model gives memory attributes none
-///   beyond what MAIR_ELx selects (one PE at a time on coherent host RAM),
+///   beyond what MAIR_ELx selects (every PE shares coherent host RAM),
 ///   so every bit holds what software writes: no component writes AMAIR_EL1
 ///   or AMAIR_EL2, and the hypervisor round-trips a guest's AMAIR_EL12.
 /// - HACR_EL2 holds every bit but the guest timer mask

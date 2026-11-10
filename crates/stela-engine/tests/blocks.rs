@@ -245,8 +245,7 @@ mod numerical {
     }
 
     #[test]
-    fn enabled_control_refusal_preserves_instruction_and_resumes_without_prefix_replay()
-    -> Result<()> {
+    fn enabled_traps_complete_an_instruction_that_raises_nothing() -> Result<()> {
         let cache = tempfile::tempdir()?;
         let mut runtime = BlockRuntime::new_for_target(
             72,
@@ -260,17 +259,52 @@ mod numerical {
         )?;
         let mut thread = input(true);
         thread.registers.fpcr |= INVALID << EXCEPTION_ENABLE_SHIFT;
+        let mut expected = thread.registers.clone();
+        expected.x[0] += 2;
+        publish(&mut expected, 0, 1, 0x40400000, 32);
+        // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+        // else mutates it.
+        let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+        assert_eq!(done.reason, StopReason::StopAddress);
+        assert_eq!(thread.registers, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn enabled_exception_traps_at_its_instruction_and_resumes_without_prefix_replay() -> Result<()>
+    {
+        use stela_compiler::aarch64::floating::{INEXACT, OVERFLOW};
+        const SINGLE_MAX: u64 = 0x7f7f_ffff;
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_for_target(
+            76,
+            cache.path().into(),
+            BlockProfile::ORDINARY,
+            TargetCpu::Baseline,
+        );
+        runtime.register_code(
+            GuestAddress(BASE),
+            words(&[ADD_ONE, FADD_S0_S1_S2, ADD_ONE, RET]),
+        )?;
+        let mut thread = input(true);
+        thread.registers.v[1][0] = 0xdead_beef_0000_0000 | SINGLE_MAX;
+        thread.registers.v[2][0] = 0x89ab_cdef_0000_0000 | SINGLE_MAX;
+        thread.registers.fpsr = 0;
+        thread.registers.fpcr |= OVERFLOW << EXCEPTION_ENABLE_SHIFT;
         let mut prefix = thread.registers.clone();
         prefix.x[0] += 1;
+        // The trapped overflow sets no FPSR bit; the inexact result, whose
+        // trap is disabled, sets IXC.
+        prefix.fpsr = INEXACT;
         // SAFETY: the test program reads and writes only its own registered guest data, and nothing
         // else mutates it.
         let stop = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
         assert_eq!(
             stop.reason,
-            StopReason::FloatingPointUnsupported {
+            StopReason::FloatingPointTrapped {
                 instruction_pc: GuestAddress(BASE + 4),
                 fpcr: prefix.fpcr,
-                enabled_exceptions: INVALID
+                exceptions: OVERFLOW
             }
         );
         assert_eq!(stop.floating_point_helpers, 0);
@@ -284,12 +318,12 @@ mod numerical {
         thread.registers.fpcr = FPCR_NEP;
         let mut expected = thread.registers.clone();
         expected.x[0] += 1;
-        publish(&mut expected, 0, 1, 0x40400000, 32);
+        expected.fpsr |= OVERFLOW | INEXACT;
+        publish(&mut expected, 0, 1, 0x7f800000, 32);
         // SAFETY: the test program reads and writes only its own registered guest data, and nothing
         // else mutates it.
         let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
         assert_eq!(done.reason, StopReason::StopAddress);
-        assert_eq!(done.floating_point_helpers, 0);
         assert_eq!(thread.registers, expected);
         Ok(())
     }
@@ -365,21 +399,14 @@ mod numerical {
         assert_eq!(report.floating_point_helpers, 0);
         assert_eq!(thread.registers, expected);
 
+        // An enabled trap the widening raises no exception for changes
+        // nothing.
         initial.registers.fpcr |= INVALID << EXCEPTION_ENABLE_SHIFT;
-        let mut prefix = initial.registers.clone();
-        prefix.x[0] += 1;
+        expected.fpcr = initial.registers.fpcr;
         // SAFETY: the program only operates on its own registered code and state.
         let report = unsafe { runtime.run(&mut initial, Some(GuestAddress(STOP)), 8)? };
-        assert_eq!(
-            report.reason,
-            StopReason::FloatingPointUnsupported {
-                instruction_pc: GuestAddress(BASE + 4),
-                fpcr: prefix.fpcr,
-                enabled_exceptions: INVALID,
-            },
-        );
-        assert_eq!(initial.pc, GuestAddress(BASE + 4));
-        assert_eq!(initial.registers, prefix);
+        assert_eq!(report.reason, StopReason::StopAddress);
+        assert_eq!(initial.registers, expected);
         Ok(())
     }
 

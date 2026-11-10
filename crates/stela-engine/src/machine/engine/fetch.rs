@@ -467,12 +467,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Both FP service boundaries share the same sole semantic completion.
+    /// An error is an enabled FP exception the instruction raised, which
+    /// [`Self::take_floating_point_exception`] takes.
     #[inline]
     pub(super) fn complete_floating_point(
         &mut self,
         word: u32,
         operation: &FloatingPointOperation,
-    ) -> Result<(), stela_compiler::aarch64::floating::UnsupportedControl> {
+    ) -> Result<(), crate::floating::Trapped> {
         #[cfg(all(feature = "std", feature = "native-profile"))]
         if let Some(profile) = &mut self.floating_profile
             && profile.tick()
@@ -481,6 +483,24 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         #[cfg(not(all(feature = "std", feature = "native-profile")))]
         let _ = word;
-        crate::floating::complete(&mut self.cpu.state, operation)
+        crate::floating::execute(&mut self.cpu.state, operation)
+    }
+
+    /// Take the TrappedFP exception of the FP instruction at the PC (Arm
+    /// `AArch64.FPTrappedException`): TFV set, with the trapped exceptions
+    /// in IOF, DZF, OFF, UFF, IXF and IDF, to the current EL above EL1, to
+    /// EL2 under HCR_EL2.TGE, else to EL1. The syndrome is TFV's for
+    /// scalar and vector instructions alike, which Arm permits.
+    pub(super) fn take_floating_point_exception(
+        &mut self,
+        trapped: crate::floating::Trapped,
+    ) -> Step {
+        const TFV: u32 = 1 << 23;
+        self.take(Exception::synchronous(
+            Class::TrappedFloatingPoint,
+            TFV | trapped.exceptions,
+            self.cpu.pc,
+        ));
+        Ok(())
     }
 }

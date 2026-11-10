@@ -18,7 +18,8 @@ use stela_compiler::{
     aarch64::{
         FloatingPointOperation, Register,
         floating::{
-            FPCR_NEP, UnsupportedControl, fused,
+            EXCEPTIONS, FPCR_EXCEPTION_ENABLE_MASK, FPCR_EXCEPTION_ENABLE_SHIFT, FPCR_NEP,
+            UnsupportedControl, fused,
             integer::{self, IntegerRounding, IntegerWidth},
             precision,
         },
@@ -49,6 +50,52 @@ fn write_lane(vector: &mut [u64; VECTOR_LIMBS], lane_bits: u32, lane: u32, bits:
     vector[limb] = (vector[limb] & !(lane_mask << shift)) | ((bits & lane_mask) << shift);
 }
 
+/// The floating-point exceptions an instruction raised whose FPCR trap
+/// enables were set: the IOF, DZF, OFF, UFF, IXF and IDF bits of its
+/// TrappedFP syndrome (EC 0x2C), in FPSR's cumulative bit positions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Trapped {
+    pub exceptions: u32,
+}
+
+/// Execute `operation` on `state` with FPCR's trap enables (Arm
+/// `FPProcessException`): an exception whose enable is clear sets its FPSR
+/// cumulative bit, and one whose enable is set traps. An instruction that
+/// raises no enabled exception completes as with the enables clear, so
+/// setting them changes nothing until an enabled exception occurs, as on
+/// Apple silicon (measured on an M1 Pro: the enables read back set, FDIV
+/// 1/1 completes and FDIV 1/0 with DZE traps at the FDIV).
+///
+/// A trap writes no destination, NZCV or general register. FPSR takes the
+/// raised exceptions whose enables are clear and not the trapped ones, as
+/// when each exception is processed in turn and the first trapped one
+/// ends the instruction; the trapped set is the syndrome's.
+pub(crate) fn execute(
+    state: &mut GuestState,
+    operation: &FloatingPointOperation,
+) -> Result<(), Trapped> {
+    let enabled = (state.fpcr >> FPCR_EXCEPTION_ENABLE_SHIFT) & EXCEPTIONS;
+    let mut trial = state.clone();
+    trial.fpcr &= !FPCR_EXCEPTION_ENABLE_MASK;
+    trial.fpsr &= !EXCEPTIONS;
+    if let Err(control) = complete(&mut trial, operation) {
+        unreachable!("FPCR without trap enables refused: {control:?}");
+    }
+    let raised = trial.fpsr & EXCEPTIONS;
+    if raised & enabled != 0 {
+        state.fpsr |= raised & !enabled;
+        return Err(Trapped {
+            exceptions: raised & enabled,
+        });
+    }
+    trial.fpcr = state.fpcr;
+    trial.fpsr |= state.fpsr;
+    *state = trial;
+    Ok(())
+}
+
+/// [`execute`] with FPCR's trap enables clear: refuses any set enable
+/// before changing state.
 pub(crate) fn complete(
     state: &mut GuestState,
     operation: &FloatingPointOperation,

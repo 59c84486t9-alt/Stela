@@ -4,12 +4,10 @@ mod observations;
 mod operands;
 
 use super::{Devices, Host, Machine};
+use crate::floating::Trapped;
 use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 use serde::Serialize;
-use stela_compiler::{
-    GuestState,
-    aarch64::{FloatingPointOperation, floating::UnsupportedControl},
-};
+use stela_compiler::{GuestState, aarch64::FloatingPointOperation};
 
 const STRATUM: u32 = 4096;
 // Earlier real-app attribution contains over 2,000 distinct service words.
@@ -63,7 +61,7 @@ struct Key {
     fpcr_after: u32,
     fpsr_before: u32,
     fpsr_after: u32,
-    refused_enabled_exceptions: Option<u32>,
+    trapped_exceptions: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,7 +186,7 @@ impl Sampler {
         cpu: &mut crate::machine::Cpu,
         word: u32,
         operation: &FloatingPointOperation,
-    ) -> Result<(), UnsupportedControl> {
+    ) -> Result<(), Trapped> {
         self.complete_selected(&mut cpu.state, word, operation, cpu.pc, cpu.retired)
     }
 
@@ -198,7 +196,7 @@ impl Sampler {
         state: &mut GuestState,
         word: u32,
         operation: &FloatingPointOperation,
-    ) -> Result<(), UnsupportedControl> {
+    ) -> Result<(), Trapped> {
         self.complete_selected(state, word, operation, 0, 0)
     }
 
@@ -209,10 +207,10 @@ impl Sampler {
         operation: &FloatingPointOperation,
         guest_pc: u64,
         retired_before: u64,
-    ) -> Result<(), UnsupportedControl> {
+    ) -> Result<(), Trapped> {
         let mut capture = operands::Capture::before(state, operation);
         let (fpcr_before, fpsr_before) = (state.fpcr, state.fpsr);
-        let outcome = crate::floating::complete(state, operation);
+        let outcome = crate::floating::execute(state, operation);
         let outputs = capture.finish(state, outcome.is_ok());
         let family = Family::of(operation);
         self.observations.record(
@@ -235,7 +233,7 @@ impl Sampler {
             fpsr_before,
             fpcr_after: state.fpcr,
             fpsr_after: state.fpsr,
-            refused_enabled_exceptions: outcome.as_ref().err().map(|e| e.enabled_exceptions),
+            trapped_exceptions: outcome.as_ref().err().map(|e| e.exceptions),
         };
         increment(&mut self.samples, &mut self.saturated);
         increment(&mut self.families[family as usize], &mut self.saturated);

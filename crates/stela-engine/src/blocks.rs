@@ -673,11 +673,11 @@ impl BlockRuntime {
                 }
             }
             if let Some((operand, continuation)) = numerical {
-                if let Err(error) = floating::complete(&mut state.registers, &operand) {
-                    outcome.reason = StopReason::FloatingPointUnsupported {
+                if let Err(trapped) = floating::execute(&mut state.registers, &operand) {
+                    outcome.reason = StopReason::FloatingPointTrapped {
                         instruction_pc: state.pc,
                         fpcr: state.registers.fpcr,
-                        enabled_exceptions: error.enabled_exceptions,
+                        exceptions: trapped.exceptions,
                     };
                     break;
                 }

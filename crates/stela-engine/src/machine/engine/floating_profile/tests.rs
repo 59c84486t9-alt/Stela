@@ -91,7 +91,7 @@ fn sampled_completion_preserves_full_state_and_refusal() {
         expected.v[0] = [0x3f80_0000, u64::MAX];
         expected.v[1] = [0x4000_0000, u64::MAX];
         let mut actual = expected.clone();
-        let outcome = crate::floating::complete(&mut expected, &operation);
+        let outcome = crate::floating::execute(&mut expected, &operation);
         let mut sampler = Sampler::new(0);
         assert_eq!(sampler.complete(&mut actual, word, &operation), outcome);
         assert_eq!(actual, expected);
@@ -99,8 +99,8 @@ fn sampled_completion_preserves_full_state_and_refusal() {
         assert_eq!(report.samples, 1);
         assert_eq!(report.rows[0].key.fpsr_before, 0x0800_0097);
         assert_eq!(
-            report.rows[0].key.refused_enabled_exceptions,
-            outcome.err().map(|e| e.enabled_exceptions)
+            report.rows[0].key.trapped_exceptions,
+            outcome.err().map(|e| e.exceptions)
         );
         assert!(report.operand_classification);
     }
@@ -243,7 +243,7 @@ fn selected_capture_matches_sole_completion_across_typed_families_and_controls()
                     ..Default::default()
                 };
                 let mut expected = state.clone();
-                let outcome = crate::floating::complete(&mut expected, &operation);
+                let outcome = crate::floating::execute(&mut expected, &operation);
                 let mut actual = state;
                 assert_eq!(
                     sampler.complete_selected(&mut actual, 0x1234, &operation, 0x1000, 17),

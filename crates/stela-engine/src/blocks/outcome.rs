@@ -35,10 +35,13 @@ pub enum StopReason {
     Unsupported {
         detail: String,
     },
-    FloatingPointUnsupported {
+    /// The FP instruction at `instruction_pc` raised `exceptions`, whose
+    /// FPCR trap enables are set: it wrote no destination, and the process
+    /// receives its TrappedFP exception.
+    FloatingPointTrapped {
         instruction_pc: GuestAddress,
         fpcr: u32,
-        enabled_exceptions: u32,
+        exceptions: u32,
     },
     SynchronousTrap {
         trap: SynchronousTrap,

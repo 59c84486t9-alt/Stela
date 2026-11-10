@@ -184,6 +184,9 @@ pub enum Class {
     DataAbortLower = 0x24,
     DataAbortSame = 0x25,
     SpAlignment = 0x26,
+    /// A floating-point exception whose FPCR trap enable is set (Arm
+    /// `AArch64.FPTrappedException`).
+    TrappedFloatingPoint = 0x2c,
     SError = 0x2f,
     /// Breakpoint, software step and watchpoint exceptions from a lower EL;
     /// the same EL's class is one more.
