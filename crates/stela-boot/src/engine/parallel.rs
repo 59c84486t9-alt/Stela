@@ -9,6 +9,7 @@ use super::{SLICE, WAIT_POLLS_PER_SECOND, host, output};
 use crate::Result;
 use crate::{apic::Apic, native_smp::executor::Executors};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use stela_boot_core::staged_frame::Share;
 use stela_contracts::refuse;
 use stela_engine::machine::Cpu;
 use stela_engine::machine::Host;
@@ -59,6 +60,14 @@ impl Kick for Doorbells {
         if let Some(&Some(destination)) = self.destinations.get(pe) {
             host::ring(destination);
         }
+    }
+
+    fn ticks(&self) -> u64 {
+        host::fresh_counter()
+    }
+
+    fn released(&self) -> bool {
+        super::storage::released()
     }
 }
 
@@ -167,8 +176,14 @@ impl Pe {
             stopped(pe, stop);
         }
         output::arguments(format_args!("PARALLEL PE {pe} starts at {address:#x}\n"));
+        // The serial port's queue goes out from here between slices, so the
+        // home PE, which holds the devices and the GPUs' work, does not pay
+        // for its own reports.
+        output::share_draining();
         #[cfg(feature = "native-profile")]
         let mut stored_report = None;
+        // This PE's part of giving the screen its frames while it runs.
+        let mut screen = Share::new(super::display::BUSY_SHARE);
         loop {
             let limit = machine.statistics.blocks + SLICE;
             let stop = machine.run_with_budget(RunBudget {
@@ -188,19 +203,48 @@ impl Pe {
             // Like the home PE, drain outside guest execution and before a
             // terminal stop. Retention is bounded by TRACE_HITS/WATCH_HITS;
             // output uses the shared bounded serial queue, never an ISR.
-            if observing {
-                report_diagnostics(&mut machine);
-            }
-            // What this PE answered degraded: the home PE reports its own
-            // and the devices' coprocessor requests.
-            super::reports::unmodeled_report(&mut machine, Vec::new());
+            // The host's work between slices runs outside this PE's run: it
+            // uses none of its translations, and the serial port and host
+            // devices it reaches can take milliseconds (a VM's port I/O
+            // waits on the hypervisor), which no other PE's maintenance
+            // broadcast waits for. The PE reads its mail before it runs.
+            super::run::host_work(&mut machine, |machine| {
+                if observing {
+                    report_diagnostics(machine);
+                }
+                // What this PE answered degraded: the home PE reports its
+                // own and the devices' coprocessor requests.
+                super::reports::unmodeled_report(machine, Vec::new());
+            });
             match stop {
-                // A PE that waits for an interrupt serves the host meanwhile.
-                stop if machine.yielded_for_interrupt(&stop) => super::service::serve(false),
-                Stop::Budget | Stop::Waiting => {}
+                // A PE that waits for an interrupt serves the host meanwhile,
+                // gives the screen the frames the DCP model presented and a
+                // staged guest disk its host I/O.
+                stop if machine.yielded_for_interrupt(&stop) => {
+                    super::run::host_work(&mut machine, |_| {
+                        super::service::serve(false, false);
+                        super::display::flush(super::display::Turn::Idle);
+                        super::storage::serve_staged(true);
+                    })
+                }
+                // A busy PE gives the screen one bounded step within its
+                // share, so that the boot PE need not.
+                Stop::Budget | Stop::Waiting => {
+                    let now = host::rdtsc();
+                    if screen.allows(now) {
+                        let spent = super::run::host_work(&mut machine, |_| {
+                            super::display::flush(super::display::Turn::Busy)
+                        });
+                        screen.spent(spent, now.wrapping_add(spent));
+                    }
+                }
                 stop => stopped(pe, stop),
             }
             hub.publish(pe, machine.counts());
+            if machine.step_timing().is_some() {
+                hub.add_system_exits(pe, &machine.take_system_exits());
+            }
+            super::run::host_work(&mut machine, |_| output::drain_some());
         }
     }
 }
@@ -350,4 +394,20 @@ pub(crate) fn counts<H: Host>(home: &Machine<H, Board>) -> Vec<Counts> {
             }
         })
         .collect()
+}
+
+/// The System exits of every PE since the last call, under step timing:
+/// the home machine's own and those the others added
+/// (`Hub::add_system_exits`).
+pub(crate) fn system_exits<H: Host>(
+    home: &mut Machine<H, Board>,
+) -> stela_engine::machine::engine::step_timing::SystemExits {
+    let mut exits = home.take_system_exits();
+    if home.runs_parallel() {
+        let hub = home.devices.hub();
+        for pe in (0..hub.pes()).filter(|&pe| pe != home.processor()) {
+            exits.merge(&hub.take_system_exits(pe));
+        }
+    }
+    exits
 }

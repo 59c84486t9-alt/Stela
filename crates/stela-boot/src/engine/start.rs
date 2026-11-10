@@ -6,19 +6,30 @@ use crate::Result;
 use alloc::string::ToString;
 use stela_contracts::refuse;
 
+/// How long XNU's debugger cross-call waits for every PE (`debug-ack`).
+const DEBUG_ACK_SECONDS: u64 = 10;
+
 /// The boot bundle `--preboot` names, built from the installed system on
 /// `partition`: its macOS, its staged update or its recoveryOS.
 fn from_disk(
     partition: alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>,
     options: &Options,
     bluetooth: bool,
+    host_hz: u64,
 ) -> Vec<(String, Vec<u8>)> {
     crate::status::begin("Reading macOS's boot files from its disk");
     // The kernel's text on the screen and on the debug UART, which the
-    // boot log records, as setup's bundles have it. A panic's stackshot
-    // waits for every PE to answer: 10 s at 24 MHz, not XNU's 1.44 ms, which
-    // is too short for PEs that answer at their next exit. System sleep is
-    // not modeled, so `noidle` stops the idle timer that would ask for it.
+    // boot log records, as setup's bundles have it. A stackshot or panic
+    // waits for every PE to answer its debugger cross-call
+    // (DebuggerXCallEnter), and a non-panic one panics "Debugger synch
+    // pending" at the timeout. A press of the power button takes such a
+    // stackshot: AppleM68Buttons' diagnostic chord (`stackshot-mask`, which
+    // J473's tree leaves to the default, its one button). XNU's default is
+    // 1,440,000 ticks (60 ms), short for PEs that answer at their next
+    // exit, so this gives 10 s. Machine timeout boot-args are in picoseconds
+    // (osfmk/kern/startup.h), converted to ticks only when overridden.
+    // System sleep is not modeled, so `noidle` stops the idle timer that
+    // would ask for it.
     // The guest's Bluetooth is a host controller bridged over USB, when the
     // host lends one: bluetoothd and BlueTool then take USB, transport 0
     // (26A434 bluetoothd's transport switch at x86_64 0x1001f84e7). Without
@@ -32,12 +43,24 @@ fn from_disk(
     let mut defaults = boot_bundle::Options {
         ecid: options.ecid,
         boot_command: options.boot_command,
-        boot_args: "-v serial=3 serial-device-name=uart0 ml-timeout-debug-ack=240000000 noidle=1"
-            .into(),
+        boot_args: format!(
+            "-v serial=3 serial-device-name=uart0 ml-timeout-debug-ack={} noidle=1",
+            stela_boot_core::guest_timeouts::picoseconds(DEBUG_ACK_SECONDS)
+        ),
         ..boot_bundle::Options::default()
     };
     if bluetooth {
         defaults.boot_args.push_str(" bt-transport-override=0");
+    }
+    // XNU's lock timeouts assume the modeled chip's cores; a slower host's
+    // translated holders get that many times longer (`guest_timeouts`).
+    {
+        use stela_boot_core::guest_timeouts::{MODELED_CORE_HZ, lock_scale, lock_scale_arguments};
+        let scale = lock_scale(host_hz);
+        defaults.boot_args.push_str(&lock_scale_arguments(scale));
+        output::arguments(format_args!(
+            "GUEST TIMEOUTS lock_scale={scale} host_hz={host_hz} modeled_hz={MODELED_CORE_HZ}\n"
+        ));
     }
     if options.maintenance_write {
         // CSR_ALLOW_UNRESTRICTED_FS; the kext grant and other policy bits stay separate.
@@ -351,10 +374,14 @@ fn open_host(
         kernel_work,
     );
     remappers.report_faults();
-    let built = devices
-        .preboot
-        .take()
-        .map(|partition| from_disk(partition, options, devices.host_bluetooth.is_some()));
+    let built = devices.preboot.take().map(|partition| {
+        from_disk(
+            partition,
+            options,
+            devices.host_bluetooth.is_some(),
+            handoff.tsc_hz,
+        )
+    });
     // A system boots as the board it was installed on: libignition finds its
     // Cryptex1 tickets by that board's model.
     if options.bundle || built.is_some() {
@@ -405,7 +432,7 @@ fn open_host(
             Err(stela_runtime::net::NetError::Status(_)) => {
                 output::arguments(format_args!("NETWORK CHECK passed\n"))
             }
-            Err(_) => output::fatal("the network check failed"),
+            Err(error) => output::fatal(format_args!("the network check failed: {error:?}")),
         }
     }
     OpenedHost {
@@ -521,6 +548,13 @@ fn open_storage(handoff: &'static Handoff, options: &Options, host: &mut OpenedH
             options.nor.as_ref().map(|_| services.next().unwrap()),
         ),
     };
+    // The host disk's I/O for the ANS model, and only for it, runs outside
+    // the devices' lock the model takes its commands under
+    // (`storage::stage`); the machine state's waits stay on the disk itself.
+    let backing = backing.map(|disk| match options.storage {
+        Some(_) => super::storage::stage(disk),
+        None => disk,
+    });
     let nor = nor.map(|device| {
         crate::status::begin(&format!(
             "Opening the machine state on {}",
@@ -1185,6 +1219,7 @@ fn open_gpus(
         Ok(None)
     };
     let firmware = firmware.clone();
+    let claiming = host::rdtsc();
     let claimed = work.call_owned(60_000_000, move || {
         let services = services::Services::new(mmio, remappers, None, heap, tsc_hz, Vec::new())
             .with_guest_ram(guest_ram);
@@ -1221,7 +1256,10 @@ fn open_gpus(
             return false;
         }
         Err(error) => {
-            crate::status::warn(&format!("the GPU could not be claimed: {error}"));
+            crate::status::warn(&format!(
+                "the GPU could not be claimed: {error}. This is a Stela bug; the boot log on \
+                 this USB holds the details"
+            ));
             return false;
         }
     };
@@ -1234,7 +1272,21 @@ fn open_gpus(
         #[cfg(feature = "nvk")]
         heap_bytes,
     };
-    match gpu::open(machine, claimed) {
+    let opening = host::rdtsc();
+    let opened = gpu::open(machine, claimed);
+    // `GPU START claim_ms=… linux_ms=… probe_ms=… total_ms=…`: claiming the
+    // functions, starting Linux, and nouveau's probe, which boots the GSP
+    // and binds DRM.
+    let ms = |ticks: u64| ticks / (tsc_hz / 1000).max(1);
+    let (linux, probe) = gpu::start_times();
+    output::arguments(format_args!(
+        "GPU START claim_ms={} linux_ms={} probe_ms={} total_ms={}\n",
+        ms(opening.wrapping_sub(claiming)),
+        ms(linux),
+        ms(probe),
+        ms(host::rdtsc().wrapping_sub(claiming)),
+    ));
+    match opened {
         Ok(()) => {
             crate::status::done("started");
             true
@@ -1317,18 +1369,21 @@ fn place_devices(
             .filter(|screen| screen.available())
             .map(|screen| {
                 let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
-                alloc::boxed::Box::new(display::GopScanout::new(screen))
+                alloc::boxed::Box::new(display::GopScanout::new(screen, options.scanout_mirror))
                     as alloc::boxed::Box<dyn stela_soc::machine::Scanout>
             })
     };
+    // The firmware's scanout keeps its newest frame itself; a GPU's is
+    // wrapped to keep one for `--scanout-mirror`.
     #[cfg(feature = "nvk")]
-    let scanout = gpu::display::scanout().or_else(firmware_scanout);
+    let scanout = gpu::display::scanout()
+        .map(|scanout| match options.scanout_mirror {
+            true => alloc::boxed::Box::new(display::MirroredScanout::new(scanout)) as _,
+            false => scanout,
+        })
+        .or_else(firmware_scanout);
     #[cfg(not(feature = "nvk"))]
     let scanout = firmware_scanout();
-    let scanout = scanout.map(|scanout| match options.scanout_mirror {
-        true => alloc::boxed::Box::new(display::MirroredScanout::new(scanout)) as _,
-        false => scanout,
-    });
     let programmed = mount::memory_locks(placement.read_only_region, core_locks);
     let memory = board.and_then(|board| memory_resources(board, canonical_ram, programmed));
     let cacheless_memory = memory.is_some();
@@ -2513,12 +2568,8 @@ fn start_devices(
             if let Some(acpi) = host_acpi {
                 acpi.retain_power(power);
             }
-            if options.boots_macos()
-                && open_gpus(work, mmio, remappers, handoff, host_firmware, gpus)
-            {
-                gpu::serve(handoff.screen.map_or((0, 0), |screen| screen.resolution()));
-            }
-            disks.profile_callbacks(options.profile);
+            // The disks' step ends with what it found before the GPU's
+            // begins, which would end it without.
             let count = |count: usize, one: &str, many: &str| {
                 format!("{count} {}", if count == 1 { one } else { many })
             };
@@ -2534,6 +2585,12 @@ fn start_devices(
                     count(disks, "disk", "disks")
                 ),
             });
+            if options.boots_macos()
+                && open_gpus(work, mmio, remappers, handoff, host_firmware, gpus)
+            {
+                gpu::serve(handoff.screen.map_or((0, 0), |screen| screen.resolution()));
+            }
+            disks.profile_callbacks(options.profile);
             if let Some(log) = log {
                 crate::log_file::resume(log);
             }
@@ -2553,7 +2610,11 @@ fn start_devices(
                     network::GuestNetwork::open(&mut links, wants_network)
                         .inspect_err(|error| {
                             output::arguments(format_args!("guest network refusal: {error}\n"));
-                            crate::status::warn(&error.to_string());
+                            // Optional: macOS boots without it.
+                            crate::status::info(
+                                "macOS starts without a network: no supported network \
+                                 adapter is free for it",
+                            );
                         })
                         .ok()
                 })

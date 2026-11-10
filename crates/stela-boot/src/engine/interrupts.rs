@@ -596,8 +596,8 @@ pub fn fatal(frame: &Frame) -> ! {
             "linux minimum deadline failed: {error:?}"
         );
     }
-    // SAFETY: the interrupted stack, which a fault that left it unreadable
-    // would have stopped on as a double fault before printing this.
+    // SAFETY: the interrupted stack's page, which a fault that left it
+    // unreadable would have stopped on as a double fault before printing this.
     unsafe { output::print_stack_at(frame.rsp as *const u64) };
     output::fatal("unexpected x86 exception in the system engine")
 }

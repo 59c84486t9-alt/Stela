@@ -19,6 +19,7 @@ mod aml;
 mod bluetooth;
 mod boot_image;
 pub(crate) mod bundle;
+mod cursor;
 mod display;
 pub(crate) mod fdr;
 mod gpu;
@@ -75,6 +76,7 @@ use stela_engine::machine::Event;
 use stela_engine::machine::Host;
 use stela_engine::machine::Machine;
 use stela_engine::machine::PeerState;
+use stela_engine::machine::Reset;
 use stela_engine::machine::Stop;
 use stela_engine::machine::Transition;
 use stela_engine::machine::engine::Call;
@@ -422,32 +424,95 @@ fn board_profile(board: &board::Board, target: TargetCpu, speculation: Speculati
     }
 }
 
-/// How long the guest's console goes without looking at the host's serial
-/// port once it found no input. The device model asks at each of its passes,
-/// thousands a second on the boot PE, and each look is a port read that a
-/// hypervisor takes as an exit and real hardware as a slow bus cycle. The
-/// port's 16-byte FIFO holds more than a millisecond at 115200 baud.
-const INPUT_IDLE_MICROS: u64 = 1000;
+/// How long the host's serial port goes without a look once it gave no
+/// input. Each look is a port read that a hypervisor takes as an exit to its
+/// device model, waiting for that model's lock, and real hardware as a slow
+/// bus cycle. While someone types, the port's 16-byte FIFO, more than a
+/// millisecond at 115200 baud, is looked at every [`INPUT_TYPING_MICROS`];
+/// once the console has been quiet for [`INPUT_TYPING_SECONDS`], every
+/// [`INPUT_IDLE_MICROS`]. A real UART can then drop what a paste sends past
+/// its FIFO before the first look; a hypervisor's port holds it.
+const INPUT_TYPING_MICROS: u64 = 1000;
+const INPUT_IDLE_MICROS: u64 = 20_000;
+const INPUT_TYPING_SECONDS: u64 = 5;
+
+/// The host serial port's input on its way to the guest's console. The
+/// host's service reads the port ([`feed_console_input`]), holding no lock
+/// of the devices': the console's device model asks for input at each of
+/// its passes, under the lock every PE's device accesses wait for, and a
+/// port read there holds them all for as long as a hypervisor's device
+/// model takes to answer. The model takes what the service read.
+struct ConsoleInput {
+    bytes: [core::sync::atomic::AtomicU8; CONSOLE_INPUT_BYTES],
+    /// Bytes put and taken so far: one service puts at a time and one
+    /// device model takes.
+    put: core::sync::atomic::AtomicUsize,
+    taken: core::sync::atomic::AtomicUsize,
+    /// The host counter before which the port is not looked at again, and
+    /// at the last byte it gave.
+    next: AtomicU64,
+    last: AtomicU64,
+}
+
+/// A few of the port's FIFOs.
+const CONSOLE_INPUT_BYTES: usize = 64;
+
+static CONSOLE_INPUT: ConsoleInput = ConsoleInput {
+    bytes: [const { core::sync::atomic::AtomicU8::new(0) }; CONSOLE_INPUT_BYTES],
+    put: core::sync::atomic::AtomicUsize::new(0),
+    taken: core::sync::atomic::AtomicUsize::new(0),
+    next: AtomicU64::new(0),
+    last: AtomicU64::new(0),
+};
+
+/// Read what the host's serial port holds for the guest's console, when a
+/// look is due. The host's service calls this, one core at a time.
+pub(crate) fn feed_console_input() {
+    let input = &CONSOLE_INPUT;
+    let now = host::fresh_counter();
+    if now < input.next.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut put = input.put.load(Ordering::Relaxed);
+    while put.wrapping_sub(input.taken.load(Ordering::Acquire)) < CONSOLE_INPUT_BYTES {
+        let Some(byte) = crate::serial::read() else {
+            let last = input.last.load(Ordering::Relaxed);
+            let typing =
+                last != 0 && now.wrapping_sub(last) < host::COUNTER_HZ * INPUT_TYPING_SECONDS;
+            let micros = if typing {
+                INPUT_TYPING_MICROS
+            } else {
+                INPUT_IDLE_MICROS
+            };
+            input.next.store(
+                now + host::COUNTER_HZ / 1_000_000 * micros,
+                Ordering::Relaxed,
+            );
+            return;
+        };
+        input.bytes[put % CONSOLE_INPUT_BYTES].store(byte, Ordering::Relaxed);
+        put = put.wrapping_add(1);
+        input.put.store(put, Ordering::Release);
+        input.last.store(now, Ordering::Relaxed);
+    }
+}
 
 /// The guest's console UART, shown line by line as `GUEST| ...`.
 #[derive(Default)]
 struct GuestConsole {
     lines: console_lines::Lines,
-    /// The host counter before which the host's port is not looked at again.
-    next_input: u64,
 }
 
 impl ConsoleSink for GuestConsole {
     fn poll(&mut self) -> Option<u8> {
-        let now = host::fresh_counter();
-        if now < self.next_input {
+        let input = &CONSOLE_INPUT;
+        let taken = input.taken.load(Ordering::Relaxed);
+        if taken == input.put.load(Ordering::Acquire) {
             return None;
         }
-        let byte = crate::serial::read();
-        if byte.is_none() {
-            self.next_input = now + host::COUNTER_HZ / 1_000_000 * INPUT_IDLE_MICROS;
-        }
-        byte
+        let byte = input.bytes[taken % CONSOLE_INPUT_BYTES].load(Ordering::Relaxed);
+        input.taken.store(taken.wrapping_add(1), Ordering::Release);
+        Some(byte)
     }
 
     fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
@@ -639,9 +704,29 @@ pub(crate) fn report(event: &Event) {
     }
 }
 
-/// How long a restart or power-off the guest asks for waits, so its reason
-/// can be read on the screen first.
+/// How long a restart or power-off that follows an error waits, so its
+/// reason can be read on the screen first. An orderly one goes on at once.
 const STOP_HOLD_SECONDS: u64 = 10;
+
+/// Whether `reset` is a restart or power-off asked for in order, through
+/// the SMC, as macOS restarts or turns the Mac off and as a held power
+/// button turns it off, with no kernel panic before it. Anything else, a
+/// watchdog's reset among them, left an error to read.
+fn orderly(reset: &Reset) -> bool {
+    !matches!(reset.transition, Transition::Halt)
+        && reset.reason.starts_with("smc: ")
+        && guest_panic().is_none()
+}
+
+/// What the stop took before the restart or power-off, by phase, in
+/// milliseconds (`STOP TIMES`).
+#[derive(Default)]
+struct StopTimes {
+    /// The NOR store and the GPUs' stop (`service::Service::stop`).
+    service: u64,
+    /// The stop's reports.
+    report: u64,
+}
 
 /// Show why the machine stopped on Stela's own screen, which it takes back
 /// from the guest's last frame: the running step fails with `text`.
@@ -650,10 +735,27 @@ fn show_stop(text: &str) {
     crate::status::fail(text);
 }
 
+/// Begin `action`, the restart or power-off that ends the run. After an
+/// error, show why the machine went down, `otherwise` without a panic, and
+/// where its full log is, and hold `hold` seconds so they can be read.
+fn show_reset(otherwise: &str, action: &str, hold: u64) {
+    if hold == 0 {
+        crate::console::reclaim();
+        crate::status::begin(action);
+        return;
+    }
+    show_stop(&guest_down(String::from(otherwise)));
+    crate::status::info(
+        "Its full log is on this USB: on another computer, `stela setup boot-log --usb USB` \
+         prints it.",
+    );
+    crate::status::countdown(action, hold);
+}
+
 /// [`show_stop`], then halt until the PC is turned off.
 fn stop_here(text: &str, code: u32) -> ! {
     show_stop(text);
-    crate::status::info("Stela stopped. Turn the PC off to try again.");
+    crate::status::info(output::STOPPED);
     output::terminate(code)
 }
 
@@ -824,17 +926,27 @@ fn run_machine<H: Host>(
     if options.profile {
         service.power().disks().report_callbacks(handoff.tsc_hz);
     }
+    let started = output::now();
     service.stop();
-    finish(&mut machine, stop, seconds, &options.dumps, service.power())
+    let times = StopTimes {
+        service: output::millis_since(started),
+        ..StopTimes::default()
+    };
+    finish(&mut machine, stop, seconds, options, times, service.power())
 }
 
 fn finish<H: Host>(
     machine: &mut Machine<H, parallel::Board>,
     stop: Stop,
     seconds: f64,
-    dumps: &[(Base, u64)],
+    options: &Options,
+    mut times: StopTimes,
     host_power: &power::HostPowerControl,
 ) -> ! {
+    let started = output::now();
+    // An orderly stop has nothing to debug: its registers and frames stay
+    // out of the log unless `--profile` asks for them.
+    let full = options.profile || !matches!(&stop, Stop::Reset(reset) if orderly(reset));
     parallel::report_source_observations(machine);
     survey_report(machine);
     let drained = machine.devices.with(Drained::take);
@@ -846,8 +958,10 @@ fn finish<H: Host>(
         machine.statistics.degraded,
         UNMODELED_REPORTED.load(Ordering::Relaxed)
     ));
-    stack_report(machine);
-    dump_report(machine, dumps);
+    if full {
+        stack_report(machine);
+    }
+    dump_report(machine, &options.dumps);
     let host = host::statistics();
     output::arguments(format_args!(
         "STATISTICS {:?} shadow_fills={} shadow_prefills={} shadow_resets={} shadow_exhausted={} shadow_peak={}M/{}M/{}M lower_resets={} scoped_invalidations={} stray_interrupts={} helper_calls={} helper_fills={} bounces={} guard_faults={} events={} seconds={seconds:.3}\n",
@@ -868,6 +982,132 @@ fn finish<H: Host>(
         host.guard_faults,
         EVENTS.load(Ordering::Relaxed),
     ));
+    for line in drained.sep {
+        output::arguments(format_args!("SEP OBSERVE {line}\n"));
+    }
+    if full {
+        machine_report(machine);
+    }
+    times.report = output::millis_since(started);
+    match stop {
+        Stop::Idle => {
+            output::arguments(format_args!(
+                "STOP idle: every PE is off or waits with no wake source\n"
+            ));
+            stop_here(
+                &guest_down(String::from(
+                    "macOS stopped: every processor is off or waits with nothing to wake it",
+                )),
+                0x10,
+            )
+        }
+        Stop::Waiting => {
+            output::arguments(format_args!(
+                "STOP waiting: every PE waits for an input from outside the board\n"
+            ));
+            stop_here(
+                &guest_down(String::from(
+                    "macOS stopped: it waits for something from outside the Mac",
+                )),
+                0x10,
+            )
+        }
+        Stop::Reset(reset) => {
+            if let Some(message) = guest_panic() {
+                output::arguments(format_args!("STOP macOS crashed: {message}\n"));
+                output::arguments(format_args!("RESET after panic: {reset}\n"));
+            } else {
+                output::arguments(format_args!("STOP reset: {reset}\n"));
+            }
+            // The run is over: its blocks' memory goes to proving the new
+            // ones.
+            machine.discard_every_block();
+            let started = output::now();
+            #[cfg(feature = "nvk")]
+            pipelines::write();
+            let pipelines = output::millis_since(started);
+            let started = output::now();
+            translations::write();
+            let translations = output::millis_since(started);
+            let hold = match reset.transition {
+                Transition::Restart | Transition::PowerOff => {
+                    stela_boot_core::shutdown::stop_hold_seconds(
+                        orderly(&reset),
+                        reset.reason == stela_soc::machine::POWER_BUTTON_HELD,
+                        STOP_HOLD_SECONDS,
+                    )
+                }
+                _ => 0,
+            };
+            output::arguments(format_args!(
+                "STOP TIMES service_ms={} report_ms={} pipelines_ms={pipelines} \
+                 translations_ms={translations} hold_ms={}\n",
+                times.service,
+                times.report,
+                hold * 1000
+            ));
+            match reset.transition {
+                Transition::Restart => {
+                    show_reset("macOS restarted the Mac", "Restarting the PC", hold);
+                    host_power.restart()
+                }
+                Transition::PowerOff => {
+                    show_reset("macOS turned the Mac off", "Turning the PC off", hold);
+                    host_power.power_off()
+                }
+                Transition::Halt => stop_here(
+                    &guest_down(format!("macOS halted the Mac: {}", reset.reason)),
+                    power::RESTART_CODE,
+                ),
+            }
+        }
+        Stop::Budget => {
+            output::arguments(format_args!("STOP budget\n"));
+            stop_here("the run reached its --budget", 0x14)
+        }
+        Stop::NativeFailure(failure) => {
+            output::arguments(format_args!("STOP NATIVE_FAILURE {failure:?}\n"));
+            stop_here(
+                "Stela's own code failed while running macOS. This is a Stela bug",
+                0x13,
+            )
+        }
+        Stop::Unsupported(requirement) => {
+            output::arguments(format_args!("STOP UNSUPPORTED {requirement}\n"));
+            stop_here(
+                &format!("macOS needs {requirement}, which Stela does not support yet"),
+                0x13,
+            )
+        }
+        Stop::DeviceRead(request) => {
+            output::arguments(format_args!(
+                "STOP canonical read requires its live continuation: {request:?}\n"
+            ));
+            stop_here(
+                "a device read was left unanswered. This is a Stela bug",
+                0x13,
+            )
+        }
+        Stop::DeviceWrite(request) => {
+            output::arguments(format_args!(
+                "STOP canonical write requires its live continuation: {request:?}\n"
+            ));
+            stop_here(
+                "a device write was left unanswered. This is a Stela bug",
+                0x13,
+            )
+        }
+        Stop::Breakpoint(pc) => {
+            output::arguments(format_args!("STOP breakpoint pc={pc:#x}\n"));
+            stop_here(&format!("Stela's breakpoint at {pc:#x}"), 0x16)
+        }
+    }
+}
+
+/// The stopped machine's state for debugging an unexpected stop: the exits
+/// that left compiled code most, every PE's registers and frames, and the
+/// implementation-defined registers the guest used.
+fn machine_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
     exit_report(machine);
     output::arguments(format_args!("FINAL {}\n", Registers(&machine.cpu)));
     let mut parked_frames = Vec::new();
@@ -913,104 +1153,6 @@ fn finish<H: Host>(
         ));
     }
     general_registers(cpu);
-    for line in drained.sep {
-        output::arguments(format_args!(
-            "SEP OBSERVE {line}
-"
-        ));
-    }
-    match stop {
-        Stop::Idle => {
-            output::arguments(format_args!(
-                "STOP idle: every PE is off or waits with no wake source\n"
-            ));
-            stop_here(
-                &guest_down(String::from(
-                    "macOS stopped: every processor is off or waits with nothing to wake it",
-                )),
-                0x10,
-            )
-        }
-        Stop::Waiting => {
-            output::arguments(format_args!(
-                "STOP waiting: every PE waits for an input from outside the board\n"
-            ));
-            stop_here(
-                &guest_down(String::from(
-                    "macOS stopped: it waits for something from outside the Mac",
-                )),
-                0x10,
-            )
-        }
-        Stop::Reset(reset) => {
-            if let Some(message) = guest_panic() {
-                output::arguments(format_args!("STOP macOS crashed: {message}\n"));
-                output::arguments(format_args!("RESET after panic: {reset}\n"));
-            } else {
-                output::arguments(format_args!("STOP reset: {reset}\n"));
-            }
-            // The run is over: its blocks' memory goes to proving the new
-            // ones.
-            machine.discard_every_block();
-            translations::write();
-            match reset.transition {
-                Transition::Restart => {
-                    show_stop(&guest_down(String::from("macOS restarted the Mac")));
-                    crate::status::countdown("Restarting the PC", STOP_HOLD_SECONDS);
-                    host_power.restart()
-                }
-                Transition::PowerOff => {
-                    show_stop(&guest_down(String::from("macOS turned the Mac off")));
-                    crate::status::countdown("Turning the PC off", STOP_HOLD_SECONDS);
-                    host_power.power_off()
-                }
-                Transition::Halt => stop_here(
-                    &guest_down(format!("macOS halted the Mac: {}", reset.reason)),
-                    power::RESTART_CODE,
-                ),
-            }
-        }
-        Stop::Budget => {
-            output::arguments(format_args!("STOP budget\n"));
-            stop_here("the run reached its --budget", 0x14)
-        }
-        Stop::NativeFailure(failure) => {
-            output::arguments(format_args!("STOP NATIVE_FAILURE {failure:?}\n"));
-            stop_here(
-                "Stela stopped after an internal native execution failure",
-                0x13,
-            )
-        }
-        Stop::Unsupported(requirement) => {
-            output::arguments(format_args!("STOP UNSUPPORTED {requirement}\n"));
-            stop_here(
-                &format!("macOS needs {requirement}, which Stela does not support yet"),
-                0x13,
-            )
-        }
-        Stop::DeviceRead(request) => {
-            output::arguments(format_args!(
-                "STOP canonical read requires its live continuation: {request:?}\n"
-            ));
-            stop_here(
-                "the canonical device read was not consumed by its qualified scheduler",
-                0x13,
-            )
-        }
-        Stop::DeviceWrite(request) => {
-            output::arguments(format_args!(
-                "STOP canonical write requires its live continuation: {request:?}\n"
-            ));
-            stop_here(
-                "the canonical device write was not consumed by its qualified scheduler",
-                0x13,
-            )
-        }
-        Stop::Breakpoint(pc) => {
-            output::arguments(format_args!("STOP breakpoint pc={pc:#x}\n"));
-            stop_here(&format!("Stela's breakpoint at {pc:#x}"), 0x16)
-        }
-    }
 }
 
 /// Whether this processor stopped inside the host drivers, whose lock it

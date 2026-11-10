@@ -150,7 +150,15 @@ pub struct HostPowerControl {
     refused: bool,
     /// The host's button was pressed before, which the next press holds.
     pressed_before: bool,
+    /// When the PM1 status registers were last read.
+    looked: u64,
 }
+
+/// How often the PM1 status registers are read for the power button. Its
+/// status bit stays set until written, so no press is lost between reads,
+/// and each read is a port access a hypervisor takes to its device model
+/// and the boot PE would make at every service turn.
+const BUTTON_MILLIS: u64 = 50;
 
 impl HostPowerControl {
     /// The host's power hardware the loader found, with the fixed power
@@ -171,6 +179,7 @@ impl HostPowerControl {
             button: false,
             refused: false,
             pressed_before: false,
+            looked: 0,
         };
         control.button = control.arm_button();
         control
@@ -254,6 +263,11 @@ impl HostPowerControl {
         let Some(power) = self.power.as_ref().filter(|_| self.button) else {
             return false;
         };
+        let now = host::rdtsc();
+        if now.wrapping_sub(self.looked) < self.tsc_hz / 1000 * BUTTON_MILLIS {
+            return false;
+        }
+        self.looked = now;
         let mut pressed = false;
         for block in power.blocks() {
             // SAFETY: the FADT's PM1 status registers.

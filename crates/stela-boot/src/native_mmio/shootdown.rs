@@ -167,7 +167,9 @@ impl Drop for Counted {
     }
 }
 
-/// The shootdowns since the last call and the ticks they waited.
+/// The shootdowns since the last call and the ticks they waited, for the
+/// GPU gate's report.
+#[cfg(feature = "nvk")]
 pub(crate) fn take_waits() -> (u64, u64) {
     (
         WAITS[0].swap(0, Ordering::Relaxed),

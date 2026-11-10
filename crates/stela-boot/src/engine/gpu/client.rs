@@ -107,7 +107,7 @@ struct GetParam {
 const GET_PARAM: u32 = 0xc010_6440;
 const CHIPSET_ID: u64 = 11;
 /// The first render node's minor.
-const RENDER_MINOR: u32 = 128;
+pub(super) const RENDER_MINOR: u32 = 128;
 
 #[derive(Clone, Copy)]
 enum Operation {
@@ -253,8 +253,9 @@ fn post(request: &Request) {
 
 /// Stops the GPUs' drivers within `seconds`, as a reset is safest for a card
 /// whose GSP has unloaded, and says whether they did. A GSP that does not answer
-/// its unload stays running: Linux then waits on it for minutes, with the guest
-/// already stopped.
+/// its unload stays running. On the boot CPU the deadline is seen only between
+/// Linux's sleeps, so nouveau bounds its own unload wait in time
+/// (`r535_gsp_unload_wait`, 4 s); its poll-counted RPC wait spun for 80-97 s.
 pub(super) fn shutdown(seconds: u64) -> bool {
     // A wait that gives up leaves this with the Linux task.
     unload(
@@ -530,6 +531,7 @@ fn serve(gpu: &Installed, request: &Request) {
     if let Some(slot) = slot {
         slot.0.store(0, Ordering::Relaxed);
     }
+    count(&QUEUED, code, started.wrapping_sub(request.posted));
     count(&SERVED, code, host::rdtsc().wrapping_sub(started));
     if request.complete(result) {
         // SAFETY: the same source task owns the Linux wait queue.
@@ -775,6 +777,11 @@ pub(super) fn start(gpu: &Installed) -> Result<(), WorkError> {
             }
             Operation::Thread(_) => start_thread(gpu, current)?,
             _ => {
+                count(
+                    &TAKEN,
+                    request_code(&current.operation),
+                    host::rdtsc().wrapping_sub(current.posted),
+                );
                 service
                     .queue
                     .borrow_mut()
@@ -864,6 +871,15 @@ static POSTED: Counts = [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU6
 /// boot CPU spends unless the request sleeps.
 static SERVED: Counts = [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; 64];
 
+/// Posted requests a worker started since [`take_queued`] by request code:
+/// how many, and the TSC ticks from posting until a worker took each one,
+/// which is the poster's wait that is not the call's own work.
+static QUEUED: Counts = [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; 64];
+
+/// Posted requests the boot CPU took for its workers since [`take_taken`]
+/// by request code: how many, and the TSC ticks from posting until then.
+static TAKEN: Counts = [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; 64];
+
 /// Requests each processor posted since it last called [`take_mine`]: how
 /// many, and the TSC ticks it waited for them.
 static MINE: [(AtomicU64, AtomicU64); PROCESSORS] =
@@ -890,6 +906,67 @@ pub(super) fn take_posted() -> Vec<(u32, u64, u64)> {
 /// request code with its count and the ticks performing them took.
 pub(super) fn take_served() -> Vec<(u32, u64, u64)> {
     take(&SERVED)
+}
+
+/// The requests the boot CPU took since the last call: each request code
+/// with its count and the ticks from posting until it took them.
+pub(super) fn take_taken() -> Vec<(u32, u64, u64)> {
+    take(&TAKEN)
+}
+
+/// The requests a worker started since the last call: each request code
+/// with its count and the ticks from posting until a worker took them.
+pub(super) fn take_queued() -> Vec<(u32, u64, u64)> {
+    take(&QUEUED)
+}
+
+/// The display's presents since [`take_presents`]: how many, the TSC ticks
+/// they took, the longest, how many ran on the boot CPU, and the ticks of
+/// those that began on the boot CPU with a posted call waiting for it.
+static PRESENTS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+
+/// Runs the display present `present`, counting its time and whether it held
+/// the boot CPU while a posted call waited for it.
+pub(in crate::engine) fn timed_present<T>(present: impl FnOnce() -> T) -> T {
+    let blocking = on_boot() && !REQUESTS.load(Ordering::Relaxed).is_null();
+    let start = host::rdtsc();
+    let result = present();
+    count_present(host::rdtsc().wrapping_sub(start), blocking);
+    result
+}
+
+fn on_boot() -> bool {
+    host::processor() == BOOT_CPU.load(Ordering::Relaxed)
+}
+
+/// Counts a display present this processor made in `ticks`, in pieces
+/// between which a posted call could run.
+pub(in crate::engine) fn present_took(ticks: u64) {
+    count_present(ticks, false);
+}
+
+fn count_present(ticks: u64, blocking: bool) {
+    let boot = on_boot();
+    let [count, total, longest, on_boot, blocked] = &PRESENTS;
+    count.fetch_add(1, Ordering::Relaxed);
+    total.fetch_add(ticks, Ordering::Relaxed);
+    longest.fetch_max(ticks, Ordering::Relaxed);
+    on_boot.fetch_add(u64::from(boot), Ordering::Relaxed);
+    if blocking {
+        blocked.fetch_add(ticks, Ordering::Relaxed);
+    }
+}
+
+/// Whether a posted call waits for the boot CPU to take it.
+pub(super) fn posted_waiting() -> bool {
+    !REQUESTS.load(Ordering::Relaxed).is_null()
+}
+
+/// [`PRESENTS`] since the last call, cleared.
+pub(super) fn take_presents() -> [u64; 5] {
+    PRESENTS
+        .each_ref()
+        .map(|value| value.swap(0, Ordering::Relaxed))
 }
 
 /// The worker pool's state when a call waits or runs long: its workers,
@@ -1073,6 +1150,23 @@ extern "C" fn stela_libc_core() -> c_uint {
     installed()
         .and_then(current_thread)
         .map_or_else(host::processor, |thread| thread.core)
+}
+
+/// The core a thread of the platform's own runs as: past the C library's
+/// threads, which never takes it.
+const PLATFORM_THREAD_CORE: c_uint = (PROCESSORS + THREADS) as c_uint;
+
+/// Runs `body` on a Linux task of its own, as Mesa's threads run: its Linux
+/// calls run in place and sleep in Linux. Zero, or a negative errno when no
+/// task could be had.
+pub(super) fn spawn(body: unsafe extern "C" fn(*mut c_void), argument: *mut c_void) -> c_int {
+    // SAFETY: the body takes the argument it is given, as a C thread's does.
+    unsafe { stela_libc_thread_start(body, argument, PLATFORM_THREAD_CORE) }
+}
+
+/// The C library's monotonic clock, which absolute DRM deadlines name.
+pub(super) fn now_ns() -> u64 {
+    stela_libc_now_ns()
 }
 
 #[unsafe(no_mangle)]

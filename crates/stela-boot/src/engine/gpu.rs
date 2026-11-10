@@ -4,8 +4,12 @@
 //! It lives on the boot CPU and takes time from the boot PE as Linux steals it
 //! from an interrupted thread. A GPU's MSI targets that CPU, which takes it
 //! between slices or when the PE waits, and only records its line ([`Fired`]);
-//! the run loop then runs what is ready ([`pump`]) and the guest goes on. Nothing reserves a core, and a Linux environment with nothing
-//! to do costs the boot PE one comparison a slice.
+//! the run loop then runs what is ready ([`pump`]) and the guest goes on.
+//! Like the host's service, it waits for a boot PE that holds no guest lock,
+//! waiting for an interrupt or at EL0, but only for a bounded time
+//! ([`pump_due`]), so other PEs do not spin on a lock while Linux runs and
+//! GPU completions are not starved. Nothing reserves a core, and a Linux
+//! environment with nothing to do costs the boot PE one comparison a slice.
 #[cfg(feature = "nvk")]
 pub(super) mod client;
 #[cfg(feature = "nvk")]
@@ -24,6 +28,8 @@ mod kext {
 }
 #[cfg(feature = "nvk")]
 mod stack;
+#[cfg(feature = "nvk")]
+mod waiter;
 
 use super::{
     host,
@@ -145,10 +151,15 @@ unsafe impl Idle for Events {
         self.idle.clock()
     }
     fn notify(&self) -> Result<(), WorkError> {
-        self.pending.store(true, Ordering::Release);
+        let raised = !self.pending.swap(true, Ordering::AcqRel);
+        if raised {
+            PENDING_SINCE.store(host::rdtsc(), Ordering::Release);
+        }
         self.clock.notify_dispatch();
+        // Only the first event since the last pump ends the boot PE's slice:
+        // later ones find it already called, and the pump takes them all.
         // SAFETY: a published hub is leaked, so it lives for the boot.
-        if let Some(hub) = unsafe { HUB.load(Ordering::Acquire).as_ref() } {
+        if raised && let Some(hub) = unsafe { HUB.load(Ordering::Acquire).as_ref() } {
             hub.call_host(BOOT_PE.load(Ordering::Relaxed));
         }
         Ok(())
@@ -1195,6 +1206,8 @@ unsafe impl ManagedJob for Start {
 }
 
 fn start(kernel: &LinuxKernel, claimed: Vec<Claimed>) -> Started {
+    #[cfg(feature = "nvk")]
+    stela_boot_core::heap::set_peak_hook(gate::peak_passed);
     let mut job = Started {
         _attached: Vec::new(),
         #[cfg(feature = "nvk")]
@@ -1520,6 +1533,17 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
     result
 }
 
+/// TSC ticks [`open`] took to start Linux and for nouveau's probe.
+static START_TICKS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// The ticks the last [`open`] took starting Linux and probing the GPUs.
+pub(super) fn start_times() -> (u64, u64) {
+    (
+        START_TICKS[0].load(Ordering::Relaxed),
+        START_TICKS[1].load(Ordering::Relaxed),
+    )
+}
+
 type MountedStartup = (
     &'static Arc<LinuxKernel>,
     &'static LinuxThreads,
@@ -1541,6 +1565,7 @@ fn mount_and_start(
                 .ok_or(WorkError::Exhausted)
         })
         .map_err(environment_error)?;
+    let started = host::rdtsc();
     // SAFETY: the enclosing dispatch owns this exact root/CPU/clock and
     // queue. The original heap, executable backing, platform and catalogue
     // stay retained permanently, including any partial kernel publication.
@@ -1585,6 +1610,8 @@ fn mount_and_start(
     // SAFETY: the taskless dispatcher observed the original joined job.
     // Only this consuming join can acknowledge public SRCU admission.
     let ready = unsafe { srcu.join() }.map_err(|failure| Error::Srcu(failure.error))?;
+    let probing = host::rdtsc();
+    START_TICKS[0].store(probing.wrapping_sub(started), Ordering::Relaxed);
     let completed = Rc::new(Cell::new(None));
     let job = Box::pin(Start {
         kernel: owner.as_ref(),
@@ -1598,6 +1625,7 @@ fn mount_and_start(
     // SAFETY: physical return on the same dispatcher with the joined status.
     let joined =
         unsafe { pending.try_join() }.map_err(|_| environment_error(WorkError::Pending))?;
+    START_TICKS[1].store(host::rdtsc().wrapping_sub(probing), Ordering::Relaxed);
     if joined.outcome() != Outcome::CallbackReturned {
         return Err(Error::Child(joined.outcome()));
     }
@@ -1681,20 +1709,159 @@ impl Installed {
     }
 }
 
-/// Run what is ready in the environment, between the boot PE's slices.
+/// When the environment's pending events were raised, as a TSC value: the
+/// age the boot PE's run loop bounds ([`pump_due`]).
+static PENDING_SINCE: AtomicU64 = AtomicU64::new(0);
+
+/// How long the environment's work may wait while the boot PE runs guest
+/// code at EL1 or EL2 with interrupts unmasked: it may hold a lock that
+/// disables only preemption, which other PEs spin on while it pumps.
+const DEFER_UNMASKED_NS: u64 = 1_000_000;
+/// The longest the work waits whatever the boot PE runs, interrupts masked
+/// included, where XNU holds its spinlocks: GPU completions and the calls
+/// other PEs posted are never later than this.
+const DEFER_LONGEST_NS: u64 = 4_000_000;
+/// How often a slice of a boot PE that holds work back ends to look again.
+const RECHECK_NS: u64 = 250_000;
+
+/// What the boot PE runs at a slice's end, which decides how long the
+/// environment's ready work waits for it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Calm {
+    /// Waiting for an interrupt or at EL0: it holds no guest lock.
+    Quiet,
+    /// EL1 or EL2 with IRQs unmasked.
+    Unmasked,
+    /// IRQs masked, or a guarded level: likely inside a spinlock.
+    Masked,
+}
+
+/// Why pumps ran, and what they took, since the last [`pump_report`].
+struct PumpCounts {
+    /// Pumps that ran the environment, by the boot PE's [`Calm`].
+    quiet: AtomicU64,
+    unmasked: AtomicU64,
+    forced: AtomicU64,
+    /// Pumps from a wait for the service's turn ([`gate::relax`]).
+    relaxed: AtomicU64,
+    /// Pumps for a posted call from the host service ([`pump_posted`]).
+    posted: AtomicU64,
+    /// Pumps for raised events, and for Linux's deadline alone.
+    by_event: AtomicU64,
+    by_deadline: AtomicU64,
+    /// Pumps whose first step found nothing to run.
+    idle: AtomicU64,
+    /// Slice ends that held ready work back for a calmer boot PE.
+    deferred: AtomicU64,
+    /// Ticks pumping, and the longest pump.
+    ticks: AtomicU64,
+    longest: AtomicU64,
+    /// Ticks from work being ready until a pump took it, and the longest.
+    delay: AtomicU64,
+    delay_longest: AtomicU64,
+}
+
+static PUMPS: PumpCounts = PumpCounts {
+    quiet: AtomicU64::new(0),
+    unmasked: AtomicU64::new(0),
+    forced: AtomicU64::new(0),
+    relaxed: AtomicU64::new(0),
+    posted: AtomicU64::new(0),
+    by_event: AtomicU64::new(0),
+    by_deadline: AtomicU64::new(0),
+    idle: AtomicU64::new(0),
+    deferred: AtomicU64::new(0),
+    ticks: AtomicU64::new(0),
+    longest: AtomicU64::new(0),
+    delay: AtomicU64::new(0),
+    delay_longest: AtomicU64::new(0),
+};
+
+/// Since when the environment has had work ready, as a TSC value: events
+/// raised or its deadline passed.
+fn ready_since(gpu: &Installed, now: u64) -> Option<u64> {
+    let raised = gpu.events.pending.load(Ordering::Acquire).then(|| {
+        // An event raised as a pump cleared its time ages from here.
+        match PENDING_SINCE.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => now,
+            Err(since) => since.min(now),
+        }
+    });
+    let next = gpu.next.load(Ordering::Relaxed);
+    let due = (now >= next).then_some(next);
+    match (raised, due) {
+        (Some(raised), Some(due)) => Some(raised.min(due)),
+        (raised, due) => raised.or(due),
+    }
+}
+
+/// Opens the boot CPU's interrupt window, which a GPU's MSI needs: compiled
+/// code runs with interrupts off and a busy PE never waits. Taking one only
+/// records it, so this is cheap whatever the guest holds.
+pub(super) fn interrupt_window() {
+    if installed().is_some() {
+        native_irq::interrupt_window();
+    }
+}
+
+/// Whether the run loop pumps now, the boot PE being `calm`: at once when it
+/// holds no guest lock, and otherwise only once the ready work has waited
+/// [`DEFER_UNMASKED_NS`] with interrupts unmasked or [`DEFER_LONGEST_NS`]
+/// whatever it runs, so completions and posted calls are never starved.
+pub(super) fn pump_due(calm: Calm) -> bool {
+    let Some(gpu) = installed() else {
+        return false;
+    };
+    let now = host::rdtsc();
+    let Some(since) = ready_since(gpu, now) else {
+        return false;
+    };
+    let waited = now.saturating_sub(since);
+    let due = match calm {
+        Calm::Quiet => true,
+        Calm::Unmasked => waited >= gpu.tsc_after(DEFER_UNMASKED_NS),
+        Calm::Masked => false,
+    } || waited >= gpu.tsc_after(DEFER_LONGEST_NS);
+    if !due {
+        PUMPS.deferred.fetch_add(1, Ordering::Relaxed);
+        return false;
+    }
+    let counter = match calm {
+        _ if waited >= gpu.tsc_after(DEFER_LONGEST_NS) => &PUMPS.forced,
+        Calm::Quiet => &PUMPS.quiet,
+        Calm::Unmasked | Calm::Masked => &PUMPS.unmasked,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
+/// Run what is ready in the environment, on the boot CPU: between the boot
+/// PE's slices once [`pump_due`], or while it waits for the service's turn.
 pub(super) fn pump() {
     let Some(gpu) = installed() else {
         return;
     };
-    // Compiled code runs with interrupts off and a busy PE never waits, so this
-    // is where the GPU's MSI gets in.
     native_irq::interrupt_window();
-    let due = host::rdtsc() >= gpu.next.load(Ordering::Relaxed);
-    if !gpu.events.pending.swap(false, Ordering::AcqRel) && !due {
+    let now = host::rdtsc();
+    let Some(since) = ready_since(gpu, now) else {
         return;
-    }
+    };
+    // Cleared before the flag: an event raised between the two stores its
+    // own time once the flag is clear.
+    PENDING_SINCE.store(0, Ordering::Release);
+    let raised = gpu.events.pending.swap(false, Ordering::AcqRel);
     let started = host::rdtsc();
+    let delay = started.saturating_sub(since);
+    PUMPS.delay.fetch_add(delay, Ordering::Relaxed);
+    PUMPS.delay_longest.fetch_max(delay, Ordering::Relaxed);
+    let cause = if raised {
+        &PUMPS.by_event
+    } else {
+        &PUMPS.by_deadline
+    };
+    cause.fetch_add(1, Ordering::Relaxed);
     let budget = gpu.tsc_after(PUMP_NS);
+    let mut steps = 0u32;
     let ran = gpu.work.dispatch_linux(|runtime| {
         loop {
             gpu.advance_children();
@@ -1703,8 +1870,11 @@ pub(super) fn pump() {
             if !runtime.step()? {
                 break;
             }
+            steps += 1;
             if super::service::shutdown_pending() || host::rdtsc().wrapping_sub(started) >= budget {
-                gpu.events.pending.store(true, Ordering::Release);
+                if !gpu.events.pending.swap(true, Ordering::AcqRel) {
+                    PENDING_SINCE.store(host::rdtsc(), Ordering::Release);
+                }
                 break;
             }
         }
@@ -1721,10 +1891,93 @@ pub(super) fn pump() {
     if let Err(error) = ran {
         output::fatal(format_args!("the host's Linux environment failed: {error}"));
     }
+    if steps == 0 {
+        PUMPS.idle.fetch_add(1, Ordering::Relaxed);
+    }
     #[cfg(feature = "nvk")]
     if look_due(gpu) {
         gate::interrupted();
+        gate::watch_completions();
     }
+    let took = host::rdtsc().wrapping_sub(started);
+    PUMPS.ticks.fetch_add(took, Ordering::Relaxed);
+    PUMPS.longest.fetch_max(took, Ordering::Relaxed);
+}
+
+/// A pump for a posted call, from host work on the boot CPU that can run
+/// for milliseconds between the run loop's pumps (the host service's device
+/// polls): an AP waiting for a DRM call waits for the boot CPU, not for that
+/// work. Nothing runs elsewhere, or with no call posted.
+pub(super) fn pump_posted() {
+    #[cfg(feature = "nvk")]
+    if client::posted_waiting() && host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
+        PUMPS.posted.fetch_add(1, Ordering::Relaxed);
+        pump();
+    }
+}
+
+/// A pump from a wait for the service's turn on the boot CPU, which runs no
+/// guest code meanwhile.
+#[cfg(feature = "nvk")]
+fn pump_waiting() {
+    if installed().is_some_and(|gpu| ready_since(gpu, host::rdtsc()).is_some()) {
+        PUMPS.relaxed.fetch_add(1, Ordering::Relaxed);
+    }
+    pump();
+}
+
+/// `GPU PUMP runs=… quiet=… unmasked=… forced=… relaxed=… posted=… by_event=…
+/// by_deadline=… idle=… deferred=… mean_us=… longest_us=… delay_mean_us=…
+/// delay_longest_us=… next_us=… next_timer=…`: the pumps since the last
+/// report, by what let each run and why it was due, what they took, how long
+/// ready work waited for one, and Linux's next deadline with the function
+/// of its first timer-list timer, as an offset in this image.
+pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
+    let gpu = installed()?;
+    let take = |counter: &AtomicU64| counter.swap(0, Ordering::Relaxed);
+    let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+    let (by_event, by_deadline) = (take(&PUMPS.by_event), take(&PUMPS.by_deadline));
+    let runs = by_event + by_deadline;
+    let (ticks, delay) = (take(&PUMPS.ticks), take(&PUMPS.delay));
+    let next = gpu.next.load(Ordering::Relaxed);
+    let next_us = match next {
+        u64::MAX => -1,
+        next => micros(next.saturating_sub(host::rdtsc())) as i128,
+    };
+    Some(format!(
+        "GPU PUMP runs={runs} quiet={} unmasked={} forced={} relaxed={} posted={} by_event={by_event} \
+         by_deadline={by_deadline} idle={} deferred={} mean_us={} longest_us={} \
+         delay_mean_us={} delay_longest_us={} next_us={next_us} next_timer={}",
+        take(&PUMPS.quiet),
+        take(&PUMPS.unmasked),
+        take(&PUMPS.forced),
+        take(&PUMPS.relaxed),
+        take(&PUMPS.posted),
+        take(&PUMPS.idle),
+        take(&PUMPS.deferred),
+        micros(ticks.checked_div(runs).unwrap_or(0)),
+        micros(take(&PUMPS.longest)),
+        micros(delay.checked_div(runs).unwrap_or(0)),
+        micros(take(&PUMPS.delay_longest)),
+        next_timer(),
+    ))
+}
+
+/// The function of the timer-list timer due first when Linux last looked,
+/// as an offset in this image, or `-` for none.
+fn next_timer() -> String {
+    unsafe extern "C" {
+        /// `compat/kernel/timer.c`: the first pending timer's function.
+        static stela_linux_timer_next_function: AtomicUsize;
+        static __ImageBase: u8;
+    }
+    // SAFETY: a word the environment stores whenever it reads its queue.
+    let function = unsafe { stela_linux_timer_next_function.load(Ordering::Relaxed) };
+    if function == 0 {
+        return String::from("-");
+    }
+    let base = &raw const __ImageBase as usize;
+    format!("+{:#x}", function.wrapping_sub(base))
 }
 
 #[cfg(feature = "nvk")]
@@ -1774,15 +2027,27 @@ fn look_again() {
     }
 }
 
-/// `ticks` of the host counter, cut short to end at Linux's next deadline.
+/// `ticks` of the host counter, cut short to end at Linux's next deadline,
+/// or, while work is ready but held back for a calmer boot PE, when the
+/// run loop next looks whether to pump ([`pump_due`]).
 pub(super) fn slice(ticks: u64) -> u64 {
     let Some(gpu) = installed() else {
         return ticks;
     };
-    let left = gpu
-        .next
-        .load(Ordering::Relaxed)
-        .saturating_sub(host::rdtsc());
+    let now = host::rdtsc();
+    let end = match ready_since(gpu, now) {
+        Some(since) => {
+            let unmasked = since.saturating_add(gpu.tsc_after(DEFER_UNMASKED_NS));
+            let longest = since.saturating_add(gpu.tsc_after(DEFER_LONGEST_NS));
+            if now < unmasked {
+                unmasked
+            } else {
+                now.saturating_add(gpu.tsc_after(RECHECK_NS)).min(longest)
+            }
+        }
+        None => gpu.next.load(Ordering::Relaxed),
+    };
+    let left = end.saturating_sub(now);
     let left = u128::from(left) * u128::from(host::COUNTER_HZ) / u128::from(gpu.tsc_hz.max(1));
     ticks.min(left.min(u128::from(u64::MAX)) as u64).max(1)
 }

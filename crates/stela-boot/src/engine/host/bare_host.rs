@@ -253,6 +253,39 @@ impl Host for BareHost<'_> {
         serialize_code();
     }
 
+    fn patch_instruction(
+        &mut self,
+        code: NativeCode,
+        instruction: [u8; stela_compiler::x86_64::chain::PATCH_BYTES],
+    ) {
+        use stela_compiler::x86_64::chain;
+        let state = state();
+        state.installed_immutable.clear();
+        let point = code.0 as u64;
+        assert!(
+            chain::patchable(point) && state.owns_installed(code, chain::PATCH_BYTES),
+            "a patch point outside a retained initialized install"
+        );
+        // The aligned word holding the point lies in the arena: installs
+        // are 16-byte aligned.
+        let word = (point & !7) - state.code_virtual;
+        // SAFETY: an aligned arena word through the writable physmap alias;
+        // this processor is the arena's only writer.
+        let word = unsafe {
+            core::sync::atomic::AtomicU64::from_ptr(
+                layout::physical(state.code_physical + word) as *mut u64
+            )
+        };
+        let current = word.load(core::sync::atomic::Ordering::Relaxed);
+        // One store: a core running the point runs the old or the new
+        // instruction whole.
+        word.store(
+            chain::patch_word(current, point, instruction),
+            core::sync::atomic::Ordering::Release,
+        );
+        serialize_code();
+    }
+
     fn discard_code(&mut self) {
         let state = state();
         state.installed_immutable.clear();

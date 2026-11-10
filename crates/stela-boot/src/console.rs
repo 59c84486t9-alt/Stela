@@ -310,6 +310,71 @@ impl Framebuffer {
         true
     }
 
+    /// Which of the display's two frames is not on screen, when it has two:
+    /// 0 at `base`, 1 after it.
+    pub(crate) fn hidden_half(&self) -> Option<usize> {
+        self.hidden_frame().map(|lines| usize::from(lines != 0))
+    }
+
+    /// Fill rows `lines` of the hidden frame `half` from `fill`, through the
+    /// RAM row `row`. Nothing is shown: [`Self::show_half`] shows the frame
+    /// once every row it lacks is filled, by this call or later ones.
+    pub(crate) fn fill_rows(
+        &self,
+        half: usize,
+        lines: core::ops::Range<usize>,
+        row: &mut [u8],
+        fill: &mut dyn FnMut(usize, &mut [u8]) -> crate::Result<()>,
+    ) -> crate::Result<()> {
+        let Some(_access) = self.use_screen() else {
+            return Err(stela_contracts::refuse!(
+                "firmware framebuffer access was refused"
+            ));
+        };
+        let frame = self.height * self.stride * BYTES_PER_PIXEL;
+        for y in lines.start..lines.end.min(self.height) {
+            fill(y, row)?;
+            self.write_row(self.base + half * frame, y, row);
+        }
+        Ok(())
+    }
+
+    /// Show the hidden frame `half`, which [`Self::fill_rows`] filled, once
+    /// `before` has run. A display that refuses the flip gets the whole
+    /// frame, from `fill` through the RAM row `row`, in the one it shows,
+    /// as [`Self::show_frame`] does.
+    pub(crate) fn show_half(
+        &self,
+        half: usize,
+        row: &mut [u8],
+        fill: &mut dyn FnMut(usize, &mut [u8]) -> crate::Result<()>,
+        before: impl FnOnce() -> bool,
+    ) -> crate::Result<()> {
+        let refused = || stela_contracts::refuse!("firmware framebuffer access was refused");
+        let Some(_access) = self.use_screen() else {
+            return Err(refused());
+        };
+        if !before() {
+            return Err(refused());
+        }
+        let lines_from = half * self.height;
+        let shown = self.show_lines_from(lines_from);
+        if shown != u16::try_from(lines_from).ok() {
+            // The display kept a frame: present into the one it shows.
+            FLIP_REFUSED.store(true, Ordering::Relaxed);
+            crate::output::arguments(format_args!(
+                "DISPLAY refused the flip to its second frame; presents into the one it shows\n"
+            ));
+            let shown = shown.map_or(0, usize::from);
+            let at = if shown == self.height { shown } else { 0 };
+            for y in 0..self.height {
+                fill(y, row)?;
+                self.write_row(self.base + at * self.stride * BYTES_PER_PIXEL, y, row);
+            }
+        }
+        Ok(())
+    }
+
     /// The first line of the frame not on screen, when the display has two.
     fn hidden_frame(&self) -> Option<usize> {
         if FLIP_REFUSED.load(Ordering::Relaxed) {

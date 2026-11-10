@@ -8,8 +8,13 @@
 //! is held past its timeout. With every PE on a host core of its own, a PE
 //! that waits for an interrupt serves the host ([`serve`]), as it holds no
 //! such lock, and a device that leaves bytes for the host wakes one that
-//! sleeps (`Hub::request_service`). The boot PE serves only once no PE has
-//! for [`STARVED_MILLIS`], or always when the PEs run serialized.
+//! sleeps (`Hub::request_service`). The boot PE serves whole only while it
+//! waits for an interrupt itself, or always when the PEs run serialized.
+//! Once no PE has served for [`STARVED_MILLIS`] it takes one bounded step
+//! between its slices ([`step`]): the parts in turn, until one ends past
+//! [`STEP_MICROS`], the next step going on from the part after it. The
+//! shared count stops at what its guest code earned while it serves
+//! (`clock`), so a step stops every PE's time for its length.
 use super::{bluetooth, host, input, network, nor, output, parallel, power, restore, usb};
 use alloc::{format, string::String, vec::Vec};
 use core::{
@@ -42,6 +47,11 @@ pub(super) fn shutdown_pending() -> bool {
 const STARVED_MILLIS: u64 = 50;
 const REQUESTED_MILLIS: u64 = 2;
 
+/// How long a step a PE that runs guest code takes ([`step`]) may go on:
+/// about what a slice that ran no blocks takes from its guest code. A part
+/// that takes longer still ends.
+const STEP_MICROS: u64 = 1000;
+
 /// Seconds between the service's own reports.
 const REPORT_SECONDS: u64 = 10;
 
@@ -58,6 +68,9 @@ pub(super) struct Service {
     tsc_hz: u64,
     log_flushed: u64,
     reported: u64,
+    /// The part the next service starts at: after the last one a step
+    /// ended on, else the first.
+    next: usize,
     #[cfg(feature = "diagnostics")]
     input_peak: Option<InputTurn>,
 }
@@ -97,6 +110,7 @@ impl Service {
             tsc_hz,
             log_flushed: now,
             reported: now,
+            next: 0,
             #[cfg(feature = "diagnostics")]
             input_peak: None,
         }
@@ -122,8 +136,8 @@ impl Service {
     /// read ahead to the guest among them, then the restore's read ahead,
     /// verification and answers and another copy, which a waiting PE leaves
     /// to a later service once an interrupt comes for it (`boot` serves them
-    /// whole).
-    fn serve(&mut self, boot: bool) {
+    /// whole); whether it ran the parts to the last.
+    fn serve(&mut self, boot: bool, step: bool) -> bool {
         if let Some(mode) = SHUTDOWN.take(boot) {
             output::arguments(format_args!("POWER native shutdown: {mode:?}\n"));
             match mode {
@@ -148,25 +162,52 @@ impl Service {
             tsc_hz,
             log_flushed,
             reported,
+            next,
             #[cfg(feature = "diagnostics")]
             input_peak,
         } = self;
         let mut lap = Lap(host::rdtsc());
         let now = host::rdtsc();
-        if now.wrapping_sub(*log_flushed) >= *tsc_hz {
-            output::flush_due();
-            *log_flushed = host::rdtsc();
-        } else {
-            output::advance_logs();
+        // The guest console's input, which its device model takes under
+        // the devices' lock and so cannot wait for the host's port there.
+        super::feed_console_input();
+        // A service runs the parts from where the last one stopped on: a
+        // step until one ends past its time, a waiting PE until an
+        // interrupt comes for it, as whoever sent it may time the answer and
+        // the count waits for it to look (`clock`).
+        let from = *next;
+        *next = 0;
+        let limit = *tsc_hz / 1_000_000 * STEP_MICROS;
+        let mut ended = false;
+        let mut due = |part: usize, next: &mut usize| {
+            if ended || part < from {
+                return false;
+            }
+            if (step && host::rdtsc().wrapping_sub(now) >= limit) || (!boot && host::interrupted())
+            {
+                ended = true;
+                *next = part;
+                return false;
+            }
+            true
+        };
+        if due(0, next) {
+            if now.wrapping_sub(*log_flushed) >= *tsc_hz {
+                output::flush_due();
+                *log_flushed = host::rdtsc();
+            } else {
+                output::advance_logs();
+            }
+            lap.part(Part::Log);
         }
-        lap.part(Part::Log);
         #[cfg(feature = "diagnostics")]
         let mut input_turn = InputTurn {
             start: lap.0,
             boot,
             ..InputTurn::default()
         };
-        if let Some(usb) = usb {
+        let inputs_due = due(1, next);
+        if let Some(usb) = usb.as_mut().filter(|_| inputs_due) {
             let arrived = usb.poll(
                 #[cfg(feature = "diagnostics")]
                 &mut input_turn.usb_wait,
@@ -174,8 +215,9 @@ impl Service {
             if let Some(input) = input.as_mut() {
                 input.add(arrived);
             }
+            lap.part(Part::Usb);
         }
-        if let Some(input) = input {
+        if let Some(input) = input.as_mut().filter(|_| inputs_due) {
             #[cfg(feature = "diagnostics")]
             {
                 input_turn.usb_done = host::rdtsc();
@@ -188,6 +230,15 @@ impl Service {
             {
                 input_turn.read_done = host::rdtsc();
                 input_turn.reports = inputs.len();
+            }
+            if inputs.iter().any(|input| {
+                matches!(
+                    input,
+                    stela_drivers::input::Input::Move { .. }
+                        | stela_drivers::input::Input::Motion { .. }
+                )
+            }) {
+                super::cursor::motion(host::rdtsc());
             }
             if !inputs.is_empty() {
                 devices.serve(|devices| {
@@ -210,7 +261,7 @@ impl Service {
                 }
             }
         }
-        if let Some(network) = network {
+        if let Some(network) = network.as_mut().filter(|_| due(2, next)) {
             // The host adapter's sends and receives wait outside the
             // devices' lock, which every PE's device accesses take.
             let (frames, status, room) = devices.with(|devices| {
@@ -228,7 +279,7 @@ impl Service {
             });
             lap.part(Part::Network);
         }
-        if let Some(bluetooth) = bluetooth {
+        if let Some(bluetooth) = bluetooth.as_mut().filter(|_| due(3, next)) {
             let (packets, room, status) = devices.with(bluetooth::HostBluetooth::queued);
             bluetooth.status(status);
             bluetooth.transmit(packets);
@@ -242,16 +293,18 @@ impl Service {
             }
             lap.part(Part::Bluetooth);
         }
-        if let Some(nor) = nor {
-            let dirty = devices.with(nor::HostNor::dirty);
-            nor.store(dirty);
+        if due(4, next) {
+            if let Some(nor) = nor {
+                let dirty = devices.with(nor::HostNor::dirty);
+                nor.store(dirty);
+            }
+            if power.pressed() {
+                devices.serve(|devices| power.press(devices));
+            }
+            lap.part(Part::Nor);
         }
-        if power.pressed() {
-            devices.serve(|devices| power.press(devices));
-        }
-        lap.part(Part::Nor);
         let interrupted = || !boot && host::interrupted();
-        if let Some(experiment) = restore {
+        if let Some(experiment) = restore.as_mut().filter(|_| due(5, next)) {
             // What was read ahead goes to the guest first: a service is
             // usually due because the guest's window opened, and the read
             // ahead can take milliseconds. The source is then read, and the
@@ -279,6 +332,7 @@ impl Service {
             power.disks().report(*tsc_hz);
             *reported = now;
         }
+        !ended
     }
 }
 
@@ -288,6 +342,8 @@ enum Part {
     /// The restore source's read ahead.
     Read,
     Restore,
+    /// The USB hosts' topology and attachment poll.
+    Usb,
     Input,
     Network,
     Bluetooth,
@@ -296,10 +352,11 @@ enum Part {
     Log,
 }
 
-const PARTS: usize = 7;
+const PARTS: usize = 8;
 const NAMES: [&str; PARTS] = [
     "read",
     "restore",
+    "usb",
     "input",
     "network",
     "bluetooth",
@@ -309,6 +366,8 @@ const NAMES: [&str; PARTS] = [
 
 /// The longest each part took since the last [`report`], in counter ticks.
 static LONGEST: [AtomicU64; PARTS] = [const { AtomicU64::new(0) }; PARTS];
+/// The time each part took in all since the last [`report`], in counter ticks.
+static TOTAL: [AtomicU64; PARTS] = [const { AtomicU64::new(0) }; PARTS];
 /// Services since the last report: by a waiting PE and by the boot PE.
 static SERVICES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
@@ -317,8 +376,13 @@ struct Lap(u64);
 impl Lap {
     fn part(&mut self, part: Part) {
         let now = host::rdtsc();
-        LONGEST[part as usize].fetch_max(now.wrapping_sub(self.0), Ordering::Relaxed);
-        self.0 = now;
+        let took = now.wrapping_sub(self.0);
+        LONGEST[part as usize].fetch_max(took, Ordering::Relaxed);
+        TOTAL[part as usize].fetch_add(took, Ordering::Relaxed);
+        // A posted GPU call waits for the boot CPU, not for the remaining
+        // parts; the pump's time is no part's.
+        super::gpu::pump_posted();
+        self.0 = host::rdtsc();
     }
 }
 
@@ -422,8 +486,9 @@ pub(super) fn install(service: Service) {
 }
 
 /// Serve the host unless another core is serving it; `boot` when the boot
-/// PE serves it.
-pub(super) fn serve(boot: bool) {
+/// PE serves it. A `step` serves only for about [`STEP_MICROS`]: its core
+/// runs guest code that no other core can, and every PE's time waits for it.
+pub(super) fn serve(boot: bool, step: bool) {
     // Give the boot processor the next turn when it must perform a native
     // shutdown; an AP may not consume that request or enter firmware for it.
     if !boot && SHUTDOWN.pending() {
@@ -437,9 +502,10 @@ pub(super) fn serve(boot: bool) {
         let Some(service) = slot else {
             return false;
         };
-        service.serve(boot);
-        true
+        service.serve(boot, step)
     });
+    // A step that left parts for the next keeps the host starved, so the
+    // next step follows at the next slice.
     if served == Some(true) {
         SERVED.store(host::rdtsc(), Ordering::Release);
         SERVICES[usize::from(boot)].fetch_add(1, Ordering::Relaxed);
@@ -470,21 +536,34 @@ pub(super) fn take() -> Option<Service> {
     }
 }
 
-/// The services since the last report and the longest each part took.
+/// The services since the last report and the longest and total time each
+/// part took.
 pub(super) fn report(tsc_hz: u64) -> String {
     let services = SERVICES
         .each_ref()
         .map(|count| count.swap(0, Ordering::Relaxed));
-    // Time cores waited for the host drivers: in total, and the longest.
-    let (waited, longest) = super::storage::host_drivers_waited(tsc_hz);
+    // Time cores waited for the host drivers, in total and at most, and the
+    // longest hold with where it was taken.
+    let (waited, longest, held, holder) = super::storage::host_drivers_waited(tsc_hz);
+    let holder = holder.map_or(String::from("-"), |site| {
+        format!("{}:{}", site.file(), site.line())
+    });
     let mut line = format!(
-        "services waiting={} boot={} host_drivers_waited_us={waited}/{longest} undelivered_doorbells={} longest_us",
+        "services waiting={} boot={} host_drivers_waited_us={waited}/{longest} host_drivers_held_us={held}@{holder} undelivered_doorbells={} longest_us",
         services[0],
         services[1],
         host::undelivered_doorbells(),
     );
     for (name, longest) in NAMES.iter().zip(&LONGEST) {
         let ticks = longest.swap(0, Ordering::Relaxed);
+        line.push_str(&format!(
+            " {name}={}",
+            u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1))
+        ));
+    }
+    line.push_str(" total_us");
+    for (name, total) in NAMES.iter().zip(&TOTAL) {
+        let ticks = total.swap(0, Ordering::Relaxed);
         line.push_str(&format!(
             " {name}={}",
             u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1))

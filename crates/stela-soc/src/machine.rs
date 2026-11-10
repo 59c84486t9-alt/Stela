@@ -204,6 +204,10 @@ pub struct AppleDevices {
     gfx_masters: Vec<(DeviceId, DeviceId)>,
     sep_masters: Vec<SepMaster>,
     dcp_masters: Vec<DcpMaster>,
+    /// A DCP presented a frame since the host's service was last asked for
+    /// ([`Devices::take_host_service`]): its scanout may keep the frame for
+    /// a processor with nothing else to do to put on the screen.
+    frame_presented: bool,
     /// One wired-OR owner per physical DART input, across logical groups.
     dart_irqs: Vec<(AicInput, dart::SharedIrq)>,
     usb_masters: Vec<UsbMaster>,
@@ -609,6 +613,7 @@ impl AppleDevices {
             gpu_gates: Vec::new(),
             sep_masters: Vec::new(),
             dcp_masters: Vec::new(),
+            frame_presented: false,
             dart_irqs: Vec::new(),
             usb_masters: Vec::new(),
             cpu_start: None,
@@ -1099,7 +1104,9 @@ impl Devices for AppleDevices {
     fn take_host_service(&mut self) -> bool {
         self.usb_masters
             .iter_mut()
-            .fold(false, |due, master| master.session.take_due() | due)
+            .fold(core::mem::take(&mut self.frame_presented), |due, master| {
+                master.session.take_due() | due
+            })
     }
 
     fn device_name(&self, physical: u64) -> Option<&'static str> {
@@ -1426,6 +1433,7 @@ impl AppleDevices {
                 coprocessor.present(now, &mut port).map_err(|reason| {
                     DeviceError::TransferRefused(refuse!("DCPEXT swap surface").because(reason))
                 })?;
+                self.frame_presented = true;
             }
             self.service_dcp_link(index, cpu, memory, now)?;
         }

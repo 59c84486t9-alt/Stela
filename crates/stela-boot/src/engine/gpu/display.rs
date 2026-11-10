@@ -3,10 +3,21 @@
 //! Binding a GPU ends the firmware's framebuffer on it, so Stela's console
 //! moves to the output's front buffer at once, where the modeled DCP's frames
 //! follow it. A GPU driving no display leaves the firmware's scanout alone.
-use super::{client, gate};
+//!
+//! The DCP model presents under the board's device lock, on whichever PE
+//! made the device access. A DRM request from a PE other than the boot CPU
+//! waits for the boot CPU to run Linux, and the boot CPU may be waiting for
+//! that lock, so a present only copies rows into a hidden buffer there and
+//! queues its page flip. The flip is requested on the boot CPU: by its own
+//! presents, or by the display's flush at the next vblank, which the home
+//! machine's device deadline brings there.
+use super::client;
 use crate::console::{self, Framebuffer};
+use crate::engine::host;
 use crate::{Result, output};
 use alloc::{boxed::Box, format};
+use core::ops::Range;
+use core::sync::atomic::Ordering;
 use core::{cell::UnsafeCell, ffi::c_int, ffi::c_void, ptr::NonNull};
 use stela_contracts::refuse;
 use stela_drivers::gpu::metal::kms::{Display, Drm, Error as DisplayError};
@@ -26,8 +37,8 @@ unsafe impl Drm for Node {
         client::map(self.0, offset, bytes)
     }
 
-    fn relax(&mut self) {
-        gate::relax();
+    fn immediate(&self) -> bool {
+        host::processor() == super::BOOT_CPU.load(Ordering::Relaxed)
     }
 }
 
@@ -48,6 +59,10 @@ impl Scanout for KmsScanout {
         self.0.refresh_millihertz()
     }
 
+    fn physical_size_mm(&self) -> Option<(u32, u32)> {
+        self.0.size_mm()
+    }
+
     fn present(&mut self, rows: &[u8]) -> Result<()> {
         console::release();
         let presented = self.0.present(rows);
@@ -56,13 +71,23 @@ impl Scanout for KmsScanout {
 
     fn try_present_rows(
         &mut self,
+        damage: Option<Range<usize>>,
         fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
     ) -> Result<bool> {
-        let prepared = self.0.prepare_rows(fill)?;
+        let prepared = self.0.prepare_rows(damage, fill)?;
         console::release();
         let presented = prepared.present();
         self.finish_present(presented)?;
         Ok(true)
+    }
+
+    fn queued(&self) -> bool {
+        self.0.queued()
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        let flushed = self.0.flush();
+        self.finish_present(flushed)
     }
 }
 

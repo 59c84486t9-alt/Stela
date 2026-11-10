@@ -21,8 +21,11 @@ use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::{
     arch::asm,
     cell::Cell,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    panic::Location,
+    ptr,
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
 };
+use stela_boot_core::staged_disk::{self, DiskWorker};
 use stela_contracts::refuse;
 use stela_drivers::{
     Handoff, PlatformCaptures,
@@ -110,6 +113,42 @@ impl Drop for TaggedRoots {
 
 /// Held while a core is inside the host drivers ([`RestoreRoot`]).
 static HOST_DRIVERS: AtomicBool = AtomicBool::new(false);
+
+/// The parts of a host disk call timed for [`HostDisks::report`].
+#[derive(Clone, Copy)]
+enum DiskPart {
+    /// Waiting for the host drivers' lock (any caller).
+    Wait,
+    /// Changing to the loader's root (any caller).
+    Root,
+    /// A disk's start, finish and completion look, inside the drivers.
+    Start,
+    Finish,
+    Posted,
+    /// A staged disk's whole step.
+    Step,
+}
+
+const DISK_PARTS: [&str; 6] = ["wait", "root", "start", "finish", "posted", "step"];
+
+/// The longest of each [`DiskPart`] since the last report, in TSC ticks.
+static DISK_TIMES: [AtomicU64; DISK_PARTS.len()] = [const { AtomicU64::new(0) }; DISK_PARTS.len()];
+
+/// Run `call`, keeping the longest it took as `part`.
+fn timed<T>(part: DiskPart, call: impl FnOnce() -> T) -> T {
+    let started = super::host::rdtsc();
+    let result = call();
+    DISK_TIMES[part as usize].fetch_max(
+        super::host::rdtsc().wrapping_sub(started),
+        Ordering::Relaxed,
+    );
+    result
+}
+
+/// Whether a core is inside the host drivers now.
+fn host_drivers_taken() -> bool {
+    HOST_DRIVERS.load(Ordering::Relaxed)
+}
 static HOST_DRIVERS_GS: AtomicU64 = AtomicU64::new(0);
 
 /// Validate the existing manager's same-CPU entered loader context.
@@ -173,15 +212,28 @@ fn lock_host_drivers() -> u64 {
     waited
 }
 
+/// The longest hold of [`HOST_DRIVERS`] since the last report, in TSC
+/// ticks, and where it was taken: a holder that waits for a slow device
+/// holds every other core's driver call, the input service's included.
+static HOST_DRIVERS_HELD: AtomicU64 = AtomicU64::new(0);
+static HOST_DRIVERS_HOLDER: AtomicPtr<Location<'static>> = AtomicPtr::new(ptr::null_mut());
+
 /// The time cores waited for the host drivers since the last report, in
-/// total and at most, in microseconds.
-pub(super) fn host_drivers_waited(tsc_hz: u64) -> (u128, u128) {
+/// total and at most, in microseconds, and the longest hold, with where
+/// it was taken.
+pub(super) fn host_drivers_waited(
+    tsc_hz: u64,
+) -> (u128, u128, u128, Option<&'static Location<'static>>) {
     let micros = |slot: &AtomicU64| {
         u128::from(slot.swap(0, Ordering::Relaxed)) * 1_000_000 / u128::from(tsc_hz.max(1))
     };
+    let holder = HOST_DRIVERS_HOLDER.swap(ptr::null_mut(), Ordering::Relaxed);
     (
         micros(&HOST_DRIVERS_WAITED[0]),
         micros(&HOST_DRIVERS_WAITED[1]),
+        micros(&HOST_DRIVERS_HELD),
+        // SAFETY: only `RestoreRoot::drop` stores, a `&'static Location`.
+        unsafe { holder.as_ref() },
     )
 }
 
@@ -191,6 +243,9 @@ pub(super) struct RestoreRoot {
     root: u64,
     flags: u64,
     tagged: bool,
+    /// When this core took the lock, and where.
+    entered: u64,
+    site: &'static Location<'static>,
     _local: core::marker::PhantomData<*mut ()>,
 }
 impl RestoreRoot {
@@ -200,8 +255,10 @@ impl RestoreRoot {
     /// # Safety
     /// `root` is the live loader root, keeping the engine window. The
     /// processor's pinned local record is active.
+    #[track_caller]
     pub(super) unsafe fn enter(root: u64) -> Self {
-        lock_host_drivers();
+        let waited = lock_host_drivers();
+        DISK_TIMES[DiskPart::Wait as usize].fetch_max(waited, Ordering::Relaxed);
         // SAFETY: the caller supplies the live root, and this core holds the lock.
         unsafe { Self::enter_locked(root) }
     }
@@ -212,6 +269,7 @@ impl RestoreRoot {
     /// # Safety
     /// As for [`Self::enter`].
     #[inline]
+    #[track_caller]
     pub(super) unsafe fn enter_input(
         root: u64,
         #[cfg(feature = "diagnostics")] wait: &mut u64,
@@ -235,6 +293,7 @@ impl RestoreRoot {
     ///
     /// # Safety
     /// As for [`Self::enter`].
+    #[track_caller]
     pub(super) unsafe fn try_enter(root: u64) -> Option<Self> {
         if !try_lock_host_drivers() {
             // The holder may need this processor to acknowledge a shootdown.
@@ -248,6 +307,7 @@ impl RestoreRoot {
     /// # Safety
     /// The caller holds the host drivers' lock and meets [`Self::enter`]'s
     /// requirements.
+    #[track_caller]
     unsafe fn enter_locked(root: u64) -> Self {
         let (previous, flags): (u64, u64);
         // SAFETY: CPL0 control register read; interrupts remain off until
@@ -278,12 +338,18 @@ impl RestoreRoot {
         } else {
             root
         };
+        let switching = super::host::rdtsc();
         // SAFETY: live roots with the same engine code/stack/window.
         unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
+        let entered = super::host::rdtsc();
+        DISK_TIMES[DiskPart::Root as usize]
+            .fetch_max(entered.wrapping_sub(switching), Ordering::Relaxed);
         Self {
             root: previous,
             flags,
             tagged,
+            entered,
+            site: Location::caller(),
             _local: core::marker::PhantomData,
         }
     }
@@ -303,6 +369,10 @@ impl Drop for RestoreRoot {
             asm!("mov cr3, {}",in(reg)root,options(nostack,preserves_flags));
         }
         HOST_DRIVERS_GS.store(0, Ordering::Release);
+        let held = super::host::rdtsc().wrapping_sub(self.entered);
+        if HOST_DRIVERS_HELD.fetch_max(held, Ordering::Relaxed) < held {
+            HOST_DRIVERS_HOLDER.store(ptr::from_ref(self.site).cast_mut(), Ordering::Relaxed);
+        }
         HOST_DRIVERS.store(false, Ordering::Release);
         // SAFETY: only IF was changed by enter().
         unsafe {
@@ -339,40 +409,102 @@ struct Service {
     /// to find anything. A lost one waits for the look its owner schedules
     /// anyway.
     looked: Cell<Option<u64>>,
+    /// Host commands that failed, which the guest sees only as its
+    /// controller's error status.
+    failures: u64,
 }
+
+impl Service {
+    /// Logs a failed host command: the first few, then each power-of-two
+    /// count, so a failing disk stays visible without flooding the log.
+    fn failed<T>(
+        &mut self,
+        operation: &str,
+        at: u64,
+        result: Result<T, BlockError>,
+    ) -> Result<T, BlockError> {
+        if let Err(error) = &result {
+            self.failures += 1;
+            if self.failures <= 16 || self.failures.is_power_of_two() {
+                output::arguments(format_args!(
+                    "HOST DISK ERROR serial={} {operation}={at}: {error} failures={}\n",
+                    self.inner.identity().serial,
+                    self.failures
+                ));
+            }
+        }
+        result
+    }
+}
+
+/// The first block `command` reaches, for a report of its failure.
+fn command_lba(command: &Command) -> u64 {
+    match command {
+        Command::Read { lba, .. }
+        | Command::Write { lba, .. }
+        | Command::WriteZeroes { lba, .. } => *lba,
+        Command::Discard { extents } => extents.first().map_or(0, |extent| extent.lba),
+        Command::Flush => 0,
+    }
+}
+
 impl BlockDevice for Service {
     fn identity(&self) -> &Identity {
         self.inner.identity()
     }
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
-        // SAFETY: open() captured the loader root; callers supply window RAM.
-        let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.read(lba, buffer)
+        let read = {
+            // SAFETY: open() captured the loader root; callers supply window RAM.
+            let _root = unsafe { RestoreRoot::enter(self.root) };
+            self.inner.read(lba, buffer)
+        };
+        // Reported with the loader's root and interrupts restored.
+        self.failed("read lba", lba, read)
     }
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
-        // SAFETY: as in read().
-        let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.write(lba, data)
+        let written = {
+            // SAFETY: as in read().
+            let _root = unsafe { RestoreRoot::enter(self.root) };
+            self.inner.write(lba, data)
+        };
+        // Reported with the loader's root and interrupts restored.
+        self.failed("write lba", lba, written)
     }
     fn flush_cache(&mut self) -> Result<(), BlockError> {
-        // SAFETY: as in read().
-        let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.flush_cache()
+        let flushed = {
+            // SAFETY: as in read().
+            let _root = unsafe { RestoreRoot::enter(self.root) };
+            self.inner.flush_cache()
+        };
+        // Reported with the loader's root and interrupts restored.
+        self.failed("flush lba", 0, flushed)
     }
     fn write_fua(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
-        // SAFETY: as in read().
-        let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.write_fua(lba, data)
+        let written = {
+            // SAFETY: as in read().
+            let _root = unsafe { RestoreRoot::enter(self.root) };
+            self.inner.write_fua(lba, data)
+        };
+        // Reported with the loader's root and interrupts restored.
+        self.failed("write_fua lba", lba, written)
     }
     fn discard(&mut self, lba: u64, blocks: u64) -> Result<(), BlockError> {
-        // SAFETY: as in read().
-        let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.discard(lba, blocks)
+        let discarded = {
+            // SAFETY: as in read().
+            let _root = unsafe { RestoreRoot::enter(self.root) };
+            self.inner.discard(lba, blocks)
+        };
+        // Reported with the loader's root and interrupts restored.
+        self.failed("discard lba", lba, discarded)
     }
     fn write_zeroes(&mut self, lba: u64, blocks: u64, unmap: bool) -> Result<(), BlockError> {
-        // SAFETY: as in read().
-        let _root = unsafe { RestoreRoot::enter(self.root) };
-        self.inner.write_zeroes(lba, blocks, unmap)
+        let zeroed = {
+            // SAFETY: as in read().
+            let _root = unsafe { RestoreRoot::enter(self.root) };
+            self.inner.write_zeroes(lba, blocks, unmap)
+        };
+        // Reported with the loader's root and interrupts restored.
+        self.failed("write_zeroes lba", lba, zeroed)
     }
     fn depth(&self) -> usize {
         self.inner.depth()
@@ -381,20 +513,37 @@ impl BlockDevice for Service {
         self.inner.room()
     }
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
-        // SAFETY: as in read().
-        let _root = unsafe { RestoreRoot::enter(self.root) };
-        let started = self.inner.start(command);
+        let lba = command_lba(&command);
+        let started = {
+            // SAFETY: as in read().
+            let _root = unsafe { RestoreRoot::enter(self.root) };
+            timed(DiskPart::Start, || self.inner.start(command))
+        };
         self.running += u32::from(started.is_ok());
         self.looked.set(None);
-        started
+        // Reported with the loader's root and interrupts restored.
+        self.failed("start lba", lba, started)
     }
     fn finish(&mut self, tag: u32) -> Option<Finished> {
-        // SAFETY: as in read().
-        let _root = unsafe { RestoreRoot::enter(self.root) };
-        let finished = self.inner.finish(tag);
+        let finished = {
+            // SAFETY: as in read().
+            let _root = unsafe { RestoreRoot::enter(self.root) };
+            timed(DiskPart::Finish, || self.inner.finish(tag))
+        };
         self.running = self.running.saturating_sub(u32::from(finished.is_some()));
         self.looked.set(None);
-        finished
+        // Reported with the loader's root and interrupts restored.
+        finished.map(|result| self.failed("finished tag", u64::from(tag), result))
+    }
+    fn reaps_together(&self) -> bool {
+        self.inner.reaps_together()
+    }
+    /// What an earlier finish collected is in memory the engine's root
+    /// maps: no driver call and no root change.
+    fn finished(&mut self, tag: u32) -> Option<Finished> {
+        let finished = self.inner.finished(tag)?;
+        self.running = self.running.saturating_sub(1);
+        Some(self.failed("finished tag", u64::from(tag), finished))
     }
     fn posted(&self) -> bool {
         if self.running == 0 {
@@ -407,7 +556,7 @@ impl BlockDevice for Service {
         }
         // SAFETY: as in read().
         let _root = unsafe { RestoreRoot::enter(self.root) };
-        let posted = self.inner.posted();
+        let posted = timed(DiskPart::Posted, || self.inner.posted());
         self.looked.set((!posted).then_some(doorbells));
         posted
     }
@@ -420,6 +569,142 @@ impl BlockDevice for Service {
         let signals = self.inner.signals();
         self.signals.set(Some(signals));
         signals
+    }
+}
+
+/// The host sides of the guest's staged disks ([`stage`]).
+static STAGED: [AtomicPtr<DiskWorker>; 4] = [const { AtomicPtr::new(ptr::null_mut()) }; 4];
+/// A device call left a staged disk work: the processor that holds the
+/// devices' lock, the only one that can have set it, steps the disk as it
+/// releases the lock ([`released`]).
+static STEP_DUE: AtomicBool = AtomicBool::new(false);
+/// When a step was last taken, on the host's counter: the boot PE's slices
+/// step only a disk nobody stepped for [`FALLBACK_MILLIS`].
+static STEPPED: AtomicU64 = AtomicU64::new(0);
+const FALLBACK_MILLIS: u64 = 1;
+/// A completion the disk has not shown is looked for after this long.
+const LOST_MILLIS: u64 = 1;
+
+/// Called under the devices' lock; it only marks the step due.
+fn wake_staged() {
+    STEP_DUE.store(true, Ordering::Release);
+}
+
+/// Steps taken, and those given up because another core was inside the
+/// host drivers, since the last report.
+static STEPS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// After a device call released the devices' lock, outside it: the step its
+/// staged disk commands left, on the processor whose guest made them, as
+/// the disk's own I/O ran there before staging; whether it collected a
+/// completion, which the devices then look at. A processor inside an
+/// interrupt or the host drivers, or one that finds another core in them,
+/// leaves the step to the next release: disk work never waits there.
+pub(super) fn released() -> bool {
+    if !STEP_DUE.load(Ordering::Relaxed) || !STEP_DUE.swap(false, Ordering::AcqRel) {
+        return false;
+    }
+    if super::host::in_interrupt() || host_drivers_held_here() {
+        STEP_DUE.store(true, Ordering::Release);
+        return false;
+    }
+    let mut finished = false;
+    for worker in staged_workers() {
+        if worker.work() {
+            match step(worker) {
+                Some(step) => finished |= step.finished != 0,
+                None => STEP_DUE.store(true, Ordering::Release),
+            }
+        }
+    }
+    finished
+}
+
+/// One step of `worker`, unless another core is inside the host drivers:
+/// a step would wait for it there, and the work keeps for the next.
+fn step(worker: &DiskWorker) -> Option<staged_disk::Step> {
+    if host_drivers_taken() {
+        STEPS[1].fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    STEPS[0].fetch_add(1, Ordering::Relaxed);
+    let now = super::host::fresh_counter();
+    STEPPED.store(now, Ordering::Relaxed);
+    Some(timed(DiskPart::Step, || {
+        worker.step(now, super::host::COUNTER_HZ / 1000 * LOST_MILLIS)
+    }))
+}
+
+/// Stage the host disk behind a guest storage model
+/// ([`stela_boot_core::staged_disk`]): the model, under the devices' lock,
+/// only queues commands and takes results, and [`serve_staged`] runs the host
+/// I/O outside it. With every slot taken the disk is left as it is.
+pub(super) fn stage(device: Box<dyn BlockDevice>) -> Box<dyn BlockDevice> {
+    if STAGED
+        .iter()
+        .all(|slot| !slot.load(Ordering::Acquire).is_null())
+    {
+        output::arguments(format_args!(
+            "HOST DISK serial={} not staged: every slot is taken; its I/O runs under the devices' lock\n",
+            device.identity().serial
+        ));
+        return device;
+    }
+    let (disk, worker) = staged_disk::stage(device, wake_staged);
+    let worker: *mut DiskWorker = Box::leak(Box::new(worker));
+    // Staged once at the start, before any PE serves; a free slot remains.
+    let stored = STAGED.iter().any(|slot| {
+        slot.compare_exchange(ptr::null_mut(), worker, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    });
+    assert!(stored, "a staged disk slot was taken meanwhile");
+    Box::new(disk)
+}
+
+/// Give each staged disk's host side its queued commands and take its
+/// completions, outside the devices' lock. A PE that waits (`whole`) steps
+/// while each step makes progress, until an interrupt comes for it; one
+/// with guest code to run takes one bounded step, and only for a disk no
+/// processor stepped for [`FALLBACK_MILLIS`]. Nothing here waits for a disk.
+pub(super) fn serve_staged(whole: bool) {
+    if !whole
+        && super::host::fresh_counter().saturating_sub(STEPPED.load(Ordering::Relaxed))
+            < super::host::COUNTER_HZ / 1000 * FALLBACK_MILLIS
+    {
+        return;
+    }
+    for worker in staged_workers() {
+        while worker.work() {
+            let progressed = step(worker).is_some_and(|step| step.progressed());
+            if !whole || !progressed || super::host::interrupted() {
+                break;
+            }
+        }
+    }
+}
+
+fn staged_workers() -> impl Iterator<Item = &'static DiskWorker> {
+    // SAFETY: `stage` stores only leaked workers, which live for the boot.
+    STAGED
+        .iter()
+        .filter_map(|slot| unsafe { slot.load(Ordering::Acquire).as_ref() })
+}
+
+/// While held, the processors step the staged disks ([`released`],
+/// [`serve_staged`]) and their models only queue; before it and after it,
+/// a model's own polls step its disk, as nothing else would.
+pub(super) struct Stepping(());
+
+impl Stepping {
+    pub(super) fn start() -> Self {
+        staged_workers().for_each(|worker| worker.set_staged(true));
+        Self(())
+    }
+}
+
+impl Drop for Stepping {
+    fn drop(&mut self) {
+        staged_workers().for_each(|worker| worker.set_staged(false));
     }
 }
 
@@ -482,6 +767,21 @@ impl HostDisks {
                 Self::report_callback(serial, callbacks, tsc_hz, "periodic");
             }
         }
+        // The longest of each part of a host disk call: the drivers' lock
+        // and root change for any caller, a disk's calls inside them, and a
+        // staged disk's step.
+        let mut line = format!(
+            "HOST DISK STAGED steps={} gave_up={} longest_us",
+            STEPS[0].swap(0, Ordering::Relaxed),
+            STEPS[1].swap(0, Ordering::Relaxed)
+        );
+        for (name, longest) in DISK_PARTS.iter().zip(&DISK_TIMES) {
+            line.push_str(&format!(
+                " {name}={}",
+                micros(longest.swap(0, Ordering::Relaxed))
+            ));
+        }
+        output::arguments(format_args!("{line}\n"));
     }
 
     /// One bounded snapshot before stop-time persistence; never waits for a
@@ -663,7 +963,7 @@ pub unsafe fn open(
         }
     }
     for (address, error) in &devices.failures {
-        output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
+        crate::storage::report_failure(*address, error);
     }
     for (location, error) in &devices.platform_failures {
         output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));
@@ -695,7 +995,7 @@ pub unsafe fn open(
         ));
     }
     for (location, error) in &devices.device_failures {
-        output::arguments(format_args!("STORAGE FAILED {location}: {error}\n"));
+        output::arguments(format_args!("HOST DEVICE FAILED {location}: {error}\n"));
     }
     for (location, error) in &devices.usb_failures {
         output::arguments(format_args!(
@@ -741,13 +1041,37 @@ pub unsafe fn open(
         .into_iter()
         .chain(log.map(|guid| (Named::Host(guid), Optional::Log)))
         .collect();
+    // The controllers that could hold a missing disk and were not driven.
+    let not_driven = devices
+        .unsupported
+        .iter()
+        .filter(|(_, class, _)| class[0] == 0x01)
+        .map(|(address, _, why)| format!("{address} {why}"))
+        .chain(
+            devices
+                .failures
+                .iter()
+                .filter(|(_, error)| crate::storage::may_hold_disks(error))
+                .map(|(address, error)| format!("{address} failed: {error}")),
+        )
+        .collect::<Vec<_>>()
+        .join("; ");
     let describe = |named: &Named, error: storage::StorageError| match named {
-        Named::Disk(target) => refuse!(
-            "{serial}:{partition}: {error}",
-            serial = target.serial.as_str(),
-            partition = %target.partition,
-            %error
-        ),
+        Named::Disk(target) => {
+            let hint = match &error {
+                storage::StorageError::NoDisk { .. } if !not_driven.is_empty() => {
+                    format!("; not driven: {not_driven}")
+                }
+                _ => String::new(),
+            };
+            refuse!(
+                "{serial}:{partition}: {error}{hint}",
+                serial = target.serial.as_str(),
+                partition = %target.partition,
+                %error,
+                %hint
+            )
+        }
         Named::Unique(guid) | Named::Host(guid) => {
             refuse!("partition {guid}: {error}", %guid, %error)
         }
@@ -779,7 +1103,7 @@ pub unsafe fn open(
         output::arguments(format_args!(
             "HOST PARTITION serial={} partition={} blocks={} block_size={}{role}\n",
             partition.disk().serial,
-            partition.partition().unique,
+            partition.partition().unique_guid,
             partition.identity().blocks,
             partition.identity().block_size
         ));
@@ -789,6 +1113,7 @@ pub unsafe fn open(
             running: 0,
             signals: Cell::new(None),
             looked: Cell::new(None),
+            failures: 0,
         })
     };
     let (mut store_partition, mut log_partition) = (None, None);
@@ -854,6 +1179,7 @@ pub unsafe fn open(
                 running: 0,
                 signals: Cell::new(None),
                 looked: Cell::new(None),
+                failures: 0,
             }) as Box<dyn BlockDevice>
         })
         .collect();
