@@ -14,6 +14,7 @@ use stela_soc::machine::AicInput;
 use stela_soc::machine::AppleDevices;
 use stela_soc::machine::AscLines;
 use stela_soc::machine::ConsoleSink;
+use stela_soc::machine::DartId;
 use stela_soc::machine::DcpextDma;
 use stela_soc::machine::DcpextNub;
 use stela_soc::machine::Range;
@@ -123,6 +124,9 @@ pub fn devices<C: ConsoleSink + 'static>(
 /// Mount the ordinary board around native memory owners. Callers must
 /// keep their registered RAM and close all native/host writers before guest
 /// entry. No legacy memory constructor is used when native owners are supplied.
+///
+/// Devices are placed in a fixed order: later steps borrow or overlap the
+/// windows of earlier ones.
 pub fn devices_with_memory<C: ConsoleSink + 'static>(
     board: &Board,
     console: C,
@@ -130,23 +134,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     memory: Option<MemoryResources>,
     log: &mut dyn FnMut(fmt::Arguments<'_>),
 ) -> Result<(AppleDevices, Option<UsbId>)> {
-    if board.direct_memory_cache.is_some() && memory.is_none() {
-        return Err(refuse!(
-            "direct MCC/AMCC/PTD requires its actual qualified native memory owner"
-        ));
-    }
-    if let Some(memory) = memory.as_ref() {
-        match memory {
-            MemoryResources::T8112Cold(plan) => plan.validate_power(board.power_states.as_ref())?,
-            MemoryResources::T6000Cold(plan) => plan.validate_power(board.power_states.as_ref())?,
-            MemoryResources::T8112 { .. } => {}
-        }
-        memory.validate(
-            board.memory_controller.as_ref(),
-            board.memory_cache.as_ref(),
-            board.direct_memory_cache.as_ref(),
-        )?;
-    }
+    validate_memory(board, memory.as_ref())?;
     let native_memory = memory.is_some();
     pmgr_qualifications(&board.pmgr_refusals, log);
     let Inputs {
@@ -160,7 +148,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         entropy,
         restore,
         input,
-        mut usb,
+        usb,
         scanout,
         firmware,
         build,
@@ -194,6 +182,120 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         aic.layout,
         board.cpus.processors.len(),
     )?;
+    add_gpio_and_nor(&mut devices, board)?;
+    add_storage(&mut devices, board, backing, build)?;
+    add_power_controllers(&mut devices, board, build, wall, now)?;
+    add_processor_blocks(&mut devices, board, reset)?;
+    for controller in &board.i2cs {
+        devices.add_i2c(controller, firmware)?;
+    }
+    for phy in &board.typec_phys {
+        devices
+            .add_atc_phy(phy)
+            .map_err(|error| refuse!("ATC PHY placement: {error}", ?error))?;
+    }
+    let darts = Darts::place(&mut devices, board)?;
+    // The PMGR's power states precede the display, whose views reach into
+    // its windows.
+    add_power_states(&mut devices, board, log)?;
+    // The display's PTD update view must borrow this publication bank,
+    // before a broad display container can claim any overlapping bytes.
+    if let Some(memory) = memory {
+        add_native_memory(&mut devices, memory, log)?;
+    }
+    add_display(&mut devices, board, &darts, scanout, build)?;
+    if let Some(sep) = board.sep {
+        add_sep(
+            &mut devices,
+            &sep,
+            &darts,
+            Sep {
+                entropy,
+                state: sep_state,
+                observe: sep_observe,
+            },
+            log,
+        )?;
+    }
+    let restore_usb = add_usbs(&mut devices, board, &darts, usb, input, restore, log)?;
+    if let Some(aes) = board.aes {
+        let ranges: Vec<Range> = aes
+            .ranges
+            .into_iter()
+            .chain(aes.dkey)
+            .map(|(physical, bytes)| Range { physical, bytes })
+            .collect();
+        // No per-installation UID1 key is provisioned yet: the engine
+        // reports every hardware key disabled.
+        devices.add_aes(
+            &ranges,
+            aes.config,
+            Some(AicInput::new(0, aes.irq as u16)),
+            (darts.native(aes.iommu, aes.instance)?, aes.stream as usize),
+            None,
+        )?;
+    }
+    add_soc_banks(&mut devices, board)?;
+    add_memory_controllers(&mut devices, board, programmed, native_memory, log)?;
+    log(format_args!(
+        "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic={:#x} nr_irq={} \
+         lockdown-blocks={} amcc-apertures={} darts={} aes={} aic-timebase=unplaced\n",
+        uart.0.physical,
+        uart.0.bytes,
+        uart.1.irq,
+        wdt.0.physical,
+        wdt.0.bytes,
+        wdt.1.irq,
+        aic.physical,
+        aic.inputs,
+        board.lockdown.len(),
+        board
+            .memory_controller
+            .as_ref()
+            .map_or(0, |controller| controller.apertures.len()),
+        darts.mounted.len(),
+        board.aes.is_some()
+    ));
+    // Last: the `sgx` window spans other banks (gfx-asc, a PMGR fabric
+    // bridge) and owns only the bytes they leave.
+    if let Some(gfx) = board.gfx.as_ref() {
+        devices.add_gfx(gfx, build)?;
+    }
+    // Finalize only after every native constructor, including SGX's final
+    // overlapping-window placement, has registered its banks.
+    connect_power(&mut devices, board, &darts, log)?;
+    if restore && restore_usb.is_none() {
+        return Err(refuse!("restore study requires a DT-placed USB device"));
+    }
+    Ok((devices, restore_usb))
+}
+
+/// Check the native memory owners against the board before anything is
+/// placed. A board with a direct memory cache requires them.
+fn validate_memory(board: &Board, memory: Option<&MemoryResources>) -> Result<()> {
+    if board.direct_memory_cache.is_some() && memory.is_none() {
+        return Err(refuse!(
+            "direct MCC/AMCC/PTD requires its actual qualified native memory owner"
+        ));
+    }
+    if let Some(memory) = memory {
+        match memory {
+            MemoryResources::T8112Cold(plan) => plan.validate_power(board.power_states.as_ref())?,
+            MemoryResources::T6000Cold(plan) => plan.validate_power(board.power_states.as_ref())?,
+            MemoryResources::T8112 { .. } => {}
+        }
+        memory.validate(
+            board.memory_controller.as_ref(),
+            board.memory_cache.as_ref(),
+            board.direct_memory_cache.as_ref(),
+        )?;
+    }
+    Ok(())
+}
+
+/// The GPIO controllers, with the SPI NOR's selects and the I2C targets'
+/// interrupts, and the SPI NOR itself.
+fn add_gpio_and_nor(devices: &mut AppleDevices, board: &Board) -> Result<()> {
     if let Some(gpio) = &board.gpio {
         let selects: Vec<u32> = board.spi_nor.iter().filter_map(|spi| spi.select).collect();
         let interrupts: Vec<u32> = board
@@ -210,6 +312,17 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     if let Some(spi) = board.spi_nor.as_ref() {
         devices.add_spi_nor(spi)?;
     }
+    Ok(())
+}
+
+/// The internal SSD's ANS2, which needs `--storage` exactly when the
+/// DeviceTree exposes one.
+fn add_storage(
+    devices: &mut AppleDevices,
+    board: &Board,
+    backing: Option<Box<dyn BlockDevice>>,
+    build: &'static stela_formats::builds::Build,
+) -> Result<()> {
     match (board.ans.as_ref(), backing) {
         (Some(ans), Some(backing)) => devices.add_ans(ans, backing, build)?,
         (Some(_), None) => return Err(refuse!("a visible ANS2 requires --storage SERIAL:GUID")),
@@ -220,6 +333,17 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         }
         (None, None) => (),
     }
+    Ok(())
+}
+
+/// The SMC, the PMP and each SPMI bus with its PMICs.
+fn add_power_controllers(
+    devices: &mut AppleDevices,
+    board: &Board,
+    build: &'static stela_formats::builds::Build,
+    wall: Option<WallClock>,
+    now: u64,
+) -> Result<()> {
     if let Some(smc) = board.smc.as_ref() {
         devices.add_smc(smc, build)?;
     }
@@ -249,6 +373,17 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             &history,
         )?;
     }
+    Ok(())
+}
+
+/// Each PE's CoreSight, lockdown, startup and counter registers, the fast
+/// IPIs and the CPU start block. With a reset entry, the startup registers
+/// of PEs without a lockdown block lock their RVBAR to it.
+fn add_processor_blocks(
+    devices: &mut AppleDevices,
+    board: &Board,
+    reset: Option<u64>,
+) -> Result<()> {
     for component in &board.coresight {
         devices
             .add_coresight_lock(component.physical)
@@ -300,46 +435,57 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     if let Some((physical, clusters)) = board.cpu_start {
         devices.add_cpu_start(physical, clusters, &mpidrs)?;
     }
-    for controller in &board.i2cs {
-        devices.add_i2c(controller, firmware)?;
-    }
-    for phy in &board.typec_phys {
-        devices
-            .add_atc_phy(phy)
-            .map_err(|error| refuse!("ATC PHY placement: {error}", ?error))?;
-    }
-    let mut darts = Vec::new();
-    for dart in &board.darts {
-        let ranges: Vec<_> = dart
-            .instances
-            .iter()
-            .map(|instance| Range {
-                physical: instance.physical,
-                bytes: instance.bytes,
-            })
-            .collect();
-        let irq = AicInput::new(0, dart.irq as u16);
-        let placed = devices
-            .add_dart_group_for_profile(
-                dart.profile,
-                &ranges,
-                usize::from(dart.streams),
-                Some(irq),
-                dart.apf,
-            )
-            .within(|| refuse!("DART placement"))?;
-        if let Some((physical, bytes)) = dart.smmu {
-            devices
-                .add_dart_smmu(placed[0], Range { physical, bytes })
-                .map_err(|error| refuse!("DART SMMU placement: {error}", ?error))?;
+    Ok(())
+}
+
+/// The placed DART groups, in the board's order, and the board's
+/// declarations they were placed from.
+struct Darts<'b> {
+    mounted: Vec<Vec<DartId>>,
+    board: &'b Board,
+}
+
+impl<'b> Darts<'b> {
+    /// Place every DART group with its SMMU.
+    fn place(devices: &mut AppleDevices, board: &'b Board) -> Result<Self> {
+        let mut mounted = Vec::new();
+        for dart in &board.darts {
+            let ranges: Vec<_> = dart
+                .instances
+                .iter()
+                .map(|instance| Range {
+                    physical: instance.physical,
+                    bytes: instance.bytes,
+                })
+                .collect();
+            let irq = AicInput::new(0, dart.irq as u16);
+            let placed = devices
+                .add_dart_group_for_profile(
+                    dart.profile,
+                    &ranges,
+                    usize::from(dart.streams),
+                    Some(irq),
+                    dart.apf,
+                )
+                .within(|| refuse!("DART placement"))?;
+            if let Some((physical, bytes)) = dart.smmu {
+                devices
+                    .add_dart_smmu(placed[0], Range { physical, bytes })
+                    .map_err(|error| refuse!("DART SMMU placement: {error}", ?error))?;
+            }
+            mounted.push(placed);
         }
-        darts.push(placed);
+        Ok(Self { mounted, board })
     }
-    let native_dart = |group: usize, instance: usize| {
-        let mounted = darts
+
+    /// The DART a native DMA route names, from a group placed in full.
+    fn native(&self, group: usize, instance: usize) -> Result<DartId> {
+        let mounted = self
+            .mounted
             .get(group)
             .ok_or(refuse!("native DMA route names an unmounted DART group"))?;
-        let declared = board
+        let declared = self
+            .board
             .darts
             .get(group)
             .ok_or(refuse!("native DMA route has no declared DART group"))?;
@@ -352,9 +498,15 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             .get(instance)
             .copied()
             .ok_or(refuse!("native DMA route names an unmounted DART instance"))
-    };
-    // The PMGR's power states precede the display, whose views reach into
-    // its windows.
+    }
+}
+
+/// The PMGR's power-state blocks.
+fn add_power_states(
+    devices: &mut AppleDevices,
+    board: &Board,
+    log: &mut dyn FnMut(fmt::Arguments<'_>),
+) -> Result<()> {
     if let Some(states) = board.power_states.as_ref() {
         let blocks: Vec<Range> = states
             .blocks
@@ -368,140 +520,189 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             blocks.len()
         ));
     }
-    // The display's PTD update view must borrow this publication bank,
-    // before a broad display container can claim any overlapping bytes.
-    if let Some(memory) = memory {
-        match memory {
-            MemoryResources::T6000Cold(plan) => {
-                plan.install(&mut devices)?;
-                log(format_args!(
-                    "DEVICES mcc native direct MCC/AMCC/PTD share canonical RAM and source power graph\n"
-                ));
-            }
-            MemoryResources::T8112Cold(plan) => {
-                plan.install(&mut devices)?;
-                log(format_args!(
-                    "DEVICES mcc native cold cache/DCS/PTD follow actual PMGR and canonical RAM\n"
-                ));
-            }
-            MemoryResources::T8112 { memory, cache } => {
-                devices.add_t8112_empty_memory_resources(memory, cache)?;
-                log(format_args!(
-                    "DEVICES mcc native DCS/PTD and cache share registered RAM\n"
-                ));
-            }
-        }
-    }
-    // The dcpext display coprocessor and its register apertures, presenting
-    // to the host's scanout, mastering through its DART and reading swap
-    // surfaces through the display pipe's.
-    if let Some(dcp) = board.dcp.as_ref() {
-        for route in &dcp.surface_routes {
-            devices.validate_native_dart(
-                "DCP declared surface mapper",
-                native_dart(route.iommu, route.instance)?,
-                route.stream as usize,
-            )?;
-        }
-        let scanout = scanout.ok_or(refuse!("visible external DCP requires one actual scanout"))?;
-        let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
-        devices.add_dcpext(
-            DcpextNub {
-                wrapper: range(dcp.wrapper),
-                interrupts: dcp.interrupts,
-                quiesced: dcp.quiesced,
-                role: dcp.role,
-                identity: dcp.identity,
-            },
-            scanout,
-            DcpextDma {
-                link: (native_dart(dcp.iommu, dcp.instance)?, dcp.stream as usize),
-                window: dcp.window,
-                surface: match (
-                    dcp.surface,
-                    dcp.surface_instance,
-                    dcp.surface_routes.first(),
-                ) {
-                    (Some((iommu, stream)), Some(instance), Some(primary))
-                        if (primary.iommu, primary.instance, primary.stream)
-                            == (iommu, instance, stream) =>
-                    {
-                        Some((native_dart(iommu, instance)?, stream as usize))
-                    }
-                    (None, None, None) => None,
-                    _ => return Err(refuse!("DCP surface DMA owner metadata is incomplete")),
-                },
-            },
-            build,
-        )?;
-        let regions: Vec<(&'static str, Range)> = dcp
-            .regions
-            .iter()
-            .map(|&(name, reg)| (name, range(reg)))
-            .collect();
-        let mut display_darts = Vec::new();
-        for group in
-            core::iter::once(dcp.iommu).chain(dcp.surface_routes.iter().map(|route| route.iommu))
-        {
-            let instances = darts
-                .get(group)
-                .ok_or(refuse!("display DART group is missing"))?;
-            for instance in 0..instances.len() {
-                let owner = native_dart(group, instance)?;
-                if !display_darts.contains(&owner) {
-                    display_darts.push(owner);
-                }
-            }
-        }
-        devices.add_display_with_darts(&regions, dcp.role, &display_darts)?;
-    }
-    if let Some(sep) = board.sep {
-        let group = darts
-            .get(sep.iommu)
-            .ok_or(refuse!("SEP DART group is missing"))?;
-        let [dart] = group.as_slice() else {
-            return Err(refuse!(
-                "SEP DMA owner requires explicit multiple-TRAD selection"
+    Ok(())
+}
+
+/// The native memory owners' controller, cache and PTD models.
+fn add_native_memory(
+    devices: &mut AppleDevices,
+    memory: MemoryResources,
+    log: &mut dyn FnMut(fmt::Arguments<'_>),
+) -> Result<()> {
+    match memory {
+        MemoryResources::T6000Cold(plan) => {
+            plan.install(devices)?;
+            log(format_args!(
+                "DEVICES mcc native direct MCC/AMCC/PTD share canonical RAM and source power graph\n"
             ));
-        };
-        if sep.instance != 0 {
-            return Err(refuse!("SEP selected TRAD is outside its sole-owner group"));
         }
-        let ranges = sep
-            .ranges
-            .map(|(physical, bytes)| Range { physical, bytes });
-        let lines = AscLines::from_interrupts(sep.irqs.map(|irq| AicInput::new(0, irq as u16)));
-        let ecid = sep.ecid.ok_or(refuse!(
-            "SEP needs /chosen unique-chip-id (the machine ECID); none in the tree"
-        ))?;
-        let state = match sep_state {
-            Some(location) => {
-                log(format_args!("SEP state on the machine-state partition\n"));
-                location
-            }
-            None => {
-                // Without `--nor` no host partition holds it: the roots
-                // and anti-replay store last this power cycle.
-                log(format_args!(
-                    "SEP state volatile: nonces end at power-off\n"
-                ));
-                sep_state::Location::Volatile
-            }
-        };
-        devices.add_sep(
-            ranges,
-            lines,
-            (*dart, sep.stream as usize),
-            entropy,
-            SepProvisioning {
-                security: sep.security,
-                ecid,
-                kexts: sep.kexts,
-                observe: sep_observe,
-                state,
-            },
+        MemoryResources::T8112Cold(plan) => {
+            plan.install(devices)?;
+            log(format_args!(
+                "DEVICES mcc native cold cache/DCS/PTD follow actual PMGR and canonical RAM\n"
+            ));
+        }
+        MemoryResources::T8112 { memory, cache } => {
+            devices.add_t8112_empty_memory_resources(memory, cache)?;
+            log(format_args!(
+                "DEVICES mcc native DCS/PTD and cache share registered RAM\n"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The dcpext display coprocessor and its register apertures, presenting
+/// to the host's scanout, mastering through its DART and reading swap
+/// surfaces through the display pipe's.
+fn add_display(
+    devices: &mut AppleDevices,
+    board: &Board,
+    darts: &Darts<'_>,
+    scanout: Option<Box<dyn Scanout>>,
+    build: &'static stela_formats::builds::Build,
+) -> Result<()> {
+    let Some(dcp) = board.dcp.as_ref() else {
+        return Ok(());
+    };
+    for route in &dcp.surface_routes {
+        devices.validate_native_dart(
+            "DCP declared surface mapper",
+            darts.native(route.iommu, route.instance)?,
+            route.stream as usize,
         )?;
     }
+    let scanout = scanout.ok_or(refuse!("visible external DCP requires one actual scanout"))?;
+    let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
+    devices.add_dcpext(
+        DcpextNub {
+            wrapper: range(dcp.wrapper),
+            interrupts: dcp.interrupts,
+            quiesced: dcp.quiesced,
+            role: dcp.role,
+            identity: dcp.identity,
+        },
+        scanout,
+        DcpextDma {
+            link: (darts.native(dcp.iommu, dcp.instance)?, dcp.stream as usize),
+            window: dcp.window,
+            surface: match (
+                dcp.surface,
+                dcp.surface_instance,
+                dcp.surface_routes.first(),
+            ) {
+                (Some((iommu, stream)), Some(instance), Some(primary))
+                    if (primary.iommu, primary.instance, primary.stream)
+                        == (iommu, instance, stream) =>
+                {
+                    Some((darts.native(iommu, instance)?, stream as usize))
+                }
+                (None, None, None) => None,
+                _ => return Err(refuse!("DCP surface DMA owner metadata is incomplete")),
+            },
+        },
+        build,
+    )?;
+    let regions: Vec<(&'static str, Range)> = dcp
+        .regions
+        .iter()
+        .map(|&(name, reg)| (name, range(reg)))
+        .collect();
+    let mut display_darts = Vec::new();
+    for group in
+        core::iter::once(dcp.iommu).chain(dcp.surface_routes.iter().map(|route| route.iommu))
+    {
+        let instances = darts
+            .mounted
+            .get(group)
+            .ok_or(refuse!("display DART group is missing"))?;
+        for instance in 0..instances.len() {
+            let owner = darts.native(group, instance)?;
+            if !display_darts.contains(&owner) {
+                display_darts.push(owner);
+            }
+        }
+    }
+    devices.add_display_with_darts(&regions, dcp.role, &display_darts)
+}
+
+/// The host's inputs to the SEP.
+struct Sep {
+    entropy: Box<dyn SepEntropy>,
+    /// Where its state lives; volatile without one.
+    state: Option<sep_state::Location>,
+    /// Advertise and log the `sks`/`pnon`/`scrd` services.
+    observe: bool,
+}
+
+/// The SEP, mastering through the sole TRAD of its DART group.
+fn add_sep(
+    devices: &mut AppleDevices,
+    sep: &stela_soc_data::board::SepDevice,
+    darts: &Darts<'_>,
+    host: Sep,
+    log: &mut dyn FnMut(fmt::Arguments<'_>),
+) -> Result<()> {
+    let group = darts
+        .mounted
+        .get(sep.iommu)
+        .ok_or(refuse!("SEP DART group is missing"))?;
+    let [dart] = group.as_slice() else {
+        return Err(refuse!(
+            "SEP DMA owner requires explicit multiple-TRAD selection"
+        ));
+    };
+    if sep.instance != 0 {
+        return Err(refuse!("SEP selected TRAD is outside its sole-owner group"));
+    }
+    let ranges = sep
+        .ranges
+        .map(|(physical, bytes)| Range { physical, bytes });
+    let lines = AscLines::from_interrupts(sep.irqs.map(|irq| AicInput::new(0, irq as u16)));
+    let ecid = sep.ecid.ok_or(refuse!(
+        "SEP needs /chosen unique-chip-id (the machine ECID); none in the tree"
+    ))?;
+    let state = match host.state {
+        Some(location) => {
+            log(format_args!("SEP state on the machine-state partition\n"));
+            location
+        }
+        None => {
+            // Without `--nor` no host partition holds it: the roots
+            // and anti-replay store last this power cycle.
+            log(format_args!(
+                "SEP state volatile: nonces end at power-off\n"
+            ));
+            sep_state::Location::Volatile
+        }
+    };
+    devices.add_sep(
+        ranges,
+        lines,
+        (*dart, sep.stream as usize),
+        host.entropy,
+        SepProvisioning {
+            security: sep.security,
+            ecid,
+            kexts: sep.kexts,
+            observe: host.observe,
+            state,
+        },
+    )
+}
+
+/// Every USB controller. The native input and `usb`'s cables attach to the
+/// last; a restore host, else the native client, to the first, whose ID is
+/// returned when a restore host is cabled to it.
+fn add_usbs(
+    devices: &mut AppleDevices,
+    board: &Board,
+    darts: &Darts<'_>,
+    mut usb: UsbCables,
+    input: bool,
+    restore: bool,
+    log: &mut dyn FnMut(fmt::Arguments<'_>),
+) -> Result<Option<UsbId>> {
     let mut restore_usb = None;
     let usbs = board.usbs.len();
     for (index, controller) in board.usbs.iter().enumerate() {
@@ -509,16 +710,17 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         // instance, as SEP and AES masters do; per-instance selection is the
         // bus master's contract (`stela_soc_data::board::Iommu`).
         let group = darts
+            .mounted
             .get(controller.iommu)
             .ok_or(refuse!("USB DART group is missing"))?;
         for (instance, _) in group.iter().enumerate() {
             devices.validate_native_dart(
                 "USB declared bank",
-                native_dart(controller.iommu, instance)?,
+                darts.native(controller.iommu, instance)?,
                 controller.stream as usize,
             )?;
         }
-        let id = devices.add_usb(controller, native_dart(controller.iommu, 0)?)?;
+        let id = devices.add_usb(controller, darts.native(controller.iommu, 0)?)?;
         // The native keyboard and pointer plug into the last connector
         // (J473AP usb-drd1), the Mac being the downstream-facing port.
         let hub = input || !usb.disks.is_empty() || usb.network.is_some();
@@ -554,23 +756,12 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             devices.usb_client(id)?.query_type()?;
         }
     }
-    if let Some(aes) = board.aes {
-        let ranges: Vec<Range> = aes
-            .ranges
-            .into_iter()
-            .chain(aes.dkey)
-            .map(|(physical, bytes)| Range { physical, bytes })
-            .collect();
-        // No per-installation UID1 key is provisioned yet: the engine
-        // reports every hardware key disabled.
-        devices.add_aes(
-            &ranges,
-            aes.config,
-            Some(AicInput::new(0, aes.irq as u16)),
-            (native_dart(aes.iommu, aes.instance)?, aes.stream as usize),
-            None,
-        )?;
-    }
+    Ok(restore_usb)
+}
+
+/// The SoC's register banks: fabric bridges, DPE, power, wake masks,
+/// performance and energy counters, CPU clusters and the AON fuses.
+fn add_soc_banks(devices: &mut AppleDevices, board: &Board) -> Result<()> {
     for bank in &board.bridges {
         devices.add_bridge(
             bank.physical,
@@ -617,9 +808,20 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     if let Some((physical, _)) = board.aon_fuses {
         devices.add_aon_fuses(physical)?;
     }
-    let memory_controller = board.memory_controller.as_ref();
+    Ok(())
+}
+
+/// The memory and I/O access controllers and the memory cache's channels.
+/// Native memory owners already placed the memory controller and cache.
+fn add_memory_controllers(
+    devices: &mut AppleDevices,
+    board: &Board,
+    programmed: stela_soc_data::amcc::Programmed,
+    native_memory: bool,
+    log: &mut dyn FnMut(fmt::Arguments<'_>),
+) -> Result<()> {
     let memory_cache = board.memory_cache.as_ref();
-    if !native_memory && let Some(controller) = memory_controller {
+    if !native_memory && let Some(controller) = board.memory_controller.as_ref() {
         let mut programmed = programmed;
         for (region, group) in programmed.iter_mut().zip(controller.layout.groups) {
             if group.is_none() {
@@ -656,36 +858,24 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
             mcc.ptd.ranges.len()
         ));
     }
-    log(format_args!(
-        "DEVICES uart={:#x}+{:#x} irq={} wdt={:#x}+{:#x} irq={} aic={:#x} nr_irq={} \
-         lockdown-blocks={} amcc-apertures={} darts={} aes={} aic-timebase=unplaced\n",
-        uart.0.physical,
-        uart.0.bytes,
-        uart.1.irq,
-        wdt.0.physical,
-        wdt.0.bytes,
-        wdt.1.irq,
-        aic.physical,
-        aic.inputs,
-        board.lockdown.len(),
-        memory_controller.map_or(0, |controller| controller.apertures.len()),
-        darts.len(),
-        board.aes.is_some()
-    ));
-    // Last: the `sgx` window spans other banks (gfx-asc, a PMGR fabric
-    // bridge) and owns only the bytes they leave.
-    if let Some(gfx) = board.gfx.as_ref() {
-        devices.add_gfx(gfx, build)?;
-    }
-    // Finalize only after every native constructor, including SGX's final
-    // overlapping-window placement, has registered its banks.
+    Ok(())
+}
+
+/// Connect the PMGR's lifecycle to every placed bank. DART clock or power
+/// gates need a modeled PMGR.
+fn connect_power(
+    devices: &mut AppleDevices,
+    board: &Board,
+    darts: &Darts<'_>,
+    log: &mut dyn FnMut(fmt::Arguments<'_>),
+) -> Result<()> {
     if let Some(states) = board.power_states.as_ref() {
         let retention = board
             .darts
             .iter()
             .map(|dart| dart.retention)
             .collect::<Vec<_>>();
-        devices.connect_power_resources(states, &darts, &retention)?;
+        devices.connect_power_resources(states, &darts.mounted, &retention)?;
         log(format_args!(
             "DEVICES pmgr lifecycle-refusals={} resources={}\n",
             devices.power_refusals().len(),
@@ -698,10 +888,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
     {
         return Err(refuse!("DART resource gates require a modeled PMGR"));
     }
-    if restore && restore_usb.is_none() {
-        return Err(refuse!("restore study requires a DT-placed USB device"));
-    }
-    Ok((devices, restore_usb))
+    Ok(())
 }
 
 #[cfg(test)]
