@@ -675,7 +675,9 @@ fn ordinary_pair_compare_reuses_both_committed_load_results() {
         .iter()
         .filter(|site| site.site.kind() == RecoverySiteKind::GuestAccess)
         .collect();
-    assert_eq!(accesses.len(), 2);
+    // The X pair's 16-byte access where its address is 16-byte aligned
+    // (FEAT_LSE2) and its two element accesses otherwise.
+    assert_eq!(accesses.len(), 3);
     for access in accesses {
         assert_eq!(access.retirement.instruction_pc(), pc);
         assert_eq!(access.retirement.retired_before(), 0);
@@ -3621,4 +3623,146 @@ fn masked_base_reuse_matches_the_unmasked_block() {
         assert_eq!(runs[0], runs[1], "X9 = {x9:#x}");
         assert_eq!(runs[0].0.sp, stack - 32);
     }
+}
+
+/// A flag setter whose NZCV the next one overwrites before any read, fault
+/// or exit keeps no capture in system mode; every other one keeps its own.
+#[test]
+fn dead_nzcv_captures_are_dropped_in_system_mode() {
+    use crate::{Lifter, TargetCpu, aarch64::Decoder};
+    const CAPTURE: [u8; 4] = [0x9f, 0x0f, 0x90, 0xc0]; // lahf; seto al
+    const ADDS_X0: u32 = 0xb100_0400;
+    const ADDS_X1: u32 = 0xb100_0421;
+    const SUBS_X2: u32 = 0xf100_0c42;
+    const ADD_X3: u32 = 0x9100_1463;
+    const MOVZ_X4: u32 = 0xd280_00e4;
+    const CSEL_X7: u32 = 0x9a81_1007;
+    const LDR_X9: u32 = 0xf940_0149;
+    const TST_X0: u32 = 0xf240_001f;
+    for (words, captures) in [
+        (&[ADDS_X0, ADDS_X1][..], 1),
+        (&[ADDS_X0, ADD_X3, MOVZ_X4, SUBS_X2], 1),
+        (&[ADDS_X0, ADDS_X1, ADD_X3], 1),
+        (&[ADDS_X0, TST_X0, SUBS_X2, ADDS_X1], 1),
+        (&[ADDS_X0, CSEL_X7, ADDS_X1], 2),
+        (&[ADDS_X0, LDR_X9, ADDS_X1], 2),
+        (&[ADDS_X0], 1),
+    ] {
+        let instructions: Vec<_> = words
+            .iter()
+            .enumerate()
+            .map(|(index, &word)| {
+                Decoder
+                    .lift(GuestAddress(0x1000 + 4 * index as u64), word)
+                    .unwrap()
+            })
+            .collect();
+        let end = GuestAddress(0x1000 + 4 * words.len() as u64);
+        let (system, _) = emit_system_mode(
+            &instructions,
+            None,
+            end,
+            TargetCpu::Baseline,
+            super::super::MemoryChecks::DEFAULT,
+            super::super::NativeSystem::NONE,
+        );
+        let code = &system.x86_64_code;
+        let found = code
+            .windows(CAPTURE.len())
+            .filter(|w| *w == CAPTURE)
+            .count();
+        assert_eq!(found, captures, "{words:08x?}");
+        // Every instruction keeps a native range of its own.
+        for pair in system.source_map.windows(2) {
+            assert!(pair[0].1 < pair[1].1, "{words:08x?}");
+        }
+    }
+}
+
+/// System-mode blocks whose dead captures went leave the state the frame
+/// emitter's instruction-by-instruction code leaves, NZCV included.
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn dead_nzcv_captures_leave_the_frame_emitters_state() {
+    use crate::{
+        GuestState, Lifter, TargetCpu,
+        aarch64::Decoder,
+        x86_64::{native, pinned},
+    };
+    const WORDS: [u32; 10] = [
+        0xb100_0400, // adds x0,x0,#1
+        0xb100_0421, // adds x1,x1,#1
+        0xf100_0c42, // subs x2,x2,#3
+        0xeb01_001f, // cmp x0,x1
+        0x9100_1463, // add x3,x3,#5
+        0xd280_00e4, // movz x4,#7
+        0xea06_00a5, // ands x5,x5,x6
+        0x9a81_1007, // csel x7,x0,x1,ne
+        0xba01_0008, // adcs x8,x0,x1
+        0xf240_001f, // tst x0,#1
+    ];
+    let inputs = [
+        0,
+        1,
+        2,
+        0x7fff_ffff_ffff_ffff,
+        u64::MAX,
+        0x8000_0000_0000_0000,
+    ];
+    let mut cases = 0;
+    // Every sequence of three words, and some longer ones.
+    let mut sequences: Vec<Vec<u32>> = Vec::new();
+    for a in WORDS {
+        for b in WORDS {
+            for c in WORDS {
+                sequences.push(vec![a, b, c]);
+            }
+        }
+    }
+    sequences.push(WORDS.to_vec());
+    sequences.push(WORDS.iter().rev().copied().collect());
+    for words in sequences {
+        let instructions: Vec<_> = words
+            .iter()
+            .enumerate()
+            .map(|(index, &word)| {
+                Decoder
+                    .lift(GuestAddress(0x1000 + 4 * index as u64), word)
+                    .unwrap()
+            })
+            .collect();
+        let end = GuestAddress(0x1000 + 4 * words.len() as u64);
+        let (system, _) = emit_system_mode(
+            &instructions,
+            None,
+            end,
+            TargetCpu::Baseline,
+            super::super::MemoryChecks::DEFAULT,
+            super::super::NativeSystem::NONE,
+        );
+        let system = pinned::entered(&system.x86_64_code);
+        let frame = emit_for_target(
+            &instructions,
+            None,
+            end,
+            TargetCpu::Baseline,
+            super::super::MemoryChecks::DEFAULT,
+        )
+        .x86_64_code;
+        for (index, &value) in inputs.iter().enumerate() {
+            let mut expected = GuestState {
+                nzcv: (index as u32 % 16) << 28,
+                ..GuestState::default()
+            };
+            for (register, x) in expected.x.iter_mut().enumerate() {
+                *x = value.wrapping_add(register as u64 * 0x1111);
+            }
+            let mut actual = expected.clone();
+            assert_eq!(native::run(&frame, &mut expected), end.0);
+            assert_eq!(native::run(&system, &mut actual), end.0);
+            assert_eq!(actual, expected, "{words:08x?} {value:x}");
+            cases += 1;
+        }
+    }
+    assert!(cases > 6000);
 }

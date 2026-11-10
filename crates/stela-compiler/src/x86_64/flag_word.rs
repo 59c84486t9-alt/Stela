@@ -84,6 +84,87 @@ pub(super) fn capture_in_rax(code: &mut Code, borrow: bool) {
     asm.setcc(Cond::O, Rax);
 }
 
+/// Whether the NZCV `instructions[index]` leaves is dead: the next
+/// instruction that touches NZCV defines all four flags without reading
+/// them, and every instruction before it neither reads them, nor can fault,
+/// exit or leave the frame, which must hold the exact NZCV at each of those.
+/// Only register operations the regions also take as pure qualify, so a
+/// block's last instruction's NZCV is never dead: an exit follows.
+pub(super) fn dead_after(instructions: &[crate::aarch64::Instruction], index: usize) -> bool {
+    use crate::aarch64::Operation;
+    for instruction in instructions.iter().skip(index + 1) {
+        match instruction.operation {
+            Operation::AddSub { flags, .. }
+            | Operation::AddSubRegister { flags, .. }
+            | Operation::AddSubExtended { flags, .. }
+            | Operation::LogicalImmediate { flags, .. }
+            | Operation::LogicalRegister { flags, .. } => {
+                if flags {
+                    return true;
+                }
+            }
+            Operation::MoveWide { .. }
+            | Operation::Bitfield(_)
+            | Operation::PcRelative(_)
+            | Operation::Nop => {}
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// The range of `code` from `start` that its pinned capture ([`capture`])
+/// takes at its end: LAHF, SETO and the store. A subtraction's CMC before
+/// them stays, as a path of the instruction may join it at the LAHF. `None`
+/// when the code does not end with one, or the capture is all its
+/// instruction emitted from `start`.
+pub(super) fn captured_tail(code: &Code, start: usize) -> Option<core::ops::Range<usize>> {
+    const LAHF: u8 = 0x9f;
+    const SETO_AL: [u8; 3] = [0x0f, 0x90, 0xc0];
+    if !code.is_pinned() || code.constant_time() {
+        return None;
+    }
+    let mut store = Code::new();
+    store.set_pinned(true);
+    store_captured(&mut store.asm());
+    let bytes: &[u8] = code;
+    let end = bytes.len();
+    let at = end.checked_sub(store.len() + SETO_AL.len() + 1)?;
+    if at <= start
+        || bytes[at] != LAHF
+        || bytes[at + 1..at + 1 + SETO_AL.len()] != SETO_AL
+        || bytes[at + 1 + SETO_AL.len()..] != *store
+    {
+        return None;
+    }
+    Some(at..end)
+}
+
+/// Overwrite the dead capture at `range` ([`captured_tail`]) with long NOPs
+/// of its length: every offset an emitter bound around it stays where it
+/// was, a join after both paths of an instruction included.
+pub(super) fn drop_capture(code: &mut Code, range: core::ops::Range<usize>) {
+    const NOPS: [&[u8]; 9] = [
+        &[0x90],
+        &[0x66, 0x90],
+        &[0x0f, 0x1f, 0x00],
+        &[0x0f, 0x1f, 0x40, 0x00],
+        &[0x0f, 0x1f, 0x44, 0x00, 0x00],
+        &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00],
+        &[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00],
+        &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+        &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+    ];
+    let mut at = range.start;
+    while at < range.end {
+        let nop = NOPS[(range.end - at).min(NOPS.len()) - 1];
+        for (offset, &byte) in nop.iter().enumerate() {
+            code.patch(at + offset, [byte]);
+        }
+        at += nop.len();
+    }
+}
+
 /// `mov word [rdi+GuestState.nzcv],ax`. Only a capture ends so, which leaves
 /// the host flags meaning what the word does.
 pub(super) fn store_captured(asm: &mut Asm) {

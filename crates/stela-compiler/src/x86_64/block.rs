@@ -807,6 +807,15 @@ fn emit_selected(
         if frame_bound {
             super::pinned::reload(code);
             code.set_pinned(true);
+        } else if after.rax == super::Rax::Nzcv
+            && super::flag_word::dead_after(instructions, cursor)
+            && let Some(start) = block.source_map.last().map(|&(_, start)| start)
+            && let Some(tail) = super::flag_word::captured_tail(code, start)
+        {
+            // The next flag setter defines NZCV again before anything reads
+            // it or the frame must hold it: this capture is dead.
+            super::flag_word::drop_capture(code, tail);
+            after.rax = super::Rax::Unknown;
         }
         let applied = code.finish_base_request();
         bases.after(instruction, applied);
