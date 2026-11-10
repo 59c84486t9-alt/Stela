@@ -1,4 +1,4 @@
-//! Apple implementation-defined registers that the 26A434 kernelcaches,
+//! Apple implementation-defined registers that the kernelcaches,
 //! SPTMs and TXM of the Apple silicon chips access, each listed with its
 //! consumer and the behavior that consumer needs (the census is in
 //! `docs/research/j473-kernel.md#system-registers`). Registers with an
@@ -51,9 +51,10 @@
 //! - `Unsupported`: its consumer relies on an effect this machine cannot
 //!   provide; every access stops with the evidence as the reason.
 //!
-//! An entry applies on a chip only where that chip's own 26A434 SPTM, TXM,
-//! kernelcache or system kext collection accesses the encoding ([`census`],
-//! keyed by `machine::Chip` as `Pmu::on` is), and, when it names chips
+//! An entry applies on a chip only where that chip's own SPTM, TXM,
+//! kernelcache or system kext collection in a supported build
+//! (`stela_formats::builds`) accesses the encoding ([`census`], keyed by
+//! `machine::Chip` as `Pmu::on` is), and, when it names chips
 //! ([`Entry::chips`]), only on those: an encoding whose consumers differ by
 //! chip (UPMCR0's 24-counter layout on the M6) has one entry per layout. The
 //! entries cite the consumer on the chips whose components they were
@@ -64,7 +65,7 @@
 //! An encoding the chip's components never access is not looked up: without
 //! a model of its own it is UNDEFINED, Arm's behavior for an unallocated
 //! encoding. That the chip allocates none of them is an inference from the
-//! census (no 26A434 component needs one), not an observation.
+//! census (no component of a supported build needs one), not an observation.
 //!
 //! `Scope::Cluster` entries are one register per cluster, shared by its PEs
 //! (`Registers::join`); the others are per PE. `el2` entries are UNDEFINED
@@ -310,6 +311,7 @@ encodings! {
     CLUSTER_COUNTER_C2_6 = 7, 2, 6;
     CLUSTER_COUNTER_C4_6 = 7, 4, 6;
     CLUSTER_COUNTER_C6_6 = 7, 6, 6;
+    CLUSTER_COUNTER_C8_6 = 7, 8, 6;
     CLUSTER_COUNTER_C14_2 = 7, 14, 2;
     SPTM_CLEARED_C4_7 = 1, 4, 7;
     SPTM_CLEARED_C9_7 = 1, 9, 7;
@@ -919,8 +921,13 @@ const CLUSTER_COUNTER_LATER_EVIDENCE: &str = "no public name; the M3-and-later \
     (AppleT8122CLPC kernelcache.release.mac15g 0xfffffe0009ec7eac: C4_6 0xfffffe0009ec8010, \
     C14_2 0xfffffe0009ec8064, C0_6 0xfffffe0009ec8084, C2_6 0xfffffe0009ec80a0, the clear \
     0xfffffe0009ec8280; C6_6 in AppleT6041CLPC mac16j 0xfffffe0009fb7a08, AppleT6050CLPC \
-    mac17j 0xfffffe0009c3a4f8 and AppleT8152CLPC mac18g 0xfffffe0009fc92e0). The emulated die's bus interface carries no traffic, so it never \
-    counts: it holds what software writes, 0 from reset (inference). One per cluster";
+    mac17j 0xfffffe0009c3a4f8 and AppleT8152CLPC mac18g 0xfffffe0009fc92e0). 26B123 widens \
+    the samplers: AppleT8112CLPC mac14g reads C14_2 at 0xfffffe0009f84710 and clears it at \
+    0xfffffe0009f84a08, AppleT8103CLPCv3 mac13g at 0xfffffe0009e35408 and 0xfffffe0009e35628, \
+    AppleT8122CLPC mac15g reads C6_6 at 0xfffffe0009ee4f00, and AppleT8152CLPC mac18g reads \
+    C8_6 at 0xfffffe0009ffe694 and clears it at 0xfffffe0009ffead4. The emulated die's bus \
+    interface carries no traffic, so it never counts: it holds what software writes, 0 from \
+    reset (inference). One per cluster";
 
 const PL2_ERROR_STATUS: &str = "26A434 XNU's peh.c names it in its \"PL2 %s error: ... \
     PL2_ERR_STS/ADR/INF\" panic, which prints S3_1_C11_C4_7, C4_5 and C4_6 in that order \
@@ -1671,6 +1678,7 @@ pub const TABLE: &[Entry] = &[
     cluster_counter(CLUSTER_COUNTER_C2_6, "S3_7_C15_C2_6 (unnamed)"),
     cluster_counter(CLUSTER_COUNTER_C4_6, "S3_7_C15_C4_6 (unnamed)"),
     cluster_counter(CLUSTER_COUNTER_C6_6, "S3_7_C15_C6_6 (unnamed)"),
+    cluster_counter(CLUSTER_COUNTER_C8_6, "S3_7_C15_C8_6 (unnamed)"),
     cluster_counter(CLUSTER_COUNTER_C14_2, "S3_7_C15_C14_2 (unnamed)"),
     // The M6's 24-counter uncore monitor, one per cluster.
     held(

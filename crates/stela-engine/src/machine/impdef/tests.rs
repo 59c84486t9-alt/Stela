@@ -463,7 +463,9 @@ fn the_m6_uncore_monitor_has_its_own_upmcr0_layout() {
 }
 
 /// The later chips' entries apply where their census shows them, CRn 11
-/// among them, and never on the M1 or M2.
+/// among them. 26B123's M1 and M2 samplers read the cluster counter at
+/// S3_7_C15_C14_2, which only the M3 and later read in 26A434, and its M3
+/// and M6 samplers add C6_6 and C8_6.
 #[test]
 fn the_later_chips_entries_follow_their_census() {
     for (encoding, chips) in [
@@ -471,7 +473,9 @@ fn the_later_chips_entries_follow_their_census() {
         (INIT_C0_7, &[Chip::AppleM6]),
         (PL2_ERR_STS, &[Chip::AppleM5, Chip::AppleM6]),
         (IRG_KEY_4, &[Chip::AppleM6]),
-        (CLUSTER_COUNTER_C6_6, &Chip::ALL[3..]),
+        (CLUSTER_COUNTER_C6_6, &Chip::ALL[2..]),
+        (CLUSTER_COUNTER_C8_6, &[Chip::AppleM6]),
+        (CLUSTER_COUNTER_C14_2, &Chip::ALL),
         (AON_COUNTER_9, &[Chip::AppleM5]),
         (PROD_TRACE_BASE_0, &Chip::ALL[2..]),
         (SW_TRACE_DATA, &Chip::ALL[3..]),
