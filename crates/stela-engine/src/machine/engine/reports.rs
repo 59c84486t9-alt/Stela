@@ -800,6 +800,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         for (&word, &count) in &self.exit_words {
             *words.entry(word).or_default() += count;
         }
+        // Exits this PE kept apart from its blocks' records.
+        for held in &self.exit_pending {
+            if held.count != 0 {
+                *words.entry(held.word).or_default() += u64::from(held.count);
+            }
+        }
         words
     }
 }

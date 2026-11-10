@@ -8663,6 +8663,7 @@ mod arena;
 mod floating_point_traps;
 mod pstate_features;
 mod recovery;
+mod sharing;
 mod stage2_syndrome;
 
 #[test]

@@ -28,7 +28,7 @@
 use super::chain_control;
 use super::{
     CanonicalDeviceMemory, CanonicalDeviceWrite, ConsumedPair, ConsumedScalar, ConsumedWrite,
-    DeviceError, DeviceReadShape, Devices, Discard, FETCH_PAGE, Fetched, Host, Machine,
+    DeviceError, DeviceReadShape, Devices, Discard, FETCH_PAGE, Fetched, Host, Machine, Padded,
     RequirementKind, Reset, ScalarRead, Start, Step, Variant, clock::SharedClock, processors::Peer,
     step_timing,
 };
@@ -198,6 +198,9 @@ impl Mail {
     }
 }
 
+/// On cache lines of its own: its owner reads `pending` and `lines` at
+/// every step, while other PEs write the inboxes beside it.
+#[repr(align(64))]
 struct Inbox {
     /// Mail is waiting.
     pending: AtomicBool,
@@ -333,8 +336,10 @@ pub struct Hub {
     /// The count every PE reads, from the home machine's as the board went
     /// parallel on.
     clock: Arc<SharedClock>,
-    /// The home machine's PE.
-    home: AtomicUsize,
+    /// The home machine's PE. Every PE reads it and `stopped` at every
+    /// step, each on a line of its own: a forwarded device access writes
+    /// `forwarding`, `requested` and `request`.
+    home: Padded<AtomicUsize>,
     home_owner: AtomicU64,
     next_owner: AtomicU64,
     /// One PE's forwarded device access at a time, and that one.
@@ -342,7 +347,7 @@ pub struct Hub {
     requested: AtomicBool,
     request: Mutex<Option<Request>>,
     /// Every running PE but the home one and the requester parks.
-    stopped: AtomicBool,
+    stopped: Padded<AtomicBool>,
     /// The run is over: a parked PE frees its blocks and stays parked.
     finishing: AtomicBool,
     /// A device left bytes for the host to feed or drain
@@ -439,13 +444,13 @@ impl Hub {
             kick: Box::new(kick),
             clusters: Mutex::new(BTreeMap::new()),
             clock: Arc::new(SharedClock::new(pes)),
-            home: AtomicUsize::new(0),
+            home: Padded(AtomicUsize::new(0)),
             home_owner: AtomicU64::new(0),
             next_owner: AtomicU64::new(1),
             forwarding: AtomicBool::new(false),
             requested: AtomicBool::new(false),
             request: Mutex::new(None),
-            stopped: AtomicBool::new(false),
+            stopped: Padded(AtomicBool::new(false)),
             finishing: AtomicBool::new(false),
             service: AtomicBool::new(false),
             code_pages: CodePages::new(),

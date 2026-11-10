@@ -440,9 +440,17 @@ impl Ring {
         self.live[part].load(Ordering::Acquire) && self.holds(part) == place.generation
     }
 
-    /// A fetch found a block of `part`: one atomic add, no lock.
+    /// A fetch found a block of `part`: one atomic add, no lock. PEs add
+    /// their counts in batches ([`Self::entered_by`]); tests count one.
+    #[cfg(test)]
     pub(in crate::machine::engine) fn entered(&self, part: usize) {
-        self.entered[part].0.fetch_add(1, Ordering::Relaxed);
+        self.entered_by(part, 1);
+    }
+
+    /// `count` fetches found blocks of `part`, which a PE kept and adds at
+    /// once (`Machine::entered`).
+    pub(in crate::machine::engine) fn entered_by(&self, part: usize, count: u32) {
+        self.entered[part].0.fetch_add(count, Ordering::Relaxed);
     }
 
     /// `part` took a block; under the board's code lock.

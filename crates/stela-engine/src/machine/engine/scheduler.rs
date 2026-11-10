@@ -91,6 +91,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Leave the run loop: other PEs' broadcasts stop waiting for this one
     /// until it enters again.
     fn leave_run_loop(&mut self) {
+        // What this PE kept of shared counts, for the reports and the ring.
+        self.flush_exits();
+        self.flush_entered();
         // Out of the wait, a PE in WFE has guest work the host's work keeps
         // from it (`clock`); one waiting for an interrupt or off has none.
         if !self.waits_for_interrupt() && !self.processor_paused(self.current) {
@@ -402,16 +405,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// ([`Machine::direct_exit`]). Whether the exit is linked now.
     pub(super) fn link(&mut self, index: usize, next_pc: u64, word: impl Into<ExitWord>) -> bool {
         let word = word.into();
-        let code = Arc::clone(&self.code);
-        let block = &code.blocks[index];
-        let record = code.blocks.record(index);
-        if block.successors.is_empty()
-            || self.variants[block.variant.0 as usize].single
-            || self.traces.binary_search(&next_pc).is_ok()
-        {
-            return false;
-        }
-        let find = || {
+        let unlinked = |code: &board::Code| {
+            let block = &code.blocks[index];
+            let record = code.blocks.record(index);
             block
                 .successors
                 .iter()
@@ -420,9 +416,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     !record.linked(position) && exit.target.0 == next_pc && exit.word() == word
                 })
         };
-        if find().is_none() {
-            return false;
+        // Nearly every exit finds nothing to link: decided on the board
+        // borrowed, without a clone of its `Arc`, whose count every PE's
+        // exits would write.
+        {
+            let block = &self.code.blocks[index];
+            if block.successors.is_empty()
+                || self.variants[block.variant.0 as usize].single
+                || self.traces.binary_search(&next_pc).is_ok()
+                || unlinked(&self.code).is_none()
+            {
+                return false;
+            }
         }
+        let code = Arc::clone(&self.code);
+        let block = &code.blocks[index];
+        let record = code.blocks.record(index);
+        let find = || unlinked(&code);
         // Another PE may link or detach it meanwhile: found again under the
         // lock, for a block still installed.
         let mut cache = code.cache_at(board::LockSite::Link);
@@ -532,28 +542,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// page and 0b01 elsewhere. Blocks are compiled per guarded page, so
     /// the page's BTYPE is the block's.
     pub(super) fn link_dynamic(&mut self, index: usize, btype: u8) {
+        // Decided on the board borrowed: nearly every such exit has its
+        // dispatcher already, and a clone of the board's `Arc` would write
+        // a count every PE's exits write.
+        let (point, kind, retired) = {
+            let block = &self.code.blocks[index];
+            let record = self.code.blocks.record(index);
+            let Some(site) = block.dynamic_site.filter(|_| {
+                !self.variants[block.variant.0 as usize].single && record.dynamic_open()
+            }) else {
+                return;
+            };
+            let Some((kind, fixed)) = dynamic_branch(block.terminal) else {
+                return;
+            };
+            let page = if self.variants[block.variant.0 as usize].guarded_page {
+                0b11
+            } else {
+                0b01
+            };
+            if fixed.unwrap_or(page) != btype {
+                return;
+            }
+            let retired = u32::from(block.instructions);
+            (chain::dynamic_patch(site.get()), kind, retired)
+        };
         let code = Arc::clone(&self.code);
-        let block = &code.blocks[index];
         let record = code.blocks.record(index);
-        let Some(site) = block
-            .dynamic_site
-            .filter(|_| !self.variants[block.variant.0 as usize].single && record.dynamic_open())
-        else {
-            return;
-        };
-        let Some((kind, fixed)) = dynamic_branch(block.terminal) else {
-            return;
-        };
-        let page = if self.variants[block.variant.0 as usize].guarded_page {
-            0b11
-        } else {
-            0b01
-        };
-        if fixed.unwrap_or(page) != btype {
-            return;
-        }
-        let retired = u32::from(block.instructions);
-        let point = chain::dynamic_patch(site.get());
         // Another PE may serve it meanwhile: checked again under the lock.
         let mut cache = code.cache_at(board::LockSite::Dynamic);
         if !record.dynamic_open() || !record.live() {

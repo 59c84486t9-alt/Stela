@@ -9,6 +9,7 @@ pub use boundary::{
     CodePartitions, CodeWindow, ConsumedPair, DeviceError, Devices, Host, LocalRegisters,
     LockedMemory, NoDevices, ScalarRead, Settled, Start,
 };
+use compilation::{PENDING_EXITS, PendingExits};
 use mirrors::*;
 use reports::*;
 pub use reports::{
@@ -637,6 +638,20 @@ struct Recent {
     number: u64,
 }
 
+/// `T` on cache lines of its own: a shared word that PEs read on every
+/// step or fetch, kept apart from words others write, or a word one PE
+/// writes kept apart from words the others read.
+#[repr(align(64))]
+#[derive(Debug, Default)]
+pub(super) struct Padded<T>(pub(super) T);
+
+impl<T> core::ops::Deref for Padded<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
 /// The contexts one half keeps, least recently used dropped first.
 const SPACES: usize = 64;
 /// The recent contexts one half finds without comparing controls: enough
@@ -708,6 +723,15 @@ pub struct Machine<H: Host, D: Devices> {
     /// the instruction word that took them, except those the live blocks
     /// count at their last instructions (see [`Self::exit_words`]).
     exit_words: BTreeMap<u32, u64>,
+    /// Exits at blocks' last instructions not yet added to their records'
+    /// shared counts, by slot ([`Self::exit_word`]): a block every PE exits
+    /// (a syscall stub, the kernel's ERET) would have each exit write its
+    /// record's line.
+    exit_pending: [PendingExits; PENDING_EXITS],
+    /// Fetches of blocks of each ring part not yet added to the ring's
+    /// shared count of the part, and their sum ([`Self::entered`]).
+    entered_pending: Vec<u32>,
+    entered_total: u32,
     /// Device accesses by physical address: the registers the guest reads
     /// and writes most and, under step timing, the costliest
     /// ([`Self::device_registers`]).
@@ -1192,6 +1216,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             statistics: Statistics::default(),
             step_timing: None,
             exit_words: BTreeMap::new(),
+            exit_pending: [PendingExits::default(); PENDING_EXITS],
+            entered_pending: Vec::new(),
+            entered_total: 0,
             device_registers: BTreeMap::new(),
             timed_device: None,
             system_words: BTreeMap::new(),

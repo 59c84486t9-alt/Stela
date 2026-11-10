@@ -158,32 +158,35 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let (entry_pc, physical, source_bytes) = (block.pc, block.physical, block.source_bytes());
         // The rows are the block's, under its record's lock: no board lock.
-        let shared = Arc::clone(&self.code);
-        let recovery = shared.blocks.recovery();
-        let Some(owner) = recovery.get(&index) else {
-            return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
-        };
-        if fault.offset >= owner.code_bytes() {
-            drop(owner);
-            return Err(self.fail_native(index, fault, NativeFailureReason::CodeExtent));
-        }
-        let key = owner.stored_key();
-        // The stored record is read outside the rows' lock.
-        drop(owner);
-        let record = key.and_then(|key| self.stored_record(physical, &key));
-        let mut owner = recovery.get_mut(&index);
-        let qualified = match owner.as_deref_mut() {
-            Some(owner) => owner.qualify(entry_pc, record.as_deref()),
+        // Borrowed from the board without a clone of its `Arc`, whose count
+        // every PE's would write at each fault.
+        let checked = match self.code.blocks.recovery().get(&index) {
             None => Err(NativeFailureReason::UnknownCode),
+            Some(owner) if fault.offset >= owner.code_bytes() => {
+                Err(NativeFailureReason::CodeExtent)
+            }
+            Some(owner) => Ok(owner.stored_key()),
         };
-        let table = match qualified {
-            Ok(rows) => rows.rows_at_reusing(fault.offset, &mut self.recovery_scratch),
-            Err(reason) => {
-                drop(owner);
-                return Err(self.fail_native(index, fault, reason));
+        let key = match checked {
+            Ok(key) => key,
+            Err(reason) => return Err(self.fail_native(index, fault, reason)),
+        };
+        // The stored record is read outside the rows' lock.
+        let record = key.and_then(|key| self.stored_record(physical, &key));
+        let qualified = {
+            let recovery = self.code.blocks.recovery();
+            let mut owner = recovery.get_mut(&index);
+            match owner.as_deref_mut() {
+                Some(owner) => owner
+                    .qualify(entry_pc, record.as_deref())
+                    .map(|rows| rows.rows_at_reusing(fault.offset, &mut self.recovery_scratch)),
+                None => Err(NativeFailureReason::UnknownCode),
             }
         };
-        drop(owner);
+        let table = match qualified {
+            Ok(table) => table,
+            Err(reason) => return Err(self.fail_native(index, fault, reason)),
+        };
         let recovery_site = match FaultRecovery::site_at(&table, fault.offset) {
             Ok(site) => site,
             Err(error) => {

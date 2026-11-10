@@ -24,7 +24,7 @@
 //! once per run-loop iteration.
 
 use super::{
-    Block, CodePartitions, CodeWindow, VariantId,
+    Block, CodePartitions, CodeWindow, Padded, VariantId,
     block_index::{BlockIndex, Finder},
     code_slots::CodeSlots,
     recovery::CodeRecovery,
@@ -174,7 +174,9 @@ pub(super) struct Code {
     pub(super) arena: Option<Arena>,
     /// Advances when the board's machines forget every block at once
     /// (`Machine::forget_shared_code`): what jump cache entries name.
-    pub(super) epoch: AtomicU64,
+    /// On a line of its own, as every fetch reads it: which also puts the
+    /// `Arc`'s counts, which clones write, on a line of their own.
+    pub(super) epoch: Padded<AtomicU64>,
     pub(super) events: Events,
     /// The ghosts of blocks that left the index ([`super::churn`]): written
     /// under the lock, read by compiles without it.
@@ -515,8 +517,10 @@ pub struct TargetCounts {
     pub deferred: u64,
 }
 
-/// Board events counted outside the lock: rare, so a shared atomic each.
+/// Board events counted outside the lock: rare, so a shared atomic each,
+/// on lines of their own apart from the fields every fetch reads.
 #[derive(Default)]
+#[repr(align(64))]
 pub(super) struct Events {
     pub(super) retired: AtomicU64,
     pub(super) forced: AtomicU64,
@@ -620,7 +624,7 @@ impl Code {
             cache: Mutex::new(Cache::new(targets, finder)),
             ghosts: super::churn::Churn::new(slots),
             arena: window.map(Arena::new),
-            epoch: AtomicU64::new(0),
+            epoch: Padded(AtomicU64::new(0)),
             events: Events::default(),
             retiring: Mutex::new(None),
             retire_pending: AtomicBool::new(false),

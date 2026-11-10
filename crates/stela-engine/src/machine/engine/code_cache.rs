@@ -17,6 +17,9 @@ pub(super) const STEP_VISITS: u64 = 1024;
 
 /// Cells one step of an eviction releases under the board's lock.
 const CELL_STEP: usize = 256;
+/// The fetches a PE counts per ring part before it adds them to the ring's
+/// shared counts ([`Machine::entered`]).
+const ENTERED_BATCH: u32 = 64;
 
 /// What [`Machine::stale_code`] checks of a block, copied under the lock.
 #[derive(Clone, Copy)]
@@ -709,13 +712,42 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// A fetch found block `slot`: its part counts an entry, for the choice
-    /// of the tenured part to go ([`board::Ring::entered`]).
-    pub(super) fn entered(&self, slot: usize) {
+    /// of the tenured part to go ([`board::Ring::entered`]). The PE keeps
+    /// its counts and adds them to the ring's every [`ENTERED_BATCH`]
+    /// fetches, before each install (where the ring chooses) and when it
+    /// leaves its run loop: the hottest part's count is one line every PE's
+    /// fetches would write. The choice needs only the parts' order by
+    /// heat, which a batch of at most that many fetches per PE leaves.
+    pub(super) fn entered(&mut self, slot: usize) {
         let Some(arena) = &self.code.arena else {
             return;
         };
-        if let Some(part) = arena.part_of(self.code.blocks[slot].code.0) {
-            arena.ring.entered(part);
+        let Some(part) = arena.part_of(self.code.blocks[slot].code.0) else {
+            return;
+        };
+        if self.entered_pending.len() <= part {
+            self.entered_pending.resize(arena.ring.parts as usize, 0);
+        }
+        self.entered_pending[part] += 1;
+        self.entered_total += 1;
+        if self.entered_total >= ENTERED_BATCH {
+            self.flush_entered();
+        }
+    }
+
+    /// Add this PE's kept part entries to the ring's counts.
+    pub(super) fn flush_entered(&mut self) {
+        if self.entered_total == 0 {
+            return;
+        }
+        self.entered_total = 0;
+        let Some(arena) = &self.code.arena else {
+            return;
+        };
+        for (part, count) in self.entered_pending.iter_mut().enumerate() {
+            if *count != 0 {
+                arena.ring.entered_by(part, core::mem::take(count));
+            }
         }
     }
 
@@ -1365,6 +1397,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     pub(super) fn discard_code(&mut self, cause: Discard) {
+        self.flush_exits();
         self.exit_words = self.exit_words();
         let code = Arc::clone(&self.code);
         let counted =

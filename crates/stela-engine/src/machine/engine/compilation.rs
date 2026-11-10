@@ -113,6 +113,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let index = match indexed {
             Some(index) => index,
             None => {
+                // The ring may choose a part to go at this install.
+                self.flush_entered();
                 self.reclaim_for_memory();
                 let (compiled, mail) = self.compile_aside(pc, physical, variant);
                 let compiled = compiled?;
@@ -1237,21 +1239,68 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn exit_word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
         let block = &self.code.blocks[index];
         if pc == block.terminal_pc() {
-            let taken = &self.code.blocks.record(index).taken;
-            if taken.load(Ordering::Relaxed) != u32::MAX {
-                taken.fetch_add(1, Ordering::Relaxed);
+            let terminal = block.terminal;
+            let incarnation = self.code.blocks.record(index).incarnation();
+            let pending = &mut self.exit_pending[index % PENDING_EXITS];
+            if pending.count != 0
+                && (pending.slot, pending.incarnation) == (index as u32, incarnation)
+                && pending.count != u32::MAX
+            {
+                pending.count += 1;
+            } else {
+                let held = core::mem::replace(
+                    pending,
+                    PendingExits {
+                        slot: index as u32,
+                        incarnation,
+                        word: terminal,
+                        count: 1,
+                    },
+                );
+                self.add_exits(held);
             }
-            return Ok(block.terminal);
+            return Ok(terminal);
         }
         let word = self.word(index, pc)?;
         *self.exit_words.entry(word).or_default() += 1;
         Ok(word)
     }
 
+    /// Add exits this PE kept ([`PendingExits`]) to their block's record,
+    /// or by word when the slot no longer holds that block.
+    fn add_exits(&mut self, held: PendingExits) {
+        if held.count == 0 {
+            return;
+        }
+        let record = self.code.blocks.record(held.slot as usize);
+        if record.incarnation() == held.incarnation && record.live() {
+            let _ = record
+                .taken
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |taken| {
+                    (taken != u32::MAX).then(|| taken.saturating_add(held.count))
+                });
+        } else {
+            *self.exit_words.entry(held.word).or_default() += u64::from(held.count);
+        }
+    }
+
+    /// Add every exit this PE kept to the shared counts.
+    pub(super) fn flush_exits(&mut self) {
+        for at in 0..PENDING_EXITS {
+            let held = core::mem::take(&mut self.exit_pending[at]);
+            self.add_exits(held);
+        }
+    }
+
     /// Exits to the engine from compiled code (System, FP, PAC and AMX), by
     /// the instruction word that took them: which words to compile inline.
     pub fn exit_words(&self) -> BTreeMap<u32, u64> {
         let mut words = self.exit_words.clone();
+        for held in &self.exit_pending {
+            if held.count != 0 {
+                *words.entry(held.word).or_default() += u64::from(held.count);
+            }
+        }
         for (slot, block) in self.code.blocks.iter() {
             let record = self.code.blocks.record(slot);
             let taken = record.taken.load(Ordering::Relaxed);
@@ -1437,3 +1486,17 @@ pub(super) fn note_itlb_ghost(
     ghosts[itlb_ghost_slot(entry.pc, entry.key)] = (entry.pc | cause as u64, entry.key);
 }
 
+/// The blocks whose exits at their last instruction a PE keeps
+/// ([`Machine::exit_word`]), a direct-mapped table by slot.
+pub(super) const PENDING_EXITS: usize = 16;
+
+/// Exits at the last instruction of the block in `slot`, while it held the
+/// block of `incarnation`, which ends with `word`, not yet added to the
+/// block's record. A `count` of 0 is no entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct PendingExits {
+    pub(super) slot: u32,
+    pub(super) incarnation: u32,
+    pub(super) word: u32,
+    pub(super) count: u32,
+}
