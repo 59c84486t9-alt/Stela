@@ -98,7 +98,16 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
 
 /// Reserve the engine's working memory and each physical worker's resources.
 pub(super) fn reserve(cores: usize, ram: &[(usize, usize)]) -> Result<EngineMemory> {
-    let sizes = Sizes::for_host(free_ram()?, cores, cores)?;
+    let free = free_ram()?;
+    let sizes = stela_boot_core::host_memory::sizes(free, cores, cores)?;
+    output::arguments(format_args!(
+        "HOST MEMORY free={}M heap={}M code={}M pool={}M guest={}M\n",
+        free >> 20,
+        sizes.heap >> 20,
+        sizes.code.bytes >> 20,
+        sizes.pool >> 20,
+        sizes.guest >> 20,
+    ));
     // Each claimed core owns a full native part. Check both ends before allocation.
     for slot in [0, cores - 1] {
         let part = crate::native_smp::resources::partition(

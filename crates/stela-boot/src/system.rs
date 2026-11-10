@@ -19,11 +19,7 @@ use crate::{
     tables::{self, Frames, LARGE, NX, PAGE, PRESENT, UNCACHED, WRITABLE, WRITE_COMBINING},
 };
 use alloc::{format, string::String, vec::Vec};
-use core::{
-    arch::asm,
-    ops::{Range, RangeInclusive},
-    ptr::NonNull,
-};
+use core::{arch::asm, ops::Range, ptr::NonNull};
 use stela_boot_core::options::{DEFAULT_WIFI_KEY, System};
 use stela_contracts::refuse;
 use stela_engine::machine::mmu::placement::Placement;
@@ -40,21 +36,6 @@ use crate::native_smp::resources::{Resources as NativeResources, STACK_BYTES, ST
 mod handoff_phase;
 mod memory;
 const MIB: u64 = 1024 * 1024;
-/// The bounds of the parts of Stela's memory sized from host RAM
-/// ([`Sizes::for_host`]).
-const HEAP_BYTES: RangeInclusive<u64> = 2304 * MIB..=3072 * MIB;
-const POOL_BYTES: RangeInclusive<u64> = 64 * MIB..=2048 * MIB;
-/// Guest DRAM bytes per byte of each native executor's shadow page-table
-/// pool: room for its 8 roots to map all of guest DRAM once in 4 KiB pages
-/// (8 bytes per page). An exhausted half resets and refills everything; a
-/// 26A434 restore's userland filled 8 MiB halves 20 to 80 times a beat.
-const POOL_SHARE: u64 = 64;
-/// Free host RAM bytes per byte of the engine heap. A 16 GiB guest's first
-/// Metal shader compiles carved all of a sixteenth (1816 MiB) and failed.
-/// What the heap needs does not shrink with the RAM: a 26A434 Setup
-/// Assistant boot whose Core Image stitches its kernels peaked at 2149 MiB,
-/// which bounds the heap from below on a smaller host.
-const HEAP_SHARE: u64 = 12;
 /// The loader heap's free bytes kept past boot services, for what still runs
 /// before the engine does; the rest of it goes to the guest.
 const LOADER_HEAP_KEPT: usize = 16 * MIB as usize;
@@ -98,8 +79,9 @@ impl Drop for Snapshot {
         // The entry and system loader both drop it before exiting boot services.
         let result = unsafe { boot::free_pages(self.copy, self.bytes / PAGE as usize) };
         output::arguments(format_args!(
-            "BOOT IMAGE snapshot physical={physical:#x} bytes={:#x} release={result:?}\n",
+            "BOOT IMAGE snapshot physical={physical:#x} bytes={:#x} release={}\n",
             self.bytes,
+            Released(result),
         ));
     }
 }
@@ -147,44 +129,6 @@ fn allocate(bytes: u64) -> Result<Region> {
     })
 }
 
-/// The engine heap, native code arena and page-table pool, sized at boot
-/// from the host RAM free for them and the guest DRAM asked for
-/// (`docs/design/system.md#memory-sizing`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Sizes {
-    heap: u64,
-    code: crate::native_smp::resources::CodeReservation,
-    pool: u64,
-}
-
-impl Sizes {
-    /// Each part takes a share of the `free` host RAM, between its bounds;
-    /// the guest gets everything left. The pool scales with the guest DRAM
-    /// each of the `runners` executors that run PEs maps, of which `free` is
-    /// the bound, and the code arena with them too; the other `cores` add
-    /// only their reserves. Each runner after the first adds an eighth of the
-    /// heap's share, for its machine's translation metadata.
-    fn for_host(free: u64, cores: usize, runners: usize) -> Result<Self> {
-        use crate::native_smp::resources::{code_reservation, parked_reserve};
-        let code = code_reservation(free, cores, runners)?;
-        let running = runners as u64;
-        let heap = free / HEAP_SHARE + (running - 1) * (free / HEAP_SHARE / 8);
-        let clamp = |bytes: u64, bounds: RangeInclusive<u64>, alignment: u64| {
-            (bytes / alignment * alignment).clamp(*bounds.start(), *bounds.end())
-        };
-        let (_, pool_reserve) = parked_reserve(cores, runners);
-        Ok(Self {
-            heap: clamp(heap, HEAP_BYTES, LARGE),
-            code,
-            pool: clamp(
-                (free / POOL_SHARE).saturating_mul(running),
-                POOL_BYTES,
-                LARGE,
-            ) + pool_reserve,
-        })
-    }
-}
-
 /// The host RAM the guest and Stela's parts may take: the free and boot
 /// services ranges in whole 2 MiB pages, as the guest's ranges are found
 /// after boot services end.
@@ -223,9 +167,22 @@ fn release_loader_heap() {
     // heap no longer manages and nothing else refers to.
     let result = unsafe { boot::free_pages(start, pages) };
     output::arguments(format_args!(
-        "BOOT HEAP released {}M: {result:?}\n",
-        released.len() >> 20
+        "BOOT HEAP released {}M: {}\n",
+        released.len() >> 20,
+        Released(result)
     ));
+}
+
+/// A page release's result in the log: `ok`, or the firmware's status.
+struct Released(uefi::Result);
+
+impl core::fmt::Display for Released {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match &self.0 {
+            Ok(()) => f.write_str("ok"),
+            Err(error) => write!(f, "{:?}", error.status()),
+        }
+    }
 }
 
 /// Whether a firmware memory map entry is RAM: every type but the reserved,
@@ -838,7 +795,7 @@ fn load(
     output::arguments(format_args!(
         "NATIVE FIRMWARE INIT deliveries={deliveries}; delivery only, no execution acknowledgement\n"
     ));
-    crate::status::done("directed INIT delivery complete");
+    crate::status::done("");
     // Keep this post-EBS boundary when the relocated engine replays status.
     let mut history = [0; crate::status::HISTORY_BYTES];
     let history_bytes = crate::status::history(&mut history);

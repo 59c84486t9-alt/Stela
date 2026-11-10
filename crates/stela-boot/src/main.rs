@@ -74,10 +74,10 @@ pub(crate) static ALLOCATOR: heap::Heap = heap::Heap::new().reporting_failures(|
 });
 /// The live firmware keeps its boot-service pages. Budget the first heap from
 /// the conventional pages still available after the pristine image copy.
-/// Before the heap exists, so its refusals are static.
-fn initial_heap_bytes() -> Result<usize, &'static str> {
+/// Before the heap exists, so its refusals are an [`EarlyText`].
+fn initial_heap_bytes() -> Result<usize, EarlyText> {
     let map = uefi::boot::memory_map(MemoryType::LOADER_DATA)
-        .map_err(|_| "firmware memory map unavailable for the boot heap")?;
+        .map_err(|_| EarlyText::from("firmware memory map unavailable for the boot heap"))?;
     let free = map
         .entries()
         .filter(|entry| entry.ty == MemoryType::CONVENTIONAL)
@@ -87,11 +87,67 @@ fn initial_heap_bytes() -> Result<usize, &'static str> {
                 .checked_mul(paging::PAGE as u64)
                 .and_then(|bytes| total.checked_add(bytes))
         })
-        .ok_or("firmware memory map overflows the boot heap budget")?;
+        .ok_or_else(|| EarlyText::from("firmware memory map overflows the boot heap budget"))?;
     stela_boot_core::memory_budget::bootstrap_heap(free)
         .map(|bytes| bytes as usize)
-        .map_err(|_| "not enough free firmware RAM for the boot heap budget")
+        .map_err(|error| {
+            let mut text = EarlyText::default();
+            let _ = core::fmt::Write::write_fmt(&mut text, format_args!("{error}"));
+            text
+        })
 }
+
+/// The longest [`EarlyText`]: room for the low-RAM refusal, small enough
+/// to return by value.
+const EARLY_BYTES: usize = 112;
+
+/// A message formatted before the heap exists, into a fixed buffer; a
+/// longer one is cut short.
+struct EarlyText {
+    bytes: [u8; EARLY_BYTES],
+    len: usize,
+}
+
+impl Default for EarlyText {
+    fn default() -> Self {
+        Self {
+            bytes: [0; EARLY_BYTES],
+            len: 0,
+        }
+    }
+}
+
+impl EarlyText {
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
+    }
+}
+
+impl From<&str> for EarlyText {
+    fn from(text: &str) -> Self {
+        let mut early = Self::default();
+        let _ = core::fmt::Write::write_str(&mut early, text);
+        early
+    }
+}
+
+impl core::fmt::Write for EarlyText {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        // Whole characters only, so the kept bytes stay UTF-8.
+        for character in text.chars() {
+            let mut buffer = [0; 4];
+            let encoded = character.encode_utf8(&mut buffer).as_bytes();
+            let end = self.len + encoded.len();
+            if end > self.bytes.len() {
+                return Err(core::fmt::Error);
+            }
+            self.bytes[self.len..end].copy_from_slice(encoded);
+            self.len = end;
+        }
+        Ok(())
+    }
+}
+
 /// What this build reads, for `stela setup` to check before installing it
 /// (`stela_loader::mount_interface`).
 #[used]
@@ -111,7 +167,8 @@ fn main() -> Status {
     core::hint::black_box(&HOST_FIRMWARE_INTERFACE);
     serial::initialize();
     output::arguments(format_args!("STELA UEFI MOUNT\n"));
-    let heap_bytes = initial_heap_bytes().unwrap_or_else(|error| output::early_fatal(error));
+    let heap_bytes =
+        initial_heap_bytes().unwrap_or_else(|error| output::early_fatal(error.as_str()));
     let heap = uefi::boot::allocate_pages(
         AllocateType::AnyPages,
         MemoryType::LOADER_DATA,

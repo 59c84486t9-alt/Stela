@@ -124,6 +124,11 @@ const PARKED_POOL: u64 = 4 * 1024 * 1024;
 
 const MIN_RUNNING_CODE: u64 = 128 * MIB;
 const MAX_RUNNING_CODE: u64 = 512 * MIB;
+/// Below this much free RAM each runner's arena keeps half the usual
+/// floor, in half as many parts of the same size: the ring reclaims its
+/// oldest code, and the guest needs the RAM more.
+const SMALL_HOST_FREE: u64 = 12 * 1024 * MIB;
+const SMALL_RUNNING_CODE: u64 = 64 * MIB;
 /// Native code also carries recovery and lookup data in the engine heap.
 const CODE_SHARE: u64 = 128;
 /// Preserve the existing aggregate share of a 32-executor roster.
@@ -172,18 +177,22 @@ pub fn code_reservation(free: u64, cores: usize, runners: usize) -> Result<CodeR
     if cores == 0 || cores > MAX_CORES || runners == 0 || runners > cores {
         return Err(refuse!("invalid native executor count"));
     }
-    let per_runner = (free / CODE_SHARE / CODE_ALIGNMENT * CODE_ALIGNMENT)
-        .clamp(MIN_RUNNING_CODE, MAX_RUNNING_CODE);
-    let part_bytes = per_runner / u64::from(MAX_CODE_PARTS);
+    let floor = if free < SMALL_HOST_FREE {
+        SMALL_RUNNING_CODE
+    } else {
+        MIN_RUNNING_CODE
+    };
+    let per_runner =
+        (free / CODE_SHARE / CODE_ALIGNMENT * CODE_ALIGNMENT).clamp(floor, MAX_RUNNING_CODE);
+    let part_bytes = per_runner.max(MIN_RUNNING_CODE) / u64::from(MAX_CODE_PARTS);
     // Keep the original maximum single-install size. Exact active rosters
     // reduce part count when the old aggregate exceeds the budget of 32
-    // legacy shares, retaining the original per-owner capacity floor.
+    // legacy shares, retaining the per-owner capacity floor.
     let parts = if cores == runners {
         let budget = free / CODE_AGGREGATE_SHARE / runners as u64;
-        (budget / part_bytes).clamp(
-            MIN_RUNNING_CODE.div_ceil(part_bytes),
-            u64::from(MAX_CODE_PARTS),
-        ) as u32
+        (budget / part_bytes)
+            .clamp(floor.div_ceil(part_bytes), u64::from(MAX_CODE_PARTS))
+            .min(per_runner / part_bytes) as u32
     } else {
         MAX_CODE_PARTS
     };
@@ -255,7 +264,6 @@ mod tests {
     #[test]
     fn code_reservations_preserve_smaller_rosters_and_parked_budgets() {
         for (free, cores, runners, expected) in [
-            (8 * 1024, 8, 8, 1024),
             (8 * 1024, 64, 8, 1248),
             (64 * 1024, 64, 8, 4320),
             (64 * 1024, 9, 8, 4112),
@@ -272,6 +280,30 @@ mod tests {
         }
         for (cores, runners) in [(0, 0), (1, 0), (2, 3), (MAX_CORES + 1, 1)] {
             assert!(code_reservation(0, cores, runners).is_err());
+        }
+    }
+
+    #[test]
+    fn small_hosts_halve_each_runners_arena_but_keep_its_install_size() {
+        for (free, runners, bytes, parts) in [
+            (6 * 1024, 2, 128, 16),
+            (8 * 1024, 8, 512, 16),
+            (12 * 1024 - 1, 8, 640, 20),
+            (12 * 1024, 8, 1024, 32),
+        ] {
+            let code = code_reservation(free * MIB, runners, runners).unwrap();
+            assert_eq!(
+                code,
+                CodeReservation {
+                    bytes: bytes * MIB,
+                    parts
+                }
+            );
+            let partition = partition(runners, runners, runners - 1, code.bytes, 64 * MIB).unwrap();
+            assert_eq!(
+                code_part_bytes(partition.code_bytes, code.parts),
+                Ok(4 * MIB)
+            );
         }
     }
 
@@ -347,17 +379,23 @@ mod tests {
                     assert!(last.code_offset + last.code_bytes <= code.bytes);
                     assert!(code.bytes <= CODE_WINDOW_BYTES);
                     if cores == runners {
+                        let small = free < SMALL_HOST_FREE;
                         let original = (free / CODE_SHARE / CODE_ALIGNMENT * CODE_ALIGNMENT)
                             .clamp(MIN_RUNNING_CODE, MAX_RUNNING_CODE);
                         let part_bytes = code_part_bytes(first.code_bytes, code.parts).unwrap();
                         assert_eq!(part_bytes, original / u64::from(MAX_CODE_PARTS));
-                        assert!(first.code_bytes >= MIN_RUNNING_CODE);
+                        let minimum = if small {
+                            SMALL_RUNNING_CODE
+                        } else {
+                            MIN_RUNNING_CODE
+                        };
+                        assert!(first.code_bytes >= minimum);
                         assert!(first.code_bytes <= original);
                         assert_eq!(last.code_offset + last.code_bytes, code.bytes);
                         let floor =
                             MIN_RUNNING_CODE.div_ceil(part_bytes) * part_bytes * cores as u64;
                         assert!(code.bytes <= (free / CODE_AGGREGATE_SHARE).max(floor));
-                        if cores <= 32 {
+                        if cores <= 32 && !small {
                             assert_eq!(code.parts, MAX_CODE_PARTS);
                             assert_eq!(first.code_bytes, original);
                         }
