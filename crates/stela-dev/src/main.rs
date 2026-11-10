@@ -71,6 +71,9 @@ enum Command {
     /// Make stela.efi an EFI partition's boot loader, or remove it.
     #[command(subcommand)]
     Efi(efi::EfiCommand),
+    /// Install the GPU components and LocalPolicy from a macOS maintenance
+    /// boot, from `cargo xtask guest`'s payload.
+    Gpu(stela_cli::gpu::Gpu),
 }
 
 impl Command {
@@ -96,6 +99,7 @@ impl Command {
             Self::Boot(command) => command.run(),
             Self::InstallMedium(command) => command.run(),
             Self::Efi(command) => command.run(),
+            Self::Gpu(command) => command.run(),
         }
     }
 }

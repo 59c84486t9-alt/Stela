@@ -56,8 +56,6 @@ pub(crate) enum Command {
     /// Print the boot log stela.efi keeps on a machine-state partition, from a
     /// disk image or a raw partition.
     BootLog(boot_log::BootLog),
-    /// Install the GPU components and LocalPolicy from a macOS maintenance boot.
-    Gpu(gpu::Gpu),
 }
 
 // Windows ships the direct installer; other hosts expose these subcommands.
@@ -73,7 +71,6 @@ impl Command {
         match self {
             Self::Setup(command) => command.run(),
             Self::BootLog(command) => command.run(),
-            Self::Gpu(command) => command.run(),
         }
     }
 }
@@ -152,10 +149,17 @@ mod tests {
     fn help_lists_shipped_commands() {
         let help = Cli::command().render_help().to_string();
         assert!(
-            help.contains("setup") && help.contains("boot-log"),
+            help.contains("setup") && help.contains("boot-log") && !help.contains("\n  gpu"),
             "{help}"
         );
-        for command in ["compile-block", "boot", "efi", "install-medium", "cpu-info"] {
+        for command in [
+            "compile-block",
+            "boot",
+            "efi",
+            "install-medium",
+            "cpu-info",
+            "gpu",
+        ] {
             assert!(
                 Cli::try_parse_from(["stela", command, "--help"]).is_err(),
                 "{command}"
