@@ -133,7 +133,7 @@ impl Controller {
             } else {
                 context
             };
-            contexts.push(self.quirks.endpoint(context)?);
+            contexts.push(self.quirks.endpoint(context, speed));
             selected |= 1 << dci;
         }
         if endpoints.iter().any(|ep| ep.kind() == 1) {

@@ -17,9 +17,18 @@ const ASMEDIA_FLOW_VALUE: u32 = 0xba;
 const ASMEDIA_RETRIES: usize = 1000;
 const ASMEDIA_POLL_US: u64 = 50;
 
+/// XHCI_LIMIT_ENDPOINT_INTERVAL_7/9: the controller cannot schedule a
+/// periodic endpoint at an xHCI interval of `limit` or more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct IntervalLimit {
+    pub limit: u32,
+    /// Only high-speed and faster endpoints are limited.
+    pub high_speed_only: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Profile {
-    pub interval_limit: Option<u32>,
+    pub interval_limit: Option<IntervalLimit>,
     pub slow_suspend: bool,
     pub suspend_delay: bool,
     pub reset_on_resume: bool,
@@ -43,8 +52,14 @@ impl Profile {
         Self {
             interval_limit: match (vendor, device) {
                 (0x1022, 0x13ed | 0x13ee | 0x148c | 0x15d4 | 0x15d5 | 0x15e0 | 0x15e1 | 0x15e5)
-                | (0x1002, 0x7316) => Some(9),
-                (0x104c, 0x8241) => Some(7),
+                | (0x1002, 0x7316) => Some(IntervalLimit {
+                    limit: 9,
+                    high_speed_only: false,
+                }),
+                (0x104c, 0x8241) => Some(IntervalLimit {
+                    limit: 7,
+                    high_speed_only: true,
+                }),
                 _ => None,
             },
             slow_suspend: (vendor, device, revision) == (0x1b73, 0x1000, 4),
@@ -67,18 +82,25 @@ impl Profile {
             ),
         }
     }
-    pub fn endpoint(self, context: endpoint::Context) -> Result<endpoint::Context, BlockError> {
-        if self
-            .interval_limit
-            .is_some_and(|maximum| context.info >> 16 & 0xff > maximum)
+    /// Linux `xhci_endpoint_init`'s periodic interval limit: an interrupt or
+    /// isochronous endpoint of device `speed` whose interval reaches the
+    /// controller's limit is serviced one step under it, twice as often as
+    /// the descriptor asks, which every periodic USB endpoint tolerates.
+    /// USB 2 hubs' 256 ms status endpoints need this on AMD controllers.
+    pub fn endpoint(self, mut context: endpoint::Context, speed: u8) -> endpoint::Context {
+        let periodic = matches!(context.info2 >> 3 & 7, 1 | 3 | 5 | 7);
+        let interval = context.info >> 16 & 0xff;
+        if let Some(IntervalLimit {
+            limit,
+            high_speed_only,
+        }) = self.interval_limit
+            && periodic
+            && interval >= limit
+            && (!high_speed_only || matches!(speed, HIGH_SPEED | SUPER_SPEED | SUPER_SPEED_PLUS))
         {
-            // Linux shortens the interval. Preserve the requested service contract
-            // until that negotiation can be reflected to the USB owner instead.
-            return Err(BlockError::Unsupported(
-                "endpoint interval exceeds controller quirk limit",
-            ));
+            context.info = context.info & !(0xff << 16) | (limit - 1) << 16;
         }
-        Ok(context)
+        context
     }
 }
 
@@ -275,27 +297,62 @@ mod tests {
         );
         assert!(f.config().writes.is_empty());
     }
-    #[test]
-    fn endpoint_limits_are_exact_and_preserve_the_requested_service_contract() {
-        let ep = Endpoint {
+    fn interval(context: &endpoint::Context) -> u32 {
+        context.info >> 16 & 0xff
+    }
+    fn endpoint(attributes: u8, max_packet: u16, interval: u8) -> Endpoint {
+        Endpoint {
             address: 0x81,
-            attributes: 3,
-            max_packet: 64,
-            interval: 16,
+            attributes,
+            max_packet,
+            interval,
             companion: None,
-        };
-        let context = endpoint::Context::new(&ep, HIGH_SPEED).unwrap();
-        assert!(
-            Profile::identity(0x1022, 0x15e0, 0)
-                .endpoint(context)
-                .is_err()
+        }
+    }
+    #[test]
+    fn amd_controllers_shorten_a_high_speed_hub_status_interval() {
+        // A USB 2 hub's status endpoint: bInterval 12, xHCI interval 11.
+        let hub = endpoint(3, 1, 12);
+        let context = endpoint::Context::new(&hub, HIGH_SPEED).unwrap();
+        assert_eq!(interval(&context), 11);
+        let context = Profile::identity(0x1022, 0x15e0, 0).endpoint(context, HIGH_SPEED);
+        assert_eq!(interval(&context), 8);
+        // A 255 ms full-speed keyboard endpoint is limited too.
+        let keyboard = endpoint(3, 8, 255);
+        let context = endpoint::Context::new(&keyboard, FULL_SPEED).unwrap();
+        assert_eq!(interval(&context), 10);
+        let context = Profile::identity(0x1022, 0x148c, 0).endpoint(context, FULL_SPEED);
+        assert_eq!(interval(&context), 8);
+        // Under the limit, and on other controllers, the interval stands.
+        let fast = endpoint(3, 64, 8);
+        let context = endpoint::Context::new(&fast, HIGH_SPEED).unwrap();
+        assert_eq!(
+            Profile::identity(0x1022, 0x15e0, 0).endpoint(context, HIGH_SPEED),
+            endpoint::Context::new(&fast, HIGH_SPEED).unwrap()
         );
-        let context = endpoint::Context::new(&ep, HIGH_SPEED).unwrap();
-        assert!(
-            Profile::identity(0x1022, 0x15b6, 0)
-                .endpoint(context)
-                .is_ok()
+        let context = endpoint::Context::new(&hub, HIGH_SPEED).unwrap();
+        assert_eq!(
+            interval(&Profile::identity(0x1022, 0x15b6, 0).endpoint(context, HIGH_SPEED)),
+            11
         );
+    }
+    #[test]
+    fn the_ti_limit_leaves_full_speed_and_bulk_endpoints_alone() {
+        let ti = Profile::identity(0x104c, 0x8241, 0);
+        let hub = endpoint(3, 1, 12);
+        let context = endpoint::Context::new(&hub, HIGH_SPEED).unwrap();
+        assert_eq!(interval(&ti.endpoint(context, HIGH_SPEED)), 6);
+        let keyboard = endpoint(3, 8, 255);
+        let context = endpoint::Context::new(&keyboard, FULL_SPEED).unwrap();
+        assert_eq!(interval(&ti.endpoint(context, FULL_SPEED)), 10);
+        // A high-speed bulk endpoint's NAK interval is not periodic.
+        let bulk = endpoint(2, 512, 255);
+        let context = endpoint::Context::new(&bulk, HIGH_SPEED).unwrap();
+        assert_eq!(interval(&context), 7);
+        assert_eq!(interval(&ti.endpoint(context, HIGH_SPEED)), 7);
+    }
+    #[test]
+    fn profiles_follow_the_controller_identity() {
         assert!(Profile::identity(0x1b73, 0x1000, 4).slow_suspend);
         assert!(!Profile::identity(0x1b73, 0x1000, 5).slow_suspend);
         assert!(Profile::identity(0x1912, 0x0014, 0).renesas_stale_high);

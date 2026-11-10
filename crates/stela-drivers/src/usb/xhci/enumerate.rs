@@ -2,6 +2,10 @@
 //! and addressed, and each device's descriptors read.
 use super::*;
 
+/// A port's debounce: whether a device stayed connected, and how long
+/// the port took to settle in microseconds.
+type Debounced = Result<(bool, u64), BlockError>;
+
 /// Linux `hub_port_debounce`: sample a port until its connection holds
 /// steady and say whether a device is there. `sample` returns the port's
 /// connection and connect change, clearing a change it reports.
@@ -29,6 +33,94 @@ fn debounce_with_delay(
         }
         delay()?;
         total += DEBOUNCE_STEP_US;
+    }
+}
+
+/// Linux `hub_port_debounce` for several ports at once, as its hub threads
+/// debounce in parallel: every unsettled port is sampled at each step, so the
+/// whole set settles in one window. A port with no connection and no connect
+/// change at its first sample is empty, as Linux's `hub_activate` leaves
+/// such a port alone; its later connection arrives as a port change. Each
+/// result is the port's connection and the microseconds it took to settle.
+fn debounce_ports_with_delay(
+    count: usize,
+    mut sample: impl FnMut(usize) -> Result<(bool, bool), BlockError>,
+    mut delay: impl FnMut() -> Result<(), BlockError>,
+) -> Vec<Debounced> {
+    let mut results: Vec<Option<Debounced>> = Vec::new();
+    let mut pending = Vec::new();
+    for port in 0..count {
+        match sample(port) {
+            Ok((false, false)) => results.push(Some(Ok((false, 0)))),
+            Ok((connected, changed)) => {
+                let mut debounce = Debounce::default();
+                debounce.observe(connected, changed);
+                pending.push((port, debounce));
+                results.push(None);
+            }
+            Err(error) => results.push(Some(Err(error))),
+        }
+    }
+    let mut total = 0;
+    while !pending.is_empty() {
+        let stop = if total >= DEBOUNCE_TIMEOUT_US {
+            Some(BlockError::Unsupported("USB port connection never settled"))
+        } else {
+            delay().err()
+        };
+        if let Some(error) = stop {
+            for (port, _) in pending.drain(..) {
+                results[port] = Some(Err(error.clone()));
+            }
+            break;
+        }
+        total += DEBOUNCE_STEP_US;
+        pending.retain_mut(|(port, debounce)| {
+            let settled = match sample(*port) {
+                Ok((connected, changed)) => debounce
+                    .observe(connected, changed)
+                    .map(|connected| Ok((connected, total))),
+                Err(error) => Some(Err(error)),
+            };
+            let done = settled.is_some();
+            if done {
+                results[*port] = settled;
+            }
+            !done
+        });
+    }
+    results
+        .into_iter()
+        .map(|result| result.expect("every port settled, failed or timed out"))
+        .collect()
+}
+
+/// How one root port fared in the first enumeration, for boot-time
+/// diagnostics: `port=<n> connected=<bool> debounce_ms=<ms> reset_ms=<ms>
+/// enumerate_ms=<ms>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortProbe {
+    pub port: u8,
+    pub connected: bool,
+    /// From the first sample until the connection held steady.
+    pub debounce_us: u64,
+    /// Port resets, every try included.
+    pub reset_us: u64,
+    /// Addressing, descriptors and configuration, every try included.
+    pub enumerate_us: u64,
+}
+
+impl core::fmt::Display for PortProbe {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "port={} connected={} debounce_ms={} reset_ms={} enumerate_ms={}",
+            self.port,
+            self.connected,
+            self.debounce_us / 1000,
+            self.reset_us / 1000,
+            self.enumerate_us / 1000
+        )
     }
 }
 
@@ -220,25 +312,108 @@ impl Controller {
         dma: &mut dyn DmaAllocator,
         failures: &mut Vec<(String, BlockError)>,
     ) -> Vec<Device> {
+        self.enumerate_timed(dma, failures, &mut Vec::new())
+    }
+
+    /// [`Self::enumerate`], recording how long each root port took. The
+    /// ports are powered together, debounced together and empty ones skipped
+    /// at once; only connected ports are reset and enumerated, one at a time.
+    pub fn enumerate_timed(
+        &mut self,
+        dma: &mut dyn DmaAllocator,
+        failures: &mut Vec<(String, BlockError)>,
+        probes: &mut Vec<PortProbe>,
+    ) -> Vec<Device> {
         let mut devices = Vec::new();
-        for port in 1..=self.max_ports {
-            let location = format!("{} port {port}", self.location);
-            crate::working(&location);
-            let reset = |c: &mut Self| {
-                c.root_port(port).map(|speed| {
-                    speed.map(|speed| Attachment {
-                        root_port: port,
-                        route: 0,
-                        tier: 0,
-                        speed,
-                        translator: None,
-                        parent: None,
-                    })
-                })
+        let location = |c: &Self, port: u8| format!("{} port {port}", c.location);
+        let settled = match self.debounce_roots() {
+            Ok(settled) => settled,
+            Err(error) => {
+                failures.push((format!("{} root ports", self.location), error));
+                return devices;
+            }
+        };
+        for (index, settled) in settled.into_iter().enumerate() {
+            let port = index as u8 + 1;
+            let (connected, debounce_us) = match settled {
+                Ok(settled) => settled,
+                Err(error) => {
+                    failures.push((format!("{} debounce", location(self, port)), error));
+                    continue;
+                }
             };
-            self.connect(location, None, reset, dma, &mut devices, failures);
+            let mut probe = PortProbe {
+                port,
+                connected,
+                debounce_us,
+                reset_us: 0,
+                enumerate_us: 0,
+            };
+            if connected {
+                let location = location(self, port);
+                crate::working(&location);
+                let clock = self.clock;
+                let start = clock.now_us();
+                let mut reset_us = 0;
+                let reset = |c: &mut Self| {
+                    let start = clock.now_us();
+                    let speed = c.root_reset(port);
+                    reset_us += clock.now_us().saturating_sub(start);
+                    speed.map(|speed| {
+                        speed.map(|speed| Attachment {
+                            root_port: port,
+                            route: 0,
+                            tier: 0,
+                            speed,
+                            translator: None,
+                            parent: None,
+                        })
+                    })
+                };
+                self.connect(location, None, reset, dma, &mut devices, failures);
+                probe.reset_us = reset_us;
+                probe.enumerate_us = clock
+                    .now_us()
+                    .saturating_sub(start)
+                    .saturating_sub(reset_us);
+            }
+            probes.push(probe);
         }
         devices
+    }
+
+    /// Power every unpowered root port and wait once for them all, then
+    /// debounce every port together.
+    fn debounce_roots(&mut self) -> Result<Vec<Debounced>, BlockError> {
+        self.check_minimum()?;
+        let mut powered = false;
+        for port in 1..=self.max_ports {
+            self.validate_current_graph(port)?;
+            if self.registers.read32(self.port_offset(port)) & PP == 0 {
+                self.write_port(port, PP);
+                powered = true;
+            }
+        }
+        if powered {
+            self.minimum_wait(PORT_POWER_US)?;
+        }
+        let minimum = self.minimum.clone();
+        minimum.check()?;
+        let settled = debounce_ports_with_delay(
+            usize::from(self.max_ports),
+            |index| Ok(self.sample_root(index as u8 + 1)),
+            || minimum.wait_us(DEBOUNCE_STEP_US),
+        );
+        self.minimum_status(Ok(settled))
+    }
+
+    /// A root port's connection and connect change, clearing the change.
+    fn sample_root(&mut self, port: u8) -> (bool, bool) {
+        let portsc = self.registers.read32(self.port_offset(port));
+        if portsc & CSC != 0 {
+            self.write_port(port, CSC);
+        }
+        (portsc & CCS != 0, portsc & CSC != 0)
     }
 
     /// Linux `hub_port_connect`: reset a port and enumerate its device, up
@@ -298,16 +473,22 @@ impl Controller {
             self.write_port(port, PP);
             self.minimum_wait(PORT_POWER_US)?;
         }
-        let clock = self.clock;
-        let connected = debounce(self.minimum.clone(), || {
-            let portsc = self.registers.read32(at);
-            if portsc & CSC != 0 {
-                self.write_port(port, CSC);
-            }
-            Ok((portsc & CCS != 0, portsc & CSC != 0))
-        });
+        let connected = debounce(self.minimum.clone(), || Ok(self.sample_root(port)));
         let connected = self.minimum_status(connected)?;
         if !connected {
+            return Ok(None);
+        }
+        self.root_reset(port)
+    }
+
+    /// Reset a debounced root port and return its device's speed once the
+    /// port is enabled, or `None` once nothing is connected.
+    pub(super) fn root_reset(&mut self, port: u8) -> Result<Option<u8>, BlockError> {
+        self.check_minimum()?;
+        self.validate_current_graph(port)?;
+        let at = self.port_offset(port);
+        let clock = self.clock;
+        if self.registers.read32(at) & CCS == 0 {
             return Ok(None);
         }
         // Clear the remaining changes, so later changes are this driver's.

@@ -99,6 +99,7 @@ use super::descriptor::*;
 pub use bind::Plan;
 use bind::bind_with_provider;
 pub use descriptor::Device;
+pub use enumerate::PortProbe;
 pub use identity::{DeviceAccess, DeviceRef, SlotId};
 pub use iso::{IsoCompletion, IsoSchedule, IsoStatus, IsoTransfer};
 pub use lifecycle::{Changes, Host};
@@ -1154,6 +1155,8 @@ pub struct Found {
     pub devices: Vec<Device>,
     /// Resident or uploaded Renesas firmware, bound to the PCI revision.
     pub controller_firmware: Option<renesas::Receipt>,
+    /// How long each root port took to debounce, reset and enumerate.
+    pub probes: Vec<PortProbe>,
 }
 
 /// Starts the controller at `function`, enumerates its devices and binds
@@ -1313,7 +1316,7 @@ fn start_with_policies(
     // and applies only to the controller reset just completed above. No public
     // raw-register caller can supply a guessed PCI identity or enable streams.
     let mut found = Found::default();
-    let devices = controller.enumerate(dma, &mut found.failures);
+    let devices = controller.enumerate_timed(dma, &mut found.failures, &mut found.probes);
     let shared: Shared = Rc::new(RefCell::new(controller));
     for device in &devices {
         bind_with_provider(&shared, device.clone(), dma, &mut found, firmware);

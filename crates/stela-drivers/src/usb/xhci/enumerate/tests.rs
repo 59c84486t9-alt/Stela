@@ -68,6 +68,100 @@ fn port_connections_count_after_a_steady_hundred_milliseconds() {
 }
 
 #[test]
+fn an_empty_root_port_is_skipped_without_waiting() {
+    let mut samples = 0;
+    let mut waits = 0;
+    let settled = debounce_ports_with_delay(
+        3,
+        |_| {
+            samples += 1;
+            Ok((false, false))
+        },
+        || {
+            waits += 1;
+            Ok(())
+        },
+    );
+    assert_eq!(settled, [Ok((false, 0)), Ok((false, 0)), Ok((false, 0))]);
+    assert_eq!((samples, waits), (3, 0));
+}
+
+#[test]
+fn connected_root_ports_debounce_in_one_window() {
+    let mut first = [true; 4];
+    let mut waits = 0;
+    let settled = debounce_ports_with_delay(
+        4,
+        |port| {
+            // Port 2 is empty; the others connect with a change.
+            let changed = core::mem::replace(&mut first[port], false);
+            Ok((port != 2, changed && port != 2))
+        },
+        || {
+            waits += 1;
+            Ok(())
+        },
+    );
+    let stable = Ok((true, DEBOUNCE_STABLE_US));
+    assert_eq!(
+        settled,
+        [stable.clone(), stable.clone(), Ok((false, 0)), stable]
+    );
+    // Three connected ports share one 100 ms window: 4 waits, not 12.
+    assert_eq!(waits, (DEBOUNCE_STABLE_US / DEBOUNCE_STEP_US) as usize);
+}
+
+#[test]
+fn a_bouncing_root_port_settles_late_and_a_flapping_one_times_out_alone() {
+    let mut samples = [0usize; 3];
+    let settled = debounce_ports_with_delay(
+        3,
+        |port| {
+            samples[port] += 1;
+            let n = samples[port];
+            Ok(match port {
+                // Connected, then a bounce at the second sample.
+                0 => (n != 2, n <= 3),
+                // Never steady.
+                1 => (n % 2 == 0, true),
+                // A device that was there all along, its change cleared.
+                _ => (true, false),
+            })
+        },
+        || Ok(()),
+    );
+    assert_eq!(
+        settled[0],
+        Ok((true, DEBOUNCE_STABLE_US + 2 * DEBOUNCE_STEP_US))
+    );
+    assert_eq!(
+        settled[1],
+        Err(BlockError::Unsupported("USB port connection never settled"))
+    );
+    assert_eq!(settled[2], Ok((true, DEBOUNCE_STABLE_US)));
+    // A failed wait fails every port still settling.
+    assert_eq!(
+        debounce_ports_with_delay(2, |_| Ok((true, true)), || Err(BlockError::Timeout)),
+        [Err(BlockError::Timeout), Err(BlockError::Timeout)]
+    );
+}
+
+#[test]
+fn a_port_probe_reads_as_the_boot_log_line() {
+    let probe = PortProbe {
+        port: 3,
+        connected: true,
+        debounce_us: 100_400,
+        reset_us: 61_000,
+        enumerate_us: 12_999,
+    };
+    assert_eq!(
+        format!("{probe}"),
+        "port=3 connected=true debounce_ms=100 reset_ms=61 enumerate_ms=12"
+    );
+}
+
+#[test]
 fn unavailable_debounce_timing_refuses_before_port_sampling_and_failed_wait_is_explicit() {
     for rate in [0, u64::MAX, (u64::MAX / 2) / 60_000_000 + 1] {
         assert!(
