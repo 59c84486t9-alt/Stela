@@ -15,9 +15,12 @@ bool stela_air_has_defined_calls(LLVMModuleRef module);
 
 /* Links modules into m's, after checking each is AIR compiled as m's was,
  * so one profile translates them, and specializing each with its own
- * function constant values. m's own are specialized first, since linking
- * merges the modules' function constant metadata. */
-bool stela_air_link_modules(struct stela_air_metadata *m, const struct stela_air_module *modules,
+ * function constant values. m's own are specialized first, with `own`,
+ * since linking merges the modules' function constant metadata. Calls by a
+ * visible function's specialized name (stela_air_specialized_name) reach
+ * that function of the module, or m's, specialized with those values. */
+bool stela_air_link_modules(struct stela_air_metadata *m, const struct stela_air_constant_value *own,
+                            unsigned own_count, const struct stela_air_module *modules,
                             unsigned count);
 
 /* Lowers air.get_size_visible_function_table to a load of the table's count,

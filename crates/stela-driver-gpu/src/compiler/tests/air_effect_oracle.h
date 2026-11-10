@@ -41,8 +41,8 @@ struct air_effect_value {
 
 /* What an execution reads: little-endian global memory at base, which
  * global loads read and global stores within it update, the push constants,
- * and the invocation's linear index in its workgroup and workgroup ID, from
- * which its global ID follows. */
+ * the invocation's linear index in its workgroup and workgroup ID, from
+ * which its global ID follows, and its scratch memory, if any. */
 struct air_effect_environment {
    uint64_t base;
    uint8_t *bytes;
@@ -50,6 +50,8 @@ struct air_effect_environment {
    const uint8_t *push;
    size_t push_size;
    uint32_t local_index, workgroup[3];
+   uint8_t *scratch;
+   size_t scratch_size;
 };
 
 /* Whether a value of shape at address lies within size bytes at base, and
@@ -263,6 +265,28 @@ air_effect_execute_in(nir_shader *shader, unsigned budget, struct air_effect_sto
                air_effect_read((global ? memory->bytes : memory->push) + offset, dest);
                break;
             }
+            /* Scratch memory is the invocation's own, so its stores are
+             * no effects. */
+            if (memory && (intrinsic->intrinsic == nir_intrinsic_load_scratch ||
+                           intrinsic->intrinsic == nir_intrinsic_store_scratch)) {
+               bool load = intrinsic->intrinsic == nir_intrinsic_load_scratch;
+               const struct air_effect_value *stored =
+                  load ? dest : air_effect_get(values, count, intrinsic->src[0].ssa);
+               const struct air_effect_value *at =
+                  air_effect_get(values, count, intrinsic->src[load ? 0 : 1].ssa);
+               size_t offset;
+               if (!stored || !at || at->components != 1)
+                  AIR_EFFECT_FAIL(AIR_EFFECT_UNDEFINED, "scratch access is not defined");
+               if (!air_effect_within(memory->scratch_size, 0,
+                                      nir_const_value_as_uint(at->lanes[0], at->bits), stored,
+                                      &offset))
+                  AIR_EFFECT_FAIL(AIR_EFFECT_UNDEFINED, "scratch access outside the test memory");
+               if (load)
+                  air_effect_read(memory->scratch + offset, dest);
+               else
+                  air_effect_write(memory->scratch + offset, stored);
+               break;
+            }
             bool ssbo = intrinsic->intrinsic == nir_intrinsic_store_ssbo;
             bool shared = intrinsic->intrinsic == nir_intrinsic_store_shared;
             if (!ssbo && !shared && intrinsic->intrinsic != nir_intrinsic_store_global)
@@ -298,7 +322,9 @@ air_effect_execute_in(nir_shader *shader, unsigned budget, struct air_effect_sto
             break;
          }
          case nir_instr_type_undef:
-            AIR_EFFECT_FAIL(AIR_EFFECT_UNDEFINED, "undefined instruction on executed path");
+            /* Only a use of the value is undefined. */
+            dest->known = false;
+            break;
          default:
             AIR_EFFECT_FAIL(AIR_EFFECT_UNSUPPORTED, "unevaluated instruction on executed path");
          }

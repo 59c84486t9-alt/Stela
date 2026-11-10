@@ -119,6 +119,10 @@ enum stela_metal_block_codec {
     * opaque magenta. */
    STELA_METAL_BLOCKS_ASTC,
    STELA_METAL_BLOCKS_ASTC_SRGB,
+   /* ASTC HDR to four half floats: HDR endpoint modes' logarithmic channels
+    * through the Khronos curve, LDR channels' UNORM16 values divided, and a
+    * void extent's half floats, or its UNORM16 values divided. */
+   STELA_METAL_BLOCKS_ASTC_HDR,
 };
 
 /* ReorderArguments (binding.rs), which the reorder blocks kernel reads at
@@ -335,7 +339,30 @@ enum stela_metal_average_format {
  * texture's level count reaches; below it is the address over 8 of the word
  * in the pool's buffer that holds the entry's view's ID. */
 #define STELA_METAL_POOL_VIEW 0x80000000u
+/* A texture whose storage images hold an sRGB format's texels through its
+ * linear twin sets this bit of its high half, below which lie storage
+ * indices: shaders encode the color channels they write and decode those
+ * they read. */
+#define STELA_METAL_SRGB_STORAGE 0x04000000u
+/* A texture's bicubic filter class (enum stela_air_filter_class) sits in
+ * these bits of its high half, below the sRGB flag and above its storage
+ * indices. */
+#define STELA_METAL_FILTER_CLASS_SHIFT 24u
+/* A two-plane texture's second plane and whether it holds chroma (enum
+ * stela_air_planes) sit in the three bits of its high half from here, below
+ * its filter class and above its storage indices; its sampled descriptor
+ * is its first plane's, followed by its second's. The two bits below,
+ * storage index bits a two-plane texture leaves free, say whether its
+ * components are 10-bit and whether its chroma is video range. */
+#define STELA_METAL_PLANES_SHIFT 21u
 #define STELA_METAL_SAMPLER_NEVER 0x80000000u
+/* A sampler Metal filters bicubically sets STELA_METAL_SAMPLER_CUBIC in its
+ * high half, with STELA_METAL_SAMPLER_MIPPED when it selects mip levels and
+ * STELA_METAL_SAMPLER_PIXELS when it takes pixel coordinates; its integer
+ * twin's index lies below them. */
+#define STELA_METAL_SAMPLER_CUBIC 0x40000000u
+#define STELA_METAL_SAMPLER_MIPPED 0x20000000u
+#define STELA_METAL_SAMPLER_PIXELS 0x10000000u
 enum stela_metal_heap_array {
    STELA_METAL_HEAP_SAMPLED_IMAGES,
    STELA_METAL_HEAP_STORAGE_IMAGES,
@@ -399,6 +426,26 @@ nir_def *stela_metal_texture_levels(nir_builder *b, const struct stela_air_textu
 /* stela_air_texture_query: whether the texture's MTLResourceID is the null one. */
 nir_def *stela_metal_texture_null(nir_builder *b, const struct stela_air_texture *texture,
                                   nir_def *id, void *stage);
+
+/* stela_air_texture_query: whether the texture's MTLResourceID carries
+ * STELA_METAL_SRGB_STORAGE. */
+nir_def *stela_metal_texture_srgb_storage(nir_builder *b, const struct stela_air_texture *texture,
+                                          nir_def *id, void *stage);
+
+/* stela_air_texture_query: the second plane (enum stela_air_planes) the
+ * texture's MTLResourceID carries, zero for one plane. */
+nir_def *stela_metal_texture_planes(nir_builder *b, const struct stela_air_texture *texture,
+                                    nir_def *id, void *stage);
+
+/* stela_air_texture_query: the filter class the texture's MTLResourceID
+ * carries. */
+nir_def *stela_metal_texture_filter_class(nir_builder *b, const struct stela_air_texture *texture,
+                                          nir_def *id, void *stage);
+
+/* stela_air_sampler_query: the stela_air_sampler_filter bits of the flags
+ * the sampler's MTLResourceID carries. */
+nir_def *stela_metal_sampler_filter(nir_builder *b, const struct stela_air_sampler *sampler,
+                                    nir_def *id, void *stage);
 
 /* stela_air_sampler_query: whether the sampler's MTLResourceID carries
  * STELA_METAL_SAMPLER_NEVER. */
@@ -506,11 +553,13 @@ nir_shader *stela_metal_decode_pvrtc_kernel(const nir_shader_compiler_options *o
 /* Thread n copies block n of the ReorderArguments' region, counted along
  * rows, between the buffer's rows of blocks and the PVRTC level's Morton
  * order. */
-/* An ASTC LDR block's texel at x, y of its block_width x block_height
- * texels: four 16-bit channels packed in two words, or for sRGB four
- * 8-bit ones in one (enum stela_metal_block_codec). */
+/* An ASTC block's texel at x, y of its block_width x block_height texels:
+ * four 16-bit channels, UNORM or with hdr_texture half floats, packed in
+ * two words, or for sRGB four 8-bit ones in one (enum
+ * stela_metal_block_codec). */
 nir_def *stela_metal_decode_astc(nir_builder *b, nir_def *words, nir_def *x, nir_def *y,
-                                 nir_def *block_width, nir_def *block_height, nir_def *srgb);
+                                 nir_def *block_width, nir_def *block_height, nir_def *srgb,
+                                 nir_def *hdr_texture);
 nir_shader *stela_metal_decode_astc_kernel(const nir_shader_compiler_options *options);
 nir_shader *stela_metal_reorder_blocks_kernel(const nir_shader_compiler_options *options);
 
@@ -548,6 +597,9 @@ struct stela_metal_tessellation {
    /* Bytes of each control point index of indexed patch draws, 2 or 4;
     * zero for patch draws without control point indices. */
    unsigned control_point_index_bytes;
+   /* tessellationFactorScaleEnabled: the control stage scales factors by
+    * its arguments' scale; without it, by one. */
+   bool scales;
 };
 
 /* The stages a tessellated pipeline runs ahead of its post-tessellation

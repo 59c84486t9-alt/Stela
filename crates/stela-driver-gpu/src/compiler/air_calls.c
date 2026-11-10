@@ -26,6 +26,7 @@
 #include "llvm-c/Linker.h"
 #include "llvm-c/Transforms/PassBuilder.h"
 #include "util/hash_table.h"
+#include "util/set.h"
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -317,10 +318,488 @@ can_prune_calls(LLVMValueRef entry)
    return false;
 }
 
+/* Makes each call of a defined function whose call type differs from the
+ * definition's only in structs of the same layout call it with the
+ * definition's type, converting its arguments and result. Linking keeps two
+ * modules' copies of one struct distinct types (`T.3` and `T.127`), and a
+ * call whose type is not its callee's never inlines: Core Image's stitched
+ * graphs call one library's filter with the struct values another library's
+ * functions build. */
+static void
+match_call_types(LLVMModuleRef module)
+{
+   LLVMContextRef context = LLVMGetModuleContext(module);
+   LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
+   for (LLVMValueRef fn = LLVMGetFirstFunction(module); fn; fn = LLVMGetNextFunction(fn)) {
+      for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+           block = LLVMGetNextBasicBlock(block)) {
+         LLVMValueRef next;
+         for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst; inst = next) {
+            next = LLVMGetNextInstruction(inst);
+            LLVMValueRef callee = LLVMIsACallInst(inst) ? LLVMGetCalledValue(inst) : NULL;
+            if (!callee || !LLVMIsAFunction(callee) || LLVMIsDeclaration(callee))
+               continue;
+            LLVMTypeRef want = LLVMGlobalGetValueType(callee), have = LLVMGetCalledFunctionType(inst);
+            unsigned count = LLVMCountParamTypes(want);
+            if (want == have || count != LLVMCountParamTypes(have) || count > 64 ||
+                LLVMIsFunctionVarArg(want) != LLVMIsFunctionVarArg(have) ||
+                LLVMGetNumArgOperands(inst) != count ||
+                !stela_air_isomorphic(context, LLVMGetReturnType(want), LLVMGetReturnType(have)))
+               continue;
+            LLVMTypeRef wanted[64], had[64];
+            LLVMGetParamTypes(want, wanted);
+            LLVMGetParamTypes(have, had);
+            bool same = true;
+            for (unsigned i = 0; i < count && same; i++)
+               same = stela_air_isomorphic(context, wanted[i], had[i]);
+            if (!same)
+               continue;
+            LLVMPositionBuilderBefore(builder, inst);
+            LLVMValueRef arguments[64];
+            for (unsigned i = 0; i < count; i++)
+               arguments[i] = stela_air_convert_layout(builder, LLVMGetOperand(inst, i), wanted[i]);
+            LLVMValueRef call = LLVMBuildCall2(builder, want, callee, arguments, count, "");
+            LLVMSetInstructionCallConv(call, LLVMGetInstructionCallConv(inst));
+            if (LLVMGetTypeKind(LLVMGetReturnType(have)) != LLVMVoidTypeKind)
+               LLVMReplaceAllUsesWith(inst, stela_air_convert_layout(builder, call,
+                                                                     LLVMGetReturnType(have)));
+            LLVMInstructionEraseFromParent(inst);
+         }
+      }
+   }
+   LLVMDisposeBuilder(builder);
+}
+
+/* Calls of one large function that follow each other.
+ *
+ * Apple's compiler keeps a [[noinline]] function's body once and calls it.
+ * NAK takes no calls, so inlining copies the body to every call, and a
+ * shader that calls one large function several times in a row grows by the
+ * whole body per call: an interpreter applying a list of operations, or a
+ * ray marcher taking several samples of a pixel. Calls of such a function
+ * in one block instead share one call, run in a loop: the code before each
+ * call branches to the shared call with that call's arguments and position,
+ * and after the call a switch on the position continues with the code that
+ * followed it. Each invocation entering the
+ * block makes every call in order, so the invocations of a quad stay
+ * together and derivatives and implicit-LOD samples in the body see the
+ * same lanes as separate copies would. A value a later part of the block
+ * reads passes through a stack slot, which SROA turns back into SSA.
+ * Everything that can stop the rewrite is checked before it changes the
+ * function, and what follows cannot refuse: a slot SROA leaves is thread
+ * memory, which translation lowers like any other. */
+
+/* Below this many instructions copies cost less than the loop: they keep
+ * each call's constants folded, and the loop keeps the values its later
+ * parts read live across every call. The size is about where an optimizing
+ * inliner stops copying a function with several calls: sharing Setup's
+ * 503-instruction distance function in its 4-sample normal estimate costs
+ * 8 registers on NVIDIA and halves the shader's code (121 to 69 KB).
+ * A function Apple's compiler keeps out of line is shared from a smaller
+ * size, since its calls were not to be specialized. */
+#define SHARED_CALL_MIN_INSTRUCTIONS 256u
+#define SHARED_CALL_MIN_OUT_OF_LINE 64u
+#define SHARED_CALL_MAX_INSTRUCTIONS (1u << 24)
+#define SHARED_CALL_MAX_CALLS 64u
+
+/* fn's instructions once its calls of defined functions are inlined. */
+static uint64_t
+inlined_size(struct hash_table *sizes, LLVMValueRef fn, unsigned depth)
+{
+   struct hash_entry *entry = _mesa_hash_table_search(sizes, fn);
+   if (entry)
+      return (uintptr_t)entry->data;
+   uint64_t size = 0;
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         LLVMValueRef callee = defined_callee(inst);
+         size += callee && callee != fn && depth < MAX_CALL_DEPTH ?
+                    inlined_size(sizes, callee, depth + 1) : 1;
+         size = MIN2(size, SHARED_CALL_MAX_INSTRUCTIONS);
+      }
+   }
+   _mesa_hash_table_insert(sizes, fn, (void *)(uintptr_t)size);
+   return size;
+}
+
+/* A block's calls of one function. The code before calls[0] is part 0 and
+ * the code after calls[i] part i + 1; parts maps each instruction of the
+ * block to the part it reads its operands in, plus one. A call reads them
+ * at the end of the part before it, and its result exists in the next. */
+struct shared_calls {
+   LLVMBasicBlockRef block;
+   LLVMValueRef callee;
+   LLVMValueRef calls[SHARED_CALL_MAX_CALLS];
+   unsigned count;
+   struct hash_table *parts;
+};
+
+static bool
+shared_call(const struct shared_calls *s, LLVMValueRef inst)
+{
+   for (unsigned i = 0; i < s->count; i++) {
+      if (s->calls[i] == inst)
+         return true;
+   }
+   return false;
+}
+
+/* Where user reads its operands; anything outside the block, after its
+ * last part. */
+static unsigned
+reading_part(const struct shared_calls *s, LLVMValueRef user)
+{
+   struct hash_entry *entry = _mesa_hash_table_search(s->parts, user);
+   return entry ? (uintptr_t)entry->data - 1 : s->count;
+}
+
+/* Whether a use reads a value of part `part` where that part does not
+ * dominate: every part follows part 0, and only the last part comes after
+ * the block. */
+static bool
+crosses(const struct shared_calls *s, LLVMUseRef use, unsigned part)
+{
+   return part && reading_part(s, LLVMGetUser(use)) != part;
+}
+
+/* Whether a value of the type is or holds a pointer. */
+static bool
+holds_pointer(LLVMTypeRef type, unsigned depth)
+{
+   switch (LLVMGetTypeKind(type)) {
+   case LLVMPointerTypeKind:
+      return true;
+   case LLVMVectorTypeKind:
+   case LLVMArrayTypeKind:
+      return depth > 64 || holds_pointer(LLVMGetElementType(type), depth + 1);
+   case LLVMStructTypeKind:
+      for (unsigned i = 0; i < LLVMCountStructElementTypes(type); i++) {
+         if (depth > 64 || holds_pointer(LLVMStructGetTypeAtIndex(type, i), depth + 1))
+            return true;
+      }
+      return false;
+   default:
+      return false;
+   }
+}
+
+/* Whether a pointer may be a constant or an offset or cast of one: either
+ * of a select's, which specialization may fold to it. */
+static bool
+constant_based(LLVMValueRef pointer, unsigned depth)
+{
+   if (depth > 64 || LLVMIsConstant(pointer))
+      return true;
+   if (LLVMIsASelectInst(pointer))
+      return constant_based(LLVMGetOperand(pointer, 1), depth + 1) ||
+             constant_based(LLVMGetOperand(pointer, 2), depth + 1);
+   if (LLVMIsAGetElementPtrInst(pointer) || LLVMIsABitCastInst(pointer) ||
+       LLVMIsAAddrSpaceCastInst(pointer))
+      return constant_based(LLVMGetOperand(pointer, 0), depth + 1);
+   return false;
+}
+
+/* Gives each value of the block that a use in another part reads a stack
+ * slot, which those uses load; with apply false, only checks that each
+ * such value can have one. */
+static bool
+spill_crossing(LLVMBuilderRef builder, LLVMValueRef fn, const struct shared_calls *s, bool apply)
+{
+   LLVMValueRef next;
+   for (LLVMValueRef inst = LLVMGetFirstInstruction(s->block); inst; inst = next) {
+      next = LLVMGetNextInstruction(inst);
+      struct hash_entry *entry = _mesa_hash_table_search(s->parts, inst);
+      if (!entry)
+         continue; /* A load or store this added. */
+      unsigned part = (uintptr_t)entry->data - 1 + shared_call(s, inst);
+      bool crossing = false;
+      for (LLVMUseRef use = LLVMGetFirstUse(inst); use && !crossing; use = LLVMGetNextUse(use))
+         crossing = crosses(s, use, part);
+      if (!crossing)
+         continue;
+      LLVMTypeRef type = LLVMTypeOf(inst);
+      LLVMTypeKind kind = LLVMGetTypeKind(type);
+      if (kind == LLVMTokenTypeKind || kind == LLVMLabelTypeKind ||
+          kind == LLVMMetadataTypeKind || !LLVMTypeIsSized(type))
+         return false;
+      /* Translation joins pointers in PHIs by the resource each was proven
+       * to reach, which a struct or array holding one would hide. */
+      bool pointer = kind == LLVMPointerTypeKind ||
+                     (kind == LLVMVectorTypeKind &&
+                      LLVMGetTypeKind(LLVMGetElementType(type)) == LLVMPointerTypeKind);
+      if (!pointer && holds_pointer(type, 0))
+         return false;
+      if (!apply)
+         continue;
+      /* Zero before the first store, which the loop's first trip reads
+       * nothing of, keeps every value defined. A pointer starts undefined:
+       * a null pointer would be one more resource its PHIs join. */
+      LLVMPositionBuilderBefore(builder, LLVMGetFirstInstruction(LLVMGetEntryBasicBlock(fn)));
+      LLVMValueRef slot = LLVMBuildAlloca(builder, type, "");
+      LLVMBuildStore(builder, pointer ? LLVMGetUndef(type) : LLVMConstNull(type), slot);
+      for (LLVMUseRef use = LLVMGetFirstUse(inst); use;) {
+         LLVMValueRef user = LLVMGetUser(use);
+         if (!crosses(s, use, part)) {
+            use = LLVMGetNextUse(use);
+            continue;
+         }
+         /* A phi reads at the end of each incoming block of this value. */
+         unsigned operands = LLVMIsAPHINode(user) ? LLVMCountIncoming(user) : LLVMGetNumOperands(user);
+         for (unsigned k = 0; k < operands; k++) {
+            if (LLVMGetOperand(user, k) != inst)
+               continue;
+            LLVMPositionBuilderBefore(builder, LLVMIsAPHINode(user) ?
+               LLVMGetBasicBlockTerminator(LLVMGetIncomingBlock(user, k)) : user);
+            LLVMSetOperand(user, k, LLVMBuildLoad2(builder, type, slot, ""));
+         }
+         use = LLVMGetFirstUse(inst);
+      }
+      /* After a call, its result is stored where the next part begins. */
+      LLVMPositionBuilderBefore(builder, next);
+      LLVMBuildStore(builder, inst, slot);
+   }
+   return true;
+}
+
+/* Turns the block's calls into one call in a loop (see above). The
+ * block's predecessors keep branching to it, and its part 0 stays in it. */
+static void
+share_calls(LLVMBuilderRef builder, LLVMValueRef fn, const struct shared_calls *s)
+{
+   LLVMContextRef context = LLVMGetTypeContext(LLVMTypeOf(fn));
+   LLVMTypeRef i32 = LLVMInt32TypeInContext(context);
+   unsigned n = s->count;
+   LLVMBasicBlockRef next_block = LLVMGetNextBasicBlock(s->block), parts[SHARED_CALL_MAX_CALLS + 1];
+   LLVMBasicBlockRef call_block = next_block ?
+      LLVMInsertBasicBlockInContext(context, next_block, "shared.call") :
+      LLVMAppendBasicBlockInContext(context, fn, "shared.call");
+   parts[0] = s->block;
+   for (unsigned i = 1; i <= n; i++) {
+      parts[i] = next_block ? LLVMInsertBasicBlockInContext(context, next_block, "shared.part") :
+                              LLVMAppendBasicBlockInContext(context, fn, "shared.part");
+   }
+   /* The block's successors now follow its last part, and its
+    * predecessors still branch to it. */
+   LLVMValueRef predecessors[256];
+   unsigned predecessor_count = 0;
+   for (LLVMUseRef use = LLVMGetFirstUse(LLVMBasicBlockAsValue(s->block)); use; use = LLVMGetNextUse(use))
+      predecessors[predecessor_count++] = LLVMGetUser(use);
+   LLVMReplaceAllUsesWith(LLVMBasicBlockAsValue(s->block), LLVMBasicBlockAsValue(parts[n]));
+   for (unsigned i = 0; i < predecessor_count; i++) {
+      for (unsigned k = 0; k < LLVMGetNumSuccessors(predecessors[i]); k++) {
+         if (LLVMGetSuccessor(predecessors[i], k) == parts[n])
+            LLVMSetSuccessor(predecessors[i], k, s->block);
+      }
+   }
+   /* Each part's code moves to its block; the calls stay to be replaced. */
+   unsigned part = 0;
+   LLVMValueRef next;
+   for (LLVMValueRef inst = LLVMGetFirstInstruction(s->block); inst; inst = next) {
+      next = LLVMGetNextInstruction(inst);
+      if (shared_call(s, inst)) {
+         part++;
+         continue;
+      }
+      if (!part)
+         continue;
+      LLVMInstructionRemoveFromParent(inst);
+      LLVMPositionBuilderAtEnd(builder, parts[part]);
+      LLVMInsertIntoBuilder(builder, inst);
+   }
+   for (unsigned i = 0; i < n; i++) {
+      LLVMPositionBuilderAtEnd(builder, parts[i]);
+      LLVMBuildBr(builder, call_block);
+   }
+   /* The shared call takes each call's position and differing arguments. */
+   LLVMPositionBuilderAtEnd(builder, call_block);
+   LLVMValueRef position = LLVMBuildPhi(builder, i32, "");
+   unsigned argument_count = LLVMGetNumArgOperands(s->calls[0]);
+   LLVMValueRef arguments[64];
+   for (unsigned a = 0; a < argument_count; a++) {
+      LLVMValueRef first = LLVMGetOperand(s->calls[0], a);
+      bool same = true;
+      for (unsigned i = 1; i < n && same; i++)
+         same = LLVMGetOperand(s->calls[i], a) == first;
+      arguments[a] = same ? first : LLVMBuildPhi(builder, LLVMTypeOf(first), "");
+   }
+   for (unsigned i = 0; i < n; i++) {
+      LLVMValueRef index = LLVMConstInt(i32, i, false);
+      LLVMBasicBlockRef from = parts[i];
+      LLVMAddIncoming(position, &index, &from, 1);
+      for (unsigned a = 0; a < argument_count; a++) {
+         if (LLVMIsAPHINode(arguments[a]) && LLVMGetInstructionParent(arguments[a]) == call_block) {
+            LLVMValueRef value = LLVMGetOperand(s->calls[i], a);
+            LLVMAddIncoming(arguments[a], &value, &from, 1);
+         }
+      }
+   }
+   LLVMValueRef call = LLVMBuildCall2(builder, LLVMGlobalGetValueType(s->callee), s->callee,
+                                      arguments, argument_count, "");
+   LLVMSetInstructionCallConv(call, LLVMGetInstructionCallConv(s->calls[0]));
+   unsigned attributes = LLVMGetCallSiteAttributeCount(s->calls[0], LLVMAttributeFunctionIndex);
+   LLVMAttributeRef attribute_list[64];
+   if (attributes <= ARRAY_SIZE(attribute_list)) {
+      LLVMGetCallSiteAttributes(s->calls[0], LLVMAttributeFunctionIndex, attribute_list);
+      for (unsigned i = 0; i < attributes; i++)
+         LLVMAddCallSiteAttribute(call, LLVMAttributeFunctionIndex, attribute_list[i]);
+   }
+   if (LLVMCanValueUseFastMathFlags(s->calls[0]))
+      LLVMSetFastMathFlags(call, LLVMGetFastMathFlags(s->calls[0]));
+   LLVMValueRef dispatch = LLVMBuildSwitch(builder, position, parts[n], n - 1);
+   for (unsigned i = 0; i + 1 < n; i++)
+      LLVMAddCase(dispatch, LLVMConstInt(i32, i, false), parts[i + 1]);
+   for (unsigned i = 0; i < n; i++) {
+      if (LLVMGetTypeKind(LLVMTypeOf(s->calls[i])) != LLVMVoidTypeKind)
+         LLVMReplaceAllUsesWith(s->calls[i], call);
+      LLVMInstructionEraseFromParent(s->calls[i]);
+   }
+}
+
+/* Whether block's calls of callee may share one call: neither branches to
+ * the block itself, which its last part would then reach, nor takes its
+ * address. */
+static bool
+gather_calls(struct shared_calls *s, LLVMBasicBlockRef block, LLVMValueRef callee)
+{
+   LLVMValueRef term = LLVMGetBasicBlockTerminator(block);
+   for (unsigned k = 0; term && k < LLVMGetNumSuccessors(term); k++) {
+      if (LLVMGetSuccessor(term, k) == block)
+         return false;
+   }
+   unsigned users = 0;
+   for (LLVMUseRef use = LLVMGetFirstUse(LLVMBasicBlockAsValue(block)); use; use = LLVMGetNextUse(use)) {
+      if (!LLVMIsATerminatorInst(LLVMGetUser(use)) || ++users > 256)
+         return false;
+   }
+   s->block = block;
+   s->callee = callee;
+   s->count = 0;
+   _mesa_hash_table_clear(s->parts, NULL);
+   for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst; inst = LLVMGetNextInstruction(inst)) {
+      _mesa_hash_table_insert(s->parts, inst, (void *)(uintptr_t)(s->count + 1));
+      if (defined_callee(inst) == callee) {
+         if (s->count == SHARED_CALL_MAX_CALLS || LLVMGetNumOperandBundles(inst) ||
+             LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
+             LLVMGetNumArgOperands(inst) > 64 ||
+             LLVMGetTailCallKind(inst) == LLVMTailCallKindMustTail)
+            return false;
+         s->calls[s->count++] = inst;
+      }
+   }
+   if (s->count < 2)
+      return false;
+   /* The shared call takes each differing argument through a PHI, where
+    * translation joins pointers by the resource each was proven to reach.
+    * A constant pointer (null: a buffer a function constant left out) and
+    * offsets off it have no such proof, nor has one inside a struct or
+    * array. A select may still fold to one. */
+   for (unsigned a = 0; a < LLVMGetNumArgOperands(s->calls[0]); a++) {
+      LLVMValueRef first = LLVMGetOperand(s->calls[0], a);
+      if (!holds_pointer(LLVMTypeOf(first), 0))
+         continue;
+      bool same = true;
+      for (unsigned i = 1; i < s->count && same; i++)
+         same = LLVMGetOperand(s->calls[i], a) == first;
+      if (same)
+         continue;
+      if (LLVMGetTypeKind(LLVMTypeOf(first)) != LLVMPointerTypeKind)
+         return false;
+      for (unsigned i = 0; i < s->count; i++) {
+         if (constant_based(LLVMGetOperand(s->calls[i], a), 0))
+            return false;
+      }
+   }
+   return true;
+}
+
+/* Shares the calls of each function in shareable, which maps it to its
+ * least size, that one block makes more than once, then rebuilds SSA
+ * values from the stack slots. */
+static bool
+share_repeated_calls(struct stela_air_metadata *m, struct hash_table *shareable)
+{
+   if (!shareable->entries)
+      return true;
+   struct hash_table *sizes = _mesa_pointer_hash_table_create(NULL);
+   struct shared_calls s = {.parts = _mesa_pointer_hash_table_create(NULL)};
+   LLVMBuilderRef builder = LLVMCreateBuilderInContext(LLVMGetModuleContext(m->module));
+   bool ok = sizes && s.parts && builder;
+   for (LLVMValueRef fn = LLVMGetFirstFunction(m->module); fn && ok; fn = LLVMGetNextFunction(fn)) {
+      if (!stela_air_defined_function(fn) ||
+          LLVMGetEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex, attribute("optnone")))
+         continue;
+      bool shared = false;
+      for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+           block = LLVMGetNextBasicBlock(block)) {
+         hash_table_foreach(shareable, entry) {
+            LLVMValueRef callee = (LLVMValueRef)entry->key;
+            if (callee == fn || inlined_size(sizes, callee, 0) < (uintptr_t)entry->data ||
+                !gather_calls(&s, block, callee) || !spill_crossing(builder, fn, &s, false))
+               continue;
+            spill_crossing(builder, fn, &s, true);
+            share_calls(builder, fn, &s);
+            shared = true;
+            /* The block now ends at the branch to the shared call. */
+            break;
+         }
+      }
+      /* Stela's LLVM (compat/llvm/passes.cpp) runs only the passes
+       * translation names, SROA among them. */
+      LLVMPassBuilderOptionsRef options = shared ? LLVMCreatePassBuilderOptions() : NULL;
+      LLVMErrorRef error = options ? LLVMRunPassesOnFunction(fn, "sroa", NULL, options) : NULL;
+      if (options)
+         LLVMDisposePassBuilderOptions(options);
+      if (error)
+         LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
+   }
+   if (builder)
+      LLVMDisposeBuilder(builder);
+   _mesa_hash_table_destroy(sizes, NULL);
+   _mesa_hash_table_destroy(s.parts, NULL);
+   return ok || fail(m, STELA_AIR_ALLOCATION, "shared call allocation failed");
+}
+
+/* Promotes what inlining made promotable: a thread variable whose address
+ * a call took (Apple's compiler keeps a [[noinline]] function's `thread T&`
+ * argument in memory) is only loaded and stored once the call is inlined,
+ * and would otherwise stay thread memory. An optimizing pipeline runs SROA
+ * after its inliner for the same reason. An unoptimized module's memory is
+ * the translator's to promote (promote_memory in air_to_nir.c). */
+static bool
+promote_inlined_memory(struct stela_air_metadata *m)
+{
+   if (m->unoptimized)
+      return true;
+   LLVMPassBuilderOptionsRef options = NULL;
+   for (LLVMValueRef fn = LLVMGetFirstFunction(m->module); fn; fn = LLVMGetNextFunction(fn)) {
+      LLVMBasicBlockRef entry = stela_air_defined_function(fn) ? LLVMGetEntryBasicBlock(fn) : NULL;
+      bool allocates = false;
+      for (LLVMValueRef inst = entry ? LLVMGetFirstInstruction(entry) : NULL; inst && !allocates;
+           inst = LLVMGetNextInstruction(inst))
+         allocates = LLVMIsAAllocaInst(inst) != NULL;
+      if (!allocates)
+         continue;
+      if (!options && !(options = LLVMCreatePassBuilderOptions()))
+         return fail(m, STELA_AIR_ALLOCATION, "pass options allocation failed");
+      LLVMErrorRef error = LLVMRunPassesOnFunction(fn, "sroa", NULL, options);
+      if (error) {
+         LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
+         LLVMDisposePassBuilderOptions(options);
+         return fail(m, STELA_AIR_INSTRUCTION, "LLVM refused to promote inlined memory");
+      }
+   }
+   if (options)
+      LLVMDisposePassBuilderOptions(options);
+   return true;
+}
+
 static bool
 inline_calls(struct stela_air_metadata *m, LLVMValueRef entry, unsigned max_call_stack_depth,
              unsigned max_instructions, LLVMValueRef specialized, bool *folded)
 {
+   match_call_types(m->module);
    struct hash_table *states = _mesa_pointer_hash_table_create(NULL);
    if (!states)
       return fail(m, STELA_AIR_ALLOCATION, "call graph allocation failed");
@@ -334,10 +813,22 @@ inline_calls(struct stela_air_metadata *m, LLVMValueRef entry, unsigned max_call
       walked = visit(m, states, fn, true, 0, &cyclic);
       recursive |= walked && fn == entry && cyclic;
    }
+   struct hash_table *shareable = _mesa_pointer_hash_table_create(NULL);
+   if (!shareable) {
+      _mesa_hash_table_destroy(states, NULL);
+      return fail(m, STELA_AIR_ALLOCATION, "call graph allocation failed");
+   }
    for (LLVMValueRef fn = LLVMGetFirstFunction(m->module); fn && walked; fn = LLVMGetNextFunction(fn)) {
       struct hash_entry *state = _mesa_hash_table_search(states, fn);
       if (!state || (uintptr_t)state->data != ACYCLIC || !called(fn))
          continue;
+      /* An unoptimized build keeps every function out of line, for no
+       * reason of size, and passes leave it as it is. */
+      bool noinline = LLVMGetEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex, attribute("noinline"));
+      if (!LLVMGetEnumAttributeAtIndex(fn, LLVMAttributeFunctionIndex, attribute("optnone")) &&
+          !is_dispatcher(fn))
+         _mesa_hash_table_insert(shareable, fn, (void *)(uintptr_t)(noinline ? SHARED_CALL_MIN_OUT_OF_LINE :
+                                                                     SHARED_CALL_MIN_INSTRUCTIONS));
       inline_always(fn);
       inlined = true;
    }
@@ -346,14 +837,20 @@ inline_calls(struct stela_air_metadata *m, LLVMValueRef entry, unsigned max_call
       _mesa_hash_table_search(states, specialized) : NULL;
    bool fold = state && (uintptr_t)state->data == ACYCLIC && can_prune_calls(specialized);
    _mesa_hash_table_destroy(states, NULL);
-   if (!walked)
+   if (!walked) {
+      _mesa_hash_table_destroy(shareable, NULL);
       return false;
+   }
    if (fold) {
       *folded = true;
-      if (!stela_air_fold_constants(m, specialized))
+      if (!stela_air_fold_constants(m, specialized)) {
+         _mesa_hash_table_destroy(shareable, NULL);
          return false;
+      }
    }
-   if (inlined && !run_inliner(m))
+   bool shared = share_repeated_calls(m, shareable);
+   _mesa_hash_table_destroy(shareable, NULL);
+   if (!shared || (inlined && (!run_inliner(m) || !promote_inlined_memory(m))))
       return false;
    return !recursive || unroll(m, entry, max_call_stack_depth, max_instructions);
 }
@@ -501,13 +998,157 @@ prepared(struct stela_air_metadata *m, LLVMModuleRef module,
    return true;
 }
 
+/* Renames what another specialization of a module defines for other
+ * modules, its functions and globals, with the suffix ".stela.copy<copy>":
+ * its own calls keep reaching its own definitions, and its declarations
+ * the program's. */
+static bool
+rename_copy(struct stela_air_metadata *m, LLVMModuleRef module, unsigned copy)
+{
+   char suffix[32];
+   int suffix_bytes = snprintf(suffix, sizeof(suffix), ".stela.copy%u", copy);
+   LLVMValueRef values[2] = {LLVMGetFirstFunction(module), LLVMGetFirstGlobal(module)};
+   for (unsigned kind = 0; kind < 2; kind++) {
+      for (LLVMValueRef value = values[kind]; value;
+           value = kind ? LLVMGetNextGlobal(value) : LLVMGetNextFunction(value)) {
+         /* LLVM's appending lists, such as llvm.compiler.used and
+          * llvm.global_ctors, merge by their names. */
+         if (LLVMIsDeclaration(value) || LLVMGetLinkage(value) == LLVMInternalLinkage ||
+             LLVMGetLinkage(value) == LLVMPrivateLinkage ||
+             LLVMGetLinkage(value) == LLVMAppendingLinkage)
+            continue;
+         size_t length;
+         const char *name = LLVMGetValueName2(value, &length);
+         /* AIR's builtins and LLVM's intrinsics are declarations, never
+          * definitions. */
+         char *renamed = malloc(length + (size_t)suffix_bytes + 1);
+         if (!renamed)
+            return fail(m, STELA_AIR_ALLOCATION, "linked copy name allocation failed");
+         memcpy(renamed, name, length);
+         memcpy(renamed + length, suffix, (size_t)suffix_bytes + 1);
+         LLVMSetValueName2(value, renamed, length + (size_t)suffix_bytes);
+         free(renamed);
+      }
+   }
+   return true;
+}
+
+/* The calls of visible functions by their specialized names, each with the
+ * name of the definition it reaches once the modules are linked. */
+struct specialized_calls {
+   unsigned count, capacity;
+   char **calls, **definitions;
+};
+
+static void
+release_specialized_calls(struct specialized_calls *calls)
+{
+   for (unsigned i = 0; i < calls->count; i++) {
+      free(calls->calls[i]);
+      free(calls->definitions[i]);
+   }
+   free(calls->calls);
+   free(calls->definitions);
+}
+
+/* Notes the specialized name of each visible function `module` defines, as
+ * `values` specialize it, and the name it is defined by once its copy's
+ * suffix (rename_copy) is added. */
+static bool
+note_specialized_calls(struct stela_air_metadata *m, LLVMModuleRef module,
+                       const struct stela_air_constant_value *values, unsigned count,
+                       unsigned copy, struct specialized_calls *calls)
+{
+   if (!count)
+      return true;
+   struct stela_air_error error = {0};
+   struct stela_air_metadata linked = {.module = module, .error = &error};
+   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+   unsigned node_count;
+   if (!stela_air_named_md(&linked, "air.visible", nodes, &node_count))
+      return fail(m, error.kind, error.detail);
+   for (unsigned i = 0; i < node_count; i++) {
+      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+      unsigned field_count;
+      if (!stela_air_md_node(&linked, nodes[i], fields, &field_count))
+         return fail(m, error.kind, error.detail);
+      if (!field_count || !fields[0] || !LLVMIsAFunction(fields[0]) ||
+          LLVMIsDeclaration(fields[0]))
+         continue;
+      size_t length;
+      const char *name = LLVMGetValueName2(fields[0], &length);
+      char call[1024], definition[1024];
+      int written = copy ? snprintf(definition, sizeof(definition), "%.*s.stela.copy%u",
+                                    (int)length, name, copy) :
+                           snprintf(definition, sizeof(definition), "%.*s", (int)length, name);
+      if (!stela_air_specialized_name(name, length, values, count, call, sizeof(call)) ||
+          written < 0 || (size_t)written >= sizeof(definition))
+         return fail(m, STELA_AIR_LIMIT, "a specialized visible function's name is too long");
+      if (calls->count == calls->capacity) {
+         unsigned capacity = calls->capacity ? calls->capacity * 2 : 16;
+         char **grown_calls = realloc(calls->calls, capacity * sizeof(*grown_calls));
+         if (grown_calls)
+            calls->calls = grown_calls;
+         char **grown_definitions =
+            grown_calls ? realloc(calls->definitions, capacity * sizeof(*grown_definitions)) : NULL;
+         if (grown_definitions)
+            calls->definitions = grown_definitions;
+         if (!grown_calls || !grown_definitions)
+            return fail(m, STELA_AIR_ALLOCATION, "specialized calls");
+         calls->capacity = capacity;
+      }
+      calls->calls[calls->count] = strdup(call);
+      calls->definitions[calls->count] = strdup(definition);
+      if (!calls->calls[calls->count] || !calls->definitions[calls->count]) {
+         free(calls->calls[calls->count]);
+         free(calls->definitions[calls->count]);
+         return fail(m, STELA_AIR_ALLOCATION, "specialized calls");
+      }
+      calls->count++;
+   }
+   return true;
+}
+
+/* Makes each call by a specialized name call the definition it names. */
+static void
+resolve_specialized_calls(struct stela_air_metadata *m, const struct specialized_calls *calls)
+{
+   for (unsigned i = 0; i < calls->count; i++) {
+      LLVMValueRef called = LLVMGetNamedFunction(m->module, calls->calls[i]);
+      LLVMValueRef defined = LLVMGetNamedFunction(m->module, calls->definitions[i]);
+      if (!called || !LLVMIsDeclaration(called) || !defined || LLVMIsDeclaration(defined))
+         continue;
+      LLVMReplaceAllUsesWith(called, defined);
+      LLVMDeleteFunction(called);
+   }
+}
+
+static bool
+link_modules(struct stela_air_metadata *m, const struct stela_air_constant_value *own,
+             unsigned own_count, const struct stela_air_module *modules, unsigned count,
+             struct specialized_calls *calls);
+
 bool
-stela_air_link_modules(struct stela_air_metadata *m, const struct stela_air_module *modules,
+stela_air_link_modules(struct stela_air_metadata *m, const struct stela_air_constant_value *own,
+                       unsigned own_count, const struct stela_air_module *modules,
                        unsigned count)
+{
+   struct specialized_calls calls = {0};
+   bool linked = link_modules(m, own, own_count, modules, count, &calls);
+   if (linked)
+      resolve_specialized_calls(m, &calls);
+   release_specialized_calls(&calls);
+   return linked;
+}
+
+static bool
+link_modules(struct stela_air_metadata *m, const struct stela_air_constant_value *own,
+             unsigned own_count, const struct stela_air_module *modules, unsigned count,
+             struct specialized_calls *calls)
 {
    if (count && !modules)
       return fail(m, STELA_AIR_INPUT, "invalid linked modules");
-   if (!name_references(m))
+   if (!name_references(m) || !note_specialized_calls(m, m->module, own, own_count, 0, calls))
       return false;
    LLVMContextRef context = LLVMGetModuleContext(m->module);
    for (unsigned i = 0; i < count; i++) {
@@ -524,6 +1165,12 @@ stela_air_link_modules(struct stela_air_metadata *m, const struct stela_air_modu
       if (!parsed || m->error->kind != STELA_AIR_OK)
          return fail(m, STELA_AIR_BITCODE, "LLVM refused a linked module");
       if (!prepared(m, module, linked->constants, linked->constant_count)) {
+         LLVMDisposeModule(module);
+         return false;
+      }
+      if (!note_specialized_calls(m, module, linked->constants, linked->constant_count,
+                                  linked->copy, calls) ||
+          (linked->copy && !rename_copy(m, module, linked->copy))) {
          LLVMDisposeModule(module);
          return false;
       }

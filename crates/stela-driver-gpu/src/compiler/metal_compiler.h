@@ -141,6 +141,8 @@ struct stela_metal_attachment {
    uint32_t format, bytes;
    uint8_t blend, write_mask, rgb_op, alpha_op;
    uint8_t source_rgb, destination_rgb, source_alpha, destination_alpha;
+   /* A two-plane format's planes (enum stela_air_planes), zero for one. */
+   uint8_t planes;
 };
 
 /* shader.rs Specialization, with a post-tessellation vertex function's
@@ -194,14 +196,28 @@ struct stela_metal_specialization {
     * are attachments' formats, which its implicit imageblock accesses, and
     * samples its samples per pixel. */
    uint32_t tile;
+   /* A fragment function's fragment tests: STELA_METAL_SELF_TESTS when it
+    * runs them itself, accessing storage attachments its pipeline cannot
+    * test fragments for first, and its pipeline's alpha to coverage and
+    * alpha to one (stela_air_stage_options::self_tests). */
+   uint32_t fragment_tests;
+   /* Metal's bicubic filter: bit n when the sampler bound at index n
+    * filters bicubically at the draws or dispatches this compilation serves,
+    * and STELA_METAL_BICUBIC_IDS when the function's process has made
+    * bicubic samplers, which its samplers of argument values may then be. */
+   uint32_t bicubic;
 };
-#define STELA_METAL_SPECIALIZATION_BYTES 192u
-#define STELA_METAL_ATTACHMENT_BYTES 16u
+#define STELA_METAL_BICUBIC_IDS 0x80000000u
+#define STELA_METAL_SPECIALIZATION_BYTES 200u
+#define STELA_METAL_SELF_TESTS 1u
+#define STELA_METAL_ALPHA_TO_COVERAGE 2u
+#define STELA_METAL_ALPHA_TO_ONE 4u
+#define STELA_METAL_ATTACHMENT_BYTES 20u
 #define STELA_METAL_CONSTEXPR_SAMPLER_BYTES 16u
 #define STELA_METAL_MODULE_BYTES 32u
 #define STELA_METAL_LINKED_FUNCTION_BYTES 16u
 /* The metal_abi.h layouts it points to. */
-#define STELA_METAL_PIPELINE_TESSELLATION_BYTES 24u
+#define STELA_METAL_PIPELINE_TESSELLATION_BYTES 28u
 #define STELA_METAL_STAGE_IN_BYTES 752u
 
 /* Reflects entry of the AIR module specialized with the function constant

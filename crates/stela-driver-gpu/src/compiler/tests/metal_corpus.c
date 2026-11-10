@@ -20,6 +20,7 @@
 #include "llvm-c/Core.h"
 #include "nouveau/compiler/nak.h"
 #include "nouveau/headers/nv_device_info.h"
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,7 +100,7 @@ attribute_format(const struct stela_metal_attribute_use *attribute)
  * why in error. */
 static nir_shader *
 compile(const uint8_t *air, size_t size, const char *entry,
-        const struct stela_metal_target *target, struct stela_air_error *error)
+        const struct stela_metal_target *target, bool tile, struct stela_air_error *error)
 {
    struct stela_metal_specialization specialization = {.max_call_stack_depth = 1};
    uint32_t stage = reflection.stage;
@@ -158,6 +159,22 @@ compile(const uint8_t *air, size_t size, const char *entry,
    for (unsigned i = 0; i < specialization.sampler_count; i++)
       samplers[i] = (struct stela_air_constexpr_sampler){states[i], (uint64_t)i << 32 | i};
    specialization.samplers = samplers;
+   if (tile) {
+      /* As a tile render pipeline compiles it (pipeline.rs): a 16 x 16
+       * tile's threads in one linear workgroup of dynamic threadgroups,
+       * over half4 color attachments, one sample each. */
+      static const struct stela_metal_attachment colors[8] = {
+         [0 ... 7] = {.format = 97 /* VK_FORMAT_R16G16B16A16_SFLOAT */, .bytes = 8,
+                      .write_mask = 0xf},
+      };
+      specialization.workgroup_size[0] = 256;
+      specialization.dynamic_threadgroups = 1;
+      specialization.threadgroup_length_count = 0;
+      specialization.tile = 1;
+      specialization.samples = 1;
+      specialization.attachments = colors;
+      specialization.attachment_count = 8;
+   }
    return stela_metal_compile(air, size, entry, target, &specialization, error);
 }
 
@@ -210,9 +227,14 @@ sweep(const char *path, const struct stela_metal_target *target)
             printf("%s %s: reflection refused (%u): %s\n", path, entry, error.kind, error.detail),
                refused++;
       } else if (reflection.stage != STELA_METAL_VISIBLE) {
-         nir_shader *shader = compile(air, size, entry, target, &error);
+         nir_shader *shader = compile(air, size, entry, target, false, &error);
+         /* A kernel of an implicit imageblock is a tile function, which only
+          * a tile render pipeline compiles. */
+         bool tile = !shader && strstr(error.detail, "implicit imageblock outside a tile function");
+         if (tile)
+            shader = compile(air, size, entry, target, true, &error);
          if (shader) {
-            printf("%s %s: ok\n", path, entry);
+            printf("%s %s: ok%s\n", path, entry, tile ? " (tile)" : "");
             stela_metal_release(shader);
          } else {
             printf("%s %s: refused (%u): %s\n", path, entry, error.kind, error.detail);

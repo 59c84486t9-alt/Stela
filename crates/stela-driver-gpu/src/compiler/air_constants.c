@@ -165,6 +165,38 @@ normalize_predicates(LLVMModuleRef module)
       LLVMDisposeBuilder(builder);
 }
 
+/* FNV-1a over each value in index order: its index, size and bytes. */
+bool
+stela_air_specialized_name(const char *name, size_t name_bytes,
+                           const struct stela_air_constant_value *values, unsigned count,
+                           char *out, size_t size)
+{
+   uint64_t hash = 0xcbf29ce484222325ull;
+   bool started = false;
+   unsigned last = 0;
+   for (unsigned taken = 0; taken < count; taken++) {
+      const struct stela_air_constant_value *next = NULL;
+      for (unsigned i = 0; i < count; i++) {
+         if ((!started || values[i].index > last) && (!next || values[i].index < next->index))
+            next = &values[i];
+      }
+      if (!next)
+         break;
+      started = true;
+      last = next->index;
+      uint32_t words[2] = {next->index, (uint32_t)next->size};
+      const uint8_t *parts[2] = {(const uint8_t *)words, next->bytes};
+      size_t lengths[2] = {sizeof(words), next->size};
+      for (unsigned part = 0; part < 2; part++) {
+         for (size_t i = 0; i < lengths[part]; i++)
+            hash = (hash ^ parts[part][i]) * 0x100000001b3ull;
+      }
+   }
+   int written = snprintf(out, size, "%.*s.stela.values%016llx", (int)name_bytes, name,
+                          (unsigned long long)hash);
+   return written > 0 && (size_t)written < size;
+}
+
 bool
 stela_air_specialize_constants(struct stela_air_metadata *m,
                                const struct stela_air_constant_value *values, unsigned count)
@@ -292,6 +324,34 @@ stela_air_release_constructed_constants(struct stela_air_constructed_constants *
    *constants = (struct stela_air_constructed_constants){0};
 }
 
+/* Folds each constructor of the specialized clone. The global optimizer's
+ * evaluator refuses any intrinsic call it does not know, even one of
+ * constant operands such as llvm.umin, so fold those to their values first,
+ * as Metal's compiler does. */
+static bool
+fold_constructors(LLVMModuleRef clone, LLVMPassBuilderOptionsRef options)
+{
+   LLVMValueRef constructors = stela_air_metadata_constructors(clone);
+   LLVMValueRef entries = constructors ? LLVMGetInitializer(constructors) : NULL;
+   if (!entries || LLVMGetTypeKind(LLVMTypeOf(entries)) != LLVMArrayTypeKind)
+      return true;
+   uint64_t count = LLVMGetArrayLength2(LLVMTypeOf(entries));
+   for (uint64_t i = 0; i < count; i++) {
+      LLVMValueRef fn = LLVMGetOperand(LLVMGetAggregateElement(entries, (unsigned)i), 1);
+      if (!LLVMIsAFunction(fn) || LLVMIsDeclaration(fn))
+         continue;
+      /* Stela's LLVM (compat/llvm/passes.cpp) has only the pipelines the
+       * compiler names: this is the one folding uses. */
+      LLVMErrorRef error = LLVMRunPassesOnFunction(fn, "sccp,instsimplify,unreachableblockelim,dce",
+                                                   NULL, options);
+      if (error) {
+         LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
+         return false;
+      }
+   }
+   return true;
+}
+
 /* The clone and original have their globals in the same order. Keep the
  * constructor's destinations externally visible so LLVM commits their
  * initializers instead of forwarding their values and removing them. The
@@ -326,6 +386,10 @@ evaluate_constants(LLVMModuleRef original, LLVMModuleRef clone,
    LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
    if (!options)
       return false;
+   if (!fold_constructors(clone, options)) {
+      LLVMDisposePassBuilderOptions(options);
+      return false;
+   }
    LLVMErrorRef error = LLVMRunPasses(clone, "globalopt", NULL, options);
    LLVMDisposePassBuilderOptions(options);
    if (error) {
@@ -410,13 +474,96 @@ prepared_matches(LLVMModuleRef module, const struct stela_air_constructed_consta
    return index == prepared->count;
 }
 
+/* Whether each use of global is a plain load or store of its whole value. */
+static bool
+loaded_and_stored(LLVMValueRef global)
+{
+   for (LLVMUseRef use = LLVMGetFirstUse(global); use; use = LLVMGetNextUse(use)) {
+      LLVMValueRef user = LLVMGetUser(use);
+      bool load = LLVMIsALoadInst(user) && LLVMGetOperand(user, 0) == global;
+      bool store = LLVMIsAStoreInst(user) && LLVMGetOperand(user, 1) == global &&
+                   LLVMGetOperand(user, 0) != global;
+      if ((!load && !store) || LLVMGetVolatile(user) ||
+          LLVMGetOrdering(user) != LLVMAtomicOrderingNotAtomic)
+         return false;
+   }
+   return true;
+}
+
+/* LLVM's global optimizer shrinks a global that only ever holds its
+ * initializer or one other value to an i1, as Apple's compiler leaves a
+ * constructed program-scope constant. The data layout gives an i1 a byte
+ * (i1:8:8) holding 0 or 1: make it that byte, loaded and truncated and
+ * stored zero-extended, as LLVM lowers it, so it is ordinary byte storage.
+ * A global used otherwise stays for validation to refuse. */
+static void
+widen_bool_globals(LLVMModuleRef module)
+{
+   LLVMContextRef context = LLVMGetModuleContext(module);
+   LLVMTypeRef bit = LLVMInt1TypeInContext(context), byte = LLVMInt8TypeInContext(context);
+   LLVMBuilderRef builder = NULL;
+   for (LLVMValueRef global = LLVMGetFirstGlobal(module), next; global; global = next) {
+      next = LLVMGetNextGlobal(global);
+      LLVMValueRef initializer = LLVMGetInitializer(global);
+      if (LLVMGlobalGetValueType(global) != bit || !loaded_and_stored(global) ||
+          (initializer && !LLVMIsUndef(initializer) && !LLVMIsAConstantInt(initializer)))
+         continue;
+      if (!builder && !(builder = LLVMCreateBuilderInContext(context)))
+         return;
+      LLVMValueRef wide = LLVMAddGlobalInAddressSpace(module, byte, "",
+                                                      LLVMGetPointerAddressSpace(LLVMTypeOf(global)));
+      size_t bytes;
+      const char *name = LLVMGetValueName2(global, &bytes);
+      char *kept = strndup(name, bytes);
+      LLVMSetValueName2(global, "", 0);
+      if (kept)
+         LLVMSetValueName2(wide, kept, bytes);
+      free(kept);
+      if (initializer)
+         LLVMSetInitializer(wide, LLVMIsUndef(initializer) ? LLVMGetUndef(byte) :
+                                  LLVMConstInt(byte, LLVMConstIntGetZExtValue(initializer), false));
+      LLVMSetLinkage(wide, LLVMGetLinkage(global));
+      LLVMSetGlobalConstant(wide, LLVMIsGlobalConstant(global));
+      LLVMSetExternallyInitialized(wide, LLVMIsExternallyInitialized(global));
+      LLVMSetThreadLocal(wide, LLVMIsThreadLocal(global));
+      LLVMSetUnnamedAddress(wide, LLVMGetUnnamedAddress(global));
+      LLVMSetAlignment(wide, LLVMGetAlignment(global));
+      const char *section = LLVMGetSection(global);
+      if (section && *section)
+         LLVMSetSection(wide, section);
+      for (LLVMUseRef use = LLVMGetFirstUse(global), after; use; use = after) {
+         after = LLVMGetNextUse(use);
+         LLVMValueRef access = LLVMGetUser(use);
+         LLVMPositionBuilderBefore(builder, access);
+         LLVMValueRef replaced;
+         if (LLVMIsALoadInst(access)) {
+            replaced = LLVMBuildLoad2(builder, byte, wide, "");
+            LLVMSetAlignment(replaced, LLVMGetAlignment(access));
+            LLVMReplaceAllUsesWith(access, LLVMBuildTrunc(builder, replaced, bit, ""));
+         } else {
+            LLVMValueRef value = LLVMBuildZExt(builder, LLVMGetOperand(access, 0), byte, "");
+            replaced = LLVMBuildStore(builder, value, wide);
+            LLVMSetAlignment(replaced, LLVMGetAlignment(access));
+         }
+         LLVMInstructionEraseFromParent(access);
+      }
+      /* Metadata that names the global names its byte. */
+      LLVMReplaceAllUsesWith(global, wide);
+      LLVMDeleteGlobal(global);
+   }
+   if (builder)
+      LLVMDisposeBuilder(builder);
+}
+
 bool
 stela_air_construct_prepared_constants(struct stela_air_metadata *m,
                                         const struct stela_air_constructed_constants *prepared)
 {
    LLVMValueRef constructors = stela_air_metadata_constructors(m->module);
-   if (!constructors)
+   if (!constructors) {
+      widen_bool_globals(m->module);
       return true;
+   }
    LLVMValueRef entries = LLVMGetInitializer(constructors);
    uint64_t functions = LLVMGetArrayLength2(LLVMTypeOf(entries));
    if (functions > AIR_MAX_ARGUMENTS)
@@ -451,6 +598,7 @@ stela_air_construct_prepared_constants(struct stela_air_metadata *m,
       if (!listed && !LLVMGetFirstUse(dropped[i]))
          LLVMDeleteFunction(dropped[i]);
    }
+   widen_bool_globals(m->module);
    return true;
 }
 

@@ -67,6 +67,11 @@ struct stela_air_module {
    size_t size;
    const struct stela_air_constant_value *constants;
    unsigned constant_count;
+   /* Nonzero for another specialization of a module the program already
+    * holds, by its other function constant values: its definitions link
+    * named with the suffix ".stela.copy<copy>", as function tables name
+    * the functions of that specialization. */
+   unsigned copy;
 };
 /* A function a visible function table's handle calls, by name. */
 struct stela_air_linked_function {
@@ -88,6 +93,11 @@ struct stela_air_buffer {
    /* An air.visible_function_table: read-only device memory of its 64-bit
     * entry count, then that many function handles. */
    bool function_table;
+   /* A buffer array, metal::array_ref<device T *>: its count of buffers,
+    * bound at consecutive indices from index, whose addresses the argument
+    * points to in thread memory. Zero for one buffer. */
+   unsigned length;
+   bool array;
 };
 
 
@@ -421,12 +431,23 @@ bool stela_air_functions(const void *, size_t, stela_air_visit_function, void *,
  * linkage the entry lists do not name, until it refuses one. */
 bool stela_air_exports(const void *, size_t, stela_air_visit_function, void *,
                        struct stela_air_error *);
-/* A visible function a stitched function calls, and the module defining it. */
+/* A visible function a stitched function calls, the module defining it and
+ * the function constant values it was made with. A function with values is
+ * called by the name stela_air_specialized_name gives it, which linking the
+ * module with those values resolves. */
 struct stela_air_stitch_source {
    const void *bitcode;
    size_t size;
    const char *name;
+   const struct stela_air_constant_value *constants;
+   unsigned constant_count;
 };
+/* The name another module calls `name` of a module specialized with
+ * `values` by: "<name>.stela.values<hash of the values>", the same for the
+ * same values in any order. False if it does not fit in `size` bytes. */
+bool stela_air_specialized_name(const char *name, size_t name_bytes,
+                                const struct stela_air_constant_value *values, unsigned count,
+                                char *out, size_t size);
 #define STELA_AIR_STITCH_INPUT UINT32_MAX
 #define STELA_AIR_STITCH_BUILTIN (UINT32_MAX - 1)
 #define STELA_AIR_STITCH_BUFFER_ADDRESS (UINT32_MAX - 2)
@@ -588,6 +609,12 @@ struct stela_air_metadata {
    bool constructed;
 };
 
+/* Whether a and b hold the same values: equal, or structs and arrays whose
+ * elements do (air_stitch.c). */
+bool stela_air_isomorphic(LLVMContextRef context, LLVMTypeRef a, LLVMTypeRef b);
+/* `value` as `to`, a type of the same layout: itself, or for structs and
+ * arrays of the same shape, its elements each converted; NULL otherwise. */
+LLVMValueRef stela_air_convert_layout(LLVMBuilderRef builder, LLVMValueRef value, LLVMTypeRef to);
 bool stela_air_md_string(LLVMValueRef value, const char *expected);
 bool stela_air_md_uint(LLVMValueRef value, unsigned *number);
 /* Whether only os_log's calls read a value: its object or a string, which

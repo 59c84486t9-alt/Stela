@@ -33,10 +33,20 @@ struct stela_air_texture_context {
    nir_def *imageblock_extent;
    nir_def *(*imageblock_load)(void *translator, LLVMValueRef slice, nir_def *pixel,
                                unsigned components, unsigned bits);
-   /* Emits body count times in a loop, with each iteration's 32-bit index;
-    * false after reporting why. */
-   bool (*repeat)(void *translator, nir_def *count, bool (*body)(void *data, nir_def *index),
-                  void *data);
+   /* Emits body count times in a loop, with each iteration's 32-bit index
+    * and the carried values: count values that start as values[] holds them,
+    * which body reads and replaces, and which hold what the last iteration
+    * left after the loop. False after reporting why. */
+   bool (*repeat)(void *translator, nir_def *count, unsigned carried, nir_def **values,
+                  bool (*body)(void *data, nir_def *index, nir_def **values), void *data);
+   /* A two-way branch: branch sends the builder to the then block, false
+    * after reporting why; branch_else to the else block; branch_join to the
+    * blocks' merge, returning the phi of each side's value, NULL after
+    * reporting why. */
+   bool (*branch)(void *translator, nir_def *condition, nir_block *blocks[4]);
+   void (*branch_else)(void *translator, nir_block *blocks[4]);
+   nir_def *(*branch_join)(void *translator, nir_block *const blocks[4], nir_def *then_value,
+                           nir_def *else_value);
 };
 
 /* Whether value is a call of air.get_read_sampler, the placeholder Metal 4's
@@ -54,6 +64,13 @@ bool stela_air_null_texture(LLVMValueRef value);
  * one that contradicts what earlier calls said; a sample of a texture a
  * later call writes is refused where the sample is translated. */
 bool stela_air_texture_use(LLVMValueRef inst, struct stela_air_texture *texture);
+
+/* A two-plane texture's RGBA from its planes' texels, by its planes (enum
+ * stela_air_planes), and the inverse: an RGBA color's first-plane value and
+ * second-plane pair, in [0, 1], green and blue-red or luma and chroma. */
+nir_def *stela_air_planes_rgba(nir_builder *b, nir_def *first, nir_def *second, nir_def *planes);
+void stela_air_rgb_planes(nir_builder *b, nir_def *rgba, bool ycbcr, nir_def **first,
+                          nir_def **second);
 
 enum stela_air_texture_status {
    STELA_AIR_TEXTURE_OTHER, /* Not a texture function; nothing was emitted. */

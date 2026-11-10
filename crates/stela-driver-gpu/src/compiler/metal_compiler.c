@@ -136,11 +136,15 @@ add_buffer(struct reflecting *r, const struct stela_air_buffer *buffer, bool arg
          buffer->index, buffer->type_size};
       return true;
    }
-   if (out->buffer_count == STELA_METAL_BUFFERS)
-      return fail(r->error, STELA_AIR_LIMIT, "buffers exceed the table");
+   /* A buffer array's slots: one per buffer. */
+   unsigned slots = buffer->array ? buffer->length : 1;
+   for (unsigned i = 0; i < slots; i++) {
+      if (out->buffer_count == STELA_METAL_BUFFERS)
+         return fail(r->error, STELA_AIR_LIMIT, "buffers exceed the table");
+      out->buffers[out->buffer_count++] = (struct stela_metal_buffer_use){
+         buffer->index + i, buffer_access(buffer->access), argument_buffer};
+   }
    out->function_tables |= buffer->function_table;
-   out->buffers[out->buffer_count++] = (struct stela_metal_buffer_use){
-      buffer->index, buffer_access(buffer->access), argument_buffer};
    return true;
 }
 
@@ -474,7 +478,8 @@ add_buffer_binding(struct binding_reflection *r, const struct stela_air_buffer *
       buffer->address_space == 3 ? STELA_METAL_BINDING_THREADGROUP :
       buffer->address_space == 6 ? STELA_METAL_BINDING_OBJECT_PAYLOAD :
       buffer->function_table ? STELA_METAL_BINDING_FUNCTION_TABLE : STELA_METAL_BINDING_BUFFER;
-   return add_binding(r, kind, buffer->index, 0, name, name_bytes, type, type_bytes, used, layout,
+   return add_binding(r, kind, buffer->index, buffer->array ? buffer->length : 0, name, name_bytes,
+                      type, type_bytes, used, layout,
                       (struct stela_metal_binding){
                          .access = buffer_access(buffer->access),
                          .argument_buffer = argument_buffer, .size = buffer->type_size,
@@ -838,11 +843,14 @@ attachment_accesses(const struct stela_metal_specialization *specialization,
       enum pipe_format format = attachment_format(attachment->format);
       if (format == PIPE_FORMAT_NONE || util_format_get_blocksize(format) != attachment->bytes ||
           attachment->rgb_op > STELA_AIR_BLEND_MAX || attachment->alpha_op > STELA_AIR_BLEND_MAX ||
-          attachment->source_rgb > STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR ||
-          attachment->destination_rgb > STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR ||
-          attachment->source_alpha > STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR ||
-          attachment->destination_alpha > STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR ||
-          attachment->write_mask > 0xf)
+          attachment->source_rgb > STELA_AIR_BLEND_ONE_MINUS_SOURCE1_ALPHA ||
+          attachment->destination_rgb > STELA_AIR_BLEND_ONE_MINUS_SOURCE1_ALPHA ||
+          attachment->source_alpha > STELA_AIR_BLEND_ONE_MINUS_SOURCE1_ALPHA ||
+          attachment->destination_alpha > STELA_AIR_BLEND_ONE_MINUS_SOURCE1_ALPHA ||
+          attachment->write_mask > 0xf ||
+          (attachment->planes &&
+           (attachment->planes & STELA_AIR_PLANES_SUBSAMPLING) != STELA_AIR_PLANES_FULL) ||
+          attachment->planes > (STELA_AIR_PLANES_FULL | STELA_AIR_PLANES_YCBCR))
          return fail(error, STELA_AIR_INPUT, "invalid storage attachment");
       /* MTLColorWriteMask names red to alpha from its fourth bit down. */
       unsigned mask = attachment->write_mask;
@@ -856,6 +864,7 @@ attachment_accesses(const struct stela_metal_specialization *specialization,
          .destination_rgb = attachment->destination_rgb,
          .source_alpha = attachment->source_alpha,
          .destination_alpha = attachment->destination_alpha,
+         .planes = attachment->planes,
       };
    }
    return true;
@@ -950,7 +959,14 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       .constexpr_sampler_count = specialization->sampler_count,
       .texture_levels = stela_metal_texture_levels,
       .texture_null = stela_metal_texture_null,
+      .texture_srgb_storage = stela_metal_texture_srgb_storage,
       .sampler_never = stela_metal_sampler_never,
+      .sampler_filter = stela_metal_sampler_filter,
+      .texture_filter_class = stela_metal_texture_filter_class,
+      .dynamic_bicubic = (specialization->bicubic & STELA_METAL_BICUBIC_IDS) != 0,
+      .bicubic_samplers = specialization->bicubic & ~STELA_METAL_BICUBIC_IDS,
+      .texture_planes = stela_metal_texture_planes,
+      .dynamic_planes = true,
       .command_count = stela_metal_command_count,
       .encode_command = stela_metal_encode_command,
       .load_device_value = stela_metal_load_device_value,
@@ -1039,6 +1055,9 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       .max_mesh_primitives = target->max_mesh_primitives,
       .stencil_export = target->stencil_export != 0,
       .fragment_tests = target->fragment_tests != 0,
+      .self_tests = (specialization->fragment_tests & STELA_METAL_SELF_TESTS) != 0,
+      .alpha_to_coverage = (specialization->fragment_tests & STELA_METAL_ALPHA_TO_COVERAGE) != 0,
+      .alpha_to_one = (specialization->fragment_tests & STELA_METAL_ALPHA_TO_ONE) != 0,
       .raster_order_groups = target->raster_order_groups != 0,
       .attachments = specialization->attachment_count ? attachments : NULL,
       .samples = specialization->samples,

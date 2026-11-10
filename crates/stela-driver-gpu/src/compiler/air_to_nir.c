@@ -55,6 +55,15 @@ struct value {
    nir_def *choice;
    bool ssbo;
    unsigned ssbo_slot;
+   /* The alignment of the buffer argument's declared type, the most a
+    * pointer into it is known to have whatever its accesses claim: Apple
+    * GPUs accept vector accesses at their element alignment, which LLVM may
+    * claim more of. Zero when the type is unknown. */
+   unsigned declared_alignment;
+   /* The size of a bound buffer argument's declared type, the bytes from its
+    * address a fragment function may read wherever it runs: a draw binds
+    * every buffer its functions access. Zero for others. */
+   unsigned declared_size;
    /* Threadgroup or thread memory's variable, or, without one, constant data
     * at constant_base in the shader's data. Either is storage_size bytes. */
    nir_variable *storage;
@@ -166,6 +175,8 @@ struct translator {
    nir_variable *attachment_heaps[AIR_MAX_RENDER_TARGETS];
    nir_def *attachment_indices[AIR_MAX_RENDER_TARGETS];
    nir_variable *attachment_outputs[AIR_MAX_RENDER_TARGETS];
+   /* Storage attachment 0's second blend source, color(0) index(1). */
+   nir_variable *attachment_source1;
    nir_def *blend_color;
    struct attachment_read {
       const struct stela_air_stage_io *io;
@@ -426,6 +437,8 @@ pointer_authority(struct value *target, const struct value *root)
    target->access = root->access;
    target->ssbo = root->ssbo;
    target->ssbo_slot = root->ssbo_slot;
+   target->declared_alignment = root->declared_alignment;
+   target->declared_size = root->declared_size;
    target->storage = root->storage;
    target->constant_data = root->constant_data;
    target->storage_size = root->storage_size;
@@ -523,19 +536,30 @@ get_value(struct translator *t, LLVMValueRef llvm)
          return nir_imm_zero(&t->b, 2, bits);
       if (LLVMIsUndef(llvm))
          return nir_undef(&t->b, 2, bits);
-      /* A constant fills both of a thread's elements only when it fills every
-       * element alike. */
+      /* A constant fills both of a thread's elements when it fills every
+       * element alike, or names them as its elements 0 and 1, the thread's
+       * thread_elements(), leaving the rest undefined, as Apple's compiler
+       * builds a thread's elements. */
       LLVMValueRef first = LLVMGetAggregateElement(llvm, 0);
-      for (unsigned i = 1; first && i < 64; i++) {
-         if (LLVMGetAggregateElement(llvm, i) != first)
-            first = NULL;
+      LLVMValueRef second = LLVMGetAggregateElement(llvm, 1);
+      bool filled = first != NULL, elements = first && second;
+      for (unsigned i = 1; (filled || elements) && i < 64; i++) {
+         LLVMValueRef element = LLVMGetAggregateElement(llvm, i);
+         filled &= element == first;
+         elements &= i == 1 || (element && LLVMIsUndef(element));
       }
-      if (!first) {
+      if (!filled && !elements) {
          fail(t, STELA_AIR_TYPE, "SIMD-group matrix constants vary by element");
          return NULL;
       }
-      nir_def *element = get_value(t, first);
-      return element ? nir_vec2(&t->b, element, element) : NULL;
+      nir_def *lanes[2];
+      for (unsigned i = 0; i < 2; i++) {
+         LLVMValueRef element = filled || !i ? first : second;
+         lanes[i] = LLVMIsUndef(element) ? nir_undef(&t->b, 1, bits) : get_value(t, element);
+         if (!lanes[i])
+            return NULL;
+      }
+      return nir_vec2(&t->b, lanes[0], lanes[1]);
    }
    if (!value_shape(LLVMTypeOf(llvm), &components, &bits)) {
       fail(t, STELA_AIR_TYPE, "unsupported AIR operand type");
@@ -723,6 +747,52 @@ volume(nir_builder *b, nir_def *size)
                    nir_channel(b, size, 2));
 }
 
+/* A tile function's threadgroup, of shape threads, padded to even sides:
+ * Apple GPUs run a tile's threads as 2 by 2 quads. */
+static nir_def *
+tile_padded(nir_builder *b, nir_def *shape)
+{
+   return nir_iand_imm(b, nir_iadd_imm(b, nir_trim_vector(b, shape, 2), 1), ~1u);
+}
+
+/* A tile function's thread at this invocation, as Apple GPUs place them:
+ * the threadgroup's sides padded to even, then cut into blocks 8 threads
+ * wide and 4 high, shorter at its edges, which fill SIMD-groups in rows;
+ * within a block, 2 by 2 quads in rows two threads high. Consecutive
+ * invocations fill a NIR subgroup as Apple's lanes fill a SIMD-group, so
+ * quads and SIMD-groups hold the threads Apple's do. A position past the
+ * shape is padding, which skips the function. Its index in the threadgroup
+ * runs the same quads across the whole padded width. */
+static void
+tile_thread(struct translator *t, nir_def *shape, nir_def **position, nir_def **index)
+{
+   nir_builder *b = &t->b;
+   nir_def *padded = tile_padded(b, shape);
+   nir_def *width = nir_channel(b, padded, 0), *height = nir_channel(b, padded, 1);
+   nir_def *lane = nir_load_local_invocation_index(b);
+   nir_def *band = nir_ishl_imm(b, width, 2);
+   nir_def *by = nir_udiv(b, lane, band);
+   nir_def *in_band = nir_isub(b, lane, nir_imul(b, by, band));
+   nir_def *rows = nir_umin(b, nir_imm_int(b, 4), nir_isub(b, height, nir_ishl_imm(b, by, 2)));
+   nir_def *block = nir_ishl_imm(b, rows, 3);
+   nir_def *bx = nir_udiv(b, in_band, block);
+   nir_def *inner = nir_isub(b, in_band, nir_imul(b, bx, block));
+   nir_def *columns = nir_umin(b, nir_imm_int(b, 8), nir_isub(b, width, nir_ishl_imm(b, bx, 3)));
+   nir_def *quads = nir_ushr_imm(b, columns, 1);
+   nir_def *quad = nir_ushr_imm(b, inner, 2);
+   nir_def *qy = nir_udiv(b, quad, quads);
+   nir_def *qx = nir_isub(b, quad, nir_imul(b, qy, quads));
+   nir_def *x = nir_iadd(b, nir_iadd(b, nir_ishl_imm(b, bx, 3), nir_ishl_imm(b, qx, 1)),
+                         nir_iand_imm(b, inner, 1));
+   nir_def *y = nir_iadd(b, nir_iadd(b, nir_ishl_imm(b, by, 2), nir_ishl_imm(b, qy, 1)),
+                         nir_iand_imm(b, nir_ushr_imm(b, inner, 1), 1));
+   *position = nir_vec3(b, x, y, nir_imm_int(b, 0));
+   nir_def *row_quads = nir_ushr_imm(b, width, 1);
+   nir_def *at = nir_iadd(b, nir_imul(b, nir_ushr_imm(b, y, 1), row_quads), nir_ushr_imm(b, x, 1));
+   *index = nir_ior(b, nir_ishl_imm(b, at, 2),
+                    nir_ior(b, nir_ishl_imm(b, nir_iand_imm(b, y, 1), 1), nir_iand_imm(b, x, 1)));
+}
+
 /* The thread's position in its threadgroup: its linear index's in the shape
  * the threadgroup runs. A threadgroup at a dispatchThreads grid's edge is
  * smaller than the workgroup, and Metal numbers its threads, and fills its
@@ -733,6 +803,13 @@ local_position(struct translator *t)
 {
    nir_builder *b = &t->b;
    const unsigned *size = t->options->workgroup_size;
+   if (t->options->tile) {
+      nir_def *shape = threadgroup_shape(t), *position, *index;
+      if (!shape)
+         return NULL;
+      tile_thread(t, shape, &position, &index);
+      return position;
+   }
    if (!t->options->dynamic_shape && !grid_bounded(t))
       return nir_load_local_invocation_id(b);
    if (!t->options->dynamic_shape && size[1] == 1 && size[2] == 1)
@@ -861,6 +938,90 @@ imageblock_data_call(LLVMValueRef inst)
    return stela_air_call_named(name, name_length, "air.imageblock_data");
 }
 
+/* What extractvalue `extract` reads, when an insertvalue chain names it:
+ * extracts of extracts compose their index paths, an insert at the path
+ * gives its value, one above it is entered and one beside it skipped, as
+ * LLVM's instcombine folds them. NULL when an insert lies within the path's
+ * aggregate or the chain starts elsewhere. */
+static LLVMValueRef
+extracted_value(LLVMValueRef extract)
+{
+   unsigned path[16], depth = LLVMGetNumIndices(extract);
+   if (depth > ARRAY_SIZE(path))
+      return NULL;
+   memcpy(path, LLVMGetIndices(extract), depth * sizeof(*path));
+   LLVMValueRef aggregate = LLVMGetOperand(extract, 0);
+   for (unsigned steps = 0; steps < 4096; steps++) {
+      if (LLVMIsAExtractValueInst(aggregate)) {
+         unsigned outer = LLVMGetNumIndices(aggregate);
+         if (outer + depth > ARRAY_SIZE(path))
+            return NULL;
+         memmove(path + outer, path, depth * sizeof(*path));
+         memcpy(path, LLVMGetIndices(aggregate), outer * sizeof(*path));
+         depth += outer;
+         aggregate = LLVMGetOperand(aggregate, 0);
+         continue;
+      }
+      if (!LLVMIsAInsertValueInst(aggregate))
+         return NULL;
+      unsigned inserted = LLVMGetNumIndices(aggregate);
+      const unsigned *at = LLVMGetIndices(aggregate);
+      unsigned common = MIN2(inserted, depth);
+      if (memcmp(at, path, common * sizeof(*path))) {
+         aggregate = LLVMGetOperand(aggregate, 0);
+         continue;
+      }
+      if (inserted > depth)
+         return NULL;
+      memmove(path, path + inserted, (depth - inserted) * sizeof(*path));
+      depth -= inserted;
+      aggregate = LLVMGetOperand(aggregate, 1);
+      if (!depth)
+         return aggregate;
+   }
+   return NULL;
+}
+
+/* Forwards fn's extractvalues to the values insertvalue chains put there,
+ * so a texture or sampler packed into Metal's one-pointer wrapper structs,
+ * or into a larger struct such as Core Image's coreimage::Sampler, reaches
+ * its texture calls as the read itself (Core Image's stitched filters pass
+ * _ci_sampler_builder's result to their kernels by value). */
+static void
+forward_extracts(LLVMValueRef fn)
+{
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      LLVMValueRef inst = LLVMGetFirstInstruction(block);
+      while (inst) {
+         LLVMValueRef next = LLVMGetNextInstruction(inst);
+         LLVMValueRef value = LLVMIsAExtractValueInst(inst) ? extracted_value(inst) : NULL;
+         if (value && LLVMTypeOf(value) == LLVMTypeOf(inst)) {
+            LLVMReplaceAllUsesWith(inst, value);
+            LLVMInstructionEraseFromParent(inst);
+         }
+         inst = next;
+      }
+   }
+   /* The chains those extracts read may now feed nothing. */
+   for (bool erased = true; erased;) {
+      erased = false;
+      for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+           block = LLVMGetNextBasicBlock(block)) {
+         LLVMValueRef inst = LLVMGetFirstInstruction(block);
+         while (inst) {
+            LLVMValueRef next = LLVMGetNextInstruction(inst);
+            if ((LLVMIsAInsertValueInst(inst) || LLVMIsAExtractValueInst(inst)) &&
+                !LLVMGetFirstUse(inst)) {
+               LLVMInstructionEraseFromParent(inst);
+               erased = true;
+            }
+            inst = next;
+         }
+      }
+   }
+}
+
 /* The texture or sampler a stitched function's call reads from the binding
  * at `index`. A texture's type, texel type and access are what the texture
  * calls that take it need, since a stitched parameter's metadata names only
@@ -898,6 +1059,7 @@ stitched_builtin_name(const char *name, size_t name_length)
 static bool
 stitched_resources(struct translator *t, LLVMValueRef fn)
 {
+   forward_extracts(fn);
    for (LLVMValueRef read = LLVMGetFirstFunction(LLVMGetGlobalParent(fn)); read;
         read = LLVMGetNextFunction(read)) {
       size_t name_length;
@@ -1022,13 +1184,25 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
       return device_value(t, builtin == STELA_AIR_STAGE_IN_GRID_ORIGIN ? STELA_AIR_STAGE_IN_ORIGIN :
                                                                           STELA_AIR_STAGE_IN_SIZE);
    case STELA_AIR_THREAD_INDEX_IN_THREADGROUP:
+   case STELA_AIR_QUADGROUP_INDEX_IN_THREADGROUP:
+      if (t->options->tile) {
+         nir_def *shape = threadgroup_shape(t), *position, *index;
+         if (!shape)
+            return NULL;
+         tile_thread(t, shape, &position, &index);
+         return builtin == STELA_AIR_THREAD_INDEX_IN_THREADGROUP ? index :
+                                                                  nir_ushr_imm(b, index, 2);
+      }
+      if (builtin == STELA_AIR_QUADGROUP_INDEX_IN_THREADGROUP)
+         return nir_ushr_imm(b, nir_load_local_invocation_index(b), 2);
       return nir_load_local_invocation_index(b);
    case STELA_AIR_SIMDGROUP_INDEX_IN_THREADGROUP:
       return nir_load_subgroup_id(b);
    case STELA_AIR_SIMDGROUPS_PER_THREADGROUP:
    case STELA_AIR_DISPATCH_SIMDGROUPS_PER_THREADGROUP: {
       bool running = builtin == STELA_AIR_SIMDGROUPS_PER_THREADGROUP;
-      if (!t->options->dynamic_shape && !(running && grid_bounded(t)))
+      /* A tile's workgroup is its padded threads, as Apple's SIMD-groups. */
+      if (t->options->tile || (!t->options->dynamic_shape && !(running && grid_bounded(t))))
          return nir_load_num_subgroups(b);
       value = running ? running_shape(t) : threadgroup_shape(t);
       if (!value)
@@ -1036,11 +1210,16 @@ builtin_value(struct translator *t, enum stela_air_builtin builtin)
       return nir_udiv(b, nir_iadd(b, volume(b, value), nir_iadd_imm(b, nir_load_subgroup_size(b), -1)),
                       nir_load_subgroup_size(b));
    }
-   case STELA_AIR_QUADGROUP_INDEX_IN_THREADGROUP:
-      return nir_ushr_imm(b, nir_load_local_invocation_index(b), 2);
    case STELA_AIR_QUADGROUPS_PER_THREADGROUP:
    case STELA_AIR_DISPATCH_QUADGROUPS_PER_THREADGROUP: {
       bool running = builtin == STELA_AIR_QUADGROUPS_PER_THREADGROUP;
+      if (t->options->tile) {
+         nir_def *shape = threadgroup_shape(t);
+         if (!shape)
+            return NULL;
+         nir_def *padded = tile_padded(b, shape);
+         return nir_ushr_imm(b, nir_imul(b, nir_channel(b, padded, 0), nir_channel(b, padded, 1)), 2);
+      }
       if (!t->options->dynamic_shape && !(running && grid_bounded(t)))
          return nir_imm_int(b, (int)DIV_ROUND_UP(size[0] * size[1] * size[2], 4));
       value = running ? running_shape(t) : threadgroup_shape(t);
@@ -1140,8 +1319,11 @@ argument_root(struct translator *t, struct value *value, LLVMValueRef param,
               const struct stela_air_argument *argument)
 {
    value->pointer_root = param;
-   if (!argument->is_argument_buffer)
+   value->declared_alignment = argument->buffer.type_alignment;
+   if (!argument->is_argument_buffer) {
+      value->declared_size = argument->buffer.type_size;
       return true;
+   }
    if (t->options->bind_ssbo)
       return fail(t, STELA_AIR_ARGUMENT, "argument buffer %u requires device addresses",
                   argument->buffer.argument);
@@ -1203,6 +1385,59 @@ absent_argument(struct translator *t, const struct stela_air_argument *argument,
 }
 
 /* The arguments of a kernel, object or mesh function. */
+static struct value *storage_root(struct translator *t, LLVMValueRef llvm, unsigned access);
+
+/* A buffer array, metal::array_ref<device T *>: thread memory holding the
+ * bound address of each of its buffers, whose loads read the one field
+ * those addresses are. */
+static bool
+buffer_array(struct translator *t, const struct stela_air_argument *argument)
+{
+   const struct stela_air_buffer *desc = &argument->buffer;
+   unsigned length = desc->length;
+   if (length && (t->options->bind_ssbo || !t->options->bind_buffer))
+      return fail(t, STELA_AIR_ARGUMENT, "buffer array %u requires device addresses",
+                  desc->argument);
+   uint64_t size = 8ull * length;
+   if (t->private_layout_bound + size + 7 > t->options->max_private_bytes)
+      return fail(t, STELA_AIR_LIMIT, "thread memory size/alignment exceeds the target limit");
+   nir_variable *var = length ? nir_local_variable_create(
+      t->b.impl, glsl_array_type(glsl_uint8_t_type(), (unsigned)size, 1), "air.buffer_array") : NULL;
+   if (length && !var)
+      return fail(t, STELA_AIR_ALLOCATION, "thread memory variable allocation failed");
+   if (var) {
+      var->data.alignment = 8;
+      t->private_allocations++;
+      t->private_layout_bound += size + 7;
+   }
+   for (unsigned i = 0; i < length; i++) {
+      struct stela_air_buffer element = *desc;
+      element.index = desc->index + i;
+      element.array = false;
+      element.length = 0;
+      nir_def *address = t->options->bind_buffer(&t->b, &element, t->options->binding_data);
+      if (!binding_prelude(t))
+         return false;
+      if (!address || address->num_components != 1 || address->bit_size != 64)
+         return fail(t, STELA_AIR_ARGUMENT, "binding callback refused/invalid buffer %u",
+                     element.index);
+      nir_deref_instr *byte = nir_build_deref_array_imm(&t->b, nir_build_deref_var(&t->b, var), 8 * i);
+      nir_deref_instr *slot = nir_build_deref_cast_with_alignment(
+         &t->b, &byte->def, nir_var_function_temp, glsl_uint64_t_type(), 8, 8, 0);
+      nir_store_deref(&t->b, slot, address, 1);
+   }
+   struct value *value = storage_root(t, argument->value, STELA_AIR_READ);
+   if (!value)
+      return false;
+   value->storage = var;
+   value->storage_size = (unsigned)size;
+   value->fields = argument->fields;
+   value->offset_known = true;
+   /* No array is empty memory: its loads are refused as unread fields. */
+   value->null = !length;
+   return true;
+}
+
 static bool
 compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
 {
@@ -1260,6 +1495,11 @@ compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
          nir_def *def = stage_in_attribute(t, argument->location, grid_position(t), NULL,
                                            argument->primitive, argument->type_components);
          if (!def || !put_value(t, param, def, 0))
+            return false;
+         continue;
+      }
+      if (argument->is_buffer && argument->buffer.array) {
+         if (!buffer_array(t, argument))
             return false;
          continue;
       }
@@ -1823,6 +2063,62 @@ global_access(struct translator *t, const struct value *address, nir_def *stored
    return nir_load_global(b, components, bits, address->def, .align_mul = alignment, .access = access);
 }
 
+/* Whether `address` points into a buffer argument nothing writes while the
+ * function runs: one it only reads (`const device` or `constant`, which
+ * translation refuses to store to) that Apple's compiler marks
+ * "air-buffer-no-alias", so that no pointer it writes through reaches it.
+ * Its loads may then use a read-only cache and move. */
+static bool
+read_only_buffer(struct translator *t, const struct value *address)
+{
+   LLVMValueRef root = address->pointer_root;
+   if (address->access != STELA_AIR_READ || address->choices || address->storage ||
+       address->constant_data || !root || !LLVMIsAArgument(root) || LLVMGetParamParent(root) != t->entry)
+      return false;
+   static const char key[] = "air-buffer-no-alias";
+   unsigned count = LLVMCountParams(t->entry);
+   for (unsigned i = 0; i < count; i++) {
+      if (LLVMGetParam(t->entry, i) == root)
+         return LLVMGetStringAttributeAtIndex(t->entry, i + 1, key, sizeof(key) - 1) != NULL;
+   }
+   return false;
+}
+
+/* Whether a fragment function's read of `bytes` at `address` lies within its
+ * bound buffer argument's declared type at a fixed offset, so that it reads
+ * mapped memory whichever pixel runs it: a draw binds every buffer its
+ * functions access. Speculating it lets a derivative of the value it reads
+ * leave a branch (hoist_derivatives). */
+static bool
+fixed_field(struct translator *t, const struct value *address, unsigned bytes)
+{
+   if (!t->stage_options || t->stage_options->stage != STELA_AIR_FRAGMENT ||
+       !address->declared_size || address->choices || !address->pointer_root)
+      return false;
+   const struct value *root = find_value(t, address->pointer_root);
+   if (!root || !root->def)
+      return false;
+   uint64_t offset = 0;
+   nir_def *def = address->def;
+   for (unsigned steps = 0; def != root->def; steps++) {
+      nir_instr *instr = nir_def_instr(def);
+      if (steps == 16 || instr->type != nir_instr_type_alu)
+         return false;
+      nir_alu_instr *alu = nir_instr_as_alu(instr);
+      if (alu->op != nir_op_iadd)
+         return false;
+      unsigned constant = nir_src_is_const(alu->src[1].src) ? 1 : 0;
+      if (!nir_src_is_const(alu->src[constant].src))
+         return false;
+      uint64_t added = nir_src_comp_as_uint(alu->src[constant].src, alu->src[constant].swizzle[0]);
+      if (added >= address->declared_size)
+         return false;
+      offset += added;
+      def = alu->src[!constant].src.ssa;
+   }
+   return offset + bytes <= address->declared_size;
+}
+
 /* One access at `address`: a load, a store of `stored` or an atomic, which
  * return the loaded or old value. */
 static nir_def *
@@ -1887,12 +2183,24 @@ memory_access(struct translator *t, const struct value *address, nir_def *stored
    }
    if (address->null)
       return stored ? NULL : nir_imm_zero(&t->b, components, bits);
+   /* Buffer memory is aligned only as its declared type is; a pointer of
+    * unknown type, only as its elements. Thread memory and constant data
+    * are the translator's own, aligned as LLVM claims. */
+   if (!address->constant_data && (!address->storage || address->declared_alignment)) {
+      unsigned element = MAX2(bits / 8, 1);
+      alignment = MIN2(alignment, MAX2(address->declared_alignment, element));
+   }
    if (address->storage)
       return variable_access(t, address, stored, atomic, access, components, bits, alignment);
    if (address->constant_data)
       return constant_access(t, address, components, bits, alignment);
    if (address->ssbo)
       return ssbo_access(t, address, stored, atomic, access, components, bits, alignment);
+   if (!stored && !atomic && fixed_field(t, address, components * (bits / 8)))
+      access |= ACCESS_CAN_SPECULATE;
+   if (!stored && !atomic && !(access & (ACCESS_ATOMIC | ACCESS_COHERENT)) &&
+       read_only_buffer(t, address))
+      access |= ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER;
    return global_access(t, address, stored, atomic, access, components, bits, alignment);
 }
 
@@ -2347,7 +2655,25 @@ vector_instruction(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
       return put_lanes(t, inst, lanes, a->components, a->bits);
    }
    struct value *b = partial_value(t, LLVMGetOperand(inst, 1));
-   unsigned n = LLVMGetNumMaskElements(inst);
+   unsigned n = LLVMGetNumMaskElements(inst), bits;
+   /* A vector widened to a SIMD-group matrix, as Apple's compiler builds a
+    * thread's elements: its elements 0 and 1 are the matrix's, the rest
+    * undefined. */
+   if (b && a->components == b->components && a->bits == b->bits &&
+       stela_air_matrix_type(LLVMTypeOf(inst), &bits) && bits == a->bits) {
+      nir_def *lanes[2];
+      for (unsigned i = 0; i < 2; i++) {
+         int mask = LLVMGetMaskValue(inst, i);
+         unsigned channel = mask < 0 ? 0 : (unsigned)mask;
+         if (mask >= 0 && channel >= a->components + b->components)
+            return fail(t, STELA_AIR_INSTRUCTION, "invalid shuffle selector");
+         lanes[i] = mask < 0 ? NULL : channel < a->components ? value_lane(t, a, channel) :
+                                      value_lane(t, b, channel - a->components);
+         if (!lanes[i])
+            lanes[i] = nir_undef(&t->b, 1, bits);
+      }
+      return put_value(t, inst, nir_vec2(&t->b, lanes[0], lanes[1]), 0);
+   }
    if (!b || a->components != b->components || a->bits != b->bits || !n || n > 4)
       return fail(t, STELA_AIR_TYPE, "unsupported shuffle shape");
    nir_def *lanes[4] = {0};
@@ -2382,6 +2708,24 @@ matrix_elements(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
       return false;
    if (op == LLVMShuffleVector) {
       unsigned n = LLVMGetNumMaskElements(inst), components, bits;
+      /* A matrix of two matrices' elements, as Apple's compiler replaces a
+       * thread's elements and keeps the rest: its own elements 0 and 1 are
+       * those its mask names, which must be thread elements. */
+      if (stela_air_matrix_type(LLVMTypeOf(inst), &bits)) {
+         nir_def *other = get_value(t, LLVMGetOperand(inst, 1));
+         if (!other)
+            return false;
+         nir_def *lanes[2];
+         for (unsigned i = 0; i < 2; i++) {
+            int mask = LLVMGetMaskValue(inst, i);
+            unsigned element = mask < 0 ? 0 : (unsigned)mask % 64;
+            if (mask >= 0 && element > 1)
+               return fail(t, STELA_AIR_INSTRUCTION, "SIMD-group matrix shuffle beyond the thread elements");
+            lanes[i] = mask < 0 ? nir_undef(&t->b, 1, bits) :
+                       nir_channel(&t->b, mask < 64 ? matrix : other, element);
+         }
+         return put_value(t, inst, nir_vec2(&t->b, lanes[0], lanes[1]), 0);
+      }
       if (!value_shape(LLVMTypeOf(inst), &components, &bits))
          return fail(t, STELA_AIR_TYPE, "SIMD-group matrix shuffles gather a vector of thread elements");
       nir_def *lanes[4] = {0};
@@ -2875,13 +3219,20 @@ ordered_instr(struct translator *t, nir_instr *instr)
    return t->attachment_read_count && !nir_foreach_src(instr, placeholder_source, t);
 }
 
-/* Storage attachment n's image at the cursor. */
+/* Storage attachment n's image at the cursor; a two-plane attachment's
+ * second plane, `plane` 1, follows its first. */
 static nir_deref_instr *
-attachment_image(struct translator *t, unsigned n)
+attachment_plane(struct translator *t, unsigned n, unsigned plane)
 {
    nir_builder *b = &t->b;
    return nir_build_deref_array(b, nir_build_deref_var(b, t->attachment_heaps[n]),
-                                t->attachment_indices[n]);
+                                nir_iadd_imm(b, t->attachment_indices[n], plane));
+}
+
+static nir_deref_instr *
+attachment_image(struct translator *t, unsigned n)
+{
+   return attachment_plane(t, n, 0);
 }
 
 /* The texel under the fragment: its pixel, the layer it renders to and, of
@@ -2896,35 +3247,80 @@ attachment_texel(struct translator *t, nir_def **coord, nir_def **sample)
    *sample = t->stage_options->samples > 1 ? nir_load_sample_id(b) : nir_imm_int(b, 0);
 }
 
-/* Storage attachment n's texel bits, a 32-bit word per four bytes. */
+/* The texel bits of storage attachment n's `plane`, a 32-bit word per four
+ * bytes of a texel of `format`. */
 static nir_def *
-load_attachment(struct translator *t, unsigned n)
+load_plane(struct translator *t, unsigned n, unsigned plane, enum pipe_format format)
 {
    nir_builder *b = &t->b;
-   const struct stela_air_attachment_access *access = storage_attachment(t, n);
    nir_def *coord, *sample;
    attachment_texel(t, &coord, &sample);
    bool multisample = t->stage_options->samples > 1;
-   nir_def *texel = nir_image_deref_load(b, 4, 32, &attachment_image(t, n)->def, coord, sample,
+   nir_def *texel = nir_image_deref_load(b, 4, 32, &attachment_plane(t, n, plane)->def, coord, sample,
                                          nir_imm_int(b, 0),
                                          .image_dim = multisample ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
                                          .image_array = true, .format = PIPE_FORMAT_NONE,
                                          .access = ACCESS_COHERENT, .dest_type = nir_type_uint32);
-   return nir_trim_vector(b, texel, DIV_ROUND_UP(util_format_get_blocksizebits(access->format), 32));
+   return nir_trim_vector(b, texel, DIV_ROUND_UP(util_format_get_blocksizebits(format), 32));
+}
+
+/* Storage attachment n's texel bits, a 32-bit word per four bytes. */
+static nir_def *
+load_attachment(struct translator *t, unsigned n)
+{
+   return load_plane(t, n, 0, storage_attachment(t, n)->format);
 }
 
 static void
-store_attachment(struct translator *t, unsigned n, nir_def *bits)
+store_plane(struct translator *t, unsigned n, unsigned plane, nir_def *bits)
 {
    nir_builder *b = &t->b;
    nir_def *coord, *sample;
    attachment_texel(t, &coord, &sample);
    bool multisample = t->stage_options->samples > 1;
    nir_def *words = nir_pad_vector_imm_int(b, bits, 0, 4);
-   nir_image_deref_store(b, &attachment_image(t, n)->def, coord, sample, words, nir_imm_int(b, 0),
+   nir_image_deref_store(b, &attachment_plane(t, n, plane)->def, coord, sample, words, nir_imm_int(b, 0),
                          .image_dim = multisample ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
                          .image_array = true, .format = PIPE_FORMAT_NONE,
                          .access = ACCESS_COHERENT, .src_type = nir_type_uint32);
+}
+
+static void
+store_attachment(struct translator *t, unsigned n, nir_def *bits)
+{
+   store_plane(t, n, 0, bits);
+}
+
+/* A two-plane storage attachment's texel as RGBA: its first plane's raw
+ * byte and its second's two, converted as its texture samples them. */
+static nir_def *
+load_planes(struct translator *t, unsigned n)
+{
+   nir_builder *b = &t->b;
+   const struct stela_air_attachment_access *access = storage_attachment(t, n);
+   nir_def *first = nir_format_unpack_rgba(b, load_plane(t, n, 0, PIPE_FORMAT_R8_UNORM),
+                                           PIPE_FORMAT_R8_UNORM);
+   nir_def *second = nir_format_unpack_rgba(b, load_plane(t, n, 1, PIPE_FORMAT_R8G8_UNORM),
+                                            PIPE_FORMAT_R8G8_UNORM);
+   return stela_air_planes_rgba(b, first, second, nir_imm_int(b, (int)access->planes));
+}
+
+/* Writes a two-plane storage attachment's RGBA `color`: its first plane's
+ * byte and its second's two. */
+static void
+store_planes(struct translator *t, unsigned n, nir_def *color)
+{
+   nir_builder *b = &t->b;
+   const struct stela_air_attachment_access *access = storage_attachment(t, n);
+   nir_def *first, *second;
+   stela_air_rgb_planes(b, color, access->planes & STELA_AIR_PLANES_YCBCR, &first, &second);
+   nir_def *zero = nir_imm_float(b, 0.0f);
+   store_plane(t, n, 0,
+               nir_format_pack_rgba(b, PIPE_FORMAT_R8_UNORM, nir_vec4(b, first, zero, zero, zero)));
+   store_plane(t, n, 1,
+               nir_format_pack_rgba(b, PIPE_FORMAT_R8G8_UNORM,
+                                    nir_vec4(b, nir_channel(b, second, 0),
+                                             nir_channel(b, second, 1), zero, zero)));
 }
 
 /* The bits of format's channel `rgba` (red, green, blue or alpha) in each of
@@ -2945,7 +3341,7 @@ channel_bits(enum pipe_format format, unsigned rgba, uint32_t words[4])
 /* A factor of Metal's blend equation for the color or alpha part. */
 static nir_def *
 blend_factor(struct translator *t, enum stela_air_blend_factor factor, bool alpha,
-             nir_def *source, nir_def *destination, nir_def *constant)
+             nir_def *source, nir_def *destination, nir_def *constant, nir_def *source1)
 {
    nir_builder *b = &t->b;
    unsigned components = alpha ? 1 : 3;
@@ -2971,6 +3367,10 @@ blend_factor(struct translator *t, enum stela_air_blend_factor factor, bool alph
    case STELA_AIR_BLEND_ONE_MINUS_COLOR_FACTOR: part = nir_fsub(b, one, PART(constant)); break;
    case STELA_AIR_BLEND_ALPHA_FACTOR: part = ALPHA(constant); break;
    case STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR: part = nir_fsub(b, one, ALPHA(constant)); break;
+   case STELA_AIR_BLEND_SOURCE1_COLOR: part = PART(source1); break;
+   case STELA_AIR_BLEND_ONE_MINUS_SOURCE1_COLOR: part = nir_fsub(b, one, PART(source1)); break;
+   case STELA_AIR_BLEND_SOURCE1_ALPHA: part = ALPHA(source1); break;
+   case STELA_AIR_BLEND_ONE_MINUS_SOURCE1_ALPHA: part = nir_fsub(b, one, ALPHA(source1)); break;
    default: UNREACHABLE("validated blend factor");
    }
 #undef PART
@@ -2980,7 +3380,7 @@ blend_factor(struct translator *t, enum stela_air_blend_factor factor, bool alph
 
 static nir_def *
 blend_part(struct translator *t, const struct stela_air_attachment_access *access, bool alpha,
-           nir_def *source, nir_def *destination, nir_def *constant)
+           nir_def *source, nir_def *destination, nir_def *constant, nir_def *source1)
 {
    nir_builder *b = &t->b;
    enum stela_air_blend_op op = alpha ? access->alpha_op : access->rgb_op;
@@ -2991,10 +3391,10 @@ blend_part(struct translator *t, const struct stela_air_attachment_access *acces
    if (op == STELA_AIR_BLEND_MAX)
       return nir_fmax(b, s, d);
    nir_def *sf = nir_fmul(b, s, blend_factor(t, alpha ? access->source_alpha : access->source_rgb,
-                                             alpha, source, destination, constant));
+                                             alpha, source, destination, constant, source1));
    nir_def *df = nir_fmul(b, d, blend_factor(t, alpha ? access->destination_alpha :
                                                         access->destination_rgb,
-                                             alpha, source, destination, constant));
+                                             alpha, source, destination, constant, source1));
    return op == STELA_AIR_BLEND_ADD ? nir_fadd(b, sf, df) :
           op == STELA_AIR_BLEND_SUBTRACT ? nir_fsub(b, sf, df) : nir_fsub(b, df, sf);
 }
@@ -3003,7 +3403,7 @@ blend_part(struct translator *t, const struct stela_air_attachment_access *acces
  * float attachment: a normalized one clamps its inputs to its range. */
 static nir_def *
 blend(struct translator *t, const struct stela_air_attachment_access *access, nir_def *source,
-      nir_def *destination)
+      nir_def *destination, nir_def *source1)
 {
    nir_builder *b = &t->b;
    const struct util_format_description *desc = util_format_description(access->format);
@@ -3015,17 +3415,59 @@ blend(struct translator *t, const struct stela_air_attachment_access *access, ni
       source = nir_fclamp(b, source, low, high);
       if (constant)
          constant = nir_fclamp(b, constant, low, high);
+      source1 = nir_fclamp(b, source1, low, high);
    }
-   nir_def *rgb = blend_part(t, access, false, source, destination, constant);
-   nir_def *a = blend_part(t, access, true, source, destination, constant);
+   nir_def *rgb = blend_part(t, access, false, source, destination, constant, source1);
+   nir_def *a = blend_part(t, access, true, source, destination, constant, source1);
    return nir_vector_insert_imm(b, nir_pad_vector(b, rgb, 4), a, 3);
 }
 
-/* An output of color attachment location clamped to what its
- * extended-range format encodes: its color to the codes' range, its alpha
- * to [0, 1]. A 32-bit output is also rounded to its nearest half, which the
- * half-float texels hold exactly: NVIDIA's color output narrows by
- * truncating, which can store a code's value nearer the code below. Other
+/* Apple GPUs draw points at most 511 pixels wide, as Metal's feature set
+ * tables give: a larger point size draws a point that wide. NVIDIA's reach
+ * 2048. */
+#define STELA_AIR_MAX_POINT_SIZE 511.0f
+
+static nir_def *
+largest_point(nir_builder *b, nir_def *size)
+{
+   return nir_fmin(b, size, nir_imm_floatN_t(b, STELA_AIR_MAX_POINT_SIZE, size->bit_size));
+}
+
+/* The value of the extended-range code nearest v, ties to even, among codes
+ * low to high: (code - 384) / 510, through the sRGB curve mirrored below
+ * zero for the sRGB encodings, as metal_abi.c's xr_code and xr_value encode
+ * and decode texels. */
+static nir_def *
+extended_range_code(nir_builder *b, nir_def *v, bool srgb, float low, float high)
+{
+   nir_def *zero = nir_imm_float(b, 0.0f);
+   if (srgb) {
+      nir_def *m = nir_fabs(b, v);
+      nir_def *curve = nir_fadd_imm(
+         b, nir_fmul_imm(b, nir_fpow(b, m, nir_imm_float(b, 1.0f / 2.4f)), 1.055), -0.055);
+      nir_def *encoded = nir_bcsel(b, nir_fge(b, nir_imm_float(b, 0.0031308f), m),
+                                   nir_fmul_imm(b, m, 12.92), curve);
+      v = nir_bcsel(b, nir_flt(b, v, zero), nir_fneg(b, encoded), encoded);
+   }
+   nir_def *code = nir_fround_even(b, nir_fadd_imm(b, nir_fmul_imm(b, v, 510.0), 384.0));
+   code = nir_fmin(b, nir_fmax(b, code, nir_imm_float(b, low)), nir_imm_float(b, high));
+   v = nir_fmul_imm(b, nir_fadd_imm(b, code, -384.0), 1.0 / 510.0);
+   if (!srgb)
+      return v;
+   nir_def *m = nir_fabs(b, v);
+   nir_def *curve = nir_fpow(b, nir_fmul_imm(b, nir_fadd_imm(b, m, 0.055), 1.0 / 1.055),
+                             nir_imm_float(b, 2.4f));
+   nir_def *linear = nir_bcsel(b, nir_fge(b, nir_imm_float(b, 0.04045f), m),
+                               nir_fmul_imm(b, m, 1.0 / 12.92), curve);
+   return nir_bcsel(b, nir_flt(b, v, zero), nir_fneg(b, linear), linear);
+}
+
+/* An output of color attachment location as its extended-range format
+ * stores it: each color channel the value of its nearest code, 0 to 1023,
+ * and alpha its nearest code's in [0, 1], codes 384 to 894. The half-float
+ * texels that hold the codes then hold that value rounded to its nearest
+ * half, which reads back as the same code: NVIDIA's color output narrows by
+ * truncating, which can store a value nearer the code below. Other
  * attachments' outputs are returned as they are. */
 static nir_def *
 clamp_extended_range(struct translator *t, unsigned location, nir_def *value)
@@ -3039,19 +3481,14 @@ clamp_extended_range(struct translator *t, unsigned location, nir_def *value)
    if (kind == STELA_AIR_EXTENDED_RANGE_NONE || value->bit_size < 16)
       return value;
    nir_builder *b = &t->b;
-   /* Codes 0 and 1023, as (code - 384) / 510, linear or through the curve:
-    * -((384 / 510 + 0.055) / 1.055)^2.4 and ((639 / 510 + 0.055) / 1.055)^2.4. */
    bool srgb = kind == STELA_AIR_EXTENDED_RANGE_SRGB;
-   float low = srgb ? -0.52711513f : -384.0f / 510.0f;
-   float high = srgb ? 1.67496527f : 639.0f / 510.0f;
    nir_def *channels[NIR_MAX_VEC_COMPONENTS];
    for (unsigned i = 0; i < value->num_components; i++) {
-      nir_def *channel = nir_channel(b, value, i);
-      channels[i] = i == 3 ? nir_fsat(b, channel)
-                           : nir_fclamp(b, channel, nir_imm_floatN_t(b, low, channel->bit_size),
-                                        nir_imm_floatN_t(b, high, channel->bit_size));
-      if (channel->bit_size == 32)
-         channels[i] = nir_f2f32(b, nir_f2f16_rtne(b, channels[i]));
+      nir_def *channel = nir_f2f32(b, nir_channel(b, value, i));
+      channel = i == 3 ? extended_range_code(b, channel, false, 384.0f, 894.0f)
+                       : extended_range_code(b, channel, srgb, 0.0f, 1023.0f);
+      channel = nir_f2f16_rtne(b, channel);
+      channels[i] = value->bit_size == 32 ? nir_f2f32(b, channel) : channel;
    }
    return nir_vec(b, channels, value->num_components);
 }
@@ -3079,8 +3516,29 @@ write_attachment(struct translator *t, unsigned n, nir_def *destination, nir_def
    for (unsigned i = 0; i < 4; i++)
       channels[i] = i < value->num_components ? nir_channel(b, value, i) : defaults[i];
    nir_def *source = nir_vec(b, channels, 4);
+   /* The second source, of attachment 0 alone; zero, as Vulkan's undefined
+    * one, without an index(1) output. */
+   nir_def *source1 = nir_imm_vec4(b, 0.0f, 0.0f, 0.0f, 0.0f);
+   if (n == 0 && t->attachment_source1 && !integer) {
+      nir_def *second = nir_load_var(b, t->attachment_source1);
+      nir_def *parts[4];
+      for (unsigned i = 0; i < 4; i++)
+         parts[i] = i < second->num_components ? nir_f2f32(b, nir_channel(b, second, i)) : defaults[i];
+      source1 = nir_vec(b, parts, 4);
+   }
    if (access->blend && !integer)
-      source = clamp_extended_range(t, n, blend(t, access, source, destination));
+      source = clamp_extended_range(t, n, blend(t, access, source, destination, source1));
+   if (access->planes) {
+      /* The planes hold the color as a whole: unwritten channels keep the
+       * texel's, then both planes take the converted color. */
+      nir_def *merged[4];
+      for (unsigned i = 0; i < 4; i++)
+         merged[i] = nir_channel(b, mask & 1u << i ? source : destination, i);
+      nir_push_if(b, nir_inot(b, nir_is_helper_invocation(b, 1)));
+      store_planes(t, n, nir_vec(b, merged, 4));
+      nir_pop_if(b, NULL);
+      return;
+   }
    nir_def *packed = nir_format_pack_rgba(b, access->format, source);
    if (mask != 0xf) {
       if (access->format == PIPE_FORMAT_R9G9B9E5_FLOAT) {
@@ -3122,26 +3580,29 @@ attachment_outputs(struct translator *t)
       const struct stela_air_stage_io *io = &t->render.outputs[i];
       if (io->absent || !t->outputs[i])
          continue;
-      if (io->semantic == STELA_AIR_DEPTH || io->semantic == STELA_AIR_STENCIL ||
-          io->semantic == STELA_AIR_SAMPLE_MASK)
+      if ((io->semantic == STELA_AIR_DEPTH || io->semantic == STELA_AIR_STENCIL ||
+           io->semantic == STELA_AIR_SAMPLE_MASK) && !t->tests_fragments)
          return fail(t, STELA_AIR_ARGUMENT,
                      "storage attachments run after the fragment tests, so their function may not write depth, stencil or coverage");
       if (io->semantic != STELA_AIR_RENDER_TARGET || !storage_attachment(t, io->location))
          continue;
-      if (io->index)
-         return fail(t, STELA_AIR_ARGUMENT, "a storage attachment has no second blend source");
+      if (io->index && io->location)
+         return fail(t, STELA_AIR_ARGUMENT, "only color attachment 0 blends a second source");
       nir_variable *var = t->outputs[i];
       exec_node_remove(&var->node);
       var->data.mode = nir_var_function_temp;
       exec_list_push_tail(&t->b.impl->locals, &var->node);
-      t->attachment_outputs[io->location] = var;
+      if (io->index)
+         t->attachment_source1 = var;
+      else
+         t->attachment_outputs[io->location] = var;
    }
    nir_fixup_deref_modes(t->b.shader);
    return true;
 }
 
-static bool repeat(void *translator, nir_def *count, bool (*body)(void *data, nir_def *index),
-                   void *data);
+static bool repeat(void *translator, nir_def *count, unsigned carried, nir_def **values,
+                   bool (*body)(void *data, nir_def *index, nir_def **values), void *data);
 static struct value *imageblock_authority(struct translator *t, struct value *authority);
 
 /* Refuses the outputs the fragment tests read, which run before a function
@@ -3227,8 +3688,9 @@ struct imageblock_store {
 };
 
 static bool
-imageblock_store_sample(void *data, nir_def *sample)
+imageblock_store_sample(void *data, nir_def *sample, nir_def **values)
 {
+   (void)values;
    const struct imageblock_store *store = data;
    struct translator *t = store->t;
    nir_builder *b = &t->b;
@@ -3256,7 +3718,7 @@ imageblock_data_output(struct translator *t, const struct value *data, LLVMTypeR
    if (!fragment_imageblock_prelude(t))
       return false;
    struct imageblock_store store = {.t = t, .data = data, .type = type, .samples = fragment_samples(t)};
-   return store.samples && repeat(t, store.samples, imageblock_store_sample, &store);
+   return store.samples && repeat(t, store.samples, 0, NULL, imageblock_store_sample, &store);
 }
 
 /* The fragment tests' comparison `function` (MTLCompareFunction, a mask of
@@ -3364,61 +3826,129 @@ tested_store(struct translator *t, const struct tested_image *image, nir_def *co
                          .access = ACCESS_COHERENT, .src_type = nir_type_uint32);
 }
 
-/* A fragment function that writes the stencil reference on a device
- * without stencil export runs the fragment tests itself, as Metal orders
- * them, on copies of the pass's depth and stencil attachments: where it
- * ends, in its interlock section, each sample it covers and keeps takes the
- * stencil test against its own reference, then the depth test at the
- * sample's depth, and the stencil operation and depth write they choose.
- * Its coverage becomes the samples that pass. The depth at a sample is the
- * fragment's plane at the sample's position, from the depth and its fine
- * derivatives the function takes where it starts, or the depth it writes. */
-static bool
-test_fragments(struct translator *t)
+/* What a fragment function testing fragments itself takes where it starts,
+ * in uniform control flow, and the outputs the tests read where it ends. */
+struct fragment_tests {
+   nir_def *state, *range, *positions, *frag, *z, *dzdx, *dzdy;
+   struct tested_image depth_image, stencil_image;
+   nir_variable *stencil_var, *depth_var, *mask_var;
+};
+
+/* The color(0) output a function testing fragments itself turns into
+ * coverage, and the color outputs it gives alpha 1: storage attachments'
+ * own variables, or the function's outputs; NULL for none. */
+static nir_variable *
+color_output(struct translator *t, unsigned location)
 {
-   if (t->storage_attachments || t->fragment_imageblock || t->render.entry.raster_ordered)
-      return fail(t, STELA_AIR_TARGET,
-                  "a stencil output without stencil export cannot also read attachments, imageblocks or raster order groups");
+   if (location < AIR_MAX_RENDER_TARGETS && t->attachment_outputs[location])
+      return t->attachment_outputs[location];
+   for (unsigned i = 0; i < t->render.entry.output_count; i++) {
+      const struct stela_air_stage_io *io = &t->render.outputs[i];
+      if (!io->absent && t->outputs[i] && io->semantic == STELA_AIR_RENDER_TARGET &&
+          io->location == location && !io->index)
+         return t->outputs[i];
+   }
+   return NULL;
+}
+
+static bool
+fragment_tests_begin(struct translator *t, struct fragment_tests *tests)
+{
    if (t->render.entry.early_fragment_tests)
-      return fail(t, STELA_AIR_ARGUMENT, "early fragment tests precede a stencil output");
+      return fail(t, STELA_AIR_ARGUMENT, "early fragment tests precede fragment tests the function runs itself");
    nir_builder *b = &t->b;
    nir_function_impl *impl = nir_shader_get_entrypoint(b->shader);
-   unsigned samples = MAX2(t->stage_options->samples, 1);
-   nir_variable *stencil_var = tested_output(t, STELA_AIR_STENCIL);
-   nir_variable *depth_var = tested_output(t, STELA_AIR_DEPTH);
-   nir_variable *mask_var = tested_output(t, STELA_AIR_SAMPLE_MASK);
+   tests->stencil_var = tested_output(t, STELA_AIR_STENCIL);
+   tests->depth_var = tested_output(t, STELA_AIR_DEPTH);
+   tests->mask_var = tested_output(t, STELA_AIR_SAMPLE_MASK);
    nir_fixup_deref_modes(b->shader);
-   if (!stencil_var)
-      return fail(t, STELA_AIR_ARGUMENT, "the stencil output has no variable");
-
-   /* Where the function starts: the state, the copies and the fragment's
-    * depth plane, in uniform control flow. */
    b->cursor = nir_before_impl(impl);
-   nir_def *state = t->options->load_device_value(b, STELA_AIR_DEPTH_STENCIL, t->options->binding_data);
-   nir_def *range = t->options->load_device_value(b, STELA_AIR_DEPTH_RANGE, t->options->binding_data);
-   nir_def *positions = t->options->load_device_value(b, STELA_AIR_SAMPLE_POSITIONS, t->options->binding_data);
-   if (!state || !range || !positions || state->num_components != 4 || range->num_components != 4 ||
-       positions->num_components != 4)
+   tests->state = t->options->load_device_value(b, STELA_AIR_DEPTH_STENCIL, t->options->binding_data);
+   tests->range = t->options->load_device_value(b, STELA_AIR_DEPTH_RANGE, t->options->binding_data);
+   tests->positions = t->options->load_device_value(b, STELA_AIR_SAMPLE_POSITIONS, t->options->binding_data);
+   if (!tests->state || !tests->range || !tests->positions || tests->state->num_components != 4 ||
+       tests->range->num_components != 4 || tests->positions->num_components != 4)
       return fail(t, STELA_AIR_ARGUMENT, "the fragment tests' state is not supplied");
-   struct tested_image depth_image, stencil_image;
-   if (!tested_image(t, false, &depth_image) || !tested_image(t, true, &stencil_image))
+   if (!tested_image(t, false, &tests->depth_image) || !tested_image(t, true, &tests->stencil_image))
       return false;
-   nir_def *frag = nir_load_frag_coord(b);
-   nir_def *z = nir_channel(b, frag, 2);
-   nir_def *dzdx = nir_ddx_fine(b, z), *dzdy = nir_ddy_fine(b, z);
+   tests->frag = nir_load_frag_coord(b);
+   tests->z = nir_channel(b, tests->frag, 2);
+   tests->dzdx = nir_ddx_fine(b, tests->z);
+   tests->dzdy = nir_ddy_fine(b, tests->z);
+   return true;
+}
 
-   /* Where it ends. */
-   b->cursor = nir_after_block_before_jump(nir_impl_last_block(impl));
-   nir_def *ref = nir_iand_imm(b, nir_load_var(b, stencil_var), 0xff);
-   nir_def *written_depth = depth_var ? nir_load_var(b, depth_var) : NULL;
-   nir_def *kept = mask_var ? nir_load_var(b, mask_var) : nir_imm_int(b, ~0);
+/* The samples a fragment keeps before its tests: those it covers, of its
+ * sample mask output, and of alpha to coverage, color(0)'s alpha of the
+ * pixel's samples, rounded to the nearest, the lowest first. */
+static nir_def *
+fragment_kept(struct translator *t, struct fragment_tests *tests)
+{
+   nir_builder *b = &t->b;
+   nir_def *kept = tests->mask_var ? nir_load_var(b, tests->mask_var) : nir_imm_int(b, ~0);
+   const struct stela_air_stage_options *stage = t->stage_options;
+   nir_variable *color = color_output(t, 0);
+   if (stage->alpha_to_coverage && color && glsl_get_base_type(glsl_without_array(color->type)) != GLSL_TYPE_INT &&
+       glsl_get_base_type(glsl_without_array(color->type)) != GLSL_TYPE_UINT) {
+      unsigned samples = MAX2(stage->samples, 1);
+      nir_def *value = nir_load_var(b, color);
+      nir_def *alpha = value->num_components == 4 ? nir_f2f32(b, nir_channel(b, value, 3)) : nir_imm_float(b, 1.0f);
+      nir_def *count = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, nir_fsat(b, alpha), samples)));
+      /* (1 << count) - 1, of at most 32 samples. */
+      nir_def *mask = nir_bcsel(b, nir_uge_imm(b, count, 32), nir_imm_int(b, ~0),
+                                nir_iadd_imm(b, nir_ishl(b, nir_imm_int(b, 1), count), -1));
+      kept = nir_iand(b, kept, mask);
+   }
+   return kept;
+}
+
+/* Alpha to one for the storage attachments a function writes: their
+ * outputs' alpha becomes 1 before they blend, as the pipeline gives the
+ * outputs it writes. */
+static void
+storage_alpha_to_one(struct translator *t)
+{
+   if (!t->stage_options->alpha_to_one)
+      return;
+   nir_builder *b = &t->b;
+   u_foreach_bit(n, t->storage_attachments) {
+      nir_variable *var = t->attachment_outputs[n];
+      enum glsl_base_type base = var ? glsl_get_base_type(glsl_without_array(var->type)) : GLSL_TYPE_INT;
+      if (!var || base == GLSL_TYPE_INT || base == GLSL_TYPE_UINT || glsl_get_vector_elements(var->type) != 4)
+         continue;
+      nir_def *value = nir_load_var(b, var);
+      nir_def *one = nir_imm_floatN_t(b, 1.0, value->bit_size);
+      nir_store_var(b, var, nir_vector_insert_imm(b, value, one, 3), 0xf);
+   }
+}
+
+/* Runs the fragment tests at the cursor, inside the function's interlock
+ * section: each sample the fragment keeps takes the stencil test against
+ * the reference, its stencil output's or the encoder's, then the depth test
+ * at the sample's depth, and the stencil operation and depth write they
+ * choose. Returns the samples that pass. The depth at a sample is the
+ * fragment's plane at the sample's position, from the depth and its fine
+ * derivatives the function takes where it starts, or the depth it writes. */
+static nir_def *
+fragment_tests_run(struct translator *t, struct fragment_tests *tests, nir_def *kept)
+{
+   nir_builder *b = &t->b;
+   unsigned samples = MAX2(t->stage_options->samples, 1);
+   nir_def *state = tests->state, *range = tests->range, *positions = tests->positions;
+   nir_def *frag = tests->frag, *z = tests->z, *dzdx = tests->dzdx, *dzdy = tests->dzdy;
+   nir_def *written_depth = tests->depth_var ? nir_load_var(b, tests->depth_var) : NULL;
    nir_def *covered = nir_iand(b, nir_load_sample_mask_in(b), kept);
    nir_def *depth_word = nir_channel(b, state, 0);
    nir_def *format = nir_iand_imm(b, nir_ushr_imm(b, depth_word, STELA_AIR_DEPTH_FORMAT_SHIFT), 3);
    nir_def *has_depth = nir_ine_imm(b, format, STELA_AIR_DEPTH_NONE);
    nir_def *has_stencil = nir_i2b(b, nir_iand_imm(b, depth_word, STELA_AIR_DEPTH_STENCIL_ATTACHED));
    nir_def *writes_depth = nir_iand(b, has_depth, nir_i2b(b, nir_iand_imm(b, depth_word, STELA_AIR_DEPTH_WRITE)));
-   nir_def *face = nir_bcsel(b, nir_load_front_face(b, 1), nir_channel(b, state, 1), nir_channel(b, state, 2));
+   nir_def *front = nir_load_front_face(b, 1);
+   nir_def *face = nir_bcsel(b, front, nir_channel(b, state, 1), nir_channel(b, state, 2));
+   nir_def *references = nir_channel(b, state, 3);
+   nir_def *ref = tests->stencil_var ? nir_iand_imm(b, nir_load_var(b, tests->stencil_var), 0xff) :
+                  nir_bcsel(b, front, nir_iand_imm(b, references, 0xff),
+                            nir_iand_imm(b, nir_ushr_imm(b, references, 8), 0xff));
    nir_def *read_mask = nir_iand_imm(b, nir_ushr_imm(b, face, 16), 0xff);
    nir_def *write_mask = nir_ushr_imm(b, face, 24);
    nir_def *near = nir_channel(b, range, 0), *far = nir_channel(b, range, 1);
@@ -3429,9 +3959,6 @@ test_fragments(struct translator *t)
    nir_def *coord = nir_vec4(b, nir_channel(b, pixel, 0), nir_channel(b, pixel, 1), nir_load_layer_id(b),
                              nir_imm_int(b, 0));
 
-   nir_variable_mode modes = nir_var_image;
-   nir_begin_invocation_interlock(b);
-   nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_ACQUIRE, modes);
    /* Zero, built ahead of the branches: their phis follow them directly,
     * and each takes it where its branch is skipped. */
    nir_def *passed = nir_imm_int(b, 0);
@@ -3459,7 +3986,7 @@ test_fragments(struct translator *t)
       nir_def *unorm24 = nir_f2u32(b, nir_fround_even(b, nir_fmul_imm(b, depth, 16777215.0)));
       nir_def *bits = nir_bcsel(b, nir_ieq_imm(b, format, STELA_AIR_DEPTH_UNORM16), unorm16,
                                 nir_bcsel(b, nir_ieq_imm(b, format, STELA_AIR_DEPTH_UNORM24), unorm24, depth));
-      nir_def *held = tested_load(t, &depth_image, coord, s);
+      nir_def *held = tested_load(t, &tests->depth_image, coord, s);
       held = nir_bcsel(b, nir_ieq_imm(b, format, STELA_AIR_DEPTH_UNORM24), nir_iand_imm(b, held, 0xffffff),
                        nir_bcsel(b, nir_ieq_imm(b, format, STELA_AIR_DEPTH_UNORM16), nir_iand_imm(b, held, 0xffff),
                                  held));
@@ -3469,7 +3996,7 @@ test_fragments(struct translator *t)
       nir_def *gt = nir_bcsel(b, is_float, nir_flt(b, held, depth), nir_ult(b, held, bits));
       nir_def *depth_passes = nir_ior(b, nir_inot(b, has_depth),
                                       compare_fragment(b, nir_iand_imm(b, depth_word, 7), lt, eq, gt));
-      nir_def *stencil = nir_iand_imm(b, tested_load(t, &stencil_image, coord, s), 0xff);
+      nir_def *stencil = nir_iand_imm(b, tested_load(t, &tests->stencil_image, coord, s), 0xff);
       nir_def *a = nir_iand(b, ref, read_mask), *h = nir_iand(b, stencil, read_mask);
       nir_def *stencil_passes = nir_ior(b, nir_inot(b, has_stencil),
                                         compare_fragment(b, nir_iand_imm(b, face, 7), nir_ult(b, a, h),
@@ -3481,29 +4008,59 @@ test_fragments(struct translator *t)
       nir_def *updated = stencil_operation(b, op, stencil, ref);
       updated = nir_ior(b, nir_iand(b, updated, write_mask), nir_iand(b, stencil, nir_inot(b, write_mask)));
       nir_push_if(b, nir_iand(b, has_stencil, nir_ine(b, updated, stencil)));
-      tested_store(t, &stencil_image, coord, s, updated);
+      tested_store(t, &tests->stencil_image, coord, s, updated);
       nir_pop_if(b, NULL);
       nir_def *passes = nir_iand(b, stencil_passes, depth_passes);
       nir_push_if(b, nir_iand(b, passes, writes_depth));
-      tested_store(t, &depth_image, coord, s, bits);
+      tested_store(t, &tests->depth_image, coord, s, bits);
       nir_pop_if(b, NULL);
       nir_def *bit = nir_bcsel(b, passes, nir_imm_int(b, 1u << s), nir_imm_int(b, 0));
       nir_pop_if(b, NULL);
       tested = nir_ior(b, tested, nir_if_phi(b, bit, passed));
    }
    nir_pop_if(b, NULL);
-   passed = nir_if_phi(b, tested, passed);
-   nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_RELEASE, modes);
-   nir_end_invocation_interlock(b);
+   return nir_if_phi(b, tested, passed);
+}
 
-   /* The samples that pass are the fragment's coverage. */
+/* The samples that pass are the fragment's coverage, which its pipeline
+ * writes its color outputs to; it tests no depth or stencil. */
+static bool
+fragment_tests_end(struct translator *t, nir_def *passed)
+{
+   nir_builder *b = &t->b;
    nir_variable *mask = nir_variable_create(b->shader, nir_var_shader_out, glsl_int_type(), "tested coverage");
    if (!mask)
       return fail(t, STELA_AIR_ALLOCATION, "render IO variable allocation failed");
    mask->data.location = FRAG_RESULT_SAMPLE_MASK;
-   nir_store_var(b, mask, nir_iand(b, passed, kept), 1);
+   nir_store_var(b, mask, passed, 1);
    b->shader->info.fs.pixel_interlock_ordered = true;
    b->shader->info.fs.early_fragment_tests = false;
+   return true;
+}
+
+/* A fragment function that tests fragments itself (tests_fragments) and
+ * accesses no storage attachments, imageblocks or raster order groups: its
+ * tests are its whole interlock section, where it ends. */
+static bool
+test_fragments(struct translator *t)
+{
+   if (t->storage_attachments || t->fragment_imageblock || t->render.entry.raster_ordered)
+      return true;
+   struct fragment_tests tests;
+   if (!fragment_tests_begin(t, &tests))
+      return false;
+   nir_builder *b = &t->b;
+   nir_function_impl *impl = nir_shader_get_entrypoint(b->shader);
+   b->cursor = nir_after_block_before_jump(nir_impl_last_block(impl));
+   nir_def *kept = fragment_kept(t, &tests);
+   nir_variable_mode modes = nir_var_image;
+   nir_begin_invocation_interlock(b);
+   nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_ACQUIRE, modes);
+   nir_def *passed = fragment_tests_run(t, &tests, kept);
+   nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_RELEASE, modes);
+   nir_end_invocation_interlock(b);
+   if (!fragment_tests_end(t, nir_iand(b, passed, kept)))
+      return false;
    nir_progress(true, impl, nir_metadata_none);
    nir_lower_vars_to_ssa(b->shader);
    return true;
@@ -3529,6 +4086,15 @@ order_fragments(struct translator *t)
    if (storage && !attachment_outputs(t))
       return false;
    if (imageblock && !tested_outputs(t))
+      return false;
+   /* A function testing fragments itself runs its tests where it ends, in
+    * this section, then writes its storage attachments for the samples that
+    * pass. */
+   bool tests = t->tests_fragments;
+   if (tests && imageblock)
+      return fail(t, STELA_AIR_TARGET, "imageblock data is written after the fragment tests, which its function runs itself");
+   struct fragment_tests fragment_tests;
+   if (tests && !fragment_tests_begin(t, &fragment_tests))
       return false;
    nir_function_impl *impl = nir_shader_get_entrypoint(t->b.shader);
    nir_cursor begin = {0}, end = {0};
@@ -3567,6 +4133,12 @@ order_fragments(struct translator *t)
       end = nir_after_block_before_jump(nir_impl_last_block(impl));
       found = true;
    }
+   if (tests) {
+      if (!found)
+         begin = nir_after_block_before_jump(nir_impl_last_block(impl));
+      end = nir_after_block_before_jump(nir_impl_last_block(impl));
+      found = true;
+   }
    /* A function whose grouped arguments go unused orders nothing. */
    if (!found && !storage)
       return true;
@@ -3579,6 +4151,10 @@ order_fragments(struct translator *t)
    nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_ACQUIRE, modes);
    nir_def *bits[AIR_MAX_RENDER_TARGETS] = {0}, *texels[AIR_MAX_RENDER_TARGETS] = {0};
    u_foreach_bit(n, t->storage_attachments) {
+      if (storage_attachment(t, n)->planes) {
+         texels[n] = load_planes(t, n);
+         continue;
+      }
       bits[n] = load_attachment(t, n);
       texels[n] = nir_format_unpack_rgba(b, bits[n], storage_attachment(t, n)->format);
    }
@@ -3592,25 +4168,37 @@ order_fragments(struct translator *t)
       exec_node_remove(&deref->var->node);
       nir_deref_instr_remove_if_unused(deref);
    }
-   if (storage) {
+   nir_def *kept = NULL, *passed = NULL;
+   if (storage || tests)
       b->cursor = nir_after_block_before_jump(nir_impl_last_block(impl));
-      u_foreach_bit(n, t->storage_attachments)
-         write_attachment(t, n, texels[n], bits[n]);
-   } else {
+   else
       b->cursor = end;
+   if (tests) {
+      kept = fragment_kept(t, &fragment_tests);
+      passed = fragment_tests_run(t, &fragment_tests, kept);
+      /* A sample the tests drop writes nothing: one invocation writes one
+       * sample's texels, or the pixel's single sample. */
+      nir_push_if(b, nir_ine_imm(b, passed, 0));
    }
+   storage_alpha_to_one(t);
+   u_foreach_bit(n, t->storage_attachments)
+      write_attachment(t, n, texels[n], bits[n]);
+   if (tests)
+      nir_pop_if(b, NULL);
    nir_scoped_memory_barrier(b, SCOPE_DEVICE, NIR_MEMORY_RELEASE, modes);
    nir_end_invocation_interlock(b);
    t->b.shader->info.fs.pixel_interlock_ordered = true;
+   if (tests && !fragment_tests_end(t, nir_iand(b, passed, kept)))
+      return false;
    nir_progress(true, impl, nir_metadata_none);
    /* The fragment tests decide which fragments write the attachments and
-    * the imageblock data. */
+    * the imageblock data, unless the function runs them itself. */
    if (imageblock)
       t->b.shader->info.fs.early_fragment_tests = true;
-   if (storage) {
+   if (storage && !tests)
       t->b.shader->info.fs.early_fragment_tests = true;
+   if (storage || tests)
       nir_lower_vars_to_ssa(t->b.shader);
-   }
    return true;
 }
 
@@ -3953,6 +4541,8 @@ stage_return(struct translator *t, LLVMValueRef inst)
       else {
          if (io->semantic == STELA_AIR_RENDER_TARGET && !io->index)
             value = clamp_extended_range(t, io->location, value);
+         if (io->semantic == STELA_AIR_POINT_SIZE)
+            value = largest_point(&t->b, value);
          nir_store_var(&t->b, t->outputs[i], value, BITFIELD_MASK(value->num_components));
       }
    }
@@ -4420,31 +5010,55 @@ imageblock_load(void *translator, LLVMValueRef slice, nir_def *pixel, unsigned c
 }
 
 /* Runs body count times, a loop of the flat CFG, with the 32-bit index of
- * each iteration. */
+ * each iteration and the values it carries, each a phi of the loop's
+ * header. */
 static bool
-repeat(void *translator, nir_def *count, bool (*body)(void *data, nir_def *index), void *data)
+repeat(void *translator, nir_def *count, unsigned carried, nir_def **values,
+       bool (*body)(void *data, nir_def *index, nir_def **values), void *data)
 {
    struct translator *t = translator;
    nir_builder *b = &t->b;
    nir_block *entry = nir_cursor_current_block(b->cursor);
    nir_block *header = new_block(t), *start = new_block(t), *exit = new_block(t);
-   nir_phi_instr *phi = nir_phi_instr_create(b->shader);
-   if (!header || !start || !exit || !phi)
+   nir_phi_instr *phis[1 + 8];
+   if (carried >= ARRAY_SIZE(phis))
+      return fail(t, STELA_AIR_LIMIT, "an AIR loop carries more than %zu values",
+                  ARRAY_SIZE(phis) - 1);
+   for (unsigned i = 0; i <= carried; i++)
+      phis[i] = nir_phi_instr_create(b->shader);
+   for (unsigned i = 0; i <= carried; i++)
+      if (!phis[i])
+         return fail(t, STELA_AIR_ALLOCATION, "AIR loop allocation failed");
+   if (!header || !start || !exit)
       return fail(t, STELA_AIR_ALLOCATION, "AIR loop allocation failed");
-   nir_def *zero = nir_imm_int(b, 0);
+   nir_def *initial[1 + 8] = {nir_imm_int(b, 0)};
+   for (unsigned i = 0; i < carried; i++)
+      initial[1 + i] = values[i];
    nir_goto(b, header);
-   nir_def_init(&phi->instr, &phi->def, 1, 32);
+   for (unsigned i = 0; i <= carried; i++) {
+      nir_def_init(&phis[i]->instr, &phis[i]->def, initial[i]->num_components,
+                   initial[i]->bit_size);
+      if (i)
+         values[i - 1] = &phis[i]->def;
+   }
+   nir_def *index = &phis[0]->def;
    b->cursor = nir_after_block(header);
-   nir_goto_if(b, start, nir_ult(b, &phi->def, count), exit);
+   nir_goto_if(b, start, nir_ult(b, index, count), exit);
    b->cursor = nir_after_block(start);
-   if (!body(data, &phi->def))
+   if (!body(data, index, values))
       return false;
    nir_block *end = nir_cursor_current_block(b->cursor);
-   nir_def *next = nir_iadd_imm(b, &phi->def, 1);
+   nir_def *next[1 + 8] = {nir_iadd_imm(b, index, 1)};
+   for (unsigned i = 0; i < carried; i++)
+      next[1 + i] = values[i];
    nir_goto(b, header);
-   nir_phi_instr_add_src(phi, entry, zero);
-   nir_phi_instr_add_src(phi, end, next);
-   nir_instr_insert(nir_before_block(header), &phi->instr);
+   for (unsigned i = 0; i <= carried; i++) {
+      nir_phi_instr_add_src(phis[i], entry, initial[i]);
+      nir_phi_instr_add_src(phis[i], end, next[i]);
+      nir_instr_insert(nir_before_block(header), &phis[i]->instr);
+      if (i)
+         values[i - 1] = &phis[i]->def;
+   }
    b->cursor = nir_after_block(exit);
    return true;
 }
@@ -4731,8 +5345,9 @@ struct tile_copy {
 };
 
 static bool
-tile_copy_chunk(void *data, nir_def *iteration)
+tile_copy_chunk(void *data, nir_def *iteration, nir_def **values)
 {
+   (void)values;
    const struct tile_copy *copy = data;
    struct translator *t = copy->t;
    nir_builder *b = &t->b;
@@ -4779,7 +5394,7 @@ tile_memory_copy(struct translator *t, bool in)
    };
    if (!in)
       workgroup_barrier(t);
-   if (!repeat(t, nir_udiv_imm(b, nir_iadd_imm(b, copy.count, threads - 1), threads),
+   if (!repeat(t, nir_udiv_imm(b, nir_iadd_imm(b, copy.count, threads - 1), threads), 0, NULL,
                tile_copy_chunk, &copy))
       return false;
    if (in)
@@ -4870,6 +5485,50 @@ imageblock_call(struct translator *t, LLVMValueRef inst, const char *name, size_
    return true;
 }
 
+/* stela_air_texture_context's two-way branches over the flat CFG: then,
+ * else and merge blocks, and the then side's last block. */
+static bool
+texture_branch(void *translator, nir_def *condition, nir_block *blocks[4])
+{
+   struct memory_guard guard;
+   if (!memory_guard_begin(translator, condition, &guard))
+      return false;
+   blocks[0] = guard.then_block;
+   blocks[1] = guard.else_block;
+   blocks[2] = guard.merge;
+   blocks[3] = NULL;
+   return true;
+}
+
+static void
+texture_branch_else(void *translator, nir_block *blocks[4])
+{
+   struct translator *t = translator;
+   blocks[3] = nir_cursor_current_block(t->b.cursor);
+   nir_goto(&t->b, blocks[2]);
+   t->b.cursor = nir_after_block(blocks[1]);
+}
+
+static nir_def *
+texture_branch_join(void *translator, nir_block *const blocks[4], nir_def *then_value,
+                    nir_def *else_value)
+{
+   struct translator *t = translator;
+   nir_block *else_end = nir_cursor_current_block(t->b.cursor);
+   nir_goto(&t->b, blocks[2]);
+   t->b.cursor = nir_after_block(blocks[2]);
+   nir_phi_instr *phi = nir_phi_instr_create(t->b.shader);
+   if (!phi) {
+      fail(t, STELA_AIR_ALLOCATION, "AIR texture branch PHI allocation failed");
+      return NULL;
+   }
+   nir_def_init(&phi->instr, &phi->def, then_value->num_components, then_value->bit_size);
+   nir_phi_instr_add_src(phi, blocks[3], then_value);
+   nir_phi_instr_add_src(phi, else_end, else_value);
+   nir_builder_instr_insert(&t->b, &phi->instr);
+   return &phi->def;
+}
+
 /* A call of one of AIR's texture functions; false with no error when the
  * call is something else. */
 static bool
@@ -4882,7 +5541,8 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
       .load_word = texture_load_word, .store_word = texture_store_word, .store_at = call_store,
       .imageblock_extent = t->imageblock ? t->imageblock_extent : NULL,
       .imageblock_load = imageblock_load,
-      .repeat = repeat,
+      .repeat = repeat, .branch = texture_branch, .branch_else = texture_branch_else,
+      .branch_join = texture_branch_join,
    };
    /* A texture chosen with null textures is null where the choice is not
     * it; its other calls are the texture's, made only where it is, and
@@ -5554,8 +6214,9 @@ offset_pointer(nir_builder *b, const struct value *base, nir_def *offset)
 }
 
 static bool
-async_copy_element(void *data, nir_def *iteration)
+async_copy_element(void *data, nir_def *iteration, nir_def **values)
 {
+   (void)values;
    struct async_copy *c = data;
    struct translator *t = c->t;
    nir_builder *b = &t->b;
@@ -5670,7 +6331,7 @@ async_copy_call(struct translator *t, LLVMValueRef inst, const char *name, size_
    /* Each thread copies every lanes-th element; a zero-width tile none. */
    nir_def *rounds = nir_udiv(b, nir_iadd(b, c.count, nir_iadd_imm(b, c.lanes, -1)), c.lanes);
    rounds = nir_bcsel(b, nir_ieq_imm(b, c.width, 0), nir_imm_int(b, 0), rounds);
-   if (!repeat(t, rounds, async_copy_element, &c))
+   if (!repeat(t, rounds, 0, NULL, async_copy_element, &c))
       return false;
    nir_barrier(b, .execution_scope = SCOPE_SUBGROUP, .memory_scope = SCOPE_WORKGROUP,
                .memory_semantics = NIR_MEMORY_ACQ_REL,
@@ -5970,6 +6631,7 @@ argument_load(struct translator *t, LLVMValueRef inst)
       return false;
    struct value *value = find_value(t, inst);
    value->pointer_root = inst;
+   value->declared_alignment = field->buffer.type_alignment;
    value->fields = field->arguments;
    value->offset_known = true;
    return true;
@@ -6153,24 +6815,84 @@ mesh_call(struct translator *t, LLVMValueRef inst, LLVMValueRef callee, const ch
    bool clip = setter == MESH_CLIP_DISTANCE;
    nir_def *element = values[clip || data ? 2 : 1];
    value = setter == MESH_CULLED ? nir_b2i32(b, value) : stage_widen(b, value, io->primitive);
+   if (setter == MESH_POINT_SIZE)
+      value = largest_point(b, value);
    return mesh_store(t, t->outputs[output], element, count, clip ? values[1] : NULL,
                      io->clip_distances, value, BITFIELD_MASK(value->num_components));
 }
 
-/* A freeze holds one value for all its uses, so a lane with none takes zero. */
-static bool
-freeze(struct translator *t, LLVMValueRef inst)
+/* v with each lane it lacks zero, a freeze's one value for all its uses. */
+static nir_def *
+frozen_lanes(struct translator *t, struct value *v)
 {
-   struct value *v = partial_value(t, LLVMGetOperand(inst, 0));
-   if (!v)
-      return false;
    nir_def *lanes[4];
    for (unsigned i = 0; i < v->components; i++) {
       lanes[i] = value_lane(t, v, i);
       if (!lanes[i])
          lanes[i] = nir_imm_intN_t(&t->b, 0, v->bits);
    }
-   return put_value(t, inst, nir_vec(&t->b, lanes, v->components), 0);
+   return nir_vec(&t->b, lanes, v->components);
+}
+
+/* An aggregate's frozen copy, element by element. */
+static struct value *
+frozen_aggregate(struct translator *t, const struct value *v, unsigned depth)
+{
+   struct value *copy = depth < 16 ? new_aggregate(t, v->aggregate_count, NULL) : NULL;
+   if (!copy)
+      return depth < 16 ? NULL : (fail(t, STELA_AIR_TYPE, "aggregate nests too deeply"), NULL);
+   for (unsigned i = 0; i < v->aggregate_count; i++) {
+      struct value *element = v->elements[i];
+      if (!element) {
+         fail(t, STELA_AIR_TYPE, "frozen aggregate lacks an element");
+         return NULL;
+      }
+      if (element->aggregate_count) {
+         if (!(copy->elements[i] = frozen_aggregate(t, element, depth + 1)))
+            return NULL;
+         continue;
+      }
+      /* A pointer keeps its proven resource; it has no undefined lane. */
+      if (element->pointer_root || element->choices || !element->components) {
+         copy->elements[i] = element;
+         continue;
+      }
+      struct value *leaf = rzalloc(t->values, struct value);
+      if (!leaf) {
+         fail(t, STELA_AIR_ALLOCATION, "aggregate value allocation failed");
+         return NULL;
+      }
+      *leaf = *element;
+      leaf->def = frozen_lanes(t, element);
+      memset(leaf->lanes, 0, sizeof(leaf->lanes));
+      copy->elements[i] = leaf;
+   }
+   return copy;
+}
+
+/* A freeze holds one value for all its uses, so a lane with none takes zero.
+ * A texture call's pair (texel and residency) is whole already; a struct or
+ * array freezes element by element. */
+static bool
+freeze(struct translator *t, LLVMValueRef inst)
+{
+   LLVMValueRef operand = LLVMGetOperand(inst, 0);
+   if (aggregate_count(LLVMTypeOf(operand))) {
+      const struct value *pair = find_value(t, operand);
+      if (pair && pair->members[0])
+         return put_pair(t, inst, pair->members[0], pair->members[1]);
+      struct value *v = aggregate_value(t, operand);
+      struct value *copy = v ? frozen_aggregate(t, v, 0) : NULL;
+      if (!copy)
+         return false;
+      if (!_mesa_hash_table_insert(t->values, inst, copy))
+         return fail(t, STELA_AIR_ALLOCATION, "AIR value map allocation failed");
+      return true;
+   }
+   struct value *v = partial_value(t, operand);
+   if (!v)
+      return false;
+   return put_value(t, inst, frozen_lanes(t, v), 0);
 }
 
 /* An FDiv or FRem at Metal's precise accuracy. */
@@ -6181,7 +6903,9 @@ precise_division(struct translator *t, LLVMValueRef inst, LLVMOpcode op)
    if (!a || !c || !fp_environment(t))
       return false;
    bool narrow = a->bit_size == 16;
-   stela_air_precise_function *function = op == LLVMFDiv ? stela_air_precise_divide : stela_air_precise_fmod;
+   stela_air_precise_function *function =
+      op == LLVMFDiv ? (narrow ? stela_air_half_divide : stela_air_precise_divide) :
+                       (narrow ? stela_air_half_fmod : stela_air_precise_fmod);
    nir_def *value = stela_air_precise(&t->b, function, narrow ? nir_f2f32(&t->b, a) : a,
                                       narrow ? nir_f2f32(&t->b, c) : c);
    return put_value(t, inst, narrow ? nir_f2f16(&t->b, value) : value, 0);
@@ -6448,9 +7172,15 @@ instruction(struct translator *t, LLVMValueRef inst)
             return false;
          if (lowered)
             return true;
-         /* An assumption only permits optimization, so honoring none is exact. */
+         /* An assumption only permits optimization, so honoring none is
+          * exact, as is ignoring a scope declaration, which only names the
+          * accesses inlining found not to alias. */
          unsigned assume = LLVMLookupIntrinsicID("llvm.assume", strlen("llvm.assume"));
          if (assume && LLVMGetIntrinsicID(callee) == assume)
+            return true;
+         static const char scope[] = "llvm.experimental.noalias.scope.decl";
+         unsigned declaration = LLVMLookupIntrinsicID(scope, strlen(scope));
+         if (declaration && LLVMGetIntrinsicID(callee) == declaration)
             return true;
       }
       if (LLVMIsAFunction(callee)) {
@@ -7326,7 +8056,9 @@ pointer_component(struct translator *t, struct pointer_node **stack,
       unsigned dependencies = pointer_dependencies(node);
       for (unsigned j = 0; j < dependencies; j++) {
          LLVMValueRef dependency = pointer_dependency(t, node, j);
-         if (!dependency)
+         /* An undefined pointer may be any pointer: it lends no authority
+          * and takes the component's, as its PHI's NIR undef does. */
+         if (!dependency || LLVMIsUndef(dependency))
             continue;
          if (LLVMIsAConstantPointerNull(dependency) || stela_air_null_texture(dependency)) {
             if (!join_null(t, &null, dependency))
@@ -7707,6 +8439,10 @@ cfg_declare(struct translator *t)
    nir_def *shape = grid_bounded(t) || t->options->dynamic_shape ? running_shape(t) : NULL;
    if ((grid_bounded(t) || t->options->dynamic_shape) && !shape)
       return false;
+   /* A tile's padding threads hold no position of its shape. */
+   nir_def *position = shape && t->options->tile ? local_position(t) : NULL;
+   if (shape && t->options->tile && !position)
+      return false;
    if (t->mesh_state) {
       /* Every thread clears the state before any sets it. */
       nir_deref_instr *state = nir_build_deref_var(&t->b, t->mesh_state);
@@ -7726,8 +8462,13 @@ cfg_declare(struct translator *t)
    }
    /* Invocations past the threads a threadgroup runs, at a dispatchThreads
     * grid's edge or past a dynamic kernel's shape, skip the function. */
-   nir_def *runs = shape ? nir_ult(&t->b, nir_load_local_invocation_index(&t->b), volume(&t->b, shape)) :
-                           NULL;
+   nir_def *runs = NULL;
+   if (position) {
+      runs = nir_ball(&t->b, nir_ult(&t->b, nir_trim_vector(&t->b, position, 2),
+                                     nir_trim_vector(&t->b, shape, 2)));
+   } else if (shape) {
+      runs = nir_ult(&t->b, nir_load_local_invocation_index(&t->b), volume(&t->b, shape));
+   }
    if (runs) {
       nir_block *body = new_block(t);
       if (!body)
@@ -7751,6 +8492,381 @@ cfg_declare(struct translator *t)
       }
    }
    return true;
+}
+
+/* The innermost loop holding a block, or NULL. */
+static nir_loop *
+innermost_loop(nir_block *block)
+{
+   for (nir_cf_node *node = block->cf_node.parent; node; node = node->parent) {
+      if (node->type == nir_cf_node_loop)
+         return nir_cf_node_as_loop(node);
+   }
+   return NULL;
+}
+
+/* Whether a block lies inside a loop that does not also hold `within`. */
+static bool
+leaves_loop(nir_block *block, nir_block *within)
+{
+   nir_loop *loop = innermost_loop(block);
+   if (!loop)
+      return false;
+   for (nir_cf_node *node = within->cf_node.parent; node; node = node->parent) {
+      if (node == &loop->cf_node)
+         return false;
+   }
+   return true;
+}
+
+/* What hoisting may run for more invocations than the branch it is in. */
+struct hoisting {
+   /* Each instruction moved, and the highest floor it moved toward. */
+   struct hash_table *floors;
+   /* The function writes memory or orders its accesses, so a read may see
+    * a different value where it runs earlier. */
+   bool writes;
+};
+
+/* Whether an intrinsic writes memory another read could see, or orders the
+ * function's accesses. */
+static bool
+writes_memory(nir_intrinsic_instr *intrinsic)
+{
+   switch (intrinsic->intrinsic) {
+   case nir_intrinsic_store_deref:
+   case nir_intrinsic_deref_atomic:
+   case nir_intrinsic_deref_atomic_swap:
+      return !nir_deref_mode_is_one_of(nir_src_as_deref(intrinsic->src[0]),
+                                       nir_var_function_temp | nir_var_shader_temp |
+                                          nir_var_shader_out);
+   case nir_intrinsic_store_global:
+   case nir_intrinsic_store_ssbo:
+   case nir_intrinsic_store_shared:
+   case nir_intrinsic_global_atomic:
+   case nir_intrinsic_global_atomic_swap:
+   case nir_intrinsic_ssbo_atomic:
+   case nir_intrinsic_ssbo_atomic_swap:
+   case nir_intrinsic_shared_atomic:
+   case nir_intrinsic_shared_atomic_swap:
+   case nir_intrinsic_image_deref_store:
+   case nir_intrinsic_image_deref_atomic:
+   case nir_intrinsic_image_deref_atomic_swap:
+   case nir_intrinsic_bindless_image_store:
+   case nir_intrinsic_bindless_image_atomic:
+   case nir_intrinsic_bindless_image_atomic_swap:
+   case nir_intrinsic_begin_invocation_interlock:
+   case nir_intrinsic_end_invocation_interlock:
+   case nir_intrinsic_barrier:
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* Whether an instruction may run for more invocations than the branch it is
+ * in: it computes from its sources alone, cannot fault, and reads memory
+ * nothing changes while the function runs. Texture reads and queries cannot
+ * fault. A buffer read can, so it moves only where translation proved it
+ * reads mapped memory in every invocation (ACCESS_CAN_SPECULATE: a field of
+ * a bound buffer at a fixed offset within its declared type, or of the
+ * argument tables). Being free to reorder (a read-only buffer) is no such
+ * proof: its index may be one the branch rejects. A read differentiated or
+ * sampled with implicit derivatives at the hoisted point takes them from
+ * the whole quad, as it would outside the branch. */
+static bool
+speculatable(nir_instr *instr, const struct hoisting *h)
+{
+   switch (instr->type) {
+   case nir_instr_type_alu:
+   case nir_instr_type_load_const:
+   case nir_instr_type_undef:
+   case nir_instr_type_deref:
+      return true;
+   case nir_instr_type_tex:
+      switch (nir_instr_as_tex(instr)->op) {
+      case nir_texop_txs:
+      case nir_texop_query_levels:
+      case nir_texop_texture_samples:
+      case nir_texop_lod:
+         return true;
+      case nir_texop_tex:
+      case nir_texop_txb:
+      case nir_texop_txl:
+      case nir_texop_txd:
+      case nir_texop_txf:
+      case nir_texop_txf_ms:
+      case nir_texop_tg4:
+         return !h->writes;
+      default:
+         return false;
+      }
+   case nir_instr_type_intrinsic: {
+      nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+      switch (intrinsic->intrinsic) {
+      case nir_intrinsic_load_input:
+      case nir_intrinsic_load_interpolated_input:
+      case nir_intrinsic_load_barycentric_pixel:
+      case nir_intrinsic_load_barycentric_centroid:
+      case nir_intrinsic_load_barycentric_sample:
+      case nir_intrinsic_load_barycentric_at_offset:
+      case nir_intrinsic_load_barycentric_at_sample:
+      case nir_intrinsic_load_frag_coord:
+      case nir_intrinsic_load_pixel_coord:
+      case nir_intrinsic_load_push_constant:
+      case nir_intrinsic_image_deref_size:
+      case nir_intrinsic_image_deref_samples:
+      case nir_intrinsic_image_deref_levels:
+         return true;
+      case nir_intrinsic_load_global:
+      case nir_intrinsic_load_global_constant: {
+         enum gl_access_qualifier access = nir_intrinsic_access(intrinsic);
+         /* A read nothing writes (CAN_REORDER) sees the same value earlier
+          * even when the function writes other memory. */
+         return (access & ACCESS_CAN_SPECULATE) && ((access & ACCESS_CAN_REORDER) || !h->writes);
+      }
+      case nir_intrinsic_image_deref_load:
+         return !h->writes;
+      default:
+         return false;
+      }
+   }
+   default:
+      return false;
+   }
+}
+
+static bool
+hoist_source(nir_src *src, void *data)
+{
+   nir_instr *parent = nir_def_instr(src->ssa);
+   nir_block **early = data;
+   if (nir_block_dominates(*early, parent->block))
+      *early = parent->block;
+   return true;
+}
+
+static nir_block *hoist_speculatable(nir_instr *instr, nir_block *floor, const struct hoisting *h);
+
+struct hoisting_operand {
+   nir_block *floor;
+   const struct hoisting *h;
+};
+
+static bool
+hoist_operand(nir_src *src, void *data)
+{
+   const struct hoisting_operand *operand = data;
+   hoist_speculatable(nir_def_instr(src->ssa), operand->floor, operand->h);
+   return true;
+}
+
+/* Moves a speculatable instruction and the speculatable ones it computes
+ * from up to `floor`, or to the first block below it where all their
+ * sources exist. Floor dominates the use the move is for, so a value a use
+ * needs no higher stays where it is. Returns its block. */
+static nir_block *
+hoist_speculatable(nir_instr *instr, nir_block *floor, const struct hoisting *h)
+{
+   if (nir_block_dominates(instr->block, floor) || instr->type == nir_instr_type_phi ||
+       !speculatable(instr, h))
+      return instr->block;
+   struct hash_entry *entry = _mesa_hash_table_search(h->floors, instr);
+   if (entry && nir_block_dominates(entry->data, floor))
+      return instr->block;
+   if (entry)
+      entry->data = floor;
+   else
+      _mesa_hash_table_insert(h->floors, instr, floor);
+   nir_foreach_src(instr, hoist_operand, &(struct hoisting_operand){floor, h});
+   nir_block *early = floor;
+   nir_foreach_src(instr, hoist_source, &early);
+   if (early != instr->block && !leaves_loop(early, instr->block))
+      nir_instr_move(nir_after_block_before_jump(early), instr);
+   return instr->block;
+}
+
+/* Whether some invocations of a subgroup may take a branch, or an iteration
+ * of a loop, that others leave. Divergence analysis proves the rest uniform:
+ * all of a quad's invocations that reach them take them together. */
+static bool
+diverges(nir_cf_node *node)
+{
+   if (node->type == nir_cf_node_if)
+      return nir_src_is_divergent(&nir_cf_node_as_if(node)->condition);
+   return node->type == nir_cf_node_loop && nir_loop_is_divergent(nir_cf_node_as_loop(node));
+}
+
+/* The block before the outermost divergent branch or loop holding block:
+ * the latest point where each invocation of a quad that reaches block is
+ * still active. NULL when no divergent branch holds block. */
+static nir_block *
+converged_before(nir_block *block)
+{
+   nir_cf_node *outer = NULL;
+   for (nir_cf_node *node = block->cf_node.parent; node && node->type != nir_cf_node_function;
+        node = node->parent) {
+      if (diverges(node))
+         outer = node;
+   }
+   return outer ? nir_cf_node_as_block(nir_cf_node_prev(outer)) : NULL;
+}
+
+/* Whether control flow node holds block. */
+static bool
+holds(const nir_cf_node *node, const nir_block *block)
+{
+   for (const nir_cf_node *n = block->cf_node.parent; n; n = n->parent) {
+      if (n == node)
+         return true;
+   }
+   return false;
+}
+
+/* Whether a divergent branch or loop holds `use` but not `def`, so that an
+ * invocation of a quad may reach def and not use. */
+static bool
+branches_between(const nir_block *def, const nir_block *use)
+{
+   for (nir_cf_node *node = use->cf_node.parent; node && node->type != nir_cf_node_function;
+        node = node->parent) {
+      if (holds(node, def))
+         return false;
+      if (diverges(node))
+         return true;
+   }
+   return false;
+}
+
+/* Where a value's derivative is taken: at the end of floor when the value
+ * exists there, which keeps the derivative's live range short, or else right
+ * after the value (after the phis of the block a phi heads). */
+static nir_cursor
+derivative_point(nir_instr *instr, nir_block *floor)
+{
+   if (nir_block_dominates(instr->block, floor))
+      return nir_after_block_before_jump(floor);
+   return instr->type == nir_instr_type_phi ? nir_after_phis(instr->block) : nir_after_instr(instr);
+}
+
+/* A texture instruction with implicit derivatives in a branch its
+ * coordinate is computed outside of (or can be): a level-of-detail query
+ * moves to where its sources exist, and a sample takes explicit gradients,
+ * the derivatives of its coordinate taken there. A bias scales both
+ * gradients by 2^bias, which adds it to the level of detail. */
+static bool
+hoist_implicit_derivatives(nir_builder *b, nir_tex_instr *tex, const struct hoisting *h)
+{
+   int index = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   if (index < 0)
+      return false;
+   nir_block *block = tex->instr.block;
+   /* Outside any divergent branch, every invocation that reached the
+    * coordinate reaches the instruction. */
+   nir_block *floor = converged_before(block);
+   if (!floor)
+      return false;
+   nir_instr *operand = nir_def_instr(tex->src[index].src.ssa);
+   nir_block *at = hoist_speculatable(operand, floor, h);
+   if (!branches_between(at, block) || leaves_loop(at, block))
+      return false;
+   if (tex->op == nir_texop_lod)
+      return hoist_speculatable(&tex->instr, floor, h) != block;
+   if (tex->op != nir_texop_tex && tex->op != nir_texop_txb)
+      return false;
+   b->cursor = derivative_point(operand, floor);
+   nir_def *coord = nir_trim_vector(b, tex->src[index].src.ssa, tex->coord_components - tex->is_array);
+   nir_def *ddx = nir_ddx(b, coord), *ddy = nir_ddy(b, coord);
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *bias = nir_steal_tex_src(tex, nir_tex_src_bias);
+   if (bias) {
+      nir_def *scale = nir_fexp2(b, nir_f2fN(b, bias, ddx->bit_size));
+      ddx = nir_fmul(b, ddx, scale);
+      ddy = nir_fmul(b, ddy, scale);
+   }
+   tex->op = nir_texop_txd;
+   nir_tex_instr_add_src(tex, nir_tex_src_ddx, ddx);
+   nir_tex_instr_add_src(tex, nir_tex_src_ddy, ddy);
+   return true;
+}
+
+/* Apple GPUs take a derivative, and a texture instruction's implicit level
+ * of detail, from the values each pixel of the quad holds, even where control
+ * flow left some of them out of the branch that takes it: a shader may stop
+ * shading pixels outside a shape and differentiate, or sample at, a value
+ * the others go on to compute. NVIDIA's quad shuffles read nothing from
+ * inactive lanes. So a derivative inside a divergent branch or loop has its
+ * speculatable computation moved up to just before the outermost one, or to
+ * where its sources exist below that, and is taken there, where every lane
+ * of the quad that reached the branch is active; a sample in such a branch
+ * takes explicit gradients taken there, and a level-of-detail query moves
+ * there. A branch divergence analysis proves uniform keeps a quad's lanes
+ * together, so nothing leaves it: moving values further up only lengthens
+ * their live ranges (Core Animation's generic shader spilled 1473 times).
+ * Nothing moves into a loop, so a value a loop leaves keeps its last
+ * iteration's derivative. A value computed from a read that may fault, such
+ * as a buffer element at a per-pixel index, stays where it is, and so does
+ * its derivative. */
+static bool
+hoist_derivatives(nir_shader *shader)
+{
+   bool progress = false;
+   nir_builder b;
+   /* The structurizer routes paths through phis of constants and undefined
+    * values, which divergence analysis takes as divergent after any
+    * divergent branch. Folding them lets it see the uniform branches. */
+   while (nir_opt_remove_phis(shader))
+      progress = true;
+   nir_foreach_function_impl(impl, shader) {
+      nir_metadata_require(impl, nir_metadata_dominance | nir_metadata_divergence);
+      struct hoisting h = {.floors = _mesa_pointer_hash_table_create(NULL)};
+      if (!h.floors)
+         return progress;
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                writes_memory(nir_instr_as_intrinsic(instr)))
+               h.writes = true;
+         }
+      }
+      b = nir_builder_create(impl);
+      bool moved = false;
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type == nir_instr_type_tex) {
+               nir_tex_instr *tex = nir_instr_as_tex(instr);
+               if (nir_tex_instr_has_implicit_derivative(tex) && tex->op != nir_texop_tg4)
+                  moved |= hoist_implicit_derivatives(&b, tex, &h);
+               continue;
+            }
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+            case nir_intrinsic_ddx: case nir_intrinsic_ddx_fine: case nir_intrinsic_ddx_coarse:
+            case nir_intrinsic_ddy: case nir_intrinsic_ddy_fine: case nir_intrinsic_ddy_coarse:
+               break;
+            default:
+               continue;
+            }
+            nir_block *floor = converged_before(block);
+            if (!floor)
+               continue;
+            nir_instr *operand = nir_def_instr(nir_instr_as_intrinsic(instr)->src[0].ssa);
+            nir_block *at = hoist_speculatable(operand, floor, &h);
+            if (!branches_between(at, block) || leaves_loop(at, block))
+               continue;
+            nir_instr_move(derivative_point(operand, floor), instr);
+            moved = true;
+         }
+      }
+      moved |= h.floors->entries != 0;
+      _mesa_hash_table_destroy(h.floors, NULL);
+      /* Moves keep the control flow; the divergence found is not kept up
+       * to date by the passes after this one. */
+      nir_progress(true, impl, nir_metadata_control_flow);
+      progress |= moved;
+   }
+   return progress;
 }
 
 static bool
@@ -7835,7 +8951,8 @@ cfg_emit(struct translator *t)
                nir_phi_src *source = nir_phi_instr_add_src(phi, pred->end, index);
                list_addtail(&source->src.use_link, &index->uses);
             }
-            if (target->pointer_root && !joined_pointer(target, incoming, find_value(t, incoming)))
+            if (target->pointer_root && !LLVMIsUndef(incoming) &&
+                !joined_pointer(target, incoming, find_value(t, incoming)))
                return fail(t, STELA_AIR_MEMORY, "pointer PHI incoming authority differs from proof");
             struct value *aggregate = target->aggregate_count ? aggregate_value(t, incoming) : NULL;
             if (target->aggregate_count &&
@@ -7881,8 +8998,52 @@ cfg_emit(struct translator *t)
    nir_lower_vars_to_ssa(t->b.shader);
    /* Its flag's derefs outlive the flag's loads and stores. */
    nir_remove_dead_derefs(t->b.shader);
+   hoist_derivatives(t->b.shader);
    nir_validate_shader(t->b.shader, "AIR structured CFG after Mesa lowering");
    return true;
+}
+
+/* The thread variables nothing accesses, which take no thread memory:
+ * not those of any deref, nor storage attachments', which the fragment
+ * tests read after the layout. */
+struct unused_thread_variables {
+   const struct translator *t;
+   struct set *referenced;
+};
+
+static bool
+unused_thread_variable(nir_variable *var, void *data)
+{
+   const struct unused_thread_variables *unused = data;
+   for (unsigned i = 0; i < AIR_MAX_RENDER_TARGETS; i++) {
+      if (unused->t->attachment_outputs[i] == var)
+         return false;
+   }
+   return var != unused->t->attachment_source1 && !_mesa_set_search(unused->referenced, var);
+}
+
+/* Removes the thread variables nothing accesses: the structurizer's path
+ * variables, now SSA values. One only written stays, as written. */
+static void
+remove_unused_thread_variables(struct translator *t)
+{
+   struct unused_thread_variables unused = {t, _mesa_pointer_set_create(NULL)};
+   /* Without the set every variable stays, as without the removal. */
+   if (!unused.referenced)
+      return;
+   nir_foreach_function_impl(impl, t->b.shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_deref &&
+                nir_instr_as_deref(instr)->deref_type == nir_deref_type_var)
+               _mesa_set_add(unused.referenced, nir_instr_as_deref(instr)->var);
+         }
+      }
+   }
+   const nir_remove_dead_variables_options options = {.can_remove_var = unused_thread_variable,
+                                                      .can_remove_var_data = &unused};
+   nir_remove_dead_variables(t->b.shader, nir_var_function_temp, &options);
+   _mesa_set_destroy(unused.referenced, NULL);
 }
 
 /* A backend with no fused operation of a size takes the weak one, which
@@ -8002,7 +9163,8 @@ translate(const void *bitcode, size_t size, const char *entry,
    if (!stela_air_metadata_layout(&t.metadata) || !stela_air_metadata_validate(&t.metadata) ||
        !stela_air_specialize_constants(&t.metadata, options->constants, options->constant_count) ||
        !stela_air_construct_constants(&t.metadata) ||
-       !stela_air_link_modules(&t.metadata, options->modules, options->module_count))
+       !stela_air_link_modules(&t.metadata, options->constants, options->constant_count,
+                               options->modules, options->module_count))
       goto done;
    LLVMValueRef specialized = NULL;
    /* Calls through tables may depend on inlining, and logging admission uses
@@ -8097,6 +9259,9 @@ translate(const void *bitcode, size_t size, const char *entry,
    }
    if (!cfg_emit(&t))
       goto done;
+   /* Texture calls' loops and branches use the derefs made before them;
+    * each use takes its own copy in its block, as backends take them. */
+   nir_rematerialize_derefs_in_use_blocks_impl(t.b.impl);
    nir_shader_alu_pass(t.b.shader, weaken_fma, nir_metadata_all, NULL);
    /* Metal keeps half denormals in every mode. Only half users declare it, so
     * backends without FP16 controls still take FP32-only shaders. */
@@ -8123,6 +9288,7 @@ translate(const void *bitcode, size_t size, const char *entry,
       nir_remove_dead_variables(t.b.shader, nir_var_mem_shared, NULL);
    }
    if (t.private_allocations) {
+      remove_unused_thread_variables(&t);
       nir_lower_vars_to_explicit_types(t.b.shader, nir_var_function_temp, glsl_get_natural_size_align_bytes);
       if (t.b.shader->scratch_size > options->max_private_bytes) {
          fail(&t, STELA_AIR_LIMIT, "aligned thread memory layout exceeds the target limit");
@@ -8130,6 +9296,13 @@ translate(const void *bitcode, size_t size, const char *entry,
       }
       nir_lower_explicit_io(t.b.shader, nir_var_function_temp, nir_address_format_32bit_offset);
       nir_remove_dead_variables(t.b.shader, nir_var_function_temp, NULL);
+   }
+   if (stage && stage->stage == STELA_AIR_FRAGMENT && stage->self_tests) {
+      if (!stage->fragment_tests || !stage->raster_order_groups || !options->bind_depth_stencil) {
+         fail(&t, STELA_AIR_TARGET, "fragment tests a function runs itself need the device's fragment shader interlock");
+         goto done;
+      }
+      t.tests_fragments = true;
    }
    if (stage && stage->stage == STELA_AIR_FRAGMENT && t.tests_fragments && !test_fragments(&t))
       goto done;

@@ -19,6 +19,18 @@ static nir_def *load(nir_builder *b, nir_def *address, unsigned offset, unsigned
                           .align_mul = bit_size / 8);
 }
 
+/* Access of a load at a fixed offset within a stage's argument table, which
+ * every draw and dispatch binds before it runs: it reads mapped memory in
+ * every invocation, so it may also run where control flow would skip it. */
+#define TABLE_ACCESS (ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE)
+
+/* A field at offset of the argument table at address. */
+static nir_def *table_load(nir_builder *b, nir_def *address, unsigned offset, unsigned bit_size)
+{
+   return nir_load_global(b, 1, bit_size, nir_iadd_imm(b, address, offset),
+                          .access = TABLE_ACCESS, .align_mul = bit_size / 8);
+}
+
 nir_def *stela_metal_load_table(nir_builder *b, enum stela_metal_table table)
 {
    return load_push(b, 1, 64, STELA_METAL_PUSH_TABLES + 8u * (unsigned)table);
@@ -58,29 +70,29 @@ nir_def *stela_metal_load_device_value(nir_builder *b, enum stela_air_device_val
                                                                                STELA_METAL_STAGE_IN_SIZE),
                              .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 4);
    case STELA_AIR_SAMPLE_COUNT:
-      return load(b, stela_metal_load_table(b, metal->table), STELA_METAL_TABLE_SAMPLE_COUNT, 32);
+      return table_load(b, stela_metal_load_table(b, metal->table), STELA_METAL_TABLE_SAMPLE_COUNT, 32);
    case STELA_AIR_BLEND_COLOR:
       return nir_load_global(b, 4, 32,
                              nir_iadd_imm(b, stela_metal_load_table(b, metal->table),
                                           STELA_METAL_TABLE_BLEND_COLOR),
-                             .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
+                             .access = TABLE_ACCESS, .align_mul = 16);
    case STELA_AIR_SAMPLE_POSITIONS:
       return nir_load_global(b, 4, 32,
                              nir_iadd_imm(b, stela_metal_load_table(b, metal->table),
                                           STELA_METAL_TABLE_SAMPLE_POSITIONS),
-                             .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
+                             .access = TABLE_ACCESS, .align_mul = 16);
    case STELA_AIR_IMAGEBLOCK:
       return nir_load_global(b, 4, 32,
                              nir_iadd_imm(b, stela_metal_load_table(b, metal->table),
                                           STELA_METAL_TABLE_IMAGEBLOCK),
-                             .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
+                             .access = TABLE_ACCESS, .align_mul = 16);
    case STELA_AIR_DEPTH_STENCIL:
    case STELA_AIR_DEPTH_RANGE:
       return nir_load_global(b, 4, 32,
                              nir_iadd_imm(b, stela_metal_load_table(b, metal->table),
                                           value == STELA_AIR_DEPTH_STENCIL ? STELA_METAL_TABLE_DEPTH_STENCIL :
                                                                              STELA_METAL_TABLE_DEPTH_RANGE),
-                             .access = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER, .align_mul = 16);
+                             .access = TABLE_ACCESS, .align_mul = 16);
    case STELA_AIR_PATCH_IDS: {
       /* The tessellation control stage's PATCH0. */
       nir_variable *ids = nir_variable_create(b->shader, nir_var_shader_in, glsl_uvec_type(3),
@@ -109,8 +121,8 @@ nir_def *stela_metal_bind_buffer(nir_builder *b, const struct stela_air_buffer *
    const struct stela_metal_stage *metal = stage;
    if (buffer->index >= STELA_METAL_BUFFERS)
       return NULL;
-   return load(b, stela_metal_load_table(b, metal->table),
-               STELA_METAL_TABLE_BUFFER_ADDRESSES + 8u * buffer->index, 64);
+   return table_load(b, stela_metal_load_table(b, metal->table),
+                     STELA_METAL_TABLE_BUFFER_ADDRESSES + 8u * buffer->index, 64);
 }
 
 /* The heap array of elements of type, as a variable of mode. Each element
@@ -152,7 +164,7 @@ static nir_def *id_half(nir_builder *b, nir_def *id, bool high)
 static nir_def *storage_level(nir_builder *b, nir_def *id, nir_def *level)
 {
    nir_def *high = id_half(b, id, true);
-   nir_def *first = nir_iand_imm(b, high, (1u << STELA_METAL_LEVEL_SHIFT) - 1);
+   nir_def *first = nir_iand_imm(b, high, (1u << STELA_METAL_PLANES_SHIFT) - 1);
    if (!level)
       return first;
    nir_def *levels = nir_iadd_imm(b, nir_ushr_imm(b, high, STELA_METAL_LEVEL_SHIFT), 1);
@@ -162,7 +174,7 @@ static nir_def *storage_level(nir_builder *b, nir_def *id, nir_def *level)
 /* The resource ID at offset in the stage's table. */
 static nir_def *table_id(nir_builder *b, const struct stela_metal_stage *stage, unsigned offset)
 {
-   return load(b, stela_metal_load_table(b, stage->table), offset, 64);
+   return table_load(b, stela_metal_load_table(b, stage->table), offset, 64);
 }
 
 nir_def *stela_metal_texture_view_word(nir_builder *b, nir_def *id, nir_def **address,
@@ -199,7 +211,7 @@ nir_deref_instr *stela_metal_bind_sampler_id(nir_builder *b, nir_def *id, bool i
    (void)stage;
    nir_def *index = id_half(b, id, integer);
    if (integer)
-      index = nir_iand_imm(b, index, ~STELA_METAL_SAMPLER_NEVER);
+      index = nir_iand_imm(b, index, STELA_METAL_SAMPLER_PIXELS - 1);
    return heap_element(b, index, STELA_METAL_HEAP_SAMPLERS, glsl_bare_sampler_type(),
                        nir_var_uniform);
 }
@@ -257,6 +269,37 @@ nir_def *stela_metal_texture_null(nir_builder *b, const struct stela_air_texture
    return id ? nir_ieq_imm(b, id, 0) : NULL;
 }
 
+nir_def *stela_metal_texture_srgb_storage(nir_builder *b, const struct stela_air_texture *texture,
+                                          nir_def *id, void *stage)
+{
+   id = queried_id(b, texture, id, stage);
+   return id ? nir_ine_imm(b, nir_iand_imm(b, id_half(b, id, true), STELA_METAL_SRGB_STORAGE), 0) :
+               NULL;
+}
+
+nir_def *stela_metal_texture_planes(nir_builder *b, const struct stela_air_texture *texture,
+                                    nir_def *id, void *stage)
+{
+   id = queried_id(b, texture, id, stage);
+   if (!id)
+      return NULL;
+   nir_def *high = id_half(b, id, true);
+   nir_def *planes = nir_ubitfield_extract_imm(b, high, STELA_METAL_PLANES_SHIFT, 3);
+   nir_def *ten = nir_ubitfield_extract_imm(b, high, STELA_METAL_PLANES_SHIFT - 1, 1);
+   nir_def *video = nir_ubitfield_extract_imm(b, high, STELA_METAL_PLANES_SHIFT - 2, 1);
+   /* Those two are storage index bits of a one-plane texture. */
+   nir_def *flags = nir_ior(b, nir_ishl_imm(b, ten, 3), nir_ishl_imm(b, video, 4));
+   return nir_bcsel(b, nir_ine_imm(b, planes, 0), nir_ior(b, planes, flags), planes);
+}
+
+nir_def *stela_metal_texture_filter_class(nir_builder *b, const struct stela_air_texture *texture,
+                                          nir_def *id, void *stage)
+{
+   id = queried_id(b, texture, id, stage);
+   return id ? nir_ubitfield_extract_imm(b, id_half(b, id, true), STELA_METAL_FILTER_CLASS_SHIFT, 2)
+             : NULL;
+}
+
 nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air_sampler *sampler,
                                           bool integer, void *stage)
 {
@@ -266,15 +309,45 @@ nir_deref_instr *stela_metal_bind_sampler(nir_builder *b, const struct stela_air
       b, table_id(b, stage, STELA_METAL_TABLE_SAMPLERS + 8u * sampler->index), integer, stage);
 }
 
-nir_def *stela_metal_sampler_never(nir_builder *b, const struct stela_air_sampler *sampler,
-                                   nir_def *id, void *stage)
+/* The high half of the MTLResourceID a sampler query names, or NULL for a
+ * bad binding. */
+static nir_def *
+sampler_flags(nir_builder *b, const struct stela_air_sampler *sampler, nir_def *id, void *stage)
 {
    if (!id) {
       if (sampler->index >= STELA_METAL_SAMPLERS)
          return NULL;
       id = table_id(b, stage, STELA_METAL_TABLE_SAMPLERS + 8u * sampler->index);
    }
-   return nir_test_mask(b, id_half(b, id, true), STELA_METAL_SAMPLER_NEVER);
+   return id_half(b, id, true);
+}
+
+nir_def *stela_metal_sampler_never(nir_builder *b, const struct stela_air_sampler *sampler,
+                                   nir_def *id, void *stage)
+{
+   nir_def *flags = sampler_flags(b, sampler, id, stage);
+   return flags ? nir_test_mask(b, flags, STELA_METAL_SAMPLER_NEVER) : NULL;
+}
+
+nir_def *stela_metal_sampler_filter(nir_builder *b, const struct stela_air_sampler *sampler,
+                                    nir_def *id, void *stage)
+{
+   nir_def *flags = sampler_flags(b, sampler, id, stage);
+   if (!flags)
+      return NULL;
+   nir_def *zero = nir_imm_int(b, 0);
+   nir_def *bits = zero;
+   static const struct {
+      uint32_t metal, air;
+   } map[] = {
+      {STELA_METAL_SAMPLER_CUBIC, STELA_AIR_SAMPLER_CUBIC},
+      {STELA_METAL_SAMPLER_MIPPED, STELA_AIR_SAMPLER_MIPPED},
+      {STELA_METAL_SAMPLER_PIXELS, STELA_AIR_SAMPLER_PIXELS},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(map); i++)
+      bits = nir_ior(b, bits, nir_bcsel(b, nir_test_mask(b, flags, map[i].metal),
+                                        nir_imm_int(b, map[i].air), zero));
+   return bits;
 }
 
 nir_def *stela_metal_resource_id(nir_builder *b, const struct stela_air_texture *texture,
@@ -291,7 +364,7 @@ nir_def *stela_metal_resource_id(nir_builder *b, const struct stela_air_texture 
    nir_def *slot = nir_umin(b, element, nir_imm_int64(b, length - 1));
    nir_def *address = nir_iadd(b, stela_metal_load_table(b, metal->table), nir_imul_imm(b, slot, 8));
    unsigned first = (texture ? STELA_METAL_TABLE_TEXTURES : STELA_METAL_TABLE_SAMPLERS) + 8u * index;
-   return nir_bcsel(b, nir_ult_imm(b, element, length), load(b, address, first, 64),
+   return nir_bcsel(b, nir_ult_imm(b, element, length), table_load(b, address, first, 64),
                     nir_imm_int64(b, 0));
 }
 
@@ -1111,8 +1184,8 @@ static nir_def *index_at(nir_builder *b, nir_def *indices, nir_def *length, nir_
 static void table_buffer(nir_builder *b, unsigned buffer, nir_def **address, nir_def **length)
 {
    nir_def *table = stela_metal_load_table(b, STELA_METAL_TABLE_PRIMARY);
-   *address = load(b, table, STELA_METAL_TABLE_BUFFER_ADDRESSES + 8u * buffer, 64);
-   *length = load(b, table, STELA_METAL_TABLE_BUFFER_LENGTHS + 8u * buffer, 64);
+   *address = table_load(b, table, STELA_METAL_TABLE_BUFFER_ADDRESSES + 8u * buffer, 64);
+   *length = table_load(b, table, STELA_METAL_TABLE_BUFFER_LENGTHS + 8u * buffer, 64);
 }
 
 /* The attribute at location, when the layout provides it as integer says. */
@@ -1356,7 +1429,8 @@ nir_shader *stela_metal_tessellation_control(const nir_shader_compiler_options *
    nir_store_var(&b, levels[1], nir_imm_zero(&b, 2, 32), 0x3);
    nir_push_if(&b, in_bounds);
    {
-      nir_def *scale = load(&b, arguments, STELA_METAL_TESSELLATION_FACTOR_SCALE, 32);
+      nir_def *scale = tessellation->scales ? load(&b, arguments, STELA_METAL_TESSELLATION_FACTOR_SCALE, 32)
+                                            : nir_imm_float(&b, 1.0f);
       nir_def *address = nir_iadd(&b, factors, offset);
       nir_def *values[6];
       for (unsigned i = 0; i < edges + insides; i++)
@@ -2597,8 +2671,230 @@ static void astc_endpoints(nir_builder *b, nir_def *cem, nir_def *const v[8], ni
    }
 }
 
+/* x with bit << shift set when mode's bit in mask is: the HDR endpoint
+ * modes scatter their values' high bits by a mode. */
+static nir_def *astc_or_if(nir_builder *b, nir_def *x, nir_def *mode, unsigned mask, nir_def *bit,
+                           unsigned shift)
+{
+   nir_def *set = nir_ine_imm(b, nir_iand_imm(b, nir_ishl(b, nir_imm_int(b, 1), mode), mask), 0);
+   return nir_ior(b, x, nir_bcsel(b, set, nir_ishl_imm(b, bit, shift), nir_imm_int(b, 0)));
+}
+
+static nir_def *astc_clamp12(nir_builder *b, nir_def *v)
+{
+   return nir_imin(b, nir_imax(b, v, nir_imm_int(b, 0)), nir_imm_int(b, 0xfff));
+}
+
+static nir_def *astc_bit(nir_builder *b, nir_def *v, unsigned bit)
+{
+   return field(b, v, bit, 1);
+}
+
+/* HDR endpoint mode 11's 12-bit RGB endpoints from v[0] to v[5]. */
+static void astc_hdr_rgb(nir_builder *b, nir_def *const v[8], nir_def *e0[3], nir_def *e1[3])
+{
+   nir_def *major = nir_ior(b, astc_bit(b, v[4], 7), nir_ishl_imm(b, astc_bit(b, v[5], 7), 1));
+   nir_def *mode = nir_ior(b, nir_ior(b, astc_bit(b, v[1], 7), nir_ishl_imm(b, astc_bit(b, v[2], 7), 1)),
+                           nir_ishl_imm(b, astc_bit(b, v[3], 7), 2));
+   nir_def *va = nir_ior(b, v[0], nir_ishl_imm(b, nir_iand_imm(b, v[1], 0x40), 2));
+   nir_def *vb0 = nir_iand_imm(b, v[2], 0x3f), *vb1 = nir_iand_imm(b, v[3], 0x3f);
+   nir_def *vc = nir_iand_imm(b, v[1], 0x3f);
+   static const unsigned dbits[8] = {7, 6, 7, 6, 5, 6, 5, 6};
+   nir_def *unused = nir_isub_imm(b, 32, lookup(b, dbits, 8, mode));
+   nir_def *vd0 = nir_ishr(b, nir_ishl(b, nir_iand_imm(b, v[4], 0x7f), unused), unused);
+   nir_def *vd1 = nir_ishr(b, nir_ishl(b, nir_iand_imm(b, v[5], 0x7f), unused), unused);
+   nir_def *x0 = astc_bit(b, v[2], 6), *x1 = astc_bit(b, v[3], 6), *x2 = astc_bit(b, v[4], 6);
+   nir_def *x3 = astc_bit(b, v[5], 6), *x4 = astc_bit(b, v[4], 5), *x5 = astc_bit(b, v[5], 5);
+   va = astc_or_if(b, va, mode, 0xa4, x0, 9);
+   va = astc_or_if(b, va, mode, 0x08, x2, 9);
+   va = astc_or_if(b, va, mode, 0x50, x4, 9);
+   va = astc_or_if(b, va, mode, 0x50, x5, 10);
+   va = astc_or_if(b, va, mode, 0xa0, x1, 10);
+   va = astc_or_if(b, va, mode, 0xc0, x2, 11);
+   vc = astc_or_if(b, vc, mode, 0x04, x1, 6);
+   vc = astc_or_if(b, vc, mode, 0xe8, x3, 6);
+   vc = astc_or_if(b, vc, mode, 0x20, x2, 7);
+   vb0 = astc_or_if(b, vb0, mode, 0x5b, x0, 6);
+   vb1 = astc_or_if(b, vb1, mode, 0x5b, x1, 6);
+   vb0 = astc_or_if(b, vb0, mode, 0x12, x2, 7);
+   vb1 = astc_or_if(b, vb1, mode, 0x12, x3, 7);
+   nir_def *shift = nir_ixor(b, nir_ushr_imm(b, mode, 1), nir_imm_int(b, 3));
+   va = nir_ishl(b, va, shift);
+   vb0 = nir_ishl(b, vb0, shift);
+   vb1 = nir_ishl(b, vb1, shift);
+   vc = nir_ishl(b, vc, shift);
+   vd0 = nir_ishl(b, vd0, shift);
+   vd1 = nir_ishl(b, vd1, shift);
+   nir_def *high[3] = {va, nir_isub(b, va, vb0), nir_isub(b, va, vb1)};
+   nir_def *low[3] = {nir_isub(b, va, vc), nir_isub(b, nir_isub(b, nir_isub(b, va, vb0), vc), vd0),
+                      nir_isub(b, nir_isub(b, nir_isub(b, va, vb1), vc), vd1)};
+   /* The major component first, its values unscattered in mode 3. */
+   nir_def *direct = nir_ieq_imm(b, major, 3);
+   nir_def *direct0[3] = {nir_ishl_imm(b, v[0], 4), nir_ishl_imm(b, v[2], 4),
+                          nir_ishl_imm(b, nir_iand_imm(b, v[4], 0x7f), 5)};
+   nir_def *direct1[3] = {nir_ishl_imm(b, v[1], 4), nir_ishl_imm(b, v[3], 4),
+                          nir_ishl_imm(b, nir_iand_imm(b, v[5], 0x7f), 5)};
+   /* Major 1 swaps red and green, 2 red and blue. */
+   nir_def *one = nir_ieq_imm(b, major, 1), *two = nir_ieq_imm(b, major, 2);
+   nir_def *const *ends[2] = {low, high};
+   nir_def **out[2] = {e0, e1};
+   nir_def *const *directs[2] = {direct0, direct1};
+   for (unsigned e = 0; e < 2; e++) {
+      nir_def *const *x = ends[e];
+      nir_def *swapped[3] = {
+         nir_bcsel(b, one, x[1], nir_bcsel(b, two, x[2], x[0])),
+         nir_bcsel(b, one, x[0], x[1]),
+         nir_bcsel(b, two, x[0], x[2]),
+      };
+      for (unsigned c = 0; c < 3; c++)
+         out[e][c] = nir_bcsel(b, direct, directs[e][c], astc_clamp12(b, swapped[c]));
+   }
+}
+
+/* HDR endpoint mode 7's 12-bit RGB endpoints: a base and a scale below it. */
+static void astc_hdr_rgb_scale(nir_builder *b, nir_def *const v[8], nir_def *e0[3], nir_def *e1[3])
+{
+   nir_def *modeval = nir_ior(b, nir_ior(b, field(b, v[0], 6, 2), nir_ishl_imm(b, astc_bit(b, v[1], 7), 2)),
+                              nir_ishl_imm(b, astc_bit(b, v[2], 7), 3));
+   nir_def *split = nir_ine_imm(b, nir_iand_imm(b, modeval, 0xc), 0xc);
+   nir_def *all = nir_ieq_imm(b, modeval, 0xf);
+   nir_def *major = nir_bcsel(b, split, nir_ushr_imm(b, modeval, 2),
+                              nir_bcsel(b, all, nir_imm_int(b, 0), nir_iand_imm(b, modeval, 3)));
+   nir_def *mode = nir_bcsel(b, split, nir_iand_imm(b, modeval, 3),
+                             nir_bcsel(b, all, nir_imm_int(b, 5), nir_imm_int(b, 4)));
+   nir_def *red = nir_iand_imm(b, v[0], 0x3f), *green = nir_iand_imm(b, v[1], 0x1f);
+   nir_def *blue = nir_iand_imm(b, v[2], 0x1f), *scale = nir_iand_imm(b, v[3], 0x1f);
+   nir_def *x0 = astc_bit(b, v[1], 6), *x1 = astc_bit(b, v[1], 5), *x2 = astc_bit(b, v[2], 6);
+   nir_def *x3 = astc_bit(b, v[2], 5), *x4 = astc_bit(b, v[3], 7), *x5 = astc_bit(b, v[3], 6);
+   nir_def *x6 = astc_bit(b, v[3], 5);
+   green = astc_or_if(b, green, mode, 0x30, x0, 6);
+   green = astc_or_if(b, green, mode, 0x3a, x1, 5);
+   blue = astc_or_if(b, blue, mode, 0x30, x2, 6);
+   blue = astc_or_if(b, blue, mode, 0x3a, x3, 5);
+   scale = astc_or_if(b, scale, mode, 0x3d, x6, 5);
+   scale = astc_or_if(b, scale, mode, 0x2d, x5, 6);
+   scale = astc_or_if(b, scale, mode, 0x04, x4, 7);
+   red = astc_or_if(b, red, mode, 0x3b, x4, 6);
+   red = astc_or_if(b, red, mode, 0x04, x3, 6);
+   red = astc_or_if(b, red, mode, 0x10, x5, 7);
+   red = astc_or_if(b, red, mode, 0x0f, x2, 7);
+   red = astc_or_if(b, red, mode, 0x05, x1, 8);
+   red = astc_or_if(b, red, mode, 0x0a, x0, 8);
+   red = astc_or_if(b, red, mode, 0x05, x0, 9);
+   red = astc_or_if(b, red, mode, 0x02, x6, 9);
+   red = astc_or_if(b, red, mode, 0x01, x3, 10);
+   red = astc_or_if(b, red, mode, 0x02, x5, 10);
+   static const unsigned shifts[6] = {1, 1, 2, 3, 4, 5};
+   nir_def *shift = lookup(b, shifts, 6, mode);
+   red = nir_ishl(b, red, shift);
+   green = nir_ishl(b, green, shift);
+   blue = nir_ishl(b, blue, shift);
+   scale = nir_ishl(b, scale, shift);
+   nir_def *offsets = nir_ine_imm(b, mode, 5);
+   green = nir_bcsel(b, offsets, nir_isub(b, red, green), green);
+   blue = nir_bcsel(b, offsets, nir_isub(b, red, blue), blue);
+   nir_def *swapped[3] = {
+      nir_bcsel(b, nir_ieq_imm(b, major, 1), green, nir_bcsel(b, nir_ieq_imm(b, major, 2), blue, red)),
+      nir_bcsel(b, nir_ieq_imm(b, major, 1), red, green),
+      nir_bcsel(b, nir_ieq_imm(b, major, 2), red, blue),
+   };
+   for (unsigned c = 0; c < 3; c++) {
+      e1[c] = astc_clamp12(b, swapped[c]);
+      e0[c] = astc_clamp12(b, nir_isub(b, swapped[c], scale));
+   }
+}
+
+/* A partition's endpoints in an HDR texture, 16 bits a channel: HDR
+ * endpoint modes' 12-bit logarithmic values shifted up, and LDR modes'
+ * 8-bit values widened. *rgb_hdr and *alpha_hdr say which channels are
+ * logarithmic. */
+static void astc_hdr_endpoints(nir_builder *b, nir_def *cem, nir_def *const v[8], nir_def *ldr0,
+                               nir_def *ldr1, nir_def **e0, nir_def **e1, nir_def **rgb_hdr,
+                               nir_def **alpha_hdr)
+{
+   /* Mode 2: luminance, large range. */
+   nir_def *ordered = nir_uge(b, v[1], v[0]);
+   nir_def *large0 = nir_bcsel(b, ordered, nir_ishl_imm(b, v[0], 4), nir_iadd_imm(b, nir_ishl_imm(b, v[1], 4), 8));
+   nir_def *large1 = nir_bcsel(b, ordered, nir_ishl_imm(b, v[1], 4), nir_iadd_imm(b, nir_ishl_imm(b, v[0], 4), -8));
+   /* Mode 3: luminance, small range. */
+   nir_def *coarse = nir_test_mask(b, v[0], 0x80);
+   nir_def *small0 = nir_bcsel(
+      b, coarse, nir_ior(b, nir_ishl_imm(b, nir_iand_imm(b, v[1], 0xe0), 4), nir_ishl_imm(b, nir_iand_imm(b, v[0], 0x7f), 2)),
+      nir_ior(b, nir_ishl_imm(b, nir_iand_imm(b, v[1], 0xf0), 4), nir_ishl_imm(b, nir_iand_imm(b, v[0], 0x7f), 1)));
+   nir_def *d = nir_bcsel(b, coarse, nir_ishl_imm(b, nir_iand_imm(b, v[1], 0x1f), 2),
+                          nir_ishl_imm(b, nir_iand_imm(b, v[1], 0x0f), 1));
+   nir_def *small1 = nir_imin(b, nir_iadd(b, small0, d), nir_imm_int(b, 0xfff));
+   nir_def *scaled0[3], *scaled1[3], *direct0[3], *direct1[3];
+   astc_hdr_rgb_scale(b, v, scaled0, scaled1);
+   astc_hdr_rgb(b, v, direct0, direct1);
+   /* Mode 15's alpha: two 7-bit values, or a base and a signed offset. */
+   nir_def *selector = nir_ior(b, astc_bit(b, v[6], 7), nir_ishl_imm(b, astc_bit(b, v[7], 7), 1));
+   nir_def *a6 = nir_iand_imm(b, v[6], 0x7f), *a7 = nir_iand_imm(b, v[7], 0x7f);
+   nir_def *base = nir_ior(b, a6, nir_iand_imm(b, nir_ishl(b, a7, nir_iadd_imm(b, selector, 1)), 0x780));
+   nir_def *half = nir_ushr(b, nir_imm_int(b, 32), selector);
+   nir_def *offset = nir_isub(b, nir_ixor(b, nir_iand(b, a7, nir_ushr(b, nir_imm_int(b, 0x3f), selector)), half), half);
+   nir_def *up = nir_isub_imm(b, 4, selector);
+   base = nir_ishl(b, base, up);
+   nir_def *packed = nir_ieq_imm(b, selector, 3);
+   nir_def *alpha0 = nir_bcsel(b, packed, nir_ishl_imm(b, a6, 5), base);
+   nir_def *alpha1 = nir_bcsel(b, packed, nir_ishl_imm(b, a7, 5),
+                               astc_clamp12(b, nir_iadd(b, base, nir_ishl(b, offset, up))));
+   nir_def *one = nir_imm_int(b, 0x780);
+   nir_def *rgb0[3], *rgb1[3];
+   for (unsigned c = 0; c < 3; c++) {
+      rgb0[c] = nir_bcsel(b, nir_ieq_imm(b, cem, 2), large0,
+                          nir_bcsel(b, nir_ieq_imm(b, cem, 3), small0,
+                                    nir_bcsel(b, nir_ieq_imm(b, cem, 7), scaled0[c], direct0[c])));
+      rgb1[c] = nir_bcsel(b, nir_ieq_imm(b, cem, 2), large1,
+                          nir_bcsel(b, nir_ieq_imm(b, cem, 3), small1,
+                                    nir_bcsel(b, nir_ieq_imm(b, cem, 7), scaled1[c], direct1[c])));
+   }
+   nir_def *ldr_alpha = nir_ieq_imm(b, cem, 14);
+   nir_def *a0 = nir_bcsel(b, nir_ieq_imm(b, cem, 15), alpha0, one);
+   nir_def *a1 = nir_bcsel(b, nir_ieq_imm(b, cem, 15), alpha1, one);
+   nir_def *hdr0 = nir_ishl_imm(b, nir_vec4(b, rgb0[0], rgb0[1], rgb0[2], a0), 4);
+   nir_def *hdr1 = nir_ishl_imm(b, nir_vec4(b, rgb1[0], rgb1[1], rgb1[2], a1), 4);
+   /* Mode 14's alpha is LDR, widened as LDR modes' channels are. */
+   hdr0 = nir_vector_insert_imm(b, hdr0, nir_bcsel(b, ldr_alpha, nir_imul_imm(b, v[6], 257), nir_channel(b, hdr0, 3)), 3);
+   hdr1 = nir_vector_insert_imm(b, hdr1, nir_bcsel(b, ldr_alpha, nir_imul_imm(b, v[7], 257), nir_channel(b, hdr1, 3)), 3);
+   *rgb_hdr = nir_ior(b, nir_ior(b, nir_ieq_imm(b, cem, 2), nir_ieq_imm(b, cem, 3)),
+                      nir_ior(b, nir_ieq_imm(b, cem, 7), nir_ior(b, nir_ieq_imm(b, cem, 11), nir_uge_imm(b, cem, 14))));
+   *alpha_hdr = nir_iand(b, *rgb_hdr, nir_inot(b, ldr_alpha));
+   *e0 = nir_bcsel(b, *rgb_hdr, hdr0, ldr0);
+   *e1 = nir_bcsel(b, *rgb_hdr, hdr1, ldr1);
+}
+
+/* A logarithmic 16-bit value's half float: its top 5 bits the exponent,
+ * the mantissa's 11 bits mapped piecewise linearly to 10, clamped below
+ * infinity. */
+static nir_def *astc_lns_to_half(nir_builder *b, nir_def *c)
+{
+   nir_def *e = nir_ushr_imm(b, c, 11), *m = nir_iand_imm(b, c, 0x7ff);
+   nir_def *mt = nir_bcsel(b, nir_ult_imm(b, m, 512), nir_imul_imm(b, m, 3),
+                           nir_bcsel(b, nir_uge_imm(b, m, 1536), nir_iadd_imm(b, nir_imul_imm(b, m, 5), -2048),
+                                     nir_iadd_imm(b, nir_imul_imm(b, m, 4), -512)));
+   nir_def *h = nir_iadd(b, nir_ishl_imm(b, e, 10), nir_ushr_imm(b, mt, 3));
+   return nir_umin(b, h, nir_imm_int(b, 0x7bff));
+}
+
+/* A UNORM16 value's half float, c / 65535 rounded to nearest: c / 65535
+ * never falls halfway between halves, and only 65535 reaches 1. */
+static nir_def *astc_unorm16_to_half(nir_builder *b, nir_def *c)
+{
+   nir_def *top = nir_ufind_msb(b, nir_imax(b, c, nir_imm_int(b, 1)));
+   /* 2^(top - 16) <= c / 65535 < 2^(top - 15): 11 bits of mantissa. */
+   nir_def *scaled = nir_ishl(b, c, nir_isub_imm(b, 26, top));
+   nir_def *m = nir_udiv_imm(b, scaled, 65535);
+   nir_def *normal = nir_iadd(b, nir_ishl_imm(b, nir_iadd_imm(b, top, -1), 10), nir_iadd_imm(b, m, -1024));
+   /* Below 2^-14, c < 4: a subnormal's 2^-24 steps. */
+   nir_def *subnormal = nir_udiv_imm(b, nir_iadd_imm(b, nir_ishl_imm(b, c, 24), 32767), 65535);
+   nir_def *h = nir_bcsel(b, nir_ult_imm(b, c, 4), subnormal, normal);
+   return nir_bcsel(b, nir_ieq_imm(b, c, 0xffff), nir_imm_int(b, 0x3c00), h);
+}
+
 nir_def *stela_metal_decode_astc(nir_builder *b, nir_def *words, nir_def *x, nir_def *y,
-                                 nir_def *block_width, nir_def *block_height, nir_def *srgb)
+                                 nir_def *block_width, nir_def *block_height, nir_def *srgb,
+                                 nir_def *hdr_texture)
 {
    nir_def *w[4];
    for (unsigned i = 0; i < 4; i++)
@@ -2784,10 +3080,15 @@ nir_def *stela_metal_decode_astc(nir_builder *b, nir_def *words, nir_def *x, nir
       weight[c] = nir_bcsel(b, nir_iand(b, dual, nir_ieq_imm(b, component, c)), infill[1], infill[0]);
    nir_def *wv = nir_vec4(b, weight[0], weight[1], weight[2], weight[3]);
 
-   /* Endpoints widened to 16 bits, sRGB's with its half-step, blended. */
+   /* Endpoints widened to 16 bits, sRGB's with its half-step, blended. An
+    * HDR texture's HDR endpoint modes give logarithmic channels. */
    nir_def *half = nir_imm_int(b, 0x80);
    nir_def *c0 = nir_ior(b, nir_ishl_imm(b, e0, 8), nir_bcsel(b, srgb, half, e0));
    nir_def *c1 = nir_ior(b, nir_ishl_imm(b, e1, 8), nir_bcsel(b, srgb, half, e1));
+   nir_def *h0, *h1, *rgb_hdr, *alpha_hdr;
+   astc_hdr_endpoints(b, cem, v, c0, c1, &h0, &h1, &rgb_hdr, &alpha_hdr);
+   c0 = nir_bcsel(b, hdr_texture, h0, c0);
+   c1 = nir_bcsel(b, hdr_texture, h1, c1);
    nir_def *color = nir_ushr_imm(
       b, nir_iadd_imm(b, nir_iadd(b, nir_imul(b, c0, nir_isub_imm(b, 64, wv)), nir_imul(b, c1, wv)), 32), 6);
 
@@ -2800,11 +3101,17 @@ nir_def *stela_metal_decode_astc(nir_builder *b, nir_def *words, nir_def *x, nir
    nir_def *unbounded = nir_iand(b, nir_iand(b, nir_ieq_imm(b, min_s, 0x1fff), nir_ieq_imm(b, max_s, 0x1fff)),
                                  nir_iand(b, nir_ieq_imm(b, min_t, 0x1fff), nir_ieq_imm(b, max_t, 0x1fff)));
    nir_def *empty = nir_ior(b, nir_uge(b, min_s, max_s), nir_uge(b, min_t, max_t));
-   nir_def *bad_void = nir_ior(b, nir_ine_imm(b, astc_field(b, w, 9, 3), 6), nir_iand(b, nir_inot(b, unbounded), empty));
+   /* An HDR texture's void extent may hold half floats, flagged by bit 9. */
+   nir_def *half_void = nir_iand(b, hdr_texture, nir_test_mask(b, mode, 1 << 9));
+   nir_def *reserved_void = nir_bcsel(b, hdr_texture, nir_ine_imm(b, astc_field(b, w, 10, 2), 3),
+                                      nir_ine_imm(b, astc_field(b, w, 9, 3), 6));
+   nir_def *bad_void = nir_ior(b, reserved_void, nir_iand(b, nir_inot(b, unbounded), empty));
 
    nir_def *magenta = nir_imm_ivec4(b, 0xffff, 0, 0xffff, 0xffff);
-   color = nir_bcsel(b, nir_ior(b, error, hdr), magenta, color);
+   nir_def *failed = nir_ior(b, error, nir_iand(b, hdr, nir_inot(b, hdr_texture)));
+   color = nir_bcsel(b, failed, magenta, color);
    color = nir_bcsel(b, void_extent, nir_bcsel(b, bad_void, magenta, constant), color);
+   nir_def *blended = nir_inot(b, nir_ior(b, failed, void_extent));
 
    /* sRGB keeps 8 bits; linear 12, read as unorm and widened to 16. */
    nir_def *byte = nir_ushr_imm(b, color, 8);
@@ -2815,6 +3122,23 @@ nir_def *stela_metal_decode_astc(nir_builder *b, nir_def *words, nir_def *x, nir
                                       nir_ishl_imm(b, nir_channel(b, byte, 3), 24)));
    nir_def *low16 = nir_ior(b, nir_channel(b, wide, 0), nir_ishl_imm(b, nir_channel(b, wide, 1), 16));
    nir_def *high16 = nir_ior(b, nir_channel(b, wide, 2), nir_ishl_imm(b, nir_channel(b, wide, 3), 16));
+
+   /* An HDR texture's halves: logarithmic channels through their curve,
+    * UNORM16 ones divided, a half-float void extent's as they are. */
+   nir_def *halves[4];
+   for (unsigned c = 0; c < 4; c++) {
+      nir_def *value = nir_channel(b, color, c);
+      nir_def *logarithmic = nir_iand(b, blended, c == 3 ? alpha_hdr : rgb_hdr);
+      nir_def *h = nir_bcsel(b, logarithmic, astc_lns_to_half(b, value), astc_unorm16_to_half(b, value));
+      halves[c] = nir_bcsel(b, nir_iand(b, void_extent, nir_iand(b, half_void, nir_inot(b, bad_void))), value, h);
+   }
+   nir_def *low_half = nir_ior(b, halves[0], nir_ishl_imm(b, halves[1], 16));
+   nir_def *high_half = nir_ior(b, halves[2], nir_ishl_imm(b, halves[3], 16));
+   /* An HDR texture's error color is four NaNs. */
+   nir_def *invalid = nir_bcsel(b, void_extent, bad_void, failed);
+   nir_def *nan = nir_imm_int(b, 0x7e007e00);
+   low16 = nir_bcsel(b, hdr_texture, nir_bcsel(b, invalid, nan, low_half), low16);
+   high16 = nir_bcsel(b, hdr_texture, nir_bcsel(b, invalid, nan, high_half), high16);
    return nir_vec2(b, nir_bcsel(b, srgb, packed8, low16), nir_bcsel(b, srgb, nir_imm_int(b, 0), high16));
 }
 
@@ -2829,6 +3153,7 @@ nir_shader *stela_metal_decode_astc_kernel(const nir_shader_compiler_options *op
    struct blocks k;
    nir_builder b = blocks(options, "stela_metal_decode_astc", astc_block_bytes, &k);
    nir_def *srgb = nir_ieq_imm(&b, k.codec, STELA_METAL_BLOCKS_ASTC_SRGB);
+   nir_def *hdr = nir_ieq_imm(&b, k.codec, STELA_METAL_BLOCKS_ASTC_HDR);
    return store_decoded(&b, &k, stela_metal_decode_astc(&b, k.words, k.x, k.y, k.block_width,
-                                                        k.block_height, srgb));
+                                                        k.block_height, srgb, hdr));
 }

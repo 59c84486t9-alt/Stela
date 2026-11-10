@@ -450,6 +450,24 @@ memory_intrinsics_lower_to_chunks(void)
            &defaults, STELA_AIR_LIMIT);
 }
 
+/* A buffer is aligned only as its declared type is: a vector access through
+ * `out`, a uint pointer, claims 4-byte alignment whatever LLVM claims, as
+ * Apple GPUs accept such accesses at element alignment. */
+static void
+buffer_accesses_claim_their_declared_alignment(void)
+{
+   nir_shader *shader = compiled("",
+      "%v = load <4 x i32>, ptr addrspace(1) %out, align 16\n"
+      "%p = getelementptr i8, ptr addrspace(1) %out, i64 16\n"
+      "store <4 x i32> %v, ptr addrspace(1) %p, align 16\nret void\n");
+   nir_intrinsic_instr *loads[8], *stores[1];
+   unsigned n = intrinsics_of(shader, nir_intrinsic_load_global, loads, ARRAY_SIZE(loads));
+   assert(n && intrinsics_of(shader, nir_intrinsic_store_global, stores, ARRAY_SIZE(stores)) == 1);
+   assert(loads[n - 1]->def.num_components == 4 && nir_intrinsic_align_mul(loads[n - 1]) == 4);
+   assert(nir_intrinsic_align_mul(stores[0]) == 4);
+   ralloc_free(shader);
+}
+
 /* Initialized constant globals become the shader's constant data, laid out in
  * first-use order, and load_constant at their base with their range. */
 static void
@@ -596,6 +614,55 @@ rate_map_decoders_read_their_parameters(void)
    ralloc_free(shader);
 }
 
+/* The access of the shader's one 32-bit scalar load_global (the bindings'
+ * tables load 64-bit addresses), or ~0 without exactly one. */
+static unsigned
+word_load_access(nir_shader *shader)
+{
+   nir_intrinsic_instr *loads[16], *word = NULL;
+   unsigned n = intrinsics_of(shader, nir_intrinsic_load_global, loads, ARRAY_SIZE(loads));
+   for (unsigned i = 0; i < n; i++) {
+      if (loads[i]->def.bit_size == 32 && loads[i]->def.num_components == 1) {
+         if (word)
+            return ~0u;
+         word = loads[i];
+      }
+   }
+   return word ? nir_intrinsic_access(word) : ~0u;
+}
+
+/* A device buffer the kernel only reads, which Apple's compiler says no
+ * other pointer reaches, is read-only while the kernel writes another; one
+ * it may alias stays an ordinary load. */
+static void
+unaliased_read_buffers_load_read_only(void)
+{
+   static const char *kernel_metadata = KERNEL_ARGUMENTS("!40, !41")
+      "!41 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read\","
+      " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+      " i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"in\"}\n";
+   const char *attributes[] = {"\"air-buffer-no-alias\" ", ""};
+   for (unsigned i = 0; i < ARRAY_SIZE(attributes); i++) {
+      char definition[1024];
+      snprintf(definition, sizeof(definition),
+               "define void @kernel(ptr addrspace(1) %%out, ptr addrspace(1) %s%%in) {\n"
+               "%%p = getelementptr i32, ptr addrspace(1) %%in, i64 1\n"
+               "%%v = load i32, ptr addrspace(1) %%p, align 4\n"
+               "store i32 %%v, ptr addrspace(1) %%out, align 4\nret void\n}\n",
+               attributes[i]);
+      struct stela_air_error error;
+      nir_shader *shader = translate_kernel("", definition, kernel_metadata, &nir_options,
+                                            stela_metal_bind_buffer, &defaults, &error);
+      if (!shader)
+         fprintf(stderr, "read buffer: %u %s\n", error.kind, error.detail);
+      assert(shader);
+      unsigned access = word_load_access(shader);
+      const unsigned read_only = ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER;
+      assert(access != ~0u && (access & read_only) == (i == 0 ? read_only : 0));
+      ralloc_free(shader);
+   }
+}
+
 /* A struct or array crosses memory leaf by leaf at its layout offsets; an
  * undefined leaf stores nothing. */
 static void
@@ -648,11 +715,13 @@ main(void)
    pointer_slots_load_by_choice();
    pointers_choose_among_every_binding();
    generic_pointers_choose_their_memory();
+   buffer_accesses_claim_their_declared_alignment();
    constant_data_lowers_to_load_constant();
    kernels_read_constant_buffers();
    rate_map_decoders_read_their_parameters();
    aggregates_load_and_store_by_leaf();
    stack_pointers_keep_their_origin();
+   unaliased_read_buffers_load_read_only();
    glsl_type_singleton_decref();
    puts("air memory: ok");
    return 0;

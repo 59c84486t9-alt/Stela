@@ -944,6 +944,61 @@ matrix_memory_takes_origins_strides_and_transposes(void)
    }
 }
 
+/* A constant that names only its elements 0 and 1, as Apple's compiler
+ * builds a thread's elements, gives every lane those two: the even columns
+ * of each row the first, the odd the second; a shuffle into a matrix takes
+ * the thread elements its mask names. */
+static void
+matrix_constants_name_thread_elements(void)
+{
+   char constant[64 * 16] = "<64 x float> <float 2.0, float 3.0";
+   for (unsigned i = 2; i < 64; i++)
+      strcat(constant, ", float poison");
+   strcat(constant, ">");
+   char body[2048];
+   snprintf(body, sizeof(body),
+            "call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(%s, ptr addrspace(1) %%out,"
+            " i64 8, <2 x i64> zeroinitializer, i1 false)\nret void\n", constant);
+   uint8_t memory[256] = {0};
+   run_simdgroup(MATRIX_DECLARATIONS, body, memory, sizeof(memory));
+   for (unsigned i = 0; i < 64; i++)
+      assert(float_at(memory, i) == (i % 2 ? 3.0f : 2.0f));
+
+   /* The same elements replacing a loaded matrix's, keeping the rest of its
+    * storage, as Apple's compiler resets an accumulator. */
+   char mask[64 * 12] = "<64 x i32> <i32 0, i32 1";
+   for (unsigned i = 66; i < 128; i++)
+      snprintf(mask + strlen(mask), sizeof(mask) - strlen(mask), ", i32 %u", i);
+   strcat(mask, ">");
+   static char shuffled[8192];
+   snprintf(shuffled, sizeof(shuffled),
+            "%%a = call <64 x float> @air.simdgroup_matrix_8x8_load.v64f32.p1f32(ptr addrspace(1)"
+            " %%out, i64 8, <2 x i64> zeroinitializer, i1 false)\n"
+            "%%m = shufflevector %s, <64 x float> %%a, %s\n"
+            "call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %%m, ptr addrspace(1) %%out,"
+            " i64 8, <2 x i64> zeroinitializer, i1 false)\nret void\n", constant, mask);
+   for (unsigned i = 0; i < 64; i++)
+      put_float(memory, i, 9.0f);
+   run_simdgroup(MATRIX_DECLARATIONS, shuffled, memory, sizeof(memory));
+   for (unsigned i = 0; i < 64; i++)
+      assert(float_at(memory, i) == (i % 2 ? 3.0f : 2.0f));
+
+   /* A pair widened to a matrix gives every lane that pair. */
+   char widen[64 * 16] = "<64 x i32> <i32 0, i32 1";
+   for (unsigned i = 2; i < 64; i++)
+      strcat(widen, ", i32 poison");
+   strcat(widen, ">");
+   snprintf(shuffled, sizeof(shuffled),
+            "%%m = shufflevector <2 x float> <float 2.0, float 3.0>, <2 x float> poison, %s\n"
+            "call void @air.simdgroup_matrix_8x8_store.v64f32.p1f32(<64 x float> %%m, ptr addrspace(1) %%out,"
+            " i64 8, <2 x i64> zeroinitializer, i1 false)\nret void\n", widen);
+   for (unsigned i = 0; i < 64; i++)
+      put_float(memory, i, 9.0f);
+   run_simdgroup(MATRIX_DECLARATIONS, shuffled, memory, sizeof(memory));
+   for (unsigned i = 0; i < 64; i++)
+      assert(float_at(memory, i) == (i % 2 ? 3.0f : 2.0f));
+}
+
 /* Half and bfloat products accumulate in single precision; a half result
  * rounds once; a thread's elements 0 and 1 are its storage's. */
 static void
@@ -1104,6 +1159,7 @@ main(void)
    matrix_memory_takes_origins_strides_and_transposes();
    matrix_memory_takes_extents_strides_and_origins();
    matrix_elements_and_narrow_types();
+   matrix_constants_name_thread_elements();
    matrix_arithmetic_is_elementwise();
    refuses_misused_matrices();
    glsl_type_singleton_decref();

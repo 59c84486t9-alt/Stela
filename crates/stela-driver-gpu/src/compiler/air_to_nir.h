@@ -101,12 +101,48 @@ typedef nir_def *(*stela_air_texture_query)(nir_builder *b,
                                             const struct stela_air_texture *texture,
                                             nir_def *id, void *data);
 
-/* Whether a sampler argument, or with id the identifier an argument buffer
- * holds (sampler is then NULL), compares with Metal's Never: a comparison
- * through it is zero, though Vulkan's sampler for it does not compare. */
+/* What a sampler argument's binding says, or with id what the identifier an
+ * argument buffer holds does (sampler is then NULL). */
 typedef nir_def *(*stela_air_sampler_query)(nir_builder *b,
                                             const struct stela_air_sampler *sampler,
                                             nir_def *id, void *data);
+
+/* How a float texture's texels filter bicubically: as they are, clamped to
+ * a normalized format's range, or (32-bit float channels) not at all, the
+ * texel a nearest filter takes in place of the bicubic one. */
+enum stela_air_filter_class {
+   STELA_AIR_FILTER_FLOAT,
+   STELA_AIR_FILTER_UNORM,
+   STELA_AIR_FILTER_SNORM,
+   STELA_AIR_FILTER_NEAREST,
+};
+
+/* sampler_filter's bits: Metal's bicubic filter, which Vulkan's samplers
+ * lack and Apple GPUs apply to 2D textures only, a mip filter, and pixel
+ * coordinates. */
+enum stela_air_sampler_filter {
+   STELA_AIR_SAMPLER_CUBIC = 1,
+   STELA_AIR_SAMPLER_MIPPED = 2,
+   STELA_AIR_SAMPLER_PIXELS = 4,
+};
+
+/* texture_planes' values: a two-plane texture's second plane holds one
+ * texel per 1 x 1, 2 x 1 or 2 x 2 of the first, in the low two bits. Its
+ * first plane holds green, its second blue and red; with
+ * STELA_AIR_PLANES_YCBCR, luma and Cb and Cr, which with
+ * STELA_AIR_PLANES_VIDEO are video range (the surface's pixel format's,
+ * not the Metal format's), else full range. With STELA_AIR_PLANES_TEN_BIT
+ * each component is the high 10 bits of a 16-bit word, else a byte. */
+enum stela_air_planes {
+   STELA_AIR_PLANES_NONE = 0,
+   STELA_AIR_PLANES_FULL = 1,
+   STELA_AIR_PLANES_HORIZONTAL = 2,
+   STELA_AIR_PLANES_BOTH = 3,
+   STELA_AIR_PLANES_SUBSAMPLING = 3,
+   STELA_AIR_PLANES_YCBCR = 4,
+   STELA_AIR_PLANES_TEN_BIT = 8,
+   STELA_AIR_PLANES_VIDEO = 16,
+};
 
 /* AIR's indirect command functions (air_commands.c), as Metal's
  * render_command and compute_command methods. */
@@ -300,7 +336,9 @@ enum stela_air_device_value {
    STELA_AIR_IMAGEBLOCK,
    /* The depth and stencil state a fragment function that tests them itself
     * applies, as a uvec4: the depth word, the front and back faces' stencil
-    * words, laid out below, and a zero. */
+    * words, laid out below, and the encoder's stencil reference values, the
+    * front face's in bits 0 to 7 and the back face's in bits 8 to 15, which
+    * a function without a stencil output tests against. */
    STELA_AIR_DEPTH_STENCIL,
    /* The viewport's near and far depths as a uvec4 of float bits, then two
     * zeros. */
@@ -418,9 +456,32 @@ struct stela_air_options {
    stela_air_texture_query texture_levels;
    /* Whether a texture is unbound; NULL refuses is_null_texture. */
    stela_air_texture_query texture_null;
-   /* Whether a sampler never compares; NULL leaves comparisons to the
-    * sampler bind_sampler resolves. */
+   /* Whether a write or read_write float texture's storage images hold an
+    * sRGB format's texels, whose color channels the shader encodes as it
+    * writes and decodes as it reads; NULL when none do. */
+   stela_air_texture_query texture_srgb_storage;
+   /* Whether a sampler compares with Metal's Never, through which a
+    * comparison is zero though Vulkan's sampler for it does not compare;
+    * NULL leaves comparisons to the sampler bind_sampler resolves. */
    stela_air_sampler_query sampler_never;
+   /* A sampler's stela_air_sampler_filter bits and a float texture's
+    * stela_air_filter_class, for the bicubic filter shaders apply in
+    * Vulkan's place; NULL when no sampler filters bicubically. */
+   stela_air_sampler_query sampler_filter;
+   stela_air_texture_query texture_filter_class;
+   /* A float 2D texture's second plane (enum stela_air_planes), zero for
+    * textures of one plane, whose samples and reads it then combines with
+    * the first's; consulted where dynamic_planes says textures may have
+    * two. */
+   stela_air_texture_query texture_planes;
+   bool dynamic_planes;
+   /* Samplers of argument values may filter bicubically: their samples
+    * carry the bicubic path, which a constexpr sampler's take only when it
+    * is bicubic. */
+   bool dynamic_bicubic;
+   /* The samplers bound at these indices filter bicubically: their samples
+    * take the bicubic path, and those of the others do not. */
+   uint32_t bicubic_samplers;
    /* Indirect command buffers and pipeline states in argument buffers;
     * NULL refuses AIR's command functions. */
    stela_air_command_count command_count;
@@ -489,6 +550,12 @@ enum stela_air_blend_factor {
    STELA_AIR_BLEND_ONE_MINUS_COLOR_FACTOR,
    STELA_AIR_BLEND_ALPHA_FACTOR,
    STELA_AIR_BLEND_ONE_MINUS_ALPHA_FACTOR,
+   /* Dual-source blending's second source, color(0) index(1), which only
+    * attachment 0 blends with. */
+   STELA_AIR_BLEND_SOURCE1_COLOR,
+   STELA_AIR_BLEND_ONE_MINUS_SOURCE1_COLOR,
+   STELA_AIR_BLEND_SOURCE1_ALPHA,
+   STELA_AIR_BLEND_ONE_MINUS_SOURCE1_ALPHA,
 };
 enum stela_air_blend_op {
    STELA_AIR_BLEND_ADD,
@@ -513,6 +580,11 @@ struct stela_air_attachment_access {
    unsigned write_mask;
    enum stela_air_blend_op rgb_op, alpha_op;
    enum stela_air_blend_factor source_rgb, destination_rgb, source_alpha, destination_alpha;
+   /* A two-plane format's planes (enum stela_air_planes), zero for one:
+    * `format` is its first plane's, and its second plane's raw texels, two
+    * bytes, follow in the next storage descriptor. Only a 4:4:4 second
+    * plane renders. */
+   unsigned planes;
 };
 
 /* How an extended-range color attachment encodes its color channels. Its
@@ -552,6 +624,18 @@ struct stela_air_stage_options {
     * raster_order_groups, and runs for each sample the fragment covers, of
     * `samples` per pixel. */
    bool stencil_export, fragment_tests;
+   /* Whether a fragment function runs the depth and stencil tests itself,
+    * as fragment_tests describes, whatever it writes: a function reading or
+    * writing storage attachments (attachments) whose pipeline cannot test
+    * fragments before it runs, because it writes depth, stencil or coverage,
+    * discards under a depth or stencil test, or its pipeline turns alpha
+    * into coverage. It then writes its storage attachments for the samples
+    * that pass, in the same interlock section, and its pipeline tests no
+    * depth or stencil. alpha_to_coverage and alpha_to_one are its pipeline's,
+    * which it applies itself: color(0)'s alpha choosing the samples kept,
+    * as many as it is of the pixel's, the lowest first, before the tests,
+    * then 1 as every color output's alpha. */
+   bool self_tests, alpha_to_coverage, alpha_to_one;
    /* Whether a fragment function may order its accesses after those of
     * overlapping fragments: the device's fragment shader pixel interlock. */
    bool raster_order_groups;

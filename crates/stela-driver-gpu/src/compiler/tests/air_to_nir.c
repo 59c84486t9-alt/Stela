@@ -1081,6 +1081,23 @@ pointer_phi_semantics(void)
          "exit:\nret void\n", invalid[i]);
       expect_refusal(body, "", 100, STELA_AIR_MEMORY);
    }
+   /* An undefined pointer on a path that never uses it, as inlining leaves
+    * an unset argument: it takes the join's authority. */
+   for (unsigned tid = 0; tid < 4; tid++) {
+      nir_shader *undefined = translate_body(
+         "entry:\n%c = icmp ult i32 %tid, 2\nbr i1 %c, label %unset, label %set\n"
+         "unset:\nbr label %join\nset:\nbr label %join\n"
+         "join:\n%p = phi ptr addrspace(1) [undef, %unset], [%out, %set]\n"
+         "%use = phi i1 [false, %unset], [true, %set]\n"
+         "br i1 %use, label %write, label %done\n"
+         "write:\nstore i32 73, ptr addrspace(1) %p, align 4\nret void\n"
+         "done:\nret void\n");
+      const uint64_t address = 0x100000;
+      const uint32_t value = 73;
+      specialize_invocation(undefined, tid);
+      check_executed_stores(undefined, &address, &value, tid < 2 ? 0 : 1);
+      ralloc_free(undefined);
+   }
    expect_refusal("entry:\n%raw = inttoptr i64 1048576 to ptr addrspace(1)\nbr label %join\n"
       "join:\n%p = phi ptr addrspace(1) [%raw, %entry]\nret void\n", "", 100, STELA_AIR_TYPE);
    expect_refusal("entry:\n%unknown = freeze ptr addrspace(1) %out\nbr label %join\n"
@@ -1092,7 +1109,7 @@ pointer_phi_semantics(void)
       "br i1 %c, label %cycle, label %join\nroot:\nbr label %join\n"
       "join:\n%q = phi ptr addrspace(1) [%p, %cycle], [%out, %root]\nret void\n",
       "", 100, STELA_AIR_VERIFY);
-   puts("Same-origin pointer PHIs: nested joins, GEP recurrences, parallel swaps and explicit provenance refusals");
+   puts("Same-origin pointer PHIs: nested joins, GEP recurrences, parallel swaps, undefined inputs and explicit provenance refusals");
 }
 
 static void
@@ -2417,10 +2434,185 @@ reject_declared_entry_in_a_recursive_module(void)
    LLVMDisposeMemoryBuffer(input);
 }
 
+/* @step's body: `rounds` rounds of x = (x * 33) ^ k. */
+static uint32_t
+step_reference(uint32_t x, uint32_t k, unsigned rounds)
+{
+   for (unsigned i = 0; i < rounds; i++)
+      x = (x * 33) ^ k;
+   return x;
+}
+
+/* Three calls in one block of a function large enough to share: one
+ * [[noinline]] function of 32 rounds, and one of 160 rounds (320
+ * instructions) Apple's compiler would inline. The block's later parts
+ * read a value of an earlier part (%b), a call's result as a later call's
+ * argument (%s0) and part 0's value (%a). The function's body is
+ * translated once, in a loop, and each invocation stores what three
+ * separate copies would. */
+static void
+repeated_calls_share_one_body(unsigned rounds, const char *attributes)
+{
+   char step[16384];
+   snprintf(step, sizeof(step), "define internal i32 @step(i32 %%x0, i32 %%k) %s {\n", attributes);
+   for (unsigned i = 0; i < rounds; i++) {
+      size_t used = strlen(step);
+      snprintf(step + used, sizeof(step) - used, "%%t%u = mul i32 %%x%u, 33\n%%x%u = xor i32 %%t%u, %%k\n",
+               i, i, i + 1, i);
+   }
+   size_t used = strlen(step);
+   snprintf(step + used, sizeof(step) - used, "ret i32 %%x%u\n}\n", rounds);
+   const char *body =
+      "%a = add i32 %tid, 1\n"
+      "%s0 = call i32 @step(i32 %a, i32 3)\n"
+      "%b = mul i32 %s0, 5\n"
+      "%s1 = call i32 @step(i32 %b, i32 7)\n"
+      "%c = add i32 %s1, %b\n"
+      "%s2 = call i32 @step(i32 %c, i32 %s0)\n"
+      "%d = add i32 %s2, %a\n"
+      "store i32 %d, ptr addrspace(1) %out, align 4\n"
+      "%p1 = getelementptr i32, ptr addrspace(1) %out, i32 1\n"
+      "store i32 %b, ptr addrspace(1) %p1, align 4\n"
+      "%p2 = getelementptr i32, ptr addrspace(1) %out, i32 2\n"
+      "store i32 %s1, ptr addrspace(1) %p2, align 4\nret void\n";
+   for (uint32_t tid = 0; tid < 3; tid++) {
+      LLVMMemoryBufferRef input = stela_air_test_bitcode(body, step);
+      struct stela_air_error error;
+      nir_shader *nir = translate(input, &test_nir_options, 4000, &error);
+      if (!nir)
+         fprintf(stderr, "shared calls: %s\n", error.detail);
+      CHECK(nir);
+      LLVMDisposeMemoryBuffer(input);
+      unsigned loops = 0, multiplies = 0;
+      nir_foreach_function_impl(impl, nir) {
+         nir_foreach_block(block, impl) {
+            nir_cf_node *parent = block->cf_node.parent;
+            loops += parent->type == nir_cf_node_loop && nir_loop_first_block(nir_cf_node_as_loop(parent)) == block;
+            nir_foreach_instr(instr, block)
+               multiplies += instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->op == nir_op_imul;
+         }
+      }
+      /* One body of `rounds` multiplies, plus %b's and the thread
+       * position's (three copies would make 3 * rounds + 2). */
+      CHECK(loops == 1 && multiplies == rounds + 2);
+      specialize_invocation(nir, tid);
+      uint32_t a = tid + 1, s0 = step_reference(a, 3, rounds), b = s0 * 5;
+      uint32_t s1 = step_reference(b, 7, rounds);
+      uint32_t d = step_reference(s1 + b, s0, rounds) + a;
+      const uint64_t addresses[3] = {0x100000, 0x100004, 0x100008};
+      const uint32_t values[3] = {d, b, s1};
+      check_executed_stores(nir, addresses, values, 3);
+      ralloc_free(nir);
+   }
+}
+
+/* Repeated calls of a function reading a constant buffer that a function
+ * constant left out: one passes the null pointer, the other an offset off
+ * it, which read nothing. Shared, the call would take them through a PHI
+ * that joins null, which has no resource, with the offsets' (translation
+ * refused a Core Animation tile kernel so), so the calls stay separate. */
+static void
+calls_of_null_buffers_stay_separate(void)
+{
+   char step[8192] = "define internal i32 @step(i32 %x0, i32 %k, ptr addrspace(2) %c) noinline {\n";
+   for (unsigned i = 0; i < 32; i++) {
+      size_t used = strlen(step);
+      snprintf(step + used, sizeof(step) - used, "%%t%u = mul i32 %%x%u, 33\n%%x%u = xor i32 %%t%u, %%k\n",
+               i, i, i + 1, i);
+   }
+   strcat(step, "%v = load i32, ptr addrspace(2) %c, align 4\n%r = add i32 %x32, %v\nret i32 %r\n}\n");
+   const char *body =
+      "%s0 = call i32 @step(i32 %tid, i32 3, ptr addrspace(2) null)\n"
+      "%q = getelementptr i8, ptr addrspace(2) null, i64 8\n"
+      "%s1 = call i32 @step(i32 %s0, i32 7, ptr addrspace(2) %q)\n"
+      "store i32 %s1, ptr addrspace(1) %out, align 4\nret void\n";
+   for (uint32_t tid = 0; tid < 2; tid++) {
+      LLVMMemoryBufferRef input = stela_air_test_bitcode(body, step);
+      struct stela_air_error error;
+      nir_shader *nir = translate(input, &test_nir_options, 4000, &error);
+      if (!nir)
+         fprintf(stderr, "calls of null buffers: %s\n", error.detail);
+      CHECK(nir);
+      LLVMDisposeMemoryBuffer(input);
+      specialize_invocation(nir, tid);
+      const uint64_t addresses[1] = {0x100000};
+      const uint32_t values[1] = {step_reference(step_reference(tid, 3, 32), 7, 32)};
+      check_executed_stores(nir, addresses, values, 1);
+      ralloc_free(nir);
+   }
+}
+
+/* A thread variable a [[noinline]] function updates through its
+ * `thread int&` argument is only loaded and stored once the calls are
+ * inlined, and takes no thread memory. */
+static void
+inlined_thread_reference_takes_no_thread_memory(void)
+{
+   const char *bump = "define internal void @bump(ptr %p) noinline {\n"
+                      "%v = load i32, ptr %p, align 4\n%w = add i32 %v, 3\n"
+                      "store i32 %w, ptr %p, align 4\nret void\n}\n";
+   const char *body = "%s = alloca i32, align 4\nstore i32 %tid, ptr %s, align 4\n"
+                      "call void @bump(ptr %s)\ncall void @bump(ptr %s)\n"
+                      "%r = load i32, ptr %s, align 4\n"
+                      "store i32 %r, ptr addrspace(1) %out, align 4\nret void\n";
+   for (uint32_t tid = 0; tid < 2; tid++) {
+      LLVMMemoryBufferRef input = stela_air_test_bitcode(body, bump);
+      struct stela_air_error error;
+      nir_shader *nir = translate(input, &test_nir_options, 1000, &error);
+      if (!nir)
+         fprintf(stderr, "thread reference: %s\n", error.detail);
+      CHECK(nir && nir->scratch_size == 0);
+      LLVMDisposeMemoryBuffer(input);
+      specialize_invocation(nir, tid);
+      const uint64_t address = 0x100000;
+      const uint32_t value = tid + 6;
+      check_executed_stores(nir, &address, &value, 1);
+      ralloc_free(nir);
+   }
+}
+
+/* Thread memory holds only what the function accesses: a dynamically
+ * indexed array, and none of the variables structurizing a loop and its
+ * branches needs. */
+static void
+thread_memory_holds_only_accessed_variables(void)
+{
+   const char *body =
+      "%a = alloca [8 x i32], align 4\nbr label %loop\n"
+      "loop:\n%i = phi i32 [0, %0], [%n, %next]\n"
+      "%slot = getelementptr [8 x i32], ptr %a, i32 0, i32 %i\n"
+      "%odd = and i32 %i, 1\n%c = icmp eq i32 %odd, 0\nbr i1 %c, label %even, label %next\n"
+      "even:\n%e = add i32 %i, %tid\nstore i32 %e, ptr %slot, align 4\nbr label %next\n"
+      "next:\n%n = add i32 %i, 1\n%done = icmp eq i32 %n, 8\nbr i1 %done, label %exit, label %loop\n"
+      "exit:\n%k = and i32 %tid, 7\n%read = getelementptr [8 x i32], ptr %a, i32 0, i32 %k\n"
+      "%r = load i32, ptr %read, align 4\nstore i32 %r, ptr addrspace(1) %out, align 4\nret void\n";
+   LLVMMemoryBufferRef input = stela_air_test_bitcode(body, "");
+   unsigned bindings = 0;
+   const struct stela_air_options options = {
+      .workgroup_size = {32, 1, 1}, .max_instructions = 1000, .max_private_bytes = 1024,
+      .bind_buffer = bind_buffer, .binding_data = &bindings,
+   };
+   struct stela_air_error error;
+   nir_shader *nir = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input), "kernel",
+                                     &test_nir_options, &options, &error);
+   if (!nir)
+      fprintf(stderr, "thread memory: %s\n", error.detail);
+   else if (nir->scratch_size != 32)
+      fprintf(stderr, "thread memory: %u bytes\n", nir->scratch_size);
+   CHECK(nir && nir->scratch_size == 32);
+   LLVMDisposeMemoryBuffer(input);
+   ralloc_free(nir);
+}
+
 static void
 tests(void)
 {
    reject_declared_entry_in_a_recursive_module();
+   repeated_calls_share_one_body(32, "noinline");
+   repeated_calls_share_one_body(160, "");
+   calls_of_null_buffers_stay_separate();
+   inlined_thread_reference_takes_no_thread_memory();
+   thread_memory_holds_only_accessed_variables();
    struct stela_air_error error;
    LLVMMemoryBufferRef input = stela_air_test_bitcode(stela_air_test_store_body, "");
    nir_shader *nir = translate(input, &test_nir_options, 100, &error);

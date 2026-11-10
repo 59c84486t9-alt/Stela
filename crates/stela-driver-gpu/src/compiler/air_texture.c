@@ -30,6 +30,7 @@
  * Sample, read and gather return {texel, i8 residency}: sparse_color's
  * resident() is bit 0 clear. Atomics are described where they are lowered. */
 #include "air_texture.h"
+#include "compiler/nir/nir_format_convert.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -100,6 +101,8 @@ struct call {
    nir_def *residency;
    /* Whether the call's sampler compares with Never, or NULL. */
    nir_def *never;
+   /* The call's sampler's stela_air_sampler_filter bits, or NULL. */
+   nir_def *filter;
 };
 
 static bool
@@ -430,6 +433,18 @@ sampler_deref(struct call *call)
    }
    if (options->sampler_never)
       call->never = options->sampler_never(call->b, id ? NULL : sampler, id, options->binding_data);
+   /* A constexpr sampler's bits fold to a constant, which decides whether
+    * its samples take the bicubic path. A bound sampler's matter only where
+    * the options say the one bound there filters bicubically, and an
+    * argument value's where samplers of argument values may. */
+   bool cubic = id ? options->dynamic_bicubic || nir_src_is_const(nir_src_for_ssa(id)) :
+                     sampler->index < 32 && (options->bicubic_samplers >> sampler->index & 1);
+   if (options->sampler_filter && cubic) {
+      bool fold = call->b->constant_fold_alu;
+      call->b->constant_fold_alu = true;
+      call->filter = options->sampler_filter(call->b, id ? NULL : sampler, id, options->binding_data);
+      call->b->constant_fold_alu = fold;
+   }
    return deref;
 }
 
@@ -547,6 +562,383 @@ layered(const struct call *call, nir_def *coord, nir_def *layer, bool sample)
    return nir_vec(call->b, components, coord->num_components + 1);
 }
 
+/* Catmull-Rom's weights (B = 0, C = 1/2) of the four texels about a
+ * sample a fraction f past the second's center. */
+static void
+catmull_rom(nir_builder *b, nir_def *f, nir_def *weights[4])
+{
+   nir_def *f2 = nir_fmul(b, f, f), *f3 = nir_fmul(b, f2, f);
+   nir_def *half_f3 = nir_fmul_imm(b, f3, 0.5);
+   /* (-f^3 + 2f^2 - f) / 2, (3f^3 - 5f^2 + 2) / 2, (-3f^3 + 4f^2 + f) / 2,
+    * (f^3 - f^2) / 2. */
+   weights[0] = nir_fsub(b, nir_fsub(b, f2, half_f3), nir_fmul_imm(b, f, 0.5));
+   weights[1] = nir_fadd_imm(b, nir_fsub(b, nir_fmul_imm(b, f3, 1.5), nir_fmul_imm(b, f2, 2.5)), 1.0);
+   weights[2] = nir_fadd(b, nir_fsub(b, nir_fmul_imm(b, f2, 2.0), nir_fmul_imm(b, f3, 1.5)),
+                         nir_fmul_imm(b, f, 0.5));
+   weights[3] = nir_fsub(b, half_f3, nir_fmul_imm(b, f2, 0.5));
+}
+
+/* The sampler's lod_min_clamp (or its lod_max_clamp): the level of detail
+ * the sampler clamps a pixel's coordinates to when they change by 2^-24
+ * (2^24) of the texture per pixel, far below (above) any level. Fragment
+ * functions alone take implicit derivatives. */
+static nir_def *
+sampler_lod_bound(const struct call *call, const struct tex *t, float scale)
+{
+   nir_builder *b = call->b;
+   nir_def *pixel = nir_trim_vector(b, nir_load_frag_coord(b), 2);
+   struct tex query = {.op = nir_texop_lod, .texture = t->texture, .sampler = t->sampler,
+                       .coord = nir_fmul_imm(b, pixel, scale)};
+   return nir_channel(b, emit(call, &query), 0);
+}
+
+/* The level of detail Metal selects a bicubic sample's mip level from:
+ * the explicit or computed one plus the bias, clamped to the sampler's
+ * range, then to the shader's minimum. */
+static nir_def *
+cubic_lod(const struct call *call, const struct tex *t)
+{
+   nir_builder *b = call->b;
+   nir_def *lod;
+   if (t->op == nir_texop_txl) {
+      lod = t->lod;
+   } else if (t->op == nir_texop_txd) {
+      /* log2 of the longer gradient in base-level texels. */
+      struct tex size = {.op = nir_texop_txs, .texture = t->texture, .lod = nir_imm_int(b, 0)};
+      nir_def *texels = nir_i2f32(b, nir_trim_vector(b, emit(call, &size), 2));
+      nir_def *x = nir_fmul(b, t->ddx, texels), *y = nir_fmul(b, t->ddy, texels);
+      lod = nir_flog2(b, nir_fsqrt(b, nir_fmax(b, nir_fdot(b, x, x), nir_fdot(b, y, y))));
+   } else {
+      struct tex query = {.op = nir_texop_lod, .texture = t->texture, .sampler = t->sampler,
+                          .coord = nir_trim_vector(b, t->coord, 2)};
+      /* The unclamped level: the sampler's clamp follows the bias. */
+      lod = nir_channel(b, emit(call, &query), 1);
+      if (t->bias)
+         lod = nir_fadd(b, lod, t->bias);
+   }
+   if (b->shader->info.stage == MESA_SHADER_FRAGMENT) {
+      lod = nir_fmax(b, lod, sampler_lod_bound(call, t, 0x1p-24f));
+      lod = nir_fmin(b, lod, sampler_lod_bound(call, t, 0x1p24f));
+   }
+   /* Elsewhere the taps' explicit level clamps to the sampler's range. */
+   return t->min_lod ? nir_fmax(b, lod, t->min_lod) : lod;
+}
+
+/* One bicubic sample's taps: a loop over them, which keeps each sample's
+ * code to one tap however many sites a shader has. */
+struct cubic_taps {
+   struct call *call;
+   const struct tex *t;
+   nir_def *first, *scale, *layer, *lod, *wx, *wy, *nearest;
+};
+
+/* Tap index of the 4 x 4 about the sample, or the nearest texel alone: a
+ * texel-center tap through the sampler, which keeps its address modes,
+ * weighted into the sum, values[0], and with sparse residency its code
+ * ANDed into values[1]. */
+static bool
+cubic_tap(void *data, nir_def *index, nir_def **values)
+{
+   struct cubic_taps *taps = data;
+   struct call *call = taps->call;
+   nir_builder *b = call->b;
+   nir_def *i = nir_iand_imm(b, index, 3), *j = nir_ushr_imm(b, index, 2);
+   nir_def *step = nir_vec2(b, nir_u2f32(b, i), nir_u2f32(b, j));
+   nir_def *center = nir_fadd(b, taps->first, nir_fadd_imm(b, step, -0.5));
+   nir_def *c = nir_fdiv(b, center, taps->scale);
+   nir_def *channels[3] = {nir_channel(b, c, 0), nir_channel(b, c, 1), taps->layer};
+   struct tex tap = {.op = nir_texop_txl, .texture = taps->t->texture, .sampler = taps->t->sampler,
+                     .coord = nir_vec(b, channels, taps->layer ? 3 : 2), .lod = taps->lod};
+   nir_def *texel = emit(call, &tap);
+   if (call->sparse) {
+      nir_def *tap_code = nir_channel(b, texel, 4);
+      nir_def *code = nir_sparse_residency_code_and(b, values[1], tap_code);
+      values[1] = nir_bcsel(b, nir_ieq_imm(b, index, 0), tap_code, code);
+      texel = nir_trim_vector(b, texel, 4);
+   }
+   nir_def *weight = nir_bcsel(b, taps->nearest, nir_imm_float(b, 1.0),
+                               nir_fmul(b, nir_vector_extract(b, taps->wx, i),
+                                        nir_vector_extract(b, taps->wy, j)));
+   values[0] = nir_ffma(b, texel, weight, values[0]);
+   return true;
+}
+
+/* A 2D texture's sample through a sampler with Metal's bicubic filter,
+ * which Vulkan lacks: sixteen texel-center taps through the sampler, which
+ * keeps its address modes, weighted as Apple GPUs weigh them, on the mip
+ * level nearest mip selection takes. Normalized formats' results clamp to
+ * their range, and 32-bit float textures take the nearest texel. With a
+ * linear mip filter between levels Apple GPUs hang. */
+static nir_def *
+bicubic(struct call *call, const struct tex *t)
+{
+   nir_builder *b = call->b;
+   const struct stela_air_options *options = call->c->options;
+   nir_def *class = options->texture_filter_class(
+      b, call->texture_id ? NULL : call->texture, call->texture_id, options->binding_data);
+   nir_def *pixels = nir_test_mask(b, call->filter, STELA_AIR_SAMPLER_PIXELS);
+   nir_def *level = nir_imm_int(b, 0);
+   if (!(t->op == nir_texop_txl && nir_src_is_const(nir_src_for_ssa(t->lod)) &&
+         nir_src_as_float(nir_src_for_ssa(t->lod)) == 0.0)) {
+      /* Vulkan's nearest selection: ceil(lod + 1/2) - 1 within the levels. */
+      struct tex count = {.op = nir_texop_query_levels, .texture = t->texture};
+      nir_def *last = nir_iadd_imm(b, emit(call, &count), -1);
+      nir_def *rounded = nir_fceil(b, nir_fadd_imm(b, cubic_lod(call, t), 0.5));
+      nir_def *nearest = nir_iadd_imm(b, nir_f2i32(b, rounded), -1);
+      nearest = nir_imin(b, nir_imax(b, nearest, nir_imm_int(b, 0)), last);
+      level = nir_bcsel(b, nir_test_mask(b, call->filter, STELA_AIR_SAMPLER_MIPPED), nearest, level);
+   }
+   struct tex size = {.op = nir_texop_txs, .texture = t->texture, .lod = level};
+   nir_def *texels = nir_i2f32(b, nir_trim_vector(b, emit(call, &size), 2));
+   nir_def *scale = nir_bcsel(b, pixels, nir_imm_vec2(b, 1.0, 1.0), texels);
+   nir_def *position = nir_fmul(b, nir_trim_vector(b, t->coord, 2), scale);
+   if (t->offset)
+      position = nir_fadd(b, position, nir_i2f32(b, t->offset));
+   /* The nearest texel is the one tap at floor(p) + 1/2; the 4 x 4 starts
+    * at floor(p - 1/2) - 1/2, a fraction f before p - 1/2. */
+   nir_def *nearest = nir_ieq_imm(b, class, STELA_AIR_FILTER_NEAREST);
+   nir_def *centered = nir_fadd_imm(b, position, -0.5);
+   nir_def *start = nir_ffloor(b, centered);
+   nir_def *fraction = nir_fsub(b, centered, start);
+   nir_def *wx[4], *wy[4];
+   catmull_rom(b, nir_channel(b, fraction, 0), wx);
+   catmull_rom(b, nir_channel(b, fraction, 1), wy);
+   struct cubic_taps taps = {
+      .call = call,
+      .t = t,
+      .first = nir_bcsel(b, nearest, nir_fadd_imm(b, nir_ffloor(b, position), 1.0), start),
+      .scale = scale,
+      .layer = t->coord->num_components > 2 ? nir_channel(b, t->coord, 2) : NULL,
+      .lod = nir_i2f32(b, level),
+      .wx = nir_vec(b, wx, 4),
+      .wy = nir_vec(b, wy, 4),
+      .nearest = nearest,
+   };
+   nir_def *values[2] = {nir_imm_zero(b, 4, 32), nir_imm_int(b, 0)};
+   const struct stela_air_texture_context *c = call->c;
+   if (!c->repeat(c->translator, nir_bcsel(b, nearest, nir_imm_int(b, 1), nir_imm_int(b, 16)),
+                  call->sparse ? 2 : 1, values, cubic_tap, &taps))
+      return NULL;
+   nir_def *sum = values[0];
+   nir_def *low = nir_bcsel(b, nir_ieq_imm(b, class, STELA_AIR_FILTER_SNORM),
+                            nir_imm_float(b, -1.0), nir_imm_float(b, 0.0));
+   nir_def *clamped = nir_fmin(b, nir_fmax(b, sum, low), nir_imm_float(b, 1.0));
+   nir_def *normalized = nir_iand(b, nir_ine_imm(b, class, STELA_AIR_FILTER_FLOAT),
+                                  nir_inot(b, nearest));
+   nir_def *filtered = nir_bcsel(b, normalized, clamped, sum);
+   if (call->sparse)
+      filtered = nir_vector_insert_imm(b, nir_pad_vector(b, filtered, 5), values[1], 4);
+   return filtered;
+}
+
+/* Whether a sample may go through bicubic: Metal's bicubic filter reaches a
+ * float 2D texture's samples that do not compare, through a constexpr
+ * sampler that has it or another the options say may have it. */
+static bool
+cubic_reaches(const struct call *call, bool compare)
+{
+   const struct stela_air_options *options = call->c->options;
+   if (!call->filter || !options->texture_filter_class || !call->c->branch || !call->c->repeat ||
+       compare || call->shape->dim != GLSL_SAMPLER_DIM_2D ||
+       base_type(call->texture) != GLSL_TYPE_FLOAT)
+      return false;
+   /* The bits are read only where the sampler may filter bicubically. */
+   nir_src filter = nir_src_for_ssa(call->filter);
+   return !nir_src_is_const(filter) || (nir_src_as_uint(filter) & STELA_AIR_SAMPLER_CUBIC) != 0;
+}
+
+/* Whether a sample or read may be of a two-plane texture: a float 2D
+ * texture's, where the options say textures may have two planes. */
+static bool
+planes_reach(const struct call *call)
+{
+   const struct stela_air_options *options = call->c->options;
+   return options->dynamic_planes && options->texture_planes && call->c->branch &&
+          !call->sparse && call->shape->dim == GLSL_SAMPLER_DIM_2D && !call->shape->array &&
+          !call->texture->depth && base_type(call->texture) == GLSL_TYPE_FLOAT;
+}
+
+/* The texture's second plane (enum stela_air_planes), zero for one. */
+static nir_def *
+texture_planes(const struct call *call)
+{
+   const struct stela_air_options *options = call->c->options;
+   return options->texture_planes(call->b, call->texture_id ? NULL : call->texture,
+                                  call->texture_id, options->binding_data);
+}
+
+/* How a two-plane texture's components convert, from texture_planes: a
+ * texture's own values, which every sample and read of it shares. Each
+ * component is first taken in whole steps: a byte, or the high 10 bits of
+ * a 16-bit word, whose low 6 bits Apple GPUs ignore. The first plane's then
+ * converts as (step + luma_bias) * luma_scale, the second's as (step +
+ * chroma_bias) * chroma_scale: luma and chroma where `ycbcr`, else green
+ * and blue and red over the largest step. Computed once ahead of the
+ * branch to the planes, a function's samples of one texture share them. */
+struct planes_conversion {
+   nir_def *ten, *ycbcr;
+   nir_def *steps;
+   nir_def *luma_bias, *luma_scale;
+   nir_def *chroma_bias, *chroma_scale;
+};
+
+/* BT.601 luma and chroma (Apple GPUs' conversion) in full range (luma over
+ * the largest step, chroma (C - half) over twice that half, (C - 128) / 256
+ * for bytes) or video range (luma (Y - 16 s) / (219 s), chroma (C - half) /
+ * (224 s), s a byte's step in the component's). */
+static struct planes_conversion
+planes_conversion(nir_builder *b, nir_def *planes)
+{
+   struct planes_conversion c;
+   c.ten = nir_test_mask(b, planes, STELA_AIR_PLANES_TEN_BIT);
+   c.ycbcr = nir_test_mask(b, planes, STELA_AIR_PLANES_YCBCR);
+   nir_def *video = nir_iand(b, c.ycbcr, nir_test_mask(b, planes, STELA_AIR_PLANES_VIDEO));
+   nir_def *full = nir_iand(b, c.ycbcr, nir_inot(b, video));
+#define TEN(wide, narrow) nir_bcsel(b, c.ten, nir_imm_float(b, wide), nir_imm_float(b, narrow))
+   c.steps = TEN(65535.0f / 64.0f, 255.0f);
+   nir_def *largest = TEN(1.0f / 1023.0f, 1.0f / 255.0f);
+   nir_def *zero = nir_imm_float(b, 0.0f);
+   c.luma_bias = nir_bcsel(b, video, TEN(-64.0f, -16.0f), zero);
+   c.luma_scale = nir_bcsel(b, video, TEN(1.0f / 876.0f, 1.0f / 219.0f), largest);
+   c.chroma_bias = nir_bcsel(b, c.ycbcr, TEN(-512.0f, -128.0f), zero);
+   c.chroma_scale = nir_bcsel(b, video, TEN(1.0f / 896.0f, 1.0f / 224.0f),
+                              nir_bcsel(b, full, TEN(1.0f / 1024.0f, 1.0f / 256.0f), largest));
+#undef TEN
+   return c;
+}
+
+/* A plane's components in whole steps from its view's UNORM values. A read
+ * takes the step exactly; a filtered sample keeps the fraction, within a
+ * step of the low bits' share. */
+static nir_def *
+plane_steps(nir_builder *b, nir_def *value, const struct planes_conversion *c, bool read)
+{
+   if (!read)
+      return nir_fmul(b, value, c->steps);
+   nir_def *wide = nir_fmul_imm(b, nir_fround_even(b, nir_fmul_imm(b, value, 65535.0)), 1.0 / 64.0);
+   return nir_bcsel(b, c->ten, nir_ffloor(b, wide), nir_fround_even(b, nir_fmul_imm(b, value, 255.0)));
+}
+
+/* A two-plane texture's texel, opaque, from its components in whole steps:
+ * green from its first plane's, blue and red from its second's; or luma
+ * and Cb and Cr converted to RGB as Apple GPUs convert them, saturated and
+ * rounded to 1/2048. */
+static nir_def *
+planes_color(nir_builder *b, nir_def *first, nir_def *second, const struct planes_conversion *c)
+{
+   nir_def *luma = nir_fmul(b, nir_fadd(b, nir_channel(b, first, 0), c->luma_bias), c->luma_scale);
+   nir_def *chroma = nir_fmul(b, nir_fadd(b, nir_trim_vector(b, second, 2), c->chroma_bias),
+                              c->chroma_scale);
+   nir_def *cb = nir_channel(b, chroma, 0), *cr = nir_channel(b, chroma, 1);
+   nir_def *rgb = nir_vec3(b, cr, luma, cb);
+   nir_def *green = nir_ffma(b, cb, nir_imm_float(b, -0.344136f), luma);
+   nir_def *converted =
+      nir_fsat(b, nir_vec3(b, nir_ffma(b, cr, nir_imm_float(b, 1.402f), luma),
+                           nir_ffma(b, cr, nir_imm_float(b, -0.714136f), green),
+                           nir_ffma(b, cb, nir_imm_float(b, 1.772f), luma)));
+   converted = nir_fmul_imm(b, nir_fround_even(b, nir_fmul_imm(b, converted, 2048.0)), 1.0 / 2048.0);
+   nir_def *color = nir_bcsel(b, c->ycbcr, converted, rgb);
+   return nir_vec4(b, nir_channel(b, color, 0), nir_channel(b, color, 1), nir_channel(b, color, 2),
+                   nir_imm_float(b, 1.0));
+}
+
+/* A two-plane texture's texel from its planes' UNORM values, as samples
+ * filter them: in whole steps, then planes_color. */
+static nir_def *
+planes_rgba(nir_builder *b, nir_def *first, nir_def *second, const struct planes_conversion *c)
+{
+   return planes_color(b, plane_steps(b, first, c, false), plane_steps(b, second, c, false), c);
+}
+
+nir_def *
+stela_air_planes_rgba(nir_builder *b, nir_def *first, nir_def *second, nir_def *planes)
+{
+   struct planes_conversion c = planes_conversion(b, planes);
+   return planes_rgba(b, first, second, &c);
+}
+
+/* The inverse: an RGB color's first-plane value and its second plane's
+ * two, in [0, 1]. Luma and chroma are full-range BT.601 with chroma scaled
+ * by 256 / 255 around 128 / 255, as Apple GPUs store them. */
+void
+stela_air_rgb_planes(nir_builder *b, nir_def *rgba, bool ycbcr, nir_def **first, nir_def **second)
+{
+   nir_def *rgb = nir_fsat(b, nir_trim_vector(b, rgba, 3));
+   nir_def *r = nir_channel(b, rgb, 0), *g = nir_channel(b, rgb, 1), *bl = nir_channel(b, rgb, 2);
+   if (!ycbcr) {
+      *first = g;
+      *second = nir_vec2(b, bl, r);
+      return;
+   }
+   nir_def *luma = nir_fdot(b, rgb, nir_imm_vec3(b, 0.299f, 0.587f, 0.114f));
+   nir_def *offset = nir_imm_float(b, 128.0f / 255.0f);
+   nir_def *cb = nir_ffma(b, nir_fsub(b, bl, luma), nir_imm_float(b, 256.0f / (255.0f * 1.772f)), offset);
+   nir_def *cr = nir_ffma(b, nir_fsub(b, r, luma), nir_imm_float(b, 256.0f / (255.0f * 1.402f)), offset);
+   *first = luma;
+   *second = nir_fsat(b, nir_vec2(b, cb, cr));
+}
+
+/* A two-plane texture's second plane at its first plane's texel coord, in
+ * whole steps, as Apple GPUs read it: each axis the plane halves takes its
+ * two texels nearest the center, three quarters of the nearer, clamped at
+ * the edges; an axis it keeps takes the texel. Apple GPUs upsample to
+ * whole steps, rounding halves up, so the sum is taken in sixteenths of
+ * whole steps, where it is exact. */
+static nir_def *
+planes_upsampled(const struct call *call, const struct tex *second, nir_def *coord,
+                 nir_def *planes, const struct planes_conversion *conversion)
+{
+   nir_builder *b = call->b;
+   nir_def *subsampling = nir_iand_imm(b, planes, STELA_AIR_PLANES_SUBSAMPLING);
+   nir_def *halves = nir_vec2(b, nir_uge_imm(b, subsampling, STELA_AIR_PLANES_HORIZONTAL),
+                              nir_ieq_imm(b, subsampling, STELA_AIR_PLANES_BOTH));
+   struct tex size = {.op = nir_texop_txs, .texture = second->texture,
+                      .lod = second->lod ? second->lod : nir_imm_int(b, 0)};
+   nir_def *last = nir_iadd_imm(b, nir_trim_vector(b, emit(call, &size), 2), -1);
+   nir_def *odd = nir_ine_imm(b, nir_iand_imm(b, coord, 1), 0);
+   nir_def *first = nir_bcsel(b, halves, nir_ishr_imm(b, nir_iadd_imm(b, coord, -1), 1), coord);
+   /* The second texel's weight in quarters. */
+   nir_def *weight = nir_bcsel(b, halves, nir_bcsel(b, odd, nir_imm_float(b, 1.0f),
+                                                    nir_imm_float(b, 3.0f)),
+                               nir_imm_float(b, 0.0f));
+   nir_def *zero = nir_imm_ivec2(b, 0, 0);
+   nir_def *low = nir_imin(b, nir_imax(b, first, zero), last);
+   nir_def *high = nir_imin(b, nir_imax(b, nir_iadd_imm(b, first, 1), zero), last);
+   nir_def *texels[4];
+   for (unsigned i = 0; i < 4; i++) {
+      struct tex at = *second;
+      at.coord = nir_vec2(b, nir_channel(b, i & 1 ? high : low, 0),
+                          nir_channel(b, i & 2 ? high : low, 1));
+      texels[i] = plane_steps(b, emit(call, &at), conversion, true);
+   }
+   nir_def *rows[2];
+   nir_def *across = nir_channel(b, weight, 0), *down = nir_channel(b, weight, 1);
+   for (unsigned i = 0; i < 2; i++)
+      rows[i] = nir_ffma(b, across, texels[2 * i + 1],
+                         nir_fmul(b, nir_fsub_imm(b, 4.0, across), texels[2 * i]));
+   nir_def *sum = nir_ffma(b, down, rows[1], nir_fmul(b, nir_fsub_imm(b, 4.0, down), rows[0]));
+   return nir_ffloor(b, nir_fmul_imm(b, nir_fadd_imm(b, sum, 8.0), 1.0 / 16.0));
+}
+
+/* A sample through t: bicubic where the sampler may filter so, else as
+ * Vulkan samples. */
+static nir_def *
+one_sample(struct call *call, const struct tex *t, bool compare)
+{
+   if (!cubic_reaches(call, compare))
+      return emit(call, t);
+   const struct stela_air_texture_context *c = call->c;
+   nir_block *blocks[4];
+   if (!c->branch(c->translator, nir_test_mask(call->b, call->filter, STELA_AIR_SAMPLER_CUBIC),
+                  blocks))
+      return NULL;
+   nir_def *cubic = bicubic(call, t);
+   if (!cubic)
+      return NULL;
+   c->branch_else(c->translator, blocks);
+   return c->branch_join(c->translator, blocks, cubic, emit(call, t));
+}
+
 static bool
 sample(struct call *call, enum operation op, nir_def **result)
 {
@@ -612,7 +1004,30 @@ sample(struct call *call, enum operation op, nir_def **result)
    }
    if (!access_operand(call, STELA_AIR_TEXTURE_SAMPLE) || !finished(call))
       return false;
-   *result = texel(call, resident(call, emit(call, &t)), false);
+   nir_def *value;
+   if (!compare && planes_reach(call)) {
+      /* A two-plane texture's planes sample at the same coordinates, each
+       * filtering its own texels. */
+      const struct stela_air_texture_context *c = call->c;
+      nir_block *blocks[4];
+      nir_def *planes = texture_planes(call);
+      if (!planes)
+         return false;
+      struct planes_conversion conversion = planes_conversion(call->b, planes);
+      if (!c->branch(c->translator, nir_ine_imm(call->b, planes, 0), blocks))
+         return false;
+      struct tex second = t;
+      if (!(second.texture = bind_texture(call, descriptor_type(call->texture), true, NULL)))
+         return false;
+      nir_def *combined = planes_rgba(call->b, emit(call, &t), emit(call, &second), &conversion);
+      c->branch_else(c->translator, blocks);
+      nir_def *single = one_sample(call, &t, compare);
+      if (!single || !(value = c->branch_join(c->translator, blocks, combined, single)))
+         return false;
+   } else if (!(value = one_sample(call, &t, compare))) {
+      return false;
+   }
+   *result = texel(call, resident(call, value), false);
    return true;
 }
 
@@ -808,6 +1223,34 @@ stela_air_texture_use(LLVMValueRef inst, struct stela_air_texture *texture)
    return true;
 }
 
+/* A float texel the shader writes to or read from storage images: its color
+ * channels encoded to sRGB, or decoded from it, where the texture's storage
+ * images hold an sRGB format's texels (stela_air_options'
+ * texture_srgb_storage). Alpha stays linear. */
+static nir_def *
+srgb_storage(const struct call *call, nir_def *texel, bool encode)
+{
+   const struct stela_air_options *options = call->c->options;
+   if (base_type(call->texture) != GLSL_TYPE_FLOAT || !options->texture_srgb_storage)
+      return texel;
+   nir_def *srgb = options->texture_srgb_storage(
+      call->b, call->texture_id ? NULL : call->texture, call->texture_id, options->binding_data);
+   if (!srgb)
+      return texel;
+   nir_builder *b = call->b;
+   nir_def *channels[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < texel->num_components; i++) {
+      nir_def *c = nir_channel(b, texel, i);
+      if (i < 3) {
+         nir_def *converted =
+            encode ? nir_format_linear_to_srgb(b, nir_fsat(b, c)) : nir_format_srgb_to_linear(b, c);
+         c = nir_bcsel(b, srgb, converted, c);
+      }
+      channels[i] = c;
+   }
+   return nir_vec(b, channels, texel->num_components);
+}
+
 /* A signed position clamped to the texels of a level whose size, and then
  * layers, size holds. */
 static nir_def *
@@ -891,9 +1334,34 @@ read_texel(struct call *call, nir_def **result)
                       .coord = coord, .ms_index = sample, .faces = faces, .lod = lod};
       if (!access_operand(call, texture->access) || !finished(call))
          return false;
-      value = emit(call, &t);
+      if (planes_reach(call)) {
+         /* A two-plane texture's second plane is upsampled to the first's
+          * texels: halved across from 4:2:2, both ways from 4:2:0. */
+         const struct stela_air_texture_context *c = call->c;
+         nir_block *blocks[4];
+         nir_def *planes = texture_planes(call);
+         if (!planes)
+            return false;
+         struct planes_conversion conversion = planes_conversion(b, planes);
+         if (!c->branch(c->translator, nir_ine_imm(b, planes, 0), blocks))
+            return false;
+         struct tex second = t;
+         if (!(second.texture = bind_texture(call, descriptor_type(texture), true, NULL)))
+            return false;
+         nir_def *combined =
+            planes_color(b, plane_steps(b, emit(call, &t), &conversion, true),
+                         planes_upsampled(call, &second, coord, planes, &conversion), &conversion);
+         c->branch_else(c->translator, blocks);
+         if (!(value = c->branch_join(c->translator, blocks, combined, emit(call, &t))))
+            return false;
+      } else {
+         value = emit(call, &t);
+      }
    }
-   *result = texel(call, resident(call, value), false);
+   value = resident(call, value);
+   if (image)
+      value = srgb_storage(call, value, false);
+   *result = texel(call, value, false);
    return true;
 }
 
@@ -992,6 +1460,7 @@ write_texel(struct call *call)
    case STELA_AIR_USHORT: value = nir_u2u32(b, value); break;
    default: break;
    }
+   value = srgb_storage(call, value, true);
    nir_image_deref_store(b, &deref->def, image_coord(call, position, face, layer),
                          nir_undef(b, 1, 32), value, nir_imm_int(b, 0), .image_dim = shape->dim,
                          .image_array = shape->array, .access = image_access(call, level),
@@ -1036,8 +1505,9 @@ struct slice {
 
 /* Pixel index of a slice's region, row by row, to its texel. */
 static bool
-slice_pixel(void *data, nir_def *index)
+slice_pixel(void *data, nir_def *index, nir_def **values)
 {
+   (void)values;
    struct slice *slice = data;
    struct call *call = slice->call;
    nir_builder *b = call->b;
@@ -1057,8 +1527,10 @@ slice_pixel(void *data, nir_def *index)
       lanes[i] = i < slice->components ? nir_channel(b, value, i) :
                  slice->floating ? nir_imm_float(b, i == 3) : nir_imm_int(b, i == 3);
    nir_def *at = nir_iadd(b, slice->position, nir_vec2(b, x, y));
+   nir_def *texel = slice->floating ? srgb_storage(call, nir_vec(b, lanes, 4), true) :
+                                      nir_vec(b, lanes, 4);
    nir_image_deref_store(b, &deref->def, image_coord(call, at, NULL, NULL), nir_undef(b, 1, 32),
-                         nir_vec(b, lanes, 4), nir_imm_int(b, 0),
+                         texel, nir_imm_int(b, 0),
                          .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = false,
                          .access = image_access(call, slice->level),
                          .src_type = nir_get_nir_type_for_glsl_base_type(base_type(call->texture)));
@@ -1133,7 +1605,7 @@ slice_write(struct call *call, const char *member_type, size_t member_type_bytes
                                           .access = image_access(call, slice.level));
    extent = nir_umin(b, extent, nir_usub_sat(b, texels, slice.position));
    slice.width = nir_channel(b, extent, 0);
-   return c->repeat(c->translator, nir_imul(b, slice.width, nir_channel(b, extent, 1)),
+   return c->repeat(c->translator, nir_imul(b, slice.width, nir_channel(b, extent, 1)), 0, NULL,
                     slice_pixel, &slice);
 }
 

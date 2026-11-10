@@ -2113,9 +2113,11 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             desc.access = stela_air_md_string(key, "air.read") ? STELA_AIR_READ :
                           stela_air_md_string(key, "air.write") ? STELA_AIR_WRITE : STELA_AIR_READ_WRITE;
          } else if (stela_air_md_string(key, "air.location_index")) {
+            /* A buffer array's count may be an expression of function
+             * constants, as its location may. */
             if (!buffer || has_location || f + 2 > fields_count ||
-                !argument_location(fields[f], &desc.index) || !stela_air_md_uint(fields[f + 1], &locations) ||
-                locations != 1 || desc.index >= AIR_MAX_ARGUMENTS)
+                !argument_location(fields[f], &desc.index) || !argument_location(fields[f + 1], &locations) ||
+                desc.index >= AIR_MAX_ARGUMENTS)
                return fail(t, STELA_AIR_METADATA, "unsupported/duplicate buffer location");
             has_location = true;
             f += 2;
@@ -2240,21 +2242,52 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
             desc.address_space = LLVMGetPointerAddressSpace(type);
             has_as = true;
          }
+         /* A buffer array, metal::array_ref<device T *>, is a thread
+          * pointer to the addresses of its buffers, which its count of
+          * locations bind; its count may be zero until specialization
+          * constructs it. */
+         static const char array_ref[] = "array_ref<";
+         desc.array = has_type_name && type_name_bytes > strlen(array_ref) &&
+                      !memcmp(type_name, array_ref, strlen(array_ref));
+         desc.length = desc.array ? locations : 0;
+         unsigned param_space = desc.array ? 0 : desc.address_space;
+         if (!desc.array && locations != 1)
+            return fail(t, STELA_AIR_METADATA, "buffer %u binds %u locations", index, locations);
          /* Device and constant buffers share the buffer indices; render
           * functions have no threadgroup memory, and constant is read-only. */
          if (!has_location || !has_as || !desc.access || desc.address_space < 1 ||
-             desc.address_space > (compute ? 3 : 2) ||
+             desc.address_space > (desc.array ? 2 : compute ? 3 : 2) ||
              (desc.address_space == 2 && desc.access != STELA_AIR_READ) ||
+             (desc.array && (indirect || !compute)) ||
              LLVMGetTypeKind(type) != LLVMPointerTypeKind ||
-             LLVMGetPointerAddressSpace(type) != desc.address_space)
+             LLVMGetPointerAddressSpace(type) != param_space)
             return fail(t, STELA_AIR_ARGUMENT, "unsupported buffer %u", index);
          bool shared = desc.address_space == 3;
          bool *indices = shared ? shared_indices : buffer_indices;
          unsigned limit = shared ? t->max_threadgroup_buffers :
                           desc.address_space == 2 ? t->max_constant_buffers : t->max_device_buffers;
-         if ((claims && indices[desc.index]) || (limit && desc.index >= limit))
+         unsigned slots = desc.array ? desc.length : 1;
+         if ((limit && (desc.index >= limit || slots > limit - desc.index)) ||
+             slots > AIR_MAX_ARGUMENTS - desc.index)
             return fail(t, STELA_AIR_METADATA, "duplicate buffer or location exceeds AIR module limit");
-         indices[desc.index] |= claims;
+         for (unsigned slot = desc.index; slot < desc.index + slots; slot++) {
+            if (claims && indices[slot])
+               return fail(t, STELA_AIR_METADATA, "duplicate buffer or location exceeds AIR module limit");
+            indices[slot] |= claims;
+         }
+         /* Its loads of addresses read the one field its addresses are. */
+         if (desc.array && desc.length) {
+            if (kernel->field_count == AIR_MAX_FIELDS)
+               return fail(t, STELA_AIR_LIMIT, "argument buffer field budget exceeded");
+            struct stela_air_buffer element = desc;
+            element.array = false;
+            element.length = 0;
+            kernel->fields[kernel->field_count] = (struct stela_air_field){
+               .kind = STELA_AIR_FIELD_BUFFER, .offset = 0, .size = 8 * desc.length,
+               .count = desc.length, .buffer = element};
+            argument_buffer = (struct stela_air_fields){kernel->field_count, 1, 8 * desc.length};
+            kernel->field_count++;
+         }
          /* An array by reference is typed by its element. */
          if (has_buffer_size && desc.type_size && buffer_size % desc.type_size)
             return fail(t, STELA_AIR_ARGUMENT, "buffer %u of %u bytes is no count of %u byte types",

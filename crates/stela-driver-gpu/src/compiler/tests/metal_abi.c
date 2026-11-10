@@ -179,7 +179,7 @@ static void loaded_ids_index_the_heap(void)
    deref = stela_metal_bind_sampler_id(&b, id, true, NULL);
    check_heap(deref, STELA_METAL_HEAP_SAMPLERS, nir_var_uniform, glsl_bare_sampler_type());
    nir_alu_instr *twin = nir_def_as_alu(deref->arr.index.ssa);
-   assert(twin->op == nir_op_iand && nir_src_as_uint(twin->src[1].src) == ~STELA_METAL_SAMPLER_NEVER);
+   assert(twin->op == nir_op_iand && nir_src_as_uint(twin->src[1].src) == STELA_METAL_SAMPLER_PIXELS - 1);
    assert(nir_def_as_alu(twin->src[0].src.ssa)->op == nir_op_unpack_64_2x32_split_y);
    assert(nir_def_as_alu(twin->src[0].src.ssa)->src[0].src.ssa == id);
    ralloc_free(b.shader);
@@ -777,17 +777,18 @@ static void tessellation_control_reads_factors_by_step(void)
       unsigned loads;
    } cases[] = {
       {{false, STELA_METAL_PARTITION_POW2, 64, STELA_METAL_FACTOR_STEP_CONSTANT,
-        STELA_METAL_WINDING_CLOCKWISE},
+        STELA_METAL_WINDING_CLOCKWISE, 0, true},
        TESS_PRIMITIVE_TRIANGLES, TESS_SPACING_EQUAL, true, 2 + 1 + 3 + 4},
       {{true, STELA_METAL_PARTITION_FRACTIONAL_ODD, 16, STELA_METAL_FACTOR_STEP_PER_PATCH,
-        STELA_METAL_WINDING_COUNTER_CLOCKWISE},
+        STELA_METAL_WINDING_COUNTER_CLOCKWISE, 0, true},
        TESS_PRIMITIVE_QUADS, TESS_SPACING_FRACTIONAL_ODD, false, 2 + 1 + 3 + 6},
       {{true, STELA_METAL_PARTITION_FRACTIONAL_EVEN, 16,
-        STELA_METAL_FACTOR_STEP_PER_PATCH_AND_PER_INSTANCE, STELA_METAL_WINDING_CLOCKWISE},
+        STELA_METAL_FACTOR_STEP_PER_PATCH_AND_PER_INSTANCE, STELA_METAL_WINDING_CLOCKWISE, 0, true},
        TESS_PRIMITIVE_QUADS, TESS_SPACING_FRACTIONAL_EVEN, true, 2 + 1 + 4 + 6},
+      /* Without scaling, the scale is one, not loaded. */
       {{false, STELA_METAL_PARTITION_INTEGER, 16, STELA_METAL_FACTOR_STEP_PER_INSTANCE,
         STELA_METAL_WINDING_COUNTER_CLOCKWISE},
-       TESS_PRIMITIVE_TRIANGLES, TESS_SPACING_EQUAL, false, 2 + 1 + 4 + 4},
+       TESS_PRIMITIVE_TRIANGLES, TESS_SPACING_EQUAL, false, 2 + 0 + 4 + 4},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(cases); i++) {
       nir_shader *shader = stela_metal_tessellation_control(NULL, &cases[i].tessellation);
@@ -809,8 +810,9 @@ static void tessellation_control_reads_factors_by_step(void)
 
       struct census census = count(shader);
       assert(census.push_constants == 1 && census.push_base == STELA_METAL_PUSH_ARGUMENTS);
-      /* The patch index binding and entry, the factor binding, the scale,
-       * the stride by step, and each half factor. */
+      /* The patch index binding and entry, the factor binding, the scale
+       * of a pipeline that scales, the stride by step, and each half
+       * factor. */
       assert(census.loads == cases[i].loads);
       assert(census.stores == 0 && census.loops == 0);
       ralloc_free(shader);

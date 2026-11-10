@@ -304,6 +304,26 @@ static BOOL refuse(StelaFailure *failure, const char *reason)
 	return [[StelaGPULibrary alloc] initWithDevice:self handle:response.handle];
 }
 
+/* The archive keeps what -addLibraryWithDescriptor: keeps of a stitched
+ * library: its functions compile into the pipelines linking them. Metal's own
+ * forms serialize the functions' AIR for its compiler service, which reads
+ * Metal's private library data from them. */
+- (id)newLibraryWithStitchedDescriptor:(id)descriptor destinationBinaryArchive:(id)archive error:(NSError **)error
+{
+	/* The archive only caches compiled code; the library is complete without
+	 * it, so it is reported once and not filled. */
+	if (archive) {
+		StelaFailure failure = {.reason = "the stitched library is not added to the archive"};
+		stela_report("newLibraryWithStitchedDescriptor:destinationBinaryArchive:", &failure);
+	}
+	return [self newLibraryWithStitchedDescriptor:descriptor error:error];
+}
+
+- (id)newLibraryWithStitchedDescriptorSPI:(id)descriptor error:(NSError **)error
+{
+	return [self newLibraryWithStitchedDescriptor:descriptor error:error];
+}
+
 - (void)newLibraryWithStitchedDescriptor:(id)descriptor completionHandler:(void (^)(id, NSError *))handler
 {
 	dispatch_async(dispatch_get_global_queue(0, 0), ^{

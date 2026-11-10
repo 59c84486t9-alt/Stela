@@ -1482,6 +1482,326 @@ every_metal_version_spells_its_calls(void)
    assert(error.kind == STELA_AIR_TARGET);
 }
 
+/* A fragment function that stops shading some pixels, then differentiates
+ * a value it reads from a constant buffer and samples with a bias at a
+ * coordinate made from it: the read and the derivative leave the branch,
+ * and the sample takes the gradients taken there, scaled by 2^bias. */
+static const char *divergent_body =
+   "declare float @air.dfdx.f32(float)\n"
+   "define <4 x float> @fragment(<4 x float> %position, ptr addrspace(1) %color,"
+   " ptr addrspace(2) %smp, ptr addrspace(2) %k) {\n"
+   "entry:\n"
+   "%x = extractelement <4 x float> %position, i64 0\n"
+   "%skip = fcmp olt float %x, 4.0\n"
+   "br i1 %skip, label %out, label %shade\n"
+   "shade:\n"
+   "%kp = getelementptr inbounds i8, ptr addrspace(2) %k, i64 4\n"
+   "%s = load float, ptr addrspace(2) %kp, align 4\n"
+   "%w = fmul float %x, %s\n"
+   "%d = call float @air.dfdx.f32(float %w)\n"
+   "%uv0 = insertelement <2 x float> undef, float %w, i64 0\n"
+   "%uv = insertelement <2 x float> %uv0, float %x, i64 1\n"
+   "%t = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %color,"
+   " ptr addrspace(2) %smp, <2 x float> %uv, i1 true, <2 x i32> zeroinitializer,"
+   " i1 false, float 1.0, float 0.0, i32 0)\n"
+   "%c = extractvalue { <4 x float>, i8 } %t, 0\n"
+   "%r = insertelement <4 x float> %c, float %d, i64 3\n"
+   "br label %out\n"
+   "out:\n"
+   "%v = phi <4 x float> [ zeroinitializer, %entry ], [ %r, %shade ]\n"
+   "ret <4 x float> %v\n}\n";
+
+static const char *divergent_metadata =
+   "!air.fragment = !{!10}\n"
+   "!air.version = !{!20}\n!air.language_version = !{!21}\n!llvm.ident = !{!22}\n"
+   "!air.compile_options = !{!23, !24, !25}\n"
+   "!10 = !{ptr @fragment, !11, !13}\n!11 = !{!12}\n"
+   "!12 = !{!\"air.render_target\", i32 0, i32 0, !\"air.arg_type_name\", !\"float4\"}\n"
+   "!13 = !{!14, !15, !16, !17}\n"
+   "!14 = !{i32 0, !\"air.position\", !\"air.center\", !\"air.no_perspective\","
+   " !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"position\"}\n"
+   "!15 = !{i32 1, !\"air.texture\", !\"air.location_index\", i32 0, i32 1, !\"air.sample\","
+   " !\"air.arg_type_name\", !\"texture2d<float, sample>\", !\"air.arg_name\", !\"color\"}\n"
+   "!16 = !{i32 2, !\"air.sampler\", !\"air.location_index\", i32 0, i32 1,"
+   " !\"air.arg_type_name\", !\"sampler\", !\"air.arg_name\", !\"smp\"}\n"
+   "!17 = !{i32 3, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read\","
+   " !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 16, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"float4\", !\"air.arg_name\", !\"k\"}\n"
+   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n"
+   "!22 = !{!\"Apple metal version 32023.922 (metalfe-32023.922.4)\"}\n"
+   "!23 = !{!\"air.compile.denorms_disable\"}\n!24 = !{!\"air.compile.fast_math_enable\"}\n"
+   "!25 = !{!\"air.compile.framebuffer_fetch_enable\"}\n";
+
+/* Whether an instruction lies outside every branch. */
+static bool
+unconditional(const nir_instr *instr)
+{
+   return instr->block->cf_node.parent->type == nir_cf_node_function;
+}
+
+static void
+divergent_derivatives_take_the_whole_quad(void)
+{
+   LLVMMemoryBufferRef input = bitcode(divergent_body, divergent_metadata);
+   struct stela_air_stage_options o = {
+      .stage = STELA_AIR_FRAGMENT, .resources = options(&fragment, false), .max_varying_slots = 16,
+   };
+   o.resources.fp_profile = STELA_AIR_FP_METAL;
+   struct stela_air_error error = {0};
+   nir_shader *shader = stela_air_stage_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                               "fragment", &nir_options, &o, &error);
+   LLVMDisposeMemoryBuffer(input);
+   if (!shader)
+      fprintf(stderr, "divergent: %u %s\n", error.kind, error.detail);
+   assert(shader && error.kind == STELA_AIR_OK);
+   nir_validate_shader(shader, "divergent fragment");
+   struct census census = count(shader);
+   assert(census.tex[nir_texop_txd] == 1 && !census.tex[nir_texop_tex] &&
+          !census.tex[nir_texop_txb]);
+   nir_tex_instr *txd = census.first[nir_texop_txd];
+   assert(!unconditional(&txd->instr));
+   assert(nir_tex_instr_src_index(txd, nir_tex_src_bias) < 0);
+   unsigned ddx = 0, ddy = 0, speculated = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+            switch (intrinsic->intrinsic) {
+            case nir_intrinsic_ddx:
+               assert(unconditional(instr));
+               ddx++;
+               break;
+            case nir_intrinsic_ddy:
+               assert(unconditional(instr));
+               ddy++;
+               break;
+            case nir_intrinsic_load_global:
+               /* The constant buffer's field; the argument tables' fields
+                * are also speculatable, and free to reorder. */
+               if ((nir_intrinsic_access(intrinsic) & (ACCESS_CAN_SPECULATE | ACCESS_CAN_REORDER)) ==
+                   ACCESS_CAN_SPECULATE) {
+                  assert(unconditional(instr));
+                  speculated++;
+               }
+               break;
+            default:
+               break;
+            }
+         }
+      }
+   }
+   /* dfdx(w), and the coordinate's two gradients. */
+   assert(ddx == 2 && ddy == 1 && speculated == 1);
+   /* The gradients the sample takes are scaled by its bias. */
+   for (unsigned i = 0; i < 2; i++) {
+      nir_def *gradient = nir_get_tex_src(txd, i ? nir_tex_src_ddy : nir_tex_src_ddx);
+      assert(gradient && nir_def_instr(gradient)->type == nir_instr_type_alu &&
+             nir_instr_as_alu(nir_def_instr(gradient))->op == nir_op_fmul);
+   }
+   ralloc_free(shader);
+}
+
+/* The divergent fragment's metadata with `body`. */
+static nir_shader *
+fragment_of(const char *body)
+{
+   LLVMMemoryBufferRef input = bitcode(body, divergent_metadata);
+   struct stela_air_stage_options o = {
+      .stage = STELA_AIR_FRAGMENT, .resources = options(&fragment, false), .max_varying_slots = 16,
+   };
+   o.resources.fp_profile = STELA_AIR_FP_METAL;
+   struct stela_air_error error = {0};
+   nir_shader *shader = stela_air_stage_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                               "fragment", &nir_options, &o, &error);
+   LLVMDisposeMemoryBuffer(input);
+   if (!shader)
+      fprintf(stderr, "branched: %u %s\n", error.kind, error.detail);
+   assert(shader && error.kind == STELA_AIR_OK);
+   nir_validate_shader(shader, "branched fragment");
+   return shader;
+}
+
+/* The divergent fragment with its branch on `skip` computed as `branch`. */
+static nir_shader *
+branched_fragment(const char *branch)
+{
+   char body[4096];
+   snprintf(body, sizeof(body), "%s",
+            replace(divergent_body, "%skip = fcmp olt float %x, 4.0\n", branch));
+   return fragment_of(body);
+}
+
+/* The number of derivatives taken outside every branch, and inside one. */
+static void
+derivative_places(nir_shader *shader, unsigned *outside, unsigned *inside)
+{
+   *outside = *inside = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                (nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_ddx ||
+                 nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_ddy))
+               (*(unconditional(instr) ? outside : inside))++;
+         }
+      }
+   }
+}
+
+/* A branch on a value every invocation shares keeps a quad's lanes
+ * together, so its derivative and implicit-derivative sample stay in it;
+ * a branch on a value read at a per-pixel index does not. */
+static void
+uniform_branches_keep_their_derivatives(void)
+{
+   nir_shader *shader = branched_fragment("%k0 = load float, ptr addrspace(2) %k, align 4\n"
+                                          "%skip = fcmp olt float %k0, 4.0\n");
+   struct census census = count(shader);
+   assert(!census.tex[nir_texop_txd] && census.tex[nir_texop_txb] == 1);
+   assert(!unconditional(&census.first[nir_texop_txb]->instr));
+   unsigned outside, inside;
+   derivative_places(shader, &outside, &inside);
+   assert(!outside && inside == 1);
+   ralloc_free(shader);
+
+   shader = branched_fragment("%i = fptoui float %x to i64\n"
+                              "%i3 = and i64 %i, 3\n"
+                              "%ki = getelementptr inbounds float, ptr addrspace(2) %k, i64 %i3\n"
+                              "%k0 = load float, ptr addrspace(2) %ki, align 4\n"
+                              "%skip = fcmp olt float %k0, 4.0\n");
+   census = count(shader);
+   assert(census.tex[nir_texop_txd] == 1 && !census.tex[nir_texop_txb]);
+   derivative_places(shader, &outside, &inside);
+   assert(outside == 3 && !inside);
+   ralloc_free(shader);
+}
+
+/* A read the branch guards, of a read-only buffer Apple's compiler marks
+ * unaliased, at a per-pixel index the skipped pixels would take out of its
+ * bounds: it may fault, so it stays in the branch, and so do the derivative
+ * of the value it reads and the sample at a coordinate made from it. */
+static void
+guarded_reads_keep_their_derivatives(void)
+{
+   char body[4096];
+   snprintf(body, sizeof(body), "%s",
+            replace(divergent_body, "ptr addrspace(2) %k)",
+                    "ptr addrspace(2) \"air-buffer-no-alias\" %k)"));
+   char indexed[4096];
+   snprintf(indexed, sizeof(indexed), "%s",
+            replace(body, "%kp = getelementptr inbounds i8, ptr addrspace(2) %k, i64 4\n",
+                    "%i = fptoui float %x to i64\n%j = sub i64 %i, 4\n"
+                    "%kp = getelementptr inbounds float, ptr addrspace(2) %k, i64 %j\n"));
+   nir_shader *shader = fragment_of(indexed);
+   struct census census = count(shader);
+   assert(!census.tex[nir_texop_txd] && census.tex[nir_texop_txb] == 1);
+   assert(!unconditional(&census.first[nir_texop_txb]->instr));
+   unsigned outside, inside, guarded = 0;
+   derivative_places(shader, &outside, &inside);
+   assert(!outside && inside == 1);
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic ||
+                nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_load_global)
+               continue;
+            nir_intrinsic_instr *load = nir_instr_as_intrinsic(instr);
+            /* The argument table's address field is in bounds anywhere. */
+            if (nir_intrinsic_access(load) & ACCESS_CAN_SPECULATE)
+               continue;
+            assert(nir_intrinsic_access(load) & ACCESS_CAN_REORDER);
+            assert(!unconditional(instr));
+            guarded++;
+         }
+      }
+   }
+   assert(guarded == 1);
+   ralloc_free(shader);
+}
+
+/* A frozen texel and residency pair, as Apple's compiler freezes a read
+ * whose lanes it uses before checking them, keeps the read's four lanes and
+ * its residency. */
+static void
+frozen_texture_reads_keep_their_lanes(void)
+{
+   static const char *body =
+      "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+      " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+      "%r = call { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1) %src,"
+      " <2 x i32> <i32 5, i32 6>, i32 0, i32 0)\n"
+      "%f = freeze { <4 x float>, i8 } %r\n"
+      "%t = extractvalue { <4 x float>, i8 } %f, 0\n"
+      "%k = extractvalue { <4 x float>, i8 } %f, 1\n"
+      "call void @air.write_texture_2d.v4f32(ptr addrspace(1) %dst, <2 x i32> <i32 3, i32 4>,"
+      " <4 x float> %t, i32 0, i32 2)\n"
+      "%w = zext i8 %k to i32\n"
+      "store i32 %w, ptr addrspace(1) %out, align 4\n"
+      "ret void\n}\n";
+   struct stela_air_options o = options(&primary, true);
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel_with(body, kernel_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "frozen read: %s\n", error.detail);
+   assert(shader);
+   assert(count(shader).tex[nir_texop_txf] == 1);
+   ralloc_free(shader);
+}
+
+/* Two samples of one texture that may have two planes: each branches to
+ * its planes, and both convert them with the texture's one conversion,
+ * computed ahead of the first branch, rather than each in its branch. */
+static void
+two_plane_samples_share_their_conversion(void)
+{
+   static const char *body =
+      "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+      " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+      "%a = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %src,"
+      " ptr addrspace(2) %smp, <2 x float> <float 0.5, float 0.25>, i1 true, <2 x i32> zeroinitializer,"
+      " i1 false, float 0.0, float 0.0, i32 0)\n"
+      "%b = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %src,"
+      " ptr addrspace(2) %smp, <2 x float> <float 0.25, float 0.5>, i1 true, <2 x i32> zeroinitializer,"
+      " i1 false, float 0.0, float 0.0, i32 0)\n"
+      "%ta = extractvalue { <4 x float>, i8 } %a, 0\n"
+      "%tb = extractvalue { <4 x float>, i8 } %b, 0\n"
+      "%t = fadd <4 x float> %ta, %tb\n"
+      "call void @air.write_texture_2d.v4f32(ptr addrspace(1) %dst, <2 x i32> <i32 3, i32 4>,"
+      " <4 x float> %t, i32 0, i32 2)\n"
+      "ret void\n}\n";
+   struct stela_air_options o = options(&primary, true);
+   o.texture_planes = stela_metal_texture_planes;
+   o.dynamic_planes = true;
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel_with(body, kernel_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "two-plane samples: %s\n", error.detail);
+   assert(shader);
+   nir_opt_cse(shader);
+   nir_opt_dce(shader);
+   /* Each sample takes a texel of each plane, or one of its only plane, at
+    * the base level outside fragment functions. */
+   assert(count(shader).tex[nir_texop_txl] == 6);
+   unsigned video = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_alu || nir_instr_as_alu(instr)->op != nir_op_iand)
+               continue;
+            nir_alu_instr *alu = nir_instr_as_alu(instr);
+            for (unsigned i = 0; i < 2; i++)
+               video += nir_src_is_const(alu->src[i].src) &&
+                        nir_src_comp_as_uint(alu->src[i].src, alu->src[i].swizzle[0]) ==
+                           STELA_AIR_PLANES_VIDEO;
+         }
+      }
+   }
+   assert(video == 1);
+   ralloc_free(shader);
+}
+
 int
 main(void)
 {
@@ -1505,9 +1825,15 @@ main(void)
    kernels_take_texture_atomics();
    every_metal_version_spells_its_calls();
    kernels_calculate_levels_over_their_quadgroups();
+   divergent_derivatives_take_the_whole_quad();
+   uniform_branches_keep_their_derivatives();
+   guarded_reads_keep_their_derivatives();
+   two_plane_samples_share_their_conversion();
+   frozen_texture_reads_keep_their_lanes();
    glsl_type_singleton_decref();
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
         "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics, "
-        "constexpr samplers, cube reads, null textures, imageblocks, tile functions, joined samples and refusals passed");
+        "constexpr samplers, cube reads, null textures, imageblocks, tile functions, joined samples, "
+        "whole-quad derivatives in branches, derivatives kept in uniform branches and with guarded reads, and refusals passed");
    return 0;
 }
