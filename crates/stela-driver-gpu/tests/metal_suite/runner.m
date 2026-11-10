@@ -1826,7 +1826,19 @@ static id<MTLFunction> linked_function(Case *c, id<MTLLibrary> library, id entry
 {
 	if ([entry isKindOfClass:[NSString class]])
 		return function_named(library, entry, nil);
-	return function_named(library_named(c.device, c.plan, entry[@"library"], c.libraries), entry[@"name"], nil);
+	id<MTLLibrary> from = library_named(c.device, c.plan, entry[@"library"], c.libraries);
+	if (!entry[@"specialized_name"])
+		return function_named(from, entry[@"name"], nil);
+	/* A specialization, which pipelines link by the name it takes. */
+	MTLFunctionDescriptor *fd = [MTLFunctionDescriptor functionDescriptor];
+	fd.name = entry[@"name"];
+	fd.specializedName = entry[@"specialized_name"];
+	fd.constantValues = constants_of(entry[@"constants"] ?: @[]);
+	NSError *error = nil;
+	id<MTLFunction> f = [from newFunctionWithDescriptor:fd error:&error];
+	if (!f)
+		@throw failure(@"specialized function %@: %@", entry[@"name"], error.localizedDescription);
+	return f;
 }
 
 /* Adds a stage's `<prefix>private_functions`, linked for direct calls

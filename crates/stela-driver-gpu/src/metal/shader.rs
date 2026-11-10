@@ -645,6 +645,9 @@ pub struct LinkedFunction {
     pub library: u64,
     pub entry: String,
     pub constants: Vec<(u32, Vec<u8>)>,
+    /// The name calls reach it by, when its function descriptor's
+    /// `specializedName` gave it one other than `entry`.
+    pub alias: Option<String>,
 }
 
 impl Linking {

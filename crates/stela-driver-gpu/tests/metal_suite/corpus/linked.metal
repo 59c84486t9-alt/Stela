@@ -7,6 +7,14 @@ using namespace metal;
 
 [[visible]] float linked_shade(float x);
 [[visible]] float linked_bias();
+// Linked as a specialization named so (linked_named.metal).
+[[visible]] uint linked_scaled(uint x);
+
+kernel void call_linked_scaled(device const uint *in [[buffer(0)]], device uint *out [[buffer(1)]],
+                               uint i [[thread_position_in_grid]])
+{
+    out[i] = linked_scaled(in[i]);
+}
 
 kernel void call_linked(device const float *in [[buffer(0)]], device float *out [[buffer(1)]],
                         uint i [[thread_position_in_grid]])

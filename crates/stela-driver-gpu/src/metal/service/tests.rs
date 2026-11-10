@@ -358,12 +358,29 @@ fn new_function(
     constants: &[ConstantRecord],
     memory: &mut Memory,
 ) -> Result<Handle, Outcome> {
+    new_specialized_function(service, connection, library, name, constants, "", memory)
+}
+
+/// `newFunctionWithDescriptor:` with a `specializedName`, empty for none.
+fn new_specialized_function(
+    service: &mut TestService,
+    connection: NonZeroU64,
+    library: u64,
+    name: &str,
+    constants: &[ConstantRecord],
+    specialized_name: &str,
+    memory: &mut Memory,
+) -> Result<Handle, Outcome> {
     let request = NewFunctionRequest {
         library,
         name: memory.put(name.as_bytes()),
         constants: memory.records(constants),
         specialized: 1,
         reserved: 0,
+        specialized_name: match specialized_name {
+            "" => Span::default(),
+            name => memory.put(name.as_bytes()),
+        },
     };
     call(
         service,
@@ -667,6 +684,26 @@ fn libraries_list_and_make_their_functions() {
         )),
         Status::StaleHandle
     );
+}
+
+#[test]
+fn functions_take_their_descriptors_specialized_names() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let library = new_library(&mut service, connection, memory);
+    let mut named = |entry, name| {
+        let handle =
+            new_specialized_function(&mut service, connection, library, entry, &[], name, memory)
+                .unwrap()
+                .handle;
+        let id = service.object::<FunctionId>(connection, handle).unwrap();
+        alloc::string::String::from(service.device().function_name(id).unwrap())
+    };
+    assert_eq!(named("visible", "renamed"), "renamed");
+    assert_eq!(named("visible", ""), "visible");
+    // A stage is linked by no name.
+    assert_eq!(named("kernel", "renamed_kernel"), "kernel");
 }
 
 #[test]

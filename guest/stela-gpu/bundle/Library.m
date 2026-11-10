@@ -899,6 +899,16 @@ static BOOL install_path(const char *name, NSString *loader, char *path, size_t 
 
 - (id)newFunctionWithName:(NSString *)name constantValues:(id)values error:(NSError **)error
 {
+	return [self newFunctionWithName:name constantValues:values specializedName:nil error:error];
+}
+
+/* `specialized`, when not nil, is the function's name: pipelines that link a
+ * visible function resolve calls of that name to it. */
+- (id)newFunctionWithName:(NSString *)name
+	   constantValues:(id)values
+	  specializedName:(NSString *)specialized
+		    error:(NSError **)error
+{
 	if (values && !([values respondsToSelector:@selector(newIndexedConstantArray)] &&
 			[values respondsToSelector:@selector(newNamedConstantArray)])) {
 		StelaFailure failure = {.reason = "constant values that keep no array of themselves"};
@@ -912,8 +922,9 @@ static BOOL install_path(const char *name, NSString *loader, char *path, size_t 
 	NSArray *named = values ? [values newNamedConstantArray] : [NSArray array];
 	NSUInteger count = indexed.count + named.count;
 	StelaConstantRecord *records = calloc(count + 1, sizeof(*records));
-	StelaSpan *spans = calloc(2 * count + 2, sizeof(*spans));
+	StelaSpan *spans = calloc(2 * count + 3, sizeof(*spans));
 	const char *utf8 = name.UTF8String;
+	const char *alias = specialized.length ? specialized.UTF8String : NULL;
 	size_t used = 0;
 	spans[used++] = stela_span(utf8, strlen(utf8));
 	for (NSUInteger i = 0; i < count; i++) {
@@ -936,8 +947,12 @@ static BOOL install_path(const char *name, NSString *loader, char *path, size_t 
 		.constants = stela_span(records, count * sizeof(*records)),
 		/* Without values, the function is as the library holds it. */
 		.specialized = values != nil,
+		.specialized_name = alias ? stela_span(alias, strlen(alias)) : stela_span(NULL, 0),
 	};
 	spans[used++] = request.constants;
+	if (alias) {
+		spans[used++] = request.specialized_name;
+	}
 	StelaHandle response = {};
 	StelaFailure failure;
 	StelaSpans touched = {.reads = spans, .read_count = used};
@@ -955,7 +970,7 @@ static BOOL install_path(const char *name, NSString *loader, char *path, size_t 
 		}
 		return nil;
 	}
-	return [[StelaGPUFunction alloc] initWithLibrary:self handle:response.handle name:name];
+	return [[StelaGPUFunction alloc] initWithLibrary:self handle:response.handle name:alias ? specialized : name];
 }
 
 - (id)newFunctionWithName:(NSString *)name
@@ -988,31 +1003,23 @@ static BOOL install_path(const char *name, NSString *loader, char *path, size_t 
 }
 
 /* A descriptor's specialized name, when it has one, is the function's name,
- * by which stitched graphs and pipelines name it. */
-static StelaGPUFunction *named_as_specialized(StelaGPUFunction *function, id descriptor)
-{
-	NSString *specialized = [descriptor specializedName];
-	if (function && specialized.length) {
-		function->_name = [specialized copy];
-	}
-	return function;
-}
-
+ * by which stitched graphs name it and pipelines link it. Functions compile
+ * into the pipelines linking them, so its archives and options add nothing. */
 - (id)newFunctionWithDescriptor:(id)descriptor error:(NSError **)error
 {
-	return named_as_specialized([self newFunctionWithName:[descriptor name]
-					       constantValues:[descriptor constantValues]
-							error:error],
-				    descriptor);
+	return [self newFunctionWithName:[descriptor name]
+			  constantValues:[descriptor constantValues]
+			 specializedName:[descriptor specializedName]
+				   error:error];
 }
 
 - (void)newFunctionWithDescriptor:(id)descriptor completionHandler:(void (^)(id, NSError *))handler
 {
-	[self newFunctionWithName:[descriptor name]
-		   constantValues:[descriptor constantValues]
-		completionHandler:^(id function, NSError *error) {
-			handler(named_as_specialized(function, descriptor), error);
-		}];
+	dispatch_async(dispatch_get_global_queue(0, 0), ^{
+		NSError *error = nil;
+		id function = [self newFunctionWithDescriptor:descriptor error:&error];
+		handler(function, error);
+	});
 }
 
 - (id)newIntersectionFunctionWithDescriptor:(id)descriptor error:(NSError **)error

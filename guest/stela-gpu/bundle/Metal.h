@@ -466,6 +466,7 @@ __attribute__((ns_returns_retained)) NSArray *MTLCopyAllDevices(void);
 - (id)privateFunctions;
 - (id)binaryFunctions;
 - (void)setBinaryFunctions:(id)functions;
+- (void)setPrivateFunctions:(id)functions;
 - (void)setLinkedFunctions:(id)functions;
 - (void)setVertexLinkedFunctions:(id)functions;
 - (void)setFragmentLinkedFunctions:(id)functions;

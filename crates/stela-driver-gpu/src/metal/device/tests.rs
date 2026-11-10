@@ -1524,6 +1524,60 @@ fn a_stitched_function_links_what_it_calls() {
 }
 
 #[test]
+fn a_specialized_name_is_the_name_pipelines_link_a_function_by() {
+    let mut device = device();
+    let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
+    let visible = device.new_function(LIBRARY, "visible", Some(&[])).unwrap();
+    let plain = device.new_function(LIBRARY, "visible", Some(&[])).unwrap();
+    device.name_function(visible, "renamed").unwrap();
+    // Its own name, or a stage's, renames nothing.
+    device.name_function(plain, "visible").unwrap();
+    device.name_function(kernel, "renamed_kernel").unwrap();
+    // A stitch of it links it under that name too.
+    let library = device.new_stitched_library(&[visible], &[]).unwrap();
+    let stitched = device.new_function(library, "visible", Some(&[])).unwrap();
+    device.destroy_function(visible).unwrap();
+
+    let request = |private_functions| ComputePipelineRequest {
+        compute_function: kernel,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 0,
+        stage_input: None,
+        linked_functions: LinkedFunctions {
+            private_functions,
+            max_call_stack_depth: 1,
+            ..LinkedFunctions::default()
+        },
+        support_indirect_command_buffers: false,
+        archives: Default::default(),
+    };
+    let dispatch = Specialization {
+        workgroup_size: Some([64, 1, 1]),
+        ..Specialization::default()
+    };
+    let pipeline = device
+        .new_compute_pipeline(&request(alloc::vec![plain, stitched]))
+        .unwrap();
+    device
+        .compute_variant(u64::from(pipeline.0), &dispatch)
+        .unwrap();
+    let linking = &device.compiler.compiled.last().unwrap().linking;
+    let aliases: Vec<_> = linking
+        .private_functions
+        .iter()
+        .map(|function| (function.entry.as_str(), function.alias.as_deref()))
+        .collect();
+    assert_eq!(
+        aliases,
+        [
+            ("visible", None),
+            ("visible", None),
+            ("visible", Some("renamed"))
+        ]
+    );
+}
+
+#[test]
 fn stages_link_visible_functions_and_name_them_by_handle() {
     let mut device = device();
     let kernel = device.new_function(LIBRARY, "kernel", Some(&[])).unwrap();
@@ -1577,6 +1631,7 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
                 library: 0,
                 entry: String::from("visible"),
                 constants: Vec::new(),
+                alias: None,
             }],
             private_functions: Vec::new(),
             libraries: alloc::vec![1],
@@ -1600,6 +1655,7 @@ fn stages_link_visible_functions_and_name_them_by_handle() {
             library: 0,
             entry: String::from("tinted"),
             constants: alloc::vec![(0, tint)],
+            alias: None,
         }]
     );
 

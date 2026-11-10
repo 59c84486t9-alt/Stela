@@ -42,6 +42,8 @@ struct Compiled {
     modules: Vec<(usize, Option<Values>)>,
     /// Each linked module's copy number.
     copies: Vec<u32>,
+    /// Each linked module's `(definition, name)` aliases.
+    aliases: Vec<Vec<(String, String)>>,
     linked_functions: Vec<String>,
     max_call_stack_depth: u32,
     samplers: Vec<(u64, u64)>,
@@ -291,6 +293,23 @@ unsafe extern "C" fn compile(
         )
     };
     let copies = modules.iter().map(|module| module.copy).collect();
+    let aliases = modules
+        .iter()
+        .map(|module| {
+            // SAFETY: as above.
+            let aliases =
+                unsafe { slice::from_raw_parts(module.aliases, module.alias_count as usize) };
+            let text = |name: *const core::ffi::c_char| {
+                // SAFETY: as above, NUL-terminated.
+                let name = unsafe { core::ffi::CStr::from_ptr(name) };
+                String::from(name.to_str().unwrap())
+            };
+            aliases
+                .iter()
+                .map(|alias| (text(alias.definition), text(alias.name)))
+                .collect()
+        })
+        .collect();
     let modules = modules
         .iter()
         .map(|module| {
@@ -382,6 +401,7 @@ unsafe extern "C" fn compile(
             stage_in_indices,
             modules,
             copies,
+            aliases,
             linked_functions,
             max_call_stack_depth: specialization.max_call_stack_depth,
             samplers,
@@ -1048,6 +1068,7 @@ fn stitching_gives_the_service_each_source_and_graph() {
         library,
         entry: String::from(entry),
         constants,
+        alias: None,
     };
     let graph = StitchedGraph {
         name: "stitched".into(),
@@ -1104,6 +1125,7 @@ fn linked_modules_reach_the_service_once_each() {
         library,
         entry: String::from(entry),
         constants,
+        alias: None,
     };
     let kernel = || function(library, "kernel", Vec::new());
     let linked = |linking| Specialization {
@@ -1174,6 +1196,39 @@ fn linked_modules_reach_the_service_once_each() {
         let compiled = fake.compiled.last().unwrap();
         assert_eq!(compiled.copies, [1]);
         assert_eq!(compiled.linked_functions, ["kernel.stela.copy1"]);
+    });
+    // A specialized name reaches the definition it names: one module copy
+    // carries each alias, and the function's own module links again for it.
+    let named = |library, entry: &str, alias: &str| LinkedFunction {
+        alias: Some(String::from(alias)),
+        ..function(library, entry, Vec::new())
+    };
+    compiler
+        .compile(
+            library,
+            "kernel",
+            &linked(Linking {
+                private_functions: vec![
+                    named(dynamic, "kernel", "first"),
+                    named(dynamic, "kernel", "second"),
+                    named(dynamic, "kernel", "first"),
+                    named(library, "kernel", "own"),
+                ],
+                ..Linking::default()
+            }),
+        )
+        .unwrap();
+    FAKE.with_borrow(|fake| {
+        let compiled = fake.compiled.last().unwrap();
+        let alias = |definition: &str, name: &str| (String::from(definition), String::from(name));
+        assert_eq!(compiled.copies, [0, 1]);
+        assert_eq!(
+            compiled.aliases,
+            [
+                vec![alias("kernel", "first"), alias("kernel", "second")],
+                vec![alias("kernel", "own")],
+            ]
+        );
     });
     assert_eq!(
         compiler.compile(

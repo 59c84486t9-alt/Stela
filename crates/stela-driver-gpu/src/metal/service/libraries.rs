@@ -174,6 +174,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             })
             .collect::<Result<Vec<_>, Fault>>()?;
         let values = (request.specialized != 0).then_some(values.as_slice());
+        let specialized = match request.specialized_name.length {
+            0 => None,
+            _ => Some(text(&memory.read(request.specialized_name)?)?),
+        };
         self.device.timing().detail(
             Timed::NewFunction,
             Detail::Function {
@@ -189,6 +193,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     NO_FUNCTION => Fault::new(Status::Declined, "no function of that name"),
                     error => error.into(),
                 })?;
+        if let Some(specialized) = &specialized {
+            self.device.name_function(function, specialized)?;
+        }
         let handle = self.hold(call.connection, Object::Function(function))?;
         call.reply(&handle)
     }

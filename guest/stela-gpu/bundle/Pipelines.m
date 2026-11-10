@@ -23,6 +23,8 @@ static id additional_functions(id linked, NSArray *functions)
 {
 	id copy = linked ? [linked copy] : [NSClassFromString(@"MTLLinkedFunctions") new];
 	[copy setBinaryFunctions:append_functions([linked binaryFunctions], functions)];
+	/* Kept whether or not the copy keeps them. */
+	[copy setPrivateFunctions:[linked privateFunctions]];
 	return copy;
 }
 

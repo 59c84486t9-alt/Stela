@@ -1051,6 +1051,35 @@ release_specialized_calls(struct specialized_calls *calls)
    free(calls->definitions);
 }
 
+/* Makes calls of `call` reach `definition` once the modules are linked. */
+static bool
+add_specialized_call(struct stela_air_metadata *m, struct specialized_calls *calls,
+                     const char *call, const char *definition)
+{
+   if (calls->count == calls->capacity) {
+      unsigned capacity = calls->capacity ? calls->capacity * 2 : 16;
+      char **grown_calls = realloc(calls->calls, capacity * sizeof(*grown_calls));
+      if (grown_calls)
+         calls->calls = grown_calls;
+      char **grown_definitions =
+         grown_calls ? realloc(calls->definitions, capacity * sizeof(*grown_definitions)) : NULL;
+      if (grown_definitions)
+         calls->definitions = grown_definitions;
+      if (!grown_calls || !grown_definitions)
+         return fail(m, STELA_AIR_ALLOCATION, "specialized calls");
+      calls->capacity = capacity;
+   }
+   calls->calls[calls->count] = strdup(call);
+   calls->definitions[calls->count] = strdup(definition);
+   if (!calls->calls[calls->count] || !calls->definitions[calls->count]) {
+      free(calls->calls[calls->count]);
+      free(calls->definitions[calls->count]);
+      return fail(m, STELA_AIR_ALLOCATION, "specialized calls");
+   }
+   calls->count++;
+   return true;
+}
+
 /* Notes the specialized name of each visible function `module` defines, as
  * `values` specialize it, and the name it is defined by once its copy's
  * suffix (rename_copy) is added. */
@@ -1084,27 +1113,32 @@ note_specialized_calls(struct stela_air_metadata *m, LLVMModuleRef module,
       if (!stela_air_specialized_name(name, length, values, count, call, sizeof(call)) ||
           written < 0 || (size_t)written >= sizeof(definition))
          return fail(m, STELA_AIR_LIMIT, "a specialized visible function's name is too long");
-      if (calls->count == calls->capacity) {
-         unsigned capacity = calls->capacity ? calls->capacity * 2 : 16;
-         char **grown_calls = realloc(calls->calls, capacity * sizeof(*grown_calls));
-         if (grown_calls)
-            calls->calls = grown_calls;
-         char **grown_definitions =
-            grown_calls ? realloc(calls->definitions, capacity * sizeof(*grown_definitions)) : NULL;
-         if (grown_definitions)
-            calls->definitions = grown_definitions;
-         if (!grown_calls || !grown_definitions)
-            return fail(m, STELA_AIR_ALLOCATION, "specialized calls");
-         calls->capacity = capacity;
-      }
-      calls->calls[calls->count] = strdup(call);
-      calls->definitions[calls->count] = strdup(definition);
-      if (!calls->calls[calls->count] || !calls->definitions[calls->count]) {
-         free(calls->calls[calls->count]);
-         free(calls->definitions[calls->count]);
-         return fail(m, STELA_AIR_ALLOCATION, "specialized calls");
-      }
-      calls->count++;
+      if (!add_specialized_call(m, calls, call, definition))
+         return false;
+   }
+   return true;
+}
+
+/* Notes each alias of a linked module, whose definition its copy's suffix
+ * (rename_copy) renames. */
+static bool
+note_aliases(struct stela_air_metadata *m, const struct stela_air_module *linked,
+             struct specialized_calls *calls)
+{
+   if (linked->alias_count && !linked->aliases)
+      return fail(m, STELA_AIR_INPUT, "invalid linked function aliases");
+   for (unsigned i = 0; i < linked->alias_count; i++) {
+      const struct stela_air_alias *alias = &linked->aliases[i];
+      if (!alias->definition || !alias->name)
+         return fail(m, STELA_AIR_INPUT, "invalid linked function aliases");
+      char definition[1024];
+      int written = linked->copy ? snprintf(definition, sizeof(definition), "%s.stela.copy%u",
+                                            alias->definition, linked->copy) :
+                                   snprintf(definition, sizeof(definition), "%s", alias->definition);
+      if (written < 0 || (size_t)written >= sizeof(definition))
+         return fail(m, STELA_AIR_LIMIT, "a linked function's name is too long");
+      if (!add_specialized_call(m, calls, alias->name, definition))
+         return false;
    }
    return true;
 }
@@ -1170,6 +1204,7 @@ link_modules(struct stela_air_metadata *m, const struct stela_air_constant_value
       }
       if (!note_specialized_calls(m, module, linked->constants, linked->constant_count,
                                   linked->copy, calls) ||
+          !note_aliases(m, linked, calls) ||
           (linked->copy && !rename_copy(m, module, linked->copy))) {
          LLVMDisposeModule(module);
          return false;

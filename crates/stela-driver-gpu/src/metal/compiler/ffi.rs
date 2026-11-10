@@ -343,6 +343,17 @@ pub(super) struct Module {
     /// definitions link with the suffix `.stela.copy<copy>`; zero for the
     /// first.
     pub copy: u32,
+    /// Other names its visible functions are called by.
+    pub aliases: *const Alias,
+    pub alias_count: u32,
+}
+
+/// `struct stela_air_alias`: calls of `name` reach the module's `definition`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Alias {
+    pub definition: *const c_char,
+    pub name: *const c_char,
 }
 
 /// `stela_air_stitch_source`.

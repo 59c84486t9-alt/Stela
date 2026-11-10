@@ -203,6 +203,37 @@ fn linked(plan: &mut Plan, rng: &mut Random) {
         }
         plan.add(case);
     }
+    // A function descriptor's specializedName is the name the kernel's
+    // call links by: x * 3 + 7 from a specialization of linked_scale_impl.
+    let named = plan.library(
+        "linked_named",
+        "linked_named.metal",
+        &[],
+        super::plan::LATEST,
+    );
+    let ints: Vec<u32> = (0..n as u32).map(|i| i.wrapping_mul(0x9e37_79b9)).collect();
+    let scaled: Vec<u32> = ints
+        .iter()
+        .map(|x| x.wrapping_mul(3).wrapping_add(7))
+        .collect();
+    plan.add(
+        Case::compute1(
+            "pipelines.linked.compute.specialized_name",
+            &library,
+            "call_linked_scaled",
+            n as u32,
+        )
+        .set("uses", json!([named]))
+        .set(
+            "private_functions",
+            json!([{"library": named, "name": "linked_scale_impl",
+                    "specialized_name": "linked_scaled",
+                    "constants": [{"type": "uint", "index": 0, "value": 3}]}]),
+        )
+        .buffer(Buffer::data("in", 0, u32s(&ints)))
+        .buffer(Buffer::zeroed("out", 1, n * 4))
+        .output(Output::new("out", Dtype::U32, Tolerance::exact()).expect_same(u32s(&scaled))),
+    );
     let pixels =
         |values: &[f64]| -> Vec<f64> { values.iter().flat_map(|&v| [v, 0.25, 0.0, 1.0]).collect() };
     let target = || Texture::d2("target", "rgba32float", 8, 8).usage(&["render"]);

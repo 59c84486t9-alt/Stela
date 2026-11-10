@@ -60,6 +60,10 @@ struct stela_air_constants {
    const struct stela_air_constant_value *values;
    unsigned count;
 };
+/* Another name of a visible function a linked module defines. */
+struct stela_air_alias {
+   const char *definition, *name;
+};
 /* An AIR module linked with the input's, and the values of its function
  * constants: NULL for a module that declares none. */
 struct stela_air_module {
@@ -72,6 +76,11 @@ struct stela_air_module {
     * named with the suffix ".stela.copy<copy>", as function tables name
     * the functions of that specialization. */
    unsigned copy;
+   /* Calls of the visible function `name` reach this module's
+    * `definition` (before its copy's suffix): a function descriptor's
+    * specializedName names its function so. */
+   const struct stela_air_alias *aliases;
+   unsigned alias_count;
 };
 /* A function a visible function table's handle calls, by name. */
 struct stela_air_linked_function {

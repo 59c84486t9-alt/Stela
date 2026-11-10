@@ -161,6 +161,9 @@ struct FunctionObject {
     /// Its process has made bicubic samplers
     /// ([`Specialization::bicubic`]).
     bicubic: bool,
+    /// The name a visible function's calls reach it by, when its
+    /// descriptor's `specializedName` is not its entry.
+    alias: Option<String>,
 }
 
 impl FunctionObject {
@@ -567,6 +570,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 library: self.pipelines.library(function.library)?,
                 entry: String::from(function.prepared.entry()),
                 constants,
+                alias: function.alias.clone(),
             });
             libraries.push(function.library);
         }
@@ -882,9 +886,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             prepared,
             users: Users::CREATED,
             bicubic: false,
+            alias: None,
         };
         self.keep(kept)?;
         Ok(FunctionId(self.pipelines.functions.insert(function)))
+    }
+
+    /// `MTLFunctionDescriptor.specializedName`: the function's name, by
+    /// which pipelines linking a visible function resolve its calls.
+    pub fn name_function(&mut self, id: FunctionId, name: &str) -> Result<()> {
+        let function = self.pipelines.functions.get_mut(id.0)?;
+        let visible = matches!(function.prepared.reflection, Reflection::Visible { .. });
+        if visible && !name.is_empty() && name != function.prepared.entry() {
+            function.alias = Some(String::from(name));
+        }
+        Ok(())
     }
 
     /// Lets the samplers `id` takes as arguments filter bicubically, as its
@@ -945,6 +961,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// The entry point a function was made from.
     pub fn function_entry(&self, id: FunctionId) -> Result<&str> {
         Ok(self.pipelines.functions.get(id.0)?.prepared.entry())
+    }
+
+    /// The name pipelines link a function by: its specialized name, or
+    /// its entry.
+    pub fn function_name(&self, id: FunctionId) -> Result<&str> {
+        let function = self.pipelines.functions.get(id.0)?;
+        Ok(function
+            .alias
+            .as_deref()
+            .unwrap_or(function.prepared.entry()))
     }
 
     /// What the compiler reflects of a function.
@@ -1996,6 +2022,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                         library: self.pipelines.library(function.library)?,
                         entry: String::from(function.prepared.entry()),
                         constants,
+                        alias: function.alias.clone(),
                     })
                 })
                 .collect()

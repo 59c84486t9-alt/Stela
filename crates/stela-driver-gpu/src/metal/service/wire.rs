@@ -224,13 +224,15 @@ records! {
 
     /// `NewFunction`: the function's name and its `ConstantRecord`s, which
     /// specialize it when `specialized` is nonzero: when values were given,
-    /// even none.
+    /// even none. `specialized_name`, empty for none, is the descriptor's
+    /// `specializedName`, by which pipelines link a visible function.
     pub struct NewFunctionRequest {
         pub library: u64,
         pub name: Span,
         pub constants: Span,
         pub specialized: u32,
         pub reserved: u32,
+        pub specialized_name: Span,
     }
 
     /// A function constant value: an `MTLDataType` and the value's packed

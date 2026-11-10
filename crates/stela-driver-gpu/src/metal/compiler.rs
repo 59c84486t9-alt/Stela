@@ -1369,6 +1369,16 @@ impl AirCompiler {
                 let count = constants.as_ref().map_or(Ok(0), |values| {
                     u32::try_from(values.len()).map_err(|_| MALFORMED)
                 })?;
+                let aliases = module
+                    .aliases
+                    .iter()
+                    .map(|&(definition, name)| {
+                        Ok((
+                            CString::new(definition).map_err(|_| MALFORMED)?,
+                            CString::new(name).map_err(|_| MALFORMED)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 Ok(JobModule {
                     bitcode: module.source.bitcode.as_ptr(),
                     size: module.source.bitcode.len(),
@@ -1376,6 +1386,7 @@ impl AirCompiler {
                     constants,
                     count,
                     copy: module.copy,
+                    aliases,
                 })
             })
             .collect::<Result<_>>()?;
@@ -1443,7 +1454,15 @@ impl AirCompiler {
             hasher.update(alloc::format!("{tessellation:?}{stage_in:?}").as_bytes());
             for module in &modules {
                 hasher.update(module.digest);
-                hasher.update(alloc::format!("{:?}/{}", module.constants, module.copy).as_bytes());
+                hasher.update(
+                    alloc::format!(
+                        "{:?}/{}/{:?}",
+                        module.constants,
+                        module.copy,
+                        module.aliases
+                    )
+                    .as_bytes(),
+                );
             }
             hasher.update(alloc::format!("{names:?}").as_bytes());
             let digest: [u8; 32] = hasher.finalize().into();
@@ -1504,6 +1523,8 @@ struct JobModule {
     constants: Option<Vec<(u32, Vec<u8>)>>,
     count: u32,
     copy: u32,
+    /// `(definition, name)` pairs (`struct stela_air_alias`).
+    aliases: Vec<(CString, CString)>,
 }
 
 /// A compilation's inputs, owned: it runs under the service's lock or, for a
@@ -1651,11 +1672,26 @@ impl CompileJob {
             .iter()
             .map(|module| module.constants.as_deref().map(constant_values))
             .collect();
+        let aliases: Vec<Vec<ffi::Alias>> = self
+            .modules
+            .iter()
+            .map(|module| {
+                module
+                    .aliases
+                    .iter()
+                    .map(|(definition, name)| ffi::Alias {
+                        definition: definition.as_ptr(),
+                        name: name.as_ptr(),
+                    })
+                    .collect()
+            })
+            .collect();
         let modules: Vec<_> = self
             .modules
             .iter()
             .zip(&values)
-            .map(|(module, values)| ffi::Module {
+            .zip(&aliases)
+            .map(|((module, values), aliases)| ffi::Module {
                 bitcode: module.bitcode.cast(),
                 size: module.size,
                 constants: values
@@ -1663,6 +1699,8 @@ impl CompileJob {
                     .map_or(ptr::null(), |values| values.as_ptr()),
                 constant_count: module.count,
                 copy: module.copy,
+                aliases: aliases.as_ptr(),
+                alias_count: aliases.len() as u32,
             })
             .collect();
         let functions: Vec<_> = self
@@ -2057,6 +2095,8 @@ struct LinkedModule<'a> {
     source: ModuleSource<'a>,
     constants: Option<&'a [(u32, Vec<u8>)]>,
     copy: u32,
+    /// `(definition, name)`: calls of `name` reach the copy's `definition`.
+    aliases: Vec<(&'a str, &'a str)>,
 }
 
 /// The suffix of the names a module's `copy` defines (`.stela.copy<copy>`,
@@ -2088,8 +2128,10 @@ fn linked_modules<'a>(
     own: ([u8; 32], &'a [(u32, Vec<u8>)]),
 ) -> Result<(Vec<LinkedModule<'a>>, Vec<u32>)> {
     let mut modules: Vec<LinkedModule<'a>> = Vec::new();
-    let mut add = |source: ModuleSource<'a>, constants| -> u32 {
-        if source.slice_hash == own.0 && same_values(Some(own.1), constants) {
+    let mut add = |source: ModuleSource<'a>, constants, alias: Option<(&'a str, &'a str)>| -> u32 {
+        // An alias needs a copy to name, so the function's own module
+        // links again for it.
+        if alias.is_none() && source.slice_hash == own.0 && same_values(Some(own.1), constants) {
             return 0;
         }
         let copies = || {
@@ -2106,6 +2148,11 @@ fn linked_modules<'a>(
                 .find(|known| known.source.slice_hash == source.slice_hash && known.copy == module)
                 .expect("the copy found");
             module.constants = module.constants.or(constants);
+            if let Some(alias) = alias
+                && !module.aliases.contains(&alias)
+            {
+                module.aliases.push(alias);
+            }
             return module.copy;
         }
         // The function's own module is copy 0 of its digest.
@@ -2118,6 +2165,7 @@ fn linked_modules<'a>(
             source,
             constants,
             copy,
+            aliases: alias.into_iter().collect(),
         });
         copy
     };
@@ -2129,7 +2177,11 @@ fn linked_modules<'a>(
         .enumerate()
     {
         let selected = select(libraries, function.library, &function.entry)?;
-        let copy = add(selected.module, Some(function.constants.as_slice()));
+        let alias = function
+            .alias
+            .as_deref()
+            .map(|name| (function.entry.as_str(), name));
+        let copy = add(selected.module, Some(function.constants.as_slice()), alias);
         if index < linking.functions.len() {
             copies.push(copy);
         }
@@ -2140,7 +2192,7 @@ fn linked_modules<'a>(
             .ok_or(Error::Invalid("unknown library"))?;
         ensure(library.dynamic, "a preloaded library that is not dynamic")?;
         for module in library.modules() {
-            add(module?, None);
+            add(module?, None, None);
         }
     }
     Ok((modules, copies))
