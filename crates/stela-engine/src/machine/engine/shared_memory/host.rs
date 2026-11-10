@@ -295,6 +295,14 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         self.native_entry();
         self.local.patch(code, bytes);
     }
+    fn patch_instruction(
+        &mut self,
+        code: NativeCode,
+        instruction: [u8; stela_compiler::x86_64::chain::PATCH_BYTES],
+    ) {
+        self.native_entry();
+        self.local.patch_instruction(code, instruction);
+    }
     fn discard_code(&mut self) {
         if self.source_service() {
             self.effect(HostEffect::DiscardCode);

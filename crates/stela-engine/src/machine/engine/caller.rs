@@ -1,6 +1,7 @@
-//! The calling thread's address space for [`Devices::serve_call`]: virtual
-//! addresses translated in the PE's current regime with EL0 permissions,
-//! reaching RAM as device DMA does, outside the memory controllers' locks.
+//! The calling thread's address space for a gate call that `run_call` takes
+//! from the devices: virtual addresses translated in the PE's current regime
+//! with EL0 permissions, reaching RAM as device DMA does, outside the memory
+//! controllers' locks.
 use super::{Controls, FETCH_PAGE, Host, RamTables, Translated, mmu};
 use alloc::vec::Vec;
 use stela_contracts::gate::{CallerFault, CallerMemory};

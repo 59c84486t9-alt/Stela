@@ -657,6 +657,13 @@ impl CompilationPlan {
                 parsed.next_pc,
                 linked,
             );
+            // Code moved after its exits were emitted: each patch point
+            // the engine may link is made patchable where it lies. Only
+            // system mode links; other profiles keep the ordinary bytes,
+            // and the engine never links an exit that is not patchable.
+            if linked.is_some() {
+                crate::x86_64::block::align_exits(&mut native.x86_64_code, &direct_exits, linked);
+            }
             return Ok(CompiledBlock {
                 native,
                 source_bytes: parsed.source_bytes,

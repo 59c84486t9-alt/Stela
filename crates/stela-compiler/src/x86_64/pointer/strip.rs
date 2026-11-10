@@ -66,11 +66,7 @@ pub fn thunk(pc: GuestAddress, register: u8, cell: Place) -> Option<Thunk> {
         asm.bind(closed);
     }
     super::super::block::direct_exit_with(&mut asm, pc, ExitKind::PointerAuthentication);
-    Some(Thunk {
-        code: code.into_bytes(),
-        next: Some(next),
-        dynamic: None,
-    })
+    Some(Thunk::new(code.into_bytes(), Some(next), None))
 }
 
 #[cfg(test)]
@@ -87,7 +83,8 @@ mod tests {
         assert_eq!(zero.next, Some(0));
         assert_eq!(
             &zero.code[..super::super::super::chain::DIRECT_EXIT_BYTES],
-            &super::super::super::chain::direct_exit(GuestAddress(0), ExitKind::Fallthrough)
+            // Padded for its offset, where a link patches it.
+            &super::super::super::chain::direct_exit_at(0, GuestAddress(0), ExitKind::Fallthrough)
         );
     }
 

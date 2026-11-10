@@ -313,7 +313,7 @@ pub fn streams(cpu: &Cpu) -> impl Iterator<Item = Stream> + '_ {
 /// Whether an enabled event stream signals in the system counts
 /// (previous, current] (Arm `GenericCounterTick`).
 pub fn event(cpu: &Cpu, previous: u64, current: u64) -> bool {
-    // A shared clock may hold the count while another PE advances its horizon.
+    // A held count, or a serialized one, may read the same twice.
     current != previous && streams(cpu).any(|stream| stream.signals(cpu, previous, current))
 }
 

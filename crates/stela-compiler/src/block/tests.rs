@@ -583,7 +583,7 @@ fn system_mode_blocks_check_sctlr_a_and_the_ordered_granule_when_asked() {
 /// the end of its code, the conditional fallthrough before the target.
 #[test]
 fn system_mode_blocks_report_their_direct_successor_exits() {
-    use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit};
+    use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit_at};
     const BASE: u64 = 0x4000;
     const ADD: u32 = 0x9100_0400; // add x0, x0, #1
     let fallthrough = (BASE + 8, ExitKind::Fallthrough);
@@ -621,9 +621,10 @@ fn system_mode_blocks_report_their_direct_successor_exits() {
             .direct_exits
             .iter()
             .map(|exit| {
+                // Padded for its offset: patchable where it lies.
                 assert_eq!(
                     code[exit.offset..exit.offset + DIRECT_EXIT_BYTES],
-                    direct_exit(exit.target, exit.kind)
+                    direct_exit_at(exit.offset as u64, exit.target, exit.kind)
                 );
                 (exit.target.0, exit.kind)
             })
@@ -640,7 +641,7 @@ fn system_mode_blocks_report_their_direct_successor_exits() {
 /// X3 in R9 past both branches.
 #[test]
 fn a_pinned_runs_side_exits_are_where_its_successors_say() {
-    use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit};
+    use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit_at};
     const BASE: u64 = 0x4100;
     let words = [
         0xf940_0043_u32, // ldr x3, [x2]
@@ -679,7 +680,7 @@ fn a_pinned_runs_side_exits_are_where_its_successors_say() {
         .map(|exit| {
             assert_eq!(
                 code[exit.offset..exit.offset + DIRECT_EXIT_BYTES],
-                direct_exit(exit.target, exit.word())
+                direct_exit_at(exit.offset as u64, exit.target, exit.word())
             );
             (exit.target.0, exit.skipped)
         })
@@ -705,7 +706,7 @@ fn a_pinned_runs_side_exits_are_where_its_successors_say() {
 /// DC ZVA without one, keeps its System exit.
 #[test]
 fn system_mode_blocks_complete_dc_zva_natively_only_with_a_block_size() {
-    use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit};
+    use crate::x86_64::chain::{DIRECT_EXIT_BYTES, is_direct_exit};
     const BASE: u64 = 0x4000;
     const ADD: u32 = 0x9100_0400; // add x0, x0, #1
     const DC_ZVA: u32 = 0xd50b_7423; // dc zva, x3
@@ -736,9 +737,10 @@ fn system_mode_blocks_complete_dc_zva_natively_only_with_a_block_size() {
     assert_eq!(code[at..at + zeroing.len()], zeroing);
     let next = GuestAddress(BASE + 8);
     let slot = crate::x86_64::chain::link_slot(Some(BASE), next, ExitKind::Fallthrough);
+    let exit = at + zeroing.len() + slot;
     assert_eq!(
-        code[at + zeroing.len() + slot..],
-        direct_exit(next, ExitKind::Fallthrough)
+        code[exit..],
+        crate::x86_64::chain::direct_exit_at(exit as u64, next, ExitKind::Fallthrough)
     );
     assert_eq!(native.direct_exits.len(), 1);
     assert_eq!(
@@ -749,11 +751,12 @@ fn system_mode_blocks_complete_dc_zva_natively_only_with_a_block_size() {
         native.direct_exits[0].offset + DIRECT_EXIT_BYTES,
         code.len()
     );
-    let system = direct_exit(GuestAddress(BASE + 4), ExitKind::System);
+    let system = GuestAddress(BASE + 4);
     for (word, bytes) in [(DC_ZVA, None), (DC_GVA, Some(64)), (MRS, Some(64))] {
         let compiled = compile(word, bytes);
         let code = &compiled.native.x86_64_code;
-        assert_eq!(code[code.len() - DIRECT_EXIT_BYTES..], system, "{word:#x}");
+        let exit = &code[code.len() - DIRECT_EXIT_BYTES..];
+        assert!(is_direct_exit(exit, system, ExitKind::System), "{word:#x}");
         assert!(compiled.direct_exits.is_empty(), "{word:#x}");
     }
     let add = |profile, bytes| {
@@ -775,7 +778,7 @@ fn system_mode_blocks_complete_dc_zva_natively_only_with_a_block_size() {
 #[test]
 fn planned_dc_clean_operations_check_xt_and_fall_through() {
     use crate::x86_64::cache_clean::Operations;
-    use crate::x86_64::chain::{DIRECT_EXIT_BYTES, direct_exit};
+    use crate::x86_64::chain::{DIRECT_EXIT_BYTES, is_direct_exit};
     const BASE: u64 = 0x4000;
     const ADD: u32 = 0x9100_0400; // add x0, x0, #1
     const DC_CIVAC: u32 = 0xd50b_7e20; // dc civac, x0
@@ -806,13 +809,14 @@ fn planned_dc_clean_operations_check_xt_and_fall_through() {
     assert_eq!(code[at..at + check.len()], check);
     let next = GuestAddress(BASE + 8);
     let slot = crate::x86_64::chain::link_slot(Some(BASE), next, ExitKind::Fallthrough);
+    let exit = at + check.len() + slot;
     assert_eq!(
-        code[at + check.len() + slot..],
-        direct_exit(next, ExitKind::Fallthrough)
+        code[exit..],
+        crate::x86_64::chain::direct_exit_at(exit as u64, next, ExitKind::Fallthrough)
     );
     assert_eq!(native.direct_exits.len(), 1);
     assert_eq!(native.direct_exits[0].target, next);
-    let system = direct_exit(GuestAddress(BASE + 4), ExitKind::System);
+    let system = GuestAddress(BASE + 4);
     for (word, operations) in [
         (DC_CIVAC, Operations::CVAC.with(Operations::CVAU)),
         (DC_CVAU, Operations::NONE),
@@ -820,7 +824,8 @@ fn planned_dc_clean_operations_check_xt_and_fall_through() {
     ] {
         let compiled = compile(word, operations);
         let code = &compiled.native.x86_64_code;
-        assert_eq!(code[code.len() - DIRECT_EXIT_BYTES..], system, "{word:#x}");
+        let exit = &code[code.len() - DIRECT_EXIT_BYTES..];
+        assert!(is_direct_exit(exit, system, ExitKind::System), "{word:#x}");
     }
     let system = options(BlockProfile::new(Features::SYSTEM), Operations::CVAC);
     assert!(crate::compile(&ADD.to_le_bytes(), GuestAddress(BASE), &system).is_err());
@@ -896,12 +901,14 @@ fn system_mode_profile_keeps_ordinary_memory_and_exits_on_system_instructions() 
                 .rchunks_exact(2)
                 .take_while(|bytes| *bytes == [0x0f, 0x0b])
                 .count();
-        let mut expected = vec![0x48, 0xb8];
-        expected.extend(terminal_pc.0.to_le_bytes());
-        expected.push(0xba);
-        expected.extend((kind as u32).to_le_bytes());
-        expected.extend([0xc3, 0xcc, 0xcc, 0xcc, 0xcc]);
-        assert_eq!(&compiled.native.x86_64_code[at..end], expected, "{word:#x}");
+        assert!(
+            crate::x86_64::chain::is_direct_exit(
+                &compiled.native.x86_64_code[at..end],
+                terminal_pc,
+                kind
+            ),
+            "{word:#x}"
+        );
     }
     // The shared lane's PEs still end a block at ISB.
     let shared = BlockProfile::new(Features::SYSTEM_MODE)
@@ -1093,7 +1100,8 @@ fn system_profile_has_one_source_bound_exit_and_rejects_memory_prefixes() {
         expected.push(MOV_EDX_IMMEDIATE);
         expected.extend((ExitKind::System as u32).to_le_bytes());
         expected.push(RETURN);
-        expected.extend([0xcc; 4]);
+        // The room a jump at the RET and its pad take.
+        expected.extend([0xcc; 8]);
         assert_eq!(&compiled.native.x86_64_code[at..], expected);
     }
     // Ordinary RAM, exclusives and legacy FP/SIMD cannot bypass shared owners.
@@ -1171,7 +1179,7 @@ fn terminal_half_division_shares_exact_consumption_analysis_and_emission() {
             helper.extend(helper_pc.0.to_le_bytes());
             helper.push(0xba); // MOV EDX,FloatingPoint; RET
             helper.extend((ExitKind::FloatingPoint as u32).to_le_bytes());
-            helper.extend([0xc3, 0xcc, 0xcc, 0xcc, 0xcc]);
+            helper.extend([0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc]);
             let offset = compiled.native.source_map[1].1;
             assert_eq!(&compiled.native.x86_64_code[offset..], helper);
             let suffix = &source[analysis.source_bytes..];
@@ -1204,7 +1212,7 @@ fn terminal_half_division_completes_inline_only_with_the_host_instruction() {
         exit.extend(pc.0.to_le_bytes());
         exit.push(0xba); // MOV EDX,kind; RET
         exit.extend((kind as u32).to_le_bytes());
-        exit.extend([0xc3, 0xcc, 0xcc, 0xcc, 0xcc]);
+        exit.extend([0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc]);
         exit
     };
     let helper = compile(crate::TargetCpu::X86_64_V4);
@@ -2254,7 +2262,10 @@ fn trap_is_a_consumed_boundary_with_its_own_source_map_and_no_leaf_fallback() {
             compiled.native.source_map,
             [(GuestAddress(0x2ffc), 0), (GuestAddress(0x3000), 1)]
         );
-        assert_eq!(compiled.native.x86_64_code.len(), 21);
+        assert_eq!(
+            compiled.native.x86_64_code.len(),
+            1 + crate::x86_64::chain::DIRECT_EXIT_BYTES
+        );
         assert_eq!(compiled.native.x86_64_code[0], 0x90);
         assert!(crate::testing::leaf(&bytes(&[word, 0xd65f03c0]), GuestAddress(0x3000)).is_err());
     }

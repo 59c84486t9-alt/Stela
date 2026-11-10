@@ -5,10 +5,10 @@ use super::*;
 impl<H: Host, D: Devices> Machine<H, D> {
     /// Run host-side work on the devices, such as an external peer's
     /// computation, between steps: the host time it takes is not guest
-    /// time, so the system counter does not advance across it. A parallel
-    /// PE holds the count at what its work earned meanwhile; stopped at EL0
-    /// it holds no lock the kernel times, so the other PEs' count goes on,
-    /// as across its own gate calls.
+    /// time, so a serialized count does not advance across it. A parallel
+    /// PE's count is the host's: stopped in the kernel, where it may hold a
+    /// lock another PE times, the count waits for it only once it has been
+    /// stopped `clock::STALL_MILLIS`; at EL0 it holds no such lock.
     pub fn exclude_host_time<T>(&mut self, work: impl FnOnce(&mut D) -> T) -> T {
         let progress = self.work();
         let at_el0 = self.cpu.pstate.el == 0;
@@ -21,6 +21,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         self.clock.exclude(after.saturating_sub(before));
         result
+    }
+
+    /// Mark the running PE's progress for the shared count's stall guard
+    /// every few blocks (`clock::Clock::mark`): a compare at each step.
+    #[inline]
+    pub(super) fn mark_progress(&mut self) {
+        if self.clock.mark_due(self.cpu.retired) {
+            self.mark_progress_now();
+        }
+    }
+
+    #[cold]
+    fn mark_progress_now(&mut self) {
+        let phases = self.clock_phases();
+        let retired = self.cpu.retired;
+        self.clock.mark(|| self.host.counter(), retired, phases);
+    }
+
+    /// The profile clock and the step loop's phase totals, under step
+    /// timing: what the stall report names a gap's phase by.
+    pub(super) fn clock_phases(&mut self) -> Option<clock::Phases> {
+        let phases = self.step_timing.as_ref()?.phases;
+        Some((self.host.profile_ticks(), phases))
     }
 
     /// End every wait of all PEs at once by leaping the system counter to
@@ -85,24 +108,32 @@ impl<H: Host, D: Devices> Machine<H, D> {
         now
     }
 
-    /// Charge the ticks since `since` to handling an exit in `slot`, and a
-    /// native device fault's to the register it reached.
+    /// Charge the ticks since `since` to handling an exit in `slot`, a native
+    /// device fault's or device site's to the register it reached, and a
+    /// System exit's to its key ([`Self::take_system_exits`]).
     #[inline]
     pub(super) fn timing_exit(&mut self, slot: usize, since: u64) {
-        let device = self
-            .timed_device
-            .take()
-            .filter(|_| slot == step_timing::DEVICE_FAULT_SLOT);
+        let device = self.timed_device.take().filter(|_| {
+            slot == step_timing::DEVICE_FAULT_SLOT || slot == step_timing::DEVICE_SITE_SLOT
+        });
         if self.step_timing.is_none() {
             return;
         }
         let now = self.host.profile_ticks();
+        let closed = core::mem::take(&mut self.timed_closed);
+        let waited = device.map_or(0, |_| self.devices.take_lock_wait());
         if let Some(timing) = &mut self.step_timing {
             let spent = now.wrapping_sub(since);
+            if let Some(physical) = device {
+                let page = step_timing::device_page(physical);
+                self.system_exits.devices.add(page, 1, spent, waited);
+            }
             if let Some(word) = self.timed_word.take() {
                 let timed = self.system_words.entry(word).or_default();
                 timed.accesses += 1;
                 timed.ticks += spent;
+                let key = step_timing::system_key(word);
+                self.system_exits.add(key, 1, spent, u64::from(closed));
             }
             if let Some(physical) = device
                 && let Some(register) = self.device_registers.get_mut(&physical)
@@ -121,6 +152,35 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 *exit = (exit.0 + 1, exit.1 + spent);
             }
         }
+    }
+
+    /// The word a System exit of block `index` at `pc` completes, which
+    /// [`Self::timing_exit`] charges: [`step_timing::DEVICE_SITE_KEY`] at a
+    /// device site's stub, else the instruction at `pc`, which is the
+    /// block's last unless an instruction the block completes natively fell
+    /// back to the engine.
+    pub(super) fn timed_system_word(&mut self, index: usize, pc: u64) -> u32 {
+        if self.device_stub(index, pc) {
+            return step_timing::DEVICE_SITE_KEY;
+        }
+        let block = &self.blocks[index];
+        let terminal = block.terminal;
+        if pc == block.terminal_pc() {
+            return terminal;
+        }
+        let mut bytes = [0; 4];
+        let physical = block.physical.wrapping_add(pc.wrapping_sub(block.pc));
+        if self.host.read_ram(physical, &mut bytes) {
+            self.admit(u32::from_le_bytes(bytes))
+        } else {
+            terminal
+        }
+    }
+
+    /// The System exits by key since the last call, under step timing
+    /// ([`step_timing::SystemExits`]).
+    pub fn take_system_exits(&mut self) -> step_timing::SystemExits {
+        core::mem::take(&mut *self.system_exits)
     }
 
     /// The architectural system count and each generic timer's `(CTL, CVAL)`
@@ -145,7 +205,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// host counter ticks in all, after which it returns [`Stop::Waiting`]
     /// so the host can take inputs that reach the board from outside it,
     /// such as its power button. Host time, as those inputs arrive in it
-    /// whether or not a horizon holds the count; in all, so that a guest
+    /// whether or not a stop holds the count; in all, so that a guest
     /// whose timers end each wait early still returns. An idle skip, which
     /// leaps to a deadline at once, is not bounded. Without a limit a wait
     /// lasts until a deadline.

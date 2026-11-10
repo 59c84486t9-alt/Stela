@@ -362,15 +362,26 @@ pub struct Statistics {
     pub exit_kinds: [u64; 13],
     /// Exits of returns, indirect branches, calls and direct exits out of
     /// their page, by why no lookup dispatcher transferred them: none was
-    /// installed yet, the target's table slot named another PC, or another
-    /// context, the chain budget was spent, or the entry refused the BTYPE.
+    /// installed yet, the ITLB held no translation of the target's page in
+    /// the current context, the block table no entry of the target with
+    /// that page's key, the chain budget was spent, or the entry refused
+    /// the BTYPE.
     pub lookup_misses: [u64; 5],
-    /// Forgotten lookup entries: halves whose contexts went for an ASIDE1 or
-    /// a TLBI of everything, halves a TLBI by VA reached entries of, and
-    /// halves whose contexts went for any other
-    /// change (an unscoped translation change, the host's fetch permissions,
-    /// the upper half's first non-global fetch).
+    /// Forgotten lookup contexts and ITLB entries: halves whose contexts
+    /// went for an ASIDE1 or a TLBI of everything, halves a TLBI by VA
+    /// reached ITLB entries of, and halves whose contexts went for any
+    /// other change (an unscoped translation change, the host's fetch
+    /// permissions, the upper half's first non-global fetch).
     pub lookup_forgets: [u64; 4],
+    /// Fetches the engine made, by where they found their block: the block
+    /// table through the ITLB's translation, there after the fetch
+    /// translated the page anew, the jump cache, the block index, or
+    /// nowhere, so that it was compiled or installed.
+    pub fetches: [u64; 5],
+    /// Pages the ITLB lacked in the context it took their translation in,
+    /// and pages it held there that took a new block key (a remap, or the
+    /// frame's blocks taking another variant).
+    pub itlb: [u64; 2],
     pub compiled: u64,
     /// Counter ticks spent analyzing and compiling `compiled`.
     pub compile_ticks: u64,
@@ -387,6 +398,9 @@ pub struct Statistics {
     pub page_ticks: u64,
     pub shared_ticks: u64,
     pub install_ticks: u64,
+    /// Fetch pages read again whose key a check of their bytes gave
+    /// without hashing them ([`stored::page_check`]).
+    pub known_keys: u64,
     /// Device transfers run because their deadline came, and the devices'
     /// interrupt lines and deadline asked anew because a cached answer
     /// expired, with the profile clock ticks each took under step timing.
@@ -456,12 +470,15 @@ impl core::ops::AddAssign for Statistics {
             exit_kinds,
             lookup_misses,
             lookup_forgets,
+            fetches,
+            itlb,
             compiled,
             compile_ticks,
             stored,
             offered,
             shared,
             page_ticks,
+            known_keys,
             shared_ticks,
             install_ticks,
             due_transfers,
@@ -505,6 +522,12 @@ impl core::ops::AddAssign for Statistics {
         for (total, count) in self.lookup_forgets.iter_mut().zip(lookup_forgets) {
             *total += count;
         }
+        for (total, count) in self.fetches.iter_mut().zip(fetches) {
+            *total += count;
+        }
+        for (total, count) in self.itlb.iter_mut().zip(itlb) {
+            *total += count;
+        }
         for (total, count) in [
             (&mut self.blocks, blocks),
             (&mut self.chained, chained),
@@ -518,6 +541,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.offered, offered),
             (&mut self.shared, shared),
             (&mut self.page_ticks, page_ticks),
+            (&mut self.known_keys, known_keys),
             (&mut self.shared_ticks, shared_ticks),
             (&mut self.install_ticks, install_ticks),
             (&mut self.due_transfers, due_transfers),
@@ -583,8 +607,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .sum(),
             rows,
             index: self.index.heap_bytes(),
-            lookup: self.targets.index_bytes(),
-            pages: self.pages.len() * crate::translations::PAGE_BYTES,
+            lookup: self.targets.index_bytes() + self.itlb.index_bytes(),
+            pages: (self.pages.len() + self.spare_pages.len()) * crate::translations::PAGE_BYTES,
         }
     }
 }

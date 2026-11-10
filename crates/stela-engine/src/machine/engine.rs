@@ -6,8 +6,8 @@ mod mirrors;
 mod reports;
 use boundary::*;
 pub use boundary::{
-    CodePartitions, ConsumedPair, DeviceError, Devices, Host, LocalRegisters, NoDevices,
-    ScalarRead, Start,
+    CodePartitions, ConsumedPair, DeviceError, Devices, Host, LocalRegisters, LockedMemory,
+    NoDevices, ScalarRead, Settled, Start,
 };
 use mirrors::*;
 use reports::*;
@@ -36,6 +36,7 @@ mod fetch;
 #[cfg(all(feature = "std", feature = "native-profile"))]
 pub mod floating_profile;
 mod guarded;
+mod install_census;
 pub mod installed_code;
 mod interrupts;
 #[cfg(all(feature = "std", feature = "native-profile"))]
@@ -43,18 +44,20 @@ pub mod metrics;
 mod monitor;
 mod native_failure;
 mod native_timing;
+mod numbering;
 mod parallel;
 mod pointer_authentication;
 mod regime_state;
 mod scheduler;
 mod system_access;
 mod timing;
-pub use clock::ClockStatus;
+pub use install_census::InstallCauses;
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
 pub use parallel::{
     BroadcastCounts, BroadcastKind, BroadcastProfile, Call, Counts, GlobalSpan, Hub, Kick,
-    MaterializedSource, ParallelAdmissionError, SharedDevices, SourceObservation, SourcePhase,
+    LockTimes, MaterializedSource, ParallelAdmissionError, SharedDevices, SourceObservation,
+    SourcePhase,
 };
 pub use stela_contracts::dma::{DmaError, TransferFault};
 mod pointer;
@@ -145,7 +148,7 @@ use stela_compiler::{
 pub use stela_contracts::bus::Transition;
 pub use stela_contracts::dma::Memory;
 pub use stela_contracts::gate::{CallerFault, CallerMemory, GateCall, GateOutcome};
-pub use stored::{Offer, SharedTranslation, Translations};
+pub use stored::{Offer, SharedTranslation, StoreEvent, Translations};
 pub use system::FP_TRAPS_WRITABLE;
 use {
     super::cpu::Cpu, super::cpu::Exception, super::cpu::HCR_AMO, super::cpu::HCR_API,
@@ -179,8 +182,6 @@ const HOST_REFUSED_FETCH_LEVEL: i8 = 3;
 /// ID_AA64PFR0_EL1.CSV3, FEAT_CSV3's field.
 const CSV3_SHIFT: u32 = 60;
 const JUMP_CACHE: usize = 4096;
-/// The pages and contexts [`Machine::visited_pages`] holds.
-const VISITED_PAGES: usize = 1 << 12;
 /// The most blocks one native run chains into, which bounds how late the
 /// engine sees a timer or device deadline pass (tens of microseconds of
 /// guest code; every System register write and device access exits
@@ -450,10 +451,6 @@ struct Block {
     terminal: u32,
     /// Exits to the engine at `terminal`, up to its limit.
     taken: u32,
-    /// A fetch reached it through the engine: it is worth a lookup entry in
-    /// the other contexts of its page
-    /// ([`Machine::remember_target_page`]).
-    fetched: bool,
     source_hash: u64,
 }
 
@@ -504,6 +501,11 @@ fn dynamic_branch(word: u32) -> Option<(ExitKind, Option<u8>)> {
     })
 }
 
+/// Lengths of successor lists whose boxes evicted blocks leave for new
+/// ones, and how many of each length are kept: about a part's blocks.
+const SUCCESSOR_BOXES: usize = 8;
+const KEPT_SUCCESSOR_BOXES: usize = 2048;
+
 /// The compiled blocks one [`Machine::stale_code`] call checks: about a
 /// millisecond of hashing.
 pub const STALE_CHECKS: usize = 1024;
@@ -538,6 +540,9 @@ struct Successor {
     slot: u8,
     /// Chained into the block of its page at `target`.
     linked: bool,
+    /// Its link slot's body was written: a core may still run it after an
+    /// unlink, so a later link goes through a thunk (`chain::link`).
+    used: bool,
 }
 
 const _: () = assert!(size_of::<Successor>() == 24);
@@ -551,6 +556,7 @@ impl Successor {
             skipped: word.skipped,
             slot: u8::try_from(slot).expect("a link slot is a few bytes"),
             linked: false,
+            used: false,
         }
     }
 
@@ -587,28 +593,28 @@ struct JumpEntry {
 }
 
 /// One lookup context of one half: the EL (with the guarded level) and
-/// variant fetches run in, the half's translation inputs
-/// ([`Machine::half_inputs`]) and the code generation, under one number.
-/// Between changes no control value shows (TLBIs, the host's fetch
-/// permissions), translation is a function of these, as a TLB tags its
-/// entries, so a return to earlier controls (a TTBR0 or SPRR permission
-/// switched back) finds its entries in the lookup table still valid.
+/// variant fetches run in and the half's translation inputs
+/// ([`Machine::half_inputs`]), under one number. Between changes no control
+/// value shows (TLBIs, the host's fetch permissions), translation is a
+/// function of these, as a TLB tags its entries, so a return to earlier
+/// controls (a TTBR0 or SPRR permission switched back) finds its pages in
+/// the ITLB still valid. Code changes leave contexts: the ITLB names no
+/// block, only the block key of a page ([`chain::block_key`]).
 #[derive(Debug, Clone, Copy)]
 struct Space {
     inputs: (mmu::Controls, u64),
     el: u8,
     variant: Variant,
-    code: u64,
     number: u64,
 }
 
-/// A half's recent context number, with the EL, variant and translation
-/// and code generations it was found for.
+/// A half's recent context number, with the EL, variant and fetch epoch it
+/// was found for.
 #[derive(Debug, Clone, Copy)]
 struct Recent {
     el: u8,
     variant: Variant,
-    generations: (FetchEpoch, u64),
+    epoch: FetchEpoch,
     number: u64,
 }
 
@@ -631,7 +637,7 @@ fn same_asid(controls: &mmu::Controls, asid: u16) -> bool {
 struct VariantId(u32);
 
 /// What a block is compiled for besides its PC and PA.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Variant {
     /// FP/SIMD enabled: otherwise the block ends before the first FP/SIMD
     /// instruction.
@@ -695,6 +701,11 @@ pub struct Machine<H: Host, D: Devices> {
     system_words: BTreeMap<u32, DeviceRegister>,
     /// The word of the system exit being handled.
     timed_word: Option<u32>,
+    /// The System exit being handled closed every mirror cell.
+    timed_closed: bool,
+    /// System exits by key since they were last taken, under step timing
+    /// ([`Self::take_system_exits`]).
+    system_exits: Box<step_timing::SystemExits>,
     #[cfg(all(feature = "std", feature = "native-profile"))]
     floating_profile: Option<alloc::boxed::Box<floating_profile::Sampler>>,
     #[cfg(all(feature = "std", feature = "native-profile"))]
@@ -716,10 +727,26 @@ pub struct Machine<H: Host, D: Devices> {
     /// from [`Block`], whose fields every exit reads.
     fault_recovery: recovery::Owners,
     recovery_scratch: Vec<block::FaultRecovery>,
+    /// The buffers a stored entry is relocated into for its install.
+    relocated: crate::translations::Relocated,
+    /// The list a block's successors are gathered in before it is boxed,
+    /// and the boxes evicted blocks left, by length less one, which blocks
+    /// of as many successors take ([`Machine::successor_box`]).
+    successor_scratch: Vec<Successor>,
+    successor_boxes: [Vec<Box<[Successor]>>; SUCCESSOR_BOXES],
+    /// A bit per block slot for what [`Machine::detach`] detaches.
+    detached_scratch: Vec<u64>,
+    /// The page keys of fetch pages read before, kept after their bytes
+    /// ([`stored::KnownKey`]), allocated at the first.
+    known_keys: Vec<Option<stored::KnownKey>>,
+    /// Why blocks were installed ([`install_census`]); the census exists
+    /// while step timing is on.
+    install_causes: InstallCauses,
+    census: Option<Box<install_census::Census>>,
     native_failure: Option<recovery::CapturedFailure>,
     /// Every variant a block was compiled for, once: what a [`VariantId`]
-    /// names.
-    variants: Vec<Variant>,
+    /// names. Shared by the board's machines ([`numbering`]).
+    variants: Arc<numbering::Registry<Variant>>,
     /// Blocks by PC, PA and variant.
     index: block_index::BlockIndex,
     /// The last block [`Machine::stale_code`] checked, where its sweep goes
@@ -731,6 +758,10 @@ pub struct Machine<H: Host, D: Devices> {
     pages: BTreeMap<u64, stored::StoredPage>,
     /// The most `pages` keeps ([`Self::share_kept_pages`]).
     kept_pages: usize,
+    /// The buffers of pages let go, which the next pages read take: every
+    /// PE reads pages all the time, and each buffer taken from the heap and
+    /// given back is two turns at the heap's lock, which they all share.
+    spare_pages: Vec<Box<[u8; crate::translations::PAGE_BYTES]>>,
     #[cfg(feature = "native-profile")]
     stored_pages_peak: usize,
     page_uses: u64,
@@ -746,11 +777,16 @@ pub struct Machine<H: Host, D: Devices> {
     table_generation: u64,
     /// The installed lookup dispatchers, by BTYPE.
     lookup_dispatchers: [Option<NativeCode>; 4],
-    /// Advances when installed code is discarded.
+    /// Advances when installed code is discarded or invalidated: the jump
+    /// cache's entries name it.
     code_generation: u64,
-    /// The blocks fetches ran, by PC and context, for lookup dispatchers
+    /// The blocks fetches ran, by PC and block key, for lookup dispatchers
     /// (`x86_64::chain`): the table `ChainControl::table` names.
     targets: chain::LookupTable,
+    /// The block key of each page a fetch translated, by context: the ITLB
+    /// `ChainControl::itlb` names, which lookup dispatchers translate
+    /// their targets through.
+    itlb: chain::LookupTable,
     /// Each half's lookup contexts ([`Space`]) since its translations last
     /// changed in a way no control value shows, most recently used last.
     spaces: [Vec<Space>; 2],
@@ -769,22 +805,18 @@ pub struct Machine<H: Host, D: Devices> {
     /// and no cached fetch, as most by far do not. Each half allocates
     /// its filter at its first recorded fetch.
     fetched_leaves: [Vec<u64>; 2],
-    /// The registers of the stored cells, in the order of the cells.
-    stored_reads: Vec<Encoding>,
+    /// The registers of the stored cells, in the order of the cells, which
+    /// the board's machines share ([`numbering`]).
+    stored_reads: Arc<numbering::Registry<Encoding>>,
     /// The IMPLEMENTATION DEFINED registers with a cell of their own for
-    /// writes ([`STORED_WRITES`]).
-    stored_writes: Vec<Encoding>,
+    /// writes ([`STORED_WRITES`]), shared alike.
+    stored_writes: Arc<numbering::Registry<Encoding>>,
     /// The page this PE posted an IC IVAU of since its last DSB.
     code_posted: Option<u64>,
     /// The storage the last generated read returned, if it was a plain one.
     plain_read: Option<(SystemRegister, u64)>,
     /// The next context number; numbers are never reused.
     next_context: u64,
-    /// The numbers from which lookup entries were written since code last
-    /// went: older ones may name a block no longer found.
-    code_floor: u64,
-    /// The code generation `code_floor` was taken in.
-    floor_generation: u64,
     /// What owns each lookup salt ([`Self::context_salt`]), and the next
     /// salt a new owner takes.
     salt_owners: [u64; chain::LOOKUP_SALTS],
@@ -860,11 +892,16 @@ pub struct Machine<H: Host, D: Devices> {
     /// The latest serial of the maintenance this PE posted to each other PE
     /// and has not yet seen applied, which its next DSB waits for.
     posted: Vec<(usize, u64)>,
-    /// The last page and context of each hash that
-    /// [`Self::remember_target_page`] filled lookup entries for.
-    visited_pages: Box<[(u64, u64)]>,
-    /// The blocks of a page being visited, kept for its capacity.
+    /// The blocks of a page being detached, kept for its capacity.
     page_blocks: Vec<usize>,
+    /// The direct exit within its page the last native run left by, when
+    /// its target had no block to link to: the block, the target and the
+    /// exit's word. The next fetch, if it is the target's, links it
+    /// ([`Self::link_direct_exit`]), so the exit costs no second return to
+    /// the engine and its target no lookup entry: no lookup reaches for a
+    /// block that only linked exits enter. Any other fetch, and any discard
+    /// of the block, forgets it.
+    direct_exit: Option<(usize, u64, ExitWord)>,
     /// Maintenance for the other PEs that this PE's next DSB sends
     /// ([`Self::send_outgoing`]).
     outgoing: Vec<parallel::Maintenance>,
@@ -922,6 +959,10 @@ pub struct Machine<H: Host, D: Devices> {
     /// The physical fetch pages whose blocks are compiled for the
     /// translated variant ([`Machine::run_translated`]).
     translated_pages: BTreeSet<u64>,
+    /// The instructions, by physical address, that reached a device
+    /// register from native code: blocks end before them and the engine
+    /// completes them ([`device_access::DeviceSite`]).
+    device_sites: BTreeMap<u64, device_access::DeviceSite>,
     /// The guest PC and data address that first needed the translated
     /// variant, for a report.
     first_translated: Option<(u64, u64)>,
@@ -968,6 +1009,8 @@ pub struct WorkerProfile {
     profile: CpuProfile,
     admit_table: Arc<AdmitTable>,
     target: TargetCpu,
+    /// The home machine's numbering, which every PE's code shares.
+    numbering: numbering::Numbering,
 }
 
 impl WorkerProfile {
@@ -990,7 +1033,7 @@ impl WorkerProfile {
             self.profile,
             self.target,
             processor,
-            Some(self.admit_table),
+            Some((self.admit_table, self.numbering)),
         )
     }
 }
@@ -1043,6 +1086,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             profile: profile.clone(),
             admit_table,
             target: self.target,
+            numbering: numbering::Numbering {
+                variants: Arc::clone(&self.variants),
+                stored_reads: Arc::clone(&self.stored_reads),
+                stored_writes: Arc::clone(&self.stored_writes),
+            },
         }
     }
 
@@ -1053,8 +1101,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         profile: CpuProfile,
         target: TargetCpu,
         boot_processor: usize,
-        admit_table: Option<Arc<AdmitTable>>,
+        shared: Option<(Arc<AdmitTable>, numbering::Numbering)>,
     ) -> Result<Self, &'static str> {
+        let (admit_table, numbering) = shared.unzip();
         if boot_processor >= profile.processors.len().max(1) {
             return Err("the boot PE is outside the CPU profile");
         }
@@ -1069,6 +1118,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         });
         let processor_power = Processors::new(profile.processors.len().max(1))
             .expect("a CPU profile has at least its boot PE");
+        let numbering = numbering.unwrap_or_else(numbering::Numbering::new);
         let mut machine = Self {
             cpu,
             host,
@@ -1081,6 +1131,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             timed_device: None,
             system_words: BTreeMap::new(),
             timed_word: None,
+            timed_closed: false,
+            system_exits: Box::default(),
             #[cfg(all(feature = "std", feature = "native-profile"))]
             floating_profile: None,
             #[cfg(all(feature = "std", feature = "native-profile"))]
@@ -1093,12 +1145,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             memory_release_blocks: MEMORY_RELEASE_BLOCKS,
             fault_recovery: recovery::Owners::new(),
             recovery_scratch: Vec::new(),
+            relocated: Default::default(),
+            successor_scratch: Vec::new(),
+            successor_boxes: Default::default(),
+            detached_scratch: Vec::new(),
+            known_keys: Vec::new(),
+            install_causes: InstallCauses::default(),
+            census: None,
             native_failure: None,
-            variants: Vec::new(),
+            variants: numbering.variants,
             index: block_index::BlockIndex::new(),
             stale_cursor: None,
             pages: BTreeMap::new(),
             kept_pages: stored::KEPT_PAGES,
+            spare_pages: Vec::new(),
             #[cfg(feature = "native-profile")]
             stored_pages_peak: 0,
             page_uses: 0,
@@ -1111,19 +1171,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
             lookup_dispatchers: Default::default(),
             code_generation: 1,
             targets: chain::LookupTable::new(),
+            itlb: chain::LookupTable::itlb(),
             spaces: [Vec::new(), Vec::new()],
             recent: [[None; RECENT]; 2],
             fetched_sizes: [0; 2],
             private_fetches: [false; 2],
             lower_globals: NO_GLOBALS,
             fetched_leaves: [Vec::new(), Vec::new()],
-            stored_reads: Vec::new(),
-            stored_writes: Vec::new(),
+            stored_reads: numbering.stored_reads,
+            stored_writes: numbering.stored_writes,
             code_posted: None,
             plain_read: None,
             next_context: 1,
-            code_floor: 1,
-            floor_generation: 1,
             salt_owners: [0; chain::LOOKUP_SALTS],
             next_salt: 0,
             profile_missing: Vec::new(),
@@ -1153,7 +1212,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             forwarded_power: Vec::new(),
             deferred_code: Vec::new(),
             posted: Vec::new(),
-            visited_pages: vec![(1, 0); VISITED_PAGES].into_boxed_slice(),
+            direct_exit: None,
             page_blocks: Vec::new(),
             outgoing: Vec::new(),
             lines_epoch: 0,
@@ -1181,6 +1240,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             block_limit: u64::MAX,
             suspended: BTreeMap::new(),
             translated_pages: BTreeSet::new(),
+            device_sites: BTreeMap::new(),
             first_translated: None,
             survey: None,
             degraded_devices: BTreeMap::new(),
@@ -1189,7 +1249,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             tag_checks: [false; 2],
             tags_checked_at: None,
         };
-        machine.chain.set_table(machine.targets.address());
+        machine
+            .chain
+            .set_table(machine.targets.address(), machine.itlb.address());
         machine.peers = processors::boot(&machine.profile, boot_processor);
         machine.load_profile();
         machine.sync_regime();
@@ -1226,14 +1288,12 @@ impl<H: Host> mmu::TableMemory for RamTables<'_, H> {
     }
 
     fn update_descriptor(&mut self, physical: u64, old: u64, new: u64) -> Option<bool> {
-        // One PE and no concurrent walker: compare and write in sequence.
-        let current = self.read_descriptor(physical)?;
-        if current != old {
-            return Some(false);
-        }
+        // The walker makes no hardware descriptor updates (no FEAT_HAFDBS).
+        // Should it, other PEs walk and write the same tables at once: the
+        // update is the host's single-copy-atomic compare-exchange, or none.
+        let mut expected = old.to_le_bytes();
         self.0
-            .write_ram(physical, &new.to_le_bytes())
-            .then_some(true)
+            .compare_exchange_ram(physical, &mut expected, &new.to_le_bytes())
     }
 }
 

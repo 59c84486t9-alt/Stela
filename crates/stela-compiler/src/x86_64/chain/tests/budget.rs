@@ -72,19 +72,51 @@ fn frame(control: u64) -> Box<GuestState> {
     frame.anchors[Anchor::Control] = control;
     frame
 }
-fn direct(mapping: &Mapping, policy: Interruption) -> Vec<u8> {
-    thunk_with_policy(
+/// The direct exit to [`TARGET`] at host address `at`, its patch point
+/// linked to a thunk right after it into `entry`, and the thunk, which
+/// returns through the exit's RAX and EDX.
+fn exit_into_thunk(at: u64, entry: u64, policy: Interruption) -> Vec<u8> {
+    let mut code = direct_exit_at(at, TARGET, ExitKind::Direct).to_vec();
+    let thunk_at = at + code.len() as u64;
+    let point = direct_patch(at);
+    let offset = (point - at) as usize;
+    code[offset..offset + PATCH_BYTES].copy_from_slice(&jump(point, thunk_at).unwrap());
+    let thunk = thunk_with_policy(
         ThunkPlan {
-            at: mapping.address(),
+            at: thunk_at,
             retired: 7,
             block: 3,
-            entry: mapping.address(),
-            target: TARGET,
-            kind: ExitKind::Direct.into(),
+            entry,
+            fallback: Fallback::Return(ExitKind::Direct.into()),
         },
         policy,
     )
-    .unwrap()
+    .unwrap();
+    code.extend(thunk);
+    code
+}
+
+/// [`exit_into_thunk`] at the mapping's start, into itself.
+fn direct(mapping: &Mapping, policy: Interruption) -> Vec<u8> {
+    exit_into_thunk(mapping.address(), mapping.address(), policy)
+}
+
+/// The link slot of an exit to [`TARGET`] at the mapping's start, linked
+/// into itself, and the exit.
+fn slot(mapping: &Mapping) -> Vec<u8> {
+    let at = mapping.address();
+    let mut code = empty_link_at(at, POLLED_LINK_BYTES);
+    code.extend(direct_exit_at(
+        at + POLLED_LINK_BYTES as u64,
+        TARGET,
+        ExitKind::Direct,
+    ));
+    let (body, bytes) = link(at, POLLED_LINK_BYTES, 7, 3, at).unwrap();
+    let start = (body - at) as usize;
+    code[start..start + bytes.len()].copy_from_slice(&bytes);
+    let point = (slot_patch(at) - at) as usize;
+    code[point..point + PATCH_BYTES].copy_from_slice(&NOP5);
+    code
 }
 fn exited(value: u128) -> (u64, u64) {
     (value as u64, ExitWord::split((value >> 64) as u64).0)
@@ -193,10 +225,12 @@ struct Shared {
     epoch: AtomicU64,
     observed: AtomicU64,
     salts: [AtomicU32; 2],
+    itlb: AtomicU64,
 }
 const _: () = assert!(core::mem::offset_of!(Shared, epoch) == INTERRUPT_EPOCH as usize);
 const _: () = assert!(core::mem::offset_of!(Shared, observed) == OBSERVED_INTERRUPT_EPOCH as usize);
 const _: () = assert!(core::mem::offset_of!(Shared, linked) == LINKED as usize);
+const _: () = assert!(core::mem::offset_of!(Shared, itlb) == ITLB as usize);
 impl Shared {
     fn new() -> Self {
         Self {
@@ -210,6 +244,7 @@ impl Shared {
             epoch: AtomicU64::new(0),
             observed: AtomicU64::new(0),
             salts: [AtomicU32::new(0), AtomicU32::new(0)],
+            itlb: AtomicU64::new(0),
         }
     }
 }
@@ -253,11 +288,12 @@ impl InterruptionOutcome {
 fn rendezvous_backedge(native: &Mapping, control: u64, gate: u64, policy: Interruption) -> Vec<u8> {
     let mut prefix = Code::new();
     prefix.asm().mov_imm64(Rcx, control);
+    // Thunks count a transfer only in the budget they spend.
     prefix.asm().alu_imm32(
         Alu::Cmp,
         Qword,
-        Mem::base(Rcx, LINKED),
-        RENDEZVOUS_AFTER as i32,
+        Mem::base(Rcx, 0),
+        (INTERRUPT_TEST_BUDGET - RENDEZVOUS_AFTER) as i32,
     );
     let ordinary = prefix.asm().jcc8(Cond::Ne);
     prefix.asm().mov_imm64(Rax, gate);
@@ -285,21 +321,24 @@ fn rendezvous_backedge(native: &Mapping, control: u64, gate: u64, policy: Interr
     let wait = prefix.asm().jcc8(Cond::E);
     crate::x86_64::asm::resolve(&mut prefix, wait, waiting);
     prefix.asm().bind(ordinary);
-    let thunk = thunk_with_policy(
-        ThunkPlan {
-            at: native.address() + prefix.len() as u64,
-            retired: 7,
-            block: 3,
-            entry: native.address(),
-            target: TARGET,
-            kind: ExitKind::Direct.into(),
-        },
+    let exit = exit_into_thunk(
+        native.address() + prefix.len() as u64,
+        native.address(),
         policy,
-    )
-    .unwrap();
+    );
     let mut bytes = prefix.into_bytes();
-    bytes.extend(thunk);
+    bytes.extend(exit);
     bytes
+}
+
+/// The transfers a thunk made from the test budget to `budget`, which wraps
+/// when a thunk finds none left.
+fn transfers(budget: u64) -> u64 {
+    if budget > INTERRUPT_TEST_BUDGET {
+        INTERRUPT_TEST_BUDGET
+    } else {
+        INTERRUPT_TEST_BUDGET - budget
+    }
 }
 
 fn interrupt_at_rendezvous(policy: Interruption) -> InterruptionOutcome {
@@ -342,13 +381,13 @@ fn interrupt_at_rendezvous(policy: Interruption) -> InterruptionOutcome {
     }
     // Ready synchronizes the native accounting prefix. Publish before opening
     // the rendezvous; the next production guard must observe the epoch.
-    let published = control.linked.load(Ordering::Acquire);
+    let published = INTERRUPT_TEST_BUDGET - control.budget.load(Ordering::Acquire);
     control.epoch.fetch_add(1, Ordering::Release);
     gate.release.store(1, Ordering::Release);
     let (result, retained, _retained_gate) = worker.join().unwrap();
     InterruptionOutcome {
         published,
-        linked: retained.linked.load(Ordering::Acquire),
+        linked: transfers(retained.budget.load(Ordering::Acquire)),
         retired: retained.retired.load(Ordering::Acquire),
         budget: retained.budget.load(Ordering::Acquire),
         block: retained.block.load(Ordering::Acquire),
@@ -393,8 +432,9 @@ fn an_already_checked_native_boundary_allows_one_transfer_then_stops() {
     prefix.asm().mov_imm64(Rcx, address);
     prefix.asm().mov_imm64(Rdx, 0);
     let enter_tail = prefix.asm().jmp();
-    let at = native.address() + prefix.len() as u64;
-    let body = thunk(at, 7, 3, at, TARGET, ExitKind::Direct).unwrap();
+    let exit = native.address() + prefix.len() as u64;
+    let at = exit + DIRECT_EXIT_BYTES as u64;
+    let body = thunk(at, 7, 3, at, Fallback::Jump(exit)).unwrap();
     // Golden legacy encodings identify the exact post-guard native window.
     // The first entry has already admitted a transfer with the old epoch;
     // its backedge re-enters the full, unchanged production thunk.
@@ -404,10 +444,7 @@ fn an_already_checked_native_boundary_allows_one_transfer_then_stops() {
         &[0x48, 0x8b, 0x51, 0x40, 0x48, 0x3b, 0x51, 0x48]
     );
     assert_eq!(body[15], 0x75);
-    assert_eq!(
-        AFTER_GUARD + usize::from(body[16]),
-        body.len() - DIRECT_EXIT_BYTES
-    );
+    assert_eq!(AFTER_GUARD + usize::from(body[16]), body.len() - JUMP_BYTES);
     assert_eq!(&body[AFTER_GUARD..AFTER_GUARD + 4], &[0x48, 0x83, 0x29, 1]);
     let distance = relative(
         native.address() + enter_tail.end() as u64,
@@ -416,6 +453,7 @@ fn an_already_checked_native_boundary_allows_one_transfer_then_stops() {
     .unwrap();
     prefix.patch(enter_tail.offset(), distance.to_le_bytes());
     let mut code = prefix.into_bytes();
+    code.extend(direct_exit_at(exit, TARGET, ExitKind::Direct));
     code.extend(body);
     native.install(&code);
     assert_eq!(
@@ -429,7 +467,7 @@ fn an_already_checked_native_boundary_allows_one_transfer_then_stops() {
             control.retired,
             control.block
         ),
-        (16, 1, 7, 3)
+        (16, 0, 7, 3)
     );
     assert_eq!(
         (control.interrupt_epoch, control.observed_interrupt_epoch),
@@ -456,13 +494,33 @@ fn native_interruption_gate_costs() {
         crate::SOURCE_SHA256
     )
     .unwrap();
-    for lookup in [false, true] {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Mode {
+        /// An exit whose patch point jumps to a thunk into the block.
+        Direct,
+        /// A link slot's body, which its patch point falls into; polled.
+        Slot,
+        /// An exit whose patch point jumps to its tail and the table probe.
+        Lookup,
+        /// An exit whose patch point jumps to its tail and a cell probe.
+        Cell,
+    }
+    const KEY: u64 = block_key(0x8_0000_0000, 1);
+    for mode in [Mode::Direct, Mode::Slot, Mode::Lookup, Mode::Cell] {
         let mut table = LookupTable::new();
+        let mut itlb = LookupTable::itlb();
         let mut control = Box::new(Aligned(ChainControl {
             table: table.address(),
+            itlb: itlb.address(),
             contexts: [5, 7],
+            salts: [itlb_salt(5), itlb_salt(7)],
             ..ChainControl::default()
         }));
+        let context = control.0.contexts[half(TARGET.0)];
+        itlb.insert(
+            itlb_slot(TARGET.0, context),
+            LookupEntry::page(TARGET.0 & !0xfff, context, KEY),
+        );
         let pointer = (&mut control.0 as *mut ChainControl) as u64;
         for policy in [
             Interruption::Legacy,
@@ -470,44 +528,75 @@ fn native_interruption_gate_costs() {
             Interruption::Flag,
             Interruption::Epoch,
         ] {
+            // A slot's body has the production gate alone.
+            if mode == Mode::Slot && policy != Interruption::Epoch {
+                continue;
+            }
             let native = Mapping::new();
-            let code = if lookup {
-                table.set(
-                    lookup_slot(TARGET.0, 0),
-                    LookupEntry {
-                        pc: TARGET.0,
-                        context: 5,
-                        entry: native.address(),
-                        block: 3,
-                        targets: 15,
-                    },
-                );
-                lookup_with_policy(7, Some(TARGET), ExitKind::Direct, 0, policy).unwrap()
-            } else {
-                direct(&native, policy)
+            let at = native.address();
+            let entry = LookupEntry {
+                pc: TARGET.0,
+                key: KEY,
+                entry: at,
+                block: 3,
+                targets: 15,
+            };
+            // The exit, its tail after it and the probes after that.
+            let through_tail = |cell: Option<u64>| {
+                let mut code = direct_exit_at(at, TARGET, ExitKind::Direct).to_vec();
+                let tail = at + code.len() as u64;
+                let point = direct_patch(at);
+                let offset = (point - at) as usize;
+                code[offset..offset + PATCH_BYTES].copy_from_slice(&jump(point, tail).unwrap());
+                let probes = (tail + CELL_TAIL_BYTES as u64).next_multiple_of(16);
+                match cell {
+                    Some(cell) => code.extend(
+                        cell_tail(
+                            tail,
+                            cell,
+                            ExitKind::Direct,
+                            7,
+                            probes + CELL_PROBE_ENTRY as u64,
+                        )
+                        .unwrap(),
+                    ),
+                    None => code.extend(
+                        lookup_tail(tail, ExitKind::Direct, 7, probes + PROBE_ENTRY as u64)
+                            .unwrap(),
+                    ),
+                }
+                code.resize((probes - at) as usize, 0xcc);
+                code.extend(dispatcher_with_policy(0, policy).unwrap());
+                code
+            };
+            let code = match mode {
+                Mode::Direct => direct(&native, policy),
+                Mode::Slot => slot(&native),
+                Mode::Lookup => {
+                    table.set(lookup_slot(TARGET.0, KEY), entry);
+                    through_tail(None)
+                }
+                Mode::Cell => {
+                    let cell = table.link_cell(1, TARGET.0, Some(entry));
+                    through_tail(Some(cell))
+                }
             };
             native.install(&code);
-            let name = format!("{}-{policy:?}", if lookup { "lookup" } else { "direct" });
+            let name = format!("{mode:?}-{policy:?}").to_lowercase();
             fs::write(output.join(format!("{name}.bin")), &code).unwrap();
             let mut samples = Vec::new();
             for sample in 0..8 {
                 control.0.budget = ITERATIONS;
                 control.0.retired = 0;
                 control.0.hits = 0;
-                control.0.linked = 0;
                 let start = Instant::now();
                 let result = native.run(pointer);
                 let elapsed = start.elapsed();
                 assert_eq!(exited(result), (TARGET.0, ExitKind::Direct as u64));
                 assert_eq!(control.0.retired, ITERATIONS * 7);
-                assert_eq!(
-                    if lookup {
-                        control.0.hits
-                    } else {
-                        control.0.linked
-                    },
-                    ITERATIONS
-                );
+                assert_eq!(control.0.budget, u64::MAX);
+                let hits = if mode == Mode::Lookup { ITERATIONS } else { 0 };
+                assert_eq!(control.0.hits, hits);
                 if sample != 0 {
                     samples.push(elapsed.as_nanos() as f64 / ITERATIONS as f64);
                 }
@@ -524,5 +613,130 @@ fn native_interruption_gate_costs() {
             writeln!(report, "{line}").unwrap();
         }
     }
+    ring_costs(&mut report);
     std::eprintln!("CHAIN_BENCH_OUTPUT={}", output.display());
+}
+
+/// Blocks in a ring of lookup transfers, each to the next one in a scrambled
+/// order: a return or an exit out of the page at every block.
+const RING: usize = 64;
+
+/// Transfers around a [`RING`] of blocks, each of whose exits goes to the
+/// next block through the table probe: through a tail of its own, as the
+/// engine links them, or through one tail they all share, which leaves one
+/// indirect jump for every target as the former shared dispatcher did.
+fn ring_costs(report: &mut fs::File) {
+    const ITERATIONS: u64 = 1 << 20;
+    // Direct exits, whose patch points jump to their tails.
+    const EXIT_BYTES: usize = DIRECT_EXIT_BYTES;
+    const PAGE: usize = 4096;
+    let bytes = RING * (EXIT_BYTES + TAIL_BYTES) + TAIL_BYTES + PAGE;
+    let bytes = bytes.next_multiple_of(PAGE);
+    // SAFETY: private anonymous pages, RX after the copy, unmapped below.
+    let base = unsafe { mmap(core::ptr::null_mut(), bytes, 3, 0x22, -1, 0) };
+    assert_ne!(base as usize, usize::MAX);
+    let base = base as u64;
+    // A full-period step through the ring's positions.
+    let order: Vec<usize> = (0..RING).map(|i| (i * 37 + 11) % RING).collect();
+    let pc = |block: usize| 0xffff_fe00_0010_0000 + 0x1000 * block as u64;
+    let probes = base + (RING * (EXIT_BYTES + TAIL_BYTES) + TAIL_BYTES) as u64;
+    let mut table = LookupTable::new();
+    let mut itlb = LookupTable::itlb();
+    // Each block's page has a frame of its own.
+    let key = |block: usize| block_key(0x8_0000_0000 + 0x1000 * block as u64, 1);
+    for block in 0..RING {
+        itlb.insert(
+            itlb_slot(pc(block), 5),
+            LookupEntry::page(pc(block), 5, key(block)),
+        );
+    }
+    for (name, shared) in [("ring-site", false), ("ring-shared", true)] {
+        let shared_tail = base + (RING * (EXIT_BYTES + TAIL_BYTES)) as u64;
+        let mut code = Vec::new();
+        for block in 0..RING {
+            let at = base + code.len() as u64;
+            let next = order[(order.iter().position(|&b| b == block).unwrap() + 1) % RING];
+            let tail = if shared {
+                shared_tail
+            } else {
+                at + EXIT_BYTES as u64
+            };
+            let mut bytes = direct_exit_at(at, GuestAddress(pc(next)), ExitKind::Return).to_vec();
+            let point = direct_patch(at);
+            let offset = (point - at) as usize;
+            bytes[offset..offset + PATCH_BYTES].copy_from_slice(&jump(point, tail).unwrap());
+            code.extend(bytes);
+            let own = at + EXIT_BYTES as u64;
+            code.extend(
+                lookup_tail(own, ExitKind::Return, 3, probes + PROBE_ENTRY as u64).unwrap(),
+            );
+            table.set(
+                lookup_slot(pc(block), key(block)),
+                LookupEntry {
+                    pc: pc(block),
+                    key: key(block),
+                    entry: at,
+                    block: block as u32,
+                    targets: 15,
+                },
+            );
+        }
+        code.extend(
+            lookup_tail(
+                shared_tail,
+                ExitKind::Return,
+                3,
+                probes + PROBE_ENTRY as u64,
+            )
+            .unwrap(),
+        );
+        code.extend(lookup_dispatcher(0).unwrap());
+        let mut control = Box::new(Aligned(ChainControl {
+            table: table.address(),
+            itlb: itlb.address(),
+            contexts: [5, 5],
+            salts: [itlb_salt(5); 2],
+            ..ChainControl::default()
+        }));
+        // SAFETY: the mapping covers `code`; nothing runs it meanwhile.
+        unsafe {
+            assert_eq!(mprotect(base as *mut c_void, bytes, 3), 0);
+            core::ptr::copy_nonoverlapping(code.as_ptr(), base as *mut u8, code.len());
+            assert_eq!(mprotect(base as *mut c_void, bytes, 5), 0);
+        }
+        let mut samples = Vec::new();
+        for sample in 0..8 {
+            control.0.budget = ITERATIONS;
+            control.0.retired = 0;
+            control.0.hits = 0;
+            let mut state = frame((&mut control.0 as *mut ChainControl) as u64);
+            let start = Instant::now();
+            // SAFETY: the installed ring has the block ABI and touches only
+            // its control and table; it clobbers caller-volatile registers.
+            let result = unsafe {
+                let enter: unsafe extern "sysv64" fn(*mut GuestState) -> u128 =
+                    core::mem::transmute(base);
+                enter(&mut *state)
+            };
+            let elapsed = start.elapsed();
+            assert_eq!(
+                ExitWord::split((result >> 64) as u64).0,
+                ExitKind::Return as u64
+            );
+            assert_eq!(control.0.hits, ITERATIONS);
+            assert_eq!(control.0.retired, ITERATIONS * 3);
+            if sample != 0 {
+                samples.push(elapsed.as_nanos() as f64 / ITERATIONS as f64);
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        let line = format!(
+            "CASE={name} BLOCKS={RING} NS_PER_TRANSFER={:.4} MIN={:.4} MAX={:.4}",
+            samples[3], samples[0], samples[6]
+        );
+        std::eprintln!("{line}");
+        writeln!(report, "{line}").unwrap();
+    }
+    // SAFETY: unique mapping; every run returned.
+    assert_eq!(unsafe { munmap(base as *mut c_void, bytes) }, 0);
 }

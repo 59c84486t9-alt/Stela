@@ -41,12 +41,252 @@ impl Phase {
 }
 
 /// The exits [`StepTiming::exits`] counts: each `ExitKind`, then native
-/// faults by cause ([`fault_slot`]).
-pub const EXIT_SLOTS: usize = FAULT_SLOTS + 5;
+/// faults by cause ([`fault_slot`]), then [`DEVICE_SITE_SLOT`].
+pub const EXIT_SLOTS: usize = FAULT_SLOTS + 6;
 /// [`StepTiming::exits`]' first native-fault slot.
 const FAULT_SLOTS: usize = 13;
 /// The slot of native faults that reached a device ([`fault_slot`]).
 pub const DEVICE_FAULT_SLOT: usize = FAULT_SLOTS + 1;
+/// The slot of System exits at a device site's stub: device accesses the
+/// engine completes (`Machine::complete_device_site`), not System
+/// instructions.
+pub const DEVICE_SITE_SLOT: usize = FAULT_SLOTS + 5;
+
+/// The [`SystemExits`] key of an exit at a device site's stub. No System
+/// instruction has this word.
+pub const DEVICE_SITE_KEY: u32 = u32::MAX;
+
+/// The [`SystemExits`] key of the System exit at instruction `word`: the
+/// word without the registers it names, so one register's MRS from every
+/// Xt counts together.
+pub fn system_key(word: u32) -> u32 {
+    match word >> 24 {
+        // MRS, MSR, SYS, SYSL, hints and barriers: Rt.
+        0xd5 => word & !0x1f,
+        // Exclusives: Rs, Rt2, Rn and Rt.
+        0x08 | 0x48 | 0x88 | 0xc8 => word & !0x001f_7fff,
+        // LDTR and STTR forms: imm9, Rn and Rt.
+        0x38 | 0x78 | 0xb8 | 0xf8 => word & !0x001f_f3ff,
+        _ => word,
+    }
+}
+
+/// A short name of [`system_key`] `key` for reports: the accessor's for
+/// MRS, MSR, SYS and SYSL (`MRS_TPIDR_EL1`, `TLBI_VAE1IS`), else the
+/// operation's kind and the key (`Exception.ExceptionReturn:0xd69f03e0`).
+pub fn system_key_name(key: u32) -> alloc::string::String {
+    use stela_compiler::aarch64::system::registers::{self, Direction};
+    if key == DEVICE_SITE_KEY {
+        return "device-site".into();
+    }
+    let word = if key >> 24 == 0xd5 { key | 0x1f } else { key };
+    let access = registers::decode(word)
+        .map(|access| (access, true))
+        .or_else(|| registers::decode_sys(word).map(|access| (access, false)));
+    if let Some((access, register)) = access {
+        let read = access.direction() == Direction::Read;
+        let encoding = access.encoding();
+        if let Some((accessor, _)) = crate::machine::system::Lookup::new().find(encoding, read) {
+            return accessor
+                .name
+                .replace("MSRregister", "MSR")
+                .replace(' ', "_");
+        }
+        let kind = match (register, read) {
+            (true, true) => "MRS",
+            (true, false) => "MSR",
+            (false, true) => "SYSL",
+            (false, false) => "SYS",
+        };
+        return alloc::format!(
+            "{kind}_S{}_{}_C{}_C{}_{}",
+            encoding.op0(),
+            encoding.op1(),
+            encoding.crn(),
+            encoding.crm(),
+            encoding.op2()
+        );
+    }
+    let operation = stela_compiler::block::decode_system_mode_instruction(
+        stela_compiler::GuestAddress(0),
+        word,
+    )
+    .ok()
+    .flatten()
+    .map(|instruction| alloc::format!("{:?}", instruction.operation));
+    let kind = operation
+        .as_deref()
+        .and_then(|debug| debug.split([' ', '{', ')']).next())
+        .unwrap_or("word")
+        .trim_end_matches('(')
+        .replace('(', ".");
+    alloc::format!("{kind}:{key:#010x}")
+}
+
+/// One [`SystemExits`] key's exits, the ticks handling them, and how many
+/// of them closed every mirror cell (`Machine::derived_changed`), after
+/// which each MRS and MSR site exits again once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SystemExit {
+    pub key: u32,
+    pub count: u64,
+    pub ticks: u64,
+    pub closes: u64,
+}
+
+impl SystemExit {
+    fn add(&mut self, count: u64, ticks: u64, closes: u64) {
+        self.count += count;
+        self.ticks += ticks;
+        self.closes += closes;
+    }
+}
+
+/// System exits by [`system_key`] since they were last taken, under step
+/// timing: an open-addressed table, with the keys past its size in `other`;
+/// and the device accesses the engine completed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SystemExits {
+    pub entries: [SystemExit; SYSTEM_KEYS],
+    pub other: SystemExit,
+    pub devices: DeviceExits,
+}
+
+/// The keys [`SystemExits`] holds apart.
+pub const SYSTEM_KEYS: usize = 128;
+
+impl Default for SystemExits {
+    fn default() -> Self {
+        Self {
+            entries: [SystemExit::default(); SYSTEM_KEYS],
+            other: SystemExit::default(),
+            devices: DeviceExits::default(),
+        }
+    }
+}
+
+impl SystemExits {
+    /// Count `count` exits of `key` that took `ticks` and closed the cells
+    /// `closes` times.
+    pub fn add(&mut self, key: u32, count: u64, ticks: u64, closes: u64) {
+        let start = (key.wrapping_mul(0x9e37_79b9) >> (u32::BITS - SYSTEM_KEYS.ilog2())) as usize;
+        for probe in 0..SYSTEM_KEYS {
+            let entry = &mut self.entries[(start + probe) % SYSTEM_KEYS];
+            if entry.count == 0 {
+                entry.key = key;
+            }
+            if entry.key == key {
+                return entry.add(count, ticks, closes);
+            }
+        }
+        self.other.add(count, ticks, closes);
+    }
+
+    /// Add every exit `exits` counts.
+    pub fn merge(&mut self, exits: &Self) {
+        for entry in exits.entries.iter().filter(|entry| entry.count != 0) {
+            self.add(entry.key, entry.count, entry.ticks, entry.closes);
+        }
+        let other = exits.other;
+        self.other.add(other.count, other.ticks, other.closes);
+        self.devices.merge(&exits.devices);
+    }
+
+    /// The keys with exits.
+    pub fn counted(&self) -> impl Iterator<Item = &SystemExit> {
+        self.entries.iter().filter(|entry| entry.count != 0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.other.count == 0 && self.counted().next().is_none() && self.devices.is_empty()
+    }
+}
+
+/// The 4 KiB page of a device register, as [`DeviceExits`] keys it.
+pub fn device_page(physical: u64) -> u32 {
+    (physical >> 12) as u32
+}
+
+/// One device page's accesses, the ticks handling them, and the host
+/// counter ticks of those spent waiting for the board's lock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceExit {
+    pub page: u32,
+    pub count: u64,
+    pub ticks: u64,
+    pub waited: u64,
+}
+
+impl DeviceExit {
+    fn add(&mut self, count: u64, ticks: u64, waited: u64) {
+        self.count += count;
+        self.ticks += ticks;
+        self.waited += waited;
+    }
+}
+
+/// The device pages [`DeviceExits`] holds apart.
+pub const DEVICE_PAGES: usize = 64;
+
+/// Device accesses the engine completed, from native faults and device
+/// sites, by [`device_page`], under step timing: an open-addressed table,
+/// with the pages past its size in `other`; and the accesses forwarded to
+/// the home machine, with the ticks their PEs waited for its answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceExits {
+    pub entries: [DeviceExit; DEVICE_PAGES],
+    pub other: DeviceExit,
+    pub forwarded: u64,
+    pub forwarded_ticks: u64,
+}
+
+impl Default for DeviceExits {
+    fn default() -> Self {
+        Self {
+            entries: [DeviceExit::default(); DEVICE_PAGES],
+            other: DeviceExit::default(),
+            forwarded: 0,
+            forwarded_ticks: 0,
+        }
+    }
+}
+
+impl DeviceExits {
+    /// Count `count` accesses of `page` that took `ticks`, `waited` of them
+    /// in host counter ticks waiting for the board's lock.
+    pub fn add(&mut self, page: u32, count: u64, ticks: u64, waited: u64) {
+        let start = (page.wrapping_mul(0x9e37_79b9) >> (u32::BITS - DEVICE_PAGES.ilog2())) as usize;
+        for probe in 0..DEVICE_PAGES {
+            let entry = &mut self.entries[(start + probe) % DEVICE_PAGES];
+            if entry.count == 0 {
+                entry.page = page;
+            }
+            if entry.page == page {
+                return entry.add(count, ticks, waited);
+            }
+        }
+        self.other.add(count, ticks, waited);
+    }
+
+    pub fn merge(&mut self, exits: &Self) {
+        for entry in exits.counted() {
+            self.add(entry.page, entry.count, entry.ticks, entry.waited);
+        }
+        let other = exits.other;
+        self.other.add(other.count, other.ticks, other.waited);
+        self.forwarded += exits.forwarded;
+        self.forwarded_ticks += exits.forwarded_ticks;
+    }
+
+    /// The pages with accesses.
+    pub fn counted(&self) -> impl Iterator<Item = &DeviceExit> {
+        self.entries.iter().filter(|entry| entry.count != 0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.other.count == 0 && self.forwarded == 0 && self.counted().next().is_none()
+    }
+}
 
 /// A native fault's slot in [`StepTiming::exits`], by cause: the guest's
 /// translation, a device, a native check, a watched or tag-checked page,
@@ -134,6 +374,108 @@ mod tests {
     use super::*;
 
     const FAULT_SLOT: usize = FAULT_SLOTS + 1;
+
+    #[test]
+    fn system_keys_drop_registers_and_name_the_instruction() {
+        // MRS X1 and X30, TPIDR_EL1: one key, the accessor's name.
+        assert_eq!(system_key(0xd538_d081), system_key(0xd538_d09e));
+        assert_eq!(system_key(0xd538_d081), 0xd538_d080);
+        assert_eq!(system_key_name(0xd538_d080), "MRS_TPIDR_EL1");
+        assert_eq!(system_key_name(0xd518_c000), "MSR_VBAR_EL1");
+        // TLBI VAE1IS, X0.
+        assert_eq!(system_key_name(system_key(0xd508_8320)), "TLBI_VAE1IS");
+        // An Apple register without an accessor: its encoding.
+        assert_eq!(system_key_name(0xd53c_f200), "MRS_S3_4_C15_C2_0");
+        assert_eq!(
+            system_key_name(0xd69f_03e0),
+            "Exception.ExceptionReturn:0xd69f03e0"
+        );
+        assert_eq!(system_key_name(DEVICE_SITE_KEY), "device-site");
+        // LDXR W1, [X2] and LDXR W3, [X4]: one key.
+        assert_eq!(system_key(0x885f_7c41), system_key(0x885f_7c83));
+    }
+
+    #[test]
+    fn system_exits_count_by_key_and_keep_the_rest_in_other() {
+        let mut exits = SystemExits::default();
+        assert!(exits.is_empty());
+        for key in 0..SYSTEM_KEYS as u32 + 2 {
+            exits.add(key, 1, 10, u64::from(key == 0));
+        }
+        exits.add(0, 1, 5, 0);
+        let first = exits.counted().find(|exit| exit.key == 0).unwrap();
+        assert_eq!((first.count, first.ticks, first.closes), (2, 15, 1));
+        assert_eq!(exits.counted().count(), SYSTEM_KEYS);
+        assert_eq!((exits.other.count, exits.other.ticks), (2, 20));
+        let mut merged = SystemExits::default();
+        merged.merge(&exits);
+        merged.merge(&exits);
+        let first = merged.counted().find(|exit| exit.key == 0).unwrap();
+        assert_eq!((first.count, first.closes), (4, 2));
+        assert_eq!(merged.other.count, 4);
+    }
+
+    #[test]
+    fn device_exits_count_by_page_and_merge_with_forwards() {
+        let mut exits = DeviceExits::default();
+        assert!(exits.is_empty());
+        assert_eq!(device_page(0x2_3b0c_8000), device_page(0x2_3b0c_8ffc));
+        assert_ne!(device_page(0x2_3b0c_8000), device_page(0x2_3b0c_6658));
+        for page in 0..DEVICE_PAGES as u32 + 3 {
+            exits.add(page, 1, 10, 2);
+        }
+        exits.add(0, 1, 5, 1);
+        exits.forwarded = 1;
+        exits.forwarded_ticks = 7;
+        let first = *exits.counted().find(|exit| exit.page == 0).unwrap();
+        assert_eq!((first.count, first.ticks, first.waited), (2, 15, 3));
+        assert_eq!(exits.counted().count(), DEVICE_PAGES);
+        assert_eq!((exits.other.count, exits.other.waited), (3, 6));
+        let system = SystemExits {
+            devices: exits,
+            ..SystemExits::default()
+        };
+        assert!(!system.is_empty());
+        let mut merged = SystemExits::default();
+        merged.merge(&system);
+        merged.merge(&system);
+        let first = *merged
+            .devices
+            .counted()
+            .find(|exit| exit.page == 0)
+            .unwrap();
+        assert_eq!((first.count, first.waited), (4, 6));
+        assert_eq!(
+            (merged.devices.forwarded, merged.devices.forwarded_ticks),
+            (2, 14)
+        );
+    }
+
+    #[test]
+    fn a_system_exit_is_charged_to_its_key_with_the_cells_it_closed() {
+        use super::super::tests::BASE;
+        const MRS_X1_TPIDR_EL1: u32 = 0xd538_d081;
+        const MSR_VBAR_EL1_X2: u32 = 0xd518_c002;
+        let mut machine = super::super::tests::machine(&[MRS_X1_TPIDR_EL1, MSR_VBAR_EL1_X2]);
+        machine.set_step_timing(true);
+        machine.cpu.state.x[2] = BASE + 0x800;
+        for pc in [BASE, BASE + 4] {
+            machine.host.exits.push(super::super::NativeExit::Exit {
+                next_pc: pc,
+                kind: stela_compiler::block::ExitKind::System as u64,
+            });
+            machine.step().unwrap();
+        }
+        assert_eq!(machine.cpu.pc, BASE + 8);
+        let system = stela_compiler::block::ExitKind::System as usize;
+        assert_eq!(machine.step_timing().unwrap().exits[system].0, 2);
+        let exits = machine.take_system_exits();
+        let key = |key| *exits.counted().find(|exit| exit.key == key).unwrap();
+        // The read changed nothing; the VBAR_EL1 write closed every cell.
+        assert_eq!((key(0xd538_d080).count, key(0xd538_d080).closes), (1, 0));
+        assert_eq!((key(0xd518_c000).count, key(0xd518_c000).closes), (1, 1));
+        assert!(machine.take_system_exits().is_empty());
+    }
 
     #[test]
     fn a_delta_subtracts_each_phase_and_exit() {

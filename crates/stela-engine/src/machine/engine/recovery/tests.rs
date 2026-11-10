@@ -116,8 +116,9 @@ fn exact_lazy_qualification_replaces_portable_bank_with_only_minted_rows() {
     });
     let mut owner = {
         let entry = record.find(0, &context).unwrap();
-        let rebased = entry.rebase(BASE, offer.input()).unwrap();
-        Template::stored(&rebased, &entry.input, origin, 0).installed()
+        let mut relocated = crate::translations::Relocated::default();
+        assert!(entry.relocate(BASE, offer.input(), &mut relocated));
+        Template::stored(entry, &relocated, origin).installed()
     };
     assert_eq!(owner.stored_key(), Some(key));
     assert_eq!(owner.code_bytes(), code_bytes);

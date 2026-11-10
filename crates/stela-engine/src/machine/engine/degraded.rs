@@ -31,9 +31,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// (`Statistics::degraded`) and report it the first time (device
     /// accesses once per register, direction and refusal); the caller then
     /// gives the degraded response of its tier.
-    pub(super) fn degrade(&mut self, requirement: Requirement) {
+    pub(super) fn degrade(&mut self, mut requirement: Requirement) {
         self.statistics.degraded += 1;
-        let first = match &requirement.kind {
+        let first = match &mut requirement.kind {
             RequirementKind::Device {
                 physical,
                 write,
@@ -41,12 +41,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
             } => {
                 // One register can carry many operations, each refused for
                 // its own reason; a register whose refusals name changing
-                // values in their detail reports its first few.
+                // values in their detail reports its first few, then says
+                // once that it reports no more.
                 let refusals = self
                     .degraded_devices
                     .entry((*physical, *write))
                     .or_default();
-                refusals.len() < DEVICE_REFUSALS_REPORTED && refusals.insert(detail.clone())
+                if refusals.len() < DEVICE_REFUSALS_REPORTED {
+                    refusals.insert(detail.clone())
+                } else if refusals.len() == DEVICE_REFUSALS_REPORTED
+                    && !refusals.contains(detail.as_str())
+                {
+                    // The empty refusal marks the limit as reported.
+                    refusals.insert(String::new());
+                    detail.push_str(
+                        "; later distinct refusals of this register and direction \
+                         are counted only (Statistics::degraded)",
+                    );
+                    true
+                } else {
+                    false
+                }
             }
             kind if self.unmodeled_met.contains(kind) => false,
             kind => {

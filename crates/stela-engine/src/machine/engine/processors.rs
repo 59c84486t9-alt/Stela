@@ -139,13 +139,9 @@ pub enum PeerState<'a> {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
-    /// The progress the clock paces this PE by.
+    /// The progress a serialized clock paces this PE by.
     pub(super) fn work(&self) -> u64 {
-        if self.clock.paces_instructions() {
-            self.cpu.retired >> super::clock::PACE_UNIT_SHIFT
-        } else {
-            self.statistics.blocks
-        }
+        self.statistics.blocks
     }
 
     /// Checked kept participants, separate from the live/parked Cpu
@@ -305,6 +301,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &mut self,
         run_deadline: Option<super::budget::Deadline>,
     ) -> Step {
+        self.mark_progress();
         if self.parallel.is_some() {
             self.forward_power()?;
             self.read_mail()?;
@@ -323,10 +320,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let work = self.work();
         self.clock.end_slice(|| self.host.counter(), work);
         let paused = self.processor_paused(self.current);
+        if paused || self.waiting.is_some() {
+            // Its guest waits: no stall of its holds the count (`clock`).
+            let phases = self.clock_phases();
+            let retired = self.cpu.retired;
+            self.clock.idle(|| self.host.counter(), retired, phases);
+        }
         if paused || self.waiting.is_some() && !self.polls_monitor() {
-            // Waiting or paused, the PE has nothing for the count to wait on,
-            // including while it serves the host. One polling a monitor may
-            // be handed a lock, and goes on holding the count.
+            // Waiting or paused, the PE has time to spare, so its timers
+            // signal as soon as they are due. One polling a monitor spins on
+            // a lock and stays busy.
             self.clock.wait(|| self.host.counter());
         }
         let mut armed = false;
@@ -348,6 +351,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Err(Stop::Waiting);
             }
             self.observe_writes();
+            // The PEs that run may all be stopped, with nobody else to see.
+            self.clock.look(|| self.host.counter());
             let now = self.now();
             self.poll_devices(now)?;
             // A device can start a PE while every PE waits; the start reads
@@ -371,6 +376,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 let share = self.runnable();
                 let work = self.work();
                 self.clock.start_slice(|| self.host.counter(), work, share);
+                let (retired, phases) = (self.cpu.retired, self.clock_phases());
+                self.clock.busy(|| self.host.counter(), retired, phases);
                 return self.wake();
             }
             // In parallel, only a PE that waits for an interrupt serves the
@@ -412,7 +419,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Err(Stop::Waiting);
             };
             if self.polls_monitor() {
-                self.clock.poll(|| self.host.counter());
                 // A safe point: the host may be waiting for this PE.
                 self.host.relax();
                 // The whole pass is the poll's.

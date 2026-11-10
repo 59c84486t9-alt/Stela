@@ -9,38 +9,62 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
         let contexts = self.contexts(el, context);
         self.chain.set_contexts(contexts);
-        // What a lookup dispatcher would enter, in the context that keeps its
-        // translation current. The engine checks BTYPE against the fetch's
-        // translation, which this leaves uncached.
-        let context_number = contexts[chain::half(pc)];
-        let slot = chain::lookup_slot(pc, context_number);
-        let target = self.targets.find(slot, pc, context_number);
-        if target.pc == pc
-            && target.context == context_number
-            && !single
-            && self.cpu.pstate.btype == 0
+        // A fetch elsewhere came between the exit waiting for a block and
+        // its target: an exception, an interrupt or another PE's run.
+        if self
+            .direct_exit
+            .is_some_and(|(_, target, _)| target != pc || single)
         {
-            return Ok(Fetched::Block(target.block as usize));
+            self.direct_exit = None;
         }
+        // What a lookup dispatcher would enter, through the translation the
+        // ITLB keeps current. The engine checks BTYPE against the fetch's
+        // translation, which this leaves uncached.
+        if !single
+            && self.cpu.pstate.btype == 0
+            && let Some(key) = self.current_key(pc)
+        {
+            let target = self.targets.find(chain::lookup_slot(pc, key), pc, key);
+            if target.pc == pc && target.key == key {
+                self.statistics.fetches[0] += 1;
+                self.link_direct_exit(pc);
+                return Ok(Fetched::Block(target.block as usize));
+            }
+        }
+        let generation = self.translation_generation;
         let physical = match self.fetch_physical(pc) {
             Ok(physical) => physical,
             Err(Ok(exception)) => return Ok(Fetched::Exception(exception)),
             Err(Err(stop)) => return Err(stop),
         };
+        // The walk may have forgotten contexts (the upper half's first
+        // non-global fetch): the page is recorded, and dispatchers look
+        // up, in their successors.
+        if self.translation_generation != generation {
+            let contexts = self.contexts(el, context);
+            self.chain.set_contexts(contexts);
+        }
         let current = Variant {
             guarded_page: self.fetch_guarded(pc),
             ..context
         };
         let variant = self.page_variant(current, physical);
-        // The entry of a context forgotten since, whose translation this
-        // fetch confirms: what TLBI ALL leaves of the kernel's text.
-        if target.pc == pc && target.context >= self.code_floor {
-            let block = &self.blocks[target.block as usize];
-            if block.pc == pc
-                && block.physical == physical
-                && self.variants[block.variant.0 as usize] == variant
-            {
-                self.remember_target_page(pc, target.block as usize);
+        // The block another context, address space or fetch of the frame
+        // recorded: what a TLBI ALL or a process switch leaves.
+        if !single && let Some(id) = self.known_variant(variant) {
+            let key = self.block_key(physical, id);
+            self.translate_page(pc, key);
+            let target = self.targets.find(chain::lookup_slot(pc, key), pc, key);
+            // Every release of a block forgets its entries; the block is
+            // checked anyway, on this path of a fresh translation.
+            let named = (target.pc == pc && target.key == key)
+                .then(|| &self.blocks[target.block as usize])
+                .is_some_and(|block| {
+                    (block.pc, block.physical, block.variant) == (pc, physical, id)
+                });
+            if named {
+                self.statistics.fetches[1] += 1;
+                self.link_direct_exit(pc);
                 return Ok(Fetched::Block(target.block as usize));
             }
         }
@@ -51,29 +75,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && entry.variant == variant
             && entry.generation == self.code_generation
         {
-            self.remember_target_page(pc, entry.block);
+            self.statistics.fetches[2] += 1;
+            self.remember_or_link(pc, entry.block);
             return Ok(Fetched::Block(entry.block));
         }
         let indexed = self
             .known_variant(variant)
             .and_then(|id| self.index.get(&self.blocks, pc, physical, id));
+        self.statistics.fetches[if indexed.is_some() { 3 } else { 4 }] += 1;
         let index = match indexed {
             Some(index) => index,
             None => {
-                let generation = self.code_generation;
                 self.reclaim_for_memory();
                 if let Some(hub) = &self.parallel {
                     hub.compiling(physical);
                 }
                 let (compiled, mail) = self.compile_aside(pc, physical, variant);
                 let compiled = compiled?;
-                // Compiling may have reclaimed code, whose lookup entries
-                // the old context still names: the thunks look up in a new
-                // one.
-                if self.code_generation != generation {
-                    let contexts = self.contexts(el, context);
-                    self.chain.set_contexts(contexts);
-                }
                 // What came meanwhile may undo this fetch's translation or
                 // the code it compiled; the block stays for the next one.
                 if mail {
@@ -93,67 +111,121 @@ impl<H: Host, D: Devices> Machine<H, D> {
             generation: self.code_generation,
             block: index,
         });
-        self.remember_target_page(pc, index);
+        if !single {
+            let key = self.block_key(physical, self.blocks[index].variant);
+            self.translate_page(pc, key);
+        }
+        self.remember_or_link(pc, index);
         Ok(Fetched::Block(index))
     }
 
-    /// [`Self::remember_target`], and, the first time this context reaches
-    /// the page of `pc`, every block of the page a fetch reached in any
-    /// context: a process runs what its libraries' other processes ran, and
-    /// learning it one exit at a time costs more than the blocks' code.
-    pub(super) fn remember_target_page(&mut self, pc: u64, index: usize) {
-        self.blocks[index].fetched = true;
-        self.remember_target(pc, index);
-        let page = pc & !(FETCH_PAGE - 1);
-        let context = self.chain.contexts()[chain::half(pc)];
-        let visit = ((page / FETCH_PAGE) ^ context).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        let visit = &mut self.visited_pages[(visit >> 48) as usize % VISITED_PAGES];
-        if *visit == (page, context) {
-            return;
-        }
-        *visit = (page, context);
-        let variant = self.blocks[index].variant;
-        let mut blocks = core::mem::take(&mut self.page_blocks);
-        blocks.extend(self.index.page(self.blocks[index].physical));
-        for &other in &blocks {
-            let block = &self.blocks[other];
-            if block.fetched && block.variant == variant && block.pc & !(FETCH_PAGE - 1) == page {
-                self.remember_target(block.pc, other);
-            }
-        }
-        blocks.clear();
-        self.page_blocks = blocks;
+    /// The block key of the frame holding `physical` for blocks of
+    /// `variant` fetched in the PE's current state
+    /// ([`chain::block_key`]): the frame, the variant, and in a guarded page
+    /// the SCTLR_ELx.BT bit of the current EL that decides which BTYPEs a
+    /// PACIASP or PACIBSP accepts ([`fetch::Landing::targets`]).
+    pub(super) fn block_key(&self, physical: u64, variant: VariantId) -> u64 {
+        const SCTLR_BT0: u64 = 1 << 35;
+        const SCTLR_BT1: u64 = 1 << 36;
+        let guarded = self.variants[variant.0 as usize].guarded_page;
+        let forbid = if self.cpu.pstate.el == 0 {
+            SCTLR_BT0
+        } else {
+            SCTLR_BT1
+        };
+        let bit = guarded && self.cpu.regime_sctlr() & forbid != 0;
+        let state = (variant.0 + 1) << 1 | u32::from(bit);
+        assert!(state < chain::KEY_STATES, "a bounded set of variants");
+        chain::block_key(physical, state)
     }
 
-    /// Record that a fetch at `pc` runs block `index` in the current
-    /// context, for lookup dispatchers. The fetch translated `pc`, so its page's
-    /// entry is in the fetch cache.
-    /// Not for single-instruction blocks, which debug checks precede, nor trace
-    /// points, which the engine records.
-    pub(super) fn remember_target(&mut self, pc: u64, index: usize) {
-        let block = &self.blocks[index];
-        if self.variants[block.variant.0 as usize].single || self.traces.binary_search(&pc).is_ok()
-        {
+    /// The block key the ITLB holds for the page of `pc` in the current
+    /// context of its half ([`Self::translate_page`]).
+    pub(super) fn current_key(&self, pc: u64) -> Option<u64> {
+        let context = self.chain.contexts()[chain::half(pc)];
+        let page = pc & !(FETCH_PAGE - 1);
+        let held = self.itlb.find(chain::itlb_slot(pc, context), page, context);
+        (held.pc == page && held.key == context).then_some(held.entry)
+    }
+
+    /// Record that the page of `pc`, which a fetch just translated for
+    /// execution in the current context of its half, has the block key
+    /// `key` there: lookup dispatchers then translate its PCs without the
+    /// engine until a TLBI or a control change forgets the page or the
+    /// context. The entry of a forgotten context of the same salt, which
+    /// takes the same slots, is this one's older self: it takes its place
+    /// and keeps its neighbour. Counts the pages the ITLB lacked in the
+    /// context apart from the new keys of pages it held.
+    pub(super) fn translate_page(&mut self, pc: u64, key: u64) {
+        let half = chain::half(pc);
+        let context = self.chain.contexts()[half];
+        let page = pc & !(FETCH_PAGE - 1);
+        let slot = chain::itlb_slot(pc, context);
+        let entry = chain::LookupEntry::page(page, context, key);
+        let held = self.itlb.find(slot, page, context);
+        if held == entry {
             return;
         }
-        let entry = block.code.0 as u64;
-        let page = pc & !(FETCH_PAGE - 1);
-        let guarded = self.fetch[(page / FETCH_PAGE) as usize % FETCH_CACHE]
-            .is_some_and(|fetched| fetched.page == page && fetched.guarded);
-        let targets = match guarded {
+        let held_page = held.pc == page && held.key == context;
+        self.statistics.itlb[usize::from(held_page)] += 1;
+        let resident = self.itlb[slot];
+        if resident.pc == page && resident.key != context && !self.live_context(half, resident.key)
+        {
+            self.itlb.set(slot, entry);
+        } else {
+            self.itlb.insert(slot, entry);
+        }
+    }
+
+    /// Link the direct exit that waited for the block `index` the fetch at
+    /// `pc` found ([`Self::link_direct_exit`]), or, when there is none or
+    /// it cannot link, [`Self::remember_target`]. A block only linked
+    /// exits enter needs no lookup entry: the link is the page's, and
+    /// enters it in every address space.
+    fn remember_or_link(&mut self, pc: u64, index: usize) {
+        if !self.link_direct_exit(pc) {
+            self.remember_target(pc, index);
+        }
+    }
+
+    /// Record that a fetch at `pc` runs block `index` while the page of
+    /// `pc` translates to the block's frame in the fetch state its key
+    /// names ([`Self::block_key`]), for lookup dispatchers: every address
+    /// space and context that maps the frame there finds it. Not for
+    /// single-instruction blocks, which debug checks precede, nor trace
+    /// points, which the engine records. Whether the table took a new
+    /// entry: one it holds already, in either place of its set, stays where
+    /// it is, and keeps its neighbour.
+    pub(super) fn remember_target(&mut self, pc: u64, index: usize) -> bool {
+        let block = &self.blocks[index];
+        let variant = &self.variants[block.variant.0 as usize];
+        if variant.single || self.traces.binary_search(&pc).is_ok() {
+            return false;
+        }
+        let targets = match variant.guarded_page {
             true => block.landing.targets(&self.cpu) | 1,
             false => 0b1111,
         };
-        let context = self.chain.contexts()[chain::half(pc)];
-        let slot = chain::lookup_slot(pc, context);
+        let key = self.block_key(block.physical, block.variant);
+        let slot = chain::lookup_slot(pc, key);
         let target = chain::LookupEntry {
             pc,
-            context,
-            entry,
+            key,
+            entry: block.code.0 as u64,
             block: index as u32,
             targets,
         };
+        if self.targets.find(slot, pc, key) == target {
+            return false;
+        }
         self.targets.insert(slot, target);
+        true
+    }
+
+    /// Whether lookups of `half` may still run in context `number`: one no
+    /// TLBI or control change forgot.
+    fn live_context(&self, half: usize, number: u64) -> bool {
+        self.spaces[half].iter().any(|space| space.number == number)
     }
 
     /// Compile the block at `pc`, unless its first instruction is a
@@ -206,42 +278,53 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // those read, and so validated against the stored page.
         let within =
             |compiled: &stela_compiler::block::CompiledBlock| compiled.source_bytes <= available;
+        // Blocks end before a device site, which no entry context names:
+        // the store neither gives nor takes its page's blocks.
+        let sited = !variant.single && self.page_has_device_sites(physical);
         let reading = self.host.counter();
-        let stored = match variant.single {
+        let stored = match variant.single || sited {
             true => None,
             false => self.stored_page(pc, physical, source),
         };
         self.statistics.page_ticks += self.host.counter().wrapping_sub(reading);
         let preparation = self.preparation(variant);
         preparation.admit(source);
+        if sited && self.device_site(physical) {
+            return self
+                .install_device_stub(pc, physical, variant, source)
+                .map(Some);
+        }
         let context = stored
             .is_some()
             .then(|| self.stored_context(variant, &preparation, page));
         if let (Some((key, record)), Some(context)) = (&stored, &context) {
+            // The machine's buffers take the entry's relocated code: an
+            // install from the store allocates nothing.
+            let mut relocated = core::mem::take(&mut self.relocated);
             let found = record
                 .as_ref()
                 .and_then(|record| record.find(offset as u16, context))
-                .and_then(|entry| {
-                    entry
-                        .rebase(page, source)
-                        .map(|block| (block, entry.input.as_slice()))
-                });
-            if let Some((compiled, input)) = found {
-                if compiled.source_bytes > available {
+                .filter(|entry| entry.relocate(page, source, &mut relocated));
+            if let Some(entry) = found {
+                if usize::from(entry.source_bytes) > available {
+                    self.relocated = relocated;
                     return Ok(None);
                 }
                 self.statistics.stored += 1;
                 let origin = self.stored_origin(physical, page, *key, *context, &preparation);
-                return self
+                let installed = self
                     .install(
                         pc,
                         physical,
                         variant,
                         source,
-                        recovery::Template::stored(&compiled, input, origin, offset as u16),
+                        recovery::Template::stored(entry, &relocated, origin),
                     )
                     .map(Some);
+                self.relocated = relocated;
+                return installed;
             }
+            self.relocated = relocated;
             let looking = self.host.counter();
             if let Some(compiled) = self
                 .host
@@ -251,7 +334,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if !within(compiled.block()) {
                     return Ok(None);
                 }
-                if compiled.matches(key, pc, context, source) {
+                let matches = compiled.matches(key, pc, context, source);
+                if !matches && let Some(translations) = self.host.translations() {
+                    translations.note(super::StoreEvent::SharedRejected);
+                }
+                if matches {
                     self.statistics.shared += 1;
                     self.statistics.shared_ticks += self.host.counter().wrapping_sub(looking);
                     return self
@@ -276,6 +363,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .filter(|&&stop| stop > pc && stop < pc + source.len() as u64)
             .min()
             .map_or(source.len(), |&stop| (stop - pc) as usize);
+        let limit = match sited {
+            true => self
+                .before_device_site(physical, source.len())
+                .map_or(limit, |site| site.min(limit)),
+            false => limit,
+        };
         let prepared = preparation.prepare_window(source, pc, limit, whole);
         #[cfg(all(feature = "std", feature = "native-profile"))]
         if let Some(metrics) = &mut self.preparation_metrics {
@@ -329,6 +422,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 context,
                 emission: emission.clone(),
                 successors,
+                quiet: self.cpu.pstate.el == 0,
             };
             if low {
                 translations.lend(offer);
@@ -372,22 +466,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// `variant`'s id, added to [`Self::variants`] the first time.
+    /// `variant`'s id, added to [`Self::variants`] the first time by
+    /// whichever machine of the board meets it first.
     pub(super) fn variant_id(&mut self, variant: Variant) -> VariantId {
-        if let Some(id) = self.known_variant(variant) {
-            return id;
-        }
-        let id = u32::try_from(self.variants.len()).expect("a bounded set of variants");
-        self.variants.push(variant);
-        VariantId(id)
+        let id = self
+            .variants
+            .find_or_add(variant, || true)
+            .expect("a bounded set of variants");
+        VariantId(id as u32)
     }
 
-    /// `variant`'s id, once a block was compiled for it.
+    /// `variant`'s id, once [`Self::variant_id`] gave it one: for a block
+    /// compiled in it, or a context made in it ([`Self::context_salt`]).
     pub(super) fn known_variant(&self, variant: Variant) -> Option<VariantId> {
-        self.variants
-            .iter()
-            .position(|known| *known == variant)
-            .map(|at| VariantId(at as u32))
+        self.variants.find(&variant).map(|at| VariantId(at as u32))
     }
 
     /// What block `index` was compiled for.
@@ -459,8 +551,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             )));
         }
         let source_bytes = compiled.source_bytes();
-        let native = compiled.native();
-        let instructions = native.source_map.len();
+        let instructions = compiled.instructions();
         if !compiled.matches_source(source)
             || source_bytes < INSTRUCTION as usize
             || source_bytes > source.len()
@@ -482,7 +573,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.discard_code(Discard::Table);
             }
         }
-        let code_bytes = &native.x86_64_code;
+        let code_bytes = compiled.code();
         let code = match self.host.install(code_bytes) {
             Ok(code) => code,
             Err(InstallError::Full) => {
@@ -492,19 +583,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 })?
             }
         };
+        self.census_installed(pc, physical, variant, code_bytes.len());
         let terminal_pc = pc + last as u64;
         let direct_exits = compiled.direct_exits();
-        let mut successors: Vec<Successor> = direct_exits
-            .iter()
-            .map(|exit| {
+        // Built in the machine's own list; the block's box comes from
+        // those evicted blocks left ([`Self::successor_box`]).
+        let mut successors = core::mem::take(&mut self.successor_scratch);
+        successors.clear();
+        // Only an exit whose patch point lies where its address puts it
+        // can be linked: any other stays an exit to the engine.
+        successors.extend(direct_exits.iter().filter_map(|exit| {
+            let slot = chain::link_slot(Some(pc), exit.target, exit.kind);
+            chain::exit_ready(code_bytes, exit.offset, code.0 as u64, slot).then(|| {
                 Successor::new(
                     code.0 as u64 + exit.offset as u64,
                     exit.target,
                     exit.word(),
-                    chain::link_slot(Some(pc), exit.target, exit.kind),
+                    slot,
                 )
             })
-            .collect();
+        }));
         // RET, BR and BLR end the code with their exit to the target in
         // RAX; the PAC thunk of a RETA*, BRA* or BLRA* has one too. Only
         // side exits follow a terminal's, and of the direct exits only a
@@ -518,11 +616,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let code_bytes = &code_bytes[..terminal_end];
         let mut dynamic_site = (!single
             && terminal & 0xff9f_fc1f == 0xd61f_0000
-            && dynamic_branch(terminal)
-                .is_some_and(|(kind, _)| code_bytes.ends_with(&chain::dynamic_exit(kind))))
+            && dynamic_branch(terminal).is_some_and(|(kind, _)| {
+                let exit = code_bytes.len().saturating_sub(chain::DYNAMIC_EXIT_BYTES);
+                chain::is_dynamic_exit(&code_bytes[exit..], kind)
+                    && chain::dynamic_ready(code_bytes, exit, code.0 as u64)
+            }))
         .then(|| (code.0 + code_bytes.len() - chain::DYNAMIC_EXIT_BYTES) as u64);
         let first = self.admit(u32::from_le_bytes(source[..4].try_into().expect("a word")));
-        if !single {
+        // A device site's stub completes nothing natively.
+        if !single && !self.device_site(physical) {
             let (successor, dynamic) = self
                 .complete_pointer_natively(code, code_bytes, terminal_pc, terminal)
                 .unwrap_or_default();
@@ -536,18 +638,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
             ));
         }
         let id = self.variant_id(variant);
+        let boxed = self.successor_box(&successors);
+        self.successor_scratch = successors;
         let block = Block {
             pc,
             physical,
             code,
             instructions: instructions as u16,
             variant: id,
-            successors: successors.into_boxed_slice(),
+            successors: boxed,
             dynamic_site: dynamic_site.and_then(NonZeroU64::new),
             landing: fetch::Landing::of(first),
             terminal,
             taken: 0,
-            fetched: false,
             source_hash: source_hash(&source[..source_bytes]),
         };
         let index = match self.free_blocks.pop() {
@@ -568,6 +671,94 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(Fetched::Block(index))
     }
 
+    /// A box holding `successors`: one an evicted block left of that
+    /// length when there is one, so the steady install allocates none.
+    pub(super) fn successor_box(&mut self, successors: &[Successor]) -> Box<[Successor]> {
+        let kept = successors
+            .len()
+            .checked_sub(1)
+            .and_then(|at| self.successor_boxes.get_mut(at))
+            .and_then(Vec::pop);
+        match kept {
+            Some(mut boxed) => {
+                boxed.copy_from_slice(successors);
+                boxed
+            }
+            None => successors.into(),
+        }
+    }
+
+    /// Keep a released block's `successors` box for a block of as many.
+    pub(super) fn keep_successor_box(&mut self, successors: Box<[Successor]>) {
+        if let Some(kept) = successors
+            .len()
+            .checked_sub(1)
+            .and_then(|at| self.successor_boxes.get_mut(at))
+            && kept.len() < KEPT_SUCCESSOR_BOXES
+        {
+            kept.push(successors);
+        }
+    }
+
+    /// Count an install of `bytes` of code of the block at `pc`, `physical`
+    /// and `variant`, and with step timing on, why it was needed
+    /// ([`install_census`]).
+    pub(super) fn census_installed(
+        &mut self,
+        pc: u64,
+        physical: u64,
+        variant: Variant,
+        bytes: usize,
+    ) {
+        let causes = &mut self.install_causes;
+        causes.installs += 1;
+        causes.installed_bytes += bytes as u64;
+        if self.step_timing.is_none() {
+            self.census = None;
+            return;
+        }
+        let identity = install_census::identity(pc, physical, &variant);
+        let now = self.host.counter();
+        let window = 10 * self.profile.counter_frequency;
+        let census = self
+            .census
+            .get_or_insert_with(|| Box::new(install_census::Census::new()));
+        let (thrash, first) = census.installed(identity, now, window);
+        let elsewhere = self
+            .parallel
+            .as_ref()
+            .is_some_and(|hub| hub.installs.install(identity, self.current));
+        let causes = &mut self.install_causes;
+        causes.thrash += u64::from(thrash);
+        causes.first += u64::from(first);
+        causes.elsewhere += u64::from(elsewhere);
+    }
+
+    /// Count the eviction of block `index`'s code: its bytes, and with the
+    /// census on, the block for a later install of it.
+    pub(super) fn census_evicted(&mut self, index: usize, now: u64) {
+        let bytes = self
+            .fault_recovery
+            .get(&index)
+            .map_or(0, recovery::CodeRecovery::code_bytes);
+        self.install_causes.evicted_bytes += bytes as u64;
+        let Some(census) = &mut self.census else {
+            return;
+        };
+        let block = &self.blocks[index];
+        let variant = &self.variants[block.variant.0 as usize];
+        let identity = install_census::identity(block.pc, block.physical, variant);
+        census.evicted(identity, now);
+        if let Some(hub) = &self.parallel {
+            hub.installs.evict(identity, self.current);
+        }
+    }
+
+    /// What this machine's installs and evictions came to.
+    pub fn install_causes(&self) -> InstallCauses {
+        self.install_causes
+    }
+
     pub(super) fn patch_native(&mut self, code: NativeCode, bytes: &[u8]) {
         self.host.patch(code, bytes);
     }
@@ -583,9 +774,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         pc: u64,
         word: u32,
     ) -> Option<(Option<Successor>, Option<u64>)> {
-        let exit = chain::direct_exit(GuestAddress(pc), ExitKind::PointerAuthentication);
         let site = native.len().checked_sub(chain::DIRECT_EXIT_BYTES)?;
-        if native[site..] != exit {
+        let exit = ExitKind::PointerAuthentication;
+        if !chain::is_direct_exit(&native[site..], GuestAddress(pc), exit) {
             return None;
         }
         let instruction = block::decode_pointer_authentication(GuestAddress(pc), word).ok()??;
@@ -600,19 +791,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
+        // The block is not reachable yet: any bytes may change.
         let jump = chain::jump(site, installed.0 as u64)?;
         self.patch_native(NativeCode(site as usize), &jump);
-        let successor = thunk.next.map(|next| {
-            Successor::new(
-                installed.0 as u64 + next as u64,
-                GuestAddress(pc + INSTRUCTION),
-                ExitKind::Fallthrough.into(),
-                0,
-            )
-        });
+        let at = installed.0 as u64;
+        let successor = thunk
+            .next
+            .filter(|&next| chain::exit_ready(&thunk.code, next, at, 0))
+            .map(|next| {
+                Successor::new(
+                    at + next as u64,
+                    GuestAddress(pc + INSTRUCTION),
+                    ExitKind::Fallthrough.into(),
+                    0,
+                )
+            });
         let dynamic = thunk
             .dynamic
-            .map(|dynamic| installed.0 as u64 + dynamic as u64);
+            .filter(|&dynamic| chain::dynamic_ready(&thunk.code, dynamic, at))
+            .map(|dynamic| at + dynamic as u64);
         Some((successor, dynamic))
     }
 
@@ -628,9 +825,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         pc: u64,
         word: u32,
     ) -> Option<Successor> {
-        let exit = chain::direct_exit(GuestAddress(pc), ExitKind::System);
         let site = native.len().checked_sub(chain::DIRECT_EXIT_BYTES)?;
-        if native[site..] != exit {
+        if !chain::is_direct_exit(&native[site..], GuestAddress(pc), ExitKind::System) {
             return None;
         }
         let masks = register_read::MaskWrite::of(word).filter(|_| self.native_system().exclusive);
@@ -698,14 +894,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
         self.patch_native(NativeCode(site as usize), &jump);
-        thunk.next.map(|next| {
-            Successor::new(
-                installed.0 as u64 + next as u64,
-                GuestAddress(pc + INSTRUCTION),
-                ExitKind::Fallthrough.into(),
-                0,
-            )
-        })
+        let at = installed.0 as u64;
+        thunk
+            .next
+            .filter(|&next| chain::exit_ready(&thunk.code, next, at, 0))
+            .map(|next| {
+                Successor::new(
+                    at + next as u64,
+                    GuestAddress(pc + INSTRUCTION),
+                    ExitKind::Fallthrough.into(),
+                    0,
+                )
+            })
     }
 
     /// The thunk completing MSR of `WRITTEN[index]` from Xt at `pc`.
@@ -753,24 +953,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// The cell of MRS of `encoding`, made if there is room.
+    /// The cell of MRS of `encoding`, made if there is room. Its index is
+    /// the board's ([`Self::stored_reads`]): code that names it reads the
+    /// same register's cell on every PE.
     fn stored_cell(&mut self, encoding: Encoding) -> Option<usize> {
-        let known = self.stored_reads.iter().position(|&read| read == encoding);
-        let cell = known.or_else(|| {
+        let cell = self.stored_reads.find_or_add(encoding, || {
             // A performance counter's reads are stored while it is idle.
             let counter = self.cpu.pmu.as_ref().and_then(|pmu| pmu.counter(encoding));
-            let storable = storable(encoding)
+            storable(encoding)
                 || counter.is_some()
                 || self.cpu.energy_accumulator(encoding)
                 || self.cpu.apple_read_storage(encoding).is_some()
                 || self
                     .devices
                     .register_storage(self.current, encoding)
-                    .is_some();
-            (storable && self.stored_reads.len() < STORED_CELLS).then(|| {
-                self.stored_reads.push(encoding);
-                self.stored_reads.len() - 1
-            })
+                    .is_some()
         })?;
         Some(MIRRORED.len() + cell)
     }
@@ -779,16 +976,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// room, and the bits of a value its writes leave to the engine.
     fn stored_write_cell(&mut self, encoding: Encoding) -> Option<(usize, u64)> {
         let (_, refused) = self.write_storage(encoding)?;
-        let known = self
-            .stored_writes
-            .iter()
-            .position(|&write| write == encoding);
-        let index = known.or_else(|| {
-            (self.stored_writes.len() < STORED_WRITES).then(|| {
-                self.stored_writes.push(encoding);
-                self.stored_writes.len() - 1
-            })
-        })?;
+        let index = self.stored_writes.find_or_add(encoding, || true)?;
         Some((index, refused))
     }
 
@@ -950,6 +1138,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(ExitKind::System) => {
                 self.retire_before(index, next_pc);
                 self.cpu.pc = next_pc;
+                if self.device_stub(index, next_pc) {
+                    return self.complete_device_site(index, next_pc);
+                }
                 self.statistics.system_exits += 1;
                 let word = self.exit_word(index, next_pc)?;
                 self.completing(next_pc, |machine| machine.system_instruction(word))
@@ -965,13 +1156,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 };
                 match self.complete_floating_point(word, &operation) {
                     Ok(()) => self.completing(next_pc, Self::next),
-                    Err(_) => Err(self.unsupported(RequirementKind::Instruction {
-                        word,
-                        detail: format!(
-                            "FPCR {:#x} enables a trapped FP exception",
-                            self.cpu.state.fpcr
-                        ),
-                    })),
+                    Err(trapped) => self.completing(next_pc, |machine| {
+                        machine.take_floating_point_exception(trapped)
+                    }),
                 }
             }
             Ok(ExitKind::PointerAuthentication) => {

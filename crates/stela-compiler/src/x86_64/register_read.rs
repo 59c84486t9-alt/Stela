@@ -627,11 +627,7 @@ fn finish_unless<const N: usize>(mut code: Vec<u8>, misses: [Patch; N], pc: Gues
         asm.bind(miss);
     }
     super::block::direct_exit_with(&mut asm, pc, ExitKind::System);
-    Thunk {
-        code,
-        next: Some(next),
-        dynamic: None,
-    }
+    Thunk::new(code, Some(next), None)
 }
 
 #[cfg(test)]
@@ -753,9 +749,14 @@ mod tests {
         );
         let next = thunk.next.unwrap();
         assert_eq!(next + DIRECT_EXIT_BYTES, end - DIRECT_EXIT_BYTES);
+        // Padded for its offset, where a link patches it.
         assert_eq!(
             thunk.code[next..next + DIRECT_EXIT_BYTES],
-            direct_exit(GuestAddress(0x4004), ExitKind::Fallthrough)
+            crate::x86_64::chain::direct_exit_at(
+                next as u64,
+                GuestAddress(0x4004),
+                ExitKind::Fallthrough
+            )
         );
     }
 

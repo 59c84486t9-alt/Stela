@@ -401,6 +401,77 @@ fn the_least_recently_used_pages_are_let_go() {
 }
 
 #[test]
+fn a_page_let_go_and_read_again_takes_its_known_key_unless_it_changed() {
+    // A block in each of five pages: add x0, x0, #1; svc #0.
+    const PAGE_WORDS: usize = FETCH_PAGE as usize / INSTRUCTION as usize;
+    let mut words = vec![0; 4 * PAGE_WORDS + 2];
+    for page in 0..5 {
+        words[page * PAGE_WORDS..page * PAGE_WORDS + 2]
+            .copy_from_slice(&[0x9100_0400, 0xd400_0001]);
+    }
+    let mut machine = machine(&words);
+    machine.host.store = Some(MemoryStore::default());
+    let page = |n: u64| BASE + n * FETCH_PAGE;
+    for n in 0..5 {
+        assert!(machine.fetch_block(page(n), false).is_ok());
+    }
+    // Page 0 was let go; its second block reads it again.
+    assert!(!machine.pages.contains_key(&page(0)));
+    let key = Digest::of(&machine.host.ram[..FETCH_PAGE as usize]);
+    assert!(machine.fetch_block(page(0) + 4, false).is_ok());
+    assert_eq!(machine.statistics.known_keys, 1);
+    assert_eq!(machine.pages[&page(0)].key, key);
+    // A page written while let go is hashed again.
+    for n in 1..5 {
+        assert!(machine.fetch_block(page(n) + 4, false).is_ok());
+    }
+    assert!(!machine.pages.contains_key(&page(0)));
+    let known = machine.statistics.known_keys;
+    machine.host.ram[100] ^= 1;
+    assert!(machine.fetch_block(page(0) + 8, false).is_ok());
+    assert_eq!(machine.statistics.known_keys, known);
+    let changed = Digest::of(&machine.host.ram[..FETCH_PAGE as usize]);
+    assert_eq!(machine.pages[&page(0)].key, changed);
+    // An IC IVAU forgets the known key too.
+    machine.invalidate_code_page(page(0));
+    assert!(machine.fetch_block(page(0) + 12, false).is_ok());
+    assert_eq!(machine.statistics.known_keys, known);
+}
+
+#[test]
+fn a_stored_install_relocates_into_the_machines_own_buffers() {
+    // adr x0, #8; add x0, x0, #1; svc #0, twice in the page.
+    let words = [
+        0x1000_0040,
+        0x9100_0400,
+        0xd400_0001,
+        0x1000_0040,
+        0x9100_0400,
+        0xd400_0001,
+    ];
+    let mut first = machine(&words);
+    first.host.store = Some(MemoryStore::default());
+    assert!(first.fetch_block(BASE, false).is_ok());
+    assert!(first.fetch_block(BASE + 12, false).is_ok());
+    let offers = core::mem::take(&mut first.host.store.as_mut().unwrap().offers);
+    let mut record = Record::new(translations::translator_id(), offers[0].key);
+    for offer in &offers {
+        record.insert(proven(offer));
+    }
+    let mut store = MemoryStore::default();
+    store.records.insert(offers[0].key, Arc::new(record));
+    let mut second = machine(&words);
+    second.host.store = Some(store);
+    assert!(second.fetch_block(BASE, false).is_ok());
+    let buffer = second.relocated.code.as_ptr();
+    assert!(second.fetch_block(BASE + 12, false).is_ok());
+    assert_eq!(second.statistics.stored, 2);
+    assert_eq!(second.relocated.code.as_ptr(), buffer);
+    // Each block's code is what the compiling machine installed.
+    assert_eq!(second.host.installed, first.host.installed);
+}
+
+#[test]
 fn with_memory_low_pages_stay_and_nothing_is_offered() {
     // A block in each of two pages: add x0, x0, #1; svc #0.
     const PAGE_WORDS: usize = FETCH_PAGE as usize / INSTRUCTION as usize;

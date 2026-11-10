@@ -158,6 +158,9 @@ fn chained_load_case(branch: u32, btype: u8, landing_pad: bool) {
         panic!("callee");
     };
     if landing_pad {
+        // A page becomes guarded through a TLBI, which forgets its
+        // translation.
+        machine.forget_lookups(mmu::tlbi::Reach::Containing(BASE), None);
         let slot = (target_pc / FETCH_PAGE) as usize % FETCH_CACHE;
         machine.fetch[slot].as_mut().unwrap().guarded = true;
         let Ok(Fetched::Block(current_entry)) = machine.fetch_block(BASE, false) else {
@@ -168,10 +171,9 @@ fn chained_load_case(branch: u32, btype: u8, landing_pad: bool) {
         };
         entry = current_entry;
         target = current_target;
-        machine.remember_target(target_pc, target);
-        let context = machine.chain.contexts()[chain::half(target_pc)];
+        let key = machine.current_key(target_pc).expect("a translated page");
         assert_eq!(
-            machine.targets[chain::lookup_slot(target_pc, context)].targets,
+            machine.targets[chain::lookup_slot(target_pc, key)].targets,
             0b0111
         );
     }

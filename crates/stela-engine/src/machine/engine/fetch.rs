@@ -157,21 +157,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The number of the context a fetch in `half` runs in now: the EL with
-    /// the guarded level, the variant, the code generation and the half's
-    /// translation inputs ([`Space`]). Lookup entries name it.
+    /// the guarded level, the variant and the half's translation inputs
+    /// ([`Space`]). ITLB entries name it.
     pub(super) fn context(&mut self, el: u8, variant: Variant, half: usize) -> u64 {
-        let generations = (self.fetch_epoch(half), self.code_generation);
-        if self.floor_generation != generations.1 {
-            self.floor_generation = generations.1;
-            self.code_floor = self.next_context << chain::LOOKUP_SALT_BITS;
-        }
-        if let Some(recent) = self.recent[half].iter().flatten().find(|recent| {
-            (recent.el, recent.variant, recent.generations) == (el, variant, generations)
-        }) {
+        let epoch = self.fetch_epoch(half);
+        if let Some(recent) = self.recent[half]
+            .iter()
+            .flatten()
+            .find(|recent| (recent.el, recent.variant, recent.epoch) == (el, variant, epoch))
+        {
             return recent.number;
         }
         let inputs = self.half_inputs(half, el);
-        self.spaces[half].retain(|space| space.code == generations.1);
         let found = self.spaces[half]
             .iter()
             .position(|space| space.el == el && space.variant == variant && space.inputs == inputs);
@@ -188,7 +185,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     inputs,
                     el,
                     variant,
-                    code: generations.1,
                     number,
                 }
             }
@@ -198,17 +194,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.recent[half][0] = Some(Recent {
             el,
             variant,
-            generations,
+            epoch,
             number: space.number,
         });
         space.number
     }
 
     /// The salt of a context of `half` at `el` in `variant` under `table`:
-    /// the same across the contexts one takes the place of, so that a
-    /// forgotten context's entries meet its successor's lookups, which
-    /// revalidate them, and another address space's PCs take other slots
-    /// while there are salts for them.
+    /// the same across the contexts one takes the place of, so that its
+    /// ITLB entries take the places of a forgotten context's, and another
+    /// address space's pages take other slots while there are salts for
+    /// them.
     fn context_salt(&mut self, half: usize, el: u8, variant: Variant, table: u64) -> u64 {
         let id = u64::from(self.variant_id(variant).0);
         let owner = table ^ (half as u64) ^ u64::from(el) << 1 ^ id << 6;

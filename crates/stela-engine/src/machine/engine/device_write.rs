@@ -421,8 +421,8 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
         }
         // The store's own step runs what it started, a gate call above all:
         // its thread reads the call's answer at the next instruction.
-        self.settle_devices(now);
-        self.follow_memory_lock();
+        let lock = self.settle_store(now);
+        self.adopt_memory_lock(lock);
         self.pending_device_write = None;
         self.finish_device_access(held)
     }

@@ -45,6 +45,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.forget_derived();
         self.device_lines = None;
         self.mirrors.close_all();
+        // Under step timing, the System exit being handled is charged with it.
+        self.timed_closed |= self.timed_word.is_some();
     }
 
     /// An exception entry or return, GENTER or GEXIT moved the PE to another

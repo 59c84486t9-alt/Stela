@@ -1,25 +1,24 @@
 //! Invocation-kept source/profile and installed native recovery owners.
 use super::stored::Emission;
 use super::{NativeCode, NativeFault, Preparation, table::Table};
-use crate::translations::{Digest, Record, StoredBlock};
+use crate::translations::{Digest, Entry, Record, Relocated};
 use alloc::sync::Arc;
 #[cfg(test)]
 use alloc::{boxed::Box, vec::Vec};
-use stela_compiler::NativeBlock;
 #[cfg(test)]
 use stela_compiler::block::{FaultRecovery, UnqualifiedFaultRecovery};
 use stela_compiler::block::{PackedRecovery, RecoveryQualificationError, RecoveryTemplate};
 use stela_compiler::x86_64::chain::DirectExit;
 
-/// The process's shared emission or a rebased record borrowed through
-/// installation. A stored block keeps only its origin once installed.
+/// The process's shared emission or a record's entry, relocated, borrowed
+/// through installation. A stored block keeps only its origin once
+/// installed.
 pub(super) enum Template<'a> {
     Compiled(Arc<Emission>),
     Stored {
-        block: &'a StoredBlock,
-        input: &'a [u8],
+        entry: &'a Entry,
+        relocated: &'a Relocated,
         origin: Arc<StoredOrigin>,
-        offset: u16,
     },
 }
 
@@ -183,39 +182,46 @@ impl<'a> Template<'a> {
     pub(super) fn compiled(emission: Arc<Emission>) -> Self {
         Self::Compiled(emission)
     }
+    /// `entry` of a record, which `relocated` holds as installed at its
+    /// origin's page ([`Entry::relocate`]).
     pub(super) fn stored(
-        block: &'a StoredBlock,
-        input: &'a [u8],
+        entry: &'a Entry,
+        relocated: &'a Relocated,
         origin: Arc<StoredOrigin>,
-        offset: u16,
     ) -> Self {
         Self::Stored {
-            block,
-            input,
+            entry,
+            relocated,
             origin,
-            offset,
         }
     }
 
-    /// The native template.
-    pub(super) fn native(&self) -> &NativeBlock {
+    /// The native code.
+    pub(super) fn code(&self) -> &[u8] {
         match self {
-            Self::Compiled(emission) => &emission.block.native,
-            Self::Stored { block, .. } => &block.native,
+            Self::Compiled(emission) => &emission.block.native.x86_64_code,
+            Self::Stored { relocated, .. } => &relocated.code,
+        }
+    }
+    /// The guest instructions it retires: one source-map entry each.
+    pub(super) fn instructions(&self) -> usize {
+        match self {
+            Self::Compiled(emission) => emission.block.native.source_map.len(),
+            Self::Stored { entry, .. } => entry.source_map.len(),
         }
     }
     /// The guest bytes its native template consumed.
     pub(super) fn source_bytes(&self) -> usize {
         match self {
             Self::Compiled(emission) => emission.block.source_bytes,
-            Self::Stored { block, .. } => block.source_bytes,
+            Self::Stored { entry, .. } => usize::from(entry.source_bytes),
         }
     }
     /// The native template's direct exits to static successors.
     pub(super) fn direct_exits(&self) -> &[DirectExit] {
         match self {
             Self::Compiled(emission) => &emission.block.direct_exits,
-            Self::Stored { block, .. } => &block.direct_exits,
+            Self::Stored { relocated, .. } => &relocated.direct_exits,
         }
     }
     /// A portable request may only reject this legacy implementation. Absence
@@ -232,9 +238,10 @@ impl<'a> Template<'a> {
                     RecoverySource::NativeSpill(_) => true,
                 })
         };
+        // Rebasing a row moves its PC alone, not its phase or bindings.
         match self {
-            Self::Stored { block, .. } => block
-                .fault_recovery
+            Self::Stored { entry, .. } => entry
+                .recovery
                 .iter()
                 .any(|row| requires(row.retirement, &row.bindings)),
             Self::Compiled(emission) => emission
@@ -247,7 +254,7 @@ impl<'a> Template<'a> {
     pub(super) fn matches_source(&self, source: &[u8]) -> bool {
         let input = match self {
             Self::Compiled(emission) => emission.input.as_slice(),
-            Self::Stored { input, .. } => input,
+            Self::Stored { entry, .. } => entry.input.as_slice(),
         };
         source.get(..input.len()) == Some(input)
     }
@@ -255,12 +262,12 @@ impl<'a> Template<'a> {
     /// The owner of the installed template: its rows, packed, or for a stored
     /// record where they are, until its first fault qualifies them.
     pub(super) fn installed(self) -> CodeRecovery {
-        let code_bytes = self.native().x86_64_code.len() as u32;
+        let code_bytes = self.code().len() as u32;
         let rows = match self {
-            Self::Stored { origin, offset, .. } => Rows::Stored {
+            Self::Stored { origin, entry, .. } => Rows::Stored {
                 origin,
                 code_bytes,
-                offset,
+                offset: entry.offset,
             },
             Self::Compiled(emission) => Rows::Qualified {
                 code_bytes,

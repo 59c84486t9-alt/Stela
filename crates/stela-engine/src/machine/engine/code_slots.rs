@@ -63,6 +63,21 @@ impl CodeSlots {
         }
     }
 
+    /// Give back the list [`Self::take`] gave, emptied, for the part's next
+    /// blocks: its capacity, about a part's blocks, is used again.
+    pub(super) fn give_back(&mut self, mut taken: Vec<u32>) {
+        let Self::Partitioned { slots, .. } = self else {
+            return;
+        };
+        taken.clear();
+        if let Some(empty) = slots
+            .iter_mut()
+            .find(|part| part.is_empty() && part.capacity() < taken.capacity())
+        {
+            *empty = taken;
+        }
+    }
+
     /// Take the slots of a whole part. A non-partitioned or unexpected
     /// reclaim falls back to scanning the authoritative block table.
     pub(super) fn take(&mut self, range: &Range<usize>) -> Option<Vec<u32>> {
@@ -99,6 +114,26 @@ mod tests {
         slots.record(0x1000, 3, || unreachable!());
         assert_eq!(slots.take(&(0x1080..0x1100)).unwrap(), [4]);
         assert_eq!(slots.take(&(0x1000..0x1080)).unwrap(), [3]);
+    }
+
+    #[test]
+    fn a_list_given_back_serves_an_empty_part() {
+        let mut slots = CodeSlots::default();
+        slots.record(0x1000, 5, || Some(LAYOUT));
+        slots.record(0x1004, 6, || unreachable!());
+        let taken = slots.take(&(0x1000..0x1080)).unwrap();
+        let capacity = taken.capacity();
+        slots.give_back(taken);
+        let CodeSlots::Partitioned { slots: parts, .. } = &slots else {
+            panic!("partitioned")
+        };
+        assert!(
+            parts
+                .iter()
+                .any(|part| part.is_empty() && part.capacity() == capacity)
+        );
+        slots.record(0x1000, 7, || unreachable!());
+        assert_eq!(slots.take(&(0x1000..0x1080)).unwrap(), [7]);
     }
 
     #[test]

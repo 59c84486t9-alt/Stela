@@ -124,6 +124,25 @@ pub trait Translations {
     fn offer(&mut self, offer: Offer);
     /// A block for the other PEs alone, which no pack keeps.
     fn lend(&mut self, _offer: Offer) {}
+    /// What a machine's use of the store cost or found, for the store's
+    /// counters.
+    fn note(&mut self, _event: StoreEvent) {}
+    /// The fetch pages the machines sharing this store keep in all, when the
+    /// store sizes them ([`KEPT_PAGES`] otherwise).
+    fn kept_pages(&mut self) -> Option<usize> {
+        None
+    }
+}
+
+/// A machine's use of its store, reported to it ([`Translations::note`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreEvent {
+    /// A fetch page was read and hashed for its record, and its record
+    /// looked up, in `ticks` of [`Host::counter`].
+    PageRead { ticks: u64 },
+    /// A shared block was found but not installed: its admitted bytes or
+    /// source extent differ from the fetch's.
+    SharedRejected,
 }
 
 /// A block compiled anew, and how it was compiled. Emission fields are private;
@@ -147,6 +166,9 @@ pub struct Offer {
     /// The entry PCs of its static successors, for translation ahead of
     /// execution.
     pub(super) successors: Vec<u64>,
+    /// Compiled for EL0, where the PE holds no lock of the guest's kernel:
+    /// a store may take time there for work of its own.
+    pub(super) quiet: bool,
 }
 
 impl Offer {
@@ -175,6 +197,7 @@ impl Offer {
             context,
             emission: Arc::new(Emission::new(input, block, preparation)),
             successors: Vec::new(),
+            quiet: false,
         })
     }
     pub fn key(&self) -> Digest {
@@ -197,6 +220,10 @@ impl Offer {
     }
     pub fn successors(&self) -> &[u64] {
         &self.successors
+    }
+    /// Whether it was compiled at EL0, where the PE holds no kernel lock.
+    pub fn quiet(&self) -> bool {
+        self.quiet
     }
     pub fn block(&self) -> &CompiledBlock {
         &self.emission.block
@@ -292,6 +319,42 @@ pub(super) const KEPT_PAGES: usize = 4096;
 #[cfg(test)]
 pub(super) const KEPT_PAGES: usize = 4;
 
+/// Known page keys per kept page: a page let go keeps its key this much
+/// longer, at a few dozen bytes instead of its 4 KiB.
+const KNOWN_PER_KEPT: usize = 8;
+
+/// The page key of a fetch page read before, and a check of the bytes it
+/// was the hash of ([`page_check`]): a page read again whose bytes give the
+/// same check takes this key instead of hashing them.
+#[derive(Clone, Copy)]
+pub(super) struct KnownKey {
+    frame: u64,
+    check: u64,
+    key: Digest,
+}
+
+/// A 64-bit check of a fetch page: four lanes, each step of which is a
+/// bijection of the lane, so a page that differs in one word always
+/// checks differently; other changes collide with a chance of 2^-64. A
+/// collision costs no correctness: it names the old page's record, whose
+/// entries are installed only when their input equals the fetch's bytes,
+/// and an offer under that key is a record entry no fetch of the old page
+/// matches.
+pub(super) fn page_check(bytes: &[u8; PAGE_BYTES]) -> u64 {
+    const MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut lanes: [u64; 4] = [1, 2, 3, 4];
+    for chunk in bytes.as_chunks::<32>().0 {
+        for (lane, word) in lanes.iter_mut().zip(chunk.as_chunks::<8>().0) {
+            let word = u64::from_le_bytes(*word);
+            *lane = (*lane ^ word).wrapping_mul(MULTIPLIER).rotate_left(29);
+        }
+    }
+    lanes.iter().enumerate().fold(0, |check, (at, &lane)| {
+        let mixed = (lane ^ lane >> 31).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        check ^ mixed.rotate_left(at as u32 * 16)
+    })
+}
+
 /// A fetch page's bytes, as read for its first block, and its record.
 pub(super) struct StoredPage {
     pub(super) key: Digest,
@@ -328,7 +391,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 stored.used = self.page_uses;
                 return Some((stored.key, stored.record.clone()));
             }
-            self.pages.remove(&frame);
+            self.forget_stored_page(frame);
         }
         self.host.translations()?;
         let page = pc & !(FETCH_PAGE - 1);
@@ -340,12 +403,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             return None;
         }
-        let mut bytes = Box::new([0u8; PAGE_BYTES]);
+        let reading = self.host.counter();
+        // A read fills the whole buffer or fails.
+        let mut bytes = self
+            .spare_pages
+            .pop()
+            .unwrap_or_else(|| Box::new([0u8; PAGE_BYTES]));
         if !self.host.read_ram(frame, bytes.as_mut_slice()) || !matches(bytes.as_slice()) {
+            self.spare_pages.push(bytes);
             return None;
         }
-        let key = Digest::of(bytes.as_slice());
+        let key = self.page_key(frame, &bytes);
         let record = self.host.translations()?.record(&key);
+        let ticks = self.host.counter().wrapping_sub(reading);
+        if let Some(translations) = self.host.translations() {
+            translations.note(StoreEvent::PageRead { ticks });
+        }
         if self.pages.len() >= self.kept_pages {
             self.forget_least_used_pages();
         }
@@ -364,6 +437,40 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.stored_pages_peak = self.stored_pages_peak.max(self.pages.len());
         }
         Some((key, record))
+    }
+
+    /// The page key of `bytes`, the fetch page at `frame`: the key it had
+    /// when read last, while its bytes give the same check, else their
+    /// SHA-256, which is kept for the next read.
+    fn page_key(&mut self, frame: u64, bytes: &[u8; PAGE_BYTES]) -> Digest {
+        let check = page_check(bytes);
+        let known = (self.kept_pages * KNOWN_PER_KEPT).next_power_of_two();
+        if self.known_keys.len() != known {
+            self.known_keys = alloc::vec![None; known];
+        }
+        let slot = &mut self.known_keys[(frame / FETCH_PAGE) as usize % known];
+        if let Some(held) = slot
+            && held.frame == frame
+            && held.check == check
+        {
+            self.statistics.known_keys += 1;
+            return held.key;
+        }
+        let key = Digest::of(bytes.as_slice());
+        *slot = Some(KnownKey { frame, check, key });
+        key
+    }
+
+    /// Forget the known key of the page at `frame`, whose code an IC IVAU
+    /// made stale.
+    pub(super) fn forget_known_key(&mut self, frame: u64) {
+        let known = self.known_keys.len();
+        if known != 0 {
+            let slot = &mut self.known_keys[(frame / FETCH_PAGE) as usize % known];
+            if slot.is_some_and(|held| held.frame == frame) {
+                *slot = None;
+            }
+        }
     }
 
     /// What a block of the record `key`, in the fetch page at `physical`
@@ -424,23 +531,49 @@ impl<H: Host, D: Devices> Machine<H, D> {
         (self.pages.len(), self.kept_pages, self.stored_pages_peak)
     }
 
-    /// Keep `KEPT_PAGES` across `machines` machines, which each keep their
-    /// own: an equal share each, but no fewer than a sixteenth.
+    /// Keep the store's kept pages ([`Translations::kept_pages`], else
+    /// `KEPT_PAGES`) across `machines` machines, which each keep their own:
+    /// an equal share each, but no fewer than a sixteenth of `KEPT_PAGES`.
     pub(super) fn share_kept_pages(&mut self, machines: usize) {
-        self.kept_pages = (KEPT_PAGES / machines.max(1)).max(KEPT_PAGES.div_ceil(16));
+        let total = self
+            .host
+            .translations()
+            .and_then(|translations| translations.kept_pages())
+            .unwrap_or(KEPT_PAGES);
+        self.kept_pages = (total / machines.max(1)).max(KEPT_PAGES.div_ceil(16));
     }
 
     /// Let the least recently used quarter of the kept pages go, at least
-    /// one.
+    /// one. Their buffers stay for the pages read next
+    /// ([`Self::forget_stored_page`]).
     fn forget_least_used_pages(&mut self) {
         let mut uses: Vec<u64> = self.pages.values().map(|page| page.used).collect();
         let quarter = (uses.len() / 4).max(1);
-        if quarter == uses.len() {
-            self.pages.clear();
-            return;
+        let least_kept = if quarter == uses.len() {
+            u64::MAX
+        } else {
+            *uses.select_nth_unstable(quarter).1
+        };
+        let gone: Vec<u64> = self
+            .pages
+            .iter()
+            .filter(|(_, page)| page.used < least_kept)
+            .map(|(&frame, _)| frame)
+            .collect();
+        for frame in gone {
+            self.forget_stored_page(frame);
         }
-        let (_, &mut least_kept, _) = uses.select_nth_unstable(quarter);
-        self.pages.retain(|_, page| page.used >= least_kept);
+    }
+
+    /// Forget the kept page at `frame`, whose buffer the next page read
+    /// takes: as many stay spare as [`Self::forget_least_used_pages`] lets
+    /// go at once.
+    pub(super) fn forget_stored_page(&mut self, frame: u64) {
+        if let Some(page) = self.pages.remove(&frame)
+            && self.spare_pages.len() < self.kept_pages.div_ceil(4)
+        {
+            self.spare_pages.push(page.bytes);
+        }
     }
 
     /// The entry context of blocks compiled for `variant` through

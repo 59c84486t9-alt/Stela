@@ -209,6 +209,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
         }
         self.statistics.interrupts += 1;
+        if vector == Vector::Fiq {
+            let now = self.clock.last();
+            if self
+                .timer_deadline()
+                .is_some_and(|deadline| now >= deadline)
+            {
+                self.clock.timer_taken(now, self.cpu.retired);
+            }
+        }
         self.take(Exception {
             vector,
             syndrome,
@@ -234,10 +243,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// The earliest count at which the running PE's timers signal: their
+    /// own deadline, kept, held back while a busy PE has not had its share
+    /// of work since the last timer interrupt (`clock::TIMER_WORK`).
     pub(super) fn timer_deadline(&mut self) -> Option<u64> {
-        *self
+        let deadline = *self
             .timers
-            .get_or_insert_with(|| timer::deadline(&self.cpu))
+            .get_or_insert_with(|| timer::deadline(&self.cpu));
+        self.clock.timer_due(deadline)
     }
 
     /// WFI and WFE (Arm `Hint_WFI`, `Hint_WFE` and `AArch64_CheckForWFxTrap`).

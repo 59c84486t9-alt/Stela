@@ -20,14 +20,42 @@ pub(super) fn exit_kind(code: &mut Code, kind: ExitKind) {
     exit_kind_with(&mut code.asm(), kind);
 }
 
-/// `mov edx,word; ret`: the exit to the target in RAX.
+/// `mov edx,word; ret`: the exit to the target in RAX, unpadded
+/// (`chain::dynamic_exit`).
 pub(super) fn exit_kind_with(asm: &mut Asm, word: impl Into<ExitWord>) {
     // MOV EDX zero-extends to the ABI's u64.
     asm.mov_imm32(Gpr::Rdx, word.into().encoded());
     asm.ret();
-    // The rest of the room a `chain::lookup_exit` takes.
-    for _ in 0..4 {
+    // The rest of the room a jump at the RET takes, and of the pad that
+    // makes the RET patchable where the code lands (`chain::dynamic_patch`).
+    for _ in 6..super::chain::DYNAMIC_EXIT_BYTES {
         asm.int3();
+    }
+}
+
+/// Pad the exits of `code`, a block's whose direct exits are `exits`, for
+/// where they lie in it: each exit's patch point and link slot, and the
+/// dynamic exit ending its terminal, if it has one. Code installs at
+/// 8-byte aligned addresses, so an offset's alignment is its address's.
+pub(crate) fn align_exits(
+    code: &mut [u8],
+    exits: &[super::chain::DirectExit],
+    linked: Option<u64>,
+) {
+    use super::chain::{
+        DYNAMIC_EXIT_BYTES, align_direct_exit, align_dynamic_exit, align_link_slot,
+    };
+    let mut terminal = super::chain::without_failures(code).len();
+    for exit in exits {
+        let slot = super::chain::link_slot(linked, exit.target, exit.kind);
+        if slot != 0 {
+            align_link_slot(code, exit.offset - slot, slot, 0);
+        }
+        align_direct_exit(code, exit.offset, 0);
+        terminal = terminal.min(exit.offset - slot);
+    }
+    if let Some(offset) = terminal.checked_sub(DYNAMIC_EXIT_BYTES) {
+        align_dynamic_exit(code, offset, 0);
     }
 }
 
@@ -1395,7 +1423,7 @@ fn terminal_exits(
     fallthrough: GuestAddress,
     linked: Option<u64>,
 ) -> Vec<super::chain::DirectExit> {
-    use super::chain::{DIRECT_EXIT_BYTES, DirectExit, direct_exit, link_slot};
+    use super::chain::{DIRECT_EXIT_BYTES, DirectExit, is_direct_exit, link_slot};
     let (target, kind, conditional) = match terminal.map(|(_, terminal)| terminal) {
         None => (fallthrough, ExitKind::Fallthrough, false),
         Some(Terminator::DirectCall(target)) => (*target, ExitKind::Call, false),
@@ -1432,7 +1460,7 @@ fn terminal_exits(
         .flatten()
         .filter_map(|(offset, target, kind)| {
             // An always-true condition emits no fallthrough exit.
-            (code[offset..offset + DIRECT_EXIT_BYTES] == direct_exit(target, kind)).then_some(
+            is_direct_exit(&code[offset..offset + DIRECT_EXIT_BYTES], target, kind).then_some(
                 DirectExit {
                     offset,
                     target,

@@ -75,22 +75,32 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// substitutions. Enforce that boundary even
     /// when a provider returns an ordinary register error from its service.
     pub(super) fn device_transfer(&mut self, now: u64) -> Result<(), DeviceError> {
+        self.device_settle(now).0
+    }
+
+    /// [`Self::device_transfer`], and the memory controllers' write lock
+    /// the DMA left, from one call to the devices ([`Devices::settle_write`]).
+    fn device_settle(
+        &mut self,
+        now: u64,
+    ) -> (Result<(), DeviceError>, super::super::mmu::MemoryLocks) {
         self.observe_parallel_source(SourcePhase::DeviceAdvanceEnter);
         let work = self.work();
-        // A just-accepted lock write precedes follow_memory_lock(), so query
-        // its device owner rather than the CPU's previous snapshot.
+        // A just-accepted lock write precedes follow_memory_lock(), so the
+        // devices give its owner's lock rather than the CPU's snapshot.
         let mut memory = HostMemory {
             host: &mut self.host,
-            lock: self.devices.memory_lock(),
+            lock: self.cpu.memory_lock,
         };
-        let result = self.devices.transfer(self.current, &mut memory, now);
+        let settled = self.devices.settle_write(self.current, now, &mut memory);
         // The call is this step's store's whatever other devices' DMA came
         // to: the caller reads its answer at the next instruction, and a call
         // left pending would run at a later step, on a record its stack has
         // since reused.
-        let lock = memory.lock;
-        self.run_call(work, lock);
-        let result = match result {
+        if let Some(call) = settled.call {
+            self.run_gate_call(call, work, settled.lock);
+        }
+        let result = match settled.transfer {
             Ok(()) => Ok(()),
             Err(DeviceError::Refused(reason) | DeviceError::TransferRefused(reason)) => {
                 Err(DeviceError::TransferRefused(reason))
@@ -100,49 +110,55 @@ impl<H: Host, D: Devices> Machine<H, D> {
             ))),
         };
         self.observe_parallel_source(SourcePhase::DeviceAdvanceExit);
-        result
+        (result, settled.after)
     }
 
     /// Run the call PE `current`'s store made through a call gate, if any,
     /// on the address space of the thread that made it.
     fn run_call(&mut self, work: u64, lock: super::super::mmu::MemoryLocks) {
         if let Some(call) = self.devices.take_call(self.current) {
-            // A call from EL0 holds no lock the kernel times, so the count
-            // need not wait for it: a compile or a GPU wait can take
-            // milliseconds. Any other holds it at what its work earned.
-            let at_el0 = self.cpu.pstate.el == 0;
-            let released = self.clock.leave(|| self.host.counter(), work, at_el0);
-            let mut caller = caller::CallerSpace {
-                controls: self.cpu.controls(self.cpu.regime()),
-                requester: mmu::Requester {
-                    unprivileged: true,
-                    ..self.cpu.requester()
-                },
-                lock,
-                refused: None,
-                host: &mut self.host,
-            };
-            let outcome = call.run(&mut caller);
-            let refused = caller.refused;
-            if released {
-                self.clock.resume(|| self.host.counter(), work);
-            }
-            self.devices.finish_call(outcome);
-            // The tables refuse what a kept translation still reaches: XNU
-            // ages pages by clearing the access flag without a TLBI. The
-            // frontend's retry touches every page of the call's spans, so
-            // give up the caller's translations, as a TLB may at any time
-            // and as TLBI ASIDE1 does, for each aged page's touch to take its
-            // fault. Giving up only the refused page's would fix one page
-            // per retry, and every retry repeats the call's work.
-            if refused.is_some() {
-                let current = self.cpu.tlbi_current();
-                self.tlb_maintained(
-                    mmu::tlbi::Reach::All,
-                    mmu::tlbi::Everywhere::NonGlobal,
-                    current.asid,
-                );
-            }
+            self.run_gate_call(call, work, lock);
+        }
+    }
+
+    /// Run `call`, which PE `current`'s store made through a call gate.
+    fn run_gate_call(&mut self, call: GateCall, work: u64, lock: super::super::mmu::MemoryLocks) {
+        // A call from EL0 holds no lock the kernel times, so the count
+        // need not wait for it: a compile or a GPU wait can take
+        // milliseconds. Any other may hold one: the count waits for it
+        // once it has been stopped `clock::STALL_MILLIS`.
+        let at_el0 = self.cpu.pstate.el == 0;
+        let released = self.clock.leave(|| self.host.counter(), work, at_el0);
+        let mut caller = caller::CallerSpace {
+            controls: self.cpu.controls(self.cpu.regime()),
+            requester: mmu::Requester {
+                unprivileged: true,
+                ..self.cpu.requester()
+            },
+            lock,
+            refused: None,
+            host: &mut self.host,
+        };
+        let outcome = call.run(&mut caller);
+        let refused = caller.refused;
+        if released {
+            self.clock.resume(|| self.host.counter(), work);
+        }
+        self.devices.finish_call(outcome);
+        // The tables refuse what a kept translation still reaches: XNU
+        // ages pages by clearing the access flag without a TLBI. The
+        // frontend's retry touches every page of the call's spans, so
+        // give up the caller's translations, as a TLB may at any time
+        // and as TLBI ASIDE1 does, for each aged page's touch to take its
+        // fault. Giving up only the refused page's would fix one page
+        // per retry, and every retry repeats the call's work.
+        if refused.is_some() {
+            let current = self.cpu.tlbi_current();
+            self.tlb_maintained(
+                mmu::tlbi::Reach::All,
+                mmu::tlbi::Everywhere::NonGlobal,
+                current.asid,
+            );
         }
     }
 
@@ -158,10 +174,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// cannot carry out is dropped, reported once, and leaves the access
     /// that found it due alone.
     pub(super) fn settle_devices(&mut self, now: u64) {
-        if let Err(error) = self.device_transfer(now) {
+        self.settle_store(now);
+    }
+
+    /// [`Self::settle_devices`] after a store the devices took: the memory
+    /// controllers' write lock it left, for [`Self::adopt_memory_lock`].
+    pub(super) fn settle_store(&mut self, now: u64) -> super::super::mmu::MemoryLocks {
+        let (result, lock) = self.device_settle(now);
+        if let Err(error) = result {
             let advance = RequirementKind::DeviceAdvance(alloc::format!("{error:?}"));
             self.degrade(self.requirement(advance));
         }
+        lock
     }
 
     pub(super) fn read_register(&self, register: Register) -> u64 {
@@ -237,6 +261,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return refuse(self, "device access by an undecodable instruction");
         };
         self.count_device_access(physical);
+        if self.step_timing.is_some() {
+            // The lock waits from here on are this access's.
+            self.devices.take_lock_wait();
+        }
         self.device_lines = None;
         if let Some(load) = ScalarLoad::from_instruction(&instruction) {
             let (accessed, writeback) = self.scalar_address(load.address());
@@ -284,11 +312,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let value = self.read_register(store.source_register());
             let now = self.now();
             let written = self.device_write(physical, bytes, value, now);
-            if written.is_ok() {
-                self.settle_devices(now);
+            // The write lock the store's DMA left, read in the same call.
+            let lock = if written.is_ok() {
+                Some(self.settle_store(now))
             } else {
                 self.run_refused_store_call();
-            }
+                None
+            };
             if let Err(error) = written
                 && let Some(step) =
                     self.device_refused(error, address, physical, bytes, Some(value))
@@ -298,7 +328,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if let Some((base, updated)) = writeback {
                 self.write_register(base, updated);
             }
-            self.follow_memory_lock();
+            match lock {
+                Some(lock) => self.adopt_memory_lock(lock),
+                None => self.follow_memory_lock(),
+            }
         } else if let Operation::MemoryPair {
             transfer,
             bytes,
@@ -408,13 +441,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 MemoryTransfer::Store => {
                     let values = data.map(|register| self.read_register(register));
+                    let mut lock = None;
                     for (element, value) in elements.into_iter().zip(values) {
                         let written = self.device_write(element, bytes, value, now);
-                        if written.is_ok() {
-                            self.settle_devices(now);
+                        lock = if written.is_ok() {
+                            Some(self.settle_store(now))
                         } else {
                             self.run_refused_store_call();
-                        }
+                            None
+                        };
                         if let Err(error) = written {
                             let at = address + (element - physical);
                             if let Some(step) =
@@ -424,7 +459,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                             }
                         }
                     }
-                    self.follow_memory_lock();
+                    match lock {
+                        Some(lock) => self.adopt_memory_lock(lock),
+                        None => self.follow_memory_lock(),
+                    }
                 }
             }
             if let Some((base, updated)) = writeback {
@@ -453,6 +491,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// write changed it.
     pub(super) fn follow_memory_lock(&mut self) {
         let lock = self.devices.memory_lock();
+        self.adopt_memory_lock(lock);
+    }
+
+    /// [`Self::follow_memory_lock`] with the lock the devices gave.
+    pub(super) fn adopt_memory_lock(&mut self, lock: super::super::mmu::MemoryLocks) {
         if lock == self.cpu.memory_lock {
             return;
         }

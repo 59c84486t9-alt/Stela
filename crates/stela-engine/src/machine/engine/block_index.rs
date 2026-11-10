@@ -15,6 +15,8 @@ pub(super) type Cursor = (u64, usize);
 const FRONT: usize = 1 << 12;
 /// A frame no page has: pages are aligned.
 const NO_FRAME: u64 = 1;
+/// The entries a forgotten page's list keeps room for.
+const KEPT_ENTRIES: usize = 16;
 
 /// One block of a page.
 #[derive(Clone, Copy)]
@@ -144,6 +146,7 @@ impl BlockIndex {
     }
 
     /// Stop finding the block in `slot`, at `physical`: whether it was found.
+    #[cfg(test)]
     pub(super) fn forget(&mut self, physical: u64, slot: usize) -> bool {
         let (frame, offset) = split(physical);
         let Some(page) = self.page_of(frame) else {
@@ -163,12 +166,28 @@ impl BlockIndex {
         true
     }
 
+    /// Stop finding the blocks of the page at `frame` whose slots `marked`
+    /// names, in one pass over the page.
+    pub(super) fn forget_marked(&mut self, frame: u64, marked: impl Fn(u32) -> bool) {
+        let Some(page) = self.page_of(frame) else {
+            return;
+        };
+        let entries = &mut self.entries[page];
+        entries.retain(|entry| !marked(entry.slot));
+        if entries.is_empty() {
+            self.forget_page(frame);
+        }
+    }
+
     /// Stop finding the blocks of the page at `frame`: whether it had any.
+    /// Its list keeps a small capacity for the next page.
     pub(super) fn forget_page(&mut self, frame: u64) -> bool {
         let Some(page) = self.pages.remove(&frame) else {
             return false;
         };
-        self.entries[page as usize] = Vec::new();
+        let entries = &mut self.entries[page as usize];
+        entries.clear();
+        entries.shrink_to(KEPT_ENTRIES);
         self.free.push(page);
         let cached = &mut self.front[Self::front_slot(frame)];
         if cached.0 == frame {
@@ -246,7 +265,6 @@ mod tests {
             landing: super::super::fetch::Landing::None,
             terminal: 0,
             taken: 0,
-            fetched: false,
             source_hash: 0,
         }
     }
@@ -308,5 +326,33 @@ mod tests {
         // The page of the last block forgotten goes with it.
         assert!(index.forget(PAGE + FETCH_PAGE, next));
         assert!(index.is_empty());
+    }
+
+    #[test]
+    fn marked_blocks_leave_their_page_in_one_pass() {
+        const PAGE: u64 = 0x8000_0000;
+        let mut blocks = Table::new();
+        let mut index = BlockIndex::new();
+        let slots: Vec<usize> = [0x10, 0x20, 0x30]
+            .iter()
+            .map(|&offset| {
+                add(
+                    &mut blocks,
+                    &mut index,
+                    block(0x1000 + offset, PAGE + offset, 0),
+                )
+            })
+            .collect();
+        index.forget_marked(PAGE, |slot| slot as usize != slots[1]);
+        assert_eq!(index.page(PAGE).collect::<Vec<_>>(), [slots[1]]);
+        assert_eq!(
+            index.get(&blocks, 0x1020, PAGE + 0x20, VariantId(0)),
+            Some(slots[1])
+        );
+        index.forget_marked(PAGE, |_| true);
+        assert!(index.is_empty());
+        // A page indexed again takes the list the forgotten one left.
+        let again = add(&mut blocks, &mut index, block(0x5000, PAGE + FETCH_PAGE, 0));
+        assert_eq!(index.page(PAGE + FETCH_PAGE).collect::<Vec<_>>(), [again]);
     }
 }

@@ -1969,10 +1969,10 @@ fn conditional_exits_branch_over_the_fallthrough_exit() {
     );
     let fallthrough = super::super::chain::direct_exit(GuestAddress(0x1004), ExitKind::Fallthrough);
     let taken = super::super::chain::direct_exit(GuestAddress(0x2000), ExitKind::Direct);
-    assert_eq!(code[..6], [0x0f, 0x85, 20, 0, 0, 0]);
-    assert_eq!(code[6..26], fallthrough);
-    assert_eq!(code[26..], taken);
-    assert_eq!(code.instructions(), 15);
+    assert_eq!(code[..6], [0x0f, 0x85, 24, 0, 0, 0]);
+    assert_eq!(code[6..30], fallthrough);
+    assert_eq!(code[30..], taken);
+    assert_eq!(code.instructions(), 23);
 }
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
@@ -2990,7 +2990,9 @@ fn clock_exit_requests_runtime_service_without_counter_or_guest_writes() {
         );
         let mut expected = vec![0x48, 0xb8];
         expected.extend(pc.0.to_le_bytes());
-        expected.extend([0xba, 7, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc]);
+        expected.extend([
+            0xba, 7, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+        ]);
         // No RDTSC, host helper address, guessed counter, destination write
         // or placeholder ISB: only the checked runtime service may complete.
         assert_eq!(native.x86_64_code, expected);
@@ -3032,7 +3034,9 @@ fn pac_helper_exit_has_no_guest_writes_or_embedded_service_address() {
         );
         let mut expected = vec![0x48, 0xb8];
         expected.extend(pc.0.to_le_bytes());
-        expected.extend([0xba, 6, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc]);
+        expected.extend([
+            0xba, 6, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+        ]);
         // Only the SysV return registers RAX/RDX are touched, including for
         // RETAB: the runtime must keep signed LR while authenticating target.
         assert_eq!(native.x86_64_code, expected);
@@ -3069,7 +3073,9 @@ fn ordinary_native_prefix_is_preserved_before_pac_boundary() {
     assert_eq!(native.source_map[1].0, pc);
     assert_eq!(
         &native.x86_64_code[native.x86_64_code.len() - DYNAMIC_EXIT_BYTES..],
-        &[0xba, 6, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc]
+        &[
+            0xba, 6, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc
+        ]
     );
 }
 
@@ -3094,7 +3100,9 @@ fn trap_exit_uses_instruction_pc_and_only_native_return_scratch_registers() {
         );
         let mut expected = vec![0x48, 0xb8]; // movabs rax,instruction_pc
         expected.extend(pc.0.to_le_bytes());
-        expected.extend([0xba, 5, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc]); // mov edx,Trap; ret
+        expected.extend([
+            0xba, 5, 0, 0, 0, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+        ]); // mov edx,Trap; ret
         assert_eq!(native.x86_64_code, expected);
         assert_eq!(native.source_map, [(pc, 0)]);
     }

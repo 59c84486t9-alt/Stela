@@ -3,12 +3,18 @@
 
 use super::super::{GateCall, GateOutcome, LocalRegisters};
 use super::*;
+use core::mem::ManuallyDrop;
 
 pub(super) struct Board<D> {
     pub(super) devices: Mutex<BoardState<D>>,
     pub(super) hub: Arc<Hub>,
     /// Calls that found the devices' lock held, by [`Call`].
     pub(super) waits: [AtomicU64; Call::ALL.len()],
+    /// By [`Call`], the host ticks ([`Hub::ticks`]) such calls waited for
+    /// the lock, the ticks calls held it, and the longest one held it.
+    pub(super) waited: [AtomicU64; Call::ALL.len()],
+    pub(super) held: [AtomicU64; Call::ALL.len()],
+    pub(super) longest: [AtomicU64; Call::ALL.len()],
     /// The latest count any machine passed, which every later call sees at
     /// least: the PEs' counters agree only to within their reads.
     pub(super) now: AtomicU64,
@@ -69,14 +75,26 @@ pub(super) fn register_bit(encoding: Encoding) -> Option<usize> {
 
 impl<D: Devices> Board<D> {
     pub(super) fn lock(&self, call: Call) -> Held<'_, D> {
-        let state = match self.devices.try_lock() {
-            Ok(state) => state,
+        let (state, since, waited) = match self.devices.try_lock() {
+            Ok(state) => (state, self.hub.ticks(), 0),
             Err(_) => {
                 self.waits[call as usize].fetch_add(1, Ordering::Relaxed);
-                self.devices.lock().unwrap_or_else(|e| e.into_inner())
+                let asked = self.hub.ticks();
+                let state = self.devices.lock().unwrap_or_else(|e| e.into_inner());
+                let since = self.hub.ticks();
+                let waited = since.wrapping_sub(asked);
+                self.waited[call as usize].fetch_add(waited, Ordering::Relaxed);
+                (state, since, waited)
             }
         };
-        Held { board: self, state }
+        Held {
+            board: self,
+            state: ManuallyDrop::new(state),
+            call,
+            since,
+            waited,
+            wakes: 0,
+        }
     }
 
     /// Record what the machines ask of `devices` at every step: the home
@@ -84,7 +102,9 @@ impl<D: Devices> Board<D> {
     /// host's service. Every call's release runs it, so it writes only what
     /// changed: the machines read these without the lock, and an unchanged
     /// store would still take each one's cache line from every reader.
-    pub(super) fn publish(&self, devices: &mut D) {
+    /// Whether the home machine must be woken, which the caller does once
+    /// it has released the lock.
+    pub(super) fn publish(&self, devices: &mut D) -> bool {
         if let Some(reset) = devices.take_reset() {
             self.reset
                 .lock()
@@ -102,11 +122,9 @@ impl<D: Devices> Board<D> {
         // completed on another core, wakes the home machine if it sleeps.
         let dma = devices.dma_deadline().unwrap_or(u64::MAX);
         let published = self.dma.load(Ordering::Acquire);
+        let wake_home = published > dma;
         if published != dma {
             self.dma.store(dma, Ordering::Release);
-            if published > dma {
-                self.hub.wake(self.hub.home.load(Ordering::Acquire));
-            }
         }
         for pe in 0..self.pins.len() {
             self.publish_pins(pe, devices.pins(pe));
@@ -118,6 +136,7 @@ impl<D: Devices> Board<D> {
         if devices.take_host_service() {
             self.hub.request_service();
         }
+        wake_home
     }
 
     /// Publish the snapshot a remote PE reads without the devices' lock.
@@ -145,7 +164,17 @@ impl<D: Devices> Board<D> {
 /// the call left for the home machine ([`Board::publish`]).
 pub(super) struct Held<'a, D: Devices> {
     board: &'a Board<D>,
-    state: crate::platform::sync::MutexGuard<'a, BoardState<D>>,
+    /// Released in [`Drop`] before the host's work after the call.
+    state: ManuallyDrop<crate::platform::sync::MutexGuard<'a, BoardState<D>>>,
+    /// What the call is for, and [`Hub::ticks`] when it took the lock.
+    call: Call,
+    since: u64,
+    /// The ticks the call waited for the lock.
+    waited: u64,
+    /// The PEs to wake once the lock is released, by bit ([`wake_bit`]): a
+    /// wake can cost the host an interrupt to another core, which no other
+    /// PE should wait for the lock behind.
+    wakes: u64,
 }
 
 impl<D: Devices> Held<'_, D> {
@@ -167,7 +196,7 @@ impl<D: Devices> Held<'_, D> {
         let BoardState {
             devices,
             lines: seen,
-        } = &mut *self.state;
+        } = &mut **self.state;
         if let Some(own) = seen.get_mut(cpu)
             && let Some(lines) = devices.pins(cpu)
         {
@@ -185,9 +214,30 @@ impl<D: Devices> Held<'_, D> {
             self.board.publish_pins(pe, pins);
             if lines != seen[pe] {
                 seen[pe] = lines;
-                self.board.hub.lines_changed(pe, now);
+                self.board.hub.lines_changed_unwoken(pe);
+                match wake_bit(pe) {
+                    0 => self.board.hub.wake(pe),
+                    bit => self.wakes |= bit,
+                }
             }
         }
+    }
+}
+
+/// A PE's bit in [`Held::wakes`]; none for a PE past its width.
+fn wake_bit(pe: usize) -> u64 {
+    u32::try_from(pe)
+        .ok()
+        .and_then(|pe| 1u64.checked_shl(pe))
+        .unwrap_or(0)
+}
+
+/// Wake each PE of `wakes` ([`wake_bit`]), after the lock is released.
+fn wake_after(hub: &Hub, wakes: u64) {
+    let mut left = wakes;
+    while left != 0 {
+        hub.wake(left.trailing_zeros() as usize);
+        left &= left - 1;
     }
 }
 
@@ -206,7 +256,31 @@ impl<D: Devices> core::ops::DerefMut for Held<'_, D> {
 
 impl<D: Devices> Drop for Held<'_, D> {
     fn drop(&mut self) {
-        self.board.publish(&mut self.state.devices);
+        if self.board.publish(&mut self.state.devices) {
+            let home = self.board.hub.home.load(Ordering::Acquire);
+            match wake_bit(home) {
+                0 => self.board.hub.wake(home),
+                bit => self.wakes |= bit,
+            }
+        }
+        // Only the holder writes these.
+        let held = self.board.hub.ticks().wrapping_sub(self.since);
+        let call = self.call as usize;
+        self.board.held[call].fetch_add(held, Ordering::Relaxed);
+        if held > self.board.longest[call].load(Ordering::Relaxed) {
+            self.board.longest[call].store(held, Ordering::Relaxed);
+        }
+        // SAFETY: dropped once, here, and not used after.
+        unsafe { ManuallyDrop::drop(&mut self.state) };
+        wake_after(&self.board.hub, self.wakes);
+        // Host work completed outside the lock: the home machine takes its
+        // next transfer at once, which publishes the real deadline again.
+        if self.board.hub.kick.released() {
+            self.board.dma.store(0, Ordering::Release);
+            self.board
+                .hub
+                .wake(self.board.hub.home.load(Ordering::Acquire));
+        }
     }
 }
 
@@ -217,6 +291,15 @@ unsafe impl<D> Send for Board<D> {}
 // SAFETY: shared references rely on the same argument as `Send` above.
 unsafe impl<D> Sync for Board<D> {}
 
+/// How long calls of one [`Call`] waited for the devices' lock and held it
+/// ([`SharedDevices::lock_times`]), in host ticks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LockTimes {
+    pub waited: u64,
+    pub held: u64,
+    pub longest: u64,
+}
+
 /// The board's devices, shared by every PE's machine.
 pub struct SharedDevices<D> {
     pub(super) board: Arc<Board<D>>,
@@ -224,6 +307,9 @@ pub struct SharedDevices<D> {
     pub(super) home: bool,
     /// Each PE's [`Devices::local_registers`], once asked for.
     local: Vec<Option<Option<Arc<dyn LocalRegisters>>>>,
+    /// The ticks this handle's calls waited for the lock since
+    /// [`Devices::take_lock_wait`].
+    waited: AtomicU64,
 }
 
 impl<D: Devices> SharedDevices<D> {
@@ -244,6 +330,9 @@ impl<D: Devices> SharedDevices<D> {
             }),
             hub,
             waits: Default::default(),
+            waited: Default::default(),
+            held: Default::default(),
+            longest: Default::default(),
             now: AtomicU64::new(0),
             pins: (0..pes).map(|_| AtomicU8::new(UNLATCHED)).collect(),
             dma: AtomicU64::new(u64::MAX),
@@ -259,6 +348,7 @@ impl<D: Devices> SharedDevices<D> {
             board: Arc::new(board),
             home: true,
             local: Vec::new(),
+            waited: AtomicU64::new(0),
         }
     }
 
@@ -268,6 +358,7 @@ impl<D: Devices> SharedDevices<D> {
             board: Arc::clone(&self.board),
             home: false,
             local: Vec::new(),
+            waited: AtomicU64::new(0),
         }
     }
 
@@ -280,8 +371,32 @@ impl<D: Devices> SharedDevices<D> {
         self.call(Call::Other, f)
     }
 
+    /// Run `f` on the devices if no PE reaches them now, else `None`: for
+    /// work that can wait, which a PE whose device access waits on the host
+    /// (a disk transfer's MMIO, say) would otherwise hold up.
+    pub fn try_with<R>(&self, f: impl FnOnce(&mut D) -> R) -> Option<R> {
+        let state = self.board.devices.try_lock().ok()?;
+        Some(f(&mut Held {
+            board: &self.board,
+            state: ManuallyDrop::new(state),
+            call: Call::Other,
+            since: self.board.hub.ticks(),
+            waited: 0,
+            wakes: 0,
+        }))
+    }
+
     pub(super) fn call<R>(&self, call: Call, f: impl FnOnce(&mut D) -> R) -> R {
-        f(&mut self.board.lock(call))
+        f(&mut self.lock(call))
+    }
+
+    /// The board's lock for `call`, counting the ticks it waited.
+    fn lock(&self, call: Call) -> Held<'_, D> {
+        let held = self.board.lock(call);
+        if held.waited != 0 {
+            self.waited.fetch_add(held.waited, Ordering::Relaxed);
+        }
+        held
     }
 
     /// Calls that found the devices' lock held since the board was made, by
@@ -293,6 +408,17 @@ impl<D: Devices> SharedDevices<D> {
             .map(|waits| waits.load(Ordering::Relaxed))
     }
 
+    /// By [`Call`], the host ticks ([`Kick::ticks`]) calls have waited for
+    /// the devices' lock and held it since the board was made, and the
+    /// longest any one held it since this was last asked.
+    pub fn lock_times(&self) -> [LockTimes; Call::ALL.len()] {
+        core::array::from_fn(|call| LockTimes {
+            waited: self.board.waited[call].load(Ordering::Relaxed),
+            held: self.board.held[call].load(Ordering::Relaxed),
+            longest: self.board.longest[call].swap(0, Ordering::Relaxed),
+        })
+    }
+
     /// Serve the host's inputs with `f`, which can change any PE's lines.
     pub fn serve<R>(&self, f: impl FnOnce(&mut D) -> R) -> R {
         let now = self.board.now.load(Ordering::Acquire);
@@ -301,7 +427,7 @@ impl<D: Devices> SharedDevices<D> {
 
     /// Run `f` on the devices at `now`, as [`Held::now`] gives it.
     pub(super) fn at<R>(&self, call: Call, now: u64, f: impl FnOnce(&mut D, u64) -> R) -> R {
-        let mut devices = self.board.lock(call);
+        let mut devices = self.lock(call);
         let now = devices.now(now);
         f(&mut devices, now)
     }
@@ -327,7 +453,7 @@ impl<D: Devices> SharedDevices<D> {
         now: u64,
         f: impl FnOnce(&mut D, u64) -> R,
     ) -> R {
-        let mut devices = self.board.lock(call);
+        let mut devices = self.lock(call);
         let now = devices.now(now);
         let result = f(&mut devices, now);
         devices.notify(cpu, now);
@@ -465,7 +591,7 @@ impl<D: Devices> Devices for SharedDevices<D> {
         {
             return lines;
         }
-        let mut devices = self.board.lock(Call::Lines);
+        let mut devices = self.lock(Call::Lines);
         let now = devices.now(now);
         let lines = devices.lines(cpu, now);
         devices.state.lines[cpu] = lines;
@@ -492,7 +618,7 @@ impl<D: Devices> Devices for SharedDevices<D> {
         if !self.home {
             return (self.lines(cpu, now), None);
         }
-        let mut devices = self.board.lock(Call::Lines);
+        let mut devices = self.lock(Call::Lines);
         let now = devices.now(now);
         let (lines, deadline) = devices.lines_and_deadline(cpu, now);
         devices.state.lines[cpu] = lines;
@@ -591,7 +717,7 @@ impl<D: Devices> Devices for SharedDevices<D> {
         memory: &mut dyn super::super::Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
-        self.changing(Call::Access, cpu, now, |devices, now| {
+        self.changing(Call::Transfer, cpu, now, |devices, now| {
             devices.transfer(cpu, memory, now)
         })
     }
@@ -600,5 +726,22 @@ impl<D: Devices> Devices for SharedDevices<D> {
     }
     fn finish_call(&mut self, outcome: GateOutcome) {
         self.with(|devices| devices.finish_call(outcome));
+    }
+    /// The lock, the DMA and the call after a write, under one lock.
+    fn settle_write(
+        &mut self,
+        cpu: usize,
+        now: u64,
+        memory: &mut dyn super::super::LockedMemory,
+    ) -> super::super::Settled {
+        self.changing(Call::Transfer, cpu, now, |devices, now| {
+            devices.settle_write(cpu, now, memory)
+        })
+    }
+    fn device_name(&self, physical: u64) -> Option<&'static str> {
+        self.with(|devices| devices.device_name(physical))
+    }
+    fn take_lock_wait(&mut self) -> u64 {
+        self.waited.swap(0, Ordering::Relaxed)
     }
 }

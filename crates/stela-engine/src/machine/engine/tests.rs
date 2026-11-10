@@ -431,9 +431,16 @@ pub(super) fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
     board(words, NoDevices, Vec::new())
 }
 
-/// The slot of `pc`'s lookup entry in the contexts `machine` runs in.
+/// The slot of `pc`'s block table entry with the key the ITLB gives its
+/// page in the contexts `machine` runs in.
 fn target_slot(machine: &Machine<FakeHost, NoDevices>, pc: u64) -> usize {
-    chain::lookup_slot(pc, machine.chain.contexts()[chain::half(pc)])
+    chain::lookup_slot(pc, target_key(machine, pc))
+}
+
+/// The block key the ITLB gives the page of `pc` in the contexts `machine`
+/// runs in, or 0 without one.
+fn target_key(machine: &Machine<FakeHost, NoDevices>, pc: u64) -> u64 {
+    machine.current_key(pc).unwrap_or(0)
 }
 
 /// The chip the tests run on, or the M2 where it has the Apple generic
@@ -749,10 +756,18 @@ fn a_device_register_reports_each_refusal_once_up_to_its_first_few() {
     for value in 0..2 * DEVICE_REFUSALS_REPORTED {
         refuse(&format!("value {value}"));
     }
+    let reported = machine.take_unmodeled();
     assert_eq!(
-        machine.take_unmodeled().len(),
-        DEVICE_REFUSALS_REPORTED,
-        "two operations and the first changing values"
+        reported.len(),
+        DEVICE_REFUSALS_REPORTED + 1,
+        "two operations, the first changing values and the limit"
+    );
+    let RequirementKind::Device { detail, .. } = &reported[DEVICE_REFUSALS_REPORTED].kind else {
+        panic!("a device refusal");
+    };
+    assert!(
+        detail.ends_with("are counted only (Statistics::degraded)"),
+        "{detail}"
     );
 }
 
@@ -2260,6 +2275,49 @@ fn check_code_arena_reclamation(indexed: bool) {
 }
 
 #[test]
+fn an_evicted_blocks_successor_box_and_index_list_serve_the_next_block() {
+    // b .+4 in each of four pages: one direct exit each.
+    const BRANCH: u32 = 0x1400_0001;
+    let mut machine = machine(&vec![BRANCH; 4 * FETCH_PAGE as usize / 4]);
+    machine.host.ring = Some(1);
+    machine.host.code_partitions = Some(CodePartitions {
+        base: NATIVE_CODE_STRIDE,
+        bytes_per_part: NATIVE_CODE_STRIDE,
+        parts: 8,
+    });
+    machine.set_step_timing(true);
+    let base = machine.cpu.pc;
+    let mut slots = Vec::new();
+    for page in 0..2 {
+        let Ok(Fetched::Block(slot)) = machine.fetch_block(base + page * FETCH_PAGE, false) else {
+            panic!("a block")
+        };
+        slots.push(slot);
+    }
+    assert_eq!(machine.blocks[slots[0]].successors.len(), 1);
+    let kept = machine.blocks[slots[0]].successors.as_ptr();
+    // The third part reclaims the first: its block's slot and successor box
+    // serve the block that needed the room, and its index list goes.
+    let Ok(Fetched::Block(next)) = machine.fetch_block(base + 2 * FETCH_PAGE, false) else {
+        panic!("a block")
+    };
+    assert_eq!(machine.statistics.code_evictions, 1);
+    assert_eq!(next, slots[0]);
+    assert_eq!(machine.blocks[next].successors.as_ptr(), kept);
+    assert_eq!(
+        machine.blocks[next].successors[0].target.0,
+        base + 2 * FETCH_PAGE + 4
+    );
+    assert!(machine.index.page(base).next().is_none());
+    assert!(machine.fetch_block(base + 3 * FETCH_PAGE, false).is_ok());
+    // The first page's block is installed again within the window: thrash.
+    assert!(machine.fetch_block(base, false).is_ok());
+    let causes = machine.install_causes();
+    assert_eq!((causes.installs, causes.thrash, causes.first), (5, 1, 4));
+    assert!(causes.installed_bytes > 0 && causes.evicted_bytes > 0);
+}
+
+#[test]
 fn a_fetch_that_reclaims_code_forgets_the_lookup_entries_of_its_blocks_alone() {
     const RET: u32 = 0xd65f_03c0;
     let mut machine = machine(&vec![RET; 3 * FETCH_PAGE as usize / 4]);
@@ -2276,10 +2334,7 @@ fn a_fetch_that_reclaims_code_forgets_the_lookup_entries_of_its_blocks_alone() {
     assert_ne!(machine.targets[target_slot(&machine, base)].pc, base);
     for kept in [base + FETCH_PAGE, pc] {
         let entry = machine.targets[target_slot(&machine, kept)];
-        assert_eq!(
-            (entry.pc, entry.context),
-            (kept, machine.chain.contexts()[chain::half(kept)])
-        );
+        assert_eq!((entry.pc, entry.key), (kept, target_key(&machine, kept)));
     }
 }
 
@@ -2313,12 +2368,11 @@ fn eviction_undoes_the_links_into_evicted_blocks_and_keeps_their_pages() {
     let second = &machine.blocks[1];
     let exit = second.successors[0];
     assert!(!exit.linked);
+    // The slot's patch point jumps to the exit again.
+    let (point, unlink) = chain::unlinked(exit.site, exit.slot.into()).unwrap();
     assert_eq!(
         machine.host.patches.last(),
-        Some(&(
-            (exit.site - exit.slot as u64) as usize,
-            chain::unlinked(exit.slot.into(), GuestAddress(base))
-        ))
+        Some(&(point as usize, unlink.to_vec()))
     );
     let (variant, physical) = (second.variant, second.physical);
     assert_eq!(
@@ -2333,7 +2387,9 @@ fn eviction_undoes_the_links_into_evicted_blocks_and_keeps_their_pages() {
             .get(&machine.blocks, base, first_physical, variant),
         None
     );
-    assert_eq!(
+    // The second block took no lookup entry: the first's exit linked into
+    // it at its fetch.
+    assert_ne!(
         machine.targets[target_slot(&machine, base + 12)].pc,
         base + 12
     );
@@ -2603,12 +2659,16 @@ fn side_exits_retire_the_instructions_that_ran() {
         .find(|exit| exit.word() == word)
         .unwrap();
     machine.step().unwrap();
-    let (at, code) = machine.host.patches.last().unwrap();
+    // The side exit linked at the fetch that compiled its target, before
+    // the target's exit back linked.
+    // Its body first, then the slot's patch point falls into it.
     let entry = machine.blocks[1].code.0 as u64;
-    assert_eq!(*at as u64, exit.site - exit.slot as u64);
+    let slot = exit.site - exit.slot as u64;
+    let (body, code) = chain::link(slot, exit.slot.into(), 1, 1, entry).unwrap();
+    assert_eq!(machine.host.patches[0], (body as usize, code));
     assert_eq!(
-        Some(code.clone()),
-        chain::link(*at as u64, exit.slot.into(), 1, 1, entry)
+        machine.host.patches[1],
+        (chain::slot_patch(slot) as usize, chain::NOP5.to_vec())
     );
 }
 
@@ -2634,18 +2694,22 @@ fn direct_exits_chain_into_their_successors_in_the_page() {
     machine.step().unwrap();
     assert_eq!(machine.statistics.links, 2);
     let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
-    // The second block's exit to the first, then the first's to it.
-    for (patch, from, to, target, index) in [
-        (&machine.host.patches[0], second, first, base, 0),
-        (&machine.host.patches[1], first, second, base + 12, 1),
+    // The first block's exit to the second, at the fetch that compiled the
+    // second, then the second's to the first, at its exit.
+    for (patches, from, to, target, index) in [
+        (&machine.host.patches[0..2], first, second, base + 12, 1),
+        (&machine.host.patches[2..4], second, first, base, 0),
     ] {
-        // The block's one direct exit ends its code, its link slot before it.
+        // The block's one direct exit ends its code, its link slot before
+        // it: the body, then the point that falls into it.
         let code = &machine.host.installed[from.code.0 / NATIVE_CODE_STRIDE - 1];
         let site = from.code.0 + code.len() - chain::DIRECT_EXIT_BYTES;
         let slot = chain::link_slot(Some(from.pc), GuestAddress(target), ExitKind::Direct);
-        let at = site - slot;
-        let expected = chain::link(at as u64, slot, 2, index, to.code.0 as u64);
-        assert_eq!((patch.0, Some(patch.1.clone())), (at, expected));
+        let at = (site - slot) as u64;
+        let (body, expected) = chain::link(at, slot, 2, index, to.code.0 as u64).unwrap();
+        assert_eq!(patches[0], (body as usize, expected));
+        let point = chain::slot_patch(at) as usize;
+        assert_eq!(patches[1], (point, chain::NOP5.to_vec()));
         assert!(from.successors.iter().all(|exit| exit.linked));
     }
     // The first block chains into the second, which exits to the first.
@@ -2745,10 +2809,94 @@ fn direct_exits_chain_into_their_successors_in_the_page() {
     assert_eq!(machine.cpu.state, state);
 }
 
-/// A direct exit out of its page and a RET are redirected through
-/// lookup thunks at their first exits; every fetch records its block
-/// under the context's number, which changes with the generations and
-/// the EL and returns with neither changed.
+/// A direct exit in its page whose target had no block links at the fetch
+/// that compiles the target, which then takes no lookup entry: the link
+/// enters it in every address space.
+#[test]
+fn a_direct_exit_links_at_the_fetch_of_its_target() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    let mut machine = machine(&[ADD, 0x1400_0002, 0, ADD, 0x17ff_fffc]);
+    let base = machine.cpu.pc;
+    let target = base + 12;
+    machine.host.exits = vec![NativeExit::Exit {
+        next_pc: target,
+        kind: ExitKind::Direct as u64,
+    }];
+    machine.step().unwrap();
+    assert_eq!(
+        machine.direct_exit.map(|(block, pc, _)| (block, pc)),
+        Some((0, target))
+    );
+    assert!(machine.host.patches.is_empty());
+    let Ok(Fetched::Block(second)) = machine.fetch_block(target, false) else {
+        panic!("a block");
+    };
+    assert!(machine.direct_exit.is_none());
+    assert_eq!(machine.statistics.links, 1);
+    assert!(machine.blocks[0].successors.iter().all(|exit| exit.linked));
+    let key = target_key(&machine, target);
+    assert_ne!(key, 0);
+    let held = machine
+        .targets
+        .find(chain::lookup_slot(target, key), target, key);
+    assert_ne!(held.pc, target);
+    assert_eq!(machine.blocks[second].pc, target);
+    // A fetch the exit did not wait for remembers its block as before.
+    let entry = machine.targets[target_slot(&machine, base)];
+    assert_eq!((entry.pc, entry.block), (base, 0));
+}
+
+/// The direct exit waiting for its target goes when a fetch elsewhere
+/// comes first, and when its block goes: an eviction, which frees its slot
+/// for the next block compiled, an IC IVAU of its page or a discard, which
+/// leaves no slot. The target's fetch then links nothing and remembers it.
+#[test]
+fn a_direct_exit_waiting_for_its_target_goes_with_its_block() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    let words = [ADD, 0x1400_0002, 0, ADD, 0x17ff_fffc];
+    let forgets: [fn(&mut Machine<FakeHost, NoDevices>); 4] = [
+        |machine| {
+            let pc = machine.cpu.pc + 16;
+            machine.fetch_block(pc, false).unwrap();
+        },
+        |machine| {
+            let code = machine.blocks[0].code.0;
+            machine.evict_code(code..code + 1);
+        },
+        |machine| machine.invalidate_code_page(machine.blocks[0].physical),
+        Machine::discard_blocks,
+    ];
+    for (case, forget) in forgets.into_iter().enumerate() {
+        let mut machine = machine(&words);
+        let base = machine.cpu.pc;
+        let target = base + 12;
+        machine.host.exits = vec![NativeExit::Exit {
+            next_pc: target,
+            kind: ExitKind::Direct as u64,
+        }];
+        machine.step().unwrap();
+        assert!(machine.direct_exit.is_some(), "case {case}");
+        forget(&mut machine);
+        assert!(machine.direct_exit.is_none(), "case {case}");
+        let Ok(Fetched::Block(second)) = machine.fetch_block(target, false) else {
+            panic!("a block in case {case}");
+        };
+        assert_eq!(machine.statistics.links, 0, "case {case}");
+        let held = machine.targets[target_slot(&machine, target)];
+        assert_eq!(
+            (held.pc, held.block),
+            (target, second as u32),
+            "case {case}"
+        );
+    }
+}
+
+/// A direct exit out of its page links through a cell of its own and a RET
+/// through a lookup tail of its own at their first exits; every fetch
+/// records its block under its frame's key and its page in the ITLB under
+/// the context's number, which changes with the generations and the EL and
+/// returns with neither changed. The cell takes the entry of its target
+/// the fetch records, outlives a TLBI and goes with the frame's entries.
 #[test]
 fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
     const ADD: u32 = 0x9100_0400; // add x0, x0, #1
@@ -2769,7 +2917,7 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
     machine.step().unwrap();
     assert_eq!(
         (machine.statistics.lookups, machine.statistics.links),
-        (2, 0)
+        (1, 1)
     );
     // The engine counts the exits it completed by kind.
     let mut kinds = [0; 13];
@@ -2784,32 +2932,73 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
     let code = |block: &Block| &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
     // The branch's direct exit, then the RET's exit to RAX, ends each
     // block's code.
+    // Their patch points are the sites.
     let sites = [
-        first.code.0 + code(first).len() - chain::LOOKUP_EXIT_BYTES,
-        second.code.0 + code(second).len() - chain::LOOKUP_EXIT_BYTES,
+        chain::direct_patch((first.code.0 + code(first).len() - chain::DIRECT_EXIT_BYTES) as u64)
+            as usize,
+        chain::dynamic_patch(
+            (second.code.0 + code(second).len() - chain::DYNAMIC_EXIT_BYTES) as u64,
+        ) as usize,
     ];
     let dispatcher = chain::lookup_dispatcher(0).unwrap();
-    let at = machine
+    let probes = machine
         .host
         .installed
         .iter()
         .position(|installed| *installed == dispatcher)
-        .expect("the dispatcher is installed")
+        .expect("the probes are installed")
         + 1;
-    let at = (at * NATIVE_CODE_STRIDE) as u64;
+    let probes = (probes * NATIVE_CODE_STRIDE) as u64;
+    // Each site's tail, then the site's jump to it.
+    let cell = machine.targets.site_cell(sites[0] as u64).expect("a cell");
     let exits = [(ExitKind::Direct, 1), (ExitKind::Return, 2)];
     for (index, (site, (kind, ran))) in sites.into_iter().zip(exits).enumerate() {
-        let exit = chain::lookup_exit(site as u64, kind, ran, at).unwrap();
-        assert_eq!(machine.host.patches[index], (site, exit.to_vec()));
+        let (tail, code) = &machine.host.patches[2 * index];
+        let at = *tail as u64;
+        let expected = if index == 0 {
+            let cell_at = u64::from_le_bytes(code[2..10].try_into().unwrap());
+            // SAFETY: the table keeps the cell at its address while its exit holds it.
+            assert_eq!(unsafe { *(cell_at as *const chain::LookupEntry) }, cell);
+            let entry = probes + chain::CELL_PROBE_ENTRY as u64;
+            chain::cell_tail(at, cell_at, kind, ran, entry)
+                .unwrap()
+                .to_vec()
+        } else {
+            chain::lookup_tail(at, kind, ran, probes + chain::PROBE_ENTRY as u64)
+                .unwrap()
+                .to_vec()
+        };
+        assert_eq!(*code, expected);
+        let jump = chain::jump(site as u64, at).unwrap();
+        assert_eq!(machine.host.patches[2 * index + 1], (site, jump.to_vec()));
     }
+    // The fetch of `far` filled the cell linked before it.
+    assert_eq!(cell, machine.targets[target_slot(&machine, far)]);
+    // A TLBI of `far`'s page forgets its translation, and leaves the cell,
+    // which holds for the frame; forgetting the frame's entries empties it,
+    // and the next fetch's entry fills it again.
+    machine.forget_lookups(mmu::tlbi::Reach::Containing(far), None);
+    assert_eq!(machine.current_key(far), None);
+    let site = sites[0] as u64;
+    assert_eq!(machine.targets.site_cell(site), Some(cell));
+    let frame = chain::key_frame(cell.key);
+    machine.targets.forget_frames(frame..=frame, |_| true);
+    assert_eq!(machine.targets.site_cell(site).unwrap().key, 0);
+    machine.remember_target(far, 1);
+    assert_eq!(machine.targets.site_cell(site), Some(cell));
+    assert_eq!(machine.targets.cells(), 1);
     let half = chain::half(base);
     let context = machine.chain.contexts()[half];
     assert_ne!(context, 0);
     for (pc, block) in [(base, 0), (far, 1)] {
-        let entry = machine.targets[target_slot(&machine, pc)];
+        let key = machine.block_key(
+            machine.blocks[block].physical,
+            machine.blocks[block].variant,
+        );
+        let entry = machine.targets[chain::lookup_slot(pc, key)];
         let expected = chain::LookupEntry {
             pc,
-            context,
+            key,
             entry: machine.blocks[block].code.0 as u64,
             block: block as u32,
             targets: 0b1111,
@@ -2823,15 +3012,25 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
     machine.step().unwrap();
     let renewed = machine.chain.contexts()[half];
     assert!(renewed > context);
-    // The thunk finds `far`'s entry of the old context, whose salt the new
-    // one kept, and it no longer enters: the fetch revalidates it.
-    assert_eq!(machine.statistics.lookup_misses, [2, 0, 1, 0, 0]);
+    // The cell's probe finds no translation of `far`'s page in the new
+    // context; the fetch translates it anew and finds the table's entry.
+    assert_eq!(machine.statistics.lookup_misses, [2, 1, 0, 0, 0]);
+    let translated = machine.statistics.fetches[1];
+    assert!(matches!(
+        machine.fetch_block(far, false),
+        Ok(Fetched::Block(1))
+    ));
+    assert_eq!(machine.statistics.fetches[1], translated + 1);
+    assert_eq!(machine.targets.site_cell(site), Some(cell));
     let variant = machine.block_variant(0);
     let el = machine.cpu.pstate.el;
     assert_eq!(machine.context(el, variant, half), renewed);
     assert_ne!(machine.context(el ^ 1, variant, half), renewed);
     assert_ne!(machine.context(el, variant, half ^ 1), renewed);
     assert_eq!(machine.context(el, variant, half), renewed);
+    // The cell goes with its exit's code.
+    machine.discard_blocks();
+    assert_eq!(machine.targets.cells(), 0);
 }
 
 /// A TLBI of one process's ASID leaves the contexts of the others, and the
@@ -2995,102 +3194,452 @@ fn fetched_leaf_filters_allocate_once_for_each_used_half() {
 }
 
 #[test]
-fn a_tlbi_by_va_drops_the_lookup_entries_of_its_leaf_in_every_context() {
+fn a_tlbi_by_va_drops_the_itlb_entries_of_its_leaf_in_every_context() {
     use mmu::tlbi::{Everywhere, Reach};
     let mut machine = machine(&[]);
     let variant = machine.current_variant(false, false);
     let contexts = machine.contexts(2, variant);
     const PAGE: u64 = 0x8000;
+    let put = |machine: &mut Machine<FakeHost, NoDevices>, page: u64, context: u64| {
+        let entry = chain::LookupEntry::page(page, context, 1);
+        machine.itlb.set(chain::itlb_slot(page, context), entry);
+    };
+    let held = |machine: &Machine<FakeHost, NoDevices>, page: u64, context: u64| {
+        machine.itlb[chain::itlb_slot(page, context)].pc == page
+    };
     machine.fetched_through(0, PAGE, 0x4000, true);
-    let pcs = [PAGE - 4, PAGE, PAGE + 0x3ffc, PAGE + 0x4000];
-    for (context, pc) in pcs.into_iter().enumerate() {
-        let slot = target_slot(&machine, pc);
-        machine.targets.set(
-            slot,
-            chain::LookupEntry {
-                pc,
-                context: context as u64 + 1,
-                entry: 1,
-                block: 0,
-                targets: 1,
-            },
-        );
+    let pages = [PAGE - 0x1000, PAGE, PAGE + 0x3000, PAGE + 0x4000];
+    for (context, page) in pages.into_iter().enumerate() {
+        put(&mut machine, page, context as u64 + 1);
     }
     let tlbi = |machine: &mut Machine<FakeHost, NoDevices>, reach| {
         machine.tlb_maintained(reach, Everywhere::Addresses(reach), None)
     };
     tlbi(&mut machine, Reach::Containing(PAGE + 0x10));
-    let kept = pcs.map(|pc| machine.targets[target_slot(&machine, pc)].pc == pc);
+    let kept = [0, 1, 2, 3].map(|n| held(&machine, pages[n], n as u64 + 1));
     assert_eq!(kept, [true, false, false, true]);
     assert_eq!(machine.contexts(2, variant), contexts);
     // A page no fetch came from reaches nothing, whatever its slots hold.
     tlbi(&mut machine, Reach::Containing(PAGE + 0x4000));
-    assert_eq!(
-        machine.targets[target_slot(&machine, PAGE + 0x4000)].pc,
-        PAGE + 0x4000
-    );
+    assert!(held(&machine, PAGE + 0x4000, 4));
     // Another leaf of a size fetched from before reaches nothing, however
-    // near it lies; the leaf holding a TLBI's address reaches all its PCs.
+    // near it lies; the leaf holding a TLBI's address reaches all its pages.
     const LEAF: u64 = 0x20_0000;
     machine.fetched_through(0, LEAF + 0x1000, LEAF, true);
-    let (near, inside) = (2 * LEAF - 4, 2 * LEAF);
-    for pc in [near, inside] {
-        let slot = target_slot(&machine, pc);
-        machine.targets.set(
-            slot,
-            chain::LookupEntry {
-                pc,
-                context: 1,
-                entry: 1,
-                block: 0,
-                targets: 1,
-            },
-        );
+    let (near, inside) = (2 * LEAF - 0x1000, 2 * LEAF);
+    for page in [near, inside] {
+        put(&mut machine, page, 1);
     }
     tlbi(&mut machine, Reach::Containing(3 * LEAF));
-    assert_eq!(machine.targets[target_slot(&machine, near)].pc, near);
+    assert!(held(&machine, near, 1));
     tlbi(&mut machine, Reach::Containing(LEAF + 0x8000));
-    assert_eq!(machine.targets[target_slot(&machine, near)].pc, 0);
-    assert_eq!(machine.targets[target_slot(&machine, inside)].pc, inside);
-    // However wide the leaf, its PCs' entries go and no context goes with
-    // them.
+    assert!(!held(&machine, near, 1));
+    assert!(held(&machine, inside, 1));
+    // However wide the leaf, its pages' entries go and no context goes
+    // with them.
     machine.fetched_through(0, 0, 1 << 30, true);
     let reaches = machine.statistics.lookup_forgets[2];
     tlbi(&mut machine, Reach::Containing(PAGE));
-    assert_eq!(machine.targets[target_slot(&machine, inside)].pc, 0);
+    assert!(!held(&machine, inside, 1));
     assert_eq!(machine.statistics.lookup_forgets[2], reaches + 1);
     assert_eq!(machine.contexts(2, variant), contexts);
 }
 
+/// The block table's entries outlive a TLBI ALL, which renumbers every
+/// context: the next fetch of a page translates it once, which the ITLB
+/// keeps, and then finds the entries of every block the page ran, with no
+/// entry written again.
 #[test]
-fn a_new_context_learns_the_blocks_its_page_fetched_in_others() {
+fn block_entries_survive_a_tlbi_all() {
+    use mmu::tlbi::{Everywhere, Reach};
     const RET: u32 = 0xd65f_03c0;
     let mut machine = machine(&[RET, RET, RET]);
-    let mut fetch = |pc| match machine.fetch_block(pc, false) {
-        Ok(Fetched::Block(index)) => index,
-        _ => panic!("a block"),
-    };
-    let (first, second) = (fetch(BASE), fetch(BASE + 4));
-    // The third block of the page was compiled, but no fetch reached it.
-    let third = fetch(BASE + 8);
-    machine.blocks[third].fetched = false;
-
-    let contexts = machine.chain.contexts().map(|context| context + (1 << 8));
-    machine.chain.set_contexts(contexts);
-    machine.remember_target_page(BASE, first);
-    let context = contexts[chain::half(BASE)];
-    let entry = |machine: &Machine<FakeHost, NoDevices>, pc| {
-        machine
-            .targets
-            .find(chain::lookup_slot(pc, context), pc, context)
-    };
-    let learnt = entry(&machine, BASE + 4);
-    assert_eq!((learnt.context, learnt.block), (context, second as u32));
-    assert_ne!(entry(&machine, BASE + 8).context, context);
+    let fetch =
+        |machine: &mut Machine<FakeHost, NoDevices>, pc| match machine.fetch_block(pc, false) {
+            Ok(Fetched::Block(index)) => index,
+            _ => panic!("a block"),
+        };
+    let blocks = [BASE, BASE + 4, BASE + 8].map(|pc| fetch(&mut machine, pc));
+    let before = machine.chain.contexts()[chain::half(BASE)];
+    let key = target_key(&machine, BASE);
+    machine.tlb_maintained(Reach::All, Everywhere::All, None);
+    let [found, translated] = [machine.statistics.fetches[0], machine.statistics.fetches[1]];
+    let (fills, entries) = (machine.statistics.itlb[0], table_entries(&machine));
+    assert_eq!(fetch(&mut machine, BASE), blocks[0]);
+    let after = machine.chain.contexts()[chain::half(BASE)];
+    assert_ne!(after, before);
+    assert_eq!(target_key(&machine, BASE), key);
+    // One translation of the page, then each block from the table.
+    assert_eq!(fetch(&mut machine, BASE + 4), blocks[1]);
+    assert_eq!(fetch(&mut machine, BASE + 8), blocks[2]);
+    assert_eq!(machine.statistics.fetches[1], translated + 1);
+    assert_eq!(machine.statistics.fetches[0], found + 2);
+    assert_eq!(machine.statistics.itlb[0], fills + 1);
+    assert_eq!(table_entries(&machine), entries);
+    // The new context's entry took the place of its predecessor's, which
+    // had its salt.
+    let slot = chain::itlb_slot(BASE, after);
+    assert_eq!(slot, chain::itlb_slot(BASE, before));
+    assert_eq!(
+        machine.itlb[slot],
+        chain::LookupEntry::page(BASE & !(FETCH_PAGE - 1), after, key)
+    );
 }
 
-/// A TLBI by VA of one process leaves the other processes' entries of the
-/// same VAs, however wide its span, unless a global page shares them.
+/// The live entries of the block table.
+fn table_entries(machine: &Machine<FakeHost, NoDevices>) -> usize {
+    (0..chain::LOOKUP_ENTRIES)
+        .filter(|&slot| machine.targets[slot].key != 0)
+        .count()
+}
+
+/// RAM offsets of the page tables [`paged_space`] builds: two address
+/// spaces, each a level 1, level 2 and level 3 table.
+const SPACES_TABLES: [[u64; 3]; 2] = [[0xf000, 0xe000, 0xd000], [0xc000, 0xb000, 0xa000]];
+
+/// A level 3 descriptor of the 4 KiB page at `frame`, executable at EL1
+/// unless `pxn`.
+fn page_descriptor(frame: u64, pxn: bool) -> u64 {
+    const PXN: u64 = 1 << 53;
+    frame | 1 << 10 | 3 << 8 | 0b11 | if pxn { PXN } else { 0 }
+}
+
+/// Write `entry` at RAM offset `at`.
+fn write_entry(machine: &mut Machine<FakeHost, NoDevices>, at: u64, entry: u64) {
+    let at = at as usize;
+    machine.host.ram[at..at + 8].copy_from_slice(&entry.to_le_bytes());
+}
+
+/// Address space `space` maps BASE's GiB through 4 KiB pages: page `n` of
+/// BASE to `frames[n]`. TTBR0_EL1 then selects it, with the MMU on.
+fn paged_space(machine: &mut Machine<FakeHost, NoDevices>, space: usize, frames: &[u64]) {
+    const MSR_TTBR0_EL1_X0: u32 = 0xd518_2000;
+    let [l1, l2, l3] = SPACES_TABLES[space];
+    if machine.cpu.read(SystemRegister::SCTLR_EL1) & 1 == 0 {
+        normal_memory(machine, false);
+    }
+    write_entry(machine, l1 + (BASE >> 30) * 8, (BASE + l2) | 0b11);
+    write_entry(machine, l2, (BASE + l3) | 0b11);
+    for (page, &frame) in frames.iter().enumerate() {
+        write_entry(machine, l3 + 8 * page as u64, page_descriptor(frame, false));
+    }
+    machine.cpu.state.x[0] = BASE + l1;
+    machine.system_instruction(MSR_TTBR0_EL1_X0).unwrap();
+}
+
+/// A TLBI by VA of the page at `va`, of every ASID.
+fn tlbi_page(machine: &mut Machine<FakeHost, NoDevices>, va: u64) {
+    use mmu::tlbi::{Everywhere, Reach};
+    let reach = Reach::Containing(va);
+    machine.tlb_maintained(reach, Everywhere::Addresses(reach), None);
+}
+
+/// Two address spaces that map one frame at one PC share its block and
+/// its block table entry: the second translates the page once and finds
+/// the entry the first recorded, compiling nothing.
+#[test]
+fn two_address_spaces_mapping_one_frame_share_an_entry() {
+    const RET: u32 = 0xd65f_03c0;
+    let mut machine = machine(&[RET]);
+    paged_space(&mut machine, 0, &[BASE]);
+    let Ok(Fetched::Block(block)) = machine.fetch_block(BASE, false) else {
+        panic!("a block");
+    };
+    let first = machine.chain.contexts()[0];
+    let key = target_key(&machine, BASE);
+    assert_eq!(key, machine.block_key(BASE, machine.blocks[block].variant));
+    let (fetches, entries) = (machine.statistics.fetches, table_entries(&machine));
+    paged_space(&mut machine, 1, &[BASE]);
+    assert!(
+        matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(index)) if index == block)
+    );
+    let second = machine.chain.contexts()[0];
+    assert_ne!(second, first);
+    assert_eq!(machine.statistics.fetches[1], fetches[1] + 1);
+    assert_eq!(machine.statistics.fetches[4], fetches[4]);
+    assert_eq!(table_entries(&machine), entries);
+    // The ITLB holds the page in both contexts, with the one key.
+    for context in [first, second] {
+        let held = machine.itlb[chain::itlb_slot(BASE, context)];
+        assert_eq!(held, chain::LookupEntry::page(BASE, context, key));
+    }
+    // An IC IVAU of the frame forgets the entry for both: the next fetch
+    // in either compiles the page again.
+    machine.invalidate_code_page(BASE);
+    assert_eq!(table_entries(&machine), entries - 1);
+    paged_space(&mut machine, 0, &[BASE]);
+    assert!(
+        matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(index)) if index != block)
+    );
+    assert_eq!(machine.statistics.fetches[4], fetches[4] + 1);
+}
+
+/// A PC whose page is mapped to another frame runs that frame's code once
+/// the TLBI that break-before-make requires has come: the TLBI forgets the
+/// page's translation in every context, and the old frame's entry, which
+/// the new translation's key no longer finds, may stay. A TLBI after the
+/// page lost its execute permission makes the fetch fault.
+#[test]
+fn a_remapped_page_runs_its_new_frame_and_a_removed_permission_faults() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const MOVZ: u32 = 0xd280_0020; // movz x0, #1
+    const RET: u32 = 0xd65f_03c0;
+    let mut machine = machine(&[]);
+    let code = |machine: &mut Machine<FakeHost, NoDevices>, at: usize, words: &[u32]| {
+        for (n, word) in words.iter().enumerate() {
+            let at = at + 4 * n;
+            machine.host.ram[at..at + 4].copy_from_slice(&word.to_le_bytes());
+        }
+    };
+    code(&mut machine, 0x1000, &[ADD, RET]);
+    code(&mut machine, 0x2000, &[MOVZ, RET]);
+    let va = BASE + 0x1000;
+    paged_space(&mut machine, 0, &[BASE, BASE + 0x1000]);
+    let Ok(Fetched::Block(old)) = machine.fetch_block(va, false) else {
+        panic!("a block");
+    };
+    assert_eq!(machine.blocks[old].physical, BASE + 0x1000);
+    let old_key = target_key(&machine, va);
+    // Break, TLBI, make: the page goes to the frame at 0x2000.
+    let [_, _, l3] = SPACES_TABLES[0];
+    write_entry(&mut machine, l3 + 8, 0);
+    tlbi_page(&mut machine, va);
+    assert_eq!(machine.current_key(va), None);
+    write_entry(&mut machine, l3 + 8, page_descriptor(BASE + 0x2000, false));
+    let Ok(Fetched::Block(new)) = machine.fetch_block(va, false) else {
+        panic!("a block");
+    };
+    assert_ne!(new, old);
+    assert_eq!(machine.blocks[new].physical, BASE + 0x2000);
+    let new_key = target_key(&machine, va);
+    assert_ne!(new_key, old_key);
+    assert_eq!(chain::key_frame(new_key), (BASE + 0x2000) >> 12);
+    let held = machine
+        .targets
+        .find(chain::lookup_slot(va, new_key), va, new_key);
+    assert_eq!((held.key, held.block), (new_key, new as u32));
+    // The page loses its execute permission: the fetch after the TLBI
+    // takes an Instruction Abort, a permission fault, and records nothing.
+    write_entry(&mut machine, l3 + 8, page_descriptor(BASE + 0x2000, true));
+    tlbi_page(&mut machine, va);
+    let Ok(Fetched::Exception(abort)) = machine.fetch_block(va, false) else {
+        panic!("an instruction abort");
+    };
+    const INSTRUCTION_ABORT_SAME: u64 = 0x21;
+    const PERMISSION: u64 = 0b00_1100;
+    assert_eq!(abort.syndrome >> 26 & 0x3f, INSTRUCTION_ABORT_SAME);
+    assert_eq!(abort.syndrome & 0x3c, PERMISSION);
+    assert_eq!(machine.current_key(va), None);
+}
+
+/// No block crosses a page: one at a page's last instruction ends there,
+/// and its fallthrough into the next page goes through a cell, whose
+/// entry holds only while the next page translates to its frame. A remap
+/// of that page and its TLBI leave the cell's entry unreachable, and the
+/// next fetch gives the cell the new frame's block.
+#[test]
+fn a_fallthrough_into_the_next_page_follows_that_pages_translation() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const MOVZ: u32 = 0xd280_0020; // movz x0, #1
+    const RET: u32 = 0xd65f_03c0;
+    let mut words = vec![RET; 1024];
+    words[1023] = ADD;
+    let mut machine = machine(&words);
+    let code = |machine: &mut Machine<FakeHost, NoDevices>, at: usize, word: u32| {
+        machine.host.ram[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    };
+    code(&mut machine, 0x1000, RET);
+    code(&mut machine, 0x2000, MOVZ);
+    code(&mut machine, 0x2004, RET);
+    paged_space(&mut machine, 0, &[BASE, BASE + 0x1000]);
+    let last = BASE + 0xffc;
+    let next = BASE + 0x1000;
+    machine.cpu.pc = last;
+    machine.host.exits = vec![NativeExit::Exit {
+        next_pc: next,
+        kind: ExitKind::Fallthrough as u64,
+    }];
+    machine.step().unwrap();
+    assert_eq!(machine.cpu.pc, next);
+    let ended = machine.blocks.len() - 1;
+    assert_eq!(
+        (
+            machine.blocks[ended].pc,
+            machine.blocks[ended].source_bytes()
+        ),
+        (last, 4)
+    );
+    // The fallthrough is linked through a cell, empty until the next
+    // page's block is fetched.
+    let installed = &machine.host.installed[machine.blocks[ended].code.0 / NATIVE_CODE_STRIDE - 1];
+    let exit_end = chain::without_failures(installed).len();
+    let exit = (machine.blocks[ended].code.0 + exit_end - chain::DIRECT_EXIT_BYTES) as u64;
+    let site = chain::direct_patch(exit);
+    assert_eq!(machine.targets.site_cell(site).unwrap().key, 0);
+    let Ok(Fetched::Block(old)) = machine.fetch_block(next, false) else {
+        panic!("a block");
+    };
+    let cell = machine.targets.site_cell(site).unwrap();
+    assert_eq!((cell.pc, cell.block), (next, old as u32));
+    assert_eq!(cell.key, target_key(&machine, next));
+    // The next page goes to another frame: its translation goes with the
+    // TLBI, which a cell probe needs before it enters the block it holds.
+    let [_, _, l3] = SPACES_TABLES[0];
+    write_entry(&mut machine, l3 + 8, page_descriptor(BASE + 0x2000, false));
+    tlbi_page(&mut machine, next);
+    assert_eq!(machine.current_key(next), None);
+    let Ok(Fetched::Block(new)) = machine.fetch_block(next, false) else {
+        panic!("a block");
+    };
+    assert_eq!(machine.blocks[new].physical, BASE + 0x2000);
+    let cell = machine.targets.site_cell(site).unwrap();
+    assert_eq!(
+        (cell.block, cell.key),
+        (new as u32, target_key(&machine, next))
+    );
+    assert_ne!(new, old);
+}
+
+/// A frame whose blocks take the translated variant leaves the ITLB entry
+/// of a page mapping it, whose old key then finds nothing: the next fetch
+/// gives the entry the new key, which is no fill.
+#[test]
+fn a_translated_frame_gives_the_pages_the_itlb_holds_a_new_key() {
+    const RET: u32 = 0xd65f_03c0;
+    let mut machine = machine(&[RET]);
+    machine.host.placement = mmu::placement::Placement::four_level(2).unwrap();
+    machine.host.translation_helper = Some(0x1000);
+    machine.derived_changed();
+    let Ok(Fetched::Block(old)) = machine.fetch_block(BASE, false) else {
+        panic!("a block");
+    };
+    let key = target_key(&machine, BASE);
+    machine.translated_pages.insert(BASE & !(FETCH_PAGE - 1));
+    machine.invalidate_code_page(BASE);
+    assert!(!dispatched(&machine, BASE));
+    let itlb = machine.statistics.itlb;
+    let Ok(Fetched::Block(new)) = machine.fetch_block(BASE, false) else {
+        panic!("a block");
+    };
+    assert_ne!(new, old);
+    assert!(machine.variants[machine.blocks[new].variant.0 as usize].translated);
+    assert_ne!(target_key(&machine, BASE), key);
+    assert_eq!(machine.statistics.itlb, [itlb[0], itlb[1] + 1]);
+    assert!(dispatched(&machine, BASE));
+}
+
+/// Whether a lookup dispatcher would enter the block at `pc` without the
+/// engine: its page translates through the ITLB in the current context of
+/// its half, and the block table holds `pc` with that key. A cell probe
+/// translates the same way and holds a table entry
+/// (`chain::lookup_dispatcher`).
+fn dispatched(machine: &Machine<FakeHost, NoDevices>, pc: u64) -> bool {
+    machine.current_key(pc).is_some_and(|key| {
+        let entry = machine.targets.find(chain::lookup_slot(pc, key), pc, key);
+        entry.pc == pc && entry.key == key
+    })
+}
+
+/// Steady-state code in two address spaces, calls and returns between
+/// pages they share and a page of one's own, with a switch between them
+/// and a TLBI by VA of another page after each: after one round, every
+/// transfer between pages finds its block through the ITLB and the block
+/// table as a dispatcher would, and the engine fetches only at each
+/// switch's exception return, which finds its block the same way. Nothing
+/// is filled again, though one space's own page shares the ITLB set of a
+/// hot page of the other's, next to which another hot page lies.
+#[test]
+fn steady_state_transfers_between_pages_stay_in_the_dispatchers() {
+    const MSR_TTBR0_EL1_X0: u32 = 0xd518_2000;
+    const RET: u32 = 0xd65f_03c0;
+    const PAGE: u64 = 0x1000;
+    const ROUNDS: u64 = 8;
+    let mut machine = machine(&[RET; 0x1800]);
+    let shared = [0, 1, 2, 3].map(|page| BASE + page * PAGE);
+    paged_space(&mut machine, 1, &shared);
+    paged_space(&mut machine, 0, &shared);
+    let variant = machine.current_variant(false, false);
+    let el = machine.cpu.pstate.el;
+    let switch = |machine: &mut Machine<FakeHost, NoDevices>, space: usize| {
+        machine.cpu.state.x[0] = BASE + SPACES_TABLES[space][0];
+        machine.system_instruction(MSR_TTBR0_EL1_X0).unwrap();
+        let contexts = machine.contexts(el, variant);
+        machine.chain.set_contexts(contexts);
+        contexts[0]
+    };
+    let (first, second) = (switch(&mut machine, 0), switch(&mut machine, 1));
+    // The second space's own page, at a VA whose ITLB set in its context
+    // is that of the first shared page in the first space's.
+    let set = chain::itlb_slot(shared[0], first) / 2;
+    let va = |alias: u64, page: u64| BASE + (alias << 21) + page * PAGE;
+    let (alias, page) = (1..512)
+        .flat_map(|alias| (4..512).map(move |page| (alias, page)))
+        .find(|&(alias, page)| chain::itlb_slot(va(alias, page), second) / 2 == set)
+        .expect("a VA of the set");
+    let [_, l2, l3] = SPACES_TABLES[1];
+    write_entry(&mut machine, l2 + 8 * alias, (BASE + l3) | 0b11);
+    write_entry(
+        &mut machine,
+        l3 + 8 * page,
+        page_descriptor(BASE + 5 * PAGE, false),
+    );
+    let own = va(alias, page);
+    let loops = [
+        [
+            shared[0],
+            shared[1],
+            shared[0] + 8,
+            shared[2],
+            shared[0] + 16,
+            shared[1] + 8,
+        ],
+        [
+            shared[0],
+            own,
+            shared[0] + 8,
+            shared[1],
+            shared[0] + 16,
+            own + 8,
+        ],
+    ];
+    let fetch = |machine: &mut Machine<FakeHost, NoDevices>, pc: u64| {
+        assert!(matches!(
+            machine.fetch_block(pc, false),
+            Ok(Fetched::Block(_))
+        ));
+    };
+    switch(&mut machine, 0);
+    fetch(&mut machine, shared[3]);
+    let round = |machine: &mut Machine<FakeHost, NoDevices>| {
+        let mut exits = 0;
+        for (space, transfers) in loops.iter().enumerate() {
+            switch(machine, space);
+            fetch(machine, transfers[0]);
+            for _ in 0..4 {
+                for &pc in transfers {
+                    if !dispatched(machine, pc) {
+                        exits += 1;
+                        fetch(machine, pc);
+                    }
+                }
+            }
+            tlbi_page(machine, shared[3]);
+        }
+        exits
+    };
+    assert_ne!(round(&mut machine) + round(&mut machine), 0);
+    let (fetches, fills) = (machine.statistics.fetches, machine.statistics.itlb[0]);
+    let exits: u64 = (0..ROUNDS).map(|_| round(&mut machine)).sum();
+    assert_eq!(exits, 0, "every transfer of {} found", ROUNDS * 2 * 4 * 6);
+    assert_eq!(machine.statistics.itlb[0], fills);
+    assert_eq!(machine.statistics.fetches[0], fetches[0] + 2 * ROUNDS);
+    assert_eq!(machine.statistics.fetches[1..], fetches[1..]);
+    switch(&mut machine, 0);
+    assert_eq!(machine.current_key(shared[3]), None);
+}
+
+/// A TLBI by VA of one process leaves the other processes' ITLB entries of
+/// the same VAs, however wide its span, unless a global page shares them.
 #[test]
 fn a_tlbi_by_va_and_asid_leaves_the_entries_of_other_asids() {
     use mmu::tlbi::{Everywhere, Reach};
@@ -3108,20 +3657,14 @@ fn a_tlbi_by_va_and_asid_leaves_the_entries_of_other_asids() {
     let (five, six) = (context(5), context(6));
     let fill = |machine: &mut Machine<FakeHost, NoDevices>| {
         for context in [five, six] {
-            machine.targets.set(
-                chain::lookup_slot(PC, context),
-                chain::LookupEntry {
-                    pc: PC,
-                    context,
-                    entry: 1,
-                    block: 0,
-                    targets: 1,
-                },
+            machine.itlb.set(
+                chain::itlb_slot(PC, context),
+                chain::LookupEntry::page(PC, context, 1),
             );
         }
     };
     let held = |machine: &Machine<FakeHost, NoDevices>| {
-        [five, six].map(|context| machine.targets[chain::lookup_slot(PC, context)].pc == PC)
+        [five, six].map(|context| machine.itlb[chain::itlb_slot(PC, context)].pc == PC)
     };
     let tlbi = |machine: &mut Machine<FakeHost, NoDevices>| {
         let reach = Reach::Containing(PC);
@@ -3287,10 +3830,24 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     let target = machine.blocks.len() - 1;
     assert_eq!(machine.blocks[target].pc, far);
     assert_eq!(machine.targets[target_slot(&machine, far)].targets, 0b1111);
+    // The page mapped guarded, which a TLBI makes known, is another key:
+    // its block's entry accepts what BTI c is compatible with.
+    let unguarded = target_key(&machine, far);
+    machine.forget_lookups(mmu::tlbi::Reach::Containing(far), None);
     let slot = (far / FETCH_PAGE) as usize % FETCH_CACHE;
     machine.fetch[slot].as_mut().unwrap().guarded = true;
-    machine.remember_target(far, target);
+    let Ok(Fetched::Block(guarded)) = machine.fetch_block(far, false) else {
+        panic!("a guarded block");
+    };
+    assert!(guarded != target && machine.block_variant(guarded).guarded_page);
+    assert_ne!(target_key(&machine, far), unguarded);
     assert_eq!(machine.targets[target_slot(&machine, far)].targets, 0b0111);
+    // The frame's other key, which the unguarded mapping still finds,
+    // shares its set.
+    let entry = machine
+        .targets
+        .find(chain::lookup_slot(far, unguarded), far, unguarded);
+    assert_eq!((entry.block, entry.targets), (target as u32, 0b1111));
     // BTI C itself performs no guest memory access. Preserve this
     // original landing-pad program, but an invented Host fault at its
     // first instruction cannot be projected as an ARM data abort.
@@ -3862,12 +4419,17 @@ fn a_compiled_pac_landing_uses_the_current_sctlr_for_lookup_entries() {
     const SCTLR_BT1: u64 = 1 << 36;
     let mut machine = machine(&[PACIASP, RET]);
     let pc = machine.cpu.pc;
+    assert!(machine.fetch_block(pc, false).is_ok());
+    // The page mapped guarded, which a TLBI makes known.
+    machine.forget_lookups(mmu::tlbi::Reach::Containing(pc), None);
+    let slot = (pc / FETCH_PAGE) as usize % FETCH_CACHE;
+    machine.fetch[slot].as_mut().unwrap().guarded = true;
     let Ok(Fetched::Block(index)) = machine.fetch_block(pc, false) else {
         panic!("compiled PAC landing");
     };
-    let slot = (pc / FETCH_PAGE) as usize % FETCH_CACHE;
-    machine.fetch[slot].as_mut().unwrap().guarded = true;
+    assert!(machine.block_variant(index).guarded_page);
     let sctlr = machine.cpu.regime_sctlr();
+    let mut keys = Vec::new();
     for (bits, targets) in [(0, 0b1111), (SCTLR_BT1, 0b0111)] {
         machine
             .cpu
@@ -3875,8 +4437,14 @@ fn a_compiled_pac_landing_uses_the_current_sctlr_for_lookup_entries() {
             .set(SystemRegister::SCTLR_EL1, 0, sctlr & !SCTLR_BT1 | bits);
         machine.derived_changed();
         machine.remember_target(pc, index);
-        assert_eq!(machine.targets[target_slot(&machine, pc)].targets, targets);
+        // BT1 is part of the key, so the entries of each value stand apart.
+        let block = &machine.blocks[index];
+        let key = machine.block_key(block.physical, block.variant);
+        let entry = machine.targets.find(chain::lookup_slot(pc, key), pc, key);
+        assert_eq!((entry.key, entry.targets), (key, targets));
+        keys.push(key);
     }
+    assert_ne!(keys[0], keys[1]);
 }
 
 /// SCTLR_EL2 bit 36 is BT with HCR_EL2.TGE clear and BT1 with it set
@@ -4127,8 +4695,11 @@ fn dc_clean_blocks_follow_the_traps_and_faults_complete_in_the_engine() {
     );
     let block = &machine.blocks[0];
     let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
-    let tail = chain::direct_exit(next, ExitKind::Fallthrough);
-    assert_eq!(code[code.len() - chain::DIRECT_EXIT_BYTES..], tail);
+    assert!(chain::is_direct_exit(
+        &code[code.len() - chain::DIRECT_EXIT_BYTES..],
+        next,
+        ExitKind::Fallthrough
+    ));
     assert_eq!(block.successors.len(), 1);
     // HCR_EL2.TPCP traps DC CIVAC at EL1: the PC gets a block that exits.
     let hcr = machine.cpu.read(SystemRegister::HCR_EL2);
@@ -4149,10 +4720,11 @@ fn dc_clean_blocks_follow_the_traps_and_faults_complete_in_the_engine() {
             .contains(cache_clean::Operations::CIVAC)
     );
     let code = &machine.host.installed[trapped.code.0 / NATIVE_CODE_STRIDE - 1];
-    assert_eq!(
-        code[code.len() - chain::DIRECT_EXIT_BYTES..],
-        chain::direct_exit(GuestAddress(base + 4), ExitKind::System)
-    );
+    assert!(chain::is_direct_exit(
+        &code[code.len() - chain::DIRECT_EXIT_BYTES..],
+        GuestAddress(base + 4),
+        ExitKind::System
+    ));
     // Without TPCP, an unmapped Xt faults the native read; the engine
     // takes the level-1 translation fault as a cache maintenance one.
     machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
@@ -5599,19 +6171,23 @@ fn pac_returns_go_through_a_lookup_dispatcher() {
         .unwrap()
         + 1;
     let at = at * NATIVE_CODE_STRIDE;
-    let site = (at + thunk.dynamic.unwrap()) as u64;
+    let site = chain::dynamic_patch((at + thunk.dynamic.unwrap()) as u64);
+    // The probes, then the RET's own tail, which calls the table probe.
+    let installed = machine.host.installed.len();
     let dispatcher = chain::lookup_dispatcher(0).unwrap();
-    assert_eq!(machine.host.installed.last(), Some(&dispatcher));
-    let exit = chain::lookup_exit(
-        site,
-        ExitKind::Return,
-        1,
-        (machine.host.installed.len() * NATIVE_CODE_STRIDE) as u64,
-    )
-    .unwrap();
+    assert_eq!(machine.host.installed[installed - 2], dispatcher);
+    let probes = ((installed - 1) * NATIVE_CODE_STRIDE) as u64;
+    let tail = (installed * NATIVE_CODE_STRIDE) as u64;
+    let probe = probes + chain::PROBE_ENTRY as u64;
+    let code = chain::lookup_tail(tail, ExitKind::Return, 1, probe).unwrap();
+    let exit = chain::jump(site, tail).unwrap();
+    let patches = machine.host.patches.len();
     assert_eq!(
-        machine.host.patches.last(),
-        Some(&(site as usize, exit.to_vec()))
+        machine.host.patches[patches - 2..],
+        [
+            (tail as usize, code.to_vec()),
+            (site as usize, exit.to_vec())
+        ]
     );
     assert_eq!(machine.statistics.lookups, 1);
     assert_eq!(machine.blocks[0].dynamic_site, None);
@@ -5683,7 +6259,10 @@ fn stored_reads_complete_natively_from_the_live_register() {
         kind: ExitKind::Fallthrough as u64,
     }];
     machine.step().unwrap();
-    assert_eq!(machine.stored_reads, [Encoding::new(3, 0, 4, 0, 1)]);
+    assert_eq!(
+        machine.stored_reads.to_vec(),
+        [Encoding::new(3, 0, 4, 0, 1)]
+    );
     let index = MIRRORED.len();
     let cell = cell_place(index);
     let thunk = register_read::stored_thunk(GuestAddress(base + 4), 8, cell);
@@ -5904,7 +6483,7 @@ fn implementation_defined_values_complete_natively_after_the_engine_does() {
     machine.derived_changed();
     machine.host.exits = vec![fall(base + 8), fall(base + 16), fall(base + 24)];
     machine.step().unwrap();
-    assert_eq!(machine.stored_writes, [encoding]);
+    assert_eq!(machine.stored_writes.to_vec(), [encoding]);
     let write = cell_place(stored_write_cell(0));
     let thunk = register_read::checked_write_thunk(GuestAddress(base + 4), 6, write, 0);
     assert_eq!(machine.host.installed.last(), Some(&thunk.code));
@@ -5918,7 +6497,7 @@ fn implementation_defined_values_complete_natively_after_the_engine_does() {
     assert_eq!((cell.readable, cell.value), (1, address));
     // A read completes from the same value.
     machine.step().unwrap();
-    assert_eq!(machine.stored_reads, [encoding]);
+    assert_eq!(machine.stored_reads.to_vec(), [encoding]);
     machine.cpu.pc = base + 12;
     machine.system_instruction(MRS).unwrap();
     assert_eq!(machine.cpu.state.x[8], 0x77);
@@ -5932,7 +6511,10 @@ fn implementation_defined_values_complete_natively_after_the_engine_does() {
     );
     let write = cell_place(stored_write_cell(1));
     let thunk = register_read::checked_write_thunk(GuestAddress(base + 20), 31, write, u64::MAX);
-    assert_eq!(machine.host.installed.last(), Some(&thunk.code));
+    // Then the thunk of the link the exit into its block took at its fetch.
+    let installed = &machine.host.installed;
+    assert_eq!(installed[installed.len() - 2], thunk.code);
+    assert_eq!(installed[installed.len() - 1], [0; chain::THUNK_BYTES]);
 }
 
 /// SEVL and a WFE that finds an event complete natively on the event
@@ -5956,7 +6538,10 @@ fn event_instructions_complete_natively_after_the_engine_does() {
     assert_eq!(machine.host.installed.last(), Some(&send.code));
     machine.step().unwrap();
     let wait = register_read::event_wait_thunk(GuestAddress(base + 12), cell_place(EVENT_WAIT));
-    assert_eq!(machine.host.installed.last(), Some(&wait.code));
+    // Then the thunk of the link the exit into its block took at its fetch.
+    let installed = &machine.host.installed;
+    assert_eq!(installed[installed.len() - 2], wait.code);
+    assert_eq!(installed[installed.len() - 1], [0; chain::THUNK_BYTES]);
     let event = register_read::Cell {
         readable: 1,
         value: machine.cpu.event_storage(),
@@ -5998,7 +6583,7 @@ fn pstate_fields_complete_natively_after_the_engine_does() {
     machine.derived_changed();
     machine.host.exits = vec![fall(base + 8), fall(base + 16)];
     machine.step().unwrap();
-    assert_eq!(machine.stored_writes, [PSTATE_FIELDS[0].0]);
+    assert_eq!(machine.stored_writes.to_vec(), [PSTATE_FIELDS[0].0]);
     let write = cell_place(stored_write_cell(0));
     let written = register_read::Written { keep: DIT, set: 0 };
     let thunk = register_read::stored_write_thunk(GuestAddress(base + 4), 2, write, written);
@@ -6012,7 +6597,7 @@ fn pstate_fields_complete_natively_after_the_engine_does() {
     let cell = machine.mirrors[stored_write_cell(0)];
     assert_eq!((cell.readable, cell.value), (1, address));
     machine.step().unwrap();
-    assert_eq!(machine.stored_reads, [PSTATE_FIELDS[0].0]);
+    assert_eq!(machine.stored_reads.to_vec(), [PSTATE_FIELDS[0].0]);
     machine.cpu.pc = base + 12;
     machine.system_instruction(MRS).unwrap();
     assert_eq!(machine.cpu.state.x[2], DIT);
@@ -6157,11 +6742,28 @@ fn sprr_perm_el0_writes_reopen_its_open_cell() {
     machine.system_instruction(MRS).unwrap();
     assert_eq!(machine.cpu.state.x[8], 0x30);
     assert_eq!(machine.mirrors[thread].readable, 1);
-    // Another SPRR_PERM register's write closes it, and only it.
+    // SPRR_PERM_EL1's write changes translation, but neither the register
+    // an SPRR_PERM_EL0 read names nor its plainness: its cells stay open,
+    // in every state.
+    machine.mirrors.banks[0][SPRR_PERM_MIRROR] = register_read::Cell {
+        readable: 1,
+        value: 0x55,
+    };
+    let generation = machine.translation_generation;
     machine.cpu.state.x[9] = 0x22;
     machine.system_instruction(MSR_SPRR_PERM_EL1).unwrap();
-    assert_eq!(machine.mirrors[SPRR_PERM_MIRROR].readable, 0);
+    assert!(machine.translation_generation > generation);
+    assert_eq!(
+        machine.mirrors[SPRR_PERM_MIRROR],
+        register_read::Cell {
+            readable: 1,
+            value: 0x30
+        }
+    );
+    assert_eq!(machine.mirrors.banks[0][SPRR_PERM_MIRROR].value, 0x55);
     assert_eq!(machine.mirrors[thread].readable, 1);
+    machine.system_instruction(MRS).unwrap();
+    assert_eq!(machine.cpu.state.x[8], 0x30);
     // Without SPRR the write is UNDEFINED and opens nothing.
     machine.system_instruction(MRS).unwrap();
     machine.cpu.state.x[9] = 0;
@@ -6172,6 +6774,10 @@ fn sprr_perm_el0_writes_reopen_its_open_cell() {
     machine.system_instruction(MSR).unwrap();
     assert!(machine.statistics.exceptions > exits);
     assert_eq!(machine.mirrors[SPRR_PERM_MIRROR].readable, 0);
+    // An SPRR_PERM_EL1 write is UNDEFINED too.
+    let exits = machine.statistics.exceptions;
+    machine.system_instruction(MSR_SPRR_PERM_EL1).unwrap();
+    assert!(machine.statistics.exceptions > exits);
 }
 
 /// An exception keeps the device lines; a System register write that
@@ -6277,8 +6883,11 @@ fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
     assert_eq!(machine.block_variant(0).system.zero_block, Some(64));
     let block = &machine.blocks[0];
     let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
-    let tail = chain::direct_exit(next, ExitKind::Fallthrough);
-    assert_eq!(code[code.len() - chain::DIRECT_EXIT_BYTES..], tail);
+    assert!(chain::is_direct_exit(
+        &code[code.len() - chain::DIRECT_EXIT_BYTES..],
+        next,
+        ExitKind::Fallthrough
+    ));
     assert_eq!(block.successors.len(), 1);
     assert_eq!(block.successors[0].target, next);
     // HCR_EL2.TDZ traps DC ZVA at EL1: the PC gets a block that exits.
@@ -6297,10 +6906,11 @@ fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
     assert_eq!(machine.block_variant(1).system.zero_block, None);
     let trapped = &machine.blocks[1];
     let code = &machine.host.installed[trapped.code.0 / NATIVE_CODE_STRIDE - 1];
-    assert_eq!(
-        code[code.len() - chain::DIRECT_EXIT_BYTES..],
-        chain::direct_exit(GuestAddress(base + 4), ExitKind::System)
-    );
+    assert!(chain::is_direct_exit(
+        &code[code.len() - chain::DIRECT_EXIT_BYTES..],
+        GuestAddress(base + 4),
+        ExitKind::System
+    ));
     // Back without TDZ, a store fault in the zeroing hands DC ZVA to the
     // engine, which zeroes the block and continues.
     machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
@@ -6842,7 +7452,8 @@ fn svc_traps_esb_fp_and_debug_only_instructions_follow_the_profile() {
             "{word:#x}"
         );
     }
-    // FPCR's trap enables and fields outside the profile are RAZ/WI.
+    // FPCR keeps its trap enables, as an M1 Pro does; fields outside the
+    // profile are RAZ/WI.
     machine.cpu.set_pstate(Pstate::reset(1));
     for register in [SystemRegister::CPACR_EL1, SystemRegister::CPTR_EL2] {
         machine.cpu.registers.set(register, 0, 0b11 << 20);
@@ -6857,7 +7468,7 @@ fn svc_traps_esb_fp_and_debug_only_instructions_follow_the_profile() {
     } else {
         0
     };
-    assert_eq!(machine.cpu.state.x[1], 0x07c8_0000 | afp);
+    assert_eq!(machine.cpu.state.x[1], 0x07c8_9f00 | afp);
 }
 
 #[test]
@@ -6939,7 +7550,7 @@ fn fpcr_alternate_controls_hold_on_the_chips_with_afp() {
         machine.cpu.state.x[0] = u64::MAX;
         machine.system_instruction(MSR_FPCR_X0).unwrap();
         machine.system_instruction(MRS_X1_FPCR).unwrap();
-        let held = if afp { 0x07c8_0007 } else { 0x07c8_0000 };
+        let held = if afp { 0x07c8_9f07 } else { 0x07c8_9f00 };
         assert_eq!(machine.cpu.state.x[1], held, "{chip:?}");
         assert_eq!(machine.cpu.state.fpcr, held as u32, "{chip:?}");
     }
@@ -7737,21 +8348,15 @@ mod stage2_syndrome;
 #[test]
 fn host_work_holds_the_shared_count_only_for_a_pe_stopped_in_the_kernel() {
     use super::clock::SharedClock;
-    let held_during = |el: u8| {
+    // The count during host work at `el` that outlasts the stall limit.
+    let during = |el: u8| {
         let mut machine = machine(&[]);
         let shared = Arc::new(SharedClock::new(2));
-        machine.clock.attach(Arc::clone(&shared), 0, 0);
-        machine.clock.start_slice(|| 0, 0, 1);
+        machine.clock.attach(Arc::clone(&shared), 0);
         machine.cpu.pstate.el = el;
         let watched = Arc::clone(&shared);
-        let holder = machine.exclude_host_time(|_| watched.status(|| u64::MAX / 2).holder);
-        // Back in guest code, the PE holds the count again.
-        assert_eq!(
-            shared.status(|| u64::MAX / 2).holder.map(|(pe, _)| pe),
-            Some(0)
-        );
-        holder.map(|(pe, _)| pe)
+        machine.exclude_host_time(|_| watched.count(|| u64::MAX / 2))
     };
-    assert_eq!(held_during(1), Some(0), "a kernel lock may be held");
-    assert_eq!(held_during(0), None);
+    assert!(during(1) < u64::MAX / 2, "a kernel lock may be held");
+    assert_eq!(during(0), u64::MAX / 2);
 }

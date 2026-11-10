@@ -140,7 +140,7 @@ fn an_interrupt_borrow_survives_detach_and_reuse_without_a_raw_pointer_lease() {
     let (hub, _) = hub(1);
     let weak = Arc::downgrade(&hub.inboxes[0].chain);
     let (attached, mut control) = Attached::new(&hub, 0, false).unwrap();
-    control.initialize(11, [12, 13]);
+    control.initialize(11, 14, [12, 13]);
     control.begin(9, 99);
     let (ready_tx, ready_rx) = mpsc::channel();
     let (resume_tx, resume_rx) = mpsc::channel();
@@ -165,7 +165,7 @@ fn an_interrupt_borrow_survives_detach_and_reuse_without_a_raw_pointer_lease() {
         "hub retains the physical allocation"
     );
     let (next, mut control) = Attached::new(&hub, 0, false).unwrap();
-    control.initialize(21, [22, 23]);
+    control.initialize(21, 24, [22, 23]);
     control.begin(2, 77);
     resume_tx.send(()).unwrap();
     reader.join().unwrap();
@@ -250,12 +250,12 @@ fn repeated_owner_reuse_keeps_remote_epoch_writes_disjoint() {
         let (attached, mut control) = Attached::new(&hub, 0, false).unwrap();
         assert!(attached.epoch > last);
         last = attached.epoch;
-        control.initialize(index, [index + 1, index + 2]);
+        control.initialize(index, index + 3, [index + 1, index + 2]);
         control.begin(index as usize, 31);
         let state = control.snapshot();
         assert_eq!(
-            (state.block, state.table, state.contexts),
-            (index, index, [index + 1, index + 2])
+            (state.block, state.table, state.itlb, state.contexts),
+            (index, index, index + 3, [index + 1, index + 2])
         );
         drop(attached);
         drop(control);
@@ -721,7 +721,7 @@ fn epoch_exhaustion_is_sticky_across_drain_detach_and_reuse() {
     assert_eq!(exhausted.observed_interrupt_epoch, u64::MAX - 1);
     drop(machine);
     let (_, mut next) = Attached::new(&hub, 0, false).unwrap();
-    next.initialize(11, [12, 13]);
+    next.initialize(11, 14, [12, 13]);
     next.acknowledge_interrupt(u64::MAX);
     next.begin(0, 4096);
     let reused = next.snapshot();
@@ -810,8 +810,12 @@ fn a_host_call_ends_a_run_and_wakes_a_sleeping_pe() {
     hub.inboxes[1].sleeping.store(false, Ordering::SeqCst);
 }
 
+/// A line change publishes the receiver's pins before it moves the
+/// receiver's epoch, so a running receiver reads them at once; a sleeping
+/// one is kicked only after the producer releases the board lock, which no
+/// other PE then waits behind.
 #[test]
-fn a_line_notification_observes_pins_before_the_producer_unlocks() {
+fn a_line_notification_publishes_pins_first_and_kicks_after_the_unlock() {
     #[derive(Default)]
     struct Latched(Lines);
     impl Devices for Latched {
@@ -834,11 +838,10 @@ fn a_line_notification_observes_pins_before_the_producer_unlocks() {
     }
     impl Kick for ReadPins {
         fn kick(&self, pe: usize) {
-            // A receiver may run as soon as it is notified, before the
-            // producer releases the board lock. Latched pins are lockless.
+            // The kick follows the unlock. Latched pins are lockless.
             let mut worker = self.worker.lock().unwrap();
             let worker = worker.as_mut().unwrap();
-            assert!(worker.board.devices.try_lock().is_err());
+            assert!(worker.board.devices.try_lock().is_ok());
             let lines = worker.lines(pe, 0);
             self.observed.lock().unwrap().push(lines);
         }
@@ -950,6 +953,120 @@ impl Devices for Pending {
     }
 }
 
+/// Counts its clock's reads: each board lock reads it once when taken and
+/// once when released.
+struct Ticks(Arc<AtomicUsize>);
+impl Kick for Ticks {
+    fn kick(&self, _pe: usize) {}
+    fn ticks(&self) -> u64 {
+        self.0.fetch_add(1, Ordering::SeqCst) as u64
+    }
+}
+
+/// What follows a write, [`Devices::settle_write`]: the lock, the DMA
+/// under it, the call and the lock after, in that order, from one board
+/// lock.
+#[test]
+fn a_shared_board_settles_a_write_under_one_lock() {
+    use super::super::{LockedMemory, Memory};
+    use crate::machine::mmu::MemoryLocks;
+    const LOCK: MemoryLocks = [Some((0x1000, 0x1fff)), None, None, None];
+    const AFTER: MemoryLocks = [Some((0x1000, 0x2fff)), None, None, None];
+    #[derive(Default)]
+    struct Settling {
+        steps: Vec<&'static str>,
+    }
+    impl Devices for Settling {
+        fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            Ok(0)
+        }
+        fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> Lines {
+            Lines::default()
+        }
+        fn memory_lock(&self) -> MemoryLocks {
+            if self.steps.contains(&"transfer") {
+                AFTER
+            } else {
+                LOCK
+            }
+        }
+        fn transfer(
+            &mut self,
+            cpu: usize,
+            memory: &mut dyn Memory,
+            _: u64,
+        ) -> Result<(), DeviceError> {
+            assert_eq!(cpu, 1);
+            assert!(memory.write(0x800, &[1]));
+            assert!(!memory.write(0x1800, &[1]), "the lock before the DMA");
+            self.steps.push("transfer");
+            Ok(())
+        }
+    }
+    /// RAM below 0x4000 that refuses writes the lock covers.
+    struct Locked(MemoryLocks);
+    impl Memory for Locked {
+        fn read(&mut self, _: u64, _: &mut [u8]) -> bool {
+            true
+        }
+        fn write(&mut self, physical: u64, _: &[u8]) -> bool {
+            !self
+                .0
+                .into_iter()
+                .flatten()
+                .any(|(first, last)| (first..=last).contains(&physical))
+        }
+    }
+    impl LockedMemory for Locked {
+        fn under(&mut self, lock: MemoryLocks) -> &mut dyn Memory {
+            self.0 = lock;
+            self
+        }
+    }
+    let reads = Arc::new(AtomicUsize::new(0));
+    let hub = Hub::new(2, Ticks(Arc::clone(&reads)));
+    let mut worker = SharedDevices::new(Settling::default(), hub).worker();
+    let before = reads.load(Ordering::SeqCst);
+    let settled = worker.settle_write(1, 0, &mut Locked([None; 4]));
+    assert_eq!(reads.load(Ordering::SeqCst) - before, 2, "one lock");
+    assert!(settled.transfer.is_ok() && settled.call.is_none());
+    assert_eq!((settled.lock, settled.after), (LOCK, AFTER));
+    assert_eq!(worker.with(|devices| devices.steps.clone()), ["transfer"]);
+}
+
+/// A handle counts the ticks its calls waited for the board's lock, once.
+#[test]
+fn a_handle_counts_the_ticks_it_waited_for_the_lock() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let hub = Hub::new(2, Ticks(reads));
+    let home = SharedDevices::new(Pending::default(), hub);
+    let mut worker = home.worker();
+    worker.write(1, 0, 4, 0, 0).unwrap();
+    assert_eq!(worker.take_lock_wait(), 0, "uncontended");
+    let board = Arc::clone(&home.board);
+    let held = board.devices.lock().unwrap();
+    let waiter = std::thread::spawn(move || {
+        worker.write(1, 0, 4, 0, 0).unwrap();
+        (worker.take_lock_wait(), worker.take_lock_wait())
+    });
+    // Bounded: the waiter blocks on the lock within five seconds.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while board.waits[Call::Access as usize].load(Ordering::Relaxed) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the waiter never waited"
+        );
+        std::thread::yield_now();
+    }
+    drop(held);
+    let (waited, again) = waiter.join().unwrap();
+    assert!(waited > 0);
+    assert_eq!(again, 0);
+}
+
 #[test]
 fn only_the_registers_the_devices_serve_reach_them() {
     let (hub, _) = hub(2);
@@ -959,6 +1076,34 @@ fn only_the_registers_the_devices_serve_reach_them() {
     assert_eq!(worker.system_register(1, other, Some(1), 0), None);
     assert!(worker.serves_register(SERVED) && !worker.serves_register(other));
     assert_eq!(worker.with(|devices| devices.register_calls), 1);
+}
+
+/// A fast-IPI write (IPI_RR_GLOBAL_EL1) moves only device lines: the
+/// step reads them again, and nothing derived from the PE's registers goes.
+#[test]
+fn a_fast_ipi_write_keeps_what_derives_from_the_pes_registers() {
+    use super::super::tests::board;
+    use stela_contracts::identity::Identity;
+    const MSR: u32 = 0xd51d_f029; // msr s3_5_c15_c0_1, x9
+    let (hub, _) = hub(2);
+    let worker = SharedDevices::new(Pending::default(), hub).worker();
+    let identities = vec![Identity {
+        midr: 0x611f_0320,
+        mpidr: 0x8000_0000,
+        clock: None,
+        caches: None,
+    }];
+    let mut machine = board(&[MSR], worker, identities);
+    machine.native_system();
+    assert!(machine.native_system.is_some());
+    machine.device_lines = Some((Lines::default(), u64::MAX, machine.current));
+    let pc = machine.cpu.pc;
+    machine.cpu.state.x[9] = 1 << 16;
+    machine.system_instruction(MSR).unwrap();
+    assert_eq!(machine.cpu.pc, pc + 4);
+    assert_eq!(machine.devices.with(|devices| devices.register_calls), 1);
+    assert_eq!(machine.device_lines, None, "lines are read again");
+    assert!(machine.native_system.is_some(), "derived state stays");
 }
 
 #[test]

@@ -14,6 +14,18 @@ fn fetched_leaf_bits(base: u64, size: u64) -> [(usize, u64); 2] {
     })
 }
 
+/// Whether `slot`'s bit is set in `bits`.
+fn bit_set(bits: &[u64], slot: u32) -> bool {
+    bits.get(slot as usize / 64)
+        .is_some_and(|word| word & 1 << (slot % 64) != 0)
+}
+
+/// The frame number of the 4 KiB frame holding `physical`, as block keys
+/// name it.
+fn frame_number(physical: u64) -> u64 {
+    chain::key_frame(chain::block_key(physical, 1))
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     /// Check the next [`STALE_CHECKS`] reachable compiled blocks against
     /// the guest bytes they were compiled from, a sweep that goes on where
@@ -71,15 +83,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// The translations of the halves `halves` may have changed with no
     /// control value showing it: their lookup contexts go, so no lookup
-    /// enters a block their entries name, nor does a cached fetch outlive
-    /// what [`Self::fetched_through`] learnt of it.
+    /// translates through their ITLB entries, nor does a cached fetch
+    /// outlive what [`Self::fetched_through`] learnt of it. The block
+    /// table's entries stay: they hold for a frame, whatever maps it.
     pub(super) fn forget_spaces(&mut self, halves: core::ops::RangeInclusive<usize>, cause: usize) {
         self.forget_contexts(halves, cause);
         self.advance_translation_generation();
     }
 
     /// Forget the contexts of `halves` that translate `asid`: what a TLBI of
-    /// one process leaves of the others', which their entries stay good for.
+    /// one process leaves of the others', which their ITLB entries stay good
+    /// for.
     /// ASIDs compare by the eight bits every TCR.AS gives them.
     pub(super) fn forget_asid(&mut self, halves: core::ops::RangeInclusive<usize>, asid: u16) {
         for half in halves {
@@ -202,15 +216,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// Drop the lookup entries of the PCs a TLBI by VA reaches
+    /// Drop the ITLB entries of the pages a TLBI by VA reaches
     /// ([`Self::fetched_span`]): those of every context, or of `asid`'s alone
     /// while no global page was fetched in its span of the lower half, which
     /// only such a page shares. A process's exit reaches the shared libraries
     /// this way, which every other process's entries still hold good for.
-    /// The table finds the entries of the span's PCs in every context from
+    /// The ITLB finds the entries of the span's pages in every context from
     /// its index of where each granule's went (`chain::LookupTable`).
-    /// Contexts stay: the hot PCs of one that went would each cost an exit on
-    /// every PE that runs them.
+    /// Contexts stay: the hot pages of one that went would each cost an exit
+    /// on every PE that runs them. The block table's entries stay too: a
+    /// page translated anew finds them again by its frame.
     pub(super) fn forget_lookups(&mut self, reach: mmu::tlbi::Reach, asid: Option<u16>) {
         let (first, last) = match reach {
             mmu::tlbi::Reach::Nothing => return,
@@ -228,7 +243,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Some(asid) => self.asid_salts(half, asid),
                 None => u64::MAX,
             };
-            if self.targets.forget_range(first..=last, reached) {
+            if self.itlb.forget_range(first..=last, reached) {
                 self.statistics.lookup_forgets[2] += 1;
             }
         }
@@ -318,10 +333,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Forget the blocks compiled from the page holding `physical`, which an
-    /// IC IVAU made stale: a later fetch compiles the page again. Their code
-    /// stays installed until the next full discard.
+    /// IC IVAU made stale, and their lookup entries, which every address
+    /// space mapping the frame shares: a later fetch compiles the page
+    /// again. Their code stays installed until the next full discard.
     pub(super) fn invalidate_code_page(&mut self, physical: u64) {
-        self.pages.remove(&(physical & !(FETCH_PAGE - 1)));
+        self.forget_stored_page(physical & !(FETCH_PAGE - 1));
+        // A forgotten block's exit waits for no block of its page.
+        if self.direct_exit.is_some_and(|(block, _, _)| {
+            (self.blocks[block].physical ^ physical) & !(FETCH_PAGE - 1) == 0
+        }) {
+            self.direct_exit = None;
+        }
+        self.forget_known_key(physical & !(FETCH_PAGE - 1));
+        let frame = frame_number(physical);
+        self.targets.forget_frames(frame..=frame, |_| true);
         if !self.index.forget_page(physical & !(FETCH_PAGE - 1)) {
             return;
         }
@@ -376,13 +401,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// there until it links them to the blocks compiled again. Only indexed
     /// blocks are reached: one replaced in the index was detached then,
     /// and the blocks of a page an IC IVAU forgot whole reach only each
-    /// other, in contexts no lookup or jump names since.
+    /// other, with no lookup entry and in a code generation no jump cache
+    /// entry names since.
     pub(super) fn evict_code(&mut self, range: core::ops::Range<usize>) {
         // A host with nothing to release says so with an empty range, and
         // while memory stays low that comes before every compile.
         if range.is_empty() {
             return;
         }
+        let started = self.host.counter();
         let evicted = self.code_slots.take(&range).unwrap_or_else(|| {
             (0..self.blocks.len())
                 .filter(|&slot| {
@@ -394,12 +421,36 @@ impl<H: Host, D: Devices> Machine<H, D> {
         });
         let mut evicted = evicted;
         evicted.sort_unstable();
-        self.detach(&evicted);
-        for slot in evicted.iter().map(|&slot| slot as usize) {
-            let block = &self.blocks[slot];
-            self.index.forget(block.physical, slot);
+        // An evicted block's slot holds the next block compiled.
+        if self
+            .direct_exit
+            .is_some_and(|(block, _, _)| evicted.binary_search(&(block as u32)).is_ok())
+        {
+            self.direct_exit = None;
         }
+        self.detach(&evicted);
+        // The exits in the range go, and with them their cells.
+        self.targets
+            .release_cells(range.start as u64..=range.end as u64 - 1);
+        // A page's evicted blocks leave its index entries in one pass.
+        let mut pages: Vec<(u64, u32)> = evicted
+            .iter()
+            .map(|&slot| {
+                (
+                    self.blocks[slot as usize].physical & !(FETCH_PAGE - 1),
+                    slot,
+                )
+            })
+            .collect();
+        pages.sort_unstable();
+        let marked = self.marked(&evicted);
+        for page in pages.chunk_by(|a, b| a.0 == b.0) {
+            self.index
+                .forget_marked(page[0].0, |slot| bit_set(&marked, slot));
+        }
+        self.unmark(marked, &evicted);
         for slot in evicted.iter().map(|&slot| slot as usize) {
+            self.census_evicted(slot, started);
             let block = &mut self.blocks[slot];
             if block.taken != 0 {
                 *self.exit_words.entry(block.terminal).or_default() += u64::from(block.taken);
@@ -407,15 +458,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             block.code = NativeCode(0);
             block.taken = 0;
             block.dynamic_site = None;
-            block.successors = Box::default();
+            let successors = core::mem::take(&mut block.successors);
+            self.keep_successor_box(successors);
             self.fault_recovery.remove(&slot);
             self.free_blocks.push(slot);
         }
-        self.scalable_leaves
-            .retain(|_, leaf| !range.contains(&leaf.code.0));
-        if !evicted.is_empty() {
+        if !self.scalable_leaves.is_empty() {
+            self.scalable_leaves
+                .retain(|_, leaf| !range.contains(&leaf.code.0));
+        }
+        self.code_slots.give_back(evicted);
+        if !pages.is_empty() {
             self.statistics.code_evictions += 1;
         }
+        self.install_causes.evict_ticks += self.host.counter().wrapping_sub(started);
     }
 
     /// Make the blocks in the sorted `slots` unreachable: the indexed blocks
@@ -424,7 +480,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// may be the one it reached), and their lookup and jump cache
     /// entries go.
     pub(super) fn detach(&mut self, slots: &[u32]) {
-        let detached = |slot: usize| slots.binary_search(&(slot as u32)).is_ok();
+        let marked = self.marked(slots);
+        let detached = |slot: usize| bit_set(&marked, slot as u32);
         let mut gone: Vec<(u64, u64)> = slots
             .iter()
             .map(|&slot| {
@@ -445,26 +502,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 for exit in self.blocks[source].successors.iter_mut() {
                     if exit.linked && page.binary_search(&(page[0].0, exit.target.0)).is_ok() {
                         exit.linked = false;
-                        let at = exit.site - u64::from(exit.slot);
-                        unlinks.push((at, chain::unlinked(exit.slot.into(), exit.target)));
+                        // Linked, so its point is patchable and in reach.
+                        let unlink = chain::unlinked(exit.site, exit.slot.into())
+                            .expect("a linked exit's patch point");
+                        unlinks.push(unlink);
                     }
                 }
             }
             sources.clear();
         }
         self.page_blocks = sources;
-        for (at, bytes) in unlinks {
-            self.patch_native(NativeCode(at as usize), &bytes);
+        // One store each, which a core running the exit may meet.
+        for (point, instruction) in unlinks {
+            self.host
+                .patch_instruction(NativeCode(point as usize), instruction);
             self.statistics.unlinks += 1;
         }
-        // Lookup entries go by PC, in runs of the pages the PCs are in.
-        let mut pages: Vec<u64> = gone.iter().map(|&(_, pc)| pc & !(FETCH_PAGE - 1)).collect();
-        pages.sort_unstable();
-        pages.dedup();
-        for run in pages.chunk_by(|a, b| a + FETCH_PAGE == *b) {
-            let pcs = run[0]..=run[run.len() - 1] + (FETCH_PAGE - 1);
+        // Lookup entries go by the frames their keys name, in runs.
+        let mut frames: Vec<u64> = gone.iter().map(|&(page, _)| frame_number(page)).collect();
+        frames.dedup();
+        for run in frames.chunk_by(|a, b| a + 1 == *b) {
             self.targets
-                .forget_where(pcs, |entry| detached(entry.block as usize));
+                .forget_frames(run[0]..=run[run.len() - 1], |entry| {
+                    detached(entry.block as usize)
+                });
         }
         // A jump cache entry sits in its PC's slot alone.
         for &(_, pc) in &gone {
@@ -473,18 +534,55 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 *entry = None;
             }
         }
+        self.unmark(marked, slots);
+    }
+
+    /// [`Self::detached_scratch`] with the bits of `slots` set, the rest
+    /// clear: what [`Self::unmark`] takes back.
+    fn marked(&mut self, slots: &[u32]) -> Vec<u64> {
+        let mut marked = core::mem::take(&mut self.detached_scratch);
+        let words = self.blocks.len().div_ceil(64);
+        if marked.len() < words {
+            marked.resize(words, 0);
+        }
+        for &slot in slots {
+            marked[slot as usize / 64] |= 1 << (slot % 64);
+        }
+        marked
+    }
+
+    /// Clear the bits of `slots` in `marked` and keep it for the next.
+    fn unmark(&mut self, mut marked: Vec<u64>, slots: &[u32]) {
+        for &slot in slots {
+            marked[slot as usize / 64] &= !(1 << (slot % 64));
+        }
+        self.detached_scratch = marked;
     }
 
     pub(super) fn discard_code(&mut self, cause: Discard) {
         self.exit_words = self.exit_words();
+        if self.census.is_some() {
+            let now = self.host.counter();
+            for slot in 0..self.blocks.len() {
+                if self.blocks[slot].code.0 != 0 {
+                    self.census_evicted(slot, now);
+                }
+            }
+        }
         self.host.discard_code();
         self.lookup_dispatchers = Default::default();
+        // The block table goes with the code; the ITLB, which names no
+        // block, keeps its translations.
+        self.targets.release_cells(0..=u64::MAX);
+        self.targets.clear();
+        self.direct_exit = None;
         // A running guest normally fills the chunks again after a discard.
         // Return their storage when freeing memory is the reason to discard.
         if matches!(cause, Discard::Memory | Discard::Finished) {
             self.blocks = table::Table::new();
             self.free_blocks = Vec::new();
             self.fault_recovery = recovery::Owners::new();
+            self.spare_pages = Vec::new();
         } else {
             self.blocks.clear();
             self.free_blocks.clear();
@@ -493,6 +591,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.code_slots = Default::default();
         self.index.clear();
         self.pages.clear();
+        self.known_keys.fill(None);
         self.scalable_leaves.clear();
         self.code_generation += 1;
         self.statistics.code_discards[cause as usize] += 1;

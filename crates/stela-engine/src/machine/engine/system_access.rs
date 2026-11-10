@@ -373,6 +373,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             return self.permission_write(word, access);
         }
+        if matches!(
+            access.encoding(),
+            registers::encodings::SPRR_PERM_EL1 | registers::encodings::SPRR_PERM_EL12
+        ) && access.direction() == Direction::Write
+        {
+            return self.kernel_permission_write(word, access);
+        }
         if let Some(index) = written(access) {
             return self.stored_write(word, access, index);
         }
@@ -539,6 +546,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
         step
     }
 
+    /// MSR SPRR_PERM_EL1 or SPRR_PERM_EL12, which XNU makes around its
+    /// writes to protected data: they write the EL1 and EL2 permissions
+    /// alone, so SPRR_PERM_EL0's cells, closed by every SPRR_PERM write,
+    /// reopen as they were in every state. Neither the register an
+    /// SPRR_PERM_EL0 read names nor what decides its plainness changed.
+    fn kernel_permission_write(&mut self, word: u32, access: RegisterAccess) -> Step {
+        let cells = self.mirrors.banks.map(|cells| cells[SPRR_PERM_MIRROR]);
+        let before = self.completion_point();
+        let step = self.register_access(word, access);
+        if step.is_ok() && self.position() == before {
+            for (bank, cell) in self.mirrors.banks.iter_mut().zip(cells) {
+                bank[SPRR_PERM_MIRROR] = cell;
+            }
+        }
+        step
+    }
+
     /// The PC, EL, GXF state and exception count of the PE, which an
     /// instruction that completes without an exception leaves as
     /// [`Self::completion_point`] gives before it.
@@ -672,10 +696,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .devices
             .system_register(self.current, encoding, write, now)?;
         self.device_lines = None;
+        // A fast-IPI write moves only device lines, which the step reads
+        // again: nothing derived from the PE's registers changes.
+        let fast_ipi = crate::machine::fast_ipi::Register::decode(encoding).is_some();
         Some(match (result, write) {
             (Ok(value), None) => RegisterOutcome::Read(value),
             (Ok(_), Some(_)) => RegisterOutcome::Written(registers::Changes {
-                reads_kept: true,
+                reads_kept: !fast_ipi,
+                stored: fast_ipi,
                 ..registers::Changes::default()
             }),
             (Err(reason), _) => RegisterOutcome::Refused(Refusal::UnsupportedSetting(reason)),

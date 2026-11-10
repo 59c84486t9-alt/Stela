@@ -5,7 +5,7 @@ use core::{
     marker::PhantomData,
     sync::atomic::{AtomicU64, Ordering},
 };
-use stela_compiler::x86_64::chain::{ChainControl, lookup_salt};
+use stela_compiler::x86_64::chain::{ChainControl, itlb_salt};
 
 /// By its hub inbox even when no Machine owns the PE. The hub exposes
 /// only the interruption epoch; all other fields belong to its admitted Machine.
@@ -54,6 +54,8 @@ impl Storage {
 /// but cannot be shared; a hub keeps Storage without granting this role.
 pub(super) struct Owner {
     storage: Arc<Storage>,
+    /// The budget the last native call began with ([`Self::begin`]).
+    entered: u64,
     _single_writer: PhantomData<Cell<()>>,
     _attachment: Option<Arc<super::parallel::Attached>>,
 }
@@ -61,6 +63,7 @@ impl Default for Owner {
     fn default() -> Self {
         Self {
             storage: Storage::new(),
+            entered: 0,
             _single_writer: PhantomData,
             _attachment: None,
         }
@@ -77,6 +80,7 @@ impl Owner {
     ) -> Self {
         Self {
             storage,
+            entered: 0,
             _single_writer: PhantomData,
             _attachment: Some(attachment),
         }
@@ -89,7 +93,7 @@ impl Owner {
     }
 
     /// Reset every local field, keeping the inbox's monotonic notification epoch.
-    pub(super) fn initialize(&mut self, table: u64, contexts: [u64; 2]) {
+    pub(super) fn initialize(&mut self, table: u64, itlb: u64, contexts: [u64; 2]) {
         let control = self.storage.control.get();
         // SAFETY: this Owner is the sole local writer, with no native call
         // in progress. Disjoint raw writes never borrow the shared epoch.
@@ -97,7 +101,9 @@ impl Owner {
             core::ptr::addr_of_mut!((*control).retired).write(0);
             core::ptr::addr_of_mut!((*control).block).write(0);
             core::ptr::addr_of_mut!((*control).contexts).write(contexts);
+            core::ptr::addr_of_mut!((*control).salts).write(contexts.map(itlb_salt));
             core::ptr::addr_of_mut!((*control).table).write(table);
+            core::ptr::addr_of_mut!((*control).itlb).write(itlb);
             core::ptr::addr_of_mut!((*control).hits).write(0);
             core::ptr::addr_of_mut!((*control).linked).write(0);
             core::ptr::addr_of_mut!((*control).observed_interrupt_epoch).write(0);
@@ -114,9 +120,13 @@ impl Owner {
                 .write(epoch.min(u64::MAX - 1));
         }
     }
-    pub(super) fn set_table(&mut self, table: u64) {
-        // SAFETY: the sole owner writes this non-budget field outside native execution.
-        unsafe { core::ptr::addr_of_mut!((*self.storage.control.get()).table).write(table) };
+    pub(super) fn set_table(&mut self, table: u64, itlb: u64) {
+        // SAFETY: the sole owner writes these non-budget fields outside native execution.
+        unsafe {
+            let control = self.storage.control.get();
+            core::ptr::addr_of_mut!((*control).table).write(table);
+            core::ptr::addr_of_mut!((*control).itlb).write(itlb);
+        }
     }
     pub(super) fn contexts(&self) -> [u64; 2] {
         // SAFETY: only this Owner or its synchronous native call can write contexts.
@@ -127,7 +137,7 @@ impl Owner {
         unsafe {
             let control = self.storage.control.get();
             core::ptr::addr_of_mut!((*control).contexts).write(contexts);
-            core::ptr::addr_of_mut!((*control).salts).write(contexts.map(lookup_salt));
+            core::ptr::addr_of_mut!((*control).salts).write(contexts.map(itlb_salt));
         }
     }
     pub(super) fn begin(&mut self, block: usize, budget: u64) {
@@ -141,19 +151,30 @@ impl Owner {
             core::ptr::addr_of_mut!((*control).linked).write(0);
         }
         self.budget().store(budget, Ordering::Relaxed);
+        self.entered = budget;
     }
+    /// The block that ended the last native call, the instructions of the
+    /// blocks it chained out of, the transfers lookup probes made and the
+    /// others. Native code counts no other transfers: each spends one of the
+    /// budget, which wraps when a transfer finds none left.
     pub(super) fn completed(&self) -> (u64, u64, u64, u64) {
         let control = self.storage.control.get();
+        let remaining = self.budget().load(Ordering::Relaxed);
+        let chained = if remaining > self.entered {
+            self.entered
+        } else {
+            self.entered - remaining
+        };
         // SAFETY: the synchronous native call has returned; no other owner
         // touches these fields, including while a peer posts an interruption.
-        unsafe {
+        let (block, retired, hits) = unsafe {
             (
                 core::ptr::addr_of!((*control).block).read(),
                 core::ptr::addr_of!((*control).retired).read(),
                 core::ptr::addr_of!((*control).hits).read(),
-                core::ptr::addr_of!((*control).linked).read(),
             )
-        }
+        };
+        (block, retired, hits, chained.saturating_sub(hits))
     }
     #[cfg(test)]
     pub(super) fn weak_storage(&self) -> alloc::sync::Weak<Storage> {
@@ -170,9 +191,11 @@ impl Owner {
             hits,
             linked,
             contexts: self.contexts(),
-            salts: self.contexts().map(lookup_salt),
+            salts: self.contexts().map(itlb_salt),
             // SAFETY: the sole owner observes a non-budget field outside entry.
             table: unsafe { core::ptr::addr_of!((*control).table).read() },
+            // SAFETY: as for `table`.
+            itlb: unsafe { core::ptr::addr_of!((*control).itlb).read() },
             interrupt_epoch: self.storage.interrupt_epoch().load(Ordering::Acquire),
             // SAFETY: only the unique owner writes the observed epoch.
             observed_interrupt_epoch: unsafe {

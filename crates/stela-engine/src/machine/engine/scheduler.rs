@@ -88,6 +88,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Leave the run loop: other PEs' broadcasts stop waiting for this one
     /// until it enters again.
     fn leave_run_loop(&mut self) {
+        // Out of the wait, a PE in WFE has guest work the host's work keeps
+        // from it (`clock`); one waiting for an interrupt or off has none.
+        if !self.waits_for_interrupt() && !self.processor_paused(self.current) {
+            let (retired, phases) = (self.cpu.retired, self.clock_phases());
+            self.clock.busy(|| self.host.counter(), retired, phases);
+        }
         self.observe_parallel_source(SourcePhase::SliceExit);
         if let Some(hub) = &self.parallel {
             hub.set_outside(self.current, true);
@@ -293,8 +299,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if let Some(miss) = self.lookup_miss(last, next_pc, kind, remaining > budget) {
                     self.statistics.lookup_misses[miss] += 1;
                 }
+                let mut slot = kind as usize;
                 if kind == ExitKind::System as u64 && self.step_timing.is_some() {
-                    self.timed_word = Some(self.blocks[last].terminal);
+                    let word = self.timed_system_word(last, next_pc);
+                    if word == step_timing::DEVICE_SITE_KEY {
+                        slot = step_timing::DEVICE_SITE_SLOT;
+                    }
+                    self.timed_word = Some(word);
                 }
                 let exited = self.exit(last, next_pc, kind);
                 if exited.is_ok() {
@@ -311,7 +322,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         _ => {}
                     }
                 }
-                self.timing_exit(kind as usize, returned);
+                self.timing_exit(slot, returned);
                 exited
             }
             NativeExit::Fault(mut fault) => {
@@ -359,12 +370,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if unlinked {
             return Some(0);
         }
-        let context = self.chain.contexts()[chain::half(next_pc)];
-        let slot = chain::lookup_slot(next_pc, context);
-        let entry = self.targets.find(slot, next_pc, context);
-        Some(if entry.pc != next_pc {
-            1
-        } else if entry.context != context {
+        let Some(key) = self.current_key(next_pc) else {
+            return Some(1);
+        };
+        let entry = self
+            .targets
+            .find(chain::lookup_slot(next_pc, key), next_pc, key);
+        Some(if entry.pc != next_pc || entry.key != key {
             2
         } else if spent {
             3
@@ -379,74 +391,125 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// variant. Its BTYPE is 0, as no branch that sets it ends in a direct
     /// exit, and every System register write, exception and device access
     /// that changes what the next fetch checks returns to the engine. An
-    /// exit out of the page goes through a lookup dispatcher instead.
-    pub(super) fn link(&mut self, index: usize, next_pc: u64, word: impl Into<ExitWord>) {
+    /// exit out of the page goes through a cell of the lookup table
+    /// instead ([`Self::link_through_cell`]). An exit in the page whose
+    /// target has no block yet waits for the fetch that compiles it
+    /// ([`Machine::direct_exit`]). Whether the exit is linked now.
+    pub(super) fn link(&mut self, index: usize, next_pc: u64, word: impl Into<ExitWord>) -> bool {
         let word = word.into();
         let block = &self.blocks[index];
         if block.successors.is_empty()
             || self.variants[block.variant.0 as usize].single
             || self.traces.binary_search(&next_pc).is_ok()
         {
-            return;
+            return false;
         }
         let Some(position) = block
             .successors
             .iter()
             .position(|exit| !exit.linked && exit.target.0 == next_pc && exit.word() == word)
         else {
-            return;
+            return false;
         };
         let retired = u32::from(block.instructions) - u32::from(word.skipped);
         if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
-            let site = block.successors[position].site;
-            let site = site + (chain::DIRECT_EXIT_BYTES - chain::LOOKUP_EXIT_BYTES) as u64;
-            if self.redirect_through_lookup(site, retired, word, 0) {
+            let point = chain::direct_patch(block.successors[position].site);
+            if self.link_through_cell(point, next_pc, retired, word) {
                 self.settle_successor(index, position);
+                return true;
             }
-            return;
+            return false;
         }
         let physical = block.physical.wrapping_add(next_pc.wrapping_sub(block.pc));
         let Some(target) = self
             .index
             .get(&self.blocks, next_pc, physical, block.variant)
         else {
-            return;
+            self.direct_exit = Some((index, next_pc, word));
+            return false;
         };
         let exit = block.successors[position];
         let site = exit.site;
         let entry = self.blocks[target].code.0 as u64;
-        if exit.slot != 0 {
-            let at = site - exit.slot as u64;
-            if let Some(code) = chain::link(at, exit.slot.into(), retired, target as u32, entry) {
-                self.patch_native(NativeCode(at as usize), &code);
-                self.blocks[index].successors[position].linked = true;
-                self.statistics.links += 1;
-            }
-            return;
+        // A slot's body runs in the block's own code, once: its patch
+        // point falls into it once it is written ([`chain::link`]).
+        if exit.slot != 0 && !exit.used {
+            let at = site - u64::from(exit.slot);
+            let point = chain::slot_patch(at);
+            let Some((body, code)) =
+                chain::link(at, exit.slot.into(), retired, target as u32, entry)
+                    .filter(|_| chain::patchable(point))
+            else {
+                return false;
+            };
+            self.patch_native(NativeCode(body as usize), &code);
+            self.host
+                .patch_instruction(NativeCode(point as usize), chain::NOP5);
+            let linked = &mut self.blocks[index].successors[position];
+            (linked.linked, linked.used) = (true, true);
+            self.statistics.links += 1;
+            return true;
+        }
+        // Otherwise a thunk: from the slot's point, back to the exit when
+        // no transfer is allowed; or from the exit's own point, which has
+        // loaded the target, returning.
+        let (point, fallback) = match exit.slot {
+            0 => (chain::direct_patch(site), chain::Fallback::Return(word)),
+            slot => (
+                chain::slot_patch(site - u64::from(slot)),
+                chain::Fallback::Jump(site),
+            ),
+        };
+        if !chain::patchable(point) {
+            return false;
         }
         let Ok(thunk) = self.host.install(&[0; chain::THUNK_BYTES]) else {
-            return;
+            return false;
         };
         let at = thunk.0 as u64;
         let (Some(code), Some(jump)) = (
-            chain::thunk(at, retired, target as u32, entry, exit.target, word),
-            chain::jump(site, at),
+            chain::thunk(at, retired, target as u32, entry, fallback),
+            chain::jump(point, at),
         ) else {
-            return;
+            return false;
         };
         self.patch_native(thunk, &code);
-        self.patch_native(NativeCode(site as usize), &jump);
+        self.host
+            .patch_instruction(NativeCode(point as usize), jump);
         self.blocks[index].successors[position].linked = true;
         self.statistics.links += 1;
+        true
+    }
+
+    /// Link the direct exit waiting for a block at `pc`
+    /// ([`Machine::direct_exit`]), which the fetch at `pc` just found or
+    /// compiled: whether it is linked now, so that the exit, not a lookup
+    /// entry, enters the block. Every block discard the exit's block may
+    /// meet forgets it first ([`Self::evict_code`]).
+    pub(super) fn link_direct_exit(&mut self, pc: u64) -> bool {
+        match self.direct_exit.take() {
+            Some((block, target, word)) if target == pc => {
+                let linked = self.link(block, target, word);
+                // The block of the fetch is another variant's.
+                self.direct_exit = None;
+                linked
+            }
+            _ => false,
+        }
     }
 
     /// Drop block `index`'s exit at `position`, now served by a lookup
     /// dispatcher, which names no block.
     fn settle_successor(&mut self, index: usize, position: usize) {
-        let successors = &mut self.blocks[index].successors;
-        let mut remaining = core::mem::take(successors).into_vec();
+        // The old box and the new one are kept boxes ([`Self::successor_box`]).
+        let mut remaining = core::mem::take(&mut self.successor_scratch);
+        remaining.clear();
+        remaining.extend_from_slice(&self.blocks[index].successors);
         remaining.swap_remove(position);
-        *successors = remaining.into_boxed_slice();
+        let settled = self.successor_box(&remaining);
+        self.successor_scratch = remaining;
+        let old = core::mem::replace(&mut self.blocks[index].successors, settled);
+        self.keep_successor_box(old);
     }
 
     /// Redirect block `index`'s exit to the target in RAX, which just left
@@ -476,14 +539,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return;
         }
         let retired = u32::from(block.instructions);
-        if self.redirect_through_lookup(site.get(), retired, kind.into(), btype) {
+        let point = chain::dynamic_patch(site.get());
+        if self.redirect_through_lookup(point, retired, kind.into(), btype) {
             self.blocks[index].dynamic_site = None;
         }
     }
 
-    /// Send the end of the exit of `word` at host address `site`, from a
-    /// block that ran `retired` instructions by a branch that sets `btype`,
-    /// to the lookup dispatcher.
+    /// Send the exit of `word` whose patch point is at host address `site`
+    /// ([`chain::dynamic_patch`]), from a block that ran `retired`
+    /// instructions by a branch that sets `btype`, to a tail of its own that
+    /// calls the table probe of `btype` ([`chain::lookup_tail`]), written
+    /// before the point's jump to it: the jump into each found block is the
+    /// site's, so the host predicts a site's targets apart from every other
+    /// site's. The probe validates every transfer against the ITLB, whose
+    /// entries a TLBI or a context change forgets, and the block table,
+    /// whose entries a release of the block forgets, so a return that
+    /// unwinds past its caller (longjmp, an exception) or returns to a
+    /// poisoned PAC address misses and exits.
     pub(super) fn redirect_through_lookup(
         &mut self,
         site: u64,
@@ -491,20 +563,83 @@ impl<H: Host, D: Devices> Machine<H, D> {
         word: ExitWord,
         btype: u8,
     ) -> bool {
-        let Some(exit) = self
-            .lookup_dispatcher(btype)
-            .and_then(|at| chain::lookup_exit(site, word, retired, at))
-        else {
+        if !chain::patchable(site) {
+            return false;
+        }
+        let Some(probe) = self.lookup_dispatcher(btype) else {
             return false;
         };
-        self.patch_native(NativeCode(site as usize), &exit);
+        let Ok(tail) = self.host.install(&[0; chain::TAIL_BYTES]) else {
+            return false;
+        };
+        let at = tail.0 as u64;
+        let (Some(code), Some(jump)) = (
+            chain::lookup_tail(at, word, retired, probe + chain::PROBE_ENTRY as u64),
+            chain::jump(site, at),
+        ) else {
+            return false;
+        };
+        self.patch_native(tail, &code);
+        self.host.patch_instruction(NativeCode(site as usize), jump);
         self.statistics.lookups += 1;
         true
     }
 
-    /// The dispatcher of `btype`, in the part of the arena new code fills:
-    /// like a thunk, it stays until after every exit that jumps to it, as
-    /// parts go oldest first and those exits are in that part or older ones.
+    /// Link the direct exit of `word` whose patch point is at host address
+    /// `site` ([`chain::direct_patch`]), from a block that ran
+    /// `retired` instructions, to `next_pc` in another page, through a cell
+    /// of the lookup table ([`chain::LookupTable::link_cell`]) and a tail of
+    /// its own ([`chain::cell_tail`]). The cell holds the entry of `next_pc`
+    /// the table holds for the key its page translates to now, and takes the
+    /// next one the table takes: a transfer through it translates the
+    /// target's page through the ITLB and compares the target and the key,
+    /// as a lookup does, without hashing or probing the table, and its jump
+    /// is the site's own. A cell that does not hold the target with that key
+    /// sends the transfer to the table probe. The cell goes with the exit's
+    /// code ([`Self::evict_code`]), and its entry with the block's.
+    pub(super) fn link_through_cell(
+        &mut self,
+        site: u64,
+        next_pc: u64,
+        retired: u32,
+        word: ExitWord,
+    ) -> bool {
+        if !chain::patchable(site) {
+            return false;
+        }
+        let Some(probe) = self.lookup_dispatcher(0) else {
+            return false;
+        };
+        let Ok(tail) = self.host.install(&[0; chain::CELL_TAIL_BYTES]) else {
+            return false;
+        };
+        let current = self.current_key(next_pc).and_then(|key| {
+            let held = self
+                .targets
+                .find(chain::lookup_slot(next_pc, key), next_pc, key);
+            (held.pc == next_pc && held.key == key).then_some(held)
+        });
+        let cell = self.targets.link_cell(site, next_pc, current);
+        let at = tail.0 as u64;
+        let entry = probe + chain::CELL_PROBE_ENTRY as u64;
+        let (Some(code), Some(jump)) = (
+            chain::cell_tail(at, cell, word, retired, entry),
+            chain::jump(site, at),
+        ) else {
+            self.targets.release_cells(site..=site);
+            return false;
+        };
+        self.patch_native(tail, &code);
+        self.host.patch_instruction(NativeCode(site as usize), jump);
+        self.statistics.links += 1;
+        true
+    }
+
+    /// The probes of `btype` ([`chain::lookup_dispatcher`]), in the part of
+    /// the arena new code fills: like a thunk, they stay until after every
+    /// tail that calls them, as parts go oldest first, every tail is in the
+    /// part of its probes, and the exits that jump to a tail are in that part
+    /// or older ones.
     fn lookup_dispatcher(&mut self, btype: u8) -> Option<u64> {
         if let Some(code) = self.lookup_dispatchers[usize::from(btype)] {
             return Some(code.0 as u64);

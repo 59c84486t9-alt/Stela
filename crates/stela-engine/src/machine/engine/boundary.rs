@@ -142,6 +142,20 @@ pub trait Host {
     /// Overwrite installed code at `code` with `bytes`, which the next
     /// native run executes.
     fn patch(&mut self, code: NativeCode, bytes: &[u8]);
+    /// Replace the instruction at the patch point `code`
+    /// (`chain::patchable`), which a core may be running, with
+    /// `instruction`: one aligned 8-byte store of the word holding it
+    /// (`chain::patch_word`), so that a core runs the old instruction or the
+    /// new one, each whole. What the new one reaches is installed or patched
+    /// first. The default is [`Self::patch`], which serves a host on which
+    /// no other core runs this arena's code.
+    fn patch_instruction(
+        &mut self,
+        code: NativeCode,
+        instruction: [u8; stela_compiler::x86_64::chain::PATCH_BYTES],
+    ) {
+        self.patch(code, &instruction);
+    }
     /// Copy an idle installed native extent from this Host's kept
     /// executable owner. Refuse unknown/reclaimed ranges; numeric addresses
     /// alone never authorize reading native memory. Used in dispatcher fault
@@ -601,6 +615,46 @@ pub trait Devices {
     }
     /// Record what a [`Self::take_call`] call came to.
     fn finish_call(&mut self, _outcome: GateOutcome) {}
+    /// What follows a device write by PE `cpu`, in one call: the memory
+    /// controllers' write lock ([`Self::memory_lock`]), the DMA the write
+    /// started ([`Self::transfer`]) on `memory` under that lock, the call it
+    /// made ([`Self::take_call`]), and the lock the DMA left. A board shared
+    /// between PEs takes its lock once for all of them.
+    fn settle_write(&mut self, cpu: usize, now: u64, memory: &mut dyn LockedMemory) -> Settled {
+        let lock = self.memory_lock();
+        let transfer = self.transfer(cpu, memory.under(lock), now);
+        Settled {
+            transfer,
+            lock,
+            call: self.take_call(cpu),
+            after: self.memory_lock(),
+        }
+    }
+    /// The model mapped at `physical`, for reports.
+    fn device_name(&self, _physical: u64) -> Option<&'static str> {
+        None
+    }
+    /// Host counter ticks this handle waited for a shared board's lock
+    /// since the last call.
+    fn take_lock_wait(&mut self) -> u64 {
+        0
+    }
+}
+
+/// Guest RAM as device DMA reaches it, under the memory controllers' write
+/// lock [`Devices::settle_write`] gives it.
+pub trait LockedMemory {
+    fn under(&mut self, lock: super::super::mmu::MemoryLocks) -> &mut dyn Memory;
+}
+
+/// [`Devices::settle_write`]'s answer.
+pub struct Settled {
+    pub transfer: Result<(), DeviceError>,
+    /// The write lock the DMA ran under, which the call runs under too.
+    pub lock: super::super::mmu::MemoryLocks,
+    pub call: Option<GateCall>,
+    /// The write lock after the DMA.
+    pub after: super::super::mmu::MemoryLocks,
 }
 
 /// Guest RAM through the host, as device DMA reaches it.
@@ -646,6 +700,13 @@ impl<H: Host> Memory for HostMemory<'_, H> {
             }
         })?;
         self.host.write_ram_progress(physical, data)
+    }
+}
+
+impl<H: Host> LockedMemory for HostMemory<'_, H> {
+    fn under(&mut self, lock: super::super::mmu::MemoryLocks) -> &mut dyn Memory {
+        self.lock = lock;
+        self
     }
 }
 

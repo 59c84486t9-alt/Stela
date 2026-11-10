@@ -247,9 +247,13 @@ fn pinned_divide_remainder_commits_before_a_polled_exit() {
     };
     assert_eq!(exit.target, PC);
     let at = exit.offset - chain::POLLED_LINK_BYTES;
-    let link = chain::link(at as u64, chain::POLLED_LINK_BYTES, 3, 1, 0).unwrap();
+    // The link at offset 0 as the code's own would be at its offset: the
+    // pad and point alike once the code lands at an aligned address.
+    let (body, link) = chain::link(at as u64, chain::POLLED_LINK_BYTES, 3, 1, 0).unwrap();
     let mut code = block.native.x86_64_code;
-    code[at..exit.offset].copy_from_slice(&link);
+    let point = chain::slot_patch(at as u64) as usize;
+    code[body as usize..body as usize + link.len()].copy_from_slice(&link);
+    code[point..point + chain::PATCH_BYTES].copy_from_slice(&chain::NOP5);
 
     let mut control = chain::ChainControl {
         budget: 1,

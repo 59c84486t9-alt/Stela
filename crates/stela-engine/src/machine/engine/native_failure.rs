@@ -208,11 +208,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
             FaultCause::Guest(guest) => self.data_abort(fault.address, guest, fault.write, false),
             FaultCause::Device { physical } => {
                 let word = self.word(index, pc)?;
-                self.outside_run(|machine| {
+                let site = self.device_site_of(index, pc);
+                let step = self.outside_run(|machine| {
                     machine.completing(pc, |machine| {
                         machine.device_access(word, fault.address, physical, fault.write)
                     })
-                })
+                });
+                // Its next run ends its block before it and completes it
+                // without this fault.
+                if let Some(site) = site {
+                    self.learn_device_site(site);
+                }
+                step
             }
             FaultCause::Translation(unsupported) => {
                 Err(self.unsupported(RequirementKind::Translation(unsupported)))
@@ -264,6 +271,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.translated_pages.insert(page);
         self.first_translated.get_or_insert((pc, address));
         self.statistics.translated_pages += 1;
+        // The frame's entries go: an ITLB key of the old variant then
+        // misses, and the next fetch through it gives its page the new one.
         self.invalidate_code_page(page);
         Ok(())
     }

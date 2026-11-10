@@ -29,9 +29,7 @@ use super::chain_control;
 use super::{
     CanonicalDeviceMemory, CanonicalDeviceWrite, ConsumedPair, ConsumedScalar, ConsumedWrite,
     DeviceError, DeviceReadShape, Devices, Discard, FETCH_PAGE, Fetched, Host, Machine,
-    RequirementKind, Reset, ScalarRead, Start, Step, Variant,
-    clock::{ClockStatus, Pace, SharedClock},
-    processors::Peer,
+    RequirementKind, Reset, ScalarRead, Start, Step, Variant, clock::SharedClock, processors::Peer,
     step_timing,
 };
 use crate::machine::{
@@ -53,7 +51,7 @@ use stela_compiler::aarch64::system::registers::Encoding;
 use stela_contracts::refuse;
 
 mod shared_devices;
-pub use shared_devices::SharedDevices;
+pub use shared_devices::{LockTimes, SharedDevices};
 mod observation;
 pub use observation::{MaterializedSource, SourceObservation, SourcePhase};
 mod profile;
@@ -64,6 +62,18 @@ pub use profile::{BroadcastCounts, BroadcastKind, BroadcastProfile};
 /// in the engine costs it one return through its interrupt handler.
 pub trait Kick: Send + Sync {
     fn kick(&self, pe: usize);
+    /// The host's free-running count, which times how long the PEs wait
+    /// for the devices' lock and hold it ([`SharedDevices::lock_times`]);
+    /// 0 from a host that times nothing.
+    fn ticks(&self) -> u64 {
+        0
+    }
+    /// Runs on the processor that just released the devices' lock, outside
+    /// it: host work its device call left for that processor to do. Whether
+    /// that work completed something the devices should look at now.
+    fn released(&self) -> bool {
+        false
+    }
 }
 
 /// A PE that may use any context's translations ([`Inbox::translating`]).
@@ -223,6 +233,9 @@ struct Inbox {
     lower_globals: Arc<GlobalSpan>,
     /// Its machine's counts, as it last published them ([`Hub::publish`]).
     counts: Mutex<Counts>,
+    /// Its System exits since the home machine last took them
+    /// ([`Hub::add_system_exits`]).
+    system_exits: Mutex<step_timing::SystemExits>,
     source: observation::Slot,
     broadcasts: profile::Slot,
     mail: Mutex<Mail>,
@@ -281,9 +294,19 @@ pub struct Counts {
     pub forwards: u64,
     pub exceptions: u64,
     pub device_accesses: u64,
+    /// Its fetches by where they found their block, and its ITLB's fills
+    /// and new keys ([`super::Statistics::fetches`], `itlb`).
+    pub fetches: [u64; 5],
+    pub itlb: [u64; 2],
     /// TSC ticks in each engine phase ([`step_timing::Phase`]), while
     /// step timing is enabled.
     pub phases: [u64; step_timing::Phase::COUNT],
+    /// Exits handled and the TSC ticks handling them, by
+    /// [`step_timing::StepTiming::exits`]' slots, while step timing is
+    /// enabled.
+    pub exits: [(u64, u64); step_timing::EXIT_SLOTS],
+    /// Its installs and evictions ([`super::InstallCauses`]).
+    pub installs: super::InstallCauses,
 }
 
 /// The cluster state its powered PEs share.
@@ -320,6 +343,8 @@ pub struct Hub {
     source_observations: AtomicBool,
     /// The fetch pages any PE may have compiled from ([`Hub::compiling`]).
     code_pages: CodePages,
+    /// Which PEs hold each block installed, for `--profile`'s counts.
+    pub(super) installs: super::install_census::Live,
 }
 
 /// Which physical fetch pages any PE may have compiled from, as a filter:
@@ -391,6 +416,7 @@ impl Hub {
                     applied: AtomicU64::new(0),
                     lines: AtomicU64::new(0),
                     counts: Mutex::new(Counts::default()),
+                    system_exits: Mutex::new(step_timing::SystemExits::default()),
                     source: observation::Slot::default(),
                     broadcasts: profile::Slot::default(),
                     mail: Mutex::new(Mail::default()),
@@ -410,17 +436,47 @@ impl Hub {
             service: AtomicBool::new(false),
             code_pages: CodePages::new(),
             source_observations: AtomicBool::new(false),
+            installs: super::install_census::Live::default(),
         })
+    }
+
+    /// The host's count for timing lock waits ([`Kick::ticks`]).
+    pub(super) fn ticks(&self) -> u64 {
+        self.kick.ticks()
     }
 
     pub fn pes(&self) -> usize {
         self.inboxes.len()
     }
 
-    /// The count every PE reads, at the host's counter `counter`, and the
-    /// PE whose horizon holds it, if one does.
-    pub fn clock(&self, counter: impl FnMut() -> u64) -> ClockStatus {
-        self.clock.status(counter)
+    /// The count every PE reads, at the host's counter `counter`.
+    pub fn clock(&self, counter: impl FnMut() -> u64) -> u64 {
+        self.clock.count(counter)
+    }
+
+    /// Host counts the count waited for PEs stopped in the kernel since the
+    /// last call ([`SharedClock::take_stalled`]).
+    pub fn clock_stalled(&self) -> u64 {
+        self.clock.take_stalled()
+    }
+
+    /// Each PE's longest gap with guest work and no instruction retired
+    /// since the last call, in counts, and the phase that took most of it
+    /// ([`SharedClock::take_stalls`]): a step loop phase's name, `host` for
+    /// host work outside the step loop, `?` without step timing.
+    pub fn clock_stalls(&self) -> Vec<(u64, &'static str)> {
+        self.clock
+            .take_stalls()
+            .into_iter()
+            .map(|(ticks, phase)| {
+                let name = match step_timing::Phase::ALL.get(usize::from(phase)) {
+                    Some(phase) => phase.name(),
+                    None if phase == super::clock::STALL_HOST => "host",
+                    None => "?",
+                };
+                (ticks, name)
+            })
+            .collect()
     }
 
     /// Enable optional owner observations. This changes no guest, mailbox,
@@ -694,16 +750,39 @@ impl Hub {
             .unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Add System exits PE `pe`'s machine took
+    /// ([`Machine::take_system_exits`]), for the home machine's reports.
+    pub fn add_system_exits(&self, pe: usize, exits: &step_timing::SystemExits) {
+        if exits.is_empty() {
+            return;
+        }
+        self.inboxes[pe]
+            .system_exits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .merge(exits);
+    }
+
+    /// PE `pe`'s System exits added since the last call.
+    pub fn take_system_exits(&self, pe: usize) -> step_timing::SystemExits {
+        core::mem::take(
+            &mut *self.inboxes[pe]
+                .system_exits
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        )
+    }
+
     /// The count of device line changes PE `pe` has had.
     pub(super) fn lines_epoch(&self, pe: usize) -> u64 {
         self.inboxes[pe].lines.load(Ordering::Acquire)
     }
 
-    fn lines_changed(&self, pe: usize, now: u64) {
-        self.clock.hold_woken(pe, now);
+    /// PE `pe`'s device lines changed; the caller wakes it ([`Self::wake`])
+    /// once it has released the devices' lock.
+    fn lines_changed_unwoken(&self, pe: usize) {
         self.inboxes[pe].lines.fetch_add(1, Ordering::SeqCst);
         self.interrupt(pe);
-        self.wake(pe);
     }
 
     /// The state of the physical cluster `key`, made by `make` if no PE of
@@ -1011,13 +1090,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             impdef: self.cpu.apple.impdef.cluster_registers(),
         });
         let host = self.host.counter();
-        let pace = Pace::new(self.profile.counter_frequency);
-        self.clock.seed(&hub.clock, host, pace);
-        self.clock.attach(
-            Arc::clone(&hub.clock),
-            self.current,
-            self.cpu.retired >> super::clock::PACE_UNIT_SHIFT,
-        );
+        self.clock
+            .seed(&hub.clock, host, self.profile.counter_frequency);
+        self.clock.attach(Arc::clone(&hub.clock), self.current);
         hub.home.store(self.current, Ordering::Relaxed);
         self.share_kept_pages(hub.pes());
         self.share_lower_globals(&hub);
@@ -1031,7 +1106,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn adopt_parallel_control(&mut self, control: chain_control::Owner) {
         let contexts = self.chain.contexts();
         self.chain = control;
-        self.chain.initialize(self.targets.address(), contexts);
+        self.chain
+            .initialize(self.targets.address(), self.itlb.address(), contexts);
     }
 
     /// Whether this machine runs one PE of a board whose PEs each run on
@@ -1066,11 +1142,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 *peer = Peer::Remote;
             }
         }
-        self.clock.attach(
-            Arc::clone(&hub.clock),
-            self.current,
-            self.cpu.retired >> super::clock::PACE_UNIT_SHIFT,
-        );
+        self.clock.attach(Arc::clone(&hub.clock), self.current);
         self.idle_skip = false;
         self.cpu.core_locks = core_locks;
         self.cpu.memory_lock = self.devices.memory_lock();
@@ -1183,15 +1255,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Run `work`, which uses no translation this PE may hold and can take
     /// long, without holding up the other PEs' broadcasts: a device access
-    /// behind another PE's, or a halt and the timer around it. This PE
-    /// reads its mail before it uses one again.
-    pub(super) fn outside_run<R>(&mut self, work: impl FnOnce(&mut Self) -> R) -> R {
-        if let Some(hub) = &self.parallel {
-            hub.set_outside(self.current, true);
-        }
+    /// behind another PE's, a halt and the timer around it, or the host's
+    /// work between two of the run loop's slices. This PE reads its mail
+    /// before it uses one again. Nested, the outer run's state returns.
+    pub fn outside_run<R>(&mut self, work: impl FnOnce(&mut Self) -> R) -> R {
+        let was = self.parallel.as_ref().map(|hub| {
+            hub.inboxes[self.current]
+                .outside
+                .swap(true, Ordering::SeqCst)
+        });
         let result = work(self);
-        if let Some(hub) = &self.parallel {
-            hub.set_outside(self.current, false);
+        if let (Some(hub), Some(was)) = (&self.parallel, was) {
+            hub.set_outside(self.current, was);
         }
         result
     }
@@ -1450,10 +1525,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             forwards: statistics.forwards,
             exceptions: statistics.exceptions,
             device_accesses: statistics.device_accesses,
+            fetches: statistics.fetches,
+            itlb: statistics.itlb,
             phases: self
                 .step_timing
                 .as_ref()
                 .map_or([0; step_timing::Phase::COUNT], |timing| timing.phases),
+            exits: self
+                .step_timing
+                .as_ref()
+                .map_or([(0, 0); step_timing::EXIT_SLOTS], |timing| timing.exits),
+            installs: self.install_causes(),
         }
     }
 
@@ -1584,6 +1666,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn forward(&mut self, access: Forwarded) -> Result<Answer, DeviceError> {
         let hub = Arc::clone(self.parallel.as_ref().expect("forwarded in parallel"));
         let started = self.host.counter();
+        let timed = self.timing_start();
         self.observe_parallel_source(SourcePhase::ForwardEnter);
         hub.set_parked(self.current, true);
         let mut applied = Ok(());
@@ -1607,6 +1690,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         hub.set_parked(self.current, false);
         self.statistics.forwards += 1;
         self.statistics.sync_ticks += self.host.counter().wrapping_sub(started);
+        if self.step_timing.is_some() {
+            let ticks = self.timing_since(timed);
+            let devices = &mut self.system_exits.devices;
+            devices.forwarded += 1;
+            devices.forwarded_ticks += ticks;
+        }
         self.observe_parallel_source(SourcePhase::ForwardExit);
         // The mail applied meanwhile settles first: its refusal is this
         // access's.
@@ -1626,8 +1715,10 @@ pub(super) fn broadcasts(scope: &tlbi::Scope) -> bool {
 /// counts the contended ones by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Call {
-    /// A device register access or a DMA transfer.
+    /// A device register access.
     Access,
+    /// The devices' DMA transfers, which the home machine runs.
+    Transfer,
     /// The lines the devices drive into a PE.
     Lines,
     /// The devices' next deadline.
@@ -1640,8 +1731,9 @@ pub enum Call {
 }
 
 impl Call {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Access,
+        Self::Transfer,
         Self::Lines,
         Self::Deadline,
         Self::Register,
@@ -1652,6 +1744,7 @@ impl Call {
     pub fn name(self) -> &'static str {
         match self {
             Self::Access => "access",
+            Self::Transfer => "transfer",
             Self::Lines => "lines",
             Self::Deadline => "deadline",
             Self::Register => "register",

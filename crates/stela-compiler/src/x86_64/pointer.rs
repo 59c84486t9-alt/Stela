@@ -254,6 +254,25 @@ pub struct Thunk {
     pub dynamic: Option<usize>,
 }
 
+impl Thunk {
+    /// The thunk of `code`, its exits at `next` and `dynamic` padded for
+    /// their patch points (`chain::direct_patch`, `chain::dynamic_patch`):
+    /// code installs at 8-byte aligned addresses.
+    pub(crate) fn new(mut code: Vec<u8>, next: Option<usize>, dynamic: Option<usize>) -> Self {
+        if let Some(next) = next {
+            super::chain::align_direct_exit(&mut code, next, 0);
+        }
+        if let Some(dynamic) = dynamic {
+            super::chain::align_dynamic_exit(&mut code, dynamic, 0);
+        }
+        Self {
+            code,
+            next,
+            dynamic,
+        }
+    }
+}
+
 /// Where a memo lookup goes besides its hit, which leaves the result in RAX:
 /// to the original exit while the key is not open, to the completion with the
 /// pointer itself while it is disabled, and to the service on a miss.
@@ -419,11 +438,7 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     asm.bind(failed);
     super::block::direct_exit_with(&mut asm, pc, ExitKind::PointerAuthentication);
     resolve(&mut code, back, complete);
-    Thunk {
-        code: code.into_bytes(),
-        next,
-        dynamic,
-    }
+    Thunk::new(code.into_bytes(), next, dynamic)
 }
 
 #[cfg(test)]
