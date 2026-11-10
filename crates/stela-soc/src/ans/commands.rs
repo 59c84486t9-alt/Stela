@@ -10,7 +10,7 @@
 //! completion.
 use super::{
     Ans, COMMAND_BYTES, COMPLETION_BYTES, MODE_RESTORE, NVMMU_PAGE_BYTES, Queue, bfh, die,
-    namespace::ReadPlan,
+    namespace::{Namespace, ReadPlan},
     prp::{MAX_TRANSFER, Prps, dma_error},
     tunables,
 };
@@ -746,9 +746,9 @@ impl Ans {
         inline: Option<InlineKey>,
         port: &mut Port<'_, '_>,
     ) -> Result<Executed> {
-        if self.medium.namespace(cmd.nsid()).is_none() {
+        let Some(namespace) = self.medium.namespace(cmd.nsid()) else {
             return Ok(Executed::Done(Outcome::status(INVALID_NAMESPACE)));
-        }
+        };
         if inline.is_some() && !matches!(cmd.opcode(), READ | WRITE) {
             return Err(refuse!(
                 "ANS inline crypto on an I/O command other than read or write is not modeled"
@@ -777,7 +777,9 @@ impl Ans {
             return Ok(Executed::Done(Outcome::status(SUCCESS)));
         }
         if cmd.opcode() == DATASET_MANAGEMENT {
-            return self.dataset_management(cmd, port).map(Executed::Done);
+            return self
+                .dataset_management(cmd, namespace, port)
+                .map(Executed::Done);
         }
         let controls = cmd.word(48);
         // CDW13 carries hints the controller may ignore, from
@@ -928,7 +930,12 @@ impl Ans {
     /// the host disk deallocates them in the background
     /// ([`super::host::Discards`]), which lets an SSD erase them ahead of
     /// its next write.
-    fn dataset_management(&mut self, cmd: &Command, port: &mut Port<'_, '_>) -> Result<Outcome> {
+    fn dataset_management(
+        &mut self,
+        cmd: &Command,
+        namespace: Namespace,
+        port: &mut Port<'_, '_>,
+    ) -> Result<Outcome> {
         let count = cmd.word(40);
         if count & !0xff != 0 || cmd.word(44) != DEALLOCATE || !cmd.zero_words(48) {
             return Err(refuse!(
@@ -951,7 +958,7 @@ impl Ans {
             let lba = u64::from_le_bytes(range[8..].try_into().unwrap());
             let fits = lba
                 .checked_add(blocks)
-                .is_some_and(|end| end <= self.medium.namespace(cmd.nsid()).unwrap().blocks);
+                .is_some_and(|end| end <= namespace.blocks);
             if !fits {
                 return Ok(Outcome::status(LBA_RANGE));
             }

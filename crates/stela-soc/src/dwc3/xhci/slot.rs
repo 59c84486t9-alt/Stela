@@ -53,6 +53,8 @@ const MAX_TD_TRBS: usize = 64;
 const PACKETS_PER_SERVICE: usize = 512;
 /// Tries at a NAKed SET_ADDRESS status stage before Address Device fails.
 const CONTROL_RETRIES: usize = 8;
+/// A transfer runs only on an endpoint that holds its gathered TD.
+const RUNNING_TD: &str = "the running endpoint holds its gathered TD";
 
 const NORMAL: u32 = 1;
 const SETUP: u32 = 2;
@@ -330,6 +332,14 @@ impl Xhci {
             .flatten()
     }
 
+    /// Slot ID `id`'s slot, which the caller found enabled. Only Disable
+    /// Slot and a controller reset free a slot, so it stays enabled while
+    /// one of its commands or transfers runs.
+    fn enabled_slot(&mut self, id: usize) -> &mut Slot {
+        self.slot_mut(id)
+            .expect("a slot stays enabled while its command or transfer runs")
+    }
+
     /// Whether the root port numbered `number` has an enabled device.
     fn port_ready(&self, number: usize) -> bool {
         (1..=self.ports.len()).contains(&number) && self.ports[number - 1].enabled()
@@ -379,7 +389,7 @@ impl Xhci {
         if !bsr && !Self::set_address(device, id as u8)? {
             return Ok(TRANSACTION_ERROR);
         }
-        let slot = self.slot_mut(id).unwrap();
+        let slot = self.enabled_slot(id);
         slot.state = if bsr {
             SlotState::Default
         } else {
@@ -476,7 +486,7 @@ impl Xhci {
         } else {
             None
         };
-        let slot = self.slot_mut(id).unwrap();
+        let slot = self.enabled_slot(id);
         for dci in 2..=ENDPOINTS {
             if drop & 1 << dci != 0 {
                 slot.endpoints[dci - 1] = Endpoint::disabled();
@@ -789,7 +799,7 @@ impl Xhci {
                 if self.port_ready(root) && !self.ports[root - 1].active() {
                     break;
                 }
-                let endpoint = &mut self.slot_mut(id).unwrap().endpoints[dci - 1];
+                let endpoint = &mut self.enabled_slot(id).endpoints[dci - 1];
                 if endpoint.state != EpState::Running {
                     continue;
                 }
@@ -827,12 +837,12 @@ impl Xhci {
         budget: &mut usize,
     ) -> Result<()> {
         let now = port.access.now;
-        let slot = self.slot_mut(id).unwrap();
+        let slot = self.enabled_slot(id);
         let (root, route) = (slot.port(), slot.route());
         let present = self.port_ready(root);
         let mut found = false;
         while *budget > 0 {
-            let endpoint = &mut self.slot_mut(id).unwrap().endpoints[dci - 1];
+            let endpoint = &mut self.enabled_slot(id).endpoints[dci - 1];
             if endpoint.td.is_none() {
                 match Self::gather(port, endpoint.ring, dci)? {
                     Some(td) => endpoint.td = Some(td),
@@ -857,12 +867,12 @@ impl Xhci {
                 .and_then(|f| usb::route(f, route));
             match self.run_td(port, device, id, dci, budget)? {
                 Step::Done => {
-                    let endpoint = &mut self.slot_mut(id).unwrap().endpoints[dci - 1];
-                    let td = endpoint.td.take().unwrap();
+                    let endpoint = &mut self.enabled_slot(id).endpoints[dci - 1];
+                    let td = endpoint.td.take().expect(RUNNING_TD);
                     endpoint.ring = td.after;
                 }
                 Step::Nak => {
-                    let endpoint = &mut self.slot_mut(id).unwrap().endpoints[dci - 1];
+                    let endpoint = &mut self.enabled_slot(id).endpoints[dci - 1];
                     endpoint.waiting = true;
                     endpoint.next = now.saturating_add(endpoint.period());
                     return Ok(());
@@ -974,9 +984,9 @@ impl Xhci {
 
     /// Halts the endpoint at the current TRB with `code`.
     fn halt(&mut self, port: &mut Port<'_, '_>, id: usize, dci: usize, code: u32) -> Result<Step> {
-        let slot = self.slot_mut(id).unwrap();
+        let slot = self.enabled_slot(id);
         let endpoint = &mut slot.endpoints[dci - 1];
-        let td = endpoint.td.take().unwrap();
+        let td = endpoint.td.take().expect(RUNNING_TD);
         let trb = td.trbs[td.index.min(td.trbs.len() - 1)];
         endpoint.state = EpState::Halted;
         endpoint.rung = false;
@@ -992,10 +1002,10 @@ impl Xhci {
     }
 
     fn td(&mut self, id: usize, dci: usize) -> &mut Td {
-        self.slot_mut(id).unwrap().endpoints[dci - 1]
+        self.enabled_slot(id).endpoints[dci - 1]
             .td
             .as_mut()
-            .unwrap()
+            .expect(RUNNING_TD)
     }
 
     /// Runs the endpoint's TD from its cursor until it completes, NAKs or
@@ -1008,7 +1018,7 @@ impl Xhci {
         dci: usize,
         budget: &mut usize,
     ) -> Result<Step> {
-        let max_packet = self.slot_mut(id).unwrap().endpoints[dci - 1].max_packet();
+        let max_packet = self.enabled_slot(id).endpoints[dci - 1].max_packet();
         let endpoint_address = address(dci);
         loop {
             let td = self.td(id, dci);
@@ -1059,7 +1069,7 @@ impl Xhci {
                         continue;
                     }
                     let mut setup = trb.parameter.to_le_bytes();
-                    let route = self.slot_mut(id).unwrap().route();
+                    let route = self.enabled_slot(id).route();
                     self.note(format!("slot {id} route {route:#x} SETUP {setup:02x?}"));
                     match function.packet(endpoint_address, Token::Setup, &mut setup)? {
                         Reply::Ack(8) => {
