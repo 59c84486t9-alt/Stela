@@ -91,19 +91,28 @@ void dma_free_attrs(struct device *dev, size_t size, void *cpu_addr, dma_addr_t 
 		get_dma_ops(dev)->free(dev, size, cpu_addr, dma_handle, attrs);
 }
 
+/* Linux __dma_alloc_pages: a bus whose operations allocate no pages gives
+ * none, and the caller falls back or fails as it would there. */
 struct page *dma_alloc_pages(struct device *dev, size_t size, dma_addr_t *dma_handle,
 			     enum dma_data_direction dir, gfp_t gfp)
 {
-	if (stela_linux_kernel_hosted())
+	const struct dma_map_ops *ops = get_dma_ops(dev);
+
+	if (stela_linux_kernel_hosted() || !ops->alloc_pages_op)
 		return NULL;
 	gfp &= ~(__GFP_DMA | __GFP_DMA32 | __GFP_HIGHMEM);
-	return get_dma_ops(dev)->alloc_pages_op(dev, PAGE_ALIGN(size), dma_handle, dir, gfp);
+	return ops->alloc_pages_op(dev, PAGE_ALIGN(size), dma_handle, dir, gfp);
 }
 
+/* Only pages dma_alloc_pages returned come back here, and it returns none
+ * without the operation. */
 void dma_free_pages(struct device *dev, size_t size, struct page *page, dma_addr_t dma_handle,
 		    enum dma_data_direction dir)
 {
-	get_dma_ops(dev)->free_pages(dev, PAGE_ALIGN(size), page, dma_handle, dir);
+	const struct dma_map_ops *ops = get_dma_ops(dev);
+
+	if (page && ops->free_pages)
+		ops->free_pages(dev, PAGE_ALIGN(size), page, dma_handle, dir);
 }
 
 static bool supported(struct device *dev, u64 mask)
