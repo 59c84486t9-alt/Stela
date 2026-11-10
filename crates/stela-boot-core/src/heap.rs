@@ -413,6 +413,9 @@ pub struct Usage {
 pub struct Heap {
     held: AtomicBool,
     failure_reported: AtomicBool,
+    /// Allocations that found no memory, the first of them reported; a
+    /// fallible caller such as `try_reserve` survives the rest.
+    failures: AtomicU64,
     /// Where the first failed allocation is reported; it must not allocate.
     failure_sink: fn(core::fmt::Arguments<'_>),
     state: UnsafeCell<State>,
@@ -454,6 +457,7 @@ impl Heap {
         Self {
             held: AtomicBool::new(false),
             failure_reported: AtomicBool::new(false),
+            failures: AtomicU64::new(0),
             failure_sink: |_| {},
             cores: [const { Core::new() }; CPUS],
             tagged: AtomicUsize::new(0),
@@ -883,6 +887,12 @@ impl Heap {
         count.store(count.load(Ordering::Relaxed) + bytes, Ordering::Relaxed);
     }
 
+    /// Ordinary allocations that found no memory so far; only the first is
+    /// reported in full.
+    pub fn failures(&self) -> u64 {
+        self.failures.load(Ordering::Relaxed)
+    }
+
     /// Acquisitions of the heap's lock that found it held: with every PE
     /// on a core of its own, the cores' allocations meet there.
     pub fn waits(&self) -> u64 {
@@ -1105,6 +1115,7 @@ unsafe impl GlobalAlloc for Heap {
             unsafe { allocate_locked(state, layout, class) }
         };
         if block.is_null() {
+            self.failures.fetch_add(1, Ordering::Relaxed);
             failure::report(self, layout);
         } else if let Some(cpu) = cpu {
             self.count_own(cpu, layout, class, true);

@@ -1,10 +1,15 @@
 //! First failed ordinary allocation: no allocation, waiting or caller formatter.
-use super::{Heap, Usage};
+use super::{CLASSES, CPUS, Heap, Usage};
 use core::{alloc::Layout, fmt, sync::atomic::Ordering};
 
 struct Report {
     layout: Layout,
     usage: Option<Usage>,
+    /// Live size-class bytes by class, and each tagged core's own bytes, as
+    /// the relaxed per-core counters hold them.
+    classes: [isize; CLASSES],
+    cores: [isize; CPUS],
+    tagged: usize,
 }
 
 fn capture(heap: &Heap, layout: Layout) -> Option<Report> {
@@ -23,7 +28,19 @@ fn capture(heap: &Heap, layout: Layout) -> Option<Report> {
         drop(guard);
         usage
     });
-    Some(Report { layout, usage })
+    let mut cores = [0; CPUS];
+    let mut tagged = 0;
+    for (slot, own) in cores.iter_mut().zip(heap.owned()) {
+        *slot = own;
+        tagged += 1;
+    }
+    Some(Report {
+        layout,
+        usage,
+        classes: heap.class_live(),
+        cores,
+        tagged,
+    })
 }
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -34,13 +51,32 @@ impl fmt::Display for Report {
             self.layout.align()
         )?;
         match self.usage {
-            Some(usage) => writeln!(
-                f,
-                " snapshot=locked-metadata live_estimate={} cpu_counters=relaxed total={} carved={} peak={} largest={}",
-                usage.live, usage.total, usage.carved, usage.peak, usage.largest
-            ),
-            None => writeln!(f, " snapshot=unavailable"),
+            Some(usage) => {
+                writeln!(
+                    f,
+                    " snapshot=locked-metadata live_estimate={} cpu_counters=relaxed total={} carved={} peak={} largest={}",
+                    usage.live, usage.total, usage.carved, usage.peak, usage.largest
+                )?;
+                // The live free-list allocations by power of two from 4 KiB,
+                // where a size holds a megabyte or more, as HEAP lines give them.
+                f.write_str("HEAP AT FAILURE large")?;
+                for (bucket, &(count, bytes)) in usage.large.iter().enumerate() {
+                    if bytes >= 1 << 20 {
+                        write!(f, " {}K:{count}/{}M", 4 << bucket, bytes >> 20)?;
+                    }
+                }
+            }
+            None => f.write_str(" snapshot=unavailable\nHEAP AT FAILURE")?,
         }
+        f.write_str(" classes")?;
+        for (class, &bytes) in self.classes.iter().enumerate() {
+            write!(f, " {}:{}M", 16 << class, bytes >> 20)?;
+        }
+        f.write_str(" cores")?;
+        for &own in &self.cores[..self.tagged] {
+            write!(f, " {}M", own >> 20)?;
+        }
+        writeln!(f)
     }
 }
 

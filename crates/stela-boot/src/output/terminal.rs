@@ -18,16 +18,18 @@ fn print_stack() {
     let stack: *const u64;
     // SAFETY: reads the stack pointer.
     unsafe { asm!("mov {}, rsp", out(reg) stack, options(nomem, nostack, preserves_flags)) };
-    // SAFETY: a panic runs far enough from its stack's end for these.
+    // SAFETY: the stack pointer's own page is mapped.
     unsafe { print_stack_at(stack) };
 }
 
-/// [`print_stack`], from `stack`.
+/// [`print_stack`], from `stack` to the end of its page, at most 512 words:
+/// the page above may be a stack's guard, and a fault here would halt this
+/// processor before the failure stops the machine.
 ///
 /// # Safety
-/// `stack` reads as 512 words.
+/// `stack`'s page reads from `stack` on.
 pub(crate) unsafe fn print_stack_at(stack: *const u64) {
-    const WORDS: usize = 512;
+    const PAGE: usize = 4096;
     const SHOWN: usize = 32;
     unsafe extern "C" {
         static __ImageBase: u8;
@@ -43,7 +45,8 @@ pub(crate) unsafe fn print_stack_at(stack: *const u64) {
                 .read_unaligned(),
         )
     };
-    let offsets = (0..WORDS)
+    let words = (PAGE - stack.addr() % PAGE) / 8;
+    let offsets = (0..words.min(512))
         // SAFETY: the caller's.
         .map(|word| unsafe { stack.add(word).read() }.wrapping_sub(base))
         .filter(|&offset| offset < bytes)

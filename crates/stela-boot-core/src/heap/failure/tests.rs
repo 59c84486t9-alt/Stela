@@ -54,7 +54,7 @@ fn first_exhaustion_reports_once_without_allocating() {
     assert!(reported.contains("bytes=16 align=16 snapshot=locked-metadata"));
     assert!(reported.contains("live_estimate="));
     assert!(reported.contains("cpu_counters=relaxed total=4096"));
-    assert!(reported.contains("largest=0\n"));
+    assert!(reported.contains("largest=0\nHEAP AT FAILURE large classes 16:0M"));
     // SAFETY: as above; this second failure must not report again.
     assert!(unsafe { heap.alloc(layout) }.is_null());
     REPORTED.with(|text| assert_eq!(text.borrow().as_str(), reported));
@@ -71,7 +71,8 @@ fn held_metadata_reports_unavailable_once() {
     write!(&mut text, "{report}").unwrap();
     assert_eq!(
         text.as_str(),
-        "HEAP ALLOCATION FAILURE bytes=14 align=2 snapshot=unavailable\n"
+        "HEAP ALLOCATION FAILURE bytes=14 align=2 snapshot=unavailable\n\
+         HEAP AT FAILURE classes 16:0M 32:0M 64:0M 128:0M 256:0M 512:0M 1024:0M 2048:0M 4096:0M cores\n"
     );
     assert!(capture(&heap, Layout::new::<u8>()).is_none());
     drop(guard);
