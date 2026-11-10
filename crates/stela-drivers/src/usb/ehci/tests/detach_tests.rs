@@ -100,6 +100,7 @@ fn disable_preflight_preserves_pending_bulk_periodic_and_private_suspend_owners(
             owner: Rc::new(()),
             generation: id.generation,
             port: id.port,
+            slot: id.slot,
         };
         assert_eq!(c.disable_port(&foreign), Err(Error::Stale));
         let after = {

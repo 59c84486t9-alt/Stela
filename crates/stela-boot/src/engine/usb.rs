@@ -5,7 +5,9 @@
 //! events wakes the engine and is polled once it has work
 //! ([`xhci::Host::due`]); another is polled on a timer. A keyboard or
 //! pointer that arrives joins the host input; another new device is
-//! reported and its owners kept.
+//! reported and its owners kept until every device they came with is
+//! removed. The USB storage interfaces probe configured stay owned here
+//! for the boot, with the disks the guest reaches through them.
 //!
 //! A USB4 host whose firmware runs the connection manager is looked at on the
 //! same timer: each firmware event is reported, as Linux's
@@ -31,7 +33,10 @@ use stela_drivers::{
     firmware::{Catalog, HandoffProvider},
     input::InputDevice,
     probe::native::usb4,
-    usb::xhci::{self, Found},
+    usb::{
+        storage::UsbStorage,
+        xhci::{self, Found},
+    },
 };
 
 /// Firmware events serviced per USB4 host per poll.
@@ -105,6 +110,13 @@ pub(super) fn report_usb4(location: &str, family: icm::Family, event: &icm::Even
 /// most 255 ms.
 const POLL_HZ: u64 = 16;
 
+/// The owners a poll found that no consumer takes, with the locations of
+/// the devices they came with that are still attached.
+struct Kept {
+    attached: Vec<String>,
+    _found: Found,
+}
+
 /// A USB4 host and what the polls last saw of it.
 struct Usb4 {
     host: usb4::Host,
@@ -122,8 +134,12 @@ pub struct HostUsb {
     dma: RegionAllocator,
     firmware: Option<Arc<Catalog>>,
     root: u64,
-    /// New devices' class owners that no consumer takes, kept for the boot.
-    kept: Vec<Found>,
+    /// New devices' class owners that no consumer takes, kept while one of
+    /// their devices is attached.
+    kept: Vec<Kept>,
+    /// The storage interfaces probe configured, whose disks the mount
+    /// opened: their class owners outlive `open`.
+    _storage: Vec<UsbStorage>,
     interval: u64,
     last: u64,
 }
@@ -132,6 +148,7 @@ impl HostUsb {
     pub fn new(
         hosts: Vec<xhci::Host>,
         usb4: Vec<usb4::Host>,
+        storage: Vec<UsbStorage>,
         dma: RegionAllocator,
         firmware: Option<Arc<Catalog>>,
         root: u64,
@@ -155,6 +172,7 @@ impl HostUsb {
             firmware,
             root,
             kept: Vec::new(),
+            _storage: storage,
             interval: tsc_hz / POLL_HZ,
             last: super::host::rdtsc(),
         }
@@ -213,6 +231,16 @@ impl HostUsb {
             };
             for device in &changes.removed {
                 output::arguments(format_args!("USB removed {}\n", device.location));
+                for kept in &mut self.kept {
+                    kept.attached
+                        .retain(|location| *location != device.location);
+                }
+            }
+            if self.kept.iter().any(|kept| kept.attached.is_empty()) {
+                // Dropping class owners can stop their transfers.
+                // SAFETY: as for the poll above.
+                let _root = unsafe { RestoreRoot::enter(self.root) };
+                self.kept.retain(|kept| !kept.attached.is_empty());
             }
             let added = &mut changes.added;
             for (location, error) in &added.failures {
@@ -239,7 +267,15 @@ impl HostUsb {
                 ));
             }
             if !changes.added.devices.is_empty() {
-                self.kept.push(changes.added);
+                self.kept.push(Kept {
+                    attached: changes
+                        .added
+                        .devices
+                        .iter()
+                        .map(|device| device.location.clone())
+                        .collect(),
+                    _found: changes.added,
+                });
             }
         }
         inputs

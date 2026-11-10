@@ -717,6 +717,7 @@ pub unsafe fn open(
     let usb = super::usb::HostUsb::new(
         core::mem::take(&mut devices.usb_hosts),
         core::mem::take(&mut devices.usb4_hosts),
+        core::mem::take(&mut devices.usb_storage),
         dma,
         handoff.firmware.clone(),
         root,

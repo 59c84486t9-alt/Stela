@@ -16,6 +16,7 @@ mod configuration_retirement_tests;
 mod configuration_tests;
 mod detach_tests;
 mod host_tests;
+mod hub_tests;
 mod minimum_tests;
 mod periodic_tests;
 mod recovery_tests;
@@ -32,6 +33,61 @@ const DESCRIPTION: [u8; 32] = [
 /// A USB 2.0 device descriptor with one configuration and no strings.
 const DEVICE: [u8; 18] = [
     18, 1, 0, 2, 0, 0, 0, 64, 0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1,
+];
+/// A device on a port of the hub that root 1's device becomes when
+/// [`Shared::hub_ports`] is not empty.
+#[derive(Clone)]
+struct Child {
+    connected: bool,
+    /// wPortStatus speed bits: 0 full, bit 9 low, bit 10 high speed.
+    speed: u16,
+    powered: bool,
+    enabled: bool,
+    change: u16,
+    /// None until a port reset leaves it at address 0.
+    address: Option<u8>,
+    configured: u8,
+    descriptor: [u8; 18],
+    description: Vec<u8>,
+    resets: usize,
+}
+impl Child {
+    fn new(speed: u16, descriptor: [u8; 18], description: &[u8]) -> Self {
+        Self {
+            connected: true,
+            speed,
+            powered: false,
+            enabled: false,
+            change: 1,
+            address: None,
+            configured: 0,
+            descriptor,
+            description: description.to_vec(),
+            resets: 0,
+        }
+    }
+    fn empty() -> Self {
+        Self {
+            connected: false,
+            change: 0,
+            ..Self::new(0, DEVICE, &DESCRIPTION)
+        }
+    }
+    /// The QH endpoint speed code: 0 full, 1 low, 2 high.
+    fn eps(&self) -> u32 {
+        if self.speed & 1 << 10 != 0 {
+            2
+        } else {
+            u32::from(self.speed & 1 << 9 != 0)
+        }
+    }
+}
+/// A single-TT USB 2.0 hub's device and configuration descriptors.
+const HUB_DEVICE: [u8; 18] = [
+    18, 1, 0, 2, 9, 0, 1, 64, 0x86, 0x80, 0x24, 0x00, 0, 1, 0, 0, 0, 1,
+];
+const HUB_DESCRIPTION: [u8; 25] = [
+    9, 2, 25, 0, 1, 1, 0, 0xe0, 0, 9, 4, 0, 0, 1, 9, 0, 0, 0, 7, 5, 0x81, 3, 1, 0, 12,
 ];
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Mode {
@@ -111,6 +167,12 @@ struct Shared {
     halt_issued: Option<u64>,
     reset_delay_us: u64,
     reset_issued: Option<u64>,
+    /// The hub ports behind root 1, when its device is a hub.
+    hub_ports: Vec<Child>,
+    /// The hub port whose device the current control request addresses.
+    request_child: Option<usize>,
+    /// What an interrupt IN endpoint answers, instead of the byte pattern.
+    report: Option<Vec<u8>>,
 }
 impl Shared {
     fn new() -> Self {
@@ -191,6 +253,68 @@ impl Shared {
             halt_issued: None,
             reset_delay_us: 0,
             reset_issued: None,
+            hub_ports: Vec::new(),
+            request_child: None,
+            report: None,
+        }
+    }
+    /// The enabled hub port whose device answers at `address`.
+    fn child_at(&self, address: u8) -> Option<usize> {
+        if self.hub_ports.is_empty()
+            || self.words[(OP + PORT) / 4] & (CONNECT | ENABLE) != CONNECT | ENABLE
+        {
+            return None;
+        }
+        self.hub_ports
+            .iter()
+            .position(|child| child.enabled && child.address == Some(address))
+    }
+    /// The hub's answer to a hub class request, and its descriptors.
+    fn hub_response(&self, setup: [u8; 8]) -> Option<Vec<u8>> {
+        if self.hub_ports.is_empty() {
+            return None;
+        }
+        Some(match (setup[0], setup[1], setup[3]) {
+            (0x80, 6, 1) => HUB_DEVICE.to_vec(),
+            (0x80, 6, 2) => HUB_DESCRIPTION.to_vec(),
+            (0xa0, 6, 0x29) => vec![9, 0x29, self.hub_ports.len() as u8, 0, 0, 50, 0, 0, 0xff],
+            (0xa3, 0, _) => {
+                let child = &self.hub_ports[usize::from(setup[4]) - 1];
+                let status = u16::from(child.connected)
+                    | u16::from(child.enabled) << 1
+                    | u16::from(child.powered) << 8
+                    | if child.connected { child.speed } else { 0 };
+                let mut bytes = status.to_le_bytes().to_vec();
+                bytes.extend_from_slice(&child.change.to_le_bytes());
+                bytes
+            }
+            _ => return None,
+        })
+    }
+    /// A hub port request's effect once its status stage completes.
+    fn hub_feature(&mut self, setup: [u8; 8]) {
+        if self.hub_ports.is_empty() || setup[0] != 0x23 {
+            return;
+        }
+        let child = &mut self.hub_ports[usize::from(setup[4]) - 1];
+        match (setup[1], setup[2]) {
+            (3, 8) => child.powered = true,
+            (3, 4) => {
+                assert!(child.powered, "reset of an unpowered hub port");
+                if child.connected {
+                    child.enabled = true;
+                    child.address = Some(0);
+                    child.configured = 0;
+                }
+                child.change |= 1 << 4;
+                child.resets += 1;
+            }
+            (1, 1) => {
+                child.enabled = false;
+                child.address = None;
+            }
+            (1, feature @ 16..=20) => child.change &= !(1 << (feature - 16)),
+            request => panic!("unexpected hub port request {request:?}"),
         }
     }
     fn u32(&self, offset: usize) -> u32 {
@@ -219,15 +343,44 @@ impl Shared {
         }
         let info = self.u32(4);
         assert_eq!(info & (1 << 15) != 0, !periodic);
-        assert_eq!(info & (3 << 12), 2 << 12);
-        if periodic {
-            assert_eq!(info >> 28, 0); // Interrupt NAK reload is zero.
-            assert_eq!(self.u32(8) & 0x3fff_ff00, 0); // No C-mask or TT.
-            assert!((1..=3).contains(&(self.u32(8) >> 30)));
-        } else {
-            assert_eq!(self.u32(8), 1 << 30);
-        }
         let address = (info & 127) as u8;
+        let child = self.child_at(address);
+        let control = info & (1 << 14) != 0;
+        let packet = ((info >> 16) & 0x7ff) as usize;
+        if let Some(index) = child {
+            let device = &self.hub_ports[index];
+            assert_eq!((info >> 12) & 3, device.eps());
+            let translator = self.u32(8) & 0x3fff_0000;
+            if device.eps() == 2 {
+                assert_eq!(translator, 0);
+                assert_eq!(info & (1 << 27), 0);
+                assert_eq!(packet, if control { 64 } else { 512 });
+            } else {
+                // Split transactions through the hub's TT, on its port.
+                let hub = u32::from(self.addresses[0].unwrap());
+                assert_eq!(translator, hub << 16 | (index as u32 + 1) << 23);
+                assert_eq!(info & (1 << 27) != 0, control, "C marks FS/LS control");
+                assert_eq!(info >> 28, 0, "no NAK reload below high speed");
+                if periodic {
+                    assert_eq!(self.u32(8) & 0xffff, 0x1c01, "S-mask 0, C-mask 2-4");
+                }
+                if control {
+                    assert!(packet == 8 || packet == 64 && device.eps() == 0);
+                }
+            }
+            if !control {
+                assert_ne!(device.configured, 0, "unconfigured physical endpoint");
+            }
+        } else {
+            assert_eq!(info & (3 << 12), 2 << 12);
+            if periodic {
+                assert_eq!(info >> 28, 0); // Interrupt NAK reload is zero.
+                assert_eq!(self.u32(8) & 0x3fff_ff00, 0); // No C-mask or TT.
+                assert!((1..=3).contains(&(self.u32(8) >> 30)));
+            } else {
+                assert_eq!(self.u32(8), 1 << 30);
+            }
+        }
         let physical: Vec<usize> = (0..15)
             .filter(|root| {
                 self.addresses[*root] == Some(address)
@@ -236,22 +389,30 @@ impl Shared {
                         == CONNECT | ENABLE
             })
             .collect();
-        assert_eq!(
-            physical.len(),
-            1,
-            "actual USB address must identify one enabled physical root"
-        );
-        let root = physical[0];
-        let control = info & (1 << 14) != 0;
-        if !control {
-            assert_ne!(
-                self.configurations[root], 0,
-                "unconfigured physical endpoint"
+        let root = if child.is_some() {
+            assert!(
+                physical.is_empty(),
+                "a child's address is unique on the bus"
             );
-        }
-        let packet = ((info >> 16) & 0x7ff) as usize;
-        if !periodic {
-            assert_eq!(packet, if control { 64 } else { 512 });
+            0
+        } else {
+            assert_eq!(
+                physical.len(),
+                1,
+                "actual USB address must identify one enabled physical root"
+            );
+            physical[0]
+        };
+        if child.is_none() {
+            if !control {
+                assert_ne!(
+                    self.configurations[root], 0,
+                    "unconfigured physical endpoint"
+                );
+            }
+            if !periodic {
+                assert_eq!(packet, if control { 64 } else { 512 });
+            }
         }
         let mut resume = self.u32(24) & ACTIVE != 0;
         let mut next = if resume { self.u32(12) } else { self.u32(16) };
@@ -344,9 +505,20 @@ impl Shared {
                 let setup: [u8; 8] = self.device[pointer..pointer + 8].try_into().unwrap();
                 self.request = Some(setup);
                 self.request_root = Some(root);
+                self.request_child = child;
                 self.setup_trace.push(setup);
                 self.offset = 0;
-                self.response = if setup == [0x80, 0, 0, 0, 0, 0, 2, 0] {
+                self.response = if let Some(index) = child {
+                    let device = &self.hub_ports[index];
+                    match (setup[0], setup[1], setup[3]) {
+                        (0x80, 6, 1) => device.descriptor.to_vec(),
+                        (0x80, 6, 2) => device.description.clone(),
+                        (0x80, 8, _) => vec![device.configured],
+                        _ => vec![0x5a; usize::from(u16::from_le_bytes([setup[6], setup[7]]))],
+                    }
+                } else if let Some(response) = self.hub_response(setup) {
+                    response
+                } else if setup == [0x80, 0, 0, 0, 0, 0, 2, 0] {
                     self.device_status[root].to_le_bytes().to_vec()
                 } else if setup == [0x80, 8, 0, 0, 0, 0, 1, 0] {
                     self.configuration_reply
@@ -378,11 +550,22 @@ impl Shared {
                 );
                 assert_ne!(initial & TOGGLE, 0);
                 self.status_pids.push(pid);
-                if setup[1] == 5 {
-                    self.addresses[self.request_root.unwrap()] = Some(setup[2]);
-                }
-                if setup[0] == 0 && setup[1] == 9 && self.configuration_ack {
-                    self.configurations[self.request_root.unwrap()] = setup[2];
+                if let Some(index) = self.request_child {
+                    let device = &mut self.hub_ports[index];
+                    if setup[0] == 0 && setup[1] == 5 {
+                        device.address = Some(setup[2]);
+                    }
+                    if setup[0] == 0 && setup[1] == 9 {
+                        device.configured = setup[2];
+                    }
+                } else {
+                    if setup[1] == 5 {
+                        self.addresses[self.request_root.unwrap()] = Some(setup[2]);
+                    }
+                    if setup[0] == 0 && setup[1] == 9 && self.configuration_ack {
+                        self.configurations[self.request_root.unwrap()] = setup[2];
+                    }
+                    self.hub_feature(setup);
                 }
                 if setup == [0, 1, 1, 0, 0, 0, 0, 0] && self.wake_clear_ack {
                     self.device_status[root] &= !2;
@@ -391,7 +574,14 @@ impl Shared {
                 if control {
                     actual = actual.min(self.response.len().saturating_sub(self.offset));
                 }
+                if let Some(report) = self.report.as_ref().filter(|_| periodic) {
+                    actual = actual.min(report.len());
+                    self.device[pointer..pointer + actual].copy_from_slice(&report[..actual]);
+                }
                 for byte in 0..actual {
+                    if periodic && self.report.is_some() {
+                        break;
+                    }
                     self.device[pointer + byte] = if control {
                         self.response[self.offset + byte]
                     } else {
@@ -1822,4 +2012,28 @@ fn failed_requester_detach_never_retires_configuration_or_restarts_the_controlle
     drop(c);
     assert_eq!(snapshot(), before);
     assert!(!m.lock().unwrap().retired);
+}
+
+#[test]
+fn a_controller_the_early_handoff_halted_with_schedules_enabled_initializes() {
+    // The early PCI handoff clears only RUN; ASE and PSE stay set while the
+    // halted controller reports neither schedule running.
+    let m = Arc::new(Mutex::new(Shared::new()));
+    {
+        let mut m = m.lock().unwrap();
+        m.words[(OP + CMD) / 4] = ASE | PSE;
+        m.words[(OP + STS) / 4] = HALT;
+    }
+    let _controller = controller(m.clone());
+    let m = m.lock().unwrap();
+    assert!(
+        m.writes
+            .iter()
+            .any(|(offset, value)| *offset == OP + CMD && *value & RESET != 0),
+        "the halted controller was reset"
+    );
+    assert!(
+        m.writes.contains(&(OP + CMD, 0)),
+        "RUN, ASE and PSE cleared"
+    );
 }

@@ -7,7 +7,7 @@ struct Configured {
     bulk: [bool; 32],
     periodic: [Option<periodic::Recipe>; 32],
 }
-fn endpoints(bytes: &[u8]) -> Result<Configured, Error> {
+fn endpoints(bytes: &[u8], speed: Speed) -> Result<Configured, Error> {
     if bytes.len() < 9
         || bytes[0] != 9
         || bytes[1] != 2
@@ -75,7 +75,9 @@ fn endpoints(bytes: &[u8]) -> Result<Configured, Error> {
                     if kind == 0 || record[3] & 0xc0 != 0 || (kind != 1 && record[3] & 0xfc != 0) {
                         return Err(Error::Invalid);
                     }
-                    if kind == 2 {
+                    if kind == 2 && speed != Speed::High {
+                        return Err(Error::Unsupported("EHCI full-speed bulk endpoint"));
+                    } else if kind == 2 {
                         // USB2 HS bulk wMaxPacketSize is exactly512, no multiplier.
                         if u16::from_le_bytes([record[4], record[5]]) != 512 || record[3] != 2 {
                             return Err(Error::Invalid);
@@ -86,10 +88,12 @@ fn endpoints(bytes: &[u8]) -> Result<Configured, Error> {
                         }
                         endpoints[index] = true;
                     } else if kind == 3 {
-                        periodic[address] = Some(periodic::Recipe::new(
-                            u16::from_le_bytes([record[4], record[5]]),
-                            record[6],
-                        )?);
+                        let packet = u16::from_le_bytes([record[4], record[5]]);
+                        periodic[address] = Some(if speed == Speed::High {
+                            periodic::Recipe::new(packet, record[6])?
+                        } else {
+                            periodic::Recipe::full_speed(packet, record[6], speed == Speed::Low)?
+                        });
                     }
                 }
             }
@@ -209,7 +213,8 @@ impl Controller {
         if description.get(..9) != Some(header.as_slice()) {
             return Err(Error::Invalid);
         }
-        let admitted = endpoints(&description)?;
+        let speed = self.ports[index].as_ref().expect("validated").speed;
+        let admitted = endpoints(&description, speed)?;
         let mut pipes = Vec::new();
         pipes
             .try_reserve_exact(admitted.bulk.iter().filter(|value| **value).count())

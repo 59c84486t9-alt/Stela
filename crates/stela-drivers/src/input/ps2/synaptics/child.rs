@@ -30,13 +30,34 @@ pub enum ScrollMode {
     Ordinary,
     Explorer4,
 }
+/// The child's last command. Wrapped replies are its observations only while
+/// it waits.
+#[derive(Default)]
+enum Exchange {
+    #[default]
+    None,
+    Waiting(Command),
+    Finished(Command),
+}
+impl Exchange {
+    fn command(&self) -> Option<&Command> {
+        match self {
+            Self::None => None,
+            Self::Waiting(command) | Self::Finished(command) => Some(command),
+        }
+    }
+    fn finish(&mut self) {
+        if let Self::Waiting(command) = core::mem::take(self) {
+            *self = Self::Finished(command);
+        }
+    }
+}
 #[derive(Default)]
 pub(super) struct Mouse {
     pub(super) protocol: Option<MouseProtocol>,
     pub(super) active: bool,
-    pub(super) waiting: bool,
     replies: VecDeque<Observation>,
-    pub(super) command: Option<Command>,
+    exchange: Exchange,
     identities: Vec<Identity>,
     enhanced_scroll: bool,
     decoder: mouse::Mouse,
@@ -53,22 +74,16 @@ impl Mouse {
         now: u64,
         timeout: u64,
     ) -> Result<(), ErrorKind> {
-        if self.waiting {
+        if let Exchange::Waiting(command) = &mut self.exchange {
             let observation = Observation {
                 native_sequence: record.native_sequence,
                 received_us: now,
                 byte: record.first(),
             };
-            if self.replies.len() >= QUEUE_LIMIT
-                || self.command.as_ref().unwrap().observations.len() >= QUEUE_LIMIT
-            {
+            if self.replies.len() >= QUEUE_LIMIT || command.observations.len() >= QUEUE_LIMIT {
                 return Err(ErrorKind::QueueFull);
             }
-            self.command
-                .as_mut()
-                .unwrap()
-                .observations
-                .push(observation);
+            command.observations.push(observation);
             self.replies.push_back(observation);
         } else if self.active {
             if self.backpressured() {
@@ -108,8 +123,16 @@ impl Mouse {
     pub(super) fn activate(&mut self, protocol: MouseProtocol) {
         self.decoder.set_protocol(protocol);
         self.protocol = Some(protocol);
-        self.waiting = false;
+        self.exchange.finish();
         self.active = true;
+    }
+    /// The command that waits for the reply being handled. Replies are queued
+    /// only while one waits.
+    fn waiting_command(&mut self) -> &mut Command {
+        match &mut self.exchange {
+            Exchange::Waiting(command) => command,
+            _ => panic!("child replies are queued only while a command waits"),
+        }
     }
 }
 
@@ -120,7 +143,16 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         child.active.then_some(child.protocol).flatten()
     }
     pub fn synaptics_child_command(&self) -> Option<&Command> {
-        self.synaptics.as_ref()?.child.as_ref()?.command.as_ref()
+        self.synaptics.as_ref()?.child.as_ref()?.exchange.command()
+    }
+    /// The passthrough child, which exists from the start of
+    /// [`Self::initialize_synaptics_mouse`]. Every caller runs inside it or
+    /// first checks the child's protocol or activity.
+    fn synaptics_child(&mut self) -> &mut Mouse {
+        self.synaptics
+            .as_mut()
+            .and_then(|engine| engine.child.as_mut())
+            .expect("the Synaptics passthrough child exists once initialization starts")
     }
     pub fn synaptics_child_identities(&self) -> Option<&[Identity]> {
         Some(&self.synaptics.as_ref()?.child.as_ref()?.identities)
@@ -151,47 +183,21 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.synaptics_child_protocol() != Some(MouseProtocol::Explorer) {
             return Err(ErrorKind::Synaptics(Error::ChildScrollUnsupported).into());
         }
-        if self
-            .synaptics
-            .as_ref()
-            .unwrap()
-            .child
-            .as_ref()
-            .unwrap()
-            .enhanced_scroll
-        {
+        if self.synaptics_child().enhanced_scroll {
             return Ok(());
         }
         let result = (|| {
             self.device_command(Port::Mouse, DISABLE_REPORTING, &[])?;
             let timeout = self.config.command_timeout_us;
             self.synaptics_child_transaction(DISABLE_REPORTING, None, 0, timeout)?;
-            self.synaptics
-                .as_mut()
-                .unwrap()
-                .child
-                .as_mut()
-                .unwrap()
-                .active = false;
+            self.synaptics_child().active = false;
             for rate in [200, 80, 40] {
                 self.synaptics_child_transaction(SET_RATE, Some(rate), 0, timeout)?;
             }
-            self.synaptics
-                .as_mut()
-                .unwrap()
-                .child
-                .as_mut()
-                .unwrap()
-                .enhanced_scroll = true;
+            self.synaptics_child().enhanced_scroll = true;
             self.synaptics_child_transaction(SET_RATE, Some(100), 0, timeout)?;
             self.synaptics_child_transaction(ENABLE_REPORTING, None, 0, timeout)?;
-            self.synaptics
-                .as_mut()
-                .unwrap()
-                .child
-                .as_mut()
-                .unwrap()
-                .activate(MouseProtocol::Explorer);
+            self.synaptics_child().activate(MouseProtocol::Explorer);
             self.device_command(Port::Mouse, ENABLE_REPORTING, &[])
         })();
         result.map_err(|kind| self.fail(kind))
@@ -210,15 +216,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         timeout: u64,
     ) -> Result<Observation, ErrorKind> {
         loop {
-            let observation = self
-                .synaptics
-                .as_mut()
-                .unwrap()
-                .child
-                .as_mut()
-                .unwrap()
-                .replies
-                .pop_front();
+            let observation = self.synaptics_child().replies.pop_front();
             if let Some(observation) = observation {
                 // Responses may already have arrived while the parent's outer
                 // command was acknowledging. Current time covers late reads;
@@ -260,16 +258,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             let observation = self.synaptics_child_response(start, timeout)?;
             match observation.byte {
                 ACK => {
-                    self.synaptics
-                        .as_mut()
-                        .unwrap()
-                        .child
-                        .as_mut()
-                        .unwrap()
-                        .command
-                        .as_mut()
-                        .unwrap()
-                        .acknowledged += 1;
+                    self.synaptics_child().waiting_command().acknowledged += 1;
                     return Ok(None);
                 }
                 RESEND => (),
@@ -289,12 +278,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         count: usize,
         timeout: u64,
     ) -> Result<Vec<Observation>, ErrorKind> {
-        let child = self.synaptics.as_mut().unwrap().child.as_mut().unwrap();
+        let child = self.synaptics_child();
         if !child.replies.is_empty() {
             return Err(ErrorKind::Synaptics(Error::ChildUnsolicited));
         }
-        child.waiting = true;
-        child.command = Some(Command {
+        child.exchange = Exchange::Waiting(Command {
             opcode,
             argument,
             acknowledged: 0,
@@ -312,21 +300,15 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         for _ in result.len()..count {
             result.push(self.synaptics_child_response(start, timeout)?);
         }
+        let child = self.synaptics_child();
         if opcode == GET_ID {
-            let child = self.synaptics.as_mut().unwrap().child.as_mut().unwrap();
-            let command = child.command.as_ref().unwrap();
+            let acknowledged = child.waiting_command().acknowledged != 0;
             child.identities.push(Identity {
-                acknowledged: command.acknowledged != 0,
+                acknowledged,
                 observation: result[0],
             });
         }
-        self.synaptics
-            .as_mut()
-            .unwrap()
-            .child
-            .as_mut()
-            .unwrap()
-            .waiting = false;
+        child.exchange.finish();
         Ok(result)
     }
     pub(in crate::input::ps2) fn stop_synaptics_mouse_inner(&mut self) -> Result<bool, ErrorKind> {
@@ -345,13 +327,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             0,
             self.config.command_timeout_us,
         )?;
-        self.synaptics
-            .as_mut()
-            .unwrap()
-            .child
-            .as_mut()
-            .unwrap()
-            .active = false;
+        self.synaptics_child().active = false;
         Ok(true)
     }
     /// Probe exactly one ordinary PS/2 mouse behind an observed passthrough
@@ -364,24 +340,18 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self
             .synaptics
             .as_ref()
-            .unwrap()
-            .child
-            .as_ref()
+            .and_then(|engine| engine.child.as_ref())
             .is_some_and(|c| c.active)
         {
             return Err(ErrorKind::AlreadyInitialized.into());
         }
         let result = (|| {
             self.device_command(Port::Mouse, DISABLE_REPORTING, &[])?;
-            if self.synaptics.as_ref().unwrap().child.is_none() {
-                self.synaptics.as_mut().unwrap().child = Some(Mouse::default());
-            }
             self.synaptics
                 .as_mut()
-                .unwrap()
+                .expect("passthrough capabilities belong to the Synaptics engine")
                 .child
-                .as_mut()
-                .unwrap()
+                .get_or_insert_with(Mouse::default)
                 .identities
                 .clear();
             // Source PT connection settles for at least10ms before probing.
@@ -397,13 +367,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     reset[1].byte,
                 ])));
             }
-            self.synaptics
-                .as_mut()
-                .unwrap()
-                .child
-                .as_mut()
-                .unwrap()
-                .enhanced_scroll = false;
+            self.synaptics_child().enhanced_scroll = false;
             let timeout = self.config.command_timeout_us;
             for command in [DEFAULTS, DISABLE_REPORTING] {
                 self.synaptics_child_transaction(command, None, 0, timeout)?;
@@ -426,12 +390,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 _ => unreachable!(),
             };
             if self
-                .synaptics
-                .as_ref()
-                .unwrap()
-                .child
-                .as_ref()
-                .unwrap()
+                .synaptics_child()
                 .protocol
                 .is_some_and(|old| old != protocol)
             {
@@ -439,26 +398,34 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             }
             self.synaptics_child_transaction(SET_RATE, Some(100), 0, timeout)?;
             self.synaptics_child_transaction(SCALE_ONE_TO_ONE, None, 0, timeout)?;
-            let mode = self.synaptics_capabilities().unwrap().mode.unwrap();
+            let mode = self
+                .synaptics_capabilities()
+                .and_then(|c| c.mode)
+                .ok_or(ErrorKind::NotInitialized)?;
             let mode = if protocol == MouseProtocol::Standard {
                 mode & !2
             } else {
                 mode | 2
             };
-            self.synaptics.as_mut().unwrap().format_transition = true;
+            let engine = self
+                .synaptics
+                .as_mut()
+                .expect("passthrough capabilities belong to the Synaptics engine");
+            engine.format_transition = true;
             self.synaptics_sliced(mode)?;
             self.device_command(Port::Mouse, SET_RATE, &[0x14])?;
-            let engine = self.synaptics.as_mut().unwrap();
-            engine.capabilities.as_mut().unwrap().mode = Some(mode);
+            let engine = self
+                .synaptics
+                .as_mut()
+                .expect("passthrough capabilities belong to the Synaptics engine");
+            engine
+                .capabilities
+                .as_mut()
+                .expect("the mode was read from these capabilities")
+                .mode = Some(mode);
             engine.format_transition = false;
             self.synaptics_child_transaction(ENABLE_REPORTING, None, 0, timeout)?;
-            self.synaptics
-                .as_mut()
-                .unwrap()
-                .child
-                .as_mut()
-                .unwrap()
-                .activate(protocol);
+            self.synaptics_child().activate(protocol);
             self.device_command(Port::Mouse, ENABLE_REPORTING, &[])?;
             Ok(protocol)
         })();

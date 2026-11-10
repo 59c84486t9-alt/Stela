@@ -10,6 +10,8 @@
 //! and drained; this polled backend observes the pin itself. Reset completes
 //! by a new zero-length IRQ acknowledgement, except source-checked
 //! no-reset-IRQ devices that explicitly expose their separate delay contract.
+//! A device without a readable pin is polled on its input register instead,
+//! with the same delay standing in for the reset interrupt.
 //! Raw HID reports and the exact report descriptor pass to a shared HID consumer;
 //! no keyboard, touchpad or touchscreen descriptor is substituted here.
 use super::Input;
@@ -40,9 +42,18 @@ const QUIRK_RESET_DELAY_US: u64 = 100_000;
 /// Platform IRQ provider. Masking must acknowledge the CPU route's
 /// mask/drain, not change a local boolean. `asserted` samples this
 /// attachment's physical active level even while the CPU route is masked.
+///
+/// A device whose only interrupt the platform cannot sample is polled: its
+/// provider says so through [`Interrupt::polled`], and `asserted` then says
+/// when the input register is due for its next read.
 pub trait Interrupt {
     fn mask_and_drain(&mut self) -> Result<(), InterruptError>;
     fn asserted(&mut self) -> Result<bool, InterruptError>;
+    /// No pin backs `asserted`. An empty input register then reads as a
+    /// zero length, which means no report rather than a reset.
+    fn polled(&self) -> bool {
+        false
+    }
 }
 impl<I: Interrupt + ?Sized> Interrupt for alloc::boxed::Box<I> {
     fn mask_and_drain(&mut self) -> Result<(), InterruptError> {
@@ -50,6 +61,9 @@ impl<I: Interrupt + ?Sized> Interrupt for alloc::boxed::Box<I> {
     }
     fn asserted(&mut self) -> Result<bool, InterruptError> {
         (**self).asserted()
+    }
+    fn polled(&self) -> bool {
+        (**self).polled()
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +171,10 @@ pub enum ResetCompletion {
     /// The exact pinned source profile omits a reset interrupt. The RESET write
     /// was accepted, the required 100ms elapsed, and post-reset power-on succeeded.
     DeviceQuirkDelay,
+    /// The device is polled, so no interrupt can acknowledge the reset. The
+    /// RESET write was accepted, Linux's 100ms no-reset-interrupt delay
+    /// elapsed, and the input register was read until empty.
+    PolledDelay,
 }
 
 /// Captured control-report bytes and the full HID length advertised on wire.
@@ -418,6 +436,23 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
     // are counted and discarded, never delivered to a consumer.
     fn drain_before_reset(&mut self) -> Result<(), ErrorKind> {
         let start = self.timer.start();
+        if self.interrupt.polled() {
+            // Without a pin, the register itself says when it is empty.
+            loop {
+                let length = self.read_input()?;
+                if length == 0 {
+                    return Ok(());
+                }
+                if !(self.quirks.elan && length == u16::MAX) {
+                    self.input_length(length)?;
+                }
+                self.discarded_before_start = self.discarded_before_start.saturating_add(1);
+                if self.timer.elapsed_us(start) >= self.reset_timeout_us {
+                    return Err(ErrorKind::InputDrainTimeout);
+                }
+                self.timer.relax();
+            }
+        }
         while self.interrupt.asserted().map_err(ErrorKind::Interrupt)? {
             let length = self.read_input()?;
             if length != 0 && !(self.quirks.elan && length == u16::MAX) {
@@ -437,7 +472,13 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
         self.drain_before_reset()?;
         let bytes = self.command(RESET, 0, 0)?;
         self.transfer(&bytes, &mut [])?;
-        let completion = if self.quirks.no_reset_irq {
+        let completion = if self.interrupt.polled() {
+            // As Linux's no-reset-interrupt quirk: wait, then take the
+            // reset response and anything after it.
+            self.delay(QUIRK_RESET_DELAY_US)?;
+            self.drain_before_reset()?;
+            ResetCompletion::PolledDelay
+        } else if self.quirks.no_reset_irq {
             // Linux i2c_hid_finish_hwreset uses this exact 100ms contract only
             // for the listed device identities. Do not relabel it as an IRQ ACK.
             self.delay(QUIRK_RESET_DELAY_US)?;
@@ -526,7 +567,8 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             Ok(())
         })
     }
-    /// Read only when the device IRQ pin is asserted. Returned HID bytes
+    /// Read only when the device IRQ pin is asserted, or a polled device is
+    /// due. Returned HID bytes
     /// include the report ID if the device's descriptor uses numbered reports.
     pub fn poll(&mut self) -> Result<Option<InputReport>, Error> {
         self.ready()?;
@@ -536,6 +578,11 @@ impl<B: Bus, I: Interrupt, T: Timer> Device<B, I, T> {
             }
             let length = this.read_input()?;
             if length == 0 {
+                // A polled device answers an empty register with no length;
+                // only an asserted pin makes it a reset.
+                if this.interrupt.polled() {
+                    return Ok(None);
+                }
                 return Err(ErrorKind::UnexpectedReset);
             }
             if this.quirks.elan && length == u16::MAX {

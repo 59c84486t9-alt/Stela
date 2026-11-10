@@ -14,22 +14,16 @@ const I8042_PORTS: [Range<u64>; 2] = [0x60..0x61, 0x64..0x65];
 /// `io` holds the I/O ranges of the first `_CRS` that lists any, the keyboard's
 /// before the mouse's, as Linux's i8042 PnP probe reads them: the data port
 /// first, then the command port. A `_CRS` without I/O ranges takes the
-/// standard ports, as Linux does. `usb_released` says every USB host
-/// controller was handed over from firmware, so no USB legacy emulation
-/// traps the ports.
+/// standard ports, as Linux does. USB hosts firmware may still hold do not
+/// gate the ports, as in Linux: the controller self-test that
+/// initialization runs fails on ports USB legacy emulation traps badly.
 pub(crate) fn i8042(
     keyboard: bool,
     mouse: bool,
     io: &[Range<u64>],
-    usb_released: bool,
 ) -> Result<Option<ps2::Config>, PlatformError> {
     if !keyboard && !mouse {
         return Ok(None);
-    }
-    if !usb_released {
-        return Err(PlatformError::Refused(
-            "i8042: a USB host controller was not handed over from firmware, so USB legacy emulation may trap its ports",
-        ));
     }
     if !io.is_empty() && io.get(..2) != Some(&I8042_PORTS[..]) {
         return Err(PlatformError::Refused(
@@ -41,6 +35,27 @@ pub(crate) fn i8042(
         mouse,
         ..ps2::Config::default()
     }))
+}
+
+/// Byte offset of the FADT's IA-PC boot architecture flags.
+const FADT_BOOT_ARCH: usize = 109;
+/// IAPC_BOOT_ARCH bit: the motherboard has an 8042 or equivalent.
+const FADT_8042: u16 = 1 << 1;
+
+/// Whether the FADT lets the i8042 ports be probed directly when the
+/// namespace lists no i8042 device, as Linux `acpi_parse_fadt` decides: a
+/// FADT before revision 2 has no boot flags, and from revision 2 on the 8042
+/// flag must be set. No FADT says nothing against it.
+pub(crate) fn fadt_expects_i8042(fadt: Option<&[u8]>) -> bool {
+    let Some(fadt) = fadt else {
+        return true;
+    };
+    match fadt.get(8) {
+        Some(revision) if *revision >= 2 => fadt
+            .get(FADT_BOOT_ARCH..FADT_BOOT_ARCH + 2)
+            .is_some_and(|flags| u16::from_le_bytes([flags[0], flags[1]]) & FADT_8042 != 0),
+        _ => true,
+    }
 }
 
 /// The mouse port's firmware identifier as Linux's i8042 PnP driver forms it
@@ -68,12 +83,16 @@ pub(crate) fn firmware_id(ids: &[String]) -> Option<String> {
     Some(text)
 }
 
-/// Attach the i8042 when the namespace lists a keyboard or mouse port.
+/// Attach the i8042 when the namespace lists a keyboard or mouse port. When
+/// it lists neither and the FADT expects an 8042, probe the keyboard port at
+/// the standard ports, as Linux's i8042 probes them directly; an absent
+/// controller is then not a failure. The auxiliary port is probed only when
+/// the namespace lists a mouse, since a failing mouse port would take the
+/// keyboard with it.
 #[cfg(feature = "native-acpi")]
 pub(super) fn attach_i8042(
     session: &crate::platform::acpi::Session,
     clock: crate::Clock,
-    usb_released: bool,
     smbus_hosts: &[super::smbus::Host],
     devices: &mut super::Devices,
 ) {
@@ -111,7 +130,8 @@ pub(super) fn attach_i8042(
         }
         Ok(ids)
     };
-    let attempt = || -> Result<Option<ps2::Controller>, PlatformError> {
+    let mut direct = false;
+    let mut attempt = || -> Result<Option<ps2::Controller>, PlatformError> {
         let keyboards = found(ids::I8042_KEYBOARD)?;
         let mice = found(ids::I8042_MOUSE)?;
         let mut io = Vec::new();
@@ -125,12 +145,19 @@ pub(super) fn attach_i8042(
                 }
             }
         }
-        let Some(config) = i8042(!keyboards.is_empty(), !mice.is_empty(), &io, usb_released)?
-        else {
+        direct = keyboards.is_empty()
+            && mice.is_empty()
+            && fadt_expects_i8042(
+                session
+                    .table(b"FACP")
+                    .map_err(|error| PlatformError::Acpi(error.into()))?
+                    .as_deref(),
+            );
+        let Some(config) = i8042(direct || !keyboards.is_empty(), !mice.is_empty(), &io)? else {
             return Ok(None);
         };
-        // SAFETY: the namespace lists an i8042 at the standard ports, every
-        // USB host was handed over from firmware, and the mount's NativeServices
+        // SAFETY: the namespace lists an i8042 at the standard ports, or the
+        // FADT says the board has one there, and the mount's NativeServices
         // contract grants those ports with IRQ1 and IRQ12 masked.
         let registers = unsafe { ps2::PortIo::claim() };
         let firmware_id = match mice.first() {
@@ -143,7 +170,8 @@ pub(super) fn attach_i8042(
         controller.initialize().map_err(PlatformError::Ps2)?;
         Ok(Some(controller))
     };
-    match attempt() {
+    let attached = attempt();
+    match attached {
         Ok(Some(controller)) => {
             let companion = controller.smbus_companion();
             let shared = alloc::rc::Rc::new(core::cell::RefCell::new(controller));
@@ -155,7 +183,16 @@ pub(super) fn attach_i8042(
             }
         }
         Ok(None) => {}
-        Err(error) => devices.platform_failures.push(("i8042".into(), error)),
+        // Linux's direct probe finds no controller and stays quiet.
+        Err(PlatformError::Ps2(error)) if direct && error.kind == ps2::ErrorKind::NoController => {}
+        Err(error) => devices.platform_failures.push((
+            String::from(if direct {
+                "i8042 (FADT 8042 flag, no ACPI device)"
+            } else {
+                "i8042"
+            }),
+            error,
+        )),
     }
 }
 
@@ -165,15 +202,15 @@ mod tests {
 
     #[test]
     fn standard_ports_attach_the_listed_ports() {
-        let config = i8042(true, false, &I8042_PORTS, true).unwrap().unwrap();
+        let config = i8042(true, false, &I8042_PORTS).unwrap().unwrap();
         assert!(config.keyboard && !config.mouse);
-        let config = i8042(false, true, &[], true).unwrap().unwrap();
+        let config = i8042(false, true, &[]).unwrap().unwrap();
         assert!(!config.keyboard && config.mouse);
     }
 
     #[test]
     fn no_listed_port_attaches_nothing() {
-        assert!(matches!(i8042(false, false, &[], false), Ok(None)));
+        assert!(matches!(i8042(false, false, &[]), Ok(None)));
     }
 
     #[test]
@@ -184,7 +221,7 @@ mod tests {
             &[0x60..0x62, 0x64..0x65],
         ] {
             assert!(matches!(
-                i8042(true, true, io, true),
+                i8042(true, true, io),
                 Err(PlatformError::Refused(_))
             ));
         }
@@ -209,11 +246,28 @@ mod tests {
         assert_eq!(firmware_id(&ids(&["MSFT0001"])), None);
     }
 
+    /// A FADT of `revision` with IAPC_BOOT_ARCH `flags`.
+    fn fadt(revision: u8, flags: u16) -> alloc::vec::Vec<u8> {
+        let mut table = alloc::vec![0; 276];
+        table[8] = revision;
+        table[FADT_BOOT_ARCH..FADT_BOOT_ARCH + 2].copy_from_slice(&flags.to_le_bytes());
+        table
+    }
+
     #[test]
-    fn a_host_still_held_by_firmware_refuses_the_ports() {
-        assert!(matches!(
-            i8042(true, true, &I8042_PORTS, false),
-            Err(PlatformError::Refused(_))
-        ));
+    fn the_fadt_8042_flag_allows_a_direct_probe() {
+        assert!(fadt_expects_i8042(Some(&fadt(6, FADT_8042 | 1))));
+        assert!(!fadt_expects_i8042(Some(&fadt(6, 1))));
+        // Before revision 2 the boot flags are reserved, and Linux probes.
+        assert!(fadt_expects_i8042(Some(&fadt(1, 0))));
+        assert!(fadt_expects_i8042(None));
+        // A table too short to hold the flags says no 8042.
+        assert!(!fadt_expects_i8042(Some(&fadt(6, FADT_8042)[..100])));
+    }
+
+    #[test]
+    fn a_keyboard_probed_directly_takes_the_standard_ports() {
+        let config = i8042(true, false, &[]).unwrap().unwrap();
+        assert!(config.keyboard && !config.mouse);
     }
 }

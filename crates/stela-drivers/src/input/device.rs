@@ -11,6 +11,8 @@ use alloc::{format, string::String, vec::Vec};
 pub enum InputDevice {
     Virtio(Box<VirtioInput>),
     Usb(Box<UsbInput>),
+    /// A boot keyboard or mouse on an EHCI controller.
+    Ehci(Box<crate::usb::ehci::input::BootInput>),
     /// The i8042 controller, for both of its ports, shared with the SMBus
     /// companion of its mouse port's touchpad.
     Ps2(ps2::Shared),
@@ -52,6 +54,7 @@ impl InputDevice {
         match self {
             Self::Virtio(device) => format!("virtio-input {:?}", device.name),
             Self::Usb(device) => format!("USB {}", device.name),
+            Self::Ehci(device) => format!("USB {}", device.name),
             Self::Ps2(_) => String::from("i8042 PS/2"),
             Self::I2cHid(device) => device.name.clone(),
             Self::Touchpad(device) => device.name.clone(),
@@ -70,6 +73,10 @@ impl InputDevice {
                 Ok(())
             }
             Self::Usb(device) => {
+                inputs.extend(device.poll());
+                Ok(())
+            }
+            Self::Ehci(device) => {
                 inputs.extend(device.poll());
                 Ok(())
             }
@@ -99,6 +106,7 @@ impl InputDevice {
         match self {
             Self::Virtio(_) | Self::Touchpad(_) => Ok(()),
             Self::Usb(device) => device.set_leds(u16::from(leds)).map_err(InputError::Usb),
+            Self::Ehci(device) => device.set_leds(u16::from(leds)).map_err(InputError::Usb),
             Self::Ps2(controller) if controller.borrow().has_keyboard() => controller
                 .borrow_mut()
                 .set_leds(ps2_leds(leds))
@@ -114,6 +122,7 @@ impl InputDevice {
     pub fn last_report(&self) -> &[u8] {
         match self {
             Self::Usb(device) => device.last_report(),
+            Self::Ehci(device) => device.last_report(),
             Self::I2cHid(device) => device.last_report(),
             Self::Ish(device) => device.last_report(),
             Self::Virtio(_) | Self::Ps2(_) | Self::Touchpad(_) => &[],
@@ -125,6 +134,7 @@ impl InputDevice {
         match self {
             Self::Virtio(device) => device.broken,
             Self::Usb(device) => device.failed(),
+            Self::Ehci(device) => device.failed(),
             Self::Ps2(controller) => controller.borrow().needs_reset(),
             Self::I2cHid(device) => device.device().needs_reset(),
             Self::Touchpad(device) => device.stopped(),

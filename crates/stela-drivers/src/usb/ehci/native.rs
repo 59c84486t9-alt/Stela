@@ -334,6 +334,8 @@ impl Controller {
             fault: None,
             operational: 0,
             ports: Vec::new(),
+            roots: 0,
+            preempted: None,
             next_generation: 0,
             next_transfer: 0,
             default_port: None,
@@ -370,20 +372,32 @@ impl Controller {
         if ports == 0 || self.operational + PORT + ports * 4 > self.hw().bytes() {
             return Err(Error::Register);
         }
-        self.ports = (0..ports).map(|_| None).collect();
+        self.roots = ports;
+        self.ports = (0..ports + CHILDREN).map(|_| None).collect();
         self.power_control = hcs & 16 != 0;
         self.companions = hcs & (15 << 12) != 0;
         self.legacy(((hcc >> 8) & 255) as u16)?;
         self.put(INTR, 0)?;
         let command = self.op(CMD)?;
-        self.wait(
-            self.operational + STS,
-            ASS | PSS,
-            (if command & ASE != 0 { ASS } else { 0 }) | (if command & PSE != 0 { PSS } else { 0 }),
-            TRANSITION_US,
-        )?;
-        self.put(CMD, command & !(RUN | ASE | PSE | IAAD))?;
-        self.wait(self.operational + STS, HALT | ASS | PSS, HALT, HALT_US)?;
+        if self.op(STS)? & HALT != 0 {
+            // A halted controller runs no schedule, whatever ASE, PSE and
+            // their statuses still say: the early PCI handoff clears only RUN,
+            // as Linux's `quirk_usb_disable_ehci` does, and a halted schedule
+            // status need not follow its enable. Linux's `ehci_halt` then
+            // waits for HALT alone.
+            self.put(CMD, command & !(RUN | ASE | PSE | IAAD))?;
+            self.wait(self.operational + STS, HALT, HALT, HALT_US)?;
+        } else {
+            self.wait(
+                self.operational + STS,
+                ASS | PSS,
+                (if command & ASE != 0 { ASS } else { 0 })
+                    | (if command & PSE != 0 { PSS } else { 0 }),
+                TRANSITION_US,
+            )?;
+            self.put(CMD, command & !(RUN | ASE | PSE | IAAD))?;
+            self.wait(self.operational + STS, HALT | ASS | PSS, HALT, HALT_US)?;
+        }
         // Initial BMEclear/reset alone cannot retire old posted writes before
         // the allocator/domain reuses RAM or IOVAs for this fresh arena.
         self.hw().prepare_dma()?;
@@ -414,7 +428,7 @@ impl Controller {
         self.delay_minimum(5_000)?; // Root-routing settle, not register readback.
         // HCRST is not USB device-address retirement. Before minting any
         // default-address owner, prove every untracked EHCI root isolated.
-        for index in 0..self.ports.len() {
+        for index in 0..self.roots {
             let at = self.port_at(index);
             let value = self.read(at)?;
             if value & OWNER != 0 {

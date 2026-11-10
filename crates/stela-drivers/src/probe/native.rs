@@ -1,6 +1,5 @@
 //! PCI functions whose drivers attach through [`NativeServices`]: each takes
 //! a stopped requester, its DMA domain and owned BAR mappings from the mount.
-//! Among them are the AMD and Intel sensor hubs ([`SensorHub`]).
 use super::{Error, NativeServices, ServiceError};
 #[cfg(feature = "native-acpi")]
 use crate::net::wifi;
@@ -18,7 +17,6 @@ use crate::{
         },
         vmd,
     },
-    input::{ish, sfh},
     net::{
         Link, LinkError, Mac,
         aqtion::{self, MappedRegisters},
@@ -993,20 +991,6 @@ pub(super) unsafe fn vmd(
     }
 }
 
-/// A sensor hub: AMD's Sensor Fusion Hub, or Intel's Integrated Sensor Hub
-/// when none of its HID clients is a keyboard or pointer.
-pub enum SensorHub {
-    Sfh(Box<Sfh>),
-    Ish(Box<ish::InputRefusal>),
-}
-
-/// AMD SFH over its owned BAR2.
-pub type Sfh = sfh::Controller<sfh::pci::NativeRegisters, Clock>;
-
-/// PCI host bridges of Intel's Mehlow platforms, on which Linux `ish_probe`
-/// refuses the ISH (`ish_invalid_pci_ids`).
-pub(super) const MEHLOW: [u16; 2] = [0xa309, 0xa30a];
-
 /// An Intel PCIe Bluetooth transport over its owned BAR0, whose MSI-X table
 /// entry 0 delivers its interrupts.
 pub type IntelBluetooth =
@@ -1086,7 +1070,7 @@ fn integer(handle: crate::platform::acpi::Handle<'static>, name: &str) -> Option
 /// `board` the board its firmware is chosen for.
 ///
 /// # Safety
-/// As for [`sfh`]; `topology` holds the mount's bridges of the function's
+/// As for [`tg3`]; `topology` holds the mount's bridges of the function's
 /// segment and its root buses, and no other owner sets their link policy.
 #[allow(
     clippy::result_large_err,
@@ -1200,7 +1184,7 @@ pub(super) unsafe fn bcm4377(
 /// same module, as in Linux.
 ///
 /// # Safety
-/// As for [`sfh`].
+/// As for [`tg3`].
 #[allow(
     clippy::result_large_err,
     reason = "a failed attach hands back the owners that must outlive the device"
@@ -1384,143 +1368,6 @@ pub(super) unsafe fn intel_bluetooth(
     }
 }
 
-/// Prepare inherited AMD SFH engines under the original root. Attachment
-/// explicitly refuses the missing native notification/mode owner while keeping
-/// that original configuration/root/BAR graph. It grants no new DMA.
-///
-/// # Safety
-/// [`NativeServices`]' contract holds for `services`, and `clock` is the
-/// handoff's calibrated clock.
-#[allow(
-    clippy::result_large_err,
-    reason = "a failed attach hands back the owners that must outlive the device"
-)]
-pub(super) unsafe fn sfh(
-    services: &dyn NativeServices,
-    address: Address,
-    clock: Clock,
-) -> Result<Sfh, Failure> {
-    let minimum = services
-        .minimum_delay()
-        .map_err(|error| (Error::Native(error), None))?;
-    let refused = |error: ServiceError| (Error::Native(error), None);
-    let mut requester = services.prepare_requester(address).map_err(refused)?;
-    // Keep the genuine source through every effect, failure and unwind.
-    let minimum = core::mem::ManuallyDrop::new(minimum);
-    if let Err(error) = requester.function_mut().power_up(minimum.as_ref()) {
-        return Err((
-            Error::SfhCold(sfh::cold::native::NativeError::Power(error)),
-            Some(Box::new((requester, minimum))),
-        ));
-    }
-    let bars = match requester.function_mut().bars() {
-        Ok(bars) => bars,
-        Err(error) => return Err(keep_error(error, (requester, minimum))),
-    };
-    let Some(bar @ Bar::Memory { .. }) = bars[2] else {
-        return Err((
-            Error::Native(ServiceError::Refused("missing memory BAR2")),
-            Some(Box::new((requester, minimum))),
-        ));
-    };
-    let mapping = match services.map_bar(address, bar) {
-        Ok(mapping) => mapping,
-        Err(error) => return Err((Error::Native(error), Some(Box::new((requester, minimum))))),
-    };
-    // SAFETY: actual original requester/root and its reserved UC BAR2 remain
-    // together; no private domain, new DMA, IRQ or worker was created.
-    let mut original = unsafe { sfh::cold::native::Original::new(requester, mapping, bar, clock) };
-    if let Err(error) = original.prepare() {
-        return Err((
-            Error::SfhCold(sfh::cold::native::NativeError::Controller(error)),
-            Some(Box::new((original, minimum))),
-        ));
-    }
-    // Vendor ACK/BME gating does not establish the missing original native
-    // notification/mode owner. Do not acknowledge/finalize a cold receipt.
-    Err((
-        Error::SfhCold(sfh::cold::native::NativeError::Controller(
-            original.migration_prerequisite(),
-        )),
-        Some(Box::new((original, minimum))),
-    ))
-}
-
-/// Prepare inherited Intel ISH engines under the original root. Attachment
-/// explicitly refuses missing notification ownership and firmware address-reset
-/// prerequisites while keeping the original configuration/root/BAR graph.
-///
-/// # Safety
-/// [`NativeServices`]' contract holds for `services`, `clock` is the
-/// handoff's calibrated clock, and probe's scan found no Mehlow host bridge
-/// ([`MEHLOW`]).
-#[allow(
-    clippy::result_large_err,
-    reason = "a failed attach hands back the owners that must outlive the device"
-)]
-pub(super) unsafe fn ish(
-    services: &dyn NativeServices,
-    address: Address,
-    clock: Clock,
-) -> Result<ish::Native, Failure> {
-    use ish::cold::native::{Error as ColdError, Original};
-    let minimum = services
-        .minimum_delay()
-        .map_err(|error| (Error::Native(error), None))?;
-    let refused = |error: ServiceError| (Error::Native(error), None);
-    // SAFETY: the caller supplies the qualified advancing platform clock.
-    let native_clock = unsafe { ish::NativeClock::new(clock) }
-        .map_err(|error| (Error::IshCold(ColdError::Controller(error)), None))?;
-    let mut requester = services.prepare_requester(address).map_err(refused)?;
-    // Keep the genuine source through every effect, failure and unwind.
-    let minimum = core::mem::ManuallyDrop::new(minimum);
-    if let Err(error) = requester.function_mut().power_up(minimum.as_ref()) {
-        return Err((
-            Error::IshCold(ColdError::Power(error)),
-            Some(Box::new((requester, minimum))),
-        ));
-    }
-    let bars = match requester.function_mut().bars() {
-        Ok(bars) => bars,
-        Err(error) => return Err(keep_error(error, (requester, minimum))),
-    };
-    let Some(bar @ Bar::Memory { .. }) = bars[0] else {
-        return Err((
-            Error::Native(ServiceError::Refused("missing memory BAR0")),
-            Some(Box::new((requester, minimum))),
-        ));
-    };
-    let mapping = match services.map_bar(address, bar) {
-        Ok(mapping) => mapping,
-        Err(error) => return Err((Error::Native(error), Some(Box::new((requester, minimum))))),
-    };
-    // SAFETY: the actual reserved original BAR0 remains paired with its owner.
-    let registers = match unsafe { ish::MappedRegisters::new(mapping) } {
-        Ok(registers) => registers,
-        Err((error, mapping)) => {
-            return Err((
-                Error::IshCold(ColdError::Controller(error)),
-                Some(Box::new((requester, mapping, minimum))),
-            ));
-        }
-    };
-    // SAFETY: the original graph stays whole before any private-root bind,
-    // allocation, MSI programming or new firmware session is admitted.
-    let mut original = unsafe { Original::new(requester, registers, native_clock) };
-    if let Err(error) = original.prepare() {
-        return Err((Error::IshCold(error), Some(Box::new((original, minimum)))));
-    }
-    // RMP2-off/DMA-idle does not forget firmware's old DMA addresses, and
-    // source masking does not supply a historical notification/root owner.
-    // Both prerequisites remain explicit; neither is a config-only receipt.
-    Err((
-        Error::IshCold(ColdError::Missing(Original::<
-            ish::MappedRegisters,
-            ish::NativeClock,
-        >::migration_prerequisites())),
-        Some(Box::new((original, minimum))),
-    ))
-}
 #[cfg(test)]
 mod tests {
     use super::*;

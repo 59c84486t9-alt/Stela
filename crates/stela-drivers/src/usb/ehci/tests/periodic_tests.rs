@@ -121,7 +121,7 @@ fn periodic_links_smask_mult_intervals_and_duplex_payloads() {
 
 #[test]
 fn periodic_service_follows_microframe_clock_and_frame_list_wrap() {
-    let (mut c, m, _, bulk, pipes) = attached_periodic(32, 1, 5); // 16 microframes.
+    let (mut c, m, _, _, pipes) = attached_periodic(32, 1, 5); // 16 microframes.
     {
         let mut m = m.lock().unwrap();
         m.periodic_auto = false;
@@ -130,8 +130,9 @@ fn periodic_service_follows_microframe_clock_and_frame_list_wrap() {
     let read = c
         .submit_interrupt_in(input_interrupt(&pipes), 32, 1_000_000)
         .unwrap();
+    // A second interrupt transfer waits its turn; a bulk one would preempt.
     assert!(matches!(
-        c.submit_bulk_in(input(&bulk), 1, 1_000_000),
+        c.submit_interrupt_out(output_interrupt(&pipes), &[0; 32], 1_000_000),
         Err(Error::Busy)
     ));
     m.lock().unwrap().advance_periodic(6);

@@ -78,6 +78,7 @@ fn configuration_zero_busy_and_foreign_preflight_preserves_current_dma() {
             owner: Rc::new(()),
             generation: id.generation,
             port: id.port,
+            slot: id.slot,
         };
         assert_eq!(c.unconfigure(&foreign), Err(Error::Stale));
         let after = {

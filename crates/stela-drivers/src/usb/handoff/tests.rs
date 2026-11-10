@@ -344,4 +344,131 @@ fn only_usb_host_interfaces_have_a_kind() {
     assert_eq!(Kind::of([0x0c, 0x05, 0x00]), None);
 }
 
+/// An Intel xHCI's configuration space with its port-routing masks.
+fn intel_xhci(device: u16, subsystem: u32, superspeed: u32, usb2: u32) -> Function<Config> {
+    let mut config = Config::new(|_, _| {});
+    config.words[0] = u32::from(INTEL) | u32::from(device) << 16;
+    config.words[2] = 0x0c03_3000;
+    config.words[usize::from(regs::SUBSYSTEM_VENDOR_ID / 4)] = subsystem;
+    config.words[usize::from(INTEL_USB3PRM / 4)] = superspeed;
+    config.words[usize::from(INTEL_USB2PRM / 4)] = usb2;
+    Function::new(
+        crate::bus::pci::Address {
+            segment: 0,
+            bus: 0,
+            device: 0x14,
+            function: 0,
+        },
+        config,
+    )
+    .unwrap_or_else(|_| panic!("modelled function"))
+}
+
+#[test]
+fn intel_xhci_takes_every_switchable_port_from_ehci() {
+    for device in [0x1e31, 0x8c31, 0x9c31, 0x9cb1] {
+        let mut function = intel_xhci(device, 0, 0xf, 0x3fff);
+        assert_eq!(
+            switch_intel_ports(&mut function, true),
+            Ok(Some(Switched {
+                superspeed: 0xf,
+                usb2: 0x3fff
+            }))
+        );
+        let words = &function.config().words;
+        assert_eq!(words[usize::from(INTEL_USB3_PSSEN / 4)], 0xf);
+        assert_eq!(words[usize::from(INTEL_XUSB2PR / 4)], 0x3fff);
+    }
+}
+
+#[test]
+fn ports_stay_put_without_an_intel_ehci_or_a_switchable_port() {
+    let untouched = |function: &mut Function<Config>| {
+        let words = &function.config().words;
+        words[usize::from(INTEL_USB3_PSSEN / 4)] == 0 && words[usize::from(INTEL_XUSB2PR / 4)] == 0
+    };
+    let mut function = intel_xhci(0x8c31, 0, 0xf, 0x3fff);
+    assert_eq!(switch_intel_ports(&mut function, false), Ok(None));
+    assert!(untouched(&mut function));
+    let mut function = intel_xhci(0x8c31, SONY_FIXED_PORTS, 0xf, 0x3fff);
+    assert_eq!(switch_intel_ports(&mut function, true), Ok(None));
+    assert!(untouched(&mut function));
+    let mut function = intel_xhci(0xa12f, 0, 0, 0);
+    assert_eq!(switch_intel_ports(&mut function, true), Ok(None));
+    assert!(untouched(&mut function));
+    let mut amd = intel_xhci(0x43ba, 0, 0xf, 0x3fff);
+    amd.vendor = 0x1022;
+    assert_eq!(switch_intel_ports(&mut amd, true), Ok(None));
+    assert!(untouched(&mut amd));
+}
+
+/// One page of EHCI registers the early handoff reaches through BAR0.
+#[repr(align(4096))]
+struct Page([u32; 1024]);
+
+#[test]
+fn early_ehci_handoff_takes_the_semaphore_and_clears_the_smis() {
+    let _time = crate::test_clock::virtualize();
+    let mut page = alloc::boxed::Box::new(Page([0; 1024]));
+    // CAPLENGTH 0x20 and EECP; the controller is halted.
+    page.0[0] = 0x20;
+    page.0[EHCI_HCCPARAMS / 4] = u32::from(EECP) << 8;
+    page.0[(0x20 + EHCI_USBSTS) / 4] = EHCI_HALTED;
+    let base = page.0.as_mut_ptr() as u64;
+    let mut config = Config::new(|words, offset| {
+        // BAR0 decodes 4 KiB, 64-bit; firmware lets go of the semaphore.
+        if offset == 0x10 && words[4] == u32::MAX {
+            words[4] = 0xffff_f004;
+        }
+        if offset == EECP + 3 {
+            words[usize::from(EECP / 4)] &= !EHCI_BIOS_OWNED;
+        }
+    });
+    config.words[0] = 0x8086 | 0x1e2d << 16;
+    config.words[2] = 0x0c03_2000;
+    config.words[4] = base as u32 | 4;
+    config.words[5] = (base >> 32) as u32;
+    config.words[usize::from(EECP / 4)] = EHCI_LEGSUP | EHCI_BIOS_OWNED;
+    config.words[usize::from(EECP / 4) + 1] = 0xe03f_0001;
+    let mut function = Function::new(
+        crate::bus::pci::Address {
+            segment: 0,
+            bus: 0,
+            device: 0x1d,
+            function: 0,
+        },
+        config,
+    )
+    .unwrap_or_else(|_| panic!("modelled function"));
+    let handoff = Handoff {
+        ecam: Vec::new(),
+        mapped: alloc::vec![base..base + 4096],
+        dma: 0..0,
+        clock: clock(),
+        firmware: None,
+        completion: None,
+    };
+    // SAFETY: BAR0 is the page above, which nothing else reaches.
+    let handed = unsafe {
+        early(
+            &mut function,
+            &handoff,
+            crate::minimum_model::owned(clock()).as_ref(),
+        )
+    };
+    assert_eq!(
+        handed,
+        Some(Ok(Handed {
+            from_firmware: true,
+            forced: false
+        }))
+    );
+    let words = &function.config().words;
+    assert_eq!(words[usize::from(EECP / 4)], EHCI_LEGSUP | 1 << 24);
+    assert_eq!(words[usize::from(EECP / 4) + 1], 0);
+    // The command register is restored, and the ports go to the companions.
+    assert_eq!(words[1], 0);
+    assert_eq!(page.0[(0x20 + EHCI_CONFIGFLAG) / 4], 0);
+}
+
 mod minimum;

@@ -549,5 +549,63 @@ fn xhci(
     Ok(handed)
 }
 
+const INTEL: u16 = 0x8086;
+const INTEL_XUSB2PR: u16 = 0xd0;
+const INTEL_USB2PRM: u16 = 0xd4;
+const INTEL_USB3_PSSEN: u16 = 0xd8;
+const INTEL_USB3PRM: u16 = 0xdc;
+/// Sony VAIO T-series (subsystem 104d:90a8), which cannot switch its ports.
+const SONY_FIXED_PORTS: u32 = 0x90a8_104d;
+
+/// The ports an Intel xHCI took from its EHCI, as the routing registers read
+/// back after the switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Switched {
+    /// USB3_PSSEN: ports whose SuperSpeed terminations are on.
+    pub superspeed: u32,
+    /// XUSB2PR: USB 2 ports routed to the xHCI.
+    pub usb2: u32,
+}
+
+/// `usb_enable_intel_xhci_ports`, which Linux runs at the end of
+/// `quirk_usb_handoff_xhci` for every Intel xHCI: on Intel 7-, 8- and
+/// 9-series PCHs firmware may leave the switchable ports on EHCI, and the
+/// xHCI then sees no device on them. When an Intel EHCI exists
+/// (`intel_ehci`), turn on SuperSpeed for every port USB3PRM allows and route
+/// every USB 2 port XUSB2PRM allows to the xHCI. None when the function is
+/// no Intel xHCI, there is no Intel EHCI, or no port is switchable.
+pub fn switch_intel_ports<C: ConfigSpace>(
+    function: &mut Function<C>,
+    intel_ehci: bool,
+) -> Result<Option<Switched>, Error> {
+    if function.vendor != INTEL || Kind::of(function.class) != Some(Kind::Xhci) || !intel_ehci {
+        return Ok(None);
+    }
+    let config = function.config();
+    if config
+        .read32(regs::SUBSYSTEM_VENDOR_ID)
+        .map_err(Error::Config)?
+        == SONY_FIXED_PORTS
+    {
+        return Ok(None);
+    }
+    let superspeed = config.read32(INTEL_USB3PRM).map_err(Error::Config)?;
+    let usb2 = config.read32(INTEL_USB2PRM).map_err(Error::Config)?;
+    if superspeed == u32::MAX || usb2 == u32::MAX {
+        return Err(Error::Removed);
+    }
+    if superspeed == 0 && usb2 == 0 {
+        return Ok(None);
+    }
+    config
+        .write32(INTEL_USB3_PSSEN, superspeed)
+        .map_err(Error::Config)?;
+    config.write32(INTEL_XUSB2PR, usb2).map_err(Error::Config)?;
+    Ok(Some(Switched {
+        superspeed: config.read32(INTEL_USB3_PSSEN).map_err(Error::Config)?,
+        usb2: config.read32(INTEL_XUSB2PR).map_err(Error::Config)?,
+    }))
+}
+
 #[cfg(test)]
 mod tests;

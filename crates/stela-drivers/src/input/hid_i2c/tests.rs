@@ -5,6 +5,7 @@ use alloc::{collections::VecDeque, rc::Rc, vec};
 use core::cell::{Cell, RefCell};
 mod minimum;
 mod ownership;
+mod polled;
 
 // A complete vendor-page HID collection: ID17, two eight-bit input fields.
 const REPORT_DESCRIPTOR: [u8; 23] = [
@@ -52,6 +53,8 @@ struct Hardware {
     writes: Vec<Vec<u8>>,
     reads: usize,
     fail_after_opcode: Option<u8>,
+    /// No pin: an empty input register reads as a zero length.
+    idle_zero: bool,
 }
 fn descriptor(vendor: u16, product: u16) -> [u8; 30] {
     let mut bytes = [0; 30];
@@ -102,6 +105,7 @@ impl Hardware {
             writes: Vec::new(),
             reads: 0,
             fail_after_opcode: None,
+            idle_zero: false,
         }
     }
     fn frame(body: &[u8]) -> Vec<u8> {
@@ -202,6 +206,7 @@ impl Bus for Model {
                     .input
                     .pop_front()
                     .or_else(|| h.repeated_input.clone())
+                    .or_else(|| h.idle_zero.then(|| vec![0, 0]))
                     .expect("read without device output");
                 assert_eq!(
                     output.len(),
@@ -272,6 +277,20 @@ impl Interrupt for Pin {
             return Err(InterruptError::Hardware(2));
         }
         Ok(!h.force_irq_low && (!h.input.is_empty() || h.repeated_input.is_some()))
+    }
+}
+/// A device without a readable pin: always due, and nothing to mask.
+struct Polled(Rc<RefCell<Hardware>>);
+impl Interrupt for Polled {
+    fn mask_and_drain(&mut self) -> Result<(), InterruptError> {
+        self.0.borrow_mut().masked = true;
+        Ok(())
+    }
+    fn asserted(&mut self) -> Result<bool, InterruptError> {
+        Ok(true)
+    }
+    fn polled(&self) -> bool {
+        true
     }
 }
 impl Timer for Time {

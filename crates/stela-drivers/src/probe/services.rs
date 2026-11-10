@@ -70,7 +70,8 @@ impl fmt::Display for ServiceError {
 /// contract for its kind. Every
 /// returned owner stays valid in every access context `probe`'s drivers use.
 /// A mount that supplies the ACPI namespace also grants `probe` port I/O to
-/// the i8042 at ports 0x60 and 0x64 when the namespace lists one, with IRQ1
+/// the i8042 at ports 0x60 and 0x64 when the namespace lists one or the FADT
+/// does not rule one out (Linux `acpi_parse_fadt`), with IRQ1
 /// and IRQ12 masked at every interrupt controller and no other user of
 /// those ports, and to the I/O window (BAR 4) of each Intel i801 SMBus host
 /// it claims, with no other user than the AML its arbitration hands it to.

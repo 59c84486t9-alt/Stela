@@ -18,6 +18,9 @@ impl Controller {
     /// remain owned; platform sleep and reset-on-resume are unsupported.
     pub fn suspend_port(&mut self, id: &DeviceId) -> Result<SuspendedPort, Error> {
         let index = self.identity(id)?;
+        if !id.is_root() {
+            return Err(Error::Unsupported("EHCI suspend of a device behind a hub"));
+        }
         if self.pending.is_some() {
             return Err(Error::Busy);
         }
@@ -133,6 +136,7 @@ impl Controller {
             owner: self.owner.clone(),
             generation,
             port: owner.port,
+            slot: owner.port,
         })
     }
     fn suspend_link(

@@ -17,6 +17,9 @@ impl Controller {
     /// alone can never release a reachable physical bus address.
     pub fn disable_port(&mut self, id: &DeviceId) -> Result<(), Error> {
         let index = self.identity(id)?;
+        if !id.is_root() {
+            return Err(Error::Invalid); // Its hub port disables it.
+        }
         if self.pending.is_some() {
             return Err(Error::Busy);
         }

@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! One exclusively scheduled high-speed interrupt QH. Linux ehci-q.c qh_make
-//! and ehci-sched.c qh_link_periodic supply the descriptor/interval reference.
-//! No TT, concurrent periodic bandwidth allocator or asynchronous unlink is
-//! inferred: the complete periodic engine stops before the arena changes.
+//! One exclusively scheduled interrupt QH. Linux ehci-q.c qh_make and
+//! ehci-sched.c qh_link_periodic supply the descriptor/interval reference.
+//! A full- or low-speed endpoint behind a hub's transaction translator runs
+//! as split transactions: the start-split in microframe 0 and the
+//! complete-splits in microframes 2 to 4, the EHCI 1.0 section 4.12.2 layout.
+//! With one periodic QH at a time, no TT budget is shared. No concurrent
+//! periodic bandwidth allocator or asynchronous unlink is inferred: the
+//! complete periodic engine stops before the arena changes.
 use super::*;
 use schedule::endpoint_index;
 
@@ -10,7 +14,10 @@ use schedule::endpoint_index;
 pub(super) struct Recipe {
     pub(super) packet: u16,
     transactions: u8,
+    /// The period in microframes.
     interval: u16,
+    /// Split transactions through a transaction translator.
+    split: bool,
 }
 impl Recipe {
     pub(super) fn new(max_packet: u16, interval: u8) -> Result<Self, Error> {
@@ -34,6 +41,22 @@ impl Recipe {
             packet,
             transactions,
             interval: 1 << (interval - 1),
+            split: false,
+        })
+    }
+    /// A full- or low-speed interrupt endpoint's recipe: `interval` is its
+    /// bInterval in frames, rounded down to a power of two as Linux
+    /// `usb_submit_urb` does for the periodic list.
+    pub(super) fn full_speed(max_packet: u16, interval: u8, low: bool) -> Result<Self, Error> {
+        if !(1..=if low { 8 } else { 64 }).contains(&max_packet) || interval == 0 {
+            return Err(Error::Invalid);
+        }
+        let frames = 1u16 << (7 - interval.leading_zeros());
+        Ok(Self {
+            packet: max_packet,
+            transactions: 1,
+            interval: frames * 8,
+            split: true,
         })
     }
     pub(super) fn payload(self) -> usize {
@@ -43,6 +66,9 @@ impl Recipe {
         usize::from(self.interval).div_ceil(8)
     }
     pub(super) fn info(self) -> u32 {
+        if self.split {
+            return 1 << 30 | 0x1c << 8 | 1;
+        }
         let step = usize::from(self.interval).min(8);
         let mask = (0..8).step_by(step).fold(0u32, |mask, bit| mask | 1 << bit);
         u32::from(self.transactions) << 30 | mask

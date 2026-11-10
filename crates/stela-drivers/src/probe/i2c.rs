@@ -3,8 +3,10 @@
 //! `i2c-hid-acpi` attaches them, and ELAN and Cypress touchpads, which
 //! [`TouchpadInput`](crate::input::touchpad::TouchpadInput) reads as a mouse. Each device's `_CRS` names its controller,
 //! an Intel LPSS function on PCI or an AMD DesignWare controller the
-//! namespace lists, and the GPIO pin its interrupt is. Every controller and
-//! GPIO controller attaches once and is shared by the devices on it.
+//! namespace lists, and the GPIO pin its interrupt is; a HID-over-I²C device
+//! whose only interrupt is an APIC interrupt is polled on a timer instead.
+//! Every controller and GPIO controller attaches once and is shared by the
+//! devices on it.
 use super::PlatformError;
 use crate::bus::i2c::{
     self, Address as I2cAddress,
@@ -81,13 +83,18 @@ pub(crate) struct Connection {
     pub speed: u32,
     /// The controller's namespace path, as `_CRS` gives it.
     pub controller: String,
-    pub interrupt: Pin,
+    /// The GPIO pin whose level says the device has input, or none when its
+    /// only interrupt is an APIC interrupt, which no driver here can sample:
+    /// a HID-over-I²C device is then polled on its input register.
+    pub interrupt: Option<Pin>,
 }
 
 /// The connection Linux `i2c_acpi_fill_info` and `i2c_acpi_get_irq` read:
-/// the first I2cSerialBus and the first interrupt, an APIC interrupt before
-/// any GpioInt. The device is polled, so its interrupt must be a GPIO pin
-/// whose level can be read.
+/// the first I2cSerialBus and the device's interrupt. Linux takes the first
+/// interrupt, an APIC interrupt before any GpioInt; the drivers here poll, so
+/// they take the first GpioInt, whose level they can read, even after an
+/// APIC interrupt that names the same line. A device with only an APIC
+/// interrupt has no pin.
 pub(crate) fn connection(descriptors: &[Descriptor]) -> Result<Connection, PlatformError> {
     let serial = descriptors
         .iter()
@@ -103,14 +110,9 @@ pub(crate) fn connection(descriptors: &[Descriptor]) -> Result<Connection, Platf
             "I2C device without an I2cSerialBus connection",
         ));
     };
-    if descriptors
+    let apic = descriptors
         .iter()
-        .any(|descriptor| matches!(descriptor.resource, Resource::Interrupt(_)))
-    {
-        return Err(PlatformError::Refused(
-            "I2C device whose interrupt is an APIC interrupt, which a polled driver cannot read",
-        ));
-    }
+        .any(|descriptor| matches!(descriptor.resource, Resource::Interrupt(_)));
     let gpio = descriptors
         .iter()
         .find_map(|descriptor| match &descriptor.resource {
@@ -120,20 +122,29 @@ pub(crate) fn connection(descriptors: &[Descriptor]) -> Result<Connection, Platf
             },
             _ => None,
         });
-    let Some((gpio, polarity)) = gpio else {
-        return Err(PlatformError::Refused("I2C device without an interrupt"));
-    };
-    let active_low = match polarity {
-        Polarity::Low => true,
-        Polarity::High => false,
-        Polarity::Both => {
-            return Err(PlatformError::Refused(
-                "I2C device interrupt on both edges, which has no asserted level",
-            ));
+    let interrupt = match gpio {
+        Some((gpio, polarity)) => {
+            let active_low = match polarity {
+                Polarity::Low => true,
+                Polarity::High => false,
+                Polarity::Both => {
+                    return Err(PlatformError::Refused(
+                        "I2C device interrupt on both edges, which has no asserted level",
+                    ));
+                }
+            };
+            let Some(&pin) = gpio.pins.first() else {
+                return Err(PlatformError::Refused("GpioInt without a pin"));
+            };
+            Some(Pin {
+                controller: gpio.source.path.clone(),
+                pin,
+                active_low,
+                debounce_us: u32::from(gpio.debounce) * 10,
+            })
         }
-    };
-    let Some(&pin) = gpio.pins.first() else {
-        return Err(PlatformError::Refused("GpioInt without a pin"));
+        None if apic => None,
+        None => return Err(PlatformError::Refused("I2C device without an interrupt")),
     };
     let address = if ten_bit {
         I2cAddress::TenBit(address)
@@ -147,12 +158,7 @@ pub(crate) fn connection(descriptors: &[Descriptor]) -> Result<Connection, Platf
         address,
         speed: serial.speed,
         controller: serial.source.path.clone(),
-        interrupt: Pin {
-            controller: gpio.source.path.clone(),
-            pin,
-            active_low,
-            debounce_us: u32::from(gpio.debounce) * 10,
-        },
+        interrupt,
     })
 }
 
@@ -331,6 +337,37 @@ mod attach {
         }
     }
 
+    /// How often a HID-over-I²C device without a readable pin is polled:
+    /// a 125 Hz report rate, as fast as common I²C touchpads report.
+    const POLL_INTERVAL_US: u64 = 8_000;
+
+    /// A device whose only interrupt is an APIC interrupt, which no driver
+    /// here unmasks or samples: its input register is read on a timer.
+    struct PolledInterrupt {
+        clock: Clock,
+        /// When the next read is due.
+        due: u64,
+    }
+
+    impl hid_i2c::Interrupt for PolledInterrupt {
+        /// The APIC interrupt has no route of its own here: the mount leaves
+        /// it masked, and nothing it delivers is waited on.
+        fn mask_and_drain(&mut self) -> Result<(), InterruptError> {
+            Ok(())
+        }
+        fn asserted(&mut self) -> Result<bool, InterruptError> {
+            let now = self.clock.now_us();
+            if now < self.due {
+                return Ok(false);
+            }
+            self.due = now.saturating_add(POLL_INTERVAL_US);
+            Ok(true)
+        }
+        fn polled(&self) -> bool {
+            true
+        }
+    }
+
     type Attached<T> = Vec<(String, T)>;
 
     /// What one probe attached, shared by the devices found after it.
@@ -487,31 +524,44 @@ mod attach {
         };
         let controller = handle.child(&connection.controller).map_err(acpi)?;
         let bus = bus(services, session, clock, controller, shared, owners)?;
-        let gpio = handle
-            .child(&connection.interrupt.controller)
-            .map_err(acpi)?;
-        let gpio = gpio_controller(services, gpio, shared)?;
-        let mut interrupt = PinInterrupt {
-            controller: gpio,
-            pin: connection.interrupt.pin,
-            active_low: connection.interrupt.active_low,
+        let interrupt: Box<dyn hid_i2c::Interrupt> = match &connection.interrupt {
+            Some(pin) => {
+                let gpio = handle.child(&pin.controller).map_err(acpi)?;
+                let gpio = gpio_controller(services, gpio, shared)?;
+                let mut interrupt = PinInterrupt {
+                    controller: gpio,
+                    pin: pin.pin,
+                    active_low: pin.active_low,
+                };
+                interrupt
+                    .controller
+                    .borrow_mut()
+                    .request(
+                        interrupt.pin,
+                        LinePolicy {
+                            direction: Direction::Input,
+                            debounce_us: pin.debounce_us,
+                        },
+                    )
+                    .map_err(acpi)?;
+                hid_i2c::Interrupt::mask_and_drain(&mut interrupt)
+                    .map_err(|_| PlatformError::Refused("the interrupt pin could not be masked"))?;
+                Box::new(interrupt)
+            }
+            // Only HID-over-I²C defines an empty input register, which makes
+            // reading it without an interrupt safe.
+            None if kind == Kind::Hid => Box::new(PolledInterrupt {
+                clock,
+                due: clock.now_us(),
+            }),
+            None => {
+                return Err(PlatformError::Refused(
+                    "I2C touchpad whose only interrupt is an APIC interrupt, which a polled driver cannot read",
+                ));
+            }
         };
-        interrupt
-            .controller
-            .borrow_mut()
-            .request(
-                interrupt.pin,
-                LinePolicy {
-                    direction: Direction::Input,
-                    debounce_us: connection.interrupt.debounce_us,
-                },
-            )
-            .map_err(acpi)?;
-        hid_i2c::Interrupt::mask_and_drain(&mut interrupt)
-            .map_err(|_| PlatformError::Refused("the interrupt pin could not be masked"))?;
         power_on(handle)?;
         let bus: Box<dyn Bus> = Box::new(bus);
-        let interrupt: Box<dyn hid_i2c::Interrupt> = Box::new(interrupt);
         let address = connection.address;
         let touchpad = |driver| {
             Ok(Some(InputDevice::Touchpad(Box::new(TouchpadInput::new(
@@ -906,12 +956,12 @@ mod tests {
                 address: I2cAddress::SevenBit(0x15),
                 speed: 400_000,
                 controller: String::from("\\_SB.PCI0.I2C1"),
-                interrupt: Pin {
+                interrupt: Some(Pin {
                     controller: String::from("\\_SB.GPI0"),
                     pin: 0x37,
                     active_low: true,
                     debounce_us: 50,
-                },
+                }),
             }
         );
         let ten_bit = [
@@ -920,13 +970,11 @@ mod tests {
         ];
         let found = connection(&ten_bit).unwrap();
         assert_eq!(found.address, I2cAddress::TenBit(0x2c5));
-        assert!(!found.interrupt.active_low);
+        assert!(!found.interrupt.unwrap().active_low);
     }
 
-    #[test]
-    fn a_connection_needs_a_gpio_interrupt_with_a_level() {
-        use crate::platform::acpi::resources::Interrupt;
-        let apic = Resource::Interrupt(Interrupt {
+    fn apic_interrupt() -> Resource {
+        Resource::Interrupt(crate::platform::acpi::resources::Interrupt {
             consumer: true,
             trigger: Trigger::Level,
             polarity: Polarity::Low,
@@ -934,10 +982,13 @@ mod tests {
             wake: false,
             pins: alloc::vec![0x33],
             source: None,
-        });
+        })
+    }
+
+    #[test]
+    fn a_connection_needs_an_interrupt_and_a_gpio_one_needs_a_level() {
         for descriptors in [
             alloc::vec![descriptor(serial(0x15, false))],
-            alloc::vec![descriptor(serial(0x15, false)), descriptor(apic)],
             alloc::vec![
                 descriptor(serial(0x15, false)),
                 descriptor(gpio_interrupt(Polarity::Both))
@@ -953,6 +1004,36 @@ mod tests {
                 Err(PlatformError::Refused(_))
             ));
         }
+    }
+
+    #[test]
+    fn an_apic_interrupt_listed_first_gives_way_to_the_gpio_pin() {
+        let descriptors = [
+            descriptor(serial(0x2c, false)),
+            descriptor(apic_interrupt()),
+            descriptor(gpio_interrupt(Polarity::Low)),
+        ];
+        let found = connection(&descriptors).unwrap();
+        assert_eq!(
+            found.interrupt,
+            Some(Pin {
+                controller: String::from("\\_SB.GPI0"),
+                pin: 0x37,
+                active_low: true,
+                debounce_us: 50,
+            })
+        );
+    }
+
+    #[test]
+    fn a_device_with_only_an_apic_interrupt_has_no_pin() {
+        let descriptors = [
+            descriptor(serial(0x2c, false)),
+            descriptor(apic_interrupt()),
+        ];
+        let found = connection(&descriptors).unwrap();
+        assert_eq!(found.address, I2cAddress::SevenBit(0x2c));
+        assert_eq!(found.interrupt, None);
     }
 
     #[test]

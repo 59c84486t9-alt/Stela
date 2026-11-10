@@ -24,6 +24,10 @@ const QH_NEXT: usize = 16;
 const QH_ALT: usize = 20;
 const QH_TOKEN: usize = 24;
 const QTD_TOKEN: usize = 8;
+/// The overlay's split transaction state: a complete-split is due.
+const SPLIT_STATE: u32 = 1 << 1;
+/// Microframes a cancelled split interrupt transfer may run on to finish.
+const SPLIT_SETTLE_MICROFRAMES: usize = 16;
 
 /// Encodes one qTD; memory publication remains the Arena owner's job.
 /// Kept separate so the ignored unchanged Linux oracle compares precisely the
@@ -181,15 +185,21 @@ impl Arena {
         }
         Ok(())
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one QH's fields, each from a different owner"
+    )]
     fn qh(
         &mut self,
         address: u8,
+        route: Route,
         endpoint: u8,
         control: bool,
         toggle: bool,
         ping: bool,
         periodic: Option<periodic::Recipe>,
     ) -> Result<(), Error> {
+        let high = route.speed == Speed::High;
         self.write(
             QH,
             if periodic.is_some() {
@@ -198,20 +208,43 @@ impl Arena {
                 self.address as u32 | 2
             },
         )?;
-        let packet = periodic.map_or(if control { 64 } else { 512 }, |recipe| {
-            u32::from(recipe.packet)
-        });
+        let packet = periodic.map_or(
+            if control {
+                u32::from(route.control_packet)
+            } else {
+                512
+            },
+            |recipe| u32::from(recipe.packet),
+        );
+        let speed = match route.speed {
+            Speed::Full => 0,
+            Speed::Low => 1,
+            Speed::High => 2,
+        };
+        // Linux qh_make: a full- or low-speed control endpoint sets C, and
+        // NAK reload is high-speed asynchronous only.
         self.write(
             4,
             u32::from(address)
                 | (u32::from(endpoint & 15) << 8)
-                | (2 << 12)
+                | (speed << 12)
                 | if control { 1 << 14 } else { 0 }
                 | if periodic.is_none() { 1 << 15 } else { 0 }
                 | (packet << 16)
-                | if periodic.is_none() { 4 << 28 } else { 0 },
+                | if control && !high { 1 << 27 } else { 0 }
+                | if periodic.is_none() && high {
+                    4 << 28
+                } else {
+                    0
+                },
         )?;
-        self.write(8, periodic.map_or(1 << 30, |recipe| recipe.info()))?;
+        let translator = route.tt.map_or(0, |(hub, port)| {
+            u32::from(hub) << 16 | u32::from(port) << 23
+        });
+        self.write(
+            8,
+            periodic.map_or(1 << 30, |recipe| recipe.info()) | translator,
+        )?;
         if let Some(recipe) = periodic {
             for frame in 0..1024 {
                 self.write(
@@ -226,11 +259,21 @@ impl Arena {
         }
         self.write(QH_NEXT, self.qtd_address(0))?;
         self.write(QH_ALT, TERMINATE)?;
+        // Below high speed this bit is the split error state, not PING.
         self.write(
             QH_TOKEN,
-            if toggle { TOGGLE } else { 0 } | if ping { PING } else { 0 },
+            if toggle { TOGGLE } else { 0 } | if ping && high { PING } else { 0 },
         )
     }
+}
+
+/// How a QH reaches its device: the device's speed, the transaction
+/// translator a full- or low-speed device sits behind, and EP0's packet.
+#[derive(Clone, Copy)]
+pub(super) struct Route {
+    pub(super) speed: Speed,
+    pub(super) tt: Option<(u8, u8)>,
+    pub(super) control_packet: u16,
 }
 
 pub(super) struct Pending {
@@ -303,6 +346,15 @@ impl Controller {
         timeout: u64,
     ) -> Result<TransferId, Error> {
         let index = self.live(id)?;
+        // Another interrupt transfer waits its turn: preempting each other,
+        // two would never complete.
+        let periodic = endpoint.is_some_and(|endpoint| {
+            self.ports[index].as_ref().expect("live").endpoints[endpoint_index(endpoint)]
+                .is_some_and(|ep| ep.periodic.is_some())
+        });
+        if !periodic && self.pending.as_ref().is_some_and(Pending::is_periodic) {
+            self.preempt()?;
+        }
         if self.pending.is_some() {
             return Err(Error::Busy);
         }
@@ -317,6 +369,11 @@ impl Controller {
         let serial = self.next_transfer.checked_add(1).ok_or(Error::Exhausted)?;
         let device = self.ports[index].as_ref().expect("live");
         let address = device.address;
+        let route = Route {
+            speed: device.speed,
+            tt: device.tt,
+            control_packet: device.control_packet,
+        };
         let (toggle, ping, periodic) = if let Some(endpoint) = endpoint {
             let ep = device.endpoints[endpoint_index(endpoint)].ok_or(Error::Stale)?;
             if ep.halted {
@@ -363,6 +420,7 @@ impl Controller {
             arena.clear()?;
             arena.qh(
                 address,
+                route,
                 endpoint.unwrap_or(0),
                 control,
                 toggle,
@@ -443,12 +501,74 @@ impl Controller {
             serial,
         })
     }
+    /// Make way for another transfer: an interrupt transfer waits for its
+    /// device's next report, so a keyboard's would hold the one-transfer
+    /// schedule forever. A report already in is kept for its ticket's next
+    /// poll; otherwise the transfer is cancelled with its toggle kept, and
+    /// that poll says [`Error::Stale`], for its owner to submit again.
+    fn preempt(&mut self) -> Result<(), Error> {
+        let pending = self.pending.as_ref().expect("checked");
+        let ticket = TransferId {
+            device: pending.device.clone(),
+            serial: pending.serial,
+        };
+        let outcome = match self.cancel_interrupt(&ticket) {
+            Ok(Some(completion)) => Ok(completion),
+            Ok(None) => Err(Error::Stale),
+            // A stall is the endpoint's, for its owner to clear.
+            Err(error @ Error::Device(_)) if self.pending.is_none() => Err(error),
+            Err(error) => return Err(error),
+        };
+        self.preempted = Some((ticket.serial, outcome));
+        Ok(())
+    }
+    /// Cancel a waiting interrupt transfer without losing its report: a
+    /// full- or low-speed transfer whose start-split went out has its data
+    /// in the hub's transaction translator, and stopping the schedule then
+    /// would drop a report the device considers delivered. So the transfer
+    /// runs on until no complete-split is due, for at most 2 ms. A report
+    /// that completes meanwhile is returned.
+    pub fn cancel_interrupt(&mut self, ticket: &TransferId) -> Result<Option<Completion>, Error> {
+        if let Some(outcome) = self.take_preempted(ticket) {
+            return outcome.map(Some);
+        }
+        for _ in 0..SPLIT_SETTLE_MICROFRAMES {
+            if let Some(completion) = self.poll(ticket)? {
+                return Ok(Some(completion));
+            }
+            let stopped = self.schedule_off();
+            self.guard(stopped)?;
+            let token = self.arena.as_ref().ok_or(Error::Invalid)?.read(QH_TOKEN);
+            let token = self.guard(token)?;
+            if token & SPLIT_STATE == 0 {
+                break;
+            }
+            let started = self.schedule_on();
+            self.guard(started)?;
+            let waited = self.delay_minimum(125);
+            self.guard(waited)?;
+        }
+        self.cancel(ticket)?;
+        Ok(None)
+    }
+    /// What became of `ticket`'s transfer when another preempted it.
+    fn take_preempted(&mut self, ticket: &TransferId) -> Option<Result<Completion, Error>> {
+        if !Rc::ptr_eq(&self.owner, &ticket.device.owner)
+            || self
+                .preempted
+                .as_ref()
+                .is_none_or(|(serial, _)| *serial != ticket.serial)
+        {
+            return None;
+        }
+        self.preempted.take().map(|(_, outcome)| outcome)
+    }
     fn ticket(&self, ticket: &TransferId) -> Result<(), Error> {
         self.identity(&ticket.device)?;
         let pending = self.pending.as_ref().ok_or(Error::Stale)?;
         if pending.serial != ticket.serial
             || pending.device.generation != ticket.device.generation
-            || pending.device.port != ticket.device.port
+            || pending.device.slot != ticket.device.slot
         {
             return Err(Error::Stale);
         }
@@ -471,6 +591,9 @@ impl Controller {
     /// Poll the exact transfer. Each poll returns DMA ownership only
     /// after ASS0/PSS0 and requester drain, and resumes unchanged partial overlays.
     pub fn poll(&mut self, ticket: &TransferId) -> Result<Option<Completion>, Error> {
+        if let Some(outcome) = self.take_preempted(ticket) {
+            return outcome.map(Some);
+        }
         self.ticket(ticket)?;
         self.live(&ticket.device)?;
         let result = self.schedule_off();
@@ -523,6 +646,9 @@ impl Controller {
     }
     /// Cancel only this TD. No payload is copied from an incomplete TD.
     pub fn cancel(&mut self, ticket: &TransferId) -> Result<(), Error> {
+        if self.take_preempted(ticket).is_some() {
+            return Ok(());
+        }
         self.ticket(ticket)?;
         self.live(&ticket.device)?;
         let result = self.schedule_off();

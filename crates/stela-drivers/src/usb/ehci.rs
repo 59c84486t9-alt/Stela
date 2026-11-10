@@ -7,12 +7,18 @@
 //! before touching its reusable QH/qTD/bounce arena. Uncertain transitions
 //! permanently quarantine the complete attachment, not just the failed TD.
 //!
-//! Full/low-speed traffic is handed to companions; split, ISO, hub,
-//! controller/PCI sleep and controller-specific quirks remain unsupported. These
-//! boundaries make this an incomplete EHCI-family implementation.
+//! Hubs are driven through owned port operations ([`hub`]). Full- and
+//! low-speed devices behind a high-speed hub run as split transactions
+//! through its transaction translator: control, and interrupt for boot
+//! keyboards and mice ([`input`]); full-speed bulk is refused. On a root
+//! port they are handed to the companion, which has no driver here. ISO,
+//! controller/PCI sleep and controller-specific quirks remain unsupported.
+//! These boundaries make this an incomplete EHCI-family implementation.
 mod descriptor;
 mod detach;
 pub mod host;
+pub mod hub;
+pub mod input;
 mod native;
 mod periodic;
 mod recovery;
@@ -63,6 +69,10 @@ const PORT_RESUME: u32 = 1 << 6;
 const POWER: u32 = 1 << 12;
 const OWNER: u32 = 1 << 13;
 const PORT_CHANGES: u32 = (1 << 1) | (1 << 3) | (1 << 5);
+/// Devices the table holds behind hubs, past the root ports.
+const CHILDREN: usize = 32;
+/// Hub tiers below a root port, as USB 2.0 allows.
+const MAX_TIERS: usize = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -108,7 +118,10 @@ impl From<MemoryError> for Error {
 pub struct DeviceId {
     owner: Rc<()>,
     generation: u64,
+    /// The root port the device hangs from, itself or through hubs.
     port: u8,
+    /// Its device-table index plus one: the root port for a root device.
+    slot: u8,
 }
 /// A bulk endpoint from a configuration fetched and selected over USB.
 #[derive(Clone)]
@@ -143,6 +156,25 @@ impl DeviceId {
     pub fn root_port(&self) -> u8 {
         self.port
     }
+    /// Whether the device is a root port's own device, not one behind a hub.
+    pub fn is_root(&self) -> bool {
+        self.slot == self.port
+    }
+}
+/// A USB 2.0 device's bus speed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Speed {
+    Low,
+    Full,
+    High,
+}
+/// Where a device behind a hub hangs: its hub's device-table entry, the
+/// hub's generation when the device was attached, and the hub port.
+#[derive(Clone, Copy)]
+struct Parent {
+    index: usize,
+    generation: u64,
+    port: u8,
 }
 /// One specific transfer; old tickets cannot cancel or consume a newer transfer.
 pub struct TransferId {
@@ -166,10 +198,26 @@ pub struct Completion {
 struct Device {
     generation: u64,
     address: u8,
+    /// The root port it hangs from, itself or through hubs.
+    root_port: u8,
+    /// The hub port it hangs from; None for a root device.
+    parent: Option<Parent>,
+    speed: Speed,
+    /// A full- or low-speed device's transaction translator: the high-speed
+    /// hub's address and the hub port the translated traffic leaves on.
+    tt: Option<(u8, u8)>,
+    /// EP0's maximum packet size.
+    control_packet: u16,
     configuration: u64,
     configuration_value: u8,
     endpoints: [Option<Endpoint>; 32],
     suspended: bool,
+}
+impl Device {
+    /// Whether the device hangs from root port `port` through hubs.
+    fn root(&self, port: u8) -> bool {
+        self.parent.is_some() && self.root_port == port
+    }
 }
 #[derive(Clone, Copy)]
 struct Endpoint {
@@ -198,13 +246,20 @@ pub struct Controller {
     state: State,
     fault: Option<Error>,
     operational: usize,
+    /// The device table: each root port's device, then the devices behind
+    /// hubs ([`CHILDREN`] entries).
     ports: Vec<Option<Device>>,
+    /// The root ports, the table's first entries.
+    roots: usize,
     next_generation: u64,
     next_transfer: u64,
     default_port: Option<u8>,
     power_control: bool,
     companions: bool,
     pending: Option<Pending>,
+    /// The interrupt transfer another transfer preempted, by serial, and
+    /// what became of it ([`Controller::preempt`]).
+    preempted: Option<(u64, Result<Completion, Error>)>,
 }
 impl Controller {
     fn hw(&mut self) -> &mut dyn Hardware {
@@ -247,24 +302,61 @@ impl Controller {
         if !Rc::ptr_eq(&self.owner, &id.owner) {
             return Err(Error::Stale);
         }
-        let index = usize::from(id.port).checked_sub(1).ok_or(Error::Stale)?;
+        let index = usize::from(id.slot).checked_sub(1).ok_or(Error::Stale)?;
         if self
             .ports
             .get(index)
             .and_then(Option::as_ref)
             .is_none_or(|device| device.generation != id.generation || device.suspended)
+            || !self.attached(index)
         {
             return Err(Error::Stale);
         }
         self.ready()?;
         Ok(index)
     }
+    /// Whether every hub between the device at `index` and its root is
+    /// still the one it was attached through.
+    fn attached(&self, mut index: usize) -> bool {
+        for _ in 0..=MAX_TIERS {
+            let Some(device) = self.ports.get(index).and_then(Option::as_ref) else {
+                return false;
+            };
+            let Some(parent) = device.parent else {
+                return true;
+            };
+            if self
+                .ports
+                .get(parent.index)
+                .and_then(Option::as_ref)
+                .is_none_or(|hub| hub.generation != parent.generation)
+            {
+                return false;
+            }
+            index = parent.index;
+        }
+        false
+    }
+    /// Retire every device behind a hub on root port `port`: a reset or
+    /// disconnect of the root takes them all off the bus.
+    fn retire_children(&mut self, port: u8) {
+        let roots = self.roots;
+        for (index, entry) in self.ports.iter_mut().enumerate().skip(roots) {
+            if entry.as_ref().is_some_and(|device| device.root(port)) {
+                *entry = None;
+                if self.default_port == Some((index + 1) as u8) {
+                    self.default_port = None;
+                }
+            }
+        }
+    }
     fn port_at(&self, index: usize) -> usize {
         self.operational + PORT + 4 * index
     }
     fn live(&mut self, id: &DeviceId) -> Result<usize, Error> {
-        let index = self.identity(id)?; //
-        let result = self.read(self.port_at(index));
+        let index = self.identity(id)?;
+        let root = usize::from(id.port) - 1;
+        let result = self.read(self.port_at(root));
         let value = self.guard(result)?;
         if value
             & (CONNECT
@@ -277,7 +369,7 @@ impl Controller {
                 | PORT_RESUME)
             != CONNECT | ENABLE
         {
-            self.retire_observed_root(index, value)?;
+            self.retire_observed_root(root, value)?;
             return Err(Error::Stale);
         }
         let result = self.health();
@@ -287,6 +379,7 @@ impl Controller {
     fn retire_observed_root(&mut self, index: usize, value: u32) -> Result<(), Error> {
         let port = (index + 1) as u8;
         self.ports[index] = None; // Revoke public identity before any other work.
+        self.retire_children(port);
         // Losing an identity is not physical isolation. A connected device can
         // still answer its old assigned address (or address0) despite PEC/CSC,
         // overcurrent or an unfinished reset. Never free that bus namespace.
@@ -423,7 +516,7 @@ impl Controller {
 
     /// The controller's root ports, numbered from one.
     pub fn ports(&self) -> u8 {
-        self.ports.len() as u8
+        self.roots as u8
     }
     /// The lowest USB address no device here holds.
     pub fn unused_address(&self) -> Option<u8> {
@@ -447,7 +540,7 @@ impl Controller {
         self.ready()?;
         let index = usize::from(port)
             .checked_sub(1)
-            .filter(|index| *index < self.ports.len())
+            .filter(|index| *index < self.roots)
             .ok_or(Error::Invalid)?;
         if self.pending.is_some() || self.default_port.is_some_and(|owner| owner != port) {
             return Err(Error::Busy);
@@ -466,6 +559,7 @@ impl Controller {
             .ok_or(Error::Exhausted)?;
         self.next_generation = generation;
         let untracked = self.ports[index].take().is_none() && self.default_port != Some(port);
+        self.retire_children(port);
         // Keep any old address0 reservation throughout the owned transition.
         // A failed reset can leave that exact device reachable at address0.
         let result = match self.reset_root(index) {
@@ -493,6 +587,11 @@ impl Controller {
         self.ports[index] = Some(Device {
             generation,
             address: 0,
+            root_port: port,
+            parent: None,
+            speed: Speed::High,
+            tt: None,
+            control_packet: 64,
             configuration: 0,
             configuration_value: 0,
             endpoints: [None; 32],
@@ -503,6 +602,7 @@ impl Controller {
             owner: self.owner.clone(),
             generation,
             port,
+            slot: port,
         })
     }
     fn reset_root(&mut self, index: usize) -> Result<RootReset, Error> {
@@ -567,9 +667,9 @@ impl Controller {
         self.ready()?;
         let mut removed = Vec::new();
         removed
-            .try_reserve_exact(self.ports.len())
+            .try_reserve_exact(self.roots)
             .map_err(|_| Error::Exhausted)?;
-        for index in 0..self.ports.len() {
+        for index in 0..self.roots {
             if self.ports[index].is_none() {
                 continue;
             }
