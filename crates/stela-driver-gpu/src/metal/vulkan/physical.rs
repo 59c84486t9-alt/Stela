@@ -284,6 +284,10 @@ pub struct Features {
     pub vertex_input_dynamic_state: bool,
     pub vertex_attribute_instance_rate_divisor: bool,
     pub depth_clip_enable: bool,
+    /// `VK_KHR_line_rasterization`'s `bresenhamLines` and
+    /// `rectangularLines`.
+    pub bresenham_lines: bool,
+    pub rectangular_lines: bool,
     /// `VK_EXT_image_view_min_lod` `minLod`.
     pub image_view_min_lod: bool,
     pub fragment_shader_barycentric: bool,
@@ -377,6 +381,11 @@ impl Memory {
 pub struct FormatSupport {
     pub optimal: FormatFeatures,
     pub linear: FormatFeatures,
+    /// The features of images of the linear DRM format modifier, the tiling
+    /// Metal's linear textures take (`VkDrmFormatModifierPropertiesList2EXT`);
+    /// a driver may render to these where linear tiling does not. Empty
+    /// without the modifier extension.
+    pub modifier_linear: FormatFeatures,
     pub buffer: FormatFeatures,
     pub sample_counts: SampleCounts,
     pub sparse: SampleCounts,

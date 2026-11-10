@@ -108,7 +108,16 @@ fn a_failed_gate_call_reports_its_status_and_reason() {
     let reason = GuestMemory::read(&mut memory, call.reason).unwrap();
     assert_eq!(
         &reason[..call.reason_length as usize],
-        b"record length".as_slice()
+        alloc::format!("record length {}", size_of::<Block>() + 1).as_bytes()
+    );
+    // The platform's line names the operation too.
+    assert_eq!(
+        core::mem::take(&mut service.refused),
+        [alloc::format!(
+            "record length {} in operation {}",
+            size_of::<Block>() + 1,
+            Operation::Negotiate.raw()
+        )]
     );
     assert_eq!(
         service.serve(connection, 0x10, &mut memory),

@@ -40,6 +40,8 @@ struct Compiled {
     stage_in_indices: Option<(u32, u32)>,
     /// The bytes of each linked module and its function constant values.
     modules: Vec<(usize, Option<Values>)>,
+    /// Each linked module's copy number.
+    copies: Vec<u32>,
     linked_functions: Vec<String>,
     max_call_stack_depth: u32,
     samplers: Vec<(u64, u64)>,
@@ -288,6 +290,7 @@ unsafe extern "C" fn compile(
             ),
         )
     };
+    let copies = modules.iter().map(|module| module.copy).collect();
     let modules = modules
         .iter()
         .map(|module| {
@@ -378,6 +381,7 @@ unsafe extern "C" fn compile(
             stage_in,
             stage_in_indices,
             modules,
+            copies,
             linked_functions,
             max_call_stack_depth: specialization.max_call_stack_depth,
             samplers,
@@ -435,12 +439,14 @@ unsafe extern "C" fn stitch(
             slice::from_raw_parts(graphs, graph_count as usize),
         )
     };
-    // The module says what the service was given.
+    // The module says what the service was given, with the first source's
+    // count of function constant values.
     let names = [
         sources.len() as u8,
         graphs.len() as u8,
         graphs[0].node_count as u8,
         u8::from(graphs[0].kernel),
+        sources[0].constant_count as u8,
     ];
     // SAFETY: the callback takes the bytes for the call.
     unsafe { visit(data, names.as_ptr().cast(), names.len()) };
@@ -1038,6 +1044,11 @@ fn visible_functions_reflect_their_constants_and_only_link() {
 #[test]
 fn stitching_gives_the_service_each_source_and_graph() {
     let (mut compiler, library) = with_library();
+    let source = |entry: &str, constants| LinkedFunction {
+        library,
+        entry: String::from(entry),
+        constants,
+    };
     let graph = StitchedGraph {
         name: "stitched".into(),
         nodes: vec![
@@ -1052,9 +1063,12 @@ fn stitching_gives_the_service_each_source_and_graph() {
     };
     assert_eq!(
         compiler
-            .stitch(&[(library, "kernel")], core::slice::from_ref(&graph))
+            .stitch(
+                &[source("kernel", vec![(0, vec![1, 0, 0, 0])])],
+                core::slice::from_ref(&graph)
+            )
             .unwrap(),
-        [1, 1, 2, 0]
+        [1, 1, 2, 0, 1]
     );
     let kernel = StitchedGraph {
         nodes: vec![
@@ -1069,10 +1083,16 @@ fn stitching_gives_the_service_each_source_and_graph() {
         ..graph
     };
     assert_eq!(
-        compiler.stitch(&[(library, "kernel")], &[kernel]).unwrap(),
-        [1, 1, 2, 1]
+        compiler
+            .stitch(&[source("kernel", Vec::new())], &[kernel])
+            .unwrap(),
+        [1, 1, 2, 1, 0]
     );
-    assert!(compiler.stitch(&[(library, "absent")], &[]).is_err());
+    assert!(
+        compiler
+            .stitch(&[source("absent", Vec::new())], &[])
+            .is_err()
+    );
 }
 
 #[test]
@@ -1132,25 +1152,29 @@ fn linked_modules_reach_the_service_once_each() {
         .compile(library, "kernel", &twice(reordered))
         .unwrap();
     assert_eq!(modules(), [(8, Some(tint.clone()))]);
-    assert_eq!(
-        compiler.compile(library, "kernel", &twice(Vec::new())),
-        Err(Error::Unsupported(
-            "linking one module with two sets of function constant values"
-        ))
-    );
-    assert_eq!(
-        compiler.compile(
+    // Two sets of values link the module twice, the second a copy whose
+    // definitions function tables name with its suffix.
+    compiler
+        .compile(library, "kernel", &twice(Vec::new()))
+        .unwrap();
+    assert_eq!(modules(), [(8, Some(tint.clone())), (8, Some(Vec::new()))]);
+    FAKE.with_borrow(|fake| assert_eq!(fake.compiled.last().unwrap().copies, [0, 1]));
+    // The function's own module with other values is a copy of it.
+    compiler
+        .compile(
             library,
             "kernel",
             &linked(Linking {
                 functions: vec![function(library, "kernel", tint)],
                 ..Linking::default()
-            })
-        ),
-        Err(Error::Unsupported(
-            "linking a function's own module with other function constant values"
-        ))
-    );
+            }),
+        )
+        .unwrap();
+    FAKE.with_borrow(|fake| {
+        let compiled = fake.compiled.last().unwrap();
+        assert_eq!(compiled.copies, [1]);
+        assert_eq!(compiled.linked_functions, ["kernel.stela.copy1"]);
+    });
     assert_eq!(
         compiler.compile(
             library,
@@ -1454,6 +1478,7 @@ fn post_tessellation_vertex_functions_compile_with_their_stage_in() {
                 step: TessellationFactorStepFunction::PerPatch.raw() as u32,
                 winding: Winding::CounterClockwise.raw() as u32,
                 control_point_index_bytes: 2,
+                scales: false,
             })
         );
         assert_eq!(

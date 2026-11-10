@@ -11,6 +11,7 @@ use super::{
     capabilities::{ApiFeatures, Capabilities, Platform},
     error::{Error, Result},
     shader::{Compiler, Refusal},
+    timing::{CallPhases, Recorder},
     vulkan::{
         backend::{Backend, Descriptor, Object, requirements},
         object::{Memory, Semaphore},
@@ -21,6 +22,7 @@ use alloc::{collections::VecDeque, vec::Vec};
 mod execution_sets;
 #[cfg(test)]
 pub(crate) mod fixture;
+pub mod gpu_times;
 pub mod indirect;
 pub mod lifecycle;
 pub mod pipelines;
@@ -114,6 +116,9 @@ pub struct Device<B: Backend, C: Compiler> {
     descriptors: DescriptorHeap,
     /// The universal queue's timeline: command buffer `n` signals `n`.
     timeline: Semaphore,
+    /// A descriptor of the timeline for the platform to wait on, until it
+    /// takes it.
+    completion: Option<i32>,
     submitted: u64,
     completed: u64,
     /// A submission failed; nothing pending will complete.
@@ -139,10 +144,12 @@ pub struct Device<B: Backend, C: Compiler> {
     tests_fragments: bool,
     queue: queue::Queue,
     /// What the device left undone with no call to refuse, such as work it
-    /// submits later, each reported once: those reported, and the one the
-    /// next call reports.
+    /// submits later, each reported once.
     unsupported: Vec<&'static str>,
-    unreported: Option<&'static str>,
+    /// What it left undone that no call has reported yet, oldest first.
+    unreported: Vec<&'static str>,
+    /// The phases of the call it serves now, for the platform's log.
+    timing: Recorder,
 }
 
 /// What a device holds at one moment.
@@ -157,9 +164,59 @@ pub struct DeviceMemory {
     pub in_flight: usize,
     pub submitted: u64,
     pub completed: u64,
+    /// Destroyed private textures kept for reuse, and how often creations
+    /// reused one.
+    pub recycled: resources::RecycleReport,
+    /// The backend's memory blocks and the resources placed in them.
+    pub blocks: crate::metal::vulkan::backend::MemoryBlocks,
+    /// Each descriptor array's use, in [`HeapArray`] order.
+    pub descriptors: [DescriptorUse; 5],
+}
+
+/// One descriptor array's indices: in use, released but waiting for the
+/// GPU, and in all.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DescriptorUse {
+    pub in_use: u32,
+    pub retiring: u32,
+    pub count: u32,
+}
+
+impl core::fmt::Display for DescriptorUse {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}+{}/{}", self.in_use, self.retiring, self.count)
+    }
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
+    /// The serials of the last command buffer submitted and the last seen
+    /// complete.
+    pub fn progress(&self) -> (u64, u64) {
+        (self.submitted, self.completed)
+    }
+
+    /// Gives the device and its backend the platform's tick counter, which
+    /// times the phases of the calls a [`Recorder`] names.
+    pub fn set_clock(&mut self, ticks: fn() -> u64) {
+        self.timing.set_clock(ticks);
+        self.backend.set_clock(ticks);
+    }
+
+    /// The tick counter the platform gave.
+    pub fn clock(&self) -> fn() -> u64 {
+        self.timing.clock()
+    }
+
+    /// The phases of the call served now.
+    pub fn timing(&mut self) -> &mut Recorder {
+        &mut self.timing
+    }
+
+    /// The phases of the call that just ended, when one was timed.
+    pub fn take_phases(&mut self) -> Option<CallPhases> {
+        self.timing.take()
+    }
+
     /// What the device holds now.
     pub fn memory(&self) -> DeviceMemory {
         DeviceMemory {
@@ -169,6 +226,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             in_flight: self.queue.in_flight_count(),
             submitted: self.submitted,
             completed: self.completed,
+            recycled: self.recycled(),
+            blocks: self.backend.memory_blocks(),
+            descriptors: core::array::from_fn(|index| {
+                let array = HeapArray::ALL[index];
+                DescriptorUse {
+                    in_use: self.descriptors.in_use(array),
+                    retiring: self.descriptors.retiring(array),
+                    count: self.descriptors.layout().count(array),
+                }
+            }),
         }
     }
 
@@ -176,14 +243,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     fn unsupported(&mut self, what: &'static str) {
         if !self.unsupported.contains(&what) {
             self.unsupported.push(what);
-            self.unreported = Some(what);
+            self.unreported.push(what);
         }
     }
 
-    /// What the device left undone since the last call, which no call's
-    /// status reports.
+    /// The oldest thing the device left undone that no call's status
+    /// reported; each is answered once.
     pub fn take_unsupported(&mut self) -> Option<&'static str> {
-        self.unreported.take()
+        (!self.unreported.is_empty()).then(|| self.unreported.remove(0))
     }
 
     /// The compiler's detail of the last function it refused, once.
@@ -209,12 +276,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         );
         let layout = HeapLayout::new(&physical.limits);
         let timeline = backend.create_semaphore(0)?;
+        let completion = backend.export_semaphore(timeline);
         Ok(Self {
             backend,
             compiler,
             capabilities,
             descriptors: DescriptorHeap::new(layout),
             timeline,
+            completion,
             submitted: 0,
             completed: 0,
             lost: false,
@@ -229,7 +298,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             tests_fragments: false,
             queue: queue::Queue::default(),
             unsupported: Vec::new(),
-            unreported: None,
+            unreported: Vec::new(),
+            timing: Recorder::default(),
         })
     }
 
@@ -254,6 +324,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// The newest serial a poll saw completed, without asking the GPU.
     pub fn completed_serial(&self) -> u64 {
         self.completed
+    }
+
+    /// The newest serial submitted.
+    pub fn submitted_serial(&self) -> u64 {
+        self.submitted
+    }
+
+    /// A descriptor of the queue's timeline, which signals each serial as it
+    /// completes, for the platform to wait on and own: once per device.
+    pub fn take_completion(&mut self) -> Option<i32> {
+        self.completion.take()
     }
 
     /// `currentAllocatedSize`, including allocations pending GPU completion.

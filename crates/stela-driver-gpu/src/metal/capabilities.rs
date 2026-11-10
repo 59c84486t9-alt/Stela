@@ -17,7 +17,7 @@ use super::{
         ArgumentBuffersTier, CounterSamplingPoint, DeviceLocation, GpuFamily, ReadWriteTextureTier,
         SparsePageSize, TextureType,
     },
-    pixel_format::{Compression, Description, Encoding, Kind, PixelFormat, Realization},
+    pixel_format::{Compression, Description, Encoding, Kind, PixelFormat, Planes, Realization},
     resource::{raw_rendered, raw_texel_format},
     vertex::VertexFormat,
     vulkan::{
@@ -217,6 +217,8 @@ pub const MAX_VERTEX_ATTRIBUTES: u32 = 31;
 /// Argument buffer tier 2 resource and sampler counts on Mac GPUs.
 const TIER2_ARGUMENT_RESOURCES: u32 = 500_000;
 const TIER2_ARGUMENT_SAMPLERS: u32 = 2048;
+/// The widest point an Apple GPU draws, Metal feature set tables.
+const APPLE_MAX_POINT_SIZE: f32 = 511.0;
 /// Vulkan's standard sparse block shapes describe 64 KiB tiles.
 const STANDARD_SPARSE_TILE_BYTES: u64 = 64 << 10;
 
@@ -315,6 +317,9 @@ pub struct Capabilities {
     pub depth_clamp: bool,
     /// `MTLTriangleFillModeLines`.
     pub wireframe: bool,
+    /// Lines and polygon edges rasterize as Apple GPUs': by the diamond
+    /// exit rule at one sample, as rectangles under multisampling.
+    pub line_modes: bool,
     /// `MTLTextureViewDescriptor.minLOD`.
     pub view_min_lod: bool,
     /// Timestamp ticks per second; zero without timestamp counters.
@@ -329,11 +334,15 @@ pub struct Capabilities {
     /// read and write the attachment as storage in a fragment shader
     /// interlock section.
     pub framebuffer_reads: bool,
-    /// Fragment functions that write the stencil reference run the
-    /// fragment tests themselves, on copies of the pass's depth and stencil
-    /// attachments in their interlock section, for a device without stencil
-    /// export.
+    /// Fragment functions can run the fragment tests themselves, on copies
+    /// of the pass's depth and stencil attachments in their interlock
+    /// section: those that write the stencil reference on a device without
+    /// stencil export, and those accessing attachments as storage whose
+    /// pipeline cannot test fragments before they run.
     pub fragment_tests: bool,
+    /// Fragment shaders write the stencil reference
+    /// (`VK_EXT_shader_stencil_export`).
+    pub stencil_export: bool,
     /// A stencil resolve following a min or max depth resolve
     /// (`MTLMultisampleStencilResolveFilterDepthResolvedSample`), which
     /// Vulkan does not have: the average samples kernel resolves the
@@ -611,13 +620,10 @@ pub fn depth_stencil_copies(device: &PhysicalDevice) -> bool {
         && features.shader_storage_image_read_without_format
 }
 
-/// Whether a fragment function writing the stencil reference on `device`,
-/// which has no stencil export, runs the fragment tests itself: on storage
-/// copies of the attachments in its interlock section.
+/// Whether a fragment function on `device` can run the fragment tests
+/// itself: on storage copies of the attachments in its interlock section.
 pub fn fragment_tests(device: &PhysicalDevice) -> bool {
-    !device.limits.stencil_export
-        && device.features.fragment_shader_pixel_interlock
-        && depth_stencil_copies(device)
+    device.features.fragment_shader_pixel_interlock && depth_stencil_copies(device)
 }
 
 impl Derivation<'_> {
@@ -743,7 +749,8 @@ impl Derivation<'_> {
                 features.dynamic_rendering_local_read && features.shader_storage_image_multisample,
                 ApiFeatures::EMPTY,
             ));
-        // A stencil output without stencil export: the function tests
+        // A stencil output without stencil export, or storage attachments
+        // whose pipeline cannot test fragments first: the function tests
         // fragments on storage copies of the attachments, which image copies
         // between depth or stencil aspects and color images fill.
         let fragment_tests = raster_order_groups && fragment_tests(self.device);
@@ -885,6 +892,10 @@ impl Derivation<'_> {
             "triangle line fill",
             features.fill_mode_non_solid && features.extended_dynamic_state3_polygon_mode,
         ));
+        let line_modes = self.check(driver(
+            "line rasterization modes",
+            features.bresenham_lines && features.rectangular_lines,
+        ));
 
         let workgroup = limits.max_compute_work_group_size;
         let mesh_limits = limits.mesh.filter(|_| mesh);
@@ -930,7 +941,9 @@ impl Derivation<'_> {
                 ArgumentBuffersTier::Tier2 => TIER2_ARGUMENT_RESOURCES,
                 ArgumentBuffersTier::Tier1 => MAX_TEXTURE_BINDINGS,
             }),
-            max_point_size: limits.point_size_range[1],
+            // Apple GPUs draw points at most 511 pixels wide, and the
+            // compiler clamps every point size to it (air_to_nir.c).
+            max_point_size: limits.point_size_range[1].min(APPLE_MAX_POINT_SIZE),
             max_vertex_buffer_stride: u64::from(limits.max_vertex_input_binding_stride),
             max_vertex_attribute_offset: u64::from(limits.max_vertex_input_attribute_offset),
             max_vertex_step_rate: if step_rates {
@@ -1006,6 +1019,7 @@ impl Derivation<'_> {
             alpha_to_one,
             depth_clamp,
             wireframe,
+            line_modes,
             view_min_lod,
             timestamp_frequency: if timestamps {
                 (1e9 / f64::from(limits.timestamp_period)) as u64
@@ -1016,6 +1030,7 @@ impl Derivation<'_> {
             memoryless_render_targets: true,
             framebuffer_reads,
             fragment_tests,
+            stencil_export: limits.stencil_export,
             stencil_follows_depth,
             counter_sampling,
             sparse_volumes,
@@ -1044,6 +1059,7 @@ impl Derivation<'_> {
         for (format, capabilities) in PixelFormat::ALL.iter().zip(formats.iter_mut()) {
             let description = format.describe();
             *capabilities = match description.realization {
+                Ok(_) if format.planes().is_some() => self.two_plane_capabilities(*format),
                 Ok(realization) => {
                     let support = self.device.formats.get(realization.format);
                     self.format_capabilities(description, support, &realization)
@@ -1172,7 +1188,22 @@ impl Derivation<'_> {
             && optimal.contains(F::STORAGE_IMAGE | F::STORAGE_WRITE_WITHOUT_FORMAT)
             && features.shader_storage_image_write_without_format
             && shaders.contains(ShaderFeatures::TEXTURE_READ_WRITE);
-        let storage_read = optimal.contains(F::STORAGE_READ_WITHOUT_FORMAT)
+        // An sRGB format's storage views are its linear twin's, through
+        // which shaders encode and decode (`PixelFormat::srgb_storage`).
+        let twin = description
+            .format
+            .srgb_storage()
+            .and_then(|linear| linear.describe().realization.as_ref().ok())
+            .map(|linear| self.device.formats.get(linear.format).optimal);
+        let storage = storage
+            || twin.is_some_and(|twin| {
+                twin.contains(F::STORAGE_IMAGE | F::STORAGE_WRITE_WITHOUT_FORMAT)
+                    && features.shader_storage_image_write_without_format
+                    && shaders.contains(ShaderFeatures::TEXTURE_READ_WRITE)
+            });
+        let storage_read = twin
+            .unwrap_or(optimal)
+            .contains(F::STORAGE_READ_WITHOUT_FORMAT)
             && features.shader_storage_image_read_without_format;
         let sampled =
             optimal.contains(F::SAMPLED_IMAGE) && shaders.contains(ShaderFeatures::TEXTURE_SAMPLE);
@@ -1281,6 +1312,55 @@ impl Derivation<'_> {
                 );
         }
         capabilities
+    }
+
+    /// A two-plane format's: an IOSurface's planes, linear images of one
+    /// and two components ([`PixelFormat::plane_formats`]), which shaders
+    /// sample and read together.
+    /// A 4:4:4 format renders through both planes' raw texels: the
+    /// fragment function converts, blends and writes them in its interlock
+    /// section ([`FormatCapabilities::RAW_RENDER`]). Rendering to a
+    /// subsampled format, which averages its second plane's texels, and
+    /// shader writes are not implemented.
+    fn two_plane_capabilities(&self, format: PixelFormat) -> FormatCapabilities {
+        use crate::metal::vulkan::Format as V;
+        use FormatCapabilities as C;
+        use FormatFeatures as F;
+        let plane = |format: PixelFormat| {
+            let description = format.describe();
+            description.realization.map_or(C::EMPTY, |realization| {
+                let support = self.device.formats.get(realization.format);
+                self.format_capabilities(description, support, &realization)
+            })
+        };
+        let Some([first, second]) = format.plane_formats() else {
+            return C::EMPTY;
+        };
+        let (first, second) = (plane(first), plane(second));
+        let both = |flag| first.contains(flag) && second.contains(flag);
+        // The planes are linear-modifier images (`resource::linear_texture`).
+        let linear = |format: V, features: F| {
+            self.device
+                .formats
+                .get(format)
+                .modifier_linear
+                .contains(features)
+        };
+        // Shaders convert raw texels of byte components only.
+        let render = format.planes() == Some(Planes::Full)
+            && !format.ten_bit_planes()
+            && self.storage_attachments()
+            && linear(V::R8Unorm, F::COLOR_ATTACHMENT)
+            && linear(V::R8G8Unorm, F::COLOR_ATTACHMENT)
+            && linear(V::R8Uint, F::COLOR_ATTACHMENT | F::STORAGE_IMAGE)
+            && linear(V::R16Uint, F::STORAGE_IMAGE);
+        C::EMPTY
+            .with(C::READ, both(C::READ))
+            .with(C::FILTER, both(C::FILTER))
+            .with(C::LINEAR, both(C::LINEAR))
+            .with(C::COLOR, render)
+            .with(C::BLEND, render)
+            .with(C::RAW_RENDER, render)
     }
 
     /// Tier 1 reads and writes the 32-bit single-channel formats in one
@@ -1587,6 +1667,7 @@ impl Derivation<'_> {
                         capabilities.supports_render_dynamic_libraries,
                     ),
                     shader("texture atomics", true, ShaderFeatures::TEXTURE_ATOMICS),
+                    driver("ASTC HDR sampling", readable(Compression::AstcHdr)),
                 ],
             );
         let apple7 = apple6

@@ -1,6 +1,6 @@
 //! Buffers, textures, samplers and heaps.
 use super::{
-    Call, Object, Service, boolean, known, region,
+    Call, Object, Service, boolean, region,
     wire::{
         AUTOMATIC, BufferRangeRequest, BufferResponse, Empty, Fault, FormatAlignmentsResponse,
         Handle, HeapBufferSizeRequest, HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse,
@@ -21,9 +21,10 @@ use crate::metal::{
     error::Error,
     heap::{HeapDescriptor, SizeAndAlign},
     pixel_format::PixelFormat,
-    resource::{TextureDescriptor, TextureViewDescriptor},
+    resource::{PlaneLayout, TextureDescriptor, TextureViewDescriptor},
     sampler::SamplerDescriptor,
     shader::Compiler,
+    timing::{Detail, Phase, Timed},
     vulkan::backend::Backend,
 };
 use alloc::vec::Vec;
@@ -92,6 +93,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     }
 
     pub(super) fn new_texture(&mut self, call: &mut Call) -> Result<(), Fault> {
+        self.device.timing().begin(Timed::NewTexture);
         let descriptor = texture_descriptor(&call.request()?)?;
         let texture = self.device.new_texture(&descriptor)?;
         let response = self.adopt_texture(call.connection, texture)?;
@@ -118,12 +120,33 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: NewBufferTextureRequest = call.request()?;
         let buffer = self.object::<BufferId>(call.connection, request.buffer)?;
         let descriptor = texture_descriptor(&request.descriptor)?;
-        let texture = self.device.new_texture_from_buffer(
-            buffer,
-            &descriptor,
-            request.offset,
-            request.bytes_per_row,
-        )?;
+        let texture = if descriptor.pixel_format.planes().is_some() {
+            if request.second_bytes_per_row == 0 {
+                return Err(Fault::malformed(
+                    "a two-plane texture without its second plane",
+                ));
+            }
+            let plane = |offset, bytes_per_row| PlaneLayout {
+                offset,
+                bytes_per_row,
+            };
+            self.device.new_two_plane_texture(
+                buffer,
+                &descriptor,
+                [
+                    plane(request.offset, request.bytes_per_row),
+                    plane(request.second_offset, request.second_bytes_per_row),
+                ],
+                request.surface_format as u32,
+            )?
+        } else {
+            self.device.new_texture_from_buffer(
+                buffer,
+                &descriptor,
+                request.offset,
+                request.bytes_per_row,
+            )?
+        };
         let response = self.adopt_texture(call.connection, texture)?;
         call.reply(&response)
     }
@@ -143,12 +166,38 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// A band at a time, as [`Self::replace_region`]. The bytes between rows
     /// keep what the caller had there.
     pub(super) fn get_bytes(&mut self, call: &mut Call) -> Result<(), Fault> {
+        self.device.timing().begin(Timed::GetBytes);
         let transfer = self.transfer(call)?;
+        let format = self
+            .device
+            .texture_descriptor(transfer.texture)?
+            .pixel_format;
+        self.device.timing().detail(
+            Timed::GetBytes,
+            Detail::Bytes {
+                format,
+                width: transfer
+                    .bands
+                    .first()
+                    .map_or(0, |(region, _)| region.size[0]),
+                rows: transfer
+                    .bands
+                    .iter()
+                    .map(|(region, _)| region.size[1])
+                    .sum(),
+                bands: transfer.bands.len() as u64,
+                bytes: transfer.bands.iter().map(|(_, span)| span.length).sum(),
+            },
+        );
         for (region, span) in transfer.bands {
+            let start = self.device.timing().now();
             let mut bytes = call.memory.read(span)?;
+            self.device.timing().since(Phase::BytesRead, start);
             self.device
                 .get_bytes(transfer.texture, &region, &mut bytes, transfer.strides)?;
+            let start = self.device.timing().now();
             call.memory.write(span, &bytes)?;
+            self.device.timing().since(Phase::BytesWrite, start);
         }
         call.reply(&Empty {})
     }
@@ -173,7 +222,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     .bytes
                     .address
                     .checked_add(band.bytes.start)
-                    .ok_or(Fault::malformed("span address"))?;
+                    .ok_or(Fault::malformed("span address").bits(request.bytes.address))?;
                 let span = Span {
                     address,
                     length: band.bytes.end - band.bytes.start,
@@ -190,6 +239,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 
     pub(super) fn new_sampler(&mut self, call: &mut Call) -> Result<(), Fault> {
         let descriptor = sampler_descriptor(&call.request()?)?;
+        if descriptor.bicubic() {
+            self.admit_bicubic(call.connection)?;
+        }
         let sampler = self.device.new_sampler(&descriptor)?;
         let (handle, resource_id) =
             self.adopt(call.connection, Object::Sampler(sampler), |device| {
@@ -206,9 +258,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let descriptor = HeapDescriptor {
             size: request.size,
             options: options(request.options)?,
-            heap_type: known(HeapType::from_raw(request.heap_type), "heap type")?,
-            sparse_page_size: known(
-                SparsePageSize::from_raw(request.sparse_page_size),
+            heap_type: super::decode(HeapType::from_raw, request.heap_type, "heap type")?,
+            sparse_page_size: super::decode(
+                SparsePageSize::from_raw,
+                request.sparse_page_size,
                 "sparse page size",
             )?,
         };
@@ -262,9 +315,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             .device
             .new_heap_texture(heap, &descriptor, offset(request.offset))
         {
-            Err(Error::OutOfMemory) => {
+            Err(Error::HeapFull) => {
                 self.note_heap_full(heap, &descriptor);
-                return Err(Error::OutOfMemory.into());
+                return Err(Error::HeapFull.into());
             }
             texture => texture?,
         };
@@ -380,7 +433,7 @@ fn texture_response<B: Backend, C: Compiler>(
 }
 
 fn options(raw: u64) -> Result<ResourceOptions, Fault> {
-    known(ResourceOptions::from_raw(raw), "resource options")
+    super::decode_bits(ResourceOptions::from_raw, raw, "resource options")
 }
 
 /// Metal's raw value for `&b38`, the two-plane lossless framebuffer WindowServer
@@ -392,17 +445,17 @@ pub(super) fn pixel_format(raw: u64) -> Result<PixelFormat, Fault> {
     if raw == LOSSLESS_BGRA {
         return Ok(PixelFormat::Bgra8Unorm);
     }
-    known(PixelFormat::from_raw(raw), "pixel format")
+    super::decode(PixelFormat::from_raw, raw, "pixel format")
 }
 
 fn texture_type(raw: u64) -> Result<TextureType, Fault> {
-    known(TextureType::from_raw(raw), "texture type")
+    super::decode(TextureType::from_raw, raw, "texture type")
 }
 
 fn swizzle(raw: [u8; 4]) -> Result<SwizzleChannels, Fault> {
     let mut channels = SwizzleChannels::IDENTITY;
     for (channel, raw) in channels.0.iter_mut().zip(raw) {
-        *channel = known(TextureSwizzle::from_raw(raw), "texture swizzle")?;
+        *channel = super::decode(TextureSwizzle::from_raw, raw, "texture swizzle")?;
     }
     Ok(channels)
 }
@@ -430,39 +483,43 @@ fn texture_descriptor(record: &TextureDescriptorRecord) -> Result<TextureDescrip
         sample_count: record.sample_count,
         array_length: record.array_length,
         options: options(record.options)?,
-        usage: known(TextureUsage::from_bits(record.usage), "texture usage")?,
+        usage: super::decode_bits(TextureUsage::from_bits, record.usage, "texture usage")?,
         swizzle: swizzle(record.swizzle)?,
     })
 }
 
 fn sampler_descriptor(record: &SamplerDescriptorRecord) -> Result<SamplerDescriptor, Fault> {
-    let filter = |raw| known(SamplerMinMagFilter::from_raw(raw), "sampler filter");
+    let filter = |raw| super::decode(SamplerMinMagFilter::from_raw, raw, "sampler filter");
     let mut address_modes = [SamplerAddressMode::ClampToEdge; 3];
     for (mode, raw) in address_modes.iter_mut().zip(record.address_modes) {
-        *mode = known(SamplerAddressMode::from_raw(raw), "sampler address mode")?;
+        *mode = super::decode(SamplerAddressMode::from_raw, raw, "sampler address mode")?;
     }
     Ok(SamplerDescriptor {
         min_filter: filter(record.min_filter)?,
         mag_filter: filter(record.mag_filter)?,
-        mip_filter: known(
-            SamplerMipFilter::from_raw(record.mip_filter),
+        mip_filter: super::decode(
+            SamplerMipFilter::from_raw,
+            record.mip_filter,
             "sampler mip filter",
         )?,
         max_anisotropy: record.max_anisotropy,
         address_modes,
-        border_color: known(
-            SamplerBorderColor::from_raw(record.border_color),
+        border_color: super::decode(
+            SamplerBorderColor::from_raw,
+            record.border_color,
             "sampler border color",
         )?,
-        reduction_mode: known(
-            SamplerReductionMode::from_raw(record.reduction_mode),
+        reduction_mode: super::decode(
+            SamplerReductionMode::from_raw,
+            record.reduction_mode,
             "sampler reduction mode",
         )?,
         normalized_coordinates: boolean(record.normalized_coordinates)?,
         lod_min_clamp: record.lod_min_clamp,
         lod_max_clamp: record.lod_max_clamp,
-        compare_function: known(
-            CompareFunction::from_raw(record.compare_function),
+        compare_function: super::decode(
+            CompareFunction::from_raw,
+            record.compare_function,
             "compare function",
         )?,
     })

@@ -1,16 +1,27 @@
 //! Command buffers, submission, completion, events and counters.
 //!
-//! Every `MTLCommandQueue` submits to the device's one universal queue in
-//! commit order, which satisfies Metal's per-queue ordering and makes fences
-//! between queues hold by construction. Command buffer `n` signals `n` on
-//! the queue's timeline semaphore; [`Device::poll`] retires everything up to
-//! the completed value.
+//! Every `MTLCommandQueue` submits to the device's one universal queue, and
+//! each connection's command buffers in commit order, which satisfies
+//! Metal's per-queue ordering. Command buffer `n` signals `n` on the queue's
+//! timeline semaphore when it is submitted in serial order; one submitted
+//! after a later serial signals the next value of a second, late timeline
+//! instead, since a timeline only rises. [`Device::poll`] retires each
+//! command buffer once its timeline passes it.
+//!
+//! A command buffer is held, not submitted, while one of its event waits
+//! is neither reached nor signaled by submitted work. The driver would
+//! hold such a wait, and everything submitted behind it, from the GPU
+//! until a signal arrived, for every connection: an event that never comes
+//! would stop the whole device. Held here, it delays only its connection's
+//! later command buffers, as Apple's GPUs delay only its queue, and is
+//! submitted once a CPU signal or a submitted signal promises the value.
 //!
 //! An indirect sparse mapping update splits its command buffer: the segments
 //! from the update's on are held until the GPU has copied its arguments,
 //! when the device reads them, makes the binds and submits the segments.
-//! Command buffers committed meanwhile are held behind them, keeping the
-//! queue's order; polling and waiting submit held work as it becomes ready.
+//! Its connection's command buffers committed meanwhile are held behind
+//! them; polling and waiting submit held work as it becomes ready.
+use super::gpu_times::{GpuClock, GpuTimes};
 use super::{
     BufferId, ComputePipelineId, CounterBufferId, Device, EventId, RenderPipelineId, Slab,
     TextureId,
@@ -25,7 +36,7 @@ use crate::metal::{
         BoundPipeline, BufferRef, CommandBuffer, ComputePipelineState, DynamicFeatures,
         MappedRange, RenderPipelineState, Resolver, Segment, Workload,
         counters::{self, CounterRange, CounterSample, STATISTIC_SAMPLE_BYTES},
-        generated::{GeneratedLayoutKey, IndirectRenderClass},
+        device_generated::{GeneratedLayoutKey, IndirectRenderClass},
         render::PassBoundary,
     },
     error::{Error, Result, ensure, require},
@@ -40,6 +51,7 @@ use crate::metal::{
     sparse::{
         MAP_INDIRECT_ARGUMENTS_BYTES, MAP_INDIRECT_MAPPINGS, Mapping, MappingRequest, MappingUpdate,
     },
+    timing::{Detail, Phase},
     upload::{Chunk, ChunkSource},
     vulkan::{
         BufferCreate, BufferUsage, MemoryProperties, PipelineStages, PipelineStatistics,
@@ -56,8 +68,14 @@ use alloc::{collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
 /// Queries per encoder attachment pool.
 const POOL_QUERIES: u32 = 256;
 
-/// Start and end timestamps for one command buffer.
-const COMPLETION_QUERIES: u32 = 2;
+/// Timestamps for one command buffer: its start, [`PASS_MARKS`] marks at
+/// most, and its end.
+const COMPLETION_QUERIES: u32 = PASS_MARKS + 2;
+
+/// Marks a command buffer's timestamps make where the GPU already waits:
+/// after each pass and before each barrier that follows dispatches, so the
+/// platform's report can say which part of a slow one took the time.
+const PASS_MARKS: u32 = 30;
 
 /// Completed command buffers whose GPU times are kept.
 const TIMES_KEPT: usize = 1024;
@@ -88,13 +106,91 @@ struct CounterBuffer {
 #[derive(Debug)]
 struct InFlight {
     serial: u64,
+    /// The connection that committed it.
+    key: u64,
+    track: Track,
     chunks: Vec<Chunk>,
     pools: Vec<(QueryType, QueryPool)>,
     invalidations: Vec<MappedRange>,
-    /// The dedicated pool that times the command buffer.
-    times: Option<QueryPool>,
+    /// The dedicated pool that times the command buffer, and its marks.
+    times: Option<(QueryPool, Marks)>,
     pipelines: Vec<BoundPipeline>,
     workload: Workload,
+    /// The platform's ticks when it was committed.
+    committed: u64,
+}
+
+/// Where a committed command buffer's completion shows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Track {
+    /// Held: not yet submitted.
+    Held,
+    /// Its segments up to an indirect mapping update's submitted, the rest
+    /// held until the GPU copies the update's arguments.
+    Started,
+    /// The queue's timeline reaching its serial.
+    Timeline,
+    /// The late timeline reaching this value.
+    Late(u64),
+    /// Seen complete, or dropped unsubmitted with its connection.
+    Done,
+}
+
+/// What a command buffer's timestamps after its start mark: for each span
+/// up to the next mark, the indices in its `pipelines` it bound and what it
+/// drew.
+#[derive(Debug, Default)]
+struct Marks {
+    spans: Vec<Vec<u16>>,
+    shapes: Vec<SpanShape>,
+}
+
+/// What one span between marks drew: the last pass's extent, its draws and
+/// dispatches, and the most vertices times instances of one direct draw.
+#[derive(Clone, Copy, Debug, Default)]
+struct SpanShape {
+    extent: [u32; 2],
+    draws: u32,
+    dispatches: u32,
+    largest: u64,
+}
+
+impl SpanShape {
+    fn add(&mut self, command: &Command) {
+        match command {
+            Command::BeginRendering(rendering) => self.extent = rendering.extent,
+            Command::Draw {
+                vertex_count: count,
+                instance_count,
+                ..
+            }
+            | Command::DrawIndexed {
+                index_count: count,
+                instance_count,
+                ..
+            } => {
+                self.draws += 1;
+                self.largest = self
+                    .largest
+                    .max(u64::from(*count) * u64::from(*instance_count));
+            }
+            Command::DrawIndirect { .. }
+            | Command::DrawIndexedIndirect { .. }
+            | Command::DrawMeshTasks(_)
+            | Command::DrawMeshTasksIndirect { .. } => self.draws += 1,
+            Command::Dispatch(_) | Command::DispatchIndirect { .. } => self.dispatches += 1,
+            _ => {}
+        }
+    }
+
+    /// `[WxH draws=… dispatches=… largest=…]`, which the report shows after
+    /// the span's entry points.
+    fn describe(&self) -> String {
+        format!(
+            "[{}x{} draws={} dispatches={} largest={}]",
+            self.extent[0], self.extent[1], self.draws, self.dispatches, self.largest
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -109,6 +205,8 @@ struct FreeQueryPool {
 #[derive(Debug)]
 struct Held {
     serial: u64,
+    /// The connection that committed it, whose later work waits behind it.
+    key: u64,
     /// The step value the copy of the update's arguments signals; zero
     /// when only the held work ahead delays the segments.
     step: u64,
@@ -154,9 +252,22 @@ pub(super) struct Queue {
     /// copied; created with the first.
     steps: Option<Semaphore>,
     step: u64,
+    /// Completes command buffers submitted after a later serial, which the
+    /// timeline already passed; created with the first.
+    late: Option<Semaphore>,
+    late_value: u64,
+    /// The newest serial submitted to signal the timeline.
+    timeline_serial: u64,
+    /// The highest value submitted work or the CPU signals on each
+    /// semaphore: a wait on no more than it is safe to submit.
+    promised: Vec<(Semaphore, u64)>,
+    /// Command buffers seen complete, in any order.
+    completions: u64,
     /// GPU start and end ticks of the latest completed command buffers, by
     /// serial, oldest first.
     times: VecDeque<(u64, [u64; 2])>,
+    /// Where retired command buffers' time went, for the platform's report.
+    clock: GpuClock,
 }
 
 impl Queue {
@@ -291,23 +402,58 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             rasterization_rate_map: request.rasterization_rate_map,
         };
         let mut plan = pass::render_pass(&self.capabilities, &descriptor)?;
-        // Framebuffer reads access each color attachment's raw texels.
+        // A two-plane attachment clears its first plane as the pass begins
+        // and its second, whole, before.
+        for (index, color) in descriptor.color_attachments.iter().enumerate() {
+            let Some(color) = color.filter(|color| color.load_action == LoadAction::Clear) else {
+                continue;
+            };
+            let texture = color.target.texture;
+            let Some(image) = self.second_plane(texture.texture)? else {
+                continue;
+            };
+            let format = texture.descriptor.pixel_format;
+            if plan.extent
+                != [
+                    texture.descriptor.width as u32,
+                    texture.descriptor.height as u32,
+                ]
+            {
+                return Err(Error::Unsupported(
+                    "clearing part of a two-plane attachment",
+                ));
+            }
+            let value = crate::metal::pixel_format::second_plane_clear(format, color.clear)
+                .ok_or(Error::Invalid("the attachment has one plane"))?;
+            plan.inputs.second_plane_clears[index] = Some((image, pass::ClearValue::Float(value)));
+        }
+        // Framebuffer reads access each color attachment's raw texels, of
+        // the attachment or, where no view of it reads them, of its copy.
         if self.capabilities.framebuffer_reads {
-            for (input, color) in plan.inputs.textures.iter_mut().zip(&plan.color) {
+            for (index, color) in plan.color.iter().enumerate() {
                 let Some(color) = color else { continue };
                 let texture = self.texture_descriptor(color.view.texture)?;
-                if texture.texture_type != crate::metal::abi::TextureType::D3
-                    && crate::metal::resource::raw_texel_format(texture.pixel_format).is_some()
-                    && texture
-                        .usage
-                        .contains(crate::metal::abi::TextureUsage::RENDER_TARGET)
+                if !texture
+                    .usage
+                    .contains(crate::metal::abi::TextureUsage::RENDER_TARGET)
                 {
-                    let view = AttachmentView {
-                        texture: (),
-                        view_type: color.view.view_type,
-                        range: color.view.range,
-                    };
-                    *input = self.attachment_storage(color.view.texture, view)?;
+                    continue;
+                }
+                let view = AttachmentView {
+                    texture: (),
+                    view_type: color.view.view_type,
+                    range: color.view.range,
+                };
+                let format = texture.pixel_format;
+                let viewed = texture.texture_type != crate::metal::abi::TextureType::D3
+                    && crate::metal::resource::raw_texel_format(format).is_some();
+                let texture = color.view.texture;
+                if viewed {
+                    plan.inputs.textures[index] = self.attachment_storage(texture, view)?;
+                } else if crate::metal::resource::raw_texel_bytes_format(format).is_some() {
+                    let copy = self.color_copy(texture, view)?;
+                    plan.inputs.textures[index] = copy.id;
+                    plan.inputs.color_copies[index] = Some(copy);
                 }
             }
         }
@@ -468,7 +614,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     /// `commit`: submits the command buffer and returns its serial. A
     /// command buffer that cannot be submitted is discarded.
-    pub fn commit(&mut self, mut commands: CommandBuffer) -> Result<u64> {
+    pub fn commit(&mut self, commands: CommandBuffer) -> Result<u64> {
+        self.commit_for(0, commands)
+    }
+
+    /// Commits `commands` for connection `key`, behind its earlier work:
+    /// another connection's held work never delays it.
+    pub fn commit_for(&mut self, key: u64, mut commands: CommandBuffer) -> Result<u64> {
+        let start = self.timing.now();
         self.ensure_admission()?;
         let serial = self.submitted + 1;
         let completion = (self.timeline, serial);
@@ -480,9 +633,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             self.recycle(recording.uploads, recording.query_pools);
             return Err(error);
         }
+        let start = self.timing.since(Phase::CommitFinish, start);
+        if let Some(Detail::Commit { uploads, .. }) = self.timing.detail_mut() {
+            *uploads = recording
+                .uploads
+                .iter()
+                .map(|(_, bytes)| bytes.len() as u64)
+                .sum();
+        }
         let mut times = None;
         let prepared = (|| {
-            let mut held = self.hold(serial, recording.segments, recording.mappings)?;
+            let mut held = self.hold(serial, key, recording.segments, recording.mappings)?;
             times = self.time(held.as_mut_slice())?;
             let mut chunks = Vec::with_capacity(recording.uploads.len());
             for (chunk, bytes) in &recording.uploads {
@@ -496,7 +657,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.recycle(recording.uploads, recording.query_pools);
-                if let Some(pool) = times {
+                if let Some((pool, _)) = times {
                     // The recording never reached the queue, so the pool
                     // remains reset and can be returned without a GPU call.
                     self.queue.free_pools.push(FreeQueryPool {
@@ -518,24 +679,45 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         held.as_mut_slice()[0].segments[0]
             .commands
             .splice(1..1, uploads);
+        let start = self.timing.since(Phase::CommitUpload, start);
         self.submitted = serial;
         self.queue.in_flight.push_back(InFlight {
             serial,
+            key,
+            track: Track::Held,
             chunks,
             pools: recording.query_pools,
             invalidations: recording.invalidations,
             times,
             pipelines: recording.pipelines,
             workload: recording.workload,
+            committed: self.timing.now(),
         });
+        if held.as_mut_slice().iter().any(|held| {
+            held.segments
+                .iter()
+                .any(|segment| !segment.waits.is_empty())
+        }) {
+            self.queue.clock.waits();
+        }
         held.enqueue(&mut self.queue.held);
-        self.advance()?;
+        self.backend.take_split();
+        let advanced = self.advance();
+        // The backend splits its submissions; the rest is submitting.
+        let whole = self.timing.now().wrapping_sub(start);
+        let [reclaim, record, _] = self.backend.take_split();
+        self.timing.add(Phase::CommitReclaim, reclaim);
+        self.timing.add(Phase::CommitRecord, record);
+        self.timing
+            .add(Phase::CommitSubmit, whole.saturating_sub(reclaim + record));
+        advanced?;
         Ok(serial)
     }
 
     /// Brackets a command buffer's work with timestamps for `GPUStartTime`
-    /// and `GPUEndTime`; `None` without timestamps.
-    fn time(&mut self, held: &mut [Held]) -> Result<Option<QueryPool>> {
+    /// and `GPUEndTime`, and marks the ends of its first passes and
+    /// dispatches for the platform's report; `None` without timestamps.
+    fn time(&mut self, held: &mut [Held]) -> Result<Option<(QueryPool, Marks)>> {
         if self.capabilities.timestamp_frequency == 0 {
             return Ok(None);
         }
@@ -548,15 +730,74 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 stage: PipelineStages::TOP_OF_PIPE,
             },
         );
+        let mut marks = Marks::default();
+        // The pipelines a span binds, by the order the command buffer first
+        // bound each: the order its `pipelines` lists them in.
+        let mut seen: Vec<Pipeline> = Vec::new();
+        let mut bound: Vec<u16> = Vec::new();
+        // Marks go where the GPU already waits: after a pass, and before the
+        // barrier that follows dispatches, so a mark never stops dispatches
+        // the encoder lets overlap.
+        let mut dispatched = false;
+        let mut shape = SpanShape::default();
+        for segment in held.iter_mut().flat_map(|held| held.segments.iter_mut()) {
+            let commands = core::mem::take(&mut segment.commands);
+            segment.commands.reserve(commands.len());
+            for command in commands {
+                let room = marks.spans.len() < PASS_MARKS as usize;
+                if room && dispatched && matches!(command, Command::Barrier(_)) {
+                    dispatched = false;
+                    marks.spans.push(core::mem::take(&mut bound));
+                    marks.shapes.push(core::mem::take(&mut shape));
+                    segment.commands.push(Command::WriteTimestamp {
+                        pool,
+                        query: marks.spans.len() as u32,
+                        stage: PipelineStages::ALL_COMMANDS,
+                    });
+                }
+                dispatched |= matches!(
+                    command,
+                    Command::Dispatch(_) | Command::DispatchIndirect { .. }
+                );
+                let pass_ends = matches!(command, Command::EndRendering);
+                shape.add(&command);
+                if let Command::BindPipeline { pipeline, .. } = &command {
+                    let index = seen
+                        .iter()
+                        .position(|known| known == pipeline)
+                        .unwrap_or_else(|| {
+                            seen.push(*pipeline);
+                            seen.len() - 1
+                        });
+                    let index = u16::try_from(index).unwrap_or(u16::MAX);
+                    if !bound.contains(&index) {
+                        bound.push(index);
+                    }
+                }
+                segment.commands.push(command);
+                if pass_ends && marks.spans.len() < PASS_MARKS as usize {
+                    marks.spans.push(core::mem::take(&mut bound));
+                    marks.shapes.push(core::mem::take(&mut shape));
+                    segment.commands.push(Command::WriteTimestamp {
+                        pool,
+                        query: marks.spans.len() as u32,
+                        stage: PipelineStages::ALL_COMMANDS,
+                    });
+                }
+            }
+        }
+        // The rest of the work to the end.
+        marks.spans.push(bound);
+        marks.shapes.push(shape);
         let last = held.last_mut().and_then(|held| held.segments.last_mut());
         last.expect("a segment")
             .commands
             .push(Command::WriteTimestamp {
                 pool,
-                query: 1,
+                query: marks.spans.len() as u32,
                 stage: PipelineStages::ALL_COMMANDS,
             });
-        Ok(Some(pool))
+        Ok(Some((pool, marks)))
     }
 
     fn take_query_pool(&mut self, query_type: QueryType, count: u32) -> Result<QueryPool> {
@@ -594,8 +835,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `GPUStartTime` and `GPUEndTime` of the completed command buffer with
     /// `serial`, in timestamp ticks; the latest [`TIMES_KEPT`] are kept.
     pub fn command_buffer_times(&self, serial: u64) -> Result<[u64; 2]> {
+        let running = self
+            .queue
+            .in_flight
+            .iter()
+            .any(|flight| flight.serial == serial);
         ensure(
-            serial != 0 && serial <= self.completed,
+            serial != 0 && serial <= self.submitted && !running,
             "the command buffer has not completed",
         )?;
         require(self.capabilities.timestamp_frequency != 0, "GPU times")?;
@@ -645,6 +891,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     fn hold(
         &mut self,
         serial: u64,
+        key: u64,
         mut segments: Vec<Segment>,
         mut mappings: Vec<(usize, Mapping)>,
     ) -> Result<HeldBatch> {
@@ -657,6 +904,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         if starts.is_empty() {
             return Ok(HeldBatch::One(Held {
                 serial,
+                key,
                 step: 0,
                 segments,
                 mappings,
@@ -682,6 +930,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             let later = mappings.split_off(mappings.partition_point(|(at, _)| *at < start));
             held.push(Held {
                 serial,
+                key,
                 step,
                 segments,
                 mappings: rebase(mappings, base),
@@ -690,6 +939,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
         held.push(Held {
             serial,
+            key,
             step,
             segments,
             mappings: rebase(mappings, base),
@@ -697,21 +947,131 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(HeldBatch::Split(held))
     }
 
-    /// Submits held work, in order, as far as its arguments are readable.
+    /// Submits held work that is ready, each connection's in order. Work
+    /// whose arguments are unread or whose event waits nothing promises
+    /// yet holds only its connection's later work.
     fn advance(&mut self) -> Result<()> {
-        while let Some(held) = self.queue.held.front() {
+        let mut blocked: Vec<u64> = Vec::new();
+        let mut index = 0;
+        while index < self.queue.held.len() {
             if self.lost {
                 return Err(Error::DeviceLost);
             }
-            if held.step > 0 {
-                let steps = self.queue.steps.expect("steps have their semaphore");
-                if self.backend.semaphore_value(steps)? < held.step {
-                    break;
-                }
+            let key = self.queue.held[index].key;
+            if blocked.contains(&key) || !self.ready(index)? {
+                blocked.push(key);
+                index += 1;
+                continue;
             }
-            let held = self.queue.held.pop_front().expect("held work");
+            let held = self.queue.held.remove(index).expect("held work");
             // A failed submission never signals; record the loss so waits end.
             self.submit_held(held).inspect_err(|_| self.lost = true)?;
+            // What it signals may have readied work passed over.
+            if !blocked.is_empty() {
+                blocked.clear();
+                index = 0;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether held work `index` can be submitted: its arguments, if any,
+    /// are copied, and each wait is promised.
+    fn ready(&mut self, index: usize) -> Result<bool> {
+        let step = self.queue.held[index].step;
+        if step > 0 {
+            let steps = self.queue.steps.expect("steps have their semaphore");
+            if self.backend.semaphore_value(steps)? < step {
+                return Ok(false);
+            }
+        }
+        let held = &self.queue.held[index];
+        // Only submitted work and the CPU's signals raise an event, and both
+        // promise their values here: a held wait needs no driver query.
+        Ok(held
+            .segments
+            .iter()
+            .flat_map(|segment| &segment.waits)
+            .all(|&(semaphore, value)| self.promised(semaphore) >= value))
+    }
+
+    /// The highest value submitted work or the CPU signals on `semaphore`.
+    fn promised(&self, semaphore: Semaphore) -> u64 {
+        self.queue
+            .promised
+            .iter()
+            .find(|&&(promised, _)| promised == semaphore)
+            .map_or(0, |&(_, value)| value)
+    }
+
+    fn promise(&mut self, semaphore: Semaphore, value: u64) {
+        match self
+            .queue
+            .promised
+            .iter_mut()
+            .find(|(promised, _)| *promised == semaphore)
+        {
+            Some((_, promised)) => *promised = (*promised).max(value),
+            None => self.queue.promised.push((semaphore, value)),
+        }
+    }
+
+    /// Points held work's completion at the timeline, or at the late
+    /// timeline when a later serial already signaled the timeline, and
+    /// notes what its segments signal.
+    fn track(&mut self, held: &mut Held) -> Result<()> {
+        let timeline = self.timeline;
+        let completes = held
+            .segments
+            .iter()
+            .any(|segment| segment.signals.contains(&(timeline, held.serial)));
+        if !completes {
+            if let Some(flight) = self
+                .queue
+                .in_flight
+                .iter_mut()
+                .find(|flight| flight.serial == held.serial)
+            {
+                flight.track = Track::Started;
+            }
+        } else {
+            let track = if held.serial > self.queue.timeline_serial {
+                self.queue.timeline_serial = held.serial;
+                Track::Timeline
+            } else {
+                let late = match self.queue.late {
+                    Some(late) => late,
+                    None => *self.queue.late.insert(self.backend.create_semaphore(0)?),
+                };
+                self.queue.late_value += 1;
+                let value = self.queue.late_value;
+                for segment in &mut held.segments {
+                    for signal in &mut segment.signals {
+                        if *signal == (timeline, held.serial) {
+                            *signal = (late, value);
+                        }
+                    }
+                }
+                Track::Late(value)
+            };
+            if let Some(flight) = self
+                .queue
+                .in_flight
+                .iter_mut()
+                .find(|flight| flight.serial == held.serial)
+            {
+                flight.track = track;
+            }
+        }
+        let signals: Vec<_> = held
+            .segments
+            .iter()
+            .flat_map(|segment| &segment.signals)
+            .copied()
+            .filter(|&(semaphore, _)| semaphore != timeline)
+            .collect();
+        for (semaphore, value) in signals {
+            self.promise(semaphore, value);
         }
         Ok(())
     }
@@ -722,7 +1082,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// use, and counts past the buffer's end; none maps anything. A count
     /// past [`MAP_INDIRECT_MAPPINGS`] maps that many and is reported.
     fn submit_held(&mut self, mut held: Held) -> Result<()> {
-        for (segment, mapping) in held.mappings {
+        for (segment, mapping) in core::mem::take(&mut held.mappings) {
             let request = match mapping {
                 Mapping::Request(request) => request,
                 Mapping::Indirect {
@@ -771,16 +1131,29 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 held.segments[segment].binds.extend(binds);
             }
         }
+        self.track(&mut held)?;
         self.backend.submit(&held.segments)
     }
 
-    /// Waits for the held work ahead of `serial`, or all of it, to be
-    /// submitted; `false` when a step's wait times out.
+    /// Waits for the held work through `serial` whose arguments are being
+    /// copied to be submitted; `false` when a step's wait times out. Work
+    /// waiting for an event stays held: only a signal readies it.
     fn submit_held_through(&mut self, serial: u64, timeout: u64) -> Result<bool> {
         self.advance()?;
-        while let Some(held) = self.queue.held.front().filter(|held| held.serial <= serial) {
-            let steps = self.queue.steps.expect("steps have their semaphore");
-            if !self.backend.wait_semaphore(steps, held.step, timeout)? {
+        let steps = self.queue.steps;
+        while let Some(step) = self
+            .queue
+            .held
+            .iter()
+            .find(|held| held.serial <= serial && held.step > 0)
+            .map(|held| held.step)
+        {
+            let steps = steps.expect("steps have their semaphore");
+            if self.backend.semaphore_value(steps)? >= step {
+                // Copied, but held for an event or work ahead of it.
+                break;
+            }
+            if !self.backend.wait_semaphore(steps, step, timeout)? {
                 return Ok(false);
             }
             self.advance()?;
@@ -824,6 +1197,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 load.conditional,
                 load.internal
             ));
+            if let Some(widest) = load.widest {
+                work.push_str(&format!(" widest dispatch {widest};"));
+            }
             for &pipeline in &in_flight.pipelines {
                 let entries = self.pipelines.entries(pipeline);
                 let entries =
@@ -845,6 +1221,64 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         result
     }
 
+    /// What connection `key` sees complete after a [`Self::poll`]: every
+    /// serial before its oldest command buffer not yet complete, or every
+    /// serial submitted. Another connection's held work never holds it.
+    pub fn reached_for(&self, key: u64) -> u64 {
+        self.queue
+            .in_flight
+            .iter()
+            .find(|flight| flight.key == key && flight.track != Track::Done)
+            .map_or(self.submitted, |flight| flight.serial - 1)
+    }
+
+    /// Every serial before the oldest command buffer not yet complete,
+    /// held or running, after a [`Self::poll`].
+    pub fn drained(&self) -> u64 {
+        self.queue
+            .in_flight
+            .iter()
+            .find(|flight| flight.track != Track::Done)
+            .map_or(self.submitted, |flight| flight.serial - 1)
+    }
+
+    /// Whether some connection's completion differs from the device's:
+    /// work is held, or completes on the late timeline.
+    pub fn holds(&self) -> bool {
+        self.queue
+            .in_flight
+            .iter()
+            .any(|flight| matches!(flight.track, Track::Held | Track::Started | Track::Late(_)))
+    }
+
+    /// Command buffers seen complete so far, in whatever order they
+    /// completed.
+    pub fn completions(&self) -> u64 {
+        self.queue.completions
+    }
+
+    /// Drops connection `key`'s held command buffers, which no longer run:
+    /// it closed. Those whose first segments were submitted still finish.
+    pub fn abandon(&mut self, key: u64) {
+        let in_flight = &mut self.queue.in_flight;
+        let mut dropped = Vec::new();
+        self.queue.held.retain(|held| {
+            let unstarted = in_flight
+                .iter()
+                .any(|flight| flight.serial == held.serial && flight.track == Track::Held);
+            let drop = held.key == key && unstarted;
+            if drop {
+                dropped.push(held.serial);
+            }
+            !drop
+        });
+        for flight in in_flight.iter_mut() {
+            if dropped.contains(&flight.serial) {
+                flight.track = Track::Done;
+            }
+        }
+    }
+
     fn poll_inner(&mut self) -> Result<u64> {
         self.advance()?;
         if self.lost {
@@ -855,32 +1289,76 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         if self.queue.in_flight.is_empty() {
             return Ok(self.completed);
         }
+        let lost = |error: &Error| *error == Error::DeviceLost;
+        let timeline = self.backend.semaphore_value(self.timeline);
+        let timeline = timeline.inspect_err(|error| self.lost |= lost(error))?;
+        let late = match self.queue.late {
+            Some(late) if self.late_in_flight() => {
+                let value = self.backend.semaphore_value(late);
+                value.inspect_err(|error| self.lost |= lost(error))?
+            }
+            _ => 0,
+        };
+        for flight in &mut self.queue.in_flight {
+            match flight.track {
+                Track::Timeline if flight.serial <= timeline => flight.track = Track::Done,
+                Track::Late(value) if value <= late => flight.track = Track::Done,
+                _ => {}
+            }
+        }
+        // Everything through the first submitted command buffer still
+        // running; held work runs nothing and holds nothing it did not own.
+        // So `completed` may pass a held serial. That is safe for what the
+        // guest releases only once its connection reaches that serial
+        // (`reached_for`); nothing the host defers may wait on a held
+        // serial through `completed`.
         let completed = self
-            .backend
-            .semaphore_value(self.timeline)
-            .inspect_err(|error| {
-                if *error == Error::DeviceLost {
-                    self.lost = true;
-                }
-            })?;
+            .queue
+            .in_flight
+            .iter()
+            .find(|flight| {
+                matches!(
+                    flight.track,
+                    Track::Started | Track::Timeline | Track::Late(_)
+                )
+            })
+            .map_or(self.submitted, |flight| flight.serial - 1);
         self.retire(completed)?;
-        Ok(completed)
+        Ok(self.completed)
+    }
+
+    fn late_in_flight(&self) -> bool {
+        self.queue
+            .in_flight
+            .iter()
+            .any(|flight| matches!(flight.track, Track::Late(_)))
     }
 
     /// Recycles what completed work held, keeps its GPU times and destroys
-    /// what it kept alive; a failed invalidation or read is answered once
-    /// the bookkeeping is done.
+    /// what waited for everything through `completed`; a failed
+    /// invalidation or read is answered once the bookkeeping is done.
     fn retire(&mut self, completed: u64) -> Result<()> {
-        if completed <= self.completed {
-            return Ok(());
-        }
-        self.completed = completed;
-        let mut outcome = Ok(());
-        while let Some(flight) = self
+        let done = self
             .queue
             .in_flight
-            .pop_front_if(|flight| flight.serial <= completed)
-        {
+            .iter()
+            .any(|flight| flight.track == Track::Done);
+        if !done && completed <= self.completed {
+            return Ok(());
+        }
+        let seen = self.timing.now();
+        self.calibrate_gpu_clock();
+        let mut outcome = Ok(());
+        let mut flights = VecDeque::new();
+        for flight in core::mem::take(&mut self.queue.in_flight) {
+            if flight.track == Track::Done {
+                flights.push_back(flight);
+            } else {
+                self.queue.in_flight.push_back(flight);
+            }
+        }
+        self.queue.completions += flights.len() as u64;
+        while let Some(flight) = flights.pop_front() {
             // Before deferred destruction, which may free the memory.
             for range in flight.invalidations {
                 outcome = outcome.and(self.backend.invalidate_memory(
@@ -890,10 +1368,45 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 ));
             }
             // Before the pool is reset.
-            if let Some(pool) = flight.times {
-                let mut times = [0; 2];
-                match self.backend.query_results(pool, 0, &mut times) {
-                    Ok(true) => self.keep_times(flight.serial, times),
+            if let Some((pool, marks)) = flight.times {
+                let mut stamps = [0; COMPLETION_QUERIES as usize];
+                let read = &mut stamps[..marks.spans.len() + 1];
+                match self.backend.query_results(pool, 0, read) {
+                    Ok(true) => {
+                        let times = [read[0], read[read.len() - 1]];
+                        self.keep_times(flight.serial, times);
+                        let frequency = u128::from(self.capabilities.timestamp_frequency);
+                        let ns =
+                            |ticks: u64| (u128::from(ticks) * 1_000_000_000 / frequency) as u64;
+                        let pipelines = &self.pipelines;
+                        let named = |index: usize| {
+                            flight
+                                .pipelines
+                                .get(index)
+                                .map_or_else(Vec::new, |&pipeline| {
+                                    pipelines.entries(pipeline).unwrap_or_default()
+                                })
+                        };
+                        let spans = marks
+                            .spans
+                            .iter()
+                            .zip(&marks.shapes)
+                            .zip(read.windows(2))
+                            .map(|((bound, shape), pair)| {
+                                let entries = bound.iter().flat_map(|&index| named(index.into()));
+                                let mut entries: Vec<String> = entries.collect();
+                                entries.push(shape.describe());
+                                (ns(pair[1]).saturating_sub(ns(pair[0])), entries)
+                            });
+                        self.queue.clock.retire(
+                            flight.serial,
+                            flight.committed,
+                            seen,
+                            [ns(times[0]), ns(times[1])],
+                            || (0..flight.pipelines.len()).flat_map(named).collect(),
+                            spans,
+                        );
+                    }
                     Ok(false) => {}
                     Err(error) => outcome = outcome.and(Err(error)),
                 }
@@ -904,6 +1417,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 self.retire_query_pool(pool, query_type, POOL_QUERIES);
             }
         }
+        if completed <= self.completed {
+            return outcome;
+        }
+        self.completed = completed;
         while let Some((_, object, allocated)) = self
             .deferred
             .pop_front_if(|(serial, _, _)| *serial <= completed)
@@ -916,12 +1433,42 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         outcome
     }
 
+    /// Reads the GPU's clock against the platform's when a reading is due
+    /// and timed work is retiring; a device that cannot is not asked again.
+    fn calibrate_gpu_clock(&mut self) {
+        let timed = self
+            .queue
+            .in_flight
+            .front()
+            .is_some_and(|flight| flight.times.is_some());
+        if !timed || !self.queue.clock.due() {
+            return;
+        }
+        let before = self.timing.now();
+        match self.backend.calibrated_timestamps() {
+            Ok((_, gpu)) => {
+                let after = self.timing.now();
+                let frequency = u128::from(self.capabilities.timestamp_frequency);
+                let gpu_ns = (u128::from(gpu) * 1_000_000_000 / frequency) as u64;
+                self.queue.clock.calibrate(before, after, gpu_ns);
+            }
+            Err(_) => self.queue.clock.disable(),
+        }
+    }
+
+    /// Where retired command buffers' time went since the last call.
+    pub fn take_gpu_times(&mut self) -> GpuTimes {
+        self.queue.clock.take()
+    }
+
     fn keep_times(&mut self, serial: u64, times: [u64; 2]) {
         let kept = &mut self.queue.times;
         if kept.len() == TIMES_KEPT {
             kept.pop_front();
         }
-        kept.push_back((serial, times));
+        // Held work completes after later serials; the times stay in order.
+        let at = kept.partition_point(|&(kept, _)| kept < serial);
+        kept.insert(at, (serial, times));
     }
 
     /// `newEvent` and `newSharedEvent`: both are timeline semaphores.
@@ -947,6 +1494,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let current = self.backend.semaphore_value(semaphore)?;
         if value > current {
             self.backend.signal_semaphore(semaphore, value)?;
+            self.promise(semaphore, value);
+            // Work held for the value goes to the queue now.
+            self.advance()?;
         }
         Ok(())
     }
@@ -969,6 +1519,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     pub fn destroy_event(&mut self, id: EventId) -> Result<()> {
         let semaphore = self.queue.events.remove(id.0)?;
+        self.queue
+            .promised
+            .retain(|&(promised, _)| promised != semaphore);
         self.defer(Object::Semaphore(semaphore));
         Ok(())
     }
@@ -1206,6 +1759,14 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         self.device.clamped_sampler(sampler, lod_min, lod_max)
     }
 
+    fn bicubic_render_pipeline(
+        &mut self,
+        state: &RenderPipelineState,
+        bicubic: [u32; 2],
+    ) -> Result<Pipeline> {
+        self.device.render_variant(state.id, bicubic)
+    }
+
     fn mesh_pipeline(
         &mut self,
         state: &RenderPipelineState,
@@ -1273,6 +1834,8 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         id: IndirectCommandBufferId,
         update: &mut dyn FnMut(&mut IndirectCommandBuffer) -> Result<()>,
     ) -> Result<()> {
+        // A commit running again would apply the update twice.
+        self.device.compiler.stop_deferring();
         update(self.device.indirect_command_buffer_mut(id)?)
     }
 }

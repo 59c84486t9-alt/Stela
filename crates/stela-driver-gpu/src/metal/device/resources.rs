@@ -2,8 +2,8 @@
 use super::{BufferId, Device, HeapId, MemoryId, SamplerId, Slab, TextureId};
 use crate::metal::{
     abi::{
-        CompareFunction, CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions, StorageMode,
-        TextureType,
+        CompareFunction, CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions,
+        SamplerMipFilter, StorageMode, TextureType, TextureUsage,
     },
     binding::{HeapArray, NULL_DESCRIPTOR, ResourceId, TexelArguments},
     capabilities::FormatCapabilities,
@@ -23,6 +23,7 @@ use crate::metal::{
     sampler::{self, SamplerDescriptor},
     shader::Compiler,
     sparse::{self, MappingRequest, SparseLayout, SparsePages, SparseTexture},
+    timing::{Detail, Phase, Timed},
     vulkan::{
         BufferCreate, BufferUsage, Format, ImageAspects, ImageCreate, ImageTiling, ImageType,
         ImageUsage, ImageViewType, MemoryProperties, SampleCounts,
@@ -34,7 +35,10 @@ use crate::metal::{
         },
     },
 };
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    vec::Vec,
+};
 use core::{num::NonZeroU64, ops::Range};
 use stela_contracts::gate::MemoryRange;
 
@@ -43,6 +47,25 @@ const TEXEL_BUFFER_ARRAYS: [HeapArray; 2] = [
     HeapArray::UniformTexelBuffers,
     HeapArray::StorageTexelBuffers,
 ];
+
+/// What the device keeps of destroyed private textures for reuse: at most
+/// this many bytes and textures, each no larger than
+/// [`RECYCLED_TEXTURE_BYTES`]. Applications create and destroy the same
+/// intermediate textures every frame; each allocation and free is a kernel
+/// call into the GPU's driver, where a reused texture is none.
+const RECYCLED_BYTES: u64 = 256 << 20;
+pub(super) const RECYCLED_TEXTURES: usize = 128;
+const RECYCLED_TEXTURE_BYTES: u64 = 64 << 20;
+
+/// A destroyed private texture kept whole, with its image, memory, views and
+/// descriptors, for the next `newTexture` of an equal descriptor once the
+/// work submitted before its destruction completes.
+#[derive(Debug)]
+struct Recycled {
+    ready: u64,
+    bytes: u64,
+    texture: TextureObject,
+}
 
 /// `allocatedSize` and `heapOffset` of a buffer or texture: zero for those
 /// sharing another resource's memory or mapping sparse pages.
@@ -125,6 +148,8 @@ struct TextureObject {
     /// or a decoded format's blocks ([`CpuAccess::Blocks`]), followed by
     /// the decode kernels' arguments for each subresource.
     cpu_copy: Option<BufferAllocation>,
+    /// A two-plane texture's second plane's image; `image` is its first's.
+    second_plane: Option<Image>,
 }
 
 /// A depth or stencil subresource's storage copy ([`TestedCopy`]): what it
@@ -132,7 +157,7 @@ struct TextureObject {
 #[derive(Debug)]
 struct TestedCopyObject {
     view: AttachmentView<()>,
-    stencil: bool,
+    aspect: ImageAspects,
     copy: TestedCopy,
     memory: Memory,
     bytes: u64,
@@ -190,6 +215,24 @@ pub(super) struct Resources {
     /// The samplers of constexpr sampler states by state. Any pipeline
     /// compiled later may name one, so each lives as long as the device.
     constexpr_samplers: BTreeMap<u64, ResourceId>,
+    /// Destroyed private textures kept for reuse, oldest first, and their
+    /// bytes.
+    recycled: VecDeque<Recycled>,
+    recycled_bytes: u64,
+    /// Private texture creations a recycled texture served, and those
+    /// that allocated.
+    recycle_hits: u64,
+    recycle_misses: u64,
+}
+
+/// What the device keeps of destroyed private textures, and how often
+/// creations reused one.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RecycleReport {
+    pub textures: usize,
+    pub bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
@@ -404,8 +447,32 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     /// `newTextureWithDescriptor:`.
     pub fn new_texture(&mut self, descriptor: &TextureDescriptor) -> Result<TextureId> {
+        let start = self.timing.now();
         let plan = resource::texture(&self.capabilities, descriptor)?;
-        let (image, memory, bytes) = self.backend.create_image(&plan.image, plan.memory)?;
+        let start = self.timing.since(Phase::TexturePlan, start);
+        let reused = self.reuse_texture(descriptor, &plan);
+        let start = self.timing.since(Phase::TextureRecycle, start);
+        self.time_texture(descriptor, 0, reused.is_some());
+        if let Some(texture) = reused {
+            return Ok(texture);
+        }
+        self.backend.take_split();
+        let (image, memory, bytes) = match self.backend.create_image(&plan.image, plan.memory) {
+            // Recycled textures hold memory nothing else may use.
+            Err(Error::OutOfMemory) if !self.resources.recycled.is_empty() => {
+                self.trim_recycled(0, 0)?;
+                self.backend.create_image(&plan.image, plan.memory)?
+            }
+            created => created?,
+        };
+        // The backend splits its call; what it does not is the image's.
+        let whole = self.timing.now().wrapping_sub(start);
+        let [_, allocate, bind] = self.backend.take_split();
+        self.timing.add(Phase::TextureAllocate, allocate);
+        self.timing.add(Phase::TextureBind, bind);
+        self.timing
+            .add(Phase::TextureCreate, whole.saturating_sub(allocate + bind));
+        self.time_texture(descriptor, bytes, false);
         self.allocated += bytes;
         self.finish_texture(
             image,
@@ -416,6 +483,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         )
     }
 
+    /// What a timed `newTextureWithDescriptor:` makes.
+    fn time_texture(&mut self, descriptor: &TextureDescriptor, bytes: u64, recycled: bool) {
+        let detail = Detail::Texture {
+            format: descriptor.pixel_format,
+            size: [descriptor.width, descriptor.height, descriptor.depth],
+            slices: descriptor.slice_count(),
+            levels: descriptor.mipmap_level_count,
+            bytes,
+            recycled,
+        };
+        self.timing.detail(Timed::NewTexture, detail);
+    }
+
     fn finish_texture(
         &mut self,
         image: Image,
@@ -424,11 +504,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         backing: Backing,
         memory: Option<Memory>,
     ) -> Result<TextureId> {
+        let start = self.timing.now();
         let cpu_copy = match plan.cpu_access {
             CpuAccess::Staged => self.new_cpu_copy(descriptor, false).map(Some),
             CpuAccess::Blocks => self.new_cpu_copy(descriptor, true).map(Some),
             _ => Ok(None),
         };
+        self.timing.since(Phase::TextureCpuCopy, start);
         let created = cpu_copy.and_then(|cpu_copy| match self.shader_views(image, &plan.views) {
             Ok((id, views)) => Ok((id, views, cpu_copy)),
             Err(error) => {
@@ -461,6 +543,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             parent: None,
             dependents: 0,
             cpu_copy,
+            second_plane: None,
         };
         Ok(TextureId(self.resources.textures.insert(texture)))
     }
@@ -527,6 +610,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .chain(views.faces)
             .chain(levels)
             .collect();
+        let start = self.timing.now();
         let mut created = Vec::with_capacity(infos.len());
         let mut descriptors = Ok(ResourceId::NULL);
         for info in &infos {
@@ -538,11 +622,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 }
             }
         }
+        let start = self.timing.since(Phase::TextureViews, start);
         if descriptors.is_ok() {
             let sampled = usize::from(views.sampled.is_some()) + usize::from(views.faces.is_some());
             let (sampled, storage) = created.split_at(sampled);
-            descriptors = self.view_descriptors(sampled, storage);
+            descriptors = self.view_descriptors(sampled, storage).map(|id| {
+                id.with_srgb_storage(views.srgb_storage)
+                    .with_filter_class(views.filter_class)
+            });
         }
+        self.timing.since(Phase::TextureDescriptors, start);
         match descriptors {
             Ok(id) => Ok((id, created)),
             Err(error) => {
@@ -606,9 +695,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(&self.resources.textures.get(id.0)?.descriptor)
     }
 
+    /// A two-plane texture's second plane's image; `None` for a texture of
+    /// one plane.
+    pub fn second_plane(&self, id: TextureId) -> Result<Option<Image>> {
+        Ok(self.resources.textures.get(id.0)?.second_plane)
+    }
+
     /// The texture's image, for blits.
     pub fn texture_image(&self, id: TextureId) -> Result<Image> {
         let texture = self.resources.textures.get(id.0)?;
+        if texture.second_plane.is_some() {
+            return Err(Error::Unsupported("blits of two-plane textures"));
+        }
         texture
             .image
             .ok_or(Error::Invalid("texture buffers are not images"))
@@ -621,6 +719,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         view: &TextureViewDescriptor,
     ) -> Result<TextureId> {
         let texture = self.resources.textures.get(parent.0)?;
+        if texture.second_plane.is_some() {
+            return Err(Error::Unsupported("views of two-plane textures"));
+        }
         let image = texture
             .image
             .ok_or(Error::Invalid("texture buffers have no views"))?;
@@ -647,6 +748,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             parent: Some(root),
             dependents: 0,
             cpu_copy: None,
+            second_plane: None,
         };
         Ok(TextureId(self.resources.textures.insert(view)))
     }
@@ -705,6 +807,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 parent: None,
                 dependents: 0,
                 cpu_copy: None,
+                second_plane: None,
             }
         } else {
             let plan = resource::linear_texture(
@@ -746,7 +849,122 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 parent: None,
                 dependents: 0,
                 cpu_copy: None,
+                second_plane: None,
             }
+        };
+        self.resources.buffers.get_mut(buffer_id.0)?.dependents += 1;
+        Ok(TextureId(self.resources.textures.insert(texture)))
+    }
+
+    /// `newTextureWithDescriptor:iosurface:plane:` of a two-plane format
+    /// ([`PixelFormat::planes`]) on the buffer over the surface: each
+    /// plane's linear image, whose sampled descriptors are consecutive, the
+    /// second's following the first's, as shaders combine them
+    /// ([`ResourceId::with_planes`]), YCbCr in the range of the surface's
+    /// pixel format `surface_format` ([`video_range`]). Usages beyond
+    /// reading are reported: rendering to and writing these textures is not
+    /// implemented.
+    pub fn new_two_plane_texture(
+        &mut self,
+        buffer_id: BufferId,
+        descriptor: &TextureDescriptor,
+        planes: [resource::PlaneLayout; 2],
+        surface_format: u32,
+    ) -> Result<TextureId> {
+        let ratio = descriptor
+            .pixel_format
+            .planes()
+            .ok_or(Error::Invalid("the format has one plane"))?;
+        if !descriptor.swizzle.is_identity() {
+            return Err(Error::Unsupported("swizzled two-plane textures"));
+        }
+        let renders = self
+            .capabilities
+            .format(descriptor.pixel_format)
+            .contains(crate::metal::capabilities::FormatCapabilities::COLOR);
+        let supported = if renders {
+            TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET
+        } else {
+            TextureUsage::SHADER_READ
+        };
+        let unsupported = descriptor.usage.difference(supported);
+        if !descriptor.usage.is_empty() && !unsupported.is_empty() {
+            self.unsupported(if renders {
+                "two-plane textures' usages beyond reading and rendering"
+            } else {
+                "two-plane textures' usages beyond reading; rendering to subsampled ones"
+            });
+        }
+        let buffer = self.resources.buffers.get(buffer_id.0)?;
+        let (memory, memory_offset, length) = (buffer.memory, buffer.memory_offset, buffer.length);
+        let plans = resource::two_plane_texture(&self.capabilities, descriptor, length, planes)?;
+        let (_, linear) = self.capabilities.linear_texture_alignments();
+        let mut images = Vec::with_capacity(2);
+        let mut views = Vec::with_capacity(2);
+        let created = (|| -> Result<ResourceId> {
+            for (plan, layout) in plans.iter().zip(planes) {
+                let place = memory_offset
+                    .checked_add(layout.offset)
+                    .filter(|place| place.is_multiple_of(linear))
+                    .ok_or(Error::Invalid(
+                        "the surface's plane is not aligned for a texture",
+                    ))?;
+                images.push(
+                    self.backend
+                        .create_placed_image(&plan.image, memory, place)?,
+                );
+                let image = images[images.len() - 1];
+                let info = plan
+                    .views
+                    .sampled
+                    .ok_or(Error::Invalid("a plane has no sampled view"))?;
+                views.push(self.backend.create_image_view(image, &info)?);
+            }
+            let first = self.descriptors.allocate_run(HeapArray::SampledImages, 2)?;
+            for (index, view) in (first..).zip(&views) {
+                self.backend
+                    .write_descriptor(index, Descriptor::SampledImage(*view));
+            }
+            let format = descriptor.pixel_format;
+            let flag = |set: bool, flag: u32| if set { flag } else { 0 };
+            let flags = flag(format.ycbcr(), ResourceId::YCBCR)
+                | flag(format.ten_bit_planes(), ResourceId::TEN_BIT)
+                | flag(
+                    format.ycbcr() && video_range(surface_format),
+                    ResourceId::VIDEO_RANGE,
+                );
+            Ok(ResourceId::new(first, NULL_DESCRIPTOR)
+                .with_planes(ratio, flags)
+                .with_filter_class(descriptor.pixel_format.filter_class()))
+        })();
+        let id = match created {
+            Ok(id) => id,
+            Err(error) => {
+                for view in views {
+                    self.backend.destroy(Object::ImageView(view));
+                }
+                for image in images {
+                    self.backend.destroy(Object::Image(image));
+                }
+                return Err(error);
+            }
+        };
+        let texture = TextureObject {
+            image: Some(images[0]),
+            descriptor: *descriptor,
+            id,
+            views,
+            texel_views: Vec::new(),
+            attachment_views: Vec::new(),
+            attachment_storage: Vec::new(),
+            tested_copies: Vec::new(),
+            cpu_access: CpuAccess::Linear,
+            backing: Backing::Buffer(buffer_id),
+            memory: None,
+            parent: None,
+            dependents: 0,
+            cpu_copy: None,
+            second_plane: Some(images[1]),
         };
         self.resources.buffers.get_mut(buffer_id.0)?.dependents += 1;
         Ok(TextureId(self.resources.textures.insert(texture)))
@@ -760,6 +978,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         view: AttachmentView<()>,
     ) -> Result<ImageView> {
         let texture = self.resources.textures.get(id.0)?;
+        if texture.second_plane.is_some()
+            && !self
+                .capabilities
+                .format(texture.descriptor.pixel_format)
+                .contains(crate::metal::capabilities::FormatCapabilities::COLOR)
+        {
+            return Err(Error::Unsupported(
+                "rendering to subsampled two-plane textures",
+            ));
+        }
         if let Some(&(_, cached)) = texture
             .attachment_views
             .iter()
@@ -825,7 +1053,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .ok_or(Error::Invalid("texture buffers are not attachments"))?;
         let format = resource::raw_texel_format(texture.descriptor.pixel_format)
             .ok_or(Error::Unsupported("framebuffer reads of the pixel format"))?;
-        let info = ImageViewInfo {
+        let info = |format| ImageViewInfo {
             view_type: ImageViewType::D2Array,
             format,
             components: [crate::metal::vulkan::ComponentSwizzle::Identity; 4],
@@ -833,7 +1061,25 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             usage: crate::metal::vulkan::ImageUsage::STORAGE,
             min_lod: 0.0,
         };
-        let created = self.backend.create_image_view(image, &info)?;
+        if let Some(second) = texture.second_plane {
+            return self.two_plane_storage(
+                id,
+                view,
+                [image, second],
+                [
+                    &info(format),
+                    &info(
+                        texture
+                            .descriptor
+                            .pixel_format
+                            .plane_formats()
+                            .and_then(|[_, second]| resource::raw_texel_format(second))
+                            .ok_or(Error::Invalid("a second plane has raw texels"))?,
+                    ),
+                ],
+            );
+        }
+        let created = self.backend.create_image_view(image, &info(format))?;
         let descriptor = match self.descriptor(Descriptor::StorageImage(created)) {
             Ok(descriptor) => descriptor,
             Err(error) => {
@@ -849,6 +1095,48 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(ResourceId::texture(NULL_DESCRIPTOR, descriptor, 1))
     }
 
+    /// [`Self::attachment_storage`] of a two-plane texture: storage views
+    /// of both planes' raw texels in consecutive descriptors, the second's
+    /// following the first's, as fragment functions write them.
+    fn two_plane_storage(
+        &mut self,
+        id: TextureId,
+        view: AttachmentView<()>,
+        images: [Image; 2],
+        infos: [&ImageViewInfo; 2],
+    ) -> Result<ResourceId> {
+        let mut created = Vec::with_capacity(2);
+        for (image, info) in images.into_iter().zip(infos) {
+            match self.backend.create_image_view(image, info) {
+                Ok(view) => created.push(view),
+                Err(error) => {
+                    for view in created {
+                        self.backend.destroy(Object::ImageView(view));
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let first = match self.descriptors.allocate_run(HeapArray::StorageImages, 2) {
+            Ok(first) => first,
+            Err(error) => {
+                for view in created {
+                    self.backend.destroy(Object::ImageView(view));
+                }
+                return Err(error);
+            }
+        };
+        let texture = self.resources.textures.get_mut(id.0)?;
+        for (index, view_handle) in (first..).zip(&created) {
+            texture.attachment_storage.push((view, *view_handle, index));
+        }
+        for (index, view_handle) in (first..).zip(created) {
+            self.backend
+                .write_descriptor(index, Descriptor::StorageImage(view_handle));
+        }
+        Ok(ResourceId::texture(NULL_DESCRIPTOR, first, 1))
+    }
+
     /// The storage copy of an attached depth (or, with `stencil`, stencil)
     /// subresource, created on first use and kept with the texture: an
     /// image of the aspect's raw texels, a 16- or 32-bit word of depth or a
@@ -861,32 +1149,32 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         stencil: bool,
     ) -> Result<TestedCopy> {
         let texture = self.resources.textures.get(id.0)?;
+        let aspect = if stencil {
+            ImageAspects::STENCIL
+        } else {
+            ImageAspects::DEPTH
+        };
         if let Some(object) = texture
             .tested_copies
             .iter()
-            .find(|object| object.view == view && object.stencil == stencil)
+            .find(|object| object.view == view && object.aspect == aspect)
         {
             return Ok(object.copy);
         }
-        let attachment = texture
-            .image
-            .ok_or(Error::Invalid("texture buffers are not attachments"))?;
-        let descriptor = texture.descriptor;
-        let realized = descriptor
+        let realized = texture
+            .descriptor
             .pixel_format
             .describe()
             .realization
             .map_err(|_| Error::Unsupported("depth and stencil copies of the pixel format"))?
             .format;
-        let (format, encoding, aspect) = if stencil {
-            (Format::R8Uint, 0, ImageAspects::STENCIL)
+        let (format, encoding) = if stencil {
+            (Format::R8Uint, 0)
         } else {
             match realized {
-                Format::D16Unorm => (Format::R16Uint, 1, ImageAspects::DEPTH),
-                Format::D24UnormS8Uint => (Format::R32Uint, 2, ImageAspects::DEPTH),
-                Format::D32Sfloat | Format::D32SfloatS8Uint => {
-                    (Format::R32Uint, 3, ImageAspects::DEPTH)
-                }
+                Format::D16Unorm => (Format::R16Uint, 1),
+                Format::D24UnormS8Uint => (Format::R32Uint, 2),
+                Format::D32Sfloat | Format::D32SfloatS8Uint => (Format::R32Uint, 3),
                 _ => {
                     return Err(Error::Unsupported(
                         "depth and stencil copies of the pixel format",
@@ -894,6 +1182,45 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 }
             }
         };
+        self.storage_copy(id, view, aspect, format, encoding)
+    }
+
+    /// The storage copy of an attached color subresource that has no raw
+    /// texel storage view of its own, an A8Unorm texture's or a 3D
+    /// texture's depth planes, created on first use and kept with the
+    /// texture: an image of its raw texels with the view's layers (or
+    /// planes) and the texture's samples, which image copies fill from the
+    /// attachment and return to it, as [`tested_copy`](Self::tested_copy)'s.
+    pub fn color_copy(&mut self, id: TextureId, view: AttachmentView<()>) -> Result<TestedCopy> {
+        let texture = self.resources.textures.get(id.0)?;
+        if let Some(object) = texture
+            .tested_copies
+            .iter()
+            .find(|object| object.view == view && object.aspect == ImageAspects::COLOR)
+        {
+            return Ok(object.copy);
+        }
+        let format = resource::raw_texel_bytes_format(texture.descriptor.pixel_format)
+            .ok_or(Error::Unsupported("framebuffer reads of the pixel format"))?;
+        self.storage_copy(id, view, ImageAspects::COLOR, format, 0)
+    }
+
+    /// Creates and keeps the copy [`tested_copy`](Self::tested_copy) and
+    /// [`color_copy`](Self::color_copy) describe.
+    fn storage_copy(
+        &mut self,
+        id: TextureId,
+        view: AttachmentView<()>,
+        aspect: ImageAspects,
+        format: Format,
+        encoding: u32,
+    ) -> Result<TestedCopy> {
+        let texture = self.resources.textures.get(id.0)?;
+        let attachment = texture
+            .image
+            .ok_or(Error::Invalid("texture buffers are not attachments"))?;
+        let descriptor = texture.descriptor;
+        let planes = descriptor.texture_type == crate::metal::abi::TextureType::D3;
         let level = view.range.base_mip_level;
         let extent = [
             (descriptor.width >> level).max(1) as u32,
@@ -963,6 +1290,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             layers,
             extent,
             encoding,
+            planes,
         };
         self.resources
             .textures
@@ -970,7 +1298,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .tested_copies
             .push(TestedCopyObject {
                 view,
-                stencil,
+                aspect,
                 copy,
                 memory,
                 bytes,
@@ -1093,16 +1421,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let (copy, rows) = self.cpu_region(id, region, strides, bytes.len())?;
         let mut packed = alloc::vec![0; rows.packed_bytes];
         self.read_region(id, &copy, &mut packed)?;
+        let start = self.timing.now();
         if rows.tight() {
             bytes[..rows.packed_bytes].copy_from_slice(&packed);
-            return Ok(());
+        } else {
+            let mut packed = packed.as_slice();
+            for row in rows.ranges() {
+                let (head, rest) = packed.split_at(row.len());
+                bytes[row].copy_from_slice(head);
+                packed = rest;
+            }
         }
-        let mut packed = packed.as_slice();
-        for row in rows.ranges() {
-            let (head, rest) = packed.split_at(row.len());
-            bytes[row].copy_from_slice(head);
-            packed = rest;
-        }
+        self.timing.since(Phase::BytesUnpack, start);
         Ok(())
     }
 
@@ -1229,14 +1559,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let image = texture.image.ok_or(Error::Invalid(
             "texture buffers are read through their buffer",
         ))?;
+        let start = self.timing.now();
         let Some(copy) = &texture.cpu_copy else {
             let description = texture.descriptor.pixel_format.describe();
             return match description.encoding() {
-                Encoding::Exact => self.backend.copy_from_image(image, region, bytes),
+                Encoding::Exact => {
+                    let copied = self.backend.copy_from_image(image, region, bytes);
+                    self.timing.since(Phase::BytesCopy, start);
+                    copied
+                }
                 encoding => {
                     let mut stored = alloc::vec![0; stored_len(description, bytes.len())];
                     self.backend.copy_from_image(image, region, &mut stored)?;
+                    let start = self.timing.since(Phase::BytesCopy, start);
                     encoding.load(&stored, bytes);
+                    self.timing.since(Phase::BytesDecode, start);
                     Ok(())
                 }
             };
@@ -1249,6 +1586,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             self.backend
                 .read_memory(memory, offset, &mut bytes[packed])?;
         }
+        self.timing.since(Phase::BytesCopy, start);
         Ok(())
     }
 
@@ -1387,6 +1725,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     }
 
     fn cpu_access(&self, texture: &TextureObject) -> Result<()> {
+        if texture.second_plane.is_some() {
+            // The CPU reaches the IOSurface's planes itself.
+            return Err(Error::Unsupported("CPU copies of two-plane textures"));
+        }
         ensure(
             texture.descriptor.options.storage_mode != StorageMode::Private,
             "private textures have no CPU access",
@@ -1410,13 +1752,94 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.resources
             .block_decodes
             .retain(|((decoded, ..), _)| *decoded != id);
+        match recyclable(&texture) {
+            Some(bytes) if !self.lost => self.recycle_texture(texture, bytes),
+            _ => self.free_texture(texture),
+        }
+    }
+
+    /// What the device keeps of destroyed private textures.
+    pub fn recycled(&self) -> RecycleReport {
+        RecycleReport {
+            textures: self.resources.recycled.len(),
+            bytes: self.resources.recycled_bytes,
+            hits: self.resources.recycle_hits,
+            misses: self.resources.recycle_misses,
+        }
+    }
+
+    /// A recycled texture of `descriptor`, zeroed as a new one, if the
+    /// device keeps one no submitted work still uses.
+    fn reuse_texture(
+        &mut self,
+        descriptor: &TextureDescriptor,
+        plan: &TexturePlan,
+    ) -> Option<TextureId> {
+        if plan.cpu_access != CpuAccess::None || descriptor.pixel_format.describe().is_compressed()
+        {
+            return None;
+        }
+        let completed = self.completed;
+        let Some(index) =
+            self.resources.recycled.iter().position(|entry| {
+                entry.ready <= completed && entry.texture.descriptor == *descriptor
+            })
+        else {
+            self.resources.recycle_misses += 1;
+            return None;
+        };
+        let entry = self.resources.recycled.remove(index)?;
+        self.resources.recycled_bytes -= entry.bytes;
+        self.resources.recycle_hits += 1;
+        self.allocated += entry.bytes;
+        let image = entry
+            .texture
+            .image
+            .expect("a recycled texture owns its image");
+        self.backend.clear_reused_image(image, &plan.image);
+        Some(TextureId(self.resources.textures.insert(entry.texture)))
+    }
+
+    /// Keeps a destroyed texture of `bytes` for reuse, freeing the oldest
+    /// kept ones beyond the budget.
+    fn recycle_texture(&mut self, texture: TextureObject, bytes: u64) -> Result<()> {
+        self.allocated -= bytes;
+        self.resources.recycled_bytes += bytes;
+        self.resources.recycled.push_back(Recycled {
+            ready: self.submitted,
+            bytes,
+            texture,
+        });
+        self.trim_recycled(RECYCLED_BYTES, RECYCLED_TEXTURES)
+    }
+
+    /// Frees the oldest recycled textures until at most `bytes` and
+    /// `textures` remain.
+    fn trim_recycled(&mut self, bytes: u64, textures: usize) -> Result<()> {
+        while self.resources.recycled_bytes > bytes || self.resources.recycled.len() > textures {
+            let Some(entry) = self.resources.recycled.pop_front() else {
+                break;
+            };
+            self.resources.recycled_bytes -= entry.bytes;
+            // Its bytes left `allocated` when it was recycled.
+            self.allocated += entry.bytes;
+            self.free_texture(entry.texture)?;
+        }
+        Ok(())
+    }
+
+    /// Frees what a destroyed texture holds once submitted work completes.
+    fn free_texture(&mut self, texture: TextureObject) -> Result<()> {
         let arrays = if texture.texel_views.is_empty() {
             TEXTURE_ARRAYS
         } else {
             TEXEL_BUFFER_ARRAYS
         };
-        let low_length =
-            resource::sampled_descriptors(resource::view_type(texture.descriptor.texture_type));
+        let low_length = if texture.second_plane.is_some() {
+            2
+        } else {
+            resource::sampled_descriptors(resource::view_type(texture.descriptor.texture_type))
+        };
         self.release_id(texture.id, arrays, low_length);
         for view in texture
             .views
@@ -1449,6 +1872,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             None => {
                 if let Some(image) = texture.image {
                     self.release_sparse(image)?;
+                    self.defer(Object::Image(image));
+                }
+                if let Some(image) = texture.second_plane {
                     self.defer(Object::Image(image));
                 }
                 if let Some(copy) = texture.cpu_copy {
@@ -1514,6 +1940,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         descriptor: &SamplerDescriptor,
     ) -> Result<(ResourceId, Vec<Sampler>)> {
         let plan = sampler::sampler(&self.capabilities, descriptor)?;
+        if descriptor.bicubic()
+            && descriptor.mip_filter != SamplerMipFilter::NotMipmapped
+            && (descriptor.lod_min_clamp > 0.0 || descriptor.lod_max_clamp < 16.0)
+        {
+            // Shaders select the bicubic level from the sample's LOD alone.
+            self.unsupported("bicubic sampling of mip levels outside the sampler's LOD clamps");
+        }
         let float = self.backend.create_sampler(&plan.float)?;
         let mut samplers = alloc::vec![float];
         let float_index = self.descriptor(Descriptor::Sampler(float))?;
@@ -1525,9 +1958,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
             None => float_index,
         };
-        let never = descriptor.compare_function == CompareFunction::Never;
         Ok((
-            ResourceId::sampler(float_index, integer_index, never),
+            ResourceId::sampler(float_index, integer_index, sampler_flags(descriptor)),
             samplers,
         ))
     }
@@ -1728,7 +2160,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let offset = match (&mut heap.allocator, offset) {
             (Some(allocator), None) => allocator
                 .allocate(requirement.size, requirement.align)
-                .ok_or(Error::OutOfMemory)?,
+                .ok_or(Error::HeapFull)?,
             (None, Some(offset)) => {
                 heap::placement(heap.descriptor.size, offset, requirement)?;
                 offset
@@ -2063,6 +2495,27 @@ impl CpuRows {
     }
 }
 
+/// The bytes of a destroyed texture the device may keep for reuse: a
+/// private texture with an allocation of its own, no CPU copy or texel
+/// views, of a format a clear can zero.
+fn recyclable(texture: &TextureObject) -> Option<u64> {
+    match texture.backing {
+        Backing::Owned(bytes)
+            if (1..=RECYCLED_TEXTURE_BYTES).contains(&bytes)
+                && texture.parent.is_none()
+                && texture.image.is_some()
+                && texture.memory.is_some()
+                && texture.cpu_access == CpuAccess::None
+                && texture.cpu_copy.is_none()
+                && texture.texel_views.is_empty()
+                && !texture.descriptor.pixel_format.describe().is_compressed() =>
+        {
+            Some(bytes)
+        }
+        _ => None,
+    }
+}
+
 /// Contiguous spans `region` covers in a texture's CPU copy, as (copy offset,
 /// range in tightly packed bytes of `length`); `first` is the region's
 /// first byte in the copy.
@@ -2258,5 +2711,48 @@ fn cpu_copy_region(descriptor: &TextureDescriptor, region: BufferImageCopy) -> B
         buffer_row_length: extent[0].next_multiple_of(block.width.into()) as u32,
         buffer_image_height: extent[1].next_multiple_of(block.height.into()) as u32,
         ..region
+    }
+}
+
+/// A sampler ID's flags (`ResourceId::SAMPLER_*`).
+fn sampler_flags(descriptor: &SamplerDescriptor) -> u32 {
+    let mut flags = 0;
+    if descriptor.compare_function == CompareFunction::Never {
+        flags |= ResourceId::SAMPLER_NEVER;
+    }
+    if descriptor.bicubic() {
+        flags |= ResourceId::SAMPLER_CUBIC;
+        if descriptor.mip_filter != SamplerMipFilter::NotMipmapped {
+            flags |= ResourceId::SAMPLER_MIPPED;
+        }
+        if !descriptor.normalized_coordinates {
+            flags |= ResourceId::SAMPLER_PIXELS;
+        }
+    }
+    flags
+}
+
+/// Whether an IOSurface pixel format code names video-range YCbCr, as
+/// CoreVideo's codes do: `'420v'`, `'x420'`, `'422v'`, `'x444'` and their
+/// lossless `'&'` forms are video range; full-range codes (`'420f'`,
+/// `'xf20'`, `'444f'`) carry an `f`, and zero, no surface, is full range.
+pub fn video_range(surface_format: u32) -> bool {
+    surface_format != 0 && !surface_format.to_be_bytes().contains(&b'f')
+}
+
+#[cfg(test)]
+mod surface_range_tests {
+    use super::video_range;
+
+    #[test]
+    fn surface_codes_name_their_range() {
+        let code = |s: &[u8; 4]| u32::from_be_bytes(*s);
+        for video in [b"420v", b"x420", b"422v", b"x422", b"x444", b"&8v0"] {
+            assert!(video_range(code(video)));
+        }
+        for full in [b"420f", b"xf20", b"444f", b"xf44", b"&8f0"] {
+            assert!(!video_range(code(full)));
+        }
+        assert!(!video_range(0));
     }
 }

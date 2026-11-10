@@ -339,6 +339,10 @@ pub(super) struct Module {
     /// Null for a module without values.
     pub constants: *const ConstantValue,
     pub constant_count: u32,
+    /// Another specialization of a module the program holds, whose
+    /// definitions link with the suffix `.stela.copy<copy>`; zero for the
+    /// first.
+    pub copy: u32,
 }
 
 /// `stela_air_stitch_source`.
@@ -347,6 +351,8 @@ pub struct StitchSource {
     pub(super) bitcode: *const c_void,
     pub(super) size: usize,
     pub(super) name: *const c_char,
+    pub(super) constants: *const ConstantValue,
+    pub(super) constant_count: u32,
 }
 
 /// `STELA_AIR_STITCH_INPUT`, `STELA_AIR_STITCH_BUILTIN`,
@@ -444,7 +450,19 @@ pub struct Specialization {
     pub(super) vertex_formats: [u8; 32],
     pub(super) imageblock_size: [u32; 2],
     pub(super) tile: u32,
+    pub(super) fragment_tests: u32,
+    pub(super) bicubic: u32,
 }
+
+/// `struct stela_metal_specialization`'s `fragment_tests` bits.
+pub(super) const SELF_TESTS: u32 = 1 << 0;
+pub(super) const ALPHA_TO_COVERAGE: u32 = 1 << 1;
+pub(super) const ALPHA_TO_ONE: u32 = 1 << 2;
+
+/// `struct stela_metal_specialization`'s `bicubic` bit for samplers of
+/// argument values (`STELA_METAL_BICUBIC_IDS`); the bits below it are
+/// sampler indices.
+pub(super) const BICUBIC_ARGUMENTS: u32 = 1 << 31;
 
 /// `struct stela_metal_attachment`: a color attachment a fragment function
 /// reads and writes as storage, by its realized `VkFormat` and texel bytes,
@@ -462,6 +480,7 @@ pub struct Attachment {
     pub(super) destination_rgb: u8,
     pub(super) source_alpha: u8,
     pub(super) destination_alpha: u8,
+    pub(super) planes: u8,
 }
 
 /// `struct stela_metal_tessellation`: the raw values of the pipeline's
@@ -475,6 +494,7 @@ pub struct Tessellation {
     pub(super) step: u32,
     pub(super) winding: u32,
     pub(super) control_point_index_bytes: u32,
+    pub(super) scales: bool,
 }
 
 /// `struct stela_metal_stage_in_attribute`; a zero format is absent.

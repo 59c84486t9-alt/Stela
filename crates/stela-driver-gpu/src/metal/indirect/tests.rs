@@ -360,7 +360,9 @@ fn records_hold_only_what_the_gpu_executes() {
         let buffer = IndirectCommandBuffer::new(&caps, descriptor, 1).unwrap();
         matches!(buffer.resident_image(), Err(Error::Unsupported(_)))
     };
-    assert!(refused(&descriptor(IndirectCommandType::DRAW_PATCHES)));
+    // Patch draws of pipelines the commands set draw through execution
+    // sets of tessellated pipelines.
+    assert!(!refused(&descriptor(IndirectCommandType::DRAW_PATCHES)));
     assert!(refused(&IndirectCommandBufferDescriptor {
         inherit_cull_mode: false,
         ..descriptor(IndirectCommandType::DRAW)
@@ -472,9 +474,9 @@ fn inherited_patch_draws_are_records_of_their_arguments() {
     assert_eq!(double(second, RecordLayout::CONTROL_POINT_INDICES), 0);
     assert_eq!(double(second, RecordLayout::FACTORS), 4 << 32);
 
-    // Commands that set their pipeline name none an execution set holds.
+    // Commands that set their pipeline name one an execution set holds.
     let own = IndirectCommandBuffer::new(&caps, &descriptor(types), 1).unwrap();
-    assert!(matches!(own.resident_image(), Err(Error::Unsupported(_))));
+    assert!(own.resident_image().is_ok());
     let mut misaligned = IndirectCommandBuffer::new(&caps, &patches, 1).unwrap();
     misaligned
         .render_command(0)
@@ -524,4 +526,34 @@ fn compute_records_hold_dynamic_attribute_strides() {
             .is_err(),
         "the descriptor supports no dynamic strides"
     );
+}
+
+/// A compute command keeps its own imageblock dimensions, which a
+/// GPU-resident record has no field for.
+#[test]
+fn compute_commands_keep_their_imageblock_size() {
+    let caps = capabilities();
+    let compute = descriptor(IndirectCommandType::CONCURRENT_DISPATCH);
+    let mut buffer = IndirectCommandBuffer::new(&caps, &compute, 1).unwrap();
+    let mut command = buffer.compute_command(0).unwrap();
+    assert!(command.set_imageblock_size(0, 32).is_err());
+    command.set_imageblock_size(32, 16).unwrap();
+    assert_eq!(
+        buffer.commands(0..1).unwrap()[0].imageblock_size,
+        Some([32, 16])
+    );
+    assert!(matches!(
+        buffer.resident_image(),
+        Err(Error::Unsupported(_))
+    ));
+    buffer.compute_command(0).unwrap().reset().unwrap();
+    let (layout, _) = buffer.resident_image().unwrap();
+    buffer.make_resident(layout);
+    assert!(matches!(
+        buffer
+            .compute_command(0)
+            .unwrap()
+            .set_imageblock_size(32, 32),
+        Err(Error::Unsupported(_))
+    ));
 }

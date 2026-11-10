@@ -347,6 +347,52 @@ fn dual_source_blending_uses_attachment_zero() {
 }
 
 #[test]
+fn blended_extended_range_attachments_blend_as_storage() {
+    let capabilities = capabilities();
+    let fragment = interface(Stage::Fragment);
+    let mut targets = RenderTargets::default();
+    targets.color_attachments[0] = ColorAttachmentDescriptor {
+        blending_enabled: true,
+        ..color(PixelFormat::Bgra10Xr)
+    };
+    targets.color_attachments[1] = color(PixelFormat::Bgr10XrSrgb);
+    targets.color_attachments[2] = ColorAttachmentDescriptor {
+        blending_enabled: true,
+        ..color(PixelFormat::Rgba16Float)
+    };
+    let attachments = storage_attachments(&capabilities, &fragment, &targets).unwrap();
+    let first = attachments[0].expect("the blended extended-range attachment");
+    assert!(first.blend);
+    assert_eq!(first.format, Format::R16G16B16A16Sfloat.raw());
+    assert!(attachments[1..].iter().all(Option::is_none));
+
+    // A pipeline that cannot test fragments first leaves them to the blend
+    // unit.
+    targets.alpha_to_coverage_enabled = true;
+    let attachments = storage_attachments(&capabilities, &fragment, &targets).unwrap();
+    assert!(attachments.iter().all(Option::is_none));
+}
+
+#[test]
+fn lines_rasterize_as_apple_gpus_draw_them() {
+    let capabilities = capabilities();
+    let vertex = shader(Stage::Vertex, 1, |_| {});
+    let mut lines = descriptor(&vertex, None);
+    let mode = |lines: &RenderPipelineDescriptor| {
+        render_pipeline(&capabilities, lines)
+            .unwrap()
+            .info
+            .line_rasterization
+    };
+    assert_eq!(mode(&lines), LineRasterization::Bresenham);
+    lines.targets.raster_sample_count = 4;
+    assert_eq!(mode(&lines), LineRasterization::Rectangular);
+    lines.targets.raster_sample_count = 1;
+    lines.targets.alpha_to_coverage_enabled = true;
+    assert_eq!(mode(&lines), LineRasterization::Default);
+}
+
+#[test]
 fn rasterization_disabled_drops_the_fragment_stage() {
     let vertex = shader(Stage::Vertex, 1, |_| {});
     let fragment = shader(Stage::Fragment, 2, |_| {});
@@ -433,6 +479,39 @@ fn compute_variants_keep_the_encoders_imageblock_size() {
     assert_eq!(variant(None).imageblock_size, None);
 }
 
+/// A tile dispatch's workgroup holds its threads with their sides padded to
+/// even, as Apple GPUs run them in 2 by 2 quads.
+#[test]
+fn tile_variants_pad_their_threadgroups_to_whole_quads() {
+    let capabilities = capabilities();
+    let kernel = shader(Stage::Kernel, 1, |_| {});
+    let descriptor = ComputePipelineDescriptor {
+        compute_function: &kernel.interface,
+        threadgroup_size_is_multiple_of_thread_execution_width: false,
+        max_total_threads_per_threadgroup: 0,
+        stage_input: None,
+    };
+    let plan = compute_pipeline(&capabilities, &descriptor).unwrap();
+    let target = TileTarget {
+        attachments: [None; MAX_COLOR_ATTACHMENTS],
+        samples: 1,
+        matches_tile_size: false,
+    };
+    let workgroup = |width, height| {
+        let threads = Size {
+            width,
+            height,
+            depth: 1,
+        };
+        tile_variant(&plan, &target, threads, [32, 32]).map(|variant| variant.workgroup_size)
+    };
+    assert_eq!(workgroup(16, 16), Ok(Some([256, 1, 1])));
+    assert_eq!(workgroup(3, 5), Ok(Some([24, 1, 1])));
+    assert_eq!(workgroup(1, 8), Ok(Some([16, 1, 1])));
+    assert_eq!(workgroup(32, 32), Ok(Some([1024, 1, 1])));
+    assert!(workgroup(31, 33).is_err(), "32 by 34 exceeds 1024 threads");
+}
+
 #[test]
 fn compute_variants_validate_dispatch_shape_and_memory() {
     let capabilities = capabilities();
@@ -494,9 +573,12 @@ fn compute_variants_validate_dispatch_shape_and_memory() {
         check(size(32, 1, 1), &[(1, 24)]).is_err(),
         "not a multiple of 16"
     );
-    assert!(
-        check(size(32, 1, 1), &[(1, 16)]).is_err(),
-        "smaller than the declared argument"
+    assert_eq!(
+        check(size(32, 1, 1), &[(1, 16)])
+            .unwrap()
+            .threadgroup_lengths,
+        [(1, 32)],
+        "a length below the declared argument runs, with the argument's bytes"
     );
     assert!(
         check(size(32, 1, 1), &[(1, 48 << 10)]).is_err(),

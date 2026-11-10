@@ -31,6 +31,7 @@ pub(super) enum Field {
     /// A buffer slot of a stage, with its vertex stride.
     Buffer(Stage, u32),
     ThreadgroupLength(u32),
+    ImageblockSize,
     /// The whole record, as a reset leaves it.
     Record,
 }
@@ -149,8 +150,7 @@ impl RecordLayout {
 
     /// The layout of a buffer of `count` commands, refusing commands
     /// records cannot hold: mesh draws, which need pipeline variants per
-    /// draw, patch draws of pipelines the commands set, which no execution
-    /// set holds, and rasterizer state the encoder does not provide.
+    /// draw, and rasterizer state the encoder does not provide.
     pub fn new(descriptor: &IndirectCommandBufferDescriptor, count: usize) -> Result<Self> {
         let patches = IndirectCommandType::DRAW_PATCHES | IndirectCommandType::DRAW_INDEXED_PATCHES;
         let recordable = IndirectCommandType::DRAW
@@ -161,11 +161,6 @@ impl RecordLayout {
         if !recordable.contains(descriptor.command_types) {
             return Err(Error::Unsupported(
                 "mesh draws in GPU-resident indirect command buffers",
-            ));
-        }
-        if descriptor.command_types.intersects(patches) && !descriptor.inherit_pipeline_state {
-            return Err(Error::Unsupported(
-                "GPU-resident patch draws of pipelines the commands set",
             ));
         }
         let renders = descriptor.renders();
@@ -312,6 +307,13 @@ impl RecordLayout {
                     .map_err(|_| Error::Invalid("threadgroup memory length"))?;
                 record.put(self.words + 4 * slot, &length.to_le_bytes());
             }
+            // A resident record's dispatch takes the dynamic variant of its
+            // pipeline, which has no imageblock of the encoder's dimensions.
+            Field::ImageblockSize => {
+                return Err(Error::Unsupported(
+                    "imageblock dimensions of GPU-resident indirect compute commands",
+                ));
+            }
             Field::Record => {
                 record.put(0, &alloc::vec![0; self.stride as usize]);
                 if command.pipeline.is_some() {
@@ -325,6 +327,9 @@ impl RecordLayout {
                 }
                 if command.stage_in.is_some() {
                     self.write(record, command, Field::StageIn)?;
+                }
+                if command.imageblock_size.is_some() {
+                    self.write(record, command, Field::ImageblockSize)?;
                 }
                 for buffer in &command.buffers {
                     self.write(record, command, Field::Buffer(buffer.stage, buffer.index))?;

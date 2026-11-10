@@ -17,7 +17,7 @@ use crate::metal::{
     pass::{AttachmentSlot, TileMemory},
     pipeline::MAX_COLOR_ATTACHMENTS,
     service::{
-        Service, boolean, known,
+        Service, boolean, decode, decode_bits,
         pipelines::render_stage,
         wire::{
             self, Fault, Status,
@@ -36,7 +36,7 @@ use crate::metal::{
     shader::Compiler,
     vulkan::backend::Backend,
 };
-use alloc::vec::Vec;
+use alloc::{format, string::String, vec::Vec};
 use core::num::NonZeroU64;
 
 /// `MTLRenderStageTile`, whose bindings tile dispatches read.
@@ -54,7 +54,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             RenderCode::Begin => {
                 let (record, data) = payload.split::<BeginRender>()?;
                 let request = self.render_pass(connection, &record, data.bytes())?;
-                self.device.begin_render(commands, &request)?;
+                if let Err(error) = self.device.begin_render(commands, &request) {
+                    self.noted = Some(self.describe_pass(&request));
+                    return Err(error.into());
+                }
             }
             RenderCode::SetPipeline => {
                 let SetPipeline { pipeline } = payload.record()?;
@@ -188,11 +191,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             RenderCode::SetCullMode => {
                 let Mode { mode } = payload.record()?;
-                commands.set_cull_mode(known(CullMode::from_raw(mode), "cull mode")?)?;
+                commands.set_cull_mode(decode(CullMode::from_raw, mode, "cull mode")?)?;
             }
             RenderCode::SetFrontFacingWinding => {
                 let Mode { mode } = payload.record()?;
-                commands.set_front_facing_winding(known(Winding::from_raw(mode), "winding")?)?;
+                commands.set_front_facing_winding(decode(Winding::from_raw, mode, "winding")?)?;
             }
             RenderCode::SetDepthBias => {
                 let DepthBias {
@@ -239,12 +242,16 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             RenderCode::SetTriangleFillMode => {
                 let Mode { mode } = payload.record()?;
-                let mode = known(TriangleFillMode::from_raw(mode), "triangle fill mode")?;
+                let mode = decode(TriangleFillMode::from_raw, mode, "triangle fill mode")?;
                 commands.set_triangle_fill_mode(mode)?;
             }
             RenderCode::SetDepthClipMode => {
                 let Mode { mode } = payload.record()?;
-                commands.set_depth_clip_mode(known(DepthClipMode::from_raw(mode), "clip mode")?)?;
+                commands.set_depth_clip_mode(decode(
+                    DepthClipMode::from_raw,
+                    mode,
+                    "clip mode",
+                )?)?;
             }
             RenderCode::SetVertexAmplification => {
                 let mappings: Vec<(u32, u32)> = payload
@@ -261,12 +268,13 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             RenderCode::SetVisibilityResultMode => {
                 let VisibilityMode { mode, offset } = payload.record()?;
-                let mode = known(VisibilityResultMode::from_raw(mode), "visibility mode")?;
+                let mode = decode(VisibilityResultMode::from_raw, mode, "visibility mode")?;
                 commands.set_visibility_result_mode(mode, offset)?;
             }
             RenderCode::SetColorStoreAction => {
                 let ColorStoreAction { action, index } = payload.record()?;
-                let index = usize::try_from(index).map_err(|_| Fault::malformed("color index"))?;
+                let index = usize::try_from(index)
+                    .map_err(|_| Fault::malformed("color index").value(index))?;
                 commands.set_store_action(AttachmentSlot::Color(index), store_action(action)?)?;
             }
             RenderCode::SetDepthStoreAction => {
@@ -279,7 +287,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             RenderCode::SetColorStoreActionOptions => {
                 let ColorStoreActionOptions { options, index } = payload.record()?;
-                let index = usize::try_from(index).map_err(|_| Fault::malformed("color index"))?;
+                let index = usize::try_from(index)
+                    .map_err(|_| Fault::malformed("color index").value(index))?;
                 commands.set_store_action_options(
                     AttachmentSlot::Color(index),
                     store_options(options)?,
@@ -299,8 +308,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     after,
                     before,
                 } = payload.record()?;
-                let scope = known(BarrierScope::from_bits(scope), "barrier scope")?;
-                let stages = |raw| known(RenderStages::from_bits(raw), "render stages");
+                let scope = decode_bits(BarrierScope::from_bits, scope, "barrier scope")?;
+                let stages = |raw| decode_bits(RenderStages::from_bits, raw, "render stages");
                 commands.render_memory_barrier(
                     &mut self.device.resolver(),
                     scope,
@@ -322,8 +331,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             RenderCode::DrawIndexed => {
                 let draw: DrawIndexed = payload.record()?;
                 let index_buffer = self.buffer_ref(connection, draw.index_buffer)?;
-                let base_vertex = i32::try_from(draw.base_vertex)
-                    .map_err(|_| Fault::new(Status::Invalid, "the base vertex exceeds 32 bits"))?;
+                let base_vertex = i32::try_from(draw.base_vertex).map_err(|_| {
+                    Fault::new(Status::Invalid, "the base vertex exceeds 32 bits")
+                        .signed(draw.base_vertex)
+                })?;
                 commands.draw_indexed_primitives(
                     &mut self.device.resolver(),
                     primitive(draw.primitive)?,
@@ -451,8 +462,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         Ok(RenderPassRequest {
             color_attachments,
             depth_attachment: self.attachment(connection, &depth.attachment, depth.clear_depth)?,
-            depth_resolve_filter: known(
-                MultisampleDepthResolveFilter::from_raw(depth.resolve_filter),
+            depth_resolve_filter: decode(
+                MultisampleDepthResolveFilter::from_raw,
+                depth.resolve_filter,
                 "depth resolve filter",
             )?,
             stencil_attachment: self.attachment(
@@ -460,15 +472,17 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 &stencil.attachment,
                 stencil.clear_stencil,
             )?,
-            stencil_resolve_filter: known(
-                MultisampleStencilResolveFilter::from_raw(stencil.resolve_filter),
+            stencil_resolve_filter: decode(
+                MultisampleStencilResolveFilter::from_raw,
+                stencil.resolve_filter,
                 "stencil resolve filter",
             )?,
             visibility_result_buffer: (record.visibility_result_buffer != 0)
                 .then(|| self.object::<BufferId>(connection, record.visibility_result_buffer))
                 .transpose()?,
-            visibility_result_type: known(
-                VisibilityResultType::from_raw(record.visibility_result_type),
+            visibility_result_type: decode(
+                VisibilityResultType::from_raw,
+                record.visibility_result_type,
                 "visibility result type",
             )?,
             render_target_array_length: record.render_target_array_length,
@@ -488,6 +502,47 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 .map(|sample| self.counter_sample(connection, sample))
                 .collect::<Result<_, _>>()?,
         })
+    }
+
+    /// The color attachments of a refused pass, for the platform's log:
+    /// each texture and resolve texture as it was made, and the actions.
+    fn describe_pass(&self, request: &RenderPassRequest) -> String {
+        use core::fmt::Write;
+        let texture = |id: TextureId| {
+            self.device.texture_descriptor(id).map_or_else(
+                |_| String::from("?"),
+                |d| {
+                    format!(
+                        "{:?} {}x{}x{} samples={} storage={:?} usage={:?}",
+                        d.pixel_format,
+                        d.width,
+                        d.height,
+                        d.depth,
+                        d.sample_count,
+                        d.options.storage_mode,
+                        d.usage
+                    )
+                },
+            )
+        };
+        let mut text = String::from("PASS REFUSED");
+        for (index, attachment) in request.color_attachments.iter().enumerate() {
+            let Some(attachment) = attachment else {
+                continue;
+            };
+            let _ = write!(
+                text,
+                " color{index}=[{} load={:?} store={:?}",
+                texture(attachment.texture),
+                attachment.load_action,
+                attachment.store_action
+            );
+            if let Some((resolve, ..)) = attachment.resolve {
+                let _ = write!(text, " resolve={}", texture(resolve));
+            }
+            text.push(']');
+        }
+        text
     }
 
     /// An attachment of a pass, or none without a texture.
@@ -516,7 +571,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             slice: record.slice,
             depth_plane: record.depth_plane,
             resolve,
-            load_action: known(LoadAction::from_raw(record.load_action), "load action")?,
+            load_action: decode(LoadAction::from_raw, record.load_action, "load action")?,
             store_action: store_action(record.store_action)?,
             store_action_options: store_options(record.store_action_options)?,
             clear,
@@ -528,22 +583,23 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         connection: NonZeroU64,
         record: &CounterSampleRecord,
     ) -> Result<(CounterBufferId, u32, PassBoundary), Fault> {
-        let boundary = match known(PassBoundaryCode::from_raw(record.boundary), "pass boundary")? {
+        let boundary = match decode(PassBoundaryCode::from_raw, record.boundary, "pass boundary")? {
             PassBoundaryCode::StartOfVertex => PassBoundary::StartOfVertex,
             PassBoundaryCode::EndOfVertex => PassBoundary::EndOfVertex,
             PassBoundaryCode::StartOfFragment => PassBoundary::StartOfFragment,
             PassBoundaryCode::EndOfFragment => PassBoundary::EndOfFragment,
         };
-        let index = u32::try_from(record.index).map_err(|_| Fault::malformed("sample index"))?;
+        let index = u32::try_from(record.index)
+            .map_err(|_| Fault::malformed("sample index").value(record.index))?;
         let buffer = self.object::<CounterBufferId>(connection, record.buffer)?;
         Ok((buffer, index, boundary))
     }
 }
 
 fn store_action(raw: u64) -> Result<StoreAction, Fault> {
-    known(StoreAction::from_raw(raw), "store action")
+    decode(StoreAction::from_raw, raw, "store action")
 }
 
 fn store_options(raw: u64) -> Result<StoreActionOptions, Fault> {
-    known(StoreActionOptions::from_bits(raw), "store action options")
+    decode_bits(StoreActionOptions::from_bits, raw, "store action options")
 }

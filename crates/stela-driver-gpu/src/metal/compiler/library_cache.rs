@@ -5,6 +5,7 @@ use super::{
     super::library::{Air, Header, Library},
     Error, Result,
 };
+use crate::metal::error::NO_FUNCTION;
 use alloc::{boxed::Box, collections::BTreeMap, vec::Vec};
 use core::{cell::OnceCell, ffi::CStr, ops::Range};
 
@@ -92,7 +93,7 @@ impl LoadedLibrary {
             .functions
             .iter()
             .find(|entry| &self.bytes[entry.name.start..entry.name.end - 1] == name.as_bytes())
-            .ok_or(Error::Invalid("no function of that name"))?;
+            .ok_or(NO_FUNCTION)?;
         let module = &self.modules[entry.module];
         let entry =
             CStr::from_bytes_with_nul(&self.bytes[entry.name.clone()]).map_err(|_| INVALID)?;

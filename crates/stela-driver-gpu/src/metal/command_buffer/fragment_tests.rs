@@ -11,7 +11,15 @@
 //! copies them back. Each copy is an image copy between the attachment's
 //! aspect and a color image of its texel size.
 //!
+//!
+//! A color attachment no storage view of which reads its raw texels, an
+//! A8Unorm texture's or a 3D texture's depth planes, likewise lives in a
+//! storage copy ([`AttachmentInputs::color_copies`]) while draws access it
+//! as storage, and returns to the attachment before a draw renders it
+//! through the blend unit and where the pass ends.
+//!
 //! [`RenderPipelinePlan::tests_fragments`]: crate::metal::pipeline::RenderPipelinePlan::tests_fragments
+//! [`AttachmentInputs::color_copies`]: crate::metal::pass::AttachmentInputs::color_copies
 use super::{CommandBuffer, Recorder, Resolver, render::render};
 use crate::metal::{
     binding::{FragmentTests, ResourceId},
@@ -34,6 +42,9 @@ pub(in crate::metal::command_buffer) struct TestState {
     /// The encoder's dynamic depth-stencil state tests nothing, for a
     /// pipeline that tests fragments itself.
     untested: bool,
+    /// The color attachments whose copies hold the pass's texels, one bit
+    /// each.
+    colors: u32,
 }
 
 impl TestState {
@@ -83,14 +94,26 @@ fn copy(recorder: &mut Recorder, copies: &[TestedCopy], back: bool) {
     barrier(recorder, TRANSFER, after);
 }
 
-/// The image copies of [`copy`], without its barriers.
+/// A color attachment's accesses its copies follow and precede.
+const COLOR_ATTACHMENT: (PipelineStages, Access) = (
+    PipelineStages::COLOR_ATTACHMENT_OUTPUT,
+    Access::COLOR_ATTACHMENT_READ.union(Access::COLOR_ATTACHMENT_WRITE),
+);
+
+/// The image copies of [`copy`], without its barriers. A 3D attachment's
+/// layers are its depth planes, which a copy addresses by depth.
 pub(super) fn copy_images(recorder: &mut Recorder, copies: &[TestedCopy], back: bool) {
     for copy in copies {
+        let (base_array_layer, layer_count, depth) = if copy.planes {
+            (0, 1, copy.base_layer as i32)
+        } else {
+            (copy.base_layer, copy.layers, 0)
+        };
         let attachment = Subresource {
             aspects: copy.aspect,
             mip_level: copy.level,
-            base_array_layer: copy.base_layer,
-            layer_count: copy.layers,
+            base_array_layer,
+            layer_count,
         };
         let image = Subresource {
             aspects: ImageAspects::COLOR,
@@ -98,20 +121,37 @@ pub(super) fn copy_images(recorder: &mut Recorder, copies: &[TestedCopy], back: 
             base_array_layer: 0,
             layer_count: copy.layers,
         };
-        let (src, dst, src_sub, dst_sub) = if back {
-            (copy.image, copy.attachment, image, attachment)
+        let (src, dst, src_sub, dst_sub, src_offset, dst_offset) = if back {
+            (
+                copy.image,
+                copy.attachment,
+                image,
+                attachment,
+                [0; 3],
+                [0, 0, depth],
+            )
         } else {
-            (copy.attachment, copy.image, attachment, image)
+            (
+                copy.attachment,
+                copy.image,
+                attachment,
+                image,
+                [0, 0, depth],
+                [0; 3],
+            )
         };
+        // A copy between a 3D image and a 2D array spans the array's layers
+        // in depth.
+        let extent_depth = if copy.planes { copy.layers } else { 1 };
         recorder.push(Command::CopyImage {
             src,
             dst,
             regions: alloc::vec![ImageCopy {
                 src: src_sub,
-                src_offset: [0; 3],
+                src_offset,
                 dst: dst_sub,
-                dst_offset: [0; 3],
-                extent: [copy.extent[0], copy.extent[1], 1],
+                dst_offset,
+                extent: [copy.extent[0], copy.extent[1], extent_depth],
             }],
         });
     }
@@ -193,6 +233,20 @@ impl CommandBuffer {
         else {
             return Ok(());
         };
+        self.prepare_tests(resolver, tests_fragments)
+    }
+
+    /// Brings the pass's depth and stencil to where a pipeline that does or
+    /// does not test fragments itself tests them, as
+    /// [`prepare_fragment_tests`](Self::prepare_fragment_tests) does for
+    /// the bound pipeline: before an execution of GPU-resident commands
+    /// whose pipelines do.
+    pub(super) fn prepare_tests(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        tests_fragments: bool,
+    ) -> Result<()> {
+        let render = render(&mut self.encoder)?;
         let pass = render.pass();
         let inputs = pass.inputs;
         let attached = (pass.depth.is_some(), pass.stencil.is_some());
@@ -219,7 +273,7 @@ impl CommandBuffer {
         }
         if attached != (inputs.depth_copy.is_some(), inputs.stencil_copy.is_some()) {
             return Err(Error::Unsupported(
-                "stencil feedback in a pass that began before its pipeline was made",
+                "fragment tests a function runs itself in a pass that began before its pipeline was made",
             ));
         }
         let tests = FragmentTests {
@@ -229,6 +283,8 @@ impl CommandBuffer {
                 inputs.stencil_copy.is_some(),
                 render.raster.clip_mode == crate::metal::abi::DepthClipMode::Clamp,
             ),
+            references: render.stencil_references[0] & 0xff
+                | (render.stencil_references[1] & 0xff) << 8,
             range: render.depth_range.map(f32::to_bits),
             depth: inputs.depth_copy.map_or(ResourceId::NULL, |copy| copy.id),
             stencil: inputs.stencil_copy.map_or(ResourceId::NULL, |copy| copy.id),
@@ -249,6 +305,7 @@ impl CommandBuffer {
 
     /// Returns the copies to the attachments where the pass ends.
     pub(super) fn finish_fragment_tests(&mut self, resolver: &mut dyn Resolver) -> Result<()> {
+        self.place_color_copies(resolver, 0)?;
         let render = render(&mut self.encoder)?;
         if !render.tests.copied {
             return Ok(());
@@ -260,5 +317,44 @@ impl CommandBuffer {
             .flatten()
             .collect();
         self.outside_pass(resolver, |recorder| copy(recorder, &copies, true))
+    }
+
+    /// Brings each copied color attachment's texels to its copy where the
+    /// next draw or tile dispatch accesses it as `storage`, and the others'
+    /// back to their attachments.
+    pub(super) fn place_color_copies(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        storage: u32,
+    ) -> Result<()> {
+        let render = render(&mut self.encoder)?;
+        let colors = render.pass().inputs.color_copies;
+        let present = (0..colors.len())
+            .filter(|&index| colors[index].is_some())
+            .fold(0u32, |mask, index| mask | 1 << index);
+        let copied = render.tests.colors;
+        let back = copied & !storage;
+        let into = storage & present & !copied;
+        if back == 0 && into == 0 {
+            return Ok(());
+        }
+        render.tests.colors = copied & !back | into;
+        let pick = |mask: u32| -> Vec<TestedCopy> {
+            (0..colors.len())
+                .filter(|&index| mask & 1 << index != 0)
+                .filter_map(|index| colors[index])
+                .collect()
+        };
+        let (back, into) = (pick(back), pick(into));
+        let accesses = (
+            COLOR_ATTACHMENT.0.union(STORAGE.0),
+            COLOR_ATTACHMENT.1.union(STORAGE.1),
+        );
+        self.outside_pass(resolver, |recorder| {
+            barrier(recorder, accesses, TRANSFER);
+            copy_images(recorder, &back, true);
+            copy_images(recorder, &into, false);
+            barrier(recorder, TRANSFER, accesses);
+        })
     }
 }

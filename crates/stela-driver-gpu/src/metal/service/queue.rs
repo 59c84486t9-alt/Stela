@@ -1,6 +1,6 @@
 //! Events, counter sample buffers and waits on the queue.
 use super::{
-    Call, Object, Service, known,
+    Call, Object, Service, decode,
     wire::{
         CounterSetCode, Empty, EventValueRequest, Fault, Handle, NewCounterBufferRequest,
         ResolveCountersRequest, ResolveCountersResponse, Value, WaitEventRequest, WaitResponse,
@@ -39,12 +39,12 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 
     pub(super) fn new_counter_buffer(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewCounterBufferRequest = call.request()?;
-        let set = match known(CounterSetCode::from_raw(request.counter_set), "counter set")? {
+        let set = match decode(CounterSetCode::from_raw, request.counter_set, "counter set")? {
             CounterSetCode::Timestamp => CounterSet::Timestamp,
             CounterSetCode::Statistic => CounterSet::Statistic,
         };
-        let count =
-            u32::try_from(request.sample_count).map_err(|_| Fault::malformed("sample count"))?;
+        let count = u32::try_from(request.sample_count)
+            .map_err(|_| Fault::malformed("sample count").value(request.sample_count))?;
         let buffer = self.device.new_counter_sample_buffer(set, count)?;
         let handle = self.hold(call.connection, Object::CounterBuffer(buffer))?;
         call.reply(&handle)
@@ -53,7 +53,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn resolve_counters(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: ResolveCountersRequest = call.request()?;
         let buffer = self.object::<CounterBufferId>(call.connection, request.buffer)?;
-        let range = |value| u32::try_from(value).map_err(|_| Fault::malformed("sample range"));
+        let range =
+            |value| u32::try_from(value).map_err(|_| Fault::malformed("sample range").value(value));
         let (first, count) = (range(request.first)?, range(request.count)?);
         let values = self.device.resolve_counters(buffer, first, count)?;
         let data: Vec<u8> = values

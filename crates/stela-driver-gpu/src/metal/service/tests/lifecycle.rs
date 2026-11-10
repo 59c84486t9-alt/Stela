@@ -205,5 +205,5 @@ fn a_device_that_does_not_reopen_stays_lost() {
     service.disconnect(connection).unwrap();
     assert!(service.device().is_lost());
     assert_eq!(service.connect().unwrap_err().status, Status::DeviceLost);
-    assert!(service.refused.take().unwrap().contains("did not reopen"));
+    assert!(service.refused.pop().unwrap().contains("did not reopen"));
 }

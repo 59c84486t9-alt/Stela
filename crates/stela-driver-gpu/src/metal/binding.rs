@@ -35,6 +35,7 @@ use super::{
     capabilities::{MAX_BUFFER_BINDINGS, MAX_SAMPLER_BINDINGS, MAX_TEXTURE_BINDINGS},
     error::{Error, Result},
     pipeline::MAX_COLOR_ATTACHMENTS,
+    pixel_format::{FilterClass, Planes},
     vulkan::physical::Limits,
 };
 use alloc::{
@@ -76,6 +77,33 @@ impl ResourceId {
     /// the address over 8 of the word in the pool's buffer that holds the
     /// entry's view's ID, which shaders load in its place.
     pub const POOL_VIEW: u32 = 1 << 31;
+    /// The high-half bit of a texture whose storage views hold an sRGB
+    /// format's texels through its linear twin: shaders encode what they
+    /// write and decode what they read, as Apple GPUs write sRGB textures.
+    /// Storage indices lie below it.
+    pub const SRGB_STORAGE: u32 = 1 << (Self::LEVEL_SHIFT - 1);
+    /// The high-half bits from which a texture holds its
+    /// [`FilterClass`], how shaders filter its texels bicubically. Storage
+    /// indices lie below them.
+    pub const FILTER_CLASS_SHIFT: u32 = Self::LEVEL_SHIFT - 3;
+    /// The high-half bits from which a two-plane texture holds its
+    /// [`Planes`], zero for one plane, and above them [`Self::YCBCR`]: its
+    /// sampled descriptor is its first plane's, followed by its second's,
+    /// which shaders combine. Storage indices lie below them.
+    pub const PLANES_SHIFT: u32 = Self::FILTER_CLASS_SHIFT - 3;
+    /// The high-half bit of a two-plane texture whose planes hold luma and
+    /// chroma, which shaders convert to RGB.
+    pub const YCBCR: u32 = 4 << Self::PLANES_SHIFT;
+    /// The high-half bit of a two-plane texture whose components are the
+    /// high 10 bits of 16-bit words, rather than bytes. It and
+    /// [`Self::VIDEO_RANGE`] take the top storage index bits, which a
+    /// two-plane texture, with no storage views, leaves free.
+    pub const TEN_BIT: u32 = 1 << (Self::PLANES_SHIFT - 1);
+    /// The high-half bit of a two-plane YCbCr texture whose surface's pixel
+    /// format is video range, rather than full range.
+    pub const VIDEO_RANGE: u32 = 1 << (Self::PLANES_SHIFT - 2);
+    /// The storage indices a texture's high half holds.
+    pub const MAX_STORAGE: u32 = 1 << Self::PLANES_SHIFT;
 
     pub const fn new(low: u32, high: u32) -> Self {
         Self(low as u64 | (high as u64) << 32)
@@ -84,30 +112,68 @@ impl ResourceId {
     /// The high-half bit of a sampler that compares with Never, through
     /// which a comparison is zero: its Vulkan samplers do not compare.
     pub const SAMPLER_NEVER: u32 = 1 << 31;
+    /// The high-half bit of a sampler with Metal's bicubic filter, which
+    /// shaders apply to 2D textures: Vulkan's samplers have none.
+    pub const SAMPLER_CUBIC: u32 = 1 << 30;
+    /// With [`Self::SAMPLER_CUBIC`], the bit of a sampler that selects mip
+    /// levels.
+    pub const SAMPLER_MIPPED: u32 = 1 << 29;
+    /// With [`Self::SAMPLER_CUBIC`], the bit of a sampler that takes pixel
+    /// coordinates. The integer-border index lies below it.
+    pub const SAMPLER_PIXELS: u32 = 1 << 28;
 
     /// A sampler's ID: its float-border descriptor, its integer-border twin,
-    /// and whether it compares with Never.
-    pub const fn sampler(float: u32, integer: u32, never: bool) -> Self {
-        debug_assert!(integer & Self::SAMPLER_NEVER == 0);
-        Self::new(float, integer | if never { Self::SAMPLER_NEVER } else { 0 })
+    /// and its `SAMPLER_*` flags.
+    pub const fn sampler(float: u32, integer: u32, flags: u32) -> Self {
+        debug_assert!(integer & !(Self::SAMPLER_PIXELS - 1) == 0);
+        debug_assert!(flags & (Self::SAMPLER_PIXELS - 1) == 0);
+        Self::new(float, integer | flags)
     }
 
     /// A sampler ID's integer-border descriptor.
     pub const fn sampler_integer(self) -> u32 {
-        self.high() & !Self::SAMPLER_NEVER
+        self.high() & (Self::SAMPLER_PIXELS - 1)
     }
 
     /// A texture's ID: its read descriptor, and its `levels` write
     /// descriptors from `storage`.
     pub const fn texture(sampled: u32, storage: u32, levels: u32) -> Self {
-        debug_assert!(storage >> Self::LEVEL_SHIFT == 0);
+        debug_assert!(storage < Self::MAX_STORAGE);
         debug_assert!(levels >= 1 && levels <= Self::MAX_LEVELS);
         Self::new(sampled, storage | (levels - 1) << Self::LEVEL_SHIFT)
     }
 
+    /// This texture ID with [`Self::SRGB_STORAGE`] set when `srgb`.
+    pub const fn with_srgb_storage(self, srgb: bool) -> Self {
+        if srgb {
+            Self(self.0 | (Self::SRGB_STORAGE as u64) << 32)
+        } else {
+            self
+        }
+    }
+
+    /// This texture ID holding `class`.
+    pub const fn with_filter_class(self, class: FilterClass) -> Self {
+        let high = (self.high() & !(3 << Self::FILTER_CLASS_SHIFT))
+            | (class as u32) << Self::FILTER_CLASS_SHIFT;
+        Self::new(self.low(), high)
+    }
+
+    /// This texture ID of a two-plane texture whose second plane is
+    /// `planes`, with `flags` of [`Self::YCBCR`], [`Self::TEN_BIT`] and
+    /// [`Self::VIDEO_RANGE`].
+    pub const fn with_planes(self, planes: Planes, flags: u32) -> Self {
+        debug_assert!(flags & !(Self::YCBCR | Self::TEN_BIT | Self::VIDEO_RANGE) == 0);
+        debug_assert!(self.high_index() == 0);
+        let high = (self.high() & !(7 << Self::PLANES_SHIFT))
+            | (planes as u32) << Self::PLANES_SHIFT
+            | flags;
+        Self::new(self.low(), high)
+    }
+
     /// The first descriptor the high half names.
     pub const fn high_index(self) -> u32 {
-        self.high() & ((1 << Self::LEVEL_SHIFT) - 1)
+        self.high() & (Self::MAX_STORAGE - 1)
     }
 
     /// The descriptors the high half names.
@@ -217,16 +283,18 @@ pub struct ArgumentTable {
     pub fragment_tests: FragmentTests,
 }
 
-/// The fragment tests a fragment function writing the stencil reference
-/// runs itself on a device without stencil export
+/// The fragment tests a fragment function runs itself
 /// ([`Capabilities::fragment_tests`]): the state words of
-/// `STELA_AIR_DEPTH_STENCIL` (`air_to_nir.h`), the viewport's depth range,
-/// and the storage views of the pass's depth and stencil copies.
+/// `STELA_AIR_DEPTH_STENCIL` (`air_to_nir.h`), the encoder's stencil
+/// reference values, the front face's in bits 0 to 7 and the back face's
+/// in bits 8 to 15, the viewport's depth range, and the storage views of
+/// the pass's depth and stencil copies.
 ///
 /// [`Capabilities::fragment_tests`]: super::capabilities::Capabilities::fragment_tests
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FragmentTests {
     pub state: [u32; 3],
+    pub references: u32,
     /// The near and far depths' bits.
     pub range: [u32; 2],
     pub depth: ResourceId,
@@ -357,7 +425,7 @@ impl ArgumentTable {
         writer.u64(self.imageblock.address);
         let tests = &self.fragment_tests;
         tests.state.into_iter().for_each(|word| writer.u32(word));
-        writer.u32(0);
+        writer.u32(tests.references);
         [tests.range[0], tests.range[1], 0, 0]
             .into_iter()
             .for_each(|word| writer.u32(word));
@@ -934,8 +1002,8 @@ impl HeapLayout {
             .max_descriptor_set_update_after_bind_samplers
             .min(limits.max_per_stage_update_after_bind_samplers)
             .min(limits.max_sampler_allocation_count);
-        // Storage indices leave the high half's level count bits free.
-        let storage = storage.min(1 << ResourceId::LEVEL_SHIFT);
+        // Storage indices leave the high half's flag and level count bits free.
+        let storage = storage.min(ResourceId::MAX_STORAGE);
         Self {
             counts: [
                 sampled - sampled / 4,
@@ -1038,6 +1106,11 @@ impl DescriptorIndices {
     pub fn in_use(&self) -> u32 {
         self.in_use
     }
+
+    /// Indices released but not yet past the GPU.
+    pub fn retiring(&self) -> u32 {
+        self.retiring.iter().map(|&(_, _, length)| length).sum()
+    }
 }
 
 /// The device's descriptor heap allocator.
@@ -1080,6 +1153,10 @@ impl DescriptorHeap {
     pub fn in_use(&self, array: HeapArray) -> u32 {
         self.arrays[array.raw() as usize].in_use()
     }
+
+    pub fn retiring(&self, array: HeapArray) -> u32 {
+        self.arrays[array.raw() as usize].retiring()
+    }
 }
 
 #[cfg(test)]
@@ -1091,6 +1168,54 @@ mod tests {
         nvidia::{CHIPS, fixture::nvk},
         vertex::{StageInStep, StepFunction},
     };
+
+    #[test]
+    fn plane_flags_match_the_compiler() {
+        // metal_abi.c's texture_planes gathers them into these values.
+        let header = include_str!("../compiler/air_to_nir.h");
+        for (name, value) in [
+            ("STELA_AIR_PLANES_YCBCR = ", 4),
+            ("STELA_AIR_PLANES_TEN_BIT = ", 8),
+            ("STELA_AIR_PLANES_VIDEO = ", 16),
+        ] {
+            let declared = header
+                .split(name)
+                .nth(1)
+                .unwrap()
+                .split(',')
+                .next()
+                .unwrap();
+            assert_eq!(declared.parse::<u32>().unwrap(), value);
+        }
+        assert_eq!(ResourceId::YCBCR, 4 << ResourceId::PLANES_SHIFT);
+        assert_eq!(ResourceId::TEN_BIT, 1 << (ResourceId::PLANES_SHIFT - 1));
+        assert_eq!(ResourceId::VIDEO_RANGE, 1 << (ResourceId::PLANES_SHIFT - 2));
+    }
+
+    #[test]
+    fn texture_ids_carry_their_planes_beside_the_filter_class() {
+        use crate::metal::pixel_format::{FilterClass, Planes};
+        let id = ResourceId::new(7, 0).with_filter_class(FilterClass::Unorm);
+        for planes in [Planes::Full, Planes::Horizontal, Planes::Both] {
+            for flags in [
+                0,
+                ResourceId::YCBCR,
+                ResourceId::TEN_BIT,
+                ResourceId::YCBCR | ResourceId::TEN_BIT | ResourceId::VIDEO_RANGE,
+            ] {
+                let planar = id.with_planes(planes, flags);
+                assert_eq!(planar.low(), 7);
+                assert_eq!(planar.high() >> ResourceId::PLANES_SHIFT & 3, planes as u32);
+                let mask = ResourceId::YCBCR | ResourceId::TEN_BIT | ResourceId::VIDEO_RANGE;
+                assert_eq!(planar.high() & mask, flags);
+                assert_eq!(planar.with_filter_class(FilterClass::Unorm), planar);
+                assert_eq!(
+                    planar.high() & (ResourceId::MAX_STORAGE - 1),
+                    flags & (ResourceId::TEN_BIT | ResourceId::VIDEO_RANGE)
+                );
+            }
+        }
+    }
 
     #[test]
     fn fragment_test_words_match_the_compiler() {
@@ -1160,6 +1285,15 @@ mod tests {
             ("STELA_METAL_LEVEL_SHIFT", ResourceId::LEVEL_SHIFT),
             ("STELA_METAL_SAMPLER_NEVER", ResourceId::SAMPLER_NEVER),
             ("STELA_METAL_POOL_VIEW", ResourceId::POOL_VIEW),
+            ("STELA_METAL_SRGB_STORAGE", ResourceId::SRGB_STORAGE),
+            (
+                "STELA_METAL_FILTER_CLASS_SHIFT",
+                ResourceId::FILTER_CLASS_SHIFT,
+            ),
+            ("STELA_METAL_PLANES_SHIFT", ResourceId::PLANES_SHIFT),
+            ("STELA_METAL_SAMPLER_CUBIC", ResourceId::SAMPLER_CUBIC),
+            ("STELA_METAL_SAMPLER_MIPPED", ResourceId::SAMPLER_MIPPED),
+            ("STELA_METAL_SAMPLER_PIXELS", ResourceId::SAMPLER_PIXELS),
             (
                 "STELA_METAL_TABLE_BUFFER_ADDRESSES",
                 ArgumentTable::BUFFER_ADDRESSES_OFFSET,
@@ -1600,6 +1734,7 @@ mod tests {
             ("STELA_METAL_BLOCKS_PVRTC_2BPP", Codec::Pvrtc2),
             ("STELA_METAL_BLOCKS_ASTC", Codec::Astc),
             ("STELA_METAL_BLOCKS_ASTC_SRGB", Codec::AstcSrgb),
+            ("STELA_METAL_BLOCKS_ASTC_HDR", Codec::AstcHdr),
         ];
         assert_eq!(codecs.len(), expected.len());
         for (enumerator, codec) in expected {
@@ -1793,6 +1928,7 @@ mod tests {
         );
         table.fragment_tests = FragmentTests {
             state: [0x17, 0x2, 0x3],
+            references: 0x0201,
             range: [0.25f32.to_bits(), 1.0f32.to_bits()],
             depth: ResourceId::new(0, 5),
             stencil: ResourceId::new(0, 6),
@@ -1802,6 +1938,7 @@ mod tests {
             |offset: u32| u32::from_le_bytes(bytes[offset as usize..][..4].try_into().unwrap());
         assert_eq!(u32_at(ArgumentTable::DEPTH_STENCIL_OFFSET), 0x17);
         assert_eq!(u32_at(ArgumentTable::DEPTH_STENCIL_OFFSET + 8), 0x3);
+        assert_eq!(u32_at(ArgumentTable::DEPTH_STENCIL_OFFSET + 12), 0x0201);
         assert_eq!(u32_at(ArgumentTable::DEPTH_RANGE_OFFSET), 0.25f32.to_bits());
         assert_eq!(u32_at(ArgumentTable::DEPTH_COPIES_OFFSET + 12), 6);
     }
@@ -1995,12 +2132,33 @@ mod tests {
         assert_eq!((id.low(), id.high_index(), id.high_count()), (7, 9, 15));
         let sampler = ResourceId::new(3, 4);
         assert_eq!((sampler.high_index(), sampler.high_count()), (4, 1));
-        let never = ResourceId::sampler(3, 4, true);
-        assert_eq!((never.low(), never.sampler_integer()), (3, 4));
-        assert_eq!(ResourceId::sampler(3, 4, false), sampler);
+        let flags = ResourceId::SAMPLER_NEVER
+            | ResourceId::SAMPLER_CUBIC
+            | ResourceId::SAMPLER_MIPPED
+            | ResourceId::SAMPLER_PIXELS;
+        let flagged = ResourceId::sampler(3, 4, flags);
+        assert_eq!((flagged.low(), flagged.sampler_integer()), (3, 4));
+        assert_eq!(ResourceId::sampler(3, 4, 0), sampler);
         assert_eq!(ResourceId::MAX_LEVELS, 16);
         let deepest = ResourceId::texture(7, 9, ResourceId::MAX_LEVELS);
         assert_eq!(deepest.high() & ResourceId::POOL_VIEW, 0);
+        // The sRGB storage flag leaves the index and count.
+        let srgb = id.with_srgb_storage(true);
+        assert_eq!(
+            (srgb.low(), srgb.high_index(), srgb.high_count()),
+            (7, 9, 15)
+        );
+        assert_ne!(srgb.high() & ResourceId::SRGB_STORAGE, 0);
+        assert_eq!(id.with_srgb_storage(false), id);
+        // So does the filter class, which a later class replaces.
+        let nearest = srgb.with_filter_class(FilterClass::Nearest);
+        assert_eq!(
+            (nearest.low(), nearest.high_index(), nearest.high_count()),
+            (7, 9, 15)
+        );
+        assert_eq!(nearest.high() >> ResourceId::FILTER_CLASS_SHIFT & 3, 3);
+        assert_ne!(nearest.high() & ResourceId::SRGB_STORAGE, 0);
+        assert_eq!(nearest.with_filter_class(FilterClass::Float), srgb);
     }
 
     #[test]

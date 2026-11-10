@@ -1,7 +1,7 @@
 //! Render, mesh and compute pipelines, their function handles and visible
 //! function tables.
 use super::{
-    Call, GuestMemory, Object, Service, boolean, known,
+    Call, GuestMemory, Object, Service, boolean, decode, decode_bits,
     resources::pixel_format,
     wire::{
         self, AttributeRecord, ColorAttachmentRecord, ComputePipelineResponse, Empty, Fault,
@@ -31,6 +31,7 @@ use crate::metal::{
     },
     pixel_format::PixelFormat,
     shader::{Compiler, Stage},
+    timing::Timed,
     vertex::{
         Attribute, Layout, StageInLayout, StageInStep, StageInputDescriptor, StepFunction,
         VertexDescriptor, VertexFormat,
@@ -42,6 +43,7 @@ use core::num::NonZeroU64;
 
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn new_render_pipeline(&mut self, call: &mut Call) -> Result<(), Fault> {
+        self.device.timing().begin(Timed::NewRenderPipeline);
         let request: NewRenderPipelineRequest = call.request()?;
         let flags = flags(request.flags)?;
         let connection = call.connection;
@@ -54,8 +56,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 .then(|| vertex_descriptor(&request.vertex_descriptor))
                 .transpose()?,
             targets: render_targets(&request.targets)?,
-            input_primitive_topology: known(
-                PrimitiveTopologyClass::from_raw(request.input_primitive_topology),
+            input_primitive_topology: decode(
+                PrimitiveTopologyClass::from_raw,
+                request.input_primitive_topology,
                 "primitive topology class",
             )?,
             max_vertex_amplification_count: request.max_vertex_amplification_count,
@@ -386,14 +389,15 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 .into_iter()
                 .map(|handle| self.object::<LibraryId>(connection, handle))
                 .collect::<Result<_, _>>()?,
-            max_call_stack_depth: u32::try_from(record.max_call_stack_depth)
-                .map_err(|_| Fault::malformed("call stack depth"))?,
+            max_call_stack_depth: u32::try_from(record.max_call_stack_depth).map_err(|_| {
+                Fault::malformed("call stack depth").value(record.max_call_stack_depth)
+            })?,
         })
     }
 }
 
 fn flags(raw: u64) -> Result<PipelineFlags, Fault> {
-    known(PipelineFlags::from_bits(raw), "pipeline flags")
+    decode_bits(PipelineFlags::from_bits, raw, "pipeline flags")
 }
 
 /// A pixel format, none for zero.
@@ -410,7 +414,7 @@ pub(super) fn render_stage(raw: u64) -> Result<Stage, Fault> {
         4 => Err(Fault::new(Status::Unsupported, "tile functions")),
         8 => Ok(Stage::Object),
         16 => Ok(Stage::Mesh),
-        _ => Err(Fault::malformed("render stage")),
+        _ => Err(Fault::malformed("render stage").bits(raw)),
     }
 }
 
@@ -435,8 +439,8 @@ fn render_targets(record: &RenderTargetsRecord) -> Result<RenderTargets, Fault> 
 }
 
 fn color_attachment(record: &ColorAttachmentRecord) -> Result<ColorAttachmentDescriptor, Fault> {
-    let factor = |raw| known(BlendFactor::from_raw(raw), "blend factor");
-    let operation = |raw| known(BlendOperation::from_raw(raw), "blend operation");
+    let factor = |raw| decode(BlendFactor::from_raw, raw, "blend factor");
+    let operation = |raw| decode(BlendOperation::from_raw, raw, "blend operation");
     Ok(ColorAttachmentDescriptor {
         pixel_format: optional_format(record.pixel_format)?,
         blending_enabled: boolean(record.blending_enabled)?,
@@ -446,8 +450,9 @@ fn color_attachment(record: &ColorAttachmentRecord) -> Result<ColorAttachmentDes
         source_alpha_blend_factor: factor(record.source_alpha_blend_factor)?,
         destination_alpha_blend_factor: factor(record.destination_alpha_blend_factor)?,
         alpha_blend_operation: operation(record.alpha_blend_operation)?,
-        write_mask: known(
-            ColorWriteMask::from_bits(record.write_mask),
+        write_mask: decode_bits(
+            ColorWriteMask::from_bits,
+            record.write_mask,
             "color write mask",
         )?,
     })
@@ -455,25 +460,29 @@ fn color_attachment(record: &ColorAttachmentRecord) -> Result<ColorAttachmentDes
 
 fn tessellation(record: &TessellationRecord) -> Result<TessellationDescriptor, Fault> {
     Ok(TessellationDescriptor {
-        partition_mode: known(
-            TessellationPartitionMode::from_raw(record.partition_mode),
+        partition_mode: decode(
+            TessellationPartitionMode::from_raw,
+            record.partition_mode,
             "tessellation partition mode",
         )?,
         max_tessellation_factor: record.max_tessellation_factor,
         factor_scale_enabled: boolean(record.factor_scale_enabled)?,
-        factor_format: known(
-            TessellationFactorFormat::from_raw(record.factor_format),
+        factor_format: decode(
+            TessellationFactorFormat::from_raw,
+            record.factor_format,
             "tessellation factor format",
         )?,
-        control_point_index_type: known(
-            TessellationControlPointIndexType::from_raw(record.control_point_index_type),
+        control_point_index_type: decode(
+            TessellationControlPointIndexType::from_raw,
+            record.control_point_index_type,
             "control point index type",
         )?,
-        factor_step_function: known(
-            TessellationFactorStepFunction::from_raw(record.factor_step_function),
+        factor_step_function: decode(
+            TessellationFactorStepFunction::from_raw,
+            record.factor_step_function,
             "tessellation factor step function",
         )?,
-        output_winding_order: known(Winding::from_raw(record.output_winding_order), "winding")?,
+        output_winding_order: decode(Winding::from_raw, record.output_winding_order, "winding")?,
     })
 }
 
@@ -489,10 +498,10 @@ fn attributes(records: &[AttributeRecord; 31]) -> Result<(Vec<Attribute>, Vec<u3
         let buffer_index = u32::try_from(record.buffer_index)
             .ok()
             .filter(|&buffer| buffer < 31)
-            .ok_or(Fault::malformed("attribute buffer index"))?;
+            .ok_or(Fault::malformed("attribute buffer index").value(record.buffer_index))?;
         attributes.push(Attribute {
             index,
-            format: known(VertexFormat::from_raw(record.format), "vertex format")?,
+            format: decode(VertexFormat::from_raw, record.format, "vertex format")?,
             offset: record.offset,
             buffer_index,
         });
@@ -517,7 +526,7 @@ fn vertex_descriptor(record: &wire::VertexDescriptorRecord) -> Result<VertexDesc
             Ok(Layout {
                 buffer_index,
                 stride,
-                step_function: known(StepFunction::from_raw(step_function), "step function")?,
+                step_function: decode(StepFunction::from_raw, step_function, "step function")?,
                 step_rate,
             })
         })
@@ -538,8 +547,9 @@ fn stage_input(request: &NewComputePipelineRequest) -> Result<StageInputDescript
             Ok(StageInLayout {
                 buffer_index,
                 stride: layout.stride,
-                step_function: known(
-                    StageInStep::from_raw(layout.step_function),
+                step_function: decode(
+                    StageInStep::from_raw,
+                    layout.step_function,
                     "stage-in step function",
                 )?,
                 step_rate: layout.step_rate,
@@ -549,8 +559,8 @@ fn stage_input(request: &NewComputePipelineRequest) -> Result<StageInputDescript
     Ok(StageInputDescriptor {
         attributes,
         layouts,
-        index_type: known(IndexType::from_raw(record.index_type), "index type")?,
+        index_type: decode(IndexType::from_raw, record.index_type, "index type")?,
         index_buffer_index: u32::try_from(record.index_buffer_index)
-            .map_err(|_| Fault::malformed("index buffer index"))?,
+            .map_err(|_| Fault::malformed("index buffer index").value(record.index_buffer_index))?,
     })
 }

@@ -19,14 +19,17 @@ use crate::metal::{
     library::{self, Function, Header, Library},
     pipeline::{
         self, ComputePipelineDescriptor, MeshRenderPipelineDescriptor, RenderPipelineDescriptor,
-        RenderTargets, StageThreads, TessellatedVertex, TessellationDescriptor, TileTarget,
+        RenderPipelinePlan, RenderTargets, StageThreads, TessellatedVertex, TessellationDescriptor,
+        TileTarget,
     },
     reflection::Binding,
     shader::{
-        CompiledShader, Compiler, Interface, LinkedFunction, Linking, PreparedFunction, Reflection,
-        Specialization, Stage, Tessellation, TessellationStages, Varying,
+        CompiledShader, Compiler, DYNAMIC_BICUBIC, Interface, LinkedFunction, Linking,
+        PreparedFunction, Reflection, Specialization, Stage, Tessellation, TessellationStages,
+        Varying,
     },
     stitching::StitchedGraph,
+    timing::{Detail, Name, Phase, Timed},
     vertex::{self, StageInputDescriptor, VertexDescriptor},
     vulkan::{
         ShaderStages,
@@ -155,6 +158,9 @@ struct FunctionObject {
     library: LibraryId,
     prepared: PreparedFunction,
     users: Users,
+    /// Its process has made bicubic samplers
+    /// ([`Specialization::bicubic`]).
+    bicubic: bool,
 }
 
 impl FunctionObject {
@@ -259,6 +265,11 @@ struct RenderObject {
     fragment: Option<ShaderCode>,
     mesh: Option<MeshFunctions>,
     variants: Vec<(MeshShape, Pipeline)>,
+    /// A vertex pipeline's request, which its bicubic variants compile.
+    request: Option<RenderPipelineRequest>,
+    /// Variants whose vertex and fragment stages filter the samplers at
+    /// these indices bicubically ([`RenderPipelineState::bicubic`]).
+    bicubic: Vec<([u32; 2], Pipeline)>,
 }
 
 /// The object and mesh functions of a mesh pipeline, which its variants
@@ -556,11 +567,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             });
             libraries.push(function.library);
         }
-        let sources: Vec<_> = stitched
-            .iter()
-            .map(|function| (function.library, function.entry.as_str()))
-            .collect();
-        let air = self.compiler.stitch(&sources, graphs)?;
+        let air = self.compiler.stitch(&stitched, graphs)?;
         // A stitched function's own stitched functions link with it.
         for id in &libraries {
             let below = &self.pipelines.libraries.get(id.0)?.stitched;
@@ -867,9 +874,29 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             library,
             prepared,
             users: Users::CREATED,
+            bicubic: false,
         };
         self.keep(kept)?;
         Ok(FunctionId(self.pipelines.functions.insert(function)))
+    }
+
+    /// Lets the samplers `id` takes as arguments filter bicubically, as its
+    /// process now makes bicubic samplers: the pipelines made from it next
+    /// carry bicubic filtering for them, and for the samplers bound to their
+    /// mesh draws and GPU-encoded commands, which run no variants.
+    pub fn admit_bicubic(&mut self, id: FunctionId) -> Result<()> {
+        self.pipelines.functions.get_mut(id.0)?.bicubic = true;
+        Ok(())
+    }
+
+    /// Reports once that a process made its first bicubic sampler after
+    /// pipelines, which filter it linearly where they run no variants.
+    pub fn bicubic_after_pipelines(&mut self) {
+        self.unsupported(
+            "bicubic samplers taken as arguments, or bound to mesh draws or GPU-encoded \
+             commands, through pipelines made before their process's first one, \
+             which filter them linearly",
+        );
     }
 
     /// The interface of a function that becomes a pipeline stage.
@@ -1017,9 +1044,29 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         specialization: Specialization,
     ) -> Result<CompiledShader> {
         let stage = self.pipelines.interface(id)?.stage;
+        let start = self.timing.now();
         let specialization = self.specialize(id, specialization)?;
-        let function = &self.pipelines.functions.get(id.0)?.prepared;
-        let compiled = self.compiler.compile_prepared(function, &specialization)?;
+        let start = self.timing.since(Phase::PipelineSpecialize, start);
+        let function = self.pipelines.functions.get(id.0)?;
+        let specialization = Specialization {
+            bicubic_arguments: function.bicubic,
+            ..specialization
+        };
+        let compiled = self
+            .compiler
+            .compile_prepared(&function.prepared, &specialization);
+        let phase = match stage {
+            Stage::Fragment => Phase::PipelineFragment,
+            _ => Phase::PipelineVertex,
+        };
+        // A variant a commit's replay needs compiles inside the commit.
+        let phase = if self.timing.timing(Timed::Commit) {
+            Phase::CommitCompile
+        } else {
+            phase
+        };
+        self.timing.since(phase, start);
+        let compiled = compiled?;
         if compiled.interface.stage != stage {
             self.compiler.release(compiled.code);
             return Err(Error::Invalid("the compiler changed the function's stage"));
@@ -1037,11 +1084,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .pipelines
             .interface(id)
             .map(|interface| (interface.stage, interface.patch))?;
+        let start = self.timing.now();
         let specialization = self.specialize(id, specialization)?;
-        let function = &self.pipelines.functions.get(id.0)?.prepared;
-        let stages =
-            self.compiler
-                .compile_prepared_tessellation(function, &specialization, tessellation)?;
+        let start = self.timing.since(Phase::PipelineSpecialize, start);
+        let function = self.pipelines.functions.get(id.0)?;
+        let specialization = Specialization {
+            bicubic_arguments: function.bicubic,
+            ..specialization
+        };
+        let stages = self.compiler.compile_prepared_tessellation(
+            &function.prepared,
+            &specialization,
+            tessellation,
+        );
+        self.timing.since(Phase::PipelineVertex, start);
+        let stages = stages?;
         let interface = &stages.evaluation.interface;
         if (interface.stage, interface.patch) != expected {
             for code in [stages.vertex, stages.control, stages.evaluation.code] {
@@ -1052,12 +1109,25 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(stages)
     }
 
+    /// The device's compiler, for the platform's service to configure.
+    pub fn compiler_mut(&mut self) -> &mut C {
+        &mut self.compiler
+    }
+
     /// `newRenderPipelineStateWithDescriptor:`. A post-tessellation vertex
     /// function compiles with the stages that feed it.
     pub fn new_render_pipeline(
         &mut self,
         request: &RenderPipelineRequest,
     ) -> Result<RenderPipelineId> {
+        if self.timing.timing(Timed::NewRenderPipeline) {
+            let entry = |id| Name::new(self.function_entry(id).unwrap_or("?"));
+            let detail = Detail::Pipeline {
+                vertex: entry(request.vertex_function),
+                fragment: request.fragment_function.map(entry),
+            };
+            self.timing.detail(Timed::NewRenderPipeline, detail);
+        }
         let kept = Kept::new(
             [request.vertex_function]
                 .into_iter()
@@ -1072,6 +1142,80 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let sources = self.pipelines.sources(&request.archives)?;
         let vertex_linked = self.link(&request.vertex_linked_functions, true)?;
         let fragment_linked = self.link(&request.fragment_linked_functions, true)?;
+        let linkings = [&vertex_linked.linking, &fragment_linked.linking];
+        let generated = self.backend.physical_device().limits.generated_commands;
+        let indirect_bindable = request.support_indirect_command_buffers && generated.is_some();
+        // GPU-encoded commands bind no variants: the pipeline reads each
+        // sampler's filter once its process has bicubic samplers.
+        let bicubic = if indirect_bindable {
+            [
+                self.dynamic_bicubic(Some(request.vertex_function))?,
+                self.dynamic_bicubic(request.fragment_function)?,
+            ]
+        } else {
+            [0; 2]
+        };
+        let (vulkan, plan, interfaces) =
+            self.create_render(request, linkings, &sources, bicubic, indirect_bindable)?;
+        self.tests_fragments |= plan.tests_fragments;
+        let indirect = if plan.info.indirect_bindable {
+            match self.add_indirect_render(&plan, &interfaces, vulkan) {
+                Ok(indirect) => Some(indirect),
+                Err(error) => {
+                    self.defer(Object::Pipeline(vulkan));
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        self.keep(&kept)?;
+        let index = self.pipelines.render.insert(RenderObject {
+            kept,
+            state: RenderPipelineState {
+                id: 0,
+                pipeline: Some(vulkan),
+                plan,
+                interfaces,
+                indirect,
+                bicubic,
+            },
+            linked: alloc::vec![
+                (Stage::Vertex, vertex_linked),
+                (Stage::Fragment, fragment_linked)
+            ],
+            sources: Sources::default(),
+            fragment: None,
+            mesh: None,
+            variants: Vec::new(),
+            request: Some(request.clone()),
+            bicubic: Vec::new(),
+        });
+        self.pipelines.render.get_mut(index)?.state.id = u64::from(index);
+        Ok(RenderPipelineId(index))
+    }
+
+    /// [`Specialization::bicubic_samplers`] of a pipeline stage whose
+    /// commands bind no variants: every sampler, once the function's
+    /// process has made bicubic samplers.
+    fn dynamic_bicubic(&self, function: Option<FunctionId>) -> Result<u32> {
+        Ok(match function {
+            Some(id) if self.pipelines.functions.get(id.0)?.bicubic => DYNAMIC_BICUBIC,
+            _ => 0,
+        })
+    }
+
+    /// Compiles a vertex pipeline whose vertex and fragment functions filter
+    /// the samplers at `bicubic` bicubically. A post-tessellation vertex
+    /// function compiles with the stages that feed it.
+    fn create_render(
+        &mut self,
+        request: &RenderPipelineRequest,
+        [vertex_linking, fragment_linking]: [&Linking; 2],
+        sources: &Sources,
+        [vertex_bicubic, fragment_bicubic]: [u32; 2],
+        indirect_bindable: bool,
+    ) -> Result<(Pipeline, RenderPipelinePlan, Vec<Interface>)> {
         let pipelines = &self.pipelines;
         let function = pipelines.interface(request.vertex_function)?;
         let fragment_function = request
@@ -1085,6 +1229,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             })
             .transpose()?
             .unwrap_or_default();
+        let self_tests = storage_attachments.iter().any(Option::is_some)
+            && fragment_function
+                .is_some_and(|fragment| !pipeline::tests_first(fragment, &request.targets));
         let tessellation = pipeline::tessellation(
             &self.capabilities,
             function,
@@ -1100,8 +1247,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let specialization = Specialization {
             amplified: request.max_vertex_amplification_count > 1,
             varyings: varyings.clone(),
-            linking: vertex_linked.linking.clone(),
+            linking: vertex_linking.clone(),
             vertex_words,
+            bicubic_samplers: vertex_bicubic,
             ..Specialization::default()
         };
         let (vertex, feeding) = match &tessellation {
@@ -1117,12 +1265,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         };
         let mut codes: Vec<ShaderCode> = feeding.into_iter().flatten().collect();
         codes.push(vertex.code);
+        let targets = &request.targets;
         let linked = Specialization {
             varyings,
-            linking: fragment_linked.linking.clone(),
+            linking: fragment_linking.clone(),
             storage_attachments,
-            samples: request.targets.raster_sample_count as u32,
-            extended_range: pipeline::extended_range_attachments(&request.targets),
+            samples: targets.raster_sample_count as u32,
+            extended_range: pipeline::extended_range_attachments(targets),
+            self_tests,
+            alpha_to_coverage: targets.alpha_to_coverage_enabled,
+            alpha_to_one: targets.alpha_to_one_enabled,
+            bicubic_samplers: fragment_bicubic,
             ..Specialization::default()
         };
         let fragment = match request.fragment_function {
@@ -1151,63 +1304,25 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 },
             ),
         };
-        let generated = self.backend.physical_device().limits.generated_commands;
         // The driver compiles the NIR into the pipeline, which outlives it.
+        let start = self.timing.now();
         let created =
             pipeline::render_pipeline(&self.capabilities, &descriptor).and_then(|mut plan| {
-                // Indirect commands draw without the copies' round trips.
-                require(
-                    !(plan.tests_fragments && request.support_indirect_command_buffers),
-                    "stencil feedback in indirect command buffers",
-                )?;
-                plan.info.indirect_bindable = request.support_indirect_command_buffers
-                    && plan.tessellation.is_none()
-                    && plan.amplification_count == 1
-                    && generated.is_some();
-                let pipeline = self.create_from(&sources, |backend, source| {
+                let start = self.timing.since(Phase::PipelinePlan, start);
+                plan.info.indirect_bindable = indirect_bindable;
+                let pipeline = self.create_from(sources, |backend, source| {
                     plan.info.source = source;
                     backend.create_graphics_pipeline(&plan.info)
-                })?;
-                Ok((pipeline, plan))
+                });
+                self.timing.since(Phase::PipelineCreate, start);
+                Ok((pipeline?, plan))
             });
         codes.iter().for_each(|code| self.compiler.release(*code));
         let (vulkan, plan) = created?;
-        self.tests_fragments |= plan.tests_fragments;
-        let interfaces: Vec<Interface> = core::iter::once(vertex.interface)
+        let interfaces = core::iter::once(vertex.interface)
             .chain(fragment.map(|shader| shader.interface))
             .collect();
-        let indirect = if plan.info.indirect_bindable {
-            match self.add_indirect_render(&plan, &interfaces, vulkan) {
-                Ok(indirect) => Some(indirect),
-                Err(error) => {
-                    self.defer(Object::Pipeline(vulkan));
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
-        self.keep(&kept)?;
-        let index = self.pipelines.render.insert(RenderObject {
-            kept,
-            state: RenderPipelineState {
-                id: 0,
-                pipeline: Some(vulkan),
-                plan,
-                interfaces,
-                indirect,
-            },
-            linked: alloc::vec![
-                (Stage::Vertex, vertex_linked),
-                (Stage::Fragment, fragment_linked)
-            ],
-            sources: Sources::default(),
-            fragment: None,
-            mesh: None,
-            variants: Vec::new(),
-        });
-        self.pipelines.render.get_mut(index)?.state.id = u64::from(index);
-        Ok(RenderPipelineId(index))
+        Ok((vulkan, plan, interfaces))
     }
 
     /// `newRenderPipelineStateWithMeshDescriptor:`; object and mesh stages
@@ -1254,14 +1369,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             })
             .transpose()?
             .unwrap_or_default();
+        let self_tests = storage_attachments.iter().any(Option::is_some)
+            && fragment_function
+                .is_some_and(|fragment| !pipeline::tests_first(fragment, &request.targets));
         let fragment = match request.fragment_function {
             Some(id) => {
+                let targets = &request.targets;
                 let specialization = Specialization {
                     varyings: varyings.clone(),
                     linking: linked[2].1.linking.clone(),
                     storage_attachments,
-                    samples: request.targets.raster_sample_count as u32,
-                    extended_range: pipeline::extended_range_attachments(&request.targets),
+                    samples: targets.raster_sample_count as u32,
+                    extended_range: pipeline::extended_range_attachments(targets),
+                    self_tests,
+                    alpha_to_coverage: targets.alpha_to_coverage_enabled,
+                    alpha_to_one: targets.alpha_to_one_enabled,
+                    // Mesh draws bind no bicubic variants.
+                    bicubic_samplers: self.dynamic_bicubic(Some(id))?,
                     ..Specialization::default()
                 };
                 Some(self.compile(id, specialization)?)
@@ -1309,6 +1433,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 plan,
                 interfaces,
                 indirect: None,
+                bicubic: [0; 2],
             },
             linked,
             sources: sources.clone(),
@@ -1319,6 +1444,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 varyings,
             }),
             variants: Vec::new(),
+            request: None,
+            bicubic: Vec::new(),
         });
         let id = RenderPipelineId(index);
         let render = self.pipelines.render.get_mut(index)?;
@@ -1337,6 +1464,46 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     pub fn render_pipeline_state(&self, id: RenderPipelineId) -> Result<&RenderPipelineState> {
         Ok(&self.pipelines.render.get(id.0)?.state)
+    }
+
+    /// The vertex pipeline whose vertex and fragment stages filter the
+    /// samplers at `bicubic` bicubically, for draws binding bicubic samplers
+    /// there; compiled on first use.
+    pub(super) fn render_variant(&mut self, id: u64, bicubic: [u32; 2]) -> Result<Pipeline> {
+        let index = u32::try_from(id).map_err(|_| Error::Invalid("unknown pipeline"))?;
+        let render = self.pipelines.render.get(index)?;
+        if bicubic == render.state.bicubic
+            && let Some(pipeline) = render.state.pipeline
+        {
+            return Ok(pipeline);
+        }
+        if let Some((_, pipeline)) = render.bicubic.iter().find(|(known, _)| *known == bicubic) {
+            return Ok(*pipeline);
+        }
+        let request = render
+            .request
+            .clone()
+            .ok_or(Error::Invalid("not a vertex pipeline"))?;
+        let linking = |stage| {
+            render
+                .linked(stage)
+                .map(|linked| linked.linking.clone())
+                .unwrap_or_default()
+        };
+        let linkings = [linking(Stage::Vertex), linking(Stage::Fragment)];
+        let (pipeline, _, _) = self.create_render(
+            &request,
+            [&linkings[0], &linkings[1]],
+            &Sources::default(),
+            bicubic,
+            false,
+        )?;
+        self.pipelines
+            .render
+            .get_mut(index)?
+            .bicubic
+            .push((bicubic, pipeline));
+        Ok(pipeline)
     }
 
     /// The mesh pipeline for one draw's threadgroup sizes.
@@ -1402,6 +1569,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 launched_by_grid: stage == Stage::Object || object.is_none(),
                 linking,
                 threadgroup_lengths,
+                bicubic_samplers: self.dynamic_bicubic(Some(function))?,
                 ..Specialization::default()
             };
             match self.compile(function, specialization) {
@@ -1447,7 +1615,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             (_, pipeline) => pipeline,
         };
         let variants = render.variants.into_iter().map(|(_, pipeline)| pipeline);
-        for pipeline in pipeline.into_iter().chain(variants) {
+        let bicubic = render.bicubic.into_iter().map(|(_, pipeline)| pipeline);
+        for pipeline in pipeline.into_iter().chain(variants).chain(bicubic) {
             self.defer(Object::Pipeline(pipeline));
         }
         if let Some(code) = render.fragment {
@@ -1544,6 +1713,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             self.defer(Object::Pipeline(pipeline));
         }
         let indirect = if request.support_indirect_command_buffers && bindable {
+            // GPU-encoded dispatches bind no variants.
+            let variant = Specialization {
+                bicubic_samplers: self.dynamic_bicubic(Some(function))?,
+                ..variant
+            };
             let pipeline =
                 self.create_compute_variant(function, subgroups, variant, true, &sources)?;
             match self.add_indirect_compute(pipeline) {

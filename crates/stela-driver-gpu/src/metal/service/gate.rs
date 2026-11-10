@@ -24,11 +24,12 @@ struct Caller<'a>(&'a mut dyn CallerMemory);
 
 impl GuestMemory for Caller<'_> {
     fn read(&mut self, span: Span) -> Result<Vec<u8>, Fault> {
-        let length = usize::try_from(span.length).map_err(|_| Fault::malformed("span length"))?;
+        let length = usize::try_from(span.length)
+            .map_err(|_| Fault::malformed("span length").value(span.length))?;
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length)
-            .map_err(|_| Fault::new(Status::OutOfMemory, "out of memory"))?;
+        bytes.try_reserve_exact(length).map_err(|_| {
+            Fault::new(Status::OutOfMemory, "out of memory for a span of bytes").value(span.length)
+        })?;
         bytes.resize(length, 0);
         self.0.read(span.address, &mut bytes).map_err(fault)?;
         Ok(bytes)
@@ -44,7 +45,7 @@ impl GuestMemory for Caller<'_> {
             let address = span
                 .address
                 .checked_add((index * COMPARED_BYTES) as u64)
-                .ok_or(Fault::malformed("span address"))?;
+                .ok_or(Fault::malformed("span address").bits(span.address))?;
             let chunk = &mut chunk[..expected.len()];
             self.0.read(address, chunk).map_err(fault)?;
             if chunk != expected {
@@ -56,7 +57,7 @@ impl GuestMemory for Caller<'_> {
 
     fn write(&mut self, span: Span, bytes: &[u8]) -> Result<(), Fault> {
         if bytes.len() as u64 != span.length {
-            return Err(Fault::MALFORMED);
+            return Err(Fault::malformed("response span").length(span.length, bytes.len() as u64));
         }
         self.0.write(span.address, bytes).map_err(fault)
     }
@@ -64,10 +65,12 @@ impl GuestMemory for Caller<'_> {
 
 fn fault(error: CallerFault) -> Fault {
     match error {
-        CallerFault::Denied { .. } => {
-            Fault::new(Status::Unmapped, "a span the caller cannot access")
+        CallerFault::Denied { address } => {
+            Fault::new(Status::Unmapped, "a span the caller cannot access").bits(address)
         }
-        CallerFault::NotRam { .. } => Fault::malformed("a span that is not memory"),
+        CallerFault::NotRam { address } => {
+            Fault::malformed("a span that is not memory").bits(address)
+        }
         CallerFault::Unsupported(reason) => Fault::new(Status::Unsupported, reason),
     }
 }
@@ -89,32 +92,78 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let mut call: GateCall = wire::read(&raw).expect("a record of its own size");
         let mut caller = Caller(caller);
         let outcome = self.dispatch_gate(connection, &call, &mut caller);
-        if let Some(what) = self.device.take_unsupported() {
-            self.refused = Some(format!("{what}: unsupported, left undone"));
+        while let Some(what) = self.device.take_unsupported() {
+            self.refused.push(format!(
+                "{what}: unsupported, left undone, in operation {}",
+                call.operation
+            ));
         }
+        // The reason the caller reads names the raw value it refused too.
+        let detailed;
         let (status, reason) = match outcome {
-            Ok(()) => (Status::Ok, ""),
-            Err(fault) => {
-                // The frontend answers `Unmapped` by mapping the span and retrying.
-                if fault.status != Status::Unmapped {
-                    self.refused = Some(match self.device.take_refusal() {
-                        Some(refusal) => format!(
-                            "{} in {} at {}: {}",
-                            fault.reason, refusal.entry, refusal.instruction, refusal.detail
-                        ),
-                        None if fault.status == Status::DeviceLost && !self.loss_described => {
-                            self.loss_described = true;
-                            format!(
-                                "{} in operation {} running {}",
-                                fault.reason,
-                                call.operation,
-                                self.device.work_in_flight()
-                            )
-                        }
-                        None => format!("{} in operation {}", fault.reason, call.operation),
-                    });
+            Ok(()) => {
+                // A refusal the call recovered from, such as a form it then
+                // compiled another way, must not name a later failure.
+                if let Some(refusal) = self.device.take_refusal() {
+                    self.refused.push(format!(
+                        "operation {} succeeded after the compiler refused {} at {}: {}",
+                        call.operation, refusal.entry, refusal.instruction, refusal.detail
+                    ));
+                }
+                (Status::Ok, "")
+            }
+            // The frontend answers `Unmapped` by mapping the span and retrying.
+            Err(fault) if fault.status == Status::Unmapped => (fault.status, fault.reason),
+            // Metal's own nil answer is a note, not a refusal; a note the
+            // call made itself says more.
+            Err(fault) if fault.status == Status::Declined => {
+                if self.noted.is_none() {
+                    self.noted = Some(format!("{fault} in operation {}", call.operation));
                 }
                 (fault.status, fault.reason)
+            }
+            Err(fault) => {
+                self.refused.push(match self.device.take_refusal() {
+                    Some(refusal) => format!(
+                        "{fault} in operation {} in {} at {}: {}",
+                        call.operation, refusal.entry, refusal.instruction, refusal.detail
+                    ),
+                    None if fault.status == Status::DeviceLost && !self.loss_described => {
+                        self.loss_described = true;
+                        format!(
+                            "{fault} in operation {} running {}",
+                            call.operation,
+                            self.device.work_in_flight()
+                        )
+                    }
+                    // How much the device and the connection hold, which
+                    // says whether the memory ran out or the request is huge.
+                    None if fault.status == Status::OutOfMemory => {
+                        let device = self.device.memory();
+                        let [sampled, storage, samplers, uniform, texel] = device.descriptors;
+                        format!(
+                            "{fault} in operation {} with device allocated={}M deferred={}M \
+                             in_flight={} connection={}M descriptors sampled={sampled} \
+                             storage={storage} samplers={samplers} uniform_texel={uniform} \
+                             storage_texel={texel}",
+                            call.operation,
+                            device.allocated >> 20,
+                            device.deferred_bytes >> 20,
+                            device.in_flight,
+                            self.connections
+                                .get(&connection)
+                                .map_or(0, |held| held.allocated >> 20),
+                        )
+                    }
+                    None => format!("{fault} in operation {}", call.operation),
+                });
+                match fault.raw {
+                    Some(_) => {
+                        detailed = format!("{fault}");
+                        (fault.status, detailed.as_str())
+                    }
+                    None => (fault.status, fault.reason),
+                }
             }
         };
         self.served = (call.operation, status);
@@ -135,8 +184,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// Command buffers completed, or the device was lost, since this last
     /// answered true; either wakes the frontend's waiters.
     pub fn signaled(&mut self) -> bool {
+        // Any connection's work completing counts, in whatever order: held
+        // work of another delays no connection's waiters.
         let reached = match self.device.poll() {
-            Ok(completed) => completed,
+            Ok(_) => self.device.completions(),
             Err(_) => {
                 // A completion query that cannot be trusted must fail every
                 // waiter consistently, rather than merely waking it once.
@@ -155,8 +206,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         call: &GateCall,
         caller: &mut Caller,
     ) -> Result<(), Fault> {
-        if call.request.length > MAX_RECORD_BYTES || call.response.length > MAX_RECORD_BYTES {
-            return Err(Fault::malformed("record length"));
+        if call.request.length > MAX_RECORD_BYTES {
+            return Err(Fault::malformed("record length").value(call.request.length));
+        }
+        if call.response.length > MAX_RECORD_BYTES {
+            return Err(Fault::malformed("record length").value(call.response.length));
         }
         // Common records such as Commit and Poll fit on the service stack.
         // Keep independent copies even when the guest supplies aliased spans.
@@ -181,7 +235,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         };
         let outcome = self.call(connection.get(), call.operation, request, response, caller);
         if outcome.status != Status::Ok {
-            return Err(Fault::new(outcome.status, outcome.reason));
+            return Err(outcome.into());
         }
         caller.write(call.response, response)
     }

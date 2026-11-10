@@ -5,7 +5,7 @@ use crate::metal::{
     command_buffer::CommandBuffer,
     device::TextureId,
     service::{
-        Service, known,
+        Service, decode,
         wire::{
             Empty, Fault,
             commands::{
@@ -92,5 +92,5 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 }
 
 fn mapping_mode(raw: u64) -> Result<SparseTextureMappingMode, Fault> {
-    known(SparseTextureMappingMode::from_raw(raw), "mapping mode")
+    decode(SparseTextureMappingMode::from_raw, raw, "mapping mode")
 }

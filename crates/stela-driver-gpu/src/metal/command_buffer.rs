@@ -34,8 +34,8 @@ use alloc::{boxed::Box, sync::Arc, vec::Vec};
 pub mod blit;
 pub mod compute;
 pub mod counters;
+pub mod device_generated;
 pub mod fragment_tests;
-pub mod generated;
 pub mod indirect;
 pub mod render;
 pub mod resource_state;
@@ -85,6 +85,13 @@ pub struct RenderPipelineState {
     /// Its place in the execution sets when GPU-resident indirect commands
     /// can switch to it.
     pub indirect: Option<IndirectPipeline>,
+    /// The samplers its vertex and fragment stages filter bicubically, by
+    /// index ([`Specialization::bicubic_samplers`]): draws binding other
+    /// bicubic samplers there run a variant
+    /// ([`Resolver::bicubic_render_pipeline`]). Mesh pipelines' stages
+    /// filter every sampler bicubically once their process has bicubic
+    /// samplers.
+    pub bicubic: [u32; 2],
 }
 
 /// A compute pipeline state object; its Vulkan pipelines are variants.
@@ -135,6 +142,15 @@ pub trait Resolver: ChunkSource {
         object_lengths: &[(u32, u64)],
     ) -> Result<Pipeline>;
 
+    /// The variant of a vertex pipeline whose vertex and fragment stages
+    /// filter the samplers at `bicubic` bicubically
+    /// ([`RenderPipelineState::bicubic`]), compiled on first use.
+    fn bicubic_render_pipeline(
+        &mut self,
+        state: &RenderPipelineState,
+        bicubic: [u32; 2],
+    ) -> Result<Pipeline>;
+
     /// A reset query pool of `query_type` and its query count; pipeline
     /// statistics pools count [`counters::STATISTICS`].
     fn query_pool(&mut self, query_type: QueryType) -> Result<(QueryPool, u32)>;
@@ -153,7 +169,7 @@ pub trait Resolver: ChunkSource {
     ) -> Result<Arc<IndirectCommandBuffer>>;
 
     /// The live state classes of indirect-bindable render pipelines.
-    fn indirect_render_classes(&mut self) -> Vec<generated::IndirectRenderClass>;
+    fn indirect_render_classes(&mut self) -> Vec<device_generated::IndirectRenderClass>;
 
     /// The compute execution set and a live pipeline of it, while any
     /// indirect-bindable compute pipeline lives.
@@ -164,7 +180,7 @@ pub trait Resolver: ChunkSource {
     /// upload memory.
     fn generated_layout(
         &mut self,
-        key: &generated::GeneratedLayoutKey,
+        key: &device_generated::GeneratedLayoutKey,
         set: Option<ExecutionSet>,
         sequences: u32,
     ) -> Result<(IndirectCommandsLayout, Requirements)>;
@@ -255,9 +271,56 @@ pub struct Workload {
     pub conditional: u32,
     /// The device's own compute passes, which read counts the GPU wrote.
     pub internal: u32,
+    /// The direct dispatch with the most threads, which names what a lost
+    /// device was running.
+    pub widest: Option<DispatchShape>,
+}
+
+/// A direct dispatch: its threadgroups, threads per threadgroup and the
+/// first threadgroup memory lengths it bound, by slot.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DispatchShape {
+    pub threadgroups: [u32; 3],
+    pub threads: [u32; 3],
+    pub lengths: [(u32, u32); DispatchShape::LENGTHS],
+    pub length_count: u8,
+}
+
+impl DispatchShape {
+    pub const LENGTHS: usize = 8;
+
+    fn total(&self) -> u64 {
+        self.threadgroups
+            .iter()
+            .chain(&self.threads)
+            .map(|&size| u64::from(size))
+            .product()
+    }
+}
+
+impl core::fmt::Display for DispatchShape {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let [x, y, z] = self.threadgroups;
+        let [w, h, d] = self.threads;
+        write!(f, "{x}x{y}x{z} threadgroups of {w}x{h}x{d}")?;
+        for (slot, length) in &self.lengths[..usize::from(self.length_count)] {
+            write!(f, ", threadgroup {slot} {length} bytes")?;
+        }
+        Ok(())
+    }
 }
 
 impl Workload {
+    /// Keeps `shape` when it runs the most threads so far.
+    fn dispatched(&mut self, shape: DispatchShape) {
+        if self
+            .widest
+            .is_none_or(|widest| shape.total() > widest.total())
+        {
+            self.widest = Some(shape);
+        }
+    }
+
     /// Counts the commands of `segments` besides the draws already counted.
     fn count(mut self, segments: &[Segment]) -> Self {
         for command in segments.iter().flat_map(|segment| &segment.commands) {
@@ -273,6 +336,7 @@ impl Workload {
                 | Command::CopyImageToBuffer { .. }
                 | Command::CopyImage { .. }
                 | Command::BlitImage { .. }
+                | Command::ClearColorImage { .. }
                 | Command::FillBuffer { .. } => self.transfers += 1,
                 Command::CopyQueryResults { wait: true, .. } => self.waited_queries += 1,
                 Command::BeginConditionalRendering { .. } => self.conditional += 1,
@@ -511,6 +575,21 @@ impl Bindings {
         Ok(())
     }
 
+    /// The samplers `interface` samples through that `slot`'s table binds
+    /// with Metal's bicubic filter, by index.
+    fn bicubic_samplers(&self, slot: impl Into<Slot>, interface: &Interface) -> u32 {
+        let samplers = &self.tables[slot.into().index()].slots.samplers;
+        interface
+            .samplers
+            .iter()
+            .filter(|&&index| {
+                samplers
+                    .get(index as usize)
+                    .is_some_and(|sampler| sampler.high() & ResourceId::SAMPLER_CUBIC != 0)
+            })
+            .fold(0, |mask, &index| mask | 1 << index)
+    }
+
     /// Uploads changed tables of `stages` and pushes constants when they
     /// changed.
     fn flush(
@@ -567,6 +646,37 @@ fn buffer_slot(index: u32) -> Result<usize> {
         "buffer index exceeds the argument table",
     )?;
     Ok(index as usize)
+}
+
+/// `segments` with each one that waits for nothing joined to the one before
+/// it, whose signals move to its end: a submission of its own would leave
+/// the GPU idle while the next is submitted. A signal then comes later, past
+/// commands only, never past a wait that could depend on it. The joined
+/// segment's opening full barrier still orders its work after the signaled
+/// work. A semaphore signaled twice keeps its higher value.
+fn merge_unwaited(segments: Vec<Segment>) -> Vec<Segment> {
+    let mut merged: Vec<Segment> = Vec::with_capacity(segments.len());
+    for segment in segments {
+        let Some(last) = merged
+            .last_mut()
+            .filter(|_| segment.waits.is_empty() && segment.binds.is_empty())
+        else {
+            merged.push(segment);
+            continue;
+        };
+        last.commands.extend(segment.commands);
+        for (semaphore, value) in segment.signals {
+            match last
+                .signals
+                .iter_mut()
+                .find(|(signal, _)| *signal == semaphore)
+            {
+                Some((_, kept)) => *kept = (*kept).max(value),
+                None => last.signals.push((semaphore, value)),
+            }
+        }
+    }
+    merged
 }
 
 /// The command stream of a command buffer, independent of encoder state.
@@ -751,6 +861,19 @@ impl CommandBuffer {
         value: u64,
     ) -> Result<()> {
         self.idle()?;
+        // A value this command buffer signals earlier needs no wait: the
+        // signal ends its segment, and every later segment opens with a full
+        // barrier on the one queue, so later work already follows the
+        // signaled work. A wait would split the submission instead.
+        let signaled = self
+            .recorder
+            .segments
+            .iter()
+            .flat_map(|segment| &segment.signals)
+            .any(|&(signal, reached)| signal == event && reached >= value);
+        if signaled {
+            return Ok(());
+        }
         let current = self.recorder.segments.last().expect("a segment");
         // A segment holding only its opening barrier can take the wait.
         if current.commands.len() == 1 && current.signals.is_empty() {
@@ -781,6 +904,9 @@ impl CommandBuffer {
         last.signals.push(completion);
         // An empty trailing segment left by a final signal still carries the
         // completion signal; it orders after everything before it.
+        if self.recorder.mappings.is_empty() {
+            self.recorder.segments = merge_unwaited(core::mem::take(&mut self.recorder.segments));
+        }
         Ok(())
     }
 

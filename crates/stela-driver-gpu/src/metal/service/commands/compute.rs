@@ -5,7 +5,7 @@ use crate::metal::{
     command_buffer::CommandBuffer,
     device::ComputePipelineId,
     service::{
-        Service, boolean, known,
+        Service, boolean, decode, decode_bits,
         wire::{
             Fault,
             commands::{
@@ -32,7 +32,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         match code {
             ComputeCode::Begin => {
                 let BeginCompute { dispatch_type } = payload.record()?;
-                let dispatch_type = known(DispatchType::from_raw(dispatch_type), "dispatch type")?;
+                let dispatch_type = decode(DispatchType::from_raw, dispatch_type, "dispatch type")?;
                 commands.begin_compute(dispatch_type)?;
             }
             ComputeCode::SetPipeline => {
@@ -139,7 +139,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             ComputeCode::MemoryBarrier => {
                 let MemoryBarrier { scope } = payload.record()?;
-                let scope = known(BarrierScope::from_bits(scope), "barrier scope")?;
+                let scope = decode_bits(BarrierScope::from_bits, scope, "barrier scope")?;
                 commands.compute_memory_barrier(scope)?;
             }
             ComputeCode::SetStageInRegion => {

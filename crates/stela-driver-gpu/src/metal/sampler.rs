@@ -53,6 +53,13 @@ impl Default for SamplerDescriptor {
 }
 
 impl SamplerDescriptor {
+    /// Whether Metal filters 2D textures through this sampler bicubically,
+    /// as it does when either filter is bicubic.
+    pub fn bicubic(&self) -> bool {
+        self.min_filter == SamplerMinMagFilter::Bicubic
+            || self.mag_filter == SamplerMinMagFilter::Bicubic
+    }
+
     /// The sampler a constexpr sampler's state encodes: the first word of
     /// the `[2 x i64]` Apple's compiler emits for it into AIR, whose bits
     /// from the low end are three 3-bit address modes (s, t, r), 2-bit mag,
@@ -71,10 +78,7 @@ impl SamplerDescriptor {
             3 => Ok(SamplerAddressMode::MirrorRepeat),
             _ => Err(invalid),
         };
-        let filter = |shift| match field(shift, 2) {
-            2 => Err(Error::Unsupported("bicubic sampler filtering")),
-            raw => SamplerMinMagFilter::from_raw(raw).ok_or(invalid),
-        };
+        let filter = |shift| SamplerMinMagFilter::from_raw(field(shift, 2)).ok_or(invalid);
         let compare_function = match field(16, 4) {
             1 => CompareFunction::Less,
             2 => CompareFunction::LessEqual,
@@ -252,7 +256,9 @@ pub fn sampler(capabilities: &Capabilities, descriptor: &SamplerDescriptor) -> R
 const fn filter(filter: SamplerMinMagFilter) -> Filter {
     match filter {
         SamplerMinMagFilter::Nearest => Filter::Nearest,
-        SamplerMinMagFilter::Linear => Filter::Linear,
+        // Shaders filter 2D textures bicubically through texel-center taps,
+        // which a linear filter reads exactly (`ResourceId::SAMPLER_CUBIC`).
+        SamplerMinMagFilter::Linear | SamplerMinMagFilter::Bicubic => Filter::Linear,
     }
 }
 
@@ -472,10 +478,12 @@ mod tests {
             (false, CompareFunction::LessEqual, 1.0)
         );
         // filter::bicubic
+        let bicubic = SamplerDescriptor::from_constexpr(0x007b_ff00_0008_1449).unwrap();
         assert_eq!(
-            SamplerDescriptor::from_constexpr(0x007b_ff00_0008_1449),
-            Err(Error::Unsupported("bicubic sampler filtering"))
+            (bicubic.min_filter, bicubic.mag_filter),
+            (SamplerMinMagFilter::Bicubic, SamplerMinMagFilter::Bicubic)
         );
+        assert!(bicubic.bicubic());
         for reserved in [1 << 60, 0x007b_ff00_0000_0049, 0x007b_ff00_0008_004c] {
             assert!(matches!(
                 SamplerDescriptor::from_constexpr(reserved),

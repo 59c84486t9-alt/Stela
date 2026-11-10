@@ -318,6 +318,11 @@ impl<T> ObjectTable<T> {
         self.closed = true;
     }
 
+    /// The objects the table holds.
+    pub fn objects(&self) -> impl Iterator<Item = &T> {
+        self.slots.iter().filter_map(|slot| slot.value.as_ref())
+    }
+
     /// Consumes publication storage, transferring each remaining owner.
     /// The caller still owes each backend's real retirement/cleanup protocol.
     pub fn into_objects(self) -> impl Iterator<Item = T> {

@@ -7,7 +7,9 @@
 //! pipeline's dispatches carry the address of their stage-in region in the
 //! push constants' `arguments`, followed by the buffers' attribute strides
 //! when a stage-in layout's stride is dynamic.
-use super::{BoundPipeline, BufferRef, CommandBuffer, ComputePipelineState, Encoder, Resolver};
+use super::{
+    BoundPipeline, BufferRef, CommandBuffer, ComputePipelineState, DispatchShape, Encoder, Resolver,
+};
 use crate::metal::{
     abi::{BarrierScope, DispatchType},
     binding::{DispatchArguments, ResourceId},
@@ -15,7 +17,7 @@ use crate::metal::{
     error::{Error, Result, ensure},
     hazard::Use,
     pipeline::compute_variant,
-    shader::Stage,
+    shader::{Specialization, Stage},
     vertex::STRIDE_DYNAMIC,
     vulkan::{Access, PipelineBindPoint, PipelineStages, command::Command, object::Pipeline},
 };
@@ -212,15 +214,7 @@ impl CommandBuffer {
     /// imageblock of the kernels this encoder dispatches after it.
     pub fn set_imageblock_size(&mut self, width: u64, height: u64) -> Result<()> {
         let state = compute(&mut self.encoder)?;
-        let dimension = |size: u64| {
-            u32::try_from(size)
-                .ok()
-                .filter(|size| (1..=u32::from(u16::MAX)).contains(size))
-                .ok_or(Error::Invalid(
-                    "imageblock dimensions are 1 to 65535 pixels",
-                ))
-        };
-        state.imageblock_size = Some([dimension(width)?, dimension(height)?]);
+        state.imageblock_size = Some([imageblock_dimension(width)?, imageblock_dimension(height)?]);
         Ok(())
     }
 
@@ -233,6 +227,7 @@ impl CommandBuffer {
     ) -> Result<()> {
         self.prepare_dispatch(resolver, threads, [0; 3], false)?;
         if !threadgroups.contains(&0) {
+            self.note_dispatch(threadgroups, threads)?;
             self.recorder.push(Command::Dispatch(threadgroups));
         }
         Ok(())
@@ -256,8 +251,26 @@ impl CommandBuffer {
         let groups = [0, 1, 2].map(|axis| grid[axis].div_ceil(group[axis] as u32));
         self.prepare_dispatch(resolver, threads, grid, false)?;
         if !groups.contains(&0) {
+            self.note_dispatch(groups, threads)?;
             self.recorder.push(Command::Dispatch(groups));
         }
+        Ok(())
+    }
+
+    /// Records a direct dispatch's shape for a lost device's report.
+    fn note_dispatch(&mut self, threadgroups: [u32; 3], threads: Size) -> Result<()> {
+        let state = compute(&mut self.encoder)?;
+        let mut shape = DispatchShape {
+            threadgroups,
+            threads: [threads.width, threads.height, threads.depth]
+                .map(|size| u32::try_from(size).unwrap_or(u32::MAX)),
+            ..DispatchShape::default()
+        };
+        for (field, &(slot, length)) in shape.lengths.iter_mut().zip(&state.threadgroup_lengths) {
+            *field = (slot, u32::try_from(length).unwrap_or(u32::MAX));
+            shape.length_count += 1;
+        }
+        self.workload.dispatched(shape);
         Ok(())
     }
 
@@ -330,13 +343,18 @@ impl CommandBuffer {
             .pipeline
             .as_ref()
             .ok_or(Error::Invalid("no compute pipeline state is set"))?;
-        let specialization = compute_variant(
-            &pipeline.plan,
-            &pipeline.interface,
-            threads,
-            &state.threadgroup_lengths,
-            state.imageblock_size,
-        )?;
+        let specialization = Specialization {
+            bicubic_samplers: self
+                .bindings
+                .bicubic_samplers(Stage::Kernel, &pipeline.interface),
+            ..compute_variant(
+                &pipeline.plan,
+                &pipeline.interface,
+                threads,
+                &state.threadgroup_lengths,
+                state.imageblock_size,
+            )?
+        };
         let variant = resolver.compute_pipeline(pipeline, &specialization)?;
         let serial = state.dispatch_type == DispatchType::Serial;
         let writes = pipeline
@@ -416,4 +434,14 @@ impl CommandBuffer {
         self.bindings
             .flush(&mut self.recorder, resolver, &[Stage::Kernel])
     }
+}
+
+/// One of `setImageblockWidth:height:`'s dimensions.
+pub(crate) fn imageblock_dimension(size: u64) -> Result<u32> {
+    u32::try_from(size)
+        .ok()
+        .filter(|size| (1..=u32::from(u16::MAX)).contains(size))
+        .ok_or(Error::Invalid(
+            "imageblock dimensions are 1 to 65535 pixels",
+        ))
 }

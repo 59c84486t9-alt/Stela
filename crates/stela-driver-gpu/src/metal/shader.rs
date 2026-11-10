@@ -557,7 +557,32 @@ pub struct Specialization {
     /// is its pass's color attachments, which `storage_attachments` give
     /// the formats of, of `samples` per pixel.
     pub tile: bool,
+    /// A fragment function with `storage_attachments` that runs the
+    /// fragment tests itself, before it writes them, because its pipeline
+    /// cannot test fragments before it runs
+    /// ([`tests_first`](super::pipeline::tests_first)).
+    pub self_tests: bool,
+    /// A fragment function's pipeline's alpha to coverage and alpha to one,
+    /// which a function testing fragments itself and one writing storage
+    /// attachments apply themselves.
+    pub alpha_to_coverage: bool,
+    pub alpha_to_one: bool,
+    /// The function's process has made samplers with Metal's bicubic
+    /// filter, which the samplers it takes as arguments may then be: their
+    /// samples carry the shader's bicubic filtering. Constexpr samplers
+    /// decide for themselves.
+    pub bicubic_arguments: bool,
+    /// The samplers bound at these indices filter bicubically, bit n for
+    /// index n: samples through them carry the shader's bicubic filtering,
+    /// which reads each sampler's filter, and samples through the others
+    /// filter as their Vulkan samplers do. Draws and dispatches binding
+    /// bicubic samplers run variants with their bits
+    /// ([`DYNAMIC_BICUBIC`] for pipelines whose commands the GPU encodes).
+    pub bicubic_samplers: u32,
 }
+
+/// [`Specialization::bicubic_samplers`] of every sampler index.
+pub const DYNAMIC_BICUBIC: u32 = (1 << MAX_SAMPLER_BINDINGS) - 1;
 
 /// A color attachment a fragment function reads, which the function also
 /// writes in its fragment shader interlock section rather than through the
@@ -575,6 +600,11 @@ pub struct StorageAttachment {
     pub write_mask: u8,
     pub operations: [u8; 2],
     pub factors: [u8; 4],
+    /// A two-plane format's planes as shaders take them
+    /// (`enum stela_air_planes`): zero for one plane, else its second
+    /// plane's storage view follows its first's and the function converts
+    /// and writes both.
+    pub planes: u8,
 }
 
 /// What a pipeline stage links into its function (`MTLLinkedFunctions` and
@@ -700,9 +730,11 @@ pub trait Compiler {
     /// definitions other modules link against, which no entry list names.
     fn exports(&mut self, air: &[u8]) -> Result<Vec<String>>;
 
-    /// A module of `graphs`, whose calls index `sources`: a library and a
-    /// function of it. The calls stay declarations a pipeline links.
-    fn stitch(&mut self, sources: &[(u64, &str)], graphs: &[StitchedGraph]) -> Result<Vec<u8>>;
+    /// A module of `graphs`, whose calls index `sources`: a function of a
+    /// library with its function constant values. The calls stay
+    /// declarations a pipeline links, of a function with values by the name
+    /// of its specialization.
+    fn stitch(&mut self, sources: &[LinkedFunction], graphs: &[StitchedGraph]) -> Result<Vec<u8>>;
 
     /// The bytes [`add_library`](Self::add_library) kept.
     fn library_data(&self, library: u64) -> Result<&[u8]>;
@@ -749,6 +781,17 @@ pub trait Compiler {
     /// The detail of the last call this compiler refused, once.
     fn take_refusal(&mut self) -> Option<Refusal> {
         None
+    }
+
+    /// Compiles in the call from here on, rather than deferring a
+    /// compilation to run the call again: the call has changed what a
+    /// second run would change again.
+    fn stop_deferring(&mut self) {}
+
+    /// Whether the call deferred a compilation, so that it fails now and
+    /// runs again once the compilation is done.
+    fn deferred(&self) -> bool {
+        false
     }
 
     /// The bindings of `entry` of `library` specialized with

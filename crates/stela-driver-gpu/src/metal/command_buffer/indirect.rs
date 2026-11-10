@@ -62,6 +62,7 @@ struct SavedRender {
 struct SavedCompute {
     pipeline: Option<ComputePipelineState>,
     threadgroup_lengths: Vec<(u32, u64)>,
+    imageblock_size: Option<[u32; 2]>,
     stage_in: Option<StageInRegion>,
     attribute_strides: [Option<u32>; MAX_BUFFER_BINDINGS as usize],
     bindings: Bindings,
@@ -406,6 +407,7 @@ impl CommandBuffer {
         let saved = SavedCompute {
             pipeline: state.pipeline.clone(),
             threadgroup_lengths: state.threadgroup_lengths.clone(),
+            imageblock_size: state.imageblock_size,
             stage_in: state.stage_in,
             attribute_strides: state.attribute_strides,
             bindings: self.bindings.clone(),
@@ -423,6 +425,7 @@ impl CommandBuffer {
         let state = compute(&mut self.encoder)?;
         state.pipeline = saved.pipeline;
         state.threadgroup_lengths = saved.threadgroup_lengths;
+        state.imageblock_size = saved.imageblock_size;
         state.stage_in = saved.stage_in;
         state.attribute_strides = saved.attribute_strides;
         self.restore_bindings(saved.bindings);
@@ -473,7 +476,10 @@ impl CommandBuffer {
             }
             *buffers = Some(&command.buffers);
         }
-        compute(&mut self.encoder)?.threadgroup_lengths = command.threadgroup_lengths.clone();
+        let state = compute(&mut self.encoder)?;
+        state.threadgroup_lengths = command.threadgroup_lengths.clone();
+        // A command's imageblock is its own, as its threadgroup memory is.
+        state.imageblock_size = command.imageblock_size;
         if let Some((origin, size)) = command.stage_in {
             self.set_stage_in_region(origin, size)?;
         }

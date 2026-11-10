@@ -610,6 +610,7 @@ fn libraries_list_and_make_their_functions() {
         Err(Outcome {
             status: Status::Invalid,
             reason: "a function constant value of another type",
+            raw: None,
         })
     );
     let unknown = ConstantRecord {
@@ -641,6 +642,16 @@ fn libraries_list_and_make_their_functions() {
             memory
         )),
         Status::Malformed
+    );
+    // A name the library lacks is Metal's nil, which the service notes
+    // rather than refuses.
+    assert_eq!(
+        new_function(&mut service, connection, library, "missing", &[], memory),
+        Err(Outcome {
+            status: Status::Declined,
+            reason: "no function of that name",
+            raw: None,
+        })
     );
     // A function's handle names no library.
     let function = function.unwrap().handle;
@@ -747,8 +758,8 @@ fn a_report_reaches_the_platform_as_a_refusal_does() {
     )
     .unwrap();
     assert_eq!(
-        service.refused.take().as_deref(),
-        Some("newTextureWithDescriptor: is absent")
+        core::mem::take(&mut service.refused),
+        ["newTextureWithDescriptor: is absent"]
     );
 }
 

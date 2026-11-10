@@ -73,7 +73,7 @@ pub(super) fn argument_layout(call: &mut Call) -> Result<(), Fault> {
         .map(|record| {
             Ok(ArgumentDescriptor {
                 data_type: DataType::from_raw(record.data_type)
-                    .ok_or(Fault::malformed("argument data type"))?,
+                    .ok_or(Fault::malformed("argument data type").value(record.data_type))?,
                 index: record.index,
                 array_length: record.array_length,
                 constant_block_alignment: record.constant_block_alignment,

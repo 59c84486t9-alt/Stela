@@ -316,6 +316,8 @@ fn features(chip: &Chip) -> Features {
         vertex_input_dynamic_state: true,
         vertex_attribute_instance_rate_divisor: true,
         depth_clip_enable: true,
+        bresenham_lines: true,
+        rectangular_lines: true,
         image_view_min_lod: true,
         fragment_shader_barycentric: true,
         task_shader: true,
@@ -392,6 +394,8 @@ fn formats() -> FormatTable {
                 FormatSupport {
                     optimal,
                     linear: optimal.difference(F::STORAGE_IMAGE_ATOMIC),
+                    // NVK renders to and stores linear-modifier images.
+                    modifier_linear: optimal.difference(F::STORAGE_IMAGE_ATOMIC),
                     buffer: F::VERTEX_BUFFER | F::UNIFORM_TEXEL_BUFFER | F::STORAGE_TEXEL_BUFFER,
                     sample_counts: if renderable {
                         SAMPLE_COUNTS

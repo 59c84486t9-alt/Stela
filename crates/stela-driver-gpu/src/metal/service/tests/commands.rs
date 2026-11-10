@@ -1,25 +1,26 @@
 use super::{
-    Memory, Stream, call, commit, connect, new_buffer, new_function, new_library,
+    Memory, Stream, TestService, call, commit, connect, new_buffer, new_function, new_library,
     render_pipeline_request, service, status, submitted, texture,
 };
 use crate::metal::{
     abi::{
-        CompareFunction, CullMode, DispatchType, LoadAction, PrimitiveType, StencilOperation,
-        StorageMode, StoreAction, TextureUsage,
+        CompareFunction, CullMode, DispatchType, LoadAction, PrimitiveType, SamplerAddressMode,
+        SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter, SamplerReductionMode,
+        StencilOperation, StorageMode, StoreAction, TextureUsage,
     },
     service::wire::{
         self, ComputePipelineResponse, CounterSetCode, Empty, Handle, NewComputePipelineRequest,
-        NewCounterBufferRequest, Operation, RenderPipelineResponse, Status,
-        TextureDescriptorRecord, TextureResponse, Value,
+        NewCounterBufferRequest, Operation, RenderPipelineResponse, SamplerDescriptorRecord,
+        SamplerResponse, Status, TextureDescriptorRecord, TextureResponse, Value,
         commands::{
             BeginCompute, BeginRender, BlitCode, ColorStoreActionOptions, CommandBufferCode,
             ComputeCode, CopyBuffer, DepthStencilRecord, Dispatch, DrawPrimitives, FillBuffer,
             MappingRecord, Mode, PassAttachmentRecord, RenderCode, ResolveCounters, Resource,
-            ResourceStateCode, SampleCounters, SetBuffer, SetBytes, SetPipeline, StencilRecord,
-            UpdateMappings, ViewportRecord,
+            ResourceStateCode, SampleCounters, SetBuffer, SetBytes, SetPipeline, StageSampler,
+            StencilRecord, UpdateMappings, ViewportRecord,
         },
     },
-    vulkan::command::Command,
+    vulkan::{PipelineBindPoint, command::Command},
 };
 
 #[test]
@@ -348,6 +349,179 @@ fn render_passes_replay_their_state_and_draws() {
         status(commit(&mut service, connection, &stream)),
         Status::Malformed
     );
+}
+
+/// A render pass that draws through a linear sampler, then through a
+/// bicubic one, which needs a variant of its pipeline.
+fn bicubic_draws(service: &mut TestService, connection: core::num::NonZeroU64) -> Stream {
+    let memory = &mut Memory::default();
+    let library = new_library(service, connection, memory);
+    let mut function = |name| {
+        new_function(service, connection, library, name, &[], memory)
+            .unwrap()
+            .handle
+    };
+    let (vertex, fragment) = (function("vertex"), function("filtering"));
+    let pipeline: RenderPipelineResponse = call(
+        service,
+        connection,
+        Operation::NewRenderPipeline,
+        &render_pipeline_request(vertex, fragment),
+        memory,
+    )
+    .unwrap();
+    let target = TextureDescriptorRecord {
+        usage: TextureUsage::RENDER_TARGET.bits(),
+        ..texture(StorageMode::Private)
+    };
+    let target: TextureResponse =
+        call(service, connection, Operation::NewTexture, &target, memory).unwrap();
+    let mut sampler = |filter: SamplerMinMagFilter| {
+        let descriptor = SamplerDescriptorRecord {
+            min_filter: filter.raw(),
+            mag_filter: filter.raw(),
+            mip_filter: SamplerMipFilter::NotMipmapped.raw(),
+            max_anisotropy: 1,
+            address_modes: [SamplerAddressMode::ClampToEdge.raw(); 3],
+            border_color: SamplerBorderColor::TransparentBlack.raw(),
+            reduction_mode: SamplerReductionMode::WeightedAverage.raw(),
+            compare_function: CompareFunction::Never.raw(),
+            lod_min_clamp: 0.0,
+            lod_max_clamp: f32::MAX,
+            normalized_coordinates: 1,
+            reserved: 0,
+        };
+        let sampler: SamplerResponse = call(
+            service,
+            connection,
+            Operation::NewSampler,
+            &descriptor,
+            memory,
+        )
+        .unwrap();
+        sampler.handle
+    };
+    let (linear, bicubic) = (
+        sampler(SamplerMinMagFilter::Linear),
+        sampler(SamplerMinMagFilter::Bicubic),
+    );
+
+    let mut begin = BeginRender::default();
+    begin.color_attachments[0].attachment = PassAttachmentRecord {
+        texture: target.handle,
+        load_action: LoadAction::Clear.raw(),
+        store_action: StoreAction::Store.raw(),
+        ..Default::default()
+    };
+    let draw = DrawPrimitives {
+        primitive: PrimitiveType::Triangle.raw(),
+        vertex_start: 0,
+        vertex_count: 3,
+        instance_count: 1,
+        base_instance: 0,
+    };
+    let set_sampler = |sampler| StageSampler {
+        stage: 2,
+        sampler,
+        index: 1,
+        clamped: 0,
+        lod_min: 0.0,
+        lod_max: 0.0,
+        reserved: 0,
+    };
+    let mut stream = Stream::default();
+    stream
+        .push(RenderCode::Begin.raw(), &begin, &[])
+        .push(
+            RenderCode::SetPipeline.raw(),
+            &SetPipeline {
+                pipeline: pipeline.handle,
+            },
+            &[],
+        )
+        .push(RenderCode::SetSampler.raw(), &set_sampler(linear), &[])
+        .push(RenderCode::DrawPrimitives.raw(), &draw, &[])
+        .push(RenderCode::SetSampler.raw(), &set_sampler(bicubic), &[])
+        .push(RenderCode::DrawPrimitives.raw(), &draw, &[])
+        .end();
+    stream
+}
+
+#[test]
+fn draws_through_bicubic_samplers_run_a_cached_variant() {
+    let mut service = service();
+    let connection = connect(&mut service);
+    let stream = bicubic_draws(&mut service, connection);
+    let compiled = service.device().compiler_mut().compiled.len();
+    let bound = |service: &mut TestService| -> alloc::vec::Vec<_> {
+        submitted(service)
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::BindPipeline {
+                    bind_point: PipelineBindPoint::Graphics,
+                    pipeline,
+                } => Some(pipeline),
+                _ => None,
+            })
+            .collect()
+    };
+    for _ in 0..2 {
+        assert!(commit(&mut service, connection, &stream).is_ok());
+        let bound = bound(&mut service);
+        // The linear draw runs the pipeline, the bicubic one its variant.
+        assert_eq!(bound.len(), 2);
+        assert_ne!(bound[0], bound[1]);
+    }
+    // The variant compiled for the first commit, its fragment function
+    // filtering the sampler at index 1 bicubically.
+    let variant: alloc::vec::Vec<_> = service.device().compiler_mut().compiled[compiled..]
+        .iter()
+        .map(|specialization| specialization.bicubic_samplers)
+        .collect();
+    assert_eq!(variant, [0, 1 << 1]);
+}
+
+#[test]
+fn a_deferred_commit_signals_its_events_only_when_it_runs_again() {
+    use crate::metal::service::wire::commands::EventCommand;
+    let mut service = service();
+    let connection = connect(&mut service);
+    let event: Handle = call(
+        &mut service,
+        connection,
+        Operation::NewEvent,
+        &Empty {},
+        &mut Memory::default(),
+    )
+    .unwrap();
+    let mut stream = bicubic_draws(&mut service, connection);
+    let signal = EventCommand {
+        event: event.handle,
+        value: 7,
+    };
+    stream.push(CommandBufferCode::SignalEvent.raw(), &signal, &[]);
+    let submissions = |service: &mut TestService| service.device().backend().submissions.len();
+    let before = submissions(&mut service);
+    // The bicubic variant's compilation defers: the commit fails, to run
+    // again, and submits nothing, its signal included.
+    service.device().compiler_mut().defer_next = true;
+    assert!(commit(&mut service, connection, &stream).is_err());
+    assert_eq!(submissions(&mut service), before);
+    service.device().compiler_mut().deferred = false;
+    // Run again, it submits the draws and the signal after them, once.
+    assert!(commit(&mut service, connection, &stream).is_ok());
+    assert_eq!(submissions(&mut service), before + 1);
+    let signals: alloc::vec::Vec<_> = service
+        .device()
+        .backend()
+        .submissions
+        .last()
+        .unwrap()
+        .iter()
+        .flat_map(|segment| segment.signals.iter().map(|&(_, value)| value))
+        .filter(|&value| value == 7)
+        .collect();
+    assert_eq!(signals, [7]);
 }
 
 #[test]

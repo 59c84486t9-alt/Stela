@@ -1,12 +1,12 @@
 //! Libraries and their functions.
 use super::{
-    Call, Object, Service, known,
+    Call, Object, Service, decode,
     wire::{
         self, ArchiveDataRequest, AttributeInfo, ConstantInfo, ConstantRecord, Fault,
         FunctionReflectionRequest, FunctionReflectionResponse, LibraryDataRequest,
         LibraryFunctionNamesRequest, LibraryIdentityRequest, LibraryIdentityResponse,
         NewArchiveRequest, NewFunctionRequest, NewLibraryRequest, NewSourceLibraryRequest,
-        NewStitchedLibraryRequest, Span,
+        NewStitchedLibraryRequest, Span, Status,
     },
 };
 use crate::metal::{
@@ -15,6 +15,7 @@ use crate::metal::{
         ArchiveId, FunctionId, LibraryId,
         pipelines::{ARCHIVE_HEADER_BYTES, ConstantKey, ConstantValue},
     },
+    error::NO_FUNCTION,
     shader::{Compiler, PatchDomain, Reflection},
     stitching,
     vulkan::backend::Backend,
@@ -56,8 +57,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             .into_iter()
             .map(|handle| self.object::<LibraryId>(call.connection, handle))
             .collect::<Result<Vec<_>, Fault>>()?;
-        let rounding = known(
-            ConversionRounding::from_raw(request.conversion_rounding),
+        let rounding = decode(
+            ConversionRounding::from_raw,
+            request.conversion_rounding,
             "conversion rounding mode",
         )?;
         let library =
@@ -162,14 +164,23 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 };
                 Ok(ConstantValue {
                     key,
-                    data_type: DataType::from_raw(record.data_type)
-                        .ok_or(Fault::malformed("function constant data type"))?,
+                    data_type: DataType::from_raw(record.data_type).ok_or(
+                        Fault::malformed("function constant data type").value(record.data_type),
+                    )?,
                     value: memory.read(record.value)?,
                 })
             })
             .collect::<Result<Vec<_>, Fault>>()?;
         let values = (request.specialized != 0).then_some(values.as_slice());
-        let function = self.device.new_function(library, &name, values)?;
+        // A name the library lacks is Metal's nil answer, not a refusal:
+        // Core Image looks for its kernels library by library.
+        let function =
+            self.device
+                .new_function(library, &name, values)
+                .map_err(|error| match error {
+                    NO_FUNCTION => Fault::new(Status::Declined, "no function of that name"),
+                    error => error.into(),
+                })?;
         let handle = self.hold(call.connection, Object::Function(function))?;
         call.reply(&handle)
     }
@@ -245,8 +256,9 @@ pub(super) struct Names {
 impl Names {
     /// Adds `name`, returning its offset and length in the reflection.
     pub(super) fn add(&mut self, name: &str) -> Result<(u32, u32), Fault> {
-        let offset = u32::try_from(self.base + self.bytes.len())
-            .map_err(|_| Fault::malformed("reflection too large"))?;
+        let offset = u32::try_from(self.base + self.bytes.len()).map_err(|_| {
+            Fault::malformed("reflection too large").value((self.base + self.bytes.len()) as u64)
+        })?;
         self.bytes.extend_from_slice(name.as_bytes());
         Ok((offset, name.len() as u32))
     }

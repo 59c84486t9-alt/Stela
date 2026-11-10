@@ -7,10 +7,12 @@
 //! every pipeline uses. Shader code arrives as NIR the compiler built, which
 //! the backend hands to the driver's internal NIR entry instead of SPIR-V.
 //! Each method is one Vulkan call or a fixed sequence of them; failures map
-//! to [`Error::OutOfMemory`] or [`Error::DeviceLost`].
+//! to [`Error::OutOfMemory`], [`Error::DeviceLost`] or, for a result with no
+//! Metal answer, [`Error::Driver`] with its raw `VkResult`.
 //!
 //! [`Error::OutOfMemory`]: crate::metal::error::Error::OutOfMemory
 //! [`Error::DeviceLost`]: crate::metal::error::Error::DeviceLost
+//! [`Error::Driver`]: crate::metal::error::Error::Driver
 use super::{
     object::{
         Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, ExecutionSet,
@@ -42,6 +44,19 @@ pub struct BufferAllocation {
     pub address: u64,
     /// Bytes of memory allocated, for Metal's allocated-size reports.
     pub allocated: u64,
+}
+
+/// The memory blocks a backend places buffers and images in, and the
+/// resources in memory of their own.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MemoryBlocks {
+    pub blocks: usize,
+    pub block_bytes: u64,
+    /// Resources placed in blocks, and the bytes they take.
+    pub placed: usize,
+    pub placed_bytes: u64,
+    /// Buffers and images in memory of their own.
+    pub own: usize,
 }
 
 /// A descriptor written into the bindless heap.
@@ -97,6 +112,7 @@ pub trait Backend {
         ))
     }
 
+    /// Memory of its own, zeroed before the host or the GPU reaches it.
     fn allocate_memory(
         &mut self,
         size: u64,
@@ -105,7 +121,11 @@ pub trait Backend {
     ) -> Result<Memory>;
     fn buffer_requirements(&mut self, info: &BufferInfo) -> Result<Requirements>;
     fn image_requirements(&mut self, info: &ImageInfo) -> Result<Requirements>;
-    /// A buffer with dedicated memory, mapped when the request says so.
+    /// A buffer with memory the backend chooses, mapped when the request
+    /// says so: a place in a larger allocation, or memory of its own. The
+    /// memory starts at least at a 256-byte boundary, where a linear image
+    /// over the buffer can bind. All of it reads zero, as Metal's new
+    /// buffers do.
     fn create_buffer(
         &mut self,
         info: &BufferInfo,
@@ -125,6 +145,9 @@ pub trait Backend {
         memory: Memory,
         offset: u64,
     ) -> Result<(Buffer, u64)>;
+    /// An image with memory the backend chooses, as [`Self::create_buffer`]
+    /// does, its memory and the bytes it needs. Every subresource reads zero
+    /// until written.
     fn create_image(
         &mut self,
         info: &ImageInfo,
@@ -136,6 +159,11 @@ pub trait Backend {
         memory: Memory,
         offset: u64,
     ) -> Result<Image>;
+    /// Zeroes every subresource of `image`, which `info` created and an
+    /// earlier texture used, as [`Self::create_image`] zeroes a new one:
+    /// before the next submission's commands, unless they overwrite it
+    /// whole first. The earlier texture's work has completed.
+    fn clear_reused_image(&mut self, image: Image, info: &ImageInfo);
     /// A sparse-residency color image with no memory bound; segments bind
     /// its blocks.
     fn create_sparse_image(&mut self, info: &ImageInfo)
@@ -152,6 +180,10 @@ pub trait Backend {
     fn pipeline_cache_data(&mut self, cache: PipelineCache) -> Result<Vec<u8>>;
     fn create_query_pool(&mut self, info: &QueryPoolInfo) -> Result<QueryPool>;
     fn create_semaphore(&mut self, initial: u64) -> Result<Semaphore>;
+    /// A file descriptor of `semaphore` the platform can wait on outside the
+    /// device (a DRM syncobj), which it owns; `None` when the driver has
+    /// none to give, and completions are then found by polling.
+    fn export_semaphore(&mut self, semaphore: Semaphore) -> Option<i32>;
     /// `vkCreateIndirectCommandsLayoutEXT`; only with
     /// [`Limits::generated_commands`].
     ///
@@ -223,6 +255,25 @@ pub trait Backend {
 
     /// `vkGetCalibratedTimestampsKHR`: (host nanoseconds, GPU ticks).
     fn calibrated_timestamps(&mut self) -> Result<(u64, u64)>;
+
+    /// Gives the backend the platform's tick counter, which times the
+    /// phases of its own calls that [`Self::take_split`] answers.
+    fn set_clock(&mut self, _ticks: fn() -> u64) {}
+
+    /// The ticks spent since the last take in phases inside the backend's
+    /// own calls, each summed into its slot: [`Self::create_image`]'s image
+    /// creation, allocation and binding, and [`Self::submit`]'s reclaim,
+    /// recording and queue submission. Zeros for a backend that does not
+    /// time them; the device takes before and after the call it splits.
+    fn take_split(&mut self) -> [u64; 3] {
+        [0; 3]
+    }
+
+    /// The blocks [`Self::create_buffer`] and [`Self::create_image`] place
+    /// resources in; zeros for a backend that gives each its own memory.
+    fn memory_blocks(&self) -> MemoryBlocks {
+        MemoryBlocks::default()
+    }
 }
 
 /// A Vulkan feature or extension the Metal layer needs from every device.

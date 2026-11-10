@@ -34,7 +34,7 @@ use core::{
     num::{NonZeroU32, NonZeroU64},
     ops::Range,
 };
-use identity::{DeviceEpoch, ObjectHandle, ObjectTable};
+use identity::{DeviceEpoch, ObjectHandle, ObjectTable, TableError};
 use libraries::LibraryNames;
 pub use shared::{Served, ServiceHost, SharedService};
 use stela_contracts::gate::MemoryRange;
@@ -59,9 +59,24 @@ pub mod wire;
 /// Opens a new device for the GPU after a loss.
 pub type Reopen<B, C> = Box<dyn FnMut() -> Result<Device<B, C>, Error> + Send>;
 
-/// A decoded value, or the value's name when it is not one.
-fn known<T>(value: Option<T>, name: &'static str) -> Result<T, Fault> {
-    value.ok_or(Fault::malformed(name))
+/// The enumeration value `raw` decodes to, or a fault naming `name` and
+/// `raw` when it is not one.
+fn decode<R: Copy + Into<u64>, T>(
+    decode: impl FnOnce(R) -> Option<T>,
+    raw: R,
+    name: &'static str,
+) -> Result<T, Fault> {
+    decode(raw).ok_or_else(|| Fault::malformed(name).value(raw))
+}
+
+/// The option set `bits` decodes to, or a fault naming `name` and `bits`
+/// when they include a flag it does not name.
+fn decode_bits<R: Copy + Into<u64>, T>(
+    decode: impl FnOnce(R) -> Option<T>,
+    bits: R,
+    name: &'static str,
+) -> Result<T, Fault> {
+    decode(bits).ok_or_else(|| Fault::malformed(name).bits(bits))
 }
 
 /// `MTLRegion` of one slice and level.
@@ -77,10 +92,10 @@ fn region(record: &wire::RegionRecord) -> Region {
 /// `first..first + count` of an indirect command buffer's commands.
 fn command_range(first: u64, count: u64) -> Result<Range<usize>, Fault> {
     let index = |value| usize::try_from(value).map_err(|_| Fault::malformed("command range"));
-    let first = index(first)?;
+    let first = index(first).map_err(|fault| fault.value(first))?;
     let end = first
-        .checked_add(index(count)?)
-        .ok_or(Fault::malformed("command range"))?;
+        .checked_add(index(count).map_err(|fault| fault.value(count))?)
+        .ok_or(Fault::malformed("command range count").value(count))?;
     Ok(first..end)
 }
 
@@ -88,7 +103,7 @@ fn boolean(raw: u32) -> Result<bool, Fault> {
     match raw {
         0 => Ok(false),
         1 => Ok(true),
-        _ => Err(Fault::malformed("boolean")),
+        _ => Err(Fault::malformed("boolean").value(raw)),
     }
 }
 
@@ -177,6 +192,26 @@ struct Connection {
     /// Objects made so far, which orders them.
     made: u64,
     negotiated: bool,
+    /// It has made a sampler with Metal's bicubic filter, which the
+    /// samplers its functions take as arguments, and those its pipelines'
+    /// GPU-encoded commands and mesh draws bind, may then be.
+    bicubic: bool,
+}
+
+impl Connection {
+    /// The functions it holds, and whether it holds pipelines.
+    fn functions_and_pipelines(&self) -> (Vec<FunctionId>, bool) {
+        let mut functions = Vec::new();
+        let mut pipelines = false;
+        for entry in self.objects.objects() {
+            match entry.object {
+                Object::Function(function) => functions.push(function),
+                Object::RenderPipeline(_) | Object::ComputePipeline(_) => pipelines = true,
+                _ => {}
+            }
+        }
+        (functions, pipelines)
+    }
 }
 
 /// What a service holds at one moment.
@@ -194,11 +229,13 @@ pub struct ConnectionMemory {
     pub allocated: u64,
 }
 
-/// How a call ended: its status and, unless it succeeded, why.
+/// How a call ended: its status and, unless it succeeded, why and the raw
+/// value it refused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Outcome {
     pub status: Status,
     pub reason: &'static str,
+    pub raw: Option<wire::Raw>,
 }
 
 impl From<Result<(), Fault>> for Outcome {
@@ -207,11 +244,23 @@ impl From<Result<(), Fault>> for Outcome {
             Ok(()) => Self {
                 status: Status::Ok,
                 reason: "",
+                raw: None,
             },
             Err(fault) => Self {
                 status: fault.status,
                 reason: fault.reason,
+                raw: fault.raw,
             },
+        }
+    }
+}
+
+impl From<Outcome> for Fault {
+    fn from(outcome: Outcome) -> Self {
+        Self {
+            status: outcome.status,
+            reason: outcome.reason,
+            raw: outcome.raw,
         }
     }
 }
@@ -267,8 +316,9 @@ pub struct Service<B: Backend, C: Compiler> {
     /// The completed serial the gate last signaled; `u64::MAX` once it
     /// signaled the device's loss.
     signaled: u64,
-    /// Why the last call was refused, for the platform's log.
-    refused: Option<String>,
+    /// Why the last call was refused, and what it left undone, for the
+    /// platform's log.
+    refused: Vec<String>,
     /// What the last call made, for the platform's log: a render pipeline's
     /// stages and vertex fetch.
     noted: Option<String>,
@@ -292,7 +342,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             next_connection: NonZeroU64::MIN,
             shares: sharing::Shares::default(),
             signaled: 0,
-            refused: None,
+            refused: Vec::new(),
             noted: None,
             asked_alignment: 0,
             served: (0, Status::Ok),
@@ -327,6 +377,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 made: 0,
                 allocated: 0,
                 negotiated: false,
+                bicubic: false,
             },
         );
         Ok(id)
@@ -336,6 +387,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// device keeps what in-flight work uses until that work completes.
     pub fn disconnect(&mut self, connection: NonZeroU64) -> Result<(), Fault> {
         let mut closed = self.connections.remove(&connection).ok_or(Fault::CLOSED)?;
+        // Its held work never runs, so nothing it names outlives the close.
+        self.device.abandon(connection.get());
         closed.objects.close();
         let mut entries: Vec<Entry> = closed.objects.into_objects().collect();
         entries.sort_unstable_by_key(|entry| core::cmp::Reverse(entry.made));
@@ -363,14 +416,17 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         };
         match reopen() {
             Ok(device) => {
+                let clock = self.device.clock();
                 self.device = device;
+                self.device.set_clock(clock);
                 self.epoch = epoch;
                 self.shares = sharing::Shares::default();
                 self.signaled = 0;
                 self.loss_described = false;
             }
             Err(error) => {
-                self.refused = Some(format!("the lost device did not reopen: {error:?}"));
+                self.refused
+                    .push(format!("the lost device did not reopen: {error:?}"));
             }
         }
     }
@@ -476,10 +532,15 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             .filter(|id| self.connections.contains_key(id))
             .ok_or(Fault::CLOSED)?;
         let operation = Operation::from_raw(operation)
-            .ok_or(Fault::new(Status::UnknownOperation, "unknown operation"))?;
+            .ok_or(Fault::new(Status::UnknownOperation, "unknown operation").value(operation))?;
         let (request_bytes, response_bytes) = operation.sizes();
-        if request.len() != request_bytes || response.len() != response_bytes {
-            return Err(Fault::MALFORMED);
+        if request.len() != request_bytes {
+            return Err(Fault::malformed("request record")
+                .length(request.len() as u64, request_bytes as u64));
+        }
+        if response.len() != response_bytes {
+            return Err(Fault::malformed("response record")
+                .length(response.len() as u64, response_bytes as u64));
         }
         if !self.connections[&connection].negotiated && operation != Operation::Negotiate {
             return Err(Fault::new(
@@ -511,7 +572,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Operation::Report => {
                 let request: wire::ReportRequest = call.request()?;
                 let text = call.memory.read(request.text)?;
-                self.refused = Some(String::from_utf8_lossy(&text).into_owned());
+                self.refused
+                    .push(String::from_utf8_lossy(&text).into_owned());
                 call.reply(&wire::Empty {})
             }
             Operation::NewLibrary => self.new_library(&mut call),
@@ -579,7 +641,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 call.reply(&wire::Value { value: allocated })
             }
             Operation::Poll => {
-                let value = self.device.poll()?;
+                self.device.poll()?;
+                let value = self.device.reached_for(call.connection.get());
                 call.reply(&wire::Value { value })
             }
             Operation::Commit => self.commit(&mut call),
@@ -598,7 +661,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     fn negotiate(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NegotiateRequest = call.request()?;
         if request.major != wire::MAJOR {
-            return Err(Fault::new(Status::Unsupported, "protocol major version"));
+            return Err(
+                Fault::new(Status::Unsupported, "protocol major version").value(request.major)
+            );
         }
         self.connection(call.connection)?.negotiated = true;
         call.reply(&NegotiateResponse {
@@ -633,6 +698,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// Gives the connection a handle to a new object, releasing the object
     /// again if the connection cannot hold it.
     fn hold(&mut self, connection: NonZeroU64, object: Object) -> Result<Handle, Fault> {
+        if let Object::Function(function) = object
+            && self.connection(connection)?.bicubic
+        {
+            self.device.admit_bicubic(function)?;
+        }
         let epoch = self.epoch;
         let bytes = self.bytes(object);
         let held = self.connection(connection).and_then(|held| {
@@ -648,7 +718,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             let handle = held
                 .objects
                 .insert(connection, epoch, entry)
-                .map_err(|refused| Fault::from(refused.error))?;
+                .map_err(|refused| match refused.error {
+                    // The table's limit, which the connection reached.
+                    TableError::Full => Fault::from(refused.error).value(MAX_OBJECTS.get()),
+                    error => Fault::from(error),
+                })?;
             held.allocated += bytes;
             Ok(handle)
         });
@@ -662,6 +736,25 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 Err(fault)
             }
         }
+    }
+
+    /// Lets the connection's functions take bicubic samplers as arguments,
+    /// after its first: its later pipelines filter them bicubically. Draws
+    /// and dispatches binding bicubic samplers run variants of any pipeline.
+    fn admit_bicubic(&mut self, connection: NonZeroU64) -> Result<(), Fault> {
+        let held = self.connection(connection)?;
+        if held.bicubic {
+            return Ok(());
+        }
+        held.bicubic = true;
+        let (functions, pipelines) = held.functions_and_pipelines();
+        for function in functions {
+            self.device.admit_bicubic(function)?;
+        }
+        if pipelines {
+            self.device.bicubic_after_pipelines();
+        }
+        Ok(())
     }
 
     /// The object `handle` names.

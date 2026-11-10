@@ -247,3 +247,258 @@ fn each_connection_counts_the_allocations_it_holds() {
         .collect();
     assert_eq!(counts, [(first, 0, 0), (second, 1, shared)]);
 }
+
+#[test]
+fn a_command_buffer_that_fails_still_signals_its_events() {
+    use crate::metal::{
+        abi::DispatchType,
+        service::wire::commands::{
+            BeginCompute, CommandBufferCode, ComputeCode, EventCommand, SetPipeline,
+        },
+    };
+    let mut service = service_on(MockBackend::new());
+    let connection = connect(&mut service);
+    let event: Handle = call(
+        &mut service,
+        connection,
+        Operation::NewEvent,
+        &Empty {},
+        &mut Memory::default(),
+    )
+    .unwrap();
+    let signal = EventCommand {
+        event: event.handle,
+        value: 9,
+    };
+    let begin = BeginCompute {
+        dispatch_type: DispatchType::Serial.raw(),
+    };
+    let mut stream = Stream::default();
+    stream
+        .push(CommandBufferCode::SignalEvent.raw(), &signal, &[])
+        .push(ComputeCode::Begin.raw(), &begin, &[])
+        .push(
+            ComputeCode::SetPipeline.raw(),
+            &SetPipeline { pipeline: 999 },
+            &[],
+        )
+        .end();
+    // The unknown pipeline fails the command buffer, but its event is still
+    // signaled: work waiting for it would otherwise never run.
+    assert!(commit(&mut service, connection, &stream).is_err());
+    let submitted = service.device().backend().submissions.last().unwrap();
+    assert!(
+        submitted
+            .iter()
+            .flat_map(|segment| &segment.signals)
+            .any(|&(_, value)| value == 9)
+    );
+    assert!(submitted.iter().all(|segment| {
+        segment
+            .commands
+            .iter()
+            .all(|command| !matches!(command, crate::metal::vulkan::command::Command::Dispatch(_)))
+    }));
+}
+
+/// What `connection` sees complete.
+fn reached(service: &mut TestService, connection: NonZeroU64) -> u64 {
+    let response: Value = call(
+        service,
+        connection,
+        Operation::Poll,
+        &Empty {},
+        &mut Memory::default(),
+    )
+    .unwrap();
+    response.value
+}
+
+#[test]
+fn an_event_that_never_comes_holds_only_its_own_connection() {
+    use crate::metal::service::wire::commands::{CommandBufferCode, EventCommand};
+    let mut service = service_on(MockBackend::new());
+    let waiting = connect(&mut service);
+    let other = connect(&mut service);
+    let event: Handle = call(
+        &mut service,
+        waiting,
+        Operation::NewEvent,
+        &Empty {},
+        &mut Memory::default(),
+    )
+    .unwrap();
+    let wait = EventCommand {
+        event: event.handle,
+        value: 1,
+    };
+    let mut stream = Stream::default();
+    stream.push(CommandBufferCode::WaitForEvent.raw(), &wait, &[]);
+    let held = commit(&mut service, waiting, &stream).unwrap().value;
+    // Its connection's next command buffer waits behind it, as Metal's
+    // queue order requires; the other connection's work does not.
+    let behind = commit(&mut service, waiting, &Stream::default())
+        .unwrap()
+        .value;
+    let mut last = 0;
+    for _ in 0..3 {
+        last = commit(&mut service, other, &Stream::default())
+            .unwrap()
+            .value;
+        service.device().backend().finish();
+        assert_eq!(reached(&mut service, other), last);
+    }
+    assert_eq!(reached(&mut service, waiting), held - 1);
+    // No submission waits on a value nothing promised: the driver would
+    // hold the whole queue there.
+    assert!(service.device().backend().unpromised.is_empty());
+
+    // The CPU's signal releases the held work; it completes after later
+    // serials did, on the late timeline.
+    call::<_, Empty>(
+        &mut service,
+        waiting,
+        Operation::SetEventSignaledValue,
+        &EventValueRequest {
+            event: event.handle,
+            value: 1,
+        },
+        &mut Memory::default(),
+    )
+    .unwrap();
+    assert_eq!(reached(&mut service, waiting), held - 1);
+    service.device().backend().finish();
+    assert_eq!(reached(&mut service, waiting), last);
+    assert!(behind > held);
+    assert!(service.device().backend().unpromised.is_empty());
+    assert!(!service.device().holds());
+}
+
+#[test]
+fn a_refused_command_buffer_waiting_on_an_event_holds_only_its_connection() {
+    use crate::metal::{
+        abi::DispatchType,
+        service::wire::commands::{
+            BeginCompute, CommandBufferCode, ComputeCode, EventCommand, SetPipeline,
+        },
+    };
+    let mut service = service_on(MockBackend::new());
+    let refused = connect(&mut service);
+    let other = connect(&mut service);
+    let new_event = |service: &mut TestService| -> Handle {
+        call(
+            service,
+            refused,
+            Operation::NewEvent,
+            &Empty {},
+            &mut Memory::default(),
+        )
+        .unwrap()
+    };
+    let (waited, signaled) = (new_event(&mut service), new_event(&mut service));
+    let mut stream = Stream::default();
+    stream
+        .push(
+            CommandBufferCode::WaitForEvent.raw(),
+            &EventCommand {
+                event: waited.handle,
+                value: 3,
+            },
+            &[],
+        )
+        .push(
+            ComputeCode::Begin.raw(),
+            &BeginCompute {
+                dispatch_type: DispatchType::Serial.raw(),
+            },
+            &[],
+        )
+        .push(
+            ComputeCode::SetPipeline.raw(),
+            &SetPipeline { pipeline: 999 },
+            &[],
+        )
+        .end()
+        .push(
+            CommandBufferCode::SignalEvent.raw(),
+            &EventCommand {
+                event: signaled.handle,
+                value: 4,
+            },
+            &[],
+        );
+    // Refused mid-stream with its events pending.
+    assert!(commit(&mut service, refused, &stream).is_err());
+    let last = commit(&mut service, other, &Stream::default())
+        .unwrap()
+        .value;
+    service.device().backend().finish();
+    assert_eq!(reached(&mut service, other), last);
+    assert!(service.device().backend().unpromised.is_empty());
+    // Once its wait is met, it signals what it promised.
+    call::<_, Empty>(
+        &mut service,
+        refused,
+        Operation::SetEventSignaledValue,
+        &EventValueRequest {
+            event: waited.handle,
+            value: 3,
+        },
+        &mut Memory::default(),
+    )
+    .unwrap();
+    reached(&mut service, refused);
+    service.device().backend().finish();
+    assert_eq!(
+        value(
+            &mut service,
+            refused,
+            Operation::EventSignaledValue,
+            signaled.handle
+        ),
+        4
+    );
+    assert_eq!(
+        reached(&mut service, refused),
+        service.device().submitted_serial()
+    );
+}
+
+#[test]
+fn a_closed_connection_drops_its_held_work() {
+    use crate::metal::service::wire::commands::{CommandBufferCode, EventCommand};
+    let mut service = service_on(MockBackend::new());
+    let waiting = connect(&mut service);
+    let other = connect(&mut service);
+    let event: Handle = call(
+        &mut service,
+        waiting,
+        Operation::NewEvent,
+        &Empty {},
+        &mut Memory::default(),
+    )
+    .unwrap();
+    let mut stream = Stream::default();
+    stream.push(
+        CommandBufferCode::WaitForEvent.raw(),
+        &EventCommand {
+            event: event.handle,
+            value: 1,
+        },
+        &[],
+    );
+    commit(&mut service, waiting, &stream).unwrap();
+    let submissions = service.device().backend().submissions.len();
+    service.disconnect(waiting).unwrap();
+    let last = commit(&mut service, other, &Stream::default())
+        .unwrap()
+        .value;
+    service.device().backend().finish();
+    assert_eq!(reached(&mut service, other), last);
+    // Only the other connection's command buffer reached the queue.
+    assert_eq!(
+        service.device().backend().submissions.len(),
+        submissions + 1
+    );
+    assert!(!service.device().holds());
+}

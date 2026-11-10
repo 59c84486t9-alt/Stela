@@ -17,6 +17,7 @@ use crate::metal::{
     error::{Error, Result, ensure},
     hazard::{RENDER_PASS, Use},
     pipeline::{TileTarget, tile_variant},
+    shader::Specialization,
     vulkan::{Access, PipelineBindPoint, PipelineStages, command::Command},
 };
 use alloc::vec::Vec;
@@ -151,7 +152,10 @@ impl CommandBuffer {
             state.interface.imageblock_bytes <= tile.imageblock_sample_length,
             "the tile function's imageblock exceeds the pass's imageblockSampleLength",
         )?;
-        let specialization = tile_variant(&state.plan, &target, threads, tile.size)?;
+        let specialization = Specialization {
+            bicubic_samplers: self.bindings.bicubic_samplers(Slot::Tile, &state.interface),
+            ..tile_variant(&state.plan, &target, threads, tile.size)?
+        };
         // Each threadgroup buffer the function uses lies in the tile's
         // threadgroup memory.
         let mut offsets = [0u32; MAX_BUFFER_BINDINGS as usize];
@@ -200,6 +204,11 @@ impl CommandBuffer {
             None => 0,
         };
         let pipeline = resolver.compute_pipeline(&state, &specialization)?;
+        // The tile function accesses its attachments as storage.
+        let accessed = (0..target.attachments.len())
+            .filter(|&index| target.attachments[index].is_some())
+            .fold(0u32, |mask, index| mask | 1 << index);
+        self.place_color_copies(resolver, accessed)?;
 
         let mut words = [0u32; DispatchArguments::BYTES as usize / 4];
         let at = DispatchArguments::SHAPE_OFFSET as usize / 4;

@@ -258,6 +258,9 @@ pub struct IndirectCommand {
     pub raster: RasterState,
     /// `setStageInRegion:` origin and size.
     pub stage_in: Option<([u64; 3], [u64; 3])>,
+    /// `setImageblockWidth:height:`, a kernel's explicit imageblock's
+    /// dimensions, 0 x 0 without them as on Apple GPUs.
+    pub imageblock_size: Option<[u32; 2]>,
     /// Earlier commands' memory accesses complete before this one's.
     pub barrier: bool,
     pub action: Option<IndirectAction>,
@@ -921,6 +924,18 @@ impl IndirectComputeCommand<'_> {
                 lengths.push((index, length));
                 Ok(())
             })
+    }
+
+    /// `setImageblockWidth:height:`.
+    pub fn set_imageblock_size(&mut self, width: u64, height: u64) -> Result<()> {
+        let size = [
+            crate::metal::command_buffer::compute::imageblock_dimension(width)?,
+            crate::metal::command_buffer::compute::imageblock_dimension(height)?,
+        ];
+        self.target.edit(Field::ImageblockSize, |command| {
+            command.imageblock_size = Some(size);
+            Ok(())
+        })
     }
 
     /// `setStageInRegion:`.

@@ -15,9 +15,10 @@ use crate::metal::{
             AUTOMATIC, BufferRangeRequest, BufferResponse, Empty, FormatAlignmentsResponse, Handle,
             HeapBufferSizeRequest, HeapDescriptorRecord, HeapUsageRequest, HeapUsageResponse,
             NewBufferRequest, NewHeapBufferRequest, NewImportedBufferRequest,
-            NewTextureViewRequest, Operation, PixelFormatRequest, RegionRecord,
+            NewTextureViewRequest, Operation, PixelFormatRequest, Raw, RegionRecord,
             SamplerDescriptorRecord, SamplerResponse, SizeAndAlignRecord, SparseTileRequest,
-            SparseTileResponse, Status, TextureBytesRequest, TextureResponse,
+            SparseTileResponse, Status, TextureBytesRequest, TextureDescriptorRecord,
+            TextureResponse,
         },
     },
 };
@@ -73,6 +74,7 @@ fn buffers_answer_their_addresses() {
         Err(Outcome {
             status: Status::Malformed,
             reason: "resource options",
+            raw: Some(crate::metal::service::wire::Raw::Bits(1 << 20)),
         })
     );
     let modified = BufferRangeRequest {
@@ -91,6 +93,7 @@ fn buffers_answer_their_addresses() {
         Err(Outcome {
             status: Status::Invalid,
             reason: "didModifyRange: is for managed buffers",
+            raw: None,
         })
     );
 }
@@ -206,6 +209,7 @@ fn textures_trade_regions_with_guest_memory() {
         Err(Outcome {
             status: Status::Invalid,
             reason: "the bytes end before the region",
+            raw: None,
         }),
         "refused before any band moves"
     );
@@ -456,4 +460,107 @@ fn imported_memory_retires_once_the_gpu_is_done_with_it() {
     assert_eq!(release(&mut service, connection, memory.get()), Status::Ok);
     assert_eq!(service.retired(), Some(token));
     assert_eq!(service.retired(), None);
+}
+
+#[test]
+fn an_unknown_pixel_format_names_its_raw_value() {
+    let mut service = super::service();
+    let connection = connect(&mut service);
+    let unknown = TextureDescriptorRecord {
+        pixel_format: 9999,
+        ..texture(StorageMode::Private)
+    };
+    assert_eq!(
+        call::<_, TextureResponse>(
+            &mut service,
+            connection,
+            Operation::NewTexture,
+            &unknown,
+            &mut Memory::default(),
+        ),
+        Err(Outcome {
+            status: Status::Malformed,
+            reason: "pixel format",
+            raw: Some(Raw::Value(9999)),
+        })
+    );
+}
+
+/// A clock that moves one tick each time it is read.
+fn stepping_clock() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    NOW.fetch_add(1, Ordering::Relaxed)
+}
+
+#[test]
+fn timed_calls_answer_their_phases_once() {
+    use crate::metal::timing::{Detail, Timed};
+    let mut backend = MockBackend::new();
+    backend.physical.as_mut().unwrap().features.host_image_copy = false;
+    let mut service = service_on(backend);
+    service.device().set_clock(stepping_clock);
+    let connection = connect(&mut service);
+    assert_eq!(
+        service.device().take_phases(),
+        None,
+        "negotiation is not timed"
+    );
+    let memory = &mut Memory::default();
+    let texture: TextureResponse = call(
+        &mut service,
+        connection,
+        Operation::NewTexture,
+        &texture(StorageMode::Managed),
+        memory,
+    )
+    .unwrap();
+    let phases = service.device().take_phases().expect("a timed texture");
+    assert_eq!(phases.operation, Timed::NewTexture);
+    assert!(phases.total > 0);
+    // Plan, recycle, the image, views, descriptors and the CPU copy each
+    // read the clock at least once.
+    let timed = phases.phases.iter().filter(|&&ticks| ticks != 0).count();
+    assert!(timed >= 5, "{phases:?}");
+    let Detail::Texture {
+        format, recycled, ..
+    } = phases.detail
+    else {
+        panic!("{phases:?}");
+    };
+    assert_eq!(format, PixelFormat::Rgba8Unorm);
+    assert!(!recycled);
+    assert_eq!(service.device().take_phases(), None);
+
+    let read = TextureBytesRequest {
+        texture: texture.handle,
+        region: RegionRecord {
+            slice: 0,
+            level: 0,
+            origin: [0, 0, 0],
+            size: [2, 2, 1],
+        },
+        bytes: memory.put(&[0; 16]),
+        bytes_per_row: 8,
+        bytes_per_image: 0,
+    };
+    call::<_, Empty>(&mut service, connection, Operation::GetBytes, &read, memory).unwrap();
+    let phases = service.device().take_phases().expect("a timed read");
+    assert_eq!(phases.operation, Timed::GetBytes);
+    let [read_span, copy, _, unpack, write] = phases.phases[..5] else {
+        unreachable!()
+    };
+    assert!(
+        read_span > 0 && copy > 0 && unpack > 0 && write > 0,
+        "{phases:?}"
+    );
+    assert!(matches!(
+        phases.detail,
+        Detail::Bytes {
+            rows: 2,
+            bands: 1,
+            bytes: 16,
+            ..
+        }
+    ));
 }

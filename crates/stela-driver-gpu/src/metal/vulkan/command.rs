@@ -305,6 +305,12 @@ pub enum Command {
         regions: Vec<ImageBlit>,
         filter: Filter,
     },
+    /// `vkCmdClearColorImage` of a color image's first level and layer,
+    /// in the general layout, with a value of the image format's kind.
+    ClearColorImage {
+        image: Image,
+        value: ClearValue,
+    },
     /// `vkCmdFillBuffer`: offset and size are multiples of four.
     FillBuffer {
         buffer: Buffer,

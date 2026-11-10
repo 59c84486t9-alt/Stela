@@ -160,6 +160,33 @@ raw_enum! {
         Depth32FloatStencil8 = 260,
         X32Stencil8 = 261,
         X24Stencil8 = 262,
+        /// Apple's private two-plane YCbCr formats of IOSurfaces: luma in
+        /// the first plane's byte, Cb and Cr in the second's two, which
+        /// holds one texel per 2 x 2, 2 x 1 or 1 x 1 of the first. Shaders
+        /// read them as RGB through full-range BT.601, which Apple GPUs use
+        /// for full-range surfaces such as '444f'; video-range ones such
+        /// as '420v' they convert in video range.
+        Ycbcr8_420_2p = 500,
+        Ycbcr8_422_2p = 502,
+        Ycbcr8_444_2p = 503,
+        /// Their 10-bit twins ('x420' and its kin): each component is the
+        /// high 10 bits of a 16-bit word. Apple GPUs convert YCbCr in the
+        /// range the surface's pixel format names, full for '444f' and
+        /// video for 'x420', rounded to 1/2048.
+        Ycbcr10_420_2p = 505,
+        Ycbcr10_422_2p = 506,
+        Ycbcr10_444_2p = 507,
+        /// Apple's private two-plane RGB formats of IOSurfaces: green in
+        /// the first plane's byte, blue and red in the second's two, which
+        /// holds one texel per 2 x 2, 2 x 1 or 1 x 1 of the first.
+        Rgb8_420_2p = 540,
+        Rgb8_422_2p = 541,
+        Rgb8_444_2p = 542,
+        /// Their 10-bit twins: each component is the high 10 bits of a
+        /// 16-bit word.
+        Rgb10_420_2p = 543,
+        Rgb10_422_2p = 544,
+        Rgb10_444_2p = 545,
         Bgra10Xr = 552,
         Bgra10XrSrgb = 553,
         Bgr10Xr = 554,
@@ -208,6 +235,22 @@ impl Numeric {
     }
 }
 
+/// How Apple GPUs filter a format's texels through Metal's bicubic sampler
+/// filter, which shaders apply in Vulkan's place.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FilterClass {
+    /// Filtered as they are.
+    #[default]
+    Float = 0,
+    /// Filtered, clamped to [0, 1].
+    Unorm = 1,
+    /// Filtered, clamped to [-1, 1].
+    Snorm = 2,
+    /// The nearest texel: 32-bit float channels, which an M1 Pro (Apple7)
+    /// does not filter bicubically.
+    Nearest = 3,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
     Color(Numeric),
@@ -226,6 +269,38 @@ pub enum Compression {
     AstcHdr,
     /// 4:2:2 subsampled pairs, two texels per block.
     Subsampled,
+    /// Two planes ([`PixelFormat::planes`]); the block is the first's.
+    TwoPlanes,
+}
+
+/// A two-plane format's second plane: texels of the first across and down
+/// per texel of it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Planes {
+    /// 4:4:4, one per texel.
+    Full = 1,
+    /// 4:2:2, one per two across.
+    Horizontal = 2,
+    /// 4:2:0, one per 2 x 2.
+    Both = 3,
+}
+
+impl Planes {
+    /// Texels of the first plane per texel of the second, across and down.
+    pub const fn ratio(self) -> (u32, u32) {
+        match self {
+            Self::Full => (1, 1),
+            Self::Horizontal => (2, 1),
+            Self::Both => (2, 2),
+        }
+    }
+
+    /// The second plane's width and height for a first of `width` by
+    /// `height`, rounded up.
+    pub const fn second(self, width: u64, height: u64) -> (u64, u64) {
+        let (across, down) = self.ratio();
+        (width.div_ceil(across as u64), height.div_ceil(down as u64))
+    }
 }
 
 /// One block's footprint: texels across, texels down and bytes.
@@ -328,6 +403,7 @@ pub enum Codec {
     Pvrtc2,
     Astc,
     AstcSrgb,
+    AstcHdr,
 }
 
 /// The decode kernel that expands a codec's blocks.
@@ -345,7 +421,7 @@ impl Codec {
     pub const fn kernel(self) -> BlockKernel {
         match self {
             Self::Pvrtc4 | Self::Pvrtc2 => BlockKernel::Pvrtc,
-            Self::Astc | Self::AstcSrgb => BlockKernel::Astc,
+            Self::Astc | Self::AstcSrgb | Self::AstcHdr => BlockKernel::Astc,
             _ => BlockKernel::Etc,
         }
     }
@@ -358,11 +434,11 @@ impl Codec {
     }
 
     /// Bytes of the decoded texel: 8-bit RGBA, EAC's 16-bit channels, or
-    /// linear ASTC's 16-bit RGBA.
+    /// linear and HDR ASTC's 16-bit RGBA.
     pub const fn decoded_bytes(self) -> u32 {
         match self {
             Self::EacR11 | Self::EacR11Snorm => 2,
-            Self::Astc => 8,
+            Self::Astc | Self::AstcHdr => 8,
             _ => 4,
         }
     }
@@ -557,10 +633,44 @@ fn unorm(value: f64, bits: u32) -> u32 {
     (floor + u32::from(fraction > 0.5 || fraction == 0.5 && floor & 1 == 1)).min(max)
 }
 
+/// Full-range BT.601 luma, Cb and Cr of an RGB color, each in [0, 1], as
+/// Apple GPUs store a two-plane YCbCr texel: chroma (C - 128) / 256 times
+/// 255 around 128 / 255.
+pub fn ycbcr(rgb: [f64; 3]) -> [f64; 3] {
+    let [r, g, b] = rgb.map(|v| if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) });
+    let y = 0.299 * r + 0.587 * g + 0.114 * b;
+    let chroma = |difference: f64, scale: f64| 128.0 / 255.0 + difference / scale * 256.0 / 255.0;
+    [y, chroma(b - y, 1.772), chroma(r - y, 1.402)]
+}
+
+/// A two-plane format's texel of an RGB color: its first plane's value and
+/// its second's two (blue and red, or Cb and Cr), each in [0, 1].
+fn planes_texel(format: PixelFormat, rgb: [f64; 3]) -> (f64, [f64; 2]) {
+    if format.ycbcr() {
+        let [y, cb, cr] = ycbcr(rgb);
+        (y, [cb, cr])
+    } else {
+        (rgb[1], [rgb[2], rgb[0]])
+    }
+}
+
+/// A clear color as a two-plane format's second-plane texel, its first
+/// channel in the low byte, in its `Rg8Unorm` image's float clear value.
+pub fn second_plane_clear(format: PixelFormat, clear: [f64; 4]) -> Option<[f32; 4]> {
+    format.planes()?;
+    let (_, second) = planes_texel(format, [clear[0], clear[1], clear[2]]);
+    let [a, b] = second.map(|v| unorm(v, 8) as f32 / 255.0);
+    Some([a, b, 0.0, 1.0])
+}
+
 /// A clear color as the raw texel of a format rendering through its raw
-/// texels (`resource::raw_rendered`), in its unsigned integer view.
+/// texels (`resource::raw_rendered`), in its unsigned integer view; a
+/// two-plane format's first plane's texel.
 pub fn raw_clear(format: PixelFormat, clear: [f64; 4]) -> Option<u32> {
     let [r, g, b, a] = clear;
+    if format.planes().is_some() {
+        return Some(unorm(planes_texel(format, [r, g, b]).0, 8));
+    }
     Some(match format {
         PixelFormat::R8UnormSrgb => srgb8(r),
         // R4G4B4A4_UNORM_PACK16: red in the top bits, alpha in the bottom.
@@ -622,8 +732,103 @@ impl PixelFormat {
         None
     }
 
+    /// The linear twin whose storage views hold this uncompressed sRGB
+    /// format's texels: no Vulkan device stores sRGB images, and Apple GPUs
+    /// write them from shaders, which then encode and decode the color
+    /// channels themselves (`ResourceId::SRGB_STORAGE`).
+    pub fn srgb_storage(self) -> Option<Self> {
+        let description = self.describe();
+        if !description.srgb || description.is_compressed() {
+            return None;
+        }
+        let linear = self.srgb_pair()?;
+        let exact = |format: Self| {
+            format
+                .describe()
+                .realization
+                .as_ref()
+                .is_ok_and(|realization| {
+                    realization.encoding.is_exact() && realization.is_identity()
+                })
+        };
+        (exact(self) && exact(linear)).then_some(linear)
+    }
+
+    /// How Metal's bicubic filter treats this format's texels.
+    pub fn filter_class(self) -> FilterClass {
+        match self {
+            Self::R32Float
+            | Self::Rg32Float
+            | Self::Rgba32Float
+            | Self::Depth32Float
+            | Self::Depth32FloatStencil8 => FilterClass::Nearest,
+            Self::Depth16Unorm | Self::Depth24UnormStencil8 => FilterClass::Unorm,
+            _ => match self.describe().kind {
+                Kind::Color(Numeric::Unorm) => FilterClass::Unorm,
+                Kind::Color(Numeric::Snorm) => FilterClass::Snorm,
+                _ => FilterClass::Float,
+            },
+        }
+    }
+
     pub fn describe(self) -> &'static Description {
         &DESCRIPTIONS[self.index()]
+    }
+
+    /// A two-plane format's second plane: the first is
+    /// [`Rgb8_444_2p`](Self::Rgb8_444_2p)'s green as `R8Unorm`, the second
+    /// blue and red as `Rg8Unorm` ([`Self::plane_formats`]).
+    pub const fn planes(self) -> Option<Planes> {
+        match self {
+            Self::Rgb8_420_2p | Self::Ycbcr8_420_2p | Self::Rgb10_420_2p | Self::Ycbcr10_420_2p => {
+                Some(Planes::Both)
+            }
+            Self::Rgb8_422_2p | Self::Ycbcr8_422_2p | Self::Rgb10_422_2p | Self::Ycbcr10_422_2p => {
+                Some(Planes::Horizontal)
+            }
+            Self::Rgb8_444_2p | Self::Ycbcr8_444_2p | Self::Rgb10_444_2p | Self::Ycbcr10_444_2p => {
+                Some(Planes::Full)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether a two-plane format's planes hold luma and chroma, which
+    /// shaders convert to RGB, rather than green and blue-red.
+    pub const fn ycbcr(self) -> bool {
+        matches!(
+            self,
+            Self::Ycbcr8_420_2p
+                | Self::Ycbcr8_422_2p
+                | Self::Ycbcr8_444_2p
+                | Self::Ycbcr10_420_2p
+                | Self::Ycbcr10_422_2p
+                | Self::Ycbcr10_444_2p
+        )
+    }
+
+    /// Whether a two-plane format's components are 10 bits, the high ones
+    /// of 16-bit words, rather than bytes.
+    pub const fn ten_bit_planes(self) -> bool {
+        matches!(
+            self,
+            Self::Rgb10_420_2p
+                | Self::Rgb10_422_2p
+                | Self::Rgb10_444_2p
+                | Self::Ycbcr10_420_2p
+                | Self::Ycbcr10_422_2p
+                | Self::Ycbcr10_444_2p
+        )
+    }
+
+    /// The formats of a two-plane format's planes' images: one component,
+    /// then two, of a byte or a 16-bit word each.
+    pub const fn plane_formats(self) -> Option<[Self; 2]> {
+        match self.planes() {
+            None => None,
+            Some(_) if self.ten_bit_planes() => Some([Self::R16Unorm, Self::Rg16Unorm]),
+            Some(_) => Some([Self::R8Unorm, Self::Rg8Unorm]),
+        }
     }
 
     pub(super) fn index(self) -> usize {
@@ -820,13 +1025,10 @@ const fn astc(format: PixelFormat, srgb: bool, width: u32, height: u32) -> Descr
     )
 }
 
-/// ASTC HDR blocks, which only a device that samples them holds.
-const fn astc_hdr(
-    format: PixelFormat,
-    width: u32,
-    height: u32,
-    realization: VkFormat,
-) -> Description {
+/// ASTC HDR blocks, held decoded to half floats ([`Encoding::Decoded`]) as
+/// LDR ones are: few devices sample HDR blocks, and Apple's decode of them
+/// is the Khronos one.
+const fn astc_hdr(format: PixelFormat, width: u32, height: u32) -> Description {
     compressed(
         format,
         Compression::AstcHdr,
@@ -835,9 +1037,9 @@ const fn astc_hdr(
         width,
         height,
         16,
-        realization,
+        V::R16G16B16A16Sfloat,
         IDENTITY,
-        Encoding::Exact,
+        Encoding::Decoded(Codec::AstcHdr),
     )
 }
 
@@ -911,6 +1113,26 @@ const fn subsampled(format: PixelFormat) -> Description {
         },
         view_only: false,
         realization: Err(Unrealized::YcbcrConversion),
+    }
+}
+
+/// A two-plane format, realized by its first plane's image, `R8Unorm` or
+/// for 10-bit components `R16Unorm`; the second plane is an image of its
+/// own ([`PixelFormat::plane_formats`]).
+const fn two_planes(format: PixelFormat) -> Description {
+    let (bytes, realization) = if format.ten_bit_planes() {
+        (2, V::R16Unorm)
+    } else {
+        (1, V::R8Unorm)
+    };
+    Description {
+        format,
+        kind: Kind::Color(Numeric::Unorm),
+        srgb: false,
+        compression: Compression::TwoPlanes,
+        block: Block::texel(bytes),
+        view_only: false,
+        realization: vk(realization, ImageAspects::COLOR),
     }
 }
 
@@ -1127,20 +1349,20 @@ static DESCRIPTIONS: &[Description] = &[
     astc(P::Astc10x10Ldr, false, 10, 10),
     astc(P::Astc12x10Ldr, false, 12, 10),
     astc(P::Astc12x12Ldr, false, 12, 12),
-    astc_hdr(P::Astc4x4Hdr, 4, 4, V::Astc4x4SfloatBlock),
-    astc_hdr(P::Astc5x4Hdr, 5, 4, V::Astc5x4SfloatBlock),
-    astc_hdr(P::Astc5x5Hdr, 5, 5, V::Astc5x5SfloatBlock),
-    astc_hdr(P::Astc6x5Hdr, 6, 5, V::Astc6x5SfloatBlock),
-    astc_hdr(P::Astc6x6Hdr, 6, 6, V::Astc6x6SfloatBlock),
-    astc_hdr(P::Astc8x5Hdr, 8, 5, V::Astc8x5SfloatBlock),
-    astc_hdr(P::Astc8x6Hdr, 8, 6, V::Astc8x6SfloatBlock),
-    astc_hdr(P::Astc8x8Hdr, 8, 8, V::Astc8x8SfloatBlock),
-    astc_hdr(P::Astc10x5Hdr, 10, 5, V::Astc10x5SfloatBlock),
-    astc_hdr(P::Astc10x6Hdr, 10, 6, V::Astc10x6SfloatBlock),
-    astc_hdr(P::Astc10x8Hdr, 10, 8, V::Astc10x8SfloatBlock),
-    astc_hdr(P::Astc10x10Hdr, 10, 10, V::Astc10x10SfloatBlock),
-    astc_hdr(P::Astc12x10Hdr, 12, 10, V::Astc12x10SfloatBlock),
-    astc_hdr(P::Astc12x12Hdr, 12, 12, V::Astc12x12SfloatBlock),
+    astc_hdr(P::Astc4x4Hdr, 4, 4),
+    astc_hdr(P::Astc5x4Hdr, 5, 4),
+    astc_hdr(P::Astc5x5Hdr, 5, 5),
+    astc_hdr(P::Astc6x5Hdr, 6, 5),
+    astc_hdr(P::Astc6x6Hdr, 6, 6),
+    astc_hdr(P::Astc8x5Hdr, 8, 5),
+    astc_hdr(P::Astc8x6Hdr, 8, 6),
+    astc_hdr(P::Astc8x8Hdr, 8, 8),
+    astc_hdr(P::Astc10x5Hdr, 10, 5),
+    astc_hdr(P::Astc10x6Hdr, 10, 6),
+    astc_hdr(P::Astc10x8Hdr, 10, 8),
+    astc_hdr(P::Astc10x10Hdr, 10, 10),
+    astc_hdr(P::Astc12x10Hdr, 12, 10),
+    astc_hdr(P::Astc12x12Hdr, 12, 12),
     subsampled(P::Gbgr422),
     subsampled(P::Bgrg422),
     depth_stencil(P::Depth16Unorm, Kind::Depth, 2, false, V::D16Unorm, DEPTH),
@@ -1178,6 +1400,18 @@ static DESCRIPTIONS: &[Description] = &[
         V::D24UnormS8Uint,
         STENCIL,
     ),
+    two_planes(P::Ycbcr8_420_2p),
+    two_planes(P::Ycbcr8_422_2p),
+    two_planes(P::Ycbcr8_444_2p),
+    two_planes(P::Ycbcr10_420_2p),
+    two_planes(P::Ycbcr10_422_2p),
+    two_planes(P::Ycbcr10_444_2p),
+    two_planes(P::Rgb8_420_2p),
+    two_planes(P::Rgb8_422_2p),
+    two_planes(P::Rgb8_444_2p),
+    two_planes(P::Rgb10_420_2p),
+    two_planes(P::Rgb10_422_2p),
+    two_planes(P::Rgb10_444_2p),
     extended(P::Bgra10Xr, true, false),
     extended(P::Bgra10XrSrgb, true, true),
     extended(P::Bgr10Xr, false, false),
@@ -1272,8 +1506,14 @@ mod tests {
             srgb.decoder(),
             Some((BlockKernel::Astc, 11 | 12 << 8 | 12 << 16))
         );
-        // HDR blocks stay the device's own.
-        assert_eq!(P::Astc4x4Hdr.describe().decoder(), None);
+        // HDR blocks decode to half floats.
+        let hdr = P::Astc8x6Hdr.describe();
+        assert_eq!(hdr.realization.unwrap().format, V::R16G16B16A16Sfloat);
+        assert_eq!(hdr.realization.unwrap().encoding.stored_bytes(16), 8);
+        assert_eq!(
+            hdr.decoder(),
+            Some((BlockKernel::Astc, 12 | 8 << 8 | 6 << 16))
+        );
     }
 
     #[test]
@@ -1347,6 +1587,28 @@ mod tests {
             Some(0xf << 12 | 8 << 8 | 3)
         );
         assert_eq!(raw_clear(P::Rgba8Unorm, [0.0; 4]), None);
+    }
+
+    /// The bytes an M1 Pro writes rendering red, green and blue into a
+    /// 4:4:4 YCbCr surface: luma, then Cb and Cr.
+    #[test]
+    fn two_plane_clears_split_a_color_into_its_planes() {
+        let bytes = |format, rgb: [f64; 3]| {
+            let first = raw_clear(format, [rgb[0], rgb[1], rgb[2], 1.0]).unwrap();
+            let second = second_plane_clear(format, [rgb[0], rgb[1], rgb[2], 1.0]).unwrap();
+            [
+                first,
+                (second[0] * 255.0) as u32,
+                (second[1] * 255.0) as u32,
+            ]
+        };
+        assert_eq!(bytes(P::Ycbcr8_444_2p, [1.0, 0.0, 0.0]), [76, 85, 255]);
+        assert_eq!(bytes(P::Ycbcr8_444_2p, [0.0, 1.0, 0.0]), [150, 43, 21]);
+        assert_eq!(bytes(P::Ycbcr8_444_2p, [0.0, 0.0, 1.0]), [29, 255, 107]);
+        assert_eq!(bytes(P::Ycbcr8_444_2p, [1.0, 1.0, 1.0]), [255, 128, 128]);
+        // Green, then blue and red.
+        assert_eq!(bytes(P::Rgb8_444_2p, [1.0, 0.5, 0.25]), [128, 64, 255]);
+        assert_eq!(second_plane_clear(P::Rgba8Unorm, [0.0; 4]), None);
     }
 
     #[test]

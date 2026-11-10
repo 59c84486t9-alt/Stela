@@ -77,6 +77,11 @@ pub struct IndirectRenderClass {
     /// as storage, and those their blend unit writes, one bit each.
     pub storage_attachments: u32,
     pub blended_attachments: u32,
+    /// Its pipelines' fragment functions run the fragment tests themselves
+    /// ([`RenderPipelinePlan::tests_fragments`]).
+    ///
+    /// [`RenderPipelinePlan::tests_fragments`]: crate::metal::pipeline::RenderPipelinePlan::tests_fragments
+    pub tests_fragments: bool,
 }
 
 /// What an indirect commands layout over a [`GeneratedSequence`] binds.
@@ -219,8 +224,29 @@ impl CommandBuffer {
         }
     }
 
-    /// Executes a render buffer's records.
+    /// Executes a render buffer's records, once for each view the encoder
+    /// amplifies to, as direct draws are: each view's sequences carry its
+    /// push constants.
     fn execute_draws(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        descriptor: &IndirectCommandBufferDescriptor,
+        arguments: ResolveArguments,
+        barriers: bool,
+    ) -> Result<()> {
+        let views = render(&mut self.encoder)?.amplification.as_slice().to_vec();
+        for (view, &mapping) in views.iter().enumerate() {
+            let constants = &mut self.bindings.constants;
+            constants.amplification_count = views.len() as u32;
+            constants.amplification_id = view as u32;
+            constants.view_mapping = mapping;
+            self.execute_view_draws(resolver, descriptor, arguments.clone(), barriers)?;
+        }
+        Ok(())
+    }
+
+    /// Executes a render buffer's records for the encoder's current view.
+    fn execute_view_draws(
         &mut self,
         resolver: &mut dyn Resolver,
         descriptor: &IndirectCommandBufferDescriptor,
@@ -228,12 +254,13 @@ impl CommandBuffer {
         barriers: bool,
     ) -> Result<()> {
         let classes = self.indirect_classes(resolver, descriptor.inherit_pipeline_state)?;
-        // Patch draws scale their factors as the encoder's pipeline does:
-        // CPU-encoded ones by the encoder's scale, shader-encoded ones by
-        // their own.
+        // Patch draws scale their factors as their pipeline does: CPU-encoded
+        // ones by the encoder's scale, shader-encoded ones by their own. A
+        // pipeline the commands set scales them in its control stage only
+        // if it enables scaling.
         let render = render(&mut self.encoder)?;
-        let scales = descriptor.inherit_pipeline_state
-            && render
+        let scales = !descriptor.inherit_pipeline_state
+            || render
                 .pipeline
                 .as_ref()
                 .and_then(|state| state.plan.tessellation.as_ref())
@@ -319,6 +346,11 @@ impl CommandBuffer {
         }
         let (slots, executions): (Vec<_>, Vec<_>) = executions.into_iter().unzip();
         arguments.slots = slots;
+        // The commands' fragment tables, which the resolve copies, carry
+        // the tests' state for pipelines that run the tests themselves.
+        if classes.iter().any(|class| class.tests_fragments) {
+            self.prepare_tests(resolver, true)?;
+        }
         let count = arguments.count;
         let (sequences, counts) = self.resolve_draws(resolver, arguments, &classes)?;
         let slot_count = executions.len() as u64;
@@ -339,6 +371,8 @@ impl CommandBuffer {
             }
             for (slot, execution) in executions.iter().enumerate() {
                 let class = &classes[execution.class];
+                self.prepare_tests(resolver, class.tests_fragments)?;
+                self.place_color_copies(resolver, class.storage_attachments)?;
                 self.order_attachment_paths(class.storage_attachments, class.blended_attachments)?;
                 let last = bound.replace((execution.class, execution.primitive));
                 // Executions that switch shaders leave no pipeline bound.
@@ -463,11 +497,6 @@ impl CommandBuffer {
         inherit_pipeline: bool,
     ) -> Result<Vec<IndirectRenderClass>> {
         let render = render(&mut self.encoder)?;
-        if render.amplification.as_slice().len() > 1 {
-            return Err(Error::Unsupported(
-                "vertex amplification of GPU-resident indirect commands",
-            ));
-        }
         if !inherit_pipeline {
             return Ok(resolver.indirect_render_classes());
         }
@@ -511,6 +540,7 @@ impl CommandBuffer {
                 .collect(),
             storage_attachments: super::render::storage_attachments(state),
             blended_attachments: super::render::blended_attachments(state),
+            tests_fragments: plan.tests_fragments,
         }])
     }
 
@@ -569,7 +599,6 @@ impl CommandBuffer {
             &[Stage::Vertex, Stage::Fragment],
         )?;
         arguments.constants = self.bindings.constants;
-        arguments.constants.amplification_count = 1;
         arguments.vertex_buffers = render(&mut self.encoder)?.sequence_vertex_buffers()?;
         arguments.counts = counts.address;
         let upload =

@@ -21,7 +21,7 @@ use crate::metal::{
         BufferRef,
         blit::Region,
         counters::{COUNTER_ERROR_VALUE, CounterSample},
-        generated::{GeneratedLayoutKey, GeneratedWork},
+        device_generated::{GeneratedLayoutKey, GeneratedWork},
         indirect::ExecutionRange,
     },
     heap::HeapDescriptor,
@@ -34,7 +34,7 @@ use crate::metal::{
     pixel_format::{BlockKernel, PixelFormat, extended_range},
     resource::TextureDescriptor,
     sampler::SamplerDescriptor,
-    shader::{LinkedFunction, Linking, Specialization, Stage},
+    shader::{DYNAMIC_BICUBIC, LinkedFunction, Linking, Specialization, Stage},
     sparse::{MappingUpdate, SparseRegion},
     vulkan::{
         MemoryProperties, PipelineStages, PrimitiveTopology, ShaderStages,
@@ -186,7 +186,7 @@ fn textures_publish_descriptors_and_release_them() {
         .map(|(index, descriptor)| (*index, descriptor.array()))
         .collect();
     assert!(written.contains(&(resource.low(), HeapArray::SampledImages)));
-    assert!(written.contains(&(resource.high(), HeapArray::StorageImages)));
+    assert!(written.contains(&(resource.high_index(), HeapArray::StorageImages)));
 
     let view = device
         .new_texture_view(
@@ -213,7 +213,8 @@ fn textures_publish_descriptors_and_release_them() {
         .iter()
         .filter(|object| matches!(object, Object::Image(_)))
         .count();
-    assert_eq!(images, 1, "views share their parent's image");
+    assert_eq!(images, 0, "views share their parent's image, which is kept");
+    assert_eq!(device.recycled().textures, 1);
     // Released indices are reused once the (absent) work completes.
     let again = device
         .new_texture(&texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ))
@@ -221,11 +222,89 @@ fn textures_publish_descriptors_and_release_them() {
     assert!(device.texture_resource_id(again).unwrap().low() != 0);
 }
 
+fn destroyed_images(device: &mut TestDevice) -> usize {
+    device
+        .backend()
+        .destroyed
+        .iter()
+        .filter(|object| matches!(object, Object::Image(_)))
+        .count()
+}
+
+#[test]
+fn destroyed_private_textures_serve_equal_descriptors_once_their_work_completes() {
+    let mut device = device();
+    let descriptor = texture(PixelFormat::Rgba8Unorm, TextureUsage::RENDER_TARGET);
+    let first = device.new_texture(&descriptor).unwrap();
+    let resource = device.texture_resource_id(first).unwrap();
+    let size = device.current_allocated_size();
+    let serial = submit(&mut device);
+    device.destroy_texture(first).unwrap();
+    assert_eq!(device.current_allocated_size(), 0);
+
+    // Work submitted before the destruction may still use it.
+    let second = device.new_texture(&descriptor).unwrap();
+    assert!(device.backend().cleared.is_empty());
+    assert_ne!(device.texture_resource_id(second).unwrap(), resource);
+    complete(&mut device, serial);
+    device.destroy_texture(second).unwrap();
+
+    let third = device.new_texture(&descriptor).unwrap();
+    assert_eq!(device.texture_resource_id(third).unwrap(), resource);
+    assert_eq!(
+        device.backend().cleared.len(),
+        1,
+        "a reused image is zeroed"
+    );
+    assert_eq!(device.current_allocated_size(), size);
+    assert_eq!(destroyed_images(&mut device), 0);
+    let recycled = device.recycled();
+    assert_eq!(
+        (recycled.textures, recycled.hits, recycled.misses),
+        (1, 1, 2)
+    );
+
+    // Another descriptor allocates.
+    let other = texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ);
+    device.new_texture(&other).unwrap();
+    assert_eq!(device.recycled().hits, 1);
+}
+
+#[test]
+fn textures_the_cpu_reaches_are_freed_not_recycled() {
+    let mut device = device();
+    let mut descriptor = texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ);
+    descriptor.options = options(StorageMode::Shared);
+    let id = device.new_texture(&descriptor).unwrap();
+    device.destroy_texture(id).unwrap();
+    assert_eq!(destroyed_images(&mut device), 1);
+    assert_eq!(device.recycled().textures, 0);
+}
+
+#[test]
+fn recycling_frees_the_oldest_textures_beyond_its_budget() {
+    let mut device = device();
+    let descriptor = texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ);
+    let textures: Vec<_> = (0..=super::resources::RECYCLED_TEXTURES)
+        .map(|_| device.new_texture(&descriptor).unwrap())
+        .collect();
+    for id in textures {
+        device.destroy_texture(id).unwrap();
+    }
+    assert_eq!(
+        device.recycled().textures,
+        super::resources::RECYCLED_TEXTURES
+    );
+    assert_eq!(destroyed_images(&mut device), 1);
+}
+
 #[test]
 fn storage_textures_have_a_descriptor_per_level() {
     let mut device = device();
     let mut descriptor = texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_WRITE);
     descriptor.mipmap_level_count = 8;
+    // The CPU reaches a shared texture, so destruction frees it.
+    descriptor.options = options(StorageMode::Shared);
     let id = device.new_texture(&descriptor).unwrap();
     let resource = device.texture_resource_id(id).unwrap();
     assert_eq!(resource.low(), 0, "write-only textures are not sampled");
@@ -256,8 +335,10 @@ fn storage_textures_have_a_descriptor_per_level() {
 #[test]
 fn sampled_cubes_are_followed_by_their_faces() {
     let mut device = device();
+    // The CPU reaches a shared texture, so destruction frees it.
     let cube = TextureDescriptor {
         texture_type: TextureType::Cube,
+        options: options(StorageMode::Shared),
         ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
     };
     let id = device.new_texture(&cube).unwrap();
@@ -493,6 +574,79 @@ fn automatic_heaps_place_and_alias_resources() {
     assert_eq!(device.current_allocated_size(), 0);
 }
 
+/// `heapTextureSizeAndAlignWithDescriptor:` answers enough for the texture
+/// whatever its usage and storage: a heap of exactly the answered size takes
+/// it, automatic or at offset zero of a placement heap.
+#[test]
+fn heaps_of_the_answered_size_hold_the_texture() {
+    let usages = [
+        TextureUsage::SHADER_READ,
+        TextureUsage::RENDER_TARGET,
+        TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET,
+        TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
+        TextureUsage::EMPTY,
+    ];
+    let formats = [
+        PixelFormat::Bgra8Unorm,
+        PixelFormat::Rgba16Float,
+        PixelFormat::R8Unorm,
+    ];
+    for storage_mode in [StorageMode::Private, StorageMode::Shared] {
+        for pixel_format in formats {
+            for usage in usages {
+                for heap_type in [HeapType::Automatic, HeapType::Placement] {
+                    let mut device = device();
+                    let mut descriptor = texture(pixel_format, usage);
+                    (descriptor.width, descriptor.height) = (2824, 1704);
+                    descriptor.options = options(storage_mode);
+                    let answered = device.heap_texture_size_and_align(&descriptor).unwrap();
+                    let heap = device
+                        .new_heap(&HeapDescriptor {
+                            size: answered.size,
+                            options: options(storage_mode),
+                            heap_type,
+                            sparse_page_size: SparsePageSize::Size64,
+                        })
+                        .unwrap();
+                    let offset = (heap_type == HeapType::Placement).then_some(0);
+                    assert!(
+                        device.new_heap_texture(heap, &descriptor, offset).is_ok(),
+                        "{heap_type:?} heap of {} bytes for {pixel_format:?} {usage:?} \
+                         {storage_mode:?}",
+                        answered.size
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A full automatic heap answers nil as Metal does, which is no shortage
+/// of device memory.
+#[test]
+fn a_full_heap_is_not_out_of_memory() {
+    let mut device = device();
+    let descriptor = texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ);
+    let answered = device.heap_texture_size_and_align(&descriptor).unwrap();
+    let heap = device
+        .new_heap(&HeapDescriptor {
+            size: answered.size,
+            options: options(StorageMode::Private),
+            heap_type: HeapType::Automatic,
+            sparse_page_size: SparsePageSize::Size64,
+        })
+        .unwrap();
+    device.new_heap_texture(heap, &descriptor, None).unwrap();
+    assert_eq!(
+        device.new_heap_texture(heap, &descriptor, None),
+        Err(Error::HeapFull)
+    );
+    assert_eq!(
+        device.new_heap_buffer(heap, 64, options(StorageMode::Private), None),
+        Err(Error::HeapFull)
+    );
+}
+
 fn color_targets() -> RenderTargets {
     let mut targets = RenderTargets::default();
     targets.color_attachments[0] = ColorAttachmentDescriptor {
@@ -500,6 +654,114 @@ fn color_targets() -> RenderTargets {
         ..ColorAttachmentDescriptor::default()
     };
     targets
+}
+
+#[test]
+fn functions_take_bicubic_argument_samplers_once_admitted() {
+    let mut device = device();
+    let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
+    let request = bicubic_request(vertex, fragment);
+    device.new_render_pipeline(&request).unwrap();
+    assert!(
+        device
+            .compiler
+            .compiled
+            .iter()
+            .all(|stage| !stage.bicubic_arguments)
+    );
+
+    // Only the admitted function compiles for bicubic samplers.
+    device.admit_bicubic(fragment).unwrap();
+    let compiled = device.compiler.compiled.len();
+    device.new_render_pipeline(&request).unwrap();
+    let stages: Vec<_> = device.compiler.compiled[compiled..]
+        .iter()
+        .map(|stage| (stage.bicubic_arguments, stage.bicubic_samplers))
+        .collect();
+    // Bound samplers filter bicubically in the variants draws bind.
+    assert_eq!(stages, [(false, 0), (true, 0)]);
+}
+
+fn bicubic_request(vertex: FunctionId, fragment: FunctionId) -> RenderPipelineRequest {
+    RenderPipelineRequest {
+        vertex_function: vertex,
+        fragment_function: Some(fragment),
+        vertex_descriptor: None,
+        targets: color_targets(),
+        input_primitive_topology: PrimitiveTopologyClass::Triangle,
+        max_vertex_amplification_count: 1,
+        tessellation: Default::default(),
+        vertex_linked_functions: LinkedFunctions::default(),
+        fragment_linked_functions: LinkedFunctions::default(),
+        support_indirect_command_buffers: false,
+        archives: Default::default(),
+    }
+}
+
+#[test]
+fn bicubic_render_variants_compile_once_per_sampler_mask() {
+    let mut device = device();
+    let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
+    let id = device
+        .new_render_pipeline(&bicubic_request(vertex, fragment))
+        .unwrap();
+    let state = device.render_pipeline_state(id).unwrap();
+    let (state_id, base) = (state.id, state.pipeline.unwrap());
+    assert_eq!(state.bicubic, [0; 2]);
+    // The pipeline's own mask is the pipeline.
+    assert_eq!(device.render_variant(state_id, [0; 2]).unwrap(), base);
+
+    let compiled = device.compiler.compiled.len();
+    let variant = device.render_variant(state_id, [0, 1 << 2]).unwrap();
+    assert_ne!(variant, base);
+    let stages: Vec<_> = device.compiler.compiled[compiled..]
+        .iter()
+        .map(|stage| stage.bicubic_samplers)
+        .collect();
+    assert_eq!(stages, [0, 1 << 2]);
+    // The variant compiles once; another mask is another variant.
+    assert_eq!(
+        device.render_variant(state_id, [0, 1 << 2]).unwrap(),
+        variant
+    );
+    assert_eq!(device.compiler.compiled.len(), compiled + 2);
+    let other = device.render_variant(state_id, [1, 1 << 2]).unwrap();
+    assert!(other != variant && other != base);
+    assert_eq!(device.compiler.compiled.len(), compiled + 4);
+    device.destroy_render_pipeline(id).unwrap();
+}
+
+#[test]
+fn indirect_render_pipelines_read_each_samplers_filter_once_admitted() {
+    let mut device = device();
+    if device
+        .backend()
+        .physical_device()
+        .limits
+        .generated_commands
+        .is_none()
+    {
+        return;
+    }
+    let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
+    device.admit_bicubic(fragment).unwrap();
+    let request = RenderPipelineRequest {
+        support_indirect_command_buffers: true,
+        ..bicubic_request(vertex, fragment)
+    };
+    let id = device.new_render_pipeline(&request).unwrap();
+    let stages: Vec<_> = device
+        .compiler
+        .compiled
+        .iter()
+        .map(|stage| stage.bicubic_samplers)
+        .collect();
+    assert_eq!(stages, [0, DYNAMIC_BICUBIC]);
+    let state = device.render_pipeline_state(id).unwrap();
+    assert_eq!(state.bicubic, [0, DYNAMIC_BICUBIC]);
 }
 
 #[test]
@@ -1983,6 +2245,34 @@ fn compute_and_mesh_variants_compile_per_shape() {
     let submission = device.backend().submissions.last().unwrap().clone();
     let signals = &submission.last().unwrap().signals;
     assert_eq!(signals, &[(device.timeline, serial)]);
+    // Serial dispatches wait for each other: each barrier after one is
+    // marked for the report, then the end.
+    let commands: Vec<_> = submission
+        .iter()
+        .flat_map(|segment| &segment.commands)
+        .collect();
+    let stamps: Vec<_> = commands
+        .iter()
+        .enumerate()
+        .filter_map(|(at, command)| match command {
+            Command::WriteTimestamp { query, .. } => Some((at, *query)),
+            _ => None,
+        })
+        .collect();
+    let (&(end_at, end), marks) = stamps.split_last().unwrap();
+    assert_eq!(end_at, commands.len() - 1);
+    assert_eq!(end as usize, marks.len());
+    for (index, &(at, query)) in marks.iter().enumerate() {
+        assert_eq!(query as usize, index);
+        if query != 0 {
+            assert!(matches!(commands[at + 1], Command::Barrier(_)));
+            assert!(matches!(commands[at - 1], Command::Dispatch(_)));
+        }
+    }
+    assert!(
+        marks.len() >= 3,
+        "a mark after each serial dispatch but the last"
+    );
     assert!(
         !device.backend().writes.is_empty(),
         "argument tables reach the upload chunk"
@@ -2741,7 +3031,7 @@ fn completion_query_pools_reuse_two_slots_after_retirement() {
     };
     assert_eq!(public_info.count, 17);
     assert_eq!(first_info.query_type, QueryType::Timestamp);
-    assert_eq!(first_info.count, 2);
+    assert_eq!(first_info.count, 32);
     assert_eq!(second_info, first_info);
     let (public_pool, first_pool, second_pool) = (*public_pool, *first_pool, *second_pool);
     assert_ne!(first_pool, second_pool);
@@ -2749,8 +3039,8 @@ fn completion_query_pools_reuse_two_slots_after_retirement() {
         backend.query_resets,
         [
             (public_pool, 0, 17),
-            (first_pool, 0, 2),
-            (second_pool, 0, 2)
+            (first_pool, 0, 32),
+            (second_pool, 0, 32)
         ]
     );
     assert!(backend.query_reads.is_empty());
@@ -2759,7 +3049,7 @@ fn completion_query_pools_reuse_two_slots_after_retirement() {
     complete(&mut device, first);
     assert_eq!(device.command_buffer_times(first), Ok([0, 10]));
     assert_eq!(device.backend().query_reads, [(first_pool, 0, 2)]);
-    assert_eq!(device.backend().query_resets[3..], [(first_pool, 0, 2)]);
+    assert_eq!(device.backend().query_resets[3..], [(first_pool, 0, 32)]);
 
     let third = submit(&mut device);
     let backend = device.backend();
@@ -2780,7 +3070,11 @@ fn completion_query_pools_reuse_two_slots_after_retirement() {
     );
     assert_eq!(
         device.backend().query_resets[3..],
-        [(first_pool, 0, 2), (second_pool, 0, 2), (first_pool, 0, 2)]
+        [
+            (first_pool, 0, 32),
+            (second_pool, 0, 32),
+            (first_pool, 0, 32)
+        ]
     );
 }
 
@@ -2834,14 +3128,14 @@ fn failed_completion_preparation_preserves_pending_texture_uploads() {
     assert_eq!(device.commit(commands), Err(Error::OutOfMemory));
     assert_eq!(device.backend().next, created + 1);
     let pool = device.backend().query_pools[0].0;
-    assert_eq!(device.backend().query_resets, [(pool, 0, 2)]);
+    assert_eq!(device.backend().query_resets, [(pool, 0, 32)]);
     assert!(device.backend().submissions.is_empty());
 
     let commands = encode(&mut device);
     let serial = device.commit(commands).unwrap();
     assert_eq!(serial, 1);
     assert_eq!(device.backend().next, created + 1);
-    assert_eq!(device.backend().query_resets, [(pool, 0, 2)]);
+    assert_eq!(device.backend().query_resets, [(pool, 0, 32)]);
     let submitted = &device.backend().submissions[0][0].commands;
     assert!(matches!(submitted[1], Command::CopyBufferToImage { .. }));
     assert!(matches!(
@@ -2849,7 +3143,10 @@ fn failed_completion_preparation_preserves_pending_texture_uploads() {
         Command::WriteTimestamp { query: 0, .. }
     ));
     complete(&mut device, serial);
-    assert_eq!(device.backend().query_resets, [(pool, 0, 2), (pool, 0, 2)]);
+    assert_eq!(
+        device.backend().query_resets,
+        [(pool, 0, 32), (pool, 0, 32)]
+    );
 }
 
 #[test]
@@ -2985,4 +3282,48 @@ fn device_loss_keeps_in_flight_imports_pinned_and_charged() {
     assert_eq!(device.backend().query_resets.len(), query_resets);
     assert!(device.backend().query_reads.is_empty());
     assert_eq!(device.retired(), None);
+}
+
+/// WindowServer's event patterns never hold its work: a wait on a value an
+/// earlier commit of its own signals, on one the CPU signaled before or
+/// signals after, and a signal then a wait in one commit.
+#[test]
+fn window_server_event_patterns_submit_at_once() {
+    let mut device = device_on(MockBackend::new());
+    let event = device.new_event().unwrap();
+    let semaphore = device.event_semaphore(event).unwrap();
+    let commit = |device: &mut TestDevice, key, signal: Option<u64>, wait: Option<u64>| {
+        let mut commands = device.new_command_buffer();
+        if let Some(value) = signal {
+            commands
+                .encode_signal_event(&mut device.resolver(), semaphore, value)
+                .unwrap();
+        }
+        if let Some(value) = wait {
+            commands
+                .encode_wait_for_event(&mut device.resolver(), semaphore, value)
+                .unwrap();
+        }
+        device.commit_for(key, commands).unwrap()
+    };
+    // Signal in one commit, wait in the next, both from one connection.
+    commit(&mut device, 1, Some(1), None);
+    commit(&mut device, 1, None, Some(1));
+    // Signal then wait in one commit.
+    commit(&mut device, 1, Some(2), Some(2));
+    // The CPU signals before the commit that waits.
+    device.set_signaled_value(event, 5).unwrap();
+    commit(&mut device, 1, None, Some(5));
+    assert!(!device.holds());
+    // The CPU signals after: held until then, then submitted at once.
+    let waiting = commit(&mut device, 2, None, Some(6));
+    assert!(device.holds());
+    device.set_signaled_value(event, 6).unwrap();
+    assert!(!device.holds());
+    assert_eq!(device.backend().submissions.len() as u64, waiting);
+    assert!(device.backend().unpromised.is_empty());
+    device.backend().finish();
+    device.poll().unwrap();
+    assert_eq!(device.reached_for(1), waiting);
+    assert_eq!(device.reached_for(2), waiting);
 }

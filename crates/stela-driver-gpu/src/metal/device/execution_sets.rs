@@ -13,11 +13,11 @@
 //! that could read it complete.
 use super::{Device, Slab};
 use crate::metal::{
-    abi::PrimitiveTopologyClass,
+    abi::{PrimitiveTopologyClass, TessellationControlPointIndexType},
     binding::DescriptorIndices,
-    command_buffer::generated::{GeneratedLayoutKey, IndirectRenderClass},
+    command_buffer::device_generated::{GeneratedLayoutKey, IndirectRenderClass},
     error::{Error, Result},
-    indirect::IndirectPipeline,
+    indirect::{IndirectPipeline, RecordLayout},
     pipeline::RenderPipelinePlan,
     shader::{ColorOutput, Compiler, Interface, Stage},
     vulkan::{
@@ -35,12 +35,15 @@ use alloc::vec::Vec;
 const SET_CAPACITY: u32 = 4096;
 
 /// What every pipeline of a render class shares: its Vulkan state without
-/// shader code, its Metal topology class and the fragment outputs the
-/// shaders write.
+/// shader code, its Metal topology class, the record action of a
+/// tessellated class's patch draws, and the fragment outputs the shaders
+/// write.
 #[derive(Clone, Debug, PartialEq)]
 struct ClassKey {
     info: GraphicsPipelineInfo,
     topology: PrimitiveTopologyClass,
+    patches: Option<u32>,
+    tests_fragments: bool,
     rasterization: bool,
     color_outputs: Vec<ColorOutput>,
     writes: [bool; 3],
@@ -58,6 +61,13 @@ impl ClassKey {
         Self {
             info,
             topology: plan.topology_class,
+            patches: plan.tessellation.as_ref().map(|tessellation| {
+                match tessellation.control_point_index {
+                    TessellationControlPointIndexType::None => RecordLayout::DRAW_PATCHES,
+                    _ => RecordLayout::DRAW_INDEXED_PATCHES,
+                }
+            }),
+            tests_fragments: plan.tests_fragments,
             rasterization: plan.rasterization_enabled,
             color_outputs: fragment.map_or(Vec::new(), |fragment| fragment.color_outputs.clone()),
             writes: fragment.map_or([false; 3], |fragment| {
@@ -231,7 +241,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                         .fold(ShaderStages::EMPTY, |stages, &(stage, _)| stages | stage),
                     rasterization: class.key.rasterization,
                     topology: class.key.topology,
-                    patches: None,
+                    patches: class.key.patches,
                     vertex_buffers: info
                         .vertex_input
                         .bindings
@@ -243,6 +253,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     // leaves unwritten.
                     storage_attachments: attachment_mask(info, |blend| blend.is_empty()),
                     blended_attachments: attachment_mask(info, |blend| !blend.is_empty()),
+                    tests_fragments: class.key.tests_fragments,
                 })
             })
             .collect()

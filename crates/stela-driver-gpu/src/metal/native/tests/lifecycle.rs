@@ -149,8 +149,10 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
             mesh: None,
             calibrated: None,
             external_memory_fd: None,
+            external_semaphore_fd: None,
             conditional,
             generated: None,
+            executables: None,
         },
         queue: vk::Queue::null(),
         snapshot: nvk(Chip::find(0x1b3).unwrap(), 16 << 30),
@@ -165,10 +167,12 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         in_flight: VecDeque::new(),
         unsignaled: Vec::new(),
         mappings: BTreeMap::new(),
+        memories: crate::metal::native::memory::Memories::new(1024),
         exporter: ManuallyDrop::new(Box::new(Exporter(drops.clone()))),
         imports: BTreeMap::new(),
         retired: VecDeque::new(),
         new_images: Vec::new(),
+        zeroing: crate::metal::native::zero::Zeroing::new(1 << 32, |_| {}),
         bind_timeline: vk::Semaphore::null(),
         bind_value: 0,
         accumulate: vk::Pipeline::null(),
@@ -182,6 +186,9 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         decode_pvrtc: vk::Pipeline::null(),
         reorder_blocks: vk::Pipeline::null(),
         decode_astc: vk::Pipeline::null(),
+        store: crate::metal::native::pipeline_store::Persisted::none(|_| {}),
+        ticks: crate::metal::timing::no_clock,
+        split: [0; 3],
     }
 }
 

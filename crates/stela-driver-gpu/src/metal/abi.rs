@@ -261,6 +261,10 @@ raw_enum! {
     pub enum SamplerMinMagFilter: u64 {
         Nearest = 0,
         Linear = 1,
+        /// No header names it; Core Image's icon scaling sets it. An M1 Pro
+        /// (Apple7) filters 2D textures through it with Catmull-Rom's
+        /// bicubic weights, and 1D, 3D and cube textures linearly.
+        Bicubic = 2,
     }
 }
 

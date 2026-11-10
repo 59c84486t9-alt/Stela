@@ -2,7 +2,7 @@
 //! Their commands are encoded by `EncodeIndirect` and run by committed
 //! command streams.
 use super::{
-    Call, Object, Service, boolean, command_range, known,
+    Call, Object, Service, boolean, command_range, decode_bits,
     wire::{
         Empty, Fault, Handle, IndirectInherits, NewIndirectRequest, Value, commands::IndirectRange,
     },
@@ -17,14 +17,16 @@ use crate::metal::{
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn new_indirect_command_buffer(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewIndirectRequest = call.request()?;
-        let inherits = known(
-            IndirectInherits::from_bits(request.inherits),
+        let inherits = decode_bits(
+            IndirectInherits::from_bits,
+            request.inherits,
             "inherited state",
         )?;
         let inherit = |state| inherits.contains(state);
         let descriptor = IndirectCommandBufferDescriptor {
-            command_types: known(
-                IndirectCommandType::from_bits(request.command_types),
+            command_types: decode_bits(
+                IndirectCommandType::from_bits,
+                request.command_types,
                 "indirect command types",
             )?,
             inherit_pipeline_state: inherit(IndirectInherits::PIPELINE_STATE),

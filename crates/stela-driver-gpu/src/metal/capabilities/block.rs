@@ -83,6 +83,10 @@ option_set! {
         const FRAGMENT_TESTS = 1 << 36;
         /// A stencil resolve following a min or max depth resolve.
         const STENCIL_FOLLOWS_DEPTH = 1 << 37;
+        /// Fragment shaders write the stencil reference.
+        const STENCIL_EXPORT = 1 << 38;
+        /// Lines rasterize as Apple GPUs' (`Capabilities::line_modes`).
+        const LINE_MODES = 1 << 39;
     }
 }
 
@@ -361,12 +365,14 @@ impl Block {
             alpha_to_one: has(Flags::ALPHA_TO_ONE),
             depth_clamp: has(Flags::DEPTH_CLAMP),
             wireframe: has(Flags::WIREFRAME),
+            line_modes: has(Flags::LINE_MODES),
             view_min_lod: has(Flags::VIEW_MIN_LOD),
             timestamp_frequency: self.timestamp_frequency,
             statistic_counters: has(Flags::STATISTIC_COUNTERS),
             memoryless_render_targets: has(Flags::MEMORYLESS_RENDER_TARGETS),
             framebuffer_reads: has(Flags::FRAMEBUFFER_READS),
             fragment_tests: has(Flags::FRAGMENT_TESTS),
+            stencil_export: has(Flags::STENCIL_EXPORT),
             stencil_follows_depth: has(Flags::STENCIL_FOLLOWS_DEPTH),
             counter_sampling,
             sparse_volumes: has(Flags::SPARSE_VOLUMES),
@@ -614,6 +620,7 @@ impl Capabilities {
             .with(Flags::ALPHA_TO_ONE, self.alpha_to_one)
             .with(Flags::DEPTH_CLAMP, self.depth_clamp)
             .with(Flags::WIREFRAME, self.wireframe)
+            .with(Flags::LINE_MODES, self.line_modes)
             .with(Flags::VIEW_MIN_LOD, self.view_min_lod)
             .with(Flags::STATISTIC_COUNTERS, self.statistic_counters)
             .with(
@@ -622,6 +629,7 @@ impl Capabilities {
             )
             .with(Flags::FRAMEBUFFER_READS, self.framebuffer_reads)
             .with(Flags::FRAGMENT_TESTS, self.fragment_tests)
+            .with(Flags::STENCIL_EXPORT, self.stencil_export)
             .with(Flags::STENCIL_FOLLOWS_DEPTH, self.stencil_follows_depth)
             .with(Flags::SPARSE_VOLUMES, self.sparse_volumes)
             .with(

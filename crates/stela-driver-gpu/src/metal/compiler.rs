@@ -15,30 +15,40 @@
 //! pipeline's tessellation and stage-in layout into the evaluation stage,
 //! and the service synthesizes the stages ahead of it.
 //!
+//! Once the platform keeps compilations ([`AirCompiler::keep_compilations`]),
+//! reflections and compiled NIR are kept for the device's boot by what they
+//! read, so a function or pipeline made again skips the service; a miss may
+//! defer its compilation to run outside the service's lock
+//! ([`AirCompiler::set_deferring`], `service/shared.rs`).
+//!
 //! A stage's [`Linking`] reaches the service as the AIR modules of its
 //! functions, with their function constant values, and of every function
 //! of its dynamic libraries, without, each module once and none that is the
 //! function's own, with the names of the functions visible function tables
 //! call.
 mod bindings;
+#[cfg(test)]
+mod cache_tests;
 pub mod ffi;
 mod library_cache;
 #[cfg(feature = "metal-linked")]
 mod linked;
+mod nir_cache;
 #[cfg(test)]
 mod tests;
 
 use super::{
     abi::{DataType, FunctionType, IndexType, TessellationControlPointIndexType, TextureType},
     capabilities::ShaderFeatures,
-    error::{Error, Result, ensure, require},
+    error::{Error, Result, ensure},
     library::Air,
     reflection::Binding,
     shader::{
         Access, AttributeUse, BufferUse, ColorOutput, CompiledShader, Compiler, DeclaredAttribute,
-        FunctionConstant, Interface, Linking, MAX_PATCH_CONTROL_POINTS, NumericClass, Patch,
-        PatchDomain, PreparedFunction, Provenance, Reflection, Refusal, Scalar, Specialization,
-        Stage, Tessellation, TessellationStages, TextureUse, ThreadgroupUse, Varying,
+        FunctionConstant, Interface, LinkedFunction, Linking, MAX_PATCH_CONTROL_POINTS,
+        NumericClass, Patch, PatchDomain, PreparedFunction, Provenance, Reflection, Refusal,
+        Scalar, Specialization, Stage, Tessellation, TessellationStages, TextureUse,
+        ThreadgroupUse, Varying,
     },
     stitching::{StitchedGraph, StitchedNode},
     vertex::{Attribute, STRIDE_DYNAMIC, StageInputDescriptor, VertexDescriptor, VertexFormat},
@@ -59,6 +69,8 @@ use core::{
 use triomphe::Arc;
 
 use library_cache::{LoadedLibrary, ModuleSource, Selected};
+pub use nir_cache::{CompileGuard, CompileLock};
+use nir_cache::{NirCache, ReflectionCache, Returned};
 
 /// The constructs the AIR frontend lowers completely (`metal/README.md`).
 const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
@@ -269,7 +281,37 @@ pub struct AirCompiler {
     libraries: Libraries,
     next_library: u64,
     refusal: Option<Refusal>,
+    /// Reflections and compiled NIR, once the platform keeps them
+    /// ([`AirCompiler::keep_compilations`]).
+    reflections: Option<ReflectionCache>,
+    nir: Option<NirCache>,
+    /// A compilation the cache misses defers rather than runs
+    /// ([`AirCompiler::set_deferring`]), and the one deferred.
+    deferring: bool,
+    deferred: Option<CompileJob>,
+    /// Keys whose compilation outside the lock failed: they compile in the
+    /// call, whose failure is then the call's.
+    failed: alloc::collections::BTreeSet<[u8; 32]>,
+    lock: alloc::sync::Arc<CompileLock>,
+    /// What a holder of the compile lock runs while another holds it.
+    relax: fn(),
+    /// Reflections and compilations the service ran.
+    reflected: u64,
+    compiled: u64,
+    deferrals: u64,
+    /// NIR an earlier boot compiled, serialized, by key, and where this
+    /// boot's compilations go for the next ([`AirCompiler::persist`]).
+    stored: BTreeMap<[u8; 32], &'static [u8]>,
+    persist: Option<Persist>,
+    /// Stored NIR deserialized in place of a compilation.
+    restored: u64,
 }
+
+/// Where a compilation's serialized NIR goes for the next boot, by key.
+pub type Persist = fn(&[u8; 32], &[u8]);
+
+/// The NIR budget of a device's compiled shaders.
+pub const NIR_BUDGET: usize = 96 << 20;
 
 // SAFETY: the target's NIR options are the driver's, read from any thread.
 unsafe impl Send for AirCompiler {}
@@ -323,7 +365,190 @@ impl AirCompiler {
             libraries: BTreeMap::new(),
             next_library: 0,
             refusal: None,
+            reflections: None,
+            nir: None,
+            deferring: false,
+            deferred: None,
+            failed: alloc::collections::BTreeSet::new(),
+            lock: alloc::sync::Arc::new(CompileLock::new()),
+            relax: core::hint::spin_loop,
+            reflected: 0,
+            compiled: 0,
+            deferrals: 0,
+            stored: BTreeMap::new(),
+            persist: None,
+            restored: 0,
         }
+    }
+
+    /// Takes `stored`, NIR an earlier boot's compilations serialized by key,
+    /// and gives this boot's compilations to `persist`: a compilation it
+    /// holds deserializes instead of lowering AIR again.
+    pub fn persist(
+        &mut self,
+        stored: impl IntoIterator<Item = ([u8; 32], &'static [u8])>,
+        persist: Persist,
+    ) {
+        if self.nir.is_none() || !nir_serialization() {
+            return;
+        }
+        self.stored.extend(stored);
+        self.persist = Some(persist);
+    }
+
+    /// The stored NIR of `job`, deserialized, as its compilation would make.
+    fn restore(&mut self, job: &CompileJob) -> Option<(CompiledShader, usize)> {
+        let blob = self.stored.get(&job.key?)?;
+        let shader = deserialize(blob, self.target.nir)?;
+        self.restored += 1;
+        Some(job.finish(shader))
+    }
+
+    /// Gives a compilation's serialized NIR to the next boot, unless it
+    /// came from there.
+    fn keep_serialized(&self, key: &[u8; 32], blob: Option<&[u8]>) {
+        if let (Some(persist), Some(blob)) = (self.persist, blob)
+            && !self.stored.contains_key(key)
+        {
+            persist(key, blob);
+        }
+    }
+
+    /// Keeps reflections and up to `nir_budget` bytes of compiled NIR for
+    /// the device's boot, keyed by what they read, so a function or pipeline
+    /// made again, by this process or another, skips the service.
+    pub fn keep_compilations(&mut self, nir_budget: usize) {
+        self.reflections
+            .get_or_insert_with(ReflectionCache::default);
+        self.nir.get_or_insert_with(|| NirCache::new(nir_budget));
+    }
+
+    /// The lock every AIR compilation holds, and what a waiter for it runs.
+    pub fn compile_lock(&mut self, relax: fn()) -> alloc::sync::Arc<CompileLock> {
+        self.relax = relax;
+        self.lock.clone()
+    }
+
+    /// Whether a compilation the NIR cache misses defers: the first is kept
+    /// for [`Self::take_deferred`] and the call fails, to run again once it
+    /// is compiled outside the service's lock ([`Self::adopt`]).
+    pub fn set_deferring(&mut self, deferring: bool) {
+        self.deferring = deferring && self.nir.is_some();
+        self.lock.set_deferred(false);
+    }
+
+    /// The compilation the call deferred.
+    pub fn take_deferred(&mut self) -> Option<CompileJob> {
+        self.lock.set_deferred(false);
+        self.deferred.take()
+    }
+
+    /// Keeps what a deferred compilation made, for the call's next run.
+    pub fn adopt(&mut self, finished: Finished) {
+        self.compiled += 1;
+        let Finished {
+            key,
+            result,
+            serialized,
+        } = finished;
+        self.keep_serialized(&key, serialized.as_deref());
+        let Some(nir) = self.nir.as_mut() else {
+            if let Ok((shader, _)) = result {
+                // SAFETY: the job's NIR, which nothing else holds.
+                unsafe { (self.service.release)(shader.code.0 as usize as *mut c_void) };
+            }
+            return;
+        };
+        match result {
+            Ok((shader, bytes)) => {
+                let code = shader.code;
+                if nir.insert(key, shader, bytes, false) == Returned::Release {
+                    // SAFETY: as above.
+                    unsafe { (self.service.release)(code.0 as usize as *mut c_void) };
+                }
+            }
+            Err(()) => {
+                self.failed.insert(key);
+            }
+        }
+        self.release_doomed();
+    }
+
+    /// Ends a call: what it lent or adopted may be evicted again.
+    pub fn end_call(&mut self) {
+        self.deferring = false;
+        if let Some(nir) = self.nir.as_mut() {
+            nir.unpin();
+        }
+        self.release_doomed();
+    }
+
+    fn release_doomed(&mut self) {
+        let doomed = self.nir.as_mut().map(NirCache::take_doomed);
+        for code in doomed.into_iter().flatten() {
+            // SAFETY: an evicted shader no one holds.
+            unsafe { (self.service.release)(code.0 as usize as *mut c_void) };
+        }
+    }
+
+    /// `GPU COMPILER reflected=… reflections=… nir_hits=… nir_misses=…
+    /// compiled=… restored=…/stored deferred=… nir=entries/MiB evicted=…`,
+    /// since the device opened: reflections and compilations the service
+    /// ran, cache hits and misses, stored NIR deserialized of what the
+    /// store held, calls that compiled outside the lock, and the cache.
+    pub fn report(&self) -> String {
+        let (hits, misses, entries, bytes, evicted) =
+            self.nir.as_ref().map_or((0, 0, 0, 0, 0), |nir| {
+                (
+                    nir.hits,
+                    nir.misses,
+                    nir.entries(),
+                    nir.bytes(),
+                    nir.evictions,
+                )
+            });
+        alloc::format!(
+            "GPU COMPILER reflected={} reflections={} nir_hits={hits} nir_misses={misses} \
+             compiled={} restored={}/{} deferred={} nir={entries}/{}M evicted={evicted}",
+            self.reflected,
+            self.reflections.as_ref().map_or(0, ReflectionCache::len),
+            self.compiled,
+            self.restored,
+            self.stored.len(),
+            self.deferrals,
+            bytes >> 20,
+        )
+    }
+
+    /// The reflection of `entry` of `library` with function constant
+    /// `values`, or as declared, from the cache when it keeps one.
+    fn reflect_cached(
+        &mut self,
+        library: u64,
+        entry: &str,
+        values: Option<&[(u32, Vec<u8>)]>,
+    ) -> Result<(Reflection, Provenance)> {
+        let selected = select(&self.libraries, library, entry)?;
+        let key = self.reflections.as_ref().map(|_| {
+            (
+                selected.module.slice_hash,
+                String::from(entry),
+                values.map(<[_]>::to_vec),
+            )
+        });
+        if let (Some(cache), Some(key)) = (&self.reflections, &key)
+            && let Some(hit) = cache.get(key)
+        {
+            return Ok(hit);
+        }
+        let raw = values.map(constant_values);
+        let reflection = selected.reflect_raw(&self.service, raw.as_deref(), &mut self.refusal)?;
+        self.reflected += 1;
+        let decoded = selected.decode_reflection(&reflection)?;
+        if let (Some(cache), Some(key)) = (&mut self.reflections, key) {
+            cache.insert(key, decoded.0.clone(), decoded.1.clone());
+        }
+        Ok(decoded)
     }
 
     /// The detail of the last call the service refused.
@@ -343,6 +568,14 @@ impl AirCompiler {
 impl Compiler for AirCompiler {
     fn take_refusal(&mut self) -> Option<Refusal> {
         self.refusal.take()
+    }
+
+    fn stop_deferring(&mut self) {
+        self.deferring = false;
+    }
+
+    fn deferred(&self) -> bool {
+        self.deferred.is_some()
     }
 
     fn features(&self) -> ShaderFeatures {
@@ -445,7 +678,7 @@ impl Compiler for AirCompiler {
         Ok(exports)
     }
 
-    fn stitch(&mut self, sources: &[(u64, &str)], graphs: &[StitchedGraph]) -> Result<Vec<u8>> {
+    fn stitch(&mut self, sources: &[LinkedFunction], graphs: &[StitchedGraph]) -> Result<Vec<u8>> {
         unsafe extern "C" fn visit(data: *mut c_void, bytes: *const c_void, size: usize) {
             // SAFETY: the data is the module below, and the service's bytes
             // are `size` long for the call.
@@ -457,19 +690,28 @@ impl Compiler for AirCompiler {
             };
             module.extend_from_slice(bytes);
         }
+        let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
         let selected = sources
             .iter()
-            .map(|&(library, entry)| select(&self.libraries, library, entry))
+            .map(|function| select(&self.libraries, function.library, &function.entry))
             .collect::<Result<Vec<_>>>()?;
-        let sources: Vec<_> = selected
+        let values: Vec<_> = sources
             .iter()
-            .map(|selected| ffi::StitchSource {
-                bitcode: selected.module.bitcode.as_ptr().cast(),
-                size: selected.module.bitcode.len(),
-                name: selected.entry.as_ptr(),
-            })
+            .map(|function| constant_values(&function.constants))
             .collect();
-        let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
+        let sources = selected
+            .iter()
+            .zip(&values)
+            .map(|(selected, values)| {
+                Ok(ffi::StitchSource {
+                    bitcode: selected.module.bitcode.as_ptr().cast(),
+                    size: selected.module.bitcode.len(),
+                    name: selected.entry.as_ptr(),
+                    constants: values.as_ptr(),
+                    constant_count: count(values.len())?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         let names = graphs
             .iter()
             .map(|graph| CString::new(graph.name.as_str()).map_err(|_| MALFORMED))
@@ -595,9 +837,8 @@ impl Compiler for AirCompiler {
         entry: &str,
         specialization: &Specialization,
     ) -> Result<Reflection> {
-        let selected = select(&self.libraries, library, entry)?;
         let (reflection, _) =
-            selected.reflect(&self.service, Some(specialization), &mut self.refusal)?;
+            self.reflect_cached(library, entry, Some(&specialization.constants))?;
         Ok(reflection)
     }
 
@@ -607,13 +848,11 @@ impl Compiler for AirCompiler {
         entry: &str,
         constants: Option<Vec<(u32, Vec<u8>)>>,
     ) -> Result<PreparedFunction> {
-        let selected = select(&self.libraries, library, entry)?;
+        let (reflection, provenance) = self.reflect_cached(library, entry, constants.as_deref())?;
         let specialization = constants.map(|constants| Specialization {
             constants,
             ..Specialization::default()
         });
-        let (reflection, provenance) =
-            selected.reflect(&self.service, specialization.as_ref(), &mut self.refusal)?;
         Ok(PreparedFunction {
             library,
             specialized: specialization.is_some(),
@@ -628,8 +867,7 @@ impl Compiler for AirCompiler {
     }
 
     fn constants(&mut self, library: u64, entry: &str) -> Result<Vec<FunctionConstant>> {
-        let selected = select(&self.libraries, library, entry)?;
-        let (reflection, _) = selected.reflect(&self.service, None, &mut self.refusal)?;
+        let (reflection, _) = self.reflect_cached(library, entry, None)?;
         Ok(reflection.constants().to_vec())
     }
 
@@ -677,7 +915,7 @@ impl Compiler for AirCompiler {
             selected.module.slice_hash,
             specialization.constants.as_slice(),
         );
-        let linked = linked_modules(&self.libraries, &specialization.linking, own)?;
+        let (linked, _) = linked_modules(&self.libraries, &specialization.linking, own)?;
         let mut states = Vec::new();
         for module in
             core::iter::once(selected.module).chain(linked.iter().map(|module| module.source))
@@ -764,6 +1002,14 @@ impl Compiler for AirCompiler {
     }
 
     fn release(&mut self, code: ShaderCode) {
+        // A shader the cache keeps, or still lends, stays.
+        if self
+            .nir
+            .as_mut()
+            .is_some_and(|nir| nir.release(code) == Returned::Kept)
+        {
+            return;
+        }
         // SAFETY: the code is NIR this compiler's service compiled, which the
         // device releases once.
         unsafe { (self.service.release)(code.0 as usize as *mut c_void) }
@@ -834,7 +1080,9 @@ impl AirCompiler {
 
     /// Compiles `entry` of `library`: a post-tessellation vertex function
     /// with its pipeline's tessellation, and a kernel or post-tessellation
-    /// vertex function with the stage-in layout it fetches by.
+    /// vertex function with the stage-in layout it fetches by. The NIR
+    /// cache answers a compilation it holds; a miss runs the service, or
+    /// defers while the service runs compilations outside its lock.
     fn compile_function(
         &mut self,
         library: u64,
@@ -844,6 +1092,74 @@ impl AirCompiler {
         stage_in: Option<&ffi::StageIn>,
         prepared: Option<&PreparedFunction>,
     ) -> Result<CompiledShader> {
+        let job = self.plan(
+            library,
+            entry,
+            specialization,
+            tessellation,
+            stage_in,
+            prepared,
+        )?;
+        if let (Some(nir), Some(key)) = (self.nir.as_mut(), job.key)
+            && let Some(shader) = nir.lend(&key)
+        {
+            return Ok(shader);
+        }
+        if let Some((shader, bytes)) = self.restore(&job) {
+            let key = job.key.expect("restored by its key");
+            let nir = self.nir.as_mut().expect("restoring keeps compilations");
+            nir.insert(key, shader.clone(), bytes, true);
+            self.release_doomed();
+            return Ok(shader);
+        }
+        if let Some(key) = job.key
+            && self.deferring
+            && self.deferred.is_none()
+            && !self.failed.contains(&key)
+        {
+            self.deferrals += 1;
+            self.deferred = Some(job);
+            self.lock.set_deferred(true);
+            return Err(DEFERRED);
+        }
+        if let Some(key) = job.key {
+            self.failed.remove(&key);
+        }
+        let result = {
+            let _held = self.lock.hold(self.relax);
+            job.run()
+        };
+        self.compiled += 1;
+        match result {
+            Ok((shader, bytes)) => {
+                if let Some(key) = job.key
+                    && self.persist.is_some()
+                {
+                    self.keep_serialized(&key, serialize(shader.code).as_deref());
+                }
+                if let (Some(nir), Some(key)) = (self.nir.as_mut(), job.key) {
+                    // Lent to the caller, whose release leaves it held.
+                    if nir.insert(key, shader.clone(), bytes, true) == Returned::Kept {
+                        self.release_doomed();
+                    }
+                }
+                Ok(shader)
+            }
+            Err(error) => Err(refuse(&mut self.refusal, entry, &error)),
+        }
+    }
+
+    /// What compiling `entry` of `library` reads, owned, so the service can
+    /// run it with or without this compiler ([`CompileJob::run`]).
+    fn plan(
+        &mut self,
+        library: u64,
+        entry: &str,
+        specialization: &Specialization,
+        tessellation: Option<&ffi::Tessellation>,
+        stage_in: Option<&ffi::StageIn>,
+        prepared: Option<&PreparedFunction>,
+    ) -> Result<CompileJob> {
         let selected = select(&self.libraries, library, entry)?;
         let constants = constant_values(&specialization.constants);
         // Reflection uses only the module, entry and function constant values.
@@ -881,34 +1197,30 @@ impl AirCompiler {
             selected.module.slice_hash,
             specialization.constants.as_slice(),
         );
-        let linked = linked_modules(&self.libraries, linking, own)?;
-        let values: Vec<_> = linked
+        let (linked, copies) = linked_modules(&self.libraries, linking, own)?;
+        let modules: Vec<JobModule> = linked
             .iter()
-            .map(|module| module.constants.map(constant_values))
-            .collect();
-        let modules = linked
-            .iter()
-            .zip(&values)
-            .map(|(module, values)| {
-                Ok(ffi::Module {
-                    bitcode: module.source.bitcode.as_ptr().cast(),
+            .map(|module| {
+                let constants = module.constants.map(<[_]>::to_vec);
+                let count = constants.as_ref().map_or(Ok(0), |values| {
+                    u32::try_from(values.len()).map_err(|_| MALFORMED)
+                })?;
+                Ok(JobModule {
+                    bitcode: module.source.bitcode.as_ptr(),
                     size: module.source.bitcode.len(),
-                    constants: values
-                        .as_ref()
-                        .map_or(ptr::null(), |values| values.as_ptr()),
-                    constant_count: values.as_ref().map_or(Ok(0), |values| {
-                        u32::try_from(values.len()).map_err(|_| MALFORMED)
-                    })?,
+                    digest: module.source.slice_hash,
+                    constants,
+                    count,
+                    copy: module.copy,
                 })
             })
-            .collect::<Result<Vec<_>>>()?;
-        let functions: Vec<_> = linking
+            .collect::<Result<_>>()?;
+        // Functions of another copy of their module carry its suffix.
+        let names: Vec<String> = linking
             .functions
             .iter()
-            .map(|function| ffi::LinkedFunction {
-                name: function.entry.as_ptr().cast(),
-                name_bytes: function.entry.len(),
-            })
+            .zip(&copies)
+            .map(|(function, &copy)| alloc::format!("{}{}", function.entry, copy_suffix(copy)))
             .collect();
         let lengths = specialization
             .threadgroup_lengths
@@ -919,15 +1231,6 @@ impl AirCompiler {
                 Ok(ffi::ThreadgroupLength { index, bytes })
             })
             .collect::<Result<Vec<_>>>()?;
-        let varyings: Vec<_> = specialization
-            .varyings
-            .iter()
-            .map(|varying| ffi::LinkedVarying {
-                identifier: varying.identifier.as_ptr().cast(),
-                identifier_bytes: varying.identifier.len(),
-                per_primitive: varying.per_primitive.into(),
-            })
-            .collect();
         let samplers: Vec<_> = specialization
             .samplers
             .iter()
@@ -945,36 +1248,232 @@ impl AirCompiler {
                 destination_rgb: attachment.factors[1],
                 source_alpha: attachment.factors[2],
                 destination_alpha: attachment.factors[3],
+                planes: attachment.planes,
             })
         });
+        let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
+        for len in [
+            lengths.len(),
+            specialization.varyings.len(),
+            constants.len(),
+            modules.len(),
+            names.len(),
+            samplers.len(),
+            attachments.len(),
+        ] {
+            count(len)?;
+        }
+        // Everything the compilation reads, by content: the cache's key.
+        let key = (self.nir.is_some() || self.deferring).then(|| {
+            let mut normal = specialization.clone();
+            normal.linking = Linking {
+                max_call_stack_depth: linking.max_call_stack_depth,
+                ..Linking::default()
+            };
+            let mut hasher = stela_crypto::Sha256::new();
+            use stela_crypto::digest::Digest;
+            hasher.update(selected.module.slice_hash);
+            hasher.update(entry.as_bytes());
+            hasher.update([0]);
+            hasher.update(alloc::format!("{normal:?}").as_bytes());
+            hasher.update(alloc::format!("{tessellation:?}{stage_in:?}").as_bytes());
+            for module in &modules {
+                hasher.update(module.digest);
+                hasher.update(alloc::format!("{:?}/{}", module.constants, module.copy).as_bytes());
+            }
+            hasher.update(alloc::format!("{names:?}").as_bytes());
+            let digest: [u8; 32] = hasher.finalize().into();
+            digest
+        });
+        // The bitcode lives in the libraries the job holds.
+        let mut held: Vec<Arc<LoadedLibrary>> = Vec::new();
+        let ids = core::iter::once(library)
+            .chain(
+                linking
+                    .functions
+                    .iter()
+                    .chain(&linking.private_functions)
+                    .map(|function| function.library),
+            )
+            .chain(linking.libraries.iter().copied());
+        for id in ids {
+            if let Some(loaded) = self.libraries.get(&id)
+                && !held.iter().any(|known| Arc::ptr_eq(known, loaded))
+            {
+                held.push(loaded.clone());
+            }
+        }
+        Ok(CompileJob {
+            service: self.service,
+            target: self.target,
+            _held: held,
+            air: selected.module.bitcode.as_ptr(),
+            air_size: selected.module.bitcode.len(),
+            entry: CString::from(selected.entry),
+            name: String::from(entry),
+            specialization: specialization.clone(),
+            tessellation: tessellation.copied(),
+            stage_in: stage_in.map(|stage_in| Box::new(*stage_in)),
+            modules,
+            names,
+            lengths,
+            samplers,
+            attachments,
+            reflected,
+            interface,
+            provenance,
+            key,
+            serializing: self.persist.is_some(),
+        })
+    }
+}
+
+/// What a compilation the cache missed fails with while it defers: the call
+/// runs again once the compilation is done outside the service's lock.
+pub const DEFERRED: Error = Error::Unsupported("a compilation deferred outside the service's lock");
+
+/// A linked module of a [`CompileJob`].
+struct JobModule {
+    bitcode: *const u8,
+    size: usize,
+    digest: [u8; 32],
+    constants: Option<Vec<(u32, Vec<u8>)>>,
+    count: u32,
+    copy: u32,
+}
+
+/// A compilation's inputs, owned: it runs under the service's lock or, for a
+/// deferred one, outside it on a stack of its own, while other calls are
+/// served. It reads only the libraries' immutable bytes, which it holds, and
+/// the driver's NIR options; the service's calls read their arguments only.
+pub struct CompileJob {
+    service: Service,
+    target: ffi::Target,
+    _held: Vec<Arc<LoadedLibrary>>,
+    air: *const u8,
+    air_size: usize,
+    entry: CString,
+    name: String,
+    specialization: Specialization,
+    tessellation: Option<ffi::Tessellation>,
+    stage_in: Option<Box<ffi::StageIn>>,
+    modules: Vec<JobModule>,
+    names: Vec<String>,
+    lengths: Vec<ffi::ThreadgroupLength>,
+    samplers: Vec<ffi::ConstexprSampler>,
+    attachments: [ffi::Attachment; crate::metal::pipeline::MAX_COLOR_ATTACHMENTS],
+    reflected: Box<ffi::Reflection>,
+    interface: Interface,
+    provenance: Provenance,
+    key: Option<[u8; 32]>,
+    /// The next boot keeps its NIR.
+    serializing: bool,
+}
+
+/// What a deferred [`CompileJob`] made, for [`AirCompiler::adopt`]: the
+/// shader with its NIR's bytes, or a failure the call's next run repeats.
+pub struct Finished {
+    key: [u8; 32],
+    result: core::result::Result<(CompiledShader, usize), ()>,
+    /// Its NIR, serialized for the next boot, when that keeps it.
+    serialized: Option<Vec<u8>>,
+}
+
+impl CompileJob {
+    /// Compiles outside the compiler, under its held lock, and serializes
+    /// the NIR for the next boot, when that keeps it. The caller holds the
+    /// lock for as long as it runs on the one compile stack.
+    pub fn run_outside(self, _held: &CompileGuard<'_>) -> Finished {
+        let serializing = self.serializing;
+        let result = self.run();
+        let serialized = match &result {
+            Ok((shader, _)) if serializing => serialize(shader.code),
+            _ => None,
+        };
+        Finished {
+            key: self.key.expect("a deferred compilation has its key"),
+            result: result.map_err(|_| ()),
+            serialized,
+        }
+    }
+
+    /// The function's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Runs the service: the shader and its NIR's bytes, or the refusal.
+    fn run(&self) -> core::result::Result<(CompiledShader, usize), Box<ffi::AirError>> {
+        let specialization = &self.specialization;
+        let constants = constant_values(&specialization.constants);
+        let values: Vec<_> = self
+            .modules
+            .iter()
+            .map(|module| module.constants.as_deref().map(constant_values))
+            .collect();
+        let modules: Vec<_> = self
+            .modules
+            .iter()
+            .zip(&values)
+            .map(|(module, values)| ffi::Module {
+                bitcode: module.bitcode.cast(),
+                size: module.size,
+                constants: values
+                    .as_ref()
+                    .map_or(ptr::null(), |values| values.as_ptr()),
+                constant_count: module.count,
+                copy: module.copy,
+            })
+            .collect();
+        let functions: Vec<_> = self
+            .names
+            .iter()
+            .map(|name| ffi::LinkedFunction {
+                name: name.as_ptr().cast(),
+                name_bytes: name.len(),
+            })
+            .collect();
+        let varyings: Vec<_> = specialization
+            .varyings
+            .iter()
+            .map(|varying| ffi::LinkedVarying {
+                identifier: varying.identifier.as_ptr().cast(),
+                identifier_bytes: varying.identifier.len(),
+                per_primitive: varying.per_primitive.into(),
+            })
+            .collect();
         let storage = specialization
             .storage_attachments
             .iter()
             .any(Option::is_some);
-        let count = |len: usize| u32::try_from(len).map_err(|_| MALFORMED);
+        // Each length was checked when planned.
+        let count = |len: usize| len as u32;
         let raw = ffi::Specialization {
             workgroup_size: specialization.workgroup_size.unwrap_or_default(),
-            threadgroup_length_count: count(lengths.len())?,
-            threadgroup_lengths: lengths.as_ptr(),
+            threadgroup_length_count: count(self.lengths.len()),
+            threadgroup_lengths: self.lengths.as_ptr(),
             varyings: varyings.as_ptr(),
-            varying_count: count(varyings.len())?,
+            varying_count: count(varyings.len()),
             amplified: specialization.amplified.into(),
             launched_by_grid: specialization.launched_by_grid.into(),
             dynamic_threadgroups: specialization.dynamic_threadgroups.into(),
-            constant_count: count(constants.len())?,
+            constant_count: count(constants.len()),
             constants: constants.as_ptr(),
-            tessellation: tessellation.map_or(ptr::null(), ptr::from_ref),
-            stage_in: stage_in.map_or(ptr::null(), ptr::from_ref),
+            tessellation: self
+                .tessellation
+                .as_ref()
+                .map_or(ptr::null(), ptr::from_ref),
+            stage_in: self.stage_in.as_deref().map_or(ptr::null(), ptr::from_ref),
             modules: modules.as_ptr(),
             linked_functions: functions.as_ptr(),
-            module_count: count(modules.len())?,
-            linked_function_count: count(functions.len())?,
-            max_call_stack_depth: linking.max_call_stack_depth,
-            sampler_count: count(samplers.len())?,
-            samplers: samplers.as_ptr(),
-            attachments: attachments.as_ptr(),
+            module_count: count(modules.len()),
+            linked_function_count: count(functions.len()),
+            max_call_stack_depth: specialization.linking.max_call_stack_depth,
+            sampler_count: count(self.samplers.len()),
+            samplers: self.samplers.as_ptr(),
+            attachments: self.attachments.as_ptr(),
             attachment_count: if storage {
-                count(attachments.len())?
+                count(self.attachments.len())
             } else {
                 0
             },
@@ -984,28 +1483,48 @@ impl AirCompiler {
             vertex_formats: vertex_formats(&specialization.vertex_words),
             imageblock_size: specialization.imageblock_size.unwrap_or_default(),
             tile: specialization.tile.into(),
+            fragment_tests: [
+                (specialization.self_tests, ffi::SELF_TESTS),
+                (specialization.alpha_to_coverage, ffi::ALPHA_TO_COVERAGE),
+                (specialization.alpha_to_one, ffi::ALPHA_TO_ONE),
+            ]
+            .into_iter()
+            .filter(|&(set, _)| set)
+            .fold(0, |bits, (_, bit)| bits | bit),
+            bicubic: specialization.bicubic_samplers & !ffi::BICUBIC_ARGUMENTS
+                | if specialization.bicubic_arguments {
+                    ffi::BICUBIC_ARGUMENTS
+                } else {
+                    0
+                },
         };
         let mut error = ffi::AirError::NONE;
-        let air = selected.module.bitcode;
         // SAFETY: the AIR, entry, target and specialization, with the arrays,
         // identifiers, values, layouts, modules and names it points to,
-        // outlive the call, which writes only the error. The compilation
-        // fields come from this service's reflection of the same input and constants.
+        // outlive the call, which writes only the error. The libraries the
+        // AIR and modules are in are held. The compilation fields come from
+        // this service's reflection of the same input and constants.
         let shader = unsafe {
             (self.service.compile)(
-                air.as_ptr().cast(),
-                air.len(),
-                selected.entry.as_ptr(),
+                self.air.cast(),
+                self.air_size,
+                self.entry.as_ptr(),
                 &self.target,
                 &raw,
-                &*reflected,
+                &*self.reflected,
                 &mut error,
             )
         };
         if shader.is_null() {
-            return Err(refuse(&mut self.refusal, entry, &error));
+            return Err(Box::new(error));
         }
-        let mut interface = interface;
+        Ok(self.finish(shader))
+    }
+
+    /// The compiled shader of `shader`, this job's NIR, with its NIR's bytes.
+    fn finish(&self, shader: *mut c_void) -> (CompiledShader, usize) {
+        let specialization = &self.specialization;
+        let mut interface = self.interface.clone();
         // SAFETY: the compiler's live NIR, which the call only reads.
         interface.buffer_reads = unsafe { (self.service.buffer_reads)(shader) };
         interface.storage_attachments = specialization
@@ -1014,11 +1533,148 @@ impl AirCompiler {
             .enumerate()
             .filter(|(_, attachment)| attachment.is_some())
             .fold(0, |mask, (index, _)| mask | 1 << index);
-        Ok(CompiledShader {
-            code: ShaderCode(shader as usize as u64),
-            interface,
-            provenance,
-        })
+        (
+            CompiledShader {
+                code: ShaderCode(shader as usize as u64),
+                interface,
+                provenance: self.provenance.clone(),
+            },
+            nir_bytes(shader),
+        )
+    }
+}
+
+/// Mesa's `struct blob` and `struct blob_reader`.
+#[cfg(all(feature = "metal-linked", target_os = "uefi"))]
+#[repr(C)]
+struct Blob {
+    data: *mut u8,
+    allocated: usize,
+    size: usize,
+    fixed_allocation: bool,
+    out_of_memory: bool,
+}
+
+#[cfg(all(feature = "metal-linked", target_os = "uefi"))]
+#[repr(C)]
+struct BlobReader {
+    data: *const u8,
+    end: *const u8,
+    current: *const u8,
+    overrun: bool,
+}
+
+#[cfg(all(feature = "metal-linked", target_os = "uefi"))]
+unsafe extern "C" {
+    fn blob_init(blob: *mut Blob);
+    fn blob_reader_init(reader: *mut BlobReader, data: *const c_void, size: usize);
+    fn nir_serialize(blob: *mut Blob, shader: *const c_void, strip: bool);
+    fn nir_deserialize(
+        context: *mut c_void,
+        options: *const c_void,
+        reader: *mut BlobReader,
+    ) -> *mut c_void;
+    fn free(pointer: *mut c_void);
+}
+
+/// Whether this image serializes NIR: the linked Mesa does.
+const fn nir_serialization() -> bool {
+    cfg!(all(feature = "metal-linked", target_os = "uefi"))
+}
+
+/// `code`'s NIR serialized whole, names kept, so the NIR deserialized from it
+/// is the same and the driver's pipeline cache, keyed by its digest, finds
+/// what it compiled from it.
+fn serialize(code: ShaderCode) -> Option<Vec<u8>> {
+    #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
+    {
+        let mut blob = Blob {
+            data: ptr::null_mut(),
+            allocated: 0,
+            size: 0,
+            fixed_allocation: false,
+            out_of_memory: false,
+        };
+        // SAFETY: a blob of Mesa's layout, and the service's live NIR, which
+        // serializing only reads. The blob's memory is Mesa's to free.
+        unsafe {
+            blob_init(&mut blob);
+            nir_serialize(&mut blob, code.0 as usize as *const c_void, false);
+        }
+        let bytes = (!blob.out_of_memory && !blob.data.is_null()).then(|| {
+            // SAFETY: the blob's written bytes.
+            unsafe { slice::from_raw_parts(blob.data, blob.size) }.to_vec()
+        });
+        // SAFETY: `blob_finish` of a growable blob.
+        unsafe { free(blob.data.cast()) };
+        bytes
+    }
+    #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
+    {
+        let _ = code;
+        None
+    }
+}
+
+/// The NIR `blob` serialized, compiled for the driver's `options`.
+fn deserialize(blob: &[u8], options: *const c_void) -> Option<*mut c_void> {
+    #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
+    {
+        let mut reader = BlobReader {
+            data: ptr::null(),
+            end: ptr::null(),
+            current: ptr::null(),
+            overrun: false,
+        };
+        // SAFETY: the stored bytes outlive the read, and the options are the
+        // driver's, as the compiler's own NIR is made with.
+        let shader = unsafe {
+            blob_reader_init(&mut reader, blob.as_ptr().cast(), blob.len());
+            nir_deserialize(ptr::null_mut(), options, &mut reader)
+        };
+        if shader.is_null() {
+            return None;
+        }
+        if reader.overrun || reader.current != reader.end {
+            // SAFETY: the deserialized shader, a ralloc context of its own.
+            unsafe { free_nir(shader) };
+            return None;
+        }
+        Some(shader)
+    }
+    #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
+    {
+        let _ = (blob, options);
+        None
+    }
+}
+
+/// Frees NIR deserialized here.
+#[cfg(all(feature = "metal-linked", target_os = "uefi"))]
+unsafe fn free_nir(shader: *mut c_void) {
+    unsafe extern "C" {
+        fn ralloc_free(context: *mut c_void);
+    }
+    // SAFETY: the caller's shader, which nothing else holds.
+    unsafe { ralloc_free(shader) }
+}
+
+/// The bytes `shader`'s NIR takes, for the cache's budget.
+fn nir_bytes(shader: *mut c_void) -> usize {
+    #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
+    {
+        unsafe extern "C" {
+            /// Mesa's `ralloc_total_size`: a context and its children.
+            fn ralloc_total_size(context: *const c_void) -> usize;
+        }
+        // SAFETY: the service's NIR, a ralloc context of its own.
+        unsafe { ralloc_total_size(shader) }
+    }
+    #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
+    {
+        // A hosted service's shaders are not NIR this image can measure.
+        let _ = shader;
+        64 << 10
     }
 }
 
@@ -1035,6 +1691,7 @@ impl ffi::Tessellation {
                 TessellationControlPointIndexType::UInt16 => 2,
                 TessellationControlPointIndexType::UInt32 => 4,
             },
+            scales: tessellation.factor_scale,
         }
     }
 }
@@ -1123,10 +1780,21 @@ fn constant_values(constants: &[(u32, Vec<u8>)]) -> Vec<ffi::ConstantValue> {
 }
 
 /// An AIR module a function links, with the function constant values of
-/// the functions linked from it, or none for a dynamic library's.
+/// the functions linked from it, or none for a dynamic library's, and its
+/// copy number: each set of values a module links with is its own copy.
 struct LinkedModule<'a> {
     source: ModuleSource<'a>,
     constants: Option<&'a [(u32, Vec<u8>)]>,
+    copy: u32,
+}
+
+/// The suffix of the names a module's `copy` defines (`.stela.copy<copy>`,
+/// `struct stela_air_module`), empty for the first.
+fn copy_suffix(copy: u32) -> String {
+    match copy {
+        0 => String::new(),
+        copy => alloc::format!(".stela.copy{copy}"),
+    }
 }
 
 /// Whether two sets of function constant values, each with one value per
@@ -1139,40 +1807,61 @@ fn same_values(a: Option<&[(u32, Vec<u8>)]>, b: Option<&[(u32, Vec<u8>)]>) -> bo
 }
 
 /// The AIR modules `linking` adds to the function whose module has `own`
-/// digest and values: each once, by digest. A module links with one set of
-/// values; a dynamic library's takes those of a function linked from it.
+/// digest and values, each once for each set of values it links with, and
+/// the copy of the module each of `linking.functions` comes from. The
+/// function's own module is copy 0 of its digest; a dynamic library's
+/// modules take the values of a function linked from them.
 fn linked_modules<'a>(
     libraries: &'a Libraries,
     linking: &'a Linking,
     own: ([u8; 32], &'a [(u32, Vec<u8>)]),
-) -> Result<Vec<LinkedModule<'a>>> {
+) -> Result<(Vec<LinkedModule<'a>>, Vec<u32>)> {
     let mut modules: Vec<LinkedModule<'a>> = Vec::new();
-    let mut add = |source: ModuleSource<'a>, constants| {
-        if source.slice_hash == own.0 {
-            return require(
-                same_values(Some(own.1), constants),
-                "linking a function's own module with other function constant values",
-            );
+    let mut add = |source: ModuleSource<'a>, constants| -> u32 {
+        if source.slice_hash == own.0 && same_values(Some(own.1), constants) {
+            return 0;
         }
-        match modules
-            .iter_mut()
-            .find(|module| module.source.slice_hash == source.slice_hash)
+        let copies = || {
+            modules
+                .iter()
+                .filter(|module| module.source.slice_hash == source.slice_hash)
+        };
+        if let Some(module) = copies()
+            .find(|module| same_values(module.constants, constants))
+            .map(|module| module.copy)
         {
-            Some(module) => {
-                require(
-                    same_values(module.constants, constants),
-                    "linking one module with two sets of function constant values",
-                )?;
-                module.constants = module.constants.or(constants);
-            }
-            None => modules.push(LinkedModule { source, constants }),
+            let module = modules
+                .iter_mut()
+                .find(|known| known.source.slice_hash == source.slice_hash && known.copy == module)
+                .expect("the copy found");
+            module.constants = module.constants.or(constants);
+            return module.copy;
         }
-        Ok(())
+        // The function's own module is copy 0 of its digest.
+        let first = u32::from(source.slice_hash != own.0);
+        let copy = copies()
+            .map(|module| module.copy + 1)
+            .max()
+            .unwrap_or(1 - first);
+        modules.push(LinkedModule {
+            source,
+            constants,
+            copy,
+        });
+        copy
     };
-    for function in linking.functions.iter().chain(&linking.private_functions) {
+    let mut copies = Vec::with_capacity(linking.functions.len());
+    for (index, function) in linking
+        .functions
+        .iter()
+        .chain(&linking.private_functions)
+        .enumerate()
+    {
         let selected = select(libraries, function.library, &function.entry)?;
-        let constants = Some(function.constants.as_slice());
-        add(selected.module, constants)?;
+        let copy = add(selected.module, Some(function.constants.as_slice()));
+        if index < linking.functions.len() {
+            copies.push(copy);
+        }
     }
     for library in &linking.libraries {
         let library = libraries
@@ -1180,10 +1869,10 @@ fn linked_modules<'a>(
             .ok_or(Error::Invalid("unknown library"))?;
         ensure(library.dynamic, "a preloaded library that is not dynamic")?;
         for module in library.modules() {
-            add(module?, None)?;
+            add(module?, None);
         }
     }
-    Ok(modules)
+    Ok((modules, copies))
 }
 
 /// Selects `entry` of `library`.
@@ -1196,19 +1885,7 @@ fn select<'a>(libraries: &'a Libraries, library: u64, entry: &str) -> Result<Sel
 
 impl Selected<'_> {
     /// The service's reflection of the function specialized with the
-    /// function constant values, or as it is declared with no specialization,
-    /// with the function's provenance.
-    fn reflect(
-        &self,
-        service: &Service,
-        specialization: Option<&Specialization>,
-        refusal: &mut Option<Refusal>,
-    ) -> Result<(Reflection, Provenance)> {
-        let values = specialization.map(|known| constant_values(&known.constants));
-        let reflection = self.reflect_raw(service, values.as_deref(), refusal)?;
-        self.decode_reflection(&reflection)
-    }
-
+    /// function constant values `values`, or as it is declared without.
     fn reflect_raw(
         &self,
         service: &Service,

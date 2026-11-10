@@ -229,6 +229,7 @@ fn pipeline(
         samples: SampleCounts::C4,
         alpha_to_coverage: true,
         alpha_to_one: false,
+        line_rasterization: Default::default(),
         color_formats: vec![Some(Format::B8G8R8A8Unorm), None],
         depth_format: Some(Format::D32Sfloat),
         stencil_format: None,
@@ -334,4 +335,45 @@ fn vulkan_failures_map_to_metal_errors() {
         panic!("an unknown driver failure is unsupported");
     };
     assert!(reason.contains("VK_ERROR_UNKNOWN"));
+    // A result with no name of its own keeps its raw value.
+    assert_eq!(
+        failure(vk::Result::ERROR_EXTENSION_NOT_PRESENT),
+        Error::Driver(vk::Result::ERROR_EXTENSION_NOT_PRESENT.as_raw())
+    );
+}
+
+#[test]
+fn a_small_bar_is_noted_and_a_full_one_is_not() {
+    use crate::metal::vulkan::{
+        MemoryHeapFlags,
+        physical::{Memory, MemoryHeap, MemoryType},
+    };
+    let heap = |size| MemoryHeap {
+        size,
+        flags: MemoryHeapFlags::DEVICE_LOCAL,
+        budget: None,
+    };
+    let kind = |properties, heap_index| MemoryType {
+        properties,
+        heap_index,
+    };
+    let vram = 16u64 << 30;
+    // NVK puts the window the CPU reaches in a heap of its own.
+    let windowed = Memory {
+        heaps: vec![heap(vram), heap(256 << 20)],
+        types: vec![
+            kind(M::DEVICE_LOCAL, 0),
+            kind(M::DEVICE_LOCAL | M::HOST_VISIBLE | M::HOST_COHERENT, 1),
+        ],
+    };
+    let note = super::small_bar(&windowed).unwrap();
+    assert!(note.contains("256 MiB of 16384 MiB"), "{note}");
+    let full = Memory {
+        heaps: vec![heap(vram)],
+        types: vec![
+            kind(M::DEVICE_LOCAL, 0),
+            kind(M::DEVICE_LOCAL | M::HOST_VISIBLE | M::HOST_COHERENT, 0),
+        ],
+    };
+    assert_eq!(super::small_bar(&full), None);
 }

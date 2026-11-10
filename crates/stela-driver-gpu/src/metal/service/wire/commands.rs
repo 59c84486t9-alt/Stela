@@ -810,6 +810,8 @@ raw_enum! {
         Reset = 0x0709,
         /// `VertexBufferStride`.
         SetBufferStride = 0x070a,
+        /// `ImageblockSize`.
+        SetImageblockSize = 0x070b,
     }
 }
 

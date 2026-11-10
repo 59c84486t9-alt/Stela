@@ -179,6 +179,17 @@ pub enum PipelineSource {
     Archived(PipelineCache),
 }
 
+/// How lines and polygon edges rasterize
+/// (`VkPipelineRasterizationLineStateCreateInfoKHR`); `Default` chains no
+/// line state.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum LineRasterization {
+    #[default]
+    Default,
+    Rectangular,
+    Bresenham,
+}
+
 /// `VkGraphicsPipelineCreateInfo` for dynamic rendering
 /// (`VkPipelineRenderingCreateInfo`) over the device's single pipeline
 /// layout. Everything Metal sets on the encoder is in `dynamic_states`.
@@ -191,6 +202,7 @@ pub struct GraphicsPipelineInfo {
     pub samples: SampleCounts,
     pub alpha_to_coverage: bool,
     pub alpha_to_one: bool,
+    pub line_rasterization: LineRasterization,
     /// Every color attachment slot's format; `None` is
     /// `VK_FORMAT_UNDEFINED`. Pipelines and passes always declare all slots
     /// (`dynamicRenderingUnusedAttachments`), so any pipeline can draw in

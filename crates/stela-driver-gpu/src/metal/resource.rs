@@ -15,7 +15,9 @@ use super::{
     },
     capabilities::{Capabilities, FormatCapabilities as C},
     error::{Result, ensure, require},
-    pixel_format::{Compression, Description, Encoding, Kind, PixelFormat, Realization},
+    pixel_format::{
+        Compression, Description, Encoding, FilterClass, Kind, PixelFormat, Realization,
+    },
     vulkan::{
         BufferCreate, BufferUsage, ComponentSwizzle, Format, ImageAspects, ImageCreate,
         ImageTiling, ImageType, ImageUsage, ImageViewType, MemoryProperties as M, SampleCounts,
@@ -210,6 +212,11 @@ pub struct ShaderViews {
     /// texels: texel fetches take no cube.
     pub faces: Option<ImageViewInfo>,
     pub storage: Option<ImageViewInfo>,
+    /// The storage views hold an sRGB format's texels through its linear
+    /// twin ([`PixelFormat::srgb_storage`]).
+    pub srgb_storage: bool,
+    /// How shaders filter the texels bicubically.
+    pub filter_class: FilterClass,
 }
 
 /// The sampled descriptors of a view of `view_type`, consecutive in the
@@ -231,6 +238,10 @@ pub struct TexturePlan {
 
 pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> Result<TexturePlan> {
     let description = descriptor.pixel_format.describe();
+    ensure(
+        descriptor.pixel_format.planes().is_none(),
+        "two-plane formats are only an IOSurface's",
+    )?;
     ensure(
         !description.view_only,
         "stencil view formats only describe texture views",
@@ -307,6 +318,7 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
     let range = full_range(descriptor, description);
     let views = shader_views(
         view_type(descriptor.texture_type),
+        descriptor.pixel_format,
         realization,
         descriptor.swizzle,
         range,
@@ -496,11 +508,15 @@ fn effective_usage(
             "texture atomics on this pixel format",
         )?;
     }
-    // A fragment function may read what it renders to.
-    Ok(usage.with(
-        TextureUsage::SHADER_READ,
-        usage.contains(TextureUsage::RENDER_TARGET) && format.contains(C::READ),
-    ))
+    // A fragment function may read what it renders to, and on Apple GPUs a
+    // kernel keeps its writes to a texture made without shader writes, as
+    // Core Animation's compute passes write their render targets.
+    Ok(usage
+        .with(
+            TextureUsage::SHADER_READ,
+            usage.contains(TextureUsage::RENDER_TARGET) && format.contains(C::READ),
+        )
+        .with(TextureUsage::SHADER_WRITE, format.contains(C::WRITE)))
 }
 
 /// The format of a color attachment's raw texel view, which a fragment
@@ -509,8 +525,18 @@ fn effective_usage(
 /// integer format of its texel's size. Vulkan keeps `A8_UNORM` apart from
 /// every other format, so it has none.
 pub fn raw_texel_format(format: PixelFormat) -> Option<Format> {
+    if format == PixelFormat::A8Unorm {
+        return None;
+    }
+    raw_texel_bytes_format(format)
+}
+
+/// The unsigned integer format of a color format's stored texel bytes,
+/// which a storage copy of an attachment holds: [`raw_texel_format`]'s, and
+/// A8Unorm's, whose own alpha format views no other format.
+pub fn raw_texel_bytes_format(format: PixelFormat) -> Option<Format> {
     let description = format.describe();
-    if !description.is_color() || format == PixelFormat::A8Unorm {
+    if !description.is_color() {
         return None;
     }
     match description.stored_block_bytes() {
@@ -724,6 +750,7 @@ const IDENTITY: [ComponentSwizzle; 4] = [ComponentSwizzle::Identity; 4];
 
 fn shader_views(
     view_type: ImageViewType,
+    pixel_format: PixelFormat,
     realization: Realization,
     swizzle: SwizzleChannels,
     range: SubresourceRange,
@@ -741,8 +768,12 @@ fn shader_views(
     };
     let sampled = image_usage.contains(ImageUsage::SAMPLED);
     let storage = image_usage.contains(ImageUsage::STORAGE);
+    let srgb_storage = pixel_format
+        .srgb_storage()
+        .and_then(|linear| linear.describe().realization.as_ref().ok())
+        .map(|linear| linear.format);
     // A minimum LOD bounds sampling only, so storage keeps a view without it.
-    let (sampled, storage) = if components == IDENTITY && min_lod == 0.0 {
+    let (sampled, storage) = if components == IDENTITY && min_lod == 0.0 && srgb_storage.is_none() {
         let usage = image_usage & (ImageUsage::SAMPLED | ImageUsage::STORAGE);
         let shared = (!usage.is_empty()).then(|| view(usage, IDENTITY));
         (shared.filter(|_| sampled), shared.filter(|_| storage))
@@ -751,6 +782,7 @@ fn shader_views(
             sampled.then(|| view(ImageUsage::SAMPLED, components)),
             storage.then(|| ImageViewInfo {
                 min_lod: 0.0,
+                format: srgb_storage.unwrap_or(realization.format),
                 ..view(ImageUsage::STORAGE, IDENTITY)
             }),
         )
@@ -764,7 +796,9 @@ fn shader_views(
     ShaderViews {
         sampled,
         faces,
+        srgb_storage: storage.is_some() && srgb_storage.is_some(),
         storage,
+        filter_class: pixel_format.filter_class(),
     }
 }
 
@@ -840,12 +874,11 @@ pub fn texture_view(
             view_format.contains(C::READ) && parent_format.contains(C::READ),
         );
     }
-    if parent.usage.is_empty() || parent.usage.contains(TextureUsage::SHADER_WRITE) {
-        usage = usage.with(
-            ImageUsage::STORAGE,
-            view_format.contains(C::WRITE) && parent_format.contains(C::WRITE),
-        );
-    }
+    // Its parent is writable wherever its format is (`effective_usage`).
+    usage = usage.with(
+        ImageUsage::STORAGE,
+        view_format.contains(C::WRITE) && parent_format.contains(C::WRITE),
+    );
     let range = SubresourceRange {
         aspects: shader_aspects(description),
         base_mip_level: view.levels.start as u32,
@@ -861,6 +894,7 @@ pub fn texture_view(
     };
     Ok(shader_views(
         view_type(view.texture_type),
+        view.pixel_format,
         realization,
         view.swizzle,
         range,
@@ -929,6 +963,10 @@ pub fn linear_texture(
     bytes_per_row: u64,
 ) -> Result<TexturePlan> {
     let description = descriptor.pixel_format.describe();
+    ensure(
+        descriptor.pixel_format.planes().is_none(),
+        "two-plane formats are only an IOSurface's",
+    )?;
     let realization = realization(description)?;
     if descriptor.texture_type == TextureType::D1 {
         // NVK stores linear images only as single-level 2D images, and a 2D
@@ -988,7 +1026,12 @@ pub fn linear_texture(
         "bytesPerRow exceeds the row pitch range",
     )?;
 
-    let usage = effective_usage(capabilities, descriptor)?;
+    // Linear tiling qualifies sampling (`C::LINEAR`), so a linear texture is
+    // written only when its usage says so.
+    let mut usage = effective_usage(capabilities, descriptor)?;
+    if !descriptor.usage.is_empty() && !descriptor.usage.contains(TextureUsage::SHADER_WRITE) {
+        usage = usage.difference(TextureUsage::SHADER_WRITE);
+    }
     let mut image = image_info(descriptor, description, realization, usage);
     image.tiling = ImageTiling::DrmFormatModifier;
     image.linear = Some(LinearLayout {
@@ -998,6 +1041,7 @@ pub fn linear_texture(
     let range = full_range(descriptor, description);
     let views = shader_views(
         ImageViewType::D2,
+        descriptor.pixel_format,
         realization,
         descriptor.swizzle,
         range,
@@ -1015,6 +1059,71 @@ pub fn linear_texture(
             CpuAccess::Linear
         },
     })
+}
+
+/// One plane of a two-plane texture: where it starts in the buffer and its
+/// row pitch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlaneLayout {
+    pub offset: u64,
+    pub bytes_per_row: u64,
+}
+
+/// An IOSurface's two-plane texture, of a [`PixelFormat::planes`] format:
+/// its first plane's linear image and its second's, at the second's own
+/// size, of [`PixelFormat::plane_formats`]. Shaders sample and read them; a render target
+/// of a format that renders ([`C::COLOR`]) attaches the first plane's raw
+/// texels and writes both planes' as storage. Other usages are reported by
+/// the caller.
+pub fn two_plane_texture(
+    capabilities: &Capabilities,
+    descriptor: &TextureDescriptor,
+    buffer_length: u64,
+    planes: [PlaneLayout; 2],
+) -> Result<[TexturePlan; 2]> {
+    let (Some(ratio), Some([first, second])) = (
+        descriptor.pixel_format.planes(),
+        descriptor.pixel_format.plane_formats(),
+    ) else {
+        return Err(super::error::Error::Invalid("the format has one plane"));
+    };
+    require(
+        capabilities
+            .format(descriptor.pixel_format)
+            .contains(C::READ),
+        "two-plane textures of this pixel format",
+    )?;
+    let (width, height) = ratio.second(descriptor.width, descriptor.height);
+    let renders = descriptor.usage.contains(TextureUsage::RENDER_TARGET)
+        && capabilities
+            .format(descriptor.pixel_format)
+            .contains(C::COLOR);
+    let usage = if renders {
+        TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET
+    } else {
+        TextureUsage::SHADER_READ
+    };
+    let plane = |pixel_format, width, height, layout: PlaneLayout| {
+        let plane = TextureDescriptor {
+            pixel_format,
+            width,
+            height,
+            usage,
+            swizzle: SwizzleChannels::IDENTITY,
+            ..*descriptor
+        };
+        linear_texture(
+            capabilities,
+            &plane,
+            buffer_length,
+            layout.offset,
+            layout.bytes_per_row,
+        )
+    };
+    Ok([
+        plane(first, descriptor.width, descriptor.height, planes[0])?,
+        plane(second, width, height, planes[1])?,
+    ])
 }
 
 /// A texture buffer: a texel buffer view of `width` texels at `offset`.

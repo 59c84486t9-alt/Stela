@@ -12,3 +12,6 @@ build = "build.rs"
 [dependencies]
 nak = { package = "stela-mesa-nak", path = "nak" }
 nil = { package = "stela-mesa-nil", path = "nil" }
+
+[build-dependencies]
+stela-fingerprint = { path = "../stela-fingerprint" }

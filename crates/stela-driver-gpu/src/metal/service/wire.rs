@@ -69,7 +69,12 @@ macro_rules! records {
 /// The records filling `bytes`.
 pub fn read_array<T: Record>(bytes: &[u8]) -> Result<Vec<T>, Fault> {
     if !bytes.len().is_multiple_of(core::mem::size_of::<T>()) {
-        return Err(Fault::MALFORMED);
+        return Err(Fault::malformed("record array").length(
+            bytes.len() as u64,
+            bytes
+                .len()
+                .next_multiple_of(core::mem::size_of::<T>().max(1)) as u64,
+        ));
     }
     bytes
         .chunks_exact(core::mem::size_of::<T>())
@@ -80,7 +85,7 @@ pub fn read_array<T: Record>(bytes: &[u8]) -> Result<Vec<T>, Fault> {
 /// The record in `bytes`, which must be exactly its size.
 pub fn read<T: Record>(bytes: &[u8]) -> Result<T, Fault> {
     if bytes.len() != core::mem::size_of::<T>() {
-        return Err(Fault::MALFORMED);
+        return Err(Fault::MALFORMED.length(bytes.len() as u64, size_of::<T>() as u64));
     }
     // SAFETY: `bytes` holds `size_of::<T>()` bytes, and every bit pattern is
     // a `T`.
@@ -98,7 +103,7 @@ pub fn bytes<T: Record>(value: &T) -> &[u8] {
 /// Writes `value` to `out`, which must be exactly its size.
 pub fn write<T: Record>(value: &T, out: &mut [u8]) -> Result<(), Fault> {
     if out.len() != core::mem::size_of::<T>() {
-        return Err(Fault::MALFORMED);
+        return Err(Fault::MALFORMED.length(out.len() as u64, size_of::<T>() as u64));
     }
     out.copy_from_slice(bytes(value));
     Ok(())
@@ -467,6 +472,13 @@ records! {
         pub descriptor: TextureDescriptorRecord,
         pub offset: u64,
         pub bytes_per_row: u64,
+        /// A two-plane texture's second plane, an IOSurface's plane 1;
+        /// zero `second_bytes_per_row` for one plane.
+        pub second_offset: u64,
+        pub second_bytes_per_row: u64,
+        /// The IOSurface's pixel format code, zero for none: two-plane
+        /// YCbCr converts in the range it names.
+        pub surface_format: u64,
     }
 
     /// What depends on a pixel format's size or support.
@@ -960,14 +972,46 @@ raw_enum! {
         /// A span's page is not mapped for the caller now, as any page of a
         /// task may not be: the frontend touches it and calls again.
         Unmapped = 9,
+        /// Metal's own nil answer, as Apple GPUs give it: an automatic heap
+        /// with no room for the resource, or a pipeline no binary archive
+        /// holds when the call may only take archived ones. The service
+        /// notes it rather than refusing.
+        Declined = 10,
     }
 }
 
-/// A failed operation: its status and why.
+/// The raw value a fault's reason names, as the call carried it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Raw {
+    /// An enumeration's value or a number, shown in decimal.
+    Value(u64),
+    /// A signed number, shown in decimal.
+    Signed(i64),
+    /// An option set's bits, shown in hexadecimal.
+    Bits(u64),
+    /// A length and the one the record or span needs.
+    Length { got: u64, expected: u64 },
+}
+
+impl core::fmt::Display for Raw {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match *self {
+            Self::Value(value) => write!(formatter, "{value}"),
+            Self::Signed(value) => write!(formatter, "{value}"),
+            Self::Bits(bits) => write!(formatter, "{bits:#x}"),
+            Self::Length { got, expected } => write!(formatter, "of {got} bytes, not {expected}"),
+        }
+    }
+}
+
+/// A failed operation: its status, why, and the raw value it refused. The
+/// value stays out of `reason` so a fault stays `Copy` and allocation-free;
+/// [`Fault`]'s `Display` joins them for the platform's log.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Fault {
     pub status: Status,
     pub reason: &'static str,
+    pub raw: Option<Raw>,
 }
 
 impl Fault {
@@ -976,12 +1020,54 @@ impl Fault {
     pub const CLOSED: Self = Self::new(Status::Closed, "the connection is closed");
 
     pub const fn new(status: Status, reason: &'static str) -> Self {
-        Self { status, reason }
+        Self {
+            status,
+            reason,
+            raw: None,
+        }
     }
 
     /// A value its type does not name.
     pub const fn malformed(reason: &'static str) -> Self {
         Self::new(Status::Malformed, reason)
+    }
+
+    /// The fault, naming the number the call carried.
+    pub fn value(self, value: impl Into<u64>) -> Self {
+        self.raw(Raw::Value(value.into()))
+    }
+
+    /// The fault, naming the signed number the call carried.
+    pub fn signed(self, value: impl Into<i64>) -> Self {
+        self.raw(Raw::Signed(value.into()))
+    }
+
+    /// The fault, naming the option bits the call carried.
+    pub fn bits(self, bits: impl Into<u64>) -> Self {
+        self.raw(Raw::Bits(bits.into()))
+    }
+
+    /// The fault, naming a length and the one it should have been.
+    pub const fn length(self, got: u64, expected: u64) -> Self {
+        self.raw(Raw::Length { got, expected })
+    }
+
+    pub const fn raw(self, raw: Raw) -> Self {
+        Self {
+            raw: Some(raw),
+            ..self
+        }
+    }
+}
+
+/// The reason, then the raw value it names: "pixel format 500".
+impl core::fmt::Display for Fault {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.reason)?;
+        match self.raw {
+            Some(raw) => write!(formatter, " {raw}"),
+            None => Ok(()),
+        }
     }
 }
 
@@ -991,9 +1077,13 @@ impl From<Error> for Fault {
             Error::Invalid(reason) => Self::new(Status::Invalid, reason),
             Error::Unsupported(capability) => Self::new(Status::Unsupported, capability),
             Error::OutOfMemory => Self::new(Status::OutOfMemory, "out of memory"),
+            Error::HeapFull => Self::new(Status::Declined, "the heap has no room for the resource"),
             Error::DeviceLost => Self::new(Status::DeviceLost, "the device was lost"),
             Error::NotArchived => {
-                Self::new(Status::Invalid, "no binary archive holds the pipeline")
+                Self::new(Status::Declined, "no binary archive holds the pipeline")
+            }
+            Error::Driver(result) => {
+                Self::new(Status::Unsupported, "Vulkan device operation VkResult").signed(result)
             }
         }
     }
@@ -1150,3 +1240,31 @@ operations! {
 }
 
 pub mod commands;
+
+#[cfg(test)]
+mod tests {
+    use super::{Fault, Status};
+    use alloc::format;
+
+    #[test]
+    fn a_fault_shows_its_raw_value_after_its_reason() {
+        let shown = |fault: Fault| format!("{fault}");
+        assert_eq!(shown(Fault::malformed("pixel format")), "pixel format");
+        assert_eq!(
+            shown(Fault::malformed("pixel format").value(500u64)),
+            "pixel format 500"
+        );
+        assert_eq!(
+            shown(Fault::malformed("texture usage").bits(0x20u64)),
+            "texture usage 0x20"
+        );
+        assert_eq!(
+            shown(Fault::new(Status::Invalid, "the base vertex exceeds 32 bits").signed(-1i64)),
+            "the base vertex exceeds 32 bits -1"
+        );
+        assert_eq!(
+            shown(Fault::MALFORMED.length(12, 16)),
+            "malformed record of 12 bytes, not 16"
+        );
+    }
+}

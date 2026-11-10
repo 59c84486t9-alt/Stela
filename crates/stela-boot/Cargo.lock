@@ -1191,6 +1191,7 @@ dependencies = [
 name = "stela-mesa"
 version = "0.0.0"
 dependencies = [
+ "stela-fingerprint",
  "stela-mesa-nak",
  "stela-mesa-nil",
 ]

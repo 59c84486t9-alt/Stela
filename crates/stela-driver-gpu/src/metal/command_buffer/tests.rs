@@ -1,7 +1,7 @@
 use super::{
     blit::{BlitTexture, BufferLayout, Region},
     counters::{CounterRange, CounterSample},
-    generated::{GeneratedLayoutKey, GeneratedWork, IndirectRenderClass},
+    device_generated::{GeneratedLayoutKey, GeneratedWork, IndirectRenderClass},
     indirect::ExecutionRange,
     render::{PassBoundary, PatchSource, Viewport},
     *,
@@ -36,8 +36,8 @@ use crate::metal::{
     pixel_format::{BlockKernel, PixelFormat},
     resource::TextureDescriptor,
     shader::{
-        Access as ShaderAccess, AttributeUse, BufferUse, CompiledShader, NumericClass, Patch,
-        PatchDomain, Provenance, tests::interface,
+        Access as ShaderAccess, AttributeUse, BufferUse, CompiledShader, DYNAMIC_BICUBIC,
+        NumericClass, Patch, PatchDomain, Provenance, tests::interface,
     },
     vertex::{
         Attribute, Layout, STRIDE_DYNAMIC, StageInLayout, StageInStep, StageInputDescriptor,
@@ -70,6 +70,8 @@ struct MockResolver {
     classes: Vec<IndirectRenderClass>,
     compute_set: Option<(ExecutionSet, Pipeline)>,
     layouts: Vec<GeneratedLayoutKey>,
+    /// The bicubic samplers of each render variant asked for.
+    bicubic: Vec<[u32; 2]>,
 }
 
 impl ChunkSource for MockResolver {
@@ -105,6 +107,15 @@ impl Resolver for MockResolver {
 
     fn clamped_sampler(&mut self, sampler: ResourceId, _: f32, _: f32) -> Result<ResourceId> {
         Ok(ResourceId(sampler.0 + 100))
+    }
+
+    fn bicubic_render_pipeline(
+        &mut self,
+        _: &RenderPipelineState,
+        bicubic: [u32; 2],
+    ) -> Result<Pipeline> {
+        self.bicubic.push(bicubic);
+        Ok(Pipeline(800 + u64::from(bicubic[0] | bicubic[1] << 16)))
     }
 
     fn mesh_pipeline(
@@ -321,6 +332,7 @@ fn render_state(amplification: u64) -> RenderPipelineState {
         plan,
         interfaces: alloc::vec![vertex.interface, fragment.interface],
         indirect: None,
+        bicubic: [0; 2],
     }
 }
 
@@ -386,6 +398,7 @@ fn patch_state_of(
         plan: render_pipeline(&capabilities(), &descriptor).unwrap(),
         interfaces: alloc::vec![evaluation.interface],
         indirect: None,
+        bicubic: [0; 2],
     }
 }
 
@@ -661,6 +674,7 @@ fn mesh_thread_draws_cover_the_grid_with_the_first_stage() {
                 .chain([mesh_function.clone()])
                 .collect(),
             indirect: None,
+            bicubic: [0; 2],
         };
         let mut resolver = MockResolver::default();
         let mut commands = CommandBuffer::new(FEATURES);
@@ -758,6 +772,128 @@ fn a_draw_binds_every_buffer_its_functions_access() {
         .set_render_bytes(&mut resolver, Stage::Fragment, &[9; 12], 1)
         .unwrap();
     draw(&mut commands, &mut resolver).unwrap();
+}
+
+#[test]
+fn draws_through_bicubic_samplers_bind_the_variant_filtering_them() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    let mut state = render_state(1);
+    state.interfaces[1].samplers = alloc::vec![0, 2];
+    commands.set_render_pipeline_state(&state).unwrap();
+    commands
+        .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
+        .unwrap();
+    let linear = ResourceId::sampler(1, 2, 0);
+    let cubic = ResourceId::sampler(3, 4, ResourceId::SAMPLER_CUBIC);
+    let mut draw_with = |sampler: Option<(Stage, ResourceId, u32)>| {
+        if let Some((stage, sampler, index)) = sampler {
+            commands
+                .set_render_sampler(&mut resolver, stage, sampler, None, index)
+                .unwrap();
+        }
+        commands
+            .draw_primitives(&mut resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
+            .unwrap();
+    };
+    // A linear sampler draws with the pipeline.
+    draw_with(Some((Stage::Fragment, linear, 0)));
+    // A bicubic sampler the fragment function samples binds the variant
+    // filtering it bicubically, which the next draw keeps.
+    draw_with(Some((Stage::Fragment, cubic, 2)));
+    draw_with(None);
+    // Bicubic samplers where no function samples change nothing.
+    draw_with(Some((Stage::Fragment, cubic, 5)));
+    draw_with(Some((Stage::Vertex, cubic, 0)));
+    // Linear again, the draw binds the pipeline.
+    draw_with(Some((Stage::Fragment, linear, 2)));
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    assert_eq!(resolver.bicubic, [[0, 1 << 2]; 4]);
+    let bound: Vec<_> = recording.segments[0]
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::BindPipeline {
+                bind_point: PipelineBindPoint::Graphics,
+                pipeline,
+            } => Some(pipeline.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bound, [42, 800 + (1 << 2 << 16), 42]);
+}
+
+#[test]
+fn draws_bind_no_variant_for_samplers_their_pipeline_filters_bicubically() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    let mut state = render_state(1);
+    state.interfaces[1].samplers = alloc::vec![2];
+    state.bicubic = [0, DYNAMIC_BICUBIC];
+    commands.set_render_pipeline_state(&state).unwrap();
+    commands
+        .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
+        .unwrap();
+    let cubic = ResourceId::sampler(3, 4, ResourceId::SAMPLER_CUBIC);
+    commands
+        .set_render_sampler(&mut resolver, Stage::Fragment, cubic, None, 2)
+        .unwrap();
+    commands
+        .draw_primitives(&mut resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
+        .unwrap();
+    assert!(resolver.bicubic.is_empty());
+}
+
+#[test]
+fn dispatches_through_bicubic_samplers_run_the_variant_filtering_them() {
+    let threads = Size {
+        width: 64,
+        height: 1,
+        depth: 1,
+    };
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_compute(DispatchType::Serial).unwrap();
+    let mut state = kernel_state(false);
+    state.interface.samplers = alloc::vec![1, 3];
+    commands.set_compute_pipeline_state(&state).unwrap();
+    commands
+        .set_compute_buffer(Some(buffer(4, 1024)), 0, 0)
+        .unwrap();
+    let cubic = ResourceId::sampler(3, 4, ResourceId::SAMPLER_CUBIC);
+    for (sampler, index) in [(ResourceId::sampler(1, 2, 0), 1), (cubic, 3), (cubic, 4)] {
+        commands
+            .set_compute_sampler(&mut resolver, sampler, None, index)
+            .unwrap();
+        commands
+            .dispatch_threadgroups(&mut resolver, [4, 1, 1], threads)
+            .unwrap();
+    }
+    let bicubic: Vec<_> = resolver
+        .compiled
+        .iter()
+        .map(|specialization| specialization.bicubic_samplers)
+        .collect();
+    assert_eq!(bicubic, [0, 1 << 3]);
 }
 
 #[test]
@@ -1894,6 +2030,70 @@ fn events_split_command_buffers_into_submissions() {
             ),
         ]
     );
+}
+
+#[test]
+fn waits_for_values_the_command_buffer_signals_take_no_submission() {
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .encode_signal_event(&mut resolver, Semaphore(8), 2)
+        .unwrap();
+    for (event, value) in [(Semaphore(8), 1), (Semaphore(8), 2)] {
+        commands
+            .encode_wait_for_event(&mut resolver, event, value)
+            .unwrap();
+    }
+    commands
+        .encode_wait_for_event(&mut resolver, Semaphore(8), 3)
+        .unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 9));
+    let waits: Vec<_> = recording
+        .segments
+        .iter()
+        .map(|segment| segment.waits.clone())
+        .collect();
+    assert_eq!(
+        waits,
+        [alloc::vec![], alloc::vec![(Semaphore(8), 3)]],
+        "only a value the command buffer does not reach waits"
+    );
+    assert!(
+        recording
+            .segments
+            .iter()
+            .all(|segment| segment.commands.first() == Some(&Command::Barrier(FULL))),
+        "every segment opens with a full barrier"
+    );
+}
+
+#[test]
+fn signals_without_a_later_wait_take_no_submission() {
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    for value in [1, 2] {
+        commands.begin_blit().unwrap();
+        commands
+            .copy_buffer(buffer(4, 64), 0, buffer(5, 64), 0, 64)
+            .unwrap();
+        commands.end_encoding(&mut resolver).unwrap();
+        commands
+            .encode_signal_event(&mut resolver, Semaphore(8), value)
+            .unwrap();
+    }
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 9));
+    let [segment] = recording.segments.as_slice() else {
+        panic!("one submission, not {}", recording.segments.len());
+    };
+    assert_eq!(
+        segment.signals,
+        [(Semaphore(8), 2), (Semaphore(1), 9)],
+        "the event keeps its last value, signaled with completion"
+    );
+    let barriers = count(&segment.commands, |command| {
+        *command == Command::Barrier(FULL)
+    });
+    assert_eq!(barriers, 3, "each joined segment keeps its opening barrier");
 }
 
 #[test]
@@ -3156,6 +3356,64 @@ fn resident_draws_execute_one_generated_sequence_per_slot() {
 }
 
 #[test]
+fn amplified_resident_draws_run_once_for_each_view() {
+    let descriptor = IndirectCommandBufferDescriptor {
+        inherit_pipeline_state: true,
+        inherit_cull_mode: true,
+        ..icb_descriptor(IndirectCommandType::DRAW)
+    };
+    let mut resolver = resident_icb(descriptor, 2);
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    commands
+        .set_render_pipeline_state(&render_state(1))
+        .unwrap();
+    commands
+        .set_vertex_amplification(&[(0, 0), (1, 3)])
+        .unwrap();
+    commands
+        .execute_commands(
+            &mut resolver,
+            IndirectCommandBufferId(0),
+            ExecutionRange::Direct(0..2),
+        )
+        .unwrap();
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let commands = &recording.segments[0].commands;
+    // Each view resolves its own sequences, whose push constants are the
+    // view's, then runs every command's slots.
+    let resolves: Vec<u64> = commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::ResolveDraws { arguments, .. } => Some(*arguments),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(resolves.len(), 2);
+    assert_eq!(generated(commands).len(), 2 * 2 * 2);
+    for (view, &arguments) in resolves.iter().enumerate() {
+        let arguments = uploaded(&recording, arguments);
+        let push = ResolveArguments::PUSH_OFFSET as usize;
+        let at = |offset: u32| word(arguments, push + offset as usize);
+        assert_eq!(at(PushConstants::AMPLIFICATION_OFFSET), view as u32);
+        assert_eq!(at(PushConstants::AMPLIFICATIONS_OFFSET), 2);
+        assert_eq!(
+            at(PushConstants::VIEW_MAPPING_OFFSET),
+            [0, 3 << 16 | 1][view]
+        );
+    }
+}
+
+#[test]
 fn resident_patch_draws_run_as_point_draws_of_the_encoders_pipeline() {
     let descriptor = IndirectCommandBufferDescriptor {
         inherit_pipeline_state: true,
@@ -3279,6 +3537,7 @@ fn resident_draws_switch_pipelines_through_execution_sets() {
         vertex_buffers: alloc::vec![(0, Some(16)), (3, None)],
         storage_attachments: 0,
         blended_attachments: 1,
+        tests_fragments: false,
     };
     resolver.classes = alloc::vec![class(0, 70), class(2, 71)];
     let color = texture(PixelFormat::Rgba8Unorm);
@@ -3326,7 +3585,11 @@ fn resident_draws_switch_pipelines_through_execution_sets() {
         word(arguments, ResolveArguments::CLASS_COUNT_OFFSET as usize),
         3
     );
-    assert_eq!(word(arguments, ResolveArguments::FLAGS_OFFSET as usize), 0);
+    // A pipeline the commands set scales factors in its own control stage.
+    assert_eq!(
+        word(arguments, ResolveArguments::FLAGS_OFFSET as usize),
+        ResolveArguments::SCALES
+    );
     let strides = uploaded(
         &recording,
         u64_at(arguments, ResolveArguments::STRIDES_OFFSET),
@@ -3709,6 +3972,7 @@ fn fragment_testing_draws_run_on_copies_of_the_depth_and_stencil() {
         layers: 1,
         extent: [64, 32],
         encoding: 3,
+        planes: false,
     };
     plan.inputs.depth_copy = Some(copy(1, crate::metal::vulkan::ImageAspects::DEPTH));
     plan.inputs.stencil_copy = Some(copy(2, crate::metal::vulkan::ImageAspects::STENCIL));
@@ -3836,6 +4100,7 @@ fn stencil_resolves_following_min_depth_run_on_copies_of_the_samples() {
         layers: 1,
         extent: [64, 32],
         encoding: 3,
+        planes: false,
     };
     plan.inputs.follows_depth = Some(FollowedStencil {
         depth: copy(1, 101, 8, ImageAspects::DEPTH),
@@ -3906,4 +4171,103 @@ fn stencil_resolves_following_min_depth_run_on_copies_of_the_samples() {
             4
         ]
     );
+}
+
+#[test]
+fn a_lost_device_names_the_widest_dispatch_and_its_threadgroup_memory() {
+    let mut workload = Workload::default();
+    let shape = |groups: [u32; 3], threads: [u32; 3]| {
+        let mut shape = DispatchShape {
+            threadgroups: groups,
+            threads,
+            ..DispatchShape::default()
+        };
+        shape.lengths[0] = (0, 4096);
+        shape.lengths[1] = (1, 8192);
+        shape.length_count = 2;
+        shape
+    };
+    workload.dispatched(shape([3, 2, 1], [16, 16, 1]));
+    workload.dispatched(shape([1, 1, 1], [32, 1, 1]));
+    assert_eq!(workload.widest, Some(shape([3, 2, 1], [16, 16, 1])));
+    assert_eq!(
+        alloc::format!("{}", workload.widest.unwrap()),
+        "3x2x1 threadgroups of 16x16x1, threadgroup 0 4096 bytes, threadgroup 1 8192 bytes"
+    );
+}
+
+/// A pass whose color attachment is a 3D texture's depth plane, which no
+/// storage view reads: draws accessing it as storage run on its copy, which
+/// the plane fills before the first such draw and which returns before a
+/// draw rendering it through the blend unit and where the pass ends.
+#[test]
+fn storage_draws_of_a_3d_plane_run_on_its_copy() {
+    use crate::metal::{pass::TestedCopy, vulkan::command::ImageCopy};
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut plan = pass(&color, StoreAction::Store, false);
+    let copy = TestedCopy {
+        id: ResourceId::texture(0, 5, 1),
+        image: Image(105),
+        attachment: Image(7),
+        aspect: crate::metal::vulkan::ImageAspects::COLOR,
+        level: 1,
+        base_layer: 2,
+        layers: 1,
+        extent: [64, 32],
+        encoding: 0,
+        planes: true,
+    };
+    plan.inputs.textures[0] = copy.id;
+    plan.inputs.color_copies[0] = Some(copy);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(&mut resolver, plan, None, Vec::new())
+        .unwrap();
+    let mut storage = render_state(1);
+    storage.interfaces[1].storage_attachments = 1;
+    let blended = render_state(1);
+    commands
+        .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
+        .unwrap();
+    let draw = |commands: &mut CommandBuffer, resolver: &mut MockResolver| {
+        commands
+            .draw_primitives(resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
+            .unwrap()
+    };
+    commands.set_render_pipeline_state(&storage).unwrap();
+    draw(&mut commands, &mut resolver);
+    draw(&mut commands, &mut resolver);
+    commands.set_render_pipeline_state(&blended).unwrap();
+    draw(&mut commands, &mut resolver);
+    commands.set_render_pipeline_state(&storage).unwrap();
+    draw(&mut commands, &mut resolver);
+    commands.end_encoding(&mut resolver).unwrap();
+    let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+    let copies: Vec<(Image, Image, ImageCopy)> = recording.segments[0]
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::CopyImage { src, dst, regions } => Some((*src, *dst, regions[0])),
+            _ => None,
+        })
+        .collect();
+    let pairs: Vec<(Image, Image)> = copies.iter().map(|&(src, dst, _)| (src, dst)).collect();
+    let (to, from) = ((Image(7), Image(105)), (Image(105), Image(7)));
+    // In, back before the blended draw, in again, back where the pass ends.
+    assert_eq!(pairs, [to, from, to, from]);
+    // The plane is depth 2 of the attachment's level, the copy's layer 0.
+    let into = copies[0].2;
+    assert_eq!(
+        (
+            into.src.mip_level,
+            into.src.base_array_layer,
+            into.src.layer_count
+        ),
+        (1, 0, 1)
+    );
+    assert_eq!((into.src_offset, into.dst_offset), ([0, 0, 2], [0; 3]));
+    assert_eq!(into.extent, [64, 32, 1]);
+    let back = copies[1].2;
+    assert_eq!((back.src_offset, back.dst_offset), ([0; 3], [0, 0, 2]));
 }

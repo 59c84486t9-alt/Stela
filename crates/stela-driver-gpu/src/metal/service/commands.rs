@@ -2,7 +2,7 @@
 //! and submits it. A command the encoders refuse discards the command
 //! buffer, as Metal's validation would, and the commit answers why.
 use super::{
-    Call, Service, boolean, known,
+    Call, Service, boolean, decode,
     wire::{
         self, Empty, Fault, Handle, Record, Status, Value,
         commands::{
@@ -23,6 +23,7 @@ use crate::metal::{
     device::{BufferId, SamplerId, TextureId},
     pipeline::{DepthStencilDescriptor, DepthStencilState, StencilDescriptor, depth_stencil},
     shader::Compiler,
+    timing::{Detail, Phase, Timed},
     vulkan::backend::Backend,
 };
 use alloc::vec::Vec;
@@ -50,15 +51,19 @@ impl<'a, Code> Stream<'a, Code> {
 
     fn entry(&mut self) -> Result<(Code, Payload<'a>), Fault> {
         const HEADER: usize = core::mem::size_of::<CommandHeader>();
-        let header: CommandHeader = wire::read(self.bytes.get(..HEADER).ok_or(Fault::MALFORMED)?)?;
+        let left = self.bytes.len() as u64;
+        let header: CommandHeader = wire::read(
+            self.bytes
+                .get(..HEADER)
+                .ok_or(Fault::malformed("command header").length(left, HEADER as u64))?,
+        )?;
         let end = HEADER + header.length as usize;
-        let entry = self
-            .bytes
-            .get(..end.next_multiple_of(8))
-            .ok_or(Fault::MALFORMED)?;
+        let entry = self.bytes.get(..end.next_multiple_of(8)).ok_or(
+            Fault::malformed("command entry").length(left, end.next_multiple_of(8) as u64),
+        )?;
         self.bytes = &self.bytes[entry.len()..];
         let code = (self.decode)(header.code)
-            .ok_or(Fault::new(Status::UnknownOperation, "unknown command"))?;
+            .ok_or(Fault::new(Status::UnknownOperation, "unknown command").value(header.code))?;
         Ok((code, Payload(&entry[HEADER..end])))
     }
 }
@@ -103,21 +108,67 @@ impl<'a> Payload<'a> {
 
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn commit(&mut self, call: &mut Call) -> Result<(), Fault> {
+        self.device.timing().begin(Timed::Commit);
         let CommitRequest { commands: span } = call.request()?;
         let connection = call.connection;
         let mut commands = self.device.new_command_buffer();
+        let start = self.device.timing().now();
         let stream_bytes = call.memory.read(span)?;
+        let start = self.device.timing().since(Phase::CommitRead, start);
+        self.device.timing().detail(
+            Timed::Commit,
+            Detail::Commit {
+                stream: stream_bytes.len() as u64,
+                uploads: 0,
+            },
+        );
         let mut stream = Stream::new(&stream_bytes, CommandCode::from_raw);
         let replayed = stream.try_for_each(|entry| {
             let (code, payload) = entry?;
             self.replay(connection, &mut commands, code, payload)
         });
+        self.device.timing().since(Phase::CommitReplay, start);
         if let Err(fault) = replayed {
             self.device.discard(commands);
+            // A deferred compilation runs the commit again, which submits
+            // the command buffer with its events: signaling them now would
+            // wake their waiters before its work.
+            if !self.device.compiler_mut().deferred() {
+                self.commit_events_only(connection, &stream_bytes);
+            }
             return Err(fault);
         }
-        let value = self.device.commit(commands)?;
+        let value = self.device.commit_for(connection.get(), commands)?;
         call.reply(&Value { value })
+    }
+
+    /// A command buffer that fails to replay does none of its work, but
+    /// still waits for and signals its events in order, as a Metal command
+    /// buffer that errors does: work queued behind its events must not wait
+    /// forever. What cannot be replayed even so is dropped.
+    fn commit_events_only(&mut self, connection: NonZeroU64, stream_bytes: &[u8]) {
+        let mut events = self.device.new_command_buffer();
+        let mut count = 0;
+        let mut stream = Stream::new(stream_bytes, CommandCode::from_raw);
+        let replayed = stream.try_for_each(|entry| {
+            let (code, payload) = entry?;
+            match code {
+                CommandCode::CommandBuffer(
+                    code @ (CommandBufferCode::SignalEvent | CommandBufferCode::WaitForEvent),
+                ) => {
+                    count += 1;
+                    self.command_buffer(connection, &mut events, code, payload)
+                }
+                _ => Ok(()),
+            }
+        });
+        // One with no events submits nothing.
+        match replayed {
+            Ok(()) if count > 0 => {
+                let _ = self.device.commit_for(connection.get(), events);
+            }
+            _ => self.device.discard(events),
+        }
     }
 
     fn replay(
@@ -177,7 +228,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     barrier,
                     reserved: _,
                 } = payload.record()?;
-                let index = u32::try_from(index).map_err(|_| Fault::malformed("sample index"))?;
+                let index = u32::try_from(index)
+                    .map_err(|_| Fault::malformed("sample index").value(index))?;
                 let sample = self
                     .device
                     .counter_sample(self.object(connection, buffer)?, index)?;
@@ -200,8 +252,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             )
         };
         Ok(PatchSource {
-            control_points: u32::try_from(record.control_points)
-                .map_err(|_| Fault::malformed("patch control points"))?,
+            control_points: u32::try_from(record.control_points).map_err(|_| {
+                Fault::malformed("patch control points").value(record.control_points)
+            })?,
             patch_indices: indices(record.patch_index_buffer, record.patch_index_offset)?,
             control_point_indices: indices(
                 record.control_point_index_buffer,
@@ -273,7 +326,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 
 /// An argument table index.
 fn binding(index: u64) -> Result<u32, Fault> {
-    u32::try_from(index).map_err(|_| Fault::malformed("binding index"))
+    u32::try_from(index).map_err(|_| Fault::malformed("binding index").value(index))
 }
 
 /// An `MTLSize` of threads in a threadgroup.
@@ -289,23 +342,25 @@ fn size([width, height, depth]: [u64; 3]) -> Size {
 fn grid(size: [u64; 3]) -> Result<[u32; 3], Fault> {
     let mut grid = [0; 3];
     for (out, size) in grid.iter_mut().zip(size) {
-        *out = u32::try_from(size)
-            .map_err(|_| Fault::new(Status::Invalid, "a grid dimension exceeds 32 bits"))?;
+        *out = u32::try_from(size).map_err(|_| {
+            Fault::new(Status::Invalid, "a grid dimension exceeds 32 bits").value(size)
+        })?;
     }
     Ok(grid)
 }
 
 /// A draw's count, start or base, which the GPU takes in 32 bits.
 fn count(value: u64) -> Result<u32, Fault> {
-    u32::try_from(value).map_err(|_| Fault::new(Status::Invalid, "a draw argument exceeds 32 bits"))
+    u32::try_from(value)
+        .map_err(|_| Fault::new(Status::Invalid, "a draw argument exceeds 32 bits").value(value))
 }
 
 fn primitive(raw: u64) -> Result<PrimitiveType, Fault> {
-    known(PrimitiveType::from_raw(raw), "primitive type")
+    decode(PrimitiveType::from_raw, raw, "primitive type")
 }
 
 fn index_type(raw: u64) -> Result<IndexType, Fault> {
-    known(IndexType::from_raw(raw), "index type")
+    decode(IndexType::from_raw, raw, "index type")
 }
 
 /// The state of a depth-stencil state object made from `record`.
@@ -319,7 +374,7 @@ fn depth_stencil_state(record: &DepthStencilRecord) -> Result<DepthStencilState,
 }
 
 fn stencil(record: &StencilRecord) -> Result<StencilDescriptor, Fault> {
-    let operation = |raw| known(StencilOperation::from_raw(raw), "stencil operation");
+    let operation = |raw| decode(StencilOperation::from_raw, raw, "stencil operation");
     Ok(StencilDescriptor {
         stencil_compare_function: compare_function(record.compare_function)?,
         stencil_failure_operation: operation(record.stencil_failure_operation)?,
@@ -331,5 +386,5 @@ fn stencil(record: &StencilRecord) -> Result<StencilDescriptor, Fault> {
 }
 
 fn compare_function(raw: u64) -> Result<CompareFunction, Fault> {
-    known(CompareFunction::from_raw(raw), "compare function")
+    decode(CompareFunction::from_raw, raw, "compare function")
 }

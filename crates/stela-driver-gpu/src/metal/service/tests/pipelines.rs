@@ -84,7 +84,8 @@ fn archives_read_back_and_answer_for_pipelines() {
             memory,
         ))
     };
-    assert_eq!(create(memory, &[archive], 0, 1), Status::Invalid);
+    // A miss is Metal's own nil answer, not a refusal.
+    assert_eq!(create(memory, &[archive], 0, 1), Status::Declined);
     assert_eq!(create(memory, &[], archive, 0), Status::Ok);
     assert_eq!(create(memory, &[archive], 0, 1), Status::Ok);
 

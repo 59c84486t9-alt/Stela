@@ -141,6 +141,15 @@ pub struct AttachmentInputs {
     /// The copies a stencil resolve following the depth resolve reads and
     /// writes ([`RenderingAttachment::follows_depth`]).
     pub follows_depth: Option<FollowedStencil>,
+    /// The storage copy of each color attachment whose raw texels no view
+    /// of its own reads, an A8Unorm texture's or a 3D texture's depth
+    /// planes ([`Device::color_copy`](super::device::Device::color_copy)),
+    /// which its `textures` entry then accesses.
+    pub color_copies: [Option<TestedCopy>; MAX_COLOR_ATTACHMENTS],
+    /// The second plane of each two-plane color attachment the pass
+    /// clears, and its value, which the pass clears before it begins: the
+    /// attachment clears only the first plane, its raw texels.
+    pub second_plane_clears: [Option<(Image, ClearValue)>; MAX_COLOR_ATTACHMENTS],
 }
 
 /// Storage copies of a pass's depth and stencil samples and of its stencil
@@ -153,10 +162,10 @@ pub struct FollowedStencil {
     pub resolve: TestedCopy,
 }
 
-/// A depth or stencil attachment's storage copy: its view's ID and image,
-/// and the attachment's image, aspect, level, first layer and the layers
-/// and extent the copy holds; a depth copy's `encoding` is its
-/// `enum stela_air_depth_format`.
+/// An attachment's storage copy: its view's ID and image, and the
+/// attachment's image, aspect, level, first layer and the layers and extent
+/// the copy holds, whose layers are a 3D attachment's depth planes with
+/// `planes`; a depth copy's `encoding` is its `enum stela_air_depth_format`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TestedCopy {
     pub id: ResourceId,
@@ -168,6 +177,7 @@ pub struct TestedCopy {
     pub layers: u32,
     pub extent: [u32; 2],
     pub encoding: u32,
+    pub planes: bool,
 }
 
 /// `VkRenderingInfo` and what the encoder checks against it.
@@ -423,9 +433,12 @@ pub fn render_pass<T: Copy + Eq>(
         };
         color_formats[index] = Some(format);
         let averaged = capabilities.format(format).contains(C::RAW_RENDER);
-        // A 3D texture's depth planes have no raw texel views.
+        // A 3D texture's depth planes have no raw texel views: the pass
+        // renders such an attachment in a storage copy of them
+        // (AttachmentInputs::color_copies), which framebuffer reads make.
         require(
-            !(averaged && attachment.target.texture.descriptor.texture_type == TextureType::D3),
+            !(averaged && attachment.target.texture.descriptor.texture_type == TextureType::D3)
+                || capabilities.framebuffer_reads,
             "rendering to 3D textures of this pixel format",
         )?;
         let clear = match pixel_format::raw_clear(format, attachment.clear) {

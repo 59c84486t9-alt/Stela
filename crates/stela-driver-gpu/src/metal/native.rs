@@ -7,18 +7,25 @@
 //! robust access), takes one universal queue, and builds the bindless heap
 //! and the single pipeline layout of the [binding ABI](super::binding).
 //!
-//! Handles cross the boundary as their raw Vulkan values. Shader code is
+//! Handles cross the boundary as their raw Vulkan values, except memory:
+//! buffers and images are placed in larger blocks ([`blocks`]), so a
+//! [`Memory`] is the backend's own number for a block place or a whole
+//! allocation ([`memory`]). Shader code is
 //! NIR, which pipelines pass in Mesa's `VkPipelineShaderStageNirCreateInfoMESA`
 //! (as Mesa's own meta shaders do) without a module or SPIR-V. Images are moved to `VK_IMAGE_LAYOUT_GENERAL` once, on the host
 //! when they allow host transfers and otherwise at the start of the next
 //! submission, and stay there.
-mod generated;
+mod blocks;
+mod device_generated;
+mod memory;
 mod objects;
 mod physical;
+pub mod pipeline_store;
 mod record;
 mod sparse;
 #[cfg(test)]
 mod tests;
+mod zero;
 
 use super::{
     binding::{HEAP_SET, HeapLayout, NULL_DESCRIPTOR, PushConstants},
@@ -26,8 +33,10 @@ use super::{
     error::{Error, Result, ensure},
     vulkan::{
         SampleCounts,
-        backend::{Backend, BufferAllocation, Descriptor, Object, Requirements, requirements},
-        command::BufferImageCopy,
+        backend::{
+            Backend, BufferAllocation, Descriptor, MemoryBlocks, Object, Requirements, requirements,
+        },
+        command::{BufferImageCopy, Command, Subresource},
         object::{
             Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, ExecutionSet,
             GraphicsPipelineInfo, Image, ImageInfo, ImageView, ImageViewInfo,
@@ -41,10 +50,12 @@ use super::{
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
+    format,
     vec::Vec,
 };
 pub use ash::vk;
 use ash::{ext, khr};
+use blocks::{Candidate, Needs, Purpose, Resident, Source, Tiling};
 use core::{
     ffi::{CStr, c_void},
     mem::ManuallyDrop,
@@ -61,6 +72,39 @@ pub struct Loader {
     /// Told each error and warning the driver reports, such as why a call
     /// failed with only a generic result.
     pub log: fn(&str),
+}
+
+/// What a device whose CPU reaches only part of its memory (no Resizable
+/// BAR) costs: textures the CPU copies to and from (`HOST_TRANSFER` images,
+/// Metal's shared and managed textures) must then share the window the
+/// CPU reaches, and run out of memory at its size. `None` when the CPU
+/// reaches all the device-local memory.
+fn small_bar(memory: &super::vulkan::physical::Memory) -> Option<alloc::string::String> {
+    use super::vulkan::MemoryHeapFlags;
+    use super::vulkan::MemoryProperties as P;
+    let local = memory
+        .heaps
+        .iter()
+        .filter(|heap| heap.flags.contains(MemoryHeapFlags::DEVICE_LOCAL))
+        .map(|heap| heap.size)
+        .max()?;
+    let reached = memory
+        .types
+        .iter()
+        .filter(|kind| kind.properties.contains(P::DEVICE_LOCAL | P::HOST_VISIBLE))
+        .filter_map(|kind| memory.heaps.get(kind.heap_index as usize))
+        .map(|heap| heap.size)
+        .max()
+        .unwrap_or(0);
+    // The CPU reaching less than all of it, with room for the kernel's own.
+    (reached < local - local / 8).then(|| {
+        format!(
+            "GPU memory the CPU reaches is {} MiB of {} MiB (no Resizable BAR): textures the \
+             CPU copies share it",
+            reached >> 20,
+            local >> 20
+        )
+    })
 }
 
 /// Forwards the driver's errors and warnings to a [`Loader::log`] through
@@ -207,6 +251,39 @@ struct Mapping {
     coherent: bool,
 }
 
+/// A mapped range: its host pointer, and its `VkDeviceMemory` and offset
+/// there.
+#[derive(Clone, Copy, Debug)]
+struct Mapped {
+    pointer: NonNull<u8>,
+    memory: vk::DeviceMemory,
+    offset: u64,
+    coherent: bool,
+}
+
+/// How a buffer or image takes memory.
+#[derive(Clone, Copy, Debug)]
+struct Resource {
+    tiling: Tiling,
+    /// The least alignment of its place.
+    alignment: u64,
+    /// The driver requires or prefers memory of the resource's own.
+    own: bool,
+}
+
+/// Where a buffer's memory starts at the least: NIL aligns a linear image
+/// to at most 256 bytes (`Image::new_linear`), and memory of the buffer's
+/// own started at 0, so a linear image over the buffer binds wherever
+/// Metal's offsets put it.
+const LINEAR_PLACEMENT: u64 = 256;
+
+/// Whether `VkMemoryDedicatedRequirements` asks for memory of the
+/// resource's own.
+fn own(dedicated: &vk::MemoryDedicatedRequirements<'_>) -> bool {
+    dedicated.prefers_dedicated_allocation == vk::TRUE
+        || dedicated.requires_dedicated_allocation == vk::TRUE
+}
+
 #[derive(Debug)]
 enum CommandBuffers {
     One(vk::CommandBuffer),
@@ -243,6 +320,10 @@ impl CommandBuffers {
         }
     }
 }
+
+/// Unfreed submissions past which a submission asks the timeline what
+/// completed rather than waiting for a completion poll to.
+const RECLAIM_AFTER: usize = 64;
 
 /// Command buffers of one submission, freed once the queue's timeline
 /// passes `value`.
@@ -300,9 +381,23 @@ struct ExtensionFns {
     mesh: Option<ext::mesh_shader::Device>,
     calibrated: Option<khr::calibrated_timestamps::Device>,
     external_memory_fd: Option<khr::external_memory_fd::Device>,
+    /// Exports the queue's timeline as a DRM syncobj, which the platform
+    /// waits on to learn of completions as they happen.
+    external_semaphore_fd: Option<khr::external_semaphore_fd::Device>,
     conditional: ext::conditional_rendering::Device,
     /// With the snapshot's `generated_commands` limits.
-    generated: Option<generated::Fns>,
+    generated: Option<device_generated::Fns>,
+    /// Each pipeline's compiled shaders' statistics, which the backend
+    /// reports through the loader's log for a shader that spills or is
+    /// large: NAK's work and memory grow with a block's instructions.
+    executables: Option<Executables>,
+}
+
+/// The functions that read a pipeline's shader statistics, and the loader's
+/// log they are reported to.
+struct Executables {
+    fns: khr::pipeline_executable_properties::Device,
+    log: fn(&str),
 }
 
 pub struct NativeBackend {
@@ -325,7 +420,10 @@ pub struct NativeBackend {
     /// own: the next signal covers them, as a signal's first synchronization
     /// scope includes every command earlier in submission order.
     unsignaled: Vec<vk::CommandBuffer>,
+    /// Host mappings of whole `VkDeviceMemory` allocations, by handle.
     mappings: BTreeMap<u64, Mapping>,
+    /// What each [`Memory`] value names, and the blocks resources share.
+    memories: memory::Memories,
     exporter: ManuallyDrop<Box<dyn MemoryExporter>>,
     /// What each imported memory came from, and its token.
     imports: BTreeMap<u64, (ExportedMemory, NonZeroU64)>,
@@ -333,6 +431,9 @@ pub struct NativeBackend {
     retired: VecDeque<NonZeroU64>,
     /// Images still in `VK_IMAGE_LAYOUT_UNDEFINED`, with their aspects.
     new_images: Vec<(vk::Image, vk::ImageAspectFlags)>,
+    /// What new resources take of memory used before, which the host or
+    /// the next submission zeroes first.
+    zeroing: zero::Zeroing,
     /// Orders sparse binds between command buffers: before a segment's
     /// binds the queue signals an odd value, and the binds signal the next.
     bind_timeline: vk::Semaphore,
@@ -348,12 +449,18 @@ pub struct NativeBackend {
     decode_pvrtc: vk::Pipeline,
     reorder_blocks: vk::Pipeline,
     decode_astc: vk::Pipeline,
+    /// The cache compiled pipelines read and fill, kept across boots.
+    store: pipeline_store::Persisted,
+    /// The platform's tick counter, and the phases of `create_image` and
+    /// `submit` it timed since the device took them.
+    ticks: fn() -> u64,
+    split: [u64; 3],
 }
 
 impl NativeBackend {
     /// The generated-commands entry points, which the Metal layer uses only
     /// with the snapshot's `generated_commands` limits.
-    fn generated(&self) -> &generated::Fns {
+    fn generated(&self) -> &device_generated::Fns {
         self.fns
             .generated
             .as_ref()
@@ -389,7 +496,8 @@ fn failure(result: vk::Result) -> Error {
             Error::Unsupported("Vulkan external handle (VK_ERROR_INVALID_EXTERNAL_HANDLE)")
         }
         vk::Result::TIMEOUT => Error::Unsupported("Vulkan wait (VK_TIMEOUT)"),
-        _ => Error::Unsupported("Vulkan device operation (another VkResult)"),
+        // The refusal names the raw result.
+        _ => Error::Driver(result.as_raw()),
     }
 }
 
@@ -444,7 +552,7 @@ impl NativeBackend {
             }
             instance.destroy_instance(None);
         };
-        let selected = Self::select(&instance, pci);
+        let selected = Self::select(&instance, pci, loader.log);
         let Some((physical, extensions, snapshot, family)) = selected else {
             destroy_instance(&instance);
             return Err(Error::Unsupported("Vulkan device of the GPU"));
@@ -499,20 +607,31 @@ impl NativeBackend {
                 .then(|| khr::calibrated_timestamps::Device::new(&instance, &device)),
             external_memory_fd: has(khr::external_memory_fd::NAME)
                 .then(|| khr::external_memory_fd::Device::new(&instance, &device)),
+            external_semaphore_fd: has(khr::external_semaphore_fd::NAME)
+                .then(|| khr::external_semaphore_fd::Device::new(&instance, &device)),
             // A requirement: the device was refused without it.
             conditional: ext::conditional_rendering::Device::new(&instance, &device),
             generated: features
                 .generated_commands()
-                .then(|| generated::Fns::load(&instance, &device))
+                .then(|| device_generated::Fns::load(&instance, &device))
                 .flatten(),
+            executables: has(khr::pipeline_executable_properties::NAME).then(|| Executables {
+                fns: khr::pipeline_executable_properties::Device::new(&instance, &device),
+                log: loader.log,
+            }),
         };
         let kernels = kernels(physical);
+        if let Some(note) = small_bar(&snapshot.memory) {
+            (loader.log)(&note);
+        }
         let mut snapshot = snapshot;
         if fns.generated.is_none() {
             snapshot.limits.generated_commands = None;
         }
         // SAFETY: the device was created with one queue in `family`.
         let queue = unsafe { device.get_device_queue(family, 0) };
+        let memories = memory::Memories::new(snapshot.limits.buffer_image_granularity);
+        let zeroing = zero::Zeroing::new(snapshot.limits.max_buffer_size, loader.log);
         let mut backend = Self {
             _entry: ManuallyDrop::new(entry),
             instance,
@@ -532,10 +651,12 @@ impl NativeBackend {
             in_flight: VecDeque::new(),
             unsignaled: Vec::new(),
             mappings: BTreeMap::new(),
+            memories,
             exporter: ManuallyDrop::new(exporter),
             imports: BTreeMap::new(),
             retired: VecDeque::new(),
             new_images: Vec::new(),
+            zeroing,
             bind_timeline: vk::Semaphore::null(),
             bind_value: 0,
             accumulate: vk::Pipeline::null(),
@@ -549,10 +670,17 @@ impl NativeBackend {
             decode_pvrtc: vk::Pipeline::null(),
             reorder_blocks: vk::Pipeline::null(),
             decode_astc: vk::Pipeline::null(),
+            store: pipeline_store::Persisted::none(loader.log),
+            ticks: super::timing::no_clock,
+            split: [0; 3],
         };
         // Dropping a partly built backend destroys what was created.
         let kernels = kernels?;
         backend.create_layout(family)?;
+        // SAFETY: the device is live and `snapshot` describes its GPU.
+        backend.store = unsafe {
+            pipeline_store::Persisted::open(&backend.device, &backend.snapshot.identity, loader.log)
+        };
         backend.bind_timeline = handle(backend.create_semaphore(0)?.0);
         let kernel = |code| ComputePipelineInfo {
             code,
@@ -576,20 +704,48 @@ impl NativeBackend {
     }
 
     /// The device at `pci` with a universal queue family, its supported
-    /// extensions, its snapshot and the family.
+    /// extensions, its snapshot and the family. When none is, why each
+    /// device the driver offers is not goes to `log`.
     fn select(
         instance: &ash::Instance,
         pci: PciBusInfo,
+        log: fn(&str),
     ) -> Option<(vk::PhysicalDevice, Extensions, PhysicalDevice, u32)> {
         // SAFETY: the instance is valid.
-        let devices = unsafe { instance.enumerate_physical_devices() }.ok()?;
-        devices.into_iter().find_map(|physical| {
+        let devices = match unsafe { instance.enumerate_physical_devices() } {
+            Ok(devices) => devices,
+            Err(error) => {
+                log(&format!(
+                    "Vulkan physical devices not enumerated: {error:?}"
+                ));
+                return None;
+            }
+        };
+        let mut rejected = Vec::new();
+        let selected = devices.iter().enumerate().find_map(|(index, &physical)| {
             // SAFETY: `physical` came from this instance.
             let available =
-                unsafe { instance.enumerate_device_extension_properties(physical) }.ok()?;
+                match unsafe { instance.enumerate_device_extension_properties(physical) } {
+                    Ok(available) => available,
+                    Err(error) => {
+                        rejected.push(format!(
+                            "Vulkan device {index}: extensions not enumerated: {error:?}"
+                        ));
+                        return None;
+                    }
+                };
             let extensions = Extensions::of(&available);
-            let snapshot = physical::probe(instance, physical, &extensions)?;
+            let Some(snapshot) = physical::probe(instance, physical, &extensions) else {
+                rejected.push(format!(
+                    "Vulkan device {index}: a driver Stela does not admit"
+                ));
+                return None;
+            };
             if snapshot.identity.pci_bus != Some(pci) {
+                rejected.push(format!(
+                    "Vulkan device {index}: at {:?}, not the GPU's {pci:?}",
+                    snapshot.identity.pci_bus
+                ));
                 return None;
             }
             // SAFETY: as above.
@@ -602,16 +758,28 @@ impl NativeBackend {
             let sparse = |(_, family): &(usize, &vk::QueueFamilyProperties)| {
                 family.queue_flags.contains(vk::QueueFlags::SPARSE_BINDING)
             };
-            let (family, properties) = candidates
+            let Some((family, properties)) = candidates
                 .clone()
                 .find(sparse)
-                .or_else(|| candidates.clone().next())?;
+                .or_else(|| candidates.clone().next())
+            else {
+                rejected.push(format!(
+                    "Vulkan device {index}: no graphics and compute queue family with timestamps \
+                     among {}",
+                    families.len()
+                ));
+                return None;
+            };
             let mut snapshot = snapshot;
             if !properties
                 .queue_flags
                 .contains(vk::QueueFlags::SPARSE_BINDING)
             {
                 // Sparse binds run on the universal queue.
+                log(&format!(
+                    "Vulkan device {index}: its universal queue family {family} binds no sparse \
+                     memory, so this device has no sparse resources"
+                ));
                 let features = &mut snapshot.features;
                 features.sparse_binding = false;
                 features.sparse_residency_buffer = false;
@@ -621,7 +789,15 @@ impl NativeBackend {
                 features.sparse_residency_aliased = false;
             }
             Some((physical, extensions, snapshot, family as u32))
-        })
+        });
+        if selected.is_none() {
+            log(&format!(
+                "Vulkan offers {} physical devices, none the GPU's {pci:?}",
+                devices.len()
+            ));
+            rejected.iter().for_each(|reason| log(reason));
+        }
+        selected
     }
 
     /// The heap's set layout, pool and set with its null descriptors, the
@@ -695,37 +871,34 @@ impl NativeBackend {
         Ok(())
     }
 
-    /// Allocates memory of a type `request` allows among `types`, trying
-    /// the preferred properties first.
-    fn allocate(
-        &mut self,
-        size: u64,
-        request: MemoryRequest,
-        types: u32,
-        dedicated: Option<vk::MemoryDedicatedAllocateInfo<'_>>,
-    ) -> Result<vk::DeviceMemory> {
-        let memory = &self.snapshot.memory;
-        let candidates = objects::memory_candidates(memory, types, request);
+    /// Allocates memory of its own of a type `request` allows among
+    /// `types`, trying the preferred properties first. The memory is
+    /// zeroed: a heap's resources are not, but none may read what another
+    /// client left in the memory before.
+    fn allocate(&mut self, size: u64, request: MemoryRequest, types: u32) -> Result<Memory> {
+        let candidates = objects::memory_candidates(&self.snapshot.memory, types, request);
         ensure(!candidates.is_empty(), "no memory type suits the resource")?;
+        let mut source = memory::Allocator {
+            device: &self.device,
+            types: &self.snapshot.memory.types,
+            mappings: &mut self.mappings,
+            zeroing: &mut self.zeroing,
+            mapped: request.mapped,
+            dedicated: None,
+        };
         let mut last = vk::Result::ERROR_OUT_OF_DEVICE_MEMORY;
         for index in candidates {
-            let mut flags = vk::MemoryAllocateFlagsInfo::default()
-                .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
-            let mut info = vk::MemoryAllocateInfo::default()
-                .allocation_size(size)
-                .memory_type_index(index)
-                .push_next(&mut flags);
-            let mut dedicated = dedicated;
-            if let Some(dedicated) = dedicated.as_mut() {
-                info = info.push_next(dedicated);
-            }
-            // SAFETY: the allocate info and its chain outlive the call.
-            match unsafe { self.device.allocate_memory(&info, None) } {
-                Ok(allocation) => {
-                    if request.mapped {
-                        self.map(allocation, size, index)?;
+            match source.allocate(index, size, Purpose::Own) {
+                Ok(device_memory) => {
+                    let memory = self.memories.insert(memory::Allocation::Whole {
+                        memory: device_memory,
+                        resource: false,
+                    });
+                    if let Err(error) = self.zero_range(device_memory, 0, size) {
+                        self.free_memory(memory);
+                        return Err(error);
                     }
-                    return Ok(allocation);
+                    return Ok(memory);
                 }
                 Err(error) => last = error,
             }
@@ -733,55 +906,347 @@ impl NativeBackend {
         Err(failure(last))
     }
 
-    fn map(&mut self, memory: vk::DeviceMemory, size: u64, index: u32) -> Result<()> {
-        // SAFETY: `memory` is host visible (the request required it) and
-        // not mapped yet.
-        let pointer = unsafe {
-            self.device
-                .map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+    /// Memory for a buffer or image of `requirements`: a place in a block,
+    /// or memory of its own, dedicated to the resource `dedicated` names if
+    /// any, when `own` (the driver requires or prefers that), when it is
+    /// large, or when no block can be allocated. Answers the memory, the
+    /// `VkDeviceMemory` and offset to bind at, and the bytes it spans there.
+    fn allocate_resource(
+        &mut self,
+        requirements: vk::MemoryRequirements,
+        resource: Resource,
+        request: MemoryRequest,
+        dedicated: Option<vk::MemoryDedicatedAllocateInfo<'static>>,
+    ) -> Result<(Memory, vk::DeviceMemory, u64, u64)> {
+        let memory = &self.snapshot.memory;
+        let atom = self.snapshot.limits.non_coherent_atom_size.max(1);
+        let candidates: Vec<_> =
+            objects::memory_candidates(memory, requirements.memory_type_bits, request)
+                .into_iter()
+                .map(|index| {
+                    let properties = memory.types[index as usize].properties;
+                    let heap = memory
+                        .heaps
+                        .get(memory.types[index as usize].heap_index as usize)
+                        .map_or(0, |heap| heap.size);
+                    let device_local =
+                        properties.contains(super::vulkan::MemoryProperties::DEVICE_LOCAL);
+                    let coherent =
+                        properties.contains(super::vulkan::MemoryProperties::HOST_COHERENT);
+                    Candidate {
+                        memory_type: index,
+                        block_bytes: blocks::block_bytes(heap, device_local),
+                        atom: if request.mapped && !coherent { atom } else { 1 },
+                    }
+                })
+                .collect();
+        let needs = Needs {
+            size: requirements.size,
+            alignment: requirements.alignment.max(resource.alignment),
+            tiling: resource.tiling,
+            own: resource.own,
+        };
+        let mut source = memory::Allocator {
+            device: &self.device,
+            types: &memory.types,
+            mappings: &mut self.mappings,
+            zeroing: &mut self.zeroing,
+            mapped: request.mapped,
+            dedicated,
+        };
+        let resident =
+            self.memories
+                .blocks
+                .allocate(&mut source, needs, request.mapped, &candidates);
+        match resident {
+            Ok(Resident::Placed(place)) => {
+                let (block, _) = self
+                    .memories
+                    .blocks
+                    .memory(place.block)
+                    .ok_or(Error::Invalid("a place outside the blocks"))?;
+                let memory = self.memories.insert(memory::Allocation::Placed(place));
+                Ok((memory, block, place.offset, place.size))
+            }
+            Ok(Resident::Own(own)) => {
+                let memory = self.memories.insert(memory::Allocation::Whole {
+                    memory: own,
+                    resource: true,
+                });
+                Ok((memory, own, 0, requirements.size))
+            }
+            Err(Some(error)) => Err(failure(error)),
+            Err(None) => Err(Error::Invalid("no memory type suits the resource")),
         }
-        .map_err(failure)?;
-        let coherent = self.snapshot.memory.types[index as usize]
-            .properties
-            .contains(super::vulkan::MemoryProperties::HOST_COHERENT);
-        let pointer = NonNull::new(pointer.cast::<u8>()).ok_or(Error::OutOfMemory)?;
-        self.mappings.insert(
-            ash::vk::Handle::as_raw(memory),
-            Mapping {
-                pointer,
-                size,
-                coherent,
-            },
-        );
-        Ok(())
     }
 
-    /// The mapping of `memory` covering `offset..offset + size`.
-    fn mapping(&self, memory: Memory, offset: u64, size: u64) -> Result<Mapping> {
+    /// Frees `memory`: returns a place to its block, or frees a whole
+    /// allocation, ending an import's host mapping.
+    fn free_memory(&mut self, memory: Memory) {
+        let Some(allocation) = self.memories.remove(memory) else {
+            return;
+        };
+        let mut source = memory::Allocator {
+            device: &self.device,
+            types: &self.snapshot.memory.types,
+            mappings: &mut self.mappings,
+            zeroing: &mut self.zeroing,
+            mapped: false,
+            dedicated: None,
+        };
+        match allocation {
+            memory::Allocation::Placed(place) => {
+                self.memories.blocks.release(&mut source, place);
+            }
+            memory::Allocation::Whole { memory, resource } => {
+                if resource {
+                    self.memories.blocks.release_own();
+                }
+                source.free(memory);
+                if let Some((exported, token)) = self.imports.remove(&raw(memory)) {
+                    self.exporter.unmap(exported);
+                    self.retired.push_back(token);
+                }
+            }
+        }
+    }
+
+    /// The `VkDeviceMemory` behind `memory` and the offset of its first byte.
+    fn resolve(&self, memory: Memory) -> Result<memory::Resolved> {
+        self.memories
+            .resolve(memory)
+            .ok_or(Error::Invalid("memory that was freed"))
+    }
+
+    /// The host pointer to `offset..offset + size` of `memory`.
+    fn mapping(&self, memory: Memory, offset: u64, size: u64) -> Result<Mapped> {
+        let resolved = self.resolve(memory)?;
         let mapping = self
             .mappings
-            .get(&memory.0)
+            .get(&raw(resolved.memory))
             .copied()
             .ok_or(Error::Invalid("memory is not mapped"))?;
+        let limit = resolved.size.unwrap_or(mapping.size);
+        ensure(
+            offset.checked_add(size).is_some_and(|end| end <= limit),
+            "range outside the mapped memory",
+        )?;
+        let at = resolved.offset + offset;
+        Ok(Mapped {
+            // SAFETY: a place lies within its block's mapping and `at + size`
+            // within the place, or within the whole mapping.
+            pointer: unsafe { mapping.pointer.add(at as usize) },
+            memory: resolved.memory,
+            offset: at,
+            coherent: mapping.coherent,
+        })
+    }
+
+    /// Zeroes `size` bytes at `offset` of `memory`, which a new resource
+    /// takes: mapped memory at once, other memory at the start of the next
+    /// submission. Zeroing at hand-out rather than at free covers every
+    /// source alike (reused places, new blocks and VRAM the kernel does not
+    /// clear) and never races a read of the freed resource.
+    fn zero_range(&mut self, memory: vk::DeviceMemory, offset: u64, size: u64) -> Result<()> {
+        let Some(mapping) = self.mappings.get(&raw(memory)).copied() else {
+            self.zeroing.fill(memory, offset, size);
+            return Ok(());
+        };
         ensure(
             offset
                 .checked_add(size)
                 .is_some_and(|end| end <= mapping.size),
             "range outside the mapped memory",
         )?;
-        Ok(mapping)
+        // SAFETY: the range lies in the mapping, and only the new resource,
+        // which nothing uses yet, owns it.
+        unsafe {
+            mapping
+                .pointer
+                .add(offset as usize)
+                .as_ptr()
+                .write_bytes(0, size as usize);
+        }
+        if mapping.coherent {
+            Ok(())
+        } else {
+            self.flush_range(memory, offset, size)
+        }
     }
 
-    /// The flush or invalidate range of a non-coherent mapping, widened to
-    /// the device's atom size.
-    fn atom_range(&self, memory: Memory, offset: u64, size: u64) -> vk::MappedMemoryRange<'_> {
+    /// What a submission starting with `commands` zeroes first: `pending`'s
+    /// fills, and clears of the image subresources its leading commands do
+    /// not overwrite whole before anything reads them.
+    fn zero_work(&self, pending: &zero::Pending, commands: &[Command]) -> record::Zero {
+        let fills = self.zeroing.buffer_fills(pending);
+        if pending.images.is_empty() {
+            return record::Zero {
+                fills,
+                clears: Vec::new(),
+            };
+        }
+        let mut images = pending.images.clone();
+        zero::first_writes(commands, &self.zeroing.views, &mut images);
+        let clears = images
+            .iter()
+            .filter_map(|(&image, entry)| {
+                let aspects = objects::aspects(entry.aspects);
+                let ranges: Vec<_> = if entry.all_stale() {
+                    alloc::vec![objects::whole(aspects)]
+                } else {
+                    entry
+                        .stale_runs()
+                        .into_iter()
+                        .map(|run| vk::ImageSubresourceRange {
+                            aspect_mask: aspects,
+                            base_mip_level: run.level,
+                            level_count: 1,
+                            base_array_layer: run.layers.start,
+                            layer_count: run.layers.end - run.layers.start,
+                        })
+                        .collect()
+                };
+                (!ranges.is_empty()).then(|| record::Clear {
+                    image: handle(image),
+                    aspects,
+                    ranges,
+                })
+            })
+            .collect();
+        record::Zero { fills, clears }
+    }
+
+    /// Zeroes on the host the subresources of `sub` in a host-transfer
+    /// image that nothing wrote whole yet, before a host copy reaches them.
+    fn zero_on_host(&mut self, image: Image, sub: Subresource) -> Result<()> {
+        let Some(entry) = self.zeroing.pending.images.get(&image.0) else {
+            return Ok(());
+        };
+        let stale = entry.stale_in(sub);
+        if stale.is_empty() {
+            return Ok(());
+        }
+        let aspects = entry.aspects;
+        let extents: Vec<_> = stale
+            .iter()
+            .map(|&(level, _)| entry.level_extent(level))
+            .collect();
+        let copy = self
+            .fns
+            .host_image_copy
+            .as_ref()
+            .ok_or(Error::Unsupported("host image copies"))?;
+        let image_handle: vk::Image = handle(image.0);
+        let mut zeros = Vec::new();
+        for (&(level, layer), extent) in stale.iter().zip(extents) {
+            for aspect in [
+                super::vulkan::ImageAspects::COLOR,
+                super::vulkan::ImageAspects::DEPTH,
+                super::vulkan::ImageAspects::STENCIL,
+            ] {
+                if !aspects.contains(aspect) {
+                    continue;
+                }
+                let aspect = objects::aspects(aspect);
+                let subresource =
+                    vk::ImageSubresource2KHR::default().image_subresource(vk::ImageSubresource {
+                        aspect_mask: aspect,
+                        mip_level: level,
+                        array_layer: layer,
+                    });
+                let mut bytes = vk::SubresourceHostMemcpySizeEXT::default();
+                let mut layout = vk::SubresourceLayout2KHR::default().push_next(&mut bytes);
+                // SAFETY: the image allows host transfers; the chain outlives
+                // the call.
+                unsafe {
+                    copy.get_image_subresource_layout2(image_handle, &subresource, &mut layout)
+                };
+                zeros.resize(zeros.len().max(bytes.size as usize), 0);
+                let regions = [vk::MemoryToImageCopyEXT::default()
+                    .host_pointer(zeros.as_ptr().cast())
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: aspect,
+                        mip_level: level,
+                        base_array_layer: layer,
+                        layer_count: 1,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: extent[0],
+                        height: extent[1],
+                        depth: extent[2],
+                    })];
+                let info = vk::CopyMemoryToImageInfoEXT::default()
+                    .flags(vk::HostImageCopyFlagsEXT::MEMCPY)
+                    .dst_image(image_handle)
+                    .dst_image_layout(vk::ImageLayout::GENERAL)
+                    .regions(&regions);
+                // SAFETY: `zeros` holds the subresource's memcpy size; the
+                // region is the whole subresource, as a memcpy needs.
+                unsafe { copy.copy_memory_to_image(&info) }.map_err(failure)?;
+            }
+            if let Some(entry) = self.zeroing.pending.images.get_mut(&image.0) {
+                entry.written(level, layer);
+            }
+        }
+        Ok(())
+    }
+
+    /// The flush or invalidate range of `offset..offset + size` in a
+    /// non-coherent mapping, widened to the device's atom size.
+    fn atom_range(
+        &self,
+        memory: vk::DeviceMemory,
+        offset: u64,
+        size: u64,
+    ) -> vk::MappedMemoryRange<'_> {
         let atom = self.snapshot.limits.non_coherent_atom_size.max(1);
         let start = offset / atom * atom;
         let end = (offset + size).next_multiple_of(atom);
         vk::MappedMemoryRange::default()
-            .memory(ash::vk::Handle::from_raw(memory.0))
+            .memory(memory)
             .offset(start)
             .size(end - start)
+    }
+
+    fn flush_range(&self, memory: vk::DeviceMemory, offset: u64, size: u64) -> Result<()> {
+        let range = self.atom_range(memory, offset, size);
+        // SAFETY: the memory is mapped; the range is atom aligned.
+        unsafe { self.device.flush_mapped_memory_ranges(&[range]) }.map_err(failure)
+    }
+
+    fn invalidate_range(&self, memory: vk::DeviceMemory, offset: u64, size: u64) -> Result<()> {
+        let range = self.atom_range(memory, offset, size);
+        // SAFETY: as in `flush_range`.
+        unsafe { self.device.invalidate_mapped_memory_ranges(&[range]) }.map_err(failure)
+    }
+
+    /// The requirements of `image`, and whether the driver requires or
+    /// prefers memory of its own for it (`VkMemoryDedicatedRequirements`).
+    fn image_needs(&self, image: vk::Image) -> (vk::MemoryRequirements, bool) {
+        let info = vk::ImageMemoryRequirementsInfo2::default().image(image);
+        let mut dedicated = vk::MemoryDedicatedRequirements::default();
+        let mut requirements = vk::MemoryRequirements2::default().push_next(&mut dedicated);
+        // SAFETY: the image is live and the chain outlives the call.
+        unsafe {
+            self.device
+                .get_image_memory_requirements2(&info, &mut requirements)
+        };
+        let needs = requirements.memory_requirements;
+        (needs, own(&dedicated))
+    }
+
+    /// As [`Self::image_needs`], of a buffer.
+    fn buffer_needs(&self, buffer: vk::Buffer) -> (vk::MemoryRequirements, bool) {
+        let info = vk::BufferMemoryRequirementsInfo2::default().buffer(buffer);
+        let mut dedicated = vk::MemoryDedicatedRequirements::default();
+        let mut requirements = vk::MemoryRequirements2::default().push_next(&mut dedicated);
+        // SAFETY: the buffer is live and the chain outlives the call.
+        unsafe {
+            self.device
+                .get_buffer_memory_requirements2(&info, &mut requirements)
+        };
+        let needs = requirements.memory_requirements;
+        (needs, own(&dedicated))
     }
 
     /// Moves a new image to `GENERAL`: on the host when it allows host
@@ -810,16 +1275,122 @@ impl NativeBackend {
     }
 
     fn create_compute(&mut self, info: &ComputePipelineInfo) -> Result<vk::Pipeline> {
-        objects::compute_pipeline(info, self.layout, |create| {
-            // SAFETY: the create info, its stage and the NIR outlive the
-            // call.
-            unsafe {
-                self.device
-                    .create_compute_pipelines(pipeline_cache(info.source), &[*create], None)
+        let pipeline = self.through_store(info.source, |backend, source, feedback| {
+            let info = ComputePipelineInfo { source, ..*info };
+            objects::compute_pipeline(&info, backend.layout, |create| {
+                let mut chained = vk::PipelineCreationFeedbackCreateInfo::default()
+                    .pipeline_creation_feedback(feedback);
+                let create = (*create).push_next(&mut chained);
+                // SAFETY: the create info, its chain, its stage and the NIR
+                // outlive the call.
+                unsafe {
+                    backend
+                        .device
+                        .create_compute_pipelines(pipeline_cache(source), &[create], None)
+                }
+                .map(|pipelines| pipelines[0])
+                .map_err(|(_, error)| failure(error))
+            })
+        })?;
+        self.report_executables(pipeline);
+        Ok(pipeline)
+    }
+
+    /// Creates a pipeline of `source` with `create`, which builds it from
+    /// the source it is given and fills the feedback. A compiled pipeline
+    /// goes through the pipeline store's cache: found there or added, and
+    /// once the store is full, found there or compiled without it.
+    fn through_store<T>(
+        &mut self,
+        source: PipelineSource,
+        mut create: impl FnMut(
+            &mut Self,
+            PipelineSource,
+            &mut vk::PipelineCreationFeedback,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        let mut feedback = vk::PipelineCreationFeedback::default();
+        let (PipelineSource::Compiled, Some((cache, grows))) = (source, self.store.cache()) else {
+            return create(self, source, &mut feedback);
+        };
+        let cache = PipelineCache(raw(cache));
+        if !grows {
+            return match create(self, PipelineSource::Archived(cache), &mut feedback) {
+                Err(Error::NotArchived) => create(self, PipelineSource::Compiled, &mut feedback),
+                created => created,
+            };
+        }
+        let created = create(self, PipelineSource::Cached(cache), &mut feedback)?;
+        let hit = feedback.flags.contains(
+            vk::PipelineCreationFeedbackFlags::VALID
+                | vk::PipelineCreationFeedbackFlags::APPLICATION_PIPELINE_CACHE_HIT,
+        );
+        self.store.created(&self.device, hit);
+        Ok(created)
+    }
+
+    /// Logs each of `pipeline`'s shaders that spills or runs past
+    /// [`LARGE_SHADER`] instructions, with NVK's statistics for it.
+    fn report_executables(&self, pipeline: vk::Pipeline) {
+        /// Instructions past which a shader is reported.
+        const LARGE_SHADER: u64 = 16384;
+        let Some(Executables { fns, log }) = &self.fns.executables else {
+            return;
+        };
+        let info = vk::PipelineInfoKHR::default().pipeline(pipeline);
+        // SAFETY: the pipeline was just created on this device.
+        let Ok(executables) = (unsafe { fns.get_pipeline_executable_properties(&info) }) else {
+            return;
+        };
+        for (index, executable) in executables.iter().enumerate() {
+            let info = vk::PipelineExecutableInfoKHR::default()
+                .pipeline(pipeline)
+                .executable_index(index as u32);
+            // SAFETY: the executable is one the pipeline listed.
+            let Ok(statistics) = (unsafe { fns.get_pipeline_executable_statistics(&info) }) else {
+                continue;
+            };
+            let value = |statistic: &vk::PipelineExecutableStatisticKHR| match statistic.format {
+                vk::PipelineExecutableStatisticFormatKHR::UINT64 => {
+                    // SAFETY: the format names the union's member.
+                    unsafe { statistic.value.u64 }
+                }
+                vk::PipelineExecutableStatisticFormatKHR::INT64 => {
+                    // SAFETY: as above.
+                    unsafe { statistic.value.i64 }.max(0) as u64
+                }
+                _ => 0,
+            };
+            let named = |name: &str| {
+                statistics
+                    .iter()
+                    .find(|statistic| {
+                        statistic
+                            .name_as_c_str()
+                            .is_ok_and(|n| n.to_bytes() == name.as_bytes())
+                    })
+                    .map_or(0, value)
+            };
+            let instructions = named("Instruction count");
+            let spills = named("Spills to memory");
+            let fills = named("Fills from memory");
+            if instructions <= LARGE_SHADER && spills == 0 && fills == 0 {
+                continue;
             }
-            .map(|pipelines| pipelines[0])
-            .map_err(|(_, error)| failure(error))
-        })
+            let mut line = format!(
+                "shader {}:",
+                executable
+                    .name_as_c_str()
+                    .map_or("?", |name| name.to_str().unwrap_or("?"))
+            );
+            for statistic in &statistics {
+                let name = statistic
+                    .name_as_c_str()
+                    .map_or("?", |name| name.to_str().unwrap_or("?"));
+                line.push_str(&format!(" {name}={}", value(statistic)));
+            }
+            log(&line);
+        }
     }
 
     /// Passes `result` through, destroying `objects` when it failed so a
@@ -885,9 +1456,21 @@ impl Drop for NativeBackend {
         if unsafe { self.device.device_wait_idle() }.is_err() {
             return;
         }
+        self.store.idle(&self.device);
+        let mut source = memory::Allocator {
+            device: &self.device,
+            types: &self.snapshot.memory.types,
+            mappings: &mut self.mappings,
+            zeroing: &mut self.zeroing,
+            mapped: false,
+            dedicated: None,
+        };
+        self.memories.blocks.release_all(&mut source);
+        self.zeroing.destroy(&self.device);
         // SAFETY: after the device idles, nothing uses any object, and each
         // handle is destroyed once; null handles are ignored by Vulkan.
         unsafe {
+            self.store.destroy(&self.device);
             self.device.destroy_pipeline(self.accumulate, None);
             self.device.destroy_pipeline(self.resolve_draws, None);
             self.device.destroy_pipeline(self.resolve_dispatches, None);
@@ -922,6 +1505,12 @@ fn handle<T: vk::Handle>(raw: u64) -> T {
     T::from_raw(raw)
 }
 
+/// Whether pipelines of `a` and `b` are created with different flags: only
+/// an archived one fails when its cache lacks it.
+fn create_flags_differ(a: PipelineSource, b: PipelineSource) -> bool {
+    matches!(a, PipelineSource::Archived(_)) != matches!(b, PipelineSource::Archived(_))
+}
+
 /// The cache a creation from `source` reads.
 fn pipeline_cache(source: PipelineSource) -> vk::PipelineCache {
     match source {
@@ -939,7 +1528,9 @@ impl Backend for NativeBackend {
         // SAFETY: this backend exclusively owns the device. The Metal owner
         // closes admission and drains its submission timeline before asking;
         // only a successful Vulkan acknowledgement establishes idleness.
-        unsafe { self.device.device_wait_idle() }.map_err(failure)
+        unsafe { self.device.device_wait_idle() }.map_err(failure)?;
+        self.store.idle(&self.device);
+        Ok(())
     }
 
     fn physical_device(&self) -> &PhysicalDevice {
@@ -952,8 +1543,7 @@ impl Backend for NativeBackend {
         request: MemoryRequest,
         memory_types: u32,
     ) -> Result<Memory> {
-        self.allocate(size, request, memory_types, None)
-            .map(|memory| Memory(raw(memory)))
+        self.allocate(size, request, memory_types)
     }
 
     fn buffer_requirements(&mut self, info: &BufferInfo) -> Result<Requirements> {
@@ -991,30 +1581,48 @@ impl Backend for NativeBackend {
             // SAFETY: the create info outlives the call.
             unsafe { self.device.create_buffer(create, None) }.map_err(failure)
         })?;
-        // SAFETY: the buffer was just created.
-        let needs = unsafe { self.device.get_buffer_memory_requirements(buffer) };
-        let dedicated = vk::MemoryDedicatedAllocateInfo::default().buffer(buffer);
-        let memory =
-            match self.allocate(needs.size, request, needs.memory_type_bits, Some(dedicated)) {
-                Ok(memory) => memory,
+        let (needs, own) = self.buffer_needs(buffer);
+        let resource = Resource {
+            tiling: Tiling::Linear,
+            alignment: LINEAR_PLACEMENT,
+            own,
+        };
+        // Memory of a buffer's own is dedicated to it only when the driver
+        // asks, so a fill buffer can zero all of it.
+        let dedicated = own.then(|| vk::MemoryDedicatedAllocateInfo::default().buffer(buffer));
+        let (memory, device_memory, offset, size) =
+            match self.allocate_resource(needs, resource, request, dedicated) {
+                Ok(allocated) => allocated,
                 Err(error) => {
                     // SAFETY: nothing uses the new buffer.
                     unsafe { self.device.destroy_buffer(buffer, None) };
                     return Err(error);
                 }
             };
-        // SAFETY: the memory was allocated for this buffer.
-        let bound = unsafe { self.device.bind_buffer_memory(buffer, memory, 0) }.map_err(failure);
+        // SAFETY: the memory, or the place at `offset` in it, was allocated
+        // for this buffer's requirements.
+        let bound = unsafe {
+            self.device
+                .bind_buffer_memory(buffer, device_memory, offset)
+        }
+        .map_err(failure)
+        .and_then(|()| {
+            // Metal zero-fills a new buffer; the whole place is zeroed, so
+            // no read past its end finds another resource's bytes.
+            if dedicated.is_some() && !request.mapped {
+                self.zeroing.pending.buffers.push(buffer);
+                Ok(())
+            } else {
+                self.zero_range(device_memory, offset, size)
+            }
+        });
         self.or_destroy(
             bound,
-            &[
-                Object::Buffer(Buffer(raw(buffer))),
-                Object::Memory(Memory(raw(memory))),
-            ],
+            &[Object::Buffer(Buffer(raw(buffer))), Object::Memory(memory)],
         )?;
         Ok(BufferAllocation {
             buffer: Buffer(raw(buffer)),
-            memory: Memory(raw(memory)),
+            memory,
             address: self.address(buffer, info),
             allocated: needs.size,
         })
@@ -1082,7 +1690,10 @@ impl Backend for NativeBackend {
             },
         );
         self.imports.insert(raw(memory), (exported, token));
-        Ok(Memory(raw(memory)))
+        Ok(self.memories.insert(memory::Allocation::Whole {
+            memory,
+            resource: false,
+        }))
     }
 
     fn retired(&mut self) -> Option<NonZeroU64> {
@@ -1103,15 +1714,17 @@ impl Backend for NativeBackend {
             // SAFETY: the create info outlives the call.
             unsafe { self.device.create_buffer(create, None) }.map_err(failure)
         };
-        let buffer = if self.imports.contains_key(&memory.0) {
+        let resolved = self.resolve(memory)?;
+        let buffer = if self.imports.contains_key(&raw(resolved.memory)) {
             objects::imported_buffer(info, DMA_BUF, create)
         } else {
             objects::buffer(info, create)
         }?;
-        // SAFETY: the Metal heap placed the buffer within `memory`.
+        // SAFETY: the Metal heap placed the buffer within `memory`, which
+        // starts `resolved.offset` into its `VkDeviceMemory`.
         let bound = unsafe {
             self.device
-                .bind_buffer_memory(buffer, handle(memory.0), offset)
+                .bind_buffer_memory(buffer, resolved.memory, resolved.offset + offset)
         }
         .map_err(failure);
         self.or_destroy(bound, &[Object::Buffer(Buffer(raw(buffer)))])?;
@@ -1123,33 +1736,50 @@ impl Backend for NativeBackend {
         info: &ImageInfo,
         request: MemoryRequest,
     ) -> Result<(Image, Memory, u64)> {
+        let started = (self.ticks)();
         let image = objects::image(info, |create| {
             // SAFETY: the create info and its chain outlive the call.
             unsafe { self.device.create_image(create, None) }.map_err(failure)
         })?;
-        // SAFETY: the image was just created.
-        let needs = unsafe { self.device.get_image_memory_requirements(image) };
+        let (needs, own) = self.image_needs(image);
+        let tiling = match info.tiling {
+            super::vulkan::ImageTiling::Optimal => Tiling::Optimal,
+            _ => Tiling::Linear,
+        };
+        let resource = Resource {
+            tiling,
+            alignment: 1,
+            own,
+        };
         let dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
-        let memory =
-            match self.allocate(needs.size, request, needs.memory_type_bits, Some(dedicated)) {
-                Ok(memory) => memory,
+        let created = (self.ticks)();
+        let (memory, device_memory, offset, _) =
+            match self.allocate_resource(needs, resource, request, Some(dedicated)) {
+                Ok(allocated) => allocated,
                 Err(error) => {
                     // SAFETY: nothing uses the new image.
                     unsafe { self.device.destroy_image(image, None) };
                     return Err(error);
                 }
             };
-        // SAFETY: the memory was allocated for this image.
-        let bound = unsafe { self.device.bind_image_memory(image, memory, 0) }.map_err(failure);
+        let allocated = (self.ticks)();
+        // SAFETY: the memory, or the place at `offset` in it, was allocated
+        // for this image's requirements.
+        let bound =
+            unsafe { self.device.bind_image_memory(image, device_memory, offset) }.map_err(failure);
         let adopted = bound.and_then(|()| self.adopt_image(image, info));
+        self.time_split([started, created, allocated, (self.ticks)()]);
         self.or_destroy(
             adopted,
-            &[
-                Object::Image(Image(raw(image))),
-                Object::Memory(Memory(raw(memory))),
-            ],
+            &[Object::Image(Image(raw(image))), Object::Memory(memory)],
         )?;
-        Ok((Image(raw(image)), Memory(raw(memory)), needs.size))
+        // Its memory may hold another resource's bytes until a clear, or a
+        // write of every subresource, reaches it.
+        self.zeroing
+            .pending
+            .images
+            .insert(raw(image), zero::Unzeroed::new(info));
+        Ok((Image(raw(image)), memory, needs.size))
     }
 
     fn create_placed_image(
@@ -1162,15 +1792,26 @@ impl Backend for NativeBackend {
             // SAFETY: the create info and its chain outlive the call.
             unsafe { self.device.create_image(create, None) }.map_err(failure)
         })?;
-        // SAFETY: the Metal heap placed the image within `memory`.
-        let bound = unsafe {
-            self.device
-                .bind_image_memory(image, handle(memory.0), offset)
-        }
-        .map_err(failure);
+        let bound = self.resolve(memory).and_then(|resolved| {
+            // SAFETY: the Metal heap or buffer placed the image within
+            // `memory`, which starts `resolved.offset` into its
+            // `VkDeviceMemory`.
+            unsafe {
+                self.device
+                    .bind_image_memory(image, resolved.memory, resolved.offset + offset)
+            }
+            .map_err(failure)
+        });
         let adopted = bound.and_then(|()| self.adopt_image(image, info));
         self.or_destroy(adopted, &[Object::Image(Image(raw(image)))])?;
         Ok(Image(raw(image)))
+    }
+
+    fn clear_reused_image(&mut self, image: Image, info: &ImageInfo) {
+        self.zeroing
+            .pending
+            .images
+            .insert(image.0, zero::Unzeroed::new(info));
     }
 
     fn create_sparse_image(
@@ -1218,12 +1859,21 @@ impl Backend for NativeBackend {
     }
 
     fn create_image_view(&mut self, image: Image, info: &ImageViewInfo) -> Result<ImageView> {
-        objects::image_view(handle(image.0), info, |create| {
+        let view = objects::image_view(handle(image.0), info, |create| {
             // SAFETY: the create info and its chain outlive the call.
             unsafe { self.device.create_image_view(create, None) }
                 .map(|view| ImageView(raw(view)))
                 .map_err(failure)
-        })
+        })?;
+        // Render passes name their attachments by view.
+        self.zeroing.views.insert(
+            view.0,
+            zero::ViewRange {
+                image: image.0,
+                range: info.range,
+            },
+        );
+        Ok(view)
     }
 
     fn create_buffer_view(&mut self, buffer: Buffer, info: &BufferViewInfo) -> Result<BufferView> {
@@ -1248,15 +1898,38 @@ impl Backend for NativeBackend {
     }
 
     fn create_graphics_pipeline(&mut self, info: &GraphicsPipelineInfo) -> Result<Pipeline> {
-        objects::graphics_pipeline(info, self.layout, |create| {
-            // SAFETY: the create info, every structure it points to and the
-            // NIR outlive the call.
-            unsafe {
-                self.device
-                    .create_graphics_pipelines(pipeline_cache(info.source), &[*create], None)
-            }
-            .map(|pipelines| Pipeline(raw(pipelines[0])))
-            .map_err(|(_, error)| failure(error))
+        self.through_store(info.source, |backend, source, feedback| {
+            // Only a full store's lookup changes the creation flags.
+            let replaced;
+            let info = if create_flags_differ(info.source, source) {
+                replaced = GraphicsPipelineInfo {
+                    source,
+                    ..info.clone()
+                };
+                &replaced
+            } else {
+                info
+            };
+            objects::graphics_pipeline(info, backend.layout, |create| {
+                let mut chained = vk::PipelineCreationFeedbackCreateInfo::default()
+                    .pipeline_creation_feedback(feedback);
+                let create = (*create).push_next(&mut chained);
+                // SAFETY: the create info, every structure it points to and
+                // the NIR outlive the call.
+                unsafe {
+                    backend.device.create_graphics_pipelines(
+                        pipeline_cache(source),
+                        &[create],
+                        None,
+                    )
+                }
+                .map(|pipelines| pipelines[0])
+                .map_err(|(_, error)| failure(error))
+            })
+        })
+        .map(|pipeline| {
+            self.report_executables(pipeline);
+            Pipeline(raw(pipeline))
         })
     }
 
@@ -1299,11 +1972,26 @@ impl Backend for NativeBackend {
         let mut timeline = vk::SemaphoreTypeCreateInfo::default()
             .semaphore_type(vk::SemaphoreType::TIMELINE)
             .initial_value(initial);
-        let create = vk::SemaphoreCreateInfo::default().push_next(&mut timeline);
-        // SAFETY: the create info outlives the call.
+        // Every timeline can be exported: NVK's are DRM syncobjs either way.
+        let mut export = vk::ExportSemaphoreCreateInfo::default()
+            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
+        let mut create = vk::SemaphoreCreateInfo::default().push_next(&mut timeline);
+        if self.fns.external_semaphore_fd.is_some() {
+            create = create.push_next(&mut export);
+        }
+        // SAFETY: the create info and its chain outlive the call.
         unsafe { self.device.create_semaphore(&create, None) }
             .map(|semaphore| Semaphore(raw(semaphore)))
             .map_err(failure)
+    }
+
+    fn export_semaphore(&mut self, semaphore: Semaphore) -> Option<i32> {
+        let fns = self.fns.external_semaphore_fd.as_ref()?;
+        let info = vk::SemaphoreGetFdInfoKHR::default()
+            .semaphore(handle(semaphore.0))
+            .handle_type(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
+        // SAFETY: the semaphore is this device's, created exportable.
+        unsafe { fns.get_semaphore_fd(&info) }.ok()
     }
 
     fn create_indirect_commands_layout(
@@ -1357,17 +2045,32 @@ impl Backend for NativeBackend {
     }
 
     fn destroy(&mut self, object: Object) {
+        if let Object::Memory(memory) = object {
+            self.free_memory(memory);
+            return;
+        }
         // SAFETY: the Metal device destroys an object only after every
         // submission that could use it completed, and only once.
         unsafe {
             match object {
-                Object::Buffer(buffer) => self.device.destroy_buffer(handle(buffer.0), None),
+                Object::Buffer(buffer) => {
+                    let buffer: vk::Buffer = handle(buffer.0);
+                    self.zeroing
+                        .pending
+                        .buffers
+                        .retain(|&pending| pending != buffer);
+                    self.device.destroy_buffer(buffer, None);
+                }
                 Object::Image(image) => {
+                    self.zeroing.pending.images.remove(&image.0);
                     let image: vk::Image = handle(image.0);
                     self.new_images.retain(|(new, _)| *new != image);
                     self.device.destroy_image(image, None);
                 }
-                Object::ImageView(view) => self.device.destroy_image_view(handle(view.0), None),
+                Object::ImageView(view) => {
+                    self.zeroing.views.remove(&view.0);
+                    self.device.destroy_image_view(handle(view.0), None);
+                }
                 Object::BufferView(view) => {
                     self.device.destroy_buffer_view(handle(view.0), None);
                 }
@@ -1382,14 +2085,7 @@ impl Backend for NativeBackend {
                 Object::Semaphore(semaphore) => {
                     self.device.destroy_semaphore(handle(semaphore.0), None);
                 }
-                Object::Memory(memory) => {
-                    self.mappings.remove(&memory.0);
-                    self.device.free_memory(handle(memory.0), None);
-                    if let Some((exported, token)) = self.imports.remove(&memory.0) {
-                        self.exporter.unmap(exported);
-                        self.retired.push_back(token);
-                    }
-                }
+                Object::Memory(_) => {}
                 Object::IndirectCommandsLayout(layout) => self.generated().destroy_layout(layout.0),
                 Object::ExecutionSet(set) => self.generated().destroy_set(set.0),
             }
@@ -1405,32 +2101,28 @@ impl Backend for NativeBackend {
     }
 
     fn write_memory(&mut self, memory: Memory, offset: u64, bytes: &[u8]) -> Result<()> {
-        let mapping = self.mapping(memory, offset, bytes.len() as u64)?;
-        // SAFETY: `mapping` covers the range and the slice is disjoint from
+        let mapped = self.mapping(memory, offset, bytes.len() as u64)?;
+        // SAFETY: `mapped` covers the range and the slice is disjoint from
         // device memory.
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                mapping.pointer.as_ptr().add(offset as usize),
-                bytes.len(),
-            );
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), mapped.pointer.as_ptr(), bytes.len());
         }
-        if mapping.coherent {
+        if mapped.coherent {
             Ok(())
         } else {
-            self.flush_memory(memory, offset, bytes.len() as u64)
+            self.flush_range(mapped.memory, mapped.offset, bytes.len() as u64)
         }
     }
 
     fn read_memory(&mut self, memory: Memory, offset: u64, bytes: &mut [u8]) -> Result<()> {
-        let mapping = self.mapping(memory, offset, bytes.len() as u64)?;
-        if !mapping.coherent {
-            self.invalidate_memory(memory, offset, bytes.len() as u64)?;
+        let mapped = self.mapping(memory, offset, bytes.len() as u64)?;
+        if !mapped.coherent {
+            self.invalidate_range(mapped.memory, mapped.offset, bytes.len() as u64)?;
         }
         // SAFETY: as in `write_memory`.
         unsafe {
             core::ptr::copy_nonoverlapping(
-                mapping.pointer.as_ptr().add(offset as usize),
+                mapped.pointer.as_ptr(),
                 bytes.as_mut_ptr(),
                 bytes.len(),
             );
@@ -1439,15 +2131,13 @@ impl Backend for NativeBackend {
     }
 
     fn flush_memory(&mut self, memory: Memory, offset: u64, size: u64) -> Result<()> {
-        let range = self.atom_range(memory, offset, size);
-        // SAFETY: the memory is mapped; the range is atom aligned.
-        unsafe { self.device.flush_mapped_memory_ranges(&[range]) }.map_err(failure)
+        let resolved = self.resolve(memory)?;
+        self.flush_range(resolved.memory, resolved.offset + offset, size)
     }
 
     fn invalidate_memory(&mut self, memory: Memory, offset: u64, size: u64) -> Result<()> {
-        let range = self.atom_range(memory, offset, size);
-        // SAFETY: as in `flush_memory`.
-        unsafe { self.device.invalidate_mapped_memory_ranges(&[range]) }.map_err(failure)
+        let resolved = self.resolve(memory)?;
+        self.invalidate_range(resolved.memory, resolved.offset + offset, size)
     }
 
     fn copy_to_image(
@@ -1456,6 +2146,16 @@ impl Backend for NativeBackend {
         region: &BufferImageCopy,
         bytes: &[u8],
     ) -> Result<()> {
+        let (sub, offset, extent) = (region.subresource, region.offset, region.extent);
+        let whole = self
+            .zeroing
+            .pending
+            .images
+            .get(&image.0)
+            .is_none_or(|entry| entry.whole(sub, offset, extent));
+        if !whole {
+            self.zero_on_host(image, sub)?;
+        }
         let copy = self
             .fns
             .host_image_copy
@@ -1468,7 +2168,11 @@ impl Backend for NativeBackend {
             .regions(&regions);
         // SAFETY: the Metal layer sized `bytes` to the region, tightly
         // packed, and the image allows host transfers.
-        unsafe { copy.copy_memory_to_image(&info) }.map_err(failure)
+        unsafe { copy.copy_memory_to_image(&info) }.map_err(failure)?;
+        if let Some(entry) = self.zeroing.pending.images.get_mut(&image.0) {
+            entry.write(sub, offset, extent);
+        }
+        Ok(())
     }
 
     fn copy_from_image(
@@ -1477,6 +2181,7 @@ impl Backend for NativeBackend {
         region: &BufferImageCopy,
         bytes: &mut [u8],
     ) -> Result<()> {
+        self.zero_on_host(image, region.subresource)?;
         let copy = self
             .fns
             .host_image_copy
@@ -1554,30 +2259,49 @@ impl Backend for NativeBackend {
     }
 
     fn submit(&mut self, segments: &[Segment]) -> Result<()> {
-        self.reclaim()?;
+        let started = (self.ticks)();
+        // The device's completion poll frees what it finds complete
+        // (`semaphore_value`). Asking the timeline again here would cost
+        // every submission a driver call, which on a host whose driver
+        // calls cross to another processor waits for that one; only a queue
+        // nobody polls grows to the bound.
+        if self.in_flight.len() >= RECLAIM_AFTER {
+            self.reclaim()?;
+        }
         if segments.is_empty() {
             return Ok(());
         }
+        let reclaimed = (self.ticks)();
         let buffers =
             CommandBuffers::allocate(&self.device, self.command_pool, segments.len() as u32)?;
         let handles = buffers.as_slice();
         let new_images = core::mem::take(&mut self.new_images);
+        let pending = core::mem::take(&mut self.zeroing.pending);
+        let zero = self.zero_work(&pending, &segments[0].commands);
+        let none = record::Zero::default();
         let recorded =
             handles
                 .iter()
                 .zip(segments)
                 .enumerate()
                 .try_for_each(|(index, (&buffer, segment))| {
-                    let adopt = if index == 0 { &new_images[..] } else { &[] };
-                    record::segment(self, buffer, adopt, segment)
+                    let (adopt, zero) = if index == 0 {
+                        (&new_images[..], &zero)
+                    } else {
+                        (&[][..], &none)
+                    };
+                    record::segment(self, buffer, adopt, zero, segment)
                 });
+        let recorded_at = (self.ticks)();
         let submitted = recorded.and_then(|()| self.queue_segments(segments, handles));
+        self.time_split([started, reclaimed, recorded_at, (self.ticks)()]);
         if let Err(error) = submitted {
             // Some segments may have reached the queue. A failed idle query
             // leaves their buffers owned by the command pool until device
             // teardown can prove idleness.
             let _ = free_after_idle(&self.device, self.queue, self.command_pool, handles);
             self.new_images = new_images;
+            self.zeroing.pending = pending;
             return Err(error);
         }
         // A commit appends the queue's completion signal last.
@@ -1621,6 +2345,18 @@ impl Backend for NativeBackend {
         let (stamps, _) =
             unsafe { calibrated.get_calibrated_timestamps(&domains) }.map_err(failure)?;
         Ok((stamps[1], stamps[0]))
+    }
+
+    fn set_clock(&mut self, ticks: fn() -> u64) {
+        self.ticks = ticks;
+    }
+
+    fn take_split(&mut self) -> [u64; 3] {
+        core::mem::take(&mut self.split)
+    }
+
+    fn memory_blocks(&self) -> MemoryBlocks {
+        self.memories.blocks.report()
     }
 }
 
@@ -1681,6 +2417,13 @@ fn submit_single_segment(
 }
 
 impl NativeBackend {
+    /// Adds the ticks between each of a call's phase marks to its split.
+    fn time_split(&mut self, marks: [u64; 4]) {
+        for (slot, pair) in self.split.iter_mut().zip(marks.windows(2)) {
+            *slot = slot.saturating_add(pair[1].wrapping_sub(pair[0]));
+        }
+    }
+
     /// Submits the recorded segments in order. A segment with sparse binds
     /// splits the submission: the queue signals the bind timeline once
     /// everything before is done, the binds wait for that and the
@@ -1740,7 +2483,15 @@ impl NativeBackend {
                     .map(|&(semaphore, value)| (handle(semaphore.0), value))
                     .collect();
                 waits.push((self.bind_timeline, value - 1));
-                sparse::SparseBatch::new(&segment.binds).submit(
+                let memories = &self.memories;
+                let resolve = |memory| {
+                    memories
+                        .resolve(memory)
+                        .map_or((vk::DeviceMemory::null(), 0), |resolved| {
+                            (resolved.memory, resolved.offset)
+                        })
+                };
+                sparse::SparseBatch::new(&segment.binds, resolve).submit(
                     &self.device,
                     self.queue,
                     &waits,

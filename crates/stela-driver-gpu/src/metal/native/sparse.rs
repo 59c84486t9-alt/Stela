@@ -1,6 +1,9 @@
 //! `vkQueueBindSparse` batches of a segment's sparse binds.
 use super::{failure, handle, objects};
-use crate::metal::{error::Result, vulkan::command::SparseBind};
+use crate::metal::{
+    error::Result,
+    vulkan::{command::SparseBind, object::Memory},
+};
 use alloc::{collections::BTreeMap, vec::Vec};
 use ash::vk;
 
@@ -25,7 +28,12 @@ pub(super) struct SparseBatch {
 }
 
 impl SparseBatch {
-    pub(super) fn new(binds: &[SparseBind]) -> Self {
+    /// The batch of `binds`, whose memories `resolve` names as a
+    /// `VkDeviceMemory` and the offset there.
+    pub(super) fn new(
+        binds: &[SparseBind],
+        resolve: impl Fn(Memory) -> (vk::DeviceMemory, u64),
+    ) -> Self {
         let mut last = BTreeMap::new();
         for bind in binds {
             let key = match *bind {
@@ -46,9 +54,10 @@ impl SparseBatch {
             };
             last.insert(key, *bind);
         }
-        let memory = |memory: Option<(crate::metal::vulkan::object::Memory, u64)>| {
+        let memory = |memory: Option<(Memory, u64)>| {
             memory.map_or((vk::DeviceMemory::null(), 0), |(memory, offset)| {
-                (handle(memory.0), offset)
+                let (memory, base) = resolve(memory);
+                (memory, base + offset)
             })
         };
         let mut batch = Self::default();

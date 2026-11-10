@@ -44,7 +44,7 @@ use crate::metal::{
             Attachment, Barrier, BufferCopy, Command, DepthStencil, Rect, Rendering, VertexBuffer,
             Viewport as VkViewport,
         },
-        object::{Buffer, ImageView, QueryPool, QueryType},
+        object::{Buffer, ImageView, Pipeline, QueryPool, QueryType},
     },
 };
 use alloc::{boxed::Box, vec::Vec};
@@ -234,6 +234,8 @@ pub(super) struct RenderState {
     /// Indices of this pass's `BeginRendering` commands in the segment.
     begins: Vec<usize>,
     pub(super) pipeline: Option<RenderPipelineState>,
+    /// The Vulkan pipeline last bound: the state's, or a variant of it.
+    bound: Option<Pipeline>,
     /// `setObjectThreadgroupMemoryLength:atIndex:` lengths, by index.
     pub(super) object_threadgroup_lengths: Vec<(u32, u64)>,
     pub(super) vertex_buffers: [Option<VertexBinding>; 31],
@@ -259,6 +261,8 @@ pub(super) struct RenderState {
     pub(super) tests: super::fragment_tests::TestState,
     /// The first viewport's near and far depths.
     pub(super) depth_range: [f32; 2],
+    /// The front and back faces' stencil reference values.
+    pub(super) stencil_references: [u32; 2],
 }
 
 impl RenderState {
@@ -414,6 +418,16 @@ impl CommandBuffer {
                 self.recorder.sample_statistics(resolver, destination)?;
             }
         }
+        // A two-plane attachment's second plane clears before the pass,
+        // which writes it as storage.
+        let clears = pass.inputs.second_plane_clears;
+        if clears.iter().any(Option::is_some) {
+            self.recorder.access(super::blit::TRANSFER);
+            for &(image, value) in clears.iter().flatten() {
+                self.recorder
+                    .push(Command::ClearColorImage { image, value });
+            }
+        }
         self.recorder.access(RENDER_PASS);
         self.recorder.pause_statistics();
         let begin = self.recorder.commands().len();
@@ -424,6 +438,7 @@ impl CommandBuffer {
             pass,
             begins: alloc::vec![begin],
             pipeline: None,
+            bound: None,
             object_threadgroup_lengths: Vec::new(),
             vertex_buffers: [None; 31],
             bound_vertex_buffers: [None; 31],
@@ -446,6 +461,7 @@ impl CommandBuffer {
             tile: super::tile::TileState::default(),
             tests: super::fragment_tests::TestState::default(),
             depth_range: [0.0, 1.0],
+            stencil_references: [0, 0],
         };
         for &(sample, boundary) in &state.samples {
             if let (CounterSample::Timestamp { pool, query }, true) = (sample, boundary.starts()) {
@@ -929,7 +945,7 @@ impl CommandBuffer {
             storage & 1 << index != 0 && pass.inputs.textures[index] == ResourceId::NULL
         }) {
             return Err(Error::Unsupported(
-                "framebuffer reads of a 3D texture's depth plane",
+                "framebuffer reads of an attachment without a raw texel view or copy",
             ));
         }
         let rebind = render
@@ -946,6 +962,7 @@ impl CommandBuffer {
             if let Some(pipeline) = state.pipeline {
                 render.topology = None;
                 render.restart = None;
+                render.bound = Some(pipeline);
                 self.recorder.push(Command::BindPipeline {
                     bind_point: PipelineBindPoint::Graphics,
                     pipeline,
@@ -1162,7 +1179,7 @@ impl CommandBuffer {
     }
 
     pub fn set_stencil_reference_values(&mut self, front: u32, back: u32) -> Result<()> {
-        render(&mut self.encoder)?;
+        render(&mut self.encoder)?.stencil_references = [front, back];
         self.recorder
             .push(Command::SetStencilReference { front, back });
         Ok(())
@@ -1326,8 +1343,10 @@ impl CommandBuffer {
         render.topology = None;
         render.restart = None;
         self.bindings.pushed = None;
+        render.bound = None;
         if let Some(state) = &render.pipeline {
             if let Some(pipeline) = state.pipeline {
+                render.bound = Some(pipeline);
                 self.recorder.push(Command::BindPipeline {
                     bind_point: PipelineBindPoint::Graphics,
                     pipeline,
@@ -1689,6 +1708,12 @@ impl CommandBuffer {
             "the primitive type is outside the pipeline's topology class",
         )?;
         self.bindings.require_buffers(&pipeline.interfaces)?;
+        self.bind_bicubic(resolver)?;
+        let render = self::render(&mut self.encoder)?;
+        let pipeline = render
+            .pipeline
+            .as_ref()
+            .ok_or(Error::Invalid("no render pipeline state is set"))?;
         let topology = primitive_topology(primitive);
         let mut commands = Vec::new();
         if render.topology != Some(topology) {
@@ -1735,7 +1760,7 @@ impl CommandBuffer {
             .into_iter()
             .for_each(|command| self.recorder.push(command));
         self.prepare_fragment_tests(resolver)?;
-        self.order_attachments()?;
+        self.order_attachments(resolver)?;
         self.begin_query(resolver)?;
         self.bindings.flush(
             &mut self.recorder,
@@ -1748,13 +1773,14 @@ impl CommandBuffer {
     /// instance's accesses of it by the other: the blend unit's and its
     /// load operation's, or fragment functions' storage accesses, which
     /// follow each other through their interlock.
-    fn order_attachments(&mut self) -> Result<()> {
+    fn order_attachments(&mut self, resolver: &mut dyn Resolver) -> Result<()> {
         let render = render(&mut self.encoder)?;
         let Some(pipeline) = render.pipeline.as_ref() else {
             return Ok(());
         };
         let storage = storage_attachments(pipeline);
         let blended = blended_attachments(pipeline);
+        self.place_color_copies(resolver, storage)?;
         self.order_attachment_paths(storage, blended)
     }
 
@@ -1826,6 +1852,15 @@ impl CommandBuffer {
             index_bytes.is_some() == source.control_point_indices.is_some(),
             "indexed patch draws match the pipeline's control point index type",
         )?;
+        self.bind_bicubic(resolver)?;
+        let render = self::render(&mut self.encoder)?;
+        let pipeline = render
+            .pipeline
+            .as_ref()
+            .ok_or(Error::Invalid("no render pipeline state is set"))?;
+        let tessellation = pipeline.plan.tessellation.as_ref().ok_or(Error::Invalid(
+            "patch draws need a post-tessellation vertex function",
+        ))?;
         let factors = render
             .factors
             .ok_or(Error::Invalid("no tessellation factor buffer is set"))?;
@@ -1881,13 +1916,44 @@ impl CommandBuffer {
         )?;
         self.bindings.constants.arguments = upload.address;
         self.prepare_fragment_tests(resolver)?;
-        self.order_attachments()?;
+        self.order_attachments(resolver)?;
         self.begin_query(resolver)?;
         self.bindings.flush(
             &mut self.recorder,
             resolver,
             &[Stage::Vertex, Stage::Fragment],
         )
+    }
+
+    /// Binds the variant of the vertex pipeline whose stages filter the
+    /// bicubic samplers the draw binds them bicubically, or the pipeline
+    /// itself when it does.
+    fn bind_bicubic(&mut self, resolver: &mut dyn Resolver) -> Result<()> {
+        let render = render(&mut self.encoder)?;
+        let Some(state) = render.pipeline.as_ref() else {
+            return Ok(());
+        };
+        let mut bicubic = [0; 2];
+        for interface in &state.interfaces {
+            let stage = match interface.stage {
+                Stage::Fragment => 1,
+                _ => 0,
+            };
+            bicubic[stage] |= self.bindings.bicubic_samplers(interface.stage, interface);
+        }
+        let pipeline = if (0..2).all(|stage| bicubic[stage] & !state.bicubic[stage] == 0) {
+            state.pipeline
+        } else {
+            Some(resolver.bicubic_render_pipeline(state, bicubic)?)
+        };
+        if let Some(pipeline) = pipeline.filter(|&pipeline| render.bound != Some(pipeline)) {
+            render.bound = Some(pipeline);
+            self.recorder.push(Command::BindPipeline {
+                bind_point: PipelineBindPoint::Graphics,
+                pipeline,
+            });
+        }
+        Ok(())
     }
 
     fn prepare_mesh(
@@ -1917,13 +1983,14 @@ impl CommandBuffer {
             mesh_threads,
             &render.object_threadgroup_lengths,
         )?;
+        render.bound = Some(pipeline);
         self.recorder.push(Command::BindPipeline {
             bind_point: PipelineBindPoint::Graphics,
             pipeline,
         });
         self.bindings.constants.grid = grid;
         self.prepare_fragment_tests(resolver)?;
-        self.order_attachments()?;
+        self.order_attachments(resolver)?;
         self.begin_query(resolver)?;
         self.bindings.flush(
             &mut self.recorder,

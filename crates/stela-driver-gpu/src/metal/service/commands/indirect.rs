@@ -44,7 +44,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 let destination = self.object(connection, request.destination)?;
                 let range = command_range(request.first, request.count)?;
                 let index = usize::try_from(request.index)
-                    .map_err(|_| Fault::malformed("command index"))?;
+                    .map_err(|_| Fault::malformed("command index").value(request.index))?;
                 commands.copy_indirect_commands(
                     &mut self.device.resolver(),
                     source,

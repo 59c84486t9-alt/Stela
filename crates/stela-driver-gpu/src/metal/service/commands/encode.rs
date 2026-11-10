@@ -11,15 +11,15 @@ use crate::metal::{
     device::{ComputePipelineId, RenderPipelineId},
     indirect::{IndirectCommandBufferId, IndirectComputeCommand, IndirectRenderCommand},
     service::{
-        Call, Service, known,
+        Call, Service, decode,
         pipelines::render_stage,
         wire::{
             Empty, EncodeIndirectRequest, Fault, Status,
             commands::{
                 DepthBias, Dispatch, DrawIndexed, DrawMesh, DrawPrimitives, EncodeCode,
-                IndirectComputeCode, IndirectPatches, IndirectRenderCode, IndirectTarget, Mode,
-                SetBuffer, SetPipeline, SetThreadgroupMemory, StageBuffer, StageInRegion,
-                VertexBufferStride,
+                ImageblockSize, IndirectComputeCode, IndirectPatches, IndirectRenderCode,
+                IndirectTarget, Mode, SetBuffer, SetPipeline, SetThreadgroupMemory, StageBuffer,
+                StageInRegion, VertexBufferStride,
             },
         },
     },
@@ -41,8 +41,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         stream.try_for_each(|entry| {
             let (code, payload) = entry?;
             let (IndirectTarget { command }, payload) = payload.split()?;
-            let command =
-                usize::try_from(command).map_err(|_| Fault::malformed("command index"))?;
+            let command = usize::try_from(command)
+                .map_err(|_| Fault::malformed("command index").value(command))?;
             match code {
                 EncodeCode::Render(code) => {
                     self.encode_render(connection, id, command, code, payload)
@@ -125,12 +125,12 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             IndirectRenderCode::SetCullMode => {
                 let Mode { mode } = payload.record()?;
-                let mode = known(CullMode::from_raw(mode), "cull mode")?;
+                let mode = decode(CullMode::from_raw, mode, "cull mode")?;
                 self.render_command(id, index)?.set_cull_mode(mode)?;
             }
             IndirectRenderCode::SetFrontFacingWinding => {
                 let Mode { mode } = payload.record()?;
-                let winding = known(Winding::from_raw(mode), "winding")?;
+                let winding = decode(Winding::from_raw, mode, "winding")?;
                 self.render_command(id, index)?
                     .set_front_facing_winding(winding)?;
             }
@@ -151,13 +151,13 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             IndirectRenderCode::SetTriangleFillMode => {
                 let Mode { mode } = payload.record()?;
-                let mode = known(TriangleFillMode::from_raw(mode), "triangle fill mode")?;
+                let mode = decode(TriangleFillMode::from_raw, mode, "triangle fill mode")?;
                 self.render_command(id, index)?
                     .set_triangle_fill_mode(mode)?;
             }
             IndirectRenderCode::SetDepthClipMode => {
                 let Mode { mode } = payload.record()?;
-                let mode = known(DepthClipMode::from_raw(mode), "clip mode")?;
+                let mode = decode(DepthClipMode::from_raw, mode, "clip mode")?;
                 self.render_command(id, index)?.set_depth_clip_mode(mode)?;
             }
             IndirectRenderCode::SetBarrier => {
@@ -183,8 +183,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             IndirectRenderCode::DrawIndexed => {
                 let draw: DrawIndexed = payload.record()?;
                 let index_buffer = self.buffer_ref(connection, draw.index_buffer)?;
-                let base_vertex = i32::try_from(draw.base_vertex)
-                    .map_err(|_| Fault::new(Status::Invalid, "the base vertex exceeds 32 bits"))?;
+                let base_vertex = i32::try_from(draw.base_vertex).map_err(|_| {
+                    Fault::new(Status::Invalid, "the base vertex exceeds 32 bits")
+                        .signed(draw.base_vertex)
+                })?;
                 let (primitive, indices, index_type, instances, base_instance) = (
                     primitive(draw.primitive)?,
                     count(draw.index_count)?,
@@ -285,6 +287,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 let slot = binding(slot)?;
                 self.compute_command(id, index)?
                     .set_threadgroup_memory_length(length, slot)?;
+            }
+            IndirectComputeCode::SetImageblockSize => {
+                let ImageblockSize { width, height } = payload.record()?;
+                self.compute_command(id, index)?
+                    .set_imageblock_size(width, height)?;
             }
             IndirectComputeCode::SetStageInRegion => {
                 let StageInRegion { origin, size } = payload.record()?;

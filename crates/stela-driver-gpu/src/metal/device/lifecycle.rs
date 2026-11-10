@@ -62,8 +62,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             Some(QuiesceStatus::GpuIdle) => return QuiesceStatus::GpuIdle,
             _ => match self.poll() {
                 Err(error) => QuiesceStatus::Unproven(error),
-                Ok(completed) if completed < self.submitted => QuiesceStatus::Pending {
-                    completed,
+                Ok(_) if self.drained() < self.submitted => QuiesceStatus::Pending {
+                    completed: self.drained(),
                     submitted: self.submitted,
                 },
                 Ok(_) => match self.backend.acknowledge_idle() {

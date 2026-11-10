@@ -102,7 +102,8 @@ fn cube_arrays_become_cube_compatible_layered_images() {
             .usage
             .contains(ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT)
     );
-    // Framebuffer reads view its raw texels as storage; shaders see none.
+    // Framebuffer reads view its raw texels as storage, and kernels write
+    // it as Apple GPUs let them without shader-write usage.
     assert!(plan.image.usage.contains(ImageUsage::STORAGE));
     assert!(
         plan.image
@@ -113,7 +114,6 @@ fn cube_arrays_become_cube_compatible_layered_images() {
         plan.image.view_formats,
         [Format::R16G16B16A16Sfloat, Format::R32G32Uint]
     );
-    assert!(plan.views.storage.is_none());
     let sampled = plan.views.sampled.unwrap();
     assert_eq!(
         (
@@ -132,7 +132,8 @@ fn cube_arrays_become_cube_compatible_layered_images() {
             ..sampled
         })
     );
-    assert_eq!(plan.views.storage, None);
+    // Kernels write it through the sampled view, which is also storage.
+    assert_eq!(plan.views.storage, plan.views.sampled);
 }
 
 #[test]
@@ -217,10 +218,11 @@ fn shape_rules_follow_metal() {
 #[test]
 fn unsupported_formats_and_uses_are_refused_by_capability() {
     let capabilities = capabilities();
+    // ASTC HDR blocks are held decoded to half floats.
     let astc = descriptor(TextureType::D2, PixelFormat::Astc4x4Hdr);
     assert_eq!(
-        texture(&capabilities, &astc),
-        Err(Error::Unsupported("shader reads of this pixel format"))
+        texture(&capabilities, &astc).unwrap().image.format,
+        Format::R16G16B16A16Sfloat
     );
     // Extended-range textures are half-float images; shader writes would
     // skip the clamping their stores do.
@@ -273,6 +275,23 @@ fn srgb_textures_may_view_their_linear_pair() {
         plan.image.view_formats,
         [Format::B8G8R8A8Srgb, Format::B8G8R8A8Unorm]
     );
+}
+
+#[test]
+fn srgb_textures_store_through_their_linear_pair() {
+    let mut srgb = descriptor(TextureType::D2, PixelFormat::Rgba8UnormSrgb);
+    srgb.usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
+    let plan = texture(&capabilities(), &srgb).unwrap();
+    assert!(plan.image.flags.contains(ImageCreate::EXTENDED_USAGE));
+    assert!(plan.image.usage.contains(ImageUsage::STORAGE));
+    assert_eq!(plan.views.sampled.unwrap().format, Format::R8G8B8A8Srgb);
+    assert_eq!(plan.views.storage.unwrap().format, Format::R8G8B8A8Unorm);
+    assert!(plan.views.srgb_storage);
+    // A linear texture's views stay its own.
+    let mut linear = srgb;
+    linear.pixel_format = PixelFormat::Rgba8Unorm;
+    let plan = texture(&capabilities(), &linear).unwrap();
+    assert!(!plan.views.srgb_storage);
 }
 
 #[test]
@@ -497,6 +516,78 @@ fn linear_textures_alias_buffer_rows_with_nvk_alignment() {
         linear_texture(&capabilities, &d1, 1 << 20, 0, 416),
         Err(Error::Unsupported("1D textures inside buffers"))
     );
+}
+
+#[test]
+fn two_plane_textures_are_a_full_plane_and_a_subsampled_pair() {
+    let capabilities = capabilities();
+    let layout = |offset, bytes_per_row| PlaneLayout {
+        offset,
+        bytes_per_row,
+    };
+    for (format, second) in [
+        (PixelFormat::Rgb8_444_2p, [101, 11]),
+        (PixelFormat::Rgb8_422_2p, [51, 11]),
+        (PixelFormat::Rgb8_420_2p, [51, 6]),
+    ] {
+        let mut surface = descriptor(TextureType::D2, format);
+        surface.width = 101;
+        surface.height = 11;
+        surface.options = options(StorageMode::Shared);
+        let [first, pair] = two_plane_texture(
+            &capabilities,
+            &surface,
+            1 << 20,
+            [layout(0, 128), layout(1 << 16, 256)],
+        )
+        .unwrap();
+        assert_eq!(first.image.format, Format::R8Unorm, "{format:?}");
+        assert_eq!(first.image.extent, [101, 11, 1]);
+        assert_eq!(first.image.linear, Some(LinearLayout { row_pitch: 128 }));
+        assert_eq!(pair.image.format, Format::R8G8Unorm);
+        assert_eq!(pair.image.extent, [second[0], second[1], 1], "{format:?}");
+        assert_eq!(pair.image.linear, Some(LinearLayout { row_pitch: 256 }));
+        assert!(texture(&capabilities, &surface).is_err());
+        assert!(linear_texture(&capabilities, &surface, 1 << 20, 0, 128).is_err());
+    }
+}
+
+#[test]
+fn ten_bit_two_plane_textures_are_planes_of_16_bit_words() {
+    let capabilities = capabilities();
+    let layout = |offset, bytes_per_row| PlaneLayout {
+        offset,
+        bytes_per_row,
+    };
+    for (format, second) in [
+        (PixelFormat::Rgb10_444_2p, [101, 11]),
+        (PixelFormat::Ycbcr10_422_2p, [51, 11]),
+        (PixelFormat::Rgb10_420_2p, [51, 6]),
+        (PixelFormat::Ycbcr10_420_2p, [51, 6]),
+    ] {
+        let mut surface = descriptor(TextureType::D2, format);
+        surface.width = 101;
+        surface.height = 11;
+        surface.options = options(StorageMode::Shared);
+        let [first, pair] = two_plane_texture(
+            &capabilities,
+            &surface,
+            1 << 20,
+            [layout(0, 256), layout(1 << 16, 512)],
+        )
+        .unwrap();
+        assert_eq!(first.image.format, Format::R16Unorm, "{format:?}");
+        assert_eq!(first.image.extent, [101, 11, 1]);
+        assert_eq!(pair.image.format, Format::R16G16Unorm);
+        assert_eq!(pair.image.extent, [second[0], second[1], 1], "{format:?}");
+        assert_eq!(format.describe().block.bytes, 2);
+        assert!(
+            !capabilities
+                .format(format)
+                .contains(crate::metal::capabilities::FormatCapabilities::COLOR),
+            "{format:?} does not render"
+        );
+    }
 }
 
 #[test]

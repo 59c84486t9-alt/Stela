@@ -1,7 +1,7 @@
 //! The driver's answers for one `VkPhysicalDevice`: the device extensions
 //! this backend uses, the feature chain it probes and enables, and the
 //! [`PhysicalDevice`] snapshot Metal's capabilities derive from.
-use super::generated;
+use super::device_generated;
 use crate::metal::vulkan::{
     DriverId, Format, FormatFeatures, MemoryHeapFlags, MemoryProperties, PhysicalDeviceType,
     ResolveModes, SampleCounts, ShaderStages, SubgroupFeatures,
@@ -70,10 +70,11 @@ impl Default for UnifiedImageLayoutsFeatures {
 
 /// Extensions the device enables when the driver offers them. The
 /// requirements decide which absences refuse the device.
-const ENABLED: [&CStr; 30] = [
+const ENABLED: [&CStr; 33] = [
+    khr::pipeline_executable_properties::NAME,
     UNIFIED_IMAGE_LAYOUTS,
     MAINTENANCE8,
-    generated::NAME,
+    device_generated::NAME,
     ext::robustness2::NAME,
     ext::dynamic_rendering_unused_attachments::NAME,
     ext::extended_dynamic_state3::NAME,
@@ -85,6 +86,7 @@ const ENABLED: [&CStr; 30] = [
     khr::calibrated_timestamps::NAME,
     ext::memory_budget::NAME,
     khr::external_memory_fd::NAME,
+    khr::external_semaphore_fd::NAME,
     ext::external_memory_dma_buf::NAME,
     ext::shader_stencil_export::NAME,
     ext::pci_bus_info::NAME,
@@ -92,6 +94,7 @@ const ENABLED: [&CStr; 30] = [
     khr::vertex_attribute_divisor::NAME,
     ext::depth_bias_control::NAME,
     ext::depth_clip_enable::NAME,
+    khr::line_rasterization::NAME,
     ext::image_view_min_lod::NAME,
     ext::vertex_input_dynamic_state::NAME,
     ext::fragment_shader_interlock::NAME,
@@ -169,6 +172,7 @@ pub(super) struct FeatureChain {
     divisor: vk::PhysicalDeviceVertexAttributeDivisorFeaturesKHR<'static>,
     depth_bias: vk::PhysicalDeviceDepthBiasControlFeaturesEXT<'static>,
     depth_clip: vk::PhysicalDeviceDepthClipEnableFeaturesEXT<'static>,
+    lines: vk::PhysicalDeviceLineRasterizationFeaturesKHR<'static>,
     view_min_lod: vk::PhysicalDeviceImageViewMinLodFeaturesEXT<'static>,
     vertex_input: vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT<'static>,
     interlock: vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT<'static>,
@@ -178,7 +182,8 @@ pub(super) struct FeatureChain {
     cooperative_matrix: vk::PhysicalDeviceCooperativeMatrixFeaturesKHR<'static>,
     local_read: vk::PhysicalDeviceDynamicRenderingLocalReadFeaturesKHR<'static>,
     float16_vector: vk::PhysicalDeviceShaderAtomicFloat16VectorFeaturesNV<'static>,
-    generated: generated::Features,
+    executable: vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR<'static>,
+    generated: device_generated::Features,
     acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'static>,
     ray_query: vk::PhysicalDeviceRayQueryFeaturesKHR<'static>,
     ray_tracing: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'static>,
@@ -220,6 +225,7 @@ impl FeatureChain {
             divisor if extensions.has(khr::vertex_attribute_divisor::NAME);
             depth_bias if extensions.has(ext::depth_bias_control::NAME);
             depth_clip if extensions.has(ext::depth_clip_enable::NAME);
+            lines if extensions.has(khr::line_rasterization::NAME);
             view_min_lod if extensions.has(ext::image_view_min_lod::NAME);
             vertex_input if extensions.has(ext::vertex_input_dynamic_state::NAME);
             interlock if extensions.has(ext::fragment_shader_interlock::NAME);
@@ -229,7 +235,8 @@ impl FeatureChain {
             cooperative_matrix if extensions.has(khr::cooperative_matrix::NAME);
             local_read if extensions.has(khr::dynamic_rendering_local_read::NAME);
             float16_vector if extensions.has(nv::shader_atomic_float16_vector::NAME);
-            generated if extensions.has(generated::NAME);
+            executable if extensions.has(khr::pipeline_executable_properties::NAME);
+            generated if extensions.has(device_generated::NAME);
             acceleration_structure if probe && extensions.has(khr::acceleration_structure::NAME);
             ray_query if probe && extensions.has(khr::ray_query::NAME);
             ray_tracing if probe && extensions.has(khr::ray_tracing_pipeline::NAME);
@@ -391,6 +398,8 @@ impl FeatureChain {
                 .divisor
                 .vertex_attribute_instance_rate_divisor),
             depth_clip_enable: on(self.depth_clip.depth_clip_enable),
+            bresenham_lines: on(self.lines.bresenham_lines),
+            rectangular_lines: on(self.lines.rectangular_lines),
             image_view_min_lod: on(self.view_min_lod.min_lod),
             fragment_shader_barycentric: on(self.barycentric.fragment_shader_barycentric),
             task_shader: on(self.mesh.task_shader),
@@ -438,7 +447,7 @@ pub(super) fn probe(
     let mut mesh = vk::PhysicalDeviceMeshShaderPropertiesEXT::default();
     let mut divisor = vk::PhysicalDeviceVertexAttributeDivisorPropertiesKHR::default();
     let mut dynamic_state3 = vk::PhysicalDeviceExtendedDynamicState3PropertiesEXT::default();
-    let mut generated = generated::Properties::default();
+    let mut generated = device_generated::Properties::default();
     let mut properties = vk::PhysicalDeviceProperties2::default()
         .push_next(&mut v11)
         .push_next(&mut v12)
@@ -458,7 +467,7 @@ pub(super) fn probe(
     if extensions.has(ext::extended_dynamic_state3::NAME) {
         properties = properties.push_next(&mut dynamic_state3);
     }
-    if extensions.has(generated::NAME) {
+    if extensions.has(device_generated::NAME) {
         // The bindings cannot chain the structure, so it goes first by hand.
         generated.p_next = properties.p_next;
         properties.p_next = ptr::addr_of_mut!(generated).cast();
@@ -527,7 +536,7 @@ pub(super) fn probe(
     );
     limits.generated_commands = chain
         .generated_commands()
-        .then(|| generated::limits(&generated));
+        .then(|| device_generated::limits(&generated));
     limits.dma_buf_import = extensions.has(khr::external_memory_fd::NAME)
         && extensions.has(ext::external_memory_dma_buf::NAME);
     limits.stencil_export = extensions.has(ext::shader_stencil_export::NAME);
@@ -724,6 +733,40 @@ fn memory(instance: &ash::Instance, device: vk::PhysicalDevice, extensions: &Ext
     }
 }
 
+/// The features of `format`'s images of the linear DRM format modifier.
+fn linear_modifier_features(
+    instance: &ash::Instance,
+    device: vk::PhysicalDevice,
+    format: vk::Format,
+) -> FormatFeatures {
+    const LINEAR: u64 = 0;
+    let count = {
+        let mut list = vk::DrmFormatModifierPropertiesList2EXT::default();
+        let mut properties = vk::FormatProperties2::default().push_next(&mut list);
+        // SAFETY: `device` came from this instance, which enabled the
+        // modifier extension when the device has it.
+        unsafe { instance.get_physical_device_format_properties2(device, format, &mut properties) };
+        list.drm_format_modifier_count
+    };
+    let mut modifiers = alloc::vec![vk::DrmFormatModifierProperties2EXT::default(); count as usize];
+    {
+        let mut list = vk::DrmFormatModifierPropertiesList2EXT::default()
+            .drm_format_modifier_properties(&mut modifiers);
+        let mut properties = vk::FormatProperties2::default().push_next(&mut list);
+        // SAFETY: as above; the list holds the count the driver reported.
+        unsafe { instance.get_physical_device_format_properties2(device, format, &mut properties) };
+    }
+    modifiers
+        .iter()
+        .find(|modifier| modifier.drm_format_modifier == LINEAR)
+        .map_or(FormatFeatures::EMPTY, |modifier| {
+            known!(
+                FormatFeatures,
+                modifier.drm_format_modifier_tiling_features.as_raw()
+            )
+        })
+}
+
 /// Support for every format the Metal layer can request.
 fn formats(
     instance: &ash::Instance,
@@ -791,6 +834,11 @@ fn formats(
             FormatSupport {
                 optimal,
                 linear: known!(FormatFeatures, flags.linear_tiling_features.as_raw()),
+                modifier_linear: if features.image_drm_format_modifier {
+                    linear_modifier_features(instance, device, vulkan)
+                } else {
+                    FormatFeatures::EMPTY
+                },
                 buffer: known!(FormatFeatures, flags.buffer_features.as_raw()),
                 sample_counts,
                 sparse,

@@ -12,7 +12,7 @@ use crate::metal::{
     error::ensure,
     resource::TextureDescriptor,
     service::{
-        Object, Service, known, region,
+        Object, Service, decode_bits, region,
         wire::{
             Empty, Fault,
             commands::{
@@ -120,8 +120,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             BlitCode::FillBuffer => {
                 let request: FillBuffer = payload.record()?;
                 let buffer = self.buffer_ref(connection, request.buffer)?;
-                let value =
-                    u8::try_from(request.value).map_err(|_| Fault::malformed("fill value"))?;
+                let value = u8::try_from(request.value)
+                    .map_err(|_| Fault::malformed("fill value").value(request.value))?;
                 let resolver = &mut self.device.resolver();
                 commands.fill_buffer(resolver, buffer, request.start, request.length, value)?;
             }
@@ -153,8 +153,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             BlitCode::ResolveCounters => {
                 let request: ResolveCounters = payload.record()?;
-                let range =
-                    |value| u32::try_from(value).map_err(|_| Fault::malformed("sample range"));
+                let range = |value| {
+                    u32::try_from(value).map_err(|_| Fault::malformed("sample range").value(value))
+                };
                 let counters = self.object(connection, request.buffer)?;
                 let range = self.device.counter_range(
                     counters,
@@ -253,5 +254,5 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 type CopiedTexture = (Image, TextureDescriptor, ResourceId, Option<BufferRef>);
 
 fn blit_options(raw: u64) -> Result<BlitOption, Fault> {
-    known(BlitOption::from_bits(raw), "blit options")
+    decode_bits(BlitOption::from_bits, raw, "blit options")
 }

@@ -1,7 +1,7 @@
 //! Vulkan create infos for the boundary's object descriptions. Each builder
 //! assembles the structure and its `pNext` chain on the stack and hands it
 //! to `build`, so the chain outlives the Vulkan call that reads it.
-use super::{generated, handle};
+use super::{device_generated, handle};
 use crate::metal::{
     binding::HeapArray,
     error::Result,
@@ -11,7 +11,8 @@ use crate::metal::{
         command::{BufferImageCopy, Subresource},
         object::{
             BufferInfo, ColorBlendAttachment, ComputePipelineInfo, GraphicsPipelineInfo, ImageInfo,
-            ImageViewInfo, MemoryRequest, PipelineSource, SamplerInfo, Semaphore, ShaderCode,
+            ImageViewInfo, LineRasterization, MemoryRequest, PipelineSource, SamplerInfo,
+            Semaphore, ShaderCode,
         },
         physical::Memory,
     },
@@ -318,7 +319,8 @@ fn create_flags(source: PipelineSource) -> vk::PipelineCreateFlags {
 
 /// The flags that replace `flags` on a pipeline indirect commands bind.
 fn indirect_flags(flags: vk::PipelineCreateFlags) -> vk::PipelineCreateFlags2KHR {
-    generated::INDIRECT_BINDABLE | vk::PipelineCreateFlags2KHR::from_raw(flags.as_raw().into())
+    device_generated::INDIRECT_BINDABLE
+        | vk::PipelineCreateFlags2KHR::from_raw(flags.as_raw().into())
 }
 
 pub(super) fn compute_pipeline<T>(
@@ -431,9 +433,18 @@ pub(super) fn graphics_pipeline<T>(
         .patch_control_points(info.patch_control_points);
 
     let viewport = vk::PipelineViewportStateCreateInfo::default();
-    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+    let mut lines = vk::PipelineRasterizationLineStateCreateInfoKHR::default()
+        .line_rasterization_mode(match info.line_rasterization {
+            LineRasterization::Default => vk::LineRasterizationModeKHR::DEFAULT,
+            LineRasterization::Rectangular => vk::LineRasterizationModeKHR::RECTANGULAR,
+            LineRasterization::Bresenham => vk::LineRasterizationModeKHR::BRESENHAM,
+        });
+    let mut rasterization = vk::PipelineRasterizationStateCreateInfo::default()
         .polygon_mode(vk::PolygonMode::FILL)
         .line_width(1.0);
+    if info.line_rasterization != LineRasterization::Default {
+        rasterization = rasterization.push_next(&mut lines);
+    }
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::from_raw(info.samples.bits()))
         .alpha_to_coverage_enable(info.alpha_to_coverage)

@@ -6,7 +6,7 @@ use crate::metal::{
     abi::{DataType, FunctionType, TextureType},
     capabilities::ShaderFeatures,
     command_buffer::Segment,
-    error::{Error, Result},
+    error::{Error, NO_FUNCTION, Result},
     library::tests::fixture,
     nvidia::{CHIPS, Chip, PcieLink, fixture::nvk},
     reflection::{
@@ -14,8 +14,8 @@ use crate::metal::{
         TextureReferenceType, Type,
     },
     shader::{
-        Access, BufferUse, CompiledShader, Compiler, FunctionConstant, Interface, Patch,
-        PatchDomain, Provenance, Reflection, Scalar, Specialization, Stage, Tessellation,
+        Access, BufferUse, CompiledShader, Compiler, FunctionConstant, Interface, LinkedFunction,
+        Patch, PatchDomain, Provenance, Reflection, Scalar, Specialization, Stage, Tessellation,
         TessellationStages, Varying, tests::interface,
     },
     stitching::StitchedGraph,
@@ -49,6 +49,8 @@ pub(crate) struct MockBackend {
     pub(crate) physical: Option<PhysicalDevice>,
     pub(crate) next: u64,
     pub(crate) destroyed: Vec<Object>,
+    /// Images zeroed for reuse, in order.
+    pub(crate) cleared: Vec<Image>,
     pub(crate) descriptors: Vec<(u32, Descriptor)>,
     pub(crate) graphics: Vec<GraphicsPipelineInfo>,
     pub(crate) compute: Vec<ComputePipelineInfo>,
@@ -62,6 +64,12 @@ pub(crate) struct MockBackend {
     pub(crate) imports: BTreeMap<u64, (Vec<MemoryRange>, NonZeroU64)>,
     pub(crate) retired: VecDeque<NonZeroU64>,
     pub(crate) semaphores: BTreeMap<u64, u64>,
+    /// The highest value each semaphore's submitted signals reach.
+    pub(crate) promised: BTreeMap<u64, u64>,
+    /// Waits submitted on a value neither reached nor promised by work
+    /// submitted before: a driver holds the queue there, every submission
+    /// behind it included, until a signal arrives.
+    pub(crate) unpromised: Vec<(Semaphore, u64)>,
     pub(crate) queries_ready: bool,
     pub(crate) query_pool_error: Option<Error>,
     pub(crate) query_pools: Vec<(QueryPool, QueryPoolInfo)>,
@@ -99,6 +107,14 @@ impl MockBackend {
             PipelineSource::Archived(_) => {}
         }
         Ok(())
+    }
+
+    /// The GPU runs everything submitted: each signal reaches its value.
+    pub(crate) fn finish(&mut self) {
+        for (&semaphore, &promised) in &self.promised {
+            let value = self.semaphores.entry(semaphore).or_default();
+            *value = (*value).max(promised);
+        }
     }
 
     /// Completes everything submitted so far.
@@ -175,6 +191,9 @@ impl Backend for MockBackend {
     fn create_placed_image(&mut self, _: &ImageInfo, _: Memory, _: u64) -> Result<Image> {
         Ok(Image(self.id()))
     }
+    fn clear_reused_image(&mut self, image: Image, _: &ImageInfo) {
+        self.cleared.push(image);
+    }
     /// RGBA8's standard block at the image's sample count, with each
     /// layer's tail of one block from level 2.
     fn create_sparse_image(
@@ -232,6 +251,9 @@ impl Backend for MockBackend {
         let id = self.id();
         self.semaphores.insert(id, initial);
         Ok(Semaphore(id))
+    }
+    fn export_semaphore(&mut self, _: Semaphore) -> Option<i32> {
+        None
     }
     fn create_indirect_commands_layout(
         &mut self,
@@ -343,6 +365,19 @@ impl Backend for MockBackend {
         Ok(self.semaphores[&semaphore.0] >= value)
     }
     fn submit(&mut self, segments: &[Segment]) -> Result<()> {
+        for segment in segments {
+            for &(semaphore, value) in &segment.waits {
+                let reached = self.semaphores.get(&semaphore.0).copied().unwrap_or(0);
+                let promised = self.promised.get(&semaphore.0).copied().unwrap_or(0);
+                if reached.max(promised) < value {
+                    self.unpromised.push((semaphore, value));
+                }
+            }
+            for &(semaphore, value) in &segment.signals {
+                let promised = self.promised.entry(semaphore.0).or_default();
+                *promised = (*promised).max(value);
+            }
+        }
         self.submissions.push(segments.to_vec());
         Ok(())
     }
@@ -364,6 +399,11 @@ pub(crate) struct MockCompiler {
     pub(crate) compiled: Vec<Specialization>,
     pub(crate) tessellations: Vec<Tessellation>,
     pub(crate) released: Vec<ShaderCode>,
+    /// The next compilation defers, as the AIR compiler's does when the
+    /// service runs the call again.
+    pub(crate) defer_next: bool,
+    /// A compilation deferred, until the test takes it.
+    pub(crate) deferred: bool,
 }
 
 /// Every function's bindings: uniforms holding a matrix and an array of
@@ -450,11 +490,11 @@ fn reflected(entry: &str) -> Result<Interface> {
     let stage = match entry {
         "kernel" => Stage::Kernel,
         "vertex" | "patch" => Stage::Vertex,
-        "fragment" | "unlinked" => Stage::Fragment,
+        "fragment" | "unlinked" | "filtering" => Stage::Fragment,
         "object" => Stage::Object,
         "mesh" => Stage::Mesh,
         "constants" | "sampling" => Stage::Kernel,
-        _ => return Err(Error::Invalid("no such function")),
+        _ => return Err(NO_FUNCTION),
     };
     let mut interface = interface(stage);
     if entry == "patch" {
@@ -470,11 +510,17 @@ fn reflected(entry: &str) -> Result<Interface> {
         per_primitive,
     };
     interface.varyings = match entry {
-        "vertex" | "patch" | "fragment" => alloc::vec![varying("user(color)", false)],
+        "vertex" | "patch" | "fragment" | "filtering" => {
+            alloc::vec![varying("user(color)", false)]
+        }
         "mesh" => alloc::vec![varying("user(color)", false), varying("user(normal)", true)],
         "unlinked" => alloc::vec![varying("user(missing)", false)],
         _ => Vec::new(),
     };
+    // A fragment function sampling through the sampler at index 1.
+    if entry == "filtering" {
+        interface.samplers = alloc::vec![1];
+    }
     if entry == "constants" {
         let constant = |name: &str, data_type, index, required| FunctionConstant {
             name: String::from(name),
@@ -501,6 +547,9 @@ impl Compiler for MockCompiler {
     fn features(&self) -> ShaderFeatures {
         ShaderFeatures::KNOWN
     }
+    fn deferred(&self) -> bool {
+        self.deferred
+    }
     fn add_library(&mut self, data: Vec<u8>) -> Result<u64> {
         self.libraries.push(Some(data));
         Ok(self.libraries.len() as u64 - 1)
@@ -518,7 +567,7 @@ impl Compiler for MockCompiler {
     fn exports(&mut self, _: &[u8]) -> Result<Vec<String>> {
         Ok(alloc::vec![String::from("_Z6helperf")])
     }
-    fn stitch(&mut self, _: &[(u64, &str)], _: &[StitchedGraph]) -> Result<Vec<u8>> {
+    fn stitch(&mut self, _: &[LinkedFunction], _: &[StitchedGraph]) -> Result<Vec<u8>> {
         Ok(b"BC\xc0\xde\0\0\0\0".to_vec())
     }
     fn library_data(&self, library: u64) -> Result<&[u8]> {
@@ -579,6 +628,10 @@ impl Compiler for MockCompiler {
         entry: &str,
         specialization: &Specialization,
     ) -> Result<CompiledShader> {
+        if core::mem::take(&mut self.defer_next) {
+            self.deferred = true;
+            return Err(crate::metal::compiler::DEFERRED);
+        }
         self.compiled.push(specialization.clone());
         Ok(CompiledShader {
             code: ShaderCode(self.compiled.len() as u64),

@@ -38,7 +38,8 @@ use super::{
         BlendFactor, BlendOp, ColorComponents, CompareOp, DynamicState, Format, PrimitiveTopology,
         SampleCounts, ShaderStages, StencilOp,
         object::{
-            ColorBlendAttachment, GraphicsPipelineInfo, PipelineSource, ShaderCode, VertexInput,
+            ColorBlendAttachment, GraphicsPipelineInfo, LineRasterization, PipelineSource,
+            ShaderCode, VertexInput,
         },
     },
 };
@@ -601,12 +602,6 @@ pub fn mesh_render_pipeline(
     Ok(plan)
 }
 
-/// The color attachments `fragment` reads, each of which it accesses as
-/// storage in its fragment shader interlock section, as the function's
-/// specialization for a pipeline of `targets`. Its texels then pass the
-/// fragment tests before the function writes them, so it may not write
-/// depth, stencil or coverage, nor discard with a depth or stencil
-/// attachment that a test would write.
 /// `enum stela_air_extended_range`'s kinds.
 const EXTENDED_RANGE_LINEAR: u32 = 1;
 const EXTENDED_RANGE_SRGB: u32 = 2;
@@ -627,6 +622,27 @@ pub fn extended_range_attachments(targets: &RenderTargets) -> u32 {
         })
 }
 
+/// Whether a pipeline of `targets` can test fragments before `fragment`
+/// runs: the function writes no depth, stencil or coverage, discards under
+/// no depth or stencil test, and its pipeline turns no alpha into coverage.
+/// A function accessing attachments as storage writes them in its interlock
+/// section, so otherwise it runs the tests itself there, before it writes
+/// them ([`Specialization::self_tests`]).
+pub fn tests_first(fragment: &Interface, targets: &RenderTargets) -> bool {
+    let depth_stencil = targets.depth_attachment_pixel_format.is_some()
+        || targets.stencil_attachment_pixel_format.is_some();
+    !(fragment.writes_depth
+        || fragment.writes_stencil
+        || fragment.writes_sample_mask
+        || fragment.discards && depth_stencil
+        || targets.alpha_to_coverage_enabled)
+}
+
+/// The color attachments `fragment` reads, each of which it accesses as
+/// storage in its fragment shader interlock section, as the function's
+/// specialization for a pipeline of `targets`. Its texels pass the fragment
+/// tests before the function writes them, which it runs itself when its
+/// pipeline cannot run them first ([`tests_first`]).
 pub fn storage_attachments(
     capabilities: &Capabilities,
     fragment: &Interface,
@@ -650,31 +666,18 @@ pub fn storage_attachments(
             })
         })
         .fold(0, |mask, (index, _)| mask | 1 << index);
-    let accessed = fragment.attachment_reads | raw;
+    let accessed =
+        fragment.attachment_reads | raw | blended_extended_range(capabilities, fragment, targets);
     if accessed == 0 {
         return Ok(attachments);
     }
-    let depth_stencil = targets.depth_attachment_pixel_format.is_some()
-        || targets.stencil_attachment_pixel_format.is_some();
-    let tests_first = !(fragment.writes_depth
-        || fragment.writes_stencil
-        || fragment.writes_sample_mask
-        || fragment.discards && depth_stencil
-        || targets.alpha_to_coverage_enabled
-        || targets.alpha_to_one_enabled);
     if fragment.attachment_reads != 0 {
         require(capabilities.framebuffer_reads, "framebuffer reads")?;
-        require(
-            tests_first,
-            "framebuffer reads by a function that writes depth, stencil or coverage",
-        )?;
     }
-    if raw != 0 {
-        require(
-            tests_first,
-            "rendering to this pixel format by a function that writes depth, stencil or coverage",
-        )?;
-    }
+    require(
+        tests_first(fragment, targets) || capabilities.fragment_tests,
+        "attachments accessed as storage by a function that writes depth, stencil or coverage",
+    )?;
     for (index, attachment) in targets.color_attachments.iter().enumerate() {
         let Some(format) = attachment
             .pixel_format
@@ -682,10 +685,6 @@ pub fn storage_attachments(
         else {
             continue;
         };
-        require(
-            !attachment.uses_source1(),
-            "storage attachments that blend a second source",
-        )?;
         let description = format.describe();
         let realization = description
             .realization
@@ -701,9 +700,63 @@ pub fn storage_attachments(
                 raw(attachment.alpha_blend_operation.raw()),
             ],
             factors: attachment.factors().map(|factor| raw(factor.raw())),
+            planes: planes(format),
         });
     }
     Ok(attachments)
+}
+
+/// The extended-range attachments a pipeline blends, one bit each, which
+/// its function blends as storage: it then stores each result's nearest
+/// code within the codes' range, as Apple GPUs do, where the blend unit
+/// would keep values past them. A device without framebuffer reads, or a
+/// function that cannot let the pipeline test fragments first, leaves
+/// them to the blend unit (metal-device.md, known hardware precision
+/// differences).
+fn blended_extended_range(
+    capabilities: &Capabilities,
+    fragment: &Interface,
+    targets: &RenderTargets,
+) -> u32 {
+    if !capabilities.framebuffer_reads || !tests_first(fragment, targets) {
+        return 0;
+    }
+    targets
+        .color_attachments
+        .iter()
+        .enumerate()
+        .filter(|(_, attachment)| attachment.blending_enabled && attachment.extended_range() != 0)
+        .fold(0, |mask, (index, _)| mask | 1 << index)
+}
+
+/// How a pipeline's lines and polygon edges rasterize: as Apple GPUs draw
+/// them, by the diamond exit rule at one sample (Vulkan's Bresenham lines)
+/// and as rectangles under multisampling. Bresenham lines exclude alpha to
+/// coverage and alpha to one, so those pipelines, and devices without the
+/// modes, keep the driver's own lines.
+fn line_rasterization(
+    capabilities: &Capabilities,
+    samples: u32,
+    targets: &RenderTargets,
+) -> LineRasterization {
+    if !capabilities.line_modes {
+        LineRasterization::Default
+    } else if samples > 1 {
+        LineRasterization::Rectangular
+    } else if targets.alpha_to_coverage_enabled || targets.alpha_to_one_enabled {
+        LineRasterization::Default
+    } else {
+        LineRasterization::Bresenham
+    }
+}
+
+/// A color format's planes as a storage attachment's function takes them
+/// (`enum stela_air_planes`): its second plane's subsampling, with 4 for
+/// luma and chroma; zero for one plane.
+fn planes(format: PixelFormat) -> u8 {
+    format.planes().map_or(0, |planes| {
+        planes as u8 | if format.ycbcr() { 4 } else { 0 }
+    })
 }
 
 fn amplification(capabilities: &Capabilities, count: u64) -> Result<u32> {
@@ -815,18 +868,15 @@ fn targets(
     if targets.alpha_to_one_enabled {
         require(capabilities.alpha_to_one, "alpha to one")?;
     }
-    // Without stencil export, a stencil output's function tests fragments
-    // before the pipeline's coverage changes: alpha to coverage would drop
-    // samples it already wrote.
+    // A stencil output's function without stencil export, and a function
+    // accessing attachments as storage whose pipeline cannot test fragments
+    // first, test fragments themselves, alpha to coverage first.
     let tests_fragments = capabilities.fragment_tests
         && targets.rasterization_enabled
-        && outputs.is_some_and(|outputs| outputs.writes_stencil);
-    if tests_fragments {
-        require(
-            !targets.alpha_to_coverage_enabled,
-            "alpha to coverage with stencil feedback",
-        )?;
-    }
+        && outputs.is_some_and(|outputs| {
+            outputs.writes_stencil && !capabilities.stencil_export
+                || outputs.storage_attachments != 0 && !tests_first(outputs, targets)
+        });
 
     let mut dynamic_states = BASE_DYNAMIC_STATES.to_vec();
     if capabilities.programmable_sample_positions {
@@ -852,8 +902,9 @@ fn targets(
             topology: PrimitiveTopology::TriangleList,
             patch_control_points: 0,
             samples: sample_flag,
-            alpha_to_coverage: targets.alpha_to_coverage_enabled,
+            alpha_to_coverage: targets.alpha_to_coverage_enabled && !tests_fragments,
             alpha_to_one: targets.alpha_to_one_enabled,
+            line_rasterization: line_rasterization(capabilities, samples, targets),
             color_formats,
             depth_format: depth,
             stencil_format: stencil,
@@ -1116,10 +1167,6 @@ pub fn compute_variant(
             length.is_multiple_of(16),
             "threadgroup memory lengths are multiples of 16",
         )?;
-        ensure(
-            length >= used.declared_bytes,
-            "threadgroup memory length is smaller than the argument",
-        )?;
         bytes += length;
         lengths.push((used.index, length));
     }
@@ -1127,6 +1174,19 @@ pub fn compute_variant(
         bytes <= plan.max_threadgroup_memory_length,
         "threadgroup memory exceeds the device limit",
     )?;
+    // A length below the argument's type runs on Apple GPUs: only the
+    // validation layer refuses it (probed on an M1 Pro, macOS 27.2: a
+    // 1 KiB argument with 128 bytes set completes and reads what it wrote).
+    // Such a slot gets its declared bytes while the device has room, so
+    // every access the type allows lands in it; past the limit it keeps
+    // the length set, as Apple GPUs allocate.
+    for ((_, length), used) in lengths.iter_mut().zip(&interface.threadgroup) {
+        let declared = used.declared_bytes.next_multiple_of(16);
+        if *length < declared && bytes - *length + declared <= plan.max_threadgroup_memory_length {
+            bytes = bytes - *length + declared;
+            *length = declared;
+        }
+    }
     // Only a kernel with an imageblock compiles for its size, which is 0 x 0
     // until the encoder sets one, as on Apple GPUs.
     let workgroup = dimensions.map(|size| size as u32);
@@ -1176,7 +1236,7 @@ pub fn tile_target(
             .realization
             .map_err(|_| Error::Unsupported("tile functions of the pixel format"))?;
         require(
-            raw_texel_format(format).is_some(),
+            raw_texel_format(format).is_some() && format.planes().is_none(),
             "tile functions of the pixel format",
         )?;
         *attachment = Some(StorageAttachment {
@@ -1228,8 +1288,17 @@ pub fn tile_variant(
             "threadgroup is not a multiple of the thread execution width",
         )?;
     }
+    // Apple GPUs run a tile's threads in 2 by 2 quads, so the workgroup
+    // holds the threads with their sides padded to even, which the function
+    // places as Apple's lanes and whose padding skips it.
+    let padded = threads.width.next_multiple_of(2) * threads.height.next_multiple_of(2);
+    if padded > plan.max_total_threads_per_threadgroup {
+        return Err(Error::Unsupported(
+            "tile threadgroups whose sides padded to even exceed maxTotalThreadsPerThreadgroup",
+        ));
+    }
     Ok(Specialization {
-        workgroup_size: Some([total as u32, 1, 1]),
+        workgroup_size: Some([padded as u32, 1, 1]),
         dynamic_threadgroups: true,
         tile: true,
         storage_attachments: target.attachments,

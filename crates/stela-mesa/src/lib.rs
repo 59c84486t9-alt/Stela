@@ -12,6 +12,10 @@ extern crate nil;
 
 use core::ffi::{c_char, c_void};
 
+/// The SHA-256 of what turns NIR into machine code (`build.rs`), which
+/// keys the Metal device's pipeline store.
+pub const COMPILER_SHA256: &str = env!("STELA_MESA_COMPILER_SHA256");
+
 unsafe extern "system" {
     /// The Vulkan loader-ICD entry of NVK.
     pub fn vk_icdGetInstanceProcAddr(instance: *mut c_void, name: *const c_char) -> *const c_void;

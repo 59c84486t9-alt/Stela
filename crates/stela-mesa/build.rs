@@ -21,4 +21,27 @@ fn main() {
         println!("cargo:rerun-if-changed={}", archive.display());
         println!("cargo:rustc-link-lib={kind}={name}");
     }
+    // What turns NIR into machine code: the C archives (NVK, NIR and the
+    // Vulkan runtime) and the Rust NAK and NIL build from, with the
+    // toolchain. NVK's own pipeline cache UUID is the same for every build
+    // (`compat/mesa/build_id.c`), so this keys the pipeline store instead.
+    stela_fingerprint::emit(
+        "STELA_MESA_COMPILER_SHA256",
+        &[
+            ".",
+            "../../target/gpu/nvk/libstela-nvk.a",
+            "../../target/gpu/nvk/libstela-vulkan.a",
+            "../../target/gpu/nvk/build/src/compiler/rust/libcompiler.rlib.p",
+            "../../target/gpu/nvk/build/src/nouveau/compiler/latencies",
+            "../../target/gpu/nvk/build/src/nouveau/compiler/nak_bindings.rs",
+            "../../target/gpu/nvk/build/src/nouveau/headers/lib.rs",
+            "../../target/gpu/nvk/build/src/nouveau/nil/nil_bindings.rs",
+            "../../third_party/mesa/src/compiler/rust",
+            "../../third_party/mesa/src/nouveau/compiler",
+            "../../third_party/mesa/src/nouveau/headers/nv_push_rs",
+            "../../third_party/mesa/src/nouveau/nil",
+            "../../third_party/mesa/src/nouveau/rust",
+            "../../rust-toolchain.toml",
+        ],
+    );
 }

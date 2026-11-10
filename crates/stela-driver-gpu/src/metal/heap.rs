@@ -39,7 +39,9 @@ pub fn heap(
     match descriptor.options.storage_mode {
         StorageMode::Private | StorageMode::Shared => {}
         StorageMode::Managed => return Err(Error::Invalid("heaps cannot use managed storage")),
-        StorageMode::Memoryless => return Err(Error::Unsupported("memoryless storage")),
+        StorageMode::Memoryless => {
+            return Err(Error::Invalid("heaps cannot use memoryless storage"));
+        }
     }
     if descriptor.heap_type == HeapType::Sparse {
         require(api.contains(ApiFeatures::SPARSE_TEXTURES), "sparse heaps")?;

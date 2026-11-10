@@ -2,6 +2,7 @@
 use super::{
     NativeBackend, failure, handle,
     objects::{self, extent, offset, stages, subresource},
+    zero::BufferFill,
 };
 use crate::metal::{
     binding::{
@@ -20,12 +21,28 @@ use crate::metal::{
 use alloc::vec::Vec;
 use ash::vk;
 
+/// A clear of an image's stale subresources to zero.
+#[derive(Clone)]
+pub(super) struct Clear {
+    pub image: vk::Image,
+    pub aspects: vk::ImageAspectFlags,
+    pub ranges: Vec<vk::ImageSubresourceRange>,
+}
+
+/// What a submission zeroes before its commands.
+#[derive(Clone, Default)]
+pub(super) struct Zero {
+    pub fills: Vec<BufferFill>,
+    pub clears: Vec<Clear>,
+}
+
 /// Records `segment` into `buffer`, first moving `adopt` (new images) from
-/// `UNDEFINED` to `GENERAL`.
+/// `UNDEFINED` to `GENERAL`, then zeroing what `zero` names.
 pub(super) fn segment(
     backend: &NativeBackend,
     buffer: vk::CommandBuffer,
     adopt: &[(vk::Image, vk::ImageAspectFlags)],
+    zero: &Zero,
     segment: &Segment,
 ) -> Result<()> {
     let recorder = Recorder { backend, buffer };
@@ -35,6 +52,7 @@ pub(super) fn segment(
     // SAFETY: the buffer was just allocated from the backend's pool.
     unsafe { device.begin_command_buffer(buffer, &begin) }.map_err(failure)?;
     recorder.adopt(adopt);
+    recorder.zero(zero);
     recorder.bind_heap();
     segment
         .commands
@@ -131,6 +149,76 @@ impl Recorder<'_> {
             self.device()
                 .cmd_pipeline_barrier2(self.buffer, &dependency)
         };
+    }
+
+    /// Fills `zero`'s buffer ranges and clears its image subresources to
+    /// zero, ordered after all earlier work and before every later command.
+    /// Zero bits are zero in every color format's clear type, so one value
+    /// clears any of them.
+    fn zero(&self, zero: &Zero) {
+        if zero.fills.is_empty() && zero.clears.is_empty() {
+            return;
+        }
+        let device = self.device();
+        let barrier = |src_stage, src_access, dst_stage, dst_access| {
+            let memory = [vk::MemoryBarrier2::default()
+                .src_stage_mask(src_stage)
+                .src_access_mask(src_access)
+                .dst_stage_mask(dst_stage)
+                .dst_access_mask(dst_access)];
+            let dependency = vk::DependencyInfo::default().memory_barriers(&memory);
+            // SAFETY: the buffer is recording.
+            unsafe { device.cmd_pipeline_barrier2(self.buffer, &dependency) };
+        };
+        barrier(
+            vk::PipelineStageFlags2::ALL_COMMANDS,
+            vk::AccessFlags2::MEMORY_WRITE,
+            vk::PipelineStageFlags2::ALL_TRANSFER,
+            vk::AccessFlags2::TRANSFER_WRITE,
+        );
+        for fill in &zero.fills {
+            // SAFETY: the buffer is alive and was created with transfer-
+            // destination usage; offset and size are words in it.
+            unsafe {
+                device.cmd_fill_buffer(self.buffer, fill.buffer, fill.offset, fill.size, 0);
+            }
+        }
+        let depth_stencil = vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL;
+        for clear in &zero.clears {
+            let (image, aspects, ranges) = (clear.image, clear.aspects, clear.ranges.as_slice());
+            // SAFETY: the image is alive, in GENERAL, and was created with
+            // transfer-destination usage, as every texture image is.
+            unsafe {
+                if aspects.intersects(depth_stencil) {
+                    let value = vk::ClearDepthStencilValue {
+                        depth: 0.0,
+                        stencil: 0,
+                    };
+                    device.cmd_clear_depth_stencil_image(
+                        self.buffer,
+                        image,
+                        vk::ImageLayout::GENERAL,
+                        &value,
+                        ranges,
+                    );
+                } else {
+                    let value = vk::ClearColorValue { uint32: [0; 4] };
+                    device.cmd_clear_color_image(
+                        self.buffer,
+                        image,
+                        vk::ImageLayout::GENERAL,
+                        &value,
+                        ranges,
+                    );
+                }
+            }
+        }
+        barrier(
+            vk::PipelineStageFlags2::ALL_TRANSFER,
+            vk::AccessFlags2::TRANSFER_WRITE,
+            vk::PipelineStageFlags2::ALL_COMMANDS,
+            vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+        );
     }
 
     fn bind_heap(&self) {
@@ -591,6 +679,21 @@ impl Recorder<'_> {
                         .regions(&regions)
                         .filter(vk::Filter::from_raw(filter.raw() as i32));
                     device.cmd_blit_image2(buffer, &info);
+                }
+                &Command::ClearColorImage { image, value } => {
+                    let range = vk::ImageSubresourceRange::default()
+                        .aspect_mask(vk::ImageAspectFlags::COLOR)
+                        .level_count(1)
+                        .layer_count(1);
+                    // A color clear value's union member is the color one.
+                    let color = clear(value).color;
+                    device.cmd_clear_color_image(
+                        buffer,
+                        handle(image.0),
+                        vk::ImageLayout::GENERAL,
+                        &color,
+                        &[range],
+                    );
                 }
                 &Command::FillBuffer {
                     buffer: target,
