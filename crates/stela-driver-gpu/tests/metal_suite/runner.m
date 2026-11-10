@@ -20,12 +20,17 @@
  */
 #import <Foundation/Foundation.h>
 #import <CoreImage/CoreImage.h>
+#import <CoreText/CoreText.h>
 #import <IOSurface/IOSurface.h>
+#import <ImageIO/ImageIO.h>
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
+#import <MetalKit/MetalKit.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+#import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 #import <QuartzCore/QuartzCore.h>
 #include <mach/mach.h>
+#include <servers/bootstrap.h>
 #include <objc/message.h>
 #include <stdio.h>
 
@@ -162,6 +167,8 @@ static NSDictionary<NSString *, NSNumber *> *pixel_formats(void)
 			@"eac_r11unorm" : @(MTLPixelFormatEAC_R11Unorm), @"eac_r11snorm" : @(MTLPixelFormatEAC_R11Snorm),
 			@"eac_rg11unorm" : @(MTLPixelFormatEAC_RG11Unorm), @"eac_rg11snorm" : @(MTLPixelFormatEAC_RG11Snorm),
 			@"astc_4x4_ldr" : @(MTLPixelFormatASTC_4x4_LDR), @"astc_4x4_srgb" : @(MTLPixelFormatASTC_4x4_sRGB),
+			@"astc_4x4_hdr" : @(MTLPixelFormatASTC_4x4_HDR), @"astc_6x6_hdr" : @(MTLPixelFormatASTC_6x6_HDR),
+			@"astc_8x8_hdr" : @(MTLPixelFormatASTC_8x8_HDR), @"astc_12x12_hdr" : @(MTLPixelFormatASTC_12x12_HDR),
 			@"astc_5x4_ldr" : @(MTLPixelFormatASTC_5x4_LDR), @"astc_5x4_srgb" : @(MTLPixelFormatASTC_5x4_sRGB),
 			@"astc_5x5_ldr" : @(MTLPixelFormatASTC_5x5_LDR), @"astc_5x5_srgb" : @(MTLPixelFormatASTC_5x5_sRGB),
 			@"astc_6x5_ldr" : @(MTLPixelFormatASTC_6x5_LDR), @"astc_6x5_srgb" : @(MTLPixelFormatASTC_6x5_sRGB),
@@ -710,7 +717,7 @@ static NSUInteger pixel_bytes(MTLPixelFormat f, NSUInteger *block, NSUInteger *b
 		*block = 8;
 		*block_height = 4;
 		return 8;
-	case MTLPixelFormatASTC_4x4_LDR: case MTLPixelFormatASTC_4x4_sRGB:
+	case MTLPixelFormatASTC_4x4_LDR: case MTLPixelFormatASTC_4x4_sRGB: case MTLPixelFormatASTC_4x4_HDR:
 		*block = 4;
 		*block_height = 4;
 		return 16;
@@ -726,7 +733,7 @@ static NSUInteger pixel_bytes(MTLPixelFormat f, NSUInteger *block, NSUInteger *b
 		*block = 6;
 		*block_height = 5;
 		return 16;
-	case MTLPixelFormatASTC_6x6_LDR: case MTLPixelFormatASTC_6x6_sRGB:
+	case MTLPixelFormatASTC_6x6_LDR: case MTLPixelFormatASTC_6x6_sRGB: case MTLPixelFormatASTC_6x6_HDR:
 		*block = 6;
 		*block_height = 6;
 		return 16;
@@ -738,7 +745,7 @@ static NSUInteger pixel_bytes(MTLPixelFormat f, NSUInteger *block, NSUInteger *b
 		*block = 8;
 		*block_height = 6;
 		return 16;
-	case MTLPixelFormatASTC_8x8_LDR: case MTLPixelFormatASTC_8x8_sRGB:
+	case MTLPixelFormatASTC_8x8_LDR: case MTLPixelFormatASTC_8x8_sRGB: case MTLPixelFormatASTC_8x8_HDR:
 		*block = 8;
 		*block_height = 8;
 		return 16;
@@ -762,7 +769,7 @@ static NSUInteger pixel_bytes(MTLPixelFormat f, NSUInteger *block, NSUInteger *b
 		*block = 12;
 		*block_height = 10;
 		return 16;
-	case MTLPixelFormatASTC_12x12_LDR: case MTLPixelFormatASTC_12x12_sRGB:
+	case MTLPixelFormatASTC_12x12_LDR: case MTLPixelFormatASTC_12x12_sRGB: case MTLPixelFormatASTC_12x12_HDR:
 		*block = 12;
 		*block_height = 12;
 		return 16;
@@ -1002,7 +1009,8 @@ static NSDictionary<NSString *, NSNumber *> *address_modes(void)
 static id<MTLSamplerState> make_sampler(Case *c, NSDictionary *s)
 {
 	MTLSamplerDescriptor *d = [MTLSamplerDescriptor new];
-	NSDictionary *filters = @{@"nearest" : @(MTLSamplerMinMagFilterNearest), @"linear" : @(MTLSamplerMinMagFilterLinear)};
+	// Bicubic, 2, is a filter no header names.
+	NSDictionary *filters = @{@"nearest" : @(MTLSamplerMinMagFilterNearest), @"linear" : @(MTLSamplerMinMagFilterLinear), @"bicubic" : @2};
 	NSDictionary *mips = @{@"none" : @(MTLSamplerMipFilterNotMipmapped), @"nearest" : @(MTLSamplerMipFilterNearest),
 			       @"linear" : @(MTLSamplerMipFilterLinear)};
 	d.minFilter = lookup(filters, @"filter", s[@"min"] ?: @"nearest");
@@ -4085,6 +4093,9 @@ static id<MTLIndirectCommandBuffer> make_icb(Case *c, NSDictionary *b)
 						      t.count > 2 ? [t[2] unsignedIntegerValue] : 1);
 			for (NSDictionary *m in command[@"threadgroup_memory"])
 				[k_ setThreadgroupMemoryLength:number(m, @"length", 16) atIndex:number(m, @"index", 0)];
+			NSArray *imageblock = command[@"imageblock"];
+			if (imageblock)
+				[k_ setImageblockWidth:[imageblock[0] unsignedIntegerValue] height:[imageblock[1] unsignedIntegerValue]];
 			NSArray *region = command[@"stage_in_region"];
 			if (region)
 				[k_ setStageInRegion:MTLRegionMake3D(0, 0, 0, [region[0] unsignedIntegerValue],
@@ -4136,59 +4147,225 @@ static CGImageRef ca_gradient(size_t w, size_t h)
 	return image;
 }
 
+/* Two overlapping opaque discs on clear, `w` by `h`: a shape only its alpha
+ * describes, as a glyph's is. */
+static CGImageRef ca_discs(size_t w, size_t h)
+{
+	CGColorSpaceRef rgb = CGColorSpaceCreateDeviceRGB();
+	CGContextRef context = CGBitmapContextCreate(NULL, w, h, 8, w * 4, rgb,
+						     (CGBitmapInfo)kCGImageAlphaPremultipliedFirst);
+	CGContextSetRGBFillColor(context, 1, 1, 1, 1);
+	CGContextFillEllipseInRect(context, CGRectMake(2, 2, h - 4, h - 4));
+	CGContextFillEllipseInRect(context, CGRectMake(w - h + 2, 2, h - 4, h - 4));
+	CGImageRef image = CGBitmapContextCreateImage(context);
+	CGContextRelease(context);
+	CGColorSpaceRelease(rgb);
+	return image;
+}
+
+/* A backdrop layer at `frame` filtering what lies below it by `f`'s
+ * "backdrop" filters: shaped by an SDF sublayer when `f` has "sdf", by an
+ * image sublayer's alpha when it has "mask", or else by its rounded bounds. */
+static CALayer *ca_backdrop(NSDictionary *f, CGRect frame)
+{
+	NSArray *backdrop = f[@"backdrop"];
+	CALayer *layer = [NSClassFromString(@"CABackdropLayer") layer];
+	layer.frame = frame;
+	NSDictionary *sdf = f[@"sdf"];
+	BOOL mask = f[@"mask"] != nil;
+	if (mask) {
+		/* Glass shaped by an image, as text is: the filters name a
+		 * sublayer whose contents' alpha is the shape. */
+		[layer setValue:@YES forKey:@"enabled"];
+		[layer setValue:@YES forKey:@"sourceSublayerDefinesBounds"];
+		[layer setValue:@0.5 forKey:@"marginWidth"];
+		[layer setValue:@0.5 forKey:@"scale"];
+		CALayer *shape = [CALayer layer];
+		shape.frame = layer.bounds;
+		shape.name = @"@0";
+		CGImageRef discs = ca_discs((size_t)frame.size.width, (size_t)frame.size.height);
+		shape.contents = (__bridge id)discs;
+		CGImageRelease(discs);
+		[layer addSublayer:shape];
+	} else if (sdf) {
+		/* Glass as SwiftUI builds it: the shape is an SDF sublayer the
+		 * filters name, one rounded element over the whole backdrop. */
+		[layer setValue:@YES forKey:@"enabled"];
+		[layer setValue:@YES forKey:@"sourceSublayerDefinesBounds"];
+		[layer setValue:@0.5 forKey:@"marginWidth"];
+		[layer setValue:@0.5 forKey:@"scale"];
+		CALayer *shape = [NSClassFromString(@"CASDFLayer") layer];
+		shape.frame = layer.bounds;
+		shape.name = @"@0";
+		[shape setValue:[NSClassFromString(@"CASDFOutputEffect") new] forKey:@"effect"];
+		[shape setValue:@8 forKey:@"smoothness"];
+		CALayer *element = [NSClassFromString(@"CASDFElementLayer") layer];
+		element.frame = shape.bounds;
+		if (sdf[@"contents"]) {
+			/* An element shaped by an image's coverage, as a glyph's
+			 * glass is: Core Animation finds its distances itself. */
+			CGImageRef discs = ca_discs((size_t)frame.size.width, (size_t)frame.size.height);
+			element.contents = (__bridge id)discs;
+			CGImageRelease(discs);
+			[element setValue:@"contents" forKey:@"mode"];
+		} else {
+			element.cornerRadius = [sdf[@"corner_radius"] doubleValue];
+			[element setValue:@"bounds" forKey:@"mode"];
+		}
+		[shape addSublayer:element];
+		[layer addSublayer:shape];
+	} else {
+		layer.cornerRadius = 8;
+		layer.masksToBounds = YES;
+	}
+	NSMutableArray *filters = [NSMutableArray new];
+	for (NSDictionary *spec in backdrop) {
+		id filter = ca_filter(spec[@"type"]);
+		if (sdf || mask)
+			[filter setValue:@"@0" forKey:@"inputSourceSublayerName"];
+		for (NSString *key in spec[@"values"])
+			[filter setValue:spec[@"values"][key] forKey:key];
+		if (spec[@"matrix"]) {
+			float m[20];
+			for (int i = 0; i < 20; i++)
+				m[i] = [spec[@"matrix"][i] floatValue];
+			[filter setValue:[NSValue valueWithBytes:m objCType:"{CAColorMatrix=ffffffffffffffffffff}"]
+				  forKey:@"inputColorMatrix"];
+		}
+		[filters addObject:filter];
+	}
+	layer.filters = filters;
+	return layer;
+}
+
+/* A push button's label, "Get Started", in the system font of `size` points,
+ * black, its baseline at `origin`. */
+static void draw_label(CGContextRef context, CGFloat size, CGPoint origin)
+{
+	CTFontRef font = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, size, NULL);
+	CGColorRef black = CGColorCreateGenericGray(0, 1);
+	NSDictionary *attributes = @{(id)kCTFontAttributeName : (__bridge id)font,
+				     (id)kCTForegroundColorAttributeName : (__bridge id)black};
+	NSAttributedString *label = [[NSAttributedString alloc] initWithString:@"Get Started" attributes:attributes];
+	CTLineRef line = CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)label);
+	CGContextSetTextPosition(context, origin.x, origin.y);
+	CTLineDraw(line, context);
+	CFRelease(line);
+	CGColorRelease(black);
+	CFRelease(font);
+}
+
+/* Draws the label into a layer's backing store, as views and SwiftUI draw
+ * their text, and animates nothing. */
+@interface LabelDelegate : NSObject <CALayerDelegate>
+@end
+
+@implementation LabelDelegate
+- (void)drawLayer:(CALayer *)layer inContext:(CGContextRef)context
+{
+	draw_label(context, 17, CGPointMake(6, 6));
+}
+
+- (id<CAAction>)actionForLayer:(CALayer *)layer forKey:(NSString *)key
+{
+	return (id<CAAction>)[NSNull null];
+}
+@end
+
+/* The label drawn into a layer of `frame`, as `text` names: a text layer
+ * ("layer"), an alpha-only image Core Animation tints ("tinted", as it tints
+ * template images), or an A8 backing store the layer's delegate draws
+ * ("backing", as SwiftUI draws text). With "vibrant", the label takes the
+ * color matrix filter SwiftUI gives text over glass. */
+static CALayer *ca_label(NSDictionary *text, CGRect frame)
+{
+	static LabelDelegate *delegate;
+	NSString *kind = text[@"kind"];
+	CALayer *layer;
+	if ([kind isEqualToString:@"layer"]) {
+		CATextLayer *label = [CATextLayer layer];
+		label.string = @"Get Started";
+		CTFontRef font = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, 17, NULL);
+		label.font = font;
+		CFRelease(font);
+		label.fontSize = 17;
+		CGColorRef white = CGColorCreateGenericGray(1, 1);
+		label.foregroundColor = white;
+		CGColorRelease(white);
+		layer = label;
+	} else if ([kind isEqualToString:@"tinted"]) {
+		size_t w = (size_t)frame.size.width, h = (size_t)frame.size.height;
+		CGContextRef context = CGBitmapContextCreate(NULL, w, h, 8, w, NULL, (CGBitmapInfo)kCGImageAlphaOnly);
+		draw_label(context, 17, CGPointMake(6, 6));
+		CGImageRef mask = CGBitmapContextCreateImage(context);
+		CGContextRelease(context);
+		CGColorRef tint = CGColorCreateGenericRGB(0.1, 0.1, 0.1, 1);
+		layer = [CALayer layer];
+		layer.contents = ((id (*)(id, SEL, CGImageRef, CGColorRef))objc_msgSend)(
+			NSClassFromString(@"CATintedImage"), sel_registerName("tintedImageWithCGImage:tint:"), mask, tint);
+		CGColorRelease(tint);
+		CGImageRelease(mask);
+	} else if ([kind isEqualToString:@"backing"]) {
+		if (!delegate)
+			delegate = [LabelDelegate new];
+		layer = [CALayer layer];
+		layer.delegate = delegate;
+		layer.contentsFormat = @"A8";
+		layer.frame = frame;
+		[layer setNeedsDisplay];
+	} else {
+		@throw failure(@"unknown label %@", kind);
+	}
+	layer.frame = frame;
+	if ([text[@"vibrant"] boolValue]) {
+		id filter = ca_filter(@"vibrantColorMatrix");
+		float m[20] = {1, 0, 0, 0, 0.2f, 0, 1, 0, 0, 0.2f, 0, 0, 1, 0, 0.2f, 0, 0, 0, 1, 0};
+		[filter setValue:[NSValue valueWithBytes:m objCType:"{CAColorMatrix=ffffffffffffffffffff}"]
+			  forKey:@"inputColorMatrix"];
+		layer.filters = @[ filter ];
+	}
+	return layer;
+}
+
+/* A button's label over the gradient, by `text` (see ca_label). With
+ * "portal", the label shows only through a portal layer that hides its
+ * source, and with "glass" too, above a glass backdrop of the button's shape
+ * (`scene`'s "backdrop" and "sdf"), as SwiftUI composes a glass button: the
+ * label's container comes first, and a portal above the glass shows it. */
+static CALayer *ca_text(NSDictionary *text, NSDictionary *scene)
+{
+	CGRect button = CGRectMake(16, 6, 128, 36);
+	CALayer *host = [CALayer layer];
+	host.frame = button;
+	/* SwiftUI's containers have no size: they only place their sublayers. */
+	CALayer *content = [CALayer layer];
+	[content addSublayer:ca_label(text, CGRectMake(8, 8, 112, 24))];
+	[host addSublayer:content];
+	if (![text[@"portal"] boolValue])
+		return host;
+	CALayer *glass = [CALayer layer];
+	if (scene[@"backdrop"])
+		[glass addSublayer:ca_backdrop(scene, host.bounds)];
+	CALayer *portal = [NSClassFromString(@"CAPortalLayer") layer];
+	[portal setValue:content forKey:@"sourceLayer"];
+	[portal setValue:@YES forKey:@"hidesSourceLayer"];
+	[portal setValue:@YES forKey:@"allowsBackdropGroups"];
+	[glass addSublayer:portal];
+	[host addSublayer:glass];
+	return host;
+}
+
 /* The layer `scene` names, over the gradient: a translucent orange rounded
  * panel, which no blend mode leaves the gradient under, alone or compositing
- * by `compositing`, or a backdrop layer of the same shape filtering what lies
- * below it, shaped by an SDF sublayer when the scene has `sdf`. */
+ * by `compositing`, a backdrop layer of the same shape (ca_backdrop), or a
+ * button's label when the scene has `text` (ca_text). */
 static CALayer *ca_scene(NSDictionary *f)
 {
 	CGRect frame = CGRectMake(12, 20, 40, 24);
-	NSArray *backdrop = f[@"backdrop"];
-	if (backdrop) {
-		CALayer *layer = [NSClassFromString(@"CABackdropLayer") layer];
-		layer.frame = frame;
-		NSDictionary *sdf = f[@"sdf"];
-		if (sdf) {
-			/* Glass as SwiftUI builds it: the shape is an SDF sublayer the
-			 * filters name, one rounded element over the whole backdrop. */
-			[layer setValue:@YES forKey:@"enabled"];
-			[layer setValue:@YES forKey:@"sourceSublayerDefinesBounds"];
-			[layer setValue:@0.5 forKey:@"marginWidth"];
-			[layer setValue:@0.5 forKey:@"scale"];
-			CALayer *shape = [NSClassFromString(@"CASDFLayer") layer];
-			shape.frame = layer.bounds;
-			shape.name = @"@0";
-			[shape setValue:[NSClassFromString(@"CASDFOutputEffect") new] forKey:@"effect"];
-			[shape setValue:@8 forKey:@"smoothness"];
-			CALayer *element = [NSClassFromString(@"CASDFElementLayer") layer];
-			element.frame = shape.bounds;
-			element.cornerRadius = [sdf[@"corner_radius"] doubleValue];
-			[element setValue:@"bounds" forKey:@"mode"];
-			[shape addSublayer:element];
-			[layer addSublayer:shape];
-		} else {
-			layer.cornerRadius = 8;
-			layer.masksToBounds = YES;
-		}
-		NSMutableArray *filters = [NSMutableArray new];
-		for (NSDictionary *spec in backdrop) {
-			id filter = ca_filter(spec[@"type"]);
-			if (sdf)
-				[filter setValue:@"@0" forKey:@"inputSourceSublayerName"];
-			for (NSString *key in spec[@"values"])
-				[filter setValue:spec[@"values"][key] forKey:key];
-			if (spec[@"matrix"]) {
-				float m[20];
-				for (int i = 0; i < 20; i++)
-					m[i] = [spec[@"matrix"][i] floatValue];
-				[filter setValue:[NSValue valueWithBytes:m objCType:"{CAColorMatrix=ffffffffffffffffffff}"]
-					  forKey:@"inputColorMatrix"];
-			}
-			[filters addObject:filter];
-		}
-		layer.filters = filters;
-		return layer;
-	}
+	if (f[@"text"])
+		return ca_text(f[@"text"], f);
+	if (f[@"backdrop"])
+		return ca_backdrop(f, frame);
 	CALayer *layer = [CALayer layer];
 	layer.frame = frame;
 	layer.cornerRadius = 8;
@@ -4209,6 +4386,75 @@ static CALayer *ca_scene(NSDictionary *f)
 	}
 	if (f[@"filter"])
 		layer.filters = @[ ca_filter(f[@"filter"]) ];
+	/* A drop shadow, of the layer's own shape or of a path, as windows and
+	 * panels cast them. */
+	NSDictionary *shadow = f[@"shadow"];
+	if (shadow) {
+		CGColorRef black = CGColorCreateGenericRGB(0, 0, 0, 1);
+		layer.shadowColor = black;
+		CGColorRelease(black);
+		layer.shadowOpacity = [shadow[@"opacity"] floatValue];
+		layer.shadowRadius = [shadow[@"radius"] doubleValue];
+		layer.shadowOffset = CGSizeMake([shadow[@"offset"][0] doubleValue], [shadow[@"offset"][1] doubleValue]);
+		if ([shadow[@"path"] boolValue]) {
+			CGPathRef path = CGPathCreateWithRoundedRect(layer.bounds, 8, 8, NULL);
+			layer.shadowPath = path;
+			CGPathRelease(path);
+		}
+	}
+	return layer;
+}
+
+/* An AppKit push button of the glass bezel, "Get Started", in a borderless
+ * window that is never shown, over a plain blue: AppKit hosts it in SwiftUI,
+ * which draws its label into an A8 backing store and shows it through a
+ * portal above the glass. The window's content layer, which the caller
+ * renders. The runner links AppKit, whose fonts must bridge Core Text's
+ * from launch, and starts its application only here. A process outside a
+ * window server session that can still reach the server, such as one
+ * launchctl bsexec places in the login window's bootstrap, makes its window;
+ * one that reaches none makes no window, and the case is unsupported. */
+static CALayer *appkit_button(CGSize size)
+{
+	CFDictionaryRef session = CGSessionCopyCurrentDictionary();
+	mach_port_t server = MACH_PORT_NULL;
+	if (session)
+		CFRelease(session);
+	else if (bootstrap_look_up(bootstrap_port, "com.apple.windowserver.active", &server) != KERN_SUCCESS)
+		@throw [NSException exceptionWithName:@"CaseUnsupported" reason:@"no window server session" userInfo:nil];
+	else
+		mach_port_deallocate(mach_task_self(), server);
+	id (*send)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+	send(NSClassFromString(@"NSApplication"), sel_registerName("sharedApplication"));
+	id button = ((id (*)(id, SEL, id, id, SEL))objc_msgSend)(NSClassFromString(@"NSButton"),
+								  sel_registerName("buttonWithTitle:target:action:"),
+								  @"Get Started", nil, NULL);
+	/* NSBezelStyleGlass. */
+	((void (*)(id, SEL, NSUInteger))objc_msgSend)(button, sel_registerName("setBezelStyle:"), 16);
+	CGRect bounds = CGRectMake(0, 0, size.width, size.height);
+	id view = ((id (*)(id, SEL, CGRect))objc_msgSend)(send(NSClassFromString(@"NSView"), @selector(alloc)),
+							  sel_registerName("initWithFrame:"), bounds);
+	((void (*)(id, SEL, BOOL))objc_msgSend)(view, sel_registerName("setWantsLayer:"), YES);
+	((void (*)(id, SEL, id))objc_msgSend)(view, sel_registerName("addSubview:"), button);
+	((void (*)(id, SEL, CGRect))objc_msgSend)(button, sel_registerName("setFrame:"),
+						  CGRectMake((size.width - 106) / 2, (size.height - 36) / 2, 106, 36));
+	/* NSWindowStyleMaskBorderless, NSBackingStoreBuffered, deferred. */
+	id window = ((id (*)(id, SEL, CGRect, NSUInteger, NSUInteger, BOOL))objc_msgSend)(
+		send(NSClassFromString(@"NSWindow"), @selector(alloc)),
+		sel_registerName("initWithContentRect:styleMask:backing:defer:"), bounds, 0, 2, YES);
+	((void (*)(id, SEL, id))objc_msgSend)(window, sel_registerName("setContentView:"), view);
+	CALayer *layer = send(view, sel_registerName("layer"));
+	CGColorRef blue = CGColorCreateGenericRGB(0.3, 0.5, 0.7, 1);
+	layer.backgroundColor = blue;
+	CGColorRelease(blue);
+	/* AppKit lays the button out and SwiftUI draws it over a few turns of
+	 * the run loop. */
+	for (int turn = 0; turn < 10; turn++) {
+		send(view, sel_registerName("layoutSubtreeIfNeeded"));
+		send(view, sel_registerName("displayIfNeeded"));
+		[CATransaction flush];
+		CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.02, false);
+	}
 	return layer;
 }
 
@@ -4216,22 +4462,28 @@ static CALayer *ca_scene(NSDictionary *f)
  * case's queue. Core Animation builds pipelines its archive lacks while it
  * draws and leaves their layers out until they are ready, and glass eases
  * toward the luma beneath it, so frames repeat until two in a row are
- * identical. */
+ * identical. Between frames the run loop turns, which AppKit's and
+ * SwiftUI's updates wait on. */
 static void run_core_animation(Case *c, id<MTLCommandQueue> queue, NSDictionary *f)
 {
 	id<MTLTexture> out = c.textures[@"out"];
 	if (!out)
 		@throw failure(@"core animation draws into an `out` texture");
 	CARenderer *renderer = [CARenderer rendererWithMTLTexture:out options:@{kCARendererMetalCommandQueue : queue}];
-	CALayer *root = [CALayer layer];
-	root.frame = CGRectMake(0, 0, out.width, out.height);
-	CALayer *ground = [CALayer layer];
-	ground.frame = root.bounds;
-	CGImageRef gradient = ca_gradient(out.width, out.height);
-	ground.contents = (__bridge id)gradient;
-	CGImageRelease(gradient);
-	[root addSublayer:ground];
-	[root addSublayer:ca_scene(f)];
+	CALayer *root;
+	if ([f[@"appkit_button"] boolValue]) {
+		root = appkit_button(CGSizeMake(out.width, out.height));
+	} else {
+		root = [CALayer layer];
+		root.frame = CGRectMake(0, 0, out.width, out.height);
+		CALayer *ground = [CALayer layer];
+		ground.frame = root.bounds;
+		CGImageRef gradient = ca_gradient(out.width, out.height);
+		ground.contents = (__bridge id)gradient;
+		CGImageRelease(gradient);
+		[root addSublayer:ground];
+		[root addSublayer:ca_scene(f)];
+	}
 	renderer.layer = root;
 	renderer.bounds = root.bounds;
 	[CATransaction flush];
@@ -4255,19 +4507,187 @@ static void run_core_animation(Case *c, id<MTLCommandQueue> queue, NSDictionary 
 		/* Glass adapts to the luma beneath it over about 25 frames. */
 		if (frame == 47)
 			@throw failure(@"core animation's frames never settled");
-		usleep(250000);
+		if (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, false) == kCFRunLoopRunFinished)
+			usleep(250000);
+		[CATransaction flush];
 	}
 }
 
+/* A push button's label set by Core Text on the CPU into a bitmap context
+ * of `out`'s size, as text reaches every layer's backing store: in BGRA over
+ * clear, over opaque white with font smoothing, or alpha only (`f`'s
+ * "format"). The bitmap's rows are copied into `out` as they are. */
+static void run_core_text(Case *c, id<MTLCommandQueue> queue, NSDictionary *f)
+{
+	id<MTLTexture> out = c.textures[@"out"];
+	if (!out)
+		@throw failure(@"core text draws into an `out` texture");
+	size_t w = out.width, h = out.height;
+	NSString *format = f[@"format"];
+	BOOL alpha = [format isEqualToString:@"alpha"], smoothed = [format isEqualToString:@"smoothed"];
+	size_t row = alpha ? w : 4 * w;
+	CGColorSpaceRef space = alpha ? NULL : CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+	CGContextRef context = CGBitmapContextCreate(
+		NULL, w, h, 8, row, space,
+		alpha ? (CGBitmapInfo)kCGImageAlphaOnly
+		      : (CGBitmapInfo)kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little);
+	CGColorSpaceRelease(space);
+	if (!context)
+		@throw failure(@"no bitmap context of format %@", format);
+	if (smoothed) {
+		CGContextSetRGBFillColor(context, 1, 1, 1, 1);
+		CGContextFillRect(context, CGRectMake(0, 0, w, h));
+	}
+	CGContextSetAllowsFontSmoothing(context, smoothed);
+	CGContextSetShouldSmoothFonts(context, smoothed);
+	/* Two pixels a point, as on a Retina display. */
+	CGContextScaleCTM(context, 2, 2);
+	draw_label(context, 13, CGPointMake(4, 6));
+	size_t stride = CGBitmapContextGetBytesPerRow(context);
+	id<MTLBuffer> bitmap = [c.device newBufferWithBytes:CGBitmapContextGetData(context)
+						     length:stride * h
+						    options:MTLResourceStorageModeShared];
+	CGContextRelease(context);
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	[blit copyFromBuffer:bitmap sourceOffset:0 sourceBytesPerRow:stride sourceBytesPerImage:stride * h
+		  sourceSize:MTLSizeMake(w, h, 1) toTexture:out destinationSlice:0 destinationLevel:0
+	   destinationOrigin:MTLOriginMake(0, 0, 0)];
+	[blit endEncoding];
+	wait_for(cb, c.spec);
+}
+
+/* A desktop picture as an app hands it on: a gradient under a checker,
+ * opaque, of an odd size, with its alpha last and not premultiplied, as
+ * AppKit's images give it: 8-bit sRGB, or 16-bit linear sRGB (`wide`). */
+static CGImageRef desktop_picture(size_t w, size_t h, BOOL wide)
+{
+	size_t bytes = wide ? 8 : 4;
+	NSMutableData *pixels = [NSMutableData dataWithLength:w * h * bytes];
+	uint8_t *p = pixels.mutableBytes;
+	for (size_t y = 0; y < h; y++)
+		for (size_t x = 0; x < w; x++, p += bytes) {
+			uint8_t v[4] = {(uint8_t)(x * 255 / (w - 1)), (uint8_t)(y * 255 / (h - 1)), ((x / 4 + y / 4) & 1) ? 224 : 32, 255};
+			for (int k = 0; k < 4; k++) {
+				if (wide)
+					((uint16_t *)p)[k] = (uint16_t)(v[k] * 257);
+				else
+					p[k] = v[k];
+			}
+		}
+	CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)pixels);
+	CGColorSpaceRef space = CGColorSpaceCreateWithName(wide ? kCGColorSpaceLinearSRGB : kCGColorSpaceSRGB);
+	CGBitmapInfo info = (CGBitmapInfo)kCGImageAlphaLast | (wide ? kCGBitmapByteOrder16Little : 0);
+	CGImageRef image = CGImageCreate(w, h, wide ? 16 : 8, bytes * 8, w * bytes, space, info, provider, NULL, false,
+					 kCGRenderingIntentDefault);
+	CGColorSpaceRelease(space);
+	CGDataProviderRelease(provider);
+	return image;
+}
+
+/* The image file of `type` ImageIO writes for `image`, which it releases. */
+static NSData *image_file(CGImageRef image, CFStringRef type)
+{
+	NSMutableData *file = [NSMutableData data];
+	CGImageDestinationRef destination = CGImageDestinationCreateWithData((__bridge CFMutableDataRef)file, type, 1, NULL);
+	CGImageDestinationAddImage(destination, image, NULL);
+	BOOL encoded = CGImageDestinationFinalize(destination);
+	CFRelease(destination);
+	CGImageRelease(image);
+	if (!encoded)
+		@throw failure(@"ImageIO wrote no %@", (__bridge NSString *)type);
+	return file;
+}
+
+/* A desktop picture loaded by MTKTextureLoader with sRGB and generated
+ * mipmaps: the 8-bit one as TIFF, as AppKit's TIFFRepresentation gives it,
+ * or the 16-bit linear one as PNG (`f`'s "bits"), which MetalKit loads as
+ * RGBA16Unorm. The out buffer holds the texture's pixel format, level
+ * count, width and height (32 bits each), then every level's texels packed
+ * at 4 or 8 bytes. */
+static void run_texture_loader(Case *c, id<MTLCommandQueue> queue, NSDictionary *f)
+{
+	id<MTLBuffer> out = c.buffers[@"out"];
+	size_t w = number(f, @"width", 1), h = number(f, @"height", 1);
+	BOOL wide = number(f, @"bits", 8) == 16;
+	NSData *file = image_file(desktop_picture(w, h, wide), wide ? CFSTR("public.png") : CFSTR("public.tiff"));
+	NSError *error = nil;
+	MTKTextureLoader *loader = [[MTKTextureLoader alloc] initWithDevice:c.device];
+	id<MTLTexture> t = [loader newTextureWithData:file
+					      options:@{MTKTextureLoaderOptionGenerateMipmaps : @YES, MTKTextureLoaderOptionSRGB : @YES}
+						error:&error];
+	if (!t)
+		@throw failure(@"MetalKit loaded no texture: %@", error);
+	uint32_t header[4] = {(uint32_t)t.pixelFormat, (uint32_t)t.mipmapLevelCount, (uint32_t)t.width, (uint32_t)t.height};
+	memcpy(out.contents, header, sizeof header);
+	NSUInteger at = sizeof header, bytes = wide ? 8 : 4;
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+	for (NSUInteger level = 0; level < t.mipmapLevelCount; level++) {
+		NSUInteger lw = MAX(t.width >> level, 1u), lh = MAX(t.height >> level, 1u);
+		if (at + lw * lh * bytes > out.length)
+			@throw failure(@"MetalKit's texture (format %lu, %lu levels) outgrows the out buffer", (unsigned long)t.pixelFormat,
+				       (unsigned long)t.mipmapLevelCount);
+		[blit copyFromTexture:t sourceSlice:0 sourceLevel:level sourceOrigin:MTLOriginMake(0, 0, 0)
+			   sourceSize:MTLSizeMake(lw, lh, 1) toBuffer:out destinationOffset:at
+		    destinationBytesPerRow:lw * bytes destinationBytesPerImage:lw * lh * bytes];
+		at += lw * lh * bytes;
+	}
+	[blit endEncoding];
+	wait_for(cb, c.spec);
+}
+
+/* The 8-bit desktop picture's TIFF as Core Image renders it into memory
+ * for a texture: a bitmap destination of 16-bit RGBA in linear sRGB, alpha
+ * not premultiplied. Core Image converts on the device, into a surface it
+ * then copies to the bitmap, the case's out buffer. */
+static void run_core_image_bitmap(Case *c, NSDictionary *f)
+{
+	id<MTLBuffer> out = c.buffers[@"out"];
+	size_t w = number(f, @"width", 1), h = number(f, @"height", 1);
+	if (out.length < w * h * 8)
+		@throw failure(@"the out buffer holds no %zux%zu RGBA16 bitmap", w, h);
+	CIImage *image = [CIImage imageWithData:image_file(desktop_picture(w, h, NO), CFSTR("public.tiff"))];
+	if (!image)
+		@throw failure(@"Core Image read no TIFF");
+	CIContext *context = [CIContext contextWithMTLDevice:c.device];
+	CIRenderDestination *destination = [[CIRenderDestination alloc] initWithBitmapData:out.contents
+										    width:w
+										   height:h
+									      bytesPerRow:w * 8
+										   format:kCIFormatRGBA16];
+	CGColorSpaceRef linear = CGColorSpaceCreateWithName(kCGColorSpaceLinearSRGB);
+	destination.colorSpace = linear;
+	CGColorSpaceRelease(linear);
+	destination.alphaMode = CIRenderDestinationAlphaUnpremultiplied;
+	NSError *error = nil;
+	CIRenderTask *task = [context startTaskToRender:image toDestination:destination error:&error];
+	if (!task || ![task waitUntilCompletedAndReturnError:&error])
+		@throw failure(@"Core Image rendered no bitmap: %@", error);
+}
+
 /* Work Apple's frameworks encode with their own shaders: an MPS matrix
- * product and box filter, MetalFX's spatial and temporal upscalers, a Core
- * Image filter and a Core Animation scene, each over the case's resources. */
+ * product and box filter, an MPSGraph fused kernel, MetalFX's spatial and
+ * temporal upscalers, a Core Image filter and a Core Animation scene, each
+ * over the case's resources; and text Core Text sets on the CPU. */
 static void run_framework(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 {
 	NSDictionary *f = spec[@"framework"];
 	NSString *kind = f[@"kind"];
 	if ([kind isEqualToString:@"core_animation"]) {
 		run_core_animation(c, queue, f);
+		return;
+	}
+	if ([kind isEqualToString:@"core_text"]) {
+		run_core_text(c, queue, f);
+		return;
+	}
+	if ([kind isEqualToString:@"texture_loader"]) {
+		run_texture_loader(c, queue, f);
+		return;
+	}
+	if ([kind isEqualToString:@"core_image_bitmap"]) {
+		run_core_image_bitmap(c, f);
 		return;
 	}
 	id<MTLCommandBuffer> cb = [queue commandBuffer];
@@ -4285,10 +4705,35 @@ static void run_framework(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec
 										   resultRows:m resultColumns:n interiorColumns:k
 											alpha:1.0 beta:0.0];
 		[mm encodeToCommandBuffer:cb leftMatrix:matrix(@"a", m, k) rightMatrix:matrix(@"b", k, n) resultMatrix:matrix(@"c", m, n)];
+	} else if ([kind isEqualToString:@"mps_gaussian_blur"]) {
+		/* Edges read zero, as MPS's default edge mode. */
+		MPSImageGaussianBlur *blur = [[MPSImageGaussianBlur alloc] initWithDevice:c.device sigma:[f[@"sigma"] floatValue]];
+		blur.edgeMode = MPSImageEdgeModeZero;
+		[blur encodeToCommandBuffer:cb sourceTexture:c.textures[@"in"] destinationTexture:c.textures[@"out"]];
 	} else if ([kind isEqualToString:@"mps_image_box"]) {
 		MPSImageBox *box = [[MPSImageBox alloc] initWithDevice:c.device kernelWidth:3 kernelHeight:3];
 		box.edgeMode = MPSImageEdgeModeClamp;
 		[box encodeToCommandBuffer:cb sourceTexture:c.textures[@"in"] destinationTexture:c.textures[@"out"]];
+	} else if ([kind isEqualToString:@"mps_graph_fused"]) {
+		/* MPSGraph's elementwise operations, relu(sin(a * b + offset)),
+		 * which it fuses into one kernel stitched from its own visible
+		 * functions. */
+		MPSShape *shape = @[ @(number(f, @"count", 1)) ];
+		MPSGraph *graph = [MPSGraph new];
+		MPSGraphTensor *a = [graph placeholderWithShape:shape dataType:MPSDataTypeFloat32 name:@"a"];
+		MPSGraphTensor *b = [graph placeholderWithShape:shape dataType:MPSDataTypeFloat32 name:@"b"];
+		MPSGraphTensor *offset = [graph constantWithScalar:[f[@"offset"] doubleValue] dataType:MPSDataTypeFloat32];
+		MPSGraphTensor *sum = [graph additionWithPrimaryTensor:[graph multiplicationWithPrimaryTensor:a secondaryTensor:b name:nil]
+						       secondaryTensor:offset
+								  name:nil];
+		MPSGraphTensor *result = [graph reLUWithTensor:[graph sinWithTensor:sum name:nil] name:nil];
+		MPSGraphTensorData *(^data)(NSString *) = ^(NSString *name) {
+			return [[MPSGraphTensorData alloc] initWithMTLBuffer:c.buffers[name] shape:shape dataType:MPSDataTypeFloat32];
+		};
+		[graph runWithMTLCommandQueue:queue
+				       feeds:@{a : data(@"a"), b : data(@"b")}
+			    targetOperations:nil
+			   resultsDictionary:@{result : data(@"out")}];
 	} else if ([kind isEqualToString:@"metalfx_spatial"]) {
 		/* MetalFX's spatial upscaler, from the input's size to the output's. */
 		if (![MTLFXSpatialScalerDescriptor supportsDevice:c.device])
@@ -4355,6 +4800,27 @@ static void run_framework(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec
 		CGColorSpaceRef unmatched = NULL;
 		[context render:invert.outputImage toMTLTexture:out commandBuffer:cb
 			 bounds:CGRectMake(0, 0, out.width, out.height) colorSpace:unmatched];
+	} else if ([kind isEqualToString:@"core_image_lanczos"]) {
+		/* Core Image's Lanczos scaler, of the input or of it mirrored, which
+		 * Core Image samples through an affine transform: its stitched
+		 * kernels pass a sampler one library builds to another's filters
+		 * (ci_lanczosDownH_affine). No colour management. */
+		CIContext *context = [CIContext contextWithMTLDevice:c.device
+							     options:@{kCIContextWorkingColorSpace : [NSNull null],
+								       kCIContextOutputColorSpace : [NSNull null]}];
+		CIImage *image = [CIImage imageWithMTLTexture:c.textures[@"in"] options:@{kCIImageColorSpace : [NSNull null]}];
+		if ([f[@"mirrored"] boolValue])
+			image = [image imageByApplyingTransform:CGAffineTransformMakeScale(-1, 1)];
+		CIFilter *lanczos = [CIFilter filterWithName:@"CILanczosScaleTransform"];
+		[lanczos setValue:image forKey:kCIInputImageKey];
+		[lanczos setValue:f[@"scale"] forKey:kCIInputScaleKey];
+		[lanczos setValue:@1.0 forKey:kCIInputAspectRatioKey];
+		CIImage *scaled = lanczos.outputImage;
+		id<MTLTexture> out = c.textures[@"out"];
+		CGColorSpaceRef unmatched = NULL;
+		[context render:scaled toMTLTexture:out commandBuffer:cb
+			 bounds:CGRectMake(floor(scaled.extent.origin.x), floor(scaled.extent.origin.y), out.width, out.height)
+		     colorSpace:unmatched];
 	} else {
 		@throw failure(@"unknown framework work %@", kind);
 	}
@@ -4605,6 +5071,131 @@ static void host_iosurface(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
 	CFRelease(src);
 	CFRelease(dst);
 	CFRelease(yuv);
+}
+
+/* A surface of two planes, '444f' unless `fourcc` names another: elements
+ * of `bytes` bytes, then pairs of them subsampled to cw x ch. */
+static IOSurfaceRef two_plane_surface(size_t w, size_t height, size_t cw, size_t ch, size_t bytes, uint32_t fourcc)
+{
+	size_t row = IOSurfaceAlignProperty(kIOSurfacePlaneBytesPerRow, w * bytes);
+	size_t pair_row = IOSurfaceAlignProperty(kIOSurfacePlaneBytesPerRow, cw * 2 * bytes);
+	size_t pair_offset = IOSurfaceAlignProperty(kIOSurfacePlaneOffset, row * height);
+	NSDictionary *properties = @{
+		(__bridge id)kIOSurfaceWidth : @(w), (__bridge id)kIOSurfaceHeight : @(height),
+		(__bridge id)kIOSurfacePixelFormat : @(fourcc),
+		(__bridge id)kIOSurfaceAllocSize : @(pair_offset + pair_row * ch),
+		(__bridge id)kIOSurfacePlaneInfo : @[
+			@{(__bridge id)kIOSurfacePlaneWidth : @(w), (__bridge id)kIOSurfacePlaneHeight : @(height),
+			  (__bridge id)kIOSurfacePlaneBytesPerElement : @(bytes), (__bridge id)kIOSurfacePlaneBytesPerRow : @(row),
+			  (__bridge id)kIOSurfacePlaneOffset : @0, (__bridge id)kIOSurfacePlaneSize : @(row * height)},
+			@{(__bridge id)kIOSurfacePlaneWidth : @(cw), (__bridge id)kIOSurfacePlaneHeight : @(ch),
+			  (__bridge id)kIOSurfacePlaneBytesPerElement : @(2 * bytes), (__bridge id)kIOSurfacePlaneBytesPerRow : @(pair_row),
+			  (__bridge id)kIOSurfacePlaneOffset : @(pair_offset), (__bridge id)kIOSurfacePlaneSize : @(pair_row * ch)},
+		],
+	};
+	return make_surface(properties);
+}
+
+/* A surface of an Apple two-plane format `format`: green or luma bytes in
+ * its first plane, blue and red or Cb and Cr pairs in its second,
+ * subsampled `across` by `down`. A kernel reads and linearly samples it
+ * through its first plane. */
+static void host_two_plane(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	size_t w = number(h, @"width", 1), height = number(h, @"height", 1);
+	size_t cw = w / number(h, @"across", 1), ch = height / number(h, @"down", 1);
+	/* 10-bit formats keep each component in a 16-bit word. The wide kernel
+	 * writes floats, which hold every 10-bit step. The surface's pixel
+	 * format, whose range YCbCr conversion follows, is '444f' unless the
+	 * case names another. */
+	size_t bytes = number(h, @"bytes", 1);
+	NSString *fourcc = h[@"fourcc"] ?: @"444f";
+	const char *code = fourcc.UTF8String;
+	if (strlen(code) != 4)
+		@throw failure(@"fourcc %@ is not four characters", fourcc);
+	uint32_t pixel = (uint32_t)code[0] << 24 | (uint32_t)code[1] << 16 | (uint32_t)code[2] << 8 | (uint32_t)code[3];
+	IOSurfaceRef s = two_plane_surface(w, height, cw, ch, bytes, pixel);
+	surface_rows(s, 0, contents(c.buffers[@"green"]), nil, w * bytes, height);
+	surface_rows(s, 1, contents(c.buffers[@"blue_red"]), nil, cw * 2 * bytes, ch);
+	id<MTLTexture> t = surface_texture(c, s, 0, (MTLPixelFormat)number(h, @"format", 0), MTLTextureUsageShaderRead);
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+	[e setComputePipelineState:host_pipeline(c, number(h, @"wide", 0) ? @"surface_two_plane_wide" : @"surface_two_plane")];
+	[e setTexture:t atIndex:0];
+	[e setBuffer:c.buffers[@"read"] offset:0 atIndex:0];
+	[e setBuffer:c.buffers[@"sampled"] offset:0 atIndex:1];
+	[e dispatchThreads:MTLSizeMake(w, height, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+	[e endEncoding];
+	wait_for(cb, c.spec);
+	CFRelease(s);
+}
+
+/* Copies both planes of a 4:4:4 two-plane surface into `out`: the first
+ * plane's bytes, then the second's pairs, tight. */
+static void two_plane_out(IOSurfaceRef s, id<MTLBuffer> out, size_t w, size_t height)
+{
+	NSMutableData *first = [NSMutableData dataWithLength:w * height];
+	NSMutableData *second = [NSMutableData dataWithLength:w * 2 * height];
+	surface_rows(s, 0, nil, first, w, height);
+	surface_rows(s, 1, nil, second, w * 2, height);
+	if (out.length < first.length + second.length)
+		@throw failure(@"two-plane output too small");
+	memcpy(out.contents, first.bytes, first.length);
+	memcpy((uint8_t *)out.contents + first.length, second.bytes, second.length);
+}
+
+/* Rendering into 4:4:4 two-plane surfaces of `format`: one loaded from the
+ * `green` and `blue_red` planes and drawn over, blending each pixel's
+ * `colors` entry by its alpha; one cleared to `clear` with its left half
+ * drawn opaque. Both surfaces' planes are the outputs. */
+static void host_two_plane_render(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	size_t w = number(h, @"width", 1), height = number(h, @"height", 1);
+	MTLPixelFormat format = (MTLPixelFormat)number(h, @"format", 0);
+	NSError *error = nil;
+	id<MTLRenderPipelineState> opaque =
+		host_render_pipeline(c, [MTLRenderPipelineDescriptor new], @"vert_viewport", @"frag_pixel", format, &error);
+	if (!opaque)
+		@throw failure(@"two-plane pipeline: %@", error.localizedDescription);
+	MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+	d.colorAttachments[0].blendingEnabled = YES;
+	d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+	d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+	id<MTLRenderPipelineState> blended = host_render_pipeline(c, d, @"vert_viewport", @"frag_pixel", format, &error);
+	if (!blended)
+		@throw failure(@"blending two-plane pipeline: %@", error.localizedDescription);
+	IOSurfaceRef loaded = two_plane_surface(w, height, w, height, 1, '444f');
+	IOSurfaceRef cleared = two_plane_surface(w, height, w, height, 1, '444f');
+	for (int i = 0; i < 2; i++) {
+		IOSurfaceRef s = i ? cleared : loaded;
+		surface_rows(s, 0, contents(c.buffers[@"green"]), nil, w, height);
+		surface_rows(s, 1, contents(c.buffers[@"blue_red"]), nil, w * 2, height);
+	}
+	MTLTextureUsage usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	id<MTLTexture> targets[2] = {surface_texture(c, loaded, 0, format, usage),
+				     surface_texture(c, cleared, 0, format, usage)};
+	NSArray *clear = h[@"clear"];
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	for (int i = 0; i < 2; i++) {
+		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		pass.colorAttachments[0].texture = targets[i];
+		pass.colorAttachments[0].loadAction = i ? MTLLoadActionClear : MTLLoadActionLoad;
+		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+		pass.colorAttachments[0].clearColor = MTLClearColorMake([clear[0] doubleValue], [clear[1] doubleValue],
+									 [clear[2] doubleValue], [clear[3] doubleValue]);
+		id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+		[e setRenderPipelineState:i ? opaque : blended];
+		MTLViewport viewport = {0, 0, (double)(i ? w / 2 : w), (double)height, 0, 1};
+		[e setViewport:viewport];
+		[e setFragmentBuffer:c.buffers[@"colors"] offset:0 atIndex:0];
+		[e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+		[e endEncoding];
+	}
+	wait_for(cb, c.spec);
+	two_plane_out(loaded, c.buffers[@"loaded"], w, height);
+	two_plane_out(cleared, c.buffers[@"cleared"], w, height);
+	CFRelease(loaded);
+	CFRelease(cleared);
 }
 
 /* What another process does to a texture and event this one shares. */
@@ -4949,6 +5540,104 @@ static void host_churn(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
 	wait_for(cb, c.spec);
 }
 
+/* Bytes of `length` that are not zero, or with `written`, that are neither
+ * zero nor in [first, last]. */
+static uint32_t stray_bytes(const uint8_t *bytes, NSUInteger length, BOOL written, uint8_t first, uint8_t last)
+{
+	uint32_t count = 0;
+	for (NSUInteger i = 0; i < length; i++)
+		count += bytes[i] != 0 && !(written && bytes[i] >= first && bytes[i] <= last);
+	return count;
+}
+
+/* Rounds of new buffers and textures of each storage mode: each is read
+ * back, filled with the round's byte and freed, so later rounds take the
+ * memory and recycled textures earlier ones held. A new buffer must read
+ * zero; a new texture may hold only zero or bytes this case wrote. */
+static void host_fresh_resources(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	NSUInteger rounds = number(h, @"rounds", 1), at = 0;
+	uint8_t first = (uint8_t)number(h, @"first_fill", 0xa1);
+	MTLResourceOptions modes[] = {MTLResourceStorageModeShared, MTLResourceStorageModeManaged,
+				      MTLResourceStorageModePrivate};
+	for (NSUInteger round = 0; round < rounds; round++) {
+		uint8_t fill = (uint8_t)(first + round);
+		for (NSNumber *size in h[@"buffer_sizes"]) {
+			NSUInteger length = size.unsignedIntegerValue;
+			for (size_t m = 0; m < sizeof modes / sizeof *modes; m++)
+				@autoreleasepool {
+					id<MTLBuffer> b = [c.device newBufferWithLength:length options:modes[m]];
+					if (!b)
+						@throw failure(@"no %lu-byte buffer", (unsigned long)length);
+					BOOL gpu_only = modes[m] == MTLResourceStorageModePrivate;
+					id<MTLBuffer> read =
+						gpu_only ? [c.device newBufferWithLength:length options:MTLResourceStorageModeShared] : b;
+					id<MTLCommandBuffer> cb = [queue commandBuffer];
+					id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+					if (gpu_only) {
+						/* The readback starts nonzero, so a copy that missed
+						 * shows. */
+						memset(read.contents, 0xff, length);
+						[e copyFromBuffer:b sourceOffset:0 toBuffer:read destinationOffset:0 size:length];
+					}
+					if (modes[m] == MTLResourceStorageModeManaged)
+						[e synchronizeResource:b];
+					[e endEncoding];
+					wait_for(cb, c.spec);
+					put(c, @"props", at++, stray_bytes(read.contents, length, NO, 0, 0));
+					cb = [queue commandBuffer];
+					e = [cb blitCommandEncoder];
+					[e fillBuffer:b range:NSMakeRange(0, length) value:fill];
+					[e endEncoding];
+					wait_for(cb, c.spec);
+				}
+		}
+		/* A size every round, which recycles textures, and a size of the
+		 * round's own, which takes freed memory. */
+		NSUInteger widths[] = {64, 80 + 16 * round};
+		for (size_t w = 0; w < sizeof widths / sizeof *widths; w++)
+			for (size_t m = 0; m < sizeof modes / sizeof *modes; m++)
+				@autoreleasepool {
+					NSUInteger width = widths[w], height = 64, row = width * 4, length = row * height;
+					MTLTextureDescriptor *td =
+						[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+												   width:width
+												  height:height
+											       mipmapped:NO];
+					td.storageMode = (MTLStorageMode)(modes[m] >> MTLResourceStorageModeShift);
+					td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+					id<MTLTexture> t = [c.device newTextureWithDescriptor:td];
+					if (!t)
+						@throw failure(@"no %lux%lu texture", (unsigned long)width, (unsigned long)height);
+					id<MTLBuffer> read = [c.device newBufferWithLength:length options:MTLResourceStorageModeShared];
+					memset(read.contents, 0xff, length);
+					id<MTLCommandBuffer> cb = [queue commandBuffer];
+					id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+					if (td.storageMode == MTLStorageModePrivate)
+						[e copyFromTexture:t sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+							      sourceSize:MTLSizeMake(width, height, 1) toBuffer:read destinationOffset:0
+						  destinationBytesPerRow:row destinationBytesPerImage:length];
+					if (td.storageMode == MTLStorageModeManaged)
+						[e synchronizeResource:t];
+					[e endEncoding];
+					wait_for(cb, c.spec);
+					if (td.storageMode != MTLStorageModePrivate)
+						[t getBytes:read.contents bytesPerRow:row fromRegion:MTLRegionMake2D(0, 0, width, height)
+						mipmapLevel:0];
+					put(c, @"props", at++, stray_bytes(read.contents, length, YES, first, fill));
+					cb = [queue commandBuffer];
+					MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+					pass.colorAttachments[0].texture = t;
+					pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+					pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+					double value = fill / 255.0;
+					pass.colorAttachments[0].clearColor = MTLClearColorMake(value, value, value, value);
+					[[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
+					wait_for(cb, c.spec);
+				}
+	}
+}
+
 /* A private buffer past 4 GiB: kernels stamp windows below 2 GiB, across
  * 2 and 4 GiB and at its end, a fill lands past 4 GiB, and blits bring
  * each back. */
@@ -5208,6 +5897,84 @@ static void host_render_target_barrier(Case *c, id<MTLCommandQueue> queue, NSDic
 	[r drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 	[r endEncoding];
 	read_back(cb, t, c.buffers[@"image"], 4, MTLBlitOptionNone);
+	wait_for(cb, c.spec);
+}
+
+/* A path filled as RenderBox fills one, in one pass over a colour target
+ * and a float winding target. A fan from a pivot to each edge of a square
+ * ring's outer contour and its opposite inner contour adds each triangle's
+ * facing to the count with additive blending; a full-target draw reads the
+ * count and the colour back through inputs a function constant enables,
+ * fills where the count is nonzero and clears the count. */
+static void host_winding_coverage(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	NSError *error = nil;
+	id<MTLLibrary> library = library_named(c.device, c.plan, c.spec[@"library"], c.libraries);
+	NSArray *reads = @[ @{@"type" : @"bool", @"index" : @0, @"value" : @1} ];
+	MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+	d.vertexFunction = function_named(library, @"vert_points", nil);
+	d.fragmentFunction = function_named(library, @"frag_winding", nil);
+	d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+	d.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
+	d.colorAttachments[1].pixelFormat = MTLPixelFormatRG16Float;
+	d.colorAttachments[1].blendingEnabled = YES;
+	d.colorAttachments[1].sourceRGBBlendFactor = MTLBlendFactorOne;
+	d.colorAttachments[1].destinationRGBBlendFactor = MTLBlendFactorOne;
+	d.colorAttachments[1].sourceAlphaBlendFactor = MTLBlendFactorOne;
+	d.colorAttachments[1].destinationAlphaBlendFactor = MTLBlendFactorOne;
+	id<MTLRenderPipelineState> wind = [c.device newRenderPipelineStateWithDescriptor:d error:&error];
+	d.vertexFunction = function_named(library, @"vert_points", nil);
+	d.fragmentFunction = function_named(library, @"frag_resolve_winding", reads);
+	d.colorAttachments[0].writeMask = MTLColorWriteMaskAll;
+	d.colorAttachments[1].blendingEnabled = NO;
+	id<MTLRenderPipelineState> resolve = wind ? [c.device newRenderPipelineStateWithDescriptor:d error:&error] : nil;
+	if (!wind || !resolve)
+		@throw failure(@"winding pipelines: %@", error.localizedDescription);
+	NSUInteger side = 16;
+	MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:side height:side mipmapped:NO];
+	td.usage = MTLTextureUsageRenderTarget;
+	td.storageMode = MTLStorageModePrivate;
+	id<MTLTexture> color = [c.device newTextureWithDescriptor:td];
+	td.pixelFormat = MTLPixelFormatRG16Float;
+	id<MTLTexture> count = [c.device newTextureWithDescriptor:td];
+	/* Outer contour counterclockwise, inner clockwise, in clip space. */
+	const float outer = 0.75f, inner = 0.25f, pivot[2] = {-0.9f, -0.97f};
+	const float contours[2][4][2] = {
+		{{-outer, -outer}, {outer, -outer}, {outer, outer}, {-outer, outer}},
+		{{-inner, -inner}, {-inner, inner}, {inner, inner}, {inner, -inner}},
+	};
+	float fan[2 * 4 * 3 * 2], *v = fan;
+	for (int k = 0; k < 2; k++) {
+		for (int e = 0; e < 4; e++) {
+			const float *a = contours[k][e], *b = contours[k][(e + 1) % 4];
+			float tri[6] = {pivot[0], pivot[1], a[0], a[1], b[0], b[1]};
+			memcpy(v, tri, sizeof tri);
+			v += 6;
+		}
+	}
+	const float whole[12] = {-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1};
+	const __fp16 fill[4] = {1, 0, 0, 1};
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+	pass.colorAttachments[0].texture = color;
+	pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+	pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 1, 1);
+	pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+	pass.colorAttachments[1].texture = count;
+	pass.colorAttachments[1].loadAction = MTLLoadActionClear;
+	pass.colorAttachments[1].clearColor = MTLClearColorMake(0, 0, 0, 0);
+	pass.colorAttachments[1].storeAction = MTLStoreActionStore;
+	id<MTLRenderCommandEncoder> r = [cb renderCommandEncoderWithDescriptor:pass];
+	[r setRenderPipelineState:wind];
+	[r setVertexBytes:fan length:sizeof fan atIndex:0];
+	[r drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:24];
+	[r setRenderPipelineState:resolve];
+	[r setVertexBytes:whole length:sizeof whole atIndex:0];
+	[r setFragmentBytes:fill length:sizeof fill atIndex:0];
+	[r drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:6];
+	[r endEncoding];
+	read_back(cb, color, c.buffers[@"color"], 4, MTLBlitOptionNone);
+	read_back(cb, count, c.buffers[@"count"], 4, MTLBlitOptionNone);
 	wait_for(cb, c.spec);
 }
 
@@ -6606,16 +7373,20 @@ static void run_host(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 	NSDictionary *work = @{
 		@"drawables" : [NSValue valueWithPointer:host_drawables],
 		@"iosurface" : [NSValue valueWithPointer:host_iosurface],
+		@"two_plane" : [NSValue valueWithPointer:host_two_plane],
+		@"two_plane_render" : [NSValue valueWithPointer:host_two_plane_render],
 		@"share" : [NSValue valueWithPointer:host_share],
 		@"archive" : [NSValue valueWithPointer:host_archive],
 		@"errors" : [NSValue valueWithPointer:host_errors],
 		@"purgeable" : [NSValue valueWithPointer:host_purgeable],
 		@"streams" : [NSValue valueWithPointer:host_streams],
 		@"churn" : [NSValue valueWithPointer:host_churn],
+		@"fresh_resources" : [NSValue valueWithPointer:host_fresh_resources],
 		@"large_buffer" : [NSValue valueWithPointer:host_large_buffer],
 		@"rebind" : [NSValue valueWithPointer:host_rebind],
 		@"dynamic_stride" : [NSValue valueWithPointer:host_dynamic_stride],
 		@"render_target_barrier" : [NSValue valueWithPointer:host_render_target_barrier],
+		@"winding_coverage" : [NSValue valueWithPointer:host_winding_coverage],
 		@"io" : [NSValue valueWithPointer:host_io],
 		@"barriers" : [NSValue valueWithPointer:host_barriers],
 		@"sync_texture" : [NSValue valueWithPointer:host_sync_texture],

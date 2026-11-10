@@ -50,6 +50,30 @@ kernel void surface_planes(texture2d<float, access::read> luma [[texture(0)]],
     out[p.y * n.x + p.x] = uint(rint(y * 255.0f)) | uint(rint(uv.x * 255.0f)) << 8 | uint(rint(uv.y * 255.0f)) << 16;
 }
 
+/* Apple's two-plane RGB formats: green in the first plane, blue and red in
+ * the second, each read at its own resolution and filtered on its own. */
+kernel void surface_two_plane(texture2d<float, access::sample> t [[texture(0)]],
+                              device uint *read [[buffer(0)]], device uint *sampled [[buffer(1)]],
+                              uint2 p [[thread_position_in_grid]], uint2 n [[threads_per_grid]])
+{
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    uint i = p.y * n.x + p.x;
+    read[i] = pack_float_to_unorm4x8(t.read(p));
+    sampled[i] = pack_float_to_unorm4x8(t.sample(linear, (float2(p) + 0.5f) / float2(n)));
+}
+
+/* The 10-bit two-plane formats: the read and the sample as floats, which
+ * hold every 10-bit step. */
+kernel void surface_two_plane_wide(texture2d<float, access::sample> t [[texture(0)]],
+                                   device float4 *read [[buffer(0)]], device float4 *sampled [[buffer(1)]],
+                                   uint2 p [[thread_position_in_grid]], uint2 n [[threads_per_grid]])
+{
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    uint i = p.y * n.x + p.x;
+    read[i] = t.read(p);
+    sampled[i] = t.sample(linear, (float2(p) + 0.5f) / float2(n));
+}
+
 kernel void archived(device uint *data [[buffer(0)]], constant uint &unused [[buffer(1)]], uint i [[thread_position_in_grid]])
 {
     data[i] = data[i] * 3u + 1u;
@@ -185,6 +209,13 @@ vertex Viewported vert_viewport(uint v [[vertex_id]], uint i [[instance_id]])
 fragment float4 frag_instance(Viewported in [[stage_in]], constant float4 *colors [[buffer(0)]])
 {
     return colors[in.instance];
+}
+
+// Each pixel's own color, from a row-major table 8 pixels wide.
+fragment float4 frag_pixel(float4 p [[position]], constant float4 *colors [[buffer(0)]])
+{
+    uint2 q = uint2(p.xy);
+    return colors[q.y * 8 + q.x];
 }
 
 kernel void fill_linear(texture2d<float, access::write> t [[texture(0)]],
@@ -349,4 +380,41 @@ struct OneSample {
 fragment OneSample frag_one_sample(constant uint &k [[buffer(0)]])
 {
     return {0.1f * float(k + 1), 1u << k};
+}
+
+// A path filled as RenderBox fills one: each triangle of a fan from a
+// pivot to each contour edge adds its facing to a winding count in a float
+// target, with additive blending.
+vertex Position vert_points(constant float2 *p [[buffer(0)]], uint v [[vertex_id]])
+{
+    return {float4(p[v], 0.0f, 1.0f)};
+}
+
+struct Winding {
+    float2 coverage [[color(1)]];
+};
+
+[[early_fragment_tests]] fragment Winding frag_winding(bool front [[front_facing]])
+{
+    return {float2(0.0f, front ? 1.0f : -1.0f)};
+}
+
+constant bool reads_targets [[function_constant(0)]];
+
+struct Resolved {
+    half4 color [[color(0)]];
+    float2 coverage [[color(1)]];
+};
+
+// Reads the count and the destination back as RenderBox's accumulator
+// does, through inputs a constant enables, fills where the count is
+// nonzero and clears the count for the next path.
+[[early_fragment_tests]] fragment Resolved
+frag_resolve_winding(constant half4 &fill [[buffer(0)]],
+                     float2 coverage [[color(1), function_constant(reads_targets)]],
+                     half4 dest [[color(0), function_constant(reads_targets)]])
+{
+    float2 c = reads_targets ? coverage : float2(0.0f);
+    half4 d = reads_targets ? dest : half4(0.0h);
+    return {mix(d, fill, half(saturate(abs(c.y)))), float2(0.0f)};
 }

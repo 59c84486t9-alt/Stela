@@ -812,6 +812,58 @@ fn targets(plan: &mut Plan, library: &str) {
             .output(Output::exact("a", Dtype::F32, expect)),
         );
     }
+    // Framebuffer reads of attachments no storage view reads, which render
+    // in copies of their texels: a 3D texture's depth plane and an A8Unorm
+    // texture, each the colour less its clear colour.
+    let white = [1.0; 4];
+    plan.add(
+        Case::render(
+            "api.render_into.depth_plane.read",
+            library,
+            "vert_inline_rect",
+            Some("frag_flat_less_target"),
+            strip(json!({"colors": [{"texture": "a", "depth_plane": 2,
+                                     "clear": [color[0], color[1], color[2], color[3]]}]})),
+        )
+        .buffers(inline_rect([-1.0, -1.0, 1.0, 1.0], white))
+        .texture(
+            Texture::new("a", "rgba32float", "3d", [size, size, 3])
+                .usage(&["render"])
+                .data(zeros(3 * face)),
+        )
+        .output(Output::exact(
+            "a",
+            Dtype::F32,
+            [
+                empty(32),
+                image(size, size, [0.75, 0.5, 0.25, 0.0], |_, _| true),
+            ]
+            .concat(),
+        ))
+        .requires(&["apple3"], &[]),
+    );
+    // 0.6 and 0.4 are 153 and 102 of 255.
+    plan.add(
+        Case::render(
+            "api.render_into.a8unorm.read",
+            library,
+            "vert_inline_rect",
+            Some("frag_flat_less_target"),
+            strip(json!({"colors": [{"texture": "a", "clear": [0.0, 0.0, 0.0, 0.6]}]})),
+        )
+        .buffers(inline_rect([-1.0, -1.0, 1.0, 1.0], white))
+        .texture(
+            Texture::d2("a", "a8unorm", size, size)
+                .usage(&["render"])
+                .data(zeros(size * size)),
+        )
+        .output(Output::exact(
+            "a",
+            Dtype::U8,
+            vec![102; (size * size) as usize],
+        ))
+        .requires(&["apple3"], &[]),
+    );
     // A multisampled pass resolved into one slice of an array.
     plan.add(
         Case::render(
@@ -1358,6 +1410,58 @@ fn frameworks(plan: &mut Plan, rng: &mut Random) {
         )
         .output(Output::new("out", Dtype::U8, Tolerance::units(1.0)).expect_same(inverted)),
     );
+    // Core Image's Lanczos downscale to 0.6, as the Mac's within a unit: of
+    // the image mirrored, Core Image stitches ci_lanczosDownH_affine, whose
+    // filter takes the sampler struct another library builds.
+    let gradient: Vec<u8> = (0..64u32 * 64)
+        .flat_map(|i| {
+            [
+                (i * 7 % 256) as u8,
+                (i / 64 * 4) as u8,
+                (i % 64 * 4) as u8,
+                255,
+            ]
+        })
+        .collect();
+    for (label, mirrored) in [("lanczos", false), ("lanczos_mirrored", true)] {
+        plan.add(
+            Case::framework(
+                &format!("api.framework.core_image_{label}"),
+                json!({"kind": "core_image_lanczos", "scale": 0.6, "mirrored": mirrored}),
+            )
+            .texture(Texture::d2("in", "rgba8unorm", 64, 64).data(gradient.clone()))
+            .texture(Texture::d2("out", "rgba8unorm", 39, 39).usage(&["read", "write", "render"]))
+            .output(Output::new("out", Dtype::U8, Tolerance::units(1.0))),
+        );
+    }
+    mps_graph(plan);
+}
+
+/// MPSGraph's elementwise operations relu(sin(a * b + 0.75)), which it fuses
+/// into one kernel stitched from its own visible functions, over a count with
+/// a scalar tail after its four-wide body. The product and sum round as f32;
+/// MPSGraph's sine is within a few ulps of the exact one.
+fn mps_graph(plan: &mut Plan) {
+    let count = 258u32;
+    let offset = 0.75f32;
+    let a: Vec<f32> = (0..count).map(|i| (i % 37) as f32 / 9.0 - 2.0).collect();
+    let b: Vec<f32> = (0..count).map(|i| 1.5 - (i % 23) as f32 / 8.0).collect();
+    let fused: Vec<f64> = a
+        .iter()
+        .zip(&b)
+        .map(|(&a, &b)| f64::from(a * b + offset).sin().max(0.0))
+        .collect();
+    let widen = |values: &[f32]| values.iter().map(|&v| f64::from(v)).collect::<Vec<_>>();
+    plan.add(
+        Case::framework(
+            "api.framework.mps_graph_fused",
+            json!({"kind": "mps_graph_fused", "count": count, "offset": offset}),
+        )
+        .buffer(Buffer::data("a", 0, f32s(&widen(&a))).unbound())
+        .buffer(Buffer::data("b", 0, f32s(&widen(&b))).unbound())
+        .buffer(Buffer::zeroed("out", 0, count as usize * 4).unbound())
+        .output(Output::new("out", Dtype::F32, Tolerance::abs(4e-6)).expect_same(f32s(&fused))),
+    );
 }
 
 /// MetalFX's spatial and temporal upscalers doubling a checkerboard with
@@ -1450,6 +1554,32 @@ fn core_animation(plan: &mut Plan) {
             "backdrop.glass",
             json!({"backdrop": [{"type": "glassBackground", "values": glass}], "sdf": {"corner_radius": 8}}),
         ),
+        // Glass shaped by a plain image sublayer's alpha, with no SDF.
+        (
+            "backdrop.glass_mask",
+            json!({"backdrop": [{"type": "glassBackground", "values": glass}], "mask": true}),
+        ),
+        // An SDF element shaped by an image's coverage, as Setup Assistant's
+        // lettering is: Core Animation derives distances by a jump flood.
+        (
+            "backdrop.glass_sdf_contents",
+            json!({"backdrop": [{"type": "glassBackground", "values": glass}], "sdf": {"contents": true}}),
+        ),
+        // Drop shadows: of the panel's shape, which Core Animation blurs
+        // from its coverage, and of a path, which it draws from a shadow
+        // image it caches.
+        (
+            "shadow",
+            json!({"shadow": {"opacity": 0.6, "radius": 6, "offset": [0, -3]}}),
+        ),
+        (
+            "shadow.path",
+            json!({"shadow": {"opacity": 0.6, "radius": 6, "offset": [0, -3], "path": true}}),
+        ),
+        (
+            "shadow.wide",
+            json!({"shadow": {"opacity": 0.8, "radius": 14, "offset": [2, -6], "path": true}}),
+        ),
         (
             "compositing.vibrant_color_matrix",
             json!({"compositing": {"type": "vibrantColorMatrix", "matrix": swap}}),
@@ -1479,6 +1609,194 @@ fn core_animation(plan: &mut Plan) {
                 .output(Output::new("out", Dtype::U8, Tolerance::units(3.0))),
         );
     }
+    text(plan, &glass);
+}
+
+/// A push button's label, from the CPU's text to Core Animation's glass. Core
+/// Text sets it into a bitmap context: in BGRA over clear, over opaque white
+/// with font smoothing, and alpha only, as an A8 backing store holds it. Core
+/// Animation then draws it as a text layer, as an alpha-only image it tints,
+/// as an A8 backing store a delegate draws (SwiftUI's text), with SwiftUI's
+/// vibrant color matrix, through a portal that hides its source, and so
+/// above glass, as SwiftUI composes a glass button; and AppKit's own glass
+/// button, where a window server session allows one. What Core Text and Core
+/// Animation draw is their own, so each is held to the reference device's.
+fn text(plan: &mut Plan, glass: &Value) {
+    for (label, format, pixel_format) in [
+        ("rgba", "rgba", "bgra8unorm"),
+        ("smoothed", "smoothed", "bgra8unorm"),
+        ("alpha", "alpha", "r8unorm"),
+    ] {
+        plan.add(
+            Case::framework(
+                &format!("api.framework.core_text.{label}"),
+                json!({"kind": "core_text", "format": format}),
+            )
+            .texture(Texture::d2("out", pixel_format, 160, 40).usage(&["read"]))
+            .output(Output::new("out", Dtype::U8, Tolerance::units(1.0))),
+        );
+    }
+    let backdrop = json!([{"type": "glassBackground", "values": glass}]);
+    for (label, scene) in [
+        (
+            "core_animation.text.layer",
+            json!({"text": {"kind": "layer"}}),
+        ),
+        (
+            "core_animation.text.tinted",
+            json!({"text": {"kind": "tinted"}}),
+        ),
+        (
+            "core_animation.text.backing",
+            json!({"text": {"kind": "backing"}}),
+        ),
+        (
+            "core_animation.text.backing_vibrant",
+            json!({"text": {"kind": "backing", "vibrant": true}}),
+        ),
+        (
+            "core_animation.text.portal",
+            json!({"text": {"kind": "backing", "vibrant": true, "portal": true}}),
+        ),
+        (
+            "core_animation.text.glass_portal",
+            json!({"text": {"kind": "backing", "vibrant": true, "portal": true},
+                   "backdrop": backdrop, "sdf": {"corner_radius": 12}}),
+        ),
+        // AppKit's own, under its own name, which a run can leave out.
+        ("appkit.glass_button", json!({"appkit_button": true})),
+    ] {
+        let mut scene = scene;
+        scene["kind"] = "core_animation".into();
+        plan.add(
+            Case::framework(&format!("api.framework.{label}"), scene)
+                .texture(Texture::d2("out", "bgra8unorm", 160, 48).usage(&["read", "render"]))
+                .output(Output::new("out", Dtype::U8, Tolerance::units(3.0))),
+        );
+    }
+}
+
+/// A desktop picture as an app hands it to MetalKit for a background:
+/// MTKTextureLoader decodes TIFF data of an opaque sRGB image of odd size
+/// into an sRGB texture and generates its mipmaps, which glass samples
+/// blurred. The decoder, the upload and the mipmaps are MetalKit's and the
+/// device's, so they are held to the reference device's.
+/// The desktop picture's texel at (x, y), 8-bit components as the runner
+/// draws it: a gradient under a 4-texel checker, opaque.
+fn desktop_texel(x: u32, y: u32, width: u32, height: u32) -> [u8; 4] {
+    let checker = if (x / 4 + y / 4) & 1 == 1 { 224 } else { 32 };
+    [
+        (x * 255 / (width - 1)) as u8,
+        (y * 255 / (height - 1)) as u8,
+        checker,
+        255,
+    ]
+}
+
+/// The sRGB transfer function's inverse.
+fn srgb_to_linear(v: f64) -> f64 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// A desktop picture as an app makes it a texture: MetalKit's loader on the
+/// 8-bit TIFF AppKit writes, and on the 16-bit linear PNG Core Image's
+/// bitmap becomes (RGBA16Unorm); Core Image rendering the TIFF into that
+/// bitmap; and MPS's Gaussian blur of a mipmapped RGBA16Unorm texture into
+/// RGBA16Float. Setup Assistant's hello view takes its background this way.
+fn texture_loader(plan: &mut Plan) {
+    let (width, height) = (203u32, 118u32);
+    let levels = 32 - width.max(height).leading_zeros();
+    let texels: u32 = (0..levels)
+        .map(|l| (width >> l).max(1) * (height >> l).max(1))
+        .sum();
+    for (name, bits) in [("texture_loader", 8usize), ("texture_loader_rgba16", 16)] {
+        let mut spec = json!({"kind": "texture_loader", "width": width, "height": height});
+        if bits == 16 {
+            spec["bits"] = json!(bits);
+        }
+        plan.add(
+            Case::framework(&format!("api.framework.metalkit.{name}"), spec)
+                .buffer(Buffer::zeroed("out", 0, 16 + texels as usize * bits / 2).unbound())
+                .output(Output::new("out", Dtype::U8, Tolerance::units(1.0))),
+        );
+    }
+    // Core Image converts sRGB to linear in half precision: within 64 of
+    // 65535 of the exact curve.
+    let linear: Vec<i128> = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let texel = desktop_texel(x, y, width, height);
+            (0..4).map(move |k| {
+                let v = f64::from(texel[k]) / 255.0;
+                let v = if k == 3 { v } else { srgb_to_linear(v) };
+                (v * 65535.0).round() as i128
+            })
+        })
+        .collect();
+    plan.add(
+        Case::framework(
+            "api.framework.core_image.bitmap_rgba16",
+            json!({"kind": "core_image_bitmap", "width": width, "height": height}),
+        )
+        .buffer(Buffer::zeroed("out", 0, (width * height * 8) as usize).unbound())
+        .output(
+            Output::new("out", Dtype::U16, Tolerance::units(64.0))
+                .expect_same(ints(Dtype::U16, &linear)),
+        ),
+    );
+    // The blur reads the source's base level; its other levels hold the
+    // base's 2 x 2 means, as generated mipmaps do.
+    let (w, h) = (256u32, 128u32);
+    let mut level: Vec<[f64; 4]> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let texel = desktop_texel(x, y, w, h);
+            core::array::from_fn(|k| f64::from(texel[k]) / 255.0)
+        })
+        .collect();
+    let mut data = Vec::new();
+    let (mut lw, mut lh) = (w, h);
+    let mips = 32 - w.max(h).leading_zeros();
+    for index in 0..mips {
+        if index > 0 {
+            let (nw, nh) = ((lw / 2).max(1), (lh / 2).max(1));
+            level = (0..nh)
+                .flat_map(|y| (0..nw).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    let at = |dx: u32, dy: u32| {
+                        level[((y * 2 + dy).min(lh - 1) * lw + (x * 2 + dx).min(lw - 1)) as usize]
+                    };
+                    core::array::from_fn(|k| {
+                        (at(0, 0)[k] + at(1, 0)[k] + at(0, 1)[k] + at(1, 1)[k]) / 4.0
+                    })
+                })
+                .collect();
+            (lw, lh) = (nw, nh);
+        }
+        let words: Vec<i128> = level
+            .iter()
+            .flat_map(|texel| texel.map(|v| (v * 65535.0).round() as i128))
+            .collect();
+        data.extend(ints(Dtype::U16, &words));
+    }
+    plan.add(
+        Case::framework(
+            "api.framework.mps_gaussian_blur",
+            json!({"kind": "mps_gaussian_blur", "sigma": 8.0}),
+        )
+        .texture(
+            Texture::d2("in", "rgba16unorm", w, h)
+                .mipmaps(mips)
+                .set("storage", "managed")
+                .data(data),
+        )
+        .texture(Texture::d2("out", "rgba16float", w, h).usage(&["read", "write"]))
+        .output(Output::new("out", Dtype::F16, Tolerance::abs(1.0 / 256.0))),
+    );
 }
 
 pub fn build(plan: &mut Plan) {
@@ -1503,4 +1821,5 @@ pub fn build(plan: &mut Plan) {
     frameworks(plan, &mut rng);
     metalfx(plan);
     core_animation(plan);
+    texture_loader(plan);
 }

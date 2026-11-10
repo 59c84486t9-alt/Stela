@@ -353,6 +353,10 @@ const OPERATIONS: &[(&str, Reach)] = &[
         Reach::Call("[k_ setThreadgroupMemoryLength:"),
     ),
     (
+        "IndirectComputeCode::SetImageblockSize",
+        Reach::Call("[k_ setImageblockWidth:"),
+    ),
+    (
         "IndirectComputeCode::SetStageInRegion",
         Reach::Call("[k_ setStageInRegion:"),
     ),

@@ -9,7 +9,7 @@
 //! asserted to the precision of fp32 plane equations, blending and format
 //! conversion to their formats' resolution, and the depth, stencil and
 //! blend equations exactly.
-use super::plan::{Buffer, Case, LATEST, Output, Plan, Texture, Tolerance};
+use super::plan::{Buffer, Case, LATEST, Output, Plan, Step, Texture, Tolerance};
 use super::textures::{srgb, xr};
 use super::values::{Dtype, Random, f16_bits, f16r, f32r, f32s, floats, ints, libm, u32s};
 use serde_json::{Value, json};
@@ -481,7 +481,7 @@ fn derivatives(plan: &mut Plan, library: &str) {
     let at = |x: u32, y: u32| deriv_attr(x as f64 + 0.5, y as f64 + 0.5);
     type F = fn([f64; 4]) -> [f64; 2];
     // Each case: the values its derivatives are of, as f32 or half.
-    let cases: [(i32, &str, F, bool); 12] = [
+    let cases: [(i32, &str, F, bool); 13] = [
         (0, "u", |a| [a[0], 0.0], false),
         (1, "v", |a| [a[1], 0.0], false),
         (2, "position", |_| [0.0, 0.0], false),
@@ -493,6 +493,7 @@ fn derivatives(plan: &mut Plan, library: &str) {
         (8, "half2", |a| [f16r(a[0]), f16r(a[1])], true),
         (9, "perspective", |a| [a[0], a[2]], false),
         (10, "discard", |a| [f32r(a[0] + a[1]), 0.0], false),
+        (12, "divergent", |a| [f32r(a[0] * a[0]), 0.0], false),
         (
             11,
             "sin",
@@ -526,6 +527,7 @@ fn derivatives(plan: &mut Plan, library: &str) {
                         [dpx, round(at(cx, y0 + 1)[1] - at(cx, y0)[1]), dpz, p[3]]
                     }
                     10 if x & 1 == 1 => CLEAR,
+                    12 if (x + y) % 3 == 0 => [0.0; 4],
                     10 => [width[0]; 4],
                     _ => [dx[0], dy[0], width[0], value[0]],
                 });
@@ -555,6 +557,189 @@ fn derivatives(plan: &mut Plan, library: &str) {
             ),
         );
     }
+}
+
+/// The colour of each level but the first of the 64x64 texture the bicubic
+/// bias case samples, one flat rgba8unorm colour a level.
+fn level_colour(level: u32) -> [u8; 4] {
+    [
+        (level * 36 + 20) as u8,
+        (250 - level * 30) as u8,
+        ((level * 53 + 7) % 256) as u8,
+        255,
+    ]
+}
+
+/// A derivative in a branch a third of the pixels skip, one in every quad,
+/// of a value the branch computes from an interpolant and a constant
+/// buffer: Apple GPUs take it from the values every pixel of the quad
+/// holds, as if no pixel had skipped. Their derivatives of texels, longer
+/// computations and implicit levels in such a branch are undefined in the
+/// skipping pixels, so no case holds them.
+fn branch_derivatives(plan: &mut Plan, library: &str) {
+    let full = [0.0, 0.0, W as f64, H as f64];
+    let corners = [(0.0, 0.0), (32.0, 0.0), (0.0, 32.0)];
+    let pos: Vec<[f64; 4]> = corners
+        .iter()
+        .map(|&(x, y)| clip(x, y, 0.5, 1.0, full))
+        .collect();
+    let att: Vec<[f64; 4]> = corners.iter().map(|&(x, y)| deriv_attr(x, y)).collect();
+    let at = |x: u32, y: u32| deriv_attr(x as f64 + 0.5, y as f64 + 0.5);
+    // scale, level scale, bias.
+    let (scale, lod_scale, bias) = (0.5, 2.0 / 64.0, 1.0);
+    let uniforms = f32s(&[scale, lod_scale, bias]);
+    let value = |x: u32, y: u32| f32r(f32r(at(x, y)[0] * at(x, y)[0]) * scale);
+    let (mut fine, mut coarse) = (vec![], vec![]);
+    for (x, y) in pixels() {
+        let (x0, y0) = (x & !1, y & !1);
+        for (out, kind) in [(&mut fine, true), (&mut coarse, false)] {
+            let (ry, cx) = if kind { (y, x) } else { (y0, x0) };
+            let dx = f32r(value(x0 + 1, ry) - value(x0, ry));
+            let dy = f32r(value(cx, y0 + 1) - value(cx, y0));
+            out.extend(if (x + y) % 3 == 0 {
+                [0.0; 4]
+            } else {
+                [dx, dy, f32r(dx.abs() + dy.abs()), value(x, y)]
+            });
+        }
+    }
+    let tol = Tolerance::abs(1e-5);
+    let case = |name: &str, which: i32| {
+        draw(
+            name,
+            library,
+            "vert_plain",
+            "frag_deriv_branch",
+            &pos,
+            &att,
+            "rgba32float",
+            json!({}),
+        )
+        .set("constants", constant(which))
+        .buffer(Buffer::data("k", 0, uniforms.clone()).stage("fragment"))
+    };
+    plan.add(
+        case("render.derivative.divergent_buffer", 0)
+            .texture(
+                Texture::d2("levels", "rgba8unorm", 1, 1)
+                    .index(0)
+                    .data(vec![0; 4]),
+            )
+            .sampler(json!({"name": "s", "index": 0}))
+            .output(
+                Output::new("c", Dtype::F32, tol.clone())
+                    .expect(f32s(&fine), tol)
+                    .expect_alternative(f32s(&coarse)),
+            ),
+    );
+    // A bicubic sample's bias moves the level past lod_max_clamp, which
+    // holds it at level 1, whose texel centers the coordinates fall on:
+    // each pixel takes its texel there, the taps beside it weighed zero.
+    let pattern = |x: u32, y: u32| {
+        [
+            (x * 7 + y * 3) % 256,
+            (x * 5 + y * 11) % 256,
+            (x ^ y) * 8 % 256,
+            255,
+        ]
+    };
+    let mut levels = vec![];
+    for level in 0..7u32 {
+        let side = 64u32 >> level;
+        for (x, y) in (0..side).flat_map(|y| (0..side).map(move |x| (x, y))) {
+            levels.extend(if level == 1 {
+                pattern(x, y).map(|c| c as u8)
+            } else {
+                level_colour(level)
+            });
+        }
+    }
+    let expected: Vec<f64> = pixels()
+        .flat_map(|(x, y)| pattern(x, y).map(|c| f64::from(c) / 255.0))
+        .collect();
+    let tol = Tolerance::abs(0.5 / 255.0);
+    plan.add(
+        case("render.sample.bicubic.bias_clamped", 1)
+            .texture(
+                Texture::d2("levels", "rgba8unorm", 64, 64)
+                    .index(0)
+                    .mipmaps(7)
+                    .data(levels),
+            )
+            .sampler(
+                json!({"name": "s", "index": 0, "min": "bicubic", "mag": "bicubic",
+                            "mip": "nearest", "lod_max": 1.0}),
+            )
+            .output(Output::new("c", Dtype::F32, tol.clone()).expect(f32s(&expected), tol)),
+    );
+}
+
+/// How fragments pack into SIMD-groups, which Metal leaves to the GPU. An
+/// M1 Pro packs a full 8 x 4 block of pixels into one: its 2 x 2 quads in
+/// lanes of four, row by row, four quads to a row. NVIDIA packs a 4 x 8
+/// block, which no lane order turns into Apple's, so the layout is
+/// reported, not asserted (metal-device.md, known hardware precision
+/// differences). What every device keeps is asserted: each quad is four
+/// lanes in a row, x in bit 0 and y in bit 1, which lane-indexed shuffles
+/// reach.
+fn fragment_simd_layout(plan: &mut Plan, library: &str) {
+    let corners = [(0.0, 0.0), (32.0, 0.0), (0.0, 32.0)];
+    let full = [0.0, 0.0, W as f64, H as f64];
+    let pos: Vec<[f64; 4]> = corners
+        .iter()
+        .map(|&(x, y)| clip(x, y, 0.5, 1.0, full))
+        .collect();
+    let att = [[0.0; 4]; 3];
+    let expected: Vec<f64> = pixels()
+        .flat_map(|(x, y)| {
+            let lane = x & 1 | (y & 1) << 1 | (x >> 1 & 3) << 2 | (y >> 1 & 1) << 4;
+            [
+                f64::from(lane),
+                f64::from((x & !7) + (y & !3) * 1024),
+                32.0,
+                32.0,
+            ]
+        })
+        .collect();
+    plan.add(
+        draw(
+            "render.simd.fragment_layout",
+            library,
+            "vert_plain",
+            "frag_simd_layout",
+            &pos,
+            &att,
+            "rgba32float",
+            json!({}),
+        )
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected)))
+        .informational()
+        .note("fragment SIMD-group layout is the GPU's; see metal-device.md"),
+    );
+    let index = |x: u32, y: u32| f64::from(x + y * 1024);
+    let quads: Vec<f64> = pixels()
+        .flat_map(|(x, y)| {
+            [
+                f64::from(x & 1 | (y & 1) << 1),
+                index(x ^ 1, y),
+                index(x, y ^ 1),
+                index(x | 1, y | 1),
+            ]
+        })
+        .collect();
+    plan.add(
+        draw(
+            "render.simd.fragment_quads",
+            library,
+            "vert_plain",
+            "frag_simd_quads",
+            &pos,
+            &att,
+            "rgba32float",
+            json!({}),
+        )
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&quads))),
+    );
 }
 
 fn builtins(plan: &mut Plan, library: &str) {
@@ -1464,7 +1649,12 @@ fn blending(plan: &mut Plan, library: &str) {
     }
     // Normalized targets clamp sources, factors and results; sRGB targets
     // blend in linear space.
-    for format in ["rgba8unorm", "rgba8unorm_srgb"] {
+    for format in [
+        "rgba8unorm",
+        "rgba8unorm_srgb",
+        "bgra8unorm",
+        "bgra8unorm_srgb",
+    ] {
         for (label, blend) in blends.iter().filter(|(l, _)| {
             matches!(
                 l.as_str(),
@@ -1487,7 +1677,10 @@ fn blending(plan: &mut Plan, library: &str) {
                 .map(|_| std::array::from_fn(|_| (rng.u32() % 256) as u8))
                 .collect();
             let srgb_target = format.ends_with("srgb");
+            let bgra = format.starts_with("bgra");
+            // A texel's channels in RGBA order, from its bytes.
             let decode = |b: [u8; 4]| {
+                let b = if bgra { [b[2], b[1], b[0], b[3]] } else { b };
                 let v = b.map(|x| f64::from(x) / 255.0);
                 if srgb_target {
                     [srgb(v[0]), srgb(v[1]), srgb(v[2]), v[3]]
@@ -1512,20 +1705,29 @@ fn blending(plan: &mut Plan, library: &str) {
                 .map(|(l, h)| h - l)
                 .max()
                 .unwrap_or(0);
-            let mut output = Output::new("c", Dtype::U8, tol.clone())
-                .expect(expected, tol)
-                .judged_by_expectation();
+            let mut output = Output::new("c", Dtype::U8, tol.clone()).expect(expected, tol);
             for step in 0..=widest.div_ceil(3) {
                 let at = |(&l, &h): (&u8, &u8)| l.saturating_add(step.saturating_mul(3)).min(h);
                 output = output.expect_alternative(lows.iter().zip(&highs).map(at).collect());
             }
             let name = format!("render.blend.{format}.{label}");
             read.push(name.clone());
-            plan.add(
-                full(&name, library, "frag_color", &s.concat(),
+            let case = |name: &str, output: Output| {
+                full(name, library, "frag_color", &s.concat(),
                      json!({"colors": [{"texture": "c", "blend": blend.json()}], "blend_color": blend_color}))
                 .texture(target("c", format).data(stored.concat()))
-                .output(output),
+                .output(output)
+            };
+            plan.add(case(&name, output.clone().judged_by_expectation()));
+            // The same blend against the Mac's rounding within a unit,
+            // reported only: Apple GPUs blend the float source, NVIDIA's
+            // blend unit the source at the target's 8 bits, which the band
+            // above allows (metal-device.md, known hardware precision
+            // differences).
+            plan.add(
+                case(&format!("{name}.reference"), output)
+                    .informational()
+                    .note("8-bit blends take the source at the target's precision"),
             );
         }
     }
@@ -2202,9 +2404,38 @@ fn multisampling(plan: &mut Plan, library: &str) {
         .collect();
     let mut a2c = state.clone();
     a2c["alpha_to_coverage"] = true.into();
+    // The Mac's own pattern is held to within a unit: a device that covers
+    // other samples, or dithers otherwise, differs from it by a sample.
     plan.add(
         full(
             "render.msaa4.alpha_to_coverage",
+            library,
+            "frag_alpha",
+            &alphas,
+            a2c.clone(),
+        )
+        .texture(ms())
+        .texture(target("c", "rgba8unorm"))
+        .output(
+            Output::new("c", Dtype::U8, Tolerance::units(1.0))
+                .expect(expected, Tolerance::units(64.0)),
+        ),
+    );
+    // Every alpha k/255, one a pixel: how many samples, and which, each
+    // covers at each pixel of the target, as the Mac's.
+    let alphas: Vec<f64> = (0..W * H)
+        .flat_map(|i| [1.0, 1.0, 1.0, f64::from(i % 256) / 255.0])
+        .collect();
+    let expected: Vec<u8> = (0..W * H)
+        .flat_map(|i| {
+            let a = f64::from(i % 256) / 255.0;
+            let c = (a * 255.0).round() as u8;
+            [c, c, c, (a * a * 255.0).round() as u8]
+        })
+        .collect();
+    plan.add(
+        full(
+            "render.msaa4.alpha_to_coverage.levels",
             library,
             "frag_alpha",
             &alphas,
@@ -2213,10 +2444,152 @@ fn multisampling(plan: &mut Plan, library: &str) {
         .texture(ms())
         .texture(target("c", "rgba8unorm"))
         .output(
-            Output::new("c", Dtype::U8, Tolerance::units(64.0))
+            Output::new("c", Dtype::U8, Tolerance::units(1.0))
                 .expect(expected, Tolerance::units(64.0)),
         ),
     );
+}
+
+/// Which pixels lines and wireframe triangles cover, which Metal leaves to
+/// the GPU: held to the Mac's pixels exactly. Each fragment adds a quarter
+/// to an r8unorm target, so a pixel two primitives cover holds a half.
+/// Lines run at slopes 0, 1/3, 1, 3 and vertical, both ways, from pixel
+/// centres, edges and corners, each in its own 16 x 16 cell; a strip shows
+/// its joints, and two wireframe triangles their shared edge. Lines through
+/// the corners of pixels' diamonds, where the exit rule ties, and lines
+/// under 4x multisampling, where Apple GPUs cover a parallelogram and
+/// Vulkan a rectangle, are reported, not asserted (metal-device.md, known
+/// hardware precision differences).
+fn lines(plan: &mut Plan, library: &str) {
+    let quarter = [0.25; 4];
+    let state = |primitive: &str, count: usize, fill: bool| {
+        let mut state = json!({
+            "colors": [{"texture": "c", "clear": [0, 0, 0, 0],
+                        "blend": Blend::simple("add", "one", "one").json()}],
+            "primitive": primitive, "vertex_count": count,
+        });
+        if fill {
+            state["fill"] = "lines".into();
+        }
+        state
+    };
+    let case = |name: &str, (w, h): (u32, u32), points: &[[f64; 2]], state: Value| -> Case {
+        let viewport = [0.0, 0.0, f64::from(w), f64::from(h)];
+        let pos: Vec<f64> = points
+            .iter()
+            .flat_map(|&[x, y]| clip(x, y, 0.5, 1.0, viewport))
+            .collect();
+        let attrs: Vec<f64> = points.iter().flat_map(|_| quarter).collect();
+        let mut case = Case::render(
+            name,
+            library,
+            "vert_plain",
+            Some("frag_attribute"),
+            state.clone(),
+        )
+        .buffer(Buffer::data("positions", 0, f32s(&pos)).stage("vertex"))
+        .buffer(Buffer::data("attributes", 1, f32s(&attrs)).stage("vertex"))
+        .texture(Texture::d2("c", "r8unorm", w, h).usage(&["render"]));
+        // Under 4x multisampling, the resolve's mean of the samples each
+        // primitive covers.
+        if state["samples"] == 4 {
+            case = case.texture(
+                Texture::new("ms", "r8unorm", "2d_ms", [w, h, 1])
+                    .samples(4)
+                    .usage(&["render"]),
+            );
+        }
+        case.output(Output::new("c", Dtype::U8, Tolerance::exact()))
+    };
+    let starts = [(2.5, 2.5), (2.0, 2.5), (2.0, 2.0)];
+    let directions = [(9.0, 0.0), (9.0, 3.0), (9.0, 9.0), (3.0, 9.0), (0.0, 9.0)];
+    let (mut segments, mut ties) = (vec![], vec![]);
+    for reversed in [false, true] {
+        for &(sx, sy) in &starts {
+            for &(dx, dy) in &directions {
+                let (a, b) = ([sx, sy], [sx + dx, sy + dy]);
+                let segment = if reversed { [b, a] } else { [a, b] };
+                // From a pixel edge's midpoint at slopes 1/3 and 1, a line
+                // runs through diamond corners.
+                if (sx, sy) == (2.0, 2.5) && matches!(dy, 3.0 | 9.0) && dx == 9.0 {
+                    ties.push(segment);
+                } else {
+                    segments.push(segment);
+                }
+            }
+        }
+    }
+    // A shallow line between sixteenths, both ways.
+    let (a, b) = ([1.25, 3.75], [14.75, 7.25]);
+    segments.extend([[a, b], [b, a]]);
+    let cells = |segments: &[[[f64; 2]; 2]]| -> Vec<[f64; 2]> {
+        segments
+            .iter()
+            .enumerate()
+            .flat_map(|(cell, segment)| {
+                let origin = [(cell % 8 * 16) as f64, (cell / 8 * 16) as f64];
+                segment.map(|[x, y]| [origin[0] + x, origin[1] + y])
+            })
+            .collect()
+    };
+    let list = cells(&segments);
+    plan.add(case(
+        "render.lines.list",
+        (128, 64),
+        &list,
+        state("line", list.len(), false),
+    ));
+    let tied = cells(&ties);
+    plan.add(
+        case(
+            "render.lines.ties",
+            (64, 16),
+            &tied,
+            state("line", tied.len(), false),
+        )
+        .informational()
+        .note("lines through diamond corners tie; see metal-device.md"),
+    );
+    segments.extend(ties);
+    let all = cells(&segments);
+    let mut msaa = state("line", all.len(), false);
+    msaa["colors"][0]["texture"] = "ms".into();
+    msaa["colors"][0]["resolve"] = "c".into();
+    msaa["samples"] = 4.into();
+    plan.add(
+        case("render.lines.list_msaa4", (128, 64), &all, msaa)
+            .informational()
+            .note("multisampled lines are Apple's parallelograms; see metal-device.md"),
+    );
+    let strip = [
+        [2.5, 2.5],
+        [20.5, 8.5],
+        [8.0, 26.0],
+        [28.0, 28.0],
+        [28.0, 4.0],
+        [16.5, 16.5],
+        [3.0, 14.0],
+    ];
+    plan.add(case(
+        "render.lines.strip",
+        (32, 32),
+        &strip,
+        state("line_strip", strip.len(), false),
+    ));
+    let triangles = [
+        [2.5, 2.5],
+        [28.0, 4.0],
+        [6.0, 28.5],
+        [28.0, 4.0],
+        [29.5, 29.5],
+        [6.0, 28.5],
+    ];
+    plan.add(case(
+        "render.wireframe",
+        (32, 32),
+        &triangles,
+        state("triangle", triangles.len(), true),
+    ));
 }
 
 fn points(plan: &mut Plan, library: &str) {
@@ -2259,6 +2632,39 @@ fn points(plan: &mut Plan, library: &str) {
         )
         .output(image.output("c", Tolerance::abs(1e-5))),
     );
+    // Apple GPUs draw a point at most 511 pixels wide: larger sizes draw
+    // that square, here the pixels 257 to 767 on each axis about a centre
+    // off the pixel grid.
+    let side = 1024u32;
+    let viewport = [0.0, 0.0, f64::from(side), f64::from(side)];
+    let centre = 512.25;
+    for size in [600.0, 1000.0] {
+        let covered = |p: u32| (257..=767).contains(&p);
+        let expected: Vec<u8> = (0..side)
+            .flat_map(|y| (0..side).map(move |x| if covered(x) && covered(y) { 255 } else { 0 }))
+            .collect();
+        plan.add(
+            Case::render(
+                &format!("render.points.large.{size}"),
+                library,
+                "vert_point",
+                Some("frag_point_cover"),
+                json!({"colors": [{"texture": "c", "clear": [0.0, 0.0, 0.0, 0.0]}],
+                       "vertex_count": 1, "primitive": "point"}),
+            )
+            .buffer(
+                Buffer::data(
+                    "positions",
+                    0,
+                    f32s(&clip(centre, centre, 0.5, 1.0, viewport)),
+                )
+                .stage("vertex"),
+            )
+            .buffer(Buffer::data("attributes", 1, f32s(&[size, 0.0, 0.0, 0.0])).stage("vertex"))
+            .texture(Texture::d2("c", "r8unorm", side, side).usage(&["render"]))
+            .output(Output::exact("c", Dtype::U8, expected)),
+        );
+    }
 }
 
 /// Each pixel of the union of triangles that share edges through pixel
@@ -3171,6 +3577,44 @@ fn tiles(plan: &mut Plan, library: &str) {
         };
         plan.add(case);
     }
+    // Where an Apple GPU places a tile function's threads: in SIMD-groups of
+    // 8 by 4 blocks of the threadgroup, cut short at its edges, of 2 by 2
+    // quads in rows two threads high; its index runs the same quads across
+    // the whole width. Odd sizes leave quads part empty.
+    for [w, h] in [[16u32, 16u32], [12, 10], [3, 5], [32, 4], [1, 8]] {
+        let (pw, ph) = (w.next_multiple_of(2), h.next_multiple_of(2));
+        let mut out = vec![[0u32; 4]; 32 * 32];
+        for y in 0..h {
+            for x in 0..w {
+                let (by, bx) = (y / 4, x / 8);
+                let (bh, bw) = ((ph - 4 * by).min(4), (pw - 8 * bx).min(8));
+                let quads = |x: u32, y: u32, across: u32| {
+                    ((y / 2 * across + x / 2) << 2) | (y % 2) << 1 | (x % 2)
+                };
+                let lane = by * 4 * pw + bx * 8 * bh + quads(x % 8, y % 4, bw / 2);
+                let index = quads(x, y, pw / 2);
+                let neighbor = |x: u32, y: u32, inside: bool| {
+                    if inside { x | y << 8 | 1 << 16 } else { 0 }
+                };
+                out[(y * 32 + x) as usize] = [
+                    lane,
+                    index | ((x % 2) | (y % 2) << 1) << 16,
+                    neighbor(x ^ 1, y, (x ^ 1) < w),
+                    neighbor(x, y ^ 1, (y ^ 1) < h),
+                ];
+            }
+        }
+        let words: Vec<u32> = out.into_iter().flatten().collect();
+        plan.add(
+            case(
+                &format!("render.tile.lanes.{w}x{h}"),
+                json!([{"function": "tile_lanes", "threads": [w, h]}]),
+                json!({"tile_size": [32, 32]}),
+            )
+            .buffer(Buffer::zeroed("out", 0, 32 * 32 * 16).stage("tile"))
+            .output(Output::exact("out", Dtype::U32, u32s(&words))),
+        );
+    }
     // Pipelines made from an archive given their functions, by completion
     // handler.
     plan.add(
@@ -3374,11 +3818,15 @@ fn raw_rendered(plan: &mut Plan, library: &str) {
         let t = c.map(|v| window(v, full_vp));
         // 0.8 in quarters stays on ABGR4's lattice: 0.2 k is 3 k / 15.
         let attrs = [[0.8; 4]; 3];
-        let mut resolved = vec![];
+        // A pixel with a sample on an edge is covered as the device's edge
+        // rule decides, which the expectation leaves out.
+        let (mut resolved, mut defined) = (vec![], vec![]);
         for (x, y) in pixels() {
-            let k = f64::from(coverage(&t, x, y).unwrap_or(0));
-            resolved.extend(store(format, [0.8 * k / 4.0; 4]).0);
+            let k = coverage(&t, x, y);
+            defined.push(u8::from(k.is_some()));
+            resolved.extend(store(format, [0.8 * f64::from(k.unwrap_or(0)) / 4.0; 4]).0);
         }
+        let stride = store(format, [0.0; 4]).0.len() / dtype.size();
         plan.add(
             Case::render(
                 &format!("render.msaa4.resolve.{format}"),
@@ -3396,7 +3844,12 @@ fn raw_rendered(plan: &mut Plan, library: &str) {
                     .usage(&["render"]),
             )
             .texture(target("c", format))
-            .output(Output::new("c", dtype, tol.clone()).expect(resolved, tol.clone())),
+            .output(
+                Output::new("c", dtype, tol.clone())
+                    .expect(resolved, tol.clone())
+                    .expect_mask(defined)
+                    .set("stride", stride),
+            ),
         );
 
         // A clear and nothing drawn.
@@ -3419,11 +3872,146 @@ fn raw_rendered(plan: &mut Plan, library: &str) {
     }
 }
 
+/// Extended-range targets the blend unit blends: a result past the codes'
+/// range stores code 1023, and each result its nearest code, as the Mac's.
+fn extended_range_blends(plan: &mut Plan, library: &str) {
+    let mut rng = Random::new(911);
+    let n = (W * H) as usize;
+    for (format, label, blend) in [
+        (
+            "bgr10_xr",
+            "add_one_one",
+            Blend::simple("add", "one", "one"),
+        ),
+        (
+            "bgra10_xr",
+            "over",
+            Blend::simple("add", "source_alpha", "one_minus_source_alpha"),
+        ),
+        (
+            "bgra10_xr_srgb",
+            "over",
+            Blend::simple("add", "source_alpha", "one_minus_source_alpha"),
+        ),
+    ] {
+        let curve = format.ends_with("srgb");
+        // The packed target's codes share a word, so its sources are codes'
+        // values (and values beyond the range), whose sums with 1.0 are codes
+        // again; the others' are any values and their results within a code.
+        let packed = format == "bgr10_xr";
+        let s: Vec<[f64; 4]> = (0..n)
+            .map(|_| {
+                std::array::from_fn(|lane| {
+                    if packed {
+                        f32r(xr_value(&mut rng, false, lane))
+                    } else {
+                        f32r(rng.uniform(0.0, if lane == 3 { 1.0 } else { 1.6 }))
+                    }
+                })
+            })
+            .collect();
+        // 1.0 is a code's value, linear or through the curve.
+        let d = [1.0; 4];
+        let initial: Vec<u8> = (0..n).flat_map(|_| store(format, d).0).collect();
+        let mut expected = vec![];
+        let mut dtype = Dtype::U8;
+        for s in &s {
+            // Apple GPUs blend the output as the target holds it: each color
+            // its nearest code's value, clamped to the codes, alpha in [0, 1].
+            let held: [f64; 4] = std::array::from_fn(|lane| {
+                if lane == 3 {
+                    s[3].clamp(0.0, 1.0)
+                } else {
+                    xr(xr_code(s[lane], curve), curve)
+                }
+            });
+            let (bytes, kind) = store(format, blend.apply(held, held, d, [0.0; 4], false));
+            expected.extend(bytes);
+            dtype = kind;
+        }
+        // A code of the half-word formats is 64 units.
+        let tol = Tolerance::units(if packed { 0.0 } else { 64.0 });
+        let colors = json!({"colors": [{"texture": "c", "blend": blend.json()}]});
+        plan.add(
+            full(
+                &format!("render.blend.{format}.{label}"),
+                library,
+                "frag_color",
+                &s.concat(),
+                colors.clone(),
+            )
+            .texture(target("c", format).data(initial.clone()))
+            .output(Output::new("c", dtype, tol.clone()).expect(expected, tol)),
+        );
+        if curve {
+            continue;
+        }
+        // The same blend read back by a kernel, which sees the texels the
+        // GPU holds rather than the bytes a CPU read converts: each the
+        // value of its code, within the codes' range.
+        let read: Vec<f64> = s
+            .iter()
+            .flat_map(|s| {
+                let held: [f64; 4] = std::array::from_fn(|lane| {
+                    if lane == 3 {
+                        s[3].clamp(0.0, 1.0)
+                    } else {
+                        xr(xr_code(s[lane], false), false)
+                    }
+                });
+                let out = blend.apply(held, held, d, [0.0; 4], false);
+                let alpha = if packed {
+                    1.0
+                } else {
+                    xr(xr_alpha_code(out[3]), false)
+                };
+                [0, 1, 2]
+                    .map(|lane| xr(xr_code(out[lane], false), false))
+                    .into_iter()
+                    .chain([alpha])
+            })
+            .collect();
+        // Half a code, within which a half float holds each code's value,
+        // and a code more where sources are not codes: Apple GPUs blend
+        // them within one.
+        let codes = Tolerance::abs(if packed { 0.5 } else { 1.5 } / 510.0);
+        let mut state = colors;
+        state["vertex_count"] = 3.into();
+        plan.add(
+            Case::sequence(
+                &format!("render.blend.{format}.{label}.read"),
+                library,
+                vec![
+                    Step::render("vert_full", "frag_color", state)
+                        .bind_stage("fragment", &[("colors", 0), ("width", 1)])
+                        .bind_stage("vertex", &[("depth", 2)]),
+                    Step::compute("read_texels", [W, H, 1], [8, 8, 1])
+                        .bind_textures(&[("c", 0)])
+                        .bind(&[("texels", 0)]),
+                ],
+            )
+            .buffer(Buffer::data("colors", 0, f32s(&s.concat())).unbound())
+            .buffer(Buffer::data("width", 0, u32s(&[W])).unbound())
+            .buffer(Buffer::data("depth", 0, f32s(&[0.5])).unbound())
+            .buffer(Buffer::zeroed("texels", 0, (W * H * 16) as usize).unbound())
+            .texture(
+                Texture::d2("c", format, W, H)
+                    .usage(&["render", "read"])
+                    .data(initial),
+            )
+            .output(Output::new("texels", Dtype::F32, codes.clone()).expect(f32s(&read), codes)),
+        );
+    }
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("render", SOURCE, &[], LATEST);
+    extended_range_blends(plan, &library);
     early_fragment_tests(plan, &library);
     interpolation(plan, &library);
     derivatives(plan, &library);
+    branch_derivatives(plan, &library);
+    fragment_simd_layout(plan, &library);
     builtins(plan, &library);
     targets(plan, &library);
     blending(plan, &library);
@@ -3432,6 +4020,7 @@ pub fn build(plan: &mut Plan) {
     multisampling(plan, &library);
     raw_rendered(plan, &library);
     points(plan, &library);
+    lines(plan, &library);
     edges(plan, &library);
     fetch(plan, &library);
     tiles(plan, &library);

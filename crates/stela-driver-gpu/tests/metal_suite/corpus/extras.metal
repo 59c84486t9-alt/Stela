@@ -79,6 +79,15 @@ kernel void read_ms_depth_array(depth2d_ms_array<float> depth [[texture(0)]], de
             depths[((l * h + p.y) * w + p.x) * n + s] = depth.read(p, l, s);
 }
 
+// Each normalized packing of the same values, which sit near rounding ties.
+kernel void pack_ties(device const float4 *in [[buffer(0)]], device uint4 *packed [[buffer(1)]],
+                      uint i [[thread_position_in_grid]])
+{
+    float4 v = in[i];
+    packed[i] = uint4(pack_float_to_unorm4x8(v), pack_float_to_snorm4x8(v),
+                      pack_float_to_unorm2x16(v.xy), pack_float_to_snorm2x16(v.zw));
+}
+
 // Every sample of a multisampled depth texture and of each slice of a
 // multisampled colour array.
 kernel void read_ms(depth2d_ms<float> depth [[texture(0)]], texture2d_ms_array<float> layers [[texture(1)]],

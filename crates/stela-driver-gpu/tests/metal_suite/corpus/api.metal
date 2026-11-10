@@ -132,6 +132,13 @@ fragment float4 frag_flat(Placed in [[stage_in]], constant float4 &color [[buffe
     return color;
 }
 
+// The colour less what the attachment holds, which the function reads.
+fragment float4 frag_flat_less_target(Placed in [[stage_in]], float4 target [[color(0)]],
+                                      constant float4 &color [[buffer(0)]])
+{
+    return color - target;
+}
+
 // The fragment's depth as its colour.
 fragment float4 frag_depth_color(Placed in [[stage_in]])
 {

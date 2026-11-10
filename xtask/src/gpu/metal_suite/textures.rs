@@ -13,9 +13,11 @@ use serde_json::{Value, json};
 
 const SOURCE: &str = "textures.metal";
 
-/// 8-bit filter weights resolve to a 256th of the texel difference.
-fn filter() -> Tolerance {
-    Tolerance::ulp(2.0).with_abs(1.0 / 128.0)
+/// 8-bit filter weights resolve to a 256th of the texel difference, which
+/// in two dimensions is a 128th of the format's `range` of values (2 for
+/// snorm). NVIDIA's texture unit stays within it, at about a 150th.
+fn filter(range: f64) -> Tolerance {
+    Tolerance::ulp(2.0).with_abs(range / 128.0)
 }
 
 pub(super) type Texel = [f64; 4];
@@ -48,6 +50,15 @@ fn signed(q: u64, bits: u32) -> i64 {
 
 fn snorm(q: u64, bits: u32) -> f64 {
     (signed(q, bits) as f64 / ((1u64 << (bits - 1)) - 1) as f64).max(-1.0)
+}
+
+/// A linear value's sRGB encoding, the inverse of [`srgb`].
+fn srgb_encode(v: f64) -> f64 {
+    if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * libm::pow(v, 1.0 / 2.4) - 0.055
+    }
 }
 
 pub fn srgb(c: f64) -> f64 {
@@ -732,18 +743,39 @@ impl Sampler {
         }
     }
 
+    /// Whether the sampler takes nearest texels, whose edges are the
+    /// device's call: a nearest filter, or bicubic's 32-bit float fallback.
     fn nearest(&self) -> bool {
-        self.min == "nearest" || self.mag == "nearest"
+        self.min == "nearest" || self.mag == "nearest" || self.bicubic()
+    }
+
+    /// Whether Metal filters 2D textures through the sampler bicubically,
+    /// as it does when either filter is bicubic.
+    fn bicubic(&self) -> bool {
+        self.min == "bicubic" || self.mag == "bicubic"
     }
 }
 
-/// One mip level of a texture: width, height, depth and texels.
+/// How an M1 Pro (Apple7) filters a format's texels bicubically: as they
+/// are, clamped to a normalized range, or 32-bit float channels not at all,
+/// the nearest texel in their place.
+#[derive(Clone, Copy, PartialEq)]
+enum Bicubic {
+    Float,
+    Unorm,
+    Snorm,
+    Nearest,
+}
+
+/// One mip level of a texture: width, height, depth, texels and their
+/// bicubic filtering.
 #[derive(Clone)]
 struct Level {
     w: i64,
     h: i64,
     d: i64,
     texels: Vec<Texel>,
+    bicubic: Bicubic,
 }
 
 impl Level {
@@ -756,6 +788,42 @@ impl Level {
             (Some(x), Some(y), Some(z)) => self.texels[((z * self.h + y) * self.w + x) as usize],
             _ => s.border_color(),
         }
+    }
+
+    /// The level's bicubic sample at normalized 2D coordinates: Catmull-Rom
+    /// weights (B = 0, C = 1/2) over the sixteen texels about it.
+    fn bicubic(&self, s: &Sampler, u: f64, v: f64) -> Texel {
+        let (x, y) = (u * self.w as f64, v * self.h as f64);
+        if self.bicubic == Bicubic::Nearest {
+            return self.fetch(s, x.floor() as i64, y.floor() as i64, 0);
+        }
+        let weights = |f: f64| {
+            let (f2, f3) = (f * f, f * f * f);
+            [
+                (-f3 + 2.0 * f2 - f) / 2.0,
+                (3.0 * f3 - 5.0 * f2 + 2.0) / 2.0,
+                (-3.0 * f3 + 4.0 * f2 + f) / 2.0,
+                (f3 - f2) / 2.0,
+            ]
+        };
+        let (x, y) = (x - 0.5, y - 0.5);
+        let (x0, y0) = (x.floor() as i64, y.floor() as i64);
+        let (wx, wy) = (weights(x - x.floor()), weights(y - y.floor()));
+        let mut out = [0.0; 4];
+        for (j, wy) in wy.iter().enumerate() {
+            for (i, wx) in wx.iter().enumerate() {
+                let t = self.fetch(s, x0 + i as i64 - 1, y0 + j as i64 - 1, 0);
+                for k in 0..4 {
+                    out[k] += t[k] * wx * wy;
+                }
+            }
+        }
+        let low = match self.bicubic {
+            Bicubic::Unorm => 0.0,
+            Bicubic::Snorm => -1.0,
+            _ => return out,
+        };
+        out.map(|c| c.clamp(low, 1.0))
     }
 
     /// The level's filtered value at normalized coordinates.
@@ -823,8 +891,15 @@ fn sample(levels: &[Level], s: &Sampler, uvw: [f64; 3], lod: f64, dims: u32) -> 
         .max(lo)
         .min(hi)
         .min((levels.len() - 1) as f64);
-    let linear = if lod <= 0.0 { s.mag } else { s.min } == "linear";
-    let at = |l: usize| levels[l].filter(s, linear, uvw[0], uvw[1], uvw[2], dims);
+    // Bicubic filters 2D textures; others filter linearly through it.
+    let linear = s.bicubic() || if lod <= 0.0 { s.mag } else { s.min } == "linear";
+    let at = |l: usize| {
+        if s.bicubic() && dims == 2 {
+            levels[l].bicubic(s, uvw[0], uvw[1])
+        } else {
+            levels[l].filter(s, linear, uvw[0], uvw[1], uvw[2], dims)
+        }
+    };
     match s.mip {
         "none" => at(0),
         "nearest" => at((lod + 0.5).floor() as usize),
@@ -846,7 +921,13 @@ fn sample(levels: &[Level], s: &Sampler, uvw: [f64; 3], lod: f64, dims: u32) -> 
 }
 
 fn level(w: i64, h: i64, texels: Vec<Texel>) -> Level {
-    Level { w, h, d: 1, texels }
+    Level {
+        w,
+        h,
+        d: 1,
+        texels,
+        bicubic: Bicubic::Float,
+    }
 }
 
 fn samplers() -> Vec<Sampler> {
@@ -867,6 +948,18 @@ fn samplers() -> Vec<Sampler> {
     black.border = "opaque_black";
     let mut white = Sampler::new("border.opaque_white", "linear", "clamp_to_border");
     white.border = "opaque_white";
+    // Core Image's icon scaling sets filter 2, which no header names. An M1
+    // Pro's bicubic filter hangs its GPU blending mip levels linearly, and
+    // through mirrored repeat clamps taps at the edges and returns one
+    // texel past them; Stela mirrors.
+    let mut mixed_bicubic = Sampler::new("bicubic.min", "bicubic", "repeat");
+    mixed_bicubic.mag = "nearest";
+    out.extend([
+        Sampler::new("bicubic.repeat", "bicubic", "repeat"),
+        Sampler::new("bicubic.clamp_to_edge", "bicubic", "clamp_to_edge"),
+        Sampler::new("bicubic.clamp_to_border", "bicubic", "clamp_to_border"),
+        mixed_bicubic,
+    ]);
     let mut mixed = Sampler::new("mixed_address", "linear", "repeat");
     mixed.address = ["repeat", "mirror_repeat", "mirror_repeat"];
     let mip = |label: &str, filt, mip| {
@@ -889,6 +982,7 @@ fn samplers() -> Vec<Sampler> {
         mip("mip.nearest", "linear", "nearest"),
         mip("mip.linear", "linear", "linear"),
         mip("mip.nearest_filter", "nearest", "linear"),
+        mip("mip.bicubic", "bicubic", "nearest"),
         clamp,
         min_mag,
     ]);
@@ -923,11 +1017,12 @@ fn near_edge(c: f64, size: i64, margin: f64) -> bool {
 fn sampling(plan: &mut Plan, library: &str) {
     let mut rng = Random::new(71);
     let (w, h, mips) = (16i64, 16i64, 5usize);
-    for name in [
-        "rgba8unorm",
-        "rgba16float",
-        "rgba32float",
-        "rgba8unorm_srgb",
+    for (name, bicubic) in [
+        ("rgba8unorm", Bicubic::Unorm),
+        ("rgba8snorm", Bicubic::Snorm),
+        ("rgba16float", Bicubic::Float),
+        ("rgba32float", Bicubic::Nearest),
+        ("rgba8unorm_srgb", Bicubic::Unorm),
     ] {
         let f = format_named(name);
         let sizes: Vec<(i64, i64)> = (0..mips)
@@ -960,8 +1055,9 @@ fn sampling(plan: &mut Plan, library: &str) {
         let levels: Vec<Level> = sizes
             .iter()
             .zip(&raw)
-            .map(|(&(lw, lh), texels)| {
-                level(lw, lh, texels.iter().map(|t| decode(&f, t)).collect())
+            .map(|(&(lw, lh), texels)| Level {
+                bicubic,
+                ..level(lw, lh, texels.iter().map(|t| decode(&f, t)).collect())
             })
             .collect();
         let data = raw.concat().concat();
@@ -970,12 +1066,19 @@ fn sampling(plan: &mut Plan, library: &str) {
             let nearest = s.min == "nearest" && s.mag == "nearest";
             let points = sample_points(&mut rng, 256, s.nearest(), w, h);
             let mipped = s.mip != "none";
+            // An M1 Pro's bicubic taps of levels under four texels across
+            // read past them, so its bicubic samples stop at 4 x 4.
+            let lod_span = if s.bicubic() {
+                64 * 2 + 16
+            } else {
+                64 * (mips as u32 - 1)
+            };
             let mut lods = vec![0.0; points.len()];
             if mipped {
                 // Off the halfway point where nearest mip selection is the
                 // device's choice.
                 lods = (0..points.len())
-                    .map(|_| f64::from(rng.u32() % (64 * (mips as u32 - 1) + 1)) / 64.0)
+                    .map(|_| f64::from(rng.u32() % (lod_span + 1)) / 64.0)
                     .collect();
                 lods = lods
                     .into_iter()
@@ -994,15 +1097,21 @@ fn sampling(plan: &mut Plan, library: &str) {
                 .flat_map(|(&(u, v), &lod)| sample(&levels, &s, [u, v, 0.0], lod, 2))
                 .map(f32r)
                 .collect();
+            // NVIDIA filters snorm's -128 as -128/127 and clamps only the
+            // result, within the snorm bound (metal-device.md).
             let mut tol = if nearest && !mipped {
                 Tolerance::ulp(1.0)
             } else {
-                filter()
+                filter(if name.contains("snorm") { 2.0 } else { 1.0 })
             };
             if name.contains("srgb") {
+                // Texels decode before they filter, so a filtered value
+                // carries both errors: the decode's at 1.0 adds to the
+                // filter's.
                 let decode = srgb_decode();
-                tol.abs = Some(tol.abs.unwrap_or(0.0).max(decode.abs.unwrap_or(0.0)));
-                tol.rel = Some(tol.rel.unwrap_or(0.0).max(decode.rel.unwrap_or(0.0)));
+                let (abs, rel) = (decode.abs.unwrap_or(0.0), decode.rel.unwrap_or(0.0));
+                tol.abs = Some(tol.abs.map_or(abs, |filtered| filtered + abs + rel));
+                tol.rel = Some(tol.rel.unwrap_or(0.0).max(rel));
             }
             let coords: Vec<f64> = points
                 .iter()
@@ -1089,15 +1198,74 @@ fn forms(plan: &mut Plan, library: &str, rng: &mut Random) {
         })
         .map(f32r)
         .collect();
-    let tol = filter();
+    let tol = filter(1.0);
     plan.add(
         Case::compute1("texture.sample.offset", library, "sample2d_offset", 256)
             .buffer(Buffer::data("coords", 0, f32s(&pts.concat())))
             .buffer(Buffer::zeroed("out", 1, 256 * 16))
-            .output(Output::new("out", Dtype::F32, tol.clone()).expect(f32s(&offset), tol))
+            .output(Output::new("out", Dtype::F32, tol.clone()).expect(f32s(&offset), tol.clone()))
             .texture(tex())
             .sampler(lin.json()),
     );
+    // Bicubic: offsets in level 0's texels, and gradients selecting the
+    // nearest level.
+    let bicubic_levels: Vec<Level> = levels
+        .iter()
+        .map(|l| Level {
+            bicubic: Bicubic::Unorm,
+            ..l.clone()
+        })
+        .collect();
+    let bicubic_flat = Sampler::new("bicubic", "bicubic", "repeat");
+    let offset: Vec<f64> = pts
+        .iter()
+        .flat_map(|p| {
+            let at = [p[0] - 2.0 / 16.0, p[1] + 3.0 / 16.0, 0.0];
+            sample(&bicubic_levels, &bicubic_flat, at, 0.0, 2)
+        })
+        .map(f32r)
+        .collect();
+    plan.add(
+        Case::compute1(
+            "texture.sample.offset.bicubic",
+            library,
+            "sample2d_offset",
+            256,
+        )
+        .buffer(Buffer::data("coords", 0, f32s(&pts.concat())))
+        .buffer(Buffer::zeroed("out", 1, 256 * 16))
+        .output(Output::new("out", Dtype::F32, tol.clone()).expect(f32s(&offset), tol.clone()))
+        .texture(tex())
+        .sampler(bicubic_flat.json()),
+    );
+    let mut bicubic_mips = bicubic_flat.clone();
+    bicubic_mips.mip = "nearest";
+    let mut coords = vec![];
+    let mut expected = vec![];
+    for p in &pts {
+        // Levels of four texels across and more (see `samplers`).
+        let lod = lattice(p[3] * 0.8);
+        let dx = f32r(2f64.powf(lod) / 16.0);
+        let dy = f32r(dx * 2f64.powf(-2.0 * p[2]));
+        coords.extend([p[0], p[1], dx, dy]);
+        let at = [p[0], p[1], 0.0];
+        expected.extend(sample(&bicubic_levels, &bicubic_mips, at, lod, 2).map(f32r));
+    }
+    if plan.has(SOURCE, "sample2d_grad") {
+        plan.add(
+            Case::compute1(
+                "texture.sample.gradient.bicubic",
+                library,
+                "sample2d_grad",
+                256,
+            )
+            .buffer(Buffer::data("coords", 0, f32s(&coords)))
+            .buffer(Buffer::zeroed("out", 1, 256 * 16))
+            .output(Output::new("out", Dtype::F32, tol.clone()).expect(f32s(&expected), tol))
+            .texture(tex())
+            .sampler(bicubic_mips.json()),
+        );
+    }
     // gradient2d(dPdx = (c.z, 0), dPdy = (0, c.w)): the level of detail is
     // log2 of the longer gradient in texels.
     let mut coords = vec![];
@@ -1194,6 +1362,7 @@ fn forms(plan: &mut Plan, library: &str, rng: &mut Random) {
     }
     let mut flat = lin.clone();
     flat.mip = "none";
+    let bicubic = Sampler::new("bicubic", "bicubic", "repeat");
     for (kind, function, (width, height, depth, array), count) in [
         (
             "2d_array",
@@ -1220,76 +1389,84 @@ fn forms(plan: &mut Plan, library: &str, rng: &mut Random) {
         if kind == "3d" {
             pts.iter_mut().for_each(|p| p[3] = 0.0);
         }
-        let mut expected = vec![];
-        let mut mask = vec![];
-        for p in &pts {
-            let (texel, defined) = match kind {
-                "2d_array" => {
-                    let slice = p[3] as usize * 64;
-                    (
+        // Bicubic filters 2D arrays; 3D, cube and 1D textures filter
+        // linearly through it.
+        for (suffix, sampler) in [("", &flat), (".bicubic", &bicubic)] {
+            let mut expected = vec![];
+            let mut mask = vec![];
+            for p in &pts {
+                let (texel, defined) = match kind {
+                    "2d_array" => {
+                        let slice = p[3] as usize * 64;
+                        (
+                            sample(
+                                &[Level {
+                                    bicubic: Bicubic::Unorm,
+                                    ..level(8, 8, decoded[slice..slice + 64].to_vec())
+                                }],
+                                sampler,
+                                [p[0], p[1], 0.0],
+                                0.0,
+                                2,
+                            ),
+                            true,
+                        )
+                    }
+                    "3d" => {
+                        let volume = Level {
+                            w: 8,
+                            h: 8,
+                            d: 8,
+                            texels: decoded.clone(),
+                            bicubic: Bicubic::Float,
+                        };
+                        (sample(&[volume], sampler, [p[0], p[1], p[2]], 0.0, 3), true)
+                    }
+                    "cube" => cube(&decoded, width, [p[0], p[1], p[2]]),
+                    _ => (
                         sample(
-                            &[level(8, 8, decoded[slice..slice + 64].to_vec())],
-                            &flat,
-                            [p[0], p[1], 0.0],
+                            &[level(64, 1, decoded.clone())],
+                            sampler,
+                            [p[0], 0.0, 0.0],
                             0.0,
-                            2,
+                            1,
                         ),
                         true,
-                    )
-                }
-                "3d" => {
-                    let volume = Level {
-                        w: 8,
-                        h: 8,
-                        d: 8,
-                        texels: decoded.clone(),
-                    };
-                    (sample(&[volume], &flat, [p[0], p[1], p[2]], 0.0, 3), true)
-                }
-                "cube" => cube(&decoded, width, [p[0], p[1], p[2]]),
-                _ => (
-                    sample(
-                        &[level(64, 1, decoded.clone())],
-                        &flat,
-                        [p[0], 0.0, 0.0],
-                        0.0,
-                        1,
                     ),
-                    true,
-                ),
-            };
-            expected.extend(texel.map(f32r));
-            mask.push(u8::from(defined));
-        }
-        let tol = filter();
-        plan.add(
-            Case::compute1(
-                &format!("texture.sample.type_{kind}"),
-                library,
-                function,
-                256,
-            )
-            .buffer(Buffer::data("coords", 0, f32s(&pts.concat())))
-            .buffer(Buffer::zeroed("out", 1, 256 * 16))
-            .output(
-                Output::new("out", Dtype::F32, tol.clone())
-                    .expect(f32s(&expected), tol)
-                    .expect_mask(mask)
-                    .set("stride", 4),
-            )
-            .texture(
-                Texture::new(
-                    "t",
-                    "rgba8unorm",
-                    kind,
-                    [width as u32, height as u32, depth as u32],
+                };
+                expected.extend(texel.map(f32r));
+                mask.push(u8::from(defined));
+            }
+            let tol = filter(1.0);
+            plan.add(
+                Case::compute1(
+                    &format!("texture.sample.type_{kind}{suffix}"),
+                    library,
+                    function,
+                    256,
                 )
-                .index(0)
-                .array(array)
-                .data(texels.concat()),
-            )
-            .sampler(flat.json()),
-        );
+                .buffer(Buffer::data("coords", 0, f32s(&pts.concat())))
+                .buffer(Buffer::zeroed("out", 1, 256 * 16))
+                .output(
+                    Output::new("out", Dtype::F32, tol.clone())
+                        .expect(f32s(&expected), tol)
+                        .expect_mask(mask)
+                        .set("stride", 4),
+                )
+                .texture(
+                    Texture::new(
+                        "t",
+                        "rgba8unorm",
+                        kind,
+                        [width as u32, height as u32, depth as u32],
+                    )
+                    .index(0)
+                    .array(array)
+                    .data(texels.concat()),
+                )
+                .sampler(sampler.json()),
+            );
+        }
     }
     // Samplers the shader declares: nearest repeat, linear mirrored repeat,
     // linear clamp at pixel coordinates, and nearest clamp to an opaque
@@ -1325,7 +1502,7 @@ fn forms(plan: &mut Plan, library: &str, rng: &mut Random) {
             mask.push(u8::from(exact));
         }
     }
-    let tol = filter();
+    let tol = filter(1.0);
     plan.add(
         Case::compute1(
             "texture.sample.constexpr_samplers",
@@ -1485,7 +1662,7 @@ fn gathers(plan: &mut Plan, library: &str, rng: &mut Random) {
         );
         coords.extend([u, v, r, 0.0]);
     }
-    let tol = filter();
+    let tol = filter(1.0);
     plan.add(
         Case::compute1(
             "texture.sample_compare.linear",
@@ -1555,6 +1732,15 @@ fn encode(name: &str, values: &[f64]) -> Vec<u8> {
     if name.ends_with("8unorm") {
         v.iter()
             .map(|&x| (x.clamp(0.0, 1.0) * 255.0).round() as u8)
+            .collect()
+    } else if name.ends_with("8unorm_srgb") {
+        // Alpha stays linear.
+        v.iter()
+            .enumerate()
+            .map(|(lane, &x)| {
+                let x = x.clamp(0.0, 1.0);
+                (if lane < 3 { srgb_encode(x) } else { x } * 255.0).round() as u8
+            })
             .collect()
     } else if name.ends_with("16float") {
         floats(Dtype::F16, v)
@@ -1652,6 +1838,11 @@ fn writes(plan: &mut Plan, library: &str) {
         "rgba8snorm",
         "rgba8sint",
         "bgra8unorm",
+        // Apple GPUs encode sRGB as they write; texels decoded from their
+        // bytes encode to the same bytes.
+        "r8unorm_srgb",
+        "rgba8unorm_srgb",
+        "bgra8unorm_srgb",
         "rgb10a2unorm",
         "rgb10a2uint",
         "rg32uint",
@@ -1772,6 +1963,25 @@ fn writes(plan: &mut Plan, library: &str) {
             )
             .requires(&[], &["read_write_textures_tier2"]),
         );
+        // A texture made to be read and rendered to, which Core Animation's
+        // compute passes write: Apple GPUs keep a kernel's writes to it.
+        plan.add(
+            Case::compute(
+                "texture.read_write.rgba32float.render_usage",
+                library,
+                "read_write",
+                [w, h, 1],
+                [8, 8, 1],
+            )
+            .dispatch_threads()
+            .output(Output::new("t", Dtype::F32, Tolerance::default()).expect_same(f32s(&expected)))
+            .texture(
+                t2d("t", "rgba32float", w, h)
+                    .usage(&["read", "render"])
+                    .data(f32s(&values)),
+            )
+            .requires(&[], &["read_write_textures_tier2"]),
+        );
     }
     if plan.has(SOURCE, "read_write") {
         read_write_formats(plan, library, &mut rng);
@@ -1810,6 +2020,8 @@ fn read_write_formats(plan: &mut Plan, library: &str, rng: &mut Random) {
     for (name, lanes, kind) in [
         ("rgba16float", 4, Kind::Float),
         ("rgba8unorm", 4, Kind::Float),
+        // Read decodes the sRGB texels, write encodes them.
+        ("rgba8unorm_srgb", 4, Kind::Float),
         ("r32float", 1, Kind::Float),
         ("r16float", 1, Kind::Float),
         ("r8unorm", 1, Kind::Float),
@@ -2440,7 +2652,7 @@ fn variants(plan: &mut Plan, library: &str, rng: &mut Random) {
         .iter()
         .flat_map(|&(x, s)| [x, 0.0, 0.0, s as f64])
         .collect();
-    let tol = filter();
+    let tol = filter(1.0);
     plan.add(
         Case::compute1(
             "texture.sample.type_1d_array",

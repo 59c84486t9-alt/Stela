@@ -869,6 +869,27 @@ fn imageblocks(plan: &mut Plan, library: &str) {
             ),
         );
     }
+    if plan.has(SOURCE, "imageblock_unsized_slice") {
+        // Without the encoder's dimensions the block is 0 x 0 on Apple GPUs,
+        // and a slice of its own size writes nothing.
+        let expected = vec![0; 16 * 16 * 8];
+        plan.add(
+            Case::compute(
+                "compute.imageblock.unsized_slice",
+                library,
+                "imageblock_unsized_slice",
+                [16, 16, 1],
+                [8, 8, 1],
+            )
+            .output(Output::new("t", Dtype::U8, Tolerance::exact()).expect_same(expected))
+            .texture(
+                Texture::d2("t", "rgba16float", 16, 16)
+                    .index(0)
+                    .usage(&["read", "write"])
+                    .data(vec![0; 16 * 16 * 8]),
+            ),
+        );
+    }
     if plan.has(SOURCE, "imageblock_dimensions") {
         // Apple GPUs give a kernel's imageblock no dimensions of their own:
         // without the encoder's it is 0 x 0, not the threadgroup's size.
@@ -890,6 +911,38 @@ fn imageblocks(plan: &mut Plan, library: &str) {
                 case = case.set("imageblock", json!(size));
             }
             plan.add(case);
+        }
+        // An indirect compute command's own dimensions, or 0 x 0 without
+        // them.
+        for (name, size) in [("unsized", None), ("sized", Some([16, 8]))] {
+            let mut command = json!({"function": "imageblock_dimensions",
+                                     "buffers": [{"name": "out", "index": 0, "offset": 0}],
+                                     "threadgroups": [1], "threadgroup": [16, 16]});
+            if let Some(size) = size {
+                command["imageblock"] = json!(size);
+            }
+            plan.add(
+                Case::compute(
+                    &format!("compute.imageblock.dimensions.indirect.{name}"),
+                    library,
+                    "imageblock_dimensions",
+                    [1, 1, 1],
+                    [16, 16, 1],
+                )
+                .set("supports_icb", true)
+                .set("execute_icb", json!({"icb": "icb", "count": 1}))
+                .set(
+                    "icbs",
+                    json!([{"name": "icb", "type": "dispatch", "count": 1, "max_buffers": 1,
+                            "commands": [command]}]),
+                )
+                .buffer(Buffer::zeroed("out", 0, 8))
+                .output(Output::exact(
+                    "out",
+                    Dtype::U32,
+                    u32s(&size.unwrap_or([0, 0])),
+                )),
+            );
         }
     }
     if plan.has(SOURCE, "imageblock_member") {

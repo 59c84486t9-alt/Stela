@@ -335,6 +335,23 @@ kernel void imageblock_tiles(imageblock<ImageblockPixel, imageblock_layout_expli
 }
 #endif
 
+#ifndef SKIP_imageblock_unsized_slice
+// A slice of an explicit size from an imageblock the encoder gives no
+// dimensions, written where the threadgroup's tile lies, as Core Animation's
+// blur kernels write theirs: the 0 x 0 block holds none of it.
+kernel void imageblock_unsized_slice(imageblock<ImageblockPixel, imageblock_layout_explicit> block,
+                                     texture2d<half, access::write> out [[texture(0)]],
+                                     ushort2 tid [[thread_position_in_threadgroup]],
+                                     ushort2 group [[threadgroup_position_in_grid]])
+{
+    threadgroup_imageblock ImageblockPixel *p = block.data(tid);
+    p->color = half4(half(tid.x) / 8, half(tid.y) / 8, half(group.x) / 2 + half(group.y) / 4, 1);
+    threadgroup_barrier(mem_flags::mem_threadgroup_imageblock);
+    if (tid.x == 0 && tid.y == 0)
+        out.write(block.slice(block.data(ushort2(0))->color, ushort2(8, 8)), group * ushort2(8, 8));
+}
+#endif
+
 #ifndef SKIP_imageblock_dimensions
 // An explicit imageblock's dimensions: the encoder's, or 0 x 0 without them.
 struct ImageblockSample { half4 color; };

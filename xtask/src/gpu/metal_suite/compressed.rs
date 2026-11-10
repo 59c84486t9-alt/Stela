@@ -815,6 +815,73 @@ fn astc_cases(plan: &mut Plan, library: &str, rng: &mut Random) {
     }
 }
 
+/// ASTC HDR textures, compared with Apple's decode, which matches the
+/// Khronos one with NaN as the error color and UNORM16 channels truncated
+/// to halves: one-partition blocks of common modes in each endpoint mode,
+/// HDR ones twice as often, blocks of up to four partitions, HDR and LDR
+/// void extents, and random blocks.
+fn astc_hdr_cases(plan: &mut Plan, library: &str, rng: &mut Random) {
+    const MODES: [u32; 12] = [
+        0x0042, 0x0053, 0x0063, 0x0102, 0x0142, 0x0182, 0x0242, 0x0442, 0x0542, 0x0843, 0x0101,
+        0x0151,
+    ];
+    const HDR: [u32; 8] = [2, 3, 7, 11, 14, 15, 7, 11];
+    let (columns, rows) = (8, 8);
+    for (i, (bw, bh)) in [(4, 4), (6, 6), (8, 8), (12, 12)].into_iter().enumerate() {
+        let name = format!("astc_{bw}x{bh}_hdr");
+        let mut blocks = Vec::new();
+        for index in 0..columns * rows {
+            let mut words: [u32; 4] = std::array::from_fn(|_| rng.u32());
+            let mode = MODES[rng.u32() as usize % MODES.len()];
+            let single = |cem: u32| cem << 13 | mode;
+            match index % 32 {
+                kind @ 0..=15 => words[0] = (words[0] & !0x1ffff) | single(kind),
+                kind @ 16..=23 => {
+                    words[0] = (words[0] & !0x1ffff) | single(HDR[kind as usize - 16])
+                }
+                24..=27 => words[0] = (words[0] & !0x7ff) | mode,
+                kind @ (28 | 29) => {
+                    // Void extents: HDR halves, then UNORM16.
+                    words[0] = if kind == 28 { 0xffff_fffc } else { 0xffff_fdfc };
+                    words[1] = u32::MAX;
+                    words[2] = (words[2] & 0x3bff_3bff) | 0x0400_0400;
+                    words[3] = (words[3] & 0x3bff_3bff) | 0x0400_0400;
+                }
+                _ => {}
+            }
+            blocks.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+        }
+        let (width, height) = (columns * bw, rows * bh);
+        let points: Vec<u32> = (0..width * height)
+            .flat_map(|i| [i % width, i / width, 0, 0])
+            .collect();
+        plan.add(
+            Case::compute1(
+                &format!("texture.compressed.{name}"),
+                library,
+                "read2d_float",
+                width * height,
+            )
+            .requires(&["apple6"], &[])
+            .buffer(Buffer::data(
+                "coords",
+                0,
+                points.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            ))
+            .buffer(Buffer::zeroed("out", 1, (width * height * 16) as usize))
+            .output(Output::new(
+                "out",
+                Dtype::F32,
+                Tolerance::exact().with_ftz(false),
+            ))
+            .texture(storage(
+                Texture::d2("t", &name, width, height).index(0).data(blocks),
+                i % 2 == 0,
+            )),
+        );
+    }
+}
+
 /// Shared textures receive their blocks from the CPU, private ones from a
 /// blit: half the ETC2 and EAC formats take each way.
 fn storage(texture: Texture, shared: bool) -> Texture {
@@ -828,6 +895,7 @@ fn storage(texture: Texture, shared: bool) -> Texture {
 pub fn build(plan: &mut Plan, library: &str) {
     pvrtc_cases(plan, library, &mut Random::new(4094));
     astc_cases(plan, library, &mut Random::new(4095));
+    astc_hdr_cases(plan, library, &mut Random::new(4096));
     let mut rng = Random::new(4093);
     let (w, h) = (8u32, 8u32);
     for f in formats() {

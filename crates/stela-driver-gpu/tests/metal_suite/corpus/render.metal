@@ -107,8 +107,40 @@ fragment float4 frag_deriv(Plain in [[stage_in]])
     case 8: { half2 q = half2(in.a.xy); return float4(float2(dfdx(q)), float2(fwidth(q))); }
     case 9: return float4(dfdx(in.p.x), dfdy(in.p.y), fwidth(in.p.z), in.p.w);
     case 10: { float d = fwidth(u + v); if (uint(in.position.x) & 1) discard_fragment(); return float4(d); }
+    case 12: {
+        // Derivatives in a branch only some of a quad's pixels take, of a
+        // value all of them computed before it.
+        float w = u * u;
+        if ((uint(in.position.x) + uint(in.position.y)) % 3 == 0)
+            return float4(0);
+        return float4(dfdx(w), dfdy(w), fwidth(w), w);
+    }
     default: { float s = sin(u * 3.0f) * v; return float4(dfdx(s), dfdy(s), fwidth(s), s); }
     }
+}
+
+// A derivative in a branch some of a quad's pixels skip, of a value the
+// branch computes from an interpolant and a constant buffer, which Apple
+// GPUs take from every pixel of the quad (case 0); and a biased sample whose
+// coordinates the buffer scales (otherwise). Apple leaves the derivatives of
+// texels, of longer computations and implicit levels in such a branch
+// undefined in the pixels that skip it.
+struct DerivUniforms {
+    float scale;
+    float lod_scale;
+    float bias;
+};
+
+fragment float4 frag_deriv_branch(Plain in [[stage_in]], constant DerivUniforms *k [[buffer(0)]],
+                                  texture2d<float> levels [[texture(0)]], sampler s [[sampler(0)]])
+{
+    if (which != 0)
+        return levels.sample(s, in.position.xy * k->lod_scale, bias(k->bias));
+    float u = in.a.x;
+    if ((uint(in.position.x) + uint(in.position.y)) % 3 == 0)
+        return float4(0);
+    float w = u * u * k->scale;
+    return float4(dfdx(w), dfdy(w), fwidth(w), w);
 }
 
 fragment float4 frag_position(Plain in [[stage_in]])
@@ -136,6 +168,13 @@ fragment float4 frag_one(Plain in [[stage_in]])
 fragment float4 frag_attribute(Plain in [[stage_in]])
 {
     return in.p;
+}
+
+// A 2D float texture's texels, row by row.
+kernel void read_texels(texture2d<float, access::read> t [[texture(0)]], device float4 *out [[buffer(0)]],
+                        uint2 p [[thread_position_in_grid]], uint2 n [[threads_per_grid]])
+{
+    out[p.y * n.x + p.x] = t.read(p);
 }
 
 // Window-filling triangle; per-pixel data from buffer 0.
@@ -302,6 +341,12 @@ vertex Point vert_point(uint v [[vertex_id]], device const float4 *pos [[buffer(
 fragment float4 frag_point(Point in [[stage_in]], float2 coord [[point_coord]])
 {
     return float4(coord, 0.0f, 1.0f);
+}
+
+// The pixels a point covers.
+fragment float4 frag_point_cover(Point in [[stage_in]])
+{
+    return float4(1.0f);
 }
 
 // Vertex fetch: each vertex stores its attributes, rasterization off.
@@ -602,6 +647,26 @@ kernel void tile_recall(imageblock<TileColor, imageblock_layout_implicit> block,
 }
 
 // The tile's dimensions and the grid of tiles, at the tile's pixels.
+/* Where an Apple GPU places a tile function's threads: each one's SIMD
+ * lane and index in the threadgroup, its quad index, and the positions its
+ * quad neighbors hold, where they exist. */
+kernel void tile_lanes(imageblock<TileColor, imageblock_layout_implicit> block,
+                       device uint4 *out [[buffer(0)]],
+                       ushort2 p [[thread_position_in_threadgroup]],
+                       ushort2 tpt [[threads_per_threadgroup]],
+                       ushort lane [[thread_index_in_simdgroup]],
+                       ushort simd [[simdgroup_index_in_threadgroup]],
+                       ushort index [[thread_index_in_threadgroup]],
+                       ushort quad [[thread_index_in_quadgroup]],
+                       ushort2 tile [[threadgroup_position_in_grid]])
+{
+    ushort2 across = quad_shuffle_xor(p, 1), down = quad_shuffle_xor(p, 2);
+    uint first = (p.x ^ 1u) < tpt.x ? uint(across.x) | uint(across.y) << 8 | 1u << 16 : 0u;
+    uint second = (p.y ^ 1u) < tpt.y ? uint(down.x) | uint(down.y) << 8 | 1u << 16 : 0u;
+    if (all(tile == 0))
+        out[p.y * 32 + p.x] = uint4(uint(simd) * 32u + lane, uint(index) | uint(quad) << 16, first, second);
+}
+
 kernel void tile_dimensions(imageblock<TileColor, imageblock_layout_implicit> block,
                             ushort2 tid [[thread_position_in_threadgroup]],
                             ushort2 tpt [[threads_per_threadgroup]],
@@ -695,4 +760,23 @@ kernel void tile_call(imageblock<TileColor, imageblock_layout_implicit> block,
             block.write(v, p);
         }
     }
+}
+
+// Which pixels share a SIMD-group: each pixel's lane, the index of the
+// pixel in lane 0, the active lanes and the group's width.
+fragment float4 frag_simd_layout(Plain in [[stage_in]], uint lane [[thread_index_in_simdgroup]],
+                                 uint width [[threads_per_simdgroup]])
+{
+    uint pixel = uint(in.position.x) + uint(in.position.y) * 1024u;
+    return float4(float(lane), float(simd_broadcast(pixel, 0)), float(simd_sum(1u)), float(width));
+}
+
+// A fragment's quad through SIMD-group shuffles: its lane in the quad, the
+// pixels across (lane ^ 1) and below or above (lane ^ 2), and the quad's
+// last pixel by its lane index.
+fragment float4 frag_simd_quads(Plain in [[stage_in]], uint lane [[thread_index_in_simdgroup]])
+{
+    uint pixel = uint(in.position.x) + uint(in.position.y) * 1024u;
+    return float4(float(lane & 3u), float(simd_shuffle_xor(pixel, 1u)), float(simd_shuffle_xor(pixel, 2u)),
+                  float(simd_shuffle(pixel, ushort(lane | 3u))));
 }

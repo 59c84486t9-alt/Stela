@@ -156,6 +156,330 @@ fn iosurface(plan: &mut Plan, library: &str, rng: &mut Random) {
     );
 }
 
+/// Surfaces of Apple's private two-plane RGB formats (540, 541 and 542 for
+/// 4:2:0, 4:2:2 and 4:4:4): green bytes in the first plane, blue and red
+/// pairs in the second. A kernel reads each texel and samples each at its
+/// centre; both give the second plane filtered linearly at its own
+/// resolution there, so a read of a subsampled plane blends its texels.
+fn two_plane(plan: &mut Plan, library: &str, rng: &mut Random) {
+    let (w, h) = (16usize, 8usize);
+    let formats = [
+        ("420", 540, 2, 2),
+        ("422", 541, 2, 1),
+        ("444", 542, 1, 1),
+        ("ycbcr_420", 500, 2, 2),
+        ("ycbcr_422", 502, 2, 1),
+        ("ycbcr_444", 503, 1, 1),
+    ];
+    // YCbCr cases draw from their own stream, leaving later cases' inputs.
+    let mut own = Random::new(500);
+    for (name, format, across, down) in formats {
+        let ycbcr = format < 540;
+        let source = if ycbcr { &mut own } else { &mut *rng };
+        let (cw, ch) = (w / across, h / down);
+        let green: Vec<u8> = (0..w * h).map(|_| source.u32() as u8).collect();
+        let pairs: Vec<u8> = (0..cw * ch * 2).map(|_| source.u32() as u8).collect();
+        let pack = |[r, g, b]: [f64; 3]| {
+            let unorm = |v: f64| (v.round() as u32).min(255);
+            unorm(r) | unorm(g) << 8 | unorm(b) << 16 | 255 << 24
+        };
+        // The first plane's value and the second's two, in whole steps, as
+        // RGB: a YCbCr texel through full-range BT.601, its chroma scaled
+        // by 255 / 256 as Apple GPUs scale it.
+        let rgb = |first: f64, second: [f64; 2]| {
+            if !ycbcr {
+                return [second[1], first, second[0]];
+            }
+            let [cb, cr] = second.map(|c| (c - 128.0) * 255.0 / 256.0);
+            [
+                first + 1.402 * cr,
+                first - 0.344136 * cb - 0.714136 * cr,
+                first + 1.772 * cb,
+            ]
+            .map(|v| v.clamp(0.0, 255.0))
+        };
+        let pair = |x: usize, y: usize, c: usize| f64::from(pairs[(y * cw + x) * 2 + c]);
+        // A clamped linear tap's texels and the second's weight along one axis.
+        let taps = |p: usize, n: usize, size: usize| {
+            let u = (p as f64 + 0.5) * size as f64 / n as f64 - 0.5;
+            let first = u.floor();
+            let clamp = |i: f64| i.clamp(0.0, size as f64 - 1.0) as usize;
+            (clamp(first), clamp(first + 1.0), u - first)
+        };
+        let mut read = Vec::new();
+        let mut sampled = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let g = f64::from(green[y * w + x]);
+                let (x0, x1, fx) = taps(x, w, cw);
+                let (y0, y1, fy) = taps(y, h, ch);
+                let filter = |c| {
+                    let row = |y| pair(x0, y, c) * (1.0 - fx) + pair(x1, y, c) * fx;
+                    row(y0) * (1.0 - fy) + row(y1) * fy
+                };
+                // Apple GPUs upsample a subsampled plane to whole values,
+                // rounding halves up; sampling keeps the fraction.
+                let filtered = [filter(0), filter(1)];
+                read.push(pack(rgb(g, filtered.map(f64::round))));
+                sampled.push(pack(rgb(g, filtered)));
+            }
+        }
+        // Luma and chroma convert in hardware to within half a step.
+        let read = if ycbcr {
+            Output::new("read", Dtype::U8, Tolerance::units(1.0)).expect_same(u32s(&read))
+        } else {
+            Output::exact("read", Dtype::U32, u32s(&read))
+        };
+        plan.add(
+            Case::host(
+                &format!("host.iosurface.two_plane_{name}"),
+                library,
+                json!({"kind": "two_plane", "format": format, "width": w, "height": h,
+                       "across": across, "down": down}),
+            )
+            .buffer(Buffer::data("green", 0, green).unbound())
+            .buffer(Buffer::data("blue_red", 0, pairs).unbound())
+            .buffer(Buffer::zeroed("read", 0, w * h * 4).unbound())
+            .buffer(Buffer::zeroed("sampled", 0, w * h * 4).unbound())
+            .output(read)
+            .output(
+                Output::new("sampled", Dtype::U8, Tolerance::units(1.0))
+                    .expect_same(u32s(&sampled)),
+            ),
+        );
+    }
+}
+
+/// Surfaces of Apple's 10-bit two-plane formats (505-507 YCbCr and 543-545
+/// RGB for 4:2:0, 4:2:2 and 4:4:4), each component the high 10 bits of a
+/// 16-bit word, whose low 6 bits shaders ignore, read as floats. As
+/// measured on an M1 Pro: a read gives the second plane filtered linearly
+/// at the texel centre and rounded to whole steps, halves up; RGB reads
+/// are those steps over 1023. YCbCr converts through BT.601 in the range
+/// the surface's pixel format names, not the Metal format: full for
+/// '444f' (luma over 1023, chroma (C - 512) / 1024, as the 8-bit formats'
+/// (C - 128) / 256) and video for 'x420' and '420v' (luma (Y - 64) / 876,
+/// chroma (C - 512) / 896, in 8-bit steps a quarter of those), rounded to
+/// 1/2048 and clamped. The 8-bit 500 over a '420v' surface is here too,
+/// since its range also follows the surface. A linear sample at the
+/// centre agrees with the read to within a step of each component, as
+/// the conversion scales it: filtering keeps the fraction, and Stela's
+/// samples also take the share of a step the words' low bits hold.
+fn two_plane_ten_bit(plan: &mut Plan, library: &str, rng: &mut Random) {
+    let (w, h) = (16usize, 8usize);
+    // Name, format, subsampling, bits and the surface's pixel format.
+    let formats = [
+        ("rgb10_420", 543, 2, 2, 10, "444f"),
+        ("rgb10_422", 544, 2, 1, 10, "444f"),
+        ("rgb10_444", 545, 1, 1, 10, "444f"),
+        ("ycbcr10_420", 505, 2, 2, 10, "444f"),
+        ("ycbcr10_422", 506, 2, 1, 10, "444f"),
+        ("ycbcr10_444", 507, 1, 1, 10, "444f"),
+        ("ycbcr10_420_video", 505, 2, 2, 10, "x420"),
+        ("ycbcr_420_video", 500, 2, 2, 8, "420v"),
+    ];
+    for (name, format, across, down, bits, fourcc) in formats {
+        let ycbcr = format < 540;
+        let video = fourcc != "444f";
+        let wide = bits == 10;
+        let (cw, ch) = (w / across, h / down);
+        let max = f64::from((1u32 << bits) - 1);
+        // A component's step: the high 10 bits of a word whose low ones
+        // hold noise, or a byte.
+        let mut component = || {
+            let random = rng.u32();
+            if wide {
+                (random & 0x3ff) << 6 | random >> 26
+            } else {
+                random & 0xff
+            }
+        };
+        let green: Vec<u32> = (0..w * h).map(|_| component()).collect();
+        let pairs: Vec<u32> = (0..cw * ch * 2).map(|_| component()).collect();
+        let step = |value: u32| f64::from(if wide { value >> 6 } else { value });
+        let pair = |x: usize, y: usize, c: usize| step(pairs[(y * cw + x) * 2 + c]);
+        let taps = |p: usize, n: usize, size: usize| {
+            let u = (p as f64 + 0.5) * size as f64 / n as f64 - 0.5;
+            let first = u.floor();
+            let clamp = |i: f64| i.clamp(0.0, size as f64 - 1.0) as usize;
+            (clamp(first), clamp(first + 1.0), u - first)
+        };
+        let scale = (max + 1.0) / 256.0;
+        let rgba = |first: f64, [b, r]: [f64; 2]| {
+            if !ycbcr {
+                return [r / max, first / max, b / max, 1.0];
+            }
+            let half = (max + 1.0) / 2.0;
+            let (y, [cb, cr]) = if video {
+                (
+                    (first - 16.0 * scale) / (219.0 * scale),
+                    [b, r].map(|c| (c - half) / (224.0 * scale)),
+                )
+            } else {
+                (first / max, [b, r].map(|c| (c - half) / (max + 1.0)))
+            };
+            let quantized = |v: f64| (v.clamp(0.0, 1.0) * 2048.0).round() / 2048.0;
+            [
+                quantized(y + 1.402 * cr),
+                quantized(y - 0.344136 * cb - 0.714136 * cr),
+                quantized(y + 1.772 * cb),
+                1.0,
+            ]
+        };
+        let mut read = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let (x0, x1, fx) = taps(x, w, cw);
+                let (y0, y1, fy) = taps(y, h, ch);
+                let filter = |c| {
+                    let row = |y| pair(x0, y, c) * (1.0 - fx) + pair(x1, y, c) * fx;
+                    (row(y0) * (1.0 - fy) + row(y1) * fy + 0.5).floor()
+                };
+                read.extend(rgba(step(green[y * w + x]), [filter(0), filter(1)]));
+            }
+        }
+        // Half a step, and for YCbCr two of the conversion's 1/2048 more.
+        let step_tolerance = 0.5 / max;
+        let tolerance = if ycbcr {
+            step_tolerance + 2.0 / 2048.0
+        } else {
+            step_tolerance
+        };
+        // A step of each component in the result: a luma step with a
+        // chroma step through blue's 1.772, the largest coefficient.
+        let filtered_step = if !ycbcr {
+            1.0 / max
+        } else if video {
+            1.0 / (219.0 * scale) + 1.772 / (224.0 * scale)
+        } else {
+            1.0 / max + 1.772 / (max + 1.0)
+        };
+        let elements = |values: &[u32]| -> Vec<u8> {
+            values
+                .iter()
+                .flat_map(|&value| {
+                    if wide {
+                        (value as u16).to_le_bytes().to_vec()
+                    } else {
+                        vec![value as u8]
+                    }
+                })
+                .collect()
+        };
+        plan.add(
+            Case::host(
+                &format!("host.iosurface.two_plane_{name}"),
+                library,
+                json!({"kind": "two_plane", "format": format, "width": w, "height": h,
+                       "across": across, "down": down, "bytes": if wide { 2 } else { 1 },
+                       "wide": 1, "fourcc": fourcc}),
+            )
+            .buffer(Buffer::data("green", 0, elements(&green)).unbound())
+            .buffer(Buffer::data("blue_red", 0, elements(&pairs)).unbound())
+            .buffer(Buffer::zeroed("read", 0, w * h * 16).unbound())
+            .buffer(Buffer::zeroed("sampled", 0, w * h * 16).unbound())
+            .output(
+                Output::new("read", Dtype::F32, Tolerance::abs(tolerance)).expect_same(f32s(&read)),
+            )
+            .output(
+                Output::new(
+                    "sampled",
+                    Dtype::F32,
+                    Tolerance::abs(tolerance + filtered_step),
+                )
+                .expect_same(f32s(&read)),
+            ),
+        );
+    }
+}
+
+/// A 4:4:4 two-plane format's planes of an RGB color, in whole steps:
+/// green and blue-red, or full-range BT.601 luma and chroma whose chroma is
+/// scaled by 256 / 255 around 128, as Apple GPUs store them.
+fn planes_of(ycbcr: bool, [r, g, b]: [f64; 3]) -> [f64; 3] {
+    if !ycbcr {
+        return [g, b, r].map(|v| v * 255.0);
+    }
+    let y = 0.299 * r + 0.587 * g + 0.114 * b;
+    let chroma = |difference: f64, scale: f64| 128.0 + difference * 255.0 / scale * 256.0 / 255.0;
+    [y * 255.0, chroma(b - y, 1.772), chroma(r - y, 1.402)].map(|v| v.clamp(0.0, 255.0))
+}
+
+/// The RGB color, in [0, 1], of a 4:4:4 two-plane texel's bytes.
+fn rgb_of(ycbcr: bool, [first, a, b]: [u8; 3]) -> [f64; 3] {
+    let [first, a, b] = [first, a, b].map(f64::from);
+    if !ycbcr {
+        return [b, first, a].map(|v| v / 255.0);
+    }
+    let [cb, cr] = [a, b].map(|c| (c - 128.0) * 255.0 / 256.0);
+    [
+        first + 1.402 * cr,
+        first - 0.344136 * cb - 0.714136 * cr,
+        first + 1.772 * cb,
+    ]
+    .map(|v| (v / 255.0).clamp(0.0, 1.0))
+}
+
+/// Rendering into 4:4:4 two-plane surfaces: blending over loaded planes,
+/// and clearing then drawing half (`host_two_plane_render`). The surfaces
+/// start with colors inside the RGB cube; luma and chroma convert to
+/// within a step.
+fn two_plane_render(plan: &mut Plan, library: &str, rng: &mut Random) {
+    let (w, h) = (8usize, 4usize);
+    for (name, format) in [("rgb", 542), ("ycbcr", 503)] {
+        let ycbcr = format == 503;
+        let mut unit = || rng.uniform(0.0, 1.0);
+        let initial: Vec<[f64; 3]> = (0..w * h).map(|_| [unit(), unit(), unit()]).collect();
+        let colors: Vec<[f64; 4]> = (0..w * h)
+            .map(|_| [unit(), unit(), unit(), unit()])
+            .collect();
+        let clear = [unit(), unit(), unit(), 1.0];
+        let bytes = |rgb: [f64; 3]| planes_of(ycbcr, rgb).map(|v| v.round() as u8);
+        let texels: Vec<[u8; 3]> = initial.iter().map(|&rgb| bytes(rgb)).collect();
+        let planes = |texels: &[[u8; 3]]| -> Vec<u8> {
+            let mut out: Vec<u8> = texels.iter().map(|t| t[0]).collect();
+            out.extend(texels.iter().flat_map(|t| [t[1], t[2]]));
+            out
+        };
+        let loaded: Vec<[u8; 3]> = texels
+            .iter()
+            .zip(&colors)
+            .map(|(&texel, color)| {
+                let destination = rgb_of(ycbcr, texel);
+                let a = color[3];
+                bytes([0, 1, 2].map(|i| color[i] * a + destination[i] * (1.0 - a)))
+            })
+            .collect();
+        let cleared: Vec<[u8; 3]> = (0..w * h)
+            .map(|i| {
+                let color = if i % w < w / 2 { colors[i] } else { clear };
+                bytes([color[0], color[1], color[2]])
+            })
+            .collect();
+        let flat: Vec<f64> = colors.iter().flatten().copied().collect();
+        let first: Vec<u8> = texels.iter().map(|t| t[0]).collect();
+        let second: Vec<u8> = texels.iter().flat_map(|t| [t[1], t[2]]).collect();
+        let output = |name: &str, texels: &[[u8; 3]]| {
+            Output::new(name, Dtype::U8, Tolerance::units(1.0)).expect_same(planes(texels))
+        };
+        plan.add(
+            Case::host(
+                &format!("host.iosurface.two_plane_render_{name}"),
+                library,
+                json!({"kind": "two_plane_render", "format": format, "width": w, "height": h,
+                       "clear": clear}),
+            )
+            .buffer(Buffer::data("green", 0, first).unbound())
+            .buffer(Buffer::data("blue_red", 0, second).unbound())
+            .buffer(Buffer::data("colors", 0, f32s(&flat)).unbound())
+            .buffer(Buffer::zeroed("loaded", 0, w * h * 3).unbound())
+            .buffer(Buffer::zeroed("cleared", 0, w * h * 3).unbound())
+            .output(output("loaded", &loaded))
+            .output(output("cleared", &cleared)),
+        );
+    }
+}
+
 /// A shared texture this process clears and the share service writes the
 /// top rows of, ordered by a shared event both processes wait on.
 fn share(plan: &mut Plan, library: &str, rng: &mut Random) {
@@ -265,6 +589,37 @@ fn churn(plan: &mut Plan, library: &str) {
         .buffer(Buffer::zeroed("texels", 0, rounds as usize * 4).unbound())
         .output(Output::exact("words", Dtype::U32, u32s(&words)))
         .output(Output::exact("texels", Dtype::U32, u32s(&texels))),
+    );
+}
+
+/// Rounds that create buffers and textures of each storage mode, read them
+/// back, fill them with the round's byte and free them, so later rounds
+/// take memory and recycled textures earlier ones held. Metal documents a
+/// new buffer as zero-filled (`newBufferWithLength:options:`): each counts
+/// its nonzero bytes. A new texture's contents are undefined, but never
+/// bytes of another resource: each counts bytes that are neither zero nor a
+/// byte this case wrote. Both counts are zero.
+fn fresh_resources(plan: &mut Plan, library: &str) {
+    let rounds = 6usize;
+    // Pooled small shared buffers, buffers placed in blocks, and buffers
+    // with memory of their own.
+    let buffer_sizes = [4096u32, 1 << 20, 48 << 20];
+    let texture_sizes = 2;
+    let per_round = buffer_sizes.len() * 3 + texture_sizes * 3;
+    plan.add(
+        Case::host(
+            "host.fresh_resources",
+            library,
+            json!({"kind": "fresh_resources", "rounds": rounds, "buffer_sizes": buffer_sizes,
+                   "first_fill": 0xa1}),
+        )
+        .set("timeout", 60.0)
+        .buffer(props(rounds * per_round))
+        .output(Output::exact(
+            "props",
+            Dtype::U32,
+            u32s(&vec![0; rounds * per_round]),
+        )),
     );
 }
 
@@ -477,6 +832,36 @@ fn passes(plan: &mut Plan, library: &str) {
             .set("note", FRAGMENT_BARRIERS),
         );
     }
+    // RenderBox's path fill: a fan's facings summed into a float count by
+    // blending, read back by framebuffer fetch on the same pass. A 16 x 16
+    // ring between squares of half-sides 6 and 2 pixels fills; the hole and
+    // the outside keep the clear, and the count ends cleared.
+    let ring = |x: i32, y: i32| {
+        let inside =
+            |half: i32| (8 - half..8 + half).contains(&x) && (8 - half..8 + half).contains(&y);
+        inside(6) && !inside(2)
+    };
+    let image: Vec<u8> = (0..256)
+        .flat_map(|i| {
+            if ring(i % 16, i / 16) {
+                [255u8, 0, 0, 255]
+            } else {
+                [0, 0, 255, 255]
+            }
+        })
+        .collect();
+    plan.add(
+        Case::host(
+            "host.winding_coverage",
+            library,
+            json!({"kind": "winding_coverage"}),
+        )
+        .requires(&["apple3"], &[])
+        .buffer(Buffer::zeroed("color", 0, 1024).unbound())
+        .buffer(Buffer::zeroed("count", 0, 1024).unbound())
+        .output(Output::exact("color", Dtype::U8, image))
+        .output(Output::exact("count", Dtype::U8, vec![0; 1024])),
+    );
     plan.add(
         Case::host(
             "host.synchronize_texture",
@@ -1160,12 +1545,16 @@ pub fn build(plan: &mut Plan) {
     drawables(plan, &library);
     properties(plan, &library, &mut Random::new(1302));
     iosurface(plan, &library, &mut rng);
+    two_plane(plan, &library, &mut Random::new(1303));
+    two_plane_render(plan, &library, &mut Random::new(1304));
+    two_plane_ten_bit(plan, &library, &mut Random::new(1305));
     share(plan, &library, &mut rng);
     archive(plan, &library, &mut rng);
     errors(plan, &library);
     purgeable(plan, &library);
     streams(plan, &library);
     churn(plan, &library);
+    fresh_resources(plan, &library);
     large_buffer(plan, &library);
     grids(plan, &library);
     rebinding(plan, &library, &mut rng);

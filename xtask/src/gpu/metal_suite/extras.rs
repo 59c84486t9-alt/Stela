@@ -211,6 +211,60 @@ fn packing(plan: &mut Plan, library: &str, rng: &mut Random) {
     );
 }
 
+/// Packing values within 8 ulps of a rounding tie of each normalized
+/// format's scale: Apple GPUs round the exact product, so a product single
+/// precision rounds onto a half still goes by the value's side of it.
+fn pack_ties(plan: &mut Plan, library: &str) {
+    // The scales of unorm4x8, snorm4x8, unorm2x16 and snorm2x16.
+    let scales = [255.0f64, 127.0, 65535.0, 32767.0];
+    let mut input = vec![];
+    for (group, scale) in scales.iter().enumerate() {
+        for k in 0..64u32 {
+            // Ties spread over the scale, negative for odd snorm elements.
+            let step = (*scale as u32) / 64;
+            let tie = (f64::from(k * step + step / 2) + 0.5) / scale;
+            let sign = if group % 2 == 1 && k % 2 == 1 {
+                -1.0
+            } else {
+                1.0
+            };
+            let centre = (sign * tie) as f32;
+            for lane in 0..4i32 {
+                let ulps = (k as i32 * 4 + lane) % 17 - 8;
+                input.push(f32::from_bits(centre.to_bits().wrapping_add_signed(ulps)));
+            }
+        }
+    }
+    let field = |v: f32, scale: f64, snorm: bool, bits: u32| {
+        let x = f64::from(v).clamp(if snorm { -1.0 } else { 0.0 }, 1.0);
+        ((x * scale).round_ties_even() as i64 as u32) & ((1u64 << bits) - 1) as u32
+    };
+    let packed: Vec<u32> = input
+        .chunks(4)
+        .flat_map(|v| {
+            let four =
+                |scale, snorm| (0..4).fold(0, |p, i| p | field(v[i], scale, snorm, 8) << (8 * i));
+            let two = |a: f32, b: f32, scale, snorm| {
+                field(a, scale, snorm, 16) | field(b, scale, snorm, 16) << 16
+            };
+            [
+                four(255.0, false),
+                four(127.0, true),
+                two(v[0], v[1], 65535.0, false),
+                two(v[2], v[3], 32767.0, true),
+            ]
+        })
+        .collect();
+    let n = input.len() / 4;
+    let input: Vec<f64> = input.into_iter().map(f64::from).collect();
+    plan.add(
+        Case::compute1("extras.pack_ties", library, "pack_ties", n as u32)
+            .buffer(Buffer::data("in", 0, f32s(&input)))
+            .buffer(Buffer::zeroed("packed", 1, n * 16))
+            .output(Output::exact("packed", Dtype::U32, u32s(&packed))),
+    );
+}
+
 /// A multisampled depth target and a two-slice multisampled colour array,
 /// slice 1 cleared by one pass and slice 0 drawn over with the depth target
 /// by another, then read sample by sample. A layered pass would need a depth
@@ -890,4 +944,5 @@ pub fn build(plan: &mut Plan) {
     async_copies(plan, &builtins);
     invariance(plan, &library);
     bfloat_scalar(plan, &library, &mut rng);
+    pack_ties(plan, &library);
 }
