@@ -8,6 +8,7 @@
 //! stela/store/store.cfg      `bytes N`: one pack's bound
 //! stela/store/XXXXXXXX.pak   one pack per translator id
 //! stela/store/spare.bin      a blank pack file of the bound
+//! stela/store/pipeline.bin   the Metal device's compiled pipelines
 //! ```
 //!
 //! `stela.efi` never grows a file: the firmware grows one by writing every
@@ -50,6 +51,12 @@ const BYTES_KEY: &str = "bytes";
 const PACK_EXTENSION: &str = "pak";
 /// The blank pack file a new translator's pack takes by rename.
 pub(super) const SPARE: &str = "spare.bin";
+/// The Metal device's pipeline store (`docs/design/metal-device.md`,
+/// "Pipeline store"), which `stela.efi` rewrites in place as it does a pack.
+/// A blank one holds nothing yet.
+pub(super) const PIPELINES: &str = "pipeline.bin";
+/// The pipeline store's size, its bound.
+pub(super) const PIPELINE_BYTES: u64 = 64 * MIB;
 /// The translator id bytes a pack's file name holds.
 const NAME_BYTES: usize = 4;
 const ID_BYTES: usize = 32;
@@ -89,6 +96,7 @@ impl Store {
         // A failed allocation leaves the previous configuration and every
         // translator's pack untouched; publishing the bound comes last.
         self.prepare_spare()?;
+        self.prepare_pipelines()?;
         efi::write_atomic(
             &directory.join(CONFIG),
             self.config_text().as_bytes(),
@@ -123,6 +131,31 @@ impl Store {
             })?;
         progress.finish();
         Ok(())
+    }
+
+    /// Whether the pipeline store holds its bound's bytes.
+    pub(super) fn pipelines_ready(&self) -> bool {
+        fs::metadata(self.directory().join(PIPELINES))
+            .is_ok_and(|m| m.is_file() && m.len() >= PIPELINE_BYTES)
+    }
+
+    /// Allocate a blank pipeline store, as [`Self::prepare_spare`] does the
+    /// spare. One already of its size keeps what it holds.
+    fn prepare_pipelines(&self) -> Result<()> {
+        if self.pipelines_ready() {
+            return Ok(());
+        }
+        let path = self.directory().join(PIPELINES);
+        let file =
+            fs::File::create(&path).with_context(|| format!("cannot create {}", path.display()))?;
+        file.set_len(PIPELINE_BYTES)
+            .and_then(|()| file.sync_all())
+            .with_context(|| {
+                format!(
+                    "cannot allocate {PIPELINE_BYTES} bytes for {}",
+                    path.display()
+                )
+            })
     }
 
     /// Whether `store.cfg` says what the record does.
@@ -202,6 +235,12 @@ impl Store {
                 "prepare {} ({} bytes)",
                 self.directory().join(SPARE).display(),
                 self.pack_bytes
+            ));
+        }
+        if !self.pipelines_ready() {
+            repairs.push(format!(
+                "prepare {} ({PIPELINE_BYTES} bytes)",
+                self.directory().join(PIPELINES).display()
             ));
         }
         for pack in self.stale() {
@@ -289,14 +328,14 @@ pub(super) fn pack_name(id: &[u8]) -> String {
 }
 
 /// The bytes a store of `pack_bytes` needs on its volume: the kept packs
-/// and the spare beside them, and a margin.
+/// and the spare beside them, the pipeline store, and a margin.
 pub(super) fn needed_bytes(pack_bytes: u64) -> u64 {
-    pack_bytes * (PACKS_KEPT as u64 + 1) + MARGIN
+    pack_bytes * (PACKS_KEPT as u64 + 1) + PIPELINE_BYTES + MARGIN
 }
 
 /// The largest bound, on a 1 MiB boundary, whose store fits in `room`.
 fn fitting(room: u64) -> u64 {
-    let bound = room.saturating_sub(MARGIN) / (PACKS_KEPT as u64 + 1);
+    let bound = room.saturating_sub(PIPELINE_BYTES + MARGIN) / (PACKS_KEPT as u64 + 1);
     bound / MIB * MIB
 }
 

@@ -33,6 +33,8 @@ pub(crate) use kernel_work::check_native_clock_domain;
 mod network;
 pub(crate) mod nor;
 mod parallel;
+#[cfg(feature = "nvk")]
+pub(crate) mod pipelines;
 pub(crate) mod power;
 use stela_boot_core::boot_progress as progress;
 mod remapping;

@@ -402,6 +402,14 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs> {
     if files.len() > MAX_FILES {
         return Err(refuse!("bundle lists too many files"));
     }
+    // The Metal device's pipelines, rewritten over the translation store's
+    // partition.
+    #[cfg(feature = "nvk")]
+    if files.len() < MAX_FILES
+        && let Some(store) = crate::engine::pipelines::read()
+    {
+        files.push((String::from(crate::engine::pipelines::FILE), store));
+    }
     Ok(Inputs {
         source,
         files,

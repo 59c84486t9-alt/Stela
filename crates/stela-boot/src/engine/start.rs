@@ -292,6 +292,14 @@ fn open_host(
         .find(|file| file.name() == translations::FILE)
         .and_then(|file| translations::install(bundle::contents(file)))
         .filter(|_| handoff.storage.present);
+    // The Metal device's stored pipelines, before any GPU opens.
+    #[cfg(feature = "nvk")]
+    if let Some(file) = handoff.files[..handoff.file_count]
+        .iter()
+        .find(|file| file.name() == super::pipelines::FILE)
+    {
+        super::pipelines::install(bundle::contents(file));
+    }
     let fdr_placement = restore::inventory_file(handoff, stela_runtime::restore::fdr::FILE)
         .map(fdr::Placement::parse)
         .transpose()
