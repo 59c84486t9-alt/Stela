@@ -294,13 +294,19 @@ pub(super) fn attach_usb_host(arguments: &Run, command: &mut Process) {
     }
 }
 
+/// QEMU's SDL window, drawn with GL. QEMU draws its window on its main
+/// thread while holding the lock every device access takes; measured, the
+/// GTK window held it up to 70 ms at a time (it paints the window in
+/// software), and this one a few milliseconds.
+const WINDOW: &str = "sdl,gl=on";
+
 /// The UART, logged to `serial`, and the monitor.
 pub(super) fn attach_console(arguments: &Run, serial: &Path, command: &mut Process) {
     if let Some(port) = arguments.console {
         let display = match arguments.display {
             Display::None => "none",
             Display::Window if cfg!(target_os = "macos") => "cocoa",
-            Display::Window => "gtk",
+            Display::Window => WINDOW,
         };
         command
             .args(["-display", display, "-chardev"])
@@ -342,7 +348,7 @@ fn attach_uart(arguments: &Run, serial: &Path, command: &mut Process) {
             ))
             .args(["-serial", "chardev:uart"]),
         Display::Window => command
-            .args(["-display", "gtk", "-chardev"])
+            .args(["-display", WINDOW, "-chardev"])
             .arg(format!("vc,id=uart,logfile={}", option_path(serial)))
             .args(["-serial", "chardev:uart"]),
     };
