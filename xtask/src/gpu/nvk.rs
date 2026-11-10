@@ -56,6 +56,10 @@ const OPTIONS: [&str; 21] = [
     "-Dexpat=disabled",
     "-Dbuildtype=release",
 ];
+/// The unit that keeps NDEBUG off: only then does ralloc record each block's
+/// size, which `ralloc_total_size` sums for the Metal compiler's NIR budget.
+/// The block header is private to the unit and its size is the same either way.
+const SIZED_UNIT: &str = "src/util/ralloc.c";
 /// The Vulkan drivers the image links, as Meson's targets.
 const DRIVERS: [&str; 1] = ["src/nouveau/vulkan/libvulkan_nouveau.so"];
 /// Tools the configuration asks for that nothing runs.
@@ -575,8 +579,14 @@ fn units(
                     .map(|name| format!("-D{name}__extern={name}__hard_float")),
             );
         }
+        let mut name = object_name(output);
+        if file.replace('\\', "/").ends_with(SIZED_UNIT) {
+            arguments.push("-UNDEBUG".to_owned());
+            // Its own object, so one compiled with NDEBUG is never reused.
+            name.insert_str(0, "sized_");
+        }
         units.push(Unit {
-            output: objects.join(object_name(output)),
+            output: objects.join(name),
             arguments,
         });
     }
