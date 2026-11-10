@@ -490,7 +490,8 @@ fn report_long_turn(served: &Served) {
 }
 
 /// What a device holds: its allocation with the part waiting for submitted
-/// work, that work, its memory blocks with the resources placed in them and
+/// work, that work, the resources automatic heaps answered nil for (no
+/// room / room only in pieces), its memory blocks with the resources placed in them and
 /// those in memory of their own, and the connections counting the most
 /// bytes, each as
 /// id:objects/MiB. Nothing while a call holds the service.
@@ -502,7 +503,7 @@ fn report_memory(service: &Shared) {
     let mib = |bytes: u64| bytes >> 20;
     let device = memory.device;
     output::arguments(format_args!(
-        "GPU MEMORY allocated={}M deferred={}/{}M in_flight={} completed={}/{} recycled={}/{}M reused={}/{} blocks={}/{}M placed={}/{}M own={} connections={}",
+        "GPU MEMORY allocated={}M deferred={}/{}M in_flight={} completed={}/{} recycled={}/{}M reused={}/{} heap_nils={}/{} blocks={}/{}M placed={}/{}M own={} connections={}",
         mib(device.allocated),
         device.deferred,
         mib(device.deferred_bytes),
@@ -513,6 +514,8 @@ fn report_memory(service: &Shared) {
         mib(device.recycled.bytes),
         device.recycled.hits,
         device.recycled.hits + device.recycled.misses,
+        device.heap_refusals.full,
+        device.heap_refusals.fragmented,
         device.blocks.blocks,
         mib(device.blocks.block_bytes),
         device.blocks.placed,

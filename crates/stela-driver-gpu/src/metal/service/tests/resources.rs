@@ -318,6 +318,50 @@ fn heaps_place_resources_and_report_their_usage() {
     assert_eq!(release(&mut service, connection, heap.handle), Status::Ok);
 }
 
+/// A full heap answers nil, and the log names the heap and the request.
+#[test]
+fn a_full_heap_names_its_nil() {
+    let mut service = service_on(MockBackend::new());
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let heap = HeapDescriptorRecord {
+        memory: 0,
+        size: 1 << 16,
+        options: options(StorageMode::Private),
+        heap_type: HeapType::Automatic.raw(),
+        sparse_page_size: SparsePageSize::Size16.raw(),
+    };
+    let heap: Handle = call(&mut service, connection, Operation::NewHeap, &heap, memory).unwrap();
+    let placed = |length| NewHeapBufferRequest {
+        heap: heap.handle,
+        length,
+        options: options(StorageMode::Private),
+        offset: AUTOMATIC,
+    };
+    let first = call::<_, BufferResponse>(
+        &mut service,
+        connection,
+        Operation::NewHeapBuffer,
+        &placed(1 << 15),
+        memory,
+    );
+    assert!(first.is_ok());
+    let refused = call::<_, BufferResponse>(
+        &mut service,
+        connection,
+        Operation::NewHeapBuffer,
+        &placed(1 << 16),
+        memory,
+    );
+    assert_eq!(status(refused), Status::Declined);
+    let noted = service.noted.take().unwrap();
+    assert!(
+        noted.starts_with("HEAP NIL 1 ") && noted.contains("heap=65536 resources=1 used=32768"),
+        "{noted}"
+    );
+    assert!(noted.contains("buffer length=65536"), "{noted}");
+}
+
 #[test]
 fn pixel_formats_answer_their_alignments_and_tiles() {
     let mut service = service_on(MockBackend::new());

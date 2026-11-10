@@ -30,6 +30,9 @@ use crate::metal::{
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
+/// How many heap nils the platform's log names; the rest only count.
+const NOTED_HEAP_NILS: u64 = 32;
+
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn new_buffer(&mut self, call: &mut Call) -> Result<(), Fault> {
         let request: NewBufferRequest = call.request()?;
@@ -302,8 +305,20 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let heap = self.object::<HeapId>(call.connection, request.heap)?;
         let options = options(request.options)?;
         let buffer =
-            self.device
-                .new_heap_buffer(heap, request.length, options, offset(request.offset))?;
+            match self
+                .device
+                .new_heap_buffer(heap, request.length, options, offset(request.offset))
+            {
+                Err(Error::HeapFull) => {
+                    let asked = self
+                        .device
+                        .heap_buffer_size_and_align(request.length, options);
+                    let what = alloc::format!("buffer length={}", request.length);
+                    self.note_heap_full(call.connection, heap, asked, what);
+                    return Err(Error::HeapFull.into());
+                }
+                buffer => buffer?,
+            };
         let response = self.adopt_buffer(call.connection, buffer)?;
         call.reply(&response)
     }
@@ -313,11 +328,60 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let heap = self.object::<HeapId>(call.connection, request.heap)?;
         let descriptor = texture_descriptor(&request.descriptor)?;
         // A heap without room answers nil, as Metal does; the device counts it.
-        let texture = self
+        let texture = match self
             .device
-            .new_heap_texture(heap, &descriptor, offset(request.offset))?;
+            .new_heap_texture(heap, &descriptor, offset(request.offset))
+        {
+            Err(Error::HeapFull) => {
+                let asked = self.device.heap_texture_size_and_align(&descriptor);
+                let what = alloc::format!(
+                    "texture {:?} {}x{}x{} levels={} samples={} layers={} usage={:#x} options={:?}",
+                    descriptor.pixel_format,
+                    descriptor.width,
+                    descriptor.height,
+                    descriptor.depth,
+                    descriptor.mipmap_level_count,
+                    descriptor.sample_count,
+                    descriptor.array_length,
+                    descriptor.usage.bits(),
+                    descriptor.options,
+                );
+                self.note_heap_full(call.connection, heap, asked, what);
+                return Err(Error::HeapFull.into());
+            }
+            texture => texture?,
+        };
         let response = self.adopt_texture(call.connection, texture)?;
         call.reply(&response)
+    }
+
+    /// Names the first [`NOTED_HEAP_NILS`] nils of full heaps in the
+    /// platform's log: the connection, the heap's size, use and largest free
+    /// piece at the request's alignment, and the request.
+    fn note_heap_full(
+        &mut self,
+        connection: NonZeroU64,
+        heap: HeapId,
+        asked: Result<SizeAndAlign, Error>,
+        what: alloc::string::String,
+    ) {
+        let refusals = self.device.heap_refusals();
+        let count = refusals.full + refusals.fragmented;
+        let (Ok(asked), Ok((size, resources))) = (asked, self.device.heap_occupancy(heap)) else {
+            return;
+        };
+        let Ok((used, largest)) = self.device.heap_usage(heap, asked.align) else {
+            return;
+        };
+        if count > NOTED_HEAP_NILS {
+            return;
+        }
+        self.noted = Some(alloc::format!(
+            "HEAP NIL {count} connection={connection} heap={size} resources={resources} \
+             used={used} largest={largest} asked={}@{:#x} {what}",
+            asked.size,
+            asked.align,
+        ));
     }
 
     pub(super) fn heap_usage(&mut self, call: &mut Call) -> Result<(), Fault> {
