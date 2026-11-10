@@ -353,7 +353,7 @@ mod tests {
         let profile = CpuProfile {
             name: "CPU PMGR owner fixture",
             chip: plan.chip(),
-            counter_frequency: 24_000_000,
+            counter_frequency: crate::counter::FREQUENCY_HZ,
             processors: plan.pes().iter().map(|pe| pe.identity).collect(),
             fixed: vec![],
         };

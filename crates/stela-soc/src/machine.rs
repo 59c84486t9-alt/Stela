@@ -244,7 +244,7 @@ pub struct AppleDevices {
 
 /// The host polls its USB sessions once a high-speed microframe, in which
 /// a bulk pipe moves at most 13 512-byte packets (USB 2.0 Table 5-10).
-const USB_POLL_TICKS: u64 = 24_000_000 / 8000;
+const USB_POLL_TICKS: u64 = crate::counter::FREQUENCY_HZ / 8000;
 const USB_PACKETS_PER_MICROFRAME: usize = 13;
 /// The microframes a late poll catches up, a frame's: this bounds one poll's
 /// work under the devices' lock.

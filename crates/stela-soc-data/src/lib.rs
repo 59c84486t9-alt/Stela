@@ -15,6 +15,7 @@ pub mod aes;
 pub mod aic;
 pub mod amcc;
 pub mod ans;
+pub mod clock;
 pub mod core_counters;
 pub mod cpm;
 pub mod cpustart;

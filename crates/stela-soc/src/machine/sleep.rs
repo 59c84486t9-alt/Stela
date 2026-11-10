@@ -389,7 +389,7 @@ mod tests {
         pmu.write(rtc.alarm_offset, &2u32.to_le_bytes(), 0).unwrap();
         pmu.write(rtc.irq_mask, &[0], 0).unwrap();
         pmu.write(rtc.alarm_control, &[0x41], 0).unwrap();
-        let second = 24_000_000;
+        let second = crate::counter::FREQUENCY_HZ;
         assert_eq!(pmu.advance(0), Some(2 * second));
         devices.lines(0, second);
         assert!(devices.asleep());

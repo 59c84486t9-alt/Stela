@@ -2,7 +2,7 @@
 use super::{Authority, Error, Image, Observation};
 use alloc::vec::Vec;
 
-const SYSTEM_HZ: u128 = 24_000_000;
+const SYSTEM_HZ: u128 = crate::counter::FREQUENCY_HZ as u128;
 
 /// Complete native-cycle phase at a system counter instant. Captured
 /// and explicitly initialized Stela phase are different permissions. Unknown

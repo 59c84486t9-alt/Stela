@@ -299,7 +299,7 @@ mod tests {
         let (services, endpoints) =
             // SAFETY: the fixture's broker and clock are its own, and these branches retire no DMA
             // grant.
-            unsafe { Services::t8112(broker, Clock::new(ticks, 24_000_000, 0).unwrap()).unwrap() };
+            unsafe { Services::t8112(broker, Clock::new(ticks, crate::counter::FREQUENCY_HZ as u32, 0).unwrap()).unwrap() };
         (services, endpoints, dispatcher)
     }
     fn advance(s: &mut Services) {

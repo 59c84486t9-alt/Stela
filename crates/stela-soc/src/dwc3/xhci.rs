@@ -191,7 +191,7 @@ const MAX_PENDING_EVENTS: usize = 256;
 /// Host trace lines per second of system count; later ones are counted.
 const TRACE_LINES: u32 = 256;
 /// System counts per second.
-const SECOND: u64 = 24_000_000;
+const SECOND: u64 = crate::counter::FREQUENCY_HZ;
 /// 24 MHz system counts per 125 us microframe.
 const MICROFRAME: u64 = 3000;
 /// Microframes from one MFINDEX wrap to the next.

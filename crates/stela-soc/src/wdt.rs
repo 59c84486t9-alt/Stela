@@ -65,7 +65,7 @@ const CTRL: u64 = 0xc;
 const STRIDE: u64 = 0x10;
 const WATCHDOGS: usize = 3;
 /// The `clkref` reference clock and system counter rate.
-const REFERENCE_HZ: u64 = 24_000_000;
+const REFERENCE_HZ: u64 = crate::counter::FREQUENCY_HZ;
 pub const PANIC_SAVE: u64 = 0x4000;
 pub const MECHANISM: u64 = 0x4004;
 pub const CONFIGURATION: u64 = 0x4008;

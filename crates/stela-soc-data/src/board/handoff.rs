@@ -88,7 +88,7 @@ pub const PANIC_REGION_BYTES: u64 = {
 };
 
 /// The SoC reference clock iBoot reports for every boot CPU clock.
-pub const BOOT_CLOCK_HZ: u64 = 24_000_000;
+pub const BOOT_CLOCK_HZ: u64 = crate::clock::REFERENCE_HZ;
 /// What iBoot writes to `/arm-io usbphy-frequency`.
 pub const USB_PHY_HZ: u32 = 0;
 
