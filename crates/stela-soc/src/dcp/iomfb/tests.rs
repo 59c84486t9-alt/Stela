@@ -1,5 +1,5 @@
 use super::super::super::scanout::{Mode, PixelFormat};
-use super::super::swap::tests::submission;
+use super::super::swap::tests::{fenced_submission, submission};
 use super::*;
 use crate::Result;
 use alloc::rc::Rc;
@@ -29,8 +29,18 @@ impl Scanout for TestScreen {
     }
 }
 
+/// The 26A434 interface, whose tags these tests name.
+fn interface() -> &'static abi::Interface {
+    abi::interface(211).unwrap()
+}
+
+/// The 26A434 row for method `tag`.
+fn row(tag: &[u8; 4]) -> &'static abi::Method {
+    interface().method(tag).unwrap()
+}
+
 fn methods() -> Methods {
-    Methods::new(Box::new(TestScreen::default()))
+    Methods::new(Box::new(TestScreen::default()), interface())
 }
 
 fn returned(step: Result<Step<Methods>>) -> Vec<u8> {
@@ -68,22 +78,22 @@ fn drain(methods: &mut Methods, answer: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
 #[test]
 fn display_size_tags_report_the_fixed_mode_at_verified_sizes() {
     assert_eq!(
-        answer(b"A451", &[], 4, FULL_HD).unwrap().unwrap(),
+        answer(row(b"A451"), &[], 4, FULL_HD).unwrap().unwrap(),
         1920u32.to_le_bytes()
     );
     assert_eq!(
-        answer(b"A452", &[], 4, FULL_HD).unwrap().unwrap(),
+        answer(row(b"A452"), &[], 4, FULL_HD).unwrap().unwrap(),
         1080u32.to_le_bytes()
     );
     assert_eq!(
-        answer(b"A351", &[], 4, FULL_HD).unwrap().unwrap(),
+        answer(row(b"A351"), &[], 4, FULL_HD).unwrap().unwrap(),
         1920u32.to_le_bytes()
     );
     assert_eq!(
-        answer(b"A350", &[], 4, FULL_HD).unwrap().unwrap(),
+        answer(row(b"A350"), &[], 4, FULL_HD).unwrap().unwrap(),
         1080u32.to_le_bytes()
     );
-    let size = answer(b"A453", &[0; 4], 8, FULL_HD).unwrap().unwrap();
+    let size = answer(row(b"A453"), &[0; 4], 8, FULL_HD).unwrap().unwrap();
     assert_eq!(&size[0..4], &1920u32.to_le_bytes());
     assert_eq!(&size[4..8], &1080u32.to_le_bytes());
 }
@@ -91,15 +101,15 @@ fn display_size_tags_report_the_fixed_mode_at_verified_sizes() {
 #[test]
 fn connection_tags_describe_one_external_main_display() {
     assert_eq!(
-        answer(b"A379", &[], 4, FULL_HD).unwrap().unwrap(),
+        answer(row(b"A379"), &[], 4, FULL_HD).unwrap().unwrap(),
         1u32.to_le_bytes()
     );
     assert_eq!(
-        answer(b"A384", &[], 4, FULL_HD).unwrap().unwrap(),
+        answer(row(b"A384"), &[], 4, FULL_HD).unwrap().unwrap(),
         0u32.to_le_bytes()
     );
     assert_eq!(
-        answer(b"A412", &[], 4, FULL_HD).unwrap().unwrap(),
+        answer(row(b"A412"), &[], 4, FULL_HD).unwrap().unwrap(),
         1u32.to_le_bytes()
     );
 }
@@ -152,23 +162,23 @@ fn status_methods_succeed_under_the_ap_link_status_contract() {
 #[test]
 fn the_boot_framebuffer_is_inherited_not_recreated() {
     assert_eq!(
-        answer(b"A454", &[], 4, FULL_HD).unwrap().unwrap(),
+        answer(row(b"A454"), &[], 4, FULL_HD).unwrap().unwrap(),
         0u32.to_le_bytes()
     );
     assert!(
-        answer(b"A389", &[], 0, FULL_HD)
+        answer(row(b"A389"), &[], 0, FULL_HD)
             .unwrap()
             .unwrap()
             .is_empty()
     );
     assert!(
-        answer(b"A478", &[0; 4], 0, FULL_HD)
+        answer(row(b"A478"), &[0; 4], 0, FULL_HD)
             .unwrap()
             .unwrap()
             .is_empty()
     );
     assert_eq!(
-        answer(b"A475", &[], 4, FULL_HD).unwrap().unwrap(),
+        answer(row(b"A475"), &[], 4, FULL_HD).unwrap().unwrap(),
         1u32.to_le_bytes()
     );
 }
@@ -283,36 +293,132 @@ fn calls_off_the_interface_or_its_sizes_refuse_by_name() {
 }
 
 #[test]
-fn a_method_without_a_model_answers_zeros_and_is_reported_once() {
+fn a_method_without_a_reply_layout_answers_zeros_and_is_reported_once() {
     let mut methods = methods();
     let logged = |methods: &mut Methods| {
         let mut reported = 0;
         while let Some(entry) = methods.take_log() {
-            reported += usize::from(matches!(entry, Log::Unmodeled(tag) if &tag == b"A123"));
+            reported += usize::from(matches!(
+                entry,
+                Log::Unmodeled { tag, answer: Degraded::Zeros, .. } if &tag == b"A123"
+            ));
         }
         reported
     };
     assert_eq!(returned(methods.call(*b"A123", &[0; 0x18], 4)), [0; 4]);
     assert_eq!(logged(&mut methods), 1);
+    let reported = methods.take_unmodeled();
+    assert_eq!(reported.len(), 1);
+    assert!(reported[0].starts_with("IOMFB unmodeled A123 start_task_dcp: answered with zeros"));
     assert_eq!(returned(methods.call(*b"A123", &[0; 0x18], 4)), [0; 4]);
     assert_eq!(logged(&mut methods), 0);
+    assert!(methods.take_unmodeled().is_empty());
+    assert!(methods.last_refusal().is_none());
+}
+
+/// The link status at `offset` as the AP reads it (`iomfb_status_from_link`).
+fn status(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+#[test]
+fn an_unmodeled_status_method_answers_unsupported_and_keeps_its_argument() {
+    // The 26B123 interface, whose tags the latest boots call.
+    let mut methods = Methods::new(
+        Box::new(TestScreen::default()),
+        abi::interface(213).unwrap(),
+    );
+    // get_gamma_table(IOMFBGammaTable*): the caller's table returns as it
+    // came, with kIOReturnUnsupported, never a zeroed table and success.
+    let mut table = alloc::vec![0x11; 0xc10];
+    table[0xc0c] = 0;
+    let reply = returned(methods.call(*b"A470", &table, 0xc10));
+    assert_eq!(reply[..0xc0c], table[..0xc0c]);
+    assert_eq!(status(&reply, 0xc0c), LINK_UNSUPPORTED);
+    let reply = returned(methods.call(*b"A471", &table, 0xc10));
+    assert_eq!(status(&reply, 0xc0c), LINK_UNSUPPORTED);
+    // set_contrast(float*): the float returns.
+    let contrast = [0, 0, 0x80, 0x3f, 0, 0xaa, 0xaa, 0xaa];
+    let reply = returned(methods.call(*b"A474", &contrast, 8));
+    assert_eq!(reply[..4], contrast[..4]);
+    assert_eq!(status(&reply, 4), LINK_UNSUPPORTED);
+    // get_block_dcp: no data, the status after it.
+    let reply = returned(methods.call(*b"A492", &[0; 0x5c], 0x1004));
+    assert!(reply[..0x1000].iter().all(|&byte| byte == 0));
+    assert_eq!(status(&reply, 0x1000), LINK_UNSUPPORTED);
+    for (tag, input, output) in [(*b"A491", 0x106c, 4), (*b"A499", 0x84, 0x7c)] {
+        let reply = returned(methods.call(tag, &alloc::vec![0; input], output));
+        assert_eq!(status(&reply, output as usize - 4), LINK_UNSUPPORTED);
+    }
+    let reported = methods.take_unmodeled();
+    assert_eq!(reported.len(), 6, "{reported:?}");
+    assert!(
+        reported
+            .iter()
+            .all(|line| line.contains("answered kIOReturnUnsupported"))
+    );
+    // Each is reported once.
+    returned(methods.call(*b"A470", &table, 0xc10));
+    assert!(methods.take_unmodeled().is_empty());
     assert!(methods.last_refusal().is_none());
 }
 
 #[test]
-fn the_color_remap_mode_reads_back_and_a_mode_the_scanout_lacks_is_reported() {
-    let mut methods = methods();
-    let query = [6, 0, 0, 0, 0, 0xaa, 0xaa, 0xaa];
-    let mut expected = [0u8; 8];
-    assert_eq!(returned(methods.call(*b"A427", &query, 8)), expected);
+fn identity_color_requests_are_carried_out_and_others_are_unsupported() {
+    let mut methods = Methods::new(
+        Box::new(TestScreen::default()),
+        abi::interface(213).unwrap(),
+    );
+    // set_matrix(9, identity) as the AP sends it at boot.
+    let matrix = |diagonal: u64| {
+        let mut packed = Packed::new().u32(9);
+        for index in 0..9 {
+            packed = packed.u64(if index % 4 == 0 { diagonal } else { 0 });
+        }
+        packed.bool(false).finish(0x50).unwrap()
+    };
     assert_eq!(
-        returned(methods.call(*b"A426", &2u32.to_le_bytes(), 4)),
+        returned(methods.call(*b"A473", &matrix(MATRIX_ONE), 4)),
         [0; 4]
     );
-    expected[0] = 2;
+    let reply = returned(methods.call(*b"A473", &matrix(MATRIX_ONE / 2), 4));
+    assert_eq!(status(&reply, 0), LINK_UNSUPPORTED);
+    // setBrightnessCorrection(1.0) then (0.5).
+    let correction = |value: u32| value.to_le_bytes();
+    assert_eq!(
+        returned(methods.call(*b"A478", &correction(BRIGHTNESS_UNCORRECTED), 4)),
+        [0; 4]
+    );
+    let reply = returned(methods.call(*b"A478", &correction(0x8000), 4));
+    assert_eq!(status(&reply, 0), LINK_UNSUPPORTED);
+    // Video power savings: disabling is what the display does already.
+    assert_eq!(returned(methods.call(*b"A508", &[0; 4], 4)), [0; 4]);
+    let reply = returned(methods.call(*b"A508", &[1, 0, 0, 0], 4));
+    assert_eq!(status(&reply, 0), LINK_UNSUPPORTED);
+    assert_eq!(methods.take_unmodeled().len(), 3);
+}
+
+#[test]
+fn the_color_remap_mode_reads_back_and_a_mode_the_scanout_lacks_is_unsupported() {
+    let mut methods = methods();
+    let query = [6, 0, 0, 0, 0, 0xaa, 0xaa, 0xaa];
+    let expected = [0u8; 8];
     assert_eq!(returned(methods.call(*b"A427", &query, 8)), expected);
-    let reported = core::iter::from_fn(|| methods.take_log())
-        .any(|entry| matches!(entry, Log::Unmodeled(tag) if &tag == b"A426"));
+    assert_eq!(
+        returned(methods.call(*b"A426", &0u32.to_le_bytes(), 4)),
+        [0; 4]
+    );
+    // A mode the scanout lacks is unsupported and does not read back.
+    let reply = returned(methods.call(*b"A426", &2u32.to_le_bytes(), 4));
+    assert_eq!(status(&reply, 0), LINK_UNSUPPORTED);
+    assert_eq!(returned(methods.call(*b"A427", &query, 8)), expected);
+    let reported = core::iter::from_fn(|| methods.take_log()).any(|entry| {
+        matches!(
+            entry,
+            Log::Unmodeled { tag, answer: Degraded::Unsupported, detail: Some(2), .. }
+                if &tag == b"A426"
+        )
+    });
     assert!(reported);
 }
 
@@ -540,7 +646,8 @@ fn power_and_sleep_gate_scanout() {
     let display = Rc::new(RefCell::new(DisplayState::new(true)));
     let screen = TestScreen(Rc::default(), Some(MODE));
     let frames = screen.0.clone();
-    let mut methods = Methods::with_display_state(Box::new(screen), Rc::clone(&display));
+    let mut methods =
+        Methods::with_display_state(Box::new(screen), Rc::clone(&display), interface());
     let mut controller = Controller::new(display);
     let mut command = |index: u32, value: Option<u64>| {
         let size: u32 = if value.is_some() { 0x20 } else { 0x10 };
@@ -560,19 +667,19 @@ fn power_and_sleep_gate_scanout() {
     returned(methods.call(*b"A407", &submission(1, &[]), 0xc));
     command(6, Some(0));
     methods
-        .present(|_, _| panic!("powered-off scanout reads no pixels"))
+        .present(0, |_, _| panic!("powered-off scanout reads no pixels"))
         .unwrap();
     assert!(methods.frame_pending() && !methods.callback_pending());
     assert!(frames.borrow().is_empty());
     command(6, Some(1));
     command(9, None);
     methods
-        .present(|_, _| panic!("asleep scanout reads no pixels"))
+        .present(0, |_, _| panic!("asleep scanout reads no pixels"))
         .unwrap();
     assert!(methods.frame_pending() && frames.borrow().is_empty());
     command(8, None);
     methods
-        .present(|_, _| panic!("background clear has no surface"))
+        .present(0, |_, _| panic!("background clear has no surface"))
         .unwrap();
     assert_eq!(frames.borrow().len(), 1);
     assert!(!methods.frame_pending() && methods.callback_pending());
@@ -590,10 +697,18 @@ fn power_and_sleep_gate_scanout() {
     assert_eq!(&callback.input[..8], &PLUGGED.to_le_bytes());
 }
 
+fn started_ids(methods: &Methods) -> Vec<u32> {
+    methods.started.iter().map(|&(id, _)| id).collect()
+}
+
 fn start_swap(methods: &mut Methods) -> u32 {
+    start_client_swap(methods, 0xfeed)
+}
+
+fn start_client_swap(methods: &mut Methods, client: u64) -> u32 {
     let start = Packed::new()
         .u32(0)
-        .u64(0xfeed)
+        .u64(client)
         .bool(false)
         .finish(0x10)
         .unwrap();
@@ -604,12 +719,12 @@ fn start_swap(methods: &mut Methods) -> u32 {
 fn submit_refusal_keeps_accepted_swap(mutate: impl FnOnce(&mut [u8]), reason: &str) {
     let screen = TestScreen(Rc::default(), Some(MODE));
     let displayed = screen.0.clone();
-    let mut methods = Methods::new(Box::new(screen));
+    let mut methods = Methods::new(Box::new(screen), interface());
     started(&mut methods);
     let completed = start_swap(&mut methods);
     returned(methods.call(*b"A407", &submission(completed, &[]), 0xc));
     methods
-        .present(|_, _| panic!("background clear reads no surface"))
+        .present(0, |_, _| panic!("background clear reads no surface"))
         .unwrap();
     let queued = start_swap(&mut methods);
     returned(methods.call(*b"A407", &submission(queued, &[(0, 4, 2, 0x1000)]), 0xc));
@@ -625,14 +740,14 @@ fn submit_refusal_keeps_accepted_swap(mutate: impl FnOnce(&mut [u8]), reason: &s
         .err()
         .expect("unsupported submission refused");
     assert!(error.to_string().contains(reason), "{error}");
-    assert_eq!(methods.started, [id]);
+    assert_eq!(started_ids(&methods), [id]);
     assert_eq!(methods.planes.as_slice(), planes);
     assert_eq!(methods.frames, frames);
     assert_eq!(methods.completed, completions);
     assert_eq!(displayed.borrow().len(), 1);
     assert_eq!(methods.call(*b"A407", &refused, 0xc).err(), Some(error));
     returned(methods.call(*b"A407", &valid, 0xc));
-    assert!(methods.started.is_empty());
+    assert!(started_ids(&methods).is_empty());
     assert_eq!(methods.frames.len(), frames.len() + 1);
     assert_eq!(methods.frames.back().unwrap().swap_id, id);
     assert_eq!(methods.completed, completions);
@@ -658,22 +773,56 @@ fn clients_are_told_of_each_refresh_and_a_late_one_replaces_the_last() {
     let mut methods = methods();
     methods.refresh(1000);
     assert!(methods.take_callback().is_none());
-    // With no client, nothing has to wake the display.
+    // With no client, no swap and nothing queued, nothing has to wake the
+    // display.
     assert_eq!(methods.refresh_deadline(), None);
     let mut clients = [0; 0x6c];
     clients[24] = 1;
     assert!(returned(methods.call(*b"A033", &clients, 0)).is_empty());
-    assert_eq!(methods.refresh_deadline(), Some(0));
-    methods.refresh(1000);
+    // The grid the first look started goes on.
     assert_eq!(methods.refresh_deadline(), Some(1000 + REFRESH_TICKS));
     // Within the refresh period nothing new is due, and a later one wins.
     methods.refresh(1000 + REFRESH_TICKS - 1);
+    assert!(methods.take_callback().is_none());
     methods.refresh(1000 + REFRESH_TICKS);
+    methods.refresh(1000 + 2 * REFRESH_TICKS);
     let callback = methods.take_callback().unwrap();
     assert_eq!(callback.tag, SWAP_NOTIFY);
     assert_eq!(callback.input.len(), 0x18);
-    assert_eq!(callback.input[..8], (1000 + REFRESH_TICKS).to_le_bytes());
+    assert_eq!(
+        callback.input[..8],
+        (1000 + 2 * REFRESH_TICKS).to_le_bytes()
+    );
     assert_eq!(callback.output, 0);
+}
+
+#[test]
+fn a_late_look_sends_the_vblanks_own_time_and_keeps_the_grid() {
+    const REFRESH_TICKS: u64 = 400_000;
+    // 5 ms of the 24 MHz counter.
+    const LATE: u64 = 120_000;
+    let mut methods = methods();
+    let mut clients = [0; 0x6c];
+    clients[24] = 1;
+    returned(methods.call(*b"A033", &clients, 0));
+    methods.refresh(1000);
+    let first = methods.take_callback().unwrap();
+    (first.then)(&mut methods, &[]).unwrap();
+    methods.refresh(1000 + REFRESH_TICKS + LATE);
+    let callback = methods.take_callback().unwrap();
+    assert_eq!(callback.tag, SWAP_NOTIFY);
+    assert_eq!(callback.input[..8], (1000 + REFRESH_TICKS).to_le_bytes());
+    (callback.then)(&mut methods, &[]).unwrap();
+    assert_eq!(methods.refresh_deadline(), Some(1000 + 2 * REFRESH_TICKS));
+    // Three and a half periods late: the last vblank passed is sent, and
+    // the grid's phase holds.
+    methods.refresh(1000 + 5 * REFRESH_TICKS + REFRESH_TICKS / 2);
+    let callback = methods.take_callback().unwrap();
+    assert_eq!(
+        callback.input[..8],
+        (1000 + 5 * REFRESH_TICKS).to_le_bytes()
+    );
+    assert_eq!(methods.refresh_deadline(), Some(1000 + 6 * REFRESH_TICKS));
 }
 
 /// A screen of the default mode at a given refresh.
@@ -692,7 +841,7 @@ impl Scanout for FastScreen {
 
 #[test]
 fn refreshes_keep_the_monitors_rate_and_phase_when_looked_at_late() {
-    let mut methods = Methods::new(Box::new(FastScreen(144_000)));
+    let mut methods = Methods::new(Box::new(FastScreen(144_000)), interface());
     let mut clients = [0; 0x6c];
     clients[24] = 1;
     assert!(returned(methods.call(*b"A033", &clients, 0)).is_empty());
@@ -703,10 +852,9 @@ fn refreshes_keep_the_monitors_rate_and_phase_when_looked_at_late() {
     // A look 5000 ticks late keeps the grid rather than starting it again.
     methods.refresh(10 + period + 5000);
     assert_eq!(methods.refresh_deadline(), Some(10 + 2 * period));
-    // One more than a period late starts a new grid where it was looked at.
-    let late = 10 + 4 * period;
-    methods.refresh(late);
-    assert_eq!(methods.refresh_deadline(), Some(late + period));
+    // So does one more than a period late: the vblanks between are skipped.
+    methods.refresh(10 + 4 * period + 7);
+    assert_eq!(methods.refresh_deadline(), Some(10 + 5 * period));
     // The advertised timing is the monitor's rate.
     let advertised = methods.advertised.as_ref().unwrap();
     let rate = u32::from_le_bytes(advertised.timing[0x38..0x3c].try_into().unwrap());
@@ -721,7 +869,14 @@ fn a_background_color_is_a_recorded_gap_shown_black() {
     input[swap::BACKGROUND] = 0xff;
     returned(methods.call(*b"A407", &input, 0xc));
     assert_eq!(methods.frames.back().unwrap().swap_id, id);
-    assert!(methods.unmodeled.contains(b"A407"));
+    assert!(methods.unmodeled.contains(&(*b"A407", None)));
+    let reported = methods.take_unmodeled();
+    assert_eq!(reported.len(), 1);
+    assert!(
+        reported[0].contains("answered success, value ignored")
+            && reported[0].contains("background is shown black"),
+        "{reported:?}"
+    );
 }
 
 #[test]
@@ -732,7 +887,7 @@ fn refused_submit_reply_preflight_preserves_started_swap() {
     // Public RPC validates ABI output size before dispatch. The
     // submit method also prepares its fallible reply before committing.
     assert!(methods.submit(*b"A407", &input, 0).is_err());
-    assert_eq!(methods.started, [id]);
+    assert_eq!(started_ids(&methods), [id]);
     assert!(methods.frames.is_empty());
     returned(methods.call(*b"A407", &input, 0xc));
     assert_eq!(methods.frames.back().unwrap().swap_id, id);
@@ -745,7 +900,7 @@ fn swaps_started_together_submit_by_the_id_their_record_names() {
     let second = start_swap(&mut methods);
     assert_ne!(first, second);
     returned(methods.call(*b"A407", &submission(second, &[]), 0xc));
-    assert_eq!(methods.started, [first]);
+    assert_eq!(started_ids(&methods), [first]);
     let error = methods
         .call(*b"A407", &submission(second, &[]), 0xc)
         .err()
@@ -764,7 +919,7 @@ fn an_abandoned_start_is_forgotten_past_the_limit() {
         start_swap(&mut methods);
     }
     assert_eq!(methods.started.len(), STARTED_SWAPS);
-    assert!(!methods.started.contains(&abandoned));
+    assert!(!started_ids(&methods).contains(&abandoned));
     assert!(
         methods
             .call(*b"A407", &submission(abandoned, &[]), 0xc)
@@ -794,18 +949,19 @@ fn failed_presents_keep_swap_order_until_abort() {
     }
     let attempts = Rc::new(RefCell::new(0));
     let frames = Rc::new(RefCell::new(Vec::new()));
-    let mut methods = Methods::new(Box::new(Sink {
-        attempts: attempts.clone(),
-        frames: frames.clone(),
-    }));
-    for (id, dva) in [(1, 0x1000), (2, 0x2000)] {
-        assert_eq!(start_swap(&mut methods), id);
-        returned(methods.call(*b"A407", &submission(id, &[(0, 4, 2, dva)]), 0xc));
-    }
+    let mut methods = Methods::new(
+        Box::new(Sink {
+            attempts: attempts.clone(),
+            frames: frames.clone(),
+        }),
+        interface(),
+    );
+    assert_eq!(start_swap(&mut methods), 1);
+    returned(methods.call(*b"A407", &submission(1, &[(0, 4, 2, 0x1000)]), 0xc));
     let mut reads = 0;
     assert!(
         methods
-            .present(|dva, bytes| {
+            .present(0, |dva, bytes| {
                 reads += 1;
                 assert!((0x1000..0x1020).contains(&dva));
                 bytes.fill(0x11);
@@ -820,37 +976,47 @@ fn failed_presents_keep_swap_order_until_abort() {
         bytes.fill(0x11);
         true
     };
+    // A failure keeps the vblank's latch: the retry needs no new vblank.
     assert_eq!(
-        methods.present(read),
+        methods.present(1, read),
         Err(refuse!("sink temporarily unavailable"))
     );
     assert!(methods.frame_pending() && !methods.callback_pending());
     assert!(frames.borrow().is_empty());
-    methods.present(read).unwrap();
+    methods.present(2, read).unwrap();
     assert_eq!(*attempts.borrow(), 2);
     assert_eq!(frames.borrow().len(), 1);
-    let callback = methods.take_callback().unwrap();
-    assert_eq!(callback.tag, SWAP_COMPLETE);
-    assert_eq!(&callback.input[..4], &1u32.to_le_bytes());
     // Presented, so the AP keeps its surfaces as the displayed ones.
-    assert_eq!(callback.input[SWAP_COMPLETE_DISPLAYED], 1);
-    (callback.then)(&mut methods, &[]).unwrap();
-    // The next submitted swap is still present, and an AP abort owns
+    complete(&mut methods, 1, true);
+    // The next submitted swap waits for its vblank, and an AP abort owns
     // its cancellation. It emits no invented successful completion.
+    assert_eq!(start_swap(&mut methods), 2);
+    returned(methods.call(*b"A407", &submission(2, &[(0, 4, 2, 0x2000)]), 0xc));
+    methods
+        .present(3, |_, _| panic!("no vblank passed"))
+        .unwrap();
     assert!(methods.frame_pending());
+    // Another client's abort leaves it queued; its own client's drops it.
     returned(methods.call(*b"A479", &[0; 8], 4));
+    assert!(methods.frame_pending());
+    returned(methods.call(*b"A479", &0xfeed_u64.to_le_bytes(), 4));
     assert!(!methods.frame_pending() && !methods.callback_pending());
     methods
-        .present(|_, _| panic!("aborted swap has no DMA"))
+        .present(methods.refresh_ticks, |_, _| {
+            panic!("aborted swap has no DMA")
+        })
         .unwrap();
     assert_eq!(*attempts.borrow(), 2);
+    // The aborted swap set layer 0: the next present composes its rows
+    // again, whatever the slot shows.
+    assert_eq!(methods.unshown, 1);
 }
 
 #[test]
 fn a_swap_is_started_submitted_presented_then_completed() {
     let screen = TestScreen(Rc::default(), Some(MODE));
     let frames = screen.0.clone();
-    let mut methods = Methods::new(Box::new(screen));
+    let mut methods = Methods::new(Box::new(screen), interface());
     assert!(returned(methods.call(*b"A403", &[], 0)).is_empty());
     assert_eq!(start_swap(&mut methods), 1);
     let submitted = returned(methods.call(*b"A407", &submission(1, &[(0, 4, 2, 0x1000)]), 0xc));
@@ -858,7 +1024,7 @@ fn a_swap_is_started_submitted_presented_then_completed() {
     // Not complete until presented.
     assert!(!methods.callback_pending() && methods.frame_pending());
     methods
-        .present(|dva, bytes| {
+        .present(0, |dva, bytes| {
             assert!((0x1000..0x1020).contains(&dva));
             bytes.fill(0x5a);
             true
@@ -880,15 +1046,18 @@ fn a_swap_is_started_submitted_presented_then_completed() {
 fn bounded_swap_logs_keep_boot_samples_failures_and_guest_completions() {
     let screen = TestScreen(Rc::default(), Some(MODE));
     let presented = screen.0.clone();
-    let mut methods = Methods::new(Box::new(screen));
+    let mut methods = Methods::new(Box::new(screen), interface());
     methods.set_swap_tracing(false);
-    let swap = |methods: &mut Methods| {
+    let period = methods.refresh_ticks;
+    let mut now = 0;
+    let mut swap = |methods: &mut Methods| {
         let id = start_swap(methods);
         let input = submission(id, &[]);
         assert_eq!(returned(methods.call(*b"A407", &input, 0xc)), [0; 12]);
         methods
-            .present(|_, _| panic!("a clear has no surface DMA"))
+            .present(now, |_, _| panic!("a clear has no surface DMA"))
             .unwrap();
+        now += period;
         let callback = methods.take_callback().unwrap();
         assert_eq!(callback.tag, SWAP_COMPLETE);
         assert_eq!(&callback.input[..4], &id.to_le_bytes());
@@ -900,21 +1069,20 @@ fn bounded_swap_logs_keep_boot_samples_failures_and_guest_completions() {
     for _ in 2..=PRESENT_SUMMARY_INTERVAL {
         swap(&mut methods);
     }
-    assert_eq!(
-        presented.borrow().len() as u64,
-        PRESENT_SUMMARY_INTERVAL + 1
-    );
+    // Every swap after the first clears a screen already clear: the
+    // scanout is given the first frame only.
+    assert_eq!(presented.borrow().len(), 1);
     assert!(methods.call(*b"A407", &first, 0xc).is_err());
 
     let records: Vec<_> = core::iter::from_fn(|| methods.take_log()).collect();
-    assert_eq!(records.len(), 14);
+    assert_eq!(records.len(), 15);
     for (index, input) in [first, second].iter().enumerate() {
         let logs = &records[6 * index..][..6];
         let id = index as u32 + 1;
         assert!(matches!(&logs[0], Log::Call { tag, .. } if tag == b"A406"));
         assert!(matches!(&logs[1], Log::Call { tag, .. } if tag == b"A407"));
         assert!(
-            matches!(&logs[2], Log::Payload { tag, bytes } if tag == b"A407" && bytes == input)
+            matches!(&logs[2], Log::Payload { tag, bytes, .. } if tag == b"A407" && bytes == input)
         );
         assert!(matches!(&logs[3], Log::Submitted { swap_id, .. } if *swap_id == id));
         assert!(matches!(&logs[4], Log::Presented { swap_id, .. } if *swap_id == id));
@@ -924,8 +1092,10 @@ fn bounded_swap_logs_keep_boot_samples_failures_and_guest_completions() {
         records[12].to_string(),
         "DCP present summary total=256 last_swap=256"
     );
+    // A refused call is logged with its refusal even when its kind is not.
+    assert!(matches!(&records[13], Log::Call { tag, .. } if tag == b"A407"));
     assert!(
-        matches!(&records[13], Log::Refused(reason) if reason.contains("names a swap that is not started"))
+        matches!(&records[14], Log::Refused(reason) if reason.contains("names a swap that is not started"))
     );
 
     methods.set_swap_tracing(true);
@@ -943,33 +1113,46 @@ fn bounded_swap_logs_keep_boot_samples_failures_and_guest_completions() {
 fn a_layer_left_out_of_the_mask_keeps_showing() {
     let screen = TestScreen(Rc::default(), Some(MODE));
     let frames = screen.0.clone();
-    let mut methods = Methods::new(Box::new(screen));
+    let mut methods = Methods::new(Box::new(screen), interface());
     start_swap(&mut methods);
     returned(methods.call(*b"A407", &submission(1, &[(2, 4, 2, 0x1000)]), 0xc));
     methods
-        .present(|_, bytes| {
+        .present(0, |_, bytes| {
             bytes.fill(1);
             true
         })
         .unwrap();
-    // A swap that enables no layer keeps layer 2.
+    complete(&mut methods, 1, true);
+    // A swap that enables no layer keeps layer 2: nothing on screen
+    // changes, so nothing is read or copied again, and the swap completes
+    // as displayed at its vblank.
     start_swap(&mut methods);
     returned(methods.call(*b"A407", &submission(2, &[]), 0xc));
+    let period = methods.refresh_ticks;
     methods
-        .present(|dva, bytes| {
-            assert!((0x1000..0x1020).contains(&dva));
-            bytes.fill(2);
-            true
-        })
+        .present(period, |_, _| panic!("an unchanged screen reads nothing"))
         .unwrap();
-    assert_eq!(frames.borrow()[1], [2, 2, 2, 0xff].repeat(8));
+    complete(&mut methods, 2, true);
+    assert_eq!(frames.borrow().len(), 1);
+    assert_eq!(frames.borrow()[0], [1, 1, 1, 0xff].repeat(8));
+    assert_eq!(methods.shown.unwrap()[2].unwrap().surface.iova, 0x1000);
+}
+
+/// Take the next callback, a completion of `swap_id` telling the AP
+/// whether it was `displayed`, and answer it.
+fn complete(methods: &mut Methods, swap_id: u32, displayed: bool) {
+    let callback = methods.take_callback().expect("a completion is due");
+    assert_eq!(callback.tag, SWAP_COMPLETE);
+    assert_eq!(&callback.input[..4], &swap_id.to_le_bytes());
+    assert_eq!(callback.input[SWAP_COMPLETE_DISPLAYED], u8::from(displayed));
+    (callback.then)(methods, &[]).unwrap();
 }
 
 #[test]
 fn several_layers_are_composed_bottom_to_top() {
     let screen = TestScreen(Rc::default(), Some(MODE));
     let frames = screen.0.clone();
-    let mut methods = Methods::new(Box::new(screen));
+    let mut methods = Methods::new(Box::new(screen), interface());
     start_swap(&mut methods);
     // Layer 0 covers the screen; layer 1, one pixel, sits at (3, 1).
     let mut two = submission(1, &[(0, 4, 2, 0x1000), (1, 1, 1, 0x2000)]);
@@ -977,7 +1160,7 @@ fn several_layers_are_composed_bottom_to_top() {
     two[at..at + 8].copy_from_slice(&[3, 0, 0, 0, 1, 0, 0, 0]);
     assert_eq!(returned(methods.call(*b"A407", &two, 0xc)), [0; 12]);
     methods
-        .present(|dva, bytes| {
+        .present(0, |dva, bytes| {
             bytes.fill(if dva >= 0x2000 { 0xff } else { 0x10 });
             true
         })
@@ -991,13 +1174,13 @@ fn several_layers_are_composed_bottom_to_top() {
 fn a_background_swap_clears_and_bad_swaps_refuse() {
     let screen = TestScreen(Rc::default(), Some(MODE));
     let frames = screen.0.clone();
-    let mut methods = Methods::new(Box::new(screen));
+    let mut methods = Methods::new(Box::new(screen), interface());
     // A submit without a start refuses.
     assert!(methods.call(*b"A407", &submission(0, &[]), 0xc).is_err());
     start_swap(&mut methods);
     returned(methods.call(*b"A407", &submission(1, &[]), 0xc));
     methods
-        .present(|_, _| panic!("a clear reads no surface"))
+        .present(0, |_, _| panic!("a clear reads no surface"))
         .unwrap();
     assert_eq!(frames.borrow()[0], [0, 0, 0, 0xff].repeat(8));
     // A source rectangle outside its surface refuses.
@@ -1013,4 +1196,493 @@ fn a_background_swap_clears_and_bad_swaps_refuse() {
     );
     // The refused submission keeps its accepted start until explicit abort.
     returned(methods.call(*b"A479", &[0; 8], 4));
+}
+
+#[test]
+fn pacing_reports_rate_gaps_stalls_lateness_and_queue_depth() {
+    let screen = TestScreen(Rc::default(), Some(MODE));
+    let mut methods = Methods::new(Box::new(screen), interface());
+    methods.set_swap_tracing(false);
+    let refresh = methods.refresh_ticks;
+    let submit = |methods: &mut Methods| {
+        let id = start_swap(methods);
+        returned(methods.call(*b"A407", &submission(id, &[]), 0xc));
+    };
+    let present = |methods: &mut Methods, now: u64| {
+        methods
+            .present(now, |_, _| panic!("a clear has no surface DMA"))
+            .unwrap();
+        while let Some(callback) = methods.take_callback() {
+            (callback.then)(methods, &[]).unwrap();
+        }
+    };
+    // One swap a refresh for ten seconds, each looked at 100 ticks after its
+    // vblank, but two wait at once at the start (one present, one merged)
+    // and one present comes three refreshes late.
+    let mut now = 0;
+    submit(&mut methods);
+    submit(&mut methods);
+    present(&mut methods, now);
+    while now < PACING_WINDOW - refresh {
+        now += if now == 100 * refresh {
+            3 * refresh
+        } else {
+            refresh
+        };
+        submit(&mut methods);
+        present(&mut methods, now + 100);
+    }
+    let pacing: Vec<_> = core::iter::from_fn(|| methods.take_log())
+        .filter_map(|log| match log {
+            Log::Pacing(pacing) => Some(pacing),
+            _ => None,
+        })
+        .collect();
+    assert!(pacing.is_empty());
+    // The window closes at the first vblank ten seconds after it opened,
+    // whether or not anything is presented there.
+    methods.refresh(PACING_WINDOW + 50);
+    let pacing: Vec<_> = core::iter::from_fn(|| methods.take_log())
+        .filter_map(|log| match log {
+            Log::Pacing(pacing) => Some(pacing),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pacing.len(), 1);
+    let pacing = &pacing[0];
+    assert_eq!(pacing.ticks, PACING_WINDOW / refresh * refresh);
+    assert_eq!(pacing.stalls, 1);
+    assert_eq!(pacing.deepest, 2);
+    assert_eq!(pacing.merged, 1);
+    assert_eq!(pacing.reordered, 0);
+    // Gaps are between vblanks: whole periods, however late each look.
+    assert_eq!(pacing.shortest, refresh);
+    assert_eq!(pacing.longest, 3 * refresh);
+    assert_eq!(pacing.total_gap, now);
+    assert_eq!(pacing.gaps + 1, pacing.presented);
+    assert_eq!(pacing.late_longest, 100);
+    assert_eq!(pacing.late_total, 100 * u64::from(pacing.presented - 1));
+    assert_eq!(pacing.submitted, pacing.presented + 1);
+    let line = pacing.to_string();
+    assert!(
+        line.starts_with("DCP PACING seconds=10.0 presented=") && line.contains(" merged=1 "),
+        "{line}"
+    );
+    // A window in which nothing was submitted or shown is not reported.
+    methods.refresh(2 * PACING_WINDOW + refresh);
+    assert!(core::iter::from_fn(|| methods.take_log()).next().is_none());
+}
+
+#[test]
+fn ready_swaps_latch_at_one_vblank_and_the_newest_is_shown() {
+    let screen = TestScreen(Rc::default(), Some(MODE));
+    let frames = screen.0.clone();
+    let mut methods = Methods::new(Box::new(screen), interface());
+    let period = methods.refresh_ticks;
+    let fill = |dva: u64, bytes: &mut [u8]| {
+        bytes.fill((dva >> 12) as u8);
+        true
+    };
+    // The first look starts the grid.
+    methods.refresh(0);
+    // Three swaps, each replacing layer 0 with its own surface, all ready
+    // before the next vblank.
+    for dva in [0x1000, 0x2000, 0x3000] {
+        let id = start_swap(&mut methods);
+        returned(methods.call(*b"A407", &submission(id, &[(0, 4, 2, dva)]), 0xc));
+    }
+    // Between vblanks nothing is shown.
+    assert!(!methods.frame_ready(period - 1));
+    methods.present(period - 1, fill).unwrap();
+    assert!(frames.borrow().is_empty() && !methods.callback_pending());
+    // At the vblank, one present: the newest. All three complete in order;
+    // the two it replaced in every slot they set were not displayed.
+    methods.present(period + 7, fill).unwrap();
+    assert_eq!(frames.borrow().len(), 1);
+    assert_eq!(frames.borrow()[0], [3, 3, 3, 0xff].repeat(8));
+    complete(&mut methods, 1, false);
+    complete(&mut methods, 2, false);
+    complete(&mut methods, 3, true);
+    assert!(methods.take_callback().is_none());
+    assert_eq!(methods.pacing.merged, 2);
+    // A swap submitted between ticks shows at the next tick, not before.
+    let id = start_swap(&mut methods);
+    returned(methods.call(*b"A407", &submission(id, &[(0, 4, 2, 0x4000)]), 0xc));
+    methods.present(period + 100, fill).unwrap();
+    methods.present(2 * period - 1, fill).unwrap();
+    assert_eq!(frames.borrow().len(), 1);
+    methods.present(2 * period, fill).unwrap();
+    assert_eq!(frames.borrow().len(), 2);
+    complete(&mut methods, id, true);
+    // At most one present a vblank, however many looks fall in it.
+    let id = start_swap(&mut methods);
+    returned(methods.call(*b"A407", &submission(id, &[(0, 4, 2, 0x5000)]), 0xc));
+    methods.present(2 * period + 1, fill).unwrap();
+    assert_eq!(frames.borrow().len(), 2);
+    assert!(methods.frame_pending());
+}
+
+#[test]
+fn a_merged_swap_whose_surface_stays_on_screen_completes_as_displayed() {
+    let screen = TestScreen(Rc::default(), Some(MODE));
+    let mut methods = Methods::new(Box::new(screen), interface());
+    let fill = |_: u64, bytes: &mut [u8]| {
+        bytes.fill(0x40);
+        true
+    };
+    let id = start_swap(&mut methods);
+    returned(methods.call(*b"A407", &submission(id, &[(0, 4, 2, 0x1000)]), 0xc));
+    methods.present(0, fill).unwrap();
+    complete(&mut methods, id, true);
+    // Cursor swaps: layer 1, the same surface each time, moved. The first
+    // two are merged into the third, and as their surface is still on
+    // screen they complete as displayed.
+    let cursor = |methods: &mut Methods| {
+        let id = start_swap(methods);
+        let input = submission(id, &[(1, 1, 1, 0x8000)]);
+        let mut input = input;
+        input[swap::ENABLED..swap::ENABLED + 4].copy_from_slice(&2u32.to_le_bytes());
+        returned(methods.call(*b"A407", &input, 0xc));
+        id
+    };
+    let ids = [
+        cursor(&mut methods),
+        cursor(&mut methods),
+        cursor(&mut methods),
+    ];
+    methods.present(methods.refresh_ticks, fill).unwrap();
+    for id in ids {
+        complete(&mut methods, id, true);
+    }
+}
+
+#[test]
+fn a_cursor_only_swap_presents_only_the_rows_its_rectangles_cover() {
+    #[derive(Clone, Default)]
+    struct Damage(Rc<RefCell<Vec<Option<core::ops::Range<usize>>>>>);
+    impl Scanout for Damage {
+        fn mode(&self) -> Mode {
+            Mode {
+                width: 4,
+                height: 8,
+                format: PixelFormat::Bgra8888,
+            }
+        }
+        fn present(&mut self, _: &[u8]) -> Result<()> {
+            unreachable!("rows are taken")
+        }
+        fn try_present_rows(
+            &mut self,
+            damage: Option<core::ops::Range<usize>>,
+            fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
+        ) -> Result<bool> {
+            let mut row = [0; 16];
+            for y in damage.clone().unwrap_or(0..8) {
+                fill(y, &mut row)?;
+            }
+            self.0.borrow_mut().push(damage);
+            Ok(true)
+        }
+    }
+    let sink = Damage::default();
+    let presented = sink.0.clone();
+    let mut methods = Methods::new(Box::new(sink), interface());
+    let period = methods.refresh_ticks;
+    let cursor_at = |methods: &mut Methods, y: u8, base: bool| {
+        let id = start_swap(methods);
+        let mut layers = alloc::vec![(1, 2, 2, 0x8000)];
+        if base {
+            layers.insert(0, (0, 4, 8, 0x1000));
+        }
+        let mut input = submission(id, &layers);
+        let at = swap::DESTINATION_RECTS + 16;
+        input[at..at + 8].copy_from_slice(&[1, 0, 0, 0, y, 0, 0, 0]);
+        if !base {
+            input[swap::ENABLED..swap::ENABLED + 4].copy_from_slice(&2u32.to_le_bytes());
+        }
+        returned(methods.call(*b"A407", &input, 0xc));
+    };
+    cursor_at(&mut methods, 1, true);
+    methods.present(0, |_, _| true).unwrap();
+    // The cursor moves from rows 1..3 to rows 5..7: those rows only.
+    cursor_at(&mut methods, 5, false);
+    methods.present(period, |_, _| true).unwrap();
+    // Two moves merged into one vblank: the rows of where it was shown and
+    // where it is shown now.
+    cursor_at(&mut methods, 3, false);
+    cursor_at(&mut methods, 4, false);
+    methods.present(2 * period, |_, _| true).unwrap();
+    assert_eq!(*presented.borrow(), [None, Some(1..7), Some(4..7)]);
+}
+
+#[test]
+fn a_swap_waits_for_the_gpu_fences_of_the_surfaces_it_shows() {
+    let screen = TestScreen(Rc::default(), Some(MODE));
+    let frames = screen.0.clone();
+    let mut methods = Methods::new(Box::new(screen), interface());
+    methods.set_swap_tracing(false);
+    assert_eq!(row(b"A470").name, "io_fence_notify");
+    let notify = |methods: &mut Methods, swap: u32, surface: u32| {
+        let input = Packed::new()
+            .u32(swap)
+            .u32(surface)
+            .u64(0x1234)
+            .u32(0)
+            .finish(0x14)
+            .unwrap();
+        assert_eq!(returned(methods.call(*b"A470", &input, 4)), [0; 4]);
+    };
+    let layer = [(0, 4, 2, 0x1000)];
+    let fill = |_: u64, bytes: &mut [u8]| {
+        bytes.fill(0x5a);
+        true
+    };
+    let complete = |methods: &mut Methods| {
+        let callback = methods.take_callback().unwrap();
+        (callback.then)(methods, &[]).unwrap();
+    };
+
+    let period = methods.refresh_ticks;
+    // Submitted while the GPU still draws surface 5: not shown until the AP
+    // names it, and another surface's fence does not count.
+    let id = start_swap(&mut methods);
+    returned(methods.call(
+        *b"A407",
+        &fenced_submission(id, &layer, 1, [5, 0, 0, 0]),
+        0xc,
+    ));
+    methods.refresh(0);
+    assert!(methods.frame_pending() && !methods.frame_ready(0));
+    methods
+        .present(0, |_, _| panic!("a fenced surface is not read"))
+        .unwrap();
+    assert!(frames.borrow().is_empty() && !methods.callback_pending());
+    notify(&mut methods, id, 9);
+    methods.refresh(period);
+    assert!(!methods.frame_ready(period));
+    // Ready between vblanks: shown at the next one.
+    notify(&mut methods, id, 5);
+    assert!(!methods.frame_ready(period + 1));
+    methods.refresh(2 * period);
+    assert!(methods.frame_ready(2 * period));
+    methods.present(2 * period, fill).unwrap();
+    assert_eq!(frames.borrow().len(), 1);
+    complete(&mut methods);
+
+    // A fence that signals before its swap is submitted is kept for it.
+    let id = start_swap(&mut methods);
+    notify(&mut methods, id, 5);
+    returned(methods.call(
+        *b"A407",
+        &fenced_submission(id, &layer, 1, [5, 0, 0, 0]),
+        0xc,
+    ));
+    methods.refresh(3 * period);
+    assert!(methods.frame_ready(3 * period));
+    methods.present(3 * period, fill).unwrap();
+    complete(&mut methods);
+
+    // Swaps show in order: a ready swap waits behind a fenced one. Without
+    // its notice, the fenced one is shown after the timeout, reported once,
+    // and the ready one behind it is latched with it.
+    let fenced = start_swap(&mut methods);
+    returned(methods.call(
+        *b"A407",
+        &fenced_submission(fenced, &layer, 1, [5, 0, 0, 0]),
+        0xc,
+    ));
+    let ready = start_swap(&mut methods);
+    returned(methods.call(*b"A407", &submission(ready, &layer), 0xc));
+    let since = 4 * period;
+    methods.refresh(since);
+    assert!(!methods.frame_ready(since));
+    let timeout = since + FENCE_TIMEOUT.next_multiple_of(period);
+    methods.refresh(timeout - period);
+    assert!(!methods.frame_ready(timeout - period));
+    methods.refresh(timeout);
+    assert!(methods.frame_ready(timeout));
+    methods.present(timeout, fill).unwrap();
+    complete(&mut methods);
+    complete(&mut methods);
+    assert!(!methods.frame_pending());
+    assert_eq!(frames.borrow().len(), 3);
+    let timeouts: Vec<_> = core::iter::from_fn(|| methods.take_log())
+        .filter(
+            |log| matches!(log, Log::FenceTimeout { swap_id, fenced: 1, .. } if *swap_id == fenced),
+        )
+        .collect();
+    assert_eq!(timeouts.len(), 1);
+    assert_eq!(
+        (methods.pacing.fence_waits, methods.pacing.fence_timeouts),
+        (2, 1)
+    );
+
+    // A notice for a swap that is gone changes nothing.
+    notify(&mut methods, fenced, 5);
+    assert!(!methods.frame_pending());
+}
+
+#[test]
+fn each_set_parameter_dcp_parameter_is_reported_with_its_answer() {
+    let mut methods = methods();
+    let parameter = |id: u32| {
+        let mut packed = Packed::new().u32(id).u64(1);
+        for _ in 0..3 {
+            packed = packed.u64(0);
+        }
+        packed.u32(1).finish(0x28).unwrap()
+    };
+    // WindowServer retries a failure forever: success, value ignored.
+    assert_eq!(returned(methods.call(*b"A450", &parameter(6), 4)), [0; 4]);
+    assert_eq!(returned(methods.call(*b"A450", &parameter(6), 4)), [0; 4]);
+    assert_eq!(returned(methods.call(*b"A450", &parameter(15), 4)), [0; 4]);
+    let reported = methods.take_unmodeled();
+    assert_eq!(reported.len(), 2, "{reported:?}");
+    assert!(reported[0].contains("set_parameter_dcp (0x6): answered success, value ignored"));
+    assert!(reported[1].contains("(0xf)"));
+    let entry = core::iter::from_fn(|| methods.take_log())
+        .find(|entry| matches!(entry, Log::Unmodeled { .. }))
+        .unwrap();
+    assert_eq!(
+        entry.to_string(),
+        "DCP unmodeled A450 set_parameter_dcp (0x6): answered success, value ignored \
+         (the caller retries a failure forever): the fixed mode runs as it is"
+    );
+}
+
+#[test]
+fn an_abort_drops_only_its_clients_swaps() {
+    let screen = TestScreen(Rc::default(), Some(MODE));
+    let mut methods = Methods::new(Box::new(screen), interface());
+    let kept = start_client_swap(&mut methods, 0x1000);
+    let aborted = start_client_swap(&mut methods, 0x3000);
+    returned(methods.call(*b"A407", &submission(kept, &[]), 0xc));
+    returned(methods.call(*b"A407", &submission(aborted, &[]), 0xc));
+    let open_kept = start_client_swap(&mut methods, 0x1000);
+    let open_aborted = start_client_swap(&mut methods, 0x3000);
+    // abort_swaps_dcp(0x3000).
+    let abort = Packed::new().u64(0x3000).finish(8).unwrap();
+    assert_eq!(returned(methods.call(*b"A479", &abort, 4)), [0; 4]);
+    assert_eq!(started_ids(&methods), [open_kept]);
+    assert!(!started_ids(&methods).contains(&open_aborted));
+    let queued: Vec<u32> = methods.frames.iter().map(|frame| frame.swap_id).collect();
+    assert_eq!(queued, [kept]);
+    // The other client's swap is still presented and completed.
+    methods.present(0, |_, _| true).unwrap();
+    let callback = methods.take_callback().unwrap();
+    assert_eq!(callback.tag, SWAP_COMPLETE);
+    assert_eq!(&callback.input[..4], &kept.to_le_bytes());
+}
+
+#[test]
+fn without_tracing_each_method_logs_its_first_call_and_every_refusal() {
+    let mut methods = methods();
+    methods.set_swap_tracing(false);
+    for _ in 0..3 {
+        returned(methods.call(*b"A451", &[], 4));
+    }
+    assert!(methods.call(*b"A451", &[], 8).is_err());
+    let calls: Vec<_> = core::iter::from_fn(|| methods.take_log()).collect();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert!(matches!(&calls[0], Log::Call { tag, output: 4, .. } if tag == b"A451"));
+    // The refused call is logged before its refusal.
+    assert!(matches!(&calls[1], Log::Call { tag, output: 8, .. } if tag == b"A451"));
+    assert!(matches!(&calls[2], Log::Refused(_)));
+    // Tracing logs every call.
+    methods.set_swap_tracing(true);
+    returned(methods.call(*b"A451", &[], 4));
+    returned(methods.call(*b"A451", &[], 4));
+    assert_eq!(core::iter::from_fn(|| methods.take_log()).count(), 2);
+    // The pacing summary counts every call.
+    assert_eq!(methods.pacing.calls, 6);
+}
+
+#[test]
+fn a_waiting_swap_or_a_queued_flip_wakes_the_display_at_its_next_vblank() {
+    /// A sink whose frames wait for a flush, as a page flip requested
+    /// only on the boot CPU does.
+    #[derive(Clone, Default)]
+    struct Queued(Rc<RefCell<(bool, usize)>>);
+    impl Scanout for Queued {
+        fn mode(&self) -> Mode {
+            MODE
+        }
+        fn present(&mut self, _: &[u8]) -> Result<()> {
+            self.0.borrow_mut().0 = true;
+            Ok(())
+        }
+        fn queued(&self) -> bool {
+            self.0.borrow().0
+        }
+        fn flush(&mut self) -> Result<()> {
+            let mut state = self.0.borrow_mut();
+            state.1 += 1;
+            state.0 = state.1 < 2;
+            Ok(())
+        }
+    }
+    let sink = Queued::default();
+    let state = sink.0.clone();
+    let mut methods = Methods::new(Box::new(sink), interface());
+    let period = methods.refresh_ticks;
+    methods.refresh(0);
+    assert_eq!(methods.refresh_deadline(), None);
+    // No client listens, but a submitted swap needs the next vblank.
+    let id = start_swap(&mut methods);
+    returned(methods.call(*b"A407", &submission(id, &[(0, 4, 2, 0x1000)]), 0xc));
+    assert_eq!(methods.refresh_deadline(), Some(period));
+    methods.present(period, |_, _| true).unwrap();
+    // The frame's flip is queued: the display needs the next vblank for it,
+    // and each look flushes until the sink has nothing queued.
+    assert!(!methods.frame_pending());
+    assert_eq!(methods.refresh_deadline(), Some(2 * period));
+    methods.refresh(period + 1);
+    assert_eq!(*state.borrow(), (true, 1));
+    methods.refresh(2 * period);
+    assert_eq!(*state.borrow(), (false, 2));
+    assert_eq!(methods.refresh_deadline(), None);
+}
+
+#[test]
+fn a_present_that_moves_a_layer_whole_counts_as_moved() {
+    let layer = |x, y, width| {
+        Some(scanout::Layer {
+            surface: scanout::Surface {
+                width: 32,
+                height: 32,
+                stride: 128,
+                format: PixelFormat::Bgra8888,
+                iova: 0x1000,
+            },
+            source: scanout::Rect {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 32,
+            },
+            destination: scanout::Rect {
+                x,
+                y,
+                width,
+                height: 32,
+            },
+            premultiplied: true,
+        })
+    };
+    let shown = [layer(0, 0, 640), layer(10, 20, 32), None, None];
+    // The pointer's layer at another place: moved.
+    assert!(moved(
+        &shown,
+        &[layer(0, 0, 640), layer(11, 20, 32), None, None]
+    ));
+    // Unchanged, resized in place, or shown in a slot empty before: not.
+    assert!(!moved(&shown, &shown));
+    assert!(!moved(
+        &shown,
+        &[layer(0, 0, 640), layer(10, 20, 64), None, None]
+    ));
+    assert!(!moved(
+        &shown,
+        &[layer(0, 0, 640), layer(10, 20, 32), layer(5, 5, 32), None]
+    ));
 }

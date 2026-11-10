@@ -106,9 +106,17 @@ pub const SECONDARY_NULL: usize = SURFACE_NULL + LAYERS;
 
 /// Record offsets.
 pub const SWAP_ID: usize = 0x98;
+/// The four layers' surface IDs (`IOSurface::getID`), which
+/// `io_fence_notify` names.
+pub const SURFACE_IDS: usize = 0x9c;
 pub const SOURCE_RECTS: usize = 0xac;
 pub const DESTINATION_RECTS: usize = 0x10c;
 pub const ENABLED: usize = 0x14c;
+/// The layers whose content is ready at submission.
+/// `IOMobileFramebufferAP::swap_apply_fences` (0x3d97e30) sets a layer's bit
+/// once its surface's GPU fence has signaled, or when it has no surface; a
+/// layer still drawing stays clear until `io_fence_notify` names its surface.
+pub const READY: usize = 0x150;
 pub const BACKGROUND: usize = 0x154;
 /// Linux `DCP_REMOVE_LAYERS`.
 pub const REMOVE_LAYERS: u32 = 1 << 31;
@@ -277,6 +285,10 @@ pub struct Submission {
     pub enabled: u32,
     /// The background color (m1n1 14.7 `bg_color`).
     pub background: u32,
+    /// The layers whose content was ready at submission ([`READY`]).
+    pub ready: u32,
+    /// Each layer's surface ID.
+    pub surface_ids: [u32; LAYERS],
     /// Each layer's surface, when its pointer is not null.
     pub layers: [Option<Layer>; LAYERS],
 }
@@ -321,8 +333,19 @@ impl Submission {
             swap_id: u32_at(input, SWAP_ID),
             enabled,
             background: u32_at(input, BACKGROUND),
+            ready: u32_at(input, READY),
+            surface_ids: core::array::from_fn(|index| u32_at(input, SURFACE_IDS + index * 4)),
             layers,
         })
+    }
+
+    /// The enabled layers whose surface the GPU may still be drawing: each
+    /// waits for `io_fence_notify` to name its surface.
+    pub fn fenced(&self) -> u32 {
+        let surfaces = (0..LAYERS).fold(0, |mask, index| {
+            mask | (u32::from(self.layers[index].is_some()) << index)
+        });
+        self.enabled & surfaces & !self.ready
     }
 
     /// The layer state after this swap, from the state before it: an
@@ -385,7 +408,41 @@ pub mod tests {
             }
         }
         input[ENABLED..ENABLED + 4].copy_from_slice(&enabled.to_le_bytes());
+        // As the AP marks layers whose GPU fences already signaled.
+        input[READY..READY + 4].copy_from_slice(&enabled.to_le_bytes());
         input
+    }
+
+    /// [`submission`] with `fenced` layers still drawing: clear in
+    /// [`READY`], and layer `i`'s surface ID `ids[i]`.
+    pub fn fenced_submission(
+        swap_id: u32,
+        layers: &[(usize, u32, u32, u64)],
+        fenced: u32,
+        ids: [u32; LAYERS],
+    ) -> Vec<u8> {
+        let mut input = submission(swap_id, layers);
+        let ready = u32_at(&input, READY) & !fenced;
+        input[READY..READY + 4].copy_from_slice(&ready.to_le_bytes());
+        for (index, id) in ids.iter().enumerate() {
+            let at = SURFACE_IDS + index * 4;
+            input[at..at + 4].copy_from_slice(&id.to_le_bytes());
+        }
+        input
+    }
+
+    #[test]
+    fn layers_left_out_of_the_ready_mask_wait_for_their_fence() {
+        let both = [(0, 4, 2, 0x8000), (1, 4, 2, 0x9000)];
+        let ready = Submission::parse(&submission(3, &both)).unwrap();
+        assert_eq!(ready.fenced(), 0);
+        let input = fenced_submission(3, &both, 0b10, [7, 9, 0, 0]);
+        let parsed = Submission::parse(&input).unwrap();
+        assert_eq!((parsed.fenced(), parsed.surface_ids), (0b10, [7, 9, 0, 0]));
+        // A layer without a surface has nothing to wait for.
+        let mut cleared = input.clone();
+        cleared[SURFACE_NULL + 1] = 1;
+        assert_eq!(Submission::parse(&cleared).unwrap().fenced(), 0);
     }
 
     #[test]
@@ -398,7 +455,11 @@ pub mod tests {
         assert_eq!(SECONDARY_DVAS + SECONDARY * 8 + 0x1a, RECORD_NULL);
         assert_eq!(RECORD_NULL + 1 + LAYERS + SECONDARY + 3, SUBMIT_BYTES);
         assert_eq!(
-            super::super::abi::method(b"A407").unwrap().input as usize,
+            super::super::abi::interface(211)
+                .unwrap()
+                .method(b"A407")
+                .unwrap()
+                .input as usize,
             SUBMIT_BYTES
         );
     }

@@ -209,6 +209,12 @@ impl<S: Service> Link<S> {
         }
     }
 
+    /// The interface version the link announces.
+    #[cfg(test)]
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+
     pub fn service(&self) -> &S {
         &self.service
     }

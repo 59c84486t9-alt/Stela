@@ -1139,7 +1139,8 @@ impl Devices for AppleDevices {
             })
             .chain(self.native_pmp_dma_deadline())
             .chain(self.native_pmp_services_deadline())
-            // A display's refresh, which its notification clients pace by.
+            // A display's next vblank, while its notification clients pace
+            // by it, a swap waits to be latched or a queued flip to be made.
             .chain(self.dcp_masters.iter().filter_map(|master| {
                 self.bus
                     .device::<Asc>(master.asc)
@@ -1365,13 +1366,19 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// The DCPs' step: each one's link DMA first, so a submit or a fence
+    /// notice the AP sent is seen by this step's vblank; then the display at
+    /// `now` (its vblank, a present latched at it); then the link DMA again
+    /// for the callbacks the vblank queued, its vsync and the completions.
     fn transfer_dcp(
         &mut self,
         cpu: usize,
         memory: &mut dyn Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
-        for master in &self.dcp_masters {
+        for index in 0..self.dcp_masters.len() {
+            self.service_dcp_link(index, cpu, memory, now)?;
+            let master = &self.dcp_masters[index];
             let presenting = self
                 .bus
                 .device_mut::<Asc>(master.asc)
@@ -1379,7 +1386,7 @@ impl AppleDevices {
                 .and_then(Asc::firmware_mut::<dcp::Coprocessor>)
                 .is_some_and(|coprocessor| {
                     coprocessor.refresh(now);
-                    coprocessor.frame_pending()
+                    coprocessor.frame_ready(now)
                 });
             if presenting {
                 let (surface, stream) = master.surface.ok_or_else(|| {
@@ -1402,29 +1409,41 @@ impl AppleDevices {
                     memory,
                     access: &mut access,
                 };
-                coprocessor.present(&mut port).map_err(|reason| {
+                coprocessor.present(now, &mut port).map_err(|reason| {
                     DeviceError::TransferRefused(refuse!("DCPEXT swap surface").because(reason))
                 })?;
             }
-            let (asc, dart) = self
-                .bus
-                .pair_mut::<Asc, Dart>(master.asc, master.dart)
-                .expect("a DCP master names its ASC and DART");
-            if !asc.dma_pending() {
-                continue;
-            }
-            let mut access = Access::new(cpu, now, &mut self.latch);
-            let mut port = Port {
-                iommu: dart,
-                stream: master.stream,
-                memory,
-                access: &mut access,
-            };
-            asc.service_dma(&mut port).map_err(|reason| {
-                DeviceError::TransferRefused(refuse!("DCPEXT link DMA").because(reason))
-            })?;
+            self.service_dcp_link(index, cpu, memory, now)?;
         }
         Ok(())
+    }
+
+    /// Run DCP `index`'s queued link DMA, if any.
+    fn service_dcp_link(
+        &mut self,
+        index: usize,
+        cpu: usize,
+        memory: &mut dyn Memory,
+        now: u64,
+    ) -> Result<(), DeviceError> {
+        let master = &self.dcp_masters[index];
+        let (asc, dart) = self
+            .bus
+            .pair_mut::<Asc, Dart>(master.asc, master.dart)
+            .expect("a DCP master names its ASC and DART");
+        if !asc.dma_pending() {
+            return Ok(());
+        }
+        let mut access = Access::new(cpu, now, &mut self.latch);
+        let mut port = Port {
+            iommu: dart,
+            stream: master.stream,
+            memory,
+            access: &mut access,
+        };
+        asc.service_dma(&mut port).map_err(|reason| {
+            DeviceError::TransferRefused(refuse!("DCPEXT link DMA").because(reason))
+        })
     }
 
     fn transfer_usb(

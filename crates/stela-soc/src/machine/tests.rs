@@ -2204,7 +2204,8 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
         tag: &[u8; 4],
         input: &[u8],
         output: u32,
-    ) {
+        now: u64,
+    ) -> Vec<(u64, u64)> {
         let stream = link::Stream {
             owner: link::Owner::Ap,
             index: 1,
@@ -2230,11 +2231,14 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
             })
             .encode(),
         );
-        d.transfer(0, memory, 0).unwrap();
+        d.transfer(0, memory, now).unwrap();
         let reply = mailbox_drain(d, WRAPPER);
-        assert_eq!(reply.len(), 1);
-        assert_eq!(reply[0].0, 0x37);
+        assert!(!reply.is_empty());
+        assert!(reply.iter().all(|&(endpoint, _)| endpoint == 0x37));
+        reply
     }
+    // 60 Hz on the 24 MHz counter.
+    const PERIOD: u64 = 400_000;
     let mut d = AppleDevices::new();
     d.add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
         .unwrap();
@@ -2267,7 +2271,8 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
             window: Some(RAM),
             surface: Some((dart, 5)),
         },
-        stela_formats::builds::DEFAULT,
+        // The build whose DCP tags this test sends.
+        stela_formats::builds::find("26A434").unwrap(),
     )
     .unwrap();
     connect_native_power(&mut d, SUPPLY, &[("/arm-io/dcpext", WRAPPER)], true);
@@ -2292,7 +2297,8 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
     send(&mut d, 0x37, link::Word::Region { dva: 0x4000 }.encode());
     d.transfer(0, &mut memory, 0).unwrap();
     assert_eq!(mailbox_drain(&mut d, WRAPPER).len(), 1);
-    call(&mut d, &mut memory, b"A406", &[0; 0x10], 8);
+    // The display's first look, at 0, starts its vblank grid.
+    call(&mut d, &mut memory, b"A406", &[0; 0x10], 8, 0);
     assert!(memory.ram.write(PIXELS, &[1, 2, 3, 255]));
     call(
         &mut d,
@@ -2300,11 +2306,12 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
         b"A407",
         &swap::tests::submission(1, &[(0, 1, 1, PIXELS)]),
         0xc,
+        1,
     );
     for gate in [4, 0x40f, 0] {
         d.write(0, SUPPLY, 4, gate, 0).unwrap();
         let before = (memory.reads, memory.writes);
-        d.transfer(0, &mut memory, 0).unwrap();
+        d.transfer(0, &mut memory, PERIOD).unwrap();
         assert_eq!((memory.reads, memory.writes), before);
         assert_eq!(*frames.borrow(), 0);
         assert!(
@@ -2317,7 +2324,10 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
         );
         d.write(0, SUPPLY, 4, 15, 0).unwrap();
     }
-    d.transfer(0, &mut memory, 0).unwrap();
+    // The swap waits for a vblank: none is passed between them.
+    d.transfer(0, &mut memory, PERIOD - 1).unwrap();
+    assert_eq!(*frames.borrow(), 0);
+    d.transfer(0, &mut memory, 2 * PERIOD).unwrap();
     assert_eq!(*frames.borrow(), 1);
     assert!(
         !d.bus
@@ -2327,8 +2337,23 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
             .unwrap()
             .frame_pending()
     );
-    d.transfer(0, &mut memory, 0).unwrap();
+    d.transfer(0, &mut memory, 2 * PERIOD).unwrap();
     assert_eq!(*frames.borrow(), 1);
+    mailbox_drain(&mut d, WRAPPER);
+    // The AP answers the completion; a swap submitted in the step of a
+    // vblank is latched at it, in that step: its completion's call leaves
+    // with the submit's reply.
+    call(&mut d, &mut memory, b"A406", &[0; 0x10], 8, 2 * PERIOD + 1);
+    assert!(memory.ram.write(PIXELS, &[1, 2, 3, 255]));
+    call(
+        &mut d,
+        &mut memory,
+        b"A407",
+        &swap::tests::submission(2, &[(0, 1, 1, PIXELS)]),
+        0xc,
+        3 * PERIOD,
+    );
+    assert_eq!(*frames.borrow(), 2);
 }
 
 #[test]

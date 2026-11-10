@@ -168,6 +168,12 @@ pub trait Firmware: Any {
     fn take_transition(&mut self) -> Option<TransitionRequest> {
         None
     }
+    /// Requests the firmware answered degraded on its own transports (not
+    /// a refused mailbox message, which the wrapper reports), each reported
+    /// once, since the last call.
+    fn take_unmodeled(&mut self) -> Vec<String> {
+        Vec::new()
+    }
     /// The coprocessor's own error reply to `message`, a request it does
     /// not implement (`reason`; docs/design/runtime.md "Unsupported
     /// operations"). `None`, the default, when its protocol has no error reply for that request: the request is then left
@@ -256,7 +262,9 @@ impl Asc {
     /// The requests answered degraded for the first time since the last
     /// call.
     pub fn take_unmodeled(&mut self) -> Vec<String> {
-        core::mem::take(&mut self.unmodeled)
+        let mut lines = core::mem::take(&mut self.unmodeled);
+        lines.extend(self.firmware.take_unmodeled());
+        lines
     }
 
     /// Emulated boot-chain handoff: native firmware is running and both

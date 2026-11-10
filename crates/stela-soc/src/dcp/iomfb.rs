@@ -4,9 +4,15 @@
 //! coprocessor makes. Every call is first checked against its interface row
 //! ([`super::abi`]); a tag outside the interface and a call whose sizes differ
 //! from its row refuse by name. A method of the interface the model does not
-//! serve is reported once and answers zeros, as a refusal would leave the
-//! AP's call open for good: an unmodeled operation is a recorded gap, and its
-//! zeros are no model of it.
+//! serve must still be answered, as a refusal would leave the AP's call open
+//! for good. It is reported once (an `UNMODELED` line through
+//! [`Methods::take_unmodeled`]) and answered degraded ([`Degraded`]): a
+//! method whose AP stub reads a link status gets the protocol's
+//! `kIOReturnUnsupported` ([`abi::LINK_UNSUPPORTED`]), its in-out argument
+//! returned as it came; any other answers zeros, which is no model of it.
+//!
+//! Each method's first call is logged; every call only under swap tracing
+//! (`--display-trace`), and a refused call always, before its refusal.
 //!
 //! The boot sequence follows Asahi Linux's AP side of the same protocol
 //! (`drivers/gpu/drm/apple/iomfb_template.c`: `boot_1` .. `boot_done`,
@@ -43,6 +49,26 @@
 //! DART, composes and presents them and only then completes the swap with
 //! `D594 swap_complete_ap_gated` ([`super::Coprocessor::present`]).
 //!
+//! Timing follows a display controller's: the monitor refreshes on a fixed
+//! grid of vertical blanks ([`Methods::refresh`]), and a swap is latched at
+//! one. At each vblank the swaps whose GPU fences have all signaled, taken
+//! in submission order up to the first still waiting, are latched together:
+//! the newest is shown, since its layer state already holds every earlier
+//! one's, and all of them complete after it, in order. At most one frame is
+//! presented per refresh, however late the model looks or however many
+//! swaps a slow frame held back, so a backlog clears at one vblank rather
+//! than one per device step. An earlier swap of the batch completes as
+//! displayed unless a later one replaced every layer it set and none of its
+//! surfaces is on screen: then it completes as not displayed and the AP
+//! releases its surfaces at once (`SWAP_COMPLETE_DISPLAYED`). Every swap the
+//! AP submitted is completed; none is dropped. The AP bounds what it queues
+//! itself: in the runs measured, WindowServer kept at most two of its own
+//! swaps open, while its cursor client (layer 1 only, one surface moved)
+//! kept submitting behind a fenced frame, 19 deep at most, until it
+//! cleared. The vsync callback
+//! `D588` carries the vblank's own counter value, not the time the model
+//! looked.
+//!
 //! Composition (Inferred: the coprocessor's compositor is undocumented):
 //! layers 0..3 stack bottom to top over opaque black, each a source
 //! rectangle of its surface scaled nearest-neighbour into its destination
@@ -53,7 +79,7 @@
 //! black, an X byte of any value shows the colour unchanged.
 use super::super::scanout::{self, Mode, Scanout};
 use super::Log;
-use super::abi::{self, Fields, IO_RETURN_SUCCESS, Packed};
+use super::abi::{self, Fields, IO_RETURN_SUCCESS, Interface, LINK_UNSUPPORTED, Method, Packed};
 use super::avipc::DisplayState;
 use super::link::SHARED_VARIABLES;
 use super::modes::{self, Advertised};
@@ -65,11 +91,19 @@ use alloc::collections::{BTreeSet, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
+use alloc::string::ToString;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use stela_contracts::Refusal;
 use stela_contracts::refuse;
+
+/// The classes whose methods the model answers.
+const AP: &str = "IOMobileFramebufferAP";
+const UP: &str = "UnifiedPipeline2";
+const H13P: &str = "UPPipeAP_H13P";
+const PIPE2: &str = "UPPipe2";
+const POWER: &str = "DCPPowerManager";
 
 /// The most display-log entries kept between drains.
 const LOG_CAPACITY: usize = 4096;
@@ -83,6 +117,10 @@ const PRESENT_SUMMARY_INTERVAL: u64 = 256;
 /// `swap_start_dcp` and its submit leaves its swap started for good, so the
 /// oldest is forgotten past this many (inferred: no swap ID ever revives).
 const STARTED_SWAPS: usize = 16;
+/// How long a swap may wait for its surfaces' GPU fences before it is shown
+/// as it stands: the AP normally names each fenced surface within a frame or
+/// two of its GPU work completing.
+const FENCE_TIMEOUT: u64 = 2 * COUNTER_HZ;
 /// `D594 swap_complete_ap_gated`'s input starts with the swap ID. Its
 /// statistics pointer is absent. The fixed eight-blob storage remains zero
 /// with count zero; the original dispatcher passes that array unconditionally
@@ -94,7 +132,160 @@ const SWAP_COMPLETE: [u8; 4] = *b"D594";
 /// when they are zero, and Core Animation stops presenting without it.
 const SWAP_NOTIFY: [u8; 4] = *b"D588";
 /// The ticks per second of the counter refreshes are timed by.
-const COUNTER_HZ: u64 = 24_000_000;
+const COUNTER_HZ: u64 = crate::counter::FREQUENCY_HZ;
+
+/// The counter ticks each pacing report covers.
+const PACING_WINDOW: u64 = 10 * COUNTER_HZ;
+
+/// How swaps reached the scanout over a window of the counter: their rate,
+/// the gaps between them, how many waited at once and whether any left out of
+/// submission order.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pacing {
+    /// Counter ticks the window covers: from the vblank that opened it to
+    /// the one that closed it, at least [`PACING_WINDOW`].
+    pub ticks: u64,
+    /// Frames presented (one per vblank at most) and swaps submitted in the
+    /// window.
+    pub presented: u32,
+    pub submitted: u32,
+    /// The shortest, total and longest gaps between the vblanks of
+    /// successive presents, in ticks: whole refresh periods.
+    pub shortest: u64,
+    pub total_gap: u64,
+    pub longest: u64,
+    /// Gaps longer than two refresh periods: frames the display repeated.
+    pub stalls: u32,
+    /// The most swaps waiting at a present, the presented one included.
+    pub deepest: usize,
+    /// Swaps presented after one the AP submitted later.
+    pub reordered: u32,
+    /// Swaps presented before the GPU completed the work submitted ahead of
+    /// them, which may still have been drawing their surfaces.
+    pub ahead: u32,
+    /// Swaps that waited for a surface's GPU fence, and those shown after
+    /// [`FENCE_TIMEOUT`] without one.
+    pub fence_waits: u32,
+    pub fence_timeouts: u32,
+    /// Method calls the AP made in the window, logged or not.
+    pub calls: u32,
+    /// Swaps completed at a vblank with a newer one shown in their place.
+    pub merged: u32,
+    /// How long after its vblank each present ran, in ticks: the total and
+    /// the longest. A present is due at its vblank; the model acts when
+    /// the counter is next looked at.
+    pub late_total: u64,
+    pub late_longest: u64,
+    /// The gaps measured: presents after the first one the display made.
+    pub gaps: u32,
+    /// Presents that moved a layer: one whose destination kept its size at
+    /// another place, as a pointer's does ([`moved_presents`]).
+    pub moved: u32,
+}
+
+/// Presents that moved a layer since boot, for the host to time against its
+/// own clock: how often the pointer moves on screen, and how long after a
+/// host input.
+static MOVED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Presents that moved a layer since boot ([`Pacing::moved`]).
+pub fn moved_presents() -> u64 {
+    MOVED.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Whether `next` shows a layer of `shown` at another place with the same
+/// size: a moved pointer, or any layer moved whole.
+fn moved(
+    shown: &[Option<scanout::Layer>; swap::LAYERS],
+    next: &[Option<scanout::Layer>; swap::LAYERS],
+) -> bool {
+    shown.iter().zip(next).any(|pair| match pair {
+        (Some(shown), Some(next)) => {
+            let (a, b) = (shown.destination, next.destination);
+            (a.width, a.height) == (b.width, b.height) && (a.x, a.y) != (b.x, b.y)
+        }
+        _ => false,
+    })
+}
+
+impl Pacing {
+    fn gap(&mut self, gap: u64, refresh: u64) {
+        self.shortest = if self.gaps == 0 {
+            gap
+        } else {
+            self.shortest.min(gap)
+        };
+        self.gaps += 1;
+        self.total_gap += gap;
+        self.longest = self.longest.max(gap);
+        self.stalls += u32::from(gap > 2 * refresh);
+    }
+}
+
+impl core::fmt::Display for Pacing {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let ms = |ticks: u64| ticks as f64 * 1000.0 / COUNTER_HZ as f64;
+        write!(
+            f,
+            "DCP PACING seconds={:.1} presented={} submitted={} merged={} per_second={:.1} gap_ms={:.1}/{:.1}/{:.1} stalls={} late_ms={:.1}/{:.1} deepest={} reordered={} ahead_of_gpu={} fence_waits={} fence_timeouts={} calls={} moved={}",
+            ms(self.ticks) / 1000.0,
+            self.presented,
+            self.submitted,
+            self.merged,
+            if self.ticks == 0 {
+                0.0
+            } else {
+                f64::from(self.presented) * 1000.0 / ms(self.ticks)
+            },
+            ms(self.shortest),
+            ms(self.total_gap) / f64::from(self.gaps.max(1)),
+            ms(self.longest),
+            self.stalls,
+            ms(self.late_total) / f64::from(self.presented.max(1)),
+            ms(self.late_longest),
+            self.deepest,
+            self.reordered,
+            self.ahead,
+            self.fence_waits,
+            self.fence_timeouts,
+            self.calls,
+            self.moved,
+        )
+    }
+}
+
+/// How a method the model does not serve in full was answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Degraded {
+    /// No reply layout is recorded for the method: zeros, which a status
+    /// word would read as success.
+    Zeros,
+    /// The protocol's error reply, `kIOReturnUnsupported`
+    /// ([`abi::LINK_UNSUPPORTED`]).
+    Unsupported,
+    /// Success with the value ignored, because the AP's caller retries a
+    /// failure forever; the text says what is shown instead.
+    Ignored(&'static str),
+}
+
+impl core::fmt::Display for Degraded {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Degraded::Zeros => {
+                write!(f, "answered with zeros; no reply layout is recorded")
+            }
+            Degraded::Unsupported => {
+                write!(f, "answered kIOReturnUnsupported (link status 2)")
+            }
+            Degraded::Ignored(shown) => {
+                write!(
+                    f,
+                    "answered success, value ignored (the caller retries a failure forever): {shown}"
+                )
+            }
+        }
+    }
+}
 
 /// The refresh period of `refresh` millihertz in counter ticks, rounded.
 fn refresh_ticks(refresh: u32) -> u64 {
@@ -134,14 +325,43 @@ const PLUGGED: u64 = 1;
 /// `restored_external` uses an external display only when it reads 1
 /// ("Will use display %s").
 const DIGITAL_OUT_CONNECTED: u32 = 1;
+/// `set_matrix`'s `u64[3][3]` holds 1.0 as 1 << 32 (Inferred: the AP's
+/// boot call sends that diagonal and zeros elsewhere, the identity it opens
+/// every display with).
+const MATRIX_ONE: u64 = 1 << 32;
+/// `setBrightnessCorrection`'s uncorrected value, 1.0 in 16.16: Apple's
+/// on-SoC panel driver (`AppleCLCD::setBrightnessCorrection_gated`, 26B123
+/// VA 0xfffffe0009a93174) refuses any larger value with
+/// `kIOReturnBadArgument`, and the AP sends it at boot.
+const BRIGHTNESS_UNCORRECTED: u32 = 0x10000;
 
 /// A submitted swap waiting for its pixels: its id and its layers, none for
 /// a swap that only clears to the background.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
     pub swap_id: u32,
+    /// The IOMFB client that started the swap (`swap_start_dcp`'s u64).
+    pub client: u64,
+    /// The GPU's last submitted command buffer when the swap was submitted.
+    pub gpu_work: u64,
+    /// Layers whose surface the GPU may still be drawing, each waiting for
+    /// `io_fence_notify` to name its surface, and the layers' surface IDs.
+    pub fenced: u32,
+    pub surface_ids: [u32; swap::LAYERS],
+    /// The counter when the display first found this swap waiting on a
+    /// fence.
+    pub waiting_since: Option<u64>,
+    /// The layer slots after this swap: what each shows, if anything.
+    pub planes: [Option<scanout::Layer>; swap::LAYERS],
+    /// The slots this swap set, whether to a surface or to nothing.
+    pub updated: u32,
+}
+
+impl Frame {
     /// The visible layers, bottom to top.
-    pub layers: Vec<scanout::Layer>,
+    pub fn layers(&self) -> Vec<scanout::Layer> {
+        self.planes.iter().flatten().copied().collect()
+    }
 }
 
 /// A callback the coprocessor makes on its own initiative.
@@ -154,24 +374,44 @@ struct Outgoing {
 /// The IOMFB methods of the one connected display, presenting to a host
 /// scanout.
 pub struct Methods {
+    /// The booted build's method interface: which tag names which method.
+    interface: &'static Interface,
     scanout: Box<dyn Scanout>,
     /// The storage of the last composed frame, for the next
     /// ([`scanout::present`]).
-    frame: Vec<u8>,
+    frame: scanout::Composed,
+    /// The layer slots on screen since the last present, `None` before it.
+    shown: Option<[Option<scanout::Layer>; swap::LAYERS]>,
+    /// Slots that swaps dropped without a present (an abort or a shutdown)
+    /// had set: their surfaces may differ from what is on screen.
+    unshown: u32,
     /// The one mode, or why the scanout's mode cannot be advertised.
     advertised: Result<Advertised>,
     /// Why the last call refused, with the tag and its interface row.
     last_refusal: Option<String>,
-    /// The interface's methods answered without a model, each reported once.
-    unmodeled: BTreeSet<[u8; 4]>,
+    /// The interface's methods answered without a model, each reported once
+    /// per method and, where the method names one, per parameter.
+    unmodeled: BTreeSet<([u8; 4], Option<u32>)>,
+    /// Those reports, not yet taken ([`Self::take_unmodeled`]).
+    reported: Vec<String>,
+    /// The methods called so far: each one's first call is logged.
+    called: BTreeSet<[u8; 4]>,
+    /// The current call, when its log entry was left out; a refusal logs it.
+    pending_call: Option<Log>,
     /// Whether the AP has any notification client (`A033`).
     notified: bool,
-    /// The counter value of the next refresh.
+    /// The counter value of the next vblank; 0 before the display's first
+    /// look, which starts the grid.
     next_refresh: u64,
     /// The monitor's refresh period, in counter ticks.
     refresh_ticks: u64,
-    /// The refresh waiting to leave, if any. A later one replaces it, as a
-    /// display drops the tick it could not deliver.
+    /// The last vblank the display passed whose latch is still open: a
+    /// ready swap may be presented for it. A present or a vblank with
+    /// nothing ready closes it.
+    latched: Option<u64>,
+    /// The vsync waiting to leave for the AP's notification clients: its
+    /// vblank's counter value. A later one replaces it, as a display drops
+    /// the tick it could not deliver.
     refresh: Option<u64>,
     /// `set_color_remap_mode`'s value, which reads back; 0 is IOMFB's normal
     /// mode, and the scanout applies no other.
@@ -183,6 +423,11 @@ pub struct Methods {
     trace_swaps: bool,
     /// Swaps whose pixels reached the host since this display was placed.
     presented: u64,
+    /// This window's pacing, the vblank that opened it and the last
+    /// present's vblank and swap.
+    pacing: Pacing,
+    window_start: Option<u64>,
+    last_present: Option<(u64, u32)>,
     /// The monitor's power and sleep state, shared with its IOAV controller.
     display: Rc<RefCell<DisplayState>>,
     /// Open IOMFB clients (`first_client_open` minus `last_client_close`).
@@ -193,15 +438,22 @@ pub struct Methods {
     /// sets it.
     config_frame: (u32, u32),
     next_swap: u32,
-    /// Swaps `swap_start_dcp` opened and not yet submitted, oldest first.
-    started: VecDeque<u32>,
+    /// Swaps `swap_start_dcp` opened and not yet submitted, oldest first,
+    /// with the client that started each.
+    started: VecDeque<(u32, u64)>,
+    /// Fences `io_fence_notify` reported for started swaps not yet submitted,
+    /// as `(swap id, surface id)`.
+    early_fences: VecDeque<(u32, u32)>,
+    /// A swap was shown without its fence, which is reported once.
+    fence_timeout_reported: bool,
     /// The four layer slots after the last submitted swap.
     planes: [Option<Layer>; swap::LAYERS],
     frames: VecDeque<Frame>,
     /// Callbacks to make, in order.
     outgoing: VecDeque<Outgoing>,
-    /// Swaps presented, whose completion callback is due.
-    completed: VecDeque<u32>,
+    /// Swaps latched at a vblank, whose completion callback is due, and
+    /// whether each reached the display.
+    completed: VecDeque<(u32, bool)>,
     /// A callback is out and not answered yet.
     in_flight: bool,
     /// The AP shut the link down (`link_shutdown_signal`).
@@ -232,6 +484,7 @@ impl Methods {
         self.config_frame = (0, 0);
         self.next_swap = 1;
         self.started.clear();
+        self.early_fences.clear();
         self.planes = [None; swap::LAYERS];
         self.shut_down = false;
     }
@@ -243,26 +496,38 @@ impl Methods {
         self.shut_down = false;
     }
 
-    pub fn new(scanout: Box<dyn Scanout>) -> Self {
+    pub fn new(scanout: Box<dyn Scanout>, interface: &'static Interface) -> Self {
         // Configured model power, not an observation of Apple's boot state.
-        Self::with_display_state(scanout, Rc::new(RefCell::new(DisplayState::new(true))))
+        Self::with_display_state(
+            scanout,
+            Rc::new(RefCell::new(DisplayState::new(true))),
+            interface,
+        )
     }
 
     pub fn with_display_state(
         scanout: Box<dyn Scanout>,
         display: Rc<RefCell<DisplayState>>,
+        interface: &'static Interface,
     ) -> Self {
         let refresh = scanout.refresh_millihertz();
-        let advertised = Advertised::at(scanout.mode(), refresh);
+        let advertised = Advertised::sized(scanout.mode(), refresh, scanout.physical_size_mm());
         Self {
+            interface,
             scanout,
-            frame: Vec::new(),
+            frame: scanout::Composed::default(),
+            shown: None,
+            unshown: 0,
             advertised,
             last_refusal: None,
             unmodeled: BTreeSet::new(),
+            reported: Vec::new(),
+            called: BTreeSet::new(),
+            pending_call: None,
             notified: false,
             next_refresh: 0,
             refresh_ticks: refresh_ticks(refresh),
+            latched: None,
             refresh: None,
             color_remap_mode: 0,
             log: VecDeque::new(),
@@ -270,12 +535,17 @@ impl Methods {
             dumped: 0,
             trace_swaps: true,
             presented: 0,
+            pacing: Pacing::default(),
+            window_start: None,
+            last_present: None,
             display,
             clients: 0,
             digital_out: None,
             config_frame: (0, 0),
             next_swap: 1,
             started: VecDeque::new(),
+            early_fences: VecDeque::new(),
+            fence_timeout_reported: false,
             planes: [None; swap::LAYERS],
             frames: VecDeque::new(),
             outgoing: VecDeque::new(),
@@ -341,59 +611,251 @@ impl Methods {
         !self.frames.is_empty()
     }
 
-    /// The counter at which the AP's notification clients are next due a
-    /// refresh, while they listen.
-    pub fn refresh_deadline(&self) -> Option<u64> {
-        (self.notified && !self.shut_down).then_some(self.next_refresh)
+    /// How many swaps, in submission order from the oldest, can be shown at
+    /// counter `now`: each has its surfaces' GPU work finished, or has
+    /// waited [`FENCE_TIMEOUT`] for it. Swaps are shown in order, so a ready
+    /// swap waits behind one still drawing.
+    fn ready_swaps(&mut self, now: u64) -> usize {
+        let mut ready = 0;
+        let mut blocked = false;
+        let mut timed_out = Vec::new();
+        // Every fenced swap's wait starts when the display first sees it,
+        // behind a blocked one or not.
+        for frame in &mut self.frames {
+            if frame.fenced != 0 {
+                let since = *frame.waiting_since.get_or_insert(now);
+                if !blocked && now.saturating_sub(since) >= FENCE_TIMEOUT {
+                    // Degraded: the surface may still be drawing. Show it
+                    // rather than freeze the display, and say so once.
+                    timed_out.push((frame.swap_id, frame.fenced));
+                    frame.fenced = 0;
+                }
+            }
+            blocked |= frame.fenced != 0;
+            ready += usize::from(!blocked);
+        }
+        for (swap_id, fenced) in timed_out {
+            self.pacing.fence_timeouts += 1;
+            if !self.fence_timeout_reported {
+                self.fence_timeout_reported = true;
+                self.record_log(Log::FenceTimeout {
+                    swap_id,
+                    fenced,
+                    seconds: FENCE_TIMEOUT / COUNTER_HZ,
+                });
+            }
+        }
+        ready
     }
 
-    /// Note the refresh due at counter `now`, for the AP's notification clients.
-    pub fn refresh(&mut self, now: u64) {
-        if self.notified && !self.shut_down && now >= self.next_refresh {
-            // Refreshes keep their phase: a late look takes the refresh it
-            // missed and the next falls on the same grid, so the rate holds
-            // however late the counter is read. A first look, or one more
-            // than a period late, starts the grid at `now`.
-            let late = now - self.next_refresh;
-            self.next_refresh = if self.next_refresh == 0 || late >= self.refresh_ticks {
-                now + self.refresh_ticks
-            } else {
-                self.next_refresh + self.refresh_ticks
-            };
-            self.refresh = Some(now);
+    /// Whether the vblank the display last passed latches a swap at counter
+    /// `now`: one is ready ([`Self::ready_swaps`]) and the latch is still
+    /// open. A vblank that finds none ready closes its latch: the monitor
+    /// repeats its frame, and a swap that becomes ready later waits for the
+    /// next vblank.
+    pub fn frame_ready(&mut self, now: u64) -> bool {
+        if self.latched.is_none() {
+            return false;
+        }
+        if self.ready_swaps(now) != 0 {
+            return true;
+        }
+        self.latched = None;
+        false
+    }
+
+    /// `io_fence_notify`: the GPU finished `surface` for `swap_id`. A queued
+    /// swap stops waiting for each layer that shows it; one only started
+    /// keeps the notice for its submission.
+    fn fence_notified(&mut self, swap_id: u32, surface: u32) {
+        if let Some(frame) = self
+            .frames
+            .iter_mut()
+            .find(|frame| frame.swap_id == swap_id)
+        {
+            for (index, &id) in frame.surface_ids.iter().enumerate() {
+                if id == surface {
+                    frame.fenced &= !(1 << index);
+                }
+            }
+        } else if self.started.iter().any(|&(id, _)| id == swap_id) {
+            if self.early_fences.len() == STARTED_SWAPS {
+                self.early_fences.pop_front();
+            }
+            self.early_fences.push_back((swap_id, surface));
         }
     }
 
-    /// Present the oldest submitted swap: read its layers through `read`
-    /// (DVA, bytes; false when unreachable), hand the composed rows to the
-    /// scanout and queue its completion. A swap is never completed before its pixels
-    /// are consumed.
-    pub fn present(&mut self, read: impl FnMut(u64, &mut [u8]) -> bool) -> Result<()> {
+    /// The counter at which the display next needs a look: its next
+    /// vblank, while the AP's notification clients listen for it, a swap
+    /// waits for one or the scanout holds work for a later flush.
+    pub fn refresh_deadline(&self) -> Option<u64> {
+        let wanted = self.notified
+            || (!self.frames.is_empty() && self.display.borrow().active())
+            || self.scanout.queued();
+        (wanted && !self.shut_down).then_some(self.next_refresh)
+    }
+
+    /// Advance the display to counter `now`: flush what the scanout queued,
+    /// and once a vblank is passed, open its latch if a swap is ready and
+    /// queue its vsync for the notification clients. Vblanks keep their phase: a late look
+    /// takes the last one it passed and the next falls on the same grid,
+    /// so the rate holds however late the counter is read. A look more than
+    /// a period late skips the vblanks between, as nothing was presented or
+    /// told of them. The first look starts the grid.
+    pub fn refresh(&mut self, now: u64) {
+        if self.shut_down {
+            return;
+        }
+        if self.scanout.queued()
+            && let Err(reason) = self.scanout.flush()
+        {
+            self.refusal(format!("DCP scanout refused a queued frame: {reason}"));
+        }
+        if self.next_refresh != 0 && now < self.next_refresh {
+            return;
+        }
+        let due = if self.next_refresh == 0 {
+            now
+        } else {
+            let behind = (now - self.next_refresh) / self.refresh_ticks;
+            self.next_refresh + behind * self.refresh_ticks
+        };
+        self.next_refresh = due + self.refresh_ticks;
+        // The latch takes only what is ready at its vblank.
+        self.latched = Some(due);
+        self.frame_ready(now);
+        if self.notified {
+            self.refresh = Some(due);
+        }
+        self.close_window(due);
+    }
+
+    /// Open the pacing window at vblank `due`, or close it once it covers
+    /// [`PACING_WINDOW`] and report it, if anything was submitted or shown.
+    fn close_window(&mut self, due: u64) {
+        let Some(start) = self.window_start else {
+            self.window_start = Some(due);
+            return;
+        };
+        let ticks = due.saturating_sub(start);
+        if ticks < PACING_WINDOW {
+            return;
+        }
+        let pacing = core::mem::take(&mut self.pacing);
+        if pacing.presented != 0 || pacing.submitted != 0 {
+            self.record_log(Log::Pacing(Pacing { ticks, ..pacing }));
+        }
+        self.window_start = Some(due);
+    }
+
+    /// Count a present of `swap_id` for vblank `due` at counter `now`, with
+    /// `waiting` swaps queued.
+    fn pace(&mut self, now: u64, due: u64, swap_id: u32, waiting: usize) {
+        if let Some((last, last_swap)) = self.last_present {
+            self.pacing
+                .gap(due.saturating_sub(last), self.refresh_ticks);
+            self.pacing.reordered += u32::from(swap_id < last_swap);
+        }
+        self.last_present = Some((due, swap_id));
+        self.pacing.presented += 1;
+        self.pacing.deepest = self.pacing.deepest.max(waiting);
+        let late = now.saturating_sub(due);
+        self.pacing.late_total += late;
+        self.pacing.late_longest = self.pacing.late_longest.max(late);
+    }
+
+    /// Present at counter `now` the swaps the last vblank latched: read the
+    /// newest one's layers through `read` (DVA, bytes; false when
+    /// unreachable), hand the rows its damage covers to the scanout and
+    /// queue the completion of every latched swap, oldest first. A swap is
+    /// never completed before the pixels it shows are consumed; a failed
+    /// present keeps every swap and the latch for a retry.
+    pub fn present(&mut self, now: u64, read: impl FnMut(u64, &mut [u8]) -> bool) -> Result<()> {
         if !self.display.borrow().active() {
             return Ok(());
         }
-        let Some(frame) = self.frames.front() else {
+        self.refresh(now);
+        if !self.frame_ready(now) {
             return Ok(());
-        };
-        scanout::present(self.scanout.as_mut(), &frame.layers, read, &mut self.frame)?;
-        // Both the surface DMA and host sink can refuse. The submitted swap
-        // owns its surfaces until presentation succeeds, or the AP explicitly
-        // aborts/shuts down; neither failure consumes it or queues D594.
-        let frame = self.frames.pop_front().expect("presented front frame");
+        }
+        let due = self.latched.expect("a ready frame has an open latch");
+        let count = self.ready_swaps(now);
+        let newest = &self.frames[count - 1];
+        let planes = newest.planes;
+        let layers = newest.layers();
+        let updated = self
+            .frames
+            .iter()
+            .take(count)
+            .fold(self.unshown, |slots, frame| slots | frame.updated);
+        let damage = self
+            .shown
+            .map(|shown| damage(&shown, &planes, updated, self.mode().height));
+        scanout::present(
+            self.scanout.as_mut(),
+            &layers,
+            damage,
+            read,
+            &mut self.frame,
+        )?;
+        // Both the surface DMA and host sink can refuse. The submitted swaps
+        // own their surfaces until presentation succeeds, or the AP explicitly
+        // aborts/shuts down; neither failure consumes them or queues D594.
+        self.latched = None;
+        if self
+            .shown
+            .as_ref()
+            .is_some_and(|shown| moved(shown, &planes))
+        {
+            self.pacing.moved += 1;
+            MOVED.fetch_add(1, core::sync::atomic::Ordering::Release);
+        }
+        self.shown = Some(planes);
+        self.unshown = 0;
+        let waiting = self.frames.len();
+        let batch: Vec<Frame> = self.frames.drain(..count).collect();
+        let (shown, merged) = batch.split_last().expect("a latched batch is not empty");
+        for (index, frame) in merged.iter().enumerate() {
+            let later = batch[index + 1..]
+                .iter()
+                .fold(0, |slots, later| slots | later.updated);
+            let on_screen = frame
+                .planes
+                .iter()
+                .enumerate()
+                .filter(|&(slot, _)| frame.updated & 1 << slot != 0)
+                .filter_map(|(_, layer)| layer.as_ref())
+                .any(|own| layers.iter().any(|layer| layer.surface == own.surface));
+            // Replaced in every slot it set, with none of its surfaces on
+            // screen: the AP may take its surfaces back at once.
+            let displayed = frame.updated & !later != 0 || on_screen;
+            self.completed.push_back((frame.swap_id, displayed));
+            self.pacing.merged += 1;
+            if self.trace_swap(frame.swap_id) {
+                self.record_log(Log::Merged {
+                    swap_id: frame.swap_id,
+                    shown: shown.swap_id,
+                    displayed,
+                });
+            }
+        }
         self.presented = self.presented.saturating_add(1);
-        if self.trace_swap(frame.swap_id) {
+        self.pace(now, due, shown.swap_id, waiting);
+        self.pacing.ahead += u32::from(super::gpu::completed() < shown.gpu_work);
+        if self.trace_swap(shown.swap_id) {
             self.record_log(Log::Presented {
-                swap_id: frame.swap_id,
-                surfaces: frame.layers.iter().map(|layer| layer.surface).collect(),
+                swap_id: shown.swap_id,
+                surfaces: layers.iter().map(|layer| layer.surface).collect(),
             });
         }
         if !self.trace_swaps && self.presented.is_multiple_of(PRESENT_SUMMARY_INTERVAL) {
             self.record_log(Log::PresentSummary {
                 total: self.presented,
-                last_swap: frame.swap_id,
+                last_swap: shown.swap_id,
             });
         }
-        self.completed.push_back(frame.swap_id);
+        self.completed.push_back((shown.swap_id, true));
         Ok(())
     }
 
@@ -404,7 +866,13 @@ impl Methods {
 
     /// Record and return a named refusal for method `tag`.
     fn refuse(&mut self, tag: [u8; 4], reason: Refusal) -> Result<Step<Self>> {
-        let row = abi::method(&tag)
+        // The refused call itself, if its entry was left out.
+        if let Some(call) = self.pending_call.take() {
+            self.record_log(call);
+        }
+        let row = self
+            .interface
+            .method(&tag)
             .map(|row| {
                 format!(
                     " {}::{} (in {:#x}, out {:#x})",
@@ -426,12 +894,70 @@ impl Methods {
         Err(reason)
     }
 
-    /// Report method `tag`, which has no model, once. The AP's caller gets on
-    /// with what the method would have told it or done.
-    fn report_unmodeled(&mut self, tag: [u8; 4]) {
-        if self.unmodeled.insert(tag) {
-            self.record_log(Log::Unmodeled(tag));
+    /// Report method `tag`, answered `answer` without a model, once per
+    /// `detail` (a parameter the method names, where one tells requests
+    /// apart), in the display log and as an `UNMODELED` line.
+    fn report_unmodeled(&mut self, tag: [u8; 4], answer: Degraded, detail: Option<u32>) {
+        if self.unmodeled.insert((tag, detail)) {
+            let name = self.name(&tag);
+            let entry = Log::Unmodeled {
+                tag,
+                name,
+                answer,
+                detail,
+            };
+            // The display-log line without its `DCP ` lead; the machine names
+            // the coprocessor.
+            let line = entry.to_string();
+            self.reported.push(format!(
+                "IOMFB {}",
+                line.strip_prefix("DCP ").unwrap_or(&line)
+            ));
+            self.record_log(entry);
         }
+    }
+
+    /// The methods answered degraded for the first time since the last
+    /// call, one line each.
+    pub fn take_unmodeled(&mut self) -> Vec<String> {
+        core::mem::take(&mut self.reported)
+    }
+
+    /// Answer a status method the model cannot carry out with the
+    /// protocol's error reply, reported once per `detail`.
+    fn unsupported(
+        &mut self,
+        row: &Method,
+        input: &[u8],
+        output: u32,
+        detail: Option<u32>,
+    ) -> Result<Step<Self>> {
+        let Some(reply) = abi::status_reply(row) else {
+            return self.refuse(
+                row.tag,
+                refuse!("DCP method has no recorded status word for its error reply"),
+            );
+        };
+        let packed = abi::status_output(reply, input, output, LINK_UNSUPPORTED);
+        if packed.is_ok() {
+            self.report_unmodeled(row.tag, Degraded::Unsupported, detail);
+        }
+        self.reply(row.tag, packed)
+    }
+
+    /// A method of the interface with no model: the error reply where its
+    /// status word is recorded, else zeros.
+    fn unmodeled_answer(&mut self, row: &Method, input: &[u8], output: u32) -> Result<Step<Self>> {
+        if abi::status_reply(row).is_some() {
+            return self.unsupported(row, input, output, None);
+        }
+        self.report_unmodeled(row.tag, Degraded::Zeros, None);
+        Ok(Step::Return(alloc::vec![0; output as usize]))
+    }
+
+    /// The interface's name for method `tag`, empty off the interface.
+    fn name(&self, tag: &[u8; 4]) -> &'static str {
+        self.interface.method(tag).map_or("", |row| row.name)
     }
 
     fn callback_log(&mut self, tag: [u8; 4], input: usize, output: u32) {
@@ -517,16 +1043,30 @@ impl Methods {
 
 impl Service for Methods {
     fn call(&mut self, tag: [u8; 4], input: &[u8], output: u32) -> Result<Step<Self>> {
-        if !matches!(&tag, b"A406" | b"A407")
-            || self.trace_swap(self.started.back().copied().unwrap_or(self.next_swap))
-        {
-            self.record_log(Log::Call {
-                tag,
-                input: input[..input.len().min(LOGGED_INPUT)].to_vec(),
-                output,
-            });
+        let row = self.interface.method(&tag);
+        let swap = row.is_some_and(|row| {
+            row.class == AP && matches!(row.name, "swap_start_dcp" | "swap_submit_dcp")
+        });
+        self.pacing.calls = self.pacing.calls.saturating_add(1);
+        let first = self.called.insert(tag);
+        let logged = if swap {
+            self.trace_swap(self.started.back().map_or(self.next_swap, |&(id, _)| id))
+        } else {
+            self.trace_swaps || first
+        };
+        let entry = Log::Call {
+            tag,
+            name: row.map_or("", |row| row.name),
+            input: input[..input.len().min(LOGGED_INPUT)].to_vec(),
+            output,
+        };
+        self.pending_call = None;
+        if logged {
+            self.record_log(entry);
+        } else {
+            self.pending_call = Some(entry);
         }
-        let Some(row) = abi::method(&tag) else {
+        let Some(row) = row else {
             return self.refuse(tag, refuse!("tag is not a method of this DCP interface"));
         };
         if row.input as usize != input.len() || row.output != output {
@@ -544,10 +1084,10 @@ impl Service for Methods {
             );
         }
         let mut fields = Fields::new(input);
-        match &tag {
+        match (row.class, row.name) {
             // start_signal: nest D120 start_hardware_boot, report its bool,
             // then publish the mode and the hotplug.
-            b"A401" => {
+            (AP, "start_signal") => {
                 self.callback_log(*b"D120", 0, 4);
                 Ok(Step::Call {
                     tag: *b"D120",
@@ -567,30 +1107,69 @@ impl Service for Methods {
                 })
             }
             // late_init_signal(bool) -> bool (Asahi boot_4, true on >= 13.2).
-            b"A000" => {
+            (H13P, "late_init_signal") => {
                 let packed = Packed::new().bool(true).finish(output);
                 self.reply(tag, packed)
             }
             // update_notify_clients_dcp(u32 clients[27]): a count of clients
             // for each notification. Every one is told of the refresh.
-            b"A033" => {
+            (H13P, "update_notify_clients_dcp") => {
                 self.notified = input.iter().any(|&byte| byte != 0);
                 Ok(Step::Return(Vec::new()))
             }
             // setup_video_limits(): the fixed mode has no limits to set up.
-            b"A027" => Ok(Step::Return(Vec::new())),
-            // set_color_remap_mode(mode) -> status.
-            b"A426" => {
-                self.color_remap_mode = fields.u32()?;
-                if self.color_remap_mode != 0 {
-                    self.report_unmodeled(tag);
+            (H13P, "setup_video_limits") => Ok(Step::Return(Vec::new())),
+            // set_color_remap_mode(mode) -> link status (AP stub
+            // 0xfffffe000ada3348). The scanout applies only mode 0; another
+            // mode is unsupported and the mode reads back unchanged.
+            (AP, "set_color_remap_mode") => {
+                let mode = fields.u32()?;
+                if mode != 0 {
+                    return self.unsupported(row, input, output, Some(mode));
                 }
+                self.color_remap_mode = mode;
                 Ok(Step::Return(IO_RETURN_SUCCESS.to_le_bytes().to_vec()))
+            }
+            // set_matrix(u32 location, const u64 (*)[3][3]) -> link status:
+            // the scanout applies the identity, so only it is carried out.
+            (AP, "set_matrix") => {
+                let location = fields.u32()?;
+                let mut identity = true;
+                for index in 0..9 {
+                    let one = if index % 4 == 0 { MATRIX_ONE } else { 0 };
+                    identity &= fields.u64()? == one;
+                }
+                // The matrix pointer's null flag.
+                identity &= !fields.bool()?;
+                if !identity {
+                    return self.unsupported(row, input, output, Some(location));
+                }
+                let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
+                self.reply(tag, packed)
+            }
+            // setBrightnessCorrection(u32 16.16) -> link status: only the
+            // uncorrected value is what the scanout shows.
+            (AP, "setBrightnessCorrection") => {
+                if fields.u32()? != BRIGHTNESS_UNCORRECTED {
+                    return self.unsupported(row, input, output, None);
+                }
+                let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
+                self.reply(tag, packed)
+            }
+            // enable_disable_video_power_savings(u32 enable) -> link status:
+            // the display never saves power, so only disabling is carried out.
+            (AP, "enable_disable_video_power_savings") => {
+                let enable = fields.u32()?;
+                if enable != 0 {
+                    return self.unsupported(row, input, output, Some(enable));
+                }
+                let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
+                self.reply(tag, packed)
             }
             // get_color_remap_mode(*mode) -> {mode, status}: the pointer's
             // value and a null flag go in (IOMobileFramebufferAP 0xad7c358),
             // which the answer does not depend on.
-            b"A427" => {
+            (AP, "get_color_remap_mode") => {
                 let mut bytes = self.color_remap_mode.to_le_bytes().to_vec();
                 bytes.extend_from_slice(&IO_RETURN_SUCCESS.to_le_bytes());
                 Ok(Step::Return(bytes))
@@ -599,8 +1178,8 @@ impl Service for Methods {
             // adaptive sync, and WindowServer sets others of unknown meaning as
             // it opens the display, retrying a failure forever. Zero leaves the
             // one fixed mode as it is; anything else is a recorded gap.
-            b"A450" => {
-                fields.u32()?;
+            (AP, "set_parameter_dcp") => {
+                let parameter = fields.u32()?;
                 let mut values = [0u64; 4];
                 for value in &mut values {
                     *value = fields.u64()?;
@@ -609,14 +1188,18 @@ impl Service for Methods {
                 let count = fields.u32()? as usize;
                 let set = values.get(..count).unwrap_or(&values);
                 if set.iter().any(|&value| value != 0) {
-                    self.report_unmodeled(tag);
+                    self.report_unmodeled(
+                        tag,
+                        Degraded::Ignored("the fixed mode runs as it is"),
+                        Some(parameter),
+                    );
                 }
                 let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
                 self.reply(tag, packed)
             }
             // setPowerState(state, ...) -> {u32, u32 result}: 1 on, 0 off
             // (Asahi dcp_on_set_power_state / last_client_closed_poff).
-            b"A484" => {
+            (AP, "setPowerState") => {
                 let state = fields.u64()?;
                 self.display.borrow_mut().powered = Some(match state {
                     0 => false,
@@ -634,7 +1217,7 @@ impl Service for Methods {
             // manage_properties(bool) (UnifiedPipeline2 0x2a52a8c; the
             // shim's HPD path passes "plugged"): the properties are the
             // ones already published; withdrawing them is not modeled.
-            b"A363" => {
+            (UP, "manage_properties") => {
                 if !fields.bool()? {
                     return self.refuse(
                         tag,
@@ -646,7 +1229,7 @@ impl Service for Methods {
             // getVideoDataForIDs(IOAVVideoTimingData*, IOAVVideoColorData*,
             // u32 timing, u32 color, bool* dual pipe) -> bool (UnifiedPipeline2
             // 0x2a52ae4; the shim passes the timing ID before the color ID).
-            b"A364" => {
+            (UP, "getVideoDataForIDs") => {
                 let timing_in = fields.bytes(modes::TIMING_BYTES)?;
                 let color_in = fields.bytes(modes::COLOR_BYTES)?;
                 let timing_id = fields.u32()?;
@@ -674,7 +1257,7 @@ impl Service for Methods {
             }
             // set_digital_out_mode(color id, timing id) -> link status
             // (IOMobileFramebufferAP 0x3d77a64).
-            b"A413" => {
+            (AP, "set_digital_out_mode") => {
                 let color = fields.u32()?;
                 let timing = fields.u32()?;
                 if (color, timing) != (modes::COLOR_ID, modes::TIMING_ID) {
@@ -689,7 +1272,7 @@ impl Service for Methods {
             }
             // get_digital_out_state(u32* state) -> link status
             // (IOMobileFramebufferAP 0x3d77ad4): the monitor is connected.
-            b"A414" => {
+            (AP, "get_digital_out_state") => {
                 let packed = Packed::new()
                     .u32(DIGITAL_OUT_CONNECTED)
                     .u32(IO_RETURN_SUCCESS)
@@ -701,7 +1284,7 @@ impl Service for Methods {
             // `UnifiedPipeline2::start_hardware_boot` (0x2a5d840) treats a
             // zero dimension as unset and configures the display size
             // (Inferred: a freshly started pipe has none configured).
-            b"A103" => {
+            (PIPE2, "get_config_frame_size") => {
                 fields.u32()?;
                 fields.u32()?;
                 let (width, height) = self.config_frame;
@@ -709,13 +1292,13 @@ impl Service for Methods {
                 self.reply(tag, packed)
             }
             // set_config_frame_size(u32 width, u32 height) (0x2a6b33c).
-            b"A104" => {
+            (PIPE2, "set_config_frame_size") => {
                 self.config_frame = (fields.u32()?, fields.u32()?);
                 Ok(Step::Return(Vec::new()))
             }
             // program_config_frame_size() (0x2a6b39c): the pipe scans out
             // the one mode, so only its size can be programmed.
-            b"A105" => {
+            (PIPE2, "program_config_frame_size") => {
                 let mode = self.mode();
                 if self.config_frame != (mode.width, mode.height) {
                     return self.refuse(
@@ -728,22 +1311,24 @@ impl Service for Methods {
                 Ok(Step::Return(Vec::new()))
             }
             // first_client_open() / last_client_close_dcp(out u32).
-            b"A466" => {
+            (AP, "first_client_open") => {
                 self.clients += 1;
                 Ok(Step::Return(Vec::new()))
             }
-            b"A467" => {
+            (AP, "last_client_close_dcp") => {
                 self.clients = self.clients.saturating_sub(1);
                 let packed = Packed::new().u32(0).finish(output);
                 self.reply(tag, packed)
             }
             // swap_begin(): no arguments and no result.
-            b"A403" => Ok(Step::Return(Vec::new())),
+            (AP, "swap_begin") => Ok(Step::Return(Vec::new())),
             // swap_start_dcp(u32* swap_id, u64 client) -> {swap_id, u32}.
             // Each IOMFB client starts its own swaps, and the record each
             // submission carries names the swap, so starts need not alternate
             // with submits.
-            b"A406" => {
+            (AP, "swap_start_dcp") => {
+                fields.u32()?;
+                let client = fields.u64()?;
                 let id = self.next_swap;
                 let packed = Packed::new().u32(id).u32(IO_RETURN_SUCCESS).finish(output);
                 let reply = self.reply(tag, packed)?;
@@ -751,14 +1336,47 @@ impl Service for Methods {
                 if self.started.len() == STARTED_SWAPS {
                     self.started.pop_front();
                 }
-                self.started.push_back(id);
+                self.started.push_back((id, client));
                 Ok(reply)
             }
-            b"A407" => self.submit(tag, input, output),
-            // abort_swaps_dcp(client) -> u32: drop the open and queued swaps.
-            b"A479" => {
-                self.started.clear();
-                self.frames.clear();
+            (AP, "swap_submit_dcp") => self.submit(tag, input, output),
+            // io_fence_notify(u32 swap_id, u32 surface_id, u64 time,
+            // IOMFBStatus) -> IOMFBStatus: `IOMobileFramebufferAP::
+            // io_fence_callback` (0x3d96b68) sends it when the GPU fence of a
+            // surface `swap_apply_fences` left pending signals, after the
+            // swap was submitted. A failed fence also ends the wait: the AP
+            // reports it, and the surface is shown as it stands.
+            (AP, "io_fence_notify") => {
+                let swap_id = fields.u32()?;
+                let surface = fields.u32()?;
+                self.fence_notified(swap_id, surface);
+                let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
+                self.reply(tag, packed)
+            }
+            // abort_swaps_dcp(u64 client) -> link status: drop that client's
+            // open and queued swaps. `IOMobileFramebufferAP::abort_swaps`
+            // (26B123 VA 0xfffffe000ad9275c) passes the user client it
+            // aborts, the value `swap_start_dcp` carries for its swaps.
+            (AP, "abort_swaps_dcp") => {
+                let client = fields.u64()?;
+                let aborted: Vec<u32> = self
+                    .started
+                    .iter()
+                    .filter(|&&(_, owner)| owner == client)
+                    .map(|&(id, _)| id)
+                    .collect();
+                self.started.retain(|&(_, owner)| owner != client);
+                self.early_fences
+                    .retain(|(swap_id, _)| !aborted.contains(swap_id));
+                let mut unshown = self.unshown;
+                self.frames.retain(|frame| {
+                    let kept = frame.client != client;
+                    if !kept {
+                        unshown |= frame.updated;
+                    }
+                    kept
+                });
+                self.unshown = unshown;
                 let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
                 self.reply(tag, packed)
             }
@@ -773,7 +1391,7 @@ impl Service for Methods {
             // tears its AP link down (0x1871f0) and answers nothing. The
             // model's pipe stops: no queued swap is presented or completed
             // and no callback follows.
-            b"A500" => {
+            (POWER, "link_shutdown_signal") => {
                 if fields.u8()? == 1 {
                     return self.refuse(
                         tag,
@@ -782,19 +1400,21 @@ impl Service for Methods {
                 }
                 self.shut_down = true;
                 self.started.clear();
-                self.frames.clear();
+                self.early_fences.clear();
+                self.unshown = self
+                    .frames
+                    .drain(..)
+                    .fold(self.unshown, |slots, frame| slots | frame.updated);
                 self.outgoing.clear();
                 self.completed.clear();
                 Ok(Step::Return(Vec::new()))
             }
-            _ => match answer(&tag, input, output, self.mode()) {
+            _ => match answer(row, input, output, self.mode()) {
                 Ok(Some(bytes)) => Ok(Step::Return(bytes)),
                 // A refusal here would leave the AP's call open for good: it
-                // waits, and the link retries the call. Its output is zeros.
-                Ok(None) => {
-                    self.report_unmodeled(tag);
-                    Ok(Step::Return(alloc::vec![0; output as usize]))
-                }
+                // waits, and the link retries the call. It is answered
+                // degraded instead.
+                Ok(None) => self.unmodeled_answer(row, input, output),
                 Err(reason) => self.refuse(tag, reason),
             },
         }
@@ -863,15 +1483,16 @@ impl Service for Methods {
                 }),
             });
         }
-        let swap_id = self.completed.pop_front()?;
+        let (swap_id, displayed) = self.completed.pop_front()?;
         let length = abi::callback(&SWAP_COMPLETE)
             .and_then(|row| row.input)
             .expect("swap_complete_ap_gated's input size is recorded")
             as usize;
         let mut input = alloc::vec![0u8; length];
         input[0..4].copy_from_slice(&swap_id.to_le_bytes());
-        // Only presented swaps complete.
-        input[SWAP_COMPLETE_DISPLAYED] = 1;
+        // Only latched swaps complete; one shown in its place may not have
+        // been displayed.
+        input[SWAP_COMPLETE_DISPLAYED] = u8::from(displayed);
         input[SWAP_COMPLETE_DATA_NULL] = 1;
         self.in_flight = true;
         if self.trace_swap(swap_id) {
@@ -897,6 +1518,7 @@ impl Methods {
             self.dumped += 1;
             self.record_log(Log::Payload {
                 tag,
+                name: self.name(&tag),
                 bytes: input.to_vec(),
             });
         }
@@ -905,7 +1527,7 @@ impl Methods {
             Err(reason) => return self.refuse(tag, reason),
         };
         let swap_id = submission.swap_id;
-        let Some(start) = self.started.iter().position(|&id| id == swap_id) else {
+        let Some(start) = self.started.iter().position(|&(id, _)| id == swap_id) else {
             return self.refuse(
                 tag,
                 refuse!("swap_submit_dcp names a swap that is not started"),
@@ -915,18 +1537,23 @@ impl Methods {
             self.record_log(Log::Submitted {
                 swap_id,
                 enabled: submission.enabled,
+                fenced: submission.fenced(),
                 layers: submission.layers.map(|layer| layer.map(|layer| layer.dva)),
             });
         }
         let planes = submission.apply(&self.planes);
-        let layers = match visible(&planes) {
-            Ok(layers) => layers,
+        let shown = match visible(&planes) {
+            Ok(shown) => shown,
             Err(reason) => return self.refuse(tag, reason),
         };
         // WindowServer retries a failed swap forever, and its layers cover the
         // screen: a background color is a recorded gap, shown black.
         if submission.background != 0 {
-            self.report_unmodeled(tag);
+            self.report_unmodeled(
+                tag,
+                Degraded::Ignored("the background is shown black"),
+                None,
+            );
         }
         let packed = Packed::new()
             .bool(false)
@@ -935,29 +1562,83 @@ impl Methods {
             .finish(output);
         let reply = self.reply(tag, packed)?;
         // Commit the accepted swap only after every fallible preflight succeeds.
-        self.started.remove(start);
+        let (_, client) = self.started.remove(start).expect("found started swap");
         self.planes = planes;
-        self.frames.push_back(Frame { swap_id, layers });
+        let mut fenced = submission.fenced();
+        self.early_fences.retain(|&(swap, surface)| {
+            if swap != swap_id {
+                return true;
+            }
+            for (index, &id) in submission.surface_ids.iter().enumerate() {
+                if id == surface {
+                    fenced &= !(1 << index);
+                }
+            }
+            false
+        });
+        self.pacing.fence_waits += u32::from(fenced != 0);
+        self.frames.push_back(Frame {
+            swap_id,
+            client,
+            gpu_work: super::gpu::submitted(),
+            fenced,
+            surface_ids: submission.surface_ids,
+            waiting_since: None,
+            planes: shown,
+            updated: if submission.enabled & swap::REMOVE_LAYERS != 0 {
+                (1 << swap::LAYERS) - 1
+            } else {
+                submission.enabled & ((1 << swap::LAYERS) - 1)
+            },
+        });
+        self.pacing.submitted += 1;
         Ok(reply)
     }
 }
 
-/// The layers the slots show, bottom to top, over a black background. A
-/// layer whose surface or rectangles the model cannot show refuses by name.
-fn visible(planes: &[Option<Layer>; swap::LAYERS]) -> Result<Vec<scanout::Layer>> {
-    planes
-        .iter()
-        .flatten()
-        .map(|layer| {
-            let surface = layer.record.surface(layer.dva)?;
-            scanout::Layer::new(
-                surface,
+/// What each slot shows, bottom to top, over a black background. A layer
+/// whose surface or rectangles the model cannot show refuses by name.
+fn visible(
+    planes: &[Option<Layer>; swap::LAYERS],
+) -> Result<[Option<scanout::Layer>; swap::LAYERS]> {
+    let mut shown = [None; swap::LAYERS];
+    for (shown, layer) in shown.iter_mut().zip(planes) {
+        if let Some(layer) = layer {
+            *shown = Some(scanout::Layer::new(
+                layer.record.surface(layer.dva)?,
                 layer.source,
                 layer.destination,
                 layer.record.premultiplied,
-            )
-        })
-        .collect()
+            )?);
+        }
+    }
+    Ok(shown)
+}
+
+/// The rows of a `height`-row screen that differ between slots `before` and
+/// `after`, where swaps set the slots in `updated` in between: those rows
+/// a changed or set slot covered before or covers after. A slot no swap set
+/// shows the same surface, which nothing draws in while it is on screen
+/// (the AP releases a surface only once a later swap replaced it).
+fn damage(
+    before: &[Option<scanout::Layer>; swap::LAYERS],
+    after: &[Option<scanout::Layer>; swap::LAYERS],
+    updated: u32,
+    height: u32,
+) -> core::ops::Range<usize> {
+    let mut rows = 0..0;
+    for (slot, (before, after)) in before.iter().zip(after).enumerate() {
+        if updated & 1 << slot == 0 && before == after {
+            continue;
+        }
+        for layer in [before, after].into_iter().flatten() {
+            let rect = layer.destination;
+            let start = rect.y.min(height) as usize;
+            let end = (u64::from(rect.y) + u64::from(rect.height)).min(height.into()) as usize;
+            rows = scanout::union(rows, start..end);
+        }
+    }
+    rows
 }
 
 /// A boolean DCP reply (the low bit set is true).
@@ -968,7 +1649,7 @@ fn bool_reply(ok: bool) -> Vec<u8> {
 /// Answer a stateless query for the fixed `mode`, or `None` for a method with
 /// no model. The output must be exactly the length the AP's header allocated
 /// (the interface's size); a mismatch refuses rather than truncates.
-pub fn answer(code: &[u8; 4], input: &[u8], output: u32, mode: Mode) -> Result<Option<Vec<u8>>> {
+pub fn answer(row: &Method, input: &[u8], output: u32, mode: Mode) -> Result<Option<Vec<u8>>> {
     let out = output as usize;
     let sized = |bytes: Vec<u8>| -> Result<Option<Vec<u8>>> {
         if bytes.len() == out {
@@ -981,64 +1662,64 @@ pub fn answer(code: &[u8; 4], input: &[u8], output: u32, mode: Mode) -> Result<O
     };
     let width = mode.width.to_le_bytes().to_vec();
     let height = mode.height.to_le_bytes().to_vec();
-    match code {
+    match (row.class, row.name) {
         // IOMobileFramebufferAP display geometry (out=4 each).
-        b"A451" => sized(width),
-        b"A452" => sized(height),
+        (AP, "display_width") => sized(width),
+        (AP, "display_height") => sized(height),
         // UnifiedPipeline2 aliases: displayHeight (A350), displayWidth (A351).
-        b"A350" => sized(height),
-        b"A351" => sized(width),
+        (UP, "displayHeight") => sized(height),
+        (UP, "displayWidth") => sized(width),
         // get_display_size(flags) -> {width, height} (in=4, out=8).
-        b"A453" => {
+        (AP, "get_display_size") => {
             let mut bytes = mode.width.to_le_bytes().to_vec();
             bytes.extend_from_slice(&mode.height.to_le_bytes());
             sized(bytes)
         }
         // is_external: the one HDMI display is external.
-        b"A379" => sized(bool_reply(true)),
+        (UP, "is_external") => sized(bool_reply(true)),
         // headless: a display is connected, so not headless (0).
-        b"A384" => sized(bool_reply(false)),
+        (UP, "headless") => sized(bool_reply(false)),
         // is_main_display: the one connected display is main.
-        b"A412" => sized(bool_reply(true)),
+        (AP, "is_main_display") => sized(bool_reply(true)),
         // get_framebuffer_id: the single framebuffer's id.
-        b"A405" => sized(1u32.to_le_bytes().to_vec()),
+        (AP, "get_framebuffer_id") => sized(1u32.to_le_bytes().to_vec()),
         // set_display_device(index) -> link status, not bool. The AP
         // wrapper (0x3d77988) passes this word to iomfb_status_from_link
         // (0x3d9cf30): 0 succeeds; 1 maps to kIOReturnError (0xe00002bc).
         // Original T6000 restore FW 0x26aed0 ignores the index and returns
         // success for its external trait (+0x4305); init 0x256310..2563e8
         // sets that trait for types 2/3 and publishes "external".
-        b"A411" => sized(IO_RETURN_SUCCESS.to_le_bytes().to_vec()),
+        (AP, "set_display_device") => sized(IO_RETURN_SUCCESS.to_le_bytes().to_vec()),
         // do_create_default_frame_buffer: the DCP does NOT create one; the
         // boot framebuffer is inherited, so this is 0 and the AP skips the
         // A036/A037 default-framebuffer-info path.
-        b"A454" => sized(bool_reply(false)),
+        (AP, "do_create_default_frame_buffer") => sized(bool_reply(false)),
         // set_create_DFB / stop_signal / free_signal: no output.
-        b"A389" | b"A402" | b"A400" => sized(Vec::new()),
+        (UP, "set_create_DFB") | (AP, "stop_signal") | (AP, "free_signal") => sized(Vec::new()),
         // flush_supportsPower(bool): no output.
-        b"A478" => sized(Vec::new()),
+        (AP, "flush_supportsPower") => sized(Vec::new()),
         // setDisplayRefreshProperties: success (out=4).
-        b"A475" => sized(bool_reply(true)),
+        (AP, "setDisplayRefreshProperties") => sized(bool_reply(true)),
         // apt_supported (UPPipeAP_H13P::late_init 0x2a4e98c): false. The
         // firmware answers pipe word +0x42c == 1 (restore 0x2bcad0, normal
         // 0x2bf884), which its init sets only to 3 or 0 (0x2c84b0, 0x2c8724).
-        b"A035" => sized(bool_reply(false)),
+        (H13P, "apt_supported") => sized(bool_reply(false)),
         // setSharedEventMemBlockSize(u32, u32) (UnifiedPipeline2::start
         // 0x2a5e02c): no output; the firmware only records the sizes in its
         // shared-event block (restore 0x1becd8, normal 0x1bf20c).
-        b"A465" => sized(Vec::new()),
+        (AP, "setSharedEventMemBlockSize") => sized(Vec::new()),
         // isKeepOnScreen (swapping_client_did_start 0x3d67534): false, the
         // firmware's byte +0x4304, which nothing sets (restore 0x1c8f30).
-        b"A485" => sized(bool_reply(false)),
+        (AP, "isKeepOnScreen") => sized(bool_reply(false)),
         // get_shared_disp_state (get_ap_shared_disp_state 0x3d6247c, asked
         // once AppleClamshellState exists): false, the pipe's byte +0x2ba8,
         // which nothing sets (restore 0x2c01d0, normal 0x2c2fb4).
-        b"A489" => sized(bool_reply(false)),
+        (AP, "get_shared_disp_state") => sized(bool_reply(false)),
         // remove_gain_maps (0x3d7a6a8): this monitor creates no gain map, so
         // the client's record state in the first eight bytes returns as it
         // came, valid byte +5 included, with success in the word at +8, which
         // the AP returns.
-        b"A480" => {
+        (AP, "remove_gain_maps") => {
             let mut bytes = input.to_vec();
             if let Some(result) = bytes.get_mut(8..12) {
                 result.copy_from_slice(&IO_RETURN_SUCCESS.to_le_bytes());

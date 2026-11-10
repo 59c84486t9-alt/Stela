@@ -32,6 +32,7 @@
 pub mod abi;
 pub mod afk;
 pub mod avipc;
+pub mod gpu;
 pub mod iomfb;
 pub mod link;
 pub mod modes;
@@ -73,9 +74,11 @@ const AFK_ENDPOINTS: [(u8, &str); 3] = [
 /// What the display model saw and did, in order, for the boot log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Log {
-    /// The AP called `tag`; `input` is its leading bytes.
+    /// The AP called `tag`, the interface's method `name`; `input` is its
+    /// leading bytes.
     Call {
         tag: [u8; 4],
+        name: &'static str,
         input: Vec<u8>,
         output: u32,
     },
@@ -88,12 +91,18 @@ pub enum Log {
     /// The AP's output for a callback whose result the model uses.
     Answer { tag: [u8; 4], output: Vec<u8> },
     /// A whole call input kept for an unpinned layout.
-    Payload { tag: [u8; 4], bytes: Vec<u8> },
+    Payload {
+        tag: [u8; 4],
+        name: &'static str,
+        bytes: Vec<u8>,
+    },
     /// A swap the AP submitted: its enable mask and each layer's DVA, none
     /// where its surface pointer is null.
     Submitted {
         swap_id: u32,
         enabled: u32,
+        /// The layers still waiting for their surface's GPU fence.
+        fenced: u32,
         layers: [Option<u64>; swap::LAYERS],
     },
     /// A swap's pixels reached the host scanout.
@@ -102,12 +111,34 @@ pub enum Log {
         /// The composed layers' surfaces, bottom to top.
         surfaces: Vec<Surface>,
     },
+    /// A swap latched at a vblank with a newer one, `shown`, presented in
+    /// its place; `displayed` is what its completion tells the AP.
+    Merged {
+        swap_id: u32,
+        shown: u32,
+        displayed: bool,
+    },
     /// Cumulative presentation progress in the bounded log.
     PresentSummary { total: u64, last_swap: u32 },
+    /// How swaps reached the scanout over a window of the counter.
+    Pacing(iomfb::Pacing),
     /// A named refusal, with the call's interface row.
     Refused(String),
-    /// A method of the interface with no model, answered with zeros.
-    Unmodeled([u8; 4]),
+    /// A swap shown before `io_fence_notify` named every surface it waited
+    /// for: those layers may still have been drawing.
+    FenceTimeout {
+        swap_id: u32,
+        fenced: u32,
+        seconds: u64,
+    },
+    /// A method of the interface the model does not serve in full, its name,
+    /// how it was answered and the parameter it was reported for, if any.
+    Unmodeled {
+        tag: [u8; 4],
+        name: &'static str,
+        answer: iomfb::Degraded,
+        detail: Option<u32>,
+    },
     /// An AFK endpoint's message or ring entry.
     Afk {
         endpoint: u8,
@@ -118,15 +149,12 @@ pub enum Log {
     Dropped(u64),
 }
 
-/// A tag and its interface name.
+/// A callback tag and its name, which every interface shares.
 struct Named<'a>(&'a [u8; 4]);
 
 impl core::fmt::Display for Named<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let name = abi::method(self.0)
-            .map(|row| row.name)
-            .or_else(|| abi::callback(self.0).map(|row| row.name))
-            .unwrap_or("");
+        let name = abi::callback(self.0).map_or("", |row| row.name);
         write!(f, "{} {name}", abi::tag_str(self.0))
     }
 }
@@ -136,8 +164,17 @@ impl core::fmt::Display for Named<'_> {
 impl core::fmt::Display for Log {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Log::Call { tag, input, output } => {
-                write!(f, "DCP call {} out={output:#x} in={input:02x?}", Named(tag))
+            Log::Call {
+                tag,
+                name,
+                input,
+                output,
+            } => {
+                write!(
+                    f,
+                    "DCP call {} {name} out={output:#x} in={input:02x?}",
+                    abi::tag_str(tag)
+                )
             }
             Log::Callback { tag, input, output } => {
                 write!(
@@ -147,8 +184,13 @@ impl core::fmt::Display for Log {
                 )
             }
             Log::Answer { tag, output } => write!(f, "DCP answer {} out={output:02x?}", Named(tag)),
-            Log::Payload { tag, bytes } => {
-                write!(f, "DCP payload {} bytes={:#x}", Named(tag), bytes.len())?;
+            Log::Payload { tag, name, bytes } => {
+                write!(
+                    f,
+                    "DCP payload {} {name} bytes={:#x}",
+                    abi::tag_str(tag),
+                    bytes.len()
+                )?;
                 for (row, chunk) in bytes.chunks(32).enumerate() {
                     if chunk.iter().any(|&byte| byte != 0) {
                         write!(
@@ -164,27 +206,50 @@ impl core::fmt::Display for Log {
             Log::Submitted {
                 swap_id,
                 enabled,
+                fenced,
                 layers,
             } => {
                 write!(
                     f,
-                    "DCP submitted swap {swap_id} enabled={enabled:#x} layers={layers:x?}"
+                    "DCP submitted swap {swap_id} enabled={enabled:#x} fenced={fenced:#x} layers={layers:x?}"
                 )
             }
             Log::Presented { swap_id, surfaces } => {
                 write!(f, "DCP presented swap {swap_id} surfaces={surfaces:x?}")
             }
+            Log::Merged {
+                swap_id,
+                shown,
+                displayed,
+            } => write!(
+                f,
+                "DCP merged swap {swap_id} into swap {shown} displayed={}",
+                u8::from(*displayed)
+            ),
             Log::PresentSummary { total, last_swap } => {
                 write!(f, "DCP present summary total={total} last_swap={last_swap}")
             }
+            Log::Pacing(pacing) => write!(f, "{pacing}"),
             Log::Refused(text) => write!(f, "DCP refused {text}"),
-            Log::Unmodeled(tag) => {
-                let name = abi::method(tag).map_or("", |row| row.name);
-                write!(
-                    f,
-                    "DCP unmodeled {} {name}: answered with zeros",
-                    abi::tag_str(tag)
-                )
+            Log::FenceTimeout {
+                swap_id,
+                fenced,
+                seconds,
+            } => write!(
+                f,
+                "DCP showed swap {swap_id} with layers {fenced:#x} still fenced after {seconds} s: the AP never named their surfaces in io_fence_notify (reported once)"
+            ),
+            Log::Unmodeled {
+                tag,
+                name,
+                answer,
+                detail,
+            } => {
+                write!(f, "DCP unmodeled {} {name}", abi::tag_str(tag))?;
+                if let Some(detail) = detail {
+                    write!(f, " ({detail:#x})")?;
+                }
+                write!(f, ": {answer}")
             }
             Log::Afk {
                 endpoint,
@@ -337,7 +402,13 @@ impl Coprocessor {
         identity: ExternalIdentity,
         build: &Build,
     ) -> Result<Self> {
-        Self::with_identity(iomfb::Methods::new(scanout), window, identity, build)
+        let interface = abi::interface(build.dcp_link_version)?;
+        Self::with_identity(
+            iomfb::Methods::new(scanout, interface),
+            window,
+            identity,
+            build,
+        )
     }
 
     fn with_identity(
@@ -419,12 +490,14 @@ impl Coprocessor {
         })
     }
 
-    /// Keep the display's refresh at counter `now`.
+    /// Advance the display to counter `now`: a queued scanout flush, and the
+    /// vblank it passed, which opens a latch and queues the vsync.
     pub fn refresh(&mut self, now: u64) {
         self.link.borrow_mut().service_mut().refresh(now);
     }
 
-    /// When the display's next refresh is due, if anyone listens for it.
+    /// When the display next needs a look: its next vblank, while anyone
+    /// listens for it, a swap waits or the scanout queued work.
     pub fn refresh_deadline(&self) -> Option<u64> {
         self.link.borrow().service().refresh_deadline()
     }
@@ -434,13 +507,20 @@ impl Coprocessor {
         self.link.borrow().service().frame_pending()
     }
 
-    /// Read the oldest submitted swap's surface through `port` (the display
-    /// pipe's DART, where the AP mapped it), present it and queue the swap's
-    /// completion callback, which leaves at the next link DMA step.
-    pub fn present(&mut self, port: &mut Port<'_, '_>) -> Result<()> {
+    /// Whether the last vblank latches a swap at counter `now`, the oldest
+    /// waiting one's surfaces' GPU fences having signaled.
+    pub fn frame_ready(&mut self, now: u64) -> bool {
+        self.link.borrow_mut().service_mut().frame_ready(now)
+    }
+
+    /// Present at counter `now` the swaps the last vblank latched, reading
+    /// the newest one's surfaces through `port` (the display pipe's DART,
+    /// where the AP mapped them), and queue their completion callbacks,
+    /// which leave at the next link DMA step.
+    pub fn present(&mut self, now: u64, port: &mut Port<'_, '_>) -> Result<()> {
         let mut link = self.link.borrow_mut();
         link.service_mut()
-            .present(|iova, bytes| port.read(iova, bytes).is_ok())
+            .present(now, |iova, bytes| port.read(iova, bytes).is_ok())
     }
 }
 
@@ -521,6 +601,9 @@ impl Firmware for Coprocessor {
     }
     fn take_transition(&mut self) -> Option<TransitionRequest> {
         self.rtkit.take_transition()
+    }
+    fn take_unmodeled(&mut self) -> Vec<String> {
+        self.link.borrow_mut().service_mut().take_unmodeled()
     }
 }
 

@@ -1,7 +1,7 @@
-//! The method and callback ABI of the DCP IOMFB link (the 26A434 interface
-//! version, [`stela_formats::builds`]): which four-character tag names which method,
-//! the wire sizes of its input and output, and how a method's arguments are
-//! packed into those bytes.
+//! The method and callback ABI of the DCP IOMFB link, per interface version
+//! (the build's `dcp_link_version`, [`stela_formats::builds`]): which
+//! four-character tag names which method, the wire sizes of its input and
+//! output, and how a method's arguments are packed into those bytes.
 //!
 //! ## Tags and sizes
 //!
@@ -9,9 +9,21 @@
 //! releases (Asahi Linux `drivers/gpu/drm/apple/iomfb_v12_3.c` and
 //! `iomfb_v13_3.c`; m1n1 `proxyclient/m1n1/fw/dcp/ipc.py`, whose `>= 14.7`
 //! branch has `A406 swap_start_dcp` and `A407 swap_submit_dcp`). The rows
-//! below are the 26A434 J473AP interface's, transcribed from the exact-build
-//! record in docs/research/display-gpu.md ("Verified method/callback
+//! of [`METHODS_211`] are the 26A434 J473AP interface's, transcribed from the
+//! exact-build record in docs/research/display-gpu.md ("Verified method/callback
 //! matrix"); method names follow the public tables where both name one.
+//! [`METHODS_213`] is the 26B123 interface: each AP stub that calls a method
+//! passes its tag and both sizes as immediates, so its rows were recovered by
+//! matching each stub's function between the two kernelcaches. 234 methods keep
+//! their 211 sizes under new tags (the `IOMobileFramebufferAP` and
+//! `DCPPowerManager` blocks moved up 50, `UnifiedPipeline2` from A380 up one),
+//! `getPlatformExtDisplayLimits` widened its last three outputs to `u32` and
+//! dropped the `u8` one, and `getDisplayCaps` and `is_mode_set_dirty` are new.
+//! The callbacks (`D` tags, [`CALLBACKS`]) are the same in both: each
+//! `IOMobileFramebuffer_RemoteCalls::Dnnn_callback__` handler calls the same
+//! AP method with the same size checks.
+//! A method's identity is its class and name (and, for an overload such as
+//! `update_dfb`, its sizes); the model dispatches on those, never on a tag.
 //! Every call the AP makes is checked against its row, so a call whose
 //! sizes differ from the interface refuses by name instead of being parsed
 //! with the wrong layout.
@@ -83,9 +95,41 @@ const fn c(
     }
 }
 
-/// The interface's row for method `tag`.
-pub fn method(tag: &[u8; 4]) -> Option<&'static Method> {
-    METHODS.iter().find(|method| &method.tag == tag)
+/// One interface version's methods.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Interface {
+    /// The link version the coprocessor announces (`dcp_link_version`).
+    pub version: u32,
+    pub methods: &'static [Method],
+}
+
+impl Interface {
+    /// The interface's row for method `tag`.
+    pub fn method(&self, tag: &[u8; 4]) -> Option<&'static Method> {
+        self.methods.iter().find(|method| &method.tag == tag)
+    }
+}
+
+/// Every interface the model speaks.
+pub const INTERFACES: &[Interface] = &[
+    Interface {
+        version: 211,
+        methods: METHODS_211,
+    },
+    Interface {
+        version: 213,
+        methods: METHODS_213,
+    },
+];
+
+/// The interface of link version `version`.
+pub fn interface(version: u32) -> Result<&'static Interface> {
+    INTERFACES
+        .iter()
+        .find(|interface| interface.version == version)
+        .ok_or(refuse!(
+            "the DCP link version has no recorded method interface"
+        ))
 }
 
 /// The interface's row for callback `tag`.
@@ -198,9 +242,154 @@ impl Packed {
 /// failed swap.
 pub const IO_RETURN_SUCCESS: u32 = 0;
 
-/// The interface's methods.
+/// The link status `iomfb_status_from_link` maps to `kIOReturnUnsupported`
+/// (0xe00002c7): index 2 of its table (26B123 kernel VA 0xfffffe000adc8038,
+/// table entry 2 0xe00002c7; 26A434 0x3d9cf30, table 0xaf72f0). It is the
+/// protocol's error reply for a method the pipe cannot carry out. Apple's
+/// own pipes answer the same IOReturn for these requests when they lack the
+/// unit (`AppleDisplayPipe::set_matrix_gated` without a color manager,
+/// `AppleMobileADBE0::readGammaTableFromRegisters` without gamma
+/// correction). An IOReturn written raw would read as success: the AP maps
+/// every link status above 18 to `kIOReturnSuccess`.
+pub const LINK_UNSUPPORTED: u32 = 2;
+
+/// Where a method's link status lies in its output. The AP stub reads the
+/// word at `status` and passes it to `iomfb_status_from_link`. With `in_out`,
+/// the bytes before it are the method's in-out argument, which the stub
+/// copies back to its caller whatever the status, and which also leads the
+/// input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusReply {
+    pub status: usize,
+    pub in_out: bool,
+}
+
+/// The status-returning `IOMobileFramebufferAP` methods the model has no
+/// complete model of, read from their 26B123 AP stubs (kernel VAs). The rows
+/// keep their sizes in the 26A434 interface.
+const STATUS_REPLIES: &[(&str, StatusReply)] = &[
+    // get_gamma_table(IOMFBGammaTable*) 0xfffffe000ada2e58: the 0xc0c-byte
+    // table in and out, the status at 0xc0c.
+    (
+        "get_gamma_table",
+        StatusReply {
+            status: 0xc0c,
+            in_out: true,
+        },
+    ),
+    // set_gamma_table(IOMFBGammaTable*) 0xfffffe000ada2f64: the same.
+    (
+        "set_gamma_table",
+        StatusReply {
+            status: 0xc0c,
+            in_out: true,
+        },
+    ),
+    // set_matrix(u32, const u64 (*)[3][3]) 0xfffffe000ada315c.
+    (
+        "set_matrix",
+        StatusReply {
+            status: 0,
+            in_out: false,
+        },
+    ),
+    // set_contrast(float*) 0xfffffe000ada321c: the float in and out.
+    (
+        "set_contrast",
+        StatusReply {
+            status: 4,
+            in_out: true,
+        },
+    ),
+    // set_color_remap_mode(DisplayColorRemapMode) 0xfffffe000ada3348.
+    (
+        "set_color_remap_mode",
+        StatusReply {
+            status: 0,
+            in_out: false,
+        },
+    ),
+    // setBrightnessCorrection(u32) 0xfffffe000ada3470.
+    (
+        "setBrightnessCorrection",
+        StatusReply {
+            status: 0,
+            in_out: false,
+        },
+    ),
+    // set_block_dcp(...) 0xfffffe000ada3ecc.
+    (
+        "set_block_dcp",
+        StatusReply {
+            status: 0,
+            in_out: false,
+        },
+    ),
+    // get_block_dcp(...) 0xfffffe000ada40c8: 0x1000 bytes out only, then
+    // the status.
+    (
+        "get_block_dcp",
+        StatusReply {
+            status: 0x1000,
+            in_out: false,
+        },
+    ),
+    // swap_set_color_matrix(IOMFBColorFixedMatrix*, function, u32)
+    // 0xfffffe000ada4718: the 0x78-byte matrix in and out.
+    (
+        "swap_set_color_matrix",
+        StatusReply {
+            status: 0x78,
+            in_out: true,
+        },
+    ),
+    // enable_disable_video_power_savings(u32) 0xfffffe000ada4c18.
+    (
+        "enable_disable_video_power_savings",
+        StatusReply {
+            status: 0,
+            in_out: false,
+        },
+    ),
+];
+
+/// Where `method`'s link status lies, for the methods whose AP stubs were
+/// read; none for any other.
+pub fn status_reply(method: &Method) -> Option<StatusReply> {
+    if method.class != "IOMobileFramebufferAP" {
+        return None;
+    }
+    STATUS_REPLIES
+        .iter()
+        .find(|(name, _)| *name == method.name)
+        .map(|&(_, reply)| reply)
+}
+
+/// The output of a status method that refuses with `status`: its in-out
+/// argument as the AP sent it, zeros elsewhere, and the status word.
+pub fn status_output(
+    reply: StatusReply,
+    input: &[u8],
+    output: u32,
+    status: u32,
+) -> Result<alloc::vec::Vec<u8>> {
+    let mut bytes = alloc::vec![0; output as usize];
+    if reply.in_out {
+        let argument = input.get(..reply.status).ok_or(refuse!(
+            "DCP method input is shorter than its in-out argument"
+        ))?;
+        bytes[..reply.status].copy_from_slice(argument);
+    }
+    bytes
+        .get_mut(reply.status..reply.status + 4)
+        .ok_or(refuse!("DCP method status lies outside its output"))?
+        .copy_from_slice(&status.to_le_bytes());
+    Ok(bytes)
+}
+
+/// The 26A434 interface's methods (link version 211).
 #[rustfmt::skip]
-pub const METHODS: &[Method] = &[
+pub const METHODS_211: &[Method] = &[
     m(b"A000", "UPPipeAP_H13P", "late_init_signal", 0x4, 0x4),
     m(b"A001", "UPPipeAP_H13P", "alss_supported", 0x0, 0x4),
     m(b"A002", "UPPipeAP_H13P", "reset_dsc", 0x0, 0x0),
@@ -438,7 +627,249 @@ pub const METHODS: &[Method] = &[
     m(b"A501", "DCPPowerManager", "power_state_will_change_to", 0x10, 0x4),
 ];
 
-/// The interface's callbacks.
+/// The 26B123 interface's methods (link version 213).
+#[rustfmt::skip]
+pub const METHODS_213: &[Method] = &[
+    m(b"A000", "UPPipeAP_H13P", "late_init_signal", 0x4, 0x4),
+    m(b"A001", "UPPipeAP_H13P", "alss_supported", 0x0, 0x4),
+    m(b"A002", "UPPipeAP_H13P", "reset_dsc", 0x0, 0x0),
+    m(b"A003", "UPPipeAP_H13P", "display_edr_factor_changed", 0x4, 0x0),
+    m(b"A004", "UPPipeAP_H13P", "set_contrast", 0x4, 0x0),
+    m(b"A005", "UPPipeAP_H13P", "set_csc_mode", 0x4, 0x0),
+    m(b"A006", "UPPipeAP_H13P", "set_op_mode", 0x4, 0x0),
+    m(b"A007", "UPPipeAP_H13P", "set_op_gamma_mode", 0x4, 0x0),
+    m(b"A008", "UPPipeAP_H13P", "set_video_out_mode", 0x4, 0x0),
+    m(b"A009", "UPPipeAP_H13P", "set_meta_allowed", 0x4, 0x0),
+    m(b"A010", "UPPipeAP_H13P", "set_tunneled_color_mode", 0x4, 0x0),
+    m(b"A011", "UPPipeAP_H13P", "set_bwr_line_time_us", 0x8, 0x0),
+    m(b"A012", "UPPipeAP_H13P", "performance_feedback", 0x8, 0x0),
+    m(b"A013", "UPPipeAP_H13P", "notify_swap_complete", 0x4, 0x0),
+    m(b"A014", "UPPipeAP_H13P", "is_run_mode_change_pending", 0x0, 0x4),
+    m(b"A015", "UPPipeAP_H13P", "ready_for_run_mode_change", 0x0, 0x4),
+    m(b"A016", "UPPipeAP_H13P", "set_thermal_throttle_cap", 0x4, 0x0),
+    m(b"A017", "UPPipeAP_H13P", "emergency_shutdown_normal_mode", 0x0, 0x0),
+    m(b"A018", "UPPipeAP_H13P", "set_target_run_mode", 0x0, 0x4),
+    m(b"A019", "UPPipeAP_H13P", "rt_bandwidth_setup", 0x0, 0x4),
+    m(b"A020", "UPPipeAP_H13P", "rt_bandwidth_update", 0xc, 0x4),
+    m(b"A021", "UPPipeAP_H13P", "rt_bandwidth_write_update", 0x8, 0x4),
+    m(b"A022", "UPPipeAP_H13P", "cif_blending_eco_present", 0x0, 0x4),
+    m(b"A023", "UPPipeAP_H13P", "request_bic_update", 0x0, 0x4),
+    m(b"A024", "UPPipeAP_H13P", "early_power_off_warning", 0x0, 0x0),
+    m(b"A025", "UPPipeAP_H13P", "get_max_frame_size", 0xc, 0x8),
+    m(b"A026", "UPPipeAP_H13P", "shadow_FIFO_empty", 0x0, 0x4),
+    m(b"A027", "UPPipeAP_H13P", "setup_video_limits", 0x0, 0x0),
+    m(b"A028", "UPPipeAP_H13P", "can_program_swap", 0x0, 0x4),
+    m(b"A029", "UPPipeAP_H13P", "in_auto_mode", 0x0, 0x4),
+    m(b"A030", "UPPipeAP_H13P", "is_piodma_used", 0x0, 0x4),
+    m(b"A031", "UPPipeAP_H13P", "push_black_frame", 0x0, 0x0),
+    m(b"A032", "UPPipeAP_H13P", "read_crc", 0x8, 0x4),
+    m(b"A033", "UPPipeAP_H13P", "update_notify_clients_dcp", 0x6c, 0x0),
+    m(b"A034", "UPPipeAP_H13P", "is_hilo", 0x0, 0x4),
+    m(b"A035", "UPPipeAP_H13P", "apt_supported", 0x0, 0x4),
+    m(b"A036", "UPPipeAP_H13P", "get_dfb_info", 0x2c, 0x2c),
+    m(b"A037", "UPPipeAP_H13P", "get_dfb_compression_info", 0x8, 0x8),
+    m(b"A038", "UPPipeAP_H13P", "get_frame_done_time", 0x0, 0x8),
+    m(b"A039", "UPPipeAP_H13P", "get_performance_headroom", 0x0, 0x4),
+    m(b"A040", "UPPipeAP_H13P", "are_stats_active", 0x0, 0x4),
+    m(b"A041", "UPPipeAP_H13P", "supports_odd_h_blanking", 0x0, 0x4),
+    m(b"A042", "UPPipeAP_H13P", "is_first_hw_version", 0x0, 0x4),
+    m(b"A043", "UPPipeAP_H13P", "set_blendout_CSC_mode", 0x0, 0x0),
+    m(b"A044", "UPPipeAP_H13P", "update_ext_disp_clock_info", 0x8, 0x4),
+    m(b"A100", "UPPipe2", "get_gamma_table_gated", 0x4, 0xc10),
+    m(b"A101", "UPPipe2", "set_gamma_table_gated", 0xc10, 0x4),
+    m(b"A102", "UPPipe2", "test_control", 0x8, 0x4),
+    m(b"A103", "UPPipe2", "get_config_frame_size", 0xc, 0x8),
+    m(b"A104", "UPPipe2", "set_config_frame_size", 0x8, 0x0),
+    m(b"A105", "UPPipe2", "program_config_frame_size", 0x0, 0x0),
+    m(b"A106", "UPPipe2", "read_blend_crc", 0x0, 0x4),
+    m(b"A107", "UPPipe2", "read_config_crc", 0x0, 0x4),
+    m(b"A108", "UPPipe2", "disable_wpc_calibration", 0x4, 0x4),
+    m(b"A109", "UPPipe2", "vftg_is_running", 0x0, 0x4),
+    m(b"A110", "UPPipe2", "vftg_debug", 0x4, 0x0),
+    m(b"A111", "UPPipe2", "vftg_set_color_channels", 0xc, 0x0),
+    m(b"A112", "UPPipe2", "set_color_filter_scale", 0x4, 0x4),
+    m(b"A113", "UPPipe2", "set_corner_temps", 0x10, 0x4),
+    m(b"A114", "UPPipe2", "reset_aot_enabled", 0x0, 0x0),
+    m(b"A115", "UPPipe2", "aot_enabled", 0x0, 0x4),
+    m(b"A116", "UPPipe2", "aot_active", 0x0, 0x4),
+    m(b"A117", "UPPipe2", "set_timings_enabled", 0x4, 0x4),
+    m(b"A118", "UPPipe2", "get_frame_size", 0xc, 0xc),
+    m(b"A119", "UPPipe2", "set_block_dcp", 0x106c, 0x4),
+    m(b"A120", "UPPipe2", "get_block", 0x5c, 0x1004),
+    m(b"A121", "UPPipe2", "abort_block_dcp", 0xc, 0x4),
+    m(b"A122", "UPPipe2", "get_buf_block_dcp", 0x106c, 0x4),
+    m(b"A123", "UPPipe2", "start_task_dcp", 0x18, 0x4),
+    m(b"A124", "UPPipe2", "abort_task_dcp", 0xc, 0x4),
+    m(b"A125", "UPPipe2", "check_task_status_dcp", 0xc, 0x4),
+    m(b"A126", "UPPipe2", "get_block_size_dcp", 0x14, 0x8),
+    m(b"A127", "UPPipe2", "get_matrix", 0x80, 0x7c),
+    m(b"A128", "UPPipe2", "set_matrix", 0x80, 0x4),
+    m(b"A129", "UPPipe2", "get_internal_timing_attributes_gated", 0x34, 0x34),
+    m(b"A130", "UPPipe2", "display_edr_factor_changed", 0x4, 0x0),
+    m(b"A131", "UPPipe2", "set_contrast", 0x4, 0x0),
+    m(b"A132", "UPPipe2", "p3_to_disp_cs", 0x20, 0x4),
+    m(b"A133", "UPPipe2", "max_panel_brightness", 0x0, 0x4),
+    m(b"A134", "UPPipe2", "swap_flush_stream_replay", 0x0, 0x0),
+    m(b"A135", "UPPipe2", "init_ca_pmu", 0x0, 0x4),
+    m(b"A136", "UPPipe2", "pmu_service_matched", 0x0, 0x4),
+    m(b"A137", "UPPipe2", "backlight_service_matched", 0x0, 0x4),
+    m(b"A200", "PropRelay", "setBool", 0x8, 0x4),
+    m(b"A201", "PropRelay", "setInt", 0x8, 0x4),
+    m(b"A202", "PropRelay", "setFx", 0x8, 0x4),
+    m(b"A203", "PropRelay", "setPropDynamic", 0x8, 0x4),
+    m(b"A204", "PropRelay", "getBool", 0x4, 0x4),
+    m(b"A205", "PropRelay", "getInt", 0x4, 0x4),
+    m(b"A206", "PropRelay", "getFx", 0x4, 0x4),
+    m(b"A350", "UnifiedPipeline2", "displayHeight", 0x0, 0x4),
+    m(b"A351", "UnifiedPipeline2", "displayWidth", 0x0, 0x4),
+    m(b"A352", "UnifiedPipeline2", "applyProperty", 0x8, 0x4),
+    m(b"A353", "UnifiedPipeline2", "getMinFramePeriodNs", 0x0, 0x8),
+    m(b"A354", "UnifiedPipeline2", "set_fast_preset_in_progress", 0x10, 0xc),
+    m(b"A355", "UnifiedPipeline2", "getTiledModes", 0x5dc, 0x5d4),
+    m(b"A356", "UnifiedPipeline2", "removeTiledModes", 0x0, 0x4),
+    m(b"A357", "UnifiedPipeline2", "insertTiledModes", 0x70, 0x68),
+    m(b"A358", "UnifiedPipeline2", "removeDisplayWallModeList", 0x0, 0x4),
+    m(b"A359", "UnifiedPipeline2", "buildDisplayWallModeList", 0x14, 0x8),
+    m(b"A360", "UnifiedPipeline2", "getMasterSwapID", 0x0, 0x4),
+    m(b"A361", "UnifiedPipeline2", "setMasterSwapID", 0x4, 0x0),
+    m(b"A362", "UnifiedPipeline2", "manage_elements", 0x4, 0x0),
+    m(b"A363", "UnifiedPipeline2", "manage_properties", 0x4, 0x0),
+    m(b"A364", "UnifiedPipeline2", "getVideoDataForIDs", 0x7c, 0x74),
+    m(b"A365", "UnifiedPipeline2", "insertMergeModes", 0x7c, 0x74),
+    m(b"A366", "UnifiedPipeline2", "setup_peer_dcp", 0x4, 0x0),
+    m(b"A367", "UnifiedPipeline2", "getDSCCapabilities", 0x24, 0x20),
+    m(b"A368", "UnifiedPipeline2", "setDSCCapabilities", 0x24, 0x20),
+    m(b"A369", "UnifiedPipeline2", "getRequiresDSC", 0x0, 0x4),
+    m(b"A370", "UnifiedPipeline2", "getDSCBitsPerPixel", 0x4, 0x8),
+    m(b"A371", "UnifiedPipeline2", "setDSCBitsPerPixel", 0x4, 0x8),
+    m(b"A372", "UnifiedPipeline2", "getDSCslicesize", 0xc, 0xc),
+    m(b"A373", "UnifiedPipeline2", "setDSCslicesize", 0xc, 0xc),
+    m(b"A374", "UnifiedPipeline2", "getMatchingMode", 0x5dc, 0x5d4),
+    m(b"A375", "UnifiedPipeline2", "getDisplayProductId", 0x18, 0x14),
+    m(b"A376", "UnifiedPipeline2", "get_dw_mode_size", 0x8, 0xc),
+    m(b"A377", "UnifiedPipeline2", "getDisplayIDs", 0x14, 0x14),
+    m(b"A378", "UnifiedPipeline2", "getPlatformExtDisplayLimits", 0x2c, 0x28),
+    m(b"A379", "UnifiedPipeline2", "is_external", 0x0, 0x4),
+    m(b"A380", "UnifiedPipeline2", "getDisplayCaps", 0x4, 0x4),
+    m(b"A381", "UnifiedPipeline2", "get_system_type", 0x0, 0x4),
+    m(b"A382", "UnifiedPipeline2", "get_dw_params", 0x0, 0x14),
+    m(b"A383", "UnifiedPipeline2", "dw_reset_dual_pipe", 0x0, 0x0),
+    m(b"A384", "UnifiedPipeline2", "is_dw_supported", 0x0, 0x4),
+    m(b"A385", "UnifiedPipeline2", "headless", 0x0, 0x4),
+    m(b"A386", "UnifiedPipeline2", "are_timings_enabled_rpc", 0x0, 0x4),
+    m(b"A387", "UnifiedPipeline2", "get_apt_nframes_completed_rpc", 0x0, 0x4),
+    m(b"A388", "UnifiedPipeline2", "export_idle_method", 0x4, 0x0),
+    m(b"A389", "UnifiedPipeline2", "get_timing_attributes_gated", 0x34, 0x34),
+    m(b"A390", "UnifiedPipeline2", "set_create_DFB", 0x0, 0x0),
+    m(b"A391", "UnifiedPipeline2", "vi_set_temperature_hint", 0x0, 0x4),
+    m(b"A392", "UnifiedPipeline2", "allocate_bandwidth_callback_gated", 0x4, 0x4),
+    m(b"A393", "UnifiedPipeline2", "getSupportsPanelReplay", 0x0, 0x4),
+    m(b"A394", "UnifiedPipeline2", "setSupportsPanelReplay", 0x0, 0x0),
+    m(b"A395", "UnifiedPipeline2", "get_is_displayX1", 0x0, 0x4),
+    m(b"A396", "UnifiedPipeline2", "set_is_displayX1", 0x4, 0x0),
+    m(b"A397", "UnifiedPipeline2", "update_max_edr_headroom", 0x0, 0x0),
+    m(b"A398", "UnifiedPipeline2", "get_fast_preset_switch_ext_disp_supported", 0x0, 0x4),
+    m(b"A399", "UnifiedPipeline2", "setFastPresetSwitchSupported", 0x0, 0x0),
+    m(b"A400", "UnifiedPipeline2", "is_j575d", 0x0, 0x4),
+    m(b"A401", "UnifiedPipeline2", "is_mode_set_dirty", 0x0, 0x4),
+    m(b"A450", "IOMobileFramebufferAP", "free_signal", 0x0, 0x0),
+    m(b"A451", "IOMobileFramebufferAP", "start_signal", 0x0, 0x4),
+    m(b"A452", "IOMobileFramebufferAP", "stop_signal", 0x0, 0x0),
+    m(b"A453", "IOMobileFramebufferAP", "swap_begin", 0x0, 0x0),
+    m(b"A454", "IOMobileFramebufferAP", "rotate_surface", 0xc, 0x4),
+    m(b"A455", "IOMobileFramebufferAP", "get_framebuffer_id", 0x0, 0x4),
+    m(b"A456", "IOMobileFramebufferAP", "swap_start_dcp", 0x10, 0x8),
+    m(b"A457", "IOMobileFramebufferAP", "swap_submit_dcp", 0x1d30, 0xc),
+    m(b"A458", "IOMobileFramebufferAP", "swap_submit_dcp_main", 0xff4, 0xc),
+    m(b"A459", "IOMobileFramebufferAP", "swap_submit_dcp_blitter", 0xd48, 0x4),
+    m(b"A460", "IOMobileFramebufferAP", "swap_signal", 0x8, 0x4),
+    m(b"A461", "IOMobileFramebufferAP", "set_display_device", 0x4, 0x4),
+    m(b"A462", "IOMobileFramebufferAP", "is_main_display", 0x0, 0x4),
+    m(b"A463", "IOMobileFramebufferAP", "set_digital_out_mode", 0x8, 0x4),
+    m(b"A464", "IOMobileFramebufferAP", "get_digital_out_state", 0x8, 0x8),
+    m(b"A465", "IOMobileFramebufferAP", "get_display_area", 0xc, 0xc),
+    m(b"A466", "IOMobileFramebufferAP", "set_tvout_mode", 0x4, 0x4),
+    m(b"A467", "IOMobileFramebufferAP", "set_tvout_signaltype", 0x4, 0x4),
+    m(b"A468", "IOMobileFramebufferAP", "set_wss_info", 0x8, 0x4),
+    m(b"A469", "IOMobileFramebufferAP", "set_content_flags", 0x4, 0x0),
+    m(b"A470", "IOMobileFramebufferAP", "get_gamma_table", 0xc10, 0xc10),
+    m(b"A471", "IOMobileFramebufferAP", "set_gamma_table", 0xc10, 0xc10),
+    m(b"A472", "IOMobileFramebufferAP", "get_matrix", 0x50, 0x4c),
+    m(b"A473", "IOMobileFramebufferAP", "set_matrix", 0x50, 0x4),
+    m(b"A474", "IOMobileFramebufferAP", "set_contrast", 0x8, 0x8),
+    m(b"A475", "IOMobileFramebufferAP", "set_white_on_black_mode", 0x4, 0x4),
+    m(b"A476", "IOMobileFramebufferAP", "set_color_remap_mode", 0x4, 0x4),
+    m(b"A477", "IOMobileFramebufferAP", "get_color_remap_mode", 0x8, 0x8),
+    m(b"A478", "IOMobileFramebufferAP", "setBrightnessCorrection", 0x4, 0x4),
+    m(b"A479", "IOMobileFramebufferAP", "create_gain_map_dcp", 0x70, 0x10),
+    m(b"A480", "IOMobileFramebufferAP", "set_gain_map_cap_buffer_dcp", 0x34, 0xc),
+    m(b"A481", "IOMobileFramebufferAP", "delete_gain_map", 0x4, 0x4),
+    m(b"A482", "IOMobileFramebufferAP", "create_lpr_metadata_dcp", 0x38, 0x10),
+    m(b"A483", "IOMobileFramebufferAP", "delete_lpr_metadata", 0x4, 0x4),
+    m(b"A484", "IOMobileFramebufferAP", "temp_queue_swap_cancel", 0x4, 0x4),
+    m(b"A485", "IOMobileFramebufferAP", "swap_cancel", 0x4, 0x4),
+    m(b"A486", "IOMobileFramebufferAP", "swap_cancel_all_dcp", 0x8, 0x4),
+    m(b"A487", "IOMobileFramebufferAP", "surface_is_replaceable", 0x8, 0x8),
+    m(b"A488", "IOMobileFramebufferAP", "kernel_tests", 0xa0, 0xa0),
+    m(b"A489", "IOMobileFramebufferAP", "splc_set_brightness", 0x4, 0x4),
+    m(b"A490", "IOMobileFramebufferAP", "splc_get_brightness", 0x8, 0x8),
+    m(b"A491", "IOMobileFramebufferAP", "set_block_dcp", 0x106c, 0x4),
+    m(b"A492", "IOMobileFramebufferAP", "get_block_dcp", 0x5c, 0x1004),
+    m(b"A493", "IOMobileFramebufferAP", "abort_block_dcp", 0xc, 0x4),
+    m(b"A494", "IOMobileFramebufferAP", "get_buf_block_dcp", 0x106c, 0x4),
+    m(b"A495", "IOMobileFramebufferAP", "start_task_dcp", 0x18, 0x4),
+    m(b"A496", "IOMobileFramebufferAP", "abort_task_dcp", 0xc, 0x4),
+    m(b"A497", "IOMobileFramebufferAP", "check_task_status_dcp", 0xc, 0x4),
+    m(b"A498", "IOMobileFramebufferAP", "get_block_size_dcp", 0x10, 0x8),
+    m(b"A499", "IOMobileFramebufferAP", "swap_set_color_matrix", 0x84, 0x7c),
+    m(b"A500", "IOMobileFramebufferAP", "set_parameter_dcp", 0x28, 0x4),
+    m(b"A501", "IOMobileFramebufferAP", "display_width", 0x0, 0x4),
+    m(b"A502", "IOMobileFramebufferAP", "display_height", 0x0, 0x4),
+    m(b"A503", "IOMobileFramebufferAP", "get_display_size", 0x4, 0x8),
+    m(b"A504", "IOMobileFramebufferAP", "do_create_default_frame_buffer", 0x0, 0x4),
+    m(b"A505", "IOMobileFramebufferAP", "printRegs", 0x0, 0x0),
+    m(b"A506", "IOMobileFramebufferAP", "enable_disable_dithering", 0x4, 0x4),
+    m(b"A507", "IOMobileFramebufferAP", "set_underrun_color", 0x4, 0x4),
+    m(b"A508", "IOMobileFramebufferAP", "enable_disable_video_power_savings", 0x4, 0x4),
+    m(b"A509", "IOMobileFramebufferAP", "set_video_dac_gain", 0x4, 0x4),
+    m(b"A510", "IOMobileFramebufferAP", "set_line21_data", 0x4, 0x4),
+    m(b"A511", "IOMobileFramebufferAP", "enableInternalToExternalMirroring", 0x4, 0x4),
+    m(b"A512", "IOMobileFramebufferAP", "getExternalMirroringCapability", 0x18, 0x18),
+    m(b"A513", "IOMobileFramebufferAP", "setRenderingAngle", 0x8, 0x8),
+    m(b"A514", "IOMobileFramebufferAP", "setOverscanSafeRegion", 0x14, 0x14),
+    m(b"A515", "IOMobileFramebufferAP", "setSharedEventMemBlockSize", 0x8, 0x0),
+    m(b"A516", "IOMobileFramebufferAP", "first_client_open", 0x0, 0x0),
+    m(b"A517", "IOMobileFramebufferAP", "last_client_close_dcp", 0x4, 0x4),
+    m(b"A518", "IOMobileFramebufferAP", "getDebugInfoBuffer", 0x4, 0xc),
+    m(b"A519", "IOMobileFramebufferAP", "flush_debug_flags", 0x4, 0x0),
+    m(b"A520", "IOMobileFramebufferAP", "io_fence_notify", 0x14, 0x4),
+    m(b"A521", "IOMobileFramebufferAP", "swap_wait_dcp", 0x10, 0x4),
+    m(b"A522", "IOMobileFramebufferAP", "get_link_quality_dcp", 0x0, 0x4),
+    m(b"A523", "IOMobileFramebufferAP", "announce_next_swap_pts", 0x8, 0x4),
+    m(b"A524", "IOMobileFramebufferAP", "set_ttr_buffer_dva", 0x10, 0x0),
+    m(b"A525", "IOMobileFramebufferAP", "setDisplayRefreshProperties", 0x0, 0x4),
+    m(b"A526", "IOMobileFramebufferAP", "exportProperty", 0x8, 0x0),
+    m(b"A527", "IOMobileFramebufferAP", "applyProperty", 0x8, 0x4),
+    m(b"A528", "IOMobileFramebufferAP", "flush_supportsPower", 0x4, 0x0),
+    m(b"A529", "IOMobileFramebufferAP", "abort_swaps_dcp", 0x8, 0x4),
+    m(b"A530", "IOMobileFramebufferAP", "remove_gain_maps", 0xc, 0xc),
+    m(b"A531", "IOMobileFramebufferAP", "remove_lpr_metadata", 0xc, 0xc),
+    m(b"A532", "IOMobileFramebufferAP", "update_dfb", 0x240, 0x4),
+    m(b"A533", "IOMobileFramebufferAP", "update_dfb", 0x230, 0x4),
+    m(b"A534", "IOMobileFramebufferAP", "setPowerState", 0x10, 0x8),
+    m(b"A535", "IOMobileFramebufferAP", "isKeepOnScreen", 0x0, 0x4),
+    m(b"A536", "IOMobileFramebufferAP", "resetStats", 0x0, 0x0),
+    m(b"A537", "IOMobileFramebufferAP", "set_dcp_clamshellstate", 0x4, 0x0),
+    m(b"A538", "IOMobileFramebufferAP", "send_clamshell_state_to_controller", 0x0, 0x4),
+    m(b"A539", "IOMobileFramebufferAP", "get_shared_disp_state", 0x0, 0x4),
+    m(b"A540", "IOMobileFramebufferAP", "set_has_frame_swap_function", 0x4, 0x0),
+    m(b"A541", "IOMobileFramebufferAP", "getPerformanceStats", 0x4, 0x8),
+    m(b"A542", "IOMobileFramebufferAP", "set_lpr_buffers", 0x34, 0x4),
+    m(b"A550", "DCPPowerManager", "link_shutdown_signal", 0x4, 0x0),
+    m(b"A551", "DCPPowerManager", "power_state_will_change_to", 0x10, 0x4),
+];
+
+/// The callbacks of every interface.
 #[rustfmt::skip]
 pub const CALLBACKS: &[Callback] = &[
     c(b"D000", "UPPipeAP_H13P", "did_boot_signal", None, Some(0x4)),
@@ -590,12 +1021,20 @@ mod tests {
 
     #[test]
     fn every_tag_is_unique_and_well_formed() {
-        for (i, method) in METHODS.iter().enumerate() {
-            assert_eq!(method.tag[0], b'A');
-            assert!(method.tag[1..].iter().all(u8::is_ascii_digit));
-            assert!(METHODS[i + 1..].iter().all(|other| other.tag != method.tag));
-            assert_eq!(method.input % 4, 0, "{}", tag_str(&method.tag));
-            assert_eq!(method.output % 4, 0, "{}", tag_str(&method.tag));
+        for interface in INTERFACES {
+            let methods = interface.methods;
+            for (i, method) in methods.iter().enumerate() {
+                assert_eq!(method.tag[0], b'A');
+                assert!(method.tag[1..].iter().all(u8::is_ascii_digit));
+                assert!(methods[i + 1..].iter().all(|other| other.tag != method.tag));
+                // Overloads share a name and differ in their sizes.
+                assert!(methods[i + 1..].iter().all(|other| {
+                    (other.class, other.name, other.input, other.output)
+                        != (method.class, method.name, method.input, method.output)
+                }));
+                assert_eq!(method.input % 4, 0, "{}", tag_str(&method.tag));
+                assert_eq!(method.output % 4, 0, "{}", tag_str(&method.tag));
+            }
         }
         for (i, callback) in CALLBACKS.iter().enumerate() {
             assert_eq!(callback.tag[0], b'D');
@@ -609,6 +1048,7 @@ mod tests {
 
     #[test]
     fn the_public_interface_anchors_hold() {
+        let method = |tag: &[u8; 4]| interface(211).unwrap().method(tag);
         // m1n1 ipc.py (>= 14.7): A406 swap_start_dcp(unsigned int*, unsigned
         // long) packs to {u32, u64, null} = 13 -> 0x10, returning {u32, ret}.
         let start = method(b"A406").unwrap();
@@ -649,6 +1089,69 @@ mod tests {
             method(b"A364").unwrap().output,
             (0x50u32 + 0x20 + 2).next_multiple_of(4)
         );
+    }
+
+    #[test]
+    fn the_26b123_interface_moves_tags_and_keeps_every_other_size() {
+        let old = interface(211).unwrap();
+        let new = interface(213).unwrap();
+        assert!(interface(212).is_err());
+        let changed = ["getPlatformExtDisplayLimits"];
+        for method in old.methods {
+            let mut moved = new
+                .methods
+                .iter()
+                .filter(|row| (row.class, row.name) == (method.class, method.name));
+            assert!(
+                changed.contains(&method.name)
+                    || moved.any(|row| (row.input, row.output) == (method.input, method.output)),
+                "{}",
+                method.name
+            );
+        }
+        assert_eq!(new.methods.len(), old.methods.len() + 2);
+        assert_eq!(new.method(b"A451").unwrap().name, "start_signal");
+        assert_eq!(new.method(b"A457").unwrap().input, 0x1d30);
+        assert_eq!(new.method(b"A550").unwrap().name, "link_shutdown_signal");
+        assert_eq!(new.method(b"A401").unwrap().name, "is_mode_set_dirty");
+        // getPlatformExtDisplayLimits(u64*, u64*, u64*, u32*, u32*, u32*):
+        // 36 bytes and six null flags in, 36 bytes and a result out.
+        let limits = new.method(b"A378").unwrap();
+        assert_eq!(
+            (limits.input, limits.output),
+            (
+                (3 * 8 + 3 * 4 + 6_u32).next_multiple_of(4),
+                3 * 8 + 3 * 4 + 4
+            )
+        );
+    }
+
+    #[test]
+    fn every_status_reply_fits_its_rows_in_both_interfaces() {
+        for interface in INTERFACES {
+            for (name, reply) in STATUS_REPLIES {
+                let row = interface
+                    .methods
+                    .iter()
+                    .find(|row| row.class == "IOMobileFramebufferAP" && row.name == *name)
+                    .unwrap_or_else(|| panic!("{name} is absent from {}", interface.version));
+                assert_eq!(status_reply(row), Some(*reply));
+                assert!(reply.status + 4 <= row.output as usize, "{name}");
+                assert!(!reply.in_out || reply.status < row.input as usize, "{name}");
+                let input = alloc::vec![0x5a; row.input as usize];
+                let bytes = status_output(*reply, &input, row.output, LINK_UNSUPPORTED).unwrap();
+                assert_eq!(bytes.len(), row.output as usize);
+                assert_eq!(
+                    bytes[reply.status..reply.status + 4],
+                    LINK_UNSUPPORTED.to_le_bytes()
+                );
+                let echoed = if reply.in_out { 0x5a } else { 0 };
+                assert!(bytes[..reply.status].iter().all(|&byte| byte == echoed));
+            }
+        }
+        // UPPipe2's gamma methods share names but not the stub.
+        let gated = interface(213).unwrap().method(b"A100").unwrap();
+        assert_eq!(status_reply(gated), None);
     }
 
     #[test]

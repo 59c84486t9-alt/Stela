@@ -2,7 +2,7 @@ use super::super::scanout::PixelFormat;
 use super::*;
 use crate::Result;
 use stela_contracts::refuse;
-use stela_formats::builds::DEFAULT;
+use stela_formats::builds::{self, Build};
 use {stela_contracts::dma::DmaError, stela_contracts::dma::test_support::Ram};
 
 const RAM: u64 = 0x8_0000_0000;
@@ -16,6 +16,11 @@ impl Scanout for TestScreen {
         *self.1.borrow_mut() += 1;
         Ok(())
     }
+}
+
+/// The build whose interface tags these tests name.
+fn build_26a434() -> &'static Build {
+    builds::find("26A434").unwrap()
 }
 
 fn screen(width: u32, height: u32) -> (Box<dyn Scanout>, Rc<RefCell<usize>>) {
@@ -71,7 +76,8 @@ fn up(coprocessor: &mut Coprocessor, ram: &mut Ram) -> Iomfb {
     let mut endpoint = Iomfb(coprocessor.link.clone());
     let mut sent = Vec::new();
     endpoint.start(&mut sent).unwrap();
-    assert_eq!(sent, [0x100 | 211 << 16]);
+    let version = u64::from(coprocessor.link.borrow().version());
+    assert_eq!(sent, [0x100 | version << 16]);
     ram.bytes[0x4000 + 12] = 4;
     endpoint
         .receive(link::Word::Region { dva: 0x4000 }.encode(), &mut sent)
@@ -123,7 +129,7 @@ fn call(
 #[test]
 fn physical_reset_refuses_accepted_work_then_releases_only_an_idle_session() {
     let (scanout, presented) = screen(1920, 1080);
-    let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
+    let mut coprocessor = Coprocessor::new(scanout, Some(RAM), build_26a434()).unwrap();
     let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
     let mut endpoint = up(&mut coprocessor, &mut ram);
     let heap = coprocessor.link.borrow().heap();
@@ -154,7 +160,7 @@ fn physical_reset_refuses_accepted_work_then_releases_only_an_idle_session() {
 #[test]
 fn the_link_comes_up_and_answers_through_the_coprocessors_dart() {
     let (scanout, _) = screen(1920, 1080);
-    let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
+    let mut coprocessor = Coprocessor::new(scanout, Some(RAM), build_26a434()).unwrap();
     let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
     let mut endpoint = up(&mut coprocessor, &mut ram);
     let a451 = call(&mut endpoint, &mut ram, 0, b"A451", &[], 4, true);
@@ -164,6 +170,24 @@ fn the_link_comes_up_and_answers_through_the_coprocessors_dart() {
     assert_eq!(&ram.bytes[at + 12..at + 16], &1920u32.to_le_bytes());
     assert!(!coprocessor.dma_pending());
     assert!(matches!(coprocessor.take_log(), Some(Log::Call { tag, .. }) if &tag == b"A451"));
+}
+
+#[test]
+fn a_26b123_coprocessor_answers_its_interfaces_tags() {
+    let (scanout, _) = screen(1920, 1080);
+    let build = builds::find("26B123").unwrap();
+    let mut coprocessor = Coprocessor::new(scanout, Some(RAM), build).unwrap();
+    let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
+    let mut endpoint = up(&mut coprocessor, &mut ram);
+    // display_width moved from A451 to A501.
+    call(&mut endpoint, &mut ram, 0, b"A501", &[], 4, true);
+    dma(&mut coprocessor, &mut ram).unwrap();
+    let at = 0x4000 + 0x8000;
+    assert_eq!(&ram.bytes[at + 12..at + 16], &1920u32.to_le_bytes());
+    assert!(matches!(
+        coprocessor.take_log(),
+        Some(Log::Call { tag, name: "display_width", .. }) if &tag == b"A501"
+    ));
 }
 
 fn iop_power(coprocessor: &mut Coprocessor, state: u64) -> Result<Vec<Message>> {
@@ -186,7 +210,7 @@ fn quiesced(link: &Shared) -> bool {
 fn iop_sleep_to_wake_resumes_the_kept_rpc_region_without_a_hello() {
     for sleep in [0x201, 0x202] {
         let (scanout, _) = screen(1920, 1080);
-        let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
+        let mut coprocessor = Coprocessor::new(scanout, Some(RAM), build_26a434()).unwrap();
         let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
         let mut endpoint = up(&mut coprocessor, &mut ram);
         // Bring a separate AFK transport up before the display sleeps.
@@ -292,7 +316,7 @@ fn asc_cpu_halt_and_restart_resume_the_kept_dcp_link_without_an_iop_request() {
     }
 
     let (scanout, _) = screen(1920, 1080);
-    let coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
+    let coprocessor = Coprocessor::new(scanout, Some(RAM), build_26a434()).unwrap();
     let mut asc = Asc::booted(Box::new(coprocessor), Lines::default()).unwrap();
     let mut latch = InterruptLatch::new();
     let mut access = Access::new(0, 0, &mut latch);
@@ -379,7 +403,7 @@ fn start_signal_nests_start_hardware_boot_through_the_coprocessor() {
     // coprocessor answers by nesting D120 start_hardware_boot, inside
     // which the AP nests A451; the AP answers D120 so A401 returns.
     let (scanout, _) = screen(1920, 1080);
-    let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
+    let mut coprocessor = Coprocessor::new(scanout, Some(RAM), build_26a434()).unwrap();
     let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
     let mut endpoint = up(&mut coprocessor, &mut ram);
     let a401 = call(&mut endpoint, &mut ram, 0, b"A401", &[], 4, true);
@@ -549,7 +573,8 @@ fn the_published_controller_owns_real_commands_shared_power_and_transport_lifeti
 
 fn check_published_controller(identity: ExternalIdentity, name: &str) {
     let (scanout, _) = screen(4, 2);
-    let mut coprocessor = Coprocessor::for_external(scanout, Some(RAM), identity, DEFAULT).unwrap();
+    let mut coprocessor =
+        Coprocessor::for_external(scanout, Some(RAM), identity, build_26a434()).unwrap();
     let mut ram = Ram::new(RAM, AV_BUFFER + 0x4000);
     let published = controller_start(&mut coprocessor, &mut ram);
     assert_eq!(&published[8..11], &[0x11, 0, 1]);
@@ -633,14 +658,15 @@ fn a_presented_swap_completes_on_a_coprocessor_stream() {
 fn an_unrepresentable_external_identity_refuses_before_publication() {
     let (scanout, _) = screen(4, 2);
     assert!(matches!(
-        Coprocessor::for_external(scanout, None, ExternalIdentity::Numbered(10), DEFAULT),
+        Coprocessor::for_external(scanout, None, ExternalIdentity::Numbered(10), build_26a434()),
         Err(e) if e == refuse!("DCP external pipe ordinal exceeds the native single-character identity")
     ));
 }
 
 fn check_presented_swap(identity: ExternalIdentity) {
     let (scanout, presented) = screen(4, 2);
-    let mut coprocessor = Coprocessor::for_external(scanout, Some(RAM), identity, DEFAULT).unwrap();
+    let mut coprocessor =
+        Coprocessor::for_external(scanout, Some(RAM), identity, build_26a434()).unwrap();
     let mut ram = Ram::new(RAM, AV_BUFFER + 0x4000);
     controller_start(&mut coprocessor, &mut ram);
     let mut endpoint = up(&mut coprocessor, &mut ram);
@@ -659,16 +685,16 @@ fn check_presented_swap(identity: ExternalIdentity) {
     dma(&mut coprocessor, &mut ram).unwrap();
     assert!(coprocessor.frame_pending() && !coprocessor.dma_pending());
     controller_call(&mut coprocessor, &mut ram, 6, Some(0));
-    with_port(&mut ram, |port| coprocessor.present(port)).unwrap();
+    with_port(&mut ram, |port| coprocessor.present(0, port)).unwrap();
     assert_eq!(*presented.borrow(), 0);
     assert!(coprocessor.frame_pending() && !coprocessor.dma_pending());
     controller_call(&mut coprocessor, &mut ram, 6, Some(1));
     controller_call(&mut coprocessor, &mut ram, 9, None);
-    with_port(&mut ram, |port| coprocessor.present(port)).unwrap();
+    with_port(&mut ram, |port| coprocessor.present(0, port)).unwrap();
     assert_eq!(*presented.borrow(), 0);
     assert!(coprocessor.frame_pending());
     controller_call(&mut coprocessor, &mut ram, 8, None);
-    with_port(&mut ram, |port| coprocessor.present(port)).unwrap();
+    with_port(&mut ram, |port| coprocessor.present(0, port)).unwrap();
     assert_eq!(*presented.borrow(), 1);
     // The completion opens a coprocessor stream.
     assert!(coprocessor.dma_pending());
@@ -736,6 +762,7 @@ fn check_presented_swap(identity: ExternalIdentity) {
 fn log_lines_name_the_tag_and_keep_nonzero_payload_rows() {
     let call = Log::Call {
         tag: *b"A401",
+        name: "start_signal",
         input: Vec::new(),
         output: 4,
     };
@@ -749,6 +776,7 @@ fn log_lines_name_the_tag_and_keep_nonzero_payload_rows() {
         "{}",
         Log::Payload {
             tag: *b"A407",
+            name: "swap_submit_dcp",
             bytes,
         }
     );
@@ -772,7 +800,7 @@ fn log_lines_name_the_tag_and_keep_nonzero_payload_rows() {
 #[test]
 fn the_afk_endpoints_come_up_through_the_coprocessors_dart() {
     let (scanout, _) = screen(4, 2);
-    let mut coprocessor = Coprocessor::new(scanout, Some(RAM), DEFAULT).unwrap();
+    let mut coprocessor = Coprocessor::new(scanout, Some(RAM), build_26a434()).unwrap();
     let mut ram = Ram::new(RAM, 0x8000);
     let shared = coprocessor.afk[0].clone();
     let mut endpoint = AfkEndpoint(shared);
@@ -801,4 +829,42 @@ fn the_afk_endpoints_come_up_through_the_coprocessors_dart() {
             ..
         })
     ));
+}
+
+#[test]
+fn an_unmodeled_iomfb_method_reaches_the_wrappers_unmodeled_reports_once() {
+    use super::super::asc::{Asc, Lines};
+    let (scanout, _) = screen(1920, 1080);
+    let build = builds::find("26B123").unwrap();
+    let mut coprocessor = Coprocessor::new(scanout, Some(RAM), build).unwrap();
+    let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
+    let mut endpoint = up(&mut coprocessor, &mut ram);
+    // setBrightnessCorrection(0.5) twice: one report.
+    for _ in 0..2 {
+        call(
+            &mut endpoint,
+            &mut ram,
+            0,
+            b"A478",
+            &0x8000u32.to_le_bytes(),
+            4,
+            true,
+        );
+        dma(&mut coprocessor, &mut ram).unwrap();
+    }
+    let at = 0x4000 + 0x8000;
+    assert_eq!(
+        &ram.bytes[at + 12 + 4..at + 12 + 8],
+        &abi::LINK_UNSUPPORTED.to_le_bytes()
+    );
+    let mut asc = Asc::booted(Box::new(coprocessor), Lines::default()).unwrap();
+    let reports = asc.take_unmodeled();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(
+        reports[0].starts_with(
+            "IOMFB unmodeled A478 setBrightnessCorrection: answered kIOReturnUnsupported"
+        ),
+        "{reports:?}"
+    );
+    assert!(asc.take_unmodeled().is_empty());
 }

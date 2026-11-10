@@ -5,7 +5,8 @@ use alloc::string::String;
 use stela_contracts::refuse;
 
 const WINDOW: u64 = 0x8_0000_0000;
-const VERSION: u32 = stela_formats::builds::DEFAULT.dcp_link_version;
+/// The 26A434 link version, which the hello words below encode.
+const VERSION: u32 = 211;
 const REGION_DVA: u64 = 0x4000;
 const REGION: u64 = WINDOW + REGION_DVA;
 
