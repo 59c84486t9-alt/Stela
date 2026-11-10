@@ -2,6 +2,7 @@
 /* Original timer and wait APIs on a source child, with delivery owned by
  * the mounted Initial's regular service loop. */
 #include <linux/completion.h>
+#include <linux/delay.h>
 #include <linux/hrtimer.h>
 #include <linux/jiffies.h>
 #include <linux/sched.h>
@@ -152,6 +153,16 @@ static void hrtimer_waits(void)
 	ktime_t timeout = ms_to_ktime(2);
 	set_current_state(TASK_UNINTERRUPTIBLE);
 	assert(!schedule_hrtimeout(&timeout, HRTIMER_MODE_REL));
+
+	/* A sleep already past its minimum still lets due work run, so a
+	 * loop of short sleeps polling a device does not hold the CPU. */
+	fires = 0;
+	hrtimer_setup(&earlier, once, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);
+	hrtimer_start(&earlier, ktime_get() - 1, HRTIMER_MODE_ABS);
+	for (int sleeps = 0; sleeps < 1000 && !READ_ONCE(fires); sleeps++)
+		usleep_range(0, 1);
+	assert(fires == 1 && !hrtimer_active(&earlier));
+	assert(try_wait_for_completion(&high_fired));
 }
 
 void stela_linux_timer_test_sleeper(void)

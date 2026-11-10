@@ -56,6 +56,7 @@ u64 stela_linux_minimum_sleep(u64 minimum_us, unsigned int state,
         !deadline->remaining_quanta_ceil || !deadline->release)
         stela_linux_fatal("invalid actual minimum deadline producer");
     u64 remaining = 0;
+    bool scheduled = false;
     for (;;) {
         __set_current_state(state);
         if (deadline->ready(deadline))
@@ -71,6 +72,7 @@ u64 stela_linux_minimum_sleep(u64 minimum_us, unsigned int state,
          * This source depends on that producer; a skipped native park cannot
          * substitute a full-duration userspace/counter polling loop. */
         int result = schedule_hrtimeout(&hint, HRTIMER_MODE_ABS);
+        scheduled = true;
         /* schedule_hrtimeout has synchronously canceled its exact timer before
          * this source check/release. A numeric expiry never grants success. */
         if (deadline->ready(deadline))
@@ -92,6 +94,11 @@ u64 stela_linux_minimum_sleep(u64 minimum_us, unsigned int state,
     }
     __set_current_state(TASK_RUNNING);
     deadline->release(deadline);
+    /* A sleep whose minimum passed before its first check still reaches the
+     * scheduler, as Linux's always does. Otherwise a loop of short sleeps
+     * polling a device never lets other tasks or the dispatcher run. */
+    if (!scheduled)
+        schedule();
     return remaining;
 }
 
