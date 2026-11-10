@@ -6,7 +6,9 @@
 //! three watchdogs, each with CUR_TIME (a writable counter that increments
 //! once per reference-clock tick), BITE_TIME and CTRL (IRQ_EN 0, IRQ_STATUS 1,
 //! RESET_EN 2). The machine resets while RESET_EN is set and
-//! CUR_TIME >= BITE_TIME; WD0 resets into recovery, WD1 and WD2 reset normally.
+//! CUR_TIME >= BITE_TIME. Every bite, WD0's included, is a plain restart
+//! request: the host restarts into its normal boot selection, and no
+//! watchdog selects recovery.
 //! WD0 also has BARK_TIME; whenever IRQ_EN is set and CUR_TIME >= BARK_TIME
 //! its interrupt and IRQ_STATUS are raised; writing 1 clears IRQ_STATUS. The reference
 //! clock is the 24 MHz `clkref`, the system counter's rate.
@@ -175,9 +177,9 @@ impl AppleWdt {
                     access.request_reset(
                         NAME,
                         if index == 0 {
-                            "watchdog 0 bit: reset into recovery requested"
+                            "watchdog 0 bite: system reset requested"
                         } else {
-                            "watchdog bit: system reset requested"
+                            "watchdog bite: system reset requested"
                         },
                     );
                 } else {
@@ -555,18 +557,35 @@ mod tests {
         let mut wdt = AppleWdt::new(None, 0);
         assert_eq!(
             write(&mut wdt, &mut latch, 5, WD1 + CTRL, CTRL_RESET_EN),
-            Some("watchdog bit: system reset requested"),
+            Some("watchdog bite: system reset requested"),
             "zero handoff BITE_TIME expires immediately when enabled"
         );
         assert_eq!(
             write(&mut wdt, &mut latch, 6, WD1 + BITE_TIME, 0),
-            Some("watchdog bit: system reset requested")
+            Some("watchdog bite: system reset requested")
         );
         let mut wdt = AppleWdt::new(None, 0);
         write(&mut wdt, &mut latch, 0, WD1 + BITE_TIME, 0x10_0000);
         write(&mut wdt, &mut latch, 0, WD1 + CUR_TIME, 0);
         write(&mut wdt, &mut latch, 0, WD1 + CTRL, CTRL_RESET_EN);
         assert!(advance(&mut wdt, &mut latch, 0x10_0000).1);
+    }
+
+    /// No bite selects recovery: WD0's is the same plain restart as the
+    /// others', and says so.
+    #[test]
+    fn a_watchdog_0_bite_requests_a_plain_restart() {
+        let mut latch = InterruptLatch::new();
+        let mut wdt = AppleWdt::new(None, 0);
+        let mut access = Access::new(0, 5, &mut latch);
+        wdt.write(CTRL, Width::Word, CTRL_RESET_EN.into(), &mut access)
+            .unwrap();
+        let request = access.reset_request().unwrap();
+        assert_eq!(
+            request.transition,
+            stela_contracts::bus::Transition::Restart
+        );
+        assert_eq!(request.reason, "watchdog 0 bite: system reset requested");
     }
 
     #[test]
