@@ -2393,7 +2393,9 @@ fn eviction_undoes_the_links_into_evicted_blocks_and_keeps_their_pages() {
     // The next page's block takes the first block's part.
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
     assert_eq!(machine.statistics.code_evictions, 1);
-    assert_eq!(machine.statistics.unlinks, 1);
+    // Its link into the second block goes first, as it leaves the index,
+    // then the second block's link into it.
+    assert_eq!(machine.statistics.unlinks, 2);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
     let second = &machine.code.blocks[1];
     let exit = second.successors[0];

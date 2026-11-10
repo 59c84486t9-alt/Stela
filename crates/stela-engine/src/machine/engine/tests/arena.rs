@@ -692,3 +692,468 @@ fn a_retirement_is_taken_in_steps_by_later_installs() {
     let codes = live_codes(&machine);
     assert!(codes.windows(2).all(|pair| pair[0] != pair[1]));
 }
+
+/// Acquisitions of the board's code lock at `site` so far.
+fn acquired(machine: &Machine<FakeHost, NoDevices>, site: board::LockSite) -> u64 {
+    machine.code.cache().lock.sites[site as usize].acquired
+}
+
+/// A jump cache hit on a block the index no longer holds (an IC IVAU on
+/// another PE forgot its page) adds no block table entry, and learns so
+/// from the finder without the code lock (build 39: one `target` lock per
+/// jump cache hit, 12-20 thousand a second at an idle login window).
+#[test]
+fn a_jump_cache_hit_on_a_forgotten_block_takes_no_code_lock() {
+    let mut memory = vec![0u8; WINDOW];
+    let (mut first, mut second, _hub) = shared_pair(&mut memory);
+    let pc = first.cpu.pc;
+    let Ok(Fetched::Block(slot)) = first.fetch_block(pc, false) else {
+        panic!("a block")
+    };
+    second.invalidate_code_page(first.code.blocks[slot].physical);
+    let before = acquired(&first, board::LockSite::Target);
+    for _ in 0..16 {
+        let jumped = first.statistics.fetches[2];
+        assert!(matches!(first.fetch_block(pc, false), Ok(Fetched::Block(found)) if found == slot));
+        assert_eq!(first.statistics.fetches[2], jumped + 1, "a jump cache hit");
+    }
+    assert_eq!(acquired(&first, board::LockSite::Target), before);
+    let key = target_key(&first, pc);
+    assert_ne!(
+        first.code.table.find(target_slot(&first, pc), pc, key).pc,
+        pc
+    );
+    assert_eq!(first.code.report().targets.unindexed, 16);
+}
+
+/// A block whose block table entry keeps going (here forgotten by hand,
+/// on a board by other inserts into its set) is added again at its first
+/// few jump cache hits, then at one in [`board::REMEMBER_EVERY`]: the lock
+/// is taken a bounded share of the hits.
+#[test]
+fn a_block_whose_entry_keeps_going_takes_the_code_lock_a_bounded_share_of_its_hits() {
+    const HITS: u64 = 256;
+    let mut memory = vec![0u8; WINDOW];
+    let mut machine = arena_machine(&mut memory);
+    let pc = machine.cpu.pc;
+    let Ok(Fetched::Block(slot)) = machine.fetch_block(pc, false) else {
+        panic!("a block")
+    };
+    let key = target_key(&machine, pc);
+    let frame = chain::key_frame(key);
+    let before = acquired(&machine, board::LockSite::Target);
+    for _ in 0..HITS {
+        machine
+            .code
+            .cache()
+            .targets
+            .forget_frames(frame..=frame, |_| true);
+        assert!(
+            matches!(machine.fetch_block(pc, false), Ok(Fetched::Block(found)) if found == slot)
+        );
+    }
+    let taken = acquired(&machine, board::LockSite::Target) - before;
+    // The fill's own insert was the first of the block's free ones.
+    let due = u64::from(board::REMEMBERS_FREE) - 1 + HITS / u64::from(board::REMEMBER_EVERY);
+    assert!(taken <= due, "{taken} acquisitions for {HITS} hits");
+    let report = machine.code.report();
+    assert_eq!(report.targets.inserted, taken + 1);
+    assert_eq!(report.targets.deferred, HITS - taken);
+}
+
+/// Pages of two-block groups, each group's first block ending in a direct
+/// branch to its second (`b .+8` over a hole): words for `pages` pages.
+fn linked_groups(pages: usize) -> Vec<u32> {
+    const B8: u32 = 0x1400_0002; // b .+8
+    [B8, 0, RET, 0]
+        .iter()
+        .copied()
+        .cycle()
+        .take(pages * FETCH_PAGE as usize / 4)
+        .collect()
+}
+
+/// A machine of `words` over a window of `memory`, with as many slots.
+fn windowed(words: &[u32], memory: &mut [u8]) -> Machine<FakeHost, NoDevices> {
+    let mut machine = machine(words);
+    machine.code = Arc::new(board::Code::new(
+        board::slot_capacity(Some(memory.len())),
+        chain::MIN_LOOKUP_ENTRIES,
+        Some(window(memory)),
+    ));
+    machine
+}
+
+/// A page whose index list is far longer than a step's work, of which a
+/// part takes a few blocks: each step of the retirement does bounded
+/// work, whatever the page's list, and no live block chains into a block
+/// that went (build 39: `evict` holds of 3-11 ms, a step walking a whole
+/// page's list and table sets for each of its pages).
+#[test]
+fn a_page_with_a_long_index_list_retires_in_steps_of_bounded_work() {
+    const B4: u32 = 0x1400_0001; // b .+4
+    const BUDGET: u64 = 64;
+    let words: Vec<u32> = [B4, RET]
+        .iter()
+        .copied()
+        .cycle()
+        .take(FETCH_PAGE as usize / 4)
+        .collect();
+    let mut memory = vec![0u8; 1 << 17];
+    let mut machine = windowed(&words, &mut memory);
+    Arc::get_mut(&mut machine.code).expect("alone").step_visits = BUDGET;
+    let base = machine.cpu.pc;
+    // The branches' targets first, so a part of them goes while the
+    // branches linked into them stay.
+    for pair in 0..FETCH_PAGE / 8 {
+        assert!(matches!(
+            machine.fetch_block(base + 8 * pair + 4, false),
+            Ok(Fetched::Block(_))
+        ));
+    }
+    for pair in 0..FETCH_PAGE / 8 {
+        let pc = base + 8 * pair;
+        let Ok(Fetched::Block(from)) = machine.fetch_block(pc, false) else {
+            panic!("a block")
+        };
+        assert!(machine.link(from, pc + 4, ExitKind::Direct));
+    }
+    let listed = machine.code.cache().index.page(base).count();
+    assert_eq!(listed as u64, FETCH_PAGE / 4);
+    // The part of a block in the middle: a few of the page's blocks.
+    // Slot 0 is the first target, at `base + 4`.
+    let (physical, variant) = (
+        machine.code.blocks[0].physical - 4,
+        machine.code.blocks[0].variant,
+    );
+    let quarter = FETCH_PAGE / 4 + 4;
+    let middle = machine
+        .code
+        .find(base + quarter, physical + quarter, variant)
+        .expect("indexed");
+    let range = part_of(&machine, middle);
+    let evicted: Vec<usize> = (0..machine.code.blocks.len())
+        .filter(|&slot| {
+            machine
+                .code
+                .blocks
+                .installed(slot)
+                .is_some_and(|block| range.contains(&block.code.0))
+        })
+        .collect();
+    assert!(evicted.len() < listed / 4, "{} of {listed}", evicted.len());
+    let linked_in = (0..machine.code.blocks.len())
+        .filter(|&slot| !evicted.contains(&slot) && machine.code.blocks.record(slot).chained(0))
+        .filter(|&slot| {
+            let block = &machine.code.blocks[slot];
+            let target = machine
+                .code
+                .find(block.pc + 4, block.physical + 4, block.variant);
+            target.is_some_and(|target| evicted.contains(&target))
+        })
+        .count();
+    assert!(linked_in > 0, "blocks that stay link into blocks that go");
+    machine.evict_code(range);
+    let step = machine
+        .code
+        .events
+        .retire_step_visits
+        .load(Ordering::Relaxed);
+    assert!(
+        step <= BUDGET + listed as u64 / 16 + 32,
+        "{step} visits in one step for a list of {listed}"
+    );
+    assert!(
+        evicted
+            .iter()
+            .all(|&slot| !machine.code.blocks.record(slot).live())
+    );
+    assert_eq!(
+        machine.code.cache().index.page(base).count(),
+        listed - evicted.len()
+    );
+    for slot in 0..machine.code.blocks.len() {
+        let Some(block) = machine.code.blocks.installed(slot) else {
+            continue;
+        };
+        let record = machine.code.blocks.record(slot);
+        for (position, exit) in block.successors.iter().enumerate() {
+            if record.chained(position) {
+                let physical = block.physical + (exit.target.0 - block.pc);
+                let target = machine.code.find(exit.target.0, physical, block.variant);
+                assert!(target.is_some_and(|target| !evicted.contains(&target)));
+            }
+        }
+    }
+    // Their lookup entries went with them.
+    for &slot in &evicted {
+        let block = &machine.code.blocks[slot];
+        let key = machine.block_key(block.physical, block.variant);
+        let table = &machine.code.table;
+        let entry = table.find(table.slot(block.pc, key), block.pc, key);
+        assert!(!(entry.pc == block.pc && entry.block as usize == slot));
+    }
+}
+
+/// The code lock work an install takes: the install's own hold and the
+/// block table entry of the fetch that compiled it. A fetch of a block
+/// another PE installed takes none.
+#[test]
+fn an_install_takes_the_code_lock_twice_and_a_found_block_never() {
+    const BLOCKS: u64 = 64;
+    let mut memory = vec![0u8; 4 << 18];
+    let (mut first, mut second, _hub) = shared_pair_of(&linked_groups(1), &mut memory);
+    let base = first.cpu.pc;
+    let total = |machine: &Machine<FakeHost, NoDevices>| machine.code.cache().lock.acquired;
+    let before = total(&first);
+    for group in 0..BLOCKS {
+        assert!(matches!(
+            first.fetch_block(base + 16 * group, false),
+            Ok(Fetched::Block(_))
+        ));
+    }
+    // One `cache()` read per call of `total`.
+    let taken = total(&first) - before - 1;
+    assert_eq!(
+        taken,
+        2 * BLOCKS,
+        "{taken} acquisitions for {BLOCKS} installs"
+    );
+    let before = total(&second);
+    for group in 0..BLOCKS {
+        assert!(matches!(
+            second.fetch_block(base + 16 * group, false),
+            Ok(Fetched::Block(_))
+        ));
+    }
+    assert_eq!(total(&second) - before - 1, 0);
+}
+
+/// What a looking PE held of a block it fetched inside its section: the
+/// slot, its PC, its code and the ring's generation then. Until the PE
+/// passes, the slot holds the block and the code's part is not filled
+/// again.
+struct Held {
+    slot: usize,
+    pc: u64,
+    address: usize,
+    generation: u32,
+}
+
+/// Whether the ring filled the part of `held`'s code again since it was
+/// fetched: the part's last fill by then was at most a lap before.
+fn refilled(code: &board::Code, held: &Held) -> bool {
+    let arena = code.arena.as_ref().expect("an arena");
+    let parts = arena.ring.parts as usize;
+    let part = (held.address - arena.window.exec) / arena.part_bytes;
+    let back = (arena.ring.part(held.generation) + parts - part) % parts;
+    let filled = held.generation - back as u32;
+    arena.ring.generation() >= filled + parts as u32
+}
+
+/// A PE's section, left however its thread ends: a PE that panicked
+/// inside would hold every grace wait up.
+struct Section<'a> {
+    grace: &'a board::Grace,
+    pe: usize,
+}
+
+impl<'a> Section<'a> {
+    fn enter(grace: &'a board::Grace, pe: usize) -> Self {
+        grace.enter(pe);
+        Self { grace, pe }
+    }
+}
+
+impl Drop for Section<'_> {
+    fn drop(&mut self) {
+        self.grace.leave(self.pe);
+    }
+}
+
+/// Three PEs of one board on threads. PE 0 installs blocks of many pages
+/// round a small ring, so parts retire in steps all the time, and links
+/// them; PEs 1 and 2 fetch and link a few hot groups and, before each
+/// pass of their section, check that every block they fetched still holds
+/// its PC and code, and that each link they made still leads to the live
+/// block it entered. No PE ever meets a block a retirement took (lock-free
+/// fetch lookup, stepwise retirement, cut links).
+#[test]
+fn pes_that_look_up_and_link_never_meet_a_block_a_concurrent_retirement_took() {
+    const PES: usize = 3;
+    const PAGES: usize = 4;
+    const ROUNDS: usize = 20_000;
+    const HOT: u64 = 8;
+    let words = linked_groups(PAGES);
+    let mut memory = vec![0u8; 8 * 4096];
+    let template = windowed(&words, &mut memory);
+    let hub = Hub::new(PES, NoKick);
+    let code = Arc::clone(&template.code);
+    let variants = Arc::clone(&template.variants);
+    let reads = Arc::clone(&template.stored_reads);
+    let writes = Arc::clone(&template.stored_writes);
+    let base = template.cpu.pc;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let make = |pe: usize| {
+        let mut machine = machine(&words);
+        machine.code = Arc::clone(&code);
+        machine.variants = Arc::clone(&variants);
+        machine.stored_reads = Arc::clone(&reads);
+        machine.stored_writes = Arc::clone(&writes);
+        machine.code_hub = Some(Arc::clone(&hub));
+        machine.current = pe;
+        // Each install takes one retirement step.
+        machine.host.counter_step = machine.profile.counter_frequency;
+        machine
+    };
+    std::thread::scope(|scope| {
+        let installer = scope.spawn(|| {
+            let mut machine = make(0);
+            let grace = &hub.board.grace;
+            let section = Section::enter(grace, 0);
+            let groups = PAGES as u64 * FETCH_PAGE / 16;
+            for round in 0..ROUNDS * 4 {
+                if std::time::Instant::now() > deadline {
+                    break;
+                }
+                grace.pass(0);
+                let pc = base + 16 * (round as u64 * 7 % groups);
+                let Ok(Fetched::Block(from)) = machine.fetch_block(pc, false) else {
+                    panic!("a block at {pc:#x}")
+                };
+                if matches!(machine.fetch_block(pc + 8, false), Ok(Fetched::Block(_))) {
+                    machine.link(from, pc + 8, ExitKind::Direct);
+                }
+            }
+            drop(section);
+            generation(&machine)
+        });
+        let lookers: Vec<_> = (1..PES)
+            .map(|pe| {
+                let make = &make;
+                let hub = &hub;
+                scope.spawn(move || {
+                    let mut machine = make(pe);
+                    let code = Arc::clone(&machine.code);
+                    let grace = &hub.board.grace;
+                    let mut links: Vec<(usize, u32, usize, u32)> = Vec::new();
+                    let mut checked = 0u64;
+                    let section = Section::enter(grace, pe);
+                    for round in 0..ROUNDS {
+                        if std::time::Instant::now() > deadline {
+                            break;
+                        }
+                        grace.pass(pe);
+                        let pc = base + 16 * (round as u64 % HOT);
+                        // The target in one round of three, before its
+                        // source: it is older than its source as often as
+                        // not, and goes while the source stays.
+                        if round % 3 == 0 {
+                            assert!(matches!(
+                                machine.fetch_block(pc + 8, false),
+                                Ok(Fetched::Block(_))
+                            ));
+                        }
+                        let waits = code.events.grace_waits.load(Ordering::Relaxed);
+                        let Ok(Fetched::Block(slot)) = machine.fetch_block(pc, false) else {
+                            panic!("a block at {pc:#x}")
+                        };
+                        let block = code.blocks.get(slot).expect("a block");
+                        assert_eq!(block.pc, pc, "PE {pe} fetched another block");
+                        assert!(
+                            !code.blocks.record(slot).lost(),
+                            "PE {pe} fetched a lost install"
+                        );
+                        let held = Held {
+                            slot,
+                            pc,
+                            address: block.code.0,
+                            generation: generation(&machine),
+                        };
+                        machine.link(slot, pc + 8, ExitKind::Direct);
+                        // A wait for a grace (its own install) let go of
+                        // what it held: no check then.
+                        if code.events.grace_waits.load(Ordering::Relaxed) == waits {
+                            let block = code.blocks.get(held.slot).expect("a block");
+                            assert_eq!(block.pc, held.pc, "PE {pe}: slot reused while held");
+                            assert!(
+                                !refilled(&code, &held),
+                                "PE {pe}: its part filled again while held"
+                            );
+                            checked += 1;
+                        }
+                        // Under the lock: a link still made, by any PE, leads
+                        // to the live block the index held for its target
+                        // then (a link to an older block of the PC is cut
+                        // before either goes).
+                        let mut cache = code.cache();
+                        let incarnation = code.blocks.record(slot).incarnation();
+                        let known = links
+                            .iter()
+                            .any(|&(source, held, ..)| (source, held) == (slot, incarnation));
+                        if !known && code.blocks.record(slot).chained(0) {
+                            let physical = code.blocks[slot].physical + 8;
+                            if let Some(target) = cache.index.get(
+                                &code.blocks,
+                                pc + 8,
+                                physical,
+                                code.blocks[slot].variant,
+                            ) {
+                                links.push((
+                                    slot,
+                                    incarnation,
+                                    target,
+                                    code.blocks.record(target).incarnation(),
+                                ));
+                            }
+                        }
+                        links.retain(|&(source, incarnation, target, entered)| {
+                            let record = code.blocks.record(source);
+                            if record.incarnation() != incarnation || !record.chained(0) {
+                                return false;
+                            }
+                            let target = code.blocks.record(target);
+                            assert!(
+                                target.live() && target.incarnation() == entered,
+                                "PE {pe}: a link outlived the block it entered"
+                            );
+                            true
+                        });
+                        drop(cache);
+                    }
+                    drop(section);
+                    checked
+                })
+            })
+            .collect();
+        let generations = installer.join().expect("the installer");
+        let checked: u64 = lookers
+            .into_iter()
+            .map(|looker| looker.join().expect("a looker"))
+            .sum();
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "the PEs ran past their time"
+        );
+        assert!(
+            generations >= 16,
+            "the ring went round: {generations} parts"
+        );
+        assert!(checked > 0, "lookups were checked");
+    });
+    // Once the retirements end, no live block chains into one that went.
+    let mut machine = make(0);
+    machine.retire_steps(u64::MAX);
+    for slot in 0..code.blocks.len() {
+        let Some(block) = code.blocks.installed(slot) else {
+            continue;
+        };
+        let record = code.blocks.record(slot);
+        for (position, exit) in block.successors.iter().enumerate() {
+            if record.chained(position) {
+                let physical = block.physical + (exit.target.0 - block.pc);
+                assert!(code.find(exit.target.0, physical, block.variant).is_some());
+            }
+        }
+    }
+}

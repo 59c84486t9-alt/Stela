@@ -116,6 +116,23 @@ impl BlockIndex {
             .map(|entry| entry.slot as usize)
     }
 
+    /// The blocks of the page holding `physical` at positions `from..` of
+    /// its list, at most `most`, and the list's length.
+    pub(super) fn page_part(
+        &self,
+        physical: u64,
+        from: usize,
+        most: usize,
+    ) -> (impl Iterator<Item = usize> + '_, usize) {
+        let (frame, _) = split(physical);
+        let entries: &[Entry] = self
+            .page_of(frame)
+            .map_or(&[], |page| self.entries[page].as_slice());
+        let part = entries.get(from..).unwrap_or(&[]);
+        let part = &part[..part.len().min(most)];
+        (part.iter().map(|entry| entry.slot as usize), entries.len())
+    }
+
     /// Find the block in `slot` by its key, in place of any block of the
     /// key: the slot of the block it replaces.
     pub(super) fn insert(

@@ -10,9 +10,10 @@ const STALE_STEP: usize = 128;
 /// board's lock: tens of microseconds.
 const EVICT_STEP: usize = 32;
 
-/// Index entries and blocks one step of a retirement visits before it
-/// stops at the end of a page.
-const STEP_VISITS: u64 = 1024;
+/// Units of work one step of a retirement takes under the board's lock
+/// ([`Machine::retire_step`]): a block or an index entry visited, about a
+/// cache miss or a few each.
+pub(super) const STEP_VISITS: u64 = 1024;
 
 /// Cells one step of an eviction releases under the board's lock.
 const CELL_STEP: usize = 256;
@@ -65,6 +66,13 @@ fn unmark(kept: &mut Vec<u64>, mut marked: Vec<u64>, slots: &[u32]) {
         marked[slot as usize / 64] &= !(1 << (slot % 64));
     }
     *kept = marked;
+}
+
+/// The block keys `block` may have entries under ([`Machine::block_key`]):
+/// its frame and variant, with the guarded page's BT bit clear and set.
+fn block_keys(block: &Block) -> [u64; 2] {
+    let state = (block.variant.0 + 1) << 1;
+    [state, state | 1].map(|state| chain::block_key(block.physical, state))
 }
 
 /// The frame number of the 4 KiB frame holding `physical`, as block keys
@@ -800,6 +808,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             range,
             slots,
             next: 0,
+            page: None,
+            pcs: Vec::new(),
             ticks: 0,
             steps: 0,
             visits: 0,
@@ -807,84 +817,219 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
-    /// One step of `job`, one hold of the code lock: whole pages of its
-    /// blocks, up to [`EVICT_STEP`] blocks or [`STEP_VISITS`] index
-    /// entries, and then its range's cells. A step cuts the links into its
-    /// blocks, forgets their lookup and index entries and retires them, so
-    /// between steps no lookup, link or index read reaches a block it took,
-    /// and the others are still whole. Whether the job is done.
+    /// One step of `job`, one hold of the code lock, of about
+    /// [`STEP_VISITS`] units of work: the phases of its pages in turn
+    /// ([`board::PageRetirement`]), and then its range's cells. Between
+    /// steps no lookup, link or index read reaches a block that left the
+    /// index, a block retires only once no link into it is left, and the
+    /// others are still whole. Whether the job is done.
     pub(super) fn retire_step(&mut self, job: &mut board::Retirement) -> bool {
         let started = board::timestamp();
         let code = Arc::clone(&self.code);
-        let shared = self.code_hub.is_some();
         let mut cache = code.cache_at(board::LockSite::Evict);
         let mut visits = 0;
-        if job.next < job.slots.len() {
-            let first = job.next;
-            let mut end = first;
-            while end < job.slots.len() && end - first < EVICT_STEP && visits < STEP_VISITS {
-                let page = job.slots[end].0;
-                visits += cache.index.page(page).count() as u64;
-                while end < job.slots.len() && job.slots[end].0 == page {
-                    end += 1;
-                    visits += 1;
+        if job.next < job.slots.len() || job.page.is_some() {
+            while visits < code.step_visits {
+                let left = code.step_visits - visits;
+                if job.page.is_none() {
+                    if job.next >= job.slots.len() {
+                        break;
+                    }
+                    let first = job.slots[job.next].0;
+                    let end = job.next
+                        + job.slots[job.next..].partition_point(|&(page, _)| page == first);
+                    job.pcs.clear();
+                    job.page = Some(board::PageRetirement {
+                        start: job.next,
+                        end,
+                        phase: board::PagePhase::Unindex(job.next),
+                    });
+                }
+                let page = job.page.as_mut().expect("a page under way");
+                let frame = job.slots[page.start].0;
+                match page.phase {
+                    board::PagePhase::Unindex(from) => {
+                        let to = page.end.min(from + EVICT_STEP.min(left as usize));
+                        visits +=
+                            self.unindex(&mut cache, frame, &job.slots[from..to], &mut job.pcs);
+                        page.phase = if to == page.end {
+                            job.pcs.sort_unstable();
+                            job.pcs.dedup();
+                            board::PagePhase::Cut(0)
+                        } else {
+                            board::PagePhase::Unindex(to)
+                        };
+                    }
+                    board::PagePhase::Cut(from) => {
+                        let (next, cut) =
+                            self.cut_links_into(&mut cache, frame, &job.pcs, from, left as usize);
+                        visits += cut;
+                        page.phase = match next {
+                            Some(next) => board::PagePhase::Cut(next),
+                            None => board::PagePhase::Retire(page.start),
+                        };
+                    }
+                    board::PagePhase::Retire(from) => {
+                        let to = page.end.min(from + EVICT_STEP);
+                        self.retire_blocks(&mut cache, &job.slots[from..to]);
+                        visits += (to - from) as u64;
+                        if to == page.end {
+                            job.next = page.end;
+                            job.page = None;
+                        } else {
+                            page.phase = board::PagePhase::Retire(to);
+                        }
+                    }
                 }
             }
-            let pages = &job.slots[first..end];
-            let step: Vec<u32> = pages.iter().map(|&(_, slot)| slot).collect();
-            // An evicted block's slot holds the next block compiled.
-            if self
-                .direct_exit
-                .is_some_and(|(block, ..)| step.contains(&(block as u32)))
-            {
-                self.direct_exit = None;
-            }
-            self.detach(&mut cache, &step);
-            // A page's evicted blocks leave its index entries in one pass.
-            let marked = mark(&mut cache.marked, code.blocks.len(), &step);
-            for page in pages.chunk_by(|a, b| a.0 == b.0) {
-                cache
-                    .index
-                    .forget_marked(page[0].0, |slot| bit_set(&marked, slot));
-            }
-            unmark(&mut cache.marked, marked, &step);
-            let now = self.host.counter();
-            for slot in step.iter().map(|&slot| slot as usize) {
-                // On a shared board its rows stay until the slot takes its
-                // next block: another PE still inside its section may be
-                // running the block and fault in it. A machine alone runs
-                // none of it now.
-                let recovery = code.blocks.recovery();
-                let bytes = match shared {
-                    true => recovery.get(&slot).map(|owner| owner.code_bytes()),
-                    false => recovery.remove(&slot).map(|owner| owner.code_bytes()),
-                }
-                .unwrap_or(0);
-                self.census_evicted(&mut cache, slot, bytes, now);
-                let taken = code.blocks.record(slot).taken.load(Ordering::Relaxed);
-                if taken != 0 {
-                    *self
-                        .exit_words
-                        .entry(code.blocks[slot].terminal)
-                        .or_default() += u64::from(taken);
-                }
-                code.blocks.retire(slot);
-            }
-            job.next = end;
         } else if let Some(from) = job.cells {
             // The exits in the range go, and with them their cells: no
             // block in it is live now, so none links through a cell again.
+            let most = CELL_STEP.min(code.step_visits as usize);
             job.cells = cache
                 .targets
-                .release_some_cells(from..=job.range.end as u64 - 1, CELL_STEP);
-            visits = CELL_STEP as u64;
+                .release_some_cells(from..=job.range.end as u64 - 1, most);
+            visits = most as u64;
         }
         drop(cache);
         job.visits += visits;
         job.step_visits = job.step_visits.max(visits);
         job.ticks += board::timestamp().wrapping_sub(started);
         job.steps += 1;
-        job.next >= job.slots.len() && job.cells.is_none()
+        job.next >= job.slots.len() && job.page.is_none() && job.cells.is_none()
+    }
+
+    /// The blocks `step` of the page at `frame` leave the index, the block
+    /// table and their links out, and this PE's jump cache and waiting
+    /// exit; their PCs go to `pcs`. They stay live: links into them are
+    /// cut next ([`Self::cut_links_into`]). Under the board's lock,
+    /// `cache`. The work it took, in [`STEP_VISITS`] units: a block each,
+    /// a sixteenth of the page's index list, and the cells looked at.
+    fn unindex(
+        &mut self,
+        cache: &mut board::Cache,
+        frame: u64,
+        step: &[(u64, u32)],
+        pcs: &mut Vec<u64>,
+    ) -> u64 {
+        let code = Arc::clone(&self.code);
+        let blocks = &code.blocks;
+        let slots: Vec<u32> = step.iter().map(|&(_, slot)| slot).collect();
+        let (_, listed) = cache.index.page_part(frame, 0, 0);
+        let marked = mark(&mut cache.marked, blocks.len(), &slots);
+        cache
+            .index
+            .forget_marked(frame, |slot| bit_set(&marked, slot));
+        unmark(&mut cache.marked, marked, &slots);
+        let mut visits = (slots.len() + listed / 16) as u64;
+        let mut unlinks = Vec::new();
+        for &slot in &slots {
+            let block = &blocks[slot as usize];
+            pcs.push(block.pc);
+            for key in block_keys(block) {
+                visits += cache.targets.forget_block(block.pc, key, slot) as u64;
+            }
+            // No detach visits it once it left the index: its links out
+            // go now, and it links nothing again.
+            let record = blocks.record(slot as usize);
+            for (position, exit) in block.successors.iter().enumerate() {
+                if record.chained(position) {
+                    record.set_linked(position, false, false);
+                    unlinks.push(
+                        chain::unlinked(exit.site, exit.slot.into())
+                            .expect("a linked exit's patch point"),
+                    );
+                }
+            }
+            let entry = &mut self.jump[(block.pc / INSTRUCTION) as usize % JUMP_CACHE];
+            if entry.is_some_and(|entry| entry.block == slot as usize) {
+                *entry = None;
+            }
+            if self
+                .direct_exit
+                .is_some_and(|(waiting, ..)| waiting == slot as usize)
+            {
+                self.direct_exit = None;
+            }
+        }
+        for (point, instruction) in unlinks {
+            self.patch_point(NativeCode(point as usize), instruction);
+            self.statistics.unlinks += 1;
+        }
+        visits
+    }
+
+    /// Cut the links of the indexed blocks of the page at `frame`, from
+    /// position `from` of its list and at most `most` of them, into the
+    /// sorted `pcs`: those of blocks that left the index. A link names the
+    /// block a PC and variant have, so a link to any of the PCs goes (one
+    /// to a block compiled again there links again). Blocks indexed after
+    /// they left link to none of them. Under the board's lock, `cache`.
+    /// Where the cut goes on, if blocks are left, and the blocks visited.
+    fn cut_links_into(
+        &mut self,
+        cache: &mut board::Cache,
+        frame: u64,
+        pcs: &[u64],
+        from: usize,
+        most: usize,
+    ) -> (Option<usize>, u64) {
+        let code = Arc::clone(&self.code);
+        let blocks = &code.blocks;
+        let (sources, listed) = cache.index.page_part(frame, from, most);
+        let mut visited = 0;
+        let mut unlinks = Vec::new();
+        for source in sources {
+            visited += 1;
+            let record = blocks.record(source);
+            for (position, exit) in blocks[source].successors.iter().enumerate() {
+                if record.chained(position) && pcs.binary_search(&exit.target.0).is_ok() {
+                    record.set_linked(position, false, false);
+                    // Linked, so its point is patchable and in reach.
+                    unlinks.push(
+                        chain::unlinked(exit.site, exit.slot.into())
+                            .expect("a linked exit's patch point"),
+                    );
+                }
+            }
+        }
+        // One store each, which a core running the exit may meet.
+        for (point, instruction) in unlinks {
+            self.patch_point(NativeCode(point as usize), instruction);
+            self.statistics.unlinks += 1;
+        }
+        let next = from + visited;
+        ((next < listed).then_some(next), visited as u64)
+    }
+
+    /// Retire the blocks of `step`, which nothing reaches but a core
+    /// already in one: their slots go once the retirement ends and its
+    /// grace passed. Under the board's lock, `cache`.
+    fn retire_blocks(&mut self, cache: &mut board::Cache, step: &[(u64, u32)]) {
+        let code = Arc::clone(&self.code);
+        let shared = self.code_hub.is_some();
+        let now = self.host.counter();
+        for slot in step.iter().map(|&(_, slot)| slot as usize) {
+            // On a shared board its rows stay until the slot takes its
+            // next block: another PE still inside its section may be
+            // running the block and fault in it. A machine alone runs
+            // none of it now.
+            let recovery = code.blocks.recovery();
+            let bytes = match shared {
+                true => recovery.get(&slot).map(|owner| owner.code_bytes()),
+                false => recovery.remove(&slot).map(|owner| owner.code_bytes()),
+            }
+            .unwrap_or(0);
+            self.census_evicted(cache, slot, bytes, now);
+            let taken = code.blocks.record(slot).taken.load(Ordering::Relaxed);
+            if taken != 0 {
+                *self
+                    .exit_words
+                    .entry(code.blocks[slot].terminal)
+                    .or_default() += u64::from(taken);
+            }
+            code.blocks.retire(slot);
+        }
     }
 
     /// The end of `job`, whose steps are done: its slots go once their

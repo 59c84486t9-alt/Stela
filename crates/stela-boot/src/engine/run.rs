@@ -996,7 +996,9 @@ impl Heartbeat {
 /// them for want of a block slot (`forced`); installs that lost to another
 /// PE's (`lost`); waits for a part's grace and those that ran out; the
 /// longest whole retirement since (lock-held microseconds of its steps, and
-/// how many); and the code lock's acquisitions, those that found it held, the microseconds
+/// how many); the block table entries jump cache hits would add (taken,
+/// refused under the lock, refused without it, put off); and the code
+/// lock's acquisitions, those that found it held, the microseconds
 /// they waited and the longest wait.
 fn board_code(
     now: &stela_engine::machine::engine::CodeReport,
@@ -1018,9 +1020,19 @@ fn board_code(
             micros(now.longest_held),
         ));
     }
+    // Block table entries jump cache hits would add: taken, refused under
+    // the lock, refused without it, put off.
+    let (targets, was_targets) = (now.targets, was.targets);
+    let targets = format!(
+        " targets=inserted/raced/unindexed/deferred:{}/{}/{}/{}",
+        targets.inserted.saturating_sub(was_targets.inserted),
+        targets.raced.saturating_sub(was_targets.raced),
+        targets.unindexed.saturating_sub(was_targets.unindexed),
+        targets.deferred.saturating_sub(was_targets.deferred),
+    );
     format!(
         " board={}M/{}/{} retired={} forced={} lost={} grace_waits={}/{} \
-         retire_longest=us/steps:{}/{} \
+         retire_longest=us/steps:{}/{}{targets} \
          lock=acquired/contended/waited_us/longest_us:{}/{}/{}/{}{sites}",
         now.window >> 20,
         now.parts,

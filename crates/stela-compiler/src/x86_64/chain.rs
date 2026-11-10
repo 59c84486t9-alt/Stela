@@ -1045,6 +1045,39 @@ impl LookupTable {
         found
     }
 
+    /// Forget the block table's entry of `pc` with `key` that names block
+    /// `block`, in its set and in the cells of `pc`: a block's entries
+    /// without a walk of its frame's sets. The frame's list keeps the set
+    /// until a sweep or a compaction drops it. The cells of `pc` it looked
+    /// at.
+    pub fn forget_block(&mut self, pc: u64, key: u64, block: u32) -> usize {
+        debug_assert_eq!(self.grouping, Grouping::Frame);
+        let named =
+            |entry: &LookupEntry| entry.pc == pc && entry.key == key && entry.block == block;
+        let slot = self.slot(pc, key);
+        for at in [slot, neighbour(slot)] {
+            let held = self.sets.get(at);
+            if held.key() == key && named(&held.load()) {
+                held.store(LookupEntry::default());
+            }
+        }
+        if self.cell_counts.is_empty() || self.cell_counts[cell_bucket(pc)] == 0 {
+            return 0;
+        }
+        let mut visited = 0;
+        for &(_, cell) in self.cell_pcs.range((pc, 0)..=(pc, u32::MAX)) {
+            visited += 1;
+            if named(&Self::cell_slot(&self.cells, cell).load()) {
+                let empty = LookupEntry {
+                    pc,
+                    ..LookupEntry::default()
+                };
+                put_cell(&self.cells, &mut self.cell_frames, cell, empty);
+            }
+        }
+        visited
+    }
+
     /// Forget the entries `forget` names in the sets of the groups in
     /// `groups`: whether the groups had entries to look at.
     fn forget_groups(
@@ -3031,4 +3064,42 @@ mod tests {
     mod patching;
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     mod shared;
+
+    /// A block's entry goes from its set and from the cells of its PC by
+    /// its PC, key and block alone: another block's entry of the PC and
+    /// key, and the frame's other entries, stay.
+    #[test]
+    fn a_block_entry_goes_from_its_set_and_cells_without_its_frame() {
+        let mut table = LookupTable::new();
+        let key = block_key(0x8000_0000, 2);
+        let (pc, site) = (0x1000, 0x9000);
+        let entry = LookupEntry {
+            pc,
+            key,
+            entry: 0x5000,
+            block: 7,
+            targets: 0b1111,
+        };
+        let other = LookupEntry {
+            pc: pc + 4,
+            block: 8,
+            entry: 0x6000,
+            ..entry
+        };
+        let slot = table.slot(pc, key);
+        table.insert(slot, entry);
+        let other_slot = table.slot(other.pc, key);
+        table.insert(other_slot, other);
+        table.link_cell(site, pc, Some(entry));
+        assert_eq!(table.site_cell(site), Some(entry));
+        assert_eq!(table.forget_block(pc, key, 9), 1);
+        assert_eq!(table.find(slot, pc, key), entry);
+        assert_eq!(table.forget_block(pc, key, 7), 1);
+        assert_ne!(table.find(slot, pc, key).pc, pc);
+        assert_eq!(
+            table.site_cell(site).map(|cell| (cell.pc, cell.key)),
+            Some((pc, 0))
+        );
+        assert_eq!(table.find(other_slot, other.pc, key), other);
+    }
 }

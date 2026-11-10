@@ -174,23 +174,31 @@ pub(super) struct Code {
     /// ([`Retirement`]), and whether there is one, read without its lock.
     pub(super) retiring: Mutex<Option<Retirement>>,
     pub(super) retire_pending: AtomicBool,
+    /// Units of work a retirement step takes under the lock
+    /// ([`super::code_cache::STEP_VISITS`]; tests take fewer).
+    pub(super) step_visits: u64,
 }
 
-/// A part's blocks being taken away, a few pages per step, each step one
-/// hold of the code lock: the ring's [`Advance::Retire`] leaves a whole
-/// part's installs before the part is needed, so PEs take the steps as
-/// they install ([`super::Machine::retire_steps`]) and none stalls for all
-/// of it. Until its last step its blocks not yet taken stay whole and
-/// reachable; their code stays until the part's grace.
+/// A part's blocks being taken away page by page, in steps of bounded
+/// work, each step one hold of the code lock: the ring's
+/// [`Advance::Retire`] leaves a whole part's installs before the part is
+/// needed, so PEs take the steps as they install
+/// ([`super::Machine::retire_steps`]) and none stalls for all of it. Until
+/// a page's blocks retire, those not yet taken stay whole and reachable;
+/// their code stays until the part's grace.
 pub(super) struct Retirement {
     /// The ring generation, or none for a host's reclaim.
     pub(super) generation: Option<u32>,
     pub(super) range: core::ops::Range<usize>,
-    /// The blocks, by page then slot: a page's blocks go in one step, so
-    /// each page's index list and table sets are walked once.
+    /// The blocks, by page then slot: a page's blocks go together, so
+    /// each page's index list is walked once.
     pub(super) slots: Vec<(u64, u32)>,
-    /// The first of `slots` not taken yet.
+    /// The first of `slots` not taken yet: past the page under way.
     pub(super) next: usize,
+    /// The page under way, if one is.
+    pub(super) page: Option<PageRetirement>,
+    /// The PCs of the page's blocks, kept for the next page's capacity.
+    pub(super) pcs: Vec<u64>,
     /// Where the release of the range's cells goes on, once the blocks went.
     pub(super) cells: Option<u64>,
     /// TSC ticks of its steps, and how many.
@@ -199,6 +207,31 @@ pub(super) struct Retirement {
     /// Blocks and index entries its steps visited, and the most in a step.
     pub(super) visits: u64,
     pub(super) step_visits: u64,
+}
+
+/// One page's blocks of a [`Retirement`], `slots[start..end]`, taken in
+/// three phases, each in steps of bounded work: they leave the index, the
+/// block table and their links out ([`PagePhase::Unindex`]); the page's
+/// indexed blocks cut their links into them ([`PagePhase::Cut`]); they
+/// retire ([`PagePhase::Retire`]). Between steps a block out of the index
+/// is still live and its code whole: a link not yet cut or a jump cache
+/// entry runs it, and it then exits to the engine, as it links nothing
+/// and takes no table entry.
+pub(super) struct PageRetirement {
+    pub(super) start: usize,
+    pub(super) end: usize,
+    pub(super) phase: PagePhase,
+}
+
+/// Where a [`PageRetirement`] goes on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum PagePhase {
+    /// The first of its blocks still in the index.
+    Unindex(usize),
+    /// The position in the page's index list the cut goes on from.
+    Cut(usize),
+    /// The first of its blocks not retired yet.
+    Retire(usize),
 }
 
 /// The parts an [`Arena`] is cut into: what one retirement takes away.
@@ -300,6 +333,10 @@ pub(super) struct Cache {
     pub(super) dispatchers: Vec<(u32, [Option<u64>; 4])>,
     /// How the lock was taken, counted by its holder.
     pub(super) lock: LockCounts,
+    /// Block table entries taken and refused under the lock
+    /// ([`TargetCounts`]).
+    pub(super) targets_inserted: u64,
+    pub(super) targets_raced: u64,
     /// Why blocks were installed on a shared board, with `--profile`:
     /// one census for the board, as its blocks are.
     pub(super) census: Option<Box<super::install_census::Census>>,
@@ -432,7 +469,21 @@ pub struct CodeReport {
     /// its steps, and how many.
     pub retire_ticks: u64,
     pub retire_steps: u64,
+    /// Block table entries a fetch's jump cache hit would add: those the
+    /// table took, those refused under the lock (the block left the index
+    /// meanwhile), those refused without it (the index no longer holds the
+    /// block) and those put off (the block's entry keeps being displaced).
+    pub targets: TargetCounts,
     pub lock: LockCounts,
+}
+
+/// What [`CodeReport::targets`] counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TargetCounts {
+    pub inserted: u64,
+    pub raced: u64,
+    pub unindexed: u64,
+    pub deferred: u64,
 }
 
 /// Board events counted outside the lock: rare, so a shared atomic each.
@@ -450,6 +501,10 @@ pub(super) struct Events {
     /// The last retirement's visits and most in one step, for tests.
     pub(super) retire_visits: AtomicU64,
     pub(super) retire_step_visits: AtomicU64,
+    /// Jump cache hits whose block table entry was refused without the
+    /// lock, or put off ([`TargetCounts`]).
+    pub(super) targets_unindexed: AtomicU64,
+    pub(super) targets_deferred: AtomicU64,
 }
 
 impl Events {
@@ -513,6 +568,8 @@ impl Cache {
             marked: Vec::new(),
             dispatchers: Vec::new(),
             lock: LockCounts::default(),
+            targets_inserted: 0,
+            targets_raced: 0,
             census: None,
         }
     }
@@ -534,6 +591,7 @@ impl Code {
             events: Events::default(),
             retiring: Mutex::new(None),
             retire_pending: AtomicBool::new(false),
+            step_visits: super::code_cache::STEP_VISITS,
         }
     }
 
@@ -593,14 +651,15 @@ impl Code {
 
     /// What the board's code came to; the lock's longest wait starts over.
     pub(super) fn report(&self) -> CodeReport {
-        let lock = {
+        let (lock, inserted, raced) = {
             let mut cache = self.cache_at(LockSite::Report);
             let lock = cache.lock;
+            let counts = (cache.targets_inserted, cache.targets_raced);
             cache.lock.longest = 0;
             for site in &mut cache.lock.sites {
                 site.longest_held = 0;
             }
-            lock
+            (lock, counts.0, counts.1)
         };
         let count = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         CodeReport {
@@ -620,6 +679,12 @@ impl Code {
             overdue: count(&self.events.overdue),
             retire_ticks: self.events.retire_ticks.swap(0, Ordering::Relaxed),
             retire_steps: self.events.retire_steps.swap(0, Ordering::Relaxed),
+            targets: TargetCounts {
+                inserted,
+                raced,
+                unindexed: count(&self.events.targets_unindexed),
+                deferred: count(&self.events.targets_deferred),
+            },
             lock,
         }
     }
@@ -672,6 +737,9 @@ pub(super) struct Record {
     dynamic: AtomicBool,
     /// Its install lost to another PE's of the same block: never reachable.
     lost: AtomicBool,
+    /// Jump cache hits that found no block table entry of it and went for
+    /// the lock to add one ([`Self::remember`]).
+    remembers: AtomicU32,
     /// Its fault recovery rows, under a lock of their own: a PE faulting
     /// in the block reads them, its first fault may qualify them. They stay
     /// after the block retires until the slot takes its next block, as a
@@ -691,6 +759,7 @@ impl Default for Record {
             used: AtomicU64::new(0),
             dynamic: AtomicBool::new(false),
             lost: AtomicBool::new(false),
+            remembers: AtomicU32::new(0),
             recovery: Mutex::new(None),
         }
     }
@@ -771,6 +840,11 @@ impl Recoveries<'_> {
 // published, and read only after (see above); the rest are atomics.
 unsafe impl Sync for Record {}
 
+/// Block table inserts a block takes at every attempt, and how often it
+/// takes one after ([`Record::remember`]).
+pub(super) const REMEMBERS_FREE: u32 = 4;
+pub(super) const REMEMBER_EVERY: u32 = 32;
+
 /// The most successors a block links: bits of [`Record::linked`].
 pub(super) const MAX_SUCCESSORS: usize = u64::BITS as usize;
 
@@ -837,6 +911,15 @@ impl Record {
     /// Its install lost: under the board's lock, before its retirement.
     pub(super) fn mark_lost(&self) {
         self.lost.store(true, Ordering::Release);
+    }
+
+    /// A fetch found the block without a block table entry and would add
+    /// one: whether this attempt is due. The first [`REMEMBERS_FREE`] are;
+    /// after that one in [`REMEMBER_EVERY`], so an entry other inserts keep
+    /// displacing from its set costs the lock a bounded share of its hits.
+    pub(super) fn remember(&self) -> bool {
+        let tries = self.remembers.fetch_add(1, Ordering::Relaxed);
+        tries < REMEMBERS_FREE || tries.is_multiple_of(REMEMBER_EVERY)
     }
 }
 
@@ -926,6 +1009,7 @@ impl Blocks {
         record.used.store(0, Ordering::Relaxed);
         record.dynamic.store(false, Ordering::Relaxed);
         record.lost.store(false, Ordering::Relaxed);
+        record.remembers.store(0, Ordering::Relaxed);
         record.incarnation.fetch_add(1, Ordering::Release);
         record.live.store(true, Ordering::Release);
         self.live.fetch_add(1, Ordering::Relaxed);

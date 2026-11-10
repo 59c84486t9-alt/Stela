@@ -223,16 +223,32 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.code.table.find(slot, pc, key) == target {
             return false;
         }
-        let mut cache = self.code.cache_at(board::LockSite::Target);
         // Only an indexed block takes an entry: one an IC IVAU forgot (that
         // a PE's jump cache still names until it reads the post) or one
         // retired since it was found would be reachable again, and links
         // out of it are cut by no detach ([`Self::detach`] visits the
-        // indexed blocks of a target's page).
-        if cache.index.get(&self.code.blocks, pc, physical, variant_id) != Some(index) {
+        // indexed blocks of a target's page). The finder answers without
+        // the lock; the lock checks again before the insert.
+        let code = &self.code;
+        match code.finder.find(&code.blocks, pc, physical, variant_id) {
+            Some(Some(found)) if found == index => {}
+            Some(_) => {
+                board::Events::count(&code.events.targets_unindexed);
+                return false;
+            }
+            None => {}
+        }
+        if !code.blocks.record(index).remember() {
+            board::Events::count(&code.events.targets_deferred);
+            return false;
+        }
+        let mut cache = code.cache_at(board::LockSite::Target);
+        if cache.index.get(&code.blocks, pc, physical, variant_id) != Some(index) {
+            cache.targets_raced += 1;
             return false;
         }
         cache.targets.insert(slot, target);
+        cache.targets_inserted += 1;
         true
     }
 
