@@ -22,6 +22,10 @@
 //! `OI_HciIfc_EnableSCO_USB` finds none: SCO links fail while LE and ACL
 //! profiles work.
 //!
+//! When the host lends no controller, the owner selects [`model::Model`]
+//! with [`Hci::use_model`]: the same function then answers every command
+//! itself, as a controller whose radio finds nothing in range.
+//!
 //! HCI headers frame every packet, so an OUT transfer may span USB packets.
 //! An IN packet that ends one on a full USB packet is followed by a
 //! zero-length one, which ends the host's transfer. A packet of a length the
@@ -39,9 +43,11 @@ use super::{
     },
 };
 use crate::Result;
-use alloc::{collections::VecDeque, string::String, vec, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, string::String, vec, vec::Vec};
 use stela_contracts::refuse;
 use stela_drivers::usb::bluetooth::MAX_ACL_PAYLOAD;
+
+pub mod model;
 
 const EVENTS: u8 = 0x81;
 const ACL_IN: u8 = 0x82;
@@ -82,6 +88,11 @@ pub struct Counters {
     /// Packets whose lengths disagree with their headers, discarded.
     pub malformed: u64,
     pub overflowed: u64,
+    /// Commands the model answered Unknown HCI Command, vendor ones among
+    /// them.
+    pub unknown: u64,
+    /// ACL packets the model discarded: they named no connection.
+    pub acl_discarded: u64,
 }
 
 /// One IN endpoint's packets, sent in USB packets.
@@ -131,6 +142,10 @@ struct State {
     acl: Stream,
     assembling: Vec<u8>,
     counters: Counters,
+    /// The controller model, when no host controller is behind the function.
+    model: Option<Box<model::Model>>,
+    /// The system count of the latest transactions.
+    now: u64,
 }
 
 /// The function: its pipes and queues.
@@ -206,6 +221,8 @@ impl Hci {
                 acl: Stream::default(),
                 assembling: Vec::new(),
                 counters: Counters::default(),
+                model: None,
+                now: 0,
             },
         }
     }
@@ -224,6 +241,35 @@ impl Hci {
     pub fn has_room(&self) -> bool {
         let state = &self.state;
         state.events.queue.len() < QUEUE_PACKETS && state.acl.queue.len() < QUEUE_PACKETS
+    }
+
+    /// Answers every packet with a controller model whose BD_ADDR is
+    /// `address`, from now on. Packets already queued for a host
+    /// controller go to it.
+    pub fn use_model(&mut self, address: [u8; 6]) {
+        let state = &mut self.state;
+        state.model = Some(Box::new(model::Model::new(address)));
+        for packet in core::mem::take(&mut state.outbound) {
+            match packet {
+                Outbound::Command(bytes) => state.modeled_command(&bytes),
+                Outbound::Acl(bytes) => state.modeled_acl(&bytes),
+            }
+        }
+    }
+
+    /// Whether the model answers.
+    pub fn modeled(&self) -> bool {
+        self.state.model.is_some()
+    }
+
+    /// Opcodes the model answered Unknown HCI Command that were not taken
+    /// before, each once.
+    pub fn take_unknown(&mut self) -> Vec<u16> {
+        self.state
+            .model
+            .as_mut()
+            .map(|model| model.take_unknown())
+            .unwrap_or_default()
     }
 
     /// The next packet the guest sent for the host's controller.
@@ -272,6 +318,27 @@ impl State {
         self.events.queue.push_back(packet);
     }
 
+    fn modeled_command(&mut self, packet: &[u8]) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        self.counters.commands += 1;
+        if !model::implements(u16::from_le_bytes([packet[0], packet[1]])) {
+            self.counters.unknown += 1;
+        }
+        let events = model.command(packet, self.now);
+        events.into_iter().for_each(|e| self.event(e));
+    }
+
+    fn modeled_acl(&mut self, packet: &[u8]) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        self.counters.acl_discarded += 1;
+        let events = model.acl(packet);
+        events.into_iter().for_each(|e| self.event(e));
+    }
+
     fn halt(&mut self, endpoint: u8) -> Option<&mut bool> {
         match endpoint {
             EVENTS => Some(&mut self.halted[0]),
@@ -290,7 +357,13 @@ impl State {
             self.counters.malformed += 1;
             return Err(Stall);
         }
-        if u16::from_le_bytes([low, high]) >> 10 == VENDOR_GROUP {
+        let vendor = u16::from_le_bytes([low, high]) >> 10 == VENDOR_GROUP;
+        if self.model.is_some() {
+            self.counters.vendor_refused += u64::from(vendor);
+            self.modeled_command(packet);
+            return Ok(());
+        }
+        if vendor {
             self.counters.vendor_refused += 1;
             self.event(vec![COMMAND_COMPLETE, 4, 1, low, high, UNKNOWN_COMMAND]);
             return Ok(());
@@ -317,9 +390,13 @@ impl State {
             self.counters.malformed += 1;
             self.assembling.clear();
         } else if self.assembling.len() == ACL_HEADER + data {
-            self.counters.acl_to_host += 1;
             let packet = core::mem::take(&mut self.assembling);
-            self.outbound.push_back(Outbound::Acl(packet));
+            if self.model.is_some() {
+                self.modeled_acl(&packet);
+            } else {
+                self.counters.acl_to_host += 1;
+                self.outbound.push_back(Outbound::Acl(packet));
+            }
         } else if self.assembling.len() > ACL_HEADER + data {
             self.counters.malformed += 1;
             self.assembling.clear();
@@ -378,6 +455,10 @@ impl Requests for State {
 
 impl BusPeer for Hci {
     fn reset(&mut self) -> Result<()> {
+        // A bus reset powers the controller up again.
+        if let Some(model) = self.state.model.as_mut() {
+            model.reset();
+        }
         self.control.reset(&mut self.state)?;
         self.state
             .configure(0)
@@ -409,16 +490,27 @@ impl BusPeer for Hci {
 }
 
 impl Function for Hci {
-    fn set_time(&mut self, _now: u64) {}
+    fn set_time(&mut self, now: u64) {
+        let state = &mut self.state;
+        state.now = now;
+        if let Some(model) = state.model.as_mut() {
+            let events = model.advance(now);
+            events.into_iter().for_each(|e| state.event(e));
+        }
+    }
 
     fn ready_at(&self, endpoint: u8) -> Option<u64> {
-        let ready = self.up()
-            && match endpoint {
-                EVENTS => !self.state.events.queue.is_empty(),
-                ACL_IN => !self.state.acl.queue.is_empty(),
-                _ => false,
-            };
-        ready.then_some(0)
+        if !self.up() {
+            return None;
+        }
+        let state = &self.state;
+        match endpoint {
+            EVENTS if !state.events.queue.is_empty() => Some(0),
+            // A procedure's end is an event then.
+            EVENTS => state.model.as_ref().and_then(|model| model.deadline()),
+            ACL_IN => (!state.acl.queue.is_empty()).then_some(0),
+            _ => None,
+        }
     }
 }
 
@@ -553,6 +645,60 @@ mod tests {
         assert_eq!(hci.take(), None);
         hci.deliver_event(&[0x0e, 0]);
         assert_eq!(hci.ready_at(EVENTS), None, "unconfigured, it takes nothing");
+    }
+
+    #[test]
+    fn the_model_answers_through_the_same_pipes() {
+        let mut hci = controller();
+        // Queued before the owner chose the model: the model takes it.
+        command(&mut hci, &[0x03, 0x0c, 0]).unwrap();
+        hci.use_model([1, 2, 3, 4, 5, 0x02]);
+        assert!(hci.modeled());
+        assert_eq!(hci.take(), None, "nothing reaches a host controller");
+        assert_eq!(
+            read(&mut hci, EVENTS, EVENT_PACKET),
+            [vec![COMMAND_COMPLETE, 4, 1, 0x03, 0x0c, 0]]
+        );
+        // Read BD_ADDR.
+        command(&mut hci, &[0x09, 0x10, 0]).unwrap();
+        assert_eq!(
+            read(&mut hci, EVENTS, EVENT_PACKET).concat(),
+            [COMMAND_COMPLETE, 10, 1, 0x09, 0x10, 0, 1, 2, 3, 4, 5, 0x02]
+        );
+        // A vendor command is unknown to the model, and reported once.
+        command(&mut hci, &[0x01, 0xfc, 1, 9]).unwrap();
+        command(&mut hci, &[0x01, 0xfc, 1, 9]).unwrap();
+        assert_eq!(read(&mut hci, EVENTS, EVENT_PACKET)[0][5], UNKNOWN_COMMAND);
+        assert_eq!(read(&mut hci, EVENTS, EVENT_PACKET)[0][5], UNKNOWN_COMMAND);
+        assert_eq!(hci.take_unknown(), [0xfc01]);
+        assert_eq!(hci.counters().vendor_refused, 2);
+        assert_eq!(hci.counters().unknown, 2);
+        // ACL data gets its buffer back.
+        hci.packet(ACL_OUT, Token::Out, &mut [1, 0, 1, 0, 7])
+            .unwrap();
+        assert_eq!(
+            read(&mut hci, EVENTS, EVENT_PACKET),
+            [vec![0x13, 5, 1, 1, 0, 1, 0]]
+        );
+        assert_eq!(hci.counters().acl_discarded, 1);
+    }
+
+    #[test]
+    fn a_procedure_ends_when_the_system_count_reaches_it() {
+        let mut hci = controller();
+        hci.use_model([1, 2, 3, 4, 5, 0x02]);
+        hci.set_time(100);
+        // Inquiry for 1.28 s.
+        command(&mut hci, &[0x01, 0x04, 5, 0x33, 0x8b, 0x9e, 1, 0]).unwrap();
+        assert_eq!(read(&mut hci, EVENTS, EVENT_PACKET)[0][0], 0x0f);
+        let end = 100 + crate::counter::FREQUENCY_HZ * 128 / 100;
+        assert_eq!(hci.ready_at(EVENTS), Some(end));
+        hci.set_time(end - 1);
+        assert_eq!(hci.ready_at(EVENTS), Some(end));
+        hci.set_time(end);
+        assert_eq!(hci.ready_at(EVENTS), Some(0));
+        assert_eq!(read(&mut hci, EVENTS, EVENT_PACKET), [vec![0x01, 1, 0]]);
+        assert_eq!(hci.ready_at(EVENTS), None);
     }
 
     #[test]

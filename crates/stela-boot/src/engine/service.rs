@@ -280,7 +280,7 @@ impl Service {
             lap.part(Part::Network);
         }
         if let Some(bluetooth) = bluetooth.as_mut().filter(|_| due(3, next)) {
-            let (packets, room, status) = devices.with(bluetooth::HostBluetooth::queued);
+            let (packets, room, status) = devices.with(|devices| bluetooth.queued(devices));
             bluetooth.status(status);
             bluetooth.transmit(packets);
             let received = if room {

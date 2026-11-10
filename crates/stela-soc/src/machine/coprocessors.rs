@@ -319,6 +319,7 @@ impl AppleDevices {
         if wrapper.bytes < asc::WRAPPER_BYTES || auxiliary.bytes == 0 {
             return Err(refuse!("SEP register apertures are incomplete"));
         }
+        self.ecid = ecid;
         let owner = self
             .bus
             .device::<Dart>(dart.0)

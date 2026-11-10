@@ -4,6 +4,11 @@
 //! back while the guest's queues have room. The rest wait in the host
 //! controller, as they would for a host that reads slowly.
 //!
+//! A host with no healthy controller gets the controller model
+//! (`stela_soc::usb::hci::model`) behind the same function: a controller
+//! with no radio, reported once as `BLUETOOTH PLATFORM Modeled`. bluetoothd
+//! then brings it up and idles instead of restarting for a missing chip.
+//!
 //! One controller serves the guest; others are reported and left idle. A
 //! controller that fails is reported once, and the guest's commands then get
 //! no answer, as from a controller that stopped responding.
@@ -23,6 +28,10 @@ enum Controller {
     Usb(Box<UsbHci>),
     Intel(Box<IntelBluetooth>),
     Broadcom(Box<Bcm4377>),
+    /// The guest's function answers itself; `installed` once it does.
+    Modeled {
+        installed: bool,
+    },
 }
 
 /// Whether a controller took a packet, or holds it back for now.
@@ -39,10 +48,13 @@ pub struct HostBluetooth {
     waiting: VecDeque<Outbound>,
     up: Option<bool>,
     failed: bool,
+    /// Commands the model answered Unknown HCI Command, to report.
+    unknown: Vec<u16>,
 }
 
 impl HostBluetooth {
-    /// The first controller `usb` and `pcie` hold that initialized.
+    /// The first controller `usb` and `pcie` hold that initialized, or the
+    /// model without one.
     pub fn first(usb: Vec<UsbHci>, pcie: Vec<PcieHci>, root: u64) -> Option<Self> {
         let usb = usb.into_iter().filter_map(|hci| {
             let healthy = matches!(hci.initialization(), Some(Ok(_)) | None);
@@ -61,7 +73,21 @@ impl HostBluetooth {
             _ => None,
         });
         let mut healthy = usb.chain(pcie);
-        let (controller, location) = healthy.next()?;
+        let Some((controller, location)) = healthy.next() else {
+            output::arguments(format_args!(
+                "BLUETOOTH PLATFORM Modeled: no host controller; the guest's controller \
+                 has no radio and finds nothing in range\n"
+            ));
+            return Some(Self {
+                controller: Controller::Modeled { installed: false },
+                location: String::from("model"),
+                root,
+                waiting: VecDeque::new(),
+                up: None,
+                failed: false,
+                unknown: Vec::new(),
+            });
+        };
         output::arguments(format_args!("BLUETOOTH guest uses {location}\n"));
         for (_, unused) in healthy {
             output::arguments(format_args!("BLUETOOTH unused {unused}\n"));
@@ -73,14 +99,27 @@ impl HostBluetooth {
             waiting: VecDeque::new(),
             up: None,
             failed: false,
+            unknown: Vec::new(),
         })
     }
 
     /// What the guest queued, whether it can take more, and its status,
-    /// taken from its devices for the exchange to run without them.
+    /// taken from its devices for the exchange to run without them. The
+    /// model is installed at the first exchange.
     pub fn queued(
+        &mut self,
         devices: &mut AppleDevices,
     ) -> (Vec<Outbound>, bool, Option<(bool, UsbBluetoothCounters)>) {
+        if let Controller::Modeled { installed } = &mut self.controller {
+            if !*installed && let Some(address) = devices.bluetooth_model() {
+                *installed = true;
+                let [a, b, c, d, e, f] = address;
+                output::arguments(format_args!(
+                    "BLUETOOTH model BD_ADDR {f:02x}:{e:02x}:{d:02x}:{c:02x}:{b:02x}:{a:02x}\n"
+                ));
+            }
+            self.unknown.extend(devices.bluetooth_unknown());
+        }
         let packets = core::iter::from_fn(|| devices.bluetooth_take()).collect();
         (
             packets,
@@ -100,6 +139,14 @@ impl HostBluetooth {
 
     /// Reports the guest's controller going up or down.
     pub fn status(&mut self, status: Option<(bool, UsbBluetoothCounters)>) {
+        for opcode in self.unknown.drain(..) {
+            output::arguments(format_args!(
+                "BLUETOOTH model: unknown command {opcode:#06x} (OGF {:#04x} OCF {:#05x}) \
+                 answered Unknown HCI Command\n",
+                opcode >> 10,
+                opcode & 0x3ff
+            ));
+        }
         let (up, counters) = status.unwrap_or_default();
         if self.up != Some(up) {
             self.up = Some(up);
@@ -111,7 +158,8 @@ impl HostBluetooth {
     }
 
     pub fn transmit(&mut self, packets: Vec<Outbound>) {
-        if self.failed {
+        // The model answers inside the guest's function.
+        if self.failed || matches!(self.controller, Controller::Modeled { .. }) {
             return;
         }
         self.waiting.extend(packets);
@@ -142,6 +190,7 @@ impl HostBluetooth {
                         Ok(Sent::Busy)
                     }
                 }
+                (Controller::Modeled { .. }, _) => Ok(Sent::Taken),
                 (Controller::Broadcom(transport), packet) => {
                     let (kind, bytes) = match packet {
                         Outbound::Command(bytes) => (bcm4377::Kind::Command, bytes),
@@ -166,12 +215,13 @@ impl HostBluetooth {
 
     /// What the controller has for the guest.
     pub fn receive(&mut self) -> Vec<Packet> {
-        if self.failed {
+        if self.failed || matches!(self.controller, Controller::Modeled { .. }) {
             return Vec::new();
         }
         // SAFETY: as in `transmit`.
         let _root = unsafe { RestoreRoot::enter(self.root) };
         let received = match &mut self.controller {
+            Controller::Modeled { .. } => Ok(Vec::new()),
             Controller::Usb(hci) => hci.poll().map_err(|error| alloc::format!("{error}")),
             Controller::Intel(transport) => transport
                 .poll()

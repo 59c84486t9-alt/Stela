@@ -241,6 +241,26 @@ impl AppleDevices {
         self.usb_bluetooth()?.take()
     }
 
+    /// Answers the guest's Bluetooth controller with the controller model,
+    /// for a host that lends none; its BD_ADDR derives from the board's
+    /// ECID. The address, or `None` without a controller.
+    pub fn bluetooth_model(&mut self) -> Option<[u8; 6]> {
+        let address = crate::usb::hci::model::address(self.ecid);
+        let hci = self.usb_bluetooth()?;
+        if !hci.modeled() {
+            hci.use_model(address);
+        }
+        Some(address)
+    }
+
+    /// Opcodes the modeled controller answered Unknown HCI Command, each
+    /// once.
+    pub fn bluetooth_unknown(&mut self) -> Vec<u16> {
+        self.usb_bluetooth()
+            .map(|hci| hci.take_unknown())
+            .unwrap_or_default()
+    }
+
     /// Whether the guest configured its Bluetooth controller, and the
     /// controller's counters; `None` without one.
     pub fn bluetooth_status(&mut self) -> Option<(bool, UsbBluetoothCounters)> {
