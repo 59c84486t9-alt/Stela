@@ -792,13 +792,22 @@ impl PeRegisters {
 }
 
 impl LocalRegisters for PeRegisters {
+    /// IPI_SR reads, and the IPI_SR writes that change nothing: a write
+    /// without PENDING, or one that finds it clear, which a send can only
+    /// set after this load ([`ipi::FastIpi::access`]).
     fn register(&self, encoding: Encoding, write: Option<u64>) -> Option<u64> {
         self.counters
             .as_ref()
             .and_then(|counters| LocalRegisters::register(counters, encoding, write))
             .or_else(|| {
-                let status = self.ipi_status(encoding).filter(|_| write.is_none())?;
-                Some(status.load(core::sync::atomic::Ordering::Relaxed))
+                let status = self.ipi_status(encoding)?;
+                let pending = status.load(core::sync::atomic::Ordering::Relaxed);
+                match write {
+                    None => Some(pending),
+                    Some(0) => Some(0),
+                    Some(1) if pending == 0 => Some(0),
+                    Some(_) => None,
+                }
             })
     }
 
@@ -1090,6 +1099,10 @@ impl Devices for AppleDevices {
         self.usb_masters
             .iter_mut()
             .fold(false, |due, master| master.session.take_due() | due)
+    }
+
+    fn device_name(&self, physical: u64) -> Option<&'static str> {
+        self.bus.name_at(physical)
     }
 
     fn memory_lock(&self) -> stela_engine::machine::mmu::MemoryLocks {

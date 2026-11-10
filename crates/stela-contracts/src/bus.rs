@@ -490,6 +490,11 @@ impl Bus {
             region.device_offset + (address - region.start),
         ))
     }
+    /// The name of the model mapped at `address`, for reports.
+    pub fn name_at(&self, address: u64) -> Option<&'static str> {
+        let (device, _) = self.route(address, Width::Byte).ok()?;
+        Some(self.devices.get(device.0)?.name())
+    }
     pub fn read(
         &mut self,
         address: u64,

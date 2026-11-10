@@ -2562,6 +2562,31 @@ fn fast_ipis_raise_and_clear_the_target_pes_fiq() {
     ));
 }
 
+/// An IPI_SR write that changes nothing completes on the PE's own word:
+/// one without PENDING, or one that finds PENDING clear. A write that
+/// clears it, or a field the model refuses, reaches the board.
+#[test]
+fn ipi_status_writes_that_change_nothing_complete_on_the_pes_word() {
+    const START: u64 = 0x2_3b73_4000;
+    let request = Encoding::new(3, 5, 15, 0, 0);
+    let status = Encoding::new(3, 5, 15, 1, 1);
+    let mut devices = AppleDevices::new();
+    devices.add_fast_ipi(&[0x8000_0000, 0x8000_0001]);
+    let local = devices.local_registers(1).unwrap();
+    assert_eq!(local.register(status, Some(1)), Some(0), "nothing pending");
+    assert_eq!(local.register(status, Some(0)), Some(0));
+    assert_eq!(local.register(status, Some(2)), None, "the model refuses");
+    assert_eq!(devices.system_register(0, request, Some(1), 0), Some(Ok(0)));
+    assert!(devices.lines(1, 0).fiq);
+    assert_eq!(local.register(status, Some(0)), Some(0));
+    assert_eq!(local.register(status, Some(1)), None, "clears PENDING");
+    assert!(devices.lines(1, 0).fiq);
+    // Reports name the model at an address.
+    devices.add_cpu_start(START, 1, &[0x8000_0000]).unwrap();
+    assert_eq!(devices.device_name(START + 4), Some("cpu-start"));
+    assert_eq!(devices.device_name(0x10), None);
+}
+
 #[test]
 fn a_start_bit_releases_its_pe_at_the_locked_rvbar() {
     const START: u64 = 0x2_3b73_4000;
