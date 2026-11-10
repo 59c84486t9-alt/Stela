@@ -1249,9 +1249,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             tag_checks: [false; 2],
             tags_checked_at: None,
         };
-        machine
-            .chain
-            .set_table(machine.targets.address(), machine.itlb.address());
+        machine.chain.set_table(
+            machine.targets.address(),
+            machine.itlb.address(),
+            [machine.targets.mask(), machine.itlb.mask()],
+        );
         machine.peers = processors::boot(&machine.profile, boot_processor);
         machine.load_profile();
         machine.sync_regime();

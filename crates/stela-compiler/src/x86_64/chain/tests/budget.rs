@@ -12,6 +12,21 @@ use std::{
     },
     time::{Duration, Instant},
 };
+/// The default block table's slot mask and ITLB's set mask.
+const TABLE_MASK: u32 = LOOKUP_ENTRIES as u32 - 1;
+const ITLB_MASK: u32 = ITLB_ENTRIES as u32 / 2 - 1;
+
+fn lookup_slot(pc: u64, key: u64) -> usize {
+    super::super::lookup_slot(pc, key, TABLE_MASK)
+}
+
+fn itlb_slot(pc: u64, context: u64) -> usize {
+    super::super::itlb_slot(pc, context, ITLB_MASK)
+}
+
+fn itlb_salt(context: u64) -> u32 {
+    super::super::itlb_salt(context, ITLB_MASK)
+}
 unsafe extern "C" {
     fn mmap(
         address: *mut c_void,
@@ -514,6 +529,7 @@ fn native_interruption_gate_costs() {
             itlb: itlb.address(),
             contexts: [5, 7],
             salts: [itlb_salt(5), itlb_salt(7)],
+            masks: [TABLE_MASK, ITLB_MASK],
             ..ChainControl::default()
         }));
         let context = control.0.contexts[half(TARGET.0)];
@@ -696,6 +712,7 @@ fn ring_costs(report: &mut fs::File) {
             itlb: itlb.address(),
             contexts: [5, 5],
             salts: [itlb_salt(5); 2],
+            masks: [TABLE_MASK, ITLB_MASK],
             ..ChainControl::default()
         }));
         // SAFETY: the mapping covers `code`; nothing runs it meanwhile.

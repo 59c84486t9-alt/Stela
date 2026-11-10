@@ -173,7 +173,10 @@ fn chained_load_case(branch: u32, btype: u8, landing_pad: bool) {
         target = current_target;
         let key = machine.current_key(target_pc).expect("a translated page");
         assert_eq!(
-            machine.targets[chain::lookup_slot(target_pc, key)].targets,
+            machine
+                .targets
+                .entry(machine.targets.slot(target_pc, key))
+                .targets,
             0b0111
         );
     }

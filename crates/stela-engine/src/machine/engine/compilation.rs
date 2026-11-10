@@ -24,7 +24,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && self.cpu.pstate.btype == 0
             && let Some(key) = self.current_key(pc)
         {
-            let target = self.targets.find(chain::lookup_slot(pc, key), pc, key);
+            let target = self.targets.find(self.targets.slot(pc, key), pc, key);
             if target.pc == pc && target.key == key {
                 self.statistics.fetches[0] += 1;
                 self.link_direct_exit(pc);
@@ -54,7 +54,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !single && let Some(id) = self.known_variant(variant) {
             let key = self.block_key(physical, id);
             self.translate_page(pc, key);
-            let target = self.targets.find(chain::lookup_slot(pc, key), pc, key);
+            let target = self.targets.find(self.targets.slot(pc, key), pc, key);
             // Every release of a block forgets its entries; the block is
             // checked anyway, on this path of a fresh translation.
             let named = (target.pc == pc && target.key == key)
@@ -144,7 +144,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn current_key(&self, pc: u64) -> Option<u64> {
         let context = self.chain.contexts()[chain::half(pc)];
         let page = pc & !(FETCH_PAGE - 1);
-        let held = self.itlb.find(chain::itlb_slot(pc, context), page, context);
+        let held = self
+            .itlb
+            .find(self.itlb.page_slot(pc, context), page, context);
         (held.pc == page && held.key == context).then_some(held.entry)
     }
 
@@ -160,7 +162,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let half = chain::half(pc);
         let context = self.chain.contexts()[half];
         let page = pc & !(FETCH_PAGE - 1);
-        let slot = chain::itlb_slot(pc, context);
+        let slot = self.itlb.page_slot(pc, context);
         let entry = chain::LookupEntry::page(page, context, key);
         let held = self.itlb.find(slot, page, context);
         if held == entry {
@@ -168,7 +170,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let held_page = held.pc == page && held.key == context;
         self.statistics.itlb[usize::from(held_page)] += 1;
-        let resident = self.itlb[slot];
+        let resident = self.itlb.entry(slot);
         if resident.pc == page && resident.key != context && !self.live_context(half, resident.key)
         {
             self.itlb.set(slot, entry);
@@ -207,7 +209,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             false => 0b1111,
         };
         let key = self.block_key(block.physical, block.variant);
-        let slot = chain::lookup_slot(pc, key);
+        let slot = self.targets.slot(pc, key);
         let target = chain::LookupEntry {
             pc,
             key,

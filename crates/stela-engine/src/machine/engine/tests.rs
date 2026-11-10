@@ -434,7 +434,7 @@ pub(super) fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
 /// The slot of `pc`'s block table entry with the key the ITLB gives its
 /// page in the contexts `machine` runs in.
 fn target_slot(machine: &Machine<FakeHost, NoDevices>, pc: u64) -> usize {
-    chain::lookup_slot(pc, target_key(machine, pc))
+    machine.targets.slot(pc, target_key(machine, pc))
 }
 
 /// The block key the ITLB gives the page of `pc` in the contexts `machine`
@@ -2331,9 +2331,9 @@ fn a_fetch_that_reclaims_code_forgets_the_lookup_entries_of_its_blocks_alone() {
     assert!(machine.fetch_block(pc, false).is_ok());
     assert_eq!(machine.statistics.code_evictions, 1);
     assert_eq!(machine.chain.contexts(), first);
-    assert_ne!(machine.targets[target_slot(&machine, base)].pc, base);
+    assert_ne!(machine.targets.entry(target_slot(&machine, base)).pc, base);
     for kept in [base + FETCH_PAGE, pc] {
-        let entry = machine.targets[target_slot(&machine, kept)];
+        let entry = machine.targets.entry(target_slot(&machine, kept));
         assert_eq!((entry.pc, entry.key), (kept, target_key(&machine, kept)));
     }
 }
@@ -2390,10 +2390,10 @@ fn eviction_undoes_the_links_into_evicted_blocks_and_keeps_their_pages() {
     // The second block took no lookup entry: the first's exit linked into
     // it at its fetch.
     assert_ne!(
-        machine.targets[target_slot(&machine, base + 12)].pc,
+        machine.targets.entry(target_slot(&machine, base + 12)).pc,
         base + 12
     );
-    assert_ne!(machine.targets[target_slot(&machine, base)].pc, base);
+    assert_ne!(machine.targets.entry(target_slot(&machine, base)).pc, base);
     // The second block runs on, and exits to the engine at the first.
     machine.host.exits = vec![direct(base)];
     machine.step().unwrap();
@@ -2838,11 +2838,11 @@ fn a_direct_exit_links_at_the_fetch_of_its_target() {
     assert_ne!(key, 0);
     let held = machine
         .targets
-        .find(chain::lookup_slot(target, key), target, key);
+        .find(machine.targets.slot(target, key), target, key);
     assert_ne!(held.pc, target);
     assert_eq!(machine.blocks[second].pc, target);
     // A fetch the exit did not wait for remembers its block as before.
-    let entry = machine.targets[target_slot(&machine, base)];
+    let entry = machine.targets.entry(target_slot(&machine, base));
     assert_eq!((entry.pc, entry.block), (base, 0));
 }
 
@@ -2882,7 +2882,7 @@ fn a_direct_exit_waiting_for_its_target_goes_with_its_block() {
             panic!("a block in case {case}");
         };
         assert_eq!(machine.statistics.links, 0, "case {case}");
-        let held = machine.targets[target_slot(&machine, target)];
+        let held = machine.targets.entry(target_slot(&machine, target));
         assert_eq!(
             (held.pc, held.block),
             (target, second as u32),
@@ -2958,7 +2958,9 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
         let expected = if index == 0 {
             let cell_at = u64::from_le_bytes(code[2..10].try_into().unwrap());
             // SAFETY: the table keeps the cell at its address while its exit holds it.
-            assert_eq!(unsafe { *(cell_at as *const chain::LookupEntry) }, cell);
+            let raw = unsafe { *(cell_at as *const chain::LookupEntry) };
+            let targets = raw.targets & chain::META_TARGETS;
+            assert_eq!(chain::LookupEntry { targets, ..raw }, cell);
             let entry = probes + chain::CELL_PROBE_ENTRY as u64;
             chain::cell_tail(at, cell_at, kind, ran, entry)
                 .unwrap()
@@ -2973,7 +2975,7 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
         assert_eq!(machine.host.patches[2 * index + 1], (site, jump.to_vec()));
     }
     // The fetch of `far` filled the cell linked before it.
-    assert_eq!(cell, machine.targets[target_slot(&machine, far)]);
+    assert_eq!(cell, machine.targets.entry(target_slot(&machine, far)));
     // A TLBI of `far`'s page forgets its translation, and leaves the cell,
     // which holds for the frame; forgetting the frame's entries empties it,
     // and the next fetch's entry fills it again.
@@ -2995,7 +2997,7 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
             machine.blocks[block].physical,
             machine.blocks[block].variant,
         );
-        let entry = machine.targets[chain::lookup_slot(pc, key)];
+        let entry = machine.targets.entry(machine.targets.slot(pc, key));
         let expected = chain::LookupEntry {
             pc,
             key,
@@ -3202,10 +3204,12 @@ fn a_tlbi_by_va_drops_the_itlb_entries_of_its_leaf_in_every_context() {
     const PAGE: u64 = 0x8000;
     let put = |machine: &mut Machine<FakeHost, NoDevices>, page: u64, context: u64| {
         let entry = chain::LookupEntry::page(page, context, 1);
-        machine.itlb.set(chain::itlb_slot(page, context), entry);
+        machine
+            .itlb
+            .set(machine.itlb.page_slot(page, context), entry);
     };
     let held = |machine: &Machine<FakeHost, NoDevices>, page: u64, context: u64| {
-        machine.itlb[chain::itlb_slot(page, context)].pc == page
+        machine.itlb.entry(machine.itlb.page_slot(page, context)).pc == page
     };
     machine.fetched_through(0, PAGE, 0x4000, true);
     let pages = [PAGE - 0x1000, PAGE, PAGE + 0x3000, PAGE + 0x4000];
@@ -3278,10 +3282,10 @@ fn block_entries_survive_a_tlbi_all() {
     assert_eq!(table_entries(&machine), entries);
     // The new context's entry took the place of its predecessor's, which
     // had its salt.
-    let slot = chain::itlb_slot(BASE, after);
-    assert_eq!(slot, chain::itlb_slot(BASE, before));
+    let slot = machine.itlb.page_slot(BASE, after);
+    assert_eq!(slot, machine.itlb.page_slot(BASE, before));
     assert_eq!(
-        machine.itlb[slot],
+        machine.itlb.entry(slot),
         chain::LookupEntry::page(BASE & !(FETCH_PAGE - 1), after, key)
     );
 }
@@ -3289,7 +3293,7 @@ fn block_entries_survive_a_tlbi_all() {
 /// The live entries of the block table.
 fn table_entries(machine: &Machine<FakeHost, NoDevices>) -> usize {
     (0..chain::LOOKUP_ENTRIES)
-        .filter(|&slot| machine.targets[slot].key != 0)
+        .filter(|&slot| machine.targets.entry(slot).key != 0)
         .count()
 }
 
@@ -3360,7 +3364,7 @@ fn two_address_spaces_mapping_one_frame_share_an_entry() {
     assert_eq!(table_entries(&machine), entries);
     // The ITLB holds the page in both contexts, with the one key.
     for context in [first, second] {
-        let held = machine.itlb[chain::itlb_slot(BASE, context)];
+        let held = machine.itlb.entry(machine.itlb.page_slot(BASE, context));
         assert_eq!(held, chain::LookupEntry::page(BASE, context, key));
     }
     // An IC IVAU of the frame forgets the entry for both: the next fetch
@@ -3416,7 +3420,7 @@ fn a_remapped_page_runs_its_new_frame_and_a_removed_permission_faults() {
     assert_eq!(chain::key_frame(new_key), (BASE + 0x2000) >> 12);
     let held = machine
         .targets
-        .find(chain::lookup_slot(va, new_key), va, new_key);
+        .find(machine.targets.slot(va, new_key), va, new_key);
     assert_eq!((held.key, held.block), (new_key, new as u32));
     // The page loses its execute permission: the fetch after the TLBI
     // takes an Instruction Abort, a permission fault, and records nothing.
@@ -3535,7 +3539,7 @@ fn a_translated_frame_gives_the_pages_the_itlb_holds_a_new_key() {
 /// (`chain::lookup_dispatcher`).
 fn dispatched(machine: &Machine<FakeHost, NoDevices>, pc: u64) -> bool {
     machine.current_key(pc).is_some_and(|key| {
-        let entry = machine.targets.find(chain::lookup_slot(pc, key), pc, key);
+        let entry = machine.targets.find(machine.targets.slot(pc, key), pc, key);
         entry.pc == pc && entry.key == key
     })
 }
@@ -3570,11 +3574,11 @@ fn steady_state_transfers_between_pages_stay_in_the_dispatchers() {
     let (first, second) = (switch(&mut machine, 0), switch(&mut machine, 1));
     // The second space's own page, at a VA whose ITLB set in its context
     // is that of the first shared page in the first space's.
-    let set = chain::itlb_slot(shared[0], first) / 2;
+    let set = machine.itlb.page_slot(shared[0], first) / 2;
     let va = |alias: u64, page: u64| BASE + (alias << 21) + page * PAGE;
     let (alias, page) = (1..512)
         .flat_map(|alias| (4..512).map(move |page| (alias, page)))
-        .find(|&(alias, page)| chain::itlb_slot(va(alias, page), second) / 2 == set)
+        .find(|&(alias, page)| machine.itlb.page_slot(va(alias, page), second) / 2 == set)
         .expect("a VA of the set");
     let [_, l2, l3] = SPACES_TABLES[1];
     write_entry(&mut machine, l2 + 8 * alias, (BASE + l3) | 0b11);
@@ -3658,13 +3662,13 @@ fn a_tlbi_by_va_and_asid_leaves_the_entries_of_other_asids() {
     let fill = |machine: &mut Machine<FakeHost, NoDevices>| {
         for context in [five, six] {
             machine.itlb.set(
-                chain::itlb_slot(PC, context),
+                machine.itlb.page_slot(PC, context),
                 chain::LookupEntry::page(PC, context, 1),
             );
         }
     };
     let held = |machine: &Machine<FakeHost, NoDevices>| {
-        [five, six].map(|context| machine.itlb[chain::itlb_slot(PC, context)].pc == PC)
+        [five, six].map(|context| machine.itlb.entry(machine.itlb.page_slot(PC, context)).pc == PC)
     };
     let tlbi = |machine: &mut Machine<FakeHost, NoDevices>| {
         let reach = Reach::Containing(PC);
@@ -3829,7 +3833,10 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     machine.step().unwrap();
     let target = machine.blocks.len() - 1;
     assert_eq!(machine.blocks[target].pc, far);
-    assert_eq!(machine.targets[target_slot(&machine, far)].targets, 0b1111);
+    assert_eq!(
+        machine.targets.entry(target_slot(&machine, far)).targets,
+        0b1111
+    );
     // The page mapped guarded, which a TLBI makes known, is another key:
     // its block's entry accepts what BTI c is compatible with.
     let unguarded = target_key(&machine, far);
@@ -3841,12 +3848,15 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     };
     assert!(guarded != target && machine.block_variant(guarded).guarded_page);
     assert_ne!(target_key(&machine, far), unguarded);
-    assert_eq!(machine.targets[target_slot(&machine, far)].targets, 0b0111);
+    assert_eq!(
+        machine.targets.entry(target_slot(&machine, far)).targets,
+        0b0111
+    );
     // The frame's other key, which the unguarded mapping still finds,
     // shares its set.
     let entry = machine
         .targets
-        .find(chain::lookup_slot(far, unguarded), far, unguarded);
+        .find(machine.targets.slot(far, unguarded), far, unguarded);
     assert_eq!((entry.block, entry.targets), (target as u32, 0b1111));
     // BTI C itself performs no guest memory access. Preserve this
     // original landing-pad program, but an invented Host fault at its
@@ -4440,7 +4450,7 @@ fn a_compiled_pac_landing_uses_the_current_sctlr_for_lookup_entries() {
         // BT1 is part of the key, so the entries of each value stand apart.
         let block = &machine.blocks[index];
         let key = machine.block_key(block.physical, block.variant);
-        let entry = machine.targets.find(chain::lookup_slot(pc, key), pc, key);
+        let entry = machine.targets.find(machine.targets.slot(pc, key), pc, key);
         assert_eq!((entry.key, entry.targets), (key, targets));
         keys.push(key);
     }

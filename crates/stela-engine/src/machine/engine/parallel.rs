@@ -1106,8 +1106,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn adopt_parallel_control(&mut self, control: chain_control::Owner) {
         let contexts = self.chain.contexts();
         self.chain = control;
-        self.chain
-            .initialize(self.targets.address(), self.itlb.address(), contexts);
+        self.chain.initialize(
+            self.targets.address(),
+            self.itlb.address(),
+            contexts,
+            [self.targets.mask(), self.itlb.mask()],
+        );
     }
 
     /// Whether this machine runs one PE of a board whose PEs each run on

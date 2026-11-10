@@ -7,6 +7,11 @@ use core::{
 };
 use stela_compiler::x86_64::chain::{ChainControl, itlb_salt};
 
+/// The salts of `contexts` in an ITLB of the set mask in `masks`.
+fn salts(contexts: [u64; 2], masks: [u32; 2]) -> [u32; 2] {
+    contexts.map(|context| itlb_salt(context, masks[1]))
+}
+
 /// By its hub inbox even when no Machine owns the PE. The hub exposes
 /// only the interruption epoch; all other fields belong to its admitted Machine.
 #[repr(C, align(64))]
@@ -93,7 +98,13 @@ impl Owner {
     }
 
     /// Reset every local field, keeping the inbox's monotonic notification epoch.
-    pub(super) fn initialize(&mut self, table: u64, itlb: u64, contexts: [u64; 2]) {
+    pub(super) fn initialize(
+        &mut self,
+        table: u64,
+        itlb: u64,
+        contexts: [u64; 2],
+        masks: [u32; 2],
+    ) {
         let control = self.storage.control.get();
         // SAFETY: this Owner is the sole local writer, with no native call
         // in progress. Disjoint raw writes never borrow the shared epoch.
@@ -101,7 +112,8 @@ impl Owner {
             core::ptr::addr_of_mut!((*control).retired).write(0);
             core::ptr::addr_of_mut!((*control).block).write(0);
             core::ptr::addr_of_mut!((*control).contexts).write(contexts);
-            core::ptr::addr_of_mut!((*control).salts).write(contexts.map(itlb_salt));
+            core::ptr::addr_of_mut!((*control).salts).write(salts(contexts, masks));
+            core::ptr::addr_of_mut!((*control).masks).write(masks);
             core::ptr::addr_of_mut!((*control).table).write(table);
             core::ptr::addr_of_mut!((*control).itlb).write(itlb);
             core::ptr::addr_of_mut!((*control).hits).write(0);
@@ -120,13 +132,20 @@ impl Owner {
                 .write(epoch.min(u64::MAX - 1));
         }
     }
-    pub(super) fn set_table(&mut self, table: u64, itlb: u64) {
+    pub(super) fn set_table(&mut self, table: u64, itlb: u64, masks: [u32; 2]) {
         // SAFETY: the sole owner writes these non-budget fields outside native execution.
         unsafe {
             let control = self.storage.control.get();
             core::ptr::addr_of_mut!((*control).table).write(table);
             core::ptr::addr_of_mut!((*control).itlb).write(itlb);
+            core::ptr::addr_of_mut!((*control).masks).write(masks);
+            let contexts = core::ptr::addr_of!((*control).contexts).read();
+            core::ptr::addr_of_mut!((*control).salts).write(salts(contexts, masks));
         }
+    }
+    fn masks(&self) -> [u32; 2] {
+        // SAFETY: only this Owner writes the masks, outside native execution.
+        unsafe { core::ptr::addr_of!((*self.storage.control.get()).masks).read() }
     }
     pub(super) fn contexts(&self) -> [u64; 2] {
         // SAFETY: only this Owner or its synchronous native call can write contexts.
@@ -137,7 +156,12 @@ impl Owner {
         unsafe {
             let control = self.storage.control.get();
             core::ptr::addr_of_mut!((*control).contexts).write(contexts);
-            core::ptr::addr_of_mut!((*control).salts).write(contexts.map(itlb_salt));
+        }
+        let masks = self.masks();
+        // SAFETY: as above.
+        unsafe {
+            core::ptr::addr_of_mut!((*self.storage.control.get()).salts)
+                .write(salts(contexts, masks));
         }
     }
     pub(super) fn begin(&mut self, block: usize, budget: u64) {
@@ -191,7 +215,8 @@ impl Owner {
             hits,
             linked,
             contexts: self.contexts(),
-            salts: self.contexts().map(itlb_salt),
+            salts: salts(self.contexts(), self.masks()),
+            masks: self.masks(),
             // SAFETY: the sole owner observes a non-budget field outside entry.
             table: unsafe { core::ptr::addr_of!((*control).table).read() },
             // SAFETY: as for `table`.

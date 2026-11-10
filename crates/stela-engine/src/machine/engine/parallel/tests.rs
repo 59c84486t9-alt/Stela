@@ -140,7 +140,7 @@ fn an_interrupt_borrow_survives_detach_and_reuse_without_a_raw_pointer_lease() {
     let (hub, _) = hub(1);
     let weak = Arc::downgrade(&hub.inboxes[0].chain);
     let (attached, mut control) = Attached::new(&hub, 0, false).unwrap();
-    control.initialize(11, 14, [12, 13]);
+    control.initialize(11, 14, [12, 13], [0xffff, 0xfff]);
     control.begin(9, 99);
     let (ready_tx, ready_rx) = mpsc::channel();
     let (resume_tx, resume_rx) = mpsc::channel();
@@ -165,7 +165,7 @@ fn an_interrupt_borrow_survives_detach_and_reuse_without_a_raw_pointer_lease() {
         "hub retains the physical allocation"
     );
     let (next, mut control) = Attached::new(&hub, 0, false).unwrap();
-    control.initialize(21, 24, [22, 23]);
+    control.initialize(21, 24, [22, 23], [0xffff, 0xfff]);
     control.begin(2, 77);
     resume_tx.send(()).unwrap();
     reader.join().unwrap();
@@ -250,7 +250,7 @@ fn repeated_owner_reuse_keeps_remote_epoch_writes_disjoint() {
         let (attached, mut control) = Attached::new(&hub, 0, false).unwrap();
         assert!(attached.epoch > last);
         last = attached.epoch;
-        control.initialize(index, index + 3, [index + 1, index + 2]);
+        control.initialize(index, index + 3, [index + 1, index + 2], [0xffff, 0xfff]);
         control.begin(index as usize, 31);
         let state = control.snapshot();
         assert_eq!(
@@ -721,7 +721,7 @@ fn epoch_exhaustion_is_sticky_across_drain_detach_and_reuse() {
     assert_eq!(exhausted.observed_interrupt_epoch, u64::MAX - 1);
     drop(machine);
     let (_, mut next) = Attached::new(&hub, 0, false).unwrap();
-    next.initialize(11, 14, [12, 13]);
+    next.initialize(11, 14, [12, 13], [0xffff, 0xfff]);
     next.acknowledge_interrupt(u64::MAX);
     next.begin(0, 4096);
     let reused = next.snapshot();

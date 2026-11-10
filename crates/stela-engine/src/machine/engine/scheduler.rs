@@ -375,7 +375,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let entry = self
             .targets
-            .find(chain::lookup_slot(next_pc, key), next_pc, key);
+            .find(self.targets.slot(next_pc, key), next_pc, key);
         Some(if entry.pc != next_pc || entry.key != key {
             2
         } else if spent {
@@ -616,7 +616,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let current = self.current_key(next_pc).and_then(|key| {
             let held = self
                 .targets
-                .find(chain::lookup_slot(next_pc, key), next_pc, key);
+                .find(self.targets.slot(next_pc, key), next_pc, key);
             (held.pc == next_pc && held.key == key).then_some(held)
         });
         let cell = self.targets.link_cell(site, next_pc, current);
