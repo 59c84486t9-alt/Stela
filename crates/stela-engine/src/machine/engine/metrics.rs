@@ -84,8 +84,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     pub fn metrics_snapshot(&self) -> Snapshot {
         let (indexed_blocks, indexed_code_pages) = {
-            let cache = self.code.cache();
-            (cache.index.len(), cache.index.pages())
+            let cache = self.code.cache_at(super::board::LockSite::Report);
+            (cache.index.len(), self.code.indexed_pages())
         };
         Snapshot {
             statistics: self.statistics,

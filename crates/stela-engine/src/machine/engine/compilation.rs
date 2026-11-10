@@ -83,14 +83,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.remember_or_link(pc, entry.block);
             return Ok(Fetched::Block(entry.block));
         }
-        let indexed = self.known_variant(variant).and_then(|id| {
-            self.code.cache_at(board::LockSite::Fetch).index.get(
-                &self.code.blocks,
-                pc,
-                physical,
-                id,
-            )
-        });
+        let indexed = self
+            .known_variant(variant)
+            .and_then(|id| self.code.find(pc, physical, id));
         self.statistics.fetches[if indexed.is_some() { 3 } else { 4 }] += 1;
         let index = match indexed {
             Some(index) => index,
@@ -215,6 +210,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             true => block.landing.targets(&self.cpu) | 1,
             false => 0b1111,
         };
+        let (physical, variant_id) = (block.physical, block.variant);
         let key = self.block_key(block.physical, block.variant);
         let slot = self.code.table.slot(pc, key);
         let target = chain::LookupEntry {
@@ -228,8 +224,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return false;
         }
         let mut cache = self.code.cache_at(board::LockSite::Target);
-        // A block retired since it was found has no entry to take.
-        if !self.code.blocks.record(index).live() {
+        // Only an indexed block takes an entry: one an IC IVAU forgot (that
+        // a PE's jump cache still names until it reads the post) or one
+        // retired since it was found would be reachable again, and links
+        // out of it are cut by no detach ([`Self::detach`] visits the
+        // indexed blocks of a target's page).
+        if cache.index.get(&self.code.blocks, pc, physical, variant_id) != Some(index) {
             return false;
         }
         cache.targets.insert(slot, target);
@@ -685,14 +685,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         let shared = Arc::clone(&self.code);
         shared.blocks.fill(slot, block);
+        // The slot is this PE's until published: its rows go in first.
+        shared.blocks.recovery().insert(slot, compiled.installed());
         let mut cache = shared.cache_at(board::LockSite::Install);
         self.census_installed(&mut cache, pc, physical, variant, installed_bytes);
         // Another PE installed the block meanwhile: the first install wins,
         // and this one's code stays unreachable until its part goes.
         if let Some(held) = cache.index.get(&shared.blocks, pc, physical, id) {
             shared.blocks.record(slot).mark_lost();
-            // Rows a block the slot held before left: none are this one's.
-            cache.recovery.remove(&slot);
+            // Its rows go: nothing faults in a block never reached.
+            shared.blocks.recovery().remove(&slot);
             shared.blocks.retire(slot);
             let (grace, _) = self.grace();
             shared
@@ -710,7 +712,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .map(board::Arena::partitions)
                 .or_else(|| self.host.code_partitions())
         });
-        cache.recovery.insert(slot, compiled.installed());
         if let Some(replaced) = cache.index.insert(&shared.blocks, slot) {
             // Only indexed blocks are reached, which eviction relies on.
             self.detach(&mut cache, &[replaced as u32]);

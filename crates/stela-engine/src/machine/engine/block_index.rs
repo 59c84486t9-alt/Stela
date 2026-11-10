@@ -3,9 +3,13 @@
 //! bytes here, and forgetting a page forgets its blocks at once. Each fetch
 //! a lookup misses comes here, so a direct-mapped cache of pages answers
 //! most without walking the ordered map, which sweeps keep their place in.
-use super::{Block, FETCH_PAGE, VariantId};
-use alloc::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
+//!
+//! The index changes under the board's code lock; a [`Finder`] beside it
+//! answers a fetch without that lock.
+use super::{Block, FETCH_PAGE, VariantId, board::Records};
+use alloc::{boxed::Box, collections::BTreeMap, sync::Arc, vec, vec::Vec};
 use core::ops::Index;
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 const _: () = assert!(FETCH_PAGE <= 1 << u16::BITS);
 
@@ -27,6 +31,8 @@ struct Entry {
 }
 
 pub(super) struct BlockIndex {
+    /// The same blocks, for reads without the lock.
+    finder: Arc<Finder>,
     /// Each physical page's [`Self::entries`].
     pages: BTreeMap<u64, u32>,
     /// A page's blocks, by ascending offset.
@@ -45,8 +51,15 @@ fn split(physical: u64) -> (u64, u16) {
 }
 
 impl BlockIndex {
+    #[cfg(test)]
     pub(super) fn new() -> Self {
+        Self::with_finder(Arc::new(Finder::new(1 << 16)))
+    }
+
+    /// An empty index that keeps `finder` in step with it.
+    pub(super) fn with_finder(finder: Arc<Finder>) -> Self {
         Self {
+            finder,
             pages: BTreeMap::new(),
             entries: Vec::new(),
             free: Vec::new(),
@@ -120,6 +133,7 @@ impl BlockIndex {
                     self.entries.len() as u32 - 1
                 });
                 self.pages.insert(frame, page);
+                self.finder.pages.store(self.pages.len(), Ordering::Relaxed);
                 page as usize
             }
         };
@@ -135,7 +149,12 @@ impl BlockIndex {
         match same {
             Some(position) => {
                 let replaced = core::mem::replace(&mut entries[start + position].slot, slot as u32);
-                (replaced as usize != slot).then_some(replaced as usize)
+                if replaced as usize == slot {
+                    return None;
+                }
+                self.finder.unlink(replaced, block.physical);
+                self.finder.link(slot as u32, block.physical);
+                Some(replaced as usize)
             }
             None => {
                 entries.insert(
@@ -145,6 +164,7 @@ impl BlockIndex {
                         slot: slot as u32,
                     },
                 );
+                self.finder.link(slot as u32, block.physical);
                 None
             }
         }
@@ -165,6 +185,7 @@ impl BlockIndex {
             return false;
         };
         entries.remove(position);
+        self.finder.unlink(slot as u32, physical);
         if entries.is_empty() {
             self.forget_page(frame);
         }
@@ -178,7 +199,14 @@ impl BlockIndex {
             return;
         };
         let entries = &mut self.entries[page];
-        entries.retain(|entry| !marked(entry.slot));
+        let finder = &self.finder;
+        entries.retain(|entry| {
+            let gone = marked(entry.slot);
+            if gone {
+                finder.unlink(entry.slot, frame | u64::from(entry.offset));
+            }
+            !gone
+        });
         if entries.is_empty() {
             self.forget_page(frame);
         }
@@ -190,7 +218,12 @@ impl BlockIndex {
         let Some(page) = self.pages.remove(&frame) else {
             return false;
         };
+        self.finder.pages.store(self.pages.len(), Ordering::Relaxed);
         let entries = &mut self.entries[page as usize];
+        for entry in entries.iter() {
+            self.finder
+                .unlink(entry.slot, frame | u64::from(entry.offset));
+        }
         entries.clear();
         entries.shrink_to(KEPT_ENTRIES);
         self.free.push(page);
@@ -202,6 +235,7 @@ impl BlockIndex {
     }
 
     pub(super) fn clear(&mut self) {
+        self.finder.clear();
         self.pages.clear();
         self.entries.clear();
         self.free.clear();
@@ -238,10 +272,6 @@ impl BlockIndex {
             + self.pages.len() * 2 * size_of::<(u64, u32)>()
     }
 
-    pub(super) fn pages(&self) -> usize {
-        self.pages.len()
-    }
-
     /// The physical pages that have indexed blocks.
     pub(super) fn frames(&self) -> impl Iterator<Item = u64> + '_ {
         self.pages.keys().copied()
@@ -258,9 +288,142 @@ impl BlockIndex {
     }
 }
 
+/// The most list entries [`Finder::find`] walks before it leaves the
+/// answer to the locked index.
+const FIND_STEPS: usize = 32;
+
+/// The index's blocks by physical address, read without the board's lock:
+/// each bucket heads a list of slots (stored plus one, 0 ends it) chained
+/// through `next`. Only the index's writer, under the lock, pushes a slot
+/// at its bucket's head or unlinks one; an unlinked slot keeps its `next`,
+/// so a reader standing on it goes on along its old list. A slot is taken
+/// again only after its grace ([`super::board::Slots`]), so a reader inside
+/// its section never sees a slot it stands on join another list.
+pub(super) struct Finder {
+    heads: Box<[AtomicU32]>,
+    next: Records<AtomicU32>,
+    /// A slot had no room for its link: reads go to the locked index.
+    partial: AtomicBool,
+    /// The index's pages, for counts read without the lock.
+    pages: AtomicUsize,
+}
+
+impl Finder {
+    /// Buckets for up to `slots` block slots: one per 16 slots, at least
+    /// 2^10 and at most 2^20 (4 MiB).
+    pub(super) fn new(slots: u32) -> Self {
+        let buckets = (slots as usize / 16)
+            .next_power_of_two()
+            .clamp(1 << 10, 1 << 20);
+        let zeroed = vec![0u32; buckets].into_boxed_slice();
+        // SAFETY: AtomicU32 has the size, alignment and bit validity of u32.
+        let heads = unsafe { Box::from_raw(Box::into_raw(zeroed) as *mut [AtomicU32]) };
+        Self {
+            heads,
+            next: Records::new(slots),
+            partial: AtomicBool::new(false),
+            pages: AtomicUsize::new(0),
+        }
+    }
+
+    fn bucket(&self, physical: u64) -> &AtomicU32 {
+        let hash = (physical >> 2).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        &self.heads[(hash >> 32) as usize & (self.heads.len() - 1)]
+    }
+
+    /// The pages the index holds.
+    pub(super) fn pages(&self) -> usize {
+        self.pages.load(Ordering::Relaxed)
+    }
+
+    /// The block at `pc`, `physical` and `variant` among `blocks`, or
+    /// `None` when the lists cannot say (the locked index can). A reader
+    /// inside its section, or holding the lock.
+    pub(super) fn find(
+        &self,
+        blocks: &super::board::Blocks,
+        pc: u64,
+        physical: u64,
+        variant: VariantId,
+    ) -> Option<Option<usize>> {
+        if self.partial.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut link = self.bucket(physical).load(Ordering::Acquire);
+        for _ in 0..FIND_STEPS {
+            let Some(slot) = link.checked_sub(1) else {
+                return Some(None);
+            };
+            let found = blocks.get(slot as usize).is_some_and(|block| {
+                block.physical == physical && block.pc == pc && block.variant == variant
+            });
+            if found && blocks.record(slot as usize).live() {
+                return Some(Some(slot as usize));
+            }
+            link = self.next.get(slot)?.load(Ordering::Acquire);
+        }
+        None
+    }
+
+    /// Put `slot` at the head of its bucket's list, unless it is listed.
+    fn link(&self, slot: u32, physical: u64) {
+        let bucket = self.bucket(physical);
+        if self.listed(bucket, slot) {
+            return;
+        }
+        let Some(next) = self.next.try_reserve(slot) else {
+            self.partial.store(true, Ordering::Relaxed);
+            return;
+        };
+        next.store(bucket.load(Ordering::Relaxed), Ordering::Relaxed);
+        bucket.store(slot + 1, Ordering::Release);
+    }
+
+    fn listed(&self, bucket: &AtomicU32, slot: u32) -> bool {
+        let mut link = bucket.load(Ordering::Relaxed);
+        while let Some(at) = link.checked_sub(1) {
+            if at == slot {
+                return true;
+            }
+            link = self
+                .next
+                .get(at)
+                .map_or(0, |next| next.load(Ordering::Relaxed));
+        }
+        false
+    }
+
+    /// Take `slot` out of its bucket's list; it keeps its `next`.
+    fn unlink(&self, slot: u32, physical: u64) {
+        let mut at = self.bucket(physical);
+        loop {
+            let link = at.load(Ordering::Relaxed);
+            let Some(held) = link.checked_sub(1) else {
+                return;
+            };
+            let Some(next) = self.next.get(held) else {
+                return;
+            };
+            if held == slot {
+                at.store(next.load(Ordering::Relaxed), Ordering::Release);
+                return;
+            }
+            at = next;
+        }
+    }
+
+    /// Empty every list.
+    fn clear(&self) {
+        for head in &self.heads {
+            head.store(0, Ordering::Release);
+        }
+        self.pages.store(0, Ordering::Relaxed);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::{NativeCode, table::Table};
+    use super::super::NativeCode;
     use super::*;
 
     fn block(pc: u64, physical: u64, variant: u32) -> Block {
@@ -280,8 +443,13 @@ mod tests {
         }
     }
 
-    fn add(blocks: &mut Table<Block>, index: &mut BlockIndex, block: Block) -> usize {
-        let slot = blocks.push(block);
+    fn push(blocks: &mut Vec<Block>, block: Block) -> usize {
+        blocks.push(block);
+        blocks.len() - 1
+    }
+
+    fn add(blocks: &mut Vec<Block>, index: &mut BlockIndex, block: Block) -> usize {
+        let slot = push(blocks, block);
         assert_eq!(index.insert(blocks, slot), None);
         slot
     }
@@ -289,7 +457,7 @@ mod tests {
     #[test]
     fn a_page_finds_its_blocks_by_every_part_of_their_key() {
         const PAGE: u64 = 0x8000_0000;
-        let mut blocks = Table::new();
+        let mut blocks = Vec::new();
         let mut index = BlockIndex::new();
         let late = add(&mut blocks, &mut index, block(0x1040, PAGE + 0x40, 0));
         let early = add(&mut blocks, &mut index, block(0x1010, PAGE + 0x10, 0));
@@ -309,7 +477,7 @@ mod tests {
         assert_eq!(index.get(&blocks, 0x1010, PAGE + 0x10, id(2)), None);
 
         // A recompilation of a key takes its place.
-        let again = blocks.push(block(0x1040, PAGE + 0x40, 0));
+        let again = push(&mut blocks, block(0x1040, PAGE + 0x40, 0));
         assert_eq!(index.insert(&blocks, again), Some(late));
         assert_eq!(index.get(&blocks, 0x1040, PAGE + 0x40, id(0)), Some(again));
         assert_eq!(index.sweep(None).count(), 5);
@@ -342,7 +510,7 @@ mod tests {
     #[test]
     fn marked_blocks_leave_their_page_in_one_pass() {
         const PAGE: u64 = 0x8000_0000;
-        let mut blocks = Table::new();
+        let mut blocks = Vec::new();
         let mut index = BlockIndex::new();
         let slots: Vec<usize> = [0x10, 0x20, 0x30]
             .iter()

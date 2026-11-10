@@ -994,8 +994,9 @@ impl Heartbeat {
 /// The board's shared code since `was`, for `PES CODE`: the window in MiB,
 /// its parts and the ring's generation; parts taken away (`retired`), of
 /// them for want of a block slot (`forced`); installs that lost to another
-/// PE's (`lost`); waits for a part's grace and those that ran out; and the
-/// code lock's acquisitions, those that found it held, the microseconds
+/// PE's (`lost`); waits for a part's grace and those that ran out; the
+/// longest whole retirement since (lock-held microseconds of its steps, and
+/// how many); and the code lock's acquisitions, those that found it held, the microseconds
 /// they waited and the longest wait.
 fn board_code(
     now: &stela_engine::machine::engine::CodeReport,
@@ -1019,6 +1020,7 @@ fn board_code(
     }
     format!(
         " board={}M/{}/{} retired={} forced={} lost={} grace_waits={}/{} \
+         retire_longest=us/steps:{}/{} \
          lock=acquired/contended/waited_us/longest_us:{}/{}/{}/{}{sites}",
         now.window >> 20,
         now.parts,
@@ -1028,6 +1030,8 @@ fn board_code(
         now.lost.saturating_sub(was.lost),
         now.grace_waits.saturating_sub(was.grace_waits),
         now.overdue.saturating_sub(was.overdue),
+        micros(now.retire_ticks),
+        now.retire_steps,
         now.lock.acquired.saturating_sub(was.lock.acquired),
         now.lock.contended.saturating_sub(was.lock.contended),
         micros(now.lock.waited.saturating_sub(was.lock.waited)),

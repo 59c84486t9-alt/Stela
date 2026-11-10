@@ -425,7 +425,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // Another PE may link or detach it meanwhile: found again under the
         // lock, for a block still installed.
         let mut cache = code.cache_at(board::LockSite::Link);
-        let Some(position) = find().filter(|_| record.live()) else {
+        // Only an indexed block links out: a detach finds the sources of
+        // its links among the indexed blocks of the target's page, so a
+        // link from a block an IC IVAU forgot would outlive its target.
+        let indexed = cache
+            .index
+            .get(&code.blocks, block.pc, block.physical, block.variant)
+            == Some(index);
+        let Some(position) = find().filter(|_| indexed) else {
             return false;
         };
         let retired = u32::from(block.instructions) - u32::from(word.skipped);

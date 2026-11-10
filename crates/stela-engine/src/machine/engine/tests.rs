@@ -62,8 +62,8 @@ pub(super) fn native_fault_site_in_entry<D: Devices>(
     };
     let rows = machine
         .code
-        .cache()
-        .recovery
+        .blocks
+        .recovery()
         .get(&index)
         .unwrap()
         .test_portable_rows();
@@ -91,8 +91,8 @@ pub(super) fn native_check_site<D: Devices>(
     };
     let rows = machine
         .code
-        .cache()
-        .recovery
+        .blocks
+        .recovery()
         .get(&index)
         .unwrap()
         .test_portable_rows();
@@ -426,8 +426,8 @@ pub(super) fn make_pending<D: Devices>(
     ));
     machine
         .code
-        .cache()
-        .recovery
+        .blocks
+        .recovery()
         .get_mut(&index)
         .unwrap()
         .test_make_pending(template);
@@ -1455,8 +1455,8 @@ fn unavailable_extended_fault_state_cannot_partially_recover_or_retire() {
     // no test-only constructor invents a guest site at internal code.
     let offset = machine
         .code
-        .cache()
-        .recovery
+        .blocks
+        .recovery()
         .get_mut(&index)
         .unwrap()
         .test_edit_rows(|rows| {
@@ -2460,14 +2460,14 @@ fn finishing_and_pressure_return_block_table_storage() {
         ));
         let capacities = (
             machine.code.blocks.capacity(),
-            machine.code.cache().recovery.capacity(),
+            machine.code.blocks.recovery().capacity(),
         );
         assert!(capacities.0 > 0 && capacities.1 > 0);
         machine.discard_code(Discard::Maintenance);
         assert_eq!(
             (
                 machine.code.blocks.capacity(),
-                machine.code.cache().recovery.capacity()
+                machine.code.blocks.recovery().capacity()
             ),
             capacities,
         );
@@ -2477,7 +2477,7 @@ fn finishing_and_pressure_return_block_table_storage() {
         ));
         machine.discard_code(cause);
         assert_eq!(machine.code.blocks.capacity(), 0);
-        assert_eq!(machine.code.cache().recovery.capacity(), 0);
+        assert_eq!(machine.code.blocks.recovery().capacity(), 0);
         assert!(matches!(
             machine.fetch_block(base, false),
             Ok(Fetched::Block(0))
@@ -2494,7 +2494,7 @@ fn pressure_reclaims_before_reading_new_compile_input() {
     machine.host.memory_low = true;
     machine.host.require_empty_code_on_read = true;
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-    assert_eq!(machine.code.cache().recovery.len(), 1);
+    assert_eq!(machine.code.blocks.recovery().len(), 1);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
 }
 
@@ -2508,7 +2508,7 @@ fn pressure_reclaims_metadata_when_the_next_arena_part_is_empty() {
     let old_generation = machine.code_generation;
     machine.host.memory_low = true;
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-    assert_eq!(machine.code.cache().recovery.len(), 1);
+    assert_eq!(machine.code.blocks.recovery().len(), 1);
     assert!(
         !(machine.code.cache().index.sweep(None))
             .any(|(_, slot)| machine.code.blocks[slot].pc == base)
@@ -2523,7 +2523,7 @@ fn pressure_reclaims_metadata_when_the_next_arena_part_is_empty() {
     );
     // Continued foreign pressure must not permit unbounded local growth.
     assert!(machine.fetch_block(base + 2 * FETCH_PAGE, false).is_ok());
-    assert_eq!(machine.code.cache().recovery.len(), 1);
+    assert_eq!(machine.code.blocks.recovery().len(), 1);
     assert_eq!(machine.code.cache().index.len(), 1);
 }
 
@@ -2560,7 +2560,7 @@ fn pressure_releases_the_oldest_arena_part_and_keeps_newer_code() {
     left.sort_unstable();
     assert_eq!(left, [page(2), page(3)]);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
-    assert_eq!(machine.code.cache().recovery.len(), 2);
+    assert_eq!(machine.code.blocks.recovery().len(), 2);
 }
 
 #[test]

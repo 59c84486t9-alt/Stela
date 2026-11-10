@@ -23,10 +23,13 @@
 //! once per run-loop iteration.
 
 use super::{
-    Block, CodePartitions, CodeWindow, block_index::BlockIndex, code_slots::CodeSlots, recovery,
+    Block, CodePartitions, CodeWindow, VariantId,
+    block_index::{BlockIndex, Finder},
+    code_slots::CodeSlots,
+    recovery::CodeRecovery,
 };
 use crate::platform::sync::{Mutex, MutexGuard};
-use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{
     AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
@@ -159,12 +162,43 @@ pub(super) struct Code {
     pub(super) cache: Mutex<Cache>,
     /// The block table's entries, for reads without the lock.
     pub(super) table: TableReader,
+    /// The block index's blocks, for reads without the lock.
+    pub(super) finder: Arc<Finder>,
     /// The code arena, when the engine allocates code itself.
     pub(super) arena: Option<Arena>,
     /// Advances when the board's machines forget every block at once
     /// (`Machine::forget_shared_code`): what jump cache entries name.
     pub(super) epoch: AtomicU64,
     pub(super) events: Events,
+    /// The part being taken away, in steps any PE's install takes
+    /// ([`Retirement`]), and whether there is one, read without its lock.
+    pub(super) retiring: Mutex<Option<Retirement>>,
+    pub(super) retire_pending: AtomicBool,
+}
+
+/// A part's blocks being taken away, a few pages per step, each step one
+/// hold of the code lock: the ring's [`Advance::Retire`] leaves a whole
+/// part's installs before the part is needed, so PEs take the steps as
+/// they install ([`super::Machine::retire_steps`]) and none stalls for all
+/// of it. Until its last step its blocks not yet taken stay whole and
+/// reachable; their code stays until the part's grace.
+pub(super) struct Retirement {
+    /// The ring generation, or none for a host's reclaim.
+    pub(super) generation: Option<u32>,
+    pub(super) range: core::ops::Range<usize>,
+    /// The blocks, by page then slot: a page's blocks go in one step, so
+    /// each page's index list and table sets are walked once.
+    pub(super) slots: Vec<(u64, u32)>,
+    /// The first of `slots` not taken yet.
+    pub(super) next: usize,
+    /// Where the release of the range's cells goes on, once the blocks went.
+    pub(super) cells: Option<u64>,
+    /// TSC ticks of its steps, and how many.
+    pub(super) ticks: u64,
+    pub(super) steps: u64,
+    /// Blocks and index entries its steps visited, and the most in a step.
+    pub(super) visits: u64,
+    pub(super) step_visits: u64,
 }
 
 /// The parts an [`Arena`] is cut into: what one retirement takes away.
@@ -249,13 +283,13 @@ impl Arena {
     }
 }
 
-/// What a board's code changes under its lock: the block index, the block
-/// table (whose entries native probes read without it), the blocks' fault
-/// recovery and the blocks of each arena part.
+/// What a board's code changes under its lock: the block index (whose
+/// [`Finder`] fetches read without it), the block table (whose entries
+/// native probes read without it) and the blocks of each arena part. A
+/// block's fault recovery is its record's ([`Record::recovery`]).
 pub(super) struct Cache {
     pub(super) index: BlockIndex,
     pub(super) targets: LookupTable,
-    pub(super) recovery: recovery::Owners,
     pub(super) code_slots: CodeSlots,
     /// The blocks of a page being detached, kept for its capacity.
     pub(super) page_blocks: Vec<usize>,
@@ -308,16 +342,20 @@ pub enum LockSite {
     Link,
     /// A dynamic exit's lookup tail.
     Dynamic,
-    /// A part's or a reclaim's eviction.
+    /// A part's or a reclaim's eviction, one bounded step at a time.
     Evict,
     /// An IC IVAU's forget.
     Invalidate,
-    /// Everything else.
+    /// A discard of every block, or its census, in bounded steps.
+    Discard,
+    /// The heartbeat's figures and the stale code sweep, in bounded steps.
+    Report,
+    /// Everything else: rare (a hub's start, a failure report).
     Other,
 }
 
 impl LockSite {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Fetch,
         Self::Install,
         Self::Target,
@@ -325,6 +363,8 @@ impl LockSite {
         Self::Dynamic,
         Self::Evict,
         Self::Invalidate,
+        Self::Discard,
+        Self::Report,
         Self::Other,
     ];
 
@@ -337,6 +377,8 @@ impl LockSite {
             Self::Dynamic => "dynamic",
             Self::Evict => "evict",
             Self::Invalidate => "invalidate",
+            Self::Discard => "discard",
+            Self::Report => "report",
             Self::Other => "other",
         }
     }
@@ -386,6 +428,10 @@ pub struct CodeReport {
     /// Waits for a part's grace, and those that ran out.
     pub grace_waits: u64,
     pub overdue: u64,
+    /// The longest whole retirement since the last report: TSC ticks of
+    /// its steps, and how many.
+    pub retire_ticks: u64,
+    pub retire_steps: u64,
     pub lock: LockCounts,
 }
 
@@ -397,16 +443,38 @@ pub(super) struct Events {
     pub(super) lost: AtomicU64,
     pub(super) grace_waits: AtomicU64,
     pub(super) overdue: AtomicU64,
+    /// The longest whole retirement since the last report: the TSC ticks
+    /// of its steps, and how many.
+    pub(super) retire_ticks: AtomicU64,
+    pub(super) retire_steps: AtomicU64,
+    /// The last retirement's visits and most in one step, for tests.
+    pub(super) retire_visits: AtomicU64,
+    pub(super) retire_step_visits: AtomicU64,
 }
 
 impl Events {
     pub(super) fn count(counter: &AtomicU64) {
         counter.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// A retirement ended.
+    pub(super) fn retired(&self, retirement: &Retirement) {
+        if self
+            .retire_ticks
+            .fetch_max(retirement.ticks, Ordering::Relaxed)
+            < retirement.ticks
+        {
+            self.retire_steps.store(retirement.steps, Ordering::Relaxed);
+        }
+        self.retire_visits
+            .store(retirement.visits, Ordering::Relaxed);
+        self.retire_step_visits
+            .store(retirement.step_visits, Ordering::Relaxed);
+    }
 }
 
 /// A timestamp for lock waits: the TSC, which every PE of a board shares.
-fn timestamp() -> u64 {
+pub(super) fn timestamp() -> u64 {
     #[cfg(target_arch = "x86_64")]
     {
         // SAFETY: RDTSC has no effect beyond reading the counter.
@@ -436,11 +504,10 @@ pub(super) fn slot_capacity(code_bytes: Option<usize>) -> u32 {
 }
 
 impl Cache {
-    fn new(targets: LookupTable) -> Self {
+    fn new(targets: LookupTable, finder: Arc<Finder>) -> Self {
         Self {
-            index: BlockIndex::new(),
+            index: BlockIndex::with_finder(finder),
             targets,
-            recovery: recovery::Owners::new(),
             code_slots: CodeSlots::default(),
             page_blocks: Vec::new(),
             marked: Vec::new(),
@@ -456,17 +523,22 @@ impl Code {
     /// (`chain::lookup_entries`).
     pub(super) fn new(slots: u32, entries: usize, window: Option<CodeWindow>) -> Self {
         let targets = LookupTable::with_entries(entries);
+        let finder = Arc::new(Finder::new(slots));
         Self {
             blocks: Blocks::new(slots),
             table: targets.reader(),
-            cache: Mutex::new(Cache::new(targets)),
+            finder: Arc::clone(&finder),
+            cache: Mutex::new(Cache::new(targets, finder)),
             arena: window.map(Arena::new),
             epoch: AtomicU64::new(0),
             events: Events::default(),
+            retiring: Mutex::new(None),
+            retire_pending: AtomicBool::new(false),
         }
     }
 
     /// The board's code lock, counted ([`LockCounts`]) as [`LockSite::Other`].
+    #[cfg(test)]
     pub(super) fn cache(&self) -> CacheGuard<'_> {
         self.cache_at(LockSite::Other)
     }
@@ -501,10 +573,28 @@ impl Code {
         }
     }
 
+    /// The indexed block at `pc`, `physical` and `variant`: from the
+    /// [`Finder`] without the lock, which a caller inside its section may
+    /// read, or under it when the finder cannot say.
+    pub(super) fn find(&self, pc: u64, physical: u64, variant: VariantId) -> Option<usize> {
+        match self.finder.find(&self.blocks, pc, physical, variant) {
+            Some(found) => found,
+            None => self
+                .cache_at(LockSite::Fetch)
+                .index
+                .get(&self.blocks, pc, physical, variant),
+        }
+    }
+
+    /// The pages the block index holds, without the lock.
+    pub(super) fn indexed_pages(&self) -> usize {
+        self.finder.pages()
+    }
+
     /// What the board's code came to; the lock's longest wait starts over.
     pub(super) fn report(&self) -> CodeReport {
         let lock = {
-            let mut cache = self.cache();
+            let mut cache = self.cache_at(LockSite::Report);
             let lock = cache.lock;
             cache.lock.longest = 0;
             for site in &mut cache.lock.sites {
@@ -528,6 +618,8 @@ impl Code {
             lost: count(&self.events.lost),
             grace_waits: count(&self.events.grace_waits),
             overdue: count(&self.events.overdue),
+            retire_ticks: self.events.retire_ticks.swap(0, Ordering::Relaxed),
+            retire_steps: self.events.retire_steps.swap(0, Ordering::Relaxed),
             lock,
         }
     }
@@ -535,21 +627,21 @@ impl Code {
     /// Forget every block: for a board no other machine holds.
     pub(super) fn clear(&mut self, free: bool) {
         self.blocks.clear(free);
+        *self
+            .retiring
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        *self.retire_pending.get_mut() = false;
         // The ring starts over: no other machine runs this board's code.
         if let Some(arena) = &mut self.arena {
             *arena = Arena::new(arena.window);
         }
-        let mut cache = self.cache();
+        let mut cache = self.cache_at(LockSite::Discard);
         cache.targets.release_cells(0..=u64::MAX);
         cache.targets.clear();
         cache.index.clear();
         cache.code_slots = CodeSlots::default();
         cache.dispatchers.clear();
-        if free {
-            cache.recovery = recovery::Owners::new();
-        } else {
-            cache.recovery.clear();
-        }
     }
 }
 
@@ -560,7 +652,6 @@ impl Code {
 /// have read the slot's number has left its section ([`Grace`]): so any PE
 /// inside its section reads it without a lock. The rest are atomics any PE
 /// changes under the board's lock and reads without it.
-#[derive(Default)]
 pub(super) struct Record {
     block: UnsafeCell<Option<Block>>,
     /// Advances each time the slot takes a block: a slot number held with
@@ -581,6 +672,99 @@ pub(super) struct Record {
     dynamic: AtomicBool,
     /// Its install lost to another PE's of the same block: never reachable.
     lost: AtomicBool,
+    /// Its fault recovery rows, under a lock of their own: a PE faulting
+    /// in the block reads them, its first fault may qualify them. They stay
+    /// after the block retires until the slot takes its next block, as a
+    /// PE still inside its section may fault in it.
+    recovery: Mutex<Option<CodeRecovery>>,
+}
+
+impl Default for Record {
+    fn default() -> Self {
+        Self {
+            block: UnsafeCell::new(None),
+            incarnation: AtomicU32::new(0),
+            live: AtomicBool::new(false),
+            taken: AtomicU32::new(0),
+            linked: AtomicU64::new(0),
+            settled: AtomicU64::new(0),
+            used: AtomicU64::new(0),
+            dynamic: AtomicBool::new(false),
+            lost: AtomicBool::new(false),
+            recovery: Mutex::new(None),
+        }
+    }
+}
+
+/// A block slot's fault recovery that a caller found there.
+pub(super) struct Owner<'a>(MutexGuard<'a, Option<CodeRecovery>>);
+
+impl core::ops::Deref for Owner<'_> {
+    type Target = CodeRecovery;
+    fn deref(&self) -> &CodeRecovery {
+        self.0.as_ref().expect("an owner found present")
+    }
+}
+
+impl core::ops::DerefMut for Owner<'_> {
+    fn deref_mut(&mut self) -> &mut CodeRecovery {
+        self.0.as_mut().expect("an owner found present")
+    }
+}
+
+/// The blocks' fault recovery, by slot, each under its record's lock.
+pub(super) struct Recoveries<'a>(&'a Blocks);
+
+impl Recoveries<'_> {
+    fn lock(&self, slot: usize) -> Option<MutexGuard<'_, Option<CodeRecovery>>> {
+        let record = self.0.records.get(u32::try_from(slot).ok()?)?;
+        Some(
+            record
+                .recovery
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        )
+    }
+
+    /// `slot`'s rows, held, if it has them.
+    pub(super) fn get(&self, slot: &usize) -> Option<Owner<'_>> {
+        self.lock(*slot).filter(|held| held.is_some()).map(Owner)
+    }
+
+    /// As [`Self::get`]: the guard lets the caller change them.
+    pub(super) fn get_mut(&self, slot: &usize) -> Option<Owner<'_>> {
+        self.get(slot)
+    }
+
+    /// `slot`'s rows, which its record holds once it was taken.
+    pub(super) fn insert(&self, slot: usize, owner: CodeRecovery) {
+        *self.lock(slot).expect("a slot that was given") = Some(owner);
+    }
+
+    pub(super) fn remove(&self, slot: &usize) -> Option<CodeRecovery> {
+        self.lock(*slot)?.take()
+    }
+
+    /// The heap bytes the rows hold beyond their records.
+    pub(super) fn heap_bytes(&self) -> usize {
+        (0..self.0.len())
+            .filter_map(|slot| self.get(&slot).map(|owner| owner.heap_bytes()))
+            .sum()
+    }
+
+    /// Slots holding rows.
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        (0..self.0.len())
+            .filter(|slot| self.get(slot).is_some())
+            .count()
+    }
+
+    /// The slots whose records have room for rows.
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 // SAFETY: the block is written only by its slot's taker before the slot is
@@ -688,6 +872,11 @@ impl Blocks {
         self.records
             .get(slot as u32)
             .expect("a slot that was given")
+    }
+
+    /// The blocks' fault recovery, each under its slot's lock.
+    pub(super) fn recovery(&self) -> Recoveries<'_> {
+        Recoveries(self)
     }
 
     /// `slot`'s block, if it ever held one.

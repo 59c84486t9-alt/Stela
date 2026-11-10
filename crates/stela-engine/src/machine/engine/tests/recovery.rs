@@ -17,8 +17,8 @@ fn fixture() -> (Machine<FakeHost, NoDevices>, usize, usize) {
     };
     let offset = machine
         .code
-        .cache()
-        .recovery
+        .blocks
+        .recovery()
         .get_mut(&index)
         .unwrap()
         .test_rows()
@@ -109,14 +109,14 @@ fn host_fetch_page_table_and_protection_faults_never_project_as_guest_access() {
 fn portable_guest_tag_on_internal_frame_cannot_mint_projection_permission() {
     let (mut machine, index, _) = fixture();
     make_pending(&mut machine, index, &input());
-    let mut cache = machine.code.cache();
-    let owner = cache.recovery.get_mut(&index).unwrap();
+    let recovery = machine.code.blocks.recovery();
+    let mut owner = recovery.get_mut(&index).unwrap();
     let mut forged = owner.test_pending_rows_mut()[0].clone();
     forged.start = 0;
     forged.end = 1;
     forged.site = RecoverySiteKind::GuestAccess;
     owner.test_push_pending(forged);
-    drop(cache);
+    drop(owner);
     terminal(
         machine,
         index,
@@ -128,15 +128,15 @@ fn portable_guest_tag_on_internal_frame_cannot_mint_projection_permission() {
 fn portable_missing_guest_tag_is_refused_instead_of_falling_back_to_source_map() {
     let (mut machine, index, offset) = fixture();
     make_pending(&mut machine, index, &input());
-    let mut cache = machine.code.cache();
-    let owner = cache.recovery.get_mut(&index).unwrap();
+    let recovery = machine.code.blocks.recovery();
+    let mut owner = recovery.get_mut(&index).unwrap();
     owner
         .test_pending_rows_mut()
         .iter_mut()
         .find(|row| row.start == offset)
         .unwrap()
         .site = RecoverySiteKind::NativeInternal;
-    drop(cache);
+    drop(owner);
     terminal(
         machine,
         index,
@@ -191,8 +191,8 @@ fn chained_load_case(branch: u32, btype: u8, landing_pad: bool) {
     let operand_pc = target_pc + u64::from(landing_pad) * INSTRUCTION;
     let row = machine
         .code
-        .cache()
-        .recovery
+        .blocks
+        .recovery()
         .get_mut(&target)
         .unwrap()
         .test_rows()
@@ -263,8 +263,8 @@ fn load_before_native_terminal_adapters_keeps_checked_fault_plan() {
         };
         let offset = machine
             .code
-            .cache()
-            .recovery
+            .blocks
+            .recovery()
             .get_mut(&index)
             .unwrap()
             .test_rows()
@@ -285,14 +285,14 @@ fn translated_fixture() -> (Machine<FakeHost, NoDevices>, usize, usize) {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("translated emission");
     };
-    let mut cache = machine.code.cache();
-    let owner = cache.recovery.get_mut(&index).unwrap();
+    let recovery = machine.code.blocks.recovery();
+    let owner = recovery.get_mut(&index).unwrap();
     let row = owner
         .test_rows()
         .into_iter()
         .find(|row| row.site.kind() == RecoverySiteKind::TranslatedHelper)
         .unwrap();
-    drop(cache);
+    drop(owner);
     let offset = row.start;
     let access = row.site.translated_access().unwrap();
     assert_eq!(

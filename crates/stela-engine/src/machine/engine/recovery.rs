@@ -1,6 +1,6 @@
 //! Invocation-kept source/profile and installed native recovery owners.
 use super::stored::Emission;
-use super::{NativeCode, NativeFault, Preparation, table::Table};
+use super::{NativeCode, NativeFault, Preparation};
 use crate::translations::{Digest, Entry, Record, Relocated};
 use alloc::sync::Arc;
 #[cfg(test)]
@@ -66,72 +66,6 @@ enum Rows {
 #[cfg(not(test))]
 const _: () = assert!(core::mem::size_of::<Option<CodeRecovery>>() <= 24);
 
-/// The installed blocks' recovery owners, by block slot.
-pub(super) struct Owners {
-    slots: Table<Option<CodeRecovery>>,
-}
-
-impl Owners {
-    /// The heap bytes its table and its owners' rows hold.
-    pub(super) fn heap_bytes(&self) -> (usize, usize) {
-        let rows = self
-            .slots
-            .iter()
-            .flatten()
-            .map(|owner| match &owner.rows {
-                Rows::Qualified { rows, .. } => rows.heap_bytes(),
-                _ => 0,
-            })
-            .sum();
-        (self.slots.heap_bytes(), rows)
-    }
-
-    pub(super) const fn new() -> Self {
-        Self {
-            slots: Table::new(),
-        }
-    }
-
-    pub(super) fn get(&self, slot: &usize) -> Option<&CodeRecovery> {
-        (*slot < self.slots.len())
-            .then(|| self.slots[*slot].as_ref())
-            .flatten()
-    }
-
-    pub(super) fn get_mut(&mut self, slot: &usize) -> Option<&mut CodeRecovery> {
-        (*slot < self.slots.len())
-            .then(|| self.slots[*slot].as_mut())
-            .flatten()
-    }
-
-    pub(super) fn insert(&mut self, slot: usize, owner: CodeRecovery) {
-        while self.slots.len() <= slot {
-            self.slots.push(None);
-        }
-        self.slots[slot] = Some(owner);
-    }
-
-    pub(super) fn remove(&mut self, slot: &usize) -> Option<CodeRecovery> {
-        (*slot < self.slots.len())
-            .then(|| self.slots[*slot].take())
-            .flatten()
-    }
-
-    pub(super) fn clear(&mut self) {
-        self.slots.clear();
-    }
-
-    #[cfg(test)]
-    pub(super) fn len(&self) -> usize {
-        self.slots.iter().flatten().count()
-    }
-
-    #[cfg(test)]
-    pub(super) fn capacity(&self) -> usize {
-        self.slots.capacity()
-    }
-}
-
 /// A terminal native implementation failure. Captured data and code owners stay
 /// on the stopped Machine; a caller cannot resume a partially committed frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,8 +80,11 @@ pub struct NativeFailure {
     pub unsettled_chain: Option<UnsettledChain>,
     pub reason: NativeFailureReason,
     /// Where the last block it ran stood on the board, when the failure
-    /// is that its code is unknown.
+    /// is that its code is unknown or the fault lies outside its code.
     pub board: Option<BoardSlot>,
+    /// For a fault outside the last block's code: the slot whose block's
+    /// code holds the faulting host address, if any does now.
+    pub owner: Option<BoardSlot>,
 }
 
 /// The board's state of a block a native failure ran: its slot and
@@ -164,6 +101,9 @@ pub struct BoardSlot {
     pub lost: bool,
     pub installer: u8,
     pub rows: bool,
+    /// Its block's code address and the bytes its rows cover.
+    pub code: u64,
+    pub code_bytes: u64,
     pub part: Option<usize>,
     pub generation: u32,
     pub retired_through: u32,
@@ -308,6 +248,14 @@ impl CodeRecovery {
     /// The installed code's length.
     pub(super) fn code_bytes(&self) -> usize {
         self.rows.code_bytes() as usize
+    }
+
+    /// The heap bytes its rows hold.
+    pub(super) fn heap_bytes(&self) -> usize {
+        match &self.rows {
+            Rows::Qualified { rows, .. } => rows.heap_bytes(),
+            _ => 0,
+        }
     }
 
     /// Make the owner a stored record's: `template`'s, whose rows are this

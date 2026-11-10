@@ -23,6 +23,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     retired_before: capture.retired,
                 },
                 board: None,
+                owner: None,
             });
             self.native_failure = Some(recovery::CapturedFailure {
                 summary,
@@ -45,6 +46,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
     ) -> Stop {
         let block = self.code.blocks.get(index);
         let (last_block, reported_retired, lookup_hits, direct_links) = self.chain.completed();
+        let board = matches!(
+            reason,
+            NativeFailureReason::UnknownCode | NativeFailureReason::CodeExtent
+        );
+        // The faulting host address is relative to the block `index`.
+        let owner = (reason == NativeFailureReason::CodeExtent)
+            .then(|| block.map(|block| block.code.0.wrapping_add(fault.offset)))
+            .flatten()
+            .and_then(|address| self.code_owner(address))
+            .map(|slot| self.board_slot(slot));
         let failure = Arc::new(NativeFailure {
             pc: block.map_or(self.cpu.pc, |block| block.pc),
             code: block.map(|block| block.code),
@@ -59,8 +70,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 lookup_hits,
                 direct_links,
             }),
-            board: (reason == NativeFailureReason::UnknownCode)
-                .then(|| self.board_slot(last_block as u32 as usize)),
+            board: board.then(|| self.board_slot(last_block as u32 as usize)),
+            owner,
             reason,
         });
         self.native_failure = Some(recovery::CapturedFailure {
@@ -68,6 +79,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
             capture: fault,
         });
         Stop::NativeFailure(failure)
+    }
+
+    /// The slot whose block's code holds host `address`, a live one first:
+    /// a walk of every slot, for a failure report.
+    fn code_owner(&self, address: usize) -> Option<usize> {
+        let blocks = &self.code.blocks;
+        let recovery = blocks.recovery();
+        let holds = |slot: usize| {
+            let block = blocks.get(slot)?;
+            let bytes = recovery.get(&slot).map_or(1, |owner| owner.code_bytes());
+            (block.code.0..block.code.0 + bytes.max(1))
+                .contains(&address)
+                .then_some(slot)
+        };
+        let mut found = None;
+        for slot in 0..blocks.len() {
+            if let Some(slot) = holds(slot) {
+                if blocks.record(slot).live() {
+                    return Some(slot);
+                }
+                found.get_or_insert(slot);
+            }
+        }
+        found
     }
 
     /// Where `slot` stands on the board, for a failure report.
@@ -81,6 +116,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Some(offset / arena.part_bytes)
         });
         let ring = code.arena.as_ref().map(|arena| &arena.ring);
+        // Read once: a second guard of the slot's rows in one expression
+        // would wait on the first.
+        let rows = code
+            .blocks
+            .recovery()
+            .get(&slot)
+            .map(|owner| owner.code_bytes());
         recovery::BoardSlot {
             slot: slot as u64,
             held: block.is_some(),
@@ -88,7 +130,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             incarnation: record.map_or(0, board::Record::incarnation),
             lost: record.is_some_and(board::Record::lost),
             installer: block.map_or(u8::MAX, |block| block.installer),
-            rows: code.cache().recovery.get(&slot).is_some(),
+            rows: rows.is_some(),
+            code: block.map_or(0, |block| block.code.0 as u64),
+            code_bytes: rows.unwrap_or(0) as u64,
             part,
             generation: ring.map_or(0, board::Ring::generation),
             retired_through: ring
@@ -113,33 +157,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
         let (entry_pc, physical, source_bytes) = (block.pc, block.physical, block.source_bytes());
+        // The rows are the block's, under its record's lock: no board lock.
         let shared = Arc::clone(&self.code);
-        let mut cache = shared.cache();
-        let Some(owner) = cache.recovery.get(&index) else {
-            drop(cache);
+        let recovery = shared.blocks.recovery();
+        let Some(owner) = recovery.get(&index) else {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
         if fault.offset >= owner.code_bytes() {
-            drop(cache);
+            drop(owner);
             return Err(self.fail_native(index, fault, NativeFailureReason::CodeExtent));
         }
         let key = owner.stored_key();
-        // The stored record is read outside the board's lock.
-        drop(cache);
+        // The stored record is read outside the rows' lock.
+        drop(owner);
         let record = key.and_then(|key| self.stored_record(physical, &key));
-        cache = shared.cache();
-        let qualified = match cache.recovery.get_mut(&index) {
+        let mut owner = recovery.get_mut(&index);
+        let qualified = match owner.as_deref_mut() {
             Some(owner) => owner.qualify(entry_pc, record.as_deref()),
             None => Err(NativeFailureReason::UnknownCode),
         };
         let table = match qualified {
             Ok(rows) => rows.rows_at_reusing(fault.offset, &mut self.recovery_scratch),
             Err(reason) => {
-                drop(cache);
+                drop(owner);
                 return Err(self.fail_native(index, fault, reason));
             }
         };
-        drop(cache);
+        drop(owner);
         let recovery_site = match FaultRecovery::site_at(&table, fault.offset) {
             Ok(site) => site,
             Err(error) => {

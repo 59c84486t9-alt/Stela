@@ -748,6 +748,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
                 unsettled_chain: None,
                 reason: super::super::NativeFailureReason::InternalSite,
                 board: None,
+                owner: None,
             });
             self.native_failure = Some(super::super::recovery::CapturedFailure {
                 summary: failure.clone(),

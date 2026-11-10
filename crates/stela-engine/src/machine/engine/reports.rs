@@ -584,7 +584,8 @@ impl core::ops::AddAssign for Statistics {
 /// The heap bytes of a machine's code bookkeeping, by structure.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Footprint {
-    /// The block table and the recovery owners' table.
+    /// The block records, which hold their recovery owners; `owners` is 0
+    /// since they moved there.
     pub blocks: usize,
     pub owners: usize,
     /// The live blocks' direct exit lists and recovery rows.
@@ -601,17 +602,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// What its code bookkeeping holds now: a walk of every block, for
     /// reports.
     pub fn footprint(&self) -> Footprint {
-        let cache = self.code.cache();
-        let (owners, rows) = cache.recovery.heap_bytes();
+        // The walks of every block take no board lock: rows are under
+        // their records' locks; only the index and table sizes need it.
+        let rows = self.code.blocks.recovery().heap_bytes();
+        let successors = self
+            .code
+            .blocks
+            .iter()
+            .map(|(_, block)| block.successors.len() * size_of::<super::Successor>())
+            .sum();
+        let cache = self.code.cache_at(super::board::LockSite::Report);
         Footprint {
             blocks: self.code.blocks.heap_bytes(),
-            owners,
-            successors: self
-                .code
-                .blocks
-                .iter()
-                .map(|(_, block)| block.successors.len() * size_of::<super::Successor>())
-                .sum(),
+            // Owners live in the block records, which `blocks` counts.
+            owners: 0,
+            successors,
             rows,
             index: cache.index.heap_bytes(),
             lookup: cache.targets.index_bytes() + self.itlb.index_bytes(),

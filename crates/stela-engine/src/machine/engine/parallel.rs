@@ -720,7 +720,7 @@ impl Hub {
     /// there to note them ([`Self::compiling`]): an IC IVAU of one must
     /// reach every PE that may run them.
     pub(super) fn note_code(&self, code: &super::board::Code) {
-        for frame in code.cache().index.frames() {
+        for frame in code.cache_at(super::board::LockSite::Other).index.frames() {
             self.compiling(frame);
         }
     }
@@ -1623,7 +1623,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             shared: statistics.shared,
             live_blocks: self.code.blocks.live() as u64,
             block_slots: self.code.blocks.len() as u64,
-            indexed_pages: self.code.cache().index.pages() as u64,
+            indexed_pages: self.code.indexed_pages() as u64,
             code_releases: statistics.code_releases,
             compile_ticks: statistics.compile_ticks,
             page_ticks: statistics.page_ticks,

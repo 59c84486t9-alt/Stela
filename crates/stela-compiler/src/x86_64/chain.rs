@@ -820,8 +820,23 @@ impl LookupTable {
     /// One at a time, without a list: [`Self::link_cell`] releases its
     /// site's at every exit it links.
     pub fn release_cells(&mut self, sites: core::ops::RangeInclusive<u64>) {
+        self.release_some_cells(sites, usize::MAX);
+    }
+
+    /// [`Self::release_cells`] of at most `most` cells: the site to go on
+    /// from when cells may be left, so a caller holding a lock releases a
+    /// long range in bounded steps.
+    pub fn release_some_cells(
+        &mut self,
+        sites: core::ops::RangeInclusive<u64>,
+        most: usize,
+    ) -> Option<u64> {
         let mut from = *sites.start();
-        while let Some((&site, &cell)) = self.cell_sites.range(from..=*sites.end()).next() {
+        if from > *sites.end() {
+            return None;
+        }
+        for _ in 0..most {
+            let (&site, &cell) = self.cell_sites.range(from..=*sites.end()).next()?;
             self.cell_sites.remove(&site);
             let pc = self.cell(cell).pc;
             if self.cell_pcs.remove(&(pc, cell)) {
@@ -836,9 +851,10 @@ impl LookupTable {
             self.free_cells.push(cell);
             match site.checked_add(1) {
                 Some(next) if next <= *sites.end() => from = next,
-                _ => break,
+                _ => return None,
             }
         }
+        Some(from)
     }
 
     /// What the cell of the exit at host address `site` holds, if it has one.

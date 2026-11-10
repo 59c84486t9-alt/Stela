@@ -3,6 +3,31 @@
 
 use super::*;
 
+/// Blocks [`Machine::stale_code`] copies under the board's lock at a time.
+const STALE_STEP: usize = 128;
+
+/// Slots one step of an eviction or a discard's census takes under the
+/// board's lock: tens of microseconds.
+const EVICT_STEP: usize = 32;
+
+/// Index entries and blocks one step of a retirement visits before it
+/// stops at the end of a page.
+const STEP_VISITS: u64 = 1024;
+
+/// Cells one step of an eviction releases under the board's lock.
+const CELL_STEP: usize = 256;
+
+/// What [`Machine::stale_code`] checks of a block, copied under the lock.
+#[derive(Clone, Copy)]
+struct StaleBlock {
+    pc: u64,
+    physical: u64,
+    code: usize,
+    source_bytes: usize,
+    source_hash: u64,
+    installer: u8,
+}
+
 /// The word and bit of the two positions of the leaf of `size` bytes at
 /// `base` in a filter of [`FETCHED_LEAVES`] bits. A base's low bits are clear,
 /// so the size's exponent keeps leaves of one base apart.
@@ -57,46 +82,77 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut report = StaleCode::default();
         let mut bytes = Vec::new();
         let mut last = None;
-        let cache = self.code.cache();
-        for (cursor, index) in cache.index.sweep(self.stale_cursor).take(STALE_CHECKS) {
-            let block = &self.code.blocks[index];
-            bytes.resize(block.source_bytes(), 0);
-            report.blocks += 1;
-            last = Some(cursor);
-            if !self.host.read_ram(block.physical, &mut bytes) {
-                continue;
-            }
-            let raw = source_hash(&bytes);
-            // A block's hash is of the bytes its compile admitted.
-            for word in bytes.as_chunks_mut::<4>().0 {
-                *word = self.admit(u32::from_le_bytes(*word)).to_le_bytes();
-            }
-            let admitted = source_hash(&bytes);
-            if admitted == block.source_hash && raw != admitted {
-                report.admitted += 1;
-            }
-            if admitted != block.source_hash {
-                report.stale += 1;
-                if report.first.is_none() {
-                    report.first = Some((block.pc, block.physical));
-                    let part = self.code.arena.as_ref().and_then(|arena| {
-                        let offset = block.code.0.checked_sub(arena.window.exec)?;
-                        Some((offset / arena.part_bytes) as u32)
-                    });
-                    report.origin = Some(StaleOrigin {
-                        pe: block.installer,
-                        part,
-                        noted: self
-                            .parallel
-                            .as_ref()
-                            .map(|hub| hub.has_code(block.physical)),
-                    });
+        // What each block's check needs, copied in bounded steps under the
+        // lock: the RAM reads and hashes run without it.
+        let mut checks = Vec::with_capacity(STALE_STEP);
+        while report.blocks < STALE_CHECKS {
+            checks.clear();
+            {
+                let cache = self.code.cache_at(board::LockSite::Report);
+                let step = STALE_STEP.min(STALE_CHECKS - report.blocks);
+                for (cursor, index) in cache.index.sweep(last.or(self.stale_cursor)).take(step) {
+                    let block = &self.code.blocks[index];
+                    checks.push((
+                        cursor,
+                        StaleBlock {
+                            pc: block.pc,
+                            physical: block.physical,
+                            code: block.code.0,
+                            source_bytes: block.source_bytes(),
+                            source_hash: block.source_hash,
+                            installer: block.installer,
+                        },
+                    ));
                 }
+            }
+            if checks.is_empty() {
+                break;
+            }
+            for &(cursor, block) in &checks {
+                self.check_stale(&mut report, &mut bytes, block);
+                last = Some(cursor);
             }
         }
         // A sweep that reached the last block starts over next time.
         self.stale_cursor = last.filter(|_| report.blocks == STALE_CHECKS);
         report
+    }
+
+    /// Check one block of [`Self::stale_code`] against its guest bytes.
+    fn check_stale(&mut self, report: &mut StaleCode, bytes: &mut Vec<u8>, block: StaleBlock) {
+        bytes.resize(block.source_bytes, 0);
+        report.blocks += 1;
+        if !self.host.read_ram(block.physical, bytes) {
+            return;
+        }
+        let raw = source_hash(bytes);
+        // A block's hash is of the bytes its compile admitted.
+        for word in bytes.as_chunks_mut::<4>().0 {
+            *word = self.admit(u32::from_le_bytes(*word)).to_le_bytes();
+        }
+        let admitted = source_hash(bytes);
+        if admitted == block.source_hash && raw != admitted {
+            report.admitted += 1;
+        }
+        if admitted == block.source_hash {
+            return;
+        }
+        report.stale += 1;
+        if report.first.is_none() {
+            report.first = Some((block.pc, block.physical));
+            let part = self.code.arena.as_ref().and_then(|arena| {
+                let offset = block.code.checked_sub(arena.window.exec)?;
+                Some((offset / arena.part_bytes) as u32)
+            });
+            report.origin = Some(StaleOrigin {
+                pe: block.installer,
+                part,
+                noted: self
+                    .parallel
+                    .as_ref()
+                    .map(|hub| hub.has_code(block.physical)),
+            });
+        }
     }
 
     /// An architectural cache epoch must never wrap back to an old permission.
@@ -385,7 +441,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// again. Their code stays installed until its part is reclaimed.
     pub(super) fn invalidate_code_page(&mut self, physical: u64) {
         let frame = frame_number(physical);
-        let mut cache = self.code.cache_at(board::LockSite::Invalidate);
+        let code = Arc::clone(&self.code);
+        let mut cache = code.cache_at(board::LockSite::Invalidate);
+        // The page's blocks leave the index, so no detach finds them as
+        // sources again: their links out are cut now.
+        let page: Vec<usize> = cache.index.page(physical).collect();
+        self.unlink_sources(&page);
         cache.targets.forget_frames(frame..=frame, |_| true);
         let forgot = cache.index.forget_page(physical & !(FETCH_PAGE - 1));
         drop(cache);
@@ -519,6 +580,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         #[cfg(debug_assertions)]
         self.assert_portable(bytes);
+        // A part being retired takes a bounded step or a few at each install:
+        // not for a link's thunk, whose caller holds the code lock.
+        if retire {
+            self.retire_steps(self.retire_budget());
+        }
         loop {
             let full = match arena.ring.take(bytes.len(), 16) {
                 Ok(place) => {
@@ -535,11 +601,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let (grace, skip) = self.grace();
             match arena.ring.advance(full, grace, skip) {
                 board::Advance::Moved => {}
-                board::Advance::Busy => self.host.relax(),
+                // The next part is still being taken away: help.
+                board::Advance::Busy => {
+                    self.retire_steps(self.retire_budget());
+                    self.host.relax();
+                }
                 board::Advance::Retire(generation) => self.retire_part(generation),
                 board::Advance::Wait(snapshot) => self.wait_grace(&snapshot),
             }
         }
+    }
+
+    /// Host counter ticks of retirement steps one install takes: half a
+    /// millisecond, so no PE stalls the guest count for a whole part.
+    fn retire_budget(&self) -> u64 {
+        (self.profile.counter_frequency / 2000).max(1)
     }
 
     /// Code in the board's arena runs on every PE: it names none of this
@@ -606,9 +682,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let (grace, skip) = self.grace();
             match arena.ring.advance(arena.ring.generation(), grace, skip) {
                 board::Advance::Moved => {}
-                board::Advance::Busy => self.host.relax(),
+                board::Advance::Busy => {
+                    self.retire_steps(u64::MAX);
+                    self.host.relax();
+                }
                 board::Advance::Retire(generation) => {
                     self.retire_part(generation);
+                    // Short of slots: all of it now.
+                    self.retire_steps(u64::MAX);
                     board::Events::count(&code.events.forced);
                     let snapshot = self.grace().0.snapshot();
                     self.wait_grace(&snapshot);
@@ -621,18 +702,217 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Take away the code of the ring's part of `generation`, which this
     /// PE moved the ring past ([`board::Advance::Retire`]): its blocks go
-    /// as in a reclaim, and its probes; the part is reused once every PE
-    /// passed the grace taken after.
+    /// as in a reclaim, and its probes, in steps the board's installs take
+    /// ([`Self::retire_steps`]); the part is reused once the last step is
+    /// done and every PE passed the grace taken after.
     fn retire_part(&mut self, generation: u32) {
         let code = Arc::clone(&self.code);
-        let arena = code.arena.as_ref().expect("a ring retires its parts");
-        let range = arena.range(generation);
-        let part = arena.ring.part(generation) as u32;
-        self.evict_code(range);
-        code.cache().dispatchers.retain(|&(held, _)| held != part);
+        let range = code
+            .arena
+            .as_ref()
+            .expect("a ring retires its parts")
+            .range(generation);
+        let job = self.retirement(range, Some(generation));
+        let mut held = code
+            .retiring
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // The ring moves on only once the last retirement ended, so none is
+        // left; one would be finished here first.
+        if let Some(mut left) = held.take() {
+            while !self.retire_step(&mut left) {}
+            self.finish_retirement(left);
+        }
+        *held = Some(job);
+        code.retire_pending.store(true, Ordering::Release);
+        drop(held);
+        self.retire_steps(self.retire_budget());
+    }
+
+    /// Take steps of the board's retirement under way, if no other PE is,
+    /// until it ends or `budget` host counter ticks passed.
+    pub(super) fn retire_steps(&mut self, budget: u64) {
+        if !self.code.retire_pending.load(Ordering::Acquire) {
+            return;
+        }
+        let code = Arc::clone(&self.code);
+        let Ok(mut held) = code.retiring.try_lock() else {
+            return;
+        };
+        let started = self.host.counter();
+        loop {
+            let Some(job) = held.as_mut() else {
+                return;
+            };
+            if self.retire_step(job) {
+                break;
+            }
+            if self.host.counter().wrapping_sub(started) >= budget {
+                self.install_causes.evict_ticks += self.host.counter().wrapping_sub(started);
+                return;
+            }
+        }
+        let job = held.take().expect("a retirement that ended");
+        code.retire_pending.store(false, Ordering::Release);
+        drop(held);
+        self.finish_retirement(job);
+        self.install_causes.evict_ticks += self.host.counter().wrapping_sub(started);
+    }
+
+    /// A retirement of the blocks whose code lies in `range`.
+    fn retirement(
+        &mut self,
+        range: core::ops::Range<usize>,
+        generation: Option<u32>,
+    ) -> board::Retirement {
+        let code = Arc::clone(&self.code);
+        let listed = code
+            .cache_at(board::LockSite::Evict)
+            .code_slots
+            .take(&range);
+        // Without a list, every slot's record, read without the lock: the
+        // range takes no new block.
+        let evicted = listed.unwrap_or_else(|| {
+            code.blocks
+                .iter()
+                .filter(|&(slot, block)| {
+                    code.blocks.record(slot).live() && range.contains(&block.code.0)
+                })
+                .map(|(slot, _)| slot as u32)
+                .collect()
+        });
+        let mut slots: Vec<(u64, u32)> = evicted
+            .iter()
+            .map(|&slot| {
+                (
+                    code.blocks[slot as usize].physical & !(FETCH_PAGE - 1),
+                    slot,
+                )
+            })
+            .collect();
+        slots.sort_unstable();
+        code.cache_at(board::LockSite::Evict)
+            .code_slots
+            .give_back(evicted);
+        board::Retirement {
+            generation,
+            cells: Some(range.start as u64),
+            range,
+            slots,
+            next: 0,
+            ticks: 0,
+            steps: 0,
+            visits: 0,
+            step_visits: 0,
+        }
+    }
+
+    /// One step of `job`, one hold of the code lock: whole pages of its
+    /// blocks, up to [`EVICT_STEP`] blocks or [`STEP_VISITS`] index
+    /// entries, and then its range's cells. A step cuts the links into its
+    /// blocks, forgets their lookup and index entries and retires them, so
+    /// between steps no lookup, link or index read reaches a block it took,
+    /// and the others are still whole. Whether the job is done.
+    pub(super) fn retire_step(&mut self, job: &mut board::Retirement) -> bool {
+        let started = board::timestamp();
+        let code = Arc::clone(&self.code);
+        let shared = self.code_hub.is_some();
+        let mut cache = code.cache_at(board::LockSite::Evict);
+        let mut visits = 0;
+        if job.next < job.slots.len() {
+            let first = job.next;
+            let mut end = first;
+            while end < job.slots.len() && end - first < EVICT_STEP && visits < STEP_VISITS {
+                let page = job.slots[end].0;
+                visits += cache.index.page(page).count() as u64;
+                while end < job.slots.len() && job.slots[end].0 == page {
+                    end += 1;
+                    visits += 1;
+                }
+            }
+            let pages = &job.slots[first..end];
+            let step: Vec<u32> = pages.iter().map(|&(_, slot)| slot).collect();
+            // An evicted block's slot holds the next block compiled.
+            if self
+                .direct_exit
+                .is_some_and(|(block, ..)| step.contains(&(block as u32)))
+            {
+                self.direct_exit = None;
+            }
+            self.detach(&mut cache, &step);
+            // A page's evicted blocks leave its index entries in one pass.
+            let marked = mark(&mut cache.marked, code.blocks.len(), &step);
+            for page in pages.chunk_by(|a, b| a.0 == b.0) {
+                cache
+                    .index
+                    .forget_marked(page[0].0, |slot| bit_set(&marked, slot));
+            }
+            unmark(&mut cache.marked, marked, &step);
+            let now = self.host.counter();
+            for slot in step.iter().map(|&slot| slot as usize) {
+                // On a shared board its rows stay until the slot takes its
+                // next block: another PE still inside its section may be
+                // running the block and fault in it. A machine alone runs
+                // none of it now.
+                let recovery = code.blocks.recovery();
+                let bytes = match shared {
+                    true => recovery.get(&slot).map(|owner| owner.code_bytes()),
+                    false => recovery.remove(&slot).map(|owner| owner.code_bytes()),
+                }
+                .unwrap_or(0);
+                self.census_evicted(&mut cache, slot, bytes, now);
+                let taken = code.blocks.record(slot).taken.load(Ordering::Relaxed);
+                if taken != 0 {
+                    *self
+                        .exit_words
+                        .entry(code.blocks[slot].terminal)
+                        .or_default() += u64::from(taken);
+                }
+                code.blocks.retire(slot);
+            }
+            job.next = end;
+        } else if let Some(from) = job.cells {
+            // The exits in the range go, and with them their cells: no
+            // block in it is live now, so none links through a cell again.
+            job.cells = cache
+                .targets
+                .release_some_cells(from..=job.range.end as u64 - 1, CELL_STEP);
+            visits = CELL_STEP as u64;
+        }
+        drop(cache);
+        job.visits += visits;
+        job.step_visits = job.step_visits.max(visits);
+        job.ticks += board::timestamp().wrapping_sub(started);
+        job.steps += 1;
+        job.next >= job.slots.len() && job.cells.is_none()
+    }
+
+    /// The end of `job`, whose steps are done: its slots go once their
+    /// grace passed, and a ring part's probes and the part itself.
+    fn finish_retirement(&mut self, job: board::Retirement) {
+        let code = Arc::clone(&self.code);
+        let arena = job.generation.and_then(|_| code.arena.as_ref());
+        if let (Some(arena), Some(generation)) = (arena, job.generation) {
+            let part = arena.ring.part(generation) as u32;
+            code.cache_at(board::LockSite::Evict)
+                .dispatchers
+                .retain(|&(held, _)| held != part);
+        }
+        let slots: Vec<u32> = job.slots.iter().map(|&(_, slot)| slot).collect();
         let (grace, _) = self.grace();
-        arena.ring.retired(generation, grace.snapshot());
-        board::Events::count(&code.events.retired);
+        code.blocks.release(slots, grace.snapshot());
+        if let (Some(arena), Some(generation)) = (arena, job.generation) {
+            arena.ring.retired(generation, grace.snapshot());
+            board::Events::count(&code.events.retired);
+        }
+        if !self.scalable_leaves.is_empty() {
+            self.scalable_leaves
+                .retain(|_, leaf| !job.range.contains(&leaf.code.0));
+        }
+        if !job.slots.is_empty() {
+            self.statistics.code_evictions += 1;
+        }
+        code.events.retired(&job);
     }
 
     /// Wait until `snapshot`'s grace passed, in rounds bounded by the host
@@ -678,7 +958,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// entry goes, so no fetch, lookup or jump cache entry reaches a block
     /// installed before; their code goes as the ring reaches its parts.
     fn forget_shared_code(&mut self) {
-        let mut cache = self.code.cache();
+        let mut cache = self.code.cache_at(board::LockSite::Discard);
         cache.index.clear();
         cache.targets.clear();
         drop(cache);
@@ -708,80 +988,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return;
         }
         let started = self.host.counter();
-        let code = Arc::clone(&self.code);
-        let shared = self.code_hub.is_some();
-        let mut cache = code.cache_at(board::LockSite::Evict);
-        let mut evicted = cache.code_slots.take(&range).unwrap_or_else(|| {
-            code.blocks
-                .iter()
-                .filter(|&(slot, block)| {
-                    code.blocks.record(slot).live() && range.contains(&block.code.0)
-                })
-                .map(|(slot, _)| slot as u32)
-                .collect()
-        });
-        evicted.sort_unstable();
-        // An evicted block's slot holds the next block compiled.
-        if self
-            .direct_exit
-            .is_some_and(|(block, ..)| evicted.binary_search(&(block as u32)).is_ok())
-        {
-            self.direct_exit = None;
-        }
-        self.detach(&mut cache, &evicted);
-        // The exits in the range go, and with them their cells.
-        cache
-            .targets
-            .release_cells(range.start as u64..=range.end as u64 - 1);
-        // A page's evicted blocks leave its index entries in one pass.
-        let mut pages: Vec<(u64, u32)> = evicted
-            .iter()
-            .map(|&slot| {
-                (
-                    code.blocks[slot as usize].physical & !(FETCH_PAGE - 1),
-                    slot,
-                )
-            })
-            .collect();
-        pages.sort_unstable();
-        let marked = mark(&mut cache.marked, code.blocks.len(), &evicted);
-        for page in pages.chunk_by(|a, b| a.0 == b.0) {
-            cache
-                .index
-                .forget_marked(page[0].0, |slot| bit_set(&marked, slot));
-        }
-        unmark(&mut cache.marked, marked, &evicted);
-        for slot in evicted.iter().map(|&slot| slot as usize) {
-            // On a shared board its rows stay until the slot takes its next
-            // block: another PE still inside its section may be running the
-            // block and fault in it. A machine alone runs none of it now.
-            let bytes = match shared {
-                true => cache.recovery.get(&slot).map(|owner| owner.code_bytes()),
-                false => cache.recovery.remove(&slot).map(|owner| owner.code_bytes()),
-            }
-            .unwrap_or(0);
-            self.census_evicted(&mut cache, slot, bytes, started);
-            let taken = code.blocks.record(slot).taken.load(Ordering::Relaxed);
-            if taken != 0 {
-                *self
-                    .exit_words
-                    .entry(code.blocks[slot].terminal)
-                    .or_default() += u64::from(taken);
-            }
-            code.blocks.retire(slot);
-        }
-        let (grace, _) = self.grace();
-        code.blocks.release(evicted.clone(), grace.snapshot());
-        cache.code_slots.give_back(evicted);
-        drop(cache);
-        if !self.scalable_leaves.is_empty() {
-            self.scalable_leaves
-                .retain(|_, leaf| !range.contains(&leaf.code.0));
-        }
-        if !pages.is_empty() {
-            self.statistics.code_evictions += 1;
-        }
+        let mut job = self.retirement(range, None);
+        while !self.retire_step(&mut job) {}
+        self.finish_retirement(job);
         self.install_causes.evict_ticks += self.host.counter().wrapping_sub(started);
+    }
+
+    /// Cut every chained exit of the blocks in `slots`, which leave the
+    /// index: under the board's lock.
+    fn unlink_sources(&mut self, slots: &[usize]) {
+        let code = Arc::clone(&self.code);
+        for &source in slots {
+            let record = code.blocks.record(source);
+            for (position, exit) in code.blocks[source].successors.iter().enumerate() {
+                if record.chained(position) {
+                    record.set_linked(position, false, false);
+                    // Linked, so its point is patchable and in reach.
+                    let (point, instruction) = chain::unlinked(exit.site, exit.slot.into())
+                        .expect("a linked exit's patch point");
+                    self.patch_point(NativeCode(point as usize), instruction);
+                    self.statistics.unlinks += 1;
+                }
+            }
+        }
     }
 
     /// Make the blocks in the sorted `slots` unreachable: the indexed blocks
@@ -854,20 +1083,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn discard_code(&mut self, cause: Discard) {
         self.exit_words = self.exit_words();
         let code = Arc::clone(&self.code);
-        let mut cache = code.cache();
-        if self.census.is_some() || cache.census.is_some() {
+        let counted =
+            self.census.is_some() || code.cache_at(board::LockSite::Discard).census.is_some();
+        if counted {
+            // In bounded steps of slots, each under the lock.
             let now = self.host.counter();
-            for slot in 0..code.blocks.len() {
-                if code.blocks.record(slot).live() {
-                    let bytes = cache
-                        .recovery
-                        .get_mut(&slot)
-                        .map_or(0, |owner| owner.code_bytes());
-                    self.census_evicted(&mut cache, slot, bytes, now);
+            let slots = code.blocks.len();
+            for step in (0..slots).step_by(EVICT_STEP) {
+                let mut cache = code.cache_at(board::LockSite::Discard);
+                for slot in step..slots.min(step + EVICT_STEP) {
+                    if code.blocks.record(slot).live() {
+                        let bytes = code
+                            .blocks
+                            .recovery()
+                            .get(&slot)
+                            .map_or(0, |owner| owner.code_bytes());
+                        self.census_evicted(&mut cache, slot, bytes, now);
+                    }
                 }
             }
         }
-        drop(cache);
         drop(code);
         self.host.discard_code();
         self.lookup_dispatchers = Default::default();

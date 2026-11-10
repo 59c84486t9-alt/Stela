@@ -109,9 +109,21 @@ fn shared_pair(
     Machine<FakeHost, NoDevices>,
     Arc<Hub>,
 ) {
+    shared_pair_of(&vec![RET; 4 * FETCH_PAGE as usize / 4], memory)
+}
+
+/// [`shared_pair`] of machines of `words`.
+fn shared_pair_of(
+    words: &[u32],
+    memory: &mut [u8],
+) -> (
+    Machine<FakeHost, NoDevices>,
+    Machine<FakeHost, NoDevices>,
+    Arc<Hub>,
+) {
     let hub = Hub::new(2, NoKick);
-    let mut first = arena_machine(memory);
-    let mut second = machine(&vec![RET; 4 * FETCH_PAGE as usize / 4]);
+    let mut first = arena_machine_of(words, memory);
+    let mut second = machine(words);
     second.code = Arc::clone(&first.code);
     // A board's machines share their numbering ([`numbering`]).
     second.variants = Arc::clone(&first.variants);
@@ -283,7 +295,7 @@ fn a_pe_faults_in_a_block_another_pe_retired_and_still_finds_its_rows() {
     assert!(!first.code.blocks.record(slot).live());
     // The slot still holds the block, and its rows, until PE 0 passes.
     assert!(first.code.blocks.get(slot).is_some());
-    assert!(first.code.cache().recovery.get(&slot).is_some());
+    assert!(first.code.blocks.recovery().get(&slot).is_some());
     let step = first.native_fault(slot, access_fault(0), 0, None);
     assert!(
         !matches!(&step, Err(Stop::NativeFailure(failure))
@@ -449,4 +461,234 @@ fn a_board_out_of_slots_moves_its_ring_on_instead_of_stopping() {
             .sweep(None)
             .all(|(_, slot)| machine.code.blocks.record(slot).live())
     );
+}
+
+/// A page of two blocks, the first ending in a direct branch to the
+/// second (`b +8` over a hole), and the second's address.
+fn chained_page() -> (Vec<u32>, u64) {
+    let mut words = vec![RET; 4 * FETCH_PAGE as usize / 4];
+    words[..5].copy_from_slice(&[ADD, 0x1400_0002, 0, ADD, 0x17ff_fffc]);
+    (words, 12)
+}
+
+/// The part range of the block in `slot`.
+fn part_of(machine: &Machine<FakeHost, NoDevices>, slot: usize) -> core::ops::Range<usize> {
+    let arena = machine.code.arena.as_ref().expect("an arena");
+    let code = machine.code.blocks[slot].code.0;
+    let part = (code - arena.window.exec) / arena.part_bytes;
+    arena.window.exec + part * arena.part_bytes..arena.window.exec + (part + 1) * arena.part_bytes
+}
+
+/// PE 0 runs A1 -> A2 by a direct link; PE 1's IC IVAU forgets the page.
+/// PE 0, before it reads the post, still finds A1 in its jump cache: A1
+/// takes no lookup entry again and links nothing, and its link out is cut,
+/// so when A2's part and slot go no live block jumps into them (build 35:
+/// a PE ran a link into a reused part, `CodeExtent` 854 KiB off).
+#[test]
+fn a_forgotten_block_keeps_no_link_and_takes_no_lookup_entry() {
+    let (words, second_offset) = chained_page();
+    let mut memory = vec![0u8; WINDOW];
+    let (mut first, mut second, _hub) = shared_pair_of(&words, &mut memory);
+    let base = first.cpu.pc;
+    let Ok(Fetched::Block(a1)) = first.fetch_block(base, false) else {
+        panic!("a block")
+    };
+    let Ok(Fetched::Block(a2)) = second.fetch_block(base + second_offset, false) else {
+        panic!("a block")
+    };
+    assert!(first.link(a1, base + second_offset, ExitKind::Direct));
+    assert!(first.code.blocks.record(a1).chained(0));
+    let physical = first.code.blocks[a1].physical;
+    second.invalidate_code_page(physical);
+    assert!(
+        !first.code.blocks.record(a1).chained(0),
+        "the forget cuts A1's link"
+    );
+    // PE 0's jump cache still names A1.
+    assert!(matches!(first.fetch_block(base, false), Ok(Fetched::Block(found)) if found == a1));
+    let key = target_key(&first, base);
+    let entry = first.code.table.find(target_slot(&first, base), base, key);
+    assert!(
+        !(entry.pc == base && entry.block as usize == a1),
+        "a forgotten block took a lookup entry"
+    );
+    assert!(!first.link(a1, base + second_offset, ExitKind::Direct));
+    // A2's part goes: no live block chains into it.
+    let range = part_of(&first, a2);
+    second.evict_code(range);
+    for slot in 0..first.code.blocks.len() {
+        let Some(block) = first.code.blocks.installed(slot) else {
+            continue;
+        };
+        let record = first.code.blocks.record(slot);
+        assert!(
+            (0..block.successors.len()).all(|position| !record.chained(position)),
+            "slot {slot} still chains into a part taken away"
+        );
+    }
+}
+
+/// A guest fault in a block another PE installed, reached by a direct
+/// link, finds that block's rows; a fault outside the block it names says
+/// which block's code holds the address.
+#[test]
+fn a_fault_in_a_linked_block_of_another_pe_finds_its_rows_and_a_stray_one_names_its_owner() {
+    let (words, second_offset) = chained_page();
+    let mut memory = vec![0u8; WINDOW];
+    let (mut first, mut second, _hub) = shared_pair_of(&words, &mut memory);
+    let base = first.cpu.pc;
+    second.current = 1;
+    let Ok(Fetched::Block(a2)) = second.fetch_block(base + second_offset, false) else {
+        panic!("a block")
+    };
+    let Ok(Fetched::Block(a1)) = first.fetch_block(base, false) else {
+        panic!("a block")
+    };
+    assert!(first.link(a1, base + second_offset, ExitKind::Direct));
+    let step = first.native_fault(a2, access_fault(0), 0, None);
+    assert!(
+        !matches!(&step, Err(Stop::NativeFailure(failure))
+            if matches!(failure.reason,
+                NativeFailureReason::UnknownCode | NativeFailureReason::CodeExtent)),
+        "{step:?}"
+    );
+    // A fault at A1's code, reported against A2.
+    let offset = first.code.blocks[a1]
+        .code
+        .0
+        .wrapping_sub(first.code.blocks[a2].code.0);
+    let Err(Stop::NativeFailure(failure)) = first.native_fault(a2, access_fault(offset), 0, None)
+    else {
+        panic!("a failure")
+    };
+    assert_eq!(failure.reason, NativeFailureReason::CodeExtent);
+    let owner = failure.owner.expect("the owner of the address");
+    assert_eq!(owner.slot, a1 as u64);
+    assert!(owner.live);
+    assert!(failure.board.is_some());
+}
+
+/// A part of blocks compiled across eight pages in turn, each page's
+/// blocks linked to each other, is taken away in steps that walk each
+/// page's index list once: its visits grow with its blocks and their
+/// pages, not with blocks times pages, and no step holds more than a
+/// bounded number (build 37: 32-slot steps over interleaved pages walked
+/// every page at every step, 8 s of lock holds a part).
+#[test]
+fn a_part_of_interleaved_pages_retires_in_steps_that_visit_each_page_once() {
+    const PAGES: usize = 8;
+    const B8: u32 = 0x1400_0002; // b .+8
+    let group = [B8, 0, RET, 0];
+    let words: Vec<u32> = group
+        .iter()
+        .copied()
+        .cycle()
+        .take(PAGES * FETCH_PAGE as usize / 4)
+        .collect();
+    let mut memory = vec![0u8; 4 << 18];
+    let mut machine = machine(&words);
+    machine.code = Arc::new(board::Code::new(
+        board::slot_capacity(Some(memory.len())),
+        chain::MIN_LOOKUP_ENTRIES,
+        Some(window(&mut memory)),
+    ));
+    let base = machine.cpu.pc;
+    let groups = FETCH_PAGE / 16;
+    let mut first = None;
+    'fill: for group in 0..groups {
+        for page in 0..PAGES as u64 {
+            let pc = base + page * FETCH_PAGE + 16 * group;
+            let Ok(Fetched::Block(from)) = machine.fetch_block(pc, false) else {
+                panic!("a block")
+            };
+            assert!(matches!(
+                machine.fetch_block(pc + 8, false),
+                Ok(Fetched::Block(_))
+            ));
+            machine.link(from, pc + 8, ExitKind::Direct);
+            first.get_or_insert(from);
+            if generation(&machine) > 0 {
+                break 'fill;
+            }
+        }
+    }
+    let first = first.expect("blocks");
+    let range = part_of(&machine, first);
+    let evicted: Vec<usize> = (0..machine.code.blocks.len())
+        .filter(|&slot| {
+            machine
+                .code
+                .blocks
+                .installed(slot)
+                .is_some_and(|block| range.contains(&block.code.0))
+        })
+        .collect();
+    assert!(
+        evicted.len() > 64,
+        "a part of many blocks: {}",
+        evicted.len()
+    );
+    let indexed = machine.code.cache().index.sweep(None).count();
+    machine.evict_code(range);
+    let events = &machine.code.events;
+    let visits = events.retire_visits.load(Ordering::Relaxed);
+    let step = events.retire_step_visits.load(Ordering::Relaxed);
+    // Each page's list once, each block once, and the cell steps.
+    assert!(
+        visits <= (evicted.len() + indexed) as u64 + 4 * 256,
+        "{visits} visits for {} blocks, {indexed} indexed",
+        evicted.len()
+    );
+    assert!(step <= 1024 + FETCH_PAGE / 4, "{step} visits in one step");
+    assert!(
+        evicted
+            .iter()
+            .all(|&slot| !machine.code.blocks.record(slot).live())
+    );
+    // No live block chains into a block that went.
+    for slot in 0..machine.code.blocks.len() {
+        let Some(block) = machine.code.blocks.installed(slot) else {
+            continue;
+        };
+        let record = machine.code.blocks.record(slot);
+        for (position, exit) in block.successors.iter().enumerate() {
+            if record.chained(position) {
+                let physical = block.physical + (exit.target.0 - block.pc);
+                let target = machine.code.find(exit.target.0, physical, block.variant);
+                assert!(target.is_some_and(|target| !evicted.contains(&target)));
+            }
+        }
+    }
+}
+
+/// A full ring leaves the part it retires to the installs after: they take
+/// its steps, and the ring moves on to it only once they are done.
+#[test]
+fn a_retirement_is_taken_in_steps_by_later_installs() {
+    let mut memory = vec![0u8; WINDOW];
+    let mut machine = arena_machine(&mut memory);
+    // Each counter read passes the budget: an install takes one step.
+    machine.host.counter_step = 1 << 32;
+    let base = machine.cpu.pc;
+    let mut pending = 0;
+    for fetched in 0..4096 {
+        let pc = base + 4 * (fetched % 4096);
+        assert!(matches!(
+            machine.fetch_block(pc, false),
+            Ok(Fetched::Block(_))
+        ));
+        if machine.code.retire_pending.load(Ordering::Relaxed) {
+            pending += 1;
+        }
+        if generation(&machine) >= 8 {
+            break;
+        }
+    }
+    assert!(generation(&machine) >= 8, "the ring goes round");
+    assert!(
+        pending > 0,
+        "a retirement outlived the install that began it"
+    );
+    let codes = live_codes(&machine);
+    assert!(codes.windows(2).all(|pair| pair[0] != pair[1]));
 }
