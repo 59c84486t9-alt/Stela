@@ -119,6 +119,10 @@ pub(super) fn retire(tsc_hz: u64) -> bool {
         crate::layout::physical(base & crate::apic::BASE_ADDRESS),
     );
     let generation = PROCESSORS.request();
+    // Counted from the first doorbell: under a hypervisor each ICR access
+    // exits, so sending to every processor is a cost of its own.
+    let start = crate::apic::rdtsc();
+    let _counted = Counted(start);
     for (slot, apic) in PROCESSORS.sharers() {
         if Some(slot) == me || PROCESSORS.acknowledged(slot) >= generation {
             continue;
@@ -131,8 +135,6 @@ pub(super) fn retire(tsc_hz: u64) -> bool {
         // exclusive access to this processor's local ICR.
         let _ = unsafe { sender.notify(apic, crate::engine::interrupts::SHOOTDOWN_VECTOR, tsc_hz) };
     }
-    let start = crate::apic::rdtsc();
-    let _counted = Counted(start);
     let (report, limit) = (tsc_hz / 1000 * REPORT_MS, tsc_hz / 1000 * WAIT_MS);
     let mut reported = false;
     // A peer may be publishing a retirement at the same time and cannot

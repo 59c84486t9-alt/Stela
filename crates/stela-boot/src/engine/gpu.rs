@@ -525,7 +525,10 @@ impl Platform for Host {
         let pages = self.devices.borrow_mut().remove(&(address as u64));
         if let Some(pages) = pages {
             unmapped(Unmapped::Device);
-            self.unmap(address as u64, pages);
+            // Device memory never becomes RAM, and Linux drops the mapping
+            // with its last use: its shootdown waits for others'. Page
+            // tables nouveau frees cost one iounmap each.
+            self.window.remove_lazily(address as u64, pages);
         }
     }
 

@@ -196,6 +196,72 @@ impl Retirements {
     }
 }
 
+/// Window ranges already unmapped on the processor that removed them, left
+/// for one later shootdown to retire together, as Linux's lazy `vunmap`
+/// purge does: a mapping's removal then costs no board-wide shootdown of its
+/// own.
+///
+/// Invariant: no processor keeps a translation for an address the window
+/// hands out again. A range enters [`Self::defer`] begun in [`Retirements`],
+/// its entries cleared and flushed on the removing processor, so neither
+/// [`Free::take`] nor an install reaches it. It returns to [`Free`] only
+/// through [`finish_batch`], after a shootdown requested once it was taken
+/// in a batch ([`Self::take`]) was acknowledged by every other processor.
+/// A batch whose shootdown failed goes back ([`Self::restore`]) and stays
+/// reserved until a later one succeeds.
+#[derive(Default)]
+pub struct Lazy {
+    ranges: Vec<Range<u64>>,
+    pages: u64,
+}
+
+impl Lazy {
+    /// How many ranges, or pages, wait before a removal retires them.
+    pub const RANGES: usize = 128;
+    pub const PAGES: u64 = 2048;
+
+    /// Leaves `range` for the next batch. Whether the batch is due, or the
+    /// range back when it cannot be kept, to be retired at once.
+    pub fn defer(&mut self, range: Range<u64>) -> Result<bool, Range<u64>> {
+        if range.is_empty() || self.ranges.try_reserve(1).is_err() {
+            return Err(range);
+        }
+        self.pages += (range.end - range.start).div_ceil(PAGE);
+        self.ranges.push(range);
+        Ok(self.ranges.len() >= Self::RANGES || self.pages >= Self::PAGES)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ranges.is_empty()
+    }
+
+    /// The waiting ranges, for one shootdown requested after this.
+    pub fn take(&mut self) -> Vec<Range<u64>> {
+        self.pages = 0;
+        core::mem::take(&mut self.ranges)
+    }
+
+    /// A taken batch whose shootdown was not acknowledged: kept, reserved,
+    /// for the next one.
+    pub fn restore(&mut self, mut batch: Vec<Range<u64>>) {
+        self.pages += batch
+            .iter()
+            .map(|range| (range.end - range.start).div_ceil(PAGE))
+            .sum::<u64>();
+        batch.append(&mut self.ranges);
+        self.ranges = batch;
+    }
+}
+
+/// After every other processor acknowledged the shootdown requested for
+/// `batch`: its ranges are free again.
+pub fn finish_batch(batch: &[Range<u64>], retiring: &mut Retirements, free: &mut Free) {
+    for range in batch {
+        retiring.finish(range);
+        free.give(range.start, (range.end - range.start) / PAGE);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,6 +296,63 @@ mod tests {
         assert!(!retiring.overlaps(&(PAGE..4 * PAGE)));
         assert!(retiring.overlaps(&(4 * PAGE..5 * PAGE)));
         assert!(retiring.begin(PAGE..4 * PAGE));
+    }
+
+    /// A lazily removed range is handed out again only after its batch's
+    /// shootdown was acknowledged; a failed one keeps it reserved.
+    #[test]
+    fn lazy_ranges_are_reused_only_after_their_batch_retires() {
+        let span = 0x10000..0x10000 + 8 * PAGE;
+        let mut free = Free::new(span.clone());
+        let mut retiring = Retirements::default();
+        let mut lazy = Lazy::default();
+        let first = free.take(4).unwrap();
+        let second = free.take(4).unwrap();
+        assert_eq!(free.take(1), None);
+
+        // Removal: reserve in `retiring`, clear, then defer.
+        let range = first..first + 4 * PAGE;
+        assert!(retiring.begin(range.clone()));
+        assert_eq!(lazy.defer(range.clone()), Ok(false));
+        assert!(!lazy.is_empty());
+        // Not free, and no install may land in it.
+        assert_eq!(free.take(1), None);
+        assert!(retiring.overlaps(&(first..first + PAGE)));
+
+        // A shootdown that was not acknowledged keeps it reserved.
+        let batch = lazy.take();
+        assert!(lazy.is_empty());
+        lazy.restore(batch);
+        assert_eq!(free.take(1), None);
+
+        // A range deferred after a batch was taken waits for the next one.
+        let batch = lazy.take();
+        let later = second..second + 4 * PAGE;
+        assert!(retiring.begin(later.clone()));
+        assert_eq!(lazy.defer(later.clone()), Ok(false));
+        finish_batch(&batch, &mut retiring, &mut free);
+        assert_eq!(free.take(4), Some(first));
+        assert_eq!(free.take(1), None);
+        assert!(retiring.overlaps(&later));
+        assert!(!retiring.overlaps(&range));
+
+        finish_batch(&lazy.take(), &mut retiring, &mut free);
+        assert_eq!(free.take(4), Some(second));
+    }
+
+    #[test]
+    fn lazy_batches_fall_due_at_their_bounds() {
+        let mut lazy = Lazy::default();
+        for index in 0..Lazy::RANGES as u64 - 1 {
+            assert_eq!(
+                lazy.defer(index * 2 * PAGE..(index * 2 + 1) * PAGE),
+                Ok(false)
+            );
+        }
+        assert_eq!(lazy.defer(0x100_0000..0x100_1000), Ok(true));
+        assert_eq!(lazy.take().len(), Lazy::RANGES);
+        assert_eq!(lazy.defer(0..Lazy::PAGES * PAGE), Ok(true));
+        assert_eq!(lazy.defer(PAGE..PAGE), Err(PAGE..PAGE));
     }
 
     #[test]

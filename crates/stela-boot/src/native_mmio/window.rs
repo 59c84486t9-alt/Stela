@@ -15,7 +15,7 @@ use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, Ordering},
 };
-use stela_boot_core::page_window::{self, Cache, Free, Retirements};
+use stela_boot_core::page_window::{self, Cache, Free, Lazy, Retirements, finish_batch};
 use stela_drivers::bus::dma::memory::{CacheAttribute, PageSource, PinnedPages};
 
 const ENTRIES: usize = 512;
@@ -23,6 +23,8 @@ const ENTRIES: usize = 512;
 struct State {
     free: Free,
     retiring: Retirements,
+    /// Removed ranges waiting for one shared shootdown ([`Window::remove_lazily`]).
+    lazy: Lazy,
     /// The pages of the tables the window grew. They last as long as it does.
     tables: Vec<PinnedPages>,
 }
@@ -87,6 +89,7 @@ impl Window {
             state: UnsafeCell::new(State {
                 free: Free::new(page_window::span(layout::window())),
                 retiring: Retirements::default(),
+                lazy: Lazy::default(),
                 tables: Vec::new(),
             }),
         })
@@ -139,8 +142,15 @@ impl Window {
         page_window::span(layout::window()).contains(&address)
     }
 
-    /// `count` free pages' addresses, mapping nothing yet.
+    /// `count` free pages' addresses, mapping nothing yet. With none, the
+    /// lazily removed ranges are retired first ([`Self::purge`]).
     pub(crate) fn reserve(&self, count: usize) -> Option<u64> {
+        if let Some(address) = self.lock().state().free.take(count as u64) {
+            return Some(address);
+        }
+        if self.lock().state().lazy.is_empty() || !self.purge() {
+            return None;
+        }
         self.lock().state().free.take(count as u64)
     }
 
@@ -183,27 +193,22 @@ impl Window {
         }
     }
 
-    /// Unmap `count` reserved pages at `address`, whether installed or not.
-    /// False when a processor may still translate through them, which leaves
-    /// the caller holding their reservation for good.
-    pub(crate) fn remove(&self, address: u64, count: usize) -> bool {
-        if count == 0 {
-            return true;
-        }
-        let Some(end) = (count as u64)
+    /// The pages `address..address + count` cover, when this window may
+    /// map all of them.
+    fn span_of(&self, address: u64, count: usize) -> Option<core::ops::Range<u64>> {
+        let end = (count as u64)
             .checked_mul(PAGE)
-            .and_then(|bytes| address.checked_add(bytes))
-        else {
-            return false;
-        };
-        if !address.is_multiple_of(PAGE) || !self.contains(address) || !self.contains(end - 1) {
-            return false;
-        }
-        let range = address..end;
-        let mut guard = self.lock();
-        if !guard.state().retiring.begin(range.clone()) {
-            return false;
-        }
+            .and_then(|bytes| address.checked_add(bytes))?;
+        (count != 0
+            && address.is_multiple_of(PAGE)
+            && self.contains(address)
+            && self.contains(end - 1))
+        .then_some(address..end)
+    }
+
+    /// Clears the leaves of `count` pages at `address` and flushes them from
+    /// this processor's TLB, under the window's lock.
+    fn clear(&self, address: u64, count: usize) {
         for (pointer, directory, slots) in page_window::leaf_runs(address, count) {
             // SAFETY: the aperture's table, a bounded index.
             let upper = unsafe { self.pointers.add(pointer).read_volatile() };
@@ -222,7 +227,6 @@ impl Window {
                 unsafe { table.add(slot).write_volatile(0) };
             }
         }
-        drop(guard);
         // SAFETY: TLB maintenance only; these addresses hold no data access.
         unsafe {
             asm!("mfence", options(nostack, preserves_flags));
@@ -232,10 +236,92 @@ impl Window {
             }
             asm!("mfence", options(nostack, preserves_flags));
         }
+    }
+
+    /// Unmap `count` reserved pages at `address`, whether installed or not.
+    /// False when a processor may still translate through them, which leaves
+    /// the caller holding their reservation for good.
+    pub(crate) fn remove(&self, address: u64, count: usize) -> bool {
+        if count == 0 {
+            return true;
+        }
+        let Some(range) = self.span_of(address, count) else {
+            return false;
+        };
+        {
+            let mut guard = self.lock();
+            if !guard.state().retiring.begin(range.clone()) {
+                return false;
+            }
+            self.clear(address, count);
+        }
         if !shootdown::retire(self.tsc_hz) {
             return false;
         }
         self.lock().state().retiring.finish(&range);
+        true
+    }
+
+    /// Unmap `count` reserved pages at `address` here, and give them back
+    /// to the window once a shootdown shared with other removals retired
+    /// them: one shootdown per [`Lazy`] batch instead of one each. The
+    /// caller does not [`Self::release`] them. False leaves them reserved.
+    ///
+    /// Only for mappings no processor reads or writes after their owner
+    /// unmapped them and whose memory outlives a stale translation: device
+    /// memory, which is never handed out as RAM. A stale translation can
+    /// only name an address that stays reserved (see [`Lazy`]).
+    pub(crate) fn remove_lazily(&self, address: u64, count: usize) -> bool {
+        if count == 0 {
+            return true;
+        }
+        let Some(range) = self.span_of(address, count) else {
+            return false;
+        };
+        let due = {
+            let mut guard = self.lock();
+            if !guard.state().retiring.begin(range.clone()) {
+                return false;
+            }
+            // Flushed here before it joins a batch, as another processor's
+            // purge covers only the processors it shoots down.
+            self.clear(address, count);
+            guard.state().lazy.defer(range)
+        };
+        match due {
+            Ok(false) => true,
+            Ok(true) => {
+                // A failed purge keeps the batch for the next one.
+                self.purge();
+                true
+            }
+            Err(range) => {
+                if !shootdown::retire(self.tsc_hz) {
+                    return false;
+                }
+                let mut guard = self.lock();
+                let state = guard.state();
+                finish_batch(&[range], &mut state.retiring, &mut state.free);
+                true
+            }
+        }
+    }
+
+    /// Retire every lazily removed range with one shootdown and free them.
+    /// False when a processor did not acknowledge: they wait for the next.
+    pub(crate) fn purge(&self) -> bool {
+        let batch = self.lock().state().lazy.take();
+        if batch.is_empty() {
+            return true;
+        }
+        // Requested after every range in the batch was cleared.
+        if !shootdown::retire(self.tsc_hz) {
+            self.lock().state().lazy.restore(batch);
+            return false;
+        }
+        let mut guard = self.lock();
+        let state = guard.state();
+        finish_batch(&batch, &mut state.retiring, &mut state.free);
         true
     }
 }
