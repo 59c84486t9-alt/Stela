@@ -53,6 +53,7 @@ impl Stack {
 impl Drop for Stack {
     fn drop(&mut self) {
         let pages = self.pages() as usize + GUARD_PAGES;
+        super::unmapped(super::Unmapped::Stacks);
         // A processor that kept the translation keeps the memory too.
         if self.window.remove(self.guard, pages) {
             self.window.release(self.guard, pages);

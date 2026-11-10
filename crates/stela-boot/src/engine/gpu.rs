@@ -48,7 +48,7 @@ use core::{
     ops::Range,
     pin::Pin,
     ptr::{self, addr_of},
-    sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering},
 };
 use stela_boot_core::page_window::{self, Cache};
 #[cfg(feature = "nvk")]
@@ -128,7 +128,7 @@ static HUB: AtomicPtr<Hub> = AtomicPtr::new(ptr::null_mut());
 static BOOT_PE: AtomicUsize = AtomicUsize::new(0);
 /// The processor the environment runs on.
 #[cfg(feature = "nvk")]
-static BOOT_CPU: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static BOOT_CPU: AtomicU32 = AtomicU32::new(0);
 
 /// End the boot PE's slices for Linux, through `hub`.
 pub(super) fn set_hub(hub: Arc<Hub>, pe: usize) {
@@ -524,6 +524,7 @@ impl Platform for Host {
     unsafe fn unmap_device(&self, address: *mut c_void) {
         let pages = self.devices.borrow_mut().remove(&(address as u64));
         if let Some(pages) = pages {
+            unmapped(Unmapped::Device);
             self.unmap(address as u64, pages);
         }
     }
@@ -537,6 +538,7 @@ impl Platform for Host {
     }
 
     unsafe fn unmap_pages(&self, address: *mut c_void, count: usize) {
+        unmapped(Unmapped::Pages);
         self.unmap(address as u64, count);
     }
 
@@ -1759,6 +1761,35 @@ struct PumpCounts {
     /// Ticks from work being ready until a pump took it, and the longest.
     delay: AtomicU64,
     delay_longest: AtomicU64,
+    /// The longest single step, which no budget ends: one Linux task run
+    /// until it sleeps. With the host's mapping shootdowns during it and the
+    /// posted calls (request code plus one) workers were performing as it
+    /// began.
+    step_longest: AtomicU64,
+    step_shootdowns: AtomicU64,
+    step_serving: [AtomicU32; 4],
+}
+
+/// Host page-window unmappings by their source since [`pump_report`]: Linux
+/// device memory (`iounmap`), Linux pages (`vfree`, `vunmap`), the C
+/// library's file mappings (`munmap`, fixed remaps) and task stacks. Each
+/// costs one shootdown of every other processor.
+static UNMAPS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+/// The [`UNMAPS`] sources.
+#[derive(Clone, Copy)]
+pub(super) enum Unmapped {
+    Device,
+    Pages,
+    #[cfg_attr(not(feature = "nvk"), allow(dead_code))]
+    Files,
+    #[cfg_attr(not(feature = "nvk"), allow(dead_code))]
+    Stacks,
+}
+
+/// Counts one page-window unmapping from `source`.
+pub(super) fn unmapped(source: Unmapped) {
+    UNMAPS[source as usize].fetch_add(1, Ordering::Relaxed);
 }
 
 static PUMPS: PumpCounts = PumpCounts {
@@ -1775,7 +1806,29 @@ static PUMPS: PumpCounts = PumpCounts {
     longest: AtomicU64::new(0),
     delay: AtomicU64::new(0),
     delay_longest: AtomicU64::new(0),
+    step_longest: AtomicU64::new(0),
+    step_shootdowns: AtomicU64::new(0),
+    step_serving: [const { AtomicU32::new(0) }; 4],
 };
+
+/// The shootdowns counted so far, for a difference across a step.
+fn shootdowns() -> u64 {
+    #[cfg(feature = "nvk")]
+    return crate::native_mmio::shootdown::count();
+    #[cfg(not(feature = "nvk"))]
+    0
+}
+
+/// Notes a step of `ticks` that began with `serving` and overlapped
+/// `shot` shootdowns, when it is the longest since the last report.
+fn note_step(ticks: u64, shot: u64, serving: [u32; 4]) {
+    if PUMPS.step_longest.fetch_max(ticks, Ordering::Relaxed) < ticks {
+        PUMPS.step_shootdowns.store(shot, Ordering::Relaxed);
+        for (into, code) in PUMPS.step_serving.iter().zip(serving) {
+            into.store(code, Ordering::Relaxed);
+        }
+    }
+}
 
 /// Since when the environment has had work ready, as a TSC value: events
 /// raised or its deadline passed.
@@ -1867,9 +1920,20 @@ pub(super) fn pump() {
             gpu.advance_children();
             #[cfg(feature = "nvk")]
             client::start(gpu)?;
+            #[cfg(feature = "nvk")]
+            let serving = client::serving();
+            #[cfg(not(feature = "nvk"))]
+            let serving = [0; 4];
+            let (step_started, shot) = (host::rdtsc(), shootdowns());
             if !runtime.step()? {
                 break;
             }
+            let now_shot = shootdowns();
+            note_step(
+                host::rdtsc().wrapping_sub(step_started),
+                now_shot.checked_sub(shot).unwrap_or(now_shot),
+                serving,
+            );
             steps += 1;
             if super::service::shutdown_pending() || host::rdtsc().wrapping_sub(started) >= budget {
                 if !gpu.events.pending.swap(true, Ordering::AcqRel) {
@@ -1931,7 +1995,11 @@ fn pump_waiting() {
 /// delay_longest_us=… next_us=… next_timer=…`: the pumps since the last
 /// report, by what let each run and why it was due, what they took, how long
 /// ready work waited for one, and Linux's next deadline with the function
-/// of its first timer-list timer, as an offset in this image.
+/// of its first timer-list timer, as an offset in this image. Then
+/// `step_longest_us=… step_shootdowns=… step_serving=…`: the longest single
+/// Linux step, the shootdowns during it and the posted calls being performed
+/// as it began (`-` for none), and `unmaps=device/pages/files/stacks`
+/// ([`UNMAPS`]).
 pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
     let gpu = installed()?;
     let take = |counter: &AtomicU64| counter.swap(0, Ordering::Relaxed);
@@ -1944,10 +2012,26 @@ pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
         u64::MAX => -1,
         next => micros(next.saturating_sub(host::rdtsc())) as i128,
     };
+    let mut serving = String::new();
+    for code in &PUMPS.step_serving {
+        let code = code.swap(0, Ordering::Relaxed);
+        if code != 0 {
+            if !serving.is_empty() {
+                serving.push('+');
+            }
+            serving.push_str(&format!("{:#x}", code.wrapping_sub(1)));
+        }
+    }
+    if serving.is_empty() {
+        serving.push('-');
+    }
+    let [device, pages, files, stacks] = UNMAPS.each_ref().map(take);
     Some(format!(
         "GPU PUMP runs={runs} quiet={} unmasked={} forced={} relaxed={} posted={} by_event={by_event} \
          by_deadline={by_deadline} idle={} deferred={} mean_us={} longest_us={} \
-         delay_mean_us={} delay_longest_us={} next_us={next_us} next_timer={}",
+         delay_mean_us={} delay_longest_us={} next_us={next_us} next_timer={} \
+         step_longest_us={} step_shootdowns={} step_serving={serving} \
+         unmaps={device}/{pages}/{files}/{stacks}",
         take(&PUMPS.quiet),
         take(&PUMPS.unmasked),
         take(&PUMPS.forced),
@@ -1960,6 +2044,8 @@ pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
         micros(delay.checked_div(runs).unwrap_or(0)),
         micros(take(&PUMPS.delay_longest)),
         next_timer(),
+        micros(take(&PUMPS.step_longest)),
+        take(&PUMPS.step_shootdowns),
     ))
 }
 

@@ -525,6 +525,7 @@ fn serve(gpu: &Installed, request: &Request) {
     if let Some(slot) = slot {
         slot.1.store(started, Ordering::Relaxed);
     }
+    let shot = crate::native_mmio::shootdown::count();
     // SAFETY: an original task entered in the canonical Linux owner. The
     // poster keeps the operation's inputs until it is done.
     let result = unsafe { perform(gpu, request.operation) };
@@ -532,7 +533,12 @@ fn serve(gpu: &Installed, request: &Request) {
         slot.0.store(0, Ordering::Relaxed);
     }
     count(&QUEUED, code, started.wrapping_sub(request.posted));
-    count(&SERVED, code, host::rdtsc().wrapping_sub(started));
+    let took = host::rdtsc().wrapping_sub(started);
+    count(&SERVED, code, took);
+    // A report between the two reads cleared the count.
+    let now_shot = crate::native_mmio::shootdown::count();
+    let during = now_shot.checked_sub(shot).unwrap_or(now_shot);
+    note_slowest(code, took, during);
     if request.complete(result) {
         // SAFETY: the same source task owns the Linux wait queue.
         unsafe { client::wake() };
@@ -871,6 +877,73 @@ static POSTED: Counts = [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU6
 /// boot CPU spends unless the request sleeps.
 static SERVED: Counts = [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; 64];
 
+/// Posted requests the service task performed since [`pool_report`] by
+/// request code: the TSC ticks of the longest one, and the host's mapping
+/// shootdowns while any of them ran, which a call that frees Linux mappings
+/// (`iounmap`, `vfree`) or sleeps while another task does causes.
+static SLOWEST: Counts = [const { (AtomicU32::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; 64];
+
+fn note_slowest(code: u32, ticks: u64, shootdowns: u64) {
+    let key = code.wrapping_add(1);
+    if let Some(slot) = SLOWEST.iter().find(|slot| {
+        match slot
+            .0
+            .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => true,
+            Err(claimed) => claimed == key,
+        }
+    }) {
+        slot.1.fetch_max(ticks, Ordering::Relaxed);
+        slot.2.fetch_add(shootdowns, Ordering::Relaxed);
+    }
+}
+
+/// `GPU SERVED LONGEST request:longest_us/shootdowns`: [`SLOWEST`] since the
+/// last call, longest first, cleared.
+fn slowest_line(tsc_hz: u64) -> Option<alloc::string::String> {
+    use core::fmt::Write;
+    const SHOWN: usize = 8;
+    let mut rows: Vec<_> = SLOWEST
+        .iter()
+        .filter_map(|slot| {
+            let longest = slot.1.swap(0, Ordering::Relaxed);
+            let shootdowns = slot.2.swap(0, Ordering::Relaxed);
+            (longest != 0).then(|| {
+                (
+                    slot.0.load(Ordering::Relaxed).wrapping_sub(1),
+                    longest,
+                    shootdowns,
+                )
+            })
+        })
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    rows.sort_unstable_by_key(|&(_, longest, _)| core::cmp::Reverse(longest));
+    let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+    let mut line = alloc::string::String::from("GPU SERVED LONGEST request:longest_us/shootdowns");
+    for &(request, longest, shootdowns) in rows.iter().take(SHOWN) {
+        let _ = write!(line, " {request:#x}:{}/{shootdowns}", micros(longest));
+    }
+    Some(line)
+}
+
+/// The request codes of up to four calls workers are performing now, each
+/// plus one, zero for none.
+pub(super) fn serving() -> [u32; 4] {
+    let mut codes = [0; 4];
+    let busy = SERVING
+        .iter()
+        .map(|slot| slot.0.load(Ordering::Relaxed))
+        .filter(|&code| code != 0);
+    for (into, code) in codes.iter_mut().zip(busy) {
+        *into = code;
+    }
+    codes
+}
+
 /// Posted requests a worker started since [`take_queued`] by request code:
 /// how many, and the TSC ticks from posting until a worker took each one,
 /// which is the poster's wait that is not the call's own work.
@@ -969,10 +1042,26 @@ pub(super) fn take_presents() -> [u64; 5] {
         .map(|value| value.swap(0, Ordering::Relaxed))
 }
 
+/// The worker pool's state when a call waits or runs long, then each
+/// request's longest call since the last report ([`slowest_line`]), one line
+/// each. On the boot CPU, between pumps.
+pub(super) fn pool_report(tsc_hz: u64) -> Option<alloc::string::String> {
+    let workers = workers_line(tsc_hz);
+    let slowest = slowest_line(tsc_hz);
+    match (workers, slowest) {
+        (Some(mut workers), Some(slowest)) => {
+            workers.push('\n');
+            workers.push_str(&slowest);
+            Some(workers)
+        }
+        (workers, slowest) => workers.or(slowest),
+    }
+}
+
 /// The worker pool's state when a call waits or runs long: its workers,
 /// idle and starting ones, queued calls with the oldest one's wait, and each
-/// call still running with how long it has. On the boot CPU, between pumps.
-pub(super) fn pool_report(tsc_hz: u64) -> Option<alloc::string::String> {
+/// call still running with how long it has.
+fn workers_line(tsc_hz: u64) -> Option<alloc::string::String> {
     use core::fmt::Write;
     let gpu = installed()?;
     let service = &gpu.service;

@@ -195,6 +195,7 @@ fn map_new(window: &Window, fd: c_int, offset: u64, count: u64) -> Result<u64, c
     let reserved = window.reserve(count as usize).ok_or(ENOMEM);
     let address = reserved.inspect_err(|_| with(|table| table.release(file)))?;
     if !install(window, address, &pages) {
+        super::unmapped(super::Unmapped::Files);
         // A processor that kept the translation keeps the pages too.
         if window.remove(address, count as usize) {
             window.release(address, count as usize);
@@ -256,6 +257,7 @@ fn map_fixed(
         }
         Ok(bound)
     })?;
+    super::unmapped(super::Unmapped::Files);
     if !window.remove(address, count as usize) {
         return Err(EBUSY);
     }
@@ -343,6 +345,7 @@ extern "C" fn stela_libc_file_munmap(address: *mut c_void, size: usize) -> c_int
         Some(Err(error)) => return error,
         Some(Ok(mapping)) => mapping,
     };
+    super::unmapped(super::Unmapped::Files);
     // A processor that kept the translation keeps the pages too.
     if gpu.window.remove(address, count as usize) {
         gpu.window.release(address, count as usize);
