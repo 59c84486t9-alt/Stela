@@ -8,8 +8,12 @@
 //! short entries, which every FAT driver writes beside a long name. A file
 //! comes back as the device extents of its cluster chain, cut to its size.
 //! Nothing is written, and a malformed volume or chain is refused.
+//! [`format`] holds the structures of a new volume.
 use crate::Result;
 use alloc::{format, string::String, vec, vec::Vec};
+use stela_contracts::bytes::{le16, le32};
+
+pub mod format;
 use core::fmt;
 use {stela_formats::payload::ReadAt, stela_formats::payload::pieces::Extent};
 
@@ -93,14 +97,6 @@ pub struct Fat32<R> {
     directory_sector: Vec<u8>,
 }
 
-fn u16_at(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([bytes[at], bytes[at + 1]])
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
-}
-
 /// The 11-byte directory form of an 8.3 name, upper case.
 fn short_name(name: &str) -> Option<[u8; 11]> {
     let (base, extension) = name.split_once('.').unwrap_or((name, ""));
@@ -127,19 +123,19 @@ impl<R: ReadAt> Fat32<R> {
         reader
             .read_at(0, &mut sector)
             .map_err(|e| FatError::Io(format!("{e:?}")))?;
-        if u16_at(&sector, 510) != BOOT_SIGNATURE {
+        if le16(&sector, 510) != BOOT_SIGNATURE {
             return Err(FatError::NotFat32("no boot sector signature"));
         }
-        let bytes_per_sector = u64::from(u16_at(&sector, 11));
+        let bytes_per_sector = u64::from(le16(&sector, 11));
         let sectors_per_cluster = u64::from(sector[13]);
-        let reserved = u64::from(u16_at(&sector, 14));
+        let reserved = u64::from(le16(&sector, 14));
         let fats = u64::from(sector[16]);
-        let root_entries = u16_at(&sector, 17);
-        let total16 = u64::from(u16_at(&sector, 19));
-        let fat16_size = u16_at(&sector, 22);
-        let total32 = u64::from(u32_at(&sector, 32));
-        let fat_size = u64::from(u32_at(&sector, 36));
-        let root = u32_at(&sector, 44);
+        let root_entries = le16(&sector, 17);
+        let total16 = u64::from(le16(&sector, 19));
+        let fat16_size = le16(&sector, 22);
+        let total32 = u64::from(le32(&sector, 32));
+        let fat_size = u64::from(le32(&sector, 36));
+        let root = le32(&sector, 44);
         if !matches!(bytes_per_sector, 512 | 1024 | 2048 | 4096) {
             return Err(FatError::NotFat32("bytes per sector"));
         }
@@ -208,7 +204,7 @@ impl<R: ReadAt> Fat32<R> {
                 .map_err(|e| FatError::Io(format!("{e:?}")))?;
             self.window_offset = Some(base);
         }
-        Ok(u32_at(&self.window, (offset - base) as usize) & CLUSTER_MASK)
+        Ok(le32(&self.window, (offset - base) as usize) & CLUSTER_MASK)
     }
 
     /// The extents of the chain from `first` holding `bytes` (`None`: the
@@ -306,9 +302,8 @@ impl<R: ReadAt> Fat32<R> {
                         stored[0] = ENTRY_FREE;
                     }
                     if stored.to_ascii_uppercase() == *name {
-                        let first =
-                            u32::from(u16_at(entry, 20)) << 16 | u32::from(u16_at(entry, 26));
-                        return Ok(Some((attributes, first, u32_at(entry, 28))));
+                        let first = u32::from(le16(entry, 20)) << 16 | u32::from(le16(entry, 26));
+                        return Ok(Some((attributes, first, le32(entry, 28))));
                     }
                 }
             }

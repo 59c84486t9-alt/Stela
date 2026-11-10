@@ -10,8 +10,9 @@ use std::{
     process::Command,
 };
 use {
-    stela_formats::sha256, stela_runtime::pc::gpt, stela_runtime::pc::gpt::Guid,
-    stela_runtime::pc::gpt::Partition, stela_runtime::pc::storage::pattern,
+    stela_formats::payload::gpt, stela_formats::payload::gpt::Guid,
+    stela_formats::payload::gpt::Partition, stela_formats::sha256,
+    stela_runtime::pc::storage::pattern,
 };
 
 const BLOCK: u64 = 512;
@@ -50,8 +51,8 @@ fn image(tag: u8) -> Result<Vec<u8>> {
         .iter()
         .zip(1u8..)
         .map(|((first, last, kind), index)| Partition {
-            kind: kind.parse().unwrap(),
-            unique: guid(tag, index),
+            type_guid: kind.parse().unwrap(),
+            unique_guid: guid(tag, index),
             first_lba: *first,
             last_lba: *last,
             attributes: 0,
@@ -61,11 +62,17 @@ fn image(tag: u8) -> Result<Vec<u8>> {
     let mut image: Vec<u8> = (0..BLOCKS * BLOCK)
         .map(|offset| offset as u8 ^ (offset >> 9) as u8 ^ 0xa5)
         .collect();
-    for (lba, bytes) in
-        gpt::format(BLOCKS, BLOCK as u32, guid(tag, 0), &partitions).map_err(anyhow::Error::msg)?
-    {
-        let start = (lba * BLOCK) as usize;
-        image[start..start + bytes.len()].copy_from_slice(&bytes);
+    let disk = gpt::Disk {
+        block_bytes: BLOCK,
+        blocks: BLOCKS,
+    };
+    let table = gpt::Table {
+        disk_guid: guid(tag, 0),
+        partitions,
+    };
+    for write in gpt::encode(disk, &table).map_err(|error| anyhow::anyhow!("{error}"))? {
+        let start = (write.lba * BLOCK) as usize;
+        image[start..start + write.bytes.len()].copy_from_slice(&write.bytes);
     }
     Ok(image)
 }

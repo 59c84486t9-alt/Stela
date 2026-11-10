@@ -1,26 +1,26 @@
 //! A FAT32 image of a directory tree, without a partition table, written
 //! directly so every host can make the boot volume of a large bundle.
 //!
-//! Layout per Microsoft's FAT specification (`fatgen103`): 32 reserved
-//! sectors (boot sector, FSInfo, backup boot sector at 6 and its FSInfo),
-//! two FATs, then clusters from 2. The root directory takes the first
-//! clusters; every directory and file then gets one contiguous chain, in
-//! tree order. Names that are not upper-case 8.3 carry long-name entries.
+//! The volume's layout, boot sector and FSInfo are the shared encoder's
+//! (`stela_runtime::pc::fat32::format`), as `stela setup` writes them. The
+//! root directory takes the first clusters; every directory and file then
+//! gets one contiguous chain, in tree order. Names that are not upper-case
+//! 8.3 carry long-name entries.
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::{self, File},
     io::{Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
+use stela_runtime::pc::fat32::format::{
+    ATTRIBUTE_VOLUME_ID as ATTR_VOLUME, BACKUP_BOOT_SECTOR, END_OF_CHAIN, FATS, Geometry,
+    MEDIA_ENTRY, ROOT_CLUSTER, volume_label,
+};
 
 const SECTOR: u64 = 512;
-const RESERVED_SECTORS: u64 = 32;
-const FATS: u64 = 2;
 const ENTRY: usize = 32;
-/// FAT32 needs at least this many clusters.
-const MIN_CLUSTERS: u64 = 65_525;
-const END_OF_CHAIN: u32 = 0x0fff_ffff;
-const ATTR_VOLUME: u8 = 0x08;
+/// The boot sector's volume serial number: fixed, so images repeat.
+const SERIAL: u32 = 0x5354_454c;
 const ATTR_DIRECTORY: u8 = 0x10;
 const ATTR_ARCHIVE: u8 = 0x20;
 const ATTR_LONG_NAME: u8 = 0x0f;
@@ -215,54 +215,13 @@ fn long_entries(name: &str, short: &[u8; 11]) -> Vec<[u8; ENTRY]> {
         .collect()
 }
 
-struct Geometry {
-    sectors: u64,
-    cluster_sectors: u64,
-    fat_sectors: u64,
-    clusters: u64,
-}
-
-impl Geometry {
-    fn new(bytes: u64) -> Result<Self> {
-        let sectors = bytes / SECTOR;
-        // The largest cluster, up to 32 KiB, that still leaves FAT32's
-        // minimum cluster count with room to spare.
-        let mut cluster_sectors = 64;
-        while cluster_sectors > 1 && sectors / cluster_sectors < MIN_CLUSTERS + 4096 {
-            cluster_sectors /= 2;
-        }
-        let fat_sectors = ((sectors / cluster_sectors + 2) * 4).div_ceil(SECTOR);
-        let clusters = (sectors - RESERVED_SECTORS - FATS * fat_sectors) / cluster_sectors;
-        ensure!(
-            clusters >= MIN_CLUSTERS,
-            "a FAT32 volume needs at least {MIN_CLUSTERS} clusters"
-        );
-        Ok(Self {
-            sectors,
-            cluster_sectors,
-            fat_sectors,
-            clusters,
-        })
-    }
-
-    fn cluster_bytes(&self) -> u64 {
-        self.cluster_sectors * SECTOR
-    }
-
-    fn offset(&self, cluster: u32) -> u64 {
-        (RESERVED_SECTORS
-            + FATS * self.fat_sectors
-            + (u64::from(cluster) - 2) * self.cluster_sectors)
-            * SECTOR
-    }
-}
-
 /// Write `image`, `bytes` long, a FAT32 volume labelled `label` holding
 /// `volume`'s tree.
 pub fn write(volume: &Path, image: &Path, bytes: u64, label: &str) -> Result<()> {
-    let geometry = Geometry::new(bytes)?;
+    let geometry = Geometry::new(bytes / SECTOR, SECTOR as u32)?;
+    let label = volume_label(label)?;
     let mut root = read_tree(volume, String::new())?;
-    let mut next = 2;
+    let mut next = ROOT_CLUSTER;
     allocate(&mut root, geometry.cluster_bytes(), &mut next, true);
     let used = u64::from(next) - 2;
     ensure!(
@@ -276,64 +235,24 @@ pub fn write(volume: &Path, image: &Path, bytes: u64, label: &str) -> Result<()>
     file.set_len(geometry.sectors * SECTOR)?;
 
     let mut fat = vec![0u32; geometry.clusters as usize + 2];
-    fat[0] = 0x0fff_fff8;
+    fat[0] = MEDIA_ENTRY;
     fat[1] = END_OF_CHAIN;
-    write_node(&mut file, &geometry, &mut fat, &root, 0, true, label)?;
+    write_node(&mut file, &geometry, &mut fat, &root, 0, true, &label)?;
     let fat_bytes: Vec<u8> = fat.iter().flat_map(|entry| entry.to_le_bytes()).collect();
     for copy in 0..FATS {
-        file.seek(SeekFrom::Start(
-            (RESERVED_SECTORS + copy * geometry.fat_sectors) * SECTOR,
-        ))?;
+        file.seek(SeekFrom::Start(geometry.fat_sector(copy) * SECTOR))?;
         file.write_all(&fat_bytes)?;
     }
 
-    let boot = boot_sector(&geometry, label);
-    let mut info = [0u8; SECTOR as usize];
-    info[..4].copy_from_slice(&0x4161_5252u32.to_le_bytes());
-    info[484..488].copy_from_slice(&0x6141_7272u32.to_le_bytes());
-    info[488..492].copy_from_slice(&((geometry.clusters - used) as u32).to_le_bytes());
-    info[492..496].copy_from_slice(&next.to_le_bytes());
-    info[508..512].copy_from_slice(&0xaa55_0000u32.to_le_bytes());
-    for base in [0, 6] {
+    let boot = geometry.boot_sector(0, &label, SERIAL)?;
+    let info = geometry.fsinfo(u32::try_from(geometry.clusters - used)?, next);
+    for base in [0, BACKUP_BOOT_SECTOR] {
         file.seek(SeekFrom::Start(base * SECTOR))?;
         file.write_all(&boot)?;
         file.write_all(&info)?;
     }
     file.sync_all()?;
     Ok(())
-}
-
-fn boot_sector(geometry: &Geometry, label: &str) -> [u8; SECTOR as usize] {
-    let mut boot = [0u8; SECTOR as usize];
-    boot[..3].copy_from_slice(&[0xeb, 0x58, 0x90]);
-    boot[3..11].copy_from_slice(b"STELA   ");
-    boot[11..13].copy_from_slice(&(SECTOR as u16).to_le_bytes());
-    boot[13] = geometry.cluster_sectors as u8;
-    boot[14..16].copy_from_slice(&(RESERVED_SECTORS as u16).to_le_bytes());
-    boot[16] = FATS as u8;
-    boot[21] = 0xf8;
-    boot[24..26].copy_from_slice(&63u16.to_le_bytes());
-    boot[26..28].copy_from_slice(&255u16.to_le_bytes());
-    boot[32..36].copy_from_slice(&(geometry.sectors as u32).to_le_bytes());
-    boot[36..40].copy_from_slice(&(geometry.fat_sectors as u32).to_le_bytes());
-    boot[44..48].copy_from_slice(&2u32.to_le_bytes());
-    boot[48..50].copy_from_slice(&1u16.to_le_bytes());
-    boot[50..52].copy_from_slice(&6u16.to_le_bytes());
-    boot[64] = 0x80;
-    boot[66] = 0x29;
-    boot[67..71].copy_from_slice(&0x5354_454cu32.to_le_bytes());
-    boot[71..82].copy_from_slice(&volume_label(label));
-    boot[82..90].copy_from_slice(b"FAT32   ");
-    boot[510..512].copy_from_slice(&[0x55, 0xaa]);
-    boot
-}
-
-fn volume_label(label: &str) -> [u8; 11] {
-    let mut bytes = [b' '; 11];
-    for (slot, byte) in bytes.iter_mut().zip(label.bytes()) {
-        *slot = byte.to_ascii_uppercase();
-    }
-    bytes
 }
 
 /// Chain `count` clusters from `first` in the FAT.
@@ -355,7 +274,7 @@ fn write_node(
     node: &Node,
     parent: u32,
     root: bool,
-    label: &str,
+    label: &[u8; 11],
 ) -> Result<()> {
     let cluster_bytes = geometry.cluster_bytes();
     match node {
@@ -369,7 +288,7 @@ fn write_node(
                 return Ok(());
             }
             chain(fat, *cluster, bytes.div_ceil(cluster_bytes));
-            file.seek(SeekFrom::Start(geometry.offset(*cluster)))?;
+            file.seek(SeekFrom::Start(geometry.cluster_offset(*cluster)))?;
             let copied = std::io::copy(&mut File::open(path)?, file)?;
             ensure!(copied == *bytes, "{} changed while copied", path.display());
         }
@@ -380,7 +299,7 @@ fn write_node(
             chain(fat, *cluster, length.div_ceil(cluster_bytes).max(1));
             let mut entries = Vec::new();
             if root {
-                entries.push(short_entry(&volume_label(label), ATTR_VOLUME, 0, 0));
+                entries.push(short_entry(label, ATTR_VOLUME, 0, 0));
             } else {
                 entries.push(short_entry(b".          ", ATTR_DIRECTORY, *cluster, 0));
                 entries.push(short_entry(b"..         ", ATTR_DIRECTORY, parent, 0));
@@ -405,7 +324,7 @@ fn write_node(
                 };
                 entries.push(short_entry(&short, attributes, child.cluster(), size));
             }
-            file.seek(SeekFrom::Start(geometry.offset(*cluster)))?;
+            file.seek(SeekFrom::Start(geometry.cluster_offset(*cluster)))?;
             file.write_all(&entries.concat())?;
             let own = if root { 0 } else { *cluster };
             for child in children {
@@ -464,9 +383,9 @@ mod tests {
         let bytes = fs::read(&image).unwrap();
         assert_eq!(&bytes[510..512], &[0x55, 0xaa]);
         assert_eq!(&bytes[6 * 512..6 * 512 + 90], &bytes[..90]);
-        let geometry = Geometry::new(520 << 20).unwrap();
+        let geometry = Geometry::new((520 << 20) / SECTOR, SECTOR as u32).unwrap();
         // The root opens with the label, then EFI's short entry.
-        let root = geometry.offset(2) as usize;
+        let root = geometry.cluster_offset(2) as usize;
         assert_eq!(&bytes[root..root + 11], b"STELA      ");
         assert_eq!(&bytes[root + 32..root + 43], b"EFI        ");
         // The kernel's bytes lie in one run of clusters.
@@ -481,8 +400,8 @@ mod tests {
     #[test]
     fn geometry_keeps_fat32_cluster_counts() {
         for bytes in [520u64 << 20, 2300 << 20, 30 << 30] {
-            let geometry = Geometry::new(bytes).unwrap();
-            assert!(geometry.clusters >= MIN_CLUSTERS, "{bytes}");
+            let geometry = Geometry::new(bytes / SECTOR, SECTOR as u32).unwrap();
+            assert!(geometry.clusters >= 65_525, "{bytes}");
             assert!(geometry.cluster_sectors <= 64);
             assert!((geometry.clusters + 2) * 4 <= geometry.fat_sectors * SECTOR);
         }
