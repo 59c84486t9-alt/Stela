@@ -19,6 +19,7 @@
 #include "llvm-c/Transforms/PassBuilder.h"
 #include "util/hash_table.h"
 #include "util/ralloc.h"
+#include "util/set.h"
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -7743,6 +7744,102 @@ promote_memory(struct translator *t, LLVMValueRef fn)
    return true;
 }
 
+/* Whether a terminator can branch along successor s: a conditional branch on
+ * a constant takes one edge only, and what only the other reaches never runs
+ * (folding constants leaves such branches, with poison on the dead side). */
+static bool
+edge_taken(LLVMValueRef term, unsigned s)
+{
+   if (!LLVMIsACondBrInst(term))
+      return true;
+   LLVMValueRef condition = LLVMGetCondition(term);
+   return !LLVMIsAConstantInt(condition) ||
+          (LLVMConstIntGetZExtValue(condition) != 0) == (s == 0);
+}
+
+/* Whether from can branch to to. */
+static bool
+edge_to(LLVMBasicBlockRef from, LLVMBasicBlockRef to)
+{
+   LLVMValueRef term = LLVMGetBasicBlockTerminator(from);
+   unsigned successors = term ? LLVMGetNumSuccessors(term) : 0;
+   for (unsigned s = 0; s < successors; s++) {
+      if (LLVMGetSuccessor(term, s) == to && edge_taken(term, s))
+         return true;
+   }
+   return false;
+}
+
+/* Refuses a call, on a path the entry can take, of a visible function the
+ * module references and no linked module defines. Such a call cannot run,
+ * and what it would have read is left in memory, where a pointer it was
+ * passed (a thread struct of buffer addresses, as MPS kernels pass their
+ * stitched functions) would otherwise be refused first. Branches on
+ * constants take only their taken edge. */
+static bool
+linked_references(struct translator *t, LLVMValueRef fn)
+{
+   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
+   unsigned count;
+   if (!stela_air_named_md(&t->metadata, "air.visible_function_references", nodes, &count))
+      return false;
+   LLVMValueRef unlinked[AIR_MAX_METADATA_OPERANDS];
+   unsigned unlinked_count = 0;
+   for (unsigned i = 0; i < count; i++) {
+      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+      unsigned field_count;
+      if (!stela_air_md_node(&t->metadata, nodes[i], fields, &field_count))
+         return false;
+      if (field_count == 3 && fields[1] && LLVMIsAFunction(fields[1]) &&
+          LLVMIsDeclaration(fields[1]))
+         unlinked[unlinked_count++] = fields[1];
+   }
+   if (!unlinked_count)
+      return true;
+   unsigned blocks = LLVMCountBasicBlocks(fn);
+   LLVMBasicBlockRef *stack = malloc(sizeof(*stack) * (blocks ? blocks : 1));
+   struct set *seen = _mesa_pointer_set_create(NULL);
+   if (!stack || !seen) {
+      free(stack);
+      _mesa_set_destroy(seen, NULL);
+      return fail(t, STELA_AIR_ALLOCATION, "visible function reference walk allocation failed");
+   }
+   unsigned depth = 0;
+   stack[depth++] = LLVMGetEntryBasicBlock(fn);
+   _mesa_set_add(seen, stack[0]);
+   bool linked = true;
+   while (linked && depth) {
+      LLVMBasicBlockRef block = stack[--depth];
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); linked && inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         LLVMValueRef callee = LLVMIsACallInst(inst) ? LLVMGetCalledValue(inst) : NULL;
+         for (unsigned i = 0; callee && i < unlinked_count; i++) {
+            if (callee != unlinked[i])
+               continue;
+            size_t length;
+            const char *name = LLVMGetValueName2(callee, &length);
+            linked = fail(t, STELA_AIR_ARGUMENT, "visible function %.*s is not linked",
+                          (int)MIN2(length, 160), name);
+            break;
+         }
+      }
+      LLVMValueRef terminator = LLVMGetBasicBlockTerminator(block);
+      unsigned successors = terminator ? LLVMGetNumSuccessors(terminator) : 0;
+      for (unsigned i = 0; i < successors; i++) {
+         if (!edge_taken(terminator, i))
+            continue;
+         LLVMBasicBlockRef next = LLVMGetSuccessor(terminator, i);
+         if (!_mesa_set_search(seen, next)) {
+            _mesa_set_add(seen, next);
+            stack[depth++] = next;
+         }
+      }
+   }
+   free(stack);
+   _mesa_set_destroy(seen, NULL);
+   return linked;
+}
+
 static struct air_block *
 cfg_block(struct translator *t, LLVMBasicBlockRef llvm)
 {
@@ -7861,6 +7958,30 @@ expand_constant_expressions(struct translator *t, LLVMValueRef fn)
    return true;
 }
 
+/* Refuses a reachable call of an intrinsic of an Apple GPU ISA (llvm.agx*,
+ * such as agx3's matrix-unit gemm and element-masked loads): those name
+ * one hardware generation's instructions, whose operand layouts AIR does
+ * not define, rather than an AIR operation. Found first, it is named
+ * instead of a wider vector or PHI it feeds. */
+static bool
+isa_intrinsics_absent(struct translator *t)
+{
+   for (unsigned i = 0; i < t->reachable_count; i++) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(t->work[i]->llvm); inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         LLVMValueRef callee = LLVMIsACallInst(inst) ? LLVMGetCalledValue(inst) : NULL;
+         if (!callee || !LLVMIsAFunction(callee))
+            continue;
+         size_t length;
+         const char *name = LLVMGetValueName2(callee, &length);
+         if (length > 8 && !memcmp(name, "llvm.agx", 8))
+            return fail(t, STELA_AIR_INSTRUCTION, "unsupported Apple GPU ISA intrinsic %.*s",
+                        (int)MIN2(length, 160), name);
+      }
+   }
+   return true;
+}
+
 static bool
 cfg_prepare(struct translator *t, LLVMValueRef fn)
 {
@@ -7893,19 +8014,23 @@ cfg_prepare(struct translator *t, LLVMValueRef fn)
    for (unsigned current = 0; current < t->reachable_count; current++) {
       LLVMValueRef term = LLVMGetBasicBlockTerminator(t->work[current]->llvm);
       LLVMOpcode op = LLVMGetInstructionOpcode(term);
-      if (op != LLVMRet && op != LLVMUncondBr && op != LLVMCondBr)
+      /* An entry that is unreachable runs nothing defined at all. */
+      if ((op != LLVMRet && op != LLVMUnreachable && op != LLVMUncondBr && op != LLVMCondBr) ||
+          (op == LLVMUnreachable && !current))
          return fail(t, STELA_AIR_CONTROL_FLOW, "unsupported AIR terminator %u", op);
       for (unsigned s = 0; s < LLVMGetNumSuccessors(term); s++) {
          struct air_block *next = cfg_block(t, LLVMGetSuccessor(term, s));
          if (!next)
             return fail(t, STELA_AIR_CONTROL_FLOW, "branch leaves AIR entry");
+         if (!edge_taken(term, s))
+            continue;
          if (!next->reachable) {
             next->reachable = true;
             t->work[t->reachable_count++] = next;
          }
       }
    }
-   return true;
+   return isa_intrinsics_absent(t);
 }
 
 static bool
@@ -7980,9 +8105,12 @@ pointer_dependency(struct translator *t, const struct pointer_node *node, unsign
       return LLVMGetOperand(node->llvm, index + 1);
    if (LLVMGetInstructionOpcode(node->llvm) != LLVMPHI)
       return LLVMGetOperand(node->llvm, 0);
-   struct air_block *pred = cfg_block(t, LLVMGetIncomingBlock(node->llvm, index));
+   LLVMBasicBlockRef from = LLVMGetIncomingBlock(node->llvm, index);
+   struct air_block *pred = cfg_block(t, from);
    /* LLVM verification has already established entry-local predecessor edges. */
-   return pred && pred->reachable ? LLVMGetIncomingValue(node->llvm, index) : NULL;
+   return pred && pred->reachable &&
+          edge_to(from, LLVMGetInstructionParent(node->llvm)) ?
+          LLVMGetIncomingValue(node->llvm, index) : NULL;
 }
 
 /* Resolve one SCC only from already-proven outgoing dependencies. In
@@ -8889,10 +9017,15 @@ cfg_emit(struct translator *t)
          if (!instruction(t, term))
             return false;
          nir_goto(&t->b, t->exit);
+      } else if (op == LLVMUnreachable) {
+         /* Reaching it is undefined, so the invocation may as well end. */
+         nir_goto(&t->b, t->exit);
       } else {
          struct air_block *yes = cfg_block(t, LLVMGetSuccessor(term, 0));
-         if (op == LLVMUncondBr) {
+         if (op == LLVMUncondBr || !edge_taken(term, 1)) {
             nir_goto(&t->b, yes->start);
+         } else if (!edge_taken(term, 0)) {
+            nir_goto(&t->b, cfg_block(t, LLVMGetSuccessor(term, 1))->start);
          } else {
             nir_def *condition = get_value(t, LLVMGetCondition(term));
             if (!condition || condition->num_components != 1 || condition->bit_size != 1)
@@ -8920,8 +9053,10 @@ cfg_emit(struct translator *t)
             struct air_block *pred = cfg_block(t, LLVMGetIncomingBlock(inst, s));
             if (!pred)
                return fail(t, STELA_AIR_CONTROL_FLOW, "PHI predecessor leaves AIR entry");
-            if (!pred->reachable)
-               continue; /* No NIR edge exists for an unreachable LLVM block. */
+            /* No NIR edge exists from an unreachable LLVM block, or along a
+             * branch its constant condition never takes. */
+            if (!pred->reachable || !edge_to(pred->llvm, block->llvm))
+               continue;
             LLVMValueRef incoming = LLVMGetIncomingValue(inst, s);
             if (pred->incoming_phi == inst) {
                if (pred->incoming_value != incoming)
@@ -9224,7 +9359,7 @@ translate(const void *bitcode, size_t size, const char *entry,
                  !stela_air_fold_absent(&t.metadata, fn, t.render.arguments.arguments,
                                         t.render.arguments.count)))
       goto done;
-   if (!cfg_prepare(&t, fn))
+   if (!linked_references(&t, fn) || !cfg_prepare(&t, fn))
       goto done;
    t.entry = fn;
    if (!workgroup_within(&t, t.render.entry.max_threads))

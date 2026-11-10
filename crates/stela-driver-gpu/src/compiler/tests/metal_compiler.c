@@ -2385,6 +2385,225 @@ static const char *stitching_kernel =
    "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
    " !\"air.arg_name\", !\"tid\"}\n";
 
+/* A kernel that keeps a generic pointer to its buffer in a thread struct and
+ * passes the struct to a visible function another module defines, as MPS's
+ * NDArray kernels pass their stitched functions a _MPSKernelInOut. */
+static const char *inout_kernel =
+   "%inout = type { ptr addrspace(8), i64 }\n"
+   "declare float @read_first.MTL_VISIBLE_FN_REF(ptr) section \"air.externally_defined\"\n"
+   "define void @passes_inout(ptr addrspace(1) %data, ptr addrspace(1) %out, i32 %tid) {\n"
+   "%s = alloca %inout, align 8\n"
+   "%g = addrspacecast ptr addrspace(1) %data to ptr addrspace(8)\n"
+   "%p = getelementptr inbounds %inout, ptr %s, i64 0, i32 0\n"
+   "store ptr addrspace(8) %g, ptr %p, align 8\n"
+   "%n = getelementptr inbounds %inout, ptr %s, i64 0, i32 1\n"
+   "store i64 4, ptr %n, align 8\n"
+   "%v = call float @read_first.MTL_VISIBLE_FN_REF(ptr %s)\n"
+   "%i = zext i32 %tid to i64\n"
+   "%o = getelementptr inbounds float, ptr addrspace(1) %out, i64 %i\n"
+   "store float %v, ptr addrspace(1) %o, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n!air.visible_function_references = !{!5}\n"
+   "!2 = !{ptr @passes_inout, !3, !4}\n!3 = !{}\n!4 = !{!40, !41, !42}\n"
+   "!5 = !{!\"air.visible_function_reference\", ptr @read_first.MTL_VISIBLE_FN_REF,"
+   " !\"read_first\"}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"float\", !\"air.arg_name\", !\"out\"}\n"
+   "!42 = !{i32 2, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
+/* The visible function it calls: the first element through the struct's
+ * pointer. */
+static const char *inout_reader =
+   "%inout = type { ptr addrspace(8), i64 }\n"
+   "define float @read_first(ptr %s) {\n"
+   "%p = getelementptr inbounds %inout, ptr %s, i64 0, i32 0\n"
+   "%g = load ptr addrspace(8), ptr %p, align 8\n"
+   "%d = addrspacecast ptr addrspace(8) %g to ptr addrspace(1)\n"
+   "%v = load float, ptr addrspace(1) %d, align 4\nret float %v\n}\n"
+   "!air.visible = !{}\n";
+
+/* A pointer a thread struct holds reaches the linked function that reads
+ * it; without that function, the refusal names it. */
+static void
+thread_structs_carry_pointers_to_linked_functions(void)
+{
+   LLVMMemoryBufferRef reader = bitcode(inout_reader);
+   const struct stela_air_module modules[] = {
+      {LLVMGetBufferStart(reader), LLVMGetBufferSize(reader)},
+   };
+   const struct stela_metal_specialization linked = {
+      .workgroup_size = {64, 1, 1}, .modules = modules, .module_count = 1,
+   };
+   struct stela_air_error error = {0};
+   nir_shader *shader = compile(inout_kernel, "passes_inout", &linked, &error);
+   if (!shader)
+      fprintf(stderr, "passes_inout: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   /* The struct is gone: two binding addresses, then the read goes
+    * straight to the buffer. */
+   assert(count_intrinsic(shader, nir_intrinsic_load_global) == 3);
+   assert(count_intrinsic(shader, nir_intrinsic_store_global) == 1);
+   assert(!count_intrinsic(shader, nir_intrinsic_load_deref) &&
+          !count_intrinsic(shader, nir_intrinsic_store_deref));
+   stela_metal_release(shader);
+
+   const struct stela_metal_specialization unlinked = {.workgroup_size = {64, 1, 1}};
+   assert(!compile(inout_kernel, "passes_inout", &unlinked, &error));
+   assert(error.kind == STELA_AIR_ARGUMENT &&
+          !strcmp(error.detail, "visible function read_first is not linked"));
+   LLVMDisposeMemoryBuffer(reader);
+}
+
+/* A kernel whose path past a check LLVM proved impossible is unreachable. */
+static const char *unreachable_kernel =
+   "define void @trusts(ptr addrspace(1) %data, i32 %tid) {\n"
+   "entry:\n%big = icmp ugt i32 %tid, 1000\nbr i1 %big, label %never, label %store\n"
+   "never:\nunreachable\n"
+   "store:\nstore i32 %tid, ptr addrspace(1) %data, align 4\nret void\n}\n"
+   "!air.kernel = !{!2}\n"
+   "!2 = !{ptr @trusts, !3, !4}\n!3 = !{}\n!4 = !{!40, !41}\n"
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read_write\","
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\","
+   " i32 4, !\"air.arg_type_name\", !\"int\", !\"air.arg_name\", !\"data\"}\n"
+   "!41 = !{i32 1, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","
+   " !\"air.arg_name\", !\"tid\"}\n";
+
+/* Reaching unreachable is undefined: the invocation ends there. */
+static void
+unreachable_paths_end_the_invocation(void)
+{
+   const struct stela_metal_specialization specialization = {.workgroup_size = {64, 1, 1}};
+   struct stela_air_error error = {0};
+   nir_shader *shader = compile(unreachable_kernel, "trusts", &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "trusts: %u %s\n", error.kind, error.detail);
+   assert(shader && count_intrinsic(shader, nir_intrinsic_store_global) == 1);
+   stela_metal_release(shader);
+}
+
+/* A file's bytes, or NULL. */
+static void *
+read_file(const char *path, size_t *size)
+{
+   FILE *file = fopen(path, "rb");
+   if (!file)
+      return NULL;
+   fseek(file, 0, SEEK_END);
+   *size = (size_t)ftell(file);
+   fseek(file, 0, SEEK_SET);
+   void *bytes = malloc(*size ? *size : 1);
+   bool read = bytes && fread(bytes, 1, *size, file) == *size;
+   fclose(file);
+   if (!read) {
+      free(bytes);
+      return NULL;
+   }
+   return bytes;
+}
+
+/* Function constant values as INDEX=HEX,...; "-" for none. */
+static unsigned
+parse_constants(const char *text, struct stela_air_constant_value *values, uint8_t (*bytes)[16])
+{
+   unsigned count = 0;
+   while (text && *text && *text != '-') {
+      unsigned index = strtoul(text, (char **)&text, 10);
+      assert(*text == '=');
+      text++;
+      unsigned size = 0;
+      while (isxdigit((unsigned char)text[0]) && isxdigit((unsigned char)text[1]) && size < 16) {
+         char pair[3] = {text[0], text[1], 0};
+         bytes[count][size++] = (uint8_t)strtoul(pair, NULL, 16);
+         text += 2;
+      }
+      values[count] = (struct stela_air_constant_value){index, bytes[count], size};
+      count++;
+      if (*text == ',')
+         text++;
+   }
+   return count;
+}
+
+/* Oracle: MPS's ndArrayIdentity, which passes its stitched functions a
+ * thread _MPSKernelInOut holding the generic pointer to its buffer array,
+ * with MetalFX's values. STELA_TEST_MPS_FUSED names a directory of Apple
+ * output, never committed: ndArrayIdentity.bc, stitched.bc and a
+ * manifest.txt whose `source PATH NAME VALUES` lines name the modules the
+ * stitched one calls, each found by its file name in the directory. */
+static void
+mps_identity_links_its_stitched_functions(void)
+{
+   const char *directory = getenv("STELA_TEST_MPS_FUSED");
+   if (!directory)
+      return;
+   char path[4096];
+   size_t size, kernel_size;
+   snprintf(path, sizeof(path), "%s/ndArrayIdentity.bc", directory);
+   void *kernel = read_file(path, &kernel_size);
+   assert(kernel);
+   static struct stela_air_module modules[64];
+   static struct stela_air_constant_value values[64][32];
+   static uint8_t bytes[64][32][16];
+   static char names[64][256];
+   unsigned count = 0;
+   snprintf(path, sizeof(path), "%s/stitched.bc", directory);
+   modules[count].bitcode = read_file(path, &modules[count].size);
+   assert(modules[count].bitcode);
+   count++;
+   snprintf(path, sizeof(path), "%s/manifest.txt", directory);
+   FILE *manifest = fopen(path, "r");
+   assert(manifest);
+   char line[4096];
+   while (fgets(line, sizeof(line), manifest)) {
+      char source[512], function[256], constants[2048];
+      if (sscanf(line, "source %511s %255s %2047s", source, function, constants) != 3)
+         continue;
+      assert(count < ARRAY_SIZE(modules));
+      const char *file = strrchr(source, '/') ? strrchr(source, '/') + 1 : source;
+      unsigned copy = 0;
+      for (unsigned i = 1; i < count; i++)
+         copy += !strcmp(names[i], file);
+      snprintf(names[count], sizeof(names[count]), "%s", file);
+      snprintf(path, sizeof(path), "%s/%s", directory, file);
+      modules[count] = (struct stela_air_module){
+         .bitcode = read_file(path, &size), .size = size, .constants = values[count],
+         .constant_count = parse_constants(constants, values[count], bytes[count]), .copy = copy,
+      };
+      assert(modules[count].bitcode);
+      count++;
+   }
+   fclose(manifest);
+   /* MetalFX's: two buffers, an identity map. */
+   struct stela_air_constant_value own[2];
+   uint8_t own_bytes[2][16];
+   unsigned own_count = parse_constants("122=02000000,124=00000000", own, own_bytes);
+   struct stela_metal_target driver = target;
+   driver.max_instructions = 1u << 20;
+   struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .constants = own, .constant_count = own_count,
+      .modules = modules, .module_count = count,
+   };
+   struct stela_air_error error = {0};
+   nir_shader *shader = stela_metal_compile(kernel, kernel_size, "ndArrayIdentity", &driver,
+                                            &specialization, &error);
+   if (!shader)
+      fprintf(stderr, "ndArrayIdentity: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   stela_metal_release(shader);
+   /* Unlinked, the refusal names a stitched function, not the struct. */
+   specialization.module_count = 0;
+   assert(!stela_metal_compile(kernel, kernel_size, "ndArrayIdentity", &driver, &specialization,
+                               &error));
+   assert(error.kind == STELA_AIR_ARGUMENT && strstr(error.detail, "Primary_f is not linked"));
+   for (unsigned i = 0; i < count; i++)
+      free((void *)modules[i].bitcode);
+   free(kernel);
+}
+
 /* Keeps the bitcode of LLVM's wrapper for a Darwin target, as `metal/library.rs`
  * reads it from a library. */
 static void
@@ -3809,6 +4028,237 @@ buffer_arrays_bind_consecutive_buffers(void)
    stela_metal_release(shader);
 }
 
+/* Copies src[tid % n] where n > tid, as a guard on a function constant
+ * divisor reads; past it, threads below 2 go through a branch on false
+ * and one on true. With n zero, folding leaves the copy behind `br i1
+ * false` with a poison address, and the ISA call stays behind `br i1 true`
+ * unless ISA_BRANCH makes its path live. */
+#define DIVIDED(isa_branch)                                                                    \
+   "@n = external addrspace(2) constant i32\n"                                                 \
+   "declare i32 @llvm.agx3.example(i32)\n"                                                     \
+   "define void @divided(ptr addrspace(1) %src, ptr addrspace(1) %dst, i32 %tid) {\n"           \
+   "entry:\n%n = load i32, ptr addrspace(2) @n, align 4\n"                                     \
+   "%some = icmp ugt i32 %n, %tid\nbr i1 %some, label %copy, label %join\n"                    \
+   "copy:\n%r = urem i32 %tid, %n\n%i = zext i32 %r to i64\n"                                  \
+   "%s = getelementptr inbounds i32, ptr addrspace(1) %src, i64 %i\n"                          \
+   "%v = load i32, ptr addrspace(1) %s, align 4\nbr label %join\n"                             \
+   "join:\n%w = phi i32 [ %v, %copy ], [ 7, %entry ]\n"                                        \
+   "%small = icmp ult i32 %tid, 2\nbr i1 %small, label %a, label %x\n"                         \
+   "a:\nbr i1 false, label %x, label %y\n"                                                     \
+   "y:\nbr i1 " isa_branch ", label %x, label %isa\n"                                          \
+   "isa:\n%e = call i32 @llvm.agx3.example(i32 %w)\nbr label %x\n"                             \
+   "x:\n%z = phi i32 [ %w, %join ], [ 100, %a ], [ 50, %y ], [ %e, %isa ]\n"                   \
+   "%j = zext i32 %tid to i64\n"                                                               \
+   "%d = getelementptr inbounds i32, ptr addrspace(1) %dst, i64 %j\n"                          \
+   "store i32 %z, ptr addrspace(1) %d, align 4\nret void\n}\n"                                 \
+   "!air.kernel = !{!2}\n"                                                                     \
+   "!2 = !{ptr @divided, !3, !4}\n!3 = !{}\n!4 = !{!40, !41, !42}\n"                           \
+   "!40 = !{i32 0, !\"air.buffer\", !\"air.location_index\", i32 0, i32 1, !\"air.read\","      \
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\"," \
+   " i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"src\"}\n"                 \
+   "!41 = !{i32 1, !\"air.buffer\", !\"air.location_index\", i32 1, i32 1, !\"air.read_write\","\
+   " !\"air.address_space\", i32 1, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\"," \
+   " i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"dst\"}\n"                 \
+   "!42 = !{i32 2, !\"air.thread_position_in_grid\", !\"air.arg_type_name\", !\"uint\","       \
+   " !\"air.arg_name\", !\"tid\"}\n"                                                           \
+   "!air.function_constants = !{!50}\n"                                                        \
+   "!50 = !{ptr addrspace(2) @n, !\"uint\", !\"n\", i32 0, i1 true}\n"
+
+/* Runs thread tid of workgroup 0 with src at SOURCE (16 bytes of `fill`
+ * from 10 up, or `fill` itself when bytes) and the second buffer at
+ * DESTINATION: its stores into trace, and their count. */
+static unsigned
+run_two_buffers(nir_shader *shader, uint32_t tid, bool bytes, uint8_t fill,
+                struct air_effect_store *trace, unsigned capacity)
+{
+   enum { SOURCE = 0x100, DESTINATION = 0x200 };
+   static uint8_t memory[0x900];
+   uint8_t push[STELA_METAL_PUSH_BYTES] = {0};
+   memset(memory, 0, sizeof(memory));
+   put64(push + STELA_METAL_PUSH_TABLES, BASE + TABLE);
+   put64(push + STELA_METAL_PUSH_ARGUMENTS, BASE + DISPATCH);
+   put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES, BASE + SOURCE);
+   put64(memory + TABLE + STELA_METAL_TABLE_BUFFER_ADDRESSES + 8, BASE + DESTINATION);
+   for (unsigned i = 0; i < 3; i++)
+      put32(memory + DISPATCH + STELA_METAL_DISPATCH_SHAPE + 4 * i, 1);
+   if (bytes)
+      memset(memory + SOURCE, fill, 0x100);
+   else
+      for (unsigned i = 0; i < 4; i++)
+         put32(memory + SOURCE + 4 * i, fill + i);
+   const struct air_effect_environment environment = {
+      .base = BASE, .bytes = memory, .size = sizeof(memory), .push = push,
+      .push_size = sizeof(push), .local_index = tid,
+   };
+   const nir_lower_compute_system_values_options linear = {.lower_cs_local_id_to_index = true};
+   nir_lower_compute_system_values(shader, &linear);
+   nir_lower_vars_to_ssa(shader);
+   nir_lower_undef_to_zero(shader, NULL);
+   nir_opt_dce(shader);
+   struct air_effect_run run =
+      air_effect_execute_in(shader, 1u << 20, trace, capacity, &environment);
+   if (run.status != AIR_EFFECT_COMPLETE)
+      fprintf(stderr, "two buffers: %s\n", run.detail);
+   assert(run.status == AIR_EFFECT_COMPLETE);
+   for (unsigned i = 0; i < run.stores; i++)
+      trace[i].address -= BASE + DESTINATION;
+   return run.stores;
+}
+
+/* What divided stores for thread tid with constant n, or ~0u if refused. */
+static uint32_t
+divided_result(const char *fixture, uint32_t n, uint32_t tid, struct stela_air_error *error)
+{
+   const struct stela_air_constant_value value = {0, &n, 4};
+   const struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .constants = &value, .constant_count = 1,
+   };
+   nir_shader *shader = compile(fixture, "divided", &specialization, error);
+   if (!shader)
+      return ~0u;
+   struct air_effect_store trace[1];
+   unsigned stores = run_two_buffers(shader, tid, false, 10, trace, 1);
+   stela_metal_release(shader);
+   assert(stores == 1 && trace[0].address == 4 * tid && trace[0].bits == 32);
+   return trace[0].values[0].u32;
+}
+
+/* A branch on a constant takes one edge: what only the other reaches, such
+ * as a folded zero divisor's poison address or an ISA intrinsic, is not
+ * translated, and a PHI takes no value along it. */
+static void
+constant_branches_take_one_edge(void)
+{
+   struct stela_air_error error = {0};
+   const char *dead = DIVIDED("true"), *live = DIVIDED("%some");
+   uint32_t result = divided_result(dead, 0, 0, &error);
+   if (result == ~0u)
+      fprintf(stderr, "divided: %u %s\n", error.kind, error.detail);
+   assert(result == 50);
+   assert(divided_result(dead, 0, 3, &error) == 7);
+   assert(divided_result(dead, 4, 0, &error) == 50);
+   assert(divided_result(dead, 4, 3, &error) == 13);
+   assert(divided_result(dead, 4, 5, &error) == 7);
+   /* Reachable, the ISA intrinsic is named. */
+   assert(divided_result(live, 4, 0, &error) == ~0u);
+   assert(error.kind == STELA_AIR_INSTRUCTION &&
+          !strcmp(error.detail, "unsupported Apple GPU ISA intrinsic llvm.agx3.example"));
+}
+
+/* Compiles a module of STELA_TEST_METALFX_AIR with one constant list. */
+static nir_shader *
+metalfx_kernel(const char *directory, const char *name,
+               const struct stela_air_constant_value *values, unsigned count,
+               struct stela_air_error *error)
+{
+   char path[4096];
+   size_t size;
+   snprintf(path, sizeof(path), "%s/%s.air", directory, name);
+   void *air = read_file(path, &size);
+   assert(air);
+   struct stela_metal_specialization specialization = {
+      .workgroup_size = {64, 1, 1}, .constants = values, .constant_count = count,
+   };
+   /* Each constexpr sampler state a sampler of its own, as the device
+    * gives them. */
+   static uint64_t states[STELA_METAL_SAMPLER_STATES];
+   static struct stela_air_constexpr_sampler samplers[STELA_METAL_SAMPLER_STATES];
+   *error = (struct stela_air_error){0};
+   assert(stela_metal_sampler_states(air, size, states, &specialization.sampler_count, error));
+   for (unsigned i = 0; i < specialization.sampler_count; i++)
+      samplers[i] = (struct stela_air_constexpr_sampler){states[i], (uint64_t)i << 32 | i};
+   specialization.samplers = samplers;
+   nir_shader *shader = stela_metal_compile(air, size, name, &target, &specialization, error);
+   if (!shader)
+      fprintf(stderr, "%s: %u %s\n", name, error->kind, error->detail);
+   free(air);
+   return shader;
+}
+
+/* Oracle: MetalFX's kernels that use the constructs above.
+ * STELA_TEST_METALFX_AIR names a directory of its default.metallib's
+ * modules, one NAME.air each, never committed. */
+static void
+metalfx_kernels_compile(void)
+{
+   const char *directory = getenv("STELA_TEST_METALFX_AIR");
+   if (!directory)
+      return;
+   struct stela_air_error error;
+   /* Zero channels leave no thread a copy: the guard folds to false over
+    * a zero divisor. One channel copies a byte. */
+   uint16_t zero = 0, one = 1;
+   const struct stela_air_constant_value none[] = {{0, &zero, 2}, {1, &zero, 2}};
+   const struct stela_air_constant_value single[] = {{0, &one, 2}, {1, &one, 2}};
+   struct air_effect_store trace[2];
+   nir_shader *shader = metalfx_kernel(directory, "DepthToSpaceWeights", none, 2, &error);
+   assert(shader && run_two_buffers(shader, 0, true, 0x5a, trace, 2) == 0);
+   stela_metal_release(shader);
+   shader = metalfx_kernel(directory, "DepthToSpaceWeights", single, 2, &error);
+   assert(shader && run_two_buffers(shader, 0, true, 0x5a, trace, 2) == 1);
+   assert(trace[0].bits == 8 && trace[0].values[0].u8 == 0x5a);
+   stela_metal_release(shader);
+   /* Motion vector splats: unsigned maxima at ushort positions. */
+   const char *splats[] = {"splatAppMotionVectors", "splatOpticalMotionVectors"};
+   const unsigned calls[] = {10, 4};
+   for (unsigned i = 0; i < ARRAY_SIZE(splats); i++) {
+      shader = metalfx_kernel(directory, splats[i], NULL, 0, &error);
+      assert(shader);
+      unsigned atomics = 0;
+      nir_foreach_function_impl(impl, shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+               if (!nir_intrinsic_has_atomic_op(intrinsic) || !nir_intrinsic_has_format(intrinsic))
+                  continue;
+               assert(nir_intrinsic_atomic_op(intrinsic) == nir_atomic_op_umax &&
+                      nir_intrinsic_format(intrinsic) == PIPE_FORMAT_R32_UINT);
+               atomics++;
+            }
+         }
+      }
+      assert(atomics == calls[i]);
+      stela_metal_release(shader);
+   }
+   /* The convolutions of Apple's matrix unit name its intrinsics, with
+    * every constant's bytes 1 so their loops run. */
+   const char *isa[] = {"Conv1x1FusedBilinear", "Conv3x3Stride2", "Conv3x3Stride2U8",
+                        "ConvKxKStride2_K3x3_F16", "Conv3x3SigmoidD2S", "ConvKxKStride2_K6x6"};
+   static const struct { const char *type; unsigned bytes; } sizes[] = {
+      {"bool", 1}, {"ushort", 2}, {"ushort4", 8}, {"uint", 4}, {"float", 4}, {"float4", 16},
+   };
+   uint8_t filled[16];
+   memset(filled, 1, sizeof(filled));
+   for (unsigned i = 0; i < ARRAY_SIZE(isa); i++) {
+      char path[4096];
+      size_t size;
+      snprintf(path, sizeof(path), "%s/%s.air", directory, isa[i]);
+      void *air = read_file(path, &size);
+      assert(air);
+      static struct stela_metal_reflection reflection;
+      assert(stela_metal_reflect(air, size, isa[i], NULL, 0, &reflection, &error));
+      struct stela_air_constant_value values[STELA_METAL_FUNCTION_CONSTANTS];
+      unsigned count = 0;
+      for (unsigned c = 0; c < reflection.function_constant_count; c++) {
+         const struct stela_metal_function_constant *constant = &reflection.function_constants[c];
+         unsigned bytes = 0;
+         for (unsigned k = 0; k < ARRAY_SIZE(sizes); k++) {
+            if (strlen(sizes[k].type) == constant->type_bytes &&
+                !memcmp(sizes[k].type, reflection.names + constant->type, constant->type_bytes))
+               bytes = sizes[k].bytes;
+         }
+         assert(bytes);
+         values[count++] = (struct stela_air_constant_value){constant->index, filled, bytes};
+      }
+      free(air);
+      assert(!metalfx_kernel(directory, isa[i], values, count, &error));
+      assert(error.kind == STELA_AIR_INSTRUCTION &&
+             strstr(error.detail, "unsupported Apple GPU ISA intrinsic llvm.agx3."));
+   }
+}
+
 /* What recursive stores over 3 with function linked at handle 1 and calls
  * through tables nested at most depth deep, or ~0u if it fails to compile. */
 static uint32_t
@@ -4021,6 +4471,11 @@ main(void)
    defined_functions_inline_into_their_callers();
    unresolved_calls_are_rejected_without_a_call_graph();
    stitched_functions_call_their_nodes_in_order();
+   thread_structs_carry_pointers_to_linked_functions();
+   mps_identity_links_its_stitched_functions();
+   unreachable_paths_end_the_invocation();
+   constant_branches_take_one_edge();
+   metalfx_kernels_compile();
    stitched_struct_arguments_pass_their_fields();
    stitched_kernels_read_their_builtins();
    stitched_buffer_addresses_read_their_kernels_buffers();

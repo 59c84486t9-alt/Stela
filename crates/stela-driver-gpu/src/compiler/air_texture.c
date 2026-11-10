@@ -1640,9 +1640,12 @@ slice_write(struct call *call, const char *member_type, size_t member_type_bytes
 
 /* Texture atomics, as DXMT records them:
  *
- *   air.atomic_fetch_<op>_explicit_<type>.<s|u>.v4i32, and atomic_exchange_:
+ *   air.atomic_fetch_<op>_explicit_<type>[.i16].<s|u>.v4i32, and atomic_exchange_:
  *     texture, position, [array], [zero offset], <4 x i32> operand, i32 order,
  *     i32 access -> <4 x i32> old texel
+ *
+ * .i16 makes the position, array and offset 16 bits, as ushort coordinates
+ * do; the texel stays 32 bits.
  *   air.atomic_compare_exchange_weak_explicit_<type>.<s|u>.v4i32: texture,
  *     position, [array], [zero offset], ptr expected, <4 x i32> desired,
  *     i32 success order, i32 failure order, i32 access -> i1 exchanged
@@ -1670,18 +1673,22 @@ static const struct {
    {"store", nir_atomic_op_xchg, nir_atomic_op_xchg, .store = true},
 };
 
-/* The index in atomics of a texture atomic's name, and its sign; or -1. */
+/* The index in atomics of a texture atomic's name, its sign and whether its
+ * positions are 16 bits (.i16); or -1. */
 static int
-atomic_named(const struct call *call, const char *name, size_t bytes, bool *is_signed)
+atomic_named(const struct call *call, const char *name, size_t bytes, bool *is_signed,
+             bool *short_indices)
 {
    const char *type = call->texture->depth ? call->shape->depth : call->shape->name;
    for (unsigned i = 0; i < ARRAY_SIZE(atomics); i++) {
-      for (unsigned sign = 0; sign < 2; sign++) {
+      for (unsigned form = 0; form < 4; form++) {
          char expected[96];
-         int length = snprintf(expected, sizeof(expected), "air.atomic_%s_explicit_%s.%c.v4i32",
-                               atomics[i].stem, type, sign ? 's' : 'u');
+         int length = snprintf(expected, sizeof(expected), "air.atomic_%s_explicit_%s%s.%c.v4i32",
+                               atomics[i].stem, type, form & 2 ? ".i16" : "",
+                               form & 1 ? 's' : 'u');
          if (length > 0 && (size_t)length == bytes && !memcmp(expected, name, bytes)) {
-            *is_signed = sign;
+            *is_signed = form & 1;
+            *short_indices = form & 2;
             return (int)i;
          }
       }
@@ -1708,7 +1715,7 @@ atomic(struct call *call, unsigned index, bool is_signed, nir_def **result)
    if (!deref)
       return false;
    nir_def *data = store ? operand(call, 4, LLVMIntegerTypeKind, 32) : NULL;
-   nir_def *position = operand(call, shape->positions, LLVMIntegerTypeKind, 32);
+   nir_def *position = index_operand(call, shape->positions);
    nir_def *layer = position && shape->array ? uint_operand(call) : NULL;
    if (!position || (shape->array && !layer) || !position_offset(call, &position))
       return false;
@@ -1943,7 +1950,7 @@ stela_air_texture_call(const struct stela_air_texture_context *context, LLVMValu
       return STELA_AIR_TEXTURE_FAILED;
    }
    bool is_signed;
-   int atomic_index = atomic_named(&call, name, name_bytes, &is_signed);
+   int atomic_index = atomic_named(&call, name, name_bytes, &is_signed, &call.short_indices);
    if (atomic_index >= 0)
       return atomic(&call, (unsigned)atomic_index, is_signed, result) ? STELA_AIR_TEXTURE_LOWERED :
                                                                        STELA_AIR_TEXTURE_FAILED;

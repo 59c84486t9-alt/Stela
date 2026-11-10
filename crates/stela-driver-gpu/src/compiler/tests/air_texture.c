@@ -1337,6 +1337,54 @@ kernels_take_texture_atomics(void)
           atomic_metadata, STELA_AIR_INSTRUCTION, "atomic order");
 }
 
+/* fetch_max at ushort positions (.i16), as MetalFX's motion vector splats
+ * call it, on the uint 2D and int 2D array textures of atomic_metadata. */
+static const char *short_atomic_body =
+   "declare <4 x i32> @air.atomic_fetch_max_explicit_texture_2d.i16.u.v4i32(ptr addrspace(1),"
+   " <2 x i16>, <2 x i16>, <4 x i32>, i32, i32)\n"
+   "declare <4 x i32> @air.atomic_fetch_max_explicit_texture_2d_array.i16.s.v4i32(ptr addrspace(1),"
+   " <2 x i16>, i16, <2 x i16>, <4 x i32>, i32, i32)\n"
+   "define void @kernel(ptr addrspace(1) %t, ptr addrspace(1) %a, ptr addrspace(1) %out) {\n"
+   "%u = call <4 x i32> @air.atomic_fetch_max_explicit_texture_2d.i16.u.v4i32(ptr addrspace(1) %t,"
+   " <2 x i16> <i16 -1, i16 2>, <2 x i16> zeroinitializer, <4 x i32> <i32 5, i32 0, i32 0, i32 0>,"
+   " i32 0, i32 3)\n"
+   "%s = call <4 x i32> @air.atomic_fetch_max_explicit_texture_2d_array.i16.s.v4i32(ptr addrspace(1) %a,"
+   " <2 x i16> <i16 3, i16 4>, i16 1, <2 x i16> <i16 1, i16 -1>,"
+   " <4 x i32> <i32 -7, i32 0, i32 0, i32 0>, i32 0, i32 3)\n"
+   "%x = extractelement <4 x i32> %u, i32 0\n%y = extractelement <4 x i32> %s, i32 0\n"
+   "%r = add i32 %x, %y\nstore i32 %r, ptr addrspace(1) %out, align 4\nret void\n}\n";
+
+/* Positions zero-extend from 16 bits, offsets sign-extend, and the texel
+ * stays 32 bits. */
+static void
+kernels_take_short_position_texture_atomics(void)
+{
+   struct stela_air_error error = {0};
+   nir_shader *shader = kernel(short_atomic_body, atomic_metadata, &error);
+   if (!shader)
+      fprintf(stderr, "short texture atomics: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_opt_constant_folding(shader);
+   nir_intrinsic_instr *atomics[2];
+   assert(image_atomics(shader, atomics, ARRAY_SIZE(atomics)) == 2);
+   assert(nir_intrinsic_atomic_op(atomics[0]) == nir_atomic_op_umax &&
+          nir_intrinsic_format(atomics[0]) == PIPE_FORMAT_R32_UINT);
+   assert(nir_intrinsic_atomic_op(atomics[1]) == nir_atomic_op_imax &&
+          nir_intrinsic_format(atomics[1]) == PIPE_FORMAT_R32_SINT &&
+          nir_intrinsic_image_array(atomics[1]));
+   const uint32_t coords[2][3] = {{65535, 2, 0}, {4, 3, 1}};
+   for (unsigned i = 0; i < 2; i++) {
+      assert(atomics[i]->src[1].ssa->bit_size == 32 && atomics[i]->src[3].ssa->bit_size == 32);
+      for (unsigned c = 0; c < 3; c++) {
+         nir_scalar coord = nir_scalar_resolved(atomics[i]->src[1].ssa, c);
+         assert(nir_scalar_is_const(coord) && nir_scalar_as_uint(coord) == coords[i][c]);
+      }
+   }
+   nir_scalar data = nir_scalar_resolved(atomics[1]->src[3].ssa, 0);
+   assert(nir_scalar_is_const(data) && nir_scalar_as_int(data) == -7);
+   ralloc_free(shader);
+}
+
 #define SPELLED(calls) \
    "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp," \
    " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n" calls \
@@ -1823,6 +1871,7 @@ main(void)
    cube_reads_fetch_their_faces();
    unsupported_texture_uses_are_refused();
    kernels_take_texture_atomics();
+   kernels_take_short_position_texture_atomics();
    every_metal_version_spells_its_calls();
    kernels_calculate_levels_over_their_quadgroups();
    divergent_derivatives_take_the_whole_quad();
