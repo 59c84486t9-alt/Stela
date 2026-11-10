@@ -1,14 +1,20 @@
-//! Fingerprint the runtime sources: with the compiler's own fingerprint they
-//! make the persistent translation store's translator id
-//! (`translations::translator_id`).
+//! Fingerprint what decides the code a block translation holds: with the
+//! compiler's own fingerprint it makes the persistent translation store's
+//! translator id (`translations::translator_id`,
+//! `docs/design/runtime.md#persistent-translation-store`).
 //!
-//! The whole engine and its shared contracts, formats and cryptography are
-//! fingerprinted. What the engine gives the compiler for a block depends on
-//! the dispatch loop, guest memory layout, block
-//! translation, PAuth services, the CPU model and the store format, which
-//! span most of the crate; a hand-maintained file list or ABI version
-//! constant goes stale silently when one of them changes, while a whole-crate
-//! digest at worst discards translations that were still valid.
+//! A stored entry is the compiler's output for its admitted input bytes, PC
+//! and entry context. The context describes every preparation input
+//! (`Preparation::context`), and the admitted input is compared byte for
+//! byte before reuse, so chip admission checks itself. What else decides a
+//! block is fingerprinted here: block preparation (`prepare.rs` and the
+//! constants of `block_inputs.rs`), the record format, proof and relocation
+//! (`translations`, `stored.rs`), and the chip's access checks that end a
+//! block (Contracts' `chip` and `cpu_features`). The rest of the engine, the
+//! other crates and the lock files are not inputs: rebuilding them leaves
+//! the store warm. Unit-test modules are left out. A test in
+//! `translations/tests.rs` checks that these files name no other engine
+//! module.
 fn main() {
     // `host_memory`: POSIX mappings for generic native-code validation.
     // A std build elsewhere (Windows, for setup) has none
@@ -19,41 +25,29 @@ fn main() {
     {
         println!("cargo::rustc-cfg=host_memory");
     }
-    stela_fingerprint::emit(
+    stela_fingerprint::emit_with(
         "STELA_ENGINE_SOURCE_SHA256",
-        &[
-            "Cargo.toml",
-            "build.rs",
-            "src",
-            "../stela-driver-core/Cargo.toml",
-            "../stela-driver-core/src",
-            "../stela-contracts/Cargo.toml",
-            "../stela-contracts/src",
-            "../stela-formats/Cargo.toml",
-            "../stela-formats/src",
-            "../stela-crypto/Cargo.toml",
-            "../stela-crypto/src",
-            "../stela-soc-data/Cargo.toml",
-            "../stela-soc-data/src",
-            "../stela-runtime/Cargo.toml",
-            "../stela-runtime/src",
-            "../stela-tls/Cargo.toml",
-            "../stela-tls/build.rs",
-            "../stela-tls/src",
-            "../stela-tls/include",
-            "../stela-tls/stela_alloc.h",
-            "../stela-tls/stela_mbed_kx.c",
-            "../stela-tls/stela_mbed_kx.h",
-            "../stela-tls/stela_mbedcrypto_config.h",
-            "../../third_party/mbedtls",
-            "../../third_party/smoltcp/Cargo.toml",
-            "../../third_party/smoltcp/build.rs",
-            "../../third_party/smoltcp/src",
-            "../../Cargo.toml",
-            "../../Cargo.lock",
-            "../stela-boot/Cargo.toml",
-            "../stela-boot/Cargo.lock",
-            "../../.cargo/config.toml",
-        ],
+        &TRANSLATION_INPUTS,
+        &stela_fingerprint::Options {
+            skip_test_modules: true,
+            locked: &[],
+        },
+    );
+    println!(
+        "cargo:rustc-env=STELA_ENGINE_TRANSLATION_INPUTS={}",
+        TRANSLATION_INPUTS.join(" ")
     );
 }
+
+/// The engine's and Contracts' translation inputs, relative to this crate.
+const TRANSLATION_INPUTS: [&str; 9] = [
+    "build.rs",
+    "src/machine/engine/block_inputs.rs",
+    "src/machine/engine/prepare.rs",
+    "src/machine/engine/stored.rs",
+    "src/translations.rs",
+    "src/translations",
+    "../stela-contracts/src/chip.rs",
+    "../stela-contracts/src/chip",
+    "../stela-contracts/src/cpu_features.rs",
+];

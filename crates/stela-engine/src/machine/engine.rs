@@ -1,5 +1,6 @@
 //! The dispatch loop: fetch translation, block cache, native execution and
 //! every exit back from native code.
+mod block_inputs;
 mod boundary;
 mod mirrors;
 mod reports;
@@ -131,7 +132,7 @@ use stela_compiler::{
         },
     },
     block::{
-        self, BlockProfile, ExitKind, Features, PointerAuthentication, PointerAuthenticationKey,
+        self, ExitKind, PointerAuthentication, PointerAuthenticationKey,
         PointerAuthenticationModifier, PointerAuthenticationOperation,
         scalar::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::SystemOperation,
@@ -162,10 +163,7 @@ use {
     stela_contracts::Feature, stela_contracts::chip::AdmitTable, stela_contracts::chip::Check,
 };
 
-const PROFILE: BlockProfile = BlockProfile::new(Features::SYSTEM_MODE);
-const INSTRUCTION: u64 = 4;
-const FETCH_PAGE: u64 = 4096;
-const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
+use block_inputs::{FETCH_PAGE, INSTRUCTION, MAX_BLOCK_BYTES, PROFILE, is_floating_point};
 /// The bytes of a block's source window a compile reads and admits first:
 /// most blocks end within them, and the rest compile from the whole window.
 const FIRST_WINDOW_BYTES: usize = 32 * INSTRUCTION as usize;
@@ -670,12 +668,6 @@ struct Variant {
 /// loads have no base register.
 fn stack_based(word: u32) -> bool {
     word & 0x0a00_0000 == 0x0800_0000 && word & 0x3b00_0000 != 0x1800_0000 && (word >> 5) & 31 == 31
-}
-
-/// Floating-point and SIMD instructions, which CPACR_EL1.FPEN can trap:
-/// SIMD&FP data processing (op0 x111) and SIMD&FP loads/stores (op0 x1x0, V=1).
-fn is_floating_point(word: u32) -> bool {
-    (word >> 25) & 7 == 7 || word & 0x0a00_0000 == 0x0800_0000 && word & (1 << 26) != 0
 }
 
 pub struct Machine<H: Host, D: Devices> {

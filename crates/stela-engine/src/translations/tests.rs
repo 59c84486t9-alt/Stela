@@ -499,3 +499,152 @@ fn merge_keeps_current_entries_and_the_first_legacy_duplicate() {
     });
     assert_eq!(record.entries(), &[first, second, third]);
 }
+
+/// The engine paths (`super::` and `crate::`) `text` names, as written,
+/// with each braced list expanded.
+fn engine_paths(text: &str) -> std::collections::BTreeSet<String> {
+    let mut paths = std::collections::BTreeSet::new();
+    let bytes = text.as_bytes();
+    let path_char = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b':';
+    let mut at = 0;
+    while at < bytes.len() {
+        let rest = &text[at..];
+        let starts = (rest.starts_with("super::") || rest.starts_with("crate::"))
+            && (at == 0 || !path_char(bytes[at - 1]));
+        if !starts {
+            at += 1;
+            continue;
+        }
+        let mut end = at;
+        while end < bytes.len() && path_char(bytes[end]) {
+            end += 1;
+        }
+        let prefix = &text[at..end];
+        if bytes.get(end) == Some(&b'{') && prefix.ends_with("::") {
+            let close = text[end..].find('}').expect("a closed use list") + end;
+            for item in text[end + 1..close].split(',') {
+                let item: String = item.split_whitespace().collect();
+                if !item.is_empty() {
+                    paths.insert(format!("{prefix}{item}"));
+                }
+            }
+            at = close;
+        } else if bytes.get(end) == Some(&b'*') {
+            paths.insert(format!("{prefix}*"));
+            at = end;
+        } else {
+            paths.insert(prefix.trim_end_matches(':').to_owned());
+            at = end;
+        }
+    }
+    paths
+}
+
+/// The translator id fingerprints only the engine files `build.rs` names
+/// (`STELA_ENGINE_TRANSLATION_INPUTS`). Each engine item those files name is
+/// in them, or only consumes what a block compiled to: a new name fails here
+/// until it is moved into the inputs or reviewed as a consumer.
+#[test]
+fn the_translator_id_covers_every_engine_item_its_inputs_name() {
+    let inputs = env!("STELA_ENGINE_TRANSLATION_INPUTS");
+    for input in [
+        "src/machine/engine/block_inputs.rs",
+        "src/machine/engine/prepare.rs",
+        "src/machine/engine/stored.rs",
+        "src/translations.rs",
+        "src/translations",
+    ] {
+        assert!(inputs.split(' ').any(|named| named == input), "{input}");
+    }
+    let block_inputs = include_str!("../machine/engine/block_inputs.rs");
+    for constant in [
+        "const PROFILE",
+        "const INSTRUCTION",
+        "const FETCH_PAGE",
+        "const MAX_BLOCK_BYTES",
+        "fn is_floating_point",
+    ] {
+        assert!(block_inputs.contains(constant), "{constant}");
+    }
+    let cases: [(&str, &str, &[&str]); 5] = [
+        (
+            "prepare.rs",
+            include_str!("../machine/engine/prepare.rs"),
+            &[
+                // block_inputs.rs, through the engine module.
+                "super::FETCH_PAGE",
+                "super::INSTRUCTION",
+                "super::MAX_BLOCK_BYTES",
+                "super::PROFILE",
+                "super::is_floating_point",
+                "super::*",
+                "crate::translations",
+                "crate::translations::Digest",
+                "crate::machine::test_chip",
+            ],
+        ),
+        (
+            "stored.rs",
+            include_str!("../machine/engine/stored.rs"),
+            &[
+                "super::FETCH_PAGE",
+                "super::Preparation",
+                // Consumers: the machine's kept pages and installs.
+                "super::Devices",
+                "super::Host",
+                "super::Machine",
+                "super::Variant",
+                "super::recovery::StoredOrigin",
+                "crate::translations",
+                "crate::translations::Digest",
+                "crate::translations::PAGE_BYTES",
+                "crate::translations::Record",
+                "crate::translations::Entry",
+                "crate::translations::probe_displacements",
+                "crate::translations::prove",
+                "crate::translations::address_class",
+            ],
+        ),
+        (
+            "translations.rs",
+            include_str!("../translations.rs"),
+            // A check at lookup with the reading build's rules.
+            &["crate::artifact::validate_source_map_geometry"],
+        ),
+        (
+            "pack.rs",
+            include_str!("pack.rs"),
+            &[
+                "super::Digest",
+                "super::Entry",
+                "super::FormatError",
+                "super::Record",
+                "super::*",
+                "crate::machine::engine::SharedTranslation",
+                "crate::machine::Offer",
+                "crate::machine::Preparation",
+                "crate::machine::Translations",
+                "crate::machine::test_preparation",
+                "crate::translations::PAGE_BYTES",
+                "crate::translations::translator_id",
+            ],
+        ),
+        (
+            "codec.rs",
+            include_str!("pack/codec.rs"),
+            &[
+                "super::super::HEADER_BYTESasRECORD_HEADER",
+                "super::super::TRAILER_BYTES",
+                "super::*",
+            ],
+        ),
+    ];
+    for (name, text, allowed) in cases {
+        let named = engine_paths(text);
+        let unexpected: Vec<_> = named
+            .iter()
+            .filter(|path| !allowed.contains(&path.as_str()))
+            .collect();
+        assert!(unexpected.is_empty(), "{name} names {unexpected:?}");
+    }
+}
