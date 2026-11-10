@@ -7,7 +7,8 @@ use super::numerical::{
     RESULT_MINIMUM_EXPONENT, Rounding, branch, clear_scalar, commit_inexact, environment_round,
     exponent_range, jump, prepare_half_result_range, prepare_vector_input_range,
     prepare_vector_result_range, read_numerical_vector, reject_other_status, resolve,
-    restore_environment, single_vector_arithmetic, test_control, vector_exponent_range,
+    restore_environment, scalar_range_or_zero, single_vector_arithmetic, test_control,
+    vector_exponent_range, vector_normal_or_zero_range,
 };
 use super::{Host, commit, encode::guest, packed, read_vector, vector_offset};
 use crate::x86_64::asm::FloatLanes;
@@ -34,6 +35,8 @@ const SOURCE_VECTOR: u8 = 1;
 const JAM_VECTOR: u8 = 6;
 /// The low Half of a scalar narrowing, ahead of its merge into old Vd.
 const HALF_LANE_VECTOR: u8 = 6;
+/// The zero classifier's scratch in vector Half narrowing.
+const NARROW_ZERO_SCRATCH: u8 = 7;
 /// VCVTPS2PH's immediate: round by MXCSR.RC.
 const CONVERT_USING_MXCSR: u8 = 1 << 2;
 const COMPARE_EQUAL: u8 = 0;
@@ -174,8 +177,21 @@ fn emit_scalar(
     // Precision conversions merge old Vd, unlike binary arithmetic's Vn merge.
     read_vector(code, operand.destination, RESULT_VECTOR);
     if source == Format::Half {
+        // A zero widens to the zero of its sign, exactly and without status.
+        code.asm().movd_from_xmm(Rax, SOURCE_VECTOR);
+        code.asm().test_imm(Size::Dword, Rax, HALF_MAGNITUDE as i32);
+        let zero = branch(code, Condition::Zero);
         half_normal_guard(code, &mut helper);
         half_to_single(code);
+        let widened = jump(code);
+        let zero_start = code.len();
+        resolve(code, zero, zero_start);
+        let mut asm = code.asm();
+        asm.alu_imm32(Alu::And, Size::Dword, Rax, HALF_SIGN as i32);
+        asm.shift_imm(ShiftOp::Shl, Size::Dword, Rax, HALF_TO_SINGLE_SIGN_SHIFT);
+        asm.movd_to_xmm(SOURCE_VECTOR, Rax);
+        let joined = code.len();
+        resolve(code, widened, joined);
         if destination == Format::Double {
             code.asm().cvtss2sd(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
         } else {
@@ -186,30 +202,35 @@ fn emit_scalar(
                 crate::TargetCpu::Baseline,
             );
         }
+    } else if destination == Format::Double {
+        // Normal or zero S→D is exact, unaffected by ambient RC/DAZ/FTZ/masks,
+        // and raises neither Intel Invalid nor Denormal, nor any FPSR status
+        // (a zero is no denormal input, whatever FZ holds). Preserve MXCSR.
+        helper.push(scalar_range_or_zero(
+            code,
+            source,
+            SOURCE_VECTOR,
+            INPUT_MINIMUM_EXPONENT,
+        ));
+        code.asm().cvtss2sd(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
     } else {
         exponent_range(code, source, SOURCE_VECTOR, INPUT_MINIMUM_EXPONENT);
         helper.push(branch(code, Condition::AboveOrEqual));
-        if destination == Format::Double {
-            // Normal S→D is exact, unaffected by ambient RC/DAZ/FTZ/masks,
-            // and raises neither Intel Invalid nor Denormal. Preserve MXCSR.
-            code.asm().cvtss2sd(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
-        } else {
-            environment_round(
-                code,
-                if rounding == PrecisionRounding::ToOdd {
-                    Rounding::Zero
-                } else {
-                    Rounding::Fpcr
-                },
-            );
-            code.asm().cvtsd2ss(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
-            restore_environment(code);
-            helper.push(reject_other_status(code));
-            exponent_range(code, destination, RESULT_VECTOR, RESULT_MINIMUM_EXPONENT);
-            helper.push(branch(code, Condition::AboveOrEqual));
+        environment_round(
+            code,
             if rounding == PrecisionRounding::ToOdd {
-                scalar_odd_jam(code);
-            }
+                Rounding::Zero
+            } else {
+                Rounding::Fpcr
+            },
+        );
+        code.asm().cvtsd2ss(RESULT_VECTOR, Rm::Xmm(SOURCE_VECTOR));
+        restore_environment(code);
+        helper.push(reject_other_status(code));
+        exponent_range(code, destination, RESULT_VECTOR, RESULT_MINIMUM_EXPONENT);
+        helper.push(branch(code, Condition::AboveOrEqual));
+        if rounding == PrecisionRounding::ToOdd {
+            scalar_odd_jam(code);
         }
     }
     helper_section(code, &helper, pc);
@@ -485,8 +506,8 @@ pub(super) fn half_narrowing_supported(mode: PrecisionMode, target: TargetCpu) -
     }
 }
 
-/// Narrow to Half under the guards of the Half arithmetic path: normal inputs,
-/// and a helper for other status or a result below exponent 2, so x86's
+/// Narrow to Half under the guards of the Half arithmetic path: normal inputs
+/// (and zero vector lanes), and a helper for other status or a result below exponent 2, so x86's
 /// tininess rule never decides a guest result. FPCR.AHP selects a format the
 /// host lacks.
 fn emit_narrow_half(
@@ -509,9 +530,17 @@ fn emit_narrow_half(
         helper.push(branch(code, Condition::AboveOrEqual));
         clear_scalar(code, source, SOURCE_VECTOR);
     } else {
+        // A zero lane narrows to the zero of its sign, exactly and without
+        // status on both sides; FZ and FIZ flush no zero.
         read_numerical_vector(code, Shape::Vector128, operand.source, SOURCE_VECTOR);
         prepare_vector_input_range(code, Format::Single);
-        vector_exponent_range(code, Format::Single, Shape::Vector128, SOURCE_VECTOR);
+        vector_normal_or_zero_range(
+            code,
+            Format::Single,
+            Shape::Vector128,
+            SOURCE_VECTOR,
+            NARROW_ZERO_SCRATCH,
+        );
         helper.push(branch(code, Condition::NotZero));
     }
     let result = if scalar.is_some() {
@@ -537,12 +566,19 @@ fn emit_narrow_half(
     helper.push(reject_other_status(code));
     prepare_vector_input_range(code, Format::Half);
     prepare_half_result_range(code);
-    let shape = if scalar.is_some() {
-        Shape::Scalar
+    if scalar.is_some() {
+        vector_exponent_range(code, Format::Half, Shape::Scalar, result);
     } else {
-        Shape::Vector64
-    };
-    vector_exponent_range(code, Format::Half, shape, result);
+        // A zero result came from a zero lane: a nonzero one rounded to zero
+        // raised underflow, which took the helper above.
+        vector_normal_or_zero_range(
+            code,
+            Format::Half,
+            Shape::Vector64,
+            result,
+            NARROW_ZERO_SCRATCH,
+        );
+    }
     helper.push(branch(code, Condition::NotZero));
     helper_section(code, &helper, pc);
     commit_inexact(code);

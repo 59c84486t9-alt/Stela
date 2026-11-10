@@ -236,6 +236,18 @@ fn accepts_zero(operation: BinaryOperation) -> bool {
     }
 }
 
+/// A scalar FDIV's zero dividend over a normal divisor: the quotient is
+/// an exact signed zero, with no status, whatever FPCR holds. Code divides
+/// zero often (a ratio or an animation's progress at its start), and each
+/// one would otherwise leave compiled code. A zero quotient from a normal
+/// dividend underflowed, which the host's status rejects; the divisor's
+/// range check still sends a zero or infinite divisor to the helper.
+fn zero_quotient(operand: &Operand) -> bool {
+    operand.operation == BinaryOperation::Divide
+        && operand.shape == Shape::Scalar
+        && matches!(operand.inputs, Inputs::Elementwise { .. })
+}
+
 /// The left source, whose register the operation overwrote, for the
 /// out-of-line zero-product check: still unchanged in the frame.
 fn product_left(operand: &Operand) -> u8 {
@@ -300,6 +312,20 @@ fn sticky_path(code: &mut Code, operand: &Operand, entry: Entry, target: TargetC
     let inline_end = code.checkpoint();
     let done = jump(code);
     let cold = code.checkpoint();
+    if zero_quotient(operand) {
+        // A zero quotient may be exact: the full path tells, from the
+        // dividend, rather than the helper.
+        let mut full = full;
+        full.push(rejected);
+        return StickyPath {
+            full,
+            helper: vec![],
+            done,
+            cold,
+            inline_end,
+            crossing: vec![],
+        };
+    }
     let mut crossing = vec![rejected];
     if !zero_product(operand.operation) {
         return StickyPath {
@@ -368,16 +394,16 @@ fn emit_scalar(
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
     helper.push(branch(code, Condition::NotZero));
     let right = prepare_inputs(code, operand);
-    for right in [LEFT_VECTOR, right] {
-        if accepts_zero(operand.operation) {
+    for source in [LEFT_VECTOR, right] {
+        if accepts_zero(operand.operation) || (source == LEFT_VECTOR && zero_quotient(operand)) {
             helper.push(scalar_range_or_zero(
                 code,
                 operand.format,
-                right,
+                source,
                 INPUT_MINIMUM_EXPONENT,
             ));
         } else {
-            exponent_range(code, operand.format, right, INPUT_MINIMUM_EXPONENT);
+            exponent_range(code, operand.format, source, INPUT_MINIMUM_EXPONENT);
             helper.push(branch(code, Condition::AboveOrEqual));
         }
     }
@@ -392,7 +418,7 @@ fn emit_scalar(
     restore_environment(code);
     // Caller environment and stack are restored before every branch from here.
     helper.push(reject_other_status(code));
-    let success = if accepts_zero(operand.operation) {
+    let success = if accepts_zero(operand.operation) || zero_quotient(operand) {
         helper.push(scalar_range_or_zero(
             code,
             operand.format,

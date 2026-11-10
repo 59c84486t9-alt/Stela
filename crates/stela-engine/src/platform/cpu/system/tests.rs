@@ -19,8 +19,46 @@ fn baseline() -> Observation {
             cr4: CR4_REQUIRED,
             efer: EFER_REQUIRED,
             flags: 0,
+            xcr0: 0,
         },
     }
+}
+
+/// FMA3, F16C and AVX2 need AVX hardware and YMM state that this core's
+/// XCR0 enables, behind CR4.OSXSAVE; a later change of XCR0 refuses entry.
+#[test]
+fn vex_vector_recipes_require_live_ymm_state() {
+    let mut actual = baseline();
+    actual.declarations.vendor = TargetCpu::AMD_VENDOR;
+    actual.declarations.cpuid1_ecx = CPUID_AVX | CPUID_FMA | CPUID_F16C;
+    actual.declarations.cpuid7_ebx = CPUID_AVX2;
+    let vector = TargetCpu::Baseline.with_fma().with_f16c().with_avx2();
+    assert!(!actual.target().unwrap().supports(TargetCpu::Fma));
+    actual.controls.xcr0 = 0x7;
+    assert!(!actual.target().unwrap().supports(TargetCpu::Fma));
+    actual.controls.cr4 |= CR4_OSXSAVE;
+    let target = actual.target().unwrap();
+    assert!(target.supports(vector));
+    assert!(!target.supports(TargetCpu::Avx512f));
+    let proof = NativeSystemTarget {
+        observed: actual,
+        lease: None,
+        target,
+    };
+    assert_eq!(proof.revalidate_observation(actual), Ok(()));
+    let mut legacy_state = actual;
+    legacy_state.controls.xcr0 = 0x3;
+    assert!(!legacy_state.target().unwrap().supports(TargetCpu::Fma));
+    assert_eq!(
+        proof.revalidate_observation(legacy_state),
+        Err(Refusal::TargetChanged)
+    );
+    let mut wider = actual;
+    wider.controls.xcr0 = 0xe7;
+    assert_eq!(proof.revalidate_observation(wider), Err(Refusal::Controls));
+    actual.declarations.cpuid1_ecx &= !CPUID_AVX;
+    assert!(!actual.target().unwrap().supports(TargetCpu::Fma));
+    assert!(!actual.target().unwrap().supports(TargetCpu::Avx2));
 }
 
 #[test]

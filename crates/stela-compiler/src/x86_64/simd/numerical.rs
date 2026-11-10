@@ -854,7 +854,7 @@ fn vector_exponent_range_impl(
     vector_validity_mask(code, format, shape);
 }
 
-/// Accept only normal S/D values and signed zeros. The range constants
+/// Accept only normal values and signed zeros. The range constants
 /// remain live in XMM4/5; XMM3 and `scratch` are classifier scratch. Unlike a zero
 /// fraction test, clearing just the sign rejects infinities and subnormals.
 pub(super) fn vector_normal_or_zero_range(
@@ -864,7 +864,6 @@ pub(super) fn vector_normal_or_zero_range(
     source: u8,
     scratch: u8,
 ) {
-    assert!(format != Format::Half);
     assert!(
         ![
             source,
@@ -877,16 +876,16 @@ pub(super) fn vector_normal_or_zero_range(
     );
     vector_exponent_validity(code, format, source, false);
     packed(code, Host::MoveAligned, VALIDITY_VECTOR, source);
-    let left = if format == Format::Double {
-        ShiftOpcode::LeftQword
-    } else {
-        ShiftOpcode::LeftDword
+    let (left, equal) = match format {
+        Format::Double => (ShiftOpcode::LeftQword, Host::EqualDword),
+        Format::Single => (ShiftOpcode::LeftDword, Host::EqualDword),
+        Format::Half => (ShiftOpcode::LeftWord, Host::EqualWord),
     };
     left.emit(code, VALIDITY_VECTOR, SIGN_BITS);
     // The result-range lower bound is one rather than zero. Use an independent
     // zero so output classification still recognizes both signed zeros.
     packed(code, Host::Xor, scratch, scratch);
-    packed(code, Host::EqualDword, VALIDITY_VECTOR, scratch);
+    packed(code, equal, VALIDITY_VECTOR, scratch);
     if format == Format::Double {
         packed_imm(
             code,

@@ -627,6 +627,42 @@ fn common_target_keeps_only_features_present_on_every_assigned_worker() {
     }
 }
 
+/// FMA3, F16C and AVX2 need AVX hardware whose YMM state every installed
+/// worker's XCR0 enables, as the interrupt entries save it.
+#[test]
+fn common_target_keeps_vex_vector_recipes_only_with_every_worker_ymm_state() {
+    use stela_compiler::TargetCpu;
+    const AVX2: u32 = 1 << 5;
+    let mut rich = target_snapshot(TargetCpu::AMD_VENDOR);
+    rich.records[2].ebx |= AVX2;
+    rich.xcr0 = 0x7;
+    rich.xcr0_valid = true;
+    let vector = TargetCpu::Baseline.with_fma().with_f16c().with_avx2();
+    assert!(common_native_target(&[&rich]).unwrap().supports(vector));
+    assert!(
+        !common_native_target(&[&rich])
+            .unwrap()
+            .supports(TargetCpu::Avx512f)
+    );
+    let mut legacy_state = rich;
+    legacy_state.xcr0 = 0x3;
+    let mut unobserved = rich;
+    unobserved.xcr0_valid = false;
+    let mut without_avx = rich;
+    without_avx.records[0].ecx &= !(1 << 28);
+    for worker in [legacy_state, unobserved, without_avx] {
+        let common = common_native_target(&[&rich, &worker]).unwrap();
+        for excluded in [TargetCpu::Fma, TargetCpu::F16c, TargetCpu::Avx2] {
+            assert!(!common.supports(excluded));
+        }
+    }
+    let mut without_avx2 = rich;
+    without_avx2.records[2].ebx &= !AVX2;
+    let common = common_native_target(&[&rich, &without_avx2]).unwrap();
+    assert!(common.supports(TargetCpu::Baseline.with_fma().with_f16c()));
+    assert!(!common.supports(TargetCpu::Avx2));
+}
+
 /// BMI1 and BMI2 need VEX decoding, which an Intel worker without AVX
 /// lacks, and fast PDEP a Zen 3 or later AMD core on every worker.
 #[test]

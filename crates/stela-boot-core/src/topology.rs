@@ -343,6 +343,11 @@ pub fn common_native_target(
     const AVX: u32 = 1 << 28;
     const BMI1: u32 = 1 << 3;
     const BMI2: u32 = 1 << 8;
+    const FMA: u32 = 1 << 12;
+    const F16C: u32 = 1 << 29;
+    const AVX2: u32 = 1 << 5;
+    /// XCR0's SSE and AVX bits: the OS saves XMM and YMM state.
+    const XCR0_YMM: u64 = 0x6;
     /// AMD's first family whose PDEP and PEXT are not microcoded (Zen 3).
     const FAST_PDEP_FAMILY: u32 = 0x19;
     if observations.is_empty() || observations.len() > MAX_CORES {
@@ -355,6 +360,9 @@ pub fn common_native_target(
     // VEX-encoded scalar GPR extensions, which use no extended state:
     // Intel's Pentium and Celeron parts without AVX fault on them.
     let mut vex = true;
+    // VEX vector recipes: AVX hardware whose XMM and YMM state the
+    // installed worker's XCR0 enables, which the interrupt entries save.
+    let mut ymm = true;
     // AMD's Zen 1 and Zen 2, and Hygon's Zen-derived cores, microcode PDEP
     // and PEXT; the display family tells them apart.
     let mut fast_pdep = true;
@@ -384,6 +392,7 @@ pub fn common_native_target(
         let vendor = [vendor.ebx, vendor.edx, vendor.ecx];
         atomic16 &= TargetCpu::atomic_load16_guaranteed(vendor, basic.ecx);
         vex &= vendor != TargetCpu::INTEL_VENDOR || basic.ecx & AVX != 0;
+        ymm &= basic.ecx & AVX != 0 && snapshot.xcr0_valid && snapshot.xcr0 & XCR0_YMM == XCR0_YMM;
         let base_family = (basic.eax >> 8) & 0xf;
         let family = if base_family == 0xf {
             base_family + ((basic.eax >> 20) & 0xff)
@@ -417,6 +426,9 @@ pub fn common_native_target(
         (bmi2, TargetCpu::with_bmi2),
         (bmi2 && fast_pdep, TargetCpu::with_fast_pdep),
         (ecx & MOVBE != 0, TargetCpu::with_movbe),
+        (ymm && ecx & FMA != 0, TargetCpu::with_fma),
+        (ymm && ecx & F16C != 0, TargetCpu::with_f16c),
+        (ymm && structured_ebx & AVX2 != 0, TargetCpu::with_avx2),
     ] {
         if present {
             target = with(target);
@@ -425,7 +437,7 @@ pub fn common_native_target(
     Ok(target)
 }
 
-/// The initial native executor uses legacy XMM state only. It
+/// The native executor's floor is legacy XMM state. It
 /// derives this floor on each physical core rather than borrowing the
 /// BSP's CPUID or firmware OSXSAVE state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

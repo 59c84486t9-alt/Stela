@@ -1,7 +1,8 @@
 //! A conservative limit, never CPU or memory execution permission. Keep the
-//! legacy XMM and scalar GPR recipes both sides have, which is what blocks
-//! compile for; wider state and DIT cannot be enabled by a caller-provided
-//! declaration.
+//! legacy XMM, scalar GPR and VEX vector recipes both sides have, which is
+//! what blocks compile for. The current side's VEX recipes already need its
+//! live YMM state, so a limit only removes them; AVX-512 state and DIT
+//! cannot be enabled by a caller-provided declaration.
 use stela_compiler::TargetCpu;
 
 pub(in crate::memory) fn restrict(actual: TargetCpu, limit: TargetCpu) -> TargetCpu {
@@ -27,6 +28,11 @@ pub(in crate::memory) fn restrict(actual: TargetCpu, limit: TargetCpu) -> Target
         (TargetCpu::Bmi2, TargetCpu::with_bmi2),
         (TargetCpu::FastPdep, TargetCpu::with_fast_pdep),
         (TargetCpu::Movbe, TargetCpu::with_movbe),
+        // VEX vector recipes, which the current side admits only with
+        // OS-enabled YMM state.
+        (TargetCpu::Fma, TargetCpu::with_fma),
+        (TargetCpu::F16c, TargetCpu::with_f16c),
+        (TargetCpu::Avx2, TargetCpu::with_avx2),
     ] {
         if actual.supports(capability) && limit.supports(capability) {
             target = with(target);
@@ -102,14 +108,13 @@ mod tests {
             .with_data_independent_timing();
         let common = restrict(rich, rich);
         assert!(!common.data_independent_timing());
-        for excluded in [
-            TargetCpu::Fma,
-            TargetCpu::F16c,
-            TargetCpu::Avx2,
-            TargetCpu::Avx512f,
-            TargetCpu::Doit,
-            TargetCpu::LineAtomic,
-        ] {
+        // VEX vector recipes stay only where both sides have them.
+        for kept in [TargetCpu::Fma, TargetCpu::F16c, TargetCpu::Avx2] {
+            assert!(common.supports(kept));
+            assert!(!restrict(TargetCpu::X86_64_V2, rich).supports(kept));
+            assert!(!restrict(rich, TargetCpu::X86_64_V2).supports(kept));
+        }
+        for excluded in [TargetCpu::Avx512f, TargetCpu::Doit, TargetCpu::LineAtomic] {
             assert!(!common.supports(excluded));
         }
         // Scalar GPR extensions use no extended state.

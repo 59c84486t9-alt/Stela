@@ -3,11 +3,11 @@ use super::super::isa::ShiftOpcode;
 use super::numerical::{
     ArithmeticOpcode, ColdSplit, Condition, Entry, FusedOpcode, INPUT_MINIMUM_EXPONENT, Input,
     RESULT_MINIMUM_EXPONENT, ZeroProduct, branch, clear_scalar, commit_inexact, emit_fma,
-    emit_opcode, environment, exponent_range, jump, prepare_vector_input_range,
-    prepare_vector_result_range, read_inputs, read_numerical_right, read_numerical_vector,
-    reject_other_status, reject_product_status, resolve, restore_environment,
-    restore_environment_with_product, save_product_status, sticky_inexact, sticky_result_check,
-    test_control, vector_normal_or_zero_range, zero_product_check,
+    emit_opcode, environment, jump, prepare_vector_input_range, prepare_vector_result_range,
+    read_inputs, read_numerical_right, read_numerical_vector, reject_other_status,
+    reject_product_status, resolve, restore_environment, restore_environment_with_product,
+    save_product_status, scalar_range_or_zero, sticky_inexact, sticky_result_check, test_control,
+    vector_normal_or_zero_range, zero_product_check,
 };
 use super::{Host, commit, packed};
 use crate::x86_64::asm::Code;
@@ -22,6 +22,12 @@ use crate::{
 use alloc::vec;
 use alloc::vec::Vec;
 mod half;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod tests;
 
 const LEFT: u8 = 0;
 const RIGHT: u8 = 1;
@@ -115,14 +121,21 @@ pub(in crate::x86_64) fn emit(
     if operand.shape != Shape::Scalar {
         prepare_vector_input_range(code, operand.format);
     }
+    // A zero input or lane is exact on both sides: FPMulAdd and the host's
+    // FMA follow IEEE 754's signed-zero sums under the installed rounding
+    // (an exact zero sum is +0, -0 rounding toward minus infinity, and a sum
+    // of two zeros of one sign keeps it), a zero product adds exactly, and
+    // the excluded infinities keep 0 x inf out. A zero is not subnormal, so
+    // FZ and FIZ flush nothing, and neither side raises status for it.
     for source in [LEFT, RIGHT, ADDEND] {
-        let condition = if operand.shape == Shape::Scalar {
-            exponent_range(code, operand.format, source, INPUT_MINIMUM_EXPONENT);
-            Condition::AboveOrEqual
+        if operand.shape == Shape::Scalar {
+            helper.push(scalar_range_or_zero(
+                code,
+                operand.format,
+                source,
+                INPUT_MINIMUM_EXPONENT,
+            ));
         } else {
-            // A zero lane is exact on both sides: FPMulAdd and the host's
-            // FMA follow IEEE 754's signed-zero sums under the installed
-            // rounding, and the excluded infinities keep 0 x inf out.
             vector_normal_or_zero_range(
                 code,
                 operand.format,
@@ -130,9 +143,8 @@ pub(in crate::x86_64) fn emit(
                 source,
                 ZERO_RANGE_SCRATCH,
             );
-            Condition::NotZero
-        };
-        helper.push(branch(code, condition));
+            helper.push(branch(code, Condition::NotZero));
+        }
     }
     let merge = if native_fma {
         ADDEND
@@ -164,9 +176,16 @@ pub(in crate::x86_64) fn emit(
         helper.push(reject_product_status(code));
     }
     helper.push(reject_other_status(code));
-    let success_condition = if operand.shape == Shape::Scalar {
-        exponent_range(code, operand.format, LEFT, RESULT_MINIMUM_EXPONENT);
-        Condition::Below
+    let success = if operand.shape == Shape::Scalar {
+        // An exact zero result raised no status; a nonzero one rounded to
+        // zero raised underflow, which went to the helper above.
+        helper.push(scalar_range_or_zero(
+            code,
+            operand.format,
+            LEFT,
+            RESULT_MINIMUM_EXPONENT,
+        ));
+        jump(code)
     } else {
         prepare_vector_result_range(code);
         // A zero result is exact: one that underflowed raised the host's
@@ -178,9 +197,8 @@ pub(in crate::x86_64) fn emit(
             LEFT,
             ZERO_RANGE_SCRATCH,
         );
-        Condition::Zero
+        branch(code, Condition::Zero)
     };
-    let success = branch(code, success_condition);
     let helper_start = code.len();
     super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
     let success_start = code.len();

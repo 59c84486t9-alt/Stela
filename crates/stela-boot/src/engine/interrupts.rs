@@ -370,8 +370,9 @@ pub(crate) unsafe fn install(handler: Handler) {
 }
 
 /// Turn AVX on where this CPU has it, which firmware leaves off, so host
-/// code that detects AVX or F16C through XCR0 finds it usable. The translator
-/// admits no AVX target; the entry stubs save the enabled state whatever it is.
+/// code that detects AVX or F16C through XCR0 finds it usable, and so that
+/// translated blocks may use FMA3, F16C and AVX2. The entry stubs save the
+/// enabled state whatever it is.
 ///
 /// # Safety
 /// Ring 0 with interrupts masked, on a CPU whose extended state nothing has

@@ -1454,6 +1454,7 @@ fn vector_self_comparisons_accept_zeros_and_infinities_without_fp_status() {
 }
 
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
+mod changed_native;
 mod fused_native;
 mod half_conversion_native;
 mod traps;

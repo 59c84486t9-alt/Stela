@@ -33,6 +33,8 @@ const TEMP_VECTOR: u8 = 7;
 const SIGN_BITS: u8 = 1;
 const HALF_SIGN_SHIFT: u8 = u16::BITS as u8 - SIGN_BITS;
 const SINGLE_SIGN_SHIFT: u8 = u32::BITS as u8 - SIGN_BITS;
+/// Moves a Half's sign to the top of a dword.
+const HALF_SIGN_TO_DWORD_TOP: u8 = (u32::BITS - u16::BITS) as u8;
 const COMPARE_EQUAL: u8 = 0;
 const COMPARE_LESS: u8 = 1;
 const COMPARE_LESS_EQUAL: u8 = 2;
@@ -149,12 +151,25 @@ fn equal_zero(code: &mut Code, format: Format, value: u8, zero: u8, temporary: u
 }
 
 fn vector_zero_guard(code: &mut Code, format: Format, shape: Shape, helper: &mut Vec<usize>) {
+    prepare_vector_input_range(code, format);
+    vector_zero_or_normal_guard(code, format, shape, LEFT_VECTOR, helper);
+}
+
+/// Send `source` to the helper unless every active lane is normal, a zero
+/// or an infinity, after [`prepare_vector_input_range`]. Uses TEMP_VECTOR
+/// and MERGE_VECTOR.
+fn vector_zero_or_normal_guard(
+    code: &mut Code,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    helper: &mut Vec<usize>,
+) {
     // The shared range leaves per-lane normal validity in EXPONENT_VECTOR.
     // OR fraction-zero validity into it: only zeros/infinities are newly
     // admitted, and none can change host MXCSR or guest FPSR.
-    prepare_vector_input_range(code, format);
-    vector_exponent_range(code, format, shape, LEFT_VECTOR);
-    packed(code, Host::MoveAligned, TEMP_VECTOR, LEFT_VECTOR);
+    vector_exponent_range(code, format, shape, source);
+    packed(code, Host::MoveAligned, TEMP_VECTOR, source);
     shift_left(format).emit(
         code,
         TEMP_VECTOR,
@@ -187,6 +202,22 @@ fn half_order_key(code: &mut Code, vector: u8) {
     ShiftOpcode::ArithmeticWord.emit(code, TEMP_VECTOR, HALF_SIGN_SHIFT);
     ShiftOpcode::RightWord.emit(code, TEMP_VECTOR, SIGN_BITS);
     packed(code, Host::Xor, vector, TEMP_VECTOR);
+}
+
+/// `register` takes the low Half of `vector` as a signed integer of its
+/// magnitude: both zeros become 0, and finite values and infinities keep
+/// their order. Uses EDX.
+fn half_signed_magnitude(code: &mut Code, register: Gpr, vector: u8) {
+    const MAGNITUDE: i32 = 0x7fff;
+    let mut asm = code.asm();
+    asm.movd_from_xmm(register, vector);
+    asm.mov(Size::Dword, Gpr::Rdx, register);
+    asm.alu_imm32(Alu::And, Size::Dword, register, MAGNITUDE);
+    // EDX becomes all ones for a negative value, then negates the magnitude.
+    asm.shift_imm(ShiftOp::Shl, Size::Dword, Gpr::Rdx, HALF_SIGN_TO_DWORD_TOP);
+    asm.shift_imm(ShiftOp::Sar, Size::Dword, Gpr::Rdx, SINGLE_SIGN_SHIFT);
+    asm.alu(Alu::Xor, Size::Dword, register, Gpr::Rdx);
+    asm.alu(Alu::Sub, Size::Dword, register, Gpr::Rdx);
 }
 
 /// EAX takes EDX's flags when `condition` holds.
@@ -237,22 +268,16 @@ fn emit_flags(code: &mut Code, format: Format, left: u8, right: CompareSource, p
     read_vector(code, left, LEFT_VECTOR);
     if let CompareSource::Register(right) = right {
         read_vector(code, right, RIGHT_VECTOR);
-        // The half order key holds for normal values alone. UCOMIS orders
-        // zeros and infinities with no host or guest flag.
+        // UCOMIS, and the signed magnitudes of Half values, order zeros of
+        // either sign and infinities with no host or guest flag; NaNs and
+        // subnormals take the helper.
         for source in [LEFT_VECTOR, RIGHT_VECTOR] {
-            if format == Format::Half {
-                scalar_normal_guard(code, format, source, &mut helper);
-            } else {
-                scalar_zero_guard(code, format, source, &mut helper);
-            }
+            scalar_zero_guard(code, format, source, &mut helper);
         }
         if format == Format::Half {
-            half_order_key(code, LEFT_VECTOR);
-            half_order_key(code, RIGHT_VECTOR);
-            let mut asm = code.asm();
-            asm.movd_from_xmm(Gpr::Rax, LEFT_VECTOR);
-            asm.movd_from_xmm(Gpr::Rcx, RIGHT_VECTOR);
-            asm.alu(Alu::Cmp, Size::Word, Gpr::Rax, Gpr::Rcx);
+            half_signed_magnitude(code, Gpr::Rax, LEFT_VECTOR);
+            half_signed_magnitude(code, Gpr::Rcx, RIGHT_VECTOR);
+            code.asm().alu(Alu::Cmp, Size::Dword, Gpr::Rax, Gpr::Rcx);
         } else if format == Format::Double {
             code.asm().ucomisd(LEFT_VECTOR, Rm::Xmm(RIGHT_VECTOR));
         } else {
@@ -515,15 +540,26 @@ fn emit_predicate(code: &mut Code, operand: &Operand, pc: GuestAddress) {
         if merge {
             packed(code, Host::MoveAligned, MERGE_VECTOR, LEFT_VECTOR);
         }
+        // CMPSS/CMPPS order zeros of either sign and infinities as Arm
+        // does, without a status; NaNs (IOC) and subnormals (FZ) take the
+        // helper. The Half order key holds for normal values alone.
         if shape == Shape::Scalar {
             for source in [LEFT_VECTOR, RIGHT_VECTOR] {
-                scalar_normal_guard(code, format, source, &mut helper);
+                if format == Format::Half {
+                    scalar_normal_guard(code, format, source, &mut helper);
+                } else {
+                    scalar_zero_guard(code, format, source, &mut helper);
+                }
             }
         } else {
             prepare_vector_input_range(code, format);
             for source in [LEFT_VECTOR, RIGHT_VECTOR] {
-                vector_exponent_range(code, format, shape, source);
-                helper.push(branch(code, Condition::NotZero));
+                if format == Format::Half {
+                    vector_exponent_range(code, format, shape, source);
+                    helper.push(branch(code, Condition::NotZero));
+                } else {
+                    vector_zero_or_normal_guard(code, format, shape, source, &mut helper);
+                }
             }
         }
     } else {

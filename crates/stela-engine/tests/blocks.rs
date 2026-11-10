@@ -76,6 +76,67 @@ mod numerical {
         expected.v[d] = value;
     }
 
+    /// A zero dividend over a normal divisor, and a zero widened from S to
+    /// D, complete in compiled code with the exact signed zero and no
+    /// status, on the full path (FPSR.IXC clear) and on the sticky one;
+    /// a zero divisor still takes the helper, which raises DZC.
+    #[test]
+    fn zero_dividends_and_zero_widenings_stay_in_compiled_code() -> Result<()> {
+        use stela_compiler::aarch64::floating::{DIVIDE_BY_ZERO, FPCR_FZ};
+        const FDIV_S0_S1_S2: u32 = 0x1e22_1820;
+        const FCVT_D3_S1: u32 = 0x1e22_c023;
+        const THREE: u64 = 0x4040_0000;
+        let cache = tempfile::tempdir()?;
+        let mut runtime = BlockRuntime::new_for_target(
+            76,
+            cache.path().into(),
+            BlockProfile::ORDINARY,
+            TargetCpu::Baseline,
+        );
+        runtime.register_code(
+            GuestAddress(BASE),
+            words(&[ADD_ONE, FDIV_S0_S1_S2, FCVT_D3_S1, ADD_ONE, RET]),
+        )?;
+        for (zero, wide) in [(0u64, 0u64), (0x8000_0000, 0x8000_0000_0000_0000)] {
+            for (fpcr, fpsr) in [(0, 0), (0, INEXACT), (FPCR_FZ, 0), (FPCR_NEP, INEXACT)] {
+                let mut thread = input(false);
+                thread.registers.fpcr = fpcr;
+                thread.registers.fpsr = fpsr;
+                thread.registers.v[1][0] = 0xdead_beef_0000_0000 | zero;
+                thread.registers.v[2][0] = 0x89ab_cdef_0000_0000 | THREE;
+                let mut expected = thread.registers.clone();
+                expected.x[0] += 2;
+                publish(&mut expected, 0, 1, zero, 32);
+                let old = expected.v[3];
+                expected.v[3] = if fpcr & FPCR_NEP != 0 {
+                    [wide, old[1]]
+                } else {
+                    [wide, 0]
+                };
+                // SAFETY: the test program reads and writes only its own registered guest data, and nothing
+                // else mutates it.
+                let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+                assert_eq!(done.reason, StopReason::StopAddress);
+                assert_eq!(
+                    done.floating_point_helpers, 0,
+                    "{zero:#x} {fpcr:#x} {fpsr:#x}"
+                );
+                assert_eq!(thread.registers, expected, "{zero:#x} {fpcr:#x} {fpsr:#x}");
+            }
+        }
+        let mut thread = input(false);
+        thread.registers.fpsr = 0;
+        thread.registers.v[1][0] = THREE;
+        thread.registers.v[2][0] = 0;
+        // SAFETY: as above.
+        let done = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), 8)? };
+        assert_eq!(done.reason, StopReason::StopAddress);
+        assert_eq!(done.floating_point_helpers, 1);
+        assert_eq!(thread.registers.fpsr, DIVIDE_BY_ZERO);
+        assert_eq!(thread.registers.v[0][0], 0x7f80_0000);
+        Ok(())
+    }
+
     #[test]
     fn packed_truncation_retires_from_native_status_when_flush_has_no_effect() -> Result<()> {
         use stela_compiler::aarch64::floating::{
@@ -447,6 +508,170 @@ mod numerical {
             assert_eq!(report.reason, StopReason::StopAddress);
             assert_eq!(report.floating_point_helpers, usize::from(exceptional));
             assert_eq!(thread.registers, expected);
+        }
+        Ok(())
+    }
+
+    /// Run `program` once with `target` and once with the baseline target,
+    /// whose helper completes every listed FP word exactly, and return both
+    /// final states with the native run's helper count.
+    fn against_helper(
+        program: &[u32],
+        target: TargetCpu,
+        thread: &ThreadState,
+    ) -> Result<(GuestState, GuestState, usize)> {
+        let mut states = Vec::new();
+        let mut helpers = 0;
+        for (index, target) in [target, TargetCpu::Baseline].into_iter().enumerate() {
+            let cache = tempfile::tempdir()?;
+            let mut runtime = BlockRuntime::new_for_target(
+                77,
+                cache.path().into(),
+                BlockProfile::ORDINARY,
+                target,
+            );
+            runtime.register_code(GuestAddress(BASE), words(program))?;
+            let mut run = thread.clone();
+            // SAFETY: the program only operates on its own registered code and state.
+            let report = unsafe { runtime.run(&mut run, Some(GuestAddress(STOP)), 8)? };
+            assert_eq!(report.reason, StopReason::StopAddress);
+            if index == 0 {
+                helpers = report.floating_point_helpers;
+            }
+            states.push(run.registers);
+        }
+        let reference = states.pop().unwrap();
+        Ok((states.pop().unwrap(), reference, helpers))
+    }
+
+    /// Vector FMLA and FMLS of S and D lanes, with normal and zero lanes,
+    /// finish in compiled code with FMA3 on the full path (FPSR.IXC clear)
+    /// and on the sticky one, with the helper's exact results and status.
+    #[test]
+    fn vector_fused_products_stay_in_compiled_code_with_fma3() -> Result<()> {
+        let target = TargetCpu::detect();
+        if !target.supports(TargetCpu::Fma) {
+            return Ok(());
+        }
+        // FMLA V0.4S,V1.4S,V2.4S; FMLS V3.4S,V1.4S,V2.4S; FMLA V5.2D,V6.2D,V7.2D.
+        let program = [ADD_ONE, 0x4e22_cc20, 0x4ea2_cc23, 0x4e67_ccc5, ADD_ONE, RET];
+        let singles = |lanes: [u32; 4]| {
+            [
+                u64::from(lanes[0]) | u64::from(lanes[1]) << 32,
+                u64::from(lanes[2]) | u64::from(lanes[3]) << 32,
+            ]
+        };
+        for fpsr in [0, INEXACT] {
+            for rounding in 0..4 {
+                let mut thread = input(false);
+                thread.registers.fpsr = fpsr;
+                thread.registers.fpcr = rounding << ROUNDING_SHIFT;
+                thread.registers.v[0] = singles([0x3f80_0000, 0xbf2a_aaab, 0, 0x4049_0fdb]);
+                thread.registers.v[1] = singles([0x3eaa_aaab, 0x3f35_04f3, 0x8000_0000, 0]);
+                thread.registers.v[2] = singles([0x3dcc_cccd, 0xc0a0_0000, 0x3f80_0000, 0]);
+                thread.registers.v[3] = singles([0x4120_0000, 0, 0x3e4c_cccd, 0x8000_0000]);
+                thread.registers.v[5] = [0x3fd5_5555_5555_5555, 0];
+                thread.registers.v[6] = [0x3fb9_9999_9999_999a, 0x4000_0000_0000_0000];
+                thread.registers.v[7] = [0xbff0_0000_0000_0001, 0x8000_0000_0000_0000];
+                let (native, reference, helpers) = against_helper(&program, target, &thread)?;
+                assert_eq!(helpers, 0, "{fpsr:#x} {rounding}");
+                assert_eq!(native, reference, "{fpsr:#x} {rounding}");
+                assert_eq!(native.fpsr & INEXACT, INEXACT);
+            }
+        }
+        Ok(())
+    }
+
+    /// Vector ordered comparisons order zero and infinite lanes in compiled
+    /// code; a NaN (IOC) or a subnormal (FZ) lane still takes the helper.
+    #[test]
+    fn vector_comparisons_keep_zero_and_infinite_lanes_compiled() -> Result<()> {
+        // FCMGE V4.4S,V7.4S,V18.4S; FCMGT V5.2D,V6.2D,V8.2D; FACGE V9.4S,V7.4S,V18.4S.
+        let program = [ADD_ONE, 0x6e32_e4e4, 0x6ee8_e4c5, 0x6e32_ece9, ADD_ONE, RET];
+        let cases = [
+            ([0x8000_0000_0000_0000, 0xff80_0000_7f80_0000], 0, false),
+            ([0x3f80_0000_7f80_0000, 0x0000_0000_bf80_0000], 0, false),
+            ([0x7fc0_0000_0000_0000, 0], INVALID, true),
+            ([0x0000_0001_0000_0000, 0], 0, true),
+        ];
+        for (left, status, exceptional) in cases {
+            let mut thread = input(false);
+            thread.registers.fpsr = 0;
+            thread.registers.v[7] = left;
+            thread.registers.v[18] = [0x0000_0000_8000_0000, 0x7f80_0000_ff80_0000];
+            thread.registers.v[6] = [0x7ff0_0000_0000_0000, 0x8000_0000_0000_0000];
+            thread.registers.v[8] = [0x3ff0_0000_0000_0000, 0];
+            let (native, reference, helpers) =
+                against_helper(&program, TargetCpu::detect(), &thread)?;
+            // FCMGE and FACGE both read the exceptional lane.
+            assert_eq!(helpers, 2 * usize::from(exceptional), "{left:x?}");
+            assert_eq!(native, reference, "{left:x?}");
+            assert_eq!(native.fpsr, status, "{left:x?}");
+        }
+        Ok(())
+    }
+
+    /// Half FCMP orders zeros of either sign and infinities in compiled
+    /// code, and FCVT widens a zero Half there; a NaN or a subnormal still
+    /// takes the helper.
+    #[test]
+    fn half_compares_and_widening_keep_zeros_and_infinities_compiled() -> Result<()> {
+        // FCMP H2,H0; CSET X5,GE; FCVT S4,H4; FCVT D6,H6.
+        let program = [
+            ADD_ONE,
+            0x1ee0_2040,
+            0x9a9f_b7e5,
+            0x1ee2_4084,
+            0x1ee2_c0c6,
+            ADD_ONE,
+            RET,
+        ];
+        let cases = [
+            (0x8000, 0x0000, 0x8000, 0),
+            (0x0000, 0x8000, 0x0000, 0),
+            (0xfc00, 0x3c00, 0xc000, 0),
+            (0x7c00, 0x7c00, 0xbc00, 0),
+            (0x3c00, 0xfbff, 0x3555, 0),
+            (0x7e00, 0x3c00, 0x0000, 1),
+            (0x0001, 0x3c00, 0x0000, 1),
+        ];
+        for (left, right, widened, helpers) in cases {
+            for fpcr in [0, FPCR_NEP] {
+                let mut thread = input(false);
+                thread.registers.fpcr = fpcr;
+                thread.registers.fpsr = 0;
+                thread.registers.v[2][0] = 0xdead_0000 | left;
+                thread.registers.v[0][0] = 0xbeef_0000 | right;
+                thread.registers.v[4][0] = 0x1234_0000 | widened;
+                thread.registers.v[6][0] = 0x5678_0000 | widened;
+                let (native, reference, count) =
+                    against_helper(&program, TargetCpu::detect(), &thread)?;
+                assert_eq!(count, helpers, "{left:#x} {right:#x} {widened:#x}");
+                assert_eq!(native, reference, "{left:#x} {right:#x} {widened:#x}");
+            }
+        }
+        Ok(())
+    }
+
+    /// FCVTN and FCVTN2 from S to H narrow zero lanes in compiled code with
+    /// F16C, with the helper's results.
+    #[test]
+    fn half_narrowing_keeps_zero_lanes_compiled_with_f16c() -> Result<()> {
+        let target = TargetCpu::detect();
+        if !target.supports(TargetCpu::F16c) {
+            return Ok(());
+        }
+        // FCVTN V3.4H,V4.4S; FCVTN2 V3.8H,V5.4S.
+        let program = [ADD_ONE, 0x0e21_6883, 0x4e21_68a3, ADD_ONE, RET];
+        for fpsr in [0, INEXACT] {
+            let mut thread = input(false);
+            thread.registers.fpsr = fpsr;
+            thread.registers.v[4] = [0x8000_0000_3f80_0000, 0x3eaa_aaab_0000_0000];
+            thread.registers.v[5] = [0, 0xc120_0000_8000_0000];
+            let (native, reference, helpers) = against_helper(&program, target, &thread)?;
+            assert_eq!(helpers, 0, "{fpsr:#x}");
+            assert_eq!(native, reference, "{fpsr:#x}");
+            assert_eq!(native.v[3], [0x3555_0000_8000_3c00, 0xc900_8000_0000_0000]);
         }
         Ok(())
     }

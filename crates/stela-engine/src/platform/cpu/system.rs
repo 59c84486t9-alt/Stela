@@ -82,6 +82,16 @@ const CPUID_MOVBE: u32 = 1 << 22;
 const CPUID_AVX: u32 = 1 << 28;
 const CPUID_BMI1: u32 = 1 << 3;
 const CPUID_BMI2: u32 = 1 << 8;
+/// CPUID.1:ECX FMA3 and F16C, and CPUID.7.0:EBX AVX2: VEX vector recipes,
+/// which also need the OS to enable YMM state ([`XCR0_YMM`]).
+const CPUID_FMA: u32 = 1 << 12;
+const CPUID_F16C: u32 = 1 << 29;
+const CPUID_AVX2: u32 = 1 << 5;
+/// CR4.OSXSAVE, which makes XGETBV and XCR0 usable.
+const CR4_OSXSAVE: u64 = 1 << 18;
+/// XCR0's SSE and AVX bits: XMM and YMM state, which the host's interrupt
+/// entries save whenever XCR0 enables it.
+const XCR0_YMM: u64 = 0x6;
 /// AMD's first family whose PDEP and PEXT are not microcoded (Zen 3).
 const FAST_PDEP_FAMILY: u32 = 0x19;
 #[cfg(any(
@@ -96,7 +106,9 @@ const CPUID1_ECX_READ: u32 = CPUID_PCLMULQDQ
     | CPUID_POPCNT
     | CPUID_AES
     | CPUID_MOVBE
-    | CPUID_AVX;
+    | CPUID_AVX
+    | CPUID_FMA
+    | CPUID_F16C;
 const CPUID_SHA: u32 = 1 << 29;
 const CPUID_GFNI: u32 = 1 << 8;
 const CPUID_LZCNT: u32 = 1 << 5;
@@ -109,6 +121,8 @@ struct NativeControls {
     cr4: u64,
     efer: u64,
     flags: u64,
+    /// XCR0, or zero without CR4.OSXSAVE.
+    xcr0: u64,
 }
 
 fn privilege(cs: u16, flags: u64) -> Result<(), Refusal> {
@@ -209,7 +223,24 @@ impl Observation {
         if TargetCpu::atomic_load16_guaranteed(d.vendor, d.cpuid1_ecx) {
             target = target.with_atomic_load16();
         }
-        // No AVX, FMA, cache-line atomicity or DOIT recipe is admitted.
+        // VEX vector recipes: AVX hardware whose YMM state this core's
+        // XCR0 enables. Blocks use VEX.128 forms, and their few VEX.256
+        // sequences end with VZEROUPPER; interrupt entries save the state.
+        if c.cr4 & CR4_OSXSAVE != 0
+            && c.xcr0 & XCR0_YMM == XCR0_YMM
+            && d.cpuid1_ecx & CPUID_AVX != 0
+        {
+            if d.cpuid1_ecx & CPUID_FMA != 0 {
+                target = target.with_fma();
+            }
+            if d.cpuid1_ecx & CPUID_F16C != 0 {
+                target = target.with_f16c();
+            }
+            if d.cpuid7_ebx & CPUID_AVX2 != 0 {
+                target = target.with_avx2();
+            }
+        }
+        // No AVX-512, cache-line atomicity or DOIT recipe is admitted.
         Ok(target)
     }
 }
@@ -417,6 +448,7 @@ impl NativeSystemTarget {
             || current.controls.cr4 != self.observed.controls.cr4
             || current.controls.efer != self.observed.controls.efer
             || current.controls.cs != self.observed.controls.cs
+            || current.controls.xcr0 != self.observed.controls.xcr0
         {
             return Err(Refusal::Controls);
         }
@@ -504,7 +536,7 @@ fn enumerate(mut cpuid: impl FnMut(u32, u32) -> Cpuid) -> Result<(CpuDeclaration
             cpuid1_edx: basic.edx & (CPUID_FLOOR_EDX | (1 << 8)),
             extended_ecx: ext.ecx & CPUID_LZCNT,
             extended_edx: ext.edx & CPUID_LONG_NX,
-            cpuid7_ebx: leaf7.ebx & (CPUID_SHA | CPUID_BMI1 | CPUID_BMI2),
+            cpuid7_ebx: leaf7.ebx & (CPUID_SHA | CPUID_BMI1 | CPUID_BMI2 | CPUID_AVX2),
             cpuid7_ecx: leaf7.ecx & ((1 << 16) | CPUID_GFNI),
             family: display_family(basic.eax),
             identity: probe,
@@ -565,6 +597,12 @@ fn controls(cs: u16, flags: u64, apic_id: u32) -> NativeControls {
         asm!("rdmsr", in("ecx") 0xc000_0080u32, out("eax") low, out("edx") high,
             options(nostack, preserves_flags));
     }
+    let xcr0 = if cr4 & CR4_OSXSAVE != 0 {
+        // SAFETY: CR4.OSXSAVE makes XGETBV with ECX 0 defined.
+        unsafe { core::arch::x86_64::_xgetbv(0) }
+    } else {
+        0
+    };
     NativeControls {
         apic_id,
         cs,
@@ -572,6 +610,7 @@ fn controls(cs: u16, flags: u64, apic_id: u32) -> NativeControls {
         cr4,
         flags,
         efer: u64::from(low) | u64::from(high) << 32,
+        xcr0,
     }
 }
 
