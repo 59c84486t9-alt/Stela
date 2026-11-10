@@ -268,7 +268,7 @@ fn logical_immediate_distinguishes_sp_destination_and_zero_source() {
 }
 
 #[test]
-fn constrained_memory_operands_select_nop_before_ordinary_decoders() {
+fn constrained_memory_operands_are_undefined_before_ordinary_decoders() {
     use constrained::ConstrainedUnpredictable::{
         LoadWritebackOverlap, PairLoadDestinationOverlap, StoreWritebackOverlap,
     };
@@ -290,13 +290,7 @@ fn constrained_memory_operands_select_nop_before_ordinary_decoders() {
         (0xf8000400, StoreWritebackOverlap),      // post-index STR base/target overlap
     ] {
         assert_eq!(constrained::decode(word), Some(reason), "{word:#x}");
-        assert_eq!(
-            Decoder.lift(pc, word).unwrap(),
-            Instruction {
-                pc,
-                operation: Operation::Nop
-            }
-        );
+        assert!(Decoder.lift(pc, word).is_err(), "{word:#x}");
     }
 }
 

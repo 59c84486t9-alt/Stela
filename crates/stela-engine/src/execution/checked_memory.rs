@@ -439,9 +439,8 @@ const CONDITIONAL_BRANCH_CLASS: u32 = 0x5400_0000;
 const CONSISTENT_BRANCH_HINT: u32 = 1 << 4;
 
 fn baseline_register_operation(word: u32, operation: &Operation) -> bool {
-    // The shared decoder turns some constrained memory forms into NOPs and
-    // erases BC's HBC origin. This profile supports neither, so the word
-    // itself is checked.
+    // The shared decoder erases BC's HBC origin, which this profile does
+    // not support, so the word itself is checked.
     match operation {
         Operation::Nop => return word == NOP_WORD,
         Operation::BranchCondition { .. } => {

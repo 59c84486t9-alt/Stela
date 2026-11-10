@@ -464,10 +464,12 @@ impl Lifter for Decoder {
             Operation::Synchronization(decoded)
         } else if let Some(decoded) = exclusive::decode(word) {
             Operation::Exclusive(decoded.map_err(|_| unsupported())?)
-        } else if let Some(_reason) = constrained::decode(word) {
-            // The CONSTRAINED UNPREDICTABLE choice here is NOP, taken before
-            // any FP enable check or memory effect.
-            Operation::Nop
+        } else if constrained::decode(word).is_some() {
+            // The CONSTRAINED UNPREDICTABLE choice is UNDEFINED, Apple's: an
+            // M1 Pro raises it for every LDPOVERLAP, WBOVERLAPLD and
+            // WBOVERLAPST form (`cargo xtask cpu-reference`). The engine
+            // reports the word once and takes the exception.
+            return Err(unsupported());
         } else if let Some(decoded) = pc_relative::decode(pc, word) {
             Operation::PcRelative(decoded)
         } else if let Some(decoded) = bitfield::decode(word) {
@@ -530,11 +532,10 @@ impl Lifter for Decoder {
             let rn = (word >> 5) & 31;
             let rt = word & 31;
             let rt2 = (word >> 10) & 31;
-            if (loading && rt == rt2)
-                || (mode != AddressMode::Offset && rn != 31 && (rn == rt || rn == rt2))
-            {
-                return Err(unsupported());
-            }
+            debug_assert!(
+                constrained::decode(word).is_none(),
+                "register overlaps are decoded first"
+            );
             let immediate = ((word >> 15) & 0x7f) as i32;
             Operation::MemoryPair {
                 transfer: if loading {
@@ -585,11 +586,10 @@ impl Lifter for Decoder {
             };
             let rn = (word >> 5) & 31;
             let rt = word & 31;
-            // Writeback overlap has constrained-unpredictable semantics.
-            // Reject it rather than choosing one possible architectural result.
-            if mode != AddressMode::Offset && rn == rt && rn != 31 {
-                return Err(unsupported());
-            }
+            debug_assert!(
+                constrained::decode(word).is_none(),
+                "register overlaps are decoded first"
+            );
             Operation::Memory {
                 transfer,
                 bytes: 1 << size,

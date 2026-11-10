@@ -86,19 +86,10 @@ fn all_store_pair_forms_reach_checked_whole_plan_and_keep_source_intervals() {
 }
 
 #[test]
-fn constrained_store_writeback_overlap_stays_decoder_nop_without_memory_requirements() {
+fn constrained_store_writeback_overlap_is_undefined_before_any_checked_plan() {
     for form in [0x2980_0000, 0x2880_0000, 0xa980_0000, 0xa880_0000] {
-        for recipe in [
-            CheckedMemoryProfile::SpAlignmentEnabled,
-            CheckedMemoryProfile::SpAlignmentDisabled,
-        ] {
-            // Rt is X0 and the base is X0. The decoder owns the source-permitted NOP.
-            let instruction = Decoder.lift(BASE, word(form, 0)).unwrap();
-            assert!(matches!(instruction.operation, Operation::Nop));
-            let decoded = Decoded::checked_ordinary(instruction, recipe).unwrap();
-            assert!(matches!(decoded, Decoded::Ordinary(_)));
-            assert_eq!(decoded.memory_requirements(), Default::default());
-        }
+        // Rt is X0 and the base is X0: UNDEFINED, as on Apple silicon.
+        assert!(Decoder.lift(BASE, word(form, 0)).is_err(), "{form:#x}");
     }
 }
 

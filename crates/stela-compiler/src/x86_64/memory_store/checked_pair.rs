@@ -40,7 +40,7 @@ fn staging(offset: u32) -> Mem {
 }
 
 /// Validated source operands, shared by temporal and non-temporal GPR pairs.
-/// Source-permitted constrained NOP encodings are decoded as Operation::Nop
+/// The decoder declines constrained register-overlap encodings (UNDEFINED)
 /// before this adapter; constructed overlapping writeback operands decline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Operand {

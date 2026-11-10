@@ -50,12 +50,13 @@ fn allocated_pair_stores_keep_register_roles_and_descriptor_intent() {
         ] {
             for base in [2, 30, REGISTER_MASK] {
                 for immediate in [IMMEDIATE_MIN, -1, 0, 1, IMMEDIATE_MAX] {
-                    let operation = lifted(word(form, data, base, immediate));
+                    let word = word(form, data, base, immediate);
                     if mode != AddressMode::Offset && base != REGISTER_MASK && data.contains(&base)
                     {
-                        assert_eq!(operation, Operation::Nop);
+                        assert!(Decoder.lift(GuestAddress(TEST_PC), word).is_err());
                         continue;
                     }
+                    let operation = lifted(word);
                     let operand = Operand::from_operation(
                         &operation,
                         CheckedMemoryProfile::SpAlignmentEnabled,
@@ -116,15 +117,14 @@ fn allocated_pair_stores_keep_register_roles_and_descriptor_intent() {
 }
 
 #[test]
-fn constrained_writeback_nops_never_enter_pair_service() {
+fn constrained_writeback_overlaps_are_undefined_before_pair_service() {
     for form in [STP_W_PRE, STP_W_POST, STP_X_PRE, STP_X_POST] {
         for base in 0..REGISTER_MASK {
             for data in [[base, 0], [0, base], [base, base]] {
-                let operation = lifted(word(form, data, base, 1));
-                assert_eq!(operation, Operation::Nop);
-                assert_eq!(
-                    Operand::from_operation(&operation, CheckedMemoryProfile::SpAlignmentEnabled),
-                    None
+                let word = word(form, data, base, 1);
+                assert!(
+                    Decoder.lift(GuestAddress(TEST_PC), word).is_err(),
+                    "{word:#x}"
                 );
             }
         }
@@ -290,10 +290,13 @@ fn allocated_load_pairs_keep_transfer_and_readonly_capability() {
             for data in [[0, 1], [REGISTER_MASK, 0], [0, REGISTER_MASK]] {
                 for base in [0, 1, 2, REGISTER_MASK] {
                     for immediate in [IMMEDIATE_MIN, -1, 0, 1, IMMEDIATE_MAX] {
-                        let operation = lifted(word(form, data, base, immediate));
-                        if operation == Operation::Nop {
+                        let Ok(instruction) =
+                            Decoder.lift(GuestAddress(TEST_PC), word(form, data, base, immediate))
+                        else {
+                            // A register overlap: UNDEFINED.
                             continue;
-                        }
+                        };
+                        let operation = instruction.operation;
                         let operand = Operand::from_operation(&operation, profile).unwrap();
                         assert_eq!(operand.transfer, MemoryTransfer::Load { signed, width });
                         assert_eq!(operand.bytes, bytes);
@@ -323,7 +326,7 @@ fn allocated_load_pairs_keep_transfer_and_readonly_capability() {
 }
 
 #[test]
-fn constructed_invalid_load_pairs_decline_and_constrained_encodings_stay_nop() {
+fn constructed_invalid_load_pairs_decline_and_constrained_encodings_are_undefined() {
     let valid = Operand::from_operation(
         &lifted(word(0xa940_0000, [0, 1], 2, 0)),
         CheckedMemoryProfile::SpAlignmentDisabled,
@@ -377,12 +380,12 @@ fn constructed_invalid_load_pairs_decline_and_constrained_encodings_stay_nop() {
     ] {
         assert!(!invalid.is_valid(), "{invalid:?}");
     }
+    let undefined = |word| Decoder.lift(GuestAddress(TEST_PC), word).is_err();
     for (form, _, _, _) in LOAD_FORMS {
-        assert_eq!(lifted(word(form, [0, 0], 2, 0)), Operation::Nop);
+        assert!(undefined(word(form, [0, 0], 2, 0)));
         for base in [0, 1] {
-            let operation = lifted(word(form, [0, 1], base, 1));
             if (form >> 23) & 3 == 1 || (form >> 23) & 3 == 3 {
-                assert_eq!(operation, Operation::Nop);
+                assert!(undefined(word(form, [0, 1], base, 1)));
             }
         }
     }
