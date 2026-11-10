@@ -155,6 +155,9 @@ pub(super) struct FakeHost {
     translation_helper: Option<u64>,
     /// What [`Host::memory_low`] answers.
     pub(super) memory_low: bool,
+    /// [`Host::write_ram`] refuses writes from this address on, as a RAM
+    /// owner whose publication failed does.
+    pub(super) refused_writes: Option<u64>,
     /// Check the allocation boundary before a new compilation reads input.
     require_empty_code_on_read: bool,
     /// Installs per part of a code arena of two parts reclaimed in
@@ -191,6 +194,12 @@ impl Host for FakeHost {
         }
     }
     fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool {
+        if self
+            .refused_writes
+            .is_some_and(|refused| physical >= refused)
+        {
+            return false;
+        }
         let Some(offset) = physical.checked_sub(self.base) else {
             return false;
         };
@@ -554,6 +563,7 @@ pub(super) fn board_on<D: Devices>(
         placement: mmu::placement::Placement::FiveLevel,
         translation_helper: None,
         memory_low: false,
+        refused_writes: None,
         require_empty_code_on_read: false,
         ring: None,
         code_partitions: None,
@@ -965,6 +975,32 @@ fn a_call_reaches_the_callers_ram_across_pages_outside_locks() {
         caller.read(u64::MAX - 1, &mut read),
         Err(CallerFault::Denied { .. } | CallerFault::NotRam { .. })
     ));
+}
+
+/// RAM that refuses a write fails the caller's write there: the service
+/// must not take an answer it wrote for one the caller sees.
+#[test]
+fn a_write_the_ram_refuses_fails_the_callers_write() {
+    let mut machine = board(&[], pair_fault_device(), Vec::new());
+    let straddling = BASE + FETCH_PAGE - 4;
+    machine.host.refused_writes = Some(BASE + FETCH_PAGE);
+    let mut caller = caller::CallerSpace {
+        controls: machine.cpu.controls(machine.cpu.regime()),
+        requester: mmu::Requester {
+            unprivileged: true,
+            ..machine.cpu.requester()
+        },
+        lock: [None; 4],
+        refused: None,
+        host: &mut machine.host,
+    };
+    assert_eq!(
+        caller.write(straddling, &[1, 2, 3, 4, 5, 6, 7, 8]),
+        Err(CallerFault::NotRam {
+            address: BASE + FETCH_PAGE
+        })
+    );
+    caller.write(BASE, &[9; 4]).unwrap();
 }
 
 /// A service that reads the caller's memory at the record's address.

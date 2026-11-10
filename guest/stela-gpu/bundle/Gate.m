@@ -23,6 +23,9 @@ static void touch(StelaSpan span, bool write)
  * most a few times; past this, mapping it again will not help. */
 #define MAX_UNMAPPED 1024u
 
+/* Tries for a call the service never read whose gate names no fault. */
+#define MAX_UNREAD 16u
+
 /* Fails a call whose memory stays out of reach, naming what it could not map. */
 static void report_unreachable(uint32_t operation, StelaSpans spans, StelaFailure *failure)
 {
@@ -54,8 +57,10 @@ uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *reques
 	failure = failure ? failure : &unread;
 	volatile StelaGateCall call;
 	unsigned denials = 0;
+	unsigned unreads = 0;
 	unsigned tries = 0;
 	unsigned waits = 0;
+	bool again;
 	do {
 		if (++tries > MAX_UNMAPPED) {
 			report_unreachable(operation, spans, failure);
@@ -68,6 +73,8 @@ uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *reques
 		for (size_t i = 0; i < spans.write_count; i++) {
 			touch(spans.writes[i], true);
 		}
+		/* The record itself, which the service reads first. */
+		touch(stela_span((const void *)&call, sizeof(call)), true);
 		call = (StelaGateCall){
 			.operation = operation,
 			.status = StelaStatusClosed,
@@ -86,8 +93,18 @@ uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *reques
 			wait_pending(waits++);
 		}
 		/* The pager can take back the stack's page after the record is written. */
-	} while (call.status == StelaStatusUnmapped || call.status == StelaStatusPending ||
-		 (failure->fault == STELA_GATE_FAULT_DENIED && ++denials < 16));
+		again = call.status == StelaStatusUnmapped || call.status == StelaStatusPending ||
+			(failure->fault == STELA_GATE_FAULT_DENIED && ++denials < 16);
+		/* Still closed with no reason and no fault: the service never wrote
+		 * the record. The gate keeps one fault per connection, so another
+		 * thread's call can clear the fault of a record the service could
+		 * not read before this thread reads it. A record the service did not
+		 * read ran nothing: make the call again. */
+		if (!again && call.status == StelaStatusClosed && call.reason_length == 0 && failure->fault == 0 &&
+		    ++unreads < MAX_UNREAD) {
+			again = true;
+		}
+	} while (again);
 	failure->status = call.status;
 	size_t length = call.reason_length < sizeof(failure->reason) ? call.reason_length : sizeof(failure->reason) - 1;
 	failure->reason[call.status == StelaStatusOk ? 0 : length] = 0;

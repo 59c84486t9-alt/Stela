@@ -131,6 +131,9 @@ pub enum GateAnswer {
     Served {
         gate: usize,
         connection: NonZeroU64,
+        /// The call record the store named, so the gate keeps its fault for
+        /// that call alone.
+        record: u64,
         fault: Option<CallerFault>,
     },
     Imported(Option<NonZeroU64>),
@@ -169,6 +172,7 @@ impl GateCall {
             } => GateAnswer::Served {
                 gate,
                 connection,
+                record,
                 fault: self.service.serve(connection, record, caller).err(),
             },
             GateRequest::Import {

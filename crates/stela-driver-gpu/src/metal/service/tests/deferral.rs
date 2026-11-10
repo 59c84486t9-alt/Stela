@@ -298,3 +298,52 @@ fn a_job_no_waiting_processor_takes_runs_on_its_callers() {
     assert_eq!((report.ran, report.forced, report.repeated), (1, 1, 1));
     assert!(!shared.jobs_waiting());
 }
+
+/// A deferred call's run writes nothing, so a record that cannot take its
+/// `Pending` is untouched: the call fails with the caller's fault for the
+/// gate to report, never as served, and leaves no job.
+#[test]
+fn a_deferred_call_whose_record_takes_no_pending_fails_with_the_fault() {
+    use stela_contracts::gate::{CallerFault, CallerMemory};
+    struct DenyRecord<'a> {
+        memory: &'a mut Memory,
+        record: u64,
+    }
+    impl CallerMemory for DenyRecord<'_> {
+        fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), CallerFault> {
+            CallerMemory::read(self.memory, address, buffer)
+        }
+
+        fn write(&mut self, address: u64, data: &[u8]) -> Result<(), CallerFault> {
+            if address == self.record {
+                return Err(CallerFault::Denied { address });
+            }
+            CallerMemory::write(self.memory, address, data)
+        }
+    }
+
+    let mut service = service();
+    let a = connect(&mut service);
+    let (pipeline, buffer) = pipeline(&mut service, a);
+    service.device().compiler_mut().defer_next = true;
+    let shared = SharedService::new(service, host(|_| {}));
+    shared.set_compile_stack(1);
+    let mut memory = Memory::default();
+    let commit = dispatching(&mut memory, pipeline, buffer);
+    let mut caller = DenyRecord {
+        memory: &mut memory,
+        record: commit,
+    };
+    assert_eq!(
+        shared.serve(a, commit, &mut caller),
+        Err(CallerFault::Denied { address: commit })
+    );
+    // Untouched: the status the caller wrote is still there.
+    let span = Span {
+        address: commit,
+        length: size_of::<GateCall>() as u64,
+    };
+    let call: GateCall = wire::read(&GuestMemory::read(&mut memory, span).unwrap()).unwrap();
+    assert_eq!(call.status, u32::MAX);
+    assert!(!shared.jobs_waiting());
+}

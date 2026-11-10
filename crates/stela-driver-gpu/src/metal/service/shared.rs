@@ -579,7 +579,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             });
             return false;
         }
-        answer_pending(record, call, caller)
+        answer_pending(record, call, caller).is_ok()
     }
 
     /// Queues each of `jobs` unless one of its key is queued, running or
@@ -922,12 +922,20 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
             // `Pending`, and made again once the job has run.
             let deferral = alloc::format!("{}", super::wire::Fault::from(compiler::DEFERRED));
             refused.retain(|reason| !reason.contains(&deferral));
-            match read_call(record, caller) {
-                Some(call) if answer_pending(record, call, caller) => {
+            // The run's own writes were dropped once it deferred, so a
+            // record that takes no `Pending` is untouched: the caller learns
+            // why from the gate's fault, and makes the call again.
+            let answered = read_record(record, caller)
+                .and_then(|call| answer_pending(record, call, caller).map(|()| call));
+            match answered {
+                Ok(call) => {
                     self.park(connection, record, call, jobs);
                     (operation, status, served) = (call.operation, Status::Pending, Ok(()));
                 }
-                _ => drop(jobs),
+                Err(fault) => {
+                    drop(jobs);
+                    served = Err(fault);
+                }
             }
         }
         if let Some(compiler) = air(turn.device().compiler_mut()) {
@@ -1014,19 +1022,28 @@ fn air<C: Compiler + 'static>(compiler: &mut C) -> Option<&mut AirCompiler> {
 
 /// The call record at `record`, unless it is out of the caller's reach.
 fn read_call(record: u64, caller: &mut dyn CallerMemory) -> Option<GateCall> {
+    read_record(record, caller).ok()
+}
+
+/// The call record at `record`, or why it is out of the caller's reach.
+fn read_record(record: u64, caller: &mut dyn CallerMemory) -> Result<GateCall, CallerFault> {
     let mut raw = [0; size_of::<GateCall>()];
-    caller.read(record, &mut raw).ok()?;
-    Some(wire::read(&raw).expect("a record of its own size"))
+    caller.read(record, &mut raw)?;
+    Ok(wire::read(&raw).expect("a record of its own size"))
 }
 
 /// Completes `call` at `record` as `Pending`, with no reason: whether the
 /// record took it.
-fn answer_pending(record: u64, mut call: GateCall, caller: &mut dyn CallerMemory) -> bool {
+fn answer_pending(
+    record: u64,
+    mut call: GateCall,
+    caller: &mut dyn CallerMemory,
+) -> Result<(), CallerFault> {
     call.status = Status::Pending.raw();
     call.reason_length = 0;
     let mut raw = [0; size_of::<GateCall>()];
     wire::write(&call, &mut raw).expect("a record of its own size");
-    caller.write(record, &raw).is_ok()
+    caller.write(record, &raw)
 }
 
 /// The caller's memory for a run that may defer a compilation: once one is

@@ -403,10 +403,18 @@ static PHASES: Totals = Totals::new();
 /// 100 ms.
 const SLOW_CALL_DIVISOR: u64 = 10;
 
+/// Calls whose record the service could not read, answered by the gate's
+/// fault alone (`GPU CALLS unreached=`): the frontend makes each again.
+static UNREACHED: AtomicU64 = AtomicU64::new(0);
+
 /// Counts a call the gate served: the PE that rang runs no guest code until
 /// it returns, so a call that holds the service long is guest time lost.
 fn served(served: Served) {
     report_long_turn(&served);
+    // A record out of reach names no operation and leaves the call closed.
+    if served.operation == 0 && served.status == Status::Closed {
+        UNREACHED.fetch_add(1, Ordering::Relaxed);
+    }
     if let Some(call) = served.phases {
         let tsc_hz = installed().map_or(0, |gpu| gpu.tsc_hz);
         if PHASES.add(&call, tsc_hz / SLOW_CALL_DIVISOR) {
@@ -649,8 +657,10 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
     taken.sort_unstable_by_key(|&(_, _, held, ..)| core::cmp::Reverse(held));
     let held: u64 = taken.iter().map(|&(_, _, held, ..)| held).sum();
     output::arguments(format_args!(
-        "GPU CALLS held_us={} operation:count/held_us/longest_us/waited_us/unmapped/posted/posted_us",
-        micros(held)
+        "GPU CALLS held_us={} unreached={} \
+         operation:count/held_us/longest_us/waited_us/unmapped/posted/posted_us",
+        micros(held),
+        UNREACHED.swap(0, Ordering::Relaxed),
     ));
     for &(operation, count, held, longest, waited, unmapped, posted, posted_waited) in
         taken.iter().take(SHOWN)

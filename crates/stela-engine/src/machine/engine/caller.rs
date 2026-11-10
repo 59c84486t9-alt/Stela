@@ -89,11 +89,19 @@ impl<H: Host> CallerMemory for CallerSpace<'_, H> {
         Ok(())
     }
 
+    /// A piece RAM refuses fails the write there, as memory that is not
+    /// RAM does: the caller must not take the bytes for written.
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), CallerFault> {
         let mut offset = 0;
         for (physical, length) in self.pieces(address, data.len(), mmu::Access::Write)? {
-            self.host
-                .write_ram(physical, &data[offset..offset + length]);
+            if !self
+                .host
+                .write_ram(physical, &data[offset..offset + length])
+            {
+                return Err(CallerFault::NotRam {
+                    address: address + offset as u64,
+                });
+            }
             offset += length;
         }
         Ok(())

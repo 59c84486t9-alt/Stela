@@ -10,7 +10,9 @@
 //! thread's memory. The service runs it in the store's own step, on that
 //! thread's PE and address space, and completes the record in place; the
 //! store retires once the call has. Only when the record itself is out of
-//! the thread's reach does the gate's `FAULT` report why.
+//! the thread's reach does the gate's `FAULT` report why: read on the PE
+//! whose store made the call, it answers for that call alone, so another
+//! thread's call through the same connection cannot clear it.
 //!
 //! Each store's request leaves the device ([`Gate::take`]) to run outside the
 //! board's lock, so a long shader compile holds up no other PE's device
@@ -58,7 +60,11 @@ pub struct Gate {
     status: bool,
     /// Each gate page's connection, by page - 1.
     slots: [Slot; CONNECTIONS],
-    faults: [u64; CONNECTIONS],
+    /// Each PE's last call through a gate: the gate and its record.
+    issued: BTreeMap<usize, (usize, u64)>,
+    /// The fault of each call whose record was out of reach, by gate and
+    /// record, until its PE's next call.
+    faults: BTreeMap<(usize, u64), u64>,
     opened: u64,
     /// The address of the range the next `IMPORT_BYTES` adds.
     range_address: u64,
@@ -80,7 +86,8 @@ impl Gate {
             irq,
             status: false,
             slots: [Slot::Free; CONNECTIONS],
-            faults: [0; CONNECTIONS],
+            issued: BTreeMap::new(),
+            faults: BTreeMap::new(),
             opened: 0,
             range_address: 0,
             ranges: Vec::new(),
@@ -108,7 +115,7 @@ impl Gate {
                 };
                 self.slots[gate] = connection.map_or(Slot::Free, Slot::Open);
                 if connection.is_some() {
-                    self.faults[gate] = 0;
+                    self.faults.retain(|&(other, _), _| other != gate);
                     self.opened = gate as u64 + 1;
                 }
             }
@@ -116,16 +123,22 @@ impl Gate {
             GateAnswer::Served {
                 gate,
                 connection,
+                record,
                 fault,
             } => {
                 // The gate may have closed, and its page opened again, since.
                 if self.slots[gate] == Slot::Open(connection) {
-                    self.faults[gate] = match fault {
+                    let code = match fault {
                         None => 0,
                         Some(CallerFault::Denied { .. }) => FAULT_DENIED,
                         Some(CallerFault::NotRam { .. }) => FAULT_NOT_RAM,
                         Some(CallerFault::Unsupported(_)) => FAULT_UNSUPPORTED,
                     };
+                    if code == 0 {
+                        self.faults.remove(&(gate, record));
+                    } else {
+                        self.faults.insert((gate, record), code);
+                    }
                 }
             }
             GateAnswer::Imported(handle) => {
@@ -181,6 +194,7 @@ impl Gate {
             return Err("a closed gate");
         };
         self.slots[gate] = Slot::Free;
+        self.faults.retain(|&(other, _), _| other != gate);
         let before = self.pending.len();
         self.pending.retain(
             |_, request| !matches!(request, GateRequest::Serve { gate: other, .. } if *other == gate),
@@ -263,7 +277,13 @@ impl MmioDevice for Gate {
                     self.service
                         .dropped("a gate call was still pending at its PE's next gate access");
                 }
-                Ok(self.faults[gate])
+                // The fault of this PE's own last call through this gate.
+                Ok(match self.issued.get(&access.cpu) {
+                    Some(&(issued, record)) if issued == gate => {
+                        self.faults.get(&(gate, record)).copied().unwrap_or(0)
+                    }
+                    _ => 0,
+                })
             }
             _ => Err(refused("no such register")),
         }
@@ -314,6 +334,10 @@ impl MmioDevice for Gate {
                     connection,
                     record: value,
                 };
+                // The PE's previous call is answered: its fault goes.
+                if let Some(previous) = self.issued.insert(access.cpu, (gate, value)) {
+                    self.faults.remove(&previous);
+                }
                 self.hold(access.cpu, request);
             }
             _ => return Err(refused("no such register")),
@@ -452,10 +476,14 @@ mod tests {
     }
 
     fn load(gate: &mut Gate, offset: u64) -> u64 {
+        load_on(gate, 0, offset)
+    }
+
+    fn load_on(gate: &mut Gate, cpu: usize, offset: u64) -> u64 {
         gate.read(
             offset,
             Width::Double,
-            &mut Access::new(0, 0, &mut NoInterrupts),
+            &mut Access::new(cpu, 0, &mut NoInterrupts),
         )
         .unwrap()
     }
@@ -587,7 +615,38 @@ mod tests {
         );
         store(&mut gate, 3, first * PAGE + CALL, 0x1000).unwrap();
         serve(&mut gate, 3);
-        assert_eq!(load(&mut gate, first * PAGE + FAULT), FAULT_DENIED);
+        assert_eq!(load_on(&mut gate, 3, first * PAGE + FAULT), FAULT_DENIED);
+    }
+
+    /// Two threads of one task call through its one gate on two PEs: the
+    /// one whose record was out of reach still reads its fault after the
+    /// other's call succeeded, and the other reads none.
+    #[test]
+    fn a_fault_belongs_to_the_call_that_met_it() {
+        let log = Arc::new(Service(Mutex::default()));
+        let mut gate = gate(&log);
+        let page = opened(&mut gate);
+        let (call, fault) = (page * PAGE + CALL, page * PAGE + FAULT);
+        store(&mut gate, 3, call, 0x1000).unwrap();
+        serve(&mut gate, 3);
+        store(&mut gate, 5, call, 0x40).unwrap();
+        serve(&mut gate, 5);
+        assert_eq!(load_on(&mut gate, 3, fault), FAULT_DENIED);
+        assert_eq!(load_on(&mut gate, 5, fault), 0);
+        // A PE that never called through the gate reads no fault.
+        assert_eq!(load_on(&mut gate, 7, fault), 0);
+        // The PE's next call answers for itself.
+        store(&mut gate, 3, call, 0x41).unwrap();
+        serve(&mut gate, 3);
+        assert_eq!(load_on(&mut gate, 3, fault), 0);
+        assert!(gate.faults.is_empty());
+        // A closed gate keeps no fault for the page's next connection.
+        store(&mut gate, 3, call, 0x2000).unwrap();
+        serve(&mut gate, 3);
+        store(&mut gate, 0, CLOSE, page).unwrap();
+        serve(&mut gate, 0);
+        assert_eq!(opened(&mut gate), page);
+        assert_eq!(load_on(&mut gate, 3, fault), 0);
     }
 
     #[test]
