@@ -107,6 +107,54 @@ pub fn ordinary_load_ends(
     (code.len() == end).then_some(ends)
 }
 
+/// How an X pair reaches memory (FEAT_LSE2): two element accesses, one
+/// 16-byte access, or the 16-byte access where RAX tests 16-byte aligned
+/// and the two otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairForm {
+    Split,
+    Aligned,
+    Tested,
+}
+
+/// TEST AL,15 and JNE over the 16-byte path to the element accesses.
+const TESTED_ENTRY: [u8; 5] = [0xf6, 0xc0, 0x0f, 0x75, 0x14];
+/// JMP over the element accesses.
+const TESTED_EXIT: [u8; 2] = [0xeb, 0x07];
+/// MOVDQA XMM0,[RAX]; MOVQ RCX,XMM0; PUNPCKHQDQ XMM0,XMM0; MOVQ R8,XMM0.
+const QUADWORD_PAIR_LOAD: [u8; 18] = [
+    0x66, 0x0f, 0x6f, 0x00, 0x66, 0x48, 0x0f, 0x7e, 0xc1, 0x66, 0x0f, 0x6d, 0xc0, 0x66, 0x49, 0x0f,
+    0x7e, 0xc0,
+];
+/// MOVQ XMM0,RCX; MOVQ XMM1,R8; PUNPCKLQDQ XMM0,XMM1; MOVDQA [RAX],XMM0.
+const QUADWORD_PAIR_STORE: [u8; 18] = [
+    0x66, 0x48, 0x0f, 0x6e, 0xc1, 0x66, 0x49, 0x0f, 0x6e, 0xc8, 0x66, 0x0f, 0x6c, 0xc1, 0x66, 0x0f,
+    0x7f, 0x00,
+];
+
+/// The element accesses `split` of a pair in `form`, with the 16-byte
+/// access `quadword`: the bytes and the instruction ends within them.
+fn pair_accesses(form: PairForm, quadword: &[u8], split: [&[u8]; 2]) -> (Vec<u8>, Vec<usize>) {
+    let mut bytes = Vec::new();
+    let mut ends = Vec::new();
+    match form {
+        PairForm::Aligned => {
+            bytes.extend_from_slice(quadword);
+            ends.push(bytes.len());
+        }
+        PairForm::Split | PairForm::Tested => {
+            if form == PairForm::Tested {
+                bytes.extend(TESTED_ENTRY.iter().chain(quadword).chain(&TESTED_EXIT));
+            }
+            for access in split {
+                bytes.extend_from_slice(access);
+                ends.push(bytes.len());
+            }
+        }
+    }
+    (bytes, ends)
+}
+
 /// Unsigned W and X pair recipe: RCX/R8 results, both accesses before either
 /// commit. Writeback, signed pairs and duplicate destinations are not selected.
 pub fn ordinary_pair_load_ends(
@@ -115,6 +163,7 @@ pub fn ordinary_pair_load_ends(
     base: usize,
     data: [Option<usize>; 2],
     displacement: i32,
+    form: PairForm,
 ) -> Option<Vec<usize>> {
     let (first, second): (&[u8], [u8; 4]) = match bytes {
         WORD_LOAD_BYTES => (
@@ -132,14 +181,17 @@ pub fn ordinary_pair_load_ends(
         ),
         _ => return None,
     };
-    let mut ends = ordinary_address_ends(code, base, displacement)?;
-    let address_end = *ends.last()?;
-    let first_end = address_end + first.len();
-    let second_end = first_end + second.len();
-    if code.get(address_end..first_end)? != first || code.get(first_end..second_end)? != second {
+    if form != PairForm::Split && bytes != DOUBLEWORD_LOAD_BYTES {
         return None;
     }
-    ends.extend([first_end, second_end]);
+    let mut ends = ordinary_address_ends(code, base, displacement)?;
+    let address_end = *ends.last()?;
+    let (accesses, access_ends) = pair_accesses(form, &QUADWORD_PAIR_LOAD, [first, &second]);
+    let second_end = address_end + accesses.len();
+    if code.get(address_end..second_end)? != accesses {
+        return None;
+    }
+    ends.extend(access_ends.iter().map(|end| address_end + end));
     let mut end = second_end;
     for (guest, rex, modrm) in [
         (data[0], REX | REX_W, FRAME_DISP32_FROM_RCX),
@@ -233,6 +285,7 @@ pub fn ordinary_pair_store_ends(
     base: usize,
     data: [Option<usize>; 2],
     displacement: i32,
+    form: PairForm,
 ) -> Option<(Vec<usize>, usize)> {
     let second: [u8; 4] = match bytes {
         WORD_LOAD_BYTES => [REX | REX_R, MOV_STORE, R8D_FROM_RAX_DISP8, WORD_LOAD_BYTES],
@@ -251,14 +304,16 @@ pub fn ordinary_pair_store_ends(
         end = check_store_data(code, end, guest, index == 1)?;
         ends.push(end);
     }
-    let first = single_store(bytes)?;
-    for store in [first, &second[..]] {
-        let start = end;
-        end += store.len();
-        if code.get(start..end)? != store {
-            return None;
-        }
-        ends.push(end);
+    if form != PairForm::Split && bytes != DOUBLEWORD_LOAD_BYTES {
+        return None;
     }
+    let first = single_store(bytes)?;
+    let (accesses, access_ends) = pair_accesses(form, &QUADWORD_PAIR_STORE, [first, &second]);
+    let start = end;
+    end += accesses.len();
+    if code.get(start..end)? != accesses {
+        return None;
+    }
+    ends.extend(access_ends.iter().map(|access| start + access));
     (code.len() == end).then_some((ends, data_segment))
 }

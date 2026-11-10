@@ -51,6 +51,10 @@ pub enum Basis {
     /// Holds on a chip with the Apple generic timer and its 1 GHz scaled
     /// Arm bank ([`super::timer::agt::present`]).
     GenericTimer(&'static str),
+    /// Holds when the host's aligned 16-byte SSE accesses are single-copy
+    /// atomic ([`TargetCpu::AtomicLoad16`]), which 16-byte-aligned X-register
+    /// pairs compile to.
+    Atomic16(&'static str),
 }
 
 /// The speculation guarantees the host gives guest code, which the
@@ -1149,11 +1153,14 @@ pub const TABLE: &[Row] = &[
         32,
         1,
         "FEAT_LSE2",
-        engine(
-            true,
-            "machine::mmu::alignment applies its alignment rules, and every \
-             access inside its 16-byte granule is single-copy atomic: one PE \
-             runs at a time and nothing else writes guest memory meanwhile",
+        Basis::Atomic16(
+            "machine::mmu::alignment applies its alignment rules; a \
+             16-byte-aligned LDP, STP, LDNP or STNP of X registers is one \
+             MOVDQA, single-copy atomic on Intel and AMD hosts with AVX (SDM \
+             Vol. 3A 9.1.1, APM Vol. 2 7.3.2); ordered and atomic accesses \
+             keep their granule. On AMD a plain unaligned access inside its \
+             16-byte granule that crosses an 8-byte boundary is two host \
+             accesses, which concurrent PEs can observe torn",
         ),
     ),
     // ID_AA64DFR0_EL1: the Armv8.4 debug architecture (FEAT_Debugv8p4,
@@ -1366,6 +1373,7 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool, speculation: Specu
         Basis::Contexts(_) => speculation.contexts,
         Basis::FaultingData(_) => speculation.faulting_data,
         Basis::GenericTimer(_) => super::timer::agt::present(chip),
+        Basis::Atomic16(_) => target.supports(TargetCpu::AtomicLoad16),
         Basis::Instructions(samples) => samples.iter().all(|word| {
             CompilationPlan::new(
                 &word.to_le_bytes(),

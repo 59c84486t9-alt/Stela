@@ -550,9 +550,11 @@ fn each_chip_advertises_only_its_own_features() {
     assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 20), 3);
     assert_eq!(field(Chip::AppleM3, ID_AA64MMFR1_EL1, 44), 0);
     assert_eq!(field(Chip::AppleM4, ID_AA64MMFR1_EL1, 44), 1);
-    // Every chip has FEAT_LSE2 (MMFR2.AT).
+    // Every chip has FEAT_LSE2 (MMFR2.AT), which a host with atomic
+    // aligned 16-byte accesses implements.
+    let lse2 = u64::from(TargetCpu::detect().supports(TargetCpu::AtomicLoad16));
     for chip in Chip::ALL {
-        assert_eq!(field(chip, ID_AA64MMFR2_EL1, 32), 1, "{chip:?}");
+        assert_eq!(field(chip, ID_AA64MMFR2_EL1, 32), lse2, "{chip:?}");
     }
     // Every chip restricts predictions (ISAR1.SPECRES 1); the M5 adds
     // COSP RCTX (2).
@@ -578,7 +580,21 @@ fn each_chip_advertises_only_its_own_features() {
     let chip = crate::machine::test_chip();
     let specres = 1 + u64::from(stela_contracts::Feature::FEAT_SPECRES2.on(chip));
     assert_eq!(field(chip, ID_AA64ISAR1_EL1, 40), specres);
-    assert_eq!(field(chip, ID_AA64MMFR2_EL1, 32), 1);
+    assert_eq!(field(chip, ID_AA64MMFR2_EL1, 32), lse2);
+}
+
+/// FEAT_LSE2 (MMFR2.AT) only where aligned 16-byte host accesses are
+/// single-copy atomic, which 16-byte-aligned X-register pairs compile to.
+#[test]
+fn lse2_is_advertised_only_with_atomic_aligned_16_byte_accesses() {
+    let at = |target: TargetCpu| {
+        derive(crate::machine::test_chip(), target, true, Speculation::NONE)
+            .into_iter()
+            .find(|(register, _)| *register == ID_AA64MMFR2_EL1)
+            .map_or(0, |(_, value)| value >> 32 & 0xf)
+    };
+    assert_eq!(at(TargetCpu::Baseline), 0);
+    assert_eq!(at(TargetCpu::Baseline.with_atomic_load16()), 1);
 }
 
 /// ID_AA64MMFR2_EL1.VARange (bits 19:16) is 0 on every chip and host

@@ -44,6 +44,15 @@ sse! {
     movq_xmm => Some(0xf3), [0x0f, 0x7e];
     /// `movdqu xmm, xmm/m128`.
     movdqu_load => Some(0xf3), [0x0f, 0x6f];
+    /// `movdqa xmm, xmm/m128`: one 16-byte access, which faults unless
+    /// 16-byte aligned.
+    movdqa_load => Some(0x66), [0x0f, 0x6f];
+    /// `punpcklqdq xmm, xmm/m128`: the low qwords of both, the source's
+    /// high.
+    punpcklqdq => Some(0x66), [0x0f, 0x6c];
+    /// `punpckhqdq xmm, xmm/m128`: the high qwords of both, the source's
+    /// high.
+    punpckhqdq => Some(0x66), [0x0f, 0x6d];
     /// `unpcklps xmm, xmm/m128`.
     unpcklps => None, [0x0f, 0x14];
     /// `unpcklpd xmm, xmm/m128`.
@@ -167,6 +176,11 @@ impl Asm<'_> {
     /// `movdqu xmm/m128, xmm`.
     pub(crate) fn movdqu_store(&mut self, rm: impl Into<Rm>, xmm: u8) {
         self.sse(Some(0xf3), &[0x0f, 0x7f], xmm, rm);
+    }
+    /// `movdqa xmm/m128, xmm`: one 16-byte access, which faults unless
+    /// 16-byte aligned.
+    pub(crate) fn movdqa_store(&mut self, rm: impl Into<Rm>, xmm: u8) {
+        self.sse(Some(0x66), &[0x0f, 0x7f], xmm, rm);
     }
     /// `pextrw r32, xmm, imm8` (66 0F C5): zero-extends word `lane`.
     pub(crate) fn pextrw(&mut self, destination: Gpr, xmm: u8, lane: u8) {

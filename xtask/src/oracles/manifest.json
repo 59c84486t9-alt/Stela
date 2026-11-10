@@ -3239,6 +3239,14 @@
     "reason": "bounded native timing; run explicitly with source/load evidence"
   },
   {
+    "package": "stela-engine",
+    "test": "aligned_x_pairs_are_single_copy_atomic_across_threads",
+    "source": "crates/stela-engine/tests/blocks.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "races two host cores on one 16-byte pair (FEAT_LSE2); run explicitly after changing pair lowering"
+  },
+  {
     "package": "stela-soc",
     "test": "original_j314s_display_ptd_view_is_the_pmgr_pmp_update_bank",
     "source": "crates/stela-soc/src/machine/display_resources/tests.rs",

@@ -178,6 +178,7 @@ pub(crate) fn test_xs() -> bool {
 /// advertises the translation profile the walker implements: a 48-bit
 /// PARange, 8-bit ASIDs, 4 KiB and 16 KiB granules but not 64 KiB (so no
 /// FEAT_LPA or FEAT_LPA2), no FEAT_LVA or FEAT_TTST, FEAT_LSE2's alignment
+/// (on a host with atomic aligned 16-byte accesses, as FEAT_LSE2 requires)
 /// and the TLBI range and Outer Shareable forms.
 #[cfg(test)]
 pub(crate) fn test_translation_chip() -> super::Chip {
@@ -185,7 +186,7 @@ pub(crate) fn test_translation_chip() -> super::Chip {
     let chip = super::test_chip();
     let values = super::identification::derive(
         chip,
-        stela_compiler::TargetCpu::Baseline,
+        stela_compiler::TargetCpu::Baseline.with_atomic_load16(),
         true,
         super::identification::Speculation::NONE,
     );

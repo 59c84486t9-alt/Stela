@@ -1,7 +1,7 @@
 //! Shared scalar and pair memory emission with optional semantic spans.
 //! Regions replace address/staging spans and copy the remaining bytes with
 //! their encoder counts. Internal branches and call descriptors stay together.
-use super::asm::{Alu, Checkpoint, Code, Gpr, Mem, Size, Span};
+use super::asm::{Alu, Checkpoint, Code, Cond, Gpr, Mem, Rm, Size, Span};
 use super::masked_base::Plan;
 use super::{
     Access, AddressMode, ImmediateAddress, MemoryChecks, MemoryTransfer, Register, Shift, Width,
@@ -704,6 +704,78 @@ pub(super) fn scalar(
     memory_writeback(code, base, mode);
     mark(&mut recipe, code, start, Kind::Writeback, 0);
 }
+/// Where FEAT_LSE2 makes a pair one single-copy atomic 16-byte access: an
+/// LDP, LDNP, STP or STNP of X registers, 16-byte aligned (Arm DDI 0487
+/// B2.2.1). Such an access is one MOVDQA, which is single-copy atomic on
+/// hosts with [`crate::TargetCpu::AtomicLoad16`]; the identification
+/// advertises FEAT_LSE2 only on them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairAlignment {
+    /// Two accesses: not an X pair, or through a checked SP at an offset
+    /// that is no multiple of 16.
+    Split,
+    /// One 16-byte access, through a checked SP at a multiple of 16.
+    Aligned,
+    /// One 16-byte access where the address tests 16-byte aligned, two
+    /// otherwise.
+    Tested,
+}
+
+fn pair_alignment(checks: MemoryChecks, operand: Pair) -> PairAlignment {
+    let Pair {
+        transfer,
+        bytes,
+        address,
+        ..
+    } = operand;
+    let quadwords = bytes == 8
+        && match transfer {
+            MemoryTransfer::Store => true,
+            MemoryTransfer::Load { signed, width } => !signed && width == Width::X64,
+        };
+    if !quadwords {
+        return PairAlignment::Split;
+    }
+    if address.base == Register::Sp && checks.stack_alignment {
+        return match pair_start(address).rem_euclid(16) {
+            0 => PairAlignment::Aligned,
+            _ => PairAlignment::Split,
+        };
+    }
+    PairAlignment::Tested
+}
+
+/// The offset of a pair's first byte from its base register.
+fn pair_start(address: ImmediateAddress) -> i32 {
+    match address.mode {
+        AddressMode::PostIndex => 0,
+        _ => address.displacement,
+    }
+}
+
+/// STP of two quadwords as one 16-byte access. Clobbers XMM0 and XMM1.
+fn quadword_pair_store(code: &mut Code, target: Mem, sources: [Gpr; 2]) {
+    let mut asm = code.asm();
+    asm.movq_to_xmm(0, sources[0]);
+    asm.movq_to_xmm(1, sources[1]);
+    asm.punpcklqdq(0, Rm::Xmm(1));
+    asm.guest_access(|asm| asm.movdqa_store(target, 0));
+}
+
+/// The 16-byte access of an LDP of two quadwords, and the first element
+/// into `host`. [`quadword_pair_second`] takes the second. Clobbers XMM0.
+fn quadword_pair_load(code: &mut Code, source: Mem, host: Gpr) {
+    let mut asm = code.asm();
+    asm.guest_access(|asm| asm.movdqa_load(0, source));
+    asm.movq_from_xmm(host, 0);
+}
+
+fn quadword_pair_second(code: &mut Code, host: Gpr) {
+    let mut asm = code.asm();
+    asm.punpckhqdq(0, Rm::Xmm(0));
+    asm.movq_from_xmm(host, 0);
+}
+
 pub(super) fn pair(
     code: &mut Code,
     checks: MemoryChecks,
@@ -719,8 +791,21 @@ pub(super) fn pair(
     let ImmediateAddress { base, mode, .. } = location;
     let access = Access::of(transfer == MemoryTransfer::Store, 2 * u16::from(bytes));
     let loads_base = data.contains(&base) && transfer != MemoryTransfer::Store;
-    let reuse = reused(code, checks, location, bytes, loads_base, recipe.is_none());
-    let place = reuse.or_else(|| direct(code, checks, location, bytes, loads_base));
+    let alignment = pair_alignment(checks, operand);
+    // A tested access tests its host register's alignment: one that the
+    // pair starts a multiple of 16 bytes past, or RAX, which holds the
+    // address.
+    let tested = alignment == PairAlignment::Tested;
+    let reuse = if tested {
+        None
+    } else {
+        reused(code, checks, location, bytes, loads_base, recipe.is_none())
+    };
+    let place = reuse.or_else(|| {
+        (!tested || pair_start(location).rem_euclid(16) == 0)
+            .then(|| direct(code, checks, location, bytes, loads_base))
+            .flatten()
+    });
     if place.is_none() {
         address(code, checks, location, bytes, access, recipe.as_deref_mut());
     }
@@ -776,11 +861,39 @@ pub(super) fn pair(
                     memory_store::Source::Host(second_stage)
                 }
             };
-            for (element, source) in [(0, first), (1, second)] {
-                let start = code.checkpoint();
-                let target = Mem::base(at, displacement + i32::from(element * bytes));
-                memory_store::emit_to(code, bytes, target, source);
+            let register = |source| match source {
+                memory_store::Source::Host(host) => host,
+                _ => Gpr::Rcx,
+            };
+            let sources = [register(first), register(second)];
+            let start = code.checkpoint();
+            if alignment == PairAlignment::Aligned {
+                quadword_pair_store(code, Mem::base(at, displacement), sources);
                 mark(&mut recipe, code, start, Kind::Store, 0);
+            } else {
+                let mut done = None;
+                if tested {
+                    code.asm().test_imm(Size::Byte, at, 15);
+                    let split = code.asm().jcc8(Cond::Ne);
+                    quadword_pair_store(code, Mem::base(at, displacement), sources);
+                    done = Some(code.asm().jmp8());
+                    code.asm().bind(split);
+                }
+                for (element, source) in [(0, first), (1, second)] {
+                    let start = if element == 0 {
+                        start
+                    } else {
+                        code.checkpoint()
+                    };
+                    let target = Mem::base(at, displacement + i32::from(element * bytes));
+                    memory_store::emit_to(code, bytes, target, source);
+                    if element == 1
+                        && let Some(done) = done
+                    {
+                        code.asm().bind(done);
+                    }
+                    mark(&mut recipe, code, start, Kind::Store, 0);
+                }
             }
         }
         MemoryTransfer::Load { signed, width } => {
@@ -798,25 +911,60 @@ pub(super) fn pair(
                     .and_then(|_| code.host(data[1]))
                     .unwrap_or(second_stage)
             }];
+            // The 16-byte access precedes the split one in the first
+            // element's span, and the second element's span ends where both
+            // paths join.
+            let mut done = None;
+            let start = code.checkpoint();
+            if tested {
+                code.asm().test_imm(Size::Byte, at, 15);
+                let split = code.asm().jcc8(Cond::Ne);
+                quadword_pair_load(code, Mem::base(at, displacement), hosts[0]);
+                quadword_pair_second(code, hosts[1]);
+                done = Some(code.asm().jmp8());
+                code.asm().bind(split);
+            }
             for (element, host, source) in [
                 (0, hosts[0], Mem::base(at, displacement)),
                 (1, hosts[1], Mem::base(at, displacement + i32::from(bytes))),
             ] {
-                let start = code.checkpoint();
-                code.asm().guest_access(|asm| {
-                    if signed {
-                        debug_assert!(width == Width::X64);
-                        asm.movsxd(host, source);
+                let start = if element == 0 {
+                    start
+                } else {
+                    code.checkpoint()
+                };
+                if alignment == PairAlignment::Aligned {
+                    if element == 0 {
+                        quadword_pair_load(code, source, host);
                     } else {
-                        asm.mov_load(size, host, source);
+                        quadword_pair_second(code, host);
                     }
-                });
+                } else {
+                    code.asm().guest_access(|asm| {
+                        if signed {
+                            debug_assert!(width == Width::X64);
+                            asm.movsxd(host, source);
+                        } else {
+                            asm.mov_load(size, host, source);
+                        }
+                    });
+                }
+                if element == 1
+                    && let Some(done) = done
+                {
+                    code.asm().bind(done);
+                }
+                let clobbers = if tested && element == 0 {
+                    mask(hosts[0]) | mask(hosts[1])
+                } else {
+                    mask(host)
+                };
                 mark(
                     &mut recipe,
                     code,
                     start,
                     Kind::Load { element, host },
-                    mask(host),
+                    clobbers,
                 );
             }
             for (register, staged) in [(data[0], hosts[0]), (data[1], hosts[1])] {
@@ -856,3 +1004,6 @@ pub(super) fn pair_recipe(checks: MemoryChecks, operand: Pair) -> (Code, Recipe)
     pair(&mut code, checks, operand, Some(&mut recipe));
     (code, recipe)
 }
+
+#[cfg(test)]
+mod tests;

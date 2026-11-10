@@ -173,10 +173,12 @@ impl HostCpuid {
 ///
 /// - Intel (`GenuineIntel`): an unaligned load within one cache line is
 ///   single-copy atomic (SDM Vol. 3A 9.1.1, [`TargetCpu::LineAtomic`]), and
-///   with AVX an aligned 16-byte load is ([`TargetCpu::AtomicLoad16`]).
+///   with AVX an aligned 16-byte MOVDQA load or store is
+///   ([`TargetCpu::AtomicLoad16`]).
 /// - AMD (`AuthenticAMD`) and Hygon (`HygonGenuine`): with AVX an aligned
-///   16-byte load is single-copy atomic (APM 24593 rev. 3.44 7.3.2); an
-///   unaligned load is atomic only inside an aligned quadword. Hygon's cores
+///   16-byte load or store is single-copy atomic (APM 24593 rev. 3.44
+///   7.3.2); an unaligned load is atomic only inside an aligned quadword.
+///   Hygon's cores
 ///   are licensed AMD Zen designs that follow AMD's manuals, as Linux treats
 ///   them (`arch/x86/kernel/cpu/hygon.c`).
 /// - Zhaoxin (`  Shanghai  `), Centaur (`CentaurHauls`) and every other
@@ -256,8 +258,9 @@ features! {
     Aes, with_aes, "+aes", |cpu| HostCpuid::bit(cpu.leaf1_ecx, 25);
     /// Minimum requirements for legacy XMM SHA instructions, independent of SSE tiers.
     Sha, with_sha, "+sha", |cpu| HostCpuid::bit(cpu.leaf7_ebx, 29);
-    /// Aligned 16-byte atomic loads: the [`Vendor`] guarantee with AVX hardware.
-    /// Lowering uses legacy SSE2, independently of OS-enabled AVX state.
+    /// Aligned 16-byte atomic loads and stores: the [`Vendor`] guarantee with
+    /// AVX hardware. Lowering uses legacy SSE2, independently of OS-enabled
+    /// AVX state.
     AtomicLoad16, with_atomic_load16, "+atomic-load16", |cpu| {
         TargetCpu::atomic_load16_guaranteed(cpu.vendor, cpu.leaf1_ecx)
     };

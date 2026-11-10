@@ -1001,12 +1001,13 @@ fn pair_loads_keep_clean_results_and_reject_changed_shared_recipe() {
             mode: AddressMode::Offset,
         },
     );
-    let ends = |raw: &[u8], bytes, base, data| {
-        recipes::ordinary_pair_load_ends(raw, bytes, base, data, -8)
+    let ends = |raw: &[u8], bytes, base, data, form| {
+        recipes::ordinary_pair_load_ends(raw, bytes, base, data, -8, form)
     };
-    assert!(ends(&raw, WORD_LOAD_BYTES, 15, [Some(16), Some(17)]).is_some());
-    assert!(ends(&raw, WORD_LOAD_BYTES, 15, [Some(16), Some(16)]).is_none());
-    assert!(ends(&raw, DOUBLEWORD_LOAD_BYTES, 15, [Some(16), Some(17)]).is_none());
+    let split = recipes::PairForm::Split;
+    assert!(ends(&raw, WORD_LOAD_BYTES, 15, [Some(16), Some(17)], split).is_some());
+    assert!(ends(&raw, WORD_LOAD_BYTES, 15, [Some(16), Some(16)], split).is_none());
+    assert!(ends(&raw, DOUBLEWORD_LOAD_BYTES, 15, [Some(16), Some(17)], split).is_none());
     for (width, bytes) in [
         (Width::W32, WORD_LOAD_BYTES),
         (Width::X64, DOUBLEWORD_LOAD_BYTES),
@@ -1032,12 +1033,19 @@ fn pair_loads_keep_clean_results_and_reject_changed_shared_recipe() {
                     mode: AddressMode::Offset,
                 },
             );
+            // An X pair tests its alignment, except through a checked SP,
+            // which is never 16-byte aligned 8 bytes below.
+            let form = if width == Width::X64 && !(base == Register::Sp && stack_alignment) {
+                recipes::PairForm::Tested
+            } else {
+                split
+            };
             let base = slot(base).unwrap();
-            assert!(ends(&raw, bytes, base, [Some(16), Some(17)]).is_some());
+            assert!(ends(&raw, bytes, base, [Some(16), Some(17)], form).is_some());
             for index in 0..raw.len() {
                 let mut changed = raw.as_slice().to_vec();
                 changed[index] ^= 1;
-                assert!(ends(&changed, bytes, base, [Some(16), Some(17)]).is_none());
+                assert!(ends(&changed, bytes, base, [Some(16), Some(17)], form).is_none());
             }
         }
     }
@@ -1447,8 +1455,12 @@ fn stores_settle_first_and_reuse_resident_values() {
             .windows(bytes.len())
             .any(|window| window == bytes)
     };
-    assert!(contains(&[0x48, 0x89, 0x08]));
-    assert!(contains(&[0x4c, 0x89, 0x40, 0x08]));
+    // STP X9,X10,[SP,#16] through the checked SP: one 16-byte access
+    // (FEAT_LSE2): MOVQ XMM0,RCX; MOVQ XMM1,R8; PUNPCKLQDQ; MOVDQA [RAX].
+    assert!(contains(&[
+        0x66, 0x48, 0x0f, 0x6e, 0xc1, 0x66, 0x49, 0x0f, 0x6e, 0xc8, 0x66, 0x0f, 0x6c, 0xc1, 0x66,
+        0x0f, 0x7f, 0x00
+    ]));
     assert!(contains(&[0x88, 0x08]));
     assert!(contains(&[0x66, 0x89, 0x08]));
     let mut baseline = Code::new();
@@ -1591,8 +1603,14 @@ fn shared_store_recipes_reject_any_change() {
                     mode: AddressMode::Offset,
                 },
             );
+            // A checked SP 16 bytes below is 16-byte aligned.
+            let form = if bytes == DOUBLEWORD_LOAD_BYTES {
+                recipes::PairForm::Aligned
+            } else {
+                recipes::PairForm::Split
+            };
             let ends = |raw: &[u8], bytes| {
-                recipes::ordinary_pair_store_ends(raw, bytes, 31, data.map(slot), -16)
+                recipes::ordinary_pair_store_ends(raw, bytes, 31, data.map(slot), -16, form)
             };
             assert!(ends(&raw, bytes).is_some());
             for index in 0..raw.len() {

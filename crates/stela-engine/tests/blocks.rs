@@ -1240,3 +1240,72 @@ fn discovery_budget_leaves_deterministic_candidates_and_new_runtime_uses_same_di
     );
     Ok(())
 }
+
+/// FEAT_LSE2 under concurrency: one host thread STPs `(n, !n)` while another
+/// LDPs the same 16-byte-aligned quadwords, and never sees halves of two
+/// different stores. The same loops 8 bytes further, two element accesses
+/// each, see hundreds of torn pairs. Ignored: it races two host cores.
+#[test]
+#[ignore = "manual: opt-in"]
+fn aligned_x_pairs_are_single_copy_atomic_across_threads() -> Result<()> {
+    use stela_compiler::{TargetCpu, block::BlockProfile};
+    use stela_engine::memory::{MemoryRegionSpec, OwnedMemory};
+    const DATA: u64 = 0x3d00_0000_0000;
+    const ITERATIONS: u64 = 10_000_000;
+    // add x1,x1,#1; mvn x2,x1; stp x1,x2,[x0]; subs x3,x3,#1; b.ne 0; ret
+    const WRITER: [u32; 6] = [
+        0x9100_0421,
+        0xaa21_03e2,
+        0xa900_0801,
+        0xf100_0463,
+        0x54ff_ff81,
+        RET,
+    ];
+    // ldp x1,x2,[x0]; eor x4,x1,x2; cmn x4,#1; cinc x5,x5,ne; subs x3,x3,#1;
+    // b.ne 0; ret
+    const READER: [u32; 7] = [
+        0xa940_0801,
+        0xca02_0024,
+        0xb100_049f,
+        0x9a85_04a5,
+        0xf100_0463,
+        0x54ff_ff61,
+        RET,
+    ];
+    let target = TargetCpu::detect();
+    if !target.supports(TargetCpu::AtomicLoad16) {
+        eprintln!("skipped: this host gives no atomic aligned 16-byte accesses");
+        return Ok(());
+    }
+    let mut memory = OwnedMemory::map(vec![MemoryRegionSpec {
+        guest_address: DATA,
+        virtual_bytes: 4096,
+        initial_bytes: vec![0; 4096],
+        readable: true,
+        writable: true,
+        executable: false,
+    }])?;
+    memory.write(DATA, &[[0u8; 8], [0xff; 8]].concat())?;
+    let run = |program: &'static [u32], seed: u64| -> Result<GuestState> {
+        let cache = tempfile::tempdir()?;
+        let mut runtime =
+            BlockRuntime::new_for_target(seed, cache.path().into(), BlockProfile::ORDINARY, target);
+        runtime.register_code(GuestAddress(BASE), words(program))?;
+        let mut thread = state(BASE, DATA);
+        thread.registers.x[3] = ITERATIONS;
+        // SAFETY: the program only accesses the mapped 16 bytes at DATA,
+        // which the other thread races on deliberately at the guest level.
+        let outcome = unsafe { runtime.run(&mut thread, Some(GuestAddress(STOP)), usize::MAX)? };
+        assert_eq!(outcome.reason, StopReason::StopAddress);
+        Ok(thread.registers)
+    };
+    let (writer, reader) = std::thread::scope(|scope| {
+        let writer = scope.spawn(|| run(&WRITER, 1));
+        let reader = scope.spawn(|| run(&READER, 2));
+        (writer.join().unwrap(), reader.join().unwrap())
+    });
+    assert_eq!(writer?.x[1], ITERATIONS);
+    assert_eq!(reader?.x[5], 0, "torn LDP observations");
+    drop(memory);
+    Ok(())
+}
