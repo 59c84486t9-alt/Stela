@@ -2230,7 +2230,9 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
             }
         }
         fn present(&mut self, rows: &[u8]) -> Result<()> {
-            assert_eq!(rows, [1, 2, 3, 255]);
+            // The first swap's pixel, then the second's.
+            let frame = *self.0.borrow();
+            assert_eq!(rows, [[1, 2, 3, 255], [4, 5, 6, 255]][frame]);
             *self.0.borrow_mut() += 1;
             Ok(())
         }
@@ -2406,7 +2408,8 @@ fn mounted_dcpext_kept_pm_gates_suppress_real_surface_dma_and_scanout() {
     // vblank is latched at it, in that step: its completion's call leaves
     // with the submit's reply.
     call(&mut d, &mut memory, b"A406", &[0; 0x10], 8, 2 * PERIOD + 1);
-    assert!(memory.ram.write(PIXELS, &[1, 2, 3, 255]));
+    // Other pixels: a swap whose rows are the last frame's presents nothing.
+    assert!(memory.ram.write(PIXELS, &[4, 5, 6, 255]));
     call(
         &mut d,
         &mut memory,

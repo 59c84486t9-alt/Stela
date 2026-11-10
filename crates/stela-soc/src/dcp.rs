@@ -41,7 +41,7 @@ pub mod swap;
 
 use super::asc::{Firmware, Message, TransitionRequest};
 use super::rtkit::{Endpoint, RtKit};
-use super::scanout::{Scanout, Surface};
+use super::scanout::{Rect, Scanout, Surface};
 use crate::Result;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
@@ -117,6 +117,16 @@ pub enum Log {
         swap_id: u32,
         shown: u32,
         displayed: bool,
+    },
+    /// A swap set layer `layer` to a surface of `surface` (width, height)
+    /// shown from `source` into `destination` on the screen, a shape the
+    /// slot did not have before: the first ones, whatever the tracing.
+    Placement {
+        swap_id: u32,
+        layer: usize,
+        surface: (u32, u32),
+        source: Rect,
+        destination: Rect,
     },
     /// Cumulative presentation progress in the bounded log.
     PresentSummary { total: u64, last_swap: u32 },
@@ -225,6 +235,27 @@ impl core::fmt::Display for Log {
                 f,
                 "DCP merged swap {swap_id} into swap {shown} displayed={}",
                 u8::from(*displayed)
+            ),
+            Log::Placement {
+                swap_id,
+                layer,
+                surface,
+                source,
+                destination,
+            } => write!(
+                f,
+                "DCP LAYER swap {swap_id} layer {layer} surface={}x{} \
+                 source={},{}+{}x{} destination={},{}+{}x{}",
+                surface.0,
+                surface.1,
+                source.x,
+                source.y,
+                source.width,
+                source.height,
+                destination.x,
+                destination.y,
+                destination.width,
+                destination.height
             ),
             Log::PresentSummary { total, last_swap } => {
                 write!(f, "DCP present summary total={total} last_swap={last_swap}")

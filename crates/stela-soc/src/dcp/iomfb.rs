@@ -111,6 +111,8 @@ const LOG_CAPACITY: usize = 4096;
 const LOGGED_INPUT: usize = 64;
 /// How many `swap_submit_dcp` inputs are logged whole.
 const DUMPED_SWAPS: u32 = 2;
+/// How many new layer shapes are logged ([`Log::Placement`]).
+const PLACEMENTS: u32 = 64;
 /// Report progress once this many swaps have reached the scanout.
 const PRESENT_SUMMARY_INTERVAL: u64 = 256;
 /// The started swaps kept for submission. A client that dies between
@@ -413,6 +415,10 @@ pub struct Methods {
     reported: Vec<String>,
     /// The methods called so far: each one's first call is logged.
     called: BTreeSet<[u8; 4]>,
+    /// The swap surface layouts seen so far, each reported once.
+    layouts: BTreeSet<swap::SurfaceLayout>,
+    /// The layer shapes logged so far ([`PLACEMENTS`] at most).
+    placements: u32,
     /// The current call, when its log entry was left out; a refusal logs it.
     pending_call: Option<Log>,
     /// Whether the AP has any notification client (`A033`).
@@ -538,6 +544,8 @@ impl Methods {
             advertised,
             last_refusal: None,
             unmodeled: BTreeSet::new(),
+            layouts: BTreeSet::new(),
+            placements: 0,
             reported: Vec::new(),
             called: BTreeSet::new(),
             pending_call: None,
@@ -1593,6 +1601,12 @@ impl Methods {
             Ok(submission) => submission,
             Err(reason) => return self.refuse(tag, reason),
         };
+        // Each new surface layout once, before the model shows or refuses it.
+        for layer in submission.layers.iter().flatten() {
+            if self.layouts.insert(layer.record.layout) {
+                self.reported.push(layer.record.layout.to_string());
+            }
+        }
         let swap_id = submission.swap_id;
         let Some(start) = self.started.iter().position(|&(id, _)| id == swap_id) else {
             return self.refuse(
@@ -1630,6 +1644,7 @@ impl Methods {
         let reply = self.reply(tag, packed)?;
         // Commit the accepted swap only after every fallible preflight succeeds.
         let (_, client) = self.started.remove(start).expect("found started swap");
+        self.log_placements(swap_id, &planes);
         self.planes = planes;
         let mut fenced = submission.fenced();
         self.early_fences.retain(|&(swap, surface)| {
@@ -1660,6 +1675,38 @@ impl Methods {
         });
         self.pacing.submitted += 1;
         Ok(reply)
+    }
+}
+
+impl Methods {
+    /// Log each slot whose surface size, source rectangle or destination
+    /// size `planes` changes, the first [`PLACEMENTS`] times: what the guest
+    /// asks the scaler for. A destination that only moves (the cursor) is
+    /// not a new shape.
+    fn log_placements(&mut self, swap_id: u32, planes: &[Option<Layer>; swap::LAYERS]) {
+        let shape = |layer: &Option<Layer>| {
+            layer.map(|layer| {
+                (
+                    (layer.record.width, layer.record.height),
+                    layer.source,
+                    (layer.destination.width, layer.destination.height),
+                )
+            })
+        };
+        for (index, layer) in planes.iter().enumerate() {
+            let Some(next) = layer else { continue };
+            if self.placements >= PLACEMENTS || shape(layer) == shape(&self.planes[index]) {
+                continue;
+            }
+            self.placements += 1;
+            self.record_log(Log::Placement {
+                swap_id,
+                layer: index,
+                surface: (next.record.width, next.record.height),
+                source: next.source,
+                destination: next.destination,
+            });
+        }
     }
 }
 

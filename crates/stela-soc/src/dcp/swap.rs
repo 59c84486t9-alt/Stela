@@ -60,13 +60,15 @@
 //! | 0x1ed | has compression info (u64) | |
 //!
 //! The model presents linear single-plane surfaces in the 32-bit formats
-//! [`PixelFormat`] names, and `&BGA` and `&b38`, the lossless-compressed forms
-//! of `BGRA` WindowServer allocates. The compressed form is a layout AGX's
-//! encoder writes; AGX is hidden and the guest's Metal device stores those
-//! surfaces as plain BGRA rows at the plane's offset, a row being the plane's
-//! bytes per row over its element height, or for `&b38`, whose second plane
-//! holds AGX's metadata and whose rows its plane does not describe, four bytes
-//! a pixel. Other tiled and compressed surfaces refuse:
+//! [`PixelFormat`] names, `&BGA`, the lossless-compressed form of `BGRA`
+//! WindowServer allocates, and `&b38`, the lossless-compressed form of
+//! Metal's `RGB10A8_2P_XR10` its framebuffers use. The compressed forms are
+//! layouts AGX's encoder writes; AGX is hidden and the guest's Metal device
+//! stores those surfaces plain at each plane's offset, a row being the
+//! plane's bytes per row over its element height: `&BGA` as BGRA rows,
+//! `&b38` as rows of 32-bit extended-range color words in its first plane
+//! and of alpha bytes in its second ([`PixelFormat::Xr10A8`]). Other tiled
+//! and compressed surfaces refuse:
 //! the address-format and compression-info encodings are IOSurface-private and
 //! unrecorded. Multi-planar YCbCr surfaces refuse: the `getYCbCrMatrix`
 //! enumeration is unrecorded. The DVAs are I/O addresses in the display
@@ -139,7 +141,8 @@ const PLANE_ELEMENT_HEIGHT: usize = 0x74;
 const HAS_COMPRESSION: usize = 0x1ed;
 /// `&BGA`: `BGRA` under AGX's lossless compression.
 const LOSSLESS_BGRA: u32 = u32::from_be_bytes(*b"&BGA");
-/// `&b38`: the same, with AGX's metadata in a plane of its own.
+/// `&b38`: `RGB10A8_2P_XR10`'s color words and, in a plane of its own,
+/// its alpha, under AGX's lossless compression.
 const LOSSLESS_BGRA_PLANES: u32 = u32::from_be_bytes(*b"&b38");
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {
@@ -168,6 +171,140 @@ pub struct Record {
     pub plane_offset: u32,
     pub plane_bytes_per_row: u32,
     pub plane_element_height: u8,
+    /// The layout the record describes, which `DCP SURFACE` lines report.
+    pub layout: SurfaceLayout,
+}
+
+/// Plane `i`'s fields start here, 0x50 bytes apart.
+const PLANES: usize = 0x59;
+const PLANE_BYTES: usize = 0x50;
+/// Plane `i`'s compression info, 0x34 bytes apart.
+const COMPRESSION: usize = 0x151;
+const COMPRESSION_BYTES: usize = 0x34;
+
+/// One plane as a `SurfaceContents` record describes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PlaneLayout {
+    pub width: u32,
+    pub height: u32,
+    pub offset: u32,
+    pub bytes_per_row: u32,
+    pub size: u32,
+    pub bytes_per_element: u16,
+    pub element_width: u8,
+    pub element_height: u8,
+    pub address_format: u8,
+    pub compression: [u8; COMPRESSION_BYTES],
+}
+
+/// A surface's layout: what tells two surfaces' memory apart, without
+/// their addresses or IDs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SurfaceLayout {
+    pub format: u32,
+    pub width: u32,
+    pub height: u32,
+    pub planes: u32,
+    pub tiled: bool,
+    pub compressed: bool,
+    pub bytes_per_row: u32,
+    pub bytes_per_element: u16,
+    pub offset: u32,
+    pub allocation: u32,
+    /// Planes 0 and 1.
+    pub plane: [PlaneLayout; 2],
+}
+
+impl SurfaceLayout {
+    fn parse(bytes: &[u8]) -> Self {
+        let plane = |i: usize| {
+            let at = PLANES + i * PLANE_BYTES;
+            let compression = COMPRESSION + i * COMPRESSION_BYTES;
+            PlaneLayout {
+                width: u32_at(bytes, at),
+                height: u32_at(bytes, at + 4),
+                offset: u32_at(bytes, at + 0xc),
+                bytes_per_row: u32_at(bytes, at + 0x10),
+                size: u32_at(bytes, at + 0x14),
+                bytes_per_element: u16::from_le_bytes([bytes[at + 0x18], bytes[at + 0x19]]),
+                element_width: bytes[at + 0x1a],
+                element_height: bytes[at + 0x1b],
+                address_format: bytes[at + 0x29],
+                compression: bytes[compression..compression + COMPRESSION_BYTES]
+                    .try_into()
+                    .expect("0x34 bytes"),
+            }
+        };
+        Self {
+            format: u32_at(bytes, FORMAT),
+            width: u32_at(bytes, WIDTH),
+            height: u32_at(bytes, HEIGHT),
+            planes: u32_at(bytes, PLANE_COUNT),
+            tiled: bytes[IS_TILED] != 0,
+            compressed: u64_at(bytes, HAS_COMPRESSION) != 0,
+            bytes_per_row: u32_at(bytes, STRIDE),
+            bytes_per_element: u16::from_le_bytes([bytes[0x19], bytes[0x1a]]),
+            offset: u32_at(bytes, OFFSET),
+            allocation: u32_at(bytes, BUFFER_SIZE),
+            plane: [plane(0), plane(1)],
+        }
+    }
+}
+
+/// `SURFACE format=&b38 1280x800 ...`: one line, the planes a record
+/// counts (at most two) with their compression info in hex.
+impl core::fmt::Display for SurfaceLayout {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let code = self
+            .format
+            .to_be_bytes()
+            .map(|b| if b.is_ascii_graphic() { b as char } else { '?' });
+        write!(
+            f,
+            "SURFACE format={}{}{}{} ({:#010x}) {}x{} planes={} tiled={} compressed={} \
+             bytes_per_row={} bytes_per_element={} offset={:#x} allocation={}",
+            code[0],
+            code[1],
+            code[2],
+            code[3],
+            self.format,
+            self.width,
+            self.height,
+            self.planes,
+            u8::from(self.tiled),
+            u8::from(self.compressed),
+            self.bytes_per_row,
+            self.bytes_per_element,
+            self.offset,
+            self.allocation
+        )?;
+        for (i, plane) in self
+            .plane
+            .iter()
+            .enumerate()
+            .take(self.planes.clamp(1, 2) as usize)
+        {
+            write!(
+                f,
+                " plane{i}=[{}x{} offset={:#x} bytes_per_row={} bytes_per_element={} \
+                 element={}x{} size={} address_format={} compression=",
+                plane.width,
+                plane.height,
+                plane.offset,
+                plane.bytes_per_row,
+                plane.bytes_per_element,
+                plane.element_width,
+                plane.element_height,
+                plane.size,
+                plane.address_format
+            )?;
+            for byte in plane.compression {
+                write!(f, "{byte:02x}")?;
+            }
+            f.write_str("]")?;
+        }
+        Ok(())
+    }
 }
 
 impl Record {
@@ -191,6 +328,7 @@ impl Record {
             plane_offset: u32_at(bytes, PLANE_OFFSET),
             plane_bytes_per_row: u32_at(bytes, PLANE_BYTES_PER_ROW),
             plane_element_height: bytes[PLANE_ELEMENT_HEIGHT],
+            layout: SurfaceLayout::parse(bytes),
         })
     }
 
@@ -214,11 +352,7 @@ impl Record {
                 self.plane_offset,
             )
         } else if self.format == LOSSLESS_BGRA_PLANES {
-            (
-                PixelFormat::Bgra8888,
-                self.width.saturating_mul(4),
-                self.plane_offset,
-            )
+            return self.extended_planes(dva);
         } else {
             if self.tiled {
                 return Err(refuse!(
@@ -253,6 +387,45 @@ impl Record {
             iova: dva
                 .checked_add(u64::from(offset))
                 .ok_or(refuse!("DCP swap surface address overflows"))?,
+        })
+    }
+}
+
+impl Record {
+    /// A `&b38` surface, the guest's Metal `RGB10A8_2P_XR10`: its first
+    /// plane's 32-bit color words and its second's alpha bytes, each a row
+    /// per its plane's bytes per row over its element height, the
+    /// guest's Metal device storing both planes plain.
+    fn extended_planes(&self, dva: u64) -> Result<Surface> {
+        let [color, alpha] = self.layout.plane;
+        let stride = |plane: PlaneLayout, bytes: u32| {
+            let row = self
+                .width
+                .checked_mul(bytes)
+                .ok_or(refuse!("DCP swap surface row overflows"))?;
+            let stride = plane.bytes_per_row / u32::from(plane.element_height.max(1));
+            let end = u64::from(plane.offset) + u64::from(stride) * u64::from(self.height);
+            if stride < row || end > u64::from(self.buffer) {
+                return Err(refuse!(
+                    "DCP swap surface plane stride or size is inconsistent"
+                ));
+            }
+            Ok(stride)
+        };
+        let alpha_stride = stride(alpha, 1)?;
+        let address = |offset: u32| {
+            dva.checked_add(u64::from(offset))
+                .ok_or(refuse!("DCP swap surface address overflows"))
+        };
+        Ok(Surface {
+            width: self.width,
+            height: self.height,
+            stride: stride(color, 4)?,
+            format: PixelFormat::Xr10A8 {
+                alpha: address(alpha.offset)?,
+                alpha_stride,
+            },
+            iova: address(color.offset)?,
         })
     }
 }
@@ -479,18 +652,102 @@ pub mod tests {
         );
     }
 
+    /// A `&b38` record with `planes`' (offset, bytes per row) at 16 x 16
+    /// elements, as IOSurface lays the planes out.
+    fn extended(width: u32, height: u32, allocation: u32, planes: [(u32, u32); 2]) -> Vec<u8> {
+        let mut bytes = record(width, height, PixelFormat::Bgra8888).to_vec();
+        bytes[IS_TILED] = 0;
+        bytes[FORMAT..FORMAT + 4].copy_from_slice(&LOSSLESS_BGRA_PLANES.to_le_bytes());
+        bytes[PLANE_COUNT..PLANE_COUNT + 4].copy_from_slice(&2u32.to_le_bytes());
+        bytes[BUFFER_SIZE..BUFFER_SIZE + 4].copy_from_slice(&allocation.to_le_bytes());
+        for (i, (offset, bytes_per_row)) in planes.into_iter().enumerate() {
+            let at = PLANES + i * PLANE_BYTES;
+            bytes[at + 0xc..at + 0x10].copy_from_slice(&offset.to_le_bytes());
+            bytes[at + 0x10..at + 0x14].copy_from_slice(&bytes_per_row.to_le_bytes());
+            bytes[at + 0x1a] = 16;
+            bytes[at + 0x1b] = 16;
+        }
+        bytes[HAS_COMPRESSION] = 1;
+        bytes
+    }
+
+    /// The planes IOSurface gave a 1280 x 800 and a 2560 x 1440 `&b38`
+    /// surface (the 2560 x 1440 one as a guest's swap record held it):
+    /// 16 x 16 elements of 1024 color bytes and of 256 alpha bytes.
     #[test]
-    fn two_plane_lossless_bgra_is_read_as_plain_rows() {
+    fn two_plane_extended_range_surfaces_read_both_planes_plain() {
+        for (width, height, allocation, planes, strides) in [
+            (
+                1280,
+                800,
+                5_251_264,
+                [(0, 81_920), (4_161_536, 20_480)],
+                (5120, 1280),
+            ),
+            (
+                2560,
+                1440,
+                18_956_288,
+                [(0, 163_840), (0xe5_0000, 40_960)],
+                (10240, 2560),
+            ),
+        ] {
+            let bytes = extended(width, height, allocation, planes);
+            let surface = Record::parse(&bytes).unwrap().surface(0x8000).unwrap();
+            assert_eq!(
+                surface.format,
+                PixelFormat::Xr10A8 {
+                    alpha: 0x8000 + u64::from(planes[1].0),
+                    alpha_stride: strides.1,
+                }
+            );
+            assert_eq!((surface.stride, surface.iova), (strides.0, 0x8000));
+        }
+        // A plane past the allocation, or rows narrower than the surface,
+        // refuse.
+        for planes in [
+            [(0, 81_920), (5_000_000, 20_480)],
+            [(0, 81_920), (4_161_536, 16_384)],
+        ] {
+            let bytes = extended(1280, 800, 5_251_264, planes);
+            assert!(Record::parse(&bytes).unwrap().surface(0).is_err());
+        }
+    }
+
+    /// The `DCP SURFACE` line of the two-plane lossless test record.
+    #[test]
+    fn surface_layouts_name_each_plane() {
         let mut bytes = record(1280, 800, PixelFormat::Bgra8888);
         bytes[IS_TILED] = 1;
         bytes[FORMAT..FORMAT + 4].copy_from_slice(&LOSSLESS_BGRA_PLANES.to_le_bytes());
         bytes[PLANE_COUNT..PLANE_COUNT + 4].copy_from_slice(&2u32.to_le_bytes());
         bytes[BUFFER_SIZE..BUFFER_SIZE + 4].copy_from_slice(&5_251_072u32.to_le_bytes());
         bytes[PLANE_OFFSET..PLANE_OFFSET + 4].copy_from_slice(&0x4000u32.to_le_bytes());
+        let second = PLANES + PLANE_BYTES;
+        bytes[second + 0xc..second + 0x10].copy_from_slice(&0x3f0000u32.to_le_bytes());
+        bytes[second + 0x10..second + 0x14].copy_from_slice(&1280u32.to_le_bytes());
+        bytes[second + 0x18] = 1;
+        bytes[COMPRESSION + COMPRESSION_BYTES] = 0xab;
         bytes[HAS_COMPRESSION] = 1;
-        let surface = Record::parse(&bytes).unwrap().surface(0x8000).unwrap();
-        assert_eq!(surface.format, PixelFormat::Bgra8888);
-        assert_eq!((surface.stride, surface.iova), (5120, 0xc000));
+        let layout = Record::parse(&bytes).unwrap().layout;
+        assert_eq!(layout.plane[0].offset, 0x4000);
+        assert_eq!(layout.plane[1].bytes_per_element, 1);
+        let line = layout.to_string();
+        assert!(
+            line.starts_with(
+                "SURFACE format=&b38 (0x26623338) 1280x800 planes=2 tiled=1 compressed=1 \
+                 bytes_per_row=5120 bytes_per_element=0 offset=0x0 allocation=5251072 \
+                 plane0=[0x0 offset=0x4000 bytes_per_row=0 bytes_per_element=0"
+            ),
+            "{line}"
+        );
+        assert!(
+            line.contains(
+                " plane1=[0x0 offset=0x3f0000 bytes_per_row=1280 bytes_per_element=1 \
+                 element=0x0 size=0 address_format=0 compression=ab00"
+            ),
+            "{line}"
+        );
     }
 
     #[test]

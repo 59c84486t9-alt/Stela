@@ -1502,9 +1502,12 @@ fn a_swap_waits_for_the_gpu_fences_of_the_surfaces_it_shows() {
         assert_eq!(returned(methods.call(*b"A470", &input, 4)), [0; 4]);
     };
     let layer = [(0, 4, 2, 0x1000)];
-    let fill = |_: u64, bytes: &mut [u8]| {
-        bytes.fill(0x5a);
-        true
+    // Each frame's pixels differ: a frame of the same pixels changes no row.
+    let fill = |value: u8| {
+        move |_: u64, bytes: &mut [u8]| {
+            bytes.fill(value);
+            true
+        }
     };
     let complete = |methods: &mut Methods| {
         let callback = methods.take_callback().unwrap();
@@ -1534,7 +1537,7 @@ fn a_swap_waits_for_the_gpu_fences_of_the_surfaces_it_shows() {
     assert!(!methods.frame_ready(period + 1));
     methods.refresh(2 * period);
     assert!(methods.frame_ready(2 * period));
-    methods.present(2 * period, fill).unwrap();
+    methods.present(2 * period, fill(0x5a)).unwrap();
     assert_eq!(frames.borrow().len(), 1);
     complete(&mut methods);
 
@@ -1548,7 +1551,7 @@ fn a_swap_waits_for_the_gpu_fences_of_the_surfaces_it_shows() {
     ));
     methods.refresh(3 * period);
     assert!(methods.frame_ready(3 * period));
-    methods.present(3 * period, fill).unwrap();
+    methods.present(3 * period, fill(0x5b)).unwrap();
     complete(&mut methods);
 
     // Swaps show in order: a ready swap waits behind a fenced one. Without
@@ -1570,7 +1573,7 @@ fn a_swap_waits_for_the_gpu_fences_of_the_surfaces_it_shows() {
     assert!(!methods.frame_ready(timeout - period));
     methods.refresh(timeout);
     assert!(methods.frame_ready(timeout));
-    methods.present(timeout, fill).unwrap();
+    methods.present(timeout, fill(0x5c)).unwrap();
     complete(&mut methods);
     complete(&mut methods);
     assert!(!methods.frame_pending());
@@ -1754,4 +1757,173 @@ fn a_present_that_moves_a_layer_whole_counts_as_moved() {
         &shown,
         &[layer(0, 0, 640), layer(10, 20, 32), layer(5, 5, 32), None]
     ));
+}
+
+/// Set layer `layer`'s source and destination rectangles in `input`.
+fn place(input: &mut [u8], layer: usize, source: swap::Rect, destination: swap::Rect) {
+    for (base, rect) in [
+        (swap::SOURCE_RECTS, source),
+        (swap::DESTINATION_RECTS, destination),
+    ] {
+        let at = base + layer * 16;
+        for (index, value) in [rect.x, rect.y, rect.width, rect.height].iter().enumerate() {
+            input[at + index * 4..at + index * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+fn rect(x: u32, y: u32, width: u32, height: u32) -> swap::Rect {
+    swap::Rect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+/// The opaque BGRA pixel a pattern surface holds at `(x, y)`.
+fn pattern_pixel(x: usize, y: usize) -> [u8; 4] {
+    [x as u8, y as u8, ((x >> 8) | (y >> 8) << 4) as u8, 0xff]
+}
+
+/// A reader of pattern surfaces `width` pixels wide whose rows are `width *
+/// 4` bytes apart, at `bases`.
+fn pattern(bases: &[(u64, usize)]) -> impl FnMut(u64, &mut [u8]) -> bool + '_ {
+    move |dva, bytes| {
+        let Some(&(base, width)) = bases.iter().rev().find(|&&(base, _)| dva >= base) else {
+            return false;
+        };
+        let first = ((dva - base) / 4) as usize;
+        for (index, pixel) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let at = first + index;
+            *pixel = pattern_pixel(at % width, at / width);
+        }
+        true
+    }
+}
+
+#[test]
+fn a_half_size_source_fills_the_screen_with_exact_2x_pixels() {
+    let mode = Mode {
+        width: 2560,
+        height: 1440,
+        format: PixelFormat::Bgra8888,
+    };
+    let screen = TestScreen(Rc::default(), Some(mode));
+    let frames = screen.0.clone();
+    let mut methods = Methods::new(Box::new(screen), interface());
+    start_swap(&mut methods);
+    // A 2560x1440 surface whose top-left 1280x720 the AP shows on the whole
+    // screen: the DCP scales it 2x.
+    let mut input = submission(1, &[(0, 2560, 1440, 0x1000_0000)]);
+    place(&mut input, 0, rect(0, 0, 1280, 720), rect(0, 0, 2560, 1440));
+    returned(methods.call(*b"A407", &input, 0xc));
+    methods.present(0, pattern(&[(0x1000_0000, 2560)])).unwrap();
+    let frames = frames.borrow();
+    let frame = &frames[0];
+    for y in 0..1440 {
+        for x in 0..2560 {
+            let at = (y * 2560 + x) * 4;
+            assert_eq!(frame[at..at + 4], pattern_pixel(x / 2, y / 2), "({x}, {y})");
+        }
+    }
+    // The guest's shape is logged, once.
+    let placed: Vec<String> = core::iter::from_fn(|| methods.take_log())
+        .filter(|entry| matches!(entry, Log::Placement { .. }))
+        .map(|entry| entry.to_string())
+        .collect();
+    assert_eq!(
+        placed,
+        [
+            "DCP LAYER swap 1 layer 0 surface=2560x1440 source=0,0+1280x720 destination=0,0+2560x1440"
+        ]
+    );
+}
+
+#[test]
+fn a_cropped_offset_source_and_an_unscaled_layer_compose_together() {
+    let mode = Mode {
+        width: 8,
+        height: 4,
+        format: PixelFormat::Bgra8888,
+    };
+    let screen = TestScreen(Rc::default(), Some(mode));
+    let frames = screen.0.clone();
+    let mut methods = Methods::new(Box::new(screen), interface());
+    start_swap(&mut methods);
+    // Layer 0: the 4x2 at (2, 1) of an 8x4 surface, scaled 2x over the
+    // screen. Layer 1: a 2x1 surface unscaled at (5, 2).
+    let mut input = submission(1, &[(0, 8, 4, 0x1000), (1, 2, 1, 0x8000)]);
+    place(&mut input, 0, rect(2, 1, 4, 2), rect(0, 0, 8, 4));
+    place(&mut input, 1, rect(0, 0, 2, 1), rect(5, 2, 2, 1));
+    returned(methods.call(*b"A407", &input, 0xc));
+    methods
+        .present(0, pattern(&[(0x1000, 8), (0x8000, 2)]))
+        .unwrap();
+    let frames = frames.borrow();
+    for y in 0..4 {
+        for x in 0..8 {
+            let want = if y == 2 && (5..7).contains(&x) {
+                pattern_pixel(x - 5, 0)
+            } else {
+                pattern_pixel(2 + x / 2, 1 + y / 2)
+            };
+            let at = (y * 8 + x) * 4;
+            assert_eq!(frames[0][at..at + 4], want, "({x}, {y})");
+        }
+    }
+}
+
+#[test]
+fn a_scaled_layer_damages_the_screen_rows_its_destination_covers() {
+    #[derive(Clone, Default)]
+    struct Damage(Rc<RefCell<Vec<Option<core::ops::Range<usize>>>>>);
+    impl Scanout for Damage {
+        fn mode(&self) -> Mode {
+            Mode {
+                width: 8,
+                height: 16,
+                format: PixelFormat::Bgra8888,
+            }
+        }
+        fn present(&mut self, _: &[u8]) -> Result<()> {
+            unreachable!("rows are taken")
+        }
+        fn try_present_rows(
+            &mut self,
+            damage: Option<core::ops::Range<usize>>,
+            fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
+        ) -> Result<bool> {
+            let mut row = [0; 32];
+            for y in damage.clone().unwrap_or(0..16) {
+                fill(y, &mut row)?;
+            }
+            self.0.borrow_mut().push(damage);
+            Ok(true)
+        }
+    }
+    let sink = Damage::default();
+    let presented = sink.0.clone();
+    let mut methods = Methods::new(Box::new(sink), interface());
+    let period = methods.refresh_ticks;
+    // A full-screen base, then layer 1: a 2x2 source shown 2x at row `y`.
+    let id = start_swap(&mut methods);
+    let mut input = submission(id, &[(0, 8, 16, 0x1000), (1, 2, 2, 0x8000)]);
+    place(&mut input, 1, rect(0, 0, 2, 2), rect(1, 3, 4, 4));
+    returned(methods.call(*b"A407", &input, 0xc));
+    methods.present(0, |_, _| true).unwrap();
+    // Moved down: the rows it covered (3..7) and covers (9..13), in source
+    // rows 0..2 scaled to four screen rows each time.
+    let id = start_swap(&mut methods);
+    let mut input = submission(id, &[(1, 2, 2, 0x8000)]);
+    place(&mut input, 1, rect(0, 0, 2, 2), rect(1, 9, 4, 4));
+    returned(methods.call(*b"A407", &input, 0xc));
+    methods.present(period, |_, _| true).unwrap();
+    // Shown at its own size in place: the old scaled rows and the new ones.
+    let id = start_swap(&mut methods);
+    let mut input = submission(id, &[(1, 2, 2, 0x8000)]);
+    place(&mut input, 1, rect(0, 0, 2, 2), rect(1, 9, 2, 2));
+    returned(methods.call(*b"A407", &input, 0xc));
+    methods.present(2 * period, |_, _| true).unwrap();
+    assert_eq!(*presented.borrow(), [None, Some(3..13), Some(9..13)]);
 }

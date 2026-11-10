@@ -43,6 +43,67 @@ pub enum PixelFormat {
     /// (`'l10r'`, CoreVideo's `ARGB2101010LEPacked`; Linux maps DRM's
     /// `ARGB2101010`, the same bits, to this DCP format).
     Argb2101010,
+    /// `'&b38'`, the guest's Metal `RGB10A8_2P_XR10`: blue, green and red
+    /// extended-range codes from bit 0 of a 32-bit word, each reading
+    /// `(code - 384) / 510`, and 8-bit alpha in a second plane whose first
+    /// pixel is at the I/O address `alpha`, `alpha_stride` bytes a row.
+    /// The codes hold display-encoded values whichever Metal view wrote
+    /// them (an sRGB view encodes through the curve as it writes), so each
+    /// shows its value clamped to the display's [0, 1]: [`XR10_DISPLAY`].
+    Xr10A8 { alpha: u64, alpha_stride: u32 },
+}
+
+/// The 8-bit display value of each extended-range code: its value
+/// `(code - 384) / 510` clamped to [0, 1], times 255, rounded half up.
+/// Since 255 / 510 is a half, that is `(code - 383) / 2` clamped, which
+/// [`xr10_row`] computes without the table.
+pub const XR10_DISPLAY: [u8; 1024] = {
+    let mut table = [0; 1024];
+    let mut code = 0;
+    while code < 1024 {
+        // 1020 times the value, times 255.
+        let value = (code as i32 * 2 - 768) * 255;
+        let rounded = (value + 510) / 1020;
+        table[code] = if value <= 0 {
+            0
+        } else if rounded > 255 {
+            255
+        } else {
+            rounded as u8
+        };
+        code += 1;
+    }
+    table
+};
+
+/// [`XR10_DISPLAY`] placed at each code's byte of an opaque BGRA8 pixel:
+/// the first code's blue, the second's green and the third's red with
+/// alpha 255, so a word's three lookups OR into its pixel.
+static XR10_PIXEL: [[u32; 1024]; 3] = {
+    let mut tables = [[0; 1024]; 3];
+    let mut code = 0;
+    while code < 1024 {
+        let value = XR10_DISPLAY[code] as u32;
+        tables[0][code] = value;
+        tables[1][code] = value << 8;
+        tables[2][code] = value << 16 | 0xff00_0000;
+        code += 1;
+    }
+    tables
+};
+
+/// Converts a row of `RGB10A8_2P_XR10` color words in place to opaque
+/// BGRA8 through [`XR10_PIXEL`]: three masked lookups and two ORs a pixel,
+/// with no arithmetic on the codes (about three times faster than
+/// computing the clamps, with or without vector units).
+#[inline(never)]
+fn xr10_row(row: &mut [u8]) {
+    let [blue, green, red] = &XR10_PIXEL;
+    for pixel in row.as_chunks_mut::<4>().0 {
+        let word = u32::from_le_bytes(*pixel);
+        let code = |shift: u32| (word >> shift & 0x3ff) as usize;
+        *pixel = (blue[code(0)] | green[code(10)] | red[code(20)]).to_le_bytes();
+    }
 }
 
 impl PixelFormat {
@@ -55,6 +116,16 @@ impl PixelFormat {
             PixelFormat::Bgra8888 => u32::from_be_bytes(*b"BGRA"),
             PixelFormat::Rgba8888 => u32::from_be_bytes(*b"RGBA"),
             PixelFormat::Argb2101010 => u32::from_be_bytes(*b"l10r"),
+            PixelFormat::Xr10A8 { .. } => u32::from_be_bytes(*b"&b38"),
+        }
+    }
+
+    /// The format of the rows [`Layer::read_row`] returns: two-plane
+    /// extended-range rows arrive as BGRA8.
+    const fn row_format(self) -> Self {
+        match self {
+            PixelFormat::Xr10A8 { .. } => PixelFormat::Bgra8888,
+            format => format,
         }
     }
 
@@ -282,8 +353,29 @@ impl Layer {
         })
     }
 
+    /// Whether the source is shown at its own size.
+    fn unscaled(&self) -> bool {
+        (self.source.width, self.source.height) == (self.destination.width, self.destination.height)
+    }
+
+    /// The byte offset in a source row of the pixel each screen column in
+    /// `xs` takes: the one under the column's centre (nearest neighbour),
+    /// which an integer upscale repeats exactly.
+    fn columns(&self, xs: [usize; 2]) -> Vec<u32> {
+        let (from, to) = (
+            u64::from(self.source.width),
+            u64::from(self.destination.width),
+        );
+        (xs[0]..xs[1])
+            .map(|x| {
+                let column = (2 * (x as u64 - u64::from(self.destination.x)) + 1) * from / (2 * to);
+                column as u32 * 4
+            })
+            .collect()
+    }
+
     fn covers_mode(&self, mode: Mode) -> bool {
-        self.surface.format == mode.format
+        self.surface.format.row_format() == mode.format
             && self.source.width == mode.width
             && self.source.height == mode.height
             && self.destination
@@ -295,13 +387,19 @@ impl Layer {
                 })
     }
 
+    /// Reads source row `from_y` into `out`, in [`PixelFormat::row_format`]:
+    /// a two-plane extended-range row is converted, its alpha read from its
+    /// plane unless `opaque` (a premultiplied bottom layer, which shows
+    /// over black whatever its alpha).
     fn read_row(
         &self,
         from_y: u64,
         out: &mut [u8],
         read: &mut impl FnMut(u64, &mut [u8]) -> bool,
+        opaque: bool,
     ) -> Result<()> {
-        let iova = (u64::from(self.source.y) + from_y)
+        let y = u64::from(self.source.y) + from_y;
+        let iova = y
             .checked_mul(self.surface.stride.into())
             .and_then(|offset| offset.checked_add(u64::from(self.source.x) * 4))
             .and_then(|offset| self.surface.iova.checked_add(offset))
@@ -309,7 +407,100 @@ impl Layer {
         if !read(iova, out) {
             return Err(refuse!("surface row is not reachable through its DART"));
         }
+        let PixelFormat::Xr10A8 {
+            alpha,
+            alpha_stride,
+        } = self.surface.format
+        else {
+            return Ok(());
+        };
+        xr10_row(out);
+        if opaque {
+            return Ok(());
+        }
+        let mut iova = y
+            .checked_mul(alpha_stride.into())
+            .and_then(|offset| offset.checked_add(u64::from(self.source.x)))
+            .and_then(|offset| alpha.checked_add(offset))
+            .ok_or(refuse!("layer row address overflows"))?;
+        let mut bytes = [0u8; 256];
+        for pixels in out.as_chunks_mut::<4>().0.chunks_mut(bytes.len()) {
+            let bytes = &mut bytes[..pixels.len()];
+            if !read(iova, bytes) {
+                return Err(refuse!("surface row is not reachable through its DART"));
+            }
+            for (pixel, &value) in pixels.iter_mut().zip(bytes.iter()) {
+                pixel[3] = value;
+            }
+            iova += pixels.len() as u64;
+        }
         Ok(())
+    }
+
+    /// Reads source row `from_y` as the surface holds it into `out`, its
+    /// color row then, for a two-plane extended-range surface whose
+    /// `alpha` counts, its alpha row: [`Self::source_row_bytes`] bytes.
+    fn read_source(
+        &self,
+        from_y: u64,
+        out: &mut [u8],
+        alpha: bool,
+        read: &mut impl FnMut(u64, &mut [u8]) -> bool,
+    ) -> Result<()> {
+        let y = u64::from(self.source.y) + from_y;
+        let x = u64::from(self.source.x);
+        let address = |base: u64, stride: u32, column: u64| {
+            y.checked_mul(stride.into())
+                .and_then(|offset| offset.checked_add(column))
+                .and_then(|offset| base.checked_add(offset))
+                .ok_or(refuse!("layer row address overflows"))
+        };
+        let (pixels, rest) = out.split_at_mut(self.source.width as usize * 4);
+        if !read(
+            address(self.surface.iova, self.surface.stride, x * 4)?,
+            pixels,
+        ) {
+            return Err(refuse!("surface row is not reachable through its DART"));
+        }
+        if let PixelFormat::Xr10A8 {
+            alpha: plane,
+            alpha_stride,
+        } = self.surface.format
+            && alpha
+            && !read(address(plane, alpha_stride, x)?, rest)
+        {
+            return Err(refuse!("surface row is not reachable through its DART"));
+        }
+        Ok(())
+    }
+
+    /// The bytes [`Self::read_source`] reads of a source row.
+    fn source_row_bytes(&self, alpha: bool) -> usize {
+        let width = self.source.width as usize;
+        match self.surface.format {
+            PixelFormat::Xr10A8 { .. } if alpha => width * 5,
+            _ => width * 4,
+        }
+    }
+
+    /// This layer without its surface's addresses: what a later swap's
+    /// layer has to match for its rows to be compared with this one's.
+    fn shape(&self) -> Self {
+        let format = match self.surface.format {
+            PixelFormat::Xr10A8 { alpha_stride, .. } => PixelFormat::Xr10A8 {
+                alpha: 0,
+                alpha_stride,
+            },
+            format => format,
+        };
+        Self {
+            surface: Surface {
+                iova: 0,
+                format,
+                ..self.surface
+            },
+            ..*self
+        }
     }
 }
 
@@ -324,7 +515,7 @@ impl PixelFormat {
         match self {
             PixelFormat::Bgra8888 => Some((2, 0)),
             PixelFormat::Rgba8888 => Some((0, 2)),
-            PixelFormat::Argb2101010 => None,
+            PixelFormat::Argb2101010 | PixelFormat::Xr10A8 { .. } => None,
         }
     }
 
@@ -339,6 +530,8 @@ impl PixelFormat {
                 let ten = |shift: u32| (((value >> shift & 0x3ff) * 255 + 511) / 1023) as u8;
                 [ten(20), ten(10), ten(0), (value >> 30) as u8 * 85]
             }
+            // Its rows are read as BGRA8 (`row_format`).
+            PixelFormat::Xr10A8 { .. } => [pixel[2], pixel[1], pixel[0], pixel[3]],
         }
     }
 }
@@ -365,6 +558,25 @@ fn copy_opaque(source: &[u8], out: &mut [u8], from: PixelFormat, to: PixelFormat
         } else {
             // The formats differ only in red/blue order.
             value & 0xff00_ff00 | (value & 0xff) << 16 | (value >> 16) & 0xff
+        };
+        *out = value.to_le_bytes();
+    }
+}
+
+/// Copy the source pixels `columns` names from `row` into `out` in `to`,
+/// alpha made opaque: a scaled row with nothing to blend.
+#[inline(never)]
+fn gather_opaque(row: &[u8], columns: &[u32], out: &mut [u8], from: PixelFormat, to: PixelFormat) {
+    let swap = from != to;
+    for (out, &at) in out.as_chunks_mut::<4>().0.iter_mut().zip(columns) {
+        let at = at as usize;
+        let value =
+            u32::from_le_bytes([row[at], row[at + 1], row[at + 2], row[at + 3]]) | 0xff00_0000;
+        // The formats differ only in red/blue order.
+        let value = if swap {
+            value & 0xff00_ff00 | (value & 0xff) << 16 | (value >> 16) & 0xff
+        } else {
+            value
         };
         *out = value.to_le_bytes();
     }
@@ -440,6 +652,185 @@ pub struct Composed {
     rows: Vec<u8>,
     /// The rows are the frame the scanout shows.
     current: bool,
+    /// The source rows of the frame the scanout shows, by layer, when no
+    /// layer is scaled ([`refine`]).
+    shown: Vec<Shown>,
+    /// A source row being compared.
+    scratch: Vec<u8>,
+}
+
+/// A layer's source rows as the frame on screen shows them.
+#[derive(Debug)]
+struct Shown {
+    /// The layer's [`Layer::shape`].
+    shape: Layer,
+    /// Whether its alpha plane counts ([`Layer::source_row_bytes`]).
+    alpha: bool,
+    rows: Vec<u8>,
+}
+
+impl Shown {
+    /// Keeps the bytes `read` filled at `iova` that lie in a source row of
+    /// `layer`, in its color plane or a counted alpha plane.
+    fn keep(&mut self, layer: &Layer, iova: u64, bytes: &[u8]) {
+        let source = layer.source;
+        let width = u64::from(source.width);
+        if self.rows.is_empty() {
+            return;
+        }
+        let row_bytes = layer.source_row_bytes(self.alpha);
+        let mut planes = [
+            (layer.surface.iova, u64::from(layer.surface.stride), 4, 0),
+            (0, 0, 0, 0),
+        ];
+        if let PixelFormat::Xr10A8 {
+            alpha,
+            alpha_stride,
+        } = layer.surface.format
+            && self.alpha
+        {
+            planes[1] = (alpha, u64::from(alpha_stride), 1, width * 4);
+        }
+        for (base, stride, size, at) in planes {
+            if stride == 0 || iova < base {
+                continue;
+            }
+            let offset = iova - base;
+            let (y, column) = (offset / stride, offset % stride);
+            let start = u64::from(source.x) * size;
+            let Some(from_y) = y.checked_sub(source.y.into()) else {
+                continue;
+            };
+            if from_y >= u64::from(source.height)
+                || column < start
+                || column - start + bytes.len() as u64 > width * size
+            {
+                continue;
+            }
+            let into = from_y as usize * row_bytes + (at + column - start) as usize;
+            self.rows[into..][..bytes.len()].copy_from_slice(bytes);
+            return;
+        }
+    }
+}
+
+/// The rows of `damage` (`None`: every row of the screen) whose
+/// pixels differ from the frame on screen, which `composed` keeps the
+/// source rows of: a new swap's surface often holds what the last one did,
+/// as WindowServer redraws only what changed, so most of the rows a swap
+/// damages need not be read twice, converted or copied again. Rows are
+/// compared as the surfaces hold them, before conversion, from the top and
+/// from the bottom up to the first that changed: the rows between are
+/// composed, and kept as [`present`] reads them. Only while every layer is
+/// unscaled and shaped as before; otherwise every row is composed, and
+/// kept, for the next swap. `alpha` says which layers' alpha counts.
+fn refine(
+    layers: &[Layer],
+    damage: Option<Range<usize>>,
+    alpha: impl Fn(usize) -> bool,
+    read: &mut impl FnMut(u64, &mut [u8]) -> bool,
+    composed: &mut Composed,
+) -> Result<Option<Range<usize>>> {
+    // A scaled layer's rows are not compared: they always changed.
+    let unscaled = |layer: &Layer| {
+        layer.source.width == layer.destination.width
+            && layer.source.height == layer.destination.height
+    };
+    let fits = |index: usize, shown: &Shown| {
+        unscaled(&layers[index])
+            && shown.shape == layers[index].shape()
+            && shown.alpha == alpha(index)
+    };
+    let counted = composed.shown.len() == layers.len();
+    // Rows a moved, resized or new layer covers, before or now, changed.
+    let mut forced = 0..0;
+    for (index, layer) in layers.iter().enumerate() {
+        if counted && fits(index, &composed.shown[index]) {
+            continue;
+        }
+        // Megabytes a heap shared with the engine may lack: without them,
+        // frames present the damage they are given.
+        let mut rows = Vec::new();
+        let bytes = if unscaled(layer) {
+            layer.source_row_bytes(alpha(index)) * layer.source.height as usize
+        } else {
+            0
+        };
+        if rows.try_reserve_exact(bytes).is_err() {
+            composed.shown.clear();
+            return Ok(damage);
+        }
+        rows.resize(bytes, 0);
+        let shown = Shown {
+            shape: layer.shape(),
+            alpha: alpha(index),
+            rows,
+        };
+        if counted {
+            let rect = |rect: Rect| rect.y as usize..rect.y as usize + rect.height as usize;
+            forced = union(forced, rect(composed.shown[index].shape.destination));
+            forced = union(forced, rect(layer.destination));
+            composed.shown[index] = shown;
+        } else {
+            composed.shown.truncate(index);
+            composed.shown.push(shown);
+        }
+    }
+    // Without the layers' rows before, every row is composed, which keeps
+    // them all.
+    let Some(lines) = damage.filter(|_| counted) else {
+        return Ok(None);
+    };
+    let widest = (0..layers.len())
+        .map(|index| layers[index].source_row_bytes(alpha(index)))
+        .max()
+        .unwrap_or(0);
+    if composed.scratch.len() < widest {
+        let more = widest - composed.scratch.len();
+        if composed.scratch.try_reserve_exact(more).is_err() {
+            composed.shown.clear();
+            return Ok(Some(lines));
+        }
+        composed.scratch.resize(widest, 0);
+    }
+    let mut changed = |y: usize| -> Result<bool> {
+        if forced.contains(&y) {
+            return Ok(true);
+        }
+        for (layer, shown) in layers.iter().zip(&mut composed.shown) {
+            let top = layer.destination.y as usize;
+            if shown.rows.is_empty() || !(top..top + layer.destination.height as usize).contains(&y)
+            {
+                continue;
+            }
+            let row_bytes = layer.source_row_bytes(shown.alpha);
+            let scratch = &mut composed.scratch[..row_bytes];
+            layer.read_source((y - top) as u64, scratch, shown.alpha, read)?;
+            // A changed row is composed, and kept, whole.
+            if shown.rows[(y - top) * row_bytes..][..row_bytes] != *scratch {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    let mut first = None;
+    for y in lines.clone() {
+        if changed(y)? {
+            first = Some(y);
+            break;
+        }
+    }
+    let Some(first) = first else {
+        return Ok(Some(0..0));
+    };
+    let mut last = first;
+    for y in (first + 1..lines.end).rev() {
+        if changed(y)? {
+            last = y;
+            break;
+        }
+    }
+    Ok(Some(first..last + 1))
 }
 
 /// Present `layers` to `sink`, `damage` naming the rows that may differ
@@ -461,6 +852,49 @@ pub(crate) fn present(
         return Ok(());
     }
     let mut rows = Rows::new(layers, mode)?;
+    // A premultiplied bottom layer read whole shows over black whatever
+    // its alpha, which it does not read.
+    let direct_base = rows.direct_base;
+    let alpha = |index: usize| !(index == 0 && direct_base && layers[0].premultiplied);
+    let damage = match refine(layers, damage, alpha, &mut read, composed) {
+        Ok(damage) => damage,
+        Err(error) => {
+            composed.shown.clear();
+            return Err(error);
+        }
+    };
+    if damage.as_ref().is_some_and(Range::is_empty) {
+        return Ok(());
+    }
+    // The rows composed are kept as they are read; they are those of the
+    // frame on screen only once it is.
+    let mut shown = core::mem::take(&mut composed.shown);
+    let keeping = |iova: u64, bytes: &mut [u8]| {
+        let reached = read(iova, bytes);
+        if reached {
+            for (layer, shown) in layers.iter().zip(&mut shown) {
+                shown.keep(layer, iova, bytes);
+            }
+        }
+        reached
+    };
+    let presented = present_rows(sink, &mut rows, damage, keeping, composed);
+    if presented.is_ok() {
+        composed.shown = shown;
+    }
+    presented
+}
+
+/// [`present`]'s rows of `damage` from `rows`.
+fn present_rows(
+    sink: &mut dyn Scanout,
+    rows: &mut Rows<'_>,
+    damage: Option<Range<usize>>,
+    mut read: impl FnMut(u64, &mut [u8]) -> bool,
+    composed: &mut Composed,
+) -> Result<()> {
+    let mode = sink.mode();
+    let height = mode.height as usize;
     if sink.try_present_rows(damage.clone(), &mut |y, row| {
         rows.compose(y, row, &mut read)
     })? {
@@ -543,6 +977,9 @@ struct Rows<'a> {
     /// The columns lower layers drew on in the row being composed.
     drawn: Vec<[usize; 2]>,
     scratch: Vec<u8>,
+    /// For each scaled layer, the byte offset in its source row of the
+    /// pixel each on-screen column takes; empty for an unscaled layer.
+    columns: Vec<Vec<u32>>,
 }
 
 impl<'a> Rows<'a> {
@@ -551,18 +988,28 @@ impl<'a> Rows<'a> {
             .format
             .red_blue()
             .ok_or(refuse!("scanout mode is not an 8-bit format"))?;
+        let placed: Vec<_> = layers
+            .iter()
+            .map(|layer| on_screen(layer.destination, mode.width, mode.height))
+            .collect();
+        let columns = layers
+            .iter()
+            .zip(&placed)
+            .map(|(layer, placed)| match placed {
+                Some((xs, _)) if !layer.unscaled() => layer.columns(*xs),
+                _ => Vec::new(),
+            })
+            .collect();
         Ok(Self {
             layers,
-            placed: layers
-                .iter()
-                .map(|layer| on_screen(layer.destination, mode.width, mode.height))
-                .collect(),
+            placed,
             red,
             blue,
             format: mode.format,
             direct_base: layers.first().is_some_and(|layer| layer.covers_mode(mode)),
             drawn: Vec::new(),
             scratch: Vec::new(),
+            columns,
         })
     }
 
@@ -586,21 +1033,36 @@ impl<'a> Rows<'a> {
                 continue;
             }
             let (surface, source, destination) = (layer.surface, layer.source, layer.destination);
+            // Two-plane extended-range rows arrive as BGRA8.
+            let surface = Surface {
+                format: surface.format.row_format(),
+                ..surface
+            };
             let over_black = !self.drawn.iter().any(|x| x[0] < xs[1] && xs[0] < x[1]);
             self.drawn.push(xs);
             let from_y = (2 * (y as u64 - u64::from(destination.y)) + 1) * u64::from(source.height)
                 / (2 * u64::from(destination.height));
             let out = &mut out[xs[0] * 4..xs[1] * 4];
             if index == 0 && self.direct_base {
-                layer.read_row(from_y, out, read)?;
+                layer.read_row(from_y, out, read, layer.premultiplied)?;
                 make_opaque(out, layer.premultiplied);
                 continue;
             }
             self.scratch.resize(source.width as usize * 4, 0);
             let row = &mut self.scratch[..];
-            layer.read_row(from_y, row, read)?;
-            let unscaled = (source.width, source.height) == (destination.width, destination.height);
-            if unscaled && surface.format.red_blue().is_some() {
+            layer.read_row(from_y, row, read, false)?;
+            let columns = &self.columns[index];
+            if !columns.is_empty() {
+                // Scaled: each column takes the source pixel its map names.
+                let first = columns[0] as usize;
+                let last = columns[columns.len() - 1] as usize + 4;
+                let opaque = (layer.premultiplied && over_black) || all_opaque(&row[first..last]);
+                if opaque && surface.format.red_blue().is_some() {
+                    gather_opaque(row, columns, out, surface.format, self.format);
+                    continue;
+                }
+            }
+            if columns.is_empty() && surface.format.red_blue().is_some() {
                 let start = (xs[0] - destination.x as usize) * 4;
                 let pixels = &row[start..start + out.len()];
                 if (layer.premultiplied && over_black) || all_opaque(pixels) {
@@ -617,10 +1079,10 @@ impl<'a> Rows<'a> {
                 }
             }
             for (x, out) in (xs[0]..xs[1]).zip(out.as_chunks_mut::<4>().0) {
-                let from_x = (2 * (x as u64 - u64::from(destination.x)) + 1)
-                    * u64::from(source.width)
-                    / (2 * u64::from(destination.width));
-                let at = from_x as usize * 4;
+                let at = match columns.get(x - xs[0]) {
+                    Some(&at) => at as usize,
+                    None => (x - destination.x as usize) * 4,
+                };
                 let pixel = surface
                     .format
                     .rgba([row[at], row[at + 1], row[at + 2], row[at + 3]]);
@@ -754,6 +1216,128 @@ mod tests {
         let l10r = (3u32 << 30 | 1023 << 20 | 512 << 10 | 3).to_le_bytes();
         assert_eq!(PixelFormat::Argb2101010.rgba(l10r), [255, 128, 1, 255]);
         assert_eq!(PixelFormat::from_fourcc(u32::from_be_bytes(*b"420f")), None);
+    }
+
+    /// Each extended-range code's display value: the range's ends, the
+    /// display's (codes 384 and 894 read 0 and 1), and every code through
+    /// the row conversion as the table holds it.
+    #[test]
+    fn extended_range_codes_show_their_clamped_values() {
+        for (code, value) in [
+            (0, 0),
+            (383, 0),
+            (384, 0),
+            (385, 1),
+            (386, 1),
+            (639, 128),
+            (893, 255),
+            (894, 255),
+            (1023, 255),
+        ] {
+            assert_eq!(XR10_DISPLAY[code], value, "{code}");
+        }
+        for code in 0..1024u32 {
+            // The value times 255, exactly: 255 / 510 is a half.
+            let exact = ((f64::from(code) - 384.0) * 0.5).clamp(0.0, 255.0);
+            assert_eq!(
+                f64::from(XR10_DISPLAY[code as usize]),
+                (exact + 0.5).floor()
+            );
+            let mut row =
+                (code | (1023 - code) << 10 | (code ^ 0x155) << 20 | 3 << 30).to_le_bytes();
+            xr10_row(&mut row);
+            let display = |code: u32| XR10_DISPLAY[code as usize];
+            assert_eq!(
+                row,
+                [
+                    display(code),
+                    display(1023 - code),
+                    display(code ^ 0x155),
+                    0xff
+                ]
+            );
+        }
+    }
+
+    /// A 1280 x 800 `&b38` surface's planes: color words at 0 with 5120
+    /// bytes a row, alpha bytes at 4,161,536 with 1280 (`dcp::swap`).
+    fn extended_surface(memory: &mut [u8]) -> Surface {
+        const ALPHA: usize = 4_161_536;
+        for y in 0..800usize {
+            for x in 0..1280usize {
+                let code = |v: usize| (v % 1024) as u32;
+                let word = code(x) | code(y) << 10 | code(x + y) << 20;
+                memory[y * 5120 + x * 4..][..4].copy_from_slice(&word.to_le_bytes());
+                memory[ALPHA + y * 1280 + x] = (x ^ y) as u8;
+            }
+        }
+        Surface {
+            width: 1280,
+            height: 800,
+            stride: 5120,
+            format: PixelFormat::Xr10A8 {
+                alpha: ALPHA as u64,
+                alpha_stride: 1280,
+            },
+            iova: 0,
+        }
+    }
+
+    #[test]
+    fn extended_range_surfaces_compose_from_both_planes() {
+        let mut memory = alloc::vec![0u8; 5_251_264];
+        let surface = extended_surface(&mut memory);
+        let mode = Mode {
+            width: 1280,
+            height: 800,
+            format: PixelFormat::Bgra8888,
+        };
+        let whole = Rect::whole(1280, 800);
+        let display = |code: usize| XR10_DISPLAY[code % 1024];
+        // A premultiplied bottom layer shows its color whatever its alpha.
+        let base = Layer::new(surface, whole, whole, true).unwrap();
+        let frame = compose(&[base], mode, reader(&memory)).unwrap();
+        for (y, x) in [(0, 0), (1, 700), (799, 1279), (400, 383)] {
+            let at = (y * 1280 + x) * 4;
+            assert_eq!(
+                frame[at..at + 4],
+                [display(x), display(y), display(x + y), 0xff],
+                "{x} {y}"
+            );
+        }
+        // A straight one is weighted by its alpha plane, over black.
+        let straight = Layer::new(surface, whole, whole, false).unwrap();
+        let frame = compose(&[straight], mode, reader(&memory)).unwrap();
+        for (y, x) in [(3, 900), (799, 1000), (17, 1279)] {
+            let at = (y * 1280 + x) * 4;
+            let alpha = ((x ^ y) & 0xff) as u32;
+            let weighted = |code: usize| scale(u32::from(display(code)), alpha) as u8;
+            assert_eq!(
+                frame[at..at + 4],
+                [weighted(x), weighted(y), weighted(x + y), 0xff],
+                "{x} {y}"
+            );
+        }
+        // Scaled and placed over another layer, it blends by its alpha.
+        let small = Layer::new(
+            surface,
+            Rect::whole(640, 400),
+            Rect::whole(1280, 800),
+            false,
+        )
+        .unwrap();
+        let frame = compose(&[base, small], mode, reader(&memory)).unwrap();
+        let (x, y) = (1001, 7);
+        let (sx, sy) = (x / 2, y / 2);
+        let alpha = ((sx ^ sy) & 0xff) as u32;
+        let at = (y * 1280 + x) * 4;
+        let below = [display(x), display(y), display(x + y)];
+        let above = [display(sx), display(sy), display(sx + sy)];
+        for channel in 0..3 {
+            let expected = scale(u32::from(above[channel]), alpha)
+                + scale(u32::from(below[channel]), 255 - alpha);
+            assert_eq!(u32::from(frame[at + channel]), expected.min(255));
+        }
     }
 
     #[test]
@@ -1123,6 +1707,103 @@ mod tests {
             self.present(&rows)?;
             Ok(true)
         }
+    }
+
+    /// A swap of another surface with the same pixels damages nothing,
+    /// and one with a changed row damages that row: rows are compared with
+    /// the frame on screen as the surfaces hold them. A scaled layer keeps
+    /// the damage it was given, and a failed present compares nothing next.
+    #[test]
+    fn swaps_present_only_the_rows_whose_pixels_changed() {
+        let mode = Mode {
+            width: 4,
+            height: 3,
+            format: PixelFormat::Bgra8888,
+        };
+        let mut memory: Vec<u8> = (0..0x300).map(|i| (i as u8).wrapping_mul(29)).collect();
+        // Surfaces at 0x100 and 0x200 hold the one at 0 but for row 1 of
+        // the second.
+        memory.copy_within(0..0x30, 0x100);
+        memory.copy_within(0..0x30, 0x200);
+        memory[0x210] ^= 0xff;
+        let layer = |iova| {
+            Layer::new(
+                surface(4, 3, 16, iova),
+                Rect::whole(4, 3),
+                Rect::whole(4, 3),
+                false,
+            )
+            .unwrap()
+        };
+        let mut sink = Hidden {
+            mode: Some(mode),
+            ..Hidden::default()
+        };
+        let mut composed = Composed::default();
+        let all = Some(0..3);
+        for (iova, damage) in [(0, None), (0x100, all.clone()), (0x200, all.clone())] {
+            present(
+                &mut sink,
+                &[layer(iova)],
+                damage,
+                reader(&memory),
+                &mut composed,
+            )
+            .unwrap();
+        }
+        // The first present asks for every row, the same pixels for none
+        // (the sink is left alone), and the changed row alone.
+        assert_eq!(sink.asked, [alloc::vec![0, 1, 2], alloc::vec![1]]);
+        assert_eq!(
+            sink.visible,
+            compose(&[layer(0x200)], mode, reader(&memory)).unwrap()
+        );
+        // An unreachable row fails the present, after which the next
+        // presents the damage it is given.
+        let unreachable = |iova: u64, bytes: &mut [u8]| {
+            iova < 0x100 && {
+                bytes.copy_from_slice(&memory[iova as usize..][..bytes.len()]);
+                true
+            }
+        };
+        assert!(
+            present(
+                &mut sink,
+                &[layer(0x100)],
+                all.clone(),
+                unreachable,
+                &mut composed
+            )
+            .is_err()
+        );
+        present(
+            &mut sink,
+            &[layer(0)],
+            all.clone(),
+            reader(&memory),
+            &mut composed,
+        )
+        .unwrap();
+        assert_eq!(sink.asked[2], [0, 1, 2]);
+        // A scaled layer's damage stands.
+        let scaled = Layer::new(
+            surface(4, 3, 16, 0),
+            Rect::whole(2, 3),
+            Rect::whole(4, 3),
+            false,
+        )
+        .unwrap();
+        for _ in 0..2 {
+            present(
+                &mut sink,
+                &[scaled],
+                all.clone(),
+                reader(&memory),
+                &mut composed,
+            )
+            .unwrap();
+        }
+        assert_eq!(sink.asked[4], [0, 1, 2]);
     }
 
     #[test]
