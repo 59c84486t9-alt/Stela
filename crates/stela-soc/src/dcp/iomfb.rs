@@ -169,6 +169,11 @@ pub struct Pacing {
     pub fence_timeouts: u32,
     /// Method calls the AP made in the window, logged or not.
     pub calls: u32,
+    /// Calls answered with the protocol's unsupported status or with
+    /// zeros: a method that repeats per frame shows here.
+    pub unmodeled: u32,
+    /// `swap_set_color_matrix` calls.
+    pub color_matrix: u32,
     /// Swaps completed at a vblank with a newer one shown in their place.
     pub merged: u32,
     /// How long after its vblank each present ran, in ticks: the total and
@@ -227,7 +232,7 @@ impl core::fmt::Display for Pacing {
         let ms = |ticks: u64| ticks as f64 * 1000.0 / COUNTER_HZ as f64;
         write!(
             f,
-            "DCP PACING seconds={:.1} presented={} submitted={} merged={} per_second={:.1} gap_ms={:.1}/{:.1}/{:.1} stalls={} late_ms={:.1}/{:.1} deepest={} reordered={} ahead_of_gpu={} fence_waits={} fence_timeouts={} calls={} moved={}",
+            "DCP PACING seconds={:.1} presented={} submitted={} merged={} per_second={:.1} gap_ms={:.1}/{:.1}/{:.1} stalls={} late_ms={:.1}/{:.1} deepest={} reordered={} ahead_of_gpu={} fence_waits={} fence_timeouts={} calls={} unmodeled={} color_matrix={} moved={}",
             ms(self.ticks) / 1000.0,
             self.presented,
             self.submitted,
@@ -249,6 +254,8 @@ impl core::fmt::Display for Pacing {
             self.fence_waits,
             self.fence_timeouts,
             self.calls,
+            self.unmodeled,
+            self.color_matrix,
             self.moved,
         )
     }
@@ -329,6 +336,16 @@ const DIGITAL_OUT_CONNECTED: u32 = 1;
 /// boot call sends that diagonal and zeros elsewhere, the identity it opens
 /// every display with).
 const MATRIX_ONE: u64 = 1 << 32;
+/// `IOMFBColorFixedMatrix`, the 0x78 bytes `swap_set_color_matrix` carries
+/// (AP stub 0xfffffe000ada4718): 15 values in the same 1 << 32 fixed point.
+/// `IOMFB::MatrixHandler::set` (26B123 0xfffffe0009ae8b38) reads +0x00 and
+/// +0x60 as two offset triples and +0x18 as the 3x3 coefficients, row-major.
+const COLOR_MATRIX_VALUES: usize = 15;
+const COLOR_MATRIX_FIRST_COEFFICIENT: usize = 3;
+/// `IOMFBColorMatrixFunction`s with a matrix location: `AppleDisplayPipe::
+/// swap_set_color_matrix_gated` (0xfffffe0009aafc68) maps 0, 1, 2 to
+/// locations 2, 1, 3 and answers `kIOReturnUnsupported` past them.
+const COLOR_MATRIX_FUNCTIONS: u32 = 3;
 /// `setBrightnessCorrection`'s uncorrected value, 1.0 in 16.16: Apple's
 /// on-SoC panel driver (`AppleCLCD::setBrightnessCorrection_gated`, 26B123
 /// VA 0xfffffe0009a93174) refuses any larger value with
@@ -940,6 +957,7 @@ impl Methods {
         };
         let packed = abi::status_output(reply, input, output, LINK_UNSUPPORTED);
         if packed.is_ok() {
+            self.pacing.unmodeled = self.pacing.unmodeled.saturating_add(1);
             self.report_unmodeled(row.tag, Degraded::Unsupported, detail);
         }
         self.reply(row.tag, packed)
@@ -951,6 +969,7 @@ impl Methods {
         if abi::status_reply(row).is_some() {
             return self.unsupported(row, input, output, None);
         }
+        self.pacing.unmodeled = self.pacing.unmodeled.saturating_add(1);
         self.report_unmodeled(row.tag, Degraded::Zeros, None);
         Ok(Step::Return(alloc::vec![0; output as usize]))
     }
@@ -1145,6 +1164,54 @@ impl Service for Methods {
                     return self.unsupported(row, input, output, Some(location));
                 }
                 let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
+                self.reply(tag, packed)
+            }
+            // swap_set_color_matrix(IOMFBColorFixedMatrix*, function, u32)
+            // -> the matrix back, then the link status. Core Animation sends
+            // its accessibility matrix (function 2) in each frame until a
+            // call succeeds. It names no layer: one matrix for the pipe
+            // (Inferred: after blending). The scanout applies none, so only
+            // the identity is carried out.
+            (AP, "swap_set_color_matrix") => {
+                self.pacing.color_matrix = self.pacing.color_matrix.saturating_add(1);
+                if first {
+                    self.record_log(Log::Payload {
+                        tag,
+                        name: row.name,
+                        bytes: input.to_vec(),
+                    });
+                }
+                let mut values = [0u64; COLOR_MATRIX_VALUES];
+                for value in &mut values {
+                    *value = fields.u64()?;
+                }
+                let function = fields.u32()?;
+                fields.u32()?;
+                // A null matrix: the AP's fill, which nothing reads.
+                let null = fields.bool()?;
+                let identity = values.iter().enumerate().all(|(index, &value)| {
+                    let coefficient = index.wrapping_sub(COLOR_MATRIX_FIRST_COEFFICIENT);
+                    let one = coefficient < 9 && coefficient % 4 == 0;
+                    value == if one { MATRIX_ONE } else { 0 }
+                });
+                if function >= COLOR_MATRIX_FUNCTIONS || !(null || identity) {
+                    // The matrix goes with its one report.
+                    if !first && !self.unmodeled.contains(&(tag, Some(function))) {
+                        self.record_log(Log::Payload {
+                            tag,
+                            name: row.name,
+                            bytes: input.to_vec(),
+                        });
+                    }
+                    return self.unsupported(row, input, output, Some(function));
+                }
+                let Some(reply) = abi::status_reply(row) else {
+                    return self.refuse(
+                        tag,
+                        refuse!("DCP method has no recorded status word for its reply"),
+                    );
+                };
+                let packed = abi::status_output(reply, input, output, IO_RETURN_SUCCESS);
                 self.reply(tag, packed)
             }
             // setBrightnessCorrection(u32 16.16) -> link status: only the

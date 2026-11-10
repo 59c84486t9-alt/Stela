@@ -313,6 +313,8 @@ fn a_method_without_a_reply_layout_answers_zeros_and_is_reported_once() {
     assert_eq!(returned(methods.call(*b"A123", &[0; 0x18], 4)), [0; 4]);
     assert_eq!(logged(&mut methods), 0);
     assert!(methods.take_unmodeled().is_empty());
+    // Reported once, counted per call.
+    assert_eq!(methods.pacing.unmodeled, 2);
     assert!(methods.last_refusal().is_none());
 }
 
@@ -396,6 +398,73 @@ fn identity_color_requests_are_carried_out_and_others_are_unsupported() {
     let reply = returned(methods.call(*b"A508", &[1, 0, 0, 0], 4));
     assert_eq!(status(&reply, 0), LINK_UNSUPPORTED);
     assert_eq!(methods.take_unmodeled().len(), 3);
+}
+
+#[test]
+fn an_identity_swap_color_matrix_succeeds_and_another_is_reported_once_with_its_matrix() {
+    // The 26B123 interface, whose tags the latest boots call.
+    let mut methods = Methods::new(
+        Box::new(TestScreen::default()),
+        abi::interface(213).unwrap(),
+    );
+    // IOMFBColorFixedMatrix: offsets, 3x3 coefficients, offsets; then the
+    // function, a u32 and the null flag, as Core Animation's A499 sends it.
+    let call = |scale: u64, function: u32, null: bool| {
+        let mut packed = Packed::new();
+        for index in 0..15 {
+            let one = (3..12).contains(&index) && (index - 3) % 4 == 0;
+            packed = packed.u64(if one { scale } else { 0 });
+        }
+        packed.u32(function).u32(0).bool(null).finish(0x84).unwrap()
+    };
+    let identity = call(MATRIX_ONE, 2, false);
+    for _ in 0..3 {
+        let reply = returned(methods.call(*b"A499", &identity, 0x7c));
+        assert_eq!(reply[..0x78], identity[..0x78]);
+        assert_eq!(status(&reply, 0x78), IO_RETURN_SUCCESS);
+    }
+    // A null matrix sets nothing.
+    let reply = returned(methods.call(*b"A499", &call(0, 2, true), 0x7c));
+    assert_eq!(status(&reply, 0x78), IO_RETURN_SUCCESS);
+    assert!(methods.take_unmodeled().is_empty());
+    // Half intensity (an accessibility filter) is not applied: unsupported,
+    // reported once with the whole matrix. So is a function with no location.
+    let dimmed = call(MATRIX_ONE / 2, 2, false);
+    for _ in 0..2 {
+        let reply = returned(methods.call(*b"A499", &dimmed, 0x7c));
+        assert_eq!(reply[..0x78], dimmed[..0x78]);
+        assert_eq!(status(&reply, 0x78), LINK_UNSUPPORTED);
+    }
+    let reply = returned(methods.call(*b"A499", &call(MATRIX_ONE, 3, false), 0x7c));
+    assert_eq!(status(&reply, 0x78), LINK_UNSUPPORTED);
+    assert_eq!(methods.take_unmodeled().len(), 2);
+    let logs: Vec<_> = core::iter::from_fn(|| methods.take_log()).collect();
+    let payloads: Vec<_> = logs
+        .iter()
+        .filter_map(|entry| match entry {
+            Log::Payload {
+                tag: [b'A', b'4', b'9', b'9'],
+                bytes,
+                ..
+            } => Some(bytes.clone()),
+            _ => None,
+        })
+        .collect();
+    // The first call's whole input, then each reported matrix.
+    assert_eq!(payloads, [identity, dimmed, call(MATRIX_ONE, 3, false)]);
+    assert!(logs.iter().any(|entry| matches!(
+        entry,
+        Log::Unmodeled {
+            answer: Degraded::Unsupported,
+            detail: Some(2),
+            ..
+        }
+    )));
+    assert_eq!(methods.pacing.color_matrix, 7);
+    assert_eq!(methods.pacing.unmodeled, 3);
+    let line = methods.pacing.to_string();
+    assert!(line.contains(" unmodeled=3 color_matrix=7 "), "{line}");
+    assert!(methods.last_refusal().is_none());
 }
 
 #[test]
