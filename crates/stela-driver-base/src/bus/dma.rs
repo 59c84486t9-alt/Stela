@@ -1,5 +1,6 @@
 //! Device-visible memory with distinct CPU mappings and bus addresses.
 use crate::block::BlockError;
+use alloc::vec::Vec;
 use core::ops::Range;
 
 mod allocator;
@@ -133,7 +134,7 @@ pub trait DmaAllocator {
     fn allocate(&mut self, bytes: usize, align: usize) -> Result<DmaBuffer, BlockError>;
 }
 
-/// Zeroed heap memory a test fixture hands out front to back, aligned to
+/// Zeroed heap memory a test fixture hands out lowest first, aligned to
 /// [`TestRegion::ALIGN`] so that whether an aligned allocation fits never
 /// depends on where the heap placed the region. Freed on drop.
 #[cfg(any(test, feature = "test-support"))]
@@ -197,11 +198,27 @@ impl Drop for TestRegion {
     }
 }
 
-/// Hands out a fixed range of identity-mapped pages front to back.
+/// Identity-mapped DMA memory: the regions added to it, each handed out
+/// front to back, and the ranges taken back once their device is done with
+/// them, which later allocations use first.
+///
+/// A buffer is never taken back by dropping it: a driver may drop one its
+/// device can still reach, after a timeout or a reset that failed, so only
+/// [`Self::release`], whose caller proves the device stopped, returns it.
+/// Memory never released is never handed out twice, and the alignment gaps
+/// front-to-back allocation skips stay unused, as before release existed.
 pub struct RegionAllocator {
-    next: u64,
-    end: u64,
+    /// The regions added, in the order they were.
+    regions: Vec<Range<u64>>,
+    /// Each region's part not yet handed out, in the same order.
+    untouched: Vec<Range<u64>>,
+    /// The released ranges, sorted, disjoint and never adjacent.
+    free: Vec<Range<u64>>,
 }
+
+/// Why [`RegionAllocator::release`] refused a buffer, which it hands back.
+#[derive(Debug)]
+pub struct ReleaseRefused(pub DmaBuffer);
 
 impl RegionAllocator {
     /// # Safety
@@ -209,29 +226,141 @@ impl RegionAllocator {
     /// `region` must be RAM that only this allocator hands out, mapped
     /// writable at the same address, and reachable by every device's DMA.
     pub unsafe fn new(region: Range<u64>) -> Self {
-        Self {
-            next: region.start,
-            end: region.end,
-        }
+        let mut allocator = Self {
+            regions: Vec::new(),
+            untouched: Vec::new(),
+            free: Vec::new(),
+        };
+        // SAFETY: forwarded.
+        unsafe { allocator.add(region) };
+        allocator
     }
 
+    /// Grow by `region`. An empty region or one that overlaps a region
+    /// already added is ignored.
+    ///
+    /// # Safety
+    ///
+    /// As for [`Self::new`], for `region`.
+    pub unsafe fn add(&mut self, region: Range<u64>) {
+        if region.start >= region.end
+            || self
+                .regions
+                .iter()
+                .any(|added| added.start < region.end && region.start < added.end)
+        {
+            return;
+        }
+        self.regions.push(region.clone());
+        self.untouched.push(region);
+    }
+
+    /// The bytes free: released and never handed out.
     pub fn remaining(&self) -> u64 {
-        self.end - self.next
+        self.free
+            .iter()
+            .chain(&self.untouched)
+            .map(|range| range.end - range.start)
+            .sum()
+    }
+
+    /// The bytes of the largest free range.
+    pub fn largest(&self) -> u64 {
+        self.free
+            .iter()
+            .chain(&self.untouched)
+            .map(|range| range.end - range.start)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Take `buffer` back for later allocations. A buffer this allocator did
+    /// not hand out, or whose memory is already free, is refused.
+    ///
+    /// # Safety
+    ///
+    /// The device given `buffer`'s bus address has stopped reaching it: no
+    /// command, ring or descriptor that names it is outstanding, and the
+    /// device was told to forget it (its slot disabled, its queue deleted or
+    /// its controller halted). No copy of its CPU pointer is used again.
+    pub unsafe fn release(&mut self, buffer: DmaBuffer) -> Result<(), ReleaseRefused> {
+        let BufferMemory::Identity(start) = buffer.memory else {
+            return Err(ReleaseRefused(buffer));
+        };
+        let Some(end) = start.checked_add(buffer.bytes as u64) else {
+            return Err(ReleaseRefused(buffer));
+        };
+        if start == end {
+            return Ok(());
+        }
+        let owned = self
+            .regions
+            .iter()
+            .any(|region| region.start <= start && end <= region.end);
+        let free = self
+            .free
+            .iter()
+            .chain(&self.untouched)
+            .any(|range| range.start < end && start < range.end);
+        if !owned || free {
+            return Err(ReleaseRefused(buffer));
+        }
+        self.insert(start..end);
+        Ok(())
+    }
+
+    /// Add `range`, which overlaps no free range, to the free list,
+    /// merging it with its neighbours.
+    fn insert(&mut self, range: Range<u64>) {
+        let at = self.free.partition_point(|free| free.end < range.start);
+        let mut merged = range;
+        let mut end = at;
+        while end < self.free.len() && self.free[end].start <= merged.end {
+            merged.start = merged.start.min(self.free[end].start);
+            merged.end = merged.end.max(self.free[end].end);
+            end += 1;
+        }
+        self.free.splice(at..end, core::iter::once(merged));
     }
 }
 
 impl DmaAllocator for RegionAllocator {
     fn allocate(&mut self, bytes: usize, align: usize) -> Result<DmaBuffer, BlockError> {
         assert!(align.is_power_of_two());
-        let start = self
-            .next
-            .checked_next_multiple_of(align as u64)
-            .ok_or(BlockError::NoDmaMemory)?;
-        let end = start
-            .checked_add(bytes as u64)
-            .filter(|end| *end <= self.end)
-            .ok_or(BlockError::NoDmaMemory)?;
-        self.next = end;
+        let bytes64 = bytes as u64;
+        let fit = |range: &Range<u64>| {
+            let start = range.start.checked_next_multiple_of(align as u64)?;
+            let end = start.checked_add(bytes64)?;
+            (end <= range.end).then_some(start)
+        };
+        let start = if let Some((index, start)) = self
+            .free
+            .iter()
+            .enumerate()
+            .find_map(|(index, range)| fit(range).map(|start| (index, start)))
+        {
+            // Released memory first, keeping the gap before it free.
+            let range = self.free[index].clone();
+            let end = start + bytes64;
+            let mut rest = Vec::new();
+            if range.start < start {
+                rest.push(range.start..start);
+            }
+            if end < range.end {
+                rest.push(end..range.end);
+            }
+            self.free.splice(index..=index, rest);
+            start
+        } else {
+            let range = self
+                .untouched
+                .iter_mut()
+                .find(|range| fit(range).is_some())
+                .ok_or(BlockError::NoDmaMemory)?;
+            let start = fit(range).ok_or(BlockError::NoDmaMemory)?;
+            range.start = start + bytes64;
+            start
+        };
         let mut buffer = DmaBuffer {
             memory: BufferMemory::Identity(start),
             bytes,
@@ -266,6 +395,139 @@ mod tests {
         let mut word = allocator.allocate(8, 8).unwrap();
         word.write(0, 0x1234u32);
         assert_eq!(word.read::<u32>(0), 0x1234);
+    }
+
+    /// A region of `bytes` over a vector the test owns.
+    fn region(backing: &mut Vec<u64>) -> (u64, RegionAllocator) {
+        let start = backing.as_mut_ptr() as u64;
+        let end = start + (backing.len() * 8) as u64;
+        // SAFETY: the vector outlives the allocator and nothing else uses it.
+        (start, unsafe { RegionAllocator::new(start..end) })
+    }
+
+    #[test]
+    fn an_exhausted_region_refuses_until_memory_is_released() {
+        let mut backing: Vec<u64> = vec![0; 4096];
+        let (start, mut allocator) = region(&mut backing);
+        let mut taken = Vec::new();
+        while let Ok(buffer) = allocator.allocate(4096, 4096) {
+            taken.push(buffer);
+        }
+        assert!(!taken.is_empty());
+        assert!(allocator.largest() < 4096);
+        assert_eq!(
+            allocator.allocate(4096, 4096).unwrap_err(),
+            BlockError::NoDmaMemory
+        );
+        let mut middle = taken.swap_remove(1);
+        let address = middle.physical();
+        middle.bytes_mut().fill(0xa5);
+        // SAFETY: no device was given the buffer.
+        unsafe { allocator.release(middle) }.unwrap();
+        let again = allocator.allocate(4096, 4096).unwrap();
+        assert_eq!(again.physical(), address);
+        assert!(
+            again.bytes().iter().all(|byte| *byte == 0),
+            "reused memory is zeroed"
+        );
+        assert!(again.physical() >= start);
+    }
+
+    #[test]
+    fn released_neighbours_merge_into_one_range() {
+        let mut backing: Vec<u64> = vec![0; 3 * 512];
+        let (_, mut allocator) = region(&mut backing);
+        let total = allocator.remaining();
+        let buffers: Vec<DmaBuffer> = (0..3)
+            .map(|_| allocator.allocate(4096, 8).unwrap())
+            .collect();
+        assert_eq!(allocator.remaining(), total - 3 * 4096);
+        for buffer in buffers.into_iter().rev() {
+            // SAFETY: no device was given the buffers.
+            unsafe { allocator.release(buffer) }.unwrap();
+        }
+        assert_eq!(allocator.remaining(), total);
+        assert_eq!(allocator.largest(), total);
+        allocator.allocate(3 * 4096, 8).unwrap();
+    }
+
+    #[test]
+    fn a_foreign_or_already_free_buffer_is_refused() {
+        let mut backing: Vec<u64> = vec![0; 1024];
+        let (_, mut allocator) = region(&mut backing);
+        let mut other: Vec<u64> = vec![0; 1024];
+        let (_, mut stranger) = region(&mut other);
+        let foreign = stranger.allocate(64, 8).unwrap();
+        // SAFETY: refused before any effect.
+        assert!(unsafe { allocator.release(foreign) }.is_err());
+        let buffer = allocator.allocate(64, 8).unwrap();
+        let copy = DmaBuffer {
+            memory: BufferMemory::Identity(buffer.physical()),
+            bytes: 64,
+        };
+        // SAFETY: no device was given the buffer.
+        unsafe { allocator.release(buffer) }.unwrap();
+        // SAFETY: refused before any effect.
+        let refused = unsafe { allocator.release(copy) }.unwrap_err();
+        assert_eq!(refused.0.len(), 64);
+        assert_eq!(allocator.remaining(), 8192);
+    }
+
+    #[test]
+    fn an_added_region_grows_the_pool() {
+        let mut first: Vec<u64> = vec![0; 512];
+        let (_, mut allocator) = region(&mut first);
+        allocator.allocate(4096, 8).unwrap();
+        assert!(allocator.allocate(4096, 8).is_err());
+        let mut second: Vec<u64> = vec![0; 1024];
+        let start = second.as_mut_ptr() as u64;
+        // SAFETY: the vector outlives the allocator and nothing else uses it.
+        unsafe { allocator.add(start..start + 8192) };
+        // An overlapping region is not added twice.
+        // SAFETY: as above; the call has no effect.
+        unsafe { allocator.add(start + 4096..start + 12288) };
+        assert_eq!(allocator.remaining(), 8192);
+        let grown = allocator.allocate(8192, 8).unwrap();
+        assert_eq!(grown.physical(), start);
+    }
+
+    #[test]
+    fn a_device_plugged_a_thousand_times_leaves_the_pool_as_it_was() {
+        let mut backing: Vec<u64> = vec![0; 64 * 512];
+        let (_, mut allocator) = region(&mut backing);
+        // Long-lived controller memory, then a device's contexts and rings.
+        let _controller = allocator.allocate(3 * 4096, 4096).unwrap();
+        let mut steady = None;
+        for _ in 0..1000 {
+            let device = [
+                allocator.allocate(2048, 64).unwrap(),
+                allocator.allocate(1024, 64).unwrap(),
+                allocator.allocate(64, 16).unwrap(),
+                allocator.allocate(4096, 4096).unwrap(),
+            ];
+            for buffer in device {
+                // SAFETY: the modeled device was disabled first.
+                unsafe { allocator.release(buffer) }.unwrap();
+            }
+            // The first plug skips an alignment gap in fresh memory; every
+            // later one reuses what the one before released.
+            let now = (allocator.remaining(), allocator.largest());
+            assert_eq!(*steady.get_or_insert(now), now);
+        }
+    }
+
+    #[test]
+    fn without_release_allocations_never_go_below_earlier_ones() {
+        let mut backing: Vec<u64> = vec![0; 32 * 512];
+        let (_, mut allocator) = region(&mut backing);
+        let mut end = 0;
+        for (bytes, align) in [(1, 65536), (100, 8), (4096, 4096), (64, 64), (8, 8)] {
+            let Ok(buffer) = allocator.allocate(bytes, align) else {
+                continue;
+            };
+            assert!(buffer.physical() >= end, "a skipped gap was handed out");
+            end = buffer.physical() + bytes as u64;
+        }
     }
 
     #[test]
