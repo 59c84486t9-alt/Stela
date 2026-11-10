@@ -265,6 +265,12 @@ impl Ports for One {
     }
 }
 
+/// Polls a host device makes for a report to arrive. The bench's controller
+/// runs only when the driver touches a register, and the driver's owned
+/// polls read only the event ring in memory until every 64th quiet look
+/// samples the controller's status, so it takes that many more.
+const POLLS: usize = 50 * 64;
+
 #[test]
 fn the_native_keyboard_and_pointer_reach_the_host_through_a_hub() {
     let hub = Hub::new(One(Peripheral::new()), "HUB").unwrap();
@@ -300,7 +306,7 @@ fn the_native_keyboard_and_pointer_reach_the_host_through_a_hub() {
     feed(Input::Buttons(1));
     let mut keys = Vec::new();
     let mut motion = Vec::new();
-    for _ in 0..50 {
+    for _ in 0..POLLS {
         keys.extend(keyboard.poll());
         motion.extend(pointer.poll());
     }
@@ -327,7 +333,7 @@ fn the_native_keyboard_and_pointer_reach_the_host_through_a_hub() {
         pressed: false,
     });
     let mut released = Vec::new();
-    for _ in 0..50 {
+    for _ in 0..POLLS {
         released.extend(keyboard.poll());
     }
     assert_eq!(
@@ -343,7 +349,7 @@ fn the_native_keyboard_and_pointer_reach_the_host_through_a_hub() {
     feed(Input::MouseButtons(4));
     feed(Input::MouseWheel(-1));
     let mut moved = Vec::new();
-    for _ in 0..50 {
+    for _ in 0..POLLS {
         moved.extend(mouse.poll());
     }
     assert_eq!(

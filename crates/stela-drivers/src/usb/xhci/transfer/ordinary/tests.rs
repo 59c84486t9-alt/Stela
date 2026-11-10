@@ -49,6 +49,33 @@ fn quiet_class_ticket_polls_still_sample_fatal_controller_status() {
 }
 
 #[test]
+fn owned_endpoint_polls_read_status_only_through_the_quiet_drain() {
+    let mut dma = TestRegion::new(64 * 1024 * 8);
+    let (mut controller, model) = cancellation_controller(&mut dma);
+    let id = controller.device_id(1).unwrap();
+    model.borrow_mut().silence_transfer = Some(3);
+    let buffer = dma.allocate(64, 64).unwrap().physical();
+    let trb = controller
+        .device(id)
+        .unwrap()
+        .submit(3, buffer, 64)
+        .unwrap();
+    assert_eq!(controller.device(id).unwrap().completed(3, trb, 64), None);
+    controller.quiet_drains = 0;
+    model.borrow_mut().fatal_status = HSE;
+    let before = model.borrow().status_reads;
+    for _ in 1..QUIET_DRAINS {
+        assert_eq!(controller.device(id).unwrap().completed(3, trb, 64), None);
+    }
+    assert_eq!(model.borrow().status_reads, before);
+    assert_eq!(
+        controller.device(id).unwrap().completed(3, trb, 64),
+        Some(Err(BlockError::Device { status: HSE }))
+    );
+    assert_eq!(model.borrow().status_reads - before, 1);
+}
+
+#[test]
 fn sparse_class_ticket_polls_sample_fatal_status_at_the_first_microframe() {
     let mut dma = TestRegion::new(64 * 1024 * 8);
     let (mut controller, model) = cancellation_controller(&mut dma);

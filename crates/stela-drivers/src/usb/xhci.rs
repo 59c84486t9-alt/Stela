@@ -1021,6 +1021,19 @@ impl Controller {
     /// Before any new command-dependent DMA mutation or doorbell. A late
     /// completion cannot establish a new command generation or undo poison.
     fn ready(&mut self) -> Result<(), BlockError> {
+        self.ready_with(true)
+    }
+
+    /// [`Self::ready`] for a completion poll, which spins: USBSTS is read
+    /// only by the event drain, with each event batch and every
+    /// `QUIET_DRAINS` quiet look, as for a deadline-bound wait
+    /// (`ticket_quiet`). A status read is a bus access, or an exit under a
+    /// hypervisor, on every poll of every endpoint.
+    fn polled_ready(&mut self) -> Result<(), BlockError> {
+        self.ready_with(false)
+    }
+
+    fn ready_with(&mut self, status: bool) -> Result<(), BlockError> {
         self.check_minimum()?;
         self.hardware.ready()?;
         if let Some(memory) = &self.native_memory {
@@ -1028,7 +1041,9 @@ impl Controller {
         }
         self.drain();
         // Once per new command or publication, never per spin.
-        self.check_status();
+        if status {
+            self.check_status();
+        }
         if let Some(status) = self.error {
             self.command_poisoned = true;
             return Err(BlockError::Device { status });

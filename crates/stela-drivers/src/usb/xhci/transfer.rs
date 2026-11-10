@@ -145,6 +145,16 @@ impl Controller {
         self.endpoint_ready_inner(slot, dci)
     }
 
+    /// [`Self::completion_ready`] for an owner that polls its endpoint
+    /// between other work, as the input service polls a HID endpoint at
+    /// every turn: fatal status comes from the event drain alone
+    /// ([`Controller::polled_ready`]).
+    pub(super) fn polled_completion_ready(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
+        self.live_slot(slot)?;
+        self.polled_ready()?;
+        self.endpoint_enabled(slot, dci)
+    }
+
     fn endpoint_ready_inner(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         self.ready()?;
         self.endpoint_enabled(slot, dci)

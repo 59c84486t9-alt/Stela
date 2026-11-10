@@ -198,7 +198,7 @@ impl Controller {
         trb: u64,
         length: usize,
     ) -> Option<Result<usize, BlockError>> {
-        if let Err(error) = self.completion_ready(slot, dci) {
+        if let Err(error) = self.polled_completion_ready(slot, dci) {
             return Some(Err(error));
         }
         let endpoint = self.slot(slot).unwrap().endpoints[usize::from(dci)]
@@ -224,12 +224,15 @@ impl Controller {
             Ok(device) => device,
             Err(error) => return Some(Err(error)),
         };
-        self.completed_ticket(&TransferTicket {
-            id,
-            device,
-            dci,
-            trb,
-        })
+        self.completed_ticket_with(
+            &TransferTicket {
+                id,
+                device,
+                dci,
+                trb,
+            },
+            true,
+        )
     }
 
     /// Whether a deadline-bound client can keep waiting without another
@@ -279,12 +282,23 @@ impl Controller {
         &mut self,
         ticket: &TransferTicket,
     ) -> Option<Result<usize, BlockError>> {
+        self.completed_ticket_with(ticket, false)
+    }
+
+    /// [`Self::completed_ticket`]; `polled` once an owner's endpoint poll
+    /// found the endpoint ready without a status read
+    /// ([`Self::polled_completion_ready`]).
+    fn completed_ticket_with(
+        &mut self,
+        ticket: &TransferTicket,
+        polled: bool,
+    ) -> Option<Result<usize, BlockError>> {
         // Reject a retired device before readiness can drain a replacement's events.
         if let Err(error) = self.validate_id(ticket.device_id()) {
             return Some(Err(error));
         }
         let slot = ticket.hardware_slot();
-        if let Err(error) = self.completion_ready(slot, ticket.dci) {
+        if !polled && let Err(error) = self.completion_ready(slot, ticket.dci) {
             return Some(Err(error));
         }
         let transfer = self.slot(slot).unwrap().endpoints[usize::from(ticket.dci)]
