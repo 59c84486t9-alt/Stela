@@ -31,10 +31,15 @@ impl DecodeCache {
         {
             return Some(operation);
         }
-        let decoded = block::decode_system_mode_instruction(GuestAddress(pc), word)
-            .ok()
-            .flatten()?
-            .operation;
+        let decoded = match block::decode_system_mode_instruction(GuestAddress(pc), word) {
+            Ok(Some(instruction)) => instruction.operation,
+            // Compiled code completes MRS and MSR of NZCV inline
+            // (`aarch64::flags`); the engine still completes one it is given.
+            Ok(None) if stela_compiler::aarch64::flags::accesses_nzcv(word) => {
+                SystemOperation::Register(decode_register(word)?)
+            }
+            _ => return None,
+        };
         *entry = Some((word, decoded));
         Some(decoded)
     }

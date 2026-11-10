@@ -363,9 +363,11 @@ fn decode_system_class(
         }),
         _ => None,
     };
+    // MRS and MSR of NZCV complete inline (`aarch64::flags`).
+    let register = registers::decode(word).filter(|_| !crate::aarch64::flags::accesses_nzcv(word));
     let mut operations = [
         terminal_sync,
-        registers::decode(word).map(SystemOperation::Register),
+        register.map(SystemOperation::Register),
         registers::decode_pstate_immediate(word).map(SystemOperation::PstateImmediate),
     ]
     .into_iter()

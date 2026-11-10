@@ -71,11 +71,37 @@ pub enum Operand {
     },
     ArmToExternal,
     ExternalToArm,
+    /// MRS Xt, NZCV: the flags in bits 31:28, the rest zero.
+    Read {
+        destination: Register,
+    },
+    /// MSR NZCV, Xt: bits 31:28 of Xt; the rest are RES0 and ignored.
+    Write {
+        source: Register,
+    },
+}
+
+/// MRS Xt, NZCV and MSR NZCV, Xt, with Rt 0.
+const MRS_NZCV: u32 = 0xd53b_4200;
+const MSR_NZCV: u32 = 0xd51b_4200;
+
+/// Whether `word` is MRS or MSR of NZCV. NZCV is plain PSTATE at every EL:
+/// no control traps or redirects it (Arm `NZCV` accessibility), so these
+/// complete inline rather than as System register accesses.
+pub fn accesses_nzcv(word: u32) -> bool {
+    matches!(word & !REGISTER_MASK, MRS_NZCV | MSR_NZCV)
 }
 
 /// CRm's parenthesized zero bits in CFINV/AXFLAG/XAFLAG are ignored.
-/// RMIF reads Xn and SETF reads Wn; register 31 is ZR, never SP.
+/// RMIF reads Xn and SETF reads Wn; register 31 is ZR, never SP. MRS and
+/// MSR of NZCV take Xt, register 31 XZR.
 pub fn decode(word: u32) -> Option<Operand> {
+    let rt = register(word & REGISTER_MASK, false);
+    match word & !REGISTER_MASK {
+        MRS_NZCV => return Some(Operand::Read { destination: rt }),
+        MSR_NZCV => return Some(Operand::Write { source: rt }),
+        _ => {}
+    }
     match word & PSTATE_MASK {
         CFINV => return Some(Operand::InvertCarry),
         AXFLAG => return Some(Operand::ArmToExternal),
@@ -106,6 +132,50 @@ pub fn decode(word: u32) -> Option<Operand> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nzcv_register_accesses_decode_for_every_register_and_nothing_near() {
+        for rt in 0..=REGISTER_MASK {
+            let expected = register(rt, false);
+            assert_eq!(
+                decode(MRS_NZCV | rt),
+                Some(Operand::Read {
+                    destination: expected
+                })
+            );
+            assert_eq!(
+                decode(MSR_NZCV | rt),
+                Some(Operand::Write { source: expected })
+            );
+            assert!(accesses_nzcv(MRS_NZCV | rt) && accesses_nzcv(MSR_NZCV | rt));
+        }
+        assert_eq!(
+            decode(MRS_NZCV | 31),
+            Some(Operand::Read {
+                destination: Register::Zero
+            })
+        );
+        // DAIF, FPCR, FPSR, SYS and MSR (immediate) neighbors stay out.
+        for word in [
+            0xd53b_4220,
+            0xd53b_4400,
+            0xd51b_4420,
+            0xd50b_4200,
+            0xd503_421f,
+        ] {
+            assert_eq!(decode(word), None, "{word:#010x}");
+            assert!(!accesses_nzcv(word), "{word:#010x}");
+        }
+        let system = crate::block::decode_system_mode_instruction;
+        for word in [MRS_NZCV | 7, MSR_NZCV | 7] {
+            assert_eq!(system(crate::GuestAddress(0x1000), word).unwrap(), None);
+        }
+        assert!(
+            system(crate::GuestAddress(0x1000), 0xd53b_4227)
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn every_condition_matches_the_architectural_truth_table() {

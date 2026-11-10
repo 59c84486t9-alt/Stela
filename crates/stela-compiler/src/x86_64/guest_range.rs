@@ -173,6 +173,9 @@ fn after(operation: &Operation, bases: u32) -> u32 {
         Operation::IntegerUnary(operand) => bases & !bit(operand.destination),
         Operation::IntegerMinMax(operand) => bases & !bit(operand.destination),
         Operation::Crc(operand) => bases & !bit(operand.destination),
+        Operation::Flags(crate::aarch64::flags::Operand::Read { destination }) => {
+            bases & !bit(*destination)
+        }
         // NZCV, barriers and hints only; the block a branch leaves is over.
         Operation::Flags(_)
         | Operation::BranchCondition { .. }

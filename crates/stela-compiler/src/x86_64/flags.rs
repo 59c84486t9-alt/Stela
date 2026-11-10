@@ -23,6 +23,8 @@ const ZERO: u32 = 1 << ZERO_BIT;
 const CARRY: u32 = 1 << CARRY_BIT;
 const OVERFLOW: u32 = 1 << OVERFLOW_BIT;
 const CARRY_MASK: u32 = CARRY << NZCV_SHIFT;
+/// NZCV's bits of the register MRS and MSR NZCV access.
+const FLAGS_MASK: u32 = (NEGATIVE | ZERO | CARRY | OVERFLOW) << NZCV_SHIFT;
 const NZCV_NIBBLE: u8 = (NEGATIVE | ZERO | CARRY | OVERFLOW) as u8;
 const TABLE_ENTRY_BITS: u32 = 4;
 const TABLE_STRIDE_SHIFT: u8 = 2;
@@ -46,6 +48,20 @@ const EXTERNAL_TO_ARM_TABLE: u32 = NEGATIVE
 
 pub(super) fn emit(code: &mut Code, operand: &Operand) {
     match *operand {
+        Operand::Read { destination } => {
+            {
+                let mut asm = code.asm();
+                asm.mov_load(Dword, Rax, nzcv());
+                asm.alu_accumulator_imm32(Alu::And, Dword, FLAGS_MASK as i32);
+            }
+            super::store(code, destination);
+            return;
+        }
+        Operand::Write { source } => {
+            load(code, source);
+            code.asm()
+                .alu_accumulator_imm32(Alu::And, Dword, FLAGS_MASK as i32);
+        }
         Operand::InvertCarry => {
             code.asm()
                 .alu_imm32(Alu::Xor, Dword, nzcv(), CARRY_MASK as i32);
@@ -173,6 +189,55 @@ mod tests {
                 (ARM_TO_EXTERNAL_TABLE >> index) & u32::from(NZCV_NIBBLE),
                 expected
             );
+        }
+    }
+
+    /// MRS and MSR of NZCV complete inside the block in system mode and
+    /// ordinary code alike, in pinned and frame code.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn nzcv_reads_and_writes_complete_inline_in_every_profile() {
+        use crate::{
+            GuestAddress, Options, TargetCpu,
+            block::{BlockProfile, Features},
+        };
+        // mrs x3, nzcv; msr nzcv, x4; mrs x5, nzcv; mrs xzr, nzcv; msr nzcv, x6
+        const WORDS: [u32; 5] = [
+            0xd53b_4203,
+            0xd51b_4204,
+            0xd53b_4205,
+            0xd53b_421f,
+            0xd51b_4206,
+        ];
+        let source: alloc::vec::Vec<u8> =
+            WORDS.iter().flat_map(|word| word.to_le_bytes()).collect();
+        let base = GuestAddress(0x4000_0000);
+        for (profile, pinned) in [
+            (BlockProfile::new(Features::SYSTEM_MODE), true),
+            (BlockProfile::ORDINARY, false),
+        ] {
+            let options = Options::new(profile, TargetCpu::Baseline);
+            let block = crate::compile(&source, base, &options).unwrap();
+            // No System exit ends the block early.
+            assert_eq!(block.source_bytes, source.len());
+            let mut state = GuestState {
+                nzcv: 0x6000_0000,
+                ..GuestState::default()
+            };
+            state.x[3] = u64::MAX;
+            state.x[4] = 0xffff_ffff_9fff_ffff;
+            state.x[5] = u64::MAX;
+            // Bits 31:28 clear, the rest set: RES0 bits are ignored.
+            state.x[6] = 0x0fff_ffff;
+            let code = &block.native.x86_64_code;
+            if pinned {
+                crate::x86_64::native::run(&crate::x86_64::pinned::entered(code), &mut state);
+            } else {
+                crate::x86_64::native::run(code, &mut state);
+            }
+            assert_eq!(state.x[3], 0x6000_0000, "pinned {pinned}");
+            assert_eq!(state.x[5], 0x9000_0000, "pinned {pinned}");
+            assert_eq!(state.nzcv, 0, "pinned {pinned}");
         }
     }
 
