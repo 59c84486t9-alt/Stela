@@ -1663,8 +1663,16 @@ fn text(plan: &mut Plan, glass: &Value) {
             json!({"text": {"kind": "backing", "vibrant": true, "portal": true},
                    "backdrop": backdrop, "sdf": {"corner_radius": 12}}),
         ),
-        // AppKit's own, under its own name, which a run can leave out.
-        ("appkit.glass_button", json!({"appkit_button": true})),
+        // The glass button AppKit resolves in the light appearance on a
+        // display without extended range at scale 1: a white face fill,
+        // lightening blur fill and darkening edge bleed, under a label
+        // lowered by its color matrix.
+        (
+            "core_animation.text.glass_button_sdr",
+            json!({"text": {"kind": "backing", "vibrant": true, "portal": true,
+                            "offset": -0.3, "backdrop_aware": true},
+                   "backdrop": [light_sdr_glass()], "sdf": {"corner_radius": 6}}),
+        ),
     ] {
         let mut scene = scene;
         scene["kind"] = "core_animation".into();
@@ -1674,6 +1682,77 @@ fn text(plan: &mut Plan, glass: &Value) {
                 .output(Output::new("out", Dtype::U8, Tolerance::units(3.0))),
         );
     }
+    // AppKit's own, under its own name, which a run can leave out. Its
+    // colors follow the appearance, so each case names one. Its glass
+    // recipe also follows the main display (extended range headroom and
+    // scale), so it matches only a reference on the same kind of display.
+    for (label, scene) in [
+        ("appkit.glass_button", json!({"appkit_button": true})),
+        (
+            "appkit.glass_button.dark",
+            json!({"appkit_button": true, "appearance": "dark"}),
+        ),
+    ] {
+        let mut scene = scene;
+        scene["kind"] = "core_animation".into();
+        plan.add(
+            Case::framework(&format!("api.framework.{label}"), scene)
+                .texture(Texture::d2("out", "bgra8unorm", 160, 48).usage(&["read", "render"]))
+                .output(Output::new("out", Dtype::U8, Tolerance::units(3.0)))
+                .informational(),
+        );
+    }
+}
+
+/// The glass filter of AppKit's glass push button in the light appearance,
+/// as SwiftUI resolves it for a display without extended range at scale 1.
+fn light_sdr_glass() -> Value {
+    // Two objects, as one would pass json!'s recursion limit.
+    let mut values = json!({
+        "inputBlurFillBlurRadius": 8, "inputBlurFillNormalOpacity": 0.5,
+        "inputBlurFillLightenOpacity": 0.9, "inputBlurFillDarkenOpacity": 0,
+        "inputFaceColorMatrixBlack": 0.4, "inputFaceColorMatrixWhite": 0.96,
+        "inputFaceColorMatrixSaturation": 1.2, "inputFaceColorMatrixMaxLuma": 1,
+        "inputFaceColorMatrixMaxLumaSDR": 0.94, "inputFaceOpacity": 1,
+        "inputShadowColorMatrixSaturation": 1, "inputShadowColorMatrixWhite": 1,
+        "inputShadowColorMatrixBlack": 0, "inputShadowRadius": 0, "inputShadowDistanceOffset": 0,
+        "inputShadowVibrancyContribution": 0, "inputShadowAmount": 0, "inputShadowBlurRadius": 0,
+        "inputShadowHeight": 0, "inputShadowOpacity": 0, "inputSDRShadowOpacity": 0,
+        "inputSDRGradientDistance0": 1, "inputSDRGradientDistance1": 1,
+        "inputSDRHoldingToneEnabled": false, "inputSDRHoldingToneWhite": 1,
+        "inputBleedAmount": 12.6, "inputBleedHeight": 12.6, "inputBleedDistance0": 1,
+        "inputBleedDistance1": 0, "inputBleedColorMatrixWhite": 1, "inputBleedColorMatrixBlack": 0.9,
+        "inputBleedColorMatrixSaturation": 1.2, "inputBleedDarkenBlend": true, "inputBleedOpacity": 0,
+    });
+    let more = json!({
+        "inputBleedBlurRadius": 0,
+        "inputBlurRadius": 5, "inputBlurOpacity0": 0.4, "inputBlurOpacity1": 0.4,
+        "inputBlurOpacity2": 1, "inputBlurOpacity3": 1, "inputBlurDistance0": 0,
+        "inputBlurDistance1": 0, "inputBlurDistance2": 0, "inputBlurDistance3": 0,
+        "inputInnerRefractionAmount": -18, "inputInnerRefractionHeight": 9,
+        "inputOuterRefractionAmount": 0, "inputOuterRefractionHeight": 0,
+        "inputRefractionDistance0": -1, "inputRefractionDistance1": 0, "inputRefractionOpacity": 0,
+        "inputRingShadowOffset": 8, "inputRingShadowStrokeWidth": 4, "inputRingShadowBlurRadius": 5,
+        "inputRingShadowOpacity": 0, "inputRingShadowMask": 1,
+        "inputKeyFillHighlightHeight": 1, "inputKeyFillHighlightAngle": core::f64::consts::FRAC_PI_2,
+        "inputKeyFillHighlightSpread": 2.0943951, "inputKeyFillHighlightSpreadSDR": 2.0943951,
+        "inputKeyFillHighlightAmount": 0.5, "inputKeyFillHighlightEffectOffset": -1,
+        "inputKeyFillHighlightColorBias": -0.1875,
+        "inputMaxHeadroom": 9999, "inputClamp": 1, "inputClampPreserveHue": false,
+    });
+    values
+        .as_object_mut()
+        .unwrap()
+        .extend(more.as_object().unwrap().clone());
+    json!({
+        "type": "glassBackground",
+        "values": values,
+        "colors": {
+            "inputFaceColorMatrixFillColor": [1, 1, 1, 0.2],
+            "inputShadowColorMatrixFillColor": [0, 0, 0, 0.3],
+        },
+        "sizes": {"inputShadowOffset": [0, 8]},
+    })
 }
 
 /// A desktop picture as an app hands it to MetalKit for a background:

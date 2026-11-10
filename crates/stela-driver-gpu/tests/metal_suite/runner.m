@@ -4225,6 +4225,21 @@ static CALayer *ca_backdrop(NSDictionary *f, CGRect frame)
 			[filter setValue:@"@0" forKey:@"inputSourceSublayerName"];
 		for (NSString *key in spec[@"values"])
 			[filter setValue:spec[@"values"][key] forKey:key];
+		/* Colors as sRGB components with alpha, sizes as width and height. */
+		for (NSString *key in spec[@"colors"]) {
+			NSArray *v = spec[@"colors"][key];
+			CGColorSpaceRef srgb = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+			CGFloat c[4] = {[v[0] doubleValue], [v[1] doubleValue], [v[2] doubleValue], [v[3] doubleValue]};
+			CGColorRef color = CGColorCreate(srgb, c);
+			[filter setValue:(__bridge id)color forKey:key];
+			CGColorRelease(color);
+			CGColorSpaceRelease(srgb);
+		}
+		for (NSString *key in spec[@"sizes"]) {
+			NSArray *v = spec[@"sizes"][key];
+			CGSize size = CGSizeMake([v[0] doubleValue], [v[1] doubleValue]);
+			[filter setValue:[NSValue valueWithBytes:&size objCType:@encode(CGSize)] forKey:key];
+		}
 		if (spec[@"matrix"]) {
 			float m[20];
 			for (int i = 0; i < 20; i++)
@@ -4318,8 +4333,13 @@ static CALayer *ca_label(NSDictionary *text, CGRect frame)
 	}
 	layer.frame = frame;
 	if ([text[@"vibrant"] boolValue]) {
+		/* SwiftUI lifts the label over dark glass and lowers it over
+		 * light glass, which it marks as aware of the backdrop. */
 		id filter = ca_filter(@"vibrantColorMatrix");
-		float m[20] = {1, 0, 0, 0, 0.2f, 0, 1, 0, 0, 0.2f, 0, 0, 1, 0, 0.2f, 0, 0, 0, 1, 0};
+		float o = text[@"offset"] ? [text[@"offset"] floatValue] : 0.2f;
+		float m[20] = {1, 0, 0, 0, o, 0, 1, 0, 0, o, 0, 0, 1, 0, o, 0, 0, 0, 1, 0};
+		if ([text[@"backdrop_aware"] boolValue])
+			[filter setValue:@YES forKey:@"inputBackdropAware"];
 		[filter setValue:[NSValue valueWithBytes:m objCType:"{CAColorMatrix=ffffffffffffffffffff}"]
 			  forKey:@"inputColorMatrix"];
 		layer.filters = @[ filter ];
@@ -4413,8 +4433,12 @@ static CALayer *ca_scene(NSDictionary *f)
  * from launch, and starts its application only here. A process outside a
  * window server session that can still reach the server, such as one
  * launchctl bsexec places in the login window's bootstrap, makes its window;
- * one that reaches none makes no window, and the case is unsupported. */
-static CALayer *appkit_button(CGSize size)
+ * one that reaches none makes no window, and the case is unsupported.
+ * Glass and its label take their colors from the appearance, which would
+ * otherwise follow the user's light or dark setting, so the case names it:
+ * `dark` for the dark one, else the light one a Mac shows before any user
+ * has chosen. */
+static CALayer *appkit_button(CGSize size, BOOL dark)
 {
 	CFDictionaryRef session = CGSessionCopyCurrentDictionary();
 	mach_port_t server = MACH_PORT_NULL;
@@ -4425,7 +4449,11 @@ static CALayer *appkit_button(CGSize size)
 	else
 		mach_port_deallocate(mach_task_self(), server);
 	id (*send)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
-	send(NSClassFromString(@"NSApplication"), sel_registerName("sharedApplication"));
+	id app = send(NSClassFromString(@"NSApplication"), sel_registerName("sharedApplication"));
+	id appearance = ((id (*)(id, SEL, id))objc_msgSend)(
+		NSClassFromString(@"NSAppearance"), sel_registerName("appearanceNamed:"),
+		dark ? @"NSAppearanceNameDarkAqua" : @"NSAppearanceNameAqua");
+	((void (*)(id, SEL, id))objc_msgSend)(app, sel_registerName("setAppearance:"), appearance);
 	id button = ((id (*)(id, SEL, id, id, SEL))objc_msgSend)(NSClassFromString(@"NSButton"),
 								  sel_registerName("buttonWithTitle:target:action:"),
 								  @"Get Started", nil, NULL);
@@ -4442,6 +4470,7 @@ static CALayer *appkit_button(CGSize size)
 	id window = ((id (*)(id, SEL, CGRect, NSUInteger, NSUInteger, BOOL))objc_msgSend)(
 		send(NSClassFromString(@"NSWindow"), @selector(alloc)),
 		sel_registerName("initWithContentRect:styleMask:backing:defer:"), bounds, 0, 2, YES);
+	((void (*)(id, SEL, id))objc_msgSend)(window, sel_registerName("setAppearance:"), appearance);
 	((void (*)(id, SEL, id))objc_msgSend)(window, sel_registerName("setContentView:"), view);
 	CALayer *layer = send(view, sel_registerName("layer"));
 	CGColorRef blue = CGColorCreateGenericRGB(0.3, 0.5, 0.7, 1);
@@ -4472,7 +4501,7 @@ static void run_core_animation(Case *c, id<MTLCommandQueue> queue, NSDictionary 
 	CARenderer *renderer = [CARenderer rendererWithMTLTexture:out options:@{kCARendererMetalCommandQueue : queue}];
 	CALayer *root;
 	if ([f[@"appkit_button"] boolValue]) {
-		root = appkit_button(CGSizeMake(out.width, out.height));
+		root = appkit_button(CGSizeMake(out.width, out.height), [f[@"appearance"] isEqual:@"dark"]);
 	} else {
 		root = [CALayer layer];
 		root.frame = CGRectMake(0, 0, out.width, out.height);
