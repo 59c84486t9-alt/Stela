@@ -877,16 +877,45 @@ enum BusScan {
     Ari,
 }
 
+/// A capability list's own malformation, as opposed to a configuration
+/// read that failed: Linux's `__pci_find_next_cap_ttl` stops at such a link
+/// and keeps what it found before it.
+fn malformed(error: &CapabilityError) -> bool {
+    !matches!(error, CapabilityError::Config { .. })
+}
+
 impl<C: ConfigSpace> Function<C> {
+    /// The extended capability `id` found before the list ends or turns out
+    /// malformed. Only a failed configuration read is an error.
     fn extended_capability(&self, id: u16) -> Result<Option<u16>, CapabilityError> {
         for entry in capability::extended_capabilities(&self.config) {
-            let entry = entry?;
-            if entry.id == id {
-                return Ok(Some(entry.offset));
+            match entry {
+                Ok(entry) if entry.id == id => return Ok(Some(entry.offset)),
+                Ok(_) => {}
+                Err(error) if malformed(&error) => return Ok(None),
+                Err(error) => return Err(error),
             }
         }
         Ok(None)
     }
+    /// The PCI Express capability found before the standard list ends or
+    /// turns out malformed. Only a failed configuration read is an error.
+    fn express_capability(&self) -> Result<Option<u16>, CapabilityError> {
+        for entry in capability::capabilities(&self.config) {
+            match entry {
+                Ok(entry) if entry.id == CAPABILITY_EXPRESS => return Ok(Some(entry.offset)),
+                Ok(_) => {}
+                Err(error) if malformed(&error) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(None)
+    }
+    /// A bridge's secondary bus and how to scan it. A malformed capability
+    /// list hides the port type, so the bus is scanned as below a
+    /// conventional bridge: every device number, as Linux does without a
+    /// PCI Express capability. The function's driver meets the same list
+    /// again and reports it; the rest of the segment is still found.
     fn secondary(&self) -> Result<Option<(u8, BusScan)>, CapabilityError> {
         let read8 = |offset| {
             self.config
@@ -902,11 +931,7 @@ impl<C: ConfigSpace> Function<C> {
             return Ok(None);
         }
         let bus = read8(SECONDARY_BUS)?;
-        let express = self
-            .capabilities()?
-            .into_iter()
-            .find(|&(_, id)| id == CAPABILITY_EXPRESS)
-            .map(|(offset, _)| u16::from(offset));
+        let express = self.express_capability()?;
         let scan = match express {
             Some(express) => {
                 let kind = (read16(express + EXPRESS_FLAGS)? >> EXPRESS_TYPE_SHIFT) & 0xf;

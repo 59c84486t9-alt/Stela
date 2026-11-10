@@ -765,6 +765,34 @@ fn a_bus_no_bridge_leads_to_is_not_scanned() {
 }
 
 #[test]
+fn a_bridge_whose_capabilities_cycle_hides_nothing_behind_or_after_it() {
+    let mut ecam = Ecam::new();
+    ecam.port(EXPRESS_ROOT_PORT, 0);
+    // A vendor capability at 0x50 whose next pointer leads back to itself,
+    // ahead of the Express capability: the port type cannot be read.
+    *ecam.word(0, 1, 0, 0x34) = 0x50;
+    *ecam.word(0, 1, 0, 0x50) = 0x09 | 0x50 << 8 | 4 << 16;
+    // Without the port type, every device number below it is scanned.
+    ecam.present(1, 0, 0, 0);
+    ecam.present(1, 4, 0, 0);
+    // A function after the bridge in scan order.
+    ecam.present(0, 2, 0, 0);
+    assert_eq!(ecam.found(), [(0, 1, 0), (0, 2, 0), (1, 0, 0), (1, 4, 0)]);
+}
+
+#[test]
+fn a_bridge_with_its_express_capability_before_a_bad_link_keeps_its_port_type() {
+    let mut ecam = Ecam::new();
+    ecam.port(EXPRESS_ROOT_PORT, 0);
+    // The Express capability's next pointer is misaligned.
+    *ecam.word(0, 1, 0, 0x40) |= 0x53 << 8;
+    for device in 0..32 {
+        ecam.present(1, device, 0, 0);
+    }
+    assert_eq!(ecam.found(), [(0, 1, 0), (1, 0, 0)]);
+}
+
+#[test]
 fn windows_narrow_to_each_root_bridge_from_its_root_bus() {
     let window = |segment, start_bus, end_bus| EcamWindow {
         base: 0xe000_0000,
