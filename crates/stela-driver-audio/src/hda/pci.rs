@@ -227,7 +227,7 @@ pub enum AttachError {
     BoardIdentityRequired,
     BoardExcluded,
     InvalidBar,
-    InvalidCapabilities,
+    InvalidCapabilities(CapabilityRefusal),
     MappedPreflightRequired,
     PowerNotReady,
     ActiveDma { offset: usize },
@@ -235,6 +235,34 @@ pub enum AttachError {
     UnsupportedPowerManagement,
     PowerTransition,
     ConfigurationRejected,
+}
+
+/// Which capability check refused the function, with the offsets and IDs
+/// it found, so a log names the layout that a controller presents.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CapabilityRefusal {
+    /// The Status register reads all ones: the function is gone.
+    StatusUnreadable,
+    /// No capability list, where an identity control needs the PCIe
+    /// capability to own its register.
+    NoList,
+    /// MSI-X Message Control at `offset` reads all ones.
+    MsixUnreadable { offset: u16 },
+    /// The PCIe capability at `offset` has no sized layout.
+    PcieLayout { offset: u16 },
+    /// Capability `id` at `offset` overlaps the Intel clock-gating or Device
+    /// Control registers, or is one whose end cannot be known below them.
+    ClockGateOverlap { offset: u16, id: u8 },
+    /// The identity's vendor control at `control` lies inside capability
+    /// `id`'s body at `offset`.
+    ControlOverlap { control: u16, offset: u16, id: u8 },
+    /// Capability `id` appears again at `offset`.
+    Duplicate { offset: u16, id: u8 },
+    /// The PCH snoop control needs the endpoint's PCIe capability ending
+    /// at Device Control; the PCIe capability found, if any.
+    PcieOwnerMissing { found: Option<u16> },
+    /// Power management moved to `found` since preparation.
+    PowerManagementMoved { found: Option<u16> },
 }
 
 /// Match the enumerated identity only; `prepare` rechecks config space.
@@ -440,13 +468,14 @@ fn capabilities<C: ConfigSpace>(
     reset_policy: ResetPolicy,
 ) -> Result<Capabilities, AttachError> {
     let mut found = Capabilities::default();
+    let refuse = |refusal| Err(AttachError::InvalidCapabilities(refusal));
     let status = config.read16(regs::STATUS)?;
     if status == u16::MAX {
-        return Err(AttachError::InvalidCapabilities);
+        return refuse(CapabilityRefusal::StatusUnreadable);
     }
     if status & regs::STATUS_CAP_LIST == 0 {
         return if controls.contains(&PCH_SNOOP) {
-            Err(AttachError::InvalidCapabilities)
+            refuse(CapabilityRefusal::NoList)
         } else {
             Ok(found)
         };
@@ -462,13 +491,13 @@ fn capabilities<C: ConfigSpace>(
             CAP_MSI => Some(&mut found.msi),
             CAP_MSIX => {
                 if config.read16(offset16 + 2)? == u16::MAX {
-                    return Err(AttachError::InvalidCapabilities);
+                    return refuse(CapabilityRefusal::MsixUnreadable { offset: offset16 });
                 }
                 Some(&mut found.msix)
             }
             CAP_PCIE => {
                 if entry.layout != Layout::Sized {
-                    return Err(AttachError::InvalidCapabilities);
+                    return refuse(CapabilityRefusal::PcieLayout { offset: offset16 });
                 }
                 let kind = (config.read16(offset16 + 2)? >> 4) & 15;
                 owned_pcie_device_control =
@@ -486,7 +515,10 @@ fn capabilities<C: ConfigSpace>(
                 || (!matches!(id, CAP_PM | CAP_MSI | CAP_MSIX | CAP_PCIE)
                     && start < usize::from(SCH_HDA_DEVC + 2)))
         {
-            return Err(AttachError::InvalidCapabilities);
+            return refuse(CapabilityRefusal::ClockGateOverlap {
+                offset: offset16,
+                id,
+            });
         }
         for control in controls {
             let range = control.extent();
@@ -494,12 +526,19 @@ fn capabilities<C: ConfigSpace>(
                 && start < range.end
                 && !(owned_pcie_device_control && *control == PCH_SNOOP)
             {
-                return Err(AttachError::InvalidCapabilities);
+                return refuse(CapabilityRefusal::ControlOverlap {
+                    control: range.start as u16,
+                    offset: offset16,
+                    id,
+                });
             }
         }
         if let Some(slot) = slot {
             if slot.is_some() {
-                return Err(AttachError::InvalidCapabilities);
+                return refuse(CapabilityRefusal::Duplicate {
+                    offset: offset16,
+                    id,
+                });
             }
             *slot = Some(offset16);
         }
@@ -507,7 +546,7 @@ fn capabilities<C: ConfigSpace>(
     // PCH78 is Device Control, so require its known endpoint owner.
     // Missing/unknown capabilities do not authorize writing an ambiguous body.
     if controls.contains(&PCH_SNOOP) && found.pcie != Some(SCH_HDA_DEVC - 8) {
-        return Err(AttachError::InvalidCapabilities);
+        return refuse(CapabilityRefusal::PcieOwnerMissing { found: found.pcie });
     }
     Ok(found)
 }

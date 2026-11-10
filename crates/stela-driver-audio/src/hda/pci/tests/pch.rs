@@ -158,8 +158,9 @@ fn malformed_snoop_capabilities_rejected() {
                 function.config().words[1] &= !(u32::from(regs::STATUS_CAP_LIST) << 16);
             }
         }
+        let refused = prepare_model(&mut function, &timer, bar).unwrap_err();
         assert_eq!(
-            prepare_model(&mut function, &timer, bar).unwrap_err(),
+            refused,
             match variant {
                 6 => AttachError::PciCapability(crate::bus::pci::CapabilityError::Overlap {
                     offset: 0x80
@@ -170,7 +171,32 @@ fn malformed_snoop_capabilities_rejected() {
                 8 => AttachError::PciCapability(crate::bus::pci::CapabilityError::FailedRead {
                     offset: 0x72
                 }),
-                _ => AttachError::InvalidCapabilities,
+                0 => AttachError::InvalidCapabilities(CapabilityRefusal::ControlOverlap {
+                    control: 0x78,
+                    offset: 0x78,
+                    id: 0xfe,
+                }),
+                1 => AttachError::InvalidCapabilities(CapabilityRefusal::ControlOverlap {
+                    control: 0x78,
+                    offset: 0x74,
+                    id: 1,
+                }),
+                2 => AttachError::InvalidCapabilities(CapabilityRefusal::ControlOverlap {
+                    control: 0x78,
+                    offset: 0x70,
+                    id: 0x11,
+                }),
+                3 | 5 => AttachError::InvalidCapabilities(CapabilityRefusal::ControlOverlap {
+                    control: 0x78,
+                    offset: if variant == 3 { 0x74 } else { 0x70 },
+                    id: 0x10,
+                }),
+                4 =>
+                    AttachError::InvalidCapabilities(CapabilityRefusal::PcieLayout { offset: 0x70 }),
+                9 => AttachError::InvalidCapabilities(CapabilityRefusal::PcieOwnerMissing {
+                    found: None
+                }),
+                _ => AttachError::InvalidCapabilities(CapabilityRefusal::NoList),
             }
         );
         assert!(function.config().writes.is_empty(), "variant {variant}");

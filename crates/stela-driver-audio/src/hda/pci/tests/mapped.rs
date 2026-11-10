@@ -232,7 +232,7 @@ fn failed_interrupt_reads_rejected() {
                         offset: 0x62,
                     })
                 } else {
-                    AttachError::InvalidCapabilities
+                    AttachError::InvalidCapabilities(CapabilityRefusal::MsixUnreadable { offset })
                 })
             );
             drop(result);

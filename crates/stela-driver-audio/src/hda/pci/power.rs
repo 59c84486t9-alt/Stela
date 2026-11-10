@@ -174,7 +174,10 @@ impl<
         }
         let caps = capabilities(config, r.identity.setup.controls(), r.identity.reset_policy)?;
         if caps.pm != Some(snapshot.pm) {
-            return Err(AttachError::InvalidCapabilities.into());
+            return Err(AttachError::InvalidCapabilities(
+                super::CapabilityRefusal::PowerManagementMoved { found: caps.pm },
+            )
+            .into());
         }
         let flags = config.read16(snapshot.pm + 2)?;
         let value = config.read16(snapshot.pm + 4)?;

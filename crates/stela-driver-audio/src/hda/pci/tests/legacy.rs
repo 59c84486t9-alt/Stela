@@ -193,8 +193,9 @@ fn overlapping_controls_rejected() {
                 function.config().words[20] = 0x0003_0001;
             }
         }
+        let refused = prepare_model(&mut function, &timer, bar).unwrap_err();
         assert_eq!(
-            prepare_model(&mut function, &timer, bar).unwrap_err(),
+            refused,
             match variant {
                 0 => AttachError::PciCapability(crate::bus::pci::CapabilityError::Overlap {
                     offset: 0x54
@@ -205,7 +206,11 @@ fn overlapping_controls_rejected() {
                 4 => AttachError::PciCapability(crate::bus::pci::CapabilityError::Overlap {
                     offset: 0x50
                 }),
-                _ => AttachError::InvalidCapabilities,
+                _ => AttachError::InvalidCapabilities(CapabilityRefusal::ControlOverlap {
+                    control: TCSEL,
+                    offset: 0x44,
+                    id: 0xfe,
+                }),
             }
         );
         assert!(function.config().writes.is_empty());
@@ -370,4 +375,29 @@ fn nvidia_coherence_and_dma_policy() {
             .iter()
             .any(|(offset, _, _, _)| matches!(*offset, TCSEL | ATI_SNOOP_CONTROL))
     );
+}
+
+#[test]
+fn nvidia_controls_inside_an_msi_body_name_the_overlap() {
+    let (mut function, timer, bar) = fixture(3);
+    set_identity(&mut function, NVIDIA, 0x22e9);
+    // A GPU HDMI function's layout: PM40 -> 64-bit MSI48, whose address
+    // occupies the 4ch..4eh coherence controls of the chipset functions.
+    let config = function.config();
+    config.words[13] = 0x40;
+    config.words[16] = 0x0003_4801;
+    config.words[17] = 3;
+    config.words[18] = (u32::from(MSI_ADDRESS_64) << 16) | 0x0005;
+    config.words[20] = 0;
+    config.words[24] = 0;
+    config.words[28] = 0;
+    assert_eq!(
+        prepare_model(&mut function, &timer, bar).unwrap_err(),
+        AttachError::InvalidCapabilities(CapabilityRefusal::ControlOverlap {
+            control: NVIDIA_TRANSREG,
+            offset: 0x48,
+            id: 5,
+        })
+    );
+    assert!(function.config().writes.is_empty());
 }

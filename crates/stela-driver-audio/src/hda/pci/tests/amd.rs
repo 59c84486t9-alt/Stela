@@ -164,7 +164,14 @@ fn rejected_snoop_keeps_mastering_disabled() {
         }
         let result = prepare_model(&mut function, &timer, bar).unwrap_err();
         if variant == 0 {
-            assert_eq!(result, AttachError::InvalidCapabilities);
+            assert_eq!(
+                result,
+                AttachError::InvalidCapabilities(CapabilityRefusal::ControlOverlap {
+                    control: 0x42,
+                    offset: 0x40,
+                    id: 1,
+                })
+            );
             assert!(function.config().writes.is_empty());
         } else {
             assert_eq!(result, AttachError::ConfigurationRejected);
