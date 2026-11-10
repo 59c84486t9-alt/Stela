@@ -101,6 +101,63 @@ fn overflow_asserts_the_pmi_until_software_rewrites_the_counter() {
 }
 
 #[test]
+fn disabled_counters_hold_and_resume_from_their_value() {
+    let mut pmu = configured(CLOCK);
+    assert_eq!(pmu.read(PMC[0], 24, 100, KERNEL), Ok(3504));
+    // `_cpc_cpmu_control_disable`: neither counter moves while PMCR0 is 0.
+    pmu.write(PMCR0, 0, 24, 100, KERNEL).unwrap();
+    assert_eq!(pmu.read(PMC[0], 48, 200, KERNEL), Ok(3504));
+    assert_eq!(pmu.read(PMC[1], 48, 200, KERNEL), Ok(100));
+    // Re-enabled, they continue from the held value: reads stay monotonic.
+    pmu.write(PMCR0, PMCR0_INIT, 48, 200, KERNEL).unwrap();
+    assert_eq!(pmu.read(PMC[0], 72, 250, KERNEL), Ok(2 * 3504));
+    assert_eq!(pmu.read(PMC[1], 72, 250, KERNEL), Ok(150));
+}
+
+/// The M2's E-core clock, its cluster's highest operating point.
+const E_CLOCK: u64 = 2_424_000_000;
+
+#[test]
+fn a_migrating_thread_reads_each_pes_own_counters() {
+    // Every PE has its own monitor, counting its own clock and the
+    // instructions it retires; XNU charges a thread the difference of the
+    // PE's counters between its switch-in and switch-out there.
+    let mut e = configured(E_CLOCK);
+    let mut p = configured(CLOCK);
+    let waiting = Context {
+        waiting: true,
+        ..KERNEL
+    };
+    p.sync(0, 0, waiting);
+    // 1 us on the E PE retiring 1000 instructions, then a switch-out.
+    let e_cycles = e.read(PMC[0], 24, 1000, KERNEL).unwrap();
+    let e_instructions = e.read(PMC[1], 24, 1000, KERNEL).unwrap();
+    assert_eq!((e_cycles, e_instructions), (2424, 1000));
+    e.sync(24, 1000, waiting);
+    // The P PE waited until the switch-in: no cycles, no instructions.
+    let p_in = (
+        p.read(PMC[0], 24, 0, KERNEL).unwrap(),
+        p.read(PMC[1], 24, 0, KERNEL).unwrap(),
+    );
+    assert_eq!(p_in, (0, 0));
+    // 1 us on the P PE retiring 3000 instructions.
+    let p_out = (
+        p.read(PMC[0], 48, 3000, KERNEL).unwrap(),
+        p.read(PMC[1], 48, 3000, KERNEL).unwrap(),
+    );
+    assert_eq!(
+        (
+            e_cycles + p_out.0 - p_in.0,
+            e_instructions + p_out.1 - p_in.1
+        ),
+        (2424 + 3504, 4000)
+    );
+    // The idle E PE's counters did not move meanwhile.
+    assert_eq!(e.read(PMC[0], 48, 1000, waiting), Ok(2424));
+    assert_eq!(e.read(PMC[1], 48, 1000, waiting), Ok(1000));
+}
+
+#[test]
 fn checked_counter_geometry_masks_writes_without_inheriting_future_layouts() {
     for (chip, mask, overflow) in [
         (Chip::AppleM1, (1u64 << 48) - 1, 1u64 << 47),

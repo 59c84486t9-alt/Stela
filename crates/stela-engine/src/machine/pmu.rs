@@ -34,7 +34,11 @@
 //! in WFI or WFE, and instructions as the engine retires them: each
 //! instruction that completes, and SVC, HVC and SMC, which complete as they
 //! take their exception; an instruction that faults or traps is not
-//! counted. A PMI is asserted, as FIQ, while PMCR0 selects FIQ and a
+//! counted. The core clock is the PE's cluster's highest operating point
+//! (`stela_soc_data::board::soc`): the engine runs a PE no slower for a lower
+//! DVFS state, so it counts as a core held at its top state. Each PE has its
+//! own monitor, so a thread that moves between PEs is charged, as on
+//! hardware, by the counters of the PE it ran on. A PMI is asserted, as FIQ, while PMCR0 selects FIQ and a
 //! counter with its PMI enabled has its overflow bit set; PMAI reads that
 //! assertion (inference: XNU's FIQ handler reads PMAI to recognize a PMI,
 //! then disables the monitor and clears every overflow by rewriting the
