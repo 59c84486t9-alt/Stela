@@ -2232,7 +2232,6 @@ dependencies = [
  "stela-engine",
  "stela-formats",
  "stela-loader",
- "stela-runtime",
  "tempfile",
  "zip",
 ]
@@ -2261,8 +2260,8 @@ dependencies = [
 name = "stela-driver-core"
 version = "0.1.0"
 dependencies = [
- "stela-contracts",
  "sha2",
+ "stela-contracts",
  "stela-crypto",
 ]
 
@@ -2319,8 +2318,6 @@ dependencies = [
  "stela-driver-gpu",
  "stela-driver-net",
  "stela-driver-storage",
- "stela-linux",
- "zeroize",
 ]
 
 [[package]]
@@ -2419,10 +2416,10 @@ dependencies = [
 ]
 
 [[package]]
- "stela-contracts",
 name = "stela-metal-input"
 version = "0.1.0"
 dependencies = [
+ "stela-contracts",
  "stela-crypto",
 ]
 
@@ -3098,7 +3095,6 @@ dependencies = [
  "stela-formats",
  "stela-loader",
  "stela-runtime",
- "stela-soc-data",
  "tempfile",
  "xz2",
  "zip",

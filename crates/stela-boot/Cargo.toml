@@ -41,7 +41,7 @@ stela-tls = { path = "../stela-tls" }
 stela-formats = { path = "../stela-formats", default-features = false }
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
 stela-boot-core = { path = "../stela-boot-core", features = ["native-acpi"] }
-stela-drivers = { path = "../stela-drivers", features = ["linux-kernel", "native-acpi", "nouveau-port"] }
+stela-drivers = { path = "../stela-drivers", features = ["native-acpi", "nouveau-port"] }
 stela-soc = { path = "../stela-soc", default-features = false }
 stela-mesa = { path = "../stela-mesa", optional = true }
 stela-runtime = { path = "../stela-runtime", default-features = false }

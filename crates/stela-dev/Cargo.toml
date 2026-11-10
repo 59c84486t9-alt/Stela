@@ -23,7 +23,6 @@ tempfile.workspace = true
 stela-cli.workspace = true
 stela-compiler.workspace = true
 stela-loader.workspace = true
-stela-runtime.workspace = true
 
 [dev-dependencies]
 zip = { version = "4", default-features = false, features = ["deflate"] }
