@@ -929,6 +929,65 @@ fn an_install_takes_the_code_lock_twice_and_a_found_block_never() {
     assert_eq!(total(&second) - before - 1, 0);
 }
 
+/// A link that a retirement cut, whose target went, and that another PE
+/// made again from the same block to the target compiled anew enters the
+/// new block, as its bytes say: the source keeps its incarnation and is
+/// chained again, so what a PE remembered of the first link no longer
+/// names it (the race the concurrent test met while it remembered links).
+#[test]
+fn a_link_cut_from_a_retired_target_and_made_again_enters_the_new_block() {
+    let words = linked_groups(4);
+    let mut memory = vec![0u8; WINDOW];
+    let (mut first, mut second, _hub) = shared_pair_of(&words, &mut memory);
+    second.current = 1;
+    let base = first.cpu.pc;
+    let Ok(Fetched::Block(target)) = first.fetch_block(base + 8, false) else {
+        panic!("a block")
+    };
+    // The source goes to the next part: the target's part goes alone.
+    let start = generation(&first);
+    let mut group = 1;
+    while generation(&first) == start {
+        assert!(matches!(
+            first.fetch_block(base + 16 * group, false),
+            Ok(Fetched::Block(_))
+        ));
+        group += 1;
+    }
+    let Ok(Fetched::Block(source)) = first.fetch_block(base, false) else {
+        panic!("a block")
+    };
+    assert_ne!(part_of(&first, source), part_of(&first, target));
+    assert!(first.link(source, base + 8, ExitKind::Direct));
+    let code = Arc::clone(&first.code);
+    let entry = code.blocks[target].code.0 as u64;
+    assert_eq!(entered(&code, source, 0), Some((target, entry)));
+    let incarnation = code.blocks.record(source).incarnation();
+    let entered_then = code.blocks.record(target).incarnation();
+
+    second.evict_code(part_of(&first, target));
+    assert!(!code.blocks.record(target).live(), "the target went");
+    assert!(
+        !code.blocks.record(source).chained(0),
+        "its link was cut first"
+    );
+    let Ok(Fetched::Block(again)) = second.fetch_block(base + 8, false) else {
+        panic!("a block")
+    };
+    assert_ne!(
+        (again, code.blocks.record(again).incarnation()),
+        (target, entered_then)
+    );
+    assert!(second.link(source, base + 8, ExitKind::Direct));
+    // The same source, chained again: only its bytes tell the links apart.
+    let record = code.blocks.record(source);
+    assert_eq!(record.incarnation(), incarnation);
+    assert!(record.chained(0));
+    let entry = code.blocks[again].code.0 as u64;
+    assert_eq!(entered(&code, source, 0), Some((again, entry)));
+    assert_eq!(enters_live_block(&code, source, 0), Ok(()));
+}
+
 /// What a looking PE held of a block it fetched inside its section: the
 /// slot, its PC, its code and the ring's generation then. Until the PE
 /// passes, the slot holds the block and the code's part is not filled
@@ -946,6 +1005,113 @@ fn refilled(code: &board::Code, held: &Held) -> bool {
     let arena = code.arena.as_ref().expect("an arena");
     let part = arena.part_of(held.address).expect("code in the window");
     arena.ring.holds(part) > held.generation
+}
+
+/// `bytes` bytes of the arena's code at executable `address`, if they lie
+/// in its window. Read under the board's lock, which every link and cut
+/// holds, so a link's bytes are whole.
+fn arena_bytes(arena: &board::Arena, address: u64, bytes: usize) -> Option<Vec<u8>> {
+    let start = usize::try_from(address).ok()?;
+    arena.part_of(start)?;
+    arena.part_of(start.checked_add(bytes.checked_sub(1)?)?)?;
+    let alias = arena.window.write + (start - arena.window.exec);
+    Some(
+        (0..bytes)
+            // SAFETY: inside the window, which the test's memory backs for
+            // the board's life.
+            .map(|offset| unsafe { core::ptr::read_volatile((alias + offset) as *const u8) })
+            .collect(),
+    )
+}
+
+/// The block and code entry that the link code at `at` enters, read back
+/// from its bytes as `encode` writes them for a block and an entry: each
+/// field lies where two encodings that differ in it alone first differ,
+/// and every byte must be what `encode` writes for the fields read. `near`
+/// is an address in a jump's reach of `at`. `None` when the bytes hold no
+/// such link.
+fn read_link(
+    arena: &board::Arena,
+    at: u64,
+    near: u64,
+    encode: impl Fn(u32, u64) -> Option<Vec<u8>>,
+) -> Option<(usize, u64)> {
+    let reference = encode(0, near)?;
+    let differs = |other: Vec<u8>| reference.iter().zip(&other).position(|(a, b)| a != b);
+    let block_at = differs(encode(1, near)?)?;
+    let entry_at = differs(encode(0, near + 1)?)?;
+    let bytes = arena_bytes(arena, at, reference.len())?;
+    let field = |bytes: &[u8], at: usize| {
+        u32::from_le_bytes(bytes[at..at + 4].try_into().expect("a 32-bit field"))
+    };
+    let block = field(&bytes, block_at);
+    let moved = field(&bytes, entry_at).wrapping_sub(field(&reference, entry_at)) as i32;
+    let entry = near.wrapping_add_signed(i64::from(moved));
+    (encode(block, entry)? == bytes).then_some((block as usize, entry))
+}
+
+/// The block and code that block `slot`'s exit at `position` enters by the
+/// bytes a core runs: its patch point, then the slot's body it falls into
+/// or the thunk it jumps to ([`chain::link`], [`chain::thunk`]). `None`
+/// when they hold no link.
+fn entered(code: &board::Code, slot: usize, position: usize) -> Option<(usize, u64)> {
+    let arena = code.arena.as_ref().expect("an arena");
+    let block = &code.blocks[slot];
+    let exit = block.successors[position];
+    let word = exit.word();
+    let retired = u32::from(block.instructions) - u32::from(word.skipped);
+    let near = block.code.0 as u64;
+    let (point, fallback) = match exit.slot {
+        0 => (
+            chain::direct_patch(exit.site),
+            chain::Fallback::Return(word),
+        ),
+        bytes => (
+            chain::slot_patch(exit.site - u64::from(bytes)),
+            chain::Fallback::Jump(exit.site),
+        ),
+    };
+    let instruction = arena_bytes(arena, point, chain::PATCH_BYTES)?;
+    if exit.slot != 0 && instruction == chain::NOP5 {
+        let at = exit.site - u64::from(exit.slot);
+        let body = point + chain::PATCH_BYTES as u64;
+        return read_link(arena, body, near, |block, entry| {
+            chain::link(at, exit.slot.into(), retired, block, entry).map(|(_, bytes)| bytes)
+        });
+    }
+    // Else a `jmp rel32` to a thunk.
+    let (&0xe9, distance) = instruction.split_first()? else {
+        return None;
+    };
+    let distance = i32::from_le_bytes(distance.try_into().ok()?);
+    let thunk = (point + chain::PATCH_BYTES as u64).wrapping_add_signed(i64::from(distance));
+    read_link(arena, thunk, near, |block, entry| {
+        chain::thunk(thunk, retired, block, entry, fallback)
+    })
+}
+
+/// Check that block `slot`'s chained exit at `position` enters, by the
+/// bytes a core runs, a live block of its target at that block's code:
+/// never a block a retirement took, nor code a part's refill reused.
+fn enters_live_block(code: &board::Code, slot: usize, position: usize) -> Result<(), String> {
+    let block = &code.blocks[slot];
+    let target = block.successors[position].target.0;
+    let (entered, entry) = entered(code, slot, position)
+        .ok_or_else(|| format!("block {slot}'s chained exit {position} holds no link"))?;
+    match code.blocks.installed(entered) {
+        Some(found)
+            if found.pc == target
+                && found.variant == block.variant
+                && found.code.0 as u64 == entry =>
+        {
+            Ok(())
+        }
+        found => Err(format!(
+            "block {slot}'s exit {position} to {target:#x} enters slot {entered} at {entry:#x}, \
+             which holds {:?}",
+            found.map(|found| (found.pc, found.code.0))
+        )),
+    }
 }
 
 /// A PE's section, left however its thread ends: a PE that panicked
@@ -972,15 +1138,20 @@ impl Drop for Section<'_> {
 /// round a small ring, so parts retire in steps all the time, and links
 /// them; PEs 1 and 2 fetch and link a few hot groups and, before each
 /// pass of their section, check that every block they fetched still holds
-/// its PC and code, and that each link they made still leads to the live
-/// block it entered. No PE ever meets a block a retirement took (lock-free
-/// fetch lookup, stepwise retirement, cut links).
+/// its PC and code, and that each hot block's link, as the bytes a core
+/// runs say, enters a live block of its target. No PE ever meets a block a
+/// retirement took (lock-free fetch lookup, stepwise retirement, cut
+/// links). A link is read from its bytes, not remembered: between two
+/// checks a retirement may cut it and take its target, and another PE link
+/// the same block again to the target compiled anew.
 #[test]
 fn pes_that_look_up_and_link_never_meet_a_block_a_concurrent_retirement_took() {
     const PES: usize = 3;
     const PAGES: usize = 4;
     const ROUNDS: usize = 20_000;
     const HOT: u64 = 8;
+    // Indexed blocks a looker checks each round beyond its own, in turn.
+    const SWEPT: usize = 16;
     let words = linked_groups(PAGES);
     let mut memory = vec![0u8; 8 * 4096];
     let template = windowed(&words, &mut memory);
@@ -1033,8 +1204,9 @@ fn pes_that_look_up_and_link_never_meet_a_block_a_concurrent_retirement_took() {
                     let mut machine = make(pe);
                     let code = Arc::clone(&machine.code);
                     let grace = &hub.board.grace;
-                    let mut links: Vec<(usize, u32, usize, u32)> = Vec::new();
                     let mut checked = 0u64;
+                    let mut linked = 0u64;
+                    let mut cursor = None;
                     let section = Section::enter(grace, pe);
                     for round in 0..ROUNDS {
                         if std::time::Instant::now() > deadline {
@@ -1067,10 +1239,13 @@ fn pes_that_look_up_and_link_never_meet_a_block_a_concurrent_retirement_took() {
                             address: block.code.0,
                             generation: generation(&machine),
                         };
+                        let page = block.physical - (pc - base);
+                        let variant = block.variant;
                         machine.link(slot, pc + 8, ExitKind::Direct);
                         // A wait for a grace (its own install) let go of
                         // what it held: no check then.
-                        if code.events.grace_waits.load(Ordering::Relaxed) == waits {
+                        let still_held = code.events.grace_waits.load(Ordering::Relaxed) == waits;
+                        if still_held {
                             let block = code.blocks.get(held.slot).expect("a block");
                             assert_eq!(block.pc, held.pc, "PE {pe}: slot reused while held");
                             assert!(
@@ -1079,55 +1254,52 @@ fn pes_that_look_up_and_link_never_meet_a_block_a_concurrent_retirement_took() {
                             );
                             checked += 1;
                         }
-                        // Under the lock: a link still made, by any PE, leads
-                        // to the live block the index held for its target
-                        // then (a link to an older block of the PC is cut
+                        // Under the lock: each hot block that chains its
+                        // exit, the one fetched and the next few indexed
+                        // blocks of any PE's enter a live block of their
+                        // target (a link to an older block of the PC is cut
                         // before either goes).
                         let mut cache = code.cache();
-                        let incarnation = code.blocks.record(slot).incarnation();
-                        let known = links
-                            .iter()
-                            .any(|&(source, held, ..)| (source, held) == (slot, incarnation));
-                        if !known && code.blocks.record(slot).chained(0) {
-                            let physical = code.blocks[slot].physical + 8;
-                            if let Some(target) = cache.index.get(
+                        let swept: Vec<_> = cache.index.sweep(cursor).take(SWEPT).collect();
+                        cursor = swept
+                            .last()
+                            .filter(|_| swept.len() == SWEPT)
+                            .map(|&(at, _)| at);
+                        let hot = (0..HOT).filter_map(|group| {
+                            cache.index.get(
                                 &code.blocks,
-                                pc + 8,
-                                physical,
-                                code.blocks[slot].variant,
-                            ) {
-                                links.push((
-                                    slot,
-                                    incarnation,
-                                    target,
-                                    code.blocks.record(target).incarnation(),
-                                ));
+                                base + 16 * group,
+                                page + 16 * group,
+                                variant,
+                            )
+                        });
+                        let mut sources: Vec<usize> = hot.collect();
+                        sources.extend(still_held.then_some(slot));
+                        sources.extend(swept.iter().map(|&(_, source)| source));
+                        sources.sort_unstable();
+                        sources.dedup();
+                        for source in sources {
+                            if code.blocks.record(source).chained(0) {
+                                if let Err(error) = enters_live_block(&code, source, 0) {
+                                    panic!("PE {pe}: {error}");
+                                }
+                                linked += 1;
                             }
                         }
-                        links.retain(|&(source, incarnation, target, entered)| {
-                            let record = code.blocks.record(source);
-                            if record.incarnation() != incarnation || !record.chained(0) {
-                                return false;
-                            }
-                            let target = code.blocks.record(target);
-                            assert!(
-                                target.live() && target.incarnation() == entered,
-                                "PE {pe}: a link outlived the block it entered"
-                            );
-                            true
-                        });
                         drop(cache);
                     }
                     drop(section);
-                    checked
+                    (checked, linked)
                 })
             })
             .collect();
         let generations = installer.join().expect("the installer");
-        let checked: u64 = lookers
+        let (checked, linked) = lookers
             .into_iter()
             .map(|looker| looker.join().expect("a looker"))
-            .sum();
+            .fold((0, 0), |(checked, linked), (more, links)| {
+                (checked + more, linked + links)
+            });
         assert!(
             std::time::Instant::now() <= deadline,
             "the PEs ran past their time"
@@ -1137,6 +1309,7 @@ fn pes_that_look_up_and_link_never_meet_a_block_a_concurrent_retirement_took() {
             "the ring went round: {generations} parts"
         );
         assert!(checked > 0, "lookups were checked");
+        assert!(linked > 0, "links were checked");
     });
     // Once the retirements end, no live block chains into one that went.
     let mut machine = make(0);
@@ -1148,6 +1321,9 @@ fn pes_that_look_up_and_link_never_meet_a_block_a_concurrent_retirement_took() {
         let record = code.blocks.record(slot);
         for (position, exit) in block.successors.iter().enumerate() {
             if record.chained(position) {
+                if let Err(error) = enters_live_block(&code, slot, position) {
+                    panic!("after the retirements: {error}");
+                }
                 let physical = block.physical + (exit.target.0 - block.pc);
                 assert!(code.find(exit.target.0, physical, block.variant).is_some());
             }
