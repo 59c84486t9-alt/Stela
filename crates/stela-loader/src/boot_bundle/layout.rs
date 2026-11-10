@@ -353,6 +353,15 @@ impl Shaped {
                 self.hidden_devices.len()
             ));
         }
+        for entry in &self.hidden_devices {
+            if let Some((path, name)) = entry.split_once(' ')
+                && stela_soc_data::board::CAPABILITY_PROPERTIES.contains(&name)
+            {
+                unresolved.push(format!(
+                    "{path} {name}: no model of this device; the guest is told it has none"
+                ));
+            }
+        }
         if let Some(chip_id) = inputs.target.chip_id
             && let Some(tables) = gpu_dvfs::publish(tree, chip_id)?
         {

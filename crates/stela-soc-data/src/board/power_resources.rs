@@ -222,6 +222,9 @@ impl PowerStates {
                     (_, "acio-parent") => node.property("acio-parent").is_none(),
                     (_, "+no-pmu") => node.property("no-pmu").is_some(),
                     (_, "+gptbat-ready") => node.property("gptbat-ready").is_some(),
+                    (_, note) if super::CAPABILITY_PROPERTIES.contains(&note) => {
+                        node.property(note).is_none()
+                    }
                     _ => false,
                 };
                 if !valid {

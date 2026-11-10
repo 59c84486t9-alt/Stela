@@ -184,6 +184,17 @@ pub const CLPC: &str = "clpc,t8112";
 /// lowest at 19 MHz or more for the curve to be positive; the curve is near 1
 /// at the highest.
 pub const ANE_CLOCKS_MHZ: [u32; 2] = [300, 600];
+/// Capability properties user space reads from the raw DeviceTree whatever
+/// binds the node, so a hidden device's copy claims hardware the machine does
+/// not have. A hidden device loses them (`PATH NAME` in the admission
+/// ledger). The guest's libMobileGestalt answers `AppleNeuralEngineSubtype`
+/// (shared cache 0x186e13548) with an `IORegistryEntrySearchCFProperty` for
+/// `ane-type` over the whole IODeviceTree plane, and `HasAppleNeuralEngine`
+/// (0x186e15744) is that subtype above zero. MetalFX, MPSGraph and Core ML
+/// then send work to an ANE no driver serves. Without the property they take
+/// the path Apple's virtual machines take. In the 26A434 kernelcache only
+/// the ANE kext reads it, and it binds by `compatible`.
+pub const CAPABILITY_PROPERTIES: &[&str] = &["ane-type"];
 /// The AIC versions the engine models (`platform::apple::aic1` and `aic`).
 const AICS: [&str; 3] = ["aic,1", "aic,2", "aic,3"];
 /// The modern DART compatible; native legacy families are selected through

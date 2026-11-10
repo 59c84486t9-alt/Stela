@@ -536,6 +536,32 @@ fn preparation_notes_are_validated_without_retiring_resources() {
             .apply_admission(&bytes, &["/arm-io/watchdog +gptbat-ready".into()])
             .is_err()
     );
+    // A retired capability note holds only once the property is gone.
+    assert_eq!(
+        states.apply_admission(&bytes, &["/arm-io/watchdog ane-type".into()]),
+        Ok(0)
+    );
+    let typed = encode(
+        &[
+            ("name", b"watchdog"),
+            ("clock-gates", &words(&[1])),
+            ("ane-type", &words(&[0x80])),
+        ],
+        &[],
+    );
+    let bytes = tree(&[(1, Some(0), [0, 0])], &[typed]);
+    let mut states = power_states(
+        &Node::root(&bytes).unwrap(),
+        &flat_fixture_extent(&Some),
+        0x8112,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(
+        states
+            .apply_admission(&bytes, &["/arm-io/watchdog ane-type".into()])
+            .is_err()
+    );
 }
 
 #[test]

@@ -1413,3 +1413,43 @@ fn a_modeled_serial_device_stays_selected() {
     assert!(hide_unmodeled(&mut tree).is_empty());
     assert!(tree.property(DEFAULTS, SERIAL_DEVICE).is_some());
 }
+
+#[test]
+fn a_hidden_neural_engine_withdraws_its_capability_and_keeps_its_links() {
+    let mut ane = phandle(node("ane", Some(b"ane,t8020\0"), vec![]), 0xe6);
+    for (key, value) in [
+        ("ane-type", 0x80u32),
+        ("iommu-parent", 0xe8),
+        ("clock-gates", 0x185),
+        ("power-gates", 0x185),
+    ] {
+        ane.set_property(key, value.to_le_bytes().to_vec()).unwrap();
+    }
+    let ane = typed(ane, b"ane\0");
+    // A device the machine models keeps the property.
+    let mut uart = node("uart0", Some(board::UART.as_bytes()), vec![]);
+    uart.set_property("ane-type", vec![1, 0, 0, 0]).unwrap();
+    let mut tree = DeviceTree {
+        root: node(
+            "device-tree",
+            None,
+            vec![node("arm-io", None, vec![ane, uart])],
+        ),
+    };
+    let hidden = hide_unmodeled(&mut tree);
+    assert_eq!(hidden, ["/arm-io/ane", "/arm-io/ane ane-type"]);
+    assert!(tree.property("/arm-io/ane", "ane-type").is_none());
+    assert!(tree.property("/arm-io/ane", COMPATIBLE).is_none());
+    for key in [
+        "iommu-parent",
+        "clock-gates",
+        "power-gates",
+        PHANDLE,
+        DEVICE_TYPE,
+    ] {
+        assert!(tree.property("/arm-io/ane", key).is_some(), "{key}");
+    }
+    assert!(tree.property("/arm-io/uart0", "ane-type").is_some());
+    // Once withdrawn, a second preparation has nothing to note.
+    assert!(hide_unmodeled(&mut tree).is_empty());
+}

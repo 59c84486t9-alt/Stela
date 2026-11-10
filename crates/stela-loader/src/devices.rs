@@ -76,6 +76,13 @@
 //! at once without the property but otherwise waits 60 s for a controller
 //! that cannot appear. Either way the client has no USB4 tunnels.
 //!
+//! A hidden device also loses the capability properties user space reads
+//! from the raw tree whatever binds it (`board::CAPABILITY_PROPERTIES`,
+//! `PATH NAME`): `/arm-io/ane`'s `ane-type` is how libMobileGestalt answers
+//! `HasAppleNeuralEngine`, so without a Neural Engine model the board says
+//! it has none, as Apple's virtual machines do. Its `reg`, gates, clocks and
+//! DART links stay as data, like every hidden node's.
+//!
 //! An SPMI controller with no admitted target or external platform-function
 //! or interrupt consumer also loses `compatible`. Board templates may carry
 //! alternative controllers over the same banks (26A434 J623/J624); iBoot
@@ -392,7 +399,31 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     publish_gpu_ttbat(tree, &mut hidden);
     retire_hidden_service_identities(tree, &hidden);
     retire_hidden_acio_parents(tree, &mut hidden);
+    retire_hidden_capabilities(tree, &mut hidden);
     hidden
+}
+
+/// Drop each hidden device's raw capability claims
+/// (`board::CAPABILITY_PROPERTIES`), noting `PATH NAME` in the ledger.
+fn retire_hidden_capabilities(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
+    let mut notes = Vec::new();
+    for path in hidden.iter() {
+        if structural(path) {
+            continue;
+        }
+        let Some(node) = tree.node_mut(path) else {
+            continue;
+        };
+        if node.property(COMPATIBLE).is_some() && node.property(IGNORE).is_none() {
+            continue;
+        }
+        for &name in board::CAPABILITY_PROPERTIES {
+            if node.remove_property(name).is_some() {
+                notes.push(format!("{path} {name}"));
+            }
+        }
+    }
+    hidden.extend(notes);
 }
 
 /// Hides the AGX model (`sgx`, its `gfx-asc` coprocessor and firmware mapper)
