@@ -34,8 +34,21 @@ pub const POLICY_NONCE_BYTES: usize = 32;
 /// Two optional policy nonces follow the firmware commitment, each a presence
 /// byte and, when present, [`POLICY_NONCE_BYTES`].
 const POLICY_TAIL_BYTES: usize = 2 * (1 + POLICY_NONCE_BYTES);
-const MAX_BYTES: usize =
-    HEADER_BYTES + MAX_SLOTS * RECORD_BYTES + 1 + HASH_BYTES + POLICY_TAIL_BYTES + MAC_BYTES;
+/// The AP boot slots a Sandcat SEP keeps a committed manifest hash for: the
+/// AP's two (`AppleMobileApNonce::_getBootedSlotAndState` walks slots 0 and
+/// 1).
+pub const AP_SLOTS: u8 = 2;
+/// Committed AP slot hashes follow the policy nonces only when there are
+/// any: a count byte, then each slot and its hash in slot order. A record
+/// without them keeps the earlier layout.
+const AP_TAIL_BYTES: usize = 1 + AP_SLOTS as usize * (1 + HASH_BYTES);
+const MAX_BYTES: usize = HEADER_BYTES
+    + MAX_SLOTS * RECORD_BYTES
+    + 1
+    + HASH_BYTES
+    + POLICY_TAIL_BYTES
+    + AP_TAIL_BYTES
+    + MAC_BYTES;
 
 /// A protected committed head. Generation is separate from the record so
 /// loading a valid but stale HMAC record can be detected.
@@ -103,6 +116,7 @@ struct State {
     firmware: Option<[u8; HASH_BYTES]>,
     recovery_policy: Option<[u8; POLICY_NONCE_BYTES]>,
     macos_policy: Option<[u8; POLICY_NONCE_BYTES]>,
+    ap_slots: BTreeMap<u8, [u8; HASH_BYTES]>,
 }
 
 pub struct Nonces<B: Backend> {
@@ -129,6 +143,7 @@ impl<B: Backend> Nonces<B> {
             firmware: None,
             recovery_policy: None,
             macos_policy: None,
+            ap_slots: BTreeMap::new(),
         };
         let record = encode(&state, &key);
         backend.commit(
@@ -289,7 +304,22 @@ impl<B: Backend> Nonces<B> {
         })
     }
 
-    /// Erase every nonce, the firmware commitment and the policy nonces, as an
+    /// Commit the AP manifest hash of one of the AP's boot slots.
+    pub fn commit_ap_slot(&mut self, slot: u8, hash: [u8; HASH_BYTES]) -> Result<()> {
+        if slot >= AP_SLOTS {
+            return Err(refuse!("SEP AP slot is outside the AP's two slots"));
+        }
+        let mut next = self.state()?.clone();
+        next.ap_slots.insert(slot, hash);
+        self.update(next)
+    }
+
+    /// The AP manifest hash committed for an AP boot slot, if any.
+    pub fn ap_slot(&self, slot: u8) -> Result<Option<[u8; HASH_BYTES]>> {
+        Ok(self.state()?.ap_slots.get(&slot).copied())
+    }
+
+    /// Erase every nonce, the firmware and AP slot commitments and the policy nonces, as an
     /// Erase Install erases the SEP's anti-replay state; the generation keeps
     /// counting.
     pub fn erase(&mut self) -> Result<()> {
@@ -300,6 +330,7 @@ impl<B: Backend> Nonces<B> {
             firmware: None,
             recovery_policy: None,
             macos_policy: None,
+            ap_slots: BTreeMap::new(),
         })
     }
 
@@ -325,6 +356,13 @@ fn encode(state: &State, key: &[u8; MAC_BYTES]) -> Vec<u8> {
         record.push(u8::from(nonce.is_some()));
         if let Some(nonce) = nonce {
             record.extend_from_slice(&nonce);
+        }
+    }
+    if !state.ap_slots.is_empty() {
+        record.push(state.ap_slots.len() as u8);
+        for (&slot, hash) in &state.ap_slots {
+            record.push(slot);
+            record.extend_from_slice(hash);
         }
     }
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts 256-bit keys");
@@ -404,6 +442,22 @@ fn decode(head: Head, key: &[u8; MAC_BYTES]) -> Result<State> {
     };
     let recovery_policy = take_policy(bytes, &mut at, end)?;
     let macos_policy = take_policy(bytes, &mut at, end)?;
+    let mut ap_slots = BTreeMap::new();
+    if at != end {
+        let count = bytes[at];
+        at += 1;
+        if count == 0 || count > AP_SLOTS || at + usize::from(count) * (1 + HASH_BYTES) > end {
+            return Err(refuse!("SEP nonce store AP slot count is invalid"));
+        }
+        for _ in 0..count {
+            let slot = bytes[at];
+            if slot >= AP_SLOTS || ap_slots.keys().next_back().is_some_and(|&p| p >= slot) {
+                return Err(refuse!("SEP nonce store AP slots are invalid or unsorted"));
+            }
+            ap_slots.insert(slot, bytes[at + 1..at + 1 + HASH_BYTES].try_into().unwrap());
+            at += 1 + HASH_BYTES;
+        }
+    }
     if at != end {
         return Err(refuse!("SEP nonce store has trailing data"));
     }
@@ -413,6 +467,7 @@ fn decode(head: Head, key: &[u8; MAC_BYTES]) -> Result<State> {
         firmware,
         recovery_policy,
         macos_policy,
+        ap_slots,
     })
 }
 
@@ -467,6 +522,27 @@ mod tests {
         assert!(reopened.read(7).is_err());
         assert!(Nonces::provision(&roots(), reopened.into_backend()).is_err());
         assert!(Nonces::open(&roots(), Memory::default()).is_err());
+    }
+    #[test]
+    fn ap_slot_hashes_survive_reopen_extend_the_record_and_erase() {
+        let mut store = Nonces::provision(&roots(), Memory::default()).unwrap();
+        store.commit_firmware([3; 48]).unwrap();
+        let without = store.backend.head.as_ref().unwrap().record.len();
+        assert_eq!(store.ap_slot(0), Ok(None));
+        store.commit_ap_slot(1, [4; 48]).unwrap();
+        store.commit_ap_slot(0, [5; 48]).unwrap();
+        assert!(store.commit_ap_slot(2, [6; 48]).is_err());
+        assert_eq!(
+            store.backend.head.as_ref().unwrap().record.len(),
+            without + 1 + 2 * 49
+        );
+        let mut reopened = Nonces::open(&roots(), store.into_backend()).unwrap();
+        assert_eq!(reopened.ap_slot(0), Ok(Some([5; 48])));
+        assert_eq!(reopened.ap_slot(1), Ok(Some([4; 48])));
+        assert_eq!(reopened.firmware(), Ok(Some([3; 48])));
+        reopened.erase().unwrap();
+        let reopened = Nonces::open(&roots(), reopened.into_backend()).unwrap();
+        assert_eq!(reopened.ap_slot(0), Ok(None));
     }
     #[test]
     fn wrong_machine_tampering_and_rollback_refuse_instead_of_reprovisioning() {

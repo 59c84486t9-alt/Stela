@@ -40,7 +40,11 @@
 //!   Restore's `seputil --commit-hash --erase` sends the manifest type with
 //!   the bit clear and no payload (observed: length 0), so the SEP commits
 //!   the manifest of the sepOS it booted, which it alone holds (Stela's
-//!   inference: no other hash reaches it);
+//!   inference: no other hash reaches it). On a Sandcat board
+//!   `seputil --commit-hash-ap --slot=N` (`commitApHash` 0x1000052dc in the
+//!   26A434 restore seputil) passes the scalars {N, 1} and no hash, so the
+//!   type is the AP slot, the bit is set and the kernel sends
+//!   `/chosen/boot-manifest-hash`: the AP manifest hash for that slot;
 //! - boot nonce (21): exactly 8 bytes out; commit epochs (22): 16 bytes in
 //!   although the length field is 0; get epochs (23): exactly 32 bytes out;
 //!   AP slot info (24): exactly 56 bytes out (8 nonce, 48 hash); set and get
@@ -64,7 +68,22 @@
 //!
 //! `AppleMobileApNonce` uses the AP slots and the boot nonce only when the
 //! DeviceTree has `/arm-io/sep/iop-sep-nub/Sandcat`; J473AP has none, so
-//! this SEP has no Sandcat slots and refuses those operations by name.
+//! there this SEP has no Sandcat slots and refuses those operations by name.
+//! J775D has one (T6050 kernel, mac17j): at start `_cleanupNonceSlots`
+//! 0xfffffe00097a694c asks `_getBootedSlotAndState` 0x97a6b3c for the
+//! state of AP slots 0 and 1 (table 0x7616a10) and compares each slot's
+//! hash with `/chosen` `sidp-rom-manifest-hash`; the slot-info block
+//! 0x9a6fe78 sends the slot in byte 6, requires exactly 56 result bytes
+//! (8 nonce, then 48 hash) and returns the reply's byte 6 as the state.
+//! Cleanup reads state 2 and 3 as booted slots (it promotes a 2), 1 in the
+//! other slot as an update in flight, and deletes the other slot unless it
+//! reads 0. This SEP generates no AP boot nonce (`bncn_generate` refuses),
+//! so a slot's nonce reads zero. A slot reads empty (zero hash, state 0)
+//! until an AP slot commit stores its hash; it then reads that hash with
+//! state 1, since this SEP does not see which AP manifest boots and so never
+//! marks a slot booted (2) or promoted (3). The cleanup then finds no booted
+//! slot and deletes nothing. Slot deletion, promotion and provisional state
+//! still refuse by name.
 //! The nonce lives in the SEP's anti-replay store ([`super::store`]). The
 //! store is durable on every commit, so a flush has nothing left to write.
 //! Each other operation is implemented here or refuses, naming what it
@@ -75,7 +94,7 @@ use super::{
     Entropy,
     endpoint::Service,
     message::Frame,
-    store::{Backend, HASH_BYTES, NONCE_BYTES, Nonces},
+    store::{AP_SLOTS, Backend, HASH_BYTES, NONCE_BYTES, Nonces},
     transaction::{Answer, Payload, Refusal},
 };
 use crate::Result;
@@ -98,6 +117,14 @@ const MANIFEST_HASH_TYPE: u8 = 0xff;
 const HASH_FOLLOWS: u8 = 1;
 /// A refused request's reply status: Darwin `ENOTSUP`.
 const UNSUPPORTED: u8 = 45;
+/// `get_ap_slot_info` (24): the AP's slots and its result size.
+const AP_SLOT_INFO: u8 = 24;
+const AP_SLOT_INFO_BYTES: usize = 8 + HASH_BYTES;
+/// An AP slot that holds no nonce.
+const AP_SLOT_EMPTY: u8 = 0;
+/// The state of an AP slot with a committed manifest hash that this SEP has
+/// not seen boot: `_cleanupNonceSlots` reads it as an update in flight.
+const AP_SLOT_COMMITTED: u8 = 1;
 
 /// The master instance's fourcc (`AppleSEPXARTService::start` 0x2d7f690).
 pub const MASTER: u32 = u32::from_be_bytes(*b"xarm");
@@ -254,6 +281,8 @@ pub struct Xart {
     /// The AP unmounted the xART volume for shutdown, or disabled xART for
     /// Erase All Content and Settings: the anti-replay state is frozen.
     frozen: Option<stela_contracts::Refusal>,
+    /// The board's SEP nub has a `Sandcat` child: the AP slots exist.
+    sandcat: bool,
 }
 
 impl Xart {
@@ -263,7 +292,13 @@ impl Xart {
             store,
             booted_manifest: None,
             frozen: None,
+            sandcat: false,
         }
+    }
+
+    /// Give this SEP the board's Sandcat AP slots.
+    pub fn set_sandcat(&mut self, sandcat: bool) {
+        self.sandcat = sandcat;
     }
 
     /// Record the booted sepOS's manifest hash ([`Self::booted_manifest`]).
@@ -434,10 +469,62 @@ impl Xart {
                 payload.output(&[0; EPOCH_COUNT * EPOCH_SLOT_BYTES])?;
                 (EPOCH_COUNT * EPOCH_SLOT_BYTES) as u16
             }
-            Operation::BootNonceGenerate | Operation::ApSlot(_) => {
+            Operation::BootNonceGenerate | Operation::ApSlot(_) if !self.sandcat => {
                 return Err(refuse!(
                     "xART boot nonces and AP slots exist only on boards with a Sandcat SEP nub"
                 ));
+            }
+            Operation::ApSlot(AP_SLOT_INFO) => {
+                if length != 0 || message.flags != 0 || message.reserved != 0 {
+                    return Err(refuse!("xART AP slot info request carries a payload"));
+                }
+                if message.slot >= AP_SLOTS {
+                    return Err(refuse!("xART AP slot is outside the AP's two slots"));
+                }
+                // No AP boot nonce is ever generated, so the nonce reads
+                // zero; the hash is the slot's committed AP manifest hash.
+                let mut info = [0; AP_SLOT_INFO_BYTES];
+                let state = match self.store.ap_slot(message.slot)? {
+                    Some(hash) => {
+                        info[8..].copy_from_slice(&hash);
+                        AP_SLOT_COMMITTED
+                    }
+                    None => AP_SLOT_EMPTY,
+                };
+                payload.output(&info)?;
+                return Ok(XartMessage {
+                    op: 0,
+                    length: AP_SLOT_INFO_BYTES as u16,
+                    flags: 0,
+                    slot: state,
+                    reserved: 0,
+                    ..message
+                }
+                .frame());
+            }
+            Operation::BootNonceGenerate => {
+                return Err(refuse!(
+                    "xART AP boot nonce generation (Sandcat bncn) is not implemented"
+                ));
+            }
+            Operation::ApSlot(_) => {
+                return Err(refuse!(
+                    "xART AP slot delete, promote and provisional state are not implemented"
+                ));
+            }
+            Operation::CommitHash if self.sandcat && message.slot < AP_SLOTS => {
+                if message.flags != 0 || message.reserved != HASH_FOLLOWS {
+                    return Err(refuse!("xART AP slot commit lacks its hash flag"));
+                }
+                if length != HASH_BYTES {
+                    return Err(refuse!("xART AP slot commit is not one SHA-384 hash"));
+                }
+                let mut hash = [0; HASH_BYTES];
+                payload.input(&mut hash)?;
+                self.live()?;
+                *committed = true;
+                self.store.commit_ap_slot(message.slot, hash)?;
+                0
             }
             Operation::CommitHash => {
                 if message.slot != MANIFEST_HASH_TYPE {
@@ -625,6 +712,81 @@ mod tests {
         assert!(ask(&mut xart, request(SLAVE_ID, 1, 12, 0), &mut buffers).is_err());
         ask(&mut xart, request(SLAVE_ID, 1, 13, 0), &mut buffers).unwrap();
         assert!(ask(&mut xart, request(SLAVE_ID, 1, 15, 0), &mut buffers).is_err());
+    }
+
+    #[test]
+    fn sandcat_ap_slots_read_empty_and_their_mutations_refuse() {
+        let mut xart = xart();
+        let mut buffers = Buffers {
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let slot = |op, slot| {
+            XartMessage {
+                slot,
+                ..XartMessage::from_frame(request(SLAVE_ID, 4, op, 0))
+            }
+            .frame()
+        };
+        assert!(ask(&mut xart, slot(24, 0), &mut buffers).is_err());
+        xart.set_sandcat(true);
+        for index in 0..2 {
+            buffers.output.clear();
+            let reply =
+                XartMessage::from_frame(ask(&mut xart, slot(24, index), &mut buffers).unwrap());
+            assert_eq!((reply.op, reply.length, reply.slot), (0, 56, 0));
+            assert_eq!(buffers.output, [0; 56]);
+        }
+        assert!(ask(&mut xart, slot(24, 2), &mut buffers).is_err());
+        for op in [21, 25, 26, 27, 28] {
+            assert!(ask(&mut xart, slot(op, 0), &mut buffers).is_err(), "{op}");
+        }
+    }
+
+    #[test]
+    fn a_sandcat_ap_slot_commit_reads_back_as_committed() {
+        let mut xart = xart();
+        let mut buffers = Buffers {
+            input: vec![0x3c; HASH_BYTES],
+            output: Vec::new(),
+        };
+        let message = |op, slot, reserved, length| {
+            XartMessage {
+                slot,
+                reserved,
+                ..XartMessage::from_frame(request(SLAVE_ID, 4, op, length))
+            }
+            .frame()
+        };
+        // `seputil --commit-hash-ap --slot=0`: type = AP slot, hash flag set,
+        // `/chosen/boot-manifest-hash` in. Without Sandcat it refuses.
+        assert!(ask(&mut xart, message(18, 0, 1, 48), &mut buffers).is_err());
+        xart.set_sandcat(true);
+        for frame in [
+            message(18, 0, 0, 48),
+            message(18, 0, 1, 32),
+            message(18, 2, 1, 48),
+        ] {
+            assert!(ask(&mut xart, frame, &mut buffers).is_err());
+        }
+        let reply =
+            XartMessage::from_frame(ask(&mut xart, message(18, 0, 1, 48), &mut buffers).unwrap());
+        assert_eq!((reply.tag, reply.op, reply.length), (4, 0, 0));
+        assert_eq!(xart.store.ap_slot(0), Ok(Some([0x3c; HASH_BYTES])));
+        assert_eq!(xart.store.firmware(), Ok(None));
+        let reply =
+            XartMessage::from_frame(ask(&mut xart, message(24, 0, 0, 0), &mut buffers).unwrap());
+        assert_eq!(
+            (reply.op, reply.length, reply.slot),
+            (0, 56, AP_SLOT_COMMITTED)
+        );
+        assert_eq!(buffers.output[..8], [0; 8]);
+        assert_eq!(buffers.output[8..], [0x3c; HASH_BYTES]);
+        buffers.output.clear();
+        let reply =
+            XartMessage::from_frame(ask(&mut xart, message(24, 1, 0, 0), &mut buffers).unwrap());
+        assert_eq!((reply.length, reply.slot), (56, AP_SLOT_EMPTY));
+        assert_eq!(buffers.output, [0; 56]);
     }
 
     #[test]
