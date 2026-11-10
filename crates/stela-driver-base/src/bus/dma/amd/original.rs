@@ -1,6 +1,6 @@
-//! AMD48882rev3.11 original host DTE interpretation. These are DATA decoders,
-//! not root/source/allocation owners or completion/engine/IRQ receipts.
-//! Actual original-root adoption must keep the real table and control owners.
+//! Decoders for the device-table entries the firmware left (AMD 48882
+//! revision 3.11, tables 7 and 8). They only read entries: the caller keeps
+//! the table and its unit for as long as the entries are in use.
 
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 const MODE: u64 = 7 << 9;

@@ -3,15 +3,16 @@
 //! ([`native_mmio::Source`]), DMA pages from the native allocator, DMA
 //! domains, and the firmware's ACPI namespace.
 //!
-//! Remapping units cover each discovered requester with the driver's DMA
-//! window before probe starts devices. A claimed requester receives its own
-//! domain. Hosts without an active remapper use a passthrough domain and
-//! report unrestricted DMA once.
+//! Remapping units start each discovered requester in the drivers' DMA
+//! window or blocked, by what the drivers behind each unit need
+//! ([`super::remapping`]), before probe starts devices. A claimed requester
+//! receives its own domain. A requester no taken unit routes uses a
+//! passthrough domain, and unrestricted DMA is reported once.
 use super::aml::HostAcpi;
 use crate::{native_memory, native_mmio, output};
 use alloc::{boxed::Box, rc::Rc, sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicBool, Ordering};
-use stela_boot_core::passthrough::Passthrough;
+use stela_boot_core::{passthrough::Passthrough, remapping::initial::Access};
 use stela_drivers::{
     bus::{
         dma::{
@@ -155,7 +156,7 @@ unsafe impl NativeServices for Services<'_> {
         self.acpi.map_or(Ok(None), HostAcpi::embedded_controller)
     }
     /// The invariant TSC, which every supported host has and reads fastest,
-    /// else the HPET when this boot retained the whole controller.
+    /// else the HPET, which a boot without an invariant TSC retains.
     fn minimum_delay(&self) -> Result<Rc<dyn Timer>, ServiceError> {
         let invariant = crate::cpu::INVARIANT_TSC.present();
         crate::native_clock::tsc::Minimum::timer(self.tsc_hz, invariant)
@@ -167,6 +168,10 @@ unsafe impl NativeServices for Services<'_> {
         crate::random::source()
     }
 
+    /// The remapping policy blocks the whole fabric only when no device
+    /// needs the drivers' pool, so legacy probe then has nothing to drive or
+    /// hand over. Every other requester a legacy driver takes starts in a
+    /// window over that pool or untranslated.
     fn legacy_pci_writes(&self) -> bool {
         !self.remappers.has_blocked_fabric()
     }
@@ -196,7 +201,12 @@ unsafe impl NativeServices for Services<'_> {
             use super::remapping::PreparationError;
             match error {
                 PreparationError::Dma(error) => {
-                    output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original DMA drain unavailable ({error:?})\n"));
+                    let why = match self.remappers.initial_access(address) {
+                        Access::Window => "its unit starts in the drivers' DMA window for the pool drivers behind it",
+                        Access::Untranslated => "no unit routes it, but other units are taken, so the machine's interrupt and DMA state is not proven",
+                        Access::Blocked => "its unit's blocked fabric did not qualify",
+                    };
+                    output::arguments(format_args!("UNSUPPORTED Stela cold requester {address}: original DMA drain unavailable ({error:?}): {why}\n"));
                     ServiceError::Refused("cold requester original DMA drain unavailable")
                 }
                 PreparationError::Interrupt(error) => {

@@ -1,9 +1,18 @@
 //! The host's DMA remapping units, VT-d's (DMAR) and AMD-Vi's (IVRS, in
 //! [`amd`]), taken before the host drivers start
-//! ([`stela_boot_core::remapping`] decides which). Intel requesters start
-//! blocked unless the unit retains an RMRR-backed window. AMD-Vi units keep
-//! their existing window policy. A driver that asks
-//! the native services for a domain gets its own ([`Remappers::domain`]).
+//! ([`stela_boot_core::remapping`] decides which, and
+//! [`initial`](stela_boot_core::remapping::initial) how each starts, from
+//! the drivers of the devices behind it). A unit whose devices include one
+//! whose driver programs physical addresses in the drivers' DMA pool (NVMe,
+//! AHCI, xHCI, Ethernet, a USB firmware handoff) starts in a window that
+//! maps the pool and the unit's reserved regions one to one. A unit with
+//! none starts blocked. When a device the machine needs attaches only
+//! natively (VMD, EHCI) and the fabric cannot be blocked whole, no unit is
+//! taken. A driver that asks the native services for a domain gets its own
+//! ([`Remappers::domain`]).
+//!
+//! With no unit taken and every described unit proven off since
+//! ExitBootServices, the machine is treated as one that describes none.
 //!
 //! The display functions a driver maps the firmware's reserved regions for
 //! are a policy input: none yet, so a unit whose scope holds a display
@@ -24,7 +33,10 @@ use crate::{
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::ops::Range;
-use stela_boot_core::remapping::{self, Present};
+use stela_boot_core::remapping::{
+    self, Present,
+    initial::{self, Access, Candidate, Left, Mode, Requester},
+};
 use stela_drivers::bus::{
     dma::{
         mapping::{DmaDomain, DmaError},
@@ -38,10 +50,10 @@ use stela_drivers::bus::{
 };
 use stela_runtime::pc::acpi;
 
-/// The processor's physical address width (CPUID 0x80000008).
+/// The processor's physical address width, less what AMD memory
+/// encryption takes, so that no window address sets the C-bit.
 fn physical_bits() -> u8 {
-    let leaf = core::arch::x86_64::__cpuid(0x8000_0008);
-    (leaf.eax & 0xff) as u8
+    crate::cpu::physical_bits()
 }
 
 /// The display functions whose driver maps their unit's reserved regions.
@@ -115,7 +127,6 @@ pub(super) struct Remappers {
     requesters: core::cell::RefCell<Vec<BoundRequester<MmioRegisters>>>,
     amd: Vec<amd::Taken>,
     amd_fabric: Option<&'static native_mmio::Source>,
-    amd_blocked: bool,
     roles: core::cell::RefCell<roles::Inventory>,
     topology: core::cell::RefCell<Vec<(u16, Vec<Present>)>>,
     dmar: Option<dmar::Remapping>,
@@ -153,8 +164,36 @@ fn requester(address: Address) -> u16 {
 }
 
 impl Remappers {
+    /// Whether a complete blocked fabric qualified. The policy chooses one
+    /// only when no device needs the drivers' pool, so legacy probe has
+    /// nothing to write; it keeps the original PCI view for reading.
     pub(super) fn has_blocked_fabric(&self) -> bool {
-        self.initial_fabric.is_some() || self.amd_blocked
+        self.initial_fabric.is_some() || self.amd_fabric.is_some()
+    }
+
+    /// How the DMA of the function at `address` reaches memory until its
+    /// driver attaches a domain of its own.
+    pub(super) fn initial_access(&self, address: Address) -> Access {
+        if self.unremapped {
+            return Access::Untranslated;
+        }
+        let rid = requester(address);
+        match self.amd(address.segment, rid) {
+            Ok(Some(taken)) if taken.windowed() && taken.covers(address.segment, rid) => {
+                return Access::Window;
+            }
+            Ok(Some(_)) | Err(_) => return Access::Blocked,
+            Ok(None) => {}
+        }
+        match self.vtd(address.segment, rid) {
+            Ok(Some(taken)) if !taken.unit.allows(rid) => Access::Blocked,
+            Ok(Some(taken)) => match taken.initial {
+                InitialContexts::Window => Access::Window,
+                InitialContexts::Blocked => Access::Blocked,
+            },
+            Ok(None) => Access::Untranslated,
+            Err(_) => Access::Blocked,
+        }
     }
 
     pub(super) const fn none() -> Self {
@@ -165,7 +204,6 @@ impl Remappers {
             requesters: core::cell::RefCell::new(Vec::new()),
             amd: Vec::new(),
             amd_fabric: None,
-            amd_blocked: false,
             roles: core::cell::RefCell::new(roles::Inventory::empty()),
             topology: core::cell::RefCell::new(Vec::new()),
             dmar: None,
@@ -233,16 +271,28 @@ impl Remappers {
                 if functions.len() != pci.functions() {
                     return Err(MappingError::InvalidPlatformReply.into());
                 }
+                // Each function's vendor and device, for what its driver
+                // needs of the unit that routes it.
+                let mut identities = Vec::new();
+                identities
+                    .try_reserve_exact(functions.len())
+                    .map_err(|_| MappingError::Exhausted)?;
+                for &address in &functions {
+                    let value = reader.read32(address, 0)?;
+                    pci.check_observation(address, 0, value)?;
+                    identities.push((address, (value as u16, (value >> 16) as u16)));
+                }
                 let roles = roles::Inventory::capture(&functions, |address, offset| {
                     reader
                         .read32(address, offset)
                         .map(Some)
                         .map_err(|error| ConfigError::before_effect(ConfigFailure::Mapping(error)))
                 });
-                pci.check_stopped(reader).map(|()| (inventories, roles))
+                pci.check_stopped(reader)
+                    .map(|()| (inventories, identities, roles))
             })
         };
-        let (inventories, roles) = match inventory {
+        let (inventories, identities, roles) = match inventory {
             Ok(inventory) => inventory,
             Err(error) => {
                 output::arguments(format_args!(
@@ -272,13 +322,30 @@ impl Remappers {
             output::arguments(format_args!(
                 "HOST IOMMU none described: device DMA and interrupts are untranslated\n"
             ));
+            return remappers;
         }
-        if let Some(ivrs) = ivrs {
+        let requesters: Vec<Requester> = inventories
+            .iter()
+            .flat_map(|(segment, present)| {
+                initial::requesters(*segment, present, |rid| {
+                    let at = address(*segment, rid);
+                    identities
+                        .iter()
+                        .find(|(address, _)| *address == at)
+                        .map(|(_, identity)| *identity)
+                })
+            })
+            .collect();
+        // Whether a unit was left in a state no proof covers: partly
+        // programmed, or not stopped after the policy refused it.
+        let mut uncertain = false;
+        if let Some(ivrs) = &ivrs {
             // SAFETY: forwarded.
-            let (units, blocked) = unsafe {
+            let outcome = unsafe {
                 amd::take(
-                    &ivrs,
+                    ivrs,
                     &inventories,
+                    &requesters,
                     &drivers,
                     mmio,
                     dmar.is_none().then_some(inactive_firmware_units),
@@ -286,8 +353,9 @@ impl Remappers {
                     physical_bits(),
                 )
             };
-            remappers.amd = units;
-            remappers.amd_blocked = blocked.is_some();
+            remappers.amd = outcome.units;
+            uncertain |= outcome.uncertain;
+            let blocked = outcome.fabric;
             if blocked == Some(true) {
                 // SAFETY: no driver, AP or competing configuration writer
                 // can change the original stopped PCI cohort during takeover.
@@ -310,6 +378,11 @@ impl Remappers {
             }
         }
         let Some(table) = dmar else {
+            let units_off = ivrs.as_ref().is_some_and(|ivrs| {
+                stela_drivers::bus::dma::amd::ivrs::Ivrs::parse(ivrs, amd::MAXIMUM_BLOCKS)
+                    .is_ok_and(|ivrs| inactive_firmware_units.matches_amd(&ivrs))
+            });
+            remappers.settle(units_off && !uncertain);
             return remappers;
         };
         let parsed = match dmar::parse(&table) {
@@ -335,92 +408,125 @@ impl Remappers {
             return remappers;
         }
         let mut covered = 0;
+        // Every unit the planner resolved, with the reserved regions its
+        // requesters still use, then how each starts.
+        let mut planned = Vec::new();
         for (segment, present) in &inventories {
             for (index, decision) in remapping::plan(&parsed, *segment, present, CLAIMED_DISPLAYS) {
-                let unit = &parsed.units[index];
-                let requesters = match decision {
-                    Ok(requesters) => requesters,
-                    Err(why) => {
-                        output::arguments(format_args!(
-                            "HOST IOMMU VT-d unit {:#x} left untranslated: {why:?}\n",
-                            unit.base
-                        ));
-                        continue;
-                    }
-                };
-                let mut window = Vec::new();
-                for region in parsed.reserved.iter().filter(|region| {
-                    region.segment == *segment
-                        && region.scopes.iter().any(|scope| {
-                            scope
-                                .resolve(present)
-                                .iter()
-                                .any(|rid| requesters.contains(rid))
+                let reserved: Vec<Range<u64>> = match &decision {
+                    Ok(requesters) => parsed
+                        .reserved
+                        .iter()
+                        .filter(|region| {
+                            region.segment == *segment
+                                && region.scopes.iter().any(|scope| {
+                                    scope
+                                        .resolve(present)
+                                        .iter()
+                                        .any(|rid| requesters.contains(rid))
+                                })
                         })
-                }) {
-                    window.push(region.base..region.limit + 1);
+                        .map(|region| region.base..region.limit + 1)
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                planned.push((*segment, index, decision, reserved));
+            }
+        }
+        let candidates: Vec<Candidate> = planned
+            .iter()
+            .map(|(segment, _, decision, reserved)| Candidate {
+                segment: *segment,
+                decision: decision.clone(),
+                blockable: reserved.is_empty(),
+            })
+            .collect();
+        let units_off = inactive_firmware_units.matches_dmar(&parsed.units);
+        let modes = initial::modes(&candidates, &requesters, units_off);
+        for ((_, index, decision, reserved), mode) in planned.into_iter().zip(modes) {
+            let unit = &parsed.units[index];
+            let (requesters, mut window) = match (decision, mode) {
+                (Ok(requesters), Mode::Blocked) => (requesters, Vec::new()),
+                (Ok(requesters), Mode::Window) => (requesters, reserved),
+                (_, Mode::Left(Left::Native { segment, rid })) => {
+                    output::arguments(format_args!(
+                        "HOST IOMMU VT-d unit {:#x} left untranslated: {} attaches only natively, which a taken unit beside the drivers' window refuses\n",
+                        unit.base,
+                        address(segment, rid)
+                    ));
+                    continue;
                 }
-                if !window.is_empty() {
-                    window.push(drivers.clone());
+                (Err(why), _) | (_, Mode::Left(Left::Policy(why))) => {
+                    output::arguments(format_args!(
+                        "HOST IOMMU VT-d unit {:#x} left untranslated: {why:?}\n",
+                        unit.base
+                    ));
+                    continue;
                 }
-                // SAFETY: forwarded; the unit's registers are the mount's.
-                match unsafe {
-                    Self::take_unit(
-                        unit,
-                        &requesters,
-                        &window,
-                        parsed.physical_bits,
-                        mmio,
-                        tsc_hz,
-                    )
-                } {
-                    Ok(taken) => {
-                        let initial = if window.is_empty() {
-                            // A blocked new root cannot qualify a previous
-                            // firmware root that was disabled without a drain.
-                            let result = if inactive_firmware_units.contains(
-                                Kind::Vtd,
-                                unit.segment,
-                                unit.base,
-                            ) {
+            };
+            if mode == Mode::Window {
+                window.push(drivers.clone());
+            }
+            // SAFETY: forwarded; the unit's registers are the mount's.
+            match unsafe {
+                Self::take_unit(
+                    unit,
+                    &requesters,
+                    &window,
+                    parsed.physical_bits,
+                    mmio,
+                    tsc_hz,
+                )
+            } {
+                Ok(taken) => {
+                    let initial = if window.is_empty() {
+                        // A blocked new root cannot qualify a previous
+                        // firmware root that was disabled without a drain.
+                        let result =
+                            if inactive_firmware_units.contains(Kind::Vtd, unit.segment, unit.base)
+                            {
                                 taken.acknowledge_initial_block(&requesters)
                             } else {
                                 Err(DmaError::DrainUnavailable)
                             };
-                            match result {
-                                Ok(cohort) => {
-                                    covered += requesters.len();
-                                    cohorts.push((index, cohort));
-                                    output::arguments(format_args!(
-                                        "HOST IOMMU VT-d unit {:#x} blocked and drained {} initial requesters\n",
-                                        unit.base,
-                                        requesters.len()
-                                    ));
-                                }
-                                Err(error) => output::arguments(format_args!(
-                                    "HOST IOMMU VT-d unit {:#x} blocked cohort not qualified: {error:?}\n",
-                                    unit.base
-                                )),
+                        match result {
+                            Ok(cohort) => {
+                                covered += requesters.len();
+                                cohorts.push((index, cohort));
+                                output::arguments(format_args!(
+                                    "HOST IOMMU VT-d unit {:#x} blocked and drained {} initial requesters\n",
+                                    unit.base,
+                                    requesters.len()
+                                ));
                             }
-                            InitialContexts::Blocked
-                        } else {
-                            output::arguments(format_args!(
-                                "HOST IOMMU VT-d unit {:#x} retains a reserved window for {} requesters\n",
-                                unit.base,
-                                requesters.len()
-                            ));
-                            InitialContexts::Window
-                        };
-                        remappers.taken.push(Taken {
-                            descriptor: index,
-                            unit: taken,
-                            initial,
-                        });
-                    }
-                    Err(error) => output::arguments(format_args!(
+                            Err(error) => output::arguments(format_args!(
+                                "HOST IOMMU VT-d unit {:#x} blocked cohort not qualified: {error:?}\n",
+                                unit.base
+                            )),
+                        }
+                        InitialContexts::Blocked
+                    } else {
+                        output::arguments(format_args!(
+                            "HOST IOMMU VT-d unit {:#x} maps the drivers' DMA pool and {} reserved regions for {} requesters\n",
+                            unit.base,
+                            window.len() - 1,
+                            requesters.len()
+                        ));
+                        InitialContexts::Window
+                    };
+                    remappers.taken.push(Taken {
+                        descriptor: index,
+                        unit: taken,
+                        initial,
+                    });
+                }
+                Err(error) => {
+                    // A refused takeover may have programmed its root.
+                    uncertain = true;
+                    output::arguments(format_args!(
                         "HOST IOMMU VT-d unit {:#x} left untranslated: {error:?}\n",
                         unit.base
-                    )),
+                    ));
                 }
             }
         }
@@ -468,7 +574,31 @@ impl Remappers {
                 pci.functions()
             ));
         }
+        remappers.settle(units_off && !uncertain);
         remappers
+    }
+
+    /// With no unit taken and every described unit `off` since
+    /// ExitBootServices, no translation path, IOTLB or interrupt remapping
+    /// sits between any requester and memory: treat the machine as one that
+    /// describes no remapping hardware. Otherwise a requester no taken unit
+    /// routes still reaches memory untranslated, but the native paths that
+    /// need the whole machine's state stay refused.
+    fn settle(&mut self, off: bool) {
+        if !self.taken.is_empty() || !self.amd.is_empty() {
+            return;
+        }
+        if !off {
+            output::arguments(format_args!(
+                "HOST IOMMU no unit taken, but not every unit is proven off: native attachments stay refused\n"
+            ));
+            return;
+        }
+        self.unremapped = true;
+        self.dmar = None;
+        output::arguments(format_args!(
+            "HOST IOMMU every unit left untranslated and off: device DMA and interrupts are untranslated\n"
+        ));
     }
 
     /// # Safety

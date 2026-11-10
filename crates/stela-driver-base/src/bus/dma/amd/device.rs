@@ -4,8 +4,8 @@
 //         Leo Duran <leo.duran@amd.com>
 // DTE policy and host update ordering adapted from Linux drivers/iommu/amd
 // at cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See platform/THIRD_PARTY.md.
-//! Complete kept per-segment device-table RAM and native atomic updates.
-//! This is not unit takeover, requester admission or a device DMA domain.
+//! One PCI segment's device table in RAM, kept for the units that use it,
+//! and its atomic entry updates.
 mod atomic;
 mod entry;
 

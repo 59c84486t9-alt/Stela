@@ -6,8 +6,8 @@
 // Command encodings adapted from Linux drivers/iommu/amd/{iommu.c,
 // amd_iommu_types.h}; page entries from generic_pt/fmt/amdv1.h, commit
 // cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See platform/THIRD_PARTY.md.
-//! Checked AMDv1 page and command encodings. No operation here touches a
-//! remapper or establishes page ownership, visibility or completion.
+//! Checked AMDv1 page-table and command encodings. Nothing here accesses a
+//! remapper.
 use super::super::mapping::Direction;
 use core::{num::NonZeroU16, ops::Range};
 

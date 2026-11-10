@@ -1,5 +1,5 @@
-//! Original AMD host graph inspection, not table/allocation/root authority.
-//! The actual original unit/memory owner must retain the inspected objects.
+//! Inspection of the page tables the firmware's device-table entries point
+//! to. It reads them only; the unit's owner keeps the tables it inspected.
 use super::{DataMode, Dte};
 use alloc::vec::Vec;
 const PAGE: u64 = 4096;

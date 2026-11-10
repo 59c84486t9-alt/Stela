@@ -1,4 +1,5 @@
-//! Native atomic half-DTE replacement. No stack/red-zone or RBX corruption.
+//! Atomic replacement of one half of a device-table entry with CMPXCHG16B,
+//! which keeps the stack's red zone and RBX intact.
 use core::ptr::NonNull;
 
 pub(super) fn supported() -> bool {

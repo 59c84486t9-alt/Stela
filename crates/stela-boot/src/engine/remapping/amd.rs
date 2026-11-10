@@ -7,6 +7,7 @@ use crate::Result;
 use crate::{native_mmio, output};
 use alloc::{boxed::Box, format, rc::Rc, sync::Arc, vec, vec::Vec};
 use core::{cell::RefCell, mem::ManuallyDrop, ops::Range, ptr::NonNull};
+use stela_boot_core::remapping::initial::{self, Candidate, Left, Mode};
 use stela_boot_core::remapping::{self, Present};
 use stela_contracts::refuse;
 use stela_drivers::{
@@ -39,7 +40,7 @@ const PAGE: u64 = 4096;
 /// performance counters.
 const APERTURES: [u64; 2] = [16 << 10, 512 << 10];
 /// The most IVHD blocks one IVRS may hold.
-const MAXIMUM_BLOCKS: usize = 64;
+pub(super) const MAXIMUM_BLOCKS: usize = 64;
 
 /// Whether the BSP's processor-local record is active outside interrupts.
 fn on_boot_processor() -> bool {
@@ -289,31 +290,80 @@ unsafe fn inspect(
     ))
 }
 
-/// Take every unit of `table` (an IVRS) the policy allows.
+/// What [`take`] did with the IVRS's units.
+pub(super) struct Outcome {
+    pub(super) units: Vec<Taken>,
+    /// Whether the units started blocked as one fabric, and whether that
+    /// fabric is complete; none when they did not start blocked.
+    pub(super) fabric: Option<bool>,
+    /// Whether a unit was left in a state no proof covers: it went cold and
+    /// then did not stop.
+    pub(super) uncertain: bool,
+}
+
+/// A unit brought up cold, whose coverage the policy now decides on.
+struct Cold {
+    unit: Unit<Platform, ObservedConfig>,
+    segment: u16,
+    base: u64,
+    own: Address,
+    decision: core::result::Result<Vec<u16>, remapping::Leave>,
+    reserved: Vec<(u16, Range<u64>)>,
+}
+
+/// Stop a cold unit the policy does not take. False when it did not stop.
+fn retire(mut unit: Unit<Platform, ObservedConfig>) -> bool {
+    // SAFETY: no requester was attached and the unit blocks nothing it
+    // translated; retiring stops it.
+    unsafe { unit.retire() }.is_ok()
+}
+
+/// Take every unit of `table` (an IVRS) the policy allows, each in the
+/// mode [`initial::modes`] gives it from the drivers of the `requesters`
+/// behind it.
 ///
 /// # Safety
 /// As for [`super::Remappers::take`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the IVRS takeover joins the census, the drivers' pool and the platform's proof"
+)]
 pub(super) unsafe fn take(
     table: &[u8],
     inventories: &[(u16, Vec<Present>)],
+    requesters: &[initial::Requester],
     drivers: &Range<u64>,
     mmio: &native_mmio::Source,
     inactive_firmware_units: Option<&InactiveFirmwareUnits>,
     tsc_hz: u64,
     physical_bits: u8,
-) -> (Vec<Taken>, Option<bool>) {
-    let mut taken = Vec::new();
+) -> Outcome {
+    let mut outcome = Outcome {
+        units: Vec::new(),
+        fabric: None,
+        uncertain: false,
+    };
     let ivrs = match Ivrs::parse(table, MAXIMUM_BLOCKS) {
         Ok(ivrs) => ivrs,
         Err(error) => {
             output::arguments(format_args!(
                 "UNSUPPORTED host IVRS unreadable ({error:?}): host DMA stays untranslated\n"
             ));
-            return (taken, None);
+            return outcome;
         }
     };
-    let blocked = inactive_firmware_units.is_some_and(|units| units.matches_amd(&ivrs))
-        && ivrs.memory_definitions().next().is_none();
+    let units_off = inactive_firmware_units.is_some_and(|units| units.matches_amd(&ivrs));
+    // Requesters may start blocked only from a proven firmware state and
+    // with no reserved region a requester still uses.
+    let blockable = units_off && ivrs.memory_definitions().next().is_none();
+    let left = |base: u64, why: &dyn core::fmt::Debug| {
+        output::arguments(format_args!(
+            "HOST IOMMU AMD-Vi unit {base:#x} left untranslated: {why:?}\n"
+        ));
+    };
+    // Bring each unit up cold, which reads its coverage, before deciding
+    // how any starts.
+    let mut cold = Vec::new();
     for description in ivrs.units() {
         let id = description.id();
         let base = description.mmio_address();
@@ -329,20 +379,18 @@ pub(super) unsafe fn take(
             device: (id.device_id >> 3 & 31) as u8,
             function: (id.device_id & 7) as u8,
         };
-        let left = |why: &dyn core::fmt::Debug| {
-            output::arguments(format_args!(
-                "HOST IOMMU AMD-Vi unit {base:#x} left untranslated: {why:?}\n"
-            ));
-        };
-        if blocked && !present.iter().any(|function| function.rid == id.device_id) {
-            left(&"its function was absent from the original stopped PCI census");
+        if blockable && !present.iter().any(|function| function.rid == id.device_id) {
+            left(
+                base,
+                &"its function was absent from the original stopped PCI census",
+            );
             continue;
         }
         // SAFETY: forwarded; no driver claims an IOMMU function.
         let function = match unsafe { config(mmio, address) } {
             Ok(function) => function,
             Err(error) => {
-                left(&error);
+                left(base, &error);
                 continue;
             }
         };
@@ -350,7 +398,7 @@ pub(super) unsafe fn take(
         let inspection = match unsafe { inspect(mmio, function, base, &ivrs) } {
             Ok(inspection) => inspection,
             Err(why) => {
-                left(&why);
+                left(base, &why);
                 continue;
             }
         };
@@ -366,10 +414,12 @@ pub(super) unsafe fn take(
         };
         // SAFETY: forwarded: the firmware's translation was turned off at
         // ExitBootServices and no driver has started.
-        let mut unit = match unsafe { Unit::cold(inspection, &ivrs, platform, limits) } {
+        let unit = match unsafe { Unit::cold(inspection, &ivrs, platform, limits) } {
             Ok(unit) => unit,
             Err(error) => {
-                left(&error);
+                // A failure after its first publication leaves it quarantined.
+                outcome.uncertain = true;
+                left(base, &error);
                 continue;
             }
         };
@@ -387,19 +437,65 @@ pub(super) unsafe fn take(
             })
             .collect();
         let held: Vec<u16> = reserved.iter().map(|(rid, _)| *rid).collect();
-        let requesters = match remapping::decide(&covered, &held, present, CLAIMED_DISPLAYS) {
-            Ok(requesters) => requesters,
-            Err(why) => {
-                left(&why);
-                // SAFETY: no requester was attached and the unit blocks
-                // nothing it translated; retiring stops it.
-                if unsafe { unit.retire() }.is_err() {
-                    left(&"and it did not stop");
+        let decision = remapping::decide(&covered, &held, present, CLAIMED_DISPLAYS);
+        cold.push(Cold {
+            unit,
+            segment: id.segment,
+            base,
+            own: address,
+            decision,
+            reserved,
+        });
+    }
+    let candidates: Vec<Candidate> = cold
+        .iter()
+        .map(|unit| Candidate {
+            segment: unit.segment,
+            decision: unit.decision.clone(),
+            blockable,
+        })
+        .collect();
+    // The units' own functions are not requesters any unit must cover.
+    let own: Vec<(u16, u16)> = ivrs
+        .units()
+        .map(|unit| (unit.id().segment, unit.id().device_id))
+        .collect();
+    let covering: Vec<initial::Requester> = requesters
+        .iter()
+        .filter(|requester| !own.contains(&(requester.segment, requester.rid)))
+        .copied()
+        .collect();
+    let modes = initial::modes(&candidates, &covering, units_off);
+    let fabric = modes.iter().all(|mode| *mode == Mode::Blocked);
+    for (cold, mode) in cold.into_iter().zip(modes) {
+        let Cold {
+            mut unit,
+            segment,
+            base,
+            own,
+            decision,
+            reserved,
+        } = cold;
+        let requesters = match (decision, mode) {
+            (Ok(requesters), Mode::Blocked | Mode::Window) => requesters,
+            (_, Mode::Left(Left::Native { segment, rid })) => {
+                output::arguments(format_args!(
+                    "HOST IOMMU AMD-Vi unit {base:#x} left untranslated: {} attaches only natively, which a taken unit beside the drivers' window refuses\n",
+                    super::address(segment, rid)
+                ));
+                outcome.uncertain |= !retire(unit);
+                continue;
+            }
+            (Err(why), _) | (_, Mode::Left(Left::Policy(why))) => {
+                left(base, &why);
+                if !retire(unit) {
+                    outcome.uncertain = true;
+                    left(base, &"and it did not stop");
                 }
                 continue;
             }
         };
-        let claims = if blocked {
+        let claims = if mode == Mode::Blocked {
             // Publish no shared window. Retain the real complete stopped
             // cohort and verify each original DTE before the unit-wide drain.
             let checked = requesters
@@ -410,7 +506,8 @@ pub(super) unsafe fn take(
                 })
                 .and_then(|()| unit.drain_posted_writes().map_err(Error::Dma));
             if let Err(error) = checked {
-                left(&error);
+                left(base, &error);
+                outcome.uncertain |= !retire(unit);
                 continue;
             }
             output::arguments(format_args!(
@@ -433,30 +530,37 @@ pub(super) unsafe fn take(
                 .map(|range| borrowed(range, physical_bits))
                 .collect::<Option<Vec<_>>>()
             else {
-                left(&"a DMA window range is empty, out of bounds or cannot be allocated");
+                left(
+                    base,
+                    &"a DMA window range is empty, out of bounds or cannot be allocated",
+                );
+                outcome.uncertain |= !retire(unit);
                 continue;
             };
             // SAFETY: forwarded: the requesters DMA only to the drivers' region
             // and their reserved regions until they attach.
             if let Err(error) = unsafe { unit.window(&requesters, ranges) } {
-                left(&error);
+                left(base, &error);
+                outcome.uncertain |= !retire(unit);
                 continue;
             }
             output::arguments(format_args!(
-                "HOST IOMMU AMD-Vi unit {base:#x} translates {} requesters\n",
+                "HOST IOMMU AMD-Vi unit {base:#x} maps the drivers' DMA pool and {} reserved regions for {} requesters\n",
+                window.len() - 1,
                 requesters.len()
             ));
             None
         };
-        taken.push(Taken {
+        outcome.units.push(Taken {
             unit: Rc::new(RefCell::new(unit)),
-            segment: id.segment,
-            own: address,
+            segment,
+            own,
             claims,
             requesters: RefCell::new(requesters),
         });
     }
-    let complete = blocked
+    let taken = &outcome.units;
+    let complete = fabric
         && !taken.is_empty()
         && taken.len() == ivrs.units().count()
         && inventories.iter().all(|(segment, functions)| {
@@ -470,7 +574,9 @@ pub(super) unsafe fn take(
                         == 1
             })
         });
-    (taken, blocked.then_some(complete))
+    let started_blocked = taken.iter().any(|unit| unit.claims.is_some());
+    outcome.fabric = started_blocked.then_some(complete);
+    outcome
 }
 
 impl Taken {
@@ -503,6 +609,12 @@ impl Taken {
 
     pub(super) fn covers(&self, segment: u16, rid: u16) -> bool {
         self.segment == segment && self.requesters.borrow().contains(&rid)
+    }
+
+    /// Whether its requesters started in the drivers' window rather than
+    /// blocked.
+    pub(super) fn windowed(&self) -> bool {
+        self.claims.is_none()
     }
 
     /// Cover requester `rid`, which arrived below a covered bridge. Its

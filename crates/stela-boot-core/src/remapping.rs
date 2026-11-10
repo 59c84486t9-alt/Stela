@@ -13,6 +13,8 @@
 //! itself passes its function in `claimed_displays`, and the unit is taken.
 use alloc::vec::Vec;
 use core::{convert::Infallible, ops::Range};
+
+pub mod initial;
 use stela_drivers::bus::pci::EcamWindow;
 
 /// The 4 KiB page span a DMA window needs, within the host's supported

@@ -1,6 +1,7 @@
-//! Actual original AMD data-path retirement, retaining root/IRQ interpretation.
-//! Generic unsafe transports are algorithmic boundaries; native success needs
-//! the real complete Source/configuration/EBS/control producer, never a snapshot.
+//! Retirement of the DMA translation the firmware left on each AMD IOMMU
+//! unit, keeping its page-table roots and interrupt remapping in place. The
+//! register, queue and memory accesses are unsafe traits; a native caller
+//! implements them over the units it owns after ExitBootServices.
 use super::tables::{self, ControlKind, Description, Inventory};
 use crate::bus::dma::amd::format::{Command, PhysicalAddress};
 use alloc::{boxed::Box, vec::Vec};
@@ -179,6 +180,9 @@ impl Snapshot {
         Ok(())
     }
     fn qualify(self, r: &impl Registers) -> Result<(), Error> {
+        // EFR fields (AMD IOMMU specification, Linux `amd_iommu_types.h`):
+        // bit 6 IASup, bit 63 SNPSup, bits 43:42 MARCSup and bits 11:10
+        // HATS, whose value 3 is reserved. MARC routing needs its own owner.
         if self.control & !BASE_CONTROL != 0
             || self.control & (IOMMU | COHERENT) != (IOMMU | COHERENT)
             || (self.control >> 5) & 7 == 7
@@ -186,8 +190,8 @@ impl Snapshot {
             || self.efr & (1 << 6) == 0
             || self.command_head != self.command_tail
             || self.efr & (1 << 63) != 0
-            || (self.efr>>42)&3!=0 // MARC routing needs its own actual owner.
-            || (self.efr>>10)&3==3
+            || (self.efr >> 42) & 3 != 0
+            || (self.efr >> 10) & 3 == 3
             || self.device & !(ADDRESS | 0x1ff) != 0
             || self.device & ADDRESS == 0
             || r.timeout_ticks() == 0

@@ -1,5 +1,5 @@
-//! WB memory for one AMD 4 KiB page table. This component
-//! grants no remapper access and performs no implicit IOTLB acknowledgement.
+//! Write-back memory for one 4 KiB AMD page table. Changing it does not
+//! invalidate the IOTLB.
 use super::format::{FormatError, PageEntry, PhysicalAddress};
 use crate::bus::dma::memory::{CacheAttribute, CpuMapping, MemoryError, PageSource};
 use core::ptr::NonNull;

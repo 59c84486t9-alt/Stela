@@ -1,5 +1,4 @@
-//! Shared AMD-Vi formats and firmware descriptions. These values confer no
-//! ownership of a remapper, requester, physical page or hardware completion.
+//! AMD-Vi formats and firmware descriptions shared by the remapper drivers.
 pub mod device;
 pub mod format;
 pub mod ivrs;
