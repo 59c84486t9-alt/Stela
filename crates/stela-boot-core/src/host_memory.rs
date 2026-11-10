@@ -21,18 +21,34 @@ pub const HEAP_FLOOR: u64 = 2816 * MIB;
 /// Above the floor, the heap grows with the host to this: a larger host
 /// runs more and larger pipelines, apps and translation packs.
 pub const HEAP_CEILING: u64 = 16 * GIB;
-/// Free host RAM bytes per byte of the engine heap. A 16 GiB guest's first
-/// Metal shader compiles carved all of a sixteenth (1816 MiB) and failed.
+/// Free host RAM bytes per byte of the engine heap's base share. A 16 GiB
+/// guest's first Metal shader compiles carved all of a sixteenth (1816 MiB)
+/// and failed.
 const HEAP_SHARE: u64 = 12;
-/// Guest DRAM bytes per byte of each running executor's shadow page-table
+/// Heap bytes per byte of the board's code window: the shared block records,
+/// index and recovery rows of the blocks it holds. An 8-PE boot with a
+/// 448 MiB window and 1.5 million live blocks held 1.31 GiB on the seven
+/// non-home cores, 2.9 bytes per window byte.
+const HEAP_PER_WINDOW: u64 = 3;
+/// Heap each running PE keeps for itself: its machine (about 1 MiB at
+/// start), ITLB (512 KiB), fetch and jump caches (about 0.8 MiB) and
+/// successor scratch (under 1 MiB); four times that, for its own compiles.
+const PE_HEAP: u64 = 16 * MIB;
+/// Guest DRAM bytes per byte of a running executor's shadow page-table
 /// pool: room for its 8 roots to map all of guest DRAM once in 4 KiB pages
 /// (8 bytes per page). An exhausted half resets and refills everything; a
 /// 26A434 restore's userland filled 8 MiB halves 20 to 80 times a beat.
 const POOL_SHARE: u64 = 64;
+/// Runners whose pools together map the guest's DRAM once each. Past them
+/// the runners divide that total: each PE's tables are a cache of what it
+/// touches, and more PEs divide the guest's working set between them.
+const POOL_SHARERS: u64 = 8;
 const POOL_FLOOR: u64 = 64 * MIB;
-/// Each running executor's pool maps at most 64 GiB of guest DRAM once;
-/// past that its halves reset as a cache of the guest's working set,
-/// rather than hold a tenth of a large host's RAM.
+/// The least pool a running executor gets, a 16 MiB half, at any PE count.
+const POOL_RUNNER_FLOOR: u64 = 32 * MIB;
+/// Each sharer's pool maps at most 64 GiB of guest DRAM once; past that its
+/// halves reset as a cache of the guest's working set, rather than hold a
+/// tenth of a large host's RAM.
 const POOL_PER_RUNNER: u64 = GIB;
 /// The least guest DRAM Stela boots macOS with. Below it macOS spends its
 /// time paging; 26A434 reaches the desktop with 3.1 GiB.
@@ -90,13 +106,14 @@ impl Shortfall {
 /// running PEs; the others add only their parked reserves.
 ///
 /// Each part takes a share of `free`, between its bounds:
-/// - the heap a twelfth, an eighth of that more for each runner after the
-///   first (its machine's translation metadata), within
+/// - the heap a twelfth, [`HEAP_PER_WINDOW`] bytes per byte of the board's
+///   code window and [`PE_HEAP`] per runner, within
 ///   [`HEAP_FLOOR`]..=[`HEAP_CEILING`];
 /// - the code arena what `code_reservation` gives;
-/// - the pool each runner's 1/[`POOL_SHARE`] of the guest's DRAM, which is
-///   what the other parts leave: `pool = runners * (free - heap - code -
-///   pool) / 64`, solved for `pool`.
+/// - the pool 1/[`POOL_SHARE`] of the guest's DRAM for each of up to
+///   [`POOL_SHARERS`] runners, which is what the other parts leave: `pool =
+///   sharers * (free - heap - code - pool) / 64`, solved for `pool`; at least
+///   [`POOL_RUNNER_FLOOR`] per runner, at most [`POOL_PER_RUNNER`] per sharer.
 ///
 /// A guest share under [`GUEST_FLOOR`] is a [`Shortfall`].
 pub fn sizes(free: u64, cores: usize, runners: usize) -> Result<Sizes> {
@@ -137,12 +154,15 @@ fn estimate_guest(free: u64, cores: usize, runners: usize) -> Result<u64> {
 fn estimate(free: u64, cores: usize, runners: usize) -> Result<Sizes> {
     let code = code_reservation(free, cores, runners)?;
     let running = runners as u64;
-    let share = free / HEAP_SHARE;
-    let heap = (share + (running - 1) * (share / 8)) / ALIGNMENT * ALIGNMENT;
-    let heap = heap.clamp(HEAP_FLOOR, HEAP_CEILING);
+    let heap = free / HEAP_SHARE + HEAP_PER_WINDOW * code.window + running * PE_HEAP;
+    let heap = (heap / ALIGNMENT * ALIGNMENT).clamp(HEAP_FLOOR, HEAP_CEILING);
     let rest = free.saturating_sub(heap).saturating_sub(code.bytes);
-    let pool = (u128::from(running) * u128::from(rest) / u128::from(POOL_SHARE + running)) as u64;
-    let pool = (pool / ALIGNMENT * ALIGNMENT).clamp(POOL_FLOOR, running * POOL_PER_RUNNER);
+    let sharers = running.min(POOL_SHARERS);
+    let pool = (u128::from(sharers) * u128::from(rest) / u128::from(POOL_SHARE + sharers)) as u64;
+    let pool = (pool / ALIGNMENT * ALIGNMENT).clamp(
+        POOL_FLOOR.max(running * POOL_RUNNER_FLOOR),
+        sharers * POOL_PER_RUNNER,
+    );
     let (_, parked) = parked_reserve(cores, runners);
     let pool = pool + parked;
     Ok(Sizes {

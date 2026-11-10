@@ -27,14 +27,16 @@ fn every_host_size_keeps_the_parts_in_bounds_and_the_guest_above_its_floor() {
             sizes.heap + sizes.code.bytes + sizes.pool + sizes.guest,
             free
         );
-        // The pool maps each runner's guest DRAM once, up to its cap.
-        let wanted = runners as u64 * sizes.guest / POOL_SHARE;
-        let cap = runners as u64 * POOL_PER_RUNNER;
+        // The pool maps each sharer's guest DRAM once, up to its cap.
+        let sharers = (runners as u64).min(POOL_SHARERS);
+        let wanted = sharers * sizes.guest / POOL_SHARE;
+        let cap = sharers * POOL_PER_RUNNER;
+        let floor = POOL_FLOOR.max(runners as u64 * POOL_RUNNER_FLOOR);
         assert!(
             sizes.pool == cap || sizes.pool + ALIGNMENT * 2 >= wanted,
             "{installed} GiB"
         );
-        assert!(sizes.pool <= wanted.max(POOL_FLOOR) || sizes.pool == cap);
+        assert!(sizes.pool <= wanted.max(floor) || sizes.pool == cap);
     }
 }
 
@@ -49,21 +51,75 @@ fn an_8_gib_host_gives_the_guest_what_the_parts_leave() {
 }
 
 #[test]
-fn a_16_gib_host_keeps_the_heap_floor_and_one_shared_code_window() {
+fn a_16_gib_host_sizes_the_heap_from_its_window_and_one_shared_code_window() {
     let sizes = sizes(free(16), 8, 8).unwrap();
-    assert_eq!(sizes.heap, HEAP_FLOOR);
+    // A twelfth, 3 bytes per byte of the 512 MiB window and 16 MiB per PE.
+    assert_eq!(sizes.heap, 2986 * MIB);
     // 64 MiB of window per runner, and each executor's 2 MiB of its own.
     assert_eq!(sizes.code.bytes, 528 * MIB);
     assert!(sizes.guest > 10 * GIB);
 }
 
 #[test]
-fn a_128_gib_host_raises_the_heap_to_its_ceiling() {
+fn a_128_gib_host_grows_the_heap_with_its_share_window_and_pes() {
     let sizes = sizes(free(128), 8, 8).unwrap();
-    assert_eq!(sizes.heap, HEAP_CEILING);
+    let heap = free(128) / HEAP_SHARE + HEAP_PER_WINDOW * 512 * MIB + 8 * PE_HEAP;
+    assert_eq!(sizes.heap, heap / ALIGNMENT * ALIGNMENT);
+    assert!(HEAP_FLOOR < sizes.heap && sizes.heap < HEAP_CEILING);
     assert_eq!(sizes.code.bytes, 528 * MIB);
     assert_eq!(sizes.pool, 8 * POOL_PER_RUNNER);
-    assert!(sizes.guest > 90 * GIB);
+    assert!(sizes.guest > 100 * GIB);
+}
+
+/// Heap, code, pool and guest MiB for `runners` PEs at `free` GiB, or None
+/// when the guest's floor does not fit.
+#[test]
+fn stelas_share_stops_growing_per_pe_past_what_each_pe_takes() {
+    for (runners, free, expected) in [
+        (2, 4, None),
+        (2, 8, Some([2816, 132, 158, 5086])),
+        (2, 16, Some([2816, 132, 406, 13030])),
+        (2, 30, Some([2976, 132, 836, 26776])),
+        (2, 128, Some([11338, 132, 2048, 117554])),
+        (8, 4, None),
+        (8, 8, Some([2816, 528, 538, 4310])),
+        (8, 16, Some([3028, 528, 1424, 11404])),
+        (8, 30, Some([4224, 528, 2884, 23084])),
+        (8, 128, Some([12586, 528, 8192, 109766])),
+        (24, 4, None),
+        (24, 8, Some([2816, 560, 768, 4048])),
+        (24, 16, Some([4820, 1072, 1164, 9328])),
+        (24, 30, Some([7552, 1584, 2398, 19186])),
+        (24, 128, Some([15914, 1584, 8192, 105382])),
+        (64, 4, None),
+        (64, 8, None),
+        (64, 16, Some([5460, 1152, 2048, 7724])),
+        (64, 30, Some([9344, 2048, 2146, 17182])),
+        (64, 128, Some([16384, 2176, 8192, 104320])),
+    ] {
+        let actual = sizes(free * GIB, runners, runners)
+            .ok()
+            .map(|sizes| [sizes.heap, sizes.code.bytes, sizes.pool, sizes.guest].map(|b| b / MIB));
+        assert_eq!(actual, expected, "{runners} PEs, {free} GiB");
+        if let Some([_, _, pool, guest]) = actual {
+            // The pool's total stays within an eighth of the guest, or each
+            // runner's floor, whatever the PE count.
+            assert!(
+                pool <= (guest / 8).max(runners as u64 * 32),
+                "{runners} {free}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_test_bench_keeps_its_guest() {
+    // `HOST MEMORY free=7354M heap=2816M code=464M pool=452M guest=3622M`.
+    let sizes = sizes(7354 * MIB, 8, 8).unwrap();
+    assert_eq!(
+        [sizes.heap, sizes.code.bytes, sizes.pool, sizes.guest].map(|b| b / MIB),
+        [2816, 464, 452, 3622]
+    );
 }
 
 #[test]
