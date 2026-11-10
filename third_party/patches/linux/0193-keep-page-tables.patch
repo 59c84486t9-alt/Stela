@@ -1,0 +1,251 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 08:59:37 -0500
+Subject: [PATCH] perf(nouveau): keep page tables for reuse up to a byte budget
+ and count where the page-table and instance-memory paths spend their time
+
+---
+ .../drm/nouveau/include/nvkm/core/counts.h    | 40 +++++++++++++++++++
+ .../drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c |  3 ++
+ .../drm/nouveau/nvkm/subdev/instmem/nv50.c    | 11 ++++-
+ .../gpu/drm/nouveau/nvkm/subdev/mmu/base.c    | 20 +++++++++-
+ .../drm/nouveau/nvkm/subdev/mmu/vmmtu102.c    |  4 ++
+ 5 files changed, 75 insertions(+), 3 deletions(-)
+ create mode 100644 drivers/gpu/drm/nouveau/include/nvkm/core/counts.h
+
+diff --git a/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h b/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5fa2d2efbf8105783e1ea1910ad9c24919808efb
+--- /dev/null
++++ b/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h
+@@ -0,0 +1,40 @@
++/* SPDX-License-Identifier: MIT */
++#ifndef __NVKM_COUNTS_H__
++#define __NVKM_COUNTS_H__
++#include <linux/ktime.h>
++#include <linux/types.h>
++
++/*
++ * Where nvkm's page-table and instance-memory paths spend their time, for a
++ * host to read: per kind, how many, their nanoseconds and the longest. A
++ * reader may take and clear them with atomic swaps.
++ */
++enum nvkm_count {
++	NVKM_COUNT_FLUSH,	/* MMU TLB invalidate: write and poll. */
++	NVKM_COUNT_PT_NEW,	/* page table allocated: no cached one. */
++	NVKM_COUNT_PT_CACHED,	/* page table taken from the cache. */
++	NVKM_COUNT_PT_FREE,	/* page table freed: cache full. */
++	NVKM_COUNT_KMAP,	/* instance object mapped through BAR2. */
++	NVKM_COUNT_EVICT,	/* BAR2 mapping evicted for another. */
++	NVKM_COUNT_KMAP_SLOW,	/* no BAR2 mapping: PRAMIN window accessors. */
++	NVKM_COUNT_RPC,		/* GSP-RM RPC, reply wait included. */
++	NVKM_COUNTS
++};
++
++extern u64 nvkm_counts[NVKM_COUNTS][3];
++
++static inline void
++nvkm_count(enum nvkm_count kind, ktime_t start)
++{
++	u64 ns = start ? ktime_to_ns(ktime_sub(ktime_get(), start)) : 0;
++	u64 *slot = nvkm_counts[kind];
++	u64 longest = __atomic_load_n(&slot[2], __ATOMIC_RELAXED);
++
++	__atomic_fetch_add(&slot[0], 1, __ATOMIC_RELAXED);
++	__atomic_fetch_add(&slot[1], ns, __ATOMIC_RELAXED);
++	while (ns > longest &&
++	       !__atomic_compare_exchange_n(&slot[2], &longest, ns, true,
++					    __ATOMIC_RELAXED, __ATOMIC_RELAXED))
++		;
++}
++#endif
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
+index 8442071d17c64dc4ac73e92b9e4c079073a2793e..b77eac160dc469cfdea92892b173fecdeff91ac0 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
+@@ -20,6 +20,7 @@
+  * OTHER DEALINGS IN THE SOFTWARE.
+  */
+ #include <rm/rpc.h>
++#include <core/counts.h>
+ 
+ #include "nvrm/rpcfn.h"
+ 
+@@ -688,6 +689,7 @@ r535_gsp_rpc_push(struct nvkm_gsp *gsp, void *payload,
+ 	const u32 max_rpc_size = GSP_MSG_MAX_SIZE - sizeof(*msg);
+ 	const u32 max_payload_size = max_rpc_size - sizeof(*rpc);
+ 	u32 payload_size = rpc->length - sizeof(*rpc);
++	ktime_t start = ktime_get();
+ 	void *repv;
+ 
+ 	mutex_lock(&gsp->cmdq.mutex);
+@@ -767,6 +769,7 @@ r535_gsp_rpc_push(struct nvkm_gsp *gsp, void *payload,
+ 
+ done:
+ 	mutex_unlock(&gsp->cmdq.mutex);
++	nvkm_count(NVKM_COUNT_RPC, start);
+ 	return repv;
+ }
+ 
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/instmem/nv50.c b/drivers/gpu/drm/nouveau/nvkm/subdev/instmem/nv50.c
+index 6fbaa1e5876dc1beabe89f61049b7653bcab1e89..6ae8928f20e568db28e028f08c65dab2222cf8f5 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/instmem/nv50.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/instmem/nv50.c
+@@ -22,6 +22,7 @@
+  * Authors: Ben Skeggs
+  */
+ #define nv50_instmem(p) container_of((p), struct nv50_instmem, base)
++#include <core/counts.h>
+ #include "priv.h"
+ 
+ #include <core/memory.h>
+@@ -128,6 +129,7 @@ nv50_instobj_kmap(struct nv50_instobj *iobj, struct nvkm_vmm *vmm)
+ 	struct nvkm_vma *bar = NULL, *ebar;
+ 	u64 size = nvkm_memory_size(memory);
+ 	void *emap;
++	ktime_t start = ktime_get(), evicting;
+ 	int ret;
+ 
+ 	/* Attempt to allocate BAR2 address-space and map the object
+@@ -155,8 +157,10 @@ nv50_instobj_kmap(struct nv50_instobj *iobj, struct nvkm_vmm *vmm)
+ 		mutex_unlock(&imem->base.mutex);
+ 		if (!eobj)
+ 			break;
++		evicting = ktime_get();
+ 		iounmap(emap);
+ 		nvkm_vmm_put(vmm, &ebar);
++		nvkm_count(NVKM_COUNT_EVICT, evicting);
+ 	}
+ 
+ 	if (ret == 0)
+@@ -178,6 +182,7 @@ nv50_instobj_kmap(struct nv50_instobj *iobj, struct nvkm_vmm *vmm)
+ 		nvkm_warn(subdev, "PRAMIN ioremap failed\n");
+ 		nvkm_vmm_put(vmm, &iobj->bar);
+ 	}
++	nvkm_count(NVKM_COUNT_KMAP, start);
+ }
+ 
+ static int
+@@ -249,10 +254,12 @@ nv50_instobj_acquire(struct nvkm_memory *memory)
+ 		if (likely(iobj->lru.next))
+ 			list_del_init(&iobj->lru);
+ 
+-		if (map)
++		if (map) {
+ 			iobj->base.memory.ptrs = &nv50_instobj_fast;
+-		else
++		} else {
+ 			iobj->base.memory.ptrs = &nv50_instobj_slow;
++			nvkm_count(NVKM_COUNT_KMAP_SLOW, 0);
++		}
+ 		/* barrier to ensure the ptrs are written before refcount is set */
+ 		smp_wmb();
+ 		refcount_set(&iobj->maps, 1);
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/base.c b/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/base.c
+index df86214183cc7411d7a8c0a268286e3bc53ee7a8..72b03c54f18e55945d3e70c30c535d651dd36ad9 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/base.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/base.c
+@@ -21,6 +21,7 @@
+  *
+  * Authors: Ben Skeggs
+  */
++#include <core/counts.h>
+ #include "ummu.h"
+ #include "vmm.h"
+ 
+@@ -30,6 +31,14 @@
+ #include <nvif/if500d.h>
+ #include <nvif/if900d.h>
+ 
++u64 nvkm_counts[NVKM_COUNTS][3];
++
++/* VRAM each page-table size may keep for reuse: freeing a page table costs
++ * its BAR2 mapping's teardown and a TLB invalidate, and a large map or unmap
++ * frees and allocates hundreds at a time. At least the original eight.
++ */
++#define NVKM_MMU_PTC_BYTES (2 << 20)
++
+ struct nvkm_mmu_ptp {
+ 	struct nvkm_mmu_pt *pt;
+ 	struct list_head head;
+@@ -152,12 +161,17 @@ nvkm_mmu_ptc_put(struct nvkm_mmu *mmu, bool force, struct nvkm_mmu_pt **ppt)
+ 
+ 		/* Either cache or free the object. */
+ 		mutex_lock(&mmu->ptc.mutex);
+-		if (pt->ptc->refs < 8 /* Heuristic. */ && !force) {
++		if ((pt->ptc->refs < 8 ||
++		     (pt->ptc->refs + 1) * pt->ptc->size <= NVKM_MMU_PTC_BYTES) &&
++		    !force) {
+ 			list_add_tail(&pt->head, &pt->ptc->item);
+ 			pt->ptc->refs++;
+ 		} else {
++			ktime_t start = ktime_get();
++
+ 			nvkm_memory_unref(&pt->memory);
+ 			kfree(pt);
++			nvkm_count(NVKM_COUNT_PT_FREE, start);
+ 		}
+ 		mutex_unlock(&mmu->ptc.mutex);
+ 	}
+@@ -168,6 +182,7 @@ nvkm_mmu_ptc_get(struct nvkm_mmu *mmu, u32 size, u32 align, bool zero)
+ {
+ 	struct nvkm_mmu_ptc *ptc;
+ 	struct nvkm_mmu_pt *pt;
++	ktime_t start;
+ 	int ret;
+ 
+ 	/* Sub-allocated page table (ie. GP100 LPT). */
+@@ -194,9 +209,11 @@ nvkm_mmu_ptc_get(struct nvkm_mmu *mmu, u32 size, u32 align, bool zero)
+ 		list_del(&pt->head);
+ 		ptc->refs--;
+ 		mutex_unlock(&mmu->ptc.mutex);
++		nvkm_count(NVKM_COUNT_PT_CACHED, 0);
+ 		return pt;
+ 	}
+ 	mutex_unlock(&mmu->ptc.mutex);
++	start = ktime_get();
+ 
+ 	/* No such luck, we need to allocate. */
+ 	if (!(pt = kmalloc_obj(*pt)))
+@@ -213,6 +230,7 @@ nvkm_mmu_ptc_get(struct nvkm_mmu *mmu, u32 size, u32 align, bool zero)
+ 
+ 	pt->base = 0;
+ 	pt->addr = nvkm_memory_addr(pt->memory);
++	nvkm_count(NVKM_COUNT_PT_NEW, start);
+ 	return pt;
+ }
+ 
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmmtu102.c b/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmmtu102.c
+index 4b30eab40bba049b2417327ea55a7d3fe9ba5519..6b851dc385f9a4399552d75a31c5dd19d920ecdf 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmmtu102.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmmtu102.c
+@@ -22,11 +22,13 @@
+ #include "vmm.h"
+ 
+ #include <subdev/timer.h>
++#include <core/counts.h>
+ 
+ void
+ tu102_vmm_flush(struct nvkm_vmm *vmm, int depth)
+ {
+ 	struct nvkm_device *device = vmm->mmu->subdev.device;
++	ktime_t start;
+ 	u32 type = 0;
+ 
+ 	type |= 0x00000001; /* PAGE_ALL */
+@@ -34,6 +36,7 @@ tu102_vmm_flush(struct nvkm_vmm *vmm, int depth)
+ 		type |= 0x00000006; /* HUB_ONLY | ALL PDB (hack) */
+ 
+ 	mutex_lock(&vmm->mmu->mutex);
++	start = ktime_get();
+ 
+ 	if (!vmm->rm.bar2_pdb)
+ 		nvkm_wr32(device, 0xb830a0, vmm->pd->pt[0]->addr >> 8);
+@@ -47,6 +50,7 @@ tu102_vmm_flush(struct nvkm_vmm *vmm, int depth)
+ 			break;
+ 	);
+ 
++	nvkm_count(NVKM_COUNT_FLUSH, start);
+ 	mutex_unlock(&vmm->mmu->mutex);
+ }
+ 

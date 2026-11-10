@@ -2029,7 +2029,11 @@ pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
         serving.push('-');
     }
     let [device, pages, files, stacks] = UNMAPS.each_ref().map(take);
-    Some(format!(
+    #[cfg(feature = "nvk")]
+    let nvkm = nvkm_report();
+    #[cfg(not(feature = "nvk"))]
+    let nvkm = String::new();
+    let pumps = format!(
         "GPU PUMP runs={runs} quiet={} unmasked={} forced={} relaxed={} posted={} by_event={by_event} \
          by_deadline={by_deadline} idle={} deferred={} mean_us={} longest_us={} \
          delay_mean_us={} delay_longest_us={} next_us={next_us} next_timer={} \
@@ -2049,7 +2053,50 @@ pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
         next_timer(),
         micros(take(&PUMPS.step_longest)),
         take(&PUMPS.step_shootdowns),
-    ))
+    );
+    Some(pumps + &nvkm)
+}
+
+/// `\nGPU NVKM kind:count/total_us/longest_us …`: where nouveau's page-table
+/// and instance-memory paths spent their time since the last report
+/// (`include/nvkm/core/counts.h`), for kinds that ran. Empty when none did.
+#[cfg(feature = "nvk")]
+fn nvkm_report() -> String {
+    /// `enum nvkm_count`'s kinds, in order.
+    const KINDS: [&str; 8] = [
+        "flush",
+        "pt_new",
+        "pt_cached",
+        "pt_free",
+        "kmap",
+        "evict",
+        "kmap_slow",
+        "rpc",
+    ];
+    unsafe extern "C" {
+        /// `nvkm/subdev/mmu/base.c`: per kind a count, nanoseconds and the
+        /// longest, which nvkm updates atomically.
+        static nvkm_counts: [[AtomicU64; 3]; 8];
+    }
+    let mut line = String::new();
+    // SAFETY: nvkm's static counters, which it only updates atomically.
+    let counts = unsafe { &nvkm_counts };
+    for (kind, [count, total, longest]) in KINDS.iter().zip(counts) {
+        let count = count.swap(0, Ordering::Relaxed);
+        let total = total.swap(0, Ordering::Relaxed);
+        let longest = longest.swap(0, Ordering::Relaxed);
+        if count != 0 {
+            if line.is_empty() {
+                line.push_str("\nGPU NVKM kind:count/total_us/longest_us");
+            }
+            line.push_str(&format!(
+                " {kind}:{count}/{}/{}",
+                total / 1000,
+                longest / 1000
+            ));
+        }
+    }
+    line
 }
 
 /// The function of the timer-list timer due first when Linux last looked,
