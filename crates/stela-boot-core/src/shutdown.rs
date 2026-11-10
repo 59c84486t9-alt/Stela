@@ -40,9 +40,26 @@ impl Requests {
     }
 }
 
+/// How long a stop that restarts or turns off the PC shows the guest's
+/// failure first: `seconds` after one (`orderly` false), none after an
+/// orderly transition or a held power button, which asks for the PC off at
+/// once, however the guest fared.
+pub const fn stop_hold_seconds(orderly: bool, held: bool, seconds: u64) -> u64 {
+    if orderly || held { 0 } else { seconds }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_failure_without_a_held_button_holds_the_stop() {
+        assert_eq!(stop_hold_seconds(false, false, 10), 10);
+        assert_eq!(stop_hold_seconds(true, false, 10), 0);
+        // A panic, then the button held: off at once.
+        assert_eq!(stop_hold_seconds(false, true, 10), 0);
+        assert_eq!(stop_hold_seconds(true, true, 10), 0);
+    }
 
     #[test]
     fn another_processor_leaves_a_pending_request_for_the_boot_processor() {

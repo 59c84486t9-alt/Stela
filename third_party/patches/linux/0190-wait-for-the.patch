@@ -1,0 +1,158 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 02:57:11 -0500
+Subject: [PATCH] fix(nouveau): wait for the GSP unload by time and report one
+ that never answers
+
+---
+ .../gpu/drm/nouveau/include/nvkm/subdev/gsp.h |  2 +
+ .../gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c   |  7 +-
+ .../drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c | 83 +++++++++++++++++--
+ 3 files changed, 86 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h b/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
+index 64fed208e4cf8568805b5294e696d2d4d14104ef..6bfba3119e2e7fe2aceef67f39677e22a9fa3ebe 100644
+--- a/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
++++ b/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
+@@ -194,6 +194,8 @@ struct nvkm_gsp {
+ 	} msgq;
+ 
+ 	bool running;
++	/* RM answered the last UNLOADING_GUEST_DRIVER. */
++	bool unload_replied;
+ 
+ 	/* Internal GSP-RM control handles. */
+ 	struct {
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c
+index 700e66411b5deb600a892baaa16da3e7d1175d0e..d8001e3e177ffa600e75da075b22e91ef24a509b 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c
+@@ -27,7 +27,12 @@ gh100_gsp_fini(struct nvkm_gsp *gsp, enum nvkm_suspend_state suspend)
+ 	if (ret && suspend)
+ 		return ret;
+ 
+-	/* Wait for RISC-V to halt. */
++	/*
++	 * Wait for RISC-V to halt. An unload RM never reported was already
++	 * waited for: look once, so a stop stays bounded.
++	 */
++	if (ret == -ETIMEDOUT)
++		time = 0;
+ 	do {
+ 		u32 data = nvkm_falcon_rd32(falcon, falcon->addr2 + NV_PRISCV_RISCV_CPUCTL);
+ 
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+index a67a84074ac1453a069087e165a3a2d13b46e68d..756ad034828f3a9a7f313e861cb950d1f73745a5 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+@@ -346,7 +346,69 @@ r535_gsp_rpc_unloading_guest_driver(struct nvkm_gsp *gsp, bool suspend)
+ 		rpc->newLevel = NV2080_CTRL_GPU_SET_POWER_STATE_GPU_LEVEL_0;
+ 	}
+ 
+-	return nvkm_gsp_rpc_wr(gsp, rpc, NVKM_GSP_RPC_REPLY_RECV);
++	/*
++	 * The reply is not waited for here: the receive path counts polls, not
++	 * time, so a GSP that never answers holds the caller for minutes (four
++	 * million polls). r535_gsp_unload_wait() waits for it by time.
++	 */
++	gsp->unload_replied = false;
++	return nvkm_gsp_rpc_wr(gsp, rpc, NVKM_GSP_RPC_REPLY_NOWAIT);
++}
++
++/* How long GSP-RM has to unload before the stop goes on without it. */
++#define R535_GSP_UNLOAD_MS 4000
++/* How long its mailbox has to report the unload after RM answered. */
++#define R535_GSP_UNLOADED_MS 2000
++
++/*
++ * Wait for GSP-RM to unload, in bounded time. It is done when mailbox 0
++ * reports the unload, or when RM answered and the mailbox had its 2 s, as
++ * before. Messages RM posts meanwhile, the answer among them, are taken
++ * as the message queue's work takes them. A GSP that did not answer by the
++ * deadline is reported with its queue and mailbox state: whether it took
++ * the command (cmdq r = w), and whether its core still runs.
++ */
++static int
++r535_gsp_unload_wait(struct nvkm_gsp *gsp)
++{
++	struct nvkm_subdev *subdev = &gsp->subdev;
++	ktime_t deadline = ktime_add_ms(ktime_get(), R535_GSP_UNLOAD_MS);
++	bool replied = false;
++	void *msg = NULL;
++
++	for (;;) {
++		if (nvkm_falcon_rd32(&gsp->falcon, 0x040) == 0x80000000)
++			return 0;
++
++		mutex_lock(&gsp->cmdq.mutex);
++		if (*gsp->msgq.rptr != *gsp->msgq.wptr)
++			msg = r535_gsp_msg_recv(gsp, 0, 0);
++		mutex_unlock(&gsp->cmdq.mutex);
++		if (IS_ERR(msg)) {
++			nvkm_error(subdev, "unload: message error %ld\n", PTR_ERR(msg));
++			return PTR_ERR(msg);
++		}
++
++		if (!replied && gsp->unload_replied) {
++			replied = true;
++			deadline = ktime_add_ms(ktime_get(), R535_GSP_UNLOADED_MS);
++		}
++		if (ktime_after(ktime_get(), deadline))
++			break;
++		usleep_range(1000, 2000);
++	}
++
++	if (replied)
++		return 0;
++
++	nvkm_error(subdev,
++		   "unload: no answer in %d ms: cmdq w%u r%u msgq w%u r%u mbox0 %08x mbox1 %08x riscv %d\n",
++		   R535_GSP_UNLOAD_MS, *gsp->cmdq.wptr, *gsp->cmdq.rptr,
++		   *gsp->msgq.wptr, *gsp->msgq.rptr,
++		   nvkm_falcon_rd32(&gsp->falcon, 0x040),
++		   nvkm_falcon_rd32(&gsp->falcon, 0x044),
++		   nvkm_falcon_riscv_active(&gsp->falcon));
++	return -ETIMEDOUT;
+ }
+ 
+ enum registry_type {
+@@ -941,6 +1003,16 @@ r535_gsp_msg_os_error_log(void *priv, u32 fn, void *repv, u32 repc)
+ 	return 0;
+ }
+ 
++/* The unload's reply, taken while r535_gsp_unload_wait() drains messages. */
++static int
++r535_gsp_msg_unload_replied(void *priv, u32 fn, void *repv, u32 repc)
++{
++	struct nvkm_gsp *gsp = priv;
++
++	gsp->unload_replied = true;
++	return 0;
++}
++
+ static int
+ r535_gsp_msg_mmu_fault_queued(void *priv, u32 fn, void *repv, u32 repc)
+ {
+@@ -1792,10 +1864,9 @@ r535_gsp_fini(struct nvkm_gsp *gsp, enum nvkm_suspend_state suspend)
+ 	if (WARN_ON(ret))
+ 		return ret;
+ 
+-	nvkm_msec(gsp->subdev.device, 2000,
+-		if (nvkm_falcon_rd32(&gsp->falcon, 0x040) == 0x80000000)
+-			break;
+-	);
++	ret = r535_gsp_unload_wait(gsp);
++	if (ret)
++		return ret;
+ 
+ 	gsp->running = false;
+ 	return 0;
+@@ -2288,6 +2359,8 @@ r535_gsp_oneinit(struct nvkm_gsp *gsp)
+ 	r535_gsp_msg_ntfy_add(gsp, NV_VGPU_MSG_EVENT_MMU_FAULT_QUEUED,
+ 			      r535_gsp_msg_mmu_fault_queued, gsp);
+ 	r535_gsp_msg_ntfy_add(gsp, NV_VGPU_MSG_EVENT_OS_ERROR_LOG, r535_gsp_msg_os_error_log, gsp);
++	r535_gsp_msg_ntfy_add(gsp, NV_VGPU_MSG_FUNCTION_UNLOADING_GUEST_DRIVER,
++			      r535_gsp_msg_unload_replied, gsp);
+ 	r535_gsp_msg_ntfy_add(gsp, NV_VGPU_MSG_EVENT_PERF_BRIDGELESS_INFO_UPDATE, NULL, NULL);
+ 	r535_gsp_msg_ntfy_add(gsp, NV_VGPU_MSG_EVENT_UCODE_LIBOS_PRINT, NULL, NULL);
+ 	if (rmapi->gsp->drop_send_user_shared_data)

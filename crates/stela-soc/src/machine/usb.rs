@@ -5,6 +5,9 @@ use super::*;
 use crate::Result;
 use stela_contracts::refuse;
 
+/// The reason of the power-off a held power button makes.
+pub const POWER_BUTTON_HELD: &str = "smc: power button held: system power-off";
+
 impl AppleDevices {
     /// The shared cable state of one Type-C connector.
     pub(super) fn typec_port(&mut self, number: u32) -> typec::Port {
@@ -308,7 +311,7 @@ impl AppleDevices {
         if self.reset.is_none() {
             self.reset = Some(Reset {
                 transition: Transition::PowerOff,
-                reason: String::from("smc: power button held: system power-off"),
+                reason: String::from(POWER_BUTTON_HELD),
             });
         }
         Ok(())

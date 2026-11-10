@@ -178,12 +178,22 @@ int timer_shutdown_sync(struct timer_list *timer)
     return timer_shutdown(timer);
 }
 
+/* The function of the timer due first when the queue was last read, for the
+ * host's pump report: which timer keeps waking the environment. Observation
+ * only; nothing reads it back here. */
+unsigned long stela_linux_timer_next_function;
+
 bool stela_linux_timers_next(unsigned long *expires)
 {
     stela_linux_timer_queue_current();
-    if (hlist_empty(&pending))
+    if (hlist_empty(&pending)) {
+        __atomic_store_n(&stela_linux_timer_next_function, 0, __ATOMIC_RELAXED);
         return false;
-    *expires = hlist_entry(pending.first, struct timer_list, entry)->expires;
+    }
+    const struct timer_list *first = hlist_entry(pending.first, struct timer_list, entry);
+    __atomic_store_n(&stela_linux_timer_next_function, (unsigned long)first->function,
+                     __ATOMIC_RELAXED);
+    *expires = first->expires;
     return true;
 }
 

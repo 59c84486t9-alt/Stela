@@ -1,10 +1,14 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Wed, 04 Nov 2026 20:21:43 -0500
+Date: Wed, 4 Nov 2026 20:21:43 -0500
 Subject: [PATCH] fix(workqueue): refuse allocation without an original task
 
+---
+ kernel/workqueue.c | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
 diff --git a/kernel/workqueue.c b/kernel/workqueue.c
-index cb7055aee..01744df15 100644
+index cb7055aee3afc78129e6709c69a153d7f7fcc6d2..01744df15d7914fa20fd9b7c46a0eea6d1fbdaf1 100644
 --- a/kernel/workqueue.c
 +++ b/kernel/workqueue.c
 @@ -57,6 +57,11 @@

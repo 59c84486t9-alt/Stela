@@ -1,0 +1,389 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 03:39:22 -0500
+Subject: [PATCH] fix(nouveau): bound GSP RPC waits by time and fail later RPCs
+ once GSP stops answering
+
+---
+ .../gpu/drm/nouveau/include/nvkm/subdev/gsp.h |  12 ++
+ drivers/gpu/drm/nouveau/nouveau_drm.c         |   5 +-
+ .../gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c   |  19 +--
+ .../drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c |  14 ++-
+ .../drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c | 110 +++++++++++++-----
+ 5 files changed, 118 insertions(+), 42 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h b/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
+index 6bfba3119e2e7fe2aceef67f39677e22a9fa3ebe..b124afb68f2566faade58dfb728494c2356ead79 100644
+--- a/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
++++ b/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
+@@ -196,6 +196,10 @@ struct nvkm_gsp {
+ 	bool running;
+ 	/* RM answered the last UNLOADING_GUEST_DRIVER. */
+ 	bool unload_replied;
++	/* The device is stopping: RPC waits are short, as GSP may be gone. */
++	bool stopping;
++	/* GSP did not answer in time: later RPCs fail at once. */
++	bool dead;
+ 
+ 	/* Internal GSP-RM control handles. */
+ 	struct {
+@@ -269,6 +273,14 @@ struct nvkm_gsp {
+ #endif
+ };
+ 
++/* The device is stopping for good: bound what is left to wait for GSP. */
++static inline void
++nvkm_gsp_stopping(struct nvkm_gsp *gsp)
++{
++	if (gsp)
++		WRITE_ONCE(gsp->stopping, true);
++}
++
+ static inline bool
+ nvkm_gsp_rm(struct nvkm_gsp *gsp)
+ {
+diff --git a/drivers/gpu/drm/nouveau/nouveau_drm.c b/drivers/gpu/drm/nouveau/nouveau_drm.c
+index a6552ac1fc63c4e92ea1a20daa078349b46e820f..0be9cfe7c8457000615bbb16da7a76e6d440bf61 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_drm.c
++++ b/drivers/gpu/drm/nouveau/nouveau_drm.c
+@@ -44,6 +44,8 @@
+ #include <core/pci.h>
+ #include <core/tegra.h>
+ 
++#include <subdev/gsp.h>
++
+ #include <nvif/driver.h>
+ #include <nvif/fifo.h>
+ #include <nvif/push006c.h>
+@@ -1096,8 +1098,9 @@ nouveau_drm_shutdown(struct pci_dev *pdev)
+ 	/*
+ 	 * The hardware does not come back from here, so nothing is saved to
+ 	 * resume from: this unloads GSP, which no reset recovers a card from
+-	 * once it has served work.
++	 * once it has served work. Waits for GSP are short from here on.
+ 	 */
++	nvkm_gsp_stopping(nvxx_device(drm)->gsp);
+ 	nvkm_device_fini(nvxx_device(drm), NVKM_POWEROFF);
+ 	pci_disable_device(pdev);
+ }
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c
+index d8001e3e177ffa600e75da075b22e91ef24a509b..93fe3a6798ead4f2aea5aa638365df088ff8f3e8 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/gh100.c
+@@ -20,7 +20,8 @@ int
+ gh100_gsp_fini(struct nvkm_gsp *gsp, enum nvkm_suspend_state suspend)
+ {
+ 	struct nvkm_falcon *falcon = &gsp->falcon;
+-	int ret, time = 4000;
++	ktime_t end;
++	int ret;
+ 
+ 	/* Shutdown RM. */
+ 	ret = r535_gsp_fini(gsp, suspend);
+@@ -28,21 +29,21 @@ gh100_gsp_fini(struct nvkm_gsp *gsp, enum nvkm_suspend_state suspend)
+ 		return ret;
+ 
+ 	/*
+-	 * Wait for RISC-V to halt. An unload RM never reported was already
+-	 * waited for: look once, so a stop stays bounded.
++	 * Wait up to 2 s for RISC-V to halt. A GSP that did not answer the
++	 * unload, or stopped answering before it, was already waited for: look
++	 * once, so a stop stays bounded.
+ 	 */
+-	if (ret == -ETIMEDOUT)
+-		time = 0;
+-	do {
++	end = ktime_add_ms(ktime_get(), (ret == -ETIMEDOUT || ret == -ENODEV) ? 0 : 2000);
++	for (;;) {
+ 		u32 data = nvkm_falcon_rd32(falcon, falcon->addr2 + NV_PRISCV_RISCV_CPUCTL);
+ 
+ 		if (NVVAL_GET(data, NV_PRISCV, RISCV_CPUCTL, HALTED))
+ 			return 0;
++		if (ktime_after(ktime_get(), end))
++			return -ETIMEDOUT;
+ 
+ 		usleep_range(1000, 2000);
+-	} while(time--);
+-
+-	return -ETIMEDOUT;
++	}
+ }
+ 
+ static bool
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+index 756ad034828f3a9a7f313e861cb950d1f73745a5..5cbb44f54621860027b1940b7456f8ed20c11467 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+@@ -347,9 +347,8 @@ r535_gsp_rpc_unloading_guest_driver(struct nvkm_gsp *gsp, bool suspend)
+ 	}
+ 
+ 	/*
+-	 * The reply is not waited for here: the receive path counts polls, not
+-	 * time, so a GSP that never answers holds the caller for minutes (four
+-	 * million polls). r535_gsp_unload_wait() waits for it by time.
++	 * The reply is not waited for here: r535_gsp_unload_wait() waits for
++	 * it or for the mailbox, whichever comes first, in bounded time.
+ 	 */
+ 	gsp->unload_replied = false;
+ 	return nvkm_gsp_rpc_wr(gsp, rpc, NVKM_GSP_RPC_REPLY_NOWAIT);
+@@ -358,7 +357,7 @@ r535_gsp_rpc_unloading_guest_driver(struct nvkm_gsp *gsp, bool suspend)
+ /* How long GSP-RM has to unload before the stop goes on without it. */
+ #define R535_GSP_UNLOAD_MS 4000
+ /* How long its mailbox has to report the unload after RM answered. */
+-#define R535_GSP_UNLOADED_MS 2000
++#define R535_GSP_UNLOADED_MS 1000
+ 
+ /*
+  * Wait for GSP-RM to unload, in bounded time. It is done when mailbox 0
+@@ -379,6 +378,8 @@ r535_gsp_unload_wait(struct nvkm_gsp *gsp)
+ 	for (;;) {
+ 		if (nvkm_falcon_rd32(&gsp->falcon, 0x040) == 0x80000000)
+ 			return 0;
++		if (READ_ONCE(gsp->dead))
++			return -ENODEV;
+ 
+ 		mutex_lock(&gsp->cmdq.mutex);
+ 		if (*gsp->msgq.rptr != *gsp->msgq.wptr)
+@@ -401,6 +402,7 @@ r535_gsp_unload_wait(struct nvkm_gsp *gsp)
+ 	if (replied)
+ 		return 0;
+ 
++	WRITE_ONCE(gsp->dead, true);
+ 	nvkm_error(subdev,
+ 		   "unload: no answer in %d ms: cmdq w%u r%u msgq w%u r%u mbox0 %08x mbox1 %08x riscv %d\n",
+ 		   R535_GSP_UNLOAD_MS, *gsp->cmdq.wptr, *gsp->cmdq.rptr,
+@@ -1860,6 +1862,10 @@ r535_gsp_fini(struct nvkm_gsp *gsp, enum nvkm_suspend_state suspend)
+ 		msleep(200);
+ 	}
+ 
++	/* A GSP that stopped answering cannot take the unload either. */
++	if (READ_ONCE(gsp->dead))
++		return -ENODEV;
++
+ 	ret = r535_gsp_rpc_unloading_guest_driver(gsp, suspend);
+ 	if (WARN_ON(ret))
+ 		return ret;
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
+index 3ca3de8f434082d881675e49c6c08b2cdefdc60b..fa20ca84dc46786f1fd155d70cb3190ba372d000 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
+@@ -138,8 +138,43 @@ r535_rpc_status_to_errno(uint32_t rpc_status)
+ 	}
+ }
+ 
++/*
++ * How long GSP has to answer an RPC, or to free command queue space. At a
++ * stop GSP may already be gone, so the bound is short there; it applies to
++ * waits already under way when the stop begins.
++ */
++#define R535_GSP_RPC_MS 30000
++#define R535_GSP_RPC_STOP_MS 2000
++
++static bool
++r535_gsp_overdue(struct nvkm_gsp *gsp, ktime_t start)
++{
++	s64 limit = READ_ONCE(gsp->stopping) ? R535_GSP_RPC_STOP_MS : R535_GSP_RPC_MS;
++
++	return ktime_ms_delta(ktime_get(), start) >= limit;
++}
++
++/*
++ * GSP did not answer in time: say so once, with the queue and core state,
++ * and fail every later RPC at once instead of waiting for each again.
++ */
++static void
++r535_gsp_no_answer(struct nvkm_gsp *gsp, const char *what, u32 fn, ktime_t start)
++{
++	if (READ_ONCE(gsp->dead))
++		return;
++
++	WRITE_ONCE(gsp->dead, true);
++	nvkm_error(&gsp->subdev,
++		   "no answer to %s fn %u in %lld ms: cmdq w%u r%u msgq w%u r%u mbox0 %08x riscv %d; later RPCs fail at once\n",
++		   what, fn, ktime_ms_delta(ktime_get(), start),
++		   *gsp->cmdq.wptr, *gsp->cmdq.rptr, *gsp->msgq.wptr, *gsp->msgq.rptr,
++		   nvkm_falcon_rd32(&gsp->falcon, 0x040),
++		   nvkm_falcon_riscv_active(&gsp->falcon));
++}
++
+ static int
+-r535_gsp_msgq_wait(struct nvkm_gsp *gsp, u32 gsp_rpc_len, int *ptime)
++r535_gsp_msgq_wait(struct nvkm_gsp *gsp, u32 gsp_rpc_len, ktime_t start)
+ {
+ 	u32 size, rptr = *gsp->msgq.rptr;
+ 	int used;
+@@ -149,22 +184,22 @@ r535_gsp_msgq_wait(struct nvkm_gsp *gsp, u32 gsp_rpc_len, int *ptime)
+ 	if (WARN_ON(!size || size >= gsp->msgq.cnt))
+ 		return -EINVAL;
+ 
+-	do {
++	for (;;) {
+ 		u32 wptr = *gsp->msgq.wptr;
+ 
+ 		used = wptr + gsp->msgq.cnt - rptr;
+ 		if (used >= gsp->msgq.cnt)
+ 			used -= gsp->msgq.cnt;
+ 		if (used >= size)
+-			break;
++			return used;
+ 
+-		usleep_range(1, 2);
+-	} while (--(*ptime));
+-
+-	if (WARN_ON(!*ptime))
+-		return -ETIMEDOUT;
++		if (READ_ONCE(gsp->dead))
++			return -ENODEV;
++		if (r535_gsp_overdue(gsp, start))
++			return -ETIMEDOUT;
+ 
+-	return used;
++		usleep_range(1, 2);
++	}
+ }
+ 
+ static struct r535_gsp_msg *
+@@ -205,12 +240,12 @@ r535_gsp_msgq_get_entry(struct nvkm_gsp *gsp)
+  *   message pages after they have been processed.
+  */
+ static void *
+-r535_gsp_msgq_peek(struct nvkm_gsp *gsp, u32 gsp_rpc_len, int *retries)
++r535_gsp_msgq_peek(struct nvkm_gsp *gsp, u32 gsp_rpc_len, ktime_t start)
+ {
+ 	struct r535_gsp_msg *mqe;
+ 	int ret;
+ 
+-	ret = r535_gsp_msgq_wait(gsp, gsp_rpc_len, retries);
++	ret = r535_gsp_msgq_wait(gsp, gsp_rpc_len, start);
+ 	if (ret < 0)
+ 		return ERR_PTR(ret);
+ 
+@@ -220,7 +255,7 @@ r535_gsp_msgq_peek(struct nvkm_gsp *gsp, u32 gsp_rpc_len, int *retries)
+ }
+ 
+ struct r535_gsp_msg_info {
+-	int *retries;
++	ktime_t start;
+ 	u32 gsp_rpc_len;
+ 	void *gsp_rpc_buf;
+ 	bool continuation;
+@@ -241,7 +276,7 @@ r535_gsp_msgq_recv_one_elem(struct nvkm_gsp *gsp,
+ 
+ 	expected = info->gsp_rpc_len;
+ 
+-	ret = r535_gsp_msgq_wait(gsp, expected, info->retries);
++	ret = r535_gsp_msgq_wait(gsp, expected, info->start);
+ 	if (ret < 0)
+ 		return ERR_PTR(ret);
+ 
+@@ -284,7 +319,7 @@ r535_gsp_msgq_recv_one_elem(struct nvkm_gsp *gsp,
+ }
+ 
+ static void *
+-r535_gsp_msgq_recv(struct nvkm_gsp *gsp, u32 gsp_rpc_len, int *retries)
++r535_gsp_msgq_recv(struct nvkm_gsp *gsp, u32 gsp_rpc_len, ktime_t start)
+ {
+ 	struct r535_gsp_msg *mqe;
+ 	const u32 max_rpc_size = GSP_MSG_MAX_SIZE - sizeof(*mqe);
+@@ -304,7 +339,7 @@ r535_gsp_msgq_recv(struct nvkm_gsp *gsp, u32 gsp_rpc_len, int *retries)
+ 		return ERR_PTR(-ENOMEM);
+ 
+ 	info.gsp_rpc_buf = buf;
+-	info.retries = retries;
++	info.start = start;
+ 	info.gsp_rpc_len = rpc->length;
+ 
+ 	buf = r535_gsp_msgq_recv_one_elem(gsp, &info);
+@@ -323,7 +358,7 @@ r535_gsp_msgq_recv(struct nvkm_gsp *gsp, u32 gsp_rpc_len, int *retries)
+ 	while (expected) {
+ 		u32 size;
+ 
+-		rpc = r535_gsp_msgq_peek(gsp, sizeof(*rpc), info.retries);
++		rpc = r535_gsp_msgq_peek(gsp, sizeof(*rpc), info.start);
+ 		if (IS_ERR_OR_NULL(rpc)) {
+ 			kvfree(buf);
+ 			return rpc;
+@@ -357,7 +392,8 @@ r535_gsp_cmdq_push(struct nvkm_gsp *gsp, void *rpc)
+ 	u64 *ptr = (void *)msg;
+ 	u64 *end;
+ 	u64 csum = 0;
+-	int free, time = 1000000;
++	ktime_t start = ktime_get();
++	int free;
+ 	u32 wptr, size, step, len;
+ 	u32 off = 0;
+ 
+@@ -383,13 +419,19 @@ r535_gsp_cmdq_push(struct nvkm_gsp *gsp, void *rpc)
+ 			if (free >= 1)
+ 				break;
+ 
+-			usleep_range(1, 2);
+-		} while(--time);
++			if (READ_ONCE(gsp->dead)) {
++				kvfree(msg);
++				return -ENODEV;
++			}
++			if (r535_gsp_overdue(gsp, start)) {
++				r535_gsp_no_answer(gsp, "send of",
++						   ((struct nvfw_gsp_rpc *)rpc)->function, start);
++				kvfree(msg);
++				return -ETIMEDOUT;
++			}
+ 
+-		if (WARN_ON(!time)) {
+-			kvfree(msg);
+-			return -ETIMEDOUT;
+-		}
++			usleep_range(1, 2);
++		} while (1);
+ 
+ 		cqe = (void *)((u8 *)gsp->shm.cmdq.ptr + 0x1000 + wptr * 0x1000);
+ 		step = min_t(u32, free, (gsp->cmdq.cnt - wptr));
+@@ -455,16 +497,17 @@ r535_gsp_msg_recv(struct nvkm_gsp *gsp, int fn, u32 gsp_rpc_len)
+ {
+ 	struct nvkm_subdev *subdev = &gsp->subdev;
+ 	struct nvfw_gsp_rpc *rpc;
+-	int retries = 4000000, i;
++	ktime_t start = ktime_get();
++	int i;
+ 
+ retry:
+-	rpc = r535_gsp_msgq_peek(gsp, sizeof(*rpc), &retries);
++	rpc = r535_gsp_msgq_peek(gsp, sizeof(*rpc), start);
+ 	if (IS_ERR_OR_NULL(rpc))
+-		return rpc;
++		goto failed;
+ 
+-	rpc = r535_gsp_msgq_recv(gsp, gsp_rpc_len, &retries);
++	rpc = r535_gsp_msgq_recv(gsp, gsp_rpc_len, start);
+ 	if (IS_ERR_OR_NULL(rpc))
+-		return rpc;
++		goto failed;
+ 
+ 	if (rpc->rpc_result) {
+ 		r535_gsp_msg_dump(gsp, rpc, NV_DBG_ERROR);
+@@ -513,6 +556,11 @@ retry:
+ 		goto retry;
+ 
+ 	return NULL;
++
++failed:
++	if (PTR_ERR_OR_ZERO(rpc) == -ETIMEDOUT)
++		r535_gsp_no_answer(gsp, "reply to", fn, start);
++	return rpc;
+ }
+ 
+ int
+@@ -640,6 +688,12 @@ r535_gsp_rpc_push(struct nvkm_gsp *gsp, void *payload,
+ 	void *repv;
+ 
+ 	mutex_lock(&gsp->cmdq.mutex);
++	if (READ_ONCE(gsp->dead)) {
++		kvfree(msg);
++		repv = ERR_PTR(-ENODEV);
++		goto done;
++	}
++
+ 	if (payload_size > max_payload_size) {
+ 		const u32 fn = rpc->function;
+ 		u32 remain_payload_size = payload_size;

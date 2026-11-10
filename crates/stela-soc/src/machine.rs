@@ -50,6 +50,7 @@ use stela_engine::machine::engine::Transition;
 use stela_engine::machine::registers::Lines;
 use stela_engine::system::access::AccessKind;
 use stela_soc_data::board::PowerOwner;
+pub use usb::POWER_BUTTON_HELD;
 
 use crate::aes;
 use crate::aes::Aes;

@@ -1921,7 +1921,7 @@ fn smc_places_a_running_wrapper_its_shared_page_and_watchdog() {
     devices.power_button_held().unwrap();
     let off = devices.take_reset().unwrap();
     assert_eq!(off.transition, Transition::PowerOff);
-    assert!(off.reason.contains("power button held"));
+    assert_eq!(off.reason, POWER_BUTTON_HELD);
     assert_eq!(devices.take_reset(), None);
     devices.write(0, REGION + 8, 8, 0x1122_3344, 0).unwrap();
     assert_eq!(devices.read(0, REGION + 8, 8, 0), Ok(0x1122_3344));

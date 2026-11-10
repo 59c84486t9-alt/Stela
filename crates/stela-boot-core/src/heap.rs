@@ -36,6 +36,35 @@ use core::{
 #[path = "heap/failure.rs"]
 mod failure;
 
+/// Called with the carved bytes each time they first pass another
+/// [`PEAK_STEP`] above [`PEAK_WATCH`], under the heap's lock: it must not
+/// allocate. The boot records the allocating stack, so a transient that
+/// raises the high-water mark names its code.
+static PEAK_HOOK: AtomicUsize = AtomicUsize::new(0);
+/// The carved bytes the peak hook next fires at.
+static PEAK_NEXT: AtomicUsize = AtomicUsize::new(PEAK_WATCH);
+const PEAK_WATCH: usize = 1280 << 20;
+const PEAK_STEP: usize = 64 << 20;
+
+/// Sets the hook [`PEAK_HOOK`] calls.
+pub fn set_peak_hook(hook: fn(usize)) {
+    PEAK_HOOK.store(hook as usize, Ordering::Release);
+}
+
+fn passed_peak(carved: usize) {
+    let next = PEAK_NEXT.load(Ordering::Relaxed);
+    if carved < next {
+        return;
+    }
+    PEAK_NEXT.store(carved - carved % PEAK_STEP + PEAK_STEP, Ordering::Relaxed);
+    let hook = PEAK_HOOK.load(Ordering::Acquire);
+    if hook != 0 {
+        // SAFETY: only `set_peak_hook` stores a nonzero value, a `fn(usize)`.
+        let hook: fn(usize) = unsafe { core::mem::transmute(hook) };
+        hook(carved);
+    }
+}
+
 const PAGE_BYTES: usize = 4096;
 /// A block's boundary tag, at its start: the address of the block before it
 /// and its own size, a multiple of [`GRANULE`] whose low bits hold [`FREE`]
@@ -1264,7 +1293,10 @@ unsafe fn resize_large(state: &mut State, pointer: *mut u8, new_size: usize) -> 
         if block as usize >= state.floor {
             state.carved_reserve = state.carved_reserve - old_bytes + new_bytes;
         }
-        state.peak = state.peak.max(state.carved);
+        if state.carved > state.peak {
+            state.peak = state.carved;
+            passed_peak(state.carved);
+        }
     }
     true
 }
@@ -1341,7 +1373,10 @@ unsafe fn take(state: &mut State, block: *mut Header, user: usize, payload: usiz
             state.carved_reserve += used_end - head;
         }
     }
-    state.peak = state.peak.max(state.carved);
+    if state.carved > state.peak {
+        state.peak = state.carved;
+        passed_peak(state.carved);
+    }
     user as *mut u8
 }
 
