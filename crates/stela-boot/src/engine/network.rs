@@ -1,5 +1,5 @@
 //! The mount's own network client over the host's first network adapter:
-//! the restore client's signing-server requests (`--tss`), the
+//! the restore client's signing-server requests (TSS), the
 //! connectivity check (`--network-check`) and a remote install image's
 //! ranged downloads (`engine::remote`), which share it.
 //!
@@ -36,6 +36,8 @@ use stela_soc::machine::AppleDevices;
 /// original Apple guest process and its requested server.
 pub const RELAY_BUFFER: usize = 1 << 20;
 
+/// No adapter a native driver runs: what to connect, as the screen says it.
+const NO_ADAPTER: &str = "No supported network adapter. Installing macOS needs the internet for Apple's signing server: connect wired Ethernet (most Intel, Realtek, Broadcom and Aquantia adapters, or a Realtek or ASIX USB adapter), or set Wi-Fi with `stela setup configure --wifi SSID --usb USB` on another computer.";
 /// What the screen says when DHCP gives the first adapter no lease.
 const NO_LEASE: &str = "No automatic network address. Connect Ethernet or Wi-Fi to a network with DHCPv4 or IPv6 router advertisements, or use an Offline installer. Stateful DHCPv6 is unsupported.";
 
@@ -184,7 +186,7 @@ impl HostNetwork {
             }
         }
         if failures.is_empty() {
-            Err(refuse!("no native host network adapter is available"))
+            Err(refuse!("{NO_ADAPTER}", NO_ADAPTER))
         } else {
             Err(refuse!(
                 "{NO_LEASE} {failures}",
@@ -341,7 +343,7 @@ impl HostNetwork {
 #[derive(Clone)]
 pub struct Shared(pub Rc<RefCell<HostNetwork>>);
 
-/// The restore client's way to Apple's signing service (`--tss`): one POST
+/// The restore client's way to Apple's signing service (TSS): one POST
 /// at a time, moved along by each host service without waiting, so no
 /// guest processor stalls while Apple answers.
 pub struct Signing {
@@ -427,7 +429,14 @@ pub struct GuestNetwork {
     up: Option<bool>,
     /// The first link refusal, reported once.
     refused: bool,
+    /// Frames read from the host adapter that the guest's receive queue
+    /// had no room for yet, delivered first at the next turn.
+    received: alloc::collections::VecDeque<Vec<u8>>,
 }
+
+/// Frames read from the host adapter in one service turn at most, outside
+/// the devices' lock: the rest wait in the adapter's ring.
+const RECEIVE_BURST: usize = 64;
 
 impl GuestNetwork {
     /// The second adapter when the mount's own client (`wants_client`)
@@ -454,6 +463,7 @@ impl GuestNetwork {
             },
             up: None,
             refused: false,
+            received: alloc::collections::VecDeque::new(),
         })
     }
 
@@ -461,8 +471,8 @@ impl GuestNetwork {
         self.link.mac()
     }
 
-    pub fn poll(&mut self, devices: &mut AppleDevices) {
-        let status = devices.network_status();
+    /// Report the guest's link state as `status` gives it.
+    pub fn status(&mut self, status: Option<(bool, stela_soc::machine::UsbNetworkCounters)>) {
         let up = status.is_some_and(|(up, _)| up);
         if self.up != Some(up) {
             self.up = Some(up);
@@ -472,24 +482,36 @@ impl GuestNetwork {
                 if up { "up" } else { "down" }
             ));
         }
-        // The guest's queues are the only bound: every frame it queued goes
-        // out, and frames come in while its receive queue has room. The rest
-        // wait in the host adapter's ring, which drops on overflow as the
-        // hardware does.
-        if let Some(frame) = self.transmit(Self::queued(devices)) {
-            devices.network_recycle(frame);
+    }
+
+    /// Read frames from the host adapter while the guest's receive queue
+    /// had `room` and nothing read earlier still waits, without the devices'
+    /// lock: the adapter's MMIO and DMA can wait milliseconds on the host.
+    pub fn receive(&mut self, room: bool) {
+        if !room || !self.received.is_empty() {
+            return;
         }
-        while devices.network_room() {
+        while self.received.len() < RECEIVE_BURST {
             match self.link.receive() {
-                Ok(Some(frame)) => {
-                    // Without an attached adapter the frame has nowhere to go.
-                    let _ = devices.network_deliver_owned(frame);
-                }
+                Ok(Some(frame)) => self.received.push_back(frame),
                 Ok(None) => break,
                 Err(error) => {
                     self.refuse(error.into());
                     break;
                 }
+            }
+        }
+    }
+
+    /// Give the guest the frames read so far while its receive queue has
+    /// room. The guest's queues are the only bound: the rest wait here and
+    /// then in the host adapter's ring, which drops on overflow as the
+    /// hardware does.
+    pub fn deliver(&mut self, devices: &mut AppleDevices) {
+        while !self.received.is_empty() && devices.network_room() {
+            if let Some(frame) = self.received.pop_front() {
+                // Without an attached adapter the frame has nowhere to go.
+                let _ = devices.network_deliver_owned(frame);
             }
         }
     }

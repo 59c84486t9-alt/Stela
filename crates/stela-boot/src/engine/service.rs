@@ -211,13 +211,20 @@ impl Service {
             }
         }
         if let Some(network) = network {
-            let frames = devices.with(network::GuestNetwork::queued);
+            // The host adapter's sends and receives wait outside the
+            // devices' lock, which every PE's device accesses take.
+            let (frames, status, room) = devices.with(|devices| {
+                let frames = network::GuestNetwork::queued(devices);
+                (frames, devices.network_status(), devices.network_room())
+            });
+            network.status(status);
             let reusable = network.transmit(frames);
+            network.receive(room);
             devices.serve(|devices| {
                 if let Some(frame) = reusable {
                     devices.network_recycle(frame);
                 }
-                network.poll(devices);
+                network.deliver(devices);
             });
             lap.part(Part::Network);
         }
