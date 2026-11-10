@@ -359,9 +359,10 @@ unsafe fn enable_doit() -> bool {
 }
 
 /// Back guest DRAM with every free host range, lowest first, and report
-/// the host's whole RAM as the Mac's, so what Stela and the firmware keep
-/// shows as memory the kernel does not manage
-/// (`docs/design/system.md#memory-sizing`).
+/// the backed bytes as the Mac's DRAM, so kernel and user-space policies
+/// size themselves from memory that exists
+/// (`stela_boot_core::host_memory::guest_dram`,
+/// `docs/design/system.md#memory-sizing`).
 fn guest_ram(handoff: &Handoff, options: &mut Options) -> Result<Vec<RamRange>> {
     let mut ranges = Vec::new();
     let mut assigned = 0;
@@ -377,11 +378,11 @@ fn guest_ram(handoff: &Handoff, options: &mut Options) -> Result<Vec<RamRange>> 
         return Err(refuse!("no free host RAM is left for the guest"));
     }
     options.ram_bytes = assigned;
-    options.dram_bytes = (handoff.installed & !(LARGE - 1)).max(assigned);
+    let dram = stela_boot_core::host_memory::guest_dram(handoff.installed, assigned);
+    options.dram_bytes = dram.reported;
     output::arguments(format_args!(
         "GUEST DRAM backed={assigned:#x} reported={:#x} kept={:#x}\n",
-        options.dram_bytes,
-        options.dram_bytes - assigned
+        dram.reported, dram.kept
     ));
     Ok(ranges)
 }

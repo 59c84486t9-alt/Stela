@@ -9,8 +9,32 @@ use core::{
     ffi::c_void,
     mem::MaybeUninit,
     ptr,
-    sync::atomic::{AtomicU8, Ordering},
+    sync::atomic::{AtomicU8, AtomicUsize, Ordering},
 };
+
+/// Heap bytes the Linux environment holds now and the most it has held,
+/// for the heartbeat's per-owner heap line.
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+static PEAK: AtomicUsize = AtomicUsize::new(0);
+
+/// Count `bytes` the environment got from the heap.
+pub(crate) fn note_allocated(bytes: usize) {
+    let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
+    if live > PEAK.load(Ordering::Relaxed) {
+        PEAK.fetch_max(live, Ordering::Relaxed);
+    }
+}
+
+/// Count `bytes` the environment gave back. An allocation's count happens
+/// before its release's: the pointer passes between them.
+pub(crate) fn note_freed(bytes: usize) {
+    LIVE.fetch_sub(bytes, Ordering::Relaxed);
+}
+
+/// The heap bytes the Linux environment holds and its high-water mark.
+pub fn usage() -> (usize, usize) {
+    (LIVE.load(Ordering::Relaxed), PEAK.load(Ordering::Relaxed))
+}
 
 const EMPTY: u8 = 0;
 const INSTALLING: u8 = 1;
@@ -122,8 +146,14 @@ extern "C" fn stela_linux_heap_try_available() -> bool {
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_linux_heap_try_alloc(size: usize, align: usize) -> *mut c_void {
     match Layout::from_size_align(size, align) {
-        // SAFETY: the checked layout and caller meet the installed heap contract.
-        Ok(layout) if size != 0 => unsafe { HEAP.allocate(layout).cast() },
+        Ok(layout) if size != 0 => {
+            // SAFETY: the checked layout and caller meet the installed heap contract.
+            let object = unsafe { HEAP.allocate(layout) };
+            if !object.is_null() {
+                note_allocated(size);
+            }
+            object.cast()
+        }
         _ => ptr::null_mut(),
     }
 }

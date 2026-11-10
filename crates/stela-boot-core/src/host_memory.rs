@@ -26,10 +26,13 @@ pub const HEAP_CEILING: u64 = 16 * GIB;
 /// and failed.
 const HEAP_SHARE: u64 = 12;
 /// Heap bytes per byte of the board's code window: the shared block records,
-/// index and recovery rows of the blocks it holds. An 8-PE boot with a
-/// 448 MiB window and 1.5 million live blocks held 1.31 GiB on the seven
-/// non-home cores, 2.9 bytes per window byte.
-const HEAP_PER_WINDOW: u64 = 3;
+/// successors, recovery rows, index and lookup of the blocks it holds,
+/// once for the board since the block store is shared. An 8-PE 26A434
+/// boot with a full 448 MiB window (1.56 million of 1.69 million slots
+/// live) held 437 MiB of them (`ENGINE MEMORY blocks=231M successors=53M
+/// rows=14M index=19M lookup=120M`), 0.98 bytes per window byte. Before
+/// the shared store each core kept its own, 2.9 bytes per byte.
+const HEAP_PER_WINDOW: u64 = 1;
 /// Heap each running PE keeps for itself: its machine (about 1 MiB at
 /// start), ITLB (512 KiB), fetch and jump caches (about 0.8 MiB) and
 /// successor scratch (under 1 MiB); four times that, for its own compiles.
@@ -78,6 +81,35 @@ pub struct Sizes {
     pub guest: u64,
 }
 
+/// The DRAM the guest Mac reports and the host RAM it does not see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestDram {
+    /// `/chosen dram-size` and `boot_args.memSizeActual`.
+    pub reported: u64,
+    /// Installed host RAM that Stela and the firmware keep.
+    pub kept: u64,
+}
+
+/// The guest reports the DRAM that backs it, `backed` bytes, not the
+/// host's `installed` RAM.
+///
+/// XNU sets `max_mem_actual` from `memSizeActual` and `max_mem` and
+/// `sane_size` from `memSize` (the managed range). `hw.memsize` reads
+/// `max_mem_actual`; `hw.memsize_usable` reads `max_mem`. User space
+/// (`NSProcessInfo.physicalMemory`, Metal's working-set size, jetsam
+/// limits, cache sizes) uses `hw.memsize`. A reported size above what
+/// exists makes it plan for memory that is not there: a 26A434 boot with
+/// 3.9 GB backed and 8 GB reported ran its compressor and pager at full
+/// load after login. On a Mac the gap is iBoot's carveouts, a few percent;
+/// here those carveouts lie inside the backed range (`memSize` excludes
+/// them), so the backed size is the truthful `max_mem_actual`.
+pub fn guest_dram(installed: u64, backed: u64) -> GuestDram {
+    GuestDram {
+        reported: backed,
+        kept: installed.saturating_sub(backed),
+    }
+}
+
 /// Too little RAM for the guest's floor: `free` bytes, of `needed`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shortfall {
@@ -106,7 +138,7 @@ impl Shortfall {
 /// running PEs; the others add only their parked reserves.
 ///
 /// Each part takes a share of `free`, between its bounds:
-/// - the heap a twelfth, [`HEAP_PER_WINDOW`] bytes per byte of the board's
+/// - the heap a twelfth, [`HEAP_PER_WINDOW`] byte per byte of the board's
 ///   code window and [`PE_HEAP`] per runner, within
 ///   [`HEAP_FLOOR`]..=[`HEAP_CEILING`];
 /// - the code arena what `code_reservation` gives;

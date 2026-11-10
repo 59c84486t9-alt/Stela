@@ -1232,6 +1232,26 @@ fn heap_report(heap: &stela_boot_core::heap::Usage) {
         crate::ALLOCATOR.low()
     ));
     output::arguments(format_args!("{line}\n"));
+    owner_report(heap.live);
+}
+
+/// `HEAP OWNERS linux=40/52M libc=900/1350M rest=600M`: the heap bytes
+/// the Linux environment and the C library (Mesa, NAK, LLVM) hold now and
+/// at most, and the rest of the live heap (engine, devices, tables).
+fn owner_report(live: usize) {
+    let (linux, linux_peak) = stela_linux::heap::usage();
+    #[cfg(feature = "nvk")]
+    let (libc, libc_peak) = super::gpu::client::LIBC_HEAP.usage();
+    #[cfg(not(feature = "nvk"))]
+    let (libc, libc_peak) = (0, 0);
+    output::arguments(format_args!(
+        "HEAP OWNERS linux={}/{}M libc={}/{}M rest={}M\n",
+        linux >> 20,
+        linux_peak >> 20,
+        libc >> 20,
+        libc_peak >> 20,
+        live.saturating_sub(linux + libc) >> 20,
+    ));
 }
 
 /// `(maintenance=9,memory=2)`: the causes of the discards so far, or

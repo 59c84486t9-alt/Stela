@@ -51,10 +51,11 @@ fn an_8_gib_host_gives_the_guest_what_the_parts_leave() {
 }
 
 #[test]
-fn a_16_gib_host_sizes_the_heap_from_its_window_and_one_shared_code_window() {
+fn a_16_gib_host_keeps_the_heap_floor_and_one_shared_code_window() {
     let sizes = sizes(free(16), 8, 8).unwrap();
-    // A twelfth, 3 bytes per byte of the 512 MiB window and 16 MiB per PE.
-    assert_eq!(sizes.heap, 2986 * MIB);
+    // A twelfth, a byte per byte of the 512 MiB window and 16 MiB per PE
+    // is under the floor.
+    assert_eq!(sizes.heap, HEAP_FLOOR);
     // 64 MiB of window per runner, and each executor's 2 MiB of its own.
     assert_eq!(sizes.code.bytes, 528 * MIB);
     assert!(sizes.guest > 10 * GIB);
@@ -79,23 +80,23 @@ fn stelas_share_stops_growing_per_pe_past_what_each_pe_takes() {
         (2, 4, None),
         (2, 8, Some([2816, 132, 158, 5086])),
         (2, 16, Some([2816, 132, 406, 13030])),
-        (2, 30, Some([2976, 132, 836, 26776])),
-        (2, 128, Some([11338, 132, 2048, 117554])),
+        (2, 30, Some([2816, 132, 840, 26932])),
+        (2, 128, Some([11082, 132, 2048, 117810])),
         (8, 4, None),
         (8, 8, Some([2816, 528, 538, 4310])),
-        (8, 16, Some([3028, 528, 1424, 11404])),
-        (8, 30, Some([4224, 528, 2884, 23084])),
-        (8, 128, Some([12586, 528, 8192, 109766])),
+        (8, 16, Some([2816, 528, 1448, 11592])),
+        (8, 30, Some([3200, 528, 2998, 23994])),
+        (8, 128, Some([11562, 528, 8192, 110790])),
         (24, 4, None),
         (24, 8, Some([2816, 560, 768, 4048])),
-        (24, 16, Some([4820, 1072, 1164, 9328])),
-        (24, 30, Some([7552, 1584, 2398, 19186])),
-        (24, 128, Some([15914, 1584, 8192, 105382])),
+        (24, 16, Some([2816, 1072, 1388, 11108])),
+        (24, 30, Some([4480, 1584, 2738, 21918])),
+        (24, 128, Some([12842, 1584, 8192, 108454])),
         (64, 4, None),
         (64, 8, None),
-        (64, 16, Some([5460, 1152, 2048, 7724])),
-        (64, 30, Some([9344, 2048, 2146, 17182])),
-        (64, 128, Some([16384, 2176, 8192, 104320])),
+        (64, 16, Some([3412, 1152, 2048, 9772])),
+        (64, 30, Some([5504, 2048, 2574, 20594])),
+        (64, 128, Some([13994, 2176, 8192, 106710])),
     ] {
         let actual = sizes(free * GIB, runners, runners)
             .ok()
@@ -220,4 +221,24 @@ fn the_pack_gets_only_what_the_parts_and_the_guest_leave() {
             }
         }
     }
+}
+
+#[test]
+fn the_guest_reports_the_dram_that_backs_it_not_the_hosts() {
+    // The 8 GiB bench: 3920 MiB backed of 8190 MiB installed.
+    let dram = guest_dram(0x1_ffe0_0000, 0xf500_0000);
+    assert_eq!(dram.reported, 0xf500_0000);
+    assert_eq!(dram.kept, 0x1_0ae0_0000);
+    // `memSize` (the managed range above the carveouts and below the
+    // framebuffer) stays within it, and tag storage sized from it lies at
+    // the managed range's top.
+    let dram_base = 0x100_0000_0000;
+    let phys_base = dram_base + 32 * MIB;
+    let managed = dram.reported - 32 * MIB - 16 * MIB;
+    let value = stela_contracts::tag_storage::hand_off(phys_base, managed, dram.reported).unwrap();
+    let base = stela_contracts::tag_storage::base(value);
+    assert!(base >= phys_base);
+    assert!(base + stela_contracts::tag_storage::bytes(dram.reported) <= phys_base + managed);
+    // A host that backs everything it has keeps nothing.
+    assert_eq!(guest_dram(8 * GIB, 8 * GIB).kept, 0);
 }

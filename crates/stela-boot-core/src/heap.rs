@@ -35,6 +35,7 @@ use core::{
 // Explicit, so the NVIDIA LUT fixture can compile this file by path.
 #[path = "heap/failure.rs"]
 mod failure;
+pub mod tally;
 
 /// Called with the carved bytes each time they first pass another
 /// [`PEAK_STEP`] above [`PEAK_WATCH`], under the heap's lock: it must not

@@ -1208,17 +1208,28 @@ fn text(pointer: *const c_char) -> &'static str {
     unsafe { CStr::from_ptr(pointer) }.to_str().unwrap_or("?")
 }
 
+/// The heap bytes the C library (Mesa, NAK, LLVM) holds, for `HEAP OWNERS`.
+pub(in crate::engine) static LIBC_HEAP: stela_boot_core::heap::tally::Tally =
+    stela_boot_core::heap::tally::Tally::new();
+
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_libc_allocate(size: usize, alignment: usize) -> *mut u8 {
     match Layout::from_size_align(size, alignment) {
-        // SAFETY: the C library never asks for zero bytes: a block has a header.
-        Ok(layout) => unsafe { alloc(layout) },
+        Ok(layout) => {
+            // SAFETY: the C library never asks for zero bytes: a block has a header.
+            let pointer = unsafe { alloc(layout) };
+            if !pointer.is_null() {
+                LIBC_HEAP.allocated(size);
+            }
+            pointer
+        }
         Err(_) => ptr::null_mut(),
     }
 }
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_libc_release(pointer: *mut u8, size: usize, alignment: usize) {
+    LIBC_HEAP.released(size);
     // SAFETY: the C library gives back what it got with this size and alignment.
     unsafe { dealloc(pointer, Layout::from_size_align_unchecked(size, alignment)) };
 }
