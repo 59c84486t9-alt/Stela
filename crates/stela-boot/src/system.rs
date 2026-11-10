@@ -402,28 +402,6 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs> {
     if files.len() > MAX_FILES {
         return Err(refuse!("bundle lists too many files"));
     }
-    // The translation store, when a volume has one and a file slot is
-    // left; rewriting its pack needs the storage drivers.
-    let mut storage = storage;
-    crate::status::begin("Opening the translation cache");
-    let translations = crate::engine::translations::read();
-    match &translations {
-        Some((store, true)) => crate::status::done(&format!("{} MB", store.bytes >> 20)),
-        Some((store, false)) => crate::status::warn(&format!(
-            "{} MB; new translations stay in memory this boot: `stela setup repair` prepares \
-             the file",
-            store.bytes >> 20
-        )),
-        None => crate::status::done("none on this USB"),
-    }
-    if files.len() < MAX_FILES
-        && let Some((store, writable)) = translations
-    {
-        files.push((String::from(crate::engine::translations::FILE), store));
-        if writable && storage.is_none() {
-            storage = storage::discover().ok();
-        }
-    }
     Ok(Inputs {
         source,
         files,
@@ -641,6 +619,65 @@ pub(crate) fn boot(
     }
 }
 
+/// Read the translation store, when a volume has one and a file slot is
+/// left, within what this PC's free RAM leaves after Stela's parts and the
+/// guest's floor (`host_memory::pack_budget`), less `pending` bytes the
+/// loader allocates before it reserves the parts: a cache, it never stops
+/// the boot. Rewriting its pack needs the storage drivers.
+fn translation_store(
+    mut files: BundleFiles,
+    mut storage: Option<stela_drivers::Handoff>,
+    cores: usize,
+    pending: u64,
+) -> (BundleFiles, Option<stela_drivers::Handoff>) {
+    use crate::engine::translations::PackRead;
+    crate::status::begin("Opening the translation cache");
+    // Without a memory map the pack gets nothing; the parts' sizing
+    // reports the map's absence.
+    let free = free_ram().map_or(0, |free| free.saturating_sub(pending));
+    let budget = stela_boot_core::host_memory::pack_budget(free, cores, cores);
+    let Some(store) = crate::engine::translations::read(budget) else {
+        crate::status::done("none on this USB");
+        return (files, storage);
+    };
+    let mb = |bytes: u64| bytes / 1_000_000;
+    let stays = "new translations stay in memory this boot";
+    match store.pack {
+        PackRead::Skipped => crate::status::warn(&format!(
+            "left on the USB: this PC's memory has no room for it; {stays}"
+        )),
+        PackRead::Part { read, held } => crate::status::warn(&format!(
+            "{} of {} MB, as much as this PC's memory holds",
+            mb(read),
+            mb(held)
+        )),
+        PackRead::Whole(bytes) if store.writable => {
+            crate::status::done(&format!("{} MB", mb(bytes)));
+        }
+        PackRead::None if store.writable => crate::status::done("empty"),
+        PackRead::Whole(_) | PackRead::None if budget == 0 => {
+            crate::status::warn(&format!("this PC's memory has no room for it; {stays}"))
+        }
+        PackRead::Whole(bytes) => crate::status::warn(&format!(
+            "{} MB; {stays}: `stela setup repair` prepares the file",
+            mb(bytes)
+        )),
+        PackRead::None => {
+            crate::status::warn(&format!("{stays}: `stela setup repair` prepares the file"))
+        }
+    }
+    if files.len() < MAX_FILES {
+        files.push((
+            String::from(crate::engine::translations::FILE),
+            store.region,
+        ));
+        if store.writable && storage.is_none() {
+            storage = storage::discover().ok();
+        }
+    }
+    (files, storage)
+}
+
 fn load(
     options: Vec<u8>,
     inputs: Inputs,
@@ -655,13 +692,18 @@ fn load(
         storage,
         wifi_key,
     } = inputs;
-    crate::status::begin("Setting up Stela's memory");
-    let image = memory::prepare_image(&snapshot)?;
     let text = core::str::from_utf8(&options).map_err(|_| refuse!("stela.cfg is not UTF-8"))?;
     let system = System::parse(text).map_err(stela_boot_core::options::Error::message)?;
     let (native_processors, available_cores) = crate::native_smp::firmware::capture_inventory()
         .map_err(crate::native_smp::firmware::Error::message)?;
     let cores = system.assigned_native_cores(available_cores, bundle_pes)?;
+    // The translation cache takes only what the parts and the guest leave,
+    // so it is read last before they are reserved: only the engine image's
+    // copy comes between.
+    let image_bytes = crate::native_image::ResidentImage::allocation_bytes(snapshot.bytes);
+    let (bundle, storage) = translation_store(bundle, storage, cores, image_bytes);
+    crate::status::begin("Setting up Stela's memory");
+    let image = memory::prepare_image(&snapshot)?;
     let mut memory = memory::reserve(cores, &image.ram)?;
     let tsc_hz = crate::firmware::tsc_hz();
     if !crate::cpu::INVARIANT_TSC.present() {

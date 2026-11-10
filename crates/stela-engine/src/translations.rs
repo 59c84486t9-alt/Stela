@@ -126,7 +126,34 @@ pub struct StoredBlock {
     pub fault_recovery: Vec<UnqualifiedFaultRecovery>,
 }
 
+/// A stored entry's code and direct exits as installed at one page
+/// ([`Entry::relocate`]): buffers a machine reuses for every install, so a
+/// stored block costs no allocation.
+#[derive(Debug, Default)]
+pub struct Relocated {
+    pub code: Vec<u8>,
+    pub direct_exits: Vec<DirectExit>,
+}
+
 impl Entry {
+    /// The heap bytes its buffers own.
+    fn buffer_bytes(&self) -> usize {
+        let mut bytes = self.input.capacity() + self.code.capacity();
+        bytes += self.relocations.capacity() * core::mem::size_of::<u32>();
+        bytes += self.source_map.capacity() * core::mem::size_of::<(u16, u32)>();
+        bytes += self.exits.capacity() * core::mem::size_of::<Exit>();
+        bytes += self.recovery.capacity() * core::mem::size_of::<UnqualifiedFaultRecovery>();
+        for row in &self.recovery {
+            bytes += row.bindings.capacity() * core::mem::size_of::<RecoveryBinding>();
+        }
+        bytes
+    }
+
+    /// What it costs in a record: its slot and its buffers.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        core::mem::size_of::<Self>() + self.buffer_bytes()
+    }
+
     /// The block as compiled at the page whose address is `page`.
     pub fn rebase(&self, page: u64, admitted: &[u8]) -> Option<StoredBlock> {
         if !self.consistent() || admitted.get(..self.input.len())? != self.input {
@@ -178,6 +205,60 @@ impl Entry {
                 })
                 .collect::<Option<_>>()?,
         })
+    }
+
+    /// What installing the block at the page whose address is `page` needs
+    /// of it, written into `into`, whose buffers keep their capacity for the
+    /// next: its code, rebased, and its direct exits. Its source map and
+    /// recovery rows stay here; the rows' first fault rebases them
+    /// ([`Self::rebase`]), and only their check that they rebase is made
+    /// now. The entry's other checks ([`Self::consistent`]) are its
+    /// record's: [`Record::decode`] made them; the bounds that keep the
+    /// writes and the install inside the code are checked here again.
+    pub fn relocate(&self, page: u64, admitted: &[u8], into: &mut Relocated) -> bool {
+        self.relocate_into(page, admitted, into).is_some()
+    }
+
+    fn relocate_into(&self, page: u64, admitted: &[u8], into: &mut Relocated) -> Option<()> {
+        if admitted.get(..self.input.len())? != self.input
+            || !page.is_multiple_of(PAGE_BYTES as u64)
+            || self.source_map.len() * 4 != usize::from(self.source_bytes)
+        {
+            return None;
+        }
+        page.checked_add(u64::from(self.offset))?
+            .checked_add(u64::from(self.source_bytes))?;
+        if !self
+            .recovery
+            .iter()
+            .all(|row| row.start < row.end && row.end <= self.code.len())
+            || !self
+                .recovery
+                .iter()
+                .all(|row| self.retirement_at(row.retirement, page).is_some())
+        {
+            return None;
+        }
+        into.code.clear();
+        into.code.extend_from_slice(&self.code);
+        for &at in &self.relocations {
+            let field = into.code.get_mut(at as usize..at as usize + FIELD_BYTES)?;
+            let value = u64::from_le_bytes(field.try_into().ok()?).wrapping_add(page);
+            field.copy_from_slice(&value.to_le_bytes());
+        }
+        into.direct_exits.clear();
+        for exit in &self.exits {
+            if exit.offset as usize > self.code.len() {
+                return None;
+            }
+            into.direct_exits.push(DirectExit {
+                offset: exit.offset as usize,
+                target: GuestAddress(exit.target.wrapping_add(page)),
+                kind: ExitKind::try_from(u64::from(exit.kind)).ok()?,
+                skipped: exit.skipped,
+            });
+        }
+        Some(())
     }
 
     /// Reconstruct only a source-backed retirement shape. This never mints a
@@ -309,14 +390,7 @@ impl Record {
         let mut bytes = core::mem::size_of::<Self>() + 2 * core::mem::size_of::<usize>();
         bytes += self.entries.capacity() * core::mem::size_of::<Entry>();
         for entry in &self.entries {
-            bytes += entry.input.capacity() + entry.code.capacity();
-            bytes += entry.relocations.capacity() * core::mem::size_of::<u32>();
-            bytes += entry.source_map.capacity() * core::mem::size_of::<(u16, u32)>();
-            bytes += entry.exits.capacity() * core::mem::size_of::<Exit>();
-            bytes += entry.recovery.capacity() * core::mem::size_of::<UnqualifiedFaultRecovery>();
-            for row in &entry.recovery {
-                bytes += row.bindings.capacity() * core::mem::size_of::<RecoveryBinding>();
-            }
+            bytes += entry.buffer_bytes();
         }
         bytes
     }
@@ -462,6 +536,19 @@ impl Record {
 
     /// Decode a record for `translator` and page `key`, checking it whole.
     pub fn decode(bytes: &[u8], translator: &Digest, key: &Digest) -> Result<Self, FormatError> {
+        Self::decode_checked(bytes, translator, key, true)
+    }
+
+    /// [`Self::decode`] of bytes that may already have passed it: with
+    /// `check` false, the trailer's hash and each entry's
+    /// [`Entry::consistent`] are not checked again, as the same immutable
+    /// bytes decode to the same entries. The format's bounds are.
+    pub fn decode_checked(
+        bytes: &[u8],
+        translator: &Digest,
+        key: &Digest,
+        check: bool,
+    ) -> Result<Self, FormatError> {
         if bytes.len() < HEADER_BYTES + TRAILER_BYTES {
             return Err(FormatError::Truncated);
         }
@@ -483,7 +570,7 @@ impl Record {
         if reader.u64()? != bytes.len() as u64 {
             return Err(FormatError::Truncated);
         }
-        if Sha256::digest(body).as_slice() != trailer {
+        if check && Sha256::digest(body).as_slice() != trailer {
             return Err(FormatError::Checksum);
         }
         if count > reader.0.len() / ENTRY_MIN_BYTES {
@@ -491,7 +578,7 @@ impl Record {
         }
         let mut entries = decode_items(count, || {
             let entry = reader.entry()?;
-            if !entry.consistent() {
+            if check && !entry.consistent() {
                 return Err(FormatError::Entry);
             }
             Ok(entry)

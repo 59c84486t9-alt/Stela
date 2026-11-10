@@ -52,9 +52,16 @@ pub(crate) struct ResidentImage {
     geometry: Layout,
     image_bytes: usize,
 }
+const ALIGNMENT: u64 = 2 * 1024 * 1024;
+
 impl ResidentImage {
+    /// The firmware bytes [`Self::allocate`] takes for an image of
+    /// `image_bytes`: room to place it on a 2 MiB boundary.
+    pub(crate) const fn allocation_bytes(image_bytes: usize) -> u64 {
+        (image_bytes as u64 + ALIGNMENT).next_multiple_of(4096)
+    }
+
     pub(crate) fn allocate(image_bytes: usize, virtual_base: u64) -> Result<Self, Error> {
-        const ALIGNMENT: u64 = 2 * 1024 * 1024;
         if image_bytes == 0
             || image_bytes > isize::MAX as usize
             || !virtual_base.is_multiple_of(4096)

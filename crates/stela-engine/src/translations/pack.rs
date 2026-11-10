@@ -22,7 +22,7 @@ use crate::machine::engine::SharedTranslation;
 use crate::machine::{Offer, Preparation, Translations};
 use alloc::{
     collections::{BTreeMap, VecDeque},
-    sync::Arc,
+    sync::{Arc, Weak},
     vec::Vec,
 };
 pub use codec::{DecodeError, DecodeScratch};
@@ -41,13 +41,31 @@ const INDEX_ENTRY_BYTES: usize = DIGEST_BYTES + 8 + 8;
 const CHECKSUM_BYTES: usize = DIGEST_BYTES;
 /// The most records a pack holds.
 pub const MAX_RECORDS: usize = 1 << 22;
-/// The most memory the blocks waiting for proof take; later blocks are
-/// counted as dropped.
+/// The most memory the blocks waiting for proof take by default; later
+/// blocks are counted as dropped ([`Store::set_bounds`]).
 const MAX_PENDING_BYTES: usize = 16 << 20;
-/// A direct-mapped cache of decoded pack records shared by all PEs. Each
-/// slot has its own bound so one large record cannot evict many small ones.
-const DECODED_SLOTS: usize = 128;
-const DECODED_SLOT_BYTES: usize = 64 << 10;
+/// The default bound of the decoded-record cache, least recently used first
+/// out ([`Store::set_bounds`]). One record takes at most an eighth of it.
+const DECODED_BYTES: usize = 8 << 20;
+/// The default bound of the entries proven during the run
+/// ([`Store::prove_batch`]).
+const PROVEN_BYTES: usize = 64 << 20;
+/// What a page waiting for proof costs beyond its buffers: an entry in a
+/// B-tree node about half full.
+const PENDING_PAGE_BYTES: usize = 2 * size_of::<(PendingKey, PendingPage)>();
+/// The direct-mapped tables that name why a shared lookup missed: offers
+/// being compiled, offers evicted, and the last offer of each PC and page.
+const MISS_SLOTS: usize = 4096;
+/// A full relayout leaves room for this many more index entries (at least
+/// [`MIN_INDEX_SLACK`]) before the records, so later boots that add records
+/// rewrite only the index and the new records.
+const INDEX_SLACK_DIVISOR: usize = 2;
+const MIN_INDEX_SLACK: usize = 1024;
+/// Records start on this boundary after a full relayout.
+const RECORD_ALIGNMENT: u64 = 4096;
+/// A pack whose unused bytes between records pass this share of its length
+/// is laid out again from the start.
+const MAX_WASTE_PERCENT: u64 = 25;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackError {
@@ -193,6 +211,7 @@ impl<'a> Pack<'a> {
         Some(PackedRecord {
             bytes: self.get(key)?,
             format: self.format,
+            checked: false,
         })
     }
 
@@ -210,6 +229,9 @@ impl<'a> Pack<'a> {
 pub struct PackedRecord<'a> {
     bytes: &'a [u8],
     format: PackFormat,
+    /// These bytes decoded whole once already, with every check: they are
+    /// immutable, so a decode again checks only the format's bounds.
+    checked: bool,
 }
 
 impl PackedRecord<'_> {
@@ -232,7 +254,7 @@ impl PackedRecord<'_> {
         } else {
             self.bytes
         };
-        Record::decode(raw, translator, key).map_err(|error| match error {
+        Record::decode_checked(raw, translator, key, !self.checked).map_err(|error| match error {
             FormatError::Capacity => DecodeError::Capacity,
             _ => DecodeError::Invalid,
         })
@@ -273,47 +295,101 @@ impl Piece<'_> {
     }
 }
 
-/// A pack to write: its header, index and checksum, then its records, in
-/// order.
+/// A pack to write: its header, index and checksum, then its records at
+/// their offsets, with zeros in any room between them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout<'a> {
     prefix: Vec<u8>,
-    records: Vec<Piece<'a>>,
+    /// Each record's offset and bytes, by offset.
+    records: Vec<(u64, Piece<'a>)>,
+    length: u64,
+    /// The byte ranges that differ from the pack this one was planned over,
+    /// in order; `None` when every byte may.
+    changed: Option<Vec<core::ops::Range<u64>>>,
 }
+
+/// Zeros for the room between records.
+static ZEROS: [u8; 4096] = [0; 4096];
 
 impl<'a> Layout<'a> {
     /// The pack of `records` (page keys and their record bytes, each key
-    /// once) for `translator`.
+    /// once) for `translator`, its records in key order after the index.
     pub fn new(translator: &Digest, records: Vec<(Digest, Piece<'a>)>) -> Self {
         Self::with_format(translator, records, PackFormat::Raw)
     }
 
     fn with_format(
         translator: &Digest,
+        records: Vec<(Digest, Piece<'a>)>,
+        format: PackFormat,
+    ) -> Self {
+        let start = prefix_length(records.len()) as u64;
+        Self::compact(translator, records, format, start)
+    }
+
+    /// Every record laid out anew in key order from `start`.
+    fn compact(
+        translator: &Digest,
         mut records: Vec<(Digest, Piece<'a>)>,
         format: PackFormat,
+        start: u64,
+    ) -> Self {
+        records.sort_by_key(|record| record.0);
+        let mut offset = start;
+        let placed = records
+            .into_iter()
+            .map(|(key, piece)| {
+                let at = offset;
+                offset += piece.bytes().len() as u64;
+                (key, at, piece)
+            })
+            .collect();
+        Self::placed(translator, placed, format, None)
+    }
+
+    /// The layout of records at the offsets given, which lie after the
+    /// prefix and do not overlap.
+    fn placed(
+        translator: &Digest,
+        mut records: Vec<(Digest, u64, Piece<'a>)>,
+        format: PackFormat,
+        changed: Option<Vec<core::ops::Range<u64>>>,
     ) -> Self {
         records.sort_by_key(|record| record.0);
         let count = records.len();
-        let mut prefix =
-            Vec::with_capacity(HEADER_BYTES + count * INDEX_ENTRY_BYTES + CHECKSUM_BYTES);
+        let mut prefix = Vec::with_capacity(prefix_length(count));
         prefix.extend(MAGIC);
         prefix.extend((format as u32).to_le_bytes());
         prefix.extend((count as u32).to_le_bytes());
         prefix.extend(translator.0);
-        let mut offset = (HEADER_BYTES + count * INDEX_ENTRY_BYTES + CHECKSUM_BYTES) as u64;
-        for (key, piece) in &records {
-            let bytes = piece.bytes().len() as u64;
+        for (key, offset, piece) in &records {
             prefix.extend(key.0);
             prefix.extend(offset.to_le_bytes());
-            prefix.extend(bytes.to_le_bytes());
-            offset += bytes;
+            prefix.extend((piece.bytes().len() as u64).to_le_bytes());
         }
         let checksum = Sha256::digest(&prefix);
         prefix.extend(checksum);
+        let mut records: Vec<(u64, Piece<'a>)> = records
+            .into_iter()
+            .map(|(_, offset, piece)| (offset, piece))
+            .collect();
+        records.sort_by_key(|record| record.0);
+        let length = records
+            .last()
+            .map_or(prefix.len() as u64, |(offset, piece)| {
+                offset + piece.bytes().len() as u64
+            });
+        debug_assert!(
+            records
+                .first()
+                .is_none_or(|(offset, _)| *offset >= prefix.len() as u64),
+            "records after the prefix"
+        );
         Self {
             prefix,
-            records: records.into_iter().map(|(_, piece)| piece).collect(),
+            records,
+            length,
+            changed,
         }
     }
 
@@ -323,23 +399,176 @@ impl<'a> Layout<'a> {
 
     /// The pack's length in bytes.
     pub fn bytes(&self) -> u64 {
-        self.chunks().map(|chunk| chunk.len() as u64).sum()
+        self.length
     }
 
     /// The pack's bytes, in order.
     pub fn chunks(&self) -> impl Iterator<Item = &[u8]> + '_ {
-        core::iter::once(self.prefix.as_slice()).chain(self.records.iter().map(Piece::bytes))
+        let mut chunks: Vec<&[u8]> = Vec::with_capacity(1 + 2 * self.records.len());
+        chunks.push(&self.prefix);
+        let mut at = self.prefix.len() as u64;
+        for (offset, piece) in &self.records {
+            for gap in zeros(offset - at) {
+                chunks.push(gap);
+            }
+            chunks.push(piece.bytes());
+            at = offset + piece.bytes().len() as u64;
+        }
+        chunks.into_iter()
     }
 
     pub fn to_vec(&self) -> Vec<u8> {
         self.chunks().flatten().copied().collect()
     }
+
+    /// The ranges of [`Self::chunks`] that differ from the pack it was planned
+    /// over, in order: a writer may write only them, the index last. `None`
+    /// when every byte may differ.
+    pub fn changed(&self) -> Option<&[core::ops::Range<u64>]> {
+        self.changed.as_deref()
+    }
+
+    /// Fill `buffer` with the pack's bytes from `offset`, zeros past its end.
+    pub fn read_at(&self, offset: u64, buffer: &mut [u8]) {
+        buffer.fill(0);
+        let end = offset + buffer.len() as u64;
+        let copy = |buffer: &mut [u8], start: u64, bytes: &[u8]| {
+            let from = offset.max(start);
+            let to = end.min(start + bytes.len() as u64);
+            if from < to {
+                buffer[(from - offset) as usize..(to - offset) as usize]
+                    .copy_from_slice(&bytes[(from - start) as usize..(to - start) as usize]);
+            }
+        };
+        copy(buffer, 0, &self.prefix);
+        let first = self
+            .records
+            .partition_point(|(start, piece)| start + piece.bytes().len() as u64 <= offset);
+        for (start, piece) in &self.records[first..] {
+            if *start >= end {
+                break;
+            }
+            copy(buffer, *start, piece.bytes());
+        }
+    }
+}
+
+/// `bytes` zeros, in slices of [`ZEROS`].
+fn zeros(bytes: u64) -> impl Iterator<Item = &'static [u8]> {
+    let whole = (bytes / ZEROS.len() as u64) as usize;
+    let rest = (bytes % ZEROS.len() as u64) as usize;
+    core::iter::repeat_n(ZEROS.as_slice(), whole).chain((rest != 0).then(|| &ZEROS[..rest]))
+}
+
+/// The bytes of the header, index and checksum of a pack of `records`.
+fn prefix_length(records: usize) -> usize {
+    HEADER_BYTES + records * INDEX_ENTRY_BYTES + CHECKSUM_BYTES
 }
 
 /// The pack bytes a layout of `records` records holding `bytes` record
 /// bytes takes.
 fn layout_bytes(records: usize, bytes: u64) -> u64 {
-    (HEADER_BYTES + records * INDEX_ENTRY_BYTES + CHECKSUM_BYTES) as u64 + bytes
+    prefix_length(records) as u64 + bytes
+}
+
+/// The layout of `records`, the plan's choice within `bound`, over the pack
+/// read, `previous`: each record it keeps unchanged stays where it was, the
+/// others follow its last, and only they and the index are written. When
+/// the index outgrows the room before the records, the unused room passes
+/// [`MAX_WASTE_PERCENT`] or the pack would pass `bound`, every record is
+/// laid out again, with room for the index to grow.
+fn layout_over<'a>(
+    translator: &Digest,
+    previous: Option<Pack<'a>>,
+    records: Vec<(Digest, Piece<'a>)>,
+    format: PackFormat,
+    bound: u64,
+) -> Layout<'a> {
+    let relayout = |records: Vec<(Digest, Piece<'a>)>| {
+        let used: u64 = records
+            .iter()
+            .map(|(_, piece)| piece.bytes().len() as u64)
+            .sum();
+        let slack = (records.len() / INDEX_SLACK_DIVISOR).max(MIN_INDEX_SLACK);
+        let roomy =
+            (prefix_length(records.len() + slack) as u64).next_multiple_of(RECORD_ALIGNMENT);
+        // Without room in the bound for the slack, the records follow the
+        // index directly.
+        let start = if roomy + used <= bound {
+            roomy
+        } else {
+            prefix_length(records.len()) as u64
+        };
+        Layout::compact(translator, records, format, start)
+    };
+    let Some(pack) = previous else {
+        return relayout(records);
+    };
+    let base = pack.bytes.as_ptr() as usize;
+    let first_record = pack
+        .iter()
+        .map(|(_, bytes)| (bytes.as_ptr() as usize - base) as u64)
+        .min()
+        .unwrap_or(pack.bytes.len() as u64);
+    let prefix = prefix_length(records.len()) as u64;
+    if prefix > first_record {
+        return relayout(records);
+    }
+    // A kept record that is the read pack's slot for its key keeps its
+    // offset.
+    let mut placed = Vec::with_capacity(records.len());
+    let mut appended = Vec::new();
+    for (key, piece) in records {
+        let kept = match &piece {
+            Piece::Kept(bytes) => pack
+                .get(&key)
+                .filter(|slot| core::ptr::eq(*slot, *bytes))
+                .map(|slot| (slot.as_ptr() as usize - base) as u64),
+            Piece::New(_) => None,
+        };
+        match kept {
+            Some(offset) => placed.push((key, offset, piece)),
+            None => appended.push((key, piece)),
+        }
+    }
+    let mut end = placed
+        .iter()
+        .map(|(_, offset, piece)| offset + piece.bytes().len() as u64)
+        .max()
+        .unwrap_or(first_record)
+        .max(first_record);
+    let mut changed = Vec::new();
+    appended.sort_by_key(|record| record.0);
+    for (key, piece) in appended {
+        let bytes = piece.bytes().len() as u64;
+        changed.push(end..end + bytes);
+        placed.push((key, end, piece));
+        end += bytes;
+    }
+    let used: u64 = placed
+        .iter()
+        .map(|(_, _, piece)| piece.bytes().len() as u64)
+        .sum();
+    // Kept records of a corrupt index can overlap and use more than the
+    // span: lay those out again too.
+    let waste = (end - first_record).checked_sub(used);
+    if end > bound || waste.is_none_or(|waste| waste * 100 > end * MAX_WASTE_PERCENT) {
+        return relayout(
+            placed
+                .into_iter()
+                .map(|(key, _, piece)| (key, piece))
+                .collect(),
+        );
+    }
+    // The index changes whenever a record comes, goes or moves; a pack the
+    // same in every byte is not written at all.
+    let same = placed.len() == pack.records() && changed.is_empty();
+    let mut ranges = Vec::new();
+    if !same {
+        ranges.push(0..prefix);
+        ranges.extend(changed);
+    }
+    Layout::placed(translator, placed, format, Some(ranges))
 }
 
 /// What a boot's store did.
@@ -349,9 +578,68 @@ pub struct Counters {
     pub loaded: u64,
     pub absent: u64,
     pub invalid: u64,
+    /// Lookups of a key looked up before (its page let go and read again,
+    /// or another PE's), those the decoded cache served, and records
+    /// decoded (inflated and checked).
+    pub repeated: u64,
+    pub cached: u64,
+    pub decoded: u64,
     /// Blocks offered and kept for proof, and those past the memory bound.
     pub offered: u64,
     pub dropped: u64,
+    /// Blocks proven during the run ([`Store::prove_batch`]), and proven
+    /// entries left out because the proven bound was full.
+    pub proven: u64,
+    pub unprovable: u64,
+    pub unkept: u64,
+    /// Shared lookups that found a block, and why the others missed: no
+    /// offer of it, an offer of its PC and page in another context, its
+    /// offer evicted, or another machine compiling it at that moment.
+    pub shared_hits: u64,
+    pub shared_absent: u64,
+    pub shared_other_context: u64,
+    pub shared_evicted: u64,
+    pub shared_in_flight: u64,
+}
+
+impl Counters {
+    /// Add `other`'s counts, as of another part of one store.
+    pub fn add(&mut self, other: &Self) {
+        let Self {
+            loaded,
+            absent,
+            invalid,
+            repeated,
+            cached,
+            decoded,
+            offered,
+            dropped,
+            proven,
+            unprovable,
+            unkept,
+            shared_hits,
+            shared_absent,
+            shared_other_context,
+            shared_evicted,
+            shared_in_flight,
+        } = other;
+        self.loaded += loaded;
+        self.absent += absent;
+        self.invalid += invalid;
+        self.repeated += repeated;
+        self.cached += cached;
+        self.decoded += decoded;
+        self.offered += offered;
+        self.dropped += dropped;
+        self.proven += proven;
+        self.unprovable += unprovable;
+        self.unkept += unkept;
+        self.shared_hits += shared_hits;
+        self.shared_absent += shared_absent;
+        self.shared_other_context += shared_other_context;
+        self.shared_evicted += shared_evicted;
+        self.shared_in_flight += shared_in_flight;
+    }
 }
 
 /// A block offered for proof: its place in its page and its input's in the
@@ -370,6 +658,15 @@ struct PendingPage {
     preparation: Arc<Preparation>,
     blocks: Vec<PendingBlock>,
     inputs: Vec<u8>,
+}
+
+impl PendingPage {
+    /// What the page is charged against the pending bound.
+    fn charge(&self) -> usize {
+        self.blocks.capacity() * size_of::<PendingBlock>()
+            + self.inputs.capacity()
+            + PENDING_PAGE_BYTES
+    }
 }
 
 /// A pending page's key, guest page and context.
@@ -412,6 +709,84 @@ type SharedKey = (u64, u64, u64);
 fn shared_key(key: &Digest, pc: u64, context: &Digest) -> SharedKey {
     let word = |digest: &Digest| u64::from_le_bytes(digest.0[..8].try_into().expect("a word"));
     (pc, word(key), word(context))
+}
+
+/// A slot of the [`MissTables`] for `words`.
+fn miss_slot(words: &[u64]) -> usize {
+    let mixed = words.iter().fold(0u64, |hash, word| {
+        (hash ^ word).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    });
+    (mixed >> 32) as usize % MISS_SLOTS
+}
+
+/// Why shared lookups miss, in direct-mapped tables a collision only
+/// misnames: offers being compiled since their lookup missed, offers
+/// evicted, and the context of the last offer of each PC and page.
+#[derive(Debug, Default)]
+struct MissTables {
+    in_flight: Vec<SharedKey>,
+    evicted: Vec<SharedKey>,
+    offered: Vec<SharedKey>,
+}
+
+impl MissTables {
+    fn ready(&mut self) -> bool {
+        if self.in_flight.is_empty() {
+            let mut tables = [Vec::new(), Vec::new(), Vec::new()];
+            for table in &mut tables {
+                if table.try_reserve_exact(MISS_SLOTS).is_err() {
+                    return false;
+                }
+                table.resize(MISS_SLOTS, (u64::MAX, 0, 0));
+            }
+            [self.in_flight, self.evicted, self.offered] = tables;
+        }
+        true
+    }
+
+    /// Why the lookup of `key` missed, marking it in flight.
+    fn miss(&mut self, key: SharedKey, counters: &mut Counters) {
+        if !self.ready() {
+            counters.shared_absent += 1;
+            return;
+        }
+        let slot = miss_slot(&[key.0, key.1, key.2]);
+        let place = miss_slot(&[key.0, key.1]);
+        let reason = if self.in_flight[slot] == key {
+            &mut counters.shared_in_flight
+        } else if self.evicted[slot] == key {
+            &mut counters.shared_evicted
+        } else if self.offered[place].0 == key.0
+            && self.offered[place].1 == key.1
+            && self.offered[place].2 != key.2
+        {
+            &mut counters.shared_other_context
+        } else {
+            &mut counters.shared_absent
+        };
+        *reason += 1;
+        self.in_flight[slot] = key;
+    }
+
+    fn offered(&mut self, key: SharedKey) {
+        if !self.ready() {
+            return;
+        }
+        let slot = miss_slot(&[key.0, key.1, key.2]);
+        if self.in_flight[slot] == key {
+            self.in_flight[slot] = (u64::MAX, 0, 0);
+        }
+        if self.evicted[slot] == key {
+            self.evicted[slot] = (u64::MAX, 0, 0);
+        }
+        self.offered[miss_slot(&[key.0, key.1])] = key;
+    }
+
+    fn evicted(&mut self, key: SharedKey) {
+        if self.ready() {
+            self.evicted[miss_slot(&[key.0, key.1, key.2])] = key;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -505,6 +880,152 @@ impl<'a> DecodedRecord<'a> {
     }
 }
 
+/// Decoded pack records, least recently used first out, within a bound of
+/// their retained bytes.
+#[derive(Debug, Default)]
+struct DecodedCache {
+    /// Each record, its charge and its last use.
+    records: BTreeMap<Digest, (Arc<Record>, usize, u64)>,
+    /// Keys by last use.
+    uses: BTreeMap<u64, Digest>,
+    bytes: usize,
+    bound: usize,
+    clock: u64,
+    /// Every record decoded, while a machine still holds it with a page it
+    /// keeps: the cache holds a small part of what the machines hold
+    /// between them, and a record one of them still has need not be
+    /// decoded again for another.
+    held: BTreeMap<Digest, Weak<Record>>,
+    /// The size of `held` at which the records nobody holds leave it.
+    held_sweep: usize,
+}
+
+/// The fewest records [`DecodedCache::held`] sweeps at.
+const HELD_SWEEP: usize = 1024;
+
+impl DecodedCache {
+    fn new(bound: usize) -> Self {
+        Self {
+            bound,
+            ..Self::default()
+        }
+    }
+
+    fn get(&mut self, key: &Digest) -> Option<Arc<Record>> {
+        let Some((record, _, used)) = self.records.get_mut(key) else {
+            return self.held.get(key)?.upgrade();
+        };
+        self.clock += 1;
+        self.uses.remove(used);
+        *used = self.clock;
+        self.uses.insert(self.clock, *key);
+        Some(Arc::clone(record))
+    }
+
+    /// Note that `record` was handed out, for [`Self::get`] to find while
+    /// anyone holds it.
+    fn hold(&mut self, record: &Arc<Record>) {
+        if self.held.len() >= self.held_sweep.max(HELD_SWEEP) {
+            self.held.retain(|_, held| held.strong_count() != 0);
+            self.held_sweep = 2 * self.held.len();
+        }
+        self.held.insert(record.key, Arc::downgrade(record));
+    }
+
+    /// Keep `record`, letting the least recently used go until it fits:
+    /// those go back to the caller, to drop outside the store's lock.
+    fn insert(&mut self, record: &Arc<Record>, bytes: usize) -> Vec<Arc<Record>> {
+        let mut evicted = Vec::new();
+        self.hold(record);
+        if bytes > self.bound / 8 || self.records.contains_key(&record.key) {
+            return evicted;
+        }
+        while self.bytes + bytes > self.bound {
+            let Some((_, key)) = self.uses.pop_first() else {
+                break;
+            };
+            if let Some((old, charge, _)) = self.records.remove(&key) {
+                self.bytes -= charge;
+                evicted.push(old);
+            }
+        }
+        self.clock += 1;
+        self.records
+            .insert(record.key, (Arc::clone(record), bytes, self.clock));
+        self.uses.insert(self.clock, record.key);
+        self.bytes += bytes;
+        evicted
+    }
+
+    /// Let records go until the cache fits `bound`.
+    fn shrink(&mut self, bound: usize) -> Vec<Arc<Record>> {
+        self.bound = bound;
+        let mut evicted = Vec::new();
+        while self.bytes > bound {
+            let Some((_, key)) = self.uses.pop_first() else {
+                break;
+            };
+            if let Some((old, charge, _)) = self.records.remove(&key) {
+                self.bytes -= charge;
+                evicted.push(old);
+            }
+        }
+        evicted
+    }
+}
+
+/// Pending pages taken from a store to prove outside its lock
+/// ([`Store::take_batch`]).
+pub struct ProofBatch {
+    pages: Vec<(PendingKey, PendingPage)>,
+}
+
+/// What proving a [`ProofBatch`] made: each page key's new entries, and
+/// the blocks proven and refused.
+pub struct ProvenBatch {
+    records: Vec<(Digest, Vec<super::Entry>)>,
+    proven: u64,
+    unprovable: u64,
+}
+
+impl ProofBatch {
+    /// The blocks in the batch.
+    pub fn blocks(&self) -> usize {
+        self.pages.iter().map(|(_, page)| page.blocks.len()).sum()
+    }
+
+    /// Compile each block again at its page's probe addresses and keep the
+    /// entries proven to move only by them. Needs no store.
+    pub fn prove(self) -> ProvenBatch {
+        let (mut proven, mut unprovable) = (0, 0);
+        let mut records: Vec<(Digest, Vec<super::Entry>)> = Vec::new();
+        for ((key, page, context), held) in self.pages {
+            let mut entries = Vec::new();
+            for block in &held.blocks {
+                let start = block.start as usize;
+                let input = &held.inputs[start..start + usize::from(block.length)];
+                let pc = page + u64::from(block.offset);
+                match Offer::prove_input(input, page, pc, context, &held.preparation) {
+                    Some(entry) => {
+                        proven += 1;
+                        entries.push(entry);
+                    }
+                    None => unprovable += 1,
+                }
+            }
+            match records.last_mut() {
+                Some((last, held)) if *last == key => held.extend(entries),
+                _ => records.push((key, entries)),
+            }
+        }
+        ProvenBatch {
+            records,
+            proven,
+            unprovable,
+        }
+    }
+}
+
 /// One boot's store over the pack it read.
 #[derive(Debug)]
 pub struct Store<'a> {
@@ -514,7 +1035,7 @@ pub struct Store<'a> {
     /// each. The records themselves are the engine's to keep: decoded, they
     /// take several times the pack's bytes.
     loaded: BTreeMap<Digest, bool>,
-    decoded: Vec<Option<Arc<Record>>>,
+    decoded: DecodedCache,
     decode_scratch: DecodeScratch,
     pending: BTreeMap<PendingKey, PendingPage>,
     /// The blocks in `pending`.
@@ -522,6 +1043,11 @@ pub struct Store<'a> {
     /// What `pending` holds: a charge for each page's entry and tree node,
     /// and the capacity of its buffers.
     pending_bytes: usize,
+    pending_bound: usize,
+    /// Entries proven during the run, by page key, and their retained bytes.
+    proven: BTreeMap<Digest, Record>,
+    proven_bytes: usize,
+    proven_bound: usize,
     /// The blocks offered, by page key, PC and context, for the other
     /// machines sharing the store, oldest first. The bound charges kept
     /// source/template buffers, Arc payloads, index entries and FIFO capacity;
@@ -530,6 +1056,7 @@ pub struct Store<'a> {
     shared_order: VecDeque<SharedKey>,
     shared_bytes: usize,
     shared_bound: usize,
+    misses: MissTables,
     pub counters: Counters,
 }
 
@@ -547,6 +1074,39 @@ pub struct Planned<'a> {
     pub evicted: u64,
 }
 
+/// What a store keeps beyond its pack, in bytes ([`Store::set_bounds`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bounds {
+    /// Inputs of blocks waiting for proof.
+    pub pending: usize,
+    /// Entries proven during the run.
+    pub proven: usize,
+    /// Decoded pack records.
+    pub decoded: usize,
+}
+
+impl Default for Bounds {
+    fn default() -> Self {
+        Self {
+            pending: MAX_PENDING_BYTES,
+            proven: PROVEN_BYTES,
+            decoded: DECODED_BYTES,
+        }
+    }
+}
+
+impl Bounds {
+    /// Each of `parts` stores' share of these bounds.
+    pub fn share(self, parts: usize) -> Self {
+        let parts = parts.max(1);
+        Self {
+            pending: self.pending / parts,
+            proven: self.proven / parts,
+            decoded: self.decoded / parts,
+        }
+    }
+}
+
 impl<'a> Store<'a> {
     /// A store of `translator` over the pack `pack` holds, if any; `None`
     /// or a damaged pack (whose error comes back too) starts it empty.
@@ -554,25 +1114,100 @@ impl<'a> Store<'a> {
         let parsed = pack
             .map(|bytes| Pack::parse(bytes, &translator))
             .transpose();
-        let empty = |pack| Self {
+        match parsed {
+            Ok(pack) => (Self::over(translator, pack), None),
+            Err(error) => (Self::over(translator, None), Some(error)),
+        }
+    }
+
+    /// A store of `translator` over `pack`, already parsed for it: one part
+    /// of a store split by page key.
+    pub fn over(translator: Digest, pack: Option<Pack<'a>>) -> Self {
+        let bounds = Bounds::default();
+        Self {
             translator,
             pack,
             loaded: BTreeMap::new(),
-            decoded: Vec::new(),
+            decoded: DecodedCache::new(bounds.decoded),
             decode_scratch: DecodeScratch::default(),
             pending: BTreeMap::new(),
             pending_blocks: 0,
             pending_bytes: 0,
+            pending_bound: bounds.pending,
+            proven: BTreeMap::new(),
+            proven_bytes: 0,
+            proven_bound: bounds.proven,
             shared: BTreeMap::new(),
             shared_order: VecDeque::new(),
             shared_bytes: 0,
             shared_bound: 0,
+            misses: MissTables::default(),
             counters: Counters::default(),
-        };
-        match parsed {
-            Ok(pack) => (empty(pack), None),
-            Err(error) => (empty(None), Some(error)),
         }
+    }
+
+    /// Bound what the store keeps beyond its pack. Records the decoded
+    /// cache lets go come back, to drop outside a lock.
+    pub fn set_bounds(&mut self, bounds: Bounds) -> Vec<Arc<Record>> {
+        self.pending_bound = bounds.pending;
+        self.proven_bound = bounds.proven;
+        self.decoded.shrink(bounds.decoded)
+    }
+
+    /// Take `other`'s run (another part of one store over the same pack):
+    /// what it looked up, its blocks waiting for proof, its proven entries
+    /// and its counts. Its shared blocks are dropped.
+    pub fn absorb(&mut self, other: Self) {
+        for (key, valid) in other.loaded {
+            self.loaded.entry(key).or_insert(valid);
+        }
+        for (group, page) in other.pending {
+            match self.pending.entry(group) {
+                alloc::collections::btree_map::Entry::Vacant(slot) => {
+                    self.pending_blocks += page.blocks.len();
+                    self.pending_bytes += page.charge();
+                    slot.insert(page);
+                }
+                alloc::collections::btree_map::Entry::Occupied(mut slot) => {
+                    // One page's offers reach one part: merge them anyway.
+                    let held = slot.get_mut();
+                    let before = held.charge();
+                    for block in page.blocks {
+                        if let Err(place) = held
+                            .blocks
+                            .binary_search_by_key(&block.offset, |held| held.offset)
+                        {
+                            let start = held.inputs.len();
+                            let from = block.start as usize;
+                            held.inputs.extend_from_slice(
+                                &page.inputs[from..from + usize::from(block.length)],
+                            );
+                            held.blocks.insert(
+                                place,
+                                PendingBlock {
+                                    start: start as u32,
+                                    ..block
+                                },
+                            );
+                            self.pending_blocks += 1;
+                        }
+                    }
+                    self.pending_bytes += held.charge() - before;
+                }
+            }
+        }
+        for (key, record) in other.proven {
+            match self.proven.entry(key) {
+                alloc::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(record);
+                }
+                alloc::collections::btree_map::Entry::Occupied(mut slot) => {
+                    slot.get_mut().merge(record);
+                }
+            }
+        }
+        self.proven_bytes += other.proven_bytes;
+        self.counters.add(&other.counters);
     }
 
     /// Keep offered blocks and their buffers, up to `bound` bytes, for
@@ -597,6 +1232,7 @@ impl<'a> Store<'a> {
         while let Some(oldest) = self.shared_order.pop_front() {
             if let Some(evicted) = self.shared.remove(&oldest) {
                 self.shared_bytes -= evicted.bytes;
+                self.misses.evicted(oldest);
                 return Some(evicted);
             }
         }
@@ -610,6 +1246,7 @@ impl<'a> Store<'a> {
         use alloc::collections::btree_map::Entry;
 
         let key = staged.key;
+        self.misses.offered(key);
         let bytes = staged.entry.as_ref()?.bytes;
         if bytes > self.shared_bound {
             return None;
@@ -655,6 +1292,8 @@ impl<'a> Store<'a> {
     /// Admit the original input for durable proof independently of shared
     /// emission admission. A writable owner may call both under one lock.
     pub fn keep_pending(&mut self, offer: &Offer) {
+        self.misses
+            .offered(shared_key(&offer.key(), offer.pc(), &offer.context()));
         if !self.reserve_pending(offer) {
             self.counters.dropped += 1;
         }
@@ -664,8 +1303,6 @@ impl<'a> Store<'a> {
     /// whether it fit.
     fn reserve_pending(&mut self, offer: &Offer) -> bool {
         const BLOCK_BYTES: usize = size_of::<PendingBlock>();
-        // An entry in a B-tree node about half full.
-        const PAGE_BYTES: usize = 2 * size_of::<(PendingKey, PendingPage)>();
         let (Ok(offset), Ok(length)) = (
             u16::try_from(offer.pc() - offer.page()),
             u16::try_from(offer.input().len()),
@@ -673,6 +1310,14 @@ impl<'a> Store<'a> {
             return false;
         };
         let group = (offer.key(), offer.page(), offer.context());
+        if self
+            .proven
+            .get(&offer.key())
+            .is_some_and(|record| record.find(offset, &offer.context()).is_some())
+        {
+            // Proven during the run already.
+            return true;
+        }
         let known = self.pending.get(&group);
         let place = known.map_or(Err(0), |page| {
             page.blocks
@@ -681,11 +1326,16 @@ impl<'a> Store<'a> {
         let Err(place) = place else {
             return true;
         };
-        let new_page = if known.is_some() { 0 } else { PAGE_BYTES };
+        let new_page = if known.is_some() {
+            0
+        } else {
+            PENDING_PAGE_BYTES
+        };
         let held_slots = known.map_or(0, |page| page.blocks.capacity());
         let held_inputs = known.map_or(0, |page| page.inputs.capacity());
         let held = held_slots * BLOCK_BYTES + held_inputs;
-        let Some(available) = MAX_PENDING_BYTES
+        let Some(available) = self
+            .pending_bound
             .checked_sub(self.pending_bytes)
             .and_then(|available| available.checked_sub(new_page))
         else {
@@ -743,46 +1393,72 @@ impl<'a> Store<'a> {
         true
     }
 
+    /// Pending pages holding at least `blocks` blocks (all, when fewer
+    /// wait), oldest key first, to prove outside the store's lock; `None`
+    /// when none wait or the proven bound is full.
+    pub fn take_batch(&mut self, blocks: usize) -> Option<ProofBatch> {
+        if self.pending.is_empty() || self.proven_bytes >= self.proven_bound {
+            return None;
+        }
+        let mut pages = Vec::new();
+        let mut taken = 0;
+        while taken < blocks.max(1)
+            && let Some((group, page)) = self.pending.pop_first()
+        {
+            taken += page.blocks.len();
+            self.pending_blocks -= page.blocks.len();
+            self.pending_bytes -= page.charge();
+            pages.push((group, page));
+        }
+        Some(ProofBatch { pages })
+    }
+
+    /// Keep what a [`ProofBatch`] of this store proved, within the proven
+    /// bound; the rest is counted as unkept.
+    pub fn fold(&mut self, batch: ProvenBatch) {
+        self.counters.proven += batch.proven;
+        self.counters.unprovable += batch.unprovable;
+        for (key, entries) in batch.records {
+            for entry in entries {
+                let bytes = entry.retained_bytes();
+                if self.proven_bytes + bytes > self.proven_bound {
+                    self.counters.unkept += 1;
+                    continue;
+                }
+                self.proven_bytes += bytes;
+                self.proven
+                    .entry(key)
+                    .or_insert_with(|| Record::new(self.translator, key))
+                    .insert(entry);
+            }
+        }
+    }
+
     /// The translator whose records the store keeps.
     pub fn translator(&self) -> &Digest {
         &self.translator
     }
 
-    fn decoded_slot(key: &Digest) -> usize {
-        usize::from(key.0[0]) % DECODED_SLOTS
-    }
-
     /// A record already decoded and checked against this pack.
-    pub fn cached_record(&self, key: &Digest) -> Option<Arc<Record>> {
-        let record = self.decoded.get(Self::decoded_slot(key))?.as_ref()?;
-        (record.key == *key).then(|| Arc::clone(record))
-    }
-
-    /// Keep a validated slot's decoded record within the cache budget.
-    fn remember_record(&mut self, decoded: &DecodedRecord<'a>) -> Option<Arc<Record>> {
-        let record = &decoded.record;
-        if decoded.retained_bytes > DECODED_SLOT_BYTES {
-            return None;
-        }
-        if self.decoded.is_empty() {
-            self.decoded.try_reserve_exact(DECODED_SLOTS).ok()?;
-            self.decoded.resize_with(DECODED_SLOTS, || None);
-        }
-        let slot = &mut self.decoded[Self::decoded_slot(&record.key)];
-        if slot.as_ref().is_some_and(|held| held.key == record.key) {
-            return None;
-        }
-        slot.replace(Arc::clone(record))
+    pub fn cached_record(&mut self, key: &Digest) -> Option<Arc<Record>> {
+        let record = self.decoded.get(key)?;
+        self.counters.cached += 1;
+        self.counters.repeated += 1;
+        Some(record)
     }
 
     /// The pack's slot for `key`, unless an earlier lookup found it invalid.
     /// Its immutable bytes may be decoded after releasing the store lock.
     pub fn stored(&self, key: &Digest) -> Option<PackedRecord<'a>> {
         let pack = self.pack?;
-        if self.loaded.get(key) == Some(&false) {
+        let loaded = self.loaded.get(key).copied();
+        if loaded == Some(false) {
             return None;
         }
-        pack.record(key)
+        let mut stored = pack.record(key)?;
+        // A first lookup that decoded the slot checked its bytes whole.
+        stored.checked = loaded == Some(true);
+        Some(stored)
     }
 
     pub fn take_decode_scratch(&mut self, stored: PackedRecord<'a>) -> DecodeScratch {
@@ -794,21 +1470,22 @@ impl<'a> Store<'a> {
     }
 
     /// A transient capacity failure can be retried. Only record a result
-    /// for the exact stored slot we gave the decoder. The caller can drop
-    /// an evicted record and the returned scratch outside the store lock.
+    /// for the exact stored slot we gave the decoder. The records the cache
+    /// let go come back, for the caller to drop with the scratch outside
+    /// the store lock.
     pub fn finish_decode(
         &mut self,
         key: &Digest,
         stored: PackedRecord<'a>,
         decoded: &Result<DecodedRecord<'a>, DecodeError>,
         scratch: &mut DecodeScratch,
-    ) -> Option<Arc<Record>> {
+    ) -> Vec<Arc<Record>> {
         self.decode_scratch.retain(scratch);
         if !self
             .stored(key)
             .is_some_and(|current| current.same_storage(stored))
         {
-            return None;
+            return Vec::new();
         }
         match decoded {
             Ok(decoded)
@@ -816,21 +1493,23 @@ impl<'a> Store<'a> {
                     && decoded.record.key == *key
                     && decoded.record.translator == self.translator =>
             {
+                self.counters.decoded += 1;
                 self.looked_up(key, true, true);
-                self.remember_record(decoded)
+                self.decoded.insert(&decoded.record, decoded.retained_bytes)
             }
             Err(DecodeError::Invalid) => {
                 self.looked_up(key, true, false);
-                None
+                Vec::new()
             }
-            _ => None,
+            _ => Vec::new(),
         }
     }
 
-    /// Count `key`'s first lookup: whether the pack held bytes for it, and
-    /// whether they decoded.
+    /// Count `key`'s lookup: on the first, whether the pack held bytes for
+    /// it, and whether they decoded.
     pub fn looked_up(&mut self, key: &Digest, found: bool, valid: bool) {
         let alloc::collections::btree_map::Entry::Vacant(slot) = self.loaded.entry(*key) else {
+            self.counters.repeated += 1;
             return;
         };
         match (found, valid) {
@@ -852,9 +1531,13 @@ impl<'a> Store<'a> {
     }
 
     /// Prove the offered blocks while `room` says there is memory to, and
-    /// lay out the next pack within `bound` bytes.
+    /// lay out the next pack within `bound` bytes: the records that gained
+    /// entries, then those this boot used, then the others, as long as
+    /// they fit. Records kept unchanged stay where they were in the pack
+    /// read ([`Layout::changed`]).
     pub fn plan(&mut self, bound: u64, room: impl Fn() -> bool) -> Planned<'a> {
-        let mut proven: BTreeMap<Digest, Record> = BTreeMap::new();
+        let mut proven = core::mem::take(&mut self.proven);
+        self.proven_bytes = 0;
         let (mut count, mut unprovable) = (0, 0);
         let pending = core::mem::take(&mut self.pending);
         let mut unproven = self.pending_blocks as u64;
@@ -888,7 +1571,15 @@ impl<'a> Store<'a> {
         for (key, record) in &mut proven {
             if let Some(stored) = self.pack.and_then(|pack| pack.record(key)) {
                 match stored.decode(&self.translator, key, &mut scratch) {
-                    Ok(previous) => record.merge(previous),
+                    Ok(previous) => {
+                        let before = previous.entries.len();
+                        record.merge(previous);
+                        if record.entries.len() == before {
+                            // Nothing new: the stored slot stays as it is.
+                            candidates.push((*key, Piece::Kept(stored.bytes)));
+                            continue;
+                        }
+                    }
                     Err(DecodeError::Invalid) => {}
                     Err(DecodeError::Capacity) => {
                         candidates.push((*key, Piece::Kept(stored.bytes)));
@@ -926,12 +1617,9 @@ impl<'a> Store<'a> {
                 evicted += 1;
             }
         }
+        let format = self.pack.map_or(PackFormat::Raw, |pack| pack.format);
         Planned {
-            layout: Layout::with_format(
-                &self.translator,
-                kept,
-                self.pack.map_or(PackFormat::Raw, |pack| pack.format),
-            ),
+            layout: layout_over(&self.translator, self.pack, kept, format, bound),
             proven: count,
             unprovable,
             unproven,
@@ -951,7 +1639,7 @@ impl Translations for Store<'_> {
         };
         let mut scratch = self.take_decode_scratch(stored);
         let decoded = DecodedRecord::decode(stored, &self.translator, key, &mut scratch);
-        self.finish_decode(key, stored, &decoded, &mut scratch);
+        drop(self.finish_decode(key, stored, &decoded, &mut scratch));
         decoded.ok().map(DecodedRecord::into_record)
     }
 
@@ -961,9 +1649,17 @@ impl Translations for Store<'_> {
         pc: u64,
         context: &Digest,
     ) -> Option<Arc<SharedTranslation>> {
-        self.shared
-            .get(&shared_key(key, pc, context))
-            .map(|entry| Arc::clone(&entry.translation))
+        let shared = shared_key(key, pc, context);
+        match self.shared.get(&shared) {
+            Some(entry) => {
+                self.counters.shared_hits += 1;
+                Some(Arc::clone(&entry.translation))
+            }
+            None => {
+                self.misses.miss(shared, &mut self.counters);
+                None
+            }
+        }
     }
 
     fn offer(&mut self, offer: Offer) {
@@ -998,24 +1694,78 @@ mod tests {
     }
 
     #[test]
-    fn decoded_pack_records_share_an_owner_and_check_the_full_key() {
+    fn decoded_pack_records_share_an_owner_and_the_least_recently_used_goes_first() {
         let translator = translator_id();
-        let first = Digest([1; 32]);
-        let mut second = first;
-        second.0[1] = 2;
+        let keys: Vec<Digest> = (0u8..9)
+            .map(|index| {
+                // Keys alike but for their last byte.
+                let mut key = Digest([1; 32]);
+                key.0[31] = index;
+                key
+            })
+            .collect();
         let bytes = Layout::new(
             &translator,
-            [first, second]
-                .map(|key| (key, Piece::New(Record::new(translator, key).encode())))
-                .into(),
+            keys.iter()
+                .map(|&key| (key, Piece::New(Record::new(translator, key).encode())))
+                .collect(),
         )
         .to_vec();
         let mut store = Store::new(translator, Some(&bytes)).0;
-        let held = store.record(&first).unwrap();
-        assert!(Arc::ptr_eq(&held, &store.record(&first).unwrap()));
-        assert_eq!(store.record(&second).unwrap().key, second);
-        assert!(!Arc::ptr_eq(&held, &store.record(&first).unwrap()));
-        assert_eq!(store.counters.loaded, 2);
+        let one = Record::new(translator, keys[0]).retained_bytes();
+        drop(store.set_bounds(Bounds {
+            decoded: 8 * one,
+            ..Bounds::default()
+        }));
+        assert!(!store.stored(&keys[0]).unwrap().checked);
+        let held: Vec<Arc<Record>> = keys[..8]
+            .iter()
+            .map(|key| store.record(key).unwrap())
+            .collect();
+        for (key, held) in keys.iter().zip(&held) {
+            assert!(Arc::ptr_eq(held, &store.record(key).unwrap()));
+            assert_eq!(held.key, *key);
+        }
+        // The first is used again; the ninth then evicts the second, which
+        // its holder still shares.
+        assert!(Arc::ptr_eq(&held[0], &store.record(&keys[0]).unwrap()));
+        assert_eq!(store.record(&keys[8]).unwrap().key, keys[8]);
+        assert!(Arc::ptr_eq(&held[0], &store.record(&keys[0]).unwrap()));
+        assert!(Arc::ptr_eq(&held[1], &store.record(&keys[1]).unwrap()));
+        assert_eq!(store.counters.loaded, 9);
+        assert_eq!(store.counters.decoded, 9);
+        assert_eq!(store.counters.repeated, 11);
+        // Once nobody holds it, it is decoded again, from bytes already
+        // checked whole.
+        assert!(store.stored(&keys[1]).unwrap().checked);
+        drop(held);
+        assert_eq!(store.record(&keys[1]).unwrap().key, keys[1]);
+        assert_eq!(store.counters.decoded, 10);
+    }
+
+    #[test]
+    fn records_nobody_holds_leave_the_held_index() {
+        let translator = translator_id();
+        let mut cache = DecodedCache::new(0);
+        let key = |index: usize| {
+            let mut key = Digest([2; 32]);
+            key.0[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            key
+        };
+        let kept = Arc::new(Record::new(translator, key(0)));
+        assert!(cache.insert(&kept, 1).is_empty());
+        for index in 1..=2 * HELD_SWEEP {
+            assert!(
+                cache
+                    .insert(&Arc::new(Record::new(translator, key(index))), 1)
+                    .is_empty()
+            );
+        }
+        // Nothing fits the cache itself; only the record still held is found.
+        assert!(cache.records.is_empty());
+        assert!(cache.held.len() <= HELD_SWEEP + 1);
+        assert!(Arc::ptr_eq(&kept, &cache.get(&key(0)).unwrap()));
+        assert!(cache.get(&key(1)).is_none());
     }
 
     #[test]
@@ -1024,7 +1774,7 @@ mod tests {
         let key = Digest::of(b"page");
         let mut large = Record::new(translator, key);
         let mut entry = offer(0x1000, key).prove().unwrap();
-        entry.code.resize(DECODED_SLOT_BYTES, 0);
+        entry.code.resize(DECODED_BYTES / 8, 0);
         large.insert(entry);
         let bytes = Layout::new(&translator, vec![(key, Piece::New(large.encode()))]).to_vec();
         let mut store = Store::new(translator, Some(&bytes)).0;
@@ -1048,7 +1798,7 @@ mod tests {
         assert!(
             store
                 .finish_decode(&key, foreign, &decoded, &mut scratch)
-                .is_none()
+                .is_empty()
         );
         assert!(store.cached_record(&key).is_none());
     }
@@ -1087,7 +1837,7 @@ mod tests {
         assert!(
             store
                 .finish_decode(&first, stored, &decoded, &mut scratch)
-                .is_none()
+                .is_empty()
         );
         assert_eq!(store.counters.loaded, 0);
         assert!(store.cached_record(&first).is_none());
@@ -1498,5 +2248,277 @@ mod tests {
         let mut offsets: Vec<u16> = record.entries.iter().map(|entry| entry.offset).collect();
         offsets.sort();
         assert_eq!(offsets, [8, 0x10]);
+    }
+
+    /// A pack whose records `layout` lays out, read back by key.
+    fn records_of(bytes: &[u8], translator: &Digest) -> BTreeMap<Digest, Vec<u8>> {
+        Pack::parse(bytes, translator)
+            .unwrap()
+            .iter()
+            .map(|(key, bytes)| (key, bytes.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn a_later_pack_keeps_its_unchanged_records_in_place_and_writes_only_the_rest() {
+        let translator = translator_id();
+        let keys: Vec<Digest> = (0u8..6).map(|index| Digest::of(&[index])).collect();
+        let mut store = Store::new(translator, None).0;
+        for (index, key) in keys[..4].iter().enumerate() {
+            store.offer(offer(0x1_0000_4008 + 0x1000 * index as u64, *key));
+        }
+        let first = store.plan(u64::MAX, || true).layout;
+        assert_eq!(first.changed(), None);
+        let old = first.to_vec();
+        // The next boot uses one record and offers a new block in another
+        // page and in a page the pack holds.
+        let mut next = Store::new(translator, Some(&old)).0;
+        assert!(next.record(&keys[1]).is_some());
+        next.offer(offer(0x1_0000_9010, keys[4]));
+        next.offer(offer(0x1_0000_6010, keys[2]));
+        let layout = next.plan(u64::MAX, || true).layout;
+        let new = layout.to_vec();
+        assert_eq!(new.len() as u64, layout.bytes());
+        let changed = layout.changed().expect("an incremental layout").to_vec();
+        // Every record outside the changed ranges is where it was, so the
+        // bytes the old pack holds there stand.
+        let offsets = |bytes: &[u8]| -> BTreeMap<Digest, (usize, usize)> {
+            let base = bytes.as_ptr() as usize;
+            Pack::parse(bytes, &translator)
+                .unwrap()
+                .iter()
+                .map(|(key, record)| (key, (record.as_ptr() as usize - base, record.len())))
+                .collect()
+        };
+        let (before, after) = (offsets(&old), offsets(&new));
+        for (key, (at, length)) in &after {
+            let written = changed
+                .iter()
+                .any(|range| range.start as usize <= *at && *at + length <= range.end as usize);
+            if !written {
+                assert_eq!(before.get(key), Some(&(*at, *length)));
+                assert_eq!(new[*at..at + length], old[*at..at + length]);
+            }
+        }
+        // The index and the two records that gained entries are written;
+        // the three others are not.
+        assert_eq!(changed.len(), 3);
+        assert_eq!(changed[0].start, 0);
+        let written: u64 = changed.iter().map(|range| range.end - range.start).sum();
+        assert!(written < new.len() as u64 / 2 + changed[0].end);
+        let read = records_of(&new, &translator);
+        assert_eq!(read.len(), 5);
+        for key in [keys[0], keys[1], keys[3]] {
+            assert_eq!(read[&key], records_of(&old, &translator)[&key]);
+        }
+        let record = Record::decode(&read[&keys[2]], &translator, &keys[2]).unwrap();
+        assert_eq!(record.entries().len(), 2);
+        // Random access reads what the chunks hold.
+        let mut buffer = vec![0xa5; 777];
+        layout.read_at(100, &mut buffer);
+        assert_eq!(buffer[..], new[100..877]);
+        layout.read_at(new.len() as u64 - 10, &mut buffer[..20]);
+        assert_eq!(buffer[..10], new[new.len() - 10..]);
+        assert!(buffer[10..20].iter().all(|&byte| byte == 0));
+
+        // A boot that changes nothing writes nothing.
+        let mut idle = Store::new(translator, Some(&new)).0;
+        assert!(idle.record(&keys[0]).is_some());
+        let same = idle.plan(u64::MAX, || true).layout;
+        assert_eq!(same.changed(), Some(&[][..]));
+        assert_eq!(same.to_vec(), new);
+    }
+
+    #[test]
+    fn a_pack_whose_index_outgrows_its_room_is_laid_out_again_with_room_to_grow() {
+        let translator = translator_id();
+        let keys: Vec<Digest> = (0u8..3).map(|index| Digest::of(&[index])).collect();
+        // A pack laid out without room after its index.
+        let old = Layout::new(
+            &translator,
+            vec![(
+                keys[0],
+                Piece::New(Record::new(translator, keys[0]).encode()),
+            )],
+        )
+        .to_vec();
+        let mut store = Store::new(translator, Some(&old)).0;
+        store.offer(offer(0x1_0000_4008, keys[1]));
+        let layout = store.plan(u64::MAX, || true).layout;
+        assert_eq!(layout.changed(), None);
+        let roomy = layout.to_vec();
+        let pack = Pack::parse(&roomy, &translator).unwrap();
+        assert_eq!(pack.records(), 2);
+        // Its records start past room for many more index entries.
+        let first = pack
+            .iter()
+            .map(|(_, bytes)| bytes.as_ptr() as usize - roomy.as_ptr() as usize)
+            .min()
+            .unwrap();
+        assert!(first >= prefix_length(2 + MIN_INDEX_SLACK));
+        let mut next = Store::new(translator, Some(&roomy)).0;
+        next.offer(offer(0x1_0000_5008, keys[2]));
+        let grown = next.plan(u64::MAX, || true).layout;
+        assert!(grown.changed().is_some());
+        assert_eq!(records_of(&grown.to_vec(), &translator).len(), 3);
+        // Under a bound without room for it, the records follow the index.
+        let tight = Store::new(translator, Some(&old))
+            .0
+            .plan(old.len() as u64, || true)
+            .layout;
+        assert_eq!(tight.to_vec(), old);
+    }
+
+    /// A checksummed index whose entries share bytes uses more than their
+    /// span; the pack is laid out again instead of computing negative waste.
+    #[test]
+    fn kept_records_that_overlap_are_laid_out_again() {
+        let translator = translator_id();
+        let keys: Vec<Digest> = (0u8..2).map(|index| Digest::of(&[index])).collect();
+        let mut old = Layout::new(
+            &translator,
+            keys.iter()
+                .map(|key| (*key, Piece::New(Record::new(translator, *key).encode())))
+                .collect(),
+        )
+        .to_vec();
+        // Point the second entry at the first's bytes and checksum the index.
+        let (_, offset, bytes) = entry(&old, 0);
+        let second = HEADER_BYTES + INDEX_ENTRY_BYTES + DIGEST_BYTES;
+        old[second..second + 8].copy_from_slice(&offset.to_le_bytes());
+        old[second + 8..second + 16].copy_from_slice(&bytes.to_le_bytes());
+        let index_end = HEADER_BYTES + 2 * INDEX_ENTRY_BYTES;
+        let checksum = Sha256::digest(&old[..index_end]);
+        old[index_end..index_end + CHECKSUM_BYTES].copy_from_slice(checksum.as_slice());
+        let pack = Pack::parse(&old, &translator).unwrap();
+        let records = pack
+            .iter()
+            .map(|(key, bytes)| (key, Piece::Kept(bytes)))
+            .collect();
+        let layout = layout_over(&translator, Some(pack), records, pack.format, u64::MAX);
+        assert_eq!(layout.changed(), None);
+    }
+
+    #[test]
+    fn blocks_proven_in_batches_during_the_run_reach_the_next_pack() {
+        let translator = translator_id();
+        let (first, second) = (Digest::of(b"first page"), Digest::of(b"second page"));
+        let mut store = Store::new(translator, None).0;
+        store.offer(offer(0x1_0000_4008, first));
+        store.offer(offer(0x1_0000_4010, first));
+        store.offer(offer(0x1_0000_8010, second));
+        let batch = store.take_batch(1).unwrap();
+        assert_eq!(batch.blocks(), 2);
+        assert_eq!(store.pending(), 1);
+        store.fold(batch.prove());
+        assert_eq!(store.counters.proven, 2);
+        // An offer already proven waits no more, and frees nothing twice.
+        store.offer(offer(0x1_0000_4008, first));
+        assert_eq!(store.pending(), 1);
+        let planned = store.plan(u64::MAX, || true);
+        assert_eq!((planned.proven, planned.unproven), (1, 0));
+        let bytes = planned.layout.to_vec();
+        let mut next = Store::new(translator, Some(&bytes)).0;
+        let context = offer(0x1_0000_4008, first).context();
+        let record = next.record(&first).unwrap();
+        assert!(record.find(8, &context).is_some() && record.find(16, &context).is_some());
+        assert!(next.record(&second).unwrap().find(16, &context).is_some());
+
+        // Past the proven bound a batch's entries are counted, not kept.
+        let mut full = Store::new(translator, None).0;
+        drop(full.set_bounds(Bounds {
+            proven: 0,
+            ..Bounds::default()
+        }));
+        full.offer(offer(0x1_0000_4008, first));
+        assert!(full.take_batch(1).is_none());
+        drop(full.set_bounds(Bounds {
+            proven: 1,
+            ..Bounds::default()
+        }));
+        let batch = full.take_batch(1).unwrap();
+        full.fold(batch.prove());
+        assert_eq!((full.counters.proven, full.counters.unkept), (1, 1));
+    }
+
+    #[test]
+    fn a_larger_pending_bound_keeps_offers_a_smaller_one_drops() {
+        let translator = translator_id();
+        let key = Digest::of(b"page");
+        let offers: Vec<Offer> = (0..64)
+            .map(|index| offer(0x1_0000_4000 + 8 * index, key))
+            .collect();
+        let mut small = Store::new(translator, None).0;
+        drop(small.set_bounds(Bounds {
+            pending: 256,
+            ..Bounds::default()
+        }));
+        let mut large = Store::new(translator, None).0;
+        for offer in &offers {
+            small.keep_pending(offer);
+            large.keep_pending(offer);
+        }
+        assert!(small.counters.dropped > 0);
+        assert_eq!((large.pending(), large.counters.dropped), (64, 0));
+    }
+
+    #[test]
+    fn shared_misses_are_counted_by_reason() {
+        let translator = translator_id();
+        let key = Digest::of(b"page");
+        let first = offer(0x1_0000_4008, key);
+        let context = first.context();
+        let other = Digest::of(b"other context");
+        let mut store = Store::new(translator, None).0;
+        store.share(usize::MAX);
+        // Never offered, then compiling elsewhere.
+        assert!(store.prepared(&key, first.pc(), &context).is_none());
+        assert!(store.prepared(&key, first.pc(), &context).is_none());
+        assert_eq!(
+            (
+                store.counters.shared_absent,
+                store.counters.shared_in_flight
+            ),
+            (1, 1)
+        );
+        store.offer(first.clone());
+        assert!(store.prepared(&key, first.pc(), &context).is_some());
+        // Offered in another context.
+        assert!(store.prepared(&key, first.pc(), &other).is_none());
+        assert_eq!(store.counters.shared_other_context, 1);
+        // Evicted.
+        store.share(0);
+        assert!(store.prepared(&key, first.pc(), &context).is_none());
+        assert_eq!(
+            (store.counters.shared_hits, store.counters.shared_evicted),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn parts_of_a_split_store_plan_the_pack_one_store_plans() {
+        let translator = translator_id();
+        let keys: Vec<Digest> = (0u8..4).map(|index| Digest::of(&[index])).collect();
+        let offers: Vec<Offer> = keys
+            .iter()
+            .enumerate()
+            .map(|(index, key)| offer(0x1_0000_4008 + 0x1000 * index as u64, *key))
+            .collect();
+        let mut whole = Store::new(translator, None).0;
+        let mut parts: Vec<Store> = (0..2).map(|_| Store::over(translator, None)).collect();
+        for offer in &offers {
+            whole.offer(offer.clone());
+            parts[usize::from(offer.key().0[0] & 1)].offer(offer.clone());
+        }
+        let mut merged = parts.remove(0);
+        for part in parts {
+            merged.absorb(part);
+        }
+        assert_eq!(merged.pending(), whole.pending());
+        assert_eq!(merged.counters.offered, whole.counters.offered);
+        assert_eq!(
+            merged.plan(u64::MAX, || true).layout.to_vec(),
+            whole.plan(u64::MAX, || true).layout.to_vec()
+        );
     }
 }

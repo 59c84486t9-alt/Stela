@@ -402,6 +402,54 @@ fn checksummed_record_count_must_fit_the_remaining_bytes() {
 }
 
 #[test]
+fn relocation_for_install_matches_the_rebase_and_reuses_its_buffers() {
+    // adrp x0, 1; add x0, x0, #8; ldr x1, #16; bl +8
+    let source = words(&[0x9000_0020, 0x9100_2000, 0x5800_0081, 0x9400_0002]);
+    let entry = proved(&source, 0x40).expect("relocatable");
+    let mut relocated = Relocated::default();
+    for other in [0x2_3456_8000u64, 0x4000] {
+        let rebased = entry.rebase(other, &source).unwrap();
+        assert!(entry.relocate(other, &source, &mut relocated));
+        assert_eq!(relocated.code, rebased.native.x86_64_code);
+        assert_eq!(relocated.direct_exits, rebased.direct_exits);
+    }
+    let buffer = relocated.code.as_ptr();
+    assert!(entry.relocate(0x4000, &source, &mut relocated));
+    assert_eq!(relocated.code.as_ptr(), buffer);
+    // Other bytes, or a page not aligned, relocate nothing.
+    let mut other = source.clone();
+    other[4] ^= 1;
+    assert!(!entry.relocate(0x4000, &other, &mut relocated));
+    assert!(!entry.relocate(0x4010, &source, &mut relocated));
+}
+
+#[test]
+fn a_record_decoded_whole_once_decodes_again_without_its_hash() {
+    let source = words(&[0x9000_0020, 0x9400_0002]);
+    let entry = proved(&source, 0x10).unwrap();
+    let (translator, key) = (translator_id(), Digest::of(&[7; PAGE_BYTES]));
+    let mut record = Record::new(translator, key);
+    record.insert(entry);
+    let mut bytes = record.encode();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    assert_eq!(
+        Record::decode(&bytes, &translator, &key),
+        Err(FormatError::Checksum)
+    );
+    assert_eq!(
+        Record::decode_checked(&bytes, &translator, &key, false),
+        Ok(record)
+    );
+    // The format's bounds are still checked.
+    assert!(Record::decode_checked(&bytes[..HEADER_BYTES], &translator, &key, false).is_err());
+    assert_eq!(
+        Record::decode_checked(&bytes, &Digest::default(), &key, false),
+        Err(FormatError::Translator)
+    );
+}
+
+#[test]
 fn records_refuse_any_damaged_framing_byte() {
     let source = words(&[0x9000_0020, 0x9400_0002]);
     let entry = proved(&source, 0x10).unwrap();

@@ -36,7 +36,7 @@ use std::{
     path::{Path, PathBuf},
     time::SystemTime,
 };
-use stela_boot_core::memory_budget::MAX_TRANSLATION_PACK_BYTES;
+use stela_boot_core::memory_budget::DEFAULT_TRANSLATION_PACK_BYTES;
 use stela_engine::translations::{
     Digest,
     pack::{self, HEADER_BYTES, PackError},
@@ -55,7 +55,7 @@ const NAME_BYTES: usize = 4;
 const ID_BYTES: usize = 32;
 const MIB: u64 = 1024 * 1024;
 /// One pack's bound by default.
-pub(super) const DEFAULT_PACK_BYTES: u64 = MAX_TRANSLATION_PACK_BYTES;
+pub(super) const DEFAULT_PACK_BYTES: u64 = DEFAULT_TRANSLATION_PACK_BYTES;
 /// The smallest bound worth keeping a store for.
 pub(super) const MIN_PACK_BYTES: u64 = 64 * MIB;
 /// FAT32's largest file, on a 1 MiB boundary.
