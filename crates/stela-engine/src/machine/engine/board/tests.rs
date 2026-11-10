@@ -130,57 +130,64 @@ fn grace_keeps_buffers_until_readers_left() {
 fn ring_moves_on_and_retires_one_ahead() {
     let grace = Grace::new(1);
     let ring = Ring::new(3, 256);
+    // Three parts keep no tenured generation: its code is young.
+    assert_eq!(ring.young_parts, 0);
     grace.enter(0);
-    let first = ring.take(200, 16).unwrap();
+    let first = ring.take(YOUNG, 200, 16).unwrap();
     assert_eq!(
         first,
         Place {
             generation: 0,
+            part: 0,
             offset: 0
         }
     );
-    assert_eq!(ring.take(100, 16), Err(0));
+    let full = ring.head(YOUNG);
+    assert_eq!(ring.take(TENURED, 100, 16), Err(full));
     // Parts 1 and 2 never held code: nothing to retire yet.
-    assert_eq!(ring.advance(0, &grace, Some(0)), Advance::Moved);
+    assert_eq!(ring.advance(YOUNG, full, &grace, Some(0)), Advance::Moved);
     assert_eq!(
-        ring.take(64, 16).unwrap(),
+        ring.take(YOUNG, 64, 16).unwrap(),
         Place {
             generation: 1,
+            part: 1,
             offset: 0
         }
     );
     assert!(ring.live(first));
-    // Moving to generation 2 retires generation 0, the oldest.
-    assert_eq!(ring.advance(1, &grace, Some(0)), Advance::Retire(0));
-    assert!(!ring.live(first));
-    // Until it is retired another advance waits for the retirer.
-    assert_eq!(ring.advance(2, &grace, Some(0)), Advance::Busy);
-    ring.retired(0, grace.snapshot());
-    // PE 0 was inside at the snapshot: it waits unless it holds nothing.
-    assert!(matches!(ring.advance(2, &grace, None), Advance::Wait(_)));
-    grace.pass(0);
-    assert_eq!(ring.advance(2, &grace, None), Advance::Retire(1));
-    // Generation 1 is not retired yet: the ring cannot reach its part.
+    // Opening the last free part chooses the oldest to go.
+    let second = ring.head(YOUNG);
     assert_eq!(
-        ring.take(256, 16).unwrap(),
+        ring.advance(YOUNG, second, &grace, Some(0)),
+        Advance::Retire(0, Why::Young)
+    );
+    assert!(!ring.live(first));
+    let third = ring.head(YOUNG);
+    assert_eq!(ring.take(YOUNG, 256, 16).unwrap().part, 2);
+    // Until it is retired another advance waits for the retirer.
+    assert_eq!(ring.advance(YOUNG, third, &grace, Some(0)), Advance::Busy);
+    ring.retired(0, grace.snapshot());
+    assert_eq!(ring.retired_through(0), 1);
+    // PE 0 was inside at the snapshot: it waits unless it holds nothing.
+    assert!(matches!(
+        ring.advance(YOUNG, third, &grace, None),
+        Advance::Wait(_)
+    ));
+    grace.pass(0);
+    assert_eq!(
+        ring.advance(YOUNG, third, &grace, None),
+        Advance::Retire(1, Why::Young)
+    );
+    assert_eq!(
+        ring.take(YOUNG, 16, 16).unwrap(),
         Place {
             generation: 3,
+            part: 0,
             offset: 0
         }
     );
-    assert_eq!(ring.take(16, 16), Err(3));
-    assert_eq!(ring.advance(3, &grace, Some(0)), Advance::Busy);
-    ring.retired(1, grace.snapshot());
-    assert_eq!(ring.advance(3, &grace, Some(0)), Advance::Retire(2));
-    assert_eq!(
-        ring.take(16, 16).unwrap(),
-        Place {
-            generation: 4,
-            offset: 0
-        }
-    );
-    // An older caller's full generation is stale: the ring moved already.
-    assert_eq!(ring.advance(3, &grace, None), Advance::Moved);
+    // An older caller's full part is stale: the ring moved already.
+    assert_eq!(ring.advance(YOUNG, third, &grace, None), Advance::Moved);
     grace.leave(0);
 }
 
@@ -215,29 +222,38 @@ fn ring_reuses_parts_only_after_readers_left() {
                 waits.clone(),
             );
             thread::spawn(move || {
-                let word =
-                    |place: Place| (ring.part(place.generation) * PART + place.offset as usize) / 8;
+                let word = |place: Place| (place.part as usize * PART + place.offset as usize) / 8;
+                let pack = |place: Place| {
+                    u64::from(place.generation) << 40
+                        | u64::from(place.part) << 32
+                        | u64::from(place.offset)
+                };
+                let unpack = |packed: u64| Place {
+                    generation: (packed >> 40) as u32,
+                    part: (packed >> 32) as u32 & 0xff,
+                    offset: packed as u32,
+                };
                 let mut seed = pe as u64 * 0x9e37_79b9 + 1;
                 let mut installed = 0u64;
                 grace.enter(pe);
                 for sequence in 1..=20_000u64 {
                     // Install a record.
                     let place = loop {
-                        match ring.take(RECORD, 16) {
+                        match ring.take(YOUNG, RECORD, 16) {
                             Ok(place) => break place,
-                            Err(full) => match ring.advance(full, &grace, Some(pe)) {
+                            Err(full) => match ring.advance(YOUNG, full, &grace, Some(pe)) {
                                 Advance::Moved | Advance::Busy => {}
-                                Advance::Retire(generation) => {
+                                Advance::Retire(part, _) => {
                                     {
                                         let _held = lock.lock().unwrap();
                                         for entry in table.iter() {
                                             let held = entry.load(Ordering::Relaxed);
-                                            if held != 0 && split(held - 1).0 == generation {
+                                            if held != 0 && unpack(held - 1).part == part {
                                                 entry.store(0, Ordering::Relaxed);
                                             }
                                         }
                                     }
-                                    ring.retired(generation, grace.snapshot());
+                                    ring.retired(part, grace.snapshot());
                                 }
                                 Advance::Wait(snapshot) => {
                                     waits.fetch_add(1, Ordering::Relaxed);
@@ -258,7 +274,7 @@ fn ring_reuses_parts_only_after_readers_left() {
                         let _held = lock.lock().unwrap();
                         if ring.live(place) {
                             let slot = next(&mut seed) as usize % PUBLISHED;
-                            let packed = cursor(place.generation, place.offset) + 1;
+                            let packed = pack(place) + 1;
                             table[slot].store(packed, Ordering::Release);
                             installed += 1;
                         }
@@ -270,8 +286,7 @@ fn ring_reuses_parts_only_after_readers_left() {
                         if held == 0 {
                             continue;
                         }
-                        let (generation, offset) = split(held - 1);
-                        let first = word(Place { generation, offset });
+                        let first = word(unpack(held - 1));
                         let tag = arena[first].load(Ordering::Relaxed);
                         assert_ne!(tag, 0);
                         for _ in 0..256 {

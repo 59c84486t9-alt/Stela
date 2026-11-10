@@ -454,6 +454,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // The page's blocks leave the index, so no detach finds them as
         // sources again: their links out are cut now.
         let page: Vec<usize> = cache.index.page(physical).collect();
+        for &slot in &page {
+            self.note_gone(&mut cache, slot, churn::Gone::Invalidated);
+        }
         self.unlink_sources(&page);
         cache.targets.forget_frames(frame..=frame, |_| true);
         let forgot = cache.index.forget_page(physical & !(FETCH_PAGE - 1));
@@ -579,6 +582,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         bytes: &[u8],
         retire: bool,
     ) -> Result<NativeCode, InstallError> {
+        let stream = core::mem::replace(&mut self.install_stream, board::YOUNG);
         let code = Arc::clone(&self.code);
         let Some(arena) = &code.arena else {
             return self.host.install(bytes);
@@ -594,7 +598,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.retire_steps(self.retire_budget());
         }
         loop {
-            let full = match arena.ring.take(bytes.len(), 16) {
+            let full = match arena.ring.take(stream, bytes.len(), 16) {
                 Ok(place) => {
                     let address = arena.address(place);
                     arena.write(address, bytes);
@@ -607,14 +611,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Err(InstallError::Full);
             }
             let (grace, skip) = self.grace();
-            match arena.ring.advance(full, grace, skip) {
+            match arena.ring.advance(stream, full, grace, skip) {
                 board::Advance::Moved => {}
                 // The next part is still being taken away: help.
                 board::Advance::Busy => {
                     self.retire_steps(self.retire_budget());
                     self.host.relax();
                 }
-                board::Advance::Retire(generation) => self.retire_part(generation),
+                board::Advance::Retire(part, _) => {
+                    self.retire_part(part, churn::Gone::Ring);
+                }
                 board::Advance::Wait(snapshot) => self.wait_grace(&snapshot),
             }
         }
@@ -676,6 +682,111 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// The generation of the arena part holding executable `address`, for
+    /// code that part's code jumps to: a thunk or a tail goes with the
+    /// block it serves ([`board::Ring::refer`]).
+    pub(super) fn stream_at(&self, address: u64) -> usize {
+        let arena = self.code.arena.as_ref();
+        arena
+            .and_then(|arena| Some(arena.ring.kind(arena.part_of(address as usize)?)))
+            .unwrap_or(board::YOUNG)
+    }
+
+    /// Code at `from` now jumps to `to`: `to`'s part stays while `from`'s
+    /// does. Under the board's lock, or before `from`'s block is published.
+    pub(super) fn note_reference(&self, from: u64, to: u64) {
+        if let Some(arena) = &self.code.arena
+            && let (Some(from), Some(to)) =
+                (arena.part_of(from as usize), arena.part_of(to as usize))
+        {
+            arena.ring.refer(from, to);
+        }
+    }
+
+    /// A fetch found block `slot`: its part counts an entry, for the choice
+    /// of the tenured part to go ([`board::Ring::entered`]).
+    pub(super) fn entered(&self, slot: usize) {
+        let Some(arena) = &self.code.arena else {
+            return;
+        };
+        if let Some(part) = arena.part_of(self.code.blocks[slot].code.0) {
+            arena.ring.entered(part);
+        }
+    }
+
+    /// The generation a block of `pc`, `physical` and `variant` goes to:
+    /// tenured when the ring took it away within a few turns
+    /// ([`churn::Churn::promotes`]).
+    pub(super) fn stream_for(&self, pc: u64, physical: u64, variant: VariantId) -> usize {
+        let Some(arena) = &self.code.arena else {
+            return board::YOUNG;
+        };
+        let identity = churn::identity(pc, physical, variant.0);
+        let ring = &arena.ring;
+        if ring.young_parts != 0
+            && self
+                .code
+                .ghosts
+                .promotes(identity, ring.generation(), ring.parts)
+        {
+            board::Events::count(&self.code.events.promoted);
+            board::TENURED
+        } else {
+            board::YOUNG
+        }
+    }
+
+    /// The ring's current generation and parts, or zeros without a ring.
+    fn ring_position(&self) -> (u32, u32) {
+        self.code
+            .arena
+            .as_ref()
+            .map_or((0, 0), |arena| (arena.ring.generation(), arena.ring.parts))
+    }
+
+    /// Note that block `slot` leaves the index for `cause`
+    /// ([`churn::Churn::gone`]). Under the board's lock, `cache`.
+    pub(super) fn note_gone(&self, _cache: &mut board::Cache, slot: usize, cause: churn::Gone) {
+        let block = &self.code.blocks[slot];
+        let identity = churn::identity(block.pc, block.physical, block.variant.0);
+        let (generation, _) = self.ring_position();
+        self.code
+            .ghosts
+            .gone(identity, block.source_hash, generation, cause);
+        // A hole in a part that stays: its part may go early.
+        if cause == churn::Gone::Invalidated
+            && let Some(arena) = &self.code.arena
+            && let Some(part) = arena.part_of(block.code.0)
+        {
+            arena.ring.dropped(part);
+        }
+    }
+
+    /// Note the install of block `slot`, before it enters the index
+    /// ([`churn::Churn::installed`]). Under the board's lock, `cache`.
+    pub(super) fn note_churn(&self, cache: &mut board::Cache, slot: usize) {
+        let blocks = &self.code.blocks;
+        let block = &blocks[slot];
+        let shared = cache
+            .index
+            .sharing(blocks, block.pc, block.physical, block.variant);
+        let identity = churn::identity(block.pc, block.physical, block.variant.0);
+        let (generation, parts) = self.ring_position();
+        self.code.ghosts.installed(
+            &mut cache.churn,
+            identity,
+            block.source_hash,
+            generation,
+            shared,
+            parts,
+        );
+        if let Some(arena) = &self.code.arena
+            && let Some(part) = arena.part_of(block.code.0)
+        {
+            arena.ring.installed(part);
+        }
+    }
+
     /// With every block slot given, move the board's ring on before its
     /// parts are full, taking the oldest parts' blocks away and waiting for
     /// their grace, until a slot is free. The caller installs its code again
@@ -688,14 +799,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Some(slot);
             }
             let (grace, skip) = self.grace();
-            match arena.ring.advance(arena.ring.generation(), grace, skip) {
+            let young = arena.ring.head(board::YOUNG);
+            match arena.ring.advance(board::YOUNG, young, grace, skip) {
                 board::Advance::Moved => {}
                 board::Advance::Busy => {
                     self.retire_steps(u64::MAX);
                     self.host.relax();
                 }
-                board::Advance::Retire(generation) => {
-                    self.retire_part(generation);
+                board::Advance::Retire(part, _) => {
+                    self.retire_part(part, churn::Gone::Slot);
                     // Short of slots: all of it now.
                     self.retire_steps(u64::MAX);
                     board::Events::count(&code.events.forced);
@@ -708,19 +820,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.take_slot()
     }
 
-    /// Take away the code of the ring's part of `generation`, which this
+    /// Take away the code of the ring's `part`, which this
     /// PE moved the ring past ([`board::Advance::Retire`]): its blocks go
     /// as in a reclaim, and its probes, in steps the board's installs take
     /// ([`Self::retire_steps`]); the part is reused once the last step is
     /// done and every PE passed the grace taken after.
-    fn retire_part(&mut self, generation: u32) {
+    fn retire_part(&mut self, part: u32, cause: churn::Gone) {
         let code = Arc::clone(&self.code);
         let range = code
             .arena
             .as_ref()
             .expect("a ring retires its parts")
-            .range(generation);
-        let job = self.retirement(range, Some(generation));
+            .range(part);
+        let mut job = self.retirement(range, Some(part));
+        job.cause = cause;
         let mut held = code
             .retiring
             .lock()
@@ -771,7 +884,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn retirement(
         &mut self,
         range: core::ops::Range<usize>,
-        generation: Option<u32>,
+        part: Option<u32>,
     ) -> board::Retirement {
         let code = Arc::clone(&self.code);
         let listed = code
@@ -803,7 +916,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .code_slots
             .give_back(evicted);
         board::Retirement {
-            generation,
+            part,
+            cause: match part {
+                Some(_) => churn::Gone::Ring,
+                None => churn::Gone::Other,
+            },
             cells: Some(range.start as u64),
             range,
             slots,
@@ -850,8 +967,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 match page.phase {
                     board::PagePhase::Unindex(from) => {
                         let to = page.end.min(from + EVICT_STEP.min(left as usize));
-                        visits +=
-                            self.unindex(&mut cache, frame, &job.slots[from..to], &mut job.pcs);
+                        visits += self.unindex(
+                            &mut cache,
+                            frame,
+                            &job.slots[from..to],
+                            &mut job.pcs,
+                            job.cause,
+                        );
                         page.phase = if to == page.end {
                             job.pcs.sort_unstable();
                             job.pcs.dedup();
@@ -911,10 +1033,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
         frame: u64,
         step: &[(u64, u32)],
         pcs: &mut Vec<u64>,
+        cause: churn::Gone,
     ) -> u64 {
         let code = Arc::clone(&self.code);
         let blocks = &code.blocks;
         let slots: Vec<u32> = step.iter().map(|&(_, slot)| slot).collect();
+        // Only blocks still in the index leave a ghost: one an IC IVAU
+        // forgot has its own, and a lost install's key is the winner's.
+        for &slot in &slots {
+            let block = &blocks[slot as usize];
+            if cache
+                .index
+                .get(blocks, block.pc, block.physical, block.variant)
+                == Some(slot as usize)
+            {
+                self.note_gone(cache, slot as usize, cause);
+            }
+        }
         let (_, listed) = cache.index.page_part(frame, 0, 0);
         let marked = mark(&mut cache.marked, blocks.len(), &slots);
         cache
@@ -1036,9 +1171,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// grace passed, and a ring part's probes and the part itself.
     fn finish_retirement(&mut self, job: board::Retirement) {
         let code = Arc::clone(&self.code);
-        let arena = job.generation.and_then(|_| code.arena.as_ref());
-        if let (Some(arena), Some(generation)) = (arena, job.generation) {
-            let part = arena.ring.part(generation) as u32;
+        let arena = job.part.and_then(|_| code.arena.as_ref());
+        if let (Some(_), Some(part)) = (arena, job.part) {
             code.cache_at(board::LockSite::Evict)
                 .dispatchers
                 .retain(|&(held, _)| held != part);
@@ -1046,8 +1180,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let slots: Vec<u32> = job.slots.iter().map(|&(_, slot)| slot).collect();
         let (grace, _) = self.grace();
         code.blocks.release(slots, grace.snapshot());
-        if let (Some(arena), Some(generation)) = (arena, job.generation) {
-            arena.ring.retired(generation, grace.snapshot());
+        if let (Some(arena), Some(part)) = (arena, job.part) {
+            arena.ring.retired(part, grace.snapshot());
             board::Events::count(&code.events.retired);
         }
         if !self.scalable_leaves.is_empty() {

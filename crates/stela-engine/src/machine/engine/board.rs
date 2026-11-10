@@ -7,8 +7,9 @@
 //!   PE unpublishes is reused only once every other PE was outside at that
 //!   moment or has left since. No PE ever waits inside a section, so two
 //!   PEs that wait never wait on each other.
-//! - [`Ring`]: the code parts every PE installs into, one bump cursor for
-//!   all, each part retired one ahead of its reuse.
+//! - [`Ring`]: the code parts every PE installs into, a bump cursor for
+//!   each of two generations (young and tenured code), each part chosen to
+//!   go one ahead of its reuse.
 //! - [`Slots`]: block slot numbers, reused through a limbo list once their
 //!   grace passed; until then new numbers are given instead.
 //! - [`Records`]: a record per slot that every PE reads without a lock.
@@ -36,8 +37,13 @@ use core::sync::atomic::{
 };
 use stela_compiler::x86_64::chain::{self, LookupTable, TableReader};
 
+mod ring;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(super) use ring::Why;
+pub(super) use ring::{AGE_TURNS, Advance, MIN_PARTS, Place, Ring, TENURED, YOUNG};
 
 /// One PE's word, on a cache line of its own: its PE writes it often.
 #[repr(align(64))]
@@ -170,6 +176,9 @@ pub(super) struct Code {
     /// (`Machine::forget_shared_code`): what jump cache entries name.
     pub(super) epoch: AtomicU64,
     pub(super) events: Events,
+    /// The ghosts of blocks that left the index ([`super::churn`]): written
+    /// under the lock, read by compiles without it.
+    pub(super) ghosts: super::churn::Churn,
     /// The part being taken away, in steps any PE's install takes
     /// ([`Retirement`]), and whether there is one, read without its lock.
     pub(super) retiring: Mutex<Option<Retirement>>,
@@ -187,8 +196,10 @@ pub(super) struct Code {
 /// a page's blocks retire, those not yet taken stay whole and reachable;
 /// their code stays until the part's grace.
 pub(super) struct Retirement {
-    /// The ring generation, or none for a host's reclaim.
-    pub(super) generation: Option<u32>,
+    /// The ring part, or none for a host's reclaim.
+    pub(super) part: Option<u32>,
+    /// Why its blocks go, for their ghosts ([`super::churn`]).
+    pub(super) cause: super::churn::Gone,
     pub(super) range: core::ops::Range<usize>,
     /// The blocks, by page then slot: a page's blocks go together, so
     /// each page's index list is walked once.
@@ -269,14 +280,19 @@ impl Arena {
 
     /// The executable address of `place`.
     pub(super) fn address(&self, place: Place) -> usize {
-        self.window.exec
-            + self.ring.part(place.generation) * self.part_bytes
-            + place.offset as usize
+        self.window.exec + place.part as usize * self.part_bytes + place.offset as usize
     }
 
-    /// The executable range of `generation`'s part.
-    pub(super) fn range(&self, generation: u32) -> core::ops::Range<usize> {
-        let start = self.window.exec + self.ring.part(generation) * self.part_bytes;
+    /// The part holding executable `address`, if the window does.
+    pub(super) fn part_of(&self, address: usize) -> Option<usize> {
+        let offset = address.checked_sub(self.window.exec)?;
+        (offset < self.window.bytes)
+            .then(|| (offset / self.part_bytes).min(self.ring.parts as usize - 1))
+    }
+
+    /// The executable range of `part`.
+    pub(super) fn range(&self, part: u32) -> core::ops::Range<usize> {
+        let start = self.window.exec + part as usize * self.part_bytes;
         start..start + self.part_bytes
     }
 
@@ -340,6 +356,9 @@ pub(super) struct Cache {
     /// Why blocks were installed on a shared board, with `--profile`:
     /// one census for the board, as its blocks are.
     pub(super) census: Option<Box<super::install_census::Census>>,
+    /// Why blocks the board held before are installed again
+    /// ([`super::churn`]).
+    pub(super) churn: super::ChurnCounts,
 }
 
 /// How a board's code lock was taken, counted under it: no atomic beyond
@@ -475,6 +494,16 @@ pub struct CodeReport {
     /// block) and those put off (the block's entry keeps being displaced).
     pub targets: TargetCounts,
     pub lock: LockCounts,
+    /// Installs of blocks the board held before, by why they went
+    /// ([`super::ChurnCounts`]).
+    pub churn: super::ChurnCounts,
+    /// The parts young and tenured code hold, installs that went to the
+    /// tenured generation, and parts taken away by why: the oldest young
+    /// one, the tenured one entered least, a tenured one past its age, one
+    /// whose blocks mostly left the index.
+    pub generations: [u32; 2],
+    pub promoted: u64,
+    pub outs: [u64; 4],
 }
 
 /// What [`CodeReport::targets`] counts.
@@ -505,6 +534,8 @@ pub(super) struct Events {
     /// lock, or put off ([`TargetCounts`]).
     pub(super) targets_unindexed: AtomicU64,
     pub(super) targets_deferred: AtomicU64,
+    /// Installs that went to the tenured generation.
+    pub(super) promoted: AtomicU64,
 }
 
 impl Events {
@@ -571,6 +602,7 @@ impl Cache {
             targets_inserted: 0,
             targets_raced: 0,
             census: None,
+            churn: super::ChurnCounts::default(),
         }
     }
 }
@@ -586,6 +618,7 @@ impl Code {
             table: targets.reader(),
             finder: Arc::clone(&finder),
             cache: Mutex::new(Cache::new(targets, finder)),
+            ghosts: super::churn::Churn::new(slots),
             arena: window.map(Arena::new),
             epoch: AtomicU64::new(0),
             events: Events::default(),
@@ -651,15 +684,16 @@ impl Code {
 
     /// What the board's code came to; the lock's longest wait starts over.
     pub(super) fn report(&self) -> CodeReport {
-        let (lock, inserted, raced) = {
+        let (lock, inserted, raced, churn) = {
             let mut cache = self.cache_at(LockSite::Report);
             let lock = cache.lock;
             let counts = (cache.targets_inserted, cache.targets_raced);
+            let churn = cache.churn;
             cache.lock.longest = 0;
             for site in &mut cache.lock.sites {
                 site.longest_held = 0;
             }
-            (lock, counts.0, counts.1)
+            (lock, counts.0, counts.1, churn)
         };
         let count = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         CodeReport {
@@ -686,6 +720,16 @@ impl Code {
                 deferred: count(&self.events.targets_deferred),
             },
             lock,
+            churn,
+            generations: self
+                .arena
+                .as_ref()
+                .map_or([0; 2], |arena| arena.ring.owned()),
+            promoted: count(&self.events.promoted),
+            outs: self
+                .arena
+                .as_ref()
+                .map_or([0; 4], |arena| arena.ring.outs()),
         }
     }
 
@@ -1120,187 +1164,6 @@ impl Board {
         Waited::Overdue {
             first: !self.overdue.swap(true, Ordering::Relaxed),
         }
-    }
-}
-
-/// The fewest parts a [`Ring`] has: the current one, the one being retired
-/// ahead of it, and at least one that keeps code.
-pub(super) const MIN_PARTS: usize = 3;
-
-/// Where [`Ring::take`] put something: the part's generation (how many
-/// parts were current before it) and the offset in the part.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Place {
-    pub(super) generation: u32,
-    pub(super) offset: u32,
-}
-
-/// What [`Ring::advance`] asks of its caller.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum Advance {
-    /// The ring moved on, by this caller or another: take again.
-    Moved,
-    /// This caller moved the ring on, and must take away the code of this
-    /// generation, the oldest (unlink every exit into its part, forget its
-    /// blocks, cells and table entries), then call [`Ring::retired`].
-    Retire(u32),
-    /// The next part's code is still being taken away by another PE: take
-    /// again soon.
-    Busy,
-    /// The next part's grace has not passed: [`Grace::wait`] for it outside
-    /// the section, then take again.
-    Wait(Snapshot),
-}
-
-/// The parts of the code arena, which every PE installs into: one cursor,
-/// a generation and an offset in one word, that a compare-exchange
-/// advances. When the current part is full the next becomes current, and
-/// the code of the part after that, the oldest, is taken away: by the time
-/// the ring reaches it its grace has long passed, so no PE waits in the
-/// usual case. A part's offsets are relative to it; the caller maps them
-/// to the arena's two views.
-pub(super) struct Ring {
-    part_bytes: u32,
-    pub(super) parts: u32,
-    /// The current part's generation above, its bytes taken below.
-    cursor: AtomicU64,
-    /// One more than the last generation each part's code was taken away
-    /// of ([`Self::retired`]); 0 for none. A part is ready for generation
-    /// `n` once its code of `n - parts` was, and that grace passed: what a
-    /// mover marks after its compare-exchange is no proof of that.
-    retired: Box<[AtomicU32]>,
-    /// The snapshot each part's last retirement waits on.
-    snapshots: Box<[Mutex<Option<Snapshot>>]>,
-}
-
-const fn cursor(generation: u32, offset: u32) -> u64 {
-    (generation as u64) << 32 | offset as u64
-}
-
-const fn split(cursor: u64) -> (u32, u32) {
-    ((cursor >> 32) as u32, cursor as u32)
-}
-
-impl Ring {
-    /// `parts` parts of `part_bytes` each.
-    pub(super) fn new(parts: usize, part_bytes: usize) -> Self {
-        assert!(parts >= MIN_PARTS, "a ring of at least three parts");
-        let part_bytes = u32::try_from(part_bytes).expect("a part below 4 GiB");
-        Self {
-            part_bytes,
-            parts: u32::try_from(parts).expect("a bounded number of parts"),
-            cursor: AtomicU64::new(0),
-            retired: (0..parts).map(|_| AtomicU32::new(0)).collect(),
-            snapshots: (0..parts).map(|_| Mutex::new(None)).collect(),
-        }
-    }
-
-    /// The part a place's generation is in.
-    pub(super) fn part(&self, generation: u32) -> usize {
-        (generation % self.parts) as usize
-    }
-
-    /// The generation of the current part.
-    pub(super) fn generation(&self) -> u32 {
-        split(self.cursor.load(Ordering::Acquire)).0
-    }
-
-    /// `bytes` at `align` (a power of two) in the current part, or the
-    /// generation of the full current part, which [`Self::advance`] takes.
-    pub(super) fn take(&self, bytes: usize, align: usize) -> Result<Place, u32> {
-        debug_assert!(align.is_power_of_two());
-        let mut current = self.cursor.load(Ordering::Acquire);
-        loop {
-            let (generation, offset) = split(current);
-            let start = (offset as usize).next_multiple_of(align);
-            let end = start + bytes;
-            if end > self.part_bytes as usize {
-                return Err(generation);
-            }
-            match self.cursor.compare_exchange_weak(
-                current,
-                cursor(generation, end as u32),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Ok(Place {
-                        generation,
-                        offset: start as u32,
-                    });
-                }
-                Err(now) => current = now,
-            }
-        }
-    }
-
-    /// Make the part after the full one of generation `full` current, once
-    /// it is ready. `skip` is as for [`Grace::passed`].
-    pub(super) fn advance(&self, full: u32, grace: &Grace, skip: Option<usize>) -> Advance {
-        let next = full.checked_add(1).expect("ring generations exhausted");
-        let part = self.part(next);
-        if self.generation() != full {
-            return Advance::Moved;
-        }
-        if let Some(old) = next.checked_sub(self.parts) {
-            if self.retired[part].load(Ordering::Acquire) != old + 1 {
-                return Advance::Busy;
-            }
-            let snapshot = self.snapshots[part]
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            match snapshot.as_ref() {
-                Some(snapshot) if !grace.passed(snapshot, skip) => {
-                    return Advance::Wait(snapshot.clone());
-                }
-                _ => {}
-            }
-        }
-        let mut current = self.cursor.load(Ordering::Acquire);
-        while split(current).0 == full {
-            match self.cursor.compare_exchange_weak(
-                current,
-                cursor(next, 0),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                // The oldest generation goes, if the ring went round once.
-                Ok(_) => {
-                    return match (next + 1).checked_sub(self.parts) {
-                        Some(oldest) => Advance::Retire(oldest),
-                        None => Advance::Moved,
-                    };
-                }
-                Err(now) => current = now,
-            }
-        }
-        Advance::Moved
-    }
-
-    /// The caller of [`Advance::Retire`] took away the code of
-    /// `generation`, and `snapshot` was taken after: its part is reused once
-    /// that passed.
-    pub(super) fn retired(&self, generation: u32, snapshot: Snapshot) {
-        let part = self.part(generation);
-        *self.snapshots[part]
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(snapshot);
-        self.retired[part].store(generation + 1, Ordering::Release);
-    }
-
-    /// One more than the last generation `part`'s code was taken away of;
-    /// 0 for none.
-    pub(super) fn retired_through(&self, part: usize) -> u32 {
-        self.retired[part].load(Ordering::Acquire)
-    }
-
-    /// Whether `place`'s part still holds its generation's code: false from
-    /// the move that retires it on. An installer checks it under the lock
-    /// the retirer forgets under, so a block published before the move is
-    /// forgotten by the retirer and none is published after it.
-    #[cfg(test)]
-    pub(super) fn live(&self, place: Place) -> bool {
-        self.generation() < place.generation.saturating_add(self.parts - 1)
     }
 }
 

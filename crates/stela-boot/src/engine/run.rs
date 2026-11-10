@@ -1168,8 +1168,43 @@ fn board_code(
         targets.unindexed.saturating_sub(was_targets.unindexed),
         targets.deferred.saturating_sub(was_targets.deferred),
     );
+    // Installs: never on the board before; again after their block went
+    // with its ring part, an IC IVAU, a part taken for want of a slot or
+    // anything else; IC IVAU ones of unchanged bytes; again within one
+    // turn of the ring, four, or later; at a frame offset that held a
+    // block of another PC, or of the same PC in another variant.
+    let churn = now.churn.since(&was.churn);
+    let churn = format!(
+        " churn=new/ring/ivau/slot/other:{}/{}/{}/{}/{} same_bytes={} \
+         ages=turn/four/older:{}/{}/{} aliases=pc/variant:{}/{}",
+        churn.new,
+        churn.again[0],
+        churn.again[1],
+        churn.again[2],
+        churn.again[3],
+        churn.same_bytes,
+        churn.ages[0],
+        churn.ages[1],
+        churn.ages[2],
+        churn.aliases,
+        churn.variants,
+    );
+    // The parts young and tenured code hold, installs sent to the tenured
+    // generation, and parts taken away: the oldest young one, the tenured
+    // one entered least, a tenured one past its age, one mostly holes.
+    let outs: [u64; 4] = core::array::from_fn(|why| now.outs[why].saturating_sub(was.outs[why]));
+    let churn = format!(
+        "{churn} gens=young/tenured:{}/{} promoted={} out=young/cold/aged/holes:{}/{}/{}/{}",
+        now.generations[0],
+        now.generations[1],
+        now.promoted.saturating_sub(was.promoted),
+        outs[0],
+        outs[1],
+        outs[2],
+        outs[3],
+    );
     format!(
-        " board={}M/{}/{} retired={} forced={} lost={} grace_waits={}/{} \
+        " board={}M/{}/{} retired={} forced={} lost={} grace_waits={}/{}{churn} \
          retire_longest=us/steps:{}/{}{targets} \
          lock=acquired/contended/waited_us/longest_us:{}/{}/{}/{}{sites}",
         now.window >> 20,

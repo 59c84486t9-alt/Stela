@@ -944,11 +944,8 @@ struct Held {
 /// fetched: the part's last fill by then was at most a lap before.
 fn refilled(code: &board::Code, held: &Held) -> bool {
     let arena = code.arena.as_ref().expect("an arena");
-    let parts = arena.ring.parts as usize;
-    let part = (held.address - arena.window.exec) / arena.part_bytes;
-    let back = (arena.ring.part(held.generation) + parts - part) % parts;
-    let filled = held.generation - back as u32;
-    arena.ring.generation() >= filled + parts as u32
+    let part = arena.part_of(held.address).expect("code in the window");
+    arena.ring.holds(part) > held.generation
 }
 
 /// A PE's section, left however its thread ends: a PE that panicked
@@ -1156,4 +1153,273 @@ fn pes_that_look_up_and_link_never_meet_a_block_a_concurrent_retirement_took() {
             }
         }
     }
+}
+
+#[test]
+fn the_board_counts_why_it_compiles_a_block_again() {
+    let mut memory = vec![0u8; WINDOW];
+    let mut machine = arena_machine(&mut memory);
+    let base = machine.cpu.pc;
+    let churn = |machine: &Machine<FakeHost, NoDevices>| machine.code.cache().churn;
+    // A loop over more blocks than the ring holds: once round, each block
+    // is compiled again after its part went.
+    let mut fetched = 0;
+    while generation(&machine) < 24 {
+        assert!(fetched < 60_000, "the ring goes round");
+        let pc = base + 4 * (fetched % 512);
+        assert!(matches!(
+            machine.fetch_block(pc, false),
+            Ok(Fetched::Block(_))
+        ));
+        fetched += 1;
+    }
+    let counts = churn(&machine);
+    assert_eq!(counts.installs, machine.install_causes().installs);
+    // Ghosts are direct-mapped: one a collision lost counts as new.
+    assert!(
+        counts.new >= 512 && counts.new < counts.installs / 2,
+        "{counts:?} fetched {fetched}"
+    );
+    assert!(counts.again[super::super::churn::Gone::Ring as usize] > 0);
+    assert_eq!(
+        counts.installs,
+        counts.new + counts.again.iter().sum::<u64>(),
+        "every install is new or again"
+    );
+    // Most come back within a few turns of the ring of four parts.
+    assert!(counts.ages[0] + counts.ages[1] > counts.ages[2]);
+    assert_eq!((counts.aliases, counts.variants), (0, 0));
+
+    // An IC IVAU of unchanged bytes: compiled again, the same bytes.
+    let pc = base + 4 * (fetched % 512);
+    let Ok(Fetched::Block(slot)) = machine.fetch_block(pc, false) else {
+        panic!("a block at {pc:#x}")
+    };
+    let before = churn(&machine);
+    let physical = machine.code.blocks[slot].physical;
+    machine.invalidate_code_page(physical);
+    assert!(matches!(
+        machine.fetch_block(pc, false),
+        Ok(Fetched::Block(_))
+    ));
+    let after = churn(&machine).since(&before);
+    assert_eq!(
+        after.again[super::super::churn::Gone::Invalidated as usize],
+        1
+    );
+    assert_eq!(after.same_bytes, 1);
+}
+
+/// A machine of `words` whose code goes to a window of all of `memory`.
+fn arena_machine_over(words: &[u32], memory: &mut [u8]) -> Machine<FakeHost, NoDevices> {
+    let mut machine = machine(words);
+    machine.code = Arc::new(board::Code::new(
+        board::slot_capacity(Some(memory.len())),
+        chain::MIN_LOOKUP_ENTRIES,
+        Some(window(memory)),
+    ));
+    machine
+}
+
+/// The slot a fetch at `pc` runs.
+fn fetched(machine: &mut Machine<FakeHost, NoDevices>, pc: u64) -> usize {
+    match machine.fetch_block(pc, false) {
+        Ok(Fetched::Block(slot)) => slot,
+        _ => panic!("a block at {pc:#x}"),
+    }
+}
+
+#[test]
+fn hot_blocks_survive_many_turns_of_cold_code_in_the_tenured_generation() {
+    // Sixteen parts of a page: about 128 blocks each, and cold code that
+    // comes back only after eight turns, past the age that promotes.
+    let mut memory = vec![0u8; 16 * 4096];
+    let words = vec![RET; 16 * 1024];
+    let mut machine = arena_machine_over(&words, &mut memory);
+    let base = machine.cpu.pc;
+    const HOT: u64 = 64;
+    let cold = |at: u64| base + 4 * (HOT + at % (words.len() as u64 - HOT));
+    let mut at = 0;
+    // Cold code turns the ring while the hot blocks keep being entered:
+    // their first part goes, they come back tenured and stay.
+    let mut run = |machine: &mut Machine<FakeHost, NoDevices>, turns: u32| {
+        let until = generation(machine) + turns * 16;
+        let mut hot = Vec::new();
+        while generation(machine) < until {
+            for _ in 0..32 {
+                fetched(machine, cold(at));
+                at += 1;
+            }
+            hot = (0..HOT)
+                .map(|block| fetched(machine, base + 4 * block))
+                .collect();
+        }
+        hot
+    };
+    let warm = run(&mut machine, 4);
+    let arena = machine.code.arena.as_ref().expect("an arena");
+    assert!(warm.iter().all(|&slot| {
+        let part = arena
+            .part_of(machine.code.blocks[slot].code.0)
+            .expect("code in the window");
+        arena.ring.kind(part) == board::TENURED
+    }));
+    let before = machine.install_causes().installs;
+    let after = run(&mut machine, 10);
+    // Ten turns of the ring later the hot blocks are the same blocks.
+    assert_eq!(warm, after);
+    let report = machine.code.report();
+    assert!(report.promoted >= HOT);
+    assert!(report.outs[board::Why::Young as usize] >= 100);
+    assert!(machine.install_causes().installs - before >= 10 * 16 * 64);
+    assert_eq!(report.generations[board::TENURED], 1);
+
+    // An IC IVAU of a tenured page still drops its blocks: the next fetch
+    // compiles the block again, and the part counts the hole.
+    let slot = after[0];
+    let physical = machine.code.blocks[slot].physical;
+    machine.invalidate_code_page(physical);
+    assert!(
+        machine.code.blocks.installed(slot).is_some(),
+        "its code stays"
+    );
+    let again = fetched(&mut machine, base);
+    assert_ne!(again, slot);
+    let churn = machine.code.cache().churn;
+    assert!(churn.again[super::super::churn::Gone::Invalidated as usize] >= 1);
+}
+
+/// Fill `stream`'s open part of `ring` and open the next, taking away at
+/// once whatever part that chose: the parts chosen and why.
+fn turn(ring: &board::Ring, grace: &board::Grace, stream: usize) -> Vec<(u32, board::Why)> {
+    let mut chosen = Vec::new();
+    while ring.take(stream, 64, 16).is_ok() {}
+    let full = ring.head(stream);
+    loop {
+        match ring.advance(stream, full, grace, None) {
+            board::Advance::Moved => return chosen,
+            board::Advance::Retire(part, why) => {
+                chosen.push((part, why));
+                ring.retired(part, grace.snapshot());
+                if ring.head(stream) != full {
+                    return chosen;
+                }
+            }
+            other => panic!("a ring nobody holds: {other:?}"),
+        }
+    }
+}
+
+/// The open part of `stream`.
+fn open_part(ring: &board::Ring, stream: usize) -> usize {
+    (ring.head(stream) & 63) as usize
+}
+
+#[test]
+fn the_tenured_part_entered_least_goes_first_and_age_and_holes_bound_the_rest() {
+    let grace = board::Grace::new(1);
+    let ring = board::Ring::new(16, 1024);
+    assert_eq!(ring.young_parts, 4);
+    // Young code fills the ring alone: first in, first out.
+    let mut young = Vec::new();
+    for _ in 0..20 {
+        young.extend(turn(&ring, &grace, board::YOUNG));
+    }
+    assert!(young.iter().all(|&(_, why)| why == board::Why::Young));
+    assert!(young.len() >= 4);
+    // Tenured code takes parts; the young generation shrinks to its share.
+    let mut tenured = Vec::new();
+    for _ in 0..10 {
+        tenured.push(open_part(&ring, board::TENURED));
+        turn(&ring, &grace, board::TENURED);
+        turn(&ring, &grace, board::YOUNG);
+    }
+    let tenured: Vec<usize> = tenured.into_iter().skip(1).collect();
+    let [young_parts, tenured_parts] = ring.owned();
+    assert!(young_parts <= 5, "young keeps its share: {young_parts}");
+    assert!(tenured_parts >= 9);
+    // Every full tenured part but one is entered.
+    let cold = tenured[3];
+    for &part in &tenured {
+        if part != cold {
+            for _ in 0..10 {
+                ring.entered(part);
+            }
+        }
+    }
+    // Young code past its share goes first; then the tenured choice.
+    let chosen = loop {
+        let chosen = turn(&ring, &grace, board::TENURED);
+        if let Some(&choice) = chosen.iter().find(|&&(_, why)| why != board::Why::Young) {
+            break choice;
+        }
+    };
+    assert_eq!(chosen, (cold as u32, board::Why::Cold));
+
+    // A part whose blocks mostly left the index goes before the rest.
+    let holey = tenured[5];
+    for _ in 0..100 {
+        ring.installed(holey);
+    }
+    for _ in 0..80 {
+        ring.dropped(holey);
+    }
+    let mut chosen = Vec::new();
+    while chosen.is_empty() {
+        chosen = turn(&ring, &grace, board::YOUNG);
+    }
+    assert_eq!(chosen, [(holey as u32, board::Why::Holes)]);
+
+    // Young code alone for longer than the age cap: the oldest tenured
+    // parts go however often they are entered.
+    let mut aged = Vec::new();
+    for _ in 0..(board::AGE_TURNS + 1) * 16 {
+        for part in 0..16 {
+            ring.entered(part);
+        }
+        aged.extend(turn(&ring, &grace, board::YOUNG));
+    }
+    assert!(aged.iter().any(|&(_, why)| why == board::Why::Aged));
+    let outs = ring.outs();
+    assert!(outs.iter().all(|&count| count > 0), "{outs:?}");
+}
+
+#[test]
+fn a_part_another_part_jumps_into_waits_for_it() {
+    let grace = board::Grace::new(1);
+    let ring = board::Ring::new(16, 1024);
+    for _ in 0..4 {
+        turn(&ring, &grace, board::TENURED);
+    }
+    // The first tenured part's code jumps into the third's: the third is
+    // never chosen while the first holds code, however cold it is.
+    let [first, _, third] = [0, 1, 2].map(|at| {
+        (0..16)
+            .filter(|&part| ring.kind(part) == board::TENURED)
+            .min_by_key(|&part| (ring.holds(part), part))
+            .map(|part| part + at)
+            .unwrap()
+    });
+    ring.refer(first, third);
+    for part in 0..16 {
+        if part != third {
+            ring.entered(part);
+        }
+    }
+    let mut chosen = Vec::new();
+    for _ in 0..40 {
+        chosen.extend(turn(&ring, &grace, board::TENURED));
+        if chosen.iter().any(|&(part, _)| part as usize == first) {
+            break;
+        }
+    }
+    let first_out = chosen
+        .iter()
+        .position(|&(part, _)| part as usize == first)
+        .expect("the first part goes");
+    assert!(
+        !chosen[..first_out]
+            .iter()
+            .any(|&(part, _)| part as usize == third)
+    );
 }

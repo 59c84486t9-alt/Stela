@@ -485,10 +485,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !chain::patchable(point) {
             return false;
         }
+        self.install_stream = self.stream_at(point);
         let Ok(thunk) = self.install_native(&[0; chain::THUNK_BYTES], false) else {
             return false;
         };
         let at = thunk.0 as u64;
+        self.note_reference(point, at);
         let (Some(bytes), Some(jump)) = (
             chain::thunk(at, retired, target as u32, entry, fallback),
             chain::jump(point, at),
@@ -583,7 +585,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !chain::patchable(site) {
             return false;
         }
-        let Some((probe, tail)) = self.probe_and_tail(cache, btype, chain::TAIL_BYTES) else {
+        let Some((probe, tail)) = self.probe_and_tail(cache, site, btype, chain::TAIL_BYTES) else {
             return false;
         };
         let at = tail.0 as u64;
@@ -622,7 +624,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !chain::patchable(site) {
             return false;
         }
-        let Some((probe, tail)) = self.probe_and_tail(cache, 0, chain::CELL_TAIL_BYTES) else {
+        let Some((probe, tail)) = self.probe_and_tail(cache, site, 0, chain::CELL_TAIL_BYTES)
+        else {
             return false;
         };
         let current = self.current_key(next_pc).and_then(|key| {
@@ -655,6 +658,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn probe_and_tail(
         &mut self,
         cache: &mut board::Cache,
+        site: u64,
         btype: u8,
         bytes: usize,
     ) -> Option<(u64, NativeCode)> {
@@ -667,9 +671,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .ok()?;
             return Some((probe, tail));
         };
+        // In the generation of the exit's block, which the tail outlives
+        // there ([`board::Ring::refer`]).
+        let stream = self.stream_at(site);
+        self.install_stream = stream;
         let tail = self
             .install_native(&[0; chain::CELL_TAIL_BYTES][..bytes], false)
             .ok()?;
+        self.note_reference(site, tail.0 as u64);
         let part_of = |address: usize| ((address - arena.window.exec) / arena.part_bytes) as u32;
         let part = part_of(tail.0);
         let at = match cache.dispatchers.iter().position(|&(held, _)| held == part) {
@@ -682,6 +691,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(probe) = cache.dispatchers[at].1[usize::from(btype)] {
             return Some((probe, tail));
         }
+        self.install_stream = stream;
         let probe = self
             .install_native(&chain::lookup_dispatcher(btype)?, false)
             .ok()?;

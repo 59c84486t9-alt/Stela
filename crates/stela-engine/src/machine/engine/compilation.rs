@@ -29,6 +29,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if target.pc == pc && target.key == key {
                 self.statistics.fetches[0] += 1;
                 self.link_direct_exit(pc);
+                self.entered(target.block as usize);
                 return Ok(Fetched::Block(target.block as usize));
             }
         }
@@ -68,6 +69,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if named {
                 self.statistics.fetches[1] += 1;
                 self.link_direct_exit(pc);
+                self.entered(target.block as usize);
                 return Ok(Fetched::Block(target.block as usize));
             }
         }
@@ -81,6 +83,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             self.statistics.fetches[2] += 1;
             self.remember_or_link(pc, entry.block);
+            self.entered(entry.block);
             return Ok(Fetched::Block(entry.block));
         }
         let indexed = self
@@ -118,6 +121,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.translate_page(pc, key);
         }
         self.remember_or_link(pc, index);
+        self.entered(index);
         Ok(Fetched::Block(index))
     }
 
@@ -600,6 +604,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let last = source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
         let code_bytes = compiled.code();
+        let id = self.variant_id(variant);
+        let stream = self.stream_for(pc, physical, id);
+        self.install_stream = stream;
         let code = self.install_code(code_bytes)?;
         // With every slot given, or a heap without room for the records'
         // next chunk, every block goes; a full arena reclaimed its oldest
@@ -611,10 +618,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             None if self.code.arena.is_some()
                 && let Some(slot) = self.retire_for_slot() =>
             {
+                self.install_stream = stream;
                 (self.install_code(code_bytes)?, slot)
             }
             None => {
                 self.discard_code(Discard::Table);
+                self.install_stream = stream;
                 let code = self.install_code(code_bytes)?;
                 let slot = self.take_slot().ok_or_else(|| {
                     self.unsupported(RequirementKind::Native("no block slot is left"))
@@ -676,7 +685,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 terminal,
             ));
         }
-        let id = self.variant_id(variant);
         // The record keeps a bit per successor; any more stay exits.
         successors.truncate(board::MAX_SUCCESSORS);
         // The slot's last block leaves its box for this one.
@@ -721,6 +729,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             board::Events::count(&shared.events.lost);
             return Ok(Fetched::Block(held));
         }
+        self.note_churn(&mut cache, slot);
         cache.code_slots.record(code.0, slot, || {
             shared
                 .arena
@@ -887,10 +896,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 x86_64_pointer::thunk(form, GuestAddress(pc), TAGS, SERVICE as usize as u64)
             }
         };
+        self.install_stream = self.stream_at(code.0 as u64);
         let installed = self.install_native(&thunk.code, true).ok()?;
         let site = code.0 as u64 + site as u64;
         // The block is not reachable yet: any bytes may change.
         let jump = chain::jump(site, installed.0 as u64)?;
+        self.note_reference(site, installed.0 as u64);
         self.patch_native(NativeCode(site as usize), &jump);
         let at = installed.0 as u64;
         let successor = thunk
@@ -988,9 +999,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 register_read::checked_write_thunk(pc, rt, cell, refused)
             }
         };
+        self.install_stream = self.stream_at(code.0 as u64);
         let installed = self.install_native(&thunk.code, true).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
+        self.note_reference(site, installed.0 as u64);
         self.patch_native(NativeCode(site as usize), &jump);
         let at = installed.0 as u64;
         thunk

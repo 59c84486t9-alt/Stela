@@ -21,6 +21,7 @@ mod apple_maintenance;
 mod budget;
 mod caller;
 mod chain_control;
+mod churn;
 mod clock;
 mod code_cache;
 mod code_slots;
@@ -53,6 +54,7 @@ mod scheduler;
 mod system_access;
 mod timing;
 pub use board::{CodeReport, LockCounts, LockSite, SiteCounts};
+pub use churn::ChurnCounts;
 pub use install_census::InstallCauses;
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
@@ -731,6 +733,10 @@ pub struct Machine<H: Host, D: Devices> {
     /// The blocks, block index and block table this machine shares with
     /// its board's other machines, or keeps alone ([`board::Code`]).
     code: Arc<board::Code>,
+    /// The generation of the board's ring the next install goes to
+    /// ([`board::YOUNG`] unless its caller says otherwise; each install
+    /// takes it back to young).
+    install_stream: usize,
     /// A grace of no PE: what a machine that keeps its code alone releases
     /// slots with ([`Self::grace`]).
     alone: board::Grace,
@@ -1199,6 +1205,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             successor_boxes: Default::default(),
             known_keys: Vec::new(),
             install_causes: InstallCauses::default(),
+            install_stream: board::YOUNG,
             census: None,
             native_failure: None,
             variants: numbering.variants,

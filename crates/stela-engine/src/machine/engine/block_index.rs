@@ -107,6 +107,30 @@ impl BlockIndex {
             .find(|&slot| blocks[slot].pc == pc && blocks[slot].variant == variant)
     }
 
+    /// What else `physical`'s frame offset holds besides a block of `pc`
+    /// in `variant`: a block of another PC (`Some(true)`, the frame mapped
+    /// at another address), else one of `pc` in another variant
+    /// (`Some(false)`), else nothing.
+    pub(super) fn sharing(
+        &mut self,
+        blocks: &impl Index<usize, Output = Block>,
+        pc: u64,
+        physical: u64,
+        variant: VariantId,
+    ) -> Option<bool> {
+        let mut shared = None;
+        for entry in self.at(physical)? {
+            let other = &blocks[entry.slot as usize];
+            if other.pc != pc {
+                return Some(true);
+            }
+            if other.variant != variant {
+                shared = Some(false);
+            }
+        }
+        shared
+    }
+
     /// The blocks of the page holding `physical`.
     pub(super) fn page(&self, physical: u64) -> impl Iterator<Item = usize> + '_ {
         let (frame, _) = split(physical);
