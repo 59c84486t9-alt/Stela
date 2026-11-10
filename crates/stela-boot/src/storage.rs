@@ -73,6 +73,41 @@ pub fn captures(wifi: stela_drivers::net::wifi::intel::platform::Observations) -
     }
 }
 
+/// The host subsystem a probe failure belongs to, where its kind names one.
+fn subsystem(error: &stela_drivers::probe::Error) -> &'static str {
+    use stela_drivers::probe::Error;
+    match error {
+        Error::Enumeration(_) => "PCI",
+        Error::Vmd(_) => "storage",
+        Error::Realtek(_) => "card reader",
+        Error::Tg3(_) | Error::Aqtion(_) => "network",
+        Error::IntelWifi(_) | Error::MediatekWifi(_) | Error::RealtekWifi(_) => "Wi-Fi",
+        Error::IntelBluetooth(_) | Error::Bcm4377(_) => "Bluetooth",
+        Error::Sfh(_) | Error::SfhCold(_) | Error::Ish(_) | Error::IshCold(_) => "sensors",
+        Error::Ehci(_) => "USB",
+        Error::HdaPci(_) | Error::Hda(_) | Error::HdaNative(_) => "audio",
+        Error::Usb4(_) => "USB4",
+        _ => "device",
+    }
+}
+
+/// Whether a function whose probe failed this way could hold a disk: a
+/// storage, USB or unnamed device's failure.
+pub(crate) fn may_hold_disks(error: &stela_drivers::probe::Error) -> bool {
+    matches!(
+        subsystem(error),
+        "storage" | "card reader" | "USB" | "device"
+    )
+}
+
+/// Report a PCI function probe could not bring up, by its subsystem.
+pub(crate) fn report_failure(address: pci::Address, error: &stela_drivers::probe::Error) {
+    output::arguments(format_args!(
+        "HOST DEVICE FAILED pci={address} ({}) error={error}\n",
+        subsystem(error)
+    ));
+}
+
 pub fn rsdp() -> Option<u64> {
     uefi::system::with_config_table(|entries| {
         let find = |guid| entries.iter().find(|entry| entry.guid == guid);
@@ -362,7 +397,7 @@ impl Prepared {
             output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
         }
         for (address, error) in &devices.failures {
-            output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
+            report_failure(*address, error);
         }
         for (location, error) in &devices.platform_failures {
             output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));

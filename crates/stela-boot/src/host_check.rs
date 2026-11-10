@@ -499,7 +499,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<InputDevice> {
         output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
     }
     for (address, error) in &devices.failures {
-        output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
+        crate::storage::report_failure(*address, error);
     }
     for (location, error) in &devices.platform_failures {
         output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));
@@ -511,7 +511,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<InputDevice> {
         ));
     }
     for (location, error) in &devices.device_failures {
-        output::arguments(format_args!("STORAGE FAILED {location}: {error}\n"));
+        output::arguments(format_args!("HOST DEVICE FAILED {location}: {error}\n"));
     }
     for (location, error) in &devices.usb_failures {
         output::arguments(format_args!(
@@ -560,15 +560,15 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<InputDevice> {
                 tables += usize::from(is_internal);
                 output::arguments(format_args!(
                     "  GPT disk={} partitions={}\n",
-                    table.disk,
+                    table.disk_guid,
                     table.partitions.len()
                 ));
                 for (index, partition) in table.partitions.iter().enumerate() {
                     output::arguments(format_args!(
                         "  PARTITION #{} unique={} type={} name={:?} first_lba={} bytes={}\n",
                         index + 1,
-                        partition.unique,
-                        partition.kind,
+                        partition.unique_guid,
+                        partition.type_guid,
                         partition.name,
                         partition.first_lba,
                         partition.blocks() * u64::from(id.block_size)
