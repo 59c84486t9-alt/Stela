@@ -25,7 +25,7 @@ use core::{
 use stela_contracts::gate::{BundleReport, GateService, MemoryRange, window};
 use stela_drivers::gpu::metal::{
     compiler::{self, AirCompiler},
-    device::lifecycle::QuiesceStatus,
+    device::{lifecycle::QuiesceStatus, pass_times},
     error::Error,
     native::{ExportedMemory, Loader, MemoryExporter, NativeBackend, vk},
     nvidia::{
@@ -593,6 +593,22 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
             times.span_entries,
         ));
     }
+    // With `--profile`: the GPU's own time per pass, conversion and copy.
+    if pass_times::pass_profile() {
+        static UNTIMED: AtomicBool = AtomicBool::new(false);
+        for service in shared().iter() {
+            if service.has_timestamps() == Some(false) && !UNTIMED.swap(true, Ordering::Relaxed) {
+                output::arguments(format_args!(
+                    "GPU PASSES unavailable: the device has no timestamp queries\n"
+                ));
+            }
+            if let Some(passes) = service.pass_times()
+                && passes.command_buffers != 0
+            {
+                output::arguments(format_args!("{passes}\n"));
+            }
+        }
+    }
     // The display's presents, and how long they held the boot CPU while a
     // posted call waited for it.
     let [presents, total, longest, on_boot, blocked] = client::take_presents();
@@ -941,6 +957,12 @@ fn open_gpu(
         }
         Err(error) => refuse(&format!("Metal could not open: {error:?}")),
     }
+}
+
+/// `--profile`: every device times its command buffers' passes apart and
+/// the report shows `GPU PASSES`.
+pub(in crate::engine) fn profile_passes() {
+    pass_times::set_pass_profile(true);
 }
 
 pub(super) fn shared() -> &'static [Arc<Shared>] {

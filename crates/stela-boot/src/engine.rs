@@ -847,6 +847,8 @@ fn run_machine<H: Host>(
         output::arguments(format_args!(
             "PROFILE on: each heartbeat reports the engine's time by phase and exit kind\n"
         ));
+        #[cfg(feature = "nvk")]
+        gpu::gate::profile_passes();
     }
     if options.install.is_some() {
         output::arguments(format_args!(
