@@ -169,6 +169,14 @@ impl State {
         }
     }
 
+    /// Milliseconds since TSC `since`; none before the rate is known.
+    fn millis(&self, since: u64) -> u64 {
+        match self.tsc_hz {
+            0 => 0,
+            hz => (now() - since) / (hz / 1000).max(1),
+        }
+    }
+
     fn draw_running(&mut self) {
         let Some(running) = self.running.as_ref() else {
             return;
@@ -222,6 +230,7 @@ impl State {
             return;
         };
         let seconds = self.seconds(running.started);
+        let millis = self.millis(running.started);
         let mut text = running.title;
         match (result.is_empty(), seconds) {
             (true, 0) => {}
@@ -229,7 +238,8 @@ impl State {
             (false, 0) => text.push_str(&format!(" ({result})")),
             (false, seconds) => text.push_str(&format!(" ({result}, {seconds} s)")),
         }
-        output::arguments(format_args!("STEP {} {text}\n", mark.letter()));
+        // The log's line carries the exact time, which the screen's rounds.
+        output::arguments(format_args!("STEP {} {text} ms={millis}\n", mark.letter()));
         self.line(mark, &text);
     }
 
@@ -273,7 +283,13 @@ pub fn begin(title: &str) {
         if state.running.is_some() {
             state.finish(Mark::Ok, "");
         }
-        output::arguments(format_args!("STEP {title}\n"));
+        // Seconds since the PC started, which the serial port's lines lack.
+        let millis = state.millis(0);
+        output::arguments(format_args!(
+            "STEP {title} t={}.{:03}\n",
+            millis / 1000,
+            millis % 1000
+        ));
         state.running = Some(Running {
             title: String::from(title),
             detail: String::new(),
@@ -314,10 +330,12 @@ pub fn progress_fraction(detail: &str, completed: u64, total: u64) {
     });
 }
 
-/// Move the running step's marker, at most eight frames a second. Safe
-/// from the firmware timer's callback: it allocates nothing and skips a
-/// frame while the state or the console is in use.
+/// Move the running step's marker, at most eight frames a second, and send
+/// the serial port what it takes now (`output::pump_serial`). Safe from the
+/// firmware timer's callback: it allocates nothing and skips a frame while
+/// the state or the console is in use.
 pub fn tick() {
+    output::pump_serial();
     with(|state| {
         let frame = state.tsc_hz / 8;
         let Some(running) = state.running.as_mut().filter(|_| frame > 0) else {

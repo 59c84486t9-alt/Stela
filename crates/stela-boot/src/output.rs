@@ -72,29 +72,62 @@ fn exclusive<R>(f: impl FnOnce() -> R) -> Option<R> {
     Some(result)
 }
 
-/// Output for the serial port while every PE runs on a core of its own
-/// ([`queue_serial`]). The port takes 16 bytes per transmit FIFO, each
-/// burst a port access a hypervisor traps and a real port drains at its
-/// baud rate, so a long report sent where it is printed would hold that
-/// processor, and the PE it runs, for a quarter second or more. Queued
-/// bytes go out from a PE that waits for an interrupt anyway
-/// ([`send_queued`]). Reached only under [`WRITING`], which covers copies
-/// into and out of the queue and never a port access.
+/// Output for the serial port, queued from the first line. The port takes
+/// 16 bytes per transmit FIFO, each burst a port access a hypervisor traps
+/// and a real port drains at its baud rate (about 11.5 KB/s), so output
+/// sent where it is printed would hold the boot, or the PE it runs, for
+/// seconds. A writer sends only what the port takes at once; the rest goes
+/// out at later lines, at the marker's ticks, and from PEs that wait for an
+/// interrupt anyway ([`send_queued`]). Until [`queue_serial`] the queue is
+/// a fixed ring in the image ([`EARLY_RING`]), since the heap may not exist
+/// yet. Reached only under [`WRITING`], which covers copies into and out of
+/// the queue and never waits for the port.
 static SERIAL_QUEUE: Global<Option<Queue>> = Global(RefCell::new(None));
 const SERIAL_QUEUE_BYTES: usize = 8 << 20;
+/// The ring the serial port's output waits in before [`queue_serial`].
+const EARLY_RING_BYTES: usize = 64 << 10;
+struct EarlyRing(core::cell::UnsafeCell<[MaybeUninit<u8>; EARLY_RING_BYTES]>);
+// SAFETY: taken once ([`EARLY_TAKEN`]), then reached only as the queue's
+// storage, under [`WRITING`].
+unsafe impl Sync for EarlyRing {}
+static EARLY_RING: EarlyRing = EarlyRing(core::cell::UnsafeCell::new(
+    [MaybeUninit::uninit(); EARLY_RING_BYTES],
+));
+static EARLY_TAKEN: AtomicBool = AtomicBool::new(false);
+/// The queue is gone ([`unqueue_serial`]): the boot is stopping or has left
+/// this image's boot services, and later lines go to the port directly.
+static SERIAL_DIRECT: AtomicBool = AtomicBool::new(false);
+/// How long a stop drains the queue before it judges the port's speed.
+const DRAIN_PROBE_MILLIS: u64 = 100;
+/// A port that takes less than this many bytes a second is a real UART,
+/// which a stop gives only the queue's newest [`DRAIN_TAIL_BYTES`]; a
+/// hypervisor's port takes the whole queue.
+const DRAIN_FAST_BYTES_PER_SECOND: u64 = 1 << 20;
+/// About a third of a second at 115200 baud.
+const DRAIN_TAIL_BYTES: usize = 4 << 10;
 /// Whether the queue holds bytes, read without the lock.
 static SERIAL_QUEUED: AtomicBool = AtomicBool::new(false);
 /// One processor at a time feeds the port from the queue, so its bursts
 /// neither interleave nor overrun the FIFO it found empty; the others do
 /// not wait for it.
 static SENDING: AtomicBool = AtomicBool::new(false);
-/// The bytes [`send_queued`] sends at once: with each line feed sent as two,
-/// at most the 16 a 16550's transmit FIFO takes once it is empty.
-const SERIAL_BURST: usize = 8;
+/// The bytes a 16550's transmit FIFO takes once it is empty: a burst, each
+/// line feed sent as two ([`Queue::take_burst`]), fills it in one string
+/// output, which a hypervisor takes in one exit.
+const SERIAL_FIFO: usize = 16;
+/// Once other processors drain the queue ([`share_draining`]), a writer
+/// only queues: under a hypervisor every burst is two exits to the host's
+/// device model, each of which can wait there for the model's lock as long
+/// as the host takes to refresh its display, and a writer holds its PE,
+/// and any lock it holds, meanwhile.
+static SHARED_DRAINING: AtomicBool = AtomicBool::new(false);
+/// Bursts a draining processor sends at once ([`drain_some`]): a few
+/// hundred bytes, a few hundred microseconds under a hypervisor.
+const DRAIN_BURSTS: usize = 32;
 
 /// A ring of bytes not yet sent.
 struct Queue {
-    bytes: Box<[MaybeUninit<u8>]>,
+    bytes: &'static mut [MaybeUninit<u8>],
     head: usize,
     len: usize,
     /// Bytes left out while the queue was full, not reported yet: the
@@ -102,19 +135,39 @@ struct Queue {
     dropped: usize,
 }
 
+/// The note that bytes were left out, formatted without the heap.
+fn dropped_note(bytes: usize) -> Text<96> {
+    let mut note = Text::default();
+    let _ = write!(
+        note,
+        "\n[serial: {bytes} bytes dropped; the boot log keeps them]\n"
+    );
+    note
+}
+
 impl Queue {
+    /// The ring in the image; `None` once taken.
+    fn early() -> Option<Self> {
+        if EARLY_TAKEN.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        // SAFETY: taken once, above; the ring lives as long as the image.
+        let bytes = unsafe { &mut *EARLY_RING.0.get() };
+        Some(Self {
+            bytes,
+            head: 0,
+            len: 0,
+            dropped: 0,
+        })
+    }
+
     /// Queue `data`, or count it as dropped while the queue cannot take it
     /// whole: a writer never waits for the port. The first output that
     /// fits again begins with a note of how much was dropped.
     fn push(&mut self, data: &[u8]) {
         if self.dropped != 0 {
-            let note = alloc::format!(
-                "
-[serial: {} bytes dropped]
-",
-                self.dropped
-            );
-            if self.room() < note.len() + data.len() {
+            let note = dropped_note(self.dropped);
+            if self.room() < note.as_bytes().len() + data.len() {
                 self.dropped += data.len();
                 return;
             }
@@ -143,6 +196,31 @@ impl Queue {
         SERIAL_QUEUED.store(true, Ordering::Release);
     }
 
+    /// Move the oldest bytes into `out` as far as they fit in one FIFO
+    /// with each line feed sent as two; how many.
+    fn take_burst(&mut self, out: &mut [u8; SERIAL_FIFO]) -> usize {
+        let mut count = 0;
+        let mut fifo = 0;
+        while count < self.len {
+            // SAFETY: only the occupied range is read, as in `take`.
+            let byte = unsafe { self.bytes[(self.head + count) % self.bytes.len()].assume_init() };
+            let width = if byte == b'\n' { 2 } else { 1 };
+            if fifo + width > SERIAL_FIFO {
+                break;
+            }
+            out[count] = byte;
+            fifo += width;
+            count += 1;
+        }
+        self.head = (self.head + count) % self.bytes.len();
+        self.len -= count;
+        if self.len == 0 {
+            self.head = 0;
+        }
+        SERIAL_QUEUED.store(self.len != 0, Ordering::Release);
+        count
+    }
+
     /// Move the oldest bytes into `out`, as many as fit; how many.
     fn take(&mut self, out: &mut [u8]) -> usize {
         let count = out.len().min(self.len);
@@ -159,21 +237,125 @@ impl Queue {
         SERIAL_QUEUED.store(self.len != 0, Ordering::Release);
         count
     }
+
+    /// Leave out all but the newest `keep` bytes; how many were left out.
+    fn keep_newest(&mut self, keep: usize) -> usize {
+        let skipped = self.len.saturating_sub(keep);
+        self.head = (self.head + skipped) % self.bytes.len();
+        self.len -= skipped;
+        skipped
+    }
+
+    /// Send what the port takes now, never waiting for it; nothing while
+    /// another processor sends or once processors drain the queue.
+    fn send_now(&mut self) {
+        if self.len == 0
+            || SHARED_DRAINING.load(Ordering::Relaxed)
+            || SENDING
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        let mut burst = [0u8; SERIAL_FIFO];
+        while self.len != 0 && crate::serial::ready() {
+            let taken = self.take_burst(&mut burst);
+            crate::serial::burst(&burst[..taken]);
+        }
+        SENDING.store(false, Ordering::Release);
+    }
+
+    /// Send the queue as the boot stops, bounded in time: a port that drains
+    /// slowly, a real UART, gets only the newest [`DRAIN_TAIL_BYTES`] after
+    /// [`DRAIN_PROBE_MILLIS`], after a note of how many were left out.
+    fn drain(&mut self) {
+        // A port that stops taking bytes this long is given up on, as
+        // `serial::send` gives up on one byte.
+        const STUCK_SPINS: u32 = 1 << 20;
+        let hz = TSC_HZ.load(Ordering::Relaxed);
+        let started = rdtsc();
+        let mut sent = 0u64;
+        let mut tail = None;
+        let mut stuck = 0;
+        let mut burst = [0u8; SERIAL_FIFO];
+        while self.len != 0 && stuck < STUCK_SPINS {
+            let now = rdtsc();
+            let elapsed = now.wrapping_sub(started);
+            let probed = hz != 0 && elapsed >= hz / 1000 * DRAIN_PROBE_MILLIS;
+            match tail {
+                None if probed
+                    && sent.saturating_mul(hz)
+                        < DRAIN_FAST_BYTES_PER_SECOND.saturating_mul(elapsed) =>
+                {
+                    tail = Some(now);
+                    let skipped = self.keep_newest(DRAIN_TAIL_BYTES);
+                    if skipped != 0 {
+                        Serial.write_bytes(dropped_note(skipped).as_bytes());
+                    }
+                    continue;
+                }
+                // The tail takes a third of a second at 115200 baud.
+                Some(since) if now.wrapping_sub(since) >= hz => break,
+                _ => {}
+            }
+            if crate::serial::ready() {
+                stuck = 0;
+                let taken = self.take_burst(&mut burst);
+                crate::serial::burst(&burst[..taken]);
+                sent += taken as u64;
+            } else {
+                stuck += 1;
+                core::hint::spin_loop();
+            }
+        }
+        SERIAL_QUEUED.store(false, Ordering::Release);
+    }
 }
 
-/// Queue the serial port's output from now on, for [`send_queued`].
+/// Queue the serial port's output in a large ring from now on, for
+/// [`send_queued`], with what the image's ring still holds.
 pub fn queue_serial() {
-    let queue = Queue {
-        bytes: Box::new_uninit_slice(SERIAL_QUEUE_BYTES),
+    let mut queue = Queue {
+        bytes: Box::leak(Box::new_uninit_slice(SERIAL_QUEUE_BYTES)),
         head: 0,
         len: 0,
         dropped: 0,
     };
     let _ = exclusive(|| {
         if let Ok(mut slot) = SERIAL_QUEUE.0.try_borrow_mut() {
+            if let Some(mut early) = slot.take() {
+                let mut chunk = [0u8; 256];
+                loop {
+                    let taken = early.take(&mut chunk);
+                    if taken == 0 {
+                        break;
+                    }
+                    queue.push(&chunk[..taken]);
+                }
+                queue.dropped += early.dropped;
+            }
             *slot = Some(queue);
         }
     });
+}
+
+/// Send what the serial queue holds as far as the port takes it now, never
+/// waiting for the port or another processor: safe from the firmware
+/// timer's callback.
+pub fn pump_serial() {
+    if !SERIAL_QUEUED.load(Ordering::Acquire)
+        || WRITING
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+    {
+        return;
+    }
+    if let Ok(mut slot) = SERIAL_QUEUE.0.try_borrow_mut()
+        && let Some(queue) = slot.as_mut()
+    {
+        queue.send_now();
+    }
+    WRITING.store(false, Ordering::Release);
 }
 
 /// Send a burst of queued bytes if the port takes it now without waiting;
@@ -188,13 +370,13 @@ pub fn send_queued() -> bool {
         return false;
     }
     if crate::serial::ready() {
-        let mut burst = [0u8; SERIAL_BURST];
+        let mut burst = [0u8; SERIAL_FIFO];
         let taken = exclusive(|| {
             SERIAL_QUEUE
                 .0
                 .try_borrow_mut()
                 .ok()
-                .and_then(|mut slot| slot.as_mut().map(|queue| queue.take(&mut burst)))
+                .and_then(|mut slot| slot.as_mut().map(|queue| queue.take_burst(&mut burst)))
                 .unwrap_or(0)
         })
         .unwrap_or(0);
@@ -204,33 +386,50 @@ pub fn send_queued() -> bool {
     SERIAL_QUEUED.load(Ordering::Acquire)
 }
 
-/// Send `bytes` to the serial port: queued once [`queue_serial`] ran, else
-/// here and now. Under [`WRITING`].
+/// From now on a writer only queues, and the processors that call
+/// [`drain_some`] or wait send the queue.
+pub fn share_draining() {
+    SHARED_DRAINING.store(true, Ordering::Relaxed);
+}
+
+/// Send up to [`DRAIN_BURSTS`] bursts of queued output, as far as the port
+/// takes them now; never waits for the port or another processor.
+pub fn drain_some() {
+    for _ in 0..DRAIN_BURSTS {
+        if !send_queued() {
+            break;
+        }
+    }
+}
+
+/// Queue `bytes` for the serial port and send what it takes now; after
+/// [`unqueue_serial`], send them here. Under [`WRITING`].
 fn serial(bytes: &[u8]) {
-    if let Ok(mut slot) = SERIAL_QUEUE.0.try_borrow_mut()
-        && let Some(queue) = slot.as_mut()
+    if !SERIAL_DIRECT.load(Ordering::Relaxed)
+        && let Ok(mut slot) = SERIAL_QUEUE.0.try_borrow_mut()
     {
-        queue.push(bytes);
-        return;
+        if slot.is_none() {
+            *slot = Queue::early();
+        }
+        if let Some(queue) = slot.as_mut() {
+            queue.push(bytes);
+            queue.send_now();
+            return;
+        }
     }
     Serial.write_bytes(bytes);
 }
 
-/// Send what the serial queue holds here and stop queueing: the boot is
-/// stopping, and no PE may wait again.
+/// Send what the serial queue holds here, bounded in time ([`Queue::drain`]),
+/// and stop queueing: the boot is stopping, or this image is leaving boot
+/// services, and no PE may wait again.
 fn unqueue_serial() {
     let _ = exclusive(|| {
+        SERIAL_DIRECT.store(true, Ordering::Relaxed);
         if let Ok(mut slot) = SERIAL_QUEUE.0.try_borrow_mut()
             && let Some(mut queue) = slot.take()
         {
-            let mut burst = [0u8; SERIAL_BURST];
-            loop {
-                let taken = queue.take(&mut burst);
-                if taken == 0 {
-                    break;
-                }
-                Serial.write_bytes(&burst[..taken]);
-            }
+            queue.drain();
         }
     });
 }
@@ -362,19 +561,33 @@ fn stamp(record: &mut Pending<[u8; PENDING_BYTES]>) {
         return;
     }
     let millis = rdtsc() / (hz / 1000).max(1);
-    let mut text = Stamp::default();
+    let mut text = Text::<24>::default();
     let _ = write!(text, "[{:5}.{:03}] ", millis / 1000, millis % 1000);
-    record.push(&text.bytes[..text.length]);
+    record.push(text.as_bytes());
 }
 
-/// A line's stamp, formatted without the heap.
-#[derive(Default)]
-struct Stamp {
-    bytes: [u8; 24],
+/// Text formatted without the heap, such as a line's stamp.
+struct Text<const N: usize> {
+    bytes: [u8; N],
     length: usize,
 }
 
-impl Write for Stamp {
+impl<const N: usize> Default for Text<N> {
+    fn default() -> Self {
+        Self {
+            bytes: [0; N],
+            length: 0,
+        }
+    }
+}
+
+impl<const N: usize> Text<N> {
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.length]
+    }
+}
+
+impl<const N: usize> Write for Text<N> {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         let end = self.length + value.len();
         self.bytes
@@ -391,6 +604,9 @@ impl Write for Stamp {
 /// take both with them.
 pub fn leave_boot_services() {
     crate::firmware::stop_ticker();
+    // The engine's copy of this image has a queue of its own: send this
+    // one's now, bounded, and the loader's last lines directly.
+    unqueue_serial();
     flush_log();
     with_sinks(true, |sinks| {
         sinks.retain(|sink| sink.kind != Log::Firmware)
@@ -663,13 +879,8 @@ pub fn terminate(code: u32) -> ! {
     ));
     // Why it stopped is at the end of what is queued, and the log's USB disk
     // may be what stopped.
-    while send_queued() {
-        core::hint::spin_loop();
-    }
+    unqueue_serial();
     flush_log();
-    while send_queued() {
-        core::hint::spin_loop();
-    }
     halt(code)
 }
 
@@ -698,12 +909,13 @@ fn halt(code: u32) -> ! {
 }
 
 /// Show `message` as the reason the mount stopped: as a failed step on
-/// Stela's console, or on the firmware's before it exists.
-fn stopped(message: &str) {
+/// Stela's console, followed by `next`, or on the firmware's before it
+/// exists.
+fn stopped(message: &str, next: &str) {
     console::reclaim();
     if console::active() && !RAW_SCREEN.load(Ordering::Relaxed) {
         crate::status::fail(message);
-        crate::status::info("Stela stopped. Turn the PC off to try again.");
+        crate::status::info(next);
     } else if FIRMWARE_CONSOLE.load(Ordering::Relaxed) {
         firmware_console("\nStela stopped: ");
         firmware_console(message);
@@ -711,12 +923,17 @@ fn stopped(message: &str) {
     }
 }
 
+/// What a stopped boot tells the user to do next: where its log is, and how
+/// to read it on another computer.
+pub const STOPPED: &str = "Stela stopped. Its log is on this USB: on another computer, `stela \
+    setup boot-log --usb USB` prints it; include it in a report. Turn the PC off to try again.";
+
 pub fn fatal(message: impl core::fmt::Display) -> ! {
     let message = alloc::string::ToString::to_string(&message);
     arguments(format_args!("\nSTELA FATAL {message}\n"));
     // The reason reaches the port before any later step can stop for good.
     unqueue_serial();
     crate::engine::stop_gpus_for_fatal();
-    stopped(&message);
+    stopped(&message, STOPPED);
     terminate(0x11)
 }
