@@ -34,7 +34,7 @@ pub fn emit(code: &mut Code, operation: &Operation) -> Result<(), EmitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aarch64::system::synchronization::{Requirement, Scope, WaitKind};
+    use crate::aarch64::system::synchronization::{Requirement, WaitKind};
     use alloc::vec;
 
     /// `mov r8,rbx; xor eax,eax; cpuid; mov rbx,r8`.
@@ -70,7 +70,6 @@ mod tests {
         for operation in [
             Operation::DataCompletion {
                 option: 15,
-                scope: Scope::OuterShareable,
                 requirement: Requirement::All,
                 nxs: false,
             },

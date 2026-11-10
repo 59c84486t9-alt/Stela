@@ -636,12 +636,9 @@ mod checked_register_tests {
                 .required_address_checks
                 .is_empty()
         );
-        for word in [0xf8a2_6bf8, 0xf8a2_0be0] {
-            assert!(
-                Decoder.lift(pc, word).is_err(),
-                "RPRFM or reserved extend {word:08x}"
-            );
-        }
+        // RPRFM is a hint; option<1> 0 is unallocated.
+        assert!(Decoder.lift(pc, 0xf8a2_6bf8).is_ok());
+        assert!(Decoder.lift(pc, 0xf8a2_0be0).is_err());
     }
 
     #[test]

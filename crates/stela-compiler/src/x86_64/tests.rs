@@ -1,6 +1,6 @@
 use super::*;
 use crate::aarch64::system::synchronization::{
-    Operation as Synchronization, Requirement, Scope, WaitKind,
+    Operation as Synchronization, Requirement, WaitKind,
 };
 
 /// The upper half's first address on a four-level host.
@@ -536,7 +536,6 @@ fn constructed_context_operations_return_an_explicit_error() {
     for operation in [
         Synchronization::DataCompletion {
             option: BARRIER_OPTION_OSH,
-            scope: Scope::OuterShareable,
             requirement: Requirement::All,
             nxs: false,
         },

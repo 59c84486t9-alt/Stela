@@ -10,9 +10,6 @@ const OPTION_SHIFT: u32 = 8;
 const OPTION_MASK: u32 = 15;
 const NXS_SCOPE_SHIFT: u32 = 10;
 const SCOPE_MASK: u32 = 3;
-const SCOPE_SHIFT: u32 = 2;
-const NONSHAREABLE_SCOPE: u32 = 1;
-const INNER_SHAREABLE_SCOPE: u32 = 2;
 const REQUIREMENT_MASK: u8 = 3;
 const READS_OPTION: u8 = 1;
 const WRITES_OPTION: u8 = 2;
@@ -47,14 +44,6 @@ pub enum Requirement {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
-    OuterShareable,
-    Nonshareable,
-    InnerShareable,
-    None,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitKind {
     Event,
     Interrupt,
@@ -62,9 +51,11 @@ pub enum WaitKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    /// DSB. Its shareability domain (CRm<3:2>, or CRm<3:2> of the nXS
+    /// form) selects nothing here: every PE shares one coherent host
+    /// memory, so each domain completes as Full system.
     DataCompletion {
         option: u8,
-        scope: Scope,
         requirement: Requirement,
         nxs: bool,
     },
@@ -112,14 +103,8 @@ pub fn decode(word: u32) -> Option<Operation> {
             WRITES_OPTION => Requirement::Writes,
             _ => Requirement::All,
         };
-        let scope = match option & REQUIREMENT_MASK {
-            READS_OPTION | WRITES_OPTION => Scope::None,
-            0 => Scope::OuterShareable,
-            _ => scope((u32::from(option) >> SCOPE_SHIFT) & SCOPE_MASK),
-        };
         return Some(Operation::DataCompletion {
             option,
-            scope,
             requirement,
             nxs: false,
         });
@@ -128,7 +113,6 @@ pub fn decode(word: u32) -> Option<Operation> {
         let encoded_scope = (word >> NXS_SCOPE_SHIFT) & SCOPE_MASK;
         return Some(Operation::DataCompletion {
             option: encoded_scope as u8,
-            scope: scope(encoded_scope),
             requirement: Requirement::All,
             nxs: true,
         });
@@ -181,14 +165,6 @@ pub fn decode(word: u32) -> Option<Operation> {
     })
 }
 
-fn scope(encoded: u32) -> Scope {
-    match encoded {
-        NONSHAREABLE_SCOPE => Scope::Nonshareable,
-        INNER_SHAREABLE_SCOPE => Scope::InnerShareable,
-        _ => Scope::OuterShareable,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,7 +204,6 @@ mod tests {
                 decode(DSB_CLASS | option << OPTION_SHIFT),
                 Some(Operation::DataCompletion {
                     option: option as u8,
-                    scope: Scope::OuterShareable,
                     requirement: Requirement::All,
                     nxs: false
                 })
@@ -239,30 +214,28 @@ mod tests {
     #[test]
     fn ordinary_dsb_options_match_the_source_table() {
         use Requirement::{All, Reads, Writes};
-        use Scope::{InnerShareable, Nonshareable, OuterShareable};
         // Options0/4 are the separately tested SSBB/PSSBB aliases.
         let expected = [
-            (1, Scope::None, Reads),
-            (2, Scope::None, Writes),
-            (3, OuterShareable, All),
-            (5, Scope::None, Reads),
-            (6, Scope::None, Writes),
-            (7, Nonshareable, All),
-            (8, OuterShareable, All),
-            (9, Scope::None, Reads),
-            (10, Scope::None, Writes),
-            (11, InnerShareable, All),
-            (12, OuterShareable, All),
-            (13, Scope::None, Reads),
-            (14, Scope::None, Writes),
-            (15, OuterShareable, All),
+            (1, Reads),
+            (2, Writes),
+            (3, All),
+            (5, Reads),
+            (6, Writes),
+            (7, All),
+            (8, All),
+            (9, Reads),
+            (10, Writes),
+            (11, All),
+            (12, All),
+            (13, Reads),
+            (14, Writes),
+            (15, All),
         ];
-        for (option, scope, requirement) in expected {
+        for (option, requirement) in expected {
             assert_eq!(
                 decode(DSB_CLASS | u32::from(option) << OPTION_SHIFT),
                 Some(Operation::DataCompletion {
                     option,
-                    scope,
                     requirement,
                     nxs: false
                 })
@@ -277,7 +250,6 @@ mod tests {
                 decode(DSB_NXS_CLASS | encoded_scope << NXS_SCOPE_SHIFT),
                 Some(Operation::DataCompletion {
                     option: encoded_scope as u8,
-                    scope: scope(encoded_scope),
                     requirement: Requirement::All,
                     nxs: true
                 })

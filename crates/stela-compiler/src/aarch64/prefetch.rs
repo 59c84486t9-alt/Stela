@@ -13,7 +13,6 @@ const REGISTER_MASK: u32 = 0xffe00c00;
 const REGISTER_FORM: u32 = 0xf8a00800;
 const LITERAL_MASK: u32 = 0xff000000;
 const LITERAL_FORM: u32 = 0xd8000000;
-const RANGE_HINT_MASK: u32 = 0b11000;
 const ADDRESS_SCALE: u8 = 3;
 const UNSIGNED_IMMEDIATE_SHIFT: u32 = 10;
 const UNSIGNED_IMMEDIATE_MASK: u32 = (1 << 12) - 1;
@@ -62,7 +61,10 @@ pub struct Operand {
 
 /// No prefetch form checks SP alignment or updates registers. AddressAdd is
 /// modulo 64 bits in the ordinary-RAM profile with checked arithmetic disabled.
-/// Register Rt=11xxx belongs to RPRFM, whose metadata semantics stay unsupported.
+/// Register Rt=11xxx is RPRFM with FEAT_RPRFM and PRFM with a reserved
+/// prfop without it: a hint either way, which may do nothing, as the
+/// immediate forms' reserved hints do. Its option<1> is 1 in both; 0 is
+/// unallocated.
 pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, Unsupported>> {
     let base = register((word >> REGISTER_SHIFT) & HINT_MASK, true);
     let address = if word & UNSIGNED_MASK == UNSIGNED_FORM {
@@ -80,9 +82,6 @@ pub fn decode(pc: GuestAddress, word: u32) -> Option<Result<Operand, Unsupported
             ) as i32,
         }
     } else if word & REGISTER_MASK == REGISTER_FORM {
-        if word & RANGE_HINT_MASK == RANGE_HINT_MASK {
-            return None;
-        }
         let Some(extend) = IndexExtend::decode((word >> EXTEND_SHIFT) & EXTEND_MASK) else {
             return Some(Err(Unsupported));
         };
@@ -161,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn register_extensions_scales_and_range_neighbors_are_explicit() {
+    fn register_extensions_scales_and_range_hints_are_explicit() {
         for hint in 0..32 {
             for option in 0..8 {
                 for scaled in [false, true] {
@@ -173,9 +172,7 @@ mod tests {
                             | (31 << 5)
                             | hint;
                         let decoded = decode(GuestAddress(0), word);
-                        if hint >= 24 {
-                            assert_eq!(decoded, None);
-                        } else if option & 2 == 0 {
+                        if option & 2 == 0 {
                             assert_eq!(decoded, Some(Err(Unsupported)));
                         } else {
                             let operand = decoded.unwrap().unwrap();
@@ -194,6 +191,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn range_prefetch_is_a_hint_that_emits_no_access() {
+        // RPRFM PLDKEEP, X0, [X1]: Rm X0, option 010, S 0, Rt 0b11000.
+        const RPRFM: u32 = 0xf8a0_4838;
+        const RET: u32 = 0xd65f_03c0;
+        // PREFETCHh's 0F 18 opcode.
+        const PREFETCH: [u8; 2] = [0x0f, 0x18];
+        let operand = decode(GuestAddress(0), RPRFM).unwrap().unwrap();
+        assert_eq!(operand.hint.encoding(), 0b11000);
+        let source: alloc::vec::Vec<u8> = [RPRFM, RET]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let leaf = crate::testing::leaf(&source, GuestAddress(0)).unwrap();
+        assert!(!leaf.x86_64_code.windows(2).any(|bytes| bytes == PREFETCH));
     }
 
     #[test]
