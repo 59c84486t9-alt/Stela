@@ -121,10 +121,11 @@ fragment float4 frag_deriv(Plain in [[stage_in]])
 
 // A derivative in a branch some of a quad's pixels skip, of a value the
 // branch computes from an interpolant and a constant buffer, which Apple
-// GPUs take from every pixel of the quad (case 0); and a biased sample whose
-// coordinates the buffer scales (otherwise). Apple leaves the derivatives of
-// texels, of longer computations and implicit levels in such a branch
-// undefined in the pixels that skip it.
+// GPUs take from every pixel of the quad (case 0); a biased sample whose
+// coordinates the buffer scales (case 1); a sample with an implicit level at
+// coordinates the buffer scales, in the branch (case 2); and the derivatives
+// of a texel the branch reads at the pixel (case 3). Cases 2 and 3 skip whole
+// quads: an M1 Pro returns other values where only some pixels skip.
 struct DerivUniforms {
     float scale;
     float lod_scale;
@@ -134,11 +135,18 @@ struct DerivUniforms {
 fragment float4 frag_deriv_branch(Plain in [[stage_in]], constant DerivUniforms *k [[buffer(0)]],
                                   texture2d<float> levels [[texture(0)]], sampler s [[sampler(0)]])
 {
-    if (which != 0)
+    if (which == 1)
         return levels.sample(s, in.position.xy * k->lod_scale, bias(k->bias));
     float u = in.a.x;
-    if ((uint(in.position.x) + uint(in.position.y)) % 3 == 0)
+    uint2 p = uint2(in.position.xy) >> (which >= 2 ? 1 : 0);
+    if ((p.x + p.y) % 3 == 0)
         return float4(0);
+    if (which == 2)
+        return levels.sample(s, in.position.xy * k->lod_scale);
+    if (which == 3) {
+        float4 t = levels.read(uint2(in.position.xy));
+        return float4(dfdx(t.x), dfdy(t.x), dfdx(t.y), dfdy(t.y));
+    }
     float w = u * u * k->scale;
     return float4(dfdx(w), dfdy(w), fwidth(w), w);
 }

@@ -573,9 +573,9 @@ fn level_colour(level: u32) -> [u8; 4] {
 /// A derivative in a branch a third of the pixels skip, one in every quad,
 /// of a value the branch computes from an interpolant and a constant
 /// buffer: Apple GPUs take it from the values every pixel of the quad
-/// holds, as if no pixel had skipped. Their derivatives of texels, longer
-/// computations and implicit levels in such a branch are undefined in the
-/// skipping pixels, so no case holds them.
+/// holds, as if no pixel had skipped. Derivatives of longer computations in
+/// such a branch are undefined in the skipping pixels, so no case holds
+/// them.
 fn branch_derivatives(plan: &mut Plan, library: &str) {
     let full = [0.0, 0.0, W as f64, H as f64];
     let corners = [(0.0, 0.0), (32.0, 0.0), (0.0, 32.0)];
@@ -671,6 +671,103 @@ fn branch_derivatives(plan: &mut Plan, library: &str) {
                             "mip": "nearest", "lod_max": 1.0}),
             )
             .output(Output::new("c", Dtype::F32, tol.clone()).expect(f32s(&expected), tol)),
+    );
+    divergent_levels_and_texels(plan, library, &pos, &att);
+}
+
+/// A sample with an implicit level, and the derivatives of a texel read at
+/// the pixel, in a branch a third of the quads skip, which divergence
+/// analysis cannot prove uniform. Where only some pixels of a quad skip, an
+/// M1 Pro returns other values in the others, so no case holds that.
+fn divergent_levels_and_texels(plan: &mut Plan, library: &str, pos: &[[f64; 4]], att: &[[f64; 4]]) {
+    let skips = |x: u32, y: u32| ((x >> 1) + (y >> 1)).is_multiple_of(3);
+    let mut levels = vec![];
+    for level in 0..7u32 {
+        let side = 64u32 >> level;
+        levels.extend((0..side * side).flat_map(|_| level_colour(level)));
+    }
+    let tol = Tolerance::abs(0.5 / 255.0);
+    // uv advances `texels_per_pixel` texels a pixel on both axes, which
+    // selects level log2 of it, nearest of the 64x64 texture's levels.
+    for texels_per_pixel in [2u32, 4] {
+        let level = texels_per_pixel.ilog2();
+        let colour = level_colour(level).map(|c| f64::from(c) / 255.0);
+        let expected: Vec<f64> = pixels()
+            .flat_map(|(x, y)| if skips(x, y) { [0.0; 4] } else { colour })
+            .collect();
+        let uniforms = f32s(&[0.0, f64::from(texels_per_pixel) / 64.0, 0.0]);
+        plan.add(
+            draw(
+                &format!("render.derivative.divergent_sample.{texels_per_pixel}"),
+                library,
+                "vert_plain",
+                "frag_deriv_branch",
+                pos,
+                att,
+                "rgba32float",
+                json!({}),
+            )
+            .set("constants", constant(2))
+            .buffer(Buffer::data("k", 0, uniforms).stage("fragment"))
+            .texture(
+                Texture::d2("levels", "rgba8unorm", 64, 64)
+                    .index(0)
+                    .mipmaps(7)
+                    .data(levels.clone()),
+            )
+            .sampler(
+                json!({"name": "s", "index": 0, "min": "linear", "mag": "linear",
+                            "mip": "nearest"}),
+            )
+            .output(Output::new("c", Dtype::F32, tol.clone()).expect(f32s(&expected), tol.clone())),
+        );
+    }
+    // Two channels that vary along both axes, one of them not linearly, so
+    // fine and coarse derivatives differ.
+    let texel = |x: u32, y: u32| {
+        let (x, y) = (f64::from(x), f64::from(y));
+        [x * x + 3.0 * y, 2.0 * y * y + x, 0.0, 1.0]
+    };
+    let texels: Vec<f64> = pixels().flat_map(|(x, y)| texel(x, y)).collect();
+    let (mut fine, mut coarse) = (vec![], vec![]);
+    for (x, y) in pixels() {
+        let (x0, y0) = (x & !1, y & !1);
+        for (out, is_fine) in [(&mut fine, true), (&mut coarse, false)] {
+            let (ry, cx) = if is_fine { (y, x) } else { (y0, x0) };
+            let dx = |c: usize| texel(x0 + 1, ry)[c] - texel(x0, ry)[c];
+            let dy = |c: usize| texel(cx, y0 + 1)[c] - texel(cx, y0)[c];
+            out.extend(if skips(x, y) {
+                [0.0; 4]
+            } else {
+                [dx(0), dy(0), dx(1), dy(1)]
+            });
+        }
+    }
+    let tol = Tolerance::exact();
+    plan.add(
+        draw(
+            "render.derivative.divergent_texel",
+            library,
+            "vert_plain",
+            "frag_deriv_branch",
+            pos,
+            att,
+            "rgba32float",
+            json!({}),
+        )
+        .set("constants", constant(3))
+        .buffer(Buffer::data("k", 0, f32s(&[0.0; 3])).stage("fragment"))
+        .texture(
+            Texture::d2("levels", "rgba32float", W, H)
+                .index(0)
+                .data(f32s(&texels)),
+        )
+        .sampler(json!({"name": "s", "index": 0}))
+        .output(
+            Output::new("c", Dtype::F32, tol.clone())
+                .expect(f32s(&fine), tol)
+                .expect_alternative(f32s(&coarse)),
+        ),
     );
 }
 

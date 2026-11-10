@@ -1651,6 +1651,47 @@ divergent_derivatives_take_the_whole_quad(void)
    ralloc_free(shader);
 }
 
+/* A fragment function that stops shading a third of the pixels by their
+ * position, then samples at the position scaled by a constant buffer's
+ * field with an implicit level, and differentiates a texel it reads at the
+ * pixel. */
+static const char *early_return_body =
+   "declare float @air.dfdx.f32(float)\n"
+   "define <4 x float> @fragment(<4 x float> %position, ptr addrspace(1) %color,"
+   " ptr addrspace(2) %smp, ptr addrspace(2) %k) {\n"
+   "entry:\n"
+   "%x = extractelement <4 x float> %position, i64 0\n"
+   "%y = extractelement <4 x float> %position, i64 1\n"
+   "%xi = fptoui float %x to i32\n"
+   "%yi = fptoui float %y to i32\n"
+   "%sum = add i32 %xi, %yi\n"
+   "%m = urem i32 %sum, 3\n"
+   "%skip = icmp eq i32 %m, 0\n"
+   "br i1 %skip, label %out, label %shade\n"
+   "shade:\n"
+   "%kp = getelementptr inbounds i8, ptr addrspace(2) %k, i64 4\n"
+   "%s = load float, ptr addrspace(2) %kp, align 4\n"
+   "%p = shufflevector <4 x float> %position, <4 x float> undef, <2 x i32> <i32 0, i32 1>\n"
+   "%sv0 = insertelement <2 x float> undef, float %s, i64 0\n"
+   "%sv = shufflevector <2 x float> %sv0, <2 x float> undef, <2 x i32> zeroinitializer\n"
+   "%uv = fmul <2 x float> %p, %sv\n"
+   "%t = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %color,"
+   " ptr addrspace(2) %smp, <2 x float> %uv, i1 true, <2 x i32> zeroinitializer,"
+   " i1 false, float 0.0, float 0.0, i32 0)\n"
+   "%c = extractvalue { <4 x float>, i8 } %t, 0\n"
+   "%xy0 = insertelement <2 x i32> undef, i32 %xi, i64 0\n"
+   "%xy = insertelement <2 x i32> %xy0, i32 %yi, i64 1\n"
+   "%r = call { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1) %color,"
+   " <2 x i32> %xy, i32 0, i32 0)\n"
+   "%texel = extractvalue { <4 x float>, i8 } %r, 0\n"
+   "%tx = extractelement <4 x float> %texel, i64 0\n"
+   "%d = call float @air.dfdx.f32(float %tx)\n"
+   "%res = insertelement <4 x float> %c, float %d, i64 3\n"
+   "br label %out\n"
+   "out:\n"
+   "%v = phi <4 x float> [ zeroinitializer, %entry ], [ %res, %shade ]\n"
+   "ret <4 x float> %v\n}\n";
+
 /* The divergent fragment's metadata with `body`. */
 static nir_shader *
 fragment_of(const char *body)
@@ -1696,6 +1737,52 @@ derivative_places(nir_shader *shader, unsigned *outside, unsigned *inside)
          }
       }
    }
+}
+
+/* Whether an instruction's block dominates the divergent branch of the
+ * function: it lies before the branch, where every pixel of a quad is
+ * active. */
+static bool
+before_branch(const nir_instr *instr, nir_if *branch)
+{
+   nir_block *then_block = nir_if_first_then_block(branch);
+   return unconditional(instr) && nir_block_dominates(instr->block, then_block);
+}
+
+/* After an early return a third of the pixels take, a sample with an
+ * implicit level becomes one with explicit gradients taken before the
+ * branch, and the texel read the function differentiates is read and
+ * differentiated there too. */
+static void
+early_returns_take_derivatives_before_the_branch(void)
+{
+   nir_shader *shader = fragment_of(early_return_body);
+   struct census census = count(shader);
+   assert(census.tex[nir_texop_txd] == 1 && !census.tex[nir_texop_tex] &&
+          !census.tex[nir_texop_txb] && census.tex[nir_texop_txf] == 1);
+   nir_tex_instr *txd = census.first[nir_texop_txd];
+   assert(!unconditional(&txd->instr));
+   nir_if *branch = NULL;
+   nir_foreach_function_impl(impl, shader) {
+      nir_metadata_require(impl, nir_metadata_dominance);
+      foreach_list_typed(nir_cf_node, node, node, &impl->body) {
+         if (node->type == nir_cf_node_if && !branch)
+            branch = nir_cf_node_as_if(node);
+      }
+   }
+   assert(branch);
+   for (unsigned i = 0; i < 2; i++) {
+      nir_def *gradient = nir_get_tex_src(txd, i ? nir_tex_src_ddy : nir_tex_src_ddx);
+      assert(gradient);
+      nir_instr *instr = nir_def_instr(gradient);
+      assert(instr->type == nir_instr_type_intrinsic && before_branch(instr, branch));
+   }
+   /* The read moves before the branch with its derivative. */
+   assert(before_branch(&census.first[nir_texop_txf]->instr, branch));
+   unsigned outside, inside;
+   derivative_places(shader, &outside, &inside);
+   assert(outside == 3 && !inside);
+   ralloc_free(shader);
 }
 
 /* A branch on a value every invocation shares keeps a quad's lanes
@@ -1876,6 +1963,7 @@ main(void)
    kernels_calculate_levels_over_their_quadgroups();
    divergent_derivatives_take_the_whole_quad();
    uniform_branches_keep_their_derivatives();
+   early_returns_take_derivatives_before_the_branch();
    guarded_reads_keep_their_derivatives();
    two_plane_samples_share_their_conversion();
    frozen_texture_reads_keep_their_lanes();
