@@ -479,6 +479,13 @@ impl Hub {
         self.clock.take_stalled()
     }
 
+    /// Host counts the count now lags the host's by, and the counts the
+    /// slew repaid since the last call ([`SharedClock::lag`],
+    /// [`SharedClock::take_repaid`]).
+    pub fn clock_lag(&self) -> (u64, u64) {
+        (self.clock.lag(), self.clock.take_repaid())
+    }
+
     /// Each PE's longest gap with guest work and no instruction retired
     /// since the last call, in counts, and the phase that took most of it
     /// ([`SharedClock::take_stalls`]): a step loop phase's name, `host` for
@@ -928,6 +935,20 @@ impl Hub {
     fn set_parked(&self, pe: usize, parked: bool) {
         self.inboxes[pe].parked.store(parked, Ordering::SeqCst);
         self.section(pe);
+    }
+
+    /// Whether the home machine is outside its run loop: it advances the
+    /// devices with time only from inside it.
+    pub(super) fn home_outside(&self) -> bool {
+        let home = self.home.load(Ordering::Acquire);
+        self.inboxes
+            .get(home)
+            .is_some_and(|inbox| inbox.outside.load(Ordering::Acquire))
+    }
+
+    /// The counts in a millisecond of the count every PE reads.
+    pub(super) fn counts_per_milli(&self) -> u64 {
+        self.clock.counts_per_milli()
     }
 
     /// PE `pe` enters the board's grace section when it is neither outside

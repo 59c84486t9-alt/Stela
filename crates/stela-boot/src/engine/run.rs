@@ -749,13 +749,19 @@ impl Heartbeat {
                 u128::from(elapsed) * u128::from(host::COUNTER_HZ) / u128::from(tsc_hz.max(1));
             let guest = count.wrapping_sub(self.clock_count);
             let stalled = machine.devices.hub().clock_stalled();
+            // What the count still lags host time by after holds, and how
+            // much of the lag it made up since the last beat.
+            let (lag, repaid) = machine.devices.hub().clock_lag();
             if self.clock_count != 0 {
                 let rate = u128::from(guest) * 1000 / wall.max(1);
+                let millis = |counts: u64| u128::from(counts) * 1000 / u128::from(host::COUNTER_HZ);
                 output::arguments(format_args!(
-                    "CLOCK RATE guest_per_wall={}.{:03} stalled_ms={}\n",
+                    "CLOCK RATE guest_per_wall={}.{:03} stalled_ms={} lag_ms={} repaid_ms={}\n",
                     rate / 1000,
                     rate % 1000,
-                    u128::from(stalled) * 1000 / u128::from(host::COUNTER_HZ),
+                    millis(stalled),
+                    millis(lag),
+                    millis(repaid),
                 ));
             }
             self.clock_count = count;

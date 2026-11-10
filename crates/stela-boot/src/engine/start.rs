@@ -9,13 +9,31 @@ use stela_contracts::refuse;
 /// How long XNU's debugger cross-call waits for every PE (`debug-ack`).
 const DEBUG_ACK_SECONDS: u64 = 10;
 
+/// The boot-args that scale XNU's lock timeouts for this host, each with a
+/// leading space. They assume the modeled chip's cores; a slower host's
+/// translated holders get that many times longer, by the clock this core
+/// sustains as measured against its TSC at `tsc_hz` (`guest_timeouts`):
+/// about 4 ms, before any AP or guest instruction runs.
+pub(super) fn lock_timeout_arguments(tsc_hz: u64) -> String {
+    use stela_boot_core::guest_timeouts::{
+        MODELED_CORE_HZ, lock_scale, lock_scale_arguments, measure_core_hz,
+    };
+    let core_hz = measure_core_hz(tsc_hz);
+    let scale = lock_scale(core_hz);
+    output::arguments(format_args!(
+        "GUEST TIMEOUTS lock_scale={scale} core_hz={core_hz} tsc_hz={tsc_hz} \
+         modeled_hz={MODELED_CORE_HZ}\n"
+    ));
+    lock_scale_arguments(scale)
+}
+
 /// The boot bundle `--preboot` names, built from the installed system on
 /// `partition`: its macOS, its staged update or its recoveryOS.
 fn from_disk(
     partition: alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>,
     options: &Options,
     bluetooth: bool,
-    host_hz: u64,
+    tsc_hz: u64,
 ) -> Vec<(String, Vec<u8>)> {
     crate::status::begin("Reading macOS's boot files from its disk");
     // The kernel's text on the screen and on the debug UART, which the
@@ -52,16 +70,7 @@ fn from_disk(
     if bluetooth {
         defaults.boot_args.push_str(" bt-transport-override=0");
     }
-    // XNU's lock timeouts assume the modeled chip's cores; a slower host's
-    // translated holders get that many times longer (`guest_timeouts`).
-    {
-        use stela_boot_core::guest_timeouts::{MODELED_CORE_HZ, lock_scale, lock_scale_arguments};
-        let scale = lock_scale(host_hz);
-        defaults.boot_args.push_str(&lock_scale_arguments(scale));
-        output::arguments(format_args!(
-            "GUEST TIMEOUTS lock_scale={scale} host_hz={host_hz} modeled_hz={MODELED_CORE_HZ}\n"
-        ));
-    }
+    defaults.boot_args.push_str(&lock_timeout_arguments(tsc_hz));
     if options.maintenance_write {
         // CSR_ALLOW_UNRESTRICTED_FS; the kext grant and other policy bits stay separate.
         defaults.security.sip_bits |= 2;

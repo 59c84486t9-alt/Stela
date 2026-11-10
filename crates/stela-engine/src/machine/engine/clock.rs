@@ -59,8 +59,14 @@
 //! the reason this count stays paced.
 //!
 //! The architecture requires a constant counter frequency, not a match
-//! with wall time; time of day drifts behind by the accumulated lag, as on
-//! a machine whose counter was paused, and ahead by any idle leaps.
+//! with wall time. A serialized count's time of day drifts behind by the
+//! accumulated lag, as on a machine whose counter was paused, and ahead by
+//! any idle leaps. A shared count repays the lag its holds left: once no
+//! hold is in force it runs [`SLEW_PARTS`]⁻¹ (1%) faster than the host's,
+//! in steps of at most [`SLEW_STEP_PARTS`]⁻¹ of the stall limit, until it
+//! is back on the host's count ([`SharedClock::look`]). A step only raises
+//! the offset, so every reader's count stays monotonic, and waits and
+//! native deadlines count the slew in, so no timer is late for it.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -131,6 +137,17 @@ pub(super) const TIMER_DELAY_HZ: u64 = 100;
 /// No ceiling, or no stop.
 const UNBOUNDED: u64 = u64::MAX;
 
+/// The slew repays one count of lag for each this many host counts: the
+/// count runs 1% fast until its lag is repaid, so a lag of L takes 100 L
+/// of wall time.
+pub(super) const SLEW_PARTS: u64 = 100;
+
+/// In parts of the stall limit: the least host time between two slew
+/// steps (3.1 ms at 50 ms, a step of at most 31 us), so that the state
+/// native reads share sees at most a few hundred writes a second while
+/// lag is owed.
+const SLEW_STEP_PARTS: u64 = 16;
+
 /// The host's counter, read fresh at each call.
 pub(super) trait Counter: FnMut() -> u64 {}
 impl<F: FnMut() -> u64> Counter for F {}
@@ -152,6 +169,61 @@ pub struct SharedClock {
     /// Host counts the count lost to stalls past the limit since the last
     /// [`Self::take_stalled`].
     stalled: AtomicU64,
+    /// The offset as seeded: the count with no lag. `offset` stays at or
+    /// below it, and the difference is the lag the slew repays. Written
+    /// only under the sequence, as is `slewed`.
+    target: AtomicU64,
+    /// The host count the slew's next step counts from: its last step, or
+    /// the last [`Self::settle`].
+    slewed: AtomicU64,
+    /// Counts the slew repaid since the last [`Self::take_repaid`].
+    repaid: AtomicU64,
+    /// The count before which no running PE can look stalled
+    /// ([`Self::look`]), on a line of its own.
+    next_scan: Summary,
+    /// Slot loads, for the host tests.
+    #[cfg(test)]
+    loads: AtomicU64,
+}
+
+/// A word on a cache line of its own.
+#[derive(Debug, Default)]
+#[repr(align(64))]
+struct Summary(AtomicU64);
+
+/// What one read of a [`SharedClock`] saw: its offset, its lag, the host
+/// count its slew steps from, and the host's counter then.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Seen {
+    offset: u64,
+    lag: u64,
+    slewed: u64,
+    host: u64,
+}
+
+impl Seen {
+    /// The highest the offset can be at host count `host`: a slew adds at
+    /// most one count for each [`SLEW_PARTS`] host counts since `slewed`,
+    /// and never more than the lag. A ceiling only lowers the count.
+    fn offset_by(&self, host: u64) -> u64 {
+        let ahead = host.saturating_sub(self.slewed) / SLEW_PARTS;
+        self.offset.wrapping_add(self.lag.min(ahead))
+    }
+
+    /// The first host count at which the count reaches `count`, as soon as
+    /// a slew that steps at most every `step` host counts can bring it: a
+    /// stale answer, or one a slower slew misses, only wakes early.
+    fn host_deadline(&self, count: u64, step: u64) -> u64 {
+        let plain = count.saturating_add_signed((self.offset as i64).wrapping_neg());
+        let first = self.slewed.saturating_add(step);
+        if self.lag == 0 || plain <= first {
+            return plain;
+        }
+        // The least `d` with `d + d / SLEW_PARTS` at least `plain - slewed`.
+        let distance = plain - self.slewed;
+        let full = self.slewed + distance - distance / (SLEW_PARTS + 1);
+        full.max(plain.saturating_sub(self.lag)).max(first)
+    }
 }
 
 /// One PE's part of a [`SharedClock`], on a cache line of its own.
@@ -183,7 +255,20 @@ impl SharedClock {
             stall: AtomicU64::new(0),
             timer_delay: AtomicU64::new(0),
             stalled: AtomicU64::new(0),
+            target: AtomicU64::new(0),
+            slewed: AtomicU64::new(0),
+            repaid: AtomicU64::new(0),
+            next_scan: Summary::default(),
+            #[cfg(test)]
+            loads: AtomicU64::new(0),
         }
+    }
+
+    /// PE `pe`'s published count.
+    fn slot(&self, pe: usize) -> u64 {
+        #[cfg(test)]
+        self.loads.fetch_add(1, Ordering::Relaxed);
+        self.slots[pe].count.load(Ordering::Relaxed)
     }
 
     /// Each PE's longest gap between two blocks with guest work since the
@@ -216,30 +301,109 @@ impl SharedClock {
             .then(|| count.saturating_add(stall))
     }
 
+    /// The lowest limit of the PEs that look stalled at count `now`, and
+    /// the lowest count at which one that does not yet could.
+    fn scan(&self, now: u64) -> (u64, u64) {
+        let suspect = self.stall.load(Ordering::Relaxed) / SUSPECT_PARTS;
+        // A PE that runs again later publishes a count past `now`.
+        let mut next = now.saturating_add(suspect);
+        let mut limit = UNBOUNDED;
+        for pe in 0..self.slots.len() {
+            let count = self.slot(pe);
+            match self.limit_of(count, now) {
+                Some(of) => limit = limit.min(of),
+                None if count != IDLE => next = next.min(count.saturating_add(suspect)),
+                None => {}
+            }
+        }
+        (limit, next)
+    }
+
     /// The lowest limit of the PEs that look stalled at count `now`.
     fn limit(&self, now: u64) -> u64 {
-        self.slots
-            .iter()
-            .filter_map(|slot| self.limit_of(slot.count.load(Ordering::Relaxed), now))
-            .min()
-            .unwrap_or(UNBOUNDED)
+        self.scan(now).0
     }
 
     /// Look at the PEs: set the limit of one that fell behind, or lift a
-    /// limit nobody holds any more. Without either, as nearly always, it
-    /// writes nothing. Read outside the sequence: a stale answer settles
-    /// once more or waits for the next look.
+    /// limit nobody holds any more; else repay lag by a slew step when one
+    /// is due. Without either, as nearly always, it writes nothing. Read
+    /// outside the sequence: a stale answer settles once more or waits for
+    /// the next look.
+    ///
+    /// With no ceiling set, a look before the count reaches the summary
+    /// `next_scan` reads no slot: no PE that runs can look stalled before
+    /// its published count is a part of the limit old, and a PE that
+    /// publishes later, running again, publishes a later count. A stop
+    /// settles at once ([`Self::stop`]). So the slots are read about once a
+    /// part of the limit in all, by the one look that claims the scan,
+    /// whatever the number of PEs, and publishing writes only its own slot.
     fn look(&self, counter: &mut impl Counter) {
-        let (count, _) = self.read(counter);
+        let (count, seen) = self.read(counter);
         let ceiling = self.state.ceiling.load(Ordering::Relaxed);
-        let limit = self.limit(count);
+        if ceiling == UNBOUNDED {
+            let next = self.next_scan.0.load(Ordering::Relaxed);
+            if count < next {
+                self.slew(&seen, counter);
+                return;
+            }
+            // Claim the scan, so that one look among the PEs reads the
+            // slots; the others go on as before it.
+            let claim = count.saturating_add(self.stall.load(Ordering::Relaxed) / SUSPECT_PARTS);
+            if self
+                .next_scan
+                .0
+                .compare_exchange(next, claim, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+            {
+                return;
+            }
+        }
+        let (limit, next) = self.scan(count);
+        self.next_scan.0.fetch_min(next, Ordering::Relaxed);
         let held = ceiling != UNBOUNDED && count >= ceiling;
         // A limit set ahead and still right, or a count held at a limit
         // still owed: the held part becomes lag only when it is lifted.
         if limit == ceiling || held && limit <= ceiling {
+            if ceiling == UNBOUNDED {
+                self.slew(&seen, counter);
+            }
             return;
         }
         self.settle(counter);
+    }
+
+    /// Repay lag by one step, if lag is owed, no ceiling is set and a step's
+    /// time has passed since the last one ([`SLEW_PARTS`]): the offset rises
+    /// by a count for each [`SLEW_PARTS`] host counts since, and never past
+    /// the lag. `seen` is a read's, checked first without a write.
+    fn slew(&self, seen: &Seen, counter: &mut impl Counter) {
+        let step = self.slew_step();
+        if seen.lag == 0 || seen.host.saturating_sub(seen.slewed) < step {
+            return;
+        }
+        let sequence = self.lock();
+        let host = sampled(counter);
+        let offset = self.state.offset.load(Ordering::Relaxed);
+        let lag = self.target.load(Ordering::Relaxed).wrapping_sub(offset);
+        let slewed = self.slewed.load(Ordering::Relaxed);
+        let since = host.saturating_sub(slewed);
+        if self.state.ceiling.load(Ordering::Relaxed) == UNBOUNDED && lag != 0 && since >= step {
+            let repay = lag.min(since / SLEW_PARTS);
+            self.state
+                .offset
+                .store(offset.wrapping_add(repay), Ordering::Relaxed);
+            // The remainder counts toward the next step; repaid in full,
+            // the next lag's slew starts from its settle.
+            self.slewed
+                .store(slewed + repay * SLEW_PARTS, Ordering::Relaxed);
+            self.repaid.fetch_add(repay, Ordering::Relaxed);
+        }
+        self.unlock(sequence);
+    }
+
+    /// The least host time between two slew steps, at least one count's.
+    fn slew_step(&self) -> u64 {
+        (self.stall.load(Ordering::Relaxed) / SLEW_STEP_PARTS).max(SLEW_PARTS)
     }
 
     /// Set the count's ceiling to the PEs' lowest limit, the count a limit
@@ -257,6 +421,9 @@ impl SharedClock {
                 .offset
                 .store(count.wrapping_sub(host), Ordering::Relaxed);
         }
+        // No slew runs while a ceiling is set: the next step counts from
+        // here.
+        self.slewed.store(host, Ordering::Relaxed);
         let limit = self.limit(count);
         let ceiling = if limit == UNBOUNDED {
             UNBOUNDED
@@ -290,6 +457,9 @@ impl SharedClock {
     fn seed(&self, offset: u64, frequency: u64) {
         let sequence = self.lock();
         self.state.offset.store(offset, Ordering::Relaxed);
+        self.target.store(offset, Ordering::Relaxed);
+        self.slewed.store(0, Ordering::Relaxed);
+        self.next_scan.0.store(0, Ordering::Relaxed);
         self.stall
             .store(frequency * STALL_MILLIS / 1000, Ordering::Relaxed);
         self.timer_delay
@@ -297,9 +467,9 @@ impl SharedClock {
         self.unlock(sequence);
     }
 
-    /// The count and offset from one publication, with the host's counter
-    /// sampled while that state holds.
-    fn read(&self, counter: &mut impl Counter) -> (u64, u64) {
+    /// The count and what it was read from in one publication, with the
+    /// host's counter sampled while that state holds.
+    fn read(&self, counter: &mut impl Counter) -> (u64, Seen) {
         loop {
             let sequence = self.state.sequence.load(Ordering::Acquire);
             if sequence & 1 != 0 {
@@ -308,10 +478,42 @@ impl SharedClock {
             }
             let offset = self.state.offset.load(Ordering::Relaxed);
             let ceiling = self.state.ceiling.load(Ordering::Relaxed);
+            let target = self.target.load(Ordering::Relaxed);
+            let slewed = self.slewed.load(Ordering::Relaxed);
             let host = sampled(counter);
             fence(Ordering::Acquire);
             if self.state.sequence.load(Ordering::Relaxed) == sequence {
-                return (host.wrapping_add(offset).min(ceiling), offset);
+                let seen = Seen {
+                    offset,
+                    lag: target.wrapping_sub(offset),
+                    slewed,
+                    host,
+                };
+                return (host.wrapping_add(offset).min(ceiling), seen);
+            }
+        }
+    }
+
+    /// The offset, lag and slew start from one publication, without the
+    /// host's counter.
+    fn snapshot(&self) -> Seen {
+        loop {
+            let sequence = self.state.sequence.load(Ordering::Acquire);
+            if sequence & 1 != 0 {
+                core::hint::spin_loop();
+                continue;
+            }
+            let offset = self.state.offset.load(Ordering::Relaxed);
+            let target = self.target.load(Ordering::Relaxed);
+            let slewed = self.slewed.load(Ordering::Relaxed);
+            fence(Ordering::Acquire);
+            if self.state.sequence.load(Ordering::Relaxed) == sequence {
+                return Seen {
+                    offset,
+                    lag: target.wrapping_sub(offset),
+                    slewed,
+                    host: 0,
+                };
             }
         }
     }
@@ -327,11 +529,26 @@ impl SharedClock {
         self.stalled.swap(0, Ordering::Relaxed)
     }
 
+    /// The counts in a millisecond, once seeded.
+    pub(super) fn counts_per_milli(&self) -> u64 {
+        self.stall.load(Ordering::Relaxed) / STALL_MILLIS
+    }
+
+    /// Host counts the count lags the host's by, owed to the slew.
+    pub fn lag(&self) -> u64 {
+        self.snapshot().lag
+    }
+
+    /// Counts the slew repaid since the last call.
+    pub fn take_repaid(&self) -> u64 {
+        self.repaid.swap(0, Ordering::Relaxed)
+    }
+
     /// The host count at which the count reaches `count` if no stop holds
-    /// it meanwhile.
+    /// it meanwhile, as early as the slew can bring it
+    /// ([`Seen::host_deadline`]).
     fn host_deadline(&self, count: u64) -> u64 {
-        let offset = self.state.offset.load(Ordering::Acquire);
-        count.saturating_add_signed((offset as i64).wrapping_neg())
+        self.snapshot().host_deadline(count, self.slew_step())
     }
 
     /// When a PE waiting at host counter `host` for the count to reach
@@ -409,9 +626,9 @@ struct Attachment {
     /// waits, so has no work the host keeps from it.
     stopped: bool,
     idle: bool,
-    /// The offset it last read: a ceiling only lowers the count, so it
-    /// stays at or below the host's counter past this one.
-    offset: u64,
+    /// What it last read: the count stays at or below the host's counter
+    /// past [`Seen::offset_by`].
+    seen: Seen,
     timers: TimerGate,
     progress: Progress,
 }
@@ -490,14 +707,14 @@ impl Clock {
     /// Read `clock` as PE `pe` from now on, from the count this clock last
     /// read.
     pub(super) fn attach(&mut self, clock: Arc<SharedClock>, pe: usize) {
-        let offset = clock.state.offset.load(Ordering::Relaxed);
+        let seen = clock.snapshot();
         self.shared = Some(Attachment {
             clock,
             pe,
             stopped: false,
             // It runs: a PE attaches as it enters parallel.
             idle: false,
-            offset,
+            seen,
             timers: TimerGate::default(),
             progress: Progress::default(),
         });
@@ -515,8 +732,8 @@ impl Clock {
     pub(super) fn read(&mut self, mut counter: impl Counter) -> u64 {
         let count = match &mut self.shared {
             Some(attachment) => {
-                let (count, offset) = attachment.clock.read(&mut counter);
-                attachment.offset = offset;
+                let (count, seen) = attachment.clock.read(&mut counter);
+                attachment.seen = seen;
                 count
             }
             None => return self.read_at(counter()),
@@ -529,9 +746,10 @@ impl Clock {
     /// reading the shared state: an exit's question, whose usual answer is
     /// that no deadline is near.
     pub(super) fn below(&self, count: u64, mut counter: impl Counter) -> bool {
-        self.shared
-            .as_ref()
-            .is_some_and(|attachment| counter().wrapping_add(attachment.offset) < count)
+        self.shared.as_ref().is_some_and(|attachment| {
+            let host = counter();
+            host.wrapping_add(attachment.seen.offset_by(host)) < count
+        })
     }
 
     /// The serialized count at host counter value `host`.

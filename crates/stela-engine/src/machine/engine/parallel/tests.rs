@@ -1194,6 +1194,90 @@ fn only_the_home_machine_advances_the_devices_with_time_and_tells_the_others() {
     assert!(worker.lines(1, 10).irq);
 }
 
+/// Latched pins: PE 1's IRQ rises once an advance with time reaches
+/// `irq_at`; counts the advances.
+#[derive(Default)]
+struct Timed {
+    irq_at: u64,
+    raised: bool,
+    advances: usize,
+}
+
+impl Devices for Timed {
+    fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+        Ok(0)
+    }
+    fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+        Ok(())
+    }
+    fn lines(&mut self, pe: usize, now: u64) -> Lines {
+        self.deadline(now);
+        self.pins(pe).unwrap_or_default()
+    }
+    fn pins(&mut self, pe: usize) -> Option<Lines> {
+        Some(Lines {
+            irq: pe == 1 && self.raised,
+            ..Lines::default()
+        })
+    }
+    fn deadline(&mut self, now: u64) -> Option<u64> {
+        self.advances += 1;
+        self.raised |= now >= self.irq_at;
+        (!self.raised).then_some(self.irq_at)
+    }
+}
+
+#[test]
+fn a_pe_advances_the_devices_once_their_deadline_passed_while_home_is_outside() {
+    let (hub, _) = hub(2);
+    let mut home = SharedDevices::new(
+        Timed {
+            irq_at: 20,
+            ..Timed::default()
+        },
+        Arc::clone(&hub),
+    );
+    let mut worker = home.worker();
+    assert_eq!(home.deadline(10), Some(20));
+    let epoch = hub.lines_epoch(1);
+    let advances = |home: &SharedDevices<Timed>| home.with(|devices| devices.advances);
+    // Home runs: it advances the devices itself, so the worker does not.
+    let before = advances(&home);
+    assert_eq!(worker.deadline(25), None);
+    assert_eq!(advances(&home), before);
+    let (lines, until) = worker.lines_and_deadline(1, 25);
+    assert!(!lines.irq);
+    assert!(until.is_some_and(|until| until > 25), "looks again later");
+    // Home leaves its run loop: the worker, awake past the deadline, brings
+    // the devices up to its count and tells every PE what changed.
+    hub.set_outside(0, true);
+    assert_eq!(worker.deadline(15), None, "not yet due");
+    assert_eq!(advances(&home), before);
+    assert_eq!(worker.deadline(25), None, "it still waits for no device");
+    assert_eq!(advances(&home), before + 1);
+    assert_eq!(hub.lines_epoch(1), epoch + 1, "PE 1's IRQ rose");
+    assert!(worker.lines(1, 25).irq);
+    // Nothing more is due: no PE advances them again.
+    assert_eq!(worker.deadline(40), None);
+    assert!(worker.lines_and_deadline(1, 40).0.irq);
+    assert_eq!(advances(&home), before + 1);
+    // While another call holds the devices, the worker leaves them.
+    home.with(|devices| {
+        devices.raised = false;
+        devices.irq_at = 50;
+    });
+    hub.set_outside(0, false);
+    assert_eq!(home.deadline(45), Some(50));
+    hub.set_outside(0, true);
+    let held = home.board.devices.lock().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(worker.deadline(60), None);
+    drop(held);
+    assert_eq!(advances(&home), before + 2);
+    assert_eq!(worker.deadline(60), None);
+    assert_eq!(advances(&home), before + 3);
+    assert!(worker.lines(1, 60).irq);
+}
+
 #[test]
 fn a_pe_without_a_machine_waits_for_its_first_start() {
     let (hub, _) = hub(2);

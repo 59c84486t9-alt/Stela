@@ -38,16 +38,98 @@ pub const MODELED_CORE_HZ: u64 = 3_490_000_000;
 pub const MAX_LOCK_SCALE: u64 = 8;
 
 /// The factor the lock timeouts get on a host whose cores run at
-/// `host_hz`, as measured: how many times slower than the modeled chip's
-/// they are, rounded up, so 1 on a host at least as fast. A translated
-/// holder runs its critical section that much slower; a holder the host
-/// stops is the count's to hold (`stela_engine` `clock`). An unmeasured
-/// rate changes nothing.
-pub fn lock_scale(host_hz: u64) -> u64 {
-    if host_hz == 0 {
+/// `core_hz`, as [`measure_core_hz`] measures it: how many times slower
+/// than the modeled chip's they are, rounded up, so 1 on a host at least
+/// as fast. A translated holder runs its critical section that much
+/// slower; a holder the host stops is the count's to hold (`stela_engine`
+/// `clock`). A rate within 5% of a step takes the lower one, so that the
+/// measurement's noise does not move a host between two scales. An
+/// unmeasured rate changes nothing.
+pub fn lock_scale(core_hz: u64) -> u64 {
+    if core_hz == 0 {
         return 1;
     }
-    MODELED_CORE_HZ.div_ceil(host_hz).clamp(1, MAX_LOCK_SCALE)
+    MODELED_CORE_HZ
+        .div_ceil(core_hz.saturating_add(core_hz / 20))
+        .clamp(1, MAX_LOCK_SCALE)
+}
+
+/// The additions one timed run of the reference loop makes, each waiting
+/// for the one before: 2,000,000 core cycles, 0.5 ms at 4 GHz.
+pub const REFERENCE_ADDS: u64 = 2_000_000;
+
+/// Timed runs of the reference loop; the fastest counts.
+pub const REFERENCE_RUNS: u32 = 8;
+
+/// The core clock that `adds` dependent additions taking `ticks` of a TSC
+/// at `tsc_hz` show: one addition a cycle, as on every x86-64 core.
+pub fn core_hz(adds: u64, ticks: u64, tsc_hz: u64) -> u64 {
+    if ticks == 0 {
+        return 0;
+    }
+    u64::try_from(u128::from(adds) * u128::from(tsc_hz) / u128::from(ticks)).unwrap_or(u64::MAX)
+}
+
+/// The clock this core sustains, measured against its TSC at `tsc_hz`:
+/// the fastest of [`REFERENCE_RUNS`] runs of [`REFERENCE_ADDS`] dependent
+/// additions, about 4 ms in all. Unlike the TSC's nominal rate it shows
+/// the core's turbo or power-saving clock and, under a hypervisor, time
+/// the host gives other work. The fastest run leaves out interrupts and
+/// the clock's ramp, so it is stable to a few percent from boot to boot.
+/// It does not see IPC, which translated code's speed also follows.
+#[cfg(target_arch = "x86_64")]
+pub fn measure_core_hz(tsc_hz: u64) -> u64 {
+    let ticks = (0..REFERENCE_RUNS)
+        .map(|_| {
+            let start = fenced_tsc();
+            dependent_adds(REFERENCE_ADDS / 8);
+            fenced_tsc().wrapping_sub(start)
+        })
+        .min()
+        .unwrap_or(0);
+    core_hz(REFERENCE_ADDS, ticks, tsc_hz)
+}
+
+/// The TSC, read after every earlier instruction and before every later
+/// one.
+#[cfg(target_arch = "x86_64")]
+fn fenced_tsc() -> u64 {
+    use core::arch::x86_64::{_mm_lfence, _rdtsc};
+    // SAFETY: LFENCE and RDTSC are baseline x86-64 instructions that touch
+    // no memory.
+    #[allow(unused_unsafe)]
+    unsafe {
+        _mm_lfence();
+        let tsc = _rdtsc();
+        _mm_lfence();
+        tsc
+    }
+}
+
+/// `iterations` times eight additions, each needing the one before.
+#[cfg(target_arch = "x86_64")]
+fn dependent_adds(iterations: u64) {
+    let mut sum = 0u64;
+    // SAFETY: register arithmetic only.
+    unsafe {
+        core::arch::asm!(
+            "2:",
+            "add {sum}, {left}",
+            "add {sum}, {left}",
+            "add {sum}, {left}",
+            "add {sum}, {left}",
+            "add {sum}, {left}",
+            "add {sum}, {left}",
+            "add {sum}, {left}",
+            "add {sum}, {left}",
+            "dec {left}",
+            "jnz 2b",
+            sum = inout(reg) sum,
+            left = inout(reg) iterations => _,
+            options(nomem, nostack),
+        );
+    }
+    core::hint::black_box(sum);
 }
 
 /// The boot-args that scale the lock timeouts by `scale`, each with a
@@ -80,11 +162,38 @@ mod tests {
         assert_eq!(lock_scale(3_000_000_000), 2);
         assert_eq!(lock_scale(1_100_000_000), 4);
         assert_eq!(lock_scale(100_000_000), MAX_LOCK_SCALE);
+        // Within 5% of a step: the lower scale, whichever way noise goes.
+        assert_eq!(lock_scale(3_400_000_000), 1);
+        assert_eq!(lock_scale(1_700_000_000), 2);
+        assert_eq!(lock_scale(1_600_000_000), 3);
         assert_eq!(
             lock_scale_arguments(2),
             " ml-timeout-ticket-lock-scale=2 ml-timeout-lock-scale=2 \
              ml-timeout-lock-panic-scale=2"
         );
+    }
+
+    #[test]
+    fn dependent_additions_show_the_core_clock() {
+        // 2,000,000 additions in 1,000,000 ticks of a 2 GHz TSC: 4 GHz.
+        assert_eq!(
+            core_hz(REFERENCE_ADDS, 1_000_000, 2_000_000_000),
+            4_000_000_000
+        );
+        assert_eq!(core_hz(REFERENCE_ADDS, 0, 2_000_000_000), 0);
+        assert_eq!(lock_scale(core_hz(REFERENCE_ADDS, 0, 1)), 1, "unmeasured");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn this_host_s_core_runs_the_reference_loop_near_its_tsc() {
+        // As cycles per TSC tick: a core between a tenth and four times its
+        // TSC's rate, near the same from one measurement to the next even
+        // while other work loads the host.
+        let first = measure_core_hz(1_000_000_000);
+        assert!((100_000_000..4_000_000_000).contains(&first), "{first}");
+        let again = measure_core_hz(1_000_000_000);
+        assert!(first.abs_diff(again) < first / 4, "{first} then {again}");
     }
 
     #[test]

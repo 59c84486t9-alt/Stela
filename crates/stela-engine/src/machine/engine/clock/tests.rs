@@ -214,18 +214,21 @@ fn a_pe_stopped_in_the_kernel_holds_the_count_only_past_the_stall_limit() {
     assert_eq!(shared.take_stalled(), 4800);
     assert_eq!(second.read(|| 10_000), 5200);
     assert_eq!(second.read(|| 10_100), 5300);
-    assert_eq!(second.host_deadline(6000), 10_800);
-    // Host work at EL0 holds no lock the kernel times.
+    // As early as the slew can bring it: 10,800 less one count in 101.
+    assert_eq!(second.host_deadline(6000), 10_793);
+    // Host work at EL0 holds no lock the kernel times. Each look from here
+    // repays a count of the lag for each 100 host counts.
     assert!(first.leave(|| 11_000, 0, true));
     second.look(|| 15_000);
-    assert_eq!(second.read(|| 20_000), 15_200);
+    assert_eq!(second.read(|| 20_000), 15_250);
     first.resume(|| 20_000, 0);
     assert_eq!(shared.take_stalled(), 0);
     // Nor host work while its guest waits for an interrupt.
     first.idle(|| 20_000, 0, None);
     assert!(!first.leave(|| 20_000, 0, false));
     second.look(|| 30_000);
-    assert_eq!(second.read(|| 30_000), 25_200);
+    assert_eq!(second.read(|| 30_000), 25_400);
+    assert_eq!(shared.take_repaid(), 200);
 }
 
 /// 200 ms at the stall limit's 50 ms.
@@ -399,4 +402,149 @@ fn a_pe_back_from_a_long_host_pause_takes_no_flood_of_timer_interrupts() {
     assert_eq!(deliveries[after], 10_000);
     assert_eq!(deliveries[after + 1] - deliveries[after], 240);
     assert!(deliveries.len() < (20_000 - 1000 - 5000) / 100 + 4);
+}
+
+/// `pes` PEs reading one shared clock seeded at count 1000 at host 1000,
+/// counting at `frequency` Hz, each with guest work from host 1000.
+fn busy_clocks(pes: usize, frequency: u64) -> (Arc<SharedClock>, Vec<Clock>) {
+    let shared = Arc::new(SharedClock::new(pes));
+    Clock::default().seed(&shared, 1000, frequency);
+    let clocks = (0..pes)
+        .map(|pe| {
+            let mut clock = Clock::default();
+            clock.attach(Arc::clone(&shared), pe);
+            clock.idle(|| 1000, 0, None);
+            clock.busy(|| 1000, 0, None);
+            clock
+        })
+        .collect();
+    (shared, clocks)
+}
+
+#[test]
+fn a_stall_s_lag_is_repaid_by_a_bounded_slew_with_timers_on_their_count() {
+    let (shared, mut clocks) = busy_clocks(3, FREQUENCY);
+    let stall = FREQUENCY * STALL_MILLIS / 1000;
+    // PE 2 waits, for a timer re-armed 1000 counts after each one fires.
+    clocks[2].idle(|| 1000, 0, None);
+    let step = shared.slew_step();
+    let (mut deadline, mut fired, mut armed) = (1500, 0, 1000);
+    let mut wake = clocks[2].wake_at(deadline, 1000);
+    // PE 0 retires nothing for 200 ms, then runs; PE 1 runs throughout.
+    let resumed = 1000 + LONG_STALL;
+    let lag = LONG_STALL - stall;
+    let repaid_by = resumed + lag * SLEW_PARTS + 2 * step;
+    let end = repaid_by + 10_000;
+    let (mut retired, mut seen, mut repaid) = ([0u64; 2], [0u64; 3], 0);
+    for host in 1001..end {
+        if host % 10 == 0 {
+            for pe in 0..2 {
+                if pe == 0 && host < resumed {
+                    continue;
+                }
+                retired[pe] += 100;
+                clocks[pe].mark(|| host, retired[pe], None);
+            }
+            // A PE that is sure the deadline is ahead is right.
+            if clocks[1].below(deadline, || host) {
+                assert!(shared.count(|| host) < deadline, "at {host}");
+            }
+        }
+        if host == wake {
+            clocks[2].look(|| host);
+            let count = clocks[2].read(|| host);
+            if count >= deadline {
+                // On its count, a count or two late at most for the steps'
+                // rounding; one armed before the hold was lifted waited for
+                // the stopped PE.
+                if armed > resumed {
+                    assert!(count - deadline <= 2, "at {host}: {count} for {deadline}");
+                }
+                fired += 1;
+                deadline = count + 1000;
+                armed = host;
+            }
+            wake = clocks[2].wake_at(deadline, host);
+            assert!(wake > host, "at {host}: waits again at once");
+        }
+        // Monotonic for every reader; never past the host's count.
+        for (pe, clock) in clocks.iter_mut().enumerate() {
+            let count = clock.read(|| host);
+            assert!(count >= seen[pe], "at {host}: {count} after {}", seen[pe]);
+            assert!(count <= host, "at {host}: overshoot to {count}");
+            seen[pe] = count;
+        }
+        if host == resumed + 1 {
+            // Held 50 ms in, the rest became lag.
+            assert_eq!(shared.lag(), lag);
+            assert_eq!(seen[1], 1000 + stall + 1);
+            assert_eq!(shared.take_repaid(), 0);
+        }
+        if host > resumed && host < repaid_by - 2 * step {
+            // No slew while held; after it, about one count per hundred.
+            let since = host - resumed;
+            let owed = shared.lag();
+            assert!(owed > 0, "at {host}");
+            let expected = lag - since / SLEW_PARTS;
+            assert!(
+                owed.abs_diff(expected) <= step / SLEW_PARTS + 2,
+                "at {host}: {owed}"
+            );
+        }
+        if host % 1000 == 0 {
+            repaid += shared.take_repaid();
+        }
+    }
+    repaid += shared.take_repaid();
+    assert_eq!((shared.lag(), repaid), (0, lag));
+    assert_eq!(clocks[1].read(|| end), end, "back on the host's count");
+    assert!(fired > lag * SLEW_PARTS / 1100, "{fired} timers fired");
+}
+
+#[test]
+fn no_slew_runs_while_a_hold_is_in_force() {
+    let (shared, mut first, second) = pair();
+    // A first stop leaves lag, a second one holds the count again.
+    assert!(first.leave(|| 2000, 0, false));
+    second.look(|| 8000);
+    first.resume(|| 8000, 0);
+    let lag = shared.lag();
+    assert_eq!(lag, 8000 - 3200);
+    assert!(first.leave(|| 9000, 0, false));
+    for host in (9000..40_000).step_by(50) {
+        second.look(|| host);
+    }
+    assert_eq!(shared.take_repaid(), 0);
+    first.resume(|| 40_000, 0);
+    assert!(shared.lag() > lag);
+}
+
+#[test]
+fn a_look_reads_no_slot_until_one_could_look_stalled() {
+    // 256 PEs at 24 MHz, each marking every 10,000 host counts in turn.
+    const PES: usize = 256;
+    let frequency = 24_000_000;
+    let (shared, mut clocks) = busy_clocks(PES, frequency);
+    shared.loads.store(0, Ordering::Relaxed);
+    let span = 10 * frequency;
+    let mut retired = [0u64; PES];
+    let mut looks = 0u64;
+    for (turn, host) in (1000..1000 + span).step_by(10_000 / PES).enumerate() {
+        let pe = turn % PES;
+        let published = clocks[pe].shared.as_ref().unwrap().progress.published;
+        retired[pe] += 1000;
+        clocks[pe].mark(|| host, retired[pe], None);
+        looks += u64::from(clocks[pe].shared.as_ref().unwrap().progress.published != published);
+    }
+    // A scan of every slot once a part of the limit (12.5 ms) at most.
+    let suspect = frequency * STALL_MILLIS / 1000 / SUSPECT_PARTS;
+    let scans = span / (suspect / 2) + 2;
+    let loads = shared.loads.load(Ordering::Relaxed);
+    assert!(looks > 30_000, "{looks} looks");
+    assert!(
+        loads <= scans * PES as u64,
+        "{loads} slot loads for {looks} looks"
+    );
+    assert_eq!(shared.count(|| 1000 + span), 1000 + span);
+    assert_eq!(shared.take_stalled(), 0);
 }

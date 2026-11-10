@@ -26,6 +26,11 @@ pub(super) struct Board<D> {
     /// requested, as each call left them: the home machine asks at every
     /// step, without the lock.
     pub(super) dma: AtomicU64,
+    /// The devices' next deadline in time (`u64::MAX`: none) as the last
+    /// advance with time left it, written under the lock: a PE other than home advances them once
+    /// it passed while home is outside its run loop
+    /// ([`SharedDevices::advance_for_home`]).
+    pub(super) time: AtomicU64,
     pub(super) reset: Mutex<Option<Reset>>,
     pub(super) resetting: AtomicBool,
     /// PE starts the devices made, which every machine asks for at every
@@ -137,6 +142,27 @@ impl<D: Devices> Board<D> {
             self.hub.request_service();
         }
         wake_home
+    }
+
+    /// Publish the devices' next deadline in time.
+    fn publish_time(&self, deadline: Option<u64>) {
+        let time = deadline.unwrap_or(u64::MAX);
+        if self.time.load(Ordering::Relaxed) != time {
+            self.time.store(time, Ordering::Release);
+        }
+    }
+
+    /// The devices' lock for `call` if no call holds it now.
+    fn try_lock(&self, call: Call) -> Option<Held<'_, D>> {
+        let state = self.devices.try_lock().ok()?;
+        Some(Held {
+            board: self,
+            state: ManuallyDrop::new(state),
+            call,
+            since: self.hub.ticks(),
+            waited: 0,
+            wakes: 0,
+        })
     }
 
     /// Publish the snapshot a remote PE reads without the devices' lock.
@@ -336,6 +362,7 @@ impl<D: Devices> SharedDevices<D> {
             now: AtomicU64::new(0),
             pins: (0..pes).map(|_| AtomicU8::new(UNLATCHED)).collect(),
             dma: AtomicU64::new(u64::MAX),
+            time: AtomicU64::new(u64::MAX),
             reset: Mutex::new(None),
             resetting: AtomicBool::new(false),
             starts: Mutex::new(VecDeque::new()),
@@ -375,15 +402,44 @@ impl<D: Devices> SharedDevices<D> {
     /// work that can wait, which a PE whose device access waits on the host
     /// (a disk transfer's MMIO, say) would otherwise hold up.
     pub fn try_with<R>(&self, f: impl FnOnce(&mut D) -> R) -> Option<R> {
-        let state = self.board.devices.try_lock().ok()?;
-        Some(f(&mut Held {
-            board: &self.board,
-            state: ManuallyDrop::new(state),
-            call: Call::Other,
-            since: self.board.hub.ticks(),
-            waited: 0,
-            wakes: 0,
-        }))
+        let mut held = self.board.try_lock(Call::Other)?;
+        Some(f(&mut held))
+    }
+
+    /// Advance the devices to `now` for the home machine, if their deadline
+    /// in time passed while it is outside its run loop (serving the host,
+    /// compiling, a heartbeat) and no call holds them: vblanks, device
+    /// timers and completions then come on time whatever home does. Home
+    /// advances them as ever once it runs; the devices see one monotonic
+    /// count ([`Held::now`]) from whichever PE asks.
+    fn advance_for_home(&self, now: u64) {
+        let board = &self.board;
+        if board.time.load(Ordering::Acquire) > now || !board.hub.home_outside() {
+            return;
+        }
+        let Some(mut devices) = board.try_lock(Call::Deadline) else {
+            return;
+        };
+        let now = devices.now(now);
+        if board.time.load(Ordering::Relaxed) > now {
+            return;
+        }
+        let deadline = devices.deadline(now);
+        board.publish_time(deadline);
+        devices.notify(usize::MAX, now);
+    }
+
+    /// When a PE other than home next looks at the devices' deadline: at
+    /// it, at most 10 ms on, or 1 ms on while it is overdue and home is in
+    /// its run loop, which advances them.
+    fn look_again(&self, now: u64) -> u64 {
+        let milli = self.board.hub.counts_per_milli().max(1);
+        let time = self.board.time.load(Ordering::Acquire);
+        if time > now {
+            time.min(now.saturating_add(10 * milli))
+        } else {
+            now.saturating_add(milli)
+        }
     }
 
     pub(super) fn call<R>(&self, call: Call, f: impl FnOnce(&mut D) -> R) -> R {
@@ -603,26 +659,35 @@ impl<D: Devices> Devices for SharedDevices<D> {
     }
     /// The home machine advances the devices with time and tells the other
     /// PEs what that changes ([`Self::notify`]); their machines wait for
-    /// those changes instead.
+    /// those changes instead, and wake for no device deadline. One that
+    /// asks while awake advances them when their deadline passed and home
+    /// is outside its run loop ([`Self::advance_for_home`]).
     fn deadline(&mut self, now: u64) -> Option<u64> {
         if !self.home {
+            self.advance_for_home(now);
             return None;
         }
-        self.changing(Call::Deadline, usize::MAX, now, |devices, now| {
-            devices.deadline(now)
-        })
+        let mut devices = self.lock(Call::Deadline);
+        let now = devices.now(now);
+        let deadline = devices.deadline(now);
+        devices.notify(usize::MAX, now);
+        self.board.publish_time(deadline);
+        deadline
     }
     /// The home machine's [`Self::lines`] and [`Self::deadline`] under one
-    /// lock, from one advance of the devices.
+    /// lock, from one advance of the devices. Another PE's machine gets its
+    /// pins and when to look again ([`Self::look_again`]).
     fn lines_and_deadline(&mut self, cpu: usize, now: u64) -> (Lines, Option<u64>) {
         if !self.home {
-            return (self.lines(cpu, now), None);
+            self.advance_for_home(now);
+            return (self.lines(cpu, now), Some(self.look_again(now)));
         }
         let mut devices = self.lock(Call::Lines);
         let now = devices.now(now);
         let (lines, deadline) = devices.lines_and_deadline(cpu, now);
         devices.state.lines[cpu] = lines;
         devices.notify(cpu, now);
+        self.board.publish_time(deadline);
         (lines, deadline)
     }
     fn system_register(
