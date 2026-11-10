@@ -154,11 +154,6 @@ impl Window {
         self.install_entry(address, page_window::leaf(physical, cache))
     }
 
-    /// Map `physical` at the reserved, empty `address`, to run from.
-    pub(crate) fn install_code(&self, address: u64, physical: u64) -> bool {
-        self.install_entry(address, page_window::code_leaf(physical))
-    }
-
     /// Install a data leaf at an address reserved by the Linux client.
     pub(crate) fn install_client(&self, address: u64, entry: u64) -> bool {
         self.install_entry(address, entry)

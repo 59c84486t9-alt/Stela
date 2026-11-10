@@ -42,9 +42,6 @@ impl<D: Domain, const N: usize> DomainRef<'_, D, N> {
     pub fn dispatcher_successor(&self) -> Result<(), WorkError> {
         D::dispatcher::<N>(&self.inner)
     }
-    pub fn same_runtime(&self, other: &DomainRef<'_, D, N>) -> bool {
-        D::same::<N>(&self.inner, &other.inner)
-    }
 }
 impl<'runtime, const N: usize> DomainRef<'runtime, NativeDomain, N> {
     /// Read/check the exact existing native Runtime; this creates no new root.

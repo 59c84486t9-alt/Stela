@@ -100,11 +100,13 @@ pub unsafe fn identify(
     let chip = pci
         .chip()
         .ok_or(Error::Identity(IdentityError::UnsupportedPci(pci)))?;
-    // SAFETY: covered by this function's own safety contract.
+    // SAFETY: `identify`'s contract: `base..base+bytes` is this function's
+    // exclusively claimed, uncached BAR0, kept by `owner`.
     let io = unsafe { MmioBar::from_owned_window(base, bytes, owner) }.map_err(Error::Register)?;
     // SAFETY: the chip comes from this function's own PCI IDs.
     let registers = unsafe { Registers::new(chip, io) };
-    // SAFETY: covered by this function's own safety contract.
+    // SAFETY: `identify` requires `Controller::new`'s contract: `clock` is
+    // calibrated on this CPU and these are the exclusive requester's registers.
     let mut control = unsafe { Control::new(registers, clock) }.map_err(Error::Control)?;
     control.firmware_own().map_err(Error::Control)?;
     control.driver_own(aspm).map_err(Error::Control)?;
@@ -190,12 +192,15 @@ impl<C: 'static> Controller<MmioBar, MmioQueue, C> {
         {
             return Err(Error::Register(registers::Error::OutsideBar));
         }
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: the constructor's contract: an exclusive PCI/BAR claim and
+        // UC mapping of `base..base+bytes`, kept by `owner`.
         let io = unsafe { MmioBar::from_owned_window(base, bytes, owner.clone()) }
             .map_err(Error::Register)?;
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: `identity` was observed on this exclusively claimed
+        // requester, whose remap window no other path uses (constructor contract).
         let registers = unsafe { Registers::new(identity.chip, io) };
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: the constructor's contract calibrates `clock` on this CPU and
+        // serializes every raw reset, IRQ, power and firmware path for this owner.
         let control = unsafe { Control::new(registers, clock) }.map_err(Error::Control)?;
         Self::claim(
             identity,
@@ -221,7 +226,8 @@ impl<C: 'static> Controller<MmioBar, MmioQueue, C> {
         let base = n.base;
         let bytes = n.bytes;
         let owner = n.owner.clone();
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: `install`'s contract covers `source` and `domain`. Each queue
+        // is a 16-byte window inside this controller's own BAR, checked below.
         unsafe {
             self.install_with(source, domain, aspm, move |offset| {
                 if (offset as usize)
@@ -315,6 +321,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             Err(Error::WrongPhase)
         }
     }
+    /// # Safety
+    /// As for [`Self::install`]: `source` and `domain` belong to this requester
+    /// and meet `TxRing::install`'s coherent-WB, 32-bit, NoSnoop- and ATS-off
+    /// conditions. Each queue `queue` returns is this requester's own ring
+    /// register window.
     pub(in crate::wifi::mediatek) unsafe fn install_with(
         &mut self,
         source: &dyn PageSource,
@@ -342,7 +353,9 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         // Source order and complete layout; each returned mapping/queue
         // is held before any subsequent fallible allocation/publication.
         s.data_tx = Some(
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: `install_with`'s contract covers the requester, `source`
+            // and `domain`. The engine is stopped and masked above, and the fresh
+            // phase owns the token namespace.
             unsafe {
                 DataRing::install(
                     queue(tx_ring(0))?,
@@ -356,7 +369,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         );
         s.control.initial_tx_ext().map_err(Error::Control)?;
         s.wm = Some(
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: as for the data ring: the stopped, masked engine and this
+            // requester's `source` and `domain` (`install_with`'s contract).
             unsafe {
                 TxRing::install(
                     queue(tx_ring(if c3 { 15 } else { 17 }))?,
@@ -368,12 +382,12 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             .map_err(Error::Ring)?,
         );
         s.fwdl = Some(
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: as above: the same stopped engine, requester and domain.
             unsafe { TxRing::install(queue(tx_ring(16))?, source, domain.clone(), 128) }
                 .map_err(Error::Ring)?,
         );
         s.event = Some(
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: as above: the same stopped engine, requester and domain.
             unsafe {
                 RxRing::install(
                     queue(rx_ring(0))?,
@@ -386,22 +400,25 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         );
         if !c3 {
             s.runtime = Some(
-                // SAFETY: covered by this function's own safety contract.
+                // SAFETY: as above: the same stopped engine, requester and domain.
                 unsafe { RxRing::install(queue(rx_ring(4))?, source, domain.clone(), 512) }
                     .map_err(Error::Ring)?,
             );
         }
         s.data_rx = Some(
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: as above: the same stopped engine, requester and domain.
             unsafe { RxRing::install(queue(rx_ring(2))?, source, domain, 1536) }
                 .map_err(Error::Ring)?,
         );
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: every ring above holds its pins and mappings for this
+        // requester, the fresh phase drained prior work, and this owner
+        // serializes every engine change.
         unsafe { s.control.start_dma_polling() }.map_err(Error::Control)?;
         // All real selected queues and owners now precede enablement.
         // Constructor still requires the checked fresh epoch.
         s.mailbox = Some(
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: these rings were installed above on this requester in its
+            // fresh sequencing epoch, and only this mailbox polls them.
             unsafe {
                 Mailbox::from_rings_with_runtime_rx(
                     s.identity,
@@ -464,7 +481,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         self.require(Phase::Firmware)?;
         let s = self.state_mut();
         s.phase = Phase::Quarantined;
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: `execute_clc`'s contract: the construction resource keeps the
+        // policy and stopped-radio permission `Execution::prepare` needs here.
         let p = unsafe {
             Execution::prepare(
                 s.mailbox.as_ref().unwrap(),
@@ -535,7 +553,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
     pub unsafe fn execute_remaining(&mut self, inputs: remaining::Inputs<'_>) -> Result<(), Error> {
         self.require(Phase::Clc)?;
         let s = self.state_mut();
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: `execute_remaining`'s contract gives `prepare_remaining` the
+        // same kept permission and resolved limits.
         unsafe {
             s.policy
                 .as_mut()
@@ -572,7 +591,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
                 .map_err(Error::Transport)?;
             s.facts.push(fact);
         }
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: `initialize_mac`'s contract: the EEPROM override is resolved
+        // and no peer, WTBL or key user exists on the freshly booted firmware.
         s.mac = Some(unsafe { s.control.initialize_mac_raw() }.map_err(Error::Control)?);
         if s.identity.chip != Chip::Mt7925 {
             let fact = s
@@ -675,7 +695,8 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
             return Err(Error::WrongPhase);
         }
         let s = self.state_mut();
-        // SAFETY: covered by this function's own safety contract.
+        // SAFETY: `register_interface`'s contract: C owns these interface
+        // indices for this requester, with no prior owner or concurrent allocator.
         let mut interface = unsafe {
             mailbox::device::Interface::claim(
                 s.mailbox.as_ref().unwrap(),
@@ -806,26 +827,27 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         let s = self.state_mut();
         s.phase = Phase::Quarantined;
         if let Some(m) = s.mailbox.as_mut() {
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: `retire_after_quiesce`'s contract: DMA, IOTLB, IRQ and
+            // deferred users and late responses are drained.
             unsafe { m.release_after_quiesce() }.map_err(Error::Ring)?;
         }
         if let Some(q) = s.data_tx.as_mut() {
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: as above: the same drained users.
             unsafe { q.release_after_quiesce() }.map_err(Error::Data)?;
         }
         for q in [&mut s.event, &mut s.runtime, &mut s.data_rx]
             .into_iter()
             .flatten()
         {
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: as above: the same drained users.
             unsafe { q.release_after_quiesce() }.map_err(Error::Ring)?;
         }
         for q in [&mut s.wm, &mut s.fwdl].into_iter().flatten() {
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: as above: the same drained users.
             unsafe { q.release_after_quiesce() }.map_err(Error::Ring)?;
         }
         if let Some(p) = s.policy.as_mut() {
-            // SAFETY: covered by this function's own safety contract.
+            // SAFETY: as above: the same drained users and stopped radio.
             unsafe { p.retire_after_quiesce() };
         }
         s.phase = Phase::Retired;

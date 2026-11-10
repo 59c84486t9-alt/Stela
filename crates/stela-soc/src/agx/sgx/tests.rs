@@ -1,5 +1,6 @@
 use super::super::generation::{self, GPUS};
 use super::*;
+use crate::research::agx_pio;
 use stela_contracts::interrupt::InterruptLatch;
 use stela_contracts::refuse;
 
@@ -7,6 +8,96 @@ const MMU_TTBAT: u64 = 0xd0_802c;
 const MMU_TTBA_INVALIDATE: u64 = 0xd0_8030;
 const CORE_MASK_0: u64 = 0xd0_1500;
 const CORE_MASK_1: u64 = 0xd0_1514;
+
+/// The research PIO descriptors' path to the native callback registers.
+impl FirmwarePower {
+    fn logical(&self, physical: u64) -> Result<u64> {
+        for &(base, bytes, offset) in &self.banks {
+            if let Some(at) = physical.checked_sub(base)
+                && at.checked_add(4).is_some_and(|end| end <= bytes)
+            {
+                return Ok(offset + at);
+            }
+        }
+        Err(refuse!(
+            "GFX firmware PIO does not target a mounted SGX bank"
+        ))
+    }
+
+    /// Resolve a PIO word through the firmware's UAT permissions before any
+    /// device effect. The AP descriptor's physical base is checked against the
+    /// translation and then the concrete device geometry, never trusted as DMA.
+    fn target(
+        &self,
+        port: &mut stela_contracts::dma::Port<'_, '_>,
+        region: &agx_pio::Region,
+        offset: u32,
+        write: bool,
+    ) -> Result<u64> {
+        if !self.native.borrow().available {
+            return Err(refuse!(
+                "GFX firmware PIO while PMGR inhibits SGX execution"
+            ));
+        }
+        if !matches!(region.kind, agx_pio::Kind::GFender | agx_pio::Kind::GmGifaf) {
+            return Err(refuse!("GFX native callback PIO region is not modeled"));
+        }
+        let (va, expected) = region.word(offset, write)?;
+        let physical = port
+            .iommu
+            .translate(port.memory, port.stream, va, va + 3, write, port.access)
+            .map_err(|error| match error {
+                stela_contracts::dma::DmaError::Fault(code) => {
+                    refuse!("GFX firmware PIO faults in the UAT", code)
+                }
+                stela_contracts::dma::DmaError::Memory => {
+                    refuse!("GFX firmware PIO page table is not RAM")
+                }
+                stela_contracts::dma::DmaError::Unsupported(reason) => reason,
+            })?;
+        if physical != expected {
+            return Err(refuse!(
+                "GFX firmware PIO translation disagrees with its AP physical descriptor"
+            ));
+        }
+        let logical = self.logical(physical)?;
+        let kind_matches = match region.kind {
+            agx_pio::Kind::GFender => {
+                matches!(logical, GATING_CONTROL | FENDER_SLEEP | FENDER_WAKE)
+            }
+            agx_pio::Kind::GmGifaf => gifaf_status(self.family) == Some(logical),
+            _ => false,
+        };
+        if !kind_matches {
+            return Err(refuse!(
+                "GFX native callback PIO kind disagrees with its target register"
+            ));
+        }
+        Ok(logical)
+    }
+
+    /// Read a source-checked native callback register. Unknown registers
+    /// refuse; the RAM DMA port is used only for the UAT table walk.
+    fn read(
+        &self,
+        port: &mut stela_contracts::dma::Port<'_, '_>,
+        region: &agx_pio::Region,
+        offset: u32,
+    ) -> Result<u32> {
+        let logical = self.target(port, region, offset, false)?;
+        self.native.borrow().read(self.family, logical)
+    }
+    fn write(
+        &self,
+        port: &mut stela_contracts::dma::Port<'_, '_>,
+        region: &agx_pio::Region,
+        offset: u32,
+        value: u32,
+    ) -> Result<()> {
+        let logical = self.target(port, region, offset, true)?;
+        self.native.borrow_mut().write(self.family, logical, value)
+    }
+}
 
 fn t8112() -> &'static Gpu {
     generation::by_chip(0x8112).unwrap()
@@ -24,13 +115,9 @@ fn write(sgx: &mut Sgx, offset: u64, value: u32) -> Result<(), MmioError> {
     sgx.write(offset, Width::Word, u64::from(value), &mut access)
 }
 
-fn firmware_region_at(
-    kind: crate::research::agx_pio::Kind,
-    physical: u64,
-    va: u64,
-) -> crate::research::agx_pio::Region {
+fn firmware_region_at(kind: agx_pio::Kind, physical: u64, va: u64) -> agx_pio::Region {
     use super::super::ring::tests::Flat;
-    use crate::research::agx_pio::Region;
+    use agx_pio::Region;
     let mut flat = Flat::new(0x1000, 0x2000);
     let descriptor = 0x1000 + 0x640 + kind as u64 * 0x28;
     flat.put_u64(descriptor, physical);
@@ -61,11 +148,7 @@ fn native_firmware_pio_walks_the_uat_and_shares_the_ap_register() {
         sgx.family = family;
         sgx.model = family.model().unwrap();
         let power = sgx.firmware_power(&[(physical, 0x4000000, 0)]).unwrap();
-        let region = firmware_region_at(
-            crate::research::agx_pio::Kind::GFender,
-            physical + 0xd04000,
-            0x10000,
-        );
+        let region = firmware_region_at(agx_pio::Kind::GFender, physical + 0xd04000, 0x10000);
         let mut ram = Ram::new(base, 0x10000);
         let [ttbr0, ttbr1] = uat::encode_gptbat(0, base + 0x4000, 0);
         ram.put_u64(base, ttbr0);
@@ -209,7 +292,7 @@ fn native_firmware_pio_walks_the_uat_and_shares_the_ap_register() {
         // physical range and must survive the source mapping unchanged.
         let subpage = (status & !0xfff) & 0x3fff;
         let gifaf = firmware_region_at(
-            crate::research::agx_pio::Kind::GmGifaf,
+            agx_pio::Kind::GmGifaf,
             physical + (status & !0xfff),
             0x20000 + subpage,
         );

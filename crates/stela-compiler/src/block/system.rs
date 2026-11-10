@@ -416,13 +416,6 @@ fn request(
 const NOP: u32 = 0xd503_201f;
 
 impl SystemInstruction {
-    pub fn is_el1_ram_completion(self) -> bool {
-        matches!(
-            self.operation,
-            SystemOperation::Synchronization(synchronization::Operation::DataCompletion { .. })
-        )
-    }
-
     /// Whether this operation needs the EL1 platform context.
     pub fn is_el1_context_operation(self) -> bool {
         match self.operation {

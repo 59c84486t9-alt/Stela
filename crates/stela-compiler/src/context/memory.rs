@@ -305,18 +305,6 @@ impl MemoryContextView {
         self.fault_pc = pc;
         self.completed_bytes = completed;
     }
-
-    pub fn record_access(
-        &mut self,
-        status: MemoryStatus,
-        address: u64,
-        pc: u64,
-        completed: u64,
-        access: FaultAccess,
-    ) {
-        self.record(status, address, pc, completed);
-        self.fault_access = access as u32;
-    }
 }
 
 /// The reached side of a read-modify-write fault. Access intent does not change

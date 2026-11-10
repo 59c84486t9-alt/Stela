@@ -5,8 +5,8 @@
 //! `CPU_PIO_RO_CTL` (per PE) and `ACC_PIO_RO_CTL` (per cluster) select the
 //! MMIO register groups to make read-only, and bit 0 of each block's
 //! `*_PIO_LOCK_VAL` applies the lock. XNU's values leave the per-PE groups
-//! [`CPU_PIO_DBG_WRAP`] and [`CPU_PIO_TRACE_CORE_CFG`] writable, and the
-//! per-cluster [`ACC_PIO_WRITABLE`] groups (PBLK_OVRD, DBG_CTL, DBG_PMGR,
+//! `CPU_PIO_DBG_WRAP` and `CPU_PIO_TRACE_CORE_CFG` writable, and the
+//! per-cluster `ACC_PIO_WRITABLE` groups (PBLK_OVRD, DBG_CTL, DBG_PMGR,
 //! DBG_WRAP_GLB, TRACE_CTL, TRC_UT_CTL and OCLA_CTL). Their offsets come
 //! from what SPTM 26A434 (T8112) does at the end of its CPU initialization
 //! (`__text+0x1b0d8` to `__text+0x1b188`), the only access it or the kernel

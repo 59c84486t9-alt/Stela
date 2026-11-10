@@ -265,17 +265,6 @@ impl HigherElState {
         }
         .ok_or(StateError::UnavailableExceptionLevel(level))
     }
-    pub(super) fn exception_mut(
-        &mut self,
-        level: ExceptionLevel,
-    ) -> Result<&mut El1Registers, StateError> {
-        match level {
-            ExceptionLevel::El2 => self.el2.as_mut().map(|bank| &mut bank.exception),
-            ExceptionLevel::El3 => self.el3.as_mut().map(|bank| &mut bank.exception),
-            _ => None,
-        }
-        .ok_or(StateError::UnavailableExceptionLevel(level))
-    }
 }
 
 #[cfg(test)]

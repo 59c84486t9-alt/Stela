@@ -60,9 +60,6 @@ use windows_sys::{
 pub(crate) const ADMIN: &str = "a terminal run as administrator";
 /// A whole disk as `--usb` names it.
 pub(crate) const DISK_EXAMPLE: &str = "PhysicalDrive2";
-/// What lists each partition's GPT GUID.
-pub(crate) const PARTITION_LISTING: &str =
-    "`Get-Partition | Format-List DiskNumber,PartitionNumber,Guid`";
 
 /// The EFI system partition's GPT type.
 const ESP: GUID = GUID::from_u128(0xc12a7328_f81f_11d2_ba4b_00a0c93ec93b);

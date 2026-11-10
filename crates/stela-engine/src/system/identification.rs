@@ -111,22 +111,6 @@ impl Register {
             .into_iter()
             .find(|register| register.encoding() == selector)
     }
-
-    pub const fn is_aa64_feature(self) -> bool {
-        !matches!(
-            self,
-            Self::MidrEl1
-                | Self::MpidrEl1
-                | Self::RevidrEl1
-                | Self::AidrEl1
-                | Self::CtrEl0
-                | Self::DczidEl0
-                | Self::ClidrEl1
-                | Self::CcsidrEl1
-                | Self::Ccsidr2El1
-                | Self::CsselrEl1
-        )
-    }
 }
 
 pub const SYSTEM_REGISTER_OP0: u8 = 3;

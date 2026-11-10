@@ -15,6 +15,10 @@ use stela_contracts::refuse;
 /// The original `AGFIPIORegionType` values used by kept power callbacks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
+#[expect(
+    dead_code,
+    reason = "the callbacks' whole region-type table; the SGX model reads GFender and GmGifaf"
+)]
 pub enum Kind {
     MCache = 3,
     ResourceWindows = 17,
@@ -46,13 +50,13 @@ pub struct Region {
 }
 
 impl Region {
-    pub fn geometry(&self) -> (u64, u32, u32) {
-        (self.physical, self.bytes, self.range_bytes)
-    }
-
     /// An original producer-checked physical list may check later
     /// ranges. No caller may synthesize that list by adding to the first
     /// descriptor base; every resulting native target still walks the UAT.
+    #[expect(
+        dead_code,
+        reason = "multi-range regions wait for a native callback that lists them"
+    )]
     pub fn listed_word(&self, offset: u32, bases: &[u64]) -> Result<(u64, u64)> {
         if bases.first() != Some(&self.physical)
             || (bases.len() as u64).checked_mul(u64::from(self.range_bytes))

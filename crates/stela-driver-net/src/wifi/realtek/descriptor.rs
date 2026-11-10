@@ -14,8 +14,6 @@ pub const QSEL_MANAGEMENT: u8 = 0x12;
 pub const QSEL_HIGH: u8 = 0x11;
 /// `rtw_tx_pkt_info_update_sec`'s type for a CCMP frame's hardware key.
 pub const SECURITY_CCMP: u8 = 3;
-/// And for TKIP and WEP.
-pub const SECURITY_RC4: u8 = 1;
 
 /// `struct rtw_tx_pkt_info`, as far as a station uses it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

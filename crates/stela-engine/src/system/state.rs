@@ -279,18 +279,6 @@ impl SystemState {
             .ok_or(StateError::UnavailableExceptionLevel(level))?
             .exception(level)
     }
-    pub fn exception_registers_mut(
-        &mut self,
-        level: ExceptionLevel,
-    ) -> Result<&mut El1Registers, StateError> {
-        if level == ExceptionLevel::El1 {
-            return Ok(&mut self.el1_registers);
-        }
-        self.higher_el
-            .as_mut()
-            .ok_or(StateError::UnavailableExceptionLevel(level))?
-            .exception_mut(level)
-    }
 
     /// The PSTATE bits held here; NZCV lives in GuestState. Use `pstate` for
     /// the full value.
@@ -404,9 +392,6 @@ impl SystemState {
     }
     pub const fn mte(&self) -> Option<&MteState> {
         self.mte.as_ref()
-    }
-    pub fn mte_mut(&mut self) -> Option<&mut MteState> {
-        self.mte.as_mut()
     }
     /// Whether PACM storage exists.
     pub const fn pacm_state_feature(&self) -> PacmStateFeature {

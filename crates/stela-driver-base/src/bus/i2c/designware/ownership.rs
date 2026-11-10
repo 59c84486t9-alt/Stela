@@ -97,9 +97,6 @@ impl<R: Registers, T: Timer> DesignWare<R, T> {
             }
         }
     }
-    pub fn fifo_depths(&self) -> (usize, usize) {
-        (self.state.tx_depth, self.state.rx_depth)
-    }
     pub fn progress(&self) -> Progress {
         self.state.progress
     }

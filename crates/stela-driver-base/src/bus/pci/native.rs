@@ -217,9 +217,6 @@ impl NativeFunction {
             Ok(())
         }
     }
-    pub fn denied_write(&self) -> Option<DeniedWrite> {
-        self.denied
-    }
     pub fn denied_write_count(&self) -> u64 {
         self.denied_count
     }

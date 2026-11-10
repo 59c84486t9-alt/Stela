@@ -51,14 +51,6 @@ impl InitialState {
     }
 }
 
-/// Only a call-prefix observation. It never acknowledges a handler, work item,
-/// device transition or radio policy effect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CallProgress {
-    pub accepted_calls: usize,
-    pub uncertain_call: Option<usize>,
-}
-
 /// Failure history disposition only, never source/kernel/retirement authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureDisposition {

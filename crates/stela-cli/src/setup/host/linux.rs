@@ -16,8 +16,6 @@ use std::{
 pub(crate) const ADMIN: &str = "sudo";
 /// A whole disk as `--usb` names it.
 pub(crate) const DISK_EXAMPLE: &str = "/dev/sdb";
-/// What lists each partition's GPT GUID.
-pub(crate) const PARTITION_LISTING: &str = "`lsblk -o NAME,PARTUUID`";
 
 /// The EFI system partition's GPT type, as `lsblk` prints it, and its MBR
 /// type.

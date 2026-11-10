@@ -10,7 +10,6 @@ use crate::{apple_device_tree::DeviceTree, carveouts::MEMORY_MAP};
 use alloc::{vec, vec::Vec};
 use stela_contracts::{refuse, require};
 
-pub const REGION_ID: u16 = 55;
 pub const BUFFER_BYTES: usize = 16 << 10;
 pub const HEADER_BYTES: usize = 16;
 pub const RECORD_BYTES: usize = 24;

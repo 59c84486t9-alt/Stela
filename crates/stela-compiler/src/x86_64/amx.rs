@@ -162,13 +162,6 @@ impl Tier {
         }
     }
 
-    /// The preferred tier the target supports; `None` leaves the model.
-    pub fn for_target(target: TargetCpu) -> Option<Self> {
-        [Self::Avx512, Self::Fma]
-            .into_iter()
-            .find(|tier| target.supports(tier.requires()))
-    }
-
     pub const fn name(self) -> &'static str {
         match self {
             Self::Fma => "fma",

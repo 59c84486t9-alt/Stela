@@ -183,9 +183,6 @@ impl Owner {
     pub fn configuration(&self) -> &Configuration {
         &self.configuration
     }
-    pub fn pending_step(&self) -> Option<u64> {
-        self.pending.as_ref().map(|p| p.cursor)
-    }
     pub fn refusal(&self) -> Option<&Refusal> {
         self.fault.as_ref()
     }

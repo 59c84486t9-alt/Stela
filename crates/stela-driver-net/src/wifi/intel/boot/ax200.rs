@@ -144,9 +144,6 @@ impl<Q: BootIo, B: BiosIo> Ax200Setup<'_, Q, B> {
     pub fn decisions(&self) -> Option<&SetupDecisions> {
         self.decisions.as_ref()
     }
-    pub fn external_clock_observation(&self) -> Option<Observation> {
-        self.clock_observation
-    }
     pub fn platform_reads(&self) -> &[service::Read] {
         self.lari.platform_reads()
     }

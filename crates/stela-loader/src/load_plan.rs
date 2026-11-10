@@ -133,13 +133,6 @@ struct PlannedImage {
     thread: Option<Arm64UnixThread>,
     install_name: Option<String>,
 }
-impl LoadPlan {
-    pub fn executable_entry(&self) -> Result<&EntryPoint> {
-        self.entry
-            .as_ref()
-            .ok_or(PlanError::UnsupportedEntryConvention)
-    }
-}
 fn checked_end(start: u64, bytes: u64, role: &str) -> Result<u64> {
     start
         .checked_add(bytes)

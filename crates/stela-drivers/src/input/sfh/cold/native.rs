@@ -83,9 +83,4 @@ impl Original {
         self.failure = result.as_ref().err().copied();
         result
     }
-    /// No generic config-only or masked-source substitute can satisfy this
-    /// missing native owner. Keep this object alongside the reported error.
-    pub fn migration_prerequisite(&self) -> Error {
-        Error::OriginalNotificationOwnerUnavailable
-    }
 }

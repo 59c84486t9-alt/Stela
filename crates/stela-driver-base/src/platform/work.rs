@@ -556,13 +556,6 @@ impl<const N: usize> Queue<N> {
         g.state().closed = true;
         Ok(())
     }
-    /// Read-only diagnostic publication count for independent fault controls.
-    /// It creates no ticket, current identity or execution/retirement authority.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn published_jobs_for_test(&self) -> Result<usize, WorkError> {
-        let mut guard = self.lock()?;
-        Ok(guard.state().jobs.iter().flatten().count())
-    }
 
     pub fn completed(&self, ticket: Ticket) -> Result<bool, WorkError> {
         let mut guard = self.lock()?;

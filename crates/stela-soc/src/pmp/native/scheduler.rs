@@ -289,7 +289,6 @@ struct WorkState {
     target: Target,
 }
 struct ImmediateState {
-    name: String,
     thread: Rc<Thread>,
     target: Target,
 }
@@ -537,7 +536,6 @@ impl Runtime {
         let thread = s.thread(priority)?;
         let id = s.immediate.len();
         s.immediate.push(ImmediateState {
-            name: name.into(),
             thread,
             target: Target {
                 callback: Some(Box::new(callback)),

@@ -18,7 +18,6 @@ const INLINE: usize = 32;
 pub const MAX_LENGTH: usize = 4095;
 pub const VENDOR: u16 = 0x1022;
 pub const DEVICE: u16 = 0x15e6;
-pub const ACPI_ID: &str = "AMDI0011";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IoError;

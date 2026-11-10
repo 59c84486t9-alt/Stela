@@ -43,9 +43,6 @@ impl SectionMetadata {
     pub fn security_key(&self) -> u32 {
         le32(&self.map, 20)
     }
-    pub fn mode_crc_type(&self) -> u32 {
-        le32(&self.map, 32)
-    }
     pub fn specification(&self) -> &[u8] {
         &self.map[MAP - SPECIFICATION..]
     }

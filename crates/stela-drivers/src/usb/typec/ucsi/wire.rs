@@ -15,7 +15,6 @@ pub(super) const CONNECTOR_CAPABILITY: u64 = 7;
 pub(super) const SET_DATA_ROLE: u64 = 9;
 pub(super) const SET_POWER_ROLE: u64 = 0x0b;
 pub(super) const ALTERNATE_MODES: u64 = 0x0c;
-pub(super) const CAM_SUPPORTED: u64 = 0x0d;
 pub(super) const CURRENT_CAM: u64 = 0x0e;
 pub(super) const NEW_CAM: u64 = 0x0f;
 pub(super) const PDOS: u64 = 0x10;

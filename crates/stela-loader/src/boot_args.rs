@@ -14,8 +14,6 @@ pub use {stela_formats::boot_bundle::schema::BootArgs, stela_formats::boot_bundl
 pub const BOOT_LINE_LENGTH: usize = 1024;
 pub const REVISION: u16 = 3;
 pub const VERSION: u16 = 2;
-/// `Boot_Video.v_depth` bits 0..8 hold bits per pixel.
-pub const VIDEO_DEPTH_MASK: u64 = 0xff;
 /// `kBootFlagsDarkBoot`.
 pub const BOOT_FLAG_DARK_BOOT: u64 = 1;
 

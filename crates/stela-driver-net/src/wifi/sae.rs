@@ -37,8 +37,6 @@ use p256::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-/// The SAE authentication algorithm number.
-pub const ALGORITHM: u16 = 3;
 /// The finite cyclic group: 256-bit random ECP group (NIST P-256).
 pub const GROUP: u16 = 19;
 /// WLAN_STATUS_ANTI_CLOG_REQUIRED.

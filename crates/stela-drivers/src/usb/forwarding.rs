@@ -124,9 +124,6 @@ impl Device {
     pub fn configuration(&self) -> Option<u8> {
         (!self.fenced).then_some(self.configuration)
     }
-    pub fn alternate_settings(&self) -> Option<&[(u8, u8)]> {
-        (!self.fenced).then_some(self.settings.as_slice())
-    }
     pub fn fenced(&self) -> bool {
         self.fenced
     }

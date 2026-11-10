@@ -8,7 +8,6 @@ use alloc::{format, vec::Vec};
 use stela_driver_core::firmware::{Requirement, Target};
 
 pub const LINUX_FIRMWARE: &str = "https://gitlab.com/kernel-firmware/linux-firmware";
-pub const REALTEK_RELEASE: &str = "20250917";
 pub const REALTEK_REVISION: &str = "add225168d0d1ba4c174d5eb15272b53de01ad5a";
 pub const INTEL_RSA_REVISION: &str = "711d3297bac870af42088a467459a0634c1970ca";
 pub const WIFI_FIRMWARE_REVISION: &str = "59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01";
@@ -33,8 +32,7 @@ const GSP_KINDS: [&str; 6] = [
 /// adapter's scans and transmissions answer to.
 pub const WIRELESS_REGDB: &str =
     "https://git.kernel.org/pub/scm/linux/kernel/git/wens/wireless-regdb.git";
-pub const WIRELESS_REGDB_RELEASE: &str = "master-2026-09-03";
-/// The immutable commit to which the named regulatory release peels.
+/// The pinned wireless-regdb commit.
 pub const WIRELESS_REGDB_REVISION: &str = "389b9b702cf9018e9a9078ccc4fa8eaae2e054e3";
 const KERNEL_ORG_GIT: &str = "https://git.kernel.org/";
 

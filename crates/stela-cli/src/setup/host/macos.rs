@@ -13,8 +13,6 @@ use std::{
 pub(crate) const ADMIN: &str = "sudo";
 /// A whole disk as `--usb` names it.
 pub(crate) const DISK_EXAMPLE: &str = "disk5";
-/// What lists each partition's GPT GUID.
-pub(crate) const PARTITION_LISTING: &str = "`diskutil info`";
 
 /// The computer `stela setup` runs on.
 pub(crate) struct System;

@@ -158,9 +158,6 @@ impl Properties {
     pub fn product_id(&self) -> &[u8] {
         &self.basic_query[11..21]
     }
-    pub fn product_info(&self) -> u16 {
-        (u16::from(self.basic_query[2] & 0x7f) << 7) | u16::from(self.basic_query[3] & 0x7f)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

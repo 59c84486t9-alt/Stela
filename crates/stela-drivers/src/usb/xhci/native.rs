@@ -89,7 +89,8 @@ impl Registers for Access {
 pub struct Failure {
     pub error: Error,
     owner: Rc<Owner>,
-    controller: Option<Box<Controller>>,
+    /// Held so a partly started controller's storage outlives the failure.
+    _controller: Option<Box<Controller>>,
     memory: Option<Rc<memory::Native>>,
 }
 impl Failure {
@@ -101,12 +102,6 @@ impl Failure {
     }
     pub fn register_error(&self) -> Option<usize> {
         self.owner.register_failure.get()
-    }
-    pub fn retains_controller_storage(&self) -> bool {
-        self.controller.is_some()
-    }
-    pub fn retains_original_requester(&self) -> bool {
-        Rc::strong_count(&self.owner) != 0
     }
 }
 
@@ -197,21 +192,10 @@ pub enum Completion {
 
 pub struct SubmitFailure {
     pub error: BlockError,
-    retained: Payload,
+    /// Held so the refused transfer's pins stay quarantined with the failure.
+    _retained: Payload,
 }
-impl SubmitFailure {
-    pub fn retains_original_payload(&self) -> bool {
-        self.retained.buffer.len() != 0
-    }
-}
-
 impl Controller {
-    pub fn native_dma_error(&self) -> Option<region::Error> {
-        self.native_memory
-            .as_ref()
-            .and_then(|memory| memory.error())
-    }
-
     pub fn allocate_native_payload(&mut self, bytes: usize) -> Result<Payload, BlockError> {
         self.ready()?;
         if bytes == 0 || bytes > MAX_TD {
@@ -316,7 +300,7 @@ impl Controller {
             // assuming that a failed sync or doorbell means no DMA occurred.
             Err(error) => Err(SubmitFailure {
                 error,
-                retained: payload,
+                _retained: payload,
             }),
         }
     }
@@ -567,7 +551,7 @@ pub unsafe fn attach(
         Err(error) => Err(Failure {
             error,
             owner,
-            controller,
+            _controller: controller,
             memory: retained_memory,
         }),
     }

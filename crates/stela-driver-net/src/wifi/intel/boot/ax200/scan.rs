@@ -143,12 +143,6 @@ impl ScanCompletion {
     pub fn outcome(&self) -> protocol::Outcome {
         self.outcome
     }
-    pub fn last_schedule(&self) -> u8 {
-        self.captured.bytes[12]
-    }
-    pub fn last_iteration(&self) -> u8 {
-        self.captured.bytes[13]
-    }
     pub fn ebs_status(&self) -> u8 {
         self.captured.bytes[15]
     }

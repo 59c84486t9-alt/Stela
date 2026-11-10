@@ -127,9 +127,6 @@ impl<B: Bus> Sbs<B> {
         Ok(this)
     }
 
-    pub fn supported_slots(&self) -> u8 {
-        self.supported
-    }
     pub fn needs_reset(&self) -> bool {
         self.quarantined
     }

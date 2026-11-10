@@ -804,71 +804,66 @@ impl State {
         outbox: &mut Vec<Mail>,
     ) -> Result<bool> {
         loop {
-            if self.active_work.is_none() {
-                let descriptor = root.work(memory, pipe, index)?;
-                let (read, write) = descriptor.indices(memory)?;
-                if read == write {
-                    return Ok(true);
+            let active = match &mut self.active_work {
+                Some(active) => active,
+                None => {
+                    let descriptor = root.work(memory, pipe, index)?;
+                    let (read, write) = descriptor.indices(memory)?;
+                    if read == write {
+                        return Ok(true);
+                    }
+                    let entry = descriptor.entry(memory, Kind::DataMaster, read)?;
+                    let command = u32::from_le_bytes(entry[0x10..0x14].try_into().unwrap());
+                    if command != pipe as u32 {
+                        return Err(refuse!(
+                            "GFX data-master entry's command type is not its ring's pipe"
+                        ));
+                    }
+                    let channel_state = u64::from_le_bytes(entry[0x08..0x10].try_into().unwrap());
+                    let queue = channel::Queue::read(memory, channel_state)?;
+                    let target = u16::from_le_bytes(entry[0x14..0x16].try_into().unwrap());
+                    let submission = queue.submission(memory, channel_state, target)?;
+                    ring::scalar_range(descriptor.state + ring::READ, 4)?;
+                    self.active_work.insert(ActiveWork {
+                        descriptor,
+                        next_read: ring::next(read),
+                        submission,
+                        command: None,
+                        retiring: false,
+                    })
                 }
-                let entry = descriptor.entry(memory, Kind::DataMaster, read)?;
-                let command = u32::from_le_bytes(entry[0x10..0x14].try_into().unwrap());
-                if command != pipe as u32 {
-                    return Err(refuse!(
-                        "GFX data-master entry's command type is not its ring's pipe"
-                    ));
-                }
-                let channel_state = u64::from_le_bytes(entry[0x08..0x10].try_into().unwrap());
-                let queue = channel::Queue::read(memory, channel_state)?;
-                let target = u16::from_le_bytes(entry[0x14..0x16].try_into().unwrap());
-                let submission = queue.submission(memory, channel_state, target)?;
-                ring::scalar_range(descriptor.state + ring::READ, 4)?;
-                self.active_work = Some(ActiveWork {
-                    descriptor,
-                    next_read: ring::next(read),
-                    submission,
-                    command: None,
-                    retiring: false,
-                });
-            }
-            if self.active_work.as_ref().unwrap().retiring {
-                let active = self.active_work.as_ref().unwrap();
+            };
+            if active.retiring {
                 active.descriptor.retire(memory, active.next_read)?;
                 self.active_work = None;
                 continue;
             }
-            self.active_work
-                .as_mut()
-                .unwrap()
-                .submission
-                .publish(memory)?;
+            active.submission.publish(memory)?;
             loop {
-                let active = self.active_work.as_ref().unwrap();
-                if active.command.is_none() {
-                    let Some(va) = active.submission.next(memory)? else {
-                        // The target is held even if this final DMA
-                        // fails. It cannot retire a later entry on retry.
-                        self.active_work.as_mut().unwrap().retiring = true;
-                        break;
-                    };
-                    let command = channel::Command::read(memory, va)?;
-                    if command.kind == channel::Kind::DashboardSignal
-                        && !self.family.dashboard_signals
-                    {
-                        return Err(refuse!(
-                            "GFX dashboard signal command: this GPU family's firmware has no dashboard-signal handler"
-                        ));
+                let command = match &mut active.command {
+                    Some(command) => command,
+                    None => {
+                        let Some(va) = active.submission.next(memory)? else {
+                            // The target is held even if this final DMA
+                            // fails. It cannot retire a later entry on retry.
+                            active.retiring = true;
+                            break;
+                        };
+                        let command = channel::Command::read(memory, va)?;
+                        if command.kind == channel::Kind::DashboardSignal
+                            && !self.family.dashboard_signals
+                        {
+                            return Err(refuse!(
+                                "GFX dashboard signal command: this GPU family's firmware has no dashboard-signal handler"
+                            ));
+                        }
+                        let retirement = active.submission.retirement();
+                        active
+                            .command
+                            .insert(ActiveCommand::accept(memory, command, retirement)?)
                     }
-                    let retirement = active.submission.retirement();
-                    self.active_work.as_mut().unwrap().command =
-                        Some(ActiveCommand::accept(memory, command, retirement)?);
-                }
-                let active = self.active_work.as_mut().unwrap();
-                if !active.command.as_mut().unwrap().advance(
-                    memory,
-                    root,
-                    outbox,
-                    &mut self.events,
-                )? {
+                };
+                if !command.advance(memory, root, outbox, &mut self.events)? {
                     return Ok(false);
                 }
                 active.command = None;

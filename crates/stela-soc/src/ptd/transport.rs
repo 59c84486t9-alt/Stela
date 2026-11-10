@@ -327,9 +327,6 @@ impl Ptd {
     pub fn lifecycle_state(&self) -> LifecycleState {
         self.0.borrow().lifecycle
     }
-    pub fn timestamp_source(&self) -> TimestampSource {
-        self.0.borrow().timestamps
-    }
 
     /// Drive the checked kept/initialized interrupt state when admitting
     /// its mapped view. Unknown active disposition refuses instead of losing an

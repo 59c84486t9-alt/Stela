@@ -167,9 +167,6 @@ impl<R: Resources> Owner<R> {
     pub fn record_count(&self) -> u32 {
         self.count
     }
-    pub fn channel_ordinal(&self) -> u64 {
-        self.ordinal
-    }
     pub fn registration_result(&self, token: &Registration) -> Option<RegistrationResult> {
         self.returned
             .iter()

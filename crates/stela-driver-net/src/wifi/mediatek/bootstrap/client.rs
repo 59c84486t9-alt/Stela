@@ -198,9 +198,6 @@ impl<C> PacketOwner<C> {
     pub const fn control_port(&self) -> bool {
         self.control_port
     }
-    pub fn tx_block_ack(&self) -> Option<&station::ba::tx::Session> {
-        self.tx_ba.as_deref()
-    }
     pub fn authentication_session(&self) -> Option<&Arc<station::external::Session>> {
         self.authentication.as_ref()
     }

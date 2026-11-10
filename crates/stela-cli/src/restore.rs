@@ -20,9 +20,6 @@ use std::{
     time::Duration,
 };
 
-pub const CATALOG_URL: &str =
-    "https://mesu.apple.com/assets/macos/com_apple_macOSIPSW/com_apple_macOSIPSW.xml";
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Image {
     pub version: String,

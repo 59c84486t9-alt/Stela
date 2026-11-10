@@ -27,11 +27,6 @@ unsafe extern "C" {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct HostFrameId(u64);
-impl HostFrameId {
-    pub fn local_id(self) -> u64 {
-        self.0
-    }
-}
 struct Mapping {
     base: usize,
     bytes: usize,

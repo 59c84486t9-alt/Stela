@@ -27,7 +27,6 @@ type GpeHandler = unsafe extern "C" fn(*mut c_void, u32, *mut c_void) -> u32;
 
 /// ACPICA's fixed events (`ACPI_EVENT_*`).
 pub const EVENT_POWER_BUTTON: u32 = 2;
-pub const EVENT_SLEEP_BUTTON: u32 = 3;
 /// `ACPI_INTERRUPT_HANDLED`.
 const INTERRUPT_HANDLED: u32 = 1;
 /// `ACPI_GPE_LEVEL_TRIGGERED` and `ACPI_GPE_EDGE_TRIGGERED`.

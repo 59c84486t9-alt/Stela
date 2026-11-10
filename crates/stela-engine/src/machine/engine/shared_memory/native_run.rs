@@ -1115,10 +1115,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(owners)
     }
 
-    pub fn native_worker_publications(&mut self) -> Option<&mut publication::WorkerPublications> {
-        self.native_publication.as_mut()
-    }
-
     /// Borrow every active PE and the publication inventory together.
     ///
     /// # Safety

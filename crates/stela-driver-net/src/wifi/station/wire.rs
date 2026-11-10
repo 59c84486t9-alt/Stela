@@ -660,14 +660,6 @@ pub fn check_peer(frame: &Mpdu, local: Mac, bssid: Mac) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn authentication_response(frame: &Mpdu) -> Result<u16, Error> {
-    let reply = authentication_frame(frame)?;
-    if reply.algorithm != OPEN_SYSTEM || reply.transaction != 2 {
-        return Err(Error::Invalid("authentication transaction/algorithm"));
-    }
-    Ok(reply.status)
-}
-
 #[derive(Clone, Debug)]
 pub struct AssociationResponse {
     pub capabilities: u16,

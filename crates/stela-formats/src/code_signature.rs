@@ -198,25 +198,7 @@ pub fn xml_entitlement_true(plist: &[u8], name: &str) -> bool {
         .any(|(at, _)| text[at + key.len()..].trim_start().starts_with("<true/>"))
 }
 
-/// Whether the XML entitlements plist holds `name` with any value
-/// (`IOVnodeIsEntitlementPresentWithAnyValue`).
-pub fn xml_entitlement_present(plist: &[u8], name: &str) -> bool {
-    let key = format!("<key>{name}</key>");
-    core::str::from_utf8(plist).is_ok_and(|text| text.contains(&key))
-}
-
 impl CodeSignature {
-    /// Whether the kernel treats this code as platform code: a code
-    /// directory platform identifier (the trust caches' code), or code
-    /// Apple signed. macOS's AMFI grants Apple-anchored code platform status
-    /// when the blob is added (`ubc_cs_blob_add` takes `CS_PLATFORM_BINARY`
-    /// from `mac_vnode_check_signature`): Xcode's `python3`, signed by
-    /// Software Signing with Team ID 59GAB85EFG and no platform identifier,
-    /// runs on the 25G241 host with `CS_PLATFORM_BINARY`.
-    pub fn platform_code(&self) -> bool {
-        self.platform != 0 || self.apple_signed
-    }
-
     /// Whether the XML entitlements grant the boolean `name`.
     pub fn entitled(&self, name: &str) -> bool {
         self.entitlements

@@ -144,9 +144,6 @@ impl TxPlan {
     pub const fn sequence(&self) -> SequenceAssignment {
         self.sequence
     }
-    pub fn qos_tid(&self) -> Option<u8> {
-        self.qos.as_ref().map(|(tid, _)| *tid)
-    }
     pub fn association_context(&self) -> Option<&Arc<AssociationContext>> {
         self.qos.as_ref().map(|(_, context)| context)
     }

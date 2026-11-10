@@ -8,16 +8,13 @@
 //! [`sae`](super::sae) derives; AES-128-CMAC MIC), in the order wpa_supplicant's
 //! `wpa_sm_rx_eapol` checks them, between the two MLDs of a multi-link
 //! association with its MLO KDEs (IEEE 802.11be-2024 12.7.6) and each link's
-//! group keys. The suites come from the association's
-//! [`pmf::Selection`] or its RSN key ciphers; the keys it yields are the
+//! group keys. The suites come from the connection's security choice
+//! ([`super::connection::security`]); the keys it yields are the
 //! arguments of [`KeySlot::begin_install`] and the IGTK's of
 //! [`management`](super::security::management).
 //!
 //! [`KeySlot::begin_install`]: super::security::KeySlot::begin_install
-use super::{
-    security::{Cipher, KeyScope, PacketNumber, ReplaySeed, management::ManagementCipher},
-    station::wire::pmf,
-};
+use super::security::{Cipher, KeyScope, PacketNumber, ReplaySeed, management::ManagementCipher};
 use crate::Mac;
 use alloc::vec::Vec;
 use hmac::{Hmac, Mac as _};
@@ -114,17 +111,6 @@ pub struct Suites {
     pub group: Cipher,
     /// The group management cipher once PMF is negotiated.
     pub management: Option<ManagementCipher>,
-}
-
-impl Suites {
-    pub fn from_selection(selection: &pmf::Selection) -> Result<Self, Error> {
-        Ok(Self {
-            akm: Akm::from_suite(selection.akm()).ok_or(Error::Unsupported)?,
-            pairwise: selection.pairwise(),
-            group: selection.group(),
-            management: Some(selection.management()),
-        })
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

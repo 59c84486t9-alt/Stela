@@ -115,12 +115,4 @@ impl<R: super::super::Registers, T: super::super::Time> Original<R, T> {
         self.failure = result.as_ref().err().cloned();
         result
     }
-    /// Both prerequisites are independent of register stop and source masking.
-    /// No successful caller path acknowledges a quiescence receipt here.
-    pub const fn migration_prerequisites() -> [Prerequisite; 2] {
-        [
-            Prerequisite::OriginalNotificationOwner,
-            Prerequisite::InheritedAddressInvalidation,
-        ]
-    }
 }

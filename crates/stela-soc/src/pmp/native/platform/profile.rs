@@ -95,9 +95,6 @@ impl Descriptor {
     pub fn raw_soc_device(&self) -> &[u32; 31] {
         &self.raw
     }
-    pub fn aggregate_mask(&self) -> u64 {
-        self.aggregate
-    }
     pub fn counter_slice(&self) -> Option<Slice> {
         self.counters
     }
@@ -115,12 +112,6 @@ impl Descriptor {
     }
     pub fn other_controllers(&self) -> [Option<u8>; 4] {
         self.other_controllers
-    }
-    pub fn other_controller_count(&self) -> usize {
-        self.other_controllers
-            .iter()
-            .position(Option::is_none)
-            .unwrap_or(4)
     }
     pub fn mode(&self) -> u32 {
         self.mode
@@ -330,12 +321,6 @@ impl Profile {
     }
     pub fn source_enabled(&self) -> u64 {
         self.enabled
-    }
-    pub fn aggregate_pass(&self) -> u64 {
-        self.aggregates
-    }
-    pub fn packet_slice(&self) -> Slice {
-        self.packet
     }
 }
 fn hooks(i: usize) -> [u64; 6] {

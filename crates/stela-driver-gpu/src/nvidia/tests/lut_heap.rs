@@ -1,9 +1,15 @@
 //! CPU fixture only: the common heap and metadata adapter, with a
 //! process-owned host buffer. This is never linked into the production driver.
 #![no_std]
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "the fixture uses part of the shared heap and the metadata adapter"
+)]
 extern crate alloc;
 
+// `cargo xtask gpu` builds this file alone with rustc
+// (`xtask/src/gpu/nvidia/lut.rs`), which records the heap source it includes.
+// No Cargo edge links the driver to the boot heap.
 #[path = "../../../../stela-boot-core/src/heap.rs"]
 mod common_heap;
 #[path = "../memory.rs"]

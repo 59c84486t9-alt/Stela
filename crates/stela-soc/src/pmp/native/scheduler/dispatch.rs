@@ -324,10 +324,6 @@ impl Runtime {
             refusal,
         })
     }
-    pub fn immediate_name(&self, immediate: &Immediate) -> Result<String> {
-        self.check_runtime(&immediate.runtime)?;
-        Ok(self.state.borrow().immediate[immediate.id].name.clone())
-    }
 }
 
 #[cfg(test)]

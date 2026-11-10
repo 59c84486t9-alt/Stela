@@ -226,9 +226,6 @@ impl Command {
     pub fn current_cam(connector: ConnectorNumber) -> Self {
         Self::connector(CURRENT_CAM, connector)
     }
-    pub fn cam_supported(connector: ConnectorNumber) -> Self {
-        Self::connector(CAM_SUPPORTED, connector)
-    }
     pub fn new_cam(connector: ConnectorNumber, mode: u8, enter: bool) -> Self {
         Self::new_cam_configuration(connector, mode, enter, 0)
     }

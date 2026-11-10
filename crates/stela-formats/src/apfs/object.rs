@@ -11,13 +11,11 @@ pub const OBJECT_TYPE_NX_SUPERBLOCK: u32 = 0x0000_0001;
 pub const OBJECT_TYPE_BTREE: u32 = 0x0000_0002;
 pub const OBJECT_TYPE_BTREE_NODE: u32 = 0x0000_0003;
 pub const OBJECT_TYPE_OMAP: u32 = 0x0000_000b;
-pub const OBJECT_TYPE_CHECKPOINT_MAP: u32 = 0x0000_000c;
 pub const OBJECT_TYPE_FS: u32 = 0x0000_000d;
 pub const OBJECT_TYPE_INTEGRITY_META: u32 = 0x0000_001e;
 
 /// `OBJECT_TYPE_MASK`: the type is the low 16 bits of `o_type`.
 pub const OBJECT_TYPE_MASK: u32 = 0x0000_ffff;
-pub const OBJ_VIRTUAL: u32 = 0x0000_0000;
 pub const OBJ_EPHEMERAL: u32 = 0x8000_0000;
 pub const OBJ_PHYSICAL: u32 = 0x4000_0000;
 pub const OBJ_STORAGETYPE_MASK: u32 = 0xc000_0000;

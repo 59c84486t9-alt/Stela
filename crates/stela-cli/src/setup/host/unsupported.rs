@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const ADMIN: &str = "administrator rights";
 pub(crate) const DISK_EXAMPLE: &str = "a whole disk";
-pub(crate) const PARTITION_LISTING: &str = "this system's disk tools";
 
 /// The computer `stela setup` runs on.
 pub(crate) struct System;
