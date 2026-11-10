@@ -54,19 +54,13 @@ struct stela_linux_page_ops {
 	/* Invoked once at checked quiescence, never from atomic context. Logical
 	 * retirement queues pins allocation-free until finish/owner exit. */
 	void (*release)(void *context, void *pin);
-};
-
-/* Separate versioned table: never append/read a tail on the original ops.
- * Readiness is a nonblocking observation of this exact retained pin's actual
- * ownership fences. False retains it and all descriptor allocation markers;
- * it does not mean release completed. It may not allocate, reenter Linux,
- * change current/preemption/IRQ state or transfer any pin ownership. */
-#define STELA_LINUX_PAGE_OPS_V2 2U
-struct stela_linux_page_ops_v2 {
-    u32 version;
-    u32 bytes;
-    struct stela_linux_page_ops ordinary;
-    bool (*release_ready)(void *context, void *pin);
+	/* Optional; NULL releases every retired pin at the next checked
+	 * quiescence. Readiness is a nonblocking observation of this exact
+	 * retained pin's ownership fences. False retains it and all descriptor
+	 * allocation markers; it does not mean release completed. It may not
+	 * allocate, reenter Linux, change current/preemption/IRQ state or
+	 * transfer any pin ownership. */
+	bool (*release_ready)(void *context, void *pin);
 };
 
 /* Call inside a quiescent entered Linux owner. Registration copies the input;
@@ -92,38 +86,28 @@ int stela_linux_page_catalog_retain_kernel(u64 generation);
 int stela_linux_page_catalog_register_extents(
     const struct stela_linux_page_reservation *extents, size_t extent_count,
     const struct stela_linux_page_ops *ops, void *context);
-int stela_linux_page_catalog_register_extents_v2(
-    const struct stela_linux_page_reservation *extents, size_t extent_count,
-    const struct stela_linux_page_ops_v2 *ops, void *context);
-/* Annotated immutable inventory, versioned separately from earlier records.
- * RuntimeStack coverage stays reserved after every unpublished admission is
+/* Annotated immutable inventory. RuntimeStack coverage stays reserved after every unpublished admission is
  * cancelled; ordinary GFP allocation cannot consume it. Payload ownership
  * remains in the caller's actual cold pin. No C stack is lent by these APIs. */
-#define STELA_LINUX_PAGE_INVENTORY_V3 3U
 #define STELA_LINUX_PAGE_ORDINARY 0U
 #define STELA_LINUX_PAGE_RUNTIME_STACK 1U
-struct stela_linux_page_extent_v3 {
+struct stela_linux_page_extent {
     struct stela_linux_page_reservation reservation;
     u32 kind;
     u32 reserved;
 };
-struct stela_linux_page_inventory_v3 {
-    u32 version;
-    u32 bytes;
-    const struct stela_linux_page_extent_v3 *extents;
-    size_t count;
-};
+/* Requires ops->release_ready. */
 int stela_linux_page_catalog_register_annotated(
-    const struct stela_linux_page_inventory_v3 *inventory,
-    const struct stela_linux_page_ops_v2 *ops, void *context);
+    const struct stela_linux_page_extent *extents, size_t count,
+    const struct stela_linux_page_ops *ops, void *context);
 
 /* Private descriptor reservation only: no payload pin/refcount transfer and
  * no page/address return. The caller retains actual allocation/mapping/cold
  * ownership through cancellation or permanent quarantine. All calls require
  * the serialized quiescent entered owner. Headers admit tails before use. */
-#define STELA_LINUX_STACK_ADMISSION_V1 1U
-#define STELA_LINUX_MODEL_STACK_V1 2U
-struct stela_linux_stack_admission_v1 {
+#define STELA_LINUX_STACK_ADMISSION 1U
+#define STELA_LINUX_MODEL_STACK 2U
+struct stela_linux_stack_admission {
     u32 version;
     u32 bytes;
     u64 generation;
@@ -131,7 +115,7 @@ struct stela_linux_stack_admission_v1 {
     const u64 *physical_pages;
     size_t page_count;
 };
-struct stela_linux_stack_ticket_v1 {
+struct stela_linux_stack_ticket {
     u32 version;
     u32 bytes;
     u64 generation;
@@ -139,14 +123,14 @@ struct stela_linux_stack_ticket_v1 {
     u64 nonce;
 };
 int stela_linux_page_stack_admit(
-    const struct stela_linux_stack_admission_v1 *request,
-    struct stela_linux_stack_ticket_v1 *ticket);
+    const struct stela_linux_stack_admission *request,
+    struct stela_linux_stack_ticket *ticket);
 #ifdef __linux__
 int stela_linux_page_model_stack_admit(const struct stela_linux_owner *owner,
                                        void *cpu_base,
-                                       struct stela_linux_stack_ticket_v1 *ticket);
+                                       struct stela_linux_stack_ticket *ticket);
 #endif
-int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *ticket);
+int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket *ticket);
 /* Private original-child descriptor lease ABI. The actual affine Rust native
  * pin remains the payload owner. actual_child is opaque source factory identity,
  * never a task/current constructor; caller proves actual copy_process custody.
@@ -156,20 +140,20 @@ int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *tick
  * Cancel is ONLY unpublished and refuses every published descriptor graph. */
 struct stela_linux_owner;
 int stela_linux_page_stack_source_context(const struct stela_linux_owner *expected);
-int stela_linux_page_stack_lend(const struct stela_linux_stack_ticket_v1 *ticket,
+int stela_linux_page_stack_lend(const struct stela_linux_stack_ticket *ticket,
                               const void *actual_child, void **cpu_base);
 /* Bounded real-current/IF0 source validation. No sleep/allocation/publication. */
 int stela_linux_page_stack_prepare_publish(
-    const struct stela_linux_stack_ticket_v1 *ticket, const void *actual_child);
+    const struct stela_linux_stack_ticket *ticket, const void *actual_child);
 /* Source nofail commit after nativeDormant accepted, before source PID/tasklist
  * publication. Corruption traps and retains; no ordinary refusal/cleanup. */
-void stela_linux_page_stack_publish(const struct stela_linux_stack_ticket_v1 *ticket,
+void stela_linux_page_stack_publish(const struct stela_linux_stack_ticket *ticket,
                                  const void *actual_child);
 /* Private unsafe retirement boundary. Real process source reaper already
  * joined final task/stack/page/alias/RCU and actual native successor receipts.
  * Every outstanding descriptor/DMA ref independently refuses removal. This
  * never frees the Rust physical pin or authorizes native stack reseeding. */
-int stela_linux_page_stack_retire(const struct stela_linux_stack_ticket_v1 *ticket,
+int stela_linux_page_stack_retire(const struct stela_linux_stack_ticket *ticket,
                                const void *actual_child);
 
 

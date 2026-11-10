@@ -213,17 +213,10 @@ struct NativeReservation {
 }
 
 #[repr(C)]
-struct NativeExtentV3 {
+struct NativeExtent {
     reservation: NativeReservation,
     kind: u32,
     reserved: u32,
-}
-#[repr(C)]
-struct NativeInventoryV3 {
-    version: u32,
-    bytes: u32,
-    extents: *const NativeExtentV3,
-    count: usize,
 }
 
 #[repr(C)]
@@ -239,13 +232,6 @@ struct Operations {
     validate: unsafe extern "C" fn(*mut c_void, u32, u32, bool) -> c_int,
     allocate: unsafe extern "C" fn(*mut c_void, u32, u32, bool, *mut NativeAllocation) -> c_int,
     release: unsafe extern "C" fn(*mut c_void, *mut c_void),
-}
-
-#[repr(C)]
-struct OperationsV2 {
-    version: u32,
-    bytes: u32,
-    ordinary: Operations,
     release_ready: unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool,
 }
 
@@ -253,15 +239,16 @@ unsafe extern "C" {
     static stela_linux_bare: u8;
     fn stela_linux_try_enter(owner: *const c_void) -> bool;
     fn stela_linux_exit();
-    fn stela_linux_page_catalog_register_extents_v2(
+    fn stela_linux_page_catalog_register_extents(
         reservations: *const NativeReservation,
         reservation_count: usize,
-        operations: *const OperationsV2,
+        operations: *const Operations,
         context: *mut c_void,
     ) -> c_int;
     fn stela_linux_page_catalog_register_annotated(
-        inventory: *const NativeInventoryV3,
-        operations: *const OperationsV2,
+        extents: *const NativeExtent,
+        count: usize,
+        operations: *const Operations,
         context: *mut c_void,
     ) -> c_int;
     fn stela_linux_page_catalog_unregister(generation: u64) -> c_int;
@@ -612,7 +599,7 @@ impl<P: Provider> Catalog<P> {
                 .try_reserve_exact(reservations.len())
                 .map_err(|_| Error::OutOfMemory)?;
             for (native, extent) in native.iter().zip(&reservations) {
-                annotations.push(NativeExtentV3 {
+                annotations.push(NativeExtent {
                     reservation: *native,
                     kind: extent.kind as u32,
                     reserved: 0,
@@ -624,15 +611,10 @@ impl<P: Provider> Catalog<P> {
             reservations,
             entry,
         })?;
-        let operations = OperationsV2 {
-            version: 2,
-            bytes: u32::try_from(size_of::<OperationsV2>())
-                .map_err(|_| Error::InvalidReservation)?,
-            ordinary: Operations {
-                validate: validate::<P>,
-                allocate: allocate::<P>,
-                release,
-            },
+        let operations = Operations {
+            validate: validate::<P>,
+            allocate: allocate::<P>,
+            release,
             release_ready: release_ready::<P>,
         };
         let result = {
@@ -642,20 +624,14 @@ impl<P: Provider> Catalog<P> {
             // while C validates and copies the selected inventory.
             unsafe {
                 if annotated {
-                    let inventory = NativeInventoryV3 {
-                        version: 3,
-                        bytes: u32::try_from(size_of::<NativeInventoryV3>())
-                            .map_err(|_| Error::InvalidReservation)?,
-                        extents: annotations.as_ptr(),
-                        count: annotations.len(),
-                    };
                     stela_linux_page_catalog_register_annotated(
-                        &inventory,
+                        annotations.as_ptr(),
+                        annotations.len(),
                         &operations,
                         (&mut *context as *mut Context<P>).cast(),
                     )
                 } else {
-                    stela_linux_page_catalog_register_extents_v2(
+                    stela_linux_page_catalog_register_extents(
                         native.as_ptr(),
                         native.len(),
                         &operations,

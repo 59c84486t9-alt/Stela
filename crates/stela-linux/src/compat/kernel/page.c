@@ -77,7 +77,6 @@ static struct {
     struct registered_extent *extents;
     size_t extent_count;
 	struct stela_linux_page_ops ops;
-    bool (*release_ready)(void *context, void *pin);
 	void *context;
 	struct page *pages;
 	struct page_state *state;
@@ -447,47 +446,20 @@ int stela_linux_page_catalog_register(const struct stela_linux_page_reservation 
     return stela_linux_page_catalog_register_extents(reservation, 1, ops, context);
 }
 
-int stela_linux_page_catalog_register_extents_v2(
-    const struct stela_linux_page_reservation *extents, size_t extent_count,
-    const struct stela_linux_page_ops_v2 *ops, void *context)
-{
-    if (stela_linux_kernel_hosted())
-        return -EPERM;
-    require_quiescence();
-    if (catalog.pages)
-        return -EBUSY;
-    /* Read only the fixed header until its exact version/size admits the tail. */
-    if (!ops || ops->version != STELA_LINUX_PAGE_OPS_V2 || ops->bytes != sizeof(*ops))
-        return -EINVAL;
-    if (!ops->release_ready)
-        return -EINVAL;
-    int error = stela_linux_page_catalog_register_extents(extents, extent_count,
-                                                        &ops->ordinary, context);
-    if (!error)
-        catalog.release_ready = ops->release_ready;
-    return error;
-}
-
 int stela_linux_page_catalog_register_annotated(
-    const struct stela_linux_page_inventory_v3 *inventory,
-    const struct stela_linux_page_ops_v2 *ops, void *context)
+    const struct stela_linux_page_extent *input, size_t count,
+    const struct stela_linux_page_ops *ops, void *context)
 {
     if (stela_linux_kernel_hosted())
         return -EPERM;
     require_quiescence();
     if (catalog.pages)
         return -EBUSY;
-    if (!inventory || inventory->version != STELA_LINUX_PAGE_INVENTORY_V3 ||
-        inventory->bytes != sizeof(*inventory) ||
-        !ops || ops->version != STELA_LINUX_PAGE_OPS_V2 || ops->bytes != sizeof(*ops))
+    if (!ops || !ops->release_ready || !input || !count ||
+        count > (size_t)SSIZE_MAX / sizeof(struct stela_linux_page_extent) ||
+        count > (size_t)SSIZE_MAX / sizeof(struct stela_linux_page_reservation) ||
+        count > (size_t)SSIZE_MAX / sizeof(u32))
         return -EINVAL;
-    if (!ops->release_ready || !inventory->extents || !inventory->count ||
-        inventory->count > (size_t)SSIZE_MAX / sizeof(struct stela_linux_page_extent_v3) ||
-        inventory->count > (size_t)SSIZE_MAX / sizeof(struct stela_linux_page_reservation) ||
-        inventory->count > (size_t)SSIZE_MAX / sizeof(u32))
-        return -EINVAL;
-    size_t count = inventory->count;
-    const struct stela_linux_page_extent_v3 *input = inventory->extents;
     for (size_t i = 0; i < count; i++) {
         if (input[i].reserved ||
             (input[i].kind != STELA_LINUX_PAGE_ORDINARY &&
@@ -512,22 +484,18 @@ int stela_linux_page_catalog_register_annotated(
         extents[i] = input[i].reservation;
         kinds[i] = input[i].kind;
     }
-    int error = register_inventory(extents, kinds, count, &ops->ordinary, context, false);
-    if (!error)
-        catalog.release_ready = ops->release_ready;
+    int error = register_inventory(extents, kinds, count, ops, context, false);
     free_metadata(kinds, count * sizeof(*kinds), __alignof__(*kinds));
     free_metadata(extents, count * sizeof(*extents), __alignof__(*extents));
     return error;
 }
 
-static_assert(sizeof(struct stela_linux_page_extent_v3) == 40);
-static_assert(offsetof(struct stela_linux_page_extent_v3, kind) == 32);
-static_assert(sizeof(struct stela_linux_page_inventory_v3) == 24);
-static_assert(offsetof(struct stela_linux_page_inventory_v3, extents) == 8);
-static_assert(sizeof(struct stela_linux_stack_admission_v1) == 40);
-static_assert(offsetof(struct stela_linux_stack_admission_v1, cpu_base) == 16);
-static_assert(sizeof(struct stela_linux_stack_ticket_v1) == 32);
-static_assert(offsetof(struct stela_linux_stack_ticket_v1, nonce) == 24);
+static_assert(sizeof(struct stela_linux_page_extent) == 40);
+static_assert(offsetof(struct stela_linux_page_extent, kind) == 32);
+static_assert(sizeof(struct stela_linux_stack_admission) == 40);
+static_assert(offsetof(struct stela_linux_stack_admission, cpu_base) == 16);
+static_assert(sizeof(struct stela_linux_stack_ticket) == 32);
+static_assert(offsetof(struct stela_linux_stack_ticket, nonce) == 24);
 
 static size_t page_index(const struct page *page)
 {
@@ -838,9 +806,9 @@ void stela_linux_pages_finish(void)
             link = &record->next;
             continue;
         }
-        if (catalog.release_ready) {
+        if (catalog.ops.release_ready) {
             in_callback = true;
-            bool ready = catalog.release_ready(catalog.context, record->pin);
+            bool ready = catalog.ops.release_ready(catalog.context, record->pin);
             in_callback = false;
             check_callback(owner, 0, ARCH_IRQ_ENABLED);
             if (!ready) {
@@ -954,7 +922,7 @@ static bool validate_allocation(const struct stela_linux_page_allocation *alloca
 }
 
 static int reserve_stack_record(size_t first, size_t count,
-                                struct stela_linux_stack_ticket_v1 *ticket)
+                                struct stela_linux_stack_ticket *ticket)
 {
     if (catalog.free_records == NO_INDEX)
         return -ENOMEM;
@@ -979,15 +947,15 @@ static int reserve_stack_record(size_t first, size_t count,
 /* This stage reserves descriptor markers only. Linux page refs remain zero
  * and the actual payload owner remains in Rust's affine cold preparation. */
 int stela_linux_page_stack_admit(
-    const struct stela_linux_stack_admission_v1 *request,
-    struct stela_linux_stack_ticket_v1 *ticket)
+    const struct stela_linux_stack_admission *request,
+    struct stela_linux_stack_ticket *ticket)
 {
     if (stela_linux_kernel_hosted())
         return -EPERM;
     require_quiescence();
-    if (!request || request->version != STELA_LINUX_STACK_ADMISSION_V1 ||
+    if (!request || request->version != STELA_LINUX_STACK_ADMISSION ||
         request->bytes != sizeof(*request) ||
-        !ticket || ticket->version != STELA_LINUX_STACK_ADMISSION_V1 ||
+        !ticket || ticket->version != STELA_LINUX_STACK_ADMISSION ||
         ticket->bytes != sizeof(*ticket))
         return -EINVAL;
     if (!catalog.pages || request->generation != catalog.generation ||
@@ -1006,12 +974,12 @@ int stela_linux_page_stack_admit(
 #ifdef __linux__
 int stela_linux_page_model_stack_admit(const struct stela_linux_owner *owner,
                                        void *cpu_base,
-                                       struct stela_linux_stack_ticket_v1 *ticket)
+                                       struct stela_linux_stack_ticket *ticket)
 {
     if (!stela_linux_kernel_hosted() || stela_linux_page_owner_context(owner) ||
         stela_linux_require_current(owner))
         return -EPERM;
-    if (!ticket || ticket->version != STELA_LINUX_MODEL_STACK_V1 ||
+    if (!ticket || ticket->version != STELA_LINUX_MODEL_STACK ||
         ticket->bytes != sizeof(*ticket) || !catalog.hosted)
         return -EINVAL;
     for (size_t i = 0; i < catalog.extent_count; i++) {
@@ -1031,10 +999,10 @@ int stela_linux_page_model_stack_admit(const struct stela_linux_owner *owner,
 /* An external NativeStack pin is held by its affine Rust owner, never by
  * ordinary allocation-record provider callbacks. Descriptor/page references
  * and original source/RCU/native return joins remain independent owners. */
-static int stack_record(const struct stela_linux_stack_ticket_v1 *ticket,
+static int stack_record(const struct stela_linux_stack_ticket *ticket,
                         struct allocation_record **out)
 {
-    u32 version = catalog.hosted ? STELA_LINUX_MODEL_STACK_V1 : STELA_LINUX_STACK_ADMISSION_V1;
+    u32 version = catalog.hosted ? STELA_LINUX_MODEL_STACK : STELA_LINUX_STACK_ADMISSION;
     if (!ticket || ticket->version != version ||
         ticket->bytes != sizeof(*ticket) || !catalog.pages ||
         ticket->generation != catalog.generation ||
@@ -1073,7 +1041,7 @@ static int stack_current(bool sleepable)
         return error;
     return sleepable && !stela_linux_quiescent() ? -EBUSY : 0;
 }
-static int stack_remove(const struct stela_linux_stack_ticket_v1 *ticket,
+static int stack_remove(const struct stela_linux_stack_ticket *ticket,
                         struct allocation_record *record)
 {
     if (record->live || record->dma_refs)
@@ -1089,7 +1057,7 @@ static int stack_remove(const struct stela_linux_stack_ticket_v1 *ticket,
     recycle_record(ticket->record);
     return 0;
 }
-int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *ticket)
+int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket *ticket)
 {
     require_quiescence();
     struct allocation_record *record;
@@ -1100,7 +1068,7 @@ int stela_linux_page_stack_cancel(const struct stela_linux_stack_ticket_v1 *tick
         return -EPERM;
     return stack_remove(ticket, record);
 }
-int stela_linux_page_stack_lend(const struct stela_linux_stack_ticket_v1 *ticket,
+int stela_linux_page_stack_lend(const struct stela_linux_stack_ticket *ticket,
                               const void *actual_child, void **cpu_base)
 {
     if (!actual_child || !cpu_base)
@@ -1140,7 +1108,7 @@ int stela_linux_page_stack_lend(const struct stela_linux_stack_ticket_v1 *ticket
     return 0;
 }
 int stela_linux_page_stack_prepare_publish(
-    const struct stela_linux_stack_ticket_v1 *ticket, const void *actual_child)
+    const struct stela_linux_stack_ticket *ticket, const void *actual_child)
 {
     int error = stack_current(false);
     if (error)
@@ -1161,7 +1129,7 @@ int stela_linux_page_stack_prepare_publish(
     }
     return 0;
 }
-void stela_linux_page_stack_publish(const struct stela_linux_stack_ticket_v1 *ticket,
+void stela_linux_page_stack_publish(const struct stela_linux_stack_ticket *ticket,
                                  const void *actual_child)
 {
     /* Private source nofail point, after native Dormant accepted and before
@@ -1170,7 +1138,7 @@ void stela_linux_page_stack_publish(const struct stela_linux_stack_ticket_v1 *ti
         __builtin_trap();
     catalog.allocations[ticket->record].external_phase = STACK_PUBLISHED;
 }
-int stela_linux_page_stack_retire(const struct stela_linux_stack_ticket_v1 *ticket,
+int stela_linux_page_stack_retire(const struct stela_linux_stack_ticket *ticket,
                                const void *actual_child)
 {
     int error = stack_current(true);
@@ -2398,7 +2366,8 @@ static void immutable_multi_extent_inventory(void)
     static_assert(offsetof(struct stela_linux_page_reservation, physical_base) == 8);
     static_assert(offsetof(struct stela_linux_page_reservation, cpu_base) == 16);
     static_assert(offsetof(struct stela_linux_page_reservation, page_count) == 24);
-    static_assert(sizeof(struct stela_linux_page_ops) == 3 * sizeof(void *));
+    static_assert(sizeof(struct stela_linux_page_ops) == 4 * sizeof(void *));
+    static_assert(offsetof(struct stela_linux_page_ops, release_ready) == 3 * sizeof(void *));
     struct stela_linux_page_reservation extents[] = {
         {.generation = 3, .physical_base = TEST_PHYSICAL,
          .cpu_base = fixture.cpu, .page_count = TEST_PAGES / 2},
@@ -2491,28 +2460,14 @@ static bool test_release_ready(void *context, void *pin)
 
 static void deferred_pin_retirement(void)
 {
-    static_assert(sizeof(struct stela_linux_page_ops_v2) == 40);
-    static_assert(offsetof(struct stela_linux_page_ops_v2, ordinary) == 8);
-    static_assert(offsetof(struct stela_linux_page_ops_v2, release_ready) == 32);
     const struct stela_linux_page_reservation extent = {
         .generation = 6, .physical_base = TEST_PHYSICAL, .cpu_base = fixture.cpu,
         .page_count = TEST_PAGES,
     };
-    struct stela_linux_page_ops_v2 ops = {
-        .version = STELA_LINUX_PAGE_OPS_V2, .bytes = sizeof(ops),
-        .ordinary = test_ops, .release_ready = test_release_ready,
-    };
-    const struct { u32 version, bytes; } header_only = {STELA_LINUX_PAGE_OPS_V2, 8};
-    assert(stela_linux_page_catalog_register_extents_v2(&extent, 1,
-           (const struct stela_linux_page_ops_v2 *)&header_only, &fixture) == -EINVAL);
-    ops.version--;
-    assert(stela_linux_page_catalog_register_extents_v2(&extent, 1, &ops, &fixture) == -EINVAL);
-    ops.version++;
-    ops.release_ready = NULL;
-    assert(stela_linux_page_catalog_register_extents_v2(&extent, 1, &ops, &fixture) == -EINVAL);
+    struct stela_linux_page_ops ops = test_ops;
     ops.release_ready = test_release_ready;
     assert(!metadata_live && !catalog.pages);
-    assert(!stela_linux_page_catalog_register_extents_v2(&extent, 1, &ops, &fixture));
+    assert(!stela_linux_page_catalog_register_extents(&extent, 1, &ops, &fixture));
     unsigned int released = fixture.releases;
     struct page *first = alloc_page(GFP_KERNEL);
     struct page *second = alloc_page(GFP_KERNEL);
@@ -2581,7 +2536,7 @@ static void annotated_stack_admission(void)
     for (size_t i = 0; i < ARRAY_SIZE(physical); i++)
         physical[i] = stack_physical + i * PAGE_SIZE;
     u64 generation = last_generation + 1;
-    struct stela_linux_page_extent_v3 extents[2] = {
+    struct stela_linux_page_extent extents[2] = {
         {.reservation = {.generation = generation, .physical_base = TEST_PHYSICAL,
                          .cpu_base = fixture.cpu, .page_count = TEST_PAGES},
          .kind = STELA_LINUX_PAGE_ORDINARY},
@@ -2589,48 +2544,32 @@ static void annotated_stack_admission(void)
                          .cpu_base = stack, .page_count = ARRAY_SIZE(physical)},
          .kind = STELA_LINUX_PAGE_RUNTIME_STACK},
     };
-    struct stela_linux_page_inventory_v3 inventory = {
-        .version = STELA_LINUX_PAGE_INVENTORY_V3, .bytes = sizeof(inventory),
-        .extents = extents, .count = ARRAY_SIZE(extents),
-    };
-    struct stela_linux_page_ops_v2 ops = {
-        .version = STELA_LINUX_PAGE_OPS_V2, .bytes = sizeof(ops),
-        .ordinary = test_ops, .release_ready = ordinary_release_ready,
-    };
-    /* Only eight header bytes are owned in these controls. A bad bytes/version
-     * must refuse before reading any pointer or callback from an absent tail. */
-    u32 short_header[2] __aligned(__alignof__(struct stela_linux_page_inventory_v3)) = {
-        STELA_LINUX_PAGE_INVENTORY_V3, sizeof(short_header),
-    };
-    assert(stela_linux_page_catalog_register_annotated((void *)short_header,
+    struct stela_linux_page_ops ops = test_ops;
+    assert(stela_linux_page_catalog_register_annotated(extents, ARRAY_SIZE(extents),
                                                        &ops, &fixture) == -EINVAL);
-    short_header[0] = STELA_LINUX_PAGE_INVENTORY_V3 + 1;
-    short_header[1] = sizeof(inventory);
-    assert(stela_linux_page_catalog_register_annotated((void *)short_header,
+    ops.release_ready = ordinary_release_ready;
+    assert(stela_linux_page_catalog_register_annotated(NULL, ARRAY_SIZE(extents),
                                                        &ops, &fixture) == -EINVAL);
-    short_header[0] = STELA_LINUX_PAGE_OPS_V2;
-    short_header[1] = sizeof(short_header);
-    assert(stela_linux_page_catalog_register_annotated(&inventory,
-                                                       (void *)short_header, &fixture) == -EINVAL);
+    assert(stela_linux_page_catalog_register_annotated(extents, 0, &ops, &fixture) == -EINVAL);
     extents[1].kind = 2;
-    assert(stela_linux_page_catalog_register_annotated(&inventory, &ops, &fixture) == -EINVAL);
+    assert(stela_linux_page_catalog_register_annotated(extents, ARRAY_SIZE(extents), &ops, &fixture) == -EINVAL);
     extents[1].kind = STELA_LINUX_PAGE_RUNTIME_STACK;
     extents[1].reserved = 1;
-    assert(stela_linux_page_catalog_register_annotated(&inventory, &ops, &fixture) == -EINVAL);
+    assert(stela_linux_page_catalog_register_annotated(extents, ARRAY_SIZE(extents), &ops, &fixture) == -EINVAL);
     extents[1].reserved = 0;
     extents[1].reservation.page_count--;
-    assert(stela_linux_page_catalog_register_annotated(&inventory, &ops, &fixture) == -EINVAL);
+    assert(stela_linux_page_catalog_register_annotated(extents, ARRAY_SIZE(extents), &ops, &fixture) == -EINVAL);
     extents[1].reservation.page_count++;
     extents[1].reservation.cpu_base = (u8 *)extents[1].reservation.cpu_base + 1;
-    assert(stela_linux_page_catalog_register_annotated(&inventory, &ops, &fixture) == -EINVAL);
+    assert(stela_linux_page_catalog_register_annotated(extents, ARRAY_SIZE(extents), &ops, &fixture) == -EINVAL);
     extents[1].reservation.cpu_base = (u8 *)extents[1].reservation.cpu_base - 1;
     for (size_t i = 0; i < 6; i++) {
         metadata_fail_after = i;
-        assert(stela_linux_page_catalog_register_annotated(&inventory, &ops, &fixture) == -ENOMEM);
+        assert(stela_linux_page_catalog_register_annotated(extents, ARRAY_SIZE(extents), &ops, &fixture) == -ENOMEM);
         assert(!metadata_live && !catalog.pages);
     }
     metadata_fail_after = NO_INDEX;
-    assert(!stela_linux_page_catalog_register_annotated(&inventory, &ops, &fixture));
+    assert(!stela_linux_page_catalog_register_annotated(extents, ARRAY_SIZE(extents), &ops, &fixture));
     assert(catalog.extent_count == 2 && !catalog.stack_admissions);
     assert(stela_linux_page_boot_capacity() == TEST_PAGES);
     unsigned long available = ULONG_MAX;
@@ -2659,18 +2598,21 @@ static void annotated_stack_admission(void)
      * deliberately reject these unpublished, zero-reference descriptors. */
     assert(catalog.pages + physical_slot(stack_physical) ==
            catalog.pages + physical_slot(TEST_PHYSICAL) + TEST_PAGES);
-    struct stela_linux_stack_admission_v1 request = {
-        .version = STELA_LINUX_STACK_ADMISSION_V1, .bytes = sizeof(request),
+    struct stela_linux_stack_admission request = {
+        .version = STELA_LINUX_STACK_ADMISSION, .bytes = sizeof(request),
         .generation = generation, .cpu_base = stack,
         .physical_pages = physical, .page_count = ARRAY_SIZE(physical),
     };
-    struct stela_linux_stack_ticket_v1 empty = {
-        .version = STELA_LINUX_STACK_ADMISSION_V1, .bytes = sizeof(empty),
+    struct stela_linux_stack_ticket empty = {
+        .version = STELA_LINUX_STACK_ADMISSION, .bytes = sizeof(empty),
         .record = NO_INDEX,
     };
-    struct stela_linux_stack_ticket_v1 ticket = empty;
-    short_header[0] = STELA_LINUX_STACK_ADMISSION_V1;
-    short_header[1] = sizeof(short_header);
+    struct stela_linux_stack_ticket ticket = empty;
+    /* Only eight header bytes are owned in these controls. A bad bytes value
+     * must refuse before reading any field from an absent tail. */
+    u32 short_header[2] __aligned(__alignof__(struct stela_linux_stack_ticket)) = {
+        STELA_LINUX_STACK_ADMISSION, sizeof(short_header),
+    };
     assert(stela_linux_page_stack_admit((void *)short_header, &ticket) == -EINVAL);
     assert(!memcmp(&ticket, &empty, sizeof(ticket)));
     assert(stela_linux_page_stack_admit(&request, (void *)short_header) == -EINVAL);
@@ -2702,10 +2644,10 @@ static void annotated_stack_admission(void)
     assert(stela_linux_page_stack_cancel(&ticket) == -EBUSY);
     assert(catalog.stack_admissions == 1 && page_ref_count(reserved) == 1);
     set_page_count(reserved, 0);
-    struct stela_linux_stack_ticket_v1 second = empty;
+    struct stela_linux_stack_ticket second = empty;
     assert(stela_linux_page_stack_admit(&request, &second) == -EINVAL);
     assert(!memcmp(&second, &empty, sizeof(second)));
-    struct stela_linux_stack_ticket_v1 wrong = ticket;
+    struct stela_linux_stack_ticket wrong = ticket;
     wrong.nonce++;
     assert(stela_linux_page_stack_cancel(&wrong) == -EINVAL);
     wrong = ticket; wrong.generation++;

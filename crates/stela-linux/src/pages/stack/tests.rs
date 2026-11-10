@@ -598,12 +598,9 @@ fn forgotten_admission_keeps_both_owners() {
 }
 #[test]
 fn annotated_record_layout() {
-    assert_eq!(size_of::<NativeExtentV3>(), 40);
-    assert_eq!(core::mem::offset_of!(NativeExtentV3, kind), 32);
-    assert_eq!(core::mem::offset_of!(NativeExtentV3, reserved), 36);
-    assert_eq!(size_of::<NativeInventoryV3>(), 24);
-    assert_eq!(core::mem::offset_of!(NativeInventoryV3, extents), 8);
-    assert_eq!(core::mem::offset_of!(NativeInventoryV3, count), 16);
+    assert_eq!(size_of::<NativeExtent>(), 40);
+    assert_eq!(core::mem::offset_of!(NativeExtent, kind), 32);
+    assert_eq!(core::mem::offset_of!(NativeExtent, reserved), 36);
     assert_eq!(size_of::<NativeAdmission>(), 40);
     assert_eq!(core::mem::offset_of!(NativeAdmission, cpu_base), 16);
     assert_eq!(core::mem::offset_of!(NativeAdmission, physical_pages), 24);

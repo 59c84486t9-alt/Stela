@@ -276,7 +276,7 @@ unsafe extern "C" {
     fn kernel_wait4(pid: i32, status: *mut i32, options: i32, usage: *mut c_void) -> isize;
     fn stela_linux_require_current(owner: *const RawOwner) -> i32;
     fn stela_linux_device_publish_allowed(device: *const c_void) -> bool;
-    fn stela_linux_page_catalog_register_extents_v2(
+    fn stela_linux_page_catalog_register_extents(
         extents: *const c_void,
         count: usize,
         ops: *const c_void,
@@ -312,12 +312,7 @@ unsafe extern "C" fn check_initial(owner: *const RawOwner, context: *mut c_void)
         assert_eq!(stela_linux_current(), &raw const init_task);
         assert!(!stela_linux_device_publish_allowed(ptr::null()));
         assert_eq!(
-            stela_linux_page_catalog_register_extents_v2(
-                ptr::null(),
-                0,
-                ptr::null(),
-                ptr::null_mut()
-            ),
+            stela_linux_page_catalog_register_extents(ptr::null(), 0, ptr::null(), ptr::null_mut()),
             -1,
         );
     }

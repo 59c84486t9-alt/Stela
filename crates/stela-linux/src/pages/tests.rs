@@ -301,10 +301,11 @@ fn original_reservation_and_operations_abi_has_no_unread_tail() {
     assert_eq!(core::mem::offset_of!(NativeReservation, physical_base), 8);
     assert_eq!(core::mem::offset_of!(NativeReservation, cpu_base), 16);
     assert_eq!(core::mem::offset_of!(NativeReservation, page_count), 24);
-    assert_eq!(size_of::<Operations>(), 3 * size_of::<usize>());
-    assert_eq!(size_of::<OperationsV2>(), 40);
-    assert_eq!(core::mem::offset_of!(OperationsV2, ordinary), 8);
-    assert_eq!(core::mem::offset_of!(OperationsV2, release_ready), 32);
+    assert_eq!(size_of::<Operations>(), 4 * size_of::<usize>());
+    assert_eq!(
+        core::mem::offset_of!(Operations, release_ready),
+        3 * size_of::<usize>()
+    );
 }
 
 #[test]
