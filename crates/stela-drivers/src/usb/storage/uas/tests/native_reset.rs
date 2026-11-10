@@ -46,7 +46,20 @@ fn native_root_reset_rebind_preserves_old_alias_quarantine_and_reprobes_geometry
         let commands_before_fault = hardware.borrow().scsi.len();
         hardware.borrow_mut().hang_next = true;
         let mut old_read = [0x91; 512];
-        assert_eq!(disks[0].read(1, &mut old_read), Err(BlockError::Timeout));
+        // The hang poisons the transport behind the owner's back, as a
+        // device the owner cannot reset on its own leaves it, so the
+        // explicit rebind below does the recovery.
+        let lun = alias_lun(&disks[0]);
+        let read = [0x28, 0, 0, 0, 0, 1, 0, 0, 1, 0]; // READ(10) of block 1.
+        assert_eq!(
+            crate::usb::storage::Scsi::read_into(
+                &mut owner.borrow_mut().transport,
+                lun,
+                &read,
+                &mut old_read
+            ),
+            Err(BlockError::Timeout)
+        );
         assert_eq!(old_read, [0x91; 512]);
         assert!(
             hardware.borrow().device_task,
@@ -192,4 +205,12 @@ fn native_reset_identity_or_reconstruction_failure_quarantines_both_epochs() {
         assert!(disks[0].read(0, &mut [0; 512]).is_err());
         assert_eq!(hardware.borrow().accesses, access);
     }
+}
+
+/// The LUN a UAS disk reads.
+fn alias_lun(disk: &crate::usb::storage::UsbDisk) -> Lun {
+    let crate::usb::storage::UsbTransport::Uas(unit) = &disk.disk else {
+        panic!("not a UAS disk")
+    };
+    unit.lun
 }

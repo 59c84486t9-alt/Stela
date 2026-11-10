@@ -79,12 +79,39 @@ struct State {
     reset_ready: Option<u64>,
     reset_minimum: bool,
     order: Vec<Order>,
+    /// Whether the model's device sits on a port [`Io::reset_device`]
+    /// can reset, and how many resets it ran.
+    port_reset: bool,
+    port_resets: usize,
 }
 #[derive(Clone)]
 struct Model(Rc<RefCell<State>>);
 impl Io for Model {
     type Buffer = DmaBuffer;
 
+    /// A port reset: the device drops whatever wedged it, and each unit
+    /// reports the reset once, as a device's power-on UNIT ATTENTION.
+    fn reset_device(
+        bot: &mut Bot<Self>,
+        _dma: &mut dyn DmaAllocator,
+    ) -> Option<Result<Bot<Self>, (alloc::string::String, BlockError)>> {
+        let state = bot.io.0.clone();
+        {
+            let mut s = state.borrow_mut();
+            if !s.port_reset {
+                return None;
+            }
+            s.port_resets += 1;
+            s.poisoned = false;
+            s.fault = Fault::None;
+            s.command = None;
+            for unit in s.units.iter_mut().flatten() {
+                unit.attention = true;
+            }
+        }
+        let (interface, flags, max_lun) = (bot.interface, bot.flags, bot.max_lun);
+        Some(Ok(bot.moved_to(Model(state), interface, flags, max_lun)))
+    }
     /// The model has no device to isolate.
     fn quarantine(&mut self) {}
     fn ready(&mut self) -> Result<(), BlockError> {
@@ -489,6 +516,8 @@ fn model(start: u64, end: u64, units: Vec<Option<Unit>>) -> Model {
         reset_ready: None,
         reset_minimum: false,
         order: Vec::new(),
+        port_reset: false,
+        port_resets: 0,
     })))
 }
 fn dma(backing: &mut [u64]) -> RegionAllocator {
@@ -1380,7 +1409,10 @@ fn synchronous_read_keeps_full_recovered_data_across_autosense() {
     let first = state.borrow().history.len();
     assert_eq!(disk.read(0, &mut output), Err(PROTOCOL_ERROR));
     assert_eq!(output, [0xa5; 512]);
-    assert!(!disk.media.get());
+    assert!(
+        disk.media.get(),
+        "the class reset ends the read, not the disk"
+    );
     assert_eq!(state.borrow().sense_polls, Some(18));
     assert!(
         state.borrow().history[first..]
@@ -1763,7 +1795,7 @@ fn metadata_warmup_limits_and_last_sector_split_reach_block_commands() {
 }
 
 #[test]
-fn acknowledged_class_reset_permanently_invalidates_all_published_luns() {
+fn an_acknowledged_class_reset_ends_the_command_and_keeps_every_lun() {
     use super::super::media::{Owner, scan_bot};
     use crate::block::BlockDevice;
     let mut memory = vec![0u64; 32 * 1024];
@@ -1784,13 +1816,60 @@ fn acknowledged_class_reset_permanently_invalidates_all_published_luns() {
     let mut old = scan_bot(owner.clone(), &mut failures).unwrap();
     state.borrow_mut().fault = Fault::Phase;
     assert!(old[0].command(&[0; 6], Data::None).is_err());
-    let before = state.borrow().transfers;
-    assert!(old[1].read(0, &mut [0; 512]).is_err());
-    assert!(old[0].flush_cache().is_err());
-    assert_eq!(state.borrow().transfers, before);
     state.borrow_mut().fault = Fault::None;
+    state.borrow_mut().now += RESET_RECOVERY_US;
+    // As in Linux, the reset ends one command, not the disks.
+    let mut bytes = [0; 512];
+    old[1].read(0, &mut bytes).unwrap();
+    assert_eq!(bytes, [2; 512]);
+    old[0].flush_cache().unwrap();
     assert_eq!(scan_bot(owner, &mut failures).unwrap().len(), 2);
-    assert!(old[1].flush_cache().is_err());
+    old[1].flush_cache().unwrap();
+    assert_eq!(state.borrow().port_resets, 0);
+}
+
+#[test]
+fn a_failed_class_reset_resets_the_port_and_completes_on_the_same_disk() {
+    use super::super::media::{Owner, scan_bot};
+    use crate::block::BlockDevice;
+    let mut memory = vec![0u64; 32 * 1024];
+    let start = memory.as_mut_ptr() as u64;
+    let mut dma = dma(&mut memory);
+    let io = model(
+        start,
+        start + memory.len() as u64 * 8,
+        vec![unit(1), unit(2)],
+    );
+    let state = io.0.clone();
+    let owner = Rc::new(RefCell::new(Owner::new(
+        Bot::new(io, 3, endpoints(), &mut dma).unwrap(),
+        "reader".into(),
+        "serial".into(),
+    )));
+    let mut failures = Vec::new();
+    let mut disks = scan_bot(owner.clone(), &mut failures).unwrap();
+    state.borrow_mut().port_reset = true;
+    for attempt in 1..=3u8 {
+        // The write's phase error starts a class reset, which fails: the
+        // owner resets the port, rebinds the same device and retries the
+        // write once, on the same disk.
+        state.borrow_mut().fault = Fault::Reset;
+        disks[1].write(0, &[0x40 + attempt; 512]).unwrap();
+        assert_eq!(state.borrow().port_resets, usize::from(attempt));
+        let mut bytes = [0; 512];
+        disks[1].read(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [0x40 + attempt; 512]);
+        disks[0].read(0, &mut bytes).unwrap();
+        assert_eq!(bytes, [1; 512], "the other LUN kept its disk");
+    }
+    // A fourth reset within the minute is not tried; every disk fails until
+    // an explicit rescan.
+    state.borrow_mut().fault = Fault::Reset;
+    assert!(disks[1].write(0, &[0; 512]).is_err());
+    state.borrow_mut().fault = Fault::None;
+    assert!(disks[1].read(0, &mut [0; 512]).is_err());
+    assert!(disks[0].read(0, &mut [0; 512]).is_err());
+    assert_eq!(state.borrow().port_resets, 3);
 }
 
 mod minimum;

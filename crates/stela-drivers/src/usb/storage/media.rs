@@ -16,6 +16,11 @@ pub(super) fn changed(sense: &Sense, removable: bool) -> bool {
         || sense.key == Sense::ILLEGAL_REQUEST && sense.asc == Sense::UNSUPPORTED_UNIT
 }
 
+/// Port resets an owner may run on its own in [`RESET_WINDOW_US`]; past
+/// that the device is left failed until an explicit rescan rebinds it.
+const RESET_LIMIT: usize = 3;
+const RESET_WINDOW_US: u64 = 60_000_000;
+
 pub(super) struct Owner<T: Scsi> {
     pub transport: T,
     prefix: String,
@@ -23,6 +28,16 @@ pub(super) struct Owner<T: Scsi> {
     units: Vec<Unit<T::Lun>>,
     /// Provisional publications: unit, validity and removability.
     pending: Vec<(T::Lun, Rc<Cell<bool>>, bool)>,
+    /// The device was reset since its last UNIT ATTENTION: the next one,
+    /// unless it reports a changed medium, is retried once, as Linux
+    /// `scsi_check_sense` retries with `expecting_cc_ua`.
+    expecting_reset: bool,
+    /// When this owner's recent port resets ran, by the transport's clock.
+    resets: Vec<u64>,
+    /// A port reset rebound the transport during the current command.
+    rebound: bool,
+    /// Port resets that rebound the transport.
+    rebinds: u64,
 }
 struct Unit<L> {
     lun: L,
@@ -38,6 +53,10 @@ impl<T: Scsi> Owner<T> {
             serial,
             units: Vec::new(),
             pending: Vec::new(),
+            expecting_reset: false,
+            resets: Vec::new(),
+            rebound: false,
+            rebinds: 0,
         }
     }
     pub fn invalidate(&mut self) {
@@ -47,6 +66,12 @@ impl<T: Scsi> Owner<T> {
         for unit in &self.units {
             unit.valid.set(false);
         }
+    }
+    /// Whether `lun` is published and still valid.
+    fn valid(&self, lun: T::Lun) -> bool {
+        self.units
+            .iter()
+            .any(|unit| unit.lun == lun && unit.valid.get())
     }
     /// Whether `lun` is removable; a unit not yet published is assumed so.
     fn removable(&self, lun: T::Lun) -> bool {
@@ -99,10 +124,34 @@ impl<T: Scsi> Owner<T> {
         &mut self,
         lun: T::Lun,
         cdb: &[u8],
-        command: impl FnOnce(&mut T) -> Result<R, BlockError>,
+        mut command: impl FnMut(&mut T) -> Result<R, BlockError>,
+    ) -> Result<R, BlockError> {
+        self.rebound = false;
+        let mut result = self.attempt(lun, cdb, &mut command);
+        // Linux's SCSI error handler retries the command a reset ended.
+        if result.is_err() && core::mem::take(&mut self.rebound) && self.valid(lun) {
+            result = self.attempt(lun, cdb, &mut command);
+            self.rebound = false;
+        }
+        result
+    }
+
+    /// One run of `command` and what its end means for the units.
+    fn attempt<R>(
+        &mut self,
+        lun: T::Lun,
+        cdb: &[u8],
+        command: &mut impl FnMut(&mut T) -> Result<R, BlockError>,
     ) -> Result<R, BlockError> {
         let generation = self.transport.generation();
-        let result = command(&mut self.transport);
+        let mut result = command(&mut self.transport);
+        if let Err(BlockError::Sense(sense)) = &result
+            && sense.key == Sense::UNIT_ATTENTION
+            && core::mem::take(&mut self.expecting_reset)
+            && !(sense.asc == Sense::MEDIUM_CHANGED && sense.ascq == 0)
+        {
+            result = command(&mut self.transport);
+        }
         // A removable unit's UA identifies an invalidated media view, even
         // when a later TUR consumes it and the capacity is unchanged.
         let removable = self.removable(lun);
@@ -115,20 +164,93 @@ impl<T: Scsi> Owner<T> {
         {
             self.changed(lun);
         }
-        if self.transport.poisoned()
-            || generation != self.transport.generation()
-            || matches!(
-                result,
-                Err(BlockError::Sense(Sense {
-                    key: Sense::UNIT_ATTENTION,
-                    asc: Sense::CONDITIONS_CHANGED,
-                    ascq: Sense::LUNS_CHANGED,
-                }))
-            )
-        {
+        self.settle(generation, &result);
+        result
+    }
+
+    /// What a command's end means for every unit: a class reset is expected
+    /// to raise a UNIT ATTENTION, a poisoned transport escalates to a port
+    /// reset, and a changed LUN inventory ends every publication.
+    fn settle<R>(&mut self, generation: u64, result: &Result<R, BlockError>) {
+        if generation != self.transport.generation() {
+            self.expecting_reset = true;
+        }
+        if self.transport.poisoned() {
+            self.reset_device();
+        }
+        if matches!(
+            result,
+            Err(BlockError::Sense(Sense {
+                key: Sense::UNIT_ATTENTION,
+                asc: Sense::CONDITIONS_CHANGED,
+                ascq: Sense::LUNS_CHANGED,
+            }))
+        ) {
             self.invalidate();
         }
-        result
+    }
+
+    /// Linux usb-storage's ladder after a failed class reset: reset the
+    /// device's port, rebind a fresh transport to the same device, and keep
+    /// every unit that probes as it was published, so the disks published on
+    /// it go on working; [`Owner::run`] then retries the failed command once. At most
+    /// [`RESET_LIMIT`] resets run in [`RESET_WINDOW_US`]; past that, or when
+    /// the reset fails, every unit fails until an explicit rescan.
+    fn reset_device(&mut self) {
+        let now = self.transport.now_us();
+        self.resets
+            .retain(|at| now.wrapping_sub(*at) < RESET_WINDOW_US);
+        if self.resets.len() >= RESET_LIMIT {
+            self.invalidate();
+            return;
+        }
+        // A root device's reset reuses its old binding's rings and
+        // buffers. One behind a hub needs new rings, which only an explicit
+        // rescan with the drivers' allocator can supply, so it fails here.
+        // SAFETY: the empty range hands out no memory.
+        let mut none = unsafe { crate::bus::dma::RegionAllocator::new(0..0) };
+        let Some(replaced) = self.transport.reset_device(&mut none) else {
+            self.invalidate();
+            return;
+        };
+        self.resets.push(now);
+        match replaced {
+            Ok(transport) => {
+                self.transport = transport;
+                self.expecting_reset = true;
+                self.revalidate();
+                self.rebound = true;
+                self.rebinds += 1;
+            }
+            Err(_) => self.invalidate(),
+        }
+    }
+
+    /// After a device reset, keep each published unit whose probe gives the
+    /// identity it was published with, and end the others.
+    fn revalidate(&mut self) {
+        for (_, valid, _) in &self.pending {
+            valid.set(false);
+        }
+        let serial = self.serial.clone();
+        for index in 0..self.units.len() {
+            let (lun, location) = (
+                self.units[index].lun,
+                self.units[index].identity.location.clone(),
+            );
+            let probed = probe(&mut self.transport, lun, &location, &serial);
+            let unit = &self.units[index];
+            let same = probed.is_ok_and(|(identity, removable)| {
+                removable == unit.removable
+                    && Identity {
+                        features: unit.identity.features,
+                        ..identity
+                    } == unit.identity
+            });
+            if !same || self.transport.poisoned() {
+                unit.valid.set(false);
+            }
+        }
     }
 }
 impl<T: Scsi> Scsi for Owner<T> {
@@ -150,7 +272,9 @@ impl<T: Scsi> Scsi for Owner<T> {
         cdb: &[u8],
         output: &mut [u8],
     ) -> Result<(), BlockError> {
-        self.run(lun, cdb, |transport| transport.read_into(lun, cdb, output))
+        self.run(lun, cdb, |transport| {
+            transport.read_into(lun, cdb, &mut *output)
+        })
     }
     fn delay(&mut self, micros: u64) -> Result<(), BlockError> {
         self.transport.delay(micros)
@@ -205,19 +329,7 @@ impl<T: Scsi> Scsi for Owner<T> {
         if matches!(&result, Err(BlockError::Sense(sense)) if changed(sense, removable)) {
             self.changed(lun);
         }
-        if self.transport.poisoned()
-            || generation != self.transport.generation()
-            || matches!(
-                result,
-                Err(BlockError::Sense(Sense {
-                    key: Sense::UNIT_ATTENTION,
-                    asc: Sense::CONDITIONS_CHANGED,
-                    ascq: Sense::LUNS_CHANGED
-                }))
-            )
-        {
-            self.invalidate();
-        }
+        self.settle(generation, &result);
         result
     }
     fn media_publication(&mut self, lun: Self::Lun, valid: Rc<Cell<bool>>, removable: bool) {
@@ -252,15 +364,19 @@ fn scan<T: Scsi>(
     mut discover: impl FnMut() -> Result<Vec<Disk<Owner<T>>>, BlockError>,
 ) -> Result<Vec<Disk<Owner<T>>>, BlockError> {
     for _ in 0..3 {
+        let rebinds = owner.borrow().rebinds;
         let result = discover();
         if result.is_err() {
             return finish(&owner, result);
         }
-        let unstable = owner
-            .borrow()
-            .pending
-            .iter()
-            .any(|(_, valid, _)| !valid.get());
+        // A port reset during discovery ended the commands it interrupted,
+        // so their units are probed again, as a changed view is.
+        let unstable = owner.borrow().rebinds != rebinds
+            || owner
+                .borrow()
+                .pending
+                .iter()
+                .any(|(_, valid, _)| !valid.get());
         if !unstable {
             return finish(&owner, result);
         }
@@ -521,11 +637,12 @@ mod tests {
         }
     }
     #[test]
-    fn service_recovers_native_uas_without_replaying_data_and_keeps_empty_media() {
+    fn a_hung_uas_command_resets_the_port_and_a_changed_capacity_ends_the_disk() {
         use crate::block::BlockDevice;
         use crate::usb::xhci;
         for speed in [xhci::HIGH_SPEED, xhci::SUPER_SPEED] {
             let mut memory = vec![0u64; 512 * 1024];
+            // The model's capacity grows with each reset.
             let (controller, device, hardware, mut dma) =
                 xhci::model::reset_fixture(&mut memory, speed, 32, 3);
             let binding = uas::Binding::new(
@@ -545,12 +662,12 @@ mod tests {
                 )
             }
             .unwrap();
-            let stale_owner = storage.clone();
             let before = hardware.borrow().scsi.len();
             hardware.borrow_mut().hang_next = true;
+            // The hung write poisons the transport and the owner resets the
+            // port at once. The device answers with another capacity, so
+            // the disk ends and the write is not retried.
             assert!(disks[0].write(1, &[0xaa; 512]).is_err());
-            let mut fresh = storage.service(&mut dma, &mut failures).unwrap();
-            assert_eq!(fresh[0].identity().blocks, 2048);
             assert_eq!(hardware.borrow().resets, 1);
             assert_eq!(
                 hardware.borrow().scsi[before..]
@@ -562,10 +679,10 @@ mod tests {
             let accesses = hardware.borrow().accesses;
             assert!(disks[0].flush_cache().is_err());
             assert_eq!(hardware.borrow().accesses, accesses);
-            let TransportOwner::Uas(old) = &stale_owner.owner else {
-                panic!("wrong transport");
-            };
-            assert!(old.borrow().transport.requires_rebind());
+            // The rebound transport publishes the new medium.
+            let mut fresh = storage.service(&mut dma, &mut failures).unwrap();
+            assert_eq!(fresh[0].identity().blocks, 2048);
+            assert_eq!(hardware.borrow().resets, 1);
             hardware.borrow_mut().empty_media = true;
             assert!(storage.service(&mut dma, &mut failures).unwrap().is_empty());
             assert!(fresh[0].read(0, &mut [0; 512]).is_err());

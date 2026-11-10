@@ -133,6 +133,21 @@ pub(super) trait Io {
             ))),
         }
     }
+    /// The port reset and rebind after a failed class reset of `bot`
+    /// ([`super::Scsi::reset_device`]); none where the host has no such step.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the replacement transport, or the failed operation and its exact cause"
+    )]
+    fn reset_device(
+        _bot: &mut Bot<Self>,
+        _dma: &mut dyn DmaAllocator,
+    ) -> Option<Result<Bot<Self>, (alloc::string::String, BlockError)>>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
 
 /// A control transfer or halt clear ([`Io::begin_control`], [`Io::begin_clear`]).
@@ -171,6 +186,13 @@ pub(super) struct Native {
 }
 impl Io for Native {
     type Buffer = DmaBuffer;
+
+    fn reset_device(
+        bot: &mut Bot<Self>,
+        dma: &mut dyn DmaAllocator,
+    ) -> Option<Result<Bot<Self>, (alloc::string::String, BlockError)>> {
+        Some(bot.reset_and_rebind(dma))
+    }
 
     fn signals(&self) -> bool {
         self.controller
@@ -522,6 +544,25 @@ impl<I: Io> Bot<I> {
             begun: None,
             failed_data: None,
         }
+    }
+    /// A transport over `io` that takes this one's buffers, cleared, once a
+    /// reset retired every request of this one. This one stays poisoned, so
+    /// its aliases cannot inspect or submit the buffers again.
+    fn moved_to(&mut self, io: I, interface: u8, flags: quirks::Flags, max_lun: u8) -> Self {
+        self.poisoned = true;
+        let mut buffer = self.buffer.transfer();
+        let mut wrapper = self.wrapper.transfer();
+        buffer.bytes_mut().fill(0);
+        wrapper.bytes_mut().fill(0);
+        Self::with_buffers(
+            io,
+            interface,
+            self.endpoints,
+            buffer,
+            wrapper,
+            flags,
+            max_lun,
+        )
     }
     pub fn max_lun(&self) -> u8 {
         self.max_lun

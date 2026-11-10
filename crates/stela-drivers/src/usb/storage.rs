@@ -185,6 +185,24 @@ trait Scsi {
     fn fua_permitted(&self) -> bool {
         false
     }
+    /// The step after a failed class reset, as Linux `usb_stor_port_reset`
+    /// and the re-enumeration after it: reset the device's port, check that
+    /// the same device answers, and return a fresh transport bound to it.
+    /// None for a transport without that step. `dma` supplies whatever the
+    /// host cannot reuse from the old binding.
+    #[allow(
+        clippy::type_complexity,
+        reason = "the replacement transport, or the failed operation and its exact cause"
+    )]
+    fn reset_device(
+        &mut self,
+        _dma: &mut dyn DmaAllocator,
+    ) -> Option<Result<Self, (String, BlockError)>>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
 impl<I: Io> Scsi for Bot<I> {
     type Lun = u8;
@@ -257,6 +275,12 @@ impl<I: Io> Scsi for Bot<I> {
     fn read_before_mode_sense(&mut self, lun: u8, block_size: usize) -> Result<(), BlockError> {
         Bot::read_before_mode_sense(self, lun, block_size)
     }
+    fn reset_device(
+        &mut self,
+        dma: &mut dyn DmaAllocator,
+    ) -> Option<Result<Self, (String, BlockError)>> {
+        I::reset_device(self, dma)
+    }
 }
 impl Scsi for uas::Host {
     type Lun = uas::Lun;
@@ -322,6 +346,12 @@ impl Scsi for uas::Host {
     }
     fn fua_permitted(&self) -> bool {
         uas::Host::fua_permitted(self)
+    }
+    fn reset_device(
+        &mut self,
+        dma: &mut dyn DmaAllocator,
+    ) -> Option<Result<Self, (String, BlockError)>> {
+        Some(uas::Host::reset_and_rebind(self, dma))
     }
     fn max_transfer_bytes(&self) -> usize {
         uas::Host::max_transfer_bytes(self)

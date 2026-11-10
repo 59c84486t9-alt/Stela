@@ -83,6 +83,15 @@ impl EhciBulk {
 impl Io for EhciBulk {
     type Buffer = Vec<u8>;
 
+    /// The root reset and rebind needs no new DMA: the controller keeps one
+    /// arena for every transfer.
+    fn reset_device(
+        bot: &mut Bot<Self>,
+        _dma: &mut dyn crate::bus::dma::DmaAllocator,
+    ) -> Option<Result<Bot<Self>, (String, BlockError)>> {
+        Some(bot.reset_and_rebind_ehci())
+    }
+
     fn ready(&mut self) -> Result<(), BlockError> {
         self.controller
             .borrow()
@@ -198,10 +207,17 @@ impl Bot<EhciBulk> {
             return Err(fail("BOT transport buffers already transferred"));
         }
         let controller = self.io.controller.clone();
-        let port = self.io.device.root_port();
         let failed = |operation: &str, error: ehci::Error| (String::from(operation), block(error));
-        let addressed =
-            host::address(&controller, port).map_err(|e| failed("BOT reset root", e))?;
+        let hub = if self.io.device.is_root() {
+            None
+        } else {
+            controller
+                .borrow()
+                .hub_port_of(&self.io.device)
+                .map_err(|e| failed("BOT reset find hub port", e))?
+        };
+        let addressed = host::readdress(&controller, &self.io.device)
+            .map_err(|e| failed("BOT reset port", e))?;
         let id = addressed.id.clone();
         let result = (|| {
             if addressed.descriptor != self.io.descriptor {
@@ -232,22 +248,13 @@ impl Bot<EhciBulk> {
                 .map_err(|e| (String::from("BOT reset reconstruct transport"), e))?;
             // Every fallible step is done and the old device's handles were
             // retired by the reset; move the unique buffer owners.
-            let mut buffer = self.buffer.transfer();
-            let mut wrapper = self.wrapper.transfer();
-            buffer.bytes_mut().fill(0);
-            wrapper.bytes_mut().fill(0);
-            Ok(Self::with_buffers(
-                io,
-                self.interface,
-                self.endpoints,
-                buffer,
-                wrapper,
-                flags,
-                max_lun,
-            ))
+            Ok(self.moved_to(io, self.interface, flags, max_lun))
         })();
         if result.is_err() {
-            let _ = controller.borrow_mut().disable_port(&id);
+            let _ = match &hub {
+                None => controller.borrow_mut().disable_port(&id),
+                Some((hub, port)) => controller.borrow_mut().disable_hub_port(hub, *port),
+            };
         }
         result
     }
