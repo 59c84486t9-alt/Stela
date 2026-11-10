@@ -255,7 +255,7 @@ impl Window {
             }
             self.clear(address, count);
         }
-        if !shootdown::retire(self.tsc_hz) {
+        if !shootdown::retire(self.tsc_hz, Some(range.clone())) {
             return false;
         }
         self.lock().state().retiring.finish(&range);
@@ -296,7 +296,7 @@ impl Window {
                 true
             }
             Err(range) => {
-                if !shootdown::retire(self.tsc_hz) {
+                if !shootdown::retire(self.tsc_hz, Some(range.clone())) {
                     return false;
                 }
                 let mut guard = self.lock();
@@ -314,8 +314,9 @@ impl Window {
         if batch.is_empty() {
             return true;
         }
-        // Requested after every range in the batch was cleared.
-        if !shootdown::retire(self.tsc_hz) {
+        // Requested after every range in the batch was cleared; peers flush
+        // everything, as the batch is not one range.
+        if !shootdown::retire(self.tsc_hz, None) {
             self.lock().state().lazy.restore(batch);
             return false;
         }

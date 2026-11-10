@@ -431,7 +431,8 @@ unsafe impl MappingPlatform for Platform {
         self.invalidate(size, first, count);
         // A processor that did not acknowledge may still translate through
         // the slots, so they stay allocated and the mapping is refused.
-        if !super::shootdown::retire(self.tsc_hz) {
+        // Peers flush everything: the slots may be large pages.
+        if !super::shootdown::retire(self.tsc_hz, None) {
             return Err(Error::Busy);
         }
         mappings.swap_remove(at);

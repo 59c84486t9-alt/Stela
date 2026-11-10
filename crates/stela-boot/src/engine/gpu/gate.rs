@@ -60,10 +60,25 @@ unsafe extern "C" {
     fn stela_nvk_nir_options(physical: vk::PhysicalDevice) -> *const c_void;
 }
 
+/// The compile stacks ([`open_gpu`]), whose jobs [`run`] runs with the
+/// shootdown vector open; a GPU past these runs its jobs masked.
+static COMPILE_STACKS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
 fn run(stack: u64, body: &mut dyn FnMut()) {
-    // SAFETY: a service's stack lives for the boot, and only the opener or a
-    // turn's holder is here.
-    unsafe { stack::on_stack(stack, body) };
+    let job = COMPILE_STACKS
+        .iter()
+        .any(|compile| compile.load(Ordering::Relaxed) == stack);
+    // SAFETY: a service's stack lives for the boot, and only the opener, a
+    // turn's holder or the compile lock's holder is here.
+    let mut on_stack = || unsafe { stack::on_stack(stack, &mut *body) };
+    if job {
+        // SAFETY: a job runs where long host work is allowed, from a run
+        // loop or a guest call, holding no lock the doorbell's or the
+        // shootdown's handler takes; it leaves IF and CR8 as they were.
+        unsafe { crate::native_mmio::shootdown::job(on_stack) }
+    } else {
+        on_stack()
+    }
 }
 
 pub(super) fn relax() {
@@ -144,10 +159,11 @@ const LONG_TURN_MILLIS: u64 = 50;
 /// next interrupt waits for the job (a few to hundreds of milliseconds, a
 /// very large kernel seconds). Other processors' guests run meanwhile, and
 /// the guest clock does not wait for a processor whose guest waits. Off the
-/// boot processor the job runs with interrupts on, so that a TLB shootdown
-/// another processor sends is acknowledged at once rather than after the
-/// job. The boot processor, whose Linux work the job would hold up, takes
-/// one only after [`BOOT_JOB_MILLIS`]. Whether one ran.
+/// boot processor the job runs with interrupts on; on it, and in a call
+/// that forces its job, with only the doorbell and the TLB shootdown open
+/// ([`run`]), so a shootdown another processor sends is acknowledged at once
+/// rather than after the job. The boot processor, whose Linux work the job
+/// would hold up, takes one only after [`BOOT_JOB_MILLIS`]. Whether one ran.
 pub(in crate::engine) fn run_job(boot: bool) -> bool {
     let Some(gpu) = installed() else {
         return false;
@@ -648,9 +664,9 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
         ));
     }
     // The host's Linux work the calls asked the boot CPU for, by ioctl.
-    let (shootdowns, shot) = crate::native_mmio::shootdown::take_waits();
+    let (shootdowns, shot, ranged) = crate::native_mmio::shootdown::take_waits();
     output::arguments(format_args!(
-        "\nGPU POSTED shootdowns={shootdowns}/{}us request:count/waited_us",
+        "\nGPU POSTED shootdowns={shootdowns}/{}us ranged={ranged} request:count/waited_us",
         micros(shot)
     ));
     for &(request, count, waited) in posted.iter().take(SHOWN) {
@@ -894,6 +910,12 @@ fn open_gpu(
             // Without a second stack, every compilation stays in its turn.
             if let Some(compiling) = Stack::map(gpu.window, STACK_BYTES) {
                 service.set_force_after(gpu.tsc_hz / 1000 * FORCE_JOB_MILLIS);
+                if let Some(free) = COMPILE_STACKS
+                    .iter()
+                    .find(|compile| compile.load(Ordering::Relaxed) == 0)
+                {
+                    free.store(compiling.top(), Ordering::Relaxed);
+                }
                 service.set_compile_stack(compiling.top());
                 core::mem::forget(compiling);
             } else {

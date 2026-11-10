@@ -245,6 +245,10 @@ const fn view_context(view: usize) -> u64 {
     view as u64 + 2
 }
 
+/// Every PCID a root loads in while PCIDE is set: the host root's 0, the
+/// loader root's 1 (`storage::TaggedRoots`) and the views'.
+pub(crate) const CONTEXTS: u64 = view_context(ROOTS);
+
 /// What the views' TLB contexts hold. With a context of its own, a change of
 /// view keeps its own translations of the engine, the translated code and
 /// the guest, which no mapping marks global. An invalidation reaches the
