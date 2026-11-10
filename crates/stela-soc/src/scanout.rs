@@ -1,13 +1,23 @@
 //! The host scanout a completed DCP swap is presented to: one fixed virtual
-//! monitor whose pixels the boot crate copies to the UEFI GOP framebuffer
-//! (`crates/stela-boot/src/engine/display.rs`).
+//! monitor. The boot crate implements it over the UEFI GOP framebuffer
+//! (`crates/stela-boot/src/engine/display.rs`, two frames flipped through
+//! QEMU's DISPI registers where the display has them) or, once a bound GPU
+//! owns the display, over DRM mode setting
+//! (`crates/stela-boot/src/engine/gpu/display.rs`, three dumb buffers in
+//! video memory and page flips).
 //!
 //! The DCP model terminates the J473AP display pipeline at the AP boundary:
-//! it has no real display controller to scan a surface out of DRAM, so a
-//! completed swap's layers are read through their DART (dart-dispext0),
-//! composed ([`compose`]) and handed to a [`Scanout`] the host implements. A swap completes only
-//! after the scanout has consumed the pixels, so the guest never recycles a
-//! surface the host is still reading (the DCP's own swap-complete contract).
+//! it has no real display controller to scan a surface out of DRAM, so the
+//! CPU reads a swap's layers through their DART (dart-dispext0), composes
+//! them a row at a time ([`compose`]) and hands the rows to a [`Scanout`].
+//! A sink with a hidden buffer takes the rows straight from the composer, so
+//! a frame is one pass from guest memory to the screen; any other is given
+//! the whole frame, composed in the model's own storage. A present names the
+//! rows that changed since the last one (its damage), and only those are
+//! composed and copied again: a cursor move rewrites the rows its old and new
+//! rectangles cover. A swap completes only after the scanout has consumed
+//! the pixels, so the guest never recycles a surface the host is still
+//! reading (the DCP's own swap-complete contract).
 //!
 //! The model converts each surface's pixel format to the scanout's and honors
 //! its row stride; a format the model cannot convert is refused explicitly
@@ -15,6 +25,7 @@
 use crate::Result;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::ops::Range;
 use stela_contracts::refuse;
 
 /// A 32-bit pixel format: the scanout's (an 8-bit one) or a surface's the
@@ -83,6 +94,12 @@ pub trait Scanout {
     fn refresh_millihertz(&self) -> u32 {
         DEFAULT_REFRESH_MILLIHERTZ
     }
+    /// The monitor's image size in millimetres, as its EDID reports it;
+    /// `None` when unknown, and the model's EDID assumes a usual one
+    /// (`dcp::modes::assumed_size_mm`).
+    fn physical_size_mm(&self) -> Option<(u32, u32)> {
+        None
+    }
     /// Present one completed frame: `rows` are its pixels top to bottom, each
     /// `width` pixels of the scanout's format, already composed and clipped
     /// to the mode. Called once per completed swap, before the swap completes.
@@ -90,15 +107,42 @@ pub trait Scanout {
     /// swap. Validate fallible inputs before publishing host-visible pixels.
     fn present(&mut self, rows: &[u8]) -> Result<()>;
 
-    /// Present a frame from an ordered producer, keeping each row hidden
-    /// until the whole frame is ready. Call the producer once per row with
-    /// exactly `width * 4` bytes to fill, stopping on its first error.
-    /// A sink without a hidden buffer declines without calling the producer.
+    /// Present a frame from a row producer, keeping its rows hidden until
+    /// the whole frame is ready. `damage` names the rows that may differ
+    /// from the last frame presented, `None` every row; the sink asks for
+    /// those and for any others the buffer it fills lacks, as it last held
+    /// an older frame. Call the producer with a row index and exactly
+    /// `width * 4` bytes to fill, rows in increasing order, stopping on its
+    /// first error; a later pass may ask for a row again. A sink without a
+    /// hidden buffer declines without calling the producer.
     fn try_present_rows(
         &mut self,
+        _damage: Option<Range<usize>>,
         _fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
     ) -> Result<bool> {
         Ok(false)
+    }
+
+    /// Whether an earlier present left work only [`Self::flush`] finishes,
+    /// such as a page flip whose request must wait for another processor.
+    fn queued(&self) -> bool {
+        false
+    }
+
+    /// Finish what an earlier present queued, as far as this processor may:
+    /// what must wait for another processor stays queued for a later flush.
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The smallest range of rows holding both `a` and `b`; an empty range adds
+/// nothing.
+pub fn union(a: Range<usize>, b: Range<usize>) -> Range<usize> {
+    match (a.is_empty(), b.is_empty()) {
+        (true, _) => b,
+        (_, true) => a,
+        _ => a.start.min(b.start)..a.end.max(b.end),
     }
 }
 
@@ -387,31 +431,60 @@ fn blend_row(pixels: &[u8], out: &mut [u8], premultiplied: bool) {
     }
 }
 
-/// Present a matching fullscreen layer directly to a sink that can hide
-/// unfinished rows. Other compositions need the complete packed frame,
-/// composed in `frame`, whose storage the next one takes again: a frame is
+/// The frame the model composed last, kept for the next: a frame is
 /// megabytes, which a heap shared with the engine may not have in one piece
-/// each time.
+/// each time. While it holds what the scanout shows, a later present
+/// recomposes only its damage in it.
+#[derive(Debug, Default)]
+pub struct Composed {
+    rows: Vec<u8>,
+    /// The rows are the frame the scanout shows.
+    current: bool,
+}
+
+/// Present `layers` to `sink`, `damage` naming the rows that may differ
+/// from the frame the sink shows (`None`: any row). A sink that can hide
+/// unfinished rows takes them from the composer; any other gets the whole
+/// frame, composed in `composed`. Rows that do not change are neither read
+/// nor written, and no damage at all leaves the sink untouched.
 pub(crate) fn present(
     sink: &mut dyn Scanout,
     layers: &[Layer],
+    damage: Option<Range<usize>>,
     mut read: impl FnMut(u64, &mut [u8]) -> bool,
-    frame: &mut Vec<u8>,
+    composed: &mut Composed,
 ) -> Result<()> {
     let mode = sink.mode();
-    if let [layer] = layers
-        && mode.format.red_blue().is_some()
-        && layer.covers_mode(mode)
-        && sink.try_present_rows(&mut |y, row| {
-            layer.read_row(y as u64, row, &mut read)?;
-            make_opaque(row, layer.premultiplied);
-            Ok(())
-        })?
-    {
+    let height = mode.height as usize;
+    let damage = damage.map(|rows| rows.start.min(height)..rows.end.min(height));
+    if damage.as_ref().is_some_and(Range::is_empty) {
         return Ok(());
     }
-    compose_into(layers, mode, read, frame)?;
-    sink.present(frame)
+    let mut rows = Rows::new(layers, mode)?;
+    if sink.try_present_rows(damage.clone(), &mut |y, row| {
+        rows.compose(y, row, &mut read)
+    })? {
+        composed.current = false;
+        return Ok(());
+    }
+    let lines = match damage {
+        Some(lines) if composed.current => lines,
+        _ => 0..height,
+    };
+    // A failure below leaves the storage between frames.
+    composed.current = false;
+    let row_bytes = mode.width as usize * 4;
+    composed.rows.resize(row_bytes * height, 0);
+    for y in lines {
+        rows.compose(
+            y,
+            &mut composed.rows[y * row_bytes..][..row_bytes],
+            &mut read,
+        )?;
+    }
+    sink.present(&composed.rows)?;
+    composed.current = true;
+    Ok(())
 }
 
 /// Compose `layers`, bottom to top, over opaque black on `mode`'s screen and
@@ -425,10 +498,10 @@ pub(crate) fn present(
 /// alpha first. Over the opaque black background a premultiplied layer
 /// shows its colour whatever its alpha.
 ///
-/// The frame is built in the scanout's byte order. An unscaled row is
-/// copied whole when blending cannot change it: every pixel opaque, or a
-/// premultiplied layer over screen no lower layer has drawn on (still
-/// black).
+/// The frame is built in the scanout's byte order, a row at a time. An
+/// unscaled row is copied whole when blending cannot change it: every pixel
+/// opaque, or a premultiplied layer over columns no lower layer has drawn
+/// on in that row (still black).
 pub fn compose(
     layers: &[Layer],
     mode: Mode,
@@ -446,59 +519,99 @@ pub fn compose_into(
     mut read: impl FnMut(u64, &mut [u8]) -> bool,
     frame: &mut Vec<u8>,
 ) -> Result<()> {
-    let width = mode.width as usize;
-    let (red, blue) = mode
-        .format
-        .red_blue()
-        .ok_or(refuse!("scanout mode is not an 8-bit format"))?;
-    // A matching bottom layer replaces every output pixel. Its DART rows
-    // can be read into the frame without first filling opaque black or
-    // routing the pixels through the scratch row.
-    let direct_base = layers.first().is_some_and(|layer| layer.covers_mode(mode));
-    let pixels = width * mode.height as usize;
-    // The direct base layer writes every byte of the frame.
-    frame.resize(pixels * 4, 0);
-    if !direct_base {
-        frame.as_chunks_mut::<4>().0.fill([0, 0, 0, 0xff]);
+    let mut rows = Rows::new(layers, mode)?;
+    let row_bytes = mode.width as usize * 4;
+    frame.resize(row_bytes * mode.height as usize, 0);
+    for (y, out) in frame.chunks_exact_mut(row_bytes.max(1)).enumerate() {
+        rows.compose(y, out, &mut read)?;
     }
-    let mut row = Vec::new();
-    let mut drawn: Vec<([usize; 2], [usize; 2])> = Vec::new();
-    for (index, layer) in layers.iter().enumerate() {
-        let (surface, source, destination) = (layer.surface, layer.source, layer.destination);
-        let Some((xs, ys)) = on_screen(destination, mode.width, mode.height) else {
-            continue;
-        };
-        let unscaled = (source.width, source.height) == (destination.width, destination.height);
-        let over_black = !drawn
-            .iter()
-            .any(|(x, y)| x[0] < xs[1] && xs[0] < x[1] && y[0] < ys[1] && ys[0] < y[1]);
-        let copies = surface.format.red_blue().is_some();
-        let direct = index == 0 && direct_base;
-        if !direct {
-            row.resize(source.width as usize * 4, 0);
+    Ok(())
+}
+
+/// The composer of one frame's rows, any row on its own.
+struct Rows<'a> {
+    layers: &'a [Layer],
+    /// Each layer's on-screen columns and rows, `None` when off screen.
+    placed: Vec<Option<([usize; 2], [usize; 2])>>,
+    red: usize,
+    blue: usize,
+    format: PixelFormat,
+    /// A matching bottom layer replaces every output pixel. Its DART rows
+    /// are read into the output row without first filling opaque black or
+    /// routing the pixels through the scratch row.
+    direct_base: bool,
+    /// The columns lower layers drew on in the row being composed.
+    drawn: Vec<[usize; 2]>,
+    scratch: Vec<u8>,
+}
+
+impl<'a> Rows<'a> {
+    fn new(layers: &'a [Layer], mode: Mode) -> Result<Self> {
+        let (red, blue) = mode
+            .format
+            .red_blue()
+            .ok_or(refuse!("scanout mode is not an 8-bit format"))?;
+        Ok(Self {
+            layers,
+            placed: layers
+                .iter()
+                .map(|layer| on_screen(layer.destination, mode.width, mode.height))
+                .collect(),
+            red,
+            blue,
+            format: mode.format,
+            direct_base: layers.first().is_some_and(|layer| layer.covers_mode(mode)),
+            drawn: Vec::new(),
+            scratch: Vec::new(),
+        })
+    }
+
+    /// Compose row `y` into `out`, the mode's width of pixels.
+    fn compose(
+        &mut self,
+        y: usize,
+        out: &mut [u8],
+        read: &mut impl FnMut(u64, &mut [u8]) -> bool,
+    ) -> Result<()> {
+        if !self.direct_base {
+            out.as_chunks_mut::<4>().0.fill([0, 0, 0, 0xff]);
         }
-        for y in ys[0]..ys[1] {
+        self.drawn.clear();
+        let layers = self.layers;
+        for (index, layer) in layers.iter().enumerate() {
+            let Some((xs, ys)) = self.placed[index] else {
+                continue;
+            };
+            if !(ys[0]..ys[1]).contains(&y) {
+                continue;
+            }
+            let (surface, source, destination) = (layer.surface, layer.source, layer.destination);
+            let over_black = !self.drawn.iter().any(|x| x[0] < xs[1] && xs[0] < x[1]);
+            self.drawn.push(xs);
             let from_y = (2 * (y as u64 - u64::from(destination.y)) + 1) * u64::from(source.height)
                 / (2 * u64::from(destination.height));
-            let out = &mut frame[(y * width + xs[0]) * 4..(y * width + xs[1]) * 4];
-            let input = if direct { &mut *out } else { &mut row[..] };
-            layer.read_row(from_y, input, &mut read)?;
-            if direct {
+            let out = &mut out[xs[0] * 4..xs[1] * 4];
+            if index == 0 && self.direct_base {
+                layer.read_row(from_y, out, read)?;
                 make_opaque(out, layer.premultiplied);
                 continue;
             }
-            if unscaled && copies {
+            self.scratch.resize(source.width as usize * 4, 0);
+            let row = &mut self.scratch[..];
+            layer.read_row(from_y, row, read)?;
+            let unscaled = (source.width, source.height) == (destination.width, destination.height);
+            if unscaled && surface.format.red_blue().is_some() {
                 let start = (xs[0] - destination.x as usize) * 4;
                 let pixels = &row[start..start + out.len()];
                 if (layer.premultiplied && over_black) || all_opaque(pixels) {
-                    copy_opaque(pixels, out, surface.format, mode.format);
+                    copy_opaque(pixels, out, surface.format, self.format);
                     continue;
                 }
-                if over_black && surface.format == mode.format {
+                if over_black && surface.format == self.format {
                     copy_straight_over_black(pixels, out);
                     continue;
                 }
-                if surface.format == mode.format {
+                if surface.format == self.format {
                     blend_row(pixels, out, layer.premultiplied);
                     continue;
                 }
@@ -512,7 +625,7 @@ pub fn compose_into(
                     .format
                     .rgba([row[at], row[at + 1], row[at + 2], row[at + 3]]);
                 let alpha = u32::from(pixel[3]);
-                for (to, value) in [(red, pixel[0]), (1, pixel[1]), (blue, pixel[2])] {
+                for (to, value) in [(self.red, pixel[0]), (1, pixel[1]), (self.blue, pixel[2])] {
                     let value = u32::from(value);
                     let value = if layer.premultiplied {
                         value
@@ -523,9 +636,8 @@ pub fn compose_into(
                 }
             }
         }
-        drawn.push((xs, ys));
+        Ok(())
     }
-    Ok(())
 }
 
 /// Reject a translucent group at once while ignoring the colour bytes.
@@ -971,38 +1083,50 @@ mod tests {
         assert_eq!(reads, [44, 76]);
     }
 
+    /// A sink with a hidden buffer: it keeps the frame it shows, fills the
+    /// rows a present asks for (every row when it names no damage) and
+    /// shows them only once all are filled.
+    #[derive(Default)]
+    struct Hidden {
+        mode: Option<Mode>,
+        visible: Vec<u8>,
+        streamed: usize,
+        /// The rows each present asked the composer for.
+        asked: Vec<Vec<usize>>,
+    }
+
+    impl Scanout for Hidden {
+        fn mode(&self) -> Mode {
+            self.mode.unwrap_or(MODE)
+        }
+
+        fn present(&mut self, rows: &[u8]) -> Result<()> {
+            self.visible = rows.to_vec();
+            Ok(())
+        }
+
+        fn try_present_rows(
+            &mut self,
+            damage: Option<Range<usize>>,
+            fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
+        ) -> Result<bool> {
+            let mode = self.mode();
+            let row_bytes = mode.width as usize * 4;
+            let mut rows = self.visible.clone();
+            rows.resize(row_bytes * mode.height as usize, 0);
+            let lines = damage.unwrap_or(0..mode.height as usize);
+            self.asked.push(lines.clone().collect());
+            for y in lines {
+                fill(y, &mut rows[y * row_bytes..][..row_bytes])?;
+            }
+            self.streamed += 1;
+            self.present(&rows)?;
+            Ok(true)
+        }
+    }
+
     #[test]
     fn hidden_rows_preserve_fullscreen_dma_order_and_pixels() {
-        #[derive(Default)]
-        struct Hidden {
-            visible: Vec<u8>,
-            streamed: usize,
-        }
-
-        impl Scanout for Hidden {
-            fn mode(&self) -> Mode {
-                MODE
-            }
-
-            fn present(&mut self, rows: &[u8]) -> Result<()> {
-                self.visible = rows.to_vec();
-                Ok(())
-            }
-
-            fn try_present_rows(
-                &mut self,
-                fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
-            ) -> Result<bool> {
-                let mut rows = [0; 32];
-                for (y, row) in rows.as_chunks_mut::<16>().0.iter_mut().enumerate() {
-                    fill(y, row)?;
-                }
-                self.streamed += 1;
-                self.present(&rows)?;
-                Ok(true)
-            }
-        }
-
         let layer = Layer::new(
             surface(6, 3, 32, 8),
             Rect {
@@ -1027,11 +1151,12 @@ mod tests {
                 present(
                     &mut sink,
                     &layers,
+                    None,
                     |iova, row| {
                         reads.push((iova, row.len()));
                         reader(&memory)(iova, row) && iova != 76
                     },
-                    &mut Vec::new()
+                    &mut Composed::default()
                 )
                 .is_err()
             );
@@ -1041,20 +1166,214 @@ mod tests {
             present(
                 &mut sink,
                 &layers,
+                None,
                 |iova, row| {
                     reads.push((iova, row.len()));
                     reader(&memory)(iova, row)
                 },
-                &mut Vec::new(),
+                &mut Composed::default(),
             )
             .unwrap();
             assert_eq!(reads, [(44, 16), (76, 16)]);
             assert_eq!(sink.visible, reference(&layers, MODE, &memory));
         }
         assert_eq!(sink.streamed, 2);
-        present(&mut sink, &[layer; 2], reader(&memory), &mut Vec::new()).unwrap();
+        // A stack of layers streams its rows too: nothing is composed into
+        // the model's own frame first.
+        let mut composed = Composed::default();
+        present(&mut sink, &[layer; 2], None, reader(&memory), &mut composed).unwrap();
         assert_eq!(sink.visible, reference(&[layer; 2], MODE, &memory));
+        assert_eq!(sink.streamed, 3);
+        assert!(composed.rows.is_empty());
+    }
+
+    /// A screen of eight rows: an opaque base layer and a 2x2 cursor.
+    fn cursor_scene() -> (Mode, Vec<u8>, Layer, Layer) {
+        let mode = Mode {
+            width: 4,
+            height: 8,
+            format: PixelFormat::Bgra8888,
+        };
+        let mut memory = alloc::vec![0u8; 0x2000];
+        for (index, byte) in memory[0x100..0x180].iter_mut().enumerate() {
+            *byte = if index % 4 == 3 { 0xff } else { index as u8 };
+        }
+        // The cursor's four pixels, translucent and premultiplied.
+        memory[0x1000..0x1010].copy_from_slice(&[0x40, 0x20, 0x10, 0x80].repeat(4));
+        let base = Layer::new(
+            surface(4, 8, 16, 0x100),
+            Rect::whole(4, 8),
+            Rect::whole(4, 8),
+            true,
+        )
+        .unwrap();
+        let cursor = Layer::new(
+            surface(2, 2, 8, 0x1000),
+            Rect::whole(2, 2),
+            Rect::whole(2, 2),
+            true,
+        )
+        .unwrap();
+        (mode, memory, base, cursor)
+    }
+
+    fn at(cursor: Layer, x: u32, y: u32) -> Layer {
+        Layer {
+            destination: Rect {
+                x,
+                y,
+                ..cursor.destination
+            },
+            ..cursor
+        }
+    }
+
+    #[test]
+    fn a_cursor_move_rewrites_only_the_rows_of_its_old_and_new_rectangles() {
+        let (mode, memory, base, cursor) = cursor_scene();
+        let mut sink = Hidden {
+            mode: Some(mode),
+            ..Hidden::default()
+        };
+        let mut composed = Composed::default();
+        let first = [base, at(cursor, 1, 1)];
+        present(&mut sink, &first, None, reader(&memory), &mut composed).unwrap();
+        // The cursor moves from rows 1..3 to rows 4..6: the damage the model
+        // names is their union, and only those rows are read and written.
+        let moved = [base, at(cursor, 2, 4)];
+        let mut reads = Vec::new();
+        present(
+            &mut sink,
+            &moved,
+            Some(1..6),
+            |iova, bytes| {
+                reads.push(iova);
+                reader(&memory)(iova, bytes)
+            },
+            &mut composed,
+        )
+        .unwrap();
+        assert_eq!(sink.asked[1], [1, 2, 3, 4, 5]);
+        // Base rows 1..6, and the cursor's two rows after its base row.
+        assert_eq!(reads, [0x110, 0x120, 0x130, 0x140, 0x1000, 0x150, 0x1008]);
+        assert_eq!(
+            sink.visible,
+            compose(&moved, mode, reader(&memory)).unwrap()
+        );
+        // No damage leaves the sink alone.
+        present(
+            &mut sink,
+            &moved,
+            Some(3..3),
+            |_, _| unreachable!(),
+            &mut composed,
+        )
+        .unwrap();
         assert_eq!(sink.streamed, 2);
+    }
+
+    #[test]
+    fn a_sink_without_hidden_rows_gets_the_kept_frame_with_only_its_damage_recomposed() {
+        let (mode, memory, base, cursor) = cursor_scene();
+        let screen = TestSink::new(mode);
+        let mut sink = screen.clone();
+        let mut composed = Composed::default();
+        present(
+            &mut sink,
+            &[base, at(cursor, 0, 0)],
+            None,
+            reader(&memory),
+            &mut composed,
+        )
+        .unwrap();
+        let moved = [base, at(cursor, 2, 6)];
+        let mut rows = Vec::new();
+        present(
+            &mut sink,
+            &moved,
+            Some(0..8),
+            |iova, bytes| {
+                if (0x100..0x180).contains(&iova) {
+                    rows.push((iova - 0x100) / 16);
+                }
+                reader(&memory)(iova, bytes)
+            },
+            &mut composed,
+        )
+        .unwrap();
+        assert_eq!(rows, (0..8).collect::<Vec<_>>());
+        rows.clear();
+        let back = [base, at(cursor, 2, 5)];
+        present(
+            &mut sink,
+            &back,
+            Some(5..8),
+            |iova, bytes| {
+                if (0x100..0x180).contains(&iova) {
+                    rows.push((iova - 0x100) / 16);
+                }
+                reader(&memory)(iova, bytes)
+            },
+            &mut composed,
+        )
+        .unwrap();
+        assert_eq!(rows, [5, 6, 7]);
+        let frames = screen.0.borrow();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[2], compose(&back, mode, reader(&memory)).unwrap());
+
+        // A failed present leaves the kept frame between frames: the next
+        // composes every row whatever its damage.
+        drop(frames);
+        assert!(present(&mut sink, &moved, Some(5..8), |_, _| false, &mut composed).is_err());
+        rows.clear();
+        present(
+            &mut sink,
+            &moved,
+            Some(5..8),
+            |iova, bytes| {
+                if (0x100..0x180).contains(&iova) {
+                    rows.push((iova - 0x100) / 16);
+                }
+                reader(&memory)(iova, bytes)
+            },
+            &mut composed,
+        )
+        .unwrap();
+        assert_eq!(rows, (0..8).collect::<Vec<_>>());
+        assert_eq!(
+            screen.0.borrow().last().unwrap(),
+            &compose(&moved, mode, reader(&memory)).unwrap()
+        );
+    }
+
+    /// A sink that takes whole frames only, keeping each.
+    #[derive(Clone)]
+    struct TestSink(alloc::rc::Rc<core::cell::RefCell<Vec<Vec<u8>>>>, Mode);
+
+    impl TestSink {
+        fn new(mode: Mode) -> Self {
+            Self(Default::default(), mode)
+        }
+    }
+
+    impl Scanout for TestSink {
+        fn mode(&self) -> Mode {
+            self.1
+        }
+
+        fn present(&mut self, rows: &[u8]) -> Result<()> {
+            self.0.borrow_mut().push(rows.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn damage_unions_into_one_range() {
+        assert_eq!(union(0..0, 3..5), 3..5);
+        assert_eq!(union(3..5, 7..7), 3..5);
+        assert_eq!(union(3..5, 1..4), 1..5);
+        assert_eq!(union(3..5, 8..9), 3..9);
     }
 
     #[test]

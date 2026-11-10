@@ -8,11 +8,20 @@
 //! frame fills.
 //!
 //! NVIDIA's display engine reads only video memory, so a guest surface in
-//! guest RAM cannot be scanned out in place: frames copy in, top to bottom.
-//! A flip the engine has not finished answers `EBUSY` and retries, so a frame
-//! waits at most for the next vertical blank.
+//! guest RAM cannot be scanned out in place: frames copy in, top to bottom,
+//! and only the rows a buffer lacks since it last held a frame.
+//!
+//! A present never waits. Its flip is queued and requested at once only
+//! where a request completes without another processor ([`Drm::immediate`]):
+//! a present runs under the board's device lock, and a request from any
+//! other processor waits for the boot processor, which may itself be
+//! waiting for that lock. A queued flip is requested by a later
+//! [`Display::flush`] on the boot processor. A flip the engine has not
+//! finished answers `EBUSY` and stays queued for the next flush; a newer
+//! frame meanwhile replaces the queued one in the same hidden buffer.
 use alloc::vec::Vec;
 use core::ffi::c_void;
+use core::ops::Range;
 use core::ptr::{self, NonNull};
 use stela_contracts::{Refusal, refuse};
 
@@ -198,8 +207,9 @@ pub unsafe trait Drm {
     fn control(&mut self, request: u32, argument: *mut c_void) -> i64;
     /// Maps `bytes` at `offset`, what `MAP_DUMB` answered.
     fn map(&mut self, offset: u64, bytes: usize) -> Option<NonNull<u8>>;
-    /// Waits a moment, as a flip's vertical blank needs.
-    fn relax(&mut self);
+    /// Whether a request made now completes without waiting for another
+    /// processor. A display queues what it cannot request now.
+    fn immediate(&self) -> bool;
 }
 
 /// A scanned-out buffer.
@@ -219,9 +229,18 @@ pub struct Display<D> {
     height: u32,
     /// The mode's refresh in millihertz.
     refresh: u32,
+    /// The monitor's image size in millimetres, when its EDID gave one.
+    size_mm: Option<(u32, u32)>,
     /// What the engine reads, then the one the next frame fills.
     /// The newest frame, the one before it and the one that shows neither.
     buffers: [Buffer; 3],
+    /// For each buffer, the rows that differ from the newest frame: what a
+    /// frame filling it must write besides its own damage.
+    stale: [Range<usize>; 3],
+    /// The hidden buffer holds a frame whose flip is not requested yet.
+    queued: bool,
+    /// The row a producer fills before it is copied to video memory.
+    row: Vec<u8>,
 }
 
 // SAFETY: the buffers' mappings go with the display, which one PE uses at a
@@ -235,7 +254,16 @@ pub struct PreparedFrame<'a, D>(&'a mut Display<D>);
 impl<D: Drm> PreparedFrame<'_, D> {
     /// Queue the prepared frame for the next vertical blank.
     pub fn present(self) -> Result<(), Error> {
-        self.0.flip()
+        self.0.queue()
+    }
+}
+
+/// The smallest range of rows holding both `a` and `b`.
+fn union(a: Range<usize>, b: Range<usize>) -> Range<usize> {
+    match (a.is_empty(), b.is_empty()) {
+        (true, _) => b,
+        (_, true) => a,
+        _ => a.start.min(b.start)..a.end.max(b.end),
     }
 }
 
@@ -275,6 +303,8 @@ fn list<T: Copy + Default>(count: u32) -> Result<Vec<T>, Error> {
 /// A connector: its state, its modes and its encoders.
 struct Output {
     connected: bool,
+    /// The image size the connector's EDID reports, in millimetres.
+    size_mm: [u32; 2],
     modes: Vec<ModeInfo>,
     encoders: Vec<u32>,
 }
@@ -306,6 +336,7 @@ fn output<D: Drm>(drm: &mut D, id: u32) -> Result<Output, Error> {
         encoders.truncate(described.encoder_count as usize);
         return Ok(Output {
             connected: described.connection == CONNECTED,
+            size_mm: described.size_mm,
             modes,
             encoders,
         });
@@ -426,7 +457,12 @@ impl<D: Drm> Display<D> {
                 continue;
             };
             if let Some(crtc) = controller(&mut drm, &found.encoders, &crtcs)? {
-                return Self::run(drm, crtc, id, mode);
+                let display = Self::run(drm, crtc, id, mode)?;
+                let [width, height] = found.size_mm;
+                return Ok(Self {
+                    size_mm: (width != 0 && height != 0).then_some((width, height)),
+                    ..display
+                });
             }
         }
         Err(Error::NoOutput)
@@ -454,7 +490,12 @@ impl<D: Drm> Display<D> {
             width,
             height,
             refresh: refresh(&mode),
+            size_mm: None,
             buffers: [front, back, spare],
+            // Each buffer holds black, and the front the console's text.
+            stale: [0..height as usize, 0..height as usize, 0..height as usize],
+            queued: false,
+            row: Vec::new(),
         })
     }
 
@@ -466,6 +507,11 @@ impl<D: Drm> Display<D> {
     /// The mode's refresh in millihertz.
     pub fn refresh_millihertz(&self) -> u32 {
         self.refresh
+    }
+
+    /// The monitor's image size in millimetres, when its EDID gave one.
+    pub fn size_mm(&self) -> Option<(u32, u32)> {
+        self.size_mm
     }
 
     /// The buffer on screen and the bytes between its rows, for what draws
@@ -485,29 +531,93 @@ impl<D: Drm> Display<D> {
                 actual: rows.len(),
             });
         }
+        let every = 0..self.height as usize;
+        for stale in &mut self.stale {
+            *stale = every.clone();
+        }
         for (y, line) in rows.chunks_exact(row).enumerate() {
             self.copy_hidden_row(y, line);
         }
-        self.flip()
+        self.stale[2] = 0..0;
+        self.queue()
     }
 
-    /// Fill the hidden buffer one row at a time. The producer works in
-    /// ordinary RAM so inspecting or changing pixels never reads VRAM.
-    /// A failed row leaves the current scanout and buffer order unchanged.
+    /// Fill the hidden buffer one row at a time: the rows `damage` names
+    /// (`None`: every row) and those the buffer lacks since it last held a
+    /// frame. The producer works in ordinary RAM so inspecting or changing
+    /// pixels never reads VRAM. A failed row leaves the current scanout and
+    /// buffer order unchanged.
     pub fn prepare_rows(
         &mut self,
+        damage: Option<Range<usize>>,
         mut fill: impl FnMut(usize, &mut [u8]) -> Result<(), Refusal>,
     ) -> Result<PreparedFrame<'_, D>, Refusal> {
+        let height = self.height as usize;
+        let damage = damage.map_or(0..height, |rows| {
+            rows.start.min(height)..rows.end.min(height)
+        });
+        for stale in &mut self.stale {
+            *stale = union(stale.clone(), damage.clone());
+        }
         let bytes = self.width as usize * BYTES_PER_PIXEL as usize;
-        let mut row = Vec::new();
-        row.try_reserve_exact(bytes)
-            .map_err(|_| refuse!("could not allocate a scanout row"))?;
-        row.resize(bytes, 0);
-        for y in 0..self.height as usize {
-            fill(y, &mut row)?;
+        let mut row = core::mem::take(&mut self.row);
+        if row.len() != bytes {
+            row.clear();
+            row.try_reserve_exact(bytes)
+                .map_err(|_| refuse!("could not allocate a scanout row"))?;
+            row.resize(bytes, 0);
+        }
+        let mut filled = Ok(());
+        for y in self.stale[2].clone() {
+            filled = fill(y, &mut row);
+            if filled.is_err() {
+                break;
+            }
             self.copy_hidden_row(y, &row);
         }
+        self.row = row;
+        filled?;
+        self.stale[2] = 0..0;
         Ok(PreparedFrame(self))
+    }
+
+    /// Whether a frame waits in the hidden buffer for its flip to be
+    /// requested ([`Self::flush`]).
+    pub fn queued(&self) -> bool {
+        self.queued
+    }
+
+    /// Request the queued frame's flip, if this processor may now. A flip
+    /// the engine is still busy with leaves the frame queued for the next
+    /// flush. A refused flip drops the request, reported here; the frame
+    /// stays in the hidden buffer and shows with the next one.
+    pub fn flush(&mut self) -> Result<(), Error> {
+        if !self.queued || !self.drm.immediate() {
+            return Ok(());
+        }
+        let mut flip = PageFlip {
+            crtc: self.crtc,
+            framebuffer: self.buffers[2].framebuffer,
+            ..PageFlip::default()
+        };
+        match self.drm.control(PAGE_FLIP, ptr::from_mut(&mut flip).cast()) {
+            0 => {
+                self.queued = false;
+                self.buffers.rotate_right(1);
+                self.stale.rotate_right(1);
+                Ok(())
+            }
+            BUSY => Ok(()),
+            error => {
+                self.queued = false;
+                Err(Error::Request(error))
+            }
+        }
+    }
+
+    fn queue(&mut self) -> Result<(), Error> {
+        self.queued = true;
+        self.flush()
     }
 
     fn copy_hidden_row(&mut self, y: usize, row: &[u8]) {
@@ -522,23 +632,6 @@ impl<D: Drm> Display<D> {
                 row.len(),
             );
         }
-    }
-
-    fn flip(&mut self) -> Result<(), Error> {
-        let mut flip = PageFlip {
-            crtc: self.crtc,
-            framebuffer: self.buffers[2].framebuffer,
-            ..PageFlip::default()
-        };
-        loop {
-            match self.drm.control(PAGE_FLIP, ptr::from_mut(&mut flip).cast()) {
-                0 => break,
-                BUSY => self.drm.relax(),
-                error => return Err(Error::Request(error)),
-            }
-        }
-        self.buffers.rotate_right(1);
-        Ok(())
     }
 }
 

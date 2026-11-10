@@ -11,7 +11,7 @@ fn row_fill_failure_keeps_the_front_and_retries_the_hidden_buffer() {
         let front = display.front();
         hidden = display.buffers[2].framebuffer;
         let failure = display
-            .prepare_rows(|y, row| {
+            .prepare_rows(None, |y, row| {
                 row.fill(1);
                 if y == 1 {
                     return Err(refuse!("second row failed"));
@@ -29,7 +29,7 @@ fn row_fill_failure_keeps_the_front_and_retries_the_hidden_buffer() {
 
         let mut scratch = None;
         display
-            .prepare_rows(|y, row| {
+            .prepare_rows(None, |y, row| {
                 assert_eq!(row.len(), 8);
                 assert_eq!(*scratch.get_or_insert(row.as_ptr()), row.as_ptr());
                 row.fill(if y == 0 { 2 } else { 3 });
@@ -38,10 +38,13 @@ fn row_fill_failure_keeps_the_front_and_retries_the_hidden_buffer() {
             .unwrap()
             .present()
             .unwrap();
+        // The busy engine keeps the flip queued until a flush finds it free.
+        assert!(display.queued());
+        display.flush().unwrap();
+        display.flush().unwrap();
         assert_eq!(display.buffers[0].framebuffer, hidden);
     }
     assert_eq!(card.flips, [hidden]);
-    assert_eq!(card.relaxed, 2);
     let filled = &card.memory[2];
     assert_eq!(&filled[..8], &[2; 8]);
     assert_eq!(&filled[32..40], &[3; 8]);

@@ -40,7 +40,10 @@ struct Card {
     /// Requests to answer `EBUSY` before a flip succeeds.
     busy: u32,
     flip_error: Option<i64>,
-    relaxed: u32,
+    /// Whether a request completes on the processor making it.
+    immediate: bool,
+    /// Flips requested, whether the engine took them or was busy.
+    flip_requests: u32,
     flips: Vec<u32>,
     next: u32,
     memory: Vec<Vec<u8>>,
@@ -58,7 +61,8 @@ impl Card {
             set: None,
             busy: 0,
             flip_error: None,
-            relaxed: 0,
+            immediate: true,
+            flip_requests: 0,
             flips: Vec::new(),
             next: 100,
             memory: Vec::new(),
@@ -155,6 +159,8 @@ unsafe impl Drm for &mut Card {
                     self.set = Some((crtc.mode, crtc.framebuffer));
                 }
                 PAGE_FLIP => {
+                    assert!(self.immediate, "a flip requested where it must wait");
+                    self.flip_requests += 1;
                     if let Some(error) = self.flip_error.take() {
                         return error;
                     }
@@ -175,8 +181,8 @@ unsafe impl Drm for &mut Card {
         NonNull::new(self.memory.last_mut()?.as_mut_ptr())
     }
 
-    fn relax(&mut self) {
-        self.relaxed += 1;
+    fn immediate(&self) -> bool {
+        self.immediate
     }
 }
 
@@ -233,31 +239,92 @@ fn an_output_with_no_mode_or_controller_is_not_taken() {
 }
 
 #[test]
-fn frames_fill_the_hidden_buffer_and_flip_past_a_busy_engine() {
+fn a_busy_engine_keeps_the_flip_queued_for_a_later_flush_without_waiting() {
     let mut card = Card::new(vec![mode(2, 2, PREFERRED)]);
     card.busy = 2;
-    let (mut first, mut second, flips);
+    let (first, second, flips);
     {
         let mut display = Display::take(&mut card, (2, 2)).unwrap();
-        let (back, spare) = (
+        let (front, back, spare) = (
+            display.buffers[0].framebuffer,
             display.buffers[1].framebuffer,
             display.buffers[2].framebuffer,
         );
         let rows: Vec<u8> = (0..16).collect();
         display.present(&rows).unwrap();
+        // The engine was busy: nothing waits, the frame stays queued.
+        assert!(display.queued());
+        assert_eq!(display.buffers[0].framebuffer, front);
+        display.flush().unwrap();
+        assert!(display.queued());
+        display.flush().unwrap();
+        assert!(!display.queued());
         assert_eq!(display.buffers[0].framebuffer, spare);
         display.present(&rows).unwrap();
         assert_eq!(display.buffers[0].framebuffer, back);
+        // Nothing queued: a flush requests nothing.
+        display.flush().unwrap();
+        assert_eq!(display.drm.flip_requests, 4);
         flips = [spare, back];
-        first = Vec::new();
-        second = Vec::new();
-        first.extend_from_slice(&rows[..8]);
-        second.extend_from_slice(&rows[8..]);
+        first = rows[..8].to_vec();
+        second = rows[8..].to_vec();
     }
     assert_eq!(card.flips, flips);
-    assert_eq!(card.relaxed, 2);
     // The rows land `pitch` apart.
     let filled = &card.memory[2];
     assert_eq!(&filled[..8], first);
     assert_eq!(&filled[24..32], second);
+}
+
+#[test]
+fn a_present_where_a_request_must_wait_only_fills_and_queues() {
+    let mut card = Card::new(vec![mode(2, 2, PREFERRED)]);
+    let spare;
+    {
+        let mut display = Display::take(&mut card, (2, 2)).unwrap();
+        spare = display.buffers[2].framebuffer;
+        // Another processor than the one that serves requests: the card
+        // asserts that no flip is requested.
+        display.drm.immediate = false;
+        display.present(&[1; 16]).unwrap();
+        assert!(display.queued());
+        display.flush().unwrap();
+        // A newer frame replaces the queued one in the same hidden buffer.
+        display.present(&[2; 16]).unwrap();
+        assert_eq!(display.buffers[2].framebuffer, spare);
+        assert_eq!(display.drm.flip_requests, 0);
+        // On the serving processor the flush requests one flip.
+        display.drm.immediate = true;
+        display.flush().unwrap();
+        assert!(!display.queued());
+        assert_eq!(display.buffers[0].framebuffer, spare);
+    }
+    assert_eq!(card.flips, [spare]);
+    assert_eq!(&card.memory[2][..8], &[2; 8]);
+}
+
+#[test]
+fn each_buffer_is_filled_with_its_own_stale_rows_and_the_damage() {
+    let mut card = Card::new(vec![mode(2, 8, PREFERRED)]);
+    let mut display = Display::take(&mut card, (2, 8)).unwrap();
+    let mut asked = Vec::new();
+    for damage in [None, Some(0..1), Some(1..2), Some(2..3), Some(2..3)] {
+        let mut rows = Vec::new();
+        display
+            .prepare_rows(damage, |y, row| {
+                rows.push(y);
+                row.fill(y as u8);
+                Ok(())
+            })
+            .unwrap()
+            .present()
+            .unwrap();
+        asked.push(rows);
+    }
+    let every: Vec<usize> = (0..8).collect();
+    // The first frame and the two buffers that held only black need every
+    // row; then each buffer needs what changed since its own last frame.
+    assert_eq!(asked[..3], [every.clone(), every.clone(), every]);
+    assert_eq!(asked[3], [0, 1, 2]);
+    assert_eq!(asked[4], [1, 2]);
 }
