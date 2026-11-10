@@ -1,0 +1,271 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 10:54:27 -0500
+Subject: [PATCH] nvk: Bound shader scratch to an eighth of VRAM, refuse
+ shaders past it and log each growth
+
+---
+ src/nouveau/vulkan/nvk_device.c | 113 +++++++++++++++++++++++++++-----
+ src/nouveau/vulkan/nvk_device.h |   9 +++
+ src/nouveau/vulkan/nvk_shader.c |  31 ++++-----
+ 3 files changed, 118 insertions(+), 35 deletions(-)
+
+diff --git a/src/nouveau/vulkan/nvk_device.c b/src/nouveau/vulkan/nvk_device.c
+index 63ebc4495064ef7843336c7689fba2dede3d4711..846124f1162b100fdcfcac1258b5da8cc037fcaf 100644
+--- a/src/nouveau/vulkan/nvk_device.c
++++ b/src/nouveau/vulkan/nvk_device.c
+@@ -17,6 +17,7 @@
+ #include "vk_drm_syncobj.h"
+ #include "vk_pipeline_cache.h"
+ #include "vk_debug_utils.h"
++#include "util/log.h"
+ #include "util/u_printf.h"
+ #include "vulkan/wsi/wsi_common.h"
+ 
+@@ -56,18 +57,27 @@ nvk_slm_area_get_mem_ref(struct nvk_slm_area *area,
+    return mem;
+ }
+ 
+-static VkResult
+-nvk_slm_area_ensure(struct nvk_device *dev,
+-                    struct nvk_slm_area *area,
+-                    uint32_t slm_bytes_per_lane,
+-                    uint32_t crs_bytes_per_warp)
++/* Scratch the device keeps for all shaders: an eighth of VRAM, so an 8 GiB
++ * GPU keeps 7 GiB for images, buffers and the desktop. The area holds every
++ * warp of every TPC, as NVIDIA's compute classes from Volta on take only the
++ * full-occupancy (non-throttled) size; a shader that needs more is refused
++ * when it is created. Without VRAM there is no bound.
++ */
++static uint64_t
++nvk_slm_budget_B(const struct nvk_physical_device *pdev)
+ {
+-   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+-   VkResult result;
++   return pdev->info.vram_size_B ? pdev->info.vram_size_B / 8 : UINT64_MAX;
++}
+ 
+-   assert(slm_bytes_per_lane < (1 << 24));
+-   assert(crs_bytes_per_warp <= (1 << 20));
+-   uint64_t bytes_per_warp = slm_bytes_per_lane * 32 + crs_bytes_per_warp;
++/* The scratch area's size for `slm_bytes_per_lane` and `crs_bytes_per_warp`,
++ * with its per-warp and per-TPC sizes.
++ */
++static uint64_t
++nvk_slm_layout(const struct nvk_physical_device *pdev,
++               uint32_t slm_bytes_per_lane, uint32_t crs_bytes_per_warp,
++               uint64_t *bytes_per_warp_out, uint64_t *bytes_per_tpc_out)
++{
++   uint64_t bytes_per_warp = (uint64_t)slm_bytes_per_lane * 32 + crs_bytes_per_warp;
+ 
+    /* The hardware seems to require this alignment for
+     * NV9097_SET_SHADER_LOCAL_MEMORY_E_DEFAULT_SIZE_PER_WARP
+@@ -82,6 +92,33 @@ nvk_slm_area_ensure(struct nvk_device *dev,
+     */
+    bytes_per_tpc = align64(bytes_per_tpc, 0x8000);
+ 
++   *bytes_per_warp_out = bytes_per_warp;
++   *bytes_per_tpc_out = bytes_per_tpc;
++
++   /* The hardware seems to require this alignment for
++    * NV9097_SET_SHADER_LOCAL_MEMORY_D_SIZE_LOWER.
++    */
++   return align64(bytes_per_tpc * pdev->info.tpc_count, 0x20000);
++}
++
++static VkResult
++nvk_slm_area_ensure(struct nvk_device *dev,
++                    struct nvk_slm_area *area,
++                    uint32_t slm_bytes_per_lane,
++                    uint32_t crs_bytes_per_warp,
++                    mesa_shader_stage stage,
++                    const char *name)
++{
++   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
++   VkResult result;
++
++   if (slm_bytes_per_lane >= (1 << 24) || crs_bytes_per_warp > (1 << 20))
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
++
++   uint64_t bytes_per_warp, bytes_per_tpc;
++   uint64_t size = nvk_slm_layout(pdev, slm_bytes_per_lane, crs_bytes_per_warp,
++                                  &bytes_per_warp, &bytes_per_tpc);
++
+    /* nvk_slm_area::bytes_per_mp only ever increases so we can check this
+     * outside the lock and exit early in the common case.  We only need to
+     * take the lock if we're actually going to resize.
+@@ -92,12 +129,8 @@ nvk_slm_area_ensure(struct nvk_device *dev,
+    if (likely(bytes_per_tpc <= area->bytes_per_tpc))
+       return VK_SUCCESS;
+ 
+-   uint64_t size = bytes_per_tpc * pdev->info.tpc_count;
+-
+-   /* The hardware seems to require this alignment for
+-    * NV9097_SET_SHADER_LOCAL_MEMORY_D_SIZE_LOWER.
+-    */
+-   size = align64(size, 0x20000);
++   if (size > nvk_slm_budget_B(pdev) || bytes_per_tpc > UINT32_MAX)
++      return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+ 
+    /* Scratch is GPU-only and sized for every warp of every TPC, so it can
+     * be gigabytes. Memory that may move to GART gets 4 KiB pages, one page
+@@ -130,6 +163,16 @@ nvk_slm_area_ensure(struct nvk_device *dev,
+       area->mem = mem;
+       area->bytes_per_warp = bytes_per_warp;
+       area->bytes_per_tpc = bytes_per_tpc;
++      /* Each growth is reported once, naming the shader that caused it. */
++      mesa_logi("NVK SLM grow: %s shader %s: %u B/thread, %u B/warp crs, "
++                "%" PRIu64 " B/warp, %" PRIu64 " MiB for %u TPCs "
++                "(budget %" PRIu64 " MiB)",
++                stage == MESA_SHADER_NONE ? "-" :
++                                            _mesa_shader_stage_to_abbrev(stage),
++                name ? name : "?",
++                slm_bytes_per_lane, crs_bytes_per_warp, bytes_per_warp,
++                mem->size_B >> 20, pdev->info.tpc_count,
++                nvk_slm_budget_B(pdev) >> 20);
+    }
+    simple_mtx_unlock(&area->mutex);
+ 
+@@ -508,5 +551,41 @@ nvk_device_ensure_slm(struct nvk_device *dev,
+ {
+    return nvk_slm_area_ensure(dev, &dev->slm,
+                               slm_bytes_per_lane,
+-                              crs_bytes_per_warp);
++                              crs_bytes_per_warp,
++                              MESA_SHADER_NONE, "bound");
++}
++
++VkResult
++nvk_device_reserve_slm(struct nvk_device *dev,
++                       uint32_t slm_bytes_per_lane,
++                       uint32_t crs_bytes_per_warp,
++                       mesa_shader_stage stage,
++                       const char *name)
++{
++   const struct nvk_physical_device *pdev = nvk_device_physical(dev);
++
++   uint64_t bytes_per_warp, bytes_per_tpc;
++   const uint64_t size = nvk_slm_layout(pdev, slm_bytes_per_lane,
++                                        crs_bytes_per_warp,
++                                        &bytes_per_warp, &bytes_per_tpc);
++   if (slm_bytes_per_lane >= (1 << 24) || size > nvk_slm_budget_B(pdev)) {
++      mesa_loge("NVK SLM refused: %s shader %s needs %u B/thread of scratch: "
++                "%" PRIu64 " MiB for every warp of %u TPCs, past the "
++                "%" PRIu64 " MiB budget",
++                _mesa_shader_stage_to_abbrev(stage), name ? name : "?",
++                slm_bytes_per_lane, size >> 20, pdev->info.tpc_count,
++                nvk_slm_budget_B(pdev) >> 20);
++      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
++                       "%s shader %s needs %u B/thread of scratch",
++                       _mesa_shader_stage_to_abbrev(stage),
++                       name ? name : "?", slm_bytes_per_lane);
++   }
++
++   /* Grow the area now, while the shader is created, so the first command
++    * buffer that binds it does not allocate and map it. A failure here is
++    * retried at bind.
++    */
++   nvk_slm_area_ensure(dev, &dev->slm, slm_bytes_per_lane,
++                       crs_bytes_per_warp, stage, name);
++   return VK_SUCCESS;
+ }
+diff --git a/src/nouveau/vulkan/nvk_device.h b/src/nouveau/vulkan/nvk_device.h
+index 5359e663adbe217c4efb37f6d40520fb279d96ee..dba834b3e926a805000d152879232aeeb3157146 100644
+--- a/src/nouveau/vulkan/nvk_device.h
++++ b/src/nouveau/vulkan/nvk_device.h
+@@ -75,6 +75,15 @@ VkResult nvk_device_ensure_slm(struct nvk_device *dev,
+                                uint32_t slm_bytes_per_lane,
+                                uint32_t crs_bytes_per_warp);
+ 
++/* Refuses a shader whose scratch for every warp of every TPC passes the
++ * device's budget, and grows the scratch area for it otherwise.
++ */
++VkResult nvk_device_reserve_slm(struct nvk_device *dev,
++                                uint32_t slm_bytes_per_lane,
++                                uint32_t crs_bytes_per_warp,
++                                mesa_shader_stage stage,
++                                const char *name);
++
+ static inline const struct nvk_physical_device *
+ nvk_device_physical(const struct nvk_device *dev)
+ {
+diff --git a/src/nouveau/vulkan/nvk_shader.c b/src/nouveau/vulkan/nvk_shader.c
+index fe4c2a4317f1eb89eebf094e25e9735eba8ec038..0dc4ed7cc5b728e72294f9d2a2fefe62daa417f1 100644
+--- a/src/nouveau/vulkan/nvk_shader.c
++++ b/src/nouveau/vulkan/nvk_shader.c
+@@ -668,11 +668,19 @@ nvk_shader_get_shader_size(struct nvk_device *dev, struct nvk_shader *shader,
+    return total_size;
+ }
+ 
++/* Uploads shader, named name when known, after reserving its scratch. */
+ static VkResult
+-nvk_shader_upload(struct nvk_device *dev, struct nvk_shader *shader)
++nvk_shader_upload(struct nvk_device *dev, struct nvk_shader *shader,
++                  const char *name)
+ {
+    const struct nvk_physical_device *pdev = nvk_device_physical(dev);
+ 
++   VkResult result = nvk_device_reserve_slm(dev, shader->info.slm_size,
++                                            shader->info.crs_size,
++                                            shader->info.stage, name);
++   if (result != VK_SUCCESS)
++      return result;
++
+    const bool has_mesh_gs_sph = shader->info.stage == MESA_SHADER_MESH &&
+                                 shader->info.mesh.has_gs_sph;
+    const uint32_t hdr_size = nvk_shader_get_hdr_size(dev, shader);
+@@ -710,7 +718,7 @@ nvk_shader_upload(struct nvk_device *dev, struct nvk_shader *shader)
+       nvk_shader_dump(shader);
+ #endif
+ 
+-   VkResult result = nvk_heap_upload(dev, &dev->shader_heap, data,
++   result = nvk_heap_upload(dev, &dev->shader_heap, data,
+                                      total_size, alignment,
+                                      &shader->upload_addr);
+    if (result == VK_SUCCESS) {
+@@ -725,13 +733,6 @@ nvk_shader_upload(struct nvk_device *dev, struct nvk_shader *shader)
+       }
+       shader->gs_hdr_addr = shader->upload_addr + gs_hdr_offset;
+       shader->data_addr = shader->upload_addr + data_offset;
+-
+-      /* Grow the device's scratch now, while the shader is created, so the
+-       * first command buffer that binds it does not allocate and map it.
+-       * A failure here is retried at bind.
+-       */
+-      nvk_device_ensure_slm(dev, shader->info.slm_size,
+-                            shader->info.crs_size);
+    }
+    free(data);
+ 
+@@ -1176,20 +1177,14 @@ nvk_compile_shader(struct nvk_device *dev,
+ 
+    result = nvk_compile_nir(dev, nir, info->flags, info->robustness,
+                             fs_key, shader);
++   if (result == VK_SUCCESS && dev->nvkmd)
++      result = nvk_shader_upload(dev, shader, nir->info.name);
+    ralloc_free(nir);
+    if (result != VK_SUCCESS) {
+       nvk_shader_destroy(&dev->vk, &shader->vk, pAllocator);
+       return result;
+    }
+ 
+-   if (dev->nvkmd) {
+-      result = nvk_shader_upload(dev, shader);
+-      if (result != VK_SUCCESS) {
+-         nvk_shader_destroy(&dev->vk, &shader->vk, pAllocator);
+-         return result;
+-      }
+-   }
+-
+    if (info->stage == MESA_SHADER_FRAGMENT) {
+       if (state != NULL && state->ms != NULL) {
+          shader->sample_shading_enable = state->ms->sample_shading_enable;
+@@ -1365,7 +1360,7 @@ nvk_deserialize_shader(struct vk_device *vk_dev,
+    }
+ 
+    if (dev->nvkmd) {
+-      result = nvk_shader_upload(dev, shader);
++      result = nvk_shader_upload(dev, shader, NULL);
+       if (result != VK_SUCCESS) {
+          nvk_shader_destroy(&dev->vk, &shader->vk, pAllocator);
+          return result;
