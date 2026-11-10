@@ -1155,14 +1155,14 @@ pub fn compute_variant(
     let mut lengths = Vec::new();
     let mut bytes = plan.static_threadgroup_memory_length;
     for used in &interface.threadgroup {
+        // A slot the encoder never sized has length 0, as on Apple GPUs,
+        // which run it: only the validation layer refuses it. It then gets
+        // the argument's bytes below, like any length short of them.
         let length = threadgroup_lengths
             .iter()
             .rev()
             .find(|(index, _)| *index == used.index)
-            .map(|&(_, length)| length)
-            .ok_or(Error::Invalid(
-                "threadgroup memory length not set for a used slot",
-            ))?;
+            .map_or(0, |&(_, length)| length);
         ensure(
             length.is_multiple_of(16),
             "threadgroup memory lengths are multiples of 16",

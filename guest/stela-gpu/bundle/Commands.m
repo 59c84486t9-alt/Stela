@@ -100,6 +100,48 @@ static CFTimeInterval host_time(void)
 
 @end
 
+BOOL class_respondsToSelector(Class class, SEL selector);
+
+/* The stages a pipeline descriptor of any kind may have. */
+@protocol StelaGPUStagedDescriptor
+@optional
+- (id)computeFunction;
+- (id)vertexFunction;
+- (id)fragmentFunction;
+- (id)tileFunction;
+- (id)objectFunction;
+- (id)meshFunction;
+@end
+
+/* Appends to `names` each function of a pipeline state's descriptor that
+ * `seen` does not yet hold. */
+static void name_functions(id object, NSMutableSet *seen, NSMutableString *names)
+{
+	id<StelaGPUStagedDescriptor> descriptor = object;
+	Class type = [object class];
+	id functions[6] = {};
+	if (class_respondsToSelector(type, @selector(computeFunction)))
+		functions[0] = [descriptor computeFunction];
+	if (class_respondsToSelector(type, @selector(vertexFunction)))
+		functions[1] = [descriptor vertexFunction];
+	if (class_respondsToSelector(type, @selector(fragmentFunction)))
+		functions[2] = [descriptor fragmentFunction];
+	if (class_respondsToSelector(type, @selector(tileFunction)))
+		functions[3] = [descriptor tileFunction];
+	if (class_respondsToSelector(type, @selector(objectFunction)))
+		functions[4] = [descriptor objectFunction];
+	if (class_respondsToSelector(type, @selector(meshFunction)))
+		functions[5] = [descriptor meshFunction];
+	for (size_t i = 0; i < 6; i++) {
+		id function = functions[i];
+		NSString *name = function && class_respondsToSelector([function class], @selector(name)) ? [function name] : nil;
+		if (name.length && ![seen containsObject:name]) {
+			[names appendFormat:seen.count ? @",%@" : @"%@", name];
+			[seen addObject:name];
+		}
+	}
+}
+
 @implementation StelaGPUCommandBuffer {
 	dispatch_group_t _scheduling;
 	dispatch_group_t _completion;
@@ -243,6 +285,27 @@ static CFTimeInterval host_time(void)
 	[_queue flush];
 }
 
+/* Names, with the process (stela_report), the command buffer and the
+ * functions of the pipelines it used, which the host's refusal cannot. */
+- (void)reportRefusal:(const StelaFailure *)failure
+{
+	NSMutableSet *seen = [NSMutableSet setWithCapacity:4];
+	NSMutableString *names = [NSMutableString new];
+	os_unfair_lock_lock(&_referencesLock);
+	for (NSUInteger i = 0; i < _retained.count; i++) {
+		id object = [_retained objectAtIndex:i];
+		if ([object isKindOfClass:[StelaGPUComputePipeline class]]) {
+			name_functions(((StelaGPUComputePipeline *)object)->_descriptor, seen, names);
+		} else if ([object isKindOfClass:[StelaGPURenderPipeline class]]) {
+			name_functions(((StelaGPURenderPipeline *)object)->_descriptor, seen, names);
+		}
+	}
+	os_unfair_lock_unlock(&_referencesLock);
+	NSString *what = [NSString stringWithFormat:@"commit of command buffer %@ using %@",
+						    self.label.length ? self.label : @"-", seen.count ? names : @"no pipeline"];
+	stela_report(what.UTF8String, failure);
+}
+
 /* Under the queue's lock, so serials follow the order of enqueue. */
 - (void)submit
 {
@@ -254,6 +317,9 @@ static CFTimeInterval host_time(void)
 	StelaFailure failure;
 	StelaSpans spans = {.reads = &request.commands, .read_count = 1};
 	uint32_t status = STELA_CALL_SPANS(&_device->_gate, Commit, &request, &serial, spans, &failure);
+	if (status != StelaStatusOk && status != StelaStatusDeviceLost) {
+		[self reportRefusal:&failure];
+	}
 	if (!_retains) {
 		os_unfair_lock_lock(&_referencesLock);
 		[_retained removeAllObjects];
@@ -422,6 +488,10 @@ typedef struct {
 {
 	StelaValue request = {.value = _serial};
 	StelaCommandBufferTimesResponse times = {};
+	/* Metal answers 0 until the buffer completes, and for one the device
+	 * refused, which never ran. */
+	if (_serial == 0 || _status < MTLCommandBufferStatusCompleted)
+		return times;
 	STELA_CALL(&_device->_gate, CommandBufferTimes, &request, &times, NULL);
 	return times;
 }

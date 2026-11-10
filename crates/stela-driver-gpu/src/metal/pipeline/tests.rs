@@ -565,9 +565,12 @@ fn compute_variants_validate_dispatch_shape_and_memory() {
         "exceeds the kernel's declared maximum"
     );
     assert!(check(size(32, 1, 0), &[(1, 64)]).is_err());
-    assert!(
-        check(size(32, 1, 1), &[]).is_err(),
-        "used slot without a length"
+    assert_eq!(
+        check(size(32, 1, 1), &[(0, 64)])
+            .unwrap()
+            .threadgroup_lengths,
+        [(1, 32)],
+        "a used slot the encoder never sized runs, with the argument's bytes"
     );
     assert!(
         check(size(32, 1, 1), &[(1, 24)]).is_err(),
