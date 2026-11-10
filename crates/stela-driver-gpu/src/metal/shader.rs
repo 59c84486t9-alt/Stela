@@ -568,11 +568,13 @@ pub struct Specialization {
     pub alpha_to_coverage: bool,
     pub alpha_to_one: bool,
     /// The function's process has made samplers with Metal's bicubic
-    /// filter, which the samplers it takes as arguments may then be: their
+    /// filter or pixel coordinates (`ResourceId::SAMPLER_SHADED`), which
+    /// the samplers it takes as arguments may then be: their
     /// samples carry the shader's bicubic filtering. Constexpr samplers
     /// decide for themselves.
     pub bicubic_arguments: bool,
-    /// The samplers bound at these indices filter bicubically, bit n for
+    /// The samplers bound at these indices filter bicubically or take pixel
+    /// coordinates, bit n for
     /// index n: samples through them carry the shader's bicubic filtering,
     /// which reads each sampler's filter, and samples through the others
     /// filter as their Vulkan samplers do. Draws and dispatches binding

@@ -562,6 +562,26 @@ layered(const struct call *call, nir_def *coord, nir_def *layer, bool sample)
    return nir_vec(call->b, components, coord->num_components + 1);
 }
 
+/* What a sample's coordinates divide by for its sampler: the base level's
+ * size where the sampler takes pixel coordinates, whose Vulkan sampler is
+ * normalized and held to the base level, else one. NULL where the sampler
+ * cannot take them: Metal's pixel coordinates do not reach cube textures. */
+static nir_def *
+pixel_scale(const struct call *call, nir_deref_instr *texture)
+{
+   if (!call->filter || call->shape->dim == GLSL_SAMPLER_DIM_CUBE)
+      return NULL;
+   nir_src filter = nir_src_for_ssa(call->filter);
+   if (nir_src_is_const(filter) && !(nir_src_as_uint(filter) & STELA_AIR_SAMPLER_PIXELS))
+      return NULL;
+   nir_builder *b = call->b;
+   unsigned n = call->shape->coords;
+   struct tex size = {.op = nir_texop_txs, .texture = texture, .lod = nir_imm_int(b, 0)};
+   nir_def *texels = nir_i2f32(b, nir_trim_vector(b, emit(call, &size), n));
+   nir_def *one = nir_trim_vector(b, nir_imm_vec4(b, 1.0, 1.0, 1.0, 1.0), n);
+   return nir_bcsel(b, nir_test_mask(b, call->filter, STELA_AIR_SAMPLER_PIXELS), texels, one);
+}
+
 /* Catmull-Rom's weights (B = 0, C = 1/2) of the four texels about a
  * sample a fraction f past the second's center. */
 static void
@@ -676,7 +696,6 @@ bicubic(struct call *call, const struct tex *t)
    const struct stela_air_options *options = call->c->options;
    nir_def *class = options->texture_filter_class(
       b, call->texture_id ? NULL : call->texture, call->texture_id, options->binding_data);
-   nir_def *pixels = nir_test_mask(b, call->filter, STELA_AIR_SAMPLER_PIXELS);
    nir_def *level = nir_imm_int(b, 0);
    if (!(t->op == nir_texop_txl && nir_src_is_const(nir_src_for_ssa(t->lod)) &&
          nir_src_as_float(nir_src_for_ssa(t->lod)) == 0.0)) {
@@ -688,9 +707,9 @@ bicubic(struct call *call, const struct tex *t)
       nearest = nir_imin(b, nir_imax(b, nearest, nir_imm_int(b, 0)), last);
       level = nir_bcsel(b, nir_test_mask(b, call->filter, STELA_AIR_SAMPLER_MIPPED), nearest, level);
    }
+   /* Pixel coordinates arrive normalized (pixel_scale). */
    struct tex size = {.op = nir_texop_txs, .texture = t->texture, .lod = level};
-   nir_def *texels = nir_i2f32(b, nir_trim_vector(b, emit(call, &size), 2));
-   nir_def *scale = nir_bcsel(b, pixels, nir_imm_vec2(b, 1.0, 1.0), texels);
+   nir_def *scale = nir_i2f32(b, nir_trim_vector(b, emit(call, &size), 2));
    nir_def *position = nir_fmul(b, nir_trim_vector(b, t->coord, 2), scale);
    if (t->offset)
       position = nir_fadd(b, position, nir_i2f32(b, t->offset));
@@ -961,6 +980,9 @@ sample(struct call *call, enum operation op, nir_def **result)
    nir_def *layer = shape->array ? uint_operand(call) : NULL;
    if (!coord || (shape->array && !layer))
       return false;
+   nir_def *scale = pixel_scale(call, t.texture);
+   if (scale)
+      coord = nir_fdiv(call->b, coord, scale);
    t.coord = layered(call, coord, layer, true);
    if (compare && !(t.comparator = float_operand(call, 1)))
       return false;
@@ -970,6 +992,10 @@ sample(struct call *call, enum operation op, nir_def **result)
       if (!(t.ddx = float_operand(call, shape->coords)) ||
           !(t.ddy = float_operand(call, shape->coords)) || !min_lod_operand(call, &t.min_lod))
          return false;
+      if (scale) {
+         t.ddx = nir_fdiv(call->b, t.ddx, scale);
+         t.ddy = nir_fdiv(call->b, t.ddy, scale);
+      }
       if (!offset(call, &t.offset))
          return false;
    } else {
@@ -1053,6 +1079,9 @@ gather(struct call *call, enum operation op, nir_def **result)
    nir_def *layer = shape->array ? uint_operand(call) : NULL;
    if (!coord || (shape->array && !layer))
       return false;
+   nir_def *scale = pixel_scale(call, t.texture);
+   if (scale)
+      coord = nir_fdiv(call->b, coord, scale);
    t.coord = layered(call, coord, layer, true);
    if (compare && !(t.comparator = float_operand(call, 1)))
       return false;
@@ -1817,6 +1846,9 @@ lod(struct call *call, enum operation op, nir_def **result)
        !(t.coord = float_operand(call, shape->coords)) ||
        !access_operand(call, STELA_AIR_TEXTURE_SAMPLE) || !finished(call))
       return false;
+   nir_def *scale = pixel_scale(call, t.texture);
+   if (scale)
+      t.coord = nir_fdiv(call->b, t.coord, scale);
    /* x is the clamped level of detail, y the unclamped one. */
    *result = nir_channel(call->b, emit(call, &t), op == CLAMPED_LOD ? 0 : 1);
    return true;

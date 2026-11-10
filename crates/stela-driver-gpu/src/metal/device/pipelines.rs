@@ -889,13 +889,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(())
     }
 
-    /// Reports once that a process made its first bicubic sampler after
-    /// pipelines, which filter it linearly where they run no variants.
+    /// Reports once that a process made its first bicubic or
+    /// pixel-coordinate sampler after pipelines, which sample through it
+    /// linearly with normalized coordinates where they run no variants.
     pub fn bicubic_after_pipelines(&mut self) {
         self.unsupported(
-            "bicubic samplers taken as arguments, or bound to mesh draws or GPU-encoded \
-             commands, through pipelines made before their process's first one, \
-             which filter them linearly",
+            "bicubic or pixel-coordinate samplers taken as arguments, or bound to mesh \
+             draws or GPU-encoded commands, through pipelines made before their \
+             process's first one, which filter them linearly with normalized coordinates",
         );
     }
 

@@ -215,6 +215,11 @@ pub fn sampler(capabilities: &Capabilities, descriptor: &SamplerDescriptor) -> R
             descriptor.lod_max_clamp,
         ),
     };
+    // A pixel-coordinate sampler is a normalized Vulkan sampler held to
+    // the base level, and shaders divide its coordinates by the base
+    // level's size (`ResourceId::SAMPLER_PIXELS`). Vulkan's unnormalized
+    // samplers need single-level views, and NVIDIA's ignore the mode on
+    // textures with mip levels.
     let (min_lod, max_lod) = if descriptor.normalized_coordinates {
         (min_lod, max_lod)
     } else {
@@ -237,7 +242,6 @@ pub fn sampler(capabilities: &Capabilities, descriptor: &SamplerDescriptor) -> R
             border.unwrap_or(SamplerBorderColor::TransparentBlack),
             false,
         ),
-        unnormalized_coordinates: !descriptor.normalized_coordinates,
         reduction_mode: match descriptor.reduction_mode {
             SamplerReductionMode::WeightedAverage => VkReductionMode::WeightedAverage,
             SamplerReductionMode::Minimum => VkReductionMode::Min,
@@ -412,7 +416,6 @@ mod tests {
             ..SamplerDescriptor::default()
         };
         let plan = sampler(&capabilities(), &pixel).unwrap().float;
-        assert!(plan.unnormalized_coordinates);
         assert_eq!((plan.min_lod, plan.max_lod), (0.0, 0.0));
         let repeating = SamplerDescriptor {
             address_modes: [SamplerAddressMode::Repeat; 3],

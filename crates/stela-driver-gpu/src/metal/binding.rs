@@ -118,9 +118,13 @@ impl ResourceId {
     /// With [`Self::SAMPLER_CUBIC`], the bit of a sampler that selects mip
     /// levels.
     pub const SAMPLER_MIPPED: u32 = 1 << 29;
-    /// With [`Self::SAMPLER_CUBIC`], the bit of a sampler that takes pixel
-    /// coordinates. The integer-border index lies below it.
+    /// The bit of a sampler that takes pixel coordinates, which shaders
+    /// divide by the base level's size: its Vulkan samplers are normalized.
+    /// The integer-border index lies below it.
     pub const SAMPLER_PIXELS: u32 = 1 << 28;
+    /// The bits of a sampler that shaders apply themselves, whose samples
+    /// read the sampler's flags.
+    pub const SAMPLER_SHADED: u32 = Self::SAMPLER_CUBIC | Self::SAMPLER_PIXELS;
 
     /// A sampler's ID: its float-border descriptor, its integer-border twin,
     /// and its `SAMPLER_*` flags.

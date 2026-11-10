@@ -576,7 +576,7 @@ impl Bindings {
     }
 
     /// The samplers `interface` samples through that `slot`'s table binds
-    /// with Metal's bicubic filter, by index.
+    /// with Metal's bicubic filter or pixel coordinates, by index.
     fn bicubic_samplers(&self, slot: impl Into<Slot>, interface: &Interface) -> u32 {
         let samplers = &self.tables[slot.into().index()].slots.samplers;
         interface
@@ -585,7 +585,7 @@ impl Bindings {
             .filter(|&&index| {
                 samplers
                     .get(index as usize)
-                    .is_some_and(|sampler| sampler.high() & ResourceId::SAMPLER_CUBIC != 0)
+                    .is_some_and(|sampler| sampler.high() & ResourceId::SAMPLER_SHADED != 0)
             })
             .fold(0, |mask, &index| mask | 1 << index)
     }

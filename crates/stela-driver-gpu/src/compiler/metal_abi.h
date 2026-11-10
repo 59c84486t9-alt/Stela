@@ -357,9 +357,9 @@ enum stela_metal_average_format {
 #define STELA_METAL_PLANES_SHIFT 21u
 #define STELA_METAL_SAMPLER_NEVER 0x80000000u
 /* A sampler Metal filters bicubically sets STELA_METAL_SAMPLER_CUBIC in its
- * high half, with STELA_METAL_SAMPLER_MIPPED when it selects mip levels and
- * STELA_METAL_SAMPLER_PIXELS when it takes pixel coordinates; its integer
- * twin's index lies below them. */
+ * high half, with STELA_METAL_SAMPLER_MIPPED when it selects mip levels; a
+ * sampler that takes pixel coordinates sets STELA_METAL_SAMPLER_PIXELS. Its
+ * integer twin's index lies below them. */
 #define STELA_METAL_SAMPLER_CUBIC 0x40000000u
 #define STELA_METAL_SAMPLER_MIPPED 0x20000000u
 #define STELA_METAL_SAMPLER_PIXELS 0x10000000u

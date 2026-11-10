@@ -2725,9 +2725,9 @@ fn sampler_flags(descriptor: &SamplerDescriptor) -> u32 {
         if descriptor.mip_filter != SamplerMipFilter::NotMipmapped {
             flags |= ResourceId::SAMPLER_MIPPED;
         }
-        if !descriptor.normalized_coordinates {
-            flags |= ResourceId::SAMPLER_PIXELS;
-        }
+    }
+    if !descriptor.normalized_coordinates {
+        flags |= ResourceId::SAMPLER_PIXELS;
     }
     flags
 }

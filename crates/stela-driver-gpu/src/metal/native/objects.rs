@@ -296,7 +296,6 @@ pub(super) fn sampler<T>(
         .min_lod(info.min_lod)
         .max_lod(info.max_lod)
         .border_color(vk::BorderColor::from_raw(info.border_color.raw() as i32))
-        .unnormalized_coordinates(info.unnormalized_coordinates)
         .push_next(&mut reduction);
     build(&create)
 }

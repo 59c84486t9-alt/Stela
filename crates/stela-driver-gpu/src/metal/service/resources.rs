@@ -239,7 +239,8 @@ impl<B: Backend, C: Compiler> Service<B, C> {
 
     pub(super) fn new_sampler(&mut self, call: &mut Call) -> Result<(), Fault> {
         let descriptor = sampler_descriptor(&call.request()?)?;
-        if descriptor.bicubic() {
+        // Shaders apply both, reading the sampler's flags.
+        if descriptor.bicubic() || !descriptor.normalized_coordinates {
             self.admit_bicubic(call.connection)?;
         }
         let sampler = self.device.new_sampler(&descriptor)?;

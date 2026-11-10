@@ -201,10 +201,11 @@ struct stela_metal_specialization {
     * test fragments for first, and its pipeline's alpha to coverage and
     * alpha to one (stela_air_stage_options::self_tests). */
    uint32_t fragment_tests;
-   /* Metal's bicubic filter: bit n when the sampler bound at index n
-    * filters bicubically at the draws or dispatches this compilation serves,
-    * and STELA_METAL_BICUBIC_IDS when the function's process has made
-    * bicubic samplers, which its samplers of argument values may then be. */
+   /* Metal's bicubic filter and pixel coordinates, which shaders apply:
+    * bit n when the sampler bound at index n has either at the draws or
+    * dispatches this compilation serves, and STELA_METAL_BICUBIC_IDS when
+    * the function's process has made such samplers, which its samplers of
+    * argument values may then be. */
    uint32_t bicubic;
 };
 #define STELA_METAL_BICUBIC_IDS 0x80000000u

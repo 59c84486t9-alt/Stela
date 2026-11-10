@@ -192,7 +192,8 @@ struct Connection {
     /// Objects made so far, which orders them.
     made: u64,
     negotiated: bool,
-    /// It has made a sampler with Metal's bicubic filter, which the
+    /// It has made a sampler with Metal's bicubic filter or pixel
+    /// coordinates, which shaders apply themselves, and which the
     /// samplers its functions take as arguments, and those its pipelines'
     /// GPU-encoded commands and mesh draws bind, may then be.
     bicubic: bool,

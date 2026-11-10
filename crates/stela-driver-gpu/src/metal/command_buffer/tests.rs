@@ -896,6 +896,40 @@ fn dispatches_through_bicubic_samplers_run_the_variant_filtering_them() {
     assert_eq!(bicubic, [0, 1 << 3]);
 }
 
+/// Shaders divide a pixel-coordinate sampler's coordinates themselves, so
+/// dispatches binding one run the variant that reads its flags, as MPS's
+/// blurs do with mipmapped sources.
+#[test]
+fn dispatches_through_pixel_coordinate_samplers_run_the_variant_reading_them() {
+    let threads = Size {
+        width: 64,
+        height: 1,
+        depth: 1,
+    };
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands.begin_compute(DispatchType::Serial).unwrap();
+    let mut state = kernel_state(false);
+    state.interface.samplers = alloc::vec![0];
+    commands.set_compute_pipeline_state(&state).unwrap();
+    commands
+        .set_compute_buffer(Some(buffer(4, 1024)), 0, 0)
+        .unwrap();
+    let pixels = ResourceId::sampler(3, 3, ResourceId::SAMPLER_PIXELS);
+    commands
+        .set_compute_sampler(&mut resolver, pixels, None, 0)
+        .unwrap();
+    commands
+        .dispatch_threadgroups(&mut resolver, [4, 1, 1], threads)
+        .unwrap();
+    let variants: Vec<_> = resolver
+        .compiled
+        .iter()
+        .map(|specialization| specialization.bicubic_samplers)
+        .collect();
+    assert_eq!(variants, [1 << 0]);
+}
+
 #[test]
 fn a_draw_binds_state_buffers_and_tables() {
     let color = texture(PixelFormat::Rgba8Unorm);

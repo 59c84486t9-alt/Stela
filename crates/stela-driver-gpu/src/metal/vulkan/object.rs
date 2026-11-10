@@ -113,7 +113,6 @@ pub struct SamplerInfo {
     pub min_lod: f32,
     pub max_lod: f32,
     pub border_color: BorderColor,
-    pub unnormalized_coordinates: bool,
     pub reduction_mode: SamplerReductionMode,
 }
 

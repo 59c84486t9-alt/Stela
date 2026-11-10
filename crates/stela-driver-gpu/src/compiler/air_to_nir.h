@@ -119,7 +119,8 @@ enum stela_air_filter_class {
 
 /* sampler_filter's bits: Metal's bicubic filter, which Vulkan's samplers
  * lack and Apple GPUs apply to 2D textures only, a mip filter, and pixel
- * coordinates. */
+ * coordinates, which shaders divide by the base level's size for the
+ * normalized Vulkan sampler. */
 enum stela_air_sampler_filter {
    STELA_AIR_SAMPLER_CUBIC = 1,
    STELA_AIR_SAMPLER_MIPPED = 2,
@@ -475,12 +476,13 @@ struct stela_air_options {
     * two. */
    stela_air_texture_query texture_planes;
    bool dynamic_planes;
-   /* Samplers of argument values may filter bicubically: their samples
-    * carry the bicubic path, which a constexpr sampler's take only when it
-    * is bicubic. */
+   /* Samplers of argument values may filter bicubically or take pixel
+    * coordinates: their samples read the sampler's filter bits, which a
+    * constexpr sampler's fold to a constant. */
    bool dynamic_bicubic;
-   /* The samplers bound at these indices filter bicubically: their samples
-    * take the bicubic path, and those of the others do not. */
+   /* The samplers bound at these indices filter bicubically or take pixel
+    * coordinates: their samples read the sampler's filter bits, and those
+    * of the others do not. */
    uint32_t bicubic_samplers;
    /* Indirect command buffers and pipeline states in argument buffers;
     * NULL refuses AIR's command functions. */

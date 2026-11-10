@@ -423,6 +423,26 @@ fn heap_buffers_start_where_a_linear_texture_over_them_binds() {
         .unwrap();
 }
 
+/// A pixel-coordinate sampler, bicubic or not, says so in its ID: shaders
+/// divide its coordinates by the base level's size for its normalized
+/// Vulkan sampler, which NVIDIA requires on textures with mip levels.
+#[test]
+fn pixel_coordinate_samplers_flag_their_ids() {
+    let mut device = device();
+    let pixels = device
+        .new_sampler(&SamplerDescriptor {
+            normalized_coordinates: false,
+            ..SamplerDescriptor::default()
+        })
+        .unwrap();
+    let id = device.sampler_resource_id(pixels).unwrap();
+    assert_ne!(id.high() & ResourceId::SAMPLER_PIXELS, 0);
+    assert_eq!(id.high() & ResourceId::SAMPLER_CUBIC, 0);
+    let normalized = device.new_sampler(&SamplerDescriptor::default()).unwrap();
+    let id = device.sampler_resource_id(normalized).unwrap();
+    assert_eq!(id.high() & ResourceId::SAMPLER_SHADED, 0);
+}
+
 #[test]
 fn samplers_are_shared_and_clamped_variants_cached() {
     let mut device = device();
