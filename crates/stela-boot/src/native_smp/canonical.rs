@@ -57,13 +57,14 @@ pub(crate) unsafe fn reserve_for_workers(
     capture: &Capture,
     executors: &Executors,
 ) -> Result<Arc<RegisteredSystemRam>> {
-    let cores = handoff.native_resources.cores as usize;
+    let reserved = handoff.native_resources.cores as usize;
+    // The started executors, fewer than reserved when an AP failed to start.
+    let cores = executors.started();
     let count = capture.processor_count as usize;
-    if cores == 0
-        || cores > capture.core_count as usize
-        || cores > super::topology::MAX_CORES
+    if cores > reserved
+        || reserved > capture.core_count as usize
+        || reserved > super::topology::MAX_CORES
         || count != capture.processors.len()
-        || executors.processors().len() + 1 != cores
     {
         return Err(refuse!(
             "canonical target has an invalid assigned physical roster"
@@ -88,7 +89,7 @@ pub(crate) unsafe fn reserve_for_workers(
         stela_engine::machine::mmu::placement::Placement::FiveLevel
     );
     bsp.qualify_native(five_level)
-        .map_err(|_| refuse!("canonical target BSP floor refused"))?;
+        .map_err(|refusal| refusal.refusal("canonical target BSP floor refused"))?;
     let mut observations = Vec::with_capacity(cores);
     observations.push(&bsp);
     for slot in 1..cores {
@@ -104,7 +105,7 @@ pub(crate) unsafe fn reserve_for_workers(
         }
         observed
             .qualify_native(five_level)
-            .map_err(|_| refuse!("canonical target AP floor refused"))?;
+            .map_err(|refusal| refusal.refusal("canonical target AP floor refused"))?;
         observations.push(observed);
     }
     let limit = super::topology::common_native_target(&observations)
@@ -264,17 +265,15 @@ pub(crate) unsafe fn prepare_with_locks<'host, D: Devices>(
         processor_power,
     } = preparation;
     let reserved = handoff.native_resources.cores as usize;
+    let started = executors.started();
     let cores = profile.processors.len().max(1);
-    if cores == 0
-        || cores > reserved
-        || reserved > capture.core_count as usize
-        || executors.processors().len() + 1 != reserved
+    if cores == 0 || cores > started || started > reserved || reserved > capture.core_count as usize
     {
         return Err(refuse!(
             "canonical active PE roster exceeds the retained physical workers"
         ));
     }
-    bindings::validate(cores, reserved, boot_processor, assignments)?;
+    bindings::validate(cores, started, boot_processor, assignments)?;
     for binding in assignments.iter().filter(|binding| binding.worker.0 != 0) {
         let slot = binding.worker.0;
         let selected = capture.processors[capture.selected[slot] as usize];

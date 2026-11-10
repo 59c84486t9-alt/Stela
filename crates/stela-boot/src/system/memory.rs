@@ -97,7 +97,22 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
 }
 
 /// Reserve the engine's working memory and each physical worker's resources.
+/// The other cores start from a page below 1 MiB, taken first; firmware
+/// that left none free boots on one core.
 pub(super) fn reserve(cores: usize, ram: &[(usize, usize)]) -> Result<EngineMemory> {
+    let (cores, sipi) = match cores {
+        1 => (1, 0),
+        _ => match sipi_page() {
+            Some(page) => (cores, page),
+            None => {
+                crate::status::info(&format!(
+                    "the firmware left no free memory below 1 MiB to start the other cores from, \
+                     so macOS runs on one of this PC's {cores}"
+                ));
+                (1, 0)
+            }
+        },
+    };
     let free = free_ram()?;
     let sizes = stela_boot_core::host_memory::sizes(free, cores, cores)?;
     output::arguments(format_args!(
@@ -147,31 +162,15 @@ pub(super) fn reserve(cores: usize, ram: &[(usize, usize)]) -> Result<EngineMemo
         output::arguments(format_args!("TASK MEMORY allocation failed: {error}\n"));
         "firmware task allocation unavailable"
     })?;
-    let mut native_resources = NativeResources {
+    let native_resources = NativeResources {
         cores: cores as u32,
         code_parts: sizes.code.parts,
         stacks,
         invocations,
         tasks: native_task_allocations.region(),
+        sipi,
         ..NativeResources::default()
     };
-    if cores > 1 {
-        let page = boot::allocate_pages(
-            AllocateType::MaxAddress(0x9f000),
-            MemoryType::LOADER_CODE,
-            1,
-        )
-        .map_err(|_| refuse!("no owned SIPI page below 1 MiB"))?;
-        let physical = page.as_ptr() as u64;
-        if physical < PAGE {
-            return Err(refuse!("SIPI page overlaps real-mode vector table"));
-        }
-        // SAFETY: the allocation is owned by Stela through every AP's lifetime.
-        unsafe {
-            page.as_ptr().write_bytes(0, PAGE as usize);
-        }
-        native_resources.sipi = physical;
-    }
     let stack = Region {
         physical: native_resources.stacks.physical,
         bytes: STACK_BYTES,
@@ -194,6 +193,28 @@ pub(super) fn reserve(cores: usize, ram: &[(usize, usize)]) -> Result<EngineMemo
         root,
         loader_tables,
     })
+}
+
+/// The page APs start from (Intel SDM 3A 9.4.4: a SIPI vector names a page
+/// below 1 MiB), above the real-mode vector table.
+fn sipi_page() -> Option<u64> {
+    let page = boot::allocate_pages(
+        AllocateType::MaxAddress(0x9f000),
+        MemoryType::LOADER_CODE,
+        1,
+    )
+    .ok()?;
+    let physical = page.as_ptr() as u64;
+    if physical < PAGE {
+        // SAFETY: the page just allocated, which nothing references.
+        let _ = unsafe { boot::free_pages(page, 1) };
+        return None;
+    }
+    // SAFETY: the allocation is owned by Stela through every AP's lifetime.
+    unsafe {
+        page.as_ptr().write_bytes(0, PAGE as usize);
+    }
+    Some(physical)
 }
 
 /// Build the identity root and shared engine window over those reservations.

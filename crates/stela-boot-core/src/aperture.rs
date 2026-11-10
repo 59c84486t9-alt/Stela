@@ -164,6 +164,16 @@ impl Processors {
         Some(slot)
     }
 
+    /// Count the joined processor with `apic` ID, an AP that failed to
+    /// start and halted or never ran, as having acknowledged every flush:
+    /// it takes no further aperture translation, so no retirement waits on
+    /// it. It stays a sharer; an interrupt to it is harmless.
+    pub fn exclude(&self, apic: u32) {
+        if let Some(slot) = self.slot(apic) {
+            self.acknowledged[slot].store(u64::MAX, Ordering::Release);
+        }
+    }
+
     /// Whether only the boot processor may hold aperture translations.
     pub fn alone(&self) -> bool {
         self.joined.load(Ordering::Acquire) <= 1
@@ -362,6 +372,23 @@ mod tests {
             processors.sharers().collect::<alloc::vec::Vec<_>>(),
             [(a, 4), (b, 9)]
         );
+    }
+
+    #[test]
+    fn an_excluded_ap_never_holds_up_a_retirement() {
+        let processors = Processors::new();
+        let bsp = processors.join_bsp(1).unwrap();
+        let ready = processors.join_ap(2).unwrap();
+        processors.join_ap(3).unwrap();
+        processors.exclude(3);
+        // An APIC ID that never joined changes nothing.
+        processors.exclude(9);
+        let generation = processors.request();
+        processors.acknowledge(bsp, generation);
+        assert!(!processors.flushed(generation, None));
+        processors.acknowledge(ready, generation);
+        assert!(processors.flushed(generation, None));
+        assert_eq!(processors.sharers().count(), 3);
     }
 
     #[test]

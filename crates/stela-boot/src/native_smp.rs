@@ -28,12 +28,14 @@ pub(crate) unsafe fn validate(
     handoff: &crate::handoff::Handoff,
     requested: Option<usize>,
 ) -> Result<Option<&'static firmware::Capture>> {
-    let cores = requested.unwrap_or(handoff.native_resources.cores as usize);
+    let cores = handoff.native_resources.cores as usize;
     if cores == 0 || cores > topology::MAX_CORES {
         return Err(refuse!("native physical-core count is outside capacity"));
     }
     let resources = &handoff.native_resources;
-    if resources.cores as usize != cores
+    // The loader reserves fewer than requested only when firmware left no
+    // AP startup page.
+    if requested.is_some_and(|requested| cores > requested)
         || resources.stacks.bytes != resources::STACK_BYTES * cores as u64
         || resources.stacks.physical == 0
     {
@@ -158,9 +160,9 @@ pub(crate) unsafe fn validate(
             snapshot.cr4,
             snapshot.efer,
         ));
-        snapshot
-            .qualify_native(five_level)
-            .map_err(|_| refuse!("a selected physical core lacks the native executor floor"))?;
+        snapshot.qualify_native(five_level).map_err(|refusal| {
+            refusal.refusal("a selected physical core lacks the native executor floor")
+        })?;
         memory_types.compatible(snapshot)?;
         if snapshot.same_memory_types(&capture.snapshots[0]).is_err() {
             let reference = &capture.snapshots[0];

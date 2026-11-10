@@ -57,7 +57,7 @@ impl ParseState<'_> {
                     .ok_or(Error::NativeCoreCount)?
                     .parse::<usize>()
                     .map_err(|_| Error::NativeCoreCount)?;
-                if !(1..=MAX_NATIVE_CORES).contains(&count) {
+                if !(1..=crate::topology::MAX_CORES).contains(&count) {
                     return Err(Error::NativeCoreCapacity);
                 }
                 options.native_cores = Some(count);

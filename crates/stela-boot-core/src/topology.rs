@@ -443,9 +443,97 @@ pub fn common_native_target(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilityRefusal {
     InvalidSnapshot,
-    NativeFloor,
+    /// The core lacks these features of the floor.
+    NativeFloor(Missing),
     FiveLevelPaging,
     MemoryTypes,
+}
+
+/// The native executor's CPU floor, by the name people know each feature
+/// by: x86-64-v2's (SSE3, SSSE3, CX16, SSE4.1, SSE4.2, POPCNT, LAHF/SAHF)
+/// and the x86-64 baseline every 64-bit PC has, with PAT and an enabled
+/// local APIC.
+const FLOOR: [&str; 22] = [
+    "SSE3",
+    "SSSE3",
+    "CX16",
+    "SSE4.1",
+    "SSE4.2",
+    "POPCNT",
+    "x87",
+    "TSC",
+    "MSR",
+    "PAE",
+    "CX8",
+    "APIC",
+    "MTRR",
+    "PAT",
+    "FXSR",
+    "SSE",
+    "SSE2",
+    "LAHF/SAHF",
+    "NX",
+    "64-bit mode",
+    "a valid PAT setting",
+    "an enabled local APIC",
+];
+/// [`FLOOR`]'s CPUID bits: leaf 1's ECX, leaf 1's EDX, then leaf
+/// 0x8000_0001's ECX and EDX.
+const ECX_BITS: [u32; 6] = [0, 9, 13, 19, 20, 23];
+const EDX_BITS: [u32; 11] = [0, 4, 5, 6, 8, 9, 12, 16, 24, 25, 26];
+const EXTENDED_ECX_BITS: [u32; 1] = [0];
+const EXTENDED_EDX_BITS: [u32; 2] = [20, 29];
+
+/// Features of [`FLOOR`] a core lacks, one bit each, in its order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Missing(u32);
+
+impl Missing {
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The names of the missing features.
+    pub fn names(self) -> impl Iterator<Item = &'static str> {
+        FLOOR
+            .into_iter()
+            .enumerate()
+            .filter(move |(index, _)| self.0 & (1 << index) != 0)
+            .map(|(_, name)| name)
+    }
+
+    /// The stop a core without the floor gives, naming what it lacks and
+    /// what Stela needs.
+    pub fn refusal(self) -> crate::Refusal {
+        let mut lacks = alloc::string::String::new();
+        let names: Vec<&str> = self.names().collect();
+        for (index, name) in names.iter().enumerate() {
+            if index > 0 {
+                lacks.push_str(if index + 1 == names.len() {
+                    " and "
+                } else {
+                    ", "
+                });
+            }
+            lacks.push_str(name);
+        }
+        refuse!(
+            "this PC's CPU lacks {lacks}; Stela needs an x86-64-v2 CPU (Intel Nehalem, AMD \
+             Bulldozer or newer)",
+            lacks = %lacks
+        )
+    }
+}
+
+impl CapabilityRefusal {
+    /// The stop this refusal gives, for messages: a missing floor names
+    /// the features ([`Missing::refusal`]).
+    pub fn refusal(self, what: &'static str) -> crate::Refusal {
+        match self {
+            Self::NativeFloor(missing) => missing.refusal(),
+            _ => refuse!(what),
+        }
+    }
 }
 
 impl Snapshot {
@@ -453,33 +541,30 @@ impl Snapshot {
         if self.count as usize > MAX_CPUID || self.msr_count as usize > MAX_MSRS {
             return Err(CapabilityRefusal::InvalidSnapshot);
         }
-        let basic = self.get(1, 0).ok_or(CapabilityRefusal::NativeFloor)?;
-        let extended = self
-            .get(0x8000_0001, 0)
-            .ok_or(CapabilityRefusal::NativeFloor)?;
-        // SSE3/SSSE3/CX16/SSE4.1/SSE4.2/POPCNT; FPU/TSC/MSR/PAE/CX8/
-        // APIC/MTRR/PAT/FXSR/SSE/SSE2; LAHF-LM/NX/long mode.
-        const ECX: u32 = (1 << 0) | (1 << 9) | (1 << 13) | (1 << 19) | (1 << 20) | (1 << 23);
-        const EDX: u32 = (1 << 0)
-            | (1 << 4)
-            | (1 << 5)
-            | (1 << 6)
-            | (1 << 8)
-            | (1 << 9)
-            | (1 << 12)
-            | (1 << 16)
-            | (1 << 24)
-            | (1 << 25)
-            | (1 << 26);
-        const EXTENDED_EDX: u32 = (1 << 20) | (1 << 29);
-        if basic.ecx & ECX != ECX
-            || basic.edx & EDX != EDX
-            || extended.ecx & 1 == 0
-            || extended.edx & EXTENDED_EDX != EXTENDED_EDX
-            || !self.pat_valid
-            || self.apic_base & (1 << 11) == 0
-        {
-            return Err(CapabilityRefusal::NativeFloor);
+        // A missing leaf lacks every feature it reports.
+        let basic = self.get(1, 0);
+        let extended = self.get(0x8000_0001, 0);
+        let registers = [
+            (basic.map(|leaf| leaf.ecx), &ECX_BITS[..]),
+            (basic.map(|leaf| leaf.edx), &EDX_BITS[..]),
+            (extended.map(|leaf| leaf.ecx), &EXTENDED_ECX_BITS[..]),
+            (extended.map(|leaf| leaf.edx), &EXTENDED_EDX_BITS[..]),
+        ];
+        let present = registers
+            .into_iter()
+            .flat_map(|(value, bits)| {
+                bits.iter()
+                    .map(move |bit| value.is_some_and(|v| v & (1 << bit) != 0))
+            })
+            .chain([self.pat_valid, self.apic_base & (1 << 11) != 0]);
+        let missing = Missing(
+            present
+                .enumerate()
+                .filter(|(_, present)| !present)
+                .fold(0, |bits, (index, _)| bits | 1 << index),
+        );
+        if !missing.is_empty() {
+            return Err(CapabilityRefusal::NativeFloor(missing));
         }
         if five_level && !self.get(7, 0).is_some_and(|leaf| leaf.ecx & (1 << 16) != 0) {
             return Err(CapabilityRefusal::FiveLevelPaging);

@@ -582,7 +582,21 @@ fn start_processors(boot: Boot<'_>, host: &mut OpenedHost) -> Processors {
         output::arguments(format_args!("native executor refusal: {error:?}\n"));
         output::fatal("owned native AP bootstrap refused")
     });
-    crate::status::done("");
+    match executors.failure() {
+        Some(failure) => {
+            output::arguments(format_args!("NATIVE AP startup failed: {failure:?}\n"));
+            if options.native_bootstrap_check || options.native_shared_check {
+                output::fatal("owned native AP bootstrap refused");
+            }
+            crate::status::warn(&alloc::format!(
+                "{} of {} cores started; macOS runs on {}",
+                executors.started(),
+                handoff.native_resources.cores,
+                executors.started(),
+            ));
+        }
+        None => crate::status::done(""),
+    }
     let sender = crate::apic::Apic::new(
         handoff.apic_base,
         layout::physical(handoff.apic_base & crate::apic::BASE_ADDRESS),
@@ -624,6 +638,9 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
         host.built.as_deref(),
         storage.nvram.take(),
     );
+    // The APs start before the board is modeled, so that the guest gets one
+    // PE for each core that started.
+    let Processors { executors, sender } = start_processors(boot, &mut host);
     let Modeled {
         mut board,
         boot_processor,
@@ -635,6 +652,7 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
         bundle_boot_processor,
         target,
         speculation,
+        executors.started(),
     );
     let topology_source = source_topology(
         loaded_source.as_ref(),
@@ -645,10 +663,6 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     );
     if loaded_tree.is_some() {
         crate::status::done("");
-    }
-    let Processors { executors, sender } = start_processors(boot, &mut host);
-    if executors.processors().len() + 1 != active_workers {
-        output::fatal("started physical worker count differs from the verified guest assignment");
     }
     output::arguments(format_args!(
         "NATIVE ACTIVE workers={active_workers} parked=0 source_PEs={}\n",
@@ -884,15 +898,15 @@ struct Modeled {
 }
 
 /// Model the board of the loaded DeviceTree, whose boot PE must be the one
-/// the verified bundle hands off to.
+/// the verified bundle hands off to, for the `started` host processors.
 fn model_board(
     boot: Boot<'_>,
     loaded_tree: Option<&bundle::live_tree::LiveTree>,
     bundle_boot_processor: Option<usize>,
     target: TargetCpu,
     speculation: Speculation,
+    started: usize,
 ) -> Modeled {
-    let handoff = boot.handoff;
     let source_tree = loaded_tree.as_ref().map(|tree| tree.bytes());
     if source_tree.is_some() {
         crate::status::begin("Checking the Mac's CPU topology");
@@ -932,7 +946,7 @@ fn model_board(
         Some(board) => board_profile(board, target, speculation),
         None => test_profile(target, speculation),
     };
-    let active_workers = handoff.native_resources.cores as usize;
+    let active_workers = started;
     let source_pes = full_profile.processors.len().max(1);
     let available = boot
         .native_processors

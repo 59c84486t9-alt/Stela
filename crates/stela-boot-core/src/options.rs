@@ -53,9 +53,6 @@ pub const DNS: &str = "--dns";
 /// The most `--dns` servers, as glibc's resolver keeps (`MAXNS`).
 pub const MAX_DNS_SERVERS: usize = 3;
 
-/// The physical cores an explicit `--native-cores` may name.
-pub const MAX_NATIVE_CORES: usize = 64;
-
 /// A `--audio-check` mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCheck {
@@ -617,7 +614,9 @@ impl System {
                 "Preboot CPU count changed; run stela setup repair or update --guest-pes N"
             ));
         }
-        if self.assigned_native_cores(available, Some(source_pes))? != reserved {
+        // Fewer cores than assigned run when firmware leaves no AP startup
+        // page or an AP fails to start.
+        if reserved == 0 || reserved > self.assigned_native_cores(available, Some(source_pes))? {
             return Err(refuse!(
                 "verified live source and reserved native core count disagree; check --guest-pes and --native-cores"
             ));

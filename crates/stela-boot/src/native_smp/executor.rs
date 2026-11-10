@@ -157,13 +157,25 @@ impl Processor {
 }
 
 pub(crate) struct Executors {
-    /// BSP is absent: it already owns its local HostOwner.
+    /// BSP is absent: it already owns its local HostOwner. Slots 1 to
+    /// `processors.len()`, in order.
     processors: Vec<Processor>,
+    /// The first AP that did not start, when one did not: it and every AP
+    /// after it run no PE.
+    failure: Option<StartupFailure>,
 }
 
 impl Executors {
     pub(crate) fn processors(&self) -> &[Processor] {
         &self.processors
+    }
+    /// The executors that run PEs: the BSP and the started APs.
+    pub(crate) fn started(&self) -> usize {
+        self.processors.len() + 1
+    }
+    /// Why fewer cores started than were reserved.
+    pub(crate) fn failure(&self) -> Option<&StartupFailure> {
+        self.failure.as_ref()
     }
 }
 
@@ -203,7 +215,7 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
                 config.placement,
                 stela_engine::machine::mmu::placement::Placement::FiveLevel
             ))
-            .map_err(|_| refuse!("AP native controls refused"))?;
+            .map_err(|refusal| refusal.refusal("AP native controls refused"))?;
         // The trampoline installs the BSP's already-checked effective PAT;
         // The offline trampoline installed the complete validated BSP image.
         let source = topology::Snapshot {
@@ -261,7 +273,11 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
     })()
     .and_then(|owner| {
         argument.status.store(SYNCING, Ordering::Release);
-        argument.tsc.target().map(|()| owner)
+        let offset = argument.tsc.target()?;
+        // This AP's 24 MHz counter counts from a base its software
+        // correction moved, so that it reads the BSP's count.
+        host::correct_tsc_base(offset);
+        Ok(owner)
     });
     match initialized {
         Ok(mut owner) => {
@@ -452,155 +468,193 @@ pub(crate) unsafe fn start(
             .join_bsp(bsp)
             .ok_or(StartupFailure::Resources)?,
     );
+    // An AP that does not start ends the startup of the ones after it, and
+    // the guest runs on the cores before it (`Executors::failure`).
+    let mut failed: Vec<(usize, StartupFailure)> = Vec::new();
     for slot in 1..cores {
-        let part = resources::partition(cores, cores, slot, handoff.code.bytes, handoff.pool.bytes)
-            .map_err(|_| StartupFailure::Resources)?;
-        let processor = capture.processors[capture.selected[slot] as usize];
-        let destination =
-            u32::try_from(processor.apic_id).map_err(|_| StartupFailure::Resources)?;
-        let config = host::Config {
-            ram: ram.to_vec(),
-            pool_physical: handoff.pool.physical + part.pool_offset,
-            pool_bytes: part.pool_bytes,
-            window_root: handoff.root,
-            loader_tables: &handoff.native_loader_tables,
-            code_virtual: layout::code(handoff.code.bytes) + part.code_offset,
-            code_physical: handoff.code.physical + part.code_offset,
-            code_bytes: part.code_bytes,
-            code_parts: handoff.native_resources.code_parts,
-            tsc_base,
-            tsc_hz: handoff.tsc_hz,
-            apic_base: capture.snapshots[slot].apic_base,
-            placement: handoff.placement,
-            bounce: Some((
-                layout::bounce() + slot as u64 * 2 * PAGE,
-                handoff.native_resources.bounce[slot],
-            )),
-        };
-        let argument: &'static Argument = Box::leak(Box::new(Argument {
-            processor,
-            source: memory_source,
-            effective_pat,
-            #[cfg(feature = "diagnostics")]
-            fp_qualification: _fp_qualification,
-            stack_bottom: layout::stack() + slot as u64 * resources::STACK_STRIDE + PAGE,
-            stack_top: layout::stack()
-                + slot as u64 * resources::STACK_STRIDE
-                + PAGE
-                + resources::STACK_BYTES,
-            config: UnsafeCell::new(Some(config)),
-            tables: UnsafeCell::new(Some(Box::leak(Box::new(interrupts::Tables::new())))),
-            observed: UnsafeCell::new(None),
-            descriptors: UnsafeCell::new(None),
-            doorbells: UnsafeCell::new(None),
-            refusal: UnsafeCell::new(None),
-            status: AtomicU8::new(STARTING),
-            tsc: tsc_sync::Sync::new(handoff.tsc_hz),
-            mailbox: mailbox::Mailbox::new(),
-        }));
-        let physical = handoff.native_resources.sipi;
-        crate::output::arguments(format_args!(
-            "NATIVE ATTEMPT slot={slot} apic={:#x} firmware_cpu={} package={} core={} thread={} sipi={physical:#x} stack={:#x}..{:#x}\n",
-            processor.apic_id,
-            processor.processor_number,
-            processor.location.package,
-            processor.location.core,
-            processor.thread,
-            argument.stack_bottom,
-            argument.stack_top,
-        ));
-        // SAFETY: this one owned low page has no previous reader: the preceding
-        // AP acknowledged high-window entry after its last low-page fetch.
-        let vector = unsafe {
-            bootstrap::prepare(
-                layout::physical(physical) as *mut u8,
-                physical,
-                bootstrap::Entry {
-                    processor_signature: capture.snapshots[slot]
-                        .get(1, 0)
-                        .ok_or(StartupFailure::Resources)?
-                        .eax,
-                    root: handoff.root,
-                    five_level: matches!(
-                        handoff.placement,
-                        stela_engine::machine::mmu::placement::Placement::FiveLevel
+        if !failed.is_empty() {
+            break;
+        }
+        let attempt = (|| -> Result<(), StartupFailure> {
+            let part =
+                resources::partition(cores, cores, slot, handoff.code.bytes, handoff.pool.bytes)
+                    .map_err(|_| StartupFailure::Resources)?;
+            let processor = capture.processors[capture.selected[slot] as usize];
+            let destination =
+                u32::try_from(processor.apic_id).map_err(|_| StartupFailure::Resources)?;
+            let config = host::Config {
+                ram: ram.to_vec(),
+                pool_physical: handoff.pool.physical + part.pool_offset,
+                pool_bytes: part.pool_bytes,
+                window_root: handoff.root,
+                loader_tables: &handoff.native_loader_tables,
+                code_virtual: layout::code(handoff.code.bytes) + part.code_offset,
+                code_physical: handoff.code.physical + part.code_offset,
+                code_bytes: part.code_bytes,
+                code_parts: handoff.native_resources.code_parts,
+                tsc_base,
+                tsc_hz: handoff.tsc_hz,
+                apic_base: capture.snapshots[slot].apic_base,
+                placement: handoff.placement,
+                bounce: Some((
+                    layout::bounce() + slot as u64 * 2 * PAGE,
+                    handoff.native_resources.bounce[slot],
+                )),
+            };
+            let argument: &'static Argument = Box::leak(Box::new(Argument {
+                processor,
+                source: memory_source,
+                effective_pat,
+                #[cfg(feature = "diagnostics")]
+                fp_qualification: _fp_qualification,
+                stack_bottom: layout::stack() + slot as u64 * resources::STACK_STRIDE + PAGE,
+                stack_top: layout::stack()
+                    + slot as u64 * resources::STACK_STRIDE
+                    + PAGE
+                    + resources::STACK_BYTES,
+                config: UnsafeCell::new(Some(config)),
+                tables: UnsafeCell::new(Some(Box::leak(Box::new(interrupts::Tables::new())))),
+                observed: UnsafeCell::new(None),
+                descriptors: UnsafeCell::new(None),
+                doorbells: UnsafeCell::new(None),
+                refusal: UnsafeCell::new(None),
+                status: AtomicU8::new(STARTING),
+                tsc: tsc_sync::Sync::new(
+                    handoff.tsc_hz,
+                    stela_boot_core::tsc::sync::round_millis(
+                        processor.location.package,
+                        (0..slot).map(|synced| {
+                            capture.processors[capture.selected[synced] as usize]
+                                .location
+                                .package
+                        }),
                     ),
-                    pat: effective_pat,
-                    memory_types: &memory_types,
-                    stack_top: layout::stack()
-                        + slot as u64 * resources::STACK_STRIDE
-                        + PAGE
-                        + resources::STACK_BYTES,
-                    argument: argument as *const Argument as u64,
-                    entry: enter,
-                },
-            )
-        }
-        .map_err(StartupFailure::Bootstrap)?;
-        // Only the BSP writes the shared boot log. Persist the last completed
-        // preparation before any real INIT/SIPI can fault or reset the machine;
-        // a buffered ATTEMPT alone does not localize an early hardware stop.
-        crate::output::arguments(format_args!(
-            "NATIVE PREPARED slot={slot} apic={destination:#x} vector={vector:#x} root={:#x}\n",
-            handoff.root,
-        ));
-        crate::output::flush_log();
-        // It may translate through the MMIO aperture from its first fetch,
-        // so it shares the aperture's shootdowns from now on, and answers
-        // them while it waits for an engine or driver lock whose holder may
-        // be retiring.
-        crate::native_mmio::PROCESSORS
-            .join_ap(destination)
-            .ok_or(StartupFailure::Resources)?;
-        stela_engine::platform::sync::set_wait(crate::native_mmio::shootdown::service);
-        stela_drivers::on_spin(crate::native_mmio::shootdown::service);
-        // SAFETY: validated physical AP and pinned complete startup resources.
-        unsafe { sender.startup(destination, vector, handoff.tsc_hz) }
-            .map_err(StartupFailure::Delivery)?;
-        crate::output::arguments(format_args!(
-            "NATIVE SIPI delivered slot={slot} vector={vector:#x}\n"
-        ));
-        let since = apic::rdtsc();
-        // Linux's parallel bringup: the next AP starts as soon as this one
-        // has left the low page, and each installs its private host beside
-        // the others while the BSP takes their TSC synchronization in turn.
-        loop {
-            // A sealed hardware exception is a failed startup, not a
-            // timeout or a synthetic READY. Return without reusing any owned
-            // AP/low-page resource whose execution remains uncertain.
-            if let Some(cause) =
-                // SAFETY: the low startup page stays owned by this bringup until the AP leaves it
-                // or fails.
-                unsafe { bootstrap::failure(layout::physical(physical) as *const u8) }
-                        .map_err(|cause| StartupFailure::FaultRecord { slot, cause })?
+                ),
+                mailbox: mailbox::Mailbox::new(),
+            }));
+            let physical = handoff.native_resources.sipi;
+            crate::output::arguments(format_args!(
+                "NATIVE ATTEMPT slot={slot} apic={:#x} firmware_cpu={} package={} core={} thread={} sipi={physical:#x} stack={:#x}..{:#x}\n",
+                processor.apic_id,
+                processor.processor_number,
+                processor.location.package,
+                processor.location.core,
+                processor.thread,
+                argument.stack_bottom,
+                argument.stack_top,
+            ));
+            // SAFETY: this one owned low page has no previous reader: the preceding
+            // AP acknowledged high-window entry after its last low-page fetch.
+            let vector = unsafe {
+                bootstrap::prepare(
+                    layout::physical(physical) as *mut u8,
+                    physical,
+                    bootstrap::Entry {
+                        processor_signature: capture.snapshots[slot]
+                            .get(1, 0)
+                            .ok_or(StartupFailure::Resources)?
+                            .eax,
+                        root: handoff.root,
+                        five_level: matches!(
+                            handoff.placement,
+                            stela_engine::machine::mmu::placement::Placement::FiveLevel
+                        ),
+                        pat: effective_pat,
+                        memory_types: &memory_types,
+                        stack_top: layout::stack()
+                            + slot as u64 * resources::STACK_STRIDE
+                            + PAGE
+                            + resources::STACK_BYTES,
+                        argument: argument as *const Argument as u64,
+                        entry: enter,
+                    },
+                )
+            }
+            .map_err(StartupFailure::Bootstrap)?;
+            // Only the BSP writes the shared boot log. Persist the last completed
+            // preparation before any real INIT/SIPI can fault or reset the machine;
+            // a buffered ATTEMPT alone does not localize an early hardware stop.
+            crate::output::arguments(format_args!(
+                "NATIVE PREPARED slot={slot} apic={destination:#x} vector={vector:#x} root={:#x}\n",
+                handoff.root,
+            ));
+            crate::output::flush_log();
+            // It may translate through the MMIO aperture from its first fetch,
+            // so it shares the aperture's shootdowns from now on, and answers
+            // them while it waits for an engine or driver lock whose holder may
+            // be retiring.
+            crate::native_mmio::PROCESSORS
+                .join_ap(destination)
+                .ok_or(StartupFailure::Resources)?;
+            stela_engine::platform::sync::set_wait(crate::native_mmio::shootdown::service);
+            stela_drivers::on_spin(crate::native_mmio::shootdown::service);
+            // SAFETY: validated physical AP and pinned complete startup resources.
+            unsafe { sender.startup(destination, vector, handoff.tsc_hz) }
+                .map_err(StartupFailure::Delivery)?;
+            crate::output::arguments(format_args!(
+                "NATIVE SIPI delivered slot={slot} vector={vector:#x}\n"
+            ));
+            let since = apic::rdtsc();
+            // Linux's parallel bringup: the next AP starts as soon as this one
+            // has left the low page, and each installs its private host beside
+            // the others while the BSP takes their TSC synchronization in turn.
+            loop {
+                // A sealed hardware exception is a failed startup, not a
+                // timeout or a synthetic READY. Return without reusing any owned
+                // AP/low-page resource whose execution remains uncertain.
+                if let Some(cause) =
+                    // SAFETY: the low startup page stays owned by this bringup until the AP leaves it
+                    // or fails.
+                    unsafe { bootstrap::failure(layout::physical(physical) as *const u8) }
+                            .map_err(|cause| StartupFailure::FaultRecord { slot, cause })?
+                {
+                    return Err(StartupFailure::EarlyException { slot, cause });
+                }
+                match argument.status.load(Ordering::Acquire) {
+                    STARTING => {}
+                    REFUSED => return Err(refused(slot, argument)),
+                    _ => break,
+                }
+                if apic::rdtsc().wrapping_sub(since) >= handoff.tsc_hz {
+                    return Err(StartupFailure::Timeout { slot });
+                }
+                serve(&mut started, &mut processors, &mut failed, handoff.tsc_hz);
+                core::hint::spin_loop();
+            }
+            started.push(Starting {
+                processor: Processor { slot, argument },
+                destination,
+                since,
+                synced: false,
+            });
+            Ok(())
+        })();
+        if let Err(error) = attempt {
+            if let Ok(apic) =
+                u32::try_from(capture.processors[capture.selected[slot] as usize].apic_id)
             {
-                return Err(StartupFailure::EarlyException { slot, cause });
+                crate::native_mmio::PROCESSORS.exclude(apic);
             }
-            match argument.status.load(Ordering::Acquire) {
-                STARTING => {}
-                REFUSED => return Err(refused(slot, argument)),
-                _ => break,
-            }
-            if apic::rdtsc().wrapping_sub(since) >= handoff.tsc_hz {
-                return Err(StartupFailure::Timeout { slot });
-            }
-            serve(&mut started, &mut processors, handoff.tsc_hz)?;
-            core::hint::spin_loop();
+            failed.push((slot, error));
         }
-        started.push(Starting {
-            processor: Processor { slot, argument },
-            destination,
-            since,
-            synced: false,
-        });
     }
     while !started.is_empty() {
-        serve(&mut started, &mut processors, handoff.tsc_hz)?;
+        serve(&mut started, &mut processors, &mut failed, handoff.tsc_hz);
         core::hint::spin_loop();
     }
     crate::output::flush_log();
     processors.sort_unstable_by_key(|processor| processor.slot);
-    Ok(Executors { processors })
+    failed.sort_unstable_by_key(|(slot, _)| *slot);
+    let failure = failed.into_iter().next();
+    if let Some((first, _)) = &failure {
+        // Every AP before the first failure is ready; later ones idle in
+        // their mailbox loop, answering shootdowns, and run no PE.
+        processors.retain(|processor| processor.slot < *first);
+    }
+    Ok(Executors {
+        processors,
+        failure: failure.map(|(_, error)| error),
+    })
 }
 
 /// A started AP that is not ready yet.
@@ -614,13 +668,14 @@ struct Starting {
 
 /// Take part in each started AP's TSC synchronization, one at a time as
 /// Linux's `check_tsc_sync_source` does, and take the APs that became
-/// ready. A refusal fails startup, as does an AP that is not ready within
-/// a second of its own.
+/// ready. An AP that refuses, or is not ready within a second of its own,
+/// goes to `failed`, out of the aperture's shootdowns.
 fn serve(
     started: &mut Vec<Starting>,
     ready: &mut Vec<Processor>,
+    failed: &mut Vec<(usize, StartupFailure)>,
     tsc_hz: u64,
-) -> Result<(), StartupFailure> {
+) {
     let mut index = 0;
     while index < started.len() {
         let (slot, argument) = (
@@ -637,10 +692,23 @@ fn serve(
                 for other in started.iter_mut() {
                     other.since = other.since.wrapping_add(spent);
                 }
-                let (adjusted, rounds) = argument.tsc.outcome();
+                let outcome = argument.tsc.outcome();
                 crate::output::arguments(format_args!(
-                    "NATIVE TSC slot={slot} adjusted={adjusted} rounds={rounds}\n"
+                    "NATIVE TSC slot={slot} adjusted={} offset={} rounds={}\n",
+                    outcome.adjusted, outcome.offset, outcome.rounds,
                 ));
+                static OFFSET_REPORTED: core::sync::atomic::AtomicBool =
+                    core::sync::atomic::AtomicBool::new(false);
+                if outcome.offset != 0 && !OFFSET_REPORTED.swap(true, Ordering::Relaxed) {
+                    // Only the guest counter's base takes the offset: raw
+                    // counter reads on this core, such as cross-PE deadlines,
+                    // stay off by it.
+                    crate::output::arguments(format_args!(
+                        "UNSUPPORTED host TSC agreement in software: slot={slot} offset={}; \
+                         raw counter reads on that core stay off by it\n",
+                        outcome.offset,
+                    ));
+                }
             }
             READY => {
                 let Starting {
@@ -669,15 +737,26 @@ fn serve(
                 ready.push(processor);
                 continue;
             }
-            REFUSED => return Err(refused(slot, argument)),
+            REFUSED => {
+                let failing = started.swap_remove(index);
+                crate::native_mmio::PROCESSORS.exclude(failing.destination);
+                failed.push((slot, refused(slot, argument)));
+                continue;
+            }
             _ if apic::rdtsc().wrapping_sub(started[index].since) >= tsc_hz => {
-                return Err(StartupFailure::Timeout { slot });
+                // A slow AP that still runs later is outside every shootdown
+                // from here on. That is safe only while it idles and takes no
+                // aperture translations, which an AP that never reached
+                // READY does not.
+                let failing = started.swap_remove(index);
+                crate::native_mmio::PROCESSORS.exclude(failing.destination);
+                failed.push((slot, StartupFailure::Timeout { slot }));
+                continue;
             }
             _ => {}
         }
         index += 1;
     }
-    Ok(())
 }
 
 fn refused(slot: usize, argument: &Argument) -> StartupFailure {

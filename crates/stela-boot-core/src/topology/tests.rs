@@ -791,18 +791,18 @@ fn core_floor_and_la57_are_required_independently_of_bsp() {
     for bit in [0, 9, 13, 19, 20, 23] {
         let mut changed = baseline;
         changed.records[0].ecx &= !(1 << bit);
-        assert_eq!(
+        assert!(matches!(
             changed.qualify_native(false),
-            Err(CapabilityRefusal::NativeFloor)
-        );
+            Err(CapabilityRefusal::NativeFloor(_))
+        ));
     }
     for bit in [0, 4, 5, 6, 8, 9, 12, 16, 24, 25, 26] {
         let mut changed = baseline;
         changed.records[0].edx &= !(1 << bit);
-        assert_eq!(
+        assert!(matches!(
             changed.qualify_native(false),
-            Err(CapabilityRefusal::NativeFloor)
-        );
+            Err(CapabilityRefusal::NativeFloor(_))
+        ));
     }
     let mut changed = baseline;
     changed.records[2].ecx = 0;
@@ -853,4 +853,36 @@ fn duplicate_physical_thread_refuses() {
     let mut cores = [processor(0, 0, 0, 0), processor(1, 0, 0, 0)];
     cores[0].flags |= BSP;
     assert_eq!(select(&cores), Err(Refusal::DuplicateThreadLocation));
+}
+
+#[test]
+fn a_missing_floor_names_each_feature() {
+    let baseline = native_snapshot();
+    let refusal = |changed: Snapshot| match changed.qualify_native(false) {
+        Err(CapabilityRefusal::NativeFloor(missing)) => missing,
+        other => panic!("{other:?}"),
+    };
+    // A Core 2 without SSE4.2 and POPCNT.
+    let mut changed = baseline;
+    changed.records[0].ecx &= !((1 << 20) | (1 << 23));
+    let missing = refusal(changed);
+    assert_eq!(missing.names().collect::<Vec<_>>(), ["SSE4.2", "POPCNT"]);
+    assert_eq!(
+        missing.refusal().to_string(),
+        "this PC's CPU lacks SSE4.2 and POPCNT; Stela needs an x86-64-v2 CPU (Intel Nehalem, \
+         AMD Bulldozer or newer)"
+    );
+    for (field, bit, name) in [(0, 0, "SSE3"), (0, 9, "SSSE3"), (0, 13, "CX16")] {
+        let mut changed = baseline;
+        changed.records[field].ecx &= !(1 << bit);
+        assert_eq!(refusal(changed).names().collect::<Vec<_>>(), [name]);
+    }
+    let mut changed = baseline;
+    changed.pat_valid = false;
+    changed.records[0].edx &= !(1 << 25);
+    assert_eq!(
+        refusal(changed).refusal().to_string(),
+        "this PC's CPU lacks SSE and a valid PAT setting; Stela needs an x86-64-v2 CPU (Intel Nehalem, AMD \
+         Bulldozer or newer)"
+    );
 }
