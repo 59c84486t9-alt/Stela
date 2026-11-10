@@ -293,8 +293,9 @@ impl<const N: usize> Domain<N> {
         deadlines.start_irq_ticks()?;
         Ok(Self::over(clock, deadlines))
     }
-    /// A domain that wakes only for raised work and its timer: no IRQ work
-    /// runs on it, and a CPU that runs guest code has no tick to spare.
+    /// A domain that wakes only for raised work and its timer, with no
+    /// periodic tick: for an owner whose IRQ work raises its own service, or
+    /// that has none. A CPU that runs guest code has no tick to spare.
     pub fn tickless(clock: Arc<dyn Clock>, idle: Arc<dyn Idle>) -> Result<Arc<Self>, WorkError> {
         let deadlines = Deadlines::new(clock.clone(), idle)?;
         Ok(Self::over(clock, deadlines))

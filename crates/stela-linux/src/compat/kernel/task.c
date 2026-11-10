@@ -1896,6 +1896,8 @@ static int finish_prepared(struct stela_linux_task *task, int result)
 		__builtin_trap();
 	task->prepared = false;
 	task->prepared_count = 0;
+	/* The task runs again, perhaps after a long idle: its jiffies are now. */
+	stela_linux_jiffies_refresh();
 	return result;
 }
 

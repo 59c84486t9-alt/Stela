@@ -1443,7 +1443,10 @@ pub(super) fn open(machine: Machine, claimed: Vec<Claimed>) -> Result<(), Error>
         idle: clock.idle(),
         pending: AtomicBool::new(false),
     });
-    let domain = Domain::new(time.clone(), events.clone()).map_err(environment_error)?;
+    // Linux's service runs for raised work and its earliest timer only:
+    // nothing here consumes a periodic tick, and one would pump the boot
+    // CPU every millisecond while the GPU idles.
+    let domain = Domain::tickless(time.clone(), events.clone()).map_err(environment_error)?;
     let realtime = wall.and_then(|reading| {
         if tsc_hz == 0
             || !crate::cpu::INVARIANT_TSC.present()

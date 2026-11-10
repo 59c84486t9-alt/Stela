@@ -55,6 +55,16 @@ static void update_jiffies(void)
     WRITE_ONCE(jiffies_64, sample);
 }
 
+/* The service has no periodic tick, so jiffies move only when Linux code
+ * runs. As Linux does when a CPU leaves tickless idle, a task that resumes
+ * brings them up to the clock first: an expiry it computes from a stale
+ * count would come early. An owner without a clock has no jiffies to move. */
+void stela_linux_jiffies_refresh(void)
+{
+    if (stela_linux_owner()->services->now_ns)
+        update_jiffies();
+}
+
 void stela_linux_timer_queue_current(void)
 {
     const struct stela_linux_owner *owner = stela_linux_owner();

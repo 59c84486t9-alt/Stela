@@ -9,6 +9,9 @@
  * S64_MAX when no timer is armed. */
 s64 stela_linux_service_run(const struct stela_linux_timer_delivery *delivery);
 
+/* Bring jiffies up to the clock, as a resuming task does. */
+void stela_linux_jiffies_refresh(void);
+
 /* Notify the mounted service after original source posts a softirq. */
 void stela_linux_service_softirq_raised(void);
 
