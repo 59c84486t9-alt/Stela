@@ -10,7 +10,7 @@ fn modelled(registers: &mut [u32], memory: &mut [u64], signalled: bool) -> Realt
     // SAFETY: the caller owns both allocations for the driver's lifetime.
     let (device, mut dma) = unsafe {
         (
-            Mmio::new(registers.as_mut_ptr() as u64),
+            Mmio::new(registers.as_mut_ptr() as u64, size_of_val(&registers[..])),
             RegionAllocator::new(start..start + (memory.len() * 8) as u64),
         )
     };

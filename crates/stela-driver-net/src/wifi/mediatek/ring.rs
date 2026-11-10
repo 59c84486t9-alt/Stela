@@ -94,7 +94,7 @@ impl MmioQueue {
     pub unsafe fn from_window(window: NonNull<[u32; 4]>, owner: Arc<dyn core::any::Any>) -> Self {
         Self {
             // SAFETY: covered by this function's own safety contract.
-            registers: unsafe { Mmio::new(window.as_ptr().cast::<u32>() as u64) },
+            registers: unsafe { Mmio::new(window.as_ptr().cast::<u32>() as u64, 16) },
             _owner: owner,
         }
     }

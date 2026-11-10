@@ -137,7 +137,7 @@ impl NativeBootIo {
         }
         Ok(Self {
             // SAFETY: covered by this function's own safety contract.
-            registers: unsafe { Mmio::new(window.as_ptr().cast::<u8>() as u64) },
+            registers: unsafe { Mmio::new(window.as_ptr().cast::<u8>() as u64, 16384) },
             minimum,
             owner,
         })

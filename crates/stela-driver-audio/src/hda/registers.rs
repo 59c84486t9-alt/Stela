@@ -125,7 +125,7 @@ impl MmioRegisters {
             // SAFETY: base is nonzero and aligned, and the extent was checked
             // above. The caller supplies an uncached identity mapping with
             // exclusive ownership through controller shutdown.
-            mmio: unsafe { Mmio::new(base) },
+            mmio: unsafe { Mmio::new(base, bytes) },
         })
     }
 }

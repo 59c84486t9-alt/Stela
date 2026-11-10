@@ -227,7 +227,7 @@ fn memory(bars: &[Option<Bar>], handoff: &Handoff) -> Result<(Mmio, usize), Erro
     }
     let bytes = usize::try_from(range.end - range.start).map_err(|_| Error::Malformed)?;
     // SAFETY: mapped uncached by the mount and owned by the caller.
-    Ok((unsafe { Mmio::new(range.start) }, bytes))
+    Ok((unsafe { Mmio::new(range.start, bytes) }, bytes))
 }
 
 const UHCI_LEGSUP: u16 = 0xc0;

@@ -37,7 +37,7 @@ fn initial_constructor_waits_for_resume_before_setup_and_keeps_failed_port() {
         registers[PORT_SIGNATURE / 4] = SIGNATURE_ATA;
         // SAFETY: this isolated device-model allocation outlives the call and
         // inspection. No hardware, native timing service or factory is used.
-        let port = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
+        let port = unsafe { Mmio::new(registers.as_mut_ptr() as u64, size_of_val(&registers[..])) };
         let mut dma = AllocationBoundary {
             timer: timer.clone(),
             calls: 0,

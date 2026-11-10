@@ -227,7 +227,8 @@ impl Fixture {
         // SAFETY: the fixture owns the memory for the driver's whole lifetime.
         let mut allocator = unsafe { RegionAllocator::new(start..start + 1_600_000) };
         // SAFETY: this aligned backing covers every register used by the driver.
-        let device = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
+        let device =
+            unsafe { Mmio::new(registers.as_mut_ptr() as u64, size_of_val(&registers[..])) };
         let mut net = E1000e {
             device,
             receive: Ring::new(&mut allocator).unwrap(),

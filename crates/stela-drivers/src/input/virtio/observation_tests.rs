@@ -9,7 +9,7 @@ pub(super) fn model(run: impl FnOnce(&mut VirtioInput)) {
     let mut notify = Box::new(0u16);
     // SAFETY: this model owns the sole aligned volatile notification register;
     // no device, interrupt worker or second driver accesses it.
-    let mmio = unsafe { Mmio::new((&mut *notify as *mut u16) as u64) };
+    let mmio = unsafe { Mmio::new((&mut *notify as *mut u16) as u64, size_of::<u16>()) };
     let producer = Producer::new(
         Description {
             origin: Origin::Virtio,

@@ -269,7 +269,7 @@ mod tests {
     /// written, and the device offers VERSION_1.
     fn modelled(common: &mut [u64], vector: u16) -> Modern {
         // SAFETY: the caller owns the memory for the transport's lifetime.
-        let common = unsafe { Mmio::new(common.as_mut_ptr() as u64) };
+        let common = unsafe { Mmio::new(common.as_mut_ptr() as u64, size_of_val(common)) };
         common.write32(DEVICE_FEATURE, 1);
         Modern {
             common,

@@ -604,7 +604,8 @@ mod tests {
                 unsafe { RegionAllocator::new(start..start + (backing.len() * 8) as u64) };
             let mut registers = vec![0u32; REGISTER_BYTES as usize / 4];
             // SAFETY: the vector is this fixture's exclusive live MMIO model.
-            let device = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
+            let device =
+                unsafe { Mmio::new(registers.as_mut_ptr() as u64, size_of_val(&registers[..])) };
             let mut net = Igc {
                 device,
                 receive: ManuallyDrop::new(Ring::with(&mut dma, DESCRIPTORS).unwrap()),

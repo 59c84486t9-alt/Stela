@@ -214,7 +214,7 @@ impl<Q: BeaconQueue> NativeIo<Q> {
         }
         Ok(Self {
             // SAFETY: the constructor's UC BAR/ownership contract.
-            registers: unsafe { Mmio::new(window.as_ptr() as u64) },
+            registers: unsafe { Mmio::new(window.as_ptr() as u64, bytes) },
             clock,
             profile,
             bytes,
@@ -322,7 +322,7 @@ impl Bar {
         }
         Ok(Self {
             // SAFETY: the constructor's exclusive mapped-BAR contract.
-            mmio: unsafe { Mmio::new(window.as_ptr() as u64) },
+            mmio: unsafe { Mmio::new(window.as_ptr() as u64, bytes) },
             profile,
             _owner: owner,
         })
@@ -385,7 +385,7 @@ mod tests {
         let mut io = NativeIo {
             // SAFETY: the model device, its pages and its domain belong to this test alone; no
             // other driver, worker or DMA touches them.
-            registers: unsafe { Mmio::new(address) },
+            registers: unsafe { Mmio::new(address, BAR_BYTES) },
             clock: Clock {
                 ticks_per_microsecond: 1,
             },

@@ -597,7 +597,7 @@ pub(super) unsafe fn realtek_wifi(
         subsystem_device,
         pci_revision,
         // SAFETY: same owned mapped BAR2, whose first page holds SYS_CFG1.
-        sys_cfg1: unsafe { crate::bus::mmio::Mmio::new(base.as_ptr() as u64) }.read32(0xf0),
+        sys_cfg1: unsafe { crate::bus::mmio::Mmio::new(base.as_ptr() as u64, 4096) }.read32(0xf0),
     };
     #[expect(
         clippy::arc_with_non_send_sync,
@@ -678,7 +678,7 @@ pub(super) unsafe fn intel_wifi<B: wifi::intel::radio::bios::service::BiosIo>(
                     .address(msix.table_offset as usize, 16)
                     .map_err(|error| Error::Native(ServiceError::Mapping(error)))?;
                 // SAFETY: this function's owned uncached MSI-X table stays kept.
-                let table = unsafe { crate::bus::mmio::Mmio::new(table.as_ptr() as u64) };
+                let table = unsafe { crate::bus::mmio::Mmio::new(table.as_ptr() as u64, 16) };
                 let vector = IntelVector {
                     msix,
                     table,

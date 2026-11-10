@@ -214,7 +214,7 @@ impl EcamConfig {
         Self {
             // SAFETY: caller owns this live mapped UC ECAM function
             // and excludes every competing accessor for the transport life.
-            transport: EcamTransport::Raw(unsafe { Mmio::new(base) }),
+            transport: EcamTransport::Raw(unsafe { Mmio::new(base, 4096) }),
             _context: core::marker::PhantomData,
         }
     }

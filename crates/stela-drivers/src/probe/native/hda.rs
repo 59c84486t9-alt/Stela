@@ -142,7 +142,7 @@ pub(in crate::probe) unsafe fn attach(
     let registers = Bar0 {
         // SAFETY: exactly this original owned UC BAR0; Native outer owner
         // keeps actual mapping across constructor error and callback unwind.
-        mmio: unsafe { Mmio::new(window.as_ptr() as u64) },
+        mmio: unsafe { Mmio::new(window.as_ptr() as u64, bytes) },
         bytes,
         mapping: cold.mapping.take().unwrap(),
     };

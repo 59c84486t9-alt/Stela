@@ -79,7 +79,7 @@ pub fn registers(
         return Err(BlockError::Unsupported("registers are not mapped"));
     }
     // SAFETY: mapped uncached by stela.efi and owned by this one driver.
-    Ok(unsafe { Mmio::new(start) })
+    Ok(unsafe { Mmio::new(start, bytes as usize) })
 }
 
 /// What runs while a driver waits: the mount's boot screen moves its

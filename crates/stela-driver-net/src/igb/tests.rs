@@ -709,7 +709,9 @@ impl DmaFixture {
         let mut dma = unsafe { RegionAllocator::new(physical..physical + 1_600_000) };
         let mut net = Igb {
             // SAFETY: this fixture exclusively owns the complete register backing.
-            device: unsafe { Mmio::new(registers.as_mut_ptr() as u64) },
+            device: unsafe {
+                Mmio::new(registers.as_mut_ptr() as u64, size_of_val(&registers[..]))
+            },
             receive: Ring::new(&mut dma).unwrap(),
             transmit: Ring::new(&mut dma).unwrap(),
             dropping: false,
