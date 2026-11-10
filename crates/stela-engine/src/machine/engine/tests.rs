@@ -8660,6 +8660,7 @@ fn upper_occupancy_lists_the_mapped_level_one_ranges_and_outermost_blocks() {
 }
 
 mod arena;
+mod exits;
 mod floating_point_traps;
 mod pstate_features;
 mod recovery;

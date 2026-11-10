@@ -327,6 +327,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     && stack_based(word)
                     && !self.cpu.state.sp.is_multiple_of(16)
                 {
+                    self.timed_check(step_timing::Check::Alignment);
                     self.take(Exception::synchronous(Class::SpAlignment, 0, pc));
                     Ok(())
                 } else {

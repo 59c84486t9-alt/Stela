@@ -116,9 +116,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let device = self.timed_device.take().filter(|_| {
             slot == step_timing::DEVICE_FAULT_SLOT || slot == step_timing::DEVICE_SITE_SLOT
         });
-        if self.step_timing.is_none() {
+        let Some(timing) = &mut self.step_timing else {
             return;
-        }
+        };
+        let check = timing.check.take();
+        let slot = match check {
+            Some(check) if slot == step_timing::CHECK_FAULT_SLOT => check.slot(),
+            _ => slot,
+        };
         let now = self.host.profile_ticks();
         let closed = core::mem::take(&mut self.timed_closed);
         let waited = device.map_or(0, |_| self.devices.take_lock_wait());
@@ -151,6 +156,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if let Some(exit) = timing.exits.get_mut(slot) {
                 *exit = (exit.0 + 1, exit.1 + spent);
             }
+        }
+    }
+
+    /// Under step timing, charge the native check fault being handled to
+    /// what the engine found at it ([`step_timing::Check`]).
+    #[inline]
+    pub(super) fn timed_check(&mut self, check: step_timing::Check) {
+        if let Some(timing) = &mut self.step_timing {
+            timing.check = Some(check);
         }
     }
 

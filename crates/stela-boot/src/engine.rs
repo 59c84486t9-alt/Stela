@@ -617,6 +617,17 @@ fn devices(
 static EVENTS: AtomicU64 = AtomicU64::new(0);
 static INTERRUPTS: AtomicU64 = AtomicU64::new(0);
 
+/// Count one more event on `counter` and give its count before, while it is
+/// below `limit`; `limit` once it is reached. Every PE reports each of its
+/// exceptions and returns here: past the allowance the shared line stays
+/// read-only, so they do not contend for it.
+fn allowance(counter: &AtomicU64, limit: u64) -> u64 {
+    if counter.load(Ordering::Relaxed) >= limit {
+        return limit;
+    }
+    counter.fetch_add(1, Ordering::Relaxed)
+}
+
 pub(crate) fn report(event: &Event) {
     // Explicit monitor traces bypass the ordinary progress-event limit
     // without consuming its reporting allowance.
@@ -641,7 +652,7 @@ pub(crate) fn report(event: &Event) {
         ));
         return;
     }
-    let count = EVENTS.fetch_add(1, Ordering::Relaxed);
+    let count = allowance(&EVENTS, REPORTED_EVENTS);
     let interrupt = matches!(
         event,
         Event::Exception { vector, .. } if *vector != stela_engine::machine::exception::Vector::Synchronous
@@ -664,7 +675,7 @@ pub(crate) fn report(event: &Event) {
     let quiet = if guarded_fault || noncanonical_fault {
         false
     } else if interrupt {
-        INTERRUPTS.fetch_add(1, Ordering::Relaxed) >= REPORTED_INTERRUPTS
+        allowance(&INTERRUPTS, REPORTED_INTERRUPTS) >= REPORTED_INTERRUPTS
     } else {
         count >= REPORTED_EVENTS
     };

@@ -41,16 +41,50 @@ impl Phase {
 }
 
 /// The exits [`StepTiming::exits`] counts: each `ExitKind`, then native
-/// faults by cause ([`fault_slot`]), then [`DEVICE_SITE_SLOT`].
-pub const EXIT_SLOTS: usize = FAULT_SLOTS + 6;
+/// faults by cause ([`fault_slot`]), then [`DEVICE_SITE_SLOT`], then the
+/// native check faults by what the engine found ([`Check`]).
+pub const EXIT_SLOTS: usize = CHECK_SLOTS + Check::COUNT;
 /// [`StepTiming::exits`]' first native-fault slot.
 const FAULT_SLOTS: usize = 13;
 /// The slot of native faults that reached a device ([`fault_slot`]).
 pub const DEVICE_FAULT_SLOT: usize = FAULT_SLOTS + 1;
+/// The slot of native check faults (`FaultCause::NonCanonical` and
+/// `InvalidOpcode`) whose outcome no [`Check`] names.
+pub const CHECK_FAULT_SLOT: usize = FAULT_SLOTS + 2;
 /// The slot of System exits at a device site's stub: device accesses the
 /// engine completes (`Machine::complete_device_site`), not System
 /// instructions.
 pub const DEVICE_SITE_SLOT: usize = FAULT_SLOTS + 5;
+/// [`StepTiming::exits`]' first [`Check`] slot.
+const CHECK_SLOTS: usize = DEVICE_SITE_SLOT + 1;
+
+/// What the engine found at a native check fault, which takes the fault's
+/// slot from [`CHECK_FAULT_SLOT`] ([`Check::slot`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum Check {
+    /// A tagged address that translates under TBI, run again untagged by a
+    /// single-instruction block (`Machine::retry_untagged`).
+    Tagged,
+    /// An Alignment fault: SP alignment, SCTLR_ELx.A, or an atomic or
+    /// ordered access crossing its granule.
+    Alignment,
+    /// An address outside the native ranges whose translation faults: a
+    /// Data Abort.
+    Abort,
+    /// An untagged address the host does not map natively: the page runs in
+    /// the translated variant.
+    Translated,
+}
+
+impl Check {
+    pub const COUNT: usize = Self::Translated as usize + 1;
+
+    /// Its slot in [`StepTiming::exits`].
+    pub const fn slot(self) -> usize {
+        CHECK_SLOTS + self as usize
+    }
+}
 
 /// The [`SystemExits`] key of an exit at a device site's stub. No System
 /// instruction has this word.
@@ -297,7 +331,7 @@ pub fn fault_slot(cause: &super::FaultCause) -> usize {
         + match cause {
             FaultCause::Guest(_) => 0,
             FaultCause::Device { .. } => DEVICE_FAULT_SLOT - FAULT_SLOTS,
-            FaultCause::NonCanonical | FaultCause::InvalidOpcode => 2,
+            FaultCause::NonCanonical | FaultCause::InvalidOpcode => CHECK_FAULT_SLOT - FAULT_SLOTS,
             FaultCause::Watched | FaultCause::TagChecked => 3,
             FaultCause::Translation(_) => 4,
         }
@@ -351,6 +385,9 @@ pub struct StepTiming {
     /// Exits handled and the ticks handling them, by `ExitKind` value, then
     /// native faults by cause ([`fault_slot`]).
     pub exits: [(u64, u64); EXIT_SLOTS],
+    /// What the native check fault being handled found, which its exit is
+    /// charged to ([`Check`]).
+    pub check: Option<Check>,
 }
 
 impl StepTiming {
@@ -585,6 +622,38 @@ mod tests {
                 ticks: 20
             }
         );
+    }
+
+    /// A native check fault is charged to what the engine found at it, once;
+    /// another exit keeps its slot and leaves the finding alone.
+    #[test]
+    fn check_faults_are_charged_by_outcome() {
+        assert_eq!(
+            fault_slot(&super::super::FaultCause::NonCanonical),
+            CHECK_FAULT_SLOT
+        );
+        let slots = [
+            Check::Tagged,
+            Check::Alignment,
+            Check::Abort,
+            Check::Translated,
+        ]
+        .map(Check::slot);
+        assert_eq!(slots, [19, 20, 21, 22]);
+        assert_eq!(EXIT_SLOTS, 23);
+        let mut machine = super::super::tests::machine(&[]);
+        machine.set_step_timing(true);
+        machine.timed_check(Check::Tagged);
+        machine.timing_exit(CHECK_FAULT_SLOT, 0);
+        machine.timing_exit(CHECK_FAULT_SLOT, 0);
+        machine.timed_check(Check::Abort);
+        machine.timing_exit(FAULT_SLOTS, 0);
+        let exits = machine.step_timing().unwrap().exits;
+        assert_eq!(exits[Check::Tagged.slot()].0, 1);
+        assert_eq!(exits[CHECK_FAULT_SLOT].0, 1);
+        assert_eq!(exits[FAULT_SLOTS].0, 1);
+        assert_eq!(exits[Check::Abort.slot()].0, 0);
+        assert_eq!(machine.step_timing().unwrap().check, None);
     }
 
     #[test]

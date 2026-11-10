@@ -17,6 +17,10 @@ use {
     super::system::helpers::effective_nvx, stela_contracts::Feature,
 };
 
+/// How often [`Cpu::note_ctrr_locks`] looks again for a CTRR group that was
+/// not locked: a cluster's groups lock once, while its PEs start.
+const CTRR_LOOKS: u8 = 64;
+
 pub const HCR_VM: u32 = 0;
 pub const HCR_FMO: u32 = 3;
 pub const HCR_IMO: u32 = 4;
@@ -278,6 +282,18 @@ pub struct Cpu {
     pub ctrr: super::shared::Shared<super::ctrr::Cluster>,
     /// This PE's own CTRR registers on the M4 and later.
     pub ctrr_core: super::ctrr::Core,
+    /// The groups of [`Self::ctrr`] found locked, with the cluster they were
+    /// read from ([`Self::note_ctrr_locks`]): a locked group keeps its values,
+    /// so [`Self::controls`] reads them without the cluster's lock, which
+    /// every PE of the cluster would otherwise take at each exception entry
+    /// and return.
+    ctrr_locked: Option<(
+        super::shared::Shared<super::ctrr::Cluster>,
+        [Option<super::ctrr::Group>; 2],
+    )>,
+    /// Calls of [`Self::note_ctrr_locks`] that found the current regime's
+    /// group unlocked.
+    ctrr_looks: u8,
     /// What iBoot left in the core lock registers, which every PE and
     /// cluster starts from.
     pub core_locks: alloc::sync::Arc<super::ctrr::CoreLocks>,
@@ -436,6 +452,8 @@ impl Cpu {
             retired: 0,
             ctrr: Default::default(),
             ctrr_core: super::ctrr::Core::default(),
+            ctrr_locked: None,
+            ctrr_looks: 0,
             core_locks: Default::default(),
             memory_lock: [None; 4],
             degraded: alloc::collections::BTreeMap::new(),
@@ -910,7 +928,7 @@ impl Cpu {
             ctrr: mmu::Ctrr {
                 privileged: super::ctrr::protection(
                     self.registers.chip(),
-                    &self.ctrr.borrow(),
+                    |level| self.ctrr_group(level),
                     &self.ctrr_core,
                     regime == TranslationRegime::El20,
                     self.read(sctlr) & mmu::SCTLR_M != 0,
@@ -929,6 +947,48 @@ impl Cpu {
                 TranslationRegime::El20 => mmu::Regime::El20,
             },
         }
+    }
+
+    /// The CTRR group of `level` (0 for EL1, 1 for EL2) of this PE's
+    /// cluster: as last found locked, or read under the cluster's lock.
+    fn ctrr_group(&self, level: usize) -> super::ctrr::Group {
+        match &self.ctrr_locked {
+            Some((cluster, groups)) if cluster.ptr_eq(&self.ctrr) => groups[level],
+            _ => None,
+        }
+        .unwrap_or_else(|| self.ctrr.borrow().levels[level])
+    }
+
+    /// Keep the CTRR groups of this PE's cluster that are locked, for
+    /// [`Self::controls`] to read without the cluster's lock: looked at
+    /// again when the PE moved to another cluster, and every
+    /// [`CTRR_LOOKS`]th call while the current regime's group is not kept,
+    /// which [`Self::controls`] reads under the lock meanwhile. A chip
+    /// without the M1 to M3 groups keeps none.
+    pub fn note_ctrr_locks(&mut self) {
+        if !super::ctrr::Cluster::grouped(self.registers.chip()) {
+            return;
+        }
+        let level = usize::from(self.regime() == TranslationRegime::El20);
+        if let Some((cluster, groups)) = &self.ctrr_locked
+            && cluster.ptr_eq(&self.ctrr)
+        {
+            if groups[level].is_some() {
+                return;
+            }
+            self.ctrr_looks = self.ctrr_looks.wrapping_add(1);
+            if !self.ctrr_looks.is_multiple_of(CTRR_LOOKS) {
+                return;
+            }
+        }
+        let locked = self.ctrr.borrow().locked();
+        self.ctrr_locked = Some((self.ctrr.clone(), locked));
+    }
+
+    /// Forget the locked CTRR groups kept, for a cluster whose registers are
+    /// replaced (`engine::Machine::hand_off_core_locks`).
+    pub fn forget_ctrr_locks(&mut self) {
+        self.ctrr_locked = None;
     }
 
     /// Whether the EL1&0 regime translates through stage 2.
@@ -1271,6 +1331,46 @@ mod tests {
                 assert_eq!(current.asid, Some(mmu::current_asid(&controls)));
             }
         }
+    }
+
+    /// A locked CTRR group is read without the cluster's lock once noted;
+    /// an unlocked one is read live, so another PE's write reaches it.
+    #[test]
+    fn controls_keep_locked_ctrr_groups_and_read_unlocked_ones_live() {
+        use crate::machine::ctrr::Field;
+        let mut cpu = Cpu::of(stela_contracts::Chip::AppleM2, 0x4000, Pstate::reset(1));
+        let other = cpu.ctrr.clone();
+        let set = |level, first, control| {
+            let mut cluster = other.borrow_mut();
+            cluster.write(level, Field::Lower, first).unwrap();
+            cluster.write(level, Field::Upper, first + 0xfff).unwrap();
+            cluster.write(level, Field::Control, control).unwrap();
+        };
+        let first = |cpu: &Cpu| {
+            cpu.controls(TranslationRegime::El10).ctrr.privileged[0].map(|region| region.first)
+        };
+        set(0, 0x1000, 0x13);
+        cpu.note_ctrr_locks();
+        assert_eq!(first(&cpu), Some(0x1000));
+        // Unlocked: another PE's write is seen at once.
+        set(0, 0x2000, 0x13);
+        cpu.note_ctrr_locks();
+        assert_eq!(first(&cpu), Some(0x2000));
+        other.borrow_mut().write(0, Field::Lock, 1).unwrap();
+        for _ in 0..=CTRR_LOOKS {
+            cpu.note_ctrr_locks();
+        }
+        let kept = cpu
+            .ctrr_locked
+            .as_ref()
+            .map(|(_, groups)| groups[0].is_some());
+        assert_eq!(kept, Some(true));
+        assert_eq!(first(&cpu), Some(0x2000));
+        // Another cluster is looked at again.
+        cpu.ctrr = crate::machine::shared::Shared::default();
+        assert_eq!(first(&cpu), None);
+        cpu.note_ctrr_locks();
+        assert_eq!(first(&cpu), None);
     }
 
     #[test]

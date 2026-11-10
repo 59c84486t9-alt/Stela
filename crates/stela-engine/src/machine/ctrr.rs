@@ -271,6 +271,16 @@ impl Cluster {
         self.levels[level].get(field)
     }
 
+    /// The groups locked now, which no write changes again ([`Self::write`]).
+    pub fn locked(&self) -> [Option<Group>; 2] {
+        self.levels.map(|group| group.locked.then_some(group))
+    }
+
+    /// Whether the M1 to M3 groups are the registers `chip` has.
+    pub fn grouped(chip: Chip) -> bool {
+        generation(chip) == Some(Generation::A)
+    }
+
     /// A write, or why it cannot complete.
     pub fn write(&mut self, level: usize, field: Field, value: u64) -> Result<(), WriteError> {
         let group = &mut self.levels[level];
@@ -582,17 +592,18 @@ impl Core {
 }
 
 /// The protection the regime of level `el2` (EL2&0 when set, EL1&0 when
-/// clear) applies, with the MMU on or off.
+/// clear) applies, with the MMU on or off. `group` gives the cluster's
+/// group of a level, which only the M1 to M3 read.
 pub fn protection(
     chip: Chip,
-    cluster: &Cluster,
+    group: impl FnOnce(usize) -> Group,
     core: &Core,
     el2: bool,
     mmu_on: bool,
 ) -> [Option<mmu::CtrrRegion>; 2] {
     match generation(chip) {
         None => [None, None],
-        Some(Generation::A) => [cluster.levels[usize::from(el2)].region(mmu_on), None],
+        Some(Generation::A) => [group(usize::from(el2)).region(mmu_on), None],
         Some(Generation::Ctrr3) if el2 => core.el2.protection(),
         Some(Generation::Ctrr3) => core.el1.protection(),
     }
@@ -738,12 +749,12 @@ mod tests {
             bank.write(LockRegion::CtxrB, Field::Control, 1 << 40),
             Err(WriteError::UnknownControl(_))
         ));
-        let [c, d] = protection(Chip::AppleM4, &Cluster::default(), &core, true, false);
+        let [c, d] = protection(Chip::AppleM4, |_| unreachable!(), &core, true, false);
         let c = c.unwrap();
         assert_eq!((c.first, c.last), (0x100_06fb_8000, 0x100_0710_bfff));
         assert!(c.write_protect && !c.execute_inside_only && d.is_none());
         assert_eq!(
-            protection(Chip::AppleM4, &Cluster::default(), &core, false, true),
+            protection(Chip::AppleM4, |_| unreachable!(), &core, false, true),
             [None, None]
         );
     }

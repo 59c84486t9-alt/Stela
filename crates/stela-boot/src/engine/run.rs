@@ -4,8 +4,9 @@
 use super::*;
 
 /// Exit kinds by `ExitKind` value, then native faults by cause
-/// (`step_timing::fault_slot`), then System exits at device sites, as the
-/// PROFILE line names them.
+/// (`step_timing::fault_slot`), then System exits at device sites, then the
+/// `fault-check` faults by outcome (`step_timing::Check`), as the PROFILE
+/// line names them.
 pub(super) const EXIT_NAMES: [&str; step_timing::EXIT_SLOTS] = [
     "fallthrough",
     "direct",
@@ -26,6 +27,10 @@ pub(super) const EXIT_NAMES: [&str; step_timing::EXIT_SLOTS] = [
     "fault-watched",
     "fault-translation",
     "device-site",
+    "check-tagged",
+    "check-alignment",
+    "check-abort",
+    "check-translated",
 ];
 
 /// `--profile`'s heartbeat lines: of `elapsed` ticks, the share inside the

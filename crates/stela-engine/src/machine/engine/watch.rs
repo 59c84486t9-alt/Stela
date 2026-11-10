@@ -15,6 +15,7 @@
 use super::{
     Devices, Host, Machine, RequirementKind, Step, Stop,
     debug::{self, Access},
+    step_timing,
     tags::{TagCheck, tag_checked_form},
 };
 use crate::machine::{
@@ -356,6 +357,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             // (Arm `NoFault`).
             let write = access.write && !access.read;
             if alignment::before_translation(sctlr, access.address, shape) {
+                self.timed_check(step_timing::Check::Alignment);
                 return self.alignment_fault(access.address, write);
             }
             if !in_guest_range(access.address) {
@@ -366,6 +368,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 };
                 return match self.translate_data(access.address, kind) {
                     mmu::Outcome::Fault(fault) => {
+                        self.timed_check(step_timing::Check::Abort);
                         self.data_abort(access.address, fault, write, false)
                     }
                     mmu::Outcome::Unsupported(unsupported) => {
@@ -374,7 +377,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     // An untagged address the host does not map natively:
                     // the page runs in the translated variant.
                     mmu::Outcome::Mapped(_) if !in_guest_range(without_tag(access.address)) => {
-                        self.run_translated(index, pc, access.address)
+                        let step = self.run_translated(index, pc, access.address);
+                        self.timed_check(step_timing::Check::Translated);
+                        step
                     }
                     // TBI, or a 52-bit range: the shadow maps 48-bit
                     // untagged addresses only. A tagged base runs again
@@ -392,6 +397,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                         let step = self.retry_untagged(pc, word, access.address);
                         self.tags_checked_at = None;
                         if let Some(step) = step {
+                            // After the retry's own run, whose exit is
+                            // charged apart.
+                            self.timed_check(step_timing::Check::Tagged);
                             return step;
                         }
                         let mut requirement = self.requirement(RequirementKind::Native(

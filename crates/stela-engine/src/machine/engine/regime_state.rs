@@ -221,6 +221,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         self.watch = watch;
         self.tag_checks = self.cpu.tag_checks();
+        self.cpu.note_ctrr_locks();
         let regime = Regime {
             controls: self.cpu.translating_controls(self.cpu.regime()),
             requester: self.cpu.requester(),

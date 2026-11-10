@@ -997,6 +997,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         });
         for cpu in core::iter::once(&mut self.cpu).chain(parked) {
             cpu.ctrr.replace(ctrr::Cluster::handed_off(&handoff));
+            cpu.forget_ctrr_locks();
             cpu.ctrr_core = ctrr::Core::handed_off(&handoff);
             cpu.core_locks = handoff.clone();
         }
