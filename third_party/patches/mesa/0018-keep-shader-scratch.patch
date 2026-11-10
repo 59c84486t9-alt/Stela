@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 09:35:20 -0500
+Subject: [PATCH] nvk: Keep shader scratch in VRAM with 2 MiB pages and grow it
+ when a shader is created
+
+---
+ src/nouveau/vulkan/nvk_device.c | 18 ++++++++++++++++--
+ src/nouveau/vulkan/nvk_shader.c |  7 +++++++
+ 2 files changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/src/nouveau/vulkan/nvk_device.c b/src/nouveau/vulkan/nvk_device.c
+index 40decf9b119e975f7743c63cee9b2335dbd70566..63ebc4495064ef7843336c7689fba2dede3d4711 100644
+--- a/src/nouveau/vulkan/nvk_device.c
++++ b/src/nouveau/vulkan/nvk_device.c
+@@ -99,9 +99,23 @@ nvk_slm_area_ensure(struct nvk_device *dev,
+     */
+    size = align64(size, 0x20000);
+ 
++   /* Scratch is GPU-only and sized for every warp of every TPC, so it can
++    * be gigabytes. Memory that may move to GART gets 4 KiB pages, one page
++    * table per 2 MiB; VRAM-only memory gets 2 MiB pages and none. It then
++    * cannot spill to system memory, so fall back when VRAM is short.
++    */
++   const uint64_t big_page_B = 1ull << 21;
+    struct nvkmd_mem *mem;
+-   result = nvkmd_dev_alloc_mem(dev->nvkmd, &dev->vk.base, size, 0,
+-                                NVKMD_MEM_LOCAL, &mem);
++   result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
++   if (size >= big_page_B && pdev->info.vram_size_B >= size) {
++      result = nvkmd_dev_alloc_mem(dev->nvkmd, &dev->vk.base,
++                                   align64(size, big_page_B), big_page_B,
++                                   NVKMD_MEM_VRAM, &mem);
++   }
++   if (result != VK_SUCCESS) {
++      result = nvkmd_dev_alloc_mem(dev->nvkmd, &dev->vk.base, size, 0,
++                                   NVKMD_MEM_LOCAL, &mem);
++   }
+    if (result != VK_SUCCESS)
+       return result;
+ 
+diff --git a/src/nouveau/vulkan/nvk_shader.c b/src/nouveau/vulkan/nvk_shader.c
+index 7e94caa94544f60d33827efb097e1b4b16364577..fe4c2a4317f1eb89eebf094e25e9735eba8ec038 100644
+--- a/src/nouveau/vulkan/nvk_shader.c
++++ b/src/nouveau/vulkan/nvk_shader.c
+@@ -725,6 +725,13 @@ nvk_shader_upload(struct nvk_device *dev, struct nvk_shader *shader)
+       }
+       shader->gs_hdr_addr = shader->upload_addr + gs_hdr_offset;
+       shader->data_addr = shader->upload_addr + data_offset;
++
++      /* Grow the device's scratch now, while the shader is created, so the
++       * first command buffer that binds it does not allocate and map it.
++       * A failure here is retried at bind.
++       */
++      nvk_device_ensure_slm(dev, shader->info.slm_size,
++                            shader->info.crs_size);
+    }
+    free(data);
+ 

@@ -2059,11 +2059,13 @@ pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
 
 /// `\nGPU NVKM kind:count/total_us/longest_us …`: where nouveau's page-table
 /// and instance-memory paths spent their time since the last report
-/// (`include/nvkm/core/counts.h`), for kinds that ran. Empty when none did.
+/// (`include/nvkm/core/counts.h`), for kinds that ran, then
+/// `\nGPU NVKM SIZES kind:count/total_kib/largest_kib …` for its page-table
+/// references by page size and its sparse references. Empty when none ran.
 #[cfg(feature = "nvk")]
 fn nvkm_report() -> String {
     /// `enum nvkm_count`'s kinds, in order.
-    const KINDS: [&str; 8] = [
+    const KINDS: [&str; 12] = [
         "flush",
         "pt_new",
         "pt_cached",
@@ -2072,31 +2074,53 @@ fn nvkm_report() -> String {
         "evict",
         "kmap_slow",
         "rpc",
+        "get_4k",
+        "get_64k",
+        "get_2m",
+        "sparse",
     ];
+    /// The first kind that counts bytes, not nanoseconds.
+    const SIZES: usize = 8;
     unsafe extern "C" {
-        /// `nvkm/subdev/mmu/base.c`: per kind a count, nanoseconds and the
-        /// longest, which nvkm updates atomically.
-        static nvkm_counts: [[AtomicU64; 3]; 8];
+        /// `nvkm/subdev/mmu/base.c`: per kind a count, nanoseconds (or
+        /// bytes) and the longest (or largest), which nvkm updates
+        /// atomically.
+        static nvkm_counts: [[AtomicU64; 3]; 12];
     }
-    let mut line = String::new();
+    let mut times = String::new();
+    let mut sizes = String::new();
     // SAFETY: nvkm's static counters, which it only updates atomically.
     let counts = unsafe { &nvkm_counts };
-    for (kind, [count, total, longest]) in KINDS.iter().zip(counts) {
+    for (index, (kind, [count, total, longest])) in KINDS.iter().zip(counts).enumerate() {
         let count = count.swap(0, Ordering::Relaxed);
         let total = total.swap(0, Ordering::Relaxed);
         let longest = longest.swap(0, Ordering::Relaxed);
-        if count != 0 {
-            if line.is_empty() {
-                line.push_str("\nGPU NVKM kind:count/total_us/longest_us");
-            }
-            line.push_str(&format!(
-                " {kind}:{count}/{}/{}",
-                total / 1000,
-                longest / 1000
-            ));
+        if count == 0 {
+            continue;
         }
+        let (line, head, unit) = if index < SIZES {
+            (
+                &mut times,
+                "\nGPU NVKM kind:count/total_us/longest_us",
+                1000,
+            )
+        } else {
+            (
+                &mut sizes,
+                "\nGPU NVKM SIZES kind:count/total_kib/largest_kib",
+                1024,
+            )
+        };
+        if line.is_empty() {
+            line.push_str(head);
+        }
+        line.push_str(&format!(
+            " {kind}:{count}/{}/{}",
+            total / unit,
+            longest / unit
+        ));
     }
-    line
+    times + &sizes
 }
 
 /// The function of the timer-list timer due first when Linux last looked,

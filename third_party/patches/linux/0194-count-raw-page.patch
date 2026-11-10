@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 09:35:20 -0500
+Subject: [PATCH] feat(nouveau): count raw page-table references by page size
+ and sparse references in bytes
+
+---
+ .../drm/nouveau/include/nvkm/core/counts.h    | 23 +++++++++++++++++--
+ .../gpu/drm/nouveau/nvkm/subdev/mmu/uvmm.c    |  4 ++++
+ 2 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h b/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h
+index 5fa2d2efbf8105783e1ea1910ad9c24919808efb..46f9ffaa063a3729b18a74afed06468f87c66acc 100644
+--- a/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h
++++ b/drivers/gpu/drm/nouveau/include/nvkm/core/counts.h
+@@ -18,15 +18,19 @@ enum nvkm_count {
+ 	NVKM_COUNT_EVICT,	/* BAR2 mapping evicted for another. */
+ 	NVKM_COUNT_KMAP_SLOW,	/* no BAR2 mapping: PRAMIN window accessors. */
+ 	NVKM_COUNT_RPC,		/* GSP-RM RPC, reply wait included. */
++	/* Sizes, not times: bytes in place of nanoseconds. */
++	NVKM_COUNT_GET_4K,	/* raw page-table reference, 4 KiB pages. */
++	NVKM_COUNT_GET_64K,	/* raw page-table reference, 64 KiB pages. */
++	NVKM_COUNT_GET_2M,	/* raw page-table reference, 2 MiB or larger. */
++	NVKM_COUNT_SPARSE,	/* raw sparse reference. */
+ 	NVKM_COUNTS
+ };
+ 
+ extern u64 nvkm_counts[NVKM_COUNTS][3];
+ 
+ static inline void
+-nvkm_count(enum nvkm_count kind, ktime_t start)
++nvkm_count_value(enum nvkm_count kind, u64 ns)
+ {
+-	u64 ns = start ? ktime_to_ns(ktime_sub(ktime_get(), start)) : 0;
+ 	u64 *slot = nvkm_counts[kind];
+ 	u64 longest = __atomic_load_n(&slot[2], __ATOMIC_RELAXED);
+ 
+@@ -37,4 +41,19 @@ nvkm_count(enum nvkm_count kind, ktime_t start)
+ 					    __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+ 		;
+ }
++
++static inline void
++nvkm_count(enum nvkm_count kind, ktime_t start)
++{
++	nvkm_count_value(kind, start ? ktime_to_ns(ktime_sub(ktime_get(), start)) : 0);
++}
++
++/* A raw page-table reference of size bytes with pages of 1 << shift. */
++static inline void
++nvkm_count_get(u8 shift, u64 size)
++{
++	nvkm_count_value(shift <= 12 ? NVKM_COUNT_GET_4K :
++			 shift <= 16 ? NVKM_COUNT_GET_64K : NVKM_COUNT_GET_2M,
++			 size);
++}
+ #endif
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/uvmm.c b/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/uvmm.c
+index fefbe65af9f1b83343724d8603cfd147b7fbc2c0..24855ee44ca757bd40204d7b1b94ebaa5611973f 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/uvmm.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/uvmm.c
+@@ -25,6 +25,7 @@
+ 
+ #include <core/client.h>
+ #include <core/memory.h>
++#include <core/counts.h>
+ 
+ #include <nvif/if000c.h>
+ #include <nvif/unpack.h>
+@@ -364,6 +365,7 @@ nvkm_uvmm_mthd_raw_get(struct nvkm_uvmm *uvmm, struct nvif_vmm_raw_v0 *args)
+ 	if (ret)
+ 		return ret;
+ 
++	nvkm_count_get(args->shift, args->size);
+ 	return nvkm_vmm_raw_get(vmm, args->addr, args->size, refd);
+ }
+ 
+@@ -455,6 +457,8 @@ nvkm_uvmm_mthd_raw_sparse(struct nvkm_uvmm *uvmm, struct nvif_vmm_raw_v0 *args)
+ 	if (!nvkm_vmm_in_managed_range(vmm, args->addr, args->size))
+ 		return -EINVAL;
+ 
++	if (args->ref)
++		nvkm_count_value(NVKM_COUNT_SPARSE, args->size);
+ 	return nvkm_vmm_raw_sparse(vmm, args->addr, args->size, args->ref);
+ }
+ 
