@@ -629,6 +629,8 @@ pub(super) struct Heartbeat {
     /// ([`Self::step`]), and what its stages took so far.
     pub(super) stage: Option<BeatStage>,
     pub(super) cost: BeatCost,
+    /// The hardware counters at the last `PES PMU` line (`host::pmu`).
+    pub(super) pmu: host::pmu::Seen,
 }
 
 /// The heartbeat's reports after its first part ([`Heartbeat::beat`]), in
@@ -689,6 +691,7 @@ impl Heartbeat {
             timing: machine.step_timing().copied(),
             stage: None,
             cost: BeatCost::new(),
+            pmu: host::pmu::Seen::new(),
         }
     }
 
@@ -750,6 +753,8 @@ impl Heartbeat {
         if let (Some(now), Some(then)) = (machine.step_timing().copied(), self.timing) {
             profile_report(&now.since(&then), self.sliced_ticks, elapsed, tsc_hz);
             self.timing = Some(now);
+            // Hardware counters by phase, per PE: `host::pmu::report`.
+            host::pmu::report(&mut self.pmu);
         }
         self.sliced_ticks = 0;
         #[cfg(feature = "native-profile")]

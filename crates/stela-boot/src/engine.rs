@@ -841,6 +841,9 @@ fn run_machine<H: Host>(
     }
     machine.set_step_timing(options.profile);
     if options.profile {
+        host::pmu::start(machine.processor());
+    }
+    if options.profile {
         output::arguments(format_args!(
             "PROFILE on: each heartbeat reports the engine's time by phase and exit kind\n"
         ));

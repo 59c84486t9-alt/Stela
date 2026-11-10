@@ -625,6 +625,14 @@ impl Host for BareHost<'_> {
         rdtsc()
     }
 
+    fn profile_boundary(
+        &mut self,
+        phase: stela_engine::machine::engine::step_timing::Phase,
+        now: u64,
+    ) {
+        pmu::boundary(phase, now);
+    }
+
     fn counter(&mut self) -> u64 {
         fresh_counter()
     }

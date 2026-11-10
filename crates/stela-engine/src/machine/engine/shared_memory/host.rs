@@ -414,6 +414,9 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
     fn profile_ticks(&mut self) -> u64 {
         self.local.profile_ticks()
     }
+    fn profile_boundary(&mut self, phase: crate::machine::engine::step_timing::Phase, now: u64) {
+        self.local.profile_boundary(phase, now);
+    }
     fn translations(&mut self) -> Option<&mut dyn crate::machine::Translations> {
         self.local.translations()
     }

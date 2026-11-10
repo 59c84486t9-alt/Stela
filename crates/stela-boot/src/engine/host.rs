@@ -58,6 +58,7 @@ use stela_engine::machine::mmu::translated::Tlb;
 
 mod bare_host;
 mod faults;
+pub(crate) mod pmu;
 mod signals;
 pub use bare_host::BareHost;
 use faults::*;

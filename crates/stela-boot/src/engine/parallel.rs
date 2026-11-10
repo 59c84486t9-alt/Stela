@@ -158,6 +158,9 @@ impl Pe {
             .start(cpu, owner.host(), devices, pe)
             .unwrap_or_else(|error| output::fatal(error));
         machine.set_step_timing(step_timing);
+        if step_timing {
+            host::pmu::start(pe);
+        }
         let observing = !traces.is_empty() || !watches.is_empty();
         if !traces.is_empty() {
             machine.set_traces(&traces);

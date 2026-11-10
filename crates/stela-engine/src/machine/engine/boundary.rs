@@ -337,6 +337,11 @@ pub trait Host {
     fn profile_ticks(&mut self) -> u64 {
         0
     }
+    /// Under `--profile`, the step loop charged the profile clock's interval
+    /// ending at `now` to `phase` ([`step_timing`]). A host with hardware
+    /// performance counters attributes them to the interval since its last
+    /// call; the default ignores it.
+    fn profile_boundary(&mut self, _phase: step_timing::Phase, _now: u64) {}
     /// Interrupt the host at this counter value, or never.
     fn arm_timer(&mut self, deadline: Option<u64>);
     /// Block until a host interrupt arrives.

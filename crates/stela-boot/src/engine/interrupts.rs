@@ -509,10 +509,16 @@ pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_
         14 => {
             let address = cr2();
             if !stela_boot_core::nofault_read::fixup(frame, address) {
+                host::pmu::fill_begin();
                 host::page_fault(frame, address, saved);
+                host::pmu::fill_end();
             }
         }
-        13 | 6 => host::native_exception(frame, saved),
+        13 | 6 => {
+            if !host::pmu::fixup(frame) {
+                host::native_exception(frame, saved);
+            }
+        }
         TIMER_VECTOR => host::timer_interrupt(),
         NATIVE_WAKE_VECTOR => host::wake_interrupt(),
         SHOOTDOWN_VECTOR => host::shootdown_interrupt(),

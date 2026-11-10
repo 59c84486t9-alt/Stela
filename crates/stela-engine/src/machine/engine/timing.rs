@@ -94,6 +94,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return 0;
         }
         let now = self.host.profile_ticks();
+        self.host.profile_boundary(phase, now);
         if let Some(timing) = &mut self.step_timing {
             let spent = now.wrapping_sub(since);
             timing.phases[phase as usize] += spent;
@@ -125,6 +126,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             _ => slot,
         };
         let now = self.host.profile_ticks();
+        self.host.profile_boundary(step_timing::Phase::Exit, now);
         let closed = core::mem::take(&mut self.timed_closed);
         let waited = device.map_or(0, |_| self.devices.take_lock_wait());
         if let Some(timing) = &mut self.step_timing {
