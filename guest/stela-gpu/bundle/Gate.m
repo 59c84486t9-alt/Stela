@@ -39,6 +39,14 @@ static void report_unreachable(uint32_t operation, StelaSpans spans, StelaFailur
 	stela_report(what.UTF8String, failure);
 }
 
+/* How long a call answered Pending waits before it calls again: 0.5 ms,
+ * doubling to 4 ms. The host compiles meanwhile on a processor whose guest
+ * waits, which this thread's sleep may be. */
+static void wait_pending(unsigned waits)
+{
+	usleep(waits < 3 ? 500u << waits : 4000u);
+}
+
 uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *request, size_t request_bytes,
 			 void *response, size_t response_bytes, StelaSpans spans, StelaFailure *failure)
 {
@@ -47,6 +55,7 @@ uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *reques
 	volatile StelaGateCall call;
 	unsigned denials = 0;
 	unsigned tries = 0;
+	unsigned waits = 0;
 	do {
 		if (++tries > MAX_UNMAPPED) {
 			report_unreachable(operation, spans, failure);
@@ -70,8 +79,15 @@ uint32_t stela_gate_call(StelaGate *gate, uint32_t operation, const void *reques
 		gate->page[STELA_GATE_CALL / sizeof(uint64_t)] = (uint64_t)&call;
 		/* Still closed: the service never reached the record, and the gate says why. */
 		failure->fault = call.status == StelaStatusClosed ? gate->page[STELA_GATE_FAULT / sizeof(uint64_t)] : 0;
+		/* Not ready: nothing of the call took effect, and a wait is no try
+		 * at mapping its memory. */
+		if (call.status == StelaStatusPending) {
+			tries--;
+			wait_pending(waits++);
+		}
 		/* The pager can take back the stack's page after the record is written. */
-	} while (call.status == StelaStatusUnmapped || (failure->fault == STELA_GATE_FAULT_DENIED && ++denials < 16));
+	} while (call.status == StelaStatusUnmapped || call.status == StelaStatusPending ||
+		 (failure->fault == STELA_GATE_FAULT_DENIED && ++denials < 16));
 	failure->status = call.status;
 	size_t length = call.reason_length < sizeof(failure->reason) ? call.reason_length : sizeof(failure->reason) - 1;
 	failure->reason[call.status == StelaStatusOk ? 0 : length] = 0;

@@ -173,6 +173,24 @@ pub trait Backend {
     fn create_sampler(&mut self, info: &SamplerInfo) -> Result<Sampler>;
     fn create_graphics_pipeline(&mut self, info: &GraphicsPipelineInfo) -> Result<Pipeline>;
     fn create_compute_pipeline(&mut self, info: &ComputePipelineInfo) -> Result<Pipeline>;
+    /// While `deferring` names the lock jobs run under, a pipeline creation
+    /// that would compile and that no cache holds fails with
+    /// [`DEFERRED`](crate::metal::compiler::DEFERRED) and leaves a job that
+    /// compiles it outside the service's turn ([`crate::metal::deferred`]).
+    fn defer_pipelines(&mut self, _deferring: Option<&crate::metal::deferred::JobLock>) {}
+    /// Creates in the call from here on: the call changed what a second run
+    /// would change again.
+    fn stop_deferring(&mut self) {}
+    /// Whether the call deferred a pipeline creation.
+    fn deferred(&self) -> bool {
+        false
+    }
+    /// The pipeline creation the call deferred.
+    fn take_job(&mut self) -> Option<crate::metal::deferred::Job> {
+        None
+    }
+    /// Keeps what a job this backend deferred made.
+    fn adopt_job(&mut self, _done: crate::metal::deferred::Done) {}
     /// A pipeline cache of `data`, an earlier one's bytes. Bytes of another
     /// device or driver, or of nothing, leave it empty.
     fn create_pipeline_cache(&mut self, data: &[u8]) -> Result<PipelineCache>;

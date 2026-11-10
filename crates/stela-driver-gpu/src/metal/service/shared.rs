@@ -25,29 +25,37 @@
 //! needs no invalidation before the CPU reads what the GPU wrote. The next
 //! holder looks at the device before its call, so what it answers agrees.
 //!
-//! A pipeline creation or commit whose compilation the compiler's cache
-//! misses runs that compilation outside the lock, on a stack of its own
-//! ([`SharedService::set_compile_stack`]), then runs again: the compiler
-//! defers the compilation and the call fails without writing to its caller;
-//! the compilation runs under the compiler's own lock, which only AIR
-//! compilations take; its NIR enters the cache under the turn and the call's
-//! next run finds it. Other calls are served meanwhile. Only immutable
-//! inputs cross: the libraries' bytes, which the compilation holds, and the
-//! driver's NIR options. No Vulkan object is used outside the turn, so the
-//! device's externally synchronized objects (its queue, command pools and
-//! the pipeline caches it creates pipelines with) keep the turn as their
-//! one owner.
+//! No compilation runs in a turn. A pipeline creation or commit that needs
+//! one no cache holds (AIR to NIR, or a pipeline's creation, which runs NIR
+//! to machine code) fails without writing to its caller and leaves a job
+//! ([`crate::metal::deferred`]); the service answers the call
+//! [`Status::Pending`] and the frontend calls again after a moment, its
+//! processor back in the guest meanwhile. A commit's replay that meets a
+//! missing variant discards its command buffer, as nothing it did before
+//! stays, and once replay changes an indirect command buffer it compiles in
+//! its turn ([`Compiler::stop_deferring`]). Until its job has run, a call
+//! made again is answered `Pending` without a turn.
+//!
+//! The platform runs the jobs ([`SharedService::run_job`]) where it allows
+//! long host work, one at a time on a stack of their own
+//! ([`SharedService::set_compile_stack`]) under the compile lock, which AIR
+//! compilations in a turn also take. What a job made is adopted at the next
+//! call's turn, which its call's next run then finds. Only owned inputs
+//! cross: the libraries' bytes, the driver's NIR options, copies of NIR and
+//! pipeline caches, which are internally synchronized; the device's queue
+//! and command pools stay the turn's.
 use super::{
     Service,
     wire::{self, GateCall, Operation, Status},
 };
 use crate::metal::{
     compiler::{self, AirCompiler, CompileLock},
+    deferred::{Done, Job, JobLock, Owner},
     shader::Compiler,
     timing::CallPhases,
     vulkan::{MemoryProperties, backend::Backend},
 };
-use alloc::sync::Arc;
+use alloc::{collections::VecDeque, vec::Vec};
 use core::{
     any::Any,
     cell::UnsafeCell,
@@ -89,16 +97,89 @@ pub struct SharedService<B: Backend, C: Compiler> {
     /// When a serial was published without a turn, by serial modulo
     /// [`PENDING`]: the serial and the tick.
     early: [(AtomicU64, AtomicU64); PENDING],
-    /// The stack compilations outside the lock run on, zero for none, and
-    /// the compiler's lock they take.
+    /// The stack jobs run on, zero while the platform runs none, and the
+    /// lock they run under.
     compile_stack: AtomicU64,
-    compile_lock: Option<Arc<CompileLock>>,
+    /// Ticks a job may wait for a waiting processor before its caller's
+    /// runs it ([`Self::set_force_after`]).
+    force_after: AtomicU64,
+    job_lock: JobLock,
+    jobs: Spin<Jobs>,
     host: ServiceHost,
 }
 
-/// The most times one call runs again for a compilation outside the lock;
-/// past it, the call compiles in its turn.
-const DEFERRALS: u32 = 8;
+/// Deferred compilations and the calls that wait for them.
+#[derive(Default)]
+struct Jobs {
+    /// Jobs not yet run, each with when it was queued.
+    queued: VecDeque<(Job, u64)>,
+    running: Option<[u8; 32]>,
+    /// Jobs that ran, for the next turn to adopt.
+    done: Vec<Done>,
+    /// Calls answered `Pending`, by the key they wait for.
+    parked: VecDeque<Parked>,
+    report: JobReport,
+}
+
+/// A call answered `Pending`: the same call made again is answered so
+/// until the job of `key` has run.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Parked {
+    connection: u64,
+    record: u64,
+    operation: u32,
+    request: u64,
+    key: [u8; 32],
+}
+
+/// More calls than wait at once; the oldest is forgotten, and asks again.
+const PARKED: usize = 128;
+
+/// Jobs run since the last [`SharedService::take_job_report`], in the
+/// platform's ticks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JobReport {
+    pub ran: u64,
+    pub ticks: u64,
+    pub longest: u64,
+    /// From queueing to running, the longest.
+    pub longest_queued: u64,
+    /// Calls answered `Pending`, with a turn and without one.
+    pub deferred: u64,
+    pub repeated: u64,
+    /// Jobs no waiting processor took within the bound, which their
+    /// caller's processor ran when it asked again.
+    pub forced: u64,
+}
+
+/// A lock for short bookkeeping, which spins.
+struct Spin<T> {
+    held: AtomicBool,
+    value: UnsafeCell<T>,
+}
+
+impl<T> Spin<T> {
+    fn new(value: T) -> Self {
+        Self {
+            held: AtomicBool::new(false),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    fn with<R>(&self, body: impl FnOnce(&mut T) -> R) -> R {
+        while self
+            .held
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // SAFETY: the flag gives one caller at a time the value.
+        let result = body(unsafe { &mut *self.value.get() });
+        self.held.store(false, Ordering::Release);
+        result
+    }
+}
 
 /// The newest submissions, as a ring of serial and submission tick.
 struct Pending {
@@ -160,7 +241,9 @@ pub struct Served {
     /// Where the call's time went, for the operations timed by phase.
     pub phases: Option<CallPhases>,
     /// Compiling outside the lock for the call, which its other calls'
-    /// turns were served meanwhile, and how many compilations that was.
+    /// turns were served meanwhile, and how many compilations that was:
+    /// now always zero and one per call answered `Pending`, as the platform
+    /// runs the jobs ([`SharedService::take_job_report`]).
     pub compiled: u64,
     pub deferrals: u32,
     /// The longest one of the call's waits for a turn.
@@ -168,7 +251,7 @@ pub struct Served {
 }
 
 // SAFETY: the lock gives one PE at a time the service, which `Send` lets move
-// between them.
+// between them; jobs are `Send` and their list is behind its own lock.
 unsafe impl<B: Backend + Send, C: Compiler + Send> Sync for SharedService<B, C> {}
 // SAFETY: every field is, given the bounds.
 unsafe impl<B: Backend + Send, C: Compiler + Send> Send for SharedService<B, C> {}
@@ -316,7 +399,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
                     || kind.properties.contains(MemoryProperties::HOST_COHERENT)
             });
         // The AIR compiler keeps what it reflects and compiles for the boot,
-        // and compiles outside the lock once the platform gives a stack.
+        // and defers its compilations once the platform runs jobs.
         let compile_lock = air(service.device().compiler_mut()).map(|compiler| {
             compiler.keep_compilations(compiler::NIR_BUDGET);
             // A warm boot deserializes the NIR the pipeline store kept.
@@ -346,15 +429,196 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             publishable: AtomicBool::new(publishable),
             early: [const { (AtomicU64::new(0), AtomicU64::new(0)) }; PENDING],
             compile_stack: AtomicU64::new(0),
-            compile_lock,
+            force_after: AtomicU64::new(u64::MAX),
+            job_lock: JobLock {
+                lock: compile_lock.unwrap_or_default(),
+                relax: host.relax,
+            },
+            jobs: Spin::new(Jobs::default()),
             host,
         }
     }
 
-    /// Runs pipeline compilations the compiler's cache misses on `stack`, a
-    /// stack as deep as the service's own, outside the lock.
+    /// Defers the compilations no cache holds to jobs, which the platform
+    /// runs on `stack`, a stack as deep as the service's own, by
+    /// [`Self::run_job`].
     pub fn set_compile_stack(&self, stack: u64) {
         self.compile_stack.store(stack, Ordering::Release);
+    }
+
+    /// Bounds how long a job waits for a processor whose guest waits: once
+    /// it has waited `ticks`, the processor of the call that waits for it
+    /// runs it when the call is made again, busy or not, so that with every
+    /// processor busy no call waits forever.
+    pub fn set_force_after(&self, ticks: u64) {
+        self.force_after.store(ticks, Ordering::Release);
+    }
+
+    /// Runs the oldest deferred job, when one has waited `older_than` ticks
+    /// and no other runs: the platform calls it where long host work is
+    /// allowed, as a job runs whole, the compilers having no point to stop
+    /// at. Whether one ran.
+    pub fn run_job(&self, older_than: u64) -> bool {
+        self.run_queued(|jobs, now| {
+            let &(_, queued) = jobs.queued.front()?;
+            (now.wrapping_sub(queued) >= older_than).then_some(0)
+        })
+    }
+
+    /// Runs the queued job `pick` chooses, by its place in the queue, unless
+    /// another runs. Whether one ran.
+    fn run_queued(&self, pick: impl FnOnce(&Jobs, u64) -> Option<usize>) -> bool {
+        let stack = self.compile_stack.load(Ordering::Acquire);
+        if stack == 0 {
+            return false;
+        }
+        let Some(held) = self.job_lock.lock.try_hold() else {
+            return false;
+        };
+        let now = (self.host.ticks)();
+        let taken = self.jobs.with(|jobs| {
+            let at = pick(jobs, now)?;
+            let (job, queued) = jobs.queued.remove(at)?;
+            jobs.running = Some(job.key);
+            Some((job, queued))
+        });
+        let Some((job, queued)) = taken else {
+            return false;
+        };
+        let mut job = Some(job);
+        let mut done = None;
+        (self.host.run)(stack, &mut || {
+            done = job.take().map(|job| job.run(&held));
+        });
+        drop(held);
+        let ran = (self.host.ticks)().wrapping_sub(now);
+        self.jobs.with(|jobs| {
+            jobs.running = None;
+            jobs.done.extend(done);
+            let report = &mut jobs.report;
+            report.ran += 1;
+            report.ticks += ran;
+            report.longest = report.longest.max(ran);
+            report.longest_queued = report.longest_queued.max(now.wrapping_sub(queued));
+        });
+        true
+    }
+
+    /// Whether a deferred job waits to run.
+    pub fn jobs_waiting(&self) -> bool {
+        self.jobs.with(|jobs| !jobs.queued.is_empty())
+    }
+
+    /// What jobs did since the last call.
+    pub fn take_job_report(&self) -> JobReport {
+        self.jobs.with(|jobs| core::mem::take(&mut jobs.report))
+    }
+
+    /// Hands what jobs made to their owners, in a turn.
+    fn adopt_jobs(&self, turn: &mut Turn<'_, B, C>) {
+        let done = self.jobs.with(|jobs| core::mem::take(&mut jobs.done));
+        for done in done {
+            match done.owner {
+                Owner::Compiler => turn.device().compiler_mut().adopt_job(done),
+                Owner::Backend => turn.device().backend().adopt_job(done),
+            }
+        }
+    }
+
+    /// Answers the call at `record` `Pending` without a turn when it was
+    /// answered so before and its job has not run. A job that has waited
+    /// past the bound for a waiting processor runs here first, outside the
+    /// lock, and the call then goes on to its turn.
+    fn still_pending(
+        &self,
+        connection: NonZeroU64,
+        record: u64,
+        caller: &mut dyn CallerMemory,
+    ) -> bool {
+        let Some(call) = read_call(record, caller) else {
+            return false;
+        };
+        let pending = self.jobs.with(|jobs| {
+            let at = jobs.parked.iter().position(|parked| {
+                (
+                    parked.connection,
+                    parked.record,
+                    parked.operation,
+                    parked.request,
+                ) == (
+                    connection.get(),
+                    record,
+                    call.operation,
+                    call.request.address,
+                )
+            })?;
+            let key = jobs.parked[at].key;
+            let waits =
+                jobs.running == Some(key) || jobs.queued.iter().any(|(job, _)| job.key == key);
+            if waits {
+                jobs.report.repeated += 1;
+            } else {
+                jobs.parked.remove(at);
+            }
+            Some((waits, key))
+        });
+        let Some((true, key)) = pending else {
+            return false;
+        };
+        let force_after = self.force_after.load(Ordering::Acquire);
+        let forced = self.run_queued(|jobs, now| {
+            let at = jobs.queued.iter().position(|(job, _)| job.key == key)?;
+            (now.wrapping_sub(jobs.queued[at].1) >= force_after).then_some(at)
+        });
+        if forced {
+            self.jobs.with(|jobs| {
+                jobs.report.forced += 1;
+                jobs.report.repeated = jobs.report.repeated.saturating_sub(1);
+                jobs.parked
+                    .retain(|parked| parked.key != key || parked.record != record);
+            });
+            return false;
+        }
+        answer_pending(record, call, caller)
+    }
+
+    /// Queues each of `jobs` unless one of its key is queued, running or
+    /// done, and parks the call at `record` on the first.
+    fn park(&self, connection: NonZeroU64, record: u64, call: GateCall, jobs: Vec<Job>) {
+        let key = jobs[0].key;
+        let parked = Parked {
+            connection: connection.get(),
+            record,
+            operation: call.operation,
+            request: call.request.address,
+            key,
+        };
+        let now = (self.host.ticks)();
+        let new = jobs;
+        let unwanted = self.jobs.with(|jobs| {
+            jobs.report.deferred += 1;
+            jobs.parked.retain(|other| {
+                (other.connection, other.record) != (parked.connection, parked.record)
+            });
+            if jobs.parked.len() == PARKED {
+                jobs.parked.pop_front();
+            }
+            jobs.parked.push_back(parked);
+            let mut unwanted = Vec::new();
+            for job in new {
+                let known = jobs.running == Some(job.key)
+                    || jobs.queued.iter().any(|(queued, _)| queued.key == job.key)
+                    || jobs.done.iter().any(|done| done.key == job.key);
+                if known {
+                    unwanted.push(job);
+                } else {
+                    jobs.queued.push_back((job, now));
+                }
+            }
+            unwanted
+        });
+        // Dropped outside the lock: a job frees what it holds.
+        drop(unwanted);
     }
 
     /// The compiler's counts, unless a call holds the service now.
@@ -481,6 +745,11 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         }
         let call: GateCall = wire::read(&raw).expect("a record of its own size");
         [
+            Operation::NewSourceLibrary,
+            Operation::NewStitchedLibrary,
+            Operation::NewFunction,
+            Operation::FunctionBindings,
+            Operation::ArgumentLayout,
             Operation::NewRenderPipeline,
             Operation::NewMeshPipeline,
             Operation::NewComputePipeline,
@@ -561,6 +830,10 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
     }
 
     fn disconnect(&self, connection: NonZeroU64) {
+        self.jobs.with(|jobs| {
+            jobs.parked
+                .retain(|parked| parked.connection != connection.get());
+        });
         // The gate closes only connections it opened and holds.
         let closed = self.call(|service| {
             for slot in &self.polling {
@@ -579,97 +852,84 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
         caller: &mut dyn CallerMemory,
     ) -> Result<(), CallerFault> {
         let rang = (self.host.ticks)();
+        let served_at_once = |operation: u32, status: Status| {
+            let left = (self.host.ticks)();
+            (self.host.served)(Served {
+                operation,
+                status,
+                waited: 0,
+                held: left.wrapping_sub(rang),
+                progress: None,
+                phases: None,
+                compiled: 0,
+                deferrals: u32::from(status == Status::Pending),
+                longest_wait: 0,
+            });
+        };
+        if self.still_pending(connection, record, caller) {
+            let operation = read_call(record, caller).map_or(0, |call| call.operation);
+            served_at_once(operation, Status::Pending);
+            return Ok(());
+        }
         let mut turn = match self.try_turn() {
             Some(turn) => turn,
             None if self.poll_while_held(connection, record, caller) => {
-                let left = (self.host.ticks)();
-                (self.host.served)(Served {
-                    operation: Operation::Poll.raw(),
-                    status: Status::Ok,
-                    waited: 0,
-                    held: left.wrapping_sub(rang),
-                    progress: None,
-                    phases: None,
-                    compiled: 0,
-                    deferrals: 0,
-                    longest_wait: 0,
-                });
+                served_at_once(Operation::Poll.raw(), Status::Ok);
                 return Ok(());
             }
             None => self.turn(),
         };
-        let mut entered = (self.host.ticks)();
-        let (mut waited, mut held, mut compiled, mut deferrals) =
-            (entered.wrapping_sub(rang), 0, 0, 0);
-        let mut longest_wait = waited;
-        let compile_stack = self.compile_stack.load(Ordering::Acquire);
-        let offloads = compile_stack != 0 && self.compiles(record, caller);
-        // What runs the deferral ended reported, which their reports keep.
-        let mut carried = alloc::vec::Vec::new();
-        let (served, mut refused, noted, (operation, status)) = loop {
-            turn.catch_up();
-            let deferring = offloads && deferrals < DEFERRALS;
-            if let Some(compiler) = air(turn.device().compiler_mut()) {
-                compiler.set_deferring(deferring);
-            }
-            let mut answer = None;
-            (self.host.run)(self.host.stack, &mut || {
-                let mut deferrable = Deferrable {
-                    caller: &mut *caller,
-                    lock: self.compile_lock.as_deref().filter(|_| deferring),
-                };
-                let served = turn.serve(connection, record, &mut deferrable);
-                answer = Some((
-                    served,
-                    core::mem::take(&mut turn.refused),
-                    turn.noted.take(),
-                    turn.served,
-                ));
-            });
-            let answer = answer.expect("the platform runs what it is given");
-            let job = air(turn.device().compiler_mut()).and_then(AirCompiler::take_deferred);
-            let (Some(job), Some(lock)) = (job, self.compile_lock.as_deref()) else {
-                break answer;
+        let entered = (self.host.ticks)();
+        let waited = entered.wrapping_sub(rang);
+        let deferring =
+            self.compile_stack.load(Ordering::Acquire) != 0 && self.compiles(record, caller);
+        turn.catch_up();
+        let job_lock = deferring.then_some(&self.job_lock);
+        let mut answer = None;
+        self.job_lock.lock.set_deferred(false);
+        (self.host.run)(self.host.stack, &mut || {
+            self.adopt_jobs(&mut turn);
+            turn.device().compiler_mut().defer_compiles(deferring);
+            turn.device().backend().defer_pipelines(job_lock);
+            let mut deferrable = Deferrable {
+                caller: &mut *caller,
+                lock: job_lock.map(|jobs| &*jobs.lock),
             };
-            // The call left nothing but the compilation: it runs again with
-            // the compiled shader, outside of which the turn is free.
-            let _ = turn.device().take_phases();
-            let left = (self.host.ticks)();
-            held += left.wrapping_sub(entered);
-            deferrals += 1;
-            drop(turn);
-            let mut finished = None;
-            let mut job = Some(job);
-            // Every PE defers onto the one compile stack: the lock is held
-            // before the switch and until the job is off it.
-            let held = lock.hold(self.host.relax);
-            (self.host.run)(compile_stack, &mut || {
-                if let Some(job) = job.take() {
-                    finished = Some(job.run_outside(&held));
-                }
-            });
-            drop(held);
-            let ready = (self.host.ticks)();
-            compiled += ready.wrapping_sub(left);
-            turn = self.turn();
-            entered = (self.host.ticks)();
-            longest_wait = longest_wait.max(entered.wrapping_sub(ready));
-            waited += entered.wrapping_sub(ready);
-            if let (Some(compiler), Some(finished)) = (air(turn.device().compiler_mut()), finished)
-            {
-                compiler.adopt(finished);
-            }
-            // What the deferred run reported, its deferral aside, stays.
+            let served = turn.serve(connection, record, &mut deferrable);
+            let device = turn.device();
+            // A call that went on past a deferral may have left both.
+            let jobs: Vec<Job> = [
+                device.compiler_mut().take_job(),
+                device.backend().take_job(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            device.compiler_mut().defer_compiles(false);
+            device.backend().defer_pipelines(None);
+            answer = Some((
+                served,
+                core::mem::take(&mut turn.refused),
+                turn.noted.take(),
+                turn.served,
+                jobs,
+            ));
+        });
+        let (mut served, mut refused, noted, (mut operation, mut status), jobs) =
+            answer.expect("the platform runs what it is given");
+        if !jobs.is_empty() {
+            // The call left nothing but the compilation: it is answered
+            // `Pending`, and made again once the job has run.
             let deferral = alloc::format!("{}", super::wire::Fault::from(compiler::DEFERRED));
-            carried.extend(
-                answer
-                    .1
-                    .into_iter()
-                    .filter(|reason| !reason.contains(&deferral)),
-            );
-        };
-        carried.append(&mut refused);
-        let refused = carried;
+            refused.retain(|reason| !reason.contains(&deferral));
+            match read_call(record, caller) {
+                Some(call) if answer_pending(record, call, caller) => {
+                    self.park(connection, record, call, jobs);
+                    (operation, status, served) = (call.operation, Status::Pending, Ok(()));
+                }
+                _ => drop(jobs),
+            }
+        }
         if let Some(compiler) = air(turn.device().compiler_mut()) {
             compiler.end_call();
         }
@@ -692,12 +952,12 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
             operation,
             status,
             waited,
-            held: held + left.wrapping_sub(entered),
+            held: left.wrapping_sub(entered),
             progress: Some(progress),
             phases,
-            compiled,
-            deferrals,
-            longest_wait,
+            compiled: 0,
+            deferrals: u32::from(status == Status::Pending),
+            longest_wait: waited,
         });
         for reason in &refused {
             (self.host.report)(reason);
@@ -750,6 +1010,23 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
 /// can run outside the lock.
 fn air<C: Compiler + 'static>(compiler: &mut C) -> Option<&mut AirCompiler> {
     (compiler as &mut dyn Any).downcast_mut::<AirCompiler>()
+}
+
+/// The call record at `record`, unless it is out of the caller's reach.
+fn read_call(record: u64, caller: &mut dyn CallerMemory) -> Option<GateCall> {
+    let mut raw = [0; size_of::<GateCall>()];
+    caller.read(record, &mut raw).ok()?;
+    Some(wire::read(&raw).expect("a record of its own size"))
+}
+
+/// Completes `call` at `record` as `Pending`, with no reason: whether the
+/// record took it.
+fn answer_pending(record: u64, mut call: GateCall, caller: &mut dyn CallerMemory) -> bool {
+    call.status = Status::Pending.raw();
+    call.reason_length = 0;
+    let mut raw = [0; size_of::<GateCall>()];
+    wire::write(&call, &mut raw).expect("a record of its own size");
+    caller.write(record, &raw).is_ok()
 }
 
 /// The caller's memory for a run that may defer a compilation: once one is

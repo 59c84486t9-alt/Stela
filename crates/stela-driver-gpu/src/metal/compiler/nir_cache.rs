@@ -231,7 +231,7 @@ pub struct CompileLock {
 }
 
 impl CompileLock {
-    pub(super) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             held: AtomicBool::new(false),
             deferred: AtomicBool::new(false),
@@ -250,13 +250,28 @@ impl CompileLock {
         CompileGuard(self)
     }
 
+    /// Holds the lock unless another holds it. The guard is made only on
+    /// success: a guard's drop releases the lock, whoever holds it.
+    pub fn try_hold(&self) -> Option<CompileGuard<'_>> {
+        self.held
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+            .then(|| CompileGuard(self))
+    }
+
     /// Whether the call served now deferred a compilation.
     pub fn deferred(&self) -> bool {
         self.deferred.load(Ordering::Acquire)
     }
 
-    pub(super) fn set_deferred(&self, deferred: bool) {
+    /// Marks the call served now as having deferred a compilation.
+    pub fn set_deferred(&self, deferred: bool) {
         self.deferred.store(deferred, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_held(&self) -> bool {
+        self.held.load(Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -267,6 +282,12 @@ impl CompileLock {
     #[cfg(test)]
     pub(crate) fn set_deferred_for_tests(&self, deferred: bool) {
         self.set_deferred(deferred);
+    }
+}
+
+impl Default for CompileLock {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

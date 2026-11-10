@@ -18,6 +18,7 @@ use crate::metal::{
     error::NO_FUNCTION,
     shader::{Compiler, PatchDomain, Reflection},
     stitching,
+    timing::{Detail, Name, Timed},
     vulkan::backend::Backend,
 };
 use alloc::{string::String, vec::Vec};
@@ -149,6 +150,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     }
 
     pub(super) fn new_function(&mut self, call: &mut Call) -> Result<(), Fault> {
+        self.device.timing().begin(Timed::NewFunction);
         let request: NewFunctionRequest = call.request()?;
         let library = self.object::<LibraryId>(call.connection, request.library)?;
         let memory = &mut *call.memory;
@@ -172,6 +174,12 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             })
             .collect::<Result<Vec<_>, Fault>>()?;
         let values = (request.specialized != 0).then_some(values.as_slice());
+        self.device.timing().detail(
+            Timed::NewFunction,
+            Detail::Function {
+                entry: Name::new(&name),
+            },
+        );
         // A name the library lacks is Metal's nil answer, not a refusal:
         // Core Image looks for its kernels library by library.
         let function =

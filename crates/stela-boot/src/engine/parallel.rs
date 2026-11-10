@@ -225,6 +225,9 @@ impl Pe {
                         super::service::serve(false, false);
                         super::display::flush(super::display::Turn::Idle);
                         super::storage::serve_staged(true);
+                        // A GPU compilation a guest call deferred.
+                        #[cfg(feature = "nvk")]
+                        super::gpu::gate::run_job(false);
                     })
                 }
                 // A busy PE gives the screen one bounded step within its

@@ -2,6 +2,7 @@
 //! functions by name, for the tests of the device and the layers above it.
 
 use super::{Device, LibraryId};
+use crate::metal::deferred::{Done, Job, JobLock, Made, Owner};
 use crate::metal::{
     abi::{DataType, FunctionType, TextureType},
     capabilities::ShaderFeatures,
@@ -32,14 +33,28 @@ use crate::metal::{
         physical::PhysicalDevice,
     },
 };
+use alloc::sync::Arc;
 use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
     string::String,
     vec::Vec,
 };
-use core::num::NonZeroU64;
+use core::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use stela_contracts::gate::MemoryRange;
+
+/// A deferred job that runs until `gate` opens, as a long compilation.
+fn gated_job(key: u8, owner: Owner, gate: Arc<AtomicBool>) -> Job {
+    Job::new([key; 32], owner, move || {
+        while !gate.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+        Box::new(()) as Made
+    })
+}
 
 #[derive(Default)]
 pub(crate) struct MockBackend {
@@ -56,6 +71,13 @@ pub(crate) struct MockBackend {
     pub(crate) compute: Vec<ComputePipelineInfo>,
     /// The pipelines each pipeline cache holds.
     pub(crate) caches: BTreeMap<u64, u8>,
+    /// While a call may defer, the next compute pipeline creation defers
+    /// to a job that runs until this opens.
+    pub(crate) pipeline_gate: Option<Arc<AtomicBool>>,
+    deferring: Option<JobLock>,
+    job: Option<Job>,
+    /// Pipeline jobs adopted.
+    pub(crate) adopted: usize,
     pub(crate) submissions: Vec<Vec<Segment>>,
     pub(crate) writes: Vec<(Memory, u64, Vec<u8>)>,
     pub(crate) write_error: Option<Error>,
@@ -221,6 +243,21 @@ impl Backend for MockBackend {
     fn create_sampler(&mut self, _: &SamplerInfo) -> Result<Sampler> {
         Ok(Sampler(self.id()))
     }
+    fn defer_pipelines(&mut self, deferring: Option<&JobLock>) {
+        self.deferring = deferring.cloned();
+    }
+    fn stop_deferring(&mut self) {
+        self.deferring = None;
+    }
+    fn deferred(&self) -> bool {
+        self.job.is_some()
+    }
+    fn take_job(&mut self) -> Option<Job> {
+        self.job.take()
+    }
+    fn adopt_job(&mut self, _: Done) {
+        self.adopted += 1;
+    }
     fn create_pipeline_cache(&mut self, data: &[u8]) -> Result<PipelineCache> {
         let id = self.id();
         self.caches.insert(id, data.first().copied().unwrap_or(0));
@@ -235,6 +272,14 @@ impl Backend for MockBackend {
         Ok(Pipeline(self.id()))
     }
     fn create_compute_pipeline(&mut self, info: &ComputePipelineInfo) -> Result<Pipeline> {
+        if let Some(lock) = &self.deferring
+            && info.source == PipelineSource::Compiled
+            && let Some(gate) = self.pipeline_gate.take()
+        {
+            lock.lock.set_deferred(true);
+            self.job = Some(gated_job(2, Owner::Backend, gate));
+            return Err(crate::metal::compiler::DEFERRED);
+        }
         self.source(info.source)?;
         self.compute.push(*info);
         Ok(Pipeline(self.id()))
@@ -404,6 +449,13 @@ pub(crate) struct MockCompiler {
     pub(crate) defer_next: bool,
     /// A compilation deferred, until the test takes it.
     pub(crate) deferred: bool,
+    /// While a call may defer, the deferred compilation leaves a job that
+    /// runs until this opens.
+    pub(crate) job_gate: Option<Arc<AtomicBool>>,
+    deferring: bool,
+    job: Option<Job>,
+    /// Jobs adopted.
+    pub(crate) adopted: usize,
 }
 
 /// Every function's bindings: uniforms holding a matrix and an array of
@@ -550,6 +602,16 @@ impl Compiler for MockCompiler {
     fn deferred(&self) -> bool {
         self.deferred
     }
+    fn defer_compiles(&mut self, deferring: bool) {
+        self.deferring = deferring;
+    }
+    fn take_job(&mut self) -> Option<Job> {
+        self.deferred = false;
+        self.job.take()
+    }
+    fn adopt_job(&mut self, _: Done) {
+        self.adopted += 1;
+    }
     fn add_library(&mut self, data: Vec<u8>) -> Result<u64> {
         self.libraries.push(Some(data));
         Ok(self.libraries.len() as u64 - 1)
@@ -630,6 +692,11 @@ impl Compiler for MockCompiler {
     ) -> Result<CompiledShader> {
         if core::mem::take(&mut self.defer_next) {
             self.deferred = true;
+            if self.deferring
+                && let Some(gate) = self.job_gate.take()
+            {
+                self.job = Some(gated_job(1, Owner::Compiler, gate));
+            }
             return Err(crate::metal::compiler::DEFERRED);
         }
         self.compiled.push(specialization.clone());

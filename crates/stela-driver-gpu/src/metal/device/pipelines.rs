@@ -801,6 +801,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "the function of an extern declaration",
         )?;
         let compiled = self.pipelines.library(library)?;
+        // Reflection, from the compiler's cache or the service's.
+        let start = self.timing.now();
         let values = match values {
             Some(values) => values,
             None if self
@@ -810,6 +812,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 .any(|constant| constant.required) =>
             {
                 let prepared = self.compiler.prepare_function(compiled, entry, None)?;
+                self.timing.since(Phase::FunctionReflect, start);
                 return self.hold_function(library, prepared, &kept);
             }
             None => &[],
@@ -848,6 +851,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let prepared = self
             .compiler
             .prepare_function(compiled, entry, Some(constants))?;
+        self.timing.since(Phase::FunctionReflect, start);
         for constant in prepared.reflection.constants() {
             match indexed.iter().find(|(index, _)| *index == constant.index) {
                 Some((_, value)) => ensure(
@@ -1146,6 +1150,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// The device's compiler, for the platform's service to configure.
     pub fn compiler_mut(&mut self) -> &mut C {
         &mut self.compiler
+    }
+
+    /// Whether the call deferred a compilation or a pipeline creation, so
+    /// that it fails now and runs again once that is done.
+    pub fn deferred(&self) -> bool {
+        self.compiler.deferred() || self.backend.deferred()
+    }
+
+    /// Compiles and creates pipelines in the call from here on: the call
+    /// changed what a second run would change again.
+    pub fn stop_deferring(&mut self) {
+        self.compiler.stop_deferring();
+        self.backend.stop_deferring();
     }
 
     /// `newRenderPipelineStateWithDescriptor:`. A post-tessellation vertex

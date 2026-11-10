@@ -19,6 +19,35 @@ fn calls() -> (u32, u32, u32) {
     CALLS.get()
 }
 
+std::thread_local! {
+    /// For the test that runs jobs on another thread: the compile lock and
+    /// whether a thread is inside the service, which LLVM, built without
+    /// threads, needs to be one at a time and only under the lock.
+    static EXCLUSIVE: core::cell::RefCell<Option<(alloc::sync::Arc<CompileLock>, alloc::sync::Arc<core::sync::atomic::AtomicBool>)>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// Enters the service as LLVM would: alone, under the lock.
+fn enter_service() {
+    EXCLUSIVE.with_borrow(|exclusive| {
+        let Some((lock, inside)) = exclusive else {
+            return;
+        };
+        assert!(
+            lock.is_held(),
+            "the service entered without the compile lock"
+        );
+        assert!(
+            !inside.swap(true, core::sync::atomic::Ordering::AcqRel),
+            "two processors in the service at once"
+        );
+        for _ in 0..2000 {
+            core::hint::spin_loop();
+        }
+        inside.store(false, core::sync::atomic::Ordering::Release);
+    });
+}
+
 unsafe extern "C" fn reflect(
     _: *const c_void,
     _: usize,
@@ -28,6 +57,7 @@ unsafe extern "C" fn reflect(
     reflection: *mut ffi::Reflection,
     _: *mut ffi::AirError,
 ) -> bool {
+    enter_service();
     let (reflected, compiled, released) = CALLS.get();
     CALLS.set((reflected + 1, compiled, released));
     let mut answer = ffi::Reflection::ZERO;
@@ -228,6 +258,36 @@ fn a_deferred_compilation_runs_outside_and_the_call_finds_it() {
 }
 
 #[test]
+fn a_deferred_reflection_runs_outside_and_the_call_finds_it() {
+    let (mut compiler, library) = caching();
+    let lock = compiler.compile_lock(core::hint::spin_loop);
+    let reflected = calls().0;
+    compiler.set_deferring(true);
+    let constants = Some(vec![(0, vec![1, 0, 0, 0])]);
+    assert_eq!(
+        compiler
+            .prepare_function(library, "kernel", constants.clone())
+            .err(),
+        Some(DEFERRED)
+    );
+    assert!(lock.deferred() && Compiler::deferred(&compiler));
+    let job = compiler.take_job().unwrap();
+    compiler.end_call();
+    assert_eq!(calls().0, reflected);
+    let done = job.run(&lock.hold(core::hint::spin_loop));
+    assert_eq!(calls().0, reflected + 1);
+    compiler.adopt_job(done);
+    // The call's next run finds the reflection without the service.
+    compiler.set_deferring(true);
+    let prepared = compiler
+        .prepare_function(library, "kernel", constants)
+        .unwrap();
+    assert_eq!(prepared.constants, vec![(0, vec![1, 0, 0, 0])]);
+    assert!(compiler.take_job().is_none());
+    assert_eq!(calls().0, reflected + 1);
+}
+
+#[test]
 fn a_call_that_stopped_deferring_compiles_in_its_turn() {
     let (mut compiler, library) = caching();
     let lock = compiler.compile_lock(core::hint::spin_loop);
@@ -252,4 +312,69 @@ fn without_kept_compilations_nothing_defers_or_stays() {
         .unwrap();
     compiler.release(shader.code);
     assert_eq!((calls().1, calls().2), (1, 1));
+}
+
+#[test]
+fn reflections_in_turns_and_in_jobs_take_the_service_one_at_a_time() {
+    use core::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+    let (mut compiler, library) = caching();
+    let lock = compiler.compile_lock(std::thread::yield_now);
+    let inside = alloc::sync::Arc::new(AtomicBool::new(false));
+    let exclusive = (lock.clone(), inside.clone());
+    EXCLUSIVE.set(Some(exclusive.clone()));
+    let (jobs, queue) = mpsc::channel::<Job>();
+    let (finished, done) = mpsc::channel::<Done>();
+    let worker = std::thread::spawn(move || {
+        EXCLUSIVE.set(Some(exclusive));
+        let lock = EXCLUSIVE.with_borrow(|exclusive| exclusive.as_ref().unwrap().0.clone());
+        for job in queue {
+            finished
+                .send(job.run(&lock.hold(std::thread::yield_now)))
+                .unwrap();
+        }
+    });
+    let constants = |value: u32| Some(vec![(0, value.to_le_bytes().to_vec())]);
+    for round in 0..200 {
+        // A call that may defer leaves its reflection as a job.
+        compiler.set_deferring(true);
+        let deferred = compiler.prepare_function(library, "kernel", constants(round));
+        assert_eq!(deferred.err(), Some(DEFERRED));
+        jobs.send(compiler.take_job().unwrap()).unwrap();
+        compiler.end_call();
+        // A call that may not reflects in its turn, while the job may run.
+        compiler.set_deferring(false);
+        compiler
+            .prepare_function(library, "kernel", constants(1000 + round))
+            .unwrap();
+        compiler.end_call();
+        for done in done.try_iter() {
+            compiler.adopt_job(done);
+        }
+    }
+    drop(jobs);
+    worker.join().unwrap();
+    for done in done.try_iter() {
+        compiler.adopt_job(done);
+    }
+    EXCLUSIVE.set(None);
+    // Each job's reflection is found without the service.
+    compiler.set_deferring(true);
+    for round in 0..200 {
+        compiler
+            .prepare_function(library, "kernel", constants(round))
+            .unwrap();
+    }
+    assert!(compiler.take_job().is_none());
+}
+
+#[test]
+fn a_failed_try_leaves_the_holders_lock_held() {
+    let lock = CompileLock::new();
+    let held = lock.hold(core::hint::spin_loop);
+    assert!(lock.try_hold().is_none());
+    assert!(lock.is_held());
+    drop(held);
+    assert!(lock.try_hold().is_some());
+    assert!(!lock.is_held());
 }

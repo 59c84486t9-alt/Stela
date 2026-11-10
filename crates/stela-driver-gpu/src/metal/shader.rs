@@ -796,6 +796,18 @@ pub trait Compiler {
         false
     }
 
+    /// Whether the call served now defers a compilation its caches miss
+    /// rather than run it ([`super::deferred`]).
+    fn defer_compiles(&mut self, _deferring: bool) {}
+
+    /// The compilation the call deferred.
+    fn take_job(&mut self) -> Option<super::deferred::Job> {
+        None
+    }
+
+    /// Keeps what a job this compiler deferred made, for the call's next run.
+    fn adopt_job(&mut self, _done: super::deferred::Done) {}
+
     /// The bindings of `entry` of `library` specialized with
     /// `specialization`'s function constant values, without those a false
     /// `[[function_constant]]` makes absent; without a specialization, those

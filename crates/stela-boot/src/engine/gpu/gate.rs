@@ -6,8 +6,9 @@
 //!
 //! Each service runs on a stack of its own, deep enough for a compile. Its
 //! lock means one is enough; opening comes before any caller. A second
-//! stack takes the pipeline compilations that run outside the lock, one at
-//! a time under the compiler's own lock.
+//! stack takes the compilations the calls defer, one at a time under the
+//! compiler's own lock ([`run_job`]): a call that needs one is answered
+//! not ready, and its guest thread sleeps and calls again.
 use super::{
     BOOT_CPU, Bound, Installed, PAGE, client, installed, look_again, pump_waiting,
     stack::{self, Stack},
@@ -120,6 +121,64 @@ impl core::fmt::Display for Unheld {
             count => write!(formatter, " ({count} distinct past the log's table)"),
         }
     }
+}
+
+/// How long a deferred compilation waits for a processor other than the boot
+/// one before the boot one takes it: with every other busy or none (one PE),
+/// the boot PE's Linux work waits for the job instead.
+const BOOT_JOB_MILLIS: u64 = 100;
+
+/// How long a deferred compilation waits for a processor whose guest waits
+/// before the processor of the call that needs it runs it, busy or not
+/// (`SharedService::set_force_after`): with every guest CPU busy, as in a
+/// benchmark, no call waits forever.
+const FORCE_JOB_MILLIS: u64 = 30;
+
+/// A turn held this long or longer is reported once for each operation and
+/// phase: no turn should come near it.
+const LONG_TURN_MILLIS: u64 = 50;
+
+/// Runs one deferred compilation, on a processor whose guest waits for an
+/// interrupt: a job runs whole, as the compilers have no point to stop at,
+/// so only a processor with no guest work to do takes it, and its guest's
+/// next interrupt waits for the job (a few to hundreds of milliseconds, a
+/// very large kernel seconds). Other processors' guests run meanwhile, and
+/// the guest clock does not wait for a processor whose guest waits. Off the
+/// boot processor the job runs with interrupts on, so that a TLB shootdown
+/// another processor sends is acknowledged at once rather than after the
+/// job. The boot processor, whose Linux work the job would hold up, takes
+/// one only after [`BOOT_JOB_MILLIS`]. Whether one ran.
+pub(in crate::engine) fn run_job(boot: bool) -> bool {
+    let Some(gpu) = installed() else {
+        return false;
+    };
+    let older = if boot {
+        gpu.tsc_hz / 1000 * BOOT_JOB_MILLIS
+    } else {
+        0
+    };
+    shared().iter().any(|service| {
+        if boot {
+            service.run_job(older)
+        } else {
+            // SAFETY: an AP's host work between slices, which holds nothing
+            // its interrupts' handlers take; they save the vector state.
+            unsafe { with_interrupts(|| service.run_job(older)) }
+        }
+    })
+}
+
+/// Runs `body` with this processor's interrupts on.
+///
+/// # Safety
+/// Nothing `body`'s caller holds is taken by an interrupt handler.
+unsafe fn with_interrupts<R>(body: impl FnOnce() -> R) -> R {
+    // SAFETY: the caller's.
+    unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+    let result = body();
+    // SAFETY: back to how the caller ran.
+    unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+    result
 }
 
 /// Logs why the service refused a guest's call, once for each reason.
@@ -331,6 +390,7 @@ const SLOW_CALL_DIVISOR: u64 = 10;
 /// Counts a call the gate served: the PE that rang runs no guest code until
 /// it returns, so a call that holds the service long is guest time lost.
 fn served(served: Served) {
+    report_long_turn(&served);
     if let Some(call) = served.phases {
         let tsc_hz = installed().map_or(0, |gpu| gpu.tsc_hz);
         if PHASES.add(&call, tsc_hz / SLOW_CALL_DIVISOR) {
@@ -375,6 +435,34 @@ fn served(served: Served) {
     calls
         .deferrals
         .fetch_add(u64::from(served.deferrals), Ordering::Relaxed);
+}
+
+/// `GPU LONG TURN operation=… phase=… held_us=…`, once for each operation
+/// and phase whose turn reached [`LONG_TURN_MILLIS`]: the phase is the timed
+/// operation's longest, `untimed` for an operation timed by no phase.
+fn report_long_turn(served: &Served) {
+    static SEEN: Seen<128> = Seen::new();
+    let tsc_hz = installed().map_or(0, |gpu| gpu.tsc_hz);
+    if tsc_hz == 0 || served.held < tsc_hz / 1000 * LONG_TURN_MILLIS {
+        return;
+    }
+    let phase = served
+        .phases
+        .as_ref()
+        .map_or("untimed", |phases| phases.longest_phase().0);
+    let key = format!("{:#x} {phase}", served.operation);
+    if let Some(unheld) = SEEN.first_time(&key) {
+        let detail = served
+            .phases
+            .as_ref()
+            .map(|phases| format!("{}", phases.detail))
+            .unwrap_or_default();
+        output::arguments(format_args!(
+            "GPU LONG TURN operation={:#x} phase={phase} held_us={}{detail}{unheld}\n",
+            served.operation,
+            u128::from(served.held) * 1_000_000 / u128::from(tsc_hz),
+        ));
+    }
 }
 
 /// What a device holds: its allocation with the part waiting for submitted
@@ -497,6 +585,22 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
     for service in shared().iter() {
         if let Some(line) = service.compiler_report() {
             output::arguments(format_args!("{line}\n"));
+        }
+        // The compilations calls deferred, which ran outside every turn.
+        let jobs = service.take_job_report();
+        if jobs.ran != 0 || jobs.deferred != 0 {
+            output::arguments(format_args!(
+                "GPU JOBS ran={} total_us={} longest_us={} longest_queued_us={} deferred={} \
+                 repeated={} forced={} waiting={}\n",
+                jobs.ran,
+                micros(jobs.ticks),
+                micros(jobs.longest),
+                micros(jobs.longest_queued),
+                jobs.deferred,
+                jobs.repeated,
+                jobs.forced,
+                service.jobs_waiting(),
+            ));
         }
     }
     report_lock(tsc_hz);
@@ -789,6 +893,7 @@ fn open_gpu(
         Ok(service) => {
             // Without a second stack, every compilation stays in its turn.
             if let Some(compiling) = Stack::map(gpu.window, STACK_BYTES) {
+                service.set_force_after(gpu.tsc_hz / 1000 * FORCE_JOB_MILLIS);
                 service.set_compile_stack(compiling.top());
                 core::mem::forget(compiling);
             } else {

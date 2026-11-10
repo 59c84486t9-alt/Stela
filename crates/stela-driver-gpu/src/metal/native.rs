@@ -16,6 +16,7 @@
 //! when they allow host transfers and otherwise at the start of the next
 //! submission, and stay there.
 mod blocks;
+mod deferral;
 mod device_generated;
 mod memory;
 mod objects;
@@ -451,6 +452,8 @@ pub struct NativeBackend {
     decode_astc: vk::Pipeline,
     /// The cache compiled pipelines read and fill, kept across boots.
     store: pipeline_store::Persisted,
+    /// Pipeline creations deferred outside the service's turn.
+    deferral: deferral::Deferral,
     /// The platform's tick counter, and the phases of `create_image` and
     /// `submit` it timed since the device took them.
     ticks: fn() -> u64,
@@ -671,6 +674,7 @@ impl NativeBackend {
             reorder_blocks: vk::Pipeline::null(),
             decode_astc: vk::Pipeline::null(),
             store: pipeline_store::Persisted::none(loader.log),
+            deferral: deferral::Deferral::default(),
             ticks: super::timing::no_clock,
             split: [0; 3],
         };
@@ -1275,6 +1279,11 @@ impl NativeBackend {
     }
 
     fn create_compute(&mut self, info: &ComputePipelineInfo) -> Result<vk::Pipeline> {
+        if let Some(created) = self.deferred_creation(deferral::Wanted::Compute(info)) {
+            let pipeline = created?;
+            self.report_executables(pipeline);
+            return Ok(pipeline);
+        }
         let pipeline = self.through_store(info.source, |backend, source, feedback| {
             let info = ComputePipelineInfo { source, ..*info };
             objects::compute_pipeline(&info, backend.layout, |create| {
@@ -1450,6 +1459,8 @@ impl NativeBackend {
 
 impl Drop for NativeBackend {
     fn drop(&mut self) {
+        // A deferred pipeline job uses the device outside any turn.
+        self.deferral.retire();
         // An error is not evidence that queued DMA stopped. Keep every native
         // handle, the driver's code and the exporter on that uncertain path.
         // SAFETY: the device belongs to this backend and no caller uses it now.
@@ -1471,6 +1482,7 @@ impl Drop for NativeBackend {
         // handle is destroyed once; null handles are ignored by Vulkan.
         unsafe {
             self.store.destroy(&self.device);
+            self.deferral.destroy(&self.device);
             self.device.destroy_pipeline(self.accumulate, None);
             self.device.destroy_pipeline(self.resolve_draws, None);
             self.device.destroy_pipeline(self.resolve_dispatches, None);
@@ -1898,6 +1910,11 @@ impl Backend for NativeBackend {
     }
 
     fn create_graphics_pipeline(&mut self, info: &GraphicsPipelineInfo) -> Result<Pipeline> {
+        if let Some(created) = self.deferred_creation(deferral::Wanted::Graphics(info)) {
+            let pipeline = created?;
+            self.report_executables(pipeline);
+            return Ok(Pipeline(raw(pipeline)));
+        }
         self.through_store(info.source, |backend, source, feedback| {
             // Only a full store's lookup changes the creation flags.
             let replaced;
@@ -1936,6 +1953,26 @@ impl Backend for NativeBackend {
     fn create_compute_pipeline(&mut self, info: &ComputePipelineInfo) -> Result<Pipeline> {
         self.create_compute(info)
             .map(|pipeline| Pipeline(raw(pipeline)))
+    }
+
+    fn defer_pipelines(&mut self, deferring: Option<&crate::metal::deferred::JobLock>) {
+        self.deferral.set(deferring);
+    }
+
+    fn stop_deferring(&mut self) {
+        self.deferral.stop();
+    }
+
+    fn deferred(&self) -> bool {
+        self.deferral.deferred()
+    }
+
+    fn take_job(&mut self) -> Option<crate::metal::deferred::Job> {
+        self.deferral.take()
+    }
+
+    fn adopt_job(&mut self, done: crate::metal::deferred::Done) {
+        self.adopt_pipeline(done);
     }
 
     fn create_pipeline_cache(&mut self, data: &[u8]) -> Result<PipelineCache> {

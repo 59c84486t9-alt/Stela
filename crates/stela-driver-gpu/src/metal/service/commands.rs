@@ -133,7 +133,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             // A deferred compilation runs the commit again, which submits
             // the command buffer with its events: signaling them now would
             // wake their waiters before its work.
-            if !self.device.compiler_mut().deferred() {
+            if !self.device.deferred() {
                 self.commit_events_only(connection, &stream_bytes);
             }
             return Err(fault);

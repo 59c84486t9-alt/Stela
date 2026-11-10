@@ -977,6 +977,11 @@ raw_enum! {
         /// holds when the call may only take archived ones. The service
         /// notes it rather than refusing.
         Declined = 10,
+        /// Not ready: a compilation the call needs runs outside the
+        /// service. Nothing of the call took effect; the frontend waits a
+        /// moment, without holding its processor in the host, and calls
+        /// again.
+        Pending = 11,
     }
 }
 

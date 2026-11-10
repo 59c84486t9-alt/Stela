@@ -1,5 +1,6 @@
 //! Where the time inside the slowest guest calls goes: the phases of
-//! `NewTexture`, `GetBytes`, `NewRenderPipeline` and `Commit`, in the
+//! `NewTexture`, `GetBytes`, `NewRenderPipeline`, `Commit` and
+//! `NewFunction`, in the
 //! platform's ticks.
 //!
 //! The device has no clock of its own. The shared service gives it the
@@ -33,14 +34,16 @@ pub enum Timed {
     GetBytes,
     NewRenderPipeline,
     Commit,
+    NewFunction,
 }
 
 impl Timed {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::NewTexture,
         Self::GetBytes,
         Self::NewRenderPipeline,
         Self::Commit,
+        Self::NewFunction,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -49,6 +52,7 @@ impl Timed {
             Self::GetBytes => "get_bytes",
             Self::NewRenderPipeline => "new_render_pipeline",
             Self::Commit => "commit",
+            Self::NewFunction => "new_function",
         }
     }
 
@@ -84,6 +88,7 @@ impl Timed {
                 CommitSubmit,
                 CommitCompile,
             ],
+            Self::NewFunction => &[FunctionReflect],
         }
     }
 }
@@ -145,6 +150,9 @@ pub enum Phase {
     /// AIR to NIR of the pipeline variants the replay needed for a
     /// dispatch's or draw's shape; part of the replay's time.
     CommitCompile,
+    /// The AIR compiler's reflection of the function with its constants,
+    /// or its cache's answer.
+    FunctionReflect,
 }
 
 impl Phase {
@@ -191,6 +199,7 @@ impl Phase {
             CommitRecord => "record",
             CommitSubmit => "submit",
             CommitCompile => "compile",
+            FunctionReflect => "reflect",
         }
     }
 }
@@ -246,6 +255,9 @@ pub enum Detail {
         vertex: Name,
         fragment: Option<Name>,
     },
+    Function {
+        entry: Name,
+    },
     Commit {
         stream: u64,
         uploads: u64,
@@ -283,6 +295,7 @@ impl fmt::Display for Detail {
                 vertex.as_str(),
                 fragment.as_ref().map_or("-", Name::as_str)
             ),
+            Self::Function { entry } => write!(formatter, " entry={}", entry.as_str()),
             Self::Commit { stream, uploads } => {
                 write!(formatter, " stream={stream} uploads={uploads}")
             }
@@ -478,7 +491,7 @@ struct Sums {
 
 /// The timed calls since the last report, summed by operation.
 pub struct Totals {
-    operations: [Sums; 4],
+    operations: [Sums; Timed::ALL.len()],
 }
 
 impl Default for Totals {
@@ -510,7 +523,7 @@ impl Totals {
                     slow: AtomicU64::new(0),
                     shown: AtomicU64::new(0),
                 }
-            }; 4],
+            }; Timed::ALL.len()],
         }
     }
 

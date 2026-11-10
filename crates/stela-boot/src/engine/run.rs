@@ -296,6 +296,12 @@ pub(super) fn run<H: Host>(
             if service::shutdown_pending() {
                 machine.exclude_host_time(|_| service::serve(true, false));
             }
+            // A GPU compilation no other PE took (`gate::run_job`), while
+            // this PE's guest waits, so the count need not wait for it.
+            #[cfg(feature = "nvk")]
+            if idle {
+                super::gpu::gate::run_job(true);
+            }
             service.parts.lap(ServiceParts::SERVICE, host::rdtsc());
             (waiting, quiet)
         });

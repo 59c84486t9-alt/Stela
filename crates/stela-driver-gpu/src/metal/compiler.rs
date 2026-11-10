@@ -40,6 +40,7 @@ mod tests;
 use super::{
     abi::{DataType, FunctionType, IndexType, TessellationControlPointIndexType, TextureType},
     capabilities::ShaderFeatures,
+    deferred::{Done, Job, Made, Owner},
     error::{Error, Result, ensure},
     library::Air,
     reflection::Binding,
@@ -70,7 +71,7 @@ use triomphe::Arc;
 
 use library_cache::{LoadedLibrary, ModuleSource, Selected};
 pub use nir_cache::{CompileGuard, CompileLock};
-use nir_cache::{NirCache, ReflectionCache, Returned};
+use nir_cache::{NirCache, ReflectionCache, ReflectionKey, Returned};
 
 /// The constructs the AIR frontend lowers completely (`metal/README.md`).
 const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
@@ -289,6 +290,11 @@ pub struct AirCompiler {
     /// ([`AirCompiler::set_deferring`]), and the one deferred.
     deferring: bool,
     deferred: Option<CompileJob>,
+    /// A reflection the cache missed, deferred as a compilation is.
+    reflecting: Option<ReflectJob>,
+    /// A call that would wait in its turn for a job's use of LLVM waits
+    /// for this job, which runs after it, instead.
+    waiting: Waiting,
     /// Keys whose compilation outside the lock failed: they compile in the
     /// call, whose failure is then the call's.
     failed: alloc::collections::BTreeSet<[u8; 32]>,
@@ -369,6 +375,8 @@ impl AirCompiler {
             nir: None,
             deferring: false,
             deferred: None,
+            reflecting: None,
+            waiting: Waiting::default(),
             failed: alloc::collections::BTreeSet::new(),
             lock: alloc::sync::Arc::new(CompileLock::new()),
             relax: core::hint::spin_loop,
@@ -474,9 +482,54 @@ impl AirCompiler {
         self.release_doomed();
     }
 
+    /// Holds the compile lock for a use of LLVM in a call's turn: LLVM is
+    /// built without threads, and a job may be using it. A call that may
+    /// defer does not wait for the job: it fails with `DEFERRED` and leaves
+    /// a job that does nothing, which runs once the lock is free.
+    fn llvm<'a>(
+        lock: &'a CompileLock,
+        waiting: &mut Waiting,
+        may_defer: bool,
+        relax: fn(),
+    ) -> Result<CompileGuard<'a>> {
+        if let Some(held) = lock.try_hold() {
+            return Ok(held);
+        }
+        if may_defer && waiting.job.is_none() {
+            waiting.count += 1;
+            let mut key = [0xff; 32];
+            key[..8].copy_from_slice(&waiting.count.to_le_bytes());
+            waiting.job = Some(Job::new(key, Owner::Compiler, || Box::new(()) as Made));
+            lock.set_deferred(true);
+            return Err(DEFERRED);
+        }
+        Ok(lock.hold(relax))
+    }
+
+    /// Keeps what a deferred reflection made, for the call's next run.
+    fn adopt_reflection(&mut self, reflected: Reflected) {
+        let Reflected {
+            digest,
+            key,
+            result,
+        } = reflected;
+        match (result, self.reflections.as_mut()) {
+            (Some((reflection, provenance)), Some(cache)) => {
+                self.reflected += 1;
+                cache.insert(key, reflection, provenance);
+            }
+            // Its call reflects in its turn, whose failure is then its own.
+            _ => {
+                self.failed.insert(digest);
+            }
+        }
+    }
+
     /// Ends a call: what it lent or adopted may be evicted again.
     pub fn end_call(&mut self) {
         self.deferring = false;
+        self.reflecting = None;
+        self.waiting.job = None;
         if let Some(nir) = self.nir.as_mut() {
             nir.unpin();
         }
@@ -541,8 +594,46 @@ impl AirCompiler {
         {
             return Ok(hit);
         }
+        // A large module's reflection, which parses and specializes its
+        // AIR, can take seconds: it runs outside the turn like a compile.
+        if let Some(key) = &key
+            && self.deferring
+            && self.deferred.is_none()
+            && self.reflecting.is_none()
+        {
+            let digest = reflection_digest(key);
+            if !self.failed.remove(&digest) {
+                let library = self
+                    .libraries
+                    .get(&library)
+                    .ok_or(Error::Invalid("unknown library"))?
+                    .clone();
+                self.deferrals += 1;
+                self.reflecting = Some(ReflectJob {
+                    service: self.service,
+                    library,
+                    digest,
+                    key: key.clone(),
+                });
+                self.lock.set_deferred(true);
+                return Err(DEFERRED);
+            }
+        }
         let raw = values.map(constant_values);
-        let reflection = selected.reflect_raw(&self.service, raw.as_deref(), &mut self.refusal)?;
+        // LLVM, built without threads, runs on one processor at a time: a
+        // job holds this lock while it runs.
+        let reflection = {
+            let lock = self.lock.clone();
+            let _held = Self::llvm(
+                &lock,
+                &mut self.waiting,
+                self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
+                self.relax,
+            )?;
+            let selected = select(&self.libraries, library, entry)?;
+            selected.reflect_raw(&self.service, raw.as_deref(), &mut self.refusal)?
+        };
+        let selected = select(&self.libraries, library, entry)?;
         self.reflected += 1;
         let decoded = selected.decode_reflection(&reflection)?;
         if let (Some(cache), Some(key)) = (&mut self.reflections, key) {
@@ -575,7 +666,40 @@ impl Compiler for AirCompiler {
     }
 
     fn deferred(&self) -> bool {
-        self.deferred.is_some()
+        self.deferred.is_some() || self.reflecting.is_some() || self.waiting.job.is_some()
+    }
+
+    fn defer_compiles(&mut self, deferring: bool) {
+        self.set_deferring(deferring);
+    }
+
+    fn take_job(&mut self) -> Option<Job> {
+        if let Some(waiting) = self.waiting.job.take() {
+            self.lock.set_deferred(false);
+            return Some(waiting);
+        }
+        if let Some(reflect) = self.reflecting.take() {
+            self.lock.set_deferred(false);
+            return Some(Job::new(reflect.digest, Owner::Compiler, move || {
+                Box::new(reflect.run()) as Made
+            }));
+        }
+        let job = self.take_deferred()?;
+        let key = job.key.expect("a deferred compilation has its key");
+        Some(Job::new(key, Owner::Compiler, move || {
+            Box::new(job.complete()) as Made
+        }))
+    }
+
+    fn adopt_job(&mut self, done: Done) {
+        match done.made.downcast::<Finished>() {
+            Ok(finished) => self.adopt(*finished),
+            Err(made) => {
+                if let Ok(reflected) = made.downcast::<Reflected>() {
+                    self.adopt_reflection(*reflected);
+                }
+            }
+        }
     }
 
     fn features(&self) -> ShaderFeatures {
@@ -620,6 +744,14 @@ impl Compiler for AirCompiler {
         let air = Air::parse(air).map_err(|_| Error::Invalid("AIR"))?;
         let mut functions = Vec::new();
         let mut error = ffi::AirError::NONE;
+        // LLVM, built without threads, runs on one processor at a time.
+        let lock = self.lock.clone();
+        let _held = Self::llvm(
+            &lock,
+            &mut self.waiting,
+            self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
+            self.relax,
+        )?;
         // SAFETY: the bitcode and the list outlive the call, which writes
         // the list through `visit` and the error.
         let listed = unsafe {
@@ -661,6 +793,14 @@ impl Compiler for AirCompiler {
         let air = Air::parse(air).map_err(|_| Error::Invalid("AIR"))?;
         let mut exports = Vec::new();
         let mut error = ffi::AirError::NONE;
+        // LLVM, built without threads, runs on one processor at a time.
+        let lock = self.lock.clone();
+        let _held = Self::llvm(
+            &lock,
+            &mut self.waiting,
+            self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
+            self.relax,
+        )?;
         // SAFETY: the bitcode and the list outlive the call, which writes
         // the list through `visit` and the error.
         let listed = unsafe {
@@ -797,6 +937,14 @@ impl Compiler for AirCompiler {
             .collect::<Result<Vec<_>>>()?;
         let mut module = Vec::new();
         let mut error = ffi::AirError::NONE;
+        // LLVM, built without threads, runs on one processor at a time.
+        let lock = self.lock.clone();
+        let _held = Self::llvm(
+            &lock,
+            &mut self.waiting,
+            self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
+            self.relax,
+        )?;
         // SAFETY: the sources and graphs, with what they point to, and the
         // module outlive the call, which writes the module through `visit`
         // and the error.
@@ -883,6 +1031,14 @@ impl Compiler for AirCompiler {
         let air = selected.module.bitcode;
         let values = specialization.map(|known| constant_values(&known.constants));
         let count = u32::try_from(values.as_ref().map_or(0, Vec::len)).map_err(|_| MALFORMED)?;
+        // LLVM, built without threads, runs on one processor at a time.
+        let lock = self.lock.clone();
+        let _held = Self::llvm(
+            &lock,
+            &mut self.waiting,
+            self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
+            self.relax,
+        )?;
         // SAFETY: the AIR, entry and values outlive the call, which writes
         // only the bindings and the error.
         let reflected = unsafe {
@@ -929,6 +1085,14 @@ impl Compiler for AirCompiler {
             let mut listed = [0; ffi::SAMPLER_STATES];
             let mut count = 0;
             let mut error = ffi::AirError::NONE;
+            // LLVM, built without threads, runs on one processor at a time.
+            let lock = self.lock.clone();
+            let _held = Self::llvm(
+                &lock,
+                &mut self.waiting,
+                self.deferring && self.deferred.is_none() && self.reflecting.is_none(),
+                self.relax,
+            )?;
             // SAFETY: the bitcode outlives the call, which writes at most
             // SAMPLER_STATES states, the count and the error.
             let valid = unsafe {
@@ -1370,6 +1534,77 @@ pub struct CompileJob {
     serializing: bool,
 }
 
+// SAFETY: its pointers are the held libraries' immutable bytes and the
+// driver's NIR options, which any thread reads; nothing else holds them.
+unsafe impl Send for CompileJob {}
+
+/// A job that waits for the compile lock, for a call whose turn would.
+#[derive(Default)]
+struct Waiting {
+    job: Option<Job>,
+    count: u64,
+}
+
+/// A reflection the cache missed, owned, to run outside the service's lock:
+/// the library's immutable bytes and the function's constant values.
+struct ReflectJob {
+    service: Service,
+    library: Arc<LoadedLibrary>,
+    digest: [u8; 32],
+    key: ReflectionKey,
+}
+
+// SAFETY: as for a compile job.
+unsafe impl Send for ReflectJob {}
+
+/// What a [`ReflectJob`] made: the reflection, or `None` when the service
+/// refused it.
+struct Reflected {
+    digest: [u8; 32],
+    key: ReflectionKey,
+    result: Option<(Reflection, Provenance)>,
+}
+
+// SAFETY: plain values the job made, which only the adopting turn reads.
+unsafe impl Send for Reflected {}
+
+impl ReflectJob {
+    fn run(self) -> Reflected {
+        let (_, entry, values) = &self.key;
+        let result = self.library.select(entry).ok().and_then(|selected| {
+            let raw = values.as_deref().map(constant_values);
+            let mut refusal = None;
+            let reflection = selected
+                .reflect_raw(&self.service, raw.as_deref(), &mut refusal)
+                .ok()?;
+            selected.decode_reflection(&reflection).ok()
+        });
+        Reflected {
+            digest: self.digest,
+            key: self.key,
+            result,
+        }
+    }
+}
+
+/// The digest a deferred reflection is known by among jobs.
+fn reflection_digest(key: &ReflectionKey) -> [u8; 32] {
+    use stela_crypto::{Sha256, digest::Digest};
+    let (slice, entry, values) = key;
+    let mut hasher = Sha256::new();
+    hasher.update(b"reflection");
+    hasher.update(slice);
+    hasher.update((entry.len() as u64).to_le_bytes());
+    hasher.update(entry.as_bytes());
+    for (index, value) in values.iter().flatten() {
+        hasher.update(index.to_le_bytes());
+        hasher.update((value.len() as u64).to_le_bytes());
+        hasher.update(value);
+    }
+    hasher.update([u8::from(values.is_some())]);
+    hasher.finalize().into()
+}
+
 /// What a deferred [`CompileJob`] made, for [`AirCompiler::adopt`]: the
 /// shader with its NIR's bytes, or a failure the call's next run repeats.
 pub struct Finished {
@@ -1384,6 +1619,11 @@ impl CompileJob {
     /// the NIR for the next boot, when that keeps it. The caller holds the
     /// lock for as long as it runs on the one compile stack.
     pub fn run_outside(self, _held: &CompileGuard<'_>) -> Finished {
+        self.complete()
+    }
+
+    /// [`Self::run_outside`], for a [`Job`] whose runner holds the lock.
+    fn complete(self) -> Finished {
         let serializing = self.serializing;
         let result = self.run();
         let serialized = match &result {
@@ -1647,6 +1887,37 @@ fn deserialize(blob: &[u8], options: *const c_void) -> Option<*mut c_void> {
         let _ = (blob, options);
         None
     }
+}
+
+/// A copy of `code`'s NIR that the caller owns until [`free_nir_copy`], as
+/// a deferred pipeline creation needs once its call has returned the
+/// original; `None` where this image links no Mesa.
+pub fn clone_nir(code: ShaderCode) -> Option<ShaderCode> {
+    #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
+    {
+        unsafe extern "C" {
+            fn nir_shader_clone(context: *mut c_void, shader: *const c_void) -> *mut c_void;
+        }
+        // SAFETY: the compiler's live NIR, which cloning only reads.
+        let copy = unsafe { nir_shader_clone(ptr::null_mut(), code.0 as usize as *const c_void) };
+        (!copy.is_null()).then_some(ShaderCode(copy as usize as u64))
+    }
+    #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
+    {
+        let _ = code;
+        None
+    }
+}
+
+/// Frees a copy [`clone_nir`] made.
+pub fn free_nir_copy(code: ShaderCode) {
+    #[cfg(all(feature = "metal-linked", target_os = "uefi"))]
+    // SAFETY: the copy, a ralloc context of its own that nothing else holds.
+    unsafe {
+        free_nir(code.0 as usize as *mut c_void);
+    }
+    #[cfg(not(all(feature = "metal-linked", target_os = "uefi")))]
+    let _ = code;
 }
 
 /// Frees NIR deserialized here.

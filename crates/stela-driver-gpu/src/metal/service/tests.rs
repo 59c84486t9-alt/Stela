@@ -34,6 +34,7 @@ use core::num::NonZeroU64;
 use stela_contracts::gate::MemoryRange;
 
 mod commands;
+mod deferral;
 mod gate;
 mod indirect;
 mod lifecycle;

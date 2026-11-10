@@ -1835,7 +1835,7 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         update: &mut dyn FnMut(&mut IndirectCommandBuffer) -> Result<()>,
     ) -> Result<()> {
         // A commit running again would apply the update twice.
-        self.device.compiler.stop_deferring();
+        self.device.stop_deferring();
         update(self.device.indirect_command_buffer_mut(id)?)
     }
 }

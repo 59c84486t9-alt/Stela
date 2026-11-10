@@ -538,6 +538,11 @@ pub(super) struct Persisted {
 
 impl Persisted {
     /// No store: compiled pipelines keep no cache.
+    /// Where the store's messages go.
+    pub(super) fn log(&self) -> fn(&str) {
+        self.log
+    }
+
     pub(super) fn none(log: fn(&str)) -> Self {
         Self {
             claim: None,
