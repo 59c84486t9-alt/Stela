@@ -2542,6 +2542,52 @@ calls_of_null_buffers_stay_separate(void)
    }
 }
 
+/* Repeated calls each passing its own thread struct that holds a buffer
+ * pointer, the shape MPS kernels pass their stitched functions. Shared, a
+ * PHI would choose the struct, SROA could not promote it, and the pointer
+ * would stay in thread memory, which translation refuses; the calls stay
+ * separate, and each stores through its struct's pointer. */
+static void
+calls_of_structs_holding_pointers_stay_separate(void)
+{
+   char put[8192] = "define internal void @put(ptr %s, i32 %x0) noinline {\n";
+   for (unsigned i = 0; i < 32; i++) {
+      size_t used = strlen(put);
+      snprintf(put + used, sizeof(put) - used, "%%t%u = mul i32 %%x%u, 33\n%%x%u = xor i32 %%t%u, 3\n",
+               i, i, i + 1, i);
+   }
+   /* Loaded past a branch, SROA cannot speculate the load into the PHI's
+    * block. */
+   strcat(put, "%odd = trunc i32 %x32 to i1\nbr i1 %odd, label %flip, label %write\n"
+               "flip:\nbr label %write\n"
+               "write:\n%v = phi i32 [%x32, %0], [%x32, %flip]\n"
+               "%p = load ptr addrspace(1), ptr %s, align 8\n"
+               "store i32 %v, ptr addrspace(1) %p, align 4\nret void\n}\n");
+   const char *body =
+      "%a = alloca { ptr addrspace(1), i32 }, align 8\n"
+      "%b = alloca { ptr addrspace(1), i32 }, align 8\n"
+      "store ptr addrspace(1) %out, ptr %a, align 8\n"
+      "%second = getelementptr i32, ptr addrspace(1) %out, i64 1\n"
+      "store ptr addrspace(1) %second, ptr %b, align 8\n"
+      "call void @put(ptr %a, i32 %tid)\n"
+      "%next = add i32 %tid, 1\n"
+      "call void @put(ptr %b, i32 %next)\nret void\n";
+   for (uint32_t tid = 0; tid < 2; tid++) {
+      LLVMMemoryBufferRef input = stela_air_test_bitcode(body, put);
+      struct stela_air_error error;
+      nir_shader *nir = translate(input, &test_nir_options, 4000, &error);
+      if (!nir)
+         fprintf(stderr, "calls of pointer structs: %s\n", error.detail);
+      CHECK(nir && nir->scratch_size == 0);
+      LLVMDisposeMemoryBuffer(input);
+      specialize_invocation(nir, tid);
+      const uint64_t addresses[2] = {0x100000, 0x100004};
+      const uint32_t values[2] = {step_reference(tid, 3, 32), step_reference(tid + 1, 3, 32)};
+      check_executed_stores(nir, addresses, values, 2);
+      ralloc_free(nir);
+   }
+}
+
 /* A thread variable a [[noinline]] function updates through its
  * `thread int&` argument is only loaded and stored once the calls are
  * inlined, and takes no thread memory. */
@@ -2611,6 +2657,7 @@ tests(void)
    repeated_calls_share_one_body(32, "noinline");
    repeated_calls_share_one_body(160, "");
    calls_of_null_buffers_stay_separate();
+   calls_of_structs_holding_pointers_stay_separate();
    inlined_thread_reference_takes_no_thread_memory();
    thread_memory_holds_only_accessed_variables();
    struct stela_air_error error;

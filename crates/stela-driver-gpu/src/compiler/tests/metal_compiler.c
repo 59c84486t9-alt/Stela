@@ -2528,6 +2528,59 @@ parse_constants(const char *text, struct stela_air_constant_value *values, uint8
    return count;
 }
 
+/* The modules MPS links an ndarray kernel with, from STELA_TEST_MPS_FUSED's
+ * `directory`: the stitched module `stitched`, then the sources its
+ * manifest.txt's `source PATH NAME VALUES` lines name, each found by its
+ * file name in the directory. */
+static struct stela_air_module mps_modules[64];
+static struct stela_air_constant_value mps_values[64][32];
+static uint8_t mps_bytes[64][32][16];
+static char mps_names[64][256];
+
+static unsigned
+mps_load_modules(const char *directory, const char *stitched)
+{
+   char path[4096];
+   size_t size;
+   unsigned count = 0;
+   snprintf(path, sizeof(path), "%s/%s", directory, stitched);
+   mps_modules[count] = (struct stela_air_module){.bitcode = read_file(path, &size), .size = size};
+   assert(mps_modules[count].bitcode);
+   count++;
+   snprintf(path, sizeof(path), "%s/manifest.txt", directory);
+   FILE *manifest = fopen(path, "r");
+   assert(manifest);
+   char line[4096];
+   while (fgets(line, sizeof(line), manifest)) {
+      char source[512], function[256], constants[2048];
+      if (sscanf(line, "source %511s %255s %2047s", source, function, constants) != 3)
+         continue;
+      assert(count < ARRAY_SIZE(mps_modules));
+      const char *file = strrchr(source, '/') ? strrchr(source, '/') + 1 : source;
+      unsigned copy = 0;
+      for (unsigned i = 1; i < count; i++)
+         copy += !strcmp(mps_names[i], file);
+      snprintf(mps_names[count], sizeof(mps_names[count]), "%s", file);
+      snprintf(path, sizeof(path), "%s/%s", directory, file);
+      mps_modules[count] = (struct stela_air_module){
+         .bitcode = read_file(path, &size), .size = size, .constants = mps_values[count],
+         .constant_count = parse_constants(constants, mps_values[count], mps_bytes[count]),
+         .copy = copy,
+      };
+      assert(mps_modules[count].bitcode);
+      count++;
+   }
+   fclose(manifest);
+   return count;
+}
+
+static void
+mps_release_modules(unsigned count)
+{
+   for (unsigned i = 0; i < count; i++)
+      free((void *)mps_modules[i].bitcode);
+}
+
 /* Oracle: MPS's ndArrayIdentity, which passes its stitched functions a
  * thread _MPSKernelInOut holding the generic pointer to its buffer array,
  * with MetalFX's values. STELA_TEST_MPS_FUSED names a directory of Apple
@@ -2541,42 +2594,12 @@ mps_identity_links_its_stitched_functions(void)
    if (!directory)
       return;
    char path[4096];
-   size_t size, kernel_size;
+   size_t kernel_size;
    snprintf(path, sizeof(path), "%s/ndArrayIdentity.bc", directory);
    void *kernel = read_file(path, &kernel_size);
    assert(kernel);
-   static struct stela_air_module modules[64];
-   static struct stela_air_constant_value values[64][32];
-   static uint8_t bytes[64][32][16];
-   static char names[64][256];
-   unsigned count = 0;
-   snprintf(path, sizeof(path), "%s/stitched.bc", directory);
-   modules[count].bitcode = read_file(path, &modules[count].size);
-   assert(modules[count].bitcode);
-   count++;
-   snprintf(path, sizeof(path), "%s/manifest.txt", directory);
-   FILE *manifest = fopen(path, "r");
-   assert(manifest);
-   char line[4096];
-   while (fgets(line, sizeof(line), manifest)) {
-      char source[512], function[256], constants[2048];
-      if (sscanf(line, "source %511s %255s %2047s", source, function, constants) != 3)
-         continue;
-      assert(count < ARRAY_SIZE(modules));
-      const char *file = strrchr(source, '/') ? strrchr(source, '/') + 1 : source;
-      unsigned copy = 0;
-      for (unsigned i = 1; i < count; i++)
-         copy += !strcmp(names[i], file);
-      snprintf(names[count], sizeof(names[count]), "%s", file);
-      snprintf(path, sizeof(path), "%s/%s", directory, file);
-      modules[count] = (struct stela_air_module){
-         .bitcode = read_file(path, &size), .size = size, .constants = values[count],
-         .constant_count = parse_constants(constants, values[count], bytes[count]), .copy = copy,
-      };
-      assert(modules[count].bitcode);
-      count++;
-   }
-   fclose(manifest);
+   unsigned count = mps_load_modules(directory, "stitched.bc");
+   const struct stela_air_module *modules = mps_modules;
    /* MetalFX's: two buffers, an identity map. */
    struct stela_air_constant_value own[2];
    uint8_t own_bytes[2][16];
@@ -2599,9 +2622,75 @@ mps_identity_links_its_stitched_functions(void)
    assert(!stela_metal_compile(kernel, kernel_size, "ndArrayIdentity", &driver, &specialization,
                                &error));
    assert(error.kind == STELA_AIR_ARGUMENT && strstr(error.detail, "Primary_f is not linked"));
-   for (unsigned i = 0; i < count; i++)
-      free((void *)modules[i].bitcode);
+   mps_release_modules(count);
    free(kernel);
+}
+
+/* Oracle: the MPS ndarray kernels a MetalFX network runs, linked with the
+ * stitched functions they call. STELA_TEST_MPS_FUSED's directory (see
+ * above) holds a kernels.txt of lines `FILE ENTRY VALUES X,Y,Z LENGTHS
+ * STITCHED`: the kernel's bitcode, its function constant values, its
+ * threadgroup size, its threadgroup memory lengths as INDEX:BYTES,... ("-"
+ * for none, as the service sizes each slot at dispatch) and the stitched
+ * module. Each compiles. The depthwise gradient kernels pass each of a
+ * block's calls its own thread struct of buffer pointers. */
+static void
+mps_kernels_compile(void)
+{
+   const char *directory = getenv("STELA_TEST_MPS_FUSED");
+   char path[4096];
+   snprintf(path, sizeof(path), "%s/kernels.txt", directory ? directory : "");
+   FILE *list = directory ? fopen(path, "r") : NULL;
+   if (!list)
+      return;
+   char line[4096];
+   unsigned failed = 0;
+   while (fgets(line, sizeof(line), list)) {
+      char file[256], entry[256], constants[1024], lengths[256], stitched[256];
+      unsigned x, y, z;
+      if (line[0] == '#' ||
+          sscanf(line, "%255s %255s %1023s %u,%u,%u %255s %255s", file, entry, constants, &x, &y, &z,
+                 lengths, stitched) != 8)
+         continue;
+      size_t kernel_size;
+      snprintf(path, sizeof(path), "%s/%s", directory, file);
+      void *kernel = read_file(path, &kernel_size);
+      assert(kernel);
+      unsigned count = mps_load_modules(directory, stitched);
+      struct stela_air_constant_value own[32];
+      uint8_t own_bytes[32][16];
+      unsigned own_count = parse_constants(constants, own, own_bytes);
+      struct stela_metal_threadgroup_length threadgroup[8];
+      unsigned threadgroup_count = 0;
+      for (const char *at = lengths; *at && *at != '-' && threadgroup_count < ARRAY_SIZE(threadgroup);) {
+         char *end;
+         threadgroup[threadgroup_count].index = strtoul(at, &end, 10);
+         assert(*end == ':');
+         threadgroup[threadgroup_count++].bytes = strtoul(end + 1, &end, 10);
+         at = *end == ',' ? end + 1 : end;
+      }
+      struct stela_metal_target driver = target;
+      driver.max_instructions = 1u << 20;
+      driver.max_private_bytes = 512u << 10;
+      const struct stela_metal_specialization specialization = {
+         .workgroup_size = {x, y, z}, .constants = own, .constant_count = own_count,
+         .threadgroup_lengths = threadgroup, .threadgroup_length_count = threadgroup_count,
+         .modules = mps_modules, .module_count = count,
+      };
+      struct stela_air_error error = {0};
+      nir_shader *shader = stela_metal_compile(kernel, kernel_size, entry, &driver, &specialization,
+                                               &error);
+      if (!shader) {
+         fprintf(stderr, "%s %s: %u at %u %s\n", entry, constants, error.kind, error.instruction,
+                 error.detail);
+         failed++;
+      }
+      stela_metal_release(shader);
+      mps_release_modules(count);
+      free(kernel);
+   }
+   fclose(list);
+   assert(!failed);
 }
 
 /* Keeps the bitcode of LLVM's wrapper for a Darwin target, as `metal/library.rs`
@@ -4473,6 +4562,7 @@ main(void)
    stitched_functions_call_their_nodes_in_order();
    thread_structs_carry_pointers_to_linked_functions();
    mps_identity_links_its_stitched_functions();
+   mps_kernels_compile();
    unreachable_paths_end_the_invocation();
    constant_branches_take_one_edge();
    metalfx_kernels_compile();

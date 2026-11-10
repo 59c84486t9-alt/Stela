@@ -501,6 +501,68 @@ constant_based(LLVMValueRef pointer, unsigned depth)
    return false;
 }
 
+/* Whether a pointer is stored, or memory copied, through `address` or an
+ * offset or cast of it. */
+static bool
+stored_pointer(LLVMValueRef address, unsigned depth)
+{
+   if (depth > 16)
+      return true;
+   for (LLVMUseRef use = LLVMGetFirstUse(address); use; use = LLVMGetNextUse(use)) {
+      LLVMValueRef user = LLVMGetUser(use);
+      if (LLVMIsAStoreInst(user)) {
+         if (LLVMGetOperand(user, 1) == address &&
+             holds_pointer(LLVMTypeOf(LLVMGetOperand(user, 0)), 0))
+            return true;
+      } else if (LLVMIsAGetElementPtrInst(user) || LLVMIsABitCastInst(user) ||
+                 LLVMIsAAddrSpaceCastInst(user) || LLVMIsASelectInst(user) || LLVMIsAPHINode(user)) {
+         if (stored_pointer(user, depth + 1))
+            return true;
+      } else if (LLVMIsACallInst(user)) {
+         LLVMValueRef callee = LLVMGetCalledValue(user);
+         unsigned id = LLVMIsAFunction(callee) ? LLVMGetIntrinsicID(callee) : 0;
+         static const char *const copies[] = {"llvm.memcpy", "llvm.memmove", "llvm.memcpy.inline"};
+         for (unsigned i = 0; id && i < ARRAY_SIZE(copies); i++) {
+            if (id == LLVMLookupIntrinsicID(copies[i], strlen(copies[i])) &&
+                LLVMGetOperand(user, 0) == address)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+/* Whether `pointer` may address thread memory that holds a pointer. A PHI
+ * of the shared call's arguments would select such memory, which SROA then
+ * cannot promote, and translation keeps no pointer in memory. Thread memory
+ * other than a known stack slot may hold anything. */
+static bool
+thread_pointer_memory(LLVMValueRef pointer, unsigned depth)
+{
+   LLVMTypeRef type = LLVMTypeOf(pointer);
+   if (LLVMGetTypeKind(type) != LLVMPointerTypeKind || LLVMGetPointerAddressSpace(type))
+      return false;
+   if (depth > 16)
+      return true;
+   if (LLVMIsConstant(pointer))
+      return false;
+   if (LLVMIsAAllocaInst(pointer))
+      return holds_pointer(LLVMGetAllocatedType(pointer), 0) || stored_pointer(pointer, 0);
+   if (LLVMIsAGetElementPtrInst(pointer) || LLVMIsABitCastInst(pointer))
+      return thread_pointer_memory(LLVMGetOperand(pointer, 0), depth + 1);
+   if (LLVMIsASelectInst(pointer))
+      return thread_pointer_memory(LLVMGetOperand(pointer, 1), depth + 1) ||
+             thread_pointer_memory(LLVMGetOperand(pointer, 2), depth + 1);
+   if (LLVMIsAPHINode(pointer)) {
+      for (unsigned i = 0; i < LLVMCountIncoming(pointer); i++) {
+         if (thread_pointer_memory(LLVMGetIncomingValue(pointer, i), depth + 1))
+            return true;
+      }
+      return false;
+   }
+   return true;
+}
+
 /* Gives each value of the block that a use in another part reads a stack
  * slot, which those uses load; with apply false, only checks that each
  * such value can have one. */
@@ -694,7 +756,9 @@ gather_calls(struct shared_calls *s, LLVMBasicBlockRef block, LLVMValueRef calle
     * translation joins pointers by the resource each was proven to reach.
     * A constant pointer (null: a buffer a function constant left out) and
     * offsets off it have no such proof, nor has one inside a struct or
-    * array. A select may still fold to one. */
+    * array. A select may still fold to one. Nor may the PHI select thread
+    * memory holding pointers (MPS kernels pass each call its own struct of
+    * buffer addresses), which SROA could then not promote. */
    for (unsigned a = 0; a < LLVMGetNumArgOperands(s->calls[0]); a++) {
       LLVMValueRef first = LLVMGetOperand(s->calls[0], a);
       if (!holds_pointer(LLVMTypeOf(first), 0))
@@ -707,7 +771,8 @@ gather_calls(struct shared_calls *s, LLVMBasicBlockRef block, LLVMValueRef calle
       if (LLVMGetTypeKind(LLVMTypeOf(first)) != LLVMPointerTypeKind)
          return false;
       for (unsigned i = 0; i < s->count; i++) {
-         if (constant_based(LLVMGetOperand(s->calls[i], a), 0))
+         if (constant_based(LLVMGetOperand(s->calls[i], a), 0) ||
+             thread_pointer_memory(LLVMGetOperand(s->calls[i], a), 0))
             return false;
       }
    }
