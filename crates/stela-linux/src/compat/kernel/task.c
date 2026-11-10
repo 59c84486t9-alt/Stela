@@ -27,6 +27,8 @@
 #include <stela/task_bootstrap.h>
 #include <sched/fork_backend.h>
 #include <stela/catalogue.h>
+#include <stela/counts.h>
+#include <stela/service.h>
 #include <linux/mm_types.h>
 #include <linux/pgtable.h>
 #include <linux/blkdev.h>
@@ -2064,6 +2066,8 @@ int __cond_resched(void)
 {
 	struct stela_linux_task *task = current_record();
 	(void)stela_linux_owner();
+	/* A worker calls this after each work item, with its function still set. */
+	stela_linux_count_work();
 	/* Legal nonblocking no-op in critical context, before provider/drain or
 	 * flag effects. The private guard survives public counter rebalance. */
 	if (stela_linux_atomic_callback_active() || preempt_count() || irqs_disabled())

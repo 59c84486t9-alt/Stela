@@ -11,6 +11,7 @@
 #include <linux/sched/signal.h>
 #include <linux/timerqueue.h>
 #include <stela/atomic_callback.h>
+#include <stela/counts.h>
 #include <stela/linux.h>
 #include <stela/timer.h>
 
@@ -212,6 +213,8 @@ static void run_queue(const struct stela_linux_timer_delivery *delivery,
             stela_linux_atomic_callback_begin_soft(&scope);
         else
             stela_linux_atomic_callback_begin(&scope);
+        stela_linux_count(&stela_linux_counts.timers,
+                          (unsigned long)ACCESS_PRIVATE(timer, function));
         enum hrtimer_restart restart = ACCESS_PRIVATE(timer, function)(timer);
         stela_linux_atomic_callback_end(&scope);
         running = NULL;
@@ -241,7 +244,7 @@ static enum hrtimer_restart wake_sleeper(struct hrtimer *timer)
 	struct task_struct *task = sleeper->task;
 
 	sleeper->task = NULL;
-	wake_up_process(task);
+	stela_linux_count_timeout(task, wake_up_process(task));
 	return HRTIMER_NORESTART;
 }
 

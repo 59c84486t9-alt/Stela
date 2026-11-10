@@ -1771,6 +1771,8 @@ struct PumpCounts {
     step_longest: AtomicU64,
     step_shootdowns: AtomicU64,
     step_serving: [AtomicU32; 4],
+    /// Linux steps the pumps ran.
+    steps: AtomicU64,
 }
 
 /// Host page-window unmappings by their source since [`pump_report`]: Linux
@@ -1812,6 +1814,7 @@ static PUMPS: PumpCounts = PumpCounts {
     step_longest: AtomicU64::new(0),
     step_shootdowns: AtomicU64::new(0),
     step_serving: [const { AtomicU32::new(0) }; 4],
+    steps: AtomicU64::new(0),
 };
 
 /// The shootdowns counted so far, for a difference across a step.
@@ -1961,6 +1964,7 @@ pub(super) fn pump() {
     if steps == 0 {
         PUMPS.idle.fetch_add(1, Ordering::Relaxed);
     }
+    PUMPS.steps.fetch_add(u64::from(steps), Ordering::Relaxed);
     #[cfg(feature = "nvk")]
     if look_due(gpu) {
         gate::interrupted();
@@ -2002,7 +2006,8 @@ fn pump_waiting() {
 /// `step_longest_us=… step_shootdowns=… step_serving=…`: the longest single
 /// Linux step, the shootdowns during it and the posted calls being performed
 /// as it began (`-` for none), and `unmaps=device/pages/files/stacks`
-/// ([`UNMAPS`]).
+/// ([`UNMAPS`]). Then `\nGPU LINUX timers=… works=… sleepers=… timeouts=…
+/// steps=…` ([`linux_report`]).
 pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
     let gpu = installed()?;
     let take = |counter: &AtomicU64| counter.swap(0, Ordering::Relaxed);
@@ -2054,7 +2059,89 @@ pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
         micros(take(&PUMPS.step_longest)),
         take(&PUMPS.step_shootdowns),
     );
-    Some(pumps + &nvkm)
+    let linux = linux_report(take(&PUMPS.steps));
+    Some(pumps + &linux + &nvkm)
+}
+
+/// `compat/stela/counts.h`: `struct stela_linux_count_kind`.
+#[repr(C)]
+struct LinuxCountKind {
+    /// Per slot the function and its count.
+    slots: [[AtomicUsize; 2]; 32],
+    other: AtomicUsize,
+}
+
+/// `compat/stela/counts.h`: `struct stela_linux_counts`.
+#[repr(C)]
+struct LinuxCounts {
+    timers: LinuxCountKind,
+    works: LinuxCountKind,
+    sleepers: LinuxCountKind,
+    timeouts: AtomicUsize,
+}
+
+/// `\nGPU LINUX timers=+0x…:N,… works=… sleepers=… timeouts=N steps=N`:
+/// since the last report, the timer callbacks (timer-list and
+/// high-resolution) and work items that ran in the environment, most first,
+/// by function as an offset in this image (`other:N` for the rest), the tasks
+/// a timeout woke by the work item or thread function they ran (`-` for
+/// neither) and in all, and the Linux steps the pumps ran.
+fn linux_report(steps: u64) -> String {
+    /// Functions listed per kind.
+    const TOP: usize = 4;
+    unsafe extern "C" {
+        /// `compat/kernel/counts.c`, which updates it only atomically.
+        static stela_linux_counts: LinuxCounts;
+        static __ImageBase: u8;
+    }
+    // SAFETY: counters the environment updates only atomically.
+    let counts = unsafe { &stela_linux_counts };
+    let base = &raw const __ImageBase as usize;
+    let list = |kind: &LinuxCountKind| {
+        let mut taken: Vec<(usize, usize)> = kind
+            .slots
+            .iter()
+            .filter_map(|[function, count]| {
+                let count = count.swap(0, Ordering::Relaxed);
+                (count != 0).then(|| (function.load(Ordering::Relaxed), count))
+            })
+            .collect();
+        taken.sort_unstable_by_key(|&(_, count)| core::cmp::Reverse(count));
+        let other = kind.other.swap(0, Ordering::Relaxed)
+            + taken
+                .iter()
+                .skip(TOP)
+                .map(|&(_, count)| count)
+                .sum::<usize>();
+        let mut line = String::new();
+        for &(function, count) in taken.iter().take(TOP) {
+            if !line.is_empty() {
+                line.push(',');
+            }
+            match function {
+                // The counters' mark for no function.
+                1 => line.push_str(&format!("-:{count}")),
+                function => line.push_str(&format!("+{:#x}:{count}", function.wrapping_sub(base))),
+            }
+        }
+        if other != 0 {
+            if !line.is_empty() {
+                line.push(',');
+            }
+            line.push_str(&format!("other:{other}"));
+        }
+        if line.is_empty() {
+            line.push('-');
+        }
+        line
+    };
+    format!(
+        "\nGPU LINUX timers={} works={} sleepers={} timeouts={} steps={steps}",
+        list(&counts.timers),
+        list(&counts.works),
+        list(&counts.sleepers),
+        counts.timeouts.swap(0, Ordering::Relaxed),
+    )
 }
 
 /// `\nGPU NVKM kind:count/total_us/longest_us …`: where nouveau's page-table

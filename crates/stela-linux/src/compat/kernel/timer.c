@@ -12,6 +12,7 @@
 #include <linux/sched/debug.h>
 #include <linux/timer.h>
 #include <stela/atomic_callback.h>
+#include <stela/counts.h>
 #include <stela/linux.h>
 #include <stela/timer.h>
 #include <stela/time.h>
@@ -226,6 +227,7 @@ void stela_linux_timers_run(const struct stela_linux_timer_delivery *delivery)
 			stela_linux_atomic_callback_begin_soft_irqsafe(&scope);
 		else
 			stela_linux_atomic_callback_begin_soft(&scope);
+        stela_linux_count(&stela_linux_counts.timers, (unsigned long)function);
         running_timer = timer;
         function(timer);
         running_timer = NULL;
@@ -239,7 +241,8 @@ struct process_timer {
 };
 static void process_timeout(struct timer_list *timer)
 {
-    wake_up_process(container_of(timer, struct process_timer, timer)->task);
+    struct task_struct *task = container_of(timer, struct process_timer, timer)->task;
+    stela_linux_count_timeout(task, wake_up_process(task));
 }
 
 /* Linux's timer wheel arms no further out than WHEEL_TIMEOUT_MAX jiffies
