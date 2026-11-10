@@ -827,8 +827,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The target PSTATE.DIT code compiles for
     /// (`TargetCpu::data_independent_timing_target`). Without one,
     /// ID_AA64PFR0_EL1.DIT reads 0 (`identification::Basis::Timing`) and
-    /// PSTATE.DIT changes no code.
+    /// PSTATE.DIT changes no code. That code's atomics, ordered accesses and
+    /// barriers are plain accesses, which only one running PE makes atomic:
+    /// a machine whose PEs run concurrently (`enter_parallel`) never selects
+    /// it, whatever its target.
     pub(super) fn timing_target(&self) -> Option<TargetCpu> {
+        if self.parallel.is_some() || self.attached.is_some() {
+            return None;
+        }
         self.target.data_independent_timing_target()
     }
 

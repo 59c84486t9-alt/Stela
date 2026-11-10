@@ -105,10 +105,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match self.cpu.registers.implemented(feature) {
             Ok(true) => {}
             Ok(false) => return self.undefined(),
-            Err(reason) => {
+            Err(error) => {
                 return Err(self.unsupported(RequirementKind::Instruction {
                     word,
-                    detail: reason.into(),
+                    detail: error.reason().into(),
                 }));
             }
         }
@@ -166,10 +166,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match self.cpu.registers.implemented(Feature::FEAT_MTE) {
             Ok(true) => {}
             Ok(false) => return self.undefined(),
-            Err(reason) => {
+            Err(error) => {
                 return Err(self.unsupported(RequirementKind::Instruction {
                     word,
-                    detail: reason.into(),
+                    detail: error.reason().into(),
                 }));
             }
         }

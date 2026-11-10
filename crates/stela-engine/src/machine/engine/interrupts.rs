@@ -263,7 +263,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             match self.cpu.registers.implemented(Feature::FEAT_WFxT) {
                 Ok(true) => {}
                 Ok(false) => return self.undefined(),
-                Err(reason) => return Err(self.unsupported(RequirementKind::Native(reason))),
+                Err(error) => {
+                    return Err(self.unsupported(RequirementKind::Native(error.reason())));
+                }
             }
         }
         let timeout = register.map(|register| {

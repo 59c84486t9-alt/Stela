@@ -43,8 +43,8 @@ pub(super) fn requires_cx16(
         && !super::plain_ordering(target, checks)
 }
 
-/// Locked x86 updates, or for a single agent ([`super::plain_ordering`]) a
-/// plain load, the update and a plain store. The plain recipes load first,
+/// Locked x86 updates, or in the data-independent-timing mode
+/// ([`super::plain_ordering`]) a plain load, the update and a plain store. The plain recipes load first,
 /// so a translation, Access flag or read-permission fault reports WnR 0 and
 /// a store to read-only memory WnR 1, as Arm requires of an atomic that
 /// reads and writes (ESR_ELx.WnR); a locked x86 update faults as a write.

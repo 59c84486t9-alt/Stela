@@ -272,30 +272,50 @@ impl Cluster {
     }
 
     /// A write, or why it cannot complete.
-    pub fn write(&mut self, level: usize, field: Field, value: u64) -> Result<(), &'static str> {
+    pub fn write(&mut self, level: usize, field: Field, value: u64) -> Result<(), WriteError> {
         let group = &mut self.levels[level];
         if group.locked {
             return if value == group.get(field) {
                 Ok(())
             } else {
-                Err(CHANGE_AFTER_LOCK)
+                Err(WriteError::ChangeAfterLock)
             };
         }
         match field {
             Field::Lower => group.lower = value,
             Field::Upper => group.upper = value,
             Field::Control if value & !CONTROL_BITS != 0 => {
-                return Err("CTRR control bit without observed meaning");
+                return Err(WriteError::UnknownControl(value & !CONTROL_BITS));
             }
             Field::Control => group.control = value,
-            Field::Lock if value > 1 => return Err("CTRR lock value other than 0 or 1"),
+            Field::Lock if value > 1 => return Err(WriteError::LockValue(value)),
             Field::Lock => group.locked = value == 1,
         }
         Ok(())
     }
 }
 
-const CHANGE_AFTER_LOCK: &str = "CTRR register change after its lock";
+/// Why a CTRR register write cannot complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteError {
+    /// A locked register written with another value.
+    ChangeAfterLock,
+    /// Control bits whose meaning has not been observed.
+    UnknownControl(u64),
+    /// A lock value other than 0 or 1.
+    LockValue(u64),
+}
+
+impl WriteError {
+    /// The refusal's reason.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::ChangeAfterLock => "CTRR register change after its lock",
+            Self::UnknownControl(_) => "CTRR control bit without observed meaning",
+            Self::LockValue(_) => "CTRR lock value other than 0 or 1",
+        }
+    }
+}
 
 const REGIONS: [LockRegion; 6] = [
     LockRegion::CtrrC,
@@ -462,7 +482,7 @@ impl Bank {
         region: LockRegion,
         field: Field,
         value: u64,
-    ) -> Result<Option<&'static str>, &'static str> {
+    ) -> Result<Option<&'static str>, WriteError> {
         let window = &mut self.windows[region as usize];
         let value = match field {
             Field::Lower | Field::Upper => value & LIMIT_MASK,
@@ -477,7 +497,7 @@ impl Bank {
             return if value == current {
                 Ok(None)
             } else {
-                Err(CHANGE_AFTER_LOCK)
+                Err(WriteError::ChangeAfterLock)
             };
         }
         let mut unmodeled = None;
@@ -491,7 +511,7 @@ impl Bank {
                     CTRR_ENABLE
                 };
                 if value & !(LOCK | enable) != 0 {
-                    return Err("CTRR control bit without observed meaning");
+                    return Err(WriteError::UnknownControl(value & !(LOCK | enable)));
                 }
                 if execute_range(region) && value & enable != 0 {
                     unmodeled = Some(CTXR_UNMODELED);
@@ -504,17 +524,17 @@ impl Bank {
 
     /// CTRR-A's or CTRR-B's control: iBoot's locked handoff value, or what
     /// an unlocked one takes.
-    pub fn write_legacy(&mut self, index: usize, value: u64) -> Result<(), &'static str> {
+    pub fn write_legacy(&mut self, index: usize, value: u64) -> Result<(), WriteError> {
         let control = &mut self.legacy[index];
         if *control & LOCK != 0 {
             return if value == *control {
                 Ok(())
             } else {
-                Err(CHANGE_AFTER_LOCK)
+                Err(WriteError::ChangeAfterLock)
             };
         }
         if value & !(LOCK | CTRR_ENABLE) != 0 {
-            return Err("CTRR control bit without observed meaning");
+            return Err(WriteError::UnknownControl(value & !(LOCK | CTRR_ENABLE)));
         }
         *control = value;
         Ok(())
@@ -597,8 +617,14 @@ mod tests {
         assert_eq!(cluster.read(0, Field::Lock), 1);
         // A locked level keeps its values; a repeat completes.
         cluster.write(0, Field::Control, 0x13).unwrap();
-        assert!(cluster.write(0, Field::Lower, 0).is_err());
-        assert!(cluster.write(0, Field::Lock, 0).is_err());
+        assert_eq!(
+            cluster.write(0, Field::Lower, 0),
+            Err(WriteError::ChangeAfterLock)
+        );
+        assert_eq!(
+            cluster.write(0, Field::Lock, 0),
+            Err(WriteError::ChangeAfterLock)
+        );
         let region = cluster.levels[0].region(true).unwrap();
         assert_eq!((region.first, region.last), (0x8_0200_0000, 0x8_0778_ffff));
         assert!(region.write_protect && region.execute_inside_only);
@@ -611,8 +637,14 @@ mod tests {
             })
         );
         assert_eq!(cluster.levels[1].region(true), None);
-        assert!(cluster.write(1, Field::Control, 1 << 2).is_err());
-        assert!(cluster.write(1, Field::Lock, 2).is_err());
+        assert!(matches!(
+            cluster.write(1, Field::Control, 1 << 2),
+            Err(WriteError::UnknownControl(_))
+        ));
+        assert_eq!(
+            cluster.write(1, Field::Lock, 2),
+            Err(WriteError::LockValue(2))
+        );
         // The M1 to M3 have no CRn-11 registers.
         assert_eq!(decode(Chip::AppleM3, crn11(0, 0)), None);
     }
@@ -681,14 +713,17 @@ mod tests {
             .unwrap();
         bank.write(LockRegion::CtrrC, Field::Control, CTRR_HANDOFF)
             .unwrap();
-        assert!(bank.write(LockRegion::CtrrC, Field::Lower, 0).is_err());
+        assert_eq!(
+            bank.write(LockRegion::CtrrC, Field::Lower, 0),
+            Err(WriteError::ChangeAfterLock)
+        );
         assert_eq!(
             bank.write(LockRegion::CtrrC, Field::Control, CTRR_HANDOFF),
             Ok(None)
         );
-        assert!(
-            bank.write(LockRegion::CtrrD, Field::Control, 1 << 1)
-                .is_err()
+        assert_eq!(
+            bank.write(LockRegion::CtrrD, Field::Control, 1 << 1),
+            Err(WriteError::UnknownControl(1 << 1))
         );
         // A CTXR enable completes and is reported.
         assert_eq!(
@@ -699,10 +734,10 @@ mod tests {
             bank.write(LockRegion::CtxrA, Field::Control, CTXR_HANDOFF[0]),
             Ok(Some(CTXR_UNMODELED))
         );
-        assert!(
-            bank.write(LockRegion::CtxrB, Field::Control, 1 << 40)
-                .is_err()
-        );
+        assert!(matches!(
+            bank.write(LockRegion::CtxrB, Field::Control, 1 << 40),
+            Err(WriteError::UnknownControl(_))
+        ));
         let [c, d] = protection(Chip::AppleM4, &Cluster::default(), &core, true, false);
         let c = c.unwrap();
         assert_eq!((c.first, c.last), (0x100_06fb_8000, 0x100_0710_bfff));
@@ -731,7 +766,10 @@ mod tests {
             (0x100_0945_0000, 0x100_0945_3000, CTXR_HANDOFF[1])
         );
         assert_eq!(cluster.copies.legacy, [CTRR_HANDOFF; 2]);
-        assert!(cluster.copies.write_legacy(0, 0).is_err());
+        assert_eq!(
+            cluster.copies.write_legacy(0, 0),
+            Err(WriteError::ChangeAfterLock)
+        );
         assert!(
             cluster
                 .copies

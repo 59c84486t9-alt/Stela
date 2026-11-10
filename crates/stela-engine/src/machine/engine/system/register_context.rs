@@ -17,7 +17,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             .cpu
             .registers
             .implemented(feature)
-            .map_err(Effect::Refused)
+            .map_err(|error| Effect::Refused(error.reason()))
     }
 
     fn el(&self) -> u64 {
@@ -287,7 +287,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Register::SVCR => {
                 return cpu
                     .set_svcr(value & 1 != 0, value & 2 != 0)
-                    .map_err(Effect::Refused);
+                    .map_err(|error| Effect::Refused(error.reason()));
             }
             Register::SP_EL0 | Register::SP_EL1 | Register::SP_EL2 => {
                 let el = match register {

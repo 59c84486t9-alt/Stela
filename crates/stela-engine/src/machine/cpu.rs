@@ -212,6 +212,25 @@ pub enum GuardedRefusal {
     Exit,
 }
 
+/// Why an SVCR change cannot complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvcrError {
+    /// The PE has no SME state: its chip has no FEAT_SME.
+    NoScalableState,
+    /// The streaming or ZA register state cannot be allocated.
+    OutOfMemory,
+}
+
+impl SvcrError {
+    /// The refusal's reason.
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::NoScalableState => "SVCR on a PE without SME state",
+            Self::OutOfMemory => "cannot allocate the SME register state",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Cpu {
     pub state: GuestState,
@@ -512,14 +531,11 @@ impl Cpu {
     /// Z, P and FFR registers, FPSR (to 0x0800009F) and FPMR, and enabling
     /// ZA zeroes ZA and ZT0. The engine applies the access checks streaming
     /// mode changes to each instruction ([`super::streaming`]).
-    pub fn set_svcr(&mut self, streaming: bool, za: bool) -> Result<(), &'static str> {
-        let scalable = self
-            .scalable
-            .as_mut()
-            .ok_or("SVCR on a PE without SME state")?;
+    pub fn set_svcr(&mut self, streaming: bool, za: bool) -> Result<(), SvcrError> {
+        let scalable = self.scalable.as_mut().ok_or(SvcrError::NoScalableState)?;
         scalable
             .apply_mode(&mut self.state, ScalableMode::new(streaming, za))
-            .map_err(|_| "cannot allocate the SME register state")
+            .map_err(|_| SvcrError::OutOfMemory)
     }
 
     /// The EL an FP/SIMD access traps to, if it traps (Arm

@@ -381,11 +381,12 @@ features! {
     /// compile to instructions on Intel's list, without a branch on or a
     /// memory index by their data, at a cost in speed. The LSE atomics,
     /// acquire loads, store-releases and barriers become plain loads and
-    /// stores (no LOCK, XCHG or MFENCE), as for a single agent, so the mode
-    /// requires that no other agent accesses guest memory while its code
-    /// runs: the system engine runs one PE at a time, and a multi-threaded
-    /// process must not use it. A compilation mode, not a host capability,
-    /// honored on the [`Self::DATA_INDEPENDENT_TIMING_TIERS`].
+    /// stores (no LOCK, XCHG or MFENCE), so the mode requires serialized
+    /// execution, with no other agent accessing guest memory while its code
+    /// runs: the system engine selects it only while one PE runs at a time
+    /// (`Machine::timing_target`), and a multi-threaded process must not use
+    /// it. A compilation mode, not a host capability, honored on the
+    /// [`Self::DATA_INDEPENDENT_TIMING_TIERS`].
     DataIndependentTiming, with_data_independent_timing, "+dit", declared;
 }
 
@@ -416,7 +417,7 @@ impl TargetCpu {
         ..Self::Baseline
     };
     /// `GenuineIntel` as CPUID leaf 0 returns it in EBX, EDX and ECX, which
-    /// identifies a [`Self::line_atomic`] host.
+    /// identifies a [`Self::LineAtomic`] host.
     pub const INTEL_VENDOR: [u32; 3] = [
         u32::from_le_bytes(*b"Genu"),
         u32::from_le_bytes(*b"ineI"),

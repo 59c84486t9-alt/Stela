@@ -3117,6 +3117,10 @@ fn pstate_dit_is_written_read_and_kept_across_exceptions() {
     const MSR_DIT_ZERO: u32 = 0xd503_405f;
     const ERET: u32 = 0xd69f_03e0;
     let mut machine = machine(&[]);
+    // Without the host's timing guarantee ID_AA64PFR0_EL1 reports no
+    // FEAT_DIT, but the field is kept as on every Apple chip
+    // (`dit_is_kept_without_the_host_timing_guarantee`).
+    assert_eq!(machine.cpu.read(Register::ID_AA64PFR0_EL1) >> 48 & 0xf, 0);
     let read = |machine: &mut TestMachine| {
         machine.system_instruction(access(true, DIT, 1)).unwrap();
         machine.cpu.state.x[1]
@@ -3161,7 +3165,4 @@ fn pstate_dit_is_written_read_and_kept_across_exceptions() {
     machine.system_instruction(ERET).unwrap();
     assert_eq!(machine.cpu.pstate.el, 1);
     assert!(!machine.cpu.pstate.dit);
-    // The engine withholds the feature: translated code gives no
-    // data-independent timing guarantee.
-    assert_eq!(machine.cpu.read(Register::ID_AA64PFR0_EL1) >> 48 & 0xf, 0);
 }

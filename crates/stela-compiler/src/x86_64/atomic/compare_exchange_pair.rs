@@ -1,5 +1,5 @@
-//! CASP through same-width atomic updates (CMPXCHG8B/CMPXCHG16B), or for a
-//! single agent a plain load, compare, CMOVNE and store.
+//! CASP through same-width atomic updates (CMPXCHG8B/CMPXCHG16B), or in the
+//! data-independent-timing mode a plain load, compare, CMOVNE and store.
 use super::{
     ADDRESS, DWORD_BYTES, QWORD_BYTES, commit_rax, input_rax, input_rax_keeping_flags, input_rcx,
     input_rcx_keeping_flags, locked_compare_exchange,
@@ -62,7 +62,7 @@ fn word_pair(
     plain: bool,
 ) {
     if plain {
-        // A single agent's CASP is one load of the old pair, a compare and a
+        // A plain-ordering CASP is one load of the old pair, a compare and a
         // store of the new pair or, as LOCK CMPXCHG does, of the old one
         // (Arm `Unpredictable_WRITEFAILEDCAS`). The load comes first, so a
         // read that would fault reports WnR 0.
@@ -134,7 +134,7 @@ fn word_pair_cx8(code: &mut Code, compare: [Register; 2], source: [Register; 2])
     commit_rax(code, DWORD_BYTES, compare[1]);
 }
 
-/// A single agent's 128-bit CASP: the old pair into R8 and R9 (both loads
+/// A plain-ordering 128-bit CASP: the old pair into R8 and R9 (both loads
 /// first, so a read that would fault reports WnR 0), ZF from the XOR of each
 /// half with its compare register, the new halves kept only when both match,
 /// and a store of the selected pair either way, as CMPXCHG16B writes back a
@@ -242,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn a_single_agent_casp_loads_compares_selects_and_stores_without_lock() {
+    fn a_plain_ordering_casp_loads_compares_selects_and_stores_without_lock() {
         let compare = [Register::X(0), Register::X(1)];
         let source = [Register::X(2), Register::X(3)];
         let words = pair(WORD_PAIR_BYTES, compare, source, true);
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn a_single_agent_zr_source_keeps_the_compare_flags() {
+    fn a_plain_ordering_zr_source_keeps_the_compare_flags() {
         // XOR of ECX would clear ZF between the compare and the CMOVNE.
         let code = pair(
             DOUBLEWORD_PAIR_BYTES,

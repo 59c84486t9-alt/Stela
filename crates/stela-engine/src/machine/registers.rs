@@ -691,13 +691,13 @@ impl Cpu {
         use super::ctrr::{Holder, Register as Ctrr};
         let el = self.pstate.el;
         let mut cluster = self.ctrr.borrow_mut();
-        let written = |result: Result<Option<&'static str>, &'static str>| match result {
+        let written = |result: Result<Option<&'static str>, super::ctrr::WriteError>| match result {
             Ok(unmodeled) => Outcome::Written(Changes {
                 translation: true,
                 unmodeled,
                 ..Changes::default()
             }),
-            Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
+            Err(error) => Outcome::Refused(Refusal::UnsupportedSetting(error.reason())),
         };
         let el2_only = matches!(
             register,
@@ -1107,11 +1107,18 @@ impl Cpu {
         let mut changes = Changes::default();
         let minimum = match (encoding.op1(), encoding.op2()) {
             (0, 3..=5) => 1,
+            // PSTATE.DIT exists on every Apple chip and XNU writes it
+            // without checking ID_AA64PFR0_EL1.DIT, which reports only
+            // whether the host keeps the timing guarantee
+            // (identification `Basis::Timing`). Without it the bit is
+            // kept as state and selects no different code.
             (3, 1 | 2 | 6 | 7) => 0,
             (3, 4) => match self.registers.implemented(Feature::FEAT_MTE) {
                 Ok(true) => 0,
                 Ok(false) => return Outcome::Undefined,
-                Err(reason) => return Outcome::Refused(Refusal::UnsupportedSetting(reason)),
+                Err(error) => {
+                    return Outcome::Refused(Refusal::UnsupportedSetting(error.reason()));
+                }
             },
             // CRm<3:1> selects SM, ZA or both; 0b000 and 0b1xx are
             // unallocated.
@@ -1163,8 +1170,8 @@ impl Cpu {
                     streaming
                 };
                 let za = if immediate & 0b0100 != 0 { bit } else { za };
-                if let Err(reason) = self.set_svcr(streaming, za) {
-                    return Outcome::Refused(Refusal::UnsupportedSetting(reason));
+                if let Err(error) = self.set_svcr(streaming, za) {
+                    return Outcome::Refused(Refusal::UnsupportedSetting(error.reason()));
                 }
             }
             (0, 3) => self.pstate.uao = bit,

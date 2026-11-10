@@ -68,7 +68,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.cpu
                 .registers
                 .implemented(feature)
-                .map_err(|reason| self.unsupported(RequirementKind::Native(reason)))
+                .map_err(|error| self.unsupported(RequirementKind::Native(error.reason())))
         };
         Ok(if has(Feature::FEAT_FPACCOMBINE)? {
             pauth::Version::FaultingCombined
@@ -134,7 +134,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .cpu
             .registers
             .implemented(Feature::FEAT_PAuth_LR)
-            .map_err(|reason| self.unsupported(RequirementKind::Native(reason)))?;
+            .map_err(|error| self.unsupported(RequirementKind::Native(error.reason())))?;
         // Without FEAT_PAuth_LR its hint-space form (PACM) is a NOP and the
         // others are UNDEFINED.
         if let PointerAuthenticationOperation::LinkRegister(form) = instruction.operation {
@@ -798,7 +798,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         match self.cpu.registers.implemented(Feature::FEAT_CPA) {
             Ok(true) => {}
             Ok(false) => return self.undefined(),
-            Err(reason) => return Err(self.unsupported(RequirementKind::Native(reason))),
+            Err(error) => return Err(self.unsupported(RequirementKind::Native(error.reason()))),
         }
         let (base, change, subtract) = match operand.kind {
             Kind::Offset {

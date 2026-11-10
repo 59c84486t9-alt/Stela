@@ -95,7 +95,10 @@ impl File {
     /// Arm `IsFeatureImplemented` for the PE: [`Chip::implemented`] for a
     /// feature its identification presents, `Ok(false)` for one it
     /// withholds.
-    pub fn implemented(&self, feature: Feature) -> Result<bool, &'static str> {
+    pub fn implemented(
+        &self,
+        feature: Feature,
+    ) -> Result<bool, crate::machine::capabilities::Unimplemented> {
         if self.withheld & 1 << feature as u64 != 0 {
             Ok(false)
         } else {

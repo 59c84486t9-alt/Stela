@@ -7729,6 +7729,7 @@ fn upper_occupancy_lists_the_mapped_level_one_ranges_and_outermost_blocks() {
     assert_eq!(machine.upper_occupancy(), None);
 }
 
+mod pstate_features;
 mod recovery;
 
 #[test]

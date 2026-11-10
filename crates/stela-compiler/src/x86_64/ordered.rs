@@ -2,10 +2,10 @@
 //!
 //! Release stores use XCHG so a later acquire load cannot pass them, and a
 //! full DMB is MFENCE. Checked loads crossing eight bytes read one aligned
-//! 16-byte snapshot. For a single agent or PSTATE.DIT
-//! ([`super::plain_ordering`]) every access is a plain load or store and a
-//! DMB emits nothing: no other agent observes guest memory, and one PE
-//! observes its own accesses in program order.
+//! 16-byte snapshot. For PSTATE.DIT ([`super::plain_ordering`]), which the
+//! engine admits only while one PE runs, every access is a plain load or
+//! store and a DMB emits nothing: no other agent observes guest memory, and
+//! one PE observes its own accesses in program order.
 use super::atomic::{address_offset, commit_rax, input_rcx, read_rax, store_rcx};
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Mem, Patch, Rm, ShiftOp, Size};
 use crate::x86_64::isa::SimdOpcode;
@@ -380,11 +380,7 @@ mod tests {
             target,
             MemoryChecks::DEFAULT,
         ));
-        // A single agent's acquire loads are plain loads.
-        let single = MemoryChecks {
-            single_agent: true,
-            ..MemoryChecks::DEFAULT
-        };
+        // Data-independent timing's acquire loads are plain loads.
         let operand = Operand::Transfer {
             feature: crate::aarch64::ordered::Feature::Base,
             kind: Kind::Acquire,
@@ -394,7 +390,11 @@ mod tests {
             displacement: 0,
             extension: LoadExtension::Zero,
         };
-        assert!(!requires_atomic_load16(&operand, target, single));
+        assert!(!requires_atomic_load16(
+            &operand,
+            target.with_data_independent_timing(),
+            MemoryChecks::DEFAULT
+        ));
         assert!(!requires_atomic_load16(
             &operand,
             target.with_line_atomic(),
@@ -403,12 +403,12 @@ mod tests {
     }
 
     #[test]
-    fn a_single_agent_takes_plain_ordered_accesses_and_drops_dmb() {
+    fn data_independent_timing_takes_plain_ordered_accesses_and_drops_dmb() {
         let single = MemoryChecks {
-            single_agent: true,
             ordered_granule: false,
             ..MemoryChecks::DEFAULT
         };
+        let timed = TargetCpu::detect().with_data_independent_timing();
         let has =
             |code: &[u8], bytes: &[u8]| code.windows(bytes.len()).any(|window| window == bytes);
         let mut barrier = Code::new();
@@ -418,7 +418,7 @@ mod tests {
                 option: 15,
                 requirement: Barrier::All,
             },
-            TargetCpu::detect(),
+            timed,
             single,
         );
         assert_eq!(barrier, [0x90]);
@@ -433,7 +433,7 @@ mod tests {
                 extension: LoadExtension::Zero,
             };
             let mut code = Code::new();
-            emit(&mut code, &operand, TargetCpu::detect(), single);
+            emit(&mut code, &operand, timed, single);
             // No XCHG, MFENCE, 16-byte snapshot or granule branch.
             assert!(!has(&code, &[0x48, 0x87, 0x0a]) && !has(&code, MFENCE));
             assert!(!has(&code, MOVDQA_XMM0_RDX) && !has(&code, &[0x89, 0xd0, 0x83, 0xe0]));

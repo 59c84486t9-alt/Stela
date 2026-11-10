@@ -617,10 +617,11 @@ impl CompilationPlan {
                 target,
             )
         } else {
-            // Only system mode runs one agent at a time and checks the
-            // guest's ranges; every other profile keeps the locked recipes
-            // and the default checks.
-            let (native, fault_recovery) = if profile.has(Features::FULL_SYSTEM) {
+            // Only system mode checks the guest's ranges and keeps guest
+            // registers pinned; every other profile keeps the default checks.
+            // Every profile keeps the locked recipes: system mode runs its
+            // PEs concurrently.
+            let (mut native, fault_recovery) = if profile.has(Features::FULL_SYSTEM) {
                 crate::x86_64::block::emit_system_mode(
                     &parsed.instructions,
                     parsed.terminal.as_ref(),

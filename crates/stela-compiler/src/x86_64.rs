@@ -387,13 +387,6 @@ pub struct MemoryChecks {
     /// ([`RangeCheck`]). The direct system-mode profile sets it for every block, whatever
     /// the engine asks, and no other profile does.
     pub(crate) guest_range: bool,
-    /// No other agent accesses guest memory while the block runs: the
-    /// system engine runs one PE at a time, and no device or host agent
-    /// writes guest RAM meanwhile. Atomics, ordered accesses and barriers
-    /// then need no LOCK, XCHG, MFENCE or 16-byte snapshot
-    /// ([`plain_ordering`]). The direct system-mode profile sets it for every block, and no
-    /// other profile does.
-    pub(crate) single_agent: bool,
     /// FEAT_CSV3: every access's address is masked ([`RangeCheck`]), those
     /// [`guest_range`] would leave to an earlier check through the same base
     /// included: by its own check, or in pinned blocks derived by data from
@@ -426,7 +419,6 @@ impl MemoryChecks {
         alignment: false,
         ordered_granule: true,
         guest_range: false,
-        single_agent: false,
         every_access_masked: false,
         stack_checked: false,
         range: RangeCheck::FIVE_LEVEL,
@@ -447,7 +439,6 @@ impl MemoryChecks {
             alignment,
             ordered_granule,
             guest_range: false,
-            single_agent: false,
             every_access_masked,
             stack_checked: false,
             range: RangeCheck::FIVE_LEVEL,
@@ -480,12 +471,13 @@ impl MemoryChecks {
 }
 
 /// Whether atomics, ordered accesses and barriers lower to plain accesses:
-/// for a single agent ([`MemoryChecks::single_agent`]), and in the
-/// data-independent-timing mode, which requires one
-/// ([`crate::TargetCpu::data_independent_timing`]) because LOCK, XCHG and
-/// MFENCE are not on Intel's data operand independent timing list.
-fn plain_ordering(target: crate::TargetCpu, checks: MemoryChecks) -> bool {
-    checks.single_agent || target.data_independent_timing()
+/// only in the data-independent-timing mode, which requires that no other
+/// agent accesses guest memory ([`crate::TargetCpu::data_independent_timing`])
+/// because LOCK, XCHG and MFENCE are not on Intel's data operand independent
+/// timing list. System mode runs its PEs concurrently, so every other target
+/// keeps the locked recipes whatever its checks.
+fn plain_ordering(target: crate::TargetCpu, _checks: MemoryChecks) -> bool {
+    target.data_independent_timing()
 }
 
 /// The system-mode check of the access address in RAX against the guest's
@@ -918,7 +910,8 @@ fn memory_writeback(code: &mut Code, base: Register, mode: AddressMode) {
 
 /// Pair loads stage both values before committing either guest destination.
 /// Pair stores expose completed first-element writes if the second access faults.
-/// Concurrent/128-bit single-copy atomic semantics are outside this RAM profile.
+/// A 16-byte aligned pair of X registers is one MOVDQA, single-copy atomic as
+/// FEAT_LSE2 requires ([`memory_recipe::pair`]).
 fn memory_pair(
     code: &mut Code,
     checks: MemoryChecks,

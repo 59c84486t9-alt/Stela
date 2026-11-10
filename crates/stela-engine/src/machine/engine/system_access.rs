@@ -92,7 +92,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                             self.next()
                         }
                         Ok(false) => self.undefined(),
-                        Err(reason) => Err(self.unsupported(RequirementKind::Native(reason))),
+                        Err(error) => {
+                            Err(self.unsupported(RequirementKind::Native(error.reason())))
+                        }
                     }
                 }
                 Synchronization::ErrorSynchronization => self.error_synchronization(),

@@ -1,5 +1,6 @@
-//! CAS through a same-width LOCK CMPXCHG, or for a single agent a plain
-//! load, compare, CMOVNE and store ([`plain`]).
+//! CAS through a same-width LOCK CMPXCHG, or under data-independent timing
+//! ([`super::super::plain_ordering`]) a plain load, compare, CMOVNE and store
+//! ([`plain`]).
 use super::{
     QWORD_BYTES, commit_rax, input_rax, input_rcx, locked_compare_exchange, read_r8, size,
     store_rcx,
@@ -51,7 +52,7 @@ mod tests {
     const HALFWORD_BYTES: u8 = 2;
 
     #[test]
-    fn a_single_agent_cas_loads_compares_selects_and_stores() {
+    fn a_plain_cas_loads_compares_selects_and_stores() {
         for (bytes, load, compare, select, store, result) in [
             (
                 BYTE_BYTES,

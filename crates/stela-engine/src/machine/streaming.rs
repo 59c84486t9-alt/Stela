@@ -148,7 +148,7 @@ fn fpmr_access(cpu: &Cpu) -> Result<(), Denial> {
     match cpu.registers.implemented(Feature::FEAT_FPMR) {
         Ok(true) => {}
         Ok(false) => return Err(Denial::Undefined),
-        Err(reason) => return Err(Denial::Unimplemented(reason)),
+        Err(error) => return Err(Denial::Unimplemented(error.reason())),
     }
     let el = cpu.pstate.el;
     let host = el == 2 || (el == 0 && cpu.in_host());

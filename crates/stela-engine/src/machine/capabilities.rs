@@ -1,16 +1,27 @@
 //! Execution support policy for the immutable CPU feature descriptions.
 use stela_contracts::{Chip, Feature};
 
+/// A feature the chip has that the engine does not implement yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unimplemented(pub Feature);
+
+impl Unimplemented {
+    /// The refusal's reason.
+    pub const fn reason(self) -> &'static str {
+        self.0.unimplemented()
+    }
+}
+
 /// Whether the chip has `feature`: `Ok(false)` without it, `Ok(true)`
-/// when the engine implements it, and the reason to stop when the chip
-/// has a feature the engine does not implement yet.
-pub fn implemented(chip: Chip, feature: Feature) -> Result<bool, &'static str> {
+/// when the engine implements it, and an error when the chip has a
+/// feature the engine does not implement yet.
+pub fn implemented(chip: Chip, feature: Feature) -> Result<bool, Unimplemented> {
     if !feature.on(chip) {
         Ok(false)
     } else if engine_implements(feature) {
         Ok(true)
     } else {
-        Err(feature.unimplemented())
+        Err(Unimplemented(feature))
     }
 }
 
@@ -93,7 +104,7 @@ mod tests {
         for feature in Feature::ALL {
             assert_ne!(
                 implemented(Chip::DEFAULT, feature),
-                Err(feature.unimplemented())
+                Err(Unimplemented(feature))
             );
         }
         assert_eq!(implemented(Chip::AppleM2, Feature::FEAT_HCX), Ok(false));

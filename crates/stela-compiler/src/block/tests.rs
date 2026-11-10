@@ -24,13 +24,12 @@ fn shared_system_uses_checked_recipes_and_refuses_serial_native_specialization()
         let target = TargetCpu::X86_64_V2.with_atomic_load16();
         let options = crate::Options::new(shared, target);
         let plan = || CompilationPlan::new(&source, GuestAddress(0x4000), &options).unwrap();
-        assert!(!plan().options.memory_checks().single_agent);
         assert!(
             CompilationPlan::new(
                 &source,
                 GuestAddress(0x4000),
                 &options.with_memory_checks(crate::x86_64::MemoryChecks {
-                    single_agent: true,
+                    alignment: true,
                     ..crate::x86_64::MemoryChecks::DEFAULT
                 })
             )
