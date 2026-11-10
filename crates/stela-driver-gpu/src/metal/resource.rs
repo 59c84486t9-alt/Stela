@@ -338,6 +338,23 @@ pub fn texture(capabilities: &Capabilities, descriptor: &TextureDescriptor) -> R
     })
 }
 
+/// A heap texture's plan. Metal's checks apply to the usage asked, and
+/// the image is made with every usage the format allows, as `Unknown`
+/// usage asks: `heapTextureSizeAndAlign` then answers one size whatever
+/// usage a descriptor names, and a heap sized from those answers holds
+/// the textures they covered.
+pub fn heap_texture(
+    capabilities: &Capabilities,
+    descriptor: &TextureDescriptor,
+) -> Result<TexturePlan> {
+    texture(capabilities, descriptor)?;
+    let union = TextureDescriptor {
+        usage: TextureUsage::EMPTY,
+        ..*descriptor
+    };
+    texture(capabilities, &union)
+}
+
 fn realization(description: &Description) -> Result<Realization> {
     description
         .realization

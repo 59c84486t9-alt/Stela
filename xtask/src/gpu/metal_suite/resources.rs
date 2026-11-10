@@ -4,8 +4,9 @@
 //!
 //! - Heaps: buffers from an automatic heap; buffers a placement heap puts
 //!   at chosen offsets, one aliasing another's memory; resources an
-//!   argument buffer alone names, resident through `useHeap`; and work
-//!   ordered across encoders by a tracked heap.
+//!   argument buffer alone names, resident through `useHeap`; work
+//!   ordered across encoders by a tracked heap; and textures a heap of
+//!   the device's answered sizes holds.
 //! - Views: the same memory as another pixel format of its size, as an
 //!   sRGB format, over a mipmap range, over a slice range, as a cube, and
 //!   with each component swizzled for reads and samples.
@@ -545,6 +546,100 @@ fn heaps_more(plan: &mut Plan, library: &str, rng: &mut Random) {
         .buffer(Buffer::zeroed("mid", 0, bytes).unbound().set("heap", "u"))
         .buffer(Buffer::zeroed("out", 0, bytes).unbound().set("heap", "u"))
         .output(Output::exact("out", Dtype::U32, u32s(&scaled(&scaled(&v))))),
+    );
+    // A heap of the summed `heapTextureSizeAndAlign` answers for two
+    // textures holds both, as Core Animation sizes its heaps; the case
+    // fails at setup when either texture is nil. Its words draw nothing
+    // from `rng`, so later cases keep their inputs.
+    let v: Vec<u32> = (0..N).map(|i| i.wrapping_mul(0x9e37_79b9)).collect();
+    let on_heap = |name: &str, format: &str, width: u32, height: u32| {
+        Texture::d2(name, format, width, height)
+            .usage(&["read", "render"])
+            .set("heap", "a")
+    };
+    plan.add(
+        Case::compute1("heap.answered_sizes", library, "copy_words", N)
+            .set(
+                "heaps",
+                json!([{"name": "a", "type": "automatic", "storage": "private", "size_of": ["small", "screen"]}]),
+            )
+            .texture(on_heap("small", "r16float", 188, 87))
+            .texture(on_heap("screen", "bgra8unorm", 2824, 1704))
+            .buffer(Buffer::data("in", 0, u32s(&v)))
+            .buffer(Buffer::zeroed("out", 1, bytes))
+            .output(Output::exact("out", Dtype::U32, u32s(&v))),
+    );
+    heaps_of_apple_sizes(plan, library, &v);
+}
+
+/// The textures Core Animation placed in heaps it sized by Apple's layout
+/// (Stela's `GPU HEAP FULL` lines): a screen, two half-float layers and two
+/// 188x87 half-float masks. A heap sized from the device's own
+/// `heapTextureSizeAndAlign` answers holds them, and one a 16 KiB page
+/// short answers nil for the last, on a Mac and on Stela: a Mac may round a
+/// heap up to whole pages, so one byte short is not enough there. A
+/// second, informational case records each device's answers as (size,
+/// alignment) pairs, expected as a Mac answers them (M-series, read and
+/// render usage).
+fn heaps_of_apple_sizes(plan: &mut Plan, library: &str, v: &[u32]) {
+    let bytes = v.len() * 4;
+    let textures = [
+        ("screen", "bgra8unorm", 2824, 1704, 1, 20_168_704u64),
+        ("layer", "rgba16float", 68, 67, 1, 98_816),
+        ("wide", "rgba16float", 122, 67, 1, 98_816),
+        ("mask", "r16float", 188, 87, 2, 66_560),
+    ];
+    let mut sized = Case::compute1("heap.apple_layout_sizes", library, "copy_words", N);
+    let mut heaps = Vec::new();
+    for (name, format, width, height, copies, _) in textures {
+        for (heap, short) in [(name.to_string(), false), (format!("{name}_short"), true)] {
+            let names: Vec<String> = (0..copies).map(|copy| format!("{heap}{copy}")).collect();
+            let mut spec =
+                json!({"name": heap, "type": "automatic", "storage": "private", "size_of": names});
+            if short {
+                spec["size_less"] = json!(16_384);
+            }
+            heaps.push(spec);
+            for (copy, texture) in names.iter().enumerate() {
+                sized = sized.texture(
+                    Texture::d2(texture, format, width, height)
+                        .usage(&["read", "render"])
+                        .set("heap", heap.as_str())
+                        .set("expect_nil", short && copy + 1 == copies),
+                );
+            }
+        }
+    }
+    plan.add(
+        sized
+            .set("heaps", json!(heaps))
+            .buffer(Buffer::data("in", 0, u32s(v)))
+            .buffer(Buffer::zeroed("out", 1, bytes))
+            .output(Output::exact("out", Dtype::U32, u32s(v))),
+    );
+    let mut answers = Case::compute1("heap.apple_layout_answers", library, "copy_words", N)
+        .informational()
+        .note("the device's heapTextureSizeAndAlign answers, which are its own layout's");
+    let mut expected = Vec::new();
+    for (name, format, width, height, _, size) in textures {
+        answers =
+            answers.texture(Texture::d2(name, format, width, height).usage(&["read", "render"]));
+        expected.extend([size, 128]);
+    }
+    let words: Vec<u32> = expected
+        .iter()
+        .flat_map(|&x| [x as u32, (x >> 32) as u32])
+        .collect();
+    plan.add(
+        answers
+            .buffer(Buffer::data("in", 0, u32s(v)))
+            .buffer(Buffer::zeroed("out", 1, bytes))
+            .buffer(
+                Buffer::zeroed("answers", 2, words.len() * 4)
+                    .unbound()
+                    .set("size_and_align_of", json!(textures.map(|t| t.0))),
+            )
+            .output(Output::exact("answers", Dtype::U32, u32s(&words))),
     );
 }
 

@@ -171,6 +171,8 @@ pub struct DeviceMemory {
     /// Destroyed private textures kept for reuse, and how often creations
     /// reused one.
     pub recycled: resources::RecycleReport,
+    /// Resources automatic heaps answered nil for, by cause.
+    pub heap_refusals: resources::HeapRefusals,
     /// The backend's memory blocks and the resources placed in them.
     pub blocks: crate::metal::vulkan::backend::MemoryBlocks,
     /// Each descriptor array's use, in [`HeapArray`] order.
@@ -231,6 +233,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             submitted: self.submitted,
             completed: self.completed,
             recycled: self.recycled(),
+            heap_refusals: self.heap_refusals(),
             blocks: self.backend.memory_blocks(),
             descriptors: core::array::from_fn(|index| {
                 let array = HeapArray::ALL[index];

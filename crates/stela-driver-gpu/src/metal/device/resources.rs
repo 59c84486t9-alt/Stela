@@ -223,6 +223,7 @@ pub(super) struct Resources {
     /// that allocated.
     recycle_hits: u64,
     recycle_misses: u64,
+    heap_refusals: HeapRefusals,
 }
 
 /// What the device keeps of destroyed private textures, and how often
@@ -233,6 +234,15 @@ pub struct RecycleReport {
     pub bytes: u64,
     pub hits: u64,
     pub misses: u64,
+}
+
+/// Resources automatic heaps answered nil for, as Metal does when a heap
+/// has no room: `full` when its free bytes are fewer than the resource's
+/// size, `fragmented` when they are enough but in pieces too small.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HeapRefusals {
+    pub full: u64,
+    pub fragmented: u64,
 }
 
 impl<B: Backend, C: Compiler> Device<B, C> {
@@ -2133,7 +2143,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         &mut self,
         descriptor: &TextureDescriptor,
     ) -> Result<SizeAndAlign> {
-        let plan = resource::texture(&self.capabilities, descriptor)?;
+        let plan = resource::heap_texture(&self.capabilities, descriptor)?;
         self.heap_texture_requirements(&plan)
     }
 
@@ -2158,9 +2168,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "heap resources share the heap's storage mode",
         )?;
         let offset = match (&mut heap.allocator, offset) {
-            (Some(allocator), None) => allocator
-                .allocate(requirement.size, requirement.align)
-                .ok_or(Error::HeapFull)?,
+            (Some(allocator), None) => {
+                let Some(offset) = allocator.allocate(requirement.size, requirement.align) else {
+                    let free = allocator.size() - allocator.used();
+                    let refusals = &mut self.resources.heap_refusals;
+                    if free >= requirement.size {
+                        refusals.fragmented += 1;
+                    } else {
+                        refusals.full += 1;
+                    }
+                    return Err(Error::HeapFull);
+                };
+                offset
+            }
             (None, Some(offset)) => {
                 heap::placement(heap.descriptor.size, offset, requirement)?;
                 offset
@@ -2229,7 +2249,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             ensure(offset.is_none(), "sparse heaps place textures themselves")?;
             return self.new_sparse_texture(id, descriptor);
         }
-        let plan = resource::texture(&self.capabilities, descriptor)?;
+        let plan = resource::heap_texture(&self.capabilities, descriptor)?;
         let requirement = self.heap_texture_requirements(&plan)?;
         let (memory, offset) = self.place(id, descriptor.options, requirement, offset)?;
         let backing = Backing::Heap {
@@ -2415,6 +2435,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             allocator.free(offset, size)?;
         }
         Ok(())
+    }
+
+    /// The resources automatic heaps answered nil for so far.
+    pub fn heap_refusals(&self) -> HeapRefusals {
+        self.resources.heap_refusals
     }
 
     /// A heap's size and how many resources live in it.

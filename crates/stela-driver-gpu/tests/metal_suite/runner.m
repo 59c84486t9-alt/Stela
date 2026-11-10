@@ -570,11 +570,14 @@ static id<MTLFunction> function_named(id<MTLLibrary> library, NSString *name, NS
 /* Shared storage, without hazard tracking when the case orders its uses
  * itself with fences or events. */
 /* A heap: automatic (the heap places resources) or placement (each names
- * its offset), shared or private, tracked or untracked. */
-static id<MTLHeap> make_heap(Case *c, NSDictionary *h)
+ * its offset), shared or private, tracked or untracked, of a given size or
+ * of the size the device answers for the textures it names. */
+static NSUInteger answered_heap_size(Case *c, NSDictionary *h, NSArray *textures);
+
+static id<MTLHeap> make_heap(Case *c, NSDictionary *h, NSArray *textures)
 {
 	MTLHeapDescriptor *d = [MTLHeapDescriptor new];
-	d.size = number(h, @"size", 65536);
+	d.size = h[@"size_of"] ? answered_heap_size(c, h, textures) - number(h, @"size_less", 0) : number(h, @"size", 65536);
 	d.type = [h[@"type"] isEqualToString:@"placement"] ? MTLHeapTypePlacement : MTLHeapTypeAutomatic;
 	d.storageMode = [h[@"storage"] isEqualToString:@"private"] ? MTLStorageModePrivate : MTLStorageModeShared;
 	d.hazardTrackingMode = [h[@"untracked"] boolValue] ? MTLHazardTrackingModeUntracked : MTLHazardTrackingModeTracked;
@@ -832,6 +835,73 @@ static MTLTextureUsage texture_usage(NSDictionary *t)
 	return usage;
 }
 
+/* The descriptor of a texture a case makes on the device or a heap. */
+static MTLTextureDescriptor *texture_descriptor(NSDictionary *t)
+{
+	MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+	d.textureType = lookup(texture_types(), @"texture type", t[@"type"] ?: @"2d");
+	d.pixelFormat = lookup(pixel_formats(), @"pixel format", t[@"format"]);
+	d.width = number(t, @"width", 1);
+	d.height = number(t, @"height", 1);
+	d.depth = number(t, @"depth", 1);
+	d.arrayLength = number(t, @"array", 1);
+	d.mipmapLevelCount = number(t, @"mipmaps", 1);
+	d.sampleCount = number(t, @"samples", 1);
+	d.storageMode = t[@"storage"] ? (MTLStorageMode)(storage_option(t[@"storage"]) >> MTLResourceStorageModeShift)
+				      : MTLStorageModePrivate;
+	d.usage = texture_usage(t);
+	if ([t[@"write_combined"] boolValue])
+		d.cpuCacheMode = MTLCPUCacheModeWriteCombined;
+	return d;
+}
+
+/* Writes the device's `heapTextureSizeAndAlignWithDescriptor:` answer for
+ * each texture a shared buffer names in `size_and_align_of`, as pairs of
+ * 64-bit size and alignment. */
+static void write_heap_answers(Case *c, NSDictionary *b, NSArray *textures)
+{
+	id<MTLBuffer> buffer = c.buffers[b[@"name"]];
+	NSArray *names = b[@"size_and_align_of"];
+	if (buffer.storageMode != MTLStorageModeShared || buffer.length < names.count * 16)
+		@throw failure(@"buffer %@ cannot hold %lu answers", b[@"name"], (unsigned long)names.count);
+	uint64_t *out = buffer.contents;
+	for (NSUInteger i = 0; i < names.count; i++) {
+		NSDictionary *t = nil;
+		for (NSDictionary *each in textures)
+			if ([each[@"name"] isEqualToString:names[i]])
+				t = each;
+		if (!t)
+			@throw failure(@"buffer %@ names no texture %@", b[@"name"], names[i]);
+		MTLSizeAndAlign answer = [c.device heapTextureSizeAndAlignWithDescriptor:texture_descriptor(t)];
+		out[2 * i] = answer.size;
+		out[2 * i + 1] = answer.align;
+	}
+}
+
+/* A heap's size as its caller computes it from the device's answers: the
+ * sum of `heapTextureSizeAndAlignWithDescriptor:` sizes, each rounded up to
+ * its alignment, of the case's textures the heap names in `size_of`, less
+ * `size_less` bytes. */
+static NSUInteger answered_heap_size(Case *c, NSDictionary *h, NSArray *textures)
+{
+	NSUInteger size = 0;
+	for (NSString *name in h[@"size_of"]) {
+		NSDictionary *t = nil;
+		for (NSDictionary *each in textures)
+			if ([each[@"name"] isEqualToString:name])
+				t = each;
+		if (!t)
+			@throw failure(@"heap %@ is sized for no texture %@", h[@"name"], name);
+		MTLTextureDescriptor *d = texture_descriptor(t);
+		d.storageMode = [h[@"storage"] isEqualToString:@"private"] ? MTLStorageModePrivate : MTLStorageModeShared;
+		MTLSizeAndAlign answer = [c.device heapTextureSizeAndAlignWithDescriptor:d];
+		if (!answer.size || !answer.align)
+			@throw failure(@"no heap size for texture %@", name);
+		size += (answer.size + answer.align - 1) / answer.align * answer.align;
+	}
+	return size;
+}
+
 /* A texture buffer: a linear view of one of the case's buffers. */
 static id<MTLTexture> make_texture_buffer(Case *c, NSDictionary *t)
 {
@@ -910,20 +980,7 @@ static id<MTLTexture> make_texture(Case *c, NSDictionary *t, id<MTLCommandQueue>
 		view.label = t[@"name"];
 		return view;
 	}
-	MTLTextureDescriptor *d = [MTLTextureDescriptor new];
-	d.textureType = lookup(texture_types(), @"texture type", t[@"type"] ?: @"2d");
-	d.pixelFormat = lookup(pixel_formats(), @"pixel format", t[@"format"]);
-	d.width = number(t, @"width", 1);
-	d.height = number(t, @"height", 1);
-	d.depth = number(t, @"depth", 1);
-	d.arrayLength = number(t, @"array", 1);
-	d.mipmapLevelCount = number(t, @"mipmaps", 1);
-	d.sampleCount = number(t, @"samples", 1);
-	d.storageMode = t[@"storage"] ? (MTLStorageMode)(storage_option(t[@"storage"]) >> MTLResourceStorageModeShift)
-				      : MTLStorageModePrivate;
-	d.usage = texture_usage(t);
-	if ([t[@"write_combined"] boolValue])
-		d.cpuCacheMode = MTLCPUCacheModeWriteCombined;
+	MTLTextureDescriptor *d = texture_descriptor(t);
 	id<MTLTexture> texture;
 	if (t[@"over_buffer"]) {
 		/* A linear 2D texture over a buffer's bytes, rows `bytes_per_row`
@@ -944,6 +1001,12 @@ static id<MTLTexture> make_texture(Case *c, NSDictionary *t, id<MTLCommandQueue>
 							    : [heap newTextureWithDescriptor:d];
 	} else {
 		texture = [c.device newTextureWithDescriptor:d];
+	}
+	/* A heap without room answers nil, which a case can expect. */
+	if ([t[@"expect_nil"] boolValue]) {
+		if (texture)
+			@throw failure(@"texture %@ allocated though its heap has no room", t[@"name"]);
+		return nil;
 	}
 	if (!texture)
 		@throw failure(@"texture %@ allocation failed", t[@"name"]);
@@ -7469,11 +7532,17 @@ static void run_case(id<MTLDevice> device, id<MTLCommandQueue> queue, NSDictiona
 	if (missing)
 		@throw [NSException exceptionWithName:@"CaseUnsupported" reason:missing userInfo:nil];
 	for (NSDictionary *h in spec[@"heaps"])
-		c.heaps[h[@"name"]] = make_heap(c, h);
+		c.heaps[h[@"name"]] = make_heap(c, h, spec[@"textures"]);
 	for (NSDictionary *b in spec[@"buffers"])
 		c.buffers[b[@"name"]] = make_buffer(c, b);
-	for (NSDictionary *t in spec[@"textures"])
-		c.textures[t[@"name"]] = make_texture(c, t, queue);
+	for (NSDictionary *t in spec[@"textures"]) {
+		id<MTLTexture> texture = make_texture(c, t, queue);
+		if (texture)
+			c.textures[t[@"name"]] = texture;
+	}
+	for (NSDictionary *b in spec[@"buffers"])
+		if (b[@"size_and_align_of"])
+			write_heap_answers(c, b, spec[@"textures"]);
 	for (NSDictionary *s in spec[@"samplers"])
 		c.samplers[s[@"name"]] = make_sampler(c, s);
 	for (NSDictionary *b in spec[@"icbs"])

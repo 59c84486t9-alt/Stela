@@ -4,7 +4,7 @@ use super::{
         MeshPipelineRequest, PipelineArchives, RenderPipelineRequest,
     },
     queue::{AttachmentRequest, CounterSet, RenderPassRequest},
-    resources::{CPU_BAND_BYTES, CpuBand, Strides},
+    resources::{CPU_BAND_BYTES, CpuBand, HeapRefusals, Strides},
     *,
 };
 use crate::metal::{
@@ -595,48 +595,99 @@ fn automatic_heaps_place_and_alias_resources() {
 }
 
 /// `heapTextureSizeAndAlignWithDescriptor:` answers enough for the texture
-/// whatever its usage and storage: a heap of exactly the answered size takes
-/// it, automatic or at offset zero of a placement heap.
+/// whatever its storage and whatever usage the answer and the texture each
+/// name: a heap image carries every usage its format allows, so NVK lays it
+/// out one way. A heap of exactly the answered size takes it, automatic or
+/// at offset zero of a placement heap, and a heap of the sum of two answers
+/// takes both textures.
 #[test]
 fn heaps_of_the_answered_size_hold_the_texture() {
-    let usages = [
-        TextureUsage::SHADER_READ,
-        TextureUsage::RENDER_TARGET,
-        TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET,
-        TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE,
-        TextureUsage::EMPTY,
-    ];
+    let read = TextureUsage::SHADER_READ;
+    let render = TextureUsage::RENDER_TARGET;
+    let usages = [read, render, read | render];
+    let others = [read | TextureUsage::SHADER_WRITE, TextureUsage::EMPTY];
     let formats = [
         PixelFormat::Bgra8Unorm,
         PixelFormat::Rgba16Float,
         PixelFormat::R8Unorm,
     ];
+    let heap = |device: &mut TestDevice, size, storage_mode, heap_type| {
+        device
+            .new_heap(&HeapDescriptor {
+                size,
+                options: options(storage_mode),
+                heap_type,
+                sparse_page_size: SparsePageSize::Size64,
+            })
+            .unwrap()
+    };
     for storage_mode in [StorageMode::Private, StorageMode::Shared] {
         for pixel_format in formats {
-            for usage in usages {
-                for heap_type in [HeapType::Automatic, HeapType::Placement] {
-                    let mut device = device();
-                    let mut descriptor = texture(pixel_format, usage);
-                    (descriptor.width, descriptor.height) = (2824, 1704);
-                    descriptor.options = options(storage_mode);
-                    let answered = device.heap_texture_size_and_align(&descriptor).unwrap();
-                    let heap = device
-                        .new_heap(&HeapDescriptor {
-                            size: answered.size,
-                            options: options(storage_mode),
-                            heap_type,
-                            sparse_page_size: SparsePageSize::Size64,
-                        })
-                        .unwrap();
-                    let offset = (heap_type == HeapType::Placement).then_some(0);
-                    assert!(
-                        device.new_heap_texture(heap, &descriptor, offset).is_ok(),
-                        "{heap_type:?} heap of {} bytes for {pixel_format:?} {usage:?} \
-                         {storage_mode:?}",
-                        answered.size
-                    );
+            let mut device = device();
+            let described = |usage| {
+                let mut descriptor = texture(pixel_format, usage);
+                (descriptor.width, descriptor.height) = (2824, 1704);
+                descriptor.options = options(storage_mode);
+                descriptor
+            };
+            // The image NVK sizes is the same for every usage.
+            let image = |usage| {
+                crate::metal::resource::heap_texture(&device.capabilities, &described(usage))
+                    .unwrap()
+                    .image
+            };
+            let first = image(read);
+            for usage in usages.iter().chain(&others) {
+                assert_eq!(image(*usage), first, "{pixel_format:?} {usage:?}");
+            }
+            for asked in usages {
+                let answered = device
+                    .heap_texture_size_and_align(&described(asked))
+                    .unwrap();
+                for made in usages {
+                    for heap_type in [HeapType::Automatic, HeapType::Placement] {
+                        let id = heap(&mut device, answered.size, storage_mode, heap_type);
+                        let offset = (heap_type == HeapType::Placement).then_some(0);
+                        assert!(
+                            device
+                                .new_heap_texture(id, &described(made), offset)
+                                .is_ok(),
+                            "{heap_type:?} heap of {} bytes answered for {asked:?} holds \
+                             {pixel_format:?} {made:?} {storage_mode:?}",
+                            answered.size
+                        );
+                    }
                 }
             }
+        }
+    }
+    // Core Animation's pair: a small half-float texture and a screen.
+    for (asked, made) in [(read, read | render), (read | render, read), (render, read)] {
+        let mut device = device();
+        let pair = [
+            (PixelFormat::R16Float, 188, 87),
+            (PixelFormat::Bgra8Unorm, 2824, 1704),
+        ];
+        let described = |format, (width, height), usage| {
+            let mut descriptor = texture(format, usage);
+            (descriptor.width, descriptor.height) = (width, height);
+            descriptor
+        };
+        let mut size = 0;
+        for (format, width, height) in pair {
+            let answered = device
+                .heap_texture_size_and_align(&described(format, (width, height), asked))
+                .unwrap();
+            size += answered.size.next_multiple_of(answered.align);
+        }
+        let id = heap(&mut device, size, StorageMode::Private, HeapType::Automatic);
+        for (format, width, height) in pair {
+            assert!(
+                device
+                    .new_heap_texture(id, &described(format, (width, height), made), None)
+                    .is_ok(),
+                "a heap of {size} bytes answered for {asked:?} holds {format:?} {made:?}"
+            );
         }
     }
 }
@@ -664,6 +715,42 @@ fn a_full_heap_is_not_out_of_memory() {
     assert_eq!(
         device.new_heap_buffer(heap, 64, options(StorageMode::Private), None),
         Err(Error::HeapFull)
+    );
+    let full = HeapRefusals {
+        full: 2,
+        fragmented: 0,
+    };
+    assert_eq!(device.memory().heap_refusals, full);
+    // Free bytes enough for a texture twice the size, in two pieces.
+    let heap = device
+        .new_heap(&HeapDescriptor {
+            size: 3 * answered.size,
+            options: options(StorageMode::Private),
+            heap_type: HeapType::Automatic,
+            sparse_page_size: SparsePageSize::Size64,
+        })
+        .unwrap();
+    let placed: Vec<_> = (0..3)
+        .map(|_| device.new_heap_texture(heap, &descriptor, None).unwrap())
+        .collect();
+    device.destroy_texture(placed[0]).unwrap();
+    device.destroy_texture(placed[2]).unwrap();
+    let mut double = descriptor;
+    double.height *= 2;
+    assert_eq!(
+        device.heap_texture_size_and_align(&double).unwrap().size,
+        2 * answered.size
+    );
+    assert_eq!(
+        device.new_heap_texture(heap, &double, None),
+        Err(Error::HeapFull)
+    );
+    assert_eq!(
+        device.memory().heap_refusals,
+        HeapRefusals {
+            fragmented: 1,
+            ..full
+        }
     );
 }
 

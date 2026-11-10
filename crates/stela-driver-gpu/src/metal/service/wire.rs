@@ -1018,6 +1018,9 @@ impl Fault {
     pub const MALFORMED: Self = Self::new(Status::Malformed, "malformed record");
     pub const STALE: Self = Self::new(Status::StaleHandle, "unknown or destroyed handle");
     pub const CLOSED: Self = Self::new(Status::Closed, "the connection is closed");
+    /// Metal's nil for a heap without room, which callers expect.
+    pub const HEAP_FULL: Self =
+        Self::new(Status::Declined, "the heap has no room for the resource");
 
     pub const fn new(status: Status, reason: &'static str) -> Self {
         Self {
@@ -1077,7 +1080,7 @@ impl From<Error> for Fault {
             Error::Invalid(reason) => Self::new(Status::Invalid, reason),
             Error::Unsupported(capability) => Self::new(Status::Unsupported, capability),
             Error::OutOfMemory => Self::new(Status::OutOfMemory, "out of memory"),
-            Error::HeapFull => Self::new(Status::Declined, "the heap has no room for the resource"),
+            Error::HeapFull => Self::HEAP_FULL,
             Error::DeviceLost => Self::new(Status::DeviceLost, "the device was lost"),
             Error::NotArchived => {
                 Self::new(Status::Declined, "no binary archive holds the pipeline")
