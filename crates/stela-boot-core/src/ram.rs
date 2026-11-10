@@ -50,6 +50,28 @@ pub fn runs(
     true
 }
 
+/// The host ranges `candidates` (`start..end`, in the firmware map's order,
+/// which UEFI does not sort) hold, sorted by address with touching and
+/// overlapping ones joined, into `ranges` as (start, bytes): how many, and
+/// the bytes of those that did not fit. Empty candidates are skipped.
+pub fn merge_ranges(candidates: &mut [(u64, u64)], ranges: &mut [(u64, u64)]) -> (usize, u64) {
+    candidates.sort_unstable();
+    let (mut count, mut dropped) = (0usize, 0u64);
+    for &(start, end) in candidates.iter().filter(|(start, end)| start < end) {
+        if let Some(last) = count.checked_sub(1).map(|last| &mut ranges[last])
+            && start <= last.0 + last.1
+        {
+            last.1 = last.1.max(end - last.0);
+        } else if let Some(slot) = ranges.get_mut(count) {
+            *slot = (start, end - start);
+            count += 1;
+        } else {
+            dropped += end - start;
+        }
+    }
+    (count, dropped)
+}
+
 /// The immutable map and all host backing remain owned by the caller through
 /// both passes. `action` is infallible and receives only complete admitted
 /// chunks. UAT/DART page-by-page prefix semantics belong to their outer owner.
@@ -113,6 +135,38 @@ fn walk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merged_ranges_are_sorted_joined_and_count_what_does_not_fit() {
+        let mut candidates = [
+            (0x4000, 0x6000),
+            (0x1000, 0x2000),
+            (0x9000, 0x9000),
+            (0x2000, 0x3000),
+            (0x8000, 0x9000),
+            (0x5000, 0x7000),
+        ];
+        let mut ranges = [(0, 0); 2];
+        assert_eq!(merge_ranges(&mut candidates, &mut ranges), (2, 0x1000));
+        assert_eq!(ranges, [(0x1000, 0x2000), (0x4000, 0x3000)]);
+    }
+
+    #[test]
+    fn two_hundred_unsorted_fragments_merge_in_address_order() {
+        let mut candidates: [(u64, u64); 200] = core::array::from_fn(|index| {
+            let page = (index as u64 * 37) % 200;
+            // Every other pair of pages touches its neighbour.
+            (page << 21, (page << 21) + (1 << 21) - ((page & 2) << 19))
+        });
+        let mut ranges = [(0, 0); 128];
+        let (count, dropped) = merge_ranges(&mut candidates, &mut ranges);
+        assert_eq!((count, dropped), (100, 0));
+        assert!(
+            ranges[..count]
+                .windows(2)
+                .all(|pair| pair[0].0 + pair[0].1 < pair[1].0)
+        );
+    }
 
     #[test]
     fn a_guest_range_is_its_host_runs() {

@@ -52,10 +52,15 @@ pub(super) struct GuestMemory {
     pub installed: u64,
 }
 
-/// Collect guest candidates from the final firmware map in entry order.
+/// Collect guest candidates from the final firmware map. UEFI does not
+/// sort the map, so the candidates are sorted and touching ones joined
+/// ([`stela_boot_core::ram::merge_ranges`]); RAM past [`MAX_GUEST_RANGES`]
+/// ranges, or past [`CANDIDATES`] firmware entries, is reported once.
 pub(super) fn guest_memory(map: &impl MemoryMap) -> GuestMemory {
-    let mut guest = [Region::default(); MAX_GUEST_RANGES];
-    let mut count = 0;
+    /// Firmware entries considered; a map has a few dozen to a few hundred.
+    const CANDIDATES: usize = 1024;
+    let mut candidates = [(0, 0); CANDIDATES];
+    let (mut found, mut past) = (0, 0);
     let mut installed = 0;
     for entry in map.entries() {
         if is_ram(entry.ty) {
@@ -71,19 +76,30 @@ pub(super) fn guest_memory(map: &impl MemoryMap) -> GuestMemory {
         }
         let start = entry.phys_start.next_multiple_of(LARGE);
         let end = (entry.phys_start + entry.page_count * PAGE) & !(LARGE - 1);
-        if end <= start || count == MAX_GUEST_RANGES {
+        if end <= start {
             continue;
         }
-        // Adjacent firmware entries merge into one range.
-        if count > 0 && guest[count - 1].physical + guest[count - 1].bytes == start {
-            guest[count - 1].bytes += end - start;
-        } else {
-            guest[count] = Region {
-                physical: start,
-                bytes: end - start,
-            };
-            count += 1;
+        match candidates.get_mut(found) {
+            Some(slot) => {
+                *slot = (start, end);
+                found += 1;
+            }
+            None => past += end - start,
         }
+    }
+    let mut merged = [(0, 0); MAX_GUEST_RANGES];
+    let (count, dropped) =
+        stela_boot_core::ram::merge_ranges(&mut candidates[..found], &mut merged);
+    if dropped + past != 0 {
+        output::arguments(format_args!(
+            "GUEST DRAM left out bytes={:#x}: the firmware map has more RAM ranges than the \
+             {MAX_GUEST_RANGES} the handoff keeps\n",
+            dropped + past
+        ));
+    }
+    let mut guest = [Region::default(); MAX_GUEST_RANGES];
+    for (region, &(physical, bytes)) in guest.iter_mut().zip(&merged[..count]) {
+        *region = Region { physical, bytes };
     }
     GuestMemory {
         ranges: guest,
