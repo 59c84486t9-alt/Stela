@@ -146,7 +146,7 @@ fn timed<T>(part: DiskPart, call: impl FnOnce() -> T) -> T {
 }
 
 /// Whether a core is inside the host drivers now.
-fn host_drivers_taken() -> bool {
+pub(super) fn host_drivers_taken() -> bool {
     HOST_DRIVERS.load(Ordering::Relaxed)
 }
 static HOST_DRIVERS_GS: AtomicU64 = AtomicU64::new(0);

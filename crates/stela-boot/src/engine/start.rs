@@ -1190,7 +1190,7 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
             } else {
                 machine.run_serialized_with_budget(parallel::RunBudget {
                     blocks: limit,
-                    host_ticks: Some(gpu::slice(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND)),
+                    host_ticks: Some(gpu::slice(host::COUNTER_HZ / HOME_SLICES_PER_SECOND)),
                 })
             }
         }

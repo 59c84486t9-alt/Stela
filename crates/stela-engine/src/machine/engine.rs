@@ -12,8 +12,9 @@ pub use boundary::{
 use mirrors::*;
 use reports::*;
 pub use reports::{
-    DeviceRegister, Discard, Event, Footprint, Occupancy, Requirement, RequirementKind, Reset,
-    Statistics, Stop, Surveyed, Suspension, TRACE_HITS, TraceHit, WATCH_HITS, WatchHit,
+    DeviceRegister, Discard, Event, ExitWordsWalk, Footprint, FootprintWalk, Occupancy,
+    Requirement, RequirementKind, Reset, Statistics, Stop, Surveyed, Suspension, TRACE_HITS,
+    TraceHit, WATCH_HITS, WatchHit,
 };
 mod amx;
 mod apple_maintenance;

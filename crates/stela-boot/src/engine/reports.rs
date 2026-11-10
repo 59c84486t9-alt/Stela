@@ -213,14 +213,64 @@ pub(super) struct ExitsSeen {
 /// The `ExitKind`s `Statistics::exit_kinds` counts.
 pub(super) const EXIT_KINDS: usize = 13;
 
+/// The exits by word since the last heartbeat, found in steps
+/// ([`ExitsSeen::diff_step`]): the counts now, the last word compared, and
+/// the words whose count changed with the change.
+pub(super) struct WordsDiff {
+    words: BTreeMap<u32, u64>,
+    after: Option<u32>,
+    top: Vec<(u64, u32)>,
+}
+
+impl WordsDiff {
+    /// `words` is [`Machine::exit_words`], gathered in steps.
+    pub(super) fn new(words: BTreeMap<u32, u64>) -> Self {
+        Self {
+            words,
+            after: None,
+            top: Vec::new(),
+        }
+    }
+}
+
 impl ExitsSeen {
+    /// Compare the counts now with the last heartbeat's from the word after
+    /// the last one compared, both maps side by side in word order, asking
+    /// `more` every 256 words; whether every word was compared.
+    pub(super) fn diff_step(&self, diff: &mut WordsDiff, mut more: impl FnMut() -> bool) -> bool {
+        use core::ops::Bound::{Excluded, Unbounded};
+        let start = diff.after.map_or(Unbounded, Excluded);
+        let mut last = self.words.range((start, Unbounded)).peekable();
+        for (compared, (&word, &count)) in diff.words.range((start, Unbounded)).enumerate() {
+            if compared != 0 && compared % 256 == 0 && !more() {
+                return false;
+            }
+            while last.next_if(|&(&seen, _)| seen < word).is_some() {}
+            let before = last
+                .next_if(|&(&seen, _)| seen == word)
+                .map_or(0, |(_, &count)| count);
+            let count = count.saturating_sub(before);
+            if count != 0 {
+                diff.top.push((count, word));
+            }
+            diff.after = Some(word);
+        }
+        true
+    }
+
     /// Since the last heartbeat: the native runs the engine started (those
     /// that did not end in a counted exit ran out of their chain budget),
     /// the exits by `ExitKind`, and the instruction words that most often
     /// left compiled code, so the engine's exit causes can be ranked, and
     /// the device registers whose native faults cost the most, each with its
     /// accesses and their handling time in microseconds.
-    pub(super) fn report<H: Host>(&mut self, machine: &Machine<H, parallel::Board>, tsc_hz: u64) {
+    /// `diff` is the words' compared in full ([`Self::diff_step`]).
+    pub(super) fn report<H: Host>(
+        &mut self,
+        machine: &Machine<H, parallel::Board>,
+        diff: WordsDiff,
+        tsc_hz: u64,
+    ) {
         const SHOWN: usize = 24;
         const REGISTERS: usize = 16;
         let statistics = &machine.statistics;
@@ -235,16 +285,13 @@ impl ExitsSeen {
             statistics.table_base_changes,
             statistics.code_invalidations,
         ];
-        let words = machine.exit_words();
-        let mut top: Vec<_> = words
-            .iter()
-            .map(|(word, &count)| {
-                let last = self.words.get(word).copied().unwrap_or_default();
-                (count.saturating_sub(last), *word)
-            })
-            .filter(|&(count, _)| count != 0)
-            .collect();
-        top.sort_unstable_by(|a, b| b.cmp(a));
+        let WordsDiff { words, mut top, .. } = diff;
+        // Only the shown words in order; the rest only add to the share.
+        if top.len() > SHOWN {
+            top.select_nth_unstable_by(SHOWN, |a, b| b.cmp(a));
+        }
+        let shown_len = top.len().min(SHOWN);
+        top[..shown_len].sort_unstable_by(|a, b| b.cmp(a));
         let exits: u64 = kinds
             .iter()
             .zip(&self.kinds)

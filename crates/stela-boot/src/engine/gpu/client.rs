@@ -32,7 +32,9 @@ use core::{
     pin::Pin,
     ptr::{self, NonNull},
     slice, str,
-    sync::atomic::{AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence},
+    sync::atomic::{
+        AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
+    },
 };
 use stela_boot_core::page_window::Cache;
 use stela_drivers::platform::work::{WorkError, service::Idle};
@@ -753,6 +755,7 @@ unsafe extern "C" fn serve_wake(context: *mut c_void) {
 /// Queues posted calls for the workers, oldest first, and starts Mesa's
 /// threads. Wake leaves use the reserved service.
 pub(super) fn start(gpu: &Installed) -> Result<(), WorkError> {
+    CHILDREN_STALE.store(false, Ordering::Relaxed);
     join_children(gpu);
     let service = &gpu.service;
     let mut request = REQUESTS
@@ -1035,6 +1038,24 @@ pub(super) fn posted_waiting() -> bool {
     !REQUESTS.load(Ordering::Relaxed).is_null()
 }
 
+/// Whether Linux ran steps since [`start`] last looked at the children: an
+/// entry other than the pump's ([`wait`], startup) leaves them unlooked.
+static CHILDREN_STALE: AtomicBool = AtomicBool::new(true);
+
+/// Whether a pump's first pass retires tasks and runs [`start`]: a call is
+/// posted, a task waits for a wake, calls wait for workers, or steps ran
+/// since the last look, which may have ended a child. Without any, both
+/// would find nothing.
+pub(super) fn start_due() -> bool {
+    posted_waiting()
+        || CHILDREN_STALE.load(Ordering::Relaxed)
+        || installed().is_some_and(|gpu| {
+            let service = &gpu.service;
+            service.wake_task.get()
+                || service.queue.borrow().len() > service.idle.get() + service.starting.get()
+        })
+}
+
 /// [`PRESENTS`] since the last call, cleared.
 pub(super) fn take_presents() -> [u64; 5] {
     PRESENTS
@@ -1121,6 +1142,7 @@ fn wait(gpu: &Installed, request: &Request, deadline: u64) {
                 start(gpu)?;
                 if waiting() {
                     runtime.step_or_idle()?;
+                    CHILDREN_STALE.store(true, Ordering::Relaxed);
                 }
             }
             Ok(())

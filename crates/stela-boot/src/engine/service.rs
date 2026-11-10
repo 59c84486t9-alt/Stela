@@ -55,6 +55,22 @@ const STEP_MICROS: u64 = 1000;
 /// Seconds between the service's own reports.
 const REPORT_SECONDS: u64 = 10;
 
+/// The longest a part that calls the host drivers (the logs, network,
+/// Bluetooth and NOR) is left to a later turn because another core holds
+/// the drivers' lock: a turn does not wait for the GPUs' pump, which can
+/// hold it for milliseconds, while that part ran recently.
+const DEFERRED_MILLIS: u64 = 20;
+
+/// The parts a turn runs, in order: the inputs first, as a pointer's motion
+/// is what the guest's user waits on.
+const INPUTS: usize = 0;
+const LOGS: usize = 1;
+const NETWORK: usize = 2;
+const BLUETOOTH: usize = 3;
+const NOR: usize = 4;
+const RESTORE: usize = 5;
+const TURN_PARTS: usize = 6;
+
 /// The host interfaces the service owns for the whole run.
 pub(super) struct Service {
     devices: parallel::Board,
@@ -71,6 +87,8 @@ pub(super) struct Service {
     /// The part the next service starts at: after the last one a step
     /// ended on, else the first.
     next: usize,
+    /// When each part last ran, for [`DEFERRED_MILLIS`].
+    ran: [u64; TURN_PARTS],
     #[cfg(feature = "diagnostics")]
     input_peak: Option<InputTurn>,
 }
@@ -111,6 +129,7 @@ impl Service {
             log_flushed: now,
             reported: now,
             next: 0,
+            ran: [now; TURN_PARTS],
             #[cfg(feature = "diagnostics")]
             input_peak: None,
         }
@@ -163,10 +182,11 @@ impl Service {
             log_flushed,
             reported,
             next,
+            ran,
             #[cfg(feature = "diagnostics")]
             input_peak,
         } = self;
-        let mut lap = Lap(host::rdtsc());
+        let mut lap = Lap::new();
         let now = host::rdtsc();
         // The guest console's input, which its device model takes under
         // the devices' lock and so cannot wait for the host's port there.
@@ -178,8 +198,11 @@ impl Service {
         let from = *next;
         *next = 0;
         let limit = *tsc_hz / 1_000_000 * STEP_MICROS;
+        let deferred = *tsc_hz / 1000 * DEFERRED_MILLIS;
         let mut ended = false;
-        let mut due = |part: usize, next: &mut usize| {
+        // Whether `part` runs in this turn; `drivers` when it calls the host
+        // drivers, whose lock another core may hold.
+        let mut due = |part: usize, drivers: bool, next: &mut usize| {
             if ended || part < from {
                 return false;
             }
@@ -189,24 +212,22 @@ impl Service {
                 *next = part;
                 return false;
             }
+            if drivers
+                && super::storage::host_drivers_taken()
+                && now.wrapping_sub(ran[part]) < deferred
+            {
+                return false;
+            }
+            ran[part] = now;
             true
         };
-        if due(0, next) {
-            if now.wrapping_sub(*log_flushed) >= *tsc_hz {
-                output::flush_due();
-                *log_flushed = host::rdtsc();
-            } else {
-                output::advance_logs();
-            }
-            lap.part(Part::Log);
-        }
         #[cfg(feature = "diagnostics")]
         let mut input_turn = InputTurn {
             start: lap.0,
             boot,
             ..InputTurn::default()
         };
-        let inputs_due = due(1, next);
+        let inputs_due = due(INPUTS, false, next);
         if let Some(usb) = usb.as_mut().filter(|_| inputs_due) {
             let arrived = usb.poll(
                 #[cfg(feature = "diagnostics")]
@@ -261,7 +282,16 @@ impl Service {
                 }
             }
         }
-        if let Some(network) = network.as_mut().filter(|_| due(2, next)) {
+        if due(LOGS, true, next) {
+            if now.wrapping_sub(*log_flushed) >= *tsc_hz {
+                output::flush_due();
+                *log_flushed = host::rdtsc();
+            } else {
+                output::advance_logs();
+            }
+            lap.part(Part::Log);
+        }
+        if let Some(network) = network.as_mut().filter(|_| due(NETWORK, true, next)) {
             // The host adapter's sends and receives wait outside the
             // devices' lock, which every PE's device accesses take.
             let (frames, status, room) = devices.with(|devices| {
@@ -279,7 +309,7 @@ impl Service {
             });
             lap.part(Part::Network);
         }
-        if let Some(bluetooth) = bluetooth.as_mut().filter(|_| due(3, next)) {
+        if let Some(bluetooth) = bluetooth.as_mut().filter(|_| due(BLUETOOTH, true, next)) {
             let (packets, room, status) = devices.with(|devices| bluetooth.queued(devices));
             bluetooth.status(status);
             bluetooth.transmit(packets);
@@ -293,7 +323,7 @@ impl Service {
             }
             lap.part(Part::Bluetooth);
         }
-        if due(4, next) {
+        if due(NOR, true, next) {
             if let Some(nor) = nor {
                 let dirty = devices.with(nor::HostNor::dirty);
                 nor.store(dirty);
@@ -304,7 +334,7 @@ impl Service {
             lap.part(Part::Nor);
         }
         let interrupted = || !boot && host::interrupted();
-        if let Some(experiment) = restore.as_mut().filter(|_| due(5, next)) {
+        if let Some(experiment) = restore.as_mut().filter(|_| due(RESTORE, false, next)) {
             // What was read ahead goes to the guest first: a service is
             // usually due because the guest's window opened, and the read
             // ahead can take milliseconds. The source is then read, and the
@@ -371,18 +401,27 @@ static TOTAL: [AtomicU64; PARTS] = [const { AtomicU64::new(0) }; PARTS];
 /// Services since the last report: by a waiting PE and by the boot PE.
 static SERVICES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
-struct Lap(u64);
+/// When the running part started, and this core's posted pumps' ticks then
+/// (`gpu::posted_ticks_here`).
+struct Lap(u64, u64);
 
 impl Lap {
+    fn new() -> Self {
+        Self(host::rdtsc(), super::gpu::posted_ticks_here())
+    }
+
     fn part(&mut self, part: Part) {
         let now = host::rdtsc();
-        let took = now.wrapping_sub(self.0);
+        // The posted pumps a part ran between its device polls are the
+        // pump's time (`GPU PUMP`), not the part's.
+        let pumped = super::gpu::posted_ticks_here().wrapping_sub(self.1);
+        let took = now.wrapping_sub(self.0).saturating_sub(pumped);
         LONGEST[part as usize].fetch_max(took, Ordering::Relaxed);
         TOTAL[part as usize].fetch_add(took, Ordering::Relaxed);
         // A posted GPU call waits for the boot CPU, not for the remaining
         // parts; the pump's time is no part's.
         super::gpu::pump_posted();
-        self.0 = host::rdtsc();
+        *self = Self::new();
     }
 }
 

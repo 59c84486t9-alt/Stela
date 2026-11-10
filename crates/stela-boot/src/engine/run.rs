@@ -194,6 +194,11 @@ pub(super) const SLICE: u64 = 1 << 18;
 /// inputs, at least (`Machine::set_wait_limit`).
 pub(super) const WAIT_POLLS_PER_SECOND: u64 = 20;
 
+/// How often the boot PE's slices end, at least, for its host service, the
+/// GPUs' pump and the heartbeat's stages: 4 ms, whether its guest runs or
+/// waits (`start`).
+pub(super) const HOME_SLICES_PER_SECOND: u64 = 250;
+
 /// Seconds between heartbeats, which locate a guest that runs without output.
 pub(super) const BEAT_SECONDS: u64 = 10;
 
@@ -230,7 +235,8 @@ pub(super) fn run<H: Host>(
         let stop = execute(machine, limit);
         machine.observe_parallel_source(parallel::SourcePhase::SliceExit);
         let service_now = host::rdtsc();
-        service.slice_end(service_now);
+        let waited = matches!(stop, Stop::Waiting) || machine.yielded_for_interrupt(&stop);
+        service.slice_end(service_now, if waited { "wait" } else { "guest" });
         heartbeat.sliced_ticks += service_now.wrapping_sub(slice_started);
         // The host's work between slices runs outside the boot PE's run: it
         // uses none of its translations, and another PE's maintenance
@@ -321,7 +327,10 @@ pub(super) fn run<H: Host>(
         // The heartbeat's reports wait for a quiet boot PE, as the service
         // does, for one more interval at most.
         let due = now - heartbeat.beat.at;
-        if due >= BEAT_SECONDS * tsc_hz && (quiet || due >= 2 * BEAT_SECONDS * tsc_hz) {
+        if heartbeat.stage.is_some() {
+            // The beat's later reports, one bounded stage per boundary.
+            host_work(machine, |machine| heartbeat.step(machine, tsc_hz));
+        } else if due >= BEAT_SECONDS * tsc_hz && (quiet || due >= 2 * BEAT_SECONDS * tsc_hz) {
             host_work(machine, |machine| {
                 heartbeat.beat(machine, &mut service, now, tsc_hz)
             });
@@ -463,6 +472,11 @@ pub(super) struct ServiceTimes {
     pub(super) serviced: u64,
     pub(super) boundaries: u64,
     pub(super) gap: u64,
+    /// When the running slice started, and of the longest gap the slice's
+    /// part and whether the boot PE ran guest code or waited in it.
+    pub(super) slice_started: u64,
+    pub(super) gap_slice: u64,
+    pub(super) gap_kind: &'static str,
     /// With every PE on a core of its own, the boot PE's guest time passes
     /// meanwhile.
     pub(super) longest: u64,
@@ -475,6 +489,9 @@ impl ServiceTimes {
             serviced: now,
             boundaries: 0,
             gap: 0,
+            slice_started: now,
+            gap_slice: 0,
+            gap_kind: "-",
             longest: 0,
             parts: ServiceParts::new(now),
         }
@@ -484,21 +501,31 @@ impl ServiceTimes {
     pub(super) fn slice_start(&mut self, now: u64) {
         self.longest = self.longest.max(now.wrapping_sub(self.serviced));
         self.parts.lap(ServiceParts::BEAT, now);
+        self.slice_started = now;
     }
 
-    /// The slice ended at `now`, starting the next service.
-    pub(super) fn slice_end(&mut self, now: u64) {
+    /// The slice ended at `now`, starting the next service; `kind` is what
+    /// the boot PE did in it: `guest` code, or `wait` for an interrupt.
+    pub(super) fn slice_end(&mut self, now: u64, kind: &'static str) {
         self.parts.start(now);
-        self.gap = self.gap.max(now.wrapping_sub(self.serviced));
+        let gap = now.wrapping_sub(self.serviced);
+        if gap > self.gap {
+            self.gap = gap;
+            self.gap_slice = now.wrapping_sub(self.slice_started);
+            self.gap_kind = kind;
+        }
         self.serviced = now;
         self.boundaries = self.boundaries.saturating_add(1);
     }
 
     pub(super) fn report(&self, tsc_hz: u64) {
         output::arguments(format_args!(
-            "HOST SERVICE boundaries={} maximum_gap_us={} maximum_service_us={} gpu_interrupts={} linux_irqs={} irq_quarantined={} irq_fault={:?} {} {}\n",
+            "HOST SERVICE boundaries={} maximum_gap_us={} gap=host_us/slice_us/kind:{}/{}/{} maximum_service_us={} gpu_interrupts={} linux_irqs={} irq_quarantined={} irq_fault={:?} {} {}\n",
             self.boundaries,
             u128::from(self.gap) * 1_000_000 / u128::from(tsc_hz),
+            u128::from(self.gap.saturating_sub(self.gap_slice)) * 1_000_000 / u128::from(tsc_hz),
+            u128::from(self.gap_slice) * 1_000_000 / u128::from(tsc_hz),
+            self.gap_kind,
             u128::from(self.longest) * 1_000_000 / u128::from(tsc_hz),
             super::gpu::interrupts(),
             stela_linux::service::serviced_irqs(),
@@ -517,6 +544,8 @@ impl ServiceTimes {
     /// Start the next beat's maxima.
     pub(super) fn restart(&mut self) {
         self.gap = 0;
+        self.gap_slice = 0;
+        self.gap_kind = "-";
         self.longest = 0;
         self.parts.longest = [0; ServiceParts::PARTS];
         self.parts.total = [0; ServiceParts::PARTS];
@@ -591,7 +620,40 @@ pub(super) struct Heartbeat {
     /// Ticks inside `execute` since the last beat, and the step timing then.
     pub(super) sliced_ticks: u64,
     pub(super) timing: Option<step_timing::StepTiming>,
+    /// The beat's reports still to run, one stage per service boundary
+    /// ([`Self::step`]), and what its stages took so far.
+    pub(super) stage: Option<BeatStage>,
+    pub(super) cost: BeatCost,
 }
+
+/// The heartbeat's reports after its first part ([`Heartbeat::beat`]), in
+/// order. Each runs at its own service boundary, so none holds the boot PE
+/// long; the walks of every block go on in steps of [`STEP_MICROS`].
+pub(super) enum BeatStage {
+    /// The exits by instruction word, then their change since the last beat
+    /// and the exit, translated and shadow lines.
+    Exits(stela_engine::machine::engine::ExitWordsWalk),
+    ExitsDiff(WordsDiff),
+    /// The PEs and stale code, then the beat's samples and the timers.
+    Stale(BeatSamples),
+    Samples(BeatSamples),
+    /// The coprocessors, storage and USB, the survey and the occupancy.
+    Devices,
+    Suspension,
+    /// The home PE's code bookkeeping, every [`FOOTPRINT_BEATS`] beats.
+    Footprint(stela_engine::machine::engine::FootprintWalk),
+}
+
+/// The call chains and PCs the heartbeat sampled, and the samples at EL0.
+pub(super) struct BeatSamples {
+    samples: Vec<[u64; CHAIN]>,
+    hot: BTreeMap<u64, HotPc>,
+    user: u32,
+}
+
+/// The longest one heartbeat stage, or one step of a walk of every block,
+/// runs on the boot PE between two slices.
+const STEP_MICROS: u64 = 300;
 
 impl Heartbeat {
     pub(super) fn new<H: Host>(machine: &Machine<H, parallel::Board>, now: u64) -> Self {
@@ -620,6 +682,8 @@ impl Heartbeat {
             occupancy: None,
             sliced_ticks: 0,
             timing: machine.step_timing().copied(),
+            stage: None,
+            cost: BeatCost::new(),
         }
     }
 
@@ -652,7 +716,10 @@ impl Heartbeat {
         }
     }
 
-    /// Report the interval since the last beat, which ends `now`.
+    /// Report the interval since the last beat, which ends `now`: the
+    /// position, service, processors, performance and translation lines,
+    /// which compare against the last beat; the rest follow in stages
+    /// ([`Self::step`]).
     pub(super) fn beat<H: Host>(
         &mut self,
         machine: &mut Machine<H, parallel::Board>,
@@ -660,15 +727,21 @@ impl Heartbeat {
         now: u64,
         tsc_hz: u64,
     ) {
-        let mut cost = BeatCost::new(now);
+        let mut at = now;
+        let mut mark = |cost: &mut BeatCost, name: &'static str| {
+            let now = host::rdtsc();
+            cost.add(name, now.wrapping_sub(at));
+            at = now;
+        };
+        let mut cost = BeatCost::new();
         let next = Beat::at(machine, now);
         let elapsed = now - self.beat.at;
         beat_report(machine, &self.beat, &next, elapsed);
-        cost.mark("position");
+        mark(&mut cost, "position");
         service.report(tsc_hz);
-        cost.mark("service");
+        mark(&mut cost, "service");
         self.report_processors(machine, &next, elapsed, tsc_hz);
-        cost.mark("processors");
+        mark(&mut cost, "processors");
         if let (Some(now), Some(then)) = (machine.step_timing().copied(), self.timing) {
             profile_report(&now.since(&then), self.sliced_ticks, elapsed, tsc_hz);
             self.timing = Some(now);
@@ -679,55 +752,114 @@ impl Heartbeat {
         service.restart();
         let compiled = next.compiled - self.beat.compiled;
         self.beat = next;
-        cost.mark("performance");
+        mark(&mut cost, "performance");
         self.translation = translation_report(machine, self.translation, compiled);
-        cost.mark("translation");
-        self.exits.report(machine, tsc_hz);
-        self.translated.report(machine);
-        self.shadows.report();
-        cost.mark("exits");
-        peers_report(machine);
-        cost.mark("peers");
-        let stale = machine.stale_code();
-        if stale.stale > 0 || stale.admitted > 0 {
-            output::arguments(format_args!("STALE {stale:?}\n"));
-        }
-        cost.mark("stale");
-        sample_report(&mut self.samples, self.user);
-        hot_report(&mut self.hot);
-        timer_report(machine);
-        cost.mark("samples");
-        for state in machine
-            .devices
-            .with(|devices| devices.coprocessor_diagnostics())
-        {
-            output::arguments(format_args!("ASC {state}\n"));
-        }
-        let (now, _) = machine.timer_snapshot();
-        for state in machine
-            .devices
-            .with(|devices| devices.storage_diagnostics(now))
-        {
-            output::arguments(format_args!("ANS {state}\n"));
-        }
-        for state in machine.devices.with(|devices| devices.usb_diagnostics()) {
-            output::arguments(format_args!("USB {state}\n"));
-        }
-        cost.mark("devices");
-        survey_report(machine);
-        occupancy_report(machine, &mut self.occupancy);
-        cost.mark("occupancy");
-        self.user = 0;
+        mark(&mut cost, "translation");
+        cost.step(at.wrapping_sub(now));
+        self.cost = cost;
         self.beats += 1;
-        if self.beats.is_multiple_of(SUSPENSION_BEATS) {
-            suspension_report(machine);
-            cost.mark("suspension");
+        self.stage = Some(BeatStage::Exits(Default::default()));
+    }
+
+    /// Run the beat's next stage, or the next step of its walk, for about
+    /// [`STEP_MICROS`] at most; after the last one, the cost line.
+    pub(super) fn step<H: Host>(&mut self, machine: &mut Machine<H, parallel::Board>, tsc_hz: u64) {
+        let Some(stage) = self.stage.take() else {
+            return;
+        };
+        let started = host::rdtsc();
+        let budget = tsc_hz / 1_000_000 * STEP_MICROS;
+        let more = || host::rdtsc().wrapping_sub(started) < budget;
+        let (name, next) = match stage {
+            BeatStage::Exits(mut walk) => {
+                let next = if machine.exit_words_step(&mut walk, more) {
+                    BeatStage::ExitsDiff(WordsDiff::new(machine.exit_words_finish(walk)))
+                } else {
+                    BeatStage::Exits(walk)
+                };
+                ("exits", Some(next))
+            }
+            BeatStage::ExitsDiff(mut diff) => {
+                if self.exits.diff_step(&mut diff, more) {
+                    self.exits.report(machine, diff, tsc_hz);
+                    self.translated.report(machine);
+                    self.shadows.report();
+                    let samples = BeatSamples {
+                        samples: core::mem::take(&mut self.samples),
+                        hot: core::mem::take(&mut self.hot),
+                        user: core::mem::take(&mut self.user),
+                    };
+                    ("exits", Some(BeatStage::Stale(samples)))
+                } else {
+                    ("exits", Some(BeatStage::ExitsDiff(diff)))
+                }
+            }
+            BeatStage::Stale(samples) => {
+                peers_report(machine);
+                let stale = machine.stale_code();
+                if stale.stale > 0 || stale.admitted > 0 {
+                    output::arguments(format_args!("STALE {stale:?}\n"));
+                }
+                ("stale", Some(BeatStage::Samples(samples)))
+            }
+            BeatStage::Samples(mut samples) => {
+                sample_report(&mut samples.samples, samples.user);
+                hot_report(&mut samples.hot);
+                timer_report(machine);
+                ("samples", Some(BeatStage::Devices))
+            }
+            BeatStage::Devices => {
+                for state in machine
+                    .devices
+                    .with(|devices| devices.coprocessor_diagnostics())
+                {
+                    output::arguments(format_args!("ASC {state}\n"));
+                }
+                let (now, _) = machine.timer_snapshot();
+                for state in machine
+                    .devices
+                    .with(|devices| devices.storage_diagnostics(now))
+                {
+                    output::arguments(format_args!("ANS {state}\n"));
+                }
+                for state in machine.devices.with(|devices| devices.usb_diagnostics()) {
+                    output::arguments(format_args!("USB {state}\n"));
+                }
+                survey_report(machine);
+                occupancy_report(machine, &mut self.occupancy);
+                let next = if self.beats.is_multiple_of(SUSPENSION_BEATS) {
+                    Some(BeatStage::Suspension)
+                } else if self.beats.is_multiple_of(FOOTPRINT_BEATS) {
+                    Some(BeatStage::Footprint(Default::default()))
+                } else {
+                    None
+                };
+                ("devices", next)
+            }
+            BeatStage::Suspension => {
+                suspension_report(machine);
+                let next = self
+                    .beats
+                    .is_multiple_of(FOOTPRINT_BEATS)
+                    .then(|| BeatStage::Footprint(Default::default()));
+                ("suspension", next)
+            }
+            BeatStage::Footprint(mut walk) => {
+                if machine.footprint_step(&mut walk, more) {
+                    footprint_report(machine, &machine.footprint_finish(&walk));
+                    ("footprint", None)
+                } else {
+                    ("footprint", Some(BeatStage::Footprint(walk)))
+                }
+            }
+        };
+        let took = host::rdtsc().wrapping_sub(started);
+        self.cost.add(name, took);
+        self.cost.step(took);
+        self.stage = next;
+        if self.stage.is_none() {
+            self.cost.report(tsc_hz);
         }
-        if self.beats.is_multiple_of(FOOTPRINT_BEATS) {
-            footprint_report(machine);
-            cost.mark("footprint");
-        }
-        cost.report(tsc_hz);
     }
 
     /// The guest instructions retired in the interval and, with each PE on
@@ -1281,8 +1413,10 @@ const FOOTPRINT_BEATS: u64 = 6;
 
 /// `ENGINE MEMORY pe=0 blocks=36M owners=12M …`: the heap bytes of the home
 /// PE's code bookkeeping, by structure ([`Machine::footprint`]).
-fn footprint_report<H: Host>(machine: &Machine<H, parallel::Board>) {
-    let footprint = machine.footprint();
+fn footprint_report<H: Host>(
+    machine: &Machine<H, parallel::Board>,
+    footprint: &stela_engine::machine::engine::Footprint,
+) {
     output::arguments(format_args!(
         "ENGINE MEMORY pe={} blocks={}M owners={}M successors={}M rows={}M index={}M lookup={}M pages={}M\n",
         machine.processor(),
@@ -1428,36 +1562,49 @@ impl ServiceParts {
     }
 }
 
-/// What each of the heartbeat's reports took, which holds the boot PE's
-/// guest up.
+/// What each of the heartbeat's reports took in all, which holds the boot
+/// PE's guest up, and its longest stage or step.
 pub(super) struct BeatCost {
-    pub(super) at: u64,
     pub(super) parts: Vec<(&'static str, u64)>,
+    pub(super) steps: u32,
+    pub(super) longest: u64,
 }
 
 impl BeatCost {
-    pub(super) fn new(now: u64) -> Self {
+    pub(super) fn new() -> Self {
         Self {
-            at: now,
             parts: Vec::new(),
+            steps: 0,
+            longest: 0,
         }
     }
 
-    /// The reports since the last mark were `name`'s.
-    pub(super) fn mark(&mut self, name: &'static str) {
-        let now = host::rdtsc();
-        self.parts.push((name, now.wrapping_sub(self.at)));
-        self.at = now;
+    /// The report `name` took `ticks` more.
+    pub(super) fn add(&mut self, name: &'static str, ticks: u64) {
+        match self.parts.iter_mut().find(|(part, _)| *part == name) {
+            Some((_, total)) => *total += ticks,
+            None => self.parts.push((name, ticks)),
+        }
     }
 
+    /// One stage or step, run at a service boundary of its own, took `ticks`.
+    pub(super) fn step(&mut self, ticks: u64) {
+        self.steps += 1;
+        self.longest = self.longest.max(ticks);
+    }
+
+    /// `BEAT COST us name=total … steps=N longest_step=us`.
     pub(super) fn report(&self, tsc_hz: u64) {
+        let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
         let mut line = String::from("BEAT COST us");
         for (name, ticks) in &self.parts {
-            line.push_str(&format!(
-                " {name}={}",
-                u128::from(*ticks) * 1_000_000 / u128::from(tsc_hz)
-            ));
+            line.push_str(&format!(" {name}={}", micros(*ticks)));
         }
+        line.push_str(&format!(
+            " steps={} longest_step={}",
+            self.steps,
+            micros(self.longest)
+        ));
         output::arguments(format_args!("{line}\n"));
     }
 }

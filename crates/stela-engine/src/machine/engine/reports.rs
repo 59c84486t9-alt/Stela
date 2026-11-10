@@ -598,6 +598,59 @@ pub struct Footprint {
     pub pages: usize,
 }
 
+/// The block slots a report walk visits between two calls of its `more`.
+const WALK_CHUNK: usize = 1024;
+
+/// A walk of the block slots in steps, for a report that would otherwise
+/// visit every block at once: the next slot to visit.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SlotWalk {
+    next: usize,
+}
+
+impl SlotWalk {
+    /// Visit slots from where the last step stopped, `WALK_CHUNK` at a time,
+    /// while `more` allows; whether every slot given so far was visited.
+    fn step(
+        &mut self,
+        blocks: &super::board::Blocks,
+        mut more: impl FnMut() -> bool,
+        mut visit: impl FnMut(usize),
+    ) -> bool {
+        loop {
+            let end = blocks.len();
+            if self.next >= end {
+                return true;
+            }
+            let chunk = end.min(self.next + WALK_CHUNK);
+            for slot in self.next..chunk {
+                visit(slot);
+            }
+            self.next = chunk;
+            if !more() {
+                return self.next >= blocks.len();
+            }
+        }
+    }
+}
+
+/// The exits by instruction word ([`Machine::exit_words`]) gathered in
+/// steps: the live blocks' counts so far.
+#[derive(Debug, Default, Clone)]
+pub struct ExitWordsWalk {
+    slots: SlotWalk,
+    words: BTreeMap<u32, u64>,
+}
+
+/// [`Machine::footprint`] gathered in steps: the rows and exit lists of the
+/// blocks visited so far.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FootprintWalk {
+    slots: SlotWalk,
+    rows: usize,
+    successors: usize,
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     /// What its code bookkeeping holds now: a walk of every block, for
     /// reports.
@@ -611,16 +664,113 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .iter()
             .map(|(_, block)| block.successors.len() * size_of::<super::Successor>())
             .sum();
+        let walk = FootprintWalk {
+            slots: SlotWalk::default(),
+            rows,
+            successors,
+        };
+        self.footprint_finish(&walk)
+    }
+
+    /// One step of [`Self::footprint`]'s walk, which goes on while `more`
+    /// allows, asked every `WALK_CHUNK` slots; whether it visited the last
+    /// slot. It takes no board lock: rows are under their records' locks.
+    /// Blocks installed or retired between steps make the sums those of the
+    /// slots as each step found them.
+    pub fn footprint_step(&self, walk: &mut FootprintWalk, more: impl FnMut() -> bool) -> bool {
+        let blocks = &self.code.blocks;
+        let recovery = blocks.recovery();
+        let (mut rows, mut successors) = (walk.rows, walk.successors);
+        let done = walk.slots.step(blocks, more, |slot| {
+            if let Some(owner) = recovery.get(&slot) {
+                rows += owner.heap_bytes();
+            }
+            if let Some(block) = blocks.get(slot) {
+                successors += block.successors.len() * size_of::<super::Successor>();
+            }
+        });
+        (walk.rows, walk.successors) = (rows, successors);
+        done
+    }
+
+    /// The footprint from a finished walk: the parts its walk summed and the
+    /// index and table sizes, which take the board's lock once.
+    pub fn footprint_finish(&self, walk: &FootprintWalk) -> Footprint {
         let cache = self.code.cache_at(super::board::LockSite::Report);
         Footprint {
             blocks: self.code.blocks.heap_bytes(),
             // Owners live in the block records, which `blocks` counts.
             owners: 0,
-            successors,
-            rows,
+            successors: walk.successors,
+            rows: walk.rows,
             index: cache.index.heap_bytes(),
             lookup: cache.targets.index_bytes() + self.itlb.index_bytes(),
             pages: (self.pages.len() + self.spare_pages.len()) * crate::translations::PAGE_BYTES,
         }
+    }
+
+    /// One step of [`Self::exit_words`]' walk of the live blocks' exit
+    /// counts, as [`Self::footprint_step`] walks.
+    pub fn exit_words_step(&self, walk: &mut ExitWordsWalk, more: impl FnMut() -> bool) -> bool {
+        let blocks = &self.code.blocks;
+        let words = &mut walk.words;
+        walk.slots.step(blocks, more, |slot| {
+            let record = blocks.record(slot);
+            let taken = record.taken.load(Ordering::Relaxed);
+            if taken != 0
+                && record.live()
+                && let Some(block) = blocks.get(slot)
+            {
+                *words.entry(block.terminal).or_default() += u64::from(taken);
+            }
+        })
+    }
+
+    /// The exits by word from a finished walk, with those of the blocks
+    /// retired so far. A block retired after its slot was visited counts
+    /// twice until the next walk; one installed in a visited slot counts
+    /// at the next walk.
+    pub fn exit_words_finish(&self, walk: ExitWordsWalk) -> BTreeMap<u32, u64> {
+        let mut words = walk.words;
+        for (&word, &count) in &self.exit_words {
+            *words.entry(word).or_default() += count;
+        }
+        words
+    }
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::super::tests::{BASE, machine};
+    use super::*;
+
+    /// The walks in steps of one chunk each give what the walks of every
+    /// block at once give.
+    #[test]
+    fn report_walks_in_steps_match_the_whole_walks() {
+        const RET: u32 = 0xd65f_03c0;
+        const BLOCKS: usize = WALK_CHUNK + WALK_CHUNK / 2;
+        let mut machine = machine(&vec![RET; BLOCKS]);
+        for block in 0..BLOCKS as u64 {
+            let Ok(Fetched::Block(slot)) = machine.fetch_block(BASE + 4 * block, false) else {
+                panic!("a block")
+            };
+            let taken = &machine.code.blocks.record(slot).taken;
+            taken.store(1 + block as u32 % 3, Ordering::Relaxed);
+        }
+        // An exit counted by word outside a block's last instruction.
+        machine.exit_words.insert(0x1234_5678, 5);
+        let mut walk = ExitWordsWalk::default();
+        let mut steps = 1;
+        while !machine.exit_words_step(&mut walk, || false) {
+            steps += 1;
+        }
+        assert_eq!(steps, 2, "one chunk a step");
+        let words = machine.exit_words_finish(walk);
+        assert_eq!(words, machine.exit_words());
+        assert_eq!(words.get(&0x1234_5678), Some(&5));
+        let mut walk = FootprintWalk::default();
+        while !machine.footprint_step(&mut walk, || false) {}
+        assert_eq!(machine.footprint_finish(&walk), machine.footprint());
     }
 }

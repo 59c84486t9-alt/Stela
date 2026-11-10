@@ -24,6 +24,16 @@ use core::{
 /// The waiters' generation: a waiter of another one leaves.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// The generation of the waiter that waits on its timeline now, 0 for none.
+static WATCHING: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the newest waiter waits on its timeline: every fence of it that
+/// signals, in an interrupt or not, ends its wait and has the services look.
+pub(super) fn watching() -> bool {
+    let generation = GENERATION.load(Ordering::Acquire);
+    generation != 0 && WATCHING.load(Ordering::Acquire) == generation
+}
+
 /// The longest one wait lasts.
 const WAIT_NS: u64 = 100_000_000;
 /// Failed waits in a row after which a waiter leaves: its syncobj or file
@@ -136,6 +146,7 @@ fn wait(file: c_int, handle: u32, watch: &Watch) {
     let generation = watch.generation;
     let mut next = value(file, handle).unwrap_or(0) + 1;
     let mut failures = 0;
+    WATCHING.store(generation, Ordering::Release);
     while GENERATION.load(Ordering::Acquire) == generation && failures < FAILURES {
         let mut point = next;
         let mut handles = handle;
@@ -166,6 +177,8 @@ fn wait(file: c_int, handle: u32, watch: &Watch) {
             _ => failures += 1,
         }
     }
+    // A newer waiter may already have stored its own.
+    let _ = WATCHING.compare_exchange(generation, 0, Ordering::AcqRel, Ordering::Relaxed);
 }
 
 /// The newest point of `handle` that signaled.

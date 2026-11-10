@@ -1776,6 +1776,33 @@ struct PumpCounts {
     step_serving: [AtomicU32; 4],
     /// Linux steps the pumps ran.
     steps: AtomicU64,
+    /// Ticks the pumps spent by part ([`PumpPart`]).
+    parts: [AtomicU64; PumpPart::COUNT],
+}
+
+/// The parts of a pump, timed for [`pump_report`].
+#[derive(Clone, Copy)]
+enum PumpPart {
+    /// Entering the environment: the host drivers' lock, the root switch
+    /// and the identity checks, until the first step.
+    Enter,
+    /// Retiring tasks and taking posted calls ([`client::start`]).
+    Children,
+    /// Linux's steps.
+    Steps,
+    /// Linux's next deadline, and leaving the environment.
+    Leave,
+    /// Looking for completed work ([`look_due`]).
+    Look,
+}
+
+impl PumpPart {
+    const COUNT: usize = 5;
+    const NAMES: [&str; Self::COUNT] = ["enter", "children", "steps", "leave", "look"];
+
+    fn add(self, ticks: u64) {
+        PUMPS.parts[self as usize].fetch_add(ticks, Ordering::Relaxed);
+    }
 }
 
 /// Host page-window unmappings by their source since [`pump_report`]: Linux
@@ -1818,7 +1845,22 @@ static PUMPS: PumpCounts = PumpCounts {
     step_shootdowns: AtomicU64::new(0),
     step_serving: [const { AtomicU32::new(0) }; 4],
     steps: AtomicU64::new(0),
+    parts: [const { AtomicU64::new(0) }; PumpPart::COUNT],
 };
+
+/// Ticks the boot CPU spent in posted pumps ([`pump_posted`]).
+#[cfg(feature = "nvk")]
+static POSTED_TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// The ticks this processor spent in posted pumps so far: the boot CPU's
+/// total, and nothing on another processor, which runs none.
+pub(super) fn posted_ticks_here() -> u64 {
+    #[cfg(feature = "nvk")]
+    if host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
+        return POSTED_TICKS.load(Ordering::Relaxed);
+    }
+    0
+}
 
 /// The shootdowns counted so far, for a difference across a step.
 fn shootdowns() -> u64 {
@@ -1924,17 +1966,43 @@ pub(super) fn pump() {
     cause.fetch_add(1, Ordering::Relaxed);
     let budget = gpu.tsc_after(PUMP_NS);
     let mut steps = 0u32;
+    let mut part_at = started;
+    let mut lap = |part: PumpPart| {
+        let now = host::rdtsc();
+        part.add(now.wrapping_sub(part_at));
+        part_at = now;
+    };
     let ran = gpu.work.dispatch_linux(|runtime| {
+        lap(PumpPart::Enter);
+        let mut first = true;
         loop {
-            gpu.advance_children();
+            // What is raised from here on this pass takes: the step runs
+            // the tasks it woke, and `client::start` the calls posted. Only
+            // what comes after stays pending for the next pump, which does
+            // not then run for nothing.
+            if !first {
+                PENDING_SINCE.store(0, Ordering::Release);
+                gpu.events.pending.store(false, Ordering::Release);
+            }
+            // Tasks retire and calls arrive only through steps and posts:
+            // a pump's first pass looks only if something may have.
             #[cfg(feature = "nvk")]
-            client::start(gpu)?;
+            if !first || client::start_due() {
+                gpu.advance_children();
+                client::start(gpu)?;
+            }
+            #[cfg(not(feature = "nvk"))]
+            gpu.advance_children();
+            first = false;
+            lap(PumpPart::Children);
             #[cfg(feature = "nvk")]
             let serving = client::serving();
             #[cfg(not(feature = "nvk"))]
             let serving = [0; 4];
             let (step_started, shot) = (host::rdtsc(), shootdowns());
-            if !runtime.step()? {
+            let stepped = runtime.step()?;
+            lap(PumpPart::Steps);
+            if !stepped {
                 break;
             }
             let now_shot = shootdowns();
@@ -1964,15 +2032,21 @@ pub(super) fn pump() {
     if let Err(error) = ran {
         output::fatal(format_args!("the host's Linux environment failed: {error}"));
     }
+    lap(PumpPart::Leave);
     if steps == 0 {
         PUMPS.idle.fetch_add(1, Ordering::Relaxed);
     }
     PUMPS.steps.fetch_add(u64::from(steps), Ordering::Relaxed);
     #[cfg(feature = "nvk")]
-    if look_due(gpu) {
-        gate::interrupted();
-        gate::watch_completions();
+    match look_due(gpu) {
+        Look::Device => {
+            gate::interrupted();
+            gate::watch_completions();
+        }
+        Look::Waiters => gate::watch_completions(),
+        Look::No => {}
     }
+    lap(PumpPart::Look);
     let took = host::rdtsc().wrapping_sub(started);
     PUMPS.ticks.fetch_add(took, Ordering::Relaxed);
     PUMPS.longest.fetch_max(took, Ordering::Relaxed);
@@ -1986,7 +2060,9 @@ pub(super) fn pump_posted() {
     #[cfg(feature = "nvk")]
     if client::posted_waiting() && host::processor() == BOOT_CPU.load(Ordering::Relaxed) {
         PUMPS.posted.fetch_add(1, Ordering::Relaxed);
+        let started = host::rdtsc();
         pump();
+        POSTED_TICKS.fetch_add(host::rdtsc().wrapping_sub(started), Ordering::Relaxed);
     }
 }
 
@@ -2009,7 +2085,8 @@ fn pump_waiting() {
 /// `step_longest_us=… step_shootdowns=… step_serving=…`: the longest single
 /// Linux step, the shootdowns during it and the posted calls being performed
 /// as it began (`-` for none), and `unmaps=device/pages/files/stacks`
-/// ([`UNMAPS`]). Then `\nGPU LINUX timers=… works=… sleepers=… timeouts=…
+/// ([`UNMAPS`]), and `total_us=enter/children/steps/leave/look:…` the
+/// pumps' time by [`PumpPart`]. Then `\nGPU LINUX timers=… works=… sleepers=… timeouts=…
 /// steps=…` ([`linux_report`]).
 pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
     let gpu = installed()?;
@@ -2061,6 +2138,17 @@ pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
         next_timer(),
         micros(take(&PUMPS.step_longest)),
         take(&PUMPS.step_shootdowns),
+    );
+    // Each part's total over the pumps since the last report.
+    let parts: Vec<String> = PUMPS
+        .parts
+        .iter()
+        .map(|part| format!("{}", micros(take(part))))
+        .collect();
+    let pumps = format!(
+        "{pumps} total_us={}/{}",
+        PumpPart::NAMES.join("/"),
+        parts.join("/")
     );
     let linux = linux_report(take(&PUMPS.steps));
     Some(pumps + &linux + &nvkm)
@@ -2248,22 +2336,45 @@ static NEXT_LOOK: AtomicU64 = AtomicU64::new(0);
 const LOOK_FALLBACK_NS: u64 = 10_000_000;
 
 #[cfg(feature = "nvk")]
-/// Whether this pump looks for completed work: each look asks the driver for
-/// each GPU's completion, which only an interrupt makes likely to have moved.
-/// Most pumps run for a call a PE posted or a Linux timer.
-fn look_due(gpu: &Installed) -> bool {
+/// What a pump looks at after its steps ([`look_due`]).
+enum Look {
+    /// Each GPU's completion, which enters the driver, and the devices'
+    /// new completion timelines.
+    Device,
+    /// Only the devices' new completion timelines, which need no driver.
+    Waiters,
+    No,
+}
+
+#[cfg(feature = "nvk")]
+/// What this pump looks at: each look asks the driver for each GPU's
+/// completion, which only an interrupt or a waiter's point makes likely to
+/// have moved. Most pumps run for a call a PE posted or a Linux timer. The
+/// fallback look every [`LOOK_FALLBACK_NS`] is for a device no waiter
+/// watches: while one waits on the only device's timeline, every fence it
+/// signals reaches the waiter, which asks for the look itself, so the
+/// fallback only starts the waiters of new timelines.
+fn look_due(gpu: &Installed) -> Look {
     let fired = FIRED.load(Ordering::Acquire);
     let interrupted = LOOKED.swap(fired, Ordering::Relaxed) != fired;
     let asked = LOOK.swap(false, Ordering::AcqRel);
     let now = host::rdtsc();
-    if interrupted || asked || now >= NEXT_LOOK.load(Ordering::Relaxed) {
+    let fallback = now >= NEXT_LOOK.load(Ordering::Relaxed);
+    if interrupted || asked || fallback {
         NEXT_LOOK.store(
             now.saturating_add(gpu.tsc_after(LOOK_FALLBACK_NS)),
             Ordering::Relaxed,
         );
-        return true;
     }
-    false
+    if interrupted || asked {
+        Look::Device
+    } else if !fallback {
+        Look::No
+    } else if gate::shared().len() == 1 && waiter::watching() {
+        Look::Waiters
+    } else {
+        Look::Device
+    }
 }
 
 #[cfg(feature = "nvk")]
