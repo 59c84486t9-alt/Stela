@@ -1694,6 +1694,13 @@ fn source_topology<'a>(
                     boot.affinity,
                     active_workers,
                 ),
+                0x6020..=0x6022 => topology::Source::t6020_assigned(
+                    intake.original(),
+                    live,
+                    identity,
+                    boot.affinity,
+                    active_workers,
+                ),
                 0x6000 => topology::Source::t6000_assigned(
                     intake.original(),
                     live,
@@ -1806,6 +1813,39 @@ fn memory_resources(
             t6000_cold::Plan::prepare_ap_frontend(board, canonical_ram, programmed, &configuration)
                 .unwrap_or_else(|error| output::fatal(&error));
         Some(MemoryResources::T6000Cold(plan))
+    } else if let Some(descriptor) = board.t6020_memory.as_ref() {
+        use stela_soc::machine::memory_resources::t6020::cold;
+        use stela_soc::mcc::t6020::Configuration;
+        let controller = board
+            .memory_controller
+            .as_ref()
+            .unwrap_or_else(|| output::fatal("T602x memory cache has no AMCC descriptor"));
+        let power = board
+            .power_states
+            .as_ref()
+            .unwrap_or_else(|| output::fatal("T602x memory cache has no PMGR power states"));
+        let layout = descriptor
+            .layout()
+            .unwrap_or_else(|error| output::fatal(&error));
+        // Cleared software controls: policy for a new cacheless frontend,
+        // never a measured Apple reset image.
+        let configuration = Configuration::clear_software_controls(layout);
+        // A refused plan leaves the controller unmodeled, reported once, as
+        // the board was before this owner existed.
+        match cold::Plan::prepare_ap_frontend(
+            controller,
+            descriptor,
+            power,
+            canonical_ram,
+            programmed,
+            &configuration,
+        ) {
+            Ok(plan) => Some(MemoryResources::T6020Cold(plan)),
+            Err(error) => {
+                output::arguments(format_args!("UNMODELED T602x memory cache: {error}\n"));
+                None
+            }
+        }
     } else if board.memory_cache.is_some() {
         use stela_soc::machine::{
             memory_resources::t8112::cache::ZeroWayConfiguration, t8112_cold,

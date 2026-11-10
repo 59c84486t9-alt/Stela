@@ -292,6 +292,38 @@ impl<'a> Source<'a> {
             acc_harvesting: 0,
         })
     }
+    /// T6020-family mode1 adapter (M2 Pro, Max and Ultra). Its kernel binds
+    /// each complex's records to CPU numbers in order, so a reduced roster
+    /// takes dense CPU IDs, watchdog records and enable_core masks.
+    pub fn t6020_assigned(
+        original: &'a [u8],
+        live: &LiveTree,
+        identity: SourceIdentity,
+        boot_reg: u32,
+        workers: usize,
+    ) -> Result<Self> {
+        const HARVESTING: u32 = 1;
+        live.require_no_harvesting_override()?;
+        let tree = DeviceTree::parse(live.bytes())
+            .map_err(|error| refuse!("assigned live source ADT: {error}", %error))?;
+        let immutable = DeviceTree::parse(original)
+            .map_err(|error| refuse!("assigned immutable source ADT: {error}", %error))?;
+        let resources = BspSource::t6020_assigned(
+            original,
+            live.bytes(),
+            identity,
+            boot_reg,
+            HARVESTING,
+            workers,
+        )?;
+        Ok(Self {
+            resources,
+            tree,
+            dense_ids: Some((immutable, identity.original_tree_sha256)),
+            boot_reg,
+            acc_harvesting: HARVESTING,
+        })
+    }
     pub fn acc_harvesting(&self) -> u32 {
         self.acc_harvesting
     }

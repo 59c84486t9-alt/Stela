@@ -489,6 +489,9 @@ pub struct Board {
     pub memory_cache: Option<MemoryCache>,
     /// Direct T6000 resources; parsing does not grant native RAM/DSB permission.
     pub direct_memory_cache: Option<DirectMemoryCache>,
+    /// `/arm-io/mcc` when it is an `mcc,t6020` (T602x MCC/AMCC/PTD); parsing
+    /// grants no native RAM or cache permission.
+    pub t6020_memory: Option<T6020Memory>,
     /// The CPU clusters' PMGR registers, when the DeviceTree shows the SoC's
     /// PMGR and the SoC row describes them.
     pub clusters: Vec<CpuCluster>,
@@ -929,6 +932,7 @@ pub fn board(tree: &[u8]) -> Result<Board> {
     let memory_cache = memory_cache(&io, &extent, chip_id, memory_controller.as_ref())?;
     let direct_memory_cache =
         memory_resources::direct_memory_cache(&io, &extent, memory_controller.as_ref())?;
+    let t6020_memory = memory_resources::t6020::from_io(&io, &extent)?;
     let spi_nor = spi_nor(&root, &io, &extent, phandle, gpio.as_ref())?;
     let spmis = spmi_controllers(&io, &extent, phandle)?;
     let dcp = dcp_device(&io, &translate, &darts)?;
@@ -970,6 +974,7 @@ pub fn board(tree: &[u8]) -> Result<Board> {
         pmgr_refusals,
         memory_cache,
         direct_memory_cache,
+        t6020_memory,
         clusters,
         aon_fuses,
         cpu_start,

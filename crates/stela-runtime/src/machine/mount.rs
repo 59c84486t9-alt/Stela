@@ -282,6 +282,11 @@ fn validate_memory(board: &Board, memory: Option<&MemoryResources>) -> Result<()
         match memory {
             MemoryResources::T8112Cold(plan) => plan.validate_power(board.power_states.as_ref())?,
             MemoryResources::T6000Cold(plan) => plan.validate_power(board.power_states.as_ref())?,
+            MemoryResources::T6020Cold(plan) => plan.validate(
+                board.memory_controller.as_ref(),
+                board.t6020_memory.as_ref(),
+                board.power_states.as_ref(),
+            )?,
             MemoryResources::T8112 { .. } => {}
         }
         memory.validate(
@@ -534,6 +539,12 @@ fn add_native_memory(
             plan.install(devices)?;
             log(format_args!(
                 "DEVICES mcc native direct MCC/AMCC/PTD share canonical RAM and source power graph\n"
+            ));
+        }
+        MemoryResources::T6020Cold(plan) => {
+            plan.install(devices)?;
+            log(format_args!(
+                "DEVICES mcc native T602x MCC/AMCC/PTD share canonical RAM and source power graph\n"
             ));
         }
         MemoryResources::T8112Cold(plan) => {

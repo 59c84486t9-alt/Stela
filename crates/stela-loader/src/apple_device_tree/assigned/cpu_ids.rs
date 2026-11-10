@@ -14,6 +14,9 @@ pub enum CpuIdRecipe<'a> {
     /// Original AppleARMCPU indexes max_cpus by cpu-id; the watchdog selects
     /// a 16-byte record by that ID after translating reg to a logical PE.
     /// See iboot-handoff.md for the independently pinned original consumers.
+    /// Each CPU's `function-enable_core` mask is its kernel CPU number's bit
+    /// (`ApplePMGR::enableCPUCores` tests the core entry's CPU number, 26B123
+    /// mac14j 0xfffffe0009b7037c), so it moves with the projected ID.
     DenseWithWatchdog {
         original: &'a DeviceTree,
         /// Digest of the immutable original bytes. A source whose parsed
@@ -47,6 +50,29 @@ pub(super) struct Prepared {
     mappings: Vec<CpuIdMapping>,
     watchdog: Option<WatchdogProjection>,
     table: Vec<u8>,
+    /// Each projected CPU's `function-enable_core`, with its new mask.
+    enables: Vec<(String, Vec<u8>)>,
+}
+
+/// The SoCs whose CPU IDs, watchdog records and enable_core masks this
+/// recipe projects: the T8112 and the T6020 family, whose original masks
+/// are each CPU's own `cpu-id` bit.
+const FAMILIES: [u32; 4] = [0x8112, 0x6020, 0x6021, 0x6022];
+const ENABLE_CORE: &str = "function-enable_core";
+
+/// The enable_core function of a CPU whose original mask is `1 << id`,
+/// with the mask moved to `1 << projected`.
+fn enable_core(node: &Node, id: u32, projected: u32) -> Result<Vec<u8>> {
+    let raw = bytes(node, ENABLE_CORE)?;
+    require!(
+        raw.len() == 12
+            && 1u32.checked_shl(id).map(u32::to_le_bytes).as_ref()
+                == Some(&raw[8..].try_into().unwrap()),
+        "CPU enable_core mask is not its original cpu-id bit"
+    );
+    let mut value = raw.to_vec();
+    value[8..].copy_from_slice(&(1u32 << projected).to_le_bytes());
+    Ok(value)
 }
 
 fn range(node: &Node, property: &str) -> Result<RegisterRange> {
@@ -88,10 +114,11 @@ impl Prepared {
                 mappings: Vec::new(),
                 watchdog: None,
                 table: Vec::new(),
+                enables: Vec::new(),
             });
         };
         require!(
-            plan.profile().soc == 0x8112,
+            FAMILIES.contains(&plan.profile().soc),
             "CPU ID/watchdog source family is unqualified"
         );
         require!(
@@ -230,6 +257,7 @@ impl Prepared {
         }
         let mut mappings = Vec::new();
         let mut projected = Vec::new();
+        let mut enables = Vec::new();
         for pe in plan.pes() {
             let binding = source
                 .nodes
@@ -247,6 +275,10 @@ impl Prepared {
                 "CPU ID plan differs from source/logical ordering"
             );
             projected.extend_from_slice(record);
+            enables.push((
+                format!("{CPUS}/{name}"),
+                enable_core(original_cpus.child(name).unwrap(), *id, pe.logical as u32)?,
+            ));
             mappings.push(CpuIdMapping {
                 slot: pe.slot,
                 path: format!("{CPUS}/{name}"),
@@ -268,6 +300,7 @@ impl Prepared {
             }),
             mappings,
             table: projected,
+            enables,
         })
     }
     pub(super) fn preserves_reference(&self, id: u32) -> bool {
@@ -298,6 +331,9 @@ impl Prepared {
                     "cpu-id",
                     mapping.projected_id.to_le_bytes().to_vec(),
                 )?;
+            }
+            for (path, value) in self.enables {
+                tree.set_property(&path, ENABLE_CORE, value)?;
             }
             tree.set_property(&watchdog.path, TRIGGER, self.table)?;
         }

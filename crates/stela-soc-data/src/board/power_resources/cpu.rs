@@ -1,10 +1,12 @@
 //! Source-checked CPU ownership, independent of lifecycle state or admission.
 //!
-//! Original 26A434 T8112 normal-mode MPIDR/idle callbacks and T6000 mode1
-//! constructor counters establish separate membership rules. See apple-socs.md's
+//! Original 26A434 T8112 normal-mode MPIDR/idle callbacks, T6000 mode1
+//! constructor counters and the T6020 family's per-die mode1 counters
+//! establish separate membership rules. See apple-socs.md's
 //! J473 proof and the T6000 source module. No input hash or board name dispatches
 //! production behavior, and no numeric suffix of a record name selects a PE.
 mod t6000;
+mod t6020;
 
 use super::records::{Layout, Record};
 use crate::pmgr::coverage::DomainId;
@@ -253,6 +255,9 @@ pub fn resolve_cpu_power(
     }
     if chip != Chip::AppleM2 {
         return Err(Error::UnsupportedChip(chip));
+    }
+    if t6020::owns(root) {
+        return t6020::resolve(root, records, processors, acc_harvesting);
     }
     let io = child(root, b"arm-io")?;
     let pmgr = child(&io, b"pmgr")?;

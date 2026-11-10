@@ -705,6 +705,10 @@ fn dense_fixture() -> Fixture {
         let reg = word(node, "reg").unwrap();
         set_word(node, "cluster-id", reg >> 8);
         set_word(node, "cpu-id", index as u32);
+        // The recipe's families give each CPU its own cpu-id bit.
+        let mut enable = vec![1, 2, 3, 4, 5, 6, 7, 8];
+        enable.extend((1u32 << index).to_le_bytes());
+        node.set_property("function-enable_core", enable).unwrap();
         let region = range(100 + index as u64);
         set_range(node, "coresight-reg", region);
         table.extend((region.base + 4).to_le_bytes());
@@ -755,8 +759,15 @@ fn dense_cpu_ids_and_watchdog_records_follow_one_plan_without_changing_physical_
         let before = original.node(&mapping.path).unwrap();
         let after = tree.node(&mapping.path).unwrap();
         assert_eq!(word(after, "cpu-id").unwrap(), mapping.projected_id);
+        // The enable_core mask moves with the ID; its provider stays.
+        let enable = bytes(after, "function-enable_core").unwrap();
+        assert_eq!(
+            enable[..8],
+            bytes(before, "function-enable_core").unwrap()[..8]
+        );
+        assert_eq!(enable[8..], (1u32 << mapping.projected_id).to_le_bytes());
         for property in &before.properties {
-            if !matches!(property.name(), "state" | "cpu-id") {
+            if !matches!(property.name(), "state" | "cpu-id" | "function-enable_core") {
                 assert_eq!(after.property(property.name()), Some(property));
             }
         }

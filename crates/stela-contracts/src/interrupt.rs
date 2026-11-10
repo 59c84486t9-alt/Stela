@@ -14,6 +14,12 @@ use alloc::vec::Vec;
 pub type CpuIndex = usize;
 
 /// One AIC input line: DeviceTree `interrupts = <AIC_IRQ [die] irq flags>`.
+///
+/// An Apple DeviceTree specifier naming an AICv2 or v3 is a vector, die by
+/// die: `die * MAX_IRQ + irq`, MAX_IRQ being the controller's INFO3 field
+/// (J575d's second-die CLPC line 0x15bf is die 1, IRQ 0x5bf). A model may
+/// carry a specifier unsplit as `new(0, vector)`; the controller splits it by
+/// its own MAX_IRQ ([`AicInput::from_vector`]), so both forms name one line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AicInput {
     pub die: u8,
@@ -22,6 +28,26 @@ pub struct AicInput {
 impl AicInput {
     pub const fn new(die: u8, irq: u16) -> Self {
         Self { die, irq }
+    }
+    /// This line's vector under a controller whose dies hold `max_irq`
+    /// inputs each.
+    pub const fn vector(self, max_irq: u16) -> u32 {
+        self.die as u32 * max_irq as u32 + self.irq as u32
+    }
+    /// The line a vector names under `max_irq` inputs per die, or `None`
+    /// when `max_irq` is 0 or the die does not fit.
+    pub const fn from_vector(vector: u32, max_irq: u16) -> Option<Self> {
+        if max_irq == 0 {
+            return None;
+        }
+        let die = vector / max_irq as u32;
+        if die > u8::MAX as u32 {
+            return None;
+        }
+        Some(Self {
+            die: die as u8,
+            irq: (vector % max_irq as u32) as u16,
+        })
     }
 }
 
@@ -127,6 +153,21 @@ impl InterruptSink for InterruptLatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn devicetree_vectors_split_by_max_irq() {
+        assert_eq!(
+            AicInput::from_vector(739, 4096),
+            Some(AicInput::new(0, 739))
+        );
+        assert_eq!(
+            AicInput::from_vector(0x15bf, 4096),
+            Some(AicInput::new(1, 0x5bf))
+        );
+        assert_eq!(AicInput::new(1, 0x5bf).vector(4096), 0x15bf);
+        assert_eq!(AicInput::from_vector(1, 0), None);
+        assert_eq!(AicInput::from_vector(256 * 32, 32), None);
+    }
 
     #[test]
     fn fiq_pin_is_the_or_of_its_sources() {

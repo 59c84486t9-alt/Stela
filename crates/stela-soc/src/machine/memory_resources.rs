@@ -440,6 +440,9 @@ pub enum MemoryResources {
     /// Direct MCC/AMCC/PTD frontend; keeps its full source graph and canonical
     /// RAM separate from the T8112 cache/quota protocol.
     T6000Cold(t6000_cold::Plan),
+    /// T602x MCC/AMCC/PTD frontend over canonical RAM; its plan checks its
+    /// own descriptor and source power graph ([`t6020::cold::Plan::validate`]).
+    T6020Cold(t6020::cold::Plan),
     T8112 {
         memory: t8112::Prepared,
         cache: t8112::cache::EmptyResource,
@@ -469,6 +472,19 @@ impl MemoryResources {
                     ));
                 }
                 plan.validate(controller, direct)
+            }
+            // The plan's own validate holds its T602x descriptor and power
+            // graph; neither other descriptor applies to it.
+            Self::T6020Cold(_) => {
+                if descriptor.is_some() {
+                    return Err(refuse!(
+                        "T602x native memory cannot adopt a cache/quota descriptor"
+                    ));
+                }
+                if controller.is_none() {
+                    return Err(refuse!("T602x native memory has no AMCC descriptor"));
+                }
+                Ok(())
             }
             Self::T8112 { memory, cache } => {
                 if descriptor != Some(memory.descriptor()) || controller != Some(cache.source()) {

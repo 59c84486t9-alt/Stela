@@ -116,31 +116,39 @@ impl PowerStates {
                 "CPU PMGR canonical inventory differs from the source tree"
             ));
         }
-        // Another die's cores power up through that die's PMGR records,
-        // whose CPU owners the association resolver does not model.
-        if dies.count != 1 {
-            let error = cpu::CpuAssociationError::UnsupportedDie(dies.count - 1);
-            return Err(refuse!("CPU PMGR associations: {error}", ?error));
-        }
+        // Each further die repeats die 0's records (`decode_domain_table`),
+        // so every die's views come from the one `devices` table. A resolver
+        // whose source contract covers one die refuses another die's view.
         let (layout, _) = Layout::select(node.property("ps-regs"), node.property("ps-groups"))?;
         let devices = node
             .property("devices")
             .ok_or(refuse!("CPU PMGR requires devices"))?;
         if !devices.len().is_multiple_of(PMGR_DEVICE)
-            || devices.len() / PMGR_DEVICE != self.domains.len()
+            || devices.len() / PMGR_DEVICE * usize::from(dies.count) != self.domains.len()
         {
             return Err(refuse!(
                 "CPU PMGR views differ from the complete domain inventory"
             ));
         }
+        let per_die = devices.len() / PMGR_DEVICE;
         let views = devices
             .as_chunks::<PMGR_DEVICE>()
             .0
             .iter()
+            .cycle()
             .zip(&self.domains)
-            .map(|(raw, domain)| {
+            .enumerate()
+            .map(|(index, (raw, domain))| {
                 let record = Record::parse(layout, raw)?;
-                if domain.id != domain_id(record.id) || domain.name != record.name {
+                let die = u8::try_from(index / per_die)
+                    .map_err(|_| refuse!("CPU PMGR die index overflows"))?;
+                if domain.id
+                    != (DomainId {
+                        die,
+                        ..domain_id(record.id)
+                    })
+                    || domain.name != record.name
+                {
                     return Err(refuse!("CPU PMGR record and canonical domain differ"));
                 }
                 let location = match (record.location, domain.address) {

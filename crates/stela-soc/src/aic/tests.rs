@@ -831,3 +831,50 @@ fn stacked_dies_follow_one_another_at_the_die_stride() {
     };
     assert!(Aic2::stacked(crowded, 2).is_err());
 }
+
+#[test]
+fn an_unsplit_devicetree_vector_names_its_die_by_max_irq() {
+    // J475D's AICv2: two dies of 1833 inputs; a second-die device's
+    // specifier 5265 is die 1, IRQ 1169.
+    let config = Aic2Config {
+        version: 2,
+        nr_irq: 1833,
+        max_irq: AIC2_MAX_IRQ,
+        irq_config: AIC2_IRQ_CFG,
+        event_offset: 0xc000,
+        timestamps: 0,
+        timestamp_base: AIC2_TIMESTAMPS,
+        cpus: 1,
+        default_cpus: 1,
+    };
+    let mut aic = Aic2::stacked(config, 2).unwrap();
+    let mut latch = InterruptLatch::new();
+    assert_eq!(read(&mut aic, &mut latch, 0, INFO1), 1 << 24 | 1833);
+    assert_eq!(read(&mut aic, &mut latch, 0, INFO3), 2 << 24 | 0x1000);
+    let (word, bit) = position(1169);
+    let die1 = AIC2_IRQ_CFG + AIC2_DIE_STRIDE;
+    write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+    write(&mut aic, &mut latch, die1 + 0x4600 + 4 * word as u64, bit);
+    let vector = AicInput::new(0, 5265);
+    assert_eq!(
+        AicInput::from_vector(5265, AIC2_MAX_IRQ),
+        Some(AicInput::new(1, 1169))
+    );
+    aic.set_input(vector, true, &mut Access::new(0, 0, &mut latch))
+        .unwrap();
+    assert_eq!(
+        read(&mut aic, &mut latch, 0, 0xc000),
+        1 << 24 | EVENT_TYPE_IRQ | 1169
+    );
+    // A vector past the second die's inputs, or on a third die, refuses.
+    for bad in [4096 + 1833, 2 * 4096] {
+        assert!(
+            aic.set_input(
+                AicInput::new(0, bad),
+                true,
+                &mut Access::new(0, 0, &mut latch)
+            )
+            .is_err()
+        );
+    }
+}

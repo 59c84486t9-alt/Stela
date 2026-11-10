@@ -327,6 +327,9 @@ impl Aic2 {
         asserted: bool,
         access: &mut Access<'_>,
     ) -> Result<(), Aic2Error> {
+        // A DeviceTree vector carried unsplit names die `vector / MAX_IRQ`.
+        let input = AicInput::from_vector(input.vector(self.config.max_irq), self.config.max_irq)
+            .ok_or(Aic2Error::UnknownInput(input))?;
         if usize::from(input.die) >= self.layout.dies.len() || input.irq >= self.config.nr_irq {
             return Err(Aic2Error::UnknownInput(input));
         }

@@ -12,6 +12,7 @@
 //! These are source membership identities, never observations of PS readiness.
 mod selected;
 mod t6000;
+mod t6020;
 mod t8112;
 use super::*;
 use crate::Result;
