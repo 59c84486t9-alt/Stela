@@ -25,6 +25,18 @@ pub fn cargo() -> Command {
     command
 }
 
+/// The environment variable that names the Apple silicon Mac reference tools
+/// reach over ssh.
+pub const MAC_VARIABLE: &str = "STELA_MAC";
+
+/// The Mac's ssh name: `given`, else `STELA_MAC`.
+pub fn mac_host(given: Option<String>) -> Result<String> {
+    given
+        .or_else(|| env::var(MAC_VARIABLE).ok())
+        .filter(|host| !host.is_empty())
+        .with_context(|| format!("no Mac: pass --mac or --host, or set {MAC_VARIABLE}"))
+}
+
 pub fn exec(command: &mut Command) -> Result<()> {
     let status = command
         .status()

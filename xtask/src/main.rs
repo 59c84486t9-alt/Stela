@@ -5,6 +5,7 @@ use std::process::ExitCode;
 mod amx;
 mod boot;
 mod check;
+mod cpu_reference;
 mod dist;
 mod gpu;
 mod guest;
@@ -60,6 +61,8 @@ enum Task {
     AmxReference(amx::AmxReference),
     /// Disassemble, size and time the native AMX kernels against the model.
     AmxKernels(amx::kernels::AmxKernels),
+    /// Run A64 cases on an Apple silicon Mac and through Stela, and compare.
+    CpuReference(cpu_reference::CpuReference),
     /// Drive the whole restore host against the real IPSW, natively, with
     /// every request restored can make, and check each answer.
     RestoreDryRun(restore_dry_run::RestoreDryRun),
@@ -82,6 +85,7 @@ fn main() -> ExitCode {
         Task::Guest => guest::run().map(|()| ExitCode::SUCCESS),
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxKernels(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::CpuReference(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::RestoreDryRun(task) => task.run(),
         Task::Sysregs(task) => task.run().map(|()| ExitCode::SUCCESS),
     };
