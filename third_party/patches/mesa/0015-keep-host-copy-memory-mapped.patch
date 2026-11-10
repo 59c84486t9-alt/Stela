@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 12:00:00 -0500
+Subject: [PATCH] nvk: Keep memory mapped for host image copies until it is
+ freed
+
+---
+ src/nouveau/vulkan/nvk_device_memory.c | 20 ++++++++++++++++++++
+ src/nouveau/vulkan/nvk_device_memory.h |  8 ++++++++
+ src/nouveau/vulkan/nvk_host_copy.c     |  7 +++++++
+ 3 files changed, 35 insertions(+)
+
+diff --git a/src/nouveau/vulkan/nvk_device_memory.c b/src/nouveau/vulkan/nvk_device_memory.c
+index c932b9392f1fe9d7fc2dcf4e1556ddfac5dd2a3a..d0c2a74918621784d6d7a256069cb29562043e35 100644
+--- a/src/nouveau/vulkan/nvk_device_memory.c
++++ b/src/nouveau/vulkan/nvk_device_memory.c
+@@ -338,6 +338,8 @@ nvk_FreeMemory(VkDevice device,
+       if (mem->kind_vas[i] != NULL)
+          nvkmd_va_free(mem->kind_vas[i]);
+    }
++   if (mem->host_copy_mapped)
++      nvkmd_mem_unmap(mem->mem, 0);
+    simple_mtx_destroy(&mem->kind_mutex);
+ 
+    nvkmd_mem_unref(mem->mem);
+@@ -393,6 +395,24 @@ out:
+    return result;
+ }
+ 
++VkResult
++nvk_device_memory_keep_mapped(struct nvk_device_memory *mem)
++{
++   if (p_atomic_read(&mem->host_copy_mapped))
++      return VK_SUCCESS;
++
++   VkResult result = VK_SUCCESS;
++   simple_mtx_lock(&mem->kind_mutex);
++   if (!mem->host_copy_mapped) {
++      result = nvkmd_mem_map(mem->mem, &mem->vk.base, NVKMD_MEM_MAP_RDWR,
++                             NULL, NULL);
++      if (result == VK_SUCCESS)
++         p_atomic_set(&mem->host_copy_mapped, 1);
++   }
++   simple_mtx_unlock(&mem->kind_mutex);
++   return result;
++}
++
+ VKAPI_ATTR VkResult VKAPI_CALL
+ nvk_MapMemory2KHR(VkDevice device,
+                   const VkMemoryMapInfoKHR *pMemoryMapInfo,
+diff --git a/src/nouveau/vulkan/nvk_device_memory.h b/src/nouveau/vulkan/nvk_device_memory.h
+index 6ad195a40e82f6e2c24b82c5bd63e96ae456ea56..d7f2ffb84a412540b026d9549ff06f152fa3ae6c 100644
+--- a/src/nouveau/vulkan/nvk_device_memory.h
++++ b/src/nouveau/vulkan/nvk_device_memory.h
+@@ -37,6 +37,11 @@ struct nvk_device_memory {
+     */
+    simple_mtx_t kind_mutex;
+    struct nvkmd_va *kind_vas[NVK_MEM_KIND_VAS];
++
++   /* Whether host image copies keep mem mapped until it is freed, rather
++    * than mapping and unmapping it around each copy. Set under kind_mutex.
++    */
++   uint32_t host_copy_mapped;
+ };
+ 
+ /* The address of mem mapped whole with pte_kind, or 0 when mem maps no more
+@@ -47,6 +52,9 @@ VkResult nvk_device_memory_kind_addr(struct nvk_device *dev,
+                                      uint8_t pte_kind,
+                                      uint64_t *addr_out);
+ 
++/* Maps mem for host image copies until it is freed, once. */
++VkResult nvk_device_memory_keep_mapped(struct nvk_device_memory *mem);
++
+ VK_DEFINE_NONDISP_HANDLE_CASTS(nvk_device_memory, vk.base, VkDeviceMemory,
+                                VK_OBJECT_TYPE_DEVICE_MEMORY)
+ 
+diff --git a/src/nouveau/vulkan/nvk_host_copy.c b/src/nouveau/vulkan/nvk_host_copy.c
+index e4d7ef0de7409e6725638bb03104eda0673c4f68..a8b6168dfe9fb5637045bc8e29d36c55eb6a2f5f 100644
+--- a/src/nouveau/vulkan/nvk_host_copy.c
++++ b/src/nouveau/vulkan/nvk_host_copy.c
+@@ -63,6 +63,13 @@ nvk_image_plane_map(const struct nvk_image_plane *plane,
+    struct nvk_device_memory *host_mem = plane->host_mem;
+    VkResult result;
+ 
++   /* The map stays until the memory is freed, so this and the unmap after
++    * the copy only count references and make no system calls.
++    */
++   result = nvk_device_memory_keep_mapped(host_mem);
++   if (result != VK_SUCCESS)
++      return result;
++
+    result = nvkmd_mem_map(host_mem->mem, &host_mem->vk.base,
+                           map_flags, NULL, map_out);
+    if (result != VK_SUCCESS)

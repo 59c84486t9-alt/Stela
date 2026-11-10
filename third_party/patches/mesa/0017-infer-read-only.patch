@@ -1,0 +1,60 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 14:16:21 -0500
+Subject: [PATCH] nir/opt_access: Infer read-only access for raw global loads
+ of shaders that write no buffer
+
+Only the raw forms a driver emits before nir_opt_access are listed. The
+*_2x32 and *_nv global forms that NAK lowers to later are not, since this
+pass runs before that lowering.
+---
+ src/compiler/nir/nir_opt_access.c | 29 +++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/src/compiler/nir/nir_opt_access.c b/src/compiler/nir/nir_opt_access.c
+index 2228e653447e25ca1503209ef22043fee454c37a..602e08be6604be0fa1a99d044142f5bc147fce1d 100644
+--- a/src/compiler/nir/nir_opt_access.c
++++ b/src/compiler/nir/nir_opt_access.c
+@@ -163,6 +163,27 @@ gather_intrinsic(struct access_state *state, nir_intrinsic_instr *instr)
+       break;
+    }
+ 
++   /* Accesses through raw addresses, which a driver may emit without
++    * derefs.
++    */
++   case nir_intrinsic_load_global:
++   case nir_intrinsic_load_global_constant:
++   case nir_intrinsic_load_ssbo:
++      gather_buffer_access(state, NULL, true, false);
++      break;
++
++   case nir_intrinsic_store_global:
++   case nir_intrinsic_store_ssbo:
++      gather_buffer_access(state, NULL, false, true);
++      break;
++
++   case nir_intrinsic_global_atomic:
++   case nir_intrinsic_global_atomic_swap:
++   case nir_intrinsic_ssbo_atomic:
++   case nir_intrinsic_ssbo_atomic_swap:
++      gather_buffer_access(state, NULL, true, true);
++      break;
++
+    case nir_intrinsic_barrier:
+       if (nir_intrinsic_memory_scope(instr) >= SCOPE_SHADER_CALL) {
+          nir_variable_mode modes = nir_intrinsic_memory_modes(instr);
+@@ -309,6 +330,14 @@ process_intrinsic(struct access_state *state, nir_intrinsic_instr *instr)
+          return false;
+    }
+ 
++   /* A relaxed atomic or coherent load stays one access in program order,
++    * which sees other invocations' writes.
++    */
++   case nir_intrinsic_load_global:
++      if (nir_intrinsic_access(instr) & (ACCESS_ATOMIC | ACCESS_COHERENT))
++         return false;
++      return update_access(state, instr, nir_var_mem_global, false, true);
++
+    case nir_intrinsic_image_deref_load:
+    case nir_intrinsic_image_deref_store:
+    case nir_intrinsic_image_deref_sparse_load: {

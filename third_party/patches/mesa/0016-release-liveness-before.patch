@@ -1,0 +1,189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 9 Nov 2026 08:10:06 -0500
+Subject: [PATCH] nak: Release liveness before rebuilding it and refuse shaders
+ whose liveness cannot fit in memory
+
+---
+ src/nouveau/compiler/nak/api.rs               | 52 ++++++++++++++++++-
+ src/nouveau/compiler/nak/assign_regs.rs       |  2 +
+ src/nouveau/compiler/nak/liveness.rs          |  7 +++
+ .../compiler/nak/opt_instr_sched_prepass.rs   |  3 ++
+ src/nouveau/compiler/nak_nir.c                | 15 ++++++
+ src/nouveau/compiler/nak_private.h            |  1 +
+ 6 files changed, 78 insertions(+), 2 deletions(-)
+
+diff --git a/src/nouveau/compiler/nak/api.rs b/src/nouveau/compiler/nak/api.rs
+index aba2b1036e21a8527840bbd6793f8ee8c2779573..45572ab300e21ed5203b9e9a442c8f0fba3aeb80 100644
+--- a/src/nouveau/compiler/nak/api.rs
++++ b/src/nouveau/compiler/nak/api.rs
+@@ -3,8 +3,8 @@
+ 
+ use crate::from_nir::*;
+ use crate::ir::{
+-    max_warps_per_sm, ShaderInfo, ShaderIoInfo, ShaderModel, ShaderModelInfo,
+-    ShaderStageInfo,
++    max_warps_per_sm, Shader, ShaderInfo, ShaderIoInfo, ShaderModel,
++    ShaderModelInfo, ShaderStageInfo,
+ };
+ use crate::sph;
+ 
+@@ -515,6 +515,24 @@ fn nak_compile_shader_internal(
+     let sm = ShaderModelInfo::new(nak.sm, nak.warps_per_sm);
+     let mut s = nak_shader_from_nir(nak, nir, &sm, has_task_shader);
+ 
++    // Liveness keeps a dense set of the shader's values for every block, so
++    // its memory grows with blocks times values. Give up, with the shader's
++    // name, when that would not fit in the memory left, rather than fail an
++    // allocation midway.
++    let live_set = live_set_bytes(&s);
++    let available = unsafe { nak_available_memory_B() };
++    let room = available - available / LIVENESS_RESERVE_DIVISOR;
++    if live_set.saturating_mul(COMPILE_LIVE_SETS) > room {
++        eprintln!(
++            "NAK: {}: {} blocks x {} values need more memory than the {} MiB left",
++            shader_name(nir),
++            s.functions[0].blocks.len(),
++            s.functions[0].ssa_alloc.max_idx(),
++            available >> 20
++        );
++        return std::ptr::null_mut();
++    }
++
+     if DEBUG.print() {
+         eprintln!("NAK IR:\n{}", &s);
+     }
+@@ -556,6 +574,36 @@ fn nak_compile_shader_internal(
+     Box::into_raw(bin) as *mut nak_shader_bin
+ }
+ 
++/// The most memory a compilation takes, in [`live_set_bytes`] of the shader
++/// [`nak_shader_from_nir`] makes.
++const COMPILE_LIVE_SETS: u64 = 8;
++/// The share of the available memory a compilation leaves for the rest of
++/// the process: one part in this many.
++const LIVENESS_RESERVE_DIVISOR: u64 = 8;
++
++/// The bytes of one dense live set per block: a bit for each SSA value.
++fn live_set_bytes(s: &Shader<'_>) -> u64 {
++    s.functions
++        .iter()
++        .map(|f| {
++            let blocks = f.blocks.len() as u64;
++            let words = u64::from(f.ssa_alloc.max_idx()).div_ceil(32);
++            blocks * words * 4
++        })
++        .sum()
++}
++
++fn shader_name(nir: *const nir_shader) -> String {
++    let name = unsafe { (*nir).info.name };
++    if name.is_null() {
++        String::from("a shader")
++    } else {
++        unsafe { CStr::from_ptr(name) }
++            .to_string_lossy()
++            .into_owned()
++    }
++}
++
+ #[no_mangle]
+ pub extern "C" fn nak_compile_shader(
+     nir: *mut nir_shader,
+diff --git a/src/nouveau/compiler/nak/assign_regs.rs b/src/nouveau/compiler/nak/assign_regs.rs
+index 82de4014b124bdd0cb17e9138acb304870ee6d8a..202f6bd16ccb124d01eb0cbadd6bf4be2d595076 100644
+--- a/src/nouveau/compiler/nak/assign_regs.rs
++++ b/src/nouveau/compiler/nak/assign_regs.rs
+@@ -1432,6 +1432,7 @@ impl Shader<'_> {
+         for file in spill_files {
+             let num_regs = self.sm.num_regs(file);
+             if max_live[file] > num_regs {
++                live.release();
+                 f.spill_values(file, num_regs, &mut self.info);
+ 
+                 // Re-calculate liveness after we spill
+@@ -1494,6 +1495,7 @@ impl Shader<'_> {
+             total_gprs = max_gprs;
+             gpr_limit = total_gprs - u32::from(tmp_gprs);
+ 
++            live.release();
+             f.spill_values(RegFile::GPR, gpr_limit, &mut self.info);
+ 
+             // Re-calculate liveness one last time
+diff --git a/src/nouveau/compiler/nak/liveness.rs b/src/nouveau/compiler/nak/liveness.rs
+index de87d99841b4aff0d40c89a305ed1c06fbedecf4..9281d20b8d176795713a38d914756e303cd7f6a9 100644
+--- a/src/nouveau/compiler/nak/liveness.rs
++++ b/src/nouveau/compiler/nak/liveness.rs
+@@ -283,6 +283,13 @@ pub struct SimpleLiveness {
+ }
+ 
+ impl SimpleLiveness {
++    /// Frees the sets: a pass that replaces them would otherwise hold the
++    /// old and the new at once, each a set of values per block.
++    pub fn release(&mut self) {
++        self.ssa_block_ip = Default::default();
++        self.blocks = Vec::new();
++    }
++
+     pub fn for_function(func: &Function) -> SimpleLiveness {
+         let mut l = SimpleLiveness {
+             ssa_block_ip: Default::default(),
+diff --git a/src/nouveau/compiler/nak/opt_instr_sched_prepass.rs b/src/nouveau/compiler/nak/opt_instr_sched_prepass.rs
+index e086742142467b75dcb3af99da2bace486f34554..fd805a9be4c0d5cb147628a85f08295a0f709a02 100644
+--- a/src/nouveau/compiler/nak/opt_instr_sched_prepass.rs
++++ b/src/nouveau/compiler/nak/opt_instr_sched_prepass.rs
+@@ -937,6 +937,9 @@ impl Function {
+ 
+             live_out_sets.push(live_set);
+         }
++        // Each holds a set of values per block; free them before scheduling.
++        drop(live_out_sets);
++        drop(liveness);
+ 
+         // Second pass: Generate a schedule for each schedule_unit
+         let mut schedule_types = get_schedule_types(
+diff --git a/src/nouveau/compiler/nak_nir.c b/src/nouveau/compiler/nak_nir.c
+index 3e43e7ff4fbb12d10866b93943a548765fa0cb75..8fcb6446755bc165adcf55e1a5a2ffb37a45f231 100644
+--- a/src/nouveau/compiler/nak_nir.c
++++ b/src/nouveau/compiler/nak_nir.c
+@@ -8,6 +8,8 @@
+ #include "nir_control_flow.h"
+ #include "nir_xfb_info.h"
+ 
++#include "util/os_misc.h"
++#include "util/u_debug.h"
+ #include "util/u_math.h"
+ 
+ #define _OPT(pass_macro, ...) ({                         \
+@@ -51,6 +53,19 @@ nak_nir_load_sysval(nir_builder *b, enum nak_sv idx,
+                              .divergent = divergent);
+ }
+ 
++/* The memory a compilation may still take: what the system has available,
++ * or NAK_AVAILABLE_MEMORY_MB when set, or UINT64_MAX when neither is known.
++ */
++uint64_t
++nak_available_memory_B(void)
++{
++   uint64_t mb = debug_get_num_option("NAK_AVAILABLE_MEMORY_MB", 0);
++   if (mb)
++      return mb << 20;
++   uint64_t size;
++   return os_get_available_system_memory(&size) ? size : UINT64_MAX;
++}
++
+ bool
+ nak_nir_workgroup_has_one_subgroup(const nir_shader *nir)
+ {
+diff --git a/src/nouveau/compiler/nak_private.h b/src/nouveau/compiler/nak_private.h
+index 17e54d10bc7e1873e3ce26e3daaa252ff53fbad3..8fe6e49570992066e759e25687291a7faf918e55 100644
+--- a/src/nouveau/compiler/nak_private.h
++++ b/src/nouveau/compiler/nak_private.h
+@@ -16,6 +16,7 @@ extern "C" {
+ 
+ bool nak_should_print_nir(void);
+ bool nak_debug_no_ugpr(void);
++uint64_t nak_available_memory_B(void);
+ 
+ struct nak_compiler {
+    uint8_t sm;
