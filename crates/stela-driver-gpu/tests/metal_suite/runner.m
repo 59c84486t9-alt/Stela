@@ -30,9 +30,11 @@
 #import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
 #import <QuartzCore/QuartzCore.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <servers/bootstrap.h>
 #include <objc/message.h>
 #include <stdio.h>
+#include <sys/mman.h>
 
 static NSString *plan_dir;
 /* GPU time of the case's own command buffers, not its output readback. */
@@ -194,6 +196,9 @@ static NSDictionary<NSString *, NSNumber *> *pixel_formats(void)
 			@"bgr10_xr" : @(MTLPixelFormatBGR10_XR), @"bgr10_xr_srgb" : @(MTLPixelFormatBGR10_XR_sRGB),
 			@"bgra10_xr" : @(MTLPixelFormatBGRA10_XR),
 			@"bgra10_xr_srgb" : @(MTLPixelFormatBGRA10_XR_sRGB),
+			/* Private formats without SDK names: 10-bit extended-range
+			 * color in one plane, 8-bit alpha in another. */
+			@"rgb10a8_2p_xr10" : @550, @"rgb10a8_2p_xr10_srgb" : @551,
 		};
 	return t;
 }
@@ -4725,6 +4730,9 @@ static CALayer *appkit_button(CGSize size, BOOL dark)
 	return layer;
 }
 
+static IOSurfaceRef make_surface(NSDictionary *properties);
+static id<MTLTexture> surface_texture(Case *c, IOSurfaceRef s, size_t plane, MTLPixelFormat format, MTLTextureUsage usage);
+
 /* Core Animation's renderer drawing a scene into the case's `out`, on the
  * case's queue. Core Animation builds pipelines its archive lacks while it
  * draws and leaves their layers out until they are ready, and glass eases
@@ -4736,7 +4744,20 @@ static void run_core_animation(Case *c, id<MTLCommandQueue> queue, NSDictionary 
 	id<MTLTexture> out = c.textures[@"out"];
 	if (!out)
 		@throw failure(@"core animation draws into an `out` texture");
-	CARenderer *renderer = [CARenderer rendererWithMTLTexture:out options:@{kCARendererMetalCommandQueue : queue}];
+	/* With "surface", Core Animation draws into a texture over an
+	 * IOSurface, as a window server draws into its displays' framebuffers,
+	 * whose texels are linear rows in shared memory; `out` takes a copy. */
+	id<MTLTexture> target = out;
+	if ([f[@"surface"] boolValue]) {
+		IOSurfaceRef surface = make_surface(@{
+			(__bridge id)kIOSurfaceWidth : @(out.width), (__bridge id)kIOSurfaceHeight : @(out.height),
+			(__bridge id)kIOSurfaceBytesPerElement : @4, (__bridge id)kIOSurfacePixelFormat : @((uint32_t)'BGRA'),
+			(__bridge id)kIOSurfaceBytesPerRow : @(IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, out.width * 4)),
+		});
+		target = surface_texture(c, surface, 0, out.pixelFormat, MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead);
+		CFRelease(surface);
+	}
+	CARenderer *renderer = [CARenderer rendererWithMTLTexture:target options:@{kCARendererMetalCommandQueue : queue}];
 	CALayer *root;
 	if ([f[@"appkit_button"] boolValue]) {
 		root = appkit_button(CGSizeMake(out.width, out.height), [f[@"appearance"] isEqual:@"dark"]);
@@ -4764,9 +4785,11 @@ static void run_core_animation(Case *c, id<MTLCommandQueue> queue, NSDictionary 
 		[renderer endFrame];
 		id<MTLCommandBuffer> cb = [queue commandBuffer];
 		id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-		[blit copyFromTexture:out sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
+		[blit copyFromTexture:target sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
 			   sourceSize:MTLSizeMake(out.width, out.height, 1) toBuffer:frames[frame % 2]
 		    destinationOffset:0 destinationBytesPerRow:out.width * 4 destinationBytesPerImage:bytes];
+		if (target != out)
+			[blit copyFromTexture:target toTexture:out];
 		[blit endEncoding];
 		wait_for(cb, c.spec);
 		if (frame > 0 && !memcmp(frames[0].contents, frames[1].contents, bytes))
@@ -6753,6 +6776,386 @@ static void host_argument_descriptors(Case *c, id<MTLCommandQueue> queue, NSDict
 	wait_for(cb, c.spec);
 }
 
+/* The heap fits Core Animation and SwiftUI depend on, as a Mac answers
+ * them: the size and alignment answers for small textures, how many 8x8
+ * R8 glyphs a 128 KiB heap holds and its usedSize and
+ * maxAvailableSizeWithAlignment: then, one more after makeAliasable, a heap
+ * of 100 bytes holding a page, two 188x77 R16Float masks in 128 KiB, a
+ * 68x67 RGBA16Float layer in 64 KiB, and three of four 64x64 BGR10A2
+ * textures in a heap of three answers; then the 100-byte heap's size and the
+ * mask and layer sequences below. */
+static void host_heap_fit(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	__block NSUInteger at = 0;
+	void (^fact)(NSUInteger) = ^(NSUInteger value) {
+		put(c, @"facts", at++, (uint32_t)value);
+	};
+	MTLTextureDescriptor *(^desc)(MTLPixelFormat, NSUInteger, NSUInteger, MTLTextureUsage) =
+		^(MTLPixelFormat f, NSUInteger w, NSUInteger hh, MTLTextureUsage u) {
+			MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:f width:w height:hh mipmapped:NO];
+			d.storageMode = MTLStorageModePrivate;
+			d.usage = u;
+			return d;
+		};
+	id<MTLHeap> (^heap)(NSUInteger) = ^(NSUInteger size) {
+		MTLHeapDescriptor *d = [MTLHeapDescriptor new];
+		d.size = size;
+		d.storageMode = MTLStorageModePrivate;
+		d.type = MTLHeapTypeAutomatic;
+		return [c.device newHeapWithDescriptor:d];
+	};
+	MTLTextureUsage read = MTLTextureUsageShaderRead, drawn = read | MTLTextureUsageRenderTarget;
+	MTLTextureDescriptor *answered[] = {
+		desc(MTLPixelFormatR8Unorm, 8, 8, read),	   desc(MTLPixelFormatRG8Unorm, 16, 16, read),
+		desc(MTLPixelFormatBGRA8Unorm, 32, 32, read),	   desc(MTLPixelFormatR16Float, 188, 77, drawn),
+		desc(MTLPixelFormatRGBA16Float, 68, 67, drawn),	   desc(MTLPixelFormatRGBA16Float, 122, 67, drawn),
+		desc(MTLPixelFormatBGR10A2Unorm, 64, 64, drawn), desc(MTLPixelFormatBGRA8Unorm, 2560, 1440, drawn),
+	};
+	for (size_t i = 0; i < sizeof answered / sizeof *answered; i++) {
+		MTLSizeAndAlign a = [c.device heapTextureSizeAndAlignWithDescriptor:answered[i]];
+		fact(a.size);
+		fact(a.align);
+	}
+	id<MTLHeap> glyphs = heap(131072);
+	NSMutableArray *held = [NSMutableArray new];
+	for (int i = 0; i < 2048; i++) {
+		id<MTLTexture> t = [glyphs newTextureWithDescriptor:answered[0]];
+		if (!t)
+			break;
+		[held addObject:t];
+	}
+	fact(held.count);
+	fact(glyphs.usedSize);
+	fact([glyphs maxAvailableSizeWithAlignment:128]);
+	[held[0] makeAliasable];
+	fact(glyphs.usedSize);
+	fact([glyphs newTextureWithDescriptor:answered[0]] != nil);
+	id<MTLHeap> small = heap(100);
+	fact([small maxAvailableSizeWithAlignment:128]);
+	fact(small.currentAllocatedSize);
+	id<MTLHeap> masks = heap(131072);
+	id<MTLTexture> first = [masks newTextureWithDescriptor:answered[3]];
+	id<MTLTexture> second = [masks newTextureWithDescriptor:answered[3]];
+	fact(first != nil);
+	fact(second != nil);
+	fact(masks.usedSize);
+	id<MTLHeap> layer = heap(65536);
+	fact([layer newTextureWithDescriptor:answered[4]] != nil);
+	MTLSizeAndAlign ten = [c.device heapTextureSizeAndAlignWithDescriptor:answered[6]];
+	id<MTLHeap> three = heap(3 * ten.size);
+	NSMutableArray *tens = [NSMutableArray new];
+	for (int i = 0; i < 4; i++) {
+		id<MTLTexture> t = [three newTextureWithDescriptor:answered[6]];
+		if (t)
+			[tens addObject:t];
+	}
+	fact(tens.count);
+	fact(three.usedSize);
+	fact(small.size);
+	/* The masks and layers Core Animation filled on the guest: each heap's
+	 * size, then per texture whether it fit, usedSize and
+	 * maxAvailableSizeWithAlignment: 128 and 16384. */
+	struct {
+		NSUInteger heap, format, width, height, count;
+	} seqs[] = {
+		{131072, MTLPixelFormatR16Float, 72, 151, 2},
+		{131072, MTLPixelFormatR16Float, 113, 153, 2},
+		{196608, MTLPixelFormatR16Float, 248, 81, 3},
+		{65536, MTLPixelFormatRGBA16Float, 36, 35, 2},
+	};
+	for (size_t i = 0; i < sizeof seqs / sizeof *seqs; i++) {
+		id<MTLHeap> into = heap(seqs[i].heap);
+		MTLTextureDescriptor *d = desc(seqs[i].format, seqs[i].width, seqs[i].height, drawn);
+		NSMutableArray *kept = [NSMutableArray new];
+		fact(into.currentAllocatedSize);
+		for (NSUInteger n = 0; n < seqs[i].count; n++) {
+			id<MTLTexture> t = [into newTextureWithDescriptor:d];
+			fact(t != nil);
+			if (t)
+				[kept addObject:t];
+			fact(into.usedSize);
+			fact([into maxAvailableSizeWithAlignment:128]);
+			fact([into maxAvailableSizeWithAlignment:16384]);
+		}
+	}
+}
+
+/* Textures over CPU memory after the CPU clears it, as Core Animation's
+ * backing stores are cleared and redrawn: a no-copy buffer over
+ * vm_allocate memory, a shared buffer's contents, an IOSurface, a texture
+ * replaceRegion fills from vm_allocate memory and a private texture a blit
+ * fills from a shared buffer. Each 256x128 R32Uint texture (128 KiB, so
+ * bzero zeroes with DC ZVA) gets a dense pattern, is read by a kernel, then
+ * its memory is cleared by bzero of all of it, by bzero from an unaligned
+ * offset, by memset_pattern4, by madvise(MADV_FREE_REUSABLE) and
+ * MADV_FREE_REUSE, by vm_deallocate and vm_allocate at the same address,
+ * or on the GPU by a buffer fill or a render pass clear, gets a sparse
+ * pattern and is read again. The facts are, per source and clear, the
+ * words the kernel read that differ from the memory after the first
+ * pattern, the nonzero words a GPU clear left in the memory, and the words
+ * that differ after the second pattern. */
+static void host_cpu_clear(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	enum { W = 256, H = 128, ROW = W * 4, BYTES = ROW * H, WORDS = W * H };
+	enum { BZERO, BZERO_PART, MEMSET, REUSABLE, REALLOC, GPU_FILL, CLEARS };
+	enum { NOCOPY, SHARED, SURFACE, REPLACE, BLIT, SOURCES };
+	static const int allowed[SOURCES][CLEARS] = {
+		[NOCOPY] = {1, 1, 1, 1, 1, 1}, [SHARED] = {1, 1, 1, 0, 0, 1}, [SURFACE] = {1, 1, 1, 0, 0, 1},
+		[REPLACE] = {1, 1, 1, 1, 1, 0}, [BLIT] = {1, 1, 1, 0, 0, 0},
+	};
+	id<MTLComputePipelineState> read = host_pipeline(c, @"texel_words");
+	id<MTLBuffer> out = [c.device newBufferWithLength:BYTES options:MTLResourceStorageModeShared];
+	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatR32Uint
+										     width:W
+										    height:H
+										 mipmapped:NO];
+	NSUInteger at = 0;
+	for (int source = 0; source < SOURCES; source++)
+		for (int clear = 0; clear < CLEARS; clear++) {
+			if (!allowed[source][clear])
+				continue;
+			mach_vm_address_t vm = 0;
+			id<MTLBuffer> buffer = nil;
+			id<MTLTexture> t = nil;
+			IOSurfaceRef surface = NULL;
+			uint32_t *memory = NULL;
+			if (source == NOCOPY || source == REPLACE) {
+				if (mach_vm_allocate(mach_task_self(), &vm, BYTES, VM_FLAGS_ANYWHERE) != KERN_SUCCESS)
+					@throw failure(@"vm_allocate");
+				memory = (uint32_t *)vm;
+			}
+			d.storageMode = MTLStorageModeShared;
+			d.usage = MTLTextureUsageShaderRead | (source == SURFACE ? MTLTextureUsageRenderTarget : 0);
+			if (source == NOCOPY) {
+				buffer = [c.device newBufferWithBytesNoCopy:memory
+								     length:BYTES
+								    options:MTLResourceStorageModeShared
+								deallocator:nil];
+				t = [buffer newTextureWithDescriptor:d offset:0 bytesPerRow:ROW];
+			} else if (source == SHARED || source == BLIT) {
+				buffer = [c.device newBufferWithLength:BYTES options:MTLResourceStorageModeShared];
+				memory = buffer.contents;
+				if (source == SHARED) {
+					t = [buffer newTextureWithDescriptor:d offset:0 bytesPerRow:ROW];
+				} else {
+					d.storageMode = MTLStorageModePrivate;
+					t = [c.device newTextureWithDescriptor:d];
+				}
+			} else if (source == SURFACE) {
+				surface = make_surface(@{
+					(__bridge id)kIOSurfaceWidth : @(W),
+					(__bridge id)kIOSurfaceHeight : @(H),
+					(__bridge id)kIOSurfaceBytesPerElement : @4,
+					(__bridge id)kIOSurfaceBytesPerRow : @(ROW),
+					(__bridge id)kIOSurfacePixelFormat : @((uint32_t)'BGRA'),
+				});
+				IOSurfaceLock(surface, 0, NULL);
+				memory = IOSurfaceGetBaseAddress(surface);
+				t = [c.device newTextureWithDescriptor:d iosurface:surface plane:0];
+			} else {
+				t = [c.device newTextureWithDescriptor:d];
+			}
+			if (!t)
+				@throw failure(@"no texture for source %d", source);
+			for (int pass = 0; pass < 2; pass++) {
+				if (pass == 0) {
+					for (uint32_t i = 0; i < WORDS; i++)
+						memory[i] = i * 2654435761u | 1;
+				} else {
+					uint8_t *bytes = (uint8_t *)memory;
+					static const uint32_t zero = 0;
+					switch (clear) {
+					case BZERO:
+						bzero(bytes, BYTES);
+						break;
+					case BZERO_PART:
+						bzero(bytes + 4160, BYTES - 4160 - 100);
+						break;
+					case MEMSET:
+						memset_pattern4(bytes, &zero, BYTES);
+						break;
+					case REUSABLE:
+						madvise(bytes, BYTES, MADV_FREE_REUSABLE);
+						madvise(bytes, BYTES, MADV_FREE_REUSE);
+						break;
+					case REALLOC:
+						mach_vm_deallocate(mach_task_self(), vm, BYTES);
+						if (mach_vm_allocate(mach_task_self(), &vm, BYTES, VM_FLAGS_FIXED) != KERN_SUCCESS)
+							@throw failure(@"vm_allocate at %llx", (unsigned long long)vm);
+						break;
+					case GPU_FILL: {
+						id<MTLCommandBuffer> fill = [queue commandBuffer];
+						if (buffer) {
+							id<MTLBlitCommandEncoder> b = [fill blitCommandEncoder];
+							[b fillBuffer:buffer range:NSMakeRange(0, BYTES) value:0];
+							[b endEncoding];
+						} else {
+							MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+							pass.colorAttachments[0].texture = t;
+							pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+							pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+							pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+							[[fill renderCommandEncoderWithDescriptor:pass] endEncoding];
+						}
+						wait_for(fill, c.spec);
+						uint32_t kept = 0;
+						for (uint32_t i = 0; i < WORDS; i++)
+							kept += memory[i] != 0;
+						put(c, @"facts", at++, kept);
+						break;
+					}
+					}
+					for (uint32_t i = 0; i < WORDS; i += 37)
+						memory[i] = (i ^ 0xa5a5a5a5u) | 2;
+				}
+				id<MTLCommandBuffer> cb = [queue commandBuffer];
+				if (source == REPLACE) {
+					[t replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 withBytes:memory bytesPerRow:ROW];
+				} else if (source == BLIT) {
+					id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+					[b copyFromBuffer:buffer
+						   sourceOffset:0
+					      sourceBytesPerRow:ROW
+					    sourceBytesPerImage:BYTES
+						     sourceSize:MTLSizeMake(W, H, 1)
+						      toTexture:t
+						destinationSlice:0
+						destinationLevel:0
+					       destinationOrigin:MTLOriginMake(0, 0, 0)];
+					[b endEncoding];
+				}
+				id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+				[e setComputePipelineState:read];
+				[e setTexture:t atIndex:0];
+				[e setBuffer:out offset:0 atIndex:0];
+				[e dispatchThreads:MTLSizeMake(W, H, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+				[e endEncoding];
+				wait_for(cb, c.spec);
+				const uint32_t *seen = out.contents;
+				uint32_t differ = 0;
+				for (uint32_t i = 0; i < WORDS; i++)
+					differ += seen[i] != memory[i];
+				put(c, @"facts", at++, differ);
+			}
+			if (surface) {
+				IOSurfaceUnlock(surface, 0, NULL);
+				t = nil;
+				CFRelease(surface);
+			}
+			t = nil;
+			buffer = nil;
+			if (vm)
+				mach_vm_deallocate(mach_task_self(), vm, BYTES);
+		}
+}
+
+/* A sub-rectangle cleared as Core Animation's OpenGL-style renderer clears
+ * one in WindowServer: its own path_blit_vert_lph and
+ * attachment_clear_frag_lph from QuartzCore's library, without blending,
+ * on a target filled with opaque red, then 5% white blended over the
+ * rectangle, three times. Targets: a private BGRA8 texture and one over a
+ * BGRA IOSurface, or a private texture of `format` (RGB10A8_2P_XR10, whose
+ * first plane a blit copies out). The facts are each target's texel at the
+ * rectangle's centre and one outside it, as words: one layer of white over
+ * transparent inside, red outside. */
+static void host_region_clear(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
+{
+	enum { W = 64, H = 32 };
+	MTLPixelFormat format = h[@"format"] ? (MTLPixelFormat)number(h, @"format", 0) : MTLPixelFormatBGRA8Unorm;
+	int count = format == MTLPixelFormatBGRA8Unorm ? 2 : 1;
+	NSError *error = nil;
+	NSBundle *quartz = [NSBundle bundleWithPath:@"/System/Library/Frameworks/QuartzCore.framework"];
+	id<MTLLibrary> ca = [c.device newDefaultLibraryWithBundle:quartz error:&error];
+	if (!ca)
+		@throw failure(@"QuartzCore library: %@", error.localizedDescription);
+	MTLRenderPipelineDescriptor *cd = [MTLRenderPipelineDescriptor new];
+	cd.vertexFunction = [ca newFunctionWithName:@"path_blit_vert_lph"];
+	cd.fragmentFunction = [ca newFunctionWithName:@"attachment_clear_frag_lph"];
+	if (!cd.vertexFunction || !cd.fragmentFunction)
+		@throw failure(@"QuartzCore's region clear functions");
+	cd.colorAttachments[0].pixelFormat = format;
+	id<MTLRenderPipelineState> clear = [c.device newRenderPipelineStateWithDescriptor:cd error:&error];
+	MTLRenderPipelineDescriptor *td = [MTLRenderPipelineDescriptor new];
+	td.colorAttachments[0].blendingEnabled = YES;
+	td.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+	td.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+	td.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+	td.colorAttachments[0].destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+	id<MTLRenderPipelineState> tint =
+		clear ? host_render_pipeline(c, td, @"vert_left_half", @"frag_constant", format, &error) : nil;
+	if (!clear || !tint)
+		@throw failure(@"region clear pipelines: %@", error.localizedDescription);
+	/* Pixels to clip space, as CA's mvp_matrix maps them; rectangles by
+	 * instance, the first off the target. */
+	float mvp[16] = {2.0f / W, 0, 0, 0, 0, -2.0f / H, 0, 0, 0, 0, 1, 0, -1, 1, 0, 1};
+	struct {
+		float min[2], max[2];
+		uint16_t color[4];
+	} rects[2] = {{{-16, -16}, {-8, -8}, {0, 0, 0, 0}}, {{8, 4}, {24, 20}, {0, 0, 0, 0}}};
+	float white[4] = {0.05f, 0.05f, 0.05f, 0.05f};
+	MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+										     width:W
+										    height:H
+										 mipmapped:NO];
+	d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+	IOSurfaceRef surface = make_surface(@{
+		(__bridge id)kIOSurfaceWidth : @(W),
+		(__bridge id)kIOSurfaceHeight : @(H),
+		(__bridge id)kIOSurfaceBytesPerElement : @4,
+		(__bridge id)kIOSurfaceBytesPerRow : @(IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, W * 4)),
+		(__bridge id)kIOSurfacePixelFormat : @((uint32_t)'BGRA'),
+	});
+	d.storageMode = MTLStorageModePrivate;
+	id<MTLTexture> targets[2] = {[c.device newTextureWithDescriptor:d], nil};
+	d.storageMode = c.device.hasUnifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+	if (count == 2)
+		targets[1] = [c.device newTextureWithDescriptor:d iosurface:surface plane:0];
+	for (int i = 0; i < count; i++)
+		if (!targets[i])
+			@throw failure(@"no region clear target %d of format %lu", i, (unsigned long)format);
+	id<MTLBuffer> out = [c.device newBufferWithLength:W * H * 4 * 2 options:MTLResourceStorageModeShared];
+	id<MTLCommandBuffer> cb = [queue commandBuffer];
+	for (int i = 0; i < count; i++) {
+		for (int round = 0; round < 4; round++) {
+			MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+			pass.colorAttachments[0].texture = targets[i];
+			pass.colorAttachments[0].loadAction = round ? MTLLoadActionLoad : MTLLoadActionClear;
+			pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+			pass.colorAttachments[0].clearColor = MTLClearColorMake(1, 0, 0, 1);
+			id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+			if (round) {
+				[e setRenderPipelineState:clear];
+				[e setVertexBytes:mvp length:sizeof mvp atIndex:2];
+				[e setVertexBytes:rects length:sizeof rects atIndex:1];
+				[e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:2];
+				[e setRenderPipelineState:tint];
+				[e setScissorRect:(MTLScissorRect){8, 4, 16, 16}];
+				[e setFragmentBytes:white length:sizeof white atIndex:0];
+				[e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+			}
+			[e endEncoding];
+		}
+		id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
+		[b copyFromTexture:targets[i]
+			     sourceSlice:0
+			     sourceLevel:0
+			    sourceOrigin:MTLOriginMake(0, 0, 0)
+			      sourceSize:MTLSizeMake(W, H, 1)
+				toBuffer:out
+		       destinationOffset:i * W * H * 4
+		  destinationBytesPerRow:W * 4
+		destinationBytesPerImage:W * H * 4];
+		[b endEncoding];
+	}
+	wait_for(cb, c.spec);
+	const uint32_t *texels = out.contents;
+	for (int i = 0; i < count; i++) {
+		put(c, @"facts", i * 2, texels[i * W * H + 12 * W + 16]);
+		put(c, @"facts", i * 2 + 1, texels[i * W * H + 28 * W + 40]);
+	}
+	CFRelease(surface);
+}
+
 /* A heap exactly one buffer large: a second buffer fits only once the
  * first is made aliasable. */
 static void host_aliasable(Case *c, id<MTLCommandQueue> queue, NSDictionary *h)
@@ -7664,6 +8067,9 @@ static void run_host(Case *c, id<MTLCommandQueue> queue, NSDictionary *spec)
 		@"resolve_counters" : [NSValue valueWithPointer:host_resolve_counters],
 		@"argument_descriptors" : [NSValue valueWithPointer:host_argument_descriptors],
 		@"aliasable" : [NSValue valueWithPointer:host_aliasable],
+		@"heap_fit" : [NSValue valueWithPointer:host_heap_fit],
+		@"cpu_clear" : [NSValue valueWithPointer:host_cpu_clear],
+		@"region_clear" : [NSValue valueWithPointer:host_region_clear],
 		@"texture_properties" : [NSValue valueWithPointer:host_texture_properties],
 		@"residency" : [NSValue valueWithPointer:host_residency],
 		@"queues" : [NSValue valueWithPointer:host_queues],

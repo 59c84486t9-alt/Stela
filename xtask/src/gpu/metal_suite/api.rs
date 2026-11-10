@@ -1601,6 +1601,28 @@ fn core_animation(plan: &mut Plan) {
             json!({"compositing": {"type": mode}}),
         ));
     }
+    // Some scenes at a display's size, drawn into an IOSurface as a window
+    // server draws its framebuffer: the gradient fills the whole surface
+    // and the backdrop passes capture all of it. They time what a frame
+    // costs (`--profile`'s `GPU PASSES`); their pixels are only reported.
+    for label in ["panel", "backdrop.blur", "backdrop.glass", "shadow.path"] {
+        let mut scene = scenes
+            .iter()
+            .find(|(known, _)| known == label)
+            .map(|(_, scene)| scene.clone())
+            .expect("a scene above");
+        scene["kind"] = "core_animation".into();
+        scene["surface"] = true.into();
+        plan.add(
+            Case::framework(
+                &format!("api.framework.core_animation.display.{label}"),
+                scene,
+            )
+            .texture(Texture::d2("out", "bgra8unorm", 2560, 1440).usage(&["read", "render"]))
+            .output(Output::new("out", Dtype::U8, Tolerance::units(3.0)))
+            .informational(),
+        );
+    }
     for (label, mut scene) in scenes {
         scene["kind"] = "core_animation".into();
         plan.add(
@@ -1694,6 +1716,24 @@ fn text(plan: &mut Plan, glass: &Value) {
     ] {
         let mut scene = scene;
         scene["kind"] = "core_animation".into();
+        // Glass and vibrant text also as a window server draws them: into
+        // a framebuffer over an IOSurface, linear rows the blends that read
+        // the destination read back.
+        if matches!(
+            label,
+            "core_animation.text.backing_vibrant"
+                | "core_animation.text.glass_portal"
+                | "core_animation.text.glass_button_sdr"
+                | "core_animation.text.glass_sdf"
+        ) {
+            let mut surface = scene.clone();
+            surface["surface"] = true.into();
+            plan.add(
+                Case::framework(&format!("api.framework.{label}.surface"), surface)
+                    .texture(Texture::d2("out", "bgra8unorm", 160, 48).usage(&["read", "render"]))
+                    .output(Output::new("out", Dtype::U8, Tolerance::units(3.0))),
+            );
+        }
         plan.add(
             Case::framework(&format!("api.framework.{label}"), scene)
                 .texture(Texture::d2("out", "bgra8unorm", 160, 48).usage(&["read", "render"]))

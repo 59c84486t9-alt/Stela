@@ -228,6 +228,14 @@ kernel void fill_linear(texture2d<float, access::write> t [[texture(0)]],
         texels.write(v.yxzw, p.x);
 }
 
+// Each texel's word of a texture over CPU memory, row by row.
+kernel void texel_words(texture2d<uint, access::read> t [[texture(0)]], device uint *out [[buffer(0)]],
+                        uint2 p [[thread_position_in_grid]])
+{
+    if (p.x < t.get_width() && p.y < t.get_height())
+        out[p.y * t.get_width() + p.x] = t.read(p).x;
+}
+
 [[max_total_threads_per_threadgroup(128)]]
 kernel void limited(device uint *data [[buffer(0)]], uint i [[thread_position_in_grid]])
 {

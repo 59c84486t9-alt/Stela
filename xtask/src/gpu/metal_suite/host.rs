@@ -1030,6 +1030,93 @@ fn resources(plan: &mut Plan, library: &str, rng: &mut Random) {
             .output(Output::exact("out", Dtype::U8, vec![0x3c; 4]).set("length", 4))
             .output(Output::exact("props", Dtype::U32, u32s(&[1; 5]))),
     );
+    // The heap answers and fits a Mac gives (M1 Pro, macOS 27): sizes and
+    // alignments of R8 8x8, RG8 16x16, BGRA8 32x32 (read), R16Float
+    // 188x77, RGBA16Float 68x67 and 122x67, BGR10A2 64x64 and BGRA8
+    // 2560x1440 (read and render); 1,024 8x8 R8 glyphs filling 128 KiB with
+    // its usedSize and maxAvailableSizeWithAlignment: 128, usedSize after
+    // makeAliasable and one more glyph; a 100-byte heap's free size and
+    // currentAllocatedSize, a page; two 188x77 R16Float masks in 128 KiB
+    // (one fits) and usedSize; a 68x67 RGBA16Float layer in 64 KiB (nil);
+    // and 64x64 BGR10A2 textures in a heap of three answers (three fit);
+    // the 100-byte heap's size, a page; and Core Animation's masks and
+    // layers: a heap's currentAllocatedSize, then per texture whether it
+    // fit, usedSize and maxAvailableSizeWithAlignment: 128 and 16384 (each
+    // heap holds its size and no more, so the last texture is nil).
+    let facts = [
+        128, 128, 640, 128, 4224, 128, 66_560, 128, 98_816, 128, 98_816, 128, 16_512, 128,
+        15_335_424, 128, 1024, 131_072, 0, 130_944, 1, 16_384, 16_384, 1, 0, 66_560, 0, 3, 49_536,
+        16_384, // the 100-byte heap's size
+        131_072, 1, 66_560, 64_512, 49_152, 0, 66_560, 64_512, 49_152, // R16Float 72x151
+        131_072, 1, 66_560, 64_512, 49_152, 0, 66_560, 64_512, 49_152, // R16Float 113x153
+        196_608, 1, 66_560, 130_048, 114_688, 1, 133_120, 63_488, 49_152, 0, 133_120, 63_488,
+        49_152, // R16Float 248x81
+        65_536, 1, 32_896, 32_640, 16_384, 0, 32_896, 32_640, 16_384, // RGBA16Float 36x35
+    ];
+    plan.add(
+        Case::host("host.heap_fit", library, json!({"kind": "heap_fit"}))
+            .buffer(Buffer::zeroed("facts", 0, facts.len() * 4).unbound())
+            .output(Output::exact("facts", Dtype::U32, u32s(&facts))),
+    );
+    // Textures over CPU memory the CPU clears and redraws, as Core
+    // Animation's backing stores are (Mac: M1 Pro, macOS 27): a no-copy
+    // buffer over vm_allocate memory, a shared buffer, an IOSurface,
+    // replaceRegion from vm_allocate memory and a blit from a shared buffer,
+    // each cleared by bzero of all of it and from an unaligned offset,
+    // memset_pattern4, MADV_FREE_REUSABLE then MADV_FREE_REUSE,
+    // vm_deallocate then vm_allocate at the same address, and on the GPU by
+    // a buffer fill or a render pass clear. Per source and clear: the texels
+    // a kernel reads that differ from the memory after the first pattern,
+    // the nonzero words a GPU clear leaves in the memory, and the texels
+    // that differ after the second pattern. None differ, except that a
+    // no-copy buffer's GPU pages stay those it was made over (all 32,768).
+    let cleared = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 32_768, 0, 0, 0, // no-copy buffer
+        0, 0, 0, 0, 0, 0, 0, 0, 0, // shared buffer
+        0, 0, 0, 0, 0, 0, 0, 0, 0, // IOSurface
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // replaceRegion
+        0, 0, 0, 0, 0, 0, // blit
+    ];
+    plan.add(
+        Case::host("host.cpu_clear", library, json!({"kind": "cpu_clear"}))
+            .buffer(Buffer::zeroed("facts", 0, cleared.len() * 4).unbound())
+            .output(Output::exact("facts", Dtype::U32, u32s(&cleared))),
+    );
+    // A sub-rectangle cleared with Core Animation's own path_blit_vert_lph
+    // and attachment_clear_frag_lph, unblended, on opaque red, then 5%
+    // white blended over it, three times, on a private BGRA8 texture and
+    // one over an IOSurface: the rectangle's centre holds one layer of white
+    // over transparent (13 in each byte), outside stays red (Mac: M1 Pro,
+    // macOS 27).
+    let region: Vec<u8> = [0x0d0d_0d0d_u32, 0xffff_0000, 0x0d0d_0d0d, 0xffff_0000]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    plan.add(
+        Case::host(
+            "host.region_clear",
+            library,
+            json!({"kind": "region_clear"}),
+        )
+        .buffer(Buffer::zeroed("facts", 0, region.len()).unbound())
+        .output(Output::new("facts", Dtype::U8, Tolerance::units(1.0)).expect_same(region)),
+    );
+    // The same on a private RGB10A8_2P_XR10 (550) target, whose first plane
+    // (extended-range BGR10) a blit copies out: 0.05 inside, 1, 0, 0
+    // outside.
+    let xr10: Vec<u8> = [0x1996_6599_u32, 0x37e6_0180]
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    plan.add(
+        Case::host(
+            "host.region_clear_550",
+            library,
+            json!({"kind": "region_clear", "format": 550}),
+        )
+        .buffer(Buffer::zeroed("facts", 0, xr10.len()).unbound())
+        .output(Output::new("facts", Dtype::U8, Tolerance::units(1.0)).expect_same(xr10)),
+    );
 }
 
 /// Fast resource loading: random bytes followed by a compressible run,

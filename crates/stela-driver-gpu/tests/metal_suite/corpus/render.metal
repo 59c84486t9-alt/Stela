@@ -700,6 +700,17 @@ kernel void tile_downsample_ca8(imageblock<TileHalf, imageblock_layout_implicit>
         tex.write(half4(s.rgb * edr_scale, s.a), offset + grid_pos / 2);
 }
 
+/* Each pixel's color as the tile's imageblock holds it, into a W-wide
+ * buffer. */
+kernel void tile_store_colors(imageblock<TileColor, imageblock_layout_implicit> block,
+                              device float4 *out [[buffer(0)]], constant uint &width [[buffer(1)]],
+                              ushort2 tid [[thread_position_in_threadgroup]],
+                              ushort2 tile [[threadgroup_position_in_grid]])
+{
+    uint2 p = uint2(tile) * uint2(block.get_width(), block.get_height()) + uint2(tid);
+    out[p.y * width + p.x] = block.read(tid).c;
+}
+
 kernel void tile_dimensions(imageblock<TileColor, imageblock_layout_implicit> block,
                             ushort2 tid [[thread_position_in_threadgroup]],
                             ushort2 tpt [[threads_per_threadgroup]],

@@ -1207,6 +1207,16 @@ fn store(format: &str, texel: [f64; 4]) -> (Vec<u8>, Dtype) {
             ];
             (u16s(&codes.map(|code| code << 6)), Dtype::U16)
         }
+        // getBytes returns only the color plane: blue, green and red codes
+        // from bit 0, the two top bits zero (alpha is the other plane's).
+        "rgb10a8_2p_xr10" | "rgb10a8_2p_xr10_srgb" => {
+            let curve = format.ends_with("srgb");
+            let code = |v: f64| xr_code(v, curve);
+            (
+                u32s(&[(code(b) | code(g) << 10 | code(r) << 20) as u32]),
+                Dtype::U32,
+            )
+        }
         _ => panic!("no store for {format}"),
     }
 }
@@ -1305,6 +1315,8 @@ fn targets(plan: &mut Plan, library: &str) {
         "bgr10_xr_srgb",
         "bgra10_xr",
         "bgra10_xr_srgb",
+        "rgb10a8_2p_xr10",
+        "rgb10a8_2p_xr10_srgb",
     ] {
         let float = format.contains("float");
         let extended = format.contains("_xr");
@@ -4203,9 +4215,126 @@ fn extended_range_blends(plan: &mut Plan, library: &str) {
     }
 }
 
+/// `RGB10A8_2P_XR10` (550), the format of WindowServer's framebuffers and
+/// Core Animation's surfaces. Measured on an M1 Pro (macOS 27.2): color
+/// holds the extended-range codes of `BGR10_XR`, alpha 8-bit unorm; reads
+/// and samples return the codes' values; blending adds in those values and
+/// clamps at the codes' ends; a tile function reads the fragment outputs
+/// unclamped from the imageblock, as half floats.
+fn extended_range_two_plane(plan: &mut Plan, library: &str) {
+    const FORMAT: &str = "rgb10a8_2p_xr10";
+    let mut rng = Random::new(913);
+    let n = (W * H) as usize;
+    let alpha8 = |a: f64| (a.clamp(0.0, 1.0) * 255.0).round() / 255.0;
+    let held = |t: [f64; 4]| -> [f64; 4] {
+        std::array::from_fn(|lane| {
+            if lane == 3 {
+                alpha8(t[3])
+            } else {
+                xr(xr_code(t[lane], false), false)
+            }
+        })
+    };
+    // Codes' values, a few past the range; alpha on its 8-bit lattice,
+    // a few past [0, 1].
+    let values: Vec<[f64; 4]> = (0..n)
+        .map(|_| {
+            std::array::from_fn(|lane| {
+                if lane == 3 {
+                    return match rng.u32() % 8 {
+                        0 => -0.5,
+                        1 => 1.5,
+                        _ => f64::from(rng.u32() % 256) / 255.0,
+                    };
+                }
+                f32r(xr_value(&mut rng, false, lane))
+            })
+        })
+        .collect();
+    let read = |name: &str, state: Value, expected: Vec<f64>, tolerance: Tolerance| {
+        Case::sequence(
+            name,
+            library,
+            vec![
+                Step::render("vert_full", "frag_color", state)
+                    .bind_stage("fragment", &[("colors", 0), ("width", 1)])
+                    .bind_stage("vertex", &[("depth", 2)]),
+                Step::compute("read_texels", [W, H, 1], [8, 8, 1])
+                    .bind_textures(&[("c", 0)])
+                    .bind(&[("texels", 0)]),
+            ],
+        )
+        .buffer(Buffer::data("width", 0, u32s(&[W])).unbound())
+        .buffer(Buffer::data("depth", 0, f32s(&[0.5])).unbound())
+        .buffer(Buffer::zeroed("texels", 0, (W * H * 16) as usize).unbound())
+        .texture(Texture::d2("c", FORMAT, W, H).usage(&["render", "read"]))
+        .output(
+            Output::new("texels", Dtype::F32, tolerance.clone()).expect(f32s(&expected), tolerance),
+        )
+    };
+    // Written values read back: each color its code's value, clamped to the
+    // codes, alpha to 1/255.
+    let expected: Vec<f64> = values.iter().flat_map(|t| held(*t)).collect();
+    plan.add(
+        read(
+            &format!("render.{FORMAT}.read"),
+            json!({"vertex_count": 3, "colors": [{"texture": "c", "clear": [0, 0, 0, 0]}]}),
+            expected,
+            Tolerance::abs(1e-4),
+        )
+        .buffer(Buffer::data("colors", 0, f32s(&values.concat())).unbound()),
+    );
+    // Source over a cleared target: the blend of the held source and
+    // destination, then held again. The Mac lands within 3 codes of that
+    // where the source is past the codes (measured: code 845 for 848).
+    let blend = Blend::simple("add", "source_alpha", "one_minus_source_alpha");
+    let clear = [1.0, 0.5, -0.5, 0.6];
+    let sources: Vec<[f64; 4]> = (0..n)
+        .map(|_| {
+            std::array::from_fn(|lane| f32r(rng.uniform(-0.5, if lane == 3 { 1.0 } else { 1.6 })))
+        })
+        .collect();
+    let blended: Vec<f64> = sources
+        .iter()
+        .flat_map(|s| {
+            let s = held(*s);
+            held(blend.apply(s, s, held(clear), [0.0; 4], false))
+        })
+        .collect();
+    plan.add(
+        read(
+            &format!("render.{FORMAT}.blend.over.read"),
+            json!({"vertex_count": 3,
+                   "colors": [{"texture": "c", "clear": clear, "blend": blend.json()}]}),
+            blended,
+            Tolerance::abs(4.0 / 510.0),
+        )
+        .buffer(Buffer::data("colors", 0, f32s(&sources.concat())).unbound()),
+    );
+    // The fragment outputs as a tile function reads them in the pass: half
+    // floats, past the codes' range too.
+    let unclamped: Vec<f64> = values.iter().flatten().map(|&v| f16r(v)).collect();
+    let tiles = json!([{"function": "tile_store_colors", "threads": [16, 16]}]);
+    plan.add(
+        full(
+            &format!("render.{FORMAT}.tile_read"),
+            library,
+            "frag_color",
+            &values.concat(),
+            json!({"colors": [{"texture": "c", "clear": [0, 0, 0, 0]}], "tiles": tiles,
+                   "tile_size": [16, 16]}),
+        )
+        .buffer(Buffer::zeroed("out", 0, (W * H * 16) as usize).stage("tile"))
+        .buffer(Buffer::data("out_width", 1, u32s(&[W])).stage("tile"))
+        .texture(target("c", FORMAT))
+        .output(Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&unclamped))),
+    );
+}
+
 pub fn build(plan: &mut Plan) {
     let library = plan.library("render", SOURCE, &[], LATEST);
     extended_range_blends(plan, &library);
+    extended_range_two_plane(plan, &library);
     early_fragment_tests(plan, &library);
     interpolation(plan, &library);
     derivatives(plan, &library);
