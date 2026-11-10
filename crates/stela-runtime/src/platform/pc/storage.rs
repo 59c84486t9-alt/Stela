@@ -5,6 +5,10 @@
 //! the partition by its unique GPT GUID. Exactly one disk must report that
 //! serial and exactly one of its partitions must carry that GUID, and the
 //! EFI system partition is refused.
+//!
+//! Each disk's table is read as boot selection reads it ([`gpt::read`]):
+//! the primary GPT, or the backup when an interrupted write left the
+//! primary damaged. So a disk the mount selected is a disk it can open.
 use super::gpt::{self, GptError, Guid, PartitionDevice};
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
@@ -36,20 +40,38 @@ impl core::str::FromStr for Target {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageError {
-    NoDisk(String),
+    /// No disk reports `serial`; `found` lists the serials the disks found
+    /// do report.
+    NoDisk {
+        serial: String,
+        found: Vec<String>,
+    },
     AmbiguousDisk(String, usize),
     Table(GptError),
     NoPartition(Guid),
     AmbiguousPartition(Guid),
     SystemPartition(Guid),
     Device(BlockError),
-    Mismatch { offset: usize },
+    Mismatch {
+        offset: usize,
+    },
 }
 
 impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoDisk(serial) => write!(f, "no disk has serial {serial:?}"),
+            Self::NoDisk { serial, found } => {
+                write!(f, "no disk has serial {serial:?}")?;
+                if found.is_empty() {
+                    return f.write_str("; no disk was found");
+                }
+                f.write_str("; found")?;
+                for (index, found) in found.iter().enumerate() {
+                    let separator = if index == 0 { " " } else { ", " };
+                    write!(f, "{separator}{found:?}")?;
+                }
+                Ok(())
+            }
             Self::AmbiguousDisk(serial, count) => {
                 write!(f, "{count} disks have serial {serial:?}")
             }
@@ -81,7 +103,13 @@ fn find(devices: &[Box<dyn BlockDevice>], serial: &str) -> Result<usize, Storage
         .collect();
     match matching[..] {
         [index] => Ok(index),
-        [] => Err(StorageError::NoDisk(String::from(serial))),
+        [] => Err(StorageError::NoDisk {
+            serial: String::from(serial),
+            found: devices
+                .iter()
+                .map(|device| device.identity().serial.clone())
+                .collect(),
+        }),
         _ => Err(StorageError::AmbiguousDisk(
             String::from(serial),
             matching.len(),
@@ -110,14 +138,14 @@ pub fn open(
     let mut partitions = table
         .partitions
         .into_iter()
-        .filter(|partition| partition.unique == target.partition);
+        .filter(|partition| partition.unique_guid == target.partition);
     let partition = partitions
         .next()
         .ok_or(StorageError::NoPartition(target.partition))?;
     if partitions.next().is_some() {
         return Err(StorageError::AmbiguousPartition(target.partition));
     }
-    if partition.kind == Guid::ESP {
+    if partition.type_guid == Guid::ESP {
         return Err(StorageError::SystemPartition(target.partition));
     }
     Ok(PartitionDevice::new(devices.swap_remove(index), partition))
@@ -202,7 +230,7 @@ fn locate(
             let mut matching = table
                 .partitions
                 .into_iter()
-                .filter(|partition| partition.unique == target.partition);
+                .filter(|partition| partition.unique_guid == target.partition);
             let partition = matching
                 .next()
                 .ok_or(StorageError::NoPartition(target.partition))?;
@@ -212,8 +240,8 @@ fn locate(
             (index, partition)
         }
     };
-    if partition.kind == Guid::ESP && !matches!(named, Named::Host(_)) {
-        return Err(StorageError::SystemPartition(partition.unique));
+    if partition.type_guid == Guid::ESP && !matches!(named, Named::Host(_)) {
+        return Err(StorageError::SystemPartition(partition.unique_guid));
     }
     Ok((index, partition))
 }
@@ -225,7 +253,7 @@ fn find_unique(
     guid: Guid,
 ) -> Result<(usize, gpt::Partition), StorageError> {
     let (index, partition) = find_any(devices, guid)?;
-    if partition.kind == Guid::ESP {
+    if partition.type_guid == Guid::ESP {
         return Err(StorageError::SystemPartition(guid));
     }
     Ok((index, partition))
@@ -242,7 +270,10 @@ fn find_any(
         let Ok(table) = gpt::read(&mut **device) else {
             continue;
         };
-        let mut matching = table.partitions.into_iter().filter(|p| p.unique == guid);
+        let mut matching = table
+            .partitions
+            .into_iter()
+            .filter(|p| p.unique_guid == guid);
         let Some(partition) = matching.next() else {
             continue;
         };
@@ -343,7 +374,30 @@ mod tests {
         let mut devices = disks();
         assert_eq!(
             open(&mut devices, &target(&format!("disk-c:{TARGET}"))).err(),
-            Some(StorageError::NoDisk(String::from("disk-c")))
+            Some(StorageError::NoDisk {
+                serial: String::from("disk-c"),
+                found: vec![
+                    String::from("disk-a"),
+                    String::from("disk-b"),
+                    String::from("blank")
+                ],
+            })
+        );
+        assert_eq!(
+            StorageError::NoDisk {
+                serial: String::from("disk-c"),
+                found: vec![String::from("disk-a"), String::from("blank")],
+            }
+            .to_string(),
+            "no disk has serial \"disk-c\"; found \"disk-a\", \"blank\""
+        );
+        assert_eq!(
+            StorageError::NoDisk {
+                serial: String::from("disk-c"),
+                found: Vec::new(),
+            }
+            .to_string(),
+            "no disk has serial \"disk-c\"; no disk was found"
         );
         let esp = "AAAAAAAA-0000-0000-0000-000000000001";
         assert_eq!(
@@ -497,12 +551,38 @@ mod tests {
         assert_eq!((disk.identity().blocks, devices.len()), (256, 2));
         assert!(matches!(
             take(&mut devices, "blank"),
-            Err(StorageError::NoDisk(_))
+            Err(StorageError::NoDisk { .. })
         ));
         devices.push(Box::new(RamDisk::new("disk-a", 8, 512)));
         assert!(matches!(
             take(&mut devices, "disk-a"),
             Err(StorageError::AmbiguousDisk(_, 2))
+        ));
+    }
+
+    #[test]
+    fn a_damaged_primary_gpt_opens_through_the_backup_as_selection_finds_it() {
+        let mut devices = disks();
+        // An interrupted write: the primary header's CRC no longer matches.
+        let mut header = [0; 512];
+        devices[1].read(1, &mut header).unwrap();
+        header[16] ^= 0xff;
+        devices[1].write(1, &header).unwrap();
+        let mut device = open(&mut devices, &target(&format!("disk-b:{TARGET}"))).unwrap();
+        assert_eq!(device.disk().serial, "disk-b");
+        assert_eq!(device.identity().blocks, 100);
+        check(&mut device, 4096).unwrap();
+        // A damaged primary and backup is still refused.
+        let mut devices = disks();
+        let mut block = [0; 512];
+        for lba in [1, 255] {
+            devices[0].read(lba, &mut block).unwrap();
+            block[16] ^= 0xff;
+            devices[0].write(lba, &block).unwrap();
+        }
+        assert!(matches!(
+            open(&mut devices, &target(&format!("disk-a:{TARGET}"))),
+            Err(StorageError::Table(GptError::Invalid(_)))
         ));
     }
 

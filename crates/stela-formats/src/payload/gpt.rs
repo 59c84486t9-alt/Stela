@@ -1,5 +1,6 @@
-//! The target disk's GUID partition table: read an existing one and plan the
-//! partitions Stela adds beside an untouched EFI system partition.
+//! GUID partition tables: the one reader and encoder every Stela tool and
+//! the mount use, and the plan of the partitions Stela adds beside an
+//! untouched EFI system partition.
 //!
 //! The Apple region is the one partition the guest's ANS2 namespace exposes;
 //! Apple's restore writes its own nested GPT inside it. Staging, machine
@@ -7,9 +8,11 @@
 //! generated code never mix with Apple bytes.
 use super::PayloadError;
 use alloc::{string::String, vec, vec::Vec};
-use core::fmt;
+use core::{fmt, str::FromStr};
+use stela_contracts::bytes::{array, le32, le64};
 
-const SIGNATURE: &[u8; 8] = b"EFI PART";
+/// The signature that opens a GPT header.
+pub const SIGNATURE: &[u8; 8] = b"EFI PART";
 const REVISION: u32 = 0x0001_0000;
 const HEADER_BYTES: u32 = 92;
 const ENTRY_BYTES: u32 = 128;
@@ -24,19 +27,41 @@ pub const ALIGNMENT: u64 = MIB;
 pub const RESERVED_ESP_BYTES: u64 = 512 * MIB;
 pub const MACHINE_STATE_BYTES: u64 = 256 * MIB;
 pub const DEFAULT_CACHE_BYTES: u64 = 16 * 1024 * MIB;
-/// The smallest Apple region a macOS restore can use.
-pub const DEFAULT_MIN_APPLE_BYTES: u64 = 64 * 1024 * MIB;
+/// The smallest Mac's SSD (the Apple region, without a machine state in its
+/// tail) Stela installs macOS onto, in decimal bytes as disks are sold:
+/// `stela setup`, `stela.efi`'s installer and the docs all use it.
+///
+/// Measured from macOS 27.2 (26B123)'s erase identities for the
+/// MacBookPro18 boards: a 13101 MiB system partition
+/// (`MinimumSystemPartition`) with 640 MiB of padding on a 64 GB disk
+/// (`SystemPartitionPadding`), 2814 MiB of system and app cryptexes, the
+/// 6.5 GB Rosetta cryptex, 0.87 GB of `/private/var` (`OSVarContentSize`)
+/// and two 1.3 GB recoveryOS images (paired and System Recovery): about
+/// 27 GB installed. A staged update needs a second system and its
+/// cryptexes, about 17 GB more. 60 GB leaves room for both and for user
+/// data, and a disk sold as 64 GB (61.5 GB or more) holds it.
+pub const DEFAULT_MIN_APPLE_BYTES: u64 = 60_000_000_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Guid(pub [u8; 16]);
 
 impl Guid {
+    /// The EFI system partition type.
+    pub const ESP: Self = Self([
+        0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9,
+        0x3b,
+    ]);
+
     /// Parse the canonical text form; the first three groups are stored
     /// little-endian, as on disk.
     pub fn parse(text: &str) -> Option<Self> {
         let groups: Vec<&str> = text.split('-').collect();
         let widths = [8, 4, 4, 4, 12];
-        if groups.len() != 5 || groups.iter().zip(widths).any(|(g, w)| g.len() != w) {
+        if groups.len() != 5
+            || groups.iter().zip(widths).any(|(group, width)| {
+                group.len() != width || !group.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
             return None;
         }
         let mut raw = [0u8; 16];
@@ -63,6 +88,14 @@ impl Guid {
 
     pub fn is_zero(&self) -> bool {
         self.0 == [0; 16]
+    }
+}
+
+impl FromStr for Guid {
+    type Err = &'static str;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::parse(text).ok_or("GUID must be XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX")
     }
 }
 
@@ -196,46 +229,19 @@ pub struct Table {
 }
 
 /// The IEEE CRC-32 of GPT headers and entry arrays.
-pub fn crc32(bytes: &[u8]) -> u32 {
-    const TABLE: [u32; 256] = {
-        let mut table = [0u32; 256];
-        let mut i = 0;
-        while i < 256 {
-            let mut c = i as u32;
-            let mut k = 0;
-            while k < 8 {
-                c = if c & 1 != 0 {
-                    0xedb8_8320 ^ (c >> 1)
-                } else {
-                    c >> 1
-                };
-                k += 1;
-            }
-            table[i] = c;
-            i += 1;
-        }
-        table
-    };
-    !bytes.iter().fold(!0u32, |c, &b| {
-        TABLE[((c ^ b as u32) & 0xff) as usize] ^ (c >> 8)
-    })
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-}
-
-fn u64_at(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
-}
+pub use stela_contracts::crc::crc32_ieee as crc32;
 
 fn guid_at(bytes: &[u8], at: usize) -> Guid {
-    Guid(bytes[at..at + 16].try_into().unwrap())
+    Guid(array(bytes, at))
 }
 
-/// The location of the entry array a primary header names.
+/// The location of the entry array a header names, and the blocks its
+/// partitions may use.
 pub struct HeaderInfo {
     pub disk_guid: Guid,
+    pub first_usable: u64,
+    /// Inclusive, as in the header.
+    pub last_usable: u64,
     pub entries_lba: u64,
     pub entry_count: u32,
     pub entry_bytes: u32,
@@ -260,23 +266,25 @@ pub fn parse_header(
     if block.len() < HEADER_BYTES as usize || &block[..8] != SIGNATURE {
         return Ok(None);
     }
-    let size = u32_at(block, 12);
+    let size = le32(block, 12);
     if !(HEADER_BYTES..=disk.block_bytes as u32).contains(&size) {
         return Err(PayloadError::Disk("GPT header size"));
     }
     let mut copy = block[..size as usize].to_vec();
     copy[16..20].fill(0);
-    if crc32(&copy) != u32_at(block, 16) {
+    if crc32(&copy) != le32(block, 16) {
         return Err(PayloadError::Disk("GPT header CRC mismatch"));
     }
     let info = HeaderInfo {
         disk_guid: guid_at(block, 56),
-        entries_lba: u64_at(block, 72),
-        entry_count: u32_at(block, 80),
-        entry_bytes: u32_at(block, 84),
-        entries_crc: u32_at(block, 88),
+        first_usable: le64(block, 40),
+        last_usable: le64(block, 48),
+        entries_lba: le64(block, 72),
+        entry_count: le32(block, 80),
+        entry_bytes: le32(block, 84),
+        entries_crc: le32(block, 88),
     };
-    if u64_at(block, 24) != lba
+    if le64(block, 24) != lba
         || info.entry_bytes < ENTRY_BYTES
         || !info.entry_bytes.is_power_of_two()
         || info.entry_count == 0
@@ -285,10 +293,14 @@ pub fn parse_header(
     {
         return Err(PayloadError::Disk("unsupported GPT header fields"));
     }
+    if info.first_usable > info.last_usable {
+        return Err(PayloadError::Disk("GPT usable range ends before it starts"));
+    }
     Ok(Some(info))
 }
 
-/// Parse the entry array a header names, checking its CRC.
+/// Parse the entry array a header names, checking its CRC and that every
+/// partition lies in the header's usable range, so none overlaps a GPT.
 pub fn parse_entries(info: &HeaderInfo, bytes: &[u8]) -> Result<Table, PayloadError> {
     let length = info.entry_array_bytes() as usize;
     if bytes.len() < length || crc32(&bytes[..length]) != info.entries_crc {
@@ -308,13 +320,16 @@ pub fn parse_entries(info: &HeaderInfo, bytes: &[u8]) -> Result<Table, PayloadEr
         let partition = Partition {
             type_guid,
             unique_guid: guid_at(entry, 16),
-            first_lba: u64_at(entry, 32),
-            last_lba: u64_at(entry, 40),
-            attributes: u64_at(entry, 48),
+            first_lba: le64(entry, 32),
+            last_lba: le64(entry, 40),
+            attributes: le64(entry, 48),
             name: String::from_utf16_lossy(&units),
         };
         if partition.last_lba < partition.first_lba {
             return Err(PayloadError::Disk("GPT entry ends before it starts"));
+        }
+        if partition.first_lba < info.first_usable || partition.last_lba > info.last_usable {
+            return Err(PayloadError::Disk("GPT entry outside the usable range"));
         }
         partitions.push(partition);
     }
@@ -490,13 +505,19 @@ pub struct Write {
 /// never leaves a valid primary header that names unwritten entries.
 pub fn encode(disk: Disk, table: &Table) -> Result<Vec<Write>, PayloadError> {
     disk.validate()?;
+    if table.partitions.len() > ENTRY_COUNT as usize {
+        return Err(PayloadError::Disk("too many partitions"));
+    }
     let block = disk.block_bytes as usize;
     let mut entries = vec![0u8; ENTRY_ARRAY_BYTES as usize];
     for (slot, partition) in entries
         .chunks_mut(ENTRY_BYTES as usize)
         .zip(&table.partitions)
     {
-        if partition.first_lba < disk.first_usable() || partition.last_lba > disk.last_usable() {
+        if partition.first_lba < disk.first_usable()
+            || partition.last_lba > disk.last_usable()
+            || partition.first_lba > partition.last_lba
+        {
             return Err(PayloadError::Disk("partition outside the usable range"));
         }
         slot[0..16].copy_from_slice(&partition.type_guid.0);
@@ -504,6 +525,8 @@ pub fn encode(disk: Disk, table: &Table) -> Result<Vec<Write>, PayloadError> {
         slot[32..40].copy_from_slice(&partition.first_lba.to_le_bytes());
         slot[40..48].copy_from_slice(&partition.last_lba.to_le_bytes());
         slot[48..56].copy_from_slice(&partition.attributes.to_le_bytes());
+        // At most 35 of the 36 UTF-16 units, so the name keeps the
+        // terminating NUL UEFI specifies.
         for (unit, out) in partition
             .name
             .encode_utf16()
@@ -614,6 +637,11 @@ fn copy_at(
     if info.entries_lba + blocks > disk.blocks {
         return Ok(Side::Damaged(PayloadError::Disk(
             "GPT entry array outside the disk",
+        )));
+    }
+    if info.last_usable >= disk.blocks {
+        return Ok(Side::Damaged(PayloadError::Disk(
+            "GPT usable range outside the disk",
         )));
     }
     let entries = read(info.entries_lba, blocks)?;

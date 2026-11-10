@@ -370,3 +370,83 @@ fn small_disks_damaged_headers_and_blank_blocks_are_told_apart() {
     entries[40] ^= 1;
     assert!(parse_entries(&info, &entries).is_err());
 }
+
+#[test]
+fn guid_text_is_hex_digits_only_and_parses_as_from_str() {
+    let esp: Guid = "C12A7328-F81F-11D2-BA4B-00A0C93EC93B".parse().unwrap();
+    assert_eq!(esp, Guid::ESP);
+    assert_eq!(Role::Esp.type_guid(), Guid::ESP);
+    // A sign is not a hex digit, though `u8::from_str_radix` takes one.
+    assert!(Guid::parse("+12A7328-F81F-11D2-BA4B-00A0C93EC93B").is_none());
+    assert!(
+        "C12A7328-F81F-11D2-BA4B-00A0C93EC93"
+            .parse::<Guid>()
+            .is_err()
+    );
+}
+
+#[test]
+fn entries_outside_the_header_usable_range_are_refused() {
+    let plan = plan(DISK, None, request(), counter()).unwrap();
+    let writes = encode(DISK, &plan.table).unwrap();
+    let mut info = parse_header(DISK, 1, &writes[3].bytes).unwrap().unwrap();
+    assert_eq!(info.first_usable, 34);
+    assert_eq!(info.last_usable, DISK.blocks - 34);
+    // A partition over the primary entry array.
+    let mut entries = writes[2].bytes.clone();
+    entries[32..40].copy_from_slice(&2u64.to_le_bytes());
+    info.entries_crc = crc32(&entries[..info.entry_array_bytes() as usize]);
+    assert_eq!(
+        parse_entries(&info, &entries),
+        Err(PayloadError::Disk("GPT entry outside the usable range"))
+    );
+    let mut header = writes[3].bytes.clone();
+    header[40..48].copy_from_slice(&(DISK.blocks).to_le_bytes());
+    header[16..20].fill(0);
+    let crc = crc32(&header[..HEADER_BYTES as usize]);
+    header[16..20].copy_from_slice(&crc.to_le_bytes());
+    assert!(parse_header(DISK, 1, &header).is_err());
+}
+
+#[test]
+fn a_usable_range_past_the_disk_reads_the_backup() {
+    let plan = plan(DISK, None, request(), counter()).unwrap();
+    let mut disk = Sparse::new(DISK);
+    for write in encode(DISK, &plan.table).unwrap() {
+        disk.apply(&write, None);
+    }
+    // The primary claims one more block than the disk has.
+    let header = disk.blocks.get_mut(&1).unwrap();
+    header[48..56].copy_from_slice(&DISK.blocks.to_le_bytes());
+    header[16..20].fill(0);
+    let crc = crc32(&header[..HEADER_BYTES as usize]);
+    header[16..20].copy_from_slice(&crc.to_le_bytes());
+    assert_eq!(
+        disk.read(),
+        Ok(Found::Table {
+            table: plan.table,
+            repair: Some("the primary GPT is damaged"),
+        })
+    );
+}
+
+#[test]
+fn encoding_refuses_what_it_cannot_write_and_terminates_names() {
+    let mut table = plan(DISK, None, request(), counter()).unwrap().table;
+    table.partitions[0].name = "N".repeat(36);
+    let writes = encode(DISK, &table).unwrap();
+    assert_eq!(read_back(DISK, &writes).partitions[0].name, "N".repeat(35));
+    assert_eq!(writes[2].bytes[56 + 70..56 + 72], [0, 0]);
+
+    let mut reversed = table.clone();
+    let partition = &mut reversed.partitions[0];
+    core::mem::swap(&mut partition.first_lba, &mut partition.last_lba);
+    assert!(encode(DISK, &reversed).is_err());
+    let mut crowded = table.clone();
+    let extra = crowded.partitions[0].clone();
+    crowded.partitions.resize(ENTRY_COUNT as usize + 1, extra);
+    assert_eq!(
+        encode(DISK, &crowded),
+        Err(PayloadError::Disk("too many partitions"))
+    );
+}

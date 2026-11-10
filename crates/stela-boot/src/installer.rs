@@ -45,8 +45,12 @@ use {
 
 const MIB: u64 = 1 << 20;
 const GB: u64 = 1_000_000_000;
-/// The least space macOS is given, as the messages say it.
-const MIN_BYTES: u64 = 64 * GB;
+/// The least partition macOS is given: the system's minimum
+/// (`gpt::DEFAULT_MIN_APPLE_BYTES`, which setup also checks) and the
+/// machine state's tail after it.
+const MIN_BYTES: u64 = gpt::DEFAULT_MIN_APPLE_BYTES + machine_state::MINIMUM_BYTES;
+/// The messages name the system's minimum, in decimal GB as disks are sold.
+const _: () = assert!(gpt::DEFAULT_MIN_APPLE_BYTES == 60 * GB);
 /// The new partition's GPT name.
 const NAME: &str = "Stela macOS";
 /// The most bytes one firmware write takes.
@@ -326,7 +330,7 @@ impl Picker {
                     let (first, end) = self.aligned(segment);
                     let bytes = self.span_bytes((first, end));
                     if bytes < MIN_BYTES {
-                        self.notice = Some(refuse!("macOS needs at least 64 GB"));
+                        self.notice = Some(refuse!("macOS needs at least 60 GB"));
                     } else {
                         self.place = Some(Place::Free { first, end });
                         self.size = bytes / MIB * MIB;
@@ -597,7 +601,7 @@ fn disks() -> Vec<Disk> {
             Some(serial) if serial.contains(char::is_whitespace) => {
                 Some("Serial number has spaces")
             }
-            Some(_) if disk.bytes() < MIN_BYTES => Some("Smaller than 64 GB"),
+            Some(_) if disk.bytes() < MIN_BYTES => Some("Smaller than 60 GB"),
             Some(_) => None,
         };
         disks.push(disk);
