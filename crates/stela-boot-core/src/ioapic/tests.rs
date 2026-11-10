@@ -893,20 +893,6 @@ fn failed_controller_eoi_or_read_keeps_route_and_contributors_for_real_retry() {
 #[test]
 fn electrical_route_mismatch_duplicate_claim_mask_failure_and_abandoned_pin_are_kept() {
     let (b, u, r, line) = fixture();
-    assert!(matches!(
-        // SAFETY: the unit lock and IRQ save serialize this selector/window pair on the owning
-        // CPU.
-        unsafe {
-            u.claim(
-                LineRoute {
-                    trigger: Trigger::Edge,
-                    ..line
-                },
-                Box::new(Contributors(b.clone())),
-            )
-        },
-        Err(IrqError::Unsupported)
-    ));
     // SAFETY: the fixture owns the stopped line and its contributors.
     let pin = unsafe { u.claim(line, Box::new(Contributors(b.clone()))) }.unwrap();
     assert!(matches!(
@@ -943,6 +929,50 @@ fn electrical_route_mismatch_duplicate_claim_mask_failure_and_abandoned_pin_are_
     pin.lifetime.phase.store(PROGRAMMED, Ordering::Release);
     drop(pin);
     assert_eq!(u.quarantine_count(), 1);
+}
+
+/// An edge line (the ISA keyboard's IRQ 1) is programmed edge-triggered,
+/// completes with the local EOI alone and drains without Remote IRR.
+#[test]
+fn an_edge_line_completes_with_the_local_eoi_alone() {
+    for version in [0x11, 0x20] {
+        let (b, u, r, line) = fixture_version(version);
+        let edge = LineRoute {
+            polarity: Polarity::High,
+            trigger: Trigger::Edge,
+            ..line
+        };
+        // SAFETY: the fixture owns the stopped line and its contributors.
+        let pin = unsafe { u.claim(edge, Box::new(Contributors(b.clone()))) }.unwrap();
+        let mut registration = r
+            .request(stela_drivers::bus::irq::Request {
+                source: Box::new(pin),
+                handler: Arc::new(Member(b.clone(), 1, true)),
+                routing: stela_drivers::bus::irq::RouteRequest::Line(edge),
+            })
+            .unwrap();
+        let low = b.hw.lock().unwrap().regs[0x22];
+        assert_eq!(low & (MASK | 1 << 15 | 1 << 13), 0, "{low:#x}");
+        for _ in 0..2 {
+            {
+                let mut h = b.hw.lock().unwrap();
+                h.asserted = 1;
+                h.pending = true;
+                h.tmr = Trigger::Edge;
+            }
+            assert!(r.dispatch(registration.vector()));
+        }
+        assert_eq!(registration.handled(), Ok(2));
+        {
+            let h = b.hw.lock().unwrap();
+            assert!(!h.events.contains(&"direct-eoi"));
+            assert!(!h.events.contains(&"edge-eoi"));
+            assert!(!h.pending);
+        }
+        finish(registration.retire().unwrap());
+        assert_eq!(b.drops.load(Ordering::Relaxed), 1);
+        assert_eq!(u.quarantine_count(), 0);
+    }
 }
 
 fn finish(retired: stela_drivers::bus::irq::RetiredSource<dyn stela_drivers::bus::irq::Source>) {

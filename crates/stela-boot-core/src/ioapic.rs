@@ -404,11 +404,10 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         devices: Box<dyn Devices>,
     ) -> Result<Pin<R, P>, IrqError> {
         self.platform.check_process()?;
-        // This slice has an end-to-end level completion proof through
-        // Remote IRR/EOI. Edge IOAPIC drain is not inferred from MSI coverage.
-        if line.trigger != Trigger::Level {
-            return Err(IrqError::Unsupported);
-        }
+        // A level line drains through Remote IRR and its EOI. An edge line
+        // (the ISA keyboard's and mouse's IRQ 1 and 12) has no Remote IRR:
+        // it drains once Delivery Status is idle and the CPU holds its vector
+        // neither requested nor in service, which `synchronize` checks.
         let pin = line
             .gsi
             .checked_sub(self.gsi_base)
@@ -552,8 +551,9 @@ impl<R: Registers, P: Platform> PinEoi<R, P> {
         }
         let low = self.unit.low(self.pin)?;
         let high = self.unit.registers.read(0x11 + self.pin * 2);
+        let level = self.line.trigger == Trigger::Level;
         let expected = u32::from(self.target.vector)
-            | 1 << 15
+            | if level { 1 << 15 } else { 0 }
             | if self.line.polarity == Polarity::Low {
                 1 << 13
             } else {
@@ -562,7 +562,9 @@ impl<R: Registers, P: Platform> PinEoi<R, P> {
         if low & (CONFIG & !MASK) != expected || high != u32::from(self.target.destination) << 24 {
             return Err(IrqError::Route);
         }
-        if observed == Trigger::Level {
+        // An edge line keeps no Remote IRR, so the local EOI completes it;
+        // a level line seen as level completed through the EOI broadcast.
+        if !level || observed == Trigger::Level {
             return Ok(());
         }
         // Intel SDM12.8.4: an edge seen by the CPU has no EOI broadcast.
@@ -814,7 +816,9 @@ unsafe impl<R: Registers + 'static, P: Platform + 'static> Source for Pin<R, P> 
             return Err(IrqError::Route);
         }
         // Contributors may assert while IOAPIC is still masked; enabling the
-        // final route observes an already asserted level and delivers it.
+        // final route observes an already asserted level and delivers it. An
+        // edge that arrived while masked is lost, as on hardware: the
+        // contributor's owner reads its device once after the route opens.
         // SAFETY: `program` published the route and every callback before unmask.
         unsafe { self.devices.enable() }?;
         let _guard = self.unit.lock();

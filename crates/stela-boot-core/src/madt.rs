@@ -11,7 +11,6 @@ use stela_drivers::bus::irq::{LineRoute, Polarity, Trigger};
 pub enum RouteError {
     InvalidTable,
     InvalidStructure,
-    UnsupportedStructure(u8),
     InvalidAddress,
     InvalidElectrical,
     Duplicate,
@@ -38,6 +37,10 @@ pub struct Routing {
     overrides: Vec<Override>,
     nmis: Vec<u32>,
     legacy_pic: bool,
+    /// Each entry type the routing does not use, once, in table order:
+    /// other architectures', the multiprocessor wakeup (ACPI 6.4 5.2.12.19)
+    /// and OEM types, which Linux's `acpi_parse_entries_array` skips too.
+    pub ignored: Vec<u8>,
 }
 fn word(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes(b[o..o + 2].try_into().unwrap())
@@ -99,6 +102,7 @@ impl Routing {
             overrides: Vec::new(),
             nmis: Vec::new(),
             legacy_pic: flags & 1 != 0,
+            ignored: Vec::new(),
         };
         let mut lapic_override = false;
         let mut offset = 44;
@@ -181,11 +185,12 @@ impl Routing {
                     }
                     lapic_override = true;
                 }
-                (kind @ (0..=5 | 9 | 10), _) => {
-                    let _ = kind;
-                    return Err(RouteError::InvalidStructure);
+                (0..=5 | 9 | 10, _) => return Err(RouteError::InvalidStructure),
+                (kind, _) => {
+                    if !routing.ignored.contains(&kind) {
+                        routing.ignored.push(kind);
+                    }
                 }
-                (kind, _) => return Err(RouteError::UnsupportedStructure(kind)),
             }
             offset += length;
         }
@@ -311,6 +316,29 @@ mod tests {
         finish(b, b"FACP")
     }
     #[test]
+    fn wakeup_and_oem_entries_are_skipped_once_each() {
+        let plain = Routing::parse(&madt(&[]), 48).unwrap();
+        // A multiprocessor wakeup entry (type 0x10, 16 bytes), two OEM
+        // entries of one type and one of another.
+        let mut extra = vec![0x10, 16];
+        extra.extend_from_slice(&[0; 14]);
+        extra.extend_from_slice(&[0x80, 4, 1, 2, 0x80, 2, 0xff, 3, 0]);
+        let skipped = Routing::parse(&madt(&extra), 48).unwrap();
+        assert_eq!(skipped.ignored, [0x10, 0x80, 0xff]);
+        assert_eq!(skipped.units, plain.units);
+        assert_eq!(skipped.isa(9), plain.isa(9));
+        // A known type of the wrong length is still malformed.
+        assert_eq!(
+            Routing::parse(&madt(&[2, 4, 0, 9]), 48).err(),
+            Some(RouteError::InvalidStructure)
+        );
+        // So is an entry running past the table.
+        assert_eq!(
+            Routing::parse(&madt(&[0x80, 9, 0]), 48).err(),
+            Some(RouteError::InvalidStructure)
+        );
+    }
+    #[test]
     fn pc_at_compatibility_reports_the_independent_legacy_pic() {
         let mut table = madt(&[]);
         assert!(!Routing::parse(&table, 48).unwrap().has_legacy_pic());
@@ -386,13 +414,13 @@ mod tests {
     }
 
     #[test]
-    fn malformed_flags_duplicates_unknown_entries_and_nmi_are_refused() {
+    fn malformed_flags_duplicates_and_nmi_are_refused() {
         for extra in [
             &[2, 0][..],
             &[2, 11, 0, 0][..],
             &[2, 10, 0, 9, 9, 0, 0, 0, 2, 0][..],
             &[2, 10, 0, 9, 9, 0, 0, 0, 0, 128][..],
-            &[6, 2][..],
+            &[4, 5, 0, 0, 0][..],
         ] {
             assert!(Routing::parse(&madt(extra), 48).is_err());
         }

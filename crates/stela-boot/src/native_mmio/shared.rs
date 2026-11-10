@@ -1009,7 +1009,7 @@ impl Source {
     }
 
     pub(crate) fn routing(&self) -> Result<crate::native_irq::madt::Routing, Error> {
-        crate::native_irq::madt::Routing::parse(
+        crate::native_irq::madt::parse(
             self.platform.wire().madt(),
             self.platform.space.physical_bits,
         )
