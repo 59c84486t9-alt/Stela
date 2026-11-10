@@ -84,13 +84,28 @@ pub fn place_gpu_gate(tree: &mut DeviceTree, index: usize, bytes: u64) -> Result
 }
 
 /// Collects the AIC inputs of `node` and its descendants whose interrupt
-/// parent is the AIC with phandle `aic`.
+/// parent is the AIC with phandle `aic`. A node's `interrupt-parent` is one
+/// phandle for all its interrupts, or one per interrupt cell: T6050's
+/// `/arm-io/pmgr/clpc` pairs three AIC inputs with thirteen cells of another
+/// controller that are four-character names, not AIC inputs.
 fn interrupts_of(node: &Node, aic: u32, used: &mut Vec<u32>) {
-    if word(node, INTERRUPT_PARENT) == Some(aic)
-        && let Some(interrupts) = node.property("interrupts")
+    if let (Some(parents), Some(interrupts)) =
+        (node.property(INTERRUPT_PARENT), node.property("interrupts"))
     {
+        let (parents, _) = parents.value.as_chunks::<4>();
         let (cells, _) = interrupts.value.as_chunks::<4>();
-        used.extend(cells.iter().map(|cell| u32::from_le_bytes(*cell)));
+        let parent = |index: usize| match parents {
+            [only] => Some(u32::from_le_bytes(*only)),
+            _ if parents.len() == cells.len() => Some(u32::from_le_bytes(parents[index])),
+            _ => None,
+        };
+        used.extend(
+            cells
+                .iter()
+                .enumerate()
+                .filter(|&(index, _)| parent(index) == Some(aic))
+                .map(|(_, cell)| u32::from_le_bytes(*cell)),
+        );
     }
     for child in &node.children {
         interrupts_of(child, aic, used);
@@ -214,6 +229,26 @@ mod tests {
             [0xf40_0000, WINDOW].map(u64::to_le_bytes).concat()
         );
         assert!(place_gpu_gate(&mut tree, 0, WINDOW).is_err());
+    }
+
+    #[test]
+    fn only_the_cells_a_parent_list_gives_the_aic_are_its_inputs() {
+        // T6050's clpc: AIC inputs, then another controller's named cells.
+        let mut clpc = device("clpc", 0x10_0000, 0x1000);
+        let parents = [AIC_PHANDLE, AIC_PHANDLE, 0x31e, 0x31e];
+        clpc.set_property(
+            INTERRUPT_PARENT,
+            parents.iter().flat_map(|p| p.to_le_bytes()).collect(),
+        )
+        .unwrap();
+        let cells = [0x19c, 0xdbc, u32::from_le_bytes(*b"RT0m"), 0];
+        clpc.set_property(
+            "interrupts",
+            cells.iter().flat_map(|c| c.to_le_bytes()).collect(),
+        )
+        .unwrap();
+        let mut tree = tree(vec![clpc]);
+        assert_eq!(place_gpu_gate(&mut tree, 0, WINDOW).unwrap().irq, 0xdbd);
     }
 
     #[test]

@@ -799,8 +799,8 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     assert_eq!(
         (REVISION, prepared_digest(&bundle)?),
         (
-            35,
-            "bc204d9f21be77c04702696ad04180ba5e655d378b824333a3244e628608f17d".to_owned()
+            37,
+            "3ebe47c08aa69d2263dfb7942cb29009f1bfd53d76b5fabadd6bb931937edd59".to_owned()
         )
     );
     let original = bundle
@@ -1032,10 +1032,15 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
         behavior
     );
     assert!(tree.property("/chosen", "repair-status").is_none());
-    for property in CPU_FREQUENCY_PROPERTIES {
+    // iBoot's six clock rows on the boot CPU, at its 24 MHz reference.
+    for property in BOOT_CPU_CLOCK_PROPERTIES
+        .into_iter()
+        .chain([TIMEBASE_PROPERTY])
+    {
         assert_eq!(
             tree.property("/cpus/cpu0", property).unwrap().as_u64(),
-            Some(24_000_000)
+            Some(board::BOOT_CLOCK_HZ),
+            "{property}"
         );
     }
     assert!(
@@ -1202,6 +1207,23 @@ fn lays_out_sptm_regions_and_patch_slots() -> Result<()> {
     let m4_bundle = prepare(&inputs, &m4_options)?;
     inputs.target.chip_id = Some(0x8142);
     let m5_bundle = prepare(&inputs, &m4_options)?;
+    // A linked auxiliary collection ends on a region SPTM's physical
+    // aperture keeps, never on the dummy page.
+    inputs.auxiliary_collection = Some(input(leak(auxiliary_collection()), "AuxKC"));
+    let linked = prepare(&inputs, &m4_options)?.manifest;
+    inputs.auxiliary_collection = None;
+    let names: Vec<_> = linked.regions.iter().map(|r| r.name.as_str()).collect();
+    let at = |name: &str| names.iter().position(|n| *n == name).unwrap();
+    assert_eq!(
+        names[at("BootKC-le")..=at("AuxKC-le") + 1],
+        [
+            "BootKC-le",
+            lock_regs::CL4_DUMMY_PAGE,
+            "AuxKC-rw",
+            "AuxKC-le",
+            "RAMDisk"
+        ]
+    );
     // The M6 places no loaded-object carveout, so its manifest goes
     // unpublished, and says so.
     inputs.target.chip_id = Some(0x8152);

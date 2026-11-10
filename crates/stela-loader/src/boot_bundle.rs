@@ -55,7 +55,7 @@ use patches::*;
 
 /// The revision of the content [`prepare`] writes within its schema; a
 /// bundle of another revision is prepared again (`stela setup update stela`).
-pub const REVISION: u32 = 35;
+pub const REVISION: u32 = 37;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -83,12 +83,22 @@ const ZERO_FILL_RECIPE: &str = "zeroes/";
 const HEX_RECIPE: &str = "hex/";
 const MAC_ADDRESS_BYTES: usize = 6;
 /// Clock properties XNU `pexpert/arm/pe_identify_machine.c` reads from the
-/// running CPU node; absent ones fall back to its defaults.
-const CPU_FREQUENCY_PROPERTIES: [&str; 3] = [
-    "timebase-frequency",
-    "fixed-frequency",
+/// running CPU node; absent ones fall back to its defaults. iBoot writes all
+/// six to the boot CPU from its clock getter, which returns the 24 MHz
+/// reference on every SoC (`stela_soc_data::board::BOOT_CLOCK_HZ`); the
+/// timebase is the bundle's configured counter rate.
+const BOOT_CPU_CLOCK_PROPERTIES: [&str; 5] = [
+    "clock-frequency",
+    "memory-frequency",
+    "bus-frequency",
     "peripheral-frequency",
+    "fixed-frequency",
 ];
+const TIMEBASE_PROPERTY: &str = "timebase-frequency";
+/// The rows every other CPU node also carries (Stela's choice: whether
+/// iBoot's CPU pass writes them beyond the boot CPU is untraced).
+const CPU_FREQUENCY_PROPERTIES: [&str; 3] =
+    [TIMEBASE_PROPERTY, "fixed-frequency", "peripheral-frequency"];
 const MEMORY_MAP_ENTRY_BYTES: usize = 16;
 const HIBERNATION_KEY_BYTES: usize = 0x30;
 
@@ -298,10 +308,14 @@ const REGION_ORDER: &[&str] = &[
     "TXM-le",
     "BootKC-rw",
     "BootKC-le",
+    // M4 and later, without a CL4 image (`lock_regs::CL4_DUMMY_PAGE`).
+    // SPTM keeps the page out of its physical aperture (as CTXR-B's) and
+    // takes the aperture address of AuxKC-le's end (26A434 sptm.t6050
+    // file 0xbc7c8..0xbc834; `io_range_get_papt` panics "IO PADDR could not
+    // be found" otherwise), so the auxiliary collection cannot end on it.
+    lock_regs::CL4_DUMMY_PAGE,
     "AuxKC-rw",
     "AuxKC-le",
-    // M4 and later, without a CL4 image (`lock_regs::CL4_DUMMY_PAGE`).
-    lock_regs::CL4_DUMMY_PAGE,
     "RAMDisk",
     "SEPFW",
     "BootArgs",

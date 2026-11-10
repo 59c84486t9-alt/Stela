@@ -119,6 +119,7 @@ impl Check {
         .with_context(|| format!("{} has no DeviceTree", self.bundle.display()))?;
         let mut board =
             stela_soc_data::board::board(&tree).context("the engine refuses this board")?;
+        let gpu_gate = gpu_gate(&tree)?;
         let mount = mount(&self.bundle, &tree, &mut board)
             .context("the engine refuses to mount this board")?;
         let hex = |value: u64| format!("{value:#x}");
@@ -147,11 +148,47 @@ impl Check {
             "power_states": board.power_states.as_ref().map(|states| states.registers.len()),
             "clusters": board.clusters.len(),
             "memory_cache": board.memory_cache.is_some(),
+            "gpu_gate": gpu_gate,
             "mount": mount,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         Ok(())
     }
+}
+
+/// Where a boot that opened a GPU puts its first StelaGPU gate in `tree`, as
+/// `stela.efi` does before it models the board, and whether the board's AIC
+/// then takes the gate's input (vector V is die V / MAX_IRQ, IRQ V % MAX_IRQ).
+fn gpu_gate(tree: &[u8]) -> Result<serde_json::Value> {
+    use stela_loader::apple_device_tree::DeviceTree;
+    let mut tree = DeviceTree::parse(tree).map_err(|error| anyhow::anyhow!("{error}"))?;
+    let placement = match stela_loader::stela_gpu::place_gpu_gate(
+        &mut tree,
+        0,
+        stela_contracts::gate::window::BYTES,
+    ) {
+        Ok(placement) => placement,
+        Err(error) => return Ok(serde_json::json!({ "refusal": error.to_string() })),
+    };
+    let hidden = stela_loader::devices::hide_agx(&mut tree);
+    let board = stela_soc_data::board::board(&tree.serialize());
+    Ok(serde_json::json!({
+        "physical": format!("{:#x}", placement.physical),
+        "vector": placement.irq,
+        "hidden": hidden,
+        "board": match board {
+            Ok(board) => {
+                let per_die = u32::from(board.aic.layout.max_irq());
+                serde_json::json!({
+                    "die": placement.irq / per_die,
+                    "input": placement.irq % per_die,
+                    "inputs": board.aic.inputs,
+                    "dies": board.aic.layout.dies(),
+                })
+            }
+            Err(error) => serde_json::json!({ "refusal": error.to_string() }),
+        },
+    }))
 }
 
 /// Mount `board`'s whole machine as `stela.efi` does, with stand-in host

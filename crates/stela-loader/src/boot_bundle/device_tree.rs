@@ -276,18 +276,27 @@ pub(super) fn shape_device_tree(
         tree.set_property("/chosen/hibernation", key, vec![0; HIBERNATION_KEY_BYTES])?;
     }
     mark_boot_cpu(tree, boot_cpu)?;
-    // iBoot adds the clock rates at hand-off; every CPU node carries them.
+    // iBoot adds the clock rates at hand-off (handoff.rs, J473 0x397f0..
+    // 0x398f0): the boot CPU gets all six, at its 24 MHz reference.
     for cpu in cpu_nodes(tree)? {
+        let boot = cpu == boot_cpu.path;
         for property in CPU_FREQUENCY_PROPERTIES {
-            tree.set_property(
-                &cpu,
-                property,
-                options.timebase_frequency.to_le_bytes().to_vec(),
-            )?;
+            let hz = if property == TIMEBASE_PROPERTY {
+                options.timebase_frequency
+            } else {
+                board::BOOT_CLOCK_HZ
+            };
+            tree.set_property(&cpu, property, hz.to_le_bytes().to_vec())?;
+        }
+        if boot {
+            for property in BOOT_CPU_CLOCK_PROPERTIES {
+                tree.set_property(&cpu, property, board::BOOT_CLOCK_HZ.to_le_bytes().to_vec())?;
+            }
         }
     }
     unresolved.push(
-        "/cpus fixed-frequency and peripheral-frequency take the timebase rate; Apple's values are unobserved"
+        "/cpus: the clock rows on CPUs other than the boot CPU are Stela's choice; \
+         whether iBoot writes them there is untraced"
             .into(),
     );
     unresolved.extend(set_die_count(tree, target.chip_id)?);
