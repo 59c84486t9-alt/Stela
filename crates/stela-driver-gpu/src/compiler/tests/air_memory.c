@@ -221,6 +221,57 @@ thread_memory_lowers_to_scratch(void)
    refused("", five, &(struct limits){0}, STELA_AIR_LIMIT);
 }
 
+#define MATRIX_GLOBALS                                                                             \
+   "%m = type { <64 x float> }\n"                                                                  \
+   "declare <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float)\n"
+
+/* An allocation of SIMD-group matrices, each loaded and stored whole, keeps
+ * only the thread elements: 8 of each 256-byte matrix, at a 32nd of its
+ * offset. 4096 bytes of matrices fit a 1024-byte limit as 128. */
+static void
+matrix_thread_memory_keeps_thread_elements(void)
+{
+   const char *body =
+      "%a = alloca [4 x [4 x %m]], align 256\n"
+      "%i = load i32, ptr addrspace(1) %out, align 4\n"
+      "%c = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float 2.0)\n"
+      "call void @llvm.lifetime.start.p0(i64 4096, ptr %a)\n"
+      "%p = getelementptr [4 x [4 x %m]], ptr %a, i64 0, i32 %i, i32 1, i32 0\n"
+      "store <64 x float> %c, ptr %p, align 256\n"
+      "%q = getelementptr [4 x [4 x %m]], ptr %a, i64 0, i64 2, i64 3\n"
+      "%v = load <64 x float>, ptr %q, align 256\n"
+      "%e = extractelement <64 x float> %v, i32 1\n"
+      "store float %e, ptr addrspace(1) %out, align 4\n"
+      "call void @llvm.lifetime.end.p0(i64 4096, ptr %a)\nret void\n";
+   nir_shader *shader = compiled(MATRIX_GLOBALS, body);
+   assert(shader->scratch_size == 128);
+   nir_opt_constant_folding(shader);
+   nir_intrinsic_instr *loads[1];
+   assert(intrinsics_of(shader, nir_intrinsic_load_scratch, loads, 1) == 1);
+   /* Matrix (2, 3) at byte (4 * 2 + 3) * 256, kept at 88. */
+   assert(nir_src_is_const(loads[0]->src[0]) && nir_src_as_uint(loads[0]->src[0]) == 88);
+   assert(loads[0]->def.num_components == 2 && loads[0]->def.bit_size == 32);
+   assert(count(shader, nir_intrinsic_store_scratch) == 1);
+   ralloc_free(shader);
+
+   /* A float inside a matrix, or a matrix at half its size, keeps the
+    * whole layout, which passes the limit. */
+   refused(MATRIX_GLOBALS,
+           "%a = alloca [4 x [4 x %m]], align 256\n"
+           "%c = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float 2.0)\n"
+           "store <64 x float> %c, ptr %a, align 256\n"
+           "%f = getelementptr [4 x [4 x %m]], ptr %a, i64 0, i64 0, i64 0, i32 0, i64 3\n"
+           "%e = load float, ptr %f, align 4\n"
+           "store float %e, ptr addrspace(1) %out, align 4\nret void\n",
+           &defaults, STELA_AIR_LIMIT);
+   refused(MATRIX_GLOBALS,
+           "%a = alloca [4 x [4 x %m]], align 256\n"
+           "%c = call <64 x float> @air.simdgroup_matrix_8x8_init_filled.v64f32.f32(float 2.0)\n"
+           "%h = getelementptr i8, ptr %a, i64 128\n"
+           "store <64 x float> %c, ptr %h, align 128\nret void\n",
+           &defaults, STELA_AIR_LIMIT);
+}
+
 /* A null pointer stands in for a device buffer's address, which is never
  * zero: a PHI or select joins them and equality compares them. An offset into
  * an allocation may be zero, so it never joins null. */
@@ -709,6 +760,7 @@ main(void)
 {
    glsl_type_singleton_init_or_ref();
    thread_memory_lowers_to_scratch();
+   matrix_thread_memory_keeps_thread_elements();
    memory_intrinsics_lower_to_chunks();
    null_joins_device_addresses();
    folded_offsets_off_null_reach_no_memory();

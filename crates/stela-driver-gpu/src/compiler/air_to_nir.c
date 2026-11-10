@@ -199,6 +199,9 @@ struct translator {
    uint64_t shared_layout_bound;
    unsigned private_allocations;
    uint64_t private_layout_bound;
+   /* Thread memory variables that hold only SIMD-group matrices, compacted
+    * by matrix_storage. */
+   struct set *matrix_storage;
    bool denorms_disable;
    bool fast_math;
    bool fp_checked;
@@ -1760,6 +1763,133 @@ module_global(struct translator *t, LLVMValueRef global)
    return value->def;
 }
 
+/* A SIMD-group matrix's LLVM type holds all 64 elements, but a thread uses
+ * only its thread elements 0 and 1: a 32nd of the type's size. */
+#define MATRIX_STORAGE_SHIFT 5
+
+/* `type`, or the member of a struct of one member, down to a SIMD-group
+ * matrix; NULL for anything else. */
+static LLVMTypeRef
+matrix_leaf(LLVMTypeRef type)
+{
+   unsigned bits;
+   while (LLVMGetTypeKind(type) == LLVMStructTypeKind && !LLVMIsOpaqueStruct(type) &&
+          LLVMCountStructElementTypes(type) == 1)
+      type = LLVMStructGetTypeAtIndex(type, 0);
+   return stela_air_matrix_type(type, &bits) ? type : NULL;
+}
+
+/* Folds a GEP's offsets into *steps, the greatest common divisor of every
+ * constant offset and dynamic stride it adds. False for a GEP whose offset
+ * this cannot bound. */
+static bool
+matrix_gep_steps(struct translator *t, LLVMValueRef gep, uint64_t *steps)
+{
+   LLVMTypeRef type = LLVMGetGEPSourceElementType(gep);
+   unsigned operands = LLVMGetNumOperands(gep);
+   for (unsigned i = 1; i < operands; i++) {
+      LLVMValueRef index = LLVMGetOperand(gep, i);
+      if (LLVMGetTypeKind(LLVMTypeOf(index)) != LLVMIntegerTypeKind || !LLVMTypeIsSized(type))
+         return false;
+      uint64_t stride;
+      if (i == 1) {
+         stride = LLVMABISizeOfType(t->layout, type);
+      } else if (LLVMGetTypeKind(type) == LLVMStructTypeKind) {
+         if (!LLVMIsAConstantInt(index) || LLVMIsOpaqueStruct(type) ||
+             LLVMConstIntGetZExtValue(index) >= LLVMCountStructElementTypes(type))
+            return false;
+         unsigned field = (unsigned)LLVMConstIntGetZExtValue(index);
+         *steps = gcd(*steps, LLVMOffsetOfElement(t->layout, type, field));
+         type = LLVMStructGetTypeAtIndex(type, field);
+         continue;
+      } else if (LLVMGetTypeKind(type) == LLVMArrayTypeKind) {
+         type = LLVMGetElementType(type);
+         stride = LLVMABISizeOfType(t->layout, type);
+      } else if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
+         type = LLVMGetElementType(type);
+         stride = LLVMStoreSizeOfType(t->layout, type);
+      } else {
+         return false;
+      }
+      if (LLVMIsAConstantInt(index)) {
+         int64_t offset = LLVMConstIntGetSExtValue(index) * (int64_t)stride;
+         *steps = gcd(*steps, (uint64_t)(offset < 0 ? -offset : offset));
+      } else {
+         *steps = gcd(*steps, stride);
+      }
+   }
+   return true;
+}
+
+/* Whether every use of `pointer`, through GEPs and bitcasts, is a lifetime
+ * marker or a plain load or store of a whole *matrix (one matrix type
+ * throughout), folding GEP offsets into *steps. */
+static bool
+matrix_uses(struct translator *t, LLVMValueRef pointer, LLVMTypeRef *matrix, uint64_t *steps,
+            unsigned depth)
+{
+   if (depth > 16)
+      return false;
+   for (LLVMUseRef use = LLVMGetFirstUse(pointer); use; use = LLVMGetNextUse(use)) {
+      LLVMValueRef user = LLVMGetUser(use);
+      if (!LLVMIsAInstruction(user))
+         return false;
+      LLVMTypeRef leaf = NULL;
+      switch (LLVMGetInstructionOpcode(user)) {
+      case LLVMLoad:
+         leaf = matrix_leaf(LLVMTypeOf(user));
+         break;
+      case LLVMStore:
+         if (LLVMGetOperand(user, 1) != pointer || LLVMGetOperand(user, 0) == pointer)
+            return false;
+         leaf = matrix_leaf(LLVMTypeOf(LLVMGetOperand(user, 0)));
+         break;
+      case LLVMBitCast:
+         if (!matrix_uses(t, user, matrix, steps, depth + 1))
+            return false;
+         continue;
+      case LLVMGetElementPtr:
+         if (LLVMGetOperand(user, 0) != pointer || !matrix_gep_steps(t, user, steps) ||
+             !matrix_uses(t, user, matrix, steps, depth + 1))
+            return false;
+         continue;
+      case LLVMCall: {
+         size_t length = 0;
+         LLVMValueRef callee = LLVMGetCalledValue(user);
+         const char *name = LLVMIsAFunction(callee) ? LLVMGetValueName2(callee, &length) : "";
+         if (strncmp(name, "llvm.lifetime.", strlen("llvm.lifetime.")))
+            return false;
+         continue;
+      }
+      default:
+         return false;
+      }
+      if (!leaf || LLVMGetVolatile(user) || LLVMGetOrdering(user) != LLVMAtomicOrderingNotAtomic ||
+          (*matrix && *matrix != leaf))
+         return false;
+      *matrix = leaf;
+   }
+   return true;
+}
+
+/* Whether `alloca` holds only SIMD-group matrices of one type, each loaded
+ * and stored whole at a multiple of the matrix's size. Such storage keeps
+ * only each matrix's thread elements, at a 32nd of every offset, as Apple's
+ * GPUs keep a matrix in its SIMD-group's registers. */
+static bool
+matrix_storage(struct translator *t, LLVMValueRef alloca)
+{
+   LLVMTypeRef matrix = NULL;
+   uint64_t steps = 0;
+   if (!matrix_uses(t, alloca, &matrix, &steps, 0) || !matrix)
+      return false;
+   unsigned bits;
+   stela_air_matrix_type(matrix, &bits);
+   uint64_t bytes = LLVMABISizeOfType(t->layout, matrix);
+   /* Elements 0 and 1 fill exactly the compacted slot of each matrix. */
+   return bytes == (2u * bits / 8) << MATRIX_STORAGE_SHIFT && steps % bytes == 0;
+}
+
 /* An entry-block alloca of a fixed size: thread memory. */
 static struct value *
 private_allocation(struct translator *t, LLVMValueRef alloca)
@@ -1784,22 +1914,32 @@ private_allocation(struct translator *t, LLVMValueRef alloca)
    uint64_t element = LLVMABISizeOfType(t->layout, type), length = LLVMConstIntGetZExtValue(count);
    uint64_t limit = t->options->max_private_bytes;
    unsigned alignment = LLVMGetAlignment(alloca);
-   if (!element || !length || length > limit / element ||
-       !alignment || (alignment & (alignment - 1)) ||
-       t->private_layout_bound + element * length + alignment - 1 > limit) {
+   /* The view's size is 32-bit; the layout is held to the limit below. */
+   if (!element || !length || length > UINT32_MAX / element ||
+       !alignment || (alignment & (alignment - 1))) {
       fail(t, STELA_AIR_LIMIT, "thread memory size/alignment exceeds the target limit");
       return NULL;
    }
    uint64_t size = element * length;
+   /* Matrix storage keeps a 32nd of its bytes: each matrix's thread elements. */
+   bool matrices = matrix_storage(t, alloca);
+   uint64_t stored = matrices ? DIV_ROUND_UP(size, 1u << MATRIX_STORAGE_SHIFT) : size;
+   unsigned stored_alignment = matrices ? MIN2(alignment, 8u) : alignment;
+   if (t->private_layout_bound + stored + stored_alignment - 1 > limit) {
+      fail(t, STELA_AIR_LIMIT, "thread memory size/alignment exceeds the target limit");
+      return NULL;
+   }
    nir_variable *var = nir_local_variable_create(t->b.impl,
-      glsl_array_type(glsl_uint8_t_type(), (unsigned)size, 1), "air.private");
-   if (!var) {
+      glsl_array_type(glsl_uint8_t_type(), (unsigned)stored, 1), "air.private");
+   if (!var || (matrices && !t->matrix_storage &&
+                !(t->matrix_storage = _mesa_pointer_set_create(t->cfg_scratch))) ||
+       (matrices && !_mesa_set_add(t->matrix_storage, var))) {
       fail(t, STELA_AIR_ALLOCATION, "thread memory variable allocation failed");
       return NULL;
    }
-   var->data.alignment = alignment;
+   var->data.alignment = stored_alignment;
    t->private_allocations++;
-   t->private_layout_bound += size + alignment - 1;
+   t->private_layout_bound += stored + stored_alignment - 1;
    value = storage_root(t, alloca, STELA_AIR_READ_WRITE);
    if (value) {
       value->storage = var;
@@ -2017,8 +2157,15 @@ variable_access(struct translator *t, const struct value *address, nir_def *stor
    struct memory_guard guard;
    if (!storage_guard_begin(t, address, bytes, &guard))
       return NULL;
+   nir_def *offset = nir_u2u32(b, address->def);
+   if (t->matrix_storage && _mesa_set_search(t->matrix_storage, address->storage)) {
+      /* A matrix's thread elements, at a 32nd of its offset: a multiple of
+       * their size (matrix_storage). */
+      offset = nir_ushr_imm(b, offset, MATRIX_STORAGE_SHIFT);
+      alignment = MIN2(bytes, address->storage->data.alignment);
+   }
    nir_deref_instr *byte = nir_build_deref_array(b, nir_build_deref_var(b, address->storage),
-                                                nir_u2u32(b, address->def));
+                                                offset);
    const struct glsl_type *type = glsl_vector_type(glsl_get_base_type(glsl_uintN_t_type(bits)), components);
    nir_deref_instr *typed = nir_build_deref_cast_with_alignment(b, &byte->def,
       address->storage->data.mode, type, bytes, alignment, 0);
