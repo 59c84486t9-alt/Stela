@@ -1,5 +1,5 @@
 //! PAC bit layouts. The process profile is VA47 with instruction TBI off and
-//! data TBI on; a translation regime can select others (Arm ARM `AddPAC` and
+//! data TBI on in the lower range; a translation regime can select others (Arm ARM `AddPAC` and
 //! `Auth`: the bottom PAC bit is 64 - TnSZ of the half that bit 55, or bit 63
 //! without TBI, selects; the top bit is 55 with TBI and 63 without).
 const ADDRESS_BITS: u32 = 47;
@@ -50,6 +50,9 @@ pub struct Layout {
     pub address_bits: u32,
     /// 55 when the top byte is ignored, 63 otherwise.
     pub top_shift: u32,
+    /// The bit `AddPAC` extends and keeps at bit 55: 55 when either range
+    /// ignores the top byte, 63 otherwise (`selbit`).
+    pub select_shift: u32,
 }
 
 impl Layout {
@@ -70,14 +73,16 @@ impl Layout {
 }
 
 impl Domain {
-    /// The process profile's fixed layout.
+    /// The process profile's layout of a lower-range pointer.
     pub const fn layout(self) -> Layout {
+        let top_shift = match self {
+            Self::Instruction => INSTRUCTION_TOP_SHIFT,
+            Self::Data => DATA_TOP_SHIFT,
+        };
         Layout {
             address_bits: ADDRESS_BITS,
-            top_shift: match self {
-                Self::Instruction => INSTRUCTION_TOP_SHIFT,
-                Self::Data => DATA_TOP_SHIFT,
-            },
+            top_shift,
+            select_shift: top_shift,
         }
     }
     #[cfg(test)]
@@ -91,7 +96,7 @@ impl Domain {
 }
 
 pub fn signing_input(layout: Layout, pointer: u64) -> u64 {
-    let extension = if pointer & (1 << layout.top_shift) != 0 {
+    let extension = if pointer & (1 << layout.select_shift) != 0 {
         layout.extension_mask()
     } else {
         0
@@ -175,6 +180,7 @@ mod tests {
         let kernel = Layout {
             address_bits: 39,
             top_shift: 63,
+            select_shift: 63,
         };
         assert_eq!(kernel.pac_mask(), 0xff7f_ff80_0000_0000);
         assert_eq!(kernel.poison_shift(), 61);
@@ -201,6 +207,7 @@ mod tests {
         let tagged = Layout {
             address_bits: 39,
             top_shift: 55,
+            select_shift: 55,
         };
         assert_eq!(tagged.pac_mask(), 0x007f_ff80_0000_0000);
         assert_eq!(tagged.poison_shift(), 53);

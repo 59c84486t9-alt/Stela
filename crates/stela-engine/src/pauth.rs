@@ -1,7 +1,7 @@
 //! Software pointer authentication (QARMA5) for arm64e.
 //!
 //! The default profile is PAuth1 with a 47-bit VA, instruction TBI off and data
-//! TBI on. Signing a pointer with an invalid extension corrupts the PAC; a failed
+//! TBI on in the lower range only (`PROCESS_TCR`). Signing a pointer with an invalid extension corrupts the PAC; a failed
 //! authentication returns the classic poisoned pointer. Optional profiles add
 //! PAuth2 XOR insertion and FPAC/FPACCOMBINE faults. The caller owns the keys and
 //! binds the context to its address space. QARMA (`qarma`) never indexes memory
@@ -184,9 +184,7 @@ impl Context {
     /// (`CalculateBottomPACBit(ptr<55>)`), since a signed pointer's bit 63 is
     /// PAC whenever the top byte is not ignored.
     fn layout(&self, domain: policy::Domain, pointer: u64, signing: bool) -> policy::Layout {
-        let Some(tcr) = self.regime else {
-            return domain.layout();
-        };
+        let tcr = self.regime.unwrap_or(PROCESS_TCR);
         // EffectiveTBI selects TBI0/TBI1 by bit 55; TBIDn exempts instructions.
         let ignores_top_byte = |upper: bool| {
             let (tbi, tbid) = if upper { (38, 52) } else { (37, 51) };
@@ -211,6 +209,7 @@ impl Context {
         policy::Layout {
             address_bits: 64 - tnsz as u32,
             top_shift: if tbi { 55 } else { 63 },
+            select_shift: select,
         }
     }
     pub fn version(&self) -> Version {
@@ -233,7 +232,8 @@ impl Context {
         self.keys.words[key.index()].is_some()
     }
 
-    /// InsertPAC with fixed VA47 instruction-TBI-off/data-TBI-on controls.
+    /// InsertPAC with the process's VA47 controls (`PROCESS_TCR`): instruction
+    /// TBI off, data TBI on in the lower range.
     /// Data keeps its tag in both QARMA input and output; it is not ignored by
     /// authentication. Null is signed. Classic invalid extension corrupts
     /// PAC bit62 (instruction) or54 (data), following June2026 Arm ASL, rather
@@ -336,6 +336,14 @@ impl Context {
         self.authenticate(Key::Ib, pointer, modifier)
     }
 }
+
+/// The EL0 regime of a macOS process: T0SZ = T1SZ = 17 (VA47), TBI0 with
+/// TBID0, so lower-range data pointers keep their top byte and instruction
+/// pointers do not, and TBI1 clear, so upper-range pointers keep no top
+/// byte. An M1 Pro strips XPACD 0x00ff7fff12345678 to 0xffffffff12345678
+/// and 0x5a3c7fff12345678 to 0x5a007fff12345678 (`cargo xtask
+/// cpu-reference`).
+const PROCESS_TCR: u64 = 17 | 17 << 16 | 1 << 37 | 1 << 51;
 
 /// TnSZ limits of the PAC field without FEAT_TTST or 52-bit VAs.
 const MIN_TNSZ: u64 = 16;

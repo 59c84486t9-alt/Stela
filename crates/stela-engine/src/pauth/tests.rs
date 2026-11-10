@@ -411,23 +411,25 @@ fn generic_domains_match_original_canonical_sign_auth_and_xpac_vectors() -> Resu
             0x7564ffffffffffff,
             0x0064ffffffffffff,
         ),
+        // The upper range ignores no top byte (TBI1 clear), so data
+        // pointers there take the instruction layout.
         (
             0xffff800000001400,
             0x0000000000000000,
             0x3cc4800000001400,
-            0xffc4800000001400,
+            0x3cc4800000001400,
         ),
         (
             0xffff800000001400,
             0x0000000000002000,
             0xf8a9800000001400,
-            0xffa9800000001400,
+            0xf8a9800000001400,
         ),
         (
             0xffff800000001400,
             0xffffffffffffffff,
             0xb598800000001400,
-            0xff98800000001400,
+            0xb598800000001400,
         ),
     ];
     for (pointer, modifier, instruction, data) in vectors {
@@ -454,9 +456,6 @@ fn auth_and_strip_keep_the_tag() -> Result<()> {
         (0x8000000000001400, 0x0000000000000000, 0x805d800000001400),
         (0x8000000000001400, 0x0000000000002000, 0x8026800000001400),
         (0x8000000000001400, 0xffffffffffffffff, 0x807a800000001400),
-        (0x7aff800000001400, 0x0000000000000000, 0x7abe000000001400),
-        (0x7aff800000001400, 0x0000000000002000, 0x7acb000000001400),
-        (0x7aff800000001400, 0xffffffffffffffff, 0x7ad1000000001400),
     ];
     for (pointer, modifier, signed) in vectors {
         for key in [Key::Da, Key::Db] {
@@ -530,10 +529,12 @@ fn data_invalid_extension_corruption_follows_june_asl_not_old_emulator() -> Resu
     let context = Context::new(73, all_keys());
     for key in [Key::Da, Key::Db] {
         for tag in [0u64, 0x80, 0x7a, 0xff] {
-            for bit in 47..56 {
+            // Lower-range pointers: the upper range ignores no top byte
+            // (`upper_range_data_pointers_keep_no_top_byte`).
+            for bit in 47..55 {
                 for pointer in [
                     (tag << 56) | (1 << bit) | 0x1400,
-                    (tag << 56) | (DATA_EXTENSION_MASK & !(1 << bit)) | 0x1400,
+                    (tag << 56) | (DATA_EXTENSION_MASK & !(1 << bit) & !REGION_BIT) | 0x1400,
                 ] {
                     let canonical = policy::authentication_input(key_domain(key).layout(), pointer);
                     let signed = context.sign(key, pointer, 0x2000)?;
@@ -544,6 +545,56 @@ fn data_invalid_extension_corruption_follows_june_asl_not_old_emulator() -> Resu
                     assert_eq!(failed.pointer, (canonical & !(3 << 53)) | (poison << 53));
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// macOS leaves TBI1 clear at EL0: an M1 Pro strips XPACD
+/// 0x00ff7fff12345678 to 0xffffffff12345678 but keeps the tag of
+/// 0x5a3c7fff12345678 (`cargo xtask cpu-reference`). Upper-range data
+/// pointers take the PAC field of instruction pointers, but since the
+/// lower range ignores it, `AddPAC` still extends bit 55 (`selbit`).
+#[test]
+fn upper_range_data_pointers_keep_no_top_byte() -> Result<()> {
+    const UPPER: u64 = 0xffff_8000_0000_1400;
+    let context = Context::new(73, all_keys());
+    assert_eq!(
+        context.strip(Key::Da, 0x00ff_7fff_1234_5678),
+        0xffff_ffff_1234_5678
+    );
+    assert_eq!(
+        context.strip(Key::Db, 0x5a3c_7fff_1234_5678),
+        0x5a00_7fff_1234_5678
+    );
+    assert_eq!(
+        context.stripping_masks(true)[1],
+        context.stripping_masks(false)[1]
+    );
+    for modifier in MODIFIERS {
+        let signed = context.sign(Key::Da, UPPER, modifier)?;
+        assert_eq!(signed, context.sign(Key::Ia, UPPER, modifier)?);
+        assert_eq!(
+            context.authenticate(Key::Da, signed, modifier)?,
+            AuthResult {
+                pointer: UPPER,
+                authenticated: true,
+            }
+        );
+        assert_eq!(context.strip(Key::Da, signed), UPPER);
+        // Bit 55 set and bits 63:47 mixed: the PAC of the bit-55
+        // extension, with PAC bit 62 inverted, so authentication fails
+        // with the poison in bits 62:61.
+        for pointer in [0x7aff_8000_0000_1400, 0x0080_0000_0000_1400] {
+            let corrupted = context.sign(Key::Da, pointer, modifier)?;
+            assert_eq!(corrupted, signed ^ 1 << 62);
+            assert_eq!(
+                context.authenticate(Key::Da, corrupted, modifier)?,
+                AuthResult {
+                    pointer: UPPER & !(3 << 61) | 1 << 61,
+                    authenticated: false,
+                }
+            );
         }
     }
     Ok(())
