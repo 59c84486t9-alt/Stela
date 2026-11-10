@@ -1,10 +1,7 @@
 //! Native TLS certificate time: the firmware's real-time clock read at boot,
 //! carried forward on the invariant TSC, as Linux keeps time from the RTC
 //! without NTP.
-use crate::{
-    firmware::TscSource,
-    handoff::{Handoff, RtcReading},
-};
+use crate::handoff::{Handoff, RtcReading};
 use alloc::{boxed::Box, sync::Arc};
 use stela_boot_core::firmware_time::interval;
 use stela_runtime::net::TlsUnavailable;
@@ -24,12 +21,7 @@ pub(super) fn native(handoff: &Handoff) -> Result<Arc<stela_tls::ClientConfig>, 
     let clock = RtcClock {
         reading,
         tsc_hz: handoff.tsc_hz,
-        tolerance_ppm: match handoff.tsc_source {
-            // A crystal's tolerance and leaf 16h's rounded base frequency.
-            TscSource::Cpuid => 1_000,
-            // The firmware stall's own error.
-            TscSource::Stall => 10_000,
-        },
+        tolerance_ppm: handoff.tsc_tolerance_ppm,
     };
     stela_tls::time::client_config_with_interval(owner, Arc::new(clock)).map_err(
         |error| match error {

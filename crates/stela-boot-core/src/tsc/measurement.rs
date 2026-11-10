@@ -8,7 +8,7 @@ const RETRIES: usize = 5;
 const MAX_POLLS: usize = 65_536;
 // Pinned Linux tsc.c tsc_read_refs default disturbance threshold. No bootstrap
 // or nominal frequency is required to decide whether a bracket is disturbed.
-const MAX_READ_CYCLES: u64 = 0x20000;
+pub(super) const MAX_READ_CYCLES: u64 = 0x20000;
 const WINDOW_FS: u64 = 1_000_000_000_000; // one millisecond, active spin only
 #[derive(Clone, Copy, Debug)]
 pub struct WindowEvidence {
@@ -29,7 +29,7 @@ impl Calibration {
         self.intersection
     }
 }
-fn stable_sample<E: From<Error>>(
+pub(super) fn stable_sample<E: From<Error>>(
     read: &mut impl FnMut() -> Result<Sample, E>,
 ) -> Result<Sample, E> {
     for _ in 0..RETRIES {

@@ -93,6 +93,20 @@ impl RateWindow {
         max_read_cycles: u64,
     ) -> Result<Self, Error> {
         let reference_ticks = wrapped_delta(start.reference, end.reference, reference_mask)?;
+        Self::from_ticks(start, end, reference_ticks, scale, max_read_cycles)
+    }
+    /// The same bounds over `reference_ticks` the caller counted between
+    /// the two samples, across any number of reference wraps.
+    pub fn from_ticks(
+        start: Sample,
+        end: Sample,
+        reference_ticks: u64,
+        scale: ReferenceScale,
+        max_read_cycles: u64,
+    ) -> Result<Self, Error> {
+        if reference_ticks == 0 {
+            return Err(Error::NoProgress);
+        }
         if max_read_cycles == 0 {
             return Err(Error::InvalidRate);
         }

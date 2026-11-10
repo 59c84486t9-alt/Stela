@@ -357,6 +357,14 @@ pub(crate) fn fresh_counter() -> u64 {
     counter_at_tsc(state, rdtsc())
 }
 
+/// Count this processor's 24 MHz clock from a base its software TSC
+/// correction moved (`tsc::sync::corrected_base`): its raw counter reads
+/// `offset` ticks behind the BSP's. Runs on the AP before it is ready.
+pub(crate) fn correct_tsc_base(offset: i64) {
+    let state = state();
+    state.tsc_base = stela_boot_core::tsc::sync::corrected_base(state.tsc_base, offset);
+}
+
 fn counter_at_tsc(state: &State, tsc: u64) -> u64 {
     let ticks = tsc.saturating_sub(state.tsc_base);
     ((u128::from(ticks) * u128::from(state.counter_per_tsc)) >> 64) as u64

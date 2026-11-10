@@ -10,8 +10,11 @@ pub use minimum::LowerScale;
 mod features;
 mod measurement;
 mod rate;
+mod reference;
 pub use rate::NominalRate;
+pub use reference::{Calibrated, Measured, Reference, WINDOW_NS, Window, measure, settle};
 mod sequence;
+pub mod sync;
 pub use calibration::{RateWindow, RationalRate, ReferenceScale, Sample, wrapped_delta};
 pub use features::{
     CounterPolicy, Deadline, HpetPowerConstraint, RateRequirement, Reliability, Serialization,

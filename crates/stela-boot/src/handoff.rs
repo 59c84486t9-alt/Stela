@@ -43,10 +43,12 @@ pub struct Handoff {
     /// The partition holding the USB's boot log the loader keeps
     /// (`log_file`), which the engine writes on to.
     pub log_partition: Option<[u8; 16]>,
-    /// TSC ticks per second, measured against the firmware's Stall.
+    /// TSC ticks per second (`firmware::tsc_hz`).
     pub tsc_hz: u64,
-    /// How `tsc_hz` was found, which bounds its error.
+    /// How `tsc_hz` was found.
     pub tsc_source: crate::firmware::TscSource,
+    /// The most `tsc_hz` may be off by, in parts per million.
+    pub tsc_tolerance_ppm: u32,
     /// IA32_APIC_BASE as the firmware left it.
     pub apic_base: u64,
     /// Immutable copied UEFI processor identities and per-physical-core raw

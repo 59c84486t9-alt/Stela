@@ -6,13 +6,17 @@
 //! PE's core and checked on another's. Firmware may leave the cores'
 //! counters apart. As `check_tsc_sync_source` and `check_tsc_sync_target`
 //! do, the BSP and the AP take turns reading their counters under one lock
-//! for [`ROUND_MILLIS`], each noting the most the shared last value went
-//! back. A clean round ends it. Otherwise the AP moves its own counter by
-//! the warp through `IA32_TSC_ADJUST`, forward when it saw the counter go
-//! back and so ran behind, else back, and tries again. Linux finds the
-//! sync mechanism's own overhead leaves at most a third round needed; an AP
-//! whose counter still differs after [`ROUNDS`], or which has no
-//! `IA32_TSC_ADJUST` to correct it with, is refused.
+//! for a round (`stela_boot_core::tsc::sync::round_millis`), each noting
+//! the most the shared last value went back. A clean round ends it.
+//! Otherwise the AP moves its own counter by the warp through
+//! `IA32_TSC_ADJUST`, forward when it saw the counter go back and so ran
+//! behind, else back, and tries again. Linux finds the sync mechanism's own
+//! overhead leaves at most a third round needed. Where the AP has no
+//! `IA32_TSC_ADJUST`, or its writes do not converge in [`ROUNDS`], the AP
+//! instead adds a software offset to the counter it reads in further
+//! rounds, and once those agree counts its guest clock from a base moved by
+//! that offset (`tsc::sync::corrected_base`). An AP that agrees in neither
+//! way is refused.
 use crate::Result;
 use crate::cpu::msr::TSC_ADJUST;
 use core::{
@@ -22,11 +26,10 @@ use core::{
     },
     sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
 };
+use stela_boot_core::tsc::sync::correction;
 use stela_contracts::refuse;
 
-/// `IA32_TSC_ADJUST`.
-/// Linux's `loop_timeout` for cores of different packages or modules.
-const ROUND_MILLIS: u64 = 20;
+/// Rounds of each correction, through `IA32_TSC_ADJUST` and in software.
 const ROUNDS: u32 = 4;
 const BSP: usize = 0;
 const AP: usize = 1;
@@ -43,9 +46,22 @@ pub(super) struct Sync {
     warps: [AtomicU64; 2],
     /// Set by the AP when it has decided, before the last rendezvous.
     finished: AtomicBool,
-    /// What the AP added to its `IA32_TSC_ADJUST`, and its rounds.
+    /// What the AP added to its `IA32_TSC_ADJUST`, its software offset,
+    /// and its rounds.
     adjusted: AtomicI64,
+    offset: AtomicI64,
     rounds: AtomicU32,
+}
+
+/// How an AP's counter came to agree with the BSP's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Outcome {
+    /// Added to its `IA32_TSC_ADJUST`.
+    pub(super) adjusted: i64,
+    /// Added in software to every value it reads: its counter base moves by
+    /// this much.
+    pub(super) offset: i64,
+    pub(super) rounds: u32,
 }
 
 /// The counter, read after every earlier load and store, as Linux's
@@ -58,15 +74,17 @@ fn ordered() -> u64 {
 }
 
 impl Sync {
-    pub(super) fn new(tsc_hz: u64) -> Self {
+    /// A round of `round_millis` (`tsc::sync::round_millis`).
+    pub(super) fn new(tsc_hz: u64, round_millis: u64) -> Self {
         Self {
-            round_ticks: tsc_hz / 1000 * ROUND_MILLIS,
+            round_ticks: tsc_hz / 1000 * round_millis,
             arrivals: AtomicU32::new(0),
             lock: AtomicBool::new(false),
             last: AtomicU64::new(0),
             warps: [AtomicU64::new(0), AtomicU64::new(0)],
             finished: AtomicBool::new(false),
             adjusted: AtomicI64::new(0),
+            offset: AtomicI64::new(0),
             rounds: AtomicU32::new(0),
         }
     }
@@ -79,9 +97,9 @@ impl Sync {
         }
     }
 
-    /// Read the counter in turn with the other core for a round, noting
-    /// the most the shared value went back as `side` saw it.
-    fn measure(&self, side: usize) {
+    /// Read the counter, moved by `offset`, in turn with the other core for
+    /// a round, noting the most the shared value went back as `side` saw it.
+    fn measure(&self, side: usize, offset: i64) {
         let started = ordered();
         loop {
             while self
@@ -92,13 +110,13 @@ impl Sync {
                 core::hint::spin_loop();
             }
             let previous = self.last.load(Ordering::Relaxed);
-            let now = ordered();
+            let now = ordered().wrapping_add(offset as u64);
             self.last.store(now, Ordering::Relaxed);
             self.lock.store(false, Ordering::Release);
             if now < previous {
                 self.warps[side].fetch_max(previous - now, Ordering::Relaxed);
             }
-            if now.wrapping_sub(started) >= self.round_ticks {
+            if now.wrapping_sub(offset as u64).wrapping_sub(started) >= self.round_ticks {
                 return;
             }
         }
@@ -110,7 +128,7 @@ impl Sync {
         loop {
             point += 1;
             self.meet(point);
-            self.measure(BSP);
+            self.measure(BSP, 0);
             point += 1;
             self.meet(point);
             point += 1;
@@ -122,49 +140,48 @@ impl Sync {
     }
 
     /// The AP's part, on the AP: rounds until its counter agrees with the
-    /// BSP's, correcting it between them.
-    pub(super) fn target(&self) -> Result<()> {
+    /// BSP's, correcting it between them through `IA32_TSC_ADJUST` while
+    /// that converges, else in software. Returns the software offset.
+    pub(super) fn target(&self) -> Result<i64> {
         // CPUID.(EAX=7,ECX=0):EBX[1] enumerates IA32_TSC_ADJUST.
         let adjustable = __cpuid_count(0, 0).eax >= 7 && __cpuid_count(7, 0).ebx & 1 << 1 != 0;
         // SAFETY: enumerated above, and read only then.
         let base = adjustable.then(|| unsafe { TSC_ADJUST.read() });
-        let mut adjusted = 0i64;
+        let (mut adjusted, mut offset) = (0i64, 0i64);
         let mut point = 0;
-        for round in 1..=ROUNDS {
+        for round in 1..=2 * ROUNDS {
             self.last.store(0, Ordering::Relaxed);
             for warp in &self.warps {
                 warp.store(0, Ordering::Relaxed);
             }
             point += 1;
             self.meet(point);
-            self.measure(AP);
+            self.measure(AP, offset);
             point += 1;
             self.meet(point);
             let seen_by_bsp = self.warps[BSP].load(Ordering::Relaxed);
             let seen_here = self.warps[AP].load(Ordering::Relaxed);
-            let outcome = match base {
-                _ if seen_by_bsp == 0 && seen_here == 0 => Some(Ok(())),
-                None => Some(Err(refuse!(
-                    "AP TSC differs from the BSP's and has no IA32_TSC_ADJUST"
-                ))),
-                Some(_) if round == ROUNDS => Some(Err(refuse!(
-                    "AP TSC still differs from the BSP's after adjustment"
-                ))),
-                Some(base) => {
-                    // Behind when this core saw the counter go back, else
-                    // ahead.
-                    adjusted += if seen_here != 0 {
-                        seen_here as i64
-                    } else {
-                        -(seen_by_bsp as i64)
-                    };
-                    // SAFETY: enumerated; Linux writes the same register.
-                    unsafe { TSC_ADJUST.write(base.wrapping_add(adjusted as u64)) };
-                    None
+            let outcome = if seen_by_bsp == 0 && seen_here == 0 {
+                Some(Ok(offset))
+            } else if round == 2 * ROUNDS {
+                Some(Err(refuse!(
+                    "AP TSC still differs from the BSP's after hardware and software correction"
+                )))
+            } else {
+                let step = correction(seen_here, seen_by_bsp);
+                match base {
+                    Some(base) if round < ROUNDS => {
+                        adjusted = adjusted.wrapping_add(step);
+                        // SAFETY: enumerated; Linux writes the same register.
+                        unsafe { TSC_ADJUST.write(base.wrapping_add(adjusted as u64)) };
+                    }
+                    _ => offset = offset.wrapping_add(step),
                 }
+                None
             };
             if let Some(outcome) = outcome {
                 self.adjusted.store(adjusted, Ordering::Relaxed);
+                self.offset.store(offset, Ordering::Relaxed);
                 self.rounds.store(round, Ordering::Relaxed);
                 self.finished.store(true, Ordering::Release);
                 point += 1;
@@ -177,12 +194,12 @@ impl Sync {
         unreachable!("the last round decides")
     }
 
-    /// What the AP added to its `IA32_TSC_ADJUST` and in how many rounds,
-    /// once [`Self::source`] returned.
-    pub(super) fn outcome(&self) -> (i64, u32) {
-        (
-            self.adjusted.load(Ordering::Relaxed),
-            self.rounds.load(Ordering::Relaxed),
-        )
+    /// How the AP's counter came to agree, once [`Self::source`] returned.
+    pub(super) fn outcome(&self) -> Outcome {
+        Outcome {
+            adjusted: self.adjusted.load(Ordering::Relaxed),
+            offset: self.offset.load(Ordering::Relaxed),
+            rounds: self.rounds.load(Ordering::Relaxed),
+        }
     }
 }

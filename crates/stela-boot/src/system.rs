@@ -868,6 +868,7 @@ fn load(
             log_partition: log.map(|guid| guid.0),
             tsc_hz,
             tsc_source: crate::firmware::tsc_source(),
+            tsc_tolerance_ppm: crate::firmware::tsc_tolerance_ppm(),
             apic_base,
             native_processors,
             native_resources,
