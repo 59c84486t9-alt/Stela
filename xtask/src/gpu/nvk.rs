@@ -30,7 +30,9 @@ use std::{
 
 /// What NVK needs and nothing else: no window system, no cache on
 /// disk and no host compiler. NVK's OpenCL kernels are `compat/mesa/nvkcl.c`, so
-/// the tools that would build them are never run.
+/// the tools that would build them are never run. A release build: NDEBUG drops
+/// NIR validation after every pass and NAK's debug assertions, which cost the
+/// image compile time and heap; the host compiler lane keeps them.
 const OPTIONS: [&str; 21] = [
     "-Dcpp_rtti=false",
     "-Dvulkan-drivers=nouveau",
@@ -52,7 +54,7 @@ const OPTIONS: [&str; 21] = [
     "-Dtools=",
     "-Dvideo-codecs=",
     "-Dexpat=disabled",
-    "-Dbuildtype=debugoptimized",
+    "-Dbuildtype=release",
 ];
 /// The Vulkan drivers the image links, as Meson's targets.
 const DRIVERS: [&str; 1] = ["src/nouveau/vulkan/libvulkan_nouveau.so"];
