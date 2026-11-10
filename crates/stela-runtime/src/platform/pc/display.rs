@@ -100,6 +100,24 @@ pub fn native(edid: &[u8]) -> Option<(u32, u32)> {
     (width != 0 && height != 0).then_some((width, height))
 }
 
+/// The smallest image an EDID's size is believed for: a 7" panel's width.
+/// Projectors and TVs report 0 or an aspect ratio in centimetres.
+const MINIMUM_SIZE_MM: (u32, u32) = (100, 50);
+
+/// The image size in millimetres an EDID reports: its preferred timing's,
+/// else the base block's centimetres (E-EDID 1.4 sections 3.6.2 and
+/// 3.10.2). `None` when neither is a plausible monitor size.
+pub fn physical_size(edid: &[u8]) -> Option<(u32, u32)> {
+    let d = preferred_timing(edid)?;
+    let plausible =
+        |(w, h): (u32, u32)| (w >= MINIMUM_SIZE_MM.0 && h >= MINIMUM_SIZE_MM.1).then_some((w, h));
+    plausible((
+        u32::from(d[12]) | u32::from(d[14] >> 4) << 8,
+        u32::from(d[13]) | u32::from(d[14] & 0xf) << 8,
+    ))
+    .or_else(|| plausible((u32::from(edid[21]) * 10, u32::from(edid[22]) * 10)))
+}
+
 /// The refresh of an EDID's preferred timing in millihertz, rounded: its
 /// pixel clock over its total pixels, active and blanking, a frame (a
 /// field, for an interlaced timing, whose descriptor counts field lines).
@@ -183,6 +201,36 @@ mod tests {
             height,
             drawable: true,
         }
+    }
+
+    #[test]
+    fn a_monitors_size_comes_from_its_timing_else_its_base_block() {
+        let mut e = stela_soc::dcp::modes::edid_sized(
+            ScanoutMode {
+                width: 3840,
+                height: 2160,
+                format: PixelFormat::Bgra8888,
+            },
+            60_000,
+            Some((597, 336)),
+        )
+        .unwrap();
+        assert_eq!(physical_size(&e), Some((597, 336)));
+        // A timing without a size leaves the base block's centimetres.
+        e[54 + 12..54 + 15].fill(0);
+        reseal(&mut e);
+        assert_eq!(physical_size(&e), Some((600, 340)));
+        // A projector's aspect ratio is no size.
+        e[21] = 16;
+        e[22] = 0;
+        reseal(&mut e);
+        assert_eq!(physical_size(&e), None);
+        assert_eq!(physical_size(&e[..64]), None);
+    }
+
+    fn reseal(e: &mut [u8; 128]) {
+        e[127] = 0;
+        e[127] = 0u8.wrapping_sub(e.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
     }
 
     /// A base block whose preferred timing is `width` by `height`, built by

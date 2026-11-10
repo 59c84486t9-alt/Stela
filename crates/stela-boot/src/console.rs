@@ -131,6 +131,8 @@ pub struct Framebuffer {
     firmware: bool,
     /// The monitor's refresh in millihertz.
     refresh_millihertz: u32,
+    /// The monitor's image size in millimetres, from its EDID.
+    size_mm: Option<(u32, u32)>,
     /// The address of the registers that choose which of two frames in
     /// video memory shows, the one at `base` or the one after it, when the
     /// display has them (QEMU's standard VGA's DISPI registers).
@@ -200,6 +202,7 @@ impl Framebuffer {
             encoding,
             firmware: true,
             refresh_millihertz: mode::refresh(width, height),
+            size_mm: mode::size_mm(),
             flip: None,
             pci_source: None,
         };
@@ -219,6 +222,7 @@ impl Framebuffer {
             encoding: Encoding::Bgr,
             firmware: false,
             refresh_millihertz: stela_soc::scanout::DEFAULT_REFRESH_MILLIHERTZ,
+            size_mm: None,
             flip: None,
             pci_source: None,
         }
@@ -250,6 +254,11 @@ impl Framebuffer {
     /// else 60 Hz.
     pub fn refresh_millihertz(&self) -> u32 {
         self.refresh_millihertz
+    }
+
+    /// The monitor's image size in millimetres, when its EDID gave one.
+    pub fn size_mm(&self) -> Option<(u32, u32)> {
+        self.size_mm
     }
 
     pub(crate) fn available(&self) -> bool {

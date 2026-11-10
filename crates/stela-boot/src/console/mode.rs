@@ -44,6 +44,15 @@ static SELECTED: Global<bool> = Global(RefCell::new(false));
 /// EDID [`select`] read.
 static NATIVE: Global<Option<(u32, u32, u32)>> = Global(RefCell::new(None));
 
+/// The monitor's image size in millimetres, from the EDID [`select`] read.
+static SIZE: Global<Option<(u32, u32)>> = Global(RefCell::new(None));
+
+/// The monitor's image size in millimetres, when its EDID reports one: the
+/// size of the screen whatever mode it runs.
+pub(super) fn size_mm() -> Option<(u32, u32)> {
+    SIZE.0.try_borrow().ok().and_then(|size| *size)
+}
+
 /// The refresh in millihertz of a `width` by `height` screen: the EDID's
 /// preferred timing's when that is the screen's resolution and the guest's
 /// display can advertise it, else 60 Hz, which every monitor runs a mode it
@@ -105,6 +114,15 @@ fn choose(handle: Handle, gop: &mut GraphicsOutput) {
     }
     output::arguments(format_args!("{line}\n"));
     let refresh = edid.as_ref().and_then(|(bytes, _)| display::refresh(bytes));
+    let size = edid
+        .as_ref()
+        .and_then(|(bytes, _)| display::physical_size(bytes));
+    if let Ok(mut slot) = SIZE.0.try_borrow_mut() {
+        *slot = size;
+    }
+    if let Some((width, height)) = size {
+        output::arguments(format_args!("DISPLAY EDID image {width}x{height} mm\n"));
+    }
     if let (Some((width, height)), Some(refresh), Ok(mut slot)) =
         (native, refresh, NATIVE.0.try_borrow_mut())
     {

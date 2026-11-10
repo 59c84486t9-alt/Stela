@@ -150,10 +150,37 @@ fn blanking(width: u32, height: u32, refresh: u32) -> Blanking {
     (RB_H_FRONT, RB_H_BLANK, v_blank)
 }
 
+/// The image size in millimetres to report for a `width` by `height` mode
+/// whose monitor reported none: a desktop monitor's usual diagonal for the
+/// resolution (27" from 2560 pixels across, 24" from 1920, else 21.5"), so
+/// that macOS's default scale follows a sane pixel density.
+pub fn assumed_size_mm(width: u32, height: u32) -> (u32, u32) {
+    let tenths_of_inch: u64 = match width {
+        2560.. => 270,
+        1920.. => 240,
+        _ => 215,
+    };
+    let (w, h) = (u64::from(width.max(1)), u64::from(height.max(1)));
+    let diagonal_pixels = (w * w + h * h).isqrt().max(1);
+    let diagonal_mm = tenths_of_inch * 254 / 100;
+    let mm = |pixels: u64| (diagonal_mm * pixels / diagonal_pixels) as u32;
+    (mm(w), mm(h))
+}
+
 /// An 18-byte EDID detailed timing descriptor for `mode` at `refresh`
 /// millihertz, digital separate sync, both polarities positive. A mode
 /// whose fields do not fit the descriptor refuses rather than wraps.
 pub fn detailed_timing(mode: Mode, refresh: u32) -> Result<[u8; 18]> {
+    detailed_timing_sized(mode, refresh, None)
+}
+
+/// [`detailed_timing`] with the monitor's image size in millimetres, else
+/// [`assumed_size_mm`].
+pub fn detailed_timing_sized(
+    mode: Mode,
+    refresh: u32,
+    size_mm: Option<(u32, u32)>,
+) -> Result<[u8; 18]> {
     let (w, h) = (mode.width, mode.height);
     if w == 0 || h == 0 || w > 0xfff || h > 0xfff {
         return Err(refuse!("DCP mode does not fit an EDID detailed timing"));
@@ -182,10 +209,12 @@ pub fn detailed_timing(mode: Mode, refresh: u32) -> Result<[u8; 18]> {
     d[9] = H_SYNC as u8;
     d[10] = ((V_FRONT << 4) | V_SYNC) as u8;
     d[11] = 0;
-    // Image size in mm (nominal), no borders.
-    d[12] = (w / 4) as u8;
-    d[13] = (h / 4) as u8;
-    d[14] = ((((w / 4) >> 8) << 4) | ((h / 4) >> 8)) as u8;
+    // Image size in mm, no borders.
+    let (width_mm, height_mm) = size_mm.unwrap_or_else(|| assumed_size_mm(w, h));
+    let (width_mm, height_mm) = (width_mm.min(0xfff), height_mm.min(0xfff));
+    d[12] = width_mm as u8;
+    d[13] = height_mm as u8;
+    d[14] = (((width_mm >> 8) << 4) | (height_mm >> 8)) as u8;
     // Digital separate sync (bits 4:3), vsync and hsync positive.
     d[17] = 0x1e;
     Ok(d)
@@ -216,8 +245,15 @@ fn range_limits(d: &[u8; 18]) -> Result<[u8; 5]> {
 }
 
 /// A truthful EDID 1.4 base block whose one detailed timing is `mode`'s at
-/// `refresh` millihertz.
+/// `refresh` millihertz, of [`assumed_size_mm`].
 pub fn edid(mode: Mode, refresh: u32) -> Result<[u8; 128]> {
+    edid_sized(mode, refresh, None)
+}
+
+/// [`edid`] for a monitor whose image is `size_mm` millimetres, as its own
+/// EDID reported, when known.
+pub fn edid_sized(mode: Mode, refresh: u32, size_mm: Option<(u32, u32)>) -> Result<[u8; 128]> {
+    let size_mm = size_mm.unwrap_or_else(|| assumed_size_mm(mode.width, mode.height));
     let mut e = [0u8; 128];
     e[0..8].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
     // Manufacturer "STE" (Stela), product 1, serial 1, week 1, year 2026.
@@ -231,12 +267,13 @@ pub fn edid(mode: Mode, refresh: u32) -> Result<[u8; 128]> {
     e[19] = 4;
     // Digital input, 8 bpc, DisplayPort.
     e[20] = 0xa5;
-    e[21] = (mode.width / 100).min(255) as u8;
-    e[22] = (mode.height / 100).min(255) as u8;
+    // The image size in whole centimetres.
+    e[21] = (size_mm.0.div_ceil(10)).clamp(1, 255) as u8;
+    e[22] = (size_mm.1.div_ceil(10)).clamp(1, 255) as u8;
     e[23] = 0x78; // gamma 2.2
     e[24] = 0x06; // RGB, sRGB default color space, preferred timing native
     e[25..35].copy_from_slice(&[0xee, 0x91, 0xa3, 0x54, 0x4c, 0x99, 0x26, 0x0f, 0x50, 0x54]);
-    let timing = detailed_timing(mode, refresh)?;
+    let timing = detailed_timing_sized(mode, refresh, Some(size_mm))?;
     e[54..72].copy_from_slice(&timing);
     e[75] = 0xfc; // display name
     e[77..77 + 6].copy_from_slice(b"Stela\n");
@@ -499,7 +536,13 @@ impl Advertised {
     /// The one mode for the scanout's `mode` at `refresh` millihertz, or why
     /// it cannot be advertised.
     pub fn at(mode: Mode, refresh: u32) -> Result<Self> {
-        let edid = edid(mode, refresh)?;
+        Self::sized(mode, refresh, None)
+    }
+
+    /// [`Self::at`] for a monitor whose image is `size_mm` millimetres,
+    /// when its own EDID said.
+    pub fn sized(mode: Mode, refresh: u32, size_mm: Option<(u32, u32)>) -> Result<Self> {
+        let edid = edid_sized(mode, refresh, size_mm)?;
         let dtd: [u8; 18] = edid[54..72].try_into().expect("18 bytes");
         Ok(Self {
             edid,
@@ -546,6 +589,12 @@ impl Advertised {
             .raw("</dict>")
             .int("NativeFormatHorizontalPixels", u64::from(width), 32)
             .int("NativeFormatVerticalPixels", u64::from(height), 32)
+            // The base block's image size in whole centimetres, as Apple's
+            // EDID parser publishes it. QuartzCore's IOMFBDisplay reads these
+            // two keys alone for the panel's physical size; without them
+            // WindowServer assumes 72 dpi and CGDisplayScreenSize is zero.
+            .int("MaxHorizontalImageSize", u64::from(e[21]), 32)
+            .int("MaxVerticalImageSize", u64::from(e[22]), 32)
             .bool("ContinuousFrequencySupport", false)
             .bool("SupportsActiveOff", false)
             .bool("SupportsSuspend", false)
@@ -651,6 +700,50 @@ mod tests {
         // The range limits are the old fixed 50..=75 Hz, 30..=80 kHz, 170 MHz
         // for a mode within them.
         assert_eq!(&e[95..101], &[0x32, 0x4b, 0x1e, 0x50, 0x11, 0x00]);
+    }
+
+    fn dtd_size_mm(e: &[u8; 128]) -> (u32, u32) {
+        let d = &e[54..72];
+        (
+            u32::from(d[12]) | u32::from(d[14] >> 4) << 8,
+            u32::from(d[13]) | u32::from(d[14] & 0xf) << 8,
+        )
+    }
+
+    #[test]
+    fn a_monitors_reported_size_reaches_both_size_fields() {
+        let uhd = Mode {
+            width: 3840,
+            height: 2160,
+            ..FULL_HD
+        };
+        // A 27" 4K panel: 597 x 336 mm.
+        let e = edid_sized(uhd, 60_000, Some((597, 336))).unwrap();
+        assert_eq!(dtd_size_mm(&e), (597, 336));
+        assert_eq!((e[21], e[22]), (60, 34));
+        assert_eq!(e.iter().fold(0u8, |a, b| a.wrapping_add(*b)), 0, "checksum");
+        let a = Advertised::sized(uhd, 60_000, Some((597, 336))).unwrap();
+        assert_eq!(a.edid, e);
+        // WindowServer learns the size only from DisplayAttributes.
+        let attributes = a.display_attributes();
+        for key in [
+            "<key>MaxHorizontalImageSize</key><integer size=\"32\">60</integer>",
+            "<key>MaxVerticalImageSize</key><integer size=\"32\">34</integer>",
+        ] {
+            assert!(attributes.contains(key), "{key} in {attributes}");
+        }
+    }
+
+    #[test]
+    fn an_unreported_size_follows_a_usual_diagonal_for_the_resolution() {
+        // 24" 1080p, 27" 1440p and 4K, 21.5" below 1920 pixels across.
+        assert_eq!(assumed_size_mm(1920, 1080), (531, 298));
+        assert_eq!(assumed_size_mm(2560, 1440), (597, 335));
+        assert_eq!(assumed_size_mm(3840, 2160), (597, 335));
+        assert_eq!(assumed_size_mm(1280, 720), (476, 267));
+        let e = edid(FULL_HD, 60_000).unwrap();
+        assert_eq!(dtd_size_mm(&e), (531, 298));
+        assert_eq!((e[21], e[22]), (54, 30));
     }
 
     #[test]
