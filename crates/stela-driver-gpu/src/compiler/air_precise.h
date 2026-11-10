@@ -23,6 +23,15 @@ stela_air_precise_function stela_air_precise_sin, stela_air_precise_cos, stela_a
    stela_air_precise_sqrt, stela_air_precise_rsqrt, stela_air_precise_divide,
    stela_air_precise_fmod;
 
+/* Functions of halves held in floats, in single precision, within Metal's
+ * half bounds: x / y, x modulo y and the trigonometric functions. */
+stela_air_precise_function stela_air_half_divide, stela_air_half_fmod, stela_air_half_sin,
+   stela_air_half_cos, stela_air_half_tan, stela_air_half_sinpi, stela_air_half_cospi,
+   stela_air_half_tanpi;
+
+/* pow(x, y) from power, |x| to the y, as Metal's pow takes every other
+ * operand: signs, zeros, infinities, NaNs, one and zero powers. */
+nir_def *stela_air_pow_of(nir_builder *b, nir_def *x, nir_def *y, nir_def *power);
 /* The length of x, or of x - y, as one lane. */
 nir_def *stela_air_precise_length(nir_builder *b, nir_def *x, nir_def *y);
 nir_def *stela_air_precise_normalize(nir_builder *b, nir_def *x);

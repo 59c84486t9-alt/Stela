@@ -177,14 +177,65 @@ approximate(enum operation operation)
    }
 }
 
-/* Operations whose fast forms take the precise lowering: Metal bounds fast
- * asin, acos, atan and atan2 at 5 ulp, which NIR's approximations miss,
- * and tanpi's poles take their sign from an exact reduction. */
+/* Operations whose fast forms take the precise lowering: tanpi's poles take
+ * their sign from an exact reduction. Fast inverse trigonometry has its own
+ * single-precision lowering (fast_inverse). */
 static bool
 precise_when_fast(enum operation operation)
 {
-   return operation == ASIN || operation == ACOS || operation == ATAN || operation == ATAN2 ||
-          operation == TANPI;
+   return operation == TANPI;
+}
+
+/* atan2(y, x) of single-precision operands in single precision. Metal bounds
+ * fast asin, acos and atan at 5 ulp and atan2 at 6, which NIR's
+ * approximations miss; the precise forms (air_precise.c) cost more than
+ * fast math should. This is Cephes' atanf: the quotient of the smaller magnitude by the larger, past
+ * tan(pi / 8) reduced by pi / 4, and its minimax polynomial, within about
+ * 2 ulp. 0 / 0 counts as 0 and infinity / infinity as 1, as C's atan2 gives
+ * them; NaN operands give NaN. */
+static nir_def *
+fast_arctangent(nir_builder *b, nir_def *y, nir_def *x)
+{
+   nir_def *ay = nir_fabs(b, y), *ax = nir_fabs(b, x);
+   nir_def *big = nir_fmax(b, ax, ay), *small = nir_fmin(b, ax, ay);
+   nir_def *q = nir_fdiv(b, small, big);
+   q = nir_bcsel(b, nir_feq_imm(b, big, 0.0), nir_imm_float(b, 0.0f), q);
+   q = nir_bcsel(b, nir_feq_imm(b, small, INFINITY), nir_imm_float(b, 1.0f), q);
+   nir_def *far = nir_fgt_imm(b, q, 0.41421356237309503);
+   nir_def *t = nir_bcsel(b, far, nir_fdiv(b, nir_fadd_imm(b, q, -1.0), nir_fadd_imm(b, q, 1.0)), q);
+   nir_def *z = nir_fmul(b, t, t);
+   nir_def *p = nir_fadd_imm(b, nir_fmul_imm(b, z, 8.05374449538e-2), -1.38776856032e-1);
+   p = nir_fadd_imm(b, nir_fmul(b, p, z), 1.99777106478e-1);
+   p = nir_fadd_imm(b, nir_fmul(b, p, z), -3.33329491539e-1);
+   nir_def *a = nir_fadd(b, nir_fmul(b, nir_fmul(b, p, z), t), t);
+   a = nir_bcsel(b, far, nir_fadd_imm(b, a, M_PI_4), a);
+   a = nir_bcsel(b, nir_flt(b, ax, ay), nir_fsub(b, nir_imm_float(b, (float)M_PI_2), a), a);
+   /* A negative x, -0 among them, takes the far half-plane. */
+   a = nir_bcsel(b, nir_ilt_imm(b, x, 0), nir_fsub(b, nir_imm_float(b, (float)M_PI), a), a);
+   a = nir_bcsel(b, nir_ilt_imm(b, y, 0), nir_fneg(b, a), a);
+   nir_def *nan = nir_ior(b, nir_fneu(b, x, x), nir_fneu(b, y, y));
+   return nir_bcsel(b, nan, nir_fadd(b, x, y), a);
+}
+
+/* Fast asin, acos, atan or atan2 of single-precision operands, or NULL for
+ * another operation: asin(x) = atan2(x, sqrt((1 - x)(1 + x))) and acos(x)
+ * = atan2(sqrt((1 - x)(1 + x)), x), whose product keeps its precision near
+ * |x| = 1. */
+static nir_def *
+fast_inverse(nir_builder *b, enum operation operation, nir_def **s)
+{
+   if (s[0]->bit_size != 32)
+      return NULL;
+   nir_def *x = s[0];
+   nir_def *cosine = operation == ASIN || operation == ACOS ?
+      nir_fsqrt(b, nir_fmul(b, nir_fsub_imm(b, 1.0, x), nir_fadd_imm(b, x, 1.0))) : NULL;
+   switch (operation) {
+   case ATAN: return fast_arctangent(b, x, nir_imm_floatN_t(b, 1.0, 32));
+   case ATAN2: return fast_arctangent(b, x, s[1]);
+   case ASIN: return fast_arctangent(b, x, cosine);
+   case ACOS: return fast_arctangent(b, cosine, x);
+   default: return NULL;
+   }
 }
 
 static nir_def *
@@ -333,6 +384,69 @@ floating_value(nir_builder *b, enum operation operation, nir_def **s, nir_def **
    case LENGTH: return length(b, x);
    case DISTANCE: return length(b, nir_fsub(b, x, s[1]));
    default: UNREACHABLE("floating-point operation");
+   }
+}
+
+/* Half operands' precise functions. Metal bounds them as loosely as its
+ * fast single-precision forms, a few half ulps or about 2^-10 absolutely,
+ * which the hardware's square roots, logarithms and exponentials meet
+ * through the fast forms: within about 2^-22, a 2^-11 of a half's ulp. The
+ * exceptions take their own forms here: powers, whose y can multiply a
+ * logarithm's error and whose special operands the fast form leaves
+ * undefined; angles of up to 65504, reduced before the hardware's sines and
+ * cosines; and exact remainders. */
+
+/* log2 of a positive finite half: x = 2^e * m with m in [sqrt(1/2),
+ * sqrt(2)), and log2(m) = 2 / ln(2) * atanh(t), t = (m - 1) / (m + 1),
+ * |t| < 0.172, whose odd series to t^9 leaves under 2^-30. m - 1 and m + 1
+ * are exact for a half's 11 bits, so near x = 1 the result keeps its
+ * relative accuracy. */
+static nir_def *
+half_log2_core(nir_builder *b, nir_def *x)
+{
+   nir_def *e = nir_ishr_imm(b, nir_iadd_imm(b, x, -0x3f3504f3), 23);
+   nir_def *m = nir_isub(b, x, nir_ishl_imm(b, e, 23));
+   nir_def *t = nir_fdiv(b, nir_fadd_imm(b, m, -1.0), nir_fadd_imm(b, m, 1.0));
+   nir_def *z = nir_fmul(b, t, t);
+   static const double c[] = {2.0 / 1, 2.0 / 3, 2.0 / 5, 2.0 / 7, 2.0 / 9};
+   nir_def *series = nir_imm_float(b, (float)(c[4] / M_LN2));
+   for (int i = 3; i >= 0; i--)
+      series = nir_ffma(b, series, z, nir_imm_float(b, (float)(c[i] / M_LN2)));
+   return nir_ffma(b, t, series, nir_i2f32(b, e));
+}
+
+/* |x|^y = 2^(y * log2|x|): y * log2|x| is within 25 of zero for a finite
+ * half result and its error within 2^-17, which moves the power by under
+ * 2^-17 of itself. */
+static nir_def *
+half_pow(nir_builder *b, nir_def *x, nir_def *y)
+{
+   nir_def *power = nir_fexp2(b, nir_fmul(b, y, half_log2_core(b, nir_fabs(b, x))));
+   return stela_air_pow_of(b, x, y, power);
+}
+
+static nir_def *
+half_powr(nir_builder *b, nir_def *x, nir_def *y)
+{
+   return nir_bcsel(b, nir_flt_imm(b, x, 0.0), nir_imm_float(b, NAN), half_pow(b, x, y));
+}
+
+/* The precise function of half operands with a form of its own, or NULL
+ * for one that takes the fast single-precision form. */
+static stela_air_precise_function *
+half_function(enum operation operation)
+{
+   switch (operation) {
+   case SIN: case SINCOS: return stela_air_half_sin;
+   case COS: return stela_air_half_cos;
+   case TAN: return stela_air_half_tan;
+   case SINPI: return stela_air_half_sinpi;
+   case COSPI: return stela_air_half_cospi;
+   case TANPI: return stela_air_half_tanpi;
+   case POW: return half_pow;
+   case POWR: return half_powr;
+   case FMOD: return stela_air_half_fmod;
+   default: return NULL;
    }
 }
 
@@ -621,8 +735,26 @@ lower(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef ca
          s[i] = s[i] ? nir_f2f32(b, s[i]) : NULL;
    }
    bool precise = approximate(operation) && (!fast || precise_when_fast(operation));
-   *result = precise ? precise_value(b, operation, count, s, &second) :
+   stela_air_precise_function *half = narrow && precise ? half_function(operation) : NULL;
+   /* Other precise half functions take the fast forms, which keep NaNs. */
+   bool keep_nans = precise && narrow && !half;
+   precise = precise && !narrow;
+   nir_def *inverse = (fast || narrow) && !precise && !half ? fast_inverse(b, operation, s) : NULL;
+   if (half && operation == SINCOS)
+      second = stela_air_precise(b, stela_air_half_cos, s[0], NULL);
+   *result = inverse ? inverse :
+             half ? stela_air_precise(b, half, s[0], count > 1 ? s[1] : NULL) :
+             precise ? precise_value(b, operation, count, s, &second) :
                        floating_value(b, operation, s, &second);
+   /* And their domains, which the fast forms leave undefined. */
+   if (keep_nans && operation == ACOSH)
+      *result = nir_bcsel(b, nir_flt_imm(b, s[0], 1.0), nir_imm_float(b, NAN), *result);
+   if (keep_nans && operation == ATANH)
+      *result = nir_bcsel(b, nir_fgt_imm(b, nir_fabs(b, s[0]), 1.0), nir_imm_float(b, NAN), *result);
+   for (unsigned i = 0; keep_nans && i < count; i++) {
+      if (s[i] && s[i]->num_components == (*result)->num_components)
+         *result = nir_bcsel(b, nir_fneu(b, s[i], s[i]), s[i], *result);
+   }
    if (narrow) {
       *result = nir_f2f16(b, *result);
       second = second ? nir_f2f16(b, second) : NULL;
@@ -771,6 +903,35 @@ pack_11f11f10f(nir_builder *b, nir_def *rgb)
    return nir_ior(b, packed, nir_ishl_imm(b, small_float(b, nir_channel(b, rgb, 2), 5), 22));
 }
 
+/* x's normalized fields: x clamped to the format's range times each
+ * field's largest value, rounded to nearest as Apple GPUs round, by the
+ * exact product. A product single precision rounds onto a half goes by
+ * the sign of its rounding error, which a fused multiply-add gives
+ * exactly; only exact halves round to even. */
+static nir_def *
+normalized_fields(nir_builder *b, nir_def *x, const struct format *format)
+{
+   nir_const_value scales[4];
+   for (unsigned i = 0; i < format->components; i++)
+      scales[i] = nir_const_value_for_float(
+         (double)((1u << (format->bits[i] - (format->snorm ? 1 : 0))) - 1), 32);
+   nir_def *scale = nir_build_imm(b, format->components, 32, scales);
+   x = format->snorm ? nir_fmin(b, nir_fmax(b, x, nir_imm_float(b, -1.0f)), nir_imm_float(b, 1.0f)) :
+                       nir_fsat(b, x);
+   uint32_t control = b->fp_math_ctrl;
+   b->fp_math_ctrl = nir_fp_no_fast_math;
+   nir_def *product = nir_fmul(b, x, scale);
+   nir_def *error = nir_ffma(b, x, scale, nir_fneg(b, product));
+   nir_def *down = nir_ffloor(b, product);
+   nir_def *half = nir_feq_imm(b, nir_fsub(b, product, down), 0.5);
+   nir_def *rounded =
+      nir_bcsel(b, nir_iand(b, half, nir_flt_imm(b, error, 0.0)), down,
+                nir_bcsel(b, nir_iand(b, half, nir_fgt_imm(b, error, 0.0)),
+                          nir_fadd_imm(b, down, 1.0), nir_fround_even(b, product)));
+   b->fp_math_ctrl = control;
+   return format->snorm ? nir_f2i32(b, rounded) : nir_f2u32(b, rounded);
+}
+
 /* "air.pack.<format>.<type>" and "air.unpack.<format>.<type>": a format's
  * normalized components to and from an integer of their bits, <type> naming
  * the float vector. A normalized format packs NaN as zero. */
@@ -833,8 +994,7 @@ pack(const struct stela_air_call_context *c, LLVMValueRef call, LLVMValueRef cal
    x = nir_bcsel(b, nir_fisnan(b, x), nir_imm_float(b, 0.0f), x);
    if (format->srgb)
       x = color(b, x, nir_format_linear_to_srgb);
-   nir_def *fields = format->snorm ? nir_format_float_to_snorm(b, x, format->bits) :
-                                     nir_format_float_to_unorm(b, x, format->bits);
+   nir_def *fields = normalized_fields(b, x, format);
    *result = nir_u2uN(b, nir_format_pack_uint(b, fields, format->bits, format->components), width);
    return STELA_AIR_CALL_LOWERED;
 }

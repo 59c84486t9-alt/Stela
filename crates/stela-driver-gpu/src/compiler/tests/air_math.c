@@ -5,8 +5,11 @@
 #include "../metal_abi.h"
 #include "compiler/air_to_nir.h"
 #include "air_test_fixture.h"
+#include "util/half_float.h"
 #include "util/ralloc.h"
 #include <assert.h>
+#include <stdlib.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 #ifdef STELA_AIR_TEST_NAK
@@ -640,6 +643,83 @@ count_alu(nir_shader *shader, nir_op op)
    return count;
 }
 
+/* x as an LLVM float literal: its double's bits. */
+static const char *
+literal(float x, char *text, size_t size)
+{
+   double wide = x;
+   uint64_t bits;
+   memcpy(&bits, &wide, sizeof(bits));
+   snprintf(text, size, "0x%016" PRIX64, bits);
+   return text;
+}
+
+/* Fast inverse trigonometry evaluates in single precision: consumer GPUs
+ * run doubles at a small fraction of its rate. Each meets Metal's bound
+ * against the C library over a sweep of operands. */
+static void
+fast_inverse_trigonometry_stays_single(void)
+{
+   static const char *const calls[][2] = {
+      {"declare float @air.fast_atan.f32(float)\n", "call float @air.fast_atan.f32(float %a)"},
+      {"declare float @air.fast_asin.f32(float)\n", "call float @air.fast_asin.f32(float %a)"},
+      {"declare float @air.fast_acos.f32(float)\n", "call float @air.fast_acos.f32(float %a)"},
+      {"declare float @air.fast_atan2.f32(float, float)\n",
+       "call float @air.fast_atan2.f32(float %a, float %a)"},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(calls); i++) {
+      char body[512];
+      snprintf(body, sizeof(body),
+               "%%a = load float, ptr addrspace(1) %%out, align 4\n%%r = %s\n"
+               "store float %%r, ptr addrspace(1) %%out, align 4\nret void\n", calls[i][1]);
+      struct stela_air_error error = {0};
+      nir_shader *shader = translate(calls[i][0], body, &nir_options, stela_metal_bind_buffer, &error);
+      assert(shader);
+      unsigned doubles = 0;
+      nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+         nir_foreach_instr(instr, block) {
+            doubles += instr->type == nir_instr_type_alu && nir_instr_as_alu(instr)->def.bit_size == 64;
+         }
+      }
+      assert(!doubles);
+      ralloc_free(shader);
+   }
+   static const float operands[] = {0.0f, 1e-30f, 1e-6f, 0.1f, 0.3f, 0.41f, 0.42f, 0.5f, 0.7f,
+                                    0.9f, 0.99f, 0.999999f, 1.0f, 2.0f, 2.5f, 10.0f, 1e6f, 1e30f};
+   for (unsigned i = 0; i < ARRAY_SIZE(operands); i++) {
+      for (int sign = -1; sign <= 1; sign += 2) {
+         float x = sign * operands[i];
+         char call[128], text[24];
+         literal(x, text, sizeof(text));
+         snprintf(call, sizeof(call), "call float @air.fast_atan.f32(float %s)", text);
+         int64_t error = (int64_t)fold("declare float @air.fast_atan.f32(float)\n", "float", call) -
+                         (int64_t)f32(atanf(x));
+         assert(error >= -5 && error <= 5);
+         if (fabsf(x) > 1.0f)
+            continue;
+         snprintf(call, sizeof(call), "call float @air.fast_asin.f32(float %s)", text);
+         error = (int64_t)fold("declare float @air.fast_asin.f32(float)\n", "float", call) -
+                 (int64_t)f32(asinf(x));
+         assert(error >= -5 && error <= 5);
+         snprintf(call, sizeof(call), "call float @air.fast_acos.f32(float %s)", text);
+         error = (int64_t)fold("declare float @air.fast_acos.f32(float)\n", "float", call) -
+                 (int64_t)f32(acosf(x));
+         assert(error >= -5 && error <= 5);
+      }
+   }
+   /* atan2 in every quadrant and on the axes. */
+   static const float pairs[][2] = {{1, 2}, {2, 1}, {-1, 2}, {1, -2}, {-2, -1}, {0, 1}, {0, -1},
+                                    {1, 0}, {-1, 0}, {3, 3}, {-0.5f, 1e-6f}};
+   for (unsigned i = 0; i < ARRAY_SIZE(pairs); i++) {
+      char call[160], y[24], x[24];
+      snprintf(call, sizeof(call), "call float @air.fast_atan2.f32(float %s, float %s)",
+               literal(pairs[i][0], y, sizeof(y)), literal(pairs[i][1], x, sizeof(x)));
+      int64_t error = (int64_t)fold("declare float @air.fast_atan2.f32(float, float)\n", "float", call) -
+                      (int64_t)f32(atan2f(pairs[i][0], pairs[i][1]));
+      assert(error >= -6 && error <= 6);
+   }
+}
+
 /* Narrowing to half rounds as the compile options select. */
 static void
 narrowing_follows_the_rounding_mode(void)
@@ -859,10 +939,258 @@ fragments_take_derivatives_and_discard(void)
    ralloc_free(shader);
 }
 
+/* A double rounded to the nearest half, ties to even, as half bits. */
+static uint16_t
+half_of(double value)
+{
+   if (isnan(value))
+      return 0x7e00;
+   double magnitude = fabs(value);
+   uint16_t sign = signbit(value) ? 0x8000 : 0;
+   if (magnitude >= 65520.0)
+      return sign | 0x7c00;
+   int e;
+   frexp(magnitude, &e);
+   /* A half has 11 significant bits down to 2^-14, then steps of 2^-24. */
+   int quantum = e - 1 >= -14 ? e - 11 : -24;
+   double rounded = ldexp(nearbyint(ldexp(magnitude, -quantum)), quantum);
+   return sign | _mesa_float_to_half((float)rounded);
+}
+
+/* Moves each hardware estimate (reciprocal, square root, inverse square
+ * root, logarithm, exponential) by `error` of itself, the logarithm also by
+ * `error` absolutely, and sines and cosines by twice `error` absolutely, as
+ * the hardware's approximations may err. */
+static void
+perturb_estimates(nir_shader *shader, float error)
+{
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_alu)
+            continue;
+         nir_alu_instr *alu = nir_instr_as_alu(instr);
+         bool angular = alu->op == nir_op_fsin || alu->op == nir_op_fcos;
+         if (alu->def.bit_size != 32 ||
+             (alu->op != nir_op_frcp && alu->op != nir_op_frsq && alu->op != nir_op_fsqrt &&
+              alu->op != nir_op_flog2 && alu->op != nir_op_fexp2 && !angular))
+            continue;
+         nir_builder b = nir_builder_at(nir_after_instr(instr));
+         nir_def *moved = nir_fmul_imm(&b, &alu->def, 1.0 + error);
+         if (alu->op == nir_op_flog2)
+            moved = nir_fadd_imm(&b, moved, error);
+         /* Sines and cosines err absolutely, by about 2^-21. */
+         if (angular)
+            moved = nir_fadd_imm(&b, &alu->def, 2.0 * error);
+         nir_def_rewrite_uses_after(&alu->def, moved);
+      }
+   }
+}
+
+/* Every bit pattern of a half through `call` (of %a, a half loaded from
+ * %out), folded, against `reference`: correctly rounded where `ulps` is 0,
+ * else within that many ulps, with the hardware's estimates exact or 2^-22
+ * off either way. The translated function has no double. */
+static void
+sweep_half_within(const char *declaration, const char *call, double (*reference)(double),
+                  unsigned ulps, double absolute)
+{
+   char body[512];
+   snprintf(body, sizeof(body),
+            "%%a = load half, ptr addrspace(1) %%out, align 2\n%%r = %s\n"
+            "store half %%r, ptr addrspace(1) %%out, align 2\nret void\n", call);
+   nir_shader *shader = translated(declaration, body);
+   unsigned doubles = 0;
+   nir_intrinsic_instr *load = NULL;
+   nir_foreach_block(block, nir_shader_get_entrypoint(shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type == nir_instr_type_alu)
+            doubles += nir_instr_as_alu(instr)->def.bit_size == 64 &&
+                       nir_op_infos[nir_instr_as_alu(instr)->op].output_type == nir_type_float;
+         if (instr->type == nir_instr_type_intrinsic &&
+             nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global &&
+             nir_instr_as_intrinsic(instr)->def.bit_size == 16)
+            load = nir_instr_as_intrinsic(instr);
+      }
+   }
+   if (doubles)
+      fprintf(stderr, "%s: %u double operations\n", call, doubles);
+   assert(!doubles && load);
+   unsigned exact = 0, compared = 0, worst = 0;
+   for (uint32_t bits = 0; bits < 0x10000; bits++) {
+      double x = _mesa_half_to_float((uint16_t)bits);
+      uint16_t expected = half_of(reference(x));
+      nir_shader *copy = nir_shader_clone(NULL, shader);
+      nir_intrinsic_instr *loaded = NULL;
+      nir_foreach_block(block, nir_shader_get_entrypoint(copy)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic == nir_intrinsic_load_global &&
+                nir_instr_as_intrinsic(instr)->def.bit_size == 16)
+               loaded = nir_instr_as_intrinsic(instr);
+         }
+      }
+      nir_builder b = nir_builder_at(nir_after_instr(&loaded->instr));
+      nir_def_rewrite_uses(&loaded->def, nir_imm_intN_t(&b, bits, 16));
+      static const float errors[] = {0.0f, 0x1p-22f, -0x1p-22f};
+      perturb_estimates(copy, errors[bits % 3]);
+      uint16_t got = (uint16_t)stored(copy, nir_intrinsic_store_global);
+      bool nans = (expected & 0x7fff) > 0x7c00 && (got & 0x7fff) > 0x7c00;
+      if (nans || got == expected) {
+         exact++;
+         compared++;
+         continue;
+      }
+      compared++;
+      int distance = abs((int)(got & 0x7fff) - (int)(expected & 0x7fff));
+      bool same_sign = (got & 0x8000) == (expected & 0x8000);
+      double error = fabs(_mesa_half_to_float(got) - _mesa_half_to_float(expected));
+      if (same_sign && distance > (int)worst)
+         worst = distance;
+      if ((!ulps || !same_sign || distance > (int)ulps) && !(error <= absolute)) {
+         fprintf(stderr, "%s(%a) = 0x%04x, expected 0x%04x\n", call, x, got, expected);
+         assert(false);
+      }
+   }
+   printf("%s: %u of %u halves correctly rounded, at most %u ulp\n", call, exact, compared, worst);
+   ralloc_free(shader);
+}
+
+static void
+sweep_half(const char *declaration, const char *call, double (*reference)(double),
+           unsigned ulps)
+{
+   sweep_half_within(declaration, call, reference, ulps, -1.0);
+}
+
+static double
+reference_rsqrt(double x)
+{
+   return 1.0 / sqrt(x);
+}
+
+static double
+reference_powr_half(double x)
+{
+   return x < 0 ? NAN : pow(x, _mesa_half_to_float(0x3746));
+}
+
+/* The other operand of the half divisions and remainders being swept. */
+static double half_operand;
+
+static double
+reference_divided(double x)
+{
+   return x / half_operand;
+}
+
+static double
+reference_dividing(double x)
+{
+   return half_operand / x;
+}
+
+static double
+reference_remainder(double x)
+{
+   return fmod(x, half_operand);
+}
+
+static double
+reference_remainder_of(double x)
+{
+   return fmod(half_operand, x);
+}
+
+/* Half division and remainder at Metal's precise accuracy, in single
+ * precision: every half divided by and dividing normal, subnormal, largest
+ * and negative halves within an ulp, and remainders exact. */
+static void
+half_division_stays_single(void)
+{
+   static const uint16_t operands[] = {0x4000, 0xc200, 0x2e66, 0x0001, 0x03ff, 0x7bff};
+   for (unsigned i = 0; i < ARRAY_SIZE(operands); i++) {
+      char divided[96], dividing[96], remainder[96], remainder_of[96];
+      snprintf(divided, sizeof(divided), "fdiv half %%a, 0xH%04X", operands[i]);
+      snprintf(dividing, sizeof(dividing), "fdiv half 0xH%04X, %%a", operands[i]);
+      snprintf(remainder, sizeof(remainder), "frem half %%a, 0xH%04X", operands[i]);
+      snprintf(remainder_of, sizeof(remainder_of), "frem half 0xH%04X, %%a", operands[i]);
+      half_operand = _mesa_half_to_float(operands[i]);
+      sweep_half("", divided, reference_divided, 1);
+      sweep_half("", dividing, reference_dividing, 1);
+      sweep_half("", remainder, reference_remainder, 0);
+      sweep_half("", remainder_of, reference_remainder_of, 0);
+   }
+}
+
+static double
+reference_sinpi(double x)
+{
+   double turn = fmod(x, 2.0);
+   return fmod(turn, 1.0) == 0.0 ? copysign(0.0, x) : sin(M_PI * turn);
+}
+
+static double
+reference_cospi(double x)
+{
+   double turn = fmod(x, 2.0);
+   return fmod(turn + 0.5, 1.0) == 0.0 ? 0.0 : cos(M_PI * turn);
+}
+
+static double
+reference_tanpi(double x)
+{
+   return reference_sinpi(x) / reference_cospi(x);
+}
+
+/* The other precise half functions, against Metal's half bounds: 2 ulp or
+ * 2^-10 absolutely, sines, cosines and tangents 2^-8 (the Metal suite's
+ * tolerances). Angles reach 65504. */
+static void
+half_functions_meet_half_bounds(void)
+{
+   static const struct {
+      const char *name;
+      double (*reference)(double);
+      double absolute;
+   } functions[] = {
+      {"sin", sin, 0x1p-8},       {"cos", cos, 0x1p-8},     {"tan", tan, 0x1p-8},
+      {"sinpi", reference_sinpi, 0x1p-8}, {"cospi", reference_cospi, 0x1p-8},
+      {"tanpi", reference_tanpi, 0x1p-8}, {"asin", asin, 0x1p-10}, {"acos", acos, 0x1p-10},
+      {"atan", atan, 0x1p-10},    {"sinh", sinh, 0x1p-10},  {"cosh", cosh, 0x1p-10},
+      {"tanh", tanh, 0x1p-10},    {"asinh", asinh, 0x1p-10}, {"acosh", acosh, 0x1p-10},
+      {"atanh", atanh, 0x1p-10},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(functions); i++) {
+      char declaration[96], call[96];
+      snprintf(declaration, sizeof(declaration), "declare half @air.%s.f16(half)\n", functions[i].name);
+      snprintf(call, sizeof(call), "call half @air.%s.f16(half %%a)", functions[i].name);
+      sweep_half_within(declaration, call, functions[i].reference, 2, functions[i].absolute);
+   }
+}
+
+/* Half operands' precise functions evaluate in single precision, with no
+ * double, every half within an ulp. */
+static void
+half_functions_stay_single(void)
+{
+   sweep_half("declare half @air.sqrt.f16(half)\n", "call half @air.sqrt.f16(half %a)", sqrt, 1);
+   sweep_half("declare half @air.rsqrt.f16(half)\n", "call half @air.rsqrt.f16(half %a)",
+              reference_rsqrt, 1);
+   sweep_half("declare half @air.log2.f16(half)\n", "call half @air.log2.f16(half %a)", log2, 1);
+   sweep_half("declare half @air.log.f16(half)\n", "call half @air.log.f16(half %a)", log, 1);
+   sweep_half("declare half @air.log10.f16(half)\n", "call half @air.log10.f16(half %a)", log10, 1);
+   sweep_half("declare half @air.exp2.f16(half)\n", "call half @air.exp2.f16(half %a)", exp2, 1);
+   sweep_half("declare half @air.exp.f16(half)\n", "call half @air.exp.f16(half %a)", exp, 1);
+   sweep_half("declare half @air.exp10.f16(half)\n", "call half @air.exp10.f16(half %a)", exp10, 1);
+   sweep_half("declare half @air.powr.f16(half, half)\n",
+              "call half @air.powr.f16(half %a, half 0xH3746)", reference_powr_half, 1);
+}
+
 int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
+   setvbuf(stdout, NULL, _IONBF, 0);
    floating_functions_follow_metal();
    integer_functions_follow_metal();
    second_results_store_through_thread_pointers();
@@ -872,6 +1200,10 @@ main(void)
    conversions_follow_their_names();
    bfloats_round_to_nearest_even();
    fast_functions_meet_their_bounds();
+   fast_inverse_trigonometry_stays_single();
+   half_functions_stay_single();
+   half_division_stays_single();
+   half_functions_meet_half_bounds();
    refuses_misnamed_and_misplaced_functions();
    half_declares_its_float_controls();
    fma_follows_its_backend();

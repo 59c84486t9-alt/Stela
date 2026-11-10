@@ -1256,11 +1256,76 @@ fn add_all(plan: &mut Plan, library: &str, mode: &str, precise: bool, version: &
     add_vectors(plan, library, mode, precise, version);
 }
 
+/// fp32 subnormals through arithmetic, compared without the suite's usual
+/// flush: a product that underflows to one, a quotient of values near
+/// FLT_MIN, a fused multiply-add of a subnormal product and addend, and a
+/// subnormal product scaled back to the normal range. An M1 Pro flushes
+/// each subnormal input and result to zero in both modes, whose libraries
+/// both set air.compile.denorms_disable; fast math folds the two scales
+/// into one and divides within 2.5 ulps.
+fn add_denormals(plan: &mut Plan) {
+    let source = plan.generated(
+        "denormals.metal",
+        "#include <metal_stdlib>\nusing namespace metal;\n\
+         kernel void denormals(device const float *in0 [[buffer(0)]], device float4 *result \
+         [[buffer(3)]], uint i [[thread_position_in_grid]])\n{\n    float x = in0[i];\n    \
+         float tiny = x * 0x1p-140f;\n    result[i] = float4(tiny, x / 3.0f, \
+         fma(x, 0x1p-140f, 0x1p-149f), tiny * 0x1p20f);\n}\n"
+            .into(),
+    );
+    let mut rng = Random::new(1407);
+    let inputs: Vec<f64> = (0..COUNT)
+        .map(|i| {
+            let m = rng.uniform(1.0, 2.0);
+            f32r(if i % 2 == 0 {
+                m * 2f64.powi(rng.below(20) as i32 - 10)
+            } else {
+                m * F32_MIN
+            })
+        })
+        .collect();
+    let flush = |v: f64| if v.abs() < F32_MIN { 0.0 } else { v };
+    for (mode, flags, fast) in [
+        ("fast", &[][..], true),
+        ("precise", &["-fno-fast-math"][..], false),
+    ] {
+        let expected: Vec<f64> = inputs
+            .iter()
+            .flat_map(|&x| {
+                let tiny = flush(f32r(x * 2f64.powi(-140)));
+                let scaled = if fast {
+                    flush(f32r(x * 2f64.powi(-120)))
+                } else {
+                    tiny
+                };
+                [tiny, flush(f32r(x / 3.0)), tiny, scaled]
+            })
+            .collect();
+        let library = plan.library(&format!("denormals_{mode}"), &source, flags, LATEST);
+        let tol = if fast { u(2.5) } else { exact() }.with_ftz(false);
+        plan.add(
+            Case::compute1(
+                &format!("math.denormals.{mode}"),
+                &library,
+                "denormals",
+                COUNT as u32,
+            )
+            .buffer(Buffer::data("in0", 0, floats(Dtype::F32, &inputs)))
+            .buffer(Buffer::zeroed("result", 3, COUNT * 16))
+            .output(
+                Output::new("result", Dtype::F32, tol.clone())
+                    .expect(floats(Dtype::F32, &expected), tol),
+            ),
+        );
+    }
+}
+
 /// Every case at every MSL version, fast and precise, each from its own
 /// library. A mode is held to the specification's precise bounds only when
 /// both its arithmetic and its functions are precise; any other is held to
 /// the fast bounds, which precise results also meet.
 pub fn build(plan: &mut Plan) {
+    add_denormals(plan);
     let source = plan.generated("math.metal", msl());
     for (version, ..) in VERSIONS {
         for (mode, precise, flags) in [

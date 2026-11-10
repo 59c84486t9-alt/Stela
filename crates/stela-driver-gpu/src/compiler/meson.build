@@ -333,7 +333,7 @@ if stela_air_llvm != ''
     c_args : stela_air_test_args,
     build_rpath : fs.parent(stela_air_llvm),
   )
-  test('stela_air_math', stela_air_math_test, suite : 'stela')
+  test('stela_air_math', stela_air_math_test, suite : 'stela', timeout : 120)
   stela_air_precise_test = executable(
     'stela_air_precise_test',
     'tests/air_precise.c',
