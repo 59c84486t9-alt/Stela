@@ -1,0 +1,148 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 05:17:38 -0500
+Subject: [PATCH] fix(nouveau): refuse other tasks' GSP RPCs while the device
+ stops, so none lands after the unload
+
+---
+ .../gpu/drm/nouveau/include/nvkm/subdev/gsp.h | 21 ++++++++++++++--
+ .../drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c |  4 ++--
+ .../drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c | 24 +++++++++++++++++--
+ .../drm/nouveau/nvkm/subdev/gsp/rm/r535/vmm.c |  6 ++++-
+ 4 files changed, 48 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h b/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
+index b124afb68f2566faade58dfb728494c2356ead79..ab761773e979324ccde6b94ca5cb6815ee0f710b 100644
+--- a/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
++++ b/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
+@@ -6,6 +6,7 @@
+ #include <core/firmware.h>
+ 
+ #include <linux/debugfs.h>
++#include <linux/sched.h>
+ 
+ #define GSP_PAGE_SHIFT 12
+ #define GSP_PAGE_SIZE  BIT(GSP_PAGE_SHIFT)
+@@ -198,8 +199,18 @@ struct nvkm_gsp {
+ 	bool unload_replied;
+ 	/* The device is stopping: RPC waits are short, as GSP may be gone. */
+ 	bool stopping;
++	/*
++	 * The task stopping the device. From then on only it sends RPCs: one
++	 * from another task, such as a file closing, can land after the
++	 * unload, which RM never takes. RM's unload frees those objects.
++	 */
++	struct task_struct *stopper;
++	/* An RPC from another task was refused during the stop, and reported. */
++	bool refused;
+ 	/* GSP did not answer in time: later RPCs fail at once. */
+ 	bool dead;
++	/* The last RPC function RM answered, for the reports at a stop. */
++	u32 last_answered;
+ 
+ 	/* Internal GSP-RM control handles. */
+ 	struct {
+@@ -273,12 +284,18 @@ struct nvkm_gsp {
+ #endif
+ };
+ 
+-/* The device is stopping for good: bound what is left to wait for GSP. */
++/*
++ * The device is stopping for good, on the calling task: bound what is left
++ * to wait for GSP, and refuse RPCs from other tasks.
++ */
+ static inline void
+ nvkm_gsp_stopping(struct nvkm_gsp *gsp)
+ {
+-	if (gsp)
++	if (gsp) {
++		WRITE_ONCE(gsp->stopper, current);
++		smp_wmb();
+ 		WRITE_ONCE(gsp->stopping, true);
++	}
+ }
+ 
+ static inline bool
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+index 5cbb44f54621860027b1940b7456f8ed20c11467..7e8727ac2288bd72cc975a65b9682eae45ce912d 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+@@ -404,8 +404,8 @@ r535_gsp_unload_wait(struct nvkm_gsp *gsp)
+ 
+ 	WRITE_ONCE(gsp->dead, true);
+ 	nvkm_error(subdev,
+-		   "unload: no answer in %d ms: cmdq w%u r%u msgq w%u r%u mbox0 %08x mbox1 %08x riscv %d\n",
+-		   R535_GSP_UNLOAD_MS, *gsp->cmdq.wptr, *gsp->cmdq.rptr,
++		   "unload: no answer in %d ms: last answered fn %u cmdq w%u r%u msgq w%u r%u mbox0 %08x mbox1 %08x riscv %d\n",
++		   R535_GSP_UNLOAD_MS, gsp->last_answered, *gsp->cmdq.wptr, *gsp->cmdq.rptr,
+ 		   *gsp->msgq.wptr, *gsp->msgq.rptr,
+ 		   nvkm_falcon_rd32(&gsp->falcon, 0x040),
+ 		   nvkm_falcon_rd32(&gsp->falcon, 0x044),
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
+index fa20ca84dc46786f1fd155d70cb3190ba372d000..8442071d17c64dc4ac73e92b9e4c079073a2793e 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
+@@ -166,8 +166,8 @@ r535_gsp_no_answer(struct nvkm_gsp *gsp, const char *what, u32 fn, ktime_t start
+ 
+ 	WRITE_ONCE(gsp->dead, true);
+ 	nvkm_error(&gsp->subdev,
+-		   "no answer to %s fn %u in %lld ms: cmdq w%u r%u msgq w%u r%u mbox0 %08x riscv %d; later RPCs fail at once\n",
+-		   what, fn, ktime_ms_delta(ktime_get(), start),
++		   "no answer to %s fn %u in %lld ms: last answered fn %u cmdq w%u r%u msgq w%u r%u mbox0 %08x riscv %d; later RPCs fail at once\n",
++		   what, fn, ktime_ms_delta(ktime_get(), start), gsp->last_answered,
+ 		   *gsp->cmdq.wptr, *gsp->cmdq.rptr, *gsp->msgq.wptr, *gsp->msgq.rptr,
+ 		   nvkm_falcon_rd32(&gsp->falcon, 0x040),
+ 		   nvkm_falcon_riscv_active(&gsp->falcon));
+@@ -517,6 +517,9 @@ retry:
+ 
+ 	r535_gsp_msg_dump(gsp, rpc, NV_DBG_TRACE);
+ 
++	if (rpc->function < NV_VGPU_MSG_FUNCTION_NUM_FUNCTIONS)
++		gsp->last_answered = rpc->function;
++
+ 	if (fn && rpc->function == fn) {
+ 		if (gsp_rpc_len) {
+ 			if (rpc->length < gsp_rpc_len) {
+@@ -694,6 +697,23 @@ r535_gsp_rpc_push(struct nvkm_gsp *gsp, void *payload,
+ 		goto done;
+ 	}
+ 
++	/*
++	 * The device is stopping on another task: this RPC could reach RM
++	 * after its unload, which RM never takes. RM's unload frees what it
++	 * would free. Say so once.
++	 */
++	if (READ_ONCE(gsp->stopping) && READ_ONCE(gsp->stopper) != current) {
++		if (!gsp->refused) {
++			gsp->refused = true;
++			nvkm_warn(&gsp->subdev,
++				  "stopping: refused fn %u from another task; RM's unload frees its objects\n",
++				  rpc->function);
++		}
++		kvfree(msg);
++		repv = ERR_PTR(-ENODEV);
++		goto done;
++	}
++
+ 	if (payload_size > max_payload_size) {
+ 		const u32 fn = rpc->function;
+ 		u32 remain_payload_size = payload_size;
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/vmm.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/vmm.c
+index 1ff42f1a8486236ff45d385fee6d0aa03191fde5..822ff88bf303c27c8098ecdd85e529fbc5cfa00b 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/vmm.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/vmm.c
+@@ -34,9 +34,13 @@ r535_mmu_vaspace_del(struct nvkm_vmm *vmm)
+ 					    NV0080_CTRL_CMD_DMA_UNSET_PAGE_DIRECTORY,
+ 					    sizeof(*ctrl));
+ 		if (!IS_ERR(ctrl)) {
++			int ret;
++
+ 			ctrl->hVASpace = vmm->rm.object.handle;
+ 
+-			WARN_ON(nvkm_gsp_rm_ctrl_wr(&vmm->rm.device.object, ctrl));
++			/* -ENODEV: GSP is gone or unloading, and RM frees it. */
++			ret = nvkm_gsp_rm_ctrl_wr(&vmm->rm.device.object, ctrl);
++			WARN_ON(ret && ret != -ENODEV);
+ 		}
+ 
+ 		vmm->rm.external = false;
