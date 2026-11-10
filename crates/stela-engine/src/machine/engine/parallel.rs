@@ -114,12 +114,22 @@ impl GlobalSpan {
 pub(super) enum Maintenance {
     /// A TLBI's entries, which each PE reaches from its own context.
     Tlb(tlbi::Scope),
+    /// Every TLB entry of every context: what a mailbox keeps in place of
+    /// more than [`MAIL_SCOPES`] TLBIs, which invalidates more than they did,
+    /// as Arm allows.
+    TlbAll,
     /// IC IVAU of the page holding this physical address, or IC IALLUIS.
     Code(Option<u64>),
     /// A CPU power change, which pauses or resumes the PE it reaches and
     /// which every machine's record of the board's CPU power takes.
     Power(super::ProcessorChange),
 }
+
+/// The TLB scopes, and apart from them the code pages, a mailbox keeps
+/// before it keeps one invalidation of everything instead: a PE that sleeps
+/// for minutes still reads its mail at once and from bounded memory. One
+/// PE's full outgoing list still arrives whole.
+const MAIL_SCOPES: usize = OUTGOING;
 
 /// What other PEs left for one PE.
 #[derive(Debug, Default)]
@@ -131,6 +141,51 @@ pub(super) struct Mail {
     pub maintenance: Vec<Maintenance>,
     /// The serial of the last maintenance in `maintenance`.
     pub serial: u64,
+}
+
+impl Mail {
+    /// Keep `maintenance` for the PE's next read. An instruction cache
+    /// invalidation it has yet to read already covers the same page again,
+    /// and so does a whole invalidation of either kind; past
+    /// [`MAIL_SCOPES`] of a kind, one whole invalidation replaces them.
+    fn keep(&mut self, maintenance: Maintenance) {
+        let held = |kind: fn(&Maintenance) -> bool, list: &[Maintenance]| {
+            list.iter().filter(|posted| kind(posted)).count()
+        };
+        match maintenance {
+            Maintenance::Code(page) => {
+                let covered = self.maintenance.iter().any(|posted| {
+                    matches!(posted, Maintenance::Code(held) if held.is_none() || *held == page)
+                });
+                if covered {
+                    return;
+                }
+                let pages = |posted: &Maintenance| matches!(posted, Maintenance::Code(Some(_)));
+                if page.is_some() && held(pages, &self.maintenance) >= MAIL_SCOPES {
+                    self.maintenance.retain(|posted| !pages(posted));
+                    self.maintenance.push(Maintenance::Code(None));
+                    return;
+                }
+            }
+            Maintenance::Tlb(_) => {
+                if self
+                    .maintenance
+                    .iter()
+                    .any(|posted| matches!(posted, Maintenance::TlbAll))
+                {
+                    return;
+                }
+                let scopes = |posted: &Maintenance| matches!(posted, Maintenance::Tlb(_));
+                if held(scopes, &self.maintenance) >= MAIL_SCOPES {
+                    self.maintenance.retain(|posted| !scopes(posted));
+                    self.maintenance.push(Maintenance::TlbAll);
+                    return;
+                }
+            }
+            Maintenance::TlbAll | Maintenance::Power(_) => {}
+        }
+        self.maintenance.push(maintenance);
+    }
 }
 
 struct Inbox {
@@ -554,15 +609,7 @@ impl Hub {
                 mail.serial += 1;
                 serial = mail.serial;
                 for &maintenance in maintenance {
-                    let covered = match maintenance {
-                        Maintenance::Code(page) => mail.maintenance.iter().any(|posted| {
-                            matches!(posted, Maintenance::Code(held) if held.is_none() || *held == page)
-                        }),
-                        _ => false,
-                    };
-                    if !covered {
-                        mail.maintenance.push(maintenance);
-                    }
+                    mail.keep(maintenance);
                 }
             });
             inbox.posted.store(serial, Ordering::Release);
@@ -1210,6 +1257,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     scope.named_asid(),
                 );
             }
+            Maintenance::TlbAll => {
+                self.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All, None);
+            }
             Maintenance::Code(Some(physical)) => {
                 self.invalidate_code_page(physical);
                 self.host.code_invalidated(Some(physical));
@@ -1312,7 +1362,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let (Some(slot), Some(started)) = (profile, started) {
             for maintenance in &self.outgoing {
                 let kind = match maintenance {
-                    Maintenance::Tlb(_) => BroadcastKind::Tlb,
+                    Maintenance::Tlb(_) | Maintenance::TlbAll => BroadcastKind::Tlb,
                     Maintenance::Code(_) => BroadcastKind::Code,
                     Maintenance::Power(_) => BroadcastKind::Power,
                 };

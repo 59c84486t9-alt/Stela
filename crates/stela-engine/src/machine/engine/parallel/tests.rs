@@ -606,6 +606,31 @@ fn a_page_invalidation_the_pe_has_yet_to_read_covers_the_same_page_again() {
     assert_eq!((mail.serial, machine.posted.as_slice()), (1, &[(1, 1)][..]));
 }
 
+/// A PE that reads no mail for a long time, asleep or powered down, holds
+/// at most [`MAIL_SCOPES`] TLB scopes and as many code pages: past them,
+/// one invalidation of everything of that kind.
+#[test]
+fn mail_for_a_pe_that_does_not_read_it_stays_bounded() {
+    use crate::machine::system::TlbiKind::VAA;
+    let (hub, _) = hub(2);
+    for page in 0..10_000u64 {
+        hub.broadcast(0, &[tlbi(VAA, page), Maintenance::Code(Some(page << 14))]);
+    }
+    let mail = hub.take(1).unwrap();
+    let count =
+        |kind: fn(&Maintenance) -> bool| mail.maintenance.iter().filter(|m| kind(m)).count();
+    assert!(
+        mail.maintenance.len() <= 2 * MAIL_SCOPES + 2,
+        "{}",
+        mail.maintenance.len()
+    );
+    assert_eq!(count(|m| matches!(m, Maintenance::TlbAll)), 1);
+    assert_eq!(count(|m| matches!(m, Maintenance::Code(None))), 1);
+    // What follows a whole invalidation is covered by it.
+    assert_eq!(count(|m| matches!(m, Maintenance::Tlb(_))), 0);
+    assert_eq!(count(|m| matches!(m, Maintenance::Code(Some(_)))), 0);
+}
+
 #[test]
 fn an_ic_ivau_reaches_other_pes_only_for_compiled_pages_once_per_dsb() {
     const PAGE: u64 = 0x4000_0000;
