@@ -1,6 +1,8 @@
 //! Source selection: the invariant TSC at the boot's calibrated rate, an
 //! exclusively owned HPET, or the bounded PM fixture. No bootstrap Cpu.
-use super::{WorkError, counter::Counter, pm};
+#[cfg(feature = "diagnostics")]
+use super::pm;
+use super::{WorkError, counter::Counter};
 use alloc::{boxed::Box, rc::Rc, sync::Arc};
 pub(crate) use stela_boot_core::hpet::ElapsedBounds;
 pub(super) use stela_boot_core::source_health::Health;
@@ -8,6 +10,7 @@ use stela_drivers::bus::pci::power::{Error as TimerError, Interval, Timer};
 
 #[derive(Clone)]
 pub(crate) enum Prepared {
+    #[cfg(feature = "diagnostics")]
     Pm(pm::Prepared),
     Hpet(Arc<Counter>),
     Tsc(Tsc),
@@ -112,6 +115,7 @@ unsafe impl Timer for HpetMinimum {
     }
 }
 
+#[cfg(feature = "diagnostics")]
 #[derive(Debug)]
 pub(crate) enum Observation {
     InvariantTsc {
@@ -131,6 +135,7 @@ pub(crate) enum Observation {
         period_fs: u32,
     },
 }
+#[cfg(feature = "diagnostics")]
 impl Observation {
     pub(super) fn debug_fields(&self, record: &mut core::fmt::DebugStruct<'_, '_>) {
         match self {
@@ -171,9 +176,11 @@ impl Prepared {
     pub(crate) fn tsc(hz: u64) -> Result<Self, WorkError> {
         Tsc::new(hz).map(Self::Tsc)
     }
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn from_fadt(table: &[u8]) -> Result<Self, WorkError> {
         pm::Prepared::from_fadt(table).map(Self::Pm)
     }
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn exclusive_hpet(
         owner: crate::native_mmio::ExclusiveHpet,
     ) -> Result<Self, WorkError> {
@@ -199,13 +206,16 @@ impl Prepared {
     pub(crate) fn hpet_counter(&self) -> Option<&Arc<super::HpetCounter>> {
         match self {
             Self::Hpet(counter) => Some(counter),
-            Self::Pm(_) | Self::Tsc(_) => None,
+            Self::Tsc(_) => None,
+            #[cfg(feature = "diagnostics")]
+            Self::Pm(_) => None,
         }
     }
     pub(super) fn continuous_period(&self) -> Result<u32, WorkError> {
         match self {
             Self::Hpet(counter) => counter.continuous_period(),
             Self::Tsc(tsc) => Ok(tsc.0.period_fs()),
+            #[cfg(feature = "diagnostics")]
             Self::Pm(_) => Err(WorkError::Unavailable),
         }
     }
@@ -216,6 +226,7 @@ impl Prepared {
                 .0
                 .elapsed_bounds(ticks)
                 .map_err(|_| WorkError::Exhausted),
+            #[cfg(feature = "diagnostics")]
             Self::Pm(_) => Err(WorkError::Unavailable),
         }
     }
@@ -226,6 +237,7 @@ impl Prepared {
                 .0
                 .ticks_for_minimum_ns(minimum_ns)
                 .map_err(|_| WorkError::Exhausted),
+            #[cfg(feature = "diagnostics")]
             Self::Pm(_) => Err(WorkError::Unavailable),
         }
     }
@@ -234,6 +246,7 @@ impl Prepared {
     /// Every real PM sample gap, including masked original execution and VMM/
     /// firmware interruptions, obeys max_gap_ns. This is only the existing
     /// explicit bounded fixture compatibility path, never arbitrary WQ entry.
+    #[cfg(feature = "diagnostics")]
     pub(crate) unsafe fn qualify_bounded(self, max_gap_ns: u64) -> Result<Self, WorkError> {
         match self {
             // SAFETY: caller supplies the complete PM source gap bound.
@@ -250,6 +263,7 @@ impl Prepared {
         identity: &Arc<crate::engine::host::RootIdentity>,
     ) -> Result<(), WorkError> {
         match self {
+            #[cfg(feature = "diagnostics")]
             Self::Pm(pm) => pm.admit(),
             Self::Tsc(tsc) => Tsc::new(tsc.0.hz()).map(|_| ()),
             Self::Hpet(counter) => {
@@ -269,6 +283,7 @@ impl Prepared {
     /// its own IRQs while mutating the serialized previous/elapsed sample pair.
     pub(super) unsafe fn read(&self) -> Result<u64, WorkError> {
         match self {
+            #[cfg(feature = "diagnostics")]
             // SAFETY: caller supplies original kept PM/CPU ownership.
             Self::Pm(pm) => unsafe { pm.read() }.map(u64::from),
             Self::Hpet(counter) => counter.read_irq(),
@@ -287,6 +302,7 @@ impl Prepared {
             },
             // The separate bounded PM fixture keeps its existing wrap/gap
             // contract; it can never mint a continuous CounterEpoch.
+            #[cfg(feature = "diagnostics")]
             Self::Pm(pm) => {
                 // SAFETY: caller holds the original bounded PM/CPU lease.
                 unsafe { pm.read() }.map(u64::from)
@@ -295,6 +311,7 @@ impl Prepared {
     }
     pub(super) fn delta(&self, previous: u64, current: u64) -> Result<u64, WorkError> {
         match self {
+            #[cfg(feature = "diagnostics")]
             Self::Pm(pm) => pm.delta(previous as u32, current as u32),
             Self::Hpet(_) | Self::Tsc(_) => {
                 let delta = current.wrapping_sub(previous);
@@ -307,11 +324,13 @@ impl Prepared {
     }
     pub(super) fn ns(&self, ticks: u64) -> Result<u64, WorkError> {
         match self {
+            #[cfg(feature = "diagnostics")]
             Self::Pm(_) => pm::ns(ticks),
             Self::Hpet(counter) => counter.ns(ticks),
             Self::Tsc(tsc) => tsc.0.ns(ticks).map_err(|_| WorkError::Exhausted),
         }
     }
+    #[cfg(feature = "diagnostics")]
     pub(super) fn observation(&self) -> Observation {
         match self {
             Self::Tsc(tsc) => Observation::InvariantTsc { hz: tsc.0.hz() },

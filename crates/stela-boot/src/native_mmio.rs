@@ -4,6 +4,7 @@
 //! preallocated uncached aperture; [`ScopedSource`] binds the same aperture
 //! to one processor's root epoch for the HPET, clock and stack diagnostics.
 //! WC and dynamic roots refuse.
+mod aliases;
 mod capture;
 mod ecam;
 mod shared;
@@ -12,12 +13,14 @@ mod window;
 use ecam::RootWindow;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;
+#[cfg(feature = "diagnostics")]
 mod platform;
 
 pub(crate) use capture::{CaptureHandoff, Prepared, Wire};
-pub(crate) use platform::{ExclusiveHpet, HpetMapping};
 #[cfg(feature = "diagnostics")]
-pub(crate) use platform::{QualifiedRam, RootPublication, ScopedSource};
+pub(crate) use platform::{
+    ExclusiveHpet, HpetMapping, QualifiedRam, RootPublication, ScopedSource,
+};
 pub(crate) use shared::{
     ContainedPci, ContainmentError, InitialPciLines, IoapicRegisters, ModePin, NativeExclusiveHpet,
     NativeHpetMapping, PROCESSORS, Source,

@@ -226,12 +226,14 @@ impl RootIdentity {
         Ok(())
     }
 
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn save_disable(&self) -> Result<u64, WorkError> {
         self.check_current()?;
         Ok(disable())
     }
     /// # Safety
     /// Enclosing save from this same context; no switch or migration.
+    #[cfg(feature = "diagnostics")]
     pub(crate) unsafe fn restore(&self, saved: u64) {
         if self.check_current().is_err() {
             self.fatal(WorkError::WrongCpu);
@@ -250,6 +252,7 @@ impl RootIdentity {
     }
     /// Immutable processor observations only, under the captured root
     /// catalog. This does not check a fixed-root memory access or epoch.
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn processor_snapshot(&self) -> Result<Snapshot, WorkError> {
         self.check_dispatch()?;
         Ok(self.snapshot)
@@ -282,6 +285,7 @@ impl RootContext {
         self.generation()?;
         self.identity.check_current()
     }
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn check_irq_cpu(&self) -> Result<(), WorkError> {
         self.generation()?;
         self.identity.check_irq_cpu()
@@ -289,12 +293,14 @@ impl RootContext {
     pub(crate) fn in_interrupt(&self) -> bool {
         self.generation().is_err() || self.identity.in_interrupt()
     }
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn save_disable(&self) -> Result<u64, WorkError> {
         self.check_current()?;
         self.identity.save_disable()
     }
     /// # Safety
     /// Enclosing same-CPU save; no switch/migration or active task-frame change.
+    #[cfg(feature = "diagnostics")]
     pub(crate) unsafe fn restore(&self, saved: u64) {
         if self.check_current().is_err() {
             self.fatal(WorkError::Closed);
@@ -319,9 +325,11 @@ struct Epoch {
     active: AtomicBool,
 }
 /// Immutable exact execution epoch. It never reopens after closure.
+#[cfg(feature = "diagnostics")]
 pub(crate) struct RootProcessScope {
     epoch: Arc<Epoch>,
 }
+#[cfg(feature = "diagnostics")]
 impl RootProcessScope {
     pub(crate) fn context(&self) -> &Arc<RootContext> {
         &self.epoch.context
@@ -364,6 +372,7 @@ impl RootExecution {
     pub(crate) fn context(&self) -> &Arc<RootContext> {
         &self.epoch.context
     }
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn process_scope(&self) -> Result<Arc<RootProcessScope>, WorkError> {
         self.check()?;
         Ok(Arc::new(RootProcessScope {
@@ -531,6 +540,7 @@ impl Owner {
 
     /// Admit this original Owner/context pair before Clock effects.
     /// The numbers inside an unrelated snapshot cannot satisfy this check.
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn check_root(&self, execution: &RootExecution) -> Result<(), WorkError> {
         if gs_base() != self.local.as_ptr() as u64 {
             return Err(WorkError::WrongCpu);

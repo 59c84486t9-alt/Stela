@@ -14,8 +14,8 @@
 //! ([`super::shootdown`]).
 use super::*;
 use super::{
+    aliases::{aliases, owned_table},
     capture::LEAVES,
-    platform::{aliases, owned_table},
 };
 use crate::{
     engine::host::{HostOwner, MmioRoots, RootIdentity},
@@ -988,8 +988,7 @@ impl Source {
         routing.validate_units(&spans).map_err(failed)?;
         // SAFETY: exact complete inventory with no IOAPIC NMI, original
         // mode pins, and the caller's exclusive controller handoff.
-        let routes =
-            unsafe { crate::native_irq::root::plan_firmware_lines(&units) }.map_err(failed)?;
+        let routes = unsafe { crate::native_irq::plan_firmware_lines(&units) }.map_err(failed)?;
         let count = units.len();
         let controllers = Rc::new(MountedControllers {
             units,
@@ -1000,8 +999,7 @@ impl Source {
         *self.ioapics.borrow_mut() = MountedIoapics::Containing(controllers.clone());
         // SAFETY: same exclusive original roster. The Source now retains every
         // controller, plan and mode pin even if the hardware refuses.
-        let contained =
-            unsafe { crate::native_irq::root::contain_firmware_lines(&controllers.routes) };
+        let contained = unsafe { crate::native_irq::contain_firmware_lines(&controllers.routes) };
         if let Err(error) = contained {
             controllers.failure.set(Some(error));
             return Err(failed(error));

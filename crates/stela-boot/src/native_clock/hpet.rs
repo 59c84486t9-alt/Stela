@@ -16,12 +16,15 @@ impl Descriptor {
         // 1024-byte extent; PhysicalSpan has the same nonempty/overflow checks.
         PhysicalSpan::new(self.0.base(), hpet::REGISTERS_BYTES).expect("validated HPET extent")
     }
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn table_sha256(self) -> [u8; 32] {
         self.0.table_sha256()
     }
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn block_id(self) -> u32 {
         self.0.block_id()
     }
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn number(self) -> u8 {
         self.0.number()
     }

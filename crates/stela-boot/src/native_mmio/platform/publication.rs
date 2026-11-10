@@ -1,6 +1,5 @@
-//! RAM-only publication capability shared with the MMIO root permission.
-//! Candidate child module of native_mmio::platform; not admitted boot source.
-//! It owns no second root catalog and never interprets UC device permissions
+//! RAM-only publication capability shared with the MMIO root permission,
+//! for the `diagnostics` build's native stack check. It owns no second root catalog and never interprets UC device permissions
 //! as RAM ownership. Callers supply PageSource pins and keep every
 //! referenced data/table pin through quiescence, unmap and TLB acknowledgement.
 use super::*;
@@ -115,9 +114,6 @@ impl QualifiedRam {
     /// Cached immutable metadata: no PageBacking callback.
     pub(crate) fn physical_pages(&self) -> &[u64] {
         &self.physical
-    }
-    pub(crate) fn bytes(&self) -> usize {
-        self.bytes
     }
     pub(crate) fn cpu_address(&self, offset: usize, bytes: usize) -> Result<NonNull<u8>, Error> {
         self.owner.check_current()?;

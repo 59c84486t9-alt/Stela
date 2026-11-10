@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native HPET power validation, private CPU TSC calibration and device
-//! minimum delays. The calibration remains a candidate: no Cpu/Clock/Idle
+//! minimum delays. The calibration candidate is built only by the
+//! `diagnostics` build's native MMIO check: no Cpu/Clock/Idle
 //! implementation, Prepared variant or service grant is built from it.
 //! Absent ADJUST remains an explicit owned-watchdog requirement; a temporary
 //! HPET active-spin reference is not that persistent watchdog or PC10 proof.
@@ -8,19 +9,21 @@ mod deadline;
 pub(super) use deadline::Control as DeadlineControl;
 mod hpet_power;
 mod minimum;
-use super::{HpetCounter, WorkError};
-use crate::{engine::host::RootIdentity, handoff::Handoff, native_smp::firmware};
-use alloc::sync::Arc;
-use core::{
-    arch::{asm, x86_64::__cpuid_count},
-    marker::PhantomData,
-};
+use core::arch::{asm, x86_64::__cpuid_count};
 pub(super) use hpet_power::PowerControl;
 pub(crate) use minimum::Minimum;
-use stela_boot_core::{
-    topology::Snapshot,
-    tsc::{self, Calibration, CounterPolicy, RateRequirement, Sample},
+#[cfg(feature = "diagnostics")]
+use {
+    super::{HpetCounter, WorkError},
+    crate::{engine::host::RootIdentity, handoff::Handoff, native_smp::firmware},
+    alloc::sync::Arc,
+    core::marker::PhantomData,
+    stela_boot_core::{
+        topology::Snapshot,
+        tsc::{self, Calibration, CounterPolicy, RateRequirement, Sample},
+    },
 };
+#[cfg(feature = "diagnostics")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Error {
     Work(WorkError),
@@ -28,23 +31,31 @@ pub(crate) enum Error {
     Inventory,
     ChangedControl,
 }
+#[cfg(feature = "diagnostics")]
 impl From<WorkError> for Error {
     fn from(value: WorkError) -> Self {
         Self::Work(value)
     }
 }
+#[cfg(feature = "diagnostics")]
 impl From<tsc::Error> for Error {
     fn from(value: tsc::Error) -> Self {
         Self::Policy(value)
     }
 }
+#[cfg(feature = "diagnostics")]
 #[derive(Debug)]
+#[expect(
+    dead_code,
+    reason = "the native MMIO check prints these fields through Debug"
+)]
 pub(crate) struct Observation<'a> {
     pub policy: CounterPolicy,
     pub calibration: &'a Calibration,
     pub reference_table: [u8; 32],
     pub reference_period_fs: u32,
 }
+#[cfg(feature = "diagnostics")]
 pub(crate) struct Candidate {
     identity: Arc<RootIdentity>,
     captured: Snapshot,
@@ -81,6 +92,7 @@ pub(super) fn fenced() -> u64 {
         core::arch::x86_64::_rdtsc()
     }
 }
+#[cfg(feature = "diagnostics")]
 fn live_policy(
     identity: &RootIdentity,
     captured: &Snapshot,
@@ -116,6 +128,7 @@ fn live_policy(
     }
     Ok(tsc::counter_policy(&live, packages)?)
 }
+#[cfg(feature = "diagnostics")]
 impl Candidate {
     /// # Safety
     /// Original post-EBS handoff/capture/HostOwner identity and native

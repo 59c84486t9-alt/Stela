@@ -4,7 +4,9 @@
 //! host drivers request routes through [`service`], and the engine takes
 //! their interrupts in its wait windows. Interrupt remapping is off.
 use crate::apic::{self, Apic};
-use alloc::{boxed::Box, sync::Arc};
+#[cfg(feature = "diagnostics")]
+use alloc::boxed::Box;
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     arch::asm,
     sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
@@ -14,7 +16,6 @@ use stela_drivers::bus::irq::{
 };
 use stela_drivers::platform::work::Cpu;
 
-use stela_boot_core::crs;
 use stela_boot_core::irq_context as context;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod diagnostic;
@@ -23,10 +24,7 @@ pub use stela_boot_core::ioapic;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod level_diagnostic;
 pub mod madt;
-#[expect(
-    dead_code,
-    reason = "the native clock, IRQ root and MMIO platform services have no production consumer until the native counter and deadline work (R9, D6) wires them"
-)]
+#[cfg(feature = "diagnostics")]
 pub(crate) mod root;
 #[cfg(feature = "diagnostics")]
 pub(crate) mod work_diagnostic;
@@ -37,8 +35,9 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 static REGISTERS: AtomicU64 = AtomicU64::new(0);
 static BSP: AtomicU32 = AtomicU32::new(0);
 static TIMEOUT: AtomicU64 = AtomicU64::new(0);
-// Main's original immutable CPU/root view, permanently kept with this
-// static registry and its possible quarantines. Never moves HostOwner itself.
+// The clock's CPU view that the diagnostics' IRQ root adopts, permanently
+// kept with this static registry. Never moves HostOwner itself.
+#[cfg(feature = "diagnostics")]
 static ROOT_ADAPTER: AtomicPtr<crate::native_clock::IrqAdapter> =
     AtomicPtr::new(core::ptr::null_mut());
 
@@ -52,14 +51,31 @@ fn mounted_cpu() -> Option<&'static crate::engine::host::RootIdentity> {
     unsafe { identity.as_ref() }
 }
 
+#[cfg(feature = "diagnostics")]
 fn root_adapter() -> Option<&'static crate::native_clock::IrqAdapter> {
     let adapter = ROOT_ADAPTER.load(Ordering::Acquire);
     // SAFETY: publication leaks this exact Box for the permanent registry
     // lifetime. No path removes it, including failed source retirement.
     unsafe { adapter.as_ref() }
 }
+#[cfg(feature = "diagnostics")]
 fn root_cpu() -> Option<&'static Arc<dyn Cpu>> {
     root_adapter().map(|adapter| &adapter.cpu)
+}
+/// Only the diagnostics' IRQ root adopts a clock CPU view.
+#[cfg(not(feature = "diagnostics"))]
+fn root_cpu() -> Option<&'static Arc<dyn Cpu>> {
+    None
+}
+/// Check this CPU against the adopted clock view, else the mounted identity.
+fn check_irq_cpu() -> Result<(), IrqError> {
+    #[cfg(feature = "diagnostics")]
+    if let Some(adapter) = root_adapter() {
+        return adapter.check_irq_cpu().map_err(|_| IrqError::WrongCpu);
+    }
+    mounted_cpu().map_or(Ok(()), |identity| {
+        identity.check_irq_cpu().map_err(|_| IrqError::WrongCpu)
+    })
 }
 
 /// Join main's existing physical CPU/IDT/APIC owner for external device IRQs.
@@ -72,6 +88,7 @@ fn root_cpu() -> Option<&'static Arc<dyn Cpu>> {
 /// descriptor allocations remain held through this permanent registration.
 /// Active external routes must be stopped before leaving their checked root
 /// execution scope; the CPU view refuses unsupported root/context changes.
+#[cfg(feature = "diagnostics")]
 pub(crate) unsafe fn adopt(
     execution: &crate::native_clock::DriverExecution<'_>,
 ) -> Result<(), IrqError> {
@@ -103,6 +120,41 @@ pub(crate) unsafe fn adopt(
         unsafe { adapter.cpu.restore(saved) };
     }
     result
+}
+
+/// # Safety
+/// The slice retains every original controller under exclusive ownership.
+/// The caller validated its complete MADT inventory, excludes IOAPIC NMIs
+/// and keeps old destinations/contributors through independent retirement.
+pub(crate) unsafe fn plan_firmware_lines<R: ioapic::Registers>(
+    units: &[(madt::Unit, Arc<ioapic::Unit<R, NativePlatform>>)],
+) -> Result<Vec<ioapic::FirmwareRoutes<R, NativePlatform>>, IrqError> {
+    let mut routes = Vec::new();
+    routes
+        .try_reserve_exact(units.len())
+        .map_err(|_| IrqError::Exhausted)?;
+    for (_, unit) in units {
+        // SAFETY: complete original controller handoff, no IOAPIC NMI,
+        // and direct delivery, as required by the caller.
+        routes.push(unsafe { unit.firmware_routes() }?);
+    }
+    Ok(routes)
+}
+
+/// # Safety
+/// Same original complete controller ownership and source exclusions used
+/// for planning. The caller retains all plans across a refusal or unwind.
+pub(crate) unsafe fn contain_firmware_lines<R: ioapic::Registers>(
+    routes: &[ioapic::FirmwareRoutes<R, NativePlatform>],
+) -> Result<(), IrqError> {
+    for plan in routes {
+        // SAFETY: forwarded original controller and source exclusions.
+        unsafe { plan.contain() }?;
+    }
+    for plan in routes {
+        plan.verify_contained()?;
+    }
+    Ok(())
 }
 
 pub struct NativePlatform(());
@@ -289,11 +341,7 @@ unsafe impl Platform for NativePlatform {
         if !READY.load(Ordering::Acquire) {
             return Err(IrqError::Unavailable);
         }
-        if let Some(adapter) = root_adapter() {
-            adapter.check_irq_cpu().map_err(|_| IrqError::WrongCpu)?;
-        } else if let Some(identity) = mounted_cpu() {
-            identity.check_irq_cpu().map_err(|_| IrqError::WrongCpu)?;
-        }
+        check_irq_cpu()?;
         if id(&controller())? != BSP.load(Ordering::Relaxed) {
             return Err(IrqError::WrongCpu);
         }

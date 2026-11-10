@@ -1,4 +1,4 @@
-//! Captured-HPET reservation and typed owner. Intended child of platform.
+//! The captured HPET's reservation and typed owner on the scoped source.
 use super::*;
 use crate::{
     engine::host::{RootContext, RootProcessScope},
@@ -156,16 +156,6 @@ impl ScopedSource {
     }
 
     /// # Safety
-    /// Native dispatcher has kept the original running HPET owner
-    /// and the WHOLE rounded page/control-block exclusion from firmware, SMM,
-    /// other drivers/CPUs, comparator/legacy/FSB/route users and independent raw
-    /// aliases. No decode/reset/stop/counter-write/rate/suspend discontinuity may
-    /// occur through final Clock/source drain and unmap. The kept SDT and
-    /// quiet register contents alone never establish this ownership contract.
-    pub(crate) unsafe fn map_running_hpet(&self) -> Result<HpetMapping, Error> {
-        self.map_original_hpet(Protection::ReadOnly)
-    }
-    /// # Safety
     /// Post-EBS main has transferred exclusive ownership of the original
     /// complete HPET block AND rounded page, including every firmware/SMM/native
     /// timer/route/counter/config/decode writer and in-flight access. No outside
@@ -175,10 +165,10 @@ impl ScopedSource {
     /// do not prove that physical handoff. Missing exclusion must refuse here.
     pub(crate) unsafe fn take_hpet(&self) -> Result<ExclusiveHpet, Error> {
         Ok(ExclusiveHpet {
-            mapping: self.map_original_hpet(Protection::ReadWrite)?,
+            mapping: self.map_original_hpet()?,
         })
     }
-    fn map_original_hpet(&self, protection: Protection) -> Result<HpetMapping, Error> {
+    fn map_original_hpet(&self) -> Result<HpetMapping, Error> {
         self.platform.check_context(self.platform.space)?;
         // Parse only the source-kept original SDT, never caller bytes.
         let descriptor =
@@ -209,21 +199,23 @@ impl ScopedSource {
         };
         scope.check().map_err(failed)?;
         let (resource, registration) = self.register_handoff(page)?;
-        let mapping =
-            match self
-                .authority
-                .map(resource, 0, 1024, CacheAttribute::Uncached, protection)
-            {
-                Ok(mapping) => mapping,
-                Err(error) => {
-                    // An uncertain native map keeps its registry reservation.
-                    // Keep the exact scope as well: no rollback success is inferred.
-                    if self.authority.unregister_resource(registration).is_err() {
-                        core::mem::forget(scope);
-                    }
-                    return Err(error);
+        let mapping = match self.authority.map(
+            resource,
+            0,
+            1024,
+            CacheAttribute::Uncached,
+            Protection::ReadWrite,
+        ) {
+            Ok(mapping) => mapping,
+            Err(error) => {
+                // An uncertain native map keeps its registry reservation.
+                // Keep the exact scope as well: no rollback success is inferred.
+                if self.authority.unregister_resource(registration).is_err() {
+                    core::mem::forget(scope);
                 }
-            };
+                return Err(error);
+            }
+        };
         Ok(HpetMapping {
             descriptor,
             mapping: ManuallyDrop::new(mapping),

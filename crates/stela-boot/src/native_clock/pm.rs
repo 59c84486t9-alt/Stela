@@ -1,15 +1,23 @@
-//! Port I/O adapter for the shared fixed-PM timer contract.
+//! Port I/O adapter for the shared fixed-PM timer contract. Only the
+//! `diagnostics` build reads the PM timer; every build uses its unit.
+#[cfg(feature = "diagnostics")]
 use core::arch::asm;
-pub(super) use stela_boot_core::pm_timer::{HZ, NS, ns};
+pub(super) use stela_boot_core::pm_timer::NS;
+#[cfg(feature = "diagnostics")]
+pub(super) use stela_boot_core::pm_timer::{HZ, ns};
+#[cfg(feature = "diagnostics")]
 use stela_drivers::platform::work::WorkError;
+#[cfg(feature = "diagnostics")]
 #[derive(Clone, Copy)]
 pub(crate) struct Prepared(stela_boot_core::pm_timer::Prepared);
+#[cfg(feature = "diagnostics")]
 impl core::ops::Deref for Prepared {
     type Target = stela_boot_core::pm_timer::Prepared;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+#[cfg(feature = "diagnostics")]
 impl Prepared {
     pub(crate) fn from_fadt(table: &[u8]) -> Result<Self, WorkError> {
         stela_boot_core::pm_timer::Prepared::from_fadt(table).map(Self)

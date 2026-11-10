@@ -1,43 +1,28 @@
-//! External interrupt resources joined to the native mapping and CPU
-//! owners. MADT and _CRS describe routes; neither can create an MMIO lease or
-//! establish ownership of the devices sharing a physical line.
-use super::{NativePlatform, ioapic, madt};
+//! The native MMIO check's IOAPIC root: every MADT unit mapped through the
+//! owned MMIO authority, its firmware lines contained and rechecked. Only the
+//! `diagnostics` build has a consumer, `native_mmio::diagnostic::check`.
+use super::{NativePlatform, contain_firmware_lines, ioapic, madt, plan_firmware_lines};
 use crate::native_clock::ProcessScope;
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::{
-    marker::PhantomData,
-    mem::ManuallyDrop,
-    sync::atomic::{AtomicU64, Ordering},
-};
-use stela_crypto::Sha256;
-use stela_crypto::digest::Digest;
+use alloc::{sync::Arc, vec::Vec};
+use core::{marker::PhantomData, mem::ManuallyDrop};
 use stela_drivers::{
     bus::{
-        irq::{IrqError, LineRoute, Platform},
+        irq::{IrqError, Platform},
         mmio::owned::{self, Authority, CacheAttribute, Mapping, PhysicalSpan, Protection},
     },
-    platform::{
-        acpi::resources::{self, DeviceResources},
-        work::{Cpu, WorkError},
-    },
+    platform::work::{Cpu, WorkError},
 };
 
 #[derive(Debug)]
+#[expect(
+    dead_code,
+    reason = "the native MMIO check prints the payloads through Debug"
+)]
 pub(crate) enum Error {
     Irq(IrqError),
     Mapping(owned::Error),
     Route(madt::RouteError),
-    Resource(resources::Error),
     Cpu(WorkError),
-}
-static QUARANTINED_MAPPINGS: AtomicU64 = AtomicU64::new(0);
-pub(crate) fn quarantined_mappings() -> u64 {
-    QUARANTINED_MAPPINGS.load(Ordering::Relaxed)
-}
-fn quarantine_mapping() {
-    let _ = QUARANTINED_MAPPINGS.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-        Some(count.saturating_add(1))
-    });
 }
 
 /// A concrete installed mapping kept by the IOAPIC unit, including every
@@ -68,14 +53,12 @@ impl Drop for Registers {
         if self.scope.check().is_err() || self.cpu.in_interrupt() {
             // Preserve the mapping AND CPU/root owner on an invalid
             // final-release context. No affine resource is destroyed here.
-            quarantine_mapping();
             return;
         }
         // SAFETY: this is the last Unit reference. A programmed Pin keeps
         // Unit until complete registry/RemoteIRR/work retirement; a failed or
         // abandoned Pin permanently keeps it. No register user remains.
         if unsafe { self.mapping.retire() }.is_err() {
-            quarantine_mapping();
             // SAFETY: Process context is checked. Mapping::drop records native
             // quarantine while keeping its resource/table provider;
             // keep the separate descriptor/CPU lease pinned as well.
@@ -91,76 +74,17 @@ impl Drop for Registers {
     }
 }
 type Unit = ioapic::Unit<Registers, NativePlatform>;
-pub(crate) type Source = ioapic::Pin<Registers, NativePlatform>;
-
-/// # Safety
-/// The slice retains every original controller under exclusive ownership.
-/// The caller validated its complete MADT inventory, excludes IOAPIC NMIs
-/// and keeps old destinations/contributors through independent retirement.
-pub(crate) unsafe fn plan_firmware_lines<R: ioapic::Registers>(
-    units: &[(madt::Unit, Arc<ioapic::Unit<R, NativePlatform>>)],
-) -> Result<Vec<ioapic::FirmwareRoutes<R, NativePlatform>>, IrqError> {
-    let mut routes = Vec::new();
-    routes
-        .try_reserve_exact(units.len())
-        .map_err(|_| IrqError::Exhausted)?;
-    for (_, unit) in units {
-        // SAFETY: complete original controller handoff, no IOAPIC NMI,
-        // and direct delivery, as required by the caller.
-        routes.push(unsafe { unit.firmware_routes() }?);
-    }
-    Ok(routes)
-}
-
-/// # Safety
-/// Same original complete controller ownership and source exclusions used
-/// for planning. The caller retains all plans across a refusal or unwind.
-pub(crate) unsafe fn contain_firmware_lines<R: ioapic::Registers>(
-    routes: &[ioapic::FirmwareRoutes<R, NativePlatform>],
-) -> Result<(), IrqError> {
-    for plan in routes {
-        // SAFETY: forwarded original controller and source exclusions.
-        unsafe { plan.contain() }?;
-    }
-    for plan in routes {
-        plan.verify_contained()?;
-    }
-    Ok(())
-}
 
 /// One complete MADT unit inventory. The original Permission supplies
 /// registered exclusive resources and all-root UC mapping acknowledgements;
 /// this layer never registers an address from a firmware descriptor as owned.
 pub(crate) struct Root {
-    routing: madt::Routing,
-    units: Vec<(madt::Unit, Arc<Unit>)>,
-    spans: Vec<(madt::Unit, u16)>,
+    /// Keeps each unit and its register mapping until the root drops.
+    _units: Vec<(madt::Unit, Arc<Unit>)>,
     firmware_routes: Vec<ioapic::FirmwareRoutes<Registers, NativePlatform>>,
-    cpu: Arc<dyn Cpu>,
-    scope: Arc<ProcessScope>,
-    madt: &'static [u8],
-    madt_hash: [u8; 32],
     _local: PhantomData<*mut ()>,
 }
 impl Root {
-    /// Original process/deferred CPU view, including IRQ metadata.
-    /// Its process-context save/check refuses a guest shadow CR3.
-    pub(crate) fn cpu(&self) -> Arc<dyn Cpu> {
-        self.cpu.clone()
-    }
-
-    /// Build a contributor's all-root, IRQ-save guard in process
-    /// context. The permanent native registry keeps its original typed
-    /// APIC/IDT/GS/root adapter; no CPU or vector grant is reconstructed.
-    pub(crate) fn irq_platform(&self) -> Result<Arc<dyn Platform>, Error> {
-        self.scope.check().map_err(Error::Cpu)?;
-        if self.cpu.in_interrupt() {
-            return Err(Error::Cpu(WorkError::InterruptContext));
-        }
-        NativePlatform(()).check_cpu().map_err(Error::Irq)?;
-        Ok(Arc::new(NativePlatform(())))
-    }
-
     /// # Safety
     /// The main-owned execution grant and Permission belong to this
     /// post-EBS CPU/root epoch. `madt` is its original table. Every
@@ -181,8 +105,8 @@ impl Root {
             .map_err(|error| Error::Irq(IrqError::Delivery(error)))?;
         let scope = execution.process_scope().map_err(Error::Cpu)?;
         let cpu = scope.cpu().map_err(Error::Cpu)?;
-        let routing = madt::Routing::parse(madt, authority.address_space().physical_bits)
-            .map_err(Error::Route)?;
+        let routing =
+            madt::parse(madt, authority.address_space().physical_bits).map_err(Error::Route)?;
         if routing.has_ioapic_nmis() {
             return Err(Error::Route(madt::RouteError::NmiConflict));
         }
@@ -250,14 +174,8 @@ impl Root {
         // into the returned root so it can recheck the same routes.
         let firmware_routes = unsafe { ManuallyDrop::take(&mut routes) };
         Ok(Self {
-            routing,
-            units,
-            spans,
+            _units: units,
             firmware_routes,
-            cpu,
-            scope,
-            madt,
-            madt_hash: Sha256::digest(madt).into(),
             _local: PhantomData,
         })
     }
@@ -268,77 +186,5 @@ impl Root {
             routes.verify_contained().map_err(Error::Irq)?;
         }
         Ok(())
-    }
-
-    pub(crate) fn resolve<'r, 'd, 'a>(
-        &'r self,
-        device: &'d DeviceResources<'a>,
-        ordinal: usize,
-        pin_index: usize,
-    ) -> Result<ResolvedLine<'r, 'd, 'a>, Error> {
-        self.scope.check().map_err(Error::Cpu)?;
-        if self.cpu.in_interrupt() {
-            return Err(Error::Cpu(WorkError::InterruptContext));
-        }
-        if Sha256::digest(self.madt).as_slice() != self.madt_hash {
-            return Err(Error::Route(madt::RouteError::InvalidTable));
-        }
-        device.revalidate().map_err(Error::Resource)?;
-        let line =
-            super::crs::line(device.descriptors(), ordinal, pin_index).map_err(Error::Irq)?;
-        let owner = self
-            .routing
-            .owner(line, &self.spans)
-            .map_err(Error::Route)?;
-        let unit = &self
-            .units
-            .iter()
-            .find(|(descriptor, _)| *descriptor == owner)
-            .ok_or(Error::Irq(IrqError::Route))?
-            .1;
-        Ok(ResolvedLine {
-            root: self,
-            device,
-            unit,
-            line,
-        })
-    }
-}
-
-/// Borrows the exact root and original namespace inspection. A different
-/// snapshot, integer GSI, cloned AML handle or copied descriptor cannot be
-/// substituted between resolution and complete-group ownership.
-pub(crate) struct ResolvedLine<'r, 'd, 'a> {
-    root: &'r Root,
-    device: &'d DeviceResources<'a>,
-    unit: &'r Arc<Unit>,
-    line: LineRoute,
-}
-impl ResolvedLine<'_, '_, '_> {
-    /// # Safety
-    /// `devices` owns EVERY physical contributor to this exact line (including
-    /// SCI/GPE/INTx aliases), stopped/drained from its previous owner. Its fixed
-    /// callback group must have identical membership. Namespace/resource
-    /// mutation and pin-sharing changes are excluded until full retirement.
-    /// Contributors remain in their checked powered state; wake capability
-    /// metadata supplies no wake-enable, suspend or power-transition grant.
-    pub(crate) unsafe fn claim(self, devices: Box<dyn ioapic::Devices>) -> Result<Source, Error> {
-        // A failed context check cannot authorize release of device/root owners
-        // in a foreign or hard-IRQ context. Keep them kept on that failure.
-        let mut devices = ManuallyDrop::new(devices);
-        self.root.scope.check().map_err(Error::Cpu)?;
-        if self.root.cpu.in_interrupt() {
-            return Err(Error::Cpu(WorkError::InterruptContext));
-        }
-        // SAFETY: Remaining refusals occur on the checked process CPU before any
-        // programming; ordinary final release is safe for this stopped group.
-        let devices = unsafe { ManuallyDrop::take(&mut devices) };
-        if Sha256::digest(self.root.madt).as_slice() != self.root.madt_hash {
-            return Err(Error::Route(madt::RouteError::InvalidTable));
-        }
-        self.device.revalidate().map_err(Error::Resource)?;
-        // SAFETY: caller supplies the complete stopped sharer group;
-        // original CRS, MADT owner and hardware pin bounds were checked.
-        unsafe { self.unit.claim(self.line, devices) }.map_err(Error::Irq)
     }
 }
