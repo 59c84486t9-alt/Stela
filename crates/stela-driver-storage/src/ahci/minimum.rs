@@ -158,12 +158,26 @@ impl PortRefusal {
     pub(super) fn new(error: BlockError, kept: crate::Retained<Box<PortBuild>>) -> Self {
         Self { error, _kept: kept }
     }
+
+    /// A port whose link reset failed before it held any DMA memory.
+    pub(super) fn unstarted(error: BlockError, owner: Rc<Control>, port: Mmio) -> Self {
+        let kept = crate::Retained::new(Box::new(PortBuild {
+            owner,
+            port,
+            commands: None,
+            table: None,
+            bounce: None,
+            disk: None,
+        }));
+        Self::new(error, kept)
+    }
 }
 pub(super) struct Build {
     pub(super) host: Host,
     pub(super) hba: Option<Mmio>,
     pub(super) disks: Vec<AhciDisk>,
     pub(super) failures: Vec<(u32, BlockError)>,
+    pub(super) remapped_nvme: u32,
 }
 /// An actual whole failed AHCI construction, never successful empty attachment.
 /// Default Drop retains function, timer, partial port and all prior disks.

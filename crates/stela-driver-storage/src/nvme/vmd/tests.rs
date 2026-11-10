@@ -23,6 +23,9 @@ use std::sync::Mutex;
 
 const PATH: [usize; 3] = [ROOT, BRIDGE, NVME];
 const SIBLING: usize = NVME + (1 << 15);
+/// The buffers an owned controller maps: four queues, the admin page and
+/// the I/O pool.
+const BUFFERS: usize = 5 + crate::nvme::POOL_PAGES;
 
 struct Configuration(Arc<Mutex<State>>);
 impl protocol::Access for Configuration {
@@ -88,11 +91,6 @@ unsafe impl DmaDomain for Domain {
         let physical = pages.physical_pages();
         if physical.len() > 1 {
             assert!(physical.windows(2).all(|pair| pair[1] != pair[0] + 4096));
-            self.state
-                .lock()
-                .unwrap()
-                .events
-                .push(Event::Nvme("scattered_map"));
         }
         // SAFETY: forwarding the model pins and request.
         let mapping = unsafe { self.original.map(pages, direction, limit) }?;
@@ -278,7 +276,7 @@ fn composed_bridge_nvme_identify_prp_read_write_flush_and_original_hierarchy_ret
         (before.commands, before.mmio_accesses),
         (after.commands, after.mmio_accesses)
     );
-    assert_eq!(after.pages_released, 6);
+    assert_eq!(after.pages_released, BUFFERS);
     assert!(after.retired && after.drained && !after.enabled && after.mappings.is_empty());
     assert!(returned.is_ready());
     // Ready is only publication; stale handles still keep the original domain.
@@ -286,7 +284,6 @@ fn composed_bridge_nvme_identify_prp_read_write_flush_and_original_hierarchy_ret
     {
         let state = f.state.lock().unwrap();
         let events = &state.events;
-        assert!(events.contains(&Event::Nvme("scattered_map")));
         // Original PMCSR W1C status survives every path member's wake.
         for base in PATH {
             assert_eq!(state.child(base + 0x84, 2) & 0x8000, 0x8000);
@@ -387,7 +384,7 @@ fn composed_failed_d0_and_posted_bme_readback_never_issue_queue_dma() {
                 0
             );
         }
-        f.assert_retained(&returned, 6);
+        f.assert_retained(&returned, BUFFERS);
     }
 }
 
@@ -411,7 +408,7 @@ fn composed_bad_cq_and_cache_failures_fence_all_stale_siblings() {
         assert_eq!(output, [0xa5; 512]);
         let failed = f.protocol.snapshot();
         assert_eq!(failed.sync_cpu, before.sync_cpu);
-        f.assert_retained(&returned, 6);
+        f.assert_retained(&returned, BUFFERS);
         assert!(sibling.flush().is_err());
         assert!(disk.write(0, &[1; 512]).is_err());
         assert!(sibling.read(0, &mut output).is_err());
@@ -480,8 +477,8 @@ fn composed_domain_epoch_drain_unmap_and_register_failures_preserve_original_own
         }
         assert!(attached.namespaces[0].retire_owned().is_err());
         let failed = f.protocol.snapshot();
-        f.assert_retained(&returned, if stage == 3 { 0 } else { 6 });
-        assert_eq!(failed.pages_released, if stage == 3 { 6 } else { 0 });
+        f.assert_retained(&returned, if stage == 3 { 0 } else { BUFFERS });
+        assert_eq!(failed.pages_released, if stage == 3 { BUFFERS } else { 0 });
         assert_eq!(failed.mappings, if stage == 3 { Vec::new() } else { ids });
         assert!(!failed.retired);
         f.state.lock().unwrap().epoch = 1;
@@ -515,7 +512,7 @@ fn composed_final_host_publication_failure_cannot_reuse_retired_registers_or_hie
     assert!(attached.namespaces[0].retire_owned().is_err());
     let failed = f.protocol.snapshot();
     assert!(failed.retired && failed.drained && failed.mappings.is_empty());
-    assert_eq!(failed.pages_released, 6);
+    assert_eq!(failed.pages_released, BUFFERS);
     f.assert_retained(&returned, 0);
     f.state.lock().unwrap().release_failure = false;
     assert!(attached.namespaces[0].retire_owned().is_err());

@@ -57,10 +57,12 @@ fn initial_constructor_waits_for_resume_before_setup_and_keeps_failed_port() {
             let Err(refusal) = result else {
                 panic!("allocation boundary must refuse");
             };
-            assert_eq!(
-                &*timer.waits.borrow(),
-                &[COMRESET_HOLD_US, RESUME_SETTLE_US]
-            );
+            let waits = timer.waits.borrow();
+            assert_eq!(&waits[..2], &[COMRESET_HOLD_US, RESUME_SETTLE_US]);
+            // Then the link debounce, unless the settle failed.
+            assert!(waits[2..].iter().all(|us| *us == DEBOUNCE_NORMAL[0]));
+            assert_eq!(waits.len() == 2, fail_resume);
+            drop(waits);
             assert_eq!(
                 registers[PORT_COMMAND / 4] & (COMMAND_START | COMMAND_FIS_RECEIVE),
                 0
@@ -267,6 +269,7 @@ fn whole_controller_refusal_keeps_prior_disks_and_partial_port() {
                 hba: Some(port),
                 disks: vec![disk],
                 failures: Vec::new(),
+                remapped_nvme: 0,
             })),
         );
         assert_eq!(failure.error, timing());

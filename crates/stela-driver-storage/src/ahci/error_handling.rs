@@ -455,7 +455,7 @@ impl AhciDisk {
                 count: 0,
                 bytes: 0,
                 write: false,
-                buffer,
+                buffer: Some(buffer),
             },
         ) {
             stop_engine(port, self.clock)?;

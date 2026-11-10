@@ -119,14 +119,14 @@ impl Controller {
         let mut command = [0u32; 16];
         command[0] = u32::from(ADMIN_IDENTIFY);
         command[1] = namespace;
-        let page = self.bounce.address()?;
+        let page = self.admin_data.address()?;
         command[6] = page as u32;
         command[7] = (page >> 32) as u32;
         command[10] = cns;
         Ok(command)
     }
 
-    /// Run admin `command` through tag 0's memory once every queued command
+    /// Run admin `command` through the admin page once every queued command
     /// ended, as Linux runs its own admin commands: never retried. One past
     /// its deadline, or a fatal controller, resets the controller, as
     /// `nvme_timeout` does for the admin queue; a failed reset poisons every
@@ -135,7 +135,7 @@ impl Controller {
     pub(super) fn admin(&mut self, command: [u32; 16]) -> Result<u32, BlockError> {
         self.ready()?;
         self.settle()?;
-        match self.admin_wait(command, Some(0)) {
+        match self.admin_wait(command, true) {
             Ok((result, 0)) => Ok(result),
             Ok((_, status)) => Err(BlockError::Device { status }),
             Err(Lost::Reset(error)) => {
@@ -148,12 +148,12 @@ impl Controller {
         }
     }
 
-    /// Publish admin `command` with tag `tag`'s memory and wait for its
-    /// completion, taking the others posted before it.
+    /// Publish admin `command`, with the admin page when it moves `data`,
+    /// and wait for its completion, taking the others posted before it.
     pub(super) fn admin_wait(
         &mut self,
         command: [u32; 16],
-        tag: Option<usize>,
+        data: bool,
     ) -> Result<(u32, u32), Lost> {
         match self.registers.read32(STATUS).map_err(Lost::Fatal)? {
             REMOVED => return Err(Lost::Fatal(removed())),
@@ -162,9 +162,9 @@ impl Controller {
             }
             _ => {}
         }
-        let id = self.publish(false, command, tag).map_err(Lost::Fatal)?;
+        let memory = if data { Data::Admin } else { Data::None };
+        let id = self.publish(false, command, memory).map_err(Lost::Fatal)?;
         let (clock, timeout) = (self.clock, self.admin_timeout_us);
-        let data = tag.is_some();
         let mut observed = None;
         let mut polls = 0u32;
         clock.wait(timeout, || {
@@ -203,14 +203,14 @@ impl Controller {
     /// Take the admin completions the controller has posted, one doorbell
     /// each: an Asynchronous Event Request's is kept for
     /// [`Self::service_events`] and an Abort's ends it. Command `id`'s result
-    /// and status once posted, giving tag 0's memory back to the CPU when
+    /// and status once posted, giving the admin page back to the CPU when
     /// it holds `data`; any other completion breaks the protocol.
     pub(super) fn admin_completion(
         &mut self,
         expected: Option<(u16, bool)>,
     ) -> Result<Option<(u32, u32)>, BlockError> {
         while let Some((id, result, status, _)) = self.posted(false)? {
-            self.release(false)?;
+            self.ring_completion(false)?;
             if self.events.request == Some(id) {
                 self.events.request = None;
                 self.events.completed = Some((result, status));
@@ -220,11 +220,8 @@ impl Controller {
                 if data {
                     self.trust_completion()?;
                     // SAFETY: the controller completed this exact command;
-                    // no other command reaches tag 0's memory meanwhile.
-                    unsafe {
-                        self.bounce.take()?;
-                        self.prp_list.take()?;
-                    }
+                    // no other command reaches the admin page meanwhile.
+                    unsafe { self.admin_data.take()? };
                 }
                 return Ok(Some((result, status)));
             } else {
@@ -234,17 +231,17 @@ impl Controller {
         Ok(None)
     }
 
-    /// An admin Identify into tag 0's bounce page.
+    /// An admin Identify into the admin page.
     pub(super) fn identify(&mut self, cns: u32, namespace: u32) -> Result<&[u8], BlockError> {
         let command = self.identify_command(cns, namespace)?;
         self.admin(command)?;
-        Ok(&self.bounce.bytes()[..PAGE])
+        Ok(&self.admin_data.bytes()[..PAGE])
     }
 
-    /// Linux `nvme_get_log` for every namespace into tag 0's bounce page. A
+    /// Linux `nvme_get_log` for every namespace into the admin page. A
     /// failure is only logged.
     pub(super) fn read_log(&mut self, log: u32, bytes: usize) -> Result<(), BlockError> {
-        let page = self.bounce.address()?;
+        let page = self.admin_data.address()?;
         let mut command = [0u32; 16];
         command[0] = u32::from(ADMIN_GET_LOG_PAGE);
         command[1] = u32::MAX;

@@ -14,7 +14,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let mut registers = vec![0u64; 1024].into_boxed_slice();
-        let mut memory = vec![0u64; 65536];
+        let mut memory = vec![0u64; 196608];
         let start = memory.as_mut_ptr() as u64;
         // SAFETY: this fixture owns both stable allocations until after
         // all controller operations; no device accesses them.
@@ -24,21 +24,14 @@ impl Fixture {
                 RegionAllocator::new(start..start + (memory.len() * 8) as u64),
             )
         };
-        let slots = (1..DEPTH)
-            .map(|_| Slot {
-                bounce: Buffer::Legacy(dma.allocate(4 * PAGE, PAGE).unwrap()),
-                prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
-            })
-            .collect();
         let controller = Controller {
             registers: RegisterIo::Legacy(mmio),
             doorbell_stride: 4,
             admin: Queue::new(0, ADMIN_ENTRIES, &mut dma).unwrap(),
             io: Queue::new(1, IO_ENTRIES, &mut dma).unwrap(),
-            bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE).unwrap()),
-            prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
-            slots,
-            prp_pages: [1; DEPTH],
+            admin_data: Buffer::Legacy(dma.allocate(PAGE, PAGE).unwrap()),
+            pool: Pool::legacy(&mut dma).unwrap(),
+            held: (0..DEPTH).map(|_| Vec::new()).collect(),
             tags: (0..DEPTH).map(|_| Tag::Free).collect(),
             recovery: None,
             signalled: false,
@@ -165,7 +158,7 @@ fn unrelated_or_malformed_completions_do_not_retire_our_command() {
         let c = fixture.disk.controller.borrow();
         assert_eq!(c.io.head, 0);
         assert_eq!(c.registers.read32(DOORBELLS + 12).unwrap(), 0);
-        assert!(c.bounce.bytes().iter().all(|byte| *byte == 0));
+        assert!(pool_untouched(&c));
     }
 }
 
@@ -250,7 +243,7 @@ fn synchronous_read_changes_the_caller_only_after_success() {
     let mut data = [0x11; 512];
     {
         let mut controller = disk.controller.borrow_mut();
-        controller.bounce.bytes_mut()[..512].fill(0x42);
+        next_page(&mut controller).bytes_mut()[..512].fill(0x42);
         controller.io.completions.write(8, 1u32 << 16 | 1);
         controller.io.completions.write(12, 1u32 << 16 | 1);
     }
@@ -258,7 +251,7 @@ fn synchronous_read_changes_the_caller_only_after_success() {
     assert_eq!(data, [0x42; 512]);
     {
         let mut controller = disk.controller.borrow_mut();
-        controller.bounce.bytes_mut()[..512].fill(0x87);
+        next_page(&mut controller).bytes_mut()[..512].fill(0x87);
         controller.io.completions.write(16 + 8, 1u32 << 16 | 2);
         controller
             .io
@@ -303,7 +296,7 @@ fn a_fatal_controller_is_reset_first_and_poisons_when_it_stays_fatal() {
     );
     assert_eq!((c.command_id, c.io.tail, c.io.head), (0, 0, 0));
     assert!(c.io.submissions.bytes().iter().all(|byte| *byte == 0));
-    assert!(c.bounce.bytes().iter().all(|byte| *byte == 0));
+    assert!(pool_untouched(&c));
     assert_eq!(c.registers.read32(DOORBELLS + 8).unwrap(), 0);
 }
 
@@ -390,7 +383,7 @@ fn submission_publication_keeps_the_whole_wire_entry_and_rings_its_queue() {
     for io in [false, true] {
         let mut words = core::array::from_fn(|index| 0x1020_3040 + index as u32 * 0x0101_0101);
         words[0] &= 0xffff;
-        let id = controller.publish(io, words, None).unwrap();
+        let id = controller.publish(io, words, Data::None).unwrap();
         words[0] |= u32::from(id) << 16;
         let queue = if io {
             &controller.io
@@ -405,55 +398,216 @@ fn submission_publication_keeps_the_whole_wire_entry_and_rings_its_queue() {
     }
 }
 
+/// The pool page the next command takes first.
+fn next_page(controller: &mut Controller) -> &mut Buffer {
+    let page = *controller.pool.free.last().unwrap();
+    &mut controller.pool.pages[usize::from(page)]
+}
+
+/// No pool page holds data.
+fn pool_untouched(controller: &Controller) -> bool {
+    controller
+        .pool
+        .pages
+        .iter()
+        .all(|page| page.bytes().iter().all(|byte| *byte == 0))
+}
+
+/// The submission entry of tag `tag`'s command: its PRP1 and PRP2.
+fn prps(controller: &Controller, tag: u32) -> (u64, u64) {
+    let Tag::Running { slot, .. } = controller.tags[tag as usize] else {
+        panic!("tag {tag} runs nothing");
+    };
+    let entry = &controller.io.submissions.bytes()[usize::from(slot) * 64..][..64];
+    let word = |at: usize| u64::from_le_bytes(entry[at..at + 8].try_into().unwrap());
+    (word(24), word(32))
+}
+
 #[test]
-fn prp_list_prefixes_follow_each_bounce_mapping_and_only_grow() {
+fn prp_lists_name_every_page_a_command_holds_across_page_boundaries() {
     let mut fixture = Fixture::new();
     let disk = &mut fixture.disk;
-    let submit = |disk: &mut Namespace, pages| {
+    // One, two, three and thirty-two pages: PRP2 unused, a page, a list.
+    let sizes = [512, PAGE + 512, 2 * PAGE + 512, BOUNCE_BYTES];
+    let tags: Vec<u32> = sizes
+        .iter()
+        .map(|&bytes| disk.start(Command::Read { lba: 0, bytes }).unwrap())
+        .collect();
+    let mut controller = disk.controller.borrow_mut();
+    let mut seen = Vec::new();
+    for (&bytes, &tag) in sizes.iter().zip(&tags) {
+        let pages = bytes.div_ceil(PAGE);
+        let held = controller.held[tag as usize].clone();
+        assert_eq!(held.len(), pages_for(bytes));
+        seen.extend(held.iter().copied());
+        let address = |controller: &mut Controller, index| {
+            controller.tag_page(tag as usize, index).address().unwrap()
+        };
+        let (prp1, prp2) = prps(&controller, tag);
+        assert_eq!(prp1, address(&mut controller, 0));
+        assert!(prp1.is_multiple_of(PAGE as u64));
+        match pages {
+            1 => assert_eq!(prp2, 0),
+            2 => assert_eq!(prp2, address(&mut controller, 1)),
+            _ => {
+                assert_eq!(prp2, address(&mut controller, pages));
+                let list =
+                    controller.tag_page(tag as usize, pages).bytes()[..8 * (pages - 1)].to_vec();
+                for (index, entry) in list.as_chunks::<8>().0.iter().enumerate() {
+                    assert_eq!(
+                        u64::from_le_bytes(*entry),
+                        address(&mut controller, index + 1)
+                    );
+                }
+            }
+        }
+    }
+    // No page is held twice.
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(
+        seen.len(),
+        sizes.iter().map(|&b| pages_for(b)).sum::<usize>()
+    );
+    assert_eq!(controller.pool.free.len(), POOL_PAGES - seen.len());
+}
+
+#[test]
+fn a_read_across_pages_gathers_each_page_and_returns_them_to_the_pool() {
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let bytes = 3 * PAGE;
+    let read = disk.start(Command::Read { lba: 0, bytes }).unwrap();
+    {
+        let mut controller = disk.controller.borrow_mut();
+        for index in 0..3 {
+            controller
+                .tag_page(read as usize, index)
+                .bytes_mut()
+                .fill(index as u8 + 1);
+        }
+        let id = running_id(&controller, read);
+        post(&mut controller, id, 0);
+    }
+    let mut expected = vec![1; PAGE];
+    expected.extend([2; PAGE]);
+    expected.extend([3; PAGE]);
+    assert_eq!(disk.finish(read), Some(Ok(Some(expected))));
+    let controller = disk.controller.borrow();
+    assert!(controller.held[read as usize].is_empty());
+    assert_eq!(controller.pool.free.len(), POOL_PAGES);
+}
+
+#[test]
+fn a_write_across_pages_copies_each_page_and_keeps_force_unit_access() {
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let data: Vec<u8> = (0..2 * PAGE + 1024).map(|at| (at / 512) as u8).collect();
+    let write = disk
+        .start(Command::Write {
+            lba: 4,
+            data: data.clone(),
+            fua: true,
+        })
+        .unwrap();
+    let mut controller = disk.controller.borrow_mut();
+    let mut written = Vec::new();
+    for (index, part) in data.chunks(PAGE).enumerate() {
+        written
+            .extend_from_slice(&controller.tag_page(write as usize, index).bytes()[..part.len()]);
+    }
+    assert_eq!(written, data);
+    let Tag::Running { slot, .. } = controller.tags[write as usize] else {
+        panic!("the write runs");
+    };
+    let entry = &controller.io.submissions.bytes()[usize::from(slot) * 64..][..64];
+    let cdw12 = u32::from_le_bytes(entry[48..52].try_into().unwrap());
+    assert_eq!(cdw12, FORCE_UNIT_ACCESS | (data.len() / 512 - 1) as u32);
+}
+
+#[test]
+fn small_commands_run_past_eight_until_the_pool_cannot_take_the_largest() {
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let largest = pages_for(BOUNCE_BYTES);
+    let mut running = Vec::new();
+    while disk.room() {
+        running.push(
+            disk.start(Command::Read {
+                lba: 0,
+                bytes: 4 * 512,
+            })
+            .unwrap(),
+        );
+    }
+    // One page each: every tag runs while the pool keeps the largest.
+    assert_eq!(running.len(), DEPTH.min(POOL_PAGES - largest + 1));
+    assert!(running.len() > 8);
+    // Nine pages each: the pool, not the tags, is what runs out.
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let mut running = 0;
+    while disk.room() {
         disk.start(Command::Read {
             lba: 0,
-            bytes: pages * PAGE,
+            bytes: 8 * PAGE,
         })
-        .unwrap()
-    };
-    let check = |disk: &Namespace, tag: u32, pages| {
+        .unwrap();
+        running += 1;
+    }
+    assert_eq!(running, (POOL_PAGES - largest) / pages_for(8 * PAGE) + 1);
+    assert!(running < DEPTH);
+    assert!(disk.controller.borrow().pool.free.len() < largest);
+}
+
+#[test]
+fn a_retried_command_keeps_its_pages_and_a_failed_one_returns_them() {
+    let _clock = crate::test_clock::virtualize();
+    let mut fixture = Fixture::new();
+    let disk = &mut fixture.disk;
+    let write = disk
+        .start(Command::Write {
+            lba: 0,
+            data: vec![0x3c; 3 * PAGE],
+            fua: false,
+        })
+        .unwrap();
+    let held = disk.controller.borrow().held[write as usize].clone();
+    {
         let mut controller = disk.controller.borrow_mut();
-        let tag = tag as usize;
-        assert_eq!(controller.prp_pages[tag], pages);
-        let (bounce, list) = controller.slot(tag);
-        let base = bounce.address().unwrap();
-        for page in 1..=pages {
-            let start = (page - 1) * 8;
-            let entry = u64::from_le_bytes(list.bytes()[start..start + 8].try_into().unwrap());
-            let expected = if page < pages {
-                base + (page * PAGE) as u64
-            } else {
-                0
-            };
-            assert_eq!(entry, expected);
-        }
-        base
-    };
-    let complete = |disk: &mut Namespace, tag| {
-        {
-            let mut controller = disk.controller.borrow_mut();
-            let id = running_id(&controller, tag);
-            post(&mut controller, id, 0);
-        }
-        assert!(matches!(disk.finish(tag), Some(Ok(Some(_)))));
-    };
-    let first = submit(disk, 3);
-    let second = submit(disk, 4);
-    let base = check(disk, first, 3);
-    assert_ne!(check(disk, second, 4), base);
-    complete(disk, first);
-    assert_eq!(submit(disk, 2), first);
-    assert_eq!(check(disk, first, 3), base);
-    complete(disk, first);
-    assert_eq!(submit(disk, 5), first);
-    assert_eq!(check(disk, first, 5), base);
-    complete(disk, second);
-    complete(disk, first);
+        let id = running_id(&controller, write);
+        // Namespace Not Ready, retried at once.
+        post(&mut controller, id, 0x82);
+    }
+    assert_eq!(disk.finish(write), None);
+    {
+        let controller = disk.controller.borrow();
+        assert_eq!(controller.held[write as usize], held);
+        assert!(matches!(
+            controller.tags[write as usize],
+            Tag::Running { retries: 1, .. }
+        ));
+        assert_eq!(
+            prps(&controller, write).0,
+            controller.pool.pages[usize::from(held[0])]
+                .address()
+                .unwrap()
+        );
+    }
+    {
+        let mut controller = disk.controller.borrow_mut();
+        let id = running_id(&controller, write);
+        post(&mut controller, id, STATUS_DO_NOT_RETRY | 0x80);
+    }
+    assert_eq!(
+        disk.finish(write),
+        Some(Err(BlockError::Device {
+            status: STATUS_DO_NOT_RETRY | 0x80
+        }))
+    );
+    let controller = disk.controller.borrow();
+    assert!(controller.held[write as usize].is_empty());
+    assert_eq!(controller.pool.free.len(), POOL_PAGES);
 }
 
 #[test]
@@ -493,7 +647,7 @@ fn queued_commands_run_together_and_complete_in_any_order() {
     {
         let mut controller = disk.controller.borrow_mut();
         let tag = read as usize;
-        controller.slot(tag).0.bytes_mut()[..512].fill(0x42);
+        controller.tag_page(tag, 0).bytes_mut()[..512].fill(0x42);
         let id = running_id(&controller, read);
         post(&mut controller, id, 0);
     }
@@ -517,16 +671,18 @@ fn borrowed_read_does_not_consume_another_tags_owned_result() {
     let mut controller = disk.controller.borrow_mut();
     let mut data = [0x11; 512];
     let id = running_id(&controller, first);
-    controller.slot(first as usize).0.bytes_mut()[..512].fill(0x42);
+    controller.tag_page(first as usize, 0).bytes_mut()[..512].fill(0x42);
     post(&mut controller, id, 0);
     assert_eq!(
         controller.finish_into(second as usize, Some(&mut data)),
         None
     );
     assert_eq!(data, [0x11; 512]);
-    controller.slot(first as usize).0.bytes_mut()[..512].fill(0x87);
+    // The completed read's pages went back to the pool with its data
+    // copied out: reusing them leaves its result as it was.
+    next_page(&mut controller).bytes_mut()[..512].fill(0x87);
     let id = running_id(&controller, second);
-    controller.slot(second as usize).0.bytes_mut()[..512].fill(0x5a);
+    controller.tag_page(second as usize, 0).bytes_mut()[..512].fill(0x5a);
     post(&mut controller, id, 0);
     assert_eq!(
         controller.finish_into(second as usize, Some(&mut data)),
@@ -548,7 +704,7 @@ fn a_completed_borrowed_read_survives_a_later_cq_fault() {
     let other = disk.start(Command::Flush).unwrap();
     let mut controller = disk.controller.borrow_mut();
     let id = running_id(&controller, read);
-    controller.slot(read as usize).0.bytes_mut()[..512].fill(0x5a);
+    controller.tag_page(read as usize, 0).bytes_mut()[..512].fill(0x5a);
     post(&mut controller, id, 0);
     let other_id = running_id(&controller, other);
     controller.io.completions.write(16 + 8, 2u32 << 16 | 2);
@@ -603,7 +759,7 @@ fn delayed_read_completes_after_submission_ring_wraps() {
             let read = disk.start(Command::Read { lba: 1, bytes: 512 }).unwrap();
             {
                 let mut controller = disk.controller.borrow_mut();
-                controller.slot(read as usize).0.bytes_mut()[..512].fill(0x71);
+                controller.tag_page(read as usize, 0).bytes_mut()[..512].fill(0x71);
                 let id = running_id(&controller, read);
                 post(&mut controller, id, 0);
             }
@@ -614,7 +770,7 @@ fn delayed_read_completes_after_submission_ring_wraps() {
             let mut controller = disk.controller.borrow_mut();
             assert_eq!(controller.io.tail, 0);
             assert_eq!(controller.io.consumed, 0);
-            controller.slot(delayed as usize).0.bytes_mut()[..512].fill(0x42);
+            controller.tag_page(delayed as usize, 0).bytes_mut()[..512].fill(0x42);
             post(&mut controller, delayed_id, 0);
         }
         assert_eq!(disk.finish(delayed), Some(Ok(Some(vec![0x42; 512]))));
@@ -688,7 +844,7 @@ fn deallocate_and_write_zeroes_carry_their_ranges() {
     );
     assert_eq!(word(&controller, 0, 10), 1);
     assert_eq!(word(&controller, 0, 11), ATTRIBUTE_DEALLOCATE);
-    let range = controller.slot(discard as usize).0.bytes()[..32].to_vec();
+    let range = controller.tag_page(discard as usize, 0).bytes()[..32].to_vec();
     assert_eq!(range[4..8], 3u32.to_le_bytes());
     assert_eq!(range[8..16], 9u64.to_le_bytes());
     assert_eq!(range[20..24], 2u32.to_le_bytes());
@@ -766,7 +922,7 @@ fn a_command_past_its_deadline_is_aborted_then_resets_the_controller_and_runs_ag
     assert_eq!(controller.scans, 1);
     assert_eq!((controller.io.tail, controller.io.head), (1, 0));
     let id = running_id(&controller, read);
-    controller.bounce.bytes_mut()[..512].fill(0x5a);
+    controller.tag_page(read as usize, 0).bytes_mut()[..512].fill(0x5a);
     post(&mut controller, id, 0);
     drop(controller);
     assert_eq!(disk.finish(read), Some(Ok(Some(vec![0x5a; 512]))));
@@ -1021,4 +1177,12 @@ fn a_controller_shuts_down_once_and_then_refuses_commands() {
         controller.ready(),
         Err(BlockError::Unsupported("NVMe controller is shut down"))
     );
+}
+
+#[test]
+fn only_the_first_namespace_carries_the_bare_controller_serial() {
+    assert_eq!(super::namespace_serial("S1", 1, Some(1)), "S1");
+    assert_eq!(super::namespace_serial("S1", 2, Some(1)), "S1/n2");
+    // A controller whose only active namespace is not the first ID.
+    assert_eq!(super::namespace_serial("S1", 3, Some(3)), "S1");
 }

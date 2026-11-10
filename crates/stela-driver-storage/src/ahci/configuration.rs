@@ -6,8 +6,120 @@ use super::*;
 impl AhciDisk {
     /// Reset the link on one port and, when an ATA disk answers, start the
     /// port and identify the disk.
+    #[cfg(test)]
     pub(super) fn start(
         port: Mmio,
+        capabilities: u32,
+        capabilities_2: u32,
+        clock: Clock,
+        dma: &mut dyn DmaAllocator,
+        minimum: Rc<Control>,
+    ) -> Result<Option<Self>, PortRefusal> {
+        let link = Self::link_ports(&[&port], capabilities, clock, &minimum).remove(0);
+        match link {
+            Ok(Some(link)) => Self::configure_port(
+                port,
+                link,
+                capabilities,
+                capabilities_2,
+                clock,
+                dma,
+                minimum,
+            ),
+            Ok(None) => Ok(None),
+            Err(error) => Err(PortRefusal::unstarted(error, minimum, port)),
+        }
+    }
+
+    /// Reset every port's link at once, as Linux probes ports in parallel:
+    /// stop each port and hold COMRESET, release them all, settle once, then
+    /// debounce them together with `sata_deb_timing_normal`. A port whose
+    /// SStatus.DET does not end at 3 has no device (`ata_phys_link_offline`):
+    /// an empty port costs one debounce, 100 ms of stable DET 0, beside the
+    /// others. A timing failure reaches every port.
+    pub(super) fn link_ports<P: CommandPort>(
+        ports: &[&P],
+        capabilities: u32,
+        clock: Clock,
+        minimum: &Control,
+    ) -> Vec<Result<Option<Link>, BlockError>> {
+        let mut links: Vec<Result<Link, BlockError>> = ports
+            .iter()
+            .map(|port| Self::reset_link(*port, capabilities, clock, minimum))
+            .collect();
+        let released = minimum.wait_after(RESUME_SETTLE_US, || {
+            for (port, link) in ports.iter().zip(&links) {
+                if let Ok(link) = link {
+                    port.write32(PORT_SATA_CONTROL, link.control);
+                    port.read32(PORT_SATA_CONTROL);
+                }
+            }
+        });
+        let reset: Vec<&P> = ports
+            .iter()
+            .zip(&links)
+            .filter(|(_, link)| link.is_ok())
+            .map(|(port, _)| *port)
+            .collect();
+        let debounced = released.and_then(|()| {
+            debounce_ports(&reset, clock, minimum, DEBOUNCE_NORMAL, DEBOUNCE_NORMAL[2])
+        });
+        let mut debounced = match debounced {
+            Ok(debounced) => debounced.into_iter(),
+            Err(error) => {
+                for link in &mut links {
+                    *link = Err(error.clone());
+                }
+                Vec::new().into_iter()
+            }
+        };
+        links
+            .into_iter()
+            .map(|link| {
+                let link = link?;
+                let present = debounced
+                    .next()
+                    .is_some_and(|found| found.detection == DEVICE_PRESENT);
+                Ok(present.then_some(link))
+            })
+            .collect()
+    }
+
+    /// Stop `port` and assert COMRESET for its minimum hold.
+    fn reset_link(
+        port: &impl CommandPort,
+        capabilities: u32,
+        clock: Clock,
+        minimum: &Control,
+    ) -> Result<Link, BlockError> {
+        minimum.check()?;
+        let command = port.read32(PORT_COMMAND);
+        stop_port(port, clock)?;
+        if capabilities & CAP_STAGGERED_SPIN_UP != 0 {
+            port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_SPIN_UP);
+        }
+        // sata_link_init_spd: the firmware's SPD caps the limit.
+        let initial = (port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED) >> SPEED_SHIFT;
+        let speed_limit = match initial {
+            0 => u32::MAX,
+            speed => (1 << speed) - 1,
+        };
+        let control = port.read32(PORT_SATA_CONTROL) & !SATA_CONTROL_DETECTION;
+        minimum.wait_after(COMRESET_HOLD_US, || {
+            port.write32(PORT_SATA_CONTROL, control | SATA_CONTROL_RESET);
+            port.read32(PORT_SATA_CONTROL);
+        })?;
+        Ok(Link {
+            command,
+            speed_limit,
+            control,
+        })
+    }
+
+    /// Start a port whose link came up and identify its disk.
+    pub(super) fn configure_port(
+        port: Mmio,
+        link: Link,
         capabilities: u32,
         capabilities_2: u32,
         clock: Clock,
@@ -25,32 +137,9 @@ impl AhciDisk {
         let result = (|| {
             let port = kept.port;
             let minimum = kept.owner.clone();
-            minimum.check()?;
-            let lpm = Lpm::new(capabilities, capabilities_2, port.read32(PORT_COMMAND));
-            stop_port(&port, clock)?;
-            if capabilities & CAP_STAGGERED_SPIN_UP != 0 {
-                port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_SPIN_UP);
-            }
-            // sata_link_init_spd: the firmware's SPD caps the limit.
-            let initial = (port.read32(PORT_SATA_CONTROL) & SATA_CONTROL_SPEED) >> SPEED_SHIFT;
-            let speed_limit = match initial {
-                0 => u32::MAX,
-                speed => (1 << speed) - 1,
-            };
-            let control = port.read32(PORT_SATA_CONTROL) & !SATA_CONTROL_DETECTION;
-            minimum.wait_after(COMRESET_HOLD_US, || {
-                port.write32(PORT_SATA_CONTROL, control | SATA_CONTROL_RESET);
-                port.read32(PORT_SATA_CONTROL);
-            })?;
-            minimum.wait_after(RESUME_SETTLE_US, || {
-                port.write32(PORT_SATA_CONTROL, control);
-                port.read32(PORT_SATA_CONTROL);
-            })?;
-            if !clock.wait(RESET_TIMEOUT_US, || {
-                port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION == DEVICE_PRESENT
-            }) {
-                return Ok(false);
-            }
+            minimum.ready()?;
+            let lpm = Lpm::new(capabilities, capabilities_2, link.command);
+            let speed_limit = link.speed_limit;
             port.write32(PORT_SATA_ERROR, u32::MAX);
             kept.get_mut().commands =
                 Some(dma.allocate(COMMAND_LIST_BYTES + RECEIVED_FIS_BYTES, COMMAND_LIST_BYTES)?);
@@ -148,6 +237,7 @@ impl AhciDisk {
                 quirks: 0,
                 devslp: false,
                 slots: DmaResource::new(Vec::new(), minimum.clone(), retain.clone()),
+                pool: DmaResource::new(Pool::default(), minimum.clone(), retain.clone()),
                 running: Vec::new(),
                 next_tag: 0,
                 looks: 0,
@@ -201,40 +291,42 @@ impl AhciDisk {
                 disk.reconfigure(&port, true, false, error, tries)?;
             }
             // Linux `__ata_change_queue_depth`: as many queued commands as the
-            // host's slots and the disk take, here at most DEPTH. A slot the
-            // DMA pool cannot hold leaves the queue shallower.
+            // host's slots and the disk take, at most ATA_MAX_QUEUE. Memory
+            // the DMA pool cannot give, or a 32-bit host cannot reach, leaves
+            // the queue shallower: slots 1 and up need the pool pages of at
+            // least one command.
             if disk.ncq.device {
                 let depth = DEPTH.min(disk.ncq.host_slots).min(disk.ncq.depth);
-                for _ in 1..depth {
-                    let (Ok(table), Ok(bounce)) = (
-                        dma.allocate(COMMAND_TABLE_BYTES, COMMAND_TABLE_ALIGN),
-                        dma.allocate(BOUNCE_BYTES, 4096),
-                    ) else {
-                        break;
-                    };
-                    let slot = Slot { table, bounce };
-                    if capabilities & CAP_64BIT == 0
-                        && [&slot.table, &slot.bounce]
-                            .iter()
-                            .any(|buffer| buffer.bus_address() + buffer.len() as u64 > 1 << 32)
-                    {
-                        break;
+                let reachable = |buffer: &DmaBuffer| {
+                    capabilities & CAP_64BIT != 0
+                        || buffer.bus_address() + buffer.len() as u64 <= 1 << 32
+                };
+                let pages = POOL_PAGES.min(CHUNK_PAGES * depth.saturating_sub(1));
+                while disk.pool.pages.len() < pages {
+                    match dma.allocate(PAGE, PAGE) {
+                        Ok(page) if reachable(&page) => disk.pool.pages.push(page),
+                        _ => break,
                     }
-                    disk.slots.push(slot);
+                }
+                if disk.pool.pages.len() >= CHUNK_PAGES {
+                    disk.pool.free = (0..disk.pool.pages.len() as u16).rev().collect();
+                    for _ in 1..depth {
+                        match dma.allocate(COMMAND_TABLE_BYTES, COMMAND_TABLE_ALIGN) {
+                            Ok(table) if reachable(&table) => disk.slots.push(Slot {
+                                table,
+                                pages: Vec::new(),
+                            }),
+                            _ => break,
+                        }
+                    }
                 }
             }
-            Ok(true)
+            Ok(())
         })();
         match result {
-            Ok(true) => {
+            Ok(()) => {
                 let minimum::PortBuild { disk, .. } = *kept.into_inner();
                 Ok(Some(disk.expect("same configured disk")))
-            }
-            Ok(false) => {
-                // No allocations or DMA pointer publication occurred on the
-                // absent-link branch, and the port was stopped beforehand.
-                drop(kept.into_inner());
-                Ok(None)
             }
             Err(error) => Err(PortRefusal::new(error, kept)),
         }
@@ -365,7 +457,7 @@ impl AhciDisk {
                     count: 1,
                     bytes,
                     write: false,
-                    buffer,
+                    buffer: Some(buffer),
                 },
             ) else {
                 return Ok(true);

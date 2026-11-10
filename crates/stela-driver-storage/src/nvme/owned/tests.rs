@@ -98,6 +98,9 @@ struct Lease {
     device: Vec<u8>,
     visible: bool,
 }
+/// The buffers an owned controller maps: four queues, the admin page and
+/// the I/O pool.
+const BUFFERS: usize = 5 + POOL_PAGES;
 #[derive(Clone, Copy, Default)]
 enum Mutation {
     #[default]
@@ -178,6 +181,9 @@ struct Model {
     busy: [bool; 2],
     /// I/O commands still to hold unanswered, one each.
     delay_io: usize,
+    /// Hold every I/O command, however many, until [`Model::complete_held`].
+    hold_io: bool,
+    held_io: Vec<[u32; 16]>,
     /// Whether an Abort completes the held command.
     abortable: bool,
     /// Statuses for the next I/O completions.
@@ -256,6 +262,8 @@ impl Model {
             pending: None,
             busy: [false; 2],
             delay_io: 0,
+            hold_io: false,
+            held_io: Vec::new(),
             abortable: false,
             statuses: Default::default(),
             fatal: false,
@@ -340,8 +348,12 @@ impl Model {
         out
     }
     fn process(&mut self, queue: usize, tail: u16) {
+        let holding = queue == 1 && self.hold_io;
         assert!(
-            self.registers_available() && self.dma_enabled() && self.enabled && !self.busy[queue]
+            self.registers_available()
+                && self.dma_enabled()
+                && self.enabled
+                && (holding || !self.busy[queue])
         );
         assert_eq!(tail, (self.sq_heads[queue] + 1) % 16);
         let bytes = self.read_iova(
@@ -361,6 +373,10 @@ impl Model {
         self.outstanding = true;
         self.drained = false;
         self.record("command");
+        if holding {
+            self.held_io.push(command);
+            return;
+        }
         if queue == 1 && (matches!(self.mutation, Mutation::Delayed) || self.delay_io > 0) {
             self.delay_io = self.delay_io.saturating_sub(1);
             self.pending = Some((queue, command));
@@ -550,6 +566,39 @@ impl Model {
         self.outstanding = self.busy.iter().any(|busy| *busy);
         self.record("completion");
     }
+    /// The pages the I/O commands not yet completed reach: their data and
+    /// PRP list, or their Dataset Management ranges.
+    fn busy_pages(&self) -> Vec<u64> {
+        let held = self.held_io.iter().copied();
+        let pending = self
+            .pending
+            .iter()
+            .filter(|(queue, _)| *queue == 1)
+            .map(|(_, command)| *command);
+        let mut pages = Vec::new();
+        for command in held.chain(pending) {
+            let first = u64::from(command[6]) | u64::from(command[7]) << 32;
+            match command[0] as u8 {
+                1 | 2 => {
+                    let bytes = ((command[12] & 0xffff) + 1) as usize * 512;
+                    if bytes.div_ceil(4096) > 2 {
+                        pages.push(u64::from(command[8]) | u64::from(command[9]) << 32);
+                    }
+                    pages.extend(self.pages(&command, bytes));
+                }
+                9 => pages.push(first),
+                _ => {}
+            }
+        }
+        pages
+    }
+    /// Complete held I/O command `index`, in the order the test chooses.
+    fn complete_held(&mut self, index: usize) {
+        let command = self.held_io.remove(index);
+        self.complete(1, command);
+        self.busy[1] = !self.held_io.is_empty();
+        self.outstanding = self.busy.iter().any(|busy| *busy);
+    }
     /// Complete the held Asynchronous Event Request with `result`.
     fn post_event(&mut self, result: u32) {
         let cid = self.event_request.take().expect("a held event request");
@@ -640,7 +689,16 @@ unsafe impl DmaDomain for Domain {
         direction: Direction,
     ) -> Result<(), DmaError> {
         let mut m = self.0.lock().unwrap();
-        assert!(!m.outstanding, "CPU acquire before command completion");
+        let start = m.maps[&token.id].token.address;
+        let end = start + m.maps[&token.id].token.bytes as u64;
+        assert!(
+            !m.busy[0]
+                && !m
+                    .busy_pages()
+                    .iter()
+                    .any(|page| (start..end).contains(page)),
+            "CPU acquire before command completion"
+        );
         if m.fail_cpu_sync {
             return Err(DmaError::VisibilityFailed);
         }
@@ -724,6 +782,7 @@ unsafe impl Registers for Regs {
                         m.outstanding = false;
                         m.busy = [false; 2];
                         m.pending = None;
+                        m.held_io.clear();
                         m.stopped = true;
                         m.fatal = false;
                         m.queues[1] = (0, 0);
@@ -900,7 +959,7 @@ fn owned_protocol_reuses_prps_across_reset_then_wraps_and_retires() {
     disk.retire_owned().unwrap();
     let m = f.model.lock().unwrap();
     assert!(m.released && m.maps.is_empty());
-    assert_eq!(f.source.released.load(Ordering::SeqCst), 6);
+    assert_eq!(f.source.released.load(Ordering::SeqCst), BUFFERS);
     let at = |event| m.events.iter().rposition(|e| *e == event).unwrap();
     assert!(
         at("stop") < at("bme_off")
@@ -910,6 +969,71 @@ fn owned_protocol_reuses_prps_across_reset_then_wraps_and_retires() {
             && at("retire_regs") < at("release")
     );
 }
+#[test]
+fn owned_queue_runs_eight_commands_at_once_and_completes_them_out_of_order() {
+    // No deadline passes while the eight commands are held.
+    let _clock = crate::test_clock::virtualize();
+    let f = Fixture::new();
+    let mut attached = f.attach().unwrap();
+    let disk = &mut attached.namespaces[0];
+    // The model's queue has 16 entries: 15 tags.
+    assert_eq!(disk.depth(), 15);
+    {
+        let mut m = f.model.lock().unwrap();
+        for (at, byte) in m.disk.iter_mut().enumerate() {
+            *byte = (at / 512) as u8 ^ (at % 251) as u8;
+        }
+        m.hold_io = true;
+    }
+    // Reads of one, two and four pages, PRP lists past two, and a write.
+    let reads: Vec<(u64, usize)> = (0..7)
+        .map(|index| (index * 40, [512, PAGE + 512, 4 * PAGE][index as usize % 3]))
+        .collect();
+    let mut tags: Vec<u32> = reads
+        .iter()
+        .map(|&(lba, bytes)| disk.start(Command::Read { lba, bytes }).unwrap())
+        .collect();
+    let written: Vec<u8> = (0..3 * PAGE).map(|at| (at * 7) as u8).collect();
+    tags.push(
+        disk.start(Command::Write {
+            lba: 600,
+            data: written.clone(),
+            fua: true,
+        })
+        .unwrap(),
+    );
+    assert!(disk.room());
+    let expected = f.model.lock().unwrap().disk.clone();
+    {
+        let m = f.model.lock().unwrap();
+        assert_eq!(m.held_io.len(), 8, "all eight reached the controller");
+    }
+    for &tag in &tags {
+        assert_eq!(disk.finish(tag), None);
+    }
+    // The controller completes them out of order, each while the others
+    // still run: the last, one from the middle, the first, and so on.
+    let mut held: Vec<usize> = (0..8).collect();
+    for index in [7, 3, 0, 4, 2, 1, 1, 0] {
+        f.model.lock().unwrap().complete_held(index);
+        let command = held.remove(index);
+        let result = disk.finish(tags[command]).expect("completed");
+        for &other in &held {
+            assert_eq!(disk.finish(tags[other]), None);
+        }
+        if command == 7 {
+            assert_eq!(result, Ok(None));
+        } else {
+            let (lba, bytes) = reads[command];
+            let at = lba as usize * 512;
+            assert_eq!(result, Ok(Some(expected[at..at + bytes].to_vec())));
+        }
+    }
+    let m = f.model.lock().unwrap();
+    assert_eq!(&m.disk[600 * 512..][..written.len()], &written[..]);
+    assert!(m.held_io.is_empty());
+}
+
 #[test]
 fn invalid_clock_keeps_unadmitted_original_owners_without_any_effect() {
     for ticks_per_microsecond in [0, u64::MAX, u64::MAX / (2 * 255 * 500_000) + 1] {
@@ -964,7 +1088,7 @@ fn owned_bad_cqe_identity_never_reuses_dma() {
         let m = f.model.lock().unwrap();
         assert_eq!(m.commands, commands);
         assert_eq!(m.sync_cpu, before);
-        assert_eq!(m.maps.len(), 6);
+        assert_eq!(m.maps.len(), BUFFERS);
         drop(m);
         disk.retire_owned().unwrap();
         assert!(f.model.lock().unwrap().released);
@@ -1311,7 +1435,7 @@ fn owned_stop_bme_drain_and_unmap_failures_keep_original_owners() {
         assert!(a.namespaces[0].retire_owned().is_err());
         {
             let m = f.model.lock().unwrap();
-            assert_eq!(m.maps.len(), 6);
+            assert_eq!(m.maps.len(), BUFFERS);
             assert!(!m.retired && !m.released);
             assert_eq!(f.source.released.load(Ordering::SeqCst), 0);
         }
@@ -1358,7 +1482,7 @@ fn owned_last_namespace_drop_retires_successful_controller() {
     drop(a);
     let m = f.model.lock().unwrap();
     assert!(m.released && m.retired && m.maps.is_empty());
-    assert_eq!(f.source.released.load(Ordering::SeqCst), 6);
+    assert_eq!(f.source.released.load(Ordering::SeqCst), BUFFERS);
 }
 #[test]
 fn owned_drop_quarantines_hierarchy_and_cpu_pins_after_failed_drain() {
@@ -1367,7 +1491,7 @@ fn owned_drop_quarantines_hierarchy_and_cpu_pins_after_failed_drain() {
     f.model.lock().unwrap().fail_drain = true;
     drop(a);
     let m = f.model.lock().unwrap();
-    assert_eq!(m.maps.len(), 6);
+    assert_eq!(m.maps.len(), BUFFERS);
     assert!(!m.retired && !m.released);
     assert_eq!(f.source.released.load(Ordering::SeqCst), 0);
 }
@@ -1411,7 +1535,7 @@ fn owned_failed_prepare_in_d3_quarantines_without_any_nvme_mmio() {
         m.events.iter().filter(|e| **e == "prepare_attempt").count(),
         1
     );
-    assert_eq!(m.maps.len(), 6);
+    assert_eq!(m.maps.len(), BUFFERS);
     assert_eq!(m.unmap_attempts, 0);
     assert!(!m.retired && !m.released);
     assert_eq!((m.register_owner_drops, m.lifecycle_owner_drops), (0, 0));
@@ -1428,16 +1552,16 @@ fn owned_register_retirement_failure_retries_only_that_step_and_release() {
         let m = f.model.lock().unwrap();
         assert!(m.maps.is_empty() && m.drained && !m.bme && !m.enabled);
         assert!(!m.retired && !m.released);
-        assert_eq!(m.unmap_attempts, 6);
+        assert_eq!(m.unmap_attempts, BUFFERS);
         assert_eq!((m.register_owner_drops, m.lifecycle_owner_drops), (0, 0));
-        assert_eq!(f.source.released.load(Ordering::SeqCst), 6);
+        assert_eq!(f.source.released.load(Ordering::SeqCst), BUFFERS);
         m.mmio_accesses
     };
     f.model.lock().unwrap().fail_retire = false;
     a.namespaces[0].retire_owned().unwrap();
     let m = f.model.lock().unwrap();
     assert_eq!(m.mmio_accesses, accesses);
-    assert_eq!(m.unmap_attempts, 6);
+    assert_eq!(m.unmap_attempts, BUFFERS);
     assert_eq!(
         m.events
             .iter()
@@ -1467,7 +1591,7 @@ fn owned_hierarchy_release_failure_never_accesses_retired_registers_on_retry() {
     a.namespaces[0].retire_owned().unwrap();
     let m = f.model.lock().unwrap();
     assert_eq!(m.mmio_accesses, accesses);
-    assert_eq!(m.unmap_attempts, 6);
+    assert_eq!(m.unmap_attempts, BUFFERS);
     assert_eq!(
         m.events
             .iter()
@@ -1502,11 +1626,11 @@ fn owned_partial_ram_unmap_retries_only_remaining_original_leases() {
         a.namespaces[0].retire_owned().unwrap();
         let m = f.model.lock().unwrap();
         assert_eq!(m.mmio_accesses, accesses);
-        assert_eq!(m.unmap_attempts, 7);
+        assert_eq!(m.unmap_attempts, BUFFERS + 1);
         assert_eq!(m.events.iter().filter(|e| **e == "drain").count(), 1);
         assert_eq!(m.events.iter().filter(|e| **e == "bme_off").count(), 1);
         assert!(m.released && m.retired && m.maps.is_empty());
-        assert_eq!(f.source.released.load(Ordering::SeqCst), 6);
+        assert_eq!(f.source.released.load(Ordering::SeqCst), BUFFERS);
     }
 }
 

@@ -66,7 +66,7 @@ impl Controller {
             ADMIN_DELETE_COMPLETION
         });
         command[10] = u32::from(self.io.id);
-        let id = self.publish(false, command, None)?;
+        let id = self.publish(false, command, Data::None)?;
         let deadline = self.deadline(self.admin_timeout_us)?;
         self.recovery = Some(Recovery::Deleting {
             submission,
@@ -98,16 +98,12 @@ impl Controller {
             // SAFETY: the engine acknowledged its reset and BME is off.
             unsafe { owner.domain.drain_posted_writes() }.map_err(owned::map_dma_error)?;
         }
-        for tag in 0..self.tags.len() {
-            // SAFETY: CSTS.RDY clear acknowledges the stopped engine.
-            unsafe {
-                let (bounce, prp_list) = self.slot(tag);
-                bounce.take()?;
-                prp_list.take()?;
-            }
-        }
-        // SAFETY: as above.
+        // SAFETY: CSTS.RDY clear acknowledges the stopped engine.
         unsafe {
+            for page in &mut self.pool.pages {
+                page.take()?;
+            }
+            self.admin_data.take()?;
             self.admin.submissions.take()?;
             self.io.submissions.take()?;
             for queue in [&mut self.admin, &mut self.io] {
@@ -115,9 +111,10 @@ impl Controller {
                 queue.completions.bytes_mut().fill(0);
             }
         }
-        for tag in &mut self.tags {
-            if matches!(tag, Tag::Waiting { retries, .. } if *retries > RETRIES) {
-                *tag = Tag::Done(Err(BlockError::Timeout));
+        for tag in 0..self.tags.len() {
+            if matches!(self.tags[tag], Tag::Waiting { retries, .. } if retries > RETRIES) {
+                self.tags[tag] = Tag::Done(Err(BlockError::Timeout));
+                self.release(tag);
             }
         }
         self.io.restart();
@@ -208,7 +205,7 @@ impl Controller {
                 };
                 match (step, code) {
                     (Step::Identify, 0) => {
-                        identify = self.bounce.bytes()[..PAGE].to_vec();
+                        identify = self.admin_data.bytes()[..PAGE].to_vec();
                         self.identified(&identify);
                     }
                     (Step::Limits, code) => self.limits_answered(code),
@@ -251,7 +248,7 @@ impl Controller {
             let Some(command) = command else {
                 continue;
             };
-            let id = self.publish(false, command, Some(0))?;
+            let id = self.publish(false, command, Data::Admin)?;
             let deadline = self.deadline(self.admin_timeout_us)?;
             self.recovery = Some(Recovery::Admin {
                 step,
@@ -325,7 +322,7 @@ impl Controller {
             self.limits.refused = true;
             return;
         }
-        let page = self.bounce.bytes();
+        let page = self.admin_data.bytes();
         self.limits.write_zeroes = page[NVM_WRITE_ZEROES_LIMIT];
         self.limits.deallocate_ranges = page[NVM_DEALLOCATE_RANGES];
         self.limits.deallocate = le32(page, NVM_DEALLOCATE_RANGE_LIMIT);
@@ -374,7 +371,7 @@ impl Controller {
             let mut command = [0u32; 16];
             command[0] = u32::from(opcode);
             command[10] = u32::from(self.io.id);
-            match self.admin_wait(command, None) {
+            match self.admin_wait(command, false) {
                 Ok(_) => {}
                 Err(Lost::Reset(_)) => break,
                 Err(Lost::Fatal(error)) => return Err(self.poison(error)),

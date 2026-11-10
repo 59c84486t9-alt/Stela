@@ -25,21 +25,69 @@ impl AhciDisk {
         }
     }
 
-    pub(super) fn bounce(&self, slot: usize) -> &DmaBuffer {
+    /// Page `index` of slot `slot`'s data memory: a page of slot 0's bounce
+    /// buffer, or of the pool pages another slot holds.
+    pub(super) fn slot_page(&mut self, slot: usize, index: usize) -> &mut [u8] {
         match slot {
-            0 => &self.bounce,
-            slot => &self.slots[slot - 1].bounce,
+            0 => &mut self.bounce.bytes_mut()[index * PAGE..][..PAGE],
+            slot => {
+                let page = self.slots[slot - 1].pages[index];
+                self.pool.pages[usize::from(page)].bytes_mut()
+            }
         }
     }
 
-    pub(super) fn bounce_mut(&mut self, slot: usize) -> &mut DmaBuffer {
-        match slot {
-            0 => &mut self.bounce,
-            slot => &mut self.slots[slot - 1].bounce,
+    /// Copy `data` into the start of slot `slot`'s data memory.
+    pub(super) fn stage(&mut self, slot: usize, data: &[u8]) {
+        for (index, part) in data.chunks(PAGE).enumerate() {
+            self.slot_page(slot, index)[..part.len()].copy_from_slice(part);
         }
     }
 
-    /// Run one ATA command in slot 0 with `bytes` of data through the bounce
+    /// Append the first `bytes` of slot `slot`'s data memory to `into`.
+    pub(super) fn gather(&mut self, slot: usize, bytes: usize, into: &mut Vec<u8>) {
+        for index in 0..bytes.div_ceil(PAGE) {
+            let part = (bytes - index * PAGE).min(PAGE);
+            into.extend_from_slice(&self.slot_page(slot, index)[..part]);
+        }
+    }
+
+    /// Give slot `slot`'s pool pages back, unless the disk failed or its
+    /// timing did, which may leave a command reaching them.
+    pub(super) fn release(&mut self, slot: usize) {
+        if slot == 0 || self.ready().is_err() {
+            return;
+        }
+        let mut pages = core::mem::take(&mut self.slots[slot - 1].pages);
+        self.pool.give_back(&mut pages);
+        self.slots[slot - 1].pages = pages;
+    }
+
+    /// The Physical Region Descriptor Table entries for `bytes` of slot
+    /// `slot`'s data memory, or at `buffer`: each region's address and byte
+    /// count, adjoining pages joined (AHCI 1.3.1 §4.2.3.3).
+    fn regions(&self, slot: usize, buffer: Option<u64>, bytes: usize) -> Vec<(u64, usize)> {
+        let start = match (slot, buffer) {
+            (_, Some(address)) => address,
+            (0, None) => self.bounce.bus_address(),
+            (slot, None) => {
+                let mut regions: Vec<(u64, usize)> = Vec::new();
+                let pages = &self.slots[slot - 1].pages;
+                for (index, &page) in pages.iter().take(bytes.div_ceil(PAGE)).enumerate() {
+                    let address = self.pool.pages[usize::from(page)].bus_address();
+                    let part = (bytes - index * PAGE).min(PAGE);
+                    match regions.last_mut() {
+                        Some((at, length)) if *at + *length as u64 == address => *length += part,
+                        _ => regions.push((address, part)),
+                    }
+                }
+                return regions;
+            }
+        };
+        alloc::vec![(start, bytes)]
+    }
+
+    /// Run one ATA command in slot 0 with `bytes` of data through its bounce
     /// buffer.
     pub(super) fn issue(
         &mut self,
@@ -190,7 +238,6 @@ impl AhciDisk {
             if plain || (!queued && launched > 0) {
                 break;
             }
-            let buffer = self.bounce(issue.slot).bus_address();
             match self.launch(
                 port,
                 issue.slot,
@@ -202,7 +249,7 @@ impl AhciDisk {
                     count: issue.count,
                     bytes: issue.bytes,
                     write: issue.write,
-                    buffer,
+                    buffer: None,
                 },
             ) {
                 Ok(started) => {
@@ -304,7 +351,7 @@ impl AhciDisk {
                 count,
                 bytes,
                 write: false,
-                buffer,
+                buffer: Some(buffer),
             },
         ) else {
             return Ok(());
@@ -389,16 +436,23 @@ impl AhciDisk {
             count as u8,
             (count >> 8) as u8,
         ];
-        let entries = u32::from(bytes > 0);
+        let regions = if bytes > 0 {
+            self.regions(slot, buffer, bytes)
+        } else {
+            Vec::new()
+        };
+        let entries = regions.len() as u32;
         let tables: &mut DmaBuffer = match slot {
             0 => &mut self.table,
             slot => &mut self.slots[slot - 1].table,
         };
         tables.bytes_mut()[..TABLE_HEADER_BYTES].fill(0);
         tables.bytes_mut()[..fis.len()].copy_from_slice(&fis);
-        if bytes > 0 {
-            tables.write(PRDT_ADDRESS, buffer);
-            tables.write(PRDT_BYTE_COUNT, bytes as u32 - 1);
+        for (index, (address, length)) in regions.into_iter().enumerate() {
+            let entry = index * PRDT_ENTRY_BYTES;
+            tables.write(PRDT_ADDRESS + entry, address);
+            tables.write(PRDT_ADDRESS + entry + 8, 0u32);
+            tables.write(PRDT_BYTE_COUNT + entry, length as u32 - 1);
         }
         let flags = COMMAND_FIS_DWORDS
             | u32::from(write) << COMMAND_WRITE_SHIFT
@@ -519,6 +573,20 @@ impl AhciDisk {
                 "every AHCI command slot is running a command",
             ));
         };
+        if slot != 0 {
+            let bytes = match &command {
+                Command::Read { bytes, .. } => *bytes,
+                Command::Write { data, .. } => data.len(),
+                Command::Discard { .. } => ATA_SECTOR_BYTES as usize,
+                Command::Flush | Command::WriteZeroes { .. } => 0,
+            };
+            let pages = bytes.min(self.chunk_bytes()).div_ceil(PAGE);
+            self.release(slot);
+            self.slots[slot - 1].pages = self
+                .pool
+                .take(pages)
+                .ok_or(BlockError::Protocol("every AHCI bounce page is in use"))?;
+        }
         let tag = self.next_tag;
         self.next_tag = tag.wrapping_add(1);
         self.running.push(Running {
@@ -577,9 +645,7 @@ impl AhciDisk {
                     Err(error) => command.result = Some(Err(error)),
                     Ok(()) => {
                         if let Command::Read { .. } = command.command {
-                            command.data.extend_from_slice(
-                                &self.bounce(command.slot).bytes()[..issue.bytes],
-                            );
+                            self.gather(command.slot, issue.bytes, &mut command.data);
                         }
                         command.done += issue.bytes.max(1);
                     }
@@ -593,7 +659,7 @@ impl AhciDisk {
     }
 
     /// The next part of `running`'s command, its data staged in its slot's
-    /// bounce buffer, or `None` once all of it is done.
+    /// memory, or `None` once all of it is done.
     pub(super) fn next_issue(&mut self, running: &Running) -> Result<Option<Issue>, BlockError> {
         let block = self.identity.block_size as usize;
         let done = running.done;
@@ -611,7 +677,7 @@ impl AhciDisk {
                 fua: false,
             } if done < data.len() => {
                 let part = (data.len() - done).min(self.chunk_bytes());
-                self.bounce_mut(slot).bytes_mut()[..part].copy_from_slice(&data[done..done + part]);
+                self.stage(slot, &data[done..done + part]);
                 let first = lba + (done / block) as u64;
                 let count = self.sectors(part);
                 self.prepare((ATA_WRITE_DMA_EXT, 0), first, count, part, true)?
@@ -641,7 +707,7 @@ impl AhciDisk {
 
     /// TRIM in one block of ranges, as libata's `ata_format_dsm_trim_descr`
     /// writes them: each the starting logical sector in bits 47:0 and the
-    /// count in bits 63:48, staged in `slot`'s bounce buffer.
+    /// count in bits 63:48, staged in `slot`'s memory.
     pub(super) fn trim(&mut self, lba: u64, blocks: u64, slot: usize) -> Result<Issue, BlockError> {
         let bytes = usize::try_from(blocks)
             .ok()
@@ -653,7 +719,7 @@ impl AhciDisk {
             return Err(BlockError::Unsupported("a TRIM past one block of ranges"));
         }
         self.ready()?;
-        let ranges = &mut self.bounce_mut(slot).bytes_mut()[..ATA_SECTOR_BYTES as usize];
+        let ranges = &mut self.slot_page(slot, 0)[..ATA_SECTOR_BYTES as usize];
         ranges.fill(0);
         for range in ranges.chunks_mut(8) {
             if sectors == 0 {

@@ -1,4 +1,4 @@
-//! AHCI host bus adapters with SATA disks, one polled command slot per port.
+//! AHCI host bus adapters with SATA disks, up to 32 queued commands per port.
 //! Controller setup follows Linux `drivers/ata/ahci.c` and `libahci.c` at
 //! a804c5742bff224d4cb4d25dd383554d598be32b: firmware-programmed capability
 //! and port registers survive HBA reset, legacy Intel port enables are set,
@@ -36,8 +36,11 @@ pub const CLASS: [u8; 3] = [0x01, 0x06, 0x01];
 const VENDOR_AMD: u16 = 0x1022;
 const CLASS_RAID: [u8; 3] = [0x01, 0x04, 0x00];
 
-/// Whether `ahci_pci_tbl` binds the function: the AHCI class, or an AMD
-/// function of the RAID class.
+/// Whether `ahci_pci_tbl` binds the function: the AHCI class, an AMD
+/// function of the RAID class, or an Intel controller the table lists by
+/// ID, such as a chipset SATA controller in RAID ("RST") mode, which is
+/// AHCI underneath. Intel VMD is none of these. The table's Dell S140/S150
+/// entry matches by subsystem vendor, which these identities do not carry.
 pub fn matches<C>(function: &Function<C>) -> bool {
     matches_identity(&function.identity())
 }
@@ -45,7 +48,9 @@ pub fn matches<C>(function: &Function<C>) -> bool {
 /// Candidate selection from copied identity DATA; owned attachment still
 /// revalidates configuration and platform requirements.
 pub fn matches_identity(function: &crate::bus::pci::Identity) -> bool {
-    function.class == CLASS || function.vendor == VENDOR_AMD && function.class == CLASS_RAID
+    function.class == CLASS
+        || function.vendor == VENDOR_AMD && function.class == CLASS_RAID
+        || function.vendor == INTEL && INTEL_AHCI.binary_search(&function.device).is_ok()
 }
 
 const CAPABILITIES: usize = 0x00;
@@ -96,6 +101,24 @@ const PORT_ISSUE: usize = 0x38;
 /// Intel Port Control and Status: one enable bit per port (Linux `PCS_6`).
 const INTEL_PORT_CONTROL: u16 = 0x92;
 const INTEL: u16 = 0x8086;
+/// Every Intel ID Linux `ahci_pci_tbl` lists, whatever the function's
+/// class, in ascending order: AHCI and RAID-mode SATA controllers.
+const INTEL_AHCI: &[u16] = &[
+    0x02d3, 0x02d7, 0x06d6, 0x06d7, 0x0f22, 0x0f23, 0x19b0, 0x19b1, 0x19b2, 0x19b3, 0x19b4, 0x19b5,
+    0x19b6, 0x19b7, 0x19be, 0x19bf, 0x19c0, 0x19c1, 0x19c2, 0x19c3, 0x19c4, 0x19c5, 0x19c6, 0x19c7,
+    0x19ce, 0x19cf, 0x1c02, 0x1c03, 0x1c04, 0x1c05, 0x1c06, 0x1c07, 0x1d02, 0x1d04, 0x1d06, 0x1e02,
+    0x1e03, 0x1e04, 0x1e05, 0x1e06, 0x1e07, 0x1e0e, 0x1f22, 0x1f23, 0x1f24, 0x1f25, 0x1f26, 0x1f27,
+    0x1f2e, 0x1f2f, 0x1f32, 0x1f33, 0x1f34, 0x1f35, 0x1f36, 0x1f37, 0x1f3e, 0x1f3f, 0x22a3, 0x2323,
+    0x23a3, 0x2652, 0x2653, 0x2681, 0x2682, 0x2683, 0x27c1, 0x27c3, 0x27c5, 0x27c6, 0x2821, 0x2822,
+    0x2823, 0x2824, 0x2826, 0x2827, 0x2829, 0x282a, 0x282f, 0x2922, 0x2923, 0x2924, 0x2925, 0x2927,
+    0x2929, 0x292a, 0x292b, 0x292c, 0x292f, 0x294d, 0x294e, 0x34d3, 0x3a05, 0x3a22, 0x3a25, 0x3b22,
+    0x3b23, 0x3b24, 0x3b25, 0x3b29, 0x3b2b, 0x3b2c, 0x3b2f, 0x43d4, 0x43d5, 0x43d6, 0x43d7, 0x4b63,
+    0x502a, 0x502b, 0x5ae3, 0x8c02, 0x8c03, 0x8c04, 0x8c05, 0x8c06, 0x8c07, 0x8c0e, 0x8c0f, 0x8c82,
+    0x8c83, 0x8c84, 0x8c85, 0x8c86, 0x8c87, 0x8c8e, 0x8c8f, 0x8d02, 0x8d04, 0x8d06, 0x8d0e, 0x8d62,
+    0x8d64, 0x8d66, 0x8d6e, 0x9c02, 0x9c03, 0x9c04, 0x9c05, 0x9c06, 0x9c07, 0x9c0e, 0x9c0f, 0x9c83,
+    0x9c85, 0x9c87, 0x9c8f, 0x9d03, 0x9d05, 0x9d07, 0x9dd3, 0xa102, 0xa103, 0xa105, 0xa106, 0xa107,
+    0xa10f, 0xa182, 0xa186, 0xa1d2, 0xa1d6, 0xa202, 0xa206, 0xa252, 0xa256, 0xa356, 0xa386,
+];
 /// Linux `ahci_pci_tbl` Intel IDs whose board sets `AHCI_HFLAG_INTEL_PCS_QUIRK`.
 const INTEL_PCS_QUIRK: &[u16] = &[
     0x02d3, 0x02d7, 0x06d6, 0x06d7, 0x0f22, 0x0f23, 0x1c02, 0x1c03, 0x1c04, 0x1c05, 0x1c06, 0x1c07,
@@ -206,6 +229,17 @@ const SIGNATURE_ATA: u32 = 0x0000_0101;
 const SIGNATURE_ATAPI: u32 = 0xeb14_0101;
 const SIGNATURE_PORT_MULTIPLIER: u32 = 0x9669_0101;
 const SIGNATURE_ENCLOSURE: u32 = 0xc33c_0101;
+/// `ahci-remap.h`: an Intel vendor capability bit, the remap capability
+/// with one bit per remapped device, and each device's class code, in a
+/// BAR of at least 512 KiB.
+const VENDOR_CAPABILITIES: usize = 0xa4;
+const REMAP_CAPABILITIES: usize = 0x800;
+const REMAP_CLASS: usize = 0x880;
+const REMAP_STRIDE: usize = 0x80;
+const REMAP_DEVICES: usize = 3;
+const REMAP_REGISTERS: u64 = 0x1000;
+const REMAP_BAR_BYTES: u64 = 512 * 1024;
+const REMAP_NVME_CLASS: u32 = 0x01_0802;
 const PORT_REGISTERS: u64 = 0x80;
 const PORT_BASE: u64 = 0x100;
 const MAX_PORTS: u32 = 32;
@@ -220,6 +254,7 @@ const DEVICE_LBA: u8 = 0x40;
 const TABLE_HEADER_BYTES: usize = 0x90;
 const PRDT_ADDRESS: usize = 0x80;
 const PRDT_BYTE_COUNT: usize = 0x8c;
+const PRDT_ENTRY_BYTES: usize = 16;
 /// IDENTIFY DEVICE words (ACS-3 Â§7.12.7).
 const IDENTIFY_CONFIG: usize = 0;
 const IDENTIFY_SERIAL: core::ops::Range<usize> = 10..20;
@@ -374,11 +409,17 @@ const LPM_WAKE_US: u64 = 10_000;
 /// The highest sense key REQUEST SENSE DATA EXT may report.
 const SENSE_COMPLETED: u8 = 0x0f;
 
+/// The most data one command moves, through slot 0's bounce buffer or the
+/// pool pages a queued command in another slot holds.
 const BOUNCE_BYTES: usize = 128 * 1024;
+const PAGE: usize = 4096;
+const CHUNK_PAGES: usize = BOUNCE_BYTES / PAGE;
 /// The queued commands a port runs at once, each in its own slot with its
-/// own command table and bounce buffer, as NVMe's tags bound them; Linux
-/// queues up to `ATA_MAX_QUEUE` (32) without bounce memory.
-const DEPTH: usize = 8;
+/// own command table: Linux `ATA_MAX_QUEUE`.
+const DEPTH: usize = 32;
+/// The bounce pages slots 1 and up share: as much memory as seven commands
+/// of [`BOUNCE_BYTES`] take, which many more small commands share.
+const POOL_PAGES: usize = 7 * CHUNK_PAGES;
 const RESET_TIMEOUT_US: u64 = 1_000_000;
 /// Linux `ahci_stop_engine` and `ahci_stop_fis_rx` waits.
 const STOP_ENGINE_TIMEOUT_US: u64 = 500_000;
@@ -484,9 +525,10 @@ pub struct AhciDisk {
     quirks: u32,
     /// `ATA_DFLAG_DEVSLP`: the disk has DevSleep and its SATA Settings page.
     devslp: bool,
-    /// Slots 1 and up's command tables and bounce buffers, for queued
-    /// commands; slot 0's are `table` and `bounce`.
+    /// Slots 1 and up's command tables and pool pages, for queued commands;
+    /// slot 0's are `table` and `bounce`.
     slots: DmaResource<Vec<Slot>>,
+    pool: DmaResource<Pool>,
     /// The block commands started on the port, each in its own slot, and
     /// the next one's tag.
     running: Vec<Running>,
@@ -495,13 +537,38 @@ pub struct AhciDisk {
     looks: u32,
 }
 
-/// A slot's command table and bounce buffer.
+/// A slot's command table, and the pool pages its block command holds.
 struct Slot {
     table: DmaBuffer,
-    bounce: DmaBuffer,
+    pages: Vec<u16>,
 }
 
-/// Task-file registers and the DMA region encoded for one command issue.
+/// Bounce pages for queued commands in slots 1 and up. A block command
+/// takes the pages of its largest part when it starts and gives them back
+/// when its result is taken. A disk error handling disabled keeps them, as
+/// it keeps all its DMA memory.
+#[derive(Default)]
+struct Pool {
+    pages: Vec<DmaBuffer>,
+    /// Indices into `pages`, the lowest taken first.
+    free: Vec<u16>,
+}
+
+impl Pool {
+    fn take(&mut self, count: usize) -> Option<Vec<u16>> {
+        let at = self.free.len().checked_sub(count)?;
+        let mut pages = self.free.split_off(at);
+        pages.reverse();
+        Some(pages)
+    }
+
+    fn give_back(&mut self, pages: &mut Vec<u16>) {
+        self.free.extend(pages.drain(..).rev());
+    }
+}
+
+/// Task-file registers and the DMA region encoded for one command issue:
+/// at `buffer`, or with `None` in the issuing slot's own memory.
 struct AtaRequest {
     command: u8,
     feature: u16,
@@ -509,7 +576,7 @@ struct AtaRequest {
     count: u16,
     bytes: usize,
     write: bool,
-    buffer: u64,
+    buffer: Option<u64>,
 }
 
 /// A command issued in its slot, awaiting its ending FIS or an error.
@@ -549,8 +616,7 @@ struct Issue {
     resume: Option<Deadline>,
 }
 
-/// A started block command, run a bounce buffer's worth at a time in its
-/// slot.
+/// A started block command, run [`BOUNCE_BYTES`] at a time in its slot.
 struct Running {
     tag: u32,
     slot: usize,
@@ -1168,6 +1234,37 @@ fn debounce(
     timing: [u64; 3],
     limit_us: u64,
 ) -> Result<(), BlockError> {
+    match debounce_ports(&[port], clock, minimum, timing, limit_us)?[..] {
+        [Debounced { settled: true, .. }] => Ok(()),
+        _ => Err(BlockError::Timeout),
+    }
+}
+
+/// A port's link reset ([`AhciDisk::link_ports`]): PxCMD before the port
+/// stopped, the SPD limit and SControl without DET.
+pub(super) struct Link {
+    command: u32,
+    speed_limit: u32,
+    control: u32,
+}
+
+/// One port's SStatus.DET once [`debounce_ports`] stopped watching it, and
+/// whether it held still rather than changing past the limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Debounced {
+    detection: u32,
+    settled: bool,
+}
+
+/// [`debounce`] for several ports at once, each judged on its own while
+/// one wait serves all, as Linux debounces every port's link in parallel.
+fn debounce_ports<P: CommandPort>(
+    ports: &[&P],
+    clock: Clock,
+    minimum: &Control,
+    timing: [u64; 3],
+    limit_us: u64,
+) -> Result<Vec<Debounced>, BlockError> {
     minimum.check()?;
     let [interval, duration, timeout] = timing;
     if interval == 0 || duration.checked_add(interval).is_none() {
@@ -1176,30 +1273,42 @@ fn debounce(
     let limit = limit_us.min(timeout);
     let start = clock.try_start().map_err(|_| BlockError::Timeout)?;
     let elapsed = || clock.try_elapsed_us(start).map_err(|_| BlockError::Timeout);
-    let mut last = port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION;
-    let mut stable_minimum = 0u64;
-    loop {
+    let detection = |port: &P| port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION;
+    let mut ports: Vec<(&P, Debounced, u64, bool)> = ports
+        .iter()
+        .map(|port| {
+            let last = Debounced {
+                detection: detection(port),
+                settled: false,
+            };
+            (*port, last, 0, false)
+        })
+        .collect();
+    while ports.iter().any(|(.., done)| !done) {
         // Actual lower-bound waits establish stability; nominal elapsed time
         // controls only refusal/deadlines and cannot shorten this minimum.
         minimum.wait_after(interval, || {})?;
         let now = elapsed()?;
-        let current = port.read32(PORT_SATA_STATUS) & SATA_STATUS_DETECTION;
-        if current == last {
-            if current == 1 && now < limit {
+        for (port, last, stable, done) in ports.iter_mut().filter(|port| !port.3) {
+            let current = detection(port);
+            if current == last.detection {
+                if current == 1 && now < limit {
+                    continue;
+                }
+                *stable = stable.saturating_add(interval);
+                if *stable > duration {
+                    (last.settled, *done) = (true, true);
+                }
                 continue;
             }
-            stable_minimum = stable_minimum.saturating_add(interval);
-            if stable_minimum > duration {
-                return Ok(());
+            last.detection = current;
+            *stable = 0;
+            if now > limit {
+                *done = true;
             }
-            continue;
-        }
-        last = current;
-        stable_minimum = 0;
-        if now > limit {
-            return Err(BlockError::Timeout);
         }
     }
+    Ok(ports.into_iter().map(|(_, last, ..)| last).collect())
 }
 
 /// The disks behind one controller, and the ports that failed on their own.
@@ -1207,7 +1316,13 @@ pub struct Attached {
     pub host: Host,
     pub disks: Vec<AhciDisk>,
     pub failures: Vec<(u32, BlockError)>,
+    /// NVMe controllers remapped behind the BAR of an Intel controller in
+    /// RAID mode ([`REMAPPED_NVME`]), which stay unreachable.
+    pub remapped_nvme: u32,
 }
+
+/// What to report once for an [`Attached::remapped_nvme`] other than 0.
+pub const REMAPPED_NVME: &str = "NVMe drives are remapped behind the SATA controller in RAID mode; set the firmware's SATA mode to AHCI to use them";
 
 /// Take the HBA from the firmware, reset it and return one device per port
 /// with an ATA disk behind it.
@@ -1222,6 +1337,7 @@ pub fn attach(
         hba: None,
         disks: Vec::new(),
         failures: Vec::new(),
+        remapped_nvme: 0,
     }));
     let result = (|| {
         let control = kept.host.control.clone();
@@ -1276,19 +1392,37 @@ pub fn attach(
             }
         }
         let address = function.address;
+        kept.get_mut().remapped_nvme = remapped_nvme(handoff, function, bars[5]);
+        let mut ports = Vec::new();
         for index in (0..MAX_PORTS).filter(|index| implemented >> index & 1 == 1) {
+            let offset = PORT_BASE + PORT_REGISTERS * u64::from(index);
+            ports.push((index, registers(handoff, bars[5], offset, PORT_REGISTERS)?));
+        }
+        // Every link resets and debounces at once; a port whose link stays
+        // down is empty.
+        let links = AhciDisk::link_ports(
+            &ports.iter().map(|(_, port)| port).collect::<Vec<_>>(),
+            capabilities,
+            clock,
+            &control,
+        );
+        for ((index, port), link) in ports.into_iter().zip(links) {
             // A prior minimum failure forbids even starting the next port.
             control.ready()?;
-            let offset = PORT_BASE + PORT_REGISTERS * u64::from(index);
-            let port = registers(handoff, bars[5], offset, PORT_REGISTERS)?;
-            match AhciDisk::start(
-                port,
-                capabilities,
-                capabilities_2,
-                clock,
-                dma,
-                control.clone(),
-            ) {
+            let started = match link {
+                Ok(Some(link)) => AhciDisk::configure_port(
+                    port,
+                    link,
+                    capabilities,
+                    capabilities_2,
+                    clock,
+                    dma,
+                    control.clone(),
+                ),
+                Ok(None) => Ok(None),
+                Err(error) => Err(PortRefusal::unstarted(error, control.clone(), port)),
+            };
+            match started {
                 Ok(Some(mut disk)) => {
                     disk.identity.location = format!("{address} port {index}");
                     kept.get_mut().disks.push(disk);
@@ -1313,12 +1447,40 @@ pub fn attach(
         hba: _,
         disks,
         failures,
+        remapped_nvme,
     } = *kept.into_inner();
     Ok(Attached {
         host,
         disks,
         failures,
+        remapped_nvme,
     })
+}
+
+/// Linux `ahci_remap_check`: the NVMe controllers an Intel SATA controller
+/// in RAID mode hides behind its own BAR, which no driver here reaches.
+/// The firmware's SATA mode must be AHCI for them to appear. Registers the
+/// mount did not map are not looked at.
+fn remapped_nvme(handoff: &Handoff, function: &Function, bar: Option<crate::bus::pci::Bar>) -> u32 {
+    let large = bar
+        .and_then(|bar| bar.memory())
+        .is_some_and(|range| range.end - range.start >= REMAP_BAR_BYTES);
+    if function.vendor != INTEL || !large {
+        return 0;
+    }
+    let Ok(hba) = registers(handoff, bar, 0, REMAP_REGISTERS) else {
+        return 0;
+    };
+    if hba.read32(VENDOR_CAPABILITIES) & 1 == 0 {
+        return 0;
+    }
+    let capabilities = hba.read64(REMAP_CAPABILITIES);
+    (0..REMAP_DEVICES)
+        .filter(|&index| {
+            capabilities >> index & 1 != 0
+                && hba.read32(REMAP_CLASS + REMAP_STRIDE * index) == REMAP_NVME_CLASS
+        })
+        .count() as u32
 }
 /// The implemented ports. An unprogrammed PI falls back to CAP.NP's count,
 /// as Linux `ahci_save_initial_config` does.
@@ -1448,8 +1610,15 @@ impl BlockDevice for AhciDisk {
         }
     }
 
+    /// A free slot: slot 0 with its own bounce buffer, any other while the
+    /// pool holds the pages of the largest command.
     fn room(&self) -> bool {
-        self.ready().is_ok() && self.free_slot().is_some()
+        self.ready().is_ok()
+            && match self.free_slot() {
+                Some(0) => true,
+                Some(_) => self.pool.free.len() >= CHUNK_PAGES,
+                None => false,
+            }
     }
 
     fn start(&mut self, command: Command) -> Result<u32, BlockError> {
@@ -1467,7 +1636,8 @@ impl BlockDevice for AhciDisk {
         }
         let index = self.running.iter().position(|running| running.tag == tag)?;
         let result = self.running[index].result.take()?;
-        self.running.remove(index);
+        let slot = self.running.remove(index).slot;
+        self.release(slot);
         Some(result)
     }
 

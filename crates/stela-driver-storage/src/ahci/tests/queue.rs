@@ -45,7 +45,7 @@ fn queued_commands_keep_independent_slots() {
 
     // Slot 1 completes first: the Set Device Bits FIS clears its PxSACT
     // bit, and the look marks the FIS area again for the next.
-    disk.bounce_mut(1).bytes_mut()[..512].fill(0x11);
+    disk.slot_page(1, 0)[..512].fill(0x11);
     link.registers.borrow_mut()[PORT_SATA_ACTIVE / 4] &= !2;
     disk.commands.write(RECEIVED_SDB, FIS_SET_DEVICE_BITS);
     assert!(disk.posted());
@@ -68,7 +68,7 @@ fn queued_commands_keep_independent_slots() {
     // IDENTIFY, then the read).
     let log = &mut disk.table.bytes_mut()[LOG_DATA..LOG_DATA + 512];
     log[..4].copy_from_slice(&[2, 0, 0x41, 0x40]);
-    disk.bounce_mut(0).bytes_mut()[..512].fill(0x33);
+    disk.slot_page(0, 0)[..512].fill(0x33);
     {
         let mut registers = link.registers.borrow_mut();
         registers[PORT_INTERRUPTS / 4] |= INTERRUPT_TASK_FILE_ERROR;
@@ -259,4 +259,178 @@ fn completion_acknowledgment_preserves_command_progress() {
             .count(),
         2
     );
+}
+
+/// A disk taking 32 queued commands, on a host with 32 slots.
+fn thirty_two_slots() -> (Fixture, crate::test_clock::Guard) {
+    let mut page = identify_page("S1", 1024);
+    for (word, value) in [
+        (IDENTIFY_SATA_CAPABILITY, SATA_CAPABILITY_NCQ),
+        (IDENTIFY_QUEUE_DEPTH, 31),
+    ] {
+        page[2 * word..2 * word + 2].copy_from_slice(&value.to_le_bytes());
+    }
+    let (mut fixture, clock) = recovering_with(page, DEPTH - 1);
+    (fixture.disk.ncq.host, fixture.disk.ncq.device) = (true, true);
+    fixture.disk.command_timeout_us = 1_000_000_000;
+    (fixture, clock)
+}
+
+/// Slot `slot`'s Physical Region Descriptor Table: each region's address
+/// and byte count.
+fn regions(disk: &AhciDisk, slot: usize) -> Vec<(u64, usize)> {
+    let entries = disk.commands.read::<u32>(slot * COMMAND_HEADER_BYTES) >> COMMAND_PRDT_SHIFT;
+    let table = disk.table(slot);
+    (0..entries as usize)
+        .map(|index| {
+            let entry = PRDT_ADDRESS + index * PRDT_ENTRY_BYTES;
+            (
+                table.read::<u64>(entry),
+                (table.read::<u32>(entry + 12) & 0x3f_ffff) as usize + 1,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn thirty_two_queued_commands_run_at_once_and_complete_out_of_order() {
+    // Reference: ahci_qc_prep and ahci_fill_sg.
+    let (mut fixture, _clock) = thirty_two_slots();
+    let disk = &mut fixture.disk;
+    assert_eq!(disk.depth(), DEPTH);
+    let link = Link::new(&[Fault::Timeout; DEPTH]);
+    // Reads of one block, and of three pages and a block, which cross
+    // page boundaries.
+    let size = |index: usize| {
+        if index.is_multiple_of(2) {
+            512
+        } else {
+            3 * PAGE + 512
+        }
+    };
+    let tags: Vec<u32> = (0..DEPTH)
+        .map(|index| {
+            disk.begin(Command::Read {
+                lba: 16 * index as u64,
+                bytes: size(index),
+            })
+            .unwrap()
+        })
+        .collect();
+    assert!(!disk.room());
+    disk.run(&link);
+    assert_eq!(link.issued.get(), DEPTH);
+    assert_eq!(
+        link.registers.borrow()[PORT_SATA_ACTIVE / 4],
+        u32::MAX,
+        "every slot's command is active at once"
+    );
+    for slot in 1..DEPTH {
+        let regions = regions(disk, slot);
+        assert_eq!(
+            regions.iter().map(|region| region.1).sum::<usize>(),
+            size(slot)
+        );
+        assert!(
+            regions
+                .iter()
+                .all(|region| region.0.is_multiple_of(PAGE as u64))
+        );
+        for index in 0..size(slot).div_ceil(PAGE) {
+            disk.slot_page(slot, index).fill(slot as u8 ^ index as u8);
+        }
+    }
+    disk.slot_page(0, 0)[..512].fill(0xee);
+    // The disk completes the odd slots first, from the highest down, then
+    // the even ones.
+    let order: Vec<usize> = (1..DEPTH)
+        .rev()
+        .filter(|slot| slot % 2 == 1)
+        .chain((0..DEPTH).filter(|slot| slot % 2 == 0))
+        .collect();
+    for slot in order {
+        link.registers.borrow_mut()[PORT_SATA_ACTIVE / 4] &= !(1 << slot);
+        disk.commands.write(RECEIVED_SDB, FIS_SET_DEVICE_BITS);
+        let tag = tags[slot];
+        let result = disk.finish(tag).expect("its Set Device Bits FIS ended it");
+        let mut expected = Vec::new();
+        for index in 0..size(slot).div_ceil(PAGE) {
+            let part = (size(slot) - index * PAGE).min(PAGE);
+            let byte = if slot == 0 {
+                0xee
+            } else {
+                slot as u8 ^ index as u8
+            };
+            expected.extend(core::iter::repeat_n(byte, part));
+        }
+        assert_eq!(result, Ok(Some(expected)));
+        assert!(disk.room());
+    }
+    assert!(disk.running.is_empty());
+    assert_eq!(disk.pool.free.len(), disk.pool.pages.len());
+}
+
+#[test]
+fn a_queued_write_across_pages_is_staged_page_by_page() {
+    let (mut fixture, _clock) = thirty_two_slots();
+    let disk = &mut fixture.disk;
+    let link = Link::new(&[Fault::Timeout; 2]);
+    disk.begin(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    let data: Vec<u8> = (0..2 * PAGE + 1024).map(|at| (at / 512) as u8).collect();
+    disk.begin(Command::Write {
+        lba: 100,
+        data: data.clone(),
+        fua: false,
+    })
+    .unwrap();
+    disk.run(&link);
+    let fis = &disk.table(1).bytes()[..14];
+    assert_eq!(
+        [fis[2], fis[3], fis[4], fis[12]],
+        [
+            ATA_WRITE_FPDMA_QUEUED,
+            (data.len() / 512) as u8,
+            100,
+            1 << 3
+        ]
+    );
+    // The command header says the host writes.
+    assert_ne!(
+        disk.commands.read::<u32>(COMMAND_HEADER_BYTES) & 1 << COMMAND_WRITE_SHIFT,
+        0
+    );
+    let mut staged = Vec::new();
+    disk.gather(1, data.len(), &mut staged);
+    assert_eq!(staged, data);
+    assert_eq!(
+        regions(disk, 1)
+            .iter()
+            .map(|region| region.1)
+            .sum::<usize>(),
+        data.len()
+    );
+}
+
+#[test]
+fn queued_commands_wait_for_pool_pages_the_largest_command_needs() {
+    let (mut fixture, _clock) = thirty_two_slots();
+    let disk = &mut fixture.disk;
+    // Keep only what one more largest command takes, and less.
+    disk.pool.free.truncate(CHUNK_PAGES + 1);
+    disk.begin(Command::Read { lba: 0, bytes: 512 }).unwrap();
+    assert!(disk.room(), "slot 0 has its own bounce buffer");
+    disk.begin(Command::Read {
+        lba: 8,
+        bytes: 2 * PAGE,
+    })
+    .unwrap();
+    assert!(!disk.room());
+    assert_eq!(disk.pool.free.len(), CHUNK_PAGES - 1);
+    // Its result taken, the slot's pages go back.
+    let link = Link::new(&[]);
+    disk.run(&link);
+    let tag = disk.running[1].tag;
+    assert!(disk.finish(tag).is_some());
+    assert_eq!(disk.pool.free.len(), CHUNK_PAGES + 1);
+    assert!(disk.room());
 }

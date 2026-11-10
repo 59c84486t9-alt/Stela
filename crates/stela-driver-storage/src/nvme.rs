@@ -1,6 +1,7 @@
 //! NVMe controllers with one admin and one I/O queue pair. Each active NVM
 //! namespace with plain logical blocks becomes one device. The I/O queue
-//! runs up to [`DEPTH`] commands at once, each through its own bounce buffer.
+//! runs up to [`DEPTH`] commands at once, each copying its data through the
+//! bounce pages it takes from the controller's [`Pool`].
 //! Errors are handled as Linux's `nvme_timeout` and `nvme_decide_disposition`
 //! handle them: a command past its deadline is aborted and given another,
 //! then the controller is reset with its DMA contained, and interrupted
@@ -224,11 +225,16 @@ const PAGE: usize = 4096;
 const ADMIN_ENTRIES: u16 = 16;
 /// The I/O queue's entries: one page of submissions.
 const IO_ENTRIES: u16 = 64;
-/// The commands the I/O queue runs at once, each holding a bounce buffer,
-/// as Linux's tag set bounds them; one for a controller in an owned DMA
-/// domain, whose buffers change hands whole.
-const DEPTH: usize = 8;
+/// The commands the I/O queue runs at once, as Linux's tag set bounds them:
+/// every submission entry but the one that tells a full queue from an empty
+/// one, fewer when CAP.MQES is smaller.
+const DEPTH: usize = IO_ENTRIES as usize - 1;
+/// The most data one command moves.
 const BOUNCE_BYTES: usize = 128 * 1024;
+/// The I/O bounce pages of one controller: as much memory as eight commands
+/// of [`BOUNCE_BYTES`] take, which many more small commands share.
+const POOL_PAGES: usize = 256;
+const _: () = assert!(POOL_PAGES >= pages_for(BOUNCE_BYTES) && POOL_PAGES <= u16::MAX as usize);
 // Linux PCI NVME_MAX_BYTES bounds the logical command range independently of
 // payload storage. Write Zeroes transfers no host data through the bounce pool.
 const MAX_COMMAND_BYTES: usize = 8 * 1024 * 1024;
@@ -252,6 +258,13 @@ const ATTRIBUTE_DEALLOCATE: u32 = 1 << 2;
 /// I/O to a namespace Linux's rescan removed.
 const NAMESPACE_REMOVED: BlockError =
     BlockError::Protocol("the NVMe namespace changed or was removed");
+
+/// The bounce pages a transfer of `bytes` takes: its data, and a PRP list
+/// past two pages.
+const fn pages_for(bytes: usize) -> usize {
+    let data = bytes.div_ceil(PAGE);
+    if data > 2 { data + 1 } else { data }
+}
 
 /// An I/O read or write of `blocks` blocks at `lba` through `pointers`.
 fn transfer_command(
@@ -405,10 +418,61 @@ impl Queue {
     }
 }
 
-/// A tag's bounce memory: its data and its PRP list.
-struct Slot {
-    bounce: Buffer,
-    prp_list: Buffer,
+/// The I/O queue's bounce memory: the pages a command takes at its start
+/// for its data, PRP list or Dataset Management ranges, and gives back once
+/// it completed for good. A command's pages stay with its tag through
+/// retries and controller resets. A command a fault leaves unresolved keeps
+/// its pages, which the never-freed DMA pool does not hand out again.
+struct Pool {
+    pages: Vec<Buffer>,
+    /// Indices into `pages`.
+    free: Vec<u16>,
+}
+
+impl Pool {
+    /// The lowest free page is taken first.
+    fn new(pages: Vec<Buffer>) -> Self {
+        let free = (0..pages.len() as u16).rev().collect();
+        Self { pages, free }
+    }
+
+    fn legacy(dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
+        let pages = (0..POOL_PAGES)
+            .map(|_| dma.allocate(PAGE, PAGE).map(Buffer::Legacy))
+            .collect::<Result<_, _>>()?;
+        Ok(Self::new(pages))
+    }
+
+    fn take(&mut self, count: usize) -> Option<Vec<u16>> {
+        let at = self.free.len().checked_sub(count)?;
+        let mut pages = self.free.split_off(at);
+        pages.reverse();
+        Some(pages)
+    }
+
+    fn give_back(&mut self, pages: &mut Vec<u16>) {
+        self.free.extend(pages.drain(..).rev());
+    }
+}
+
+/// The bounce pages `command` takes.
+fn command_pages(command: &Command) -> usize {
+    match command {
+        Command::Read { bytes, .. } => pages_for(*bytes),
+        Command::Write { data, .. } => pages_for(data.len()),
+        Command::Discard { .. } => 1,
+        Command::Flush | Command::WriteZeroes { .. } => 0,
+    }
+}
+
+/// What memory a published command hands the controller.
+#[derive(Clone, Copy)]
+enum Data {
+    None,
+    /// The admin page.
+    Admin,
+    /// The pages an I/O tag holds.
+    Tag(usize),
 }
 
 /// A command of the I/O queue: under its tag until the controller completes
@@ -579,21 +643,17 @@ struct Controller {
     doorbell_stride: usize,
     admin: Queue,
     io: Queue,
-    /// Tag 0's bounce memory, which admin commands also use.
-    bounce: Buffer,
-    prp_list: Buffer,
-    /// Tags 1 and up's bounce memory.
-    slots: Vec<Slot>,
-    /// Initialized PRP list prefix per tag, counted in bounce pages including
-    /// the first page that travels in the command. The bounce mappings stay
-    /// fixed and the controller only reads the lists, including across reset.
-    prp_pages: [usize; DEPTH],
+    /// The page admin commands move their data through, one at a time.
+    admin_data: Buffer,
+    pool: Pool,
+    /// The pool pages each tag holds, in PRP order: data, then any list.
+    held: Vec<Vec<u16>>,
     tags: Vec<Tag>,
     recovery: Option<Recovery>,
     /// The I/O completion queue raises MSI-X vector 0, which the host
     /// gave the message of its completion signal.
     signalled: bool,
-    /// Maximum data payload, bounded by the bounce allocation.
+    /// Maximum data payload, at most [`BOUNCE_BYTES`].
     max_transfer: usize,
     /// MDTS/host command bound used when no non-MDTS limit is supplied.
     max_command_bytes: usize,
@@ -748,22 +808,14 @@ pub fn attach(
         }
         _ => false,
     };
-    let mut slots = Vec::new();
-    for _ in 1..DEPTH {
-        slots.push(Slot {
-            bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE)?),
-            prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
-        });
-    }
     let mut controller = Controller {
         registers,
         doorbell_stride: 0,
         admin: Queue::new(0, ADMIN_ENTRIES, dma)?,
         io: Queue::new(1, IO_ENTRIES, dma)?,
-        bounce: Buffer::Legacy(dma.allocate(BOUNCE_BYTES, PAGE)?),
-        prp_list: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
-        slots,
-        prp_pages: [1; DEPTH],
+        admin_data: Buffer::Legacy(dma.allocate(PAGE, PAGE)?),
+        pool: Pool::legacy(dma)?,
+        held: (0..DEPTH).map(|_| Vec::new()).collect(),
         tags: (0..DEPTH).map(|_| Tag::Free).collect(),
         recovery: None,
         signalled,
@@ -898,6 +950,7 @@ fn discover(
         }
     }
     let controller = Rc::new(RefCell::new(controller));
+    let first = found.iter().map(|&(namespace, ..)| namespace).min();
     attached.namespaces = found
         .into_iter()
         .map(|(namespace, format, ids)| Namespace {
@@ -910,7 +963,7 @@ fn discover(
                 transport: Transport::Nvme,
                 location: format!("{location} namespace {namespace}"),
                 model: model.clone(),
-                serial: serial.clone(),
+                serial: namespace_serial(&serial, namespace, first),
                 blocks: format.blocks,
                 block_size: format.block_size,
                 read_only: format.read_only,
@@ -1275,6 +1328,17 @@ impl BlockDevice for Namespace {
             self.flush()?;
         }
         self.controller.borrow_mut().shutdown()
+    }
+}
+
+/// The serial a namespace's disk is named by: the controller's for its
+/// first namespace, and with `/n` and the namespace ID for the others, so
+/// that a serial names one disk.
+fn namespace_serial(serial: &str, namespace: u32, first: Option<u32>) -> alloc::string::String {
+    if Some(namespace) == first {
+        alloc::string::String::from(serial)
+    } else {
+        format!("{serial}/n{namespace}")
     }
 }
 

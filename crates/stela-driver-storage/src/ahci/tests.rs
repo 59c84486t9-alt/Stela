@@ -303,7 +303,8 @@ impl Fixture {
             no_dma_log: false,
             quirks: 0,
             devslp: false,
-            slots: DmaResource::new(Vec::new(), minimum.clone(), retain),
+            slots: DmaResource::new(Vec::new(), minimum.clone(), retain.clone()),
+            pool: DmaResource::new(Pool::default(), minimum.clone(), retain),
             running: Vec::new(),
             next_tag: 0,
             looks: 0,
@@ -313,9 +314,13 @@ impl Fixture {
                 table: dma
                     .allocate(COMMAND_TABLE_BYTES, COMMAND_TABLE_ALIGN)
                     .unwrap(),
-                bounce: dma.allocate(BOUNCE_BYTES, 4096).unwrap(),
+                pages: Vec::new(),
             });
+            for _ in 0..CHUNK_PAGES {
+                disk.pool.pages.push(dma.allocate(PAGE, PAGE).unwrap());
+            }
         }
+        disk.pool.free = (0..disk.pool.pages.len() as u16).rev().collect();
         Self {
             disk,
             _registers: registers,
@@ -351,6 +356,7 @@ impl CommandPort for Engines {
 
 mod identify_fixture;
 mod lifecycle;
+mod links;
 mod minimum_timing;
 mod modes;
 mod power;

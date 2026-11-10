@@ -22,15 +22,44 @@ impl Controller {
         }
     }
 
-    /// Tag `tag`'s bounce memory: its data and its PRP list.
-    pub(super) fn slot(&mut self, tag: usize) -> (&mut Buffer, &mut Buffer) {
-        match tag {
-            0 => (&mut self.bounce, &mut self.prp_list),
-            _ => {
-                let slot = &mut self.slots[tag - 1];
-                (&mut slot.bounce, &mut slot.prp_list)
-            }
+    /// Page `index` of those tag `tag` holds.
+    pub(super) fn tag_page(&mut self, tag: usize, index: usize) -> &mut Buffer {
+        &mut self.pool.pages[usize::from(self.held[tag][index])]
+    }
+
+    /// Give the controller tag `tag`'s pages.
+    fn give_tag(&mut self, tag: usize) -> Result<(), BlockError> {
+        for &page in &self.held[tag] {
+            self.pool.pages[usize::from(page)].give()?;
         }
+        Ok(())
+    }
+
+    /// Take tag `tag`'s pages back from the controller.
+    ///
+    /// # Safety
+    /// The controller completed the tag's command, or acknowledged that it
+    /// stopped.
+    unsafe fn take_tag(&mut self, tag: usize) -> Result<(), BlockError> {
+        for &page in &self.held[tag] {
+            // SAFETY: as the caller establishes.
+            unsafe { self.pool.pages[usize::from(page)].take()? };
+        }
+        Ok(())
+    }
+
+    /// Copy the first `bytes` of tag `tag`'s data pages into `into`.
+    fn gather(&self, tag: usize, into: &mut [u8]) {
+        for (part, &page) in into.chunks_mut(PAGE).zip(&self.held[tag]) {
+            part.copy_from_slice(&self.pool.pages[usize::from(page)].bytes()[..part.len()]);
+        }
+    }
+
+    /// The pool's pages back from tag `tag`, whose command ended for good.
+    pub(super) fn release(&mut self, tag: usize) {
+        let mut pages = core::mem::take(&mut self.held[tag]);
+        self.pool.give_back(&mut pages);
+        self.held[tag] = pages;
     }
 
     /// Whether command identifier `id` names a command still outstanding.
@@ -48,14 +77,14 @@ impl Controller {
             )
     }
 
-    /// Publish `command` on queue `io`, giving the controller tag `tag`'s
-    /// memory when it moves data, and ring its doorbell; its identifier,
-    /// one no outstanding command holds.
+    /// Publish `command` on queue `io`, giving the controller the memory
+    /// `data` names, and ring its doorbell; its identifier, one no
+    /// outstanding command holds.
     pub(super) fn publish(
         &mut self,
         io: bool,
         mut command: [u32; 16],
-        tag: Option<usize>,
+        data: Data,
     ) -> Result<u16, BlockError> {
         let stride = self.doorbell_stride;
         loop {
@@ -65,10 +94,10 @@ impl Controller {
             }
         }
         let id = self.command_id;
-        if let Some(tag) = tag {
-            let (bounce, prp_list) = self.slot(tag);
-            bounce.give()?;
-            prp_list.give()?;
+        match data {
+            Data::None => {}
+            Data::Admin => self.admin_data.give()?,
+            Data::Tag(tag) => self.give_tag(tag)?,
         }
         let registers = &self.registers;
         let queue = if io { &mut self.io } else { &mut self.admin };
@@ -151,7 +180,7 @@ impl Controller {
     }
 
     /// Ring queue `io`'s completion doorbell at its head.
-    pub(super) fn release(&mut self, io: bool) -> Result<(), BlockError> {
+    pub(super) fn ring_completion(&mut self, io: bool) -> Result<(), BlockError> {
         let stride = self.doorbell_stride;
         let queue = if io { &self.io } else { &self.admin };
         self.registers.write32(
@@ -189,7 +218,7 @@ impl Controller {
         }
     }
 
-    /// The I/O command for `command` with tag `tag`'s memory, its data
+    /// The I/O command for `command` with tag `tag`'s pages, its data
     /// copied in.
     pub(super) fn io_command(
         &mut self,
@@ -213,7 +242,9 @@ impl Controller {
                 ))
             }
             Command::Write { lba, data, fua } => {
-                self.slot(tag).0.bytes_mut()[..data.len()].copy_from_slice(data);
+                for (index, part) in data.chunks(PAGE).enumerate() {
+                    self.tag_page(tag, index).bytes_mut()[..part.len()].copy_from_slice(part);
+                }
                 let pointers = self.data_pointers(tag, data.len())?;
                 let access = if *fua { FORCE_UNIT_ACCESS } else { 0 };
                 let blocks = (data.len() / block) as u32;
@@ -226,7 +257,7 @@ impl Controller {
                 Ok(words)
             }
             Command::Discard { extents } => {
-                let (bounce, _) = self.slot(tag);
+                let bounce = self.tag_page(tag, 0);
                 // Each range: context attributes, length, starting LBA.
                 for (index, extent) in extents.iter().enumerate() {
                     let count = u32::try_from(extent.blocks)
@@ -256,13 +287,16 @@ impl Controller {
         }
     }
 
-    /// Whether [`Self::start`] answers now: a tag is free and no reset runs,
-    /// or the controller failed or shut down, which it refuses at once
-    /// rather than leaving the command waiting for room it never gets.
+    /// Whether [`Self::start`] answers now: a tag and the pages of the
+    /// largest command are free and no reset runs, or the controller failed
+    /// or shut down, which it refuses at once rather than leaving the
+    /// command waiting for room it never gets.
     pub(super) fn room(&self) -> bool {
         self.fault.is_some()
             || self.shut_down
-            || (self.recovery.is_none() && self.tags.iter().any(|tag| matches!(tag, Tag::Free)))
+            || (self.recovery.is_none()
+                && self.pool.free.len() >= pages_for(self.max_transfer)
+                && self.tags.iter().any(|tag| matches!(tag, Tag::Free)))
     }
 
     /// Run `command` of `namespace` under a free tag; the tag.
@@ -279,6 +313,11 @@ impl Controller {
             .position(|tag| matches!(tag, Tag::Free))
             .filter(|_| self.recovery.is_none())
             .ok_or(BlockError::Protocol("every NVMe tag is in use"))?;
+        debug_assert!(self.held[tag].is_empty());
+        self.held[tag] = self
+            .pool
+            .take(command_pages(&command))
+            .ok_or(BlockError::Protocol("every NVMe bounce page is in use"))?;
         self.submit(tag, namespace, block, command, 0);
         Ok(tag as u32)
     }
@@ -327,7 +366,7 @@ impl Controller {
         // runs from its doorbell.
         let published = self.deadline(self.command_timeout_us).and_then(|_| {
             let words = self.io_command(tag, namespace, block, &command)?;
-            let id = self.publish(true, words, Some(tag))?;
+            let id = self.publish(true, words, Data::Tag(tag))?;
             Ok((id, self.deadline(self.command_timeout_us)?))
         });
         self.tags[tag] = match published {
@@ -411,7 +450,7 @@ impl Controller {
                 }
             }
         }
-        if reaped && let Err(error) = self.release(true) {
+        if reaped && let Err(error) = self.ring_completion(true) {
             self.poison(error);
             self.fail_all();
             return;
@@ -447,8 +486,8 @@ impl Controller {
 
     /// Run all due retries before issuing any Abort. The same counter
     /// snapshot can identify expired running tags during the retry pass.
-    fn retry_and_find_expired(&mut self, now: u64) -> u8 {
-        const _: () = assert!(DEPTH <= u8::BITS as usize);
+    fn retry_and_find_expired(&mut self, now: u64) -> u64 {
+        const _: () = assert!(DEPTH <= u64::BITS as usize);
 
         let mut expired = 0;
         for tag in 0..self.tags.len() {
@@ -519,11 +558,11 @@ impl Controller {
         };
         // SAFETY: the controller completed this exact command; its memory
         // is the CPU's again.
-        let taken = unsafe {
-            let (bounce, prp_list) = self.slot(tag);
-            bounce.take().and_then(|()| prp_list.take())
-        };
+        let taken = unsafe { self.take_tag(tag) };
         let retry = status != 0 && status & STATUS_DO_NOT_RETRY == 0 && retries < RETRIES;
+        // A retry keeps its pages; a page the CPU could not take back stays
+        // out of the pool.
+        let ended = taken.is_ok() && !retry;
         self.tags[tag] = match (taken, status, command) {
             (Err(error), ..) => Tag::Done(Err(self.poison(error))),
             (Ok(()), _, command) if retry => {
@@ -543,19 +582,23 @@ impl Controller {
                 }
             }
             (Ok(()), 0, Command::Read { bytes, .. }) => {
-                let data = &self.slot(tag).0.bytes()[..bytes];
                 if let Some(read) = destination.as_mut().filter(|read| read.tag == tag) {
-                    // Reset and Identify can reuse tag 0's bounce once this
-                    // completion is reaped, even before its result is taken.
-                    read.bytes.copy_from_slice(data);
+                    // The pages go back to the pool once this completion is
+                    // reaped, even before its result is taken.
+                    self.gather(tag, read.bytes);
                     Tag::Done(Ok(None))
                 } else {
-                    Tag::Done(Ok(Some(data.to_vec())))
+                    let mut data = alloc::vec![0; bytes];
+                    self.gather(tag, &mut data);
+                    Tag::Done(Ok(Some(data)))
                 }
             }
             (Ok(()), 0, _) => Tag::Done(Ok(None)),
             (Ok(()), status, _) => Tag::Done(Err(BlockError::Device { status })),
         };
+        if ended {
+            self.release(tag);
+        }
         true
     }
 
@@ -583,25 +626,24 @@ impl Controller {
         }
     }
 
-    /// The PRP entries for the first `bytes` of tag `tag`'s bounce buffer.
+    /// The PRP entries for `bytes` in tag `tag`'s pages: the first page,
+    /// then the second or the PRP list naming every later one (NVMe Base 2.1
+    /// §4.3.1), each page whole and aligned.
     pub(super) fn data_pointers(
         &mut self,
         tag: usize,
         bytes: usize,
     ) -> Result<(u64, u64), BlockError> {
-        let initialized = self.prp_pages[tag];
-        let (bounce, prp_list) = self.slot(tag);
-        let first = bounce.address()?;
+        let first = self.tag_page(tag, 0).address()?;
         match bytes.div_ceil(PAGE) {
             0 | 1 => Ok((first, 0)),
-            2 => Ok((first, first + PAGE as u64)),
+            2 => Ok((first, self.tag_page(tag, 1).address()?)),
             pages => {
-                let second = prp_list.address()?;
-                for page in initialized..pages {
-                    prp_list.write(8 * (page - 1), first + (page * PAGE) as u64);
+                for index in 1..pages {
+                    let address = self.tag_page(tag, index).address()?;
+                    self.tag_page(tag, pages).write(8 * (index - 1), address);
                 }
-                self.prp_pages[tag] = initialized.max(pages);
-                Ok((first, second))
+                Ok((first, self.tag_page(tag, pages).address()?))
             }
         }
     }
@@ -624,7 +666,7 @@ impl Controller {
         let mut command = [0u32; 16];
         command[0] = u32::from(ADMIN_ABORT);
         command[10] = u32::from(id) << 16 | u32::from(self.io.id);
-        let abort = self.publish(false, command, None)?;
+        let abort = self.publish(false, command, Data::None)?;
         self.aborts.push(abort);
         let renewed = self.deadline(self.command_timeout_us)?;
         if let Tag::Running {

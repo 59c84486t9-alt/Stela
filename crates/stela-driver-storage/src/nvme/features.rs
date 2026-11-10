@@ -6,8 +6,8 @@ use super::*;
 impl Controller {
     /// Linux `nvme_configure_host_options` from `identify`: a Set Features
     /// for Host Behavior Support enabling ACRE when a retry delay is
-    /// reported and LBAFEE for extended LBA formats, its data in tag 0's
-    /// bounce page.
+    /// reported and LBAFEE for extended LBA formats, its data in the
+    /// admin page.
     pub(super) fn host_options(
         &mut self,
         identify: &[u8],
@@ -17,11 +17,11 @@ impl Controller {
         if !acre && !lbafee {
             return Ok(None);
         }
-        let page = &mut self.bounce.bytes_mut()[..HOST_BEHAVIOR_BYTES];
+        let page = &mut self.admin_data.bytes_mut()[..HOST_BEHAVIOR_BYTES];
         page.fill(0);
         page[HOST_BEHAVIOR_ACRE] = u8::from(acre);
         page[HOST_BEHAVIOR_LBAFEE] = u8::from(lbafee);
-        let data = self.bounce.address()?;
+        let data = self.admin_data.address()?;
         let mut command = [0u32; 16];
         command[0] = u32::from(ADMIN_SET_FEATURES);
         command[6] = data as u32;
@@ -31,12 +31,12 @@ impl Controller {
     }
 
     /// The Set Features enabling autonomous power state transitions with
-    /// `table`, written to tag 0's bounce page.
+    /// `table`, written to the admin page.
     pub(super) fn apst_command(&mut self, table: &[u64; 32]) -> Result<[u32; 16], BlockError> {
         for (index, entry) in table.iter().enumerate() {
-            self.bounce.write(8 * index, *entry);
+            self.admin_data.write(8 * index, *entry);
         }
-        let page = self.bounce.address()?;
+        let page = self.admin_data.address()?;
         let mut command = [0u32; 16];
         command[0] = u32::from(ADMIN_SET_FEATURES);
         command[6] = page as u32;
@@ -166,7 +166,7 @@ impl Controller {
     pub(super) fn request_event(&mut self) -> Result<(), BlockError> {
         let mut command = [0u32; 16];
         command[0] = u32::from(ADMIN_ASYNC_EVENT);
-        let id = self.publish(false, command, None)?;
+        let id = self.publish(false, command, Data::None)?;
         self.events.request = Some(id);
         Ok(())
     }

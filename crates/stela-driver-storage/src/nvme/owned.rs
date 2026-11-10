@@ -384,8 +384,9 @@ pub(super) struct Owner {
 }
 
 /// Initialize real admin/I/O queues and discover ordinary NVM namespaces using
-/// the same command/namespace engine as the boot NVMe API. This is a synchronous
-/// polled transport; it does not claim interrupts or hotplug. A reset after a
+/// the same command/namespace engine as the boot NVMe API, with the same
+/// queue depth. Completions are polled; it does not claim interrupts or
+/// hotplug. A reset after a
 /// timeout clears BME and drains the domain before the CPU reuses any buffer.
 /// # Safety
 /// The supplied register/lifecycle owners and domain must denote the same
@@ -449,12 +450,10 @@ unsafe fn attach_with_timeout(
             phase: true,
             consumed: 0,
         },
-        bounce: Buffer::Empty,
-        prp_list: Buffer::Empty,
-        // The DMA domain's buffers change hands whole: one command at a time.
-        slots: alloc::vec::Vec::new(),
-        prp_pages: [1; DEPTH],
-        tags: alloc::vec![Tag::Free],
+        admin_data: Buffer::Empty,
+        pool: Pool::new(alloc::vec::Vec::new()),
+        held: (0..DEPTH).map(|_| alloc::vec::Vec::new()).collect(),
+        tags: (0..DEPTH).map(|_| Tag::Free).collect(),
         recovery: None,
         signalled: false,
         max_transfer: BOUNCE_BYTES,
@@ -495,13 +494,14 @@ unsafe fn attach_with_timeout(
         Buffer::allocate(source, domain.clone(), PAGE, Direction::ToDevice)?;
     controller.io.completions =
         Buffer::allocate(source, domain.clone(), PAGE, Direction::FromDevice)?;
-    controller.bounce = Buffer::allocate(
-        source,
-        domain.clone(),
-        BOUNCE_BYTES,
-        Direction::Bidirectional,
-    )?;
-    controller.prp_list = Buffer::allocate(source, domain.clone(), PAGE, Direction::ToDevice)?;
+    controller.admin_data =
+        Buffer::allocate(source, domain.clone(), PAGE, Direction::Bidirectional)?;
+    // Each pool page is mapped on its own, so it changes hands between the
+    // CPU and the controller apart from the pages other commands hold.
+    let pages = (0..POOL_PAGES)
+        .map(|_| Buffer::allocate(source, domain.clone(), PAGE, Direction::Bidirectional))
+        .collect::<Result<_, _>>()?;
+    controller.pool = Pool::new(pages);
     // Polling live CQ memory requires the domain's checked
     // coherent observation; refuse absent support before enabling the engine.
     controller.admin.completions.coherent(12)?;
@@ -581,10 +581,10 @@ impl Controller {
                 &mut self.admin.completions,
                 &mut self.io.submissions,
                 &mut self.io.completions,
-                &mut self.bounce,
-                &mut self.prp_list,
+                &mut self.admin_data,
             ]
             .into_iter()
+            .chain(&mut self.pool.pages)
             .chain(host_memory)
             {
                 // SAFETY: stop/containment/drain remain acknowledged;
@@ -618,10 +618,10 @@ impl Drop for Controller {
                 &mut self.admin.completions,
                 &mut self.io.submissions,
                 &mut self.io.completions,
-                &mut self.bounce,
-                &mut self.prp_list,
+                &mut self.admin_data,
             ]
             .into_iter()
+            .chain(&mut self.pool.pages)
             .chain(host_memory)
             {
                 buffer.quarantine();
