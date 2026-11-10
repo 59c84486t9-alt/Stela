@@ -18,13 +18,13 @@ mod unsupported;
 mod windows;
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{ADMIN, DISK_EXAMPLE, PARTITION_LISTING, System};
+pub(crate) use linux::{ADMIN, DISK_EXAMPLE, System};
 #[cfg(target_os = "macos")]
-pub(crate) use macos::{ADMIN, DISK_EXAMPLE, PARTITION_LISTING, System};
+pub(crate) use macos::{ADMIN, DISK_EXAMPLE, System};
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-pub(crate) use unsupported::{ADMIN, DISK_EXAMPLE, PARTITION_LISTING, System};
+pub(crate) use unsupported::{ADMIN, DISK_EXAMPLE, System};
 #[cfg(windows)]
-pub(crate) use windows::{ADMIN, DISK_EXAMPLE, PARTITION_LISTING, System};
+pub(crate) use windows::{ADMIN, DISK_EXAMPLE, System};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FileSystem {
@@ -141,6 +141,17 @@ pub(crate) fn size_text(bytes: u64) -> String {
         "size unavailable".into()
     } else {
         format!("{:.1} GB", bytes as f64 / 1e9)
+    }
+}
+
+/// A size as every user message and plan line shows it: decimal GB from
+/// one gigabyte, decimal MB below it, as disk makers and the docs count.
+pub(crate) fn bytes_text(bytes: u64) -> String {
+    match bytes {
+        1_000_000_000.. => format!("{:.1} GB", bytes as f64 / 1e9),
+        1_000_000.. => format!("{:.1} MB", bytes as f64 / 1e6),
+        1_000.. => format!("{:.1} kB", bytes as f64 / 1e3),
+        _ => format!("{bytes} bytes"),
     }
 }
 
@@ -323,6 +334,16 @@ mod tests {
         assert_eq!(facts(Bus::Other, false, false).removal(), Removal::Fixed);
         // A Thunderbolt SSD macOS places outside the Mac.
         assert_eq!(facts(Bus::Other, false, true).removal(), Removal::Typed);
+    }
+
+    #[test]
+    fn sizes_are_shown_in_decimal_units() {
+        assert_eq!(bytes_text(60_000_000_000), "60.0 GB");
+        assert_eq!(bytes_text(61_500_000_000), "61.5 GB");
+        assert_eq!(bytes_text(0xe1_0000), "14.7 MB");
+        assert_eq!(bytes_text(16 << 20), "16.8 MB");
+        assert_eq!(bytes_text(4096), "4.1 kB");
+        assert_eq!(bytes_text(512), "512 bytes");
     }
 
     #[test]

@@ -95,6 +95,36 @@ fn cached(client: &Client, directory: &Path, artifact: &Artifact) -> Result<Vec<
     read_cached(&path, artifact)
 }
 
+/// The chips of this computer's NVIDIA GPUs, whose firmware setup adds to
+/// the USB, and a note for each NVIDIA GPU Stela cannot run.
+pub(super) fn host_chips(host: &dyn super::host::Host) -> Result<(Vec<&'static str>, Vec<String>)> {
+    let mut chips = Vec::new();
+    let mut notes = Vec::new();
+    for device in host.nvidia_gpus()? {
+        match recipes::nvidia_chip(device) {
+            Some(chip) if !chips.contains(&chip) => chips.push(chip),
+            Some(_) => {}
+            None => notes.push(format!(
+                "this computer's NVIDIA GPU (device {device:04x}) is not one Stela supports: \
+                 Stela needs {}",
+                stela_boot_core::gpu_status::SUPPORTED
+            )),
+        }
+    }
+    Ok((chips, notes))
+}
+
+/// Why a USB made on this computer has no GPU firmware, and how to add it:
+/// `fix` is the command, with CHIP for the chip the PC's boot screen names.
+pub(super) fn missing(fix: &str) -> String {
+    format!(
+        "this computer has no NVIDIA GPU Stela supports, so the USB gets no GPU firmware, and \
+         macOS cannot start without it. Run setup on the PC itself, or add the firmware later: \
+         boot the PC from the USB, which names its GPU chip (such as ga104) when its firmware \
+         is missing, then run {fix} on this computer"
+    )
+}
+
 /// Firmware inputs, cache and destination for one provisioning request.
 pub(super) struct ProvisionOptions<'a> {
     pub(super) requirements: Option<&'a Path>,

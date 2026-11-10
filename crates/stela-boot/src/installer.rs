@@ -1013,7 +1013,12 @@ impl Picker {
         let disk = self.chosen();
         let block = disk.geometry.block_bytes;
         let mut rows: Vec<(&str, String, u32)> = Vec::new();
-        rows.push(("Disk", disk.model.clone(), ui::TEXT));
+        // Two disks of one model differ by size or serial number.
+        let disk_line = format!("{}, {}", disk.model, size(disk.bytes()));
+        rows.push(("Disk", disk_line, ui::TEXT));
+        if let Some(serial) = &disk.serial {
+            rows.push(("Serial", serial.clone(), ui::TEXT));
+        }
         rows.push((
             "macOS",
             match self.place {

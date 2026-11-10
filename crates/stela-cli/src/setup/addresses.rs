@@ -119,7 +119,7 @@ pub(super) fn servers(word: &str) -> Result<Servers, String> {
 /// The wizard's network step: automatic addresses, or a static IPv4
 /// address with its router and DNS servers.
 pub(super) fn choose(request: &mut Request) -> Result<()> {
-    let manual = cliclack::select("Network addresses")
+    let manual = cliclack::select("6 / 8  Network addresses")
         .item(false, "Automatic", "DHCP and IPv6 autoconfiguration")
         .item(
             true,

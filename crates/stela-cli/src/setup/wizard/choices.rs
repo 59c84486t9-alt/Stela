@@ -38,7 +38,7 @@ pub(super) fn release(images: &[Image], preferred: &str) -> Result<usize> {
     let groups = majors(images);
     let mut initial = initial_group(&groups, images, preferred);
     loop {
-        let mut picker = cliclack::select("3 / 6  Choose a macOS version").max_rows(8);
+        let mut picker = cliclack::select("3 / 8  Choose a macOS version").max_rows(8);
         for (index, (major, _)) in groups.iter().enumerate() {
             picker = picker.item(index, format!("macOS {major}"), "");
         }
@@ -162,34 +162,10 @@ pub(super) fn model(
     names: &BTreeMap<String, String>,
     preferred: Option<&str>,
 ) -> Result<String> {
-    let mut groups: BTreeMap<Family, Vec<&String>> = BTreeMap::new();
-    for model in models {
-        if let Some(family) = family(model, model_name(model, names)) {
-            groups.entry(family).or_default().push(model);
-        }
-    }
-    ensure!(
-        !groups.is_empty(),
-        "this image lists no physical Mac models"
-    );
-    let groups: Vec<_> = groups
-        .into_iter()
-        .map(|(family, mut models)| {
-            models.sort_by(|a, b| {
-                chip(model_name(b, names))
-                    .cmp(&chip(model_name(a, names)))
-                    .then_with(|| model_name(a, names).cmp(model_name(b, names)))
-                    .then_with(|| a.cmp(b))
-            });
-            (family, models)
-        })
-        .collect();
-    let mut initial = groups
-        .iter()
-        .position(|(_, models)| models.iter().any(|model| Some(model.as_str()) == preferred))
-        .unwrap_or(0);
+    let groups = grouped(models, names)?;
+    let (mut initial, preferred_model) = initial(&groups, preferred);
     loop {
-        let mut picker = cliclack::select("4 / 6  Choose a Mac family");
+        let mut picker = cliclack::select("4 / 8  Choose a Mac family");
         for (index, (family, _)) in groups.iter().enumerate() {
             picker = picker.item(index, family.label(), "");
         }
@@ -207,7 +183,7 @@ pub(super) fn model(
             .collect();
         let initial_model = models
             .iter()
-            .position(|model| Some(model.as_str()) == preferred)
+            .position(|model| Some(model.as_str()) == preferred_model)
             .unwrap_or(0);
         if let Some(index) = super::menu::submenu(
             &format!("{} · Choose a chip and model", family.label()),
@@ -218,6 +194,56 @@ pub(super) fn model(
         }
         console::Term::stderr().clear_last_lines(3)?;
     }
+}
+
+/// The physical Macs among `models`, by family, newest chip first.
+fn grouped<'a>(
+    models: &'a [String],
+    names: &BTreeMap<String, String>,
+) -> Result<Vec<(Family, Vec<&'a String>)>> {
+    let mut groups: BTreeMap<Family, Vec<&String>> = BTreeMap::new();
+    for model in models {
+        if let Some(family) = family(model, model_name(model, names)) {
+            groups.entry(family).or_default().push(model);
+        }
+    }
+    ensure!(
+        !groups.is_empty(),
+        "this image lists no physical Mac models"
+    );
+    Ok(groups
+        .into_iter()
+        .map(|(family, mut models)| {
+            models.sort_by(|a, b| {
+                chip(model_name(b, names))
+                    .cmp(&chip(model_name(a, names)))
+                    .then_with(|| model_name(a, names).cmp(model_name(b, names)))
+                    .then_with(|| a.cmp(b))
+            });
+            (family, models)
+        })
+        .collect())
+}
+
+/// The family the picker opens on and the model it then selects:
+/// `preferred`'s, else the Mac scripted setup presents
+/// (`super::super::PINNED_MODEL`), so pressing Enter through the wizard
+/// picks the same board.
+fn initial<'a>(
+    groups: &[(Family, Vec<&String>)],
+    preferred: Option<&'a str>,
+) -> (usize, Option<&'a str>) {
+    let has = |wanted: &str| {
+        groups
+            .iter()
+            .position(|(_, models)| models.iter().any(|model| model.as_str() == wanted))
+    };
+    for wanted in preferred.into_iter().chain([super::super::PINNED_MODEL]) {
+        if let Some(family) = has(wanted) {
+            return (family, Some(wanted));
+        }
+    }
+    (0, None)
 }
 
 #[cfg(test)]
@@ -240,6 +266,29 @@ mod tests {
             Some(Family::MacBookNeo)
         );
         assert!(chip("Mac Studio (M4 Max)") > chip("Mac Studio (M3 Ultra)"));
+    }
+
+    #[test]
+    fn model_picker_defaults_to_the_pinned_model() {
+        let models: Vec<String> = ["Mac13,1", "Mac14,3", "MacBookPro18,1", "MacBookPro18,3"]
+            .map(Into::into)
+            .into();
+        let names: BTreeMap<String, String> = [
+            ("Mac13,1", "Mac Studio (M1 Max)"),
+            ("Mac14,3", "Mac Mini (M2, 2023)"),
+            ("MacBookPro18,1", "MacBook Pro (16-inch, 2021)"),
+            ("MacBookPro18,3", "MacBook Pro (14-inch, 2021)"),
+        ]
+        .map(|(model, name)| (model.into(), name.into()))
+        .into();
+        let groups = grouped(&models, &names).unwrap();
+        let pinned = super::super::super::PINNED_MODEL;
+        let (family, model) = initial(&groups, None);
+        assert_eq!(model, Some(pinned));
+        assert!(groups[family].1.iter().any(|m| m.as_str() == pinned));
+        assert_eq!(groups[family].0, Family::MacBookPro);
+        let (family, model) = initial(&groups, Some("Mac14,3"));
+        assert_eq!((groups[family].0, model), (Family::Mini, Some("Mac14,3")));
     }
 
     #[test]
