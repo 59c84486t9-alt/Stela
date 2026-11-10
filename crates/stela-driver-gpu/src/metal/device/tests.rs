@@ -40,7 +40,7 @@ use crate::metal::{
         MemoryProperties, PipelineStages, PrimitiveTopology, ShaderStages,
         backend::{Descriptor, Object},
         command::Command,
-        object::{Buffer, MemoryRequest, Pipeline, PipelineSource, QueryType},
+        object::{Buffer, MemoryRequest, Pipeline, PipelineSource, QueryType, Semaphore},
     },
 };
 use alloc::{string::String, vec::Vec};
@@ -2913,7 +2913,8 @@ fn indirect_mapping_updates_bind_once_their_arguments_are_read() {
                 _ => None,
             })
             .unwrap();
-        let (steps, step) = *copy[0].signals.last().unwrap();
+        // The step, before the late timeline value that ends the part.
+        let (steps, step) = *copy[0].signals.iter().rev().nth(1).unwrap();
         let backend = device.backend();
         let memory = backend.writes.last().unwrap().0;
         let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
@@ -3521,4 +3522,201 @@ fn window_server_event_patterns_submit_at_once() {
     device.poll().unwrap();
     assert_eq!(device.reached_for(1), waiting);
     assert_eq!(device.reached_for(2), waiting);
+}
+
+/// One event operation of a command buffer the queue tests commit.
+#[derive(Clone, Copy)]
+enum EventStep {
+    Signal(usize, u64),
+    Wait(usize, u64),
+}
+
+/// Commits a command buffer of `steps` over `events` for connection `key`
+/// on its Metal queue `queue`.
+fn commit_events(
+    device: &mut TestDevice,
+    events: &[Semaphore],
+    [key, queue]: [u64; 2],
+    steps: &[EventStep],
+) -> u64 {
+    let mut commands = device.new_command_buffer();
+    for &step in steps {
+        match step {
+            EventStep::Signal(event, value) => commands
+                .encode_signal_event(&mut device.resolver(), events[event], value)
+                .unwrap(),
+            EventStep::Wait(event, value) => commands
+                .encode_wait_for_event(&mut device.resolver(), events[event], value)
+                .unwrap(),
+        }
+    }
+    device.commit_on(key, queue, commands).unwrap()
+}
+
+/// `count` new events and their semaphores.
+fn new_events(device: &mut TestDevice, count: usize) -> (Vec<EventId>, Vec<Semaphore>) {
+    let ids: Vec<_> = (0..count).map(|_| device.new_event().unwrap()).collect();
+    let semaphores = ids
+        .iter()
+        .map(|&id| device.event_semaphore(id).unwrap())
+        .collect();
+    (ids, semaphores)
+}
+
+/// The index of the first submission that signals `signal`.
+fn submitted_at(device: &mut TestDevice, signal: (Semaphore, u64)) -> Option<usize> {
+    device.backend().submissions.iter().position(|segments| {
+        segments
+            .iter()
+            .any(|segment| segment.signals.contains(&signal))
+    })
+}
+
+/// MetalFX's temporal scaler over MPSGraph: the caller's command buffer A
+/// signals the graph's B, waits for it, signals D and waits for D, while B,
+/// C and D run on the graph's own queue and the CPU signals between them.
+/// A's first segment must reach the GPU while its later ones wait, and B
+/// must not wait behind A.
+#[test]
+fn a_command_buffer_runs_its_segments_as_other_queues_promise_its_waits() {
+    use EventStep::{Signal, Wait};
+    let mut device = device_on(MockBackend::new());
+    let (ids, e) = new_events(&mut device, 7);
+    let (caller, graph) = ([1, 1], [1, 2]);
+    let a = commit_events(
+        &mut device,
+        &e,
+        caller,
+        &[Signal(1, 1), Wait(3, 2), Signal(4, 1), Wait(2, 1)],
+    );
+    // Its first segment is submitted; the rest waits for #3.
+    assert!(submitted_at(&mut device, (e[1], 1)).is_some());
+    assert!(submitted_at(&mut device, (e[4], 1)).is_none());
+    assert!(device.holds());
+    let b = commit_events(
+        &mut device,
+        &e,
+        graph,
+        &[Wait(1, 1), Signal(5, 2), Signal(6, 2), Signal(3, 2)],
+    );
+    // B ran, and what it signals released A's middle segment.
+    let b_at = submitted_at(&mut device, (e[3], 2)).unwrap();
+    let middle = submitted_at(&mut device, (e[4], 1)).unwrap();
+    assert!(submitted_at(&mut device, (e[1], 1)).unwrap() < b_at && b_at < middle);
+    device.backend().finish();
+    device.poll().unwrap();
+    // B completed on its own queue while A still waits.
+    assert_eq!(device.reached_for(1), a - 1);
+    assert_eq!(device.completed_after(1, a - 1), b);
+    assert_eq!(device.completed_after(1, b), 0);
+    // The CPU raises #6 once it saw #5 and #6 reach 2.
+    device.set_signaled_value(ids[6], 3).unwrap();
+    let c = commit_events(&mut device, &e, graph, &[Wait(6, 2), Signal(6, 3)]);
+    let d = commit_events(
+        &mut device,
+        &e,
+        graph,
+        &[Wait(6, 3), Wait(4, 1), Signal(2, 1)],
+    );
+    let d_at = submitted_at(&mut device, (e[2], 1)).unwrap();
+    assert!(middle < d_at);
+    // A's last segment followed D.
+    let last = device.backend().submissions.len() - 1;
+    assert!(d_at < last);
+    assert!(
+        device.backend().submissions[last][0]
+            .waits
+            .contains(&(e[2], 1))
+    );
+    assert!(device.backend().unpromised.is_empty());
+    device.backend().finish();
+    device.poll().unwrap();
+    assert!(!device.holds());
+    assert_eq!(device.reached_for(1), d);
+    assert!(c < d && d == device.submitted_serial());
+}
+
+/// A wait nothing promises holds the rest of its command buffer and its
+/// queue's later work, but neither another queue of the same connection nor
+/// another connection, and the other queue's completions are answered.
+#[test]
+fn a_wait_nothing_promises_holds_only_its_queue() {
+    use EventStep::{Signal, Wait};
+    let mut device = device_on(MockBackend::new());
+    let (ids, e) = new_events(&mut device, 2);
+    let held = commit_events(&mut device, &e, [1, 1], &[Signal(1, 1), Wait(0, 1)]);
+    let behind = commit_events(&mut device, &e, [1, 1], &[]);
+    let other_queue = commit_events(&mut device, &e, [1, 2], &[Wait(1, 1)]);
+    let other_connection = commit_events(&mut device, &e, [2, 1], &[]);
+    device.backend().finish();
+    device.poll().unwrap();
+    assert_eq!(device.reached_for(1), held - 1);
+    assert_eq!(device.completed_after(1, held - 1), other_queue);
+    assert_eq!(device.completed_after(1, other_queue), 0);
+    assert_eq!(device.reached_for(2), other_connection);
+    // Freeing waits only for the submitted part of the held command buffer.
+    assert_eq!(device.completed_serial(), device.submitted_serial());
+    assert!(device.backend().unpromised.is_empty());
+    device.set_signaled_value(ids[0], 1).unwrap();
+    device.backend().finish();
+    device.poll().unwrap();
+    assert_eq!(device.reached_for(1), device.submitted_serial());
+    assert!(behind > held && !device.holds());
+}
+
+/// Two queues whose waits each need the other's held segment stay held:
+/// nothing promises either value. A third queue and another connection run.
+#[test]
+fn waits_that_promise_each_other_through_held_segments_stay_held() {
+    use EventStep::{Signal, Wait};
+    let mut device = device_on(MockBackend::new());
+    let (_, e) = new_events(&mut device, 3);
+    let first = commit_events(
+        &mut device,
+        &e,
+        [1, 1],
+        &[Signal(2, 1), Wait(0, 1), Signal(1, 1)],
+    );
+    commit_events(&mut device, &e, [1, 2], &[Wait(1, 1), Signal(0, 1)]);
+    let third = commit_events(&mut device, &e, [1, 3], &[]);
+    let other = commit_events(&mut device, &e, [2, 1], &[]);
+    // Only the first command buffer's first segment and the free work ran.
+    assert!(submitted_at(&mut device, (e[2], 1)).is_some());
+    assert!(submitted_at(&mut device, (e[0], 1)).is_none());
+    assert!(submitted_at(&mut device, (e[1], 1)).is_none());
+    assert!(device.backend().unpromised.is_empty());
+    device.backend().finish();
+    device.poll().unwrap();
+    assert!(device.holds());
+    assert_eq!(device.reached_for(1), first - 1);
+    assert_eq!(device.completed_after(1, first - 1), third);
+    assert_eq!(device.reached_for(2), other);
+    // Retiring passes the held work: its submitted segment completed.
+    assert_eq!(device.completed_serial(), device.submitted_serial());
+}
+
+/// Closing a connection drops the held segments of a command buffer whose
+/// first segments ran; it completes once those have.
+#[test]
+fn closing_drops_held_segments() {
+    use EventStep::{Signal, Wait};
+    let mut device = device_on(MockBackend::new());
+    let (_, e) = new_events(&mut device, 2);
+    commit_events(
+        &mut device,
+        &e,
+        [1, 1],
+        &[Signal(1, 1), Wait(0, 1), Signal(1, 2)],
+    );
+    commit_events(&mut device, &e, [1, 1], &[]);
+    let submissions = device.backend().submissions.len();
+    device.abandon(1);
+    let other = commit_events(&mut device, &e, [2, 1], &[]);
+    device.backend().finish();
+    device.poll().unwrap();
+    assert!(!device.holds());
+    assert_eq!(device.backend().submissions.len(), submissions + 1);
+    assert!(submitted_at(&mut device, (e[1], 2)).is_none());
+    assert_eq!(device.reached_for(2), other);
+    assert_eq!(device.drained(), device.submitted_serial());
 }

@@ -1,26 +1,29 @@
 //! Command buffers, submission, completion, events and counters.
 //!
-//! Every `MTLCommandQueue` submits to the device's one universal queue, and
-//! each connection's command buffers in commit order, which satisfies
-//! Metal's per-queue ordering. Command buffer `n` signals `n` on the queue's
-//! timeline semaphore when it is submitted in serial order; one submitted
-//! after a later serial signals the next value of a second, late timeline
-//! instead, since a timeline only rises. [`Device::poll`] retires each
-//! command buffer once its timeline passes it.
+//! Every `MTLCommandQueue` submits to the device's one universal queue, each
+//! in commit order, which satisfies Metal's per-queue ordering. Command
+//! buffer `n` signals `n` on the queue's timeline semaphore when it is
+//! submitted in serial order; one submitted after a later serial signals the
+//! next value of a second, late timeline instead, since a timeline only
+//! rises. [`Device::poll`] retires each command buffer once its timeline
+//! passes it.
 //!
-//! A command buffer is held, not submitted, while one of its event waits
-//! is neither reached nor signaled by submitted work. The driver would
-//! hold such a wait, and everything submitted behind it, from the GPU
-//! until a signal arrived, for every connection: an event that never comes
-//! would stop the whole device. Held here, it delays only its connection's
-//! later command buffers, as Apple's GPUs delay only its queue, and is
-//! submitted once a CPU signal or a submitted signal promises the value.
+//! A command buffer's segments from its first event wait that is neither
+//! reached nor signaled by submitted work are held, not submitted. The
+//! driver would hold such a wait, and everything submitted behind it, from
+//! the GPU until a signal arrived, for every connection: an event that never
+//! comes would stop the whole device. The segments before it are submitted,
+//! so what they signal promises its values to other work. The held segments
+//! delay only the later command buffers of their Metal queue, as Apple's GPUs
+//! delay only that queue, and are submitted once a CPU signal or a submitted
+//! signal promises the value. Signals of held segments promise nothing, so
+//! waits that form a cycle through held segments stay held.
 //!
 //! An indirect sparse mapping update splits its command buffer: the segments
 //! from the update's on are held until the GPU has copied its arguments,
 //! when the device reads them, makes the binds and submits the segments.
-//! Its connection's command buffers committed meanwhile are held behind
-//! them; polling and waiting submit held work as it becomes ready.
+//! Its queue's command buffers committed meanwhile are held behind them;
+//! polling and waiting submit held work as it becomes ready.
 use super::gpu_times::{GpuClock, GpuTimes};
 use super::{
     BufferId, ComputePipelineId, CounterBufferId, Device, EventId, RenderPipelineId, Slab,
@@ -125,9 +128,10 @@ struct InFlight {
 enum Track {
     /// Held: not yet submitted.
     Held,
-    /// Its segments up to an indirect mapping update's submitted, the rest
-    /// held until the GPU copies the update's arguments.
-    Started,
+    /// Its first segments submitted, the rest held for an event or for the
+    /// GPU to copy an indirect mapping update's arguments. The submitted
+    /// segments end by signaling this value of the late timeline.
+    Started(u64),
     /// The queue's timeline reaching its serial.
     Timeline,
     /// The late timeline reaching this value.
@@ -205,8 +209,11 @@ struct FreeQueryPool {
 #[derive(Debug)]
 struct Held {
     serial: u64,
-    /// The connection that committed it, whose later work waits behind it.
+    /// The connection that committed it.
     key: u64,
+    /// The connection's Metal queue it was committed on, whose later work
+    /// waits behind it.
+    queue: u64,
     /// The step value the copy of the update's arguments signals; zero
     /// when only the held work ahead delays the segments.
     step: u64,
@@ -263,6 +270,10 @@ pub(super) struct Queue {
     promised: Vec<(Semaphore, u64)>,
     /// Command buffers seen complete, in any order.
     completions: u64,
+    /// (connection, serial) of command buffers retired while an older one
+    /// of their connection is not complete, until the connection reaches
+    /// them: another Metal queue's held work never delays their completion.
+    early: Vec<(u64, u64)>,
     /// GPU start and end ticks of the latest completed command buffers, by
     /// serial, oldest first.
     times: VecDeque<(u64, [u64; 2])>,
@@ -618,9 +629,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.commit_for(0, commands)
     }
 
-    /// Commits `commands` for connection `key`, behind its earlier work:
-    /// another connection's held work never delays it.
-    pub fn commit_for(&mut self, key: u64, mut commands: CommandBuffer) -> Result<u64> {
+    /// Commits `commands` for connection `key` on its one Metal queue.
+    pub fn commit_for(&mut self, key: u64, commands: CommandBuffer) -> Result<u64> {
+        self.commit_on(key, 0, commands)
+    }
+
+    /// Commits `commands` for connection `key` on its Metal queue `queue`,
+    /// behind that queue's earlier work: held work of another queue or
+    /// connection never delays it.
+    pub fn commit_on(&mut self, key: u64, queue: u64, mut commands: CommandBuffer) -> Result<u64> {
         let start = self.timing.now();
         self.ensure_admission()?;
         let serial = self.submitted + 1;
@@ -643,7 +660,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
         let mut times = None;
         let prepared = (|| {
-            let mut held = self.hold(serial, key, recording.segments, recording.mappings)?;
+            let mut held =
+                self.hold(serial, [key, queue], recording.segments, recording.mappings)?;
             times = self.time(held.as_mut_slice())?;
             let mut chunks = Vec::with_capacity(recording.uploads.len());
             for (chunk, bytes) in &recording.uploads {
@@ -891,7 +909,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     fn hold(
         &mut self,
         serial: u64,
-        key: u64,
+        [key, queue]: [u64; 2],
         mut segments: Vec<Segment>,
         mut mappings: Vec<(usize, Mapping)>,
     ) -> Result<HeldBatch> {
@@ -905,6 +923,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             return Ok(HeldBatch::One(Held {
                 serial,
                 key,
+                queue,
                 step: 0,
                 segments,
                 mappings,
@@ -931,6 +950,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             held.push(Held {
                 serial,
                 key,
+                queue,
                 step,
                 segments,
                 mappings: rebase(mappings, base),
@@ -940,6 +960,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         held.push(Held {
             serial,
             key,
+            queue,
             step,
             segments,
             mappings: rebase(mappings, base),
@@ -947,23 +968,53 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(HeldBatch::Split(held))
     }
 
-    /// Submits held work that is ready, each connection's in order. Work
-    /// whose arguments are unread or whose event waits nothing promises
-    /// yet holds only its connection's later work.
+    /// Submits held work that is ready, each Metal queue's in order. A
+    /// command buffer's segments before its first wait nothing promises yet
+    /// are submitted; the rest, and work whose arguments are unread, hold
+    /// only their queue's later work.
     fn advance(&mut self) -> Result<()> {
-        let mut blocked: Vec<u64> = Vec::new();
+        let mut blocked: Vec<[u64; 2]> = Vec::new();
         let mut index = 0;
         while index < self.queue.held.len() {
             if self.lost {
                 return Err(Error::DeviceLost);
             }
-            let key = self.queue.held[index].key;
-            if blocked.contains(&key) || !self.ready(index)? {
-                blocked.push(key);
+            let order = [self.queue.held[index].key, self.queue.held[index].queue];
+            let ready = if blocked.contains(&order) {
+                0
+            } else {
+                self.ready_segments(index)?
+            };
+            if ready == 0 {
+                blocked.push(order);
                 index += 1;
                 continue;
             }
-            let held = self.queue.held.remove(index).expect("held work");
+            let whole = ready == self.queue.held[index].segments.len();
+            let held = if whole {
+                self.queue.held.remove(index).expect("held work")
+            } else {
+                // The rest stays at its place, to be looked at again with
+                // what this part promises.
+                let rest = &mut self.queue.held[index];
+                let tail = rest.segments.split_off(ready);
+                let segments = core::mem::replace(&mut rest.segments, tail);
+                let split = rest.mappings.partition_point(|(at, _)| *at < ready);
+                let mut later = rest.mappings.split_off(split);
+                for (at, _) in &mut later {
+                    *at -= ready;
+                }
+                let mappings = core::mem::replace(&mut rest.mappings, later);
+                let step = core::mem::take(&mut rest.step);
+                Held {
+                    serial: rest.serial,
+                    key: rest.key,
+                    queue: rest.queue,
+                    step,
+                    segments,
+                    mappings,
+                }
+            };
             // A failed submission never signals; record the loss so waits end.
             self.submit_held(held).inspect_err(|_| self.lost = true)?;
             // What it signals may have readied work passed over.
@@ -975,14 +1026,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(())
     }
 
-    /// Whether held work `index` can be submitted: its arguments, if any,
-    /// are copied, and each wait is promised.
-    fn ready(&mut self, index: usize) -> Result<bool> {
+    /// How many of held work `index`'s first segments can be submitted:
+    /// none while its arguments are being copied, else those before the
+    /// first wait nothing promises.
+    fn ready_segments(&mut self, index: usize) -> Result<usize> {
         let step = self.queue.held[index].step;
         if step > 0 {
             let steps = self.queue.steps.expect("steps have their semaphore");
             if self.backend.semaphore_value(steps)? < step {
-                return Ok(false);
+                return Ok(0);
             }
         }
         let held = &self.queue.held[index];
@@ -991,8 +1043,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(held
             .segments
             .iter()
-            .flat_map(|segment| &segment.waits)
-            .all(|&(semaphore, value)| self.promised(semaphore) >= value))
+            .position(|segment| {
+                segment
+                    .waits
+                    .iter()
+                    .any(|&(semaphore, value)| self.promised(semaphore) < value)
+            })
+            .unwrap_or(held.segments.len()))
     }
 
     /// The highest value submitted work or the CPU signals on `semaphore`.
@@ -1018,57 +1075,60 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     /// Points held work's completion at the timeline, or at the late
     /// timeline when a later serial already signaled the timeline, and
-    /// notes what its segments signal.
+    /// notes what its segments signal. Work that does not complete its
+    /// command buffer signals the next late value last, which says when
+    /// the submitted part is done.
     fn track(&mut self, held: &mut Held) -> Result<()> {
         let timeline = self.timeline;
         let completes = held
             .segments
             .iter()
             .any(|segment| segment.signals.contains(&(timeline, held.serial)));
-        if !completes {
-            if let Some(flight) = self
-                .queue
-                .in_flight
-                .iter_mut()
-                .find(|flight| flight.serial == held.serial)
-            {
-                flight.track = Track::Started;
-            }
+        let late = |device: &mut Self| -> Result<(Semaphore, u64)> {
+            let late = match device.queue.late {
+                Some(late) => late,
+                None => *device
+                    .queue
+                    .late
+                    .insert(device.backend.create_semaphore(0)?),
+            };
+            device.queue.late_value += 1;
+            Ok((late, device.queue.late_value))
+        };
+        let track = if !completes {
+            let (late, value) = late(self)?;
+            let last = held.segments.last_mut().expect("a segment");
+            last.signals.push((late, value));
+            Track::Started(value)
+        } else if held.serial > self.queue.timeline_serial {
+            self.queue.timeline_serial = held.serial;
+            Track::Timeline
         } else {
-            let track = if held.serial > self.queue.timeline_serial {
-                self.queue.timeline_serial = held.serial;
-                Track::Timeline
-            } else {
-                let late = match self.queue.late {
-                    Some(late) => late,
-                    None => *self.queue.late.insert(self.backend.create_semaphore(0)?),
-                };
-                self.queue.late_value += 1;
-                let value = self.queue.late_value;
-                for segment in &mut held.segments {
-                    for signal in &mut segment.signals {
-                        if *signal == (timeline, held.serial) {
-                            *signal = (late, value);
-                        }
+            let (late, value) = late(self)?;
+            for segment in &mut held.segments {
+                for signal in &mut segment.signals {
+                    if *signal == (timeline, held.serial) {
+                        *signal = (late, value);
                     }
                 }
-                Track::Late(value)
-            };
-            if let Some(flight) = self
-                .queue
-                .in_flight
-                .iter_mut()
-                .find(|flight| flight.serial == held.serial)
-            {
-                flight.track = track;
             }
+            Track::Late(value)
+        };
+        if let Some(flight) = self
+            .queue
+            .in_flight
+            .iter_mut()
+            .find(|flight| flight.serial == held.serial)
+        {
+            flight.track = track;
         }
+        let late = self.queue.late;
         let signals: Vec<_> = held
             .segments
             .iter()
             .flat_map(|segment| &segment.signals)
             .copied()
-            .filter(|&(semaphore, _)| semaphore != timeline)
+            .filter(|&(semaphore, _)| semaphore != timeline && Some(semaphore) != late)
             .collect();
         for (semaphore, value) in signals {
             self.promise(semaphore, value);
@@ -1245,10 +1305,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// Whether some connection's completion differs from the device's:
     /// work is held, or completes on the late timeline.
     pub fn holds(&self) -> bool {
-        self.queue
-            .in_flight
-            .iter()
-            .any(|flight| matches!(flight.track, Track::Held | Track::Started | Track::Late(_)))
+        self.queue.in_flight.iter().any(|flight| {
+            matches!(
+                flight.track,
+                Track::Held | Track::Started(_) | Track::Late(_)
+            )
+        })
     }
 
     /// Command buffers seen complete so far, in whatever order they
@@ -1257,26 +1319,41 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.queue.completions
     }
 
-    /// Drops connection `key`'s held command buffers, which no longer run:
-    /// it closed. Those whose first segments were submitted still finish.
+    /// The oldest of connection `key`'s command buffers after `serial` that
+    /// completed while an older one of its own has not, after a
+    /// [`Self::poll`]; zero for none. Another Metal queue's held work
+    /// delays [`Self::reached_for`], not these.
+    pub fn completed_after(&self, key: u64, serial: u64) -> u64 {
+        self.queue
+            .early
+            .iter()
+            .filter(|&&(early, completed)| early == key && completed > serial)
+            .map(|&(_, completed)| completed)
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Drops connection `key`'s held segments, which no longer run: it
+    /// closed. Segments already submitted still finish.
     pub fn abandon(&mut self, key: u64) {
-        let in_flight = &mut self.queue.in_flight;
         let mut dropped = Vec::new();
         self.queue.held.retain(|held| {
-            let unstarted = in_flight
-                .iter()
-                .any(|flight| flight.serial == held.serial && flight.track == Track::Held);
-            let drop = held.key == key && unstarted;
-            if drop {
+            if held.key == key {
                 dropped.push(held.serial);
             }
-            !drop
+            held.key != key
         });
-        for flight in in_flight.iter_mut() {
-            if dropped.contains(&flight.serial) {
-                flight.track = Track::Done;
+        for flight in &mut self.queue.in_flight {
+            if !dropped.contains(&flight.serial) {
+                continue;
             }
+            flight.track = match flight.track {
+                // Done once its submitted segments are.
+                Track::Started(value) => Track::Late(value),
+                _ => Track::Done,
+            };
         }
+        self.queue.early.retain(|&(early, _)| early != key);
     }
 
     fn poll_inner(&mut self) -> Result<u64> {
@@ -1306,24 +1383,27 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 _ => {}
             }
         }
-        // Everything through the first submitted command buffer still
-        // running; held work runs nothing and holds nothing it did not own.
-        // So `completed` may pass a held serial. That is safe for what the
-        // guest releases only once its connection reaches that serial
-        // (`reached_for`); nothing the host defers may wait on a held
+        // Everything through the first command buffer whose submitted work
+        // still runs; held segments run nothing and hold nothing they did
+        // not own. So `completed` may pass a held serial. That is safe for
+        // what the guest releases only once its connection reaches that
+        // serial (`reached_for`); nothing the host defers may wait on a held
         // serial through `completed`.
         let completed = self
             .queue
             .in_flight
             .iter()
-            .find(|flight| {
-                matches!(
-                    flight.track,
-                    Track::Started | Track::Timeline | Track::Late(_)
-                )
+            .find(|flight| match flight.track {
+                Track::Started(value) => value > late,
+                Track::Timeline | Track::Late(_) => true,
+                Track::Held | Track::Done => false,
             })
             .map_or(self.submitted, |flight| flight.serial - 1);
         self.retire(completed)?;
+        // Out of order completions the connection now reaches in order.
+        let mut early = core::mem::take(&mut self.queue.early);
+        early.retain(|&(key, serial)| serial > self.reached_for(key));
+        self.queue.early = early;
         Ok(self.completed)
     }
 
@@ -1331,7 +1411,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.queue
             .in_flight
             .iter()
-            .any(|flight| matches!(flight.track, Track::Late(_)))
+            .any(|flight| matches!(flight.track, Track::Started(_) | Track::Late(_)))
     }
 
     /// Recycles what completed work held, keeps its GPU times and destroys
@@ -1358,6 +1438,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
         }
         self.queue.completions += flights.len() as u64;
+        for flight in &flights {
+            let older = self
+                .queue
+                .in_flight
+                .iter()
+                .any(|kept| kept.key == flight.key && kept.serial < flight.serial);
+            if older {
+                self.queue.early.push((flight.key, flight.serial));
+            }
+        }
         while let Some(flight) = flights.pop_front() {
             // Before deferred destruction, which may free the memory.
             for range in flight.invalidations {

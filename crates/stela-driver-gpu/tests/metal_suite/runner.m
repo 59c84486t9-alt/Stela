@@ -3659,14 +3659,21 @@ static void run_sequence(Case *c, id<MTLCommandQueue> queue, NSDictionary *plan,
 		[open endEncoding];
 	}
 	/* Values the host signals once everything is committed, after a
-	 * delay, so the GPU's waits for them are real. */
+	 * delay, so the GPU's waits for them are real; a signal may first wait
+	 * for each [event, value] it lists, as a listener of the GPU's would. */
 	NSArray *host = spec[@"host_signals"];
-	for (NSArray *h in host)
+	for (NSArray *h in host) {
 		event_named(c, h[0]);
+		for (NSArray *w in h.count > 2 ? h[2] : @[])
+			event_named(c, w[0]);
+	}
 	if (host.count)
 		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC), dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
-			for (NSArray *h in host)
+			for (NSArray *h in host) {
+				for (NSArray *w in h.count > 2 ? h[2] : @[])
+					[(id<MTLSharedEvent>)c.events[w[0]] waitUntilSignaledValue:[w[1] unsignedLongLongValue] timeoutMS:10000];
 				((id<MTLSharedEvent>)c.events[h[0]]).signaledValue = [h[1] unsignedLongLongValue];
+			}
 		});
 	/* Listeners the host registers for values the GPU signals. */
 	MTLSharedEventListener *listener = nil;

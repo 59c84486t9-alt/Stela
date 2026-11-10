@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 /// The protocol version a connection negotiates. A major version changes
 /// records; a minor version only adds operations.
-pub const MAJOR: u32 = 2;
+pub const MAJOR: u32 = 3;
 pub const MINOR: u32 = 0;
 
 /// A fixed-width wire record.
@@ -1226,8 +1226,13 @@ operations! {
     SampleTimestamps = 0x0407 => Empty, TimestampsResponse;
     /// `currentAllocatedSize`.
     AllocatedSize = 0x0408 => Empty, Value;
-    /// Submits ready work and answers the completed serial.
+    /// Submits ready work and answers the completed serial: every serial
+    /// before the connection's oldest command buffer not yet complete.
     Poll = 0x0409 => Empty, Value;
+    /// After a `Poll`, the oldest of the connection's command buffers after
+    /// serial `value` that completed before an older one of its own, which
+    /// another Metal queue's held work delays; zero for none.
+    CompletedAfter = 0x040a => Value, Value;
     /// Replays a command stream into a command buffer, submits it and
     /// answers its serial.
     Commit = 0x040b => commands::CommitRequest, Value;

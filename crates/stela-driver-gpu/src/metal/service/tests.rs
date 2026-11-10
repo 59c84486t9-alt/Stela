@@ -249,9 +249,20 @@ fn commit(
     connection: NonZeroU64,
     stream: &Stream,
 ) -> Result<Value, Outcome> {
+    commit_on(service, connection, 1, stream)
+}
+
+/// Commits `stream` on the connection's Metal queue `queue`.
+fn commit_on(
+    service: &mut TestService,
+    connection: NonZeroU64,
+    queue: u64,
+    stream: &Stream,
+) -> Result<Value, Outcome> {
     let memory = &mut Memory::default();
     let request = CommitRequest {
         commands: memory.put(&stream.0),
+        queue,
     };
     call(service, connection, Operation::Commit, &request, memory)
 }

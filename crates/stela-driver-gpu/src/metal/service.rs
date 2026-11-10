@@ -643,6 +643,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 let value = self.device.reached_for(call.connection.get());
                 call.reply(&wire::Value { value })
             }
+            Operation::CompletedAfter => {
+                let wire::Value { value } = call.request()?;
+                let value = self.device.completed_after(call.connection.get(), value);
+                call.reply(&wire::Value { value })
+            }
             Operation::Commit => self.commit(&mut call),
             Operation::CommandBufferTimes => {
                 let wire::Value { value } = call.request()?;

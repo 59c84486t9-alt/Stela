@@ -10,9 +10,13 @@
 use super::{Record, RegionRecord, Span};
 
 records! {
-    /// `commit` of the command buffer `commands` encode.
+    /// `commit` of the command buffer `commands` encode, on the Metal
+    /// queue `queue` names: a nonzero value the connection chooses, the
+    /// same for every command buffer of one queue. The service keeps each
+    /// queue's order; one queue's held work never delays another's.
     pub struct CommitRequest {
         pub commands: Span,
+        pub queue: u64,
     }
 
     /// A command's `CommandCode` and the length of its record and data,

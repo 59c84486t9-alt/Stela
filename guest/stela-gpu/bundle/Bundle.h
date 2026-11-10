@@ -587,6 +587,8 @@ NSData *stela_compile_source(NSString *source, id options, NSError **error);
 @public
 	StelaGPUDevice *_device;
 	StelaGPULogState *_logState;
+	/* Names the queue to the service, which keeps each queue's order. */
+	uint64_t _identity;
 	/* The priorities callers set, which the device's one priority serves:
 	 * Apple's queues start at 1 and, in the background, 2. */
 	_Atomic NSUInteger _gpuPriority, _backgroundGPUPriority;

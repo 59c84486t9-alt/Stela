@@ -1,7 +1,8 @@
 /*
  * Queues and command buffers. A command buffer's stream stays here until
- * commit, when the service replays it; completions arrive in serial order on
- * the device's queue. What the stream names stays retained until then.
+ * commit, when the service replays it; completions arrive in serial order
+ * within each queue on the device's queue. What the stream names stays
+ * retained until then.
  */
 #include "Bundle.h"
 
@@ -22,7 +23,9 @@ static CFTimeInterval host_time(void)
 {
 	self = [super init];
 	if (self) {
+		static uint64_t queues;
 		_device = device;
+		_identity = __atomic_add_fetch(&queues, 1, __ATOMIC_RELAXED);
 		_lock = OS_UNFAIR_LOCK_INIT;
 		_enqueued = [NSMutableArray arrayWithCapacity:16];
 		_gpuPriority = 1;
@@ -312,7 +315,10 @@ static void name_functions(id object, NSMutableSet *seen, NSMutableString *names
 	_kernelStart = host_time();
 	[_logState commandBufferStarted];
 	[_device flushIndirect];
-	StelaCommitRequest request = {.commands = stela_span(_stream.bytes, _stream.length)};
+	StelaCommitRequest request = {
+		.commands = stela_span(_stream.bytes, _stream.length),
+		.queue = _queue->_identity,
+	};
 	StelaValue serial = {};
 	StelaFailure failure;
 	StelaSpans spans = {.reads = &request.commands, .read_count = 1};

@@ -267,6 +267,27 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 		[done addObject:buffer];
 		[_inFlight removeObjectAtIndex:0];
 	}
+	/* Another queue's held work delays the serial order, not this queue's
+	 * completions: the service names those that completed past it. */
+	uint64_t after = reached.value;
+	while (!lost && [self inFlightSpansQueues]) {
+		os_unfair_lock_unlock(&_lock);
+		StelaValue request = {.value = after}, next = {};
+		bool answered = STELA_CALL(&_gate, CompletedAfter, &request, &next, NULL) == StelaStatusOk;
+		os_unfair_lock_lock(&_lock);
+		if (!answered || next.value == 0) {
+			break;
+		}
+		after = next.value;
+		for (NSUInteger i = 0; i < _inFlight.count; i++) {
+			StelaGPUCommandBuffer *buffer = [_inFlight objectAtIndex:i];
+			if (buffer->_serial == after) {
+				[done addObject:buffer];
+				[_inFlight removeObjectAtIndex:i];
+				break;
+			}
+		}
+	}
 	NSArray *settling = [_settling copy];
 	os_unfair_lock_unlock(&_lock);
 	for (NSUInteger i = 0; i < done.count; i++) {
@@ -276,6 +297,21 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 	[self releaseDeferredReaching:lost ? UINT64_MAX : reached.value];
 	[self wakeWaiters];
 	[self arm];
+}
+
+/* Under `_lock`: whether the command buffers in flight are of more than one
+ * queue, so one may complete before an older one. */
+- (bool)inFlightSpansQueues
+{
+	StelaGPUQueue *first = nil;
+	for (NSUInteger i = 0; i < _inFlight.count; i++) {
+		StelaGPUQueue *queue = ((StelaGPUCommandBuffer *)[_inFlight objectAtIndex:i])->_queue;
+		if (first && queue != first) {
+			return true;
+		}
+		first = queue;
+	}
+	return false;
 }
 
 - (uint64_t)wakes

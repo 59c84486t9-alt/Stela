@@ -1,5 +1,6 @@
 use super::{
-    Memory, StorageMode, Stream, TestService, call, commit, connect, new_buffer, service_on, status,
+    Memory, StorageMode, Stream, TestService, call, commit, commit_on, connect, new_buffer,
+    service_on, status,
 };
 use crate::metal::{
     device::fixture::MockBackend,
@@ -12,6 +13,7 @@ use crate::metal::{
         },
     },
 };
+use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
 fn value(
@@ -500,5 +502,97 @@ fn a_closed_connection_drops_its_held_work() {
         service.device().backend().submissions.len(),
         submissions + 1
     );
+    assert!(!service.device().holds());
+}
+
+/// MetalFX's temporal scaler over MPSGraph, as the guest commits it: the
+/// caller's command buffer A on one Metal queue, B, C and D on another of
+/// the same connection, events between them and a CPU signal. Every command
+/// buffer completes; B completes while A still waits, and the connection
+/// learns of it.
+#[test]
+fn command_buffers_of_two_queues_wait_for_each_others_events() {
+    use crate::metal::service::wire::commands::{CommandBufferCode, EventCommand};
+    let mut service = service_on(MockBackend::new());
+    let connection = connect(&mut service);
+    let events: Vec<u64> = (0..7)
+        .map(|_| {
+            let event: Handle = call(
+                &mut service,
+                connection,
+                Operation::NewEvent,
+                &Empty {},
+                &mut Memory::default(),
+            )
+            .unwrap();
+            event.handle
+        })
+        .collect();
+    let stream = |steps: &[(bool, usize, u64)]| {
+        let mut stream = Stream::default();
+        for &(signal, event, value) in steps {
+            let code = if signal {
+                CommandBufferCode::SignalEvent
+            } else {
+                CommandBufferCode::WaitForEvent
+            };
+            let command = EventCommand {
+                event: events[event],
+                value,
+            };
+            stream.push(code.raw(), &command, &[]);
+        }
+        stream
+    };
+    let (signal, wait) = (true, false);
+    let a = stream(&[(signal, 1, 1), (wait, 3, 2), (signal, 4, 1), (wait, 2, 1)]);
+    let a = commit_on(&mut service, connection, 1, &a).unwrap().value;
+    let b = stream(&[(wait, 1, 1), (signal, 5, 2), (signal, 6, 2), (signal, 3, 2)]);
+    let b = commit_on(&mut service, connection, 2, &b).unwrap().value;
+    service.device().backend().finish();
+    assert_eq!(reached(&mut service, connection), a - 1);
+    let after = |service: &mut TestService, serial| {
+        let next: Value = call(
+            service,
+            connection,
+            Operation::CompletedAfter,
+            &Value { value: serial },
+            &mut Memory::default(),
+        )
+        .unwrap();
+        next.value
+    };
+    assert_eq!(after(&mut service, a - 1), b);
+    assert_eq!(after(&mut service, b), 0);
+    for event in [5, 6] {
+        assert_eq!(
+            value(
+                &mut service,
+                connection,
+                Operation::EventSignaledValue,
+                events[event]
+            ),
+            2
+        );
+    }
+    call::<_, Empty>(
+        &mut service,
+        connection,
+        Operation::SetEventSignaledValue,
+        &EventValueRequest {
+            event: events[6],
+            value: 3,
+        },
+        &mut Memory::default(),
+    )
+    .unwrap();
+    let c = stream(&[(wait, 6, 2), (signal, 6, 3)]);
+    commit_on(&mut service, connection, 2, &c).unwrap();
+    let d = stream(&[(wait, 6, 3), (wait, 4, 1), (signal, 2, 1)]);
+    let d = commit_on(&mut service, connection, 2, &d).unwrap().value;
+    assert!(service.device().backend().unpromised.is_empty());
+    service.device().backend().finish();
+    assert_eq!(reached(&mut service, connection), d);
+    assert_eq!(after(&mut service, d), 0);
     assert!(!service.device().holds());
 }

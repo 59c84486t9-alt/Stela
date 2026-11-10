@@ -1108,6 +1108,7 @@ fn queues_and_handlers(plan: &mut Plan, library: &str, rng: &mut Random) {
             case.set("listener", listener)
         });
     }
+    event_chain(plan, library);
     plan.add(base("sequence.unretained", vec![scale(), neighbour()]).set("unretained", true));
     plan.add(base(
         "sequence.compute.concurrent_barrier",
@@ -1131,6 +1132,71 @@ fn queues_and_handlers(plan: &mut Plan, library: &str, rng: &mut Random) {
             u32s(&[0, 1, 0, 0, 0, 0, 0, 0, 1, 4]),
         )),
     );
+}
+
+/// MetalFX's temporal scaler over MPSGraph: command buffer A on the case's
+/// queue signals B on a second queue, waits for B, signals D and waits for
+/// D; C and D follow B on the second queue, and the host raises an event
+/// once it sees B's signals. Each stage writes one past the levels of the
+/// stages it follows, so a stage that ran early writes a lower level. The
+/// final stage, E, follows A on its queue, so waiting for E waits for A.
+fn event_chain(plan: &mut Plan, library: &str) {
+    // Slots: A0 A1 A2 B C D E.
+    let stage = |slot: u32, after: [u32; 2]| {
+        let name = format!("stage{slot}");
+        let step = Step::compute("stage_level", [1, 1, 1], [1, 1, 1])
+            .bind(&[("levels", 0), (name.as_str(), 1)]);
+        (
+            step,
+            Buffer::data(&name, 0, u32s(&[slot, after[0], after[1], 0])).unbound(),
+        )
+    };
+    let (a0, a0_args) = stage(0, [0, 0]);
+    let (a1, a1_args) = stage(1, [4, 0]);
+    let (a2, a2_args) = stage(2, [6, 0]);
+    let (b, b_args) = stage(3, [1, 0]);
+    let (c, c_args) = stage(4, [4, 0]);
+    let (d, d_args) = stage(5, [2, 5]);
+    let (e, e_args) = stage(6, [3, 0]);
+    let mut case = Case::sequence(
+        "sequence.queues.event_chain",
+        library,
+        vec![
+            a0.signal_events(&[("e1", 1)]),
+            a1.wait_events(&[("e3", 2)]).signal_events(&[("e4", 1)]),
+            a2.wait_events(&[("e2", 1)]),
+            b.set("queue", 1).wait_events(&[("e1", 1)]).signal_events(&[
+                ("e5", 2),
+                ("e6", 2),
+                ("e3", 2),
+            ]),
+            c.set("queue", 1)
+                .new_command_buffer()
+                .wait_events(&[("e6", 2)])
+                .signal_events(&[("e6", 3)]),
+            d.set("queue", 1)
+                .new_command_buffer()
+                .wait_events(&[("e6", 3), ("e4", 1)])
+                .signal_events(&[("e2", 1)]),
+            e.set("queue", 0),
+        ],
+    )
+    .buffer(
+        Buffer::zeroed("levels", 0, 32)
+            .unbound()
+            .set("untracked", true),
+    )
+    // The host raises e6 to 3 once e5 and e6 reached 2, as MPSGraph does.
+    .set("host_signals", json!([["e6", 3, [["e5", 2], ["e6", 2]]]]))
+    .output(Output::exact(
+        "levels",
+        Dtype::U32,
+        u32s(&[1, 3, 5, 2, 3, 4, 6, 0]),
+    ));
+    for args in [a0_args, a1_args, a2_args, b_args, c_args, d_args, e_args] {
+        case = case.buffer(args);
+    }
+    plan.add(case);
 }
 
 pub fn build(plan: &mut Plan) {

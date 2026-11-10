@@ -30,6 +30,18 @@ kernel void write_arguments(device uint *dispatch [[buffer(0)]], device uint *dr
     corners[3] = float4(1, 1, 0, 1);
 }
 
+// One stage of work between events: its level is one past the highest
+// level of the stages it follows (`stage.y` and `stage.z`, each a slot plus
+// one, zero for none), so a stage that runs before one it follows writes a
+// lower level.
+kernel void stage_level(device uint *levels [[buffer(0)]], constant uint4 &stage [[buffer(1)]])
+{
+    uint after = 0;
+    if (stage.y != 0) after = max(after, levels[stage.y - 1]);
+    if (stage.z != 0) after = max(after, levels[stage.z - 1]);
+    levels[stage.x] = after + 1;
+}
+
 kernel void count_threads(device atomic_uint *count [[buffer(0)]], device uint *seen [[buffer(1)]],
                           uint i [[thread_position_in_grid]], uint group [[threadgroup_position_in_grid]])
 {

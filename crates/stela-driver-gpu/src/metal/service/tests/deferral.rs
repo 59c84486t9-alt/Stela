@@ -102,6 +102,7 @@ fn dispatching(memory: &mut Memory, pipeline: u64, buffer: u64) -> u64 {
         .end();
     let request = CommitRequest {
         commands: memory.put(&stream.0),
+        queue: 1,
     };
     gate_call(memory, Operation::Commit, &request, size_of::<Value>())
 }

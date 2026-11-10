@@ -109,7 +109,10 @@ impl<'a> Payload<'a> {
 impl<B: Backend, C: Compiler> Service<B, C> {
     pub(super) fn commit(&mut self, call: &mut Call) -> Result<(), Fault> {
         self.device.timing().begin(Timed::Commit);
-        let CommitRequest { commands: span } = call.request()?;
+        let CommitRequest {
+            commands: span,
+            queue,
+        } = call.request()?;
         let connection = call.connection;
         let mut commands = self.device.new_command_buffer();
         let start = self.device.timing().now();
@@ -134,11 +137,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             // the command buffer with its events: signaling them now would
             // wake their waiters before its work.
             if !self.device.deferred() {
-                self.commit_events_only(connection, &stream_bytes);
+                self.commit_events_only(connection, queue, &stream_bytes);
             }
             return Err(fault);
         }
-        let value = self.device.commit_for(connection.get(), commands)?;
+        let value = self.device.commit_on(connection.get(), queue, commands)?;
         call.reply(&Value { value })
     }
 
@@ -146,7 +149,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// still waits for and signals its events in order, as a Metal command
     /// buffer that errors does: work queued behind its events must not wait
     /// forever. What cannot be replayed even so is dropped.
-    fn commit_events_only(&mut self, connection: NonZeroU64, stream_bytes: &[u8]) {
+    fn commit_events_only(&mut self, connection: NonZeroU64, queue: u64, stream_bytes: &[u8]) {
         let mut events = self.device.new_command_buffer();
         let mut count = 0;
         let mut stream = Stream::new(stream_bytes, CommandCode::from_raw);
@@ -165,7 +168,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         // One with no events submits nothing.
         match replayed {
             Ok(()) if count > 0 => {
-                let _ = self.device.commit_for(connection.get(), events);
+                let _ = self.device.commit_on(connection.get(), queue, events);
             }
             _ => self.device.discard(events),
         }
