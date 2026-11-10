@@ -18,6 +18,10 @@ struct Delayed {
     reads: Rc<Cell<usize>>,
     given: Rc<core::cell::RefCell<Vec<Command>>>,
     last_read_address: Rc<Cell<usize>>,
+    /// Whether a finish collects every completion ([`BlockDevice::finished`]),
+    /// and the finishes that reached the device.
+    together: bool,
+    finishes: Rc<Cell<usize>>,
 }
 
 type Probes = (
@@ -39,6 +43,8 @@ impl Delayed {
             reads: probes.1.clone(),
             given: probes.2.clone(),
             last_read_address: Default::default(),
+            together: false,
+            finishes: Default::default(),
         };
         (delayed, probes)
     }
@@ -90,8 +96,15 @@ impl BlockDevice for Delayed {
         Ok(tag)
     }
     fn finish(&mut self, tag: u32) -> Option<Finished> {
+        self.finishes.set(self.finishes.get() + 1);
         self.complete();
         self.done.remove(&tag)
+    }
+    fn reaps_together(&self) -> bool {
+        self.together
+    }
+    fn finished(&mut self, tag: u32) -> Option<Finished> {
+        self.together.then(|| self.done.remove(&tag)).flatten()
     }
 }
 
@@ -906,4 +919,44 @@ fn only_a_write_zeroes_that_stores_zeros_counts_as_written() {
     };
     assert_eq!(zeroes(false).accounted(512), (Direction::Write, 4096));
     assert_eq!(zeroes(true).accounted(512), (Direction::Discard, 4096));
+}
+
+#[test]
+fn a_start_with_room_reaches_no_completion_and_one_finish_reaps_them_all() {
+    let (mut delayed, (released, _, _)) = Delayed::new(RamDisk::new("reap", 64, 512), 8);
+    delayed.together = true;
+    let finishes = delayed.finishes.clone();
+    let disk = Shared::new(Box::new(delayed));
+    let (mut a, mut b) = (disk.window(0, 32).unwrap(), disk.window(32, 32).unwrap());
+    let tickets: Vec<u32> = (0..3).map(|lba| a.start(write(lba, 1)).unwrap()).collect();
+    let other = b.start(write(8, 2)).unwrap();
+    // Starting with room looks at no completion.
+    assert_eq!(finishes.get(), 0);
+    released.set(4);
+    // One look collects all four: the device is reached once.
+    assert_eq!(a.finish(tickets[2]), Some(Ok(None)));
+    assert_eq!(finishes.get(), 1);
+    // What it collected needs no device.
+    assert_eq!(a.finished(tickets[0]), Some(Ok(None)));
+    assert_eq!(b.finished(other), Some(Ok(None)));
+    assert_eq!(a.finish(tickets[1]), Some(Ok(None)));
+    assert_eq!(finishes.get(), 1);
+    assert_eq!(a.finished(tickets[1]), None);
+}
+
+#[test]
+fn a_disk_that_reaps_one_at_a_time_is_asked_for_each() {
+    let (delayed, (released, _, _)) = Delayed::new(RamDisk::new("each", 64, 512), 8);
+    let finishes = delayed.finishes.clone();
+    let disk = Shared::new(Box::new(delayed));
+    let mut window = disk.whole();
+    let tickets: Vec<u32> = (0..3)
+        .map(|lba| window.start(write(lba, 1)).unwrap())
+        .collect();
+    released.set(3);
+    assert_eq!(window.finish(tickets[0]), Some(Ok(None)));
+    // Without `reaps_together` every running command was asked.
+    assert_eq!(finishes.get(), 3);
+    assert_eq!(window.finished(tickets[1]), Some(Ok(None)));
+    assert_eq!(window.finished(tickets[2]), Some(Ok(None)));
 }

@@ -168,6 +168,14 @@ impl<D: BlockDevice> BlockDevice for PartitionDevice<D> {
         self.disk.finish(tag)
     }
 
+    fn reaps_together(&self) -> bool {
+        self.disk.reaps_together()
+    }
+
+    fn finished(&mut self, tag: u32) -> Option<Finished> {
+        self.disk.finished(tag)
+    }
+
     fn posted(&self) -> bool {
         self.disk.posted()
     }

@@ -13,7 +13,9 @@
 //! (Linux's hybrid polling). Nothing waits for the disk and nothing wakes
 //! while no transfer runs. A disk that runs nothing queued executes each
 //! command on the calling PE. One poll admits at most 64 commands, so larger
-//! transfers keep their partial progress until later polls.
+//! transfers keep their partial progress until later polls. The boot stages
+//! the guest's disk: there a submission and a look only queue commands and
+//! take results, and the host I/O runs outside the devices' lock.
 //!
 //! A mounting APFS deallocates tens of thousands of ranges, which already
 //! read as zeros ([`super::namespace::Medium::deallocate`]), so a Deallocate

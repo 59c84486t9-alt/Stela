@@ -64,6 +64,7 @@ pub mod root_transition;
 pub mod screen;
 pub mod shutdown;
 pub mod source_health;
+pub mod staged_disk;
 pub mod storage;
 pub mod topology;
 pub mod tsc;

@@ -1099,6 +1099,18 @@ pub trait BlockDevice {
         None
     }
 
+    /// Whether one [`Self::finish`] collects every command the device has
+    /// completed, so [`Self::finished`] gives the others' results.
+    fn reaps_together(&self) -> bool {
+        false
+    }
+
+    /// Command `tag`'s result if an earlier [`Self::finish`] already
+    /// collected it, without reaching the device.
+    fn finished(&mut self, _tag: u32) -> Option<Finished> {
+        None
+    }
+
     /// Whether a started command's completion waits for [`Self::finish`]:
     /// a look at memory the device writes, never at a register.
     fn posted(&self) -> bool {
@@ -1168,6 +1180,12 @@ impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
 
     fn finish(&mut self, tag: u32) -> Option<Finished> {
         (**self).finish(tag)
+    }
+    fn reaps_together(&self) -> bool {
+        (**self).reaps_together()
+    }
+    fn finished(&mut self, tag: u32) -> Option<Finished> {
+        (**self).finished(tag)
     }
 
     fn posted(&self) -> bool {

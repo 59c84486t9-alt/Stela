@@ -1314,6 +1314,15 @@ impl BlockDevice for Namespace {
         self.controller.borrow_mut().finish(tag as usize)
     }
 
+    /// A finish reaps the whole completion queue.
+    fn reaps_together(&self) -> bool {
+        true
+    }
+
+    fn finished(&mut self, tag: u32) -> Option<Finished> {
+        self.controller.borrow_mut().finished(tag as usize)
+    }
+
     fn posted(&self) -> bool {
         self.controller.borrow().posted_completion()
     }

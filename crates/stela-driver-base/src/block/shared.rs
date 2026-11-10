@@ -132,7 +132,9 @@ impl Held<'_> {
         requests.running.is_empty() && requests.waiting.is_empty()
     }
 
-    /// Queue `command`; its ticket.
+    /// Queue `command` and start what the device has room for; its ticket.
+    /// Completions are collected only when the device has no room, which
+    /// they may free: a start needs no look at them.
     pub(super) fn submit(&mut self, command: Command) -> u32 {
         let requests = self.requests();
         let ticket = requests.next;
@@ -140,7 +142,10 @@ impl Held<'_> {
         requests
             .waiting
             .push_back((ticket, command, crate::Clock::ticks()));
-        self.advance();
+        self.step(false);
+        if !self.requests().waiting.is_empty() {
+            self.advance();
+        }
         ticket
     }
 
@@ -204,12 +209,21 @@ impl Held<'_> {
     /// while it has room. A device that takes no queued commands runs each
     /// here, its caller waiting.
     pub(super) fn advance(&mut self) {
+        self.step(true);
+    }
+
+    /// Start the waiting commands, collecting completions first when `reap`.
+    fn step(&mut self, reap: bool) {
         let observing = self.0.profile_callbacks.load(Ordering::Relaxed);
         let started = observing.then(crate::Clock::ticks);
         let disk = self.0;
         let _active = started.map(|ticks| disk.activity.advance.enter(ticks));
         let mut work = profile::Work::default();
-        self.advance_inner(&mut work);
+        if reap {
+            self.advance_inner(&mut work);
+        } else {
+            self.start_waiting(&mut work);
+        }
         if let Some(started) = started {
             let elapsed = crate::Clock::ticks().wrapping_sub(started);
             self.requests()
@@ -222,10 +236,26 @@ impl Held<'_> {
     }
 
     pub(super) fn advance_inner(&mut self, work: &mut profile::Work) {
+        self.reap(work);
+        self.start_waiting(work);
+    }
+
+    /// Collect the device's completed commands into `finished`. A device
+    /// that collects all of them in one finish is reached once; the other
+    /// results are taken from what that finish collected.
+    fn reap(&mut self, work: &mut profile::Work) {
+        let together = self.reaps_together();
+        let mut looked = false;
         let mut index = 0;
         while index < self.requests().running.len() {
             let tag = self.requests().running[index].tag;
-            let Some(result) = self.finish(tag) else {
+            let result = if together && looked {
+                self.finished(tag)
+            } else {
+                looked = true;
+                self.finish(tag)
+            };
+            let Some(result) = result else {
                 index += 1;
                 continue;
             };
@@ -263,6 +293,12 @@ impl Held<'_> {
                 finished.insert(ticket, part);
             }
         }
+    }
+
+    /// Start the waiting commands, in order, while the device has room. A
+    /// device that takes no queued commands runs each here, its caller
+    /// waiting.
+    fn start_waiting(&mut self, work: &mut profile::Work) {
         if self.requests().waiting.is_empty() {
             return;
         }
@@ -599,6 +635,17 @@ impl BlockDevice for Window {
 
     fn finish(&mut self, tag: u32) -> Option<Finished> {
         let finished = self.disk.lock().take(tag)?;
+        self.started.retain(|&ticket| ticket != tag);
+        Some(finished)
+    }
+
+    /// A finish collects every completed command of the disk.
+    fn reaps_together(&self) -> bool {
+        true
+    }
+
+    fn finished(&mut self, tag: u32) -> Option<Finished> {
+        let finished = self.disk.lock().requests().finished.remove(&tag)?;
         self.started.retain(|&ticket| ticket != tag);
         Some(finished)
     }

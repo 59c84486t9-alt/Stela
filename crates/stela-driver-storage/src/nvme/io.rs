@@ -607,6 +607,18 @@ impl Controller {
         self.finish_into(tag, None)
     }
 
+    /// Tag `tag`'s result if a completion already reaped gave it; no look at
+    /// the queues.
+    pub(super) fn finished(&mut self, tag: usize) -> Option<Finished> {
+        if !matches!(self.tags.get(tag)?, Tag::Done(_)) {
+            return None;
+        }
+        match core::mem::take(&mut self.tags[tag]) {
+            Tag::Done(result) => Some(result),
+            _ => unreachable!(),
+        }
+    }
+
     pub(super) fn finish_into(
         &mut self,
         tag: usize,
