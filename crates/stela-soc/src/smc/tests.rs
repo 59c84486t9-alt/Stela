@@ -387,11 +387,13 @@ fn system_event_notices_are_recorded_and_commands_request_transitions() {
         smc.take_transition().unwrap().transition,
         Transition::Restart
     );
-    write_key(&mut smc, &sram, b"MBSE", &code(b"susp").to_le_bytes());
-    assert_eq!(
-        smc.take_transition().unwrap().transition,
-        Transition::PowerOff
-    );
+    for command in [b"susp", b"off1"] {
+        write_key(&mut smc, &sram, b"MBSE", &code(command).to_le_bytes());
+        assert_eq!(
+            smc.take_transition().unwrap().transition,
+            Transition::PowerOff
+        );
+    }
     // Low-power emergency mode, hibernation and unknown commands refuse.
     for command in [b"lpem", b"hiba", b"zzzz"] {
         sram.put(&code(command).to_le_bytes());

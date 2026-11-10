@@ -65,8 +65,12 @@
 //! - `susp` powers the machine off to standby: `_shutdownGated` (file
 //!   0x2dd7178, "smc go stdby") writes it as the last step of
 //!   `PEHaltRestart(kPEHaltCPU)` and panics "SMCFW failed to handle
-//!   suspend/lpem request" a second later. `lpem` (low-power emergency
-//!   mode, on battery systems) refuses: the board has no battery.
+//!   suspend/lpem request" a second later. `off1` powers it off: the
+//!   T6050 kernel's `_shutdownGated` writes it on its other path (mac17j
+//!   `.cold.3`, 0xfffffe0009ad9c88, after the RTC wake alarm is cleared)
+//!   and panics "SMCFW failed to handle shutdown request" a second later.
+//!   `lpem` (low-power emergency mode, on battery systems) refuses: the
+//!   board has no battery.
 //! - `slpa` puts the SoC to sleep and `hiba` into hibernation: the key
 //!   endpoint writes one itself when its power state drops to 0
 //!   (`AppleSMCKeysEndpoint::_powerStateActionGated` file 0x2da492c,
@@ -242,6 +246,7 @@ const PANIC_END: u32 = code(b"pane");
 const RESTART: u32 = code(b"phra");
 const SYSTEM_RESET: u32 = code(b"sysr");
 const STANDBY: u32 = code(b"susp");
+const SHUTDOWN: u32 = code(b"off1");
 const LOW_POWER_EMERGENCY: u32 = code(b"lpem");
 const SLEEP: u32 = code(b"slpa");
 const HIBERNATE: u32 = code(b"hiba");
@@ -706,6 +711,12 @@ impl Smc {
                 self.transition = Some(transition(
                     Transition::PowerOff,
                     "MBSE standby command: system power-off",
+                ));
+            }
+            SHUTDOWN => {
+                self.transition = Some(transition(
+                    Transition::PowerOff,
+                    "MBSE shutdown command: system power-off",
                 ));
             }
             LOW_POWER_EMERGENCY => {
