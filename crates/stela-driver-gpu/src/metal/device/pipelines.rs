@@ -13,7 +13,6 @@ use super::{
 };
 use crate::metal::{
     abi::{ConversionRounding, DataType, FunctionType, PrimitiveTopologyClass},
-    capabilities::Size,
     command_buffer::{BoundPipeline, ComputePipelineState, IndirectCompute, RenderPipelineState},
     error::{Error, Result, ensure, require},
     library::{self, Function, Header, Library},
@@ -1779,30 +1778,25 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let bindable =
             generated.is_some_and(|limits| limits.pipeline_stages.contains(ShaderStages::COMPUTE));
         let subgroups = (plan.thread_execution_width as u32, plan.full_subgroups);
-        // A tile pipeline compiles for its passes' default tiles, or the
-        // largest square tile its threadgroups hold.
+        // A tile pipeline compiles for the largest square of threads its
+        // limit holds, when one does.
         let variant = match &tile {
-            None => pipeline::indirect_compute_variant(&plan),
-            Some(target) => {
-                let square = |side: u64| Size {
-                    width: side,
-                    height: side,
-                    depth: 1,
-                };
-                pipeline::tile_variant(&plan, target, square(32), [32; 2])
-                    .or_else(|_| pipeline::tile_variant(&plan, target, square(16), [16; 2]))?
-            }
+            None => Some(pipeline::indirect_compute_variant(&plan)),
+            Some(target) => pipeline::tile_creation_variant(&plan, target),
         };
-        let variant = Specialization {
+        let variant = variant.map(|variant| Specialization {
             linking: linked.linking.clone(),
             ..variant
-        };
-        if sources.compiles_at_creation() {
+        });
+        if let Some(variant) = variant.clone().filter(|_| sources.compiles_at_creation()) {
             let pipeline =
-                self.create_compute_variant(function, subgroups, variant.clone(), false, &sources)?;
+                self.create_compute_variant(function, subgroups, variant, false, &sources)?;
             self.defer(Object::Pipeline(pipeline));
         }
-        let indirect = if request.support_indirect_command_buffers && bindable {
+        // Tile pipelines take no indirect commands, so a compute variant is here.
+        let indirect = if let Some(variant) =
+            variant.filter(|_| request.support_indirect_command_buffers && bindable)
+        {
             // GPU-encoded dispatches bind no variants.
             let variant = Specialization {
                 bicubic_samplers: self.dynamic_bicubic(Some(function))?,

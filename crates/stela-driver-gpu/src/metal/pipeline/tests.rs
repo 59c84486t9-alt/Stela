@@ -512,6 +512,73 @@ fn tile_variants_pad_their_threadgroups_to_whole_quads() {
     assert!(workgroup(31, 33).is_err(), "32 by 34 exceeds 1024 threads");
 }
 
+/// A tile pipeline of Core Animation's shape: `tile_downsample_8` with
+/// `maxTotalThreadsPerThreadgroup` 64 over a BGRA attachment. Measured on an
+/// M1 Pro (macOS 27.2): creation succeeds and reports 64; 8 x 8 threads per
+/// tile run; 16 x 16 fail validation, whose limit is on sides padded to even.
+#[test]
+fn tile_pipelines_follow_their_thread_limit() {
+    let capabilities = capabilities();
+    let kernel = shader(Stage::Kernel, 1, |_| {});
+    let plan = |max_total_threads_per_threadgroup| {
+        let descriptor = ComputePipelineDescriptor {
+            compute_function: &kernel.interface,
+            threadgroup_size_is_multiple_of_thread_execution_width: false,
+            max_total_threads_per_threadgroup,
+            stage_input: None,
+        };
+        compute_pipeline(&capabilities, &descriptor).unwrap()
+    };
+    let formats = {
+        let mut formats = [None; MAX_COLOR_ATTACHMENTS];
+        formats[0] = Some(PixelFormat::Bgra8Unorm);
+        formats
+    };
+    let target = tile_target(&capabilities, &formats, 1, false).unwrap();
+    let created = |max| tile_creation_variant(&plan(max), &target).map(|v| v.workgroup_size);
+    assert_eq!(created(64), Some(Some([64, 1, 1])), "8 x 8");
+    assert_eq!(created(256), Some(Some([256, 1, 1])), "16 x 16");
+    assert_eq!(created(0), Some(Some([1024, 1, 1])), "32 x 32");
+    assert_eq!(created(48), Some(Some([16, 1, 1])), "4 x 4");
+    assert_eq!(created(3), None, "no tile dispatch fits");
+
+    let small = plan(64);
+    assert_eq!(small.max_total_threads_per_threadgroup, 64);
+    let dispatch = |plan: &ComputePipelinePlan, width, height| {
+        let threads = Size {
+            width,
+            height,
+            depth: 1,
+        };
+        tile_variant(plan, &target, threads, [32, 32]).map(|variant| variant.workgroup_size)
+    };
+    assert_eq!(dispatch(&small, 8, 8), Ok(Some([64, 1, 1])));
+    let refused = dispatch(&small, 16, 16).unwrap_err();
+    assert_eq!(
+        refused,
+        Error::Threads {
+            reason: "tile threadgroup sides padded to even exceed maxTotalThreadsPerThreadgroup",
+            threads: 256,
+            limit: 64,
+        }
+    );
+    assert_eq!(
+        alloc::string::ToString::to_string(&crate::metal::service::wire::Fault::from(refused)),
+        "tile threadgroup sides padded to even exceed maxTotalThreadsPerThreadgroup \
+         (256 threads, limit 64)",
+        "the log names the numbers"
+    );
+    // 63 threads whose sides pad to 8 x 10.
+    assert!(matches!(
+        dispatch(&plan(63), 7, 9),
+        Err(Error::Threads {
+            threads: 80,
+            limit: 63,
+            ..
+        })
+    ));
+}
+
 #[test]
 fn compute_variants_validate_dispatch_shape_and_memory() {
     let capabilities = capabilities();

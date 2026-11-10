@@ -3104,6 +3104,7 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 		td.tileFunction = function_named(library, tile[@"function"], spec[@"constants"]);
 		td.rasterSampleCount = number(r, @"samples", 1);
 		td.threadgroupSizeMatchesTileSize = [tile[@"matches_tile_size"] boolValue];
+		td.maxTotalThreadsPerThreadgroup = number(tile, @"max_total_threads", 0);
 		for (NSUInteger i = 0; i < colors.count; i++)
 			td.colorAttachments[i].pixelFormat = c.textures[colors[i][@"texture"]].pixelFormat;
 		for (NSNumber *i in tile[@"immutable_buffers"])
@@ -3149,6 +3150,10 @@ static void encode_render(Case *c, id<MTLCommandBuffer> cb, id<MTLLibrary> libra
 		}
 		if (!tp)
 			@throw failure(@"tile pipeline: %@", made_error.localizedDescription);
+		/* A limit asked for is the pipeline's (an Apple GPU reports it). */
+		if (tile[@"max_total_threads"] && tp.maxTotalThreadsPerThreadgroup != number(tile, @"max_total_threads", 0))
+			@throw failure(@"tile pipeline maxTotalThreadsPerThreadgroup %lu, asked %@",
+				       (unsigned long)tp.maxTotalThreadsPerThreadgroup, tile[@"max_total_threads"]);
 		if (tile[@"added_binary_functions"]) {
 			/* Binary functions added to the finished pipeline, which its
 			 * table then calls. */

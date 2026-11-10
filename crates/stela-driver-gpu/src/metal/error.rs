@@ -10,6 +10,13 @@
 pub enum Error {
     /// The arguments violate Metal's documented contract.
     Invalid(&'static str),
+    /// A threadgroup past its pipeline's limit, which Metal's contract
+    /// forbids: the threads asked for and the limit.
+    Threads {
+        reason: &'static str,
+        threads: u64,
+        limit: u64,
+    },
     /// The call is valid Metal but this device lacks the capability.
     Unsupported(&'static str),
     /// The backend could not allocate memory or another object.

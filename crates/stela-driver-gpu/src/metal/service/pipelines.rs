@@ -228,7 +228,23 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             support_indirect_command_buffers: false,
             archives: self.archives(connection, &mut *call.memory, &request.archives)?,
         };
-        let pipeline = self.device.new_tile_pipeline(&pipeline, target)?;
+        let function = pipeline.compute_function;
+        let pipeline = match self.device.new_tile_pipeline(&pipeline, target) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                // The gate logs the fault; this names the pipeline it was.
+                let name = self.device.function_name(function).unwrap_or("?");
+                self.refused.push(format!(
+                    "tile pipeline of {name}: maxTotalThreadsPerThreadgroup {}, colors {:?}, \
+                     samples {}, threadgroupSizeMatchesTileSize {}",
+                    request.max_total_threads_per_threadgroup,
+                    request.color_formats,
+                    request.raster_sample_count,
+                    target.matches_tile_size,
+                ));
+                return Err(error.into());
+            }
+        };
         let object = Object::ComputePipeline(pipeline);
         let (handle, response) = self.adopt(connection, object, |device| {
             let plan = &device.compute_pipeline_state(pipeline)?.plan;

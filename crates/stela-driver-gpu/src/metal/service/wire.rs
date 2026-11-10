@@ -998,6 +998,8 @@ pub enum Raw {
     Bits(u64),
     /// A length and the one the record or span needs.
     Length { got: u64, expected: u64 },
+    /// Threads of a threadgroup and the pipeline's limit.
+    Threads { threads: u64, limit: u64 },
 }
 
 impl core::fmt::Display for Raw {
@@ -1007,6 +1009,9 @@ impl core::fmt::Display for Raw {
             Self::Signed(value) => write!(formatter, "{value}"),
             Self::Bits(bits) => write!(formatter, "{bits:#x}"),
             Self::Length { got, expected } => write!(formatter, "of {got} bytes, not {expected}"),
+            Self::Threads { threads, limit } => {
+                write!(formatter, "({threads} threads, limit {limit})")
+            }
         }
     }
 }
@@ -1085,6 +1090,11 @@ impl From<Error> for Fault {
     fn from(error: Error) -> Self {
         match error {
             Error::Invalid(reason) => Self::new(Status::Invalid, reason),
+            Error::Threads {
+                reason,
+                threads,
+                limit,
+            } => Self::new(Status::Invalid, reason).raw(Raw::Threads { threads, limit }),
             Error::Unsupported(capability) => Self::new(Status::Unsupported, capability),
             Error::OutOfMemory => Self::new(Status::OutOfMemory, "out of memory"),
             Error::HeapFull => Self::HEAP_FULL,

@@ -1141,8 +1141,9 @@ pub fn compute_variant(
         "threadgroup dimension exceeds the limit",
     )?;
     let total = dimensions.iter().product::<u64>();
-    ensure(
-        total <= plan.max_total_threads_per_threadgroup,
+    within_limit(
+        total,
+        plan.max_total_threads_per_threadgroup,
         "threadgroup exceeds maxTotalThreadsPerThreadgroup",
     )?;
     if plan.full_subgroups {
@@ -1278,10 +1279,6 @@ pub fn tile_variant(
         "threadgroup dimension exceeds the limit",
     )?;
     let total = threads.width * threads.height;
-    ensure(
-        total <= plan.max_total_threads_per_threadgroup,
-        "threadgroup exceeds maxTotalThreadsPerThreadgroup",
-    )?;
     if plan.full_subgroups {
         ensure(
             total.is_multiple_of(plan.thread_execution_width),
@@ -1290,13 +1287,16 @@ pub fn tile_variant(
     }
     // Apple GPUs run a tile's threads in 2 by 2 quads, so the workgroup
     // holds the threads with their sides padded to even, which the function
-    // places as Apple's lanes and whose padding skips it.
+    // places as Apple's lanes and whose padding skips it. Metal's limit is
+    // on those padded sides too (its validation layer, macOS 27.2: 16 x 16
+    // threads per tile on a pipeline of 64 fails "roundup2(width) *
+    // roundup2(height) ... must be <= maxTotalThreadsPerThreadgroup").
     let padded = threads.width.next_multiple_of(2) * threads.height.next_multiple_of(2);
-    if padded > plan.max_total_threads_per_threadgroup {
-        return Err(Error::Unsupported(
-            "tile threadgroups whose sides padded to even exceed maxTotalThreadsPerThreadgroup",
-        ));
-    }
+    within_limit(
+        padded,
+        plan.max_total_threads_per_threadgroup,
+        "tile threadgroup sides padded to even exceed maxTotalThreadsPerThreadgroup",
+    )?;
     Ok(Specialization {
         workgroup_size: Some([padded as u32, 1, 1]),
         dynamic_threadgroups: true,
@@ -1305,6 +1305,39 @@ pub fn tile_variant(
         samples: target.samples,
         ..Specialization::default()
     })
+}
+
+/// The variant a tile pipeline compiles at creation: the largest square
+/// of threads its limit holds, up to a default 32 x 32 tile's. Core
+/// Animation dispatches `(32 / n)^2` threads on pipelines limited to that
+/// count (`tile_downsample_8`: 8 x 8 of 64), so this is the variant its
+/// dispatches use. None when no square fits, as no tile dispatch does:
+/// creation still succeeds, as on Apple GPUs, and each dispatch refuses.
+pub fn tile_creation_variant(
+    plan: &ComputePipelinePlan,
+    target: &TileTarget,
+) -> Option<Specialization> {
+    [32u64, 16, 8, 4, 2].into_iter().find_map(|side| {
+        let threads = Size {
+            width: side,
+            height: side,
+            depth: 1,
+        };
+        tile_variant(plan, target, threads, [side as u32; 2]).ok()
+    })
+}
+
+/// Fails with the threads and the limit unless `threads` is within it.
+fn within_limit(threads: u64, limit: u64, reason: &'static str) -> Result<()> {
+    if threads <= limit {
+        Ok(())
+    } else {
+        Err(Error::Threads {
+            reason,
+            threads,
+            limit,
+        })
+    }
 }
 
 /// One face's stencil test (`MTLStencilDescriptor`).

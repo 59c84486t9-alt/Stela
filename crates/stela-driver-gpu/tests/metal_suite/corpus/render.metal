@@ -675,6 +675,31 @@ kernel void tile_lanes(imageblock<TileColor, imageblock_layout_implicit> block,
         out[p.y * 32 + p.x] = uint4(uint(simd) * 32u + lane, uint(index) | uint(quad) << 16, first, second);
 }
 
+/* Core Animation's tile_downsample_8 (QuartzCore's metallib, macOS 27):
+ * each thread sums a 4 x 4 block at 1/64, its quad adds four, and the
+ * quad's first thread writes one pixel per 8 x 8 of the tile. */
+struct TileHalf {
+    half4 color [[color(0)]];
+};
+
+kernel void tile_downsample_ca8(imageblock<TileHalf, imageblock_layout_implicit> block,
+                                texture2d<half, access::write> tex [[texture(0)]],
+                                constant ushort2 &offset [[buffer(9)]],
+                                constant half &edr_scale [[buffer(6)]],
+                                ushort2 group_pos [[thread_position_in_threadgroup]],
+                                ushort2 grid_pos [[thread_position_in_grid]],
+                                ushort quad [[thread_index_in_quadgroup]])
+{
+    half4 s = 0.0h;
+    for (ushort x = 0; x < 4; x++)
+        for (ushort y = 0; y < 4; y++)
+            s = fma(block.read(group_pos * 4 + ushort2(x, y)).color, half4(0.015625h), s);
+    s += quad_shuffle_xor(s, 2);
+    s += quad_shuffle_xor(s, 1);
+    if (quad == 0)
+        tex.write(half4(s.rgb * edr_scale, s.a), offset + grid_pos / 2);
+}
+
 kernel void tile_dimensions(imageblock<TileColor, imageblock_layout_implicit> block,
                             ushort2 tid [[thread_position_in_threadgroup]],
                             ushort2 tpt [[threads_per_threadgroup]],

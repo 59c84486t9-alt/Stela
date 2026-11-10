@@ -3754,6 +3754,66 @@ fn tiles(plan: &mut Plan, library: &str) {
             .output(Output::exact("out", Dtype::U32, u32s(&words))),
         );
     }
+    // Core Animation's blur downsample: tile_downsample_8 on a pipeline
+    // limited to (32 / 4)^2 = 64 threads, 8 x 8 threads per 32 x 32 tile,
+    // over a BGRA attachment (WindowServer's 'RGB10A8_2P_XR10' surface on
+    // this device). Each output pixel averages an 8 x 8 block in half.
+    {
+        const W: u32 = 64;
+        let texel = |x: u32, y: u32| -> [f64; 4] {
+            let k = |v: u32| f64::from(v % 256) / 255.0;
+            [
+                k(x * 4 + y),
+                k(y * 3 + 7 * x),
+                k(x * y + 11),
+                k(200 + x + y),
+            ]
+        };
+        let colors: Vec<f64> = (0..W)
+            .flat_map(|y| (0..W).flat_map(move |x| texel(x, y)))
+            .collect();
+        let average: Vec<f64> = (0..W / 8)
+            .flat_map(|oy| (0..W / 8).map(move |ox| (ox, oy)))
+            .flat_map(|(ox, oy)| {
+                let mut sum = [0.0; 4];
+                for y in oy * 8..oy * 8 + 8 {
+                    for x in ox * 8..ox * 8 + 8 {
+                        for (s, v) in sum.iter_mut().zip(texel(x, y)) {
+                            *s += v / 64.0;
+                        }
+                    }
+                }
+                sum
+            })
+            .collect();
+        let tiles = json!([{"function": "tile_downsample_ca8", "threads": [8, 8],
+                            "max_total_threads": 64}]);
+        let render = json!({"vertex_count": 3, "colors": [{"texture": "c"}], "tiles": tiles,
+                            "tile_size": [32, 32]});
+        plan.add(
+            Case::render(
+                "render.tile.downsample_8",
+                library,
+                "vert_full",
+                Some("frag_color"),
+                render,
+            )
+            .buffer(Buffer::data("colors", 0, f32s(&colors)).stage("fragment"))
+            .buffer(Buffer::data("width", 1, u32s(&[W])).stage("fragment"))
+            .buffer(Buffer::data("depth", 2, f32s(&[0.5])).stage("vertex"))
+            .buffer(Buffer::data("offset", 9, u32s(&[0])).stage("tile"))
+            // half 1.0
+            .buffer(Buffer::data("edr_scale", 6, u32s(&[0x3c00])).stage("tile"))
+            .texture(Texture::d2("c", "bgra8unorm", W, W).usage(&["render"]))
+            .texture(
+                Texture::d2("o", "rgba32float", W / 8, W / 8)
+                    .usage(&["write"])
+                    .index(0)
+                    .set("stage", "tile"),
+            )
+            .output(Output::new("o", Dtype::F32, Tolerance::abs(2e-3)).expect_same(f32s(&average))),
+        );
+    }
     // Pipelines made from an archive given their functions, by completion
     // handler.
     plan.add(
