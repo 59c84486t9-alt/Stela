@@ -63,9 +63,6 @@ pub(super) struct Record {
     /// Schema 4: every boot bundle setup wrote.
     #[serde(default)]
     pub(super) bundles: Vec<bundle::Bundle>,
-    /// Schema 4: the Apple signing server opt-in (`--tss`).
-    #[serde(default)]
-    pub(super) tss: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) chooser_timeout: Option<u32>,
     /// Schema 5: the install medium; read into `media`.
@@ -183,7 +180,6 @@ impl Record {
             .iter()
             .map(|bundle| bundle.processors)
             .find(|&processors| processors != 0);
-        system.tss = self.tss;
         system.profile = self.profile;
         // The key file is `--wifi`'s default one.
         system.ssid = self.wifi.as_ref().map(|network| network.ssid.clone());
@@ -214,12 +210,11 @@ impl Record {
             .map(Option::unwrap_or_default)
     }
 
-    /// The restore bundle of `kind` (erase or update) of `ecid`'s machine
-    /// for the active build.
-    /// The active build's restore bundle of `kind` for `ecid`, signed as the
-    /// setup's TSS choice needs: under Apple's personalized ticket with the
-    /// opt-in, under the global one without. A bundle signed the other way
-    /// counts as missing, so the next setup run prepares it again.
+    /// The active build's restore bundle of `kind` (erase or update) for
+    /// `ecid`'s machine, under the AP ticket Apple's signing service
+    /// personalized for it. A bundle under the IPSW's global ticket, which
+    /// an older setup without the signing opt-in prepared, counts as
+    /// missing, so `repair --ipsw` prepares it again.
     pub(super) fn restore_bundle(&self, kind: Kind, ecid: Option<Ecid>) -> Option<&bundle::Bundle> {
         self.bundles.iter().find(|b| {
             b.same_kind(bundle::Identity {
@@ -227,7 +222,7 @@ impl Record {
                 build: &self.build,
                 ecid,
                 generation: self.generation(),
-            }) && b.personalized == self.tss
+            }) && b.personalized
         })
     }
 
@@ -262,7 +257,7 @@ impl Record {
     /// ([`Kind::Restore`]) or Update macOS choice
     /// ([`Kind::Update`]): its restore bundle of that kind, the install
     /// medium and its partitions. None without the active build's medium or
-    /// the machine's bundle, or without the signing server opt-in.
+    /// the machine's personalized bundle.
     pub(super) fn restore_line(
         &self,
         kind: Kind,
@@ -271,7 +266,7 @@ impl Record {
         let Some(medium) = self.active_medium() else {
             return Ok(None);
         };
-        if self.restore_bundle(kind, install.ecid).is_none() || !self.tss {
+        if self.restore_bundle(kind, install.ecid).is_none() {
             return Ok(None);
         }
         let restore = bundle::firmware_path_of(bundle::Identity {
@@ -382,6 +377,17 @@ impl Record {
             .partition(|b| machines.contains(&b.ecid));
         self.bundles = kept;
         stale
+    }
+
+    /// Whether the record names bundles or media of another build or
+    /// generation than the active one: what an interrupted update left,
+    /// which `update::prune` removes.
+    pub(super) fn has_leftovers(&self) -> bool {
+        let generation = self.generation();
+        self.bundles
+            .iter()
+            .any(|b| b.build != self.build || b.generation() != generation)
+            || self.media.iter().any(|m| m.build != self.build)
     }
 
     /// Every build directory the record or a bundle names.
@@ -516,6 +522,14 @@ pub(super) fn read_any_record(path: &Path) -> Result<Record> {
         }
     }
     Ok(record)
+}
+
+/// The record at `path` when it is this schema's and its first setup was
+/// interrupted (`complete` is false): what `create::plan` resumes.
+pub(super) fn interrupted(path: &Path) -> Option<Record> {
+    stela_engine::read_json::<Record>(path)
+        .ok()
+        .filter(|record| record.schema_version == RECORD_SCHEMA && !record.complete)
 }
 
 /// Replace the record through a synced sibling file, so a stop at any point

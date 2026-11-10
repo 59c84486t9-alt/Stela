@@ -8,33 +8,6 @@ fn audio_hpet_handoff_requires_an_audio_diagnostic() {
     );
 }
 #[test]
-fn native_pci_hpet_round_trips_only_on_the_normal_system_path() {
-    let flag = "--native-pci-own-hpet";
-    let text = format!("--system {flag}");
-    let options = System::parse(&text).unwrap();
-    assert!(options.native_pci_own_hpet);
-    assert_eq!(options.diagnostic_option(), None);
-    assert_eq!(System::parse(&options.to_string()), Ok(options));
-    assert_eq!(
-        System::parse(&format!("{text} {flag}")).unwrap_err(),
-        Error::DuplicateNativePciHpet
-    );
-    for fixture in [
-        "--audio-check transport-duplex --audio-own-hpet",
-        "--native-cores 1 --native-clock-check",
-        "--native-mmio-check",
-        "--native-memory-check",
-        "--native-cores 2 --native-bootstrap-check",
-        "--native-cores 2 --native-shared-check",
-    ] {
-        assert_eq!(
-            System::parse(&format!("{text} {fixture}")).unwrap_err(),
-            Error::Constraint(Constraint::NativePciHpetExclusive)
-        );
-    }
-}
-
-#[test]
 fn native_pci_ioapic_handoff_round_trips_and_refuses_diagnostic_paths() {
     let text = "--system --native-pci-own-ioapic";
     let options = System::parse(text).unwrap();
@@ -136,10 +109,10 @@ fn maintenance_writes_require_an_explicit_preboot_selection() {
 fn setup_lines_parse_and_serialize_identically() {
     let preboot = format!(
         "--system --storage {DISK} --nor {DISK} --preboot {DISK} --ecid 0x0000000000001234 \
-         --external-disks --guest-network --tss"
+         --external-disks --guest-network"
     );
     let options = round_trip(&preboot);
-    assert!(options.bundle && options.external_disks && options.tss);
+    assert!(options.bundle && options.external_disks);
     assert_eq!(options.ecid, Some(0x1234));
     assert_eq!(options.to_string(), preboot);
     let bundle = format!("--system --storage {DISK} --nor {DISK} --bundle \\EFI\\stela\\r");
@@ -161,7 +134,7 @@ fn chosen_disk_round_trips_and_the_mount_refuses_it_unreplaced() {
 fn every_option_survives_a_round_trip() {
     let options = round_trip(&format!(
         "--system --storage {DISK} --nor {DISK} --bundle b --install p.json \
-         --install-source 11111111-2222-3333-4444-555555555555 --tss --verify-on-read \
+         --install-source 11111111-2222-3333-4444-555555555555 --verify-on-read \
          --usb-storage A --usb-storage B --input --idle-skip --sep-observe --native-cores 3 \
          --native-artifacts --serialized --profile --monitor-trace --display-trace \
          --network-check http://h/p --audio-check transport-duplex --audio-own-hpet --dram-base 0x10000000000 \

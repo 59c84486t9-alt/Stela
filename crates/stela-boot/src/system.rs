@@ -328,7 +328,7 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs> {
         || system.audio_check.is_some()
         || !system.usb_storage.is_empty()
         || system.input
-        || system.tss
+        || system.install.is_some()
         || system.guest_network;
     let storage = if host_devices {
         crate::status::begin("Finding the PCI devices Stela drives itself");
@@ -541,7 +541,7 @@ fn held(refusal: Refusal) -> &'static str {
              macOS."
         }
         Refusal::NoRecovery { installed: true } => {
-            "NVRAM asks for recoveryOS, which the Mac's SSD does not hold: choose Install macOS."
+            "NVRAM asks for a recoveryOS the SSD lacks. Install macOS erases the SSD."
         }
         _ => "The Mac's last install did not finish: choose Install macOS again.",
     }

@@ -66,7 +66,6 @@ pub enum Error {
     DuplicateDns,
     DuplicateAudioCheck,
     DuplicateAudioHpet,
-    DuplicateNativePciHpet,
     DuplicateNativePciIoapic,
     MissingAudioMode,
     MissingNetworkUrl,
@@ -129,7 +128,6 @@ pub enum Constraint {
     UpdateDependency,
     DevelopmentRestore,
     VerifyDependency,
-    InstallTicket,
     PrebootSelection,
     UpgradeSelection,
     RecoverySafeMode,
@@ -138,7 +136,6 @@ pub enum Constraint {
     ClockExclusive,
     HostDiagnosticExclusive,
     AudioHpetDependency,
-    NativePciHpetExclusive,
     NativePciIoapicExclusive,
 }
 impl Error {
@@ -192,7 +189,6 @@ impl Error {
             Self::DuplicateDns => "duplicate --dns",
             Self::DuplicateAudioCheck => "duplicate audio check",
             Self::DuplicateAudioHpet => "duplicate audio HPET handoff",
-            Self::DuplicateNativePciHpet => "duplicate native PCI HPET handoff",
             Self::DuplicateNativePciIoapic => "duplicate native PCI IOAPIC handoff",
             Self::MissingAudioMode => "missing audio check mode",
             Self::MissingNetworkUrl => "missing network check URL",
@@ -256,9 +252,6 @@ impl Constraint {
                 "--development-restore requires an erase --install and refuses --update-restore"
             }
             Self::VerifyDependency => "--verify-on-read applies to --install and --restore-study",
-            Self::InstallTicket => {
-                "--install needs --tss: required boot firmware is not covered by the IPSW's global ticket"
-            }
             Self::PrebootSelection => {
                 "--boot-volume, --boot-command, --safe-boot, --maintenance-write, --upgrade, --paired-recovery and --system-recovery \
                  choose a --preboot boot"
@@ -274,9 +267,6 @@ impl Constraint {
             Self::AudioHpetDependency => "--audio-own-hpet requires --audio-check",
             Self::NativePciIoapicExclusive => {
                 "--native-pci-own-ioapic requires the normal system platform path"
-            }
-            Self::NativePciHpetExclusive => {
-                "--native-pci-own-hpet requires the normal system platform path"
             }
         }
     }

@@ -139,7 +139,6 @@ impl ParseState<'_> {
             "--development-restore" => options.development_restore = true,
             "--idle-skip" => options.idle_skip = true,
             "--input" => options.input = true,
-            "--tss" => options.tss = true,
             "--usb-storage" => {
                 let serial = value().ok_or(Error::MissingUsbStorage)?;
                 if options.usb_storage.iter().any(|other| other == serial) {
@@ -210,12 +209,6 @@ impl ParseState<'_> {
             }
             "--audio-own-hpet" => {
                 flag(&mut options.audio_own_hpet, Error::DuplicateAudioHpet)?;
-            }
-            "--native-pci-own-hpet" => {
-                flag(
-                    &mut options.native_pci_own_hpet,
-                    Error::DuplicateNativePciHpet,
-                )?;
             }
             "--native-pci-own-ioapic" => {
                 flag(

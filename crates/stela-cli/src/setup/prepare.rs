@@ -54,7 +54,6 @@ pub(super) fn prepare_restore_bundles(
             environment,
             BundleOptions {
                 kind,
-                tss: true,
                 ipsw,
                 model,
                 build: Some(&build),
@@ -76,8 +75,6 @@ pub(super) fn supported(environment: &Environment<'_>, ipsw: &Path, build: &str)
 /// Source identity and personalization choices for one kind of boot bundle.
 pub(super) struct BundleOptions<'a> {
     pub(super) kind: Kind,
-    /// Request personalization through the TSS service.
-    pub(super) tss: bool,
     pub(super) ipsw: &'a Path,
     pub(super) model: &'a str,
     pub(super) build: Option<&'a str>,
@@ -92,7 +89,6 @@ pub(super) fn prepare_kind(
 ) -> Result<(String, String, Vec<Prepared>)> {
     let BundleOptions {
         kind,
-        tss,
         ipsw,
         model,
         build,
@@ -115,14 +111,15 @@ pub(super) fn prepare_kind(
             Kind::Restore => environment.prepare_restore,
             Kind::Update => environment.prepare_update,
         };
-        let personalized = tss;
+        // A restore bundle for a known machine boots under its personalized
+        // ticket from Apple's signing service (TSS).
+        let personalized = ecid.is_some();
         let progress =
             crate::progress::Phase::spinner(format!("Preparing {} boot files", kind.label()));
         prepare(RamdiskOptions {
             ipsw,
             model,
             ecid,
-            personalized,
             output: &output,
         })
         .with_context(|| format!("preparing the {} boot bundle", kind.label()))?;
@@ -303,9 +300,9 @@ pub(super) const CONSOLE_BOOT_ARGS: &str = "--boot-args=-v serial=3 serial-devic
 pub(super) struct RamdiskOptions<'a> {
     pub(super) ipsw: &'a Path,
     pub(super) model: &'a str,
+    /// The machine; its restore bundle boots under the AP ticket Apple's
+    /// signing service (TSS) personalizes for it.
     pub(super) ecid: Option<Ecid>,
-    /// Request an AP ticket; ecid must be set.
-    pub(super) personalized: bool,
     pub(super) output: &'a Path,
 }
 
@@ -322,8 +319,7 @@ pub(super) fn prepare_update(options: RamdiskOptions<'_>) -> Result<()> {
 }
 
 /// A restore bundle of the model's erase or, with `update`, update restore
-/// identity; `personalized`, under the AP ticket Apple's signing service
-/// issues for the machine, which the restore's `--tss` choice needs. Then
+/// identity, for `ecid` under its personalized AP ticket. Then
 /// the engine's own board check of the prepared DeviceTree
 /// (`machine::soc::board`), so a model the engine cannot run is refused
 /// before the USB changes rather than when the PC boots it.
@@ -332,7 +328,6 @@ fn prepare_ramdisk(options: RamdiskOptions<'_>, update: bool) -> Result<()> {
         ipsw,
         model,
         ecid,
-        personalized,
         output,
     } = options;
     let mut line: Vec<String> = [
@@ -352,13 +347,6 @@ fn prepare_ramdisk(options: RamdiskOptions<'_>, update: bool) -> Result<()> {
     }
     if let Some(ecid) = ecid {
         line.extend(["--ecid".into(), ecid.to_string()]);
-    }
-    if personalized {
-        ensure!(
-            ecid.is_some(),
-            "a personalized restore bundle needs an ECID"
-        );
-        line.push("--tss".into());
     }
     boot::prepare(&line)?;
     let tree = fs::read(output.join("devicetree.adt"))?;

@@ -248,13 +248,13 @@ impl<R: ReadAt> Answers<R> {
         }
     }
     /// The personalized AP ticket the restore booted under (`stela-dev boot
-    /// prepare --tss`): the signer takes the nonces it is bound to, as Stela
+    /// prepare --restore --ecid`): the signer takes the nonces it is bound to, as Stela
     /// plays the boot ROM and the SEP ROM, and it answers `RootTicket`, whose
     /// SHA-384 restored's `update_ticket` requires to be
     /// `/chosen/boot-manifest-hash`.
     pub fn boot_with(&mut self, bytes: Vec<u8>) -> Result<()> {
         let signer = self.signer.as_mut().ok_or(Error::Invalid(
-            "a booted ticket needs Apple's signing service (opt-in --tss)",
+            "a booted ticket needs Apple's signing service (TSS)",
         ))?;
         let (ticket, nonces) = Ticket::booted(bytes, self.store.identity(), signer.ecid)?;
         signer.nonces = nonces;
@@ -672,7 +672,7 @@ impl<R: ReadAt> Answers<R> {
     /// policy, stitched unchanged, or a refusal without the signing service.
     fn recovery_local_policy(&mut self, identity: &Identity, args: &Value) -> Result<Plan> {
         let signer = self.signer.as_mut().ok_or(Error::Invalid(
-            "recoveryOS LocalPolicy needs Apple's signing service (opt-in --tss); a Stela-signed policy fails libbootpolicy's Apple root",
+            "recoveryOS LocalPolicy needs Apple's signing service (TSS); a Stela-signed policy fails libbootpolicy's Apple root",
         ))?;
         let bytes = tss::request_local_policy(signer, identity, args)?;
         let ticket = Ticket::personalized(bytes, identity, signer.ecid, None)?;
@@ -887,7 +887,7 @@ impl<R: ReadAt> Answers<R> {
             && d.keys().any(|k| k.contains("Nonce") || k.contains("ECID"))
         {
             let signer = self.signer.as_mut().ok_or(Error::Invalid(
-                "a personalized cryptex ticket needs Apple's signing service (opt-in --tss)",
+                "a personalized cryptex ticket needs Apple's signing service (TSS)",
             ))?;
             let ticket = tss::request_cryptex_ticket(signer, identity, args, "Cryptex1,Ticket")?;
             return Ok(Plan::Reply(Value::dict([(

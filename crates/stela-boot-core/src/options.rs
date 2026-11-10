@@ -292,8 +292,6 @@ pub struct System {
     /// Time the engine's phases and report them with each heartbeat
     /// (`--profile`).
     pub profile: bool,
-    /// The user opted in to Apple's signing server (`--tss`).
-    pub tss: bool,
     /// The machine's ECID for a bundle built from the Preboot volume
     /// (`--ecid HEX`, nonzero).
     pub ecid: Option<u64>,
@@ -304,9 +302,6 @@ pub struct System {
     pub audio_check: Option<AudioCheck>,
     /// Explicit whole-controller handoff for the audio check's physical clock.
     pub audio_own_hpet: bool,
-    /// Exclusive whole HPET handoff until shutdown. It supplies native PCI
-    /// minimum delays and can serve the Linux scheduler on an admitted BSP timer.
-    pub native_pci_own_hpet: bool,
     /// Exclusive handoff of the original IOAPICs through shutdown.
     pub native_pci_own_ioapic: bool,
     /// Whole host disks, by serial, that the guest sees as USB mass
@@ -404,12 +399,10 @@ impl Default for System {
             native_rounds: false,
             parallel: true,
             profile: false,
-            tss: false,
             ecid: None,
             network_check: None,
             audio_check: None,
             audio_own_hpet: false,
-            native_pci_own_hpet: false,
             native_pci_own_ioapic: false,
             usb_storage: Vec::new(),
             usb4_approved: Vec::new(),
@@ -811,7 +804,6 @@ impl fmt::Display for System {
         line.value(IPV4, self.ipv4)?;
         line.value(IPV4_GATEWAY, self.ipv4_gateway)?;
         line.value(DNS, (!self.dns.is_empty()).then(|| Servers(&self.dns)))?;
-        line.flag("--tss", self.tss)?;
         line.flag("--input", self.input)?;
         line.flag("--idle-skip", self.idle_skip)?;
         line.flag("--survey", self.survey)?;
@@ -834,7 +826,6 @@ impl fmt::Display for System {
         line.value("--network-check", self.network_check.as_deref())?;
         line.value("--audio-check", self.audio_check.map(AudioCheck::name))?;
         line.flag("--audio-own-hpet", self.audio_own_hpet)?;
-        line.flag("--native-pci-own-hpet", self.native_pci_own_hpet)?;
         line.flag("--native-pci-own-ioapic", self.native_pci_own_ioapic)?;
         if self.dram_explicit {
             line.value("--dram-base", Some(Hex(self.dram_base)))?;

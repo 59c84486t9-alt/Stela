@@ -1,7 +1,8 @@
 //! A small Clack-style front end to the same setup command used by scripts.
 use super::{
-    InstallImage, Request,
+    InstallImage, RECORD, Request, firmware,
     host::{self, Disk, Host, Removal},
+    record::{self, Record},
     wifi,
 };
 use crate::{progress::Phase, restore};
@@ -122,10 +123,60 @@ pub(super) fn configure(command: &mut Request, host: &dyn Host) -> Result<bool> 
                 .downcast_ref::<std::io::Error>()
                 .is_some_and(|e| e.kind() == std::io::ErrorKind::Interrupted) =>
         {
+            cliclack::outro_cancel("Setup cancelled. Your USB was not changed.")?;
             Ok(false)
         }
         result => result,
     }
+}
+
+/// The EFI partition of `usb` and the interrupted first setup it holds,
+/// which the same choices again resume (`create::plan`). The partition is
+/// mounted to look, as setup mounts it anyway.
+pub(super) fn interrupted(host: &dyn Host, usb: &Disk) -> Option<(PathBuf, Record)> {
+    let partition = usb.partitions.iter().find(|p| p.content == "EFI")?;
+    let esp = match &partition.mount {
+        Some(mount) => mount.clone(),
+        None => host.mount(&partition.identifier).ok()?,
+    };
+    let record = record::interrupted(&esp.join(RECORD))?;
+    Some((esp, record))
+}
+
+/// Make `command` the interrupted setup `record` describes, on its EFI
+/// partition `esp`, so it resumes instead of erasing the USB again. A local
+/// IPSW given on the command line stays; otherwise setup downloads the
+/// recorded build.
+pub(super) fn resume(command: &mut Request, esp: PathBuf, record: &Record) {
+    command.usb = esp;
+    command.build = record.build.clone();
+    command.model = Some(record.model.clone());
+    command.install_image = record.install_image.or_else(|| {
+        record.media.first().map(|medium| match medium.remote {
+            true => InstallImage::Online,
+            false => InstallImage::Offline,
+        })
+    });
+    if command.ipsw.is_none() {
+        command.fetch = true;
+    }
+    command.install = record.installs.first().map(|install| install.name.clone());
+    command.wifi = record.wifi.as_ref().map(|network| network.ssid.clone());
+    command.wifi_country = record
+        .wifi
+        .as_ref()
+        .and_then(|network| network.country.clone());
+    command.ipv4 = record
+        .addresses
+        .ipv4
+        .map(|ipv4| stela_boot_core::options::StaticIpv4 {
+            address: ipv4.address,
+            prefix: ipv4.prefix,
+        });
+    command.ipv4_gateway = record.addresses.ipv4.and_then(|ipv4| ipv4.gateway);
+    command.dns = (!record.addresses.dns.is_empty()).then(|| record.addresses.dns.clone());
+    command.usb4_approve = record.usb4_approved.clone();
+    command.profile = record.profile;
 }
 
 fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
@@ -144,8 +195,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         .collect();
     ensure!(
         !choices.is_empty(),
-        "no removable USB found. Connect one and run setup again ({}).",
-        super::host::ADMIN
+        "no removable USB found. Connect a USB and run setup again."
     );
     let mut images = None;
     let mut names = catalog::cached_names();
@@ -160,7 +210,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 value: i,
                 label: usb.description(),
                 hint: if usb.bytes == 0 {
-                    "Capacity unavailable; run setup as administrator".into()
+                    "Capacity unavailable".into()
                 } else if usb.bytes < NETWORK_MIN {
                     "Too small · Requires an 8 GB or larger USB".into()
                 } else if usb.bytes < OFFLINE_MIN {
@@ -175,8 +225,27 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             .iter()
             .position(|usb| usb.path() == command.usb)
             .unwrap_or(0);
-        let usb = &choices[menu::select("1 / 6  Choose a USB", &rows, initial)?];
+        let usb = &choices[menu::select("1 / 8  Choose a USB", &rows, initial)?];
         command.usb = usb.path();
+        // A setup this USB holds that stopped part way is finished, not
+        // erased and begun again.
+        let disk = disks.iter().find(|d| d.identifier == usb.id);
+        if let Some((esp, record)) = disk.and_then(|disk| interrupted(host, disk)) {
+            let choice = cliclack::select("This USB holds a setup that was interrupted")
+                .item(0, "Resume it", "Keeps what it wrote and finishes the rest")
+                .item(1, "Start over", "Erases the USB")
+                .initial_value(0)
+                .interact()?;
+            if choice == 0 {
+                resume(command, esp, &record);
+                if command.wifi.is_some() {
+                    cliclack::log::warning("The passphrase is stored in plaintext on the USB.")?;
+                    let ssid = command.wifi.clone().unwrap_or_default();
+                    command.wifi_passphrase = Some(wifi::ask_passphrase(&ssid)?);
+                }
+                return Ok(true);
+            }
+        }
         let offline = usb.bytes >= OFFLINE_MIN;
         let prefilled = first && command.ipsw.is_some() && offline;
         first = false;
@@ -199,7 +268,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 item(
                     1,
                     "Network installer",
-                    "Downloads boot files only · Requires an 8 GB USB; Ethernet needed during installation",
+                    "Downloads boot files only · Requires an 8 GB USB; macOS downloads during installation",
                     true,
                 ),
                 item(
@@ -214,7 +283,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             } else {
                 usize::from(command.install_image == Some(InstallImage::Online))
             };
-            menu::select("2 / 6  Choose an installer", &rows, initial)?
+            menu::select("2 / 8  Choose an installer", &rows, initial)?
         };
         let (version, models) = if source == 2 {
             let path = if prefilled {
@@ -225,7 +294,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
-                let text: String = cliclack::input("3 / 6  Choose an IPSW file")
+                let text: String = cliclack::input("3 / 8  Choose an IPSW file")
                     .placeholder("Path to the .ipsw file")
                     .default_input(&initial)
                     .validate(|s: &String| {
@@ -285,25 +354,17 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         models.sort();
         models.dedup();
         command.model = Some(choices::model(&models, &names, command.model.as_deref())?);
-        if command.install_image == Some(InstallImage::Online) {
-            choose_wifi(command)?;
-            super::addresses::choose(command)?;
-        } else {
-            (command.wifi, command.wifi_passphrase) = (None, None);
-            (command.ipv4, command.ipv4_gateway, command.dns) = (None, None, None);
-        }
-        // Every setup installs macOS, which needs TSS personalization, so the
-        // wizard does not offer it as a choice; `configure --no-tss` withdraws the
-        // opt-in from an existing setup.
+        // Every install needs the network for Apple's signing server; a
+        // network installer also downloads macOS over it.
+        choose_wifi(command)?;
+        super::addresses::choose(command)?;
         cliclack::set_theme(theme::Stela { extras: true });
-        let extras = cliclack::multiselect("5 / 6  Choose extras")
+        let extras = cliclack::multiselect("7 / 8  Choose extras")
             .item(0, "Profiling", "Save translation timing in the boot log")
             .initial_values(if command.profile { vec![0] } else { vec![] })
             .required(false)
             .interact()?;
         cliclack::set_theme(theme::Stela::default());
-        command.tss = true;
-        command.no_tss = false;
         command.profile = extras.contains(&0);
         let installer = match (source, command.install_image) {
             (2, _) => format!(
@@ -315,14 +376,14 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
             ),
             (_, Some(InstallImage::Online)) => {
-                "Network · macOS downloads over Ethernet during installation".into()
+                "Network · macOS downloads during installation".into()
             }
             _ => "Offline · the full macOS image goes on the USB".into(),
         };
         cliclack::note(
-            "6 / 6  Review",
+            "8 / 8  Review",
             format!(
-                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\n{}{}Profiling  {}\nSigning    Apple personalizes the boot files during setup",
+                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\n{}{}Profiling  {}",
                 usb.serial.as_ref().map_or_else(
                     || usb.description(),
                     |serial| format!("{} · serial {serial}", usb.description())
@@ -331,18 +392,25 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 names
                     .get(command.model())
                     .map_or(command.model(), String::as_str),
-                match (&command.wifi, command.install_image) {
-                    (Some(ssid), _) => format!("Wi-Fi      {ssid}\n"),
-                    (None, Some(InstallImage::Online)) => "Wi-Fi      None (Ethernet)\n".into(),
-                    (None, _) => String::new(),
+                match &command.wifi {
+                    Some(ssid) => format!("Wi-Fi      {ssid}\n"),
+                    None => "Wi-Fi      None (Ethernet)\n".into(),
                 },
-                match command.install_image {
-                    Some(InstallImage::Online) => super::addresses::review(command),
-                    _ => String::new(),
-                },
+                super::addresses::review(command),
                 if command.profile { "On" } else { "Off" },
             ),
         )?;
+        let (chips, notes) = firmware::host_chips(host)?;
+        for note in notes {
+            cliclack::log::warning(note)?;
+        }
+        if chips.is_empty() {
+            cliclack::log::warning(firmware::missing(
+                "`stela setup host-firmware fetch --gpu CHIP --usb USB` (USB: the installer's \
+                 STELA volume)",
+            ))?;
+        }
+        cliclack::log::info(super::create::SIGNING_NOTE)?;
         cliclack::log::warning(format!("Everything on {} will be erased.", usb.short()))?;
         match cliclack::select("Create the installer?")
             .item(
@@ -360,6 +428,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     command.confirm_disk = Some(usb.typed_back()?);
                 }
                 usb.verify(host)?;
+                command.confirmed = true;
                 return Ok(true);
             }
             1 => continue,
@@ -379,7 +448,7 @@ fn choose_wifi(command: &mut Request) -> Result<()> {
     progress.finish();
     const ETHERNET: usize = usize::MAX;
     const TYPED: usize = usize::MAX - 1;
-    let mut select = cliclack::select("Wi-Fi during installation").item(
+    let mut select = cliclack::select("5 / 8  Wi-Fi during installation").item(
         ETHERNET,
         "No Wi-Fi",
         "Connect the PC to Ethernet during installation",
@@ -445,7 +514,7 @@ mod tests {
             &["repair"],
             &["uninstall"],
             &["update", "stela"],
-            &["configure", "--no-tss"],
+            &["configure", "--no-profile"],
         ] {
             let line = ["stela", "setup"].into_iter().chain(words.iter().copied());
             assert!(crate::Cli::try_parse_from(line).is_err(), "{words:?}");

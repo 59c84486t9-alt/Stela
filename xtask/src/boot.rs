@@ -317,13 +317,6 @@ pub struct Run {
     /// Expose QEMU's HPET to the owned MMIO or native-clock check.
     #[arg(long, requires = "owned_clock_check")]
     hpet: bool,
-    /// Hand off the entire QEMU HPET to normal system PCI timing.
-    #[arg(long, conflicts_with_all = [
-        "owned_clock_check", "native_dma_check", "native_dma_isolation_check",
-        "native_work_check", "native_irq_work_check", "audio_check", "usb_image",
-        "gdb", "monitor", "icount"
-    ])]
-    native_pci_own_hpet: bool,
     /// Check bounded PM or owned HPET/LAPIC clock, IRQ progress and retirement.
     #[arg(long, group = "owned_clock_check", conflicts_with_all = [
         "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check", "native_mmio_check",
@@ -365,8 +358,8 @@ pub struct Run {
     #[arg(long, conflicts_with = "audio_check")]
     host_audio: bool,
     /// Give the mount a host network adapter: a `virtio-net-pci`, which the
-    /// mount drives after ExitBootServices for its own requests (`--tss`,
-    /// `--network-check`), on a QEMU `stream` netdev to xtask's own LAN
+    /// mount drives after ExitBootServices for its own requests (an
+    /// install's TSS, `--network-check`), on a QEMU `stream` netdev to xtask's own LAN
     /// peer (`boot/lan.rs`): DHCP, DNS and TCP relayed to the host, logged
     /// to `network.log`. QEMU needs no slirp. A USB image's own entries say
     /// whether the mount uses it.
@@ -417,7 +410,7 @@ pub struct Run {
     usb_host: Vec<(u16, u16)>,
     /// Give the mount its host network adapter as a USB CDC-ECM device on
     /// the `qemu-xhci` (`usb-net`), on a LAN peer of its own
-    /// (`usb-network.log`), for `--tss` and `--network-check`.
+    /// (`usb-network.log`), for an install's TSS and `--network-check`.
     #[arg(long, group = "network_adapter", conflicts_with_all = ["module", "usb_image", "payload"])]
     usb_network: bool,
     /// Attach a raw disk as a QEMU `usb-storage` device on the `qemu-xhci`,
@@ -856,10 +849,6 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             "host audio/network checks require system mode: use --scenario system-kernel, --bundle or --append starting with --system"
         );
     }
-    if arguments.native_pci_own_hpet {
-        ensure!(system, "native PCI HPET ownership requires system mode");
-        options.push_str(" --native-pci-own-hpet");
-    }
     if let Some(mode) = arguments.audio_check {
         options.push_str(&format!(
             " --audio-check {} --audio-own-hpet",
@@ -1018,10 +1007,7 @@ impl Run {
     }
 
     fn hpet_enabled(&self) -> bool {
-        self.hpet
-            || self.audio_check.is_some()
-            || self.native_pci_own_hpet
-            || self.usb_hpet_handoff()
+        self.hpet || self.audio_check.is_some() || self.usb_hpet_handoff()
     }
 
     /// A native host fixture: the mount runs a host check, not a guest.

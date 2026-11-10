@@ -8,9 +8,6 @@ pub(super) fn system(options: &System) -> Result<(), Error> {
     install(options)?;
     boot_selection(options)?;
     dram(options)?;
-    if options.native_pci_own_hpet && options.diagnostic_option().is_some() {
-        return Err(Error::Constraint(Constraint::NativePciHpetExclusive));
-    }
     clock(options)?;
     if options.audio_own_hpet && options.audio_check.is_none() {
         return Err(Error::Constraint(Constraint::AudioHpetDependency));
@@ -88,9 +85,6 @@ fn install(options: &System) -> Result<(), Error> {
     if options.verify_on_read && options.install.is_none() && !options.restore {
         return Err(Error::Constraint(Constraint::VerifyDependency));
     }
-    if options.install.is_some() && !options.tss {
-        return Err(Error::Constraint(Constraint::InstallTicket));
-    }
     Ok(())
 }
 
@@ -143,7 +137,6 @@ fn clock(options: &System) -> Result<(), Error> {
             || options.ssid.is_some()
             || options.external_disks
             || !options.usb_storage.is_empty()
-            || options.tss
             || options.install.is_some()
             || options.restore
         {

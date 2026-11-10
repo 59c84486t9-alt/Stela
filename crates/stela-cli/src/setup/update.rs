@@ -1,7 +1,9 @@
 //! Updates of an existing setup: a Stela update replaces `stela.efi`, a
 //! macOS update replaces the install medium and restore bundles. Each one
 //! writes the new files first and removes the old ones last, so one that was
-//! interrupted is finished by running it again.
+//! interrupted is finished by running it again. The record names the new
+//! version or build only once it is active, and `repair` removes what a stop
+//! left of the other one (`Record::has_leftovers`). There is no rollback.
 //!
 //! - Stela: the USB's boot loader is replaced atomically by the new one. A
 //!   new `stela.efi` must carry this `stela`'s mount interface. When it reads
@@ -58,7 +60,7 @@ fn activate_build(record: &mut Record, build: &str) -> Result<()> {
 
 /// Remove the bundles and media of everything but the active build and
 /// generation.
-fn prune(record: &mut Record) -> Result<()> {
+pub(super) fn prune(record: &mut Record) -> Result<()> {
     let (build, generation) = (record.build.clone(), record.generation());
     let (active, stale): (Vec<_>, Vec<_>) = record
         .bundles
@@ -90,18 +92,17 @@ fn remove_medium(medium: &super::medium::Medium) -> Result<()> {
     Ok(())
 }
 
-/// Refuse a change to an interrupted setup.
-pub(super) fn ready(record: &Record) -> Result<()> {
-    ensure!(
-        record.complete,
-        "the setup on {} was interrupted; run `stela setup uninstall` and set up again",
-        record.esp.display()
-    );
+/// Refuse a change to an interrupted setup, naming the command that
+/// finishes it.
+pub(super) fn ready(record: &Record, usb: &Path) -> Result<()> {
+    ensure!(record.complete, "{}", super::interrupted_text(record, usb));
     Ok(())
 }
 
 /// Image sources and write policy for a Stela update.
 pub(super) struct UpdateOptions<'a> {
+    /// The USB, as `--usb` named it.
+    pub(super) usb: &'a Path,
     pub(super) image_path: &'a Path,
     pub(super) ipsw: Option<&'a Path>,
     pub(super) dry_run: bool,
@@ -115,6 +116,7 @@ pub(super) fn update_stela(
     options: UpdateOptions<'_>,
 ) -> Result<String> {
     let UpdateOptions {
+        usb,
         image_path,
         ipsw,
         dry_run,
@@ -123,7 +125,7 @@ pub(super) fn update_stela(
     check_firmware_support(&record.esp, &image)?;
     let to = version_id(&image);
     let to_generation = environment.generation();
-    ready(&record)?;
+    ready(&record, usb)?;
     let esp = record.esp.clone();
     // A missing or damaged loader is what an update also puts right.
     let from = fs::read(esp.join(LOADER_PATH)).map_or("none".into(), |image| version_id(&image));
@@ -134,6 +136,28 @@ pub(super) fn update_stela(
     if from == to && from_generation == to_generation {
         if !dry_run {
             super::fdr::prepare(&record, false)?;
+        }
+        // An update stopped after its loader went in: the record still names
+        // the previous version, or the bundles and media it replaced.
+        if record.stela_version.as_deref() != Some(to.as_str()) || record.has_leftovers() {
+            writeln!(
+                text,
+                "  stela.efi      version {to} is installed; its update is finished"
+            )?;
+            writeln!(
+                text,
+                "  boot loader    stela.cfg and the startup choices as recorded"
+            )?;
+            if dry_run {
+                text.push_str("Dry run: nothing was changed.\n");
+                return Ok(text);
+            }
+            if let Some(store) = &record.translations {
+                store.publish()?;
+            }
+            activate(&mut record, to)?;
+            text.push_str("Done.\n");
+            return Ok(text);
         }
         writeln!(text, "  stela.efi      version {to} is already installed")?;
         if let Some(store) = &record.translations
@@ -171,9 +195,10 @@ pub(super) fn update_stela(
         let Some(ipsw) = ipsw else {
             bail!(
                 "this stela and stela.efi {to} boot bundles of {to_generation}, and this \
-                 setup's are {from_generation}: pass the macOS {} restore image with --ipsw or \
-                 --fetch so the update prepares new ones",
-                record.build
+                 setup's are {from_generation}. The update prepares new ones from the macOS {} \
+                 restore image: run {} (or --ipsw FILE in place of --fetch)",
+                record.build,
+                super::fix(usb, "update stela --fetch")
             );
         };
         let mut prepared: Vec<Prepared> = Vec::new();
@@ -188,7 +213,6 @@ pub(super) fn update_stela(
                     environment,
                     super::prepare::BundleOptions {
                         kind,
-                        tss: record.tss,
                         ipsw,
                         model: &record.model,
                         build: Some(&record.build),
@@ -204,7 +228,7 @@ pub(super) fn update_stela(
     for bundle in &prepared {
         writeln!(
             text,
-            "  {:<14} {} ({to_generation}, {:.1} GB); the {from_generation} bundles go",
+            "  {:<14} {} ({to_generation}, {}), replaces {from_generation}",
             bundle.kind.label(),
             bundle::directory_of(
                 &record.volume,
@@ -216,7 +240,7 @@ pub(super) fn update_stela(
                 }
             )
             .display(),
-            bundle.bytes as f64 / 1e9
+            super::host::bytes_text(bundle.bytes)
         )?;
     }
     match &record.translations {
@@ -226,7 +250,7 @@ pub(super) fn update_stela(
             } else {
                 writeln!(
                     text,
-                    "  translations   {}; the new stela.efi translates anew into its own pack",
+                    "  translations   {}; new pack for the new stela.efi",
                     store.describe()
                 )?;
             }
@@ -236,7 +260,6 @@ pub(super) fn update_stela(
         }
         None => writeln!(text, "  translations   no store on this USB")?,
     }
-    writeln!(text, "  disks          the installed disks are not changed")?;
     if dry_run {
         text.push_str("Dry run: nothing was changed.\n");
         return Ok(text);
@@ -252,15 +275,25 @@ pub(super) fn update_stela(
     }
     super::fdr::prepare(&record, false)?;
     efi::add_mount(&esp, &image, None, None)?;
-    publish(&mut record)?;
+    activate(&mut record, to)?;
+    text.push_str("Done.\n");
+    Ok(text)
+}
+
+/// The steps after the new loader is in place: `stela.cfg` and the startup
+/// choices for the record, the record naming version `to`, and the bundles,
+/// media and packs it replaced removed. The record names the old version
+/// until it is written here, so `update stela` run again after a stop
+/// anywhere before finishes these steps.
+fn activate(record: &mut Record, to: String) -> Result<()> {
+    publish(record)?;
     record.stela_version = Some(to);
-    prune(&mut record)?;
+    write_record(&record.esp.clone(), record)?;
+    prune(record)?;
     if let Some(store) = &record.translations {
         store.prune()?;
     }
-    write_record(&esp, &record)?;
-    text.push_str("Done.\n");
-    Ok(text)
+    write_record(&record.esp.clone(), record)
 }
 
 /// Add `ipsw`'s install medium and every machine's restore bundles, and
@@ -269,13 +302,31 @@ pub(super) fn update_os(
     environment: &Environment<'_>,
     mut record: Record,
     ipsw: &Path,
+    usb: &Path,
     dry_run: bool,
 ) -> Result<String> {
     check_bundle_revision(environment, &record)?;
     let (product_version, build) = crate::restore::payload::identity(ipsw, &record.model)?;
     super::supported(environment, ipsw, &build)?;
-    ready(&record)?;
+    ready(&record, usb)?;
     let from = record.build.clone();
+    if build == from && record.has_leftovers() {
+        // Stopped after the new build became the active one: remove what it
+        // replaces.
+        let mut text = format!("macOS {product_version} ({build}) install files:\n");
+        writeln!(
+            text,
+            "  remove         the restore files of earlier builds and generations"
+        )?;
+        if dry_run {
+            text.push_str("Dry run: nothing was changed.\n");
+            return Ok(text);
+        }
+        prune(&mut record)?;
+        write_record(&record.esp.clone(), &record)?;
+        text.push_str("Done.\n");
+        return Ok(text);
+    }
     ensure!(
         build != from,
         "macOS {build} is already the build this setup installs"
@@ -293,34 +344,30 @@ pub(super) fn update_os(
         },
     )?;
     let mut text = String::new();
-    writeln!(text, "macOS update to {product_version} ({build}):")?;
+    writeln!(text, "macOS {product_version} ({build}) install files:")?;
     describe_install(&record, &install, &mut text)?;
     if let Some(medium) = record.active_medium() {
         writeln!(
             text,
-            "  remove         {} and {from}'s restore bundles",
+            "  remove         {} and the {from} restore files",
             medium.directory().display()
         )?;
     }
-    writeln!(
-        text,
-        "  next           choose Install macOS in the startup choices: it erases the disk and \
-         restores {product_version}"
-    )?;
-    writeln!(
-        text,
-        "  note           macOS's own Software Update stages the update on the Update volume; \
-         stela.efi boots it from there (boot-command upgrade) and then the new Preboot \
-         objects, without this command"
-    )?;
     if dry_run {
         text.push_str("Dry run: nothing was changed.\n");
         return Ok(text);
     }
     apply_install(environment, &mut record, ipsw, install)?;
     activate_build(&mut record, &build)?;
+    // The record names the new build before the old one's files go, so a
+    // stop while they are removed leaves them as leftovers, which running
+    // this again or `repair` removes.
+    write_record(&record.esp.clone(), &record)?;
     prune(&mut record)?;
     write_record(&record.esp.clone(), &record)?;
-    text.push_str("Done.\n");
+    text.push_str(
+        "Done. An installed macOS keeps updating itself. To install this build on a new or \
+         erased disk, boot the USB and choose Install macOS, which erases that disk.\n",
+    );
     Ok(text)
 }

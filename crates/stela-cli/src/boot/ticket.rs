@@ -1,4 +1,4 @@
-//! The restore's AP root ticket from Apple's signing service (`--tss`).
+//! The restore's AP root ticket from Apple's signing service (TSS).
 //! Stela plays the boot ROM and the SEP ROM, so it draws their nonces here;
 //! the bundle boots under the ticket Apple personalizes for them, and the
 //! restore host answers restored's `RootTicket` with it, whose SHA-384

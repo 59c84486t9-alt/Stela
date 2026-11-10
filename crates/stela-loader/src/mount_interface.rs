@@ -43,7 +43,9 @@ pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 /// Revision 11: `--ipv4 ADDRESS/PREFIX`, `--ipv4-gateway ADDRESS` and
 /// `--dns SERVERS` set the mount network's addresses by hand. Revision 12:
 /// `--usb4-approve UUID` admits a USB4 device's PCIe tunnel without an IOMMU.
-pub const OPTIONS_REVISION: u32 = 12;
+/// Revision 13: `--tss` is gone; every `--install` signs with Apple's
+/// signing service.
+pub const OPTIONS_REVISION: u32 = 13;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";
@@ -382,10 +384,10 @@ mod tests {
 
     #[test]
     fn the_chosen_disk_stands_in_for_every_word_that_names_it() {
-        let options = "--system --storage @disk --nor @disk --tss";
+        let options = "--system --storage @disk --nor @disk --guest-network";
         assert_eq!(
             with_disk(options, Some("S1:0C81")).as_deref(),
-            Some("--system --storage S1:0C81 --nor S1:0C81 --tss")
+            Some("--system --storage S1:0C81 --nor S1:0C81 --guest-network")
         );
         assert_eq!(with_disk(options, None), None);
         assert_eq!(

@@ -321,13 +321,11 @@ fn open_host(
         remappers,
         _work: kernel_work,
     } = start_platform(handoff, &mut host_owner, options);
-    // The signing service is asked only during a restore, so a boot that
-    // restores nothing leaves the adapter to the guest.
-    let restoring = options.install.is_some() || options.restore_source.is_some();
-    // An install without a medium partition streams its remote image.
+    // The signing service is asked only during an install, so a boot that
+    // installs nothing leaves the adapter to the guest. An install without a
+    // medium partition also streams its remote image.
     let remote_image = options.install.is_some() && options.install_source.is_none();
-    let wants_network =
-        (options.tss && restoring) || remote_image || options.network_check.is_some();
+    let wants_network = options.install.is_some() || options.network_check.is_some();
     let mut devices = start_devices(
         handoff,
         options,
@@ -1800,7 +1798,7 @@ fn bind_native_pmp(
 }
 
 /// The restore the guest's installer runs against `source`: the signing
-/// service and guest-facing proxy `--tss` selects, and the restore's mode.
+/// service and guest-facing proxy an install uses, and the restore's mode.
 fn prepare_restore(
     boot: Boot<'_>,
     source: restore::Source,
@@ -1819,11 +1817,13 @@ fn prepare_restore(
         .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
         .map(u64::from_le_bytes)
         .filter(|&ecid| ecid != 0);
-    // `--tss` hands the restore client Apple's signing service, for the
-    // machine whose ECID the bundle names (`/chosen unique-chip-id`).
-    let signer = options.tss.then(|| {
+    // An install signs with Apple's signing service (TSS), for the machine
+    // whose ECID the bundle names (`/chosen unique-chip-id`).
+    let signer = options.install.is_some().then(|| {
         let ecid = boot_ecid.unwrap_or_else(|| {
-            output::fatal("--tss needs the bundle's machine ECID (stela-dev boot prepare --ecid)")
+            output::fatal(
+                "install: the bundle names no machine ECID (stela-dev boot prepare --ecid)",
+            )
         });
         stela_runtime::restore::tss::Signer {
             ecid,
@@ -1833,17 +1833,20 @@ fn prepare_restore(
                 ap: [0; 32],
                 sep: [0; 20],
             },
-            transport: match host_network.as_ref().expect("--tss opens the host network") {
+            transport: match host_network
+                .as_ref()
+                .expect("an install opens the host network")
+            {
                 Ok(network) => alloc::boxed::Box::new(network::Signing::new(network.clone())),
                 Err(reason) => alloc::boxed::Box::new(network::Offline(reason.clone())),
             },
         }
     });
     // Development restores keep the original DEV-board FDR failure
-    // policy without exposing Apple's FDR service. TSS, when selected,
-    // uses the host signer directly; the image reader also owns its own
-    // network access independently of this guest reverse proxy.
-    let proxy_network = (options.tss && !options.development_restore)
+    // policy without exposing Apple's FDR service. TSS uses the host
+    // signer directly; the image reader also owns its own network access
+    // independently of this guest reverse proxy.
+    let proxy_network = (options.install.is_some() && !options.development_restore)
         .then(|| {
             host_network
                 .as_ref()
@@ -2114,13 +2117,17 @@ fn start_platform(
             output::fatal("the audio check failed")
         });
     }
-    if options.native_pci_own_hpet {
+    // Without an invariant TSC the HPET is the drivers' minimum delays and
+    // the kernel work clock, as Linux falls back to it. A diagnostic that
+    // takes the HPET itself keeps it.
+    if !crate::cpu::INVARIANT_TSC.present() && options.diagnostic_option().is_none() {
         let result = native_mmio
             .ok_or(refuse!("native MMIO aperture unavailable"))
             .and_then(|source| {
-                // SAFETY: the explicit whole-controller handoff excludes
-                // firmware/SMM and every other writer until shutdown. The
-                // installed BSP owns the source before any native driver.
+                // SAFETY: firmware has stopped and no diagnostic owns the
+                // HPET, so this boot owns the whole controller until
+                // shutdown. The installed BSP owns the source before any
+                // native driver.
                 unsafe { source.install_pci_clock() }
             });
         match result {

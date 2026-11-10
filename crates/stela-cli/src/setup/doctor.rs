@@ -12,20 +12,29 @@
 //! `ota-result`) and whether its SEP state is provisioned. Each problem
 //! names the command that fixes it, and any problem fails the command.
 //!
-//! Repair puts back what the record says: the active `stela.efi` from its
-//! kept copy, the entry, `stela.cfg` and the startup choices, and, from the
-//! active build's restore image (`--ipsw` or `--fetch`), every damaged or
-//! missing restore bundle and a damaged install medium; with an image it
-//! prepares every restore bundle of the active build again, with each
-//! machine's own ECID, and gives an install without one its ECID
-//! (`machines::machine_ecid`).
+//! Repair puts back what the record says: `stela.cfg` and the startup
+//! choices, and, from the active build's restore image (`--ipsw` or
+//! `--fetch`), every damaged or missing restore bundle and a damaged install
+//! medium; with an image it prepares every restore bundle of the active
+//! build again, with each machine's own ECID, and gives an install without
+//! one its ECID (`machines::machine_ecid`). It removes the bundles and media
+//! of other builds and generations that an interrupted update left. A
+//! missing or foreign `stela.efi` is `update stela`'s to replace: no copy of
+//! it is kept. With `--initialize-nor` it replaces machine state `stela.efi`
+//! would refuse (`installed::reinitialize`), blanking a foreign SEP area
+//! only for a machine that never booted.
 use super::{
-    CHOICES_PATH, Environment, LOADER_PATH, RECORD, Record, Request, apply_install, bundle,
-    check_bundle_revision, describe_install, ecid::Ecid, host::Host, installed, machines,
-    plan_install, publish, read_record, revision_mismatch, state, update, write_record,
+    CHOICES_PATH, Environment, LOADER_PATH, RECORD, Record, Reported, Request, apply_install,
+    bundle, check_bundle_revision, describe_install, ecid::Ecid, fix, host::Host, host::bytes_text,
+    installed, interrupted_text, machines, plan_install, publish, read_record, revision_mismatch,
+    state, update, write_record,
 };
-use anyhow::{Result, bail};
-use std::{fmt::Write as _, fs, path::Path};
+use anyhow::{Context, Result, bail, ensure};
+use std::{
+    fmt::Write as _,
+    fs,
+    path::{Path, PathBuf},
+};
 use stela_loader::{boot_selection, mount_interface, recovery};
 use {
     stela_formats::apfs, stela_formats::apfs::Container,
@@ -120,9 +129,16 @@ fn systems(host: &dyn Host, identifier: &str, bytes: u64) -> Vec<String> {
 struct Report {
     text: String,
     problems: Vec<String>,
+    /// The USB, as the fixes name it.
+    usb: PathBuf,
 }
 
 impl Report {
+    /// The command that fixes a problem (`super::fix`).
+    fn fix(&self, words: &str) -> String {
+        fix(&self.usb, words)
+    }
+
     fn line(&mut self, label: &str, value: impl std::fmt::Display) {
         let _ = writeln!(self.text, "  {label:<14} {value}");
     }
@@ -135,25 +151,19 @@ impl Report {
 /// The translation store's packs, and what `repair` would fix.
 fn translations_status(record: &Record, report: &mut Report) {
     let Some(store) = &record.translations else {
-        report.line(
-            "translations",
-            "no store: every boot translates anew (the USB had no room for one)",
-        );
+        report.line("translations", "none");
         return;
     };
     report.line("translations", store.describe());
     for pack in store.packs() {
         report.line(
             "  pack",
-            format!(
-                "{} ({:.1} MB)",
-                pack.path.display(),
-                pack.bytes as f64 / 1e6
-            ),
+            format!("{} ({})", pack.path.display(), bytes_text(pack.bytes)),
         );
     }
     for repair in store.repairs() {
-        report.problem(format!("translation store: {repair}: `stela setup repair`"));
+        let fix = report.fix("repair");
+        report.problem(format!("translation store: {repair}: {fix}"));
     }
 }
 
@@ -172,9 +182,10 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
                         .unwrap_or_default()
                 ),
             );
+            let fix = report.fix("update stela");
             if record.stela_version.as_deref() != Some(id.as_str()) {
                 report.problem(format!(
-                    "{} is not the version setup installed ({}): `stela setup update stela`",
+                    "{} is not the version setup installed ({}): {fix}",
                     tool.display(),
                     record.stela_version.as_deref().unwrap_or("unknown")
                 ));
@@ -182,19 +193,20 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
             if let Some(reason) = mount_interface::mismatch(environment.interface, interface) {
                 report.problem(format!(
                     "the installed stela.efi does not read what this stela writes ({reason}): \
-                     `stela setup update stela`"
+                     {fix}"
                 ));
             }
         }
-        Err(_) => report.problem(format!(
-            "{} is missing: `stela setup update stela`",
-            tool.display()
-        )),
+        Err(_) => {
+            let fix = report.fix("update stela");
+            report.problem(format!("{} is missing: {fix}", tool.display()))
+        }
     }
+    let repair = report.fix("repair");
     let options = fs::read_to_string(record.esp.join("EFI/stela/stela.cfg")).unwrap_or_default();
     match record.options_text() {
         Ok(expected) if options != expected => {
-            report.problem("stela.cfg differs from the setup record: `stela setup repair`".into())
+            report.problem(format!("stela.cfg differs from the setup record: {repair}"))
         }
         Ok(_) => {}
         Err(error) => report.problem(format!(
@@ -203,17 +215,28 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
     }
     let choices = fs::read_to_string(record.esp.join(CHOICES_PATH)).ok();
     match record.choices_text() {
-        Ok(expected) if choices != expected => report.problem(
-            "the startup choices (choices.cfg) differ from the setup record: `stela setup \
-             repair`"
-                .into(),
-        ),
+        Ok(expected) if choices != expected => report.problem(format!(
+            "the startup choices (choices.cfg) differ from the setup record: {repair}"
+        )),
         Ok(_) => {}
         Err(error) => report.problem(format!("the startup choices: {error:#}")),
     }
 }
 
+/// The command that puts back the active build's restore files: `--fetch`
+/// downloads that build, the whole image when the medium holds it.
+fn image_fix(record: &Record, report: &Report) -> String {
+    let offline = record.active_medium().is_some_and(|medium| !medium.remote);
+    report.fix(if offline {
+        "repair --fetch --install-image offline"
+    } else {
+        "repair --fetch"
+    })
+}
+
 fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Report) {
+    let repair = report.fix("repair");
+    let image = image_fix(record, report);
     for kept in &record.bundles {
         let directory = kept.directory(&record.volume);
         let role = if kept.build == record.build && kept.generation() == record.generation() {
@@ -238,16 +261,24 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
                 }
             ),
         );
+        if role != "active" {
+            report.problem(format!(
+                "{} is left by an interrupted update: run that update again, or {repair} \
+                 removes it",
+                directory.display()
+            ));
+            continue;
+        }
         for problem in problems {
             report.problem(format!(
-                "{problem}: `stela setup repair --ipsw` with the macOS {} restore image",
+                "{problem}: {image} (or --ipsw with the macOS {} restore image)",
                 kept.build
             ));
         }
     }
     for directory in record.build_directories() {
         for (_, what) in bundle::leftovers(&directory) {
-            report.problem(format!("{what}: `stela setup repair` puts it right"));
+            report.problem(format!("{what}: {repair} puts it right"));
         }
     }
     if let Some(reason) = revision_mismatch(environment, record) {
@@ -255,8 +286,7 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
     }
     for (kind, ecid) in record.missing_restore_bundles() {
         report.problem(format!(
-            "the active build {} has no {} bundle for {}, so its {} choice is missing: `stela \
-             setup repair --ipsw`",
+            "the active build {} has no {} bundle for {}, so its {} choice is missing: {image}",
             record.build,
             kind.label(),
             ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}")),
@@ -266,18 +296,26 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
     if record.installs_media() && record.active_medium().is_none() {
         report.problem(format!(
             "the active build {} has no install medium, so its Install macOS choice is \
-             missing: `stela setup repair --ipsw` with its restore image",
+             missing: {image}",
             record.build
         ));
     }
     for medium in &record.media {
         let problems = medium.problems();
+        if medium.build != record.build {
+            report.line(
+                "leftover",
+                format!("{} (macOS {})", medium.directory().display(), medium.build),
+            );
+            report.problem(format!(
+                "{} is left by an interrupted update: run that update again, or {repair} \
+                 removes it",
+                medium.directory().display()
+            ));
+            continue;
+        }
         report.line(
-            if medium.build == record.build {
-                "install medium"
-            } else {
-                "kept medium"
-            },
+            "install medium",
             format!(
                 "{} (macOS {}, partition {}): {}",
                 medium.directory().display(),
@@ -292,17 +330,19 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
         );
         for problem in problems {
             report.problem(format!(
-                "{problem}: `stela setup repair --ipsw` with the macOS {} restore image",
+                "{problem}: {image} (or --ipsw with the macOS {} restore image)",
                 medium.build
             ));
         }
-        if medium.build == record.build && !record.tss {
-            report.problem(
-                "the Install macOS choice is off because the restore needs Apple's \
-                 signing server: `stela setup --tss`"
-                    .into(),
-            );
-        }
+    }
+}
+
+/// `--install NAME` when the setup has several installs, for a fix that
+/// acts on one.
+fn install_words(record: &Record, install: &machines::Install) -> String {
+    match record.installs.len() {
+        1 => String::new(),
+        _ => format!(" --install {}", super::quoted(&install.name)),
     }
 }
 
@@ -322,20 +362,20 @@ fn install_status(
     );
     match install.ecid {
         Some(ecid) => report.line("ECID", ecid),
-        None => report.problem(format!(
-            "install \"{}\" has no ECID (an older setup made it): `stela setup repair --ipsw`, \
-             with --ecid or --new-ecid when its SEP state is provisioned",
-            install.name
-        )),
+        None => {
+            let fix = report.fix("repair --fetch");
+            report.problem(format!(
+                "install \"{}\" has no ECID (an older setup made it): {fix}, with --ecid or \
+                 --new-ecid when its SEP state is provisioned",
+                install.name
+            ))
+        }
     }
     let disk = &install.disk;
     // A portable installer's disk is chosen in stela.efi, out of this
     // computer's reach.
     if disk.is_chosen() {
-        report.line(
-            "Apple region",
-            "chosen in stela.efi on the PC when Install macOS starts",
-        );
+        report.line("Mac's SSD", "a PC disk chosen at Install macOS");
         return;
     }
     match installed::confirm(host, disk, installed::Role::AppleRegion, None) {
@@ -345,7 +385,7 @@ fn install_status(
             let bytes = disk.machine_state_offset.unwrap_or(bytes).min(bytes);
             let systems = systems(host, &region, bytes);
             report.line(
-                "Apple region",
+                "Mac's SSD",
                 format!(
                     "{region} (serial {}, partition {}): {}",
                     disk.apple_region_serial,
@@ -357,17 +397,27 @@ fn install_status(
                     }
                 ),
             );
+            if region != disk.apple_region {
+                report.line(
+                    "",
+                    format!("was {}; `repair` records the new name", disk.apple_region),
+                );
+            }
             for system in systems {
                 report.line("", system);
             }
         }
         Err(error) => report.problem(format!(
-            "install \"{}\"'s Apple region: {error:#}",
+            "install \"{}\"'s SSD partition: {error:#}",
             install.name
         )),
     }
     if let Ok(Some(region)) = installed::foreign(host, disk) {
-        report.problem(foreign_problem(&install.name, &region.identifier));
+        let fix = report.fix("repair --erase-target");
+        report.problem(format!(
+            "{}: {fix} erases it",
+            foreign_problem(&install.name, &region.identifier)
+        ));
     }
     let area = match installed::state_area(host, disk, None) {
         Ok(area) => area,
@@ -379,14 +429,10 @@ fn install_status(
             return;
         }
     };
-    let nor = area.identifier.clone();
-    match disk.machine_state_offset {
-        Some(_) => report.line(
-            "machine state",
-            format!("{}: {:#x} bytes", disk.state_description(), area.bytes),
-        ),
-        None => report.line("NOR", disk.state_description()),
-    }
+    report.line(
+        "machine state",
+        format!("{} ({})", disk.state_description(), bytes_text(area.bytes)),
+    );
     let bytes = match area.read(
         host,
         0,
@@ -399,8 +445,16 @@ fn install_status(
         }
     };
     let (nor_bytes, sep_area) = bytes.split_at(CAPACITY);
+    // An interrupted `--target` can leave a machine that never booted with
+    // foreign state, which `repair --initialize-nor` replaces.
+    let never_booted = installed::never_booted(host, &area)
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    let nor = area.describe();
+    let which = install_words(record, install);
     match state::nvram(nor_bytes) {
-        state::Nvram::Blank => report.line("NVRAM", "blank: stela.efi writes it at first boot"),
+        state::Nvram::Blank => report.line("NVRAM", "blank"),
         state::Nvram::Valid(variables) => {
             report.line("next boot", state::next_boot(&variables));
             for name in [
@@ -419,37 +473,47 @@ fn install_status(
                 }
             }
         }
-        state::Nvram::Invalid(error) => report.problem(format!(
-            "{nor}'s NVRAM is unreadable ({error}): `stela setup nvram reset --nor {nor}`"
-        )),
+        state::Nvram::Invalid(error) if never_booted => {
+            let fix = report.fix("repair --initialize-nor");
+            report.problem(format!("{nor}'s NVRAM is unreadable ({error}): {fix}"))
+        }
+        state::Nvram::Invalid(error) => {
+            let fix = report.fix(&format!("nvram reset{which}"));
+            report.problem(format!("{nor}'s NVRAM is unreadable ({error}): {fix}"))
+        }
     }
     match state::sep(sep_area) {
-        Ok(true) => report.line(
-            "SEP state",
-            "provisioned; back it up with `stela setup state backup FILE`",
-        ),
-        Ok(false) => report.line("SEP state", "blank: the SEP provisions it at first boot"),
-        Err(error) => report.problem(format!(
-            "{nor}'s SEP area: {error}; restore it with `stela setup state restore FILE --nor \
-             {nor}`"
-        )),
+        Ok(true) => report.line("SEP state", "provisioned"),
+        Ok(false) => report.line("SEP state", "blank"),
+        Err(error) if never_booted => {
+            let fix = report.fix("repair --initialize-nor");
+            report.problem(format!(
+                "{nor}'s SEP area: {error}; the machine never booted, so it holds no keys: {fix} \
+                 blanks it"
+            ))
+        }
+        Err(error) => {
+            let lost = installed::lost_keys(install, &report.usb, record.installs.len() > 1);
+            report.problem(format!("{nor}'s SEP area: {error}. {lost}"))
+        }
     }
 }
 
-/// `status`.
-/// An install's Apple region holds another file system.
+/// An install's SSD partition holds another file system.
 fn foreign_problem(install: &str, region: &str) -> String {
     format!(
-        "install \"{install}\"'s Apple region {region} holds another file system, which the PC's \
-         own OS mounts, clearing the free space it sees, Stela's machine state included"
+        "install \"{install}\"'s SSD partition {region} holds another file system. The PC's own \
+         OS mounts it and can overwrite Stela's machine state in it"
     )
 }
 
+/// `status`.
 pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String> {
     let record = read_record(environment, usb)?;
     let mut report = Report {
         text: String::new(),
         problems: Vec::new(),
+        usb: usb.to_path_buf(),
     };
     let _ = writeln!(
         report.text,
@@ -458,23 +522,10 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
         record.esp.join(RECORD).display()
     );
     if !record.complete {
-        report.problem(
-            "the setup was interrupted: `stela setup uninstall`, then set up again".into(),
-        );
+        report.problem(interrupted_text(&record, usb));
     }
     report.line("model", &record.model);
-    report.line(
-        "macOS build",
-        format!("{} (Install macOS restores it)", record.build),
-    );
-    report.line(
-        "TSS",
-        if record.tss {
-            "on: the restore host may send the ECID and component hashes to gs.apple.com"
-        } else {
-            "off"
-        },
-    );
+    report.line("macOS build", &record.build);
     efi_status(environment, &record, &mut report);
     bundle_status(environment, &record, &mut report);
     translations_status(&record, &mut report);
@@ -486,31 +537,44 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
         text.push_str("No problems found.\n");
         return Ok(text);
     }
-    let _ = writeln!(text, "{} problems:", report.problems.len());
+    let count = report.problems.len();
+    let _ = match count {
+        1 => writeln!(text, "1 problem:"),
+        _ => writeln!(text, "{count} problems:"),
+    };
     for problem in &report.problems {
         let _ = writeln!(text, "  - {problem}");
     }
-    bail!("{text}")
+    Err(Reported {
+        report: text,
+        summary: match count {
+            1 => "1 problem; the report above names its fix".into(),
+            _ => format!("{count} problems; the report above names each fix"),
+        },
+    }
+    .into())
 }
 
 /// `repair`.
 pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result<String> {
-    let mut record = read_record(environment, &command.usb)?;
-    update::ready(&record)?;
+    let usb = &command.usb;
+    let mut record = read_record(environment, usb)?;
+    update::ready(&record, usb)?;
     let esp = record.esp.clone();
     let mut text = format!("Stela repair on {}:\n", esp.display());
     let Ok(tool) = fs::read(esp.join(LOADER_PATH)) else {
         bail!(
-            "{} has no stela.efi: `stela setup update stela`",
-            esp.display()
+            "{} has no stela.efi: {}",
+            esp.display(),
+            fix(usb, "update stela")
         );
     };
     if let Some(reason) =
         mount_interface::mismatch(environment.interface, mount_interface::find(&tool))
     {
         bail!(
-            "the setup's stela.efi does not read what this stela writes ({reason}); `stela \
-             setup update stela` first"
+            "the setup's stela.efi does not read what this stela writes ({reason}): run {} first",
+            fix(usb, "update stela")
         );
     }
     update::check_firmware_support(&esp, &tool)?;
@@ -521,6 +585,41 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     }
     record.install_image = command.install_image.or(record.install_image);
     let mut notes = Vec::new();
+    // Disk names change with plug order and reboots: each install's
+    // partitions are found again by their GUIDs and serials, and recorded
+    // under their new names.
+    for install in &mut record.installs {
+        if install.disk.is_chosen() {
+            continue;
+        }
+        for (role, recorded) in [
+            (
+                installed::Role::AppleRegion,
+                install.disk.apple_region.clone(),
+            ),
+            (installed::Role::Nor, install.disk.nor.clone()),
+        ] {
+            let Ok(found) = installed::confirm(environment.host, &install.disk, role, None) else {
+                continue;
+            };
+            if found == recorded {
+                continue;
+            }
+            writeln!(
+                text,
+                "  disks          install \"{}\": {recorded} is now {found}",
+                install.name
+            )?;
+            match role {
+                installed::Role::AppleRegion => install.disk.apple_region = found.clone(),
+                installed::Role::Nor => install.disk.nor = found,
+            }
+            // A machine state in the region's tail is named by the region.
+            if install.disk.machine_state_offset.is_some() {
+                install.disk.nor = install.disk.apple_region.clone();
+            }
+        }
+    }
     let mut assigned: Vec<(String, Ecid)> = Vec::new();
     if ipsw.is_some() {
         for index in 0..record.installs.len() {
@@ -528,11 +627,21 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
                 continue;
             }
             let install = record.installs[index].clone();
-            let area = installed::state_area(environment.host, &install.disk, None)?.read(
-                environment.host,
-                CAPACITY as u64,
-                stela_formats::machine_state::SEP_ROOTS_BYTES,
-            )?;
+            let area = installed::state_area(environment.host, &install.disk, None)
+                .and_then(|area| {
+                    area.read(
+                        environment.host,
+                        CAPACITY as u64,
+                        stela_formats::machine_state::SEP_ROOTS_BYTES,
+                    )
+                })
+                .with_context(|| {
+                    format!(
+                        "install \"{}\" needs an ECID, which depends on its machine state; \
+                         connect its disk",
+                        install.name
+                    )
+                })?;
             let provisioned = state::sep(&area).unwrap_or(false);
             let ecid = machines::machine_ecid(
                 machines::EcidOptions {
@@ -569,6 +678,16 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
             text,
             "  remove         {}",
             old.directory(&record.volume).display()
+        )?;
+    }
+    // What an interrupted update left beside the active build and
+    // generation.
+    let leftovers = record.has_leftovers();
+    if leftovers {
+        writeln!(
+            text,
+            "  remove         the files an interrupted update left beside macOS {}'s",
+            record.build
         )?;
     }
     // The install's restore bundles and medium: all again with an image.
@@ -610,40 +729,110 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
             describe_install(&record, &plan, &mut text)?;
             Some(plan)
         }
-        (None, false) => bail!(
-            "{text}  install        {} restore bundles of macOS {} are damaged or missing{}: \
-             pass its restore image with --ipsw or --fetch",
-            restore.len(),
-            record.build,
-            if damaged_medium {
-                ", and so is the install medium"
-            } else {
-                ""
+        (None, false) => {
+            writeln!(
+                text,
+                "  install        {} restore bundles of macOS {} are damaged or missing{}",
+                restore.len(),
+                record.build,
+                if damaged_medium {
+                    ", and so is the install medium"
+                } else {
+                    ""
+                }
+            )?;
+            let offline = record.active_medium().is_some_and(|medium| !medium.remote);
+            return Err(Reported {
+                report: text,
+                summary: format!(
+                    "repair needs the macOS {} restore image: run {} (or --ipsw FILE in place \
+                     of --fetch)",
+                    record.build,
+                    fix(
+                        usb,
+                        if offline {
+                            "repair --fetch --install-image offline"
+                        } else {
+                            "repair --fetch"
+                        }
+                    )
+                ),
             }
-        ),
+            .into());
+        }
     };
     writeln!(
         text,
         "  boot loader    stela.efi, stela.cfg and the startup choices as recorded"
     )?;
-    // An Apple region holding another file system: erased with
+    // Machine state stela.efi would refuse: replaced with
+    // --initialize-nor, else named.
+    // A disk that is not connected keeps its machine state as it is; the
+    // USB's own files are repaired all the same.
+    let mut reinitialize = Vec::new();
+    for install in &record.installs {
+        let lost = installed::lost_keys(install, usb, record.installs.len() > 1);
+        let fresh = match installed::reinitialize(environment.host, &install.disk, &lost) {
+            Ok(Some(fresh)) => fresh,
+            Ok(None) => continue,
+            Err(error) => {
+                notes.push(unreachable_note(&install.name, &error));
+                continue;
+            }
+        };
+        match (&fresh.refusal, command.initialize_nor) {
+            (Some(refusal), true) => {
+                return Err(Reported {
+                    report: text,
+                    summary: format!("install \"{}\": {refusal}", install.name),
+                }
+                .into());
+            }
+            (Some(refusal), false) => {
+                notes.push(format!("install \"{}\": {refusal}", install.name))
+            }
+            (None, true) => {
+                for change in &fresh.changes {
+                    writeln!(text, "  disks          {change}")?;
+                }
+                reinitialize.push(fresh);
+            }
+            (None, false) => notes.push(format!(
+                "install \"{}\"'s machine state would be refused by stela.efi; {} replaces it",
+                install.name,
+                fix(usb, "repair --initialize-nor")
+            )),
+        }
+    }
+    // An SSD partition holding another file system: erased with
     // --erase-target, else named.
     let mut foreign = Vec::new();
     for install in &record.installs {
-        if let Some(region) = installed::foreign(environment.host, &install.disk)? {
-            if command.erase_target {
-                writeln!(
-                    text,
-                    "  disks          erase the file system on {}, install \"{}\"'s Apple region",
-                    region.identifier, install.name
-                )?;
-                foreign.push(region);
-            } else {
-                notes.push(format!(
-                    "{}; pass --erase-target to erase it",
-                    foreign_problem(&install.name, &region.identifier)
-                ));
+        let region = match installed::foreign(environment.host, &install.disk) {
+            Ok(Some(region)) => region,
+            Ok(None) => continue,
+            Err(error) => {
+                // Named once, as the machine-state check above names it.
+                let note = unreachable_note(&install.name, &error);
+                if !notes.contains(&note) {
+                    notes.push(note);
+                }
+                continue;
             }
+        };
+        if command.erase_target {
+            writeln!(
+                text,
+                "  disks          erase the file system on {}, install \"{}\"'s SSD partition",
+                region.identifier, install.name
+            )?;
+            foreign.push(region);
+        } else {
+            notes.push(format!(
+                "{}: {} erases it",
+                foreign_problem(&install.name, &region.identifier),
+                fix(usb, "repair --erase-target")
+            ));
         }
     }
     for note in &notes {
@@ -669,12 +858,29 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
     for region in &foreign {
         installed::erase_foreign(environment.host, region)?;
     }
+    for fresh in &reinitialize {
+        fresh.area.write(environment.host, 0, &fresh.bytes)?;
+        ensure!(
+            fresh.area.read(environment.host, 0, fresh.bytes.len())? == fresh.bytes,
+            "{} did not read back as written",
+            fresh.area.describe()
+        );
+    }
     if let (Some(plan), Some(ipsw)) = (install, &ipsw) {
         apply_install(environment, &mut record, ipsw, plan)?;
     }
     publish(&mut record)?;
     write_record(&esp, &record)?;
     super::remove_bundles(&record, &stale)?;
-    text.push_str("Done. Check it with: stela setup status\n");
+    if leftovers {
+        update::prune(&mut record)?;
+        write_record(&esp, &record)?;
+    }
+    writeln!(text, "Done. Check it with {}", fix(usb, "status"))?;
     Ok(text)
+}
+
+/// Why an install's disk was left alone.
+fn unreachable_note(install: &str, error: &anyhow::Error) -> String {
+    format!("install \"{install}\"'s disk is left as it is: {error:#}")
 }

@@ -208,7 +208,7 @@ mod tests {
             &["state", "backup", "state.bin"],
             &["state", "restore", "state.bin", "--nor", "sdc3"],
             &["boot-log"],
-            &["configure", "--no-tss", "--chooser-timeout", "0"],
+            &["configure", "--no-profile", "--chooser-timeout", "0"],
             &["host-firmware", "install", "package"],
             &[
                 "host-firmware",
@@ -226,7 +226,7 @@ mod tests {
         for words in [
             &["status", "--target", "sdc2"][..],
             &["uninstall", "--ipsw", "a.ipsw"],
-            &["configure", "--tss", "--no-tss"],
+            &["configure", "--profile", "--no-profile"],
             &["state", "backup", "state.bin", "--chooser-timeout", "0"],
             &["--target", "sdc2", "status"],
             &["status", "repair"],

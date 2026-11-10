@@ -120,7 +120,7 @@ pub(super) struct Bundle {
     #[serde(default, skip_serializing_if = "Kind::is_restore")]
     pub(super) kind: Kind,
     /// A restore bundle that boots under the AP ticket Apple's signing
-    /// service personalized for its machine (`boot prepare --tss`), not the
+    /// service personalized for its machine (`boot prepare --restore --ecid`), not the
     /// IPSW's global ticket.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) personalized: bool,

@@ -729,10 +729,11 @@ fn run_machine<H: Host>(
             "PROFILE on: each heartbeat reports the engine's time by phase and exit kind\n"
         ));
     }
-    if options.tss {
+    if options.install.is_some() {
         output::arguments(format_args!(
-            "TSS OPT-IN: the restore host sends this machine's ECID, the restore's nonces and \
-             its component hashes to gs.apple.com for its root tickets and recoveryOS LocalPolicy\n"
+            "INSTALL SIGNING: the restore host sends this machine's ECID, the restore's nonces \
+             and its component hashes to gs.apple.com for its root tickets and recoveryOS \
+             LocalPolicy\n"
         ));
     }
     // Waits return to this loop often enough that a press of the host's

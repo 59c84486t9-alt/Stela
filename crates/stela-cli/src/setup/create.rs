@@ -21,6 +21,7 @@ use anyhow::{Context, Result, bail, ensure};
 use std::{
     fmt::Write as _,
     fs,
+    io::IsTerminal as _,
     path::{Path, PathBuf},
 };
 use stela_formats::builds;
@@ -119,7 +120,6 @@ pub(super) fn plan_install(
                 environment,
                 super::prepare::BundleOptions {
                     kind,
-                    tss: record.tss,
                     ipsw,
                     model: &record.model,
                     build: Some(build),
@@ -176,16 +176,16 @@ pub(super) fn plan_install(
     let free = host.volume(&record.volume)?.free_bytes;
     ensure!(
         free >= need,
-        "{} has {:.1} GB free; the install medium and boot bundles need {:.1} GB{}. Free space \
-         on it, or use a larger USB.",
+        "{} has {} free; the install medium and boot bundles need {}{}. Free space on it, or \
+         use a larger USB.",
         record.volume.display(),
-        free as f64 / 1e9,
-        need as f64 / 1e9,
+        host::bytes_text(free),
+        host::bytes_text(need),
         match &medium {
             Some(plan) if !plan.remote => {
                 format!(
-                    " (the macOS {build} IPSW is {:.1} GB)",
-                    plan.ipsw_bytes as f64 / 1e9
+                    " (the macOS {build} IPSW is {})",
+                    host::bytes_text(plan.ipsw_bytes)
                 )
             }
             _ => String::new(),
@@ -207,7 +207,7 @@ pub(super) fn describe_install(
     for bundle in &plan.restore {
         writeln!(
             text,
-            "  {:<14} {} ({:.1} GB)",
+            "  {:<14} {} ({})",
             bundle.kind.label(),
             bundle::directory_of(
                 &record.volume,
@@ -219,32 +219,31 @@ pub(super) fn describe_install(
                 }
             )
             .display(),
-            bundle.bytes as f64 / 1e9
+            host::bytes_text(bundle.bytes)
         )?;
     }
     if let Some(medium) = plan.medium.as_ref().filter(|m| m.remote) {
         writeln!(
             text,
-            "  install image  {}: the macOS {} restore image's inventory (online); the install \
-             streams the image from Apple's servers over the PC's wired network",
+            "  install image  {}: file list only; Install macOS downloads macOS {} from Apple \
+             over the PC's network (Ethernet, or the Wi-Fi network setup names)",
             medium::directory(&medium.volume, &plan.build).display(),
             plan.build,
         )?;
     } else if let Some(medium) = &plan.medium {
         writeln!(
             text,
-            "  install medium {}: the macOS {} IPSW in pieces of at most 4 GiB on the USB's FAT32 \
-             partition {} (offline; {:.1} GB still to write)",
+            "  install medium {}: the macOS {} IPSW in pieces on partition {} ({} to write)",
             medium::directory(&medium.volume, &plan.build).display(),
             plan.build,
             medium.guid,
-            medium.need as f64 / 1e9
+            host::bytes_text(medium.need)
         )?;
         if medium.expected.sha1.is_none() {
             writeln!(
                 text,
-                "  note           the IPSW has no download receipt, so it is checked against its \
-                 BuildManifest but not Apple's catalog digest"
+                "  note           no download receipt: the IPSW is checked against its \
+                 BuildManifest only"
             )?;
         }
     }
@@ -309,9 +308,8 @@ pub(super) fn apply_install(
         write_record(&record.esp.clone(), record)?;
         return remove_replaced(record, &build, previous.as_ref());
     }
-    let progress = crate::progress::Phase::spinner("Checking installation files");
+    // The inventory shows the restore image's hashing progress.
     let inventory = (environment.inventory)(ipsw, &record.model)?;
-    progress.finish();
     ensure!(
         inventory.manifest.product_build == build,
         "{} holds macOS build {}, not {build}",
@@ -345,12 +343,156 @@ pub(super) fn remove_replaced(
     }
 }
 
-/// Why a setup, which installs macOS, needs the explicit signing-service
-/// choice.
-pub(super) const TSS_REQUIRED: &str = "Stela setup installs macOS onto the Mac's internal SSD, which \
-    needs --tss: required boot firmware needs personalized tickets from Apple's signing \
-    server (gs.apple.com), which receives this machine's ECID, the restore's nonces and its \
-    boot components' hashes. Add --tss to opt in.";
+/// What a resumed first setup keeps of the interrupted one.
+struct Resume {
+    name: String,
+    ecid: Ecid,
+    /// Its restore bundles, when every one is intact; else empty, and
+    /// they are prepared again.
+    bundles: Vec<bundle::Bundle>,
+    /// Its install medium of the build: `plan_install` keeps it when intact
+    /// and `medium::write` keeps each piece whose hash matches.
+    media: Vec<medium::Medium>,
+    translations: Option<translations::Store>,
+    created_directories: Vec<PathBuf>,
+}
+
+/// The setup a resume is checked against.
+struct ResumeRequest<'a> {
+    command: &'a Request,
+    ipsw: &'a Path,
+    disk: &'a installed::InstalledDisk,
+    volume: &'a Path,
+}
+
+impl Resume {
+    /// Refuse a resume of a setup of another build, model, target, data
+    /// volume, install name or bundle generation, naming each difference.
+    fn check(
+        environment: &Environment<'_>,
+        previous: &Record,
+        request: ResumeRequest<'_>,
+    ) -> Result<Self> {
+        let ResumeRequest {
+            command,
+            ipsw,
+            disk,
+            volume,
+        } = request;
+        let [install] = &previous.installs[..] else {
+            bail!(
+                "the interrupted setup on {} names {} installs; remove it with {} first",
+                previous.esp.display(),
+                previous.installs.len(),
+                super::fix(&command.usb, "uninstall")
+            );
+        };
+        let mut differences = Vec::new();
+        let (_, build) = restore::payload::identity(ipsw, command.model())?;
+        if build != previous.build {
+            differences.push(format!("macOS {} (this one {build})", previous.build));
+        }
+        if command.model() != previous.model {
+            differences.push(format!(
+                "model {} (this one {})",
+                previous.model,
+                command.model()
+            ));
+        }
+        let same_disk = |a: &installed::InstalledDisk, b: &installed::InstalledDisk| {
+            a.is_chosen() == b.is_chosen()
+                && a.apple_region_guid
+                    .eq_ignore_ascii_case(&b.apple_region_guid)
+                && a.nor_guid.eq_ignore_ascii_case(&b.nor_guid)
+                && a.machine_state_offset == b.machine_state_offset
+        };
+        if !same_disk(&install.disk, disk) {
+            differences.push(format!(
+                "target {} (this one {})",
+                install.disk.partitions(),
+                disk.partitions()
+            ));
+        }
+        if previous.volume != volume {
+            differences.push(format!(
+                "data volume {} (this one {})",
+                previous.volume.display(),
+                volume.display()
+            ));
+        }
+        if let Some(name) = command
+            .install
+            .as_ref()
+            .filter(|name| **name != install.name)
+        {
+            differences.push(format!(
+                "install \"{}\" (this one \"{name}\")",
+                install.name
+            ));
+        }
+        let generation = environment.generation();
+        if previous.generation() != generation {
+            differences.push(format!(
+                "boot bundles {} (this stela prepares {generation})",
+                previous.generation()
+            ));
+        }
+        let Some(ecid) = install.ecid else {
+            bail!(
+                "the interrupted setup on {} names no ECID; remove it with {} first",
+                previous.esp.display(),
+                super::fix(&command.usb, "uninstall")
+            );
+        };
+        if !differences.is_empty() {
+            bail!(
+                "{} holds an interrupted setup that differs from this one: {}. Finish it with {}, \
+                 or remove it with {} first",
+                previous.esp.display(),
+                differences.join(", "),
+                super::rerun(previous, &command.usb),
+                super::fix(&command.usb, "uninstall")
+            );
+        }
+        // Every restore bundle intact, or all prepared again.
+        let intact = bundle::RESTORE_KINDS.into_iter().all(|kind| {
+            previous
+                .restore_bundle(kind, Some(ecid))
+                .is_some_and(|kept| {
+                    bundle::verify(&kept.directory(&previous.volume), &kept.manifest_sha256)
+                        .is_empty()
+                })
+        });
+        let bundles = match intact {
+            true => previous
+                .bundles
+                .iter()
+                .filter(|b| b.build == build && b.generation() == generation)
+                .cloned()
+                .collect(),
+            false => Vec::new(),
+        };
+        Ok(Self {
+            name: install.name.clone(),
+            ecid,
+            bundles,
+            media: previous
+                .media
+                .iter()
+                .filter(|m| m.build == build)
+                .cloned()
+                .collect(),
+            translations: previous.translations.clone(),
+            created_directories: previous.created_directories.clone(),
+        })
+    }
+}
+
+/// What an install sends to Apple's signing service; the plan says it
+/// before setup writes the USB.
+pub(super) const SIGNING_NOTE: &str = "Apple's signing service (gs.apple.com) receives this \
+    machine's ECID, the restore's nonces and its component hashes, to sign the restore's root \
+    tickets and the recoveryOS LocalPolicy.";
 
 /// The checks' result: everything setup will write, and where.
 pub(super) struct Plan {
@@ -380,22 +522,21 @@ pub(super) fn plan(
 ) -> Result<Plan> {
     let host = environment.host;
     let esp = locate_esp(host, &command.usb)?;
-    if esp.join(RECORD).exists() {
-        let interrupted = stela_engine::read_json::<Record>(&esp.join(RECORD))
-            .is_ok_and(|record| !record.complete);
-        bail!(
-            "{} was already set up{} ({}); run `stela setup uninstall --usb {}` first, or \
-             update it with `stela setup update stela` or `update os`",
-            esp.display(),
-            if interrupted {
-                ", and that setup was interrupted"
-            } else {
-                ""
-            },
-            esp.join(RECORD).display(),
-            command.usb.display()
-        );
-    }
+    // An interrupted first setup is resumed; any other is refused.
+    let previous = match esp.join(RECORD).exists() {
+        false => None,
+        true => match super::record::interrupted(&esp.join(RECORD)) {
+            Some(previous) => Some(previous),
+            None => bail!(
+                "{} is already set up ({}). Update it with {} or {}, or remove it with {} first",
+                esp.display(),
+                esp.join(RECORD).display(),
+                super::fix(&command.usb, "update stela"),
+                super::fix(&command.usb, "update os --fetch"),
+                super::fix(&command.usb, "uninstall")
+            ),
+        },
+    };
     let usb_disk = host.volume(&esp)?.disk;
     // Without --target, a raw partition of the USB is the Mac's internal
     // SSD, and the PC's disks its external drives.
@@ -404,7 +545,6 @@ pub(super) fn plan(
         None => stick_ssd(host, usb_disk.as_deref())?,
     };
     let target = command.target.clone().or(stick.clone());
-    ensure!(command.tss, TSS_REQUIRED);
     // With no disk named here, Install macOS chooses the PC's disk in
     // stela.efi.
     let installed = match &target {
@@ -429,10 +569,26 @@ pub(super) fn plan(
         )?,
     };
     let mut notes = Vec::new();
+    // The bundles, the install medium and the translation store go on the
+    // USB's FAT32 data partition, which the firmware reads.
+    let (volume, _) = medium::locate(host, &esp, command.install_volume.as_deref())?;
+    let resume = match &previous {
+        Some(previous) => Some(Resume::check(
+            environment,
+            previous,
+            ResumeRequest {
+                command,
+                ipsw: &ipsw,
+                disk: &installed.disk,
+                volume: &volume,
+            },
+        )?),
+        None => None,
+    };
     let ecid = machines::machine_ecid(
         machines::EcidOptions {
             given: command.ecid,
-            recorded: None,
+            recorded: resume.as_ref().map(|r| r.ecid),
             sep_provisioned: installed.sep_provisioned,
             new_ecid: command.new_ecid,
         },
@@ -445,20 +601,28 @@ pub(super) fn plan(
     let efi_image = read_efi(environment, &efi_path)?;
     update::check_firmware_support(&esp, &efi_image)?;
     // The restore bundles are prepared on this computer before the USB
-    // changes, which also measures them for the space check.
-    let (product_version, build, prepared) = match early {
-        Some(prepared) => prepared,
-        None => prepare_restore_bundles(environment, &ipsw, command.model(), ecid)?,
+    // changes, which also measures them for the space check. A resumed
+    // setup keeps its intact ones.
+    let (product_version, build, prepared) = match (early, &resume) {
+        (Some(prepared), _) => prepared,
+        (None, Some(resume)) if !resume.bundles.is_empty() => {
+            let (version, build) = restore::payload::identity(&ipsw, command.model())?;
+            notes.push("the interrupted setup's boot files are intact and kept".into());
+            (version, build, Vec::new())
+        }
+        (None, _) => prepare_restore_bundles(environment, &ipsw, command.model(), ecid)?,
     };
     let bundles: u64 = prepared.iter().map(|bundle| bundle.bytes).sum();
-    // The bundles, the install medium and the translation store go on the
-    // USB's FAT32 data partition, which the firmware reads.
-    let (volume, _) = medium::locate(host, &esp, command.install_volume.as_deref())?;
     let install = machines::Install {
-        name: command
-            .install
-            .clone()
-            .unwrap_or_else(|| machines::FIRST_NAME.into()),
+        name: resume.as_ref().map_or_else(
+            || {
+                command
+                    .install
+                    .clone()
+                    .unwrap_or_else(|| machines::FIRST_NAME.into())
+            },
+            |resume| resume.name.clone(),
+        ),
         ecid: Some(ecid),
         disk: installed.disk.clone(),
     };
@@ -474,7 +638,7 @@ pub(super) fn plan(
             &volume,
             &bundle::build_directory(&volume, &build),
         ),
-        volume,
+        volume: volume.clone(),
         payload_directory: None,
         options: String::new(),
         complete: false,
@@ -485,8 +649,10 @@ pub(super) fn plan(
         bundle_schema: environment.interface.bundle_schema,
         bundle_revision: environment.bundle_revision,
         bundles: Vec::new(),
-        tss: command.tss,
-        chooser_timeout: command.chooser_timeout,
+        chooser_timeout: match command.chooser_timeout {
+            Some(super::command::Wait::Seconds(seconds)) => Some(seconds),
+            _ => None,
+        },
         medium: None,
         media: Vec::new(),
         verify_on_read: command.verify_on_read,
@@ -500,6 +666,26 @@ pub(super) fn plan(
         usb4_approved: command.usb4_approve.clone(),
         addresses: super::addresses::Addresses::requested(command)?,
     };
+    // What the interrupted setup wrote and this one keeps: its intact
+    // bundles, its medium (kept whole when intact, else piece by piece by
+    // its hashes), its translation store and the directories it created.
+    if let Some(resume) = resume {
+        notes.push(format!(
+            "resumes the setup interrupted on {}",
+            esp.join(RECORD).display()
+        ));
+        record.bundles = resume.bundles;
+        record.media = resume.media;
+        record.translations = resume.translations;
+        for directory in resume.created_directories {
+            if !record.created_directories.contains(&directory) {
+                record.created_directories.push(directory);
+            }
+        }
+        record
+            .created_directories
+            .sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    }
     // The restore bundles are prepared above: the install plan adds the
     // install medium.
     let install = plan_install(
@@ -515,48 +701,29 @@ pub(super) fn plan(
     // The translation store takes what the data partition has left after
     // everything above.
     let medium_bytes = install.medium.as_ref().map_or(0, |m| m.need);
-    let (store, note) = translations::choose(
-        host,
-        &[record.volume.as_path()],
-        |_| medium_bytes + bundles,
-        command.translation_store_bytes,
-    )?;
-    notes.extend(note);
-    record.translations = store;
+    if record.translations.is_none() {
+        let (store, note) = translations::choose(
+            host,
+            &[record.volume.as_path()],
+            |_| medium_bytes + bundles,
+            command.translation_store_bytes,
+        )?;
+        notes.extend(note);
+        record.translations = store;
+    }
     record.options = record.options_text()?;
     record.choices_text()?;
-    let source = match install.medium.as_ref().is_some_and(|medium| medium.remote) {
-        true => {
-            "streaming the restore image from Apple's servers (about 27 GB) over the PC's \
-                 wired network"
-        }
-        false => "from the install medium on this USB (TSS still needs network)",
-    };
-    notes.push(match installed.disk.is_chosen() {
-        true => format!(
-            "The Install macOS startup choice asks for a disk of the PC and the space macOS gets \
-             there, then Apple's restore installs macOS onto it as the Mac's internal SSD \
-             (ANS2), {source}. An install may not finish yet."
-        ),
-        false => format!(
-            "The Install macOS startup choice restores macOS onto {} as the Mac's internal SSD \
-             (ANS2), {source}. An install may not finish yet.",
-            installed.disk.apple_region
-        ),
-    });
-    notes.push(tss_note());
-    notes.push("Erase installs retain the original development-board FDR failure policy: FDR connectivity is disabled and factory data remains unprovisioned.".into());
+    notes.push(SIGNING_NOTE.into());
     notes.extend(installed.notes.iter().cloned());
-    let mut gpu_chips = Vec::new();
-    for device in environment.host.nvidia_gpus()? {
-        match stela_loader::host_firmware::recipes::nvidia_chip(device) {
-            Some(chip) if !gpu_chips.contains(&chip) => gpu_chips.push(chip),
-            Some(_) => {}
-            None => notes.push(format!(
-                "NVIDIA GPU {device:04x}: setup cannot tell its chip; the boot names the chip \
-                 and `stela setup host-firmware fetch --gpu` adds its firmware."
-            )),
-        }
+    // The firmware of this computer's GPU; a USB made elsewhere gets none,
+    // which the PC's boot screen names, so say how to add it.
+    let (gpu_chips, gpu_notes) = firmware::host_chips(environment.host)?;
+    notes.extend(gpu_notes);
+    if gpu_chips.is_empty() {
+        notes.push(firmware::missing(&super::fix(
+            &command.usb,
+            "host-firmware fetch --gpu CHIP",
+        )));
     }
     Ok(Plan {
         record,
@@ -570,15 +737,6 @@ pub(super) fn plan(
         wifi_passphrase: command.wifi_passphrase.clone(),
         gpu_chips,
     })
-}
-
-/// What the Apple signing server opt-in sends.
-pub(super) fn tss_note() -> String {
-    "TSS opt-in (--tss): the restore host sends this machine's ECID, the restore's nonces \
-     and its boot components' hashes to Apple's signing server (gs.apple.com) for the \
-     restore's root tickets and the recoveryOS LocalPolicy; `stela setup configure --no-tss` turns it \
-     off."
-        .into()
 }
 
 pub(super) fn describe(plan: &Plan) -> Result<String> {
@@ -603,7 +761,7 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
     for prepared in &plan.prepared {
         writeln!(
             text,
-            "  {:<14} {} ({:.1} GB)",
+            "  {:<14} {} ({})",
             prepared.kind.label(),
             bundle::directory_of(
                 &record.volume,
@@ -615,7 +773,7 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
                 }
             )
             .display(),
-            prepared.bytes as f64 / 1e9
+            host::bytes_text(prepared.bytes)
         )?;
     }
     if let Some(store) = &record.translations {
@@ -630,15 +788,12 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
     let disk = &checked.disk;
     writeln!(
         text,
-        "  stela.cfg      {}: boots macOS from {}, or the disk's own recoveryOS when NVRAM \
-         asks or the disk holds no system",
-        record.esp.join("EFI/stela/stela.cfg").display(),
-        disk.apple_region
+        "  stela.cfg      {}",
+        record.esp.join("EFI/stela/stela.cfg").display()
     )?;
     writeln!(
         text,
-        "  choices.cfg    {}: \"{}\" and \"{INSTALL_CHOICE}\", listed for {CHOOSER_SECONDS} \
-         seconds at startup",
+        "  choices.cfg    {}: \"{}\", \"{INSTALL_CHOICE}\" ({CHOOSER_SECONDS} s menu)",
         record.esp.join(CHOICES_PATH).display(),
         install.name
     )?;
@@ -652,12 +807,11 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
     match disk.is_chosen() {
         true => writeln!(
             text,
-            "  Apple region   a partition stela.efi's {INSTALL_CHOICE} makes on the PC disk you \
-             choose"
+            "  Mac's SSD      a PC disk chosen at {INSTALL_CHOICE}"
         )?,
         false => writeln!(
             text,
-            "  Apple region   {} (serial {}, partition {})",
+            "  Mac's SSD      {} (serial {}, partition {})",
             disk.apple_region, disk.apple_region_serial, disk.apple_region_guid
         )?,
     }
@@ -665,10 +819,10 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
     match checked.nor_image {
         Some(_) => writeln!(
             text,
-            "  disks          this USB, and fresh machine state (NOR image or SEP area) on {}",
+            "  writes         this USB, machine state on {}",
             disk.state_description()
         )?,
-        None => writeln!(text, "  disks          none are written but this USB")?,
+        None => writeln!(text, "  writes         this USB only")?,
     }
     for note in &plan.notes {
         writeln!(text, "  note           {note}")?;
@@ -678,17 +832,11 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
 
 /// The plan's line for an install's machine state, after its two spaces.
 pub(super) fn state_line(disk: &installed::InstalledDisk) -> String {
-    let label = if disk.machine_state_offset.is_some() || disk.is_chosen() {
-        "machine state"
-    } else {
-        "NOR"
-    };
-    format!("{label:<14} {}", disk.state_description())
+    format!("{:<14} {}", "machine state", disk.state_description())
 }
 
 pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Result<String> {
     let host = environment.host;
-    ensure!(command.tss, TSS_REQUIRED);
     // Before anything is erased.
     command.read_wifi_passphrase()?;
     if command.fetch {
@@ -723,14 +871,20 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
         }
         host.check_erase_access(&disk)?;
         let identity = wizard::Usb::from_disk(&found, host);
+        if !command.confirmed && std::io::stdin().is_terminal() {
+            confirm_erase(host, &found)?;
+        }
         erase = Some((disk, found.name, found.bytes, identity));
     }
-    // Downloaded boot archives are temporary. A full image goes directly to
-    // USB after preparation and signing; an explicit cache directory keeps the
-    // scripted cache behavior for developer workflows.
+    // Downloaded boot archives are kept in one place until setup finishes,
+    // so a setup run again after a stop reuses them, and removed once it
+    // has. A full image goes directly to the USB after preparation and
+    // signing; an explicit cache directory keeps what it holds.
     let temporary = (command.fetch && command.download_dir.is_none() && !command.dry_run)
-        .then(tempfile::tempdir)
-        .transpose()?;
+        .then(|| download_dir().join("setup"));
+    if let Some(temporary) = &temporary {
+        fs::create_dir_all(temporary)?;
+    }
     let mut download = None;
     let ipsw = if let Some(temporary) = &temporary
         && command.install_image == Some(InstallImage::Offline)
@@ -740,7 +894,7 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
             Some(&command.build),
             Some(command.model()),
         )?;
-        let boot = temporary.path().join("boot.ipsw");
+        let boot = temporary.join("boot.ipsw");
         download = Some(medium::download::Download::prepare(
             image,
             command.model(),
@@ -749,7 +903,7 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
         boot
     } else {
         if let Some(temporary) = &temporary {
-            command.download_dir = Some(temporary.path().to_owned());
+            command.download_dir = Some(temporary.clone());
         }
         command.image()?
     };
@@ -801,9 +955,11 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
                 + 4 * MARGIN;
             ensure!(
                 *capacity == 0 || *capacity >= required,
-                "the USB needs at least {:.1} GB for this installer (it has {:.1} GB); use a larger USB or online mode",
-                required as f64 / 1e9,
-                *capacity as f64 / 1e9
+                "this installer needs a USB of at least {} (this one holds {}): use a larger \
+                 USB, or the network installer (--install-image online), which downloads macOS \
+                 during the install",
+                host::bytes_text(required),
+                host::bytes_text(*capacity)
             );
             early = Some((version, build, prepared));
         }
@@ -828,6 +984,10 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
     }
     let disk = plan.installed.disk.clone();
     apply(environment, plan)?;
+    if let Some(temporary) = &temporary {
+        // The boot files are on the USB now.
+        let _ = fs::remove_dir_all(temporary);
+    }
     let start = match disk {
         disk if disk.is_chosen() => format!(
             "choose \"{INSTALL_CHOICE}\" in Stela's startup choices, pick the PC disk and the \
@@ -835,28 +995,50 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
              installed macOS from that disk"
         ),
         disk if disk.external_disks => format!(
-            "boot the PC from the USB: its internal SSD ({}) is blank, so Stela offers \
-             \"{INSTALL_CHOICE}\", which restores it. Then recoveryOS's Disk Utility \
-             partitions and formats the PC's disks, which macOS sees as external drives, and \
-             Reinstall macOS installs onto one, as on a Mac",
+            "its internal SSD ({}) is blank, so Stela offers \"{INSTALL_CHOICE}\", which \
+             restores macOS onto it; Stela then starts that macOS from the USB, and macOS \
+             sees the PC's other disks as external drives",
             disk.apple_region
         ),
         disk => format!(
             "choose \"{INSTALL_CHOICE}\" in Stela's startup choices to install macOS onto \
-             {target}, then boot from the USB again, which boots the installed macOS (or its \
-             recoveryOS when NVRAM asks)",
+             {target}, then boot from the USB again, which starts the installed macOS",
             target = disk.apple_region
         ),
     };
     writeln!(
         report,
         "Done. Boot the PC from this USB (the firmware's boot menu lists it as a UEFI USB \
-         device): {start}. Stela does not run recoveryOS to its window yet.\nCheck it with: \
-         stela setup status --usb {}\nUndo with: stela setup uninstall --usb {}",
-        command.usb.display(),
-        command.usb.display()
+         device): {start}.\nCheck it with {}\nUndo it with {}",
+        super::fix(&command.usb, "status"),
+        super::fix(&command.usb, "uninstall")
     )?;
     Ok(report)
+}
+
+/// Ask before erasing `disk` at a terminal: a mistyped disk name would
+/// erase another removable disk.
+fn confirm_erase(host: &dyn Host, disk: &host::Disk) -> Result<()> {
+    let serial = host
+        .serial(&disk.identifier)
+        .ok()
+        .flatten()
+        .map(|serial| format!(", serial {serial}"))
+        .unwrap_or_default();
+    eprint!(
+        "Erase {} ({}, {}{serial})? Everything on it is deleted. [y/N] ",
+        disk.identifier,
+        disk.name,
+        host::size_text(disk.bytes)
+    );
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    ensure!(
+        matches!(answer.trim(), "y" | "Y" | "yes" | "Yes" | "YES"),
+        "{} was not erased; setup stopped",
+        disk.identifier
+    );
+    Ok(())
 }
 
 /// The FAT32 volume setup erases a USB into.
@@ -911,8 +1093,9 @@ pub(super) fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
         })
         .with_context(|| {
             format!(
-                "the USB is set up, but without {chip}'s GPU firmware: \
-                 `stela setup host-firmware fetch --gpu {chip}` adds it"
+                "the USB is set up, but without {chip}'s GPU firmware, which macOS needs: add \
+                 it with {}",
+                super::fix(&esp, &format!("host-firmware fetch --gpu {chip}"))
             )
         })?;
     }

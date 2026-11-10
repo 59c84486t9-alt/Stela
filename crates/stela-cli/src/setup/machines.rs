@@ -13,9 +13,8 @@
 //! bound to the old one. Every install needs its own restore bundle,
 //! prepared from the active build's restore image.
 use super::{
-    Environment, Request, TSS_REQUIRED, apply_install, bundle, check_bundle_revision,
-    check_installed_efi, describe_install, ecid::Ecid, installed, plan_install, publish,
-    read_record, tss_note, write_record,
+    Environment, Request, apply_install, bundle, check_bundle_revision, check_installed_efi,
+    describe_install, ecid::Ecid, installed, plan_install, publish, read_record, write_record,
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -79,18 +78,14 @@ pub(super) fn machine_ecid(options: EcidOptions, notes: &mut Vec<String>) -> Res
         (Some(given), _) => Ok(given),
         (None, Some(recorded)) => Ok(recorded),
         (None, None) if sep_provisioned && !new_ecid => bail!(
-            "the NOR partition holds an earlier Stela machine's SEP state, which is bound to that \
-             machine's ECID. Pass that ECID with --ecid (`stela setup status` on its old USB \
-             or its `state backup` file shows it), or --new-ecid to start a new machine, which \
-             orphans its LocalPolicy and SEP state."
+            "this disk's machine state holds an earlier Stela machine's SEP state, which is \
+             bound to that machine's ECID. Pass that ECID with --ecid (`stela setup status` of \
+             its old USB, or its `state backup` file, shows it), or --new-ecid to start a new \
+             machine, which orphans its LocalPolicy and SEP state."
         ),
         (None, None) => {
             if sep_provisioned {
-                notes.push(
-                    "--new-ecid: the NOR partition's SEP state and LocalPolicy belong to another \
-                     ECID and are orphaned"
-                        .into(),
-                );
+                notes.push("--new-ecid: the old SEP state and LocalPolicy are orphaned".into());
             }
             Ecid::generate()
         }
@@ -103,7 +98,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
     let record = read_record(environment, &command.usb)?;
     check_installed_efi(environment, &record)?;
     check_bundle_revision(environment, &record)?;
-    super::update::ready(&record)?;
+    super::update::ready(&record, &command.usb)?;
     if let Some(model) = &command.model {
         ensure!(
             *model == record.model,
@@ -120,7 +115,6 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
     let Some(target) = &command.target else {
         bail!("an install needs --target");
     };
-    ensure!(record.tss || command.tss, TSS_REQUIRED);
     // An install's Apple region is never converted to keep its machine
     // state in its own tail, before anything of it is read.
     if command.nor.is_none() {
@@ -151,59 +145,108 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
             external_disks: false,
         },
     )?;
+    // An add that was interrupted after the record named its install is
+    // finished by the same command: the install keeps its name and ECID.
+    let mut unfinished = None;
     for install in &record.installs {
         let guids = [&install.disk.apple_region_guid, &install.disk.nor_guid];
+        if !guids.contains(&&checked.disk.apple_region_guid)
+            && !guids.contains(&&checked.disk.nor_guid)
+        {
+            continue;
+        }
+        let same = install
+            .disk
+            .apple_region_guid
+            .eq_ignore_ascii_case(&checked.disk.apple_region_guid)
+            && install
+                .disk
+                .nor_guid
+                .eq_ignore_ascii_case(&checked.disk.nor_guid)
+            && command
+                .install
+                .as_ref()
+                .is_none_or(|name| *name == install.name);
+        let missing = record
+            .missing_restore_bundles()
+            .iter()
+            .any(|&(_, ecid)| ecid == install.ecid)
+            || checked.nor_image.is_some()
+            || checked.foreign.is_some();
         ensure!(
-            !guids.contains(&&checked.disk.apple_region_guid)
-                && !guids.contains(&&checked.disk.nor_guid),
+            same && missing,
             "{} already belongs to install \"{}\"",
             checked.disk.partitions(),
             install.name
         );
+        unfinished = Some(install.clone());
     }
-    let name = match &command.install {
-        Some(name) => name.clone(),
-        None if record.installs.is_empty() => FIRST_NAME.into(),
-        None => (2..)
-            .map(|n| format!("{FIRST_NAME} {n}"))
-            .find(|name| record.installs.iter().all(|i| &i.name != name))
-            .expect("a free name"),
-    };
-    check_name(&name)?;
-    ensure!(
-        record.installs.iter().all(|i| i.name != name),
-        "this setup already has an install named {name:?}"
-    );
     let mut notes = checked.notes.clone();
-    let ecid = machine_ecid(
-        EcidOptions {
-            given: command.ecid,
-            recorded: None,
-            sep_provisioned: checked.sep_provisioned,
-            new_ecid: command.new_ecid,
-        },
-        &mut notes,
-    )?;
-    ensure!(
-        record.installs.iter().all(|i| i.ecid != Some(ecid)),
-        "ECID {ecid} already belongs to another install of this setup"
-    );
-    let install = Install {
-        name: name.clone(),
-        ecid: Some(ecid),
-        disk: checked.disk.clone(),
-    };
     let mut next = record.clone();
-    next.installs.push(install.clone());
-    next.tss |= command.tss;
+    let (name, ecid) = match unfinished {
+        Some(install) => {
+            let ecid = machine_ecid(
+                EcidOptions {
+                    given: command.ecid,
+                    recorded: install.ecid,
+                    sep_provisioned: checked.sep_provisioned,
+                    new_ecid: command.new_ecid,
+                },
+                &mut notes,
+            )?;
+            notes.push(format!(
+                "finishes adding install \"{}\", which was interrupted",
+                install.name
+            ));
+            if let Some(kept) = next.installs.iter_mut().find(|i| i.name == install.name) {
+                kept.ecid = Some(ecid);
+                kept.disk = checked.disk.clone();
+            }
+            (install.name, ecid)
+        }
+        None => {
+            let name = match &command.install {
+                Some(name) => name.clone(),
+                None if record.installs.is_empty() => FIRST_NAME.into(),
+                None => (2..)
+                    .map(|n| format!("{FIRST_NAME} {n}"))
+                    .find(|name| record.installs.iter().all(|i| &i.name != name))
+                    .expect("a free name"),
+            };
+            check_name(&name)?;
+            ensure!(
+                record.installs.iter().all(|i| i.name != name),
+                "this setup already has an install named {name:?}"
+            );
+            let ecid = machine_ecid(
+                EcidOptions {
+                    given: command.ecid,
+                    recorded: None,
+                    sep_provisioned: checked.sep_provisioned,
+                    new_ecid: command.new_ecid,
+                },
+                &mut notes,
+            )?;
+            ensure!(
+                record.installs.iter().all(|i| i.ecid != Some(ecid)),
+                "ECID {ecid} already belongs to another install of this setup"
+            );
+            next.installs.push(Install {
+                name: name.clone(),
+                ecid: Some(ecid),
+                disk: checked.disk.clone(),
+            });
+            (name, ecid)
+        }
+    };
     next.verify_on_read = command.verify_on_read;
     next.install_image = command.install_image.or(next.install_image);
     let stale = next.drop_stale_bundles();
     // Every install restores from the medium with its own restore bundle.
     let Some(ipsw) = command.optional_image()? else {
         bail!(
-            "install \"{name}\" (ECID {ecid}) is installed from the macOS {} IPSW, with a restore \
-             bundle of its own: pass the restore image with --ipsw or --fetch",
+            "install \"{name}\" (ECID {ecid}) needs a restore bundle of its own, prepared from \
+             the macOS {} restore image: add --fetch, or --ipsw FILE",
             record.build
         );
     };
@@ -228,20 +271,19 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
     let disk = &checked.disk;
     writeln!(
         text,
-        "  Apple region   {} (serial {}, partition {})",
+        "  Mac's SSD      {} (serial {}, partition {})",
         disk.apple_region, disk.apple_region_serial, disk.apple_region_guid
     )?;
     writeln!(text, "  {}", super::state_line(disk))?;
     describe_install(&next, &install_plan, &mut text)?;
     writeln!(
         text,
-        "  choices.cfg    lists \"{name}\" and its Install macOS; the startup choices open \
-         at every boot"
+        "  choices.cfg    adds \"{name}\" and its Install macOS"
     )?;
     if checked.nor_image.is_some() {
         writeln!(
             text,
-            "  disks          fresh machine state (NOR image or SEP area) on {}",
+            "  writes         machine state on {}",
             disk.state_description()
         )?;
     }
@@ -275,19 +317,19 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
 }
 
 /// Settings of an existing setup: the default install, removing one, the
-/// TSS opt-in, the engine profile and the startup choices' timeout.
+/// engine profile and the startup choices' timeout.
 pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Result<String> {
     let mut record = read_record(environment, &command.usb)?;
     check_installed_efi(environment, &record)?;
-    super::update::ready(&record)?;
+    super::update::ready(&record, &command.usb)?;
     let mut text = format!("Stela setup on {}:\n", record.esp.display());
     let mut removed_bundles = Vec::new();
     if let Some(name) = &command.remove_install {
         let install = record.install(Some(name))?.clone();
         ensure!(
             record.installs.len() > 1,
-            "install \"{name}\" is this setup's only one; `stela setup uninstall` removes the \
-             setup"
+            "install \"{name}\" is this setup's only one; {} removes the setup",
+            super::fix(&command.usb, "uninstall")
         );
         record.installs.retain(|i| i.name != *name);
         if record.default_install.as_deref() == Some(name.as_str()) {
@@ -295,11 +337,10 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
         }
         writeln!(
             text,
-            "  remove         install \"{name}\"; {} keep macOS, its NVRAM and SEP state{}",
-            install.disk.partitions(),
+            "  remove         install \"{name}\" (disk kept{})",
             install
                 .ecid
-                .map(|ecid| format!(" (ECID {ecid}: add it again with --ecid {ecid})"))
+                .map(|ecid| format!(", ECID {ecid}"))
                 .unwrap_or_default()
         )?;
         removed_bundles = record.drop_stale_bundles();
@@ -316,23 +357,6 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
         record.default_install = Some(name.clone());
         writeln!(text, "  default        install \"{name}\" boots by default")?;
     }
-    if command.tss || command.no_tss {
-        record.tss = command.tss;
-        if record.tss {
-            writeln!(text, "  TSS            on. {}", tss_note())?;
-        } else {
-            writeln!(
-                text,
-                "  TSS/FDR        off: no machine identity or nonces are sent to Apple's services"
-            )?;
-            if record.active_medium().is_some() {
-                writeln!(
-                    text,
-                    "  choices.cfg    drops the Install macOS choice: the restore needs --tss"
-                )?;
-            }
-        }
-    }
     if command.profile || command.no_profile {
         record.profile = command.profile;
         writeln!(
@@ -344,9 +368,21 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
             }
         )?;
     }
-    if let Some(seconds) = command.chooser_timeout {
-        record.chooser_timeout = Some(seconds);
-        writeln!(text, "  choices        wait {seconds} s")?;
+    match command.chooser_timeout {
+        Some(super::command::Wait::Seconds(seconds)) => {
+            record.chooser_timeout = Some(seconds);
+            writeln!(text, "  choices        wait {seconds} s")?;
+        }
+        Some(super::command::Wait::Automatic) => {
+            record.chooser_timeout = None;
+            writeln!(
+                text,
+                "  choices        wait {} s with several installs or an install medium, else \
+                 open only when a key is held",
+                super::CHOOSER_SECONDS
+            )?;
+        }
+        None => {}
     }
     if let Some(ssid) = &command.wifi {
         let network = super::wifi::Network {

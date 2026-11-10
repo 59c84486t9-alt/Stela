@@ -15,12 +15,17 @@
 //!   on a partition of at least `boot_log::PARTITION_BYTES`
 //!   (`stela_runtime::pc::boot_log`), and writes nothing.
 //!
-//! Both writes need the NOR partition named again with `--nor`, and that
-//! partition must still be the install's (`installed::confirm`). An install
-//! whose machine state lives in its Apple region's tail is named by that
-//! partition, and every command addresses the tail
+//! Every command finds the install's partition by its recorded GUID and disk
+//! serial (`installed::confirm`), so no other partition is written; `--nor`
+//! names it only where this computer cannot find it, and must name the same
+//! partition. Each write's plan names the partition, its GUID and its disk
+//! serial. An install whose machine state lives in its SSD partition's tail
+//! is named by that partition, and every command addresses the tail
 //! (`installed::state_area`).
-use super::{Environment, Record, Request, check_installed_efi, ecid::Ecid, installed, machines};
+use super::{
+    Environment, Record, Request, check_installed_efi, ecid::Ecid, host::bytes_text, installed,
+    machines,
+};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -110,30 +115,25 @@ pub(super) fn next_boot(variables: &Variables) -> String {
     }
 }
 
-/// The install and confirmed machine state a state command acts on; its
-/// partition must be named with `--nor` for a write.
+/// The install and confirmed machine state a state command acts on.
 fn target<'a>(
     environment: &Environment<'_>,
     record: &'a Record,
     command: &Request,
-    write: bool,
 ) -> Result<(&'a machines::Install, installed::StateArea)> {
     let install = record.install(command.install.as_deref())?;
-    if write {
-        ensure!(
-            command.nor.is_some(),
-            "name install \"{}\"'s {} with --nor (it was {}), so no other partition is written",
-            install.name,
-            if install.disk.machine_state_offset.is_some() {
-                "Apple region, whose last bytes hold its machine state,"
-            } else {
-                "NOR partition"
-            },
-            install.disk.nor
-        );
-    }
     let area = installed::state_area(environment.host, &install.disk, command.nor.as_deref())?;
     Ok((install, area))
+}
+
+/// A write's plan line naming the partition it writes.
+fn partition_line(install: &machines::Install, area: &installed::StateArea) -> String {
+    format!(
+        "  partition      {} (partition {}, disk serial {})\n",
+        area.describe(),
+        install.disk.nor_guid,
+        install.disk.nor_serial
+    )
 }
 
 /// `nvram reset`.
@@ -143,14 +143,11 @@ pub(super) fn reset_nvram(
     command: &Request,
 ) -> Result<String> {
     check_installed_efi(environment, record)?;
-    let (install, area) = target(environment, record, command, true)?;
+    let (install, area) = target(environment, record, command)?;
     let host = environment.host;
     let current = area.read(host, 0, CAPACITY)?;
-    let mut text = format!(
-        "Reset the NVRAM of install \"{}\" ({}):\n",
-        install.name,
-        area.describe()
-    );
+    let mut text = format!("Reset the NVRAM of install \"{}\":\n", install.name);
+    text.push_str(&partition_line(install, &area));
     match nvram(&current) {
         Nvram::Blank => writeln!(text, "  NVRAM          blank; it is written fresh")?,
         Nvram::Valid(variables) => {
@@ -161,10 +158,14 @@ pub(super) fn reset_nvram(
             .iter()
             .map(|p| variables.list(*p).count())
             .sum::<usize>();
+            let removed = match count {
+                1 => "1 variable is".to_owned(),
+                _ => format!("{count} variables are"),
+            };
             writeln!(
                 text,
-                "  NVRAM          {count} variables are removed, boot-volume and boot-args \
-                 among any set; macOS's startup disk choice is made again in macOS"
+                "  NVRAM          {removed} removed, boot-volume and boot-args among any set; \
+                 macOS's startup disk choice is made again in macOS"
             )?;
         }
         Nvram::Invalid(error) => writeln!(
@@ -230,14 +231,14 @@ fn install_log(
     record: &Record,
     command: &Request,
 ) -> Result<String> {
-    let (install, area) = target(environment, record, command, false)?;
+    let (install, area) = target(environment, record, command)?;
     let nor = area.describe();
     let bytes = area.bytes;
     ensure!(
         bytes >= boot_log::PARTITION_BYTES,
-        "{nor} holds {bytes:#x} bytes; the boot log needs {:#x}, so stela.efi boots install \
-         \"{}\" without one",
-        boot_log::PARTITION_BYTES,
+        "{nor} holds {}; the boot log needs {}, so stela.efi boots install \"{}\" without one",
+        bytes_text(bytes),
+        bytes_text(boot_log::PARTITION_BYTES),
         install.name
     );
     let region = area.read(
@@ -266,7 +267,7 @@ pub(super) fn backup(
     command: &Request,
     path: &Path,
 ) -> Result<String> {
-    let (install, area) = target(environment, record, command, false)?;
+    let (install, area) = target(environment, record, command)?;
     let nor = area.describe();
     ensure!(
         !path.exists(),
@@ -362,7 +363,7 @@ pub(super) fn restore(
 ) -> Result<String> {
     check_installed_efi(environment, record)?;
     let (header, bytes) = read_backup(path)?;
-    let (install, area) = target(environment, record, command, true)?;
+    let (install, area) = target(environment, record, command)?;
     let (host, nor) = (environment.host, area.describe());
     ensure!(
         header.nor_guid.eq_ignore_ascii_case(&install.disk.nor_guid),
@@ -383,10 +384,11 @@ pub(super) fn restore(
     }
     let current = area.read(host, 0, STATE_BYTES)?;
     let mut text = format!(
-        "Restore the machine state of install \"{}\" ({nor}) from {}:\n",
+        "Restore the machine state of install \"{}\" from {}:\n",
         install.name,
         path.display()
     );
+    text.push_str(&partition_line(install, &area));
     if current == bytes {
         writeln!(text, "  state          already as backed up")?;
         return Ok(text);

@@ -13,7 +13,6 @@ fn complete_records_report_the_named_constraint() {
         storage: Some(target.clone()),
         nor: Some(target.clone()),
         install: Some(String::from("install.json")),
-        tss: true,
         ..System::default()
     };
     let examples = [
@@ -80,13 +79,6 @@ fn complete_records_report_the_named_constraint() {
                 ..System::default()
             },
             Constraint::VerifyDependency,
-        ),
-        (
-            System {
-                tss: false,
-                ..install
-            },
-            Constraint::InstallTicket,
         ),
         (
             System {
@@ -259,15 +251,10 @@ fn clock_exclusivity_keeps_every_independent_input() {
             ..base.clone()
         },
         System {
-            tss: true,
-            ..base.clone()
-        },
-        System {
             bundle: true,
             storage: Some(target.clone()),
             nor: Some(target.clone()),
             install: Some(String::from("manifest")),
-            tss: true,
             ..base.clone()
         },
         System {

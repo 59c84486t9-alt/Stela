@@ -37,9 +37,10 @@ enum Command {
     /// fails when something needs fixing.
     #[command(visible_alias = "doctor")]
     Status(Usb),
-    /// Put back what the setup record says (the entry, stela.cfg, the
-    /// startup choices); with `--ipsw` or `--fetch`, prepare
-    /// the active build's restore bundles again.
+    /// Put back what the setup record says (stela.cfg, the startup choices,
+    /// damaged boot files); with `--fetch` or `--ipsw`, also prepare the
+    /// active build's restore bundles again and put back a damaged install
+    /// medium.
     Repair(Repair),
     /// Update an existing setup in place.
     #[command(subcommand)]
@@ -52,8 +53,8 @@ enum Command {
     /// Back up an install's machine state, or write a backup back.
     #[command(subcommand)]
     State(State),
-    /// Print the boot log stela.efi keeps on the install's machine-state
-    /// partition.
+    /// Print the boot logs: the USB's own, then the one stela.efi keeps in
+    /// the install's machine state.
     BootLog(Machine),
     /// Change the settings of an existing setup.
     Configure(Configure),
@@ -134,8 +135,9 @@ struct Image {
     /// Where `--fetch` keeps the image.
     #[arg(long)]
     download_dir: Option<PathBuf>,
-    /// The build `--fetch` downloads: the newest supported one by default.
-    #[arg(long, default_value = builds::DEFAULT.build, hide = true)]
+    /// The macOS build `--fetch` downloads: the newest supported one by
+    /// default. Maintenance commands download the setup's own build.
+    #[arg(long, default_value = builds::DEFAULT.build)]
     build: String,
 }
 
@@ -205,6 +207,24 @@ impl Addressing {
     }
 }
 
+/// How long the startup choices wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Wait {
+    /// As setup chooses (`super::CHOOSER_SECONDS` with several installs).
+    Automatic,
+    Seconds(u32),
+}
+
+fn wait(value: &str) -> Result<Wait, String> {
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(Wait::Automatic);
+    }
+    value
+        .parse()
+        .map(Wait::Seconds)
+        .map_err(|_| "a number of seconds, or auto".into())
+}
+
 /// An install's machine state.
 #[derive(Args)]
 struct Machine {
@@ -213,9 +233,9 @@ struct Machine {
     /// The install to act on (the default install otherwise).
     #[arg(long)]
     install: Option<String>,
-    /// The install's machine-state partition, named again (the target
-    /// itself when its tail holds the state).
-    #[arg(long, value_parser = partition_name)]
+    /// The install's machine-state partition, when this computer names it
+    /// differently than setup found it by its GUID and disk serial.
+    #[arg(long, value_parser = partition_name, hide = true)]
     nor: Option<String>,
 }
 
@@ -251,12 +271,13 @@ struct Create {
     #[command(flatten)]
     addressing: Addressing,
     /// Where an install reads the macOS restore image: `offline` copies the
-    /// whole IPSW (about 27 GB) onto the USB; TSS still needs network.
-    /// `online` writes only its inventory, and `stela.efi` streams
-    /// the IPSW from Apple's servers during the install over the PC's wired
-    /// network. A complete local IPSW defaults to offline, including for
-    /// a disk chosen later in stela.efi. An image without the macOS system
-    /// image (`--fetch`) defaults to online.
+    /// whole IPSW (about 27 GB) onto the USB, and the install still needs
+    /// the internet for Apple's signing server. `online` writes only its
+    /// file list, and `stela.efi` downloads the IPSW from Apple during the
+    /// install over the PC's network (Ethernet, or the Wi-Fi network
+    /// `--wifi` names). A complete local IPSW defaults to offline, including
+    /// for a disk chosen later in stela.efi. An image without the macOS
+    /// system image (`--fetch`) defaults to online.
     #[arg(long, value_enum)]
     install_image: Option<InstallImage>,
     /// The `stela.efi` to install instead of the one built into `stela`.
@@ -273,30 +294,32 @@ struct Create {
     /// The PC's partition that becomes the Mac's internal SSD, such as
     /// disk1s2 on macOS, /dev/nvme0n1p2 on Linux or disk1p2 on Windows:
     /// Install macOS restores macOS onto it, and it is booted from it.
-    /// Without --nor its last 16 MiB keep the machine state (NVRAM, the SEP's
-    /// state and the boot log), which the guest never sees. On an existing
+    /// Without --nor its last 16.8 MB keep the machine state (NVRAM, the
+    /// SEP's state and the boot log), which macOS never sees. On an existing
     /// setup, it adds another install.
     #[arg(long, value_parser = partition_name)]
     target: Option<String>,
-    /// Optional: a separate PC partition (at least 1 MiB and 64 KiB) for the
-    /// machine state instead of the target's tail: the Mac's NOR flash, where
-    /// NVRAM persists, and the SEP's state; with at least 0x510000 bytes it
-    /// also keeps stela.efi's boot log.
+    /// Optional: a separate PC partition for the machine state instead of
+    /// the target's last bytes. 8.5 MB holds NVRAM and the SEP's state,
+    /// 12.6 MB also stela.efi's boot log, and 14.7 MB also the board
+    /// devices' firmware, which boots of the installed disk need: use at
+    /// least 14.7 MB.
     #[arg(long, value_parser = partition_name, requires = "target")]
     nor: Option<String>,
     /// The serial number of the disk holding `--target` and `--nor`, when
     /// this computer cannot read it.
-    #[arg(long, requires = "target")]
+    #[arg(long, requires = "target", hide = true)]
     disk_serial: Option<String>,
     /// Erase the other file system a `--target` holds, unmounting it first:
     /// the PC's own OS would mount it and clear Stela's machine state.
     #[arg(long, requires = "target")]
     erase_target: bool,
-    /// Write a fresh NOR image over machine state that is neither blank nor
-    /// one, and blank a foreign SEP area.
+    /// Write fresh machine state over bytes that are neither blank nor
+    /// Stela's machine state, as another program or an interrupted setup
+    /// leaves them.
     #[arg(long, requires = "target")]
     initialize_nor: bool,
-    /// The name of the new install.
+    /// The new install's name (macOS by default).
     #[arg(long)]
     install: Option<String>,
     /// The ECID of the machine being set up, in hexadecimal: reuse a known
@@ -307,14 +330,6 @@ struct Create {
     /// another one. Its LocalPolicy and SEP state are then orphaned.
     #[arg(long)]
     new_ecid: bool,
-    /// Opt in to Apple's signing server: the restore host sends the
-    /// machine's ECID, the restore's nonces and the build's component hashes
-    /// to gs.apple.com for the restore's personalized root tickets and the
-    /// recoveryOS LocalPolicy. Required for a new setup, which installs
-    /// macOS: a local IPSW supplies the image files, but boot firmware still
-    /// needs personalized tickets.
-    #[arg(long)]
-    tss: bool,
     /// Have every startup choice time the engine (its `--profile`): each
     /// heartbeat of the boot log then reports where the engine's time goes
     /// between translated blocks, by phase and by exit kind.
@@ -324,17 +339,17 @@ struct Create {
     /// it otherwise reads whole before the restore starts; with them it
     /// checks each block as the restore reads it either way. It adds the
     /// engine's `--verify-on-read` to the Install macOS choice.
-    #[arg(long, requires = "target")]
+    #[arg(long, requires = "target", hide = true)]
     verify_on_read: bool,
     /// The USB's FAT32 data partition, when it has several, for the boot
     /// bundles, the install medium (the full IPSW in pieces or its
     /// inventory) and the translation store; the first one by default.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     install_volume: Option<PathBuf>,
     /// The bound of each translation pack `stela.efi` keeps on the USB, in
     /// bytes (64 MiB to the FAT32 file limit; 0 for none). Defaults to 1 GiB
     /// or what fits. The mount uses up to 1 GiB of each allocation.
-    #[arg(long, value_name = "BYTES")]
+    #[arg(long, value_name = "BYTES", hide = true)]
     translation_store_bytes: Option<u64>,
     /// The model or size, as setup shows it, of the whole disk `--usb`
     /// names, which erasing a removable disk other than a USB (an SD card,
@@ -360,7 +375,6 @@ impl Create {
             install: self.install,
             ecid: self.ecid,
             new_ecid: self.new_ecid,
-            tss: self.tss,
             profile: self.profile,
             verify_on_read: self.verify_on_read,
             install_volume: self.install_volume,
@@ -386,10 +400,15 @@ struct Repair {
     /// (with `--ipsw` or `--fetch`).
     #[arg(long, value_enum)]
     install_image: Option<InstallImage>,
-    /// Erase the other file system an install's Apple region holds: the
+    /// Erase the other file system an install's SSD partition holds: the
     /// PC's own OS would mount it and clear Stela's machine state.
     #[arg(long)]
     erase_target: bool,
+    /// Write fresh machine state over an install's that stela.efi would
+    /// refuse, as an interrupted `--target` leaves it. A SEP area is blanked
+    /// only on a machine that never booted.
+    #[arg(long)]
+    initialize_nor: bool,
     /// The machine's ECID, in hexadecimal, when its machine state cannot
     /// name it.
     #[arg(long, value_parser = |value: &str| Ecid::parse(value).map_err(|e| e.to_string()))]
@@ -408,6 +427,7 @@ impl Repair {
         let mut request = Request {
             install_image: self.install_image,
             erase_target: self.erase_target,
+            initialize_nor: self.initialize_nor,
             ecid: self.ecid,
             new_ecid: self.new_ecid,
             dry_run: self.dry_run,
@@ -424,8 +444,8 @@ enum Update {
     /// or `--fetch` lets it prepare the boot bundles again when it reads a
     /// new bundle schema or this `stela` prepares a new bundle revision.
     Stela(UpdateStela),
-    /// Add a new macOS build's install medium and restore bundles (`--ipsw`
-    /// or `--fetch`) for Install macOS.
+    /// Replace Install macOS's build with a new one (`--fetch` or `--ipsw`):
+    /// its install medium and restore bundles replace the old build's.
     Os(UpdateOs),
 }
 
@@ -587,15 +607,9 @@ struct Configure {
     #[arg(long)]
     remove_install: Option<String>,
     /// Seconds `stela.efi`'s startup choices wait (0: only when a key is
-    /// held).
-    #[arg(long)]
-    chooser_timeout: Option<u32>,
-    /// Turn the Apple signing server opt-in on (see `stela setup --help`).
-    #[arg(long, conflicts_with = "no_tss")]
-    tss: bool,
-    /// Turn the Apple signing server opt-in off.
-    #[arg(long)]
-    no_tss: bool,
+    /// held), or `auto` for setup's choice.
+    #[arg(long, value_name = "SECONDS|auto", value_parser = wait)]
+    chooser_timeout: Option<Wait>,
     /// Turn the engine profile on for every startup choice.
     #[arg(long, conflicts_with = "no_profile")]
     profile: bool,
@@ -619,10 +633,10 @@ struct Configure {
     #[command(flatten)]
     addressing: Addressing,
     /// Take the IPv4 address and router from DHCP again.
-    #[arg(long, conflicts_with = "ipv4")]
+    #[arg(long = "no-ipv4", alias = "automatic-ipv4", conflicts_with = "ipv4")]
     automatic_ipv4: bool,
     /// Take the DNS servers from DHCP and the router again.
-    #[arg(long, conflicts_with = "dns")]
+    #[arg(long = "no-dns", alias = "automatic-dns", conflicts_with = "dns")]
     automatic_dns: bool,
     /// Show what would change, and change nothing.
     #[arg(long)]
@@ -635,8 +649,6 @@ impl Configure {
             default_install: self.default_install,
             remove_install: self.remove_install,
             chooser_timeout: self.chooser_timeout,
-            tss: self.tss,
-            no_tss: self.no_tss,
             profile: self.profile,
             no_profile: self.no_profile,
             no_wifi: self.no_wifi,
@@ -673,8 +685,8 @@ enum HostFirmware {
     Fetch {
         #[arg(value_name = "REQUIREMENTS", required_unless_present = "gpu")]
         requirements: Option<PathBuf>,
-        /// Also keep what the USB holds, and add what nouveau needs for this
-        /// NVIDIA chip, which a boot without it names (`ga104`).
+        /// Also keep what the USB holds, and add the GPU firmware this NVIDIA
+        /// chip needs, such as ga104. A boot without it names the chip.
         #[arg(long, value_name = "CHIP")]
         gpu: Option<String>,
         #[command(flatten)]

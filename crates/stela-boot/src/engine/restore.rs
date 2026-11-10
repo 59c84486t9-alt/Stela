@@ -629,12 +629,6 @@ impl Experiment {
             }
             (false, Verify::Full) => Verify::Full,
         };
-        let personalized = signer.is_some();
-        if mode == Mode::DevelopmentInstall && !personalized {
-            return Err(refuse!(
-                "the development install needs --tss for required boot firmware"
-            ));
-        }
         output::arguments(format_args!(
             "{} build={} source_sha256={} manifest_sha256={} identity={} bytes={} hashes={} verify={}\n",
             match mode {
@@ -708,9 +702,8 @@ impl Experiment {
             // The bundle boots under the AP ticket Apple personalized for it,
             // which also answers RootTicket.
             let booted = inventory_file(handoff, BOOT_MANIFEST_FILE)
-                .ok_or(refuse!("--tss needs the bundle's boot manifest"))?;
-            answers.boot_with(booted.to_vec()).map_err(|error| refuse!("--tss needs a bundle whose boot manifest Apple personalized for this machine \
-                     (stela-dev boot prepare --tss): {error}", %error))?;
+                .ok_or(refuse!("install: the bundle has no boot manifest"))?;
+            answers.boot_with(booted.to_vec()).map_err(|error| refuse!("install: the bundle's boot manifest is not personalized for this machine: {error}", %error))?;
         }
         // Serve the system-image content-key GET from the inventory's keys.
         answers

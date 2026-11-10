@@ -18,23 +18,24 @@
 //! or zeros is used only with `--erase-target`, so no host data is lost by
 //! accident. Every later Stela or macOS update keeps both partitions.
 use super::ecid::Ecid;
-use super::host::{Host, PartitionInfo};
+use super::host::{Host, PartitionInfo, bytes_text};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use stela_boot_core::options::{self, System};
 use stela_loader::{
     boot_selection::{BOOT_COMMAND, Command, ONE_TIME_BOOT_COMMAND, RECOVERY_BOOT_MODE, lookup},
     mount_interface::CHOSEN_DISK,
 };
 use {
-    stela_formats::payload::gpt::DEFAULT_MIN_APPLE_BYTES, stela_runtime::pc::boot_log,
-    stela_runtime::pc::machine_state, stela_runtime::pc::storage::Target,
-    stela_soc::machine::sep_state, stela_soc_data::nor::CAPACITY, stela_soc_data::nor::Image,
-    stela_soc_data::nor::SECTOR_SIZE, stela_soc_data::nor::nvram::Partition,
-    stela_soc_data::nor::nvram::Variables,
+    stela_formats::payload::gpt::DEFAULT_MIN_APPLE_BYTES,
+    stela_formats::payload::gpt::SIGNATURE as GPT_SIGNATURE, stela_runtime::pc::board_flash,
+    stela_runtime::pc::boot_log, stela_runtime::pc::machine_state,
+    stela_runtime::pc::storage::Target, stela_soc::machine::sep_state,
+    stela_soc_data::nor::CAPACITY, stela_soc_data::nor::Image, stela_soc_data::nor::SECTOR_SIZE,
+    stela_soc_data::nor::nvram::Partition, stela_soc_data::nor::nvram::Variables,
 };
 
-const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 /// LBA 1 at 512-byte or 4096-byte blocks.
 const GPT_HEADER_OFFSETS: [u64; 2] = [512, 4096];
 const PROBE_BYTES: usize = 8192;
@@ -190,9 +191,11 @@ pub(super) enum Role {
 }
 
 /// The partition identifier that is still `disk`'s partition in `role`:
-/// `explicit` when the user names one, else the recorded identifier, which
-/// must carry the recorded GUID, sit on a disk with the recorded serial (when
-/// this computer reports one) and be unmounted. Every write setup makes to a
+/// `explicit` when the user names one, else the recorded identifier, else
+/// whichever partition of this computer's disks carries the recorded GUID,
+/// since disk names change with plug order and reboots. It must carry the
+/// recorded GUID, sit on a disk with the recorded serial (when this
+/// computer reports one) and be unmounted. Every write setup makes to a
 /// partition goes through this, so a renumbered disk or another partition
 /// is never written.
 pub(super) fn confirm(
@@ -210,23 +213,43 @@ pub(super) fn confirm(
             &disk.apple_region,
             &disk.apple_region_serial,
             &disk.apple_region_guid,
-            "Apple region",
+            "SSD partition",
         ),
-        Role::Nor => (&disk.nor, &disk.nor_serial, &disk.nor_guid, "NOR partition"),
+        Role::Nor => (
+            &disk.nor,
+            &disk.nor_serial,
+            &disk.nor_guid,
+            "machine-state partition",
+        ),
     };
-    let identifier = explicit.unwrap_or(recorded);
+    let carries = |identifier: &str| {
+        host.partition(identifier)
+            .is_ok_and(|info| info.guid.eq_ignore_ascii_case(guid))
+    };
+    let identifier = match explicit {
+        Some(explicit) => explicit.to_owned(),
+        None if carries(recorded) => recorded.clone(),
+        None => match host.disks().ok().and_then(|disks| {
+            disks
+                .into_iter()
+                .flat_map(|disk| disk.partitions)
+                .map(|partition| partition.identifier)
+                .find(|identifier| carries(identifier))
+        }) {
+            Some(found) => found,
+            None => bail!(
+                "this install's {what} (partition {guid}, on the disk with serial {serial:?}) is \
+                 not connected to this computer: connect that disk"
+            ),
+        },
+    };
     let info = host
-        .partition(identifier)
+        .partition(&identifier)
         .with_context(|| format!("cannot inspect {identifier}"))?;
     ensure!(
         info.guid.eq_ignore_ascii_case(guid),
-        "{identifier} is not this install's {what} (partition {guid}); its identifier may have \
-         changed. Find the partition with that GUID ({}) and pass it with {}",
-        super::host::PARTITION_LISTING,
-        match role {
-            Role::AppleRegion => "--target",
-            Role::Nor => "--nor",
-        }
+        "{identifier} is not this install's {what} (partition {guid}). Leave out --nor, and \
+         setup finds the partition by its GUID"
     );
     if let Some(found) = host.serial(&info.disk)? {
         ensure!(
@@ -238,7 +261,7 @@ pub(super) fn confirm(
         info.mount.is_none(),
         "{identifier} is mounted; this install's {what} is a raw partition Stela owns"
     );
-    Ok(identifier.to_owned())
+    Ok(identifier)
 }
 
 /// Where a machine's state is: a partition, and the byte offset and length
@@ -265,10 +288,9 @@ impl StateArea {
         ensure!(
             at.checked_add(length as u64)
                 .is_some_and(|end| end <= self.bytes),
-            "{} bytes at {at:#x} are outside {}'s {:#x}-byte machine state",
-            length,
+            "{length} bytes at byte {at} are outside {}'s machine state ({})",
             self.identifier,
-            self.bytes
+            bytes_text(self.bytes)
         );
         Ok(())
     }
@@ -303,10 +325,11 @@ pub(super) fn state_area(
     let layout = machine_state::split(bytes).map_err(|e| anyhow::anyhow!("{identifier}: {e}"))?;
     ensure!(
         layout.state_offset() == recorded,
-        "{identifier} holds {bytes:#x} bytes, so its machine state would start at {:#x}, not \
-         at the recorded {recorded:#x}: the partition was resized, and stela.efi would no \
-         longer find its NVRAM and SEP state. Restore its size, or restore a `state backup` \
-         file after setting the install up again.",
+        "{identifier} holds {}, so its machine state would start at byte {}, not at the \
+         recorded byte {recorded}: the partition was resized, and stela.efi would no longer \
+         find its NVRAM and SEP state. Restore its size, or restore a `state backup` file \
+         after setting the install up again.",
+        bytes_text(bytes),
         layout.state_offset()
     );
     Ok(StateArea {
@@ -459,14 +482,14 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     );
     ensure!(
         request.nor != Some(request.apple_region),
-        "the Apple region and a NOR partition of its own are two partitions; leave out --nor to \
-         keep the machine state in the Apple region's last {} MiB",
-        machine_state::MACHINE_STATE_BYTES >> 20
+        "--target and --nor name the same partition; leave out --nor to keep the machine state \
+         in the target's last {}",
+        bytes_text(machine_state::MACHINE_STATE_BYTES)
     );
     let region = usable(
         host,
         request.apple_region,
-        "Apple region",
+        "Mac's SSD",
         request.usb_disk.filter(|_| !request.external_disks),
         request.erase_target,
     )?;
@@ -481,15 +504,16 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     let ssd_bytes = split.map_or(region.bytes, |split| split.namespace_bytes);
     ensure!(
         ssd_bytes >= DEFAULT_MIN_APPLE_BYTES,
-        "{} holds {:.1} GB{}; macOS needs an Apple region of at least {} GB",
+        "{} holds {}{}; macOS needs at least {}. Give it a larger partition.",
         region.identifier,
-        ssd_bytes as f64 / 1e9,
+        // Rounded down, so that a shortfall never reads as the minimum.
+        bytes_text(ssd_bytes / 100_000_000 * 100_000_000),
         if split.is_some() {
             " before the machine state in its last bytes"
         } else {
             ""
         },
-        DEFAULT_MIN_APPLE_BYTES / 1_000_000_000
+        bytes_text(DEFAULT_MIN_APPLE_BYTES)
     );
     let found = contents(host, &region.identifier)?;
     let foreign = matches!(found, Contents::Other).then(|| region.clone());
@@ -500,35 +524,27 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
                 let spans = guest_disk_bytes(&head);
                 ensure!(
                     spans.is_some_and(|bytes| bytes <= split.namespace_bytes),
-                    "{} holds a guest disk that spans {}, past the {:#x} bytes the Mac's SSD \
-                     keeps when the machine state lives in the partition's last bytes. Its \
-                     install is not converted: that would truncate the disk and overwrite its \
-                     backup GPT. Keep its machine state on a partition of its own with --nor.",
+                    "{} holds a macOS disk that spans {}, past the {} the Mac's SSD keeps when \
+                     the machine state lives in the partition's last bytes. Its install is not \
+                     converted: that would truncate the disk and overwrite its backup GPT. Keep \
+                     its machine state on a partition of its own with --nor.",
                     region.identifier,
-                    spans.map_or_else(
-                        || "an unreadable size".into(),
-                        |bytes| format!("{bytes:#x} bytes")
-                    ),
-                    split.namespace_bytes
+                    spans.map_or_else(|| "an unreadable size".into(), bytes_text),
+                    bytes_text(split.namespace_bytes)
                 );
             }
             notes.push(format!(
-                "{} already holds a guest disk; it is kept and booted",
+                "{} already holds a macOS disk; it is kept and booted",
                 region.identifier
             ))
         }
-        Contents::Blank => notes.push(format!(
-            "{} is blank: install macOS onto it with the Install macOS startup choice",
-            region.identifier
-        )),
+        Contents::Blank => notes.push(format!("{} is blank", region.identifier)),
         Contents::Other if request.erase_target => notes.push(format!(
-            "{} holds other data, which setup erases (--erase-target): left in place, the PC's \
-             own OS would mount its file system and clear the free space it sees, Stela's \
-             machine state included",
+            "{} holds other data; --erase-target erases it",
             region.identifier
         )),
         Contents::Other => bail!(
-            "{} holds data that is not a Stela guest disk; installing macOS onto it would erase \
+            "{} holds data that is not a Stela macOS disk; installing macOS onto it would erase \
              it. Pass --erase-target to use it anyway.",
             region.identifier
         ),
@@ -536,7 +552,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     // The machine state: a partition of its own, or the region's tail.
     let (nor, area, label) = match (request.nor, split) {
         (Some(identifier), _) => {
-            let nor = usable(host, identifier, "NOR", request.usb_disk, false)?;
+            let nor = usable(host, identifier, "machine state", request.usb_disk, false)?;
             let area = StateArea {
                 identifier: nor.identifier.clone(),
                 offset: 0,
@@ -552,17 +568,15 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
                 bytes: split.state_bytes,
             };
             let label = format!(
-                "{}'s machine state (its last {:#x} bytes)",
-                region.identifier, split.state_bytes
+                "{}'s machine state (its last {})",
+                region.identifier,
+                bytes_text(split.state_bytes)
             );
             notes.push(format!(
-                "the machine state (NVRAM, the SEP's state and the boot log) lives in the last \
-                 {:#x} bytes of {}, from byte {:#x}; recoveryOS sees the {:#x} bytes before it \
-                 as the Mac's SSD",
-                split.state_bytes,
+                "the machine state takes the last {} of {}; the Mac's SSD is the {} before it",
+                bytes_text(split.state_bytes),
                 region.identifier,
-                split.state_offset(),
-                split.namespace_bytes
+                bytes_text(split.namespace_bytes)
             ));
             (region.clone(), area, label)
         }
@@ -571,21 +585,32 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     let state_bytes = CAPACITY + stela_formats::machine_state::SEP_BYTES as usize;
     ensure!(
         area.bytes >= state_bytes as u64,
-        "{} is smaller than the {state_bytes:#x} bytes of the 8 MiB NOR image and the SEP's \
-         state ({:#x} bytes also keep the optional boot log)",
+        "{} holds {}; the machine state needs at least {} (NVRAM and the SEP's state), and {} \
+         to keep the boot log and the board devices' firmware too",
         nor.identifier,
-        boot_log::PARTITION_BYTES
+        bytes_text(area.bytes),
+        bytes_text(state_bytes as u64),
+        bytes_text(board_flash::PARTITION_BYTES)
     );
     notes.push(if area.bytes >= boot_log::PARTITION_BYTES {
-        format!("{label} also keeps stela.efi's boot log (`stela setup boot-log`)")
+        format!("{label} keeps the boot log")
     } else {
         format!(
-            "{label} holds {:#x} bytes: it boots without a boot log, which is optional and needs \
-             a partition of at least {:#x} bytes",
-            area.bytes,
-            boot_log::PARTITION_BYTES
+            "{label} has no room for the boot log ({} of {})",
+            bytes_text(area.bytes),
+            bytes_text(boot_log::PARTITION_BYTES)
         )
     });
+    // The board devices' flash follows the log; stela.efi boots without it
+    // and says so (`BOARD FLASH off`).
+    if area.bytes < board_flash::PARTITION_BYTES {
+        notes.push(format!(
+            "{label} has no room for the board devices' flash ({} of {}): boots of the \
+             installed disk lack the device firmware a restore bundle carries",
+            bytes_text(area.bytes),
+            bytes_text(board_flash::PARTITION_BYTES)
+        ));
+    }
     let bytes = area.read(host, 0, state_bytes)?;
     let (nor_bytes, sep_area) = bytes.split_at(CAPACITY);
     let blank = nor_bytes.iter().all(|&b| b == 0);
@@ -595,7 +620,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     let nor_foreign = match image {
         _ if blank => {
             notes.push(format!(
-                "{label} is blank: stela.efi writes a fresh NOR image there at its first boot"
+                "{label} is blank; stela.efi writes a NOR image at first boot"
             ));
             false
         }
@@ -605,8 +630,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
         }
         _ if request.initialize_nor => {
             notes.push(format!(
-                "{label} is neither blank nor a NOR image: setup writes a fresh NOR image \
-                 (--initialize-nor)"
+                "{label} is not a NOR image; --initialize-nor overwrites it"
             ));
             true
         }
@@ -622,15 +646,12 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
         Ok(true) => false,
         Ok(false) => {
             sep_provisioned = true;
-            notes.push(format!(
-                "{label} holds SEP state; its anti-replay store is kept"
-            ));
+            notes.push(format!("{label} holds SEP state; kept"));
             false
         }
         Err(_) if request.initialize_nor => {
             notes.push(format!(
-                "{label} holds other bytes after its NOR image: setup blanks the SEP's state \
-                 (--initialize-nor)"
+                "{label}: SEP area is not blank; --initialize-nor blanks it"
             ));
             true
         }
@@ -655,7 +676,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     let same_disk = region.disk == nor.disk;
     ensure!(
         request.serial.is_none() || same_disk,
-        "--disk-serial names one disk, but the Apple region and the NOR are on {} and {}",
+        "--disk-serial names one disk, but --target and --nor are on {} and {}",
         region.disk,
         nor.disk
     );
@@ -709,6 +730,136 @@ pub(super) fn initialize_nor(host: &dyn Host, disk: &InstalledDisk, image: &[u8]
     let area = state_area(host, disk, None)?;
     area.write(host, 0, image)
         .with_context(|| format!("writing a fresh NOR image to {}", area.describe()))
+}
+
+/// Whether `stela.efi` has never booted the machine whose state `area`
+/// holds: its boot log's header is all zeros (`stela.efi`'s loader writes
+/// it at the start of every boot, before the guest and its SEP run), and
+/// its NVRAM holds no variables. A damaged header, as a flush cut short by a
+/// power loss leaves it, is no proof: the machine may have booted. None when
+/// the area is too small for a log, which leaves it unknown.
+pub(super) fn never_booted(host: &dyn Host, area: &StateArea) -> Result<Option<bool>> {
+    if area.bytes < boot_log::PARTITION_BYTES {
+        return Ok(None);
+    }
+    let region = area.read(host, boot_log::OFFSET, boot_log::LOG_BYTES as usize)?;
+    if boot_log::read(&region) != Err(boot_log::HeaderError::Blank) {
+        return Ok(Some(false));
+    }
+    let nor = area.read(host, 0, CAPACITY)?;
+    let variables = Image::from_bytes(nor).and_then(|image| {
+        let bank = image.current_bank()?;
+        Variables::parse(image.bank(bank)?)
+    });
+    Ok(Some(match variables {
+        Ok(variables) => [Partition::System, Partition::Common]
+            .into_iter()
+            .all(|partition| variables.list(partition).next().is_none()),
+        Err(_) => true,
+    }))
+}
+
+/// What to do about an install whose SEP area may hold its keys but cannot
+/// be read: restore a backup, or give its disk a new machine.
+pub(super) fn lost_keys(install: &super::machines::Install, usb: &Path, several: bool) -> String {
+    let fix = |words: &str| super::fix(usb, words);
+    let name = super::quoted(&install.name);
+    let which = if several {
+        format!(" --install {name}")
+    } else {
+        String::new()
+    };
+    let disk = &install.disk;
+    let target = match disk.machine_state_offset {
+        Some(_) => format!("--target {}", disk.apple_region),
+        None => format!("--target {} --nor {}", disk.apple_region, disk.nor),
+    };
+    let start_over = if several {
+        format!(
+            "remove the install with {}, then add the disk again with {}",
+            fix(&format!("configure --remove-install {name}")),
+            fix(&format!("{target} --initialize-nor --fetch"))
+        )
+    } else {
+        format!(
+            "remove the setup with {}, then set it up again with {}",
+            fix("uninstall"),
+            fix(&format!("{target} --initialize-nor --fetch"))
+        )
+    };
+    format!(
+        "The machine may have booted, so it may hold its keys. If you have a backup, restore it \
+         with {}. Without one, its keys are lost: {start_over}",
+        fix(&format!("state restore FILE{which}"))
+    )
+}
+
+/// Machine state that `stela.efi` would refuse, as an interrupted
+/// `--target` can leave it, and its fresh replacement.
+pub(super) struct Reinitialize {
+    pub(super) area: StateArea,
+    /// The NOR image and SEP area to write from the area's start.
+    pub(super) bytes: Vec<u8>,
+    pub(super) changes: Vec<String>,
+    /// Why it cannot be replaced: a foreign SEP area of a machine that may
+    /// have booted can hold its keys.
+    pub(super) refusal: Option<String>,
+}
+
+/// What `repair --initialize-nor` writes to `disk`'s machine state: a fresh
+/// NOR image over one that is neither blank nor a NOR image, and a blank SEP
+/// area over a foreign one when the machine never booted. A foreign SEP area
+/// of a machine that may have booted can hold its keys: its `refusal` names
+/// the way to put it right, `lost_keys` ([`lost_keys`]). None when nothing
+/// is foreign.
+pub(super) fn reinitialize(
+    host: &dyn Host,
+    disk: &InstalledDisk,
+    lost_keys: &str,
+) -> Result<Option<Reinitialize>> {
+    if disk.is_chosen() {
+        return Ok(None);
+    }
+    let area = state_area(host, disk, None)?;
+    let state_bytes = CAPACITY + stela_formats::machine_state::SEP_BYTES as usize;
+    let mut bytes = area.read(host, 0, state_bytes)?;
+    let (nor_bytes, sep_area) = bytes.split_at_mut(CAPACITY);
+    let mut changes = Vec::new();
+    let mut refusal = None;
+    let nor_foreign = !nor_bytes.iter().all(|&b| b == 0)
+        && Image::from_bytes(nor_bytes.to_vec())
+            .and_then(|image| image.current_bank())
+            .is_err();
+    if nor_foreign {
+        nor_bytes.copy_from_slice(Image::fresh().bytes());
+        changes.push(format!(
+            "{}: a fresh NOR image over one stela.efi would refuse",
+            area.describe()
+        ));
+    }
+    if let Err(error) = sep_state::blank(&sep_area[..stela_formats::machine_state::SEP_ROOTS_BYTES])
+    {
+        if never_booted(host, &area)? == Some(true) {
+            sep_area.fill(0);
+            changes.push(format!(
+                "{}: a blank SEP area; the machine never booted",
+                area.describe()
+            ));
+        } else {
+            refusal = Some(format!(
+                "{}'s SEP area: {error}. {lost_keys}",
+                area.describe()
+            ));
+        }
+    }
+    Ok(
+        (!changes.is_empty() || refusal.is_some()).then_some(Reinitialize {
+            area,
+            bytes,
+            changes,
+            refusal,
+        }),
+    )
 }
 
 /// What the next boot is.
