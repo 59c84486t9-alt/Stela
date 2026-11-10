@@ -1779,7 +1779,7 @@ fn ic_ivau_by_one_pe_makes_every_pe_compile_the_new_code() {
                 panic!("no block at the code");
             };
             (
-                machine.blocks[index].source_hash,
+                machine.code.blocks[index].source_hash,
                 machine.statistics.compiled,
             )
         };

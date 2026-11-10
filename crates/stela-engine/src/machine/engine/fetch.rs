@@ -448,7 +448,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !matches!(kind, Ok(ExitKind::Indirect | ExitKind::Call)) {
             return Ok(0);
         }
-        let terminal = self.blocks[index].terminal_pc();
+        let terminal = self.code.blocks[index].terminal_pc();
         let word = self.word(index, terminal)?;
         let register = ((word >> 5) & 31) as u8;
         Ok(match word & REGISTER_BRANCH {

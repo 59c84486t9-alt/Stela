@@ -49,10 +49,11 @@ fn an_8_gib_host_gives_the_guest_what_the_parts_leave() {
 }
 
 #[test]
-fn a_16_gib_host_keeps_the_heap_floor_and_full_code_arenas() {
+fn a_16_gib_host_keeps_the_heap_floor_and_one_shared_code_window() {
     let sizes = sizes(free(16), 8, 8).unwrap();
     assert_eq!(sizes.heap, HEAP_FLOOR);
-    assert_eq!(sizes.code.bytes, 1024 * MIB);
+    // 64 MiB of window per runner, and each executor's 2 MiB of its own.
+    assert_eq!(sizes.code.bytes, 528 * MIB);
     assert!(sizes.guest > 10 * GIB);
 }
 
@@ -60,7 +61,7 @@ fn a_16_gib_host_keeps_the_heap_floor_and_full_code_arenas() {
 fn a_128_gib_host_raises_the_heap_to_its_ceiling() {
     let sizes = sizes(free(128), 8, 8).unwrap();
     assert_eq!(sizes.heap, HEAP_CEILING);
-    assert_eq!(sizes.code.bytes, 8 * 512 * MIB);
+    assert_eq!(sizes.code.bytes, 528 * MIB);
     assert_eq!(sizes.pool, 8 * POOL_PER_RUNNER);
     assert!(sizes.guest > 90 * GIB);
 }
@@ -69,9 +70,9 @@ fn a_128_gib_host_raises_the_heap_to_its_ceiling() {
 fn a_2_tib_host_caps_every_part() {
     let sizes = sizes(free(2048), 8, 8).unwrap();
     assert_eq!(sizes.heap, HEAP_CEILING);
-    assert_eq!(sizes.code.bytes, 8 * 512 * MIB);
+    assert_eq!(sizes.code.bytes, 528 * MIB);
     assert_eq!(sizes.pool, 8 * POOL_PER_RUNNER);
-    assert_eq!(sizes.guest, free(2048) - 28 * GIB);
+    assert_eq!(sizes.guest, free(2048) - 24 * GIB - 528 * MIB);
 }
 
 #[test]
@@ -139,7 +140,7 @@ fn a_128_gb_pc_keeps_more_for_the_pack() {
 fn the_pack_gets_only_what_the_parts_and_the_guest_leave() {
     // Just above what eight cores need, the pack gets the rest, not its
     // share; below it, nothing, and the boot goes on without a pack.
-    let needed = (6784..7200)
+    let needed = (6000..7200)
         .map(|mib| mib * MIB)
         .find(|&free| sizes(free, 8, 8).is_ok())
         .unwrap();

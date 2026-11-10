@@ -20,6 +20,28 @@ fn bit_set(bits: &[u64], slot: u32) -> bool {
         .is_some_and(|word| word & 1 << (slot % 64) != 0)
 }
 
+/// `marked`, a bit per slot below `len`, with the bits of `slots` set, the
+/// rest clear: what [`unmark`] takes back.
+fn mark(marked: &mut Vec<u64>, len: usize, slots: &[u32]) -> Vec<u64> {
+    let mut marked = core::mem::take(marked);
+    let words = len.div_ceil(64);
+    if marked.len() < words {
+        marked.resize(words, 0);
+    }
+    for &slot in slots {
+        marked[slot as usize / 64] |= 1 << (slot % 64);
+    }
+    marked
+}
+
+/// Clear the bits of `slots` in `marked` and keep it in `kept` for the next.
+fn unmark(kept: &mut Vec<u64>, mut marked: Vec<u64>, slots: &[u32]) {
+    for &slot in slots {
+        marked[slot as usize / 64] &= !(1 << (slot % 64));
+    }
+    *kept = marked;
+}
+
 /// The frame number of the 4 KiB frame holding `physical`, as block keys
 /// name it.
 fn frame_number(physical: u64) -> u64 {
@@ -35,17 +57,42 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let mut report = StaleCode::default();
         let mut bytes = Vec::new();
         let mut last = None;
-        for (cursor, index) in self.index.sweep(self.stale_cursor).take(STALE_CHECKS) {
-            let block = &self.blocks[index];
+        let cache = self.code.cache();
+        for (cursor, index) in cache.index.sweep(self.stale_cursor).take(STALE_CHECKS) {
+            let block = &self.code.blocks[index];
             bytes.resize(block.source_bytes(), 0);
             report.blocks += 1;
-            if self.host.read_ram(block.physical, &mut bytes)
-                && source_hash(&bytes) != block.source_hash
-            {
-                report.stale += 1;
-                report.first.get_or_insert((block.pc, block.physical));
-            }
             last = Some(cursor);
+            if !self.host.read_ram(block.physical, &mut bytes) {
+                continue;
+            }
+            let raw = source_hash(&bytes);
+            // A block's hash is of the bytes its compile admitted.
+            for word in bytes.as_chunks_mut::<4>().0 {
+                *word = self.admit(u32::from_le_bytes(*word)).to_le_bytes();
+            }
+            let admitted = source_hash(&bytes);
+            if admitted == block.source_hash && raw != admitted {
+                report.admitted += 1;
+            }
+            if admitted != block.source_hash {
+                report.stale += 1;
+                if report.first.is_none() {
+                    report.first = Some((block.pc, block.physical));
+                    let part = self.code.arena.as_ref().and_then(|arena| {
+                        let offset = block.code.0.checked_sub(arena.window.exec)?;
+                        Some((offset / arena.part_bytes) as u32)
+                    });
+                    report.origin = Some(StaleOrigin {
+                        pe: block.installer,
+                        part,
+                        noted: self
+                            .parallel
+                            .as_ref()
+                            .map(|hub| hub.has_code(block.physical)),
+                    });
+                }
+            }
         }
         // A sweep that reached the last block starts over next time.
         self.stale_cursor = last.filter(|_| report.blocks == STALE_CHECKS);
@@ -335,33 +382,82 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Forget the blocks compiled from the page holding `physical`, which an
     /// IC IVAU made stale, and their lookup entries, which every address
     /// space mapping the frame shares: a later fetch compiles the page
-    /// again. Their code stays installed until the next full discard.
+    /// again. Their code stays installed until its part is reclaimed.
     pub(super) fn invalidate_code_page(&mut self, physical: u64) {
-        self.forget_stored_page(physical & !(FETCH_PAGE - 1));
-        // A forgotten block's exit waits for no block of its page.
-        if self.direct_exit.is_some_and(|(block, _, _)| {
-            (self.blocks[block].physical ^ physical) & !(FETCH_PAGE - 1) == 0
-        }) {
-            self.direct_exit = None;
-        }
-        self.forget_known_key(physical & !(FETCH_PAGE - 1));
         let frame = frame_number(physical);
-        self.targets.forget_frames(frame..=frame, |_| true);
-        if !self.index.forget_page(physical & !(FETCH_PAGE - 1)) {
-            return;
+        let mut cache = self.code.cache_at(board::LockSite::Invalidate);
+        cache.targets.forget_frames(frame..=frame, |_| true);
+        let forgot = cache.index.forget_page(physical & !(FETCH_PAGE - 1));
+        drop(cache);
+        // Every PE's jump cache on a shared board still names its blocks.
+        if forgot || self.code_hub.is_some() {
+            self.forget_code_page_here(physical);
+        } else {
+            self.forget_page_caches(physical);
         }
+    }
+
+    /// Another PE's IC IVAU of the page holding `physical`. On a shared
+    /// board the poster forgot the page already, but this PE may have read
+    /// the old bytes before the write and published their block after that
+    /// forget: a compile runs outside, so the post did not wait for it. It
+    /// reads its mail only after it published, so forgetting the page again
+    /// here takes such a block away.
+    pub(super) fn invalidate_posted_code_page(&mut self, physical: u64) {
+        self.invalidate_code_page(physical);
+    }
+
+    /// Forget this PE's caches of the page holding `physical`, and its jump
+    /// cache.
+    fn forget_code_page_here(&mut self, physical: u64) {
+        self.forget_page_caches(physical);
         // The jump cache holds no generation per page.
         self.code_generation += 1;
         self.statistics.code_invalidations += 1;
     }
 
+    /// Forget this PE's stored page, waiting direct exit and known key of
+    /// the page holding `physical`.
+    fn forget_page_caches(&mut self, physical: u64) {
+        self.forget_stored_page(physical & !(FETCH_PAGE - 1));
+        // A forgotten block's exit waits for no block of its page.
+        if self.direct_exit.is_some_and(|(block, ..)| {
+            (self.code.blocks[block].physical ^ physical) & !(FETCH_PAGE - 1) == 0
+        }) {
+            self.direct_exit = None;
+        }
+        self.forget_known_key(physical & !(FETCH_PAGE - 1));
+    }
+
     /// Make room in the code arena: reclaim its oldest part, or discard
     /// every block on a host whose arena is one part.
     pub(super) fn reclaim_code(&mut self) {
+        // A ring reclaims its parts as installs fill it.
+        if self.code.arena.is_some() {
+            return;
+        }
         self.lookup_dispatchers = Default::default();
         match self.host.reclaim_code() {
             Some(range) => self.evict_code(range),
             None => self.discard_code(Discard::Arena),
+        }
+    }
+
+    /// Make room in the host's own arena for a leaf. With the board's
+    /// arena holding the blocks, the host's holds only leaves: its oldest
+    /// part goes with the leaves in it.
+    pub(super) fn reclaim_leaves(&mut self) {
+        if self.code.arena.is_none() {
+            return self.reclaim_code();
+        }
+        match self.host.reclaim_code() {
+            Some(range) => self
+                .scalable_leaves
+                .retain(|_, leaf| !range.contains(&leaf.code.0)),
+            None => {
+                self.host.discard_code();
+                self.scalable_leaves.clear();
+            }
         }
     }
 
@@ -377,11 +473,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// [`MEMORY_RELEASE_BLOCKS`] keeps them: what they free would not
     /// relieve the heap.
     pub(super) fn reclaim_for_memory(&mut self) {
-        if !self.host.memory_low() {
+        // A ring's blocks are bounded by its bytes.
+        if self.code.arena.is_some() || !self.host.memory_low() {
             self.reclaimed_at = None;
             return;
         }
-        let live = self.blocks.len() - self.free_blocks.len();
+        let live = self.code.blocks.live();
         if live < self.memory_release_blocks.max(1)
             || self.reclaimed_at.is_some_and(|held| live < held)
         {
@@ -395,6 +492,206 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// The grace slots this machine releases go to limbo under, and the PE
+    /// it is there: a machine that keeps its code alone has a grace of no
+    /// PE, so its slots are free again at once.
+    pub(super) fn grace(&self) -> (&board::Grace, Option<usize>) {
+        match &self.code_hub {
+            Some(hub) => (&hub.board.grace, Some(self.current)),
+            None => (&self.alone, None),
+        }
+    }
+
+    /// Install native `bytes`: in the board's arena when it has one, else
+    /// in the host's. `retire` lets a full ring take away its oldest part's
+    /// code to make room, for a caller outside the board's lock.
+    pub(super) fn install_native(
+        &mut self,
+        bytes: &[u8],
+        retire: bool,
+    ) -> Result<NativeCode, InstallError> {
+        let code = Arc::clone(&self.code);
+        let Some(arena) = &code.arena else {
+            return self.host.install(bytes);
+        };
+        if bytes.len() > arena.part_bytes {
+            return Err(InstallError::Full);
+        }
+        #[cfg(debug_assertions)]
+        self.assert_portable(bytes);
+        loop {
+            let full = match arena.ring.take(bytes.len(), 16) {
+                Ok(place) => {
+                    let address = arena.address(place);
+                    arena.write(address, bytes);
+                    self.host.serialize_code();
+                    return Ok(NativeCode(address));
+                }
+                Err(full) => full,
+            };
+            if !retire {
+                return Err(InstallError::Full);
+            }
+            let (grace, skip) = self.grace();
+            match arena.ring.advance(full, grace, skip) {
+                board::Advance::Moved => {}
+                board::Advance::Busy => self.host.relax(),
+                board::Advance::Retire(generation) => self.retire_part(generation),
+                board::Advance::Wait(snapshot) => self.wait_grace(&snapshot),
+            }
+        }
+    }
+
+    /// Code in the board's arena runs on every PE: it names none of this
+    /// PE's own data by address, only through its anchors, whose values
+    /// differ by PE ([`Self::anchors`]).
+    #[cfg(debug_assertions)]
+    fn assert_portable(&self, bytes: &[u8]) {
+        let anchors = self.anchors();
+        let own = [
+            anchors[Anchor::Control],
+            anchors[Anchor::Mirrors],
+            anchors[Anchor::Cells],
+            anchors[Anchor::Pointer],
+            anchors[Anchor::Memo],
+            anchors[Anchor::Count],
+            anchors[Anchor::StackZero],
+            &self.cpu.state as *const _ as u64,
+        ];
+        for window in bytes.windows(8) {
+            let value = u64::from_le_bytes(window.try_into().expect("eight bytes"));
+            assert!(
+                value == 0 || !own.contains(&value),
+                "board code names PE {}'s own address {value:#x}",
+                self.current
+            );
+        }
+    }
+
+    /// Overwrite installed code at `code` with `bytes`.
+    pub(super) fn patch_native(&mut self, code: NativeCode, bytes: &[u8]) {
+        match &self.code.arena {
+            Some(arena) => {
+                arena.write(code.0, bytes);
+                self.host.serialize_code();
+            }
+            None => self.host.patch(code, bytes),
+        }
+    }
+
+    /// Replace the instruction at patch point `code`, which a core may be
+    /// running, in one store (`Host::patch_instruction`).
+    pub(super) fn patch_point(&mut self, code: NativeCode, instruction: [u8; chain::PATCH_BYTES]) {
+        match &self.code.arena {
+            Some(arena) => {
+                assert!(chain::patchable(code.0 as u64), "a patch point");
+                arena.patch_point(code.0 as u64, instruction);
+                self.host.serialize_code();
+            }
+            None => self.host.patch_instruction(code, instruction),
+        }
+    }
+
+    /// With every block slot given, move the board's ring on before its
+    /// parts are full, taking the oldest parts' blocks away and waiting for
+    /// their grace, until a slot is free. The caller installs its code again
+    /// after: its part may be one that went. A slot, if that freed one.
+    pub(super) fn retire_for_slot(&mut self) -> Option<usize> {
+        let code = Arc::clone(&self.code);
+        let arena = code.arena.as_ref()?;
+        for _ in 0..2 * arena.ring.parts {
+            if let Some(slot) = self.take_slot() {
+                return Some(slot);
+            }
+            let (grace, skip) = self.grace();
+            match arena.ring.advance(arena.ring.generation(), grace, skip) {
+                board::Advance::Moved => {}
+                board::Advance::Busy => self.host.relax(),
+                board::Advance::Retire(generation) => {
+                    self.retire_part(generation);
+                    board::Events::count(&code.events.forced);
+                    let snapshot = self.grace().0.snapshot();
+                    self.wait_grace(&snapshot);
+                }
+                board::Advance::Wait(snapshot) => self.wait_grace(&snapshot),
+            }
+        }
+        self.take_slot()
+    }
+
+    /// Take away the code of the ring's part of `generation`, which this
+    /// PE moved the ring past ([`board::Advance::Retire`]): its blocks go
+    /// as in a reclaim, and its probes; the part is reused once every PE
+    /// passed the grace taken after.
+    fn retire_part(&mut self, generation: u32) {
+        let code = Arc::clone(&self.code);
+        let arena = code.arena.as_ref().expect("a ring retires its parts");
+        let range = arena.range(generation);
+        let part = arena.ring.part(generation) as u32;
+        self.evict_code(range);
+        code.cache().dispatchers.retain(|&(held, _)| held != part);
+        let (grace, _) = self.grace();
+        arena.ring.retired(generation, grace.snapshot());
+        board::Events::count(&code.events.retired);
+    }
+
+    /// Wait until `snapshot`'s grace passed, in rounds bounded by the host
+    /// counter; the board's first overrun is reported once. A PE inside
+    /// its section leaves it to wait ([`board::Board::wait`]); outside (a
+    /// compile), it holds nothing anyone waits on.
+    fn wait_grace(&mut self, snapshot: &board::Snapshot) {
+        let Some(hub) = self.code_hub.clone() else {
+            return;
+        };
+        let events = &self.code.events;
+        board::Events::count(&events.grace_waits);
+        let ticks = (self.profile.counter_frequency / 10).max(1);
+        let pe = self.current;
+        let waited = if hub.board.grace.inside(pe) {
+            hub.board.wait(pe, snapshot, ticks, || self.host.counter())
+        } else {
+            let start = self.host.counter();
+            loop {
+                if hub.board.grace.passed(snapshot, None) {
+                    break board::Waited::Passed;
+                }
+                if self.host.counter().wrapping_sub(start) >= ticks {
+                    break board::Waited::Overdue {
+                        first: hub.board.overdue(),
+                    };
+                }
+                self.host.relax();
+            }
+        };
+        if let board::Waited::Overdue { .. } = waited {
+            board::Events::count(&self.code.events.overdue);
+        }
+        if let board::Waited::Overdue { first: true } = waited {
+            let requirement = self.requirement(RequirementKind::Native(
+                "a code part's grace ran past its deadline: its reuse waits",
+            ));
+            self.degrade(requirement);
+        }
+    }
+
+    /// What the board's machines share: every index entry and block table
+    /// entry goes, so no fetch, lookup or jump cache entry reaches a block
+    /// installed before; their code goes as the ring reaches its parts.
+    fn forget_shared_code(&mut self) {
+        let mut cache = self.code.cache();
+        cache.index.clear();
+        cache.targets.clear();
+        drop(cache);
+        self.code.epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// What jump cache entries are valid in: this machine's code
+    /// generation and the board's epoch ([`Self::forget_shared_code`]).
+    pub(super) fn jump_generation(&self) -> u64 {
+        self.code_generation
+            .wrapping_add(self.code.epoch.load(Ordering::Acquire) << 40)
+    }
+
     /// Forget the blocks and leaves whose code lies in `range`, which the
     /// host reclaimed. The other blocks of their pages stay: they chain into
     /// them no more ([`Self::detach`]), and take an exit to the engine
@@ -402,7 +699,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// blocks are reached: one replaced in the index was detached then,
     /// and the blocks of a page an IC IVAU forgot whole reach only each
     /// other, with no lookup entry and in a code generation no jump cache
-    /// entry names since.
+    /// entry names since. Their slots are given again once the grace
+    /// passed ([`board::Blocks::release`]).
     pub(super) fn evict_code(&mut self, range: core::ops::Range<usize>) {
         // A host with nothing to release says so with an empty range, and
         // while memory stays low that comes before every compile.
@@ -410,64 +708,76 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return;
         }
         let started = self.host.counter();
-        let evicted = self.code_slots.take(&range).unwrap_or_else(|| {
-            (0..self.blocks.len())
-                .filter(|&slot| {
-                    let address = self.blocks[slot].code.0;
-                    address != 0 && range.contains(&address)
+        let code = Arc::clone(&self.code);
+        let shared = self.code_hub.is_some();
+        let mut cache = code.cache_at(board::LockSite::Evict);
+        let mut evicted = cache.code_slots.take(&range).unwrap_or_else(|| {
+            code.blocks
+                .iter()
+                .filter(|&(slot, block)| {
+                    code.blocks.record(slot).live() && range.contains(&block.code.0)
                 })
-                .map(|slot| slot as u32)
+                .map(|(slot, _)| slot as u32)
                 .collect()
         });
-        let mut evicted = evicted;
         evicted.sort_unstable();
         // An evicted block's slot holds the next block compiled.
         if self
             .direct_exit
-            .is_some_and(|(block, _, _)| evicted.binary_search(&(block as u32)).is_ok())
+            .is_some_and(|(block, ..)| evicted.binary_search(&(block as u32)).is_ok())
         {
             self.direct_exit = None;
         }
-        self.detach(&evicted);
+        self.detach(&mut cache, &evicted);
         // The exits in the range go, and with them their cells.
-        self.targets
+        cache
+            .targets
             .release_cells(range.start as u64..=range.end as u64 - 1);
         // A page's evicted blocks leave its index entries in one pass.
         let mut pages: Vec<(u64, u32)> = evicted
             .iter()
             .map(|&slot| {
                 (
-                    self.blocks[slot as usize].physical & !(FETCH_PAGE - 1),
+                    code.blocks[slot as usize].physical & !(FETCH_PAGE - 1),
                     slot,
                 )
             })
             .collect();
         pages.sort_unstable();
-        let marked = self.marked(&evicted);
+        let marked = mark(&mut cache.marked, code.blocks.len(), &evicted);
         for page in pages.chunk_by(|a, b| a.0 == b.0) {
-            self.index
+            cache
+                .index
                 .forget_marked(page[0].0, |slot| bit_set(&marked, slot));
         }
-        self.unmark(marked, &evicted);
+        unmark(&mut cache.marked, marked, &evicted);
         for slot in evicted.iter().map(|&slot| slot as usize) {
-            self.census_evicted(slot, started);
-            let block = &mut self.blocks[slot];
-            if block.taken != 0 {
-                *self.exit_words.entry(block.terminal).or_default() += u64::from(block.taken);
+            // On a shared board its rows stay until the slot takes its next
+            // block: another PE still inside its section may be running the
+            // block and fault in it. A machine alone runs none of it now.
+            let bytes = match shared {
+                true => cache.recovery.get(&slot).map(|owner| owner.code_bytes()),
+                false => cache.recovery.remove(&slot).map(|owner| owner.code_bytes()),
             }
-            block.code = NativeCode(0);
-            block.taken = 0;
-            block.dynamic_site = None;
-            let successors = core::mem::take(&mut block.successors);
-            self.keep_successor_box(successors);
-            self.fault_recovery.remove(&slot);
-            self.free_blocks.push(slot);
+            .unwrap_or(0);
+            self.census_evicted(&mut cache, slot, bytes, started);
+            let taken = code.blocks.record(slot).taken.load(Ordering::Relaxed);
+            if taken != 0 {
+                *self
+                    .exit_words
+                    .entry(code.blocks[slot].terminal)
+                    .or_default() += u64::from(taken);
+            }
+            code.blocks.retire(slot);
         }
+        let (grace, _) = self.grace();
+        code.blocks.release(evicted.clone(), grace.snapshot());
+        cache.code_slots.give_back(evicted);
+        drop(cache);
         if !self.scalable_leaves.is_empty() {
             self.scalable_leaves
                 .retain(|_, leaf| !range.contains(&leaf.code.0));
         }
-        self.code_slots.give_back(evicted);
         if !pages.is_empty() {
             self.statistics.code_evictions += 1;
         }
@@ -478,30 +788,34 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// of their pages undo their links to their PCs (a link names the
     /// block a PC and variant have, so any of the page's blocks of the PC
     /// may be the one it reached), and their lookup and jump cache
-    /// entries go.
-    pub(super) fn detach(&mut self, slots: &[u32]) {
-        let marked = self.marked(slots);
+    /// entries go. Under the board's lock, `cache`.
+    pub(super) fn detach(&mut self, cache: &mut board::Cache, slots: &[u32]) {
+        let blocks = &self.code.blocks;
+        let marked = mark(&mut cache.marked, blocks.len(), slots);
         let detached = |slot: usize| bit_set(&marked, slot as u32);
         let mut gone: Vec<(u64, u64)> = slots
             .iter()
             .map(|&slot| {
-                let block = &self.blocks[slot as usize];
+                let block = &blocks[slot as usize];
                 (block.physical & !(FETCH_PAGE - 1), block.pc)
             })
             .collect();
         gone.sort_unstable();
         gone.dedup();
-        let mut sources = core::mem::take(&mut self.page_blocks);
+        let mut sources = core::mem::take(&mut cache.page_blocks);
         let mut unlinks = Vec::new();
         for page in gone.chunk_by(|a, b| a.0 == b.0) {
-            sources.extend(self.index.page(page[0].0));
+            sources.extend(cache.index.page(page[0].0));
             for &source in &sources {
                 if detached(source) {
                     continue;
                 }
-                for exit in self.blocks[source].successors.iter_mut() {
-                    if exit.linked && page.binary_search(&(page[0].0, exit.target.0)).is_ok() {
-                        exit.linked = false;
+                let record = blocks.record(source);
+                for (position, exit) in blocks[source].successors.iter().enumerate() {
+                    if record.chained(position)
+                        && page.binary_search(&(page[0].0, exit.target.0)).is_ok()
+                    {
+                        record.set_linked(position, false, false);
                         // Linked, so its point is patchable and in reach.
                         let unlink = chain::unlinked(exit.site, exit.slot.into())
                             .expect("a linked exit's patch point");
@@ -511,18 +825,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             sources.clear();
         }
-        self.page_blocks = sources;
+        cache.page_blocks = sources;
         // One store each, which a core running the exit may meet.
         for (point, instruction) in unlinks {
-            self.host
-                .patch_instruction(NativeCode(point as usize), instruction);
+            self.patch_point(NativeCode(point as usize), instruction);
             self.statistics.unlinks += 1;
         }
         // Lookup entries go by the frames their keys name, in runs.
         let mut frames: Vec<u64> = gone.iter().map(|&(page, _)| frame_number(page)).collect();
         frames.dedup();
         for run in frames.chunk_by(|a, b| a + 1 == *b) {
-            self.targets
+            cache
+                .targets
                 .forget_frames(run[0]..=run[run.len() - 1], |entry| {
                     detached(entry.block as usize)
                 });
@@ -534,62 +848,53 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 *entry = None;
             }
         }
-        self.unmark(marked, slots);
-    }
-
-    /// [`Self::detached_scratch`] with the bits of `slots` set, the rest
-    /// clear: what [`Self::unmark`] takes back.
-    fn marked(&mut self, slots: &[u32]) -> Vec<u64> {
-        let mut marked = core::mem::take(&mut self.detached_scratch);
-        let words = self.blocks.len().div_ceil(64);
-        if marked.len() < words {
-            marked.resize(words, 0);
-        }
-        for &slot in slots {
-            marked[slot as usize / 64] |= 1 << (slot % 64);
-        }
-        marked
-    }
-
-    /// Clear the bits of `slots` in `marked` and keep it for the next.
-    fn unmark(&mut self, mut marked: Vec<u64>, slots: &[u32]) {
-        for &slot in slots {
-            marked[slot as usize / 64] &= !(1 << (slot % 64));
-        }
-        self.detached_scratch = marked;
+        unmark(&mut cache.marked, marked, slots);
     }
 
     pub(super) fn discard_code(&mut self, cause: Discard) {
         self.exit_words = self.exit_words();
-        if self.census.is_some() {
+        let code = Arc::clone(&self.code);
+        let mut cache = code.cache();
+        if self.census.is_some() || cache.census.is_some() {
             let now = self.host.counter();
-            for slot in 0..self.blocks.len() {
-                if self.blocks[slot].code.0 != 0 {
-                    self.census_evicted(slot, now);
+            for slot in 0..code.blocks.len() {
+                if code.blocks.record(slot).live() {
+                    let bytes = cache
+                        .recovery
+                        .get_mut(&slot)
+                        .map_or(0, |owner| owner.code_bytes());
+                    self.census_evicted(&mut cache, slot, bytes, now);
                 }
             }
         }
+        drop(cache);
+        drop(code);
         self.host.discard_code();
         self.lookup_dispatchers = Default::default();
-        // The block table goes with the code; the ITLB, which names no
-        // block, keeps its translations.
-        self.targets.release_cells(0..=u64::MAX);
-        self.targets.clear();
         self.direct_exit = None;
-        // A running guest normally fills the chunks again after a discard.
-        // Return their storage when freeing memory is the reason to discard.
-        if matches!(cause, Discard::Memory | Discard::Finished) {
-            self.blocks = table::Table::new();
-            self.free_blocks = Vec::new();
-            self.fault_recovery = recovery::Owners::new();
-            self.spare_pages = Vec::new();
-        } else {
-            self.blocks.clear();
-            self.free_blocks.clear();
-            self.fault_recovery.clear();
+        // A worker built on the hub's code holds it before it joins.
+        if self.code_hub.is_some() || Arc::get_mut(&mut self.code).is_none() {
+            // Other PEs run the board's code: it becomes unreachable now
+            // and goes as the ring reaches it.
+            self.forget_shared_code();
+            self.pages.clear();
+            self.known_keys.fill(None);
+            self.scalable_leaves.clear();
+            self.code_generation += 1;
+            self.statistics.code_discards[cause as usize] += 1;
+            return;
         }
-        self.code_slots = Default::default();
-        self.index.clear();
+        // The block table goes with the code; the ITLB, which names no
+        // block, keeps its translations. A running guest normally fills the
+        // chunks again after a discard: their storage goes back when
+        // freeing memory is the reason to discard.
+        let free = matches!(cause, Discard::Memory | Discard::Finished);
+        Arc::get_mut(&mut self.code)
+            .expect("a machine that keeps its code alone discards it")
+            .clear(free);
+        if free {
+            self.spare_pages = Vec::new();
+        }
         self.pages.clear();
         self.known_keys.fill(None);
         self.scalable_leaves.clear();

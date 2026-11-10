@@ -295,6 +295,21 @@ impl Host for BareHost<'_> {
         }
     }
 
+    fn code_window(&self) -> Option<stela_engine::machine::engine::CodeWindow> {
+        let state = state();
+        // Every executor maps the whole reservation executable at one
+        // address in the window root, and the physmap reaches it writable.
+        (state.window_bytes != 0).then(|| stela_engine::machine::engine::CodeWindow {
+            exec: state.window_virtual as usize,
+            write: layout::physical(state.window_physical) as usize,
+            bytes: state.window_bytes as usize,
+        })
+    }
+
+    fn serialize_code(&mut self) {
+        serialize_code();
+    }
+
     fn code_partitions(&self) -> Option<stela_engine::machine::engine::CodePartitions> {
         let state = state();
         Some(stela_engine::machine::engine::CodePartitions {

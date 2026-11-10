@@ -419,7 +419,12 @@ pub struct State {
     code_bytes: u64,
     code_part_bytes: u64,
     code_parts: u64,
-    /// The arena part new code goes to.
+    /// The board's code window, which the engine allocates itself: run at
+    /// `window_virtual`, written through the physmap. Empty without one.
+    window_virtual: u64,
+    window_physical: u64,
+    window_bytes: u64,
+    /// The private arena part new code goes to.
     code_unit: u64,
     /// Successful initialized installs in each arena unit, from its start.
     /// These extents require this State's backing, root and CPU owner.
@@ -516,6 +521,9 @@ pub struct Config {
     pub code_physical: u64,
     pub code_bytes: u64,
     pub code_parts: u32,
+    /// The board's code window, the same on every executor: (executable
+    /// address, physical address, bytes), or `None`.
+    pub window: Option<(u64, u64, u64)>,
     /// One common origin for every physical executor.
     pub tsc_base: u64,
     pub tsc_hz: u64,
@@ -623,6 +631,9 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
             code_bytes: config.code_bytes,
             code_part_bytes,
             code_parts: u64::from(config.code_parts),
+            window_virtual: config.window.map_or(0, |window| window.0),
+            window_physical: config.window.map_or(0, |window| window.1),
+            window_bytes: config.window.map_or(0, |window| window.2),
             code_unit: 0,
             installed_extents: core::array::from_fn(|_| CodeExtents::default()),
             code_peak: 0,

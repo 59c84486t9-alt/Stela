@@ -83,13 +83,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     pub fn metrics_snapshot(&self) -> Snapshot {
+        let (indexed_blocks, indexed_code_pages) = {
+            let cache = self.code.cache();
+            (cache.index.len(), cache.index.pages())
+        };
         Snapshot {
             statistics: self.statistics,
             preparation: self.preparation_metrics,
-            block_slots: self.blocks.len(),
-            free_block_slots: self.free_blocks.len(),
-            indexed_blocks: self.index.len(),
-            indexed_code_pages: self.index.pages(),
+            block_slots: self.code.blocks.len(),
+            free_block_slots: self.code.blocks.len() - self.code.blocks.live(),
+            indexed_blocks,
+            indexed_code_pages,
             retained_source_pages: self.pages.len(),
             compile_wall_ticks_scope: "accepted foreground prepare only; excludes discarded short-window attempts, refusals and background compilation; host counter ticks, not CPU cycles",
             preparation_scope: "since this writer enabled metrics; all foreground preparation probes and wall ticks, including internal retry work; short probes that reach the end of input emit no code; returned bytes exclude internal discarded emissions; not exact emitter invocation counts or CPU cycles; excludes shared/stored rebase and background workers",

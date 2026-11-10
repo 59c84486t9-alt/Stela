@@ -163,7 +163,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.device_stub(index, pc) {
             return step_timing::DEVICE_SITE_KEY;
         }
-        let block = &self.blocks[index];
+        let block = &self.code.blocks[index];
         let terminal = block.terminal;
         if pc == block.terminal_pc() {
             return terminal;

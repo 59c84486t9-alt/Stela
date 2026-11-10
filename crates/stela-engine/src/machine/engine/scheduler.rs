@@ -69,6 +69,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.leave_run_loop();
                 return Stop::Budget;
             }
+            if let Some(hub) = &self.parallel {
+                hub.pass(self.current);
+            }
             let started = self.timing_start();
             let scheduled = match deadline {
                 Some(deadline) => self.schedule_with_deadline(Some(deadline)),
@@ -242,7 +245,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Run compiled block `index` and the blocks it chains into, up to
     /// `budget` of them, and complete the last one's exit or fault.
     pub(super) fn execute(&mut self, index: usize, budget: u64) -> Step {
-        let entry = self.blocks[index].code;
+        let entry = self.code.blocks[index].code;
         self.chain.begin(index, budget);
         self.cpu.state.daif = u32::from(self.cpu.pstate.daif);
         self.mirrors.selected = u64::from(self.cpu.pstate.sp);
@@ -271,8 +274,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             budget - remaining
         };
         let last = (block & u64::from(u32::MAX)) as usize;
+        // A block another PE retired since this run entered it is still
+        // in its slot: the slot is given again only after this PE's grace.
         if let NativeExit::Fault(fault) = exit
-            && (last >= self.blocks.len() || self.blocks[last].code.0 == 0)
+            && self.code.blocks.get(last).is_none()
         {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         }
@@ -327,7 +332,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             NativeExit::Fault(mut fault) => {
                 let at = (entry.0 as u64).wrapping_add(fault.offset as u64);
-                fault.offset = at.wrapping_sub(self.blocks[last].code.0 as u64) as usize;
+                fault.offset = at.wrapping_sub(self.code.blocks[last].code.0 as u64) as usize;
                 let slot = step_timing::fault_slot(&fault.cause);
                 self.timed_device = None;
                 let handled = self.native_fault(last, fault, retired, btype);
@@ -347,20 +352,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
         kind: u64,
         spent: bool,
     ) -> Option<usize> {
-        let block = &self.blocks[index];
+        let block = &self.code.blocks[index];
+        let record = self.code.blocks.record(index);
         let kind = ExitKind::try_from(kind).ok()?;
         let unlinked = if dynamic_branch(block.terminal).is_some() && kind != ExitKind::Direct {
-            block.dynamic_site.is_some()
+            block.dynamic_site.is_some() && record.dynamic_open()
         } else if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0
             && matches!(
                 kind,
                 ExitKind::Fallthrough | ExitKind::Direct | ExitKind::Call
             )
         {
-            block
-                .successors
-                .iter()
-                .any(|exit| !exit.linked && exit.target.0 == next_pc && exit.kind == kind as u8)
+            block.successors.iter().enumerate().any(|(position, exit)| {
+                !record.linked(position) && exit.target.0 == next_pc && exit.kind == kind as u8
+            })
         } else {
             return None;
         };
@@ -373,9 +378,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Some(key) = self.current_key(next_pc) else {
             return Some(1);
         };
-        let entry = self
-            .targets
-            .find(self.targets.slot(next_pc, key), next_pc, key);
+        let table = &self.code.table;
+        let entry = table.find(table.slot(next_pc, key), next_pc, key);
         Some(if entry.pc != next_pc || entry.key != key {
             2
         } else if spent {
@@ -397,56 +401,67 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// ([`Machine::direct_exit`]). Whether the exit is linked now.
     pub(super) fn link(&mut self, index: usize, next_pc: u64, word: impl Into<ExitWord>) -> bool {
         let word = word.into();
-        let block = &self.blocks[index];
+        let code = Arc::clone(&self.code);
+        let block = &code.blocks[index];
+        let record = code.blocks.record(index);
         if block.successors.is_empty()
             || self.variants[block.variant.0 as usize].single
             || self.traces.binary_search(&next_pc).is_ok()
         {
             return false;
         }
-        let Some(position) = block
-            .successors
-            .iter()
-            .position(|exit| !exit.linked && exit.target.0 == next_pc && exit.word() == word)
-        else {
+        let find = || {
+            block
+                .successors
+                .iter()
+                .enumerate()
+                .position(|(position, exit)| {
+                    !record.linked(position) && exit.target.0 == next_pc && exit.word() == word
+                })
+        };
+        if find().is_none() {
+            return false;
+        }
+        // Another PE may link or detach it meanwhile: found again under the
+        // lock, for a block still installed.
+        let mut cache = code.cache_at(board::LockSite::Link);
+        let Some(position) = find().filter(|_| record.live()) else {
             return false;
         };
         let retired = u32::from(block.instructions) - u32::from(word.skipped);
         if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0 {
             let point = chain::direct_patch(block.successors[position].site);
-            if self.link_through_cell(point, next_pc, retired, word) {
-                self.settle_successor(index, position);
+            if self.link_through_cell(&mut cache, point, next_pc, retired, word) {
+                record.settle(position);
                 return true;
             }
             return false;
         }
         let physical = block.physical.wrapping_add(next_pc.wrapping_sub(block.pc));
-        let Some(target) = self
+        let Some(target) = cache
             .index
-            .get(&self.blocks, next_pc, physical, block.variant)
+            .get(&code.blocks, next_pc, physical, block.variant)
         else {
-            self.direct_exit = Some((index, next_pc, word));
+            self.direct_exit = Some((index, record.incarnation(), next_pc, word));
             return false;
         };
         let exit = block.successors[position];
         let site = exit.site;
-        let entry = self.blocks[target].code.0 as u64;
+        let entry = code.blocks[target].code.0 as u64;
         // A slot's body runs in the block's own code, once: its patch
         // point falls into it once it is written ([`chain::link`]).
-        if exit.slot != 0 && !exit.used {
+        if exit.slot != 0 && !record.used(position) {
             let at = site - u64::from(exit.slot);
             let point = chain::slot_patch(at);
-            let Some((body, code)) =
+            let Some((body, bytes)) =
                 chain::link(at, exit.slot.into(), retired, target as u32, entry)
                     .filter(|_| chain::patchable(point))
             else {
                 return false;
             };
-            self.patch_native(NativeCode(body as usize), &code);
-            self.host
-                .patch_instruction(NativeCode(point as usize), chain::NOP5);
-            let linked = &mut self.blocks[index].successors[position];
-            (linked.linked, linked.used) = (true, true);
+            self.patch_native(NativeCode(body as usize), &bytes);
+            self.patch_point(NativeCode(point as usize), chain::NOP5);
+            record.set_linked(position, true, true);
             self.statistics.links += 1;
             return true;
         }
@@ -463,20 +478,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !chain::patchable(point) {
             return false;
         }
-        let Ok(thunk) = self.host.install(&[0; chain::THUNK_BYTES]) else {
+        let Ok(thunk) = self.install_native(&[0; chain::THUNK_BYTES], false) else {
             return false;
         };
         let at = thunk.0 as u64;
-        let (Some(code), Some(jump)) = (
+        let (Some(bytes), Some(jump)) = (
             chain::thunk(at, retired, target as u32, entry, fallback),
             chain::jump(point, at),
         ) else {
             return false;
         };
-        self.patch_native(thunk, &code);
-        self.host
-            .patch_instruction(NativeCode(point as usize), jump);
-        self.blocks[index].successors[position].linked = true;
+        self.patch_native(thunk, &bytes);
+        self.patch_point(NativeCode(point as usize), jump);
+        record.set_linked(position, true, false);
         self.statistics.links += 1;
         true
     }
@@ -488,7 +502,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// meet forgets it first ([`Self::evict_code`]).
     pub(super) fn link_direct_exit(&mut self, pc: u64) -> bool {
         match self.direct_exit.take() {
-            Some((block, target, word)) if target == pc => {
+            Some((block, incarnation, target, word))
+                if target == pc && self.code.blocks.record(block).incarnation() == incarnation =>
+            {
                 let linked = self.link(block, target, word);
                 // The block of the fetch is another variant's.
                 self.direct_exit = None;
@@ -496,20 +512,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             _ => false,
         }
-    }
-
-    /// Drop block `index`'s exit at `position`, now served by a lookup
-    /// dispatcher, which names no block.
-    fn settle_successor(&mut self, index: usize, position: usize) {
-        // The old box and the new one are kept boxes ([`Self::successor_box`]).
-        let mut remaining = core::mem::take(&mut self.successor_scratch);
-        remaining.clear();
-        remaining.extend_from_slice(&self.blocks[index].successors);
-        remaining.swap_remove(position);
-        let settled = self.successor_box(&remaining);
-        self.successor_scratch = remaining;
-        let old = core::mem::replace(&mut self.blocks[index].successors, settled);
-        self.keep_successor_box(old);
     }
 
     /// Redirect block `index`'s exit to the target in RAX, which just left
@@ -520,10 +522,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// page and 0b01 elsewhere. Blocks are compiled per guarded page, so
     /// the page's BTYPE is the block's.
     pub(super) fn link_dynamic(&mut self, index: usize, btype: u8) {
-        let block = &self.blocks[index];
+        let code = Arc::clone(&self.code);
+        let block = &code.blocks[index];
+        let record = code.blocks.record(index);
         let Some(site) = block
             .dynamic_site
-            .filter(|_| !self.variants[block.variant.0 as usize].single)
+            .filter(|_| !self.variants[block.variant.0 as usize].single && record.dynamic_open())
         else {
             return;
         };
@@ -540,8 +544,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let retired = u32::from(block.instructions);
         let point = chain::dynamic_patch(site.get());
-        if self.redirect_through_lookup(point, retired, kind.into(), btype) {
-            self.blocks[index].dynamic_site = None;
+        // Another PE may serve it meanwhile: checked again under the lock.
+        let mut cache = code.cache_at(board::LockSite::Dynamic);
+        if !record.dynamic_open() || !record.live() {
+            return;
+        }
+        if self.redirect_through_lookup(&mut cache, point, retired, kind.into(), btype) {
+            record.close_dynamic();
         }
     }
 
@@ -558,6 +567,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// poisoned PAC address misses and exits.
     pub(super) fn redirect_through_lookup(
         &mut self,
+        cache: &mut board::Cache,
         site: u64,
         retired: u32,
         word: ExitWord,
@@ -566,10 +576,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !chain::patchable(site) {
             return false;
         }
-        let Some(probe) = self.lookup_dispatcher(btype) else {
-            return false;
-        };
-        let Ok(tail) = self.host.install(&[0; chain::TAIL_BYTES]) else {
+        let Some((probe, tail)) = self.probe_and_tail(cache, btype, chain::TAIL_BYTES) else {
             return false;
         };
         let at = tail.0 as u64;
@@ -580,7 +587,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return false;
         };
         self.patch_native(tail, &code);
-        self.host.patch_instruction(NativeCode(site as usize), jump);
+        self.patch_point(NativeCode(site as usize), jump);
         self.statistics.lookups += 1;
         true
     }
@@ -599,6 +606,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// code ([`Self::evict_code`]), and its entry with the block's.
     pub(super) fn link_through_cell(
         &mut self,
+        cache: &mut board::Cache,
         site: u64,
         next_pc: u64,
         retired: u32,
@@ -607,32 +615,75 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !chain::patchable(site) {
             return false;
         }
-        let Some(probe) = self.lookup_dispatcher(0) else {
-            return false;
-        };
-        let Ok(tail) = self.host.install(&[0; chain::CELL_TAIL_BYTES]) else {
+        let Some((probe, tail)) = self.probe_and_tail(cache, 0, chain::CELL_TAIL_BYTES) else {
             return false;
         };
         let current = self.current_key(next_pc).and_then(|key| {
-            let held = self
+            let held = cache
                 .targets
-                .find(self.targets.slot(next_pc, key), next_pc, key);
+                .find(cache.targets.slot(next_pc, key), next_pc, key);
             (held.pc == next_pc && held.key == key).then_some(held)
         });
-        let cell = self.targets.link_cell(site, next_pc, current);
+        let cell = cache.targets.link_cell(site, next_pc, current);
         let at = tail.0 as u64;
         let entry = probe + chain::CELL_PROBE_ENTRY as u64;
         let (Some(code), Some(jump)) = (
             chain::cell_tail(at, cell, word, retired, entry),
             chain::jump(site, at),
         ) else {
-            self.targets.release_cells(site..=site);
+            cache.targets.release_cells(site..=site);
             return false;
         };
         self.patch_native(tail, &code);
-        self.host.patch_instruction(NativeCode(site as usize), jump);
+        self.patch_point(NativeCode(site as usize), jump);
         self.statistics.links += 1;
         true
+    }
+
+    /// The probes of `btype` and room for a tail of `bytes` that calls
+    /// them, in one part: a tail is taken away with its part, never after
+    /// its probes. In the board's arena the probes are installed once per
+    /// part, under the board's lock (`cache`); a tail that met a new part
+    /// installs them there first.
+    fn probe_and_tail(
+        &mut self,
+        cache: &mut board::Cache,
+        btype: u8,
+        bytes: usize,
+    ) -> Option<(u64, NativeCode)> {
+        let code = Arc::clone(&self.code);
+        let Some(arena) = &code.arena else {
+            let probe = self.lookup_dispatcher(btype)?;
+            let tail = self
+                .host
+                .install(&[0; chain::CELL_TAIL_BYTES][..bytes])
+                .ok()?;
+            return Some((probe, tail));
+        };
+        let tail = self
+            .install_native(&[0; chain::CELL_TAIL_BYTES][..bytes], false)
+            .ok()?;
+        let part_of = |address: usize| ((address - arena.window.exec) / arena.part_bytes) as u32;
+        let part = part_of(tail.0);
+        let at = match cache.dispatchers.iter().position(|&(held, _)| held == part) {
+            Some(at) => at,
+            None => {
+                cache.dispatchers.push((part, [None; 4]));
+                cache.dispatchers.len() - 1
+            }
+        };
+        if let Some(probe) = cache.dispatchers[at].1[usize::from(btype)] {
+            return Some((probe, tail));
+        }
+        let probe = self
+            .install_native(&chain::lookup_dispatcher(btype)?, false)
+            .ok()?;
+        // The part filled between the two: the tail waits for the next.
+        if part_of(probe.0) != part {
+            return None;
+        }
+        cache.dispatchers[at].1[usize::from(btype)] = Some(probe.0 as u64);
+        Some((probe.0 as u64, tail))
     }
 
     /// The probes of `btype` ([`chain::lookup_dispatcher`]), in the part of

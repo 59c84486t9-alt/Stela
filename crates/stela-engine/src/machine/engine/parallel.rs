@@ -345,6 +345,12 @@ pub struct Hub {
     code_pages: CodePages,
     /// Which PEs hold each block installed, for `--profile`'s counts.
     pub(super) installs: super::install_census::Live,
+    /// The compiled code the PEs share, and its grace: a PE is inside
+    /// while neither `outside` nor `parked` ([`Self::section`]).
+    pub(super) board: super::board::Board,
+    /// The home machine's code, when its host gives the engine a code
+    /// window: every PE whose host gives the same window joins it.
+    code: Mutex<Option<Arc<super::board::Code>>>,
 }
 
 /// Which physical fetch pages any PE may have compiled from, as a filter:
@@ -437,12 +443,25 @@ impl Hub {
             code_pages: CodePages::new(),
             source_observations: AtomicBool::new(false),
             installs: super::install_census::Live::default(),
+            board: super::board::Board::new(pes),
+            code: Mutex::new(None),
         })
     }
 
     /// The host's count for timing lock waits ([`Kick::ticks`]).
     pub(super) fn ticks(&self) -> u64 {
         self.kick.ticks()
+    }
+
+    /// What the code the board's PEs share came to: `None` while each
+    /// keeps its own.
+    pub fn code_report(&self) -> Option<super::CodeReport> {
+        let code = self
+            .code
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        code.map(|code| code.report())
     }
 
     pub fn pes(&self) -> usize {
@@ -691,6 +710,21 @@ impl Hub {
         }
     }
 
+    /// Make `code` the board's, which every PE whose host gives the same
+    /// window joins ([`Machine::join_code`]).
+    pub(super) fn share_code(&self, code: &Arc<super::board::Code>) {
+        *self.code.lock().unwrap_or_else(|error| error.into_inner()) = Some(Arc::clone(code));
+    }
+
+    /// Note the pages of `code`'s blocks, compiled before this hub was
+    /// there to note them ([`Self::compiling`]): an IC IVAU of one must
+    /// reach every PE that may run them.
+    pub(super) fn note_code(&self, code: &super::board::Code) {
+        for frame in code.cache().index.frames() {
+            self.compiling(frame);
+        }
+    }
+
     /// Whether any PE may have compiled from the page holding `physical`.
     pub(super) fn has_code(&self, physical: u64) -> bool {
         let (word, bit) = self.code_pages.at(physical);
@@ -888,10 +922,35 @@ impl Hub {
     /// ([`Self::applied`]) as `sleeping` is.
     pub(super) fn set_outside(&self, pe: usize, outside: bool) {
         self.inboxes[pe].outside.store(outside, Ordering::SeqCst);
+        self.section(pe);
     }
 
     fn set_parked(&self, pe: usize, parked: bool) {
         self.inboxes[pe].parked.store(parked, Ordering::SeqCst);
+        self.section(pe);
+    }
+
+    /// PE `pe` enters the board's grace section when it is neither outside
+    /// its run loop nor parked, and leaves it otherwise. Only the PE itself
+    /// changes its two flags, so this needs no lock.
+    fn section(&self, pe: usize) {
+        let inbox = &self.inboxes[pe];
+        let inside =
+            !inbox.outside.load(Ordering::Relaxed) && !inbox.parked.load(Ordering::Relaxed);
+        let grace = &self.board.grace;
+        match (inside, grace.inside(pe)) {
+            (true, false) => grace.enter(pe),
+            (false, true) => grace.leave(pe),
+            _ => {}
+        }
+    }
+
+    /// PE `pe` is at its run loop's top, where it holds nothing of the
+    /// board's code it does not check again.
+    pub(super) fn pass(&self, pe: usize) {
+        if self.board.grace.inside(pe) {
+            self.board.grace.pass(pe);
+        }
     }
 
     fn others(&self, from: usize) -> impl Iterator<Item = usize> + '_ {
@@ -1065,6 +1124,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Err(ParallelAdmissionError::PeersNotHeldInReset);
         }
         let (attached, control) = Attached::new(&hub, self.current, true)?;
+        // Its blocks so far were compiled before the hub noted pages.
+        hub.note_code(&self.code);
+        // The home machine's code becomes the board's, in the one arena.
+        if self.code.arena.is_some() {
+            hub.share_code(&self.code);
+            self.code_hub = Some(Arc::clone(&hub));
+            self.read_count_natively();
+        }
         self.adopt_parallel_control(control);
         // What native code may complete depends on going parallel.
         self.forget_derived();
@@ -1103,14 +1170,56 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(())
     }
 
+    /// Run the board's code from now on, in place of this machine's own,
+    /// which held nothing yet: its host gives the same code window.
+    pub(super) fn join_code(&mut self, hub: &Arc<Hub>) {
+        let shared = hub
+            .code
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(shared) = shared else {
+            return;
+        };
+        // Built on the hub's code from its worker profile.
+        if Arc::ptr_eq(&shared, &self.code) {
+            self.code_hub = Some(Arc::clone(hub));
+            self.read_count_natively();
+            return;
+        }
+        let window = |code: &super::board::Code| code.arena.as_ref().map(|arena| arena.window);
+        if window(&shared).is_some() && window(&shared) == window(&self.code) {
+            debug_assert_eq!(self.code.blocks.live(), 0, "a PE joins before it installs");
+            self.code = shared;
+            self.code_hub = Some(Arc::clone(hub));
+            self.read_count_natively();
+        }
+    }
+
+    /// Set this PE's clock reader up for native count reads, as compiling a
+    /// count read's thunk does: on a shared board this PE runs thunks other
+    /// PEs compiled, and a reader left unset reads a count that never
+    /// moves, so a guest's timed wait on this PE never ends.
+    fn read_count_natively(&mut self) {
+        if let Some(tsc) = self.host.tsc_counter() {
+            self.clock.native(tsc);
+        }
+    }
+
+    /// Whether native count reads on this PE follow the host counter, or
+    /// its host has none (no code reads the count natively then).
+    pub fn count_reads_natively(&self) -> bool {
+        self.clock.reads_natively() || self.host.tsc_counter().is_none()
+    }
+
     fn adopt_parallel_control(&mut self, control: chain_control::Owner) {
         let contexts = self.chain.contexts();
         self.chain = control;
         self.chain.initialize(
-            self.targets.address(),
+            self.code.table.address(),
             self.itlb.address(),
             contexts,
-            [self.targets.mask(), self.itlb.mask()],
+            [self.code.table.mask(), self.itlb.mask()],
         );
     }
 
@@ -1140,6 +1249,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let (attached, control) = Attached::new(&hub, self.current, false)
             .map_err(|error| self.unsupported(RequirementKind::ParallelAdmission(error)))?;
+        self.join_code(&hub);
         self.adopt_parallel_control(control);
         for (pe, peer) in self.peers.iter_mut().enumerate() {
             if pe != self.current {
@@ -1264,9 +1374,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// before it uses one again. Nested, the outer run's state returns.
     pub fn outside_run<R>(&mut self, work: impl FnOnce(&mut Self) -> R) -> R {
         let was = self.parallel.as_ref().map(|hub| {
-            hub.inboxes[self.current]
+            let was = hub.inboxes[self.current]
                 .outside
-                .swap(true, Ordering::SeqCst)
+                .swap(true, Ordering::SeqCst);
+            hub.section(self.current);
+            was
         });
         let result = work(self);
         if let (Some(hub), Some(was)) = (&self.parallel, was) {
@@ -1340,7 +1452,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All, None);
             }
             Maintenance::Code(Some(physical)) => {
-                self.invalidate_code_page(physical);
+                self.invalidate_posted_code_page(physical);
                 self.host.code_invalidated(Some(physical));
             }
             Maintenance::Code(None) => {
@@ -1509,9 +1621,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             retired: self.retired_instructions() as u64,
             compiled: statistics.compiled,
             shared: statistics.shared,
-            live_blocks: (self.blocks.len() - self.free_blocks.len()) as u64,
-            block_slots: self.blocks.len() as u64,
-            indexed_pages: self.index.pages() as u64,
+            live_blocks: self.code.blocks.live() as u64,
+            block_slots: self.code.blocks.len() as u64,
+            indexed_pages: self.code.cache().index.pages() as u64,
             code_releases: statistics.code_releases,
             compile_ticks: statistics.compile_ticks,
             page_ticks: statistics.page_ticks,

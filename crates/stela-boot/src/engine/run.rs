@@ -569,6 +569,8 @@ pub(super) struct Heartbeat {
     pub(super) lock_waits: ([u64; Call::ALL.len()], u64),
     /// The devices' lock times at the last beat, by call.
     pub(super) lock_times: [stela_engine::machine::engine::LockTimes; Call::ALL.len()],
+    /// The board's shared code at the last beat.
+    pub(super) board: stela_engine::machine::engine::CodeReport,
     /// Counter ticks spent compiling, the guest instructions compiled and
     /// the blocks taken from the translation store, at the last beat.
     pub(super) translation: (u64, u64, u64),
@@ -600,6 +602,7 @@ impl Heartbeat {
             clock_count: 0,
             lock_waits: ([0; Call::ALL.len()], 0),
             lock_times: Default::default(),
+            board: Default::default(),
             translation: (
                 machine.statistics.compile_ticks,
                 machine.statistics.compiled_instructions,
@@ -686,7 +689,7 @@ impl Heartbeat {
         peers_report(machine);
         cost.mark("peers");
         let stale = machine.stale_code();
-        if stale.stale > 0 {
+        if stale.stale > 0 || stale.admitted > 0 {
             output::arguments(format_args!("STALE {stale:?}\n"));
         }
         cost.mark("stale");
@@ -788,7 +791,8 @@ impl Heartbeat {
             let mut fetches = String::from("PES FETCH compile%/page%/shared%/install%");
             // Per PE: the blocks it holds, its block table's slots, the
             // pages its index finds blocks in, and the code arena parts it
-            // released for heap pressure since the last beat.
+            // released for heap pressure since the last beat; on a shared
+            // board the first three are the board's, and `board_code` adds.
             let mut code = String::from("PES CODE live/slots/pages/releases");
             // Per PE: device transfers whose deadline came and device line
             // queries, each as a count and, with `--profile`, a share of the
@@ -816,7 +820,9 @@ impl Heartbeat {
             // Per PE with `--profile`: why blocks were installed (evicted
             // here within 10 s, installed on another PE then, never here
             // before), the KiB of block code installed and evicted, and the
-            // interval's share evicting.
+            // interval's share evicting. On a shared board one census
+            // counts for the board: evicted by any PE, never on the board
+            // before, and never elsewhere.
             let mut installs =
                 String::from("PES INSTALLS installs/thrash/elsewhere/first/in_kb/out_kb/evict%");
             let tsc_percent = |ticks: u64| u128::from(ticks) * 100 / u128::from(elapsed.max(1));
@@ -941,6 +947,10 @@ impl Heartbeat {
             self.lock_waits = waits;
             output::arguments(format_args!("{shares}\n"));
             output::arguments(format_args!("{fetches}\n"));
+            if let Some(board) = machine.devices.hub().code_report() {
+                code.push_str(&board_code(&board, &self.board, tsc_hz));
+                self.board = board;
+            }
             output::arguments(format_args!("{code}\n"));
             output::arguments(format_args!("{device_work}\n"));
             output::arguments(format_args!("{lookups}\n"));
@@ -979,6 +989,50 @@ impl Heartbeat {
         ));
         self.retired = retired;
     }
+}
+
+/// The board's shared code since `was`, for `PES CODE`: the window in MiB,
+/// its parts and the ring's generation; parts taken away (`retired`), of
+/// them for want of a block slot (`forced`); installs that lost to another
+/// PE's (`lost`); waits for a part's grace and those that ran out; and the
+/// code lock's acquisitions, those that found it held, the microseconds
+/// they waited and the longest wait.
+fn board_code(
+    now: &stela_engine::machine::engine::CodeReport,
+    was: &stela_engine::machine::engine::CodeReport,
+    tsc_hz: u64,
+) -> String {
+    let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+    // By what took the lock: acquisitions, microseconds held and waited,
+    // and the longest hold.
+    let mut sites = String::from(" lock_sites=acquired/held_us/waited_us/longest_held_us");
+    for site in stela_engine::machine::engine::LockSite::ALL {
+        let (now, was) = (now.lock.sites[site as usize], was.lock.sites[site as usize]);
+        sites.push_str(&format!(
+            " {}:{}/{}/{}/{}",
+            site.name(),
+            now.acquired.saturating_sub(was.acquired),
+            micros(now.held.saturating_sub(was.held)),
+            micros(now.waited.saturating_sub(was.waited)),
+            micros(now.longest_held),
+        ));
+    }
+    format!(
+        " board={}M/{}/{} retired={} forced={} lost={} grace_waits={}/{} \
+         lock=acquired/contended/waited_us/longest_us:{}/{}/{}/{}{sites}",
+        now.window >> 20,
+        now.parts,
+        now.generation,
+        now.retired.saturating_sub(was.retired),
+        now.forced.saturating_sub(was.forced),
+        now.lost.saturating_sub(was.lost),
+        now.grace_waits.saturating_sub(was.grace_waits),
+        now.overdue.saturating_sub(was.overdue),
+        now.lock.acquired.saturating_sub(was.lock.acquired),
+        now.lock.contended.saturating_sub(was.lock.contended),
+        micros(now.lock.waited.saturating_sub(was.lock.waited)),
+        micros(now.lock.longest),
+    )
 }
 
 /// `HEAP small=310M large=62M 128K:352/73M cores=300M/20M classes=16:8M,…`:

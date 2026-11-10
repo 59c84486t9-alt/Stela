@@ -208,7 +208,7 @@ fn a_populated_machine_keeps_its_code_as_it_adopts_a_hub_control() {
     machine.step().unwrap();
     machine.step().unwrap();
     assert_eq!(machine.statistics.links, 2);
-    let (blocks, installed) = (machine.blocks.len(), machine.host.installed.len());
+    let (blocks, installed) = (machine.code.blocks.len(), machine.host.installed.len());
     let contexts = machine.chain.contexts();
     let old_address = machine.chain.address();
     let old_storage = machine.chain.weak_storage();
@@ -219,7 +219,7 @@ fn a_populated_machine_keeps_its_code_as_it_adopts_a_hub_control() {
     // Code finds the control through the frame, which the next entry sets.
     assert_eq!(machine.chain.contexts(), contexts);
     assert_eq!(
-        (machine.blocks.len(), machine.host.installed.len()),
+        (machine.code.blocks.len(), machine.host.installed.len()),
         (blocks, installed)
     );
     assert_eq!(
@@ -1269,5 +1269,64 @@ fn a_shared_board_classifies_and_serves_a_scalar_access_in_one_call() {
             .devices
             .with(|devices| (devices.reads, devices.writes)),
         (1, 1)
+    );
+}
+
+#[test]
+fn board_grace_follows_run_loop_flags() {
+    let (hub, _) = hub(2);
+    let grace = &hub.board.grace;
+    assert!(!grace.inside(0) && !grace.inside(1));
+    // Entering the run loop enters the section; parking leaves it.
+    hub.set_outside(0, false);
+    hub.set_outside(1, false);
+    assert!(grace.inside(0) && grace.inside(1));
+    let snapshot = grace.snapshot();
+    assert!(!grace.passed(&snapshot, None));
+    hub.set_parked(1, true);
+    assert!(!grace.inside(1));
+    assert!(!grace.passed(&snapshot, None), "PE 0 has not moved on");
+    // A loop top passes; parked and outside together stay outside.
+    hub.pass(0);
+    assert!(grace.passed(&snapshot, None));
+    hub.set_outside(1, true);
+    hub.set_parked(1, false);
+    assert!(!grace.inside(1));
+    hub.pass(1);
+    hub.set_outside(1, false);
+    assert!(grace.inside(1));
+    // A PE that was outside at the snapshot never holds it up.
+    hub.set_outside(0, true);
+    let snapshot = grace.snapshot();
+    hub.pass(1);
+    assert!(grace.passed(&snapshot, None));
+}
+
+#[test]
+fn board_wait_runs_out_and_reports_once() {
+    use super::super::board::Waited;
+    let (hub, _) = hub(2);
+    hub.set_outside(0, false);
+    hub.set_outside(1, false);
+    let snapshot = hub.board.grace.snapshot();
+    let mut now = 0u64;
+    let mut counter = || {
+        now += 10;
+        now
+    };
+    // PE 1 stays inside: PE 0's wait ends at its deadline, back inside.
+    assert_eq!(
+        hub.board.wait(0, &snapshot, 100, &mut counter),
+        Waited::Overdue { first: true }
+    );
+    assert!(hub.board.grace.inside(0));
+    assert_eq!(
+        hub.board.wait(0, &snapshot, 100, &mut counter),
+        Waited::Overdue { first: false }
+    );
+    hub.pass(1);
+    assert_eq!(
+        hub.board.wait(0, &snapshot, 100, &mut counter),
+        Waited::Passed
     );
 }

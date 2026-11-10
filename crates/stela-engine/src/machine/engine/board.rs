@@ -1,0 +1,1224 @@
+//! What the board's PEs share of compiled code, and the rules for taking
+//! some of it away while other PEs may still hold it (stages 4 and 5 of
+//! the shared code arena, `docs/design/compiler.md`):
+//!
+//! - [`Grace`]: a word per PE that says whether it is inside a section that
+//!   may hold what is being taken away, and how often it left one. What a
+//!   PE unpublishes is reused only once every other PE was outside at that
+//!   moment or has left since. No PE ever waits inside a section, so two
+//!   PEs that wait never wait on each other.
+//! - [`Ring`]: the code parts every PE installs into, one bump cursor for
+//!   all, each part retired one ahead of its reuse.
+//! - [`Slots`]: block slot numbers, reused through a limbo list once their
+//!   grace passed; until then new numbers are given instead.
+//! - [`Records`]: a record per slot that every PE reads without a lock.
+//!
+//! - [`Board`]: what `parallel::Hub` keeps of these for its PEs.
+//!
+//! - [`Code`]: the blocks, block index, block table and, when the host
+//!   gives its whole code window, the one [`Arena`] of a board's machines,
+//!   or of one machine alone.
+//!
+//! The grace is entered and left with the hub's run-loop flags and passed
+//! once per run-loop iteration.
+
+use super::{
+    Block, CodePartitions, CodeWindow, block_index::BlockIndex, code_slots::CodeSlots, recovery,
+};
+use crate::platform::sync::{Mutex, MutexGuard};
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{
+    AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
+};
+use stela_compiler::x86_64::chain::{self, LookupTable, TableReader};
+
+#[cfg(test)]
+mod tests;
+
+/// One PE's word, on a cache line of its own: its PE writes it often.
+#[repr(align(64))]
+#[derive(Default)]
+struct Word(AtomicU64);
+
+/// Each PE's count of section entries and exits: odd while it is inside a
+/// section, where it may hold and use what the guarded state names (code
+/// addresses, slot numbers); even outside, where it holds none. A PE that
+/// waits for a grace period first leaves its section, so it holds no other
+/// waiter up.
+pub(super) struct Grace {
+    words: Box<[Word]>,
+}
+
+/// The PEs' words when something was unpublished ([`Grace::snapshot`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct Snapshot(Box<[u64]>);
+
+impl Grace {
+    /// Words for `pes` PEs, every one outside.
+    pub(super) fn new(pes: usize) -> Self {
+        Self {
+            words: (0..pes).map(|_| Word::default()).collect(),
+        }
+    }
+
+    /// PE `pe` enters a section. A full barrier: its later reads of
+    /// shared state come after a remover that saw it outside.
+    pub(super) fn enter(&self, pe: usize) {
+        let before = self.words[pe].0.fetch_add(1, Ordering::SeqCst);
+        debug_assert!(before & 1 == 0, "a PE enters one section at a time");
+    }
+
+    /// PE `pe` leaves its section: what it read inside is no longer used.
+    pub(super) fn leave(&self, pe: usize) {
+        let before = self.words[pe].0.fetch_add(1, Ordering::Release);
+        debug_assert!(before & 1 == 1, "a PE leaves the section it is in");
+    }
+
+    /// Leave and enter again at once: a point of a PE that stays inside
+    /// where it holds nothing (its run loop's top).
+    pub(super) fn pass(&self, pe: usize) {
+        let before = self.words[pe].0.fetch_add(2, Ordering::SeqCst);
+        debug_assert!(before & 1 == 1, "a PE passes a point of its section");
+    }
+
+    /// Whether PE `pe` is inside a section.
+    pub(super) fn inside(&self, pe: usize) -> bool {
+        self.words[pe].0.load(Ordering::Relaxed) & 1 != 0
+    }
+
+    /// The words now. Taken after the stores that unpublished something:
+    /// a PE outside now finds it gone once it enters.
+    pub(super) fn snapshot(&self) -> Snapshot {
+        fence(Ordering::SeqCst);
+        Snapshot(
+            self.words
+                .iter()
+                .map(|word| word.0.load(Ordering::SeqCst))
+                .collect(),
+        )
+    }
+
+    /// Whether every PE but `skip` was outside at `snapshot` or has left
+    /// since: what was unpublished before it is no longer used. `skip` is
+    /// a caller inside a section that holds nothing it read before the
+    /// snapshot without checking it again.
+    pub(super) fn passed(&self, snapshot: &Snapshot, skip: Option<usize>) -> bool {
+        self.words
+            .iter()
+            .zip(&snapshot.0)
+            .enumerate()
+            .all(|(pe, (word, &then))| {
+                then & 1 == 0 || Some(pe) == skip || word.0.load(Ordering::Acquire) != then
+            })
+    }
+
+    /// Wait outside its section, as PE `pe`, until `snapshot` has passed or
+    /// `give_up` says to stop, then enter again: whether it passed. The
+    /// caller checks what it held before again, as a remover may have
+    /// taken it meanwhile.
+    pub(super) fn wait(
+        &self,
+        pe: usize,
+        snapshot: &Snapshot,
+        mut give_up: impl FnMut() -> bool,
+    ) -> bool {
+        self.leave(pe);
+        let passed = loop {
+            if self.passed(snapshot, None) {
+                break true;
+            }
+            if give_up() {
+                break false;
+            }
+            core::hint::spin_loop();
+        };
+        self.enter(pe);
+        passed
+    }
+}
+
+/// What the board's PEs share of compiled code, kept by `parallel::Hub`.
+/// Its one [`Grace`] covers code bytes and block slots alike: a PE is
+/// inside while it is in its run loop and neither parked nor outside it
+/// (`Hub::set_outside`, `Hub::set_parked`), and passes the loop's top once
+/// per iteration, where it holds no code address or slot it does not check
+/// again (the jump cache by incarnation, a held exit by its part).
+pub(super) struct Board {
+    pub(super) grace: Grace,
+    /// A wait ran out once: reported then, not again.
+    overdue: AtomicBool,
+}
+
+/// The compiled blocks a board's machines share, or a machine keeps alone
+/// (a board of one PE): every PE runs any block any PE installed.
+pub(super) struct Code {
+    /// The blocks, which any PE reads without a lock.
+    pub(super) blocks: Blocks,
+    /// What changes with installs, links and evictions, under one lock.
+    pub(super) cache: Mutex<Cache>,
+    /// The block table's entries, for reads without the lock.
+    pub(super) table: TableReader,
+    /// The code arena, when the engine allocates code itself.
+    pub(super) arena: Option<Arena>,
+    /// Advances when the board's machines forget every block at once
+    /// (`Machine::forget_shared_code`): what jump cache entries name.
+    pub(super) epoch: AtomicU64,
+    pub(super) events: Events,
+}
+
+/// The parts an [`Arena`] is cut into: what one retirement takes away.
+const ARENA_PARTS: usize = 32;
+
+/// The board's code arena: a host's whole [`CodeWindow`] cut into [`Ring`]
+/// parts, written through its writable view and run through its executable
+/// one.
+pub(super) struct Arena {
+    pub(super) window: CodeWindow,
+    pub(super) part_bytes: usize,
+    pub(super) ring: Ring,
+}
+
+impl Arena {
+    fn new(window: CodeWindow) -> Self {
+        let parts = ARENA_PARTS.min(window.bytes / 4096).max(MIN_PARTS);
+        let part_bytes = (window.bytes / parts) & !4095;
+        assert!(part_bytes >= 4096, "a code window of at least three pages");
+        Self {
+            window,
+            part_bytes,
+            ring: Ring::new(parts, part_bytes),
+        }
+    }
+
+    /// The parts, as a host would give them.
+    pub(super) fn partitions(&self) -> CodePartitions {
+        CodePartitions {
+            base: self.window.exec,
+            bytes_per_part: self.part_bytes,
+            parts: self.ring.parts as usize,
+        }
+    }
+
+    /// The executable address of `place`.
+    pub(super) fn address(&self, place: Place) -> usize {
+        self.window.exec
+            + self.ring.part(place.generation) * self.part_bytes
+            + place.offset as usize
+    }
+
+    /// The executable range of `generation`'s part.
+    pub(super) fn range(&self, generation: u32) -> core::ops::Range<usize> {
+        let start = self.window.exec + self.ring.part(generation) * self.part_bytes;
+        start..start + self.part_bytes
+    }
+
+    /// The writable alias of executable `address`, checked to lie with
+    /// `bytes` in the window.
+    fn alias(&self, address: usize, bytes: usize) -> *mut u8 {
+        let offset = address
+            .checked_sub(self.window.exec)
+            .filter(|offset| offset + bytes <= self.window.bytes)
+            .expect("code inside the arena");
+        (self.window.write + offset) as *mut u8
+    }
+
+    /// Copy `bytes` to executable `address`, which no core runs yet or
+    /// which the caller's lock makes its own to rewrite.
+    pub(super) fn write(&self, address: usize, bytes: &[u8]) {
+        let alias = self.alias(address, bytes.len());
+        // SAFETY: the host keeps the window writable for the board's life;
+        // the caller owns these bytes (a fresh place, or a patch under the
+        // board's lock).
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), alias, bytes.len()) };
+    }
+
+    /// Replace the instruction at patch point `point` with one aligned
+    /// 8-byte store, which a core running it meets whole
+    /// (`chain::patch_word`). Under the board's lock.
+    pub(super) fn patch_point(&self, point: u64, instruction: [u8; chain::PATCH_BYTES]) {
+        let word = self.alias((point & !7) as usize, 8) as *mut u64;
+        // SAFETY: an aligned word of the window; the board's lock makes the
+        // caller its only writer.
+        let word = unsafe { AtomicU64::from_ptr(word) };
+        let current = word.load(Ordering::Relaxed);
+        word.store(
+            chain::patch_word(current, point, instruction),
+            Ordering::Release,
+        );
+    }
+}
+
+/// What a board's code changes under its lock: the block index, the block
+/// table (whose entries native probes read without it), the blocks' fault
+/// recovery and the blocks of each arena part.
+pub(super) struct Cache {
+    pub(super) index: BlockIndex,
+    pub(super) targets: LookupTable,
+    pub(super) recovery: recovery::Owners,
+    pub(super) code_slots: CodeSlots,
+    /// The blocks of a page being detached, kept for its capacity.
+    pub(super) page_blocks: Vec<usize>,
+    /// A bit per block slot for what a detach detaches.
+    pub(super) marked: Vec<u64>,
+    /// The lookup dispatchers in each arena part that has them, by ring
+    /// generation and BTYPE: a tail calls the probes of its own part.
+    pub(super) dispatchers: Vec<(u32, [Option<u64>; 4])>,
+    /// How the lock was taken, counted by its holder.
+    pub(super) lock: LockCounts,
+    /// Why blocks were installed on a shared board, with `--profile`:
+    /// one census for the board, as its blocks are.
+    pub(super) census: Option<Box<super::install_census::Census>>,
+}
+
+/// How a board's code lock was taken, counted under it: no atomic beyond
+/// the lock's own, and a timestamp only when another PE held it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LockCounts {
+    pub acquired: u64,
+    /// Acquisitions that found it held, the TSC ticks they waited and the
+    /// longest wait since the last report ([`Code::report`]).
+    pub contended: u64,
+    pub waited: u64,
+    pub longest: u64,
+    /// By [`LockSite`]: what took it, how long it waited and held it.
+    pub sites: [SiteCounts; LockSite::ALL.len()],
+}
+
+/// One [`LockSite`]'s share of the code lock: acquisitions, and the TSC
+/// ticks waited for it and held, and the longest hold since the last report.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SiteCounts {
+    pub acquired: u64,
+    pub waited: u64,
+    pub held: u64,
+    pub longest_held: u64,
+}
+
+/// What takes the board's code lock.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LockSite {
+    /// A fetch's index lookup.
+    Fetch,
+    /// A block's publication.
+    Install,
+    /// A block table entry.
+    Target,
+    /// A direct link or cell.
+    Link,
+    /// A dynamic exit's lookup tail.
+    Dynamic,
+    /// A part's or a reclaim's eviction.
+    Evict,
+    /// An IC IVAU's forget.
+    Invalidate,
+    /// Everything else.
+    Other,
+}
+
+impl LockSite {
+    pub const ALL: [Self; 8] = [
+        Self::Fetch,
+        Self::Install,
+        Self::Target,
+        Self::Link,
+        Self::Dynamic,
+        Self::Evict,
+        Self::Invalidate,
+        Self::Other,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Fetch => "fetch",
+            Self::Install => "install",
+            Self::Target => "target",
+            Self::Link => "link",
+            Self::Dynamic => "dynamic",
+            Self::Evict => "evict",
+            Self::Invalidate => "invalidate",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// The board's code lock held, charging its hold to its [`LockSite`].
+pub(super) struct CacheGuard<'a> {
+    guard: MutexGuard<'a, Cache>,
+    site: usize,
+    since: u64,
+}
+
+impl core::ops::Deref for CacheGuard<'_> {
+    type Target = Cache;
+    fn deref(&self) -> &Cache {
+        &self.guard
+    }
+}
+
+impl core::ops::DerefMut for CacheGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Cache {
+        &mut self.guard
+    }
+}
+
+impl Drop for CacheGuard<'_> {
+    fn drop(&mut self) {
+        let held = timestamp().wrapping_sub(self.since);
+        let site = &mut self.guard.lock.sites[self.site];
+        site.held += held;
+        site.longest_held = site.longest_held.max(held);
+    }
+}
+
+/// What a board's code came to, for the heartbeat ([`super::Hub::code_report`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CodeReport {
+    /// The window's bytes, its ring's parts and the current generation.
+    pub window: usize,
+    pub parts: usize,
+    pub generation: u32,
+    /// Parts taken away, of them for want of a block slot, and installs
+    /// that lost to another PE's of the same block.
+    pub retired: u64,
+    pub forced: u64,
+    pub lost: u64,
+    /// Waits for a part's grace, and those that ran out.
+    pub grace_waits: u64,
+    pub overdue: u64,
+    pub lock: LockCounts,
+}
+
+/// Board events counted outside the lock: rare, so a shared atomic each.
+#[derive(Default)]
+pub(super) struct Events {
+    pub(super) retired: AtomicU64,
+    pub(super) forced: AtomicU64,
+    pub(super) lost: AtomicU64,
+    pub(super) grace_waits: AtomicU64,
+    pub(super) overdue: AtomicU64,
+}
+
+impl Events {
+    pub(super) fn count(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A timestamp for lock waits: the TSC, which every PE of a board shares.
+fn timestamp() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: RDTSC has no effect beyond reading the counter.
+        #[allow(unused_unsafe)]
+        unsafe {
+            core::arch::x86_64::_rdtsc()
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        0
+    }
+}
+
+/// The most block slots a board gives: a block takes at least a few dozen
+/// bytes of code, so an arena's bytes over this bound its blocks.
+const CODE_BYTES_PER_SLOT: usize = 32;
+const MIN_SLOTS: usize = 1 << 16;
+const MAX_SLOTS: usize = 1 << 24;
+
+/// The block slots for an arena of `code_bytes`, or the most for a host
+/// that does not say.
+pub(super) fn slot_capacity(code_bytes: Option<usize>) -> u32 {
+    code_bytes.map_or(MAX_SLOTS, |bytes| {
+        (bytes / CODE_BYTES_PER_SLOT).clamp(MIN_SLOTS, MAX_SLOTS)
+    }) as u32
+}
+
+impl Cache {
+    fn new(targets: LookupTable) -> Self {
+        Self {
+            index: BlockIndex::new(),
+            targets,
+            recovery: recovery::Owners::new(),
+            code_slots: CodeSlots::default(),
+            page_blocks: Vec::new(),
+            marked: Vec::new(),
+            dispatchers: Vec::new(),
+            lock: LockCounts::default(),
+            census: None,
+        }
+    }
+}
+
+impl Code {
+    /// Room for `slots` blocks and a block table of `entries`
+    /// (`chain::lookup_entries`).
+    pub(super) fn new(slots: u32, entries: usize, window: Option<CodeWindow>) -> Self {
+        let targets = LookupTable::with_entries(entries);
+        Self {
+            blocks: Blocks::new(slots),
+            table: targets.reader(),
+            cache: Mutex::new(Cache::new(targets)),
+            arena: window.map(Arena::new),
+            epoch: AtomicU64::new(0),
+            events: Events::default(),
+        }
+    }
+
+    /// The board's code lock, counted ([`LockCounts`]) as [`LockSite::Other`].
+    pub(super) fn cache(&self) -> CacheGuard<'_> {
+        self.cache_at(LockSite::Other)
+    }
+
+    /// The board's code lock, counted ([`LockCounts`]) for `site`.
+    pub(super) fn cache_at(&self, site: LockSite) -> CacheGuard<'_> {
+        let site = site as usize;
+        if let Ok(mut cache) = self.cache.try_lock() {
+            cache.lock.acquired += 1;
+            cache.lock.sites[site].acquired += 1;
+            return CacheGuard {
+                guard: cache,
+                site,
+                since: timestamp(),
+            };
+        }
+        let start = timestamp();
+        let mut cache = self.cache.lock().unwrap_or_else(|error| error.into_inner());
+        let since = timestamp();
+        let waited = since.wrapping_sub(start);
+        let lock = &mut cache.lock;
+        lock.acquired += 1;
+        lock.contended += 1;
+        lock.waited += waited;
+        lock.longest = lock.longest.max(waited);
+        lock.sites[site].acquired += 1;
+        lock.sites[site].waited += waited;
+        CacheGuard {
+            guard: cache,
+            site,
+            since,
+        }
+    }
+
+    /// What the board's code came to; the lock's longest wait starts over.
+    pub(super) fn report(&self) -> CodeReport {
+        let lock = {
+            let mut cache = self.cache();
+            let lock = cache.lock;
+            cache.lock.longest = 0;
+            for site in &mut cache.lock.sites {
+                site.longest_held = 0;
+            }
+            lock
+        };
+        let count = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        CodeReport {
+            window: self.arena.as_ref().map_or(0, |arena| arena.window.bytes),
+            parts: self
+                .arena
+                .as_ref()
+                .map_or(0, |arena| arena.ring.parts as usize),
+            generation: self
+                .arena
+                .as_ref()
+                .map_or(0, |arena| arena.ring.generation()),
+            retired: count(&self.events.retired),
+            forced: count(&self.events.forced),
+            lost: count(&self.events.lost),
+            grace_waits: count(&self.events.grace_waits),
+            overdue: count(&self.events.overdue),
+            lock,
+        }
+    }
+
+    /// Forget every block: for a board no other machine holds.
+    pub(super) fn clear(&mut self, free: bool) {
+        self.blocks.clear(free);
+        // The ring starts over: no other machine runs this board's code.
+        if let Some(arena) = &mut self.arena {
+            *arena = Arena::new(arena.window);
+        }
+        let mut cache = self.cache();
+        cache.targets.release_cells(0..=u64::MAX);
+        cache.targets.clear();
+        cache.index.clear();
+        cache.code_slots = CodeSlots::default();
+        cache.dispatchers.clear();
+        if free {
+            cache.recovery = recovery::Owners::new();
+        } else {
+            cache.recovery.clear();
+        }
+    }
+}
+
+/// A block slot's record. The block is written only by the PE that took
+/// the slot from [`Slots`], before it publishes the slot (an index or table
+/// store under the board's lock, or a release store of `live`), and stays
+/// until the slot is taken again, which is only after every PE that could
+/// have read the slot's number has left its section ([`Grace`]): so any PE
+/// inside its section reads it without a lock. The rest are atomics any PE
+/// changes under the board's lock and reads without it.
+#[derive(Default)]
+pub(super) struct Record {
+    block: UnsafeCell<Option<Block>>,
+    /// Advances each time the slot takes a block: a slot number held with
+    /// it names that block while they match.
+    incarnation: AtomicU32,
+    /// Whether the slot holds an installed block.
+    live: AtomicBool,
+    /// Exits to the engine at the block's terminal, up to its limit.
+    pub(super) taken: AtomicU32,
+    /// A bit per successor: chained into a block of its page.
+    linked: AtomicU64,
+    /// A bit per successor: served by a lookup table cell, never linked.
+    settled: AtomicU64,
+    /// A bit per successor: its link slot's body was written, so a core
+    /// may still run it after an unlink (`chain::link`).
+    used: AtomicU64,
+    /// Its dynamic exit is served by a lookup dispatcher.
+    dynamic: AtomicBool,
+    /// Its install lost to another PE's of the same block: never reachable.
+    lost: AtomicBool,
+}
+
+// SAFETY: the block is written only by its slot's taker before the slot is
+// published, and read only after (see above); the rest are atomics.
+unsafe impl Sync for Record {}
+
+/// The most successors a block links: bits of [`Record::linked`].
+pub(super) const MAX_SUCCESSORS: usize = u64::BITS as usize;
+
+impl Record {
+    pub(super) fn incarnation(&self) -> u32 {
+        self.incarnation.load(Ordering::Acquire)
+    }
+
+    pub(super) fn live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+
+    /// Whether successor `position` is linked or settled: not to link.
+    pub(super) fn linked(&self, position: usize) -> bool {
+        (self.linked.load(Ordering::Acquire) | self.settled.load(Ordering::Acquire)) & 1 << position
+            != 0
+    }
+
+    /// Whether successor `position` is chained into a block of its page,
+    /// which a detach of that block undoes.
+    pub(super) fn chained(&self, position: usize) -> bool {
+        self.linked.load(Ordering::Acquire) & 1 << position != 0
+    }
+
+    /// Successor `position` is served by a cell from now on: under the
+    /// board's lock.
+    pub(super) fn settle(&self, position: usize) {
+        self.settled.fetch_or(1 << position, Ordering::Release);
+    }
+
+    /// Whether successor `position`'s link slot body was written.
+    pub(super) fn used(&self, position: usize) -> bool {
+        self.used.load(Ordering::Acquire) & 1 << position != 0
+    }
+
+    /// Mark successor `position` linked (or unlinked), and its slot body
+    /// used if `used`: under the board's lock.
+    pub(super) fn set_linked(&self, position: usize, linked: bool, used: bool) {
+        let bit = 1 << position;
+        if linked {
+            self.linked.fetch_or(bit, Ordering::Release);
+        } else {
+            self.linked.fetch_and(!bit, Ordering::Release);
+        }
+        if used {
+            self.used.fetch_or(bit, Ordering::Release);
+        }
+    }
+
+    /// Whether its dynamic exit is still open for a lookup dispatcher.
+    pub(super) fn dynamic_open(&self) -> bool {
+        !self.dynamic.load(Ordering::Acquire)
+    }
+
+    pub(super) fn close_dynamic(&self) {
+        self.dynamic.store(true, Ordering::Release);
+    }
+
+    /// Whether its install lost to another PE's ([`Self::mark_lost`]).
+    pub(super) fn lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
+
+    /// Its install lost: under the board's lock, before its retirement.
+    pub(super) fn mark_lost(&self) {
+        self.lost.store(true, Ordering::Release);
+    }
+}
+
+/// The board's blocks: slot numbers from [`Slots`] and a [`Record`] per
+/// slot. Indexing gives a slot's block, as a table would.
+pub(super) struct Blocks {
+    slots: Slots,
+    records: Records<Record>,
+    /// Slots holding an installed block.
+    live: AtomicUsize,
+}
+
+impl Blocks {
+    pub(super) fn new(capacity: u32) -> Self {
+        Self {
+            slots: Slots::new(capacity),
+            records: Records::new(capacity),
+            live: AtomicUsize::new(0),
+        }
+    }
+
+    /// One more than the highest slot given so far.
+    pub(super) fn len(&self) -> usize {
+        self.slots.issued() as usize
+    }
+
+    /// Slots holding a block.
+    pub(super) fn live(&self) -> usize {
+        self.live.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn record(&self, slot: usize) -> &Record {
+        self.records
+            .get(slot as u32)
+            .expect("a slot that was given")
+    }
+
+    /// `slot`'s block, if it ever held one.
+    pub(super) fn get(&self, slot: usize) -> Option<&Block> {
+        let record = self.records.get(u32::try_from(slot).ok()?)?;
+        // SAFETY: see `Record`: written only before the slot was published.
+        unsafe { (*record.block.get()).as_ref() }
+    }
+
+    /// `slot`'s block while it holds an installed one.
+    pub(super) fn installed(&self, slot: usize) -> Option<&Block> {
+        let record = self.records.get(u32::try_from(slot).ok()?)?;
+        record.live().then(|| self.get(slot)).flatten()
+    }
+
+    /// A slot for a new block, with its record allocated, if one is left
+    /// and the heap has room. `grace` and `skip` are as for [`Slots::take`].
+    pub(super) fn take(&self, grace: &Grace, skip: Option<usize>) -> Option<usize> {
+        let slot = self.slots.take(grace, skip)?;
+        if self.records.try_reserve(slot).is_none() {
+            self.slots.release(alloc::vec![slot], grace.snapshot());
+            return None;
+        }
+        Some(slot as usize)
+    }
+
+    /// The block `slot` held before [`Self::take`] gave it to this
+    /// caller, which nothing names any more.
+    pub(super) fn vacate(&self, slot: usize) -> Option<Block> {
+        let record = self.record(slot);
+        debug_assert!(!record.live(), "a slot taken for a new block");
+        // SAFETY: as for `fill`.
+        unsafe { (*record.block.get()).take() }
+    }
+
+    /// Put `block` in `slot`, which [`Self::take`] gave and nothing names
+    /// yet, and make it live.
+    pub(super) fn fill(&self, slot: usize, block: Block) {
+        let record = self.record(slot);
+        debug_assert!(!record.live(), "a slot taken for a new block");
+        // SAFETY: the slot was taken by this caller and no PE reads it: its
+        // last release's grace passed.
+        unsafe { *record.block.get() = Some(block) };
+        record.taken.store(0, Ordering::Relaxed);
+        record.linked.store(0, Ordering::Relaxed);
+        record.settled.store(0, Ordering::Relaxed);
+        record.used.store(0, Ordering::Relaxed);
+        record.dynamic.store(false, Ordering::Relaxed);
+        record.lost.store(false, Ordering::Relaxed);
+        record.incarnation.fetch_add(1, Ordering::Release);
+        record.live.store(true, Ordering::Release);
+        self.live.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Make `slot` no longer live, as its block's code goes: under the
+    /// board's lock, before the release of [`Self::release`].
+    pub(super) fn retire(&self, slot: usize) {
+        let record = self.record(slot);
+        if record.live.swap(false, Ordering::AcqRel) {
+            self.live.fetch_sub(1, Ordering::Relaxed);
+        }
+        record.incarnation.fetch_add(1, Ordering::Release);
+    }
+
+    /// `slots`, retired, were unpublished before `snapshot`.
+    pub(super) fn release(&self, slots: Vec<u32>, snapshot: Snapshot) {
+        self.slots.release(slots, snapshot);
+    }
+
+    /// Forget every block, for a board no other machine holds; `free`
+    /// gives the records' memory back.
+    pub(super) fn clear(&mut self, free: bool) {
+        let capacity = self.slots.capacity;
+        if free {
+            *self = Self::new(capacity);
+        } else {
+            self.slots = Slots::new(capacity);
+            self.records.reset();
+            *self.live.get_mut() = 0;
+        }
+    }
+
+    /// The heap bytes the records hold.
+    pub(super) fn heap_bytes(&self) -> usize {
+        self.records.heap_bytes()
+    }
+
+    /// The slots its allocated records cover.
+    #[cfg(test)]
+    pub(super) fn capacity(&self) -> usize {
+        self.records
+            .chunks
+            .iter()
+            .filter(|chunk| !chunk.load(Ordering::Relaxed).is_null())
+            .count()
+            * RECORD_CHUNK
+    }
+
+    /// Every slot that ever held a block, and its block.
+    pub(super) fn iter(&self) -> impl Iterator<Item = (usize, &Block)> {
+        (0..self.len()).filter_map(|slot| Some((slot, self.get(slot)?)))
+    }
+}
+
+impl core::ops::Index<usize> for Blocks {
+    type Output = Block;
+    fn index(&self, slot: usize) -> &Block {
+        self.get(slot).expect("a slot holding a block")
+    }
+}
+
+/// How [`Board::wait`] ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Waited {
+    Passed,
+    /// The deadline passed first. Nothing is reused: the caller goes back
+    /// to its run loop (where it reads its mail, which may be what the
+    /// other PE waits on) and tries again later. `first` is true for the
+    /// board's first overrun, which the caller reports.
+    Overdue {
+        first: bool,
+    },
+}
+
+impl Board {
+    pub(super) fn new(pes: usize) -> Self {
+        Self {
+            grace: Grace::new(pes),
+            overdue: AtomicBool::new(false),
+        }
+    }
+
+    /// Whether this is the board's first overrun of a wait: the one
+    /// reported.
+    pub(super) fn overdue(&self) -> bool {
+        !self.overdue.swap(true, Ordering::Relaxed)
+    }
+
+    /// As PE `pe`, wait outside its section for `snapshot` for at most
+    /// `ticks` of `counter`, the host's counter, then enter again. Never
+    /// hangs: a PE inside that waits on this one (a broadcast, a stop)
+    /// gets its answer once this one is back in its run loop.
+    pub(super) fn wait(
+        &self,
+        pe: usize,
+        snapshot: &Snapshot,
+        ticks: u64,
+        mut counter: impl FnMut() -> u64,
+    ) -> Waited {
+        let start = counter();
+        if self
+            .grace
+            .wait(pe, snapshot, || counter().wrapping_sub(start) >= ticks)
+        {
+            return Waited::Passed;
+        }
+        Waited::Overdue {
+            first: !self.overdue.swap(true, Ordering::Relaxed),
+        }
+    }
+}
+
+/// The fewest parts a [`Ring`] has: the current one, the one being retired
+/// ahead of it, and at least one that keeps code.
+pub(super) const MIN_PARTS: usize = 3;
+
+/// Where [`Ring::take`] put something: the part's generation (how many
+/// parts were current before it) and the offset in the part.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Place {
+    pub(super) generation: u32,
+    pub(super) offset: u32,
+}
+
+/// What [`Ring::advance`] asks of its caller.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Advance {
+    /// The ring moved on, by this caller or another: take again.
+    Moved,
+    /// This caller moved the ring on, and must take away the code of this
+    /// generation, the oldest (unlink every exit into its part, forget its
+    /// blocks, cells and table entries), then call [`Ring::retired`].
+    Retire(u32),
+    /// The next part's code is still being taken away by another PE: take
+    /// again soon.
+    Busy,
+    /// The next part's grace has not passed: [`Grace::wait`] for it outside
+    /// the section, then take again.
+    Wait(Snapshot),
+}
+
+/// The parts of the code arena, which every PE installs into: one cursor,
+/// a generation and an offset in one word, that a compare-exchange
+/// advances. When the current part is full the next becomes current, and
+/// the code of the part after that, the oldest, is taken away: by the time
+/// the ring reaches it its grace has long passed, so no PE waits in the
+/// usual case. A part's offsets are relative to it; the caller maps them
+/// to the arena's two views.
+pub(super) struct Ring {
+    part_bytes: u32,
+    pub(super) parts: u32,
+    /// The current part's generation above, its bytes taken below.
+    cursor: AtomicU64,
+    /// One more than the last generation each part's code was taken away
+    /// of ([`Self::retired`]); 0 for none. A part is ready for generation
+    /// `n` once its code of `n - parts` was, and that grace passed: what a
+    /// mover marks after its compare-exchange is no proof of that.
+    retired: Box<[AtomicU32]>,
+    /// The snapshot each part's last retirement waits on.
+    snapshots: Box<[Mutex<Option<Snapshot>>]>,
+}
+
+const fn cursor(generation: u32, offset: u32) -> u64 {
+    (generation as u64) << 32 | offset as u64
+}
+
+const fn split(cursor: u64) -> (u32, u32) {
+    ((cursor >> 32) as u32, cursor as u32)
+}
+
+impl Ring {
+    /// `parts` parts of `part_bytes` each.
+    pub(super) fn new(parts: usize, part_bytes: usize) -> Self {
+        assert!(parts >= MIN_PARTS, "a ring of at least three parts");
+        let part_bytes = u32::try_from(part_bytes).expect("a part below 4 GiB");
+        Self {
+            part_bytes,
+            parts: u32::try_from(parts).expect("a bounded number of parts"),
+            cursor: AtomicU64::new(0),
+            retired: (0..parts).map(|_| AtomicU32::new(0)).collect(),
+            snapshots: (0..parts).map(|_| Mutex::new(None)).collect(),
+        }
+    }
+
+    /// The part a place's generation is in.
+    pub(super) fn part(&self, generation: u32) -> usize {
+        (generation % self.parts) as usize
+    }
+
+    /// The generation of the current part.
+    pub(super) fn generation(&self) -> u32 {
+        split(self.cursor.load(Ordering::Acquire)).0
+    }
+
+    /// `bytes` at `align` (a power of two) in the current part, or the
+    /// generation of the full current part, which [`Self::advance`] takes.
+    pub(super) fn take(&self, bytes: usize, align: usize) -> Result<Place, u32> {
+        debug_assert!(align.is_power_of_two());
+        let mut current = self.cursor.load(Ordering::Acquire);
+        loop {
+            let (generation, offset) = split(current);
+            let start = (offset as usize).next_multiple_of(align);
+            let end = start + bytes;
+            if end > self.part_bytes as usize {
+                return Err(generation);
+            }
+            match self.cursor.compare_exchange_weak(
+                current,
+                cursor(generation, end as u32),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Ok(Place {
+                        generation,
+                        offset: start as u32,
+                    });
+                }
+                Err(now) => current = now,
+            }
+        }
+    }
+
+    /// Make the part after the full one of generation `full` current, once
+    /// it is ready. `skip` is as for [`Grace::passed`].
+    pub(super) fn advance(&self, full: u32, grace: &Grace, skip: Option<usize>) -> Advance {
+        let next = full.checked_add(1).expect("ring generations exhausted");
+        let part = self.part(next);
+        if self.generation() != full {
+            return Advance::Moved;
+        }
+        if let Some(old) = next.checked_sub(self.parts) {
+            if self.retired[part].load(Ordering::Acquire) != old + 1 {
+                return Advance::Busy;
+            }
+            let snapshot = self.snapshots[part]
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match snapshot.as_ref() {
+                Some(snapshot) if !grace.passed(snapshot, skip) => {
+                    return Advance::Wait(snapshot.clone());
+                }
+                _ => {}
+            }
+        }
+        let mut current = self.cursor.load(Ordering::Acquire);
+        while split(current).0 == full {
+            match self.cursor.compare_exchange_weak(
+                current,
+                cursor(next, 0),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                // The oldest generation goes, if the ring went round once.
+                Ok(_) => {
+                    return match (next + 1).checked_sub(self.parts) {
+                        Some(oldest) => Advance::Retire(oldest),
+                        None => Advance::Moved,
+                    };
+                }
+                Err(now) => current = now,
+            }
+        }
+        Advance::Moved
+    }
+
+    /// The caller of [`Advance::Retire`] took away the code of
+    /// `generation`, and `snapshot` was taken after: its part is reused once
+    /// that passed.
+    pub(super) fn retired(&self, generation: u32, snapshot: Snapshot) {
+        let part = self.part(generation);
+        *self.snapshots[part]
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(snapshot);
+        self.retired[part].store(generation + 1, Ordering::Release);
+    }
+
+    /// One more than the last generation `part`'s code was taken away of;
+    /// 0 for none.
+    pub(super) fn retired_through(&self, part: usize) -> u32 {
+        self.retired[part].load(Ordering::Acquire)
+    }
+
+    /// Whether `place`'s part still holds its generation's code: false from
+    /// the move that retires it on. An installer checks it under the lock
+    /// the retirer forgets under, so a block published before the move is
+    /// forgotten by the retirer and none is published after it.
+    #[cfg(test)]
+    pub(super) fn live(&self, place: Place) -> bool {
+        self.generation() < place.generation.saturating_add(self.parts - 1)
+    }
+}
+
+/// Block slot numbers below a capacity. A released slot goes to limbo with
+/// the grace snapshot taken after its block was unpublished, and is given
+/// again once that passed; until then a new number is given, and only a
+/// full capacity refuses.
+pub(super) struct Slots {
+    capacity: u32,
+    list: Mutex<SlotList>,
+}
+
+struct SlotList {
+    next: u32,
+    free: Vec<u32>,
+    limbo: VecDeque<(Snapshot, Vec<u32>)>,
+}
+
+impl Slots {
+    pub(super) fn new(capacity: u32) -> Self {
+        Self {
+            capacity,
+            list: Mutex::new(SlotList {
+                next: 0,
+                free: Vec::new(),
+                limbo: VecDeque::new(),
+            }),
+        }
+    }
+
+    /// A slot no PE holds, if one is left. `skip` is as for
+    /// [`Grace::passed`].
+    pub(super) fn take(&self, grace: &Grace, skip: Option<usize>) -> Option<u32> {
+        let mut list = self.list.lock().unwrap_or_else(|error| error.into_inner());
+        if list.free.is_empty() {
+            while list
+                .limbo
+                .front()
+                .is_some_and(|(snapshot, _)| grace.passed(snapshot, skip))
+            {
+                let (_, slots) = list.limbo.pop_front().expect("a front batch");
+                list.free.extend(slots);
+            }
+        }
+        if let Some(slot) = list.free.pop() {
+            return Some(slot);
+        }
+        (list.next < self.capacity).then(|| {
+            list.next += 1;
+            list.next - 1
+        })
+    }
+
+    /// `slots` were unpublished before `snapshot` was taken.
+    pub(super) fn release(&self, slots: Vec<u32>, snapshot: Snapshot) {
+        if slots.is_empty() {
+            return;
+        }
+        self.list
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .limbo
+            .push_back((snapshot, slots));
+    }
+
+    /// The most slots given at once so far: what block records need room for.
+    pub(super) fn issued(&self) -> u32 {
+        self.list
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .next
+    }
+}
+
+/// Records in one allocation of [`Records`], which never moves.
+const RECORD_CHUNK: usize = 1024;
+
+/// A record per slot, in chunks allocated as slots reach them, which never
+/// move: any PE reads a record with no lock. Records hold their fields in
+/// atomics, so a writer and a reader never race on plain memory; what a
+/// field means is settled by the slot discipline: the PE that took a slot
+/// from [`Slots`] fills its record before it publishes the block (a table
+/// or index store with release), and nobody reads a released slot's record
+/// once its grace passed.
+pub(super) struct Records<T> {
+    chunks: Box<[AtomicPtr<T>]>,
+    growing: Mutex<()>,
+}
+
+// SAFETY: a chunk is published once and freed only on drop; `T` is shared
+// across PEs only through `&T`.
+unsafe impl<T: Send + Sync> Send for Records<T> {}
+// SAFETY: as above.
+unsafe impl<T: Send + Sync> Sync for Records<T> {}
+
+impl<T: Default> Records<T> {
+    /// Room for `capacity` slots, none allocated yet.
+    pub(super) fn new(capacity: u32) -> Self {
+        Self {
+            chunks: (0..(capacity as usize).div_ceil(RECORD_CHUNK))
+                .map(|_| AtomicPtr::new(core::ptr::null_mut()))
+                .collect(),
+            growing: Mutex::new(()),
+        }
+    }
+
+    /// `slot`'s record, if its chunk was allocated.
+    pub(super) fn get(&self, slot: u32) -> Option<&T> {
+        let chunk = self
+            .chunks
+            .get(slot as usize / RECORD_CHUNK)?
+            .load(Ordering::Acquire);
+        // SAFETY: a published chunk of RECORD_CHUNK records, live until drop.
+        (!chunk.is_null()).then(|| unsafe { &*chunk.add(slot as usize % RECORD_CHUNK) })
+    }
+
+    /// `slot`'s record, allocating its chunk if needed: for the PE that
+    /// took the slot, before it publishes it.
+    #[cfg(test)]
+    pub(super) fn reserve(&self, slot: u32) -> &T {
+        if let Some(record) = self.get(slot) {
+            return record;
+        }
+        let index = slot as usize / RECORD_CHUNK;
+        let _growing = self
+            .growing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if self.chunks[index].load(Ordering::Acquire).is_null() {
+            let chunk: Box<[T]> = (0..RECORD_CHUNK).map(|_| T::default()).collect();
+            let chunk = Box::into_raw(chunk) as *mut T;
+            self.chunks[index].store(chunk, Ordering::Release);
+        }
+        self.get(slot).expect("a published chunk")
+    }
+
+    /// [`Self::reserve`], or nothing when the heap has no room for the
+    /// chunk or `slot` is past the capacity.
+    pub(super) fn try_reserve(&self, slot: u32) -> Option<&T> {
+        if let Some(record) = self.get(slot) {
+            return Some(record);
+        }
+        let index = slot as usize / RECORD_CHUNK;
+        let _growing = self
+            .growing
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let chunk = self.chunks.get(index)?;
+        if chunk.load(Ordering::Acquire).is_null() {
+            let mut records = Vec::new();
+            records.try_reserve_exact(RECORD_CHUNK).ok()?;
+            records.resize_with(RECORD_CHUNK, T::default);
+            let records = Box::into_raw(records.into_boxed_slice()) as *mut T;
+            chunk.store(records, Ordering::Release);
+        }
+        self.get(slot)
+    }
+
+    /// Every record back to its default, the chunks kept: for an owner no
+    /// other PE reads through.
+    pub(super) fn reset(&mut self) {
+        for chunk in &mut self.chunks {
+            let chunk = *chunk.get_mut();
+            if !chunk.is_null() {
+                // SAFETY: a chunk of RECORD_CHUNK records, owned exclusively.
+                let records = unsafe { core::slice::from_raw_parts_mut(chunk, RECORD_CHUNK) };
+                records.fill_with(T::default);
+            }
+        }
+    }
+
+    /// The bytes its chunks hold.
+    pub(super) fn heap_bytes(&self) -> usize {
+        let chunks = self
+            .chunks
+            .iter()
+            .filter(|chunk| !chunk.load(Ordering::Relaxed).is_null())
+            .count();
+        chunks * RECORD_CHUNK * size_of::<T>() + self.chunks.len() * size_of::<AtomicPtr<T>>()
+    }
+}
+
+impl<T> Drop for Records<T> {
+    fn drop(&mut self) {
+        for chunk in &mut self.chunks {
+            let chunk = *chunk.get_mut();
+            if !chunk.is_null() {
+                let slice = core::ptr::slice_from_raw_parts_mut(chunk, RECORD_CHUNK);
+                // SAFETY: allocated in `reserve` as a boxed slice of this length.
+                drop(unsafe { Box::from_raw(slice) });
+            }
+        }
+    }
+}

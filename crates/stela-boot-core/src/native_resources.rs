@@ -1,5 +1,7 @@
-//! Stack geometry and the per-executor partition of the code arena and
-//! shadow pool. Each executor owns its own ranges; none is shared.
+//! Stack geometry and the per-executor partition of the code reservation
+//! and shadow pool. Each executor owns its pool share and a small private
+//! code ring; the rest of the code reservation is one window every PE's
+//! engine shares.
 use crate::Result;
 use crate::topology::MAX_CORES;
 use alloc::vec::Vec;
@@ -112,34 +114,46 @@ pub fn task_stacks(
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Partition {
+    /// The executor's own part of the code reservation, for what its host
+    /// installs itself (context leaves, scalable leaves, shared-memory
+    /// native runs); a ring of [`PRIVATE_PARTS`].
     pub code_offset: u64,
     pub code_bytes: u64,
+    /// The board's code window, the same for every executor: compiled
+    /// blocks, which every PE runs (`Host::code_window`).
+    pub window_offset: u64,
+    pub window_bytes: u64,
     pub pool_offset: u64,
     pub pool_bytes: u64,
 }
 
-/// What an executor that runs no PE keeps of the code arena and shadow pool.
-const PARKED_CODE: u64 = 4 * 1024 * 1024;
+/// What an executor that runs no PE keeps of the shadow pool.
 const PARKED_POOL: u64 = 4 * 1024 * 1024;
 
-const MIN_RUNNING_CODE: u64 = 128 * MIB;
-const MAX_RUNNING_CODE: u64 = 512 * MIB;
-/// Below this much free RAM each runner's arena keeps half the usual
-/// floor, in half as many parts of the same size: the ring reclaims its
-/// oldest code, and the guest needs the RAM more.
-const SMALL_HOST_FREE: u64 = 12 * 1024 * MIB;
-const SMALL_RUNNING_CODE: u64 = 64 * MIB;
-/// Native code also carries recovery and lookup data in the engine heap.
-const CODE_SHARE: u64 = 128;
-/// Preserve the existing aggregate share of a 32-executor roster.
-const CODE_AGGREGATE_SHARE: u64 = CODE_SHARE / 32;
+/// Each executor's own code: a few hundred leaves and native-run
+/// artifacts of at most a block each, in four parts of 512 KiB. Blocks go
+/// to the board's window.
+pub const PRIVATE_CODE: u64 = 2 * MIB;
+pub const PRIVATE_PARTS: u32 = 4;
+/// The board's code window holds the guest's working set of code once for
+/// every PE: free RAM / 16, at most 64 MiB per runner, 64 MiB to 2 GiB,
+/// in 16 MiB steps. The block table grows with it (one entry per 256
+/// bytes, 128 MiB at 1 GiB and above), and each PE's ITLB to 16,384
+/// entries from 64 MiB.
+const WINDOW_SHARE: u64 = 16;
+const WINDOW_PER_RUNNER: u64 = 64 * MIB;
+const MIN_WINDOW: u64 = 64 * MIB;
+const MAX_WINDOW: u64 = 2048 * MIB;
 const CODE_ALIGNMENT: u64 = 16 * MIB;
 pub const MAX_CODE_PARTS: u32 = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CodeReservation {
+    /// Every executor's [`PRIVATE_CODE`], then the board's window.
     pub bytes: u64,
+    /// The parts of each executor's private ring.
     pub parts: u32,
+    pub window: u64,
 }
 
 /// The aligned bytes in an install/eviction part. Reduced rings cover
@@ -160,58 +174,40 @@ pub fn code_part_bytes(bytes: u64, parts: u32) -> Result<u64> {
 }
 
 /// The executable window holds the largest reservation the loader can make.
-/// Each active slot contributes at most `MAX_RUNNING_CODE`. The rounded
-/// parked tail fits in what those slots would contribute when active.
-pub const CODE_WINDOW_BYTES: u64 = MAX_CORES as u64 * MAX_RUNNING_CODE;
+pub const CODE_WINDOW_BYTES: u64 = MAX_CORES as u64 * 512 * MIB;
+const _: () = assert!(MAX_CORES as u64 * PRIVATE_CODE + MAX_WINDOW <= CODE_WINDOW_BYTES);
 
 /// The code and pool bytes the executors past the `runners` of `cores` keep.
 /// The loader adds them to the runners' own shares.
 pub const fn parked_reserve(cores: usize, runners: usize) -> (u64, u64) {
     let parked = cores.saturating_sub(runners) as u64;
-    (parked * PARKED_CODE, parked * PARKED_POOL)
+    (parked * PRIVATE_CODE, parked * PARKED_POOL)
 }
 
-/// The firmware code allocation, including the aligned parked tail, checked
-/// before any firmware pages are reserved.
+/// The firmware code allocation: each of `cores` executors' private part
+/// and the board's window, sized from `free` host bytes and the `runners`
+/// that run PEs, checked before any firmware pages are reserved.
 pub fn code_reservation(free: u64, cores: usize, runners: usize) -> Result<CodeReservation> {
     if cores == 0 || cores > MAX_CORES || runners == 0 || runners > cores {
         return Err(refuse!("invalid native executor count"));
     }
-    let floor = if free < SMALL_HOST_FREE {
-        SMALL_RUNNING_CODE
-    } else {
-        MIN_RUNNING_CODE
-    };
-    let per_runner =
-        (free / CODE_SHARE / CODE_ALIGNMENT * CODE_ALIGNMENT).clamp(floor, MAX_RUNNING_CODE);
-    let part_bytes = per_runner.max(MIN_RUNNING_CODE) / u64::from(MAX_CODE_PARTS);
-    // Keep the original maximum single-install size. Exact active rosters
-    // reduce part count when the old aggregate exceeds the budget of 32
-    // legacy shares, retaining the per-owner capacity floor.
-    let parts = if cores == runners {
-        let budget = free / CODE_AGGREGATE_SHARE / runners as u64;
-        (budget / part_bytes)
-            .clamp(floor.div_ceil(part_bytes), u64::from(MAX_CODE_PARTS))
-            .min(per_runner / part_bytes) as u32
-    } else {
-        MAX_CODE_PARTS
-    };
-    let parked = parked_reserve(cores, runners)
-        .0
-        .next_multiple_of(CODE_ALIGNMENT);
-    let bytes = part_bytes * u64::from(parts) * runners as u64 + parked;
-    if bytes > CODE_WINDOW_BYTES {
-        return Err(refuse!(
-            "native code reservation exceeds its executable window"
-        ));
-    }
-    Ok(CodeReservation { bytes, parts })
+    let window = (free / WINDOW_SHARE)
+        .min(runners as u64 * WINDOW_PER_RUNNER)
+        .clamp(MIN_WINDOW, MAX_WINDOW)
+        / CODE_ALIGNMENT
+        * CODE_ALIGNMENT;
+    Ok(CodeReservation {
+        bytes: cores as u64 * PRIVATE_CODE + window,
+        parts: PRIVATE_PARTS,
+        window,
+    })
 }
 
-/// Divide only whole frames/code ring units; unused tail bytes remain owned
-/// by the allocation and cannot be lent to a second executor. The first
-/// `runners` executors run PEs and share alike all but the others'
-/// [`PARKED_CODE`] and [`PARKED_POOL`].
+/// Divide only whole frames; unused tail bytes remain owned by the
+/// allocation and cannot be lent to a second executor. Every executor
+/// keeps [`PRIVATE_CODE`] of `code`, in slot order, and the rest is the
+/// board's window. The first `runners` executors run PEs and share alike
+/// all of `pool` but the others' [`PARKED_POOL`].
 pub fn partition(
     cores: usize,
     runners: usize,
@@ -222,36 +218,29 @@ pub fn partition(
     if cores == 0 || cores > MAX_CORES || slot >= cores || runners == 0 || runners > cores {
         return Err(refuse!("invalid native executor slot"));
     }
-    let parked = (cores - runners) as u64;
-    let share = |total: u64, reserve: u64, unit: u64| {
-        total.saturating_sub(parked * reserve) / runners as u64 / unit * unit
+    let private = cores as u64 * PRIVATE_CODE;
+    let Some(window_bytes) = code.checked_sub(private) else {
+        return Err(refuse!("native executor resources too small"));
     };
-    // Each host ring uses 16-byte-aligned code units. Each shadow pool
-    // needs 64 permanent root frames and at least one frame in each half.
-    let (code_share, pool_share) = (
-        share(code, PARKED_CODE, 128),
-        share(pool, PARKED_POOL, PAGE),
-    );
-    let (code_bytes, pool_bytes, code_offset, pool_offset) = match slot.checked_sub(runners) {
-        None => (
-            code_share,
-            pool_share,
-            slot as u64 * code_share,
-            slot as u64 * pool_share,
-        ),
+    let parked = (cores - runners) as u64;
+    // Each shadow pool needs 64 permanent root frames and at least one
+    // frame in each half.
+    let pool_share = pool.saturating_sub(parked * PARKED_POOL) / runners as u64 / PAGE * PAGE;
+    let (pool_bytes, pool_offset) = match slot.checked_sub(runners) {
+        None => (pool_share, slot as u64 * pool_share),
         Some(behind) => (
-            PARKED_CODE,
             PARKED_POOL,
-            runners as u64 * code_share + behind as u64 * PARKED_CODE,
             runners as u64 * pool_share + behind as u64 * PARKED_POOL,
         ),
     };
-    if code_bytes < 128 || pool_bytes < 66 * PAGE {
+    if pool_bytes < 66 * PAGE {
         return Err(refuse!("native executor resources too small"));
     }
     Ok(Partition {
-        code_offset,
-        code_bytes,
+        code_offset: slot as u64 * PRIVATE_CODE,
+        code_bytes: PRIVATE_CODE,
+        window_offset: private,
+        window_bytes,
         pool_offset,
         pool_bytes,
     })
@@ -262,20 +251,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn code_reservations_preserve_smaller_rosters_and_parked_budgets() {
-        for (free, cores, runners, expected) in [
-            (8 * 1024, 64, 8, 1248),
-            (64 * 1024, 64, 8, 4320),
-            (64 * 1024, 9, 8, 4112),
-            (32 * 1024, 32, 32, 8 * 1024),
-            (128 * 1024, 64, 64, 32 * 1024),
+    fn the_window_grows_with_the_host_and_its_runners_between_bounds() {
+        for (free, cores, runners, window) in [
+            (0, 1, 1, 64),
+            (6 * 1024, 2, 2, 128),
+            (7936, 8, 8, 496),
+            (16 * 1024, 8, 8, 512),
+            (32 * 1024, 32, 32, 2048),
+            (128 * 1024, 64, 64, 2048),
+            (128 * 1024, 64, 8, 512),
         ] {
+            let code = code_reservation(free * MIB, cores, runners).unwrap();
             assert_eq!(
-                code_reservation(free * MIB, cores, runners).unwrap(),
+                code,
                 CodeReservation {
-                    bytes: expected * MIB,
-                    parts: MAX_CODE_PARTS,
+                    bytes: cores as u64 * PRIVATE_CODE + window * MIB,
+                    parts: PRIVATE_PARTS,
+                    window: window * MIB,
                 },
+                "{free} {cores} {runners}"
             );
         }
         for (cores, runners) in [(0, 0), (1, 0), (2, 3), (MAX_CORES + 1, 1)] {
@@ -284,128 +278,30 @@ mod tests {
     }
 
     #[test]
-    fn small_hosts_halve_each_runners_arena_but_keep_its_install_size() {
-        for (free, runners, bytes, parts) in [
-            (6 * 1024, 2, 128, 16),
-            (8 * 1024, 8, 512, 16),
-            (12 * 1024 - 1, 8, 640, 20),
-            (12 * 1024, 8, 1024, 32),
-        ] {
-            let code = code_reservation(free * MIB, runners, runners).unwrap();
-            assert_eq!(
-                code,
-                CodeReservation {
-                    bytes: bytes * MIB,
-                    parts
-                }
-            );
-            let partition = partition(runners, runners, runners - 1, code.bytes, 64 * MIB).unwrap();
-            assert_eq!(
-                code_part_bytes(partition.code_bytes, code.parts),
-                Ok(4 * MIB)
-            );
-        }
-    }
-
-    #[test]
-    fn legacy_parked_partition_keeps_its_aligned_ring_units() {
-        let code = code_reservation(32 * 1024 * MIB, 5, 3).unwrap();
-        let owner = partition(5, 3, 0, code.bytes, 64 * MIB).unwrap();
-        assert_eq!(owner.code_bytes, 271_231_616);
-        assert_eq!(owner.code_bytes % 512, 128);
-        assert_eq!(
-            code_part_bytes(owner.code_bytes, code.parts).unwrap(),
-            owner.code_bytes / 512 * 16,
-        );
-    }
-
-    #[test]
-    fn larger_exact_rosters_reduce_part_count_without_reducing_install_size() {
-        for (free, cores, bytes, parts, part_mib) in [
-            (32 * 1024, 48, 8064, 21, 8),
-            (32 * 1024, 64, 8 * 1024, 16, 8),
-            (64 * 1024, 64, 16 * 1024, 16, 16),
-        ] {
-            let code = code_reservation(free * MIB, cores, cores).unwrap();
-            assert_eq!(
-                code,
-                CodeReservation {
-                    bytes: bytes * MIB,
-                    parts
-                }
-            );
-            let partition = partition(cores, cores, cores - 1, code.bytes, 2048 * MIB).unwrap();
-            let part_bytes = code_part_bytes(partition.code_bytes, code.parts).unwrap();
-            assert_eq!(part_bytes, part_mib * MIB);
-            assert_eq!(partition.code_offset + partition.code_bytes, code.bytes);
-            let mut empty = CodeExtents::default();
-            assert!(
-                empty
-                    .append(part_bytes, part_bytes as usize + 1, |_| panic!())
-                    .is_none()
-            );
-            assert_eq!(
-                empty.append(part_bytes, part_bytes as usize, |_| {}),
-                Some(0..part_bytes)
-            );
-        }
-        assert!(code_part_bytes(16 * MIB, 0).is_err());
-        assert!(code_part_bytes(16 * MIB, MAX_CODE_PARTS + 1).is_err());
-        assert!(code_part_bytes(16 * MIB - 1, 16).is_err());
-        assert_eq!(
-            code_part_bytes(16 * MIB - 1, MAX_CODE_PARTS).unwrap(),
-            512 * 1024 - 16
-        );
-    }
-
-    #[test]
-    fn all_supported_code_partitions_fit_inside_the_executable_window() {
+    fn every_executor_keeps_a_private_ring_beside_one_shared_window() {
         for cores in 1..=MAX_CORES {
             for runners in 1..=cores {
-                for free in [
-                    0,
-                    8 * 1024 * MIB,
-                    18 * 1024 * MIB,
-                    24 * 1024 * MIB,
-                    64 * 1024 * MIB,
-                    u64::MAX,
-                ] {
+                for free in [0, 8 * 1024 * MIB, 64 * 1024 * MIB, u64::MAX] {
                     let code = code_reservation(free, cores, runners).unwrap();
-                    let pool = 64 * MIB + parked_reserve(cores, runners).1;
-                    let first = partition(cores, runners, 0, code.bytes, pool).unwrap();
-                    let last = partition(cores, runners, cores - 1, code.bytes, pool).unwrap();
-                    assert_eq!(first.code_offset, 0);
-                    assert_eq!(code.bytes % PAGE, 0);
-                    assert!(last.code_offset + last.code_bytes <= code.bytes);
                     assert!(code.bytes <= CODE_WINDOW_BYTES);
-                    if cores == runners {
-                        let small = free < SMALL_HOST_FREE;
-                        let original = (free / CODE_SHARE / CODE_ALIGNMENT * CODE_ALIGNMENT)
-                            .clamp(MIN_RUNNING_CODE, MAX_RUNNING_CODE);
-                        let part_bytes = code_part_bytes(first.code_bytes, code.parts).unwrap();
-                        assert_eq!(part_bytes, original / u64::from(MAX_CODE_PARTS));
-                        let minimum = if small {
-                            SMALL_RUNNING_CODE
-                        } else {
-                            MIN_RUNNING_CODE
-                        };
-                        assert!(first.code_bytes >= minimum);
-                        assert!(first.code_bytes <= original);
-                        assert_eq!(last.code_offset + last.code_bytes, code.bytes);
-                        let floor =
-                            MIN_RUNNING_CODE.div_ceil(part_bytes) * part_bytes * cores as u64;
-                        assert!(code.bytes <= (free / CODE_AGGREGATE_SHARE).max(floor));
-                        if cores <= 32 && !small {
-                            assert_eq!(code.parts, MAX_CODE_PARTS);
-                            assert_eq!(first.code_bytes, original);
-                        }
-                    } else {
-                        assert_eq!(code.parts, MAX_CODE_PARTS);
-                        assert_eq!(code.bytes % CODE_ALIGNMENT, 0);
+                    assert!(code.bytes.is_multiple_of(2 * MIB));
+                    let pool = 64 * MIB + parked_reserve(cores, runners).1;
+                    let mut end = 0;
+                    for slot in 0..cores {
+                        let part = partition(cores, runners, slot, code.bytes, pool).unwrap();
+                        assert_eq!(part.code_offset, end);
+                        assert_eq!(part.code_bytes, PRIVATE_CODE);
+                        end += part.code_bytes;
+                        assert_eq!(part.window_offset, cores as u64 * PRIVATE_CODE);
+                        assert_eq!(part.window_bytes, code.window);
+                        assert_eq!(code_part_bytes(part.code_bytes, code.parts), Ok(512 * 1024));
                     }
+                    assert_eq!(end + code.window, code.bytes);
                 }
             }
         }
+        assert!(partition(4, 4, 0, 4 * PRIVATE_CODE - 1, 64 * MIB).is_err());
+        assert!(partition(4, 4, 4, 64 * MIB, 64 * MIB).is_err());
     }
 
     #[test]
@@ -486,63 +382,59 @@ mod tests {
         assert!(layout.virtual_bytes() < TASK_WINDOW_BYTES);
     }
     #[test]
-    fn private_arenas_have_no_overlap_or_fractional_ring_units() {
+    fn private_pools_have_no_overlap_or_fractional_frames() {
         for (cores, runners) in
             (1..=MAX_CORES).flat_map(|cores| [(cores, cores), (cores, 1), (cores, cores.min(8))])
         {
-            let (code_reserve, pool_reserve) = parked_reserve(cores, runners);
-            let code = 128 * 1024 * 1024 + 127 + code_reserve;
+            let (_, pool_reserve) = parked_reserve(cores, runners);
+            let code = cores as u64 * PRIVATE_CODE + 64 * MIB;
             let pool = 64 * 1024 * 1024 + PAGE - 1 + pool_reserve;
-            let mut previous_code = 0;
             let mut previous_pool = 0;
             for slot in 0..cores {
                 let part = partition(cores, runners, slot, code, pool).unwrap();
-                assert_eq!(part.code_offset, previous_code);
                 assert_eq!(part.pool_offset, previous_pool);
-                assert_eq!(part.code_bytes % 128, 0);
                 assert_eq!(part.pool_bytes % PAGE, 0);
-                previous_code += part.code_bytes;
                 previous_pool += part.pool_bytes;
             }
-            assert!(previous_code <= code);
             assert!(previous_pool <= pool);
         }
     }
 
-    /// Serialized, the BSP runs every PE and takes all but the workers'
-    /// reserves.
+    /// Serialized, the BSP runs every PE and takes all of the pool but the
+    /// workers' reserves; every executor keeps the same private code.
     #[test]
     fn a_serialized_bsp_takes_all_but_the_workers_reserves() {
-        let (code, pool) = (512 * 1024 * 1024, 1024 * 1024 * 1024);
+        let (code, pool) = (512 * MIB, 1024 * MIB);
         let bsp = partition(8, 1, 0, code, pool).unwrap();
-        assert_eq!(bsp.code_bytes, code - 7 * PARKED_CODE);
+        assert_eq!(bsp.code_bytes, PRIVATE_CODE);
+        assert_eq!(bsp.window_bytes, code - 8 * PRIVATE_CODE);
         assert_eq!(bsp.pool_bytes, pool - 7 * PARKED_POOL);
         let last = partition(8, 1, 7, code, pool).unwrap();
-        assert_eq!(last.code_offset + last.code_bytes, code);
+        assert_eq!(last.code_offset + last.code_bytes, last.window_offset);
         assert_eq!(last.pool_offset + last.pool_bytes, pool);
     }
 
     /// A host with more cores than the guest has PEs parks the rest, which
-    /// take no share.
+    /// take no share of the pool.
     #[test]
     fn cores_past_the_guests_pes_keep_only_a_reserve() {
-        let (code, pool) = (56 * PARKED_CODE + (8 << 28), 56 * PARKED_POOL + (8 << 28));
+        let (code, pool) = (64 * PRIVATE_CODE + 256 * MIB, 56 * PARKED_POOL + (8 << 28));
         let share = 1 << 28;
         let first = partition(64, 8, 7, code, pool).unwrap();
-        assert_eq!((first.code_bytes, first.pool_bytes), (share, share));
-        assert_eq!(first.code_offset, 7 * share);
+        assert_eq!(first.pool_bytes, share);
         let parked = partition(64, 8, 8, code, pool).unwrap();
         assert_eq!(
             (parked.code_bytes, parked.pool_bytes),
-            (PARKED_CODE, PARKED_POOL)
+            (PRIVATE_CODE, PARKED_POOL)
         );
-        assert_eq!(parked.code_offset, 8 * share);
-        let last = partition(64, 8, 63, code, pool).unwrap();
-        assert_eq!(last.code_offset + last.code_bytes, code);
+        assert_eq!(parked.code_offset, 8 * PRIVATE_CODE);
+        assert_eq!(parked.pool_offset, 8 * share);
+        assert_eq!(parked.window_bytes, 256 * MIB);
     }
 
     #[test]
     fn unavailable_slots_and_insufficient_private_roots_refuse() {
+        let code = 2 * PRIVATE_CODE;
         for (cores, runners, slot) in [
             (0, 1, 0),
             (MAX_CORES + 1, 1, 0),
@@ -550,11 +442,11 @@ mod tests {
             (2, 0, 0),
             (2, 3, 0),
         ] {
-            assert!(partition(cores, runners, slot, 1024, 1024 * PAGE).is_err());
+            assert!(partition(cores, runners, slot, code, 1024 * PAGE).is_err());
         }
-        assert!(partition(2, 2, 0, 255, 1024 * PAGE).is_err());
-        assert!(partition(2, 2, 0, 1024, 132 * PAGE - 1).is_err());
-        assert!(partition(2, 2, 0, 256, 132 * PAGE).is_ok());
-        assert!(partition(2, 1, 0, 256, 132 * PAGE).is_err());
+        assert!(partition(2, 2, 0, code - 1, 1024 * PAGE).is_err());
+        assert!(partition(2, 2, 0, code, 132 * PAGE - 1).is_err());
+        assert!(partition(2, 2, 0, code, 132 * PAGE).is_ok());
+        assert!(partition(2, 1, 0, code, 132 * PAGE).is_err());
     }
 }

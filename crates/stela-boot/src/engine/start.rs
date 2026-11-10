@@ -1143,6 +1143,14 @@ fn start_machine(boot: Boot<'_>, parts: MachineParts) -> ! {
         machine
             .enter_parallel(hub)
             .unwrap_or_else(|error| output::fatal(error));
+        output::arguments(format_args!(
+            "PARALLEL home count={}\n",
+            if machine.count_reads_natively() {
+                "native"
+            } else {
+                "still"
+            }
+        ));
         translations::share(handoff.heap.bytes as usize / parallel::SHARED_CODE_SHARE);
         parallel::spawn(
             &machine,
@@ -1989,6 +1997,13 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
         code_physical: handoff.code.physical,
         code_bytes: partition.code_bytes,
         code_parts: handoff.native_resources.code_parts,
+        window: (partition.window_bytes != 0).then(|| {
+            (
+                layout::code(handoff.code.bytes) + partition.window_offset,
+                handoff.code.physical + partition.window_offset,
+                partition.window_bytes,
+            )
+        }),
         tsc_base: native_tsc_base,
         tsc_hz: handoff.tsc_hz,
         apic_base: handoff.apic_base,

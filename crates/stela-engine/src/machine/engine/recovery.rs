@@ -145,6 +145,28 @@ pub struct NativeFailure {
     pub error_code: u64,
     pub unsettled_chain: Option<UnsettledChain>,
     pub reason: NativeFailureReason,
+    /// Where the last block it ran stood on the board, when the failure
+    /// is that its code is unknown.
+    pub board: Option<BoardSlot>,
+}
+
+/// The board's state of a block a native failure ran: its slot and
+/// whether it is live, its incarnation, whether its install lost to another
+/// PE's, the PE that compiled it, whether its recovery rows are held, its
+/// part of the arena, the ring's generation and one more than the last
+/// generation of that part taken away.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoardSlot {
+    pub slot: u64,
+    pub held: bool,
+    pub live: bool,
+    pub incarnation: u32,
+    pub lost: bool,
+    pub installer: u8,
+    pub rows: bool,
+    pub part: Option<usize>,
+    pub generation: u32,
+    pub retired_through: u32,
 }
 /// Native control counters copied after return, without granting a resumable
 /// architectural boundary or claiming that completed memory effects rolled back.

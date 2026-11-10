@@ -133,7 +133,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Count the instructions of block `index` before `pc` as retired.
     pub(super) fn retire_before(&mut self, index: usize, pc: u64) {
-        self.cpu.retired += (pc - self.blocks[index].pc) / INSTRUCTION;
+        self.cpu.retired += (pc - self.code.blocks[index].pc) / INSTRUCTION;
     }
 
     /// Whether an interrupt routed to `target` is taken now (Arm ARM D1.3.6;

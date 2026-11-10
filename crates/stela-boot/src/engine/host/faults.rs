@@ -115,8 +115,12 @@ unsafe extern "sysv64" {
     pub(super) fn stela_native_recover();
 }
 
+/// Whether `rip` lies in native code this processor runs: its private arena
+/// or the board's code window.
 pub(super) fn in_code(state: &State, rip: u64) -> bool {
-    state.native && (state.code_virtual..state.code_virtual + state.code_bytes).contains(&rip)
+    state.native
+        && ((state.code_virtual..state.code_virtual + state.code_bytes).contains(&rip)
+            || (state.window_virtual..state.window_virtual + state.window_bytes).contains(&rip))
 }
 
 /// End the native block at `frame` and report `cause` to the engine.

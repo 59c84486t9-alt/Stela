@@ -314,6 +314,14 @@ impl<H: Host, T: ServiceTransport> Host for ServiceHost<H, T> {
         self.native_entry();
         self.local.reclaim_code()
     }
+    fn code_window(&self) -> Option<super::super::CodeWindow> {
+        self.local.code_window()
+    }
+    fn serialize_code(&mut self) {
+        // Every install or patch in the board's window ends here.
+        self.native_entry();
+        self.local.serialize_code();
+    }
     fn release_oldest_code(&mut self) -> Option<core::ops::Range<usize>> {
         self.native_entry();
         self.local.release_oldest_code()

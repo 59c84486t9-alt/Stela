@@ -392,9 +392,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             translated: false,
         };
         let variant = self.page_variant(variant, physical);
-        let indexed = self
-            .known_variant(variant)
-            .and_then(|id| self.index.get(&self.blocks, pc, physical, id));
+        let indexed = self.known_variant(variant).and_then(|id| {
+            self.code.cache_at(super::board::LockSite::Fetch).index.get(
+                &self.code.blocks,
+                pc,
+                physical,
+                id,
+            )
+        });
         let index = match indexed {
             Some(index) => index,
             None => match self.compile(pc, physical, variant)? {
@@ -845,7 +850,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let code = match self.host.install(native) {
             Ok(code) => code,
             Err(InstallError::Full) => {
-                self.reclaim_code();
+                self.reclaim_leaves();
                 self.host
                     .install(native)
                     .map_err(|_| PreparationError::CodeArenaFull)?

@@ -22,6 +22,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     pe: capture.pe,
                     retired_before: capture.retired,
                 },
+                board: None,
             });
             self.native_failure = Some(recovery::CapturedFailure {
                 summary,
@@ -42,7 +43,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         fault: NativeFault,
         reason: NativeFailureReason,
     ) -> Stop {
-        let block = (index < self.blocks.len()).then(|| &self.blocks[index]);
+        let block = self.code.blocks.get(index);
         let (last_block, reported_retired, lookup_hits, direct_links) = self.chain.completed();
         let failure = Arc::new(NativeFailure {
             pc: block.map_or(self.cpu.pc, |block| block.pc),
@@ -58,6 +59,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 lookup_hits,
                 direct_links,
             }),
+            board: (reason == NativeFailureReason::UnknownCode)
+                .then(|| self.board_slot(last_block as u32 as usize)),
             reason,
         });
         self.native_failure = Some(recovery::CapturedFailure {
@@ -65,6 +68,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
             capture: fault,
         });
         Stop::NativeFailure(failure)
+    }
+
+    /// Where `slot` stands on the board, for a failure report.
+    pub(super) fn board_slot(&self, slot: usize) -> recovery::BoardSlot {
+        let code = &self.code;
+        let held = slot < code.blocks.len();
+        let block = code.blocks.get(slot);
+        let record = held.then(|| code.blocks.record(slot));
+        let part = code.arena.as_ref().zip(block).and_then(|(arena, block)| {
+            let offset = block.code.0.checked_sub(arena.window.exec)?;
+            Some(offset / arena.part_bytes)
+        });
+        let ring = code.arena.as_ref().map(|arena| &arena.ring);
+        recovery::BoardSlot {
+            slot: slot as u64,
+            held: block.is_some(),
+            live: record.is_some_and(board::Record::live),
+            incarnation: record.map_or(0, board::Record::incarnation),
+            lost: record.is_some_and(board::Record::lost),
+            installer: block.map_or(u8::MAX, |block| block.installer),
+            rows: code.cache().recovery.get(&slot).is_some(),
+            part,
+            generation: ring.map_or(0, board::Ring::generation),
+            retired_through: ring
+                .zip(part)
+                .map_or(0, |(ring, part)| ring.retired_through(part)),
+        }
     }
 
     pub(super) fn native_fault(
@@ -79,25 +109,37 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         // Source maps locate diagnostics; only a checked exact
         // operand/check site can authorize architectural fault projection.
-        let Some(block) = (index < self.blocks.len()).then(|| &self.blocks[index]) else {
+        let Some(block) = self.code.blocks.get(index) else {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
         let (entry_pc, physical, source_bytes) = (block.pc, block.physical, block.source_bytes());
-        let Some(owner) = self.fault_recovery.get(&index) else {
+        let shared = Arc::clone(&self.code);
+        let mut cache = shared.cache();
+        let Some(owner) = cache.recovery.get(&index) else {
+            drop(cache);
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
         };
         if fault.offset >= owner.code_bytes() {
+            drop(cache);
             return Err(self.fail_native(index, fault, NativeFailureReason::CodeExtent));
         }
-        let record = owner
-            .stored_key()
-            .and_then(|key| self.stored_record(physical, &key));
-        let owner = self.fault_recovery.get_mut(&index).expect("found above");
-        let qualified = owner.qualify(entry_pc, record.as_deref());
+        let key = owner.stored_key();
+        // The stored record is read outside the board's lock.
+        drop(cache);
+        let record = key.and_then(|key| self.stored_record(physical, &key));
+        cache = shared.cache();
+        let qualified = match cache.recovery.get_mut(&index) {
+            Some(owner) => owner.qualify(entry_pc, record.as_deref()),
+            None => Err(NativeFailureReason::UnknownCode),
+        };
         let table = match qualified {
             Ok(rows) => rows.rows_at_reusing(fault.offset, &mut self.recovery_scratch),
-            Err(reason) => return Err(self.fail_native(index, fault, reason)),
+            Err(reason) => {
+                drop(cache);
+                return Err(self.fail_native(index, fault, reason));
+            }
         };
+        drop(cache);
         let recovery_site = match FaultRecovery::site_at(&table, fault.offset) {
             Ok(site) => site,
             Err(error) => {
@@ -196,8 +238,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // the whole DC ZVA block (Arm `AArch64_DataMemZero`), or adopting the
         // monitor the frame holds, whatever stopped the access.
         let (terminal, word) = (
-            self.blocks[index].terminal_pc(),
-            self.blocks[index].terminal,
+            self.code.blocks[index].terminal_pc(),
+            self.code.blocks[index].terminal,
         );
         if pc == terminal && completes_natively(pc, word, self.block_variant(index).system) {
             self.statistics.system_exits += 1;
@@ -257,7 +299,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// still leaves the ranges, or a host without the helper, stops
     /// explicitly.
     pub(super) fn run_translated(&mut self, index: usize, pc: u64, address: u64) -> Step {
-        let block = &self.blocks[index];
+        let block = &self.code.blocks[index];
         if self.variants[block.variant.0 as usize].translated
             || self.host.translation_helper().is_none()
         {

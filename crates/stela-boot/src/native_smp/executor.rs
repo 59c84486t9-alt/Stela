@@ -492,6 +492,13 @@ pub(crate) unsafe fn start(
                 code_physical: handoff.code.physical + part.code_offset,
                 code_bytes: part.code_bytes,
                 code_parts: handoff.native_resources.code_parts,
+                window: (part.window_bytes != 0).then(|| {
+                    (
+                        layout::code(handoff.code.bytes) + part.window_offset,
+                        handoff.code.physical + part.window_offset,
+                        part.window_bytes,
+                    )
+                }),
                 tsc_base,
                 tsc_hz: handoff.tsc_hz,
                 apic_base: capture.snapshots[slot].apic_base,

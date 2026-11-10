@@ -855,6 +855,12 @@ impl Clock {
         self.publish_state();
     }
 
+    /// Whether native count reads find the host counter's scale here
+    /// ([`Self::native`]): without it they read a count that stands still.
+    pub(super) fn reads_natively(&self) -> bool {
+        self.count.per_tsc != 0
+    }
+
     /// Show native count reads the state this clock follows.
     fn publish_state(&mut self) {
         self.count.state = match &self.shared {

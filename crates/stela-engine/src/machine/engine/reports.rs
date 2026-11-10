@@ -420,6 +420,9 @@ pub struct Statistics {
     pub code_evictions: u64,
     /// Parts of the code arena released for heap pressure.
     pub code_releases: u64,
+    /// Blocks another PE of the board installed first, whose own install
+    /// was dropped.
+    pub lost_installs: u64,
     /// Pages of compiled code an IC IVAU made stale.
     pub code_invalidations: u64,
     pub waits: u64,
@@ -493,6 +496,7 @@ impl core::ops::AddAssign for Statistics {
             code_discards,
             code_evictions,
             code_releases,
+            lost_installs,
             code_invalidations,
             waits,
             switches,
@@ -555,6 +559,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.device_accesses, device_accesses),
             (&mut self.code_evictions, code_evictions),
             (&mut self.code_releases, code_releases),
+            (&mut self.lost_installs, lost_installs),
             (&mut self.code_invalidations, code_invalidations),
             (&mut self.waits, waits),
             (&mut self.switches, switches),
@@ -596,18 +601,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// What its code bookkeeping holds now: a walk of every block, for
     /// reports.
     pub fn footprint(&self) -> Footprint {
-        let (owners, rows) = self.fault_recovery.heap_bytes();
+        let cache = self.code.cache();
+        let (owners, rows) = cache.recovery.heap_bytes();
         Footprint {
-            blocks: self.blocks.heap_bytes(),
+            blocks: self.code.blocks.heap_bytes(),
             owners,
             successors: self
+                .code
                 .blocks
                 .iter()
-                .map(|block| block.successors.len() * size_of::<super::Successor>())
+                .map(|(_, block)| block.successors.len() * size_of::<super::Successor>())
                 .sum(),
             rows,
-            index: self.index.heap_bytes(),
-            lookup: self.targets.index_bytes() + self.itlb.index_bytes(),
+            index: cache.index.heap_bytes(),
+            lookup: cache.targets.index_bytes() + self.itlb.index_bytes(),
             pages: (self.pages.len() + self.spare_pages.len()) * crate::translations::PAGE_BYTES,
         }
     }

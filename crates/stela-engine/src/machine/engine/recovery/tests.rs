@@ -10,7 +10,7 @@ fn legacy_first_fault_qualification_is_cached_and_reports_dispatcher_cost() {
         panic!("actual emission");
     };
     make_pending(&mut machine, index, &input);
-    let mut owner = machine.fault_recovery.remove(&index).unwrap();
+    let mut owner = machine.code.cache().recovery.remove(&index).unwrap();
     let started = std::time::Instant::now();
     let first = owner.qualify(BASE, None).unwrap().rows();
     let cold = started.elapsed();

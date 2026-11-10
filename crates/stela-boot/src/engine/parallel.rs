@@ -175,7 +175,14 @@ impl Pe {
         if let Err(stop) = machine.start_parallel(Arc::clone(&hub), core_locks, address) {
             stopped(pe, stop);
         }
-        output::arguments(format_args!("PARALLEL PE {pe} starts at {address:#x}\n"));
+        output::arguments(format_args!(
+            "PARALLEL PE {pe} starts at {address:#x} count={}\n",
+            if machine.count_reads_natively() {
+                "native"
+            } else {
+                "still"
+            }
+        ));
         // The serial port's queue goes out from here between slices, so the
         // home PE, which holds the devices and the GPUs' work, does not pay
         // for its own reports.

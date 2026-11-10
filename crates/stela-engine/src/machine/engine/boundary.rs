@@ -25,6 +25,16 @@ pub struct CodePartitions {
     pub parts: usize,
 }
 
+/// The whole native code reservation, which the engine allocates itself
+/// ([`Host::code_window`]): executable at `exec` on every PE that shares
+/// it, and writable at `write`, the same memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeWindow {
+    pub exec: usize,
+    pub write: usize,
+    pub bytes: usize,
+}
+
 /// The x86 machine beneath the engine: guest RAM, native code, shadow
 /// translation, time and waiting.
 pub trait Host {
@@ -165,6 +175,20 @@ pub trait Host {
     }
     /// Free every installed block.
     fn discard_code(&mut self);
+    /// The whole code reservation, when the engine allocates code itself:
+    /// every PE whose host gives the same window shares one arena, and the
+    /// engine then never calls [`Self::install`], [`Self::patch`],
+    /// [`Self::patch_instruction`] or the reclaims for blocks. The host keeps
+    /// it mapped, executable and writable as described, for the board's
+    /// life, and runs [`Self::execute`] at any address in it.
+    fn code_window(&self) -> Option<CodeWindow> {
+        None
+    }
+    /// Make code written through the window's writable view visible to
+    /// this core's instruction fetches (on x86, a serializing instruction).
+    fn serialize_code(&mut self) {
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+    }
     /// Optional layout for indexing reclaimable block slots. It must
     /// stay fixed from the first block installation until discard, and
     /// reclamation must return one whole part or an empty range.

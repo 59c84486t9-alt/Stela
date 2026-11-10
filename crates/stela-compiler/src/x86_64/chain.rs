@@ -133,6 +133,43 @@ const ITLB_SET_BITS: u32 = 15;
 pub const ITLB_ENTRIES: usize = 1 << 14;
 pub const MIN_ITLB_ENTRIES: usize = 1 << 12;
 pub const MAX_ITLB_ENTRIES: usize = 1 << 14;
+
+/// Arena bytes per block table entry: a block with its exits and thunks
+/// takes about 300 bytes, so a table of this many entries holds a little
+/// more than every block the arena does.
+const CODE_BYTES_PER_ENTRY: usize = 256;
+/// Arena bytes per ITLB entry: 64 MiB of code, the most one PE's arena
+/// holds, takes the largest ITLB.
+const CODE_BYTES_PER_PAGE: usize = 4096;
+
+/// The power of two at most `value`, within `low..=high`.
+fn sized(value: usize, low: usize, high: usize) -> usize {
+    match value.checked_ilog2() {
+        Some(bits) => (1usize << bits).clamp(low, high),
+        None => low,
+    }
+}
+
+/// The block table entries for an arena of `code_bytes`, which the host
+/// sizes from its memory ([`LookupTable::with_entries`]).
+pub fn lookup_entries(code_bytes: usize) -> usize {
+    sized(
+        code_bytes / CODE_BYTES_PER_ENTRY,
+        MIN_LOOKUP_ENTRIES,
+        MAX_LOOKUP_ENTRIES,
+    )
+}
+
+/// The ITLB entries for a PE whose arena holds `code_bytes`
+/// ([`LookupTable::itlb_with`]).
+pub fn itlb_entries(code_bytes: usize) -> usize {
+    sized(
+        code_bytes / CODE_BYTES_PER_PAGE,
+        MIN_ITLB_ENTRIES,
+        MAX_ITLB_ENTRIES,
+    )
+}
+
 /// The page an ITLB entry translates.
 const PAGE_SHIFT: u32 = 12;
 /// A block key's frame number is below this bit, its fetch state above.
@@ -1998,6 +2035,23 @@ mod tests {
 
     fn itlb_salt(context: u64) -> u32 {
         super::itlb_salt(context, ITLB_MASK)
+    }
+
+    /// Tables grow with the arena, in powers of two within their bounds:
+    /// a 64 MiB arena keeps the defaults.
+    #[test]
+    fn tables_are_sized_from_the_arena() {
+        const MIB: usize = 1 << 20;
+        assert_eq!(lookup_entries(64 * MIB), LOOKUP_ENTRIES);
+        assert_eq!(itlb_entries(64 * MIB), ITLB_ENTRIES);
+        assert_eq!(lookup_entries(16 * MIB), MIN_LOOKUP_ENTRIES);
+        assert_eq!(itlb_entries(16 * MIB), MIN_ITLB_ENTRIES);
+        assert_eq!(lookup_entries(100 * MIB), LOOKUP_ENTRIES);
+        assert_eq!(lookup_entries(512 * MIB), 1 << 21);
+        assert_eq!(lookup_entries(64 * 1024 * MIB), MAX_LOOKUP_ENTRIES);
+        assert_eq!(itlb_entries(512 * MIB), MAX_ITLB_ENTRIES);
+        assert_eq!(lookup_entries(0), MIN_LOOKUP_ENTRIES);
+        assert_eq!(itlb_entries(0), MIN_ITLB_ENTRIES);
     }
 
     /// A span's ITLB entries go in every context its salts reach, wherever

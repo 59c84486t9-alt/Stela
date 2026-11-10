@@ -35,7 +35,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The physical address of the instruction at `pc` of block `index`,
     /// unless the block is a single instruction's.
     pub(super) fn device_site_of(&self, index: usize, pc: u64) -> Option<u64> {
-        let block = &self.blocks[index];
+        let block = &self.code.blocks[index];
         (!self.variants[block.variant.0 as usize].single)
             .then(|| block.physical.wrapping_add(pc.wrapping_sub(block.pc)))
     }
@@ -85,13 +85,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Whether block `index`, exiting with a System exit at `pc`, is a device
-    /// site's stub: the only block that starts at a device site.
+    /// site's stub. The block says so, not this PE's sites: on a shared
+    /// board a PE runs the stubs of sites other PEs learnt.
     pub(super) fn device_stub(&self, index: usize, pc: u64) -> bool {
-        let block = &self.blocks[index];
-        block.pc == pc
-            && block.instructions == 1
-            && !self.variants[block.variant.0 as usize].single
-            && self.device_site(block.physical)
+        let block = &self.code.blocks[index];
+        block.device_stub && block.pc == pc
     }
 
     /// Install the stub of the device site at `pc` and `physical`: native
@@ -119,13 +117,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             block,
             preparation,
         ));
-        self.install(
+        self.installing_stub = true;
+        let installed = self.install(
             pc,
             physical,
             variant,
             source,
             recovery::Template::compiled(emission),
-        )
+        );
+        self.installing_stub = false;
+        installed
     }
 
     /// The access the instruction `word` at `pc` makes, when the engine can
@@ -188,8 +189,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// watchpoint, or a form the engine does not complete) by running it
     /// natively as a block of its own, which takes that path itself.
     pub(super) fn complete_device_site(&mut self, index: usize, pc: u64) -> Step {
-        let physical = self.blocks[index].physical;
-        let word = self.blocks[index].terminal;
+        let physical = self.code.blocks[index].physical;
+        let word = self.code.blocks[index].terminal;
         let access = self.site_access(pc, word);
         let device = access.and_then(|access| {
             let kind = if access.write {

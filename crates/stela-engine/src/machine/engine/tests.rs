@@ -61,7 +61,9 @@ pub(super) fn native_fault_site_in_entry<D: Devices>(
         panic!("actual compiled native block");
     };
     let rows = machine
-        .fault_recovery
+        .code
+        .cache()
+        .recovery
         .get(&index)
         .unwrap()
         .test_portable_rows();
@@ -88,7 +90,9 @@ pub(super) fn native_check_site<D: Devices>(
         panic!("actual compiled native block");
     };
     let rows = machine
-        .fault_recovery
+        .code
+        .cache()
+        .recovery
         .get(&index)
         .unwrap()
         .test_portable_rows();
@@ -399,7 +403,7 @@ pub(super) fn installed_code<D: Devices>(
     bytes: usize,
 ) -> Vec<u8> {
     let mut code = vec![0; bytes];
-    let at = NativeCode(machine.blocks[index].code.0 + offset);
+    let at = NativeCode(machine.code.blocks[index].code.0 + offset);
     assert!(machine.host.read_native(at, &mut code), "installed code");
     code
 }
@@ -411,7 +415,7 @@ pub(super) fn make_pending<D: Devices>(
     index: usize,
     input: &[u8],
 ) {
-    let (pc, variant) = (machine.blocks[index].pc, machine.block_variant(index));
+    let (pc, variant) = (machine.code.blocks[index].pc, machine.block_variant(index));
     let preparation = machine.preparation(variant);
     let mut compiled = preparation.compile_input(input, pc).unwrap();
     compiled.fault_recovery = Vec::new();
@@ -421,7 +425,9 @@ pub(super) fn make_pending<D: Devices>(
         preparation,
     ));
     machine
-        .fault_recovery
+        .code
+        .cache()
+        .recovery
         .get_mut(&index)
         .unwrap()
         .test_make_pending(template);
@@ -434,7 +440,7 @@ pub(super) fn machine(words: &[u32]) -> Machine<FakeHost, NoDevices> {
 /// The slot of `pc`'s block table entry with the key the ITLB gives its
 /// page in the contexts `machine` runs in.
 fn target_slot(machine: &Machine<FakeHost, NoDevices>, pc: u64) -> usize {
-    machine.targets.slot(pc, target_key(machine, pc))
+    machine.code.table.slot(pc, target_key(machine, pc))
 }
 
 /// The block key the ITLB gives the page of `pc` in the contexts `machine`
@@ -1368,7 +1374,7 @@ fn host_breakpoints_end_blocks_and_stop_before_their_instruction() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block")
     };
-    assert_eq!(machine.blocks[index].instructions, 2);
+    assert_eq!(machine.code.blocks[index].instructions, 2);
     machine.cpu.pc = BASE + 8;
     assert!(matches!(machine.step(), Err(Stop::Breakpoint(pc)) if pc == BASE + 8));
     assert_eq!(machine.cpu.state.x[0], 0);
@@ -1384,9 +1390,12 @@ fn system_address_pair_keeps_an_independent_add_entry_and_breakpoint() {
     let Ok(Fetched::Block(add)) = grouped.fetch_block(BASE + 4, false) else {
         panic!("independent ADD block");
     };
-    assert_ne!(grouped.blocks[head].code, grouped.blocks[add].code);
-    assert_eq!(grouped.blocks[head].instructions, 3);
-    assert_eq!(grouped.blocks[add].instructions, 2);
+    assert_ne!(
+        grouped.code.blocks[head].code,
+        grouped.code.blocks[add].code
+    );
+    assert_eq!(grouped.code.blocks[head].instructions, 3);
+    assert_eq!(grouped.code.blocks[add].instructions, 2);
     assert_eq!(installed_code(&mut grouped, head, 0, 1), [0x90]);
     assert_ne!(installed_code(&mut grouped, add, 0, 1), [0x90]);
 
@@ -1395,7 +1404,7 @@ fn system_address_pair_keeps_an_independent_add_entry_and_breakpoint() {
     let Ok(Fetched::Block(head)) = split.fetch_block(BASE, false) else {
         panic!("breakpoint-bounded ADRP");
     };
-    assert_eq!(split.blocks[head].instructions, 1);
+    assert_eq!(split.code.blocks[head].instructions, 1);
     assert_eq!(
         installed_code(&mut split, head, 2, 8),
         (BASE + 0x1000).to_le_bytes()
@@ -1412,7 +1421,7 @@ fn trace_points_end_blocks_and_record_each_entry_without_stopping() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block")
     };
-    assert_eq!(machine.blocks[index].instructions, 2);
+    assert_eq!(machine.code.blocks[index].instructions, 2);
     machine.cpu.pc = BASE + 8;
     machine.cpu.state.x[0] = 7;
     machine.step().unwrap();
@@ -1445,7 +1454,9 @@ fn unavailable_extended_fault_state_cannot_partially_recover_or_retire() {
     // Corrupt a real, minted operand row to exercise atomic capture refusal;
     // no test-only constructor invents a guest site at internal code.
     let offset = machine
-        .fault_recovery
+        .code
+        .cache()
+        .recovery
         .get_mut(&index)
         .unwrap()
         .test_edit_rows(|rows| {
@@ -1497,7 +1508,7 @@ fn compiles_blocks_through_the_page_and_reports_unsupported_words() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block")
     };
-    assert_eq!(machine.blocks[index].instructions, 2);
+    assert_eq!(machine.code.blocks[index].instructions, 2);
     assert_eq!(machine.statistics.compiled, 1);
     assert!(matches!(machine.fetch_block(BASE, false), Ok(Fetched::Block(i)) if i == index));
     assert_eq!(machine.statistics.compiled, 1, "cached");
@@ -1507,14 +1518,14 @@ fn compiles_blocks_through_the_page_and_reports_unsupported_words() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block with UDF")
     };
-    assert_eq!(machine.blocks[index].instructions, 2);
+    assert_eq!(machine.code.blocks[index].instructions, 2);
     // On the M4, whose SME has it in streaming mode, the block ends
     // before it, and the engine applies its access checks on its own.
     let mut machine = machine_on(stela_contracts::Chip::AppleM4, &[0x9100_0400, 0x04a0_0000]);
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("prefix block")
     };
-    assert_eq!(machine.blocks[index].instructions, 1);
+    assert_eq!(machine.code.blocks[index].instructions, 1);
     assert!(matches!(
         machine.fetch_block(BASE + 4, false),
         Ok(Fetched::Checked(0x04a0_0000))
@@ -1529,7 +1540,8 @@ fn pstate_dit_selects_blocks_compiled_for_the_data_independent_timing_target() {
     // add r8d,ecx; mov [rdx],r8d: the plain update and store.
     const PLAIN_ADD_STORE: [u8; 6] = [0x41, 0x01, 0xc8, 0x44, 0x89, 0x02];
     let has = |machine: &Machine<FakeHost, NoDevices>, index: usize, bytes: &[u8]| {
-        let code = &machine.host.installed[machine.blocks[index].code.0 / NATIVE_CODE_STRIDE - 1];
+        let code =
+            &machine.host.installed[machine.code.blocks[index].code.0 / NATIVE_CODE_STRIDE - 1];
         code.windows(bytes.len()).any(|window| window == bytes)
     };
     let mut machine = machine(&[LDADD_W1_W0_X2, SVC_0]);
@@ -1565,7 +1577,8 @@ fn sctlr_sa_selects_blocks_with_or_without_the_sp_alignment_check() {
     // ldr x0, [sp, #8]; svc #0
     let mut machine = machine(&[0xf940_07e0, 0xd400_0001]);
     let has_check = |machine: &Machine<FakeHost, NoDevices>, index: usize| {
-        let code = &machine.host.installed[machine.blocks[index].code.0 / NATIVE_CODE_STRIDE - 1];
+        let code =
+            &machine.host.installed[machine.code.blocks[index].code.0 / NATIVE_CODE_STRIDE - 1];
         code.windows(SP_CHECK.len()).any(|bytes| bytes == SP_CHECK)
     };
     let sctlr = machine.cpu.read(SystemRegister::SCTLR_EL1) | 1 << 3;
@@ -1661,6 +1674,7 @@ fn native_alignment_checks_take_the_alignment_fault_of_the_access() {
                 )
             }),
             machine
+                .code
                 .blocks
                 .len()
                 .checked_sub(1)
@@ -1811,7 +1825,11 @@ fn a_mapped_address_outside_the_native_ranges_runs_its_page_translated() {
     for cause in [FaultCause::NonCanonical; 2] {
         machine.translated_pages.clear();
         let slot = target_slot(&machine, BASE);
-        machine.targets.set(slot, chain::LookupEntry::default());
+        machine
+            .code
+            .cache()
+            .targets
+            .set(slot, chain::LookupEntry::default());
         let kind = stela_compiler::block::RecoverySiteKind::GuestAccess;
         run(&mut machine, cause, kind).unwrap();
         assert_eq!(machine.cpu.pc, BASE, "{cause:?}");
@@ -1821,7 +1839,7 @@ fn a_mapped_address_outside_the_native_ranges_runs_its_page_translated() {
         let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
             panic!("block")
         };
-        let block = &machine.blocks[index];
+        let block = &machine.code.blocks[index];
         let variant = machine.block_variant(index);
         assert!(variant.translated, "{cause:?}");
         assert_eq!(
@@ -1862,7 +1880,7 @@ fn system_mode_blocks_check_accesses_against_the_guest_ranges() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block")
     };
-    let code = &machine.host.installed[machine.blocks[index].code.0 / NATIVE_CODE_STRIDE - 1];
+    let code = &machine.host.installed[machine.code.blocks[index].code.0 / NATIVE_CODE_STRIDE - 1];
     assert!(code.windows(CHECK.len()).any(|bytes| bytes == CHECK));
 }
 
@@ -2257,17 +2275,17 @@ fn check_code_arena_reclamation(indexed: bool) {
     // The parts held pages 0 and 1, then page 0 again and page 2; page
     // 3 needed the first part back, whose reclaim forgot its two blocks
     // alone, and whose slots took the next blocks.
-    let left: Vec<u64> = (machine.index.sweep(None))
-        .map(|(_, slot)| machine.blocks[slot].pc)
+    let left: Vec<u64> = (machine.code.cache().index.sweep(None))
+        .map(|(_, slot)| machine.code.blocks[slot].pc)
         .collect();
     assert_eq!(left, [page(0) + 4, page(1) + 8, page(2), page(3)]);
     assert_eq!(machine.statistics.code_evictions, 1);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
-    assert_eq!(machine.blocks.len(), 4);
+    assert_eq!(machine.code.blocks.len(), 4);
     assert_eq!(&slots[4..], [1, 0]);
     assert_eq!(
         matches!(
-            machine.code_slots,
+            machine.code.cache().code_slots,
             code_slots::CodeSlots::Partitioned { .. }
         ),
         indexed
@@ -2294,8 +2312,8 @@ fn an_evicted_blocks_successor_box_and_index_list_serve_the_next_block() {
         };
         slots.push(slot);
     }
-    assert_eq!(machine.blocks[slots[0]].successors.len(), 1);
-    let kept = machine.blocks[slots[0]].successors.as_ptr();
+    assert_eq!(machine.code.blocks[slots[0]].successors.len(), 1);
+    let kept = machine.code.blocks[slots[0]].successors.as_ptr();
     // The third part reclaims the first: its block's slot and successor box
     // serve the block that needed the room, and its index list goes.
     let Ok(Fetched::Block(next)) = machine.fetch_block(base + 2 * FETCH_PAGE, false) else {
@@ -2303,12 +2321,12 @@ fn an_evicted_blocks_successor_box_and_index_list_serve_the_next_block() {
     };
     assert_eq!(machine.statistics.code_evictions, 1);
     assert_eq!(next, slots[0]);
-    assert_eq!(machine.blocks[next].successors.as_ptr(), kept);
+    assert_eq!(machine.code.blocks[next].successors.as_ptr(), kept);
     assert_eq!(
-        machine.blocks[next].successors[0].target.0,
+        machine.code.blocks[next].successors[0].target.0,
         base + 2 * FETCH_PAGE + 4
     );
-    assert!(machine.index.page(base).next().is_none());
+    assert!(machine.code.cache().index.page(base).next().is_none());
     assert!(machine.fetch_block(base + 3 * FETCH_PAGE, false).is_ok());
     // The first page's block is installed again within the window: thrash.
     assert!(machine.fetch_block(base, false).is_ok());
@@ -2331,9 +2349,21 @@ fn a_fetch_that_reclaims_code_forgets_the_lookup_entries_of_its_blocks_alone() {
     assert!(machine.fetch_block(pc, false).is_ok());
     assert_eq!(machine.statistics.code_evictions, 1);
     assert_eq!(machine.chain.contexts(), first);
-    assert_ne!(machine.targets.entry(target_slot(&machine, base)).pc, base);
+    assert_ne!(
+        machine
+            .code
+            .cache()
+            .targets
+            .entry(target_slot(&machine, base))
+            .pc,
+        base
+    );
     for kept in [base + FETCH_PAGE, pc] {
-        let entry = machine.targets.entry(target_slot(&machine, kept));
+        let entry = machine
+            .code
+            .cache()
+            .targets
+            .entry(target_slot(&machine, kept));
         assert_eq!((entry.pc, entry.key), (kept, target_key(&machine, kept)));
     }
 }
@@ -2359,15 +2389,15 @@ fn eviction_undoes_the_links_into_evicted_blocks_and_keeps_their_pages() {
         machine.step().unwrap();
     }
     assert_eq!(machine.statistics.links, 2);
-    let first_physical = machine.blocks[0].physical;
+    let first_physical = machine.code.blocks[0].physical;
     // The next page's block takes the first block's part.
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
     assert_eq!(machine.statistics.code_evictions, 1);
     assert_eq!(machine.statistics.unlinks, 1);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
-    let second = &machine.blocks[1];
+    let second = &machine.code.blocks[1];
     let exit = second.successors[0];
-    assert!(!exit.linked);
+    assert!(!machine.code.blocks.record(1).linked(0));
     // The slot's patch point jumps to the exit again.
     let (point, unlink) = chain::unlinked(exit.site, exit.slot.into()).unwrap();
     assert_eq!(
@@ -2377,23 +2407,40 @@ fn eviction_undoes_the_links_into_evicted_blocks_and_keeps_their_pages() {
     let (variant, physical) = (second.variant, second.physical);
     assert_eq!(
         machine
+            .code
+            .cache()
             .index
-            .get(&machine.blocks, base + 12, physical, variant),
+            .get(&machine.code.blocks, base + 12, physical, variant),
         Some(1)
     );
     assert_eq!(
         machine
+            .code
+            .cache()
             .index
-            .get(&machine.blocks, base, first_physical, variant),
+            .get(&machine.code.blocks, base, first_physical, variant),
         None
     );
     // The second block took no lookup entry: the first's exit linked into
     // it at its fetch.
     assert_ne!(
-        machine.targets.entry(target_slot(&machine, base + 12)).pc,
+        machine
+            .code
+            .cache()
+            .targets
+            .entry(target_slot(&machine, base + 12))
+            .pc,
         base + 12
     );
-    assert_ne!(machine.targets.entry(target_slot(&machine, base)).pc, base);
+    assert_ne!(
+        machine
+            .code
+            .cache()
+            .targets
+            .entry(target_slot(&machine, base))
+            .pc,
+        base
+    );
     // The second block runs on, and exits to the engine at the first.
     machine.host.exits = vec![direct(base)];
     machine.step().unwrap();
@@ -2411,11 +2458,17 @@ fn finishing_and_pressure_return_block_table_storage() {
             machine.fetch_block(base, false),
             Ok(Fetched::Block(0))
         ));
-        let capacities = (machine.blocks.capacity(), machine.fault_recovery.capacity());
+        let capacities = (
+            machine.code.blocks.capacity(),
+            machine.code.cache().recovery.capacity(),
+        );
         assert!(capacities.0 > 0 && capacities.1 > 0);
         machine.discard_code(Discard::Maintenance);
         assert_eq!(
-            (machine.blocks.capacity(), machine.fault_recovery.capacity()),
+            (
+                machine.code.blocks.capacity(),
+                machine.code.cache().recovery.capacity()
+            ),
             capacities,
         );
         assert!(matches!(
@@ -2423,8 +2476,8 @@ fn finishing_and_pressure_return_block_table_storage() {
             Ok(Fetched::Block(0))
         ));
         machine.discard_code(cause);
-        assert_eq!(machine.blocks.capacity(), 0);
-        assert_eq!(machine.fault_recovery.capacity(), 0);
+        assert_eq!(machine.code.blocks.capacity(), 0);
+        assert_eq!(machine.code.cache().recovery.capacity(), 0);
         assert!(matches!(
             machine.fetch_block(base, false),
             Ok(Fetched::Block(0))
@@ -2441,7 +2494,7 @@ fn pressure_reclaims_before_reading_new_compile_input() {
     machine.host.memory_low = true;
     machine.host.require_empty_code_on_read = true;
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-    assert_eq!(machine.fault_recovery.len(), 1);
+    assert_eq!(machine.code.cache().recovery.len(), 1);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
 }
 
@@ -2455,8 +2508,11 @@ fn pressure_reclaims_metadata_when_the_next_arena_part_is_empty() {
     let old_generation = machine.code_generation;
     machine.host.memory_low = true;
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-    assert_eq!(machine.fault_recovery.len(), 1);
-    assert!(!(machine.index.sweep(None)).any(|(_, slot)| machine.blocks[slot].pc == base));
+    assert_eq!(machine.code.cache().recovery.len(), 1);
+    assert!(
+        !(machine.code.cache().index.sweep(None))
+            .any(|(_, slot)| machine.code.blocks[slot].pc == base)
+    );
     assert_ne!(machine.code_generation, old_generation);
     // A cached hit adds no compilation scratch and keeps its owner.
     let discarded = machine.statistics.code_discards.iter().sum::<u64>();
@@ -2467,8 +2523,8 @@ fn pressure_reclaims_metadata_when_the_next_arena_part_is_empty() {
     );
     // Continued foreign pressure must not permit unbounded local growth.
     assert!(machine.fetch_block(base + 2 * FETCH_PAGE, false).is_ok());
-    assert_eq!(machine.fault_recovery.len(), 1);
-    assert_eq!(machine.index.len(), 1);
+    assert_eq!(machine.code.cache().recovery.len(), 1);
+    assert_eq!(machine.code.cache().index.len(), 1);
 }
 
 #[test]
@@ -2481,7 +2537,7 @@ fn a_machine_with_few_blocks_keeps_them_under_memory_pressure() {
     machine.host.memory_low = true;
     // One block frees too little to relieve the heap: it stays.
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-    assert_eq!(machine.index.len(), 2);
+    assert_eq!(machine.code.cache().index.len(), 2);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
 }
 
@@ -2498,13 +2554,13 @@ fn pressure_releases_the_oldest_arena_part_and_keeps_newer_code() {
     }
     machine.host.memory_low = true;
     assert!(machine.fetch_block(page(3), false).is_ok());
-    let mut left: Vec<u64> = (machine.index.sweep(None))
-        .map(|(_, slot)| machine.blocks[slot].pc)
+    let mut left: Vec<u64> = (machine.code.cache().index.sweep(None))
+        .map(|(_, slot)| machine.code.blocks[slot].pc)
         .collect();
     left.sort_unstable();
     assert_eq!(left, [page(2), page(3)]);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
-    assert_eq!(machine.fault_recovery.len(), 2);
+    assert_eq!(machine.code.cache().recovery.len(), 2);
 }
 
 #[test]
@@ -2515,8 +2571,8 @@ fn a_block_installed_while_memory_runs_low_discards_the_others_first() {
     assert!(machine.fetch_block(base, false).is_ok());
     machine.host.memory_low = true;
     assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
-    let left: Vec<u64> = (machine.index.sweep(None))
-        .map(|(_, slot)| machine.blocks[slot].pc)
+    let left: Vec<u64> = (machine.code.cache().index.sweep(None))
+        .map(|(_, slot)| machine.code.blocks[slot].pc)
         .collect();
     assert_eq!(left, [base + FETCH_PAGE]);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
@@ -2533,7 +2589,7 @@ fn memory_pressure_reclaims_before_each_new_compilation() {
     // Still low, as another machine's data may keep it: a new compile
     // releases this machine's old owners before allocating more.
     assert!(machine.fetch_block(base + 2 * FETCH_PAGE, false).is_ok());
-    assert_eq!(machine.index.len(), 1);
+    assert_eq!(machine.code.cache().index.len(), 1);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 2);
 }
 
@@ -2553,11 +2609,11 @@ fn pressure_this_machine_cannot_relieve_waits_for_it_to_regrow() {
     // One block held: it installs the next without discarding again.
     assert!(machine.fetch_block(page(3), false).is_ok());
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
-    assert_eq!(machine.index.len(), 2);
+    assert_eq!(machine.code.cache().index.len(), 2);
     // Two again, as many as at the last reclaim: the next one reclaims.
     assert!(machine.fetch_block(page(4), false).is_ok());
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 2);
-    assert_eq!(machine.index.len(), 1);
+    assert_eq!(machine.code.cache().index.len(), 1);
     // Once memory recovers, the next stretch of pressure reclaims at once.
     machine.host.memory_low = false;
     assert!(machine.fetch_block(page(0), false).is_ok());
@@ -2609,17 +2665,17 @@ fn ic_ivau_forgets_its_pages_blocks_and_ic_iallu_every_block() {
             Ok(Fetched::Block(_))
         ));
     }
-    assert_eq!(machine.index.len(), 2);
+    assert_eq!(machine.code.cache().index.len(), 2);
     machine.cpu.state.x[0] = base + 0x40;
     machine.system_instruction(IC_IVAU_X0).unwrap();
-    let left: Vec<u64> = (machine.index.sweep(None))
-        .map(|(_, slot)| machine.blocks[slot].pc)
+    let left: Vec<u64> = (machine.code.cache().index.sweep(None))
+        .map(|(_, slot)| machine.code.blocks[slot].pc)
         .collect();
     assert_eq!(left, [base + FETCH_PAGE]);
     assert_eq!(machine.statistics.code_invalidations, 1);
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 0);
     machine.system_instruction(IC_IALLU).unwrap();
-    assert!(machine.index.is_empty());
+    assert!(machine.code.cache().index.is_empty());
     assert_eq!(machine.statistics.code_discards.iter().sum::<u64>(), 1);
 }
 
@@ -2649,11 +2705,11 @@ fn side_exits_retire_the_instructions_that_ran() {
     machine.step().unwrap();
     assert_eq!(machine.cpu.pc, base + 12);
     assert_eq!(machine.cpu.retired, retired + 1);
-    assert_eq!(machine.blocks[0].instructions, 5);
+    assert_eq!(machine.code.blocks[0].instructions, 5);
     assert_eq!(machine.statistics.exit_kinds[ExitKind::Direct as usize], 1);
     machine.step().unwrap();
     assert_eq!(machine.cpu.retired, retired + 3);
-    let exit = *machine.blocks[0]
+    let exit = *machine.code.blocks[0]
         .successors
         .iter()
         .find(|exit| exit.word() == word)
@@ -2662,7 +2718,7 @@ fn side_exits_retire_the_instructions_that_ran() {
     // The side exit linked at the fetch that compiled its target, before
     // the target's exit back linked.
     // Its body first, then the slot's patch point falls into it.
-    let entry = machine.blocks[1].code.0 as u64;
+    let entry = machine.code.blocks[1].code.0 as u64;
     let slot = exit.site - exit.slot as u64;
     let (body, code) = chain::link(slot, exit.slot.into(), 1, 1, entry).unwrap();
     assert_eq!(machine.host.patches[0], (body as usize, code));
@@ -2693,7 +2749,7 @@ fn direct_exits_chain_into_their_successors_in_the_page() {
     machine.step().unwrap();
     machine.step().unwrap();
     assert_eq!(machine.statistics.links, 2);
-    let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
+    let (first, second) = (&machine.code.blocks[0], &machine.code.blocks[1]);
     // The first block's exit to the second, at the fetch that compiled the
     // second, then the second's to the first, at its exit.
     for (patches, from, to, target, index) in [
@@ -2710,7 +2766,8 @@ fn direct_exits_chain_into_their_successors_in_the_page() {
         assert_eq!(patches[0], (body as usize, expected));
         let point = chain::slot_patch(at) as usize;
         assert_eq!(patches[1], (point, chain::NOP5.to_vec()));
-        assert!(from.successors.iter().all(|exit| exit.linked));
+        let record = machine.code.blocks.record(1 - index as usize);
+        assert!((0..from.successors.len()).all(|position| record.linked(position)));
     }
     // The first block chains into the second, which exits to the first.
     let (blocks, retired) = (machine.statistics.blocks, machine.cpu.retired);
@@ -2766,10 +2823,10 @@ fn direct_exits_chain_into_their_successors_in_the_page() {
             ..current
         },
     ));
-    let offset = machine.blocks[1]
+    let offset = machine.code.blocks[1]
         .code
         .0
-        .wrapping_sub(machine.blocks[0].code.0);
+        .wrapping_sub(machine.code.blocks[0].code.0);
     machine.host.exits = vec![NativeExit::Fault(NativeFault {
         origin: crate::machine::NativeFaultOrigin::Exception,
         trap: 14,
@@ -2824,7 +2881,7 @@ fn a_direct_exit_links_at_the_fetch_of_its_target() {
     }];
     machine.step().unwrap();
     assert_eq!(
-        machine.direct_exit.map(|(block, pc, _)| (block, pc)),
+        machine.direct_exit.map(|(block, _, pc, _)| (block, pc)),
         Some((0, target))
     );
     assert!(machine.host.patches.is_empty());
@@ -2833,16 +2890,23 @@ fn a_direct_exit_links_at_the_fetch_of_its_target() {
     };
     assert!(machine.direct_exit.is_none());
     assert_eq!(machine.statistics.links, 1);
-    assert!(machine.blocks[0].successors.iter().all(|exit| exit.linked));
+    let record = machine.code.blocks.record(0);
+    assert!((0..machine.code.blocks[0].successors.len()).all(|position| record.linked(position)));
     let key = target_key(&machine, target);
     assert_ne!(key, 0);
     let held = machine
+        .code
+        .cache()
         .targets
-        .find(machine.targets.slot(target, key), target, key);
+        .find(machine.code.table.slot(target, key), target, key);
     assert_ne!(held.pc, target);
-    assert_eq!(machine.blocks[second].pc, target);
+    assert_eq!(machine.code.blocks[second].pc, target);
     // A fetch the exit did not wait for remembers its block as before.
-    let entry = machine.targets.entry(target_slot(&machine, base));
+    let entry = machine
+        .code
+        .cache()
+        .targets
+        .entry(target_slot(&machine, base));
     assert_eq!((entry.pc, entry.block), (base, 0));
 }
 
@@ -2860,10 +2924,10 @@ fn a_direct_exit_waiting_for_its_target_goes_with_its_block() {
             machine.fetch_block(pc, false).unwrap();
         },
         |machine| {
-            let code = machine.blocks[0].code.0;
+            let code = machine.code.blocks[0].code.0;
             machine.evict_code(code..code + 1);
         },
-        |machine| machine.invalidate_code_page(machine.blocks[0].physical),
+        |machine| machine.invalidate_code_page(machine.code.blocks[0].physical),
         Machine::discard_blocks,
     ];
     for (case, forget) in forgets.into_iter().enumerate() {
@@ -2882,7 +2946,11 @@ fn a_direct_exit_waiting_for_its_target_goes_with_its_block() {
             panic!("a block in case {case}");
         };
         assert_eq!(machine.statistics.links, 0, "case {case}");
-        let held = machine.targets.entry(target_slot(&machine, target));
+        let held = machine
+            .code
+            .cache()
+            .targets
+            .entry(target_slot(&machine, target));
         assert_eq!(
             (held.pc, held.block),
             (target, second as u32),
@@ -2926,9 +2994,13 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
     assert_eq!(machine.statistics.exit_kinds, kinds);
     // Neither exit had a thunk yet.
     assert_eq!(machine.statistics.lookup_misses, [2, 0, 0, 0, 0]);
-    let (first, second) = (&machine.blocks[0], &machine.blocks[1]);
-    assert!(first.successors.is_empty() && first.dynamic_site.is_none());
-    assert!(second.dynamic_site.is_none());
+    let (first, second) = (&machine.code.blocks[0], &machine.code.blocks[1]);
+    let records = [0, 1].map(|slot| machine.code.blocks.record(slot));
+    assert!((0..first.successors.len()).all(|position| records[0].linked(position)));
+    let closed = |block: &Block, record: &board::Record| {
+        block.dynamic_site.is_none() || !record.dynamic_open()
+    };
+    assert!(closed(first, records[0]) && closed(second, records[1]));
     let code = |block: &Block| &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
     // The branch's direct exit, then the RET's exit to RAX, ends each
     // block's code.
@@ -2950,7 +3022,12 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
         + 1;
     let probes = (probes * NATIVE_CODE_STRIDE) as u64;
     // Each site's tail, then the site's jump to it.
-    let cell = machine.targets.site_cell(sites[0] as u64).expect("a cell");
+    let cell = machine
+        .code
+        .cache()
+        .targets
+        .site_cell(sites[0] as u64)
+        .expect("a cell");
     let exits = [(ExitKind::Direct, 1), (ExitKind::Return, 2)];
     for (index, (site, (kind, ran))) in sites.into_iter().zip(exits).enumerate() {
         let (tail, code) = &machine.host.patches[2 * index];
@@ -2975,33 +3052,48 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
         assert_eq!(machine.host.patches[2 * index + 1], (site, jump.to_vec()));
     }
     // The fetch of `far` filled the cell linked before it.
-    assert_eq!(cell, machine.targets.entry(target_slot(&machine, far)));
+    assert_eq!(
+        cell,
+        machine
+            .code
+            .cache()
+            .targets
+            .entry(target_slot(&machine, far))
+    );
     // A TLBI of `far`'s page forgets its translation, and leaves the cell,
     // which holds for the frame; forgetting the frame's entries empties it,
     // and the next fetch's entry fills it again.
     machine.forget_lookups(mmu::tlbi::Reach::Containing(far), None);
     assert_eq!(machine.current_key(far), None);
     let site = sites[0] as u64;
-    assert_eq!(machine.targets.site_cell(site), Some(cell));
+    assert_eq!(machine.code.cache().targets.site_cell(site), Some(cell));
     let frame = chain::key_frame(cell.key);
-    machine.targets.forget_frames(frame..=frame, |_| true);
-    assert_eq!(machine.targets.site_cell(site).unwrap().key, 0);
+    machine
+        .code
+        .cache()
+        .targets
+        .forget_frames(frame..=frame, |_| true);
+    assert_eq!(machine.code.cache().targets.site_cell(site).unwrap().key, 0);
     machine.remember_target(far, 1);
-    assert_eq!(machine.targets.site_cell(site), Some(cell));
-    assert_eq!(machine.targets.cells(), 1);
+    assert_eq!(machine.code.cache().targets.site_cell(site), Some(cell));
+    assert_eq!(machine.code.cache().targets.cells(), 1);
     let half = chain::half(base);
     let context = machine.chain.contexts()[half];
     assert_ne!(context, 0);
     for (pc, block) in [(base, 0), (far, 1)] {
         let key = machine.block_key(
-            machine.blocks[block].physical,
-            machine.blocks[block].variant,
+            machine.code.blocks[block].physical,
+            machine.code.blocks[block].variant,
         );
-        let entry = machine.targets.entry(machine.targets.slot(pc, key));
+        let entry = machine
+            .code
+            .cache()
+            .targets
+            .entry(machine.code.table.slot(pc, key));
         let expected = chain::LookupEntry {
             pc,
             key,
-            entry: machine.blocks[block].code.0 as u64,
+            entry: machine.code.blocks[block].code.0 as u64,
             block: block as u32,
             targets: 0b1111,
         };
@@ -3023,7 +3115,7 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
         Ok(Fetched::Block(1))
     ));
     assert_eq!(machine.statistics.fetches[1], translated + 1);
-    assert_eq!(machine.targets.site_cell(site), Some(cell));
+    assert_eq!(machine.code.cache().targets.site_cell(site), Some(cell));
     let variant = machine.block_variant(0);
     let el = machine.cpu.pstate.el;
     assert_eq!(machine.context(el, variant, half), renewed);
@@ -3032,7 +3124,7 @@ fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
     assert_eq!(machine.context(el, variant, half), renewed);
     // The cell goes with its exit's code.
     machine.discard_blocks();
-    assert_eq!(machine.targets.cells(), 0);
+    assert_eq!(machine.code.cache().targets.cells(), 0);
 }
 
 /// A TLBI of one process's ASID leaves the contexts of the others, and the
@@ -3293,7 +3385,7 @@ fn block_entries_survive_a_tlbi_all() {
 /// The live entries of the block table.
 fn table_entries(machine: &Machine<FakeHost, NoDevices>) -> usize {
     (0..chain::LOOKUP_ENTRIES)
-        .filter(|&slot| machine.targets.entry(slot).key != 0)
+        .filter(|&slot| machine.code.cache().targets.entry(slot).key != 0)
         .count()
 }
 
@@ -3351,7 +3443,10 @@ fn two_address_spaces_mapping_one_frame_share_an_entry() {
     };
     let first = machine.chain.contexts()[0];
     let key = target_key(&machine, BASE);
-    assert_eq!(key, machine.block_key(BASE, machine.blocks[block].variant));
+    assert_eq!(
+        key,
+        machine.block_key(BASE, machine.code.blocks[block].variant)
+    );
     let (fetches, entries) = (machine.statistics.fetches, table_entries(&machine));
     paged_space(&mut machine, 1, &[BASE]);
     assert!(
@@ -3402,7 +3497,7 @@ fn a_remapped_page_runs_its_new_frame_and_a_removed_permission_faults() {
     let Ok(Fetched::Block(old)) = machine.fetch_block(va, false) else {
         panic!("a block");
     };
-    assert_eq!(machine.blocks[old].physical, BASE + 0x1000);
+    assert_eq!(machine.code.blocks[old].physical, BASE + 0x1000);
     let old_key = target_key(&machine, va);
     // Break, TLBI, make: the page goes to the frame at 0x2000.
     let [_, _, l3] = SPACES_TABLES[0];
@@ -3414,13 +3509,15 @@ fn a_remapped_page_runs_its_new_frame_and_a_removed_permission_faults() {
         panic!("a block");
     };
     assert_ne!(new, old);
-    assert_eq!(machine.blocks[new].physical, BASE + 0x2000);
+    assert_eq!(machine.code.blocks[new].physical, BASE + 0x2000);
     let new_key = target_key(&machine, va);
     assert_ne!(new_key, old_key);
     assert_eq!(chain::key_frame(new_key), (BASE + 0x2000) >> 12);
     let held = machine
+        .code
+        .cache()
         .targets
-        .find(machine.targets.slot(va, new_key), va, new_key);
+        .find(machine.code.table.slot(va, new_key), va, new_key);
     assert_eq!((held.key, held.block), (new_key, new as u32));
     // The page loses its execute permission: the fetch after the TLBI
     // takes an Instruction Abort, a permission fault, and records nothing.
@@ -3465,25 +3562,26 @@ fn a_fallthrough_into_the_next_page_follows_that_pages_translation() {
     }];
     machine.step().unwrap();
     assert_eq!(machine.cpu.pc, next);
-    let ended = machine.blocks.len() - 1;
+    let ended = machine.code.blocks.len() - 1;
     assert_eq!(
         (
-            machine.blocks[ended].pc,
-            machine.blocks[ended].source_bytes()
+            machine.code.blocks[ended].pc,
+            machine.code.blocks[ended].source_bytes()
         ),
         (last, 4)
     );
     // The fallthrough is linked through a cell, empty until the next
     // page's block is fetched.
-    let installed = &machine.host.installed[machine.blocks[ended].code.0 / NATIVE_CODE_STRIDE - 1];
+    let installed =
+        &machine.host.installed[machine.code.blocks[ended].code.0 / NATIVE_CODE_STRIDE - 1];
     let exit_end = chain::without_failures(installed).len();
-    let exit = (machine.blocks[ended].code.0 + exit_end - chain::DIRECT_EXIT_BYTES) as u64;
+    let exit = (machine.code.blocks[ended].code.0 + exit_end - chain::DIRECT_EXIT_BYTES) as u64;
     let site = chain::direct_patch(exit);
-    assert_eq!(machine.targets.site_cell(site).unwrap().key, 0);
+    assert_eq!(machine.code.cache().targets.site_cell(site).unwrap().key, 0);
     let Ok(Fetched::Block(old)) = machine.fetch_block(next, false) else {
         panic!("a block");
     };
-    let cell = machine.targets.site_cell(site).unwrap();
+    let cell = machine.code.cache().targets.site_cell(site).unwrap();
     assert_eq!((cell.pc, cell.block), (next, old as u32));
     assert_eq!(cell.key, target_key(&machine, next));
     // The next page goes to another frame: its translation goes with the
@@ -3495,8 +3593,8 @@ fn a_fallthrough_into_the_next_page_follows_that_pages_translation() {
     let Ok(Fetched::Block(new)) = machine.fetch_block(next, false) else {
         panic!("a block");
     };
-    assert_eq!(machine.blocks[new].physical, BASE + 0x2000);
-    let cell = machine.targets.site_cell(site).unwrap();
+    assert_eq!(machine.code.blocks[new].physical, BASE + 0x2000);
+    let cell = machine.code.cache().targets.site_cell(site).unwrap();
     assert_eq!(
         (cell.block, cell.key),
         (new as u32, target_key(&machine, next))
@@ -3526,7 +3624,7 @@ fn a_translated_frame_gives_the_pages_the_itlb_holds_a_new_key() {
         panic!("a block");
     };
     assert_ne!(new, old);
-    assert!(machine.variants[machine.blocks[new].variant.0 as usize].translated);
+    assert!(machine.variants[machine.code.blocks[new].variant.0 as usize].translated);
     assert_ne!(target_key(&machine, BASE), key);
     assert_eq!(machine.statistics.itlb, [itlb[0], itlb[1] + 1]);
     assert!(dispatched(&machine, BASE));
@@ -3539,7 +3637,11 @@ fn a_translated_frame_gives_the_pages_the_itlb_holds_a_new_key() {
 /// (`chain::lookup_dispatcher`).
 fn dispatched(machine: &Machine<FakeHost, NoDevices>, pc: u64) -> bool {
     machine.current_key(pc).is_some_and(|key| {
-        let entry = machine.targets.find(machine.targets.slot(pc, key), pc, key);
+        let entry = machine
+            .code
+            .cache()
+            .targets
+            .find(machine.code.table.slot(pc, key), pc, key);
         entry.pc == pc && entry.key == key
     })
 }
@@ -3805,11 +3907,15 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     let page = (base / FETCH_PAGE) as usize % FETCH_CACHE;
     machine.fetch[page].as_mut().unwrap().guarded = true;
     let slot = target_slot(&machine, base + 8);
-    machine.targets.set(slot, chain::LookupEntry::default());
+    machine
+        .code
+        .cache()
+        .targets
+        .set(slot, chain::LookupEntry::default());
     machine.cpu.pc = base + 8;
     machine.cpu.pstate.btype = 0;
     machine.step().unwrap();
-    assert_eq!(machine.blocks.len(), 4);
+    assert_eq!(machine.code.blocks.len(), 4);
     assert!(!machine.block_variant(2).guarded_page && machine.block_variant(3).guarded_page);
     for (index, kind, btype) in [
         (0, ExitKind::Call, 0b10),
@@ -3819,7 +3925,7 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     ] {
         let dispatcher = chain::lookup_dispatcher(btype).unwrap();
         assert!(machine.host.installed.contains(&dispatcher), "{kind:?}");
-        assert_eq!(machine.blocks[index].dynamic_site, None, "{index}");
+        assert!(!machine.code.blocks.record(index).dynamic_open(), "{index}");
     }
     assert_eq!(machine.statistics.lookups, 4);
     machine.fetch[page].as_mut().unwrap().guarded = false;
@@ -3831,10 +3937,15 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
         kind: ExitKind::Fallthrough as u64,
     }];
     machine.step().unwrap();
-    let target = machine.blocks.len() - 1;
-    assert_eq!(machine.blocks[target].pc, far);
+    let target = machine.code.blocks.len() - 1;
+    assert_eq!(machine.code.blocks[target].pc, far);
     assert_eq!(
-        machine.targets.entry(target_slot(&machine, far)).targets,
+        machine
+            .code
+            .cache()
+            .targets
+            .entry(target_slot(&machine, far))
+            .targets,
         0b1111
     );
     // The page mapped guarded, which a TLBI makes known, is another key:
@@ -3849,14 +3960,22 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
     assert!(guarded != target && machine.block_variant(guarded).guarded_page);
     assert_ne!(target_key(&machine, far), unguarded);
     assert_eq!(
-        machine.targets.entry(target_slot(&machine, far)).targets,
+        machine
+            .code
+            .cache()
+            .targets
+            .entry(target_slot(&machine, far))
+            .targets,
         0b0111
     );
     // The frame's other key, which the unguarded mapping still finds,
     // shares its set.
-    let entry = machine
-        .targets
-        .find(machine.targets.slot(far, unguarded), far, unguarded);
+    let entry =
+        machine
+            .code
+            .cache()
+            .targets
+            .find(machine.code.table.slot(far, unguarded), far, unguarded);
     assert_eq!((entry.block, entry.targets), (target as u32, 0b1111));
     // BTI C itself performs no guest memory access. Preserve this
     // original landing-pad program, but an invented Host fault at its
@@ -3872,10 +3991,10 @@ fn indirect_branches_go_through_lookups_that_check_the_target() {
             ..current
         },
     ));
-    let offset = machine.blocks[target]
+    let offset = machine.code.blocks[target]
         .code
         .0
-        .wrapping_sub(machine.blocks[0].code.0);
+        .wrapping_sub(machine.code.blocks[0].code.0);
     machine.host.exits = vec![NativeExit::Fault(NativeFault {
         origin: crate::machine::NativeFaultOrigin::Exception,
         trap: 14,
@@ -4448,9 +4567,13 @@ fn a_compiled_pac_landing_uses_the_current_sctlr_for_lookup_entries() {
         machine.derived_changed();
         machine.remember_target(pc, index);
         // BT1 is part of the key, so the entries of each value stand apart.
-        let block = &machine.blocks[index];
+        let block = &machine.code.blocks[index];
         let key = machine.block_key(block.physical, block.variant);
-        let entry = machine.targets.find(machine.targets.slot(pc, key), pc, key);
+        let entry = machine
+            .code
+            .cache()
+            .targets
+            .find(machine.code.table.slot(pc, key), pc, key);
         assert_eq!((entry.key, entry.targets), (key, targets));
         keys.push(key);
     }
@@ -4703,7 +4826,7 @@ fn dc_clean_blocks_follow_the_traps_and_faults_complete_in_the_engine() {
         machine.block_variant(0).system.cache_clean,
         cache_clean::Operations::ALL
     );
-    let block = &machine.blocks[0];
+    let block = &machine.code.blocks[0];
     let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
     assert!(chain::is_direct_exit(
         &code[code.len() - chain::DIRECT_EXIT_BYTES..],
@@ -4721,7 +4844,7 @@ fn dc_clean_blocks_follow_the_traps_and_faults_complete_in_the_engine() {
     machine.cpu.pc = base;
     machine.host.exits = vec![fallthrough];
     machine.step().unwrap();
-    let trapped = &machine.blocks[1];
+    let trapped = &machine.code.blocks[1];
     assert!(
         !machine
             .block_variant(1)
@@ -6009,7 +6132,7 @@ fn pac_exits_complete_natively_from_the_memo_under_open_tags() {
         kind: ExitKind::Fallthrough as u64,
     }];
     machine.step().unwrap();
-    let block = &machine.blocks[0];
+    let block = &machine.code.blocks[0];
     assert!(
         block.terminal_pc() > base + 8,
         "the block runs past PACIBSP"
@@ -6065,7 +6188,7 @@ fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
         kind: ExitKind::Fallthrough as u64,
     }];
     native.step().unwrap();
-    let block = &native.blocks[0];
+    let block = &native.code.blocks[0];
     assert!(block.terminal_pc() > base + 8, "the block runs past XPACD");
     assert_eq!(
         native.host.installed.len(),
@@ -6200,7 +6323,7 @@ fn pac_returns_go_through_a_lookup_dispatcher() {
         ]
     );
     assert_eq!(machine.statistics.lookups, 1);
-    assert_eq!(machine.blocks[0].dynamic_site, None);
+    assert!(!machine.code.blocks.record(0).dynamic_open());
 }
 
 /// MRS TPIDR_EL1 ends its block in a System exit that a thunk reading
@@ -6342,7 +6465,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
         kind: ExitKind::Fallthrough as u64,
     }];
     machine.step().unwrap();
-    let block = &machine.blocks[0];
+    let block = &machine.code.blocks[0];
     let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
     let cell = cell_place(thread);
     let thunk = register_read::thunk(GuestAddress(base + 4), 8, cell);
@@ -6371,7 +6494,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
         kind: ExitKind::Fallthrough as u64,
     });
     other.step().unwrap();
-    assert!(other.host.patches.is_empty() && other.blocks[0].successors.is_empty());
+    assert!(other.host.patches.is_empty() && other.code.blocks[0].successors.is_empty());
     machine
         .cpu
         .registers
@@ -6891,7 +7014,7 @@ fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
     }];
     machine.step().unwrap();
     assert_eq!(machine.block_variant(0).system.zero_block, Some(64));
-    let block = &machine.blocks[0];
+    let block = &machine.code.blocks[0];
     let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
     assert!(chain::is_direct_exit(
         &code[code.len() - chain::DIRECT_EXIT_BYTES..],
@@ -6914,7 +7037,7 @@ fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
     }];
     machine.step().unwrap();
     assert_eq!(machine.block_variant(1).system.zero_block, None);
-    let trapped = &machine.blocks[1];
+    let trapped = &machine.code.blocks[1];
     let code = &machine.host.installed[trapped.code.0 / NATIVE_CODE_STRIDE - 1];
     assert!(chain::is_direct_exit(
         &code[code.len() - chain::DIRECT_EXIT_BYTES..],
@@ -8350,6 +8473,7 @@ fn upper_occupancy_lists_the_mapped_level_one_ranges_and_outermost_blocks() {
     assert_eq!(machine.upper_occupancy(), None);
 }
 
+mod arena;
 mod floating_point_traps;
 mod pstate_features;
 mod recovery;

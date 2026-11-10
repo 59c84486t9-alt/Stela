@@ -43,6 +43,7 @@ impl<T> Table<T> {
 
     /// Whether [`Self::push`] has room, allocating a chunk if it needs one;
     /// false when the heap has none.
+    #[cfg(test)]
     pub(super) fn try_reserve_one(&mut self) -> bool {
         if self.len < self.chunks.len() * CHUNK {
             return true;

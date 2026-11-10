@@ -3,8 +3,9 @@
 //! bytes here, and forgetting a page forgets its blocks at once. Each fetch
 //! a lookup misses comes here, so a direct-mapped cache of pages answers
 //! most without walking the ordered map, which sweeps keep their place in.
-use super::{Block, FETCH_PAGE, VariantId, table::Table};
+use super::{Block, FETCH_PAGE, VariantId};
 use alloc::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
+use core::ops::Index;
 
 const _: () = assert!(FETCH_PAGE <= 1 << u16::BITS);
 
@@ -82,7 +83,7 @@ impl BlockIndex {
     /// The block at `pc`, `physical` and `variant`.
     pub(super) fn get(
         &mut self,
-        blocks: &Table<Block>,
+        blocks: &impl Index<usize, Output = Block>,
         pc: u64,
         physical: u64,
         variant: VariantId,
@@ -104,7 +105,11 @@ impl BlockIndex {
 
     /// Find the block in `slot` by its key, in place of any block of the
     /// key: the slot of the block it replaces.
-    pub(super) fn insert(&mut self, blocks: &Table<Block>, slot: usize) -> Option<usize> {
+    pub(super) fn insert(
+        &mut self,
+        blocks: &impl Index<usize, Output = Block>,
+        slot: usize,
+    ) -> Option<usize> {
         let block = &blocks[slot];
         let (frame, offset) = split(block.physical);
         let page = match self.page_of(frame) {
@@ -237,6 +242,11 @@ impl BlockIndex {
         self.pages.len()
     }
 
+    /// The physical pages that have indexed blocks.
+    pub(super) fn frames(&self) -> impl Iterator<Item = u64> + '_ {
+        self.pages.keys().copied()
+    }
+
     #[cfg(any(test, all(feature = "std", feature = "native-profile")))]
     pub(super) fn len(&self) -> usize {
         self.entries.iter().map(Vec::len).sum()
@@ -250,7 +260,7 @@ impl BlockIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::super::NativeCode;
+    use super::super::{NativeCode, table::Table};
     use super::*;
 
     fn block(pc: u64, physical: u64, variant: u32) -> Block {
@@ -264,8 +274,9 @@ mod tests {
             dynamic_site: None,
             landing: super::super::fetch::Landing::None,
             terminal: 0,
-            taken: 0,
             source_hash: 0,
+            installer: 0,
+            device_stub: false,
         }
     }
 

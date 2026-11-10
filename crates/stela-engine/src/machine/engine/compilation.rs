@@ -13,7 +13,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // its target: an exception, an interrupt or another PE's run.
         if self
             .direct_exit
-            .is_some_and(|(_, target, _)| target != pc || single)
+            .is_some_and(|(_, _, target, _)| target != pc || single)
         {
             self.direct_exit = None;
         }
@@ -24,7 +24,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && self.cpu.pstate.btype == 0
             && let Some(key) = self.current_key(pc)
         {
-            let target = self.targets.find(self.targets.slot(pc, key), pc, key);
+            let table = &self.code.table;
+            let target = table.find(table.slot(pc, key), pc, key);
             if target.pc == pc && target.key == key {
                 self.statistics.fetches[0] += 1;
                 self.link_direct_exit(pc);
@@ -54,11 +55,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !single && let Some(id) = self.known_variant(variant) {
             let key = self.block_key(physical, id);
             self.translate_page(pc, key);
-            let target = self.targets.find(self.targets.slot(pc, key), pc, key);
+            let table = &self.code.table;
+            let target = table.find(table.slot(pc, key), pc, key);
             // Every release of a block forgets its entries; the block is
             // checked anyway, on this path of a fresh translation.
             let named = (target.pc == pc && target.key == key)
-                .then(|| &self.blocks[target.block as usize])
+                .then(|| self.code.blocks.installed(target.block as usize))
+                .flatten()
                 .is_some_and(|block| {
                     (block.pc, block.physical, block.variant) == (pc, physical, id)
                 });
@@ -73,23 +76,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && entry.pc == pc
             && entry.physical == physical
             && entry.variant == variant
-            && entry.generation == self.code_generation
+            && entry.generation == self.jump_generation()
+            && self.code.blocks.record(entry.block).incarnation() == entry.incarnation
         {
             self.statistics.fetches[2] += 1;
             self.remember_or_link(pc, entry.block);
             return Ok(Fetched::Block(entry.block));
         }
-        let indexed = self
-            .known_variant(variant)
-            .and_then(|id| self.index.get(&self.blocks, pc, physical, id));
+        let indexed = self.known_variant(variant).and_then(|id| {
+            self.code.cache_at(board::LockSite::Fetch).index.get(
+                &self.code.blocks,
+                pc,
+                physical,
+                id,
+            )
+        });
         self.statistics.fetches[if indexed.is_some() { 3 } else { 4 }] += 1;
         let index = match indexed {
             Some(index) => index,
             None => {
                 self.reclaim_for_memory();
-                if let Some(hub) = &self.parallel {
-                    hub.compiling(physical);
-                }
                 let (compiled, mail) = self.compile_aside(pc, physical, variant);
                 let compiled = compiled?;
                 // What came meanwhile may undo this fetch's translation or
@@ -108,11 +114,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pc,
             physical,
             variant,
-            generation: self.code_generation,
+            generation: self.jump_generation(),
             block: index,
+            incarnation: self.code.blocks.record(index).incarnation(),
         });
         if !single {
-            let key = self.block_key(physical, self.blocks[index].variant);
+            let key = self.block_key(physical, self.code.blocks[index].variant);
             self.translate_page(pc, key);
         }
         self.remember_or_link(pc, index);
@@ -199,7 +206,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// entry: one it holds already, in either place of its set, stays where
     /// it is, and keeps its neighbour.
     pub(super) fn remember_target(&mut self, pc: u64, index: usize) -> bool {
-        let block = &self.blocks[index];
+        let block = &self.code.blocks[index];
         let variant = &self.variants[block.variant.0 as usize];
         if variant.single || self.traces.binary_search(&pc).is_ok() {
             return false;
@@ -209,7 +216,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             false => 0b1111,
         };
         let key = self.block_key(block.physical, block.variant);
-        let slot = self.targets.slot(pc, key);
+        let slot = self.code.table.slot(pc, key);
         let target = chain::LookupEntry {
             pc,
             key,
@@ -217,10 +224,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             block: index as u32,
             targets,
         };
-        if self.targets.find(slot, pc, key) == target {
+        if self.code.table.find(slot, pc, key) == target {
             return false;
         }
-        self.targets.insert(slot, target);
+        let mut cache = self.code.cache_at(board::LockSite::Target);
+        // A block retired since it was found has no entry to take.
+        if !self.code.blocks.record(index).live() {
+            return false;
+        }
+        cache.targets.insert(slot, target);
         true
     }
 
@@ -239,6 +251,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         physical: u64,
         variant: Variant,
     ) -> Result<Fetched, Stop> {
+        // Before its bytes are read: an IC IVAU of the page posted after
+        // a write this read may miss reaches this PE then.
+        if let Some(hub) = &self.parallel {
+            hub.compiling(physical);
+        }
         let window = source_window(pc, variant);
         if window > FIRST_WINDOW_BYTES
             && let Some(fetched) = self.compile_window(pc, physical, variant, FIRST_WINDOW_BYTES)?
@@ -486,7 +503,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// What block `index` was compiled for.
     pub(super) fn block_variant(&self, index: usize) -> Variant {
-        self.variants[self.blocks[index].variant.0 as usize]
+        self.variants[self.code.blocks[index].variant.0 as usize]
     }
 
     /// How blocks of `variant` are compiled, made once per variant.
@@ -566,26 +583,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let last = source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
-        // A heap without room for the block table's next chunk reuses the
-        // oldest code's slots instead, or, when none of this machine's
-        // blocks lay there, every slot.
-        if self.free_blocks.is_empty() && !self.blocks.try_reserve_one() {
-            self.reclaim_code();
-            if self.free_blocks.is_empty() && !self.blocks.try_reserve_one() {
-                self.discard_code(Discard::Table);
-            }
-        }
         let code_bytes = compiled.code();
-        let code = match self.host.install(code_bytes) {
-            Ok(code) => code,
-            Err(InstallError::Full) => {
-                self.reclaim_code();
-                self.host.install(code_bytes).map_err(|_| {
-                    self.unsupported(RequirementKind::Native("block exceeds the code arena"))
-                })?
+        let code = self.install_code(code_bytes)?;
+        // With every slot given, or a heap without room for the records'
+        // next chunk, every block goes; a full arena reclaimed its oldest
+        // part above, whose slots serve first.
+        let (code, slot) = match self.take_slot() {
+            Some(slot) => (code, slot),
+            // A board's ring gives slots back by taking its oldest parts
+            // away, which may be the one `code` went to.
+            None if self.code.arena.is_some()
+                && let Some(slot) = self.retire_for_slot() =>
+            {
+                (self.install_code(code_bytes)?, slot)
+            }
+            None => {
+                self.discard_code(Discard::Table);
+                let code = self.install_code(code_bytes)?;
+                let slot = self.take_slot().ok_or_else(|| {
+                    self.unsupported(RequirementKind::Native("no block slot is left"))
+                })?;
+                (code, slot)
             }
         };
-        self.census_installed(pc, physical, variant, code_bytes.len());
+        let installed_bytes = code_bytes.len();
         let terminal_pc = pc + last as u64;
         let direct_exits = compiled.direct_exits();
         // Built in the machine's own list; the block's box comes from
@@ -640,6 +661,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             ));
         }
         let id = self.variant_id(variant);
+        // The record keeps a bit per successor; any more stay exits.
+        successors.truncate(board::MAX_SUCCESSORS);
+        // The slot's last block leaves its box for this one.
+        if let Some(old) = self.code.blocks.vacate(slot) {
+            self.keep_successor_box(old.successors);
+        }
         let boxed = self.successor_box(&successors);
         self.successor_scratch = successors;
         let block = Block {
@@ -652,25 +679,65 @@ impl<H: Host, D: Devices> Machine<H, D> {
             dynamic_site: dynamic_site.and_then(NonZeroU64::new),
             landing: fetch::Landing::of(first),
             terminal,
-            taken: 0,
             source_hash: source_hash(&source[..source_bytes]),
+            installer: self.current as u8,
+            device_stub: self.installing_stub,
         };
-        let index = match self.free_blocks.pop() {
-            Some(slot) => {
-                self.blocks[slot] = block;
-                slot
-            }
-            None => self.blocks.push(block),
-        };
-        self.code_slots
-            .record(code.0, index, || self.host.code_partitions());
-        self.fault_recovery.insert(index, compiled.installed());
-        if let Some(replaced) = self.index.insert(&self.blocks, index) {
-            // Only indexed blocks are reached, which eviction relies on.
-            self.detach(&[replaced as u32]);
+        let shared = Arc::clone(&self.code);
+        shared.blocks.fill(slot, block);
+        let mut cache = shared.cache_at(board::LockSite::Install);
+        self.census_installed(&mut cache, pc, physical, variant, installed_bytes);
+        // Another PE installed the block meanwhile: the first install wins,
+        // and this one's code stays unreachable until its part goes.
+        if let Some(held) = cache.index.get(&shared.blocks, pc, physical, id) {
+            shared.blocks.record(slot).mark_lost();
+            // Rows a block the slot held before left: none are this one's.
+            cache.recovery.remove(&slot);
+            shared.blocks.retire(slot);
+            let (grace, _) = self.grace();
+            shared
+                .blocks
+                .release(alloc::vec![slot as u32], grace.snapshot());
+            drop(cache);
+            self.statistics.lost_installs += 1;
+            board::Events::count(&shared.events.lost);
+            return Ok(Fetched::Block(held));
         }
+        cache.code_slots.record(code.0, slot, || {
+            shared
+                .arena
+                .as_ref()
+                .map(board::Arena::partitions)
+                .or_else(|| self.host.code_partitions())
+        });
+        cache.recovery.insert(slot, compiled.installed());
+        if let Some(replaced) = cache.index.insert(&shared.blocks, slot) {
+            // Only indexed blocks are reached, which eviction relies on.
+            self.detach(&mut cache, &[replaced as u32]);
+        }
+        drop(cache);
         self.mirrors.close_code_page();
-        Ok(Fetched::Block(index))
+        Ok(Fetched::Block(slot))
+    }
+
+    /// Install `bytes` of a block, reclaiming the arena's oldest part
+    /// when it is full.
+    fn install_code(&mut self, bytes: &[u8]) -> Result<NativeCode, Stop> {
+        match self.install_native(bytes, true) {
+            Ok(code) => Ok(code),
+            Err(InstallError::Full) => {
+                self.reclaim_code();
+                self.install_native(bytes, true).map_err(|_| {
+                    self.unsupported(RequirementKind::Native("block exceeds the code arena"))
+                })
+            }
+        }
+    }
+
+    /// A slot for a new block, if the board has one.
+    pub(super) fn take_slot(&self) -> Option<usize> {
+        let (grace, skip) = self.grace();
+        self.code.blocks.take(grace, skip)
     }
 
     /// A box holding `successors`: one an evicted block left of that
@@ -704,9 +771,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Count an install of `bytes` of code of the block at `pc`, `physical`
     /// and `variant`, and with step timing on, why it was needed
-    /// ([`install_census`]).
+    /// ([`install_census`]). A shared board keeps one census, under its
+    /// lock (`cache`), and its blocks are never elsewhere.
     pub(super) fn census_installed(
         &mut self,
+        cache: &mut board::Cache,
         pc: u64,
         physical: u64,
         variant: Variant,
@@ -722,14 +791,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let identity = install_census::identity(pc, physical, &variant);
         let now = self.host.counter();
         let window = 10 * self.profile.counter_frequency;
-        let census = self
-            .census
-            .get_or_insert_with(|| Box::new(install_census::Census::new()));
+        let shared = self.code_hub.is_some();
+        let census = if shared {
+            &mut cache.census
+        } else {
+            &mut self.census
+        }
+        .get_or_insert_with(|| Box::new(install_census::Census::new()));
         let (thrash, first) = census.installed(identity, now, window);
-        let elsewhere = self
-            .parallel
-            .as_ref()
-            .is_some_and(|hub| hub.installs.install(identity, self.current));
+        let elsewhere = !shared
+            && self
+                .parallel
+                .as_ref()
+                .is_some_and(|hub| hub.installs.install(identity, self.current));
         let causes = &mut self.install_causes;
         causes.thrash += u64::from(thrash);
         causes.first += u64::from(first);
@@ -738,20 +812,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Count the eviction of block `index`'s code: its bytes, and with the
     /// census on, the block for a later install of it.
-    pub(super) fn census_evicted(&mut self, index: usize, now: u64) {
-        let bytes = self
-            .fault_recovery
-            .get(&index)
-            .map_or(0, recovery::CodeRecovery::code_bytes);
+    /// Under the board's lock, `cache`.
+    pub(super) fn census_evicted(
+        &mut self,
+        cache: &mut board::Cache,
+        index: usize,
+        bytes: usize,
+        now: u64,
+    ) {
         self.install_causes.evicted_bytes += bytes as u64;
-        let Some(census) = &mut self.census else {
+        let shared = self.code_hub.is_some();
+        let census = if shared {
+            &mut cache.census
+        } else {
+            &mut self.census
+        };
+        let Some(census) = census else {
             return;
         };
-        let block = &self.blocks[index];
+        let block = &self.code.blocks[index];
         let variant = &self.variants[block.variant.0 as usize];
         let identity = install_census::identity(block.pc, block.physical, variant);
         census.evicted(identity, now);
-        if let Some(hub) = &self.parallel {
+        if !shared && let Some(hub) = &self.parallel {
             hub.installs.evict(identity, self.current);
         }
     }
@@ -759,10 +842,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// What this machine's installs and evictions came to.
     pub fn install_causes(&self) -> InstallCauses {
         self.install_causes
-    }
-
-    pub(super) fn patch_native(&mut self, code: NativeCode, bytes: &[u8]) {
-        self.host.patch(code, bytes);
     }
 
     /// Redirect the PAC exit ending a block's `native` code, installed at
@@ -791,7 +870,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 x86_64_pointer::thunk(form, GuestAddress(pc), TAGS, SERVICE as usize as u64)
             }
         };
-        let installed = self.host.install(&thunk.code).ok()?;
+        let installed = self.install_native(&thunk.code, true).ok()?;
         let site = code.0 as u64 + site as u64;
         // The block is not reachable yet: any bytes may change.
         let jump = chain::jump(site, installed.0 as u64)?;
@@ -892,7 +971,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 register_read::checked_write_thunk(pc, rt, cell, refused)
             }
         };
-        let installed = self.host.install(&thunk.code).ok()?;
+        let installed = self.install_native(&thunk.code, true).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
         self.patch_native(NativeCode(site as usize), &jump);
@@ -1053,9 +1132,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The word an exit at `pc` executes, counted in [`Self::exit_words`]:
     /// the block's last instruction, as it was compiled, or one it reads.
     pub(super) fn exit_word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
-        let block = &mut self.blocks[index];
+        let block = &self.code.blocks[index];
         if pc == block.terminal_pc() {
-            block.taken = block.taken.saturating_add(1);
+            let taken = &self.code.blocks.record(index).taken;
+            if taken.load(Ordering::Relaxed) != u32::MAX {
+                taken.fetch_add(1, Ordering::Relaxed);
+            }
             return Ok(block.terminal);
         }
         let word = self.word(index, pc)?;
@@ -1067,8 +1149,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the instruction word that took them: which words to compile inline.
     pub fn exit_words(&self) -> BTreeMap<u32, u64> {
         let mut words = self.exit_words.clone();
-        for block in self.blocks.iter().filter(|block| block.taken != 0) {
-            *words.entry(block.terminal).or_default() += u64::from(block.taken);
+        for (slot, block) in self.code.blocks.iter() {
+            let record = self.code.blocks.record(slot);
+            let taken = record.taken.load(Ordering::Relaxed);
+            if taken != 0 && record.live() {
+                *words.entry(block.terminal).or_default() += u64::from(taken);
+            }
         }
         words
     }
@@ -1095,7 +1181,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// original word, or the UDF or NOP of a form the chip lacks. The
     /// block's last is kept as it was compiled; others are read again.
     pub(super) fn word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
-        let block = &self.blocks[index];
+        let block = &self.code.blocks[index];
         if pc == block.terminal_pc() {
             return Ok(block.terminal);
         }
@@ -1112,11 +1198,47 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.admit_table.admit(word)
     }
 
+    /// A System exit of block `index` at `pc` met `word`, which is not
+    /// System: the code that ran is not what the block records, or not
+    /// what the PE's translation of `pc` names. Reported once per PE, with
+    /// what tells which.
+    fn report_exit_mismatch(&mut self, index: usize, pc: u64, word: u32) {
+        if core::mem::replace(&mut self.exit_mismatch_reported, true) {
+            return;
+        }
+        let block = &self.code.blocks[index];
+        let record = self.code.blocks.record(index);
+        let part = self.code.arena.as_ref().and_then(|arena| {
+            let offset = block.code.0.checked_sub(arena.window.exec)?;
+            Some(offset / arena.part_bytes)
+        });
+        let detail = alloc::format!(
+            "System exit at a word that is not System: pe={} slot={index} part={part:?} \
+             incarnation={} live={} installer={} stub={} site_here={} block_pc={:#x} \
+             physical={:#x} instructions={} terminal={:#x} installed_key={:#x} \
+             looked_up_key={:?} word={word:#x}",
+            self.current,
+            record.incarnation(),
+            record.live(),
+            block.installer,
+            block.device_stub,
+            self.device_site(block.physical.wrapping_add(pc.wrapping_sub(block.pc))),
+            block.pc,
+            block.physical,
+            block.instructions,
+            block.terminal,
+            self.block_key(block.physical, block.variant),
+            self.current_key(pc),
+        );
+        let requirement = self.requirement(RequirementKind::NativePreparation(detail));
+        self.degrade(requirement);
+    }
+
     pub(super) fn exit(&mut self, index: usize, next_pc: u64, kind: u64) -> Step {
         let kind = ExitKind::try_from(kind);
         // BTYPE belongs to the block's first instruction until it completes;
         // a branch ending the block gives the next one (Arm `BTypeNext`).
-        if next_pc != self.blocks[index].pc {
+        if next_pc != self.code.blocks[index].pc {
             self.cpu.pstate.btype = 0;
         }
         match kind {
@@ -1132,7 +1254,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.cpu.retired = self
                     .cpu
                     .retired
-                    .wrapping_add(u64::from(self.blocks[index].instructions));
+                    .wrapping_add(u64::from(self.code.blocks[index].instructions));
                 self.cpu.pstate.btype = self.native_branch_type(index, kind)?;
                 self.cpu.pc = next_pc;
                 Ok(())
@@ -1145,7 +1267,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 self.statistics.system_exits += 1;
                 let word = self.exit_word(index, next_pc)?;
-                self.completing(next_pc, |machine| machine.system_instruction(word))
+                let operation = self.decode_system_operation(word);
+                if operation.is_none() {
+                    self.report_exit_mismatch(index, next_pc, word);
+                }
+                self.completing(next_pc, |machine| {
+                    machine.complete_system_instruction(word, operation)
+                })
             }
             Ok(ExitKind::FloatingPoint) => {
                 self.retire_before(index, next_pc);

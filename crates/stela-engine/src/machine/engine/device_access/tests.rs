@@ -74,7 +74,7 @@ fn a_device_site_faults_once_then_completes_without_a_fault() {
     let Ok(Fetched::Block(first)) = machine.fetch_block(BASE, false) else {
         panic!("a block");
     };
-    assert_eq!(machine.blocks[first].instructions, 1);
+    assert_eq!(machine.code.blocks[first].instructions, 1);
     machine
         .host
         .exits
@@ -181,8 +181,8 @@ fn a_device_site_that_reaches_ram_runs_natively_and_keeps_writeback_and_size() {
     assert_eq!(machine.cpu.pc, BASE + 4);
     assert!(
         machine
-            .blocks
+            .code.blocks
             .iter()
-            .any(|block| block.pc == BASE && machine.variants[block.variant.0 as usize].single)
+            .any(|(_, block)| block.pc == BASE && machine.variants[block.variant.0 as usize].single)
     );
 }

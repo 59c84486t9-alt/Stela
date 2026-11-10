@@ -229,7 +229,7 @@ fn a_block_another_thread_prepared_at_the_same_pc_is_installed_as_it_is() {
     );
     assert_eq!(
         second.host.installed
-            [second.blocks[index].code.0 / super::super::tests::NATIVE_CODE_STRIDE - 1],
+            [second.code.blocks[index].code.0 / super::super::tests::NATIVE_CODE_STRIDE - 1],
         offer.block().native.x86_64_code
     );
     // Another PC of the same page is compiled.
@@ -275,7 +275,7 @@ fn a_stored_block_of_the_same_page_bytes_is_installed_without_compiling() {
         crate::machine::NoDevices,
     >,
                      index: usize| {
-        let block = &machine.blocks[index];
+        let block = &machine.code.blocks[index];
         (
             machine.host.installed[block.code.0 / super::super::tests::NATIVE_CODE_STRIDE - 1]
                 .clone(),
@@ -316,7 +316,7 @@ fn a_block_longer_than_the_first_window_compiles_and_is_stored_whole() {
     let Ok(Fetched::Block(index)) = first.fetch_block(BASE, false) else {
         panic!("block")
     };
-    assert_eq!(first.blocks[index].source_bytes(), block_bytes);
+    assert_eq!(first.code.blocks[index].source_bytes(), block_bytes);
     let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
     assert_eq!(offer.input().len(), block_bytes);
     let mut record = Record::new(translations::translator_id(), offer.key);
@@ -332,7 +332,7 @@ fn a_block_longer_than_the_first_window_compiles_and_is_stored_whole() {
         (second.statistics.compiled, second.statistics.stored),
         (0, 1)
     );
-    assert_eq!(second.blocks[stored].source_bytes(), block_bytes);
+    assert_eq!(second.code.blocks[stored].source_bytes(), block_bytes);
     // A changed word past the first window, inside the block: the stored
     // block's bytes no longer match, and it is compiled.
     words[ADDS - 1] = 0x9100_0800;

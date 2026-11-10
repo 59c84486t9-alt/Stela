@@ -202,7 +202,7 @@ fn streaming_scalar_fp_runs_as_a_block_and_zeroes_the_upper_z_bits_it_writes() {
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("an ordinary block")
     };
-    let block = &machine.blocks[index];
+    let block = &machine.code.blocks[index];
     assert_eq!((block.pc, block.instructions), (BASE, 2));
 }
 

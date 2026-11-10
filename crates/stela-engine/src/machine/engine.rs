@@ -6,8 +6,8 @@ mod mirrors;
 mod reports;
 use boundary::*;
 pub use boundary::{
-    CodePartitions, ConsumedPair, DeviceError, Devices, Host, LocalRegisters, LockedMemory,
-    NoDevices, ScalarRead, Settled, Start,
+    CodePartitions, CodeWindow, ConsumedPair, DeviceError, Devices, Host, LocalRegisters,
+    LockedMemory, NoDevices, ScalarRead, Settled, Start,
 };
 use mirrors::*;
 use reports::*;
@@ -51,6 +51,7 @@ mod regime_state;
 mod scheduler;
 mod system_access;
 mod timing;
+pub use board::{CodeReport, LockCounts, LockSite, SiteCounts};
 pub use install_census::InstallCauses;
 pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 pub use native_timing::{NativeInstructionSample, NativeTimingPhase, NativeTimingWork};
@@ -67,6 +68,7 @@ pub use device_write::{
     CanonicalDeviceWrite, CanonicalWriteMemory, ConsumedWrite, DeviceWriteRequest, DeviceWriteShape,
 };
 mod block_index;
+mod board;
 mod processors;
 mod recovery;
 mod scalable;
@@ -437,24 +439,29 @@ struct Block {
     /// The guest instructions it retires.
     instructions: u16,
     variant: VariantId,
-    /// Direct exits to static successors, its own and its PAC thunk's: not
-    /// yet chained, or chained into a block of its page, which an eviction
-    /// of that block undoes.
+    /// Direct exits to static successors, its own and its PAC thunk's, at
+    /// most [`board::MAX_SUCCESSORS`]: which are chained (into a block of
+    /// its page, which an eviction of that block undoes) its record says.
     successors: Box<[Successor]>,
     /// The host address of the exit to the target in RAX that its RET, BR
-    /// or BLR form (or that form's PAC thunk) ends with, until a lookup dispatcher
-    /// serves it.
+    /// or BLR form (or that form's PAC thunk) ends with; its record says
+    /// once a lookup dispatcher serves it.
     dynamic_site: Option<NonZeroU64>,
     /// What its first instruction admits on a guarded page.
     landing: fetch::Landing,
     /// The word of its last instruction, where it exits to the engine.
     terminal: u32,
-    /// Exits to the engine at `terminal`, up to its limit.
-    taken: u32,
+    /// FNV-1a of its admitted guest bytes ([`Machine::admit`]).
     source_hash: u64,
+    /// The PE that compiled it, for [`StaleCode`].
+    installer: u8,
+    /// A device site's stub ([`Machine::install_device_stub`]): its System
+    /// exit is the site's access, on whichever PE runs it, whether or not
+    /// that PE learnt the site.
+    device_stub: bool,
 }
 
-// Every PE keeps one per block it ran, millions in all.
+// The board keeps one per block, millions in all.
 const _: () = assert!(size_of::<Block>() <= 72);
 
 impl Block {
@@ -523,8 +530,23 @@ fn source_hash(bytes: &[u8]) -> u64 {
 pub struct StaleCode {
     pub blocks: usize,
     pub stale: usize,
+    /// Blocks whose bytes in RAM differ from their admitted bytes alone:
+    /// words the compile admitted as UDF, no change of code.
+    pub admitted: usize,
     /// The first stale block's PC and physical address.
     pub first: Option<(u64, u64)>,
+    /// Where the first stale block came from.
+    pub origin: Option<StaleOrigin>,
+}
+
+/// Where a stale block came from: the PE that compiled it, its part of
+/// the board's arena, and whether the hub notes its page as one an IC
+/// IVAU must reach every PE for ([`parallel::Hub::has_code`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StaleOrigin {
+    pub pe: u8,
+    pub part: Option<u32>,
+    pub noted: Option<bool>,
 }
 
 /// A direct exit in native code to a static successor: its host address,
@@ -538,11 +560,6 @@ struct Successor {
     skipped: u16,
     /// The bytes before `site` kept for a link ([`chain::link_slot`]).
     slot: u8,
-    /// Chained into the block of its page at `target`.
-    linked: bool,
-    /// Its link slot's body was written: a core may still run it after an
-    /// unlink, so a later link goes through a thunk (`chain::link`).
-    used: bool,
 }
 
 const _: () = assert!(size_of::<Successor>() == 24);
@@ -555,8 +572,6 @@ impl Successor {
             kind: word.kind as u8,
             skipped: word.skipped,
             slot: u8::try_from(slot).expect("a link slot is a few bytes"),
-            linked: false,
-            used: false,
         }
     }
 
@@ -590,6 +605,8 @@ struct JumpEntry {
     variant: Variant,
     generation: u64,
     block: usize,
+    /// The block's slot incarnation ([`board::Record::incarnation`]).
+    incarnation: u32,
 }
 
 /// One lookup context of one half: the EL (with the guarded level) and
@@ -711,21 +728,20 @@ pub struct Machine<H: Host, D: Devices> {
     #[cfg(all(feature = "std", feature = "native-profile"))]
     preparation_metrics: Option<metrics::PreparationMetrics>,
     target: TargetCpu,
-    blocks: table::Table<Block>,
-    code_slots: code_slots::CodeSlots,
-    /// Slots of `blocks` whose code was reclaimed, for new blocks.
-    free_blocks: Vec<usize>,
+    /// The blocks, block index and block table this machine shares with
+    /// its board's other machines, or keeps alone ([`board::Code`]).
+    code: Arc<board::Code>,
+    /// A grace of no PE: what a machine that keeps its code alone releases
+    /// slots with ([`Self::grace`]).
+    alone: board::Grace,
+    /// The hub whose PEs share `code`, when it is the board's.
+    code_hub: Option<Arc<parallel::Hub>>,
     /// The blocks this machine held when it last reclaimed code for memory,
     /// while memory has stayed low since (`reclaim_for_memory`).
     reclaimed_at: Option<usize>,
     /// The fewest live blocks it releases for low memory
     /// ([`MEMORY_RELEASE_BLOCKS`]).
     memory_release_blocks: usize,
-    /// The fault recovery tables of the blocks that have entries, by block
-    /// index: where their regions keep guest GPRs out of the frame across a
-    /// faultable access, which a native fault applies first. Kept apart
-    /// from [`Block`], whose fields every exit reads.
-    fault_recovery: recovery::Owners,
     recovery_scratch: Vec<block::FaultRecovery>,
     /// The buffers a stored entry is relocated into for its install.
     relocated: crate::translations::Relocated,
@@ -734,8 +750,6 @@ pub struct Machine<H: Host, D: Devices> {
     /// of as many successors take ([`Machine::successor_box`]).
     successor_scratch: Vec<Successor>,
     successor_boxes: [Vec<Box<[Successor]>>; SUCCESSOR_BOXES],
-    /// A bit per block slot for what [`Machine::detach`] detaches.
-    detached_scratch: Vec<u64>,
     /// The page keys of fetch pages read before, kept after their bytes
     /// ([`stored::KnownKey`]), allocated at the first.
     known_keys: Vec<Option<stored::KnownKey>>,
@@ -747,8 +761,6 @@ pub struct Machine<H: Host, D: Devices> {
     /// Every variant a block was compiled for, once: what a [`VariantId`]
     /// names. Shared by the board's machines ([`numbering`]).
     variants: Arc<numbering::Registry<Variant>>,
-    /// Blocks by PC, PA and variant.
-    index: block_index::BlockIndex,
     /// The last block [`Machine::stale_code`] checked, where its sweep goes
     /// on; `None` to start over.
     stale_cursor: Option<block_index::Cursor>,
@@ -780,9 +792,6 @@ pub struct Machine<H: Host, D: Devices> {
     /// Advances when installed code is discarded or invalidated: the jump
     /// cache's entries name it.
     code_generation: u64,
-    /// The blocks fetches ran, by PC and block key, for lookup dispatchers
-    /// (`x86_64::chain`): the table `ChainControl::table` names.
-    targets: chain::LookupTable,
     /// The block key of each page a fetch translated, by context: the ITLB
     /// `ChainControl::itlb` names, which lookup dispatchers translate
     /// their targets through.
@@ -892,8 +901,6 @@ pub struct Machine<H: Host, D: Devices> {
     /// The latest serial of the maintenance this PE posted to each other PE
     /// and has not yet seen applied, which its next DSB waits for.
     posted: Vec<(usize, u64)>,
-    /// The blocks of a page being detached, kept for its capacity.
-    page_blocks: Vec<usize>,
     /// The direct exit within its page the last native run left by, when
     /// its target had no block to link to: the block, the target and the
     /// exit's word. The next fetch, if it is the target's, links it
@@ -901,7 +908,8 @@ pub struct Machine<H: Host, D: Devices> {
     /// the engine and its target no lookup entry: no lookup reaches for a
     /// block that only linked exits enter. Any other fetch, and any discard
     /// of the block, forgets it.
-    direct_exit: Option<(usize, u64, ExitWord)>,
+    /// The block's slot incarnation is kept with it.
+    direct_exit: Option<(usize, u32, u64, ExitWord)>,
     /// Maintenance for the other PEs that this PE's next DSB sends
     /// ([`Self::send_outgoing`]).
     outgoing: Vec<parallel::Maintenance>,
@@ -963,6 +971,11 @@ pub struct Machine<H: Host, D: Devices> {
     /// register from native code: blocks end before them and the engine
     /// completes them ([`device_access::DeviceSite`]).
     device_sites: BTreeMap<u64, device_access::DeviceSite>,
+    /// The block being installed is a device site's stub.
+    installing_stub: bool,
+    /// A System exit at a word that is not System was reported
+    /// ([`Self::report_exit_mismatch`]).
+    exit_mismatch_reported: bool,
     /// The guest PC and data address that first needed the translated
     /// variant, for a report.
     first_translated: Option<(u64, u64)>,
@@ -1011,6 +1024,10 @@ pub struct WorkerProfile {
     target: TargetCpu,
     /// The home machine's numbering, which every PE's code shares.
     numbering: numbering::Numbering,
+    /// The home machine's code once it is the hub's: a worker whose host
+    /// gives the same window starts on it, and never builds a table of its
+    /// own.
+    code: Option<Arc<board::Code>>,
 }
 
 impl WorkerProfile {
@@ -1033,7 +1050,7 @@ impl WorkerProfile {
             self.profile,
             self.target,
             processor,
-            Some((self.admit_table, self.numbering)),
+            Some((self.admit_table, self.numbering, self.code)),
         )
     }
 }
@@ -1091,6 +1108,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 stored_reads: Arc::clone(&self.stored_reads),
                 stored_writes: Arc::clone(&self.stored_writes),
             },
+            code: self.code_hub.as_ref().map(|_| Arc::clone(&self.code)),
         }
     }
 
@@ -1101,9 +1119,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         profile: CpuProfile,
         target: TargetCpu,
         boot_processor: usize,
-        shared: Option<(Arc<AdmitTable>, numbering::Numbering)>,
+        shared: Option<(
+            Arc<AdmitTable>,
+            numbering::Numbering,
+            Option<Arc<board::Code>>,
+        )>,
     ) -> Result<Self, &'static str> {
-        let (admit_table, numbering) = shared.unzip();
+        let (admit_table, numbering, board_code) = match shared {
+            Some((admit_table, numbering, code)) => (Some(admit_table), Some(numbering), code),
+            None => (None, None, None),
+        };
         if boot_processor >= profile.processors.len().max(1) {
             return Err("the boot PE is outside the CPU profile");
         }
@@ -1119,6 +1144,31 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let processor_power = Processors::new(profile.processors.len().max(1))
             .expect("a CPU profile has at least its boot PE");
         let numbering = numbering.unwrap_or_else(numbering::Numbering::new);
+        // The tables grow with the arena, which the host sizes from its
+        // memory; a host without parts keeps the default sizes.
+        let window = host.code_window();
+        let code_bytes = window.map(|window| window.bytes).or_else(|| {
+            host.code_partitions()
+                .map(|parts| parts.bytes_per_part * parts.parts)
+        });
+        let (table_entries, itlb_entries) = code_bytes
+            .map_or((chain::LOOKUP_ENTRIES, chain::ITLB_ENTRIES), |bytes| {
+                (chain::lookup_entries(bytes), chain::itlb_entries(bytes))
+            });
+        // The hub's code when this host gives its window, else a board of
+        // one PE until the machine joins a hub's.
+        let code = match board_code {
+            Some(code)
+                if window.is_some() && code.arena.as_ref().map(|arena| arena.window) == window =>
+            {
+                code
+            }
+            _ => Arc::new(board::Code::new(
+                board::slot_capacity(code_bytes),
+                table_entries,
+                window,
+            )),
+        };
         let mut machine = Self {
             cpu,
             host,
@@ -1138,23 +1188,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             #[cfg(all(feature = "std", feature = "native-profile"))]
             preparation_metrics: None,
             target,
-            blocks: table::Table::new(),
-            code_slots: code_slots::CodeSlots::default(),
-            free_blocks: Vec::new(),
+            code,
+            alone: board::Grace::new(0),
+            code_hub: None,
             reclaimed_at: None,
             memory_release_blocks: MEMORY_RELEASE_BLOCKS,
-            fault_recovery: recovery::Owners::new(),
             recovery_scratch: Vec::new(),
             relocated: Default::default(),
             successor_scratch: Vec::new(),
             successor_boxes: Default::default(),
-            detached_scratch: Vec::new(),
             known_keys: Vec::new(),
             install_causes: InstallCauses::default(),
             census: None,
             native_failure: None,
             variants: numbering.variants,
-            index: block_index::BlockIndex::new(),
             stale_cursor: None,
             pages: BTreeMap::new(),
             kept_pages: stored::KEPT_PAGES,
@@ -1170,8 +1217,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             table_generation: 1,
             lookup_dispatchers: Default::default(),
             code_generation: 1,
-            targets: chain::LookupTable::new(),
-            itlb: chain::LookupTable::itlb(),
+            itlb: chain::LookupTable::itlb_with(itlb_entries),
             spaces: [Vec::new(), Vec::new()],
             recent: [[None; RECENT]; 2],
             fetched_sizes: [0; 2],
@@ -1213,7 +1259,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             deferred_code: Vec::new(),
             posted: Vec::new(),
             direct_exit: None,
-            page_blocks: Vec::new(),
             outgoing: Vec::new(),
             lines_epoch: 0,
             pending_device_read: None,
@@ -1241,6 +1286,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             suspended: BTreeMap::new(),
             translated_pages: BTreeSet::new(),
             device_sites: BTreeMap::new(),
+            installing_stub: false,
+            exit_mismatch_reported: false,
             first_translated: None,
             survey: None,
             degraded_devices: BTreeMap::new(),
@@ -1250,9 +1297,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             tags_checked_at: None,
         };
         machine.chain.set_table(
-            machine.targets.address(),
+            machine.code.table.address(),
             machine.itlb.address(),
-            [machine.targets.mask(), machine.itlb.mask()],
+            [machine.code.table.mask(), machine.itlb.mask()],
         );
         machine.peers = processors::boot(&machine.profile, boot_processor);
         machine.load_profile();

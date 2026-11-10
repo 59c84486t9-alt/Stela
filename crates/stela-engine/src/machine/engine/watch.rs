@@ -343,7 +343,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     "{detail} ({:?} at native offset {:#x} of the block at {:#x}, address {:#x})",
                     fault.cause,
                     fault.offset,
-                    self.blocks[index].pc,
+                    self.code.blocks[index].pc,
                     fault.address,
                 ),
             })

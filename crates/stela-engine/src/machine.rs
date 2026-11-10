@@ -34,7 +34,7 @@ pub use engine::{
     ConsumedPair, Description, DeviceError, DeviceRegister, Devices, Event, FaultCause, Host,
     InstallError, Machine, NativeCode, NativeExit, NativeFault, NativeFaultOrigin, NoDevices,
     Offer, PeerState, Preparation, Prepared, Refused, Regime, Requirement, RequirementKind, Reset,
-    StaleCode, Statistics, Stop, Transition, Translations, window,
+    StaleCode, StaleOrigin, Statistics, Stop, Transition, Translations, window,
 };
 pub use registers::{CpuProfile, Lines};
 #[cfg(test)]
