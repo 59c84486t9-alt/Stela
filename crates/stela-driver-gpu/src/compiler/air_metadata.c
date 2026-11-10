@@ -2008,6 +2008,7 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          bool explicit_layout = fields_count > 2 && stela_air_md_string(fields[2], "explicit");
          bool implicit_layout = fields_count > 2 && stela_air_md_string(fields[2], "implicit");
          struct stela_air_argument block = {.value = param, .is_imageblock = true,
+                                            .implicit_imageblock = implicit_layout,
                                             .absent = !claims,
                                             .used = LLVMGetFirstUse(param) != NULL ||
                                                     calls_imageblock(fn)};
@@ -2022,12 +2023,14 @@ metadata_arguments(struct stela_air_metadata *t, LLVMValueRef fn, LLVMValueRef a
          }
          if ((!explicit_layout || !size) && !implicit_layout)
             return fail(t, STELA_AIR_ARGUMENT, "a kernel's imageblock of an unknown layout");
-         if (kernel->imageblock_size || kernel->implicit_imageblock)
-            return fail(t, STELA_AIR_ARGUMENT, "a kernel takes one imageblock");
-         if (claims) {
-            kernel->imageblock_size = explicit_layout ? size : 0;
-            kernel->implicit_imageblock = implicit_layout;
-         }
+         /* One of each layout, as Metal allows. */
+         if (implicit_layout ? kernel->implicit_imageblock : kernel->imageblock_size != 0)
+            return fail(t, STELA_AIR_ARGUMENT, "a kernel takes one %s imageblock",
+                        implicit_layout ? "implicit" : "explicit");
+         if (claims && implicit_layout)
+            kernel->implicit_imageblock = true;
+         else if (claims)
+            kernel->imageblock_size = size;
          kernel->arguments[a] = block;
          continue;
       }

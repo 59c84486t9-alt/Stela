@@ -4,6 +4,7 @@
 #include "../metal_abi.h"
 #include "compiler/air_to_nir.h"
 #include "air_test_fixture.h"
+#include "air_effect_oracle.h"
 #include "util/ralloc.h"
 #include <assert.h>
 #include <stdio.h>
@@ -1076,6 +1077,247 @@ tile_functions_access_imageblock_data(void)
    ralloc_free(shader);
 }
 
+/* A tile function of both imageblocks: its pass's color attachment and its
+ * pass's imageblock data. */
+static const char *tile_both_metadata =
+   "!air.kernel = !{!2}\n"
+   "!air.version = !{!20}\n!air.language_version = !{!21}\n"
+   "!2 = !{ptr @kernel, !3, !4}\n!3 = !{}\n!4 = !{!5, !6, !7}\n"
+   "!5 = !{i32 0, !\"air.imageblock\", !\"implicit\", !\"air.arg_type_align_size\", i32 16,"
+   " !\"air.arg_type_name\", !\"imageblock<Color, layout_implicit>\", !\"air.arg_name\", !\"colors\"}\n"
+   "!6 = !{i32 1, !\"air.imageblock\", !\"explicit\", !\"air.imageblock_data_size\", i32 32,"
+   " !\"air.arg_type_align_size\", i32 16, !\"air.arg_type_name\","
+   " !\"imageblock<Data, layout_explicit>\", !\"air.arg_name\", !\"data\"}\n"
+   "!7 = !{i32 2, !\"air.thread_position_in_threadgroup\", !\"air.arg_type_name\", !\"ushort2\","
+   " !\"air.arg_name\", !\"tid\"}\n"
+   "!20 = !{i32 2, i32 9, i32 0}\n!21 = !{!\"Metal\", i32 4, i32 1, i32 0}\n";
+
+/* Data { uint4 a, n }: n.x += color.x + color.y, then the color becomes
+ * (2 a.x, 2 a.y, color.z + n.x, 3). */
+static const char *tile_both_body =
+   "%block_t = type { ptr addrspace(4) }\n"
+   "declare <4 x i32> @air.load.implicit_imageblock.v4i32(i32, <2 x i16>, i32, i16)\n"
+   "declare void @air.store.implicit_imageblock.v4i32(<4 x i32>, i32, <2 x i16>, i32, i16)\n"
+   "declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)\n"
+   "define void @kernel(%block_t %colors, %block_t %data, <2 x i16> %tid) {\n"
+   "%c = call <4 x i32> @air.load.implicit_imageblock.v4i32(i32 0, <2 x i16> %tid, i32 0, i16 0)\n"
+   "%d = call ptr addrspace(4) @air.imageblock_data(<2 x i16> %tid, i32 0, i16 0)\n"
+   "%np = getelementptr inbounds i8, ptr addrspace(4) %d, i64 16\n"
+   "%n = load <4 x i32>, ptr addrspace(4) %np, align 16\n"
+   "%cx = extractelement <4 x i32> %c, i64 0\n"
+   "%cy = extractelement <4 x i32> %c, i64 1\n"
+   "%cz = extractelement <4 x i32> %c, i64 2\n"
+   "%s = add i32 %cx, %cy\n"
+   "%n0 = extractelement <4 x i32> %n, i64 0\n"
+   "%n1 = add i32 %n0, %s\n"
+   "%nn = insertelement <4 x i32> %n, i32 %n1, i64 0\n"
+   "store <4 x i32> %nn, ptr addrspace(4) %np, align 16\n"
+   "%a = load <4 x i32>, ptr addrspace(4) %d, align 16\n"
+   "%ax = extractelement <4 x i32> %a, i64 0\n"
+   "%ay = extractelement <4 x i32> %a, i64 1\n"
+   "%x2 = shl i32 %ax, 1\n"
+   "%y2 = shl i32 %ay, 1\n"
+   "%z = add i32 %cz, %n1\n"
+   "%o0 = insertelement <4 x i32> <i32 0, i32 0, i32 0, i32 3>, i32 %x2, i64 0\n"
+   "%o1 = insertelement <4 x i32> %o0, i32 %y2, i64 1\n"
+   "%o = insertelement <4 x i32> %o1, i32 %z, i64 2\n"
+   "call void @air.store.implicit_imageblock.v4i32(<4 x i32> %o, i32 0, <2 x i16> %tid, i32 0, i16 0)\n"
+   "ret void\n}\n";
+
+static void
+put_word(uint8_t *bytes, uint32_t value)
+{
+   for (unsigned i = 0; i < 4; i++)
+      bytes[i] = (uint8_t)(value >> (8 * i));
+}
+
+static uint32_t
+word_at(const uint8_t *bytes)
+{
+   return bytes[0] | bytes[1] << 8 | bytes[2] << 16 | (uint32_t)bytes[3] << 24;
+}
+
+/* A 4 x 2 pass whose tile (1, 0) of 2 x 2 pixels a tile function runs
+ * as: its color attachment is image 1, a texture argument at index 0 image
+ * 2, and its imageblock data 32 bytes a pixel in rows of 4. */
+enum { TILE_BASE = 0x10000, TILE_DISPATCH = 0x700, TILE_DATA = 0x900, TILE_W = 4, TILE_H = 2 };
+
+struct tile_pass {
+   uint8_t memory[TILE_DATA + 32 * TILE_W * TILE_H];
+   uint8_t push[STELA_METAL_PUSH_BYTES];
+   uint32_t colors[TILE_W * TILE_H * 4], texture[TILE_W * TILE_H * 4];
+   struct air_effect_image images[3];
+};
+
+/* Each pixel p's color is (10 + p, 20 + p, 30 + p, 7), word i of its data
+ * 100 p + i, and the texture zero. */
+static void
+tile_pass_init(struct tile_pass *pass)
+{
+   memset(pass, 0, sizeof(*pass));
+   put_word(pass->push + STELA_METAL_PUSH_TABLES, TILE_BASE);
+   put_word(pass->push + STELA_METAL_PUSH_ARGUMENTS, TILE_BASE + TILE_DISPATCH);
+   const uint32_t grid[3] = {TILE_W, TILE_H, 1}, shape[3] = {2, 2, 1};
+   for (unsigned i = 0; i < 3; i++) {
+      put_word(pass->push + STELA_METAL_PUSH_GRID + 4 * i, grid[i]);
+      put_word(pass->memory + TILE_DISPATCH + STELA_METAL_DISPATCH_SHAPE + 4 * i, shape[i]);
+   }
+   put_word(pass->memory + TILE_DISPATCH + STELA_METAL_DISPATCH_TILE, 2 | 2u << 16);
+   /* A storage descriptor is the high half of an ID. */
+   put_word(pass->memory + STELA_METAL_TABLE_ATTACHMENTS + 4, 1);
+   put_word(pass->memory + STELA_METAL_TABLE_TEXTURES + 4, 2);
+   const uint32_t data[4] = {32, TILE_W, TILE_BASE + TILE_DATA, 0};
+   for (unsigned i = 0; i < 4; i++)
+      put_word(pass->memory + STELA_METAL_TABLE_IMAGEBLOCK + 4 * i, data[i]);
+   for (unsigned p = 0; p < TILE_W * TILE_H; p++) {
+      const uint32_t color[4] = {10 + p, 20 + p, 30 + p, 7};
+      memcpy(pass->colors + 4 * p, color, sizeof(color));
+      for (unsigned i = 0; i < 8; i++)
+         put_word(pass->memory + TILE_DATA + 32 * p + 4 * i, 100 * p + i);
+   }
+   pass->images[1] = (struct air_effect_image){TILE_W, TILE_H, pass->colors};
+   pass->images[2] = (struct air_effect_image){TILE_W, TILE_H, pass->texture};
+}
+
+/* Runs thread `thread` of the tile, which stores `stores` times to global
+ * memory. */
+static void
+tile_pass_run(nir_shader *shader, struct tile_pass *pass, uint32_t thread, unsigned stores)
+{
+   const struct air_effect_environment environment = {
+      .base = TILE_BASE, .bytes = pass->memory, .size = sizeof(pass->memory), .push = pass->push,
+      .push_size = sizeof(pass->push), .local_index = thread, .workgroup = {1, 0, 0},
+      .images = pass->images, .image_count = 3,
+   };
+   struct air_effect_store trace[4];
+   struct air_effect_run run = air_effect_execute_in(shader, 100000, trace, 4, &environment);
+   if (run.status != AIR_EFFECT_COMPLETE)
+      fprintf(stderr, "tile pass, thread %u: %s\n", thread, run.detail);
+   assert(run.status == AIR_EFFECT_COMPLETE && run.stores == stores);
+}
+
+/* A tile function's slice of its explicit imageblock's second member,
+ * written to its texture at (1, 0). */
+static const char *tile_slice_body =
+   "%block_t = type { ptr addrspace(4) }\n"
+   "declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)\n"
+   "declare void @air.write_imageblock_slice_to_texture_2d.i16.v4i32(ptr addrspace(1),"
+   " ptr addrspace(4), i1, <2 x i16>, <2 x i16>, <2 x i16>, i16, i1, i32)\n"
+   "define void @kernel(%block_t %colors, %block_t %data, <2 x i16> %tid, ptr addrspace(1) %out) {\n"
+   "%d = call ptr addrspace(4) @air.imageblock_data(<2 x i16> %tid, i32 0, i16 0)\n"
+   "%np = getelementptr inbounds i8, ptr addrspace(4) %d, i64 16\n"
+   "call void @air.write_imageblock_slice_to_texture_2d.i16.v4i32(ptr addrspace(1) %out,"
+   " ptr addrspace(4) %np, i1 false, <2 x i16> zeroinitializer, <2 x i16> undef,"
+   " <2 x i16> <i16 1, i16 0>, i16 0, i1 false, i32 2)\n"
+   "ret void\n}\n";
+
+/* A tile function of both imageblocks reads and writes its pixel's color
+ * and its pixel's data in one invocation, and writes a slice of its data
+ * to a texture. */
+static void
+tile_functions_take_both_imageblocks(void)
+{
+   struct stela_air_error error = {0};
+   struct stela_air_options o = options(&primary, true);
+   struct stela_air_tile tile = {.formats = {PIPE_FORMAT_R32G32B32A32_UINT}, .samples = 1};
+   o.dynamic_shape = true;
+   o.load_device_value = stela_metal_load_device_value;
+   o.bind_attachment = stela_metal_bind_attachment;
+   o.tile = &tile;
+   nir_shader *shader = kernel_with(tile_both_body, tile_both_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "tile both: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   nir_validate_shader(shader, "tile function of both imageblocks");
+   static struct tile_pass pass;
+   tile_pass_init(&pass);
+   for (uint32_t thread = 0; thread < 4; thread++)
+      tile_pass_run(shader, &pass, thread, 1);
+   uint8_t *memory = pass.memory;
+   const uint32_t *texels = pass.colors;
+   enum { DATA = TILE_DATA, W = TILE_W, H = TILE_H };
+   /* The tile's pixels change, and no other. */
+   for (unsigned p = 0; p < W * H; p++) {
+      bool in_tile = p % W >= 2;
+      uint32_t a[4], n[4];
+      for (unsigned i = 0; i < 4; i++) {
+         a[i] = word_at(memory + DATA + 32 * p + 4 * i);
+         n[i] = word_at(memory + DATA + 32 * p + 16 + 4 * i);
+         assert(a[i] == 100 * p + i);
+      }
+      uint32_t sum = 100 * p + 4 + (in_tile ? 30 + 2 * p : 0);
+      assert(n[0] == sum && n[1] == 100 * p + 5);
+      const uint32_t *color = texels + 4 * p;
+      if (in_tile)
+         assert(color[0] == 2 * a[0] && color[1] == 2 * a[1] && color[2] == 30 + p + sum &&
+                color[3] == 3);
+      else
+         assert(color[0] == 10 + p && color[1] == 20 + p && color[2] == 30 + p && color[3] == 7);
+   }
+   ralloc_free(shader);
+
+   /* The slice is the second member of the tile's pixels' data, at the
+    * texture's (1, 0) onward: its pixels (1..2, 0..1). */
+   static const char *slice_metadata_args = "!4 = !{!5, !6, !7, !8}\n";
+   char slice_metadata[4096];
+   snprintf(slice_metadata, sizeof(slice_metadata), "%s%s",
+            replace(tile_both_metadata, "!4 = !{!5, !6, !7}\n", slice_metadata_args),
+            "!8 = !{i32 3, !\"air.texture\", !\"air.location_index\", i32 0, i32 1, !\"air.write\","
+            " !\"air.arg_type_name\", !\"texture2d<uint, write>\", !\"air.arg_name\", !\"out\"}\n");
+   shader = kernel_with(tile_slice_body, slice_metadata, &o, &error);
+   if (!shader)
+      fprintf(stderr, "tile slice: %u %s\n", error.kind, error.detail);
+   assert(shader);
+   tile_pass_init(&pass);
+   tile_pass_run(shader, &pass, 0, 0);
+   for (unsigned y = 0; y < TILE_H; y++) {
+      for (unsigned x = 0; x < TILE_W; x++) {
+         const uint32_t *texel = pass.texture + 4 * (y * TILE_W + x);
+         bool written = x >= 1 && x <= 2;
+         unsigned p = y * TILE_W + x + 1;
+         for (unsigned i = 0; i < 4; i++)
+            assert(texel[i] == (written ? 100 * p + 4 + i : 0));
+      }
+   }
+   ralloc_free(shader);
+   /* A multisampled pass's slice is refused. */
+   tile.samples = 4;
+   assert(!kernel_with(tile_slice_body, slice_metadata, &o, &error));
+   assert(strstr(error.detail, "slice write in a multisampled tile function"));
+   tile.samples = 1;
+
+   /* Their colors in a multisampled pass count apart, and the call names
+    * neither imageblock; one imageblock of each layout. */
+   static const char *colors =
+      "%block_t = type { ptr addrspace(4) }\n"
+      "declare i16 @air.get_imageblock_num_colors(<2 x i16>)\n"
+      "declare ptr addrspace(4) @air.imageblock_data(<2 x i16>, i32, i16)\n"
+      "define void @kernel(%block_t %colors, %block_t %data, <2 x i16> %tid) {\n"
+      "%n = call i16 @air.get_imageblock_num_colors(<2 x i16> %tid)\n"
+      "%d = call ptr addrspace(4) @air.imageblock_data(<2 x i16> %tid, i32 0, i16 0)\n"
+      "store i16 %n, ptr addrspace(4) %d, align 2\n"
+      "ret void\n}\n";
+   shader = kernel_with(colors, tile_both_metadata, &o, &error);
+   assert(shader);
+   ralloc_free(shader);
+   tile.samples = 4;
+   assert(!kernel_with(colors, tile_both_metadata, &o, &error));
+   assert(strstr(error.detail, "multisampled tile function of both imageblocks"));
+   tile.samples = 1;
+   const char *two_explicit = replace(tile_both_metadata, "!\"implicit\"", "!\"explicit\","
+                                      " !\"air.imageblock_data_size\", i32 16");
+   assert(!kernel_with(tile_both_body, two_explicit, &o, &error));
+   assert(strstr(error.detail, "one explicit imageblock"));
+   const char *two_implicit = replace(tile_both_metadata, "!\"explicit\", !\"air.imageblock_data_size\", i32 32", "!\"implicit\"");
+   assert(!kernel_with(tile_both_body, two_implicit, &o, &error));
+   assert(strstr(error.detail, "one implicit imageblock"));
+   /* Outside a tile function the implicit one is refused. */
+   o.tile = NULL;
+   o.dynamic_shape = false;
+   assert(!kernel_with(tile_both_body, tile_both_metadata, &o, &error));
+   assert(strstr(error.detail, "implicit imageblock outside a tile function"));
+}
+
 /* A null texture has no descriptor to bind, and reads zero. */
 static void
 null_textures_bind_nothing(void)
@@ -1951,6 +2193,7 @@ main(void)
    imageblocks_live_in_threadgroup_memory();
    tile_functions_access_their_attachments();
    tile_functions_access_imageblock_data();
+   tile_functions_take_both_imageblocks();
    samples_join_through_phis();
    short_indices_widen_their_positions();
    array_arguments_bind_their_elements();
@@ -1971,6 +2214,6 @@ main(void)
    puts("AIR textures: sample/level/offset, write, read_write array read, size queries, "
         "implicit-derivative fragment sampling, depth compare, gather, storage levels, arrays, atomics, "
         "constexpr samplers, cube reads, null textures, imageblocks, tile functions, joined samples, "
-        "whole-quad derivatives in branches, derivatives kept in uniform branches and with guarded reads, and refusals passed");
+        "whole-quad derivatives in branches, derivatives kept in uniform branches and with guarded reads, gradients taken before early returns, tile functions of both imageblocks, and refusals passed");
    return 0;
 }

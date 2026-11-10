@@ -716,8 +716,9 @@ struct stela_air_argument {
    /* Object and mesh inputs; the payload's buffer holds its size, alignment
     * and access. */
    bool is_payload, is_mesh, is_mesh_grid;
-   /* A kernel's explicit imageblock, whose size the kernel holds. */
-   bool is_imageblock;
+   /* A kernel's imageblock: explicit, whose size the kernel holds, or
+    * implicit, a tile function's color attachments. */
+   bool is_imageblock, implicit_imageblock;
    /* A stage-in attribute at location: a kernel's air.stage_in. */
    bool is_stage_in;
    unsigned location;
@@ -741,7 +742,8 @@ struct stela_air_kernel {
    /* The bytes of each element of a kernel's explicit imageblock, or zero
     * for a kernel without one. */
    unsigned imageblock_size;
-   /* Its imageblock is implicit: a tile function's color attachments. */
+   /* It has an implicit imageblock: a tile function's color attachments.
+    * A kernel takes at most one imageblock of each layout. */
    bool implicit_imageblock;
    struct stela_air_argument arguments[AIR_MAX_ARGUMENTS];
    struct stela_air_field fields[AIR_MAX_FIELDS];

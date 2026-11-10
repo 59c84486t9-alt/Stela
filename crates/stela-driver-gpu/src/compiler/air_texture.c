@@ -1574,7 +1574,8 @@ slice_pixel(void *data, nir_def *index, nir_def **values)
  *     i1 implicit layout, i32 access
  *
  * The slice is one member of every element of a kernel's explicit
- * imageblock. Pixel (x, y) of the block, within size when sized and the
+ * imageblock, or of a tile function's: its pass's data at the tile's
+ * pixels. Pixel (x, y) of the block, within size when sized and the
  * whole block otherwise, goes to texel position + (x, y); those past the
  * texture's edge go nowhere. */
 static bool

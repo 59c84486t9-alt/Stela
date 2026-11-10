@@ -739,6 +739,20 @@ kernel void tile_ib_resolve(imageblock<IbData, imageblock_layout_explicit> block
     out[p.y * size.x + p.x] = float4(d->a.xyz, d->n.x);
 }
 
+// A tile function of both imageblocks: the data's n.x adds the pixel's
+// color's x and y, then the color becomes the data's a.xy doubled, its z
+// plus the new n.x, and alpha 3.
+kernel void tile_ib_mix(imageblock<TileColor, imageblock_layout_implicit> colors,
+                        imageblock<IbData, imageblock_layout_explicit> data,
+                        ushort2 tid [[thread_position_in_threadgroup]])
+{
+    TileColor c = colors.read(tid);
+    threadgroup_imageblock IbData *d = data.data(tid);
+    d->n.x += c.c.x + c.c.y;
+    c.c = float4(d->a.xy * 2.0f, c.c.z + d->n.x, 3.0f);
+    colors.write(c, tid);
+}
+
 // Functions a tile function's tables call on a pixel's color, given its
 // position in the tile.
 [[visible]] float4 tile_offset(float4 c, ushort2 p)

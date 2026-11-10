@@ -3674,6 +3674,48 @@ fn tiles(plan: &mut Plan, library: &str) {
         };
         plan.add(case);
     }
+    // A tile function of both imageblocks between the draws and the data's
+    // resolve: it reads each pixel's color and data and writes both.
+    let mixed = |x: u32, y: u32| {
+        let (x, y) = (f64::from(x), f64::from(y));
+        (x + 2.0 * add[0], y + 2.0 * add[1], x + 100.0 * y + 2000.0)
+    };
+    let n = |x: u32, y: u32| {
+        let (ax, ay, n) = mixed(x, y);
+        n + ax + ay
+    };
+    let data = image(&|x, y| {
+        let (ax, ay, _) = mixed(x, y);
+        [ax, ay, 2.0 * add[2], n(x, y)]
+    });
+    let colored = image(&|x, y| {
+        let (ax, ay, _) = mixed(x, y);
+        [2.0 * ax, 2.0 * ay, 2.0 * add[2] + n(x, y), 3.0]
+    });
+    let tiles = json!([
+        {"function": "tile_ib_init", "threads": [16, 16], "before": true},
+        {"function": "tile_ib_mix", "threads": [16, 16]},
+        {"function": "tile_ib_resolve", "threads": [16, 16]}
+    ]);
+    let render = json!({"vertex_count": 3, "instance_count": 2,
+                        "colors": [{"texture": "c", "clear": [0, 0, 0, 0]}],
+                        "tiles": tiles, "tile_size": [16, 16], "imageblock_sample_length": 48});
+    plan.add(
+        Case::render(
+            "render.tile.both_imageblocks",
+            library,
+            "vert_full",
+            Some("frag_ib_add"),
+            render,
+        )
+        .buffer(Buffer::data("add", 0, f32s(&add)).stage("fragment"))
+        .buffer(Buffer::data("depth", 2, f32s(&[0.5])).stage("vertex"))
+        .buffer(Buffer::zeroed("out", 0, (TW * TH * 16) as usize).stage("tile"))
+        .buffer(Buffer::data("size", 1, u32s(&[TW, TH])).stage("tile"))
+        .texture(Texture::d2("c", "rgba32float", TW, TH).usage(&["render"]))
+        .output(Output::new("out", Dtype::F32, Tolerance::exact()).expect_same(f32s(&data)))
+        .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&colored))),
+    );
     // Where an Apple GPU places a tile function's threads: in SIMD-groups of
     // 8 by 4 blocks of the threadgroup, cut short at its edges, of 2 by 2
     // quads in rows two threads high; its index runs the same quads across

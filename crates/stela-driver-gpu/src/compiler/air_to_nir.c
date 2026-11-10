@@ -159,7 +159,7 @@ struct translator {
     * or a fragment function with imageblock data; the fragment's pixel and
     * the samples it covers, and whether it accesses the data. */
    nir_def *imageblock_pass, *imageblock_pixel, *imageblock_mask;
-   bool tile_explicit, fragment_imageblock;
+   bool tile_explicit, tile_implicit, fragment_imageblock;
    /* The first air.imageblock_data call, which stands for the origin of
     * every pointer into the imageblock. */
    LLVMValueRef imageblock_root;
@@ -424,6 +424,7 @@ find_value(struct translator *t, LLVMValueRef llvm)
 static nir_def *module_global(struct translator *t, LLVMValueRef global);
 static nir_variable *shared_resource(struct translator *t, uint64_t size, unsigned alignment);
 static bool tile_prelude(struct translator *t);
+static nir_def *tile_pixel(struct translator *t, nir_def *at);
 static void workgroup_barrier(struct translator *t);
 static nir_variable *dynamic_threadgroup(struct translator *t, const struct stela_air_buffer *buffer);
 static nir_def *stage_narrow(nir_builder *b, nir_def *def, enum stela_air_primitive p);
@@ -1457,10 +1458,12 @@ compute_arguments(struct translator *t, const struct stela_air_kernel *kernel)
       if (argument->is_imageblock) {
          if (LLVMGetFirstUse(param))
             return fail(t, STELA_AIR_ARGUMENT, "an imageblock read other than through its functions");
-         if (kernel->implicit_imageblock && !t->tile)
+         if (argument->implicit_imageblock && !t->tile)
             return fail(t, STELA_AIR_ARGUMENT, "an implicit imageblock outside a tile function");
-         if (kernel->implicit_imageblock)
+         if (argument->implicit_imageblock) {
+            t->tile_implicit = true;
             continue;
+         }
          /* A tile function's is its pass's imageblock data, which the
           * pass's fragment functions share. */
          if (t->tile) {
@@ -4990,6 +4993,45 @@ texture_store_word(void *translator, LLVMValueRef pointer, nir_def *value)
    return t->error->kind == STELA_AIR_OK;
 }
 
+/* The tile's dimensions, a 32-bit uvec2: a tile function's imageblock's. */
+static nir_def *
+tile_extent(struct translator *t)
+{
+   nir_builder *b = &t->b;
+   nir_def *size = nir_channel(b, t->tile, 0);
+   return nir_vec2(b, nir_iand_imm(b, size, 0xffff), nir_ushr_imm(b, size, 16));
+}
+
+/* Element `pixel` of a tile function's explicit imageblock's member that
+ * slice points to: the pass's data at the tile's pixel, whose elements lie
+ * a stride apart from the data's base. A multisampled pass's pixels hold a
+ * color a sample, which a slice does not choose among. */
+static nir_def *
+tile_imageblock_load(struct translator *t, const struct value *base, nir_def *pixel,
+                     unsigned components, unsigned bits)
+{
+   if (base->pointer_root != t->imageblock_root || base->choices) {
+      fail(t, STELA_AIR_MEMORY, "an imageblock slice that names no member of the imageblock");
+      return NULL;
+   }
+   if (t->options->tile->samples > 1) {
+      fail(t, STELA_AIR_INSTRUCTION, "an imageblock slice write in a multisampled tile function");
+      return NULL;
+   }
+   nir_builder *b = &t->b;
+   nir_def *pass = t->imageblock_pass;
+   nir_def *data = nir_pack_64_2x32_split(b, nir_channel(b, pass, 2), nir_channel(b, pass, 3));
+   nir_def *member = nir_umod(b, nir_isub(b, base->def, data), nir_u2u64(b, nir_channel(b, pass, 0)));
+   nir_def *width = nir_channel(b, tile_extent(t), 0);
+   nir_def *at = nir_vec2(b, nir_umod(b, pixel, width), nir_udiv(b, pixel, width));
+   struct value address = *base;
+   address.def = nir_iadd(b, imageblock_address(t, tile_pixel(t, at), nir_imm_int(b, 0),
+                                                nir_imm_int(b, 1)),
+                          member);
+   address.offset_known = false;
+   return memory_access(t, &address, NULL, NULL, 0, components, bits, bits / 8);
+}
+
 /* Element `pixel` of the imageblock's member that slice points to, of
  * `components` lanes of `bits`. */
 static nir_def *
@@ -4998,6 +5040,8 @@ imageblock_load(void *translator, LLVMValueRef slice, nir_def *pixel, unsigned c
 {
    struct translator *t = translator;
    const struct value *base = pointer_value(t, slice);
+   if (base && t->tile_explicit)
+      return tile_imageblock_load(t, base, pixel, components, bits);
    if (!base || !t->imageblock || base->storage != t->imageblock) {
       fail(t, STELA_AIR_MEMORY, "an imageblock slice that names no member of the imageblock");
       return NULL;
@@ -5196,9 +5240,7 @@ static nir_def *
 tile_pixel(struct translator *t, nir_def *at)
 {
    nir_builder *b = &t->b;
-   nir_def *size = nir_channel(b, t->tile, 0);
-   nir_def *extent = nir_vec2(b, nir_iand_imm(b, size, 0xffff), nir_ushr_imm(b, size, 16));
-   nir_def *origin = nir_imul(b, nir_trim_vector(b, nir_load_workgroup_id(b), 2), extent);
+   nir_def *origin = nir_imul(b, nir_trim_vector(b, nir_load_workgroup_id(b), 2), tile_extent(t));
    return nir_iadd(b, origin, nir_u2u32(b, at));
 }
 
@@ -5244,6 +5286,11 @@ tile_call(struct translator *t, LLVMValueRef inst, const char *name, size_t name
    if (!at)
       return false;
    nir_def *pixel = tile_pixel(t, at);
+   /* The two layouts count a multisampled pixel's colors apart, and the
+    * call names neither. */
+   if ((colors || coverage) && t->tile_explicit && t->tile_implicit && tile->samples > 1)
+      return fail(t, STELA_AIR_INSTRUCTION, "%.*s in a multisampled tile function of both imageblocks",
+                  (int)name_length, name);
    /* An explicit imageblock's samples each hold a color. */
    if (colors) {
       if (LLVMTypeOf(inst) != i16)
@@ -5540,7 +5587,8 @@ texture_call(struct translator *t, LLVMValueRef inst, const char *name, size_t n
       .b = &t->b, .options = t->options, .error = t->error, .translator = t,
       .operand = texture_operand, .texture = texture_argument, .sampler = sampler_argument,
       .load_word = texture_load_word, .store_word = texture_store_word, .store_at = call_store,
-      .imageblock_extent = t->imageblock ? t->imageblock_extent : NULL,
+      .imageblock_extent = t->imageblock ? t->imageblock_extent :
+                           t->tile_explicit ? tile_extent(t) : NULL,
       .imageblock_load = imageblock_load,
       .repeat = repeat, .branch = texture_branch, .branch_else = texture_branch_else,
       .branch_join = texture_branch_join,

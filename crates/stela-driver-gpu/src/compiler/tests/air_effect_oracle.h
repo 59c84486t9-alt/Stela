@@ -39,10 +39,19 @@ struct air_effect_value {
    nir_const_value lanes[4];
 };
 
+/* A storage image of one layer and sample: four 32-bit words a texel, in
+ * rows. */
+struct air_effect_image {
+   uint32_t width, height;
+   uint32_t *texels;
+};
+
 /* What an execution reads: little-endian global memory at base, which
  * global loads read and global stores within it update, the push constants,
  * the invocation's linear index in its workgroup and workgroup ID, from
- * which its global ID follows, and its scratch memory, if any. */
+ * which its global ID follows, its scratch memory, if any, and the storage
+ * images an image variable's array index names, if any. Image stores are
+ * no effects; they change the image. */
 struct air_effect_environment {
    uint64_t base;
    uint8_t *bytes;
@@ -52,6 +61,8 @@ struct air_effect_environment {
    uint32_t local_index, workgroup[3];
    uint8_t *scratch;
    size_t scratch_size;
+   const struct air_effect_image *images;
+   unsigned image_count;
 };
 
 /* Whether a value of shape at address lies within size bytes at base, and
@@ -265,6 +276,50 @@ air_effect_execute_in(nir_shader *shader, unsigned budget, struct air_effect_sto
                air_effect_read((global ? memory->bytes : memory->push) + offset, dest);
                break;
             }
+            if (memory && memory->images &&
+                (intrinsic->intrinsic == nir_intrinsic_image_deref_size ||
+                 intrinsic->intrinsic == nir_intrinsic_image_deref_load ||
+                 intrinsic->intrinsic == nir_intrinsic_image_deref_store)) {
+               const struct air_effect_value *handle = air_effect_get(values, count, intrinsic->src[0].ssa);
+               if (!handle || handle->components != 1)
+                  AIR_EFFECT_FAIL(AIR_EFFECT_UNDEFINED, "image is not defined");
+               uint64_t index = nir_const_value_as_uint(handle->lanes[0], handle->bits);
+               if (index >= memory->image_count)
+                  AIR_EFFECT_FAIL(AIR_EFFECT_UNDEFINED, "image outside the test images");
+               const struct air_effect_image *image = &memory->images[index];
+               if (intrinsic->intrinsic == nir_intrinsic_image_deref_size) {
+                  const uint32_t size[3] = {image->width, image->height, 1};
+                  for (unsigned lane = 0; lane < dest->components && lane < 3; lane++)
+                     dest->lanes[lane] = nir_const_value_for_uint(size[lane], dest->bits);
+                  break;
+               }
+               bool load = intrinsic->intrinsic == nir_intrinsic_image_deref_load;
+               const struct air_effect_value *coord = air_effect_get(values, count, intrinsic->src[1].ssa);
+               /* A single-sampled image's access may leave its sample
+                * undefined. */
+               const struct air_effect_value *sample = air_effect_get(values, count, intrinsic->src[2].ssa);
+               const struct air_effect_value *texel =
+                  load ? dest : air_effect_get(values, count, intrinsic->src[3].ssa);
+               if (!coord || !texel || coord->components < 2)
+                  AIR_EFFECT_FAIL(AIR_EFFECT_UNDEFINED, "image access is not defined");
+               uint64_t x = nir_const_value_as_uint(coord->lanes[0], coord->bits);
+               uint64_t y = nir_const_value_as_uint(coord->lanes[1], coord->bits);
+               if (x >= image->width || y >= image->height ||
+                   (nir_intrinsic_image_array(intrinsic) &&
+                    nir_const_value_as_uint(coord->lanes[2], coord->bits)) ||
+                   (sample && nir_const_value_as_uint(sample->lanes[0], sample->bits)))
+                  AIR_EFFECT_FAIL(AIR_EFFECT_UNDEFINED, "image access outside the test image");
+               if (texel->components != 4 || texel->bits != 32)
+                  AIR_EFFECT_FAIL(AIR_EFFECT_UNSUPPORTED, "image texel other than four words");
+               uint32_t *words = image->texels + 4 * (y * image->width + x);
+               for (unsigned lane = 0; lane < 4; lane++) {
+                  if (load)
+                     dest->lanes[lane] = nir_const_value_for_uint(words[lane], 32);
+                  else
+                     words[lane] = (uint32_t)nir_const_value_as_uint(texel->lanes[lane], 32);
+               }
+               break;
+            }
             /* Scratch memory is the invocation's own, so its stores are
              * no effects. */
             if (memory && (intrinsic->intrinsic == nir_intrinsic_load_scratch ||
@@ -325,6 +380,26 @@ air_effect_execute_in(nir_shader *shader, unsigned budget, struct air_effect_sto
             /* Only a use of the value is undefined. */
             dest->known = false;
             break;
+         case nir_instr_type_deref: {
+            /* An image variable, or an element of an array of them: its
+             * index among the test images. */
+            nir_deref_instr *deref = nir_instr_as_deref(instr);
+            nir_deref_instr *parent = nir_deref_instr_parent(deref);
+            bool element = deref->deref_type == nir_deref_type_array && parent &&
+                           parent->deref_type == nir_deref_type_var;
+            if (!memory || !memory->images || !nir_deref_mode_is(deref, nir_var_image) ||
+                (!element && deref->deref_type != nir_deref_type_var))
+               AIR_EFFECT_FAIL(AIR_EFFECT_UNSUPPORTED, "unevaluated deref on executed path");
+            uint64_t index = 0;
+            if (element) {
+               const struct air_effect_value *at = air_effect_get(values, count, deref->arr.index.ssa);
+               if (!at || at->components != 1)
+                  AIR_EFFECT_FAIL(AIR_EFFECT_UNDEFINED, "image index is not defined");
+               index = nir_const_value_as_uint(at->lanes[0], at->bits);
+            }
+            dest->lanes[0] = nir_const_value_for_uint(index, dest->bits);
+            break;
+         }
          default:
             AIR_EFFECT_FAIL(AIR_EFFECT_UNSUPPORTED, "unevaluated instruction on executed path");
          }
