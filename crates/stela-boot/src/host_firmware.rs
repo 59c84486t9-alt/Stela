@@ -36,13 +36,15 @@ pub unsafe fn identity_catalog(resources: &Resources) -> Result<Option<Arc<Catal
 /// The loader supplied this validated wire handoff. Its LOADER_DATA pages
 /// are reserved, and the engine maps them in its permanent shared physmap.
 pub unsafe fn after_ebs(resources: &Resources) -> Result<Option<Arc<Catalog>>> {
+    let started = output::now();
     // SAFETY: the caller's validated loader handoff and permanent physmap.
     let catalog =
         unsafe { resources.catalog(layout::physical, Some("after-ebs"), output::arguments) }?;
     if let Some(catalog) = &catalog {
         let (images, bytes) = catalog.inventory();
         output::arguments(format_args!(
-            "HOST FIRMWARE phase=after-ebs images={images} bytes={bytes}\n"
+            "HOST FIRMWARE phase=after-ebs images={images} bytes={bytes} catalog_ms={}\n",
+            output::millis_since(started)
         ));
     }
     Ok(catalog)
@@ -183,12 +185,15 @@ pub fn read(root: &mut Directory) -> Result<Resources> {
         ..Resources::absent()
     };
     // Parse/identity checks and the total budget precede every image allocation.
+    let started = output::now();
     for (slot, image) in resources.images.iter_mut().zip(&parsed.images) {
         let path = format!("{}/{}", manifest::DIRECTORY, image.path);
         let file =
             open(root, &path)?.ok_or(refuse!("host firmware manifest names a missing resource"))?;
         *slot = read_file(file, Some(image.length), manifest::MAX_IMAGE_BYTES)?;
     }
+    let read_ms = output::millis_since(started);
+    let started = output::now();
     // SAFETY: only this loader owns these permanent pages; identity alias is
     // currently mapped by firmware. Drop metadata before engine relocation.
     let catalog =
@@ -196,7 +201,9 @@ pub fn read(root: &mut Directory) -> Result<Resources> {
             .ok_or(refuse!("missing host firmware catalog"))?;
     let (images, total) = catalog.inventory();
     output::arguments(format_args!(
-        "HOST FIRMWARE phase=before-ebs images={images} bytes={total}\n"
+        "HOST FIRMWARE phase=before-ebs images={images} bytes={total} read_ms={read_ms} \
+         catalog_ms={}\n",
+        output::millis_since(started)
     ));
     Ok(resources)
 }

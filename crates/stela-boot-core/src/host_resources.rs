@@ -50,6 +50,20 @@ impl Resources {
         }
     }
 
+    /// The one log line for a PC whose firmware holds none of the Intel
+    /// Wi-Fi variables, in place of a record for each.
+    pub fn wifi_summary(&self, phase: &str) -> Option<alloc::string::String> {
+        self.wifi
+            .iter()
+            .all(|capture| matches!(capture.observation, Observation::Absent { .. }))
+            .then(|| {
+                format!(
+                    "HOST WIFI UEFI {phase} none of the {} variables present\n",
+                    self.wifi.len()
+                )
+            })
+    }
+
     pub fn wifi_observations(&self) -> Observations {
         let mut observations = Observations::default();
         for (descriptor, capture) in VARIABLE_DESCRIPTORS.iter().zip(&self.wifi) {
@@ -285,8 +299,13 @@ impl Resources {
             if let Some(record) = smbios_record {
                 log(format_args!("HOST SMBIOS RECORD {record}\n"));
             }
-            for record in records {
-                log(format_args!("HOST WIFI UEFI RECORD {record}\n"));
+            match phase.and_then(|phase| self.wifi_summary(phase)) {
+                Some(summary) => log(format_args!("{summary}")),
+                None => {
+                    for record in records {
+                        log(format_args!("HOST WIFI UEFI RECORD {record}\n"));
+                    }
+                }
             }
             return Ok(None);
         }
@@ -306,8 +325,13 @@ impl Resources {
             }
             log(format_args!("HOST SMBIOS RECORD {record}\n"));
         }
-        for record in records {
-            log(format_args!("HOST WIFI UEFI RECORD {record}\n"));
+        match phase.and_then(|phase| self.wifi_summary(phase)) {
+            Some(summary) => log(format_args!("{summary}")),
+            None => {
+                for record in records {
+                    log(format_args!("HOST WIFI UEFI RECORD {record}\n"));
+                }
+            }
         }
         if let Some(phase) = phase
             && let (Some(manifest_bytes), Some(parsed)) = (manifest_bytes, &parsed)
@@ -377,6 +401,29 @@ pub fn report(error: manifest::Error, log: fn(fmt::Arguments<'_>)) -> &'static s
 mod tests {
     use super::*;
     use stela_drivers::net::wifi::intel::platform::Variable;
+
+    #[test]
+    fn absent_wifi_variables_take_one_line() {
+        let mut resources = Resources::absent();
+        assert_eq!(resources.wifi_summary("pre-ebs"), None);
+        for capture in &mut resources.wifi {
+            capture.observation = Observation::Absent {
+                stage: stela_drivers::net::wifi::intel::platform::Stage::Probe,
+                status: 14,
+                reported_bytes: None,
+            };
+        }
+        assert_eq!(
+            resources.wifi_summary("pre-ebs").as_deref(),
+            Some(
+                format!(
+                    "HOST WIFI UEFI pre-ebs none of the {} variables present\n",
+                    VARIABLE_DESCRIPTORS.len()
+                )
+                .as_str()
+            )
+        );
+    }
 
     #[test]
     fn installed_resources_cannot_substitute_a_live_observation_name_or_target() {

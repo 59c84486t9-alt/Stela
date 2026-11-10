@@ -832,7 +832,9 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     );
     let worker_bindings = worker_bindings(assigned.as_ref());
     if tree.is_some() {
-        crate::status::done(profile.name);
+        // The CPU profile's name is for the log, not the screen.
+        output::arguments(format_args!("BOOT CPU profile {}\n", profile.name));
+        crate::status::done("");
     }
     let restore = source.map(|source| {
         prepare_restore(
@@ -1183,15 +1185,33 @@ fn open_gpus(
         let random = stela_drivers::probe::NativeServices::entropy(&services)
             .ok()
             .and_then(|entropy| stela_linux::random::Seeded::from_entropy(&*entropy).ok());
-        let claimed = random.as_ref().map_or_else(Vec::new, |_| {
+        let (claimed, refused) = random.as_ref().map_or_else(Default::default, |_| {
             gpu::claim_all(&services, &adapters, gop, firmware.as_ref())
         });
-        (claimed, random)
+        (claimed, refused, random)
     });
     let (claimed, random) = match claimed {
-        Ok((claimed, Some(random))) if !claimed.is_empty() => (claimed, random),
-        Ok(_) => {
-            crate::status::warn("this PC has no NVIDIA GPU to start");
+        Ok((claimed, _, Some(random))) if !claimed.is_empty() => (claimed, random),
+        Ok((_, refused, _)) => {
+            // Each GPU that did not start, and why, or that there is none.
+            use stela_boot_core::gpu_status;
+            match refused.split_first() {
+                None => crate::status::warn(&gpu_status::none()),
+                Some((first, rest)) => {
+                    crate::status::warn(&gpu_status::refused(
+                        &first.address,
+                        first.device,
+                        first.reason,
+                    ));
+                    for gpu in rest {
+                        crate::status::info(&gpu_status::refused(
+                            &gpu.address,
+                            gpu.device,
+                            gpu.reason,
+                        ));
+                    }
+                }
+            }
             return false;
         }
         Err(error) => {

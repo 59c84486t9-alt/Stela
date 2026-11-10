@@ -857,7 +857,11 @@ fn select_firmware(boot0: u32, catalog: Arc<Catalog>) -> Result<PciFirmware, Ser
                 available = true;
             }
             Err(error) if error.kind == FirmwareError::Missing => (),
-            Err(_) => {
+            Err(error) => {
+                output::arguments(format_args!(
+                    "GPU {name}: firmware {} refused: {error:?}\n",
+                    request.name
+                ));
                 return Err(ServiceError::Refused(
                     "the GPU firmware does not match its exact catalogue target",
                 ));
@@ -869,9 +873,7 @@ fn select_firmware(boot0: u32, catalog: Arc<Catalog>) -> Result<PciFirmware, Ser
         output::arguments(format_args!(
             "GPU {name}: `stela setup host-firmware fetch --gpu {name}` supplies the pinned firmware\n"
         ));
-        return Err(ServiceError::Refused(
-            "no pinned firmware for the observed GPU chipset was loaded",
-        ));
+        return Err(ServiceError::Refused(NO_FIRMWARE));
     }
     PciFirmware::new(target, catalog, names.into_boxed_slice())
         .map_err(|_| ServiceError::Refused("the GPU firmware image names are invalid"))
@@ -1091,30 +1093,47 @@ fn cold_refusal(
     ServiceError::Refused("the GPU's original cold handoff was refused")
 }
 
-/// Claim every NVIDIA adapter, each reported if it cannot be. In a foreground
-/// continuation, with probe finished.
+/// Why a GPU was refused when the USB holds no firmware for its chip.
+const NO_FIRMWARE: &str = "no pinned firmware for the observed GPU chipset was loaded";
+
+/// An NVIDIA adapter [`claim_all`] did not claim, for the boot screen
+/// (`stela_boot_core::gpu_status`).
+pub(super) struct Refused {
+    pub(super) address: String,
+    pub(super) device: u16,
+    pub(super) reason: stela_boot_core::gpu_status::Reason,
+}
+
+/// Claim every NVIDIA adapter, each reported if it cannot be, and the ones
+/// refused. In a foreground continuation, with probe finished.
 pub(super) fn claim_all(
     services: &dyn NativeServices,
     adapters: &[gpu::Adapter],
     gop: Result<Option<crate::pci_io::FramebufferSource>, &'static str>,
     catalog: Option<&Arc<Catalog>>,
-) -> Vec<Claimed> {
+) -> (Vec<Claimed>, Vec<Refused>) {
+    use stela_boot_core::gpu_status::Reason;
+    let refused_as = |adapter: &gpu::Adapter, reason| Refused {
+        address: format!("{}", adapter.address),
+        device: adapter.device,
+        reason,
+    };
+    let nvidia = adapters
+        .iter()
+        .filter(|adapter| adapter.vendor == gpu::Vendor::Nvidia);
     if !cfg!(feature = "nvk") {
-        for adapter in adapters
-            .iter()
-            .filter(|adapter| adapter.vendor == gpu::Vendor::Nvidia)
-        {
+        let mut refused = Vec::new();
+        for adapter in nvidia {
             output::arguments(format_args!(
                 "GPU {} left with firmware: build the image with `cargo xtask boot build --nvk`\n",
                 adapter.address
             ));
+            refused.push(refused_as(adapter, Reason::Other));
         }
-        return Vec::new();
+        return (Vec::new(), refused);
     }
-    let nvidia = adapters
-        .iter()
-        .filter(|adapter| adapter.vendor == gpu::Vendor::Nvidia);
     let mut claimed = Vec::new();
+    let mut refused = Vec::new();
     for adapter in nvidia {
         let result = gop.map_err(ServiceError::Refused).and_then(|source| {
             let catalog =
@@ -1130,11 +1149,16 @@ pub(super) fn claim_all(
         match result {
             Ok(function) => claimed.push(function),
             Err(error) => {
-                output::arguments(format_args!("GPU {} refused: {error:?}\n", adapter.address))
+                output::arguments(format_args!("GPU {} refused: {error:?}\n", adapter.address));
+                let reason = match error {
+                    ServiceError::Refused(NO_FIRMWARE) => Reason::MissingFirmware,
+                    _ => Reason::Other,
+                };
+                refused.push(refused_as(adapter, reason));
             }
         }
     }
-    claimed
+    (claimed, refused)
 }
 
 /// A GPU nouveau bound.

@@ -15,7 +15,6 @@
 extern crate alloc;
 pub use stela_contracts::Refusal;
 pub type Result<T, E = Refusal> = core::result::Result<T, E>;
-use alloc::format;
 use core::{arch::asm, panic::PanicInfo};
 use stela_boot_core::apic;
 use uefi::{
@@ -97,6 +96,53 @@ fn initial_heap_bytes() -> Result<usize, EarlyText> {
         })
 }
 
+/// The boot log's identity line (`stela_boot_core::host_identity`): this
+/// build, the CPU, the RAM the firmware describes and the firmware.
+fn host_identity() -> alloc::string::String {
+    use core::arch::x86_64::__cpuid;
+    use stela_boot_core::host_identity::{Identity, brand, line};
+    let signature = __cpuid(1).eax;
+    let mut words = [0u32; 12];
+    if __cpuid(0x8000_0000).eax >= 0x8000_0004 {
+        for (index, leaf) in (0x8000_0002..=0x8000_0004u32).enumerate() {
+            let registers = __cpuid(leaf);
+            words[index * 4..index * 4 + 4].copy_from_slice(&[
+                registers.eax,
+                registers.ebx,
+                registers.ecx,
+                registers.edx,
+            ]);
+        }
+    }
+    let cpu = brand(words);
+    let ram_bytes = uefi::boot::memory_map(MemoryType::LOADER_DATA)
+        .map(|map| {
+            map.entries()
+                .filter(|entry| {
+                    !matches!(
+                        entry.ty,
+                        MemoryType::RESERVED
+                            | MemoryType::MMIO
+                            | MemoryType::MMIO_PORT_SPACE
+                            | MemoryType::UNUSABLE
+                            | MemoryType::PAL_CODE
+                    )
+                })
+                .map(|entry| entry.page_count * paging::PAGE as u64)
+                .sum()
+        })
+        .unwrap_or(0);
+    let vendor = alloc::string::String::from(uefi::system::firmware_vendor());
+    line(&Identity {
+        version: env!("CARGO_PKG_VERSION"),
+        cpu: &cpu,
+        signature,
+        ram_bytes,
+        firmware_vendor: &vendor,
+        firmware_revision: uefi::system::firmware_revision(),
+    })
+}
+
 /// The longest [`EarlyText`]: room for the low-RAM refusal, small enough
 /// to return by value.
 const EARLY_BYTES: usize = 112;
@@ -166,7 +212,10 @@ fn main() -> Status {
     core::hint::black_box(&MOUNT_INTERFACE);
     core::hint::black_box(&HOST_FIRMWARE_INTERFACE);
     serial::initialize();
-    output::arguments(format_args!("STELA UEFI MOUNT\n"));
+    output::arguments(format_args!(
+        "STELA UEFI MOUNT version={}\n",
+        env!("CARGO_PKG_VERSION")
+    ));
     let heap_bytes =
         initial_heap_bytes().unwrap_or_else(|error| output::early_fatal(error.as_str()));
     let heap = uefi::boot::allocate_pages(
@@ -185,9 +234,11 @@ fn main() -> Status {
     status::set_clock(firmware::tsc_hz());
     firmware::start_ticker();
     let log = log_file::open();
+    output::arguments(format_args!("{}", host_identity()));
     status::begin("Connecting the firmware's drivers to every device");
     let handles = firmware::connect_all();
-    status::done(&format!("{handles} handles"));
+    output::arguments(format_args!("FIRMWARE connected {handles} handles\n"));
+    status::done("");
     status::begin("Reading Stela's settings");
     let (mut volume, mut firmware_root) = firmware::volume().unwrap_or_else(|e| output::fatal(e));
     let host_firmware =
