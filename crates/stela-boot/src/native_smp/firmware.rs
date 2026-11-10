@@ -43,6 +43,8 @@ pub(crate) enum Error {
     ProcessorIdentity,
     Memory,
     AmdMemoryControls,
+    /// A memory-encryption setting Stela cannot run under, and what to change.
+    AmdEncryption(&'static str),
 }
 
 impl Error {
@@ -64,9 +66,8 @@ impl Error {
                 "native observed CPUID identity differs from firmware identity"
             }
             Self::Memory => "native source record allocation or extent is invalid",
-            Self::AmdMemoryControls => {
-                "AMD encrypted/SNP or fixed-attribute visibility controls are unqualified"
-            }
+            Self::AmdMemoryControls => "AMD fixed-attribute visibility controls are unqualified",
+            Self::AmdEncryption(reason) => reason,
         }
     }
 }
@@ -82,7 +83,7 @@ struct FixedVisibility {
 impl FixedVisibility {
     /// # Safety
     /// CPL0 AMD64 with observed MSR/MTRR/PAT controls, no concurrent writer on
-    /// this processor. No SNP/encryption owner may lock the visibility control.
+    /// this processor. SME alone leaves the visibility control writable.
     unsafe fn open(fixed: bool) -> Result<Self, Error> {
         let flags: u64;
         // SAFETY: saves RFLAGS and masks interrupts on this CPU; the guard's drop restores IF.
@@ -96,8 +97,8 @@ impl FixedVisibility {
             interrupts: flags & (1 << 9) != 0,
             changed: false,
         };
-        if original & amd::ENCRYPTION != 0 {
-            return Err(Error::AmdMemoryControls);
+        if let Some(reason) = amd::encryption_refusal(original) {
+            return Err(Error::AmdEncryption(reason));
         }
         // With MtrrFixDramEn clear the fixed MTRRs' RdMem and WrMem bits have
         // no effect (AMD APM Vol. 2 7.7.4), so the type bits read without the

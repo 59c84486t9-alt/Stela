@@ -29,7 +29,7 @@ impl Prepared {
         if extended < 0x8000_0008 {
             return Err(Error::ResourceInventory);
         }
-        let physical_bits = core::arch::x86_64::__cpuid(0x8000_0008).eax as u8;
+        let physical_bits = crate::cpu::physical_bits();
         let rsdp = crate::storage::rsdp().ok_or(Error::ResourceInventory)?;
         // SAFETY: UEFI configuration table before EBS; the ACPI parser
         // checks the source table/checksum and returns owned MCFG observations.

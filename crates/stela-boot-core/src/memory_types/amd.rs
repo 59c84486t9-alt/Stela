@@ -14,7 +14,18 @@ pub const FIXED_MODIFY: u64 = 1 << 19;
 pub const VARIABLE_DRAM: u64 = 1 << 20;
 pub const TOM2_ENABLE: u64 = 1 << 21;
 pub const TOM2_WB: u64 = 1 << 22;
-pub const ENCRYPTION: u64 = 0xf << 23;
+/// MemEncryptionModeEn, the firmware's "SME" option: page-table entries
+/// may then select encryption with the C-bit (APM Vol. 2 7.10.1). Memory
+/// they leave it clear in, as Stela's do, stays plain, and DMA is
+/// unaffected. Transparent SME (TSME) is invisible here and to software.
+pub const MEMORY_ENCRYPTION: u64 = 1 << 23;
+/// SecureNestedPagingEn: every access is checked against the reverse map
+/// table, whose owner Stela is not (APM Vol. 2 15.36.3).
+pub const SECURE_NESTED_PAGING: u64 = 1 << 24;
+/// VMPLEn: privilege levels inside SNP guests; no effect on the host.
+pub const VMPL: u64 = 1 << 25;
+/// HostMultiKeyMemEncrModeEn: physical-address bits select host keys.
+pub const HOST_MULTI_KEY: u64 = 1 << 26;
 pub const REGISTERS: [u32; 7] = [
     SYSCFG,
     IORR_BASE,
@@ -29,6 +40,41 @@ pub const VENDOR: [u32; 3] = [
     u32::from_le_bytes(*b"enti"),
     u32::from_le_bytes(*b"cAMD"),
 ];
+
+/// Why memory encryption as `syscfg` sets it stops a boot: only the
+/// controls Stela cannot run under, each with the firmware setting to
+/// change. SME alone and VMPL alone are not among them.
+pub fn encryption_refusal(syscfg: u64) -> Option<&'static str> {
+    if syscfg & SECURE_NESTED_PAGING != 0 {
+        Some(
+            "SEV-SNP is on in the firmware setup, and Stela does not own its reverse map table: \
+             turn off SEV-SNP (sometimes called SNP Memory Coverage) in the firmware setup",
+        )
+    } else if syscfg & HOST_MULTI_KEY != 0 {
+        Some(
+            "AMD host multi-key memory encryption is on in the firmware setup, which Stela does \
+             not support: turn it off in the firmware setup",
+        )
+    } else {
+        None
+    }
+}
+
+/// The physical address width left to memory: with SME enabled, CPUID
+/// Fn8000_001F EBX[11:6] bits fewer than `maximum`, as Linux's
+/// `early_detect_mem_encrypt` reduces `x86_phys_bits`, so that no address
+/// reaches the C-bit (EBX[5:0]). `encryption` is that leaf's EBX where the
+/// CPU enumerates SME (EAX bit 0).
+pub fn usable_physical_bits(maximum: u8, syscfg: u64, encryption: Option<u32>) -> u8 {
+    match encryption {
+        Some(ebx) if syscfg & MEMORY_ENCRYPTION != 0 => {
+            let reduction = ((ebx >> 6) & 0x3f) as u8;
+            let c_bit = (ebx & 0x3f) as u8;
+            maximum.saturating_sub(reduction).min(c_bit.max(32))
+        }
+        _ => maximum,
+    }
+}
 
 /// The routing registers `syscfg` enables (APM Vol. 2 7.9): MtrrVarDramEn
 /// the IORRs and TOP_MEM, MtrrTom2En TOP_MEM2. Disabled registers have no
@@ -98,10 +144,8 @@ impl State {
             top_mem: register(TOP_MEM)?,
             top_mem2: register(TOP_MEM2)?,
         };
-        if state.syscfg & ENCRYPTION != 0 {
-            return Err(refuse!(
-                "AMD encryption/SNP memory ownership is unqualified"
-            ));
+        if let Some(reason) = encryption_refusal(state.syscfg) {
+            return Err(refuse!(reason));
         }
         let address = ((1u64 << physical_bits) - 1) & !0xfff;
         if state.top_mem & !(address & !((1 << 23) - 1)) != 0
@@ -257,11 +301,39 @@ mod tests {
             TOP_MEM
         ]));
         assert!(enabled(TOM2_ENABLE).eq([TOP_MEM2]));
-        for bit in 23..=26 {
+        for (bit, refused) in [(23, false), (24, true), (25, false), (26, true)] {
             changed = source;
             changed.msrs[0].value = 1 << bit;
-            assert!(State::from_snapshot(&changed, 52).is_err());
+            assert_eq!(
+                State::from_snapshot(&changed, 52).is_err(),
+                refused,
+                "bit {bit}"
+            );
         }
+    }
+    #[test]
+    fn sme_alone_boots_and_snp_says_which_setting_to_change() {
+        assert_eq!(encryption_refusal(0), None);
+        assert_eq!(encryption_refusal(MEMORY_ENCRYPTION), None);
+        assert_eq!(encryption_refusal(MEMORY_ENCRYPTION | VMPL), None);
+        let snp = encryption_refusal(MEMORY_ENCRYPTION | SECURE_NESTED_PAGING).unwrap();
+        assert!(snp.contains("turn off SEV-SNP"), "{snp}");
+        assert!(encryption_refusal(HOST_MULTI_KEY).is_some());
+    }
+    #[test]
+    fn sme_reduces_the_physical_address_width_below_the_c_bit() {
+        // A Zen 4 CPU: C-bit 51, 6 bits fewer with SME on.
+        let ebx = 51 | 6 << 6;
+        assert_eq!(usable_physical_bits(52, 0, Some(ebx)), 52);
+        assert_eq!(usable_physical_bits(52, MEMORY_ENCRYPTION, None), 52);
+        assert_eq!(usable_physical_bits(52, MEMORY_ENCRYPTION, Some(ebx)), 46);
+        // A Zen 2 CPU: C-bit 47 inside a 48-bit space, 5 bits fewer.
+        assert_eq!(
+            usable_physical_bits(48, MEMORY_ENCRYPTION, Some(47 | 5 << 6)),
+            43
+        );
+        // The C-bit bounds the width even where no reduction is reported.
+        assert_eq!(usable_physical_bits(48, MEMORY_ENCRYPTION, Some(47)), 47);
     }
     #[test]
     fn geometry_overlap_and_preserved_routing_controls_refuse_before_installation() {

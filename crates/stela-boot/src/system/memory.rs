@@ -63,6 +63,11 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
         .chain(core::iter::once(apic + PAGE))
         .max()
         .unwrap_or(0);
+    if top > 1 << crate::cpu::physical_bits() {
+        return Err(refuse!(
+            "the firmware placed memory above the address width AMD memory encryption leaves"
+        ));
+    }
     let placement = layout::choose(crate::cpu::LA57.present(), top).ok_or(refuse!(
         "host physical addresses lie beyond what any placement's physmap reaches"
     ))?;
