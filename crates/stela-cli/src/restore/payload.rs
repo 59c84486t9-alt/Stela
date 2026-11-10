@@ -373,6 +373,11 @@ fn local_keys(metadata: &[(String, aea::Metadata)], dir: &Path) -> Result<Vec<Ae
 
 /// A file's length and SHA-256, read in pieces.
 pub(crate) fn file_sha256(path: &Path) -> Result<(u64, String)> {
+    file_sha256_with(path, |_| {})
+}
+
+/// [`file_sha256`], telling `read` each piece's length as it is hashed.
+fn file_sha256_with(path: &Path, read: impl Fn(u64)) -> Result<(u64, String)> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
     let mut buffer = vec![0u8; BUFFER];
@@ -384,6 +389,7 @@ pub(crate) fn file_sha256(path: &Path) -> Result<(u64, String)> {
         }
         total += count as u64;
         hash.update(&buffer[..count]);
+        read(count as u64);
     }
 }
 
@@ -450,11 +456,18 @@ pub fn inventory(image: &Path, model: &str, keys: KeyOptions<'_>) -> Result<Inve
     let mut archive = ZipArchive::new(File::open(image)?)?;
     let selection = select(&mut archive, model)?;
     let metadata = aea_metadata(&mut archive, image, &selection.names)?;
+    // Hashing a whole IPSW takes minutes from a slow disk: its progress is
+    // the whole file's, which the members are read beside.
+    let progress = crate::progress::Phase::bytes(
+        "Checking the restore image",
+        std::fs::metadata(image)?.len(),
+    );
     let (ipsw, members) = std::thread::scope(|scope| {
-        let whole = scope.spawn(|| file_sha256(image));
+        let whole = scope.spawn(|| file_sha256_with(image, |bytes| progress.advance(bytes)));
         let members = hash_members(image, &selection.names, BlockDigests::Record);
         (whole.join().expect("hash worker panicked"), members)
     });
+    progress.finish();
     let hashed = members?;
     finish_inventory(image, selection, metadata, hashed, ipsw?, keys)
 }
