@@ -53,8 +53,8 @@ pub(crate) struct Cli {
 pub(crate) enum Command {
     /// Create a macOS installer USB interactively, or manage an existing USB.
     Setup(Box<setup::Setup>),
-    /// Print the boot log stela.efi keeps on a machine-state partition, from a
-    /// disk image or a raw partition.
+    /// Print every boot log stela.efi kept on a disk image or a raw partition:
+    /// it finds each machine-state partition, or SSD partition tail, itself.
     BootLog(boot_log::BootLog),
 }
 
@@ -112,7 +112,22 @@ struct Installer {
 
 #[cfg(windows)]
 fn installer() -> anyhow::Result<()> {
-    Installer::parse().setup.run()
+    Installer::parse_from(installer_arguments(std::env::args_os()))
+        .setup
+        .run()
+}
+
+/// `stela.exe`'s arguments without a leading `setup`, so the `stela setup
+/// ...` commands that messages and the docs name work as typed.
+#[cfg(any(windows, test))]
+fn installer_arguments(
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Vec<std::ffi::OsString> {
+    let mut arguments: Vec<_> = arguments.into_iter().collect();
+    if arguments.get(1).is_some_and(|word| word == "setup") {
+        arguments.remove(1);
+    }
+    arguments
 }
 
 #[cfg(test)]
@@ -139,10 +154,28 @@ mod tests {
             .unwrap();
         assert!(scripted.get_flag("profile") && scripted.contains_id("ipsw"));
         Installer::try_parse_from(["stela", "status", "--usb", "E:\\"]).unwrap();
-        assert!(Installer::try_parse_from(["stela", "setup"]).is_err());
+        Installer::try_parse_from(installer_arguments(
+            ["stela", "setup", "status", "--usb", "E:\\"].map(Into::into),
+        ))
+        .unwrap();
         let help = Installer::command().render_help().to_string();
         assert!(help.contains("status"), "{help}");
         Installer::command().debug_assert();
+    }
+
+    #[test]
+    fn a_leading_setup_word_is_dropped_for_the_installer() {
+        let words =
+            |list: &[&str]| -> Vec<std::ffi::OsString> { list.iter().map(Into::into).collect() };
+        assert_eq!(
+            installer_arguments(words(&["stela", "setup", "status", "--usb", "E:\\"])),
+            words(&["stela", "status", "--usb", "E:\\"])
+        );
+        assert_eq!(installer_arguments(words(&["stela"])), words(&["stela"]));
+        assert_eq!(
+            installer_arguments(words(&["stela", "--usb", "setup"])),
+            words(&["stela", "--usb", "setup"])
+        );
     }
 
     #[test]

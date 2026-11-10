@@ -1,10 +1,10 @@
 //! `stela boot-log`: the persistent boot log `stela.efi` keeps on a
-//! machine-state partition (`stela_runtime::pc::boot_log`), read from a
-//! whole-disk image by the partition's GUID or from a raw partition at a
-//! byte offset. `--in-target` reads it from the tail of an Apple region
-//! that also holds the machine state (`pc::machine_state`), as a setup with
-//! `--target` alone lays it out. `stela setup boot-log` reads the same
-//! region of a setup's install.
+//! machine-state partition (`stela_runtime::pc::boot_log`), found in a
+//! whole-disk image or a raw partition: at each partition's start, and in
+//! the tail of an Apple region that also holds the machine state
+//! (`pc::machine_state`), as a setup with `--target` alone lays it out.
+//! The hidden `--partition`, `--offset` and `--in-target` name one place
+//! instead. `stela setup boot-log` reads the same regions of a setup.
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use std::{
@@ -22,32 +22,93 @@ use stela_runtime::pc::{
 
 #[derive(Args)]
 pub(crate) struct BootLog {
-    /// A whole-disk image or a raw partition, a file or a device.
+    /// A whole-disk image or a raw partition, a file or a device. Every
+    /// boot log on it is printed.
     file: PathBuf,
-    /// The machine-state partition's unique GUID in FILE's GPT.
-    #[arg(long, conflicts_with = "offset")]
+    /// Only the machine-state partition with this unique GUID in FILE's
+    /// GPT.
+    #[arg(long, conflicts_with = "offset", hide = true)]
     partition: Option<String>,
-    /// The machine-state partition's byte offset in FILE (0 for a raw
-    /// partition).
-    #[arg(long, value_parser = crate::args::parse_address)]
+    /// Only the machine-state partition at this byte offset in FILE (0 for
+    /// a raw partition).
+    #[arg(long, value_parser = crate::args::parse_address, hide = true)]
     offset: Option<u64>,
-    /// The partition is an Apple region whose last bytes hold the machine
-    /// state (`--nor` naming the `--storage` partition); with `--offset`,
-    /// FILE ends where the partition does.
-    #[arg(long)]
+    /// With --partition or --offset: the partition is a Mac's SSD partition
+    /// whose last bytes hold the machine state; with --offset, FILE ends
+    /// where the partition does.
+    #[arg(long, hide = true)]
     in_target: bool,
 }
 
 impl BootLog {
     pub(crate) fn run(&self) -> Result<()> {
-        let log = self.load()?;
-        eprint!("{}", summary(&log));
-        match std::io::stdout().write_all(&log.stream) {
-            // A reader that closed the pipe early (`| head`) has what it
-            // asked for.
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-            result => Ok(result?),
+        let logs = if self.partition.is_none() && self.offset.is_none() {
+            self.find()?
+        } else {
+            vec![(String::new(), self.load()?)]
+        };
+        let several = logs.len() > 1;
+        let mut stdout = std::io::stdout();
+        for (place, log) in logs {
+            let mut written = Ok(());
+            if several {
+                eprint!("{place}: ");
+                written = writeln!(stdout, "=== {place} ===");
+            }
+            eprint!("{}", summary(&log));
+            match written.and_then(|()| stdout.write_all(&log.stream)) {
+                // A reader that closed the pipe early (`| head`) has what it
+                // asked for.
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => return Ok(()),
+                result => result?,
+            }
         }
+        Ok(())
+    }
+
+    /// Every boot log on FILE, each with where it is: at the start or in
+    /// the tail of each GPT partition, or of FILE itself without a GPT.
+    fn find(&self) -> Result<Vec<(String, Log)>> {
+        let mut file = File::open(&self.file)
+            .with_context(|| format!("cannot open {}", self.file.display()))?;
+        let (spans, listed) = match table(&self.file) {
+            Ok((table, block)) => (
+                table
+                    .partitions
+                    .iter()
+                    .map(|partition| {
+                        let start = partition.first_lba * block;
+                        let place = format!("partition {}", partition.unique_guid);
+                        (place, start, start + partition.blocks() * block)
+                    })
+                    .collect::<Vec<_>>(),
+                format!("; its GPT has:\n{}", listing(&table, block)),
+            ),
+            Err(_) => (
+                vec![(String::from("the file"), 0, file.seek(SeekFrom::End(0))?)],
+                String::new(),
+            ),
+        };
+        let mut logs = Vec::new();
+        for (place, start, end) in spans {
+            let bytes = end - start;
+            if bytes >= boot_log::PARTITION_BYTES
+                && let Ok(log) = read(&mut file, start)
+            {
+                logs.push((place.clone(), log));
+            }
+            if let Ok(layout) = machine_state::split(bytes)
+                && let Ok(log) = read(&mut file, start + layout.state_offset())
+            {
+                logs.push((format!("{place}, machine state in its last bytes"), log));
+            }
+        }
+        ensure!(
+            !logs.is_empty(),
+            "{} holds no Stela boot log at the start or in the last 16 MiB of any partition{listed}",
+            self.file.display()
+        );
+        Ok(logs)
     }
 
     fn load(&self) -> Result<Log> {
@@ -60,7 +121,7 @@ impl BootLog {
                 let partition = table
                     .partitions
                     .iter()
-                    .find(|partition| partition.unique == guid)
+                    .find(|partition| partition.unique_guid == guid)
                     .with_context(|| {
                         format!(
                             "{} has no partition {guid}; it has:\n{}",
@@ -79,15 +140,7 @@ impl BootLog {
                 (start, start + bytes)
             }
             (None, Some(offset)) => (offset, file.seek(SeekFrom::End(0))?),
-            (None, None) => {
-                let found = table(&self.file)
-                    .map(|(table, block)| format!("; its GPT has:\n{}", listing(&table, block)))
-                    .unwrap_or_default();
-                bail!(
-                    "name the machine-state partition: --partition GUID in a whole-disk image, or \
-                     --offset BYTES for a raw partition (0 when FILE is one){found}"
-                )
-            }
+            (None, None) => unreachable!("`run` finds the logs without a place"),
         };
         // The machine state starts at the partition's start, or in its tail.
         let offset = if self.in_target {
@@ -101,20 +154,22 @@ impl BootLog {
         } else {
             offset
         };
-        let start = offset + boot_log::OFFSET;
-        let mut region = vec![0; boot_log::LOG_BYTES as usize];
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut region).with_context(|| {
-            format!(
-                "{} holds no boot log region at {start:#x}: the machine-state partition needs \
-                 {:#x} bytes",
-                self.file.display(),
-                boot_log::PARTITION_BYTES
-            )
-        })?;
-        boot_log::read(&region)
-            .with_context(|| format!("{} has no boot log at {start:#x}", self.file.display()))
+        read(&mut file, offset).with_context(|| format!("{}", self.file.display()))
     }
+}
+
+/// The boot log of the machine state that starts at byte `state` of `file`.
+fn read(file: &mut File, state: u64) -> Result<Log> {
+    let start = state + boot_log::OFFSET;
+    let mut region = vec![0; boot_log::LOG_BYTES as usize];
+    file.seek(SeekFrom::Start(start))?;
+    file.read_exact(&mut region).with_context(|| {
+        format!(
+            "no boot log region at {start:#x}: the machine-state partition needs {:#x} bytes",
+            boot_log::PARTITION_BYTES
+        )
+    })?;
+    boot_log::read(&region).with_context(|| format!("no boot log at {start:#x}"))
 }
 
 /// What a log holds, one line.
@@ -195,7 +250,7 @@ fn listing(table: &gpt::Table, block: u64) -> String {
         let _ = writeln!(
             text,
             "  {}  {:#x} bytes at {:#x}  {}",
-            partition.unique,
+            partition.unique_guid,
             partition.blocks() * block,
             partition.first_lba * block,
             partition.name
@@ -207,7 +262,8 @@ fn listing(table: &gpt::Table, block: u64) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use stela_runtime::pc::{boot_log::Writer, gpt::Partition};
+    use stela_formats::payload::gpt::{Disk, Partition, Table, encode};
+    use stela_runtime::pc::boot_log::Writer;
 
     /// A partition of a byte vector.
     struct Bytes<'a> {
@@ -268,17 +324,24 @@ pub(crate) mod tests {
         let disk_bytes = (partition_bytes + 2 * mib).max(16 * mib);
         let blocks = disk_bytes / 512;
         let mut bytes = vec![0u8; disk_bytes as usize];
-        let partition = Partition {
-            kind: "0FC63DAF-8483-4772-8E79-3D69D8477DE4".parse().unwrap(),
-            unique: GUID.parse().unwrap(),
-            first_lba: 2048,
-            last_lba: 2048 + partition_bytes / 512 - 1,
-            attributes: 0,
-            name: "machine state".into(),
+        let table = Table {
+            disk_guid: Guid([7; 16]),
+            partitions: vec![Partition {
+                type_guid: "0FC63DAF-8483-4772-8E79-3D69D8477DE4".parse().unwrap(),
+                unique_guid: GUID.parse().unwrap(),
+                first_lba: 2048,
+                last_lba: 2048 + partition_bytes / 512 - 1,
+                attributes: 0,
+                name: "machine state".into(),
+            }],
         };
-        for (lba, block) in gpt::format(blocks, 512, Guid([7; 16]), &[partition]).unwrap() {
-            let at = (lba * 512) as usize;
-            bytes[at..at + block.len()].copy_from_slice(&block);
+        let disk = Disk {
+            block_bytes: 512,
+            blocks,
+        };
+        for write in encode(disk, &table).unwrap() {
+            let at = (write.lba * 512) as usize;
+            bytes[at..at + write.bytes.len()].copy_from_slice(&write.bytes);
         }
         if partition_bytes >= boot_log::PARTITION_BYTES {
             let start = (2048 * 512 + boot_log::OFFSET) as usize;
@@ -315,9 +378,10 @@ pub(crate) mod tests {
         let raw = command(&path, None, Some(2048 * 512)).load().unwrap();
         assert_eq!(raw, log);
 
-        // Without a partition the command lists the GPT's.
-        let error = format!("{:#}", command(&path, None, None).load().unwrap_err());
-        assert!(error.contains(GUID), "{error}");
+        // Without a place the command finds the log itself.
+        let found = command(&path, None, None).find().unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0], (format!("partition {GUID}"), log.clone()));
         let error = format!(
             "{:#}",
             command(&path, Some("5E1A0000-0000-4000-8000-0000000000C1"), None)
@@ -381,5 +445,49 @@ pub(crate) mod tests {
         image(&path, 2 * 1024 * 1024);
         let error = format!("{:#}", command(&path, Some(GUID), None).load().unwrap_err());
         assert!(error.contains("boots it without one"), "{error}");
+        // Without a place, no log anywhere is named with the GPT's partitions.
+        let error = format!("{:#}", command(&path, None, None).find().unwrap_err());
+        assert!(error.contains("holds no Stela boot log"), "{error}");
+        assert!(error.contains(GUID), "{error}");
+    }
+
+    #[test]
+    fn boot_log_finds_logs_at_a_partition_start_and_in_its_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("both.img");
+        let partition_bytes = 20 * 1024 * 1024;
+        image(&path, partition_bytes);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let tail = machine_state::split(partition_bytes)
+            .unwrap()
+            .state_offset();
+        let at = (2048 * 512 + tail + boot_log::OFFSET) as usize;
+        bytes[at..at + boot_log::LOG_BYTES as usize].copy_from_slice(&region(&["in the tail\n"]));
+        std::fs::write(&path, &bytes).unwrap();
+        let found = command(&path, None, None).find().unwrap();
+        let places: Vec<_> = found
+            .iter()
+            .map(|(place, log)| (place.as_str(), log.boots))
+            .collect();
+        assert_eq!(
+            places,
+            [
+                (format!("partition {GUID}").as_str(), 2),
+                (
+                    format!("partition {GUID}, machine state in its last bytes").as_str(),
+                    1
+                ),
+            ]
+        );
+        // A raw partition without a GPT is searched as one.
+        let raw = dir.path().join("raw.img");
+        std::fs::write(
+            &raw,
+            &bytes[2048 * 512..2048 * 512 + partition_bytes as usize],
+        )
+        .unwrap();
+        let found = command(&raw, None, None).find().unwrap();
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].0, "the file");
     }
 }
