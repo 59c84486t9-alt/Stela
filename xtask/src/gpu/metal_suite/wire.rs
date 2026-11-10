@@ -137,6 +137,7 @@ const OPERATIONS: &[(&str, Reach)] = &[
     ("SampleTimestamps", Reach::Call("sampleTimestamps:")),
     ("AllocatedSize", Reach::Call("currentAllocatedSize")),
     ("CommandBufferTimes", Reach::Call("GPUStartTime")),
+    ("CompletedAfter", Reach::Call("encodeWaitForEvent:")),
     ("ShareObject", Reach::Call("newSharedTextureHandle]")),
     ("OpenSharedEvent", Reach::Call("newSharedEventWithHandle:")),
     (
