@@ -294,12 +294,7 @@ pub(super) const GROUPS: &[Group] = &[
         module: "iwlmvm",
         file: "drivers/net/wireless/intel/iwlwifi/mvm/iwlmvm",
         directory: "drivers/net/wireless/intel/iwlwifi/mvm",
-        flags: &[
-            Flag::Literal("-I"),
-            Flag::Literal(
-                "/home/owner/stela-audit-evidence/2026-11-01/wireless-import-294/original/drivers/net/wireless/intel/iwlwifi/mvm/../",
-            ),
-        ],
+        flags: &[Flag::Include("drivers/net/wireless/intel/iwlwifi/mvm/../")],
         sources: &[
             Source {
                 source: "drivers/net/wireless/intel/iwlwifi/mvm/fw",
