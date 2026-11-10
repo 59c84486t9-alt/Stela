@@ -62,6 +62,7 @@ use {
     stela_formats::apfs, stela_formats::apfs::ApfsError, stela_formats::apfs::Container,
     stela_formats::apfs::FileKind, stela_formats::apfs::Volume,
     stela_formats::apfs::uuid_text as apfs_uuid,
+    stela_formats::apfs::volume::APFS_VOL_ROLE_PREBOOT,
     stela_formats::apfs::volume::APFS_VOL_ROLE_RECOVERY, stela_formats::img4,
     stela_formats::payload::ReadAt, stela_formats::payload::gpt::Guid, stela_formats::preboot,
     stela_formats::preboot::BootSet, stela_formats::preboot::SYSTEM_VERSION, stela_formats::sha256,
@@ -78,6 +79,12 @@ pub const ENVIRONMENT: OsEnvironment = OsEnvironment::Recoveryos;
 /// BaseSystem root hash. Each must be recorded in the directory's manifest.
 const REQUIRED: [&[u8; 4]; 6] = [b"krnl", b"dtre", b"sptm", b"trxm", b"bstc", b"csys"];
 const SEP_FIRMWARE_TYPE: &[u8; 4] = b"sepi";
+/// Preboot's directory of the restore source's boot objects, below the
+/// volume group, and the version file restored writes there.
+const RESTORE_DIRECTORY: &str = "restore";
+const RESTORE_SYSTEM_VERSION: &str = "SystemVersion.plist";
+/// A manifest is far smaller; larger files are not read as one.
+const MANIFEST_LIMIT: u64 = 1024 * 1024;
 
 /// Which recoveryOS copy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -513,30 +520,104 @@ impl<R: ReadAt> Reader<'_, R> {
     }
 
     /// `ProductVersion` and `ProductBuildVersion` from the directory's group
-    /// on the volume, when it has a `SystemVersion.plist`.
+    /// on the volume, when it has a `SystemVersion.plist`; for the paired
+    /// copy, otherwise from the restore objects of the same manifest on the
+    /// container's Preboot volume ([`Self::restore_version`]).
     fn system_version(&mut self) -> Result<Option<(String, String)>> {
         let path = format!("{}/{SYSTEM_VERSION}", self.set.volume_group);
-        let device = &mut self.container.device;
-        let inode = match self.volume.lookup(device, &path, true) {
-            Err(ApfsError::NotFound(_)) => return Ok(None),
-            found => found.within(|| refuse!("{path}", path))?,
-        };
-        let bytes = self
-            .volume
-            .read(device, &inode)
-            .within(|| refuse!("{path}", path))?;
-        let text =
-            core::str::from_utf8(&bytes).map_err(|_| refuse!("{path} is not UTF-8", path))?;
-        let field = |key: &str| -> Result<String> {
-            plist_string(text, key)
-                .within(|| refuse!("{path}", path))?
-                .ok_or_else(|| refuse!("{path} has no {key}", path, key).into())
-        };
-        Ok(Some((
-            field("ProductVersion")?,
-            field("ProductBuildVersion")?,
-        )))
+        let volume = self.volume;
+        match version_at(&mut self.container.device, volume, &path)? {
+            None if self.kind == Kind::Paired => self.restore_version(),
+            found => Ok(found),
+        }
     }
+
+    /// The version restored records beside the restore source's boot
+    /// objects, Preboot's `<group>/restore/SystemVersion.plist`, when a
+    /// manifest there is the one that signs this directory (its SHA-384 is
+    /// the directory's name). Known, from 26A434 restores of J775d (boot107):
+    /// the paired Recovery volume's group holds only `boot/` and `usr/`, no
+    /// `SystemVersion.plist`, while restored's MSUBootObjectCopier writes
+    /// `restore/SystemVersion.plist` and `restore/apticket.<model>.<ECID>.im4m`,
+    /// whose SHA-384 names the Recovery boot directory.
+    fn restore_version(&mut self) -> Result<Option<(String, String)>> {
+        let preboot = match self.container.volume_with_role(APFS_VOL_ROLE_PREBOOT) {
+            Err(ApfsError::NotFound(_)) => return Ok(None),
+            found => found?,
+        };
+        let directory = format!("{}/{RESTORE_DIRECTORY}", self.set.volume_group);
+        let device = &mut self.container.device;
+        let Ok(restore) = preboot.lookup(device, &directory, true) else {
+            return Ok(None);
+        };
+        let tickets: Vec<String> = preboot
+            .entries(device, restore.oid)
+            .within(|| refuse!("{directory}", directory))?
+            .into_iter()
+            .filter(|entry| {
+                entry.kind == FileKind::Regular
+                    && entry.name.starts_with("apticket.")
+                    && entry.name.ends_with(".im4m")
+            })
+            .map(|entry| format!("{directory}/{}", entry.name))
+            .collect();
+        let mut signs = false;
+        for path in tickets {
+            let inode = preboot
+                .lookup(device, &path, true)
+                .within(|| refuse!("{path}", path))?;
+            if inode.size > MANIFEST_LIMIT {
+                continue;
+            }
+            let bytes = preboot
+                .read(device, &inode)
+                .within(|| refuse!("{path}", path))?;
+            if names_directory(&bytes, &self.set.boot_hash) {
+                signs = true;
+                break;
+            }
+        }
+        if !signs {
+            return Ok(None);
+        }
+        version_at(
+            device,
+            &preboot,
+            &format!("{directory}/{RESTORE_SYSTEM_VERSION}"),
+        )
+    }
+}
+
+/// Whether `manifest` is the one a boot directory named `boot_hash` is
+/// signed by: the directory's name is the manifest's SHA-384.
+fn names_directory(manifest: &[u8], boot_hash: &str) -> bool {
+    hex::encode_upper(im4m::sha384(manifest)).eq_ignore_ascii_case(boot_hash)
+}
+
+/// `ProductVersion` and `ProductBuildVersion` of the `SystemVersion.plist`
+/// at `path` on `volume`; `None` when it is absent.
+fn version_at<R: ReadAt>(
+    device: &mut apfs::Device<R>,
+    volume: &Volume,
+    path: &str,
+) -> Result<Option<(String, String)>> {
+    let inode = match volume.lookup(device, path, true) {
+        Err(ApfsError::NotFound(_)) => return Ok(None),
+        found => found.within(|| refuse!("{path}", path))?,
+    };
+    let bytes = volume
+        .read(device, &inode)
+        .within(|| refuse!("{path}", path))?;
+    let text = core::str::from_utf8(&bytes).map_err(|_| refuse!("{path} is not UTF-8", path))?;
+    let field = |key: &str| -> Result<String> {
+        plist_string(text, key)
+            .within(|| refuse!("{path}", path))?
+            .ok_or_else(|| refuse!("{path} has no {key}", path, key).into())
+    };
+    Ok(Some((
+        field("ProductVersion")?,
+        field("ProductBuildVersion")?,
+    )))
 }
 
 fn root_string(tree: &DeviceTree, property: &str) -> Result<String> {
@@ -727,6 +808,16 @@ mod tests {
     use {stela_formats::apfs::object::fletcher64, stela_formats::payload::gpt};
 
     const GROUP: &str = "A304C51B-D22F-4CDD-829D-3E30CB5BD87B";
+
+    #[test]
+    fn a_restore_manifest_names_the_directory_its_sha384_spells() {
+        let manifest = b"IM4M synthetic manifest";
+        let name = hex::encode_upper(im4m::sha384(manifest));
+        assert!(names_directory(manifest, &name));
+        assert!(names_directory(manifest, &name.to_ascii_lowercase()));
+        assert!(!names_directory(b"another manifest", &name));
+        assert!(!names_directory(manifest, &name[..94]));
+    }
     const BLOCK: usize = 4096;
     const VOLUME_MAGIC_AT: usize = 32;
     const ROLE_AT: usize = 964;

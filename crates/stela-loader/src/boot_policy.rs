@@ -371,6 +371,32 @@ pub fn apply(
                 domain.to_le_bytes().to_vec(),
                 "boot manifest SDOM",
             )?;
+            // iBoot on chips with extended security domains publishes their
+            // fuses next to `security-domain` and `chip-epoch` (J775D iBoot
+            // 26A434 file 0x255b8..0x255dc, four bytes); AppleImage4 imposes a
+            // manifest's `esdm` on that environment value and fails trust
+            // evaluation without it (`seal_system_volume`, boot106). The
+            // emulated chip is the unit the manifest names, so its fuses hold
+            // the manifest's domain. A manifest without `esdm` names a chip
+            // without them, whose iBoot publishes none.
+            if let Some(extended) = manifest.property("esdm") {
+                let Value::Integer(extended) = extended else {
+                    return Err(refuse!(
+                        "boot manifest esdm is {extended}, expected an integer",
+                        ?extended
+                    )
+                    .into());
+                };
+                let extended = u32::try_from(*extended).map_err(|_| {
+                    refuse!("boot manifest esdm {extended:#x} exceeds u32", extended = *extended)
+                })?;
+                writer.set(
+                    CHOSEN,
+                    "esdm-fuses",
+                    extended.to_le_bytes().to_vec(),
+                    "the emulated chip's extended security domain fuses: boot manifest esdm",
+                )?;
+            }
             manifest_properties(&mut writer, manifest)?;
         }
         None => unresolved.push(

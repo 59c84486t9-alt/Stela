@@ -22,13 +22,23 @@ pub struct Build {
 }
 
 /// Every supported build, newest first.
-pub const SUPPORTED: &[Build] = &[Build {
-    build: "26A434",
-    version: "27.0.1",
-    // The AP's global at 26A434 kernel file offset 0x5bd9bd8.
-    dcp_link_version: 211,
-    rtkit_version: 12,
-}];
+pub const SUPPORTED: &[Build] = &[
+    Build {
+        build: "26B123",
+        version: "27.2",
+        // IOMobileGraphicsFamily-DCP's `link_version__`, at the 26B123
+        // Mac14,3 kernelcache's file offset 0x5c06768.
+        dcp_link_version: 213,
+        rtkit_version: 12,
+    },
+    Build {
+        build: "26A434",
+        version: "27.0.1",
+        // The same global, at the 26A434 kernelcache's file offset 0x5bd9bd8.
+        dcp_link_version: 211,
+        rtkit_version: 12,
+    },
+];
 
 /// The native firmware build setup selects when none is named:
 /// the newest entry admitted by [`SUPPORTED`].
@@ -78,11 +88,12 @@ mod tests {
     fn an_unlisted_build_is_refused_naming_the_supported_ones() {
         assert_eq!(find("26A434").unwrap().dcp_link_version, 211);
         assert_eq!(find("26A434").unwrap().rtkit_version, 12);
-        assert_eq!(DEFAULT.build, "26A434");
+        assert_eq!(find("26B123").unwrap().dcp_link_version, 213);
+        assert_eq!(DEFAULT.build, "26B123");
         let error = find("26B5040").unwrap_err();
         assert_eq!(
             error.to_string(),
-            "macOS build 26B5040 is not supported; this Stela supports 26A434"
+            "macOS build 26B5040 is not supported; this Stela supports 26B123, 26A434"
         );
     }
 }

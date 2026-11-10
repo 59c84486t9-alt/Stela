@@ -118,6 +118,8 @@ fn reduced_security_is_expressed_as_device_tree_data() -> Result<()> {
     );
     assert_eq!(value(CHOSEN, "certificate-security-mode"), boolean(true));
     assert_eq!(value(CHOSEN, "chip-epoch"), 1u32.to_le_bytes());
+    // A manifest without esdm names a chip without extended domain fuses.
+    assert!(tree.property(CHOSEN, "esdm-fuses").is_none());
     for flag in UNIT_FLAGS {
         assert_eq!(value(CHOSEN, flag), boolean(false));
     }
@@ -386,5 +388,44 @@ fn the_root_hash_record_is_forwarded_once_the_boot_manifest_signs_it() -> Result
         )
         .is_err()
     );
+    Ok(())
+}
+
+#[test]
+fn a_manifest_s_extended_security_domain_is_the_chip_s_esdm_fuses() -> Result<()> {
+    let policy = SecurityPolicy {
+        mode: SecurityMode::Reduced,
+        sip_bits: 0,
+        sepfw_load_at_boot: None,
+        kexts: None,
+    };
+    let with = |esdm: &[u8]| {
+        im4m::parse(&manifest(
+            &[
+                entry("CPRO", &der(&[0x01], &[0xff])),
+                entry("CSEC", &der(&[0x01], &[0xff])),
+                entry("SDOM", &der(&[0x02], &[1])),
+                entry("CEPO", &der(&[0x02], &[1])),
+                entry("esdm", esdm),
+            ],
+            &[],
+        ))
+    };
+    for (domain, expected) in [(&[0][..], 0u32), (&[2][..], 2)] {
+        let mut tree = tree();
+        apply(
+            &mut tree,
+            &policy,
+            Some(&with(&der(&[0x02], domain))?),
+            None,
+        )?;
+        assert_eq!(
+            tree.property(CHOSEN, "esdm-fuses").unwrap().value,
+            expected.to_le_bytes()
+        );
+    }
+    // A domain that is not an integer refuses.
+    let mut tree = tree();
+    assert!(apply(&mut tree, &policy, Some(&with(&der(&[0x04], b"x"))?), None).is_err());
     Ok(())
 }
