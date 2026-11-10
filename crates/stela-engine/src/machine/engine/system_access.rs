@@ -88,6 +88,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Synchronization::DataCompletion { nxs: true, .. } => {
                     match self.cpu.registers.implemented(Feature::FEAT_XS) {
                         Ok(true) => {
+                            data_barrier();
                             self.complete_maintenance()?;
                             self.next()
                         }
@@ -101,6 +102,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 // The TLB and instruction cache maintenance this PE posted
                 // completes for the other PEs (`parallel` `post`).
                 Synchronization::DataCompletion { .. } => {
+                    data_barrier();
                     self.complete_maintenance()?;
                     self.mirrors[DATA_BARRIER].readable = 1;
                     self.next()
@@ -112,9 +114,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 | Synchronization::Yield
                 | Synchronization::ConsumptionBarrier
                 | Synchronization::SpeculationBarrier => {
-                    // One PE runs at a time and its accesses complete in
-                    // program order before another runs (`processors`):
-                    // completion and hints have no further effect.
+                    // The engine completes each instruction before the
+                    // next, and x86 keeps the PE's own accesses in program
+                    // order for the others (TSO) apart from store to load,
+                    // which only DSB and DMB order: these have no further
+                    // effect.
                     self.next()
                 }
                 Synchronization::SendEvent { .. } | Synchronization::Wait { .. } => {
@@ -974,9 +978,36 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 }
 
+/// The host fence of a DSB the engine completes: every store this PE made
+/// before it is visible to the other PEs before any later load (x86 orders
+/// store to load only with a fence or a locked instruction). Native code
+/// issues its own MFENCE only while the `DATA_BARRIER` cell is open.
+fn data_barrier() {
+    #[cfg(test)]
+    tests::DATA_BARRIERS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host fences [`data_barrier`] has issued, across every test.
+    pub(super) static DATA_BARRIERS: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+
+    #[test]
+    fn a_dsb_with_no_posted_maintenance_still_fences_the_host() {
+        use core::sync::atomic::Ordering::Relaxed;
+        const DSB_ISH: u32 = 0xd503_3b9f;
+        const DSB_ISHLD: u32 = 0xd503_399f;
+        let mut machine = super::super::tests::machine(&[]);
+        for word in [DSB_ISH, DSB_ISHLD] {
+            let before = DATA_BARRIERS.load(Relaxed);
+            machine.system_instruction(word).unwrap();
+            assert!(DATA_BARRIERS.load(Relaxed) > before, "{word:#x}");
+        }
+    }
 
     #[test]
     fn decoded_operation_reuses_words_across_pcs_and_still_checks_fallthrough() {

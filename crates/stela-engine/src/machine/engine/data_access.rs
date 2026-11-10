@@ -594,13 +594,42 @@ impl<H: Host, D: Devices> Machine<H, D> {
         write: bool,
         cache: bool,
     ) -> Exception {
+        // A stage-2 fault of the instruction's own access, not of a stage-1
+        // walk, carries its instruction syndrome where Arm defines one.
+        let instruction = match fault.second_stage {
+            Some(mmu::SecondStage { walk: false, .. }) if !cache => self
+                .instruction_word()
+                .and_then(crate::machine::exception::load_store_syndrome)
+                .unwrap_or(0),
+            _ => 0,
+        };
         self.abort(
             fault,
             [Class::DataAbortLower, Class::DataAbortSame],
-            fault.data_syndrome(write, cache),
+            fault.data_syndrome(write, cache) | instruction,
             address,
             self.cpu.pc,
         )
+    }
+
+    /// The word at the PC, through an instruction fetch of the current
+    /// regime: `None` where it no longer translates to RAM.
+    fn instruction_word(&mut self) -> Option<u32> {
+        let controls = self.cpu.controls(self.cpu.regime());
+        let requester = self.cpu.requester();
+        let Translated::Mapped(translation) = mmu::translate(
+            &controls,
+            self.cpu.pc,
+            Access::Execute,
+            requester,
+            &mut RamTables(&mut self.host),
+        ) else {
+            return None;
+        };
+        let mut bytes = [0; 4];
+        self.host
+            .read_ram(translation.physical, &mut bytes)
+            .then(|| self.admit(u32::from_le_bytes(bytes)))
     }
 
     /// The abort for a translation fault (Arm `AArch64_Abort` and

@@ -7732,6 +7732,7 @@ fn upper_occupancy_lists_the_mapped_level_one_ranges_and_outermost_blocks() {
 mod floating_point_traps;
 mod pstate_features;
 mod recovery;
+mod stage2_syndrome;
 
 #[test]
 fn host_work_holds_the_shared_count_only_for_a_pe_stopped_in_the_kernel() {

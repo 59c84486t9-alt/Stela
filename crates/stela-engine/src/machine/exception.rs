@@ -230,6 +230,57 @@ pub fn data_abort_iss(status: u32, write: bool) -> u32 {
     status | if write { 1 << 6 } else { 0 }
 }
 
+/// ISS[24:14] of a stage-2 Data Abort on `word` (Arm `ISV`, `SAS`, `SSE`,
+/// `SRT`, `SF`, `AR`): valid for the A64 loads and stores of a single
+/// general-purpose register without writeback, acquire and release forms
+/// included, as Arm requires for ESR_EL2. Exclusives, atomics, pairs,
+/// SIMD&FP registers, writeback forms and prefetches have none (`None`):
+/// the Arm ARM's ISS encoding for an exception from a Data Abort gives them
+/// ISV=0.
+pub fn load_store_syndrome(word: u32) -> Option<u32> {
+    const ISV: u32 = 1 << 24;
+    let rt = word & 31;
+    let size = word >> 30;
+    let opc = (word >> 22) & 3;
+    // LDR/STR (unsigned immediate), LDUR/STUR, LDTR/STTR and the register
+    // offset forms: size, opc and Rt as Arm's load/store register class.
+    let ordinary = word & 0x3f00_0000 == 0x3900_0000
+        || (word & 0x3f20_0000 == 0x3800_0000 && matches!((word >> 10) & 3, 0b00 | 0b10))
+        || word & 0x3f20_0c00 == 0x3820_0800;
+    // LDAPUR/STLUR (FEAT_LRCPC2): the same size and opc, acquire-release.
+    let unscaled_ordered = word & 0x3f20_0c00 == 0x1900_0000;
+    let (bytes_log2, signed, wide, acquire_release) = if ordinary || unscaled_ordered {
+        let (signed, wide) = match (opc, size) {
+            (0 | 1, _) => (false, size == 3),
+            (2, 0..=2) => (true, true),
+            (3, 0 | 1) => (true, false),
+            // PRFM and unallocated forms.
+            _ => return None,
+        };
+        (size, signed, wide, unscaled_ordered)
+    } else if word & 0x3f00_0000 == 0x1800_0000 {
+        // LDR (literal) to a general-purpose register: opc in size's place.
+        match size {
+            0 => (2, false, false, false),
+            1 => (3, false, true, false),
+            2 => (2, true, true, false),
+            _ => return None,
+        }
+    } else if word & 0x3fa0_0000 == 0x0880_0000 || word & 0x3fff_fc00 == 0x38bf_c000 {
+        // LDAR/STLR, LDLAR/STLLR and LDAPR.
+        (size, false, size == 3, true)
+    } else {
+        return None;
+    };
+    Some(
+        ISV | bytes_log2 << 22
+            | u32::from(signed) << 21
+            | rt << 16
+            | u32::from(wide) << 15
+            | u32::from(acquire_release) << 14,
+    )
+}
+
 /// The vector offset from the target EL's VBAR for an exception taken from
 /// `from`: a lower AArch64 EL, or the current EL with SP_EL0 or SP_ELx.
 pub fn vector_offset(from: Pstate, target: u8, vector: Vector) -> u64 {
@@ -274,6 +325,45 @@ pub fn entry_pstate(from: Pstate, sctlr: u64, target: u8, in_host: bool, mte: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_register_accesses_without_writeback_report_their_syndrome() {
+        const ISV: u32 = 1 << 24;
+        let syndrome = |sas: u32, sse: bool, srt: u32, sf: bool, ar: bool| {
+            ISV | sas << 22
+                | u32::from(sse) << 21
+                | srt << 16
+                | u32::from(sf) << 15
+                | u32::from(ar) << 14
+        };
+        for (word, expected) in [
+            (0x7980_0023, syndrome(1, true, 3, true, false)), // ldrsh x3, [x1]
+            (0x79c0_0023, syndrome(1, true, 3, false, false)), // ldrsh w3, [x1]
+            (0xc89f_fc25, syndrome(3, false, 5, true, true)), // stlr x5, [x1]
+            (0xf940_0023, syndrome(3, false, 3, true, false)), // ldr x3, [x1]
+            (0x3900_003f, syndrome(0, false, 31, false, false)), // strb wzr, [x1]
+            (0xb8a2_6823, syndrome(2, true, 3, true, false)), // ldrsw x3, [x1, x2]
+            (0xf840_0823, syndrome(3, false, 3, true, false)), // ldtr x3, [x1]
+            (0xb85f_c023, syndrome(2, false, 3, false, false)), // ldur w3, [x1, #-4]
+            (0x5800_0043, syndrome(3, false, 3, true, false)), // ldr x3, #8
+            (0xb8bf_c023, syndrome(2, false, 3, false, true)), // ldapr w3, [x1]
+            (0xd940_0023, syndrome(3, false, 3, true, true)), // ldapur x3, [x1]
+        ] {
+            assert_eq!(load_store_syndrome(word), Some(expected), "{word:#x}");
+        }
+        for word in [
+            0xf840_8423, // ldr x3, [x1], #8
+            0xf840_8c23, // ldr x3, [x1, #8]!
+            0xc85f_7c23, // ldxr x3, [x1]
+            0xf820_0023, // ldadd x0, x3, [x1]
+            0xa940_0c23, // ldp x3, x3, [x1]
+            0xfd40_0023, // ldr d3, [x1]
+            0xf980_0020, // prfm pldl1keep, [x1]
+            0xc8a0_7c23, // cas x0, x3, [x1]
+        ] {
+            assert_eq!(load_store_syndrome(word), None, "{word:#x}");
+        }
+    }
     use {
         crate::machine::system::File, crate::machine::system::Register, stela_contracts::Feature,
     };
