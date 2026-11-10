@@ -8,6 +8,12 @@
 //! each of blue, green, red and alpha in the top ten bits of a 16-bit word,
 //! writing zeros below. Writes round to the nearest code, ties to even.
 //!
+//! `RGB10A8_2P_XR10` (550) and its sRGB variant (551) hold `BGR10_XR`'s
+//! codes in a plane of 32-bit words whose two top bits Apple GPUs write as
+//! zeros, and 8-bit alpha in a second plane. A Metal texel is the color
+//! plane's word alone (`getBytes:` and buffer copies return it): writing one
+//! keeps the texel's alpha.
+//!
 //! Vulkan has no such format. The device stores these textures as
 //! `R16G16B16A16_SFLOAT` holding the values a read returns (linear values for
 //! the `sRGB` variants), which filtering and blending treat as Metal does;
@@ -24,26 +30,30 @@ pub const STORED_BYTES: usize = 8;
 const ALPHA_ZERO: u32 = 384;
 const ALPHA_ONE: u32 = 894;
 
-/// A format's codes: whether it has alpha and whether its color passes
-/// through the sRGB curve.
+/// A format's codes: whether it has alpha, whether its color passes
+/// through the sRGB curve, and whether it is a two-plane format, whose
+/// alpha is 8-bit and outside its Metal texel.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Codes {
     pub alpha: bool,
     pub srgb: bool,
+    pub planes: bool,
 }
 
 impl Codes {
     /// Bytes of one Metal texel.
     pub const fn metal_bytes(self) -> usize {
-        if self.alpha { 8 } else { 4 }
+        if self.alpha && !self.planes { 8 } else { 4 }
     }
 
-    /// Converts whole Metal texels to stored texels.
+    /// Converts whole Metal texels to stored texels. A two-plane format's
+    /// texel keeps the alpha `stored` holds.
     pub fn store(self, metal: &[u8], stored: &mut [u8]) {
         let texels = metal.chunks_exact(self.metal_bytes());
         for (texel, out) in texels.zip(stored.as_chunks_mut::<STORED_BYTES>().0) {
             let value = self.read(texel);
-            for (channel, half) in value.iter().zip(out.as_chunks_mut::<2>().0) {
+            let channels = if self.planes { 3 } else { 4 };
+            for (channel, half) in value.iter().zip(out.as_chunks_mut::<2>().0).take(channels) {
                 *half = f16_bits(*channel).to_le_bytes();
             }
         }
@@ -68,11 +78,25 @@ impl Codes {
     pub fn quantize(self, value: Texel) -> Texel {
         let mut texel = [0; 8];
         self.write(value, &mut texel);
-        self.read(&texel)
+        let mut read = self.read(&texel);
+        if self.planes {
+            read[3] = alpha8(value[3]);
+        }
+        read
     }
 
-    /// The values a shader reads from one Metal texel.
+    /// The values a shader reads from one Metal texel; a two-plane
+    /// format's alpha, outside it, reads 0.
     fn read(self, texel: &[u8]) -> Texel {
+        if self.planes {
+            let bits = u32::from_le_bytes([texel[0], texel[1], texel[2], texel[3]]);
+            return [
+                self.color(bits >> 20 & 0x3ff),
+                self.color(bits >> 10 & 0x3ff),
+                self.color(bits & 0x3ff),
+                0.0,
+            ];
+        }
         let (blue, green, red, alpha) = if self.alpha {
             let word = |at: usize| u32::from(u16::from_le_bytes([texel[at], texel[at + 1]])) >> 6;
             (word(0), word(2), word(4), word(6))
@@ -93,10 +117,16 @@ impl Codes {
         ]
     }
 
-    /// The Metal texel a write of `value` stores.
+    /// The Metal texel a write of `value` stores: a two-plane format's
+    /// color word, its top two bits zero.
     fn write(self, value: Texel, out: &mut [u8]) {
         let [red, green, blue, alpha] = value;
         let color = |value: f32| self.code(value);
+        if self.planes {
+            let bits = color(blue) | color(green) << 10 | color(red) << 20;
+            out[..4].copy_from_slice(&bits.to_le_bytes());
+            return;
+        }
         let alpha = nearest(f64::from(alpha) * 510.0 + 384.0, ALPHA_ZERO, ALPHA_ONE);
         if self.alpha {
             for (at, code) in [
@@ -132,6 +162,11 @@ impl Codes {
         let value = if value.is_nan() { 0.0 } else { value };
         SRGB_MIDPOINTS.partition_point(|&midpoint| midpoint < value) as u32
     }
+}
+
+/// The value of the 8-bit alpha nearest `alpha`, ties to even, in [0, 1].
+pub fn alpha8(alpha: f32) -> f32 {
+    nearest(f64::from(alpha) * 255.0, 0, 255) as f32 / 255.0
 }
 
 fn linear(code: u32) -> f32 {
@@ -294,14 +329,27 @@ mod tests {
     const LINEAR: Codes = Codes {
         alpha: false,
         srgb: false,
+        planes: false,
     };
     const SRGB: Codes = Codes {
         alpha: false,
         srgb: true,
+        planes: false,
     };
     const ALPHA: Codes = Codes {
         alpha: true,
         srgb: false,
+        planes: false,
+    };
+    const PLANES: Codes = Codes {
+        alpha: true,
+        srgb: false,
+        planes: true,
+    };
+    const PLANES_SRGB: Codes = Codes {
+        alpha: true,
+        srgb: true,
+        planes: true,
     };
 
     fn packed(red: u32, green: u32, blue: u32) -> [u8; 4] {
@@ -398,6 +446,59 @@ mod tests {
         assert_eq!(u16::from_le_bytes([out[6], out[7]]), 384 << 6);
     }
 
+    /// `RGB10A8_2P_XR10` texels an M1 Pro (macOS 27.2) wrote for drawn
+    /// values, as `getBytes:` returned them: the color word alone, its top
+    /// bits zero. The GPU holds the outputs as half floats first (-0.499
+    /// stores code 129, as its half -0.49902 does), as the device does.
+    #[test]
+    fn two_plane_words_match_an_apple_gpu() {
+        for (codes, value, word) in [
+            (PLANES, [-0.75, -0.749, 2.0, -0.75], 0x0020_0bff),
+            (PLANES, [-0.5, -0.499, 1.75, -0.5], 0x0812_07ff),
+            (PLANES, [1.25, 1.251, 0.0, 1.25], 0x3fef_f980),
+            (PLANES, [2.0, 2.002, -0.75, 2.0], 0x3fff_fc02),
+            (PLANES_SRGB, [-0.75, -0.749, 2.0, -0.75], 0x0000_03ff),
+            (PLANES_SRGB, [1.25, 1.251, 0.0, 1.25], 0x3b2e_cd80),
+            (PLANES_SRGB, [2.0, 2.002, -0.75, 2.0], 0x3fff_fc00),
+        ] {
+            let mut out = [0; 4];
+            codes.write(value.map(|v: f32| f16_value(f16_bits(v))), &mut out);
+            assert_eq!(u32::from_le_bytes(out), word, "{codes:?} {value:?}");
+        }
+        // The range's ends: codes 0 and 1023 read -0.7529 and 1.2529, or
+        // through the curve -0.5271 and 1.6749 (the Mac's reads).
+        for (codes, low, high) in [
+            (PLANES, -0.7529412, 1.2529411),
+            (PLANES_SRGB, -0.5271, 1.6749),
+        ] {
+            let read = codes.read(&(1023u32 << 20 | 0xc000_0000).to_le_bytes());
+            assert!((read[0] - high).abs() < 1.3e-4 && (read[2] - low).abs() < 1.3e-4);
+            assert_eq!(codes.quantize([5.0, -5.0, 0.0, 2.0]), {
+                let mut held = codes.read(&(1023u32 << 20 | 384).to_le_bytes());
+                held[3] = 1.0;
+                held
+            });
+        }
+        assert_eq!(PLANES.quantize([0.0, 0.0, 0.0, 0.5])[3], 128.0 / 255.0);
+        assert_eq!(PLANES.quantize([0.0, 0.0, 0.0, -0.5])[3], 0.0);
+    }
+
+    #[test]
+    fn two_plane_texels_keep_their_alpha() {
+        for codes in [PLANES, PLANES_SRGB] {
+            for code in [0u32, 1, 383, 384, 894, 1022, 1023] {
+                let metal = (code | (1023 - code) << 10 | code << 20).to_le_bytes();
+                let mut stored = [0u8; STORED_BYTES];
+                stored[6..8].copy_from_slice(&f16_bits(0.5).to_le_bytes());
+                codes.store(&metal, &mut stored);
+                assert_eq!(f16_value(u16::from_le_bytes([stored[6], stored[7]])), 0.5);
+                let mut back = [0u8; 4];
+                codes.load(&stored, &mut back);
+                assert_eq!(back, metal, "{codes:?} {code}");
+            }
+        }
+    }
+
     #[test]
     fn every_code_survives_half_float_storage() {
         for codes in [
@@ -407,6 +508,7 @@ mod tests {
             Codes {
                 alpha: true,
                 srgb: true,
+                planes: false,
             },
         ] {
             for code in 0..1024u32 {

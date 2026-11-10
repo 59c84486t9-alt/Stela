@@ -25,6 +25,9 @@ pub(crate) mod fixture;
 pub mod gpu_times;
 pub mod indirect;
 pub mod lifecycle;
+mod memory_book;
+pub use memory_book::MemoryOwner;
+pub mod pass_times;
 pub mod pipelines;
 pub mod queue;
 pub mod resources;
@@ -154,6 +157,9 @@ pub struct Device<B: Backend, C: Compiler> {
     unreported: Vec<&'static str>,
     /// The phases of the call it serves now, for the platform's log.
     timing: Recorder,
+    /// Who owned the GPU addresses of whole allocations, for a lost
+    /// device's report.
+    book: memory_book::MemoryBook,
 }
 
 /// What a device holds at one moment.
@@ -307,6 +313,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             unsupported: Vec::new(),
             unreported: Vec::new(),
             timing: Recorder::default(),
+            book: memory_book::MemoryBook::default(),
         })
     }
 
@@ -363,8 +370,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     }
 
     fn defer_allocation(&mut self, object: Object, allocated: u64) {
-        if !self.lost && self.submitted <= self.completed {
-            self.backend.destroy(object);
+        if let Object::Memory(memory) = object {
+            self.book.release(memory, self.submitted);
+        }
+        if !self.lost && self.submitted <= self.freeable() {
+            self.destroy_now(object);
             self.allocated -= allocated;
         } else {
             self.deferred.push_back((self.submitted, object, allocated));
@@ -385,6 +395,35 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     fn release_memory(&mut self, memory: Memory, bytes: u64) {
         self.defer_allocation(Object::Memory(memory), bytes);
+    }
+
+    /// Destroys `object` now that no submitted work uses it; freed memory
+    /// leaves the book as of the completed serial.
+    fn destroy_now(&mut self, object: Object) {
+        if let Object::Memory(memory) = object {
+            self.book.free(memory, self.completed);
+        }
+        self.backend.destroy(object);
+    }
+
+    /// Notes `memory`, a whole allocation of `bytes` that `what` owns, in
+    /// the book; memory placed in a block is not, as freeing it unmaps
+    /// nothing.
+    fn book_memory(
+        &mut self,
+        memory: Memory,
+        bytes: u64,
+        what: impl FnOnce() -> alloc::string::String,
+    ) {
+        if self.backend.whole_memory(memory) {
+            self.book.note(memory, bytes, what(), self.submitted);
+        }
+    }
+
+    /// The newest frees of whole allocations and the live ranges either
+    /// side, which name what the address of a GPU MMU fault held.
+    pub fn memory_book_report(&self) -> Vec<alloc::string::String> {
+        self.book.report(self.submitted)
     }
 }
 

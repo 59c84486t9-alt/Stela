@@ -1202,8 +1202,11 @@ StelaGPUEvent *stela_event(StelaGPUDevice *device, id event)
 		secondOffset = (uint8_t *)IOSurfaceGetBaseAddressOfPlane(surface, 1) - base;
 		secondBytesPerRow = IOSurfaceGetBytesPerRowOfPlane(surface, 1) / IOSurfaceGetElementHeightOfPlane(surface, 1);
 		/* A pair of 8- or 16-bit components, as the format's first plane's
-		 * element is one. */
-		NSUInteger secondRow = IOSurfaceGetWidthOfPlane(surface, 1) * 2 * format.block_bytes;
+		 * element is one; RGB10A8_2P_XR10's (550, 551) second plane is a
+		 * byte of alpha. */
+		NSUInteger pixelFormat = [descriptor pixelFormat];
+		NSUInteger secondTexel = pixelFormat == 550 || pixelFormat == 551 ? 1 : 2 * format.block_bytes;
+		NSUInteger secondRow = IOSurfaceGetWidthOfPlane(surface, 1) * secondTexel;
 		if (IOSurfaceGetPixelFormat(surface) >> 24 == '&' && secondBytesPerRow < secondRow) {
 			secondBytesPerRow = secondRow;
 		}
@@ -1311,8 +1314,12 @@ StelaGPUEvent *stela_event(StelaGPUDevice *device, id event)
 	StelaGPUHeap *heap = [[StelaGPUHeap alloc] initWithDevice:self handle:response.handle];
 	heap->_contents = contents;
 	heap->_mappedBytes = mapped;
-	heap->_size = request.size;
 	heap->_options = options;
+	/* The service answers the capacity, whole pages as on a Mac. */
+	heap->_size = [heap usageForAlignment:1].size;
+	if (heap->_size == 0) {
+		heap->_size = request.size;
+	}
 	heap->_type = request.heap_type;
 	return heap;
 }

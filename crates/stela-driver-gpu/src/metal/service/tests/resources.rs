@@ -298,6 +298,7 @@ fn heaps_place_resources_and_report_their_usage() {
     .unwrap();
     assert_eq!(usage.used_size, size.size);
     assert_eq!(usage.max_available_size, (1 << 20) - size.size);
+    assert_eq!(usage.size, 1 << 20);
 
     let aliasable = |service: &mut TestService, handle| {
         status(call::<_, Empty>(
@@ -315,6 +316,39 @@ fn heaps_place_resources_and_report_their_usage() {
         Status::Invalid
     );
     assert_eq!(release(&mut service, connection, buffer.handle), Status::Ok);
+    assert_eq!(release(&mut service, connection, heap.handle), Status::Ok);
+}
+
+/// A heap's capacity is whole pages, as a Mac answers `size` and
+/// `currentAllocatedSize`: a heap of 100 bytes holds 16 KiB.
+#[test]
+fn heaps_answer_whole_pages() {
+    let mut service = service_on(MockBackend::new());
+    let connection = connect(&mut service);
+    let memory = &mut Memory::default();
+    let heap = HeapDescriptorRecord {
+        memory: 0,
+        size: 100,
+        options: options(StorageMode::Private),
+        heap_type: HeapType::Automatic.raw(),
+        sparse_page_size: SparsePageSize::Size16.raw(),
+    };
+    let heap: Handle = call(&mut service, connection, Operation::NewHeap, &heap, memory).unwrap();
+    let usage: HeapUsageResponse = call(
+        &mut service,
+        connection,
+        Operation::HeapUsage,
+        &HeapUsageRequest {
+            heap: heap.handle,
+            alignment: 128,
+        },
+        memory,
+    )
+    .unwrap();
+    assert_eq!(
+        (usage.used_size, usage.max_available_size, usage.size),
+        (0, 16_384, 16_384)
+    );
     assert_eq!(release(&mut service, connection, heap.handle), Status::Ok);
 }
 

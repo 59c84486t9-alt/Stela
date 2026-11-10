@@ -537,7 +537,7 @@ pub struct Specialization {
     pub storage_attachments: [Option<StorageAttachment>; MAX_COLOR_ATTACHMENTS],
     pub samples: u32,
     /// A fragment function's color attachments of extended-range formats,
-    /// two bits each by index (`enum stela_air_extended_range`): it clamps
+    /// three bits each by index (`enum stela_air_extended_range`): it clamps
     /// their outputs to the values the formats encode.
     pub extended_range: u32,
     /// The function's library's narrowing floating-point conversions round

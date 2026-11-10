@@ -125,6 +125,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 (fault.status, fault.reason)
             }
             Err(fault) => {
+                let mut book = Vec::new();
                 self.refused.push(match self.device.take_refusal() {
                     Some(refusal) => format!(
                         "{fault} in operation {} in {} at {}: {}",
@@ -132,6 +133,9 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     ),
                     None if fault.status == Status::DeviceLost && !self.loss_described => {
                         self.loss_described = true;
+                        // What the GPU addresses near a fault held: the
+                        // host kernel names the address and its neighbours.
+                        book = self.device.memory_book_report();
                         format!(
                             "{fault} in operation {} running {}",
                             call.operation,
@@ -159,6 +163,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                     }
                     None => format!("{fault} in operation {}", call.operation),
                 });
+                self.refused.append(&mut book);
                 match fault.raw {
                     Some(_) => {
                         detailed = format!("{fault}");

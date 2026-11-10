@@ -1180,11 +1180,14 @@ impl Derivation<'_> {
         let raster = shaders.contains(ShaderFeatures::VERTEX_FRAGMENT);
         // Shader writes would skip a stored encoding's clamping, and only
         // an exact encoding's texels lie in a buffer or sparse tile as Metal's.
+        // The two-plane extended-range formats' writes hold their half
+        // floats to the codes (`ResourceId::EXTENDED_STORAGE`).
         let exact = realization.encoding.is_exact();
+        let held = matches!(realization.encoding, Encoding::ExtendedRange(codes) if codes.planes);
         let identity = realization.is_identity();
         let storage = color
             && identity
-            && exact
+            && (exact || held)
             && optimal.contains(F::STORAGE_IMAGE | F::STORAGE_WRITE_WITHOUT_FORMAT)
             && features.shader_storage_image_write_without_format
             && shaders.contains(ShaderFeatures::TEXTURE_READ_WRITE);

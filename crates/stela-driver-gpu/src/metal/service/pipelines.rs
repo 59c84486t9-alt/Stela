@@ -83,14 +83,30 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     }
 
     /// A render pipeline's functions and vertex fetch, for the platform's
-    /// log: `PIPELINE vertex=… fragment=… attributes=[index:format@offset/buffer …]
-    /// layouts=[buffer:stride/step/rate …]`.
+    /// log: `PIPELINE vertex=… fragment=… [vertex_linked=[…]]
+    /// [fragment_linked=[…]] attributes=[index:format@offset/buffer …]
+    /// layouts=[buffer:stride/step/rate …]`. The linked lists name the
+    /// visible functions a stage's function tables and references reach,
+    /// such as a framework's custom shaders.
     fn describe_render_pipeline(&self, pipeline: &RenderPipelineRequest) -> String {
         use core::fmt::Write;
         let entry = |id: FunctionId| self.device.function_entry(id).unwrap_or("?");
         let mut text = format!("PIPELINE vertex={}", entry(pipeline.vertex_function));
         let fragment = pipeline.fragment_function.map_or("-", entry);
         let _ = write!(text, " fragment={fragment}");
+        for (stage, linked) in [
+            ("vertex", &pipeline.vertex_linked_functions),
+            ("fragment", &pipeline.fragment_linked_functions),
+        ] {
+            let mut names = linked.functions.iter().chain(&linked.private_functions);
+            if let Some(&first) = names.next() {
+                let _ = write!(text, " {stage}_linked=[{}", entry(first));
+                for &id in names {
+                    let _ = write!(text, ",{}", entry(id));
+                }
+                text.push(']');
+            }
+        }
         if let Some(vertex) = &pipeline.vertex_descriptor {
             text.push_str(" attributes=[");
             for attribute in &vertex.attributes {

@@ -3,7 +3,7 @@ use super::{
     counters::{CounterRange, CounterSample},
     device_generated::{GeneratedLayoutKey, GeneratedWork, IndirectRenderClass},
     indirect::ExecutionRange,
-    render::{PassBoundary, PatchSource, Viewport},
+    render::{PassBoundary, PatchSource, ScissorRect, Viewport},
     *,
 };
 use crate::metal::{
@@ -2197,6 +2197,87 @@ fn bindings_validate_slots_and_offsets() {
             .set_compute_sampler(&mut resolver, ResourceId(5), None, 16)
             .is_err()
     );
+}
+
+/// A pass that loads an IOSurface's extended-range planes decodes and
+/// encodes only what its draws' scissors covered; a tile dispatch reaches
+/// every pixel, so the whole extent.
+#[test]
+fn surface_plane_conversions_cover_what_the_pass_drew() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let planes = crate::metal::pass::ExtendedPlanes {
+        storage: ResourceId(0x55),
+        encoding: 9,
+        extent: [64, 32],
+        layers: 1,
+        color: 1 << 40,
+        color_bytes_per_row: 256,
+        alpha: 2 << 40,
+        alpha_bytes_per_row: 64,
+        loads: true,
+        stores: true,
+        narrows: true,
+        decodes_whole: false,
+    };
+    let record = |scissors: &[ScissorRect]| {
+        let mut resolver = MockResolver::default();
+        let mut commands = CommandBuffer::new(FEATURES);
+        let mut plan = pass(&color, StoreAction::Store, false);
+        plan.inputs.extended_planes[0] = Some(planes);
+        commands
+            .begin_render(&mut resolver, plan, None, Vec::new())
+            .unwrap();
+        commands
+            .set_render_pipeline_state(&render_state(1))
+            .unwrap();
+        commands
+            .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
+            .unwrap();
+        for scissor in scissors {
+            commands.set_scissor_rects(&[*scissor]).unwrap();
+            commands
+                .draw_primitives(&mut resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
+                .unwrap();
+        }
+        commands.end_encoding(&mut resolver).unwrap();
+        let recording = commit(commands, &mut resolver, (Semaphore(1), 1));
+        recording.segments[0]
+            .commands
+            .iter()
+            .filter_map(|command| match *command {
+                Command::StoreTexels { arguments, count }
+                | Command::LoadTexels { arguments, count } => {
+                    let encoded = uploaded(&recording, arguments);
+                    Some((
+                        count,
+                        double(encoded, 0),
+                        [24, 28, 40, 44].map(|at| word(encoded, at)),
+                        double(encoded, 56),
+                    ))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let rect = |x, y, width, height| ScissorRect {
+        x,
+        y,
+        width,
+        height,
+    };
+    // Two draws: the union of their scissors, 8..40 by 4..20.
+    let drawn = record(&[rect(8, 4, 16, 8), rect(24, 12, 16, 8)]);
+    let narrowed = (
+        32 * 16,
+        (1 << 40) + 4 * 256 + 8 * 4,
+        [32, 16, 8, 4],
+        (2 << 40) + 4 * 64 + 8,
+    );
+    assert_eq!(drawn, [narrowed, narrowed]);
+    // Nothing drawn: an empty decode, and nothing to encode.
+    let none = record(&[]);
+    assert_eq!(none.len(), 1);
+    assert_eq!(none[0].0, 0);
 }
 
 #[test]

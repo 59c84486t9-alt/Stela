@@ -277,7 +277,9 @@ records! {
 
     /// An attachment of a render pass: its texture (zero for none), the
     /// slice, level and depth plane it renders to, those of its resolve
-    /// texture (zero for none), and its actions.
+    /// texture (zero for none), and its actions. A texture over an IOSurface
+    /// names the surface's ID and its seed as the pass was encoded
+    /// (`IOSurfaceGetID`, `IOSurfaceGetSeed`), zero for others.
     pub struct PassAttachmentRecord {
         pub texture: u64,
         pub level: u64,
@@ -290,6 +292,8 @@ records! {
         pub load_action: u64,
         pub store_action: u64,
         pub store_action_options: u64,
+        pub surface: u32,
+        pub seed: u32,
     }
 
     /// `MTLRenderPassColorAttachmentDescriptor`.

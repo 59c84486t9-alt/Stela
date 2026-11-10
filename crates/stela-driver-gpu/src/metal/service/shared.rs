@@ -799,6 +799,21 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             .map(|mut turn| turn.device().take_gpu_times())
     }
 
+    /// `--profile`'s GPU time per pass since the last call, unless a call
+    /// holds the service now or passes are not profiled
+    /// ([`set_pass_profile`](crate::metal::device::pass_times::set_pass_profile)).
+    pub fn pass_times(&self) -> Option<crate::metal::device::pass_times::PassTimes> {
+        self.try_turn()
+            .and_then(|mut turn| turn.device().take_pass_times())
+    }
+
+    /// Whether the device has GPU timestamps, without which passes are not
+    /// timed; `None` while a call holds the service.
+    pub fn has_timestamps(&self) -> Option<bool> {
+        self.try_turn()
+            .map(|mut turn| turn.device().capabilities().timestamp_frequency != 0)
+    }
+
     /// The GPU interrupted: look for what completed now or, while a call
     /// holds the service, once it leaves.
     pub fn interrupted(&self) {

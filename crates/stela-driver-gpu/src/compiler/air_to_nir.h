@@ -95,6 +95,16 @@ typedef nir_def *(*stela_air_resource_id)(nir_builder *b, const struct stela_air
                                           const struct stela_air_sampler *sampler,
                                           nir_def *element, void *data);
 
+/* How a texture's storage images hold extended-range codes
+ * (stela_air_options' texture_extended_storage). */
+enum stela_air_extended_storage {
+   STELA_AIR_EXTENDED_STORAGE_NONE,
+   /* Half floats of RGB10A8_2P_XR10's codes and 8-bit alpha. */
+   STELA_AIR_EXTENDED_STORAGE_CODES,
+   /* The same, the codes through the sRGB curve mirrored below zero. */
+   STELA_AIR_EXTENDED_STORAGE_SRGB,
+};
+
 /* What a texture argument's binding says, or with id what the identifier an
  * argument buffer holds does (texture is then NULL). */
 typedef nir_def *(*stela_air_texture_query)(nir_builder *b,
@@ -143,6 +153,13 @@ enum stela_air_planes {
    STELA_AIR_PLANES_YCBCR = 4,
    STELA_AIR_PLANES_TEN_BIT = 8,
    STELA_AIR_PLANES_VIDEO = 16,
+   /* Apple's RGB10A8_2P_XR10: the first plane holds blue, green and red
+    * extended-range codes from bit 0 of a 32-bit word, read through an
+    * A2B10G10R10 UNORM view, each reading (code - 384) / 510, through the
+    * sRGB curve mirrored below zero with STELA_AIR_PLANES_XR10_SRGB; the
+    * second plane holds 8-bit alpha. */
+   STELA_AIR_PLANES_XR10 = 32,
+   STELA_AIR_PLANES_XR10_SRGB = 64,
 };
 
 /* AIR's indirect command functions (air_commands.c), as Metal's
@@ -461,6 +478,11 @@ struct stela_air_options {
     * sRGB format's texels, whose color channels the shader encodes as it
     * writes and decodes as it reads; NULL when none do. */
    stela_air_texture_query texture_srgb_storage;
+   /* A write or read_write float texture's enum stela_air_extended_storage:
+    * whether its storage images hold a two-plane extended-range format's
+    * half floats, which the shader holds to the format's codes and 8-bit
+    * alpha as it writes; NULL when none do. */
+   stela_air_texture_query texture_extended_storage;
    /* Whether a sampler compares with Metal's Never, through which a
     * comparison is zero though Vulkan's sampler for it does not compare;
     * NULL leaves comparisons to the sampler bind_sampler resolves. */
@@ -598,8 +620,18 @@ enum stela_air_extended_range {
    /* The same codes through the sRGB curve, mirrored below zero; the
     * attachment holds the linear values. */
    STELA_AIR_EXTENDED_RANGE_SRGB,
+   /* RGB10A8_2P_XR10's codes, linear or through the curve, and 8-bit
+    * alpha, of an attachment the pipeline blends: Apple GPUs blend the
+    * output as the texture holds it. The device renders these formats as
+    * half floats and encodes them where the pass ends. */
+   STELA_AIR_EXTENDED_RANGE_PLANES_HELD,
+   STELA_AIR_EXTENDED_RANGE_PLANES_HELD_SRGB,
+   /* RGB10A8_2P_XR10 unblended: the output as Apple GPUs' tile memory
+    * holds it, each channel its nearest half, ties to even, which tile
+    * functions read unclamped; the pass's end clamps it to the codes. */
+   STELA_AIR_EXTENDED_RANGE_PLANES,
 };
-#define STELA_AIR_EXTENDED_RANGE_BITS 2u
+#define STELA_AIR_EXTENDED_RANGE_BITS 3u
 
 struct stela_air_stage_options {
    enum stela_air_stage stage;
@@ -648,7 +680,7 @@ struct stela_air_stage_options {
    const struct stela_air_attachment_access *attachments;
    unsigned samples;
    /* A fragment function's color attachments of Apple's extended-range
-    * formats, two bits each by location (enum stela_air_extended_range),
+    * formats, three bits each by location (enum stela_air_extended_range),
     * which the device stores as half floats: the function clamps its
     * outputs to the range the formats encode, as their stores do. */
    unsigned extended_range;

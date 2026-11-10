@@ -662,10 +662,14 @@ void stela_tile_size(id descriptor, NSUInteger *width, NSUInteger *height)
 	*height = h < 16 ? 16 : h > w ? w : h;
 }
 
+/* An attachment over an IOSurface names the surface and its seed, which a
+ * CPU's writes change: the device then knows when the surface changed under
+ * what it rendered there before. */
 static void pass_attachment(id attachment, StelaPassAttachmentRecord *record)
 {
 	StelaGPUTexture *texture = [attachment texture];
 	StelaGPUTexture *resolve = [attachment resolveTexture];
+	IOSurfaceRef surface = texture ? texture->_surface : NULL;
 	*record = (StelaPassAttachmentRecord){
 		.texture = texture ? texture->_handle : 0,
 		.level = [attachment level],
@@ -678,6 +682,8 @@ static void pass_attachment(id attachment, StelaPassAttachmentRecord *record)
 		.load_action = [attachment loadAction],
 		.store_action = [attachment storeAction],
 		.store_action_options = [attachment storeActionOptions],
+		.surface = surface ? IOSurfaceGetID(surface) : 0,
+		.seed = surface ? IOSurfaceGetSeed(surface) : 0,
 	};
 }
 

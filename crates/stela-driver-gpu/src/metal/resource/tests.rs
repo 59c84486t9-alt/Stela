@@ -294,6 +294,35 @@ fn srgb_textures_store_through_their_linear_pair() {
     assert!(!plan.views.srgb_storage);
 }
 
+/// Shaders write the two-plane extended-range formats as an Apple GPU does,
+/// holding their half floats to the codes: their storage views say so, and
+/// through the sRGB curve for the sRGB format.
+#[test]
+fn extended_range_textures_are_written_through_their_codes() {
+    for (format, srgb) in [
+        (PixelFormat::Rgb10A8_2pXr10, false),
+        (PixelFormat::Rgb10A8_2pXr10Srgb, true),
+    ] {
+        let mut written = descriptor(TextureType::D2, format);
+        written.usage = TextureUsage::SHADER_READ | TextureUsage::SHADER_WRITE;
+        let plan = texture(&capabilities(), &written).unwrap();
+        assert_eq!(
+            plan.views.storage.unwrap().format,
+            Format::R16G16B16A16Sfloat
+        );
+        assert_eq!(plan.views.extended_storage, Some(srgb));
+        assert!(!plan.views.srgb_storage);
+        // A render target's kernels keep their writes too, as on Apple GPUs.
+        written.usage = TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET;
+        let plan = texture(&capabilities(), &written).unwrap();
+        assert_eq!(plan.views.extended_storage, Some(srgb));
+    }
+    // Other extended-range formats still refuse them.
+    let mut other = descriptor(TextureType::D2, PixelFormat::Bgr10Xr);
+    other.usage = TextureUsage::SHADER_WRITE;
+    assert!(texture(&capabilities(), &other).is_err());
+}
+
 #[test]
 fn managed_textures_use_host_image_copies() {
     let mut managed = descriptor(TextureType::D2, PixelFormat::Rgba8Unorm);

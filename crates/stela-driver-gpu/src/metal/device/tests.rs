@@ -24,7 +24,7 @@ use crate::metal::{
         device_generated::{GeneratedLayoutKey, GeneratedWork},
         indirect::ExecutionRange,
     },
-    heap::HeapDescriptor,
+    heap::{HeapDescriptor, PAGE, SizeAndAlign},
     indirect::{IndirectCommandBufferDescriptor, RecordLayout},
     nvidia::{CHIPS, PcieLink},
     pipeline::{
@@ -692,6 +692,143 @@ fn heaps_of_the_answered_size_hold_the_texture() {
     }
 }
 
+/// A heap holds as many textures as a Mac's does, whatever the backend's
+/// layout of them: 1,024 8x8 R8 textures fill 128 KiB, the heap counts each
+/// as 128 bytes, and one made aliasable gives its room to the next. A heap
+/// of 100 bytes holds a page, as on a Mac.
+#[test]
+fn heaps_hold_as_many_textures_as_a_macs() {
+    let mut device = device();
+    let heap = |device: &mut TestDevice, size| {
+        device
+            .new_heap(&HeapDescriptor {
+                size,
+                options: options(StorageMode::Private),
+                heap_type: HeapType::Automatic,
+                sparse_page_size: SparsePageSize::Size64,
+            })
+            .unwrap()
+    };
+    let glyphs = heap(&mut device, 131_072);
+    let mut glyph = texture(PixelFormat::R8Unorm, TextureUsage::SHADER_READ);
+    (glyph.width, glyph.height) = (8, 8);
+    assert_eq!(
+        device.heap_texture_size_and_align(&glyph).unwrap(),
+        SizeAndAlign {
+            size: 128,
+            align: 128
+        }
+    );
+    let mut placed = Vec::new();
+    while let Ok(texture) = device.new_heap_texture(glyphs, &glyph, None) {
+        placed.push(texture);
+    }
+    assert_eq!(placed.len(), 1024);
+    assert_eq!(device.heap_usage(glyphs, 128).unwrap(), (131_072, 0));
+    assert_eq!(
+        device.texture_placement(placed[1]).unwrap().heap_offset,
+        128
+    );
+    assert_eq!(
+        device.texture_placement(placed[1]).unwrap().allocated_size,
+        128
+    );
+    device.make_texture_aliasable(placed[0]).unwrap();
+    assert_eq!(
+        device.heap_usage(glyphs, 128).unwrap(),
+        (131_072 - 128, 128)
+    );
+    placed.push(device.new_heap_texture(glyphs, &glyph, None).unwrap());
+    for texture in placed {
+        device.destroy_texture(texture).unwrap();
+    }
+    assert_eq!(device.heap_usage(glyphs, 128).unwrap(), (0, 131_072));
+    device.destroy_heap(glyphs).unwrap();
+
+    let small = heap(&mut device, 100);
+    assert_eq!(device.heap_usage(small, 1).unwrap(), (0, PAGE));
+    assert_eq!(device.heap_occupancy(small).unwrap(), (PAGE, 0));
+    device.destroy_heap(small).unwrap();
+}
+
+/// The heaps Core Animation filled on the guest, as a Mac (M1 Pro, macOS
+/// 27) fills them: a heap holds its size and no more, so a second 66,560
+/// byte R16Float mask does not fit 128 KiB, and the heap answers usedSize
+/// and maxAvailableSizeWithAlignment: 128 and 16,384 as the Mac does after
+/// each texture.
+#[test]
+fn heaps_refuse_what_a_macs_refuse() {
+    let mut device = device();
+    let drawn = TextureUsage::SHADER_READ | TextureUsage::RENDER_TARGET;
+    // Heap size, format, width, height, then (used, max at 128, max at
+    // 16 KiB) after each texture that fits; the next one does not.
+    type Sequence = (u64, PixelFormat, u64, u64, &'static [(u64, u64, u64)]);
+    let cases: [Sequence; 6] = [
+        (
+            131_072,
+            PixelFormat::R16Float,
+            72,
+            151,
+            &[(66_560, 64_512, 49_152)],
+        ),
+        (
+            131_072,
+            PixelFormat::R16Float,
+            113,
+            153,
+            &[(66_560, 64_512, 49_152)],
+        ),
+        (
+            196_608,
+            PixelFormat::R16Float,
+            248,
+            81,
+            &[(66_560, 130_048, 114_688), (133_120, 63_488, 49_152)],
+        ),
+        (
+            65_536,
+            PixelFormat::Rgba16Float,
+            36,
+            35,
+            &[(32_896, 32_640, 16_384)],
+        ),
+        (65_536, PixelFormat::Rgba16Float, 68, 67, &[]),
+        (65_536, PixelFormat::Rgba16Float, 122, 67, &[]),
+    ];
+    for (size, format, width, height, after) in cases {
+        let heap = device
+            .new_heap(&HeapDescriptor {
+                size,
+                options: options(StorageMode::Private),
+                heap_type: HeapType::Automatic,
+                sparse_page_size: SparsePageSize::Size64,
+            })
+            .unwrap();
+        let mut descriptor = texture(format, drawn);
+        (descriptor.width, descriptor.height) = (width, height);
+        let mut placed = Vec::new();
+        for &(used, max, max_page) in after {
+            placed.push(device.new_heap_texture(heap, &descriptor, None).unwrap());
+            assert_eq!(
+                device.heap_usage(heap, 128).unwrap(),
+                (used, max),
+                "{format:?} {width}x{height} in {size}"
+            );
+            assert_eq!(device.heap_usage(heap, PAGE).unwrap().1, max_page);
+        }
+        assert_eq!(
+            device.new_heap_texture(heap, &descriptor, None),
+            Err(Error::HeapFull),
+            "{format:?} {width}x{height} in {size}"
+        );
+        assert_eq!(device.heap_occupancy(heap).unwrap().0, size);
+        for texture in placed {
+            device.destroy_texture(texture).unwrap();
+        }
+        device.destroy_heap(heap).unwrap();
+    }
+}
+
 /// A full automatic heap answers nil as Metal does, which is no shortage
 /// of device memory.
 #[test]
@@ -711,6 +848,13 @@ fn a_full_heap_is_not_out_of_memory() {
     assert_eq!(
         device.new_heap_texture(heap, &descriptor, None),
         Err(Error::HeapFull)
+    );
+    // The rest of the heap's last page holds a small buffer, as on a Mac.
+    let rest = answered.size.next_multiple_of(crate::metal::heap::PAGE) - answered.size;
+    assert!(
+        device
+            .new_heap_buffer(heap, rest, options(StorageMode::Private), None)
+            .is_ok()
     );
     assert_eq!(
         device.new_heap_buffer(heap, 64, options(StorageMode::Private), None),
@@ -2573,6 +2717,7 @@ fn render_passes_resolve_cached_attachment_views() {
                 store_action: StoreAction::Store,
                 store_action_options: StoreActionOptions::EMPTY,
                 clear: [1.0, 0.0, 0.0, 1.0],
+                surface: None,
             });
             colors
         },
@@ -2606,6 +2751,58 @@ fn render_passes_resolve_cached_attachment_views() {
     }
     assert_eq!(views[0], views[1], "the attachment view is created once");
     let _ = PrimitiveType::Triangle;
+
+    // The profile marks where the work changes kind and names each span.
+    device.set_pass_profile(true);
+    let buffer = device
+        .new_buffer(4096, options(StorageMode::Private))
+        .unwrap();
+    let buffer = device.buffer(buffer).unwrap();
+    let mut commands = device.new_command_buffer();
+    commands.begin_blit().unwrap();
+    commands
+        .fill_buffer(&mut device.resolver(), buffer, 0, 4096, 7)
+        .unwrap();
+    commands.end_encoding(&mut device.resolver()).unwrap();
+    device.begin_render(&mut commands, &request).unwrap();
+    commands.end_encoding(&mut device.resolver()).unwrap();
+    let serial = device.commit(commands).unwrap();
+    let segment = &device.backend().submissions.last().unwrap()[0];
+    let order: Vec<_> = segment
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::FillBuffer { .. } => Some("fill"),
+            Command::BeginRendering(_) => Some("begin"),
+            Command::EndRendering => Some("end"),
+            Command::WriteTimestamp { .. } => Some("mark"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        order,
+        ["mark", "fill", "mark", "begin", "end", "mark", "mark"]
+    );
+    let pool = device.backend().query_pools.last().unwrap().1;
+    assert_eq!(pool.count, pass_times::PROFILE_MARKS + 2);
+    device.backend().queries_ready = true;
+    complete(&mut device, serial);
+    let passes = device.take_pass_times().unwrap();
+    assert_eq!(passes.command_buffers, 1);
+    assert_eq!(passes.spans, 3);
+    assert_eq!(passes.submits.total, 1);
+    assert_eq!(passes.passes.total, 1);
+    let keys: Vec<_> = passes.entries.keys().map(String::as_str).collect();
+    assert_eq!(
+        keys,
+        [
+            "idle:-",
+            "render:-@128x128/Rgba8Unorm/optimal",
+            "transfer:-"
+        ]
+    );
+    device.set_pass_profile(false);
+    assert_eq!(device.take_pass_times(), None);
 }
 
 #[test]
@@ -3444,6 +3641,33 @@ fn imported_heap_allocations_are_counted_once_through_retirement() {
     assert_eq!(device.retired(), None);
 }
 
+/// A shared heap of 100 bytes lives in the page the guest maps for it and
+/// holds that page, as on a Mac.
+#[test]
+fn imported_heaps_hold_whole_pages() {
+    let mut device = device();
+    let token = core::num::NonZeroU64::new(11).unwrap();
+    let ranges = [stela_contracts::gate::MemoryRange {
+        address: 0x8_0000_0000,
+        bytes: PAGE,
+    }];
+    let memory = device.import_memory(&ranges, token).unwrap();
+    let heap = device
+        .new_imported_heap(
+            memory,
+            &HeapDescriptor {
+                size: 100,
+                options: options(StorageMode::Shared),
+                heap_type: HeapType::Automatic,
+                sparse_page_size: SparsePageSize::Size64,
+            },
+        )
+        .unwrap();
+    assert_eq!(device.heap_occupancy(heap).unwrap(), (PAGE, 0));
+    assert_eq!(device.heap_usage(heap, 1).unwrap(), (0, PAGE));
+    device.destroy_heap(heap).unwrap();
+}
+
 #[test]
 fn device_loss_keeps_in_flight_imports_pinned_and_charged() {
     let mut device = device();
@@ -3654,8 +3878,11 @@ fn a_wait_nothing_promises_holds_only_its_queue() {
     assert_eq!(device.completed_after(1, held - 1), other_queue);
     assert_eq!(device.completed_after(1, other_queue), 0);
     assert_eq!(device.reached_for(2), other_connection);
-    // Freeing waits only for the submitted part of the held command buffer.
+    // Completion waits only for the submitted part of the held command
+    // buffer; freeing waits for all of it, which may still read what was
+    // released meanwhile.
     assert_eq!(device.completed_serial(), device.submitted_serial());
+    assert_eq!(device.freeable(), held - 1);
     assert!(device.backend().unpromised.is_empty());
     device.set_signaled_value(ids[0], 1).unwrap();
     device.backend().finish();
@@ -3692,7 +3919,9 @@ fn waits_that_promise_each_other_through_held_segments_stay_held() {
     assert_eq!(device.completed_after(1, first - 1), third);
     assert_eq!(device.reached_for(2), other);
     // Retiring passes the held work: its submitted segment completed.
+    // Freeing does not: its held segments run later.
     assert_eq!(device.completed_serial(), device.submitted_serial());
+    assert_eq!(device.freeable(), first - 1);
 }
 
 /// Closing a connection drops the held segments of a command buffer whose
@@ -3719,4 +3948,245 @@ fn closing_drops_held_segments() {
     assert!(submitted_at(&mut device, (e[1], 2)).is_none());
     assert_eq!(device.reached_for(2), other);
     assert_eq!(device.drained(), device.submitted_serial());
+}
+
+/// A lost device's report names the owner of each whole allocation freed
+/// lately, at the GPU range freeing it unbound, with the live ranges either
+/// side: a GPU MMU fault address names one of them.
+#[test]
+fn the_memory_book_names_freed_ranges_and_their_neighbours() {
+    let mut device = device();
+    let token = core::num::NonZeroU64::new(11).unwrap();
+    let shared = options(StorageMode::Shared);
+    let surface = 64 * 64 * 4;
+    let ranges = [stela_contracts::gate::MemoryRange {
+        address: 0x8_0000_0000,
+        bytes: surface,
+    }];
+    let made = device.submitted_serial();
+    let memory = device.import_memory(&ranges, token).unwrap();
+    device.book_holder(super::MemoryOwner::Import(memory), 3);
+    let buffer = device.new_imported_buffer(memory, surface, shared).unwrap();
+    let mut descriptor = texture(PixelFormat::Bgra8Unorm, TextureUsage::SHADER_READ);
+    descriptor.width = 64;
+    descriptor.height = 64;
+    descriptor.options = shared;
+    let texture = device
+        .new_texture_from_buffer(buffer, &descriptor, 0, 256)
+        .unwrap();
+    let ranges = [stela_contracts::gate::MemoryRange {
+        address: 0x9_0000_0000,
+        bytes: 1 << 20,
+    }];
+    let heap_memory = device
+        .import_memory(&ranges, core::num::NonZeroU64::new(12).unwrap())
+        .unwrap();
+    let heap = device
+        .new_imported_heap(
+            heap_memory,
+            &HeapDescriptor {
+                size: 1 << 20,
+                options: shared,
+                heap_type: HeapType::Automatic,
+                sparse_page_size: SparsePageSize::Size64,
+            },
+        )
+        .unwrap();
+    device.book_holder(super::MemoryOwner::Heap(heap), 3);
+    device.new_heap_buffer(heap, 4096, shared, None).unwrap();
+    assert_eq!(
+        device.memory_book_report(),
+        ["lost device memory: no whole allocation with a known address was freed"]
+    );
+    let serial = submit(&mut device);
+    device.destroy_texture(texture).unwrap();
+    device.destroy_buffer(buffer).unwrap();
+    // Not freed while submitted work may use it.
+    assert!(device.memory_book_report()[0].contains("no whole allocation"));
+    complete(&mut device, serial);
+    let report = device.memory_book_report();
+    assert_eq!(report.len(), 1, "{report:?}");
+    let line = &report[0];
+    assert!(
+        line.contains(&alloc::format!(
+            "({surface} bytes) buffer of {surface} bytes under a 64x64 Bgra8Unorm texture of \
+             connection 3, made at serial {made}, released at serial {serial} when serial {serial} \
+             completed"
+        )),
+        "{line}"
+    );
+    assert!(line.contains("live below: "), "{line}");
+    assert!(
+        line.contains("live above: ")
+            && line.contains("(1048576 bytes) imported heap of 1048576 bytes of connection 3"),
+        "{line}"
+    );
+}
+
+/// A CPU-copy upload rides the next commit of any connection. While that
+/// command buffer is held for an event, `completed` passes its serial, and
+/// the texture's own connection may destroy the texture: its CPU copy stays
+/// until the held command buffer that reads it has run. Freed at once, the
+/// copy's GPU mapping was gone when the event released the command buffer:
+/// an MMU fault on the copy's last page, which lost the device.
+#[test]
+fn uploads_a_held_command_buffer_carries_outlive_their_texture() {
+    let mut backend = MockBackend::new();
+    backend.physical.as_mut().unwrap().features.host_image_copy = false;
+    let mut device = device_on(backend);
+    let descriptor = TextureDescriptor {
+        width: 8,
+        height: 4,
+        options: options(StorageMode::Managed),
+        ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
+    };
+    let texture = device.new_texture(&descriptor).unwrap();
+    let copy = device.texture_cpu_copy(texture, 0, 0).unwrap().unwrap();
+    let source = copy.buffer.buffer;
+    let region = Region {
+        slice: 0,
+        level: 0,
+        origin: [0, 0, 0],
+        size: [8, 4, 1],
+    };
+    let strides = Strides {
+        bytes_per_row: 32,
+        bytes_per_image: 0,
+    };
+    device
+        .replace_region(texture, &region, &[7; 128], strides)
+        .unwrap();
+    // Another connection's command buffer waits for an event the CPU
+    // signals later; the upload rides it.
+    let event = device.new_event().unwrap();
+    let semaphore = device.event_semaphore(event).unwrap();
+    let mut commands = device.new_command_buffer();
+    commands
+        .encode_wait_for_event(&mut device.resolver(), semaphore, 1)
+        .unwrap();
+    let held = device.commit_for(2, commands).unwrap();
+    assert!(device.holds());
+    let freed =
+        |device: &mut TestDevice| device.backend().destroyed.contains(&Object::Buffer(source));
+    // The writer releases the texture: none of its own work is unfinished.
+    device.destroy_texture(texture).unwrap();
+    device.poll().unwrap();
+    assert!(device.completed_serial() >= held);
+    assert!(
+        !freed(&mut device),
+        "the held command buffer reads the copy"
+    );
+    assert_eq!(destroyed_images(&mut device), 0);
+    // The event arrives: the command buffer runs, reading the copy.
+    device.set_signaled_value(event, 1).unwrap();
+    assert!(!device.holds());
+    let uploaded = device
+        .backend()
+        .submissions
+        .iter()
+        .flatten()
+        .any(|segment| {
+            segment.commands.iter().any(|command| {
+            matches!(command, Command::CopyBufferToImage { src, .. } if *src == source)
+        })
+        });
+    assert!(uploaded);
+    assert!(!freed(&mut device));
+    device.backend().finish();
+    device.poll().unwrap();
+    assert!(freed(&mut device), "freed once the command buffer ran");
+    assert_eq!(destroyed_images(&mut device), 1);
+}
+
+/// A texture destroyed before the next commit takes its CPU-copy upload
+/// leaves none for the texture that takes its slot.
+#[test]
+fn a_destroyed_texture_leaves_no_upload_for_the_next_in_its_slot() {
+    let mut backend = MockBackend::new();
+    backend.physical.as_mut().unwrap().features.host_image_copy = false;
+    let mut device = device_on(backend);
+    let descriptor = TextureDescriptor {
+        width: 8,
+        height: 4,
+        options: options(StorageMode::Managed),
+        ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
+    };
+    let first = device.new_texture(&descriptor).unwrap();
+    let region = Region {
+        slice: 0,
+        level: 0,
+        origin: [0, 0, 0],
+        size: [8, 4, 1],
+    };
+    let strides = Strides {
+        bytes_per_row: 32,
+        bytes_per_image: 0,
+    };
+    device
+        .replace_region(first, &region, &[7; 128], strides)
+        .unwrap();
+    device.destroy_texture(first).unwrap();
+    let second = device.new_texture(&descriptor).unwrap();
+    assert_eq!(second, first, "the slot is reused");
+    submit(&mut device);
+    let uploaded = device
+        .backend()
+        .submissions
+        .iter()
+        .flatten()
+        .any(|segment| {
+            segment
+                .commands
+                .iter()
+                .any(|command| matches!(command, Command::CopyBufferToImage { .. }))
+        });
+    assert!(!uploaded, "the second texture was never written");
+}
+
+/// Core Animation commits an unretained-reference command buffer that waits
+/// for an event, then releases a resource it names, as a Mac's kernel keeps
+/// such memory until the GPU is done. `completed` passes the held command
+/// buffer, but its resources stay until it ran.
+#[test]
+fn what_a_held_command_buffer_names_outlives_its_release() {
+    let mut device = device_on(MockBackend::new());
+    let buffer = device
+        .new_buffer(1 << 16, options(StorageMode::Private))
+        .unwrap();
+    let vk_buffer = device.buffer(buffer).unwrap().buffer;
+    let event = device.new_event().unwrap();
+    let semaphore = device.event_semaphore(event).unwrap();
+    let mut commands = device.new_command_buffer();
+    commands
+        .encode_wait_for_event(&mut device.resolver(), semaphore, 1)
+        .unwrap();
+    let held = device.commit_for(1, commands).unwrap();
+    assert!(device.holds());
+    device.destroy_buffer(buffer).unwrap();
+    device.poll().unwrap();
+    assert!(device.completed_serial() >= held);
+    let freed = |device: &mut TestDevice| {
+        device
+            .backend()
+            .destroyed
+            .contains(&Object::Buffer(vk_buffer))
+    };
+    assert!(!freed(&mut device), "the held command buffer may read it");
+    device.set_signaled_value(event, 1).unwrap();
+    assert!(!freed(&mut device), "submitted, not yet complete");
+    device.backend().finish();
+    device.poll().unwrap();
+    assert!(freed(&mut device));
+    // With nothing in flight, a release frees at once.
+    let idle = device
+        .new_buffer(1 << 16, options(StorageMode::Private))
+        .unwrap();
+    let idle_buffer = device.buffer(idle).unwrap().buffer;
+    device.destroy_buffer(idle).unwrap();
+    assert!(
+        device
+            .backend()
+            .destroyed
+            .contains(&Object::Buffer(idle_buffer))
+    );
 }

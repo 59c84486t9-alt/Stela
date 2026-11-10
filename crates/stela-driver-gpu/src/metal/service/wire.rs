@@ -595,10 +595,13 @@ records! {
         pub alignment: u64,
     }
 
-    /// `usedSize` and `maxAvailableSizeWithAlignment:`.
+    /// `usedSize`, `maxAvailableSizeWithAlignment:`, and `size` and
+    /// `currentAllocatedSize`: the heap's capacity, which a Mac rounds up to
+    /// whole pages.
     pub struct HeapUsageResponse {
         pub used_size: u64,
         pub max_available_size: u64,
+        pub size: u64,
     }
 }
 

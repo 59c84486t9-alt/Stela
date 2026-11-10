@@ -269,12 +269,37 @@ nir_def *stela_metal_texture_null(nir_builder *b, const struct stela_air_texture
    return id ? nir_ieq_imm(b, id, 0) : NULL;
 }
 
+/* Whether a texture ID's high half carries STELA_METAL_EXTENDED_STORAGE: its
+ * chroma flag without a second plane. */
+static nir_def *extended_storage(nir_builder *b, nir_def *high)
+{
+   nir_def *planes = nir_ubitfield_extract_imm(b, high, STELA_METAL_PLANES_SHIFT, 3);
+   return nir_ieq_imm(b, planes, STELA_METAL_EXTENDED_STORAGE >> STELA_METAL_PLANES_SHIFT);
+}
+
 nir_def *stela_metal_texture_srgb_storage(nir_builder *b, const struct stela_air_texture *texture,
                                           nir_def *id, void *stage)
 {
    id = queried_id(b, texture, id, stage);
-   return id ? nir_ine_imm(b, nir_iand_imm(b, id_half(b, id, true), STELA_METAL_SRGB_STORAGE), 0) :
-               NULL;
+   if (!id)
+      return NULL;
+   nir_def *high = id_half(b, id, true);
+   nir_def *srgb = nir_ine_imm(b, nir_iand_imm(b, high, STELA_METAL_SRGB_STORAGE), 0);
+   return nir_iand(b, srgb, nir_inot(b, extended_storage(b, high)));
+}
+
+nir_def *stela_metal_texture_extended_storage(nir_builder *b,
+                                              const struct stela_air_texture *texture,
+                                              nir_def *id, void *stage)
+{
+   id = queried_id(b, texture, id, stage);
+   if (!id)
+      return NULL;
+   nir_def *high = id_half(b, id, true);
+   nir_def *srgb = nir_ine_imm(b, nir_iand_imm(b, high, STELA_METAL_SRGB_STORAGE), 0);
+   nir_def *kind = nir_bcsel(b, srgb, nir_imm_int(b, STELA_AIR_EXTENDED_STORAGE_SRGB),
+                             nir_imm_int(b, STELA_AIR_EXTENDED_STORAGE_CODES));
+   return nir_bcsel(b, extended_storage(b, high), kind, nir_imm_int(b, STELA_AIR_EXTENDED_STORAGE_NONE));
 }
 
 nir_def *stela_metal_texture_planes(nir_builder *b, const struct stela_air_texture *texture,
@@ -289,7 +314,15 @@ nir_def *stela_metal_texture_planes(nir_builder *b, const struct stela_air_textu
    nir_def *video = nir_ubitfield_extract_imm(b, high, STELA_METAL_PLANES_SHIFT - 2, 1);
    /* Those two are storage index bits of a one-plane texture. */
    nir_def *flags = nir_ior(b, nir_ishl_imm(b, ten, 3), nir_ishl_imm(b, video, 4));
-   return nir_bcsel(b, nir_ine_imm(b, planes, 0), nir_ior(b, planes, flags), planes);
+   /* Video range without YCbCr marks extended-range codes, whose ten-bit
+    * flag is the sRGB curve. */
+   nir_def *xr = nir_iand(b, nir_ieq_imm(b, video, 1),
+                          nir_ieq_imm(b, nir_iand_imm(b, planes, STELA_AIR_PLANES_YCBCR), 0));
+   nir_def *xr_flags = nir_ior_imm(b, nir_ishl_imm(b, ten, 6), STELA_AIR_PLANES_XR10);
+   flags = nir_bcsel(b, xr, xr_flags, flags);
+   /* STELA_METAL_EXTENDED_STORAGE alone is one plane. */
+   return nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, planes, 3), 0), nir_ior(b, planes, flags),
+                    nir_imm_int(b, 0));
 }
 
 nir_def *stela_metal_texture_filter_class(nir_builder *b, const struct stela_air_texture *texture,
@@ -1490,6 +1523,8 @@ static nir_def *xr_code(nir_builder *b, nir_def *v, bool srgb, float low, float 
  * in the buffer for texels of texel_bytes, and its texture's raw view. */
 struct texels {
    nir_def *arguments, *buffer, *encoding, *coord, *offset;
+   /* The alpha plane's texel of a two-plane encoding, or zero. */
+   nir_def *alpha;
    nir_deref_instr *image;
 };
 
@@ -1524,6 +1559,11 @@ static nir_builder texels(const nir_shader_compiler_options *options, const char
                nir_imul(&b, x, texel_bytes)));
    t->buffer = load(&b, arguments, STELA_METAL_TEXELS_BUFFER, 64);
    t->offset = nir_u2u64(&b, offset);
+   nir_def *alpha = load(&b, arguments, STELA_METAL_TEXELS_ALPHA, 64);
+   nir_def *alpha_offset = nir_iadd(
+      &b, nir_imul(&b, y, load(&b, arguments, STELA_METAL_TEXELS_ALPHA_ROW, 32)), x);
+   t->alpha = nir_bcsel(&b, nir_ieq_imm(&b, alpha, 0), alpha,
+                        nir_iadd(&b, alpha, nir_u2u64(&b, alpha_offset)));
    const struct glsl_type *type = glsl_image_type(GLSL_SAMPLER_DIM_2D, true, GLSL_TYPE_UINT);
    t->image = stela_metal_bind_texture_id(&b, load(&b, arguments, STELA_METAL_TEXELS_IMAGE, 64),
                                           type, false, NULL, NULL);
@@ -1589,6 +1629,36 @@ nir_shader *stela_metal_store_texels_kernel(const nir_shader_compiler_options *o
    }
    nir_push_else(&b, NULL);
    nir_def *lo = nir_load_global(&b, 1, 32, address, .align_mul = 4);
+   for (unsigned e = STELA_METAL_TEXELS_XR10_PLANES; e <= STELA_METAL_TEXELS_XR10_PLANES_SRGB; e++) {
+      bool srgb = e == STELA_METAL_TEXELS_XR10_PLANES_SRGB;
+      nir_push_if(&b, nir_ieq_imm(&b, t.encoding, e));
+      {
+         /* Alpha from its plane's byte, or kept from the image's texel. */
+         nir_def *has_alpha = nir_ine_imm(&b, t.alpha, 0);
+         nir_def *none = nir_imm_int(&b, 0);
+         nir_push_if(&b, has_alpha);
+         nir_def *byte = nir_u2u32(&b, nir_load_global(&b, 1, 8, t.alpha, .align_mul = 1));
+         nir_pop_if(&b, NULL);
+         byte = nir_if_phi(&b, byte, none);
+         nir_def *kept = nir_image_deref_load(
+            &b, 4, 32, &t.image->def, t.coord, nir_undef(&b, 1, 32), nir_imm_int(&b, 0),
+            .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = true, .format = PIPE_FORMAT_NONE,
+            .dest_type = nir_type_uint32);
+         nir_def *kept_alpha = nir_f2f32(&b, nir_unpack_32_2x16_split_y(&b, nir_channel(&b, kept, 1)));
+         nir_def *a = nir_bcsel(&b, has_alpha, nir_fmul_imm(&b, nir_u2f32(&b, byte), 1.0 / 255.0),
+                                kept_alpha);
+         nir_def *blue = nir_iand_imm(&b, lo, 0x3ff);
+         nir_def *green = nir_iand_imm(&b, nir_ushr_imm(&b, lo, 10), 0x3ff);
+         nir_def *red = nir_iand_imm(&b, nir_ushr_imm(&b, lo, 20), 0x3ff);
+         nir_image_deref_store(&b, &t.image->def, t.coord, nir_undef(&b, 1, 32),
+                               halves(&b, xr_value(&b, red, srgb), xr_value(&b, green, srgb),
+                                      xr_value(&b, blue, srgb), a),
+                               nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D,
+                               .image_array = true, .format = PIPE_FORMAT_NONE,
+                               .src_type = nir_type_uint32);
+      }
+      nir_pop_if(&b, NULL);
+   }
    for (unsigned e = STELA_METAL_TEXELS_XR10; e <= STELA_METAL_TEXELS_XR10X4_SRGB; e++) {
       bool alpha = e >= STELA_METAL_TEXELS_XR10X4;
       bool srgb = e == STELA_METAL_TEXELS_XR10_SRGB || e == STELA_METAL_TEXELS_XR10X4_SRGB;
@@ -1651,6 +1721,35 @@ nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *op
          nir_def *hi = nir_ior(&b, nir_ishl_imm(&b, codes[2], 6), nir_ishl_imm(&b, alpha_code, 22));
          nir_store_global(&b, nir_vec2(&b, lo, hi), address, .align_mul = 4);
       }
+      nir_pop_if(&b, NULL);
+   }
+   for (unsigned e = STELA_METAL_TEXELS_XR10_PLANES; e <= STELA_METAL_TEXELS_XR10_PLANES_SRGB; e++) {
+      bool srgb = e == STELA_METAL_TEXELS_XR10_PLANES_SRGB;
+      nir_push_if(&b, nir_ieq_imm(&b, t.encoding, e));
+      nir_def *codes[3] = {xr_code(&b, bl, srgb, 0, 1023), xr_code(&b, g, srgb, 0, 1023),
+                           xr_code(&b, r, srgb, 0, 1023)};
+      nir_def *steps = nir_fround_even(&b, nir_fmul_imm(&b, nir_fsat(&b, a), 255.0));
+      nir_push_if(&b, nir_ine_imm(&b, t.buffer, 0));
+      {
+         /* Blue, green and red from bit 0; the top two bits are zero. */
+         nir_def *word = nir_ior(&b, nir_ior(&b, codes[0], nir_ishl_imm(&b, codes[1], 10)),
+                                 nir_ishl_imm(&b, codes[2], 20));
+         nir_store_global(&b, word, address, .align_mul = 4);
+      }
+      nir_push_else(&b, NULL);
+      {
+         /* The image's texels become the values they read. */
+         nir_def *value = halves(&b, xr_value(&b, codes[2], srgb), xr_value(&b, codes[1], srgb),
+                                 xr_value(&b, codes[0], srgb), nir_fmul_imm(&b, steps, 1.0 / 255.0));
+         nir_image_deref_store(&b, &t.image->def, t.coord, nir_undef(&b, 1, 32), value,
+                               nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D,
+                               .image_array = true, .format = PIPE_FORMAT_NONE,
+                               .src_type = nir_type_uint32);
+      }
+      nir_pop_if(&b, NULL);
+      nir_push_if(&b, nir_ine_imm(&b, t.alpha, 0));
+      nir_store_global(&b, nir_u2u8(&b, nir_f2u32(&b, steps)), t.alpha, .align_mul = 1);
+      nir_pop_if(&b, NULL);
       nir_pop_if(&b, NULL);
    }
    return finish(&b);

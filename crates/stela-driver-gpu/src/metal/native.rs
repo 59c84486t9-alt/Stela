@@ -2395,6 +2395,12 @@ impl Backend for NativeBackend {
     fn memory_blocks(&self) -> MemoryBlocks {
         self.memories.blocks.report()
     }
+
+    fn whole_memory(&self, memory: Memory) -> bool {
+        self.memories
+            .resolve(memory)
+            .is_some_and(|resolved| resolved.size.is_none())
+    }
 }
 
 /// Free possibly submitted buffers only after the driver acknowledges idle.

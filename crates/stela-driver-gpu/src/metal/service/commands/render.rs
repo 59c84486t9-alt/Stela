@@ -575,6 +575,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             store_action: store_action(record.store_action)?,
             store_action_options: store_options(record.store_action_options)?,
             clear,
+            surface: (record.surface != 0).then_some((record.surface, record.seed)),
         }))
     }
 

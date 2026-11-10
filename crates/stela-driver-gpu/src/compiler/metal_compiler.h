@@ -182,7 +182,7 @@ struct stela_metal_specialization {
    uint32_t attachment_count, samples;
    /* Narrowing floating-point conversions round toward zero, as the
     * library's MTLCompileOptions ask, not to nearest even. Then a fragment
-    * function's extended-range color attachments, two bits each by location
+    * function's extended-range color attachments, three bits each by location
     * (air_to_nir.h enum stela_air_extended_range). */
    uint32_t round_toward_zero, extended_range;
    /* A vertex function's MTLVertexFormat of each input, by location, that

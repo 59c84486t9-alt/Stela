@@ -65,6 +65,12 @@ bool stela_air_null_texture(LLVMValueRef value);
  * later call writes is refused where the sample is translated. */
 bool stela_air_texture_use(LLVMValueRef inst, struct stela_air_texture *texture);
 
+/* The value of the extended-range code nearest v, ties to even, among codes
+ * low to high: (code - 384) / 510, through the sRGB curve mirrored below
+ * zero when srgb. */
+nir_def *stela_air_extended_range_code(nir_builder *b, nir_def *v, bool srgb, float low,
+                                       float high);
+
 /* A two-plane texture's RGBA from its planes' texels, by its planes (enum
  * stela_air_planes), and the inverse: an RGBA color's first-plane value and
  * second-plane pair, in [0, 1], green and blue-red or luma and chroma. */

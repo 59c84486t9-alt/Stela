@@ -292,6 +292,12 @@ pub trait Backend {
     fn memory_blocks(&self) -> MemoryBlocks {
         MemoryBlocks::default()
     }
+
+    /// Whether `memory` is a whole allocation, bound at GPU addresses of
+    /// its own that freeing it unbinds, rather than a place in a block.
+    fn whole_memory(&self, _memory: Memory) -> bool {
+        true
+    }
 }
 
 /// A Vulkan feature or extension the Metal layer needs from every device.

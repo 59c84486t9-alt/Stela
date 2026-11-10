@@ -795,7 +795,7 @@ texture_planes(const struct call *call)
  * and blue and red over the largest step. Computed once ahead of the
  * branch to the planes, a function's samples of one texture share them. */
 struct planes_conversion {
-   nir_def *ten, *ycbcr;
+   nir_def *ten, *ycbcr, *xr, *xr_srgb;
    nir_def *steps;
    nir_def *luma_bias, *luma_scale;
    nir_def *chroma_bias, *chroma_scale;
@@ -811,6 +811,8 @@ planes_conversion(nir_builder *b, nir_def *planes)
    struct planes_conversion c;
    c.ten = nir_test_mask(b, planes, STELA_AIR_PLANES_TEN_BIT);
    c.ycbcr = nir_test_mask(b, planes, STELA_AIR_PLANES_YCBCR);
+   c.xr = nir_test_mask(b, planes, STELA_AIR_PLANES_XR10);
+   c.xr_srgb = nir_test_mask(b, planes, STELA_AIR_PLANES_XR10_SRGB);
    nir_def *video = nir_iand(b, c.ycbcr, nir_test_mask(b, planes, STELA_AIR_PLANES_VIDEO));
    nir_def *full = nir_iand(b, c.ycbcr, nir_inot(b, video));
 #define TEN(wide, narrow) nir_bcsel(b, c.ten, nir_imm_float(b, wide), nir_imm_float(b, narrow))
@@ -861,12 +863,39 @@ planes_color(nir_builder *b, nir_def *first, nir_def *second, const struct plane
                    nir_imm_float(b, 1.0));
 }
 
+/* An RGB10A8_2P_XR10 texel (STELA_AIR_PLANES_XR10) from its planes' UNORM
+ * values: the first's blue, green and red codes over 1023, whole codes for
+ * a read, each reading (code - 384) / 510, through the sRGB curve mirrored
+ * below zero where xr_srgb; alpha is the second's. A filtered sample
+ * filters the codes, which the linear values follow exactly. */
+static nir_def *
+xr_planes_color(nir_builder *b, nir_def *first, nir_def *second, const struct planes_conversion *c,
+                bool read)
+{
+   nir_def *codes = nir_fmul_imm(b, nir_trim_vector(b, first, 3), 1023.0);
+   if (read)
+      codes = nir_fround_even(b, codes);
+   nir_def *v = nir_fmul_imm(b, nir_fadd_imm(b, codes, -384.0), 1.0 / 510.0);
+   nir_def *m = nir_fabs(b, v);
+   nir_def *curve = nir_fpow(b, nir_fmul_imm(b, nir_fadd_imm(b, m, 0.055), 1.0 / 1.055),
+                             nir_replicate(b, nir_imm_float(b, 2.4f), 3));
+   nir_def *linear = nir_bcsel(b, nir_fge(b, nir_replicate(b, nir_imm_float(b, 0.04045f), 3), m),
+                               nir_fmul_imm(b, m, 1.0 / 12.92), curve);
+   linear = nir_bcsel(b, nir_flt(b, v, nir_replicate(b, nir_imm_float(b, 0.0f), 3)),
+                      nir_fneg(b, linear), linear);
+   v = nir_bcsel(b, c->xr_srgb, linear, v);
+   return nir_vec4(b, nir_channel(b, v, 2), nir_channel(b, v, 1), nir_channel(b, v, 0),
+                   nir_channel(b, second, 0));
+}
+
 /* A two-plane texture's texel from its planes' UNORM values, as samples
  * filter them: in whole steps, then planes_color. */
 static nir_def *
 planes_rgba(nir_builder *b, nir_def *first, nir_def *second, const struct planes_conversion *c)
 {
-   return planes_color(b, plane_steps(b, first, c, false), plane_steps(b, second, c, false), c);
+   nir_def *rgba =
+      planes_color(b, plane_steps(b, first, c, false), plane_steps(b, second, c, false), c);
+   return nir_bcsel(b, c->xr, xr_planes_color(b, first, second, c, false), rgba);
 }
 
 nir_def *
@@ -1252,14 +1281,51 @@ stela_air_texture_use(LLVMValueRef inst, struct stela_air_texture *texture)
    return true;
 }
 
+/* A float texel the shader writes, as a texture whose storage images hold a
+ * two-plane extended-range format's half floats stores it (stela_air_options'
+ * texture_extended_storage): each color channel its nearest code's value,
+ * alpha its nearest 8-bit value, rounded to the half that holds it, as an
+ * Apple GPU writes RGB10A8_2P_XR10 textures. Other textures' texels pass. */
+static nir_def *
+extended_storage(const struct call *call, nir_def *texel)
+{
+   const struct stela_air_options *options = call->c->options;
+   if (base_type(call->texture) != GLSL_TYPE_FLOAT || !options->texture_extended_storage)
+      return texel;
+   nir_def *kind = options->texture_extended_storage(
+      call->b, call->texture_id ? NULL : call->texture, call->texture_id, options->binding_data);
+   if (!kind)
+      return texel;
+   nir_builder *b = call->b;
+   /* Translated control flow is unstructured: the texel selects its form. */
+   nir_def *held_kind = nir_ine_imm(b, kind, STELA_AIR_EXTENDED_STORAGE_NONE);
+   nir_def *srgb = nir_ieq_imm(b, kind, STELA_AIR_EXTENDED_STORAGE_SRGB);
+   nir_def *channels[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < texel->num_components; i++) {
+      nir_def *c = nir_channel(b, texel, i);
+      if (i < 3) {
+         c = nir_bcsel(b, srgb, stela_air_extended_range_code(b, c, true, 0.0f, 1023.0f),
+                       stela_air_extended_range_code(b, c, false, 0.0f, 1023.0f));
+      } else {
+         nir_def *steps = nir_fround_even(b, nir_fmul_imm(b, nir_fsat(b, c), 255.0));
+         c = nir_fmul_imm(b, steps, 1.0 / 255.0);
+      }
+      channels[i] = nir_f2f32(b, nir_f2f16_rtne(b, c));
+   }
+   return nir_bcsel(b, held_kind, nir_vec(b, channels, texel->num_components), texel);
+}
+
 /* A float texel the shader writes to or read from storage images: its color
  * channels encoded to sRGB, or decoded from it, where the texture's storage
  * images hold an sRGB format's texels (stela_air_options'
- * texture_srgb_storage). Alpha stays linear. */
+ * texture_srgb_storage), or held to extended-range codes as it is written
+ * (extended_storage). Alpha stays linear. */
 static nir_def *
 srgb_storage(const struct call *call, nir_def *texel, bool encode)
 {
    const struct stela_air_options *options = call->c->options;
+   if (encode)
+      texel = extended_storage(call, texel);
    if (base_type(call->texture) != GLSL_TYPE_FLOAT || !options->texture_srgb_storage)
       return texel;
    nir_def *srgb = options->texture_srgb_storage(
@@ -1377,9 +1443,14 @@ read_texel(struct call *call, nir_def **result)
          struct tex second = t;
          if (!(second.texture = bind_texture(call, descriptor_type(texture), true, NULL)))
             return false;
+         nir_def *first = emit(call, &t);
          nir_def *combined =
-            planes_color(b, plane_steps(b, emit(call, &t), &conversion, true),
+            planes_color(b, plane_steps(b, first, &conversion, true),
                          planes_upsampled(call, &second, coord, planes, &conversion), &conversion);
+         /* An extended-range texture's planes hold a texel each. */
+         combined = nir_bcsel(b, conversion.xr,
+                              xr_planes_color(b, first, emit(call, &second), &conversion, true),
+                              combined);
          c->branch_else(c->translator, blocks);
          if (!(value = c->branch_join(c->translator, blocks, combined, emit(call, &t))))
             return false;

@@ -215,6 +215,10 @@ pub struct ShaderViews {
     /// The storage views hold an sRGB format's texels through its linear
     /// twin ([`PixelFormat::srgb_storage`]).
     pub srgb_storage: bool,
+    /// The storage views hold a two-plane extended-range format's half
+    /// floats, which shaders hold to its codes as they write, through the
+    /// sRGB curve when `Some(true)` ([`ResourceId::EXTENDED_STORAGE`](crate::metal::binding::ResourceId::EXTENDED_STORAGE)).
+    pub extended_storage: Option<bool>,
     /// How shaders filter the texels bicubically.
     pub filter_class: FilterClass,
 }
@@ -814,6 +818,10 @@ fn shader_views(
         sampled,
         faces,
         srgb_storage: storage.is_some() && srgb_storage.is_some(),
+        extended_storage: match pixel_format.describe().encoding() {
+            Encoding::ExtendedRange(codes) if codes.planes && storage.is_some() => Some(codes.srgb),
+            _ => None,
+        },
         storage,
         filter_class: pixel_format.filter_class(),
     }

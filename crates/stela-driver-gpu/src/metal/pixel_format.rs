@@ -187,6 +187,13 @@ raw_enum! {
         Rgb10_420_2p = 543,
         Rgb10_422_2p = 544,
         Rgb10_444_2p = 545,
+        /// Apple's private extended-range two-plane format of WindowServer's
+        /// framebuffers ('&b38' surfaces) and Core Animation's surfaces:
+        /// `BGR10_XR`'s codes in a plane of 32-bit words, the top two bits
+        /// zero, and 8-bit alpha in a plane of its own
+        /// ([`extended_range`]).
+        Rgb10A8_2pXr10 = 550,
+        Rgb10A8_2pXr10Srgb = 551,
         Bgra10Xr = 552,
         Bgra10XrSrgb = 553,
         Bgr10Xr = 554,
@@ -462,7 +469,10 @@ impl Encoding {
     pub const fn texel_kernel(self) -> u32 {
         match self {
             Self::Exact => 0,
-            Self::ExtendedRange(extended_range::Codes { alpha, srgb }) => {
+            Self::ExtendedRange(extended_range::Codes {
+                srgb, planes: true, ..
+            }) => 7 + srgb as u32,
+            Self::ExtendedRange(extended_range::Codes { alpha, srgb, .. }) => {
                 1 + 2 * alpha as u32 + srgb as u32
             }
             Self::Rotated => 5,
@@ -715,6 +725,7 @@ impl PixelFormat {
             (P::Astc10x10Ldr, P::Astc10x10Srgb),
             (P::Astc12x10Ldr, P::Astc12x10Srgb),
             (P::Astc12x12Ldr, P::Astc12x12Srgb),
+            (P::Rgb10A8_2pXr10, P::Rgb10A8_2pXr10Srgb),
             (P::Bgra10Xr, P::Bgra10XrSrgb),
             (P::Bgr10Xr, P::Bgr10XrSrgb),
         ];
@@ -828,6 +839,19 @@ impl PixelFormat {
             None => None,
             Some(_) if self.ten_bit_planes() => Some([Self::R16Unorm, Self::Rg16Unorm]),
             Some(_) => Some([Self::R8Unorm, Self::Rg8Unorm]),
+        }
+    }
+
+    /// The planes of an IOSurface's `RGB10A8_2P_XR10` texture: its codes'
+    /// 32-bit words, which shaders read through `RGB10A2Unorm`, and its
+    /// 8-bit alpha. Its other textures, and every pipeline, hold its
+    /// texels as half floats ([`extended_range`]).
+    pub const fn extended_planes(self) -> Option<[Self; 2]> {
+        match self {
+            Self::Rgb10A8_2pXr10 | Self::Rgb10A8_2pXr10Srgb => {
+                Some([Self::Rgb10A2Unorm, Self::R8Unorm])
+            }
+            _ => None,
         }
     }
 
@@ -1044,9 +1068,19 @@ const fn astc_hdr(format: PixelFormat, width: u32, height: u32) -> Description {
 }
 
 /// An extended-range format, held as half floats; one without alpha reads
-/// opaque.
+/// opaque. The two-plane `RGB10A8_2P_XR10` formats render, read and sample
+/// the same way; a texture over an IOSurface's planes keeps its texels in
+/// them (`device::extended_planes`).
 const fn extended(format: PixelFormat, alpha: bool, srgb: bool) -> Description {
-    let codes = extended_range::Codes { alpha, srgb };
+    let planes = matches!(
+        format,
+        PixelFormat::Rgb10A8_2pXr10 | PixelFormat::Rgb10A8_2pXr10Srgb
+    );
+    let codes = extended_range::Codes {
+        alpha,
+        srgb,
+        planes,
+    };
     Description {
         format,
         kind: Kind::Color(Numeric::Float),
@@ -1412,6 +1446,8 @@ static DESCRIPTIONS: &[Description] = &[
     two_planes(P::Rgb10_420_2p),
     two_planes(P::Rgb10_422_2p),
     two_planes(P::Rgb10_444_2p),
+    extended(P::Rgb10A8_2pXr10, true, false),
+    extended(P::Rgb10A8_2pXr10Srgb, true, true),
     extended(P::Bgra10Xr, true, false),
     extended(P::Bgra10XrSrgb, true, true),
     extended(P::Bgr10Xr, false, false),
@@ -1556,7 +1592,7 @@ mod tests {
                 "{format:?}"
             );
         }
-        assert_eq!(pairs, 62);
+        assert_eq!(pairs, 64);
         assert_eq!(P::Rgba16Float.srgb_pair(), None);
     }
 
@@ -1646,19 +1682,26 @@ mod tests {
 
     #[test]
     fn extended_range_formats_are_held_as_half_floats() {
-        for (format, alpha, srgb, bytes) in [
-            (P::Bgra10Xr, true, false, 8),
-            (P::Bgra10XrSrgb, true, true, 8),
-            (P::Bgr10Xr, false, false, 4),
-            (P::Bgr10XrSrgb, false, true, 4),
+        for (format, alpha, srgb, planes, bytes) in [
+            (P::Bgra10Xr, true, false, false, 8),
+            (P::Bgra10XrSrgb, true, true, false, 8),
+            (P::Bgr10Xr, false, false, false, 4),
+            (P::Bgr10XrSrgb, false, true, false, 4),
+            (P::Rgb10A8_2pXr10, true, false, true, 4),
+            (P::Rgb10A8_2pXr10Srgb, true, true, true, 4),
         ] {
             let description = format.describe();
             let realization = description.realization.unwrap();
             assert_eq!(realization.format, V::R16G16B16A16Sfloat);
             assert_eq!(
                 realization.encoding,
-                Encoding::ExtendedRange(extended_range::Codes { alpha, srgb })
+                Encoding::ExtendedRange(extended_range::Codes {
+                    alpha,
+                    srgb,
+                    planes
+                })
             );
+            assert_eq!(format.extended_planes().is_some(), planes);
             assert_eq!(description.block.bytes, bytes);
             assert_eq!(
                 realization.swizzle[3],

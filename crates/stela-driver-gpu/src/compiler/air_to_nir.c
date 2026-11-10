@@ -3588,8 +3588,8 @@ largest_point(nir_builder *b, nir_def *size)
  * low to high: (code - 384) / 510, through the sRGB curve mirrored below
  * zero for the sRGB encodings, as metal_abi.c's xr_code and xr_value encode
  * and decode texels. */
-static nir_def *
-extended_range_code(nir_builder *b, nir_def *v, bool srgb, float low, float high)
+nir_def *
+stela_air_extended_range_code(nir_builder *b, nir_def *v, bool srgb, float low, float high)
 {
    nir_def *zero = nir_imm_float(b, 0.0f);
    if (srgb) {
@@ -3615,11 +3615,14 @@ extended_range_code(nir_builder *b, nir_def *v, bool srgb, float low, float high
 
 /* An output of color attachment location as its extended-range format
  * stores it: each color channel the value of its nearest code, 0 to 1023,
- * and alpha its nearest code's in [0, 1], codes 384 to 894. The half-float
- * texels that hold the codes then hold that value rounded to its nearest
- * half, which reads back as the same code: NVIDIA's color output narrows by
- * truncating, which can store a value nearer the code below. Other
- * attachments' outputs are returned as they are. */
+ * and alpha its nearest code's in [0, 1], codes 384 to 894, or for the
+ * two-plane formats its nearest 8-bit value. The half-float texels that
+ * hold the codes then hold that value rounded to its nearest half, which
+ * reads back as the same code: NVIDIA's color output narrows by
+ * truncating, which can store a value nearer the code below. An unblended
+ * two-plane output is only rounded to its nearest half, as Apple GPUs'
+ * tile memory holds it. Other attachments' outputs are returned as they
+ * are. */
 static nir_def *
 clamp_extended_range(struct translator *t, unsigned location, nir_def *value)
 {
@@ -3632,12 +3635,21 @@ clamp_extended_range(struct translator *t, unsigned location, nir_def *value)
    if (kind == STELA_AIR_EXTENDED_RANGE_NONE || value->bit_size < 16)
       return value;
    nir_builder *b = &t->b;
-   bool srgb = kind == STELA_AIR_EXTENDED_RANGE_SRGB;
+   bool srgb = kind == STELA_AIR_EXTENDED_RANGE_SRGB ||
+               kind == STELA_AIR_EXTENDED_RANGE_PLANES_HELD_SRGB;
+   bool planes = kind >= STELA_AIR_EXTENDED_RANGE_PLANES_HELD;
    nir_def *channels[NIR_MAX_VEC_COMPONENTS];
    for (unsigned i = 0; i < value->num_components; i++) {
       nir_def *channel = nir_f2f32(b, nir_channel(b, value, i));
-      channel = i == 3 ? extended_range_code(b, channel, false, 384.0f, 894.0f)
-                       : extended_range_code(b, channel, srgb, 0.0f, 1023.0f);
+      if (kind == STELA_AIR_EXTENDED_RANGE_PLANES) {
+         /* Held as it is. */
+      } else if (i == 3 && planes) {
+         nir_def *steps = nir_fround_even(b, nir_fmul_imm(b, nir_fsat(b, channel), 255.0));
+         channel = nir_fmul_imm(b, steps, 1.0 / 255.0);
+      } else {
+         channel = i == 3 ? stela_air_extended_range_code(b, channel, false, 384.0f, 894.0f)
+                          : stela_air_extended_range_code(b, channel, srgb, 0.0f, 1023.0f);
+      }
       channel = nir_f2f16_rtne(b, channel);
       channels[i] = value->bit_size == 32 ? nir_f2f32(b, channel) : channel;
    }

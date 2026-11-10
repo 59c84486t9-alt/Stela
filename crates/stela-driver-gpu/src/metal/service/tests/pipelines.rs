@@ -311,6 +311,12 @@ fn render_pipelines_decode_their_targets_and_stages() {
         memory,
     )
     .unwrap();
+    // The log names the visible functions the fragment stage links.
+    let noted = service.noted.take().unwrap();
+    assert!(
+        noted.starts_with("PIPELINE vertex=vertex fragment=fragment fragment_linked=[visible]"),
+        "{noted}"
+    );
     // MTLRenderStageFragment, then MTLRenderStageVertex.
     assert_eq!(
         handle(&mut service, connection, pipeline.handle, visible, 2),

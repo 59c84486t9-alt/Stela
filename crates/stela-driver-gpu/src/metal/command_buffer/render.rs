@@ -26,12 +26,12 @@ use crate::metal::{
     },
     binding::{
         AccumulateArguments, AverageArguments, BufferBinding, PassImageblock, ResourceId,
-        SequenceVertexBuffer, TessellationArguments,
+        SequenceVertexBuffer, TessellationArguments, TexelArguments,
     },
     capabilities::MAX_BUFFER_BINDINGS,
     error::{Error, Result, ensure},
     hazard::{RENDER_PASS, Use},
-    pass::{AttachmentSlot, FollowedStencil, RenderPassPlan, RenderingAttachment},
+    pass::{AttachmentSlot, ExtendedPlanes, FollowedStencil, RenderPassPlan, RenderingAttachment},
     pipeline::{DepthStencilState, MAX_COLOR_ATTACHMENTS},
     resource::raw_rendered,
     shader::{Interface, MAX_PATCH_CONTROL_POINTS, Stage},
@@ -263,6 +263,9 @@ pub(super) struct RenderState {
     pub(super) depth_range: [f32; 2],
     /// The front and back faces' stencil reference values.
     pub(super) stencil_references: [u32; 2],
+    /// The decodes of IOSurface planes before the pass, as (command index,
+    /// color attachment), which its end narrows to what it drew.
+    plane_decodes: Vec<(usize, usize)>,
 }
 
 impl RenderState {
@@ -428,6 +431,7 @@ impl CommandBuffer {
                     .push(Command::ClearColorImage { image, value });
             }
         }
+        let plane_decodes = self.extended_planes(resolver, &pass, true, None)?;
         self.recorder.access(RENDER_PASS);
         self.recorder.pause_statistics();
         let begin = self.recorder.commands().len();
@@ -462,6 +466,7 @@ impl CommandBuffer {
             tests: super::fragment_tests::TestState::default(),
             depth_range: [0.0, 1.0],
             stencil_references: [0, 0],
+            plane_decodes,
         };
         for &(sample, boundary) in &state.samples {
             if let (CounterSample::Timestamp { pool, query }, true) = (sample, boundary.starts()) {
@@ -556,6 +561,9 @@ impl CommandBuffer {
 
         let last = state.begins.len() - 1;
         let commands = self.recorder.commands();
+        // What the pass's work may have written; the IOSurface planes'
+        // conversions cover only that (`extended_planes`).
+        let drawn = drawn_area(&commands[state.begins[0]..], state.pass.extent);
         for (instance, &index) in state.begins.iter().enumerate() {
             commands[index] =
                 Command::BeginRendering(rendering(&state.pass, instance == 0, instance == last));
@@ -574,8 +582,119 @@ impl CommandBuffer {
             commands.splice(at..at, resets.collect::<Vec<_>>());
         }
         self.average_samples(resolver, &state.pass)?;
+        self.narrow_plane_decodes(resolver, &state, drawn)?;
+        self.extended_planes(resolver, &state.pass, false, Some(drawn))?;
         self.follow_depth(resolver, &state.pass)?;
         self.resolve_visibility(resolver, state.visibility)
+    }
+
+    /// Converts each two-plane extended-range attachment's half floats
+    /// ([`ExtendedPlanes`](crate::metal::pass::ExtendedPlanes)) with the
+    /// texel kernels: before the pass, from an IOSurface's planes it loads;
+    /// once its last instance has stored them, into the planes, or for
+    /// another texture in place to the values its texels read.
+    ///
+    /// The end of a pass that loaded an IOSurface's planes converts only
+    /// `drawn`, the part its work may have written ([`drawn_area`]): every
+    /// code survives a decode and encode, so the rest of the planes already
+    /// holds what a whole encode would write. Answers the decodes' command
+    /// indices, which the end narrows the same way.
+    fn extended_planes(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        pass: &RenderPassPlan<ImageView>,
+        begins: bool,
+        drawn: Option<[u32; 4]>,
+    ) -> Result<Vec<(usize, usize)>> {
+        let mut decodes = Vec::new();
+        for (index, planes) in pass.inputs.extended_planes.iter().enumerate() {
+            let Some(planes) = planes else { continue };
+            // A store action set after the pass began decides its end.
+            let stores = pass.color[index].as_ref().is_some_and(|color| {
+                !color.memoryless && color.store_op == AttachmentStoreOp::Store
+            });
+            if begins && !planes.loads || !begins && !stores {
+                continue;
+            }
+            let area = drawn.filter(|_| narrows(planes));
+            let Some((arguments, count)) = plane_conversion(planes, area)? else {
+                continue;
+            };
+            let upload =
+                self.recorder
+                    .upload(resolver, &arguments.encode(), TexelArguments::ALIGNMENT)?;
+            self.recorder.access(Use::new(
+                PipelineStages::COMPUTE_SHADER,
+                Access::SHADER_READ.union(Access::SHADER_WRITE),
+            ));
+            if begins {
+                decodes.push((self.recorder.commands().len(), index));
+            }
+            self.recorder.push(if begins {
+                Command::StoreTexels {
+                    arguments: upload.address,
+                    count,
+                }
+            } else {
+                Command::LoadTexels {
+                    arguments: upload.address,
+                    count,
+                }
+            });
+        }
+        Ok(decodes)
+    }
+
+    /// Narrows the decodes before a pass that loaded IOSurface planes to
+    /// `drawn`, the part its work may have read or written: the rest is
+    /// neither read nor encoded back. A pass that drew nothing decodes
+    /// nothing.
+    fn narrow_plane_decodes(
+        &mut self,
+        resolver: &mut dyn Resolver,
+        state: &RenderState,
+        drawn: [u32; 4],
+    ) -> Result<()> {
+        for &(at, index) in &state.plane_decodes {
+            let Some(planes) = state.pass.inputs.extended_planes[index]
+                .as_ref()
+                .filter(|planes| narrows(planes) && !planes.decodes_whole)
+            else {
+                continue;
+            };
+            let [width, height] = planes.extent;
+            if drawn == [0, 0, width, height] {
+                continue;
+            }
+            let command = match plane_conversion(planes, Some(drawn))? {
+                Some((arguments, count)) => {
+                    let upload = self.recorder.upload(
+                        resolver,
+                        &arguments.encode(),
+                        TexelArguments::ALIGNMENT,
+                    )?;
+                    Command::StoreTexels {
+                        arguments: upload.address,
+                        count,
+                    }
+                }
+                // Nothing to decode: an empty dispatch keeps the indices.
+                None => match self.recorder.commands()[at] {
+                    Command::StoreTexels { arguments, .. } => Command::StoreTexels {
+                        arguments,
+                        count: 0,
+                    },
+                    _ => return Err(Error::Invalid("a pass's plane decode moved")),
+                },
+            };
+            let slot = &mut self.recorder.commands()[at];
+            ensure(
+                matches!(slot, Command::StoreTexels { .. }),
+                "a pass's plane decode moved",
+            )?;
+            *slot = command;
+        }
+        Ok(())
     }
 
     /// Resolves each attachment rendering through its raw texels whose
@@ -821,6 +940,132 @@ fn end_query(recorder: &mut Recorder, visibility: &mut Visibility) {
     if let Some((pool, query)) = visibility.active.take() {
         recorder.push(Command::EndQuery { pool, query });
     }
+}
+
+/// The part of a pass's `extent` its work may have read or written, as
+/// `[x, y, width, height]`, from the pass's commands from its first
+/// `BeginRendering` on: the union of the scissor rectangles its draws ran
+/// with, which bound every fragment, blend and storage access of theirs.
+/// Anything but a draw inside the pass (a tile dispatch, a copy, generated
+/// commands) may reach any pixel, so the whole extent; nothing drawn is
+/// empty.
+fn drawn_area(commands: &[Command], extent: [u32; 2]) -> [u32; 4] {
+    let full = [0, 0, extent[0], extent[1]];
+    let whole = Rect {
+        offset: [0, 0],
+        extent,
+    };
+    let mut scissors = alloc::vec![whole];
+    let (mut low, mut high) = ([u32::MAX; 2], [0u32; 2]);
+    for command in commands {
+        match command {
+            Command::SetScissors(rects) => scissors.clone_from(rects),
+            Command::Draw { .. }
+            | Command::DrawIndexed { .. }
+            | Command::DrawIndirect { .. }
+            | Command::DrawIndexedIndirect { .. }
+            | Command::DrawMeshTasks(_)
+            | Command::DrawMeshTasksIndirect { .. } => {
+                for rect in &scissors {
+                    let clip = |axis: usize, end: i64| end.clamp(0, i64::from(extent[axis])) as u32;
+                    let start = [0, 1].map(|axis| clip(axis, i64::from(rect.offset[axis])));
+                    let end = [0, 1].map(|axis| {
+                        clip(
+                            axis,
+                            i64::from(rect.offset[axis]) + i64::from(rect.extent[axis]),
+                        )
+                    });
+                    if start[0] < end[0] && start[1] < end[1] {
+                        for axis in 0..2 {
+                            low[axis] = low[axis].min(start[axis]);
+                            high[axis] = high[axis].max(end[axis]);
+                        }
+                    }
+                }
+            }
+            // Order, state and queries touch no attachment.
+            Command::Barrier(_)
+            | Command::RegionBarrier(_)
+            | Command::BeginRendering(_)
+            | Command::EndRendering
+            | Command::BindPipeline { .. }
+            | Command::PushConstants(_)
+            | Command::SetViewports(_)
+            | Command::SetDepthBias { .. }
+            | Command::SetBlendConstants(_)
+            | Command::SetStencilReference { .. }
+            | Command::SetDepthStencil(_)
+            | Command::SetCullMode(_)
+            | Command::SetFrontFace(_)
+            | Command::SetPrimitiveTopology(_)
+            | Command::SetPrimitiveRestart(_)
+            | Command::SetRasterizerDiscard(_)
+            | Command::SetPolygonMode(_)
+            | Command::SetDepthClamp(_)
+            | Command::SetSampleLocations { .. }
+            | Command::BindVertexBuffers { .. }
+            | Command::BindIndexBuffer { .. }
+            | Command::ResetQueryPool { .. }
+            | Command::BeginQuery { .. }
+            | Command::EndQuery { .. }
+            | Command::WriteTimestamp { .. }
+            | Command::BeginConditionalRendering { .. }
+            | Command::EndConditionalRendering => {}
+            _ => return full,
+        }
+    }
+    if low[0] >= high[0] || low[1] >= high[1] {
+        return [0; 4];
+    }
+    [low[0], low[1], high[0] - low[0], high[1] - low[1]]
+}
+
+/// Whether a pass converts only what it drew of `planes`
+/// ([`ExtendedPlanes::narrows`]): texels outside the drawn part keep their
+/// codes.
+fn narrows(planes: &ExtendedPlanes) -> bool {
+    planes.narrows
+}
+
+/// The texel kernels' arguments converting `planes` over `area`
+/// (`[x, y, width, height]`, all of the extent for `None`), and the texels;
+/// `None` for no texels.
+fn plane_conversion(
+    planes: &ExtendedPlanes,
+    area: Option<[u32; 4]>,
+) -> Result<Option<(TexelArguments, u32)>> {
+    let [x, y, width, height] = area.unwrap_or([0, 0, planes.extent[0], planes.extent[1]]);
+    let count = width
+        .checked_mul(height)
+        .and_then(|texels| texels.checked_mul(planes.layers))
+        .ok_or(Error::Unsupported("conversions of 4 Gi texels"))?;
+    if count == 0 {
+        return Ok(None);
+    }
+    // The planes' addresses are of the area's first texel.
+    let at = |base: u64, row: u32, bytes: u64| {
+        if base == 0 {
+            0
+        } else {
+            base + u64::from(y) * u64::from(row) + u64::from(x) * bytes
+        }
+    };
+    Ok(Some((
+        TexelArguments {
+            buffer: at(planes.color, planes.color_bytes_per_row, 4),
+            count,
+            encoding: planes.encoding,
+            image: planes.storage.0,
+            width,
+            height,
+            bytes_per_row: planes.color_bytes_per_row,
+            origin: [x, y, 0],
+            alpha: at(planes.alpha, planes.alpha_bytes_per_row, 1),
+            alpha_bytes_per_row: planes.alpha_bytes_per_row,
+            ..TexelArguments::default()
+        },
+        count,
+    )))
 }
 
 /// The copies through which the pass's stencil resolve follows its depth

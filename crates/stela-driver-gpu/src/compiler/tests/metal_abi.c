@@ -399,15 +399,19 @@ static unsigned varying_alu_count(nir_shader *shader, nir_op op)
 
 /* The texel kernels convert one texel per thread through a raw storage
  * view: the store kernel writes it once per encoding, the load kernel reads
- * it once and writes the buffer once per encoding. */
+ * it once and writes the buffer once per encoding. The two-plane
+ * extended-range encodings' store kernel reads the texel's alpha where no
+ * plane holds it; their load kernel writes the color word and the alpha
+ * byte, or the texel back without a buffer. */
 static void texel_kernels_convert_each_encoding(void)
 {
    unsigned encodings = STELA_METAL_TEXELS_PADDED8X2 - STELA_METAL_TEXELS_XR10 + 1;
+   unsigned planes = STELA_METAL_TEXELS_XR10_PLANES_SRGB - STELA_METAL_TEXELS_XR10_PLANES + 1;
    nir_shader *store = stela_metal_store_texels_kernel(NULL);
    check_kernel(store);
    /* The 16-bit encodings share one store. */
-   assert(intrinsic_count(store, nir_intrinsic_image_deref_store) == encodings - 1);
-   assert(intrinsic_count(store, nir_intrinsic_image_deref_load) == 0);
+   assert(intrinsic_count(store, nir_intrinsic_image_deref_store) == encodings - 1 + planes);
+   assert(intrinsic_count(store, nir_intrinsic_image_deref_load) == planes);
    assert(intrinsic_count(store, nir_intrinsic_store_global) == 0);
    /* Extended-range halves round to nearest: no pack whose rounding a
     * backend may truncate. */
@@ -417,8 +421,8 @@ static void texel_kernels_convert_each_encoding(void)
    nir_shader *load = stela_metal_load_texels_kernel(NULL);
    check_kernel(load);
    assert(intrinsic_count(load, nir_intrinsic_image_deref_load) == 1);
-   assert(intrinsic_count(load, nir_intrinsic_image_deref_store) == 0);
-   assert(intrinsic_count(load, nir_intrinsic_store_global) == encodings);
+   assert(intrinsic_count(load, nir_intrinsic_image_deref_store) == planes);
+   assert(intrinsic_count(load, nir_intrinsic_store_global) == encodings + 2 * planes);
    ralloc_free(load);
 }
 

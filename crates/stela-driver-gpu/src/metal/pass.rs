@@ -150,6 +150,42 @@ pub struct AttachmentInputs {
     /// clears, and its value, which the pass clears before it begins: the
     /// attachment clears only the first plane, its raw texels.
     pub second_plane_clears: [Option<(Image, ClearValue)>; MAX_COLOR_ATTACHMENTS],
+    /// Each color attachment of a two-plane extended-range format
+    /// (`RGB10A8_2P_XR10`), which renders as half floats that the texel
+    /// kernels convert where the pass begins and ends.
+    pub extended_planes: [Option<ExtendedPlanes>; MAX_COLOR_ATTACHMENTS],
+}
+
+/// A two-plane extended-range color attachment's conversions: a pass
+/// renders its texels as half floats in `storage`'s image, a raw storage
+/// view of its `layers` over `extent`. An IOSurface texture's are its
+/// working image, decoded from its planes before the pass when it `loads`
+/// and encoded into them after it when it `stores`; another texture's are
+/// its own, which the pass's end holds to the values its texels read when
+/// it stores, as Apple GPUs store their tile memory.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExtendedPlanes {
+    pub storage: ResourceId,
+    /// `enum stela_metal_texel_encoding`.
+    pub encoding: u32,
+    pub extent: [u32; 2],
+    pub layers: u32,
+    /// The address of the first texel's color word and alpha byte in an
+    /// IOSurface's planes, and their bytes per row; zero for a texture of
+    /// half floats.
+    pub color: u64,
+    pub color_bytes_per_row: u32,
+    pub alpha: u64,
+    pub alpha_bytes_per_row: u32,
+    pub loads: bool,
+    pub stores: bool,
+    /// The pass converts only what it drew of an IOSurface's planes: it
+    /// loads them, into a working image that holds them or through its
+    /// decode, so the rest of what it would encode keeps their codes.
+    pub narrows: bool,
+    /// Its decode is of all of the planes, after which the working image
+    /// holds them, rather than of what it drew.
+    pub decodes_whole: bool,
 }
 
 /// Storage copies of a pass's depth and stencil samples and of its stencil

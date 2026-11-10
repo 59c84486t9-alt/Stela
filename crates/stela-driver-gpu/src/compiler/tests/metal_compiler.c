@@ -1126,16 +1126,29 @@ extended_range_outputs_clamp(void)
       assert(alu_count(shader, nir_op_f2f16_rtne) == 4);
       stela_metal_release(shader);
    }
+   /* The two-plane formats' blended outputs hold their codes and 8-bit
+    * alpha; their unblended ones are only rounded to halves. */
+   for (uint32_t kind = STELA_AIR_EXTENDED_RANGE_PLANES_HELD; kind <= STELA_AIR_EXTENDED_RANGE_PLANES;
+        kind++) {
+      const struct stela_metal_specialization planes = {.extended_range = kind};
+      shader = compile(positioned, "positioned", &planes, &error);
+      bool held = kind != STELA_AIR_EXTENDED_RANGE_PLANES;
+      assert(shader && alu_count(shader, nir_op_fround_even) == (held ? 4 : 0) &&
+             alu_count(shader, nir_op_fmin) == (held ? 3 : 0) &&
+             alu_count(shader, nir_op_fsat) == (held ? 1 : 0));
+      assert(alu_count(shader, nir_op_f2f16_rtne) == 4);
+      stela_metal_release(shader);
+   }
    /* Another location's kind leaves location 0 alone. */
    const struct stela_metal_specialization other = {
       .extended_range = STELA_AIR_EXTENDED_RANGE_LINEAR << STELA_AIR_EXTENDED_RANGE_BITS};
    shader = compile(positioned, "positioned", &other, &error);
    assert(shader && !alu_count(shader, nir_op_fmin));
    stela_metal_release(shader);
-   /* Kinds past sRGB, locations past the eighth and other stages are refused. */
-   const struct stela_metal_specialization unknown = {.extended_range = 3};
+   /* Unknown kinds, locations past the eighth and other stages are refused. */
+   const struct stela_metal_specialization unknown = {.extended_range = 6};
    assert(!compile(positioned, "positioned", &unknown, &error) && error.kind == STELA_AIR_INPUT);
-   const struct stela_metal_specialization ninth = {.extended_range = 1u << 16};
+   const struct stela_metal_specialization ninth = {.extended_range = 1u << 24};
    assert(!compile(positioned, "positioned", &ninth, &error) && error.kind == STELA_AIR_INPUT);
    const struct stela_metal_specialization unrendered = {.extended_range = 1};
    assert(!compile(vertex, "vertex", &unrendered, &error) && error.kind == STELA_AIR_INPUT);

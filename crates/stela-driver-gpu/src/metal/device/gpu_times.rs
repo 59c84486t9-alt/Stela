@@ -49,7 +49,7 @@ pub struct GpuTimes {
 }
 
 /// Entry points without their function constants, each once.
-fn names(entries: impl IntoIterator<Item = String>) -> String {
+pub(super) fn names(entries: impl IntoIterator<Item = String>) -> String {
     let mut names: Vec<String> = Vec::new();
     for entry in entries {
         // A bracketed note, such as a span's shape, stays whole.

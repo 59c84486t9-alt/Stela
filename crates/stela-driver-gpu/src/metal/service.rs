@@ -23,7 +23,7 @@ use super::{
     command_buffer::blit::Region,
     device::{
         ArchiveId, BufferId, ComputePipelineId, CounterBufferId, Device, EventId, FunctionId,
-        HeapId, LibraryId, MemoryId, RenderPipelineId, SamplerId, TextureId,
+        HeapId, LibraryId, MemoryId, MemoryOwner, RenderPipelineId, SamplerId, TextureId,
     },
     error::Error,
     indirect::IndirectCommandBufferId,
@@ -752,9 +752,21 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             Ok(handle)
         });
         match held {
-            Ok(handle) => Ok(Handle {
-                handle: handle.encode(),
-            }),
+            Ok(handle) => {
+                let owner = match object {
+                    Object::Memory(id) => Some(MemoryOwner::Import(id)),
+                    Object::Buffer(id) => Some(MemoryOwner::Buffer(id)),
+                    Object::Texture(id) => Some(MemoryOwner::Texture(id)),
+                    Object::Heap(id) => Some(MemoryOwner::Heap(id)),
+                    _ => None,
+                };
+                if let Some(owner) = owner {
+                    self.device.book_holder(owner, connection.get());
+                }
+                Ok(Handle {
+                    handle: handle.encode(),
+                })
+            }
             Err(fault) => {
                 // Nothing uses the new object yet, so releasing it cannot fail.
                 self.destroy(object)?;

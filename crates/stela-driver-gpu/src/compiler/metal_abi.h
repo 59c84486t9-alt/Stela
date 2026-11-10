@@ -65,8 +65,9 @@
  * constants' arguments address: the buffer's address, the texel count and
  * its encoding (enum stela_metal_texel_encoding), the resource ID of a raw
  * storage view of the texture's level, the region's width and height, the
- * buffer's bytes per row and image, and the region's origin and first
- * layer in the view. */
+ * buffer's bytes per row and image, the region's origin and first layer in
+ * the view, then for the two-plane extended-range encodings the address of
+ * the alpha plane's first texel, or zero, and its bytes per row. */
 #define STELA_METAL_TEXELS_BUFFER 0u
 #define STELA_METAL_TEXELS_COUNT 8u
 #define STELA_METAL_TEXELS_ENCODING 12u
@@ -76,7 +77,9 @@
 #define STELA_METAL_TEXELS_ROW 32u
 #define STELA_METAL_TEXELS_IMAGE_BYTES 36u
 #define STELA_METAL_TEXELS_ORIGIN 40u
-#define STELA_METAL_TEXELS_BYTES 56u
+#define STELA_METAL_TEXELS_ALPHA 56u
+#define STELA_METAL_TEXELS_ALPHA_ROW 64u
+#define STELA_METAL_TEXELS_BYTES 72u
 
 /* The layouts a texture's image stores in place of its Metal format's
  * bytes (pixel_format.rs Encoding): the extended-range codes of BGR10_XR
@@ -91,6 +94,15 @@ enum stela_metal_texel_encoding {
    /* Two 8-bit channels padded with a zero and a one (RG8Unorm_sRGB as
     * R8G8B8A8_SRGB). */
    STELA_METAL_TEXELS_PADDED8X2,
+   /* RGB10A8_2P_XR10 and its sRGB variant as four half floats: the buffer
+    * holds the codes of BGR10_XR's word with its top two bits zero, and the
+    * alpha plane, where the arguments name one, a byte of 8-bit alpha.
+    * Loading converts the image's texels to them and, without a buffer,
+    * writes the image's texels back as the values they read; storing
+    * converts them to the image's, keeping its alpha without an alpha
+    * plane. */
+   STELA_METAL_TEXELS_XR10_PLANES,
+   STELA_METAL_TEXELS_XR10_PLANES_SRGB,
 };
 
 /* The compressed formats the decode kernels expand into a texture's image
@@ -355,6 +367,12 @@ enum stela_metal_average_format {
  * storage index bits a two-plane texture leaves free, say whether its
  * components are 10-bit and whether its chroma is video range. */
 #define STELA_METAL_PLANES_SHIFT 21u
+/* The chroma flag of those three bits on a texture of one plane: its storage
+ * images hold a two-plane extended-range format's half floats, which shaders
+ * hold to the format's codes and 8-bit alpha as they write, through the sRGB
+ * curve where STELA_METAL_SRGB_STORAGE is also set (it then does not
+ * encode). */
+#define STELA_METAL_EXTENDED_STORAGE 0x00800000u
 #define STELA_METAL_SAMPLER_NEVER 0x80000000u
 /* A sampler Metal filters bicubically sets STELA_METAL_SAMPLER_CUBIC in its
  * high half, with STELA_METAL_SAMPLER_MIPPED when it selects mip levels; a
@@ -428,9 +446,16 @@ nir_def *stela_metal_texture_null(nir_builder *b, const struct stela_air_texture
                                   nir_def *id, void *stage);
 
 /* stela_air_texture_query: whether the texture's MTLResourceID carries
- * STELA_METAL_SRGB_STORAGE. */
+ * STELA_METAL_SRGB_STORAGE without STELA_METAL_EXTENDED_STORAGE. */
 nir_def *stela_metal_texture_srgb_storage(nir_builder *b, const struct stela_air_texture *texture,
                                           nir_def *id, void *stage);
+
+/* stela_air_texture_query: the texture's enum stela_air_extended_storage,
+ * from STELA_METAL_EXTENDED_STORAGE on a texture of one plane and
+ * STELA_METAL_SRGB_STORAGE. */
+nir_def *stela_metal_texture_extended_storage(nir_builder *b,
+                                              const struct stela_air_texture *texture,
+                                              nir_def *id, void *stage);
 
 /* stela_air_texture_query: the second plane (enum stela_air_planes) the
  * texture's MTLResourceID carries, zero for one plane. */

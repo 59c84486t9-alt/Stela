@@ -175,6 +175,15 @@ impl ColorAttachmentDescriptor {
     /// attachment's output to (`enum stela_air_extended_range`).
     fn extended_range(&self) -> u32 {
         match self.pixel_format.map(|format| format.describe().encoding()) {
+            // A two-plane format holds an unblended output as it is until
+            // the pass's end encodes it.
+            Some(Encoding::ExtendedRange(codes)) if codes.planes => {
+                match (self.blending_enabled, codes.srgb) {
+                    (false, _) => EXTENDED_RANGE_PLANES,
+                    (true, false) => EXTENDED_RANGE_PLANES_HELD,
+                    (true, true) => EXTENDED_RANGE_PLANES_HELD_SRGB,
+                }
+            }
             Some(Encoding::ExtendedRange(codes)) => {
                 if codes.srgb {
                     EXTENDED_RANGE_SRGB
@@ -602,11 +611,16 @@ pub fn mesh_render_pipeline(
     Ok(plan)
 }
 
-/// `enum stela_air_extended_range`'s kinds.
+/// `enum stela_air_extended_range`'s kinds, `STELA_AIR_EXTENDED_RANGE_BITS`
+/// each.
 const EXTENDED_RANGE_LINEAR: u32 = 1;
 const EXTENDED_RANGE_SRGB: u32 = 2;
+const EXTENDED_RANGE_PLANES_HELD: u32 = 3;
+const EXTENDED_RANGE_PLANES_HELD_SRGB: u32 = 4;
+const EXTENDED_RANGE_PLANES: u32 = 5;
+const EXTENDED_RANGE_BITS: usize = 3;
 
-/// A fragment function's extended-range color attachments, two bits each
+/// A fragment function's extended-range color attachments, three bits each
 /// by index ([`Specialization::extended_range`]), whose outputs it clamps
 /// to what their formats encode.
 pub fn extended_range_attachments(targets: &RenderTargets) -> u32 {
@@ -618,7 +632,7 @@ pub fn extended_range_attachments(targets: &RenderTargets) -> u32 {
         .iter()
         .enumerate()
         .fold(0, |kinds, (index, attachment)| {
-            kinds | attachment.extended_range() << (2 * index)
+            kinds | attachment.extended_range() << (EXTENDED_RANGE_BITS * index)
         })
 }
 

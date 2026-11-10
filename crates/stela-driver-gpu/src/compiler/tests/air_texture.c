@@ -2179,11 +2179,48 @@ two_plane_samples_share_their_conversion(void)
    ralloc_free(shader);
 }
 
+/* A write to a texture whose storage may hold extended-range codes holds
+ * the texel to them where the texture's ID selects it: each channel
+ * rounded to its code's or 8-bit value, then to its half. Without the query
+ * the texel is written as it is. */
+static void
+extended_storage_writes_hold_their_codes(void)
+{
+   static const char *body =
+      "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+      " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+      "call void @air.write_texture_2d.v4f32(ptr addrspace(1) %dst, <2 x i32> <i32 3, i32 4>,"
+      " <4 x float> <float 2.0, float -1.0, float 0.25, float 0.5>, i32 0, i32 2)\n"
+      "ret void\n}\n";
+   for (unsigned queried = 0; queried < 2; queried++) {
+      struct stela_air_options o = options(&primary, true);
+      if (queried)
+         o.texture_extended_storage = stela_metal_texture_extended_storage;
+      struct stela_air_error error = {0};
+      nir_shader *shader = kernel_with(body, kernel_metadata, &o, &error);
+      if (!shader)
+         fprintf(stderr, "extended storage write: %s\n", error.detail);
+      assert(shader);
+      assert(count(shader).store);
+      unsigned narrowed = 0;
+      nir_foreach_function_impl(impl, shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block)
+               narrowed += instr->type == nir_instr_type_alu &&
+                           nir_instr_as_alu(instr)->op == nir_op_f2f16_rtne;
+         }
+      }
+      assert(narrowed == (queried ? 4 : 0));
+      ralloc_free(shader);
+   }
+}
+
 int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
    kernels_sample_write_read_and_query();
+   extended_storage_writes_hold_their_codes();
    fragments_sample_with_derivatives_compare_and_gather();
    storage_levels_select_their_descriptor();
    sparse_texels_report_their_residency();

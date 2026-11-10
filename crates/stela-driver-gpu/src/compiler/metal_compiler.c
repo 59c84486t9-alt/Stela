@@ -813,17 +813,18 @@ attachment_format(uint32_t format)
    }
 }
 
-/* Each attachment's two bits name an enum stela_air_extended_range. */
+/* Each attachment's three bits name an enum stela_air_extended_range; the
+ * bits past the last attachment's are zero. */
 static bool
 extended_range_valid(uint32_t kinds)
 {
-   for (unsigned n = 0; n < 32 / STELA_AIR_EXTENDED_RANGE_BITS; n++) {
+   for (unsigned n = 0; n < AIR_MAX_RENDER_TARGETS; n++) {
       unsigned kind = kinds >> (n * STELA_AIR_EXTENDED_RANGE_BITS) &
                       BITFIELD_MASK(STELA_AIR_EXTENDED_RANGE_BITS);
-      if (kind > STELA_AIR_EXTENDED_RANGE_SRGB || (kind && n >= AIR_MAX_RENDER_TARGETS))
+      if (kind > STELA_AIR_EXTENDED_RANGE_PLANES)
          return false;
    }
-   return true;
+   return (uint64_t)kinds >> (AIR_MAX_RENDER_TARGETS * STELA_AIR_EXTENDED_RANGE_BITS) == 0;
 }
 
 /* The specialization's storage attachments as the translator takes them. */
@@ -960,6 +961,7 @@ stela_metal_compile_reflected(const void *air, size_t size, const char *entry,
       .texture_levels = stela_metal_texture_levels,
       .texture_null = stela_metal_texture_null,
       .texture_srgb_storage = stela_metal_texture_srgb_storage,
+      .texture_extended_storage = stela_metal_texture_extended_storage,
       .sampler_never = stela_metal_sampler_never,
       .sampler_filter = stela_metal_sampler_filter,
       .texture_filter_class = stela_metal_texture_filter_class,

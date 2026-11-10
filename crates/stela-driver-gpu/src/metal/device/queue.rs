@@ -25,6 +25,9 @@
 //! Its queue's command buffers committed meanwhile are held behind them;
 //! polling and waiting submit held work as it becomes ready.
 use super::gpu_times::{GpuClock, GpuTimes};
+use super::pass_times::{
+    self, CommandBufferCounts, PROFILE_MARKS, PassTimes, SpanKind, SpanWork, TargetInfo,
+};
 use super::{
     BufferId, ComputePipelineId, CounterBufferId, Device, EventId, RenderPipelineId, Slab,
     TextureId,
@@ -66,7 +69,13 @@ use crate::metal::{
         },
     },
 };
-use alloc::{collections::VecDeque, format, string::String, sync::Arc, vec::Vec};
+use alloc::{
+    collections::{BTreeMap, VecDeque},
+    format,
+    string::String,
+    sync::Arc,
+    vec::Vec,
+};
 
 /// Queries per encoder attachment pool.
 const POOL_QUERIES: u32 = 256;
@@ -82,6 +91,9 @@ const PASS_MARKS: u32 = 30;
 
 /// Completed command buffers whose GPU times are kept.
 const TIMES_KEPT: usize = 1024;
+
+/// Render pass targets the profile remembers by attachment view.
+const TARGETS_KEPT: usize = 1024;
 
 /// A `MTLCounterSet` the device samples.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -121,6 +133,14 @@ struct InFlight {
     workload: Workload,
     /// The platform's ticks when it was committed.
     committed: u64,
+    /// `vkQueueSubmit2` calls its work took, and the Vulkan command
+    /// buffers they submitted.
+    submits: u64,
+    segments: u64,
+    /// It carries the device's own commands for objects it does not own:
+    /// CPU-copy uploads and block decodes of any connection's textures,
+    /// which a lost device's report names.
+    carries: bool,
 }
 
 /// Where a committed command buffer's completion shows.
@@ -147,22 +167,69 @@ enum Track {
 struct Marks {
     spans: Vec<Vec<u16>>,
     shapes: Vec<SpanShape>,
+    /// The pool's queries: [`COMPLETION_QUERIES`], or more under the
+    /// profile ([`pass_times`]), whose spans it reports.
+    queries: u32,
+    profiled: bool,
+    counts: CommandBufferCounts,
+}
+
+impl Marks {
+    /// Ends the span here: the next timestamp is its end.
+    fn mark(
+        &mut self,
+        pool: QueryPool,
+        bound: &mut Vec<u16>,
+        shape: &mut SpanShape,
+        commands: &mut Vec<Command>,
+    ) {
+        self.spans.push(core::mem::take(bound));
+        self.shapes.push(core::mem::take(shape));
+        commands.push(Command::WriteTimestamp {
+            pool,
+            query: self.spans.len() as u32,
+            stage: PipelineStages::ALL_COMMANDS,
+        });
+    }
 }
 
 /// What one span between marks drew: the last pass's extent, its draws and
-/// dispatches, and the most vertices times instances of one direct draw.
+/// dispatches, and the most vertices times instances of one direct draw;
+/// for the profile, its kind of work, the last pass's first attachment and
+/// the texels it copied or converted.
 #[derive(Clone, Copy, Debug, Default)]
 struct SpanShape {
     extent: [u32; 2],
     draws: u32,
     dispatches: u32,
     largest: u64,
+    kind: SpanKind,
+    target: Option<ImageView>,
+    texels: u64,
 }
 
 impl SpanShape {
     fn add(&mut self, command: &Command) {
+        // A span with a pass is the pass's; else its first work names it.
+        let kind = SpanKind::of(command);
+        if kind != SpanKind::None && (kind == SpanKind::Render || self.kind == SpanKind::None) {
+            self.kind = kind;
+        }
+        if let Some(texels) = pass_times::copied_texels(command) {
+            self.texels += texels;
+        }
         match command {
-            Command::BeginRendering(rendering) => self.extent = rendering.extent,
+            Command::BeginRendering(rendering) => {
+                self.extent = rendering.extent;
+                self.target = rendering
+                    .color
+                    .iter()
+                    .flatten()
+                    .next()
+                    .or(rendering.depth.as_ref())
+                    .or(rendering.stencil.as_ref())
+                    .map(|attachment| attachment.view);
+            }
             Command::Draw {
                 vertex_count: count,
                 instance_count,
@@ -279,6 +346,14 @@ pub(super) struct Queue {
     times: VecDeque<(u64, [u64; 2])>,
     /// Where retired command buffers' time went, for the platform's report.
     clock: GpuClock,
+    /// Per-pass timing without `--profile`'s global switch, for tests.
+    profile: bool,
+    /// The profile's spans and counts since the last report.
+    passes: PassTimes,
+    /// The profile's render pass targets by attachment view, newest last.
+    targets: BTreeMap<ImageView, (u64, TargetInfo)>,
+    /// Targets noted so far, which orders them by age.
+    noted: u64,
 }
 
 impl Queue {
@@ -300,6 +375,10 @@ pub struct AttachmentRequest<Clear> {
     pub store_action: StoreAction,
     pub store_action_options: StoreActionOptions,
     pub clear: Clear,
+    /// The IOSurface the texture lies in and its seed, which changes as a
+    /// CPU writes it, as the guest saw them encoding the pass; `None` when
+    /// unknown.
+    pub surface: Option<(u32, u32)>,
 }
 
 /// `MTLRenderPassDescriptor` with the device's object ids.
@@ -420,6 +499,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 continue;
             };
             let texture = color.target.texture;
+            // An extended-range texture's planes clear through its half
+            // floats (below).
+            if texture.descriptor.pixel_format.extended_planes().is_some() {
+                continue;
+            }
             let Some(image) = self.second_plane(texture.texture)? else {
                 continue;
             };
@@ -437,6 +521,41 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             let value = crate::metal::pixel_format::second_plane_clear(format, color.clear)
                 .ok_or(Error::Invalid("the attachment has one plane"))?;
             plan.inputs.second_plane_clears[index] = Some((image, pass::ClearValue::Float(value)));
+        }
+        // A two-plane extended-range attachment renders as half floats,
+        // which the pass converts where it begins and ends.
+        for (index, color) in descriptor.color_attachments.iter().enumerate() {
+            let (Some(color), Some(Some(attached))) = (color, plan.color.get(index)) else {
+                continue;
+            };
+            if let Some((_, resolve)) = attached.resolve
+                && self
+                    .texture_descriptor(resolve.texture)?
+                    .pixel_format
+                    .extended_planes()
+                    .is_some()
+            {
+                return Err(Error::Unsupported(
+                    "multisample resolves into two-plane extended-range textures",
+                ));
+            }
+            let view = AttachmentView {
+                texture: (),
+                view_type: attached.view.view_type,
+                range: attached.view.range,
+            };
+            let stores = !attached.memoryless
+                && attached.store_op == crate::metal::vulkan::AttachmentStoreOp::Store;
+            let actions = super::resources::PlaneActions {
+                loads: color.load_action == LoadAction::Load,
+                stores,
+                settled: color.store_action == StoreAction::Store,
+                surface: request.color_attachments[index]
+                    .as_ref()
+                    .and_then(|color| color.surface),
+            };
+            plan.inputs.extended_planes[index] =
+                self.extended_pass_planes(attached.view.texture, view, plan.extent, actions)?;
         }
         // Framebuffer reads access each color attachment's raw texels, of
         // the attachment or, where no view of it reads them, of its copy.
@@ -524,7 +643,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             };
             plan.inputs.follows_depth = Some(followed);
         }
+        // The profile names a pass by its first attachment.
+        fn first<T: Copy>(plan: &RenderPassPlan<T>) -> Option<T> {
+            plan.color
+                .iter()
+                .flatten()
+                .next()
+                .or(plan.depth.as_ref())
+                .or(plan.stencil.as_ref())
+                .map(|attachment| attachment.view.texture)
+        }
+        let texture = first(&plan).filter(|_| self.passes_profiled());
         let plan = self.resolve_views(plan)?;
+        if let (Some(texture), Some(view)) = (texture, first(&plan)) {
+            self.note_target(view, texture);
+        }
         let visibility = request
             .visibility_result_buffer
             .map(|buffer| Ok((self.buffer(buffer)?, request.visibility_result_type)))
@@ -675,12 +808,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.recycle(recording.uploads, recording.query_pools);
-                if let Some((pool, _)) = times {
+                if let Some((pool, marks)) = times {
                     // The recording never reached the queue, so the pool
                     // remains reset and can be returned without a GPU call.
                     self.queue.free_pools.push(FreeQueryPool {
                         query_type: QueryType::Timestamp,
-                        count: COMPLETION_QUERIES,
+                        count: marks.queries,
                         pool,
                     });
                 }
@@ -694,6 +827,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         // and outside the command buffer's GPU times. Keep pending copies
         // available for the next commit until preparation succeeds.
         let uploads = self.take_cpu_copy_uploads();
+        let carries = !uploads.is_empty();
         held.as_mut_slice()[0].segments[0]
             .commands
             .splice(1..1, uploads);
@@ -710,6 +844,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             pipelines: recording.pipelines,
             workload: recording.workload,
             committed: self.timing.now(),
+            submits: 0,
+            segments: 0,
+            carries,
         });
         if held.as_mut_slice().iter().any(|held| {
             held.segments
@@ -739,7 +876,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         if self.capabilities.timestamp_frequency == 0 {
             return Ok(None);
         }
-        let pool = self.take_query_pool(QueryType::Timestamp, COMPLETION_QUERIES)?;
+        let profiled = self.passes_profiled();
+        let limit = if profiled { PROFILE_MARKS } else { PASS_MARKS };
+        let queries = if profiled {
+            PROFILE_MARKS + 2
+        } else {
+            COMPLETION_QUERIES
+        };
+        let pool = self.take_query_pool(QueryType::Timestamp, queries)?;
         held[0].segments[0].commands.insert(
             1,
             Command::WriteTimestamp {
@@ -748,7 +892,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 stage: PipelineStages::TOP_OF_PIPE,
             },
         );
-        let mut marks = Marks::default();
+        let mut marks = Marks {
+            queries,
+            profiled,
+            ..Marks::default()
+        };
         // The pipelines a span binds, by the order the command buffer first
         // bound each: the order its `pipelines` lists them in.
         let mut seen: Vec<Pipeline> = Vec::new();
@@ -758,26 +906,41 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         // the encoder lets overlap.
         let mut dispatched = false;
         let mut shape = SpanShape::default();
+        // Under the profile a mark also goes wherever the work changes
+        // kind outside a pass, which may stop work that would overlap.
+        let mut in_pass = false;
         for segment in held.iter_mut().flat_map(|held| held.segments.iter_mut()) {
             let commands = core::mem::take(&mut segment.commands);
             segment.commands.reserve(commands.len());
             for command in commands {
-                let room = marks.spans.len() < PASS_MARKS as usize;
-                if room && dispatched && matches!(command, Command::Barrier(_)) {
+                let room = marks.spans.len() < limit as usize;
+                let kind = SpanKind::of(&command);
+                let changes = profiled
+                    && !in_pass
+                    && kind != SpanKind::None
+                    && shape.kind != SpanKind::None
+                    && shape.kind != kind;
+                if room && (dispatched && matches!(command, Command::Barrier(_)) || changes) {
                     dispatched = false;
-                    marks.spans.push(core::mem::take(&mut bound));
-                    marks.shapes.push(core::mem::take(&mut shape));
-                    segment.commands.push(Command::WriteTimestamp {
-                        pool,
-                        query: marks.spans.len() as u32,
-                        stage: PipelineStages::ALL_COMMANDS,
-                    });
+                    marks.mark(pool, &mut bound, &mut shape, &mut segment.commands);
                 }
                 dispatched |= matches!(
                     command,
                     Command::Dispatch(_) | Command::DispatchIndirect { .. }
                 );
                 let pass_ends = matches!(command, Command::EndRendering);
+                match command {
+                    Command::BeginRendering(_) => {
+                        in_pass = true;
+                        marks.counts.passes += 1;
+                    }
+                    Command::EndRendering => in_pass = false,
+                    _ => {}
+                }
+                if let Some(texels) = pass_times::copied_texels(&command) {
+                    marks.counts.copies += 1;
+                    marks.counts.copied_texels += texels;
+                }
                 shape.add(&command);
                 if let Command::BindPipeline { pipeline, .. } = &command {
                     let index = seen
@@ -793,17 +956,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     }
                 }
                 segment.commands.push(command);
-                if pass_ends && marks.spans.len() < PASS_MARKS as usize {
-                    marks.spans.push(core::mem::take(&mut bound));
-                    marks.shapes.push(core::mem::take(&mut shape));
-                    segment.commands.push(Command::WriteTimestamp {
-                        pool,
-                        query: marks.spans.len() as u32,
-                        stage: PipelineStages::ALL_COMMANDS,
-                    });
+                if pass_ends && marks.spans.len() < limit as usize {
+                    marks.mark(pool, &mut bound, &mut shape, &mut segment.commands);
                 }
             }
         }
+        marks.counts.out_of_marks = marks.spans.len() >= limit as usize;
         // The rest of the work to the end.
         marks.spans.push(bound);
         marks.shapes.push(shape);
@@ -1192,6 +1350,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
         }
         self.track(&mut held)?;
+        if let Some(flight) = self
+            .queue
+            .in_flight
+            .iter_mut()
+            .find(|flight| flight.serial == held.serial)
+        {
+            flight.submits += 1;
+            flight.segments += held.segments.len() as u64;
+        }
         self.backend.submit(&held.segments)
     }
 
@@ -1256,6 +1423,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 load.waited_queries,
                 load.conditional,
                 load.internal
+            ));
+            // How long it waited, and whether it read other textures' CPU
+            // copies, say whether it ran on memory freed meanwhile.
+            work.push_str(&format!(
+                " {:?} {} ticks after commit{};",
+                in_flight.track,
+                self.timing.now().wrapping_sub(in_flight.committed),
+                if in_flight.carries {
+                    ", carrying CPU-copy uploads or decodes"
+                } else {
+                    ""
+                }
             ));
             if let Some(widest) = load.widest {
                 work.push_str(&format!(" widest dispatch {widest};"));
@@ -1384,11 +1563,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
         }
         // Everything through the first command buffer whose submitted work
-        // still runs; held segments run nothing and hold nothing they did
-        // not own. So `completed` may pass a held serial. That is safe for
-        // what the guest releases only once its connection reaches that
-        // serial (`reached_for`); nothing the host defers may wait on a held
-        // serial through `completed`.
+        // still runs; held segments run nothing yet. So `completed` may pass
+        // a held serial. Deferred
+        // destruction does not: it waits for `freeable`, as a held command
+        // buffer still names what was released after it was committed.
         let completed = self
             .queue
             .in_flight
@@ -1405,6 +1583,29 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         early.retain(|&(key, serial)| serial > self.reached_for(key));
         self.queue.early = early;
         Ok(self.completed)
+    }
+
+    /// Every serial through which deferred destruction may free what was
+    /// released: [`Self::completed_serial`], but never past the oldest
+    /// command buffer not yet done, held ones included. `completed` passes
+    /// a held command buffer, yet a held command buffer names what it will
+    /// read once its event arrives: a resource its app released after
+    /// committing it (an unretained-reference command buffer, which Core
+    /// Animation commits and then drops the IOSurface texture of; a Mac's
+    /// kernel keeps such memory until the GPU is done), and the CPU-copy
+    /// uploads and decodes of any connection's textures that ride the next
+    /// commit. Freed when `completed` passed it, its memory was unbound when
+    /// the event released the command buffer: a GPU MMU fault that lost the
+    /// device. A command buffer dropped unsubmitted with its connection is
+    /// done.
+    pub(super) fn freeable(&self) -> u64 {
+        self.queue
+            .in_flight
+            .iter()
+            .find(|flight| flight.track != Track::Done)
+            .map_or(self.completed, |flight| {
+                self.completed.min(flight.serial - 1)
+            })
     }
 
     fn late_in_flight(&self) -> bool {
@@ -1459,8 +1660,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
             // Before the pool is reset.
             if let Some((pool, marks)) = flight.times {
-                let mut stamps = [0; COMPLETION_QUERIES as usize];
-                let read = &mut stamps[..marks.spans.len() + 1];
+                let mut stamps = alloc::vec![0; marks.spans.len() + 1];
+                let read = &mut stamps[..];
                 match self.backend.query_results(pool, 0, read) {
                     Ok(true) => {
                         let times = [read[0], read[read.len() - 1]];
@@ -1477,6 +1678,38 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                                     pipelines.entries(pipeline).unwrap_or_default()
                                 })
                         };
+                        if marks.profiled {
+                            let counts = CommandBufferCounts {
+                                submits: flight.submits,
+                                segments: flight.segments,
+                                ..marks.counts
+                            };
+                            self.queue.passes.command_buffer(counts);
+                            for ((bound, shape), pair) in
+                                marks.spans.iter().zip(&marks.shapes).zip(read.windows(2))
+                            {
+                                let entries = bound.iter().flat_map(|&index| named(index.into()));
+                                let names = super::gpu_times::names(entries);
+                                let target = shape.target.and_then(|view| {
+                                    self.queue.targets.get(&view).map(|&(_, target)| target)
+                                });
+                                let key = pass_times::span_key(
+                                    shape.kind,
+                                    &names,
+                                    shape.extent,
+                                    target.filter(|_| shape.kind == SpanKind::Render),
+                                );
+                                self.queue.passes.span(
+                                    key,
+                                    SpanWork {
+                                        ns: ns(pair[1]).saturating_sub(ns(pair[0])),
+                                        draws: shape.draws.into(),
+                                        dispatches: shape.dispatches.into(),
+                                        texels: shape.texels,
+                                    },
+                                );
+                            }
+                        }
                         let spans = marks
                             .spans
                             .iter()
@@ -1500,26 +1733,26 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     Ok(false) => {}
                     Err(error) => outcome = outcome.and(Err(error)),
                 }
-                self.retire_query_pool(pool, QueryType::Timestamp, COMPLETION_QUERIES);
+                self.retire_query_pool(pool, QueryType::Timestamp, marks.queries);
             }
             self.queue.free_chunks.extend(flight.chunks);
             for (query_type, pool) in flight.pools {
                 self.retire_query_pool(pool, query_type, POOL_QUERIES);
             }
         }
-        if completed <= self.completed {
-            return outcome;
-        }
-        self.completed = completed;
+        // A held command buffer that finished frees what waited for it even
+        // when `completed` passed it while it was held.
+        self.completed = self.completed.max(completed);
+        let freeable = self.freeable();
         while let Some((_, object, allocated)) = self
             .deferred
-            .pop_front_if(|(serial, _, _)| *serial <= completed)
+            .pop_front_if(|(serial, _, _)| *serial <= freeable)
         {
-            self.backend.destroy(object);
+            self.destroy_now(object);
             self.allocated -= allocated;
         }
-        self.descriptors.retire(completed);
-        self.execution_sets.retire(completed);
+        self.descriptors.retire(freeable);
+        self.execution_sets.retire(freeable);
         outcome
     }
 
@@ -1549,6 +1782,50 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// Where retired command buffers' time went since the last call.
     pub fn take_gpu_times(&mut self) -> GpuTimes {
         self.queue.clock.take()
+    }
+
+    /// Times each pass apart and reports [`PassTimes`], as `--profile`
+    /// does for every device ([`pass_times::set_pass_profile`]).
+    pub fn set_pass_profile(&mut self, on: bool) {
+        self.queue.profile = on;
+    }
+
+    /// Whether command buffers time each pass apart.
+    pub fn passes_profiled(&self) -> bool {
+        self.queue.profile || pass_times::pass_profile()
+    }
+
+    /// The profile's spans and counts since the last call; `None` when
+    /// passes are not profiled or the device has no timestamps.
+    pub fn take_pass_times(&mut self) -> Option<PassTimes> {
+        (self.passes_profiled() && self.capabilities.timestamp_frequency != 0)
+            .then(|| self.queue.passes.take())
+    }
+
+    /// Notes what a pass attaching `view` of `texture` renders into, for
+    /// the profile's report.
+    fn note_target(&mut self, view: ImageView, texture: TextureId) {
+        let Ok(descriptor) = self.texture_descriptor(texture) else {
+            return;
+        };
+        let target = TargetInfo {
+            format: descriptor.pixel_format,
+            memory: self.target_memory(texture),
+        };
+        let queue = &mut self.queue;
+        queue.noted += 1;
+        queue.targets.insert(view, (queue.noted, target));
+        if queue.targets.len() > TARGETS_KEPT {
+            // The oldest note goes: its view is likely gone.
+            let oldest = queue
+                .targets
+                .iter()
+                .min_by_key(|(_, (noted, _))| *noted)
+                .map(|(view, _)| *view);
+            if let Some(oldest) = oldest {
+                queue.targets.remove(&oldest);
+            }
+        }
     }
 
     fn keep_times(&mut self, serial: u64, times: [u64; 2]) {

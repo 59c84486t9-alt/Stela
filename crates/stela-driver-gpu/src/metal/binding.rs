@@ -102,6 +102,19 @@ impl ResourceId {
     /// The high-half bit of a two-plane YCbCr texture whose surface's pixel
     /// format is video range, rather than full range.
     pub const VIDEO_RANGE: u32 = 1 << (Self::PLANES_SHIFT - 2);
+    /// The bit of [`Self::VIDEO_RANGE`] on a two-plane RGB texture: its
+    /// planes hold `RGB10A8_2P_XR10`'s extended-range codes and 8-bit alpha,
+    /// with [`Self::XR10_SRGB`] through the sRGB curve.
+    pub const XR10: u32 = Self::VIDEO_RANGE;
+    /// The bit of [`Self::TEN_BIT`] on an [`Self::XR10`] texture: its codes
+    /// read through the sRGB curve.
+    pub const XR10_SRGB: u32 = Self::TEN_BIT;
+    /// The bit of [`Self::YCBCR`] on a texture of one plane: its storage
+    /// views hold a two-plane extended-range format's half floats, which
+    /// shaders hold to the format's codes and 8-bit alpha as they write,
+    /// through the sRGB curve with [`Self::SRGB_STORAGE`] (which then does
+    /// not encode), as Apple GPUs write `RGB10A8_2P_XR10` textures.
+    pub const EXTENDED_STORAGE: u32 = Self::YCBCR;
     /// The storage indices a texture's high half holds.
     pub const MAX_STORAGE: u32 = 1 << Self::PLANES_SHIFT;
 
@@ -153,6 +166,17 @@ impl ResourceId {
             Self(self.0 | (Self::SRGB_STORAGE as u64) << 32)
         } else {
             self
+        }
+    }
+
+    /// This texture ID with [`Self::EXTENDED_STORAGE`], and
+    /// [`Self::SRGB_STORAGE`] for the sRGB curve, when `extended` is some.
+    pub const fn with_extended_storage(self, extended: Option<bool>) -> Self {
+        match extended {
+            Some(srgb) => {
+                Self(self.0 | (Self::EXTENDED_STORAGE as u64) << 32).with_srgb_storage(srgb)
+            }
+            None => self,
         }
     }
 
@@ -553,6 +577,11 @@ pub struct TexelArguments {
     pub bytes_per_row: u32,
     pub bytes_per_image: u32,
     pub origin: [u32; 3],
+    /// For the two-plane extended-range encodings, the address of the
+    /// alpha plane's byte of the region's first texel, or zero for none,
+    /// and that plane's bytes per row.
+    pub alpha: u64,
+    pub alpha_bytes_per_row: u32,
 }
 
 impl TexelArguments {
@@ -565,7 +594,9 @@ impl TexelArguments {
     pub const ROW_OFFSET: u32 = 32;
     pub const IMAGE_BYTES_OFFSET: u32 = 36;
     pub const ORIGIN_OFFSET: u32 = 40;
-    pub const BYTES: u32 = 56;
+    pub const ALPHA_OFFSET: u32 = 56;
+    pub const ALPHA_ROW_OFFSET: u32 = 64;
+    pub const BYTES: u32 = 72;
     pub const ALIGNMENT: u64 = 16;
     /// Threads per workgroup of the kernels.
     pub const WORKGROUP_SIZE: u32 = 64;
@@ -587,6 +618,9 @@ impl TexelArguments {
         for coordinate in self.origin {
             writer.u32(coordinate);
         }
+        writer.u32(0);
+        writer.u64(self.alpha);
+        writer.u32(self.alpha_bytes_per_row);
         bytes
     }
 }
@@ -1295,6 +1329,7 @@ mod tests {
                 ResourceId::FILTER_CLASS_SHIFT,
             ),
             ("STELA_METAL_PLANES_SHIFT", ResourceId::PLANES_SHIFT),
+            ("STELA_METAL_EXTENDED_STORAGE", ResourceId::EXTENDED_STORAGE),
             ("STELA_METAL_SAMPLER_CUBIC", ResourceId::SAMPLER_CUBIC),
             ("STELA_METAL_SAMPLER_MIPPED", ResourceId::SAMPLER_MIPPED),
             ("STELA_METAL_SAMPLER_PIXELS", ResourceId::SAMPLER_PIXELS),
@@ -1376,6 +1411,11 @@ mod tests {
                 TexelArguments::IMAGE_BYTES_OFFSET,
             ),
             ("STELA_METAL_TEXELS_ORIGIN", TexelArguments::ORIGIN_OFFSET),
+            ("STELA_METAL_TEXELS_ALPHA", TexelArguments::ALPHA_OFFSET),
+            (
+                "STELA_METAL_TEXELS_ALPHA_ROW",
+                TexelArguments::ALPHA_ROW_OFFSET,
+            ),
             ("STELA_METAL_TEXELS_BYTES", TexelArguments::BYTES),
             (
                 "STELA_METAL_AVERAGE_SOURCE",
@@ -2128,6 +2168,19 @@ mod tests {
         indices.retire(2);
         assert_eq!(indices.allocate_run(4), Ok(8));
         assert_eq!(indices.in_use(), 11);
+    }
+
+    #[test]
+    fn extended_storage_is_a_chroma_flag_without_planes() {
+        let id = ResourceId::texture(5, ResourceId::MAX_STORAGE - 1, 1);
+        assert_eq!(id.with_extended_storage(None), id);
+        let codes = id.with_extended_storage(Some(false));
+        assert_eq!(codes.high() >> ResourceId::PLANES_SHIFT & 7, 4);
+        assert_eq!(codes.high_index(), ResourceId::MAX_STORAGE - 1);
+        assert_eq!(codes.high() & ResourceId::SRGB_STORAGE, 0);
+        let srgb = id.with_extended_storage(Some(true));
+        assert_ne!(srgb.high() & ResourceId::SRGB_STORAGE, 0);
+        assert_eq!(srgb.high_index(), ResourceId::MAX_STORAGE - 1);
     }
 
     #[test]

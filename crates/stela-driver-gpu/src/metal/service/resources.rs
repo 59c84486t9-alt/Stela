@@ -123,16 +123,33 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: NewBufferTextureRequest = call.request()?;
         let buffer = self.object::<BufferId>(call.connection, request.buffer)?;
         let descriptor = texture_descriptor(&request.descriptor)?;
-        let texture = if descriptor.pixel_format.planes().is_some() {
+        let plane = |offset, bytes_per_row| PlaneLayout {
+            offset,
+            bytes_per_row,
+        };
+        // An IOSurface's extended-range texture keeps its texels in the
+        // surface's two planes ('&b38'), which the display reads.
+        let texture = if descriptor.pixel_format.extended_planes().is_some() {
+            if request.second_bytes_per_row == 0 {
+                return Err(crate::metal::error::Error::Unsupported(
+                    "buffer textures of two-plane extended-range formats",
+                )
+                .into());
+            }
+            self.device.new_extended_plane_texture(
+                buffer,
+                &descriptor,
+                [
+                    plane(request.offset, request.bytes_per_row),
+                    plane(request.second_offset, request.second_bytes_per_row),
+                ],
+            )?
+        } else if descriptor.pixel_format.planes().is_some() {
             if request.second_bytes_per_row == 0 {
                 return Err(Fault::malformed(
                     "a two-plane texture without its second plane",
                 ));
             }
-            let plane = |offset, bytes_per_row| PlaneLayout {
-                offset,
-                bytes_per_row,
-            };
             self.device.new_two_plane_texture(
                 buffer,
                 &descriptor,
@@ -388,9 +405,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let request: HeapUsageRequest = call.request()?;
         let heap = self.object::<HeapId>(call.connection, request.heap)?;
         let (used_size, max_available_size) = self.device.heap_usage(heap, request.alignment)?;
+        let (size, _) = self.device.heap_occupancy(heap)?;
         call.reply(&HeapUsageResponse {
             used_size,
             max_available_size,
+            size,
         })
     }
 
@@ -462,15 +481,7 @@ fn options(raw: u64) -> Result<ResourceOptions, Fault> {
     super::decode_bits(ResourceOptions::from_raw, raw, "resource options")
 }
 
-/// Metal's raw value for `&b38`, the two-plane lossless framebuffer WindowServer
-/// allocates. AGX's encoder writes that layout; this device stores its pixels
-/// as plain BGRA rows (`stela_soc::dcp::swap`).
-const LOSSLESS_BGRA: u64 = 550;
-
 pub(super) fn pixel_format(raw: u64) -> Result<PixelFormat, Fault> {
-    if raw == LOSSLESS_BGRA {
-        return Ok(PixelFormat::Bgra8Unorm);
-    }
     super::decode(PixelFormat::from_raw, raw, "pixel format")
 }
 

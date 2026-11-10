@@ -627,6 +627,7 @@ impl CommandBuffer {
             bytes_per_image: narrow(held.bytes_per_image)?,
             // The view holds the copied slice alone.
             origin: [narrow(region.origin[0])?, narrow(region.origin[1])?, 0],
+            ..TexelArguments::default()
         };
         if arguments.count == 0 {
             return Ok(());
@@ -865,6 +866,7 @@ fn texel_arguments(
         bytes_per_image: narrow(image_bytes)?,
         // The view holds the copied slice alone.
         origin: [copy.offset[0] as u32, copy.offset[1] as u32, 0],
+        ..TexelArguments::default()
     }))
 }
 

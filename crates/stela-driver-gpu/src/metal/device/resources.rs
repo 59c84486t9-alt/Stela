@@ -1,5 +1,5 @@
 //! Buffers, textures, samplers and heaps.
-use super::{BufferId, Device, HeapId, MemoryId, SamplerId, Slab, TextureId};
+use super::{BufferId, Device, HeapId, MemoryId, MemoryOwner, SamplerId, Slab, TextureId};
 use crate::metal::{
     abi::{
         CompareFunction, CpuCacheMode, HazardTrackingMode, HeapType, ResourceOptions,
@@ -37,10 +37,14 @@ use crate::metal::{
 };
 use alloc::{
     collections::{BTreeMap, VecDeque},
+    format,
     vec::Vec,
 };
 use core::{num::NonZeroU64, ops::Range};
 use stela_contracts::gate::MemoryRange;
+
+mod extended_planes;
+pub(super) use extended_planes::PlaneActions;
 
 const TEXTURE_ARRAYS: [HeapArray; 2] = [HeapArray::SampledImages, HeapArray::StorageImages];
 const TEXEL_BUFFER_ARRAYS: [HeapArray; 2] = [
@@ -80,13 +84,19 @@ pub struct Placement {
 enum Backing {
     /// Its own allocation of this many bytes.
     Owned(u64),
-    /// Placed in a heap; automatic heaps return the range on destruction
-    /// unless the resource was made aliasable.
+    /// Placed in a heap at `offset`, `size` bytes as the heap counts them
+    /// (`heapOffset`, `allocatedSize`); automatic heaps return that range on
+    /// destruction unless the resource was made aliasable. Where it lives:
+    /// the range `real` of the heap's memory its automatic heap reserved,
+    /// or at `offset` in it (`real` none, `own` zero), or memory of its
+    /// own of `own` bytes when its layout does not fit there.
     Heap {
         heap: HeapId,
         offset: u64,
         size: u64,
         aliasable: bool,
+        real: Option<(u64, u64)>,
+        own: u64,
     },
     /// Aliases a buffer's memory (linear textures and texture buffers).
     Buffer(BufferId),
@@ -179,7 +189,17 @@ struct SamplerObject {
 struct HeapObject {
     descriptor: HeapDescriptor,
     memory: Memory,
+    /// The bytes of `memory`: a device heap's size rounded up to whole
+    /// [`heap::PAGE`]s, as a Mac rounds it.
+    bytes: u64,
+    /// What an automatic heap holds by its answered sizes.
     allocator: Option<HeapAllocator>,
+    /// Where in `memory` an automatic heap's resources live, by the
+    /// backend's own sizes and alignments.
+    real: Option<HeapAllocator>,
+    /// Its memory is the guest's, which the CPU reaches at the offsets its
+    /// buffers answer: a buffer lives nowhere else.
+    imported: bool,
     sparse: Option<SparseHeap>,
     resources: u32,
 }
@@ -215,6 +235,13 @@ pub(super) struct Resources {
     /// The samplers of constexpr sampler states by state. Any pipeline
     /// compiled later may name one, so each lives as long as the device.
     constexpr_samplers: BTreeMap<u64, ResourceId>,
+    /// IOSurface textures of extended-range planes, by texture: where the
+    /// planes lie in their buffers and what their working image holds
+    /// ([`extended_planes`]).
+    extended_planes: BTreeMap<u32, extended_planes::PlaneState>,
+    /// The times textures encoded into each IOSurface's planes, by surface
+    /// ID ([`extended_planes`]).
+    extended_generations: BTreeMap<u32, u64>,
     /// Destroyed private textures kept for reuse, oldest first, and their
     /// bytes.
     recycled: VecDeque<Recycled>,
@@ -260,6 +287,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let bytes = ranges.iter().map(|range| range.bytes).sum();
         let memory = self.backend.import_memory(ranges, token)?;
         self.allocated += bytes;
+        self.book_memory(memory, bytes, || {
+            format!("imported memory of {bytes} bytes")
+        });
         Ok(MemoryId(
             self.resources
                 .imports
@@ -294,10 +324,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     }
 
     pub fn heap_bytes(&self, id: HeapId) -> u64 {
-        self.resources
-            .heaps
-            .get(id.0)
-            .map_or(0, |heap| heap.descriptor.size)
+        self.resources.heaps.get(id.0).map_or(0, |heap| heap.bytes)
     }
 
     pub fn release_import(&mut self, id: MemoryId) -> Result<()> {
@@ -339,7 +366,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let (buffer, address) = self.backend.create_placed_buffer(&plan.info, memory, 0)?;
         self.resources.imports.remove(id.0)?;
         self.allocated -= bytes;
-        Ok(self.own_buffer(
+        let buffer = self.own_buffer(
             BufferAllocation {
                 buffer,
                 memory,
@@ -348,7 +375,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             },
             length,
             options,
-        ))
+        );
+        self.book
+            .describe(memory, format!("imported buffer of {length} bytes"));
+        Ok(buffer)
     }
 
     fn own_buffer(
@@ -358,6 +388,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         options: ResourceOptions,
     ) -> BufferId {
         self.allocated += allocation.allocated;
+        self.book_memory(allocation.memory, allocation.allocated, || {
+            format!("buffer of {length} bytes ({:?})", options.storage_mode)
+        });
+        if allocation.address != 0 {
+            self.book
+                .learn_address(allocation.memory, allocation.address);
+        }
         BufferId(self.resources.buffers.insert(BufferObject {
             buffer: allocation.buffer,
             memory: allocation.memory,
@@ -638,6 +675,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             let (sampled, storage) = created.split_at(sampled);
             descriptors = self.view_descriptors(sampled, storage).map(|id| {
                 id.with_srgb_storage(views.srgb_storage)
+                    .with_extended_storage(views.extended_storage)
                     .with_filter_class(views.filter_class)
             });
         }
@@ -709,6 +747,32 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// one plane.
     pub fn second_plane(&self, id: TextureId) -> Result<Option<Image>> {
         Ok(self.resources.textures.get(id.0)?.second_plane)
+    }
+
+    /// Where texture `id`'s texels are, which the profile's pass report
+    /// names: a view's are its parent's.
+    pub(super) fn target_memory(&self, id: TextureId) -> super::pass_times::TargetMemory {
+        use super::pass_times::TargetMemory;
+        let textures = &self.resources.textures;
+        let Ok(texture) = textures.get(id.0) else {
+            return TargetMemory::Optimal;
+        };
+        let root = texture.parent.unwrap_or(id);
+        if self.has_extended_planes(root) {
+            return TargetMemory::Planes;
+        }
+        let backing = textures.get(root.0).map(|texture| texture.backing);
+        let Ok(Backing::Buffer(buffer)) = backing else {
+            return TargetMemory::Optimal;
+        };
+        let Ok(buffer) = self.resources.buffers.get(buffer.0) else {
+            return TargetMemory::Optimal;
+        };
+        match (buffer.options.storage_mode, buffer.options.cpu_cache_mode) {
+            (StorageMode::Private, _) => TargetMemory::LinearPrivate,
+            (_, CpuCacheMode::WriteCombined) => TargetMemory::LinearWriteCombined,
+            _ => TargetMemory::LinearShared,
+        }
     }
 
     /// The texture's image, for blits.
@@ -863,7 +927,67 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
         };
         self.resources.buffers.get_mut(buffer_id.0)?.dependents += 1;
+        self.book_texture_over(buffer_id, descriptor);
         Ok(TextureId(self.resources.textures.insert(texture)))
+    }
+
+    /// Names the texture `descriptor` made over buffer `id` as what owns
+    /// the buffer's memory, when the buffer has memory of its own (an
+    /// IOSurface's or an app's imported pages).
+    fn book_texture_over(&mut self, id: BufferId, descriptor: &TextureDescriptor) {
+        let Ok(buffer) = self.resources.buffers.get(id.0) else {
+            return;
+        };
+        if buffer.memory_offset != 0 || !matches!(buffer.backing, Backing::Owned(_)) {
+            return;
+        }
+        let memory = buffer.memory;
+        let length = buffer.length;
+        self.book.describe(
+            memory,
+            format!(
+                "buffer of {length} bytes under a {}x{} {:?} texture",
+                descriptor.width, descriptor.height, descriptor.pixel_format
+            ),
+        );
+    }
+
+    /// Notes `connection` as the first holder of `owner`'s memory in the
+    /// book.
+    pub fn book_holder(&mut self, owner: MemoryOwner, connection: u64) {
+        let memory = match owner {
+            MemoryOwner::Import(id) => self
+                .resources
+                .imports
+                .get(id.0)
+                .ok()
+                .map(|import| import.memory),
+            MemoryOwner::Buffer(id) => self
+                .resources
+                .buffers
+                .get(id.0)
+                .ok()
+                .map(|buffer| buffer.memory),
+            MemoryOwner::Texture(id) => {
+                self.resources
+                    .textures
+                    .get(id.0)
+                    .ok()
+                    .and_then(|texture| match texture.backing {
+                        Backing::Buffer(buffer) => self
+                            .resources
+                            .buffers
+                            .get(buffer.0)
+                            .ok()
+                            .map(|buffer| buffer.memory),
+                        _ => texture.memory,
+                    })
+            }
+            MemoryOwner::Heap(id) => self.resources.heaps.get(id.0).ok().map(|heap| heap.memory),
+        };
+        if let Some(memory) = memory {
+            self.book.hold(memory, connection);
+        }
     }
 
     /// `newTextureWithDescriptor:iosurface:plane:` of a two-plane format
@@ -977,6 +1101,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             second_plane: Some(images[1]),
         };
         self.resources.buffers.get_mut(buffer_id.0)?.dependents += 1;
+        self.book_texture_over(buffer_id, descriptor);
         Ok(TextureId(self.resources.textures.insert(texture)))
     }
 
@@ -1004,6 +1129,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .find(|(key, _)| *key == view)
         {
             return Ok(cached);
+        }
+        if self.has_extended_planes(id) {
+            return self.extended_attachment_view(id, view);
         }
         let image = texture
             .image
@@ -1050,6 +1178,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         id: TextureId,
         view: AttachmentView<()>,
     ) -> Result<ResourceId> {
+        if self.has_extended_planes(id) {
+            return Ok(self.extended_working(id, view)?.id);
+        }
         let texture = self.resources.textures.get(id.0)?;
         if let Some(&(_, _, descriptor)) = texture
             .attachment_storage
@@ -1522,6 +1653,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 Encoding::Exact => self.backend.copy_to_image(image, region, bytes),
                 encoding => {
                     let mut stored = alloc::vec![0; stored_len(description, bytes.len())];
+                    // A two-plane extended-range texel keeps its alpha.
+                    if matches!(encoding, Encoding::ExtendedRange(codes) if codes.planes) {
+                        self.backend.copy_from_image(image, region, &mut stored)?;
+                    }
                     encoding.store(bytes, &mut stored);
                     self.backend.copy_to_image(image, region, &stored)
                 }
@@ -1722,6 +1857,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             bytes_per_row: narrow(layout.bytes_per_row)?,
             bytes_per_image: narrow(layout.bytes_per_image)?,
             origin: [0; 3],
+            ..TexelArguments::default()
         };
         let offset = decode_arguments_offset(&descriptor)
             + (level * descriptor.slice_count() + slice) * DECODE_ARGUMENTS_STRIDE;
@@ -1758,10 +1894,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "views of the texture are still alive",
         )?;
         let texture = self.resources.textures.remove(id.0)?;
-        // Its decodes would write a view destroyed with it.
+        self.forget_extended_planes(id);
+        // Its decodes would write a view destroyed with it, and its uploads
+        // would go to whatever texture takes its slot next.
         self.resources
             .block_decodes
             .retain(|((decoded, ..), _)| *decoded != id);
+        self.resources
+            .cpu_copy_uploads
+            .retain(|(uploaded, _)| *uploaded != id);
         match recyclable(&texture) {
             Some(bytes) if !self.lost => self.recycle_texture(texture, bytes),
             _ => self.free_texture(texture),
@@ -1789,7 +1930,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         {
             return None;
         }
-        let completed = self.completed;
+        // Not while a held command buffer may still name it.
+        let completed = self.freeable();
         let Some(index) =
             self.resources.recycled.iter().position(|entry| {
                 entry.ready <= completed && entry.texture.descriptor == *descriptor
@@ -1906,13 +2048,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     offset,
                     size,
                     aliasable,
+                    real,
+                    own,
                 },
-                _,
+                memory,
             ) => {
                 let heap = self.resources.heaps.get_mut(heap.0)?;
                 heap.resources -= 1;
                 if let (Some(allocator), false) = (&mut heap.allocator, aliasable) {
                     allocator.free(offset, size)?;
+                }
+                if let (Some(allocator), Some((at, length))) = (&mut heap.real, real) {
+                    allocator.free(at, length)?;
+                }
+                if let (Some(memory), true) = (memory, own != 0) {
+                    self.release_memory(memory, own);
                 }
             }
             (Backing::Buffer(buffer), _) => {
@@ -2071,9 +2221,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "sparse heaps are the device's",
         )?;
         let ImportObject { memory, bytes } = *self.resources.imports.get(id.0)?;
-        ensure(bytes == plan.size, "the heap is not the size of its memory")?;
+        // Its memory is whole pages, as the Mac rounds a heap.
+        ensure(
+            bytes == plan.size.next_multiple_of(heap::PAGE),
+            "the heap is not the size of its memory",
+        )?;
         self.resources.imports.remove(id.0)?;
-        Ok(self.own_heap(descriptor, memory, None, plan.size))
+        let heap = self.own_heap(descriptor, memory, None, bytes);
+        self.resources.heaps.get_mut(heap.0)?.imported = true;
+        self.book
+            .describe(memory, format!("imported heap of {bytes} bytes"));
+        Ok(heap)
     }
 
     pub fn new_heap(&mut self, descriptor: &HeapDescriptor) -> Result<HeapId> {
@@ -2097,11 +2255,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             HeapType::Automatic | HeapType::Placement => None,
         };
         let memory_types = sparse.as_ref().map_or(u32::MAX, |heap| heap.memory_types);
+        // A Mac holds whole pages of resources whatever size was asked.
+        let bytes = match sparse {
+            Some(_) => plan.size,
+            None => plan.size.next_multiple_of(heap::PAGE),
+        };
         let memory = self
             .backend
-            .allocate_memory(plan.size, plan.memory, memory_types)?;
-        self.allocated += plan.size;
-        Ok(self.own_heap(descriptor, memory, sparse, plan.size))
+            .allocate_memory(bytes, plan.memory, memory_types)?;
+        self.allocated += bytes;
+        self.book_memory(memory, bytes, || {
+            format!("{:?} heap of {bytes} bytes", descriptor.heap_type)
+        });
+        Ok(self.own_heap(descriptor, memory, sparse, bytes))
     }
 
     fn own_heap(
@@ -2111,12 +2277,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         sparse: Option<SparseHeap>,
         size: u64,
     ) -> HeapId {
-        let allocator =
-            (descriptor.heap_type == HeapType::Automatic).then(|| HeapAllocator::new(size));
+        let automatic = descriptor.heap_type == HeapType::Automatic;
         HeapId(self.resources.heaps.insert(HeapObject {
             descriptor: *descriptor,
             memory,
-            allocator,
+            bytes: size,
+            allocator: automatic.then(|| HeapAllocator::new(size)),
+            real: automatic.then(|| HeapAllocator::new(size)),
+            imported: false,
             sparse,
             resources: 0,
         }))
@@ -2144,7 +2312,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         descriptor: &TextureDescriptor,
     ) -> Result<SizeAndAlign> {
         let plan = resource::heap_texture(&self.capabilities, descriptor)?;
-        self.heap_texture_requirements(&plan)
+        let layout = self.heap_texture_requirements(&plan)?;
+        Ok(heap::apple_texture(descriptor).unwrap_or(layout))
     }
 
     fn heap_texture_requirements(&mut self, plan: &TexturePlan) -> Result<SizeAndAlign> {
@@ -2182,7 +2351,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 offset
             }
             (None, Some(offset)) => {
-                heap::placement(heap.descriptor.size, offset, requirement)?;
+                heap::placement(heap.bytes, offset, requirement)?;
                 offset
             }
             (Some(_), Some(_)) => return Err(Error::Invalid("automatic heaps choose offsets")),
@@ -2192,7 +2361,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok((heap.memory, offset))
     }
 
-    /// `newBufferWithLength:options:` (and `…offset:`) on a heap.
+    /// `newBufferWithLength:options:` (and `…offset:`) on a heap. An
+    /// automatic heap's buffer lives at its offset in the heap's memory
+    /// unless a texture's own layout took part of that range, and then in
+    /// memory of its own.
     pub fn new_heap_buffer(
         &mut self,
         id: HeapId,
@@ -2203,42 +2375,74 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let requirement = self.heap_buffer_size_and_align(length, options)?;
         let (memory, offset) = self.place(id, options, requirement, offset)?;
         let plan = resource::buffer(&self.capabilities, length, options)?;
-        let (buffer, address) = match self
-            .backend
-            .create_placed_buffer(&plan.info, memory, offset)
-        {
+        let heap = self.resources.heaps.get_mut(id.0)?;
+        let real = match &mut heap.real {
+            Some(real) => real
+                .take(offset, requirement.size)
+                .then_some((offset, requirement.size)),
+            None => Some((offset, 0)),
+        };
+        if real.is_none() && heap.imported {
+            // A texture's own layout holds that range of the CPU's memory.
+            heap.resources -= 1;
+            if let Some(allocator) = &mut heap.allocator {
+                allocator.free(offset, requirement.size)?;
+            }
+            self.resources.heap_refusals.full += 1;
+            return Err(Error::HeapFull);
+        }
+        let mut backing = Backing::Heap {
+            heap: id,
+            offset,
+            size: requirement.size,
+            aliasable: false,
+            real: real.filter(|&(_, length)| length != 0),
+            own: 0,
+        };
+        let created = match real {
+            Some(_) => self
+                .backend
+                .create_placed_buffer(&plan.info, memory, offset)
+                .map(|(buffer, address)| (buffer, memory, offset, address)),
+            None => self
+                .backend
+                .create_buffer(&plan.info, plan.memory)
+                .map(|own| {
+                    self.allocated += own.allocated;
+                    if let Backing::Heap { own: bytes, .. } = &mut backing {
+                        *bytes = own.allocated;
+                    }
+                    (own.buffer, own.memory, 0, own.address)
+                }),
+        };
+        let (buffer, memory, memory_offset, address) = match created {
             Ok(created) => created,
             Err(error) => {
-                self.release_backing(
-                    Backing::Heap {
-                        heap: id,
-                        offset,
-                        size: requirement.size,
-                        aliasable: false,
-                    },
-                    None,
-                )?;
+                self.release_backing(backing, None)?;
                 return Err(error);
             }
         };
+        if address != 0 && address >= memory_offset {
+            self.book.learn_address(memory, address - memory_offset);
+        }
         Ok(BufferId(self.resources.buffers.insert(BufferObject {
             buffer,
             memory,
-            memory_offset: offset,
+            memory_offset,
             address,
             length,
             options,
-            backing: Backing::Heap {
-                heap: id,
-                offset,
-                size: requirement.size,
-                aliasable: false,
-            },
+            backing,
             dependents: 0,
         })))
     }
 
-    /// `newTextureWithDescriptor:` (and `…offset:`) on a heap.
+    /// `newTextureWithDescriptor:` (and `…offset:`) on a heap. The heap
+    /// counts the texture by the size and alignment a Mac answers
+    /// ([`heap::apple_texture`]), so as many fit, at the same offsets, as
+    /// there. The image lives where its own layout fits: a free range of an
+    /// automatic heap's memory, a placement heap's offset when the layout
+    /// is no larger than the answer, or else memory of its own.
     pub fn new_heap_texture(
         &mut self,
         id: HeapId,
@@ -2250,25 +2454,53 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             return self.new_sparse_texture(id, descriptor);
         }
         let plan = resource::heap_texture(&self.capabilities, descriptor)?;
-        let requirement = self.heap_texture_requirements(&plan)?;
-        let (memory, offset) = self.place(id, descriptor.options, requirement, offset)?;
-        let backing = Backing::Heap {
+        let layout = self.heap_texture_requirements(&plan)?;
+        let answer = heap::apple_texture(descriptor).unwrap_or(layout);
+        let (memory, offset) = self.place(id, descriptor.options, answer, offset)?;
+        let heap = self.resources.heaps.get_mut(id.0)?;
+        let real = match &mut heap.real {
+            Some(real) => real
+                .allocate(layout.size, layout.align)
+                .map(|at| Some((at, layout.size))),
+            None => (offset.is_multiple_of(layout.align)
+                && layout.size <= answer.size
+                && offset + layout.size <= heap.bytes)
+                .then_some(None),
+        };
+        let mut backing = Backing::Heap {
             heap: id,
             offset,
-            size: requirement.size,
+            size: answer.size,
             aliasable: false,
+            real: real.flatten(),
+            own: 0,
         };
-        let image = match self
-            .backend
-            .create_placed_image(&plan.image, memory, offset)
-        {
-            Ok(image) => image,
+        let created =
+            match real {
+                Some(range) => {
+                    let at = range.map_or(offset, |(at, _)| at);
+                    self.backend
+                        .create_placed_image(&plan.image, memory, at)
+                        .map(|image| (image, None))
+                }
+                None => self.backend.create_image(&plan.image, plan.memory).map(
+                    |(image, own, bytes)| {
+                        self.allocated += bytes;
+                        if let Backing::Heap { own: owned, .. } = &mut backing {
+                            *owned = bytes;
+                        }
+                        (image, Some(own))
+                    },
+                ),
+            };
+        let (image, own) = match created {
+            Ok(created) => created,
             Err(error) => {
                 self.release_backing(backing, None)?;
                 return Err(error);
             }
         };
-        self.finish_texture(image, descriptor, &plan, backing, None)
+        self.finish_texture(image, descriptor, &plan, backing, own)
     }
 
     /// A texture on a sparse heap, with every tile unmapped.
@@ -2430,9 +2662,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
     }
 
-    fn free_heap_range(&mut self, (heap, offset, size): (HeapId, u64, u64)) -> Result<()> {
-        if let Some(allocator) = &mut self.resources.heaps.get_mut(heap.0)?.allocator {
+    fn free_heap_range(&mut self, (heap, (offset, size), real): AliasedRanges) -> Result<()> {
+        let heap = self.resources.heaps.get_mut(heap.0)?;
+        if let Some(allocator) = &mut heap.allocator {
             allocator.free(offset, size)?;
+        }
+        if let (Some(allocator), Some((at, length))) = (&mut heap.real, real) {
+            allocator.free(at, length)?;
         }
         Ok(())
     }
@@ -2442,10 +2678,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.resources.heap_refusals
     }
 
-    /// A heap's size and how many resources live in it.
+    /// A heap's size, whole pages as a Mac answers `size` and
+    /// `currentAllocatedSize`, and how many resources live in it.
     pub fn heap_occupancy(&self, id: HeapId) -> Result<(u64, u32)> {
         let heap = self.resources.heaps.get(id.0)?;
-        Ok((heap.descriptor.size, heap.resources))
+        Ok((heap.bytes, heap.resources))
     }
 
     /// `usedSize` and `maxAvailableSizeWithAlignment:` of a heap.
@@ -2454,7 +2691,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(match (&heap.allocator, &heap.sparse) {
             (Some(allocator), _) => (allocator.used(), allocator.max_available(alignment)),
             (None, Some(sparse)) => (sparse.pages.used_bytes(), sparse.pages.free_bytes()),
-            (None, None) => (heap.descriptor.size, heap.descriptor.size),
+            (None, None) => (heap.bytes, heap.bytes),
         })
     }
 
@@ -2464,10 +2701,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             "resources still live in the heap",
         )?;
         let heap = self.resources.heaps.remove(id.0)?;
-        self.release_memory(heap.memory, heap.descriptor.size);
+        self.release_memory(heap.memory, heap.bytes);
         Ok(())
     }
 }
+
+/// A heap, the range it counts a resource in, and the range of its memory
+/// the resource reserved.
+type AliasedRanges = (HeapId, (u64, u64), Option<(u64, u64)>);
 
 fn owned_bytes(backing: Backing) -> u64 {
     match backing {
@@ -2476,19 +2717,22 @@ fn owned_bytes(backing: Backing) -> u64 {
     }
 }
 
-/// The heap range a resource gives back as it becomes aliasable; none for
-/// one already aliasable, which Metal leaves as it is.
-fn make_aliasable(backing: &mut Backing) -> Result<Option<(HeapId, u64, u64)>> {
+/// The heap ranges a resource gives back as it becomes aliasable, as the
+/// heap counts it and of the heap's memory, which later resources may then
+/// alias; none for one already aliasable, which Metal leaves as it is.
+fn make_aliasable(backing: &mut Backing) -> Result<Option<AliasedRanges>> {
     match backing {
         Backing::Heap {
             heap,
             offset,
             size,
             aliasable,
+            real,
+            ..
         } => {
             let first = !*aliasable;
             *aliasable = true;
-            Ok(first.then_some((*heap, *offset, *size)))
+            Ok(first.then(|| (*heap, (*offset, *size), real.take())))
         }
         _ => Err(Error::Invalid("only heap resources become aliasable")),
     }
