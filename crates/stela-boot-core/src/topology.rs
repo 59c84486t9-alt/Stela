@@ -1,16 +1,16 @@
 //! Copied firmware processor identity and per-processor CPUID observations.
-//! One selected logical processor owns each physical core; SMT siblings never
-//! increase the number of guest PEs admitted by this native executor.
+//! Every enabled, healthy logical processor can run one guest PE: the first
+//! thread of each physical core is assigned before any SMT sibling.
 
 use crate::Result;
 use alloc::vec::Vec;
 use stela_contracts::refuse;
 
-/// Physical cores the native executor can own. Hosts with more physical
-/// cores run on the first `MAX_CORES` of `select`'s order.
+/// Logical processors the native executor can own. Hosts with more run on
+/// the first `MAX_CORES` of `select`'s order.
 pub const MAX_CORES: usize = 64;
 
-/// Physical cores the executor owns from `available` discovered cores.
+/// Logical processors the executor owns from `available` selectable ones.
 /// Without a request this is `min(available, MAX_CORES)`; an explicit count
 /// narrows it and refuses when it exceeds either bound.
 pub fn assignment_count(requested: Option<usize>, available: usize) -> Result<usize> {
@@ -18,7 +18,7 @@ pub fn assignment_count(requested: Option<usize>, available: usize) -> Result<us
     let count = requested.unwrap_or(assignable);
     if assignable == 0 || count == 0 || count > assignable {
         return Err(refuse!(
-            "native assignment is outside the actual physical-core roster"
+            "native assignment is outside the host's processor roster"
         ));
     }
     Ok(count)
@@ -30,7 +30,7 @@ pub const BSP: u32 = 1;
 pub const ENABLED: u32 = 1 << 1;
 pub const HEALTHY: u32 = 1 << 2;
 
-/// Number of guest PEs and physical owners admitted by both the host
+/// Number of guest PEs and host processors admitted by both the host
 /// roster and the source profile. An explicit request must fit both.
 pub fn guest_assignment_count(
     requested: Option<usize>,
@@ -653,40 +653,54 @@ fn bootstrap_index(processors: &[Processor]) -> Result<usize, Refusal> {
     bsp.ok_or(Refusal::NoBootstrapProcessor)
 }
 
-/// Return one original processor index per physical core, BSP first, then by
-/// location, without renumbering their firmware identity. The list covers
-/// every physical core; assignment takes a prefix (`assignment_count`). No AP
-/// is started and no capability is inferred here.
+/// Return the original index of every enabled, healthy logical processor,
+/// without renumbering its firmware identity: the BSP, then the first thread
+/// of each other physical core by location, then each core's second thread by
+/// location, and so on. Assignment takes a prefix (`assignment_count`), so a
+/// host with enough physical cores gives every PE a core of its own. No AP is
+/// started and no capability is inferred here.
 pub fn select(processors: &[Processor]) -> Result<Vec<usize>, Refusal> {
     let bsp = bootstrap_index(processors)?;
-    let mut selected = alloc::vec![bsp];
-    // Prefer the lowest original thread/processor number on each other core.
-    // The BSP owns its own physical core even when its thread number is nonzero.
     let mut candidates: Vec<_> = processors
         .iter()
         .enumerate()
         .filter(|(_, processor)| processor.available())
+        .map(|(index, processor)| {
+            (
+                index,
+                processor.location,
+                (index != bsp, processor.thread, processor.processor_number),
+            )
+        })
         .collect();
-    candidates.sort_by_key(|(_, processor)| {
-        (
-            processor.location,
-            processor.thread,
-            processor.processor_number,
-        )
-    });
-    for (index, processor) in candidates {
-        if selected
-            .iter()
-            .any(|&other| processors[other].location == processor.location)
-        {
-            continue;
-        }
-        selected.push(index);
+    // The BSP leads its own core even when its thread number is nonzero.
+    candidates.sort_by_key(|&(_, location, order)| (location, order));
+    // A processor's rank is its position among its core's threads.
+    let mut ranked: Vec<_> = Vec::with_capacity(candidates.len());
+    for (position, &(index, location, order)) in candidates.iter().enumerate() {
+        let rank = match position.checked_sub(1).map(|previous| ranked[previous]) {
+            Some((rank, _, previous, _)) if previous == location => rank + 1,
+            _ => 0usize,
+        };
+        ranked.push((rank, index, location, order));
     }
-    Ok(selected)
+    ranked.sort_by_key(|&(rank, index, location, order)| (index != bsp, rank, location, order));
+    Ok(ranked.into_iter().map(|(_, index, _, _)| index).collect())
 }
 
-/// Enabled logical processors outside the requested physical roster.
+/// Distinct physical cores among the enabled, healthy logical processors.
+pub fn physical_cores(processors: &[Processor]) -> usize {
+    let mut locations: Vec<_> = processors
+        .iter()
+        .filter(|processor| processor.available())
+        .map(|processor| processor.location)
+        .collect();
+    locations.sort_unstable();
+    locations.dedup();
+    locations.len()
+}
+
+/// Enabled logical processors outside the requested roster.
 /// Unlike admission, this includes enabled unhealthy APs: health does not prove
 /// that their firmware execution has stopped. Disabled processors stay disabled.
 /// No allocation or firmware access is needed at the post-EBS boundary.
@@ -699,14 +713,10 @@ pub fn enabled_unselected<'a>(
         return Err(Refusal::InvalidAssignment);
     }
     for (slot, &index) in selected.iter().enumerate() {
-        let processor = processors
+        let available = processors
             .get(index as usize)
-            .filter(|processor| processor.available())
-            .ok_or(Refusal::InvalidAssignment)?;
-        if selected[..slot]
-            .iter()
-            .any(|&previous| processors[previous as usize].location == processor.location)
-        {
+            .is_some_and(|processor| processor.available());
+        if !available || selected[..slot].contains(&index) {
             return Err(Refusal::InvalidAssignment);
         }
     }

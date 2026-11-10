@@ -233,7 +233,7 @@ fn start(handoff: u64) -> Started {
     if (options.native_bootstrap_check || options.native_shared_check)
         && options.native_cores.is_none()
     {
-        output::fatal("native bootstrap check needs an explicit physical-core count");
+        output::fatal("native bootstrap check needs an explicit processor count");
     }
     // Refuse physical and implicit persistent-device setup before translation
     // stores, FDR placement, storage::open or any independent native driver.
@@ -993,7 +993,7 @@ fn model_board(
     let available = boot
         .native_processors
         .expect("validated native roster")
-        .physical_count as usize;
+        .logical_count as usize;
     boot.options
         .validate_native_cores(available, active_workers, source_pes)
         .unwrap_or_else(|error| output::fatal(&error));

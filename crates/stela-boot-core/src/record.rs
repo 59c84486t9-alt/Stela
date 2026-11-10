@@ -10,13 +10,13 @@ pub struct Capture {
     pub magic: u64,
     pub version: u32,
     pub processor_count: u32,
-    /// Physical cores with source observations: the assignable roster,
-    /// `min(physical_count, MAX_CORES)`.
+    /// Logical processors with source observations, a prefix of `select`'s
+    /// order: the assignable roster, `min(logical_count, MAX_CORES)`.
     pub core_count: u32,
     pub enabled_count: u32,
-    /// Every physical core the firmware inventory identifies. Cores past
-    /// `core_count` are retired at EBS with the unassigned SMT siblings.
-    pub physical_count: u32,
+    /// Every enabled, healthy logical processor `select` returns. Those past
+    /// `core_count` get INIT at EBS with the other unassigned processors.
+    pub logical_count: u32,
     pub selected: [u32; topology::MAX_CORES],
     pub snapshots: [Snapshot; topology::MAX_CORES],
     pub processors: [Processor],
@@ -89,7 +89,7 @@ struct Header {
     processor_count: u32,
     core_count: u32,
     enabled_count: u32,
-    physical_count: u32,
+    logical_count: u32,
     selected: [u32; topology::MAX_CORES],
     snapshots: [Snapshot; topology::MAX_CORES],
     processors: [Processor; 0],

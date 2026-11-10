@@ -19,7 +19,7 @@ pub(crate) mod transport;
 mod tsc_sync;
 
 /// Check the exact loader-owned reservation against the requested, source
-/// identified physical cores before any INIT/SIPI or guest-state loan.
+/// identified logical processors before any INIT/SIPI or guest-state loan.
 ///
 /// # Safety
 /// `handoff` is the live immutable loader record and all reserved regions are
@@ -30,7 +30,7 @@ pub(crate) unsafe fn validate(
 ) -> Result<Option<&'static firmware::Capture>> {
     let cores = handoff.native_resources.cores as usize;
     if cores == 0 || cores > topology::MAX_CORES {
-        return Err(refuse!("native physical-core count is outside capacity"));
+        return Err(refuse!("native processor count is outside capacity"));
     }
     let resources = &handoff.native_resources;
     // The loader reserves fewer than requested only when firmware left no
@@ -120,7 +120,7 @@ pub(crate) unsafe fn validate(
         .map_err(firmware::Error::message)?;
     if cores > capture.core_count as usize {
         return Err(refuse!(
-            "requested native cores exceed physical source inventory"
+            "requested native cores exceed the source processor inventory"
         ));
     }
     let five_level = matches!(
@@ -128,12 +128,13 @@ pub(crate) unsafe fn validate(
         stela_engine::machine::mmu::placement::Placement::FiveLevel
     );
     crate::output::arguments(format_args!(
-        "NATIVE INVENTORY firmware_processors={} enabled={} physical_cores={} assignable={} retired_cores={} requested={cores}\n",
+        "NATIVE INVENTORY firmware_processors={} enabled={} physical_cores={} logical={} assignable={} retired={} requested={cores}\n",
         capture.processor_count,
         capture.enabled_count,
-        capture.physical_count,
+        topology::physical_cores(&capture.processors),
+        capture.logical_count,
         capture.core_count,
-        capture.physical_count - capture.core_count,
+        capture.logical_count - capture.core_count,
     ));
     let memory_types = memory_types::Image::from_snapshot(&capture.snapshots[0])?;
     for (slot, snapshot) in capture.snapshots[..cores].iter().enumerate() {
@@ -161,7 +162,7 @@ pub(crate) unsafe fn validate(
             snapshot.efer,
         ));
         snapshot.qualify_native(five_level).map_err(|refusal| {
-            refusal.refusal("a selected physical core lacks the native executor floor")
+            refusal.refusal("a selected processor lacks the native executor floor")
         })?;
         memory_types.compatible(snapshot)?;
         if snapshot.same_memory_types(&capture.snapshots[0]).is_err() {

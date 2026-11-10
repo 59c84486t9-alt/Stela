@@ -155,7 +155,7 @@ impl Error {
             Self::DuplicateNativeCores => "--native-cores must occur once",
             Self::NativeCoreCount => "--native-cores needs a processor count",
             Self::NativeCoreCapacity => {
-                "--native-cores is outside the supported physical-core capacity"
+                "--native-cores is outside the supported processor capacity"
             }
             Self::DuplicateGuestPes => "--guest-pes must occur once",
             Self::GuestPeCount => "--guest-pes needs a processor count",

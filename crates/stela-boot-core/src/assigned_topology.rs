@@ -82,19 +82,19 @@ impl<'a> BspRoster<'a> {
             .ok_or(refuse!(
                 "assigned topology has an invalid captured processor count"
             ))?;
-        let physical = native::select(processors)
+        let logical = native::select(processors)
             .map_err(|e| refuse!("assigned BSP source roster: {e}", ?e))?;
-        let selected = physical.get(..capture.core_count as usize).ok_or(refuse!(
-            "assigned topology has more captured cores than physical cores"
+        let selected = logical.get(..capture.core_count as usize).ok_or(refuse!(
+            "assigned topology has more captured processors than the inventory"
         ))?;
-        if physical.len() != capture.physical_count as usize
+        if logical.len() != capture.logical_count as usize
             || selected
                 .iter()
                 .enumerate()
                 .any(|(slot, &index)| capture.selected[slot] as usize != index)
         {
             return Err(refuse!(
-                "assigned topology differs from the retained physical-core selection"
+                "assigned topology differs from the retained processor selection"
             ));
         }
         let index = *selected

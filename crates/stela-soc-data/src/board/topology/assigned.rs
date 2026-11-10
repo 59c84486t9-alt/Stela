@@ -223,10 +223,6 @@ pub enum Requirement {
         requested: usize,
     },
     DuplicateWorker(usize),
-    DuplicatePhysicalCore {
-        package: u32,
-        core: u32,
-    },
     DuplicateApic(u32),
     UnstartedWorker(usize),
     UnknownWorker(usize),
@@ -420,17 +416,11 @@ impl<'a> Plan<'a> {
             });
         }
         let mut workers = BTreeSet::new();
-        let mut physical = BTreeSet::new();
+        // SMT siblings share a physical core; the APIC ID names the processor.
         let mut apics = BTreeSet::new();
         for core in cores {
             if !workers.insert(core.worker) {
                 return Err(Requirement::DuplicateWorker(core.worker));
-            }
-            if !physical.insert((core.package, core.core)) {
-                return Err(Requirement::DuplicatePhysicalCore {
-                    package: core.package,
-                    core: core.core,
-                });
             }
             if !apics.insert(core.apic) {
                 return Err(Requirement::DuplicateApic(core.apic));

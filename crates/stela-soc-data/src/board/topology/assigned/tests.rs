@@ -320,7 +320,7 @@ fn cluster_mask_limits_do_not_alias() {
     }
 }
 #[test]
-fn unstarted_smt_duplicate_worker_and_apic_records_cannot_receive_credit() {
+fn unstarted_duplicate_worker_and_apic_records_cannot_receive_credit_but_siblings_can() {
     let (mut host, r, a) = fixture(&[0, 1]);
     host.cores[1].started = false;
     assert_eq!(
@@ -328,15 +328,9 @@ fn unstarted_smt_duplicate_worker_and_apic_records_cannot_receive_credit() {
         Requirement::UnstartedWorker(41)
     );
     host.cores[1].started = true;
+    // An SMT sibling shares its core's coordinates and is its own worker.
     host.cores[1].core = host.cores[0].core;
-    assert_eq!(
-        Plan::build(&host, &r, &a).unwrap_err(),
-        Requirement::DuplicatePhysicalCore {
-            package: 3,
-            core: 10
-        }
-    );
-    host.cores[1].core = 11;
+    assert_eq!(Plan::build(&host, &r, &a).unwrap().pes().len(), 2);
     host.cores[1].apic = host.cores[0].apic;
     assert_eq!(
         Plan::build(&host, &r, &a).unwrap_err(),

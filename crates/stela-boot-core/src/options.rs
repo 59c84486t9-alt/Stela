@@ -271,8 +271,8 @@ pub struct System {
     pub native_mmio_check: bool,
     /// Short native PM/LAPIC/IRQ fixture; stops before guest entry.
     pub native_clock_check: bool,
-    /// Explicit physical native executors and guest PEs (`--native-cores N`).
-    /// SMT siblings do not count as additional cores.
+    /// Explicit native executors and guest PEs (`--native-cores N`), one per
+    /// logical processor; SMT siblings count after every physical core.
     pub native_cores: Option<usize>,
     /// The source PE count (`--guest-pes N`) recorded by setup for disk
     /// boots whose verified DeviceTree is loaded after firmware exit.
@@ -555,7 +555,7 @@ impl System {
         self.preboot.is_some() && self.recovery.is_none() && !self.upgrade
     }
 
-    /// Select the exact number of physical owners the loader reserves.
+    /// Select the exact number of host processors the loader reserves.
     /// A disk-derived count is rechecked against the live source before SIPI.
     pub fn assigned_native_cores(
         &self,
@@ -566,7 +566,7 @@ impl System {
         use stela_contracts::refuse;
         if self.native_bootstrap_check || self.native_shared_check {
             let count = self.native_cores.ok_or(refuse!(
-                "native bootstrap check needs an explicit physical-core count"
+                "native bootstrap check needs an explicit processor count"
             ))?;
             return assignment_count(Some(count), available);
         }

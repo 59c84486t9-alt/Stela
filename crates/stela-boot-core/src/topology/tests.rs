@@ -278,13 +278,21 @@ fn large_host(packages: u32, cores: u32, threads: u32) -> Vec<Processor> {
 }
 
 #[test]
-fn large_hosts_select_every_physical_core_and_retire_those_past_the_assignment() {
+fn large_hosts_select_every_physical_core_before_siblings_and_retire_the_rest() {
     // Dual-socket 96-core SMT host: 384 logical processors, 192 cores.
     let source = large_host(2, 96, 2);
     let all = select(&source).unwrap();
-    assert_eq!(all.len(), 192);
+    assert_eq!(all.len(), 384);
+    assert_eq!(physical_cores(&source), 192);
     assert_eq!(all[0], 191); // BSP first, even on thread 1
-    assert!(all[1..].iter().all(|&index| source[index].thread == 0));
+    assert!(all[1..192].iter().all(|&index| source[index].thread == 0));
+    // Siblings follow in location order; the BSP's sibling is thread 0.
+    assert!(
+        all[192..]
+            .iter()
+            .all(|&index| source[index].thread == 1 || index == 190)
+    );
+    assert!(all[192..].contains(&190));
     let assigned = assignment_count(None, all.len()).unwrap();
     assert_eq!(assigned, MAX_CORES);
     // The assigned prefix stays on package 0 before using package 1.
@@ -297,7 +305,7 @@ fn large_hosts_select_every_physical_core_and_retire_those_past_the_assignment()
     let retired: Vec<_> = enabled_unselected(&source, &selected).unwrap().collect();
     assert_eq!(retired.len(), source.len() - MAX_CORES);
     for &index in &all[assigned..] {
-        assert!(retired.contains(&index)); // unassigned physical cores get INIT
+        assert!(retired.contains(&index)); // unassigned processors get INIT
     }
     assert!(!retired.contains(&191));
 }
@@ -305,13 +313,51 @@ fn large_hosts_select_every_physical_core_and_retire_those_past_the_assignment()
 #[test]
 fn processor_inventory_has_no_fixed_logical_ceiling() {
     let source = large_host(4, 80, 2); // 640 logical processors
-    assert_eq!(select(&source).map(|cores| cores.len()), Ok(320));
+    assert_eq!(select(&source).map(|all| all.len()), Ok(640));
     let source = large_host(1, 1, 300); // one core, 300 threads
-    assert_eq!(select(&source), Ok(alloc::vec![299]));
+    let all = select(&source).unwrap();
+    assert_eq!((all.len(), all[0]), (300, 299));
+    assert_eq!(physical_cores(&source), 1);
+}
+
+/// PEs a host gives a guest whose profile allows `cap` CPUs.
+fn pes(source: &[Processor], cap: usize) -> Vec<usize> {
+    let all = select(source).unwrap();
+    let count = guest_assignment_count(None, all.len(), cap).unwrap();
+    all[..count].to_vec()
 }
 
 #[test]
-fn one_thread_per_physical_core_and_original_bsp_are_preserved() {
+fn smt_siblings_run_pes_after_every_physical_core() {
+    // 2 cores / 4 threads, BSP on core 0 thread 0.
+    let mut laptop = large_host(1, 2, 2);
+    laptop[3].flags &= !BSP;
+    laptop[0].flags |= BSP;
+    assert_eq!(pes(&laptop, 8), [0, 2, 1, 3]);
+    assert_eq!(pes(&laptop, 2), [0, 2]);
+    // 8 cores / 16 threads: a cap of 8 takes the 8 leaders, 24 takes all 16.
+    let mut desktop = large_host(1, 8, 2);
+    desktop[15].flags &= !BSP;
+    desktop[0].flags |= BSP;
+    let leaders: Vec<_> = (0..8).map(|core| core * 2).collect();
+    assert_eq!(pes(&desktop, 8), leaders);
+    let siblings: Vec<_> = (0..8).map(|core| core * 2 + 1).collect();
+    assert_eq!(pes(&desktop, 24), [leaders.clone(), siblings].concat());
+    // A retired or unhealthy sibling is skipped.
+    desktop[3].flags = HEALTHY;
+    desktop[5].flags = ENABLED;
+    let all = pes(&desktop, 24);
+    assert_eq!(all.len(), 14);
+    assert!(!all.contains(&3) && !all.contains(&5));
+    assert_eq!(all[..8], leaders[..]);
+    // A sibling assignment is a valid INIT boundary.
+    let selected: Vec<_> = all.iter().map(|&index| index as u32).collect();
+    let retired: Vec<_> = enabled_unselected(&desktop, &selected).unwrap().collect();
+    assert_eq!(retired, [5]);
+}
+
+#[test]
+fn bsp_leads_and_each_core_is_ordered_by_thread() {
     let mut cores = [
         processor(3, 0, 0, 1),
         processor(8, 0, 0, 0),
@@ -320,11 +366,12 @@ fn one_thread_per_physical_core_and_original_bsp_are_preserved() {
         processor(22, 1, 0, 0),
     ];
     cores[0].flags |= BSP;
-    assert_eq!(select(&cores), Ok(alloc::vec![0, 3, 4]));
+    assert_eq!(select(&cores), Ok(alloc::vec![0, 3, 4, 1, 2]));
+    assert_eq!(physical_cores(&cores), 3);
     // Extended die/module/tile coordinates distinguish physical cores.
     cores[4].location.package = 0;
     cores[4].location.die = 1;
-    assert_eq!(select(&cores), Ok(alloc::vec![0, 3, 4]));
+    assert_eq!(select(&cores), Ok(alloc::vec![0, 3, 4, 1, 2]));
 }
 
 #[test]
@@ -343,8 +390,8 @@ fn unselected_enabled_threads_and_unrequested_cores_need_init_without_identity_a
     source[6].flags = HEALTHY; // disabled: no INIT target
     source[7].flags = ENABLED; // unhealthy but still enabled: INIT target
     let all = select(&source).unwrap();
-    assert_eq!(all, [1, 2, 4]);
-    for requested in 1..=all.len() {
+    assert_eq!(all, [1, 2, 4, 3, 0, 5]);
+    for requested in 1..=3 {
         let selected: Vec<_> = all[..requested].iter().map(|&index| index as u32).collect();
         let actual: Vec<_> = enabled_unselected(&source, &selected).unwrap().collect();
         let expected: Vec<_> = (0..source.len())
@@ -365,7 +412,9 @@ fn malformed_quiescence_assignment_refuses_before_any_targets_are_exposed() {
         processor(3, 0, 1, 0),
     ];
     source[0].flags |= BSP;
-    for selected in [&[][..], &[1][..], &[0, 0][..], &[0, 1][..], &[0, 3][..]] {
+    // A sibling of the BSP (index 1) is a valid assignment.
+    assert!(enabled_unselected(&source, &[0, 1]).is_ok());
+    for selected in [&[][..], &[1][..], &[0, 0][..], &[0, 1, 1][..], &[0, 3][..]] {
         assert!(matches!(
             enabled_unselected(&source, selected),
             Err(Refusal::InvalidAssignment)

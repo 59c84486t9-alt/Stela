@@ -201,7 +201,7 @@ fn capture() -> alloc::boxed::Box<Capture> {
     let mut capture = Capture::boxed(2).unwrap();
     capture.processor_count = 2;
     capture.core_count = 2;
-    capture.physical_count = 2;
+    capture.logical_count = 2;
     capture.enabled_count = 2;
     for index in 0..2 {
         capture.processors[index] = native::Processor {

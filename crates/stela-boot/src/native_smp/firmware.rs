@@ -26,7 +26,7 @@ use uefi::{
 };
 
 const MAGIC: u64 = 0x5354_4c53_4d50_3031;
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const MAX_VARIABLE_MTRRS: usize = 16;
 const CR4_OSXSAVE: u64 = 1 << 18;
 
@@ -52,14 +52,14 @@ impl Error {
         match self {
             Self::NoMpServices => "native cores need UEFI MP Services source identity",
             Self::ProcessorInventory => "native processor inventory is invalid",
-            Self::Topology(_) => "native physical-core topology is ambiguous",
+            Self::Topology(_) => "native processor topology is ambiguous",
             Self::CoreCount => {
-                "requested native count exceeds the available physical cores or the executor's core capacity"
+                "requested native count exceeds the available processors or the executor's capacity"
             }
             Self::WrongBootstrapProcessor => {
                 "native BSP differs from the firmware processor identity"
             }
-            Self::SnapshotCapacity => "native per-core source observations exceed capacity",
+            Self::SnapshotCapacity => "native per-processor source observations exceed capacity",
             Self::SnapshotCallback => "firmware AP callback did not publish its source observation",
             Self::SnapshotTimeout => "firmware AP source observation did not finish before timeout",
             Self::ProcessorIdentity => {
@@ -380,13 +380,14 @@ extern "efiapi" fn observe_ap(argument: *mut c_void) {
     }
 }
 
-/// Observe the complete physical inventory without assigning its workers.
+/// Observe the complete processor inventory without assigning its workers.
+/// The count is every logical processor that can run a PE.
 pub(crate) fn capture_inventory() -> Result<(Region, usize), Error> {
     let region = capture(1)?;
     // SAFETY: capture just allocated and initialized this exact UEFI
     // allocation; before EBS its physical address is directly accessible.
-    let physical = unsafe { Capture::from_raw(region.physical as *const u8, 0).physical_count };
-    Ok((region, physical as usize))
+    let logical = unsafe { Capture::from_raw(region.physical as *const u8, 0).logical_count };
+    Ok((region, logical as usize))
 }
 
 pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
@@ -456,13 +457,13 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
             thread,
         });
     }
-    let physical = topology::select(&processors).map_err(Error::Topology)?;
+    let logical = topology::select(&processors).map_err(Error::Topology)?;
     let assignable =
-        topology::assignment_count(None, physical.len()).map_err(|_| Error::CoreCount)?;
+        topology::assignment_count(None, logical.len()).map_err(|_| Error::CoreCount)?;
     if requested == 0 || requested > assignable {
         return Err(Error::CoreCount);
     }
-    let selected = &physical[..assignable];
+    let selected = &logical[..assignable];
     if mp.who_am_i().map_err(|_| Error::WrongBootstrapProcessor)?
         != processors[selected[0]].processor_number as usize
     {
@@ -513,7 +514,7 @@ pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
         capture.processor_count = processors.len() as u32;
         capture.enabled_count = count.enabled as u32;
         capture.core_count = selected.len() as u32;
-        capture.physical_count = physical.len() as u32;
+        capture.logical_count = logical.len() as u32;
         capture.processors.copy_from_slice(&processors);
         for (slot, &index) in selected.iter().enumerate() {
             capture.selected[slot] = index as u32;
@@ -550,18 +551,18 @@ pub(crate) unsafe fn captured(region: Region) -> Result<&'static Capture, Error>
     }
     // SAFETY: the region holds exactly the record for `count` entries.
     let capture = unsafe { Capture::from_raw(base, count) };
-    let physical = capture.physical_count as usize;
+    let logical = capture.logical_count as usize;
     if capture.magic != MAGIC
         || capture.version != VERSION
         || capture.core_count == 0
-        || topology::assignment_count(None, physical) != Ok(capture.core_count as usize)
+        || topology::assignment_count(None, logical) != Ok(capture.core_count as usize)
     {
         return Err(Error::ProcessorInventory);
     }
     let processors = &capture.processors;
     let all = topology::select(processors).map_err(Error::Topology)?;
     let selected = &all[..all.len().min(topology::MAX_CORES)];
-    if all.len() != physical
+    if all.len() != logical
         || capture.enabled_count as usize
             != processors
                 .iter()
