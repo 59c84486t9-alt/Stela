@@ -336,6 +336,46 @@ impl Discard {
     }
 }
 
+/// How a fetch began ([`Statistics::fetch_paths`]): through the ITLB and the
+/// block table without a walk, with BTYPE zero or with an entry that admits
+/// the PE's BTYPE; or, leaving that path, because the ITLB lacked the page
+/// in the current context, the block table lacked the PC with the page's
+/// key, the entry refused the BTYPE, or the fetch was of one instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FetchPath {
+    Fast,
+    FastBtype,
+    ItlbMiss,
+    TableMiss,
+    BtypeRefused,
+    Single,
+}
+
+impl FetchPath {
+    pub(super) const COUNT: usize = 6;
+}
+
+const _: () = assert!(FetchPath::Single as usize + 1 == FetchPath::COUNT);
+
+/// Why the ITLB lacked a page it then took ([`Statistics::itlb_misses`]): a
+/// fill of another page took its entry's place, a TLBI by VA dropped it,
+/// its context was forgotten (an entry of the page in a forgotten context
+/// of the same salt was found), or none of these was seen (the first fetch
+/// of the page in the context, or one whose earlier entry left no trace).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ItlbMiss {
+    Evicted,
+    Forgotten,
+    Context,
+    Cold,
+}
+
+impl ItlbMiss {
+    pub(super) const COUNT: usize = 4;
+}
+
+const _: () = assert!(ItlbMiss::Cold as usize + 1 == ItlbMiss::COUNT);
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[cfg_attr(
     all(feature = "std", feature = "native-profile"),
@@ -382,6 +422,19 @@ pub struct Statistics {
     /// and pages it held there that took a new block key (a remap, or the
     /// frame's blocks taking another variant).
     pub itlb: [u64; 2],
+    /// Fetches by whether they found their block through the ITLB and the
+    /// block table without a walk, in `FetchPath`'s order.
+    pub fetch_paths: [u64; 6],
+    /// Pages the ITLB lacked in the context it took their translation in
+    /// (`itlb[0]`), by why, in `ItlbMiss`'s order.
+    pub itlb_misses: [u64; 4],
+    /// ITLB entries of live contexts a fill took the place of, ITLB
+    /// entries a TLBI by VA dropped, contexts that left a half's
+    /// `SPACES` most recent (their entries with them), lookup salts a new
+    /// owner took from another (`Machine::context_salt`), and TLB
+    /// invalidations of everything that stood for more scoped TLBIs than a
+    /// PE's mail keeps (`MAIL_SCOPES`).
+    pub itlb_drops: [u64; 5],
     pub compiled: u64,
     /// Counter ticks spent analyzing and compiling `compiled`.
     pub compile_ticks: u64,
@@ -475,6 +528,9 @@ impl core::ops::AddAssign for Statistics {
             lookup_forgets,
             fetches,
             itlb,
+            fetch_paths,
+            itlb_misses,
+            itlb_drops,
             compiled,
             compile_ticks,
             stored,
@@ -530,6 +586,15 @@ impl core::ops::AddAssign for Statistics {
             *total += count;
         }
         for (total, count) in self.itlb.iter_mut().zip(itlb) {
+            *total += count;
+        }
+        for (total, count) in self.fetch_paths.iter_mut().zip(fetch_paths) {
+            *total += count;
+        }
+        for (total, count) in self.itlb_misses.iter_mut().zip(itlb_misses) {
+            *total += count;
+        }
+        for (total, count) in self.itlb_drops.iter_mut().zip(itlb_drops) {
             *total += count;
         }
         for (total, count) in [

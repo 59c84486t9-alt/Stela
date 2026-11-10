@@ -298,6 +298,14 @@ pub struct Counts {
     /// and new keys ([`super::Statistics::fetches`], `itlb`).
     pub fetches: [u64; 5],
     pub itlb: [u64; 2],
+    /// Its fetches by path, its ITLB fills by why the page was missing,
+    /// its ITLB's drops and its forgotten contexts
+    /// ([`super::Statistics::fetch_paths`], `itlb_misses`, `itlb_drops`,
+    /// `lookup_forgets`).
+    pub fetch_paths: [u64; 6],
+    pub itlb_misses: [u64; 4],
+    pub itlb_drops: [u64; 5],
+    pub lookup_forgets: [u64; 4],
     /// TSC ticks in each engine phase ([`step_timing::Phase`]), while
     /// step timing is enabled.
     pub phases: [u64; step_timing::Phase::COUNT],
@@ -1470,6 +1478,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 );
             }
             Maintenance::TlbAll => {
+                self.statistics.itlb_drops[4] += 1;
                 self.tlb_maintained(mmu::tlbi::Reach::All, mmu::tlbi::Everywhere::All, None);
             }
             Maintenance::Code(Some(physical)) => {
@@ -1664,6 +1673,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             device_accesses: statistics.device_accesses,
             fetches: statistics.fetches,
             itlb: statistics.itlb,
+            fetch_paths: statistics.fetch_paths,
+            itlb_misses: statistics.itlb_misses,
+            itlb_drops: statistics.itlb_drops,
+            lookup_forgets: statistics.lookup_forgets,
             phases: self
                 .step_timing
                 .as_ref()

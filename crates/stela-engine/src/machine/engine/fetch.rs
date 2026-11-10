@@ -177,6 +177,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             None => {
                 if self.spaces[half].len() == SPACES {
                     self.spaces[half].remove(0);
+                    self.statistics.itlb_drops[2] += 1;
                 }
                 let salt = self.context_salt(half, el, variant, inputs.0.ttbr0);
                 let number = self.next_context << chain::LOOKUP_SALT_BITS | salt;
@@ -212,6 +213,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         salt.unwrap_or_else(|| {
             let salt = self.next_salt;
             self.next_salt = (salt + 1) % chain::LOOKUP_SALTS;
+            if self.salt_owners[salt] != 0 {
+                self.statistics.itlb_drops[3] += 1;
+            }
             self.salt_owners[salt] = owner;
             salt
         }) as u64

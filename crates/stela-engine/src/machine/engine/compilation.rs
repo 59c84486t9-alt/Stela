@@ -18,21 +18,41 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.direct_exit = None;
         }
         // What a lookup dispatcher would enter, through the translation the
-        // ITLB keeps current. The engine checks BTYPE against the fetch's
-        // translation, which this leaves uncached.
-        if !single
-            && self.cpu.pstate.btype == 0
-            && let Some(key) = self.current_key(pc)
-        {
+        // ITLB keeps current, with the probe's BTYPE check: the entry's
+        // targets are the BTYPEs its block's first instruction accepts in
+        // a guarded page, or all of them in another, for the key's page
+        // guard and SCTLR_ELx.BT ([`Self::remember_target`]). An entry that
+        // admits a nonzero BTYPE spares the branch target check its
+        // translation; one that refuses it leaves the check, and its
+        // Branch Target exception, to the walk.
+        self.landing_admitted = false;
+        let btype = self.cpu.pstate.btype;
+        let path = if single {
+            FetchPath::Single
+        } else if let Some(key) = self.current_key(pc) {
             let table = &self.code.table;
             let target = table.find(table.slot(pc, key), pc, key);
-            if target.pc == pc && target.key == key {
+            if target.pc != pc || target.key != key {
+                FetchPath::TableMiss
+            } else if target.targets & (1 << btype) == 0 {
+                FetchPath::BtypeRefused
+            } else {
+                let path = if btype == 0 {
+                    FetchPath::Fast
+                } else {
+                    self.landing_admitted = true;
+                    FetchPath::FastBtype
+                };
+                self.statistics.fetch_paths[path as usize] += 1;
                 self.statistics.fetches[0] += 1;
                 self.link_direct_exit(pc);
                 self.entered(target.block as usize);
                 return Ok(Fetched::Block(target.block as usize));
             }
-        }
+        } else {
+            FetchPath::ItlbMiss
+        };
+        self.statistics.fetch_paths[path as usize] += 1;
         let generation = self.translation_generation;
         let physical = match self.fetch_physical(pc) {
             Ok(physical) => physical,
@@ -176,12 +196,65 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let held_page = held.pc == page && held.key == context;
         self.statistics.itlb[usize::from(held_page)] += 1;
+        if !held_page {
+            let miss = self.itlb_miss(half, slot, page, context);
+            self.statistics.itlb_misses[miss as usize] += 1;
+        }
         let resident = self.itlb.entry(slot);
         if resident.pc == page && resident.key != context && !self.live_context(half, resident.key)
         {
             self.itlb.set(slot, entry);
         } else {
+            // What the resident's move takes the place of, unless it is the
+            // page's own older entry.
+            let lost = self.itlb.entry(slot ^ 1);
+            if resident.key != 0
+                && (resident.pc, resident.key) != (page, context)
+                && lost.key != 0
+                && (lost.pc, lost.key) != (page, context)
+                && (self.chain.contexts().contains(&lost.key)
+                    || self.live_context(chain::half(lost.pc), lost.key))
+            {
+                self.statistics.itlb_drops[0] += 1;
+                note_itlb_ghost(&mut self.itlb_ghosts, &lost, ItlbMiss::Evicted);
+            }
             self.itlb.insert(slot, entry);
+        }
+    }
+
+    /// Why the ITLB lacked the page `page` of `half` in `context`, whose
+    /// slot is `slot` ([`ItlbMiss`]): what [`note_itlb_ghost`] noted of
+    /// the page in the context, or of it in a forgotten context of the
+    /// same salt, or an entry of such a context in the page's set.
+    fn itlb_miss(&self, half: usize, slot: usize, page: u64, context: u64) -> ItlbMiss {
+        let salt = context % chain::LOOKUP_SALTS as u64;
+        let forgotten = |number: u64| {
+            number != context
+                && number % chain::LOOKUP_SALTS as u64 == salt
+                && !self.live_context(half, number)
+        };
+        if let Some(&(noted, number)) = self.itlb_ghosts.get(itlb_ghost_slot(page, context))
+            && noted & !ITLB_GHOST_CAUSE == page
+        {
+            if number == context {
+                return if noted & ITLB_GHOST_CAUSE == ItlbMiss::Forgotten as u64 {
+                    ItlbMiss::Forgotten
+                } else {
+                    ItlbMiss::Evicted
+                };
+            }
+            if forgotten(number) {
+                return ItlbMiss::Context;
+            }
+        }
+        let older = [slot, slot ^ 1].into_iter().any(|at| {
+            let held = self.itlb.entry(at);
+            held.pc == page && held.key != 0 && forgotten(held.key)
+        });
+        if older {
+            ItlbMiss::Context
+        } else {
+            ItlbMiss::Cold
         }
     }
 
@@ -1337,3 +1410,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 }
+
+/// The entries of [`Machine::itlb_ghosts`]: a direct-mapped table.
+const ITLB_GHOSTS: usize = 1 << 12;
+/// The low bits of a ghost's page that hold its [`ItlbMiss`] cause.
+const ITLB_GHOST_CAUSE: u64 = 3;
+
+/// The ghost slot of `page` in contexts of the salt of `context`: a
+/// context and the forgotten ones it took the place of share it.
+fn itlb_ghost_slot(page: u64, context: u64) -> usize {
+    let salt = context % chain::LOOKUP_SALTS as u64;
+    let mixed = ((page / FETCH_PAGE) ^ (salt << 40)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    (mixed >> (64 - ITLB_GHOSTS.trailing_zeros())) as usize
+}
+
+/// Note that the ITLB entry `entry` (a page in a context) went for `cause`,
+/// for [`Machine::itlb_miss`] to tell when a fill takes the page again.
+pub(super) fn note_itlb_ghost(
+    ghosts: &mut Vec<(u64, u64)>,
+    entry: &chain::LookupEntry,
+    cause: ItlbMiss,
+) {
+    if ghosts.is_empty() {
+        ghosts.resize(ITLB_GHOSTS, (0, 0));
+    }
+    ghosts[itlb_ghost_slot(entry.pc, entry.key)] = (entry.pc | cause as u64, entry.key);
+}
+

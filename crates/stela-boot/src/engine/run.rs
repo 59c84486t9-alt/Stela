@@ -943,6 +943,37 @@ impl Heartbeat {
             let mut lookups = String::from(
                 "PES LOOKUP found/translated/jump/indexed/installed/itlb_fills/itlb_rekeys",
             );
+            // Per PE: how its fetches began: through the ITLB and the block
+            // table without a walk, at BTYPE zero or with a BTYPE the entry
+            // admitted, or leaving that path because the ITLB lacked the
+            // page, the block table the PC, the entry refused the BTYPE, or
+            // the fetch was of one instruction.
+            let mut paths = String::from(
+                "PES FETCHPATH fast/fast_btype/itlb_miss/table_miss/btype_refused/single",
+            );
+            // Per PE: its ITLB fills by why the page was missing (a fill
+            // took its entry's place, a TLBI by VA dropped it, its context
+            // was forgotten, no trace of it); the live entries fills took
+            // the place of, the entries TLBIs by VA dropped, the contexts
+            // that left a half's most recent, the salts taken from another
+            // owner, the whole invalidations its mail kept for too many
+            // scoped TLBIs; and its halves' forgotten contexts: for an ASID or
+            // non-global TLBI, a TLBI of everything, a TLBI by VA that
+            // reached entries, other changes.
+            let mut itlb = String::from(concat!(
+                "PES ITLB evicted/forgotten/context/cold",
+                "/drop_evict/drop_tlbi/space_lru/salt_reuse/mail_all",
+                "/forget_asid/forget_all/forget_va/forget_other",
+            ));
+            let deltas = |line: &mut String, pe: usize, now: &[u64], before: &[u64]| {
+                line.push_str(&format!(" {pe}:"));
+                for (slot, (now, before)) in now.iter().zip(before).enumerate() {
+                    if slot > 0 {
+                        line.push('/');
+                    }
+                    line.push_str(&format!("{}", now.saturating_sub(*before)));
+                }
+            };
             // Per PE with `--profile`: the interval's share in each engine
             // phase, in step timing's order.
             let mut phases = String::from("PES PHASES");
@@ -1017,6 +1048,15 @@ impl Heartbeat {
                     }
                     lookups.push_str(&format!("{}", now.saturating_sub(*before)));
                 }
+                deltas(&mut paths, pe, &now.fetch_paths, &before.fetch_paths);
+                let concat = |counts: &parallel::Counts| {
+                    let mut all = [0u64; 13];
+                    all[..4].copy_from_slice(&counts.itlb_misses);
+                    all[4..9].copy_from_slice(&counts.itlb_drops);
+                    all[9..].copy_from_slice(&counts.lookup_forgets);
+                    all
+                };
+                deltas(&mut itlb, pe, &concat(now), &concat(before));
                 let (cause, was) = (&now.installs, &before.installs);
                 installs.push_str(&format!(
                     " {pe}:{}/{}/{}/{}/{}/{}/{}",
@@ -1092,6 +1132,8 @@ impl Heartbeat {
             output::arguments(format_args!("{code}\n"));
             output::arguments(format_args!("{device_work}\n"));
             output::arguments(format_args!("{lookups}\n"));
+            output::arguments(format_args!("{paths}\n"));
+            output::arguments(format_args!("{itlb}\n"));
             if machine.step_timing().is_some() {
                 output::arguments(format_args!("{phases}\n"));
                 output::arguments(format_args!("{installs}\n"));

@@ -802,6 +802,15 @@ pub struct Machine<H: Host, D: Devices> {
     /// `ChainControl::itlb` names, which lookup dispatchers translate
     /// their targets through.
     itlb: chain::LookupTable,
+    /// The ITLB entries of live contexts that fills took the place of and
+    /// that TLBIs by VA dropped, by page and salt, each `(page | cause,
+    /// context)` ([`ItlbMiss`]): what tells a later fill of the page why
+    /// the ITLB lacked it. Allocated at the first drop.
+    itlb_ghosts: Vec<(u64, u64)>,
+    /// The last fetch found its block through a block table entry that
+    /// admits the PE's nonzero BTYPE: the branch target check before the
+    /// block runs passes ([`Self::fetch_block`]).
+    landing_admitted: bool,
     /// Each half's lookup contexts ([`Space`]) since its translations last
     /// changed in a way no control value shows, most recently used last.
     spaces: [Vec<Space>; 2],
@@ -1225,6 +1234,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             lookup_dispatchers: Default::default(),
             code_generation: 1,
             itlb: chain::LookupTable::itlb_with(itlb_entries),
+            itlb_ghosts: Vec::new(),
+            landing_admitted: false,
             spaces: [Vec::new(), Vec::new()],
             recent: [[None; RECENT]; 2],
             fetched_sizes: [0; 2],

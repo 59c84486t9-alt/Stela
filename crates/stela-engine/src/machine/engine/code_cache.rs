@@ -354,7 +354,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Some(asid) => self.asid_salts(half, asid),
                 None => u64::MAX,
             };
-            if self.itlb.forget_range(first..=last, reached) {
+            let (ghosts, drops) = (&mut self.itlb_ghosts, &mut self.statistics.itlb_drops[1]);
+            let noted = |entry: &chain::LookupEntry| {
+                *drops += 1;
+                super::compilation::note_itlb_ghost(ghosts, entry, ItlbMiss::Forgotten);
+            };
+            if self.itlb.forget_range_noting(first..=last, reached, noted) {
                 self.statistics.lookup_forgets[2] += 1;
             }
         }

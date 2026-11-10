@@ -197,7 +197,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return step;
             }
         };
-        if self.cpu.pstate.btype != 0 && self.fetch_guarded(pc) {
+        // A block table entry that admitted the BTYPE answered the check.
+        if self.cpu.pstate.btype != 0 && !self.landing_admitted && self.fetch_guarded(pc) {
             let word = self.word(index, pc)?;
             if let Some(exception) = self.branch_target_exception(pc, word) {
                 self.take(exception);

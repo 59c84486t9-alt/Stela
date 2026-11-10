@@ -3420,6 +3420,56 @@ fn block_entries_survive_a_tlbi_all() {
     );
 }
 
+/// The ITLB tells its fills apart by why the page was missing: never held
+/// in the context, dropped by a TLBI by VA, held in a context a TLBI ALL
+/// forgot, or taken the place of by a fill of the set's third page.
+#[test]
+fn itlb_fills_name_why_the_page_was_missing() {
+    use mmu::tlbi::{Everywhere, Reach};
+    const RET: u32 = 0xd65f_03c0;
+    let mut machine = machine(&[RET]);
+    let fetch = |machine: &mut Machine<FakeHost, NoDevices>| {
+        assert!(matches!(
+            machine.fetch_block(BASE, false),
+            Ok(Fetched::Block(_))
+        ));
+    };
+    let misses = |machine: &Machine<FakeHost, NoDevices>| machine.statistics.itlb_misses;
+    let mut expected = [0; ItlbMiss::COUNT];
+    fetch(&mut machine);
+    expected[ItlbMiss::Cold as usize] += 1;
+    assert_eq!(misses(&machine), expected);
+    machine.forget_lookups(Reach::Containing(BASE), None);
+    assert_eq!(machine.statistics.itlb_drops[..2], [0, 1]);
+    fetch(&mut machine);
+    expected[ItlbMiss::Forgotten as usize] += 1;
+    assert_eq!(misses(&machine), expected);
+    machine.tlb_maintained(Reach::All, Everywhere::All, None);
+    fetch(&mut machine);
+    expected[ItlbMiss::Context as usize] += 1;
+    assert_eq!(misses(&machine), expected);
+    // Three pages of one set: the third's fill takes the first's place.
+    let context = machine.chain.contexts()[0];
+    let key = target_key(&machine, BASE);
+    let page = |n: u64| BASE + 0x10_0000 + n * FETCH_PAGE;
+    let slot = machine.itlb.page_slot(page(0), context);
+    assert_ne!(slot / 2, machine.itlb.page_slot(BASE, context) / 2);
+    let pages: Vec<u64> = (0..1 << 20)
+        .map(page)
+        .filter(|&pc| machine.itlb.page_slot(pc, context) == slot)
+        .take(3)
+        .collect();
+    for &pc in &pages {
+        machine.translate_page(pc, key);
+    }
+    expected[ItlbMiss::Cold as usize] += 3;
+    assert_eq!(misses(&machine), expected);
+    assert_eq!(machine.statistics.itlb_drops[..2], [1, 1]);
+    machine.translate_page(pages[0], key);
+    expected[ItlbMiss::Evicted as usize] += 1;
+    assert_eq!(misses(&machine), expected);
+}
+
 /// The live entries of the block table.
 fn table_entries(machine: &Machine<FakeHost, NoDevices>) -> usize {
     (0..chain::LOOKUP_ENTRIES)
@@ -4700,6 +4750,104 @@ fn an_incompatible_guarded_target_takes_the_branch_target_exception() {
     assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), 0x1000);
     assert_eq!((machine.cpu.read(SystemRegister::SPSR_EL1) >> 10) & 3, 0b11);
     assert_eq!(machine.cpu.pstate.btype, 0);
+}
+
+/// A fetch after a BR or BLR whose target's block table entry the ITLB
+/// finds stays on that path when the entry admits the BTYPE, without the
+/// page's translation, and leaves it when the entry refuses it: either
+/// way the PE ends as a fetch that walks the page leaves it, with the same
+/// Branch Target exception at the same PC for an incompatible target in a
+/// guarded page.
+#[test]
+fn fetches_after_indirect_branches_keep_the_lookup_path_with_the_same_result() {
+    const LANDINGS: [u32; 5] = [
+        0xd503_245f, // BTI c
+        0xd503_249f, // BTI j
+        0xd503_24df, // BTI jc
+        0xd503_201f, // NOP: no landing
+        0xd503_233f, // PACIASP, with SCTLR_EL1.BT1 clear
+    ];
+    const RET: u32 = 0xd65f_03c0;
+    // Rows BTYPE 0b01 (BR X16), 0b10 (BLR), 0b11 (BR from a guarded
+    // page); columns the landings.
+    const COMPATIBLE: [[bool; 5]; 3] = [
+        [true, true, true, false, true],
+        [true, false, true, false, true],
+        [false, true, true, false, true],
+    ];
+    let state = |machine: &Machine<FakeHost, NoDevices>| {
+        (
+            machine.cpu.pc,
+            machine.cpu.pstate.btype,
+            machine.cpu.pstate.el,
+            machine.cpu.read(SystemRegister::ESR_EL1),
+            machine.cpu.read(SystemRegister::ELR_EL1),
+            machine.cpu.read(SystemRegister::SPSR_EL1),
+        )
+    };
+    let prepared = |guarded: bool, landing: u32, btype: u8| {
+        let mut machine = guarded_machine(guarded);
+        machine.host.ram[0x1000..0x1004].copy_from_slice(&landing.to_le_bytes());
+        machine.host.ram[0x1004..0x1008].copy_from_slice(&RET.to_le_bytes());
+        machine.host.exits = vec![NativeExit::Exit {
+            next_pc: 0x1004,
+            kind: ExitKind::Fallthrough as u64,
+        }];
+        machine.cpu.pstate.daif = 0;
+        machine.cpu.pc = 0x1000;
+        machine.cpu.pstate.btype = btype;
+        machine
+    };
+    for guarded in [true, false] {
+        for (column, landing) in LANDINGS.into_iter().enumerate() {
+            for btype in 1..=3u8 {
+                let case = format!("guarded {guarded} landing {landing:#x} btype {btype}");
+                let compatible = !guarded || COMPATIBLE[usize::from(btype) - 1][column];
+                // A fetch that walks: the target's page is new.
+                let mut walked = prepared(guarded, landing, btype);
+                walked.step().unwrap();
+                assert_eq!(
+                    walked.statistics.fetch_paths[FetchPath::ItlbMiss as usize],
+                    1,
+                    "{case}"
+                );
+                // One whose target's page and block the ITLB and the block
+                // table hold, from a fetch at BTYPE zero; its cached
+                // translation gone.
+                let mut found = prepared(guarded, landing, 0);
+                let Ok(Fetched::Block(index)) = found.fetch_block(0x1000, false) else {
+                    panic!("{case}: no block");
+                };
+                assert_eq!(found.block_variant(index).guarded_page, guarded, "{case}");
+                assert!(found.current_key(0x1000).is_some(), "{case}");
+                found.fetch.iter_mut().for_each(|entry| *entry = None);
+                found.cpu.pstate.btype = btype;
+                let (paths, checks) = (found.statistics.fetch_paths, found.host.fetch_checks);
+                found.step().unwrap();
+                let path = match compatible {
+                    true => FetchPath::FastBtype,
+                    false => FetchPath::BtypeRefused,
+                };
+                assert_eq!(
+                    found.statistics.fetch_paths[path as usize],
+                    paths[path as usize] + 1,
+                    "{case}"
+                );
+                if compatible {
+                    assert_eq!(found.host.fetch_checks, checks, "{case}: walked");
+                }
+                assert_eq!(state(&found), state(&walked), "{case}");
+                let (pc, left, _, esr, elr, _) = state(&found);
+                if compatible {
+                    assert_eq!((pc, left), (0x1004, 0), "{case}");
+                } else {
+                    assert_eq!(pc, 0x2_0200, "{case}");
+                    assert_eq!((esr >> 26, esr & 0x1ff_ffff), (0x0d, u64::from(btype)));
+                    assert_eq!(elr, 0x1000, "{case}");
+                }
+            }
+        }
+    }
 }
 
 #[test]
