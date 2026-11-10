@@ -103,9 +103,11 @@ const SUBSYSTEM_ID: u16 = 0x2c;
 const RESOURCE_MEMORY: u64 = 0x200;
 const RESOURCE_PREFETCHABLE: u64 = 0x2000;
 const RESOURCE_WIDE: u64 = 0x10_0000;
-/// Every DMA mask nouveau sets holds 40 bits. A mapping past it is refused
-/// (`function::Mappings`), not truncated.
-const DMA_LIMIT: u64 = (1 << 40) - 1;
+/// Every DMA mask nouveau sets on the GPUs Stela drives holds 47 bits: the
+/// Turing-and-later MMUs' `dma_bits` (`nvkm/subdev/mmu/tu102.c` 47,
+/// `gh100.c` 52), which `nvkm_device_pci_new` sets as the mask. A mapping
+/// past it is refused (`function::Mappings`), not truncated.
+const DMA_LIMIT: u64 = (1 << 47) - 1;
 /// How long the GPUs may take to boot their firmware before the guest starts.
 const START_SECONDS: u64 = 60;
 /// The longest idle wait while they do, which the timeout above is checked at.
