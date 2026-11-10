@@ -185,16 +185,45 @@ fn a_lost_device_reopens_once_its_last_connection_closes() {
     assert_eq!(
         service.connect().unwrap_err().status,
         Status::DeviceLost,
-        "new clients wait for the lost device's last connection"
+        "new clients wait while a connection holds an object of the lost device"
     );
-    service.disconnect(first).unwrap();
-    assert_eq!(REOPENED.load(Ordering::Relaxed), 0);
     service.disconnect(second).unwrap();
+    assert_eq!(REOPENED.load(Ordering::Relaxed), 0);
+    service.disconnect(first).unwrap();
     assert_eq!(REOPENED.load(Ordering::Relaxed), 1);
     assert!(!service.device().is_lost());
     let next = connect(&mut service);
     cpu_buffer(&mut service, next, 4096, StorageMode::Shared);
     assert_eq!(service.device().current_allocated_size(), 4096);
+}
+
+/// A process that keeps an empty connection open no longer keeps every
+/// later client from the GPU: the device reopens for new clients, and the
+/// old connection stays lost.
+#[test]
+fn a_lost_device_reopens_while_an_empty_connection_stays_open() {
+    let mut service = service().with_reopen(Box::new(|| Ok(device_on(MockBackend::new()))));
+    let idle = connect(&mut service);
+    let busy = connect(&mut service);
+    cpu_buffer(&mut service, busy, 4096, StorageMode::Shared);
+    service.device().mark_lost();
+    service.disconnect(busy).unwrap();
+    assert!(!service.device().is_lost());
+    let next = connect(&mut service);
+    cpu_buffer(&mut service, next, 4096, StorageMode::Shared);
+    assert_eq!(service.device().current_allocated_size(), 4096);
+    assert_eq!(
+        status(call::<_, Handle>(
+            &mut service,
+            idle,
+            Operation::NewEvent,
+            &Empty {},
+            &mut Memory::default()
+        )),
+        Status::DeviceLost
+    );
+    service.disconnect(idle).unwrap();
+    assert!(!service.device().is_lost());
 }
 
 #[test]

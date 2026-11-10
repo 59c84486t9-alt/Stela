@@ -14,10 +14,11 @@
 //! is refused, and closing a connection releases what it still holds, newest
 //! first, so views and aliases go before the resources under them.
 //!
-//! A lost device refuses every call but releases. Once its last connection
-//! closes, a service given a [`Reopen`] serves a new device in the next
-//! epoch, as a Mac's GPU comes back for the clients that start after its
-//! reset; until then new connections are refused.
+//! A lost device refuses every call but releases. Once no connection holds
+//! an object of it, a service given a [`Reopen`] serves a new device in the
+//! next epoch, as a Mac's GPU comes back for the clients that start after
+//! its reset; until then new connections are refused. Connections of the
+//! lost epoch that stay open keep refusing every call but releases.
 use super::{
     command_buffer::blit::Region,
     device::{
@@ -362,6 +363,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// Opens a connection for the task the gate authenticated; it must
     /// negotiate before any other operation.
     pub fn connect(&mut self) -> Result<NonZeroU64, Fault> {
+        self.recover();
         self.device.ensure_admission()?;
         let id = self.next_connection;
         self.next_connection = id.checked_add(1).ok_or(Fault::new(
@@ -402,11 +404,20 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         released
     }
 
-    /// Serves a new device in the next epoch once the lost one has no
-    /// connection left. The lost device keeps what its backend could not
-    /// prove stopped.
+    /// Serves a new device in the next epoch once no connection holds an
+    /// object of the lost one. A connection that stays open holding nothing
+    /// (a process that keeps its `MTLDevice` but made nothing, or released
+    /// all) no longer keeps every later client from the GPU; it stays in
+    /// the lost epoch and is answered `DeviceLost`, as a Mac's `MTLDevice`
+    /// is after a GPU reset. The lost device keeps what its backend could
+    /// not prove stopped.
     fn recover(&mut self) {
-        if !self.device.is_lost() || !self.connections.is_empty() {
+        if !self.device.is_lost()
+            || self
+                .connections
+                .values()
+                .any(|connection| !connection.objects.is_empty())
+        {
             return;
         }
         let (Some(reopen), Ok(epoch)) = (self.reopen.as_mut(), self.epoch.next()) else {
@@ -512,10 +523,18 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         let outcome: Outcome = self
             .dispatch(connection, operation, request, response, memory)
             .into();
-        if outcome.status == Status::DeviceLost {
+        if outcome.status == Status::DeviceLost && !self.stale(connection) {
             self.device.mark_lost();
         }
         outcome
+    }
+
+    /// Whether `connection` belongs to a lost device's epoch: its refusals
+    /// say nothing about the device served now.
+    fn stale(&self, connection: u64) -> bool {
+        NonZeroU64::new(connection)
+            .and_then(|id| self.connections.get(&id))
+            .is_some_and(|held| held.objects.epoch() != self.epoch)
     }
 
     fn dispatch(
@@ -546,7 +565,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 "the connection has not negotiated",
             ));
         }
-        if self.device.is_lost() && operation != Operation::Release {
+        // A connection of an earlier epoch keeps the device it lost.
+        if (self.device.is_lost() || self.stale(connection.get()))
+            && operation != Operation::Release
+        {
             return Err(Error::DeviceLost.into());
         }
         self.admit_quiescing(operation)?;

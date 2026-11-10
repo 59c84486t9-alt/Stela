@@ -191,6 +191,11 @@ impl<T> ObjectTable<T> {
         self.closed
     }
 
+    /// The device epoch this table's objects belong to.
+    pub fn epoch(&self) -> DeviceEpoch {
+        self.epoch
+    }
+
     fn check_scope(&self, connection: NonZeroU64, epoch: DeviceEpoch) -> Result<(), TableError> {
         if connection != self.connection {
             Err(TableError::WrongConnection)

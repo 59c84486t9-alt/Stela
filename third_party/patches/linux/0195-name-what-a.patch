@@ -1,0 +1,349 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 12:18:52 -0500
+Subject: [PATCH] feat(nouveau): name what a channel's MMU fault address held:
+ the mapping over it or either side, and the latest unmaps and page-table
+ releases that covered it
+
+---
+ .../drm/nouveau/include/nvkm/engine/fifo.h    |  10 ++
+ drivers/gpu/drm/nouveau/nouveau_exec.c        |   9 +-
+ drivers/gpu/drm/nouveau/nouveau_uvmm.c        | 149 +++++++++++++++++-
+ drivers/gpu/drm/nouveau/nouveau_uvmm.h        |  15 ++
+ .../nouveau/nvkm/subdev/gsp/rm/r570/fifo.c    |  12 ++
+ 5 files changed, 186 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/include/nvkm/engine/fifo.h b/drivers/gpu/drm/nouveau/include/nvkm/engine/fifo.h
+index 96c16cfccf16c0929336832d64cdc2a71b4614d0..690c1f9744a69cd52a2aee8639af5b6270e85b54 100644
+--- a/drivers/gpu/drm/nouveau/include/nvkm/engine/fifo.h
++++ b/drivers/gpu/drm/nouveau/include/nvkm/engine/fifo.h
+@@ -84,6 +84,16 @@ struct nvkm_fifo {
+ 		u32 mthdbuf_size;
+ 	} rm;
+ 
++	/* The latest MMU fault that reset a channel, under lock, until the
++	 * channel's client names what the address held.
++	 */
++	struct {
++		u64 addr;
++		u32 type;
++		int chid;
++		bool pending;
++	} fault;
++
+ 	spinlock_t lock;
+ 	struct mutex mutex;
+ };
+diff --git a/drivers/gpu/drm/nouveau/nouveau_exec.c b/drivers/gpu/drm/nouveau/nouveau_exec.c
+index 9d32b0810f8bdf556234117599a72ee35517b905..58e9a51cd00d89801fed97565ab1ba14c87c54ff 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_exec.c
++++ b/drivers/gpu/drm/nouveau/nouveau_exec.c
+@@ -405,8 +405,13 @@ nouveau_exec_ioctl_exec(struct drm_device *dev,
+ 	if (!chan)
+ 		return nouveau_abi16_put(abi16, -ENOENT);
+ 
+-	if (unlikely(atomic_read(&chan->killed)))
+-		return nouveau_abi16_put(abi16, -ENODEV);
++	if (unlikely(atomic_read(&chan->killed))) {
++		int chid = chan->chid;
++
++		ret = nouveau_abi16_put(abi16, -ENODEV);
++		nouveau_uvmm_describe_fault(cli, chid);
++		return ret;
++	}
+ 
+ 	if (chan->user.oclass < NV50_CHANNEL_GPFIFO)
+ 		return nouveau_abi16_put(abi16, -ENOSYS);
+diff --git a/drivers/gpu/drm/nouveau/nouveau_uvmm.c b/drivers/gpu/drm/nouveau/nouveau_uvmm.c
+index 2026fe6b48c69446a3436d7b68b1386b819213fe..19eee08408432909425ceec76ba331a6a5b295ee 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_uvmm.c
++++ b/drivers/gpu/drm/nouveau/nouveau_uvmm.c
+@@ -32,6 +32,10 @@
+ #include <nvif/if000c.h>
+ #include <nvif/if900d.h>
+ 
++#include <engine/fifo.h>
++
++#include <drm/ttm/ttm_placement.h>
++
+ #define NOUVEAU_VA_SPACE_BITS		47 /* FIXME */
+ #define NOUVEAU_VA_SPACE_START		0x0
+ #define NOUVEAU_VA_SPACE_END		(1ULL << NOUVEAU_VA_SPACE_BITS)
+@@ -114,21 +118,42 @@ nouveau_uvmm_vmm_get(struct nouveau_uvmm *uvmm,
+ 	return nvif_vmm_raw_get(vmm, addr, range, page_shift);
+ }
+ 
++/* Notes a page-table unmap or release for nouveau_uvmm_describe_fault(). */
++static void
++nouveau_uvmm_history_add(struct nouveau_uvmm *uvmm, u64 addr, u64 range,
++			 u8 page_shift, const char *why)
++{
++	struct nouveau_uvmm_history *entry;
++
++	spin_lock(&uvmm->history_lock);
++	entry = &uvmm->history[uvmm->history_next++ % ARRAY_SIZE(uvmm->history)];
++	entry->addr = addr;
++	entry->range = range;
++	entry->jiffies = jiffies;
++	entry->why = why;
++	entry->page_shift = page_shift;
++	spin_unlock(&uvmm->history_lock);
++}
++
+ static int
+ nouveau_uvmm_vmm_put(struct nouveau_uvmm *uvmm,
+ 		     u64 addr, u64 range, u8 page_shift)
+ {
+ 	struct nvif_vmm *vmm = &uvmm->vmm.vmm;
+ 
++	nouveau_uvmm_history_add(uvmm, addr, range, page_shift,
++				 "page tables released");
+ 	return nvif_vmm_raw_put(vmm, addr, range, page_shift);
+ }
+ 
+ static int
+ nouveau_uvmm_vmm_unmap(struct nouveau_uvmm *uvmm,
+-		       u64 addr, u64 range, u8 page_shift, bool sparse)
++		       u64 addr, u64 range, u8 page_shift, bool sparse,
++		       const char *why)
+ {
+ 	struct nvif_vmm *vmm = &uvmm->vmm.vmm;
+ 
++	nouveau_uvmm_history_add(uvmm, addr, range, page_shift, why);
+ 	return nvif_vmm_raw_unmap(vmm, addr, range, page_shift, sparse);
+ }
+ 
+@@ -202,7 +227,7 @@ nouveau_uvma_map(struct nouveau_uvma *uvma,
+ }
+ 
+ static int
+-nouveau_uvma_unmap(struct nouveau_uvma *uvma)
++nouveau_uvma_unmap(struct nouveau_uvma *uvma, const char *why)
+ {
+ 	u64 addr = uvma->va.va.addr;
+ 	u64 range = uvma->va.va.range;
+@@ -212,7 +237,8 @@ nouveau_uvma_unmap(struct nouveau_uvma *uvma)
+ 	if (drm_gpuva_invalidated(&uvma->va))
+ 		return 0;
+ 
+-	return nouveau_uvmm_vmm_unmap(to_uvmm(uvma), addr, range, page_shift, sparse);
++	return nouveau_uvmm_vmm_unmap(to_uvmm(uvma), addr, range, page_shift,
++				      sparse, why);
+ }
+ 
+ static int
+@@ -860,7 +886,7 @@ op_unmap(struct drm_gpuva_op_unmap *u)
+ 
+ 	/* nouveau_uvma_unmap() does not unmap if backing BO is evicted. */
+ 	if (!u->keep)
+-		nouveau_uvma_unmap(uvma);
++		nouveau_uvma_unmap(uvma, "unbound");
+ }
+ 
+ static void
+@@ -872,7 +898,8 @@ op_unmap_range(struct drm_gpuva_op_unmap *u,
+ 	bool sparse = !!uvma->region;
+ 
+ 	if (!drm_gpuva_invalidated(u->va))
+-		nouveau_uvmm_vmm_unmap(to_uvmm(uvma), addr, range, page_shift, sparse);
++		nouveau_uvmm_vmm_unmap(to_uvmm(uvma), addr, range, page_shift,
++				       sparse, "unbound in part");
+ }
+ 
+ static void
+@@ -1868,7 +1895,7 @@ nouveau_uvmm_bo_unmap_all(struct nouveau_bo *nvbo)
+ 		drm_gpuvm_bo_for_each_va(va, vm_bo) {
+ 			struct nouveau_uvma *uvma = uvma_from_va(va);
+ 
+-			nouveau_uvma_unmap(uvma);
++			nouveau_uvma_unmap(uvma, "BO moved or evicted");
+ 			drm_gpuva_invalidate(va, true);
+ 		}
+ 	}
+@@ -1896,6 +1923,113 @@ static const struct drm_gpuvm_ops gpuvm_ops = {
+ 	.vm_bo_validate = nouveau_uvmm_bo_validate,
+ };
+ 
++/* A mapping for nouveau_uvmm_describe_fault(): its range, page size, kind
++ * and BO size and placement.
++ */
++static void
++nouveau_uvmm_describe_va(struct nouveau_cli *cli, const char *what,
++			 struct drm_gpuva *va)
++{
++	struct nouveau_uvma *uvma = uvma_from_va(va);
++	struct nouveau_bo *nvbo = va->gem.obj ? nouveau_gem_object(va->gem.obj) : NULL;
++	u32 placement = nvbo && nvbo->bo.resource ? nvbo->bo.resource->mem_type : ~0;
++
++	NV_PRINTK(err, cli, "  %s: 0x%llx-0x%llx page_shift %u kind 0x%x sparse %d bo %zu bytes in %s\n",
++		  what, va->va.addr, va->va.addr + va->va.range, uvma->page_shift,
++		  uvma->kind, !!uvma->region, nvbo ? nvbo->bo.base.size : 0,
++		  placement == TTM_PL_VRAM ? "VRAM" :
++		  placement == TTM_PL_TT ? "GART" :
++		  placement == TTM_PL_SYSTEM ? "system" : "none");
++}
++
++/**
++ * nouveau_uvmm_describe_fault() - name what a channel's MMU fault address held
++ * @cli: the client whose channel @chid was reset
++ * @chid: the channel
++ *
++ * Once per fault GSP-RM reported with a channel reset: whether a mapping
++ * covers the address now (then the page tables lost it), the mappings either
++ * side, and the latest unmaps and page-table releases that covered it (then
++ * the address was used after it was unbound, moved or evicted). Runs in the
++ * client's ioctl, outside the hardware paths.
++ */
++void
++nouveau_uvmm_describe_fault(struct nouveau_cli *cli, int chid)
++{
++	struct nvkm_fifo *fifo = nvxx_device(cli->drm)->fifo;
++	struct nouveau_uvmm *uvmm = nouveau_cli_uvmm(cli);
++	struct nouveau_uvmm_history found[4];
++	struct drm_gpuva *va, *below = NULL, *above = NULL, *covering = NULL;
++	struct nouveau_uvma_region *region;
++	unsigned long flags, now = jiffies;
++	unsigned int kept, i, shown = 0;
++	u64 addr;
++	u32 type;
++
++	if (!fifo || !uvmm)
++		return;
++
++	spin_lock_irqsave(&fifo->lock, flags);
++	if (!fifo->fault.pending || fifo->fault.chid != chid) {
++		spin_unlock_irqrestore(&fifo->lock, flags);
++		return;
++	}
++	fifo->fault.pending = false;
++	addr = fifo->fault.addr;
++	type = fifo->fault.type;
++	spin_unlock_irqrestore(&fifo->lock, flags);
++
++	spin_lock(&uvmm->history_lock);
++	kept = min_t(unsigned int, uvmm->history_next, ARRAY_SIZE(uvmm->history));
++	for (i = 1; i <= kept && shown < ARRAY_SIZE(found); i++) {
++		struct nouveau_uvmm_history *entry = &uvmm->history[
++			(uvmm->history_next - i) % ARRAY_SIZE(uvmm->history)];
++
++		if (addr >= entry->addr && addr - entry->addr < entry->range)
++			found[shown++] = *entry;
++	}
++	spin_unlock(&uvmm->history_lock);
++
++	nouveau_uvmm_lock(uvmm);
++	drm_gpuvm_for_each_va(va, &uvmm->base) {
++		if (va == &uvmm->base.kernel_alloc_node)
++			continue;
++		if (va->va.addr + va->va.range <= addr) {
++			below = va;
++		} else if (va->va.addr <= addr) {
++			covering = va;
++		} else {
++			above = va;
++			break;
++		}
++	}
++	region = nouveau_uvma_region_find_first(uvmm, addr, 1);
++
++	NV_PRINTK(err, cli, "channel %d MMU fault at 0x%llx type %u: %s\n",
++		  chid, addr, type,
++		  covering && drm_gpuva_invalidated(covering) ?
++			   "a mapping covers it, but its BO was moved or evicted" :
++		  covering ? "a mapping covers it, so the page tables lost it" :
++		  region ? "in a sparse region with no mapping" :
++			   "no mapping covers it");
++	if (covering)
++		nouveau_uvmm_describe_va(cli, "covering", covering);
++	if (below)
++		nouveau_uvmm_describe_va(cli, "below", below);
++	if (above)
++		nouveau_uvmm_describe_va(cli, "above", above);
++	nouveau_uvmm_unlock(uvmm);
++
++	for (i = 0; i < shown; i++)
++		NV_PRINTK(err, cli, "  %lu ms ago %s: 0x%llx-0x%llx page_shift %u\n",
++			  (now - found[i].jiffies) * 1000 / HZ, found[i].why,
++			  found[i].addr, found[i].addr + found[i].range,
++			  found[i].page_shift);
++	if (!shown)
++		NV_PRINTK(err, cli, "  none of the latest %u unmaps or releases covered it\n",
++			  kept);
++}
++
+ int
+ nouveau_uvmm_ioctl_vm_init(struct drm_device *dev,
+ 			   void *data,
+@@ -1938,6 +2072,7 @@ nouveau_uvmm_ioctl_vm_init(struct drm_device *dev,
+ 	}
+ 
+ 	mutex_init(&uvmm->mutex);
++	spin_lock_init(&uvmm->history_lock);
+ 	mt_init_flags(&uvmm->region_mt, MT_FLAGS_LOCK_EXTERN);
+ 	mt_set_external_lock(&uvmm->region_mt, &uvmm->mutex);
+ 
+@@ -1993,7 +2128,7 @@ nouveau_uvmm_fini(struct nouveau_uvmm *uvmm)
+ 		drm_gpuva_unlink(va);
+ 		dma_resv_unlock(obj->resv);
+ 
+-		nouveau_uvma_unmap(uvma);
++		nouveau_uvma_unmap(uvma, "VM closed");
+ 		nouveau_uvma_vmm_put(uvma);
+ 
+ 		nouveau_uvma_gem_put(uvma);
+diff --git a/drivers/gpu/drm/nouveau/nouveau_uvmm.h b/drivers/gpu/drm/nouveau/nouveau_uvmm.h
+index 51925711ae9086bbbd1e09d32c474c60d4dc4af7..633a459060a1398eb7f939953c07abc43337e345 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_uvmm.h
++++ b/drivers/gpu/drm/nouveau/nouveau_uvmm.h
+@@ -12,6 +12,19 @@ struct nouveau_uvmm {
+ 	struct nouveau_vmm vmm;
+ 	struct maple_tree region_mt;
+ 	struct mutex mutex;
++
++	/* The latest page-table unmaps and releases, newest at
++	 * history_next - 1, for naming what a faulting address last held.
++	 */
++	spinlock_t history_lock;
++	unsigned int history_next;
++	struct nouveau_uvmm_history {
++		u64 addr;
++		u64 range;
++		unsigned long jiffies;
++		const char *why;
++		u8 page_shift;
++	} history[64];
+ };
+ 
+ struct nouveau_uvma_region {
+@@ -86,6 +99,8 @@ int nouveau_uvmm_ioctl_vm_init(struct drm_device *dev, void *data,
+ int nouveau_uvmm_ioctl_vm_bind(struct drm_device *dev, void *data,
+ 			       struct drm_file *file_priv);
+ 
++void nouveau_uvmm_describe_fault(struct nouveau_cli *cli, int chid);
++
+ static inline void nouveau_uvmm_lock(struct nouveau_uvmm *uvmm)
+ {
+ 	mutex_lock(&uvmm->mutex);
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r570/fifo.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r570/fifo.c
+index 79132805cfcf6ed6e93339de2935b8c9fcebaa43..00c134a631eea099ac7b49eac13f4663382813ec 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r570/fifo.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r570/fifo.c
+@@ -110,6 +110,18 @@ r570_fifo_rc_triggered(void *priv, u32 fn, void *repv, u32 repc)
+ 		   msg->scope, msg->partitionAttributionId,
+ 		   msg->mmuFaultAddrHi, msg->mmuFaultAddrLo, msg->mmuFaultType);
+ 
++	if (msg->mmuFaultAddrHi || msg->mmuFaultAddrLo) {
++		struct nvkm_fifo *fifo = gsp->subdev.device->fifo;
++		unsigned long flags;
++
++		spin_lock_irqsave(&fifo->lock, flags);
++		fifo->fault.addr = (u64)msg->mmuFaultAddrHi << 32 | msg->mmuFaultAddrLo;
++		fifo->fault.type = msg->mmuFaultType;
++		fifo->fault.chid = msg->chid;
++		fifo->fault.pending = true;
++		spin_unlock_irqrestore(&fifo->lock, flags);
++	}
++
+ 	r535_fifo_rc_chid(gsp->subdev.device->fifo, msg->chid);
+ 	return 0;
+ }
