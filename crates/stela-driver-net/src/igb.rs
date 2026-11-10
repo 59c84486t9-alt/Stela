@@ -198,7 +198,7 @@ impl Igb {
         dma: &mut dyn DmaAllocator,
         minimum: alloc::rc::Rc<dyn crate::bus::pci::power::Timer>,
     ) -> Result<Self, BlockError> {
-        let clock = crate::timing::Timing::new(handoff.clock, minimum)?;
+        let clock = crate::timing::Timing::checked(handoff.clock, minimum)?;
         if !matches(function) {
             return Err(BlockError::Unsupported("not an igb copper controller"));
         }

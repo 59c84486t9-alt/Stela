@@ -23,6 +23,7 @@ pub mod platform;
 pub mod sync;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_clock;
+pub mod timing;
 
 use stela_driver_core::firmware;
 

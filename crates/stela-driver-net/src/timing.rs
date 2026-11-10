@@ -1,32 +1,12 @@
-//! Kept minimum-delay capability, separate from nominal deadline arithmetic.
-use crate::{Clock, block::BlockError, bus::pci::power::Timer};
+//! The drivers' shared timing owner, and the minimum-delay models the
+//! adapter tests run under.
+#[cfg(test)]
+use crate::bus::pci::power::Timer;
+#[cfg(test)]
+use crate::{Clock, block::BlockError};
+#[cfg(test)]
 use alloc::rc::Rc;
-#[derive(Clone)]
-pub(crate) struct Timing {
-    nominal: Clock,
-    minimum: Rc<dyn Timer>,
-}
-impl Timing {
-    pub(crate) fn new(nominal: Clock, minimum: Rc<dyn Timer>) -> Result<Self, BlockError> {
-        minimum.check()?;
-        Ok(Self { nominal, minimum })
-    }
-    pub(crate) fn minimum(&self) -> &dyn Timer {
-        self.minimum.as_ref()
-    }
-    pub(crate) fn nominal(&self) -> Clock {
-        self.nominal
-    }
-    pub(crate) fn now_us(&self) -> u64 {
-        self.nominal.now_us()
-    }
-    pub(crate) fn wait(&self, us: u64, ready: impl FnMut() -> bool) -> bool {
-        self.nominal.wait(us, ready)
-    }
-    pub(crate) fn delay(&self, us: u64) -> Result<(), BlockError> {
-        self.minimum.wait_us(us).map_err(BlockError::PciPower)
-    }
-}
+pub(crate) use stela_driver_base::timing::Timing;
 #[cfg(test)]
 pub(crate) fn model(nominal: Clock) -> Timing {
     use core::cell::Cell;
@@ -48,7 +28,7 @@ pub(crate) fn model(nominal: Clock) -> Timing {
             Ok(())
         }
     }
-    Timing::new(
+    Timing::checked(
         nominal,
         Rc::new(ModelMinimum {
             elapsed: Cell::new(0),
@@ -99,7 +79,7 @@ pub(crate) fn controlled_model(nominal: Clock) -> (Timing, Rc<core::cell::Cell<b
         }
     }
     let failed = Rc::new(Cell::new(false));
-    let timing = Timing::new(
+    let timing = Timing::checked(
         nominal,
         Rc::new(ModelMinimum {
             failed: failed.clone(),
@@ -143,7 +123,7 @@ mod tests {
             elapsed: Cell::new(0),
         });
         let weak = Rc::downgrade(&peer);
-        let timing = Timing::new(
+        let timing = Timing::checked(
             Clock {
                 ticks_per_microsecond: 0,
             },
@@ -174,7 +154,7 @@ mod tests {
             checks: Cell::new(0),
             elapsed: Cell::new(0),
         });
-        let result = Timing::new(
+        let result = Timing::checked(
             Clock {
                 ticks_per_microsecond: 3000,
             },
