@@ -77,6 +77,10 @@ impl<T> Slab<T> {
         self.entries.iter().flatten()
     }
 
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.entries.iter_mut().flatten()
+    }
+
     fn remove(&mut self, index: u32) -> Result<T> {
         let value = self.entries.get_mut(index as usize).and_then(Option::take);
         let value = value.ok_or(Error::Invalid("unknown or destroyed object"))?;

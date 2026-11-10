@@ -962,11 +962,14 @@ impl CommandBuffer {
             if let Some(pipeline) = state.pipeline {
                 render.topology = None;
                 render.restart = None;
-                render.bound = Some(pipeline);
-                self.recorder.push(Command::BindPipeline {
-                    bind_point: PipelineBindPoint::Graphics,
-                    pipeline,
-                });
+                // An outdated pipeline's draws bind a variant instead.
+                if !state.outdated {
+                    render.bound = Some(pipeline);
+                    self.recorder.push(Command::BindPipeline {
+                        bind_point: PipelineBindPoint::Graphics,
+                        pipeline,
+                    });
+                }
             }
             self.recorder
                 .push(Command::SetRasterizerDiscard(!plan.rasterization_enabled));
@@ -1941,11 +1944,12 @@ impl CommandBuffer {
             };
             bicubic[stage] |= self.bindings.bicubic_samplers(interface.stage, interface);
         }
-        let pipeline = if (0..2).all(|stage| bicubic[stage] & !state.bicubic[stage] == 0) {
-            state.pipeline
-        } else {
-            Some(resolver.bicubic_render_pipeline(state, bicubic)?)
-        };
+        let pipeline =
+            if !state.outdated && (0..2).all(|stage| bicubic[stage] & !state.bicubic[stage] == 0) {
+                state.pipeline
+            } else {
+                Some(resolver.bicubic_render_pipeline(state, bicubic)?)
+            };
         if let Some(pipeline) = pipeline.filter(|&pipeline| render.bound != Some(pipeline)) {
             render.bound = Some(pipeline);
             self.recorder.push(Command::BindPipeline {

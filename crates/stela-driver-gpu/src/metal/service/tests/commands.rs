@@ -468,17 +468,19 @@ fn draws_through_bicubic_samplers_run_a_cached_variant() {
     for _ in 0..2 {
         assert!(commit(&mut service, connection, &stream).is_ok());
         let bound = bound(&mut service);
-        // The linear draw runs the pipeline, the bicubic one its variant.
+        // The linear and bicubic draws run different variants.
         assert_eq!(bound.len(), 2);
         assert_ne!(bound[0], bound[1]);
     }
-    // The variant compiled for the first commit, its fragment function
-    // filtering the sampler at index 1 bicubically.
+    // The variants compiled for the first commit: the pipeline was made
+    // before the connection's first bicubic sampler, so the linear draw
+    // runs one too, and the bicubic draw's fragment function filters the
+    // sampler at index 1 bicubically.
     let variant: alloc::vec::Vec<_> = service.device().compiler_mut().compiled[compiled..]
         .iter()
         .map(|specialization| specialization.bicubic_samplers)
         .collect();
-    assert_eq!(variant, [0, 1 << 1]);
+    assert_eq!(variant, [0, 0, 0, 1 << 1]);
 }
 
 #[test]

@@ -333,6 +333,7 @@ fn render_state(amplification: u64) -> RenderPipelineState {
         interfaces: alloc::vec![vertex.interface, fragment.interface],
         indirect: None,
         bicubic: [0; 2],
+        outdated: false,
     }
 }
 
@@ -399,6 +400,7 @@ fn patch_state_of(
         interfaces: alloc::vec![evaluation.interface],
         indirect: None,
         bicubic: [0; 2],
+        outdated: false,
     }
 }
 
@@ -675,6 +677,7 @@ fn mesh_thread_draws_cover_the_grid_with_the_first_stage() {
                 .collect(),
             indirect: None,
             bicubic: [0; 2],
+            outdated: false,
         };
         let mut resolver = MockResolver::default();
         let mut commands = CommandBuffer::new(FEATURES);
@@ -861,6 +864,33 @@ fn draws_bind_no_variant_for_samplers_their_pipeline_filters_bicubically() {
         .draw_primitives(&mut resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
         .unwrap();
     assert!(resolver.bicubic.is_empty());
+}
+
+/// A pipeline made before its process's first bicubic or pixel-coordinate
+/// sampler draws through a variant compiled since, whatever it binds.
+#[test]
+fn draws_through_outdated_pipelines_bind_a_variant() {
+    let color = texture(PixelFormat::Rgba8Unorm);
+    let mut resolver = MockResolver::default();
+    let mut commands = CommandBuffer::new(FEATURES);
+    commands
+        .begin_render(
+            &mut resolver,
+            pass(&color, StoreAction::Store, false),
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+    let mut state = render_state(1);
+    state.outdated = true;
+    commands.set_render_pipeline_state(&state).unwrap();
+    commands
+        .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
+        .unwrap();
+    commands
+        .draw_primitives(&mut resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
+        .unwrap();
+    assert_eq!(resolver.bicubic, [[0; 2]]);
 }
 
 #[test]

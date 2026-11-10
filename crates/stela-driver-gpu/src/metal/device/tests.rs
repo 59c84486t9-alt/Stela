@@ -703,6 +703,38 @@ fn functions_take_bicubic_argument_samplers_once_admitted() {
     assert_eq!(stages, [(false, 0), (true, 0)]);
 }
 
+/// A pipeline made before its process's first pixel-coordinate or bicubic
+/// sampler compiles again for its next draw, whose variant reads argument
+/// samplers' flags: the order of creation does not change what it samples.
+#[test]
+fn pipelines_made_before_admission_compile_again_on_next_use() {
+    let mut device = device();
+    let vertex = device.new_function(LIBRARY, "vertex", Some(&[])).unwrap();
+    let fragment = device.new_function(LIBRARY, "fragment", Some(&[])).unwrap();
+    let id = device
+        .new_render_pipeline(&bicubic_request(vertex, fragment))
+        .unwrap();
+    let (state_id, base) = {
+        let state = device.render_pipeline_state(id).unwrap();
+        (state.id, state.pipeline.unwrap())
+    };
+    let early = device.render_variant(state_id, [0, 1]).unwrap();
+    device.admit_bicubic(vertex).unwrap();
+    device.admit_bicubic(fragment).unwrap();
+    device.outdate_pipelines(&[vertex, fragment]);
+    assert!(device.render_pipeline_state(id).unwrap().outdated);
+    let compiled = device.compiler.compiled.len();
+    let late = device.render_variant(state_id, [0; 2]).unwrap();
+    assert_ne!(late, base);
+    assert_ne!(device.render_variant(state_id, [0, 1]).unwrap(), early);
+    assert!(
+        device.compiler.compiled[compiled..]
+            .iter()
+            .all(|stage| stage.bicubic_arguments)
+    );
+    assert_eq!(device.render_variant(state_id, [0; 2]).unwrap(), late);
+}
+
 fn bicubic_request(vertex: FunctionId, fragment: FunctionId) -> RenderPipelineRequest {
     RenderPipelineRequest {
         vertex_function: vertex,

@@ -739,9 +739,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         }
     }
 
-    /// Lets the connection's functions take bicubic samplers as arguments,
-    /// after its first: its later pipelines filter them bicubically. Draws
-    /// and dispatches binding bicubic samplers run variants of any pipeline.
+    /// Lets the connection's functions take bicubic or pixel-coordinate
+    /// samplers as arguments, after its first: its later pipelines, and
+    /// variants of its earlier ones, read their flags. Draws and dispatches
+    /// binding such samplers run variants of any pipeline.
     fn admit_bicubic(&mut self, connection: NonZeroU64) -> Result<(), Fault> {
         let held = self.connection(connection)?;
         if held.bicubic {
@@ -749,11 +750,11 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         }
         held.bicubic = true;
         let (functions, pipelines) = held.functions_and_pipelines();
-        for function in functions {
+        for &function in &functions {
             self.device.admit_bicubic(function)?;
         }
         if pipelines {
-            self.device.bicubic_after_pipelines();
+            self.device.outdate_pipelines(&functions);
         }
         Ok(())
     }

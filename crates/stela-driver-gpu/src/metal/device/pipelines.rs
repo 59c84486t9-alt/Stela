@@ -264,12 +264,15 @@ struct RenderObject {
     /// links.
     fragment: Option<ShaderCode>,
     mesh: Option<MeshFunctions>,
-    variants: Vec<(MeshShape, Pipeline)>,
+    /// Mesh variants, and whether their process had made bicubic or
+    /// pixel-coordinate samplers when they compiled.
+    variants: Vec<(MeshShape, bool, Pipeline)>,
     /// A vertex pipeline's request, which its bicubic variants compile.
     request: Option<RenderPipelineRequest>,
     /// Variants whose vertex and fragment stages filter the samplers at
-    /// these indices bicubically ([`RenderPipelineState::bicubic`]).
-    bicubic: Vec<([u32; 2], Pipeline)>,
+    /// these indices bicubically ([`RenderPipelineState::bicubic`]), and
+    /// whether their process had made such samplers when they compiled.
+    bicubic: Vec<([u32; 2], bool, Pipeline)>,
 }
 
 /// The object and mesh functions of a mesh pipeline, which its variants
@@ -889,15 +892,45 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(())
     }
 
-    /// Reports once that a process made its first bicubic or
-    /// pixel-coordinate sampler after pipelines, which sample through it
-    /// linearly with normalized coordinates where they run no variants.
-    pub fn bicubic_after_pipelines(&mut self) {
-        self.unsupported(
-            "bicubic or pixel-coordinate samplers taken as arguments, or bound to mesh \
-             draws or GPU-encoded commands, through pipelines made before their \
-             process's first one, which filter them linearly with normalized coordinates",
-        );
+    /// Whether `id`'s process has made bicubic or pixel-coordinate
+    /// samplers, which the samplers it takes as arguments may then be.
+    fn admitted(&self, id: FunctionId) -> Result<bool> {
+        Ok(self.pipelines.functions.get(id.0)?.bicubic)
+    }
+
+    /// After [`Self::admit_bicubic`] of `functions`: their pipelines made
+    /// before compile again on their next use, as variants that read each
+    /// argument sampler's flags, so draws and dispatches do not depend on
+    /// the order samplers and pipelines were made. GPU-encoded commands and
+    /// a mesh pipeline's fragment stage keep what they were compiled with,
+    /// which is reported once.
+    pub fn outdate_pipelines(&mut self, functions: &[FunctionId]) {
+        let mut kept = false;
+        for render in self.pipelines.render.iter_mut() {
+            let uses = |id: &FunctionId| functions.contains(id);
+            if let Some(request) = &render.request {
+                if uses(&request.vertex_function)
+                    || request.fragment_function.is_some_and(|f| uses(&f))
+                {
+                    render.state.outdated = true;
+                    kept |= render.state.indirect.is_some();
+                }
+            } else if let Some(mesh) = &render.mesh
+                && (uses(&mesh.mesh) || mesh.object.is_some_and(|f| uses(&f)))
+            {
+                kept |= render.fragment.is_some();
+            }
+        }
+        kept |= self.pipelines.compute.iter().any(|compute| {
+            functions.contains(&compute.function) && compute.state.indirect.is_some()
+        });
+        if kept {
+            self.unsupported(
+                "bicubic or pixel-coordinate samplers taken as arguments by GPU-encoded \
+                 commands or mesh fragment stages of pipelines made before their process's \
+                 first one, which filter them linearly with normalized coordinates",
+            );
+        }
     }
 
     /// The interface of a function that becomes a pipeline stage.
@@ -1180,6 +1213,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 interfaces,
                 indirect,
                 bicubic,
+                outdated: false,
             },
             linked: alloc::vec![
                 (Stage::Vertex, vertex_linked),
@@ -1435,6 +1469,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 interfaces,
                 indirect: None,
                 bicubic: [0; 2],
+                outdated: false,
             },
             linked,
             sources: sources.clone(),
@@ -1474,17 +1509,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let index = u32::try_from(id).map_err(|_| Error::Invalid("unknown pipeline"))?;
         let render = self.pipelines.render.get(index)?;
         if bicubic == render.state.bicubic
+            && !render.state.outdated
             && let Some(pipeline) = render.state.pipeline
         {
             return Ok(pipeline);
-        }
-        if let Some((_, pipeline)) = render.bicubic.iter().find(|(known, _)| *known == bicubic) {
-            return Ok(*pipeline);
         }
         let request = render
             .request
             .clone()
             .ok_or(Error::Invalid("not a vertex pipeline"))?;
+        let arguments = self.admitted(request.vertex_function)?;
+        if let Some((_, _, pipeline)) = render
+            .bicubic
+            .iter()
+            .find(|(known, admitted, _)| *known == bicubic && *admitted == arguments)
+        {
+            return Ok(*pipeline);
+        }
         let linking = |stage| {
             render
                 .linked(stage)
@@ -1503,7 +1544,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .render
             .get_mut(index)?
             .bicubic
-            .push((bicubic, pipeline));
+            .push((bicubic, arguments, pipeline));
         Ok(pipeline)
     }
 
@@ -1518,13 +1559,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let index = u32::try_from(id).map_err(|_| Error::Invalid("unknown pipeline"))?;
         let render = self.pipelines.render.get(index)?;
         let key = (object_threads, mesh_threads, object_lengths.to_vec());
-        if let Some((_, pipeline)) = render.variants.iter().find(|(known, _)| *known == key) {
-            return Ok(*pipeline);
-        }
         let functions = render
             .mesh
             .as_ref()
             .ok_or(Error::Invalid("not a mesh pipeline"))?;
+        let arguments = self.admitted(functions.mesh)?;
+        if let Some((_, _, pipeline)) = render
+            .variants
+            .iter()
+            .find(|(known, admitted, _)| *known == key && *admitted == arguments)
+        {
+            return Ok(*pipeline);
+        }
         let (object, mesh, varyings) =
             (functions.object, functions.mesh, functions.varyings.clone());
         let linking = |stage| {
@@ -1598,7 +1644,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .render
             .get_mut(index)?
             .variants
-            .push((key, pipeline));
+            .push((key, arguments, pipeline));
         Ok(pipeline)
     }
 
@@ -1615,8 +1661,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             (Some(indirect), Some(pipeline)) => self.remove_indirect(indirect, pipeline)?,
             (_, pipeline) => pipeline,
         };
-        let variants = render.variants.into_iter().map(|(_, pipeline)| pipeline);
-        let bicubic = render.bicubic.into_iter().map(|(_, pipeline)| pipeline);
+        let variants = render.variants.into_iter().map(|(_, _, pipeline)| pipeline);
+        let bicubic = render.bicubic.into_iter().map(|(_, _, pipeline)| pipeline);
         for pipeline in pipeline.into_iter().chain(variants).chain(bicubic) {
             self.defer(Object::Pipeline(pipeline));
         }
@@ -1770,6 +1816,12 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     ) -> Result<Pipeline> {
         let index = u32::try_from(id).map_err(|_| Error::Invalid("unknown pipeline"))?;
         let compute = self.pipelines.compute.get(index)?;
+        // Variants compiled before the process made bicubic or
+        // pixel-coordinate samplers read no argument sampler's flags.
+        let specialization = &Specialization {
+            bicubic_arguments: self.admitted(compute.function)?,
+            ..specialization.clone()
+        };
         if let Some((_, pipeline)) = compute
             .variants
             .iter()

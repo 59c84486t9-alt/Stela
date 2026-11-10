@@ -92,6 +92,10 @@ pub struct RenderPipelineState {
     /// filter every sampler bicubically once their process has bicubic
     /// samplers.
     pub bicubic: [u32; 2],
+    /// It was compiled before its process made bicubic or pixel-coordinate
+    /// samplers, which its functions may take as arguments: draws bind a
+    /// variant compiled since ([`Resolver::bicubic_render_pipeline`]).
+    pub outdated: bool,
 }
 
 /// A compute pipeline state object; its Vulkan pipelines are variants.
