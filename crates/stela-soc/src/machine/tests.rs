@@ -1439,6 +1439,7 @@ fn ans_dma_and_sart_idle_share_the_nvme_aperture_without_aliasing() {
             die: 0,
             device: 125
         }],
+        quiesced: false,
     };
     let mut devices = AppleDevices::new();
     devices
@@ -1598,6 +1599,67 @@ fn mailbox_drain(devices: &mut AppleDevices, wrapper: u64) -> Vec<(u64, u64)> {
 /// word, up to the client driver's STARTEP of it, except that group 0
 /// now also lists the crashlog endpoint. The coprocessor must end
 /// enumeration with the power-on announcement the AP waits for.
+#[test]
+fn a_quiesced_ans2_nub_waits_for_the_ap_wake_before_its_hello() {
+    use stela_drivers::block::RamDisk;
+    use stela_soc_data::board::AnsController;
+    const NVME: u64 = 0x2_7bcc_0000;
+    const SART: u64 = 0x2_7bc5_0000;
+    const WRAPPER: u64 = 0x2_7740_0000;
+    const VDMA: u64 = 0x2_7b10_0000;
+    const SUPPLY: u64 = 0x2_3b70_0428;
+    let placement = AnsController {
+        geometry: stela_soc_data::ans::QueueGeometry::DEFAULT,
+        wrapper: (WRAPPER, 0x6c000),
+        nvme: (NVME, 0x60000),
+        vdma: Some((VDMA, 0x44000)),
+        sart: (SART, 0xc000),
+        sart_layout: stela_soc_data::sart::Layout::V3,
+        sart_idle: NVME + 0x13e8,
+        sart_canary: None,
+        sart_exclusive_bounds: false,
+        interrupts: [718, 717, 720, 719],
+        completion_irq: 724,
+        namespaces: alloc::vec![stela_soc_data::ans::Description {
+            id: 1,
+            kind: 1,
+            blocks: 0
+        }],
+        clock_gates: alloc::vec![coverage::DomainId {
+            die: 0,
+            device: 125
+        }],
+        power_gates: alloc::vec![coverage::DomainId {
+            die: 0,
+            device: 125
+        }],
+        quiesced: true,
+    };
+    let mut devices = AppleDevices::new();
+    devices
+        .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
+        .unwrap();
+    devices
+        .add_ans(
+            &placement,
+            Box::new(RamDisk::new("backing", 16, 4096)),
+            stela_formats::builds::DEFAULT,
+        )
+        .unwrap();
+
+    connect_native_power(&mut devices, SUPPLY, &[("/arm-io/ans", WRAPPER)], true);
+    // The boot chain quiesced it: no HELLO until the AP's IOP power 0x220.
+    assert!(mailbox_drain(&mut devices, WRAPPER).is_empty());
+    devices
+        .write(0, WRAPPER + 0x8800, 8, 0x0060_0000_0000_0220, 0)
+        .unwrap();
+    devices.write(0, WRAPPER + 0x8808, 8, 0, 0).unwrap();
+    assert_eq!(
+        mailbox_drain(&mut devices, WRAPPER),
+        [(0, 0x0010_0000_000c_000c)]
+    );
+}
+
 fn walk_rtkit_start(devices: &mut AppleDevices, wrapper: u64) {
     let send = |devices: &mut AppleDevices, payload| {
         devices.write(0, wrapper + 0x8800, 8, payload, 0).unwrap();

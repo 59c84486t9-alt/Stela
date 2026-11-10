@@ -18,10 +18,13 @@ impl AppleDevices {
         build: &stela_formats::builds::Build,
     ) -> Result<()> {
         let irq = |n| AicInput::new(0, n);
-        let rtkit = RtKit::new(
+        let mut rtkit = RtKit::new(
             vec![(ans::RTKIT_ENDPOINT, Box::new(ans::Endpoint) as Box<_>)],
             build.rtkit_version,
         )?;
+        if placement.quiesced {
+            rtkit = rtkit.quiesced();
+        }
         let wrapper = Asc::booted(
             Box::new(rtkit),
             AscLines::from_interrupts(placement.interrupts.map(irq)),

@@ -206,6 +206,10 @@ pub struct AnsController {
     pub namespaces: Vec<crate::ans::Description>,
     pub clock_gates: Vec<DomainId>,
     pub power_gates: Vec<DomainId>,
+    /// The RTBuddy nub is `quiesced`: the boot chain used the coprocessor
+    /// and quiesced it, so it waits for the AP's wake before its HELLO
+    /// (`rtkit::RtKit::quiesced`; J475D's ANS2, not J473's).
+    pub quiesced: bool,
 }
 
 /// Only explicitly visible ANS2 hardware is placed. Do not preserve all
@@ -253,7 +257,7 @@ pub(super) fn ans_controller(
             flag
         ));
     }
-    rtbuddy_nub(&node, "ANS2")?;
+    let quiesced = rtbuddy_nub(&node, "ANS2")?.property("quiesced").is_some();
     let regs = apertures::registers(&node).ok_or(refuse!("ANS2 has no reg pairs"))?;
     let parent = node
         .first_u32("iommu-parent")
@@ -377,6 +381,7 @@ pub(super) fn ans_controller(
             .property("power-gates")
             .map(|_| power_resources::gate_ids(&node, "/arm-io/ans", "power-gates"))
             .ok_or(refuse!("ANS2 has no power-gates"))??,
+        quiesced,
     }))
 }
 
@@ -625,10 +630,15 @@ mod tests {
         banks.push((0x7b10_0000, 0x44000));
         let banks = pairs(&banks);
         let flagged = |flags: &[&'static str], version: u32, parent: u32, interrupt_index: u32| {
-            let nub = encode(
-                &[("name", &z("iop-ans-nub")), ("compatible", &z(RTBUDDY))],
-                &[],
-            );
+            // `quiesced` is the nub's flag; every other flag is the ANS node's.
+            let nub_name = z("iop-ans-nub");
+            let nub_compatible = z(RTBUDDY);
+            let mut nub_properties: Vec<(&str, &[u8])> =
+                vec![("name", &nub_name), ("compatible", &nub_compatible)];
+            if flags.contains(&"quiesced") {
+                nub_properties.push(("quiesced", &[]));
+            }
+            let nub = encode(&nub_properties, &[]);
             let (name, compatible, role) = (z("ans"), z(ASC), z("ANS2"));
             let (entries, index) = (cells(&[64]), cells(&[interrupt_index]));
             let interrupts = cells(&[718, 717, 720, 719, 724]);
@@ -649,7 +659,12 @@ mod tests {
                 ("clock-gates", &gates),
                 ("power-gates", &gates),
             ];
-            properties.extend(flags.iter().map(|&flag| (flag, [].as_slice())));
+            properties.extend(
+                flags
+                    .iter()
+                    .filter(|&&flag| flag != "quiesced")
+                    .map(|&flag| (flag, [].as_slice())),
+            );
             let ans = encode(&properties, &[nub]);
             let sart = encode(
                 &[
@@ -685,6 +700,17 @@ mod tests {
         assert_eq!(placed.sart_layout, sart::Layout::V3);
         assert_eq!(placed.sart_canary, None);
         assert!(!placed.sart_exclusive_bounds);
+        assert!(!placed.quiesced);
+        // A boot chain that used and quiesced ANS2 (J475D) marks its nub.
+        let bytes = flagged(&["quiesced"], 3, 0x8e, 4);
+        let quiesced = ans_controller(
+            &Node::root(&bytes).unwrap(),
+            &flat_fixture_extent(&|a| Some(a)),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(quiesced.quiesced);
         // A version 4 SART places with SPTM's version 4 layout.
         let bytes = tree(4, 0x8e, 4);
         let v4 = ans_controller(
