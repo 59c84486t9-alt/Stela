@@ -23,6 +23,7 @@
 //! size. Other types are refused by number.
 use super::{ApfsError, Result};
 use alloc::{vec, vec::Vec};
+use stela_contracts::bytes::{get_be32, get_le32};
 
 /// The attribute holding the header.
 pub const ATTRIBUTE: &str = "com.apple.decmpfs";
@@ -142,18 +143,14 @@ fn append_chunk(
     Ok(())
 }
 
+const MALFORMED: ApfsError = ApfsError::Malformed("decmpfs resource fork");
+
 fn u32_le(bytes: &[u8], at: usize) -> Result<u32> {
-    bytes
-        .get(at..at + 4)
-        .map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")))
-        .ok_or(ApfsError::Malformed("decmpfs resource fork"))
+    get_le32(bytes, at).ok_or(MALFORMED)
 }
 
 fn u32_be(bytes: &[u8], at: usize) -> Result<u32> {
-    bytes
-        .get(at..at + 4)
-        .map(|b| u32::from_be_bytes(b.try_into().expect("4 bytes")))
-        .ok_or(ApfsError::Malformed("decmpfs resource fork"))
+    get_be32(bytes, at).ok_or(MALFORMED)
 }
 
 /// The resource fork's chunks, as byte ranges of `fork`.

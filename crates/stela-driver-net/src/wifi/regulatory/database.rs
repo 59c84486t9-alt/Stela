@@ -107,10 +107,10 @@ fn bytes(data: &[u8], at: usize, n: usize) -> Result<&[u8], Error> {
         .ok_or(Error::Truncated)
 }
 fn be16(data: &[u8], at: usize) -> Result<u16, Error> {
-    Ok(u16::from_be_bytes(bytes(data, at, 2)?.try_into().unwrap()))
+    bytes(data, at, 2).map(|field| stela_driver_core::bytes::be16(field, 0))
 }
 fn be32(data: &[u8], at: usize) -> Result<u32, Error> {
-    Ok(u32::from_be_bytes(bytes(data, at, 4)?.try_into().unwrap()))
+    bytes(data, at, 4).map(|field| stela_driver_core::bytes::be32(field, 0))
 }
 fn pointer(data: &[u8], at: usize) -> Result<usize, Error> {
     Ok(usize::from(be16(data, at)?) * 4)

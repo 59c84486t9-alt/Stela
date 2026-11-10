@@ -9,7 +9,7 @@ use stela_crypto::digest::Digest;
 use stela_drivers::firmware::smbios::{self, Error, Format, MAX_ENTRY_BYTES};
 use uefi_raw::table::boot::MemoryType;
 
-const PAGE: u64 = 4096;
+use stela_contracts::bytes::HOST_PAGE_BYTES as PAGE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {

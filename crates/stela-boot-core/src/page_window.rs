@@ -10,7 +10,7 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::ops::Range;
 
-pub const PAGE: u64 = 4096;
+pub use stela_contracts::bytes::HOST_PAGE_BYTES as PAGE;
 /// Bytes one paging-structure entry's level covers, from the leaf up.
 const DIRECTORY_BYTES: u64 = PAGE << 9;
 const DIRECTORY_POINTER_BYTES: u64 = DIRECTORY_BYTES << 9;

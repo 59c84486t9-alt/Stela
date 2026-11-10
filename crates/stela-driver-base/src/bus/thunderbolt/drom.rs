@@ -4,6 +4,7 @@
 //! DROM images: `tb_drom_parse` and its entry walks. Parsed identifiers and
 //! lane hints grant nothing: a router's adapters are what it reports.
 use alloc::vec::Vec;
+use stela_driver_core::{bytes::le16, crc::crc32c};
 
 pub const DATA_START: usize = 13;
 pub const MAX_LEN: usize = 4095 + DATA_START;
@@ -21,11 +22,11 @@ pub enum Error {
     UidCrc { expected: u8, actual: u8 },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Crc32 {
+pub struct Crc32c {
     pub expected: u32,
     pub actual: u32,
 }
-impl Crc32 {
+impl Crc32c {
     pub fn matches(self) -> bool {
         self.expected == self.actual
     }
@@ -68,7 +69,7 @@ pub struct Image {
     pub uid: u64,
     pub uid_source: UidSource,
     pub revision: u8,
-    pub crc32: Crc32,
+    pub crc32c: Crc32c,
     pub product: (u16, u16),
     pub bytes: Vec<u8>,
     pub entries: Vec<Entry>,
@@ -89,7 +90,7 @@ impl Image {
             uid,
             uid_source: UidSource::Router,
             revision: 0,
-            crc32: Crc32 {
+            crc32c: Crc32c {
                 expected: 0,
                 actual: 0,
             },
@@ -157,19 +158,6 @@ fn crc8(data: &[u8]) -> u8 {
     }
     crc
 }
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for b in data {
-        crc ^= u32::from(*b);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ if crc & 1 != 0 { 0x82f63b78 } else { 0 };
-        }
-    }
-    !crc
-}
-fn le16(data: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([data[at], data[at + 1]])
-}
 fn parse(image: &mut Image, max_port: u8, lanes: impl Fn(u8) -> bool) -> Result<(), Error> {
     if image.bytes.len() < 16 {
         return Err(Error::HeaderSize);
@@ -202,9 +190,9 @@ fn parse(image: &mut Image, max_port: u8, lanes: impl Fn(u8) -> bool) -> Result<
         3 => 16,
         other => return Err(Error::UnsupportedRevision(other)),
     };
-    image.crc32 = Crc32 {
+    image.crc32c = Crc32c {
         expected: u32::from_le_bytes(bytes[9..13].try_into().unwrap()),
-        actual: crc32(&bytes[DATA_START..]),
+        actual: crc32c(&bytes[DATA_START..]),
     };
     let mut at = header;
     while at < bytes.len() {
@@ -275,7 +263,7 @@ pub(crate) fn seal(bytes: &mut [u8]) {
     let len = (bytes.len() - DATA_START) as u16;
     bytes[14..16].copy_from_slice(&len.to_le_bytes());
     bytes[0] = crc8(&bytes[1..9]);
-    let crc = crc32(&bytes[13..]);
+    let crc = crc32c(&bytes[13..]);
     bytes[9..13].copy_from_slice(&crc.to_le_bytes());
 }
 

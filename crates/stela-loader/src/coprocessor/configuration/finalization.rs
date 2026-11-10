@@ -7,7 +7,10 @@ use crate::Result;
 use crate::coprocessor::publication;
 use alloc::{collections::BTreeSet, string::String, vec::Vec};
 use serde::Serialize;
-use stela_contracts::{refuse, require};
+use stela_contracts::{
+    bytes::{get_le32, get_le64},
+    refuse, require,
+};
 use stela_formats::sha256;
 
 const DSEG: u32 = u32::from_le_bytes(*b"dseg");
@@ -40,24 +43,10 @@ pub struct Receipt {
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(
-        bytes
-            .get(at..)
-            .and_then(|b| b.get(..4))
-            .ok_or(refuse!("truncated native finalization u32"))?
-            .try_into()
-            .unwrap(),
-    ))
+    get_le32(bytes, at).ok_or_else(|| refuse!("truncated native finalization u32").into())
 }
 fn u64_at(bytes: &[u8], at: usize) -> Result<u64> {
-    Ok(u64::from_le_bytes(
-        bytes
-            .get(at..)
-            .and_then(|b| b.get(..8))
-            .ok_or(refuse!("truncated native finalization u64"))?
-            .try_into()
-            .unwrap(),
-    ))
+    get_le64(bytes, at).ok_or_else(|| refuse!("truncated native finalization u64").into())
 }
 fn snapshot(proposal: &publication::Proposal) -> Result<String> {
     // The complete selected geometry/flags/provenance and omitted family stay

@@ -34,6 +34,7 @@
 use super::acpi::{self, AcpiError};
 use crate::Result;
 use stela_contracts::Refusal;
+use stela_contracts::bytes::{get_le32, get_le64};
 use stela_contracts::refuse;
 
 const HEADER: usize = 36;
@@ -192,22 +193,10 @@ pub fn sleep_register_control(sleep_type: u8) -> u8 {
     (sleep_type << SLEEP_REGISTER_TYPE_SHIFT) & SLEEP_REGISTER_TYPE | SLEEP_REGISTER_ENABLE
 }
 
-fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        bytes.get(offset..offset + 4)?.try_into().ok()?,
-    ))
-}
-
-fn u64_at(bytes: &[u8], offset: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(
-        bytes.get(offset..offset + 8)?.try_into().ok()?,
-    ))
-}
-
 /// A Generic Address Structure: its space and address.
 fn gas(bytes: &[u8], offset: usize) -> Option<(u8, u64)> {
     let field = bytes.get(offset..offset + GAS_BYTES)?;
-    Some((field[0], u64_at(field, 4)?))
+    Some((field[0], get_le64(field, 4)?))
 }
 
 /// An I/O port block: the X_ field when present, else the 32-bit one
@@ -219,7 +208,7 @@ fn port(fadt: &[u8], legacy: Option<usize>, extended: usize) -> Result<Option<u1
             return Err(refuse!("an ACPI register block outside system I/O space"));
         }
         _ => legacy
-            .and_then(|legacy| u32_at(fadt, legacy))
+            .and_then(|legacy| get_le32(fadt, legacy))
             .map_or(0, u64::from),
     };
     match address {
@@ -231,7 +220,7 @@ fn port(fadt: &[u8], legacy: Option<usize>, extended: usize) -> Result<Option<u1
 }
 
 fn reset_register(fadt: &[u8]) -> Result<Option<(ResetRegister, u8)>> {
-    if u32_at(fadt, FLAGS).unwrap_or(0) & RESET_SUPPORTED == 0 {
+    if get_le32(fadt, FLAGS).unwrap_or(0) & RESET_SUPPORTED == 0 {
         return Ok(None);
     }
     let (Some((space, address)), Some(&value)) = (gas(fadt, RESET_REGISTER), fadt.get(RESET_VALUE))
@@ -266,14 +255,14 @@ pub fn fadt(table: &[u8]) -> Result<(HostPower, u64), AcpiError> {
     if table.len() < RESET_REGISTER || &table[..4] != b"FACP" {
         return Err(BAD);
     }
-    let flags = u32_at(table, FLAGS).ok_or(BAD)?;
+    let flags = get_le32(table, FLAGS).ok_or(BAD)?;
     let mut power = HostPower::default();
     let mut refuse = |reason: Refusal| {
         power.refused.get_or_insert(reason);
     };
-    let dsdt = match u64_at(table, X_DSDT) {
+    let dsdt = match get_le64(table, X_DSDT) {
         Some(address) if address != 0 => address,
-        _ => u64::from(u32_at(table, DSDT).ok_or(BAD)?),
+        _ => u64::from(get_le32(table, DSDT).ok_or(BAD)?),
     };
     let mut reset = None;
     match reset_register(table) {
@@ -358,7 +347,7 @@ fn integer(bytes: &[u8]) -> Option<(u64, usize)> {
             u64::from(u16::from_le_bytes(bytes.get(1..3)?.try_into().ok()?)),
             3,
         )),
-        DWORD_PREFIX => Some((u64::from(u32_at(bytes, 1)?), 5)),
+        DWORD_PREFIX => Some((u64::from(get_le32(bytes, 1)?), 5)),
         _ => None,
     }
 }

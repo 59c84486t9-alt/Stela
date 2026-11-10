@@ -5,6 +5,7 @@
 //! metadata and digest remain borrowed from the original input.
 use alloc::vec::Vec;
 use core::{fmt, ops::Range, str};
+use stela_contracts::bytes::{le16, le32, le64};
 use stela_crypto::{Sha256, digest::Digest};
 
 const HEADER_BYTES: usize = 88;
@@ -63,21 +64,15 @@ fn bytes(data: &[u8], offset: usize, size: usize) -> Result<&[u8]> {
 }
 
 fn u16_at(data: &[u8], offset: usize) -> Result<u16> {
-    Ok(u16::from_le_bytes(
-        bytes(data, offset, 2)?.try_into().unwrap(),
-    ))
+    bytes(data, offset, 2).map(|field| le16(field, 0))
 }
 
 fn u32_at(data: &[u8], offset: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(
-        bytes(data, offset, 4)?.try_into().unwrap(),
-    ))
+    bytes(data, offset, 4).map(|field| le32(field, 0))
 }
 
 fn u64_at(data: &[u8], offset: usize) -> Result<u64> {
-    Ok(u64::from_le_bytes(
-        bytes(data, offset, 8)?.try_into().unwrap(),
-    ))
+    bytes(data, offset, 8).map(|field| le64(field, 0))
 }
 
 fn host_size(value: u64, offset: usize) -> Result<usize> {

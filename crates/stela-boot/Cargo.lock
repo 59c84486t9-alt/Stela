@@ -1063,6 +1063,7 @@ dependencies = [
 name = "stela-driver-core"
 version = "0.1.0"
 dependencies = [
+ "stela-contracts",
  "stela-crypto",
 ]
 

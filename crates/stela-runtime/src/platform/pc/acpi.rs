@@ -2,6 +2,7 @@
 //! MCFG table that locates PCI configuration space, and any table by
 //! address ([`power`](super::power) reads the FADT and DSDT).
 use alloc::vec::Vec;
+use stela_contracts::bytes::{le32, le64};
 use stela_drivers::bus::pci::EcamWindow;
 
 const HEADER: usize = 36;
@@ -17,14 +18,6 @@ fn checksum(bytes: &[u8]) -> bool {
     bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)) == 0
 }
 
-fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
-}
-
-fn u64_at(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
-}
-
 /// # Safety
 ///
 /// `address` must be readable, identity-mapped memory holding at least an
@@ -33,7 +26,7 @@ pub unsafe fn table(address: u64) -> Result<&'static [u8], AcpiError> {
     // SAFETY: the caller's contract covers the header.
     let header = unsafe { core::slice::from_raw_parts(address as *const u8, HEADER) };
     let signature: [u8; 4] = header[..4].try_into().unwrap();
-    let length = u32_at(header, 4) as usize;
+    let length = le32(header, 4) as usize;
     if length < HEADER {
         return Err(AcpiError::BadTable(signature));
     }
@@ -62,19 +55,19 @@ pub unsafe fn find(rsdp: u64, signature: &[u8; 4]) -> Result<&'static [u8], Acpi
         if !checksum(long) {
             return Err(AcpiError::BadRsdp);
         }
-        match u64_at(long, 24) {
-            0 => (u64::from(u32_at(short, 16)), 4),
+        match le64(long, 24) {
+            0 => (u64::from(le32(short, 16)), 4),
             xsdt => (xsdt, 8),
         }
     } else {
-        (u64::from(u32_at(short, 16)), 4)
+        (u64::from(le32(short, 16)), 4)
     };
     // SAFETY: the caller's contract.
     let root = unsafe { table(root)? };
     for entry in root[HEADER..].chunks_exact(width) {
         let address = match width {
-            8 => u64_at(entry, 0),
-            _ => u64::from(u32_at(entry, 0)),
+            8 => le64(entry, 0),
+            _ => u64::from(le32(entry, 0)),
         };
         // SAFETY: the caller's contract.
         let candidate = unsafe { table(address)? };
@@ -100,7 +93,7 @@ pub fn mcfg(table: &[u8]) -> Result<Vec<EcamWindow>, AcpiError> {
         .iter()
         .map(|entry| {
             let window = EcamWindow {
-                base: u64_at(entry, 0),
+                base: le64(entry, 0),
                 segment: u16::from_le_bytes([entry[8], entry[9]]),
                 start_bus: entry[10],
                 end_bus: entry[11],

@@ -212,16 +212,10 @@ fn relative(bytes: &[u8], offset: u64, length: u64) -> Result<&[u8], Error> {
         .ok_or(Error::Extent)
 }
 fn u32_at(bytes: &[u8], offset: usize) -> Result<u32, Error> {
-    let word = bytes.get(offset..offset + 4).ok_or(Error::Extent)?;
-    Ok(u32::from_le_bytes(
-        word.try_into().map_err(|_| Error::Extent)?,
-    ))
+    stela_contracts::bytes::get_le32(bytes, offset).ok_or(Error::Extent)
 }
 fn u64_at(bytes: &[u8], offset: usize) -> Result<u64, Error> {
-    let word = bytes.get(offset..offset + 8).ok_or(Error::Extent)?;
-    Ok(u64::from_le_bytes(
-        word.try_into().map_err(|_| Error::Extent)?,
-    ))
+    stela_contracts::bytes::get_le64(bytes, offset).ok_or(Error::Extent)
 }
 
 #[cfg(test)]

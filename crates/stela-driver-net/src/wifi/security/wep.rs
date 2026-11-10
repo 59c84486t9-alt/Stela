@@ -5,19 +5,9 @@
 //! mac80211 encrypts itself before any key reaches the hardware.
 
 use super::Cipher;
+// The WEP ICV is `~crc32_le(~0, bytes)`, the IEEE CRC-32.
+use stela_driver_core::crc::crc32_ieee as crc32;
 use zeroize::Zeroize;
-
-/// `~crc32_le(~0, bytes)`, the WEP ICV and the 6 GHz short SSID.
-pub fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ if crc & 1 != 0 { 0xedb8_8320 } else { 0 };
-        }
-    }
-    !crc
-}
 
 /// One static WEP key with its on-air index.
 #[derive(Clone, PartialEq, Eq)]

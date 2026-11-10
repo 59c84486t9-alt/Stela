@@ -1,6 +1,6 @@
 //! Memory budgets for allocations made while UEFI still owns boot services.
 use core::fmt;
-const PAGE: u64 = 4096;
+use stela_contracts::bytes::HOST_PAGE_BYTES as PAGE;
 const MIB: u64 = 1024 * 1024;
 const MINIMUM: u64 = 16 * MIB;
 const MAXIMUM: u64 = 384 * MIB;

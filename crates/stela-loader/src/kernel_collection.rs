@@ -20,7 +20,7 @@ const SEGMENT_NAME_BYTES: usize = 16;
 /// `LC_FILESET_ENTRY` is `0x35 | LC_REQ_DYLD`.
 const LC_FILESET_ENTRY: u32 = macho::LC_FILESET_ENTRY;
 /// The arm64 kernel page; segment and region boundaries are multiples of it.
-pub const PAGE_BYTES: u64 = 0x4000;
+pub use stela_contracts::bytes::GUEST_PAGE_BYTES as PAGE_BYTES;
 const MAX_LOAD_COMMAND_BYTES: usize = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

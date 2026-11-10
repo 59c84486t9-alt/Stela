@@ -8,6 +8,7 @@ use crate::bytes::le32;
 use crate::firmware::{self as resources, Image, Provider, Requirement, Target};
 use alloc::{string::String, vec::Vec};
 use core::fmt;
+use stela_driver_core::bytes::be32;
 
 pub mod auxiliary;
 pub mod clc;
@@ -50,9 +51,6 @@ impl fmt::Display for FormatError {
 }
 impl core::error::Error for FormatError {}
 
-fn be32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap())
-}
 fn checked_address(address: u32, bytes: u32) -> Result<(), FormatError> {
     if bytes == 0 || u64::from(address) + u64::from(bytes) > (1u64 << 32) {
         Err(FormatError::DeviceAddress)

@@ -150,13 +150,11 @@ fn byte(bytes: &[u8], at: usize) -> Result<u8> {
 }
 
 fn be32(bytes: &[u8], at: usize) -> Result<u32> {
-    let b = extent(bytes, at, 4)?;
-    Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    extent(bytes, at, 4).map(|field| stela_contracts::bytes::be32(field, 0))
 }
 
 fn le32(bytes: &[u8], at: usize) -> Result<u32> {
-    let b = extent(bytes, at, 4)?;
-    Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    extent(bytes, at, 4).map(|field| stela_contracts::bytes::le32(field, 0))
 }
 
 fn c_string(bytes: &[u8], at: usize) -> Option<String> {

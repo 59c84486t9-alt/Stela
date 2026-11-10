@@ -4,9 +4,10 @@
 //! Stela writes the header last. A partition whose header is missing or
 //! damaged holds no usable payload, so an interrupted copy is never mistaken
 //! for a complete one.
-use super::{PayloadError, PayloadManifest, ReadAt, gpt::crc32};
+use super::{PayloadError, PayloadManifest, ReadAt};
 use alloc::{string::String, vec, vec::Vec};
 use serde::{Deserialize, Serialize};
+use stela_contracts::crc::crc32_ieee as crc32;
 
 const MAGIC: &[u8; 16] = b"STELA-STAGING\0\0\x01";
 /// The header area; members start after it.

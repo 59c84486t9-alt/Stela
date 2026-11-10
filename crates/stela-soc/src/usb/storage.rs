@@ -32,6 +32,7 @@ use super::{
 };
 use crate::Result;
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use stela_contracts::bytes::{be16, be32, be64};
 use stela_contracts::refuse;
 use stela_drivers::block::BlockDevice;
 
@@ -282,16 +283,6 @@ impl MassStorage {
         let model = identity.model.clone();
         Self::new(device, &serial, &model)
     }
-}
-
-fn be16(cdb: &[u8], at: usize) -> u16 {
-    u16::from_be_bytes([cdb[at], cdb[at + 1]])
-}
-fn be32(cdb: &[u8], at: usize) -> u32 {
-    u32::from_be_bytes(cdb[at..at + 4].try_into().unwrap())
-}
-fn be64(cdb: &[u8], at: usize) -> u64 {
-    u64::from_be_bytes(cdb[at..at + 8].try_into().unwrap())
 }
 
 impl State {

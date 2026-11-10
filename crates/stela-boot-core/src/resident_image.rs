@@ -2,7 +2,7 @@
 //! This describes byte ranges only; it creates no allocation, code or root pin.
 use core::ops::Range;
 
-const PAGE: u64 = 4096;
+use stela_contracts::bytes::HOST_PAGE_BYTES as PAGE;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {

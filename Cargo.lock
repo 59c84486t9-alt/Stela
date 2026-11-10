@@ -2261,6 +2261,7 @@ dependencies = [
 name = "stela-driver-core"
 version = "0.1.0"
 dependencies = [
+ "stela-contracts",
  "sha2",
  "stela-crypto",
 ]
@@ -2418,6 +2419,7 @@ dependencies = [
 ]
 
 [[package]]
+ "stela-contracts",
 name = "stela-metal-input"
 version = "0.1.0"
 dependencies = [

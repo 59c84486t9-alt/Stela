@@ -16,6 +16,7 @@
 use crate::payload::{ReadAt, gpt};
 use alloc::{format, string::String, vec, vec::Vec};
 use core::fmt;
+use stela_contracts::bytes::{get_array, get_le16, get_le32, get_le64};
 
 pub mod btree;
 pub mod container;
@@ -68,42 +69,22 @@ pub type Result<T> = core::result::Result<T, ApfsError>;
 
 /// Little-endian field readers over a block; out-of-range reads are
 /// malformed structures.
+const TRUNCATED: ApfsError = ApfsError::Malformed("truncated field");
+
 pub(crate) fn u16_at(bytes: &[u8], at: usize) -> Result<u16> {
-    Ok(u16::from_le_bytes(
-        bytes
-            .get(at..at + 2)
-            .ok_or(ApfsError::Malformed("truncated field"))?
-            .try_into()
-            .unwrap(),
-    ))
+    get_le16(bytes, at).ok_or(TRUNCATED)
 }
 
 pub(crate) fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(
-        bytes
-            .get(at..at + 4)
-            .ok_or(ApfsError::Malformed("truncated field"))?
-            .try_into()
-            .unwrap(),
-    ))
+    get_le32(bytes, at).ok_or(TRUNCATED)
 }
 
 pub(crate) fn u64_at(bytes: &[u8], at: usize) -> Result<u64> {
-    Ok(u64::from_le_bytes(
-        bytes
-            .get(at..at + 8)
-            .ok_or(ApfsError::Malformed("truncated field"))?
-            .try_into()
-            .unwrap(),
-    ))
+    get_le64(bytes, at).ok_or(TRUNCATED)
 }
 
 pub(crate) fn uuid_at(bytes: &[u8], at: usize) -> Result<[u8; 16]> {
-    Ok(bytes
-        .get(at..at + 16)
-        .ok_or(ApfsError::Malformed("truncated field"))?
-        .try_into()
-        .unwrap())
+    get_array(bytes, at).ok_or(TRUNCATED)
 }
 
 /// `uuid_t` in its canonical text form.

@@ -58,16 +58,9 @@ impl ReceiveFilter {
     }
 }
 
-// calc_crc returns ~crc32(~0, mac, 6); the source uses ~calc_crc &0x7f.
-// This bitwise IEEE implementation is compared against the unchanged Linux
-// table generator and crc32_le_base, not a copy of this loop.
+// calc_crc returns ~crc32(~0, mac, 6), the IEEE CRC-32; the source uses
+// ~calc_crc & 0x7f. Its tests compare against the unchanged Linux table
+// generator and crc32_le_base.
 pub(super) fn multicast_bit(mac: Mac) -> usize {
-    let mut crc = u32::MAX;
-    for byte in mac.0 {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ if crc & 1 != 0 { 0xedb8_8320 } else { 0 };
-        }
-    }
-    (crc & 0x7f) as usize
+    (!stela_driver_core::crc::crc32_ieee(&mac.0) & 0x7f) as usize
 }

@@ -4,6 +4,7 @@
 //! Bounded raw NHI configuration packets adapted from Linux ctl.c/tb_msgs.h.
 //! Wire dwords and CRC are big endian; the DMA descriptor is little endian.
 use alloc::vec::Vec;
+pub(super) use stela_driver_core::crc::crc32c;
 
 pub const FRAME_BYTES: usize = 256;
 pub const MAX_CONFIG_WORDS: usize = (FRAME_BYTES - 4 - 12) / 4;
@@ -11,7 +12,6 @@ const ROUTE_MASK: u64 = (1 << 54) - 1;
 const ROUTE_HIGH_MASK: u32 = (1 << 22) - 1;
 const REPLY: u32 = 1 << 31;
 const ADDRESS_LIMIT: u16 = 1 << 13;
-const CRC32C_POLYNOMIAL: u32 = 0x82f6_3b78;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -133,17 +133,6 @@ pub(super) fn encode(kind: PacketType, words: &[u32]) -> Result<Encoded, Error> 
     }
     bytes.extend_from_slice(&crc32c(&bytes).to_be_bytes());
     Ok(Encoded { kind, bytes })
-}
-
-pub(super) fn crc32c(bytes: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for byte in bytes {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = (crc >> 1) ^ (CRC32C_POLYNOMIAL & 0u32.wrapping_sub(crc & 1));
-        }
-    }
-    !crc
 }
 
 /// One exact outstanding operation. A transport must stop accepting replies

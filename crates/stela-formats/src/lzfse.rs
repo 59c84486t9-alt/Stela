@@ -16,6 +16,7 @@
 //! declared raw size, every literal and match must stay inside its block's
 //! literals and the bytes decoded so far, and nothing may follow `bvx$`.
 use alloc::vec::Vec;
+use stela_contracts::bytes::{get_le16, get_le32, get_le64};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LzfseError {
@@ -91,24 +92,15 @@ const D_BASE_VALUE: [i32; D_SYMBOLS] = [
 ];
 
 fn u16_at(bytes: &[u8], at: usize) -> Result<u16> {
-    bytes
-        .get(at..at + 2)
-        .map(|b| u16::from_le_bytes(b.try_into().unwrap()))
-        .ok_or(LzfseError::Truncated)
+    get_le16(bytes, at).ok_or(LzfseError::Truncated)
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
-    bytes
-        .get(at..at + 4)
-        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-        .ok_or(LzfseError::Truncated)
+    get_le32(bytes, at).ok_or(LzfseError::Truncated)
 }
 
 fn u64_at(bytes: &[u8], at: usize) -> Result<u64> {
-    bytes
-        .get(at..at + 8)
-        .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
-        .ok_or(LzfseError::Truncated)
+    get_le64(bytes, at).ok_or(LzfseError::Truncated)
 }
 
 /// The decoded output, bounded by the caller's limit.

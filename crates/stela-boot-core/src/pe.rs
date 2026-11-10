@@ -5,7 +5,7 @@ use crate::Result;
 use alloc::vec::Vec;
 use stela_contracts::refuse;
 
-pub const PAGE: usize = 4096;
+pub const PAGE: usize = stela_contracts::bytes::HOST_PAGE_BYTES as usize;
 const DOS_HEADER: usize = 64;
 const PE_HEADER: usize = 24;
 const OPTIONAL_HEADER: usize = 112;

@@ -1,6 +1,6 @@
 //! Read-only page-table validation, separate from ownership admission.
 use super::Slot;
-const PAGE: u64 = 4096;
+use stela_contracts::bytes::HOST_PAGE_BYTES as PAGE;
 const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 const PRESENT: u64 = 1;
 const WRITE: u64 = 2;

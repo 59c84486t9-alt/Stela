@@ -2,6 +2,7 @@
 //! count, a child count, properties (32-byte name, 32-bit length whose top
 //! bit is a flag, value padded to 4 bytes), then children
 //! (m1n1 `adt.c`; the format `stela-loader` parses and serializes exactly).
+use crate::bytes::get_le32;
 use alloc::vec::Vec;
 
 const NODE_HEADER_BYTES: usize = 8;
@@ -33,12 +34,6 @@ fn cells(value: &[u8]) -> Vec<u64> {
 /// (name, value) of every property of a node.
 type Properties<'a> = Vec<(&'a [u8], &'a [u8])>;
 
-fn u32_at(data: &[u8], offset: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        data.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
-    ))
-}
-
 struct Property<'a> {
     name: &'a [u8],
     value: &'a [u8],
@@ -51,7 +46,7 @@ fn property_at(data: &[u8], offset: usize) -> Option<Property<'_>> {
     let value_start = offset.checked_add(PROPERTY_HEADER_BYTES)?;
     let name = data.get(offset..name_end)?;
     let name = &name[..name.iter().position(|&b| b == 0).unwrap_or(name.len())];
-    let encoded_length = u32_at(data, name_end)?;
+    let encoded_length = get_le32(data, name_end)?;
     let length = (encoded_length & 0x7fff_ffff) as usize;
     let value_end = value_start.checked_add(length)?;
     let padded = length.checked_add(3)? & !3;
@@ -142,8 +137,8 @@ impl<'a> Node<'a> {
             return None;
         }
         let start = offset.checked_add(NODE_HEADER_BYTES)?;
-        let properties = u32_at(data, offset)? as usize;
-        let children = u32_at(data, offset.checked_add(4)?)? as usize;
+        let properties = get_le32(data, offset)? as usize;
+        let children = get_le32(data, offset.checked_add(4)?)? as usize;
         let minimum = properties
             .checked_mul(PROPERTY_HEADER_BYTES)?
             .checked_add(children.checked_mul(NODE_HEADER_BYTES)?)?;
@@ -330,7 +325,7 @@ impl<'a> Node<'a> {
 
     /// The first 32-bit cell of a property.
     pub fn first_u32(&self, name: &str) -> Option<u32> {
-        u32_at(self.property(name)?, 0)
+        get_le32(self.property(name)?, 0)
     }
 
     /// A property's first 64 bits, little-endian, when it is at least eight
@@ -407,7 +402,7 @@ mod tests {
             assert!(Node::root(&tree).is_none());
             assert!(Node::root_exact(&tree).is_none());
         }
-        assert!(u32_at(&[], usize::MAX).is_none());
+        assert!(get_le32(&[], usize::MAX).is_none());
         assert!(property_at(&[], usize::MAX).is_none());
     }
 

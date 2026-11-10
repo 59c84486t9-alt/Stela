@@ -12,7 +12,7 @@ pub fn archive(members: &[(&str, &[u8], bool)], zip64: bool) -> Vec<u8> {
             data.to_vec()
         };
         let offset = out.len() as u64;
-        let crc = crate::payload::gpt::crc32(data);
+        let crc = stela_contracts::crc::crc32_ieee(data);
         let method: u16 = if *deflate { 8 } else { 0 };
         let small = |v: u64| if zip64 { 0xffff_ffff } else { v as u32 };
         out.extend_from_slice(&LOCAL.to_le_bytes());

@@ -32,7 +32,7 @@ fn images_yield_names_products_and_lanes() {
         assert_eq!(image.uid_source, UidSource::Router);
         assert_eq!(image.vendor_name(), Some(&b"STELA"[..]));
         assert_eq!(image.device_name(), Some(&b"DP"[..]));
-        assert!(image.crc32.matches());
+        assert!(image.crc32c.matches());
         assert_eq!(
             image.product,
             if revision == 1 {
@@ -70,7 +70,7 @@ fn a_version_1_image_supplies_a_missing_uid() {
 fn integrity_failures_are_explicit() {
     let mut bytes = rom(3);
     bytes[9] ^= 1;
-    assert!(!parsed(bytes, 7).unwrap().crc32.matches());
+    assert!(!parsed(bytes, 7).unwrap().crc32c.matches());
     let mut bytes = rom(1);
     bytes[0] ^= 1;
     assert!(matches!(parsed(bytes, 7), Err(Error::UidCrc { .. })));

@@ -5,9 +5,11 @@ extern crate alloc;
 
 pub mod adt;
 pub mod bus;
+pub mod bytes;
 pub mod caches;
 pub mod chip;
 pub mod cpu_features;
+pub mod crc;
 pub mod ctrr;
 pub mod dma;
 pub mod gate;

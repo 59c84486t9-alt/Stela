@@ -57,7 +57,7 @@ pub struct Colocated {
 
 /// The short SSID, `~crc32_le(~0, ssid)`.
 pub fn short_ssid(ssid: &[u8]) -> u32 {
-    crate::wifi::security::wep::crc32(ssid)
+    stela_driver_core::crc::crc32_ieee(ssid)
 }
 
 /// `cfg80211_channel_is_psc`.

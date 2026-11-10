@@ -187,7 +187,7 @@ mod tests {
     }
 
     fn u32_at(value: &[u8], index: usize) -> u32 {
-        u32::from_le_bytes(value[index * 4..index * 4 + 4].try_into().unwrap())
+        stela_contracts::bytes::le32(value, index * 4)
     }
 
     #[test]

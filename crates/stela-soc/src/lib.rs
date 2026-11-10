@@ -21,7 +21,6 @@ use stela_contracts::interrupt;
 /// A refused request names the values that decided it.
 pub type Result<T, E = Refusal> = core::result::Result<T, E>;
 
-mod checksum;
 pub mod machine;
 #[cfg(test)]
 mod research;

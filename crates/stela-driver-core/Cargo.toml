@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+stela-contracts = { path = "../stela-contracts", default-features = false }
 stela-crypto = { path = "../stela-crypto" }
 
 [dev-dependencies]

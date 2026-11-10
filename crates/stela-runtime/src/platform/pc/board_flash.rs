@@ -27,6 +27,7 @@
 //! reports, and the next bundle that carries them writes them again.
 use alloc::{format, string::String, vec, vec::Vec};
 use core::fmt;
+use stela_contracts::bytes::le32;
 use stela_crypto::Sha256;
 use stela_crypto::digest::Digest;
 use stela_drivers::block::{BlockDevice, BlockError};
@@ -88,10 +89,6 @@ fn block_size(device: &dyn BlockDevice) -> Result<usize, Error> {
     Ok(block)
 }
 
-fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
-}
-
 impl Flash {
     /// The flash on `device`, the region alone.
     pub fn read(device: &mut dyn BlockDevice) -> Result<Self, Error> {
@@ -101,13 +98,13 @@ impl Flash {
         if header.iter().all(|&byte| byte == 0) {
             return Ok(Self::default());
         }
-        if &header[..8] != MAGIC || u32_at(&header, 8) != VERSION {
+        if &header[..8] != MAGIC || le32(&header, 8) != VERSION {
             return Err(Error::Invalid("the region is not board flash"));
         }
         if Sha256::digest(&header[..FIELDS])[..] != header[FIELDS..] {
             return Err(Error::Invalid("the board flash header fails its hash"));
         }
-        let count = u32_at(&header, 12) as usize;
+        let count = le32(&header, 12) as usize;
         if count > MAXIMUM_ENTRIES {
             return Err(Error::Invalid(
                 "the board flash header lists too many images",
@@ -127,7 +124,7 @@ impl Flash {
                 .unwrap_or(NAME_BYTES);
             let name = core::str::from_utf8(&name[..end])
                 .map_err(|_| Error::Invalid("a board flash image's name is not text"))?;
-            let (offset, length) = (u32_at(rest, 0) as usize, u32_at(rest, 4) as usize);
+            let (offset, length) = (le32(rest, 0) as usize, le32(rest, 4) as usize);
             let aligned = length.next_multiple_of(block);
             if !offset.is_multiple_of(block)
                 || offset < HEADER_BYTES

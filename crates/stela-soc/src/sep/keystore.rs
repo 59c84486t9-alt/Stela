@@ -492,9 +492,7 @@ impl Environment {
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> Result<u32> {
-    bytes
-        .get(at..at + 4)
-        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+    stela_contracts::bytes::get_le32(bytes, at)
         .ok_or(refuse!("SEP keystore IPC message ends inside its header"))
 }
 

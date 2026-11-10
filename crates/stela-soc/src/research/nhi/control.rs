@@ -4,8 +4,8 @@
 //! fields and CRC32C; Reset and Error use the same framing. See the original
 //! address/source matrix in `docs/research/usb4-acio.md`. This codec supplies
 //! no register values, routing decisions, reset completion or acknowledgments.
-use crate::checksum::crc32c;
 use alloc::vec::Vec;
+use stela_contracts::crc::crc32c;
 
 const ROUTE_MASK: u64 = (1 << 54) - 1;
 const REPLY: u32 = 1 << 31;

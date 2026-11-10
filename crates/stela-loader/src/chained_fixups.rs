@@ -6,7 +6,10 @@ use super::load_plan::{LoadPlan, SegmentPlan};
 use crate::{Error, Result, Within};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use stela_contracts::{refuse, require};
+use stela_contracts::{
+    bytes::{le16, le32, le64},
+    refuse, require,
+};
 
 const COMMAND: u32 = 0x80000034;
 const MAX_FIXUPS: usize = 1_048_576;
@@ -197,19 +200,13 @@ fn bytes(data: &[u8], offset: usize, length: usize) -> Result<&[u8]> {
         .ok_or(refuse!("truncated chained-fixup extent").into())
 }
 fn u16_at(data: &[u8], offset: usize) -> Result<u16> {
-    Ok(u16::from_le_bytes(
-        bytes(data, offset, 2)?.try_into().unwrap(),
-    ))
+    bytes(data, offset, 2).map(|field| le16(field, 0))
 }
 fn u32_at(data: &[u8], offset: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(
-        bytes(data, offset, 4)?.try_into().unwrap(),
-    ))
+    bytes(data, offset, 4).map(|field| le32(field, 0))
 }
 fn u64_at(data: &[u8], offset: usize) -> Result<u64> {
-    Ok(u64::from_le_bytes(
-        bytes(data, offset, 8)?.try_into().unwrap(),
-    ))
+    bytes(data, offset, 8).map(|field| le64(field, 0))
 }
 fn moved(address: u64, slide: i128, role: &str) -> Result<u64> {
     u64::try_from(i128::from(address) + slide)

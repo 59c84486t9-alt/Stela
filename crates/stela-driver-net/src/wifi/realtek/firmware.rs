@@ -46,14 +46,10 @@ fn bytes(data: &[u8], offset: usize, len: usize) -> Result<&[u8], ParseError> {
         .ok_or(ParseError::Truncated { offset, bytes: len })
 }
 fn le16(data: &[u8], offset: usize) -> Result<u16, ParseError> {
-    Ok(u16::from_le_bytes(
-        bytes(data, offset, 2)?.try_into().unwrap(),
-    ))
+    bytes(data, offset, 2).map(|field| stela_driver_core::bytes::le16(field, 0))
 }
 fn le32(data: &[u8], offset: usize) -> Result<u32, ParseError> {
-    Ok(u32::from_le_bytes(
-        bytes(data, offset, 4)?.try_into().unwrap(),
-    ))
+    bytes(data, offset, 4).map(|field| stela_driver_core::bytes::le32(field, 0))
 }
 fn image_limit(data: &[u8]) -> Result<(), ParseError> {
     if data.len() > MAX_IMAGE {

@@ -10,6 +10,7 @@ use miniz_oxide::inflate::{
     TINFLStatus,
     core::{DecompressorOxide, decompress, inflate_flags::TINFL_FLAG_HAS_MORE_INPUT},
 };
+use stela_contracts::bytes::{le16, le32, le64};
 
 const END: u32 = 0x0605_4b50;
 const END64: u32 = 0x0606_4b50;
@@ -50,18 +51,6 @@ pub struct Archive {
     entries: Vec<Entry>,
 }
 
-fn u16_at(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes([bytes[at], bytes[at + 1]])
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-}
-
-fn u64_at(bytes: &[u8], at: usize) -> u64 {
-    u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
-}
-
 fn corrupt(what: &'static str) -> PayloadError {
     PayloadError::Archive(what)
 }
@@ -91,15 +80,15 @@ impl Archive {
         let end = (0..=tail.len() - END_BYTES)
             .rev()
             .find(|&at| {
-                u32_at(&tail, at) == END
-                    && at + END_BYTES + u16_at(&tail, at + 20) as usize == tail.len()
+                le32(&tail, at) == END
+                    && at + END_BYTES + le16(&tail, at + 20) as usize == tail.len()
             })
             .ok_or(corrupt("no end of central directory record"))?;
         let record = &tail[end..];
-        let mut count = u16_at(record, 10) as u64;
-        let mut size = u32_at(record, 12) as u64;
-        let mut start = u32_at(record, 16) as u64;
-        if u16_at(record, 4) != 0 || u16_at(record, 6) != 0 {
+        let mut count = le16(record, 10) as u64;
+        let mut size = le32(record, 12) as u64;
+        let mut start = le32(record, 16) as u64;
+        if le16(record, 4) != 0 || le16(record, 6) != 0 {
             return Err(corrupt("multi-disk archives are not supported"));
         }
         let end_offset = tail_start + end as u64;
@@ -108,16 +97,16 @@ impl Archive {
                 .checked_sub(LOCATOR_BYTES)
                 .ok_or(corrupt("no ZIP64 locator"))?;
             let locator = read(reader, at, LOCATOR_BYTES as usize)?;
-            if u32_at(&locator, 0) != LOCATOR64 {
+            if le32(&locator, 0) != LOCATOR64 {
                 return Err(corrupt("no ZIP64 locator"));
             }
-            let record = read(reader, u64_at(&locator, 8), 56)?;
-            if u32_at(&record, 0) != END64 {
+            let record = read(reader, le64(&locator, 8), 56)?;
+            if le32(&record, 0) != END64 {
                 return Err(corrupt("no ZIP64 end record"));
             }
-            count = u64_at(&record, 32);
-            size = u64_at(&record, 40);
-            start = u64_at(&record, 48);
+            count = le64(&record, 32);
+            size = le64(&record, 40);
+            start = le64(&record, 48);
         }
         if size > MAX_DIRECTORY_BYTES || count > MAX_ENTRIES {
             return Err(corrupt("central directory exceeds limits"));
@@ -126,28 +115,28 @@ impl Archive {
         let mut entries = Vec::with_capacity(count as usize);
         let mut at = 0usize;
         for _ in 0..count {
-            if at + CENTRAL_BYTES > directory.len() || u32_at(&directory, at) != CENTRAL {
+            if at + CENTRAL_BYTES > directory.len() || le32(&directory, at) != CENTRAL {
                 return Err(corrupt("bad central directory entry"));
             }
             let header = &directory[at..];
-            let flags = u16_at(header, 8);
-            let method = u16_at(header, 10);
-            let name_bytes = u16_at(header, 28) as usize;
-            let extra_bytes = u16_at(header, 30) as usize;
-            let comment_bytes = u16_at(header, 32) as usize;
+            let flags = le16(header, 8);
+            let method = le16(header, 10);
+            let name_bytes = le16(header, 28) as usize;
+            let extra_bytes = le16(header, 30) as usize;
+            let comment_bytes = le16(header, 32) as usize;
             let next = at + CENTRAL_BYTES + name_bytes + extra_bytes + comment_bytes;
             if next > directory.len() {
                 return Err(corrupt("central directory entry overruns"));
             }
             let name = core::str::from_utf8(&header[CENTRAL_BYTES..CENTRAL_BYTES + name_bytes])
                 .map_err(|_| corrupt("member name is not UTF-8"))?;
-            let mut bytes = u32_at(header, 24) as u64;
-            let mut compressed_bytes = u32_at(header, 20) as u64;
-            let mut local_header = u32_at(header, 42) as u64;
+            let mut bytes = le32(header, 24) as u64;
+            let mut compressed_bytes = le32(header, 20) as u64;
+            let mut local_header = le32(header, 42) as u64;
             let mut extra = &header[CENTRAL_BYTES + name_bytes..][..extra_bytes];
             while extra.len() >= 4 {
-                let id = u16_at(extra, 0);
-                let field = u16_at(extra, 2) as usize;
+                let id = le16(extra, 0);
+                let field = le16(extra, 2) as usize;
                 let body = extra
                     .get(4..4 + field)
                     .ok_or(corrupt("extra field overruns"))?;
@@ -181,8 +170,8 @@ impl Archive {
                 method,
                 compressed_bytes,
                 bytes,
-                crc32: u32_at(header, 16),
-                unix_mode: (header[5] == 3).then(|| (u32_at(header, 38) >> 16) as u16),
+                crc32: le32(header, 16),
+                unix_mode: (header[5] == 3).then(|| (le32(header, 38) >> 16) as u16),
                 local_header,
             });
             at = next;
@@ -263,13 +252,13 @@ impl Archive {
         entry: &Entry,
     ) -> Result<Progress, PayloadError> {
         let local = read(reader, entry.local_header, LOCAL_BYTES)?;
-        if u32_at(&local, 0) != LOCAL {
+        if le32(&local, 0) != LOCAL {
             return Err(corrupt("bad local header"));
         }
         let data = entry.local_header
             + LOCAL_BYTES as u64
-            + u16_at(&local, 26) as u64
-            + u16_at(&local, 28) as u64;
+            + le16(&local, 26) as u64
+            + le16(&local, 28) as u64;
         match data.checked_add(entry.compressed_bytes) {
             Some(end) if end <= reader.len() => {}
             _ => return Err(corrupt("member data past the end of the archive")),

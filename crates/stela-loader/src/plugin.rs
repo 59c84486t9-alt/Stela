@@ -20,8 +20,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::iter;
 use stela_contracts::{refuse, require};
 
-/// Segments align to the macOS arm64 page.
-const PAGE: u64 = 0x4000;
+// Segments align to the macOS arm64 page.
+use stela_contracts::bytes::GUEST_PAGE_BYTES as PAGE;
 /// A signature hashes the file in units of this.
 const HASH_PAGE: u64 = 0x1000;
 const HASH_PAGE_SHIFT: u8 = 12;

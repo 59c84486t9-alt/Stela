@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::ops::Range;
 use stela_contracts::refuse;
 
-const PAGE: u64 = 4096;
+use stela_contracts::bytes::HOST_PAGE_BYTES as PAGE;
 const MIB: u64 = 1024 * 1024;
 
 pub const STACK_BYTES: u64 = 2 * 1024 * 1024;

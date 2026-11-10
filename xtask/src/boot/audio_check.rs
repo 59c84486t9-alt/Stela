@@ -11,6 +11,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use stela_contracts::bytes::{le16, le32};
 use stela_formats::sha256;
 
 const RING_BYTES: usize = 16_384;
@@ -318,13 +319,6 @@ fn serial(mode: Mode, serial: &str) -> Result<Value> {
     Ok(
         json!({"mode": mode.option(), "scope": scope, "power_gate": power_gate, "streams": streams, "capture": capture, "shutdown": "quiesced"}),
     )
-}
-
-fn le16(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
-}
-fn le32(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
 /// Parse finalized RIFF, including size and format, before comparing audio.

@@ -33,8 +33,8 @@ pub(super) const SECTIONS: usize = 3;
 /// replace the image and activate it at the next reset (NVMe 1.4 figure
 /// 181). No other slot or action is ever sent.
 pub(super) const ACTIVATE_SLOT0_REPLACE: u32 = 1 << 3;
-pub(super) use crate::checksum::crc32c;
-use crate::checksum::crc32c_update as crc_update;
+pub(super) use stela_contracts::crc::crc32c;
+use stela_contracts::crc::crc32c_update as crc_update;
 
 /// A transferred byte string's identity.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4,7 +4,10 @@ use crate::Result;
 use crate::coprocessor::configuration::Provenance;
 use alloc::{string::String, vec::Vec};
 use serde::Serialize;
-use stela_contracts::{refuse, require};
+use stela_contracts::{
+    bytes::{get_le32, get_le64},
+    refuse, require,
+};
 use stela_formats::sha256;
 
 const GROUP_BYTES: usize = 0x38;
@@ -52,22 +55,10 @@ pub struct Selection {
 }
 
 fn u32_at(b: &[u8], at: usize) -> Result<u32> {
-    Ok(u32::from_le_bytes(
-        b.get(at..)
-            .and_then(|b| b.get(..4))
-            .ok_or(refuse!("truncated native tuning u32"))?
-            .try_into()
-            .unwrap(),
-    ))
+    get_le32(b, at).ok_or_else(|| refuse!("truncated native tuning u32").into())
 }
 fn u64_at(b: &[u8], at: usize) -> Result<u64> {
-    Ok(u64::from_le_bytes(
-        b.get(at..)
-            .and_then(|b| b.get(..8))
-            .ok_or(refuse!("truncated native tuning pointer"))?
-            .try_into()
-            .unwrap(),
-    ))
+    get_le64(b, at).ok_or_else(|| refuse!("truncated native tuning pointer").into())
 }
 fn slice(source: &[u8], at: u64, bytes: usize) -> Result<&[u8]> {
     source

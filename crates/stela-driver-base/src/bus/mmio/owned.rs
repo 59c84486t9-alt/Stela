@@ -13,7 +13,8 @@ use core::{any::Any, mem::ManuallyDrop, ptr::NonNull};
 pub mod model;
 pub use registry::{AliasId, Authority, Mapping, MappingView, ResourceId, Status};
 
-pub const PAGE_BYTES: u64 = 4096;
+/// MMIO is owned and mapped in host pages.
+pub use stela_driver_core::bytes::HOST_PAGE_BYTES as PAGE_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
