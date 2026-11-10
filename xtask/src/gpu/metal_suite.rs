@@ -90,16 +90,18 @@ pub enum Command {
     Probe {
         #[command(flatten)]
         selection: Selection,
-        #[arg(long, default_value = remote::HOST)]
-        host: String,
+        /// The Mac's ssh name (default: `STELA_MAC`).
+        #[arg(long)]
+        host: Option<String>,
     },
     /// Build the libraries and the runner on the Mac, run every case there
     /// and bring back the AIR, metallibs, runner and DIR/results/mac.
     Mac {
         #[command(flatten)]
         selection: Selection,
-        #[arg(long, default_value = remote::HOST)]
-        host: String,
+        /// The Mac's ssh name (default: `STELA_MAC`).
+        #[arg(long)]
+        host: Option<String>,
     },
     /// Hold a run's outputs to the expectations the plan states.
     Check {
@@ -141,8 +143,9 @@ pub enum Command {
     Coverage {
         #[command(flatten)]
         selection: Selection,
-        #[arg(long, default_value = remote::HOST)]
-        host: String,
+        /// The Mac's ssh name (default: `STELA_MAC`).
+        #[arg(long)]
+        host: Option<String>,
         /// Copy the system metallibs from the Mac again.
         #[arg(long)]
         refresh: bool,
@@ -154,8 +157,11 @@ pub enum Command {
 pub fn run(command: Command) -> Result<()> {
     match command {
         Command::Plan { selection } => write_plan(&selection).map(drop),
-        Command::Probe { selection, host } => remote::probe(&selection.out(), &host),
+        Command::Probe { selection, host } => {
+            remote::probe(&selection.out(), &crate::tools::mac_host(host)?)
+        }
         Command::Mac { selection, host } => {
+            let host = crate::tools::mac_host(host)?;
             let plan = write_plan(&selection)?;
             remote::mac(&selection.out(), &plan, &host)
         }
@@ -190,7 +196,12 @@ pub fn run(command: Command) -> Result<()> {
             host,
             refresh,
             report,
-        } => coverage::run(&selection.out(), &host, refresh, report.as_deref()),
+        } => coverage::run(
+            &selection.out(),
+            &crate::tools::mac_host(host)?,
+            refresh,
+            report.as_deref(),
+        ),
     }
 }
 

@@ -11,7 +11,6 @@ use std::{
     process::{Command, Stdio},
 };
 
-pub const HOST: &str = "owner@mac.local";
 const REMOTE_DIR: &str = "stela-metal-suite";
 const DEVELOPER_DIR: &str = "/Applications/Xcode.app/Contents/Developer";
 
