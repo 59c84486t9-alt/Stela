@@ -17,10 +17,14 @@
 //! function answers each with Command Complete, status Unknown HCI Command,
 //! and counts it.
 //!
-//! Synchronous audio is not transported. The host stack carries commands and
-//! ACL data only, so the configuration has no isochronous interface and
-//! `OI_HciIfc_EnableSCO_USB` finds none: SCO links fail while LE and ACL
-//! profiles work.
+//! The configuration also carries the standard synchronous interface (Vol 4
+//! Part B 2.1.1): interface 1, alternate settings 0-5, each with an
+//! isochronous IN and OUT endpoint of 0, 9, 17, 25, 33 and 49 bytes.
+//! Host stacks require it: macOS's takes a controller only when interface 0
+//! has the interrupt and bulk pipes and interface 1 has both isochronous
+//! pipes in each of alternate settings 0-5. Isochronous data is not
+//! transported: the endpoints answer no transaction, so a SCO link carries
+//! no audio. The model never forms one.
 //!
 //! When the host lends no controller, the owner selects [`model::Model`]
 //! with [`Hci::use_model`]: the same function then answers every command
@@ -56,6 +60,12 @@ const EVENT_PACKET: usize = 16;
 const HIGH_SPEED_PACKET: u16 = 512;
 const FULL_SPEED_PACKET: u16 = 64;
 const INTERFACE_NUMBER: u16 = 0;
+/// The synchronous interface and its endpoints.
+const SCO_INTERFACE: u16 = 1;
+const SCO_IN: u8 = 0x83;
+const SCO_OUT: u8 = 0x03;
+/// wMaxPacketSize of each alternate setting (Vol 4 Part B 2.1.1).
+const SCO_PACKETS: [u8; 6] = [0, 9, 17, 25, 33, 49];
 /// Packets each direction holds.
 pub const QUEUE_PACKETS: usize = 64;
 /// bRequest of an HCI command (Vol 4 Part B 2.2).
@@ -137,6 +147,8 @@ impl Stream {
 struct State {
     /// Halted: EVENTS, ACL_IN, ACL_OUT.
     halted: [bool; 3],
+    /// The synchronous interface's alternate setting.
+    sco_setting: u8,
     outbound: VecDeque<Outbound>,
     events: Stream,
     acl: Stream,
@@ -178,16 +190,21 @@ fn descriptors() -> Descriptors {
     ];
     let configuration = |bulk: u16, interval: u8| {
         let [low, high] = bulk.to_le_bytes();
-        control::configuration(
-            1,
-            0,
-            &[
-                &[9, INTERFACE, 0, 0, 3, 0xe0, 0x01, 0x01, 0],
-                &[7, ENDPOINT, EVENTS, 3, EVENT_PACKET as u8, 0, interval],
-                &[7, ENDPOINT, ACL_IN, 2, low, high, 0],
-                &[7, ENDPOINT, ACL_OUT, 2, low, high, 0],
-            ],
-        )
+        let mut parts = vec![
+            vec![9, INTERFACE, 0, 0, 3, 0xe0, 0x01, 0x01, 0],
+            vec![7, ENDPOINT, EVENTS, 3, EVENT_PACKET as u8, 0, interval],
+            vec![7, ENDPOINT, ACL_IN, 2, low, high, 0],
+            vec![7, ENDPOINT, ACL_OUT, 2, low, high, 0],
+        ];
+        for (setting, &size) in SCO_PACKETS.iter().enumerate() {
+            parts.push(vec![9, INTERFACE, 1, setting as u8, 2, 0xe0, 0x01, 0x01, 0]);
+            for address in [SCO_IN, SCO_OUT] {
+                // Isochronous, no synchronization, one packet a frame.
+                parts.push(vec![7, ENDPOINT, address, 0x01, size, 0, interval]);
+            }
+        }
+        let parts: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
+        control::configuration(1, 0, &parts)
     };
     let qualifier = [
         10,
@@ -216,6 +233,7 @@ impl Hci {
             control: Control::new(descriptors()),
             state: State {
                 halted: [false; 3],
+                sco_setting: 0,
                 outbound: VecDeque::new(),
                 events: Stream::default(),
                 acl: Stream::default(),
@@ -408,6 +426,7 @@ impl State {
 impl Requests for State {
     fn configure(&mut self, _value: u8) -> Result<(), Stall> {
         self.halted = [false; 3];
+        self.sco_setting = 0;
         self.outbound.clear();
         self.events.clear();
         self.acl.clear();
@@ -424,9 +443,20 @@ impl Requests for State {
                 self.command(data).map(|()| Outcome::Done)
             }
             (STANDARD, RECIPIENT_INTERFACE, GET_STATUS, true)
-                if setup.index == INTERFACE_NUMBER =>
+                if setup.index == INTERFACE_NUMBER || setup.index == SCO_INTERFACE =>
             {
                 Ok(Outcome::Data(vec![0, 0]))
+            }
+            (STANDARD, RECIPIENT_INTERFACE, GET_INTERFACE, true)
+                if setup.index == SCO_INTERFACE =>
+            {
+                Ok(Outcome::Data(vec![self.sco_setting]))
+            }
+            (STANDARD, RECIPIENT_INTERFACE, SET_INTERFACE, false)
+                if setup.index == SCO_INTERFACE && usize::from(setup.value) < SCO_PACKETS.len() =>
+            {
+                self.sco_setting = setup.value as u8;
+                Ok(Outcome::Done)
             }
             (STANDARD, RECIPIENT_INTERFACE, GET_INTERFACE, true)
                 if setup.index == INTERFACE_NUMBER =>
@@ -558,6 +588,72 @@ mod tests {
         let configuration = hci.control.descriptors.configuration;
         assert_eq!(configuration[9 + 4], 3, "interrupt, bulk IN and bulk OUT");
         assert_eq!(configuration[9 + 5..9 + 8], [0xe0, 0x01, 0x01]);
+    }
+
+    /// The walk a host stack makes before it takes the controller:
+    /// interface 0 with interrupt IN, bulk IN and bulk OUT; interface 1 with
+    /// an isochronous IN and OUT pipe in each of alternate settings 0-5.
+    #[test]
+    fn the_configuration_has_the_interfaces_bluetoothd_requires() {
+        for configuration in [
+            descriptors().configuration,
+            descriptors().other_speed.unwrap().1,
+        ] {
+            assert_eq!(configuration[4], 2, "two interfaces");
+            assert_eq!(
+                usize::from(u16::from_le_bytes([configuration[2], configuration[3]])),
+                configuration.len()
+            );
+            let mut at = 9;
+            let mut interface = (0, 0);
+            let mut pipes: Vec<((u8, u8), u8, u8, u16)> = Vec::new();
+            while at < configuration.len() {
+                let d = &configuration[at..at + usize::from(configuration[at])];
+                match d[1] {
+                    INTERFACE => interface = (d[2], d[3]),
+                    ENDPOINT => {
+                        pipes.push((interface, d[2], d[3] & 3, u16::from_le_bytes([d[4], d[5]])))
+                    }
+                    _ => panic!("unexpected descriptor"),
+                }
+                at += d.len();
+            }
+            let kinds = |i| -> Vec<(u8, u8)> {
+                pipes
+                    .iter()
+                    .filter(|p| p.0 == i)
+                    .map(|p| (p.1, p.2))
+                    .collect()
+            };
+            assert_eq!(kinds((0, 0)), [(EVENTS, 3), (ACL_IN, 2), (ACL_OUT, 2)]);
+            for (setting, size) in SCO_PACKETS.into_iter().enumerate() {
+                assert_eq!(kinds((1, setting as u8)), [(SCO_IN, 1), (SCO_OUT, 1)]);
+                assert!(
+                    pipes
+                        .iter()
+                        .filter(|p| p.0 == (1, setting as u8))
+                        .all(|p| p.3 == u16::from(size))
+                );
+            }
+        }
+        let mut hci = controller();
+        let get = setup(0x81, GET_INTERFACE, 0, SCO_INTERFACE, 1);
+        assert_eq!(transfer(&mut hci, get, &[]).unwrap(), [0]);
+        transfer(
+            &mut hci,
+            setup(0x01, SET_INTERFACE, 5, SCO_INTERFACE, 0),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(transfer(&mut hci, get, &[]).unwrap(), [5]);
+        assert!(
+            transfer(
+                &mut hci,
+                setup(0x01, SET_INTERFACE, 6, SCO_INTERFACE, 0),
+                &[]
+            )
+            .is_err()
+        );
     }
 
     #[test]
