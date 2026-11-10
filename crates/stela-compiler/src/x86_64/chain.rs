@@ -628,6 +628,11 @@ pub struct LookupTable {
     cell_counts: Box<[u32]>,
     /// Each held cell by the host address of the exit holding it.
     cell_sites: BTreeMap<u64, u32>,
+    /// The state of [`Self::insert`]'s victim choice (xorshift).
+    victims: u64,
+    /// Entries [`Self::insert`] put out of a full set: the slot's resident,
+    /// then its neighbour.
+    evicted: [u64; 2],
 }
 
 impl LookupTable {
@@ -680,7 +685,15 @@ impl LookupTable {
             cell_frames: BTreeSet::new(),
             cell_counts: Box::default(),
             cell_sites: BTreeMap::new(),
+            victims: 0x9e37_79b9_7f4a_7c15,
+            evicted: [0; 2],
         }
+    }
+
+    /// Entries [`Self::insert`] put out of a full set so far: the slot's
+    /// resident, then its neighbour.
+    pub fn evicted(&self) -> [u64; 2] {
+        self.evicted
     }
 
     /// The entries it holds room for.
@@ -888,16 +901,34 @@ impl LookupTable {
         self.sets.get(slot).load()
     }
 
-    /// Put `entry` in the slot its PC and key pick, and what held it beside
-    /// it unless that is the entry's own older self.
+    /// Put `entry` in the slot its PC and key pick. What held the slot,
+    /// unless it is the entry's own older self, moves beside it into an
+    /// empty neighbour; with both places held, one of the two leaves,
+    /// chosen at random. Always putting out the neighbour let two entries
+    /// a lookup keeps reaching put each other out, round after round,
+    /// while a third that nothing reaches stayed: a random victim leaves
+    /// that third the one out after a few rounds.
     pub fn insert(&mut self, slot: usize, entry: LookupEntry) {
         let resident = self.entry(slot);
         if resident == entry {
             return;
         }
         if resident.key != 0 && (resident.pc != entry.pc || resident.key != entry.key) {
-            // The same set, which the resident's group lists already.
-            self.sets.get(neighbour(slot)).store(resident);
+            let beside = self.entry(neighbour(slot));
+            let keep_resident = if beside.key == 0 {
+                true
+            } else {
+                self.victims ^= self.victims << 13;
+                self.victims ^= self.victims >> 7;
+                self.victims ^= self.victims << 17;
+                let resident_stays = self.victims >> 63 != 0;
+                self.evicted[usize::from(resident_stays)] += 1;
+                resident_stays
+            };
+            if keep_resident {
+                // The same set, which the resident's group lists already.
+                self.sets.get(neighbour(slot)).store(resident);
+            }
         }
         self.set(slot, entry);
     }
@@ -1006,10 +1037,26 @@ impl LookupTable {
     /// `salts`, a mask of salt numbers: whether the pages had entries to
     /// look at.
     pub fn forget_range(&mut self, pages: core::ops::RangeInclusive<u64>, salts: u64) -> bool {
+        self.forget_range_noting(pages, salts, |_| {})
+    }
+
+    /// [`Self::forget_range`], calling `noted` with each entry it forgets.
+    pub fn forget_range_noting(
+        &mut self,
+        pages: core::ops::RangeInclusive<u64>,
+        salts: u64,
+        mut noted: impl FnMut(&LookupEntry),
+    ) -> bool {
         debug_assert_eq!(self.grouping, Grouping::Pc);
         let groups = *pages.start() >> GRANULE_SHIFT..=*pages.end() >> GRANULE_SHIFT;
         let span = pages.clone();
-        let found = self.forget_groups(groups, |entry| entry.reached(&span, salts));
+        let found = self.forget_groups(groups, |entry| {
+            let reached = entry.reached(&span, salts);
+            if reached {
+                noted(entry);
+            }
+            reached
+        });
         debug_assert!(self.cell_pcs.is_empty());
         found
     }
@@ -3101,5 +3148,49 @@ mod tests {
             Some((pc, 0))
         );
         assert_eq!(table.find(other_slot, other.pc, key), other);
+    }
+
+    /// Two entries a lookup keeps reaching and a third that nothing
+    /// reaches share one set: as an engine does, each lookup that misses
+    /// inserts its entry again. The two settle in the set within a few
+    /// rounds; always putting out the neighbour had them put each other out
+    /// at every round (two misses a round, the guest's call/return loop at
+    /// an engine exit per return).
+    #[test]
+    fn two_reached_entries_put_a_third_out_of_their_set() {
+        let mut table = LookupTable::new();
+        let key = block_key(0x8_0000_0000, 1);
+        // `pc >> 2` even: `pc + 4` takes the neighbouring slot.
+        let pc = 0x1_0000_e030 & !0x4;
+        let entry = |pc: u64, key: u64, block: u32| LookupEntry {
+            pc,
+            key,
+            entry: 0x1000 * u64::from(block),
+            block,
+            targets: 0b1111,
+        };
+        let hot = [entry(pc, key, 1), entry(pc + 4, key, 2)];
+        assert_eq!(lookup_slot(pc, key), neighbour(lookup_slot(pc + 4, key)));
+        // Another state's block of the first PC: the first's slot.
+        let stale = entry(pc, block_key(0x8_0000_0000, 2), 3);
+        let slot = |entry: &LookupEntry| lookup_slot(entry.pc, entry.key);
+        assert_eq!(slot(&stale), slot(&hot[0]));
+        table.insert(slot(&stale), stale);
+        let rounds = 1000;
+        let mut misses = 0;
+        for _ in 0..rounds {
+            for wanted in &hot {
+                if table.find(slot(wanted), wanted.pc, wanted.key) != *wanted {
+                    misses += 1;
+                    table.insert(slot(wanted), *wanted);
+                }
+            }
+        }
+        assert!(misses < 40, "{misses} misses in {rounds} rounds");
+        for wanted in &hot {
+            assert_eq!(table.find(slot(wanted), wanted.pc, wanted.key), *wanted);
+        }
+        assert_ne!(table.find(slot(&stale), stale.pc, stale.key), stale);
+        assert!(table.evicted().iter().sum::<u64>() > 0);
     }
 }
