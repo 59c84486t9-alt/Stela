@@ -1,6 +1,5 @@
 //! The install medium: the full IPSW on the USB's FAT32 data partition, as
-//! `stela.efi`'s `--install` reads it (`docs/research/installation.md`,
-//! "Install medium").
+//! `stela.efi`'s `--install` reads it.
 //!
 //! ```text
 //! stela/install/<build>/ipsw.000 ...   PIECE_BYTES each, the last shorter

@@ -1,6 +1,5 @@
 //! The persistent translation store's home on the USB: where `stela.efi`
-//! keeps its `STLTPACK` packs (`docs/design/runtime.md`, "Persistent
-//! translation store"), how much room each may take, and which packs are
+//! keeps its `STLTPACK` packs, how much room each may take, and which packs are
 //! kept. The pack format is the engine's; setup never reads a pack beyond
 //! its header.
 //!
@@ -51,8 +50,8 @@ const BYTES_KEY: &str = "bytes";
 const PACK_EXTENSION: &str = "pak";
 /// The blank pack file a new translator's pack takes by rename.
 pub(super) const SPARE: &str = "spare.bin";
-/// The Metal device's pipeline store (`docs/design/metal-device.md`,
-/// "Pipeline store"), which `stela.efi` rewrites in place as it does a pack.
+/// The Metal device's pipeline store, which `stela.efi` rewrites in place as
+/// it does a pack.
 /// A blank one holds nothing yet.
 pub(super) const PIPELINES: &str = "pipeline.bin";
 /// The pipeline store's size, its bound.

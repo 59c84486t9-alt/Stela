@@ -9,9 +9,9 @@
 //! boot prepare --restore`) and adds an Install macOS startup choice
 //! (`stela.efi --install`), which restores macOS and its paired recoveryOS
 //! and System Recovery onto the Mac's internal SSD, as a Mac's erase
-//! restore does. An erase restore needs the macOS system image, so
-//! `--fetch`'s recovery members (`restore::payload::trim`) only prepare the
-//! boot bundles (`docs/research/small-installer-usb.md`). The macOS choice
+//! restore does. An erase restore needs the macOS system image, so a
+//! download's recovery members (`restore::payload::trim`) only prepare the
+//! boot bundles. The macOS choice
 //! boots the installed system afterwards. The restore personalizes its root
 //! tickets and the recoveryOS LocalPolicy with Apple's signing server
 //! (TSS).
