@@ -1,7 +1,7 @@
 //! AMX block exits: one Apple AMX instruction against the PE's AMX unit and
 //! translated guest memory, with the reference model of
 //! `stela_compiler::amx::model`. The ABI and its evidence are in
-//! `docs/design/system.md#apple-extensions` and `machine::amx`.
+//! `machine::amx`.
 use super::{Devices, FETCH_PAGE, Host, Machine, RequirementKind, Step};
 use crate::machine::{
     amx,

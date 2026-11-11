@@ -3,8 +3,7 @@
 //! On hardware the AMX register file belongs to the PE, not to a thread: the
 //! guest kernel enables it with `AMX_CTL_EL1` bit 63 and saves and restores
 //! it in its own context switch with ordinary AMX transfers. The evidence is
-//! the 26A434 J473 kernelcache, cited by address in
-//! `docs/research/amx.md#system-mode-abi-26a434-xnu-j473`:
+//! the 26A434 J473 kernelcache, cited by address:
 //!
 //! - CPU initialization writes `AMX_CTL_EL1` = 0x100, or 0x100 | MPIDR.Aff0
 //!   for generation 1, and for generations 2–4 writes MPIDR.Aff0 to
