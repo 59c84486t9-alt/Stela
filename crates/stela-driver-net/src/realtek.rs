@@ -761,14 +761,17 @@ impl Realtek {
     ) -> Result<Option<T>, LinkError> {
         self.update_link()?;
         let frame = self.receive.receive_with(&mut take);
-        if frame.is_some() || !self.signalled {
+        if frame.is_some() {
             return Ok(frame);
         }
-        // rtl8169_interrupt acknowledges the events it read, so the next
-        // frame or link change raises the vector again. A frame that
-        // arrived before the acknowledgement is in the ring.
+        // rtl8169_interrupt acknowledges every event it read (rtl_ack_events
+        // of the whole status), so the next frame or link change raises the
+        // vector again. Among them are the receive ring's exhaustion and the
+        // receive FIFO's overflow: an RTL8168H (XID 541) that had them left
+        // pending received nothing more after a download's first burst. A
+        // frame that arrived before the acknowledgement is in the ring.
         let hardware = Hardware::new(&self.device, &self.clock, self.revision, self.function);
-        if hardware.acknowledge(SIGNALLED_EVENTS) & LINK_CHANGE != 0 {
+        if hardware.acknowledge() & LINK_CHANGE != 0 {
             self.link.last_phy_poll = None;
             self.update_link()?;
         }
