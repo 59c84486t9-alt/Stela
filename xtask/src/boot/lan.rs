@@ -8,17 +8,23 @@
 //! router and DNS server, answers DNS A queries (RFC 1035) from the host's
 //! resolver, and terminates every TCP connection the guest opens to any
 //! address (RFC 9293), relaying its bytes over a host TCP connection to the
-//! same address and port: connect, data both ways, FIN and RST. Anything
-//! else (other protocols, other UDP ports, IP options it cannot route) is
-//! dropped and logged. Each lease, query and connection is logged to the
-//! run directory. Dev-only: one guest, IPv4, no fragments. The guest's
-//! window scale (RFC 7323) is honored; the peer's own window is unscaled.
+//! same address and port: connect, data both ways, FIN and RST. Other UDP
+//! and ICMP echo go through user-mode NAT on host sockets ([`datagram`]).
+//! Anything else (other IP protocols, IPv6, fragments from the guest) is
+//! dropped and logged. Each lease, query, connection and datagram mapping is
+//! logged to the run directory, with UDP totals each minute they change and
+//! at the end. Dev-only: one guest, IPv4. The guest's window scale (RFC
+//! 7323) is honored; the peer's own window is unscaled.
+mod datagram;
+mod flows;
 mod wire;
 
+use datagram::{FLOWS, Flow, Mapping, Totals};
+use flows::Flows;
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::{self, Read, Write},
-    net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream, ToSocketAddrs},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -39,6 +45,8 @@ const LEASE_SECONDS: u32 = 24 * 60 * 60;
 const DNS_TTL: u32 = 60;
 const WINDOW: u16 = 65535;
 const MSS: usize = 1460;
+/// The guest link's MTU; larger datagrams for the guest go as fragments.
+const MTU: usize = 1500;
 const RETRANSMIT: Duration = Duration::from_secs(1);
 /// Retransmission timeouts double up to this many times while the guest
 /// acknowledges nothing new (RFC 6298 5.5), so a slow guest is not buried
@@ -73,6 +81,12 @@ pub enum Event {
     Resolved {
         port: u16,
         reply: Vec<u8>,
+    },
+    /// A datagram a mapping's host socket received from `from`.
+    Datagram {
+        flow: Flow,
+        from: SocketAddrV4,
+        payload: Vec<u8>,
     },
     /// QEMU closed the link.
     Quit,
@@ -143,6 +157,15 @@ pub struct Lan {
     connections: HashMap<Key, Connection>,
     iss: u32,
     out: Vec<Vec<u8>>,
+    flows: Flows<Flow, Mapping>,
+    totals: Totals,
+    totals_noted: Totals,
+    totals_written: Instant,
+    /// Link-local and gateway destinations already reported.
+    local_reported: HashSet<(Ipv4, u16)>,
+    echo_unsupported: bool,
+    /// The identification of the last datagram sent as fragments.
+    ident: u16,
 }
 
 impl Lan {
@@ -159,6 +182,13 @@ impl Lan {
             connections: HashMap::new(),
             iss,
             out: Vec::new(),
+            flows: Flows::new(FLOWS),
+            totals: Totals::default(),
+            totals_noted: Totals::default(),
+            totals_written: Instant::now(),
+            local_reported: HashSet::new(),
+            echo_unsupported: false,
+            ident: 0,
         }
     }
 
@@ -200,12 +230,18 @@ impl Lan {
                 }
             }
             Event::Resolved { port, reply } => self.udp(GATEWAY, GUEST, DNS, port, &reply),
-            Event::Quit => {}
+            Event::Datagram {
+                flow,
+                from,
+                payload,
+            } => self.host_datagram(flow, from, payload),
+            Event::Quit => self.finish(),
         }
     }
 
-    /// Retransmissions and idle connections.
+    /// Retransmissions, idle connections and idle datagram mappings.
     pub fn tick(&mut self, now: Instant) {
+        self.tick_flows(now);
         let keys: Vec<Key> = self.connections.keys().copied().collect();
         for key in keys {
             let Some(c) = self.connections.get(&key) else {
@@ -261,6 +297,9 @@ impl Lan {
                 }
             }
             wire::ETHERTYPE_IPV4 => {
+                if wire::is_fragment(frame.payload) {
+                    return self.fragment_dropped(frame.payload);
+                }
                 let Some(packet) = Ipv4Packet::parse(frame.payload) else {
                     return;
                 };
@@ -274,12 +313,18 @@ impl Lan {
                                 DNS if packet.destination == GATEWAY => {
                                     self.dns(udp.source_port, udp.payload)
                                 }
-                                port => self.note(format_args!(
-                                    "UDP to {}:{port} dropped",
-                                    packet.destination
-                                )),
+                                port => self.forward_udp(
+                                    packet.source,
+                                    packet.destination,
+                                    udp.source_port,
+                                    port,
+                                    udp.payload,
+                                ),
                             }
                         }
+                    }
+                    wire::PROTOCOL_ICMP => {
+                        self.forward_icmp(packet.source, packet.destination, packet.payload)
                     }
                     wire::PROTOCOL_TCP => {
                         if let Some(segment) =
@@ -299,13 +344,19 @@ impl Lan {
     }
 
     fn ip(&mut self, source: Ipv4, destination: Ipv4, protocol: u8, payload: &[u8]) {
-        let packet = wire::ipv4(source, destination, protocol, payload);
+        let packets = wire::ipv4_fragments(source, destination, protocol, self.ident, payload, MTU);
+        if packets.len() > 1 {
+            self.totals.fragmented += 1;
+            self.ident = self.ident.wrapping_add(1);
+        }
         let mac = match destination {
             Ipv4::BROADCAST => Mac::BROADCAST,
             _ => self.guest_mac.unwrap_or(Mac::BROADCAST),
         };
-        self.out
-            .push(wire::frame(mac, GATEWAY_MAC, wire::ETHERTYPE_IPV4, &packet));
+        for packet in packets {
+            self.out
+                .push(wire::frame(mac, GATEWAY_MAC, wire::ETHERTYPE_IPV4, &packet));
+        }
     }
 
     fn udp(&mut self, source: Ipv4, destination: Ipv4, from: u16, to: u16, payload: &[u8]) {
@@ -799,7 +850,10 @@ fn run(
 ) -> io::Result<()> {
     loop {
         match inbox.recv_timeout(TICK) {
-            Ok(Event::Quit) | Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Ok(Event::Quit) | Err(RecvTimeoutError::Disconnected) => {
+                lan.finish();
+                return Ok(());
+            }
             Ok(event) => lan.handle(event),
             Err(RecvTimeoutError::Timeout) => {}
         }

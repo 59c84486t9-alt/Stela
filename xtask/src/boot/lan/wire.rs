@@ -1,12 +1,13 @@
 //! The peer's frames, parsed and built with smoltcp's wire module: Ethernet
-//! II, ARP, IPv4 without fragments, UDP and TCP with the MSS and window
-//! scale options. Checksums are verified on parse and filled on build.
+//! II, ARP, IPv4 (whole datagrams in, fragmented out when larger than the
+//! link MTU), UDP, ICMP echo and TCP with the MSS and window scale
+//! options. Checksums are verified on parse and filled on build.
 use smoltcp::{
     phy::ChecksumCapabilities,
     wire::{
         ArpOperation, ArpPacket, ArpRepr, EthernetAddress, EthernetFrame, EthernetProtocol,
-        IpAddress, IpProtocol, Ipv4Packet as RawIpv4, Ipv4Repr, TcpControl, TcpPacket, TcpRepr,
-        TcpSeqNumber, UdpPacket, UdpRepr,
+        Icmpv4Message, Icmpv4Packet, IpAddress, IpProtocol, Ipv4Packet as RawIpv4, Ipv4Repr,
+        TcpControl, TcpPacket, TcpRepr, TcpSeqNumber, UdpPacket, UdpRepr,
     },
 };
 use std::net::Ipv4Addr as Ipv4;
@@ -19,9 +20,11 @@ pub const PSH: u8 = 0x08;
 pub const ACK: u8 = 0x10;
 pub const ETHERTYPE_IPV4: u16 = 0x0800;
 pub const ETHERTYPE_ARP: u16 = 0x0806;
+pub const PROTOCOL_ICMP: u8 = 1;
 pub const PROTOCOL_TCP: u8 = 6;
 pub const PROTOCOL_UDP: u8 = 17;
 const ETHERNET_HEADER: usize = 14;
+const IPV4_HEADER: usize = 20;
 
 pub struct Frame<'a> {
     pub source: Mac,
@@ -119,6 +122,44 @@ impl<'a> Ipv4Packet<'a> {
     }
 }
 
+/// Whether `bytes` is a well-formed fragment of a larger IPv4 datagram,
+/// which [`Ipv4Packet::parse`] refuses.
+pub fn is_fragment(bytes: &[u8]) -> bool {
+    RawIpv4::new_checked(bytes).is_ok_and(|packet| packet.more_frags() || packet.frag_offset() != 0)
+}
+
+/// One datagram as the IPv4 packets a link of `mtu` bytes carries (RFC 791
+/// 3.2): whole when it fits, otherwise fragments that share `ident`, each
+/// payload but the last a multiple of 8 bytes, with Don't Fragment clear.
+pub fn ipv4_fragments(
+    source: Ipv4,
+    destination: Ipv4,
+    protocol: u8,
+    ident: u16,
+    payload: &[u8],
+    mtu: usize,
+) -> Vec<Vec<u8>> {
+    if IPV4_HEADER + payload.len() <= mtu {
+        return vec![ipv4(source, destination, protocol, payload)];
+    }
+    let step = (mtu - IPV4_HEADER) & !7;
+    let count = payload.len().div_ceil(step);
+    payload
+        .chunks(step)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let mut bytes = ipv4(source, destination, protocol, chunk);
+            let mut packet = RawIpv4::new_unchecked(&mut bytes);
+            packet.set_ident(ident);
+            packet.set_dont_frag(false);
+            packet.set_more_frags(index + 1 < count);
+            packet.set_frag_offset((index * step) as u16);
+            packet.fill_checksum();
+            bytes
+        })
+        .collect()
+}
+
 pub fn ipv4(source: Ipv4, destination: Ipv4, protocol: u8, payload: &[u8]) -> Vec<u8> {
     let repr = Ipv4Repr {
         src_addr: source,
@@ -168,6 +209,45 @@ pub fn udp(source: Ipv4, destination: Ipv4, from: u16, to: u16, payload: &[u8]) 
         |body| body.copy_from_slice(payload),
         &ChecksumCapabilities::default(),
     );
+    bytes
+}
+
+/// The identifier of a checksummed ICMP echo request (RFC 792).
+pub fn echo_request(bytes: &[u8]) -> Option<u16> {
+    let packet = Icmpv4Packet::new_checked(bytes).ok()?;
+    (packet.verify_checksum()
+        && packet.msg_type() == Icmpv4Message::EchoRequest
+        && packet.msg_code() == 0)
+        .then(|| packet.echo_ident())
+}
+
+/// The ICMP type and code of `bytes`, for logging what is not forwarded.
+pub fn icmp_kind(bytes: &[u8]) -> Option<(u8, u8)> {
+    Some((*bytes.first()?, *bytes.get(1)?))
+}
+
+/// Turns `bytes`, an echo reply from a host ping socket (whose kernel has
+/// checked its checksum), into one for `ident` with its checksum refilled;
+/// `false` leaves anything else untouched.
+pub fn echo_reply_for(bytes: &mut [u8], ident: u16) -> bool {
+    let Ok(mut packet) = Icmpv4Packet::new_checked(&mut *bytes) else {
+        return false;
+    };
+    if packet.msg_type() != Icmpv4Message::EchoReply || packet.msg_code() != 0 {
+        return false;
+    }
+    packet.set_echo_ident(ident);
+    packet.fill_checksum();
+    true
+}
+
+/// The reply to `request`, an echo request [`echo_request`] accepted: the
+/// same identifier, sequence number and data.
+pub fn echo_answer(request: &[u8]) -> Vec<u8> {
+    let mut bytes = request.to_vec();
+    let mut packet = Icmpv4Packet::new_unchecked(&mut bytes);
+    packet.set_msg_type(Icmpv4Message::EchoReply);
+    packet.fill_checksum();
     bytes
 }
 
