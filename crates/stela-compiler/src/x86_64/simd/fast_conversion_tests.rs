@@ -1,6 +1,7 @@
 //! The environment-free scalar FP/integer conversions
 //! (`integer_conversion::fast_to_integer`, `fast_from_integer`) and Half
-//! narrowing against the reference conversions,
+//! narrowing (`precision::emit_field_narrow_half`, then F16C) against the
+//! reference conversions,
 //! on reduced targets: every inline completion matches the reference in its
 //! result, FPSR and NZCV; every other run exits at the instruction with the
 //! state unchanged. Zeros and in-range normals must complete inline, which
@@ -8,8 +9,8 @@
 use crate::{
     GuestAddress, GuestState, Options, TargetCpu,
     aarch64::floating::{
-        FPCR_AH, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_FZ16, FPCR_NEP,
-        FPCR_ROUNDING_SHIFT, Format, INEXACT,
+        FPCR_AH, FPCR_AHP, FPCR_DN, FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_FZ16,
+        FPCR_NEP, FPCR_ROUNDING_SHIFT, Format, INEXACT,
         integer::{
             IntegerFormat, IntegerRounding, IntegerWidth, from_integer, to_integer, to_javascript,
         },
@@ -421,14 +422,11 @@ fn environment_free_integer_to_float_matches_the_reference() {
 
 #[test]
 fn environment_free_half_narrowing_matches_the_reference() {
+    let mut targets = targets();
     let host = TargetCpu::detect();
-    let mut targets = alloc::vec![TargetCpu::X86_64_V2.with_f16c(), TargetCpu::X86_64_V3];
-    targets.retain(|target| host.supports(*target));
-    if targets.is_empty() {
-        std::eprintln!("SKIPPED: host has no F16C");
-        return;
+    if host.supports(TargetCpu::X86_64_V3) {
+        targets.push(TargetCpu::X86_64_V3);
     }
-    targets.push(host);
     let singles = floats(Format::Single);
     let mut seed = 0x9e37_79b9_u64;
     let mut pick = move || {
@@ -447,6 +445,10 @@ fn environment_free_half_narrowing_matches_the_reference() {
         ] {
             let word = word | (N as u32) << 5 | D as u32;
             let code = compile(word, target);
+            if !target.supports(TargetCpu::F16c) {
+                // Without F16C only the field path is inline: no MXCSR access.
+                assert!(!code.windows(2).any(|pair| pair == [0x0f, 0xae]));
+            }
             for case in 0..6000 {
                 let mut inputs = [0u64; 4];
                 for lane in inputs.iter_mut().take(lanes) {
@@ -461,7 +463,30 @@ fn environment_free_half_narrowing_matches_the_reference() {
                 if case % 7 == 0 && lanes == 4 {
                     inputs[case % 4] = 0;
                 }
-                for fpcr in controls() {
+                if case % 5 == 0 {
+                    // Zeros of both signs and the field range bounds.
+                    const EDGES: [u64; 8] = [
+                        0,
+                        0x8000_0000,
+                        0x3880_0000,
+                        0x387f_ffff,
+                        0x477f_efff,
+                        0x477f_f000,
+                        0x477f_e000,
+                        0x3880_1000,
+                    ];
+                    for (lane, input) in inputs.iter_mut().take(lanes).enumerate() {
+                        *input = EDGES[(case / 5 + lane * 3) % EDGES.len()]
+                            | u64::from(case % 2 == 1) << 31;
+                    }
+                }
+                let field = inputs.iter().take(lanes).all(|&bits| {
+                    let magnitude = bits & 0x7fff_ffff;
+                    magnitude == 0 || (0x3880_0000..=0x477f_efff).contains(&magnitude)
+                });
+                let mut controls = controls();
+                controls.push(FPCR_AHP);
+                for fpcr in controls {
                     for fpsr in [0, INEXACT] {
                         let mut initial = GuestState {
                             fpcr,
@@ -479,6 +504,15 @@ fn environment_free_half_narrowing_matches_the_reference() {
                         let exit = run(&code, &mut actual);
                         if exit == PC.0 {
                             assert_eq!(actual, initial);
+                            assert!(
+                                !(field
+                                    && fpcr
+                                        & (FPCR_EXCEPTION_ENABLE_MASK
+                                            | FPCR_AHP
+                                            | 3 << FPCR_ROUNDING_SHIFT)
+                                        == 0),
+                                "field form exited: {word:08x} {inputs:x?} {fpcr:#x} {target:?}"
+                            );
                             continue;
                         }
                         // The conversion may end its block: completion then

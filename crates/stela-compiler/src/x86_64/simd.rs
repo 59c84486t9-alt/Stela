@@ -279,7 +279,10 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
         | FloatingPointOperation::BFloat16(_)
         | FloatingPointOperation::Complex(_) => false,
         FloatingPointOperation::Conversion(operand) => match operand {
-            Operand::Precision(operand) => operand.mode.destination_format() == Format::Half,
+            Operand::Precision(operand) => {
+                operand.mode.destination_format() == Format::Half
+                    && !precision::field_narrowing(operand.mode)
+            }
             Operand::FromInteger(operand) => operand.format == Format::Half,
             Operand::ToInteger { operand, rounding } => {
                 operand.format == Format::Half
@@ -760,9 +763,11 @@ mod tests {
         use crate::GuestAddress;
         use alloc::vec::Vec;
 
-        const FCVT_H_S: u32 = 0x1e23c020;
+        const FCVT_H_D: u32 = 0x1e63c020;
         const SCVTF_H_W: u32 = 0x1ee20020;
         const FCVTAS_4S: u32 = 0x4e21c820;
+        const FCVT_H_S: u32 = 0x1e23c020;
+        const FCVTN_4H_4S: u32 = 0x0e216820;
         const FCVTAS_W_S: u32 = 0x1e240020;
         const FJCVTZS_W_D: u32 = 0x1e7e0020;
         const FCVT_S_H: u32 = 0x1ee24020;
@@ -772,7 +777,7 @@ mod tests {
 
         #[test]
         fn terminal_conversions_do_not_consume_or_validate_an_unreached_suffix() {
-            for word in [FCVT_H_S, SCVTF_H_W, FCVTAS_4S] {
+            for word in [FCVT_H_D, SCVTF_H_W, FCVTAS_4S] {
                 let bytes: Vec<u8> = [word, UNSUPPORTED_SUFFIX]
                     .iter()
                     .flat_map(|word| word.to_le_bytes())
@@ -782,7 +787,15 @@ mod tests {
                 assert_eq!(compiled.native.source_map, [(GuestAddress(0x1000), 0)]);
             }
             // Inline on every target: the block continues into the suffix.
-            for word in [FCVT_S_H, SCVTF_S_W, FCVTL_4S_4H, FJCVTZS_W_D, FCVTAS_W_S] {
+            for word in [
+                FCVT_S_H,
+                SCVTF_S_W,
+                FCVTL_4S_4H,
+                FJCVTZS_W_D,
+                FCVT_H_S,
+                FCVTN_4H_4S,
+                FCVTAS_W_S,
+            ] {
                 let bytes: Vec<u8> = [word, UNSUPPORTED_SUFFIX]
                     .iter()
                     .flat_map(|word| word.to_le_bytes())

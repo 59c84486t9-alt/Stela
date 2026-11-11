@@ -12,13 +12,16 @@ use super::numerical::{
 };
 use super::{Host, commit, encode::guest, packed, read_vector, vector_offset};
 use crate::x86_64::asm::FloatLanes;
-use crate::x86_64::asm::{Alu, Code, Cond, Gpr, Rm, ShiftOp, Size, vector_extensions};
+use crate::x86_64::asm::{
+    Alu, BitTest, Code, Cond, Gpr, Rm, ShiftOp, Size, Unary, vector_extensions,
+};
 use crate::{
     GuestAddress, TargetCpu,
     aarch64::{
         FloatingPointOperation, Instruction, Operation,
         floating::{
-            FPCR_AHP, FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, Format, precision::PrecisionRounding,
+            FPCR_AHP, FPCR_EXCEPTION_ENABLE_MASK, FPCR_NEP, FPCR_ROUNDING_MASK,
+            FPCR_ROUNDING_SHIFT, Format, precision::PrecisionRounding,
         },
         simd::{
             arithmetic::Shape,
@@ -27,7 +30,7 @@ use crate::{
     },
     block::ExitKind,
 };
-use Gpr::{Rax, Rcx};
+use Gpr::{Rax, Rcx, Rdx};
 use alloc::vec::Vec;
 
 const RESULT_VECTOR: u8 = 0;
@@ -72,6 +75,23 @@ const DOUBLE_TO_SINGLE_DISCARDED_BITS: u8 = 29;
 const DOUBLE_TO_SINGLE_DISCARDED_MASK: u32 = (1 << DOUBLE_TO_SINGLE_DISCARDED_BITS) - 1;
 const COMPACT_QWORD_LOW_DWORDS: u8 = 0x88;
 const DWORD_SIGN_TO_LSB_SHIFT: u8 = u32::BITS as u8 - 1;
+/// Field narrowing of Single to Half ([`emit_field_narrow_half`]) converts
+/// zero magnitudes and those in [`FIELD_NARROW_MINIMUM`,
+/// `FIELD_NARROW_MAXIMUM`]: from the smallest normal Half (2^-14) to the
+/// largest value that rounds to a finite Half under nearest-even (below
+/// 65520).
+const FIELD_NARROW_MINIMUM: u32 = 0x3880_0000;
+const FIELD_NARROW_MAXIMUM: u32 = 0x477f_efff;
+/// The Single fraction bits a Half drops.
+const FIELD_NARROW_DROPPED_BITS: u8 = 13;
+const FIELD_NARROW_DROPPED_MASK: u32 = (1 << FIELD_NARROW_DROPPED_BITS) - 1;
+/// The exponent rebias from Single to Half, in the Single exponent field.
+const FIELD_NARROW_REBIAS: u32 = (Format::Single.exponent_bias() - Format::Half.exponent_bias())
+    << Format::Single.fraction_bits();
+/// Nearest-even before the shift: half the dropped weight less one; the kept
+/// least significant bit adds the last one.
+const FIELD_NARROW_ROUND: u32 = FIELD_NARROW_DROPPED_MASK >> 1;
+const ALL_DWORD_LANES: i8 = 0x0f;
 
 fn exception_guard(code: &mut Code, helper: &mut Vec<usize>) {
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
@@ -599,12 +619,206 @@ fn emit_narrow_half(
     }
 }
 
+/// Whether Single to Half `mode` has the field narrowing path of
+/// [`emit_field_narrow_half`], which runs on every target.
+pub(super) fn field_narrowing(mode: PrecisionMode) -> bool {
+    matches!(
+        mode,
+        PrecisionMode::Scalar {
+            source: Format::Single,
+            destination: Format::Half,
+            rounding: PrecisionRounding::Fpcr,
+        } | PrecisionMode::Narrow {
+            destination: Format::Half,
+            rounding: PrecisionRounding::Fpcr,
+            ..
+        }
+    )
+}
+
+/// Broadcast `value` to the four dwords of `xmm`. Clobbers EAX.
+fn dword_constant(code: &mut Code, xmm: u8, value: u32) {
+    let mut asm = code.asm();
+    asm.mov_imm32(Rax, value);
+    asm.movd_to_xmm(xmm, Rax);
+    super::shuffle(code, xmm, xmm, 0);
+}
+
+/// FCVT Hd, Sn from the Single fields in general registers: a zero, or a
+/// magnitude in the field narrowing range, else `fallback`. Leaves the Half
+/// in EAX, and ECX with every bit set when inexact and zero otherwise.
+fn scalar_field_narrow(code: &mut Code, source: u8, fallback: &mut Vec<usize>) {
+    let mut asm = code.asm();
+    asm.mov_load(Size::Dword, Rax, guest(vector_offset(source)));
+    asm.mov(Size::Dword, Rdx, Rax);
+    asm.alu_imm32(Alu::And, Size::Dword, Rdx, i32::MAX);
+    let zero = branch(code, Condition::Zero);
+    let mut asm = code.asm();
+    asm.alu_imm32(Alu::Sub, Size::Dword, Rdx, FIELD_NARROW_MINIMUM as i32);
+    asm.alu_imm32(
+        Alu::Cmp,
+        Size::Dword,
+        Rdx,
+        (FIELD_NARROW_MAXIMUM - FIELD_NARROW_MINIMUM) as i32,
+    );
+    fallback.push(branch(code, Condition::Above));
+    // The minimum has no fraction bits, so EDX keeps the dropped bits and the
+    // kept least significant bit of the magnitude.
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rcx, Rdx);
+    asm.alu_imm32(Alu::And, Size::Dword, Rcx, FIELD_NARROW_DROPPED_MASK as i32);
+    asm.unary(Unary::Neg, Size::Dword, Rcx);
+    asm.alu(Alu::Sbb, Size::Dword, Rcx, Rcx);
+    asm.bit_imm(BitTest::Bt, Size::Dword, Rdx, FIELD_NARROW_DROPPED_BITS);
+    asm.alu_imm32(
+        Alu::Adc,
+        Size::Dword,
+        Rdx,
+        (FIELD_NARROW_MINIMUM - FIELD_NARROW_REBIAS + FIELD_NARROW_ROUND) as i32,
+    );
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rdx, FIELD_NARROW_DROPPED_BITS);
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, HALF_TO_SINGLE_SIGN_SHIFT);
+    asm.alu_imm32(Alu::And, Size::Dword, Rax, HALF_SIGN as i32);
+    asm.alu(Alu::Or, Size::Dword, Rax, Rdx);
+    let done = jump(code);
+    let zero_start = code.len();
+    resolve(code, zero, zero_start);
+    // Only the sign is left above a zero magnitude.
+    let mut asm = code.asm();
+    asm.shift_imm(ShiftOp::Shr, Size::Dword, Rax, HALF_TO_SINGLE_SIGN_SHIFT);
+    asm.alu(Alu::Xor, Size::Dword, Rcx, Rcx);
+    let end = code.len();
+    resolve(code, done, end);
+}
+
+/// FCVTN Vd.4H, Vn.4S from the Single fields in SSE2 integer lanes: every
+/// lane a zero or a magnitude in the field narrowing range, else `fallback`.
+/// Leaves the four Halves in the low qword of `RESULT_VECTOR` with a zero
+/// high qword, and ECX with every bit set when some lane is inexact and zero
+/// otherwise.
+fn vector_field_narrow(code: &mut Code, source: u8, fallback: &mut Vec<usize>) {
+    const MAGNITUDE: u8 = 2;
+    const VALID: u8 = 3;
+    const SCRATCH: u8 = 4;
+    const ZERO: u8 = 5;
+    const BOUND: u8 = 6;
+    read_vector(code, source, SOURCE_VECTOR);
+    packed(code, Host::MoveAligned, MAGNITUDE, SOURCE_VECTOR);
+    ShiftOpcode::LeftDword.emit(code, MAGNITUDE, 1);
+    ShiftOpcode::RightDword.emit(code, MAGNITUDE, 1);
+    dword_constant(code, BOUND, FIELD_NARROW_MINIMUM - 1);
+    packed(code, Host::MoveAligned, SCRATCH, MAGNITUDE);
+    packed(code, Host::GreaterDword, SCRATCH, BOUND);
+    dword_constant(code, VALID, FIELD_NARROW_MAXIMUM + 1);
+    packed(code, Host::GreaterDword, VALID, MAGNITUDE);
+    packed(code, Host::And, VALID, SCRATCH);
+    packed(code, Host::Xor, ZERO, ZERO);
+    packed(code, Host::MoveAligned, SCRATCH, MAGNITUDE);
+    packed(code, Host::EqualDword, SCRATCH, ZERO);
+    packed(code, Host::Or, SCRATCH, VALID);
+    Host::DwordSignMask.register(code, 0, SCRATCH, TargetCpu::Baseline);
+    code.asm()
+        .alu_imm8(Alu::Cmp, Size::Dword, Rax, ALL_DWORD_LANES);
+    fallback.push(branch(code, Condition::NotZero));
+    // A zero lane has no dropped bits either.
+    packed(code, Host::MoveAligned, SCRATCH, MAGNITUDE);
+    ShiftOpcode::LeftDword.emit(code, SCRATCH, u32::BITS as u8 - FIELD_NARROW_DROPPED_BITS);
+    packed(code, Host::EqualDword, SCRATCH, ZERO);
+    Host::DwordSignMask.register(code, 0, SCRATCH, TargetCpu::Baseline);
+    let mut asm = code.asm();
+    asm.mov(Size::Dword, Rcx, Rax);
+    asm.alu_imm8(Alu::Xor, Size::Dword, Rcx, ALL_DWORD_LANES);
+    asm.unary(Unary::Neg, Size::Dword, Rcx);
+    asm.alu(Alu::Sbb, Size::Dword, Rcx, Rcx);
+    // Round each valid lane: its kept least significant bit, then the rebias
+    // and half the dropped weight less one.
+    packed(code, Host::MoveAligned, SCRATCH, MAGNITUDE);
+    ShiftOpcode::RightDword.emit(code, SCRATCH, FIELD_NARROW_DROPPED_BITS);
+    ShiftOpcode::LeftDword.emit(code, SCRATCH, DWORD_SIGN_TO_LSB_SHIFT);
+    ShiftOpcode::RightDword.emit(code, SCRATCH, DWORD_SIGN_TO_LSB_SHIFT);
+    packed(code, Host::AddDword, SCRATCH, MAGNITUDE);
+    dword_constant(
+        code,
+        BOUND,
+        FIELD_NARROW_ROUND.wrapping_sub(FIELD_NARROW_REBIAS),
+    );
+    packed(code, Host::AddDword, SCRATCH, BOUND);
+    ShiftOpcode::RightDword.emit(code, SCRATCH, FIELD_NARROW_DROPPED_BITS);
+    packed(code, Host::And, SCRATCH, VALID);
+    ShiftOpcode::RightDword.emit(code, SOURCE_VECTOR, DWORD_SIGN_TO_LSB_SHIFT);
+    ShiftOpcode::LeftDword.emit(code, SOURCE_VECTOR, HALF_SIGN.trailing_zeros() as u8);
+    packed(code, Host::Or, SCRATCH, SOURCE_VECTOR);
+    // Sign-extend each Half to its dword so that the saturating pack is
+    // exact, and pack against zero.
+    ShiftOpcode::LeftDword.emit(code, SCRATCH, u16::BITS as u8);
+    ShiftOpcode::ArithmeticDword.emit(code, SCRATCH, u16::BITS as u8);
+    packed(code, Host::PackSignedDwordToWord, SCRATCH, ZERO);
+    packed(code, Host::MoveAligned, RESULT_VECTOR, SCRATCH);
+}
+
+/// Single to Half narrowing (`field_narrowing`) under FPCR nearest-even, AHP
+/// clear and no enabled trap, from the Single fields alone: zeros, and
+/// magnitudes whose Half is normal and finite. Such an input is not tiny, so
+/// the only status is inexact, from the dropped fraction bits; no host FP
+/// instruction runs and MXCSR stays untouched, on every target. Other inputs
+/// and controls take the F16C recipe where the host has it, else the helper.
+fn emit_field_narrow_half(
+    code: &mut Code,
+    operand: &PrecisionOperand,
+    pc: GuestAddress,
+    target: TargetCpu,
+) {
+    let mut fallback = Vec::new();
+    test_control(
+        code,
+        FPCR_EXCEPTION_ENABLE_MASK | FPCR_AHP | FPCR_ROUNDING_MASK << FPCR_ROUNDING_SHIFT,
+    );
+    fallback.push(branch(code, Condition::NotZero));
+    match operand.mode {
+        PrecisionMode::Scalar { .. } => {
+            scalar_field_narrow(code, operand.source, &mut fallback);
+            commit_inexact(code);
+            read_vector(code, operand.destination, RESULT_VECTOR);
+            code.asm().pinsrw(RESULT_VECTOR, Rax, 0);
+            scalar_commit(code, operand.destination, Format::Half);
+        }
+        PrecisionMode::Narrow { upper, .. } => {
+            vector_field_narrow(code, operand.source, &mut fallback);
+            commit_inexact(code);
+            if upper {
+                read_vector(code, operand.destination, SOURCE_VECTOR);
+                code.asm().movlhps(SOURCE_VECTOR, Rm::Xmm(RESULT_VECTOR));
+                commit(code, operand.destination, SOURCE_VECTOR);
+            } else {
+                commit(code, operand.destination, RESULT_VECTOR);
+            }
+        }
+        PrecisionMode::Widen { .. } => unreachable!("field narrowing narrows"),
+    }
+    let done = jump(code);
+    let fallback_start = code.len();
+    for patch in fallback {
+        resolve(code, patch, fallback_start);
+    }
+    if half_narrowing_supported(operand.mode, target) {
+        emit_narrow_half(code, operand, pc, target);
+    } else {
+        super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
+    }
+    let end = code.len();
+    resolve(code, done, end);
+}
+
 pub(in crate::x86_64) fn emit(
     code: &mut Code,
     operand: &PrecisionOperand,
     pc: GuestAddress,
     target: TargetCpu,
 ) {
+    if field_narrowing(operand.mode) && !target.data_independent_timing() {
+        emit_field_narrow_half(code, operand, pc, target);
+        return;
+    }
     if half_narrowing_supported(operand.mode, target) {
         emit_narrow_half(code, operand, pc, target);
         return;

@@ -50,6 +50,9 @@ const FORMS: [u32; 30] = [
     0x1ec2_f420,
 ];
 
+/// FCVTN, FCVTN2 and FCVT Hd, Sn: inline on every target.
+const FIELD_NARROWING: [u32; 3] = [0x0e21_6820, 0x4e21_6820, 0x1e23_c020];
+
 fn compile(word: u32, target: TargetCpu) -> Mapping {
     compile_words(&[PREFIX, word, SUFFIX], target)
 }
@@ -78,7 +81,9 @@ fn mxcsr() -> u32 {
 }
 
 /// Run the block; the state must match exact completion, on the inline path
-/// or after a helper exit that left only the prefix's effects.
+/// or after a helper exit that left only the prefix's effects. A conversion
+/// that ends its block exits after itself; one in the block body runs on
+/// through the suffix.
 fn check(mapping: &Mapping, operation: &FloatingPointOperation, state: GuestState) -> bool {
     let mut expected = state.clone();
     expected.x[8] += 1;
@@ -92,7 +97,11 @@ fn check(mapping: &Mapping, operation: &FloatingPointOperation, state: GuestStat
     assert_eq!(mxcsr(), saved, "MXCSR {operation:?}");
     let inline = exit.kind == ExitKind::Fallthrough as u64;
     if inline {
-        assert_eq!(exit.next_pc, PC + 8, "{operation:?}");
+        if exit.next_pc == PC + 12 {
+            expected.x[9] += 1;
+        } else {
+            assert_eq!(exit.next_pc, PC + 8, "{operation:?}");
+        }
     } else {
         assert_eq!(exit.kind, ExitKind::FloatingPoint as u64, "{operation:?}");
         assert_eq!(exit.next_pc, PC + 4, "{operation:?}");
@@ -143,6 +152,7 @@ fn half_conversions_match_completion_on_each_host_recipe() {
             continue;
         }
         let mut inline = 0;
+        let mut inline_recipes = 0;
         for word in FORMS {
             let operation = FloatingPointOperation::decode(word).unwrap().unwrap();
             let mapping = compile(word, target);
@@ -163,11 +173,20 @@ fn half_conversions_match_completion_on_each_host_recipe() {
                     1 => (next() & 0xfff).wrapping_neg(),
                     _ => next() >> (next() % 64),
                 };
-                inline += u32::from(check(&mapping, &operation, state));
+                let completed = check(&mapping, &operation, state);
+                inline += u32::from(completed);
+                inline_recipes += u32::from(completed && !FIELD_NARROWING.contains(&word));
             }
         }
         std::println!("{} inline={inline}", target.id());
-        assert_eq!(inline == 0, target == TargetCpu::Baseline, "{target:?}");
+        // Single to Half narrowing has an SSE2 field path; the other forms
+        // need AVX512-FP16.
+        assert_ne!(inline, 0, "{target:?}");
+        assert_eq!(
+            inline_recipes != 0,
+            target.supports(TargetCpu::X86_64_V4.with_avx512fp16()),
+            "{target:?}"
+        );
     }
 }
 
