@@ -1,8 +1,12 @@
 //! Bounds-checked Metal library containers and LLVM bitcode wrappers.
 //!
-//! The MTLB layout is reverse-engineered, not a public Apple ABI. See
-//! `metal/README.md` for its sources and contract. Shader bytes,
-//! metadata and digest remain borrowed from the original input.
+//! The MTLB layout is reverse-engineered, not a public Apple ABI; it follows
+//! MetalLibraryArchive (<https://github.com/YuAo/MetalLibraryArchive>) and
+//! LLVM's bitcode wrapper format, and copies no external parser. The reader
+//! checks section and record bounds, required tags, metadata group framing
+//! and the selected AIR module's SHA-256; wrapper parsing checks framing
+//! only, so LLVM must still verify the bitcode. Shader bytes, metadata and
+//! digest remain borrowed from the original input.
 use alloc::vec::Vec;
 use core::{fmt, ops::Range, str};
 use stela_contracts::bytes::{le16, le32, le64};

@@ -74,7 +74,8 @@ use library_cache::{LoadedLibrary, ModuleSource, Selected};
 pub use nir_cache::{CompileGuard, CompileLock};
 use nir_cache::{NirCache, ReflectionCache, ReflectionKey, Returned};
 
-/// The constructs the AIR frontend lowers completely (`metal/README.md`).
+/// The shader stages the AIR frontend lowers completely; other constructs
+/// are refused with a typed diagnostic.
 const FEATURES: ShaderFeatures = ShaderFeatures::COMPUTE
     .union(ShaderFeatures::VERTEX_FRAGMENT)
     .union(ShaderFeatures::MESH)

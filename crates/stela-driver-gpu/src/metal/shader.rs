@@ -589,7 +589,7 @@ pub const DYNAMIC_BICUBIC: u32 = (1 << MAX_SAMPLER_BINDINGS) - 1;
 /// A color attachment a fragment function reads, which the function also
 /// writes in its fragment shader interlock section rather than through the
 /// blend unit, so overlapping fragments of one draw read and write each
-/// texel in primitive order (`metal/README.md`).
+/// texel in primitive order.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct StorageAttachment {
     /// The raw `VkFormat` realizing its pixel format, and its texel bytes.

@@ -268,7 +268,9 @@ struct stela_air_entry {
    size_t name_bytes;
    unsigned argument_count;
    const struct stela_air_argument_info *arguments;
-   bool reflection_complete; /* Bounded plain-resource reflection; see README. */
+   /* Whether plain-resource reflection covers every argument; library
+    * assembly refuses the entry otherwise. */
+   bool reflection_complete;
    unsigned max_threads; /* air.max_work_group_size, or zero when undeclared. */
    /* The threadgroup globals the entry uses, in module order, each placed at
     * its alignment. */
