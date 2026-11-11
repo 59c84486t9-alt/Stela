@@ -384,6 +384,17 @@ fn open_host(
         kernel_work,
     );
     remappers.report_faults();
+    // No install finishes without Apple's signing server, even with macOS on
+    // the USB: stop before the restore changes the Mac's disk, not at its
+    // first signing request.
+    if options.install.is_some()
+        && let Some(Err(reason)) = &devices.host_network
+    {
+        output::fatal(stela_runtime::restore::tss::no_network(
+            remote_image,
+            &reason.to_string(),
+        ));
+    }
     let built = devices.preboot.take().map(|partition| {
         from_disk(
             partition,

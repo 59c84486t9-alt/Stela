@@ -37,9 +37,9 @@ use stela_soc::machine::AppleDevices;
 pub const RELAY_BUFFER: usize = 1 << 20;
 
 /// No adapter a native driver runs: what to connect, as the screen says it.
-const NO_ADAPTER: &str = "No supported network adapter. Installing macOS needs the internet for Apple's signing server: connect wired Ethernet (most Intel, Realtek, Broadcom and Aquantia adapters, or a Realtek or ASIX USB adapter), or set Wi-Fi with `stela setup configure --wifi SSID --usb USB` on another computer.";
+const NO_ADAPTER: &str = "No supported network adapter. Connect wired Ethernet (most Intel, Realtek, Broadcom and Aquantia adapters, or a Realtek or ASIX USB adapter), or set Wi-Fi with `stela setup configure --wifi SSID --usb USB` on another computer.";
 /// What the screen says when DHCP gives the first adapter no lease.
-const NO_LEASE: &str = "No automatic network address. Connect Ethernet or Wi-Fi to a network with DHCPv4 or IPv6 router advertisements, or use an Offline installer. Stateful DHCPv6 is unsupported.";
+const NO_LEASE: &str = "No automatic network address. Connect Ethernet or Wi-Fi to a network with DHCPv4 or IPv6 router advertisements, or set an address with `stela setup configure --ipv4 ADDRESS/PREFIX --usb USB` on another computer. Stateful DHCPv6 is unsupported.";
 
 /// The host's network adapters and the loader root they are reached in.
 pub struct Links {
