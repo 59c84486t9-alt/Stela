@@ -22,6 +22,7 @@ pub(crate) mod bundle;
 mod cursor;
 mod display;
 pub(crate) mod fdr;
+mod firmware_requests;
 mod gpu;
 pub(crate) mod host;
 mod input;

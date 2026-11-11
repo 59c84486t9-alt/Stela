@@ -19,9 +19,10 @@
 //!
 //! The controllers' registers and DMA pages are reached through the
 //! loader's identity root, so each poll runs in it (`storage::RestoreRoot`).
+use super::firmware_requests::Requests;
 use super::storage::RestoreRoot;
 use crate::output;
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use stela_drivers::{
     bus::{
         dma::RegionAllocator,
@@ -30,7 +31,6 @@ use stela_drivers::{
             manager::{Admission, Platform, Report, Uuid},
         },
     },
-    firmware::{Catalog, HandoffProvider},
     input::InputDevice,
     probe::native::usb4,
     usb::{
@@ -132,7 +132,8 @@ pub struct HostUsb {
     tsc_per_ms: u64,
     /// The probe's DMA pages, which enumeration of a new device draws on.
     dma: RegionAllocator,
-    firmware: Option<Arc<Catalog>>,
+    /// The boot's firmware, through the probe's request record.
+    firmware: &'static Requests,
     root: u64,
     /// New devices' class owners that no consumer takes, kept while one of
     /// their devices is attached.
@@ -150,7 +151,7 @@ impl HostUsb {
         usb4: Vec<usb4::Host>,
         storage: Vec<UsbStorage>,
         dma: RegionAllocator,
-        firmware: Option<Arc<Catalog>>,
+        firmware: &'static Requests,
         root: u64,
         tsc_hz: u64,
     ) -> Self {
@@ -178,6 +179,11 @@ impl HostUsb {
         }
     }
 
+    /// Whether a host driver found firmware the USB lacks.
+    pub fn firmware_missing(&self) -> bool {
+        self.firmware.missing()
+    }
+
     /// Poll controllers with work or a due attachment timer, and check
     /// non-signalling controllers on the fallback interval. Return the
     /// keyboards and pointers that arrived.
@@ -194,7 +200,7 @@ impl HostUsb {
             #[cfg(feature = "diagnostics")]
             wait,
         );
-        let firmware = HandoffProvider::new(self.firmware.as_deref());
+        let firmware = self.firmware;
         for host in &mut self.hosts {
             let mut changes = {
                 // The software attachment timer is owned by this HostUsb.
@@ -227,7 +233,11 @@ impl HostUsb {
                 }) {
                     continue;
                 }
-                host.poll(&mut self.dma, &firmware)
+                let changes = host.poll(&mut self.dma, firmware);
+                // A new device's driver may have found its firmware missing;
+                // the record is reached under the same lock.
+                firmware.report();
+                changes
             };
             for device in &changes.removed {
                 output::arguments(format_args!("USB removed {}\n", device.location));

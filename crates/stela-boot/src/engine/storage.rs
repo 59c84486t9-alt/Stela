@@ -942,10 +942,12 @@ pub unsafe fn open(
     }
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
-    let firmware = stela_drivers::probe::handoff_provider(handoff);
+    let firmware =
+        super::firmware_requests::Requests::new(stela_drivers::probe::handoff_provider(handoff));
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
     let mut devices =
         unsafe { probe_with_provider(handoff, captures, &mut dma, firmware, services, wifi) };
+    firmware.report();
     // The owners native attachments keep, and those of failed ones, stay
     // for the boot: their mappings and DMA domains outlive the devices.
     Vec::leak(core::mem::take(&mut devices.owners));
@@ -1055,7 +1057,7 @@ pub unsafe fn open(
         core::mem::take(&mut devices.usb4_hosts),
         core::mem::take(&mut devices.usb_storage),
         dma,
-        handoff.firmware.clone(),
+        firmware,
         root,
         handoff.clock.ticks_per_microsecond * 1_000_000,
     );

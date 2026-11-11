@@ -2729,6 +2729,9 @@ fn start_devices(
                 translations::set_partition(store);
             }
             fdr_device = fdr;
+            if usb.firmware_missing() {
+                crate::status::info(super::firmware_requests::MISSING);
+            }
             host_usb = Some(usb);
             // The guest's controller hangs off the hub of its keyboard.
             host_bluetooth = host_controller.filter(|_| options.input);
