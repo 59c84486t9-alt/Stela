@@ -648,6 +648,9 @@ impl Firmware for Coprocessor {
             outbox.extend(sent.drain(..).map(|payload| Message { endpoint, payload }));
             result?;
         }
+        // The calls, notices and answers this transfer carries happen now.
+        let now = port.access.now;
+        self.link.borrow_mut().service_mut().observe(now);
         let result = self.link.borrow_mut().dma(&mut PortBus(port), &mut sent);
         outbox.extend(sent.into_iter().map(|payload| Message {
             endpoint: IOMFB_ENDPOINT,

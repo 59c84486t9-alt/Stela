@@ -200,6 +200,52 @@ pub struct Pacing {
     /// Presents that moved a layer: one whose destination kept its size at
     /// another place, as a pointer's does ([`moved_presents`]).
     pub moved: u32,
+    /// Where a swap's time goes, in counter ticks, so a slow frame rate can
+    /// be told apart from a late display: `fence`, from its submit to the
+    /// notice of its last GPU fence (swaps that waited for one); `notice`,
+    /// from the time `io_fence_notify` names (the AP's clock) to the model
+    /// receiving it; `latch`, from ready (fences done, or submitted
+    /// unfenced) to the present that showed or merged it; `complete`, from
+    /// that present to the AP's answer to its `swap_complete_ap_gated`;
+    /// `total`, from submit to that answer.
+    pub fence: Latency,
+    pub notice: Latency,
+    pub latch: Latency,
+    pub complete: Latency,
+    pub total: Latency,
+    /// Vsyncs (`D588`) the notification clients answered, each from its
+    /// vblank to the answer: the frame clock Core Animation paces by.
+    pub vsync: Latency,
+}
+
+/// A count of intervals, their total and the longest, in counter ticks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Latency {
+    pub count: u32,
+    pub total: u64,
+    pub longest: u64,
+}
+
+impl Latency {
+    fn add(&mut self, ticks: u64) {
+        self.count = self.count.saturating_add(1);
+        self.total = self.total.saturating_add(ticks);
+        self.longest = self.longest.max(ticks);
+    }
+}
+
+impl core::fmt::Display for Latency {
+    /// `count:average/longest`, in milliseconds.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let ms = |ticks: u64| ticks as f64 * 1000.0 / COUNTER_HZ as f64;
+        write!(
+            f,
+            "{}:{:.1}/{:.1}",
+            self.count,
+            ms(self.total) / f64::from(self.count.max(1)),
+            ms(self.longest)
+        )
+    }
 }
 
 /// Presents that moved a layer since boot, for the host to time against its
@@ -246,7 +292,7 @@ impl core::fmt::Display for Pacing {
         let ms = |ticks: u64| ticks as f64 * 1000.0 / COUNTER_HZ as f64;
         write!(
             f,
-            "DCP PACING seconds={:.1} presented={} submitted={} merged={} per_second={:.1} gap_ms={:.1}/{:.1}/{:.1} stalls={} late_ms={:.1}/{:.1} deepest={} reordered={} ahead_of_gpu={} fence_waits={} fence_timeouts={} calls={} unmodeled={} color_matrix={} moved={}",
+            "DCP PACING seconds={:.1} presented={} submitted={} merged={} per_second={:.1} gap_ms={:.1}/{:.1}/{:.1} stalls={} late_ms={:.1}/{:.1} deepest={} reordered={} ahead_of_gpu={} fence_waits={} fence_timeouts={} calls={} unmodeled={} color_matrix={} moved={} swap_ms=n:avg/max fence={} notice={} latch={} complete={} total={} vsync={}",
             ms(self.ticks) / 1000.0,
             self.presented,
             self.submitted,
@@ -271,6 +317,12 @@ impl core::fmt::Display for Pacing {
             self.unmodeled,
             self.color_matrix,
             self.moved,
+            self.fence,
+            self.notice,
+            self.latch,
+            self.complete,
+            self.total,
+            self.vsync,
         )
     }
 }
@@ -382,6 +434,11 @@ pub struct Frame {
     /// The counter when the display first found this swap waiting on a
     /// fence.
     pub waiting_since: Option<u64>,
+    /// The counter when the AP submitted the swap, and when it became ready
+    /// to show: at submit when nothing was fenced, else at the last fence's
+    /// notice (or the fence timeout).
+    pub submitted_at: u64,
+    pub ready_at: Option<u64>,
     /// The layer slots after this swap: what each shows, if anything.
     pub planes: [Option<scanout::Layer>; swap::LAYERS],
     /// The slots this swap set, whether to a surface or to nothing.
@@ -524,10 +581,16 @@ pub struct Methods {
     /// Swaps latched at a vblank, whose completion callback is due, and
     /// whether each reached the display.
     completed: VecDeque<(u32, bool)>,
+    /// For each queued completion, in the same order: its swap and the
+    /// counter when it was submitted and presented ([`Pacing::complete`]).
+    completion_times: VecDeque<(u32, u64, u64)>,
     /// A callback is out and not answered yet.
     in_flight: bool,
     /// The AP shut the link down (`link_shutdown_signal`).
     shut_down: bool,
+    /// The newest counter value the model was given: a call, notice or
+    /// answer is timed by the link service that carried it.
+    now: u64,
 }
 
 impl Methods {
@@ -628,8 +691,10 @@ impl Methods {
             frames: VecDeque::new(),
             outgoing: VecDeque::new(),
             completed: VecDeque::new(),
+            completion_times: VecDeque::new(),
             in_flight: false,
             shut_down: false,
+            now: 0,
         }
     }
 
@@ -707,6 +772,9 @@ impl Methods {
                     // rather than freeze the display, and say so once.
                     timed_out.push((frame.swap_id, frame.fenced));
                     frame.fenced = 0;
+                    if frame.ready_at.is_none() {
+                        frame.ready_at = Some(now);
+                    }
                 }
             }
             blocked |= frame.fenced != 0;
@@ -756,6 +824,12 @@ impl Methods {
                     frame.fenced &= !(1 << index);
                 }
             }
+            if frame.fenced == 0 && frame.ready_at.is_none() {
+                frame.ready_at = Some(self.now);
+                self.pacing
+                    .fence
+                    .add(self.now.saturating_sub(frame.submitted_at));
+            }
         } else if self.started.iter().any(|&(id, _)| id == swap_id) {
             if self.early_fences.len() == STARTED_SWAPS {
                 self.early_fences.pop_front();
@@ -785,6 +859,7 @@ impl Methods {
     /// a period late skips the vblanks between, as nothing was presented or
     /// told of them. The first look starts the grid.
     pub fn refresh(&mut self, now: u64) {
+        self.observe(now);
         if self.shut_down {
             return;
         }
@@ -811,6 +886,12 @@ impl Methods {
             self.refresh = Some(due);
         }
         self.close_window(due);
+    }
+
+    /// The counter reads `now`: what the calls, notices and answers the link
+    /// carries next are timed by. The counter never goes back.
+    pub(super) fn observe(&mut self, now: u64) {
+        self.now = self.now.max(now);
     }
 
     /// Open the pacing window at vblank `due`, or close it once it covers
@@ -1032,6 +1113,10 @@ impl Methods {
         let waiting = self.frames.len();
         let batch: Vec<Frame> = self.frames.drain(..count).collect();
         let (shown, merged) = batch.split_last().expect("a latched batch is not empty");
+        for frame in &batch {
+            let ready = frame.ready_at.unwrap_or(now);
+            self.pacing.latch.add(now.saturating_sub(ready));
+        }
         for (index, frame) in merged.iter().enumerate() {
             let later = batch[index + 1..]
                 .iter()
@@ -1047,6 +1132,8 @@ impl Methods {
             // screen: the AP may take its surfaces back at once.
             let displayed = frame.updated & !later != 0 || on_screen;
             self.completed.push_back((frame.swap_id, displayed));
+            self.completion_times
+                .push_back((frame.swap_id, frame.submitted_at, now));
             self.pacing.merged += 1;
             if self.trace_swap(frame.swap_id) {
                 self.record_log(Log::Merged {
@@ -1072,6 +1159,8 @@ impl Methods {
             });
         }
         self.completed.push_back((shown.swap_id, true));
+        self.completion_times
+            .push_back((shown.swap_id, shown.submitted_at, now));
     }
 
     fn refusal(&mut self, text: String) {
@@ -1623,6 +1712,15 @@ impl Service for Methods {
             (AP, "io_fence_notify") => {
                 let swap_id = fields.u32()?;
                 let surface = fields.u32()?;
+                // The AP's time of the signal; its clock is this counter
+                // only if the guest's timebase has no offset, so a time
+                // ahead of the model or older than the fence timeout is
+                // not counted.
+                let signaled = fields.u64()?;
+                let behind = self.now.wrapping_sub(signaled);
+                if signaled != 0 && signaled <= self.now && behind < FENCE_TIMEOUT {
+                    self.pacing.notice.add(behind);
+                }
                 self.fence_notified(swap_id, surface);
                 let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
                 self.reply(tag, packed)
@@ -1687,6 +1785,7 @@ impl Service for Methods {
                     .fold(self.unshown, |slots, frame| slots | frame.updated);
                 self.outgoing.clear();
                 self.completed.clear();
+                self.completion_times.clear();
                 Ok(Step::Return(Vec::new()))
             }
             _ => match answer(row, input, output, self.mode()) {
@@ -1731,8 +1830,10 @@ impl Service for Methods {
                 tag: SWAP_NOTIFY,
                 input,
                 output: 0,
-                then: Box::new(|methods, _| {
+                then: Box::new(move |methods, _| {
                     methods.in_flight = false;
+                    let waited = methods.now.saturating_sub(counter);
+                    methods.pacing.vsync.add(waited);
                     Ok(())
                 }),
             });
@@ -1764,6 +1865,10 @@ impl Service for Methods {
             });
         }
         let (swap_id, displayed) = self.completed.pop_front()?;
+        let times = self
+            .completion_times
+            .pop_front()
+            .filter(|&(id, _, _)| id == swap_id);
         let length = abi::callback(&SWAP_COMPLETE)
             .and_then(|row| row.input)
             .expect("swap_complete_ap_gated's input size is recorded")
@@ -1782,8 +1887,13 @@ impl Service for Methods {
             tag: SWAP_COMPLETE,
             input,
             output: 0,
-            then: Box::new(|methods, _| {
+            then: Box::new(move |methods, _| {
                 methods.in_flight = false;
+                if let Some((_, submitted, presented)) = times {
+                    let now = methods.now;
+                    methods.pacing.complete.add(now.saturating_sub(presented));
+                    methods.pacing.total.add(now.saturating_sub(submitted));
+                }
                 Ok(())
             }),
         })
@@ -1889,6 +1999,8 @@ impl Methods {
             fenced,
             surface_ids: submission.surface_ids,
             waiting_since: None,
+            submitted_at: self.now,
+            ready_at: (fenced == 0).then_some(self.now),
             planes: shown,
             updated: if submission.enabled & swap::REMOVE_LAYERS != 0 {
                 (1 << swap::LAYERS) - 1

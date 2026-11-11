@@ -2028,6 +2028,95 @@ fn a_submit_past_the_held_swaps_refuses_and_keeps_its_swap_started() {
     assert!(methods.started.iter().any(|&(started, _)| started == id));
 }
 
+#[test]
+fn pacing_times_each_stage_of_a_swap_and_the_vsyncs() {
+    let screen = TestScreen(Rc::default(), Some(MODE));
+    let mut methods = Methods::new(Box::new(screen), interface());
+    methods.set_swap_tracing(false);
+    methods.notified = true;
+    let period = methods.refresh_ticks;
+    // Answer every callback the AP is sent, at counter `at`.
+    let answer_all = |methods: &mut Methods, at: u64| {
+        methods.observe(at);
+        while let Some(callback) = methods.take_callback() {
+            (callback.then)(methods, &[]).unwrap();
+        }
+    };
+    // The grid starts at 0; its vsync is answered 100 ticks later.
+    methods.refresh(0);
+    answer_all(&mut methods, 100);
+    assert_eq!(methods.pacing.vsync.count, 1);
+    assert_eq!(methods.pacing.vsync.longest, 100);
+
+    // Submitted at 1000 while the GPU draws surface 5; the AP names it at
+    // half a period, 30 ticks after its own time of the signal.
+    methods.observe(1000);
+    let id = start_swap(&mut methods);
+    returned(methods.call(
+        *b"A407",
+        &fenced_submission(id, &[(0, 4, 2, 0x1000)], 1, [5, 0, 0, 0]),
+        0xc,
+    ));
+    let notice = period / 2;
+    methods.observe(notice);
+    let input = Packed::new()
+        .u32(id)
+        .u32(5)
+        .u64(notice - 30)
+        .u32(0)
+        .finish(0x14)
+        .unwrap();
+    returned(methods.call(*b"A470", &input, 4));
+    // A time the AP's clock puts ahead of the model is not counted.
+    let ahead = Packed::new()
+        .u32(id)
+        .u32(5)
+        .u64(notice + 1)
+        .u32(0)
+        .finish(0x14)
+        .unwrap();
+    returned(methods.call(*b"A470", &ahead, 4));
+    assert_eq!(methods.pacing.fence.count, 1);
+    assert_eq!(methods.pacing.fence.total, notice - 1000);
+    assert_eq!(methods.pacing.notice.count, 1);
+    assert_eq!(methods.pacing.notice.total, 30);
+
+    // Latched at the next vblank, presented 5 ticks after it; its vsync and
+    // completion are answered 50 ticks after the vblank.
+    methods
+        .present(period + 5, |_, bytes: &mut [u8]| {
+            bytes.fill(0x5a);
+            true
+        })
+        .unwrap();
+    assert_eq!(methods.pacing.latch.count, 1);
+    assert_eq!(methods.pacing.latch.total, period + 5 - notice);
+    answer_all(&mut methods, period + 50);
+    assert_eq!(methods.pacing.vsync.count, 2);
+    assert_eq!(methods.pacing.vsync.total, 150);
+    assert_eq!(methods.pacing.complete.count, 1);
+    assert_eq!(methods.pacing.complete.total, 45);
+    assert_eq!(methods.pacing.total.total, period + 50 - 1000);
+
+    // An unfenced swap is ready when submitted.
+    methods.observe(period + 60);
+    let id = start_swap(&mut methods);
+    returned(methods.call(*b"A407", &submission(id, &[(0, 4, 2, 0x1000)]), 0xc));
+    methods
+        .present(2 * period, |_, bytes: &mut [u8]| {
+            bytes.fill(0x5b);
+            true
+        })
+        .unwrap();
+    assert_eq!(methods.pacing.fence.count, 1);
+    assert_eq!(methods.pacing.latch.longest, period - 60);
+    let line = methods.pacing.to_string();
+    assert!(
+        line.contains(" swap_ms=n:avg/max fence=1:") && line.contains(" vsync=2:"),
+        "{line}"
+    );
+}
+
 /// A screen whose frames another thread can push, as a compose outside the
 /// devices' lock does.
 #[derive(Clone, Default)]
