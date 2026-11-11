@@ -8,7 +8,6 @@ pub mod fetch;
 mod llvm;
 mod mesa;
 mod metal_suite;
-mod nvidia;
 mod nvk;
 mod support;
 mod sysroot;

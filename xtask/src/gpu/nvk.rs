@@ -8,10 +8,9 @@
 //! from sources generated here. Mesa itself stays unpatched: what differs is
 //! the C library, the configuration below and the units in `compat/mesa`.
 use super::{
-    nvidia::Toolchain,
     support::{NATIVE_TARGET, build_directory, capture, gpu, slashed, third_party, tool},
     sysroot::Sysroot,
-    toolchain::GENERATORS,
+    toolchain::{GENERATORS, Toolchain},
 };
 use crate::tools::{self, exec};
 use anyhow::{Context, Result, ensure};

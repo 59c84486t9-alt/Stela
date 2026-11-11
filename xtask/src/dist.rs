@@ -6,9 +6,9 @@
 use crate::tools::{cargo, exec, root};
 use anyhow::Result;
 
-pub fn run(nvk: bool) -> Result<()> {
+pub fn run() -> Result<()> {
     crate::gpu::fetch::fetch(false)?;
-    let built = crate::boot::build(true, nvk)?;
+    let built = crate::boot::build(true)?;
     let efi = built.with_file_name("stela-dist.efi");
     crate::boot::deploy_image(&built, &efi)?;
     exec(

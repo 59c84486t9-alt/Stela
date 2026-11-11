@@ -60,7 +60,7 @@ const CROSS_TARGET_DIR: &str = "target/cross";
 const RELEASE_HOST: &str = "aarch64-apple-darwin";
 const DENY: [&str; 3] = ["--", "-D", "warnings"];
 
-pub fn run(fix: bool, nvk: bool, low_memory: bool) -> Result<()> {
+pub fn run(fix: bool, low_memory: bool) -> Result<()> {
     let gpu_jobs = if low_memory { 1 } else { 8 };
     if fix {
         exec(&mut command(["fmt", "--all"]))?;
@@ -90,37 +90,34 @@ pub fn run(fix: bool, nvk: bool, low_memory: bool) -> Result<()> {
         uefi(["-p", "stela-driver-net", "--features", "native-acpi"]),
         uefi(["-p", "stela-driver-storage"]),
         uefi(["-p", "stela-driver-audio"]),
-        uefi(["-p", "stela-driver-gpu"]),
         uefi(["-p", "stela-drivers", "--features", "native-acpi"]),
-    ];
-    if nvk {
-        boot_lane.push(uefi([
+        uefi([
             "-p",
             "stela-driver-gpu",
             "--features",
             "metal-linked,nouveau-port",
-        ]));
-        let mut nvk_clippy = uefi([BOOT[0], BOOT[1], "--features", "nvk"]);
-        // Mesa's unchanged path crates declare their upstream naming lint
-        // policy in their manifests. Deny warnings on the mount itself;
-        // Stela's driver owners are checked separately above.
-        nvk_clippy.env("RUSTFLAGS", BOOT_RUSTFLAGS);
-        boot_lane.push(nvk_clippy);
-        let mut linked = command([
-            "build",
-            "--locked",
-            "--manifest-path",
-            BOOT_MANIFEST,
-            "--features",
-            "nvk",
-            "--target",
-            BOOT_TARGET,
-            "--target-dir",
-            BOOT_TARGET_DIR,
-        ]);
-        linked.env("CARGO_BUILD_JOBS", gpu_jobs.to_string());
-        boot_lane.push(linked);
-    }
+        ]),
+    ];
+    let mut nvk_clippy = uefi([BOOT[0], BOOT[1], "--features", "nvk"]);
+    // Mesa's unchanged path crates declare their upstream naming lint
+    // policy in their manifests. Deny warnings on the mount itself;
+    // Stela's driver owners are checked separately above.
+    nvk_clippy.env("RUSTFLAGS", BOOT_RUSTFLAGS);
+    boot_lane.push(nvk_clippy);
+    let mut linked = command([
+        "build",
+        "--locked",
+        "--manifest-path",
+        BOOT_MANIFEST,
+        "--features",
+        "nvk",
+        "--target",
+        BOOT_TARGET,
+        "--target-dir",
+        BOOT_TARGET_DIR,
+    ]);
+    linked.env("CARGO_BUILD_JOBS", gpu_jobs.to_string());
+    boot_lane.push(linked);
     boot_lane.extend(CROSS.map(|(target, packages)| {
         let mut clippy = command(["clippy", "--locked"]);
         clippy
@@ -170,9 +167,7 @@ pub fn run(fix: bool, nvk: bool, low_memory: bool) -> Result<()> {
         }
         cross?;
         crate::gpu::fetch::fetch(false)?;
-        if nvk {
-            crate::gpu::build_nvk(gpu_jobs)?;
-        }
+        crate::gpu::build_nvk(gpu_jobs)?;
         lane(boot_lane, serial)?;
         lane(host_lane, serial)?;
         return run_tests(serial);
@@ -184,12 +179,7 @@ pub fn run(fix: bool, nvk: bool, low_memory: bool) -> Result<()> {
             .collect();
         // The GPU ports build against the pinned, patched upstream sources.
         let lanes = crate::gpu::fetch::fetch(false)
-            .and_then(|()| {
-                if nvk {
-                    crate::gpu::build_nvk(gpu_jobs)?;
-                }
-                Ok(())
-            })
+            .and_then(|()| crate::gpu::build_nvk(gpu_jobs))
             .map(|()| {
                 let boot = scope.spawn(move || lane(boot_lane, buffered));
                 let host = lane(host_lane, exec);

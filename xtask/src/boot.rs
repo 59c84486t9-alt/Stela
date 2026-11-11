@@ -573,11 +573,9 @@ pub fn run(command: Command) -> Result<ExitCode> {
     }
 }
 
-pub fn build(release: bool, nvk: bool) -> Result<PathBuf> {
-    if nvk {
-        crate::gpu::build_nvk(crate::gpu::default_jobs())?;
-    }
-    build_with_diagnostics(release, false, nvk)
+pub fn build(release: bool) -> Result<PathBuf> {
+    crate::gpu::build_nvk(crate::gpu::default_jobs())?;
+    build_with_diagnostics(release, false, true)
 }
 
 fn build_for_boot(release: bool, diagnostics: bool, nvk: bool) -> Result<PathBuf> {
