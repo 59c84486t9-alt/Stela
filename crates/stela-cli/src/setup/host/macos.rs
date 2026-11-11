@@ -85,31 +85,38 @@ impl Host for System {
     }
 
     fn read(&self, identifier: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
-        use std::{io::Read, io::Seek, io::SeekFrom};
+        use std::os::unix::fs::FileExt;
         let path = raw_device(identifier)?;
-        let mut file = std::fs::File::open(&path).with_context(|| {
+        let file = std::fs::File::open(&path).with_context(|| {
             format!(
                 "cannot read {path}; setup reads the installed disk's partitions as root (sudo)"
             )
         })?;
-        file.seek(SeekFrom::Start(offset))?;
-        let mut bytes = vec![0; length];
-        file.read_exact(&mut bytes)?;
-        Ok(bytes)
+        // A raw device takes whole blocks at block offsets only.
+        super::read_blocks(block_size(&file), offset, length, &mut |buffer, at| {
+            file.read_exact_at(buffer, at)
+        })
+        .with_context(|| format!("cannot read {path}"))
     }
 
     fn write(&self, identifier: &str, offset: u64, bytes: &[u8]) -> Result<()> {
-        use std::{io::Seek, io::SeekFrom, io::Write};
+        use std::os::unix::fs::FileExt;
         let path = raw_device(identifier)?;
-        let mut file = std::fs::OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .open(&path)
             .with_context(|| format!("cannot open {path} for writing (sudo)"))?;
-        file.seek(SeekFrom::Start(offset))?;
         // A raw device has no file cache to flush: its writes reach the
         // disk unbuffered, and `sync_all`'s F_FULLFSYNC fails on it (ENOTTY).
-        file.write_all(bytes)?;
-        Ok(())
+        super::write_blocks(
+            block_size(&file),
+            offset,
+            bytes,
+            &mut |buffer, at| file.read_exact_at(buffer, at),
+            &mut |data, at| file.write_all_at(data, at),
+        )
+        .with_context(|| format!("cannot write {path}"))
     }
 
     fn unmount(&self, partition: &PartitionInfo) -> Result<()> {
@@ -162,6 +169,22 @@ impl Host for System {
 
     fn cpu(&self) -> Result<Cpu> {
         super::cpu()
+    }
+}
+
+/// The block size of the raw device `file` (`DKIOCGETBLOCKSIZE`), or 4096,
+/// which every disk's blocks divide.
+fn block_size(file: &std::fs::File) -> u64 {
+    use std::os::unix::io::AsRawFd;
+    /// `_IOR('d', 24, uint32_t)`.
+    const DKIOCGETBLOCKSIZE: libc::c_ulong = 0x4004_6418;
+    let mut size: u32 = 0;
+    // SAFETY: the request writes one u32 into `size`, which outlives the
+    // call, through a descriptor `file` keeps open.
+    let done = unsafe { libc::ioctl(file.as_raw_fd(), DKIOCGETBLOCKSIZE, &mut size) };
+    match done == 0 && size >= 512 && size.is_power_of_two() {
+        true => u64::from(size),
+        false => 4096,
     }
 }
 

@@ -297,6 +297,45 @@ fn cpu() -> Result<Cpu> {
     bail!("an installed disk is set up on the x86 PC that boots it")
 }
 
+/// Bytes `[offset, offset + length)` of a device that takes only whole
+/// `block`-byte blocks at block offsets, as macOS's raw disks do (EINVAL
+/// otherwise): `read_at` reads a whole span at a block offset.
+#[cfg(any(target_os = "macos", test))]
+fn read_blocks(
+    block: u64,
+    offset: u64,
+    length: usize,
+    read_at: &mut dyn FnMut(&mut [u8], u64) -> std::io::Result<()>,
+) -> Result<Vec<u8>> {
+    let first = offset / block * block;
+    let end = (offset + length as u64).div_ceil(block) * block;
+    let mut bytes = vec![0u8; usize::try_from(end - first)?];
+    read_at(&mut bytes, first)?;
+    let skip = usize::try_from(offset - first)?;
+    Ok(bytes[skip..skip + length].to_vec())
+}
+
+/// Write `data` at `offset` of such a device, merging the partial blocks at
+/// either end with what they hold.
+#[cfg(any(target_os = "macos", test))]
+fn write_blocks(
+    block: u64,
+    offset: u64,
+    data: &[u8],
+    read_at: &mut dyn FnMut(&mut [u8], u64) -> std::io::Result<()>,
+    write_at: &mut dyn FnMut(&[u8], u64) -> std::io::Result<()>,
+) -> Result<()> {
+    let first = offset / block * block;
+    let end = (offset + data.len() as u64).div_ceil(block) * block;
+    if first == offset && end == offset + data.len() as u64 {
+        return Ok(write_at(data, offset)?);
+    }
+    let mut bytes = read_blocks(block, first, usize::try_from(end - first)?, read_at)?;
+    let skip = usize::try_from(offset - first)?;
+    bytes[skip..skip + data.len()].copy_from_slice(data);
+    Ok(write_at(&bytes, first)?)
+}
+
 /// Write `layout` to the whole disk `file`, durably: the bytes setup's
 /// erase lays out, written in their order, zeros in bounded runs.
 #[cfg(not(target_os = "macos"))]
@@ -348,6 +387,46 @@ mod tests {
         assert_eq!(facts(Bus::Other, false, false).removal(), Removal::Fixed);
         // A Thunderbolt SSD macOS places outside the Mac.
         assert_eq!(facts(Bus::Other, false, true).removal(), Removal::Typed);
+    }
+
+    #[test]
+    fn raw_device_io_uses_whole_blocks_only() {
+        use std::cell::RefCell;
+        let device = RefCell::new((0..8192u32).map(|i| i as u8).collect::<Vec<u8>>());
+        let aligned = |bytes: usize, at: u64| {
+            assert!(
+                bytes.is_multiple_of(4096) && at.is_multiple_of(4096),
+                "{bytes} bytes at {at}"
+            );
+        };
+        let mut read_at = |buffer: &mut [u8], at: u64| {
+            aligned(buffer.len(), at);
+            let at = at as usize;
+            buffer.copy_from_slice(&device.borrow()[at..at + buffer.len()]);
+            Ok(())
+        };
+        let read = read_blocks(4096, 4090, 12, &mut read_at).unwrap();
+        assert_eq!(read, (4090..4102u32).map(|i| i as u8).collect::<Vec<_>>());
+        let mut write_at = |data: &[u8], at: u64| {
+            aligned(data.len(), at);
+            let at = at as usize;
+            device.borrow_mut()[at..at + data.len()].copy_from_slice(data);
+            Ok(())
+        };
+        let mut read_at = |buffer: &mut [u8], at: u64| {
+            aligned(buffer.len(), at);
+            let at = at as usize;
+            buffer.copy_from_slice(&device.borrow()[at..at + buffer.len()]);
+            Ok(())
+        };
+        write_blocks(4096, 100, &[0xee; 10], &mut read_at, &mut write_at).unwrap();
+        let after = device.borrow().clone();
+        assert_eq!(after[99], 99);
+        assert!(after[100..110].iter().all(|&b| b == 0xee));
+        assert_eq!(after[110], 110);
+        assert_eq!(after[4096], 0);
+        write_blocks(4096, 4096, &[1; 4096], &mut read_at, &mut write_at).unwrap();
+        assert!(device.borrow()[4096..].iter().all(|&b| b == 1));
     }
 
     #[test]
