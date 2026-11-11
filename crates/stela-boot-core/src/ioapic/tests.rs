@@ -983,3 +983,153 @@ fn finish(retired: stela_drivers::bus::irq::RetiredSource<dyn stela_drivers::bus
     drop(callback);
     drop(route);
 }
+
+/// A cohort unit with `pins` version-reported pins, all masked.
+fn cohort_unit(pins: u16, id: u8, gsi_base: u32) -> (Arc<Board>, Arc<Unit<Io, Cpu>>) {
+    let b = Board::new();
+    {
+        let mut hardware = b.hw.lock().unwrap();
+        hardware.regs[1] = 0x21 | u32::from(pins - 1) << 16;
+        for pin in 0..usize::from(pins) {
+            hardware.regs[0x10 + pin * 2] = MASK;
+        }
+    }
+    let r = Box::leak(Box::new(Registry::new(Cpu(b.clone()))));
+    b.registry.store(r, Ordering::Relaxed);
+    // SAFETY: each model board is its unit's only selector/window owner.
+    let u = unsafe {
+        Unit::attach(
+            Io(b.clone()),
+            Cpu(b.clone()),
+            Arc::new(Domain(b.clone())),
+            r.identity(),
+            id,
+            gsi_base,
+        )
+    }
+    .unwrap();
+    (b, u)
+}
+
+/// An AMD desktop MADT: the FCH IOAPIC (24 pins at GSI 0), a second IOAPIC
+/// at GSI 24, the timer override and an active-low level SCI on IRQ 9.
+fn amd_madt() -> alloc::vec::Vec<u8> {
+    let mut b = alloc::vec![0u8; 44];
+    b[40] = 1; // PCAT_COMPAT: an 8259 pair exists beside the IOAPICs.
+    b.extend_from_slice(&[1, 12, 0x21, 0, 0, 0, 0xc0, 0xfe, 0, 0, 0, 0]);
+    b.extend_from_slice(&[1, 12, 0x22, 0, 0, 0x10, 0xc0, 0xfe, 24, 0, 0, 0]);
+    b.extend_from_slice(&[2, 10, 0, 0, 2, 0, 0, 0, 0, 0]);
+    b.extend_from_slice(&[2, 10, 0, 9, 9, 0, 0, 0, 0x0f, 0]);
+    b[..4].copy_from_slice(b"APIC");
+    let length = b.len() as u32;
+    b[4..8].copy_from_slice(&length.to_le_bytes());
+    b[9] = 0u8.wrapping_sub(b.iter().fold(0u8, |s, x| s.wrapping_add(*x)));
+    b
+}
+
+#[test]
+fn amd_two_ioapic_cohort_masks_firmware_unmasked_legacy_pins_and_verifies_i8042_lines() {
+    let routing = crate::madt::Routing::parse(&amd_madt(), 48).unwrap();
+    assert!(routing.has_legacy_pic());
+    let [first, second] = routing.units[..] else {
+        panic!("two MADT IOAPICs")
+    };
+    let (fch, fch_unit) = cohort_unit(24, first.id, first.gsi_base);
+    let (other, other_unit) = cohort_unit(32, second.id, second.gsi_base);
+    {
+        // Firmware left the 8259 virtual wire, both i8042 lines (one at a
+        // low ISA vector) and one line of the second unit unmasked.
+        let mut hardware = fch.hw.lock().unwrap();
+        hardware.regs[0x10] = EXT_INT;
+        hardware.regs[0x12] = 0x31;
+        hardware.regs[0x28] = LOWEST_PRIORITY | 0x0c;
+        hardware.regs[0x29] = 1 << 24;
+        other.hw.lock().unwrap().regs[0x16] = 1 << 15 | 1 << 13 | 0x41;
+    }
+    let spans = [(first, fch_unit.pins()), (second, other_unit.pins())];
+    routing.validate_units(&spans).unwrap();
+    // SAFETY: sole controllers, CPU and original firmware route models.
+    let routes = unsafe {
+        [
+            fch_unit.firmware_routes().unwrap(),
+            other_unit.firmware_routes().unwrap(),
+        ]
+    };
+    let keyboard = routing.isa(1).unwrap();
+    let mouse = routing.isa(12).unwrap();
+    // Nothing is verified before the cohort is contained.
+    assert_eq!(
+        verify_owned_line(&routing, &spans, &routes, keyboard),
+        Err(IrqError::Unavailable)
+    );
+    for plan in &routes {
+        // SAFETY: the fixture retains each exact original controller.
+        unsafe { plan.contain() }.unwrap();
+    }
+    assert_eq!(
+        verify_owned_line(&routing, &spans, &routes, keyboard),
+        Ok(0)
+    );
+    assert_eq!(verify_owned_line(&routing, &spans, &routes, mouse), Ok(0));
+    let second_line = LineRoute {
+        gsi: 27,
+        polarity: Polarity::Low,
+        trigger: Trigger::Level,
+    };
+    assert_eq!(
+        verify_owned_line(&routing, &spans, &routes, second_line),
+        Ok(1)
+    );
+    for (board, pins) in [(&fch, 24), (&other, 32)] {
+        let hardware = board.hw.lock().unwrap();
+        for pin in 0..pins {
+            assert_ne!(hardware.regs[0x10 + pin * 2] & MASK, 0, "pin {pin} masked");
+        }
+    }
+    assert_eq!(fch.hw.lock().unwrap().regs[0x10], EXT_INT | MASK);
+    assert_eq!(
+        fch.hw.lock().unwrap().regs[0x28],
+        LOWEST_PRIORITY | 0x0c | MASK
+    );
+    // A GSI past both units, or plans out of cohort order, verify nothing.
+    let outside = LineRoute {
+        gsi: 56,
+        ..second_line
+    };
+    assert_eq!(
+        verify_owned_line(&routing, &spans, &routes, outside),
+        Err(IrqError::Route)
+    );
+    let [a, b] = routes;
+    let swapped = [b, a];
+    assert_eq!(
+        verify_owned_line(&routing, &spans, &swapped, keyboard),
+        Err(IrqError::Route)
+    );
+    assert_eq!(
+        verify_owned_line(&routing, &spans[..1], &swapped[..1], keyboard),
+        Err(IrqError::Route)
+    );
+}
+
+#[test]
+fn firmware_containment_refuses_unmasked_smi_nmi_init_and_reserved_modes() {
+    for mode in [2 << 8, 3 << 8, 4 << 8, 5 << 8, 6 << 8] {
+        let (board, unit) = cohort_unit(24, 0, 0);
+        board.hw.lock().unwrap().regs[0x12] = mode | 0x31;
+        // SAFETY: sole controller, CPU and original firmware route model.
+        let plan = unsafe { unit.firmware_routes() };
+        assert!(matches!(plan, Err(IrqError::Unsupported)), "mode {mode:#x}");
+        assert!(board.hw.lock().unwrap().events.is_empty());
+    }
+    for mode in [0, LOWEST_PRIORITY, EXT_INT] {
+        let (board, unit) = cohort_unit(24, 0, 0);
+        board.hw.lock().unwrap().regs[0x12] = mode | 0x01;
+        // SAFETY: sole controller, CPU and original firmware route model.
+        let plan = unsafe { unit.firmware_routes() }.unwrap();
+        // SAFETY: the fixture retains the exact original controller.
+        unsafe { plan.contain() }.unwrap();
+        assert_eq!(board.hw.lock().unwrap().regs[0x12], mode | 0x01 | MASK);
+        plan.verify_line(1).unwrap();
+    }
+}

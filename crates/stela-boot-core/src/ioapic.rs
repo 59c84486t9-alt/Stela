@@ -25,6 +25,44 @@ const DELIVERY: u32 = 1 << 12;
 const DELIVERY_MODE: u32 = 7 << 8;
 const LOWEST_PRIORITY: u32 = 1 << 8;
 const CONFIG: u32 = 0xff | 7 << 8 | 1 << 11 | 1 << 13 | 1 << 15 | MASK;
+const EXT_INT: u32 = 7 << 8;
+
+/// Whether firmware may have left this redirection entry unmasked for the
+/// initial containment to mask, as Linux's clear_IO_APIC masks every pin at
+/// boot: fixed and lowest-priority routes with any vector (firmware leaves
+/// ISA lines such as the i8042's at low vectors), and the 8259 virtual-wire
+/// ExtINT route. SMI, NMI, INIT and reserved modes stay refused: they are
+/// not ordinary device routes this containment may take over.
+fn maskable_firmware_mode(low: u32) -> bool {
+    matches!(low & DELIVERY_MODE, 0 | LOWEST_PRIORITY | EXT_INT)
+}
+
+/// Verify `line` against the firmware plan of the cohort unit whose
+/// version-reported pins hold it, and return that unit's index. `spans`
+/// and `routes` are the same complete original cohort in the same order;
+/// a platform may have several IOAPICs (AMD places a second one behind the
+/// southbridge's), so ownership comes from the GSI spans, never from unit 0.
+pub fn verify_owned_line<R: Registers, P: Platform>(
+    routing: &crate::madt::Routing,
+    spans: &[(crate::madt::Unit, u16)],
+    routes: &[FirmwareRoutes<R, P>],
+    line: LineRoute,
+) -> Result<usize, IrqError> {
+    if spans.len() != routes.len() {
+        return Err(IrqError::Route);
+    }
+    let owner = routing.owner(line, spans).map_err(|_| IrqError::Route)?;
+    let index = spans
+        .iter()
+        .position(|(unit, _)| *unit == owner)
+        .ok_or(IrqError::Route)?;
+    let plan = &routes[index];
+    if plan.unit.gsi_base != owner.gsi_base || plan.unit.id != owner.id {
+        return Err(IrqError::Route);
+    }
+    plan.verify_line(line.gsi)?;
+    Ok(index)
+}
 const MAX_PINS: usize = 120;
 
 /// # Safety
@@ -296,9 +334,7 @@ impl<R: Registers, P: Platform> Unit<R, P> {
         let _guard = self.lock();
         for pin in 0..self.pins as u8 {
             let (low, high) = self.firmware_entry(pin)?;
-            if low & MASK == 0
-                && (!matches!(low & DELIVERY_MODE, 0 | LOWEST_PRIORITY) || (low as u8) < 16)
-            {
+            if low & MASK == 0 && !maskable_firmware_mode(low) {
                 return Err(IrqError::Unsupported);
             }
             entries.push((low, high));

@@ -876,15 +876,8 @@ impl MountedControllers {
         routing: &crate::native_irq::madt::Routing,
         line: irq::LineRoute,
     ) -> Result<&Arc<IoapicUnit>, irq::IrqError> {
-        let owner = routing
-            .owner(line, &self.spans)
-            .map_err(|_| irq::IrqError::Route)?;
-        let index = self
-            .units
-            .iter()
-            .position(|(descriptor, _)| *descriptor == owner)
-            .ok_or(irq::IrqError::Route)?;
-        self.routes[index].verify_line(line.gsi)?;
+        let index =
+            crate::native_irq::ioapic::verify_owned_line(routing, &self.spans, &self.routes, line)?;
         Ok(&self.units[index].1)
     }
 }
