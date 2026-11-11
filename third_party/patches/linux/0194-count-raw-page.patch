@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Tue, 10 Nov 2026 09:35:20 -0500
+Date: Tue, 10 Nov 2026 14:35:20 +0000
 Subject: [PATCH] feat(nouveau): count raw page-table references by page size
  and sparse references in bytes
 

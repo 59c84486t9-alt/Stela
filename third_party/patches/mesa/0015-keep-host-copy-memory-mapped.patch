@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Mon, 9 Nov 2026 12:00:00 -0500
+Date: Mon, 9 Nov 2026 17:00:00 +0000
 Subject: [PATCH] nvk: Keep memory mapped for host image copies until it is
  freed
 

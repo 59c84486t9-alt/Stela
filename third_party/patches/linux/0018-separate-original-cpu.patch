@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Mon, 2 Nov 2026 21:44:43 -0500
+Date: Tue, 3 Nov 2026 02:44:43 +0000
 Subject: [PATCH] refactor(cpu): separate original CPU topology providers
 
 ---

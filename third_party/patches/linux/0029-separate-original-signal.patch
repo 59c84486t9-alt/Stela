@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Mon, 2 Nov 2026 22:36:13 -0500
+Date: Tue, 3 Nov 2026 03:36:13 +0000
 Subject: [PATCH] refactor(fork): separate original signal and affinity
  lifecycle helpers
 

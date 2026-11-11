@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Mon, 2 Nov 2026 02:41:05 -0500
+Date: Mon, 2 Nov 2026 07:41:05 +0000
 Subject: [PATCH] feat(kthread): retain managed native creation lineage
 
 ---

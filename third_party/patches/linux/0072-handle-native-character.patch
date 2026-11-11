@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 11:26:28 -0500
+Date: Tue, 3 Nov 2026 16:26:28 +0000
 Subject: [PATCH] fix(fs): handle native character device map availability
 
 ---

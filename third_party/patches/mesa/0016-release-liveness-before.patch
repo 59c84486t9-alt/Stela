@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Mon, 9 Nov 2026 08:10:06 -0500
+Date: Mon, 9 Nov 2026 13:10:06 +0000
 Subject: [PATCH] nak: Release liveness before rebuilding it and refuse shaders
  whose liveness cannot fit in memory
 

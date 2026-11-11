@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Wed, 4 Nov 2026 03:11:24 -0500
+Date: Wed, 4 Nov 2026 08:11:24 +0000
 Subject: [PATCH] refactor(kthread): isolate address-space adoption
 
 ---

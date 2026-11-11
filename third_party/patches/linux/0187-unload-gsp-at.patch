@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: stela <stela@localhost>
-Date: Mon, 2 Nov 2026 10:26:07 -0500
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 15:26:07 +0000
 Subject: [PATCH] fix(nouveau): unload GSP at shutdown
 
 ---

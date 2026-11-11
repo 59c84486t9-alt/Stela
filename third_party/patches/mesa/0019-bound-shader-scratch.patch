@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Tue, 10 Nov 2026 10:54:27 -0500
+Date: Tue, 10 Nov 2026 15:54:27 +0000
 Subject: [PATCH] nvk: Bound shader scratch to an eighth of VRAM, refuse
  shaders past it and log each growth
 

@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Tue, 3 Nov 2026 20:58:53 -0500
+Date: Wed, 4 Nov 2026 01:58:53 +0000
 Subject: [PATCH] fix(nouveau): treat a completed job's timeout as a lost
  interrupt
 

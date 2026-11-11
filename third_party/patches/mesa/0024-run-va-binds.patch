@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Tue, 10 Nov 2026 19:32:29 -0500
+Date: Wed, 11 Nov 2026 00:32:29 +0000
 Subject: [PATCH] Revert "nvk: Run VA binds asynchronously on a device timeline
  that every exec waits for"
 

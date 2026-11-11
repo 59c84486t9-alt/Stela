@@ -1,6 +1,6 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
-Date: Fri, 23 Oct 2026 18:55:10 -0400
+Date: Fri, 23 Oct 2026 22:55:10 +0000
 Subject: [PATCH] fix(nouveau): bound GSP firmware parsing and radix sizing
 
 ---
