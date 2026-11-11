@@ -68,7 +68,7 @@ fn route_arithmetic_matches_linux() {
 
 #[test]
 fn uuid_round_trips_its_canonical_form() {
-    let uuid = Uuid::of([0x1122_3344, 0x5566_7788, !0, !0]);
+    let uuid = Uuid::from_le_words([0x1122_3344, 0x5566_7788, !0, !0]);
     let text = alloc::format!("{uuid}");
     assert_eq!(text, "44332211-8877-6655-ffff-ffffffffffff");
     assert_eq!(Uuid::parse(&text), Some(uuid));
@@ -448,7 +448,7 @@ fn a_thunderbolt_3_dock_comes_up_through_its_link_controller() {
     };
     assert_eq!(name.as_deref(), Some("Acme Doc"));
     assert_eq!((generation, version, width), (3, 0, WIDTH_DUAL));
-    assert_eq!(uuid, Uuid::of([0xa1a2, 0xb1b2, 0xc1c2, 0xd1d2]));
+    assert_eq!(uuid, Uuid::from_le_words([0xa1a2, 0xb1b2, 0xc1c2, 0xd1d2]));
     assert_eq!(fabric.tunnels_up(Protocol::Pcie), 1);
     assert_eq!(fabric.tunnels_up(Protocol::Usb3), 0);
     let state = fabric.lock();

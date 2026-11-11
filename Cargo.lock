@@ -2241,6 +2241,7 @@ dependencies = [
  "cc",
  "sha2",
  "stela-c-build",
+ "stela-contracts",
  "stela-driver-core",
  "triomphe",
 ]

@@ -16,26 +16,9 @@ const DATA_SELECT: u16 = 0x1e00;
 const D3_DELAY: u64 = 10_000;
 const READY_TIMEOUT: u64 = 60_000_000;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Error {
-    Config(super::ConfigError),
-    Interrupted,
-    Identity,
-    Capability,
-    Unsupported,
-    Clock,
-    Read(u16),
-    Readback(u16),
-    State,
-    BusMaster,
-    Bars,
-    NotReady,
-}
-impl From<super::ConfigError> for Error {
-    fn from(error: super::ConfigError) -> Self {
-        Self::Config(error)
-    }
-}
+mod error;
+pub use error::Error;
+
 #[derive(Clone, Copy)]
 enum Phase {
     Ready,

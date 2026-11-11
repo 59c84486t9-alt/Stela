@@ -100,45 +100,7 @@ impl From<channel::Error> for Error {
 }
 
 /// A router's unique identity, as `/sys/bus/thunderbolt` shows it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Uuid(pub [u8; 16]);
-
-impl Uuid {
-    fn of(words: [u32; 4]) -> Self {
-        let mut bytes = [0; 16];
-        for (chunk, word) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(words) {
-            chunk.copy_from_slice(&word.to_le_bytes());
-        }
-        Self(bytes)
-    }
-    /// Parse the canonical 8-4-4-4-12 form.
-    pub fn parse(text: &str) -> Option<Self> {
-        let mut digits = text.bytes().filter(|byte| *byte != b'-');
-        let dashes = text.bytes().enumerate().filter(|(_, byte)| *byte == b'-');
-        if !dashes.map(|(index, _)| index).eq([8, 13, 18, 23]) {
-            return None;
-        }
-        let mut bytes = [0; 16];
-        for byte in &mut bytes {
-            let high = char::from(digits.next()?).to_digit(16)?;
-            let low = char::from(digits.next()?).to_digit(16)?;
-            *byte = (high << 4 | low) as u8;
-        }
-        digits.next().is_none().then_some(Self(bytes))
-    }
-}
-
-impl fmt::Display for Uuid {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, byte) in self.0.iter().enumerate() {
-            if matches!(index, 4 | 6 | 8 | 10) {
-                f.write_str("-")?;
-            }
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+pub use stela_contracts::uuid::Uuid;
 
 /// Why a router's PCIe tunnel was or was not admitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -559,7 +521,7 @@ impl Cm {
             device: router.device(),
             generation: router.generation(),
             version: router.usb4_version(),
-            uuid: Uuid::of(router.uuid()),
+            uuid: Uuid::from_le_words(router.uuid()),
             speed: router.link_speed,
             width: router.link_width,
         });
@@ -825,7 +787,7 @@ impl Cm {
             return Ok(());
         };
         let up = (route, up.number);
-        let uuid = Uuid::of(router.uuid());
+        let uuid = Uuid::from_le_words(router.uuid());
         let above = parent(route);
         if !self.router(above)?.authorized {
             return Ok(());

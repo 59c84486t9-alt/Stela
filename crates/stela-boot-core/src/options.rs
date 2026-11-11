@@ -8,7 +8,7 @@ use crate::Result;
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 use stela_contracts::refuse;
-pub use stela_drivers::bus::thunderbolt::manager::Uuid;
+pub use stela_contracts::uuid::Uuid;
 use stela_loader::{
     boot_selection::{self, BootVolume},
     handoff::BootCommand,
