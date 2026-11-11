@@ -265,8 +265,7 @@ impl<R: ReadAt> Answers<R> {
     /// `fcs-key-url` GET from the inventory's recorded recipient key, so the
     /// guest fetches the system-image content key without the network. The
     /// reply is the PEM as the public key server returns it; restored unwraps
-    /// the archive key from the image's own `fcs-response` (see
-    /// `docs/research/restore-client.md`). A recorded digest that disagrees
+    /// the archive key from the image's own `fcs-response`. A recorded digest that disagrees
     /// with the rebuilt reply, as a swapped key would, refuses by member.
     pub fn stage_system_image_keys(&mut self) -> Result<()> {
         // Several images can share one recipient key and `fcs-key-url`; stage
@@ -667,8 +666,8 @@ impl<R: ReadAt> Answers<R> {
             _ => Err(Error::Invalid("unknown required restore DataType")),
         }
     }
-    /// libbootpolicy accepts only an Apple-signed recoveryOS policy
-    /// (`docs/research/restore-trust.md`): Apple's ticket for the bare
+    /// libbootpolicy accepts only an Apple-signed recoveryOS policy:
+    /// Apple's ticket for the bare
     /// policy, stitched unchanged, or a refusal without the signing service.
     fn recovery_local_policy(&mut self, identity: &Identity, args: &Value) -> Result<Plan> {
         let signer = self.signer.as_mut().ok_or(Error::Invalid(
@@ -810,7 +809,7 @@ impl<R: ReadAt> Answers<R> {
     /// optional; seputil 0x100012f54 refuses any other top level). No global
     /// ticket covers them (the root ticket has no `rsep` or `sepi`), so the
     /// container carries no manifest, and Stela's SEP model is their
-    /// authenticator (`docs/research/sep.md`), as SEPROM is a Mac's. The
+    /// authenticator, as SEPROM is a Mac's. The
     /// firmware set and LLB are absent, so a reader of them fails.
     pub fn sep_firmware(&mut self, request: &Value) -> Result<Plan> {
         self.sep_firmware_inner(request)

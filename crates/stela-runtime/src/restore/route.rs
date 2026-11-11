@@ -1,8 +1,9 @@
 //! Host option sets: Apple's stock restore, the recovery-only erase restore
 //! of the stick SSD, and the study for firmware owned by Stela. The study is
 //! an explicitly unchecked experiment, not an attestation that every
-//! requested object can be supplied. Evidence: restored classic arm64e file offsets in
-//! `docs/research/stela-firmware-route.md`. No application/build keys.
+//! requested object can be supplied. Offsets marked R are file offsets in
+//! the 26A434 ramdisk's `restored_external` arm64e slice. No
+//! application/build keys.
 use super::{Error, Result, plist::Value};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -23,7 +24,7 @@ pub enum Route {
     /// `AuthInstallRecoveryOSVariant` (R 0x100012ff4, 0x1000131ac ->
     /// 0x100027018), which this route withholds. `SystemImage` false
     /// (R 0x100014ec0, 0x100026ed4) tells the later steps there is no system
-    /// volume. Evidence: `docs/research/small-installer-usb.md`.
+    /// volume.
     Recovery,
     /// Exercise the original global/Reduced Security path while leaving NOR
     /// flashing and recovery population disabled. SEP load remains mandatory
@@ -69,7 +70,7 @@ impl Route {
     }
     /// Whether restored may flash the NOR firmware set. The study turns
     /// `FlashNOR` off, which leaves `load_sep_os` as `NORData`'s only
-    /// consumer (R 0x2d51c..0x2d660, `docs/research/stela-firmware-route.md`).
+    /// consumer (R 0x2d51c..0x2d660).
     pub fn flashes_nor(self) -> bool {
         self != Self::StelaFirmwareStudy
     }

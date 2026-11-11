@@ -1,8 +1,8 @@
 //! The opt-in requests to Apple's signing service (TSS): the personalized AP
 //! root tickets a restore installs, the Cryptex1 ticket the restore's
 //! cryptex updater asks for with its own nonce, and the recoveryOS
-//! LocalPolicy, the one object restored verifies against Apple's fixed roots
-//! (`docs/research/restore-trust.md`), so no Stela key can sign it.
+//! LocalPolicy, the one object restored verifies against Apple's fixed roots,
+//! so no Stela key can sign it.
 //!
 //! Wire: libtatsu `tss.c` (`tss_request_new`, `tss_parameters_add_from_manifest`,
 //! `tss_request_add_common_tags`, `tss_request_add_ap_tags`,

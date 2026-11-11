@@ -114,7 +114,7 @@ fn write_range(
 }
 
 /// A pack index entry's bytes: page key, offset from the pack's start and
-/// length (`docs/design/runtime.md`, "Persistent translation store").
+/// length.
 const INDEX_ENTRY_BYTES: usize = 32 + 8 + 8;
 /// The SHA-256 of the header and index that follows the index.
 const CHECKSUM_BYTES: usize = 32;

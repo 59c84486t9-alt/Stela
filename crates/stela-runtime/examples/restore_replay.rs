@@ -1,5 +1,7 @@
 //! Host-side harness for the native restore client. No sockets or Apple servers.
-//! See docs/research/restore-client.md for transcript layout and provenance.
+//! A transcript directory holds `control.plists`, the guest-to-host stream of
+//! big-endian length-prefixed plists, and one `job-ID-port-PORT.input` per
+//! service; the harness writes the matching `.output` files.
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     fs::{self, File},

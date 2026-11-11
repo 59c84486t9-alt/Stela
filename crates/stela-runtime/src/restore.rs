@@ -1,8 +1,8 @@
 //! Request-driven restore host, independent of USB and guest execution.
 //!
-//! Wire evidence: pinned libimobiledevice property_list_service.c/restore.c
-//! and idevicerestore restore.c/asr.c, revisions in
-//! `docs/research/restore-transport.md`. No signing-service access exists here.
+//! Wire evidence: libimobiledevice property_list_service.c/restore.c
+//! (`fa0f791`) and idevicerestore restore.c/asr.c (`4b3e847`). No
+//! signing-service access exists here.
 //! An adapter supplies mux streams; each call performs bounded work so the
 //! caller can schedule control, ASR and independent DataPort jobs fairly.
 pub mod answers;
