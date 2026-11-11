@@ -677,6 +677,7 @@ impl Advertised {
 mod tests {
     use super::super::super::scanout::PixelFormat;
     use super::*;
+    use alloc::format;
 
     const FULL_HD: Mode = Mode {
         width: 1920,
@@ -871,6 +872,105 @@ mod tests {
         let colors = a.color_elements();
         assert!(colors.contains("<key>ID</key><integer size=\"64\">2</integer>"));
         assert!(colors.contains("<key>Score</key><integer size=\"32\">242999</integer>"));
+    }
+
+    /// The value of integer `key` in a serialized property.
+    fn integer(xml: &str, key: &str) -> u64 {
+        let open = format!("<key>{key}</key><integer size=\"");
+        let start = xml.find(&open).unwrap_or_else(|| panic!("{key}")) + open.len();
+        let value = &xml[start..];
+        let value = &value[value.find('>').unwrap() + 1..];
+        value[..value.find('<').unwrap()].parse().unwrap()
+    }
+
+    /// The UI scale SkyLight 27's density rule picks as the default for a
+    /// display publishing `attributes` (`GenerateModeListForDisplay`, guest
+    /// dyld cache 0x1828f9cec..0x1828fad38, no override file for a vendor
+    /// that is not Apple's): physical width in inches from
+    /// `MaxHorizontalImageSize` cm x 0.3937 (QuartzCore 0x18e0bdfe0); half
+    /// the native density from 3840 x 2160 up, else whichever of the native
+    /// density and its half is nearer 110 ppi.
+    fn density_default_scale(attributes: &str) -> u32 {
+        let width = integer(attributes, "NativeFormatHorizontalPixels") as f64;
+        let height = integer(attributes, "NativeFormatVerticalPixels") as f64;
+        let inches = integer(attributes, "MaxHorizontalImageSize") as f64 * 0.3937;
+        assert!(inches > 6.5, "a physical width SkyLight uses");
+        let ppi = width / inches;
+        let half = ppi / 2.0;
+        let target =
+            if width >= 3840.0 && height >= 2160.0 || (half - 110.0).abs() < (ppi - 110.0).abs() {
+                half
+            } else {
+                ppi
+            };
+        if target == ppi { 1 } else { 2 }
+    }
+
+    #[test]
+    fn the_first_published_attributes_already_give_the_settled_default_mode() {
+        // The monitor of the measured runs (EDID 650 x 369 mm) and the sizes
+        // assumed when a monitor reports none. WindowServer's settled mode in
+        // those runs, 2560 x 1440 at scale 1, carries the default flag from
+        // the first mode list on (run 20261110-221312, `FMD` lines).
+        let qhd = Mode {
+            width: 2560,
+            height: 1440,
+            format: PixelFormat::Bgra8888,
+        };
+        let uhd = Mode {
+            width: 3840,
+            height: 2160,
+            format: PixelFormat::Bgra8888,
+        };
+        for (mode, size, scale) in [
+            (qhd, Some((650, 369)), 1),
+            (qhd, None, 1),
+            (FULL_HD, None, 1),
+            (uhd, None, 2),
+        ] {
+            let a = Advertised::sized(mode, 60_000, size).unwrap();
+            let attributes = a.display_attributes();
+            assert_eq!(
+                integer(&attributes, "NativeFormatHorizontalPixels"),
+                u64::from(mode.width)
+            );
+            assert_eq!(
+                integer(&attributes, "NativeFormatVerticalPixels"),
+                u64::from(mode.height)
+            );
+            // The image size in the attributes is the EDID's, which the
+            // detailed timing gives in millimetres.
+            let (width_mm, height_mm) = dtd_size_mm(&a.edid);
+            assert_eq!(
+                integer(&attributes, "MaxHorizontalImageSize"),
+                u64::from(width_mm.div_ceil(10))
+            );
+            assert_eq!(
+                integer(&attributes, "MaxVerticalImageSize"),
+                u64::from(height_mm.div_ceil(10))
+            );
+            // The one timing is the native size and preferred, so the
+            // native size SkyLight reads matches the attributes.
+            let timings = a.timing_elements();
+            assert_eq!(timings.matches("<key>IsPreferred</key><true/>").count(), 1);
+            assert_eq!(timings.matches("<key>TimingType</key>").count(), 1);
+            assert!(timings.contains(&format!(
+                "<key>Active</key><integer size=\"32\">{}</integer>",
+                mode.width
+            )));
+            assert!(timings.contains(&format!(
+                "<key>Active</key><integer size=\"32\">{}</integer>",
+                mode.height
+            )));
+            assert_eq!(
+                density_default_scale(&attributes),
+                scale,
+                "{mode:?} {size:?}"
+            );
+            // Building the answers again gives the same bytes: nothing in
+            // them depends on when they are asked.
+            assert_eq!(Advertised::sized(mode, 60_000, size).unwrap(), a);
+        }
     }
 
     #[test]

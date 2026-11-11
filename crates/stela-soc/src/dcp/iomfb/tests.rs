@@ -11,6 +11,11 @@ const MODE: Mode = Mode {
     height: 2,
     format: PixelFormat::Bgra8888,
 };
+const MODE_QHD: Mode = Mode {
+    width: 2560,
+    height: 1440,
+    format: PixelFormat::Bgra8888,
+};
 const FULL_HD: Mode = Mode {
     width: 1920,
     height: 1080,
@@ -589,6 +594,75 @@ fn start_publishes_the_mode_then_reports_the_monitor_plugged() {
         ]
     );
     assert!(!methods.callback_pending());
+}
+
+/// The properties `made` published, as `(key, text)` in order, each
+/// reassembled from its `D126`..`D128` callbacks.
+fn published(made: &[([u8; 4], Vec<u8>)]) -> Vec<(String, String)> {
+    let mut properties = Vec::new();
+    let mut buffer = Vec::new();
+    for (tag, input) in made {
+        match *tag {
+            PROP_START => {
+                buffer =
+                    alloc::vec![0u8; u32::from_le_bytes(input[0..4].try_into().unwrap()) as usize];
+            }
+            PROP_CHUNK => {
+                let offset = u32::from_le_bytes(input[0x1000..0x1004].try_into().unwrap()) as usize;
+                let length = u32::from_le_bytes(input[0x1004..0x1008].try_into().unwrap()) as usize;
+                buffer[offset..offset + length].copy_from_slice(&input[..length]);
+            }
+            PROP_END => {
+                let key = input.split(|&byte| byte == 0).next().unwrap();
+                let text = core::str::from_utf8(&buffer[..buffer.len() - 1]).unwrap();
+                properties.push((String::from_utf8(key.to_vec()).unwrap(), String::from(text)));
+            }
+            _ => {}
+        }
+    }
+    properties
+}
+
+#[test]
+fn the_display_is_described_once_before_the_hotplug_and_the_same_after_a_reset() {
+    // WindowServer builds its mode list, default mode and physical size from
+    // these properties when the monitor is reported plugged. A guest that
+    // read them at its first query and again later, after a coprocessor
+    // reset, must see the same monitor: nothing published depends on time.
+    let screen = TestScreen(Rc::default(), Some(MODE_QHD));
+    let mut methods = Methods::new(Box::new(screen), interface());
+    started(&mut methods);
+    let first = drain(&mut methods, &[1, 0, 0, 0]);
+    assert_eq!(first.last().unwrap().0, HOTPLUG);
+    assert_eq!(first.iter().filter(|(tag, _)| *tag == HOTPLUG).count(), 1);
+    let properties = published(&first);
+    let attributes = &properties
+        .iter()
+        .find(|(key, _)| key == "DisplayAttributes")
+        .unwrap()
+        .1;
+    for key in [
+        "<key>NativeFormatHorizontalPixels</key><integer size=\"32\">2560</integer>",
+        "<key>NativeFormatVerticalPixels</key><integer size=\"32\">1440</integer>",
+        // The assumed 27-inch monitor: 597 x 336 mm.
+        "<key>MaxHorizontalImageSize</key><integer size=\"32\">60</integer>",
+        "<key>MaxVerticalImageSize</key><integer size=\"32\">34</integer>",
+    ] {
+        assert!(attributes.contains(key), "{key}");
+    }
+    // The display size the AP reads is the native size the attributes name.
+    let size = returned(methods.call(*b"A453", &[0; 4], 8));
+    assert_eq!(&size[0..4], &2560u32.to_le_bytes());
+    assert_eq!(&size[4..8], &1440u32.to_le_bytes());
+    // No later callback re-describes the monitor.
+    assert!(methods.take_callback().is_none());
+
+    methods.check_reset().unwrap();
+    methods.reset();
+    started(&mut methods);
+    let again = drain(&mut methods, &[1, 0, 0, 0]);
+    assert_eq!(published(&again), properties);
+    assert_eq!(again, first);
 }
 
 #[test]
