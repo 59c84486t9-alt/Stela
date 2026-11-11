@@ -15,7 +15,7 @@
 //! keeps nothing else live but the pinned registers, which the call
 //! preserves. The branch forms (BRA*, BLRA* and RETA*) still end their
 //! block, whose thunk completes them.
-use super::{Finish, Form, Lookup, Routine, call_service, lookup};
+use super::{Finish, Form, Lookup, Routine, call_service, lookup, rare};
 use crate::x86_64::asm::{Code, Gpr, Patch, Size, resolve};
 use crate::{
     Anchor, GuestAddress, Place,
@@ -49,8 +49,9 @@ pub fn inlines(operation: Operation) -> bool {
 /// What [`emit`] leaves to [`place`] out of line.
 pub(crate) struct Slow {
     pc: GuestAddress,
-    /// The service call of a memo miss, which returns to the completion.
-    service: Option<(Form, Vec<Patch>, usize)>,
+    /// The service call of a memo miss, which returns to the completion,
+    /// and the lookup's rare path.
+    service: Option<(Form, Vec<Patch>, usize, Patch)>,
     /// The jumps to the exit at the instruction.
     exits: Vec<Patch>,
 }
@@ -80,22 +81,20 @@ pub(crate) fn emit(code: &mut Code, operation: Operation, pc: GuestAddress, cell
         .filter(|form| form.completion == Finish::Register)
         .expect("a form that completes into its register");
     let Lookup {
-        closed,
-        identity,
+        rare: unusual,
         misses,
     } = lookup(
         &mut asm,
         form,
         Place::new(Anchor::Pointer, cells.tags as usize),
     );
-    asm.bind(identity);
     let complete = asm.len();
     let result = asm.guest(Register::X(form.result)).expect("X0..X30");
     asm.mov_store(Size::Qword, result, Gpr::Rax);
     Slow {
         pc,
-        service: Some((form, misses, complete)),
-        exits: vec![closed],
+        service: Some((form, misses, complete, unusual)),
+        exits: vec![],
     }
 }
 
@@ -103,19 +102,22 @@ pub(crate) fn emit(code: &mut Code, operation: Operation, pc: GuestAddress, cell
 pub(crate) fn place(code: &mut Code, slow: Slow, cells: Cells) {
     let mut asm = code.asm();
     let mut exits = slow.exits;
-    let mut back = None;
-    if let Some((form, misses, complete)) = slow.service {
+    let mut back = vec![];
+    if let Some((form, misses, complete, unusual)) = slow.service {
         for miss in misses {
             asm.bind(miss);
         }
         exits.push(call_service(&mut asm, form, Routine::Cell(cells.routine)));
-        back = Some((asm.jmp(), complete));
+        back.push((asm.jmp(), complete));
+        let (closed, identity) = rare(&mut asm, unusual);
+        exits.push(closed);
+        back.push((identity, complete));
     }
     for exit in exits {
         asm.bind(exit);
     }
     super::super::block::direct_exit_with(&mut asm, slow.pc, ExitKind::PointerAuthentication);
-    if let Some((patch, complete)) = back {
+    for (patch, complete) in back {
         resolve(code, patch, complete);
     }
 }

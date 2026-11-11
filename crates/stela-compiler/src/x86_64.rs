@@ -155,6 +155,7 @@ pub(crate) mod sme;
 pub(crate) mod sve;
 mod system;
 mod tag_arithmetic;
+pub mod mirrored_read;
 mod unprivileged;
 pub mod zero_block;
 
@@ -183,6 +184,9 @@ pub struct NativeSystem {
     /// instructions from, which blocks then complete inside themselves
     /// rather than ending at one (`x86_64::pointer::inline`).
     pub pointer: Option<pointer::inline::Cells>,
+    /// The System registers whose MRS blocks complete inside themselves from
+    /// the engine's cells rather than ending at one (`x86_64::mirrored_read`).
+    pub mirrored: mirrored_read::Reads,
 }
 
 impl NativeSystem {
@@ -192,6 +196,7 @@ impl NativeSystem {
         cache_clean: cache_clean::Operations::NONE,
         exclusive: false,
         pointer: None,
+        mirrored: mirrored_read::Reads::NONE,
     };
 }
 
@@ -1239,6 +1244,9 @@ pub(crate) fn emit_instruction(
         }
         Operation::PointerAuthentication(_) => {
             unreachable!("PAC instructions inside a block require its emission")
+        }
+        Operation::MirroredRead { .. } => {
+            unreachable!("mirrored reads require block emission with their cells")
         }
         Operation::FloatingPointRegister(operand) => fp_register::emit(code, &operand),
         Operation::Simd(operand) => simd::emit_for_target(code, &operand, target, checks),

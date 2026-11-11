@@ -306,9 +306,11 @@ fn thunks_complete_hits_and_computed_misses_natively() {
 
 /// `mov [rdi+disp32],rax`.
 const REGISTER_WRITE_BYTES: usize = 7;
-/// The second opcode bytes of `jz` and `jnz` with a 32-bit displacement.
+/// The second opcode bytes of `jz`, `jnz` and `jbe` with a 32-bit
+/// displacement.
 const JZ: u8 = 0x84;
 const JNZ: u8 = 0x85;
+const JBE: u8 = 0x86;
 
 #[test]
 fn register_completions_chain_onward_and_misses_exit_unchanged() {
@@ -328,22 +330,33 @@ fn register_completions_chain_onward_and_misses_exit_unchanged() {
     );
     // The closed key and the refused service land on the exit; the
     // three memo misses on the service call, just after the completion.
-    // The disabled key's identity lands on the completion's register write.
+    // One JBE takes a closed or disabled key to the rare path before the
+    // exit: TEST R8,R8, the closed key's JZ, and the disabled key's JMP to
+    // the completion's register write.
     let complete = next - REGISTER_WRITE_BYTES;
-    let (mut exits, mut calls, mut identities) = (0, 0, 0);
+    let rare = end - DIRECT_EXIT_BYTES - 5 - 6 - 3;
+    let (mut exits, mut calls, mut rares) = (0, 0, 0);
     for at in 0..end - 6 {
-        if thunk.code[at] == 0x0f && [JZ, JNZ].contains(&thunk.code[at + 1]) {
+        if thunk.code[at] == 0x0f && [JZ, JNZ, JBE].contains(&thunk.code[at + 1]) {
             let relative =
                 i32::from_le_bytes(thunk.code[at + 2..at + 6].try_into().unwrap()) as usize;
             match at + 6 + relative {
                 target if target == end - DIRECT_EXIT_BYTES => exits += 1,
                 target if target == next + DIRECT_EXIT_BYTES => calls += 1,
-                target if target == complete => identities += 1,
+                target if target == rare && thunk.code[at + 1] == JBE => rares += 1,
                 target => panic!("a jump to {target}"),
             }
         }
     }
-    assert_eq!((exits, calls, identities), (2, 3, 1));
+    assert_eq!((exits, calls, rares), (2, 3, 1));
+    assert_eq!(thunk.code[rare..rare + 3], [0x4d, 0x85, 0xc0]);
+    let identity = end - DIRECT_EXIT_BYTES - 5;
+    assert_eq!(thunk.code[identity], 0xe9);
+    let relative = i32::from_le_bytes(thunk.code[identity + 1..identity + 5].try_into().unwrap());
+    assert_eq!(
+        (identity as i64 + 5 + i64::from(relative)) as usize,
+        complete
+    );
     assert_eq!(thunk.dynamic, None);
     // A return completes at its exit to the target in RAX, which the
     // service path reaches too.
@@ -351,11 +364,12 @@ fn register_completions_chain_onward_and_misses_exit_unchanged() {
     let ret = super::thunk(ret, pc, TAGS, 0x4000);
     assert_eq!(ret.next, None);
     let returns = ret.dynamic.unwrap();
-    assert_eq!(
-        ret.code[returns..returns + DYNAMIC_EXIT_BYTES],
-        super::super::chain::dynamic_exit(ExitKind::Return)
-    );
-    // The service path's `jmp complete` precedes the final exit.
+    // Padded for its patch point, wherever it lands.
+    assert!(super::super::chain::is_dynamic_exit(
+        &ret.code[returns..returns + DYNAMIC_EXIT_BYTES],
+        ExitKind::Return
+    ));
+    // The disabled key's `jmp complete` precedes the final exit.
     let back = ret.code.len() - DIRECT_EXIT_BYTES - 5;
     assert_eq!(ret.code[back], 0xe9);
     let relative = i32::from_le_bytes(ret.code[back + 1..back + 5].try_into().unwrap());

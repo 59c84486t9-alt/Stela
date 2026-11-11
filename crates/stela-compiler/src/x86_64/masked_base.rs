@@ -179,6 +179,7 @@ fn written(operation: &Operation) -> Option<Register> {
         | Operation::LogicalImmediate { destination, .. }
         | Operation::MoveWide { destination, .. } => destination,
         Operation::PcRelative(operand) => operand.destination,
+        Operation::MirroredRead { word } => super::mirrored_read::destination(word),
         Operation::ConditionalSelect(operand) => operand.destination,
         Operation::Bitfield(operand) => operand.destination,
         Operation::IntegerMath(operand) => operand.destination,

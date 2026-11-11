@@ -85,6 +85,7 @@ pub(crate) fn emit(
             native: crate::x86_64::NativeSystem::NONE,
             checks: crate::x86_64::MemoryChecks::DEFAULT,
             rax: crate::x86_64::Rax::Unknown,
+            flags_live: false,
             target,
             zero_branch: None,
         },

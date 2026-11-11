@@ -229,6 +229,12 @@ pub enum Operation {
     /// A PAC instruction a system-mode block completes inside itself
     /// (`x86_64::pointer::inline`); any other ends its block.
     PointerAuthentication(crate::block::PointerAuthenticationOperation),
+    /// MRS `word` of a System register whose plain read the system-mode
+    /// engine keeps in a cell, which a block completes inside itself
+    /// (`x86_64::mirrored_read`); only blocks given the cells hold it.
+    MirroredRead {
+        word: u32,
+    },
     Exclusive(exclusive::Operand),
     FloatingPoint(FloatingPointOperation),
     FloatingPointRegister(fp_register::Operand),

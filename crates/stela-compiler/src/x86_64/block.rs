@@ -401,6 +401,8 @@ fn emit_selected(
     let mut emitted_alone = true;
     // The out-of-line paths of the PAC instructions completed inline.
     let mut pointer_paths = vec![];
+    // And those of the mirrored reads (`mirrored_read`).
+    let mut mirrored_paths = vec![];
     while cursor < instructions.len() {
         let held = core::mem::replace(&mut after, Held::NOTHING);
         // A group emitted otherwise may have used the slots.
@@ -811,6 +813,18 @@ fn emit_selected(
             cursor += 1;
             continue;
         }
+        if let Operation::MirroredRead { word } = instruction.operation {
+            let cell = native
+                .mirrored
+                .cell(word)
+                .expect("blocks hold mirrored reads only given their cells");
+            mirrored_paths.push(super::mirrored_read::emit(code, word, instruction.pc, cell));
+            // Xt alone changes; its masked base, if any, is gone.
+            bases.after(instruction, None);
+            emitted_alone = true;
+            cursor += 1;
+            continue;
+        }
         if reuse_bases {
             code.set_base_request(bases.plan(&instructions[cursor..]));
         }
@@ -859,13 +873,19 @@ fn emit_selected(
         "ordinary instruction prefix cannot branch"
     );
     out_of_line.place(code);
+    // A capture the body ends with leaves the host flags live for the
+    // terminal's branch: only the jump over the paths below comes between.
+    let flags_live = after.rax == super::Rax::Nzcv && code.ends_with(&nzcv_store(code.is_pinned()));
     // Before the terminal, whose direct exits end the code.
-    if let Some(cells) = native.pointer
-        && !pointer_paths.is_empty()
-    {
+    if !pointer_paths.is_empty() || !mirrored_paths.is_empty() {
         let over = code.asm().jmp();
-        for path in pointer_paths {
-            super::pointer::inline::place(code, path, cells);
+        if let Some(cells) = native.pointer {
+            for path in pointer_paths {
+                super::pointer::inline::place(code, path, cells);
+            }
+        }
+        for path in mirrored_paths {
+            super::mirrored_read::place(code, path);
         }
         code.asm().bind(over);
     }
@@ -896,6 +916,7 @@ fn emit_selected(
                 native,
                 checks,
                 rax: after.rax,
+                flags_live,
                 target,
                 zero_branch,
             },
@@ -1478,6 +1499,9 @@ struct TerminalContext {
     native: super::NativeSystem,
     checks: super::MemoryChecks,
     rax: super::Rax,
+    /// The body ends with the NZCV capture, out-of-line paths aside, so
+    /// the host flags still hold it ([`branch_condition_with`]).
+    flags_live: bool,
     target: crate::TargetCpu,
     zero_branch: Option<Cond>,
 }
@@ -1493,6 +1517,7 @@ fn emit_terminal(
         native,
         checks,
         rax,
+        flags_live,
         target,
         zero_branch,
     } = context;
@@ -1580,7 +1605,8 @@ fn emit_terminal(
                 Operation::BranchCondition { target, .. }
                 | Operation::BranchZero { target, .. }
                 | Operation::BranchBit { target, .. } => {
-                    let taken = zero_branch.or_else(|| branch_condition(code, operation, rax));
+                    let taken = zero_branch
+                        .or_else(|| branch_condition_with(code, operation, rax, flags_live));
                     conditional_exit(code, taken, target, fallthrough);
                 }
                 _ => unreachable!("block decoder restricts branch terminators"),
@@ -1601,12 +1627,25 @@ fn load_unless_held(code: &mut Code, register: Register, rax: super::Rax) {
 /// Test a conditional branch's condition: the host condition it is taken
 /// in, or `None` when it always is. `rax` says what RAX holds.
 fn branch_condition(code: &mut Code, operation: &Operation, rax: super::Rax) -> Option<Cond> {
+    branch_condition_with(code, operation, rax, false)
+}
+
+/// [`branch_condition`], with the NZCV capture known to have left the host
+/// flags live where `flags_live` (a block's out-of-line paths, which the
+/// body jumps over, come between the capture and its terminal).
+fn branch_condition_with(
+    code: &mut Code,
+    operation: &Operation,
+    rax: super::Rax,
+    flags_live: bool,
+) -> Option<Cond> {
     match *operation {
         Operation::BranchCondition { condition, .. } => {
             if rax == super::Rax::LiveNzcv {
                 return Some(super::flag_word::condition(code, condition, true));
             }
-            let loaded = rax == super::Rax::Nzcv && code.ends_with(&nzcv_store(code.is_pinned()));
+            let loaded = rax == super::Rax::Nzcv
+                && (flags_live || code.ends_with(&nzcv_store(code.is_pinned())));
             super::condition_holds(code, condition, loaded)
         }
         Operation::BranchZero {

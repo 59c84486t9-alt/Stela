@@ -301,12 +301,7 @@ pub fn analyze_and_plan(
     base: GuestAddress,
     options: &crate::Options,
 ) -> Result<(BlockAnalysis, Result<CompilationPlan, CompileError>), BlockAnalysisError> {
-    let parsed = parse_with(
-        source,
-        base,
-        options.profile(),
-        options.native_system().pointer.is_some(),
-    )?;
+    let parsed = parse_with(source, base, options.profile(), options.native_system())?;
     let analysis = analyze_parsed(&parsed);
     Ok((
         analysis,
@@ -355,8 +350,14 @@ impl CompilationPlan {
         let profile = BlockProfile::new(Features::SYSTEM_MODE).with_checked_memory(checked);
         let options = crate::Options::new(profile, target);
         options.validate()?;
-        let parsed =
-            parse_admitted(source, base, profile, false, admit).map_err(CompileError::from)?;
+        let parsed = parse_admitted(
+            source,
+            base,
+            profile,
+            crate::x86_64::NativeSystem::NONE,
+            admit,
+        )
+        .map_err(CompileError::from)?;
         if parsed.source_bytes == 0 {
             return Ok(None);
         }
@@ -393,8 +394,7 @@ impl CompilationPlan {
                 source_bytes: source.len(),
             },
             _ => {
-                let inline_pointer = options.native_system().pointer.is_some();
-                let parsed = parse_with(source, base, profile, inline_pointer)
+                let parsed = parse_with(source, base, profile, options.native_system())
                     .map_err(CompileError::from)?;
                 return Self::block(parsed, options);
             }

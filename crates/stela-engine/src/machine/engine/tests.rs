@@ -6657,7 +6657,20 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     let index = |encoding| MIRRORED.iter().position(|&e| e == encoding).unwrap();
     let thread = index(registers::encodings::TPIDR_EL1);
     let daif = index(registers::encodings::DAIF);
-    let mut machine = machine(&[ADD, MRS, ADD]);
+    let status = index(registers::encodings::GXF_STATUS_EL1);
+    // Blocks complete MRS TPIDR_EL1 inside themselves
+    // (`x86_64::mirrored_read`): the block runs past it, with no thunk.
+    let mut inline = machine(&[ADD, MRS, ADD]);
+    let start = inline.cpu.pc;
+    inline.host.exits = vec![NativeExit::Exit {
+        next_pc: start + 12,
+        kind: ExitKind::Fallthrough as u64,
+    }];
+    inline.step().unwrap();
+    assert!(inline.code.blocks[0].instructions > 2);
+    assert!(inline.host.patches.is_empty());
+    // Other mirrored reads end their block, and a thunk completes them.
+    let mut machine = machine(&[ADD, MRS_GXF_STATUS, ADD]);
     let base = machine.cpu.pc;
     machine.host.exits = vec![NativeExit::Exit {
         next_pc: base + 8,
@@ -6666,7 +6679,7 @@ fn mirrored_reads_complete_natively_from_the_open_cell() {
     machine.step().unwrap();
     let block = &machine.code.blocks[0];
     let code = &machine.host.installed[block.code.0 / NATIVE_CODE_STRIDE - 1];
-    let cell = cell_place(thread);
+    let cell = cell_place(status);
     let thunk = register_read::thunk(GuestAddress(base + 4), 8, cell);
     let installed = machine.host.installed.len() * NATIVE_CODE_STRIDE;
     assert_eq!(

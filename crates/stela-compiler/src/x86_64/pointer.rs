@@ -274,11 +274,10 @@ impl Thunk {
 }
 
 /// Where a memo lookup goes besides its hit, which leaves the result in RAX:
-/// to the original exit while the key is not open, to the completion with the
-/// pointer itself while it is disabled, and to the service on a miss.
+/// to its rare path ([`rare`]) while the key is not open or disabled, and
+/// to the service on a miss.
 struct Lookup {
-    closed: Patch,
-    identity: Patch,
+    rare: Patch,
     misses: Vec<Patch>,
 }
 
@@ -300,17 +299,14 @@ fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Lookup {
         }
         Modifier::Zero => asm.alu(Alu::Xor, Dword, Rdx, Rdx),
     }
-    asm.place(
-        R8,
-        Place::new(tags.anchor, tags.offset + usize::from(form.key) * 8),
-    );
-    asm.mov_load(Qword, R8, Mem::base(R8, 0));
-    asm.test(Qword, R8, R8);
-    // The key is not open.
-    let closed = asm.jcc(Cond::E);
-    // The result is the pointer in RAX.
+    // The anchor, then the key's tag word through it: one load, no LEA.
+    asm.place(R8, Place::new(tags.anchor, 0));
+    let word = i32::try_from(tags.offset + usize::from(form.key) * 8).expect("a tag word offset");
+    asm.mov_load(Qword, R8, Mem::base(R8, word));
+    // Not open (0) or disabled (DISABLED, 1): every open tag word is above.
+    const _: () = assert!(DISABLED == 1);
     asm.alu_imm8(Alu::Cmp, Qword, R8, DISABLED as i8);
-    let identity = asm.jcc(Cond::E);
+    let rare = asm.jcc(Cond::Be);
     asm.mov(Qword, Rcx, Rdx);
     asm.shift_imm(ShiftOp::Rol, Qword, Rcx, 29);
     asm.alu(Alu::Xor, Qword, Rcx, Rax);
@@ -319,8 +315,9 @@ fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Lookup {
     asm.shift_imm(ShiftOp::Shr, Qword, Rcx, SLOT_SHIFT);
     // 32-byte entries.
     asm.shift_imm(ShiftOp::Shl, Qword, Rcx, 5);
-    asm.place(R9, Place::new(Anchor::Memo, 0));
-    asm.alu(Alu::Add, Qword, Rcx, R9);
+    // The memo's anchor added from the frame.
+    let memo = core::mem::offset_of!(crate::GuestState, anchors) + Anchor::Memo as usize * 8;
+    asm.alu_load(Alu::Add, Qword, Rcx, Mem::base(Gpr::Rdi, memo as i32));
     let mut misses = Vec::new();
     asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rcx, 0));
     misses.push(asm.jcc(Cond::Ne));
@@ -330,11 +327,17 @@ fn lookup(asm: &mut Asm, form: Form, tags: Place) -> Lookup {
     asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(Rcx, TAG));
     misses.push(asm.jcc(Cond::Ne));
     asm.mov_load(Qword, Rax, Mem::base(Rcx, VALUE));
-    Lookup {
-        closed,
-        identity,
-        misses,
-    }
+    Lookup { rare, misses }
+}
+
+/// A lookup's rare path, out of line, with the tag word in R8: the branch
+/// taken while the key is not open, then the jump to bind to the completion
+/// while it is disabled, where the result is the pointer in RAX.
+fn rare(asm: &mut Asm, rare: Patch) -> (Patch, Patch) {
+    asm.bind(rare);
+    asm.test(Size::Qword, Gpr::R8, Gpr::R8);
+    let closed = asm.jcc(Cond::E);
+    (closed, asm.jmp())
 }
 
 /// How native code reaches the service routine.
@@ -394,11 +397,9 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     let mut code = Code::pinned();
     let mut asm = code.asm();
     let Lookup {
-        closed,
-        identity,
+        rare: unusual,
         misses,
     } = lookup(&mut asm, form, tags);
-    asm.bind(identity);
     let complete = asm.len();
     let next_pc = GuestAddress(pc.0.wrapping_add(4));
     let mut next = None;
@@ -434,10 +435,12 @@ pub fn thunk(form: Form, pc: GuestAddress, tags: Place, service: u64) -> Thunk {
     }
     let failed = call_service(&mut asm, form, Routine::Address(service));
     let back = asm.jmp();
+    let (closed, identity) = rare(&mut asm, unusual);
     asm.bind(closed);
     asm.bind(failed);
     super::block::direct_exit_with(&mut asm, pc, ExitKind::PointerAuthentication);
     resolve(&mut code, back, complete);
+    resolve(&mut code, identity, complete);
     Thunk::new(code.into_bytes(), next, dynamic)
 }
 

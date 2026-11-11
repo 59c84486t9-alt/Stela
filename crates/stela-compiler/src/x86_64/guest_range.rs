@@ -167,6 +167,7 @@ fn after(operation: &Operation, bases: u32) -> u32 {
             literal::Transfer::Simd { .. } => bases,
         },
         Operation::PcRelative(operand) => bases & !bit(operand.destination),
+        Operation::MirroredRead { word } => bases & !bit(super::mirrored_read::destination(*word)),
         Operation::ConditionalSelect(operand) => bases & !bit(operand.destination),
         Operation::Bitfield(operand) => bases & !bit(operand.destination),
         Operation::IntegerMath(operand) => bases & !bit(operand.destination),

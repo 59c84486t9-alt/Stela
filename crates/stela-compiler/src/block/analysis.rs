@@ -9,6 +9,7 @@ use super::{
 use crate::{
     CompileError, CompileErrorKind, GuestAddress, Lifter,
     aarch64::{Decoder, Instruction, Operation, Register},
+    x86_64::NativeSystem,
 };
 use alloc::vec::Vec;
 use serde::Serialize;
@@ -242,27 +243,35 @@ pub(super) fn parse(
     base: GuestAddress,
     profile: BlockProfile,
 ) -> Result<ParsedBlock, BlockAnalysisError> {
-    parse_admitted(source, base, profile, false, |_| true)
+    parse_admitted(source, base, profile, NativeSystem::NONE, |_| true)
 }
 
-/// [`parse`], with the PAC instructions a block completes inside itself
-/// (`x86_64::pointer::inline`) parsed as instructions where `inline_pointer`.
+/// [`parse`], with the PAC instructions (`x86_64::pointer::inline`) and the
+/// MRS of mirrored registers (`x86_64::mirrored_read`) that blocks compiled
+/// for `native` complete inside themselves parsed as instructions.
 pub(super) fn parse_with(
     source: &[u8],
     base: GuestAddress,
     profile: BlockProfile,
-    inline_pointer: bool,
+    native: NativeSystem,
 ) -> Result<ParsedBlock, BlockAnalysisError> {
-    parse_admitted(source, base, profile, inline_pointer, |_| true)
+    parse_admitted(source, base, profile, native, |_| true)
 }
 
 pub(super) fn parse_admitted(
     source: &[u8],
     base: GuestAddress,
     profile: BlockProfile,
-    inline_pointer: bool,
+    native: NativeSystem,
     mut admit: impl FnMut(u32) -> bool,
 ) -> Result<ParsedBlock, BlockAnalysisError> {
+    let inline_pointer = native.pointer.is_some();
+    // Only the engine's own system-mode blocks read its cells.
+    let mirrored = if profile == BlockProfile::new(Features::SYSTEM_MODE) {
+        native.mirrored
+    } else {
+        crate::x86_64::mirrored_read::Reads::NONE
+    };
     if source.is_empty() || !source.len().is_multiple_of(4) || !base.0.is_multiple_of(4) {
         return Err(BlockAnalysisError {
             pc: base,
@@ -355,6 +364,16 @@ pub(super) fn parse_admitted(
                 encoding: Some(word),
                 kind: error.kind,
             })? {
+                if let system::SystemOperation::Register(access) = decoded.operation
+                    && access.direction() == crate::aarch64::system::registers::Direction::Read
+                    && mirrored.cell(word).is_some()
+                {
+                    instructions.push(Instruction {
+                        pc,
+                        operation: Operation::MirroredRead { word },
+                    });
+                    continue;
+                }
                 // The shared lane executes these through the existing typed
                 // all-writer memory service, not the single-agent CPU monitor.
                 let checked = checked_memory
