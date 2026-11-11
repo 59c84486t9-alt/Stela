@@ -444,6 +444,7 @@ fn transmit_fills_one_descriptor_per_frame_and_pads_short_frames() {
     let mut fixture = Fixture::new();
     let mut alx = fixture.attach(Fixture::chip(0x1091, 0)).unwrap();
     fixture.link(Some(GIGABIT_FULL));
+    assert!(sample(&mut alx));
     let frame: Vec<u8> = (0..20u8).collect();
     alx.transmit(&frame).unwrap();
     alx.transmit(&[0x5a; MAX_FRAME]).unwrap();
@@ -466,6 +467,7 @@ fn a_full_ring_waits_for_the_consumer_and_then_reports_a_stall() {
     let mut fixture = Fixture::new();
     let mut alx = fixture.attach(Fixture::chip(0x1091, 0)).unwrap();
     fixture.link(Some(GIGABIT_FULL));
+    assert!(sample(&mut alx));
     fixture.model.borrow_mut().consume_transmit = false;
     for _ in 0..TX_RING - 1 {
         alx.transmit(&[1; 60]).unwrap();
@@ -485,6 +487,7 @@ fn receive_returns_good_frames_without_fcs_and_drops_errors() {
     let mut fixture = Fixture::new();
     let mut alx = fixture.attach(Fixture::chip(0x1091, 0)).unwrap();
     fixture.link(Some(GIGABIT_FULL));
+    assert!(sample(&mut alx));
     assert_eq!(alx.receive(), Ok(None));
     let frame: Vec<u8> = (0..64u8).collect();
     {
@@ -504,6 +507,7 @@ fn receive_keeps_up_across_the_ring_wrap() {
     let mut fixture = Fixture::new();
     let mut alx = fixture.attach(Fixture::chip(0x1091, 0)).unwrap();
     fixture.link(Some(GIGABIT_FULL));
+    assert!(sample(&mut alx));
     let mut reused = Vec::with_capacity(MAX_FRAME);
     let storage = reused.as_ptr();
     for round in 0..(RX_RING * 2) {
