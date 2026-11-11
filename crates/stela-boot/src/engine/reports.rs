@@ -660,6 +660,23 @@ pub(super) fn watchdog_report<H: Host>(
         let (pc, lr) = hub
             .source_observation(event.cpu)
             .map_or((0, 0), |observed| (observed.source.pc, observed.source.lr));
+        // XNU moves the deadline forward every few seconds while it is well; only
+        // an arm whose margin differs from the last one is news.
+        if let Some(seconds) = event.deadline {
+            let margin = u64::from(seconds)
+                .wrapping_mul(COUNTER_HZ)
+                .wrapping_sub(event.at)
+                / COUNTER_HZ;
+            if WATCHDOG_MARGIN
+                .swap(margin, Ordering::Relaxed)
+                .abs_diff(margin)
+                <= 1
+            {
+                continue;
+            }
+        } else {
+            WATCHDOG_MARGIN.store(u64::MAX, Ordering::Relaxed);
+        }
         match event.deadline {
             Some(seconds) => output::arguments(format_args!(
                 "WDT MECHANISM armed deadline_s={seconds} counter={} pe={} source_pc={pc:#x} source_lr={lr:#x}\n",
@@ -675,6 +692,11 @@ pub(super) fn watchdog_report<H: Host>(
         output::arguments(format_args!("WDT MECHANISM writes_not_kept={dropped}\n"));
     }
 }
+
+/// The margin in seconds of the last reported watchdog arm.
+static WATCHDOG_MARGIN: AtomicU64 = AtomicU64::new(u64::MAX);
+/// The guest counter's rate.
+const COUNTER_HZ: u64 = 24_000_000;
 
 /// The distinct unsupported operations `UNMODELED` lines have reported.
 pub(super) static UNMODELED_REPORTED: AtomicU64 = AtomicU64::new(0);
