@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // A dynamic library: functions other libraries link against and call.
 #include <metal_stdlib>
 using namespace metal;

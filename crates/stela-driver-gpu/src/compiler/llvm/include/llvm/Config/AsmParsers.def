@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The AIR bridge initializes no LLVM target; see llvm-config.h. */
 #ifndef LLVM_ASM_PARSER
 #error "define LLVM_ASM_PARSER before including this file"

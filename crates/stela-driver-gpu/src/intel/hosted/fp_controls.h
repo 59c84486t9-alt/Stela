@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_INTEL_HOSTED_FP_CONTROLS_H
 #define STELA_INTEL_HOSTED_FP_CONTROLS_H
 #include "compiler/shader_info.h"

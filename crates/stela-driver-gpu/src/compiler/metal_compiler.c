@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "metal_compiler.h"
 #include "threadgroup.h"
 #include "util/ralloc.h"

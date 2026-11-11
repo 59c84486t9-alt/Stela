@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Unowned topology controls cannot disturb any current root transfer.
 use super::*;
 

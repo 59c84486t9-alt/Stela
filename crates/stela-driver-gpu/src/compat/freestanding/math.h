@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The functions Mesa's floating-point helpers name; see assert.h. The integer
  * encoders call none of them, and nothing defines them.
  */

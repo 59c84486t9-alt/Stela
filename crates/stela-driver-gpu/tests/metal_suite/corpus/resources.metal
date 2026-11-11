@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Resources beyond device buffers and textures: heaps (allocation,
 // placement, aliasing, residency through useHeap), texture views (pixel
 // format, type, mipmap and slice ranges, swizzle) and programmable sample

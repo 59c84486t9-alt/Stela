@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The AIR bridge initializes no LLVM target; see llvm-config.h. */
 #ifndef LLVM_DISASSEMBLER
 #error "define LLVM_DISASSEMBLER before including this file"

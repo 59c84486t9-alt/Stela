@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* AIR's SIMD-group matrix functions, as Apple's compiler names them:
  *
  *   air.simdgroup_matrix_8x8_init_filled.<m>.<t>(t value)

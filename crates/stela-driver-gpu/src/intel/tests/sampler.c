@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "../hosted/sampler.h"
 #include "intel/dev/intel_device_info.h"
 #include "compiler/tests/targets/intel.h"

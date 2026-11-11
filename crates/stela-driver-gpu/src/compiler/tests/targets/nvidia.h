@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_TARGETS_NVIDIA_H
 #define STELA_TARGETS_NVIDIA_H
 /* NVIDIA compile targets for every Stela compiler probe. Mesa has no SM table

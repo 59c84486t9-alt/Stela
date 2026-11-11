@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Compute features the other sources leave out, chosen by which AIR
 // intrinsics macOS's own shaders call (`metal-suite coverage`): vector
 // relational reductions, device atomic stores behind a fence, threadgroup

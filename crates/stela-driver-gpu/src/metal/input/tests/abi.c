@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifdef NDEBUG
 #error "This ownership test requires active assertions"
 #endif

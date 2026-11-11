@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* AIR render stage inputs and outputs. Original LLVM IR fixtures in the
  * argument and output forms air_metadata.c documents; no Apple output. */
 #include "../metal_abi.h"

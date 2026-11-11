@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* A caller of Mesa is a host processor, one for each PE in the GPU's gate, and a
  * thread Mesa starts is a task of the Linux environment on the boot CPU. Each
  * waits its own way in stela_libc_wait: a processor spins, and a task sleeps. */

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Stela's sampled RGBA 2D/array state follows the policy of pinned Mesa
  * 31e9a6b2e95e30d84bf3177d1f497d063e59b6b2 src/amd/vulkan/radv_image_view.c

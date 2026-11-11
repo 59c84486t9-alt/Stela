@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Hosted ABI/dispatch fixtures; deterministic bytes are test inputs, not
  * entropy or a native IRQ/CPU qualification. Link the actual common archive. */
 #include <linux/irqflags.h>

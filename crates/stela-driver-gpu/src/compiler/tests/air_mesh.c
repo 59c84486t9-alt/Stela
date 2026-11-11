@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Object and mesh functions, and the fragment inputs of mesh primitive data.
  * Original LLVM IR fixtures in the object and mesh forms DXMT emits; no
  * Apple output. */

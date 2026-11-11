@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Metal's precise single-precision functions and division, which NIR's Vulkan
  * accuracy does not reach, in single precision: consumer GPUs run doubles at
  * a small fraction of the float rate, so no float function takes them. Each

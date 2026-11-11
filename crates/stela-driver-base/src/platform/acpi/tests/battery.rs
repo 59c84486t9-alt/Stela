@@ -1,6 +1,6 @@
 use super::*;
 
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Authored AML protocol fixture, evaluated by the real native ACPICA interpreter.
 #[test]
 fn native_control_method_battery_refresh_alarm_fallback_and_removal() {

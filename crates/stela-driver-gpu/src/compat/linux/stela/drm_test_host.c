@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* drm_mm_print's, the one piece of DRM's printing the hosted allocators reach
  * when the real one is not linked; no test prints an allocator. */
 struct drm_printer;

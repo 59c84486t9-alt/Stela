@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* AIR's indirect command functions, as Apple's compiler emits them for
  * metal_command_buffer's render_command and compute_command methods. Each
  * takes the command_buffer an argument buffer holds and the command's

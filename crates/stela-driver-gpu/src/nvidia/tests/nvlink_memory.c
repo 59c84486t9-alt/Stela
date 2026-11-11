@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Separate CPU-only process: link the actual production stela_nvlink_memory.c
  * against this bounded denial provider, never into the driver. Real-success
  * heap ownership is exercised by the Rust tests through the actual C hooks.

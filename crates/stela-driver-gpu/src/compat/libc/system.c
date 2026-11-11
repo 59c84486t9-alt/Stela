@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* The operating system LLVM's Support library expects, which nothing the image
  * runs reaches on a path that matters: there are no files, users, signals or
  * dates, so each call fails the way POSIX lets it and LLVM reports the error. */

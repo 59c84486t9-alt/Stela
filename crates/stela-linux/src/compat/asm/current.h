@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef _ASM_STELA_CURRENT_H
 #define _ASM_STELA_CURRENT_H
 #ifndef __ASSEMBLY__

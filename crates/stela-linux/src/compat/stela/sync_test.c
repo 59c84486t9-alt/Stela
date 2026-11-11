@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux sleeping locks, kthread workers, and irq_work on original tasks. */
 #include <linux/completion.h>
 #include <linux/irq_work.h>

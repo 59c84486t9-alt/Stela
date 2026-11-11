@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "stela_device.h"
 
 NV_STATUS stela_nvidia_prepare_device(nv_state_t *nv, void *handle,

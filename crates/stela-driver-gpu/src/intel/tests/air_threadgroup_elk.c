@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "air_threadgroup_elk.h"
 #include "intel/compiler/elk/elk_compiler.h"
 #include "intel/compiler/elk/elk_eu.h"

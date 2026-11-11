@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Actual Linux/EFI literal ABI, independent of the host C library's wchar.
  * This fixture qualifies compiler data representation, never firmware calls. */
 #include <linux/efi.h>

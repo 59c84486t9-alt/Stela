@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Offline original AIR -> shared NIR -> original vendor compiler -> PM4.
  * Topology/VM and packet addresses below are immutable CPU models. No physical
  * device, allocation, residency, upload, execution or completion is claimed.

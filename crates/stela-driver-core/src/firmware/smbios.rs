@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Physical-host SMBIOS observations, distinct from translated guest identity.
 //! Layouts: DMTF DSP0134 3.8.0 §§5.2,6.1,7.2. No source mapping permission is
 //! granted by this pure parser; boot must copy readable pre-EBS data.

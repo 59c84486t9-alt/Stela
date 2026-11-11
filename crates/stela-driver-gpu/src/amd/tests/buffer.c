@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Synthetic device/VM facts for hosted descriptor packing; no GPU is opened. */
 #include "../hosted/buffer.h"
 #include "amd/common/ac_gpu_info.h"

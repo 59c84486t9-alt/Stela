@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* One bounded service pass from the SAME real owned Domain batch. Nominal
  * jiffies/deadline inspection is not an original periodic tick producer:
  * selected HZ_PERIODIC accounting/RCU/workqueue/clockevent integration remains

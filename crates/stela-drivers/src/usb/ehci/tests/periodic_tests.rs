@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Periodic frame-list/QH/qTD DMA through the requester peer.
 use super::*;
 

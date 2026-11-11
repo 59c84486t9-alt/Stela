@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Post-tessellation vertex functions over triangle and quad patches, with
 // the compute kernel that writes their factors.
 #include <metal_stdlib>

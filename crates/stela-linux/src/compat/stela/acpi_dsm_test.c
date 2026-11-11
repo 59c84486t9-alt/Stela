@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Original DSM helper bodies over deterministic client responses. This fixture
  * installs no portal, interpreter, native owner or hardware capability. */
 #define CONFIG_ACPI 1

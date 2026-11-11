@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_LIBC_SYSLOG_H
 #define STELA_LIBC_SYSLOG_H
 #include <sys/cdefs.h>

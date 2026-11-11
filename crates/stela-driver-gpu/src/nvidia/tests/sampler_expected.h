@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* NVK's sampler headers (Mesa 31e9a6b2) for sampler_cases.h, recorded before
  * Stela packed its own. Two classes exercise NVK's reduction gate.
  * Raw output SHA256: b6a22d592b651238b1a0580710737cf6b012c0220e89e950cab5262eb73e778b

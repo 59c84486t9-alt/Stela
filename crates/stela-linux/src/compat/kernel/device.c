@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's device model, following Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 drivers/base/core.c, class.c and
  * devres.c. Stela's owners create and attach devices, and nothing reads

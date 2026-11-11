@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_VULKAN_BUFFERS_H
 #define STELA_VULKAN_BUFFERS_H
 #include "air_metadata.h"

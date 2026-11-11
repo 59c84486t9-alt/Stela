@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Owned isolated counter controls; no native Installed/current permission.
 use super::*;
 use alloc::rc::Rc;

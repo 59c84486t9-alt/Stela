@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* NVLink's CPU primitives, as nvlink_os.h declares them, over the shared C
  * runtime with 64-bit NvLength lengths. */
 #include "stela_primitives.h"

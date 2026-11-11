@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The native HuC parser against upstream xe_uc_fw.c run directly on the same
  * images. Inputs are synthetic unsigned data. */
 #include <stela/test.h>

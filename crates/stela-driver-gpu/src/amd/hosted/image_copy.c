@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Bounds, ownership contracts and staging windows around Mesa's unchanged
  * ac_surface CPU copy and Addrlib layouts. No tiler, allocator,
  * synchronization operation or hardware algorithm is added.

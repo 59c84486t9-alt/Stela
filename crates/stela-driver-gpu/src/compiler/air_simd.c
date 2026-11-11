@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* AIR's SIMD-group and quad-group functions, as Apple's compiler names
  * them after their MSL builtins:
  *

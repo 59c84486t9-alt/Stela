@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "fixtures.h"
 #include "amdgpu.h"
 #include "discovery.h"

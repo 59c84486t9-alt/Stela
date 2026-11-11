@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Every texture type's reads, writes, samples, gathers, comparisons,
 // queries and atomics.
 #include <metal_stdlib>

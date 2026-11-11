@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_NVIDIA_SAMPLER_CASES_H
 #define STELA_NVIDIA_SAMPLER_CASES_H
 /* Test values only; sampler_expected.h holds NVK's headers for them. */

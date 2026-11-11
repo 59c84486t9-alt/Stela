@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_METAL_LIBRARY_MANIFEST_H
 #define STELA_METAL_LIBRARY_MANIFEST_H
 #include "../metal/input/input.h"

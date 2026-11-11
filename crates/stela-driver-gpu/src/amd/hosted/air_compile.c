@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "air_compile.h"
 #include "amd/common/ac_binary.h"
 #include "amd/common/nir/ac_nir.h"

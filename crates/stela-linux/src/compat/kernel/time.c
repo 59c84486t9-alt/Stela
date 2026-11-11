@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Nominal timekeeping is data. Physical minima use a separately retained
  * actual source, and sleep through the genuine service/scheduler IRQ path. */
 #include <linux/delay.h>

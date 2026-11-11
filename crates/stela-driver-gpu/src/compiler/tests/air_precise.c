@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* air_precise.c's accuracy: each function, folded at sampled arguments, against
  * the host's double-precision library rounded once. */
 #include "../air_precise.h"

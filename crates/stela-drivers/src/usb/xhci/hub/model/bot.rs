@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Opt-in device-side BOT peer for complete native topology/class rebinding.
 //! Decodes wire CBWs independently and serves RAM media through TDs.
 use alloc::vec::Vec;

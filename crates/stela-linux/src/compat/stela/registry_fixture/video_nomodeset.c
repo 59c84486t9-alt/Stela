@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Explicit source-path macro is the exact retained ORIGINAL input. */
 #include <stela/registration.h>
 #ifndef STELA_LINUX_VIDEO_NOMODESET_SOURCE

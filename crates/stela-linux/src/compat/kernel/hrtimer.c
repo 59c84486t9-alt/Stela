@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's high-resolution timers, with the interface of Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 kernel/time/hrtimer.c. Every timer
  * counts in an actual supplied clock domain. Qualified service delivery uses

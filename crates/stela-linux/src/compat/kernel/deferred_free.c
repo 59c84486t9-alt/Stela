@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Canonical native allocation lookup and actual RCU retirement. No Linux
  * allocator-private slab/page/vmalloc layout is assigned to native storage. */
 #include <linux/mm.h>

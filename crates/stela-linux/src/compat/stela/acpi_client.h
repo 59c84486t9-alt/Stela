@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_LINUX_ACPI_CLIENT_H
 #define STELA_LINUX_ACPI_CLIENT_H
 /* Forced into kernel clients before public ACPICA declarations. Boot owns the

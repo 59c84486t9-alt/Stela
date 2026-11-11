@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Host-only immutable-image classifier for hosted C tests that bind no image;
  * compile outside the Linux header environment, beside stela/test.c. A test
  * defining its own fixture classifier takes precedence over this archive

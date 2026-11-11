@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Original timer and wait APIs on a source child, with delivery owned by
  * the mounted Initial's regular service loop. */
 #include <linux/completion.h>

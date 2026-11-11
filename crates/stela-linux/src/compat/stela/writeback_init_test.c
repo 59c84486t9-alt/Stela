@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 #include <linux/backing-dev.h>
 #include <linux/cpu.h>
 #include <linux/init_task.h>

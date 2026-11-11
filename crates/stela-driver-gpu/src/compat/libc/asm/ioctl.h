@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The kernel's ioctl encoding, which its UAPI headers build requests with. */
 #ifndef STELA_LIBC_ASM_IOCTL_H
 #define STELA_LIBC_ASM_IOCTL_H

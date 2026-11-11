@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The unchanged Linux i915 batch-start emitters, writing into the borrowed
  * command storage through a request whose ring is that storage. */
 #include "i915_commands.h"

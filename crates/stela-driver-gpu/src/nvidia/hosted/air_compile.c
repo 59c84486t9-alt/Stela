@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "air_compile.h"
 #include "nouveau/compiler/nak_private.h"
 #include "util/ralloc.h"

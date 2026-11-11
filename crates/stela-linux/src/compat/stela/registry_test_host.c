@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Hosted-only process isolation: permanent production singleton state is never
  * reset to run a second scenario. A signal/abnormal exit is a fixture failure. */
 #include <sys/types.h>

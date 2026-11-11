@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Object and mesh functions with payloads and per-primitive data.
 #include <metal_stdlib>
 using namespace metal;

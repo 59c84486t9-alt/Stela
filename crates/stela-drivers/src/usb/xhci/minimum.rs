@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Owned minimum intervals, distinct from nominal polling deadlines.
 use super::*;
 use crate::bus::pci::power::{Error, Interval, Timer};

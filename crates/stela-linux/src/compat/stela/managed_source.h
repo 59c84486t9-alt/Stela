@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_MANAGED_SOURCE_H
 #define STELA_MANAGED_SOURCE_H
 #include <stela/managed.h>

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Select the vendor's native kernel-interface declarations, not core nvport
  * implementation dependencies. The API declarations in nv.h require NVRM. */
 #ifndef NVRM

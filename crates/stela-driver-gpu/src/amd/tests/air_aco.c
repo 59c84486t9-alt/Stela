@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Original AIR input -> shared AIR/NIR frontend -> retained AMD ACO backend.
  * CPU compilation only: no initialized GPU, mappings or submission are claimed.
  */

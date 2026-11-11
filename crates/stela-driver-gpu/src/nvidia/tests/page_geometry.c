@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Original global-data ABI plus unchanged original accessor bodies, linked in
  * a fresh hosted process. No actual RAM/cache/physical support is attested. */
 #include "../stela_page_geometry.h"

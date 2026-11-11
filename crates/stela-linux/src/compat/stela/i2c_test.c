@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's I2C core on the fixture's real Runtime task, which its bus lock
  * needs: adapters, transfers with Linux's retries, and unbound clients. */
 #include <linux/err.h>

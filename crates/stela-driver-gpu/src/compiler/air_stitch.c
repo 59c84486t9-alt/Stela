@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stitched functions: MTLFunctionStitchingGraph as a module of visible
  * functions and kernels, each of whose body calls its nodes' functions in
  * order. The functions it calls stay declarations, so a pipeline of or

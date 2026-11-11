@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The pinned LLVM Support library's POSIX regular expression engine. */
 #ifndef STELA_LIBC_REGEX_H
 #define STELA_LIBC_REGEX_H

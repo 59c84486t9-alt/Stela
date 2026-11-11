@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "amd/compiler/aco_interface.h"
 #include "probe_report.h"
 #include "targets/amd.h"

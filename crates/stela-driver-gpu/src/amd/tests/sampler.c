@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Hosted descriptor CPU models. No initialized GPU or filter execution. */
 #include "../hosted/sampler.h"
 #include "amd/common/ac_descriptors.h"

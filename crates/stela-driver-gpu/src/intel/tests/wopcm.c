@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The unchanged xe_wopcm.c in Stela's environment over modelled registers
  * and firmware, never physical readback/upload. */
 #include <stela/test.h>

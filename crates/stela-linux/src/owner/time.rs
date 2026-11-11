@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Actual source-owned physical deadlines kept independently of C park loans.
 use super::*;
 use core::mem::ManuallyDrop;

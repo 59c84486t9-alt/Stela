@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "x86emu/x86emu.h"
 
 _Static_assert(sizeof(((X86EMU_sysEnv *)0)->mem_base) == sizeof(void *),

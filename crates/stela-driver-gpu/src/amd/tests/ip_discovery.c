@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The unchanged amdgpu_discovery.c in Stela's environment, over modelled
  * registers, MM-index VRAM and firmware; CPU only. */
 #include <stela/test.h>

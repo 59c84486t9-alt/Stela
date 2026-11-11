@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Argument buffers with buffers, textures, samplers, arrays, nested
 // structures and pointers to other argument buffers.
 #include <metal_stdlib>

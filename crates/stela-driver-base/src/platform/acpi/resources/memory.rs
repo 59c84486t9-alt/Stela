@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Memory resources from device `_CRS` templates and their reservations.
 use super::*;
 use crate::bus::mmio::owned::{

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "buffer.h"
 #include "amd/common/ac_descriptors.h"
 #include "amd/common/ac_gpu_info.h"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Clock reads from the retained owner, independent of timer delivery. */
 #include <linux/errno.h>
 #include <linux/jiffies.h>

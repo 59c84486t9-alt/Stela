@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "air_to_nir.h"
 #include "air_probe_input.h"
 #include "compiler/tests/intel_probe.h"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Sanitized original-resource leaf lifecycle and fixed-header admission. */
 #include <linux/errno.h>
 #include <linux/mm.h>

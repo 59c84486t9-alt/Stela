@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The unchanged amdgpu_drv.c's probe admission in Stela's environment; CPU
  * only. */
 #include <stela/test.h>

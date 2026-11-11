@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* RM's CPU primitives, as os-interface.h declares them, over the shared C
  * runtime. Lengths keep RM's NvU32 width. */
 #include "os-interface.h"

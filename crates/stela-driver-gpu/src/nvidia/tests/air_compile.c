@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Hosted CPU compilation/table/QMD fixtures only. Device topology, GPU VAs and
  * resource owners are synthetic test models, never hardware qualification. */
 #include "../hosted/air_compile.h"

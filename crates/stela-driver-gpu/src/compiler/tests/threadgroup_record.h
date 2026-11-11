@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_THREADGROUP_RECORD_H
 #define STELA_THREADGROUP_RECORD_H
 /* Threadgroup facts of an owned compile result, in an open record. */

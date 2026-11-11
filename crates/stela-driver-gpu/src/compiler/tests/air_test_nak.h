@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AIR_TEST_NAK_H
 #define STELA_AIR_TEST_NAK_H
 /* Compiles frontend fixtures with the NVIDIA backend, for every target. */

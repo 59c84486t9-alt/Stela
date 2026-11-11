@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Driver initcalls run after the original Initial resource bootstrap.
  * Stop at the first failed stage and preserve its error. */
 #include <stela/registry.h>

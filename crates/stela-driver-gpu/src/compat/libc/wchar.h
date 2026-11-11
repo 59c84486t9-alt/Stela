@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* What libc++ names. libc++'s strings are all that run wide text, and wchar.c
  * has what they reach; the rest are declarations, so a caller fails the link. */
 #ifndef STELA_LIBC_WCHAR_H

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Indirect command encoding from kernels: AIR's command functions in the
  * forms Apple's compiler emits for render_command and compute_command,
  * written to GPU-resident records over the Metal ABI, and run over test

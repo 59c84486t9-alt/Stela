@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* os_log's methods, as Apple's compiler emits them under -fmetal-enable-logging:
  * a variadic function that loads the os_log's strings and calls
  *

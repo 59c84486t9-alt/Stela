@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Original RT mutexes and FIFO/PI ranks on distinct real Runtime stacks.
  * No waiter, owner, priority or task state is fabricated by this fixture. */
 #include <linux/errno.h>

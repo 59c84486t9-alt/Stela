@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* A compute shader allocates exactly its fixed NIR shared size, within the
  * target's per-workgroup LDS limit. No vendor compiler algorithm is changed.
  */

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // The shaders host cases run: drawing into drawables, reading and writing
 // IOSurface planes, archived pipelines, ordered and concurrent counting,
 // and stamping a buffer past 4 GiB.

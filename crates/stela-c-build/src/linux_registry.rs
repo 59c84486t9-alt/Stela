@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Selected-object registration manifest. No source-body scan or linking.
 //! Requires the already object 0.37 and sha2 0.10 build dependencies.
 use super::inputs::{self, Inputs, Key, Limits, Request, RootId};

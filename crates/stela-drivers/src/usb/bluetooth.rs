@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Physical host USB Bluetooth legacy HCI transport, not an ARM XNU kext.
 //!
 //! Commands use EP0, events interrupt IN, ACL bulk IN/OUT, without H4 packet

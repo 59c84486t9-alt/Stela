@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Callable whole-original-mutex fixtures. Each role runs on a distinct actual
  * Runtime stack with original task metadata and an entered owner. Checkpoints
  * enqueue real continuations or post a retained expected-job cancellation;

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* NVKMS's CPU primitives, as nvidia-modeset-os-interface.h declares them, over
  * the shared C runtime with size_t lengths. */
 #include "stela_primitives.h"

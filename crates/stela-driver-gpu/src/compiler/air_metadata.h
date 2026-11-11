@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AIR_METADATA_H
 #define STELA_AIR_METADATA_H
 #include <stdbool.h>

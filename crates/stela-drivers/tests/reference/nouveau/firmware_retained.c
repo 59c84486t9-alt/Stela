@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Separate opt-in entry: unchanged retained input, parser acceptance only.
  * Build only after the source generator checks the explicitly selected input.
  * Absence is not an executed/pass result and has no replacement bytes. */

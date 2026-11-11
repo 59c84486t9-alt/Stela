@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Compile the actual vendor declarations under both the full-core target and
  * Cargo's OS-hook target. Every active record/scalar measurement must match;
  * ordinary long is reported separately and never relaxes a record comparison.

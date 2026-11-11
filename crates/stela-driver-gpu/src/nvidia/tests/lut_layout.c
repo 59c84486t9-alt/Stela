@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Compile as C11 and C++11 with the real NVKMS header for each native/host
  * ABI. These constants freeze the device byte layout and the declared CPU
  * alignment. This fixture supplies no platform services.

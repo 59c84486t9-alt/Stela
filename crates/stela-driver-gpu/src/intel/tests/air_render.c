@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Offline VS/FS compiler qualification, not a render pipeline or GPU run.
  * Device profiles come from original Mesa compile models. No allocation,
  * surface, vertex fetch state, URB reservation or render target is published.

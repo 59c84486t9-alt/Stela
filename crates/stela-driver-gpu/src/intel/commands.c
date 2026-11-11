@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Xe's MI packets, from the unchanged Linux xe_ring_ops.c emitters. */
 #include "commands.h"
 #include <stela/linux.h>

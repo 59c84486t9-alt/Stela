@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_INTEL_DEVICE_H
 #define STELA_INTEL_DEVICE_H
 /* A Linux xe_device that Stela runs Linux code on, with the native owner of

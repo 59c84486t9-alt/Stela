@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Explicit native consumer initialization, separate from raw USB attachment.
 //! The kept result owns metadata only and never extends a provider borrow.
 use super::{Error, Hci, Io, ath3k, broadcom, intel, mediatek, qca, realtek};

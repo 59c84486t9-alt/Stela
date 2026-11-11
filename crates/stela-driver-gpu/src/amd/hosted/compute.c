@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "compute.h"
 #include "compute_policy.h"
 #include "amd/common/ac_binary.h"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Integer arithmetic and bit functions over every integer width.
 #include <metal_stdlib>
 using namespace metal;

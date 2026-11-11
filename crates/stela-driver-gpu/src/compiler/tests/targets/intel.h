@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_TARGETS_INTEL_H
 #define STELA_TARGETS_INTEL_H
 /* Intel compile targets and holds for every Stela compiler probe: every

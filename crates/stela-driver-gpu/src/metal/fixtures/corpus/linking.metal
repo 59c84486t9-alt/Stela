@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Function constants, visible functions and function tables, and
 // kernels with stage-in.
 #include <metal_stdlib>

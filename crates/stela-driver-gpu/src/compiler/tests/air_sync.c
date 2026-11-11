@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Atomics, barriers, fences, SIMD-group functions and SIMD-group matrices.
  * Original LLVM IR fixtures in the forms air_to_nir.c, air_simd.c and
  * air_matrix.c document; no Apple output. */

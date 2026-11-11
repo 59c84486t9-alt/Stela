@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The unchanged Linux amdgpu_discovery.c, run on a device whose registers,
  * clock and firmware belong to the native owner. Discovery acquires and
  * checks the IP discovery binary and decodes it as the dynamic path of

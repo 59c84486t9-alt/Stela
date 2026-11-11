@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's sorts, with the interfaces of Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 lib/sort.c and lib/list_sort.c: an
  * in-place, unstable heapsort of arrays and a stable merge sort of lists. */

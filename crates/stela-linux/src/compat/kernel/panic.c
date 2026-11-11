@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* The selected domain's fatal Linux API boundary. Reporting and a terminal
  * stop are real; SMP arbitration, notifiers, crash dumps and reboot are not
  * provided by this serialized execution environment. */

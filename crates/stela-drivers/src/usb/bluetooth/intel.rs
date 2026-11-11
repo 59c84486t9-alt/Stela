@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Compatibility entry point for the shared Intel Bluetooth initializer.
 pub mod bulk_iso;
 pub(crate) use crate::bluetooth::intel::SECURE_SEND;

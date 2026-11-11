@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * The Metal suite's runner: executes every case of a plan that
  * `cargo xtask gpu metal-suite plan` wrote and stores each output's bytes. The same

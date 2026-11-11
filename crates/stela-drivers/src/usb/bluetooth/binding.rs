@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! The legacy USB Bluetooth HCI interface and its endpoints. Endpoint numbers
 //! are discovered, never assumed from the specification's suggested addresses.
 use super::super::descriptor::{Endpoint, Interface};

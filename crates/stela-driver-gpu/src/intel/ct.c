@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stela's GuC CT rings over Linux's unchanged CTB ABI and register
  * definitions, following the protocol of xe_guc_ct.c's h2g_write() and
  * g2h_read(). BO, PM, fence and reset policy stay with the real owner. */

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #define STELA_AIR_METADATA_INTERNAL
 #include "air_to_nir.h"
 #include "air_calls.h"

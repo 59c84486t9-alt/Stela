@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! xHCI-backed physical HCI I/O. DMA storage lives for the rest of the boot,
 //! including when an unplugged/faulted controller cannot acknowledge a stop.
 use super::super::descriptor::Endpoint;

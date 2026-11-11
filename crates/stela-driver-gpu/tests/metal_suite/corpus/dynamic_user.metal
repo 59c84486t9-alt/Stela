@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Functions that call into the dynamic library dynamic.metal builds, from
 // a kernel and from a fragment function.
 #include <metal_stdlib>

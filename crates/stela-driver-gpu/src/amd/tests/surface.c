@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* CPU-only Addrlib ABI/layout check using retained captured-device fixtures.
  * These partial models are never initialized GPU devices or production inputs. */
 #include "amd/common/ac_gpu_info.h"

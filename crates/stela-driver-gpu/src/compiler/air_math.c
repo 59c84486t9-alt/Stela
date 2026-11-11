@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* AIR's math, integer, relational, conversion, packing, derivative and
  * discard functions, and LLVM's math intrinsics. AIR names a function after
  * its MSL builtin and its overload, as Apple's compiler emits them:

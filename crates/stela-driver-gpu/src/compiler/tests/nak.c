@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "compiler/nir/nir_builder.h"
 #include "probe_report.h"
 #include "targets/nvidia.h"

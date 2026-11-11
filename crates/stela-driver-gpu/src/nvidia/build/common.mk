@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Shared by core.mk and modeset.mk, which `cargo xtask gpu nvidia` reads after
 # NVIDIA's unchanged component Makefile, with STELA naming this port's
 # directory. NVIDIA's own rules compile every object; these add Stela's port

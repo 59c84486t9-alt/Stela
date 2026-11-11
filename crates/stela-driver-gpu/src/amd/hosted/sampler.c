@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stela's sampler policy: validated pipe sampler facts mapped to the SQ
  * sampler fields, packed by Mesa's unchanged ac_build_sampler_descriptor.
  */

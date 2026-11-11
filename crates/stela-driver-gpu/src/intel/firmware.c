@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The unchanged Linux xe_uc_fw.c and xe_huc.c, which select GuC and HuC
  * images and parse their headers, on a native device without registers.
  * Stela selects and parses images only: requests, BO placement, DMA upload,

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* The C library against the C standard's answers, as a static Linux program:
  * `cargo xtask gpu nvk` builds and runs it. */
 #include <dirent.h>

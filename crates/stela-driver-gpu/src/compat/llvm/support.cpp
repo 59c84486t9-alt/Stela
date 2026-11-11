@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // What LLVM's process-bound units give the libraries the AIR compiler links:
 // the image has no signals, no processes and no difference of text from binary,
 // reads no profiles and parses no assembly. Each entry stands for a unit that

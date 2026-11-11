@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_LIBC_CTYPE_H
 #define STELA_LIBC_CTYPE_H
 static inline int isdigit(int c) { return c >= '0' && c <= '9'; }

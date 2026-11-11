@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's tick count. As x86's linker script does, jiffies names
  * jiffies_64's low word, which on LP64 is all of it. Service passes advance it
  * (kernel/service.c); until the first it holds INITIAL_JIFFIES. */

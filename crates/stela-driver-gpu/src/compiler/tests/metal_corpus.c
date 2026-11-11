@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Compiles every entry point of AIR modules the way the Metal device does,
  * with NAK's NIR options, and reports each one's outcome: the shader
  * coverage sweep of metal-device.md's bring-up plan. Each argument is an

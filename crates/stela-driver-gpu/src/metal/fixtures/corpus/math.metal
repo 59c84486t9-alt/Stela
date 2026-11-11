@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // The math library over float, half and their vectors, in the default,
 // precise and fast namespaces, with geometric and matrix functions.
 #include <metal_stdlib>

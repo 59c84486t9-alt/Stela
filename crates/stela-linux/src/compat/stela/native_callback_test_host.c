@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* The standalone C suites use the sanitized common archive with a bare owner.
  * They have no Rust task broker or timer delivery owner. Trap if a suite
  * reaches either boundary so it cannot pass on fabricated native state.

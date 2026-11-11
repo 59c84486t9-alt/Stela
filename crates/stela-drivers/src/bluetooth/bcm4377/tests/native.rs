@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Native config/mapping/Registry models composed with the literal IPC device.
 //! These are software ownership/effect tests, not physical platform validation.
 extern crate std;

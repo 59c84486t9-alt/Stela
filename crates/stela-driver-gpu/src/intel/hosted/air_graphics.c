@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "air_graphics.h"
 #include "fp_controls.h"
 #include "compiler/nir/nir_builder.h"

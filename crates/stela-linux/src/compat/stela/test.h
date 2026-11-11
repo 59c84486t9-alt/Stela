@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_TEST_H
 #define STELA_TEST_H
 /* What hosted test programs built in Stela's Linux environment use of the

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* What Linux's scheduler-internal kernel/sched/sched.h gives the scheduler's
  * shared units Stela builds unchanged (wait.c, swait.c, completion.c): the
  * declarations they share, and the wake core of Stela's scheduler in

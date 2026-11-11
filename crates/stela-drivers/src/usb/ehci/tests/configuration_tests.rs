@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Real EP0 configuration-zero acknowledgement and endpoint lifetime controls.
 use super::*;
 use periodic_tests::{attached_periodic, input_interrupt};

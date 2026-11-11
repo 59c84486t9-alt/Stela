@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AIR_SIMD_H
 #define STELA_AIR_SIMD_H
 /* Compiler implementation only: AIR's SIMD-group and quad-group functions in

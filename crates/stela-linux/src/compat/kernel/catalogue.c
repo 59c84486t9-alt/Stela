@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Exact original device membership under one kernel owner. No device name,
  * BDF, firmware name or current driver name selects an authority. */
 #include <linux/device.h>

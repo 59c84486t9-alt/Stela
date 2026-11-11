@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // LLVM's pass C API (`llvm-c/Transforms/PassBuilder.h`) over only the passes
 // the AIR compiler names. `PassBuilder` parses a pipeline by reaching
 // every pass LLVM has, every code generator's included, so the image would carry

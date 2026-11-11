@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Exact host-device firmware resources, independent of a filesystem or OS loader.
 //!
 //! A setup/boot loader supplies owned [`Resource`] buffers and their manifests to

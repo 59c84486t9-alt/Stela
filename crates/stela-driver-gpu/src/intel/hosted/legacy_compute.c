@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stela's legacy compute payload and state policy, over Mesa's unchanged
  * compiler dispatch, push-size and Intel SLM helpers. It programs the values
  * the hardware requires, as Iris and Crocus do.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Share one measured runtime between Linux scheduler classes and Runtime. */
 #include <sched/sched.h>
 #include <stela/linux.h>

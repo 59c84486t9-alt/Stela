@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* What libc++'s `basic_string<wchar_t>` reaches. Numbers are ASCII in the C
  * locale, so these narrow their text and use the narrow functions. */
 #include <errno.h>

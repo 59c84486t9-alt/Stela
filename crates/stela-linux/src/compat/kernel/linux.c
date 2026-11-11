@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* The execution Stela gives Linux code: one owner at a time, on one context
  * that nothing preempts or interrupts. */
 #include <stela/catalogue.h>

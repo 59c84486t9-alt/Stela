@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The host under hosted test programs: the platform heap behind Linux's
  * allocators, and the services stela/test.h declares. Built on the C library,
  * outside Stela's Linux environment. */

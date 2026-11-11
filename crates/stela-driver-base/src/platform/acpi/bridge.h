@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_ACPI_BRIDGE_H
 #define STELA_ACPI_BRIDGE_H
 #include "acpi/acpi.h"

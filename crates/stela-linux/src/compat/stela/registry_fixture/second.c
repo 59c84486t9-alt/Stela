@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "fixture.h"
 #include <stela/registration.h>
 static int duplicate(void) { stela_registry_fixture_event(20); return 0; }

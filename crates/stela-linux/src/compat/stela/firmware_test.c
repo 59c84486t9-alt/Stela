@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 #include <linux/array_size.h>
 #include <linux/bottom_half.h>
 #include <linux/irqflags.h>

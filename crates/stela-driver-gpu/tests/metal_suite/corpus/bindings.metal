@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Every stage's binding slots read back, so that each way of binding them
 // (one call per slot, calls over ranges, offsets moved after binding) and
 // each way of making argument-buffer targets resident can be compared:

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "fixture.h"
 #include <linux/pci_ids.h>
 #include <linux/pci.h>

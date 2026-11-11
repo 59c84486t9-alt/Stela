@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Separate CPU process. Keep the original private prefix/realloc algorithm,
  * observing only its sized free call. The production backend is a separately
  * compiled real stela_nvkms_memory.c; only its common-heap/zero callees are

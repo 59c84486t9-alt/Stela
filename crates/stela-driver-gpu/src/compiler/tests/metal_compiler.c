@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The Metal device's compiler service: reflection and compilation of
  * kernels, linked vertex and fragment functions, and object and mesh
  * functions. Original LLVM IR fixtures, one AIR module per function as

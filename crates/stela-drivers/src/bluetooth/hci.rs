@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! HCI command events during vendor initialization (Bluetooth Core v5.4
 //! Vol 4 Part E 4.4, 7.7.14 and 7.7.15): the commands the vendor engines
 //! send, and what a Command Complete or Command Status event says about the

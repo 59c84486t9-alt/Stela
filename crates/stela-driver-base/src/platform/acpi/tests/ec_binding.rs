@@ -1,6 +1,6 @@
 use super::*;
 
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // ACPICA installation, OSL port transport and kept handler lifecycle.
 mod ec_binding_tests {
     #[test]

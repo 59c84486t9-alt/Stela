@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "stela_services.h"
 
 NV_STATUS stela_nvidia_bind_memory(nv_state_t *nv, void *services,

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! The SCSI commands USB disks receive (SPC-5, SBC-4) and the mode data
 //! they return.
 

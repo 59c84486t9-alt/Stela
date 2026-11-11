@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_NVIDIA_RENDER_COMPILE_H
 #define STELA_NVIDIA_RENDER_COMPILE_H
 #include "compiler/air_to_nir.h"

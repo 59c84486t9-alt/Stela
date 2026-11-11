@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Independent EC-SMB-HC peripheral, including native EC command/data framing.
 extern crate std;
 use super::*;

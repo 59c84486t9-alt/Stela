@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Counts of the timers, work items and timeout wakes that run in the
  * environment, by function, for the host's heartbeat: which source keeps
  * waking it. Observation only; no Linux code reads them back. */

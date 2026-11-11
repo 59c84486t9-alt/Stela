@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Argument buffers: device and constant addresses, texture and sampler
  * resource IDs, inline constants and nested argument buffers, over the
  * Metal ABI's heap binds. Original LLVM IR fixtures in the argument buffer

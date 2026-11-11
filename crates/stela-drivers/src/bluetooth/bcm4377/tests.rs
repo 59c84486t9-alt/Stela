@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Independent literal wire/device model. Device accesses resolve domain IOVAs
 //! to kept CPU mappings; model physical pages and CPU pointers are above
 //! 4GiB and are never used as the source's 32-bit DMA addresses.

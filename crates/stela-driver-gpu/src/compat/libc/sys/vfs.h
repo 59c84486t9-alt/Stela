@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* What LLVM's path code names. The image has no file systems: a caller fails
  * the link. */
 #ifndef STELA_LIBC_SYS_VFS_H

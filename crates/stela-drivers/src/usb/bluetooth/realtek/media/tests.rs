@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Independent completed-transfer/voice model; initialization receipts come
 //! from the existing real firmware-selection/download command model.
 use super::*;

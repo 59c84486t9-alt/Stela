@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Same-source C -> canonical Rust -> real LLVM -> owned manifest tests.
  * Original LLVM/MTLB fixtures are not Apple compiler output or a GPU reference.
  * Optional source mode consumes the retained genuine adapter result unchanged. */

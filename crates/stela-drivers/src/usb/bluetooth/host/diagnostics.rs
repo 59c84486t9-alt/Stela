@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! XHCI owner for the separate Broadcom diagnostic bulk interface.
 use super::Host;
 use crate::{

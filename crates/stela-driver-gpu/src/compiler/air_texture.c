@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* AIR's texture functions, as Apple's compiler emits them and DXMT's AIR
  * builder (src/airconv/nt/air_builder.cpp) records them. Each function's name
  * spells the operation, the texture's AIR type and its texel type; this file

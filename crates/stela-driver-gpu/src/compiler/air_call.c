@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "air_call.h"
 #include "compiler/nir/nir_builtin_builder.h"
 #include <stdarg.h>

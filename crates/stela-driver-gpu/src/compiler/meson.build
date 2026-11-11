@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-2.0-or-later
 # These executables exercise the real compiler and its complete link closure.
 # They do not open a device, submit GPU work, or expose a Metal device.
 # Hosted source compilation is independent of Mesa and the physical backend.

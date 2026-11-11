@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Original VMA offset/tag bookkeeping only. Local drm_file objects are opaque
  * identity tokens for this library fixture, not opened files or credentials.
  * All queried page spans are representable; a native mmap caller must validate

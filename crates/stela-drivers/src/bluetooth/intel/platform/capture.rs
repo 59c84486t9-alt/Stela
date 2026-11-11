@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Owned pre-EBS UEFI observation for Intel's packed DSBR variable. Raw EFI
 //! statuses are x86-64 values; only NOT_FOUND is classified as absent.
 use super::{DsbrInput, PlatformInputs};

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The unchanged Linux xe_wopcm.c, which partitions WOPCM for the GuC and
  * locks its registers, on a native device over the activated GPU's
  * registers. */

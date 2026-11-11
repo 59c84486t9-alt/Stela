@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // How functions receive what they use beyond plain buffers: function
 // constants, argument buffers (Tier 2: structs of pointers, resource IDs
 // and arrays of them, nested), visible function tables and stitched

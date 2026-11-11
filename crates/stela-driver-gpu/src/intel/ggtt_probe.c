@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stela's GSM probe: the PF geometry of xe_ggtt_init_early() and the PTE
  * index of xe_ggtt_get_pte() in Linux's xe_ggtt.c, over its unchanged
  * register and page definitions. */

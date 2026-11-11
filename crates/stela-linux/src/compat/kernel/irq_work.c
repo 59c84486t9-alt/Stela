@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's irq_work, with the claiming of kernel/irq_work.c. Stela's drivers
  * have no self-interrupt, so queued work runs on a worker. It keeps what hard
  * interrupt context promises the function: no sleeping, and an RCU read side

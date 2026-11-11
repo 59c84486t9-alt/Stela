@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* nvlink_malloc and nvlink_free, as nvlink_os.h declares them, over Stela's
  * checked global-heap boundary (stela_memory.h). They have no atomic mode. */
 #include <stddef.h>

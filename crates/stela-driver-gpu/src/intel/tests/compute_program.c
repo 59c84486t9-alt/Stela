@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "../hosted/compute.h"
 #include "compiler/tests/intel_probe.h"
 #include "compiler/tests/targets/intel.h"

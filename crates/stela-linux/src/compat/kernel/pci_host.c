@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* A physical function as a Linux pci_dev. Stela's PCI owner enumerates and
  * places functions, so this only presents one: configuration space and DMA go
  * through its owner's callbacks, as an x86 host bridge's pci_ops and IOMMU's

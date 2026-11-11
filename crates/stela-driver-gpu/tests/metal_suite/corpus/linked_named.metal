@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // A visible function linked.metal calls as linked_scaled: the pipeline links
 // a specialization of linked_scale_impl that a function descriptor names so.
 #include <metal_stdlib>

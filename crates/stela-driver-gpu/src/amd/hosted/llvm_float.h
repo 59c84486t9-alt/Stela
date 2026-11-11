@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AMD_LLVM_FLOAT_H
 #define STELA_AMD_LLVM_FLOAT_H
 

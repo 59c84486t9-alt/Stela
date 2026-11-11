@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AIR_MATRIX_H
 #define STELA_AIR_MATRIX_H
 /* Compiler implementation only: AIR's SIMD-group matrix functions in NIR

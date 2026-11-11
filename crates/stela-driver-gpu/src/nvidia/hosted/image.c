@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "image.h"
 #include "util/u_math.h"
 #include "nouveau/headers/nvidia/classes/clb097.h"

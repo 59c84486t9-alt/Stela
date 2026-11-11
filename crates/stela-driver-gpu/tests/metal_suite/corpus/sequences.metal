@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Work that depends on earlier work in the same command buffer or queue:
 // dispatches in one encoder and across encoders, blits around compute,
 // arguments a dispatch or draw reads from what an earlier dispatch wrote,

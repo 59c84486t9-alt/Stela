@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Copies to and from clients, with the interfaces of Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 lib/usercopy.c and mm/util.c. A
  * user pointer belongs to the client the running ioctl serves, in an address

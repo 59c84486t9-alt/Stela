@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Timer-list API of original Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8
  * kernel/time/timer.c and sleep_timeout.c. The qualified real service source
  * runs due callbacks in original softirq nesting. Selected !NO_HZ_COMMON uses

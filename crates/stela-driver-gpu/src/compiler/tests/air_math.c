@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* AIR and LLVM math, conversions, half arithmetic, derivatives and discard.
  * Original LLVM IR fixtures in the call forms air_math.c documents; no Apple
  * output. Exact results are checked by folding each call's NIR. */

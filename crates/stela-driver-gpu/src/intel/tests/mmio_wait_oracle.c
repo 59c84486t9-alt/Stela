@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Compare complete original poll transcripts with the actual native adapter. */
 #include "activation.h"
 #include "xe_mmio.h"

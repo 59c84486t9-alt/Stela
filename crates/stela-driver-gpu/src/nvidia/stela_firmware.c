@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "version.h"
 /* Same original package-name policy as kernel-open/nvidia/nv.c at the retained
  * NVIDIA pin. version.h is generated from the existing vendor version.mk. */

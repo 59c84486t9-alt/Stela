@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Actual local C -> owned Rust input -> shared LLVM metadata integration.
  * No Objective-C, device, framework compiler, GPU or transport is invoked. */
 #ifdef NDEBUG

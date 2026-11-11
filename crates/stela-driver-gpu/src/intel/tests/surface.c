@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "../hosted/surface.h"
 #include "intel/dev/intel_device_info.h"
 #include "intel/genxml/genX_bits.h"

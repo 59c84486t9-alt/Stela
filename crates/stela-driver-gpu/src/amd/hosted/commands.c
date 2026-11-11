@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "commands.h"
 #include "amd/common/ac_cmdbuf.h"
 #include "amd/common/ac_pm4.h"

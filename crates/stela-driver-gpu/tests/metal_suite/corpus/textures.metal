@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Textures from compute: read, sample, gather and compare sampling, write,
 // read-write access, atomics and queries, over the texture types. The host
 // binds the texture and sampler state each case names; each thread takes

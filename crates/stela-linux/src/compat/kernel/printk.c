@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's kernel messages, each delivered formatted to the running owner's
  * log at its level. Messages longer than Linux's 1024-byte records are cut
  * as Linux cuts them. */

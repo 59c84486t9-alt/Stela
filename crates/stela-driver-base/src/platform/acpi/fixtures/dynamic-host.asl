@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 DefinitionBlock ("dynamic-host.aml", "DSDT", 2, "STELA", "DYNHOST", 1)
 {
     Name (DDBH, Zero)

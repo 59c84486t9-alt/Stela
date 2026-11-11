@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* What the C library needs of the host, which Rust supplies (`mesa::libc`). */
 #ifndef STELA_LIBC_HOST_H
 #define STELA_LIBC_HOST_H

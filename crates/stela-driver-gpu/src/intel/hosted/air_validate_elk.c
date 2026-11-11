@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "intel/compiler/elk/elk_eu.h"
 #include "intel/compiler/elk/elk_compiler.h"
 #include <string.h>

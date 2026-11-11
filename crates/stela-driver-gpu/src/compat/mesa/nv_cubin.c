@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* CUDA modules for VK_NVX_binary_import, which Metal has no use for. They are
  * ELF, and `stela.efi` carries no ELF reader, so a module fails to load. */
 #include "nv_cubin.h"

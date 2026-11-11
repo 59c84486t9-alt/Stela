@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The unchanged Linux xe_pat.c, which selects and programs the GPU's PAT
  * table, on a native device over the activated GPU's registers. */
 #include "pat.h"

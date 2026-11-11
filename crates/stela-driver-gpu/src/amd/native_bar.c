@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stela's placement of amdgpu's register and kernel doorbell apertures, with
  * the results Linux's amdgpu_device_init, amdgpu_doorbell_init and
  * amdgpu_doorbell_create_kernel_doorbells give. */

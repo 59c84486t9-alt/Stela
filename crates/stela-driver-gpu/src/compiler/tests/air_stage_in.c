@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stage-in the functions fetch themselves: post-tessellation vertex
  * functions' control points and per-patch attributes, and kernels'.
  * Original LLVM IR fixtures in the forms air_metadata.c documents; no Apple

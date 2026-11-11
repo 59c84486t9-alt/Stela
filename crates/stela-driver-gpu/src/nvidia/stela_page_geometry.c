@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "stela_page_geometry.h"
 
 /* Actual original os-interface.h data types. No guessed platform defaults;

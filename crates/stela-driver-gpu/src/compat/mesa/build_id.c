@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Mesa finds its build ID in its own ELF notes. It uses them to key caches
  * across driver builds; there is no ELF here and the shader cache is out, so
  * one note serves. */

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Hosted control entry, called only on the real joined source Runtime fixture.
  * No main/bare-current/softirq daemon substitute is supplied here. */
 #include <linux/bottom_half.h>

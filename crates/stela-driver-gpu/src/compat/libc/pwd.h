@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* What LLVM's path code names. The image has no users: a caller fails the link. */
 #ifndef STELA_LIBC_PWD_H
 #define STELA_LIBC_PWD_H

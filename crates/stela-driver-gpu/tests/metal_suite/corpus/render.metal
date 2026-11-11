@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // The render pipeline: interpolation qualifiers, derivatives, fragment
 // builtins, blending, multiple render targets, discard, depth output,
 // multisampling, points and vertex fetch. Vertex positions are clip-space

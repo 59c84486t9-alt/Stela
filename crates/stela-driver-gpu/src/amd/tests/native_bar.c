@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stela's BAR policy in Stela's Linux environment; CPU only. */
 #include <drm/amd_asic_type.h>
 #include <linux/string.h>

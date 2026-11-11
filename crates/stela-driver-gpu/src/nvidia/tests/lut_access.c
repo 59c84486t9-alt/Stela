@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Separate CPU-only fixture. Include the unchanged original allocation unit
  * so its private prefix is real, never a reconstructed vendor record. Link
  * unchanged nvkms-lut.c for the actual upload loop, with dead-code removal.

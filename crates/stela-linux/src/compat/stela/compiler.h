@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Forced into every Linux translation unit after Linux's compiler_types.h.
  * Linux places code and data in named sections for its own linker script:
  * init and exit code, read-mostly data, once flags, symbol and parameter

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AIR_CONSTANTS_H
 #define STELA_AIR_CONSTANTS_H
 /* Compiler implementation only: function constant specialization. Includers

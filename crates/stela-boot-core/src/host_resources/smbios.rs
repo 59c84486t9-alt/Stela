@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Pre-EBS physical-host SMBIOS source acquisition only. UEFI 2.10 §2.3.4
 //! grants identity mappings only for described memory; §4.6 config GUIDs and
 //! DSP0134 §5.2 authorize reading their published tables. Never use this after

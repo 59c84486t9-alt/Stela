@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 DefinitionBlock ("namespace.aml", "DSDT", 2, "STELA", "AMLTEST", 1)
 {
     Scope (\_SB)

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Explicit RAM model of actual owned C entry; no native PCI/provider. */
 #include <stela/test.h>
 #include "../activation.c"

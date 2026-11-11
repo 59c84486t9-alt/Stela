@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Original C records and private input ABI; compile-only layout arrays on every
  * native target. Host main uses only bounded CPU config, never RM/hardware. */
 #include "../stela_device.h"

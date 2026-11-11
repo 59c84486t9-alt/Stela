@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Callable mechanics fixtures. These use real Runtime stacks/current tasks;
  * the separately retained Rust test CPU is a hosted model, not native entry. */
 #include <linux/bottom_half.h>

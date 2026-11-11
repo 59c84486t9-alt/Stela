@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Compute: dispatch builtins, threadgroup memory and barriers, device and
 // threadgroup atomics, SIMD-group and quad-group functions, SIMD-group
 // matrices, memory layouts and control flow. Every result is a function of

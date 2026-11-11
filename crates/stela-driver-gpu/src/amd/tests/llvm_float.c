@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* CPU-only LLVM attribute/config contract fixtures; no GPU initialization. */
 #include "../hosted/llvm_float.h"
 #include "amd/common/ac_binary.h"

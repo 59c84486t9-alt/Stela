@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Isolated control owners; no physical permission from numeric model time.
 use super::*;
 use crate::bus::pci::power::Error;

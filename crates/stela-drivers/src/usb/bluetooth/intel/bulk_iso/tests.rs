@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Independent command peer plus native xHCI bulk ownership controls.
 use super::*;
 use crate::{

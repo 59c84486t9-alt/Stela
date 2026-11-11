@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AIR_CALL_H
 #define STELA_AIR_CALL_H
 /* Compiler implementation only: the translator's view of one call of an AIR

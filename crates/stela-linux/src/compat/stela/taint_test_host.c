@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Host-only trap observer; compile outside the Linux header environment,
  * beside stela/test.c. Never part of a native image or Linux service. */
 #include <errno.h>

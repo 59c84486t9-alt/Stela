@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Each negative mode is compiled into a GENUINE ordinary object separately.
  * Do not synthesize or patch binary object bytes. It is deliberately invalid
  * registry input; no negative definition is linked into production. */

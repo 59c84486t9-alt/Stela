@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Real engine, BME, requester-drain, mapping and root-isolation recovery peer.
 use super::*;
 

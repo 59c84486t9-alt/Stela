@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef _ASM_STELA_ACPI_H
 #define _ASM_STELA_ACPI_H
 /* Architecture declarations for Linux ACPI clients. They do not expose the

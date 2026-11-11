@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stela's register access for Xe, in place of xe_mmio.c: each register
  * handle's tile names its device, whose native owner reads and writes BAR0
  * through its canonical uncached mapping. */

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Original Tiny SRCU on real retained Runtime/service/workqueue tasks. */
 #include <linux/completion.h>
 #include <linux/backing-dev.h>

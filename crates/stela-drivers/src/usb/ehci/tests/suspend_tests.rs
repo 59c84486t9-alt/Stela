@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Held-D0 physical root transitions through native registers/EP0/DMA.
 use super::*;
 

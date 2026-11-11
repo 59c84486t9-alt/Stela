@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Coherent device IOVAs; CPU pointers never become device addresses.
 use super::{Error, Result};
 use crate::bus::dma::{

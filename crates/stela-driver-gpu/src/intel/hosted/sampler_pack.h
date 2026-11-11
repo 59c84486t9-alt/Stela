@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "sampler_internal.h"
 #define __gen_address_type uint64_t
 #define __gen_user_data void

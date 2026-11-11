@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_LEGACY_ELK_VALIDATE_H
 #define STELA_LEGACY_ELK_VALIDATE_H
 #include <stdbool.h>

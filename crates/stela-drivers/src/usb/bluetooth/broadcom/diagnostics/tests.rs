@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Independent diagnostic peer and real native bulk endpoints/retirement.
 use super::*;
 use crate::{

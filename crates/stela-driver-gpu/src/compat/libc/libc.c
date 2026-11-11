@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* The C library Mesa runs on inside `stela.efi`: memory, numbers, sorting, time
  * and the few descriptors NVK opens, which are all DRM render nodes. There is
  * no process, so a request for one's environment, signals or files answers as

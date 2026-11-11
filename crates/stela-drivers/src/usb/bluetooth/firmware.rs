@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Owned image metadata shared by explicit native Bluetooth initializers.
 //! Receipts keep integrity/provenance evidence without firmware/provider borrows.
 use crate::firmware::Image;

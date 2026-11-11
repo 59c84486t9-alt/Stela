@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's copies to and from I/O memory, a byte at a time: every mapping
  * accepts those, whatever its alignment. */
 #include <linux/io.h>

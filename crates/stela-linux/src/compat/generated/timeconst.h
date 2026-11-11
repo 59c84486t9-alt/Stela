@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Kbuild generates these with kernel/time/timeconst.bc; here for HZ=1000. */
 #ifndef __KERNEL_TIMECONST_H
 #define __KERNEL_TIMECONST_H

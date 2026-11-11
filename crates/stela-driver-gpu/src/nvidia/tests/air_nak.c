@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Offline, original-input compiler qualification. No device is opened. */
 #include "air_to_nir.h"
 #include "../../compiler/tests/air_probe.h"

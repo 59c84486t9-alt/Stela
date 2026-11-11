@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * The build configuration LLVM's C headers include. The AIR bridge calls the
  * C API of a shared LLVM 23 library and initializes no target, so it states

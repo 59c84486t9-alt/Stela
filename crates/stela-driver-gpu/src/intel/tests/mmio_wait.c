@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Actual native wait helper over a retained register/clock peer. */
 #include "../activation.h"
 #include "../device.h"

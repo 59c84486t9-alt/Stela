@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_STDINT_H
 #define STELA_STDINT_H
 /* The <stdint.h> Stela's own headers use in its Linux environment, which has

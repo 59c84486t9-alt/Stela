@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Calls to visible functions that another library (linked_def.metal)
 // defines, resolved when a pipeline links them: from a kernel, from
 // vertex and fragment functions, and from object and mesh functions.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Called on the existing fixture's real retained Runtime/current/stack.
  * Forked failure observers inherit that complete hosted CPU model; no native
  * IRQ, Timer service or irq_work delivery producer is supplied by these tests.

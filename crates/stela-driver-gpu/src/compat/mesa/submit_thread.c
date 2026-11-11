@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Puts a queue's submissions on Mesa's submit thread, a Linux task of the
  * host's environment: vkQueueSubmit2 then queues the work and returns, and
  * the thread makes the driver's submission (DRM_NOUVEAU_EXEC) where Linux

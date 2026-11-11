@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The Metal ABI's NIR shapes; the GPU behavior needs a device. */
 #include "../metal_abi.h"
 #include "air_effect_oracle.h"

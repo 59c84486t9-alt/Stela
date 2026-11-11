@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stela's GuC reset: the register handshake of xe_guc_reset() in Linux's
  * xe_guc.c, over its unchanged register definitions, for the GTs that
  * activation admits. */

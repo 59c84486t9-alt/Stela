@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AIR_LOG_H
 #define STELA_AIR_LOG_H
 /* Compiler implementation only: os_log. Includers define

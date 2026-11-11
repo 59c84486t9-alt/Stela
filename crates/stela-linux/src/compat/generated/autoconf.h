@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stela's Kconfig. Linux code runs on 64-bit x86 for one owner at a time,
  * without preemption or interrupts (see stela/linux.h): Linux's
  * uniprocessor, non-preemptible configuration of Stela's own arch. Options

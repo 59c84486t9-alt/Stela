@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "air_to_nir.h"
 #include "nvidia/hosted/compute.h"
 #include "llvm-c/Core.h"

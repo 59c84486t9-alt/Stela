@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // The visible functions linked.metal calls, defined in a library of their
 // own and linked into the pipelines that call them.
 #include <metal_stdlib>

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* nvkms_alloc and nvkms_free, as nvidia-modeset-os-interface.h declares them,
  * over Stela's checked global-heap boundary (stela_memory.h). A nonzero zero flag
  * clears the allocation; the heap keeps its own layout, so free needs no size.

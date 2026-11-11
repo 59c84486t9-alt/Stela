@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_TARGETS_AMD_H
 #define STELA_TARGETS_AMD_H
 /* AMD compile targets and holds for every Stela compiler probe: one family per

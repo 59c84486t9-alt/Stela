@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Partial captured CPU models plus synthetic VM addresses, never real devices. */
 #include "../hosted/image.h"
 #include "amd/common/ac_descriptors.h"

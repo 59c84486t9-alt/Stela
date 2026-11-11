@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_INTEL_HOSTED_SAMPLER_INTERNAL_H
 #define STELA_INTEL_HOSTED_SAMPLER_INTERNAL_H
 #include "sampler.h"

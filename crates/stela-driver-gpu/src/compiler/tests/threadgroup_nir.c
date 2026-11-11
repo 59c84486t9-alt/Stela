@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Original LLVM fixtures and existing NIR optimization; no GPU interpreter. */
 #include "../threadgroup.h"
 #include "compiler/air_to_nir.h"

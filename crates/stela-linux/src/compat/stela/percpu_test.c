@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Dynamic per-CPU allocation fixtures over the production compat/kernel/percpu.c. */
 #include <linux/gfp.h>
 #include <linux/irqflags.h>

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Stela's archive of NVIDIA's unchanged display core; see common.mk.
 STELA_SRCS := $(addprefix $(STELA)/,stela_nvkms_primitives.c stela_nvkms_memory.c)
 # NVIDIA embeds its compressed shaders with an ELF binary link. Stela embeds the

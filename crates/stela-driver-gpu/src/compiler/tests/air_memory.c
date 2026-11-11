@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Thread memory (allocas), LLVM's memory intrinsics, constant data
  * (initialized constant globals) and constant buffers. Original LLVM IR
  * fixtures; no Apple output. */

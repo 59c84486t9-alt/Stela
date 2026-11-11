@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_LIBC_SIGNAL_H
 #define STELA_LIBC_SIGNAL_H
 #include <sys/cdefs.h>

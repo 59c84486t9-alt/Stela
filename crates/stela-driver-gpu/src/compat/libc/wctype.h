@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* What libc++ names; see wchar.h. */
 #ifndef STELA_LIBC_WCTYPE_H
 #define STELA_LIBC_WCTYPE_H

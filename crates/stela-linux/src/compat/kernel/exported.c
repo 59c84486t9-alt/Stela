@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Memory the owner holds, as a dma-buf a driver imports like any other. Linux
  * has no pages for it, so a mapping is only device addresses, which is all an
  * importer may read of one, and DMA_ATTR_MMIO says that the owner, not Linux's

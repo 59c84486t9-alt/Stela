@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Calls between the module's functions. Apple's compiler inlines most
  * functions but keeps [[noinline]] and visible functions out of line, while
  * translation lowers one function. Each call to a function the module

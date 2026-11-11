@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's string-to-integer conversions, with lib/kstrtox.c's results: an
  * optional '+' or, for a signed result, '-', base 0 choosing 16 for "0x", 8 for "0" and else 10, an
  * optional "0x" for base 16, at least one digit, and at most one trailing

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Class control custody and sticky first minimum failure.
 use super::{BlockError, Control, Vec};
 use core::mem::ManuallyDrop;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Clients' mappings of Linux's files, with the interfaces of Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 mm/memory.c, mm/mmap.c and
  * mm/interval_tree.c. The owner owns the clients' address spaces: each

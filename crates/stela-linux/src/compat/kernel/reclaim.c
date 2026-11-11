@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 #ifdef STELA_LINUX_RECLAIM_TEST
 #include <linux/list_lru.h>
 #include <stela/linux.h>

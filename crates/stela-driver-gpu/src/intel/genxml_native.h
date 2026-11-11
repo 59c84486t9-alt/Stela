@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The address type the original Mesa XML packers combine: a plain GPU address
  * with no relocation, as the native encoders emit it.
  */

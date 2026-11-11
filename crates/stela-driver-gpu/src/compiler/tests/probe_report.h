@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_PROBE_REPORT_H
 #define STELA_PROBE_REPORT_H
 /* The one machine-readable output of Stela's compiler probes: a line

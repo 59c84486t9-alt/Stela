@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "compute.h"
 #include "nouveau/headers/nv_push.h"
 #include "nv_push_cla0c0.h"

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Function constants. Metal.jl's library builder (src/metallib/builder.jl)
  * reads Apple's AIR: each constant is an AS2 global named by
  * !air.function_constants, which functions load and test with

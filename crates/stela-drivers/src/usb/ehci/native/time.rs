@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Attachment-local elapsed TSC time, preserving fractional ticks and wrap.
 //! Minimum delays use the shared checked native PCI Timer implementation.
 pub(super) struct Elapsed {

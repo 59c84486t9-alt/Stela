@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Kernel services Stela does not provide yet. */
 #include <linux/folio_batch.h>
 #include <linux/fs.h>

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // What a C++ program expects below libc++, on compat/libc: allocation, the
 // compiler's runtime calls and static constructors. Nothing here throws: the
 // image has no unwinder, so a failed allocation is fatal, as LLVM's own

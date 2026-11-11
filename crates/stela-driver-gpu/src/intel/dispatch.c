@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Field policy from Iris iris_upload_gpgpu_walker(); encodings remain generated
  * by Mesa's unchanged XML packing algorithms, never transcribed by hand.
  */

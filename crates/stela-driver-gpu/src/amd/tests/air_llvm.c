@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Offline AIR -> shared NIR -> retained Mesa AMD LLVM compiler, for the
  * families original ACO refuses. The shader ABI is explicit; no device
  * initialization/execution is claimed.

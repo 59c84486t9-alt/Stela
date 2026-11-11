@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* ASTC LDR blocks decoded as Apple's GPUs do, for the decoder tests: Mesa's
  * reference decoder, kept at 16 bits for linear formats, with the one rule
  * Apple adds, a void extent's reserved bits. Apple reads a linear texel's

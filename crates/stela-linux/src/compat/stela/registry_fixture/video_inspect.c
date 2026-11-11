@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <linux/err.h>
 #include <linux/string.h>
 #include <stela/linux.h>

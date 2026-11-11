@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Shared serialized callback lifecycle; no native IRQ admission is supplied. */
 #include <linux/hardirq.h>
 #include <linux/irqflags.h>

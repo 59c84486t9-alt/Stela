@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Kbuild generates these from Linux's kernel/bounds.c for the configuration
  * in autoconf.h; compat/linux/kernel/bounds.c checks each against the
  * definition it reports. */

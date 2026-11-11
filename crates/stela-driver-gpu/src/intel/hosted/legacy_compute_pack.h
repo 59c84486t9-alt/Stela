@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* One generation's legacy compute packets: Stela's field values, the ones
  * Iris and Crocus also program, packed entirely by Mesa's unchanged
  * XML-generated packers.

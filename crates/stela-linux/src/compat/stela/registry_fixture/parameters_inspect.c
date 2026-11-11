@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <linux/panic.h>
 #include <stela/linux.h>
 #include <stela/registry.h>

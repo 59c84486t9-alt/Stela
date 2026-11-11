@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "../hosted/image_copy.h"
 #include "nouveau/headers/nvidia/classes/clb097.h"
 #include "nouveau/headers/nvidia/classes/clb197.h"

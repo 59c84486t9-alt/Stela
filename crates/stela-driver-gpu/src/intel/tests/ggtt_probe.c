@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* GSM geometry against the GMCH field layout and GGTT bounds; CPU only. */
 #include "../ggtt_probe.h"
 #include <linux/types.h>

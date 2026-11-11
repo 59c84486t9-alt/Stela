@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "compute_dispatch_internal.h"
 
 int stela_intel_compute_dispatch(struct stela_intel_commands *commands,

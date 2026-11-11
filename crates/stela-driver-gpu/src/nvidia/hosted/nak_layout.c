@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* NAK reads its frontend's constant-buffer layout from these two globals,
  * which NVK defines for Vulkan. Stela keeps the sample locations and masks
  * and the printf buffer address in constant buffer 0 for every stage. */

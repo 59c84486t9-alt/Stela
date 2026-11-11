@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* os_flush_cpu_write_combine_buffer, as os-interface.h declares it, for
  * x86-64: sfence orders this CPU's earlier write-combining stores before its
  * later ones. It is not cache maintenance, posted-write completion or DMA

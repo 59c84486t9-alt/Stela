@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Shader features macOS's own shaders use that the other families do not
 // reach: SIMD-group indices and counts, null texture and function table
 // handles, device-coherent memory, packing formats, multisampled depth

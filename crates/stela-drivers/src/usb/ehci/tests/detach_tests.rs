@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! A physically enabled old USB address must never alias a newly assigned root.
 use super::*;
 

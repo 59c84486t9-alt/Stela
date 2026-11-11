@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_LINUX_H
 #define STELA_LINUX_H
 /* Stela's kernel-API binding. Linux code runs only between stela_linux_enter

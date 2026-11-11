@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* AIR texture functions over the Metal ABI's heap binds. Original LLVM IR
  * fixtures in the AIR call shapes air_texture.c documents; no Apple output. */
 #include "../metal_abi.h"

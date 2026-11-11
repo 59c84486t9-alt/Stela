@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "compute.h"
 #include "fp_controls.h"
 #include "intel/common/intel_common.h"

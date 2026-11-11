@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Compile/name isolation only. No portal, AML or native service is installed. */
 #include <linux/acpi.h>
 #include <linux/string.h>

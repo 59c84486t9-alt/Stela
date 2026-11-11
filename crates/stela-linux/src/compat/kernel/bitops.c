@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's software population counts, for arch_hweight.h. */
 #include <linux/bitops.h>
 

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Retained captured partial CPU models and synthetic VM views only. */
 #include "../hosted/image_resource.h"
 #include "amd/common/ac_gpu_info.h"

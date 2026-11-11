@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "render_compile.h"
 #include "../../compiler/library_assembly.h"
 #include "air_compile.h" /* Reuse the existing immutable resource-view record. */

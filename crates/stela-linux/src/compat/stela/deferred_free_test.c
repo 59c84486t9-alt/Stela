@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Original nonbatched RCU-free helpers. The hosted source fixture joins real
  * RCU and both fixtures observe the actual allocator/queue through ELF wrappers. */
 #include <linux/bottom_half.h>

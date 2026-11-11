@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Explicit native initialization order for original kernel resource caches. */
 #include <linux/errno.h>
 #include <linux/ioport.h>

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AMD_IMAGE_COPY_H
 #define STELA_AMD_IMAGE_COPY_H
 

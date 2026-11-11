@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The backend's internal compute kernels compile through NAK for every
  * NVIDIA target: NAK refuses ALU operations it has no lowering for only
  * when it compiles, which on a device is when the backend starts. The

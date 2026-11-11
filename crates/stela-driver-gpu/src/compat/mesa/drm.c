@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* libdrm, as far as NVK reaches it: thin wrappers of DRM's ioctls, with the
  * entry points of xf86drm.h. Devices come from the host, not from /sys. */
 #include <errno.h>

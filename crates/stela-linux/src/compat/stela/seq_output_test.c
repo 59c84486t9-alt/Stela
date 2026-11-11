@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Actual original seq buffer-output helpers. Buffers are owned by this test;
  * no filesystem, process, credentials, user-copy or mapping authority exists. */
 #include <linux/seq_file.h>

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Stela's compute resource-word policy: each COMPUTE_PGM_RSRC field from the
  * compiler config and shader facts. Mesa's unchanged ac_* helpers supply the
  * per-generation LDS and instruction-prefetch encodings.

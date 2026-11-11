@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The kernel's fixed-width names, for its UAPI headers. */
 #ifndef STELA_LIBC_LINUX_TYPES_H
 #define STELA_LIBC_LINUX_TYPES_H

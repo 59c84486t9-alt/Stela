@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The unchanged Linux amdgpu_drv.c, whose device tables, ASIC quirks and
  * generation support policy decide matching. Nothing of the DRM driver itself
  * is reachable. */

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_PAGE_H
 #define STELA_PAGE_H
 #include <linux/types.h>

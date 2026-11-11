@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Isolated BOT target timing effects; numeric scheduling alone cannot clear.
 use super::*;
 use crate::bus::pci::power::Error;

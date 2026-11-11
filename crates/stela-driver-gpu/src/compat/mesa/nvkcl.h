@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* NVK's two internal compute kernels. Mesa compiles them from OpenCL C with
  * LLVM at build time into `nvkcl.h`; `nvkcl.c` builds the same programs in NIR
  * so the boot image needs neither (`src/nouveau/vulkan/cl/`). */

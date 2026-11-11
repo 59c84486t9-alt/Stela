@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AMD_AIR_COMPILE_H
 #define STELA_AMD_AIR_COMPILE_H
 

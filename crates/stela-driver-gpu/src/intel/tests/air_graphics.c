@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Canonical selected-stage owner/compiled package tests. Synthetic MTLB outer
  * framing identifies actual vertex0/fragment1 roles around unchanged externally
  * supplied AIR. It is not claimed to be an original Apple-produced archive or

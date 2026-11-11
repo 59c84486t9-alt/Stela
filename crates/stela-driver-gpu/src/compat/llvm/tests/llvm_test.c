@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* LLVM as `stela.efi` links it, over the C library and libc++, doing what the
  * AIR compiler does, as a static Linux program: `cargo xtask gpu llvm --test`
  * builds and runs it. */

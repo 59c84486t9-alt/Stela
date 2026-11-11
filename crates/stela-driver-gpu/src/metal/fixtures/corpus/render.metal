@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Vertex and fragment stage inputs and outputs.
 #include <metal_stdlib>
 using namespace metal;

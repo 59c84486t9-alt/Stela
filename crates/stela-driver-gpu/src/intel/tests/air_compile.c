@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Hosted compiler/RAW/table/plan fixtures. Device topologies and placements
  * are synthetic models, not initialized hardware or native execution. */
 #include "../hosted/air_compile.h"

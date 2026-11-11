@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_PAGE_TEST_H
 #define STELA_PAGE_TEST_H
 /* A few real pages behind Linux's page allocator, for hosted tests of code that

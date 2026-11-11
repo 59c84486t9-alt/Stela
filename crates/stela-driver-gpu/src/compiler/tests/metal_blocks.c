@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The block decoders against reference decoders that follow the formats'
  * specifications bit for bit, over random blocks. The decoders run through
  * the NIR effect oracle; the kernels that load and store around them need a

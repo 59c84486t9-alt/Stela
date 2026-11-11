@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* C's mathematics over the x87 unit, which computes the elementary functions
  * to a precision past double's, so no tables are needed here. Mesa uses these
  * to fold constants the way a GPU will evaluate them, which is itself never

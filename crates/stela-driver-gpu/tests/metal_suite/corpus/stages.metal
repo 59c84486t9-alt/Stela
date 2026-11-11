@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Programmable stages beyond vertex and fragment: tessellation of quad
 // patches with control points read through stage-in.
 #include <metal_stdlib>

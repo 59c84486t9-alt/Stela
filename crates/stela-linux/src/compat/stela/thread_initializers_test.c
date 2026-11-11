@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Native architecture metadata initializers, without current/task admission. */
 #include <linux/preempt.h>
 #include <linux/sched.h>

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The C library headers Mesa's packing helpers include, for the native packet
  * encoders, which run without one. No assertion handler exists there: a
  * violated packer invariant stops execution rather than truncating a field.

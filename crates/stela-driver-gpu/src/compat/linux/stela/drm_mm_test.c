@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Whole original drm_mm range algorithm versus an independent byte occupancy
  * model. Metadata offsets grant no backing, CPU mapping, IOVA or GPU address. */
 #include <linux/errno.h>

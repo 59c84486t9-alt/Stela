@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Original UID/exec-state paths on an actually attached hosted Runtime task.
  * The CPU/physical provider is a test model; no native current is installed,
  * so RCU-deferred frees never complete here (see resources_test.c). */

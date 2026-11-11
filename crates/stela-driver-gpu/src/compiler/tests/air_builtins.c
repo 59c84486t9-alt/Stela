@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* AIR builtin inputs over the Metal ABI's device values. Original LLVM IR
  * fixtures in the argument forms air_metadata.c documents; no Apple output. */
 #include "../metal_abi.h"

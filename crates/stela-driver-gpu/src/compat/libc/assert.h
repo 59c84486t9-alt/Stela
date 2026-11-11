@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <sys/cdefs.h>
 #undef assert
 __BEGIN_DECLS

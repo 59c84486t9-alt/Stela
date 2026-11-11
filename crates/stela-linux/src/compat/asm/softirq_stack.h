@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 #ifndef STELA_ASM_SOFTIRQ_STACK_H
 #define STELA_ASM_SOFTIRQ_STACK_H
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Formatted output into memory, and the two streams that reach the host's log.
  * A memory stream is the only file that can be opened. */
 #include <ctype.h>

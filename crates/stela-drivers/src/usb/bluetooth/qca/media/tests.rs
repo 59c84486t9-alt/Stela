@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! QCA live-report admission and source shutdown over an independent USB peer.
 use super::*;
 use crate::{

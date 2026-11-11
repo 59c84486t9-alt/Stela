@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Hosted compiler-only qualification. No graphics pipeline, device or draw. */
 #include "air_to_nir.h"
 #include "nouveau/compiler/nak.h"

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_NVIDIA_MMIO_H
 #define STELA_NVIDIA_MMIO_H
 #include "nvtypes.h"

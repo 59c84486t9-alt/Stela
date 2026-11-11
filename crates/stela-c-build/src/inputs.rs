@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Bounded descriptor-relative build inputs, shared by source selection and
 //! original-object registration capture. No compiler or source is executed.
 //! Resolve explicitly selected root aliases once; never follow links below.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Synchronous firmware requests route only through their actual enrolled
  * device authority. Each result owns a complete independent immutable copy. */
 #include <linux/device.h>

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Counted native supplier ownership; namespace handles stay in affine receipts.
 use super::{Error, Handle};
 use alloc::sync::Arc;

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Freestanding, private libc names; these never call the host C runtime. */
 #include "acpi/acpi.h"
 void *memcpy(void *dst, const void *src, size_t n) {

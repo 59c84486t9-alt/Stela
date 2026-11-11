@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Offline parser/selector qualification; these bytes are not signed firmware. */
 #include <stela/test.h>
 #include "../firmware.c"

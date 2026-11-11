@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_AIR_PRECISE_H
 #define STELA_AIR_PRECISE_H
 /* Compiler implementation only: Metal's precise single-precision functions

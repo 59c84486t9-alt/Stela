@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Atomic operations on device and threadgroup memory.
 #include <metal_stdlib>
 using namespace metal;

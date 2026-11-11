@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Dynamic per-CPU storage for Stela's single qualified Linux CPU. Static
  * per-CPU objects already use the same identity mapping in asm/percpu.h.
  * Each allocation owns a separately aligned, zeroed canonical heap window.

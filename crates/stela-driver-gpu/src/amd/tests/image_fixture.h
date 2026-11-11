@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Retained partial captured-device CPU fixture; never production init. */
 #ifndef STELA_AMD_TEST_IMAGE_FIXTURE_H
 #define STELA_AMD_TEST_IMAGE_FIXTURE_H

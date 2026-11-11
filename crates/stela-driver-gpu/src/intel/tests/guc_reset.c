@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* GuC reset handshake over a modelled register file and clock; never a
  * physical reset. */
 #include "../guc_reset.h"

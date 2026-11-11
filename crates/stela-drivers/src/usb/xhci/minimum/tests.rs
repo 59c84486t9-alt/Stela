@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Isolated protocol timing/failure controls, not native physical permits.
 use super::*;
 use crate::bus::dma::TestRegion;

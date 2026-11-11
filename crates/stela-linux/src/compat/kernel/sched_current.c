@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Linux's current task follows the native dispatcher on its one CPU. */
 #include <linux/jiffies.h>
 #include <linux/sched/loadavg.h>

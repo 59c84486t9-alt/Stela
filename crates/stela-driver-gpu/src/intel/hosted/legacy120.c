@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #define GFX_VERx10 120
 #define STELA_LEGACY_PACK stela_intel_legacy_pack_120
 #include "legacy_compute_pack.h"

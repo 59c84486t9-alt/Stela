@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The unchanged Linux xe_module.c, xe_pci.c, xe_step.c and xe_force_wake.c,
  * run on a native device. Activation runs Linux's own device-info probe and
  * GT forcewake; nothing else of the PCI driver is reachable. */

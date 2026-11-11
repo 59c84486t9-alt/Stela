@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef STELA_METAL_COMPILER_H
 #define STELA_METAL_COMPILER_H
 /* The Metal device's compiler service: shader::Compiler's reflection and

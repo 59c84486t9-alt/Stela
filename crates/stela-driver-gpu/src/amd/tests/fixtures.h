@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Fixtures shared by the hosted C tests and the Rust integration test. */
 #ifndef STELA_AMD_TEST_FIXTURES_H
 #define STELA_AMD_TEST_FIXTURES_H

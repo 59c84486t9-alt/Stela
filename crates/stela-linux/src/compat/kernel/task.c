@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Original Linux task metadata bound to actual retained Runtime continuations.
  * This implements identity/lease transitions, not a substitute Linux scheduler. */
 #include <linux/errno.h>

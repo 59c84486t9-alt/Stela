@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "../hosted/sampler.h"
 #include "nouveau/headers/drf.h"
 #include "nouveau/headers/nvidia/classes/cl9097tex.h"

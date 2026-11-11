@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Stela's GPU compilers and their probes over Mesa's shader compilers, which
 # build as the subproject `subprojects/mesa` (the `third_party/mesa` submodule)
 # without graphics API frontends, window systems or device I/O.

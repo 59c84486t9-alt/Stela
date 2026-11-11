@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Rust's UEFI target is soft-float, so an `extern "C"` float from it travels as
  * bits in an integer register where Mesa's C expects an SSE one. These are all
  * the floats that cross: bindgen's wrappers of the three conversions NAK calls,

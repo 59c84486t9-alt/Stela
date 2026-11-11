@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Bounded parser/geometry tests, not a nouveau device or firmware-boot test.
  * The source-only generator binds complete actual patched helper bodies and
  * metadata into one ignored include. No original firmware input is required.

@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The NIR options a device's shaders are built with, for the AIR compiler,
  * which reaches NVK by no route Vulkan offers. */
 #include "nak.h"

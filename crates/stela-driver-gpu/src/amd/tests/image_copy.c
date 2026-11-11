@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* CPU allocation/model checks only; no GPU mapping, upload or cache service. */
 #include "../hosted/image_copy.h"
 #include "image_fixture.h"

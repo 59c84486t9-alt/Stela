@@ -1,6 +1,6 @@
 use super::*;
 
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Included by acpi::tests: native AML, never a synthetic Handle backend.
 #[test]
 fn native_battery_linux_status_default_information_fallback_and_trip_failures() {

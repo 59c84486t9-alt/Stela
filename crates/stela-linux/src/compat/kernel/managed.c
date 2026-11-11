@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Owned transport for original kthread_create_info. No scheduler or WQ policy. */
 #include <linux/completion.h>
 #include <linux/err.h>

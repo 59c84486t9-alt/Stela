@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Hosted ownership/ABI and retained compiler tests only. Target/VM facts and
  * upload addresses are CPU models; no initialized physical GPU is claimed. */
 #include "../hosted/air_compile.h"

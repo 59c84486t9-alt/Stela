@@ -1,6 +1,6 @@
 use super::*;
 
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Included by acpi::tests to exercise native AML and EC operation regions.
 #[test]
 fn native_ec_discovery_consumed_queries_and_reentrant_operation_regions() {

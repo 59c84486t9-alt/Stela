@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* C++ reaches these headers too: LLVM and libc++ call the C library by C names. */
 #ifndef STELA_LIBC_SYS_CDEFS_H
 #define STELA_LIBC_SYS_CDEFS_H

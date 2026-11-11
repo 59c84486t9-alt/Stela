@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 // SIMD-group, quad-group and threadgroup collectives, and SIMD-group
 // matrices.
 #include <metal_stdlib>

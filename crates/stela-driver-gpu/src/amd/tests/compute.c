@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* CPU model only: immutable synthetic topology/VM facts, real retained ACO
  * compilation, the resource-word policy and actual PM4 decoding.
  * No physical device, allocation, mapping or resource residency is created.

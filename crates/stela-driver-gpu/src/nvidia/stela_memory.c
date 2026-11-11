@@ -1,4 +1,4 @@
-/* SPDX-License-Identifier: MIT */
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #include <stddef.h>
 #include "os-interface.h"
 #include "stela_memory.h"

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: GPL-2.0-or-later
 //! Firmware resource decoding and reservations backed by native owners.
 //!
 //! A `_CRS` address is descriptive, not ownership. `MemoryBroker` subdivides
