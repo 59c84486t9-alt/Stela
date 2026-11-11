@@ -12,7 +12,7 @@ use crate::{
     input::{self, InputDevice, virtio::VirtioInput},
     net::{
         self, Link, LinkError, Mac,
-        e1000e::E1000e,
+        e1000e::{E1000e, pch::cold::attach as pch},
         igb::Igb,
         igc::Igc,
         realtek::{self, Realtek},
@@ -51,6 +51,7 @@ pub enum Error {
     Enumeration(crate::bus::pci::EnumerationError),
     Device(BlockError),
     Realtek(realtek::Error),
+    Pch(pch::AttachError),
     /// The mount's [`NativeServices`] refused or lack a resource.
     Native(ServiceError),
     Vmd(crate::bus::vmd::Error),
@@ -78,6 +79,7 @@ impl fmt::Display for Error {
             Self::Device(error) => error.fmt(f),
             Self::Enumeration(error) => write!(f, "PCI enumeration: {error:?}"),
             Self::Realtek(error) => error.fmt(f),
+            Self::Pch(error) => error.fmt(f),
             Self::Native(error) => error.fmt(f),
             Self::Vmd(error) => write!(f, "VMD: {error}"),
             Self::Tg3(error) => write!(f, "tg3: {error:?}"),
@@ -114,6 +116,12 @@ impl From<crate::bus::pci::ConfigError> for Error {
 impl From<crate::bus::pci::CapabilityError> for Error {
     fn from(error: crate::bus::pci::CapabilityError) -> Self {
         Self::Device(BlockError::PciCapability(error))
+    }
+}
+
+impl From<pch::AttachError> for Error {
+    fn from(error: pch::AttachError) -> Self {
+        Self::Pch(error)
     }
 }
 
@@ -225,6 +233,8 @@ pub enum Adapter {
     Virtio(VirtioNet),
     Igc(Igc),
     E1000e(E1000e),
+    /// An Intel 82579, I217/I218 or I219 integrated MAC.
+    Pch(Box<pch::Pch>),
     Igb(Igb),
     Realtek(Realtek),
     Usb(UsbNet),
@@ -243,7 +253,7 @@ impl Adapter {
         match self {
             Self::Virtio(_) => "virtio-net",
             Self::Igc(_) => "igc",
-            Self::E1000e(_) => "e1000e",
+            Self::E1000e(_) | Self::Pch(_) => "e1000e",
             Self::Igb(_) => "igb",
             Self::Realtek(_) => "realtek",
             Self::Usb(_) => "usb-cdc",
@@ -263,6 +273,7 @@ impl Adapter {
             Self::Virtio(device) => &device.location,
             Self::Igc(device) => &device.location,
             Self::E1000e(device) => &device.location,
+            Self::Pch(device) => &device.location,
             Self::Igb(device) => &device.location,
             Self::Realtek(device) => &device.location,
             Self::Usb(device) => &device.location,
@@ -283,6 +294,7 @@ impl Link for Adapter {
             Self::Virtio(device) => device.mac(),
             Self::Igc(device) => device.mac(),
             Self::E1000e(device) => device.mac(),
+            Self::Pch(device) => device.mac(),
             Self::Igb(device) => device.mac(),
             Self::Realtek(device) => device.mac(),
             Self::Usb(device) => device.mac(),
@@ -300,6 +312,7 @@ impl Link for Adapter {
             Self::Virtio(device) => device.carrier(),
             Self::Igc(device) => device.carrier(),
             Self::E1000e(device) => device.carrier(),
+            Self::Pch(device) => device.carrier(),
             Self::Igb(device) => device.carrier(),
             Self::Realtek(device) => device.carrier(),
             Self::Usb(device) => device.carrier(),
@@ -317,6 +330,7 @@ impl Link for Adapter {
             Self::Virtio(device) => device.signals(),
             Self::Igc(device) => device.signals(),
             Self::E1000e(device) => device.signals(),
+            Self::Pch(device) => device.signals(),
             Self::Igb(device) => device.signals(),
             Self::Realtek(device) => device.signals(),
             Self::Usb(device) => device.signals(),
@@ -343,6 +357,7 @@ impl Link for Adapter {
             Self::Virtio(device) => device.transmit(frame),
             Self::Igc(device) => device.transmit(frame),
             Self::E1000e(device) => device.transmit(frame),
+            Self::Pch(device) => device.transmit(frame),
             Self::Igb(device) => device.transmit(frame),
             Self::Realtek(device) => device.transmit(frame),
             Self::Usb(device) => device.transmit(frame),
@@ -360,6 +375,7 @@ impl Link for Adapter {
             Self::Virtio(device) => device.receive(),
             Self::Igc(device) => device.receive(),
             Self::E1000e(device) => device.receive(),
+            Self::Pch(device) => device.receive(),
             Self::Igb(device) => device.receive(),
             Self::Realtek(device) => device.receive(),
             Self::Usb(device) => device.receive(),
@@ -377,6 +393,7 @@ impl Link for Adapter {
             Self::Virtio(device) => device.receive_reusing(frame),
             Self::Igc(device) => device.receive_reusing(frame),
             Self::E1000e(device) => device.receive_reusing(frame),
+            Self::Pch(device) => device.receive_reusing(frame),
             Self::Igb(device) => device.receive_reusing(frame),
             Self::Realtek(device) => device.receive_reusing(frame),
             Self::Usb(device) => device.receive_reusing(frame),
@@ -406,6 +423,7 @@ pub fn claims_identity(function: &crate::bus::pci::Identity) -> bool {
         || net::virtio::matches_identity(function)
         || net::igc::matches_identity(function)
         || net::e1000e::matches_identity(function)
+        || pch::matches_identity(function)
         || net::igb::matches_identity(function)
         || realtek::matches_identity(function)
         || crate::audio::hda::pci::identify_identity(function).is_ok()
@@ -1187,6 +1205,20 @@ pub unsafe fn probe_with_provider(
                 // functions and controllers after ExitBootServices.
                 let attached = unsafe { E1000e::new(&mut function, handoff, dma, minimum.clone()) };
                 attach_link!(attached, Adapter::E1000e);
+            } else if pch::matches(&function) {
+                let minimum = minimum_for_function!().clone();
+                // The MTP/PTP cohorts read Linux's K1 board quirk from the
+                // SMBIOS system fields; without them those cohorts refuse.
+                let snapshot = crate::firmware::smbios::load(firmware).ok();
+                let host = snapshot
+                    .as_ref()
+                    .map(|snapshot| pch::host_identity(&snapshot.identity))
+                    .unwrap_or_default();
+                // SAFETY: as for e1000e; the adapter keeps the function, its
+                // configuration and both register windows to the end of boot.
+                let attached =
+                    unsafe { pch::Pch::attach(function, handoff, dma, minimum.clone(), host) };
+                attach_link!(attached.map(Box::new), Adapter::Pch);
             } else if net::igb::matches(&function) {
                 let minimum = minimum_for_function!().clone();
                 // SAFETY: as for e1000e, the caller granted exclusive ownership

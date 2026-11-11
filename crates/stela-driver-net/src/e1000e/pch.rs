@@ -4,10 +4,10 @@
 //! Owned PCH PHY transport for the 82579 and I217/I218/I219 paths.
 //!
 //! SWFLAG, MDIC, HV paging, debug ports and host-wakeup access follow the
-//! pinned Linux e1000e shared code. This component does not admit a PCH MAC
-//! to the network probe. [`cold`] composes only its declared unmanaged 82579
-//! reset/NVM/PHY/MAC/queue profile behind owned unsafe grants. Other
-//! generations and canonical native admission remain separate. It never applies the
+//! pinned Linux e1000e shared code. [`cold`] composes the declared unmanaged
+//! 82579, LPT and I219 reset/NVM/PHY/MAC/queue profiles behind owned unsafe
+//! grants, and [`cold::attach`] admits exactly those PCI IDs to the network
+//! probe. Other generations remain unclaimed. It never applies the
 //! discrete 82574L's PHY page or RAR policy to an integrated PCH controller.
 
 pub mod cold;

@@ -10,6 +10,7 @@ use super::{Delay, Fault, Identity, Kind, Phy, Register, Registers, nvm};
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
+pub mod attach;
 pub mod i219;
 pub mod lpt;
 pub mod mtp;

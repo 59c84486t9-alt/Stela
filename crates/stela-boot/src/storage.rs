@@ -80,7 +80,7 @@ fn subsystem(error: &stela_drivers::probe::Error) -> &'static str {
         Error::Enumeration(_) => "PCI",
         Error::Vmd(_) => "storage",
         Error::Realtek(_) => "card reader",
-        Error::Tg3(_) | Error::Aqtion(_) => "network",
+        Error::Tg3(_) | Error::Aqtion(_) | Error::Pch(_) => "network",
         Error::IntelWifi(_) | Error::MediatekWifi(_) | Error::RealtekWifi(_) => "Wi-Fi",
         Error::IntelBluetooth(_) | Error::Bcm4377(_) => "Bluetooth",
         Error::Sfh(_) | Error::SfhCold(_) | Error::Ish(_) | Error::IshCold(_) => "sensors",
