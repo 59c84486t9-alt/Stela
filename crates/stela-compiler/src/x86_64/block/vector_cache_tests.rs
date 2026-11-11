@@ -265,6 +265,83 @@ fn run_random_blocks(target: TargetCpu, cases: usize) {
     assert!(cached > cases * 4 / 5, "{target:?}: {cached}");
 }
 
+/// Blocks that reuse a few by-element operands (Vm.h[i]) and rounding
+/// narrows, whose prepared elements and lane constants the cache keeps for
+/// the block, with writes to those Vm between uses, from lanes at and near
+/// the signed and unsigned maxima: the same state as the frame layout.
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn kept_elements_and_lane_constants_run_as_the_frame_layout() {
+    const EXTREMES: [u64; 8] = [
+        0x7fff_ffff_7fff_ffff,
+        0x8000_0000_8000_0000,
+        0x7fff_7fff_7fff_7fff,
+        0xffff_ffff_ffff_ffff,
+        0x7fff_ff80_7fff_ffc0,
+        0x0000_0000_0000_0000,
+        0x7ffe_ffff_ffff_7fff,
+        0x0000_8000_0000_8000,
+    ];
+    for target in tiers() {
+        let mut random = Random(0x5151_7a7a_0101_9e9e);
+        for case in 0..400 {
+            let length = 4 + random.below(30) as usize;
+            let words: Vec<u32> = (0..length)
+                .map(|_| {
+                    let (d, n) = (random.below(8), random.below(8));
+                    // Vm is V8 or V9, element 0 or 5.
+                    let m = 8 + random.below(2);
+                    let index = [0, 5][random.below(2) as usize];
+                    let element = |base: u32| {
+                        base | (index & 1) << 20
+                            | (index >> 1 & 1) << 21
+                            | (index >> 2) << 11
+                            | m << 16
+                            | n << 5
+                            | d
+                    };
+                    match random.below(14) {
+                        0 | 1 => element(0x0f40_2000),           // smlal by element
+                        2 | 3 => element(0x4f40_2000),           // smlal2 by element
+                        4 => element(0x0f40_a000),               // smull by element
+                        5 => element(0x4f40_6000),               // smlsl2 by element
+                        6 => 0x4ea0_8400 | m << 16 | n << 5 | m, // add vm.4s,vn.4s,vm.4s
+                        7 => 0x6f19_8c00 | n << 5 | d,           // sqrshrun2 vd.8h,vn.4s,#7
+                        8 => 0x2f19_8c00 | n << 5 | d,           // sqrshrun vd.4h,vn.4s,#7
+                        9 => 0x2f0c_8c00 | n << 5 | d,           // sqrshrun vd.8b,vn.8h,#4
+                        10 => 0x0f19_8c00 | n << 5 | d,          // rshrn vd.4h,vn.4s,#7
+                        11 => 0x4f21_2400 | n << 5 | d,          // srshr vd.4s,vn.4s,#31
+                        12 => 0x6f3e_3400 | n << 5 | d,          // ursra vd.4s,vn.4s,#2
+                        _ => 0x6e60_4000 | n << 16 | m << 5 | d, // raddhn2 vd.8h
+                    }
+                })
+                .collect();
+            let instructions = lift(&words);
+            let end = GuestAddress(0x1000 + 4 * length as u64);
+            let frame = emit(&instructions, None, end);
+            let (entered, _) = system(&instructions, end, target);
+            let mut memory = [0; WORDS];
+            let mut state = initial(&mut random, &mut memory);
+            for vector in state.v.iter_mut() {
+                for half in vector.iter_mut() {
+                    if random.below(2) == 0 {
+                        *half = EXTREMES[random.below(8) as usize];
+                    }
+                }
+            }
+            let mut expected_memory = memory;
+            let mut expected = state.clone();
+            expected.x[1] = expected_memory.as_mut_ptr() as u64;
+            let expected_exit = native::run(&frame.x86_64_code, &mut expected);
+            let exit = native::run(&entered, &mut state);
+            state.x[1] = 0;
+            expected.x[1] = 0;
+            assert_eq!(exit, expected_exit, "{target:?} case {case}: {words:08x?}");
+            assert_eq!(state, expected, "{target:?} case {case}: {words:08x?}");
+        }
+    }
+}
+
 /// No fault site of a block finds a vector only in a host register: the
 /// encoder refuses one ([`crate::x86_64::asm::Code::guest_access`]), so
 /// emitting blocks whose accesses follow cached writes proves that the

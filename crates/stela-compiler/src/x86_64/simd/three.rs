@@ -124,6 +124,72 @@ pub(super) fn dot_words(code: &mut Code, sum: u8, left: u8, right: u8, target: T
     }
 }
 
+/// Whether the block's derived bank, XMM16-31 ([`Code::derived`]), is
+/// usable on `target`: AVX-512F with VL and BW, whose EVEX forms of the
+/// recipes' steps can name it. The DIT profile keeps its reviewed recipes.
+///
+/// [`Code::derived`]: crate::x86_64::asm::Code::derived
+pub(super) fn derived_bank(target: TargetCpu) -> bool {
+    target.supports(TargetCpu::Avx512f.with_avx512vl().with_avx512bw())
+        && !target.data_independent_timing()
+}
+
+const fn evex128(map: Map) -> crate::x86_64::asm::Evex {
+    crate::x86_64::asm::Evex {
+        map,
+        pp: Pp::P66,
+        w: false,
+        length: 0,
+        mask: 0,
+        zeroing: false,
+        broadcast: false,
+        scale: 16,
+    }
+}
+
+/// EVEX.128 `destination = left op right` of a `66 0F` catalog opcode
+/// whose EVEX form has W0 or WIG (PMADDWD, PADDW/D, PSUBW/D): any of
+/// XMM0-31. [`derived_bank`] hosts only.
+pub(super) fn evex_three(
+    code: &mut Code,
+    opcode: SimdOpcode,
+    destination: u8,
+    left: u8,
+    right: u8,
+) {
+    debug_assert!(matches!(
+        opcode,
+        Host::MultiplyAddWords | Host::AddWord | Host::AddDword | Host::SubWord | Host::SubDword
+    ));
+    let (map, byte) = vex_form(opcode);
+    code.asm()
+        .evex(evex128(map), byte, destination, left, Rm::Xmm(right));
+}
+
+/// VMOVDQA32 `destination`, `source` (EVEX: any of XMM0-31).
+pub(super) fn evex_move(code: &mut Code, destination: u8, source: u8) {
+    code.asm()
+        .evex(evex128(Map::M0f), 0x6f, destination, 0, Rm::Xmm(source));
+}
+
+/// Whether [`dot_words`] can name the derived bank on `target`: AVX-512
+/// VNNI with VL.
+pub(super) fn evex_dot_words_supported(target: TargetCpu) -> bool {
+    target.supports(TargetCpu::Avx512f.with_avx512vl().with_avx512vnni())
+        && !target.data_independent_timing()
+}
+
+/// [`dot_words`] in its EVEX form, whose operands may be any of XMM0-31.
+pub(super) fn evex_dot_words(code: &mut Code, sum: u8, left: u8, right: u8, target: TargetCpu) {
+    assert!(
+        evex_dot_words_supported(target),
+        "EVEX VPDPWSSD needs AVX-512 VNNI"
+    );
+    const VPDPWSSD: u8 = 0x52;
+    code.asm()
+        .evex(evex128(Map::M0f38), VPDPWSSD, sum, left, Rm::Xmm(right));
+}
+
 /// VPBROADCASTW: word 0 of `source` in every word of `destination` (AVX2).
 pub(super) fn broadcast_word(code: &mut Code, destination: u8, source: u8) {
     broadcast(code, 2, destination, Rm::Xmm(source));

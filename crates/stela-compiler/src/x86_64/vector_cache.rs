@@ -24,7 +24,29 @@
 //! The pool is the legacy-SSE register file's upper half on every x86-64
 //! host: SSE2 recipes take a home directly as a source operand, which
 //! XMM16 to XMM31 (AVX-512VL, EVEX only) cannot be.
+//!
+//! Those sixteen are a second bank on AVX-512VL hosts, for values recipes
+//! derive and use again later in the block (a prepared by-element operand,
+//! lane constants): [`Code::derived`]. EVEX forms read them; nothing
+//! stores them; a value goes when its source vector is written, when the
+//! bank needs its register, and wherever the cache forgets its homes, so
+//! no fault site, exit or helper depends on one.
 use super::asm::{Code, Gpr, Mem};
+
+/// The first register of the derived bank.
+pub(crate) const FIRST_DERIVED: u8 = 16;
+/// The derived bank's registers.
+const DERIVED_HOSTS: usize = 16;
+
+/// A value recipes derive from guest vectors or from nothing, which the
+/// derived bank may keep for later instructions of the block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Derived {
+    /// What the value is, in the deriving recipe's own terms.
+    pub(crate) key: u32,
+    /// The guest vector it is computed from, if any.
+    pub(crate) source: Option<u8>,
+}
 
 /// The first host register of the pool.
 pub(crate) const FIRST_HOST: u8 = 8;
@@ -54,6 +76,12 @@ pub(crate) struct VectorCache {
     /// ([`Code::begin_vector_write`]), which the encoder lets it write, or
     /// `NONE`.
     writing: u8,
+    /// The derived value each bank register holds.
+    derived: [Option<Derived>; DERIVED_HOSTS],
+    /// The last use of each bank register.
+    derived_used: [u32; DERIVED_HOSTS],
+    /// The bank register a recipe is filling, or `NONE`.
+    deriving: u8,
     /// Whether that home's old value is gone: a destination written whole,
     /// whose vector no recipe may read until the write ends.
     fresh: bool,
@@ -70,6 +98,9 @@ impl Default for VectorCache {
             clock: 0,
             write_through: false,
             writing: NONE,
+            derived: [None; DERIVED_HOSTS],
+            derived_used: [0; DERIVED_HOSTS],
+            deriving: NONE,
             fresh: false,
         }
     }
@@ -100,10 +131,18 @@ impl VectorCache {
             .fold(0, |mask, (index, _)| {
                 mask | 1 << (usize::from(FIRST_HOST) + index)
             });
-        match self.writing {
-            NONE => occupied,
-            host => occupied & !(1 << host),
-        }
+        let occupied = self
+            .derived
+            .iter()
+            .enumerate()
+            .filter(|(_, derived)| derived.is_some())
+            .fold(occupied, |mask, (index, _)| {
+                mask | 1 << (usize::from(FIRST_DERIVED) + index)
+            });
+        [self.writing, self.deriving]
+            .into_iter()
+            .filter(|host| *host != NONE)
+            .fold(occupied, |mask, host| mask & !(1 << host))
     }
     fn touch(&mut self, index: usize) {
         self.clock += 1;
@@ -169,7 +208,7 @@ impl Code {
                     .enumerate()
                     .min_by_key(|(_, used)| **used)
                     .expect("a non-empty pool");
-                self.evict_vector(self.vectors.owner[index]);
+                self.spill_vector(self.vectors.owner[index]);
                 index
             }
         };
@@ -200,6 +239,65 @@ impl Code {
         self.vectors.fresh = false;
         self.mark_vector_dirty(vector);
     }
+    /// The derived bank register that holds `derived`, if one does.
+    pub(crate) fn derived(&mut self, derived: Derived) -> Option<u8> {
+        if !self.vectors.active {
+            return None;
+        }
+        let index = self
+            .vectors
+            .derived
+            .iter()
+            .position(|kept| *kept == Some(derived))?;
+        self.vectors.clock += 1;
+        self.vectors.derived_used[index] = self.vectors.clock;
+        Some(FIRST_DERIVED + index as u8)
+    }
+    /// Keep `derived` in a derived bank register (free, else the least
+    /// recently used), which `emit` fills with EVEX forms; returns it.
+    pub(crate) fn keep_derived(
+        &mut self,
+        derived: Derived,
+        emit: impl FnOnce(&mut Self, u8),
+    ) -> u8 {
+        assert!(self.vectors.active, "derived values live with the homes");
+        let index = match self.vectors.derived.iter().position(Option::is_none) {
+            Some(free) => free,
+            None => {
+                let (index, _) = self
+                    .vectors
+                    .derived_used
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, used)| **used)
+                    .expect("a non-empty bank");
+                index
+            }
+        };
+        let host = FIRST_DERIVED + index as u8;
+        self.vectors.derived[index] = Some(derived);
+        self.vectors.clock += 1;
+        self.vectors.derived_used[index] = self.vectors.clock;
+        self.vectors.deriving = host;
+        emit(self, host);
+        self.vectors.deriving = NONE;
+        host
+    }
+    /// [`Self::derived`], or else [`Self::keep_derived`].
+    pub(crate) fn derive(&mut self, derived: Derived, emit: impl FnOnce(&mut Self, u8)) -> u8 {
+        match self.derived(derived) {
+            Some(host) => host,
+            None => self.keep_derived(derived, emit),
+        }
+    }
+    /// Forget the derived values computed from `vector`, which changes.
+    fn invalidate_derived(&mut self, vector: u8) {
+        for kept in &mut self.vectors.derived {
+            if kept.is_some_and(|derived| derived.source == Some(vector)) {
+                *kept = None;
+            }
+        }
+    }
     /// Commit to the state from here on, or to homes.
     pub(crate) fn set_vector_write_through(&mut self, through: bool) {
         self.vectors.write_through = through;
@@ -207,6 +305,7 @@ impl Code {
     /// Give up `vector`'s home without storing it: the caller writes the
     /// whole register to the state next.
     pub(crate) fn discard_vector(&mut self, vector: u8) {
+        self.invalidate_derived(vector);
         let host = self.vectors.home[usize::from(vector)];
         if host != NONE {
             self.vectors.dirty &= !(1 << vector);
@@ -224,6 +323,7 @@ impl Code {
     /// `vector`'s home holds a value the state block lacks.
     pub(crate) fn mark_vector_dirty(&mut self, vector: u8) {
         debug_assert_ne!(self.vectors.home[usize::from(vector)], NONE);
+        self.invalidate_derived(vector);
         self.vectors.dirty |= 1 << vector;
     }
     fn store_vector(&mut self, vector: u8) {
@@ -232,8 +332,15 @@ impl Code {
         self.asm_unguarded().movdqu_store(slot(vector), host);
         self.vectors.dirty &= !(1 << vector);
     }
-    /// Store `vector` if dirty and give up its home.
+    /// Store `vector` if dirty and give up its home, for a write of its
+    /// slot: its derived values go too.
     pub(crate) fn evict_vector(&mut self, vector: u8) {
+        self.invalidate_derived(vector);
+        self.spill_vector(vector);
+    }
+    /// Store `vector` if dirty and give up its home; its value, and so its
+    /// derived values, stay.
+    fn spill_vector(&mut self, vector: u8) {
         let host = self.vectors.home[usize::from(vector)];
         if host == NONE {
             return;

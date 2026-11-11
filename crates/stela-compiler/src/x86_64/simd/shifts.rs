@@ -158,6 +158,30 @@ pub(crate) fn rounded_right(
     rounded_right_from(code, 0, 0, lane_bytes, amount, signed, round, target);
 }
 
+/// The key of the per-block constant 1 in every lane ([`Code::derive`]).
+///
+/// [`Code::derive`]: crate::x86_64::asm::Code::derive
+const LANE_ONES: u32 = 0x200;
+
+/// A derived bank register holding 1 in every `lane_bytes` lane, kept for
+/// the block (PCMPEQD, one shift and one EVEX move through XMM1 the first
+/// time).
+fn lane_ones(code: &mut Code, lane_bytes: u8) -> u8 {
+    let key = crate::x86_64::vector_cache::Derived {
+        key: LANE_ONES | u32::from(lane_bytes),
+        source: None,
+    };
+    code.derive(key, |code, host| {
+        packed(code, Host::EqualDword, 1, 1);
+        let right = match lane_bytes {
+            2 => Shift::RightWord,
+            _ => Shift::RightDword,
+        };
+        right.emit(code, 1, lane_bytes * BITS_PER_BYTE - 1);
+        three::evex_move(code, host, 1);
+    })
+}
+
 /// The single host shift by immediate that shifts `lane_bytes` lanes
 /// right, where there is one: logical H, S and D lanes, arithmetic H and S.
 fn single_right_shift(lane_bytes: u8, signed: bool) -> Option<Shift> {
@@ -186,6 +210,32 @@ fn rounded_right_from(
     round: bool,
     target: TargetCpu,
 ) {
+    let single = single_right_shift(lane_bytes, signed).filter(|_| amount != 0);
+    if let Some(opcode) = single
+        && round
+        && amount >= 2
+        && lane_bytes <= 4
+        && code.vector_cache().active()
+        && three::derived_bank(target)
+    {
+        // With ones per lane kept for the block: (x >> (n-1)) + 1, then
+        // >> 1. The first shift leaves room for the + 1 at the lane's
+        // maximum, so the sum is exact where x + 2^(n-1) would wrap.
+        let ones = lane_ones(code, lane_bytes);
+        if source == 0 {
+            opcode.emit(code, 0, amount - 1);
+        } else {
+            three::shift(code, opcode, 0, source, amount - 1, target);
+        }
+        let add = super::rearrange::add_or_subtract(lane_bytes, false);
+        three::evex_three(code, add, 0, 0, ones);
+        if destination == 0 {
+            opcode.emit(code, 0, 1);
+        } else {
+            three::shift(code, opcode, destination, 0, 1, target);
+        }
+        return;
+    }
     if round && lane_bytes > 1 && !target.data_independent_timing() {
         // The rounding bit, bit amount-1, alone in bit 0 of XMM1: shift it to
         // the top of the lane, then down to the bottom. No constant.
@@ -203,7 +253,6 @@ fn rounded_right_from(
         lane_mask(code, 2, lane_bytes, 1);
         packed(code, Host::And, 1, 2);
     }
-    let single = single_right_shift(lane_bytes, signed).filter(|_| amount != 0);
     let shifted = if round { 0 } else { destination };
     match single {
         // The legacy form in place, a VEX form from the source.

@@ -672,6 +672,72 @@ fn indexed_word_pairs(code: &mut Code, source: u8, index: u8, target: TargetCpu)
     }
 }
 
+/// The key of a prepared halfword element `index` of a by-element
+/// product's Vm, zero-extended in every dword ([`indexed_word_pairs`]).
+const ELEMENT_PAIRS: u32 = 0x100;
+
+/// SMULL/SMLAL/SMLSL by element where the block keeps vectors in host
+/// registers: the element of Vm, zero-extended in every dword, is prepared
+/// once per block and kept in a pool register ([`Code::derived`]) until Vm
+/// changes; then each product needs only its Vn half in dword pairs
+/// (PMOVZXWD for the low half, PUNPCKHWD for the high) and one VPDPWSSD or
+/// PMADDWD. Returns whether it emitted `operand`.
+fn cached_element_product(
+    code: &mut Code,
+    operand: &Operand,
+    operation: Accumulate,
+    target: TargetCpu,
+) -> bool {
+    use crate::x86_64::vector_cache::Derived;
+    let Some(index) = operand.index else {
+        return false;
+    };
+    if !code.vector_cache().active() || !three::derived_bank(target) {
+        return false;
+    }
+    let key = Derived {
+        key: ELEMENT_PAIRS | u32::from(index),
+        source: Some(operand.right),
+    };
+    let element = match code.derived(key) {
+        Some(element) => element,
+        None => {
+            let right = vector_source(code, operand.right, 1);
+            indexed_word_pairs(code, right, index, target);
+            code.keep_derived(key, |code, host| three::evex_move(code, host, 1))
+        }
+    };
+    let left = vector_source(code, operand.left, 0);
+    if operand.upper {
+        three::three(code, Host::UnpackHighWord, 0, left, left, target);
+    } else {
+        Host::ZeroExtendWordToDword.register(code, 0, left, target);
+    }
+    match operation {
+        Accumulate::Add if three::evex_dot_words_supported(target) => {
+            let sum = vector_accumulator(code, operand.destination, 2);
+            three::evex_dot_words(code, sum.xmm, 0, element, target);
+            finish(code, sum);
+        }
+        Accumulate::None => {
+            let destination = vector_destination(code, operand.destination, 0);
+            three::evex_three(code, Host::MultiplyAddWords, destination.xmm, 0, element);
+            finish(code, destination);
+        }
+        _ => {
+            three::evex_three(code, Host::MultiplyAddWords, 0, 0, element);
+            let sum = vector_accumulator(code, operand.destination, 1);
+            let opcode = if operation == Accumulate::Add {
+                Host::AddDword
+            } else {
+                Host::SubDword
+            };
+            binary(code, opcode, sum, sum.xmm, 0, false, target);
+        }
+    }
+    true
+}
+
 /// SMULL/UMULL/SMLAL/UMLAL/SMLSL/UMLSL of halfwords, by vector or element,
 /// written to the destination: the sources are read where they are (homes,
 /// or XMM0 and XMM1 loaded) and the last instruction writes the
@@ -689,6 +755,9 @@ fn word_long_product(
 ) {
     let upper = operand.upper;
     let paired = signed && (operand.index.is_some() || !upper);
+    if paired && cached_element_product(code, operand, operation, target) {
+        return;
+    }
     let left = vector_source(code, operand.left, 0);
     let right = vector_source(code, operand.right, 1);
     let result = if paired {
