@@ -1090,7 +1090,7 @@ pub(super) fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
             requirements: None,
             gpu: Some(chip),
             destination: &esp.join(stela_loader::host_firmware::DIRECTORY),
-            cache: &download_dir().with_file_name("firmware"),
+            cache: &super::cache_dir().join("firmware"),
             dry_run: false,
             mount_image: &plan.efi_image,
         })

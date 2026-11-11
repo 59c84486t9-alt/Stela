@@ -76,7 +76,7 @@ mod wizard;
 pub(crate) use command::Setup;
 pub(crate) use elevation::hold_window;
 pub(crate) use installed::NextBoot;
-pub(crate) use prepare::download_dir;
+pub(crate) use prepare::{cache_dir, download_dir, ensure_room};
 
 use crate::{efi, restore};
 use anyhow::{Context, Result, bail, ensure};
@@ -735,7 +735,7 @@ impl Request {
                 let cache = self
                     .host_firmware_cache
                     .clone()
-                    .unwrap_or_else(|| download_dir().with_file_name("firmware"));
+                    .unwrap_or_else(|| cache_dir().join("firmware"));
                 firmware::provision(firmware::ProvisionOptions {
                     requirements: requirements.as_deref(),
                     gpu: gpu.as_deref(),

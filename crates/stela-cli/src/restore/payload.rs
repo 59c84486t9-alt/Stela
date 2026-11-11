@@ -726,7 +726,6 @@ pub fn identity(image: &Path, model: &str) -> Result<(String, String)> {
 /// `output` and renamed when complete, so a partial one is never taken for
 /// a medium. Returns the bytes written for the members.
 pub fn trim<R: Read + Seek>(source: R, model: &str, output: &Path) -> Result<u64> {
-    use zip::{CompressionMethod, write::SimpleFileOptions};
     let mut archive = ZipArchive::new(source)?;
     let selection = select_scope(&mut archive, model, true)?;
     let mut names: Vec<&str> = vec![BUILD_MANIFEST];
@@ -739,11 +738,30 @@ pub fn trim<R: Read + Seek>(source: R, model: &str, output: &Path) -> Result<u64
             .checked_add(archive.by_name(name)?.size())
             .context("boot archive size overflow")
     })?;
+    let directory = output.parent().unwrap_or(Path::new("."));
+    crate::setup::ensure_room(directory, "Downloading the boot files", total)?;
     let progress = crate::progress::Phase::bytes("Downloading boot files", total);
     let part = output.with_extension("part");
-    let mut writer = zip::ZipWriter::new(File::create(&part)?);
+    // A partial archive cannot be resumed: it is removed on any failure.
+    let written = copy_members(&mut archive, &names, &part, &progress).inspect_err(|_| {
+        let _ = fs::remove_file(&part);
+    })?;
+    fs::rename(&part, output)?;
+    progress.finish();
+    Ok(written)
+}
+
+/// Copy `names` of `archive` into a new stored archive `part`.
+fn copy_members<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    names: &[&str],
+    part: &Path,
+    progress: &crate::progress::Phase,
+) -> Result<u64> {
+    use zip::{CompressionMethod, write::SimpleFileOptions};
+    let mut writer = zip::ZipWriter::new(File::create(part)?);
     let mut written = 0;
-    for name in names {
+    for &name in names {
         let index = archive
             .index_for_name(name)
             .with_context(|| format!("the IPSW lacks {name}"))?;
@@ -771,8 +789,6 @@ pub fn trim<R: Read + Seek>(source: R, model: &str, output: &Path) -> Result<u64
     }
     writer.set_raw_comment(RECOVERY_COMMENT.into());
     writer.finish()?.sync_all()?;
-    fs::rename(&part, output)?;
-    progress.finish();
     Ok(written)
 }
 

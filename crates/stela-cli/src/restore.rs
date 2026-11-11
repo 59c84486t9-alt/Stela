@@ -365,18 +365,22 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
     let mut offset = 0;
     let mut previous_total = None;
     if part.exists() {
-        let previous: Partial =
-            stela_engine::read_json(&metadata).context("partial image has no valid metadata")?;
-        ensure!(
-            previous.image == *image,
-            "partial image belongs to a different catalog entry"
-        );
-        offset = part.metadata()?.len();
-        previous_total = previous.total_bytes;
-        ensure!(
-            previous_total.is_none_or(|total| offset <= total),
-            "partial file exceeds expected image size"
-        );
+        // A partial download resumes only as the same catalog entry and
+        // within its size; any other is removed and the download restarts.
+        let resumable = stela_engine::read_json::<Partial>(&metadata)
+            .ok()
+            .filter(|previous| previous.image == *image)
+            .and_then(|previous| {
+                let bytes = part.metadata().ok()?.len();
+                previous
+                    .total_bytes
+                    .is_none_or(|total| bytes <= total)
+                    .then_some((bytes, previous.total_bytes))
+            });
+        match resumable {
+            Some((bytes, total)) => (offset, previous_total) = (bytes, total),
+            None => remove_partial(&part, &metadata)?,
+        }
         if offset > 0 && previous_total == Some(offset) {
             // Recover interruption after the last byte but before publishing.
             return publish(image, output, &part, &metadata, offset);
@@ -399,10 +403,12 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
                 .to_str()?,
             offset,
         )?);
-        ensure!(
-            previous_total.is_none() || total == previous_total,
-            "image size changed during resume"
-        );
+        if previous_total.is_some() && total != previous_total {
+            remove_partial(&part, &metadata)?;
+            bail!(
+                "the image's size changed on Apple's server; run setup again to download it anew"
+            );
+        }
         if let Some(length) = response.content_length() {
             ensure!(
                 length.checked_add(offset) == total,
@@ -414,6 +420,10 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
         total = response.content_length();
     } else {
         bail!("unexpected download status: {}", response.status());
+    }
+    if let Some(total) = total {
+        let directory = output.parent().unwrap_or(Path::new("."));
+        crate::setup::ensure_room(directory, "Downloading macOS", total - offset)?;
     }
     stela_engine::write_json(
         &metadata,
@@ -460,6 +470,19 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
     publish(image, output, &part, &metadata, written)
 }
 
+/// Remove a partial download and its metadata, as far as they exist.
+fn remove_partial(part: &Path, metadata: &Path) -> Result<()> {
+    for path in [part, metadata] {
+        match std::fs::remove_file(path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(error).with_context(|| format!("cannot remove {}", path.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn publish(
     image: &Image,
     output: &Path,
@@ -481,10 +504,13 @@ fn publish(
         sha1.update(&buffer[..n]);
         progress.advance(n as u64);
     }
-    if let Some(expected) = &image.sha1 {
-        ensure!(
-            hex::encode(sha1.finalize()) == *expected,
-            "Apple catalog SHA-1 mismatch; delete the .part and .part.json files before retrying"
+    if let Some(expected) = &image.sha1
+        && hex::encode(sha1.finalize()) != *expected
+    {
+        remove_partial(part, metadata)?;
+        bail!(
+            "the downloaded macOS image does not match Apple's checksum and was removed; run \
+             setup again to download it anew"
         );
     }
     let receipt = Receipt {
@@ -641,6 +667,38 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn a_partial_of_another_catalog_entry_is_removed_and_the_download_restarts() -> Result<()> {
+        let (url, server) =
+            serve("HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc".into());
+        let image = Image {
+            version: "test".into(),
+            build: "TEST".into(),
+            models: vec![],
+            url,
+            sha1: Some(hex::encode(sha1::Sha1::digest(b"abc"))),
+        };
+        let dir = tempfile::tempdir()?;
+        let out = dir.path().join("test.ipsw");
+        std::fs::write(sidecar(&out, ".part"), b"0123456789")?;
+        stela_engine::write_json(
+            &sidecar(&out, ".part.json"),
+            &Partial {
+                image: Image {
+                    build: "OTHER".into(),
+                    ..image.clone()
+                },
+                total_bytes: Some(10),
+            },
+        )?;
+        download_with_client(&image, &out, &Client::new())?;
+        assert_eq!(std::fs::read(&out)?, b"abc");
+        assert!(!sidecar(&out, ".part").exists());
+        // The restart asks for the whole image.
+        assert!(!server.join().unwrap().to_lowercase().contains("range:"));
+        Ok(())
+    }
+
+    #[test]
     fn ignored_range_restarts_and_bad_digest_never_publishes() -> Result<()> {
         for bad in [false, true] {
             let (url, server) = serve(
@@ -665,8 +723,11 @@ mod tests {
             )?;
             let result = download_with_client(&image, &out, &Client::new());
             if bad {
-                assert!(result.is_err());
+                let error = result.unwrap_err().to_string();
+                assert!(error.contains("was removed"), "{error}");
                 assert!(!out.exists());
+                assert!(!sidecar(&out, ".part").exists());
+                assert!(!sidecar(&out, ".part.json").exists());
             } else {
                 result?;
                 assert_eq!(std::fs::read(out)?, b"abc");

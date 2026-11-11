@@ -129,7 +129,7 @@ struct Image {
     /// downloads the image from Apple.
     #[arg(long)]
     ipsw: Option<PathBuf>,
-    /// Where downloaded images are kept.
+    /// Where downloaded images are kept: Stela's per-user cache by default.
     #[arg(long)]
     download_dir: Option<PathBuf>,
     /// The macOS 27 build to download, such as 26B123: the newest tested

@@ -8,7 +8,7 @@ use super::{
     record::Record,
 };
 use crate::{boot, restore};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -217,9 +217,70 @@ pub(super) fn check_space(host: &dyn Host, volume: &Path, prepared: &[Prepared])
     Ok(())
 }
 
-/// Where `--fetch` keeps downloaded restore images: the host's per-user cache.
+/// Where setup keeps downloaded restore images without `--download-dir`:
+/// `images` in Stela's per-user cache ([`cache_dir`]).
 pub(crate) fn download_dir() -> PathBuf {
-    std::env::temp_dir().join("Stela/images")
+    cache_dir().join("images")
+}
+
+/// Stela's per-user cache: `stela` in the platform's cache directory, or in
+/// the current directory when the environment names none. Never the system
+/// temp directory, which is often too small for macOS.
+pub(crate) fn cache_dir() -> PathBuf {
+    let var = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    cache_dir_in(std::env::consts::OS, var).unwrap_or_else(|| PathBuf::from("stela-cache"))
+}
+
+/// [`cache_dir`] on operating system `os` with environment `var`: Linux and
+/// other Unix `$XDG_CACHE_HOME/stela` or `~/.cache/stela`, macOS
+/// `~/Library/Caches/stela`, Windows `%LOCALAPPDATA%\stela\cache`.
+pub(super) fn cache_dir_in(
+    os: &str,
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    let home = || {
+        var("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute())
+    };
+    match os {
+        "windows" => var("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute() || path.to_string_lossy().contains(':'))
+            .map(|path| path.join("stela").join("cache")),
+        "macos" => home().map(|home| home.join("Library/Caches/stela")),
+        _ => var("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| home().map(|home| home.join(".cache")))
+            .map(|cache| cache.join("stela")),
+    }
+}
+
+/// Refuse to write `need` bytes into `directory` (created on demand) unless
+/// its file system has room for them and [`MARGIN`]; `what` names the
+/// download.
+pub(crate) fn ensure_room(directory: &Path, what: &str, need: u64) -> Result<()> {
+    fs::create_dir_all(directory)
+        .with_context(|| format!("cannot create {}", directory.display()))?;
+    let free = super::host::System.volume(directory)?.free_bytes;
+    match shortfall(directory, what, need, free) {
+        Some(text) => bail!("{text}"),
+        None => Ok(()),
+    }
+}
+
+/// Why `free` bytes in `directory` cannot take `need` bytes and [`MARGIN`].
+pub(super) fn shortfall(directory: &Path, what: &str, need: u64, free: u64) -> Option<String> {
+    (free < need.saturating_add(MARGIN)).then(|| {
+        format!(
+            "{what} needs {} in {}, which has {} free; free some space there or choose another \
+             place with --download-dir",
+            super::host::bytes_text(need.saturating_add(MARGIN)),
+            directory.display(),
+            super::host::bytes_text(free)
+        )
+    })
 }
 
 /// Download `--build`'s image, or reuse a complete earlier download: the
@@ -361,4 +422,97 @@ fn prepare_ramdisk(options: RamdiskOptions<'_>, update: bool) -> Result<()> {
     stela_soc_data::board::board(&tree)
         .map_err(|reason| anyhow::anyhow!("Stela cannot run {model} yet: {reason}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::BTreeMap, ffi::OsString};
+
+    fn cache(os: &str, vars: &[(&str, &str)]) -> Option<PathBuf> {
+        let vars: BTreeMap<String, OsString> = vars
+            .iter()
+            .map(|(name, value)| (name.to_string(), OsString::from(value)))
+            .collect();
+        cache_dir_in(os, |name| vars.get(name).cloned())
+    }
+
+    #[test]
+    fn downloads_go_to_the_per_user_cache_never_the_temp_directory() {
+        let home = [("HOME", "/home/someone")];
+        assert_eq!(
+            cache("linux", &home),
+            Some("/home/someone/.cache/stela".into())
+        );
+        assert_eq!(
+            cache(
+                "linux",
+                &[("HOME", "/home/someone"), ("XDG_CACHE_HOME", "/data/cache")]
+            ),
+            Some("/data/cache/stela".into())
+        );
+        // A relative XDG_CACHE_HOME is invalid by the specification.
+        assert_eq!(
+            cache(
+                "linux",
+                &[("HOME", "/home/someone"), ("XDG_CACHE_HOME", "cache")]
+            ),
+            Some("/home/someone/.cache/stela".into())
+        );
+        assert_eq!(
+            cache("freebsd", &home),
+            Some("/home/someone/.cache/stela".into())
+        );
+        assert_eq!(
+            cache(
+                "macos",
+                &[("HOME", "/Users/someone"), ("XDG_CACHE_HOME", "/x")]
+            ),
+            Some("/Users/someone/Library/Caches/stela".into())
+        );
+        let windows = cache(
+            "windows",
+            &[("LOCALAPPDATA", r"C:\Users\someone\AppData\Local")],
+        )
+        .unwrap();
+        assert!(windows.ends_with("stela/cache") || windows.ends_with(r"stela\cache"));
+        assert!(windows.starts_with(r"C:\Users\someone\AppData\Local"));
+        for os in ["linux", "macos", "windows"] {
+            assert_eq!(cache(os, &[]), None, "{os}");
+            assert_eq!(cache(os, &[("HOME", "relative")]), None, "{os}");
+        }
+        let chosen = cache_dir();
+        assert!(
+            !chosen.starts_with(std::env::temp_dir()),
+            "{}",
+            chosen.display()
+        );
+        assert_eq!(download_dir(), chosen.join("images"));
+    }
+
+    #[test]
+    fn a_download_needs_its_size_and_the_margin_free() {
+        let directory = Path::new("/cache/stela/images");
+        let gb = 1_000_000_000;
+        assert_eq!(
+            shortfall(directory, "Downloading macOS", 17 * gb, 18 * gb),
+            None
+        );
+        assert_eq!(
+            shortfall(directory, "Downloading macOS", 17 * gb, 17 * gb).as_deref(),
+            Some(
+                "Downloading macOS needs 17.1 GB in /cache/stela/images, which has 17.0 GB free; \
+                 free some space there or choose another place with --download-dir"
+            )
+        );
+        assert!(shortfall(directory, "x", u64::MAX, u64::MAX - 1).is_some());
+        let dir = tempfile::tempdir().unwrap();
+        let fresh = dir.path().join("made/on/demand");
+        ensure_room(&fresh, "Downloading macOS", 1).unwrap();
+        assert!(fresh.is_dir());
+        let error = ensure_room(&fresh, "Downloading macOS", u64::MAX / 2)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("--download-dir"), "{error}");
+    }
 }
