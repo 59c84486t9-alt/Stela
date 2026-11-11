@@ -12,8 +12,14 @@ const EVICT_STEP: usize = 32;
 
 /// Units of work one step of a retirement takes under the board's lock
 /// ([`Machine::retire_step`]): a block or an index entry visited, about a
-/// cache miss or a few each.
-pub(super) const STEP_VISITS: u64 = 1024;
+/// cache miss or a few each. A launch measured 1024 at 116 us a step: each
+/// of the other PEs' fetches, links and installs, one every ~50 us per PE,
+/// that comes during a step waits for the rest of it, so the waits a
+/// retirement causes grow with the square of its step (build of run
+/// 20261111-025825: 1.2 s of `evict` holds, 4-7 s of waits per beat). A
+/// quarter of that keeps a step under the gap between one PE's
+/// acquisitions.
+pub(super) const STEP_VISITS: u64 = 256;
 
 /// Cells one step of an eviction releases under the board's lock.
 const CELL_STEP: usize = 256;
@@ -809,6 +815,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
     }
 
+    /// Unlink the exits whose patch points and instructions are `unlinks`,
+    /// each in one store ([`Self::patch_point`]). In the board's arena the
+    /// writer serializes once after the last: no other core's fetch depends
+    /// on it, and this core runs none of them before it returns.
+    pub(super) fn unlink_points(&mut self, unlinks: Vec<(u64, [u8; chain::PATCH_BYTES])>) {
+        self.statistics.unlinks += unlinks.len() as u64;
+        let Some(arena) = &self.code.arena else {
+            for (point, instruction) in unlinks {
+                self.host
+                    .patch_instruction(NativeCode(point as usize), instruction);
+            }
+            return;
+        };
+        if unlinks.is_empty() {
+            return;
+        }
+        for (point, instruction) in unlinks {
+            assert!(chain::patchable(point), "a patch point");
+            arena.patch_point(point, instruction);
+        }
+        self.host.serialize_code();
+    }
+
     /// The generation of the arena part holding executable `address`, for
     /// code that part's code jumps to: a thunk or a tail goes with the
     /// block it serves ([`board::Ring::refer`]).
@@ -1259,10 +1288,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.direct_exit = None;
             }
         }
-        for (point, instruction) in unlinks {
-            self.patch_point(NativeCode(point as usize), instruction);
-            self.statistics.unlinks += 1;
-        }
+        self.unlink_points(unlinks);
         visits
     }
 
@@ -1301,10 +1327,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         }
         // One store each, which a core running the exit may meet.
-        for (point, instruction) in unlinks {
-            self.patch_point(NativeCode(point as usize), instruction);
-            self.statistics.unlinks += 1;
-        }
+        self.unlink_points(unlinks);
         let next = from + visited;
         ((next < listed).then_some(next), visited as u64)
     }
@@ -1510,10 +1533,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         cache.page_blocks = sources;
         // One store each, which a core running the exit may meet.
-        for (point, instruction) in unlinks {
-            self.patch_point(NativeCode(point as usize), instruction);
-            self.statistics.unlinks += 1;
-        }
+        self.unlink_points(unlinks);
         // Lookup entries go by the frames their keys name, in runs.
         let mut frames: Vec<u64> = gone.iter().map(|&(page, _)| frame_number(page)).collect();
         frames.dedup();
