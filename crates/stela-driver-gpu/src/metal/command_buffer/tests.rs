@@ -2199,9 +2199,9 @@ fn bindings_validate_slots_and_offsets() {
     );
 }
 
-/// A pass that loads an IOSurface's extended-range planes decodes and
-/// encodes only what its draws' scissors covered; a tile dispatch reaches
-/// every pixel, so the whole extent.
+/// A pass that loads an IOSurface's extended-range planes decodes the
+/// bounds of what its draws may have reached, and encodes each disjoint
+/// part of it: their scissors, within their viewports for triangles.
 #[test]
 fn surface_plane_conversions_cover_what_the_pass_drew() {
     let color = texture(PixelFormat::Rgba8Unorm);
@@ -2218,8 +2218,9 @@ fn surface_plane_conversions_cover_what_the_pass_drew() {
         stores: true,
         narrows: true,
         decodes_whole: false,
+        mirror: 0,
     };
-    let record = |scissors: &[ScissorRect]| {
+    let record = |draws: &[(ScissorRect, Option<Viewport>, PrimitiveType)]| {
         let mut resolver = MockResolver::default();
         let mut commands = CommandBuffer::new(FEATURES);
         let mut plan = pass(&color, StoreAction::Store, false);
@@ -2227,16 +2228,20 @@ fn surface_plane_conversions_cover_what_the_pass_drew() {
         commands
             .begin_render(&mut resolver, plan, None, Vec::new())
             .unwrap();
-        commands
-            .set_render_pipeline_state(&render_state(1))
-            .unwrap();
+        // Of any topology.
+        let mut state = render_state(1);
+        state.plan.topology_class = crate::metal::abi::PrimitiveTopologyClass::Unspecified;
+        commands.set_render_pipeline_state(&state).unwrap();
         commands
             .set_render_buffer(Stage::Vertex, Some(buffer(3, 256)), 0, 2)
             .unwrap();
-        for scissor in scissors {
-            commands.set_scissor_rects(&[*scissor]).unwrap();
+        for &(scissor, viewport, primitive) in draws {
+            commands.set_scissor_rects(&[scissor]).unwrap();
+            if let Some(viewport) = viewport {
+                commands.set_viewports(&[viewport]).unwrap();
+            }
             commands
-                .draw_primitives(&mut resolver, PrimitiveType::Triangle, 0, 3, 1, 0)
+                .draw_primitives(&mut resolver, primitive, 0, 3, 1, 0)
                 .unwrap();
         }
         commands.end_encoding(&mut resolver).unwrap();
@@ -2265,15 +2270,61 @@ fn surface_plane_conversions_cover_what_the_pass_drew() {
         width,
         height,
     };
-    // Two draws: the union of their scissors, 8..40 by 4..20.
-    let drawn = record(&[rect(8, 4, 16, 8), rect(24, 12, 16, 8)]);
-    let narrowed = (
-        32 * 16,
-        (1 << 40) + 4 * 256 + 8 * 4,
-        [32, 16, 8, 4],
-        (2 << 40) + 4 * 64 + 8,
+    // The conversion of [x, y, width, height].
+    let converted = |[x, y, width, height]: [u32; 4]| {
+        (
+            width * height,
+            (1 << 40) + u64::from(y) * 256 + u64::from(x) * 4,
+            [width, height, x, y],
+            (2 << 40) + u64::from(y) * 64 + u64::from(x),
+        )
+    };
+    let triangle = PrimitiveType::Triangle;
+    // Two draws apart: the decode of their bounds, 8..40 by 4..20, and an
+    // encode of each.
+    let drawn = record(&[
+        (rect(8, 4, 16, 8), None, triangle),
+        (rect(24, 12, 16, 8), None, triangle),
+    ]);
+    assert_eq!(
+        drawn,
+        [
+            converted([8, 4, 32, 16]),
+            converted([8, 4, 16, 8]),
+            converted([24, 12, 16, 8]),
+        ]
     );
-    assert_eq!(drawn, [narrowed, narrowed]);
+    // Overlapping draws encode their union once.
+    let overlapping = record(&[
+        (rect(8, 4, 16, 8), None, triangle),
+        (rect(16, 8, 16, 8), None, triangle),
+    ]);
+    assert_eq!(
+        overlapping,
+        [converted([8, 4, 24, 12]), converted([8, 4, 24, 12])]
+    );
+    // A whole scissor bounded by a viewport of fractional edges: the pixels
+    // it touches.
+    let viewport = Viewport {
+        origin_x: 10.5,
+        origin_y: 3.25,
+        width: 20.0,
+        height: 6.5,
+        znear: 0.0,
+        zfar: 1.0,
+    };
+    let whole = rect(0, 0, 64, 32);
+    let bounded = record(&[(whole, Some(viewport), triangle)]);
+    assert_eq!(
+        bounded,
+        [converted([10, 3, 21, 7]), converted([10, 3, 21, 7])]
+    );
+    // Points reach past the viewport by their size: the scissor bounds them.
+    let points = record(&[(whole, Some(viewport), PrimitiveType::Point)]);
+    assert_eq!(
+        points,
+        [converted([0, 0, 64, 32]), converted([0, 0, 64, 32])]
+    );
     // Nothing drawn: an empty decode, and nothing to encode.
     let none = record(&[]);
     assert_eq!(none.len(), 1);

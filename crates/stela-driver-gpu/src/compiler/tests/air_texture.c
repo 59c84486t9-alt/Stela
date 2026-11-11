@@ -2215,12 +2215,58 @@ extended_storage_writes_hold_their_codes(void)
    }
 }
 
+/* A read of a texture whose storage may hold extended-range codes returns
+ * the exact value of the code each channel's half holds, where the
+ * texture's ID selects it: each color channel and alpha rounded to its step.
+ * Without the query the texel is read as it is. */
+static void
+extended_storage_reads_return_their_codes(void)
+{
+   static const char *body =
+      "define void @kernel(i32 %tid, ptr addrspace(1) %src, ptr addrspace(2) %smp,"
+      " ptr addrspace(1) %dst, ptr addrspace(1) %layers, ptr addrspace(1) %out) {\n"
+      "%r = call { <4 x float>, i8 } @air.read_texture_2d.v4f32(ptr addrspace(1) %src,"
+      " <2 x i32> <i32 1, i32 2>, i32 0, i32 0)\n"
+      "%t = extractvalue { <4 x float>, i8 } %r, 0\n"
+      "%x = extractelement <4 x float> %t, i64 0\n"
+      "%y = extractelement <4 x float> %t, i64 1\n"
+      "%z = extractelement <4 x float> %t, i64 2\n"
+      "%w = extractelement <4 x float> %t, i64 3\n"
+      "%xy = fadd float %x, %y\n"
+      "%zw = fadd float %z, %w\n"
+      "%s = fadd float %xy, %zw\n"
+      "store float %s, ptr addrspace(1) %out, align 4\n"
+      "ret void\n}\n";
+   for (unsigned queried = 0; queried < 2; queried++) {
+      struct stela_air_options o = options(&primary, true);
+      if (queried)
+         o.texture_extended_storage = stela_metal_texture_extended_storage;
+      struct stela_air_error error = {0};
+      nir_shader *shader = kernel_with(body, kernel_metadata, &o, &error);
+      if (!shader)
+         fprintf(stderr, "extended storage read: %s\n", error.detail);
+      assert(shader);
+      assert(count(shader).tex[nir_texop_txf] == 1);
+      unsigned rounded = 0;
+      nir_foreach_function_impl(impl, shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block)
+               rounded += instr->type == nir_instr_type_alu &&
+                          nir_instr_as_alu(instr)->op == nir_op_fround_even;
+         }
+      }
+      assert(rounded == (queried ? 4 : 0));
+      ralloc_free(shader);
+   }
+}
+
 int
 main(void)
 {
    glsl_type_singleton_init_or_ref();
    kernels_sample_write_read_and_query();
    extended_storage_writes_hold_their_codes();
+   extended_storage_reads_return_their_codes();
    fragments_sample_with_derivatives_compare_and_gather();
    storage_levels_select_their_descriptor();
    sparse_texels_report_their_residency();

@@ -67,7 +67,10 @@
  * storage view of the texture's level, the region's width and height, the
  * buffer's bytes per row and image, the region's origin and first layer in
  * the view, then for the two-plane extended-range encodings the address of
- * the alpha plane's first texel, or zero, and its bytes per row. */
+ * the alpha plane's first texel, or zero, its bytes per row, and the
+ * planes' mirror (STELA_METAL_TEXELS_MIRROR_*): the view's next layer
+ * holds, per texel, the codes word and alpha byte the planes hold, which a
+ * load compares to write only the texels that changed. */
 #define STELA_METAL_TEXELS_BUFFER 0u
 #define STELA_METAL_TEXELS_COUNT 8u
 #define STELA_METAL_TEXELS_ENCODING 12u
@@ -79,7 +82,16 @@
 #define STELA_METAL_TEXELS_ORIGIN 40u
 #define STELA_METAL_TEXELS_ALPHA 56u
 #define STELA_METAL_TEXELS_ALPHA_ROW 64u
+#define STELA_METAL_TEXELS_MIRROR 68u
 #define STELA_METAL_TEXELS_BYTES 72u
+
+/* What the two-plane encodings do with the planes' mirror
+ * (STELA_METAL_TEXELS_MIRROR): nothing; every conversion writes it; or as
+ * WRITE, and a load writes the planes only where the codes or alpha differ
+ * from the mirror's, which holds what the planes do. */
+#define STELA_METAL_TEXELS_MIRROR_NONE 0u
+#define STELA_METAL_TEXELS_MIRROR_WRITE 1u
+#define STELA_METAL_TEXELS_MIRROR_COMPARE 2u
 
 /* The layouts a texture's image stores in place of its Metal format's
  * bytes (pixel_format.rs Encoding): the extended-range codes of BGR10_XR

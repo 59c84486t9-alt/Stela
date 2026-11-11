@@ -1315,6 +1315,39 @@ extended_storage(const struct call *call, nir_def *texel)
    return nir_bcsel(b, held_kind, nir_vec(b, channels, texel->num_components), texel);
 }
 
+/* A float texel the shader reads from a texture whose images hold
+ * RGB10A8_2P_XR10's half floats (texture_extended_storage): the exact value
+ * of the code each color channel's half holds, and alpha's 8-bit value, as an
+ * Apple GPU reads the format. Every code survives the half that holds it, so
+ * the nearest code is the stored one. The sRGB variant's reads stay the
+ * halves, within 2^-11 of the value: its curve would cost every float
+ * texture read two powers per channel. Other textures' texels pass. */
+static nir_def *
+extended_read(const struct call *call, nir_def *texel)
+{
+   const struct stela_air_options *options = call->c->options;
+   if (base_type(call->texture) != GLSL_TYPE_FLOAT || !options->texture_extended_storage)
+      return texel;
+   nir_def *kind = options->texture_extended_storage(
+      call->b, call->texture_id ? NULL : call->texture, call->texture_id, options->binding_data);
+   if (!kind)
+      return texel;
+   nir_builder *b = call->b;
+   nir_def *held_kind = nir_ieq_imm(b, kind, STELA_AIR_EXTENDED_STORAGE_CODES);
+   nir_def *channels[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < texel->num_components; i++) {
+      nir_def *c = nir_channel(b, texel, i);
+      if (i < 3) {
+         c = stela_air_extended_range_code(b, c, false, 0.0f, 1023.0f);
+      } else {
+         nir_def *steps = nir_fround_even(b, nir_fmul_imm(b, nir_fsat(b, c), 255.0));
+         c = nir_fmul_imm(b, steps, 1.0 / 255.0);
+      }
+      channels[i] = c;
+   }
+   return nir_bcsel(b, held_kind, nir_vec(b, channels, texel->num_components), texel);
+}
+
 /* A float texel the shader writes to or read from storage images: its color
  * channels encoded to sRGB, or decoded from it, where the texture's storage
  * images hold an sRGB format's texels (stela_air_options'
@@ -1461,6 +1494,7 @@ read_texel(struct call *call, nir_def **result)
    value = resident(call, value);
    if (image)
       value = srgb_storage(call, value, false);
+   value = extended_read(call, value);
    *result = texel(call, value, false);
    return true;
 }

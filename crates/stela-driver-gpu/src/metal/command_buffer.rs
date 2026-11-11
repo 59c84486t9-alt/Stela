@@ -771,6 +771,9 @@ pub struct CommandBuffer {
     features: DynamicFeatures,
     pipelines: Vec<BoundPipeline>,
     workload: Workload,
+    /// What its passes change of the extended-range textures' planes,
+    /// applied once it is committed.
+    pub(crate) planes: super::device::resources::PlaneChanges,
 }
 
 impl CommandBuffer {
@@ -782,6 +785,7 @@ impl CommandBuffer {
             features,
             pipelines: Vec::new(),
             workload: Workload::default(),
+            planes: Default::default(),
         }
     }
 

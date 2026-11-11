@@ -582,8 +582,8 @@ impl CommandBuffer {
             commands.splice(at..at, resets.collect::<Vec<_>>());
         }
         self.average_samples(resolver, &state.pass)?;
-        self.narrow_plane_decodes(resolver, &state, drawn)?;
-        self.extended_planes(resolver, &state.pass, false, Some(drawn))?;
+        self.narrow_plane_decodes(resolver, &state, DrawnArea::bounds(&drawn))?;
+        self.extended_planes(resolver, &state.pass, false, Some(&drawn))?;
         self.follow_depth(resolver, &state.pass)?;
         self.resolve_visibility(resolver, state.visibility)
     }
@@ -595,16 +595,17 @@ impl CommandBuffer {
     /// another texture in place to the values its texels read.
     ///
     /// The end of a pass that loaded an IOSurface's planes converts only
-    /// `drawn`, the part its work may have written ([`drawn_area`]): every
-    /// code survives a decode and encode, so the rest of the planes already
-    /// holds what a whole encode would write. Answers the decodes' command
-    /// indices, which the end narrows the same way.
+    /// `drawn`, the disjoint rectangles its work may have written
+    /// ([`drawn_area`]), one conversion each: every code survives a decode
+    /// and encode, so the rest of the planes already holds what a whole
+    /// encode would write. Answers the decodes' command indices, which the
+    /// end narrows to the rectangles' bounds.
     fn extended_planes(
         &mut self,
         resolver: &mut dyn Resolver,
         pass: &RenderPassPlan<ImageView>,
         begins: bool,
-        drawn: Option<[u32; 4]>,
+        drawn: Option<&[[u32; 4]]>,
     ) -> Result<Vec<(usize, usize)>> {
         let mut decodes = Vec::new();
         for (index, planes) in pass.inputs.extended_planes.iter().enumerate() {
@@ -616,31 +617,48 @@ impl CommandBuffer {
             if begins && !planes.loads || !begins && !stores {
                 continue;
             }
-            let area = drawn.filter(|_| narrows(planes));
-            let Some((arguments, count)) = plane_conversion(planes, area)? else {
-                continue;
+            // The rectangles are disjoint: their conversions need no order.
+            let whole = [None];
+            let narrowed: Vec<_>;
+            let areas: &[Option<[u32; 4]>] = match drawn.filter(|_| narrows(planes)) {
+                Some(rects) => {
+                    narrowed = rects.iter().copied().map(Some).collect();
+                    &narrowed
+                }
+                None => &whole,
             };
-            let upload =
-                self.recorder
-                    .upload(resolver, &arguments.encode(), TexelArguments::ALIGNMENT)?;
-            self.recorder.access(Use::new(
-                PipelineStages::COMPUTE_SHADER,
-                Access::SHADER_READ.union(Access::SHADER_WRITE),
-            ));
-            if begins {
-                decodes.push((self.recorder.commands().len(), index));
+            let mut ordered = false;
+            for &area in areas {
+                let Some((arguments, count)) = plane_conversion(planes, area)? else {
+                    continue;
+                };
+                let upload = self.recorder.upload(
+                    resolver,
+                    &arguments.encode(),
+                    TexelArguments::ALIGNMENT,
+                )?;
+                if !ordered {
+                    self.recorder.access(Use::new(
+                        PipelineStages::COMPUTE_SHADER,
+                        Access::SHADER_READ.union(Access::SHADER_WRITE),
+                    ));
+                    ordered = true;
+                }
+                if begins {
+                    decodes.push((self.recorder.commands().len(), index));
+                }
+                self.recorder.push(if begins {
+                    Command::StoreTexels {
+                        arguments: upload.address,
+                        count,
+                    }
+                } else {
+                    Command::LoadTexels {
+                        arguments: upload.address,
+                        count,
+                    }
+                });
             }
-            self.recorder.push(if begins {
-                Command::StoreTexels {
-                    arguments: upload.address,
-                    count,
-                }
-            } else {
-                Command::LoadTexels {
-                    arguments: upload.address,
-                    count,
-                }
-            });
         }
         Ok(decodes)
     }
@@ -942,47 +960,64 @@ fn end_query(recorder: &mut Recorder, visibility: &mut Visibility) {
     }
 }
 
+/// The most rectangles a pass's drawn area keeps apart; past them the two
+/// whose union adds the least merge.
+const DRAWN_RECTS: usize = 8;
+
 /// The part of a pass's `extent` its work may have read or written, as
-/// `[x, y, width, height]`, from the pass's commands from its first
-/// `BeginRendering` on: the union of the scissor rectangles its draws ran
-/// with, which bound every fragment, blend and storage access of theirs.
-/// Anything but a draw inside the pass (a tile dispatch, a copy, generated
-/// commands) may reach any pixel, so the whole extent; nothing drawn is
-/// empty.
-fn drawn_area(commands: &[Command], extent: [u32; 2]) -> [u32; 4] {
-    let full = [0, 0, extent[0], extent[1]];
+/// disjoint `[x, y, width, height]` rectangles, from the pass's commands
+/// from its first `BeginRendering` on: each draw's scissor rectangles, and
+/// for filled triangles also its viewports, which bound every fragment,
+/// blend and storage access of theirs (points, lines and mesh draws may
+/// reach past the viewport by their width). Anything but a draw inside the
+/// pass (a tile dispatch, a copy, generated commands) may reach any pixel,
+/// so the whole extent; nothing drawn is none.
+fn drawn_area(commands: &[Command], extent: [u32; 2]) -> Vec<[u32; 4]> {
+    let full = alloc::vec![[0, 0, extent[0], extent[1]]];
     let whole = Rect {
         offset: [0, 0],
         extent,
     };
     let mut scissors = alloc::vec![whole];
-    let (mut low, mut high) = ([u32::MAX; 2], [0u32; 2]);
+    // The viewports' bounds as [x0, y0, x1, y1], and whether draws keep
+    // within them.
+    let mut viewports = [0, 0, extent[0], extent[1]];
+    let mut topology = None;
+    let mut filled = true;
+    let mut area = DrawnArea::default();
     for command in commands {
-        match command {
-            Command::SetScissors(rects) => scissors.clone_from(rects),
+        let clipped = match command {
+            Command::SetScissors(rects) => {
+                scissors.clone_from(rects);
+                continue;
+            }
+            Command::SetViewports(set) => {
+                viewports = viewport_bounds(set, extent);
+                continue;
+            }
+            Command::SetPrimitiveTopology(set) => {
+                topology = Some(*set);
+                continue;
+            }
+            Command::SetPolygonMode(mode) => {
+                filled = *mode == PolygonMode::Fill;
+                continue;
+            }
             Command::Draw { .. }
             | Command::DrawIndexed { .. }
             | Command::DrawIndirect { .. }
-            | Command::DrawIndexedIndirect { .. }
-            | Command::DrawMeshTasks(_)
-            | Command::DrawMeshTasksIndirect { .. } => {
-                for rect in &scissors {
-                    let clip = |axis: usize, end: i64| end.clamp(0, i64::from(extent[axis])) as u32;
-                    let start = [0, 1].map(|axis| clip(axis, i64::from(rect.offset[axis])));
-                    let end = [0, 1].map(|axis| {
-                        clip(
-                            axis,
-                            i64::from(rect.offset[axis]) + i64::from(rect.extent[axis]),
+            | Command::DrawIndexedIndirect { .. } => {
+                filled
+                    && matches!(
+                        topology,
+                        Some(
+                            PrimitiveTopology::TriangleList
+                                | PrimitiveTopology::TriangleStrip
+                                | PrimitiveTopology::PatchList
                         )
-                    });
-                    if start[0] < end[0] && start[1] < end[1] {
-                        for axis in 0..2 {
-                            low[axis] = low[axis].min(start[axis]);
-                            high[axis] = high[axis].max(end[axis]);
-                        }
-                    }
-                }
+                    )
             }
+            Command::DrawMeshTasks(_) | Command::DrawMeshTasksIndirect { .. } => false,
             // Order, state and queries touch no attachment.
             Command::Barrier(_)
             | Command::RegionBarrier(_)
@@ -990,17 +1025,14 @@ fn drawn_area(commands: &[Command], extent: [u32; 2]) -> [u32; 4] {
             | Command::EndRendering
             | Command::BindPipeline { .. }
             | Command::PushConstants(_)
-            | Command::SetViewports(_)
             | Command::SetDepthBias { .. }
             | Command::SetBlendConstants(_)
             | Command::SetStencilReference { .. }
             | Command::SetDepthStencil(_)
             | Command::SetCullMode(_)
             | Command::SetFrontFace(_)
-            | Command::SetPrimitiveTopology(_)
             | Command::SetPrimitiveRestart(_)
             | Command::SetRasterizerDiscard(_)
-            | Command::SetPolygonMode(_)
             | Command::SetDepthClamp(_)
             | Command::SetSampleLocations { .. }
             | Command::BindVertexBuffers { .. }
@@ -1010,14 +1042,131 @@ fn drawn_area(commands: &[Command], extent: [u32; 2]) -> [u32; 4] {
             | Command::EndQuery { .. }
             | Command::WriteTimestamp { .. }
             | Command::BeginConditionalRendering { .. }
-            | Command::EndConditionalRendering => {}
+            | Command::EndConditionalRendering => continue,
             _ => return full,
+        };
+        let bounds = if clipped {
+            viewports
+        } else {
+            [0, 0, extent[0], extent[1]]
+        };
+        for rect in &scissors {
+            let clip = |axis: usize, end: i64| {
+                end.clamp(i64::from(bounds[axis]), i64::from(bounds[axis + 2])) as u32
+            };
+            let start = [0, 1].map(|axis| clip(axis, i64::from(rect.offset[axis])));
+            let end = [0, 1].map(|axis| {
+                clip(
+                    axis,
+                    i64::from(rect.offset[axis]) + i64::from(rect.extent[axis]),
+                )
+            });
+            area.add([start[0], start[1], end[0], end[1]]);
         }
     }
-    if low[0] >= high[0] || low[1] >= high[1] {
-        return [0; 4];
+    area.rects
+        .iter()
+        .map(|&[x0, y0, x1, y1]| [x0, y0, x1 - x0, y1 - y0])
+        .collect()
+}
+
+/// The pixels the viewports `set` cover, within `extent`, as
+/// `[x0, y0, x1, y1]`: every pixel a sample of theirs lies in.
+fn viewport_bounds(set: &[VkViewport], extent: [u32; 2]) -> [u32; 4] {
+    let mut low = [f32::INFINITY; 2];
+    let mut high = [f32::NEG_INFINITY; 2];
+    for viewport in set {
+        // Flipped viewports have negative heights.
+        let xs = [viewport.x, viewport.x + viewport.width];
+        let ys = [viewport.y, viewport.y + viewport.height];
+        for (axis, ends) in [xs, ys].into_iter().enumerate() {
+            low[axis] = low[axis].min(ends[0].min(ends[1]));
+            high[axis] = high[axis].max(ends[0].max(ends[1]));
+        }
     }
-    [low[0], low[1], high[0] - low[0], high[1] - low[1]]
+    // Not a number reaches anywhere.
+    let side = |axis: usize, value: f32, up: bool| {
+        let limit = extent[axis] as f32;
+        if value.is_nan() {
+            return if up { extent[axis] } else { 0 };
+        }
+        // Clamped first, the truncation is the floor (core has no rounding).
+        let clamped = value.clamp(0.0, limit);
+        let floor = clamped as u32;
+        if up && (floor as f32) < clamped {
+            floor + 1
+        } else {
+            floor
+        }
+    };
+    [
+        side(0, low[0], false),
+        side(1, low[1], false),
+        side(0, high[0], true),
+        side(1, high[1], true),
+    ]
+}
+
+/// Disjoint rectangles, `[x0, y0, x1, y1]`, covering everything added.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct DrawnArea {
+    rects: Vec<[u32; 4]>,
+}
+
+impl DrawnArea {
+    fn add(&mut self, rect: [u32; 4]) {
+        if rect[0] >= rect[2] || rect[1] >= rect[3] {
+            return;
+        }
+        let mut rect = rect;
+        // A rectangle overlapping kept ones takes them in.
+        while let Some(at) = self.rects.iter().position(|&kept| overlap(kept, rect)) {
+            rect = union(self.rects.swap_remove(at), rect);
+        }
+        self.rects.push(rect);
+        while self.rects.len() > DRAWN_RECTS {
+            let mut best = (u64::MAX, 0, 1);
+            for a in 0..self.rects.len() {
+                for b in a + 1..self.rects.len() {
+                    let (x, y) = (self.rects[a], self.rects[b]);
+                    let grown = area(union(x, y)) - area(x) - area(y);
+                    if grown < best.0 {
+                        best = (grown, a, b);
+                    }
+                }
+            }
+            let merged = union(self.rects[best.1], self.rects.swap_remove(best.2));
+            self.rects.swap_remove(best.1);
+            self.add(merged);
+        }
+    }
+
+    /// Their bounds as `[x, y, width, height]`, zero for none.
+    fn bounds(rects: &[[u32; 4]]) -> [u32; 4] {
+        let Some(first) = rects.first() else {
+            return [0; 4];
+        };
+        let to_corners = |&[x, y, width, height]: &[u32; 4]| [x, y, x + width, y + height];
+        let [x0, y0, x1, y1] = rects.iter().map(to_corners).fold(to_corners(first), union);
+        [x0, y0, x1 - x0, y1 - y0]
+    }
+}
+
+fn overlap(a: [u32; 4], b: [u32; 4]) -> bool {
+    a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+}
+
+fn union(a: [u32; 4], b: [u32; 4]) -> [u32; 4] {
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[2].max(b[2]),
+        a[3].max(b[3]),
+    ]
+}
+
+fn area(rect: [u32; 4]) -> u64 {
+    u64::from(rect[2] - rect[0]) * u64::from(rect[3] - rect[1])
 }
 
 /// Whether a pass converts only what it drew of `planes`
@@ -1062,6 +1211,7 @@ fn plane_conversion(
             origin: [x, y, 0],
             alpha: at(planes.alpha, planes.alpha_bytes_per_row, 1),
             alpha_bytes_per_row: planes.alpha_bytes_per_row,
+            mirror: planes.mirror,
             ..TexelArguments::default()
         },
         count,
@@ -2340,4 +2490,36 @@ fn render_stages(stages: RenderStages) -> PipelineStages {
             PipelineStages::MESH_SHADER,
             stages.contains(RenderStages::MESH),
         )
+}
+
+#[cfg(test)]
+mod drawn_tests {
+    use super::DrawnArea;
+
+    /// Drawn rectangles stay disjoint: one overlapping kept ones takes them
+    /// in, and past the limit the two whose union adds the least merge.
+    #[test]
+    fn drawn_rectangles_stay_disjoint_and_few() {
+        let mut area = DrawnArea::default();
+        area.add([0, 0, 4, 4]);
+        area.add([8, 0, 12, 4]);
+        area.add([2, 2, 10, 3]);
+        assert_eq!(area.rects, [[0, 0, 12, 4]]);
+        area.add([5, 5, 5, 9]);
+        assert_eq!(area.rects.len(), 1);
+        let mut many = DrawnArea::default();
+        for n in 0..9 {
+            many.add([n * 10, 0, n * 10 + 2, 2]);
+        }
+        assert_eq!(many.rects.len(), super::DRAWN_RECTS);
+        assert!(many.rects.contains(&[0, 0, 12, 2]));
+        for (n, &a) in many.rects.iter().enumerate() {
+            assert!(many.rects[n + 1..].iter().all(|&b| !super::overlap(a, b)));
+        }
+        assert_eq!(
+            DrawnArea::bounds(&[[8, 4, 16, 8], [24, 12, 16, 8]]),
+            [8, 4, 32, 16]
+        );
+        assert_eq!(DrawnArea::bounds(&[]), [0; 4]);
+    }
 }

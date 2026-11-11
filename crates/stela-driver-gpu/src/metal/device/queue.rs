@@ -554,8 +554,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                     .as_ref()
                     .and_then(|color| color.surface),
             };
-            plan.inputs.extended_planes[index] =
-                self.extended_pass_planes(attached.view.texture, view, plan.extent, actions)?;
+            plan.inputs.extended_planes[index] = self.extended_pass_planes(
+                attached.view.texture,
+                view,
+                plan.extent,
+                actions,
+                &mut commands.planes,
+            )?;
         }
         // Framebuffer reads access each color attachment's raw texels, of
         // the attachment or, where no view of it reads them or the backend
@@ -780,6 +785,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let finished = self
             .flush_indirect_writes()
             .and_then(|()| commands.finish(&mut self.resolver(), completion));
+        // Applied once the recording reaches the queue.
+        let planes = core::mem::take(&mut commands.planes);
         let recording = commands.into_recording();
         if let Err(error) = finished.and_then(|()| self.check_mappings(&recording.mappings)) {
             self.recycle(recording.uploads, recording.query_pools);
@@ -835,6 +842,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .splice(1..1, uploads);
         let start = self.timing.since(Phase::CommitUpload, start);
         self.submitted = serial;
+        self.apply_plane_changes(planes);
         self.queue.in_flight.push_back(InFlight {
             serial,
             key,

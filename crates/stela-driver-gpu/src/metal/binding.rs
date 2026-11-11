@@ -582,6 +582,9 @@ pub struct TexelArguments {
     /// and that plane's bytes per row.
     pub alpha: u64,
     pub alpha_bytes_per_row: u32,
+    /// `STELA_METAL_TEXELS_MIRROR_*`: whether the view's next layer
+    /// mirrors the planes, and whether an encode compares with it.
+    pub mirror: u32,
 }
 
 impl TexelArguments {
@@ -596,7 +599,11 @@ impl TexelArguments {
     pub const ORIGIN_OFFSET: u32 = 40;
     pub const ALPHA_OFFSET: u32 = 56;
     pub const ALPHA_ROW_OFFSET: u32 = 64;
+    pub const MIRROR_OFFSET: u32 = 68;
     pub const BYTES: u32 = 72;
+    /// `STELA_METAL_TEXELS_MIRROR_WRITE` and `_COMPARE`.
+    pub const MIRROR_WRITE: u32 = 1;
+    pub const MIRROR_COMPARE: u32 = 2;
     pub const ALIGNMENT: u64 = 16;
     /// Threads per workgroup of the kernels.
     pub const WORKGROUP_SIZE: u32 = 64;
@@ -621,6 +628,7 @@ impl TexelArguments {
         writer.u32(0);
         writer.u64(self.alpha);
         writer.u32(self.alpha_bytes_per_row);
+        writer.u32(self.mirror);
         bytes
     }
 }
@@ -1415,6 +1423,15 @@ mod tests {
             (
                 "STELA_METAL_TEXELS_ALPHA_ROW",
                 TexelArguments::ALPHA_ROW_OFFSET,
+            ),
+            ("STELA_METAL_TEXELS_MIRROR", TexelArguments::MIRROR_OFFSET),
+            (
+                "STELA_METAL_TEXELS_MIRROR_WRITE",
+                TexelArguments::MIRROR_WRITE,
+            ),
+            (
+                "STELA_METAL_TEXELS_MIRROR_COMPARE",
+                TexelArguments::MIRROR_COMPARE,
             ),
             ("STELA_METAL_TEXELS_BYTES", TexelArguments::BYTES),
             (

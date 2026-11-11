@@ -187,6 +187,10 @@ pub struct ExtendedPlanes {
     /// Its decode is of all of the planes, after which the working image
     /// holds them, rather than of what it drew.
     pub decodes_whole: bool,
+    /// The working image's next layer mirrors the planes
+    /// ([`TexelArguments::mirror`](crate::metal::binding::TexelArguments)):
+    /// zero for none, else what its conversions do with it.
+    pub mirror: u32,
 }
 
 /// Storage copies of a pass's depth and stencil samples and of its stencil

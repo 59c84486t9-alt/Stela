@@ -1525,6 +1525,8 @@ struct texels {
    nir_def *arguments, *buffer, *encoding, *coord, *offset;
    /* The alpha plane's texel of a two-plane encoding, or zero. */
    nir_def *alpha;
+   /* STELA_METAL_TEXELS_MIRROR_*, and the mirror's coordinate. */
+   nir_def *mirror, *mirror_coord;
    nir_deref_instr *image;
 };
 
@@ -1564,6 +1566,9 @@ static nir_builder texels(const nir_shader_compiler_options *options, const char
       &b, nir_imul(&b, y, load(&b, arguments, STELA_METAL_TEXELS_ALPHA_ROW, 32)), x);
    t->alpha = nir_bcsel(&b, nir_ieq_imm(&b, alpha, 0), alpha,
                         nir_iadd(&b, alpha, nir_u2u64(&b, alpha_offset)));
+   t->mirror = load(&b, arguments, STELA_METAL_TEXELS_MIRROR, 32);
+   t->mirror_coord = nir_vector_insert_imm(&b, t->coord,
+                                           nir_iadd_imm(&b, nir_channel(&b, t->coord, 2), 1), 2);
    const struct glsl_type *type = glsl_image_type(GLSL_SAMPLER_DIM_2D, true, GLSL_TYPE_UINT);
    t->image = stela_metal_bind_texture_id(&b, load(&b, arguments, STELA_METAL_TEXELS_IMAGE, 64),
                                           type, false, NULL, NULL);
@@ -1603,6 +1608,15 @@ static nir_def *store_xr(nir_builder *b, nir_def *lo, nir_def *hi, bool alpha, b
    nir_def *code = nir_ushr_imm(b, hi, 22);
    nir_def *a = nir_fsat(b, xr_value(b, code, false));
    return halves(b, xr_value(b, red, srgb), xr_value(b, green, srgb), xr_value(b, blue, srgb), a);
+}
+
+/* Writes a two-plane texel's codes word and alpha byte to its mirror. */
+static void store_mirror(nir_builder *b, const struct texels *t, nir_def *word, nir_def *alpha)
+{
+   nir_image_deref_store(b, &t->image->def, t->mirror_coord, nir_undef(b, 1, 32),
+                         nir_vec4(b, word, alpha, nir_imm_int(b, 0), nir_imm_int(b, 0)),
+                         nir_imm_int(b, 0), .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = true,
+                         .format = PIPE_FORMAT_NONE, .src_type = nir_type_uint32);
 }
 
 nir_shader *stela_metal_store_texels_kernel(const nir_shader_compiler_options *options)
@@ -1656,6 +1670,10 @@ nir_shader *stela_metal_store_texels_kernel(const nir_shader_compiler_options *o
                                nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D,
                                .image_array = true, .format = PIPE_FORMAT_NONE,
                                .src_type = nir_type_uint32);
+         /* The mirror holds what the planes do. */
+         nir_push_if(&b, nir_ine_imm(&b, t.mirror, STELA_METAL_TEXELS_MIRROR_NONE));
+         store_mirror(&b, &t, lo, byte);
+         nir_pop_if(&b, NULL);
       }
       nir_pop_if(&b, NULL);
    }
@@ -1729,12 +1747,31 @@ nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *op
       nir_def *codes[3] = {xr_code(&b, bl, srgb, 0, 1023), xr_code(&b, g, srgb, 0, 1023),
                            xr_code(&b, r, srgb, 0, 1023)};
       nir_def *steps = nir_fround_even(&b, nir_fmul_imm(&b, nir_fsat(&b, a), 255.0));
+      /* Blue, green and red from bit 0; the top two bits are zero. */
+      nir_def *word = nir_ior(&b, nir_ior(&b, codes[0], nir_ishl_imm(&b, codes[1], 10)),
+                              nir_ishl_imm(&b, codes[2], 20));
+      nir_def *alpha_byte = nir_f2u32(&b, steps);
+      /* A texel whose codes and alpha the planes hold already, as the
+       * mirror says, is not written again. */
+      nir_def *compares = nir_ieq_imm(&b, t.mirror, STELA_METAL_TEXELS_MIRROR_COMPARE);
+      nir_def *changed = nir_imm_false(&b);
+      nir_push_if(&b, compares);
+      nir_def *mirrored = nir_image_deref_load(
+         &b, 4, 32, &t.image->def, t.mirror_coord, nir_undef(&b, 1, 32), nir_imm_int(&b, 0),
+         .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = true, .format = PIPE_FORMAT_NONE,
+         .dest_type = nir_type_uint32);
+      nir_def *held = nir_iand(&b, nir_ieq(&b, nir_channel(&b, mirrored, 0), word),
+                               nir_ieq(&b, nir_channel(&b, mirrored, 1), alpha_byte));
+      nir_pop_if(&b, NULL);
+      held = nir_if_phi(&b, held, changed);
+      nir_push_if(&b, nir_inot(&b, held));
       nir_push_if(&b, nir_ine_imm(&b, t.buffer, 0));
       {
-         /* Blue, green and red from bit 0; the top two bits are zero. */
-         nir_def *word = nir_ior(&b, nir_ior(&b, codes[0], nir_ishl_imm(&b, codes[1], 10)),
-                                 nir_ishl_imm(&b, codes[2], 20));
          nir_store_global(&b, word, address, .align_mul = 4);
+         nir_push_if(&b, nir_ine_imm(&b, t.mirror, STELA_METAL_TEXELS_MIRROR_NONE));
+         store_mirror(&b, &t, word, nir_bcsel(&b, nir_ine_imm(&b, t.alpha, 0), alpha_byte,
+                                              nir_imm_int(&b, 0)));
+         nir_pop_if(&b, NULL);
       }
       nir_push_else(&b, NULL);
       {
@@ -1748,7 +1785,8 @@ nir_shader *stela_metal_load_texels_kernel(const nir_shader_compiler_options *op
       }
       nir_pop_if(&b, NULL);
       nir_push_if(&b, nir_ine_imm(&b, t.alpha, 0));
-      nir_store_global(&b, nir_u2u8(&b, nir_f2u32(&b, steps)), t.alpha, .align_mul = 1);
+      nir_store_global(&b, nir_u2u8(&b, alpha_byte), t.alpha, .align_mul = 1);
+      nir_pop_if(&b, NULL);
       nir_pop_if(&b, NULL);
       nir_pop_if(&b, NULL);
    }

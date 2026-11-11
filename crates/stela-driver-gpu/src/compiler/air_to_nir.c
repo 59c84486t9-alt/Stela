@@ -3613,6 +3613,21 @@ stela_air_extended_range_code(nir_builder *b, nir_def *v, bool srgb, float low, 
    return nir_bcsel(b, nir_flt(b, v, zero), nir_fneg(b, linear), linear);
 }
 
+/* Whether color attachment location is a blended two-plane extended-range
+ * one (STELA_AIR_EXTENDED_RANGE_PLANES_HELD), whose output Apple GPUs blend
+ * in halves. */
+static bool
+blended_in_halves(const struct translator *t, unsigned location)
+{
+   unsigned kinds = t->stage_options ? t->stage_options->extended_range : 0;
+   unsigned kind = location < AIR_MAX_RENDER_TARGETS
+                      ? kinds >> (location * STELA_AIR_EXTENDED_RANGE_BITS) &
+                           BITFIELD_MASK(STELA_AIR_EXTENDED_RANGE_BITS)
+                      : STELA_AIR_EXTENDED_RANGE_NONE;
+   return kind == STELA_AIR_EXTENDED_RANGE_PLANES_HELD ||
+          kind == STELA_AIR_EXTENDED_RANGE_PLANES_HELD_SRGB;
+}
+
 /* An output of color attachment location as its extended-range format
  * stores it: each color channel the value of its nearest code, 0 to 1023,
  * and alpha its nearest code's in [0, 1], codes 384 to 894, or for the
@@ -3621,8 +3636,8 @@ stela_air_extended_range_code(nir_builder *b, nir_def *v, bool srgb, float low, 
  * reads back as the same code: NVIDIA's color output narrows by
  * truncating, which can store a value nearer the code below. An unblended
  * two-plane output is only rounded to its nearest half, as Apple GPUs'
- * tile memory holds it. Other attachments' outputs are returned as they
- * are. */
+ * tile memory holds it, and a blended one is held from that half. Other
+ * attachments' outputs are returned as they are. */
 static nir_def *
 clamp_extended_range(struct translator *t, unsigned location, nir_def *value)
 {
@@ -3641,6 +3656,10 @@ clamp_extended_range(struct translator *t, unsigned location, nir_def *value)
    nir_def *channels[NIR_MAX_VEC_COMPONENTS];
    for (unsigned i = 0; i < value->num_components; i++) {
       nir_def *channel = nir_f2f32(b, nir_channel(b, value, i));
+      /* A blended two-plane output is held from its half
+       * (blended_in_halves). */
+      if (planes && kind != STELA_AIR_EXTENDED_RANGE_PLANES && value->bit_size == 32)
+         channel = nir_f2f32(b, nir_f2f16_rtne(b, channel));
       if (kind == STELA_AIR_EXTENDED_RANGE_PLANES) {
          /* Held as it is. */
       } else if (i == 3 && planes) {
@@ -3689,8 +3708,15 @@ write_attachment(struct translator *t, unsigned n, nir_def *destination, nir_def
          parts[i] = i < second->num_components ? nir_f2f32(b, nir_channel(b, second, i)) : defaults[i];
       source1 = nir_vec(b, parts, 4);
    }
-   if (access->blend && !integer)
+   if (access->blend && !integer) {
+      /* Apple GPUs blend a two-plane extended-range output as their tile
+       * memory holds it, in halves: 0.05 blends as 0.0499878, code 409. */
+      if (blended_in_halves(t, n)) {
+         source = nir_f2f32(b, nir_f2f16_rtne(b, source));
+         source1 = nir_f2f32(b, nir_f2f16_rtne(b, source1));
+      }
       source = clamp_extended_range(t, n, blend(t, access, source, destination, source1));
+   }
    if (access->planes) {
       /* The planes hold the color as a whole: unwritten channels keep the
        * texel's, then both planes take the converted color. */

@@ -17,7 +17,7 @@
 use super::{Backing, Device, TestedCopyObject, TextureId, TextureObject};
 use crate::metal::{
     abi::TextureUsage,
-    binding::{HeapArray, NULL_DESCRIPTOR, ResourceId},
+    binding::{HeapArray, NULL_DESCRIPTOR, ResourceId, TexelArguments},
     capabilities::FormatCapabilities,
     command_buffer::BufferRef,
     error::{Error, Result, ensure},
@@ -68,6 +68,68 @@ pub(in crate::metal::device) struct PlaneActions {
     pub settled: bool,
     /// The attachment's IOSurface ID and seed, as the guest reported them.
     pub surface: Option<(u32, u32)>,
+}
+
+/// What a command buffer's passes change of the extended-range textures'
+/// [`PlaneState`]s and their surfaces' generations, which its commit applies
+/// once it reaches the queue ([`Device::apply_plane_changes`]). A command
+/// buffer dropped or failed (a replay answered Pending while a pipeline
+/// compiles, or faulting) changes nothing, so the replay made again plans
+/// its decodes from the state as it was.
+#[derive(Clone, Debug, Default)]
+pub struct PlaneChanges {
+    /// Textures' states as the command buffer's passes leave them.
+    states: Vec<(u32, PlaneState)>,
+    /// Each surface whose generation the passes read: the device's
+    /// generation when first read, and the stores that advance it.
+    surfaces: Vec<(u32, u64, u64)>,
+    /// Stores of unreported surfaces, which advance every generation.
+    unreported: u64,
+}
+
+impl PlaneChanges {
+    fn state(&self, id: u32) -> Option<PlaneState> {
+        self.states
+            .iter()
+            .find(|(known, _)| *known == id)
+            .map(|&(_, state)| state)
+    }
+
+    fn set_state(&mut self, id: u32, state: PlaneState) {
+        match self.states.iter_mut().find(|(known, _)| *known == id) {
+            Some(slot) => slot.1 = state,
+            None => self.states.push((id, state)),
+        }
+    }
+
+    /// `surface`'s generation after the passes so far, from `device`'s.
+    fn generation(&mut self, surface: u32, device: u64) -> u64 {
+        let at = match self
+            .surfaces
+            .iter()
+            .position(|&(known, ..)| known == surface)
+        {
+            Some(at) => at,
+            None => {
+                self.surfaces.push((surface, device, 0));
+                self.surfaces.len() - 1
+            }
+        };
+        let (_, base, stores) = self.surfaces[at];
+        base + stores + self.unreported
+    }
+
+    /// Advances `surface`'s generation by a store; answers the new one.
+    fn store(&mut self, surface: u32, device: u64) -> u64 {
+        self.generation(surface, device);
+        let slot = self
+            .surfaces
+            .iter_mut()
+            .find(|(known, ..)| *known == surface)
+            .expect("the surface was just read");
+        slot.2 += 1;
+        slot.1 + slot.2 + self.unreported
+    }
 }
 
 /// Whether `format` is a two-plane extended-range format.
@@ -263,13 +325,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .ok_or(Error::Unsupported("rendering to this pixel format"))?;
         let extent = [descriptor.width as u32, descriptor.height as u32];
         let layers = view.range.layer_count;
+        // The layer after the rendered ones mirrors the planes: each
+        // texel's codes word and alpha byte, which encodes compare.
+        let mirrored = layers + 1;
         let info = ImageInfo {
             flags: ImageCreate::MUTABLE_FORMAT | ImageCreate::EXTENDED_USAGE,
             image_type: ImageType::D2,
             format,
             extent: [extent[0], extent[1], 1],
             mip_levels: 1,
-            array_layers: layers,
+            array_layers: mirrored,
             samples: SampleCounts::C1,
             tiling: ImageTiling::Optimal,
             usage: ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
@@ -292,7 +357,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
-                layer_count: layers,
+                layer_count: mirrored,
             },
             usage: ImageUsage::STORAGE,
             min_lod: 0.0,
@@ -373,6 +438,57 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         Ok(created)
     }
 
+    /// Applies a committed command buffer's [`PlaneChanges`]: its stores
+    /// advance the surfaces' generations and its passes leave the textures'
+    /// states. A texture destroyed since keeps none. Were a generation the
+    /// passes read advanced meanwhile by another commit, no state of theirs
+    /// holds the planes. Generations of surfaces no texture follows any
+    /// longer are dropped.
+    pub(in crate::metal::device) fn apply_plane_changes(&mut self, changes: PlaneChanges) {
+        let PlaneChanges {
+            states,
+            surfaces,
+            unreported,
+        } = changes;
+        if states.is_empty() && surfaces.is_empty() && unreported == 0 {
+            return;
+        }
+        let generations = &mut self.resources.extended_generations;
+        let moved = surfaces.iter().any(|&(surface, base, _)| {
+            generations.get(&surface).copied().unwrap_or_default() != base
+        });
+        if unreported != 0 {
+            for generation in generations.values_mut() {
+                *generation += unreported;
+            }
+        }
+        for &(surface, base, stores) in &surfaces {
+            if stores != 0 || unreported != 0 {
+                let generation = generations.entry(surface).or_insert(base);
+                *generation = (*generation).max(base + stores + unreported);
+                if moved {
+                    *generation += 1;
+                }
+            }
+        }
+        for (id, state) in states {
+            if let Some(kept) = self.resources.extended_planes.get_mut(&id) {
+                *kept = PlaneState {
+                    synced: state.synced.filter(|_| !moved),
+                    ..state
+                };
+            }
+        }
+        let planes = &self.resources.extended_planes;
+        self.resources.extended_generations.retain(|surface, _| {
+            planes.values().any(|state| {
+                state
+                    .surface
+                    .is_some_and(|(followed, _)| followed == *surface)
+            })
+        });
+    }
+
     /// What a pass converts of its color attachment `id`, attached as
     /// `view` over `extent`, when its format is a two-plane extended-range
     /// one: an IOSurface texture's planes, decoded into its working image
@@ -388,6 +504,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         view: AttachmentView<()>,
         extent: [u32; 2],
         actions: PlaneActions,
+        changes: &mut PlaneChanges,
     ) -> Result<Option<ExtendedPlanes>> {
         let PlaneActions {
             loads,
@@ -407,7 +524,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
         let encoding = format.describe().encoding().texel_kernel();
         let size = [texture.descriptor.width, texture.descriptor.height].map(|size| size as u32);
-        let Some(&state) = self.resources.extended_planes.get(&id.0) else {
+        let Some(&kept) = self.resources.extended_planes.get(&id.0) else {
             return Ok(Some(ExtendedPlanes {
                 storage: self.attachment_storage(id, view)?,
                 encoding,
@@ -425,12 +542,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             u32::try_from(value).map_err(|_| Error::Invalid("a plane's rows exceed 4 GiB"))
         };
         let working = self.extended_working(id, view)?;
-        let planes = state.planes;
+        let planes = kept.planes;
+        // The state as this command buffer's earlier passes leave it; its
+        // commit applies what this pass changes ([`PlaneChanges`]).
+        let state = changes.state(id.0).unwrap_or(kept);
+        let generations = &self.resources.extended_generations;
+        let device = |surface: u32| generations.get(&surface).copied().unwrap_or_default();
         // The working image holds the planes when nothing wrote them since
         // this texture's last stored pass: neither the CPU (the seed is the
         // same) nor another texture (the generation is).
-        let generations = &mut self.resources.extended_generations;
-        let generation = surface.map(|(surface, _)| *generations.entry(surface).or_default());
+        let generation = surface.map(|(surface, _)| changes.generation(surface, device(surface)));
         let current = surface.is_some()
             && state.surface == surface
             && state.synced.is_some()
@@ -442,19 +563,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         // planes where it held them before, or decodes or clears them all.
         let synced = match surface {
             Some((surface, _)) if stores => {
-                let generation = generations.entry(surface).or_default();
-                *generation += 1;
-                (settled && (current || extent == size)).then_some(*generation)
+                let generation = changes.store(surface, device(surface));
+                (settled && (current || extent == size)).then_some(generation)
             }
             None if stores => {
-                for generation in generations.values_mut() {
-                    *generation += 1;
-                }
+                changes.unreported += 1;
                 None
             }
             _ => None,
         };
-        self.resources.extended_planes.insert(
+        changes.set_state(
             id.0,
             PlaneState {
                 surface,
@@ -479,6 +597,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             // A surface followed decodes all of it, after which its image
             // holds the planes.
             decodes_whole: surface.is_some(),
+            // The mirror holds what the planes do where the image did, or
+            // once the pass decodes them all: its encode then writes only
+            // the texels whose codes changed. Otherwise it writes all it
+            // encodes, and the mirror with them.
+            mirror: match surface {
+                Some(_) if current || loads => TexelArguments::MIRROR_COMPARE,
+                Some(_) => TexelArguments::MIRROR_WRITE,
+                None => 0,
+            },
         }))
     }
 }
@@ -497,7 +624,7 @@ mod tests {
             queue::{AttachmentRequest, RenderPassRequest},
         },
         pipeline::MAX_COLOR_ATTACHMENTS,
-        vulkan::command::Command,
+        vulkan::{ImageViewType, command::Command, object::SubresourceRange},
     };
 
     /// A 1280 x 800 `&b38` surface's planes as the guest sends them: color
@@ -743,6 +870,134 @@ mod tests {
         device.destroy_texture(second).unwrap();
         device.destroy_texture(first).unwrap();
         assert!(device.resources.extended_generations.is_empty());
+    }
+
+    /// A command buffer dropped after planning a pass (its replay answered
+    /// Pending while a pipeline compiles, or discarded on a fault) changes
+    /// no texture's planes: the replay made again decodes what it needs.
+    /// Found by the GPU audit (`audit_abandoned_replay_skips_needed_decode`).
+    #[test]
+    fn abandoned_replays_leave_the_planes_state_alone() {
+        let mut device = device();
+        let buffer = device
+            .new_buffer(5_251_264, options(StorageMode::Shared))
+            .unwrap();
+        let format = PixelFormat::Rgb10A8_2pXr10;
+        let first = device
+            .new_extended_plane_texture(buffer, &surface_texture(format), PLANES)
+            .unwrap();
+        let load = |seed| reported(first, LoadAction::Load, Some((7, seed)));
+        let abandon = |device: &mut crate::metal::device::fixture::TestDevice,
+                       request: &RenderPassRequest| {
+            let mut commands = device.new_command_buffer();
+            device.begin_render(&mut commands, request).unwrap();
+            commands.end_encoding(&mut device.resolver()).unwrap();
+            device.discard(commands);
+        };
+        // The first pass, planned and dropped, then made again; a dropped
+        // command buffer is the same as one never committed.
+        abandon(&mut device, &load(1));
+        assert_eq!(conversions(&mut device, &load(1)), ["decode"]);
+        assert!(conversions(&mut device, &load(1)).is_empty());
+        // A CPU write, its replay dropped, then made again.
+        abandon(&mut device, &load(2));
+        assert_eq!(conversions(&mut device, &load(2)), ["decode"]);
+        // Two passes in one command buffer: the second sees the first's
+        // decode, and the commit keeps it.
+        let mut commands = device.new_command_buffer();
+        for _ in 0..2 {
+            device.begin_render(&mut commands, &load(3)).unwrap();
+            commands.end_encoding(&mut device.resolver()).unwrap();
+        }
+        device.commit(commands).unwrap();
+        let decodes = device.backend().submissions.last().unwrap()[0]
+            .commands
+            .iter()
+            .filter(|command| matches!(command, Command::StoreTexels { count, .. } if *count == 1280 * 800))
+            .count();
+        assert_eq!(decodes, 1);
+        assert!(conversions(&mut device, &load(3)).is_empty());
+        // Surfaces no texture follows keep no generation.
+        let second = device
+            .new_extended_plane_texture(buffer, &surface_texture(format), PLANES)
+            .unwrap();
+        for surface in 100..110 {
+            conversions(
+                &mut device,
+                &reported(second, LoadAction::Load, Some((surface, 1))),
+            );
+        }
+        assert_eq!(
+            device
+                .resources
+                .extended_generations
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [7, 109]
+        );
+        device.destroy_texture(second).unwrap();
+        device.destroy_texture(first).unwrap();
+        assert!(device.resources.extended_generations.is_empty());
+    }
+
+    /// A followed surface's working image mirrors its planes in a second
+    /// layer: an encode compares with it where the image held the planes
+    /// or the pass decoded them all, so only texels whose codes changed are
+    /// written; otherwise it writes everything it encodes, and the mirror.
+    #[test]
+    fn encodes_compare_with_the_planes_mirror_once_it_holds_them() {
+        let mut device = device();
+        let buffer = device
+            .new_buffer(5_251_264, options(StorageMode::Shared))
+            .unwrap();
+        let texture = device
+            .new_extended_plane_texture(
+                buffer,
+                &surface_texture(PixelFormat::Rgb10A8_2pXr10),
+                PLANES,
+            )
+            .unwrap();
+        let view = AttachmentView {
+            texture: (),
+            view_type: ImageViewType::D2,
+            range: SubresourceRange {
+                aspects: ImageAspects::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+        };
+        let mut plan = |loads, surface| {
+            let mut changes = PlaneChanges::default();
+            let actions = PlaneActions {
+                loads,
+                stores: true,
+                settled: true,
+                surface,
+            };
+            let planes = device
+                .extended_pass_planes(texture, view, [1280, 800], actions, &mut changes)
+                .unwrap()
+                .unwrap();
+            device.apply_plane_changes(changes);
+            (planes.loads, planes.mirror)
+        };
+        let (write, compare) = (TexelArguments::MIRROR_WRITE, TexelArguments::MIRROR_COMPARE);
+        // The first loading pass decodes all of the planes into both layers.
+        assert_eq!(plan(true, Some((7, 1))), (true, compare));
+        // A clear over an image that holds them.
+        assert_eq!(plan(false, Some((7, 1))), (false, compare));
+        // The CPU wrote the surface: a clear writes all it encodes.
+        assert_eq!(plan(false, Some((7, 2))), (false, write));
+        assert_eq!(plan(true, Some((7, 2))), (false, compare));
+        // Unreported surfaces keep no mirror.
+        assert_eq!(plan(true, None), (true, 0));
+        // The working image has the mirror's layer.
+        let working = device.extended_working(texture, view).unwrap();
+        assert_eq!(working.layers, 1);
+        device.destroy_texture(texture).unwrap();
     }
 
     #[test]

@@ -1127,7 +1127,8 @@ extended_range_outputs_clamp(void)
       stela_metal_release(shader);
    }
    /* The two-plane formats' blended outputs hold their codes and 8-bit
-    * alpha; their unblended ones are only rounded to halves. */
+    * alpha from their halves; their unblended ones are only rounded to
+    * halves. */
    for (uint32_t kind = STELA_AIR_EXTENDED_RANGE_PLANES_HELD; kind <= STELA_AIR_EXTENDED_RANGE_PLANES;
         kind++) {
       const struct stela_metal_specialization planes = {.extended_range = kind};
@@ -1136,7 +1137,7 @@ extended_range_outputs_clamp(void)
       assert(shader && alu_count(shader, nir_op_fround_even) == (held ? 4 : 0) &&
              alu_count(shader, nir_op_fmin) == (held ? 3 : 0) &&
              alu_count(shader, nir_op_fsat) == (held ? 1 : 0));
-      assert(alu_count(shader, nir_op_f2f16_rtne) == 4);
+      assert(alu_count(shader, nir_op_f2f16_rtne) == (held ? 8 : 4));
       stela_metal_release(shader);
    }
    /* Another location's kind leaves location 0 alone. */
