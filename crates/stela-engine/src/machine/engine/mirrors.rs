@@ -98,6 +98,10 @@ pub(super) struct Mirrors {
     /// last step at EL2 found it (0 elsewhere): native GEXIT unmasks only
     /// before it ([`Machine::refresh_interrupt_status`]).
     pub(super) lines_until: u64,
+    /// The thread switches native TPIDR_EL1 writes made since native code
+    /// was entered, which the engine takes when it returns
+    /// ([`Machine::take_thread_switches`]).
+    pub(super) switches: register_read::SwitchLog,
 }
 
 /// Where native code finds the cell at `index` of the PE's state.
@@ -170,8 +174,10 @@ pub(super) const MASK_WRITES: usize = MIRRORED.len() + STORED_CELLS;
 /// after [`MASK_WRITES`], that a plain write opens on the storage it reached
 /// (FPSR's lives in the frame, so names none). They stay open as reads do.
 /// A PAC key's halves also close the keys to PAC thunks, which then reopen
-/// together (`Machine::open_pointers`).
-pub(super) const WRITTEN: [(Encoding, SystemRegister); 16] = [
+/// together (`Machine::open_pointers`). TPIDR_EL1's also update its open
+/// read cells in every state and log the thread switch for the engine's
+/// diagnostics ([`THREAD_SWITCH`]).
+pub(super) const WRITTEN: [(Encoding, SystemRegister); 17] = [
     (Encoding::new(3, 0, 4, 0, 1), SystemRegister::ELR_EL1),
     (Encoding::new(3, 0, 4, 0, 0), SystemRegister::SPSR_EL1),
     (STACK_ZERO, SystemRegister::SP_EL0),
@@ -191,7 +197,30 @@ pub(super) const WRITTEN: [(Encoding, SystemRegister); 16] = [
     (Encoding::new(3, 0, 2, 2, 3), SystemRegister::APDBKeyHi_EL1),
     (Encoding::new(3, 0, 2, 3, 0), SystemRegister::APGAKeyLo_EL1),
     (Encoding::new(3, 0, 2, 3, 1), SystemRegister::APGAKeyHi_EL1),
+    (registers::encodings::TPIDR_EL1, SystemRegister::TPIDR_EL1),
 ];
+
+/// The [`WRITTEN`] index of TPIDR_EL1, the kernel's thread pointer.
+pub(super) const THREAD_POINTER_WRITE: usize = WRITTEN.len() - 1;
+
+/// The [`MIRRORED`] index of TPIDR_EL1.
+pub(super) const THREAD_POINTER_MIRROR: usize = 0;
+const _: () = assert!(matches!(
+    MIRRORED[THREAD_POINTER_MIRROR],
+    registers::encodings::TPIDR_EL1
+));
+
+/// Where a native TPIDR_EL1 write finds the register's read cells and the
+/// switch log (`x86_64::register_read::thread_switch_thunk`).
+pub(super) const THREAD_SWITCH: register_read::ThreadSwitch = register_read::ThreadSwitch {
+    reads: Place::new(
+        Anchor::Mirrors,
+        offset_of!(Mirrors, banks) + THREAD_POINTER_MIRROR * size_of::<register_read::Cell>(),
+    ),
+    stride: size_of::<[register_read::Cell; CELLS]>(),
+    banks: MIRROR_STATES,
+    log: Place::new(Anchor::Mirrors, offset_of!(Mirrors, switches)),
+};
 
 /// SP_EL0, plain only with SP_ELx selected.
 pub(super) const STACK_ZERO: Encoding = Encoding::new(3, 0, 4, 1, 0);
@@ -208,6 +237,7 @@ impl Default for Mirrors {
             interrupt_status: register_read::Cell::default(),
             transitions: transition::Table::default(),
             lines_until: 0,
+            switches: register_read::SwitchLog::default(),
         }
     }
 }

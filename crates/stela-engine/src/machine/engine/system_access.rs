@@ -511,6 +511,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .filter(|&(register, _)| {
                 self.register_fixed_bits(register) == self.register_fixed_bits(named)
             })
+            // A native thread pointer write also updates TPIDR_EL1's read
+            // cells: it must reach TPIDR_EL1 itself. (A completed write
+            // leaves none of its reads degraded: `degraded_written`.)
+            .filter(|&(register, _)| {
+                index != THREAD_POINTER_WRITE || register == SystemRegister::TPIDR_EL1
+            })
             .and_then(|(register, index)| match register {
                 SystemRegister::FPSR => Some(0),
                 _ => self

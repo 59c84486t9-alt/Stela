@@ -281,20 +281,57 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Record the previous thread's suspension on a TPIDR_EL1 change.
     pub(super) fn switch_thread(&mut self, next: u64) {
         let previous = self.cpu.read(SystemRegister::TPIDR_EL1);
+        let state = &self.cpu.state;
+        let (pc, frame, link) = (self.cpu.pc, state.x[29], state.x[30]);
+        self.suspend(previous, next, None, pc, frame, link);
+    }
+
+    /// The switches native TPIDR_EL1 writes made, in order, as
+    /// [`Self::switch_thread`] records them at their MSR, but stopped at the
+    /// count native code returned at.
+    pub(super) fn take_thread_switches(&mut self) {
+        let log = core::mem::take(&mut self.mirrors.switches);
+        let len = (log.len as usize).min(log.entries.len());
+        let mut now = None;
+        for switch in &log.entries[..len] {
+            now = self.suspend(
+                switch.previous,
+                switch.next,
+                now,
+                switch.pc,
+                switch.frame,
+                switch.link,
+            );
+        }
+    }
+
+    /// Thread `next` runs in place of `previous`, which stopped at `pc` with
+    /// `frame` and `link`; at count `at`, the current one if `None`, which
+    /// is read only when needed. The count used, if any.
+    fn suspend(
+        &mut self,
+        previous: u64,
+        next: u64,
+        at: Option<u64>,
+        pc: u64,
+        frame: u64,
+        link: u64,
+    ) -> Option<u64> {
         if previous == next {
-            return;
+            return at;
         }
         self.suspended.remove(&next);
-        if previous != 0 && self.suspended.len() < SUSPENSIONS {
-            let now = self.now();
-            let state = &self.cpu.state;
-            let suspension = Suspension {
-                at: now,
-                pc: self.cpu.pc,
-                frame: state.x[29],
-                link: state.x[30],
-            };
-            self.suspended.insert(previous, suspension);
+        if previous == 0 || self.suspended.len() >= SUSPENSIONS {
+            return at;
         }
+        let at = at.unwrap_or_else(|| self.now());
+        let suspension = Suspension {
+            at,
+            pc,
+            frame,
+            link,
+        };
+        self.suspended.insert(previous, suspension);
+        Some(at)
     }
 }

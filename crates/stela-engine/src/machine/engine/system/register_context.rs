@@ -365,6 +365,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                         | Register::SPSR_EL2
                         | Register::TPIDR_EL0
                         | Register::TPIDRRO_EL0
+                        | Register::TPIDR_EL1
                 )
             {
                 self.plain.set(Some((register, index)));

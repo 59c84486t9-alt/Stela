@@ -1325,6 +1325,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let selected = SELECTED;
             return register_read::selected_write_thunk(pc, rt, cell, selected, written);
         }
+        if index == THREAD_POINTER_WRITE {
+            return register_read::thread_switch_thunk(pc, rt, cell, &THREAD_SWITCH);
+        }
         if pointer_key(register) {
             let words = x86_64_pointer::TAG_WORDS;
             return register_read::key_write_thunk(pc, rt, cell, pointer::TAGS, words);

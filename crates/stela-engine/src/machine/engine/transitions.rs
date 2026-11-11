@@ -316,7 +316,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     target_arch = "x86_64",
     any(target_os = "macos", target_os = "linux")
 ))]
-mod tests {
+pub(super) mod tests {
     use super::super::NoDevices;
     use super::super::tests::{BASE, FakeHost, machine_on};
     use super::*;
@@ -340,7 +340,10 @@ mod tests {
     /// Run `code` on the host on the machine's frame, entered and left as
     /// `Machine::execute` enters and leaves native code; the exit's PC and
     /// kind.
-    fn run_native(machine: &mut Machine<FakeHost, NoDevices>, code: &[u8]) -> (u64, u64) {
+    pub(in crate::machine::engine) fn run_native(
+        machine: &mut Machine<FakeHost, NoDevices>,
+        code: &[u8],
+    ) -> (u64, u64) {
         use core::ffi::c_void;
         unsafe extern "C" {
             fn mmap(

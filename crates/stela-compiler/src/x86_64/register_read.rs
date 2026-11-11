@@ -257,6 +257,107 @@ pub fn checked_write_thunk(pc: GuestAddress, rt: u8, cell: Place, refused: u64) 
     finish_unless(code, [miss, unplain], pc)
 }
 
+/// One thread switch a [`thread_switch_thunk`] completed: the thread
+/// pointer it replaced and the one it wrote, the frame pointer (X29) and
+/// link register (X30) then, and the MSR's PC.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Switch {
+    pub previous: u64,
+    pub next: u64,
+    pub frame: u64,
+    pub link: u64,
+    pub pc: u64,
+}
+
+/// The thread switches native code completed since the engine last took
+/// them, in order: `len` of `entries`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SwitchLog {
+    pub len: u64,
+    pub entries: [Switch; SWITCHES],
+}
+
+/// The switches a [`SwitchLog`] holds; a thunk finding it full exits.
+pub const SWITCHES: usize = 8;
+
+/// Where a [`thread_switch_thunk`] finds the register's read cells and the
+/// engine's [`SwitchLog`]: `reads` is the read cell of the first of `banks`
+/// banks, each `stride` bytes after the one before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThreadSwitch {
+    pub reads: Place,
+    pub stride: usize,
+    pub banks: usize,
+    pub log: Place,
+}
+
+/// Leave Xt's value in RAX (0 for XZR).
+fn load_x(asm: &mut Asm<'_>, rt: u8) {
+    if rt == 31 {
+        asm.alu(Alu::Xor, Size::Dword, Gpr::Rax, Gpr::Rax);
+    } else {
+        asm.mov_load(Size::Qword, Gpr::Rax, register(rt));
+    }
+}
+
+/// The thunk completing `MSR <thread pointer>, Xt` at `pc` through the
+/// storage the `value` of the cell at `cell` points at, for a register that
+/// keeps what it is written and has read cells of its own in every bank
+/// (TPIDR_EL1): every open read cell takes the value, as the engine's
+/// write updates them. A value that replaces another is logged in the
+/// [`SwitchLog`] for the engine's diagnostics, which see the switch as an
+/// engine-path write would show it; with the log full, or the cell closed,
+/// it exits at `pc`. It also clobbers RCX and RDX.
+pub fn thread_switch_thunk(pc: GuestAddress, rt: u8, cell: Place, places: &ThreadSwitch) -> Thunk {
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::Qword;
+    let (mut code, miss) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    asm.mov_load(Qword, Rcx, Mem::base_disp8(Rax, VALUE));
+    load_x(&mut asm, rt);
+    // The same value changes nothing: no cell, no thread.
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(Rcx, 0));
+    let same = asm.jcc(Cond::E);
+    asm.place(Rdx, places.log);
+    let len = core::mem::offset_of!(SwitchLog, len) as i32;
+    asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rdx, len), SWITCHES as i8);
+    let full = asm.jcc(Cond::Ae);
+    asm.mov_load(Qword, Rax, Mem::base(Rdx, len));
+    asm.alu_imm8(Alu::Add, Qword, Mem::base(Rdx, len), 1);
+    asm.imul_imm32(Qword, Rax, Rax, size_of::<Switch>() as i32);
+    asm.alu(Alu::Add, Qword, Rdx, Rax);
+    let entry = |field: usize| {
+        Mem::base(
+            Rdx,
+            (core::mem::offset_of!(SwitchLog, entries) + field) as i32,
+        )
+    };
+    asm.mov_load(Qword, Rax, Mem::base(Rcx, 0));
+    asm.mov_store(Qword, entry(core::mem::offset_of!(Switch, previous)), Rax);
+    load_x(&mut asm, 29);
+    asm.mov_store(Qword, entry(core::mem::offset_of!(Switch, frame)), Rax);
+    load_x(&mut asm, 30);
+    asm.mov_store(Qword, entry(core::mem::offset_of!(Switch, link)), Rax);
+    asm.mov_imm64(Rax, pc.0);
+    asm.mov_store(Qword, entry(core::mem::offset_of!(Switch, pc)), Rax);
+    load_x(&mut asm, rt);
+    asm.mov_store(Qword, entry(core::mem::offset_of!(Switch, next)), Rax);
+    asm.mov_store(Qword, Mem::base(Rcx, 0), Rax);
+    // Every open read cell reads the new value; closed ones keep none.
+    asm.place(Rdx, places.reads);
+    for bank in 0..places.banks {
+        let at = (bank * places.stride) as i32;
+        asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rdx, at), 0);
+        let closed = asm.jcc8(Cond::E);
+        asm.mov_store(Qword, Mem::base(Rdx, at + VALUE as i32), Rax);
+        asm.bind(closed);
+    }
+    asm.bind(same);
+    finish_unless(code, [miss, full], pc)
+}
+
 /// The thunk completing `IC IVAU, Xt` at `pc` of an address in the page the
 /// `value` of the cell at `cell` names, else exiting at `pc`.
 pub fn code_page_thunk(pc: GuestAddress, rt: u8, cell: Place) -> Thunk {
@@ -864,6 +965,100 @@ mod tests {
         pc: PC.0 + 4,
         kind: ExitKind::Fallthrough as u64,
     };
+
+    /// A thread pointer write runs on the host: with its cell open it writes
+    /// the storage and every open read cell, logs a switch to another value
+    /// with the frame and link registers, changes nothing for the same
+    /// value, and leaves everything to the engine with the cell closed or
+    /// the log full.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn thread_switches_write_the_register_its_reads_and_the_log() {
+        use crate::GuestState;
+        use core::mem::offset_of;
+        #[repr(C)]
+        #[derive(Default)]
+        struct Data {
+            write: Cell,
+            storage: u64,
+            reads: [Cell; 3],
+            log: SwitchLog,
+        }
+        let (pc, miss, next) = (PC, MISS, NEXT);
+        let mut data = alloc::boxed::Box::new(Data::default());
+        let base = &mut *data as *mut Data;
+        let place = |offset: usize| Place::new(Anchor::Mirrors, offset);
+        let places = ThreadSwitch {
+            reads: place(offset_of!(Data, reads)),
+            stride: size_of::<Cell>(),
+            banks: 3,
+            log: place(offset_of!(Data, log)),
+        };
+        let cell = place(offset_of!(Data, write));
+        let mut state = GuestState::default();
+        state.anchors[Anchor::Mirrors] = base as u64;
+        state.x[29] = 0xffff_fe00_0000_2900;
+        state.x[30] = 0xffff_fe00_0000_3000;
+        let storage = base as u64 + offset_of!(Data, storage) as u64;
+        // SAFETY: `base` points into the live box; reads and writes happen
+        // between thunk calls.
+        let data = |f: &mut dyn FnMut(&mut Data)| unsafe { f(&mut *base) };
+        let open = Cell {
+            readable: 1,
+            value: 0x1000,
+        };
+        data(&mut |d| {
+            d.write = Cell {
+                readable: 0,
+                value: storage,
+            };
+            d.storage = 0x1000;
+            d.reads = [open, Cell::default(), open];
+        });
+        state.x[5] = 0x2000;
+        let write = thread_switch_thunk(pc, 5, cell, &places);
+        assert_eq!(run(&write.code, &mut state), miss);
+        data(&mut |d| assert_eq!((d.storage, d.log.len), (0x1000, 0)));
+        data(&mut |d| d.write.readable = 1);
+        assert_eq!(run(&write.code, &mut state), next);
+        data(&mut |d| {
+            assert_eq!(d.storage, 0x2000);
+            let new = Cell {
+                readable: 1,
+                value: 0x2000,
+            };
+            assert_eq!(d.reads, [new, Cell::default(), new]);
+            assert_eq!(d.log.len, 1);
+            let switch = Switch {
+                previous: 0x1000,
+                next: 0x2000,
+                frame: 0xffff_fe00_0000_2900,
+                link: 0xffff_fe00_0000_3000,
+                pc: pc.0,
+            };
+            assert_eq!(d.log.entries[0], switch);
+        });
+        // The same value again: nothing logged.
+        assert_eq!(run(&write.code, &mut state), next);
+        data(&mut |d| assert_eq!(d.log.len, 1));
+        // XZR, then values until the log is full: the next one exits.
+        assert_eq!(
+            run(&thread_switch_thunk(pc, 31, cell, &places).code, &mut state),
+            next
+        );
+        data(&mut |d| assert_eq!((d.storage, d.log.entries[1].next), (0, 0)));
+        for value in 2..SWITCHES as u64 {
+            state.x[5] = value;
+            assert_eq!(run(&write.code, &mut state), next);
+        }
+        data(&mut |d| assert_eq!((d.log.len, d.storage), (SWITCHES as u64, 7)));
+        state.x[5] = 0x9000;
+        assert_eq!(run(&write.code, &mut state), miss);
+        data(&mut |d| {
+            assert_eq!(d.storage, 7);
+            assert_eq!(d.reads[0].value, 7);
+        });
+    }
 
     /// Thunks run on the host: a readable cell completes the read into Xt,
     /// or into nothing for XZR; a cleared one exits with no write.

@@ -8893,6 +8893,7 @@ mod shared_code;
 mod sharing;
 mod stage2_syndrome;
 mod tagged;
+mod thread_switch;
 
 #[test]
 fn host_work_holds_the_shared_count_only_for_a_pe_stopped_in_the_kernel() {
