@@ -25,14 +25,17 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
-  cli:
+  check:
+    name: check (${{ matrix.system }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - system: linux
+            os: ubuntu-22.04
             skip: ""
-          - os: windows-2025
+          - system: windows
+            os: windows-2025
             # The repaired record spells stela/boot with a / where setup wrote
             # a \, so these two compare unequal on Windows until that is fixed.
             skip: >-
