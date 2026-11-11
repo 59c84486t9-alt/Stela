@@ -8,8 +8,7 @@
 //! (hibernation image writer) and X19/X20 (hibernation restore), which
 //! confirms the register fields.
 //!
-//! The result register layout is recovered from those callers
-//! (`docs/design/system.md#apple-extensions`):
+//! The result register layout is recovered from those callers:
 //!
 //! - bits 7:0, compress only: the compressed size in 64-byte units, less
 //!   one; a size of 16 KiB means the page did not compress;
