@@ -180,6 +180,18 @@ pub fn inventory_file(handoff: &Handoff, name: &str) -> Option<&'static [u8]> {
         .map(bundle::contents)
 }
 
+/// The install's signing answers setup fetched from Apple
+/// (`tss::staged::FILE`), when the bundle holds them. A damaged file is
+/// reported and the install takes the network as without one.
+pub fn staged_answers(handoff: &Handoff) -> Option<stela_runtime::restore::tss::staged::Set> {
+    let bytes = inventory_file(handoff, stela_runtime::restore::tss::staged::FILE)?;
+    stela_runtime::restore::tss::staged::Set::decode(bytes)
+        .inspect_err(|error| {
+            output::arguments(format_args!("TSS STAGED refusal: {error}\n"));
+        })
+        .ok()
+}
+
 pub struct Experiment {
     usb: UsbId,
     driver: Driver<Source, MuxStream>,

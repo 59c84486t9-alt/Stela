@@ -335,7 +335,17 @@ fn open_host(
     // installs nothing leaves the adapter to the guest. An install without a
     // medium partition also streams its remote image.
     let remote_image = options.install.is_some() && options.install_source.is_none();
-    let wants_network = options.install.is_some() || options.network_check.is_some();
+    // macOS on the USB and Apple's answers to every signing request the
+    // install makes: the install needs no network, so none is opened.
+    let offline = options.install.is_some()
+        && !remote_image
+        && restore::staged_answers(handoff).is_some_and(|set| set.complete());
+    if offline {
+        output::arguments(format_args!(
+            "INSTALL OFFLINE macOS and Apple's signing answers are on the USB; no network is opened\n"
+        ));
+    }
+    let wants_network = (options.install.is_some() && !offline) || options.network_check.is_some();
     let mut devices = start_devices(
         handoff,
         options,
@@ -353,9 +363,9 @@ fn open_host(
         kernel_work,
     );
     remappers.report_faults();
-    // No install finishes without Apple's signing server, even with macOS on
-    // the USB: stop before the restore changes the Mac's disk, not at its
-    // first signing request.
+    // An install without staged signing answers cannot finish without
+    // Apple's signing server: stop before the restore changes the Mac's
+    // disk, not at its first signing request.
     if options.install.is_some()
         && let Some(Err(reason)) = &devices.host_network
     {
@@ -1953,6 +1963,36 @@ fn bind_native_pmp(
     }
 }
 
+/// The install's way to Apple's signing service: the answers setup fetched
+/// for its requests, then the host network, or the reason there is none.
+fn signing_transport(
+    handoff: &Handoff,
+    host_network: &Option<Result<network::Shared>>,
+) -> alloc::boxed::Box<dyn stela_runtime::restore::tss::Transport> {
+    let inner: alloc::boxed::Box<dyn stela_runtime::restore::tss::Transport> = match host_network {
+        Some(Ok(network)) => alloc::boxed::Box::new(network::Signing::new(network.clone())),
+        Some(Err(reason)) => alloc::boxed::Box::new(network::Offline(reason.clone())),
+        None => alloc::boxed::Box::new(network::Offline(refuse!(
+            "the install opened no network: the USB holds Apple's answers to its signing requests, and this request is not one of them"
+        ))),
+    };
+    match restore::staged_answers(handoff) {
+        Some(set) => alloc::boxed::Box::new(stela_runtime::restore::tss::staged::Staging::new(
+            set,
+            inner,
+            alloc::boxed::Box::new(
+                |kind: stela_runtime::restore::tss::staged::Kind, sha256: &str| {
+                    output::arguments(format_args!(
+                        "TSS STAGED kind={} sha256={sha256}\n",
+                        kind.name()
+                    ));
+                },
+            ),
+        )),
+        None => inner,
+    }
+}
+
 /// The restore the guest's installer runs against `source`: the signing
 /// service and guest-facing proxy an install uses, and the restore's mode.
 fn prepare_restore(
@@ -1989,13 +2029,7 @@ fn prepare_restore(
                 ap: [0; 32],
                 sep: [0; 20],
             },
-            transport: match host_network
-                .as_ref()
-                .expect("an install opens the host network")
-            {
-                Ok(network) => alloc::boxed::Box::new(network::Signing::new(network.clone())),
-                Err(reason) => alloc::boxed::Box::new(network::Offline(reason.clone())),
-            },
+            transport: signing_transport(handoff, host_network),
         }
     });
     // Development restores keep the original DEV-board FDR failure
