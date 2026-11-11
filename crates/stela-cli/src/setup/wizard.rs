@@ -150,12 +150,10 @@ pub(super) fn resume(command: &mut Request, esp: PathBuf, record: &Record) {
     command.usb = esp;
     command.build = record.build.clone();
     command.model = Some(record.model.clone());
-    command.install_image = record.install_image.or_else(|| {
-        record.media.first().map(|medium| match medium.remote {
-            true => InstallImage::Network,
-            false => InstallImage::Full,
-        })
-    });
+    // A resumed setup is a new one, and streams the install as every new
+    // setup does, also when an older stela began it with the whole image
+    // (`stela setup` run again does the same).
+    command.install_image = Some(InstallImage::Network);
     if command.ipsw.is_none() {
         command.fetch = true;
     }

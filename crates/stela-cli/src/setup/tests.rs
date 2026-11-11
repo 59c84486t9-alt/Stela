@@ -2588,6 +2588,34 @@ fn an_interrupted_setup_follows_the_usb_to_where_it_is_mounted_now() {
 }
 
 #[test]
+fn an_interrupted_whole_image_setup_resumes_as_a_network_install() {
+    let mut f = fixture(64 * GIB, false);
+    add_installed_disk(&mut f, &[], &[]);
+    // An older stela's setup that copied the whole image and stopped part
+    // way; its record names the image choice by its first name.
+    setup(&environment(&f.host), installed_command(&f)).unwrap();
+    let (first, _) = interrupt_setup(&f);
+    let path = f.esp.join(RECORD);
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"install_image\": \"full\""), "{text}");
+    fs::write(&path, text.replace("\"full\"", "\"offline\"")).unwrap();
+    // The same setup run again, as this stela runs it: no image choice.
+    let mut again = installed_command(&f);
+    again.install_image = None;
+    let report = setup(&environment(&f.host), again).unwrap();
+    assert!(report.contains("Done."), "{report}");
+    let resumed = record(&f);
+    assert!(resumed.complete);
+    assert_eq!(resumed.install_image, None);
+    let medium = resumed.active_medium().unwrap();
+    assert!(medium.remote && medium.problems().is_empty(), "{medium:?}");
+    // The whole image's pieces are gone, and the setup is sound.
+    assert!(!first.exists());
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(status.contains("No problems found."), "{status}");
+}
+
+#[test]
 fn interrupted_disk_add_is_finished_by_repair_initialize_nor() {
     use stela_runtime::pc::boot_log::{LOG_BYTES, OFFSET};
     use stela_soc_data::nor::{CAPACITY, Image};
