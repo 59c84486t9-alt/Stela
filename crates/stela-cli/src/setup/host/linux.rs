@@ -501,7 +501,14 @@ impl Host for System {
             .write(true)
             .custom_flags(libc::O_EXCL)
             .open(&path)
-            .with_context(|| format!("cannot open {path} to erase it ({ADMIN})"))?;
+            .map_err(|error| match error.raw_os_error() {
+                Some(libc::EBUSY) => anyhow::anyhow!(
+                    "{path} is in use: a volume on it is still mounted or open (another program, \
+                     an encrypted volume, a RAID or LVM member); close it and run setup again"
+                ),
+                _ => anyhow::Error::new(error)
+                    .context(format!("cannot open {path} to erase it ({ADMIN})")),
+            })?;
         super::write_layout(&mut file, &layout)?;
         // The kernel reads the new partition table; udev, probing the disk
         // after the write, may hold it briefly.
