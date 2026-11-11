@@ -50,8 +50,22 @@ const FORMS: [u32; 30] = [
     0x1ec2_f420,
 ];
 
-/// FCVTN, FCVTN2 and FCVT Hd, Sn: inline on every target.
-const FIELD_NARROWING: [u32; 3] = [0x0e21_6820, 0x4e21_6820, 0x1e23_c020];
+/// Inline on every target from the fields: FCVTN, FCVTN2 and FCVT Hd, Sn;
+/// FCVTZS and FCVTZU 8H, 4H and H; SCVTF and UCVTF 8H, 4H and H.
+const FIELD_RECIPES: [u32; 12] = [
+    0x0e21_6820,
+    0x4e21_6820,
+    0x1e23_c020,
+    0x4ef9_b820,
+    0x0ef9_b820,
+    0x6ef9_b820,
+    0x5ef9_b820,
+    0x7ef9_b820,
+    0x4e79_d820,
+    0x2e79_d820,
+    0x5e79_d820,
+    0x7e79_d820,
+];
 
 fn compile(word: u32, target: TargetCpu) -> Mapping {
     compile_words(&[PREFIX, word, SUFFIX], target)
@@ -175,12 +189,11 @@ fn half_conversions_match_completion_on_each_host_recipe() {
                 };
                 let completed = check(&mapping, &operation, state);
                 inline += u32::from(completed);
-                inline_recipes += u32::from(completed && !FIELD_NARROWING.contains(&word));
+                inline_recipes += u32::from(completed && !FIELD_RECIPES.contains(&word));
             }
         }
         std::println!("{} inline={inline}", target.id());
-        // Single to Half narrowing has an SSE2 field path; the other forms
-        // need AVX512-FP16.
+        // The field recipes run on SSE2; the other forms need AVX512-FP16.
         assert_ne!(inline, 0, "{target:?}");
         assert_eq!(
             inline_recipes != 0,

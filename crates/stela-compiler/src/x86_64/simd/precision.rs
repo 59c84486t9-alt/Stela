@@ -637,7 +637,7 @@ pub(super) fn field_narrowing(mode: PrecisionMode) -> bool {
 }
 
 /// Broadcast `value` to the four dwords of `xmm`. Clobbers EAX.
-fn dword_constant(code: &mut Code, xmm: u8, value: u32) {
+pub(super) fn dword_constant(code: &mut Code, xmm: u8, value: u32) {
     let mut asm = code.asm();
     asm.mov_imm32(Rax, value);
     asm.movd_to_xmm(xmm, Rax);
@@ -697,12 +697,19 @@ fn scalar_field_narrow(code: &mut Code, source: u8, fallback: &mut Vec<usize>) {
 /// high qword, and ECX with every bit set when some lane is inexact and zero
 /// otherwise.
 fn vector_field_narrow(code: &mut Code, source: u8, fallback: &mut Vec<usize>) {
+    read_vector(code, source, SOURCE_VECTOR);
+    field_narrow_lanes(code, fallback);
+}
+
+/// [`vector_field_narrow`] of the four Single lanes already in XMM1, under
+/// FPCR nearest-even, with the same results. Clobbers only XMM0-XMM6, EAX
+/// and ECX.
+pub(super) fn field_narrow_lanes(code: &mut Code, fallback: &mut Vec<usize>) {
     const MAGNITUDE: u8 = 2;
     const VALID: u8 = 3;
     const SCRATCH: u8 = 4;
     const ZERO: u8 = 5;
     const BOUND: u8 = 6;
-    read_vector(code, source, SOURCE_VECTOR);
     packed(code, Host::MoveAligned, MAGNITUDE, SOURCE_VECTOR);
     ShiftOpcode::LeftDword.emit(code, MAGNITUDE, 1);
     ShiftOpcode::RightDword.emit(code, MAGNITUDE, 1);

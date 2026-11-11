@@ -29,6 +29,13 @@ mod fast_conversion_tests;
 mod floating;
 mod fused;
 pub(in crate::x86_64) mod half;
+mod half_integer;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod half_integer_tests;
 mod halving;
 mod i8mm;
 mod immediates;
@@ -289,9 +296,12 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
                 operand.mode.destination_format() == Format::Half
                     && !precision::field_narrowing(operand.mode)
             }
-            Operand::FromInteger(operand) => operand.format == Format::Half,
+            Operand::FromInteger(operand) => {
+                operand.format == Format::Half && !half_integer::from_integer_inline(operand)
+            }
             Operand::ToInteger { operand, rounding } => {
                 operand.format == Format::Half
+                    && !half_integer::to_integer_inline(operand, *rounding)
                     || *rounding == IntegerRounding::NearestAway
                         && !integer_conversion::nearest_away_inline(operand)
             }

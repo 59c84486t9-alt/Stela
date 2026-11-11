@@ -566,8 +566,12 @@ pub(in crate::x86_64) fn from_integer(
         word_to_double(code, operand, register, signed, pc);
         return;
     }
+    if super::half_integer::try_from_integer(code, operand, pc, target) {
+        return;
+    }
     if operand.format == Format::Half && !half_supported(operand, target) {
-        // S->H after integer->S can double round; there is no baseline H CVT.
+        // S->H after a general integer->S can double round; there is no
+        // baseline H CVT.
         helper(code, pc);
         return;
     }
@@ -846,6 +850,9 @@ fn to_integer_with(
     target: TargetCpu,
     negative_zero_exact: bool,
 ) {
+    if super::half_integer::try_to_integer(code, operand, mode, pc, target) {
+        return;
+    }
     if operand.format == Format::Half && !half_supported(operand, target) {
         helper(code, pc);
         return;
