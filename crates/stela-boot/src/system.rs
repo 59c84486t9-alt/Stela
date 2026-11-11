@@ -784,6 +784,19 @@ fn load(
     let engine_entry =
         layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
 
+    let mut boot_disk = [0u8; crate::handoff::BOOT_DISK_BYTES];
+    let mut boot_disk_bytes = 0;
+    if let Some(location) = crate::installer::boot_disk_location() {
+        output::arguments(format_args!(
+            "BOOT DISK the firmware found it at {location}\n"
+        ));
+        let mut take = location.len().min(boot_disk.len());
+        while !location.is_char_boundary(take) {
+            take -= 1;
+        }
+        boot_disk[..take].copy_from_slice(&location.as_bytes()[..take]);
+        boot_disk_bytes = take;
+    }
     crate::status::done("");
     let boot_heap = crate::ALLOCATOR.usage();
     output::arguments(format_args!(
@@ -890,6 +903,8 @@ fn load(
             host,
             host_bytes,
             log_partition: log.map(|guid| guid.0),
+            boot_disk,
+            boot_disk_bytes,
             tsc_hz,
             tsc_source: crate::firmware::tsc_source(),
             tsc_tolerance_ppm: crate::firmware::tsc_tolerance_ppm(),
