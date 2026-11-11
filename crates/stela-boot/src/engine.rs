@@ -413,6 +413,7 @@ fn test_profile(target: TargetCpu, speculation: Speculation) -> CpuProfile {
 fn board_profile(board: &board::Board, target: TargetCpu, speculation: Speculation) -> CpuProfile {
     let chip = board.cpus.chip;
     let mut fixed = stela_engine::machine::identification::derive(chip, target, true, speculation);
+    report_steering(chip, target);
     // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s` zeroes with
     // `dc zva` in fixed 64-byte steps.
     fixed.push((DCZID_EL0, 4));
@@ -423,6 +424,45 @@ fn board_profile(board: &board::Board, target: TargetCpu, speculation: Speculati
         fixed,
         processors: board.cpus.processors.clone(),
     }
+}
+
+/// Report once which steered features the identification advertises on
+/// this host and why the others are hidden
+/// (`identification::Basis::Steered`): the guest kernel's
+/// `hw.optional.arm.FEAT_*` sysctls and commpage bits follow the fields.
+fn report_steering(chip: Chip, target: TargetCpu) {
+    let steering = stela_engine::machine::identification::steering(chip, target);
+    let names = |advertised: bool| {
+        let mut names = String::new();
+        for entry in steering
+            .iter()
+            .filter(|entry| entry.advertised == advertised)
+        {
+            if !names.is_empty() {
+                names.push(',');
+            }
+            names.push_str(entry.feature);
+        }
+        if names.is_empty() {
+            names.push('-');
+        }
+        names
+    };
+    let mut reasons = String::new();
+    for entry in steering.iter().filter(|entry| !entry.advertised) {
+        if !reasons.is_empty() {
+            reasons.push_str("; ");
+        }
+        reasons.push_str(entry.feature);
+        reasons.push_str(": ");
+        reasons.push_str(entry.reason);
+    }
+    output::arguments(format_args!(
+        "GUEST FEATURES advertised={} hidden={} because {}\n",
+        names(true),
+        names(false),
+        if reasons.is_empty() { "-" } else { &reasons }
+    ));
 }
 
 /// How long the host's serial port goes without a look once it gave no
