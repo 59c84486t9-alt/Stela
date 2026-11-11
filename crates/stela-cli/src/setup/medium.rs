@@ -580,7 +580,7 @@ pub(super) fn write_remote(
 
 /// Remove what `previous`, the medium of the same build that `current`
 /// replaced, left: its whole directory when it was elsewhere, or the IPSW's
-/// pieces when an online medium took its directory. The files `current`
+/// pieces when a network medium took its directory. The files `current`
 /// wrote stay.
 pub(super) fn remove_replaced(previous: &Medium, current: &Medium) -> Result<()> {
     let directory = previous.removable_directory()?;

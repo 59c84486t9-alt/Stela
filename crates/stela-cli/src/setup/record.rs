@@ -112,7 +112,7 @@ pub(super) const RECORD_SCHEMA: u32 = 9;
 
 impl Record {
     /// Whether installs stream `ipsw`'s build from Apple's servers
-    /// (`--install-image online`) rather than read it from the USB. An erase
+    /// (`--install-image network`) rather than read it from the USB. An erase
     /// restore needs the macOS system image, which a recovery archive
     /// (`restore::payload::trim`) leaves out. A complete local image
     /// stays local by default, including when the target disk will be

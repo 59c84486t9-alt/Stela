@@ -276,10 +276,10 @@ struct Create {
     #[command(flatten)]
     addressing: Addressing,
     /// Where an install reads macOS: `full` copies the whole IPSW (about
-    /// 27 GB) onto the USB; `online` writes only its file list, and
+    /// 27 GB) onto the USB; `network` writes only its file list, and
     /// stela.efi downloads macOS from Apple during the install. Either way
     /// the install needs the network for Apple's signing server. A local
-    /// IPSW defaults to full, a download to online.
+    /// IPSW defaults to full, a download to network.
     #[arg(long, value_enum)]
     install_image: Option<InstallImage>,
     /// The `stela.efi` to install instead of the one built into `stela`.

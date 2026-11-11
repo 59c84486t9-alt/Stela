@@ -3,7 +3,7 @@
 //! system's life.
 //!
 //! Setup writes the install medium (`setup::medium`) as `--install-image`
-//! says: full, the whole IPSW on the USB's FAT32 data partition; online,
+//! says: full, the whole IPSW on the USB's FAT32 data partition; network,
 //! only its inventory, and `stela.efi` streams the IPSW from Apple's servers
 //! during the install. It prepares each machine's restore bundle (`stela
 //! boot prepare --restore`) and adds an Install macOS startup choice
@@ -281,20 +281,22 @@ pub(crate) enum InstallImage {
     /// written before the name changed say `offline`.
     #[serde(alias = "offline")]
     Full,
-    /// The IPSW on Apple's servers, streamed during the install.
-    Online,
+    /// The IPSW on Apple's servers, streamed during the install. Records
+    /// written before the name changed say `online`.
+    #[serde(alias = "online")]
+    Network,
 }
 
 fn image_is_remote(ipsw: &Path, choice: Option<InstallImage>) -> Result<bool> {
     let complete = restore::payload::holds_system_image(ipsw)?;
     match choice {
-        Some(InstallImage::Online) => Ok(true),
+        Some(InstallImage::Network) => Ok(true),
         Some(InstallImage::Full) => {
             ensure!(
                 complete,
                 "{} holds only the recovery members, without the macOS system image an \
                  install restores; pass the whole IPSW with --ipsw, leave out --ipsw to download \
-                 it, or use --install-image online to stream it from Apple during the install",
+                 it, or use --install-image network to stream it from Apple during the install",
                 ipsw.display()
             );
             Ok(false)

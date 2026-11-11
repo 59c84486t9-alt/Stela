@@ -153,7 +153,7 @@ pub(super) fn resume(command: &mut Request, esp: PathBuf, record: &Record) {
     command.model = Some(record.model.clone());
     command.install_image = record.install_image.or_else(|| {
         record.media.first().map(|medium| match medium.remote {
-            true => InstallImage::Online,
+            true => InstallImage::Network,
             false => InstallImage::Full,
         })
     });
@@ -291,7 +291,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             let initial = if command.ipsw.is_some() {
                 2
             } else {
-                usize::from(command.install_image == Some(InstallImage::Online))
+                usize::from(command.install_image == Some(InstallImage::Network))
             };
             menu::select("2 / 7  Choose an installer", &rows, initial)?
         };
@@ -358,7 +358,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             command.install_image = Some(if source == 0 {
                 InstallImage::Full
             } else {
-                InstallImage::Online
+                InstallImage::Network
             });
             (image.version.clone(), image.models.clone())
         };
@@ -373,7 +373,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         // Every install needs the network for Apple's signing server; a
         // network installer also downloads macOS over it.
         cliclack::log::info(stela_runtime::restore::tss::network_reason(
-            command.install_image == Some(InstallImage::Online),
+            command.install_image == Some(InstallImage::Network),
         ))?;
         choose_wifi(command)?;
         super::addresses::choose(command)?;
@@ -386,7 +386,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     .and_then(Path::file_name)
                     .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
             ),
-            (_, Some(InstallImage::Online)) => {
+            (_, Some(InstallImage::Network)) => {
                 "Network · macOS downloads during installation".into()
             }
             _ => "Full · the macOS image goes on the USB".into(),

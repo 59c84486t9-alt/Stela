@@ -285,7 +285,7 @@ pub(super) fn apply_install(
     record.created_directories = created;
     write_record(&record.esp.clone(), record)?;
     if plan.remote {
-        let progress = crate::progress::Phase::spinner("Preparing the online install inventory");
+        let progress = crate::progress::Phase::spinner("Preparing the network install inventory");
         let inventory = (environment.remote_inventory)(ipsw, &record.model)?;
         progress.finish();
         ensure!(
@@ -959,7 +959,7 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
             ensure!(
                 *capacity == 0 || *capacity >= required,
                 "this installer needs a USB of at least {} (this one holds {}): use a larger \
-                 USB, or the network installer (--install-image online), which downloads macOS \
+                 USB, or the network installer (--install-image network), which downloads macOS \
                  during the install",
                 host::bytes_text(required),
                 host::bytes_text(*capacity)

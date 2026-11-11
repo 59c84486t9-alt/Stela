@@ -608,15 +608,15 @@ fn setup_places_bundles_on_fat32_data_volume() {
         error.contains("boot bundles and the install medium"),
         "{error}"
     );
-    // A FAT data partition holds the bundle and the online install's
+    // A FAT data partition holds the bundle and the network install's
     // inventory under `stela/`; the EFI partition keeps only the boot
     // loader and its configuration.
     let mut f = fixture(GIB / 32, false);
     add_stela(&mut f);
     let volume = stela_volume(&f);
-    let mut online = command(&f, &volume);
-    online.install_image = Some(InstallImage::Online);
-    setup(&environment(&f.host), online).unwrap();
+    let mut network = command(&f, &volume);
+    network.install_image = Some(InstallImage::Network);
+    setup(&environment(&f.host), network).unwrap();
     let ecid = record(&f).installs[0].ecid;
     assert!(bundle_of(&f, ecid).join("ramdisk.img").is_file());
     assert!(bundle_of(&f, ecid).starts_with(volume.join("stela/boot")));
@@ -1213,16 +1213,16 @@ fn install_and_repair_unmount_target_filesystems() {
 fn install_reads_full_or_streamed_image() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
-    // Online: the USB holds the inventory alone, and the Install choice
+    // Network: the USB holds the inventory alone, and the Install choice
     // names no partition to read the IPSW from.
-    let mut online = installed_command(&f);
-    online.install_image = Some(InstallImage::Online);
-    let report = setup(&environment(&f.host), online).unwrap();
+    let mut network = installed_command(&f);
+    network.install_image = Some(InstallImage::Network);
+    let report = setup(&environment(&f.host), network).unwrap();
     assert!(report.contains("file list only"), "{report}");
     let remote = stela_runtime::restore::tss::network_reason(true);
     assert!(report.contains(remote), "{report}");
     let written = record(&f);
-    assert_eq!(written.install_image, Some(InstallImage::Online));
+    assert_eq!(written.install_image, Some(InstallImage::Network));
     let medium = written.active_medium().cloned().unwrap();
     assert!(medium.remote && medium.problems().is_empty(), "{medium:?}");
     let choices = fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap();
@@ -1254,9 +1254,9 @@ fn install_reads_full_or_streamed_image() {
     assert!(!full.remote && full.problems().is_empty(), "{full:?}");
     let first_piece = full.directory().join(stela_formats::payload::piece_name(0));
     assert!(first_piece.is_file());
-    // Back online, the pieces go.
-    let online = switch(InstallImage::Online);
-    assert!(online.remote && online.problems().is_empty(), "{online:?}");
+    // Back to the network, the pieces go.
+    let network = switch(InstallImage::Network);
+    assert!(network.remote && network.problems().is_empty(), "{network:?}");
     assert!(!first_piece.exists());
 }
 
