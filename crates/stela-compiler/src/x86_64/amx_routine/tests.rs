@@ -119,7 +119,7 @@ fn register_operations_complete_in_block_as_the_model_does() {
                     let number = operation.encoding().0 as usize;
                     let counts = cell.kernels[number];
                     assert_eq!(counts[0] + counts[1], 1, "{context}");
-                    if native == Native::MODEL {
+                    if native == Native::MODEL && operation == AmxOperation::VectorFloat {
                         assert_eq!(counts, [0, 1], "{context}: the model's");
                     }
                     // The first call of each operation is sampled.
@@ -204,5 +204,59 @@ fn run(code: &[u8], state: &mut crate::GuestState) -> (u64, u64) {
         let exit = entry(state);
         assert_eq!(munmap(page, BYTES), 0);
         (exit as u64, (exit >> 64) as u64)
+    }
+}
+
+/// The cost of a block of eight vecfp f16 broadcasts through the routine
+/// on the host's paths: `cargo test --release -p stela-compiler --lib
+/// routine_costs -- --ignored --nocapture`.
+#[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+#[test]
+#[ignore = "manual: opt-in"]
+fn routine_costs() {
+    use core::ffi::c_void;
+    unsafe extern "C" {
+        fn mmap(a: *mut c_void, b: usize, p: i32, f: i32, fd: i32, o: i64) -> *mut c_void;
+        fn mprotect(a: *mut c_void, b: usize, p: i32) -> i32;
+        fn munmap(a: *mut c_void, b: usize) -> i32;
+    }
+    const BYTES: usize = 1 << 16;
+    const RUNS: u32 = 200_000;
+    let words = [word(AmxOperation::VectorFloat); 8];
+    let code = compile(&words);
+    let bytes = crate::x86_64::pinned::entered(&code);
+    let mut random = Random(3);
+    let mut file = filled(&mut random);
+    for native in [Native::select(TargetCpu::detect()), Native::MODEL] {
+        let mut cell = Cell {
+            registers: &mut *file as *mut AmxRegisters as u64,
+            routine: routine as *const () as usize as u64,
+            generation: Some(Generation::M2),
+            native,
+            ..Cell::default()
+        };
+        let mut state = crate::GuestState::default();
+        state.x[OPERAND as usize] = 2 << 42 | 1 << 38 | 3 << 32 | 8 << 20;
+        state.anchors[crate::Anchor::Amx] = &mut cell as *mut Cell as u64;
+        // SAFETY: as `run`, mapped once for every call.
+        unsafe {
+            let page = mmap(core::ptr::null_mut(), BYTES, 3, 0x22, -1, 0);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), page.cast(), bytes.len());
+            assert_eq!(mprotect(page, BYTES, 5), 0);
+            let entry: unsafe extern "sysv64" fn(*mut crate::GuestState) -> u128 =
+                core::mem::transmute(page);
+            let runs = if native == Native::MODEL {
+                RUNS / 100
+            } else {
+                RUNS
+            };
+            let started = std::time::Instant::now();
+            for _ in 0..runs {
+                entry(&mut state);
+            }
+            let each = started.elapsed().as_nanos() as f64 / f64::from(runs) / 8.0;
+            std::println!("{native:?}: {each:.1} ns per vecfp through the routine");
+            assert_eq!(munmap(page, BYTES), 0);
+        }
     }
 }

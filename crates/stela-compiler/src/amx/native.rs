@@ -33,13 +33,26 @@
 //! result in that mode, and a result is NaN on one exactly when it is on the
 //! other; NaN results become the Arm default NaN, as the AMX environment
 //! (FPCR.DN) gives.
-use super::{AmxOperation, AmxRegisters, Generation, model::write_mask, state::ROW_BYTES};
+use super::{AmxOperation, AmxRegisters, Generation};
+#[cfg(target_arch = "x86_64")]
+use super::{model::write_mask, state::ROW_BYTES};
 use crate::TargetCpu;
 
+#[cfg(target_arch = "x86_64")]
 const VECTOR: u64 = 1 << 63;
+/// Fused-op modes (bits 29:27) that copy an operand or write a constant:
+/// x or -x (3), y or -y (5), z unchanged (6), +0 or -0 (7).
+#[cfg(target_arch = "x86_64")]
+const fn copies(mode: u64) -> bool {
+    matches!(mode, 3 | 5 | 6 | 7)
+}
+
 /// `fma16`/`fms16` bit 62: f32 accumulation into interleaved row pairs.
+#[cfg(target_arch = "x86_64")]
 const WIDEN_16_32: u64 = 1 << 62;
+#[cfg(target_arch = "x86_64")]
 const X_HALF: u64 = 1 << 61;
+#[cfg(target_arch = "x86_64")]
 const Y_HALF: u64 = 1 << 60;
 
 /// The widest host path that computes the covered operations exactly.
@@ -117,11 +130,14 @@ impl Native {
             | AmxOperation::Fms32
             | AmxOperation::Fma64
             | AmxOperation::Fms64 => {
-                self.tier != Tier::Model && x86::fused(self, registers, operation, operand)
+                // Copies and constants (bits 29:27 of 3, 5, 6, 7) need no FMA.
+                (self.tier != Tier::Model || copies((operand >> 27) & 7))
+                    && x86::fused(self, registers, operation, operand)
             }
             #[cfg(target_arch = "x86_64")]
             AmxOperation::Fma16 | AmxOperation::Fms16 => {
-                self.f16c && x86::fused_half(registers, operation, operand)
+                (self.f16c || copies((operand >> 27) & 7))
+                    && x86::fused_half(registers, operation, operand)
             }
             #[cfg(target_arch = "x86_64")]
             AmxOperation::VectorFloat => {
@@ -188,18 +204,29 @@ mod x86 {
             AmxOperation::Fms64 => (true, true),
             _ => return false,
         };
-        let product_only = match (operand >> 27) & 7 {
-            0 => false,
-            1 => true,
-            _ => return false,
-        };
+        let mode = (operand >> 27) & 7;
+        let product_only = mode == 1;
         // Only fma32/fms32 read bits 61/60; f64 ignores them.
         let x_half = !double && operand & X_HALF != 0;
         let y_half = !double && operand & Y_HALF != 0;
+        let bytes = if double { 8 } else { 4 };
+        if super::copies(mode) {
+            // Copies and constants: no arithmetic. Widened copies keep
+            // NaN payloads the model negates for fms32: left to it.
+            let copies_half = match mode {
+                3 => x_half,
+                5 => y_half,
+                _ => false,
+            };
+            return !copies_half && skip(registers, operand, bytes, mode, subtract, Shape::Plain);
+        }
+        if matches!(mode, 2 | 4) {
+            // z ± x and z ± y: left to the model until a kernel matches it.
+            return false;
+        }
         if (x_half || y_half) && native.tier == Tier::Fma && !native.f16c {
             return false;
         }
-        let bytes = if double { 8 } else { 4 };
         let fused = Fused {
             vector: operand & VECTOR != 0,
             z_row: ((operand >> 20) & 63) as usize,
@@ -268,7 +295,126 @@ mod x86 {
         true
     }
 
-    /// Save MXCSR and load the AMX environment.
+    /// Where a fused operation's lanes go.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Shape {
+        /// Vector or matrix of the operation's lanes (`fma.c`).
+        Plain,
+        /// `fma16` bit 62: f32 lane i/2 of row 2j + i%2.
+        Widened,
+    }
+
+    /// The fused forms with no arithmetic: bits 29:27 = 3 (x, or -x for
+    /// fms), 5 (y, -y), 6 (z unchanged) and 7 (+0, -0 for fms), written to
+    /// the enabled lanes as the model does. Copies of widened halves are
+    /// the caller's to refuse.
+    fn skip(
+        registers: &mut AmxRegisters,
+        operand: u64,
+        bytes: u32,
+        mode: u64,
+        subtract: bool,
+        shape: Shape,
+    ) -> bool {
+        if mode == 6 {
+            return true;
+        }
+        if shape == Shape::Widened && mode != 7 {
+            return false;
+        }
+        let bytes = bytes as usize;
+        let lanes = 64 / bytes;
+        let x = registers.x_operand((operand >> 10) & 0x1ff);
+        let y = registers.y_operand(operand & 0x1ff);
+        let x_enable = write_mask(operand >> 41, bytes as u32, 7);
+        let y_enable = write_mask(operand >> 32, bytes as u32, 7);
+        let z_row = ((operand >> 20) & 63) as usize;
+        let (out_bytes, sign) = match (shape, bytes) {
+            (Shape::Widened, _) | (_, 4) => (4, 0x8000_0000u64),
+            (_, 2) => (2, 0x8000),
+            _ => (8, 1 << 63),
+        };
+        // Rows of `out_bytes` lanes: each lane's value, and all-ones where
+        // it is written, merged into Z eight bytes at a time.
+        let splat = |value: u64| -> Row {
+            let mut row = [0u8; ROW_BYTES];
+            for lane in row.chunks_exact_mut(out_bytes) {
+                lane.copy_from_slice(&value.to_le_bytes()[..out_bytes]);
+            }
+            row
+        };
+        let negated = |row: &Row| -> Row {
+            let mut row = *row;
+            if subtract {
+                for (byte, flip) in row.iter_mut().zip(splat(sign)) {
+                    *byte ^= flip;
+                }
+            }
+            row
+        };
+        let merge = |z: &mut Row, values: &Row, mask: &Row| {
+            let z = z.as_chunks_mut::<8>().0;
+            let values = values.as_chunks::<8>().0;
+            let mask = mask.as_chunks::<8>().0;
+            for ((z, value), mask) in z.iter_mut().zip(values).zip(mask) {
+                let (old, value, mask) = (
+                    u64::from_le_bytes(*z),
+                    u64::from_le_bytes(*value),
+                    u64::from_le_bytes(*mask),
+                );
+                *z = (old & !mask | value & mask).to_le_bytes();
+            }
+        };
+        let mut x_mask = [0u8; ROW_BYTES];
+        let mut parity_masks = [[0u8; ROW_BYTES]; 2];
+        for i in (0..lanes).filter(|&i| on(x_enable, i, bytes)) {
+            x_mask[i * bytes..i * bytes + bytes].fill(0xff);
+            parity_masks[i & 1][(i >> 1) * 4..(i >> 1) * 4 + 4].fill(0xff);
+        }
+        let constant = splat(if subtract { sign } else { 0 });
+        let lane_values = |j: usize| -> Row {
+            match mode {
+                3 => negated(&x),
+                5 => {
+                    let mut value = [0u8; 8];
+                    value[..bytes].copy_from_slice(&y[j * bytes..j * bytes + bytes]);
+                    negated(&splat(u64::from_le_bytes(value)))
+                }
+                _ => constant,
+            }
+        };
+        if operand & VECTOR != 0 {
+            let values = match mode {
+                3 => negated(&x),
+                5 => negated(&y),
+                _ => constant,
+            };
+            merge(&mut registers.z[z_row], &values, &x_mask);
+            return true;
+        }
+        for j in (0..lanes).filter(|&j| on(y_enable, j, bytes)) {
+            match shape {
+                Shape::Widened => {
+                    for (parity, mask) in parity_masks.iter().enumerate() {
+                        merge(&mut registers.z[2 * j + parity], &constant, mask);
+                    }
+                }
+                Shape::Plain => {
+                    let g = 64 / lanes;
+                    let values = lane_values(j);
+                    merge(
+                        &mut registers.z[j * g + (z_row & (g - 1))],
+                        &values,
+                        &x_mask,
+                    );
+                }
+            }
+        }
+        true
+    }
+
+    /// Save MXCSR and load the AMX environment. A conditional switch that
+    /// skips LDMXCSR when MXCSR already holds it measured slower here.
     ///
     /// # Safety
     /// Pair with [`leave`].
@@ -1065,44 +1211,38 @@ mod x86 {
         }
         let x = registers.x_operand((operand >> 10) & 0x1ff);
         let mut y = registers.y_operand(operand & 0x1ff);
-        let enable = if field == 1 {
+        let mut mask = ALL_LANES;
+        if field == 1 {
             // Y lane (bits 36:32) in every lane, every lane on.
             let lane = ((operand >> 32) & 31) as usize;
-            let half = [y[2 * lane], y[2 * lane + 1]];
-            for pair in y.as_chunks_mut::<2>().0 {
-                pair.copy_from_slice(&half);
+            let half = u64::from(u16::from_le_bytes([y[2 * lane], y[2 * lane + 1]]));
+            let lanes = half * 0x0001_0001_0001_0001;
+            for word in y.as_chunks_mut::<8>().0 {
+                *word = lanes.to_le_bytes();
             }
-            u64::MAX
         } else {
-            write_mask(operand >> 32, 2, 9)
-        };
+            let enable = write_mask(operand >> 32, 2, 9);
+            if enable != u64::MAX {
+                for lane in 0..32 {
+                    if !on(enable, lane, 2) {
+                        mask[2 * lane..2 * lane + 2].fill(0);
+                    }
+                }
+            }
+        }
         let row = &mut registers.z[((operand >> 20) & 63) as usize];
-        let mut result = [0u8; ROW_BYTES];
         // SAFETY: the caller checked F16C (with OS-enabled AVX state); every
         // pointer is to a live 64-byte row; MXCSR is restored after.
         unsafe {
             let saved = enter();
-            for group in 0..8 {
-                fused_half4(
-                    x.as_ptr().add(8 * group),
-                    y.as_ptr().add(8 * group),
-                    row.as_ptr().add(8 * group),
-                    result.as_mut_ptr().add(8 * group),
-                    mode == 1,
-                );
-            }
+            fused_half_row(&x, &y, row, &mask, mode == 1);
             leave(saved);
-        }
-        for lane in 0..32 {
-            if on(enable, lane, 2) {
-                row[2 * lane..2 * lane + 2].copy_from_slice(&result[2 * lane..2 * lane + 2]);
-            }
         }
         true
     }
 
     /// `fma16`/`fms16` (`fma.c`) in the fused form (bits 29:27 clear): the
-    /// vector shape and the f16 matrix row by row through [`fused_half4`],
+    /// vector shape and the f16 matrix row by row through [`fused_half_row`],
     /// the bit-62 matrix into interleaved f32 row pairs through
     /// [`widened_rows`]. Every lane's f16 product is exact in f32.
     pub(super) fn fused_half(
@@ -1111,7 +1251,16 @@ mod x86 {
         operand: u64,
     ) -> bool {
         let subtract = operation == AmxOperation::Fms16;
-        if (operand >> 27) & 7 != 0 {
+        let mode = (operand >> 27) & 7;
+        if super::copies(mode) {
+            let shape = if operand & VECTOR == 0 && operand & super::WIDEN_16_32 != 0 {
+                Shape::Widened
+            } else {
+                Shape::Plain
+            };
+            return skip(registers, operand, 2, mode, subtract, shape);
+        }
+        if mode != 0 {
             return false;
         }
         let x = registers.x_operand((operand >> 10) & 0x1ff);
@@ -1147,22 +1296,14 @@ mod x86 {
     /// # Safety
     /// F16C and AVX exist; MXCSR holds the AMX environment.
     unsafe fn half_row(z: &mut Row, x: &Row, y: &Row, enable: u64, subtract: bool) {
-        let mut result = [0u8; ROW_BYTES];
-        for group in 0..8 {
-            // SAFETY: 8-byte groups of live rows; the caller's contract.
-            unsafe {
-                fused_half4(
-                    x.as_ptr().add(8 * group),
-                    y.as_ptr().add(8 * group),
-                    z.as_ptr().add(8 * group),
-                    result.as_mut_ptr().add(8 * group),
-                    subtract,
-                );
+        let mut mask = ALL_LANES;
+        if enable != u64::MAX {
+            for lane in (0..32).filter(|&lane| !on(enable, lane, 2)) {
+                mask[2 * lane..2 * lane + 2].fill(0);
             }
         }
-        for lane in (0..32).filter(|&lane| on(enable, lane, 2)) {
-            z[2 * lane..2 * lane + 2].copy_from_slice(&result[2 * lane..2 * lane + 2]);
-        }
+        // SAFETY: the caller's contract.
+        unsafe { fused_half_row(x, y, z, &mask, subtract) };
     }
 
     /// The bit-62 matrix: X lane i times Y lane j, widened to f32, into f32
@@ -1268,28 +1409,37 @@ mod x86 {
         }
     }
 
-    /// Four f16 lanes (8 bytes each at `x`, `y`, `z`) of `z ± x*y`, rounded
-    /// once, to `out`: the f32 product is exact, the f32 sum is rounded to
-    /// odd from its TwoSum error, then converted to f16 to nearest even.
+    /// Every byte set: all 32 f16 lanes written.
+    const ALL_LANES: Row = [0xff; ROW_BYTES];
+
+    /// One f16 row in one kernel, four lanes per step: `z ± x*y` in f16
+    /// lanes, rounded once (f32 product exact, f32 sum rounded to odd,
+    /// then to f16 to nearest even), default NaN, written where `mask`
+    /// (per byte) is set.
     ///
     /// # Safety
-    /// F16C and AVX exist; every pointer has 8 live bytes.
-    unsafe fn fused_half4(x: *const u8, y: *const u8, z: *const u8, out: *mut u8, subtract: bool) {
-        // SAFETY: as above.
+    /// F16C and AVX exist; MXCSR holds the AMX environment.
+    unsafe fn fused_half_row(x: &Row, y: &Row, z: &mut Row, mask: &Row, subtract: bool) {
+        // SAFETY: four live 64-byte rows; the caller's contract.
         unsafe {
             asm!(
-                "vcvtph2ps xmm0, qword ptr [{x}]",
-                "vcvtph2ps xmm1, qword ptr [{y}]",
-                "vcvtph2ps xmm2, qword ptr [{z}]",
-                // p = x*y, exact; negated for z - x*y.
-                "vmulps xmm3, xmm0, xmm1",
                 "vpcmpeqd xmm10, xmm10, xmm10",
                 "vpslld xmm11, xmm10, 31",
                 "vpsrld xmm10, xmm10, 31",
+                "vbroadcastss xmm12, dword ptr [{nan}]",
+                "vpxor xmm13, xmm13, xmm13",
                 "test {subtract:e}, {subtract:e}",
                 "jz 2f",
-                "vxorps xmm3, xmm3, xmm11",
+                "vmovdqa xmm13, xmm11",
                 "2:",
+                "xor eax, eax",
+                "3:",
+                "vcvtph2ps xmm0, qword ptr [{x} + rax]",
+                "vcvtph2ps xmm1, qword ptr [{y} + rax]",
+                "vcvtph2ps xmm2, qword ptr [{z} + rax]",
+                // p = x*y, exact; negated for z - x*y.
+                "vmulps xmm3, xmm0, xmm1",
+                "vxorps xmm3, xmm3, xmm13",
                 // s = p + z and its TwoSum error e.
                 "vaddps xmm4, xmm3, xmm2",
                 "vsubps xmm5, xmm4, xmm3",
@@ -1311,15 +1461,23 @@ mod x86 {
                 "vpaddd xmm4, xmm4, xmm9",
                 // NaN sums become the default NaN.
                 "vcmpps xmm7, xmm4, xmm4, 3",
-                "vbroadcastss xmm8, dword ptr [{nan}]",
-                "vblendvps xmm4, xmm4, xmm8, xmm7",
-                "vcvtps2ph qword ptr [{out}], xmm4, 0",
-                x = in(reg) x,
-                y = in(reg) y,
-                z = in(reg) z,
-                out = in(reg) out,
+                "vblendvps xmm4, xmm4, xmm12, xmm7",
+                "vcvtps2ph xmm4, xmm4, 0",
+                // Disabled lanes keep Z.
+                "vmovq xmm5, qword ptr [{z} + rax]",
+                "vmovq xmm6, qword ptr [{m} + rax]",
+                "vpblendvb xmm4, xmm5, xmm4, xmm6",
+                "vmovq qword ptr [{z} + rax], xmm4",
+                "add eax, 8",
+                "cmp eax, 64",
+                "jb 3b",
+                x = in(reg) x.as_ptr(),
+                y = in(reg) y.as_ptr(),
+                z = in(reg) z.as_mut_ptr(),
+                m = in(reg) mask.as_ptr(),
                 nan = in(reg) &raw const NAN_32,
                 subtract = in(reg) u32::from(subtract),
+                out("rax") _,
                 clobber_abi("sysv64"),
                 options(nostack),
             );
@@ -1418,11 +1576,12 @@ mod tests {
         let mut operand = random.next();
         let choice = random.next();
         operand &= !(7 << 27);
-        operand |= match choice % 8 {
-            0..=3 => 0,
-            4 | 5 => 1,
-            mode => mode << 27,
+        let mode = match choice % 8 {
+            0..=2 => 0,
+            3 | 4 => 1,
+            _ => 2 + (choice >> 8) % 6,
         };
+        operand |= mode << 27;
         if choice & 0x30 != 0 {
             operand &= !(0x7f << 41);
         }
@@ -1494,9 +1653,15 @@ mod tests {
                         let widened =
                             matches!(operation, AmxOperation::Fma32 | AmxOperation::Fms32)
                                 && operand & (X_HALF | Y_HALF) != 0;
+                        // Widened copies keep the NaN payloads fms32 negates.
+                        let copies_half =
+                            matches!(operation, AmxOperation::Fms32 | AmxOperation::Fma32)
+                                && (mode == 3 && operand & X_HALF != 0
+                                    || mode == 5 && operand & Y_HALF != 0);
                         assert!(
                             native.tier == Tier::Model
-                                || mode > 1
+                                || matches!(mode, 2 | 4)
+                                || copies_half
                                 || widened && native.tier == Tier::Fma && !native.f16c,
                             "{operand:#x}"
                         );
@@ -1609,7 +1774,12 @@ mod tests {
                         );
                     } else {
                         assert!(actual == initial, "refused paths change nothing");
-                        assert_ne!((operand >> 27) & 7, 0, "{operand:#x}");
+                        let mode = (operand >> 27) & 7;
+                        let widened = operand & VECTOR == 0 && operand & WIDEN_16_32 != 0;
+                        assert!(
+                            matches!(mode, 1 | 2 | 4) || widened && matches!(mode, 3 | 5),
+                            "{operand:#x}"
+                        );
                     }
                 }
             }
@@ -1676,6 +1846,16 @@ mod tests {
                 AmxOperation::VectorFloat,
                 2 << 42 | 1 << 38 | 3 << 32 | 8 << 20,
             ),
+            (
+                "fma16 widened clear",
+                AmxOperation::Fma16,
+                0x4000_0000_3800_0000,
+            ),
+            (
+                "fma32 constant (mode 7)",
+                AmxOperation::Fma32,
+                7 << 27 | 3 << 20,
+            ),
         ];
         let rounds = 20_000u32;
         for (name, operation, operand) in cases {
@@ -1724,6 +1904,14 @@ mod tests {
                 native.f16c
             );
             assert!(!native.execute(Generation::M2, &mut registers, AmxOperation::Fma16, 1 << 27));
+            // fma16 bit 62 with bits 29:27 = 7: the Z clear Espresso runs,
+            // native on every tier.
+            assert!(native.execute(
+                Generation::M2,
+                &mut registers,
+                AmxOperation::Fma16,
+                0x4000_0000_3800_0000
+            ));
         }
         assert_eq!(
             Native::select(TargetCpu::Sse42.with_fma().with_f16c()).tier(),

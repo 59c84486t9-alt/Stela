@@ -4756,6 +4756,14 @@
   },
   {
     "package": "stela-compiler",
+    "test": "routine_costs",
+    "source": "crates/stela-compiler/src/x86_64/amx_routine/tests.rs",
+    "kind": "manual",
+    "inputs": [],
+    "reason": "host timing measurement; run on request"
+  },
+  {
+    "package": "stela-compiler",
     "test": "amx_transfer_costs",
     "source": "crates/stela-compiler/src/x86_64/amx_transfer/tests.rs",
     "kind": "manual",
