@@ -2,7 +2,7 @@
 //! Firmware is downloaded separately; no vendor image is embedded here.
 use super::{
     Error, MAX_TOTAL_BYTES, fail,
-    requirements::{Inventory, Request},
+    requirements::{Inventory, Request, read_by_boot},
 };
 use alloc::{format, vec::Vec};
 use stela_driver_core::firmware::{Requirement, Target};
@@ -951,6 +951,25 @@ fn select_intel_rsa(request: &Request) -> Option<&'static Recipe> {
     })
 }
 
+/// The pinned recipe for `request`'s exact name and target, if any.
+/// Board-specific requests and resources boot reads itself have none.
+pub fn recipe(request: &Request) -> Option<&'static Recipe> {
+    if request.target.board.is_some() || read_by_boot(&request.view().target) {
+        return None;
+    }
+    match request.target.driver.as_str() {
+        "realtek" => select_realtek(request),
+        "intel-bluetooth-usb-rsa" => select_intel_rsa(request),
+        "wifi-regulatory" => select_regulatory(request),
+        "wifi-intel" => select_intel_wifi(request),
+        "wifi-mt792x" => select_mediatek_wifi(request),
+        "mediatek-bluetooth-usb-mt79xx-v1" => select_mediatek_bluetooth(request),
+        "realtek-wifi" => select_realtek_wifi(request),
+        "nouveau" => select_gsp(request),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Selection {
     pub request: Request,
@@ -969,28 +988,19 @@ impl Plan {
         let mut selections = Vec::with_capacity(inventory.requests().len());
         let mut total = 0usize;
         for request in inventory.requests() {
-            let target = &request.target;
-            if target.board.is_some() {
+            if request.target.board.is_some() {
                 return Err(fail(
                     "no pinned recipe for the exact observed host firmware target",
                 ));
             }
-            // Boot reads these from UEFI variables itself; nothing downloaded
-            // stands in for them.
-            if target.driver == "wifi-intel" && target.hardware.starts_with("uefi:") {
+            // Boot reads these from the PC's firmware itself; nothing
+            // downloaded stands in for them.
+            if read_by_boot(&request.view().target) {
                 continue;
             }
-            let recipe = match target.driver.as_str() {
-                "realtek" => select_realtek(request),
-                "intel-bluetooth-usb-rsa" => select_intel_rsa(request),
-                "wifi-regulatory" => select_regulatory(request),
-                "wifi-intel" => select_intel_wifi(request),
-                "wifi-mt792x" => select_mediatek_wifi(request),
-                "mediatek-bluetooth-usb-mt79xx-v1" => select_mediatek_bluetooth(request),
-                "realtek-wifi" => select_realtek_wifi(request),
-                "nouveau" => select_gsp(request),
-                _ => None,
-            }.ok_or_else(|| fail("no pinned recipe for the exact observed firmware driver/hardware/revision/name"))?;
+            let recipe = recipe(request).ok_or_else(|| {
+                fail("no pinned recipe for the exact observed firmware driver/hardware/revision/name")
+            })?;
             if request.minimum_bytes > recipe.image.length {
                 return Err(fail(
                     "pinned firmware is shorter than the driver's requirement",

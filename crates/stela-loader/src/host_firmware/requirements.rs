@@ -4,13 +4,25 @@
 use super::{
     Error, MAX_IMAGE_BYTES, MAX_IMAGES, MAX_MANIFEST_BYTES, fail, logical_path, valid_label,
 };
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::cell::RefCell;
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{self, SeqAccess, Visitor},
 };
-use stela_driver_core::firmware::{self, Image, Provider, Requirement, Target};
+use stela_driver_core::firmware::{self, ErrorKind, Image, Provider, Requirement, Target};
+
+/// What starts the boot log line that holds the inventory of a boot whose
+/// drivers asked for firmware the USB lacks ([`RecordingProvider::log_line`]).
+/// `stela setup repair` adds the files of the newest such line ([`newest`]).
+pub const LOG_LINE: &str = "HOST FIRMWARE REQUESTS ";
+
+/// Whether boot reads the resource for `target` from the PC's own firmware
+/// (UEFI variables and the SMBIOS table) rather than from the USB. Such a
+/// resource is absent on many PCs and no download stands in for it.
+pub fn read_by_boot(target: &Target<'_>) -> bool {
+    target.hardware.starts_with("uefi:") || *target == firmware::smbios::TARGET
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -193,6 +205,9 @@ impl Inventory {
 pub struct RecordingProvider<'a> {
     inner: &'a dyn Provider,
     inventory: RefCell<Result<Inventory, String>>,
+    /// The requests the inner provider answered `Missing` for, without
+    /// those [`read_by_boot`], each once.
+    missing: RefCell<Inventory>,
 }
 
 impl<'a> RecordingProvider<'a> {
@@ -200,6 +215,7 @@ impl<'a> RecordingProvider<'a> {
         Self {
             inner,
             inventory: RefCell::new(Ok(Inventory::default())),
+            missing: RefCell::new(Inventory::default()),
         }
     }
     pub fn snapshot(&self) -> Result<Inventory, Error> {
@@ -209,6 +225,57 @@ impl<'a> RecordingProvider<'a> {
             .cloned()
             .map_err(|e| Error(e.clone()))
     }
+
+    /// How many distinct requests found no file, of those the USB supplies.
+    pub fn missing_count(&self) -> usize {
+        self.missing.borrow().requests().len()
+    }
+
+    /// The missing requests from the `skip`th on, in the order the drivers
+    /// asked for them.
+    pub fn missing_since(&self, skip: usize) -> Vec<Request> {
+        self.missing
+            .borrow()
+            .requests()
+            .iter()
+            .skip(skip)
+            .cloned()
+            .collect()
+    }
+
+    /// One line for the boot log: [`LOG_LINE`] and the complete inventory in
+    /// its schema 1 encoding, or why there is none. It holds firmware names
+    /// and driver target labels only.
+    pub fn log_line(&self) -> String {
+        match self.snapshot().and_then(|inventory| inventory.encode()) {
+            Ok(json) => format!("{LOG_LINE}{}", String::from_utf8_lossy(&json)),
+            Err(error) => format!("{LOG_LINE}{UNAVAILABLE}{error}"),
+        }
+    }
+}
+
+/// What follows [`LOG_LINE`] when a boot could not record its inventory.
+const UNAVAILABLE: &str = "unavailable: ";
+
+/// The inventory of the newest [`LOG_LINE`] in a boot log's text, whose
+/// lines may carry a time stamp before it: `None` without one, and an error
+/// for a line that holds no complete inventory.
+pub fn newest(log: &[u8]) -> Option<Result<Inventory, Error>> {
+    let prefix = LOG_LINE.as_bytes();
+    log.split(|&byte| byte == b'\n').rev().find_map(|line| {
+        let at = line
+            .windows(prefix.len())
+            .position(|window| window == prefix)?;
+        let rest = &line[at + prefix.len()..];
+        let rest = rest.strip_suffix(b"\r").unwrap_or(rest);
+        Some(match rest.strip_prefix(UNAVAILABLE.as_bytes()) {
+            Some(why) => Err(Error(format!(
+                "the boot recorded no complete firmware inventory: {}",
+                String::from_utf8_lossy(why)
+            ))),
+            None => Inventory::parse(rest),
+        })
+    })
 }
 
 impl Provider for RecordingProvider<'_> {
@@ -221,7 +288,16 @@ impl Provider for RecordingProvider<'_> {
                 *inventory = Err(error.0);
             }
         }
-        self.inner.load(request)
+        let result = self.inner.load(request);
+        if let Err(error) = &result
+            && error.kind == ErrorKind::Missing
+            && !read_by_boot(&request.target)
+        {
+            // An invalid or excessive request already latched the
+            // inventory's error; the count stays what it was.
+            let _ = self.missing.borrow_mut().observe(request);
+        }
+        result
     }
 }
 
@@ -296,5 +372,132 @@ mod tests {
         assert!(observer.snapshot().is_err());
         assert!(Inventory::parse(br#"{"schema":1,"complete":false,"requirements":[]}"#).is_err());
         assert!(Inventory::parse(&alloc::vec![b' '; MAX_MANIFEST_BYTES + 1]).is_err());
+    }
+
+    #[test]
+    fn missing_requests_count_once_and_skip_what_boot_reads_itself() {
+        use stela_driver_core::firmware::{Provenance, Resource};
+        let present = Requirement {
+            name: "rtl_nic/rtl8168d-1.fw",
+            ..request()
+        };
+        let catalog = Catalog::from_handoff(alloc::vec![Resource {
+            name: present.name,
+            target: present.target,
+            provenance: Provenance {
+                source: "synthetic-fixtures",
+                revision: "v1",
+                member: "fixtures/abc.bin",
+                license: "CC0-1.0",
+            },
+            expected_length: 3,
+            expected_sha256: {
+                use stela_crypto::{Sha256, digest::Digest};
+                Sha256::digest(b"abc").into()
+            },
+            bytes: b"abc".to_vec(),
+        }])
+        .unwrap();
+        let observer = RecordingProvider::new(&catalog);
+        assert!(
+            observer
+                .load(Requirement {
+                    minimum_bytes: 3,
+                    ..present
+                })
+                .is_ok()
+        );
+        let variable = Requirement {
+            name: "intel/wifi/uefi/UefiCnvWlanUATS.bin",
+            target: Target {
+                driver: "wifi-intel",
+                hardware: "uefi:92daaf2f-c02b-455b-b2ec-f5a3594f4aea",
+                revision: "CnvUefiWlanUATS",
+                board: None,
+            },
+            minimum_bytes: 1,
+        };
+        for wanted in [
+            request(),
+            variable,
+            firmware::smbios::REQUIREMENT,
+            request(),
+        ] {
+            assert_eq!(observer.load(wanted).unwrap_err().kind, ErrorKind::Missing);
+        }
+        // A wrong length is no missing file.
+        assert!(
+            observer
+                .load(Requirement {
+                    minimum_bytes: 4,
+                    ..present
+                })
+                .is_err()
+        );
+        assert_eq!(observer.missing_count(), 1);
+        let missing = observer.missing_since(0);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, request().name);
+        assert_eq!(missing[0].view().target, request().target);
+        assert!(observer.missing_since(1).is_empty());
+        // The line holds the complete inventory, present files included.
+        let line = observer.log_line();
+        assert!(line.starts_with(LOG_LINE), "{line}");
+        assert!(!line.contains('\n'), "{line}");
+        let decoded = Inventory::parse(&line.as_bytes()[LOG_LINE.len()..]).unwrap();
+        assert_eq!(decoded.requests(), observer.snapshot().unwrap().requests());
+        assert_eq!(decoded.requests().len(), 4);
+        assert_eq!(
+            line,
+            alloc::format!(
+                "{LOG_LINE}{}",
+                core::str::from_utf8(&observer.snapshot().unwrap().encode().unwrap()).unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn the_newest_log_line_names_the_inventory() {
+        let empty = Catalog::from_handoff(Vec::new()).unwrap();
+        let first = RecordingProvider::new(&empty);
+        let _ = first.load(request());
+        let second = RecordingProvider::new(&empty);
+        let other = Requirement {
+            name: "rtl_nic/rtl8168f-1.fw",
+            target: Target {
+                revision: "xid-480",
+                ..request().target
+            },
+            ..request()
+        };
+        let _ = second.load(other);
+        let log = alloc::format!(
+            "=== STELA BOOT 1 ===\n[    1.000] {}\nUSB added 1-2\n=== STELA BOOT 2 ===\n\
+             [    2.500] {}\r\n[    2.600] HOST WARNING something else\n",
+            first.log_line(),
+            second.log_line()
+        );
+        let inventory = newest(log.as_bytes()).unwrap().unwrap();
+        assert_eq!(inventory.requests().len(), 1);
+        assert_eq!(inventory.requests()[0].name, "rtl_nic/rtl8168f-1.fw");
+        assert!(newest(b"=== STELA BOOT 1 ===\nnothing\n").is_none());
+        // A line cut short, or one whose capture failed, holds no inventory.
+        let cut = alloc::format!("{}\n", &second.log_line()[..40]);
+        assert!(newest(cut.as_bytes()).unwrap().is_err());
+        let failed = RecordingProvider::new(&empty);
+        let _ = failed.load(Requirement {
+            name: "../bad",
+            ..request()
+        });
+        let line = failed.log_line();
+        assert!(
+            line.starts_with("HOST FIRMWARE REQUESTS unavailable: "),
+            "{line}"
+        );
+        let error = newest(line.as_bytes()).unwrap().unwrap_err();
+        assert!(
+            error.0.contains("no complete firmware inventory"),
+            "{error:?}"
+        );
     }
 }
