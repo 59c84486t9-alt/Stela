@@ -2,7 +2,14 @@
 //!
 //! The platform supplies owned OSL services. There is no implicit identity map,
 //! interrupt routing, EC driver, scheduler, allocator, or permissive I/O fallback.
-//! See [`Services`] and `acpi/README.md` before installing a provider.
+//! Every OSL callback in [`Services`] is mandatory: real allocation,
+//! IRQ-save locks, counting semaphores, owned mapping leases, hardware
+//! access, monotonic 100 ns time, nonzero thread IDs, deferred work and
+//! draining. A fallible unsupported operation returns the exact ACPICA
+//! error and a void one completes or fails closed; providers must not
+//! unwind. Shutdown closes work admission, quiesces the sources and drains
+//! work before ACPICA terminates; if quiescence fails, provider and core
+//! state stay quarantined.
 mod io_window;
 pub mod processor;
 pub mod resources;
