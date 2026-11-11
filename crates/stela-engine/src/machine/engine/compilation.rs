@@ -1353,8 +1353,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 register_read::event_wait_thunk(pc, cell)
             }
         } else if data_barrier(pc, word) {
-            let cell = cell_place(DATA_BARRIER);
-            register_read::barrier_thunk(GuestAddress(pc), cell)
+            register_read::barrier_thunk(GuestAddress(pc), BARRIER)
         } else if let Some(rt) = code_page_invalidation(word).filter(|&rt| rt != ZERO_REGISTER) {
             let cell = cell_place(CODE_PAGE);
             register_read::code_page_thunk(GuestAddress(pc), rt, cell)

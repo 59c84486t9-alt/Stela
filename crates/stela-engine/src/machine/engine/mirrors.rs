@@ -91,6 +91,10 @@ pub(super) struct Mirrors {
     /// `value` the interrupt epoch they reflect
     /// ([`Machine::refresh_interrupt_status`]).
     pub(super) interrupt_status: register_read::Cell,
+    /// What a native DSB checks (`x86_64::register_read::barrier_thunk`):
+    /// open while this PE has no maintenance outstanding, whatever its
+    /// state or derived state ([`Machine::open_barrier`]).
+    pub(super) barrier: register_read::Cell,
     /// The records native GENTER and GEXIT complete from
     /// (`x86_64::transition`), indexed by `state`, which they move.
     pub(super) transitions: transition::Table,
@@ -130,6 +134,9 @@ pub(super) const SELECTED: Place = Place::new(Anchor::Mirrors, offset_of!(Mirror
 pub(super) const INTERRUPT_STATUS: Place =
     Place::new(Anchor::Mirrors, offset_of!(Mirrors, interrupt_status));
 
+/// Where native code finds [`Mirrors::barrier`].
+pub(super) const BARRIER: Place = Place::new(Anchor::Mirrors, offset_of!(Mirrors, barrier));
+
 /// MRS ISR_EL1 to Xt, Rt in bits 4:0.
 pub(super) const READ_INTERRUPT_STATUS: u32 = 0xd538_c100;
 
@@ -152,14 +159,10 @@ pub(super) const CODE_PAGE: usize = STACK_SELECT + 1;
 /// completed plainly in the state on a host that keeps PAN in RFLAGS.AC.
 pub(super) const PAN_WRITES: usize = CODE_PAGE + 1;
 
-/// The cell of DSB (`x86_64::register_read::barrier_thunk`), open from one's
-/// completion until this PE has maintenance for another to complete.
-pub(super) const DATA_BARRIER: usize = PAN_WRITES + 1;
-
 /// The cells of SEVL and WFE (`x86_64::register_read::send_event_thunk`,
 /// `event_wait_thunk`), open on the event register once one completed
 /// plainly in the state; WFE completes natively only when an event is set.
-pub(super) const SEND_EVENT: usize = DATA_BARRIER + 1;
+pub(super) const SEND_EVENT: usize = PAN_WRITES + 1;
 pub(super) const EVENT_WAIT: usize = SEND_EVENT + 1;
 
 /// The cell of MSR TTBR0_EL1 (`x86_64::register_read::unchanged_write_thunk`),
@@ -363,6 +366,7 @@ impl Default for Mirrors {
             selected: 0,
             fields: [0; 3],
             interrupt_status: register_read::Cell::default(),
+            barrier: register_read::Cell::default(),
             transitions: transition::Table::default(),
             lines_until: 0,
             switches: register_read::SwitchLog::default(),
@@ -499,7 +503,8 @@ impl Mirrors {
             readable: 1,
             value: address,
         };
-        self.close(DATA_BARRIER);
+        // The DSB that ends the run of lines closes the cell again.
+        self.barrier = register_read::Cell::default();
     }
 
     /// Another IC IVAU of the page could do more.

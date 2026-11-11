@@ -2730,3 +2730,59 @@ fn a_pe_inside_a_block_has_applied_every_post_counted_as_applied() {
         done.store(true, Ordering::SeqCst);
     });
 }
+
+/// A DSB completes natively while this PE has no maintenance outstanding,
+/// in any state and across derived state changes, and exits to the engine
+/// once a post or an open code page cell leaves it something to complete;
+/// the engine's DSB completes that and reopens the native path.
+#[test]
+fn native_dsb_completes_only_without_outstanding_maintenance() {
+    use super::super::mirrors::{BARRIER, CODE_PAGE};
+    use super::super::tests::{BASE, FakeHost};
+    use super::super::transitions::tests::run_native;
+    use crate::machine::NoDevices;
+    use crate::machine::exception::Pstate;
+    use stela_compiler::x86_64::register_read;
+    use stela_compiler::{GuestAddress, block::ExitKind};
+    const DSB_ISH: u32 = 0xd503_3b9f;
+    let (hub, _) = hub(2);
+    let mut machine = first_of_two(&[DSB_ISH], &hub);
+    machine.cpu.pstate = Pstate::reset(1);
+    let thunk = register_read::barrier_thunk(GuestAddress(BASE), BARRIER);
+    let native = |machine: &mut Machine<FakeHost, NoDevices>| {
+        let exit = run_native(machine, &thunk.code);
+        if exit == (BASE + 4, ExitKind::Fallthrough as u64) {
+            true
+        } else {
+            assert_eq!(exit, (BASE, ExitKind::System as u64));
+            false
+        }
+    };
+    let engine = |machine: &mut Machine<FakeHost, NoDevices>| {
+        machine.cpu.pc = BASE;
+        machine.system_instruction(DSB_ISH).unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 4);
+    };
+    assert!(!native(&mut machine), "no DSB completed yet");
+    engine(&mut machine);
+    assert!(native(&mut machine));
+    // Neither derived state nor the PE's state decides it.
+    machine.derived_changed();
+    assert!(native(&mut machine), "derived state changed");
+    machine.cpu.pstate.el = 0;
+    assert!(native(&mut machine), "at EL0");
+    machine.cpu.pstate.el = 1;
+    // Maintenance for the other PE: the DSB must send it and wait.
+    machine.post(Maintenance::Code(None));
+    assert!(!native(&mut machine), "maintenance posted");
+    hub.set_live(1, false);
+    engine(&mut machine);
+    assert!(machine.outgoing.is_empty() && machine.posted.is_empty());
+    assert!(native(&mut machine));
+    // A code page cell the DSB that ends the run of lines must close.
+    machine.mirrors.open_code_page(0x4000);
+    assert!(!native(&mut machine), "code page cell open");
+    engine(&mut machine);
+    assert_eq!(machine.mirrors[CODE_PAGE].readable, 0);
+    assert!(native(&mut machine));
+}

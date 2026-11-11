@@ -1929,7 +1929,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.parallel.is_none() {
             return;
         }
-        self.mirrors.close(super::mirrors::DATA_BARRIER);
+        self.mirrors.barrier = stela_compiler::x86_64::register_read::Cell::default();
         self.outgoing.push(maintenance);
         if self.outgoing.len() == OUTGOING {
             self.send_outgoing();

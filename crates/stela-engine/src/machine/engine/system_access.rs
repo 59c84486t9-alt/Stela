@@ -109,7 +109,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Synchronization::DataCompletion { .. } => {
                     data_barrier();
                     self.complete_maintenance()?;
-                    self.mirrors[DATA_BARRIER].readable = 1;
+                    self.open_barrier();
                     self.next()
                 }
                 Synchronization::StoreBypassBarrier { .. }
@@ -1208,10 +1208,52 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 }
 
+impl<H: Host, D: Devices> Machine<H, D> {
+    /// A DSB completed: where it left none of this PE's maintenance
+    /// outstanding, later DSBs complete natively ([`Mirrors::barrier`])
+    /// until it has some again.
+    ///
+    /// What a DSB waits for here, all of it this PE's own (Arm ARM, DSB:
+    /// it completes the PE's earlier explicit accesses and the cache and
+    /// TLB maintenance it issued, and waits for nothing other PEs issued):
+    ///
+    /// - Its earlier memory accesses, for every later one. The engine and
+    ///   native code make each access in program order and x86 keeps them
+    ///   ordered for other PEs (TSO) but for a store before a later load,
+    ///   which the thunk's MFENCE orders, as [`data_barrier`] does here.
+    ///   Device accesses are no part of it: each completes in the engine,
+    ///   at its own exit, before the next instruction.
+    /// - Its TLB and instruction cache maintenance. This PE applies a TLBI
+    ///   or IC IVAU to itself as the engine completes it; what the other PEs
+    ///   must apply waits in `outgoing` and `posted`, and `code_posted` names
+    ///   a page posted, until [`Self::complete_maintenance`] sends it and
+    ///   waits until each applied it. That empties them, and only
+    ///   [`Self::post`] fills them again, which closes the cell, as does an
+    ///   open [`CODE_PAGE`] cell, which the DSB that ends a run of lines must
+    ///   close ([`Mirrors::open_code_page`]). Native code posts nothing and
+    ///   opens no code page cell: only the engine does, so the cell stays
+    ///   true for a whole native run.
+    ///
+    /// Maintenance other PEs posted to this one is theirs to wait for: this
+    /// PE applies it at its next return to the engine, to which their mail
+    /// brings it, whether or not it runs a DSB. Neither System registers
+    /// nor the PE's state decide any of this, so the cell is the PE's
+    /// alone, outside the cell banks: derived state changes and
+    /// transitions leave it open.
+    pub(super) fn open_barrier(&mut self) {
+        let quiet =
+            self.outgoing.is_empty() && self.posted.is_empty() && self.code_posted.is_none();
+        self.mirrors.barrier = register_read::Cell {
+            readable: u64::from(quiet),
+            value: 0,
+        };
+    }
+}
+
 /// The host fence of a DSB the engine completes: every store this PE made
 /// before it is visible to the other PEs before any later load (x86 orders
 /// store to load only with a fence or a locked instruction). Native code
-/// issues its own MFENCE only while the `DATA_BARRIER` cell is open.
+/// issues its own MFENCE only while [`Mirrors::barrier`] is open.
 fn data_barrier() {
     #[cfg(test)]
     tests::DATA_BARRIERS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
