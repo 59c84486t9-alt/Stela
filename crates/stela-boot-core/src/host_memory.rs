@@ -3,7 +3,10 @@
 //! left for the guest, and what is left of it for the translation pack
 //! (`docs/design/system.md#memory-sizing`).
 use crate::Result;
-use crate::native_resources::{CodeReservation, code_reservation, parked_reserve};
+use crate::native_resources::{
+    CodeReservation, SMALL_WINDOW_PER_RUNNER, WINDOW_PER_RUNNER, code_reservation_per_runner,
+    parked_reserve,
+};
 use stela_contracts::refuse;
 
 const MIB: u64 = 1024 * 1024;
@@ -33,6 +36,10 @@ const HEAP_SHARE: u64 = 12;
 /// rows=14M index=19M lookup=120M`), 0.98 bytes per window byte. Before
 /// the shared store each core kept its own, 2.9 bytes per byte.
 const HEAP_PER_WINDOW: u64 = 1;
+/// The code window [`HEAP_FLOOR`] was measured with. A larger window raises
+/// the floor by [`HEAP_PER_WINDOW`] per byte past it: its block records
+/// come on top of the peak the floor holds.
+const FLOOR_WINDOW: u64 = 512 * MIB;
 /// Heap each running PE keeps for itself: its machine (about 1 MiB at
 /// start), ITLB (512 KiB), fetch and jump caches (about 0.8 MiB) and
 /// successor scratch (under 1 MiB); four times that, for its own compiles.
@@ -140,8 +147,11 @@ impl Shortfall {
 /// Each part takes a share of `free`, between its bounds:
 /// - the heap a twelfth, [`HEAP_PER_WINDOW`] byte per byte of the board's
 ///   code window and [`PE_HEAP`] per runner, within
-///   [`HEAP_FLOOR`]..=[`HEAP_CEILING`];
-/// - the code arena what `code_reservation` gives;
+///   [`HEAP_FLOOR`]..=[`HEAP_CEILING`], the floor raised by the window past
+///   [`FLOOR_WINDOW`];
+/// - the code arena what `code_reservation` gives: [`WINDOW_PER_RUNNER`]
+///   per runner within free RAM / 16, or [`SMALL_WINDOW_PER_RUNNER`] where
+///   the larger window would leave the guest under its floor;
 /// - the pool 1/[`POOL_SHARE`] of the guest's DRAM for each of up to
 ///   [`POOL_SHARERS`] runners, which is what the other parts leave: `pool =
 ///   sharers * (free - heap - code - pool) / 64`, solved for `pool`; at least
@@ -183,11 +193,22 @@ fn estimate_guest(free: u64, cores: usize, runners: usize) -> Result<u64> {
     estimate(free, cores, runners).map(|sizes| sizes.guest)
 }
 
+/// The sizes with the larger code window per runner, or with the smaller
+/// one where the larger would leave the guest under its floor.
 fn estimate(free: u64, cores: usize, runners: usize) -> Result<Sizes> {
-    let code = code_reservation(free, cores, runners)?;
+    let large = estimate_with(free, cores, runners, WINDOW_PER_RUNNER)?;
+    if large.guest >= GUEST_FLOOR {
+        return Ok(large);
+    }
+    estimate_with(free, cores, runners, SMALL_WINDOW_PER_RUNNER)
+}
+
+fn estimate_with(free: u64, cores: usize, runners: usize, per_runner: u64) -> Result<Sizes> {
+    let code = code_reservation_per_runner(free, cores, runners, per_runner)?;
     let running = runners as u64;
     let heap = free / HEAP_SHARE + HEAP_PER_WINDOW * code.window + running * PE_HEAP;
-    let heap = (heap / ALIGNMENT * ALIGNMENT).clamp(HEAP_FLOOR, HEAP_CEILING);
+    let floor = HEAP_FLOOR + HEAP_PER_WINDOW * code.window.saturating_sub(FLOOR_WINDOW);
+    let heap = (heap / ALIGNMENT * ALIGNMENT).clamp(floor, HEAP_CEILING.max(floor));
     let rest = free.saturating_sub(heap).saturating_sub(code.bytes);
     let sharers = running.min(POOL_SHARERS);
     let pool = (u128::from(sharers) * u128::from(rest) / u128::from(POOL_SHARE + sharers)) as u64;

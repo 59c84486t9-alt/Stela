@@ -1,5 +1,7 @@
-//! The installed blocks by physical page: a page's sorted slots and page
-//! offsets, whose blocks hold the rest of each key. A block costs a few
+//! The installed blocks by physical page: a page's slots sorted by page
+//! offset and a tag of the PC, whose blocks hold the rest of each key. The
+//! tag keeps a lookup among many copies of one frame mapped at other PCs
+//! (each process's own slide of the same binary) from loading each copy. A block costs a few
 //! bytes here, and forgetting a page forgets its blocks at once. Each fetch
 //! a lookup misses comes here, so a direct-mapped cache of pages answers
 //! most without walking the ordered map, which sweeps keep their place in.
@@ -23,11 +25,32 @@ const NO_FRAME: u64 = 1;
 /// The entries a forgotten page's list keeps room for.
 const KEPT_ENTRIES: usize = 16;
 
-/// One block of a page.
+/// One block of a page: its offset, a tag of its PC ([`pc_tag`]) and its
+/// slot. The tag takes the room alignment left, so an entry is 8 bytes.
 #[derive(Clone, Copy)]
 struct Entry {
     offset: u16,
+    tag: u16,
     slot: u32,
+}
+
+impl Entry {
+    fn order(&self) -> (u16, u16) {
+        (self.offset, self.tag)
+    }
+}
+
+/// A PC's 16-bit tag: blocks of one offset at different PCs mostly differ
+/// in it.
+fn pc_tag(pc: u64) -> u16 {
+    ((pc >> 2).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 48) as u16
+}
+
+/// The finder's hash of a block's physical address and PC.
+fn key_hash(physical: u64, pc: u64) -> u64 {
+    let hash = (physical >> 2).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (pc >> 2).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
+    hash ^ hash >> 29
 }
 
 pub(super) struct BlockIndex {
@@ -93,7 +116,8 @@ impl BlockIndex {
         Some(&entries[start..start + count])
     }
 
-    /// The block at `pc`, `physical` and `variant`.
+    /// The block at `pc`, `physical` and `variant`: only the entries of
+    /// its offset with its PC's tag load their blocks.
     pub(super) fn get(
         &mut self,
         blocks: &impl Index<usize, Output = Block>,
@@ -101,8 +125,12 @@ impl BlockIndex {
         physical: u64,
         variant: VariantId,
     ) -> Option<usize> {
-        self.at(physical)?
+        let tag = pc_tag(pc);
+        let entries = self.at(physical)?;
+        let start = entries.partition_point(|entry| entry.tag < tag);
+        entries[start..]
             .iter()
+            .take_while(|entry| entry.tag == tag)
             .map(|entry| entry.slot as usize)
             .find(|&slot| blocks[slot].pc == pc && blocks[slot].variant == variant)
     }
@@ -119,7 +147,12 @@ impl BlockIndex {
         variant: VariantId,
     ) -> Option<bool> {
         let mut shared = None;
+        let tag = pc_tag(pc);
         for entry in self.at(physical)? {
+            // Another tag is another PC, without loading its block.
+            if entry.tag != tag {
+                return Some(true);
+            }
             let other = &blocks[entry.slot as usize];
             if other.pc != pc {
                 return Some(true);
@@ -179,10 +212,11 @@ impl BlockIndex {
             }
         };
         let entries = &mut self.entries[page];
-        let start = entries.partition_point(|entry| entry.offset < offset);
+        let tag = pc_tag(block.pc);
+        let start = entries.partition_point(|entry| entry.order() < (offset, tag));
         let same = entries[start..]
             .iter()
-            .take_while(|entry| entry.offset == offset)
+            .take_while(|entry| entry.order() == (offset, tag))
             .position(|entry| {
                 let other = &blocks[entry.slot as usize];
                 other.pc == block.pc && other.variant == block.variant
@@ -193,8 +227,8 @@ impl BlockIndex {
                 if replaced as usize == slot {
                     return None;
                 }
-                self.finder.unlink(replaced, block.physical);
-                self.finder.link(slot as u32, block.physical);
+                self.finder.unlink(replaced);
+                self.finder.link(slot as u32, block.physical, block.pc);
                 Some(replaced as usize)
             }
             None => {
@@ -202,10 +236,11 @@ impl BlockIndex {
                     start,
                     Entry {
                         offset,
+                        tag,
                         slot: slot as u32,
                     },
                 );
-                self.finder.link(slot as u32, block.physical);
+                self.finder.link(slot as u32, block.physical, block.pc);
                 None
             }
         }
@@ -226,7 +261,7 @@ impl BlockIndex {
             return false;
         };
         entries.remove(position);
-        self.finder.unlink(slot as u32, physical);
+        self.finder.unlink(slot as u32);
         if entries.is_empty() {
             self.forget_page(frame);
         }
@@ -244,7 +279,7 @@ impl BlockIndex {
         entries.retain(|entry| {
             let gone = marked(entry.slot);
             if gone {
-                finder.unlink(entry.slot, frame | u64::from(entry.offset));
+                finder.unlink(entry.slot);
             }
             !gone
         });
@@ -262,8 +297,7 @@ impl BlockIndex {
         self.finder.pages.store(self.pages.len(), Ordering::Relaxed);
         let entries = &mut self.entries[page as usize];
         for entry in entries.iter() {
-            self.finder
-                .unlink(entry.slot, frame | u64::from(entry.offset));
+            self.finder.unlink(entry.slot);
         }
         entries.clear();
         entries.shrink_to(KEPT_ENTRIES);
@@ -333,9 +367,10 @@ impl BlockIndex {
 /// answer to the locked index.
 const FIND_STEPS: usize = 32;
 
-/// The index's blocks by physical address, read without the board's lock:
-/// each bucket heads a list of slots (stored plus one, 0 ends it) chained
-/// through `next`. Only the index's writer, under the lock, pushes a slot
+/// The index's blocks by physical address and PC, read without the board's
+/// lock: each bucket heads a list of slots (stored plus one, 0 ends it)
+/// chained through `next`. Copies of one frame at other PCs go to other
+/// buckets, so no list grows with them. Only the index's writer, under the lock, pushes a slot
 /// at its bucket's head or unlinks one; an unlinked slot keeps its `next`,
 /// so a reader standing on it goes on along its old list. A slot is taken
 /// again only after its grace ([`super::board::Slots`]), so a reader inside
@@ -343,6 +378,10 @@ const FIND_STEPS: usize = 32;
 pub(super) struct Finder {
     heads: Box<[AtomicU32]>,
     next: Records<AtomicU32>,
+    /// Each slot's bucket while it is listed, plus one; 0 when it is not.
+    /// The writer's alone: a link needs no walk to know a slot is listed,
+    /// and an unlink knows its list.
+    listed: Records<AtomicU32>,
     /// A slot had no room for its link: reads go to the locked index.
     partial: AtomicBool,
     /// The index's pages, for counts read without the lock.
@@ -362,14 +401,14 @@ impl Finder {
         Self {
             heads,
             next: Records::new(slots),
+            listed: Records::new(slots),
             partial: AtomicBool::new(false),
             pages: AtomicUsize::new(0),
         }
     }
 
-    fn bucket(&self, physical: u64) -> &AtomicU32 {
-        let hash = (physical >> 2).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        &self.heads[(hash >> 32) as usize & (self.heads.len() - 1)]
+    fn bucket_of(&self, physical: u64, pc: u64) -> usize {
+        (key_hash(physical, pc) >> 32) as usize & (self.heads.len() - 1)
     }
 
     /// The pages the index holds.
@@ -390,7 +429,7 @@ impl Finder {
         if self.partial.load(Ordering::Relaxed) {
             return None;
         }
-        let mut link = self.bucket(physical).load(Ordering::Acquire);
+        let mut link = self.heads[self.bucket_of(physical, pc)].load(Ordering::Acquire);
         for _ in 0..FIND_STEPS {
             let Some(slot) = link.checked_sub(1) else {
                 return Some(None);
@@ -406,37 +445,35 @@ impl Finder {
         None
     }
 
-    /// Put `slot` at the head of its bucket's list, unless it is listed.
-    fn link(&self, slot: u32, physical: u64) {
-        let bucket = self.bucket(physical);
-        if self.listed(bucket, slot) {
-            return;
-        }
-        let Some(next) = self.next.try_reserve(slot) else {
+    /// Put `slot`, a block at `physical` and `pc`, at the head of its
+    /// bucket's list, unless it is listed.
+    fn link(&self, slot: u32, physical: u64, pc: u64) {
+        let (Some(next), Some(listed)) =
+            (self.next.try_reserve(slot), self.listed.try_reserve(slot))
+        else {
             self.partial.store(true, Ordering::Relaxed);
             return;
         };
-        next.store(bucket.load(Ordering::Relaxed), Ordering::Relaxed);
-        bucket.store(slot + 1, Ordering::Release);
-    }
-
-    fn listed(&self, bucket: &AtomicU32, slot: u32) -> bool {
-        let mut link = bucket.load(Ordering::Relaxed);
-        while let Some(at) = link.checked_sub(1) {
-            if at == slot {
-                return true;
-            }
-            link = self
-                .next
-                .get(at)
-                .map_or(0, |next| next.load(Ordering::Relaxed));
+        if listed.load(Ordering::Relaxed) != 0 {
+            return;
         }
-        false
+        let bucket = self.bucket_of(physical, pc);
+        let head = &self.heads[bucket];
+        next.store(head.load(Ordering::Relaxed), Ordering::Relaxed);
+        head.store(slot + 1, Ordering::Release);
+        listed.store(bucket as u32 + 1, Ordering::Relaxed);
     }
 
-    /// Take `slot` out of its bucket's list; it keeps its `next`.
-    fn unlink(&self, slot: u32, physical: u64) {
-        let mut at = self.bucket(physical);
+    /// Take `slot` out of its bucket's list, if it is listed; it keeps its
+    /// `next`.
+    fn unlink(&self, slot: u32) {
+        let Some(listed) = self.listed.get(slot) else {
+            return;
+        };
+        let Some(bucket) = listed.swap(0, Ordering::Relaxed).checked_sub(1) else {
+            return;
+        };
+        let mut at = &self.heads[bucket as usize];
         loop {
             let link = at.load(Ordering::Relaxed);
             let Some(held) = link.checked_sub(1) else {
@@ -456,7 +493,16 @@ impl Finder {
     /// Empty every list.
     fn clear(&self) {
         for head in &self.heads {
-            head.store(0, Ordering::Release);
+            let mut link = head.swap(0, Ordering::Release);
+            while let Some(slot) = link.checked_sub(1) {
+                if let Some(listed) = self.listed.get(slot) {
+                    listed.store(0, Ordering::Relaxed);
+                }
+                link = self
+                    .next
+                    .get(slot)
+                    .map_or(0, |next| next.load(Ordering::Relaxed));
+            }
         }
         self.pages.store(0, Ordering::Relaxed);
     }
@@ -575,5 +621,101 @@ mod tests {
         // A page indexed again takes the list the forgotten one left.
         let again = add(&mut blocks, &mut index, block(0x5000, PAGE + FETCH_PAGE, 0));
         assert_eq!(index.page(PAGE + FETCH_PAGE).collect::<Vec<_>>(), [again]);
+    }
+
+    /// `count` blocks of one physical word at as many PCs (the same code
+    /// mapped at a new address by as many processes), as a board holds
+    /// them: their slots and the index.
+    fn aliases(count: usize) -> (super::super::board::Blocks, BlockIndex, Vec<usize>) {
+        const PAGE: u64 = 0x8000_0000;
+        let blocks = super::super::board::Blocks::new(count as u32 + 64);
+        let grace = super::super::board::Grace::new(1);
+        let mut index = BlockIndex::with_finder(Arc::new(Finder::new(count as u32 + 64)));
+        let slots = (0..count as u64)
+            .map(|alias| {
+                let slot = blocks.take(&grace, Some(0)).unwrap();
+                blocks.fill(slot, block(0x1_0000_0010 + (alias << 14), PAGE + 0x10, 0));
+                assert_eq!(index.insert(&blocks, slot), None);
+                slot
+            })
+            .collect();
+        (blocks, index, slots)
+    }
+
+    /// Many copies of one frame at other PCs are each found without the
+    /// lock, by their own PC, and the locked index finds each too
+    /// (build 49: they shared one list of the finder, every insert walked
+    /// it, and reads past 32 of them went to the locked index).
+    #[test]
+    fn many_aliases_of_one_frame_are_found_without_the_lock() {
+        const PAGE: u64 = 0x8000_0000;
+        let (blocks, mut index, slots) = aliases(1024);
+        let finder = Arc::clone(&index.finder);
+        for (alias, &slot) in slots.iter().enumerate() {
+            let pc = 0x1_0000_0010 + ((alias as u64) << 14);
+            assert_eq!(
+                finder.find(&blocks, pc, PAGE + 0x10, VariantId(0)),
+                Some(Some(slot)),
+                "alias {alias}"
+            );
+            assert_eq!(
+                index.get(&blocks, pc, PAGE + 0x10, VariantId(0)),
+                Some(slot)
+            );
+            assert_eq!(
+                finder.find(&blocks, pc, PAGE + 0x10, VariantId(1)),
+                Some(None)
+            );
+        }
+        // Each leaves by itself, and the others stay.
+        index.forget_marked(PAGE, |slot| slot as usize == slots[7]);
+        let pc = |alias: u64| 0x1_0000_0010 + (alias << 14);
+        assert_eq!(
+            finder.find(&blocks, pc(7), PAGE + 0x10, VariantId(0)),
+            Some(None)
+        );
+        assert_eq!(index.get(&blocks, pc(7), PAGE + 0x10, VariantId(0)), None);
+        assert_eq!(
+            finder.find(&blocks, pc(8), PAGE + 0x10, VariantId(0)),
+            Some(Some(slots[8]))
+        );
+        assert!(index.forget_page(PAGE));
+        assert_eq!(
+            finder.find(&blocks, pc(8), PAGE + 0x10, VariantId(0)),
+            Some(None)
+        );
+    }
+
+    /// Host timing of inserts and lookups as copies of one frame grow:
+    /// `cargo test -p stela-engine --release --lib alias_cost -- --ignored
+    /// --nocapture`.
+    #[test]
+    #[ignore = "host timing; run by hand in release"]
+    fn alias_cost() {
+        extern crate std;
+        const PAGE: u64 = 0x8000_0000;
+        for count in [64, 256, 1024, 4096] {
+            let started = std::time::Instant::now();
+            let (blocks, mut index, slots) = aliases(count);
+            let insert = started.elapsed().as_nanos() / count as u128;
+            let started = std::time::Instant::now();
+            let mut locked = 0;
+            for alias in 0..count as u64 {
+                let pc = 0x1_0000_0010 + (alias << 14);
+                if index
+                    .finder
+                    .find(&blocks, pc, PAGE + 0x10, VariantId(0))
+                    .is_none()
+                {
+                    locked += 1;
+                    assert!(index.get(&blocks, pc, PAGE + 0x10, VariantId(0)).is_some());
+                }
+            }
+            let find = started.elapsed().as_nanos() / count as u128;
+            std::println!(
+                "aliases={count} insert_ns={insert} find_ns={find} locked_fallbacks={locked} slots={}",
+                slots.len()
+            );
+        }
     }
 }

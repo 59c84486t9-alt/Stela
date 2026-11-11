@@ -136,12 +136,20 @@ const PARKED_POOL: u64 = 4 * 1024 * 1024;
 pub const PRIVATE_CODE: u64 = 2 * MIB;
 pub const PRIVATE_PARTS: u32 = 4;
 /// The board's code window holds the guest's working set of code once for
-/// every PE: free RAM / 16, at most 64 MiB per runner, 64 MiB to 2 GiB,
-/// in 16 MiB steps. The block table grows with it (one entry per 256
-/// bytes, 128 MiB at 1 GiB and above), and each PE's ITLB to 16,384
+/// every PE: free RAM / 16, at most [`WINDOW_PER_RUNNER`] per runner, 64 MiB
+/// to 2 GiB, in 16 MiB steps. The block table grows with it (one entry per
+/// 256 bytes, 128 MiB at 1 GiB and above), and each PE's ITLB to 16,384
 /// entries from 64 MiB.
 const WINDOW_SHARE: u64 = 16;
-const WINDOW_PER_RUNNER: u64 = 64 * MIB;
+/// The window per runner where the host's memory allows it. A sign-in on 8
+/// PEs with 512 MiB (64 MiB per runner) compiled 45% of its installs again
+/// within one turn of the ring, the code lock waited 3.5 s per 10 s, and
+/// each part the ring took cost about 0.75 s of PE time
+/// (`.stela/review/storm/STATUS.md`).
+pub const WINDOW_PER_RUNNER: u64 = 128 * MIB;
+/// The window per runner when [`WINDOW_PER_RUNNER`] would leave the guest
+/// under its floor ([`crate::host_memory::sizes`] falls back to it).
+pub const SMALL_WINDOW_PER_RUNNER: u64 = 64 * MIB;
 const MIN_WINDOW: u64 = 64 * MIB;
 const MAX_WINDOW: u64 = 2048 * MIB;
 const CODE_ALIGNMENT: u64 = 16 * MIB;
@@ -188,11 +196,22 @@ pub const fn parked_reserve(cores: usize, runners: usize) -> (u64, u64) {
 /// and the board's window, sized from `free` host bytes and the `runners`
 /// that run PEs, checked before any firmware pages are reserved.
 pub fn code_reservation(free: u64, cores: usize, runners: usize) -> Result<CodeReservation> {
+    code_reservation_per_runner(free, cores, runners, WINDOW_PER_RUNNER)
+}
+
+/// [`code_reservation`] with at most `per_runner` bytes of window for each
+/// runner.
+pub fn code_reservation_per_runner(
+    free: u64,
+    cores: usize,
+    runners: usize,
+    per_runner: u64,
+) -> Result<CodeReservation> {
     if cores == 0 || cores > MAX_CORES || runners == 0 || runners > cores {
         return Err(refuse!("invalid native executor count"));
     }
     let window = (free / WINDOW_SHARE)
-        .min(runners as u64 * WINDOW_PER_RUNNER)
+        .min(runners as u64 * per_runner)
         .clamp(MIN_WINDOW, MAX_WINDOW)
         / CODE_ALIGNMENT
         * CODE_ALIGNMENT;
@@ -254,12 +273,14 @@ mod tests {
     fn the_window_grows_with_the_host_and_its_runners_between_bounds() {
         for (free, cores, runners, window) in [
             (0, 1, 1, 64),
-            (6 * 1024, 2, 2, 128),
+            (6 * 1024, 2, 2, 256),
             (7936, 8, 8, 496),
-            (16 * 1024, 8, 8, 512),
+            (12 * 1024, 8, 8, 768),
+            (16 * 1024, 8, 8, 1024),
+            (32 * 1024, 8, 8, 1024),
             (32 * 1024, 32, 32, 2048),
             (128 * 1024, 64, 64, 2048),
-            (128 * 1024, 64, 8, 512),
+            (128 * 1024, 64, 8, 1024),
         ] {
             let code = code_reservation(free * MIB, cores, runners).unwrap();
             assert_eq!(

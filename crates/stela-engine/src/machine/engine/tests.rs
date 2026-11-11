@@ -8800,6 +8800,8 @@ mod floating_point_traps;
 mod process_switching;
 mod pstate_features;
 mod recovery;
+mod retire_cost;
+mod shared_code;
 mod sharing;
 mod stage2_syndrome;
 mod tagged;

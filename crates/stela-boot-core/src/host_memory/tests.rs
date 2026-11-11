@@ -51,23 +51,63 @@ fn an_8_gib_host_gives_the_guest_what_the_parts_leave() {
 }
 
 #[test]
-fn a_16_gib_host_keeps_the_heap_floor_and_one_shared_code_window() {
+fn a_16_gib_host_takes_a_sixteenth_for_its_window_and_raises_the_heap_floor() {
     let sizes = sizes(free(16), 8, 8).unwrap();
-    // A twelfth, a byte per byte of the 512 MiB window and 16 MiB per PE
-    // is under the floor.
-    assert_eq!(sizes.heap, HEAP_FLOOR);
-    // 64 MiB of window per runner, and each executor's 2 MiB of its own.
-    assert_eq!(sizes.code.bytes, 528 * MIB);
+    // A sixteenth (992 MiB, under 8 runners' 128 MiB), and each executor's
+    // 2 MiB of its own.
+    assert_eq!(sizes.code.window, 992 * MIB);
+    assert_eq!(sizes.code.bytes, 1008 * MIB);
+    // The floor plus a byte per window byte past 512 MiB: a twelfth, the
+    // window and 16 MiB per PE are under it.
+    assert_eq!(sizes.heap, HEAP_FLOOR + 480 * MIB);
     assert!(sizes.guest > 10 * GIB);
+}
+
+/// The test VM (12 GiB, `HOST MEMORY free=11514M`) takes a 704 MiB window,
+/// 192 MiB more than 64 MiB per runner gave, and as much more heap.
+#[test]
+fn the_test_vm_takes_a_larger_window_and_heap_from_its_guest() {
+    let sizes = sizes(11514 * MIB, 8, 8).unwrap();
+    assert_eq!(
+        [sizes.heap, sizes.code.bytes, sizes.pool, sizes.guest].map(|b| b / MIB),
+        [3008, 720, 864, 6922]
+    );
+}
+
+/// A host whose guest the larger window would put under its floor keeps
+/// 64 MiB per runner, and boots where it booted before.
+#[test]
+fn a_host_short_of_the_larger_window_falls_back_to_the_smaller() {
+    // Two runners near the floor: 256 MiB of window would leave the guest
+    // under 3 GiB, 128 MiB does not.
+    let short = (5 * GIB / MIB..8 * GIB / MIB)
+        .step_by(16)
+        .map(|free| free * MIB)
+        .find(|&free| {
+            let large = estimate_with(free, 2, 2, WINDOW_PER_RUNNER).unwrap();
+            let small = estimate_with(free, 2, 2, SMALL_WINDOW_PER_RUNNER).unwrap();
+            large.guest < GUEST_FLOOR && small.guest >= GUEST_FLOOR
+        })
+        .expect("a host the fallback lets boot");
+    let sizes = sizes(short, 2, 2).unwrap();
+    assert_eq!(sizes.code.window, 2 * SMALL_WINDOW_PER_RUNNER);
+    assert!(sizes.guest >= GUEST_FLOOR);
+    // With a little more RAM the larger window fits.
+    let roomy = sizes_of(short + 512 * MIB);
+    assert_eq!(roomy.code.window, 2 * WINDOW_PER_RUNNER);
+}
+
+fn sizes_of(free: u64) -> Sizes {
+    sizes(free, 2, 2).unwrap()
 }
 
 #[test]
 fn a_128_gib_host_grows_the_heap_with_its_share_window_and_pes() {
     let sizes = sizes(free(128), 8, 8).unwrap();
-    let heap = free(128) / HEAP_SHARE + HEAP_PER_WINDOW * 512 * MIB + 8 * PE_HEAP;
+    let heap = free(128) / HEAP_SHARE + HEAP_PER_WINDOW * 1024 * MIB + 8 * PE_HEAP;
     assert_eq!(sizes.heap, heap / ALIGNMENT * ALIGNMENT);
     assert!(HEAP_FLOOR < sizes.heap && sizes.heap < HEAP_CEILING);
-    assert_eq!(sizes.code.bytes, 528 * MIB);
+    assert_eq!(sizes.code.bytes, 1040 * MIB);
     assert_eq!(sizes.pool, 8 * POOL_PER_RUNNER);
     assert!(sizes.guest > 100 * GIB);
 }
@@ -78,20 +118,20 @@ fn a_128_gib_host_grows_the_heap_with_its_share_window_and_pes() {
 fn stelas_share_stops_growing_per_pe_past_what_each_pe_takes() {
     for (runners, free, expected) in [
         (2, 4, None),
-        (2, 8, Some([2816, 132, 158, 5086])),
-        (2, 16, Some([2816, 132, 406, 13030])),
-        (2, 30, Some([2816, 132, 840, 26932])),
-        (2, 128, Some([11082, 132, 2048, 117810])),
+        (2, 8, Some([2816, 260, 154, 4962])),
+        (2, 16, Some([2816, 260, 402, 12906])),
+        (2, 30, Some([2848, 260, 836, 26776])),
+        (2, 128, Some([11210, 260, 2048, 117554])),
         (8, 4, None),
         (8, 8, Some([2816, 528, 538, 4310])),
-        (8, 16, Some([2816, 528, 1448, 11592])),
-        (8, 30, Some([3200, 528, 2998, 23994])),
-        (8, 128, Some([11562, 528, 8192, 110790])),
+        (8, 16, Some([3328, 1040, 1334, 10682])),
+        (8, 30, Some([3712, 1040, 2884, 23084])),
+        (8, 128, Some([12074, 1040, 8192, 109766])),
         (24, 4, None),
         (24, 8, Some([2816, 560, 768, 4048])),
-        (24, 16, Some([2816, 1072, 1388, 11108])),
-        (24, 30, Some([4480, 1584, 2738, 21918])),
-        (24, 128, Some([12842, 1584, 8192, 108454])),
+        (24, 16, Some([3328, 1072, 1330, 10654])),
+        (24, 30, Some([4864, 1968, 2654, 21234])),
+        (24, 128, Some([13354, 2096, 8192, 107430])),
         (64, 4, None),
         (64, 8, None),
         (64, 16, Some([3412, 1152, 2048, 9772])),
@@ -127,9 +167,9 @@ fn the_test_bench_keeps_its_guest() {
 fn a_2_tib_host_caps_every_part() {
     let sizes = sizes(free(2048), 8, 8).unwrap();
     assert_eq!(sizes.heap, HEAP_CEILING);
-    assert_eq!(sizes.code.bytes, 528 * MIB);
+    assert_eq!(sizes.code.bytes, 1040 * MIB);
     assert_eq!(sizes.pool, 8 * POOL_PER_RUNNER);
-    assert_eq!(sizes.guest, free(2048) - 24 * GIB - 528 * MIB);
+    assert_eq!(sizes.guest, free(2048) - 24 * GIB - 1040 * MIB);
 }
 
 #[test]

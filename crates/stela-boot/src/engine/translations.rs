@@ -512,6 +512,9 @@ static COSTS: Costs = Costs {
 /// a fraction of one core, and no PE holds a kernel lock while it proves.
 const PROOF_BATCH_BLOCKS: usize = 32;
 const PROOF_SPACING: u64 = 4;
+/// Counter ticks after a look that found nothing to prove before the next:
+/// about a millisecond at the clocks Stela runs on.
+const IDLE_LOOK_TICKS: u64 = 1 << 22;
 static PROVING: AtomicBool = AtomicBool::new(false);
 static NEXT_PROOF: AtomicU64 = AtomicU64::new(0);
 static PROOF_PART: AtomicUsize = AtomicUsize::new(0);
@@ -585,6 +588,7 @@ fn prove_some() {
         return;
     }
     // A stop clears the capability before it waits for `PROVING`.
+    let mut proved = false;
     if available(WRITE_PACK) && !crate::ALLOCATOR.low() {
         for _ in 0..PARTS {
             let lock = &STORES[PROOF_PART.fetch_add(1, Ordering::Relaxed) % PARTS];
@@ -598,16 +602,22 @@ fn prove_some() {
                     store.fold(proven);
                 }
             });
+            proved = true;
             break;
         }
     }
     let spent = output::now().wrapping_sub(now);
-    COSTS.batches.fetch_add(1, Ordering::Relaxed);
-    COSTS.batch_ticks.fetch_add(spent, Ordering::Relaxed);
-    NEXT_PROOF.store(
-        now.wrapping_add(spent.saturating_mul(PROOF_SPACING)),
-        Ordering::Relaxed,
-    );
+    // Only batches proven count: a look that found every part empty or
+    // full is not one, and the next look waits a while, so that EL0
+    // compiles do not each look through every part.
+    let wait = if proved {
+        COSTS.batches.fetch_add(1, Ordering::Relaxed);
+        COSTS.batch_ticks.fetch_add(spent, Ordering::Relaxed);
+        spent.saturating_mul(PROOF_SPACING)
+    } else {
+        IDLE_LOOK_TICKS
+    };
+    NEXT_PROOF.store(now.wrapping_add(wait), Ordering::Relaxed);
     PROVING.store(false, Ordering::SeqCst);
 }
 

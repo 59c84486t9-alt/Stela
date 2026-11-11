@@ -1048,6 +1048,10 @@ pub struct Store<'a> {
     proven: BTreeMap<Digest, Record>,
     proven_bytes: usize,
     proven_bound: usize,
+    /// A fold left an entry out for the proven bound: a batch proven now
+    /// would be left out too, so none is taken until the bound grows
+    /// ([`Self::take_batch`]). Its pages wait for the stop's proof instead.
+    proven_full: bool,
     /// The blocks offered, by page key, PC and context, for the other
     /// machines sharing the store, oldest first. The bound charges kept
     /// source/template buffers, Arc payloads, index entries and FIFO capacity;
@@ -1137,6 +1141,7 @@ impl<'a> Store<'a> {
             proven: BTreeMap::new(),
             proven_bytes: 0,
             proven_bound: bounds.proven,
+            proven_full: false,
             shared: BTreeMap::new(),
             shared_order: VecDeque::new(),
             shared_bytes: 0,
@@ -1150,6 +1155,9 @@ impl<'a> Store<'a> {
     /// cache lets go come back, to drop outside a lock.
     pub fn set_bounds(&mut self, bounds: Bounds) -> Vec<Arc<Record>> {
         self.pending_bound = bounds.pending;
+        if bounds.proven > self.proven_bound {
+            self.proven_full = false;
+        }
         self.proven_bound = bounds.proven;
         self.decoded.shrink(bounds.decoded)
     }
@@ -1207,6 +1215,7 @@ impl<'a> Store<'a> {
             }
         }
         self.proven_bytes += other.proven_bytes;
+        self.proven_full |= other.proven_full;
         self.counters.add(&other.counters);
     }
 
@@ -1395,9 +1404,11 @@ impl<'a> Store<'a> {
 
     /// Pending pages holding at least `blocks` blocks (all, when fewer
     /// wait), oldest key first, to prove outside the store's lock; `None`
-    /// when none wait or the proven bound is full.
+    /// when none wait or the proven bound is full: reached, or short of an
+    /// entry a fold left out. A batch then would be proven only to be
+    /// dropped, and its pages with it.
     pub fn take_batch(&mut self, blocks: usize) -> Option<ProofBatch> {
-        if self.pending.is_empty() || self.proven_bytes >= self.proven_bound {
+        if self.pending.is_empty() || self.proven_full || self.proven_bytes >= self.proven_bound {
             return None;
         }
         let mut pages = Vec::new();
@@ -1423,6 +1434,7 @@ impl<'a> Store<'a> {
                 let bytes = entry.retained_bytes();
                 if self.proven_bytes + bytes > self.proven_bound {
                     self.counters.unkept += 1;
+                    self.proven_full = true;
                     continue;
                 }
                 self.proven_bytes += bytes;
@@ -1538,6 +1550,7 @@ impl<'a> Store<'a> {
     pub fn plan(&mut self, bound: u64, room: impl Fn() -> bool) -> Planned<'a> {
         let mut proven = core::mem::take(&mut self.proven);
         self.proven_bytes = 0;
+        self.proven_full = false;
         let (mut count, mut unprovable) = (0, 0);
         let pending = core::mem::take(&mut self.pending);
         let mut unproven = self.pending_blocks as u64;
@@ -2439,6 +2452,61 @@ mod tests {
         let batch = full.take_batch(1).unwrap();
         full.fold(batch.prove());
         assert_eq!((full.counters.proven, full.counters.unkept), (1, 1));
+    }
+
+    /// Once a fold left an entry out for the proven bound, a batch proven
+    /// then would be left out too: none is taken, and the pages wait for
+    /// the stop's proof, which keeps them. Before, every batch was proven
+    /// and dropped with its pages for the rest of the run.
+    #[test]
+    fn a_store_short_of_an_entry_proves_no_batch_until_its_bound_grows() {
+        let translator = translator_id();
+        let keys: Vec<Digest> = (0u8..4).map(|index| Digest::of(&[index])).collect();
+        let mut store = Store::new(translator, None).0;
+        drop(store.set_bounds(Bounds {
+            proven: 1,
+            ..Bounds::default()
+        }));
+        for (index, key) in keys.iter().enumerate() {
+            store.offer(offer(0x1_0000_4008 + 0x4000 * index as u64, *key));
+        }
+        assert_eq!(store.pending(), 4);
+        let batch = store.take_batch(1).unwrap();
+        assert_eq!(batch.blocks(), 1);
+        store.fold(batch.prove());
+        assert_eq!((store.counters.proven, store.counters.unkept), (1, 1));
+        // Room is left under the bound, but not for an entry: no batch.
+        for _ in 0..8 {
+            assert!(store.take_batch(1).is_none());
+        }
+        assert_eq!((store.counters.proven, store.pending()), (1, 3));
+        // A smaller bound changes nothing; a larger one proves again.
+        drop(store.set_bounds(Bounds {
+            proven: 0,
+            ..Bounds::default()
+        }));
+        assert!(store.take_batch(1).is_none());
+        drop(store.set_bounds(Bounds::default()));
+        let batch = store.take_batch(1).unwrap();
+        store.fold(batch.prove());
+        assert_eq!((store.counters.proven, store.counters.unkept), (2, 1));
+        assert_eq!(store.pending(), 2);
+        // The stop proves the two that still wait, and the next pack holds
+        // them with the one proven during the run.
+        let planned = store.plan(u64::MAX, || true);
+        assert_eq!((planned.proven, planned.unproven), (2, 0));
+        let bytes = planned.layout.to_vec();
+        let mut next = Store::new(translator, Some(&bytes)).0;
+        // All but the page the first, unkept batch took.
+        let context = offer(0x1_0000_4008, keys[0]).context();
+        let kept = keys
+            .iter()
+            .filter(|key| {
+                next.record(key)
+                    .is_some_and(|record| record.find(8, &context).is_some())
+            })
+            .count();
+        assert_eq!(kept, 3);
     }
 
     #[test]
