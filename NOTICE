@@ -12,12 +12,15 @@ mostly Linux kernel code and Rust ports of Linux drivers. A program that
 contains such code is distributed as a whole under GPL-2.0-only:
 
   stela.efi             GPL-2.0-only (contains Linux code)
-  stela (CLI)           GPL-2.0-only (contains Linux-derived driver code;
-                        also carries stela.efi as a separate program)
+  stela (CLI)           GPL-2.0-only (contains Linux-derived driver code)
   stela-gpu-maintenance GPL-2.0-or-later
   Stela.app             GPL-2.0-or-later
   StelaGPU.kext         GPL-2.0-or-later
   StelaGPU.bundle       GPL-2.0-or-later
+
+The stela CLI carries a copy of stela.efi, a separate program that it writes
+to the installer USB and never links or runs, aggregated with the CLI and
+distributed under its own license above.
 
 If you redistribute these programs in binary form, you must also offer their
 complete corresponding source under the terms of the GPL: this repository at
