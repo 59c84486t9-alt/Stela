@@ -40,6 +40,9 @@ pub const STREAM_LINES: usize = 40;
 /// The width of a step's mark and the gap after it, where its text starts:
 /// info and streamed lines start there too.
 const TEXT_INDENT: &str = "           ";
+/// A running step's detail held this long is logged with its time
+/// ([`State::detail_ends`]).
+const DETAIL_LOG_MILLIS: u64 = 250;
 
 /// Text formatted on the stack: drawing a timer tick allocates nothing.
 #[derive(Default)]
@@ -69,6 +72,8 @@ impl fmt::Write for Short {
 struct Running {
     title: String,
     detail: String,
+    /// When `detail` last changed, on the TSC.
+    detail_started: u64,
     percentage: Option<u8>,
     started: u64,
     frame: usize,
@@ -177,6 +182,26 @@ impl State {
         }
     }
 
+    /// The running step's detail gives way to `next` (empty at the step's
+    /// end): one that held for [`DETAIL_LOG_MILLIS`] or more is logged with
+    /// its time, such as a device a driver took long to start, which the
+    /// step's own time does not single out.
+    fn detail_ends(&mut self, next: &str) {
+        let Some(running) = self.running.as_ref() else {
+            return;
+        };
+        if running.detail == next {
+            return;
+        }
+        let millis = self.millis(running.detail_started);
+        if !running.detail.is_empty() && millis >= DETAIL_LOG_MILLIS {
+            output::arguments(format_args!("STEP DETAIL {} ms={millis}\n", running.detail));
+        }
+        if let Some(running) = self.running.as_mut() {
+            running.detail_started = now();
+        }
+    }
+
     fn draw_running(&mut self) {
         let Some(running) = self.running.as_ref() else {
             return;
@@ -221,6 +246,7 @@ impl State {
     }
 
     fn finish(&mut self, mark: Mark, result: &str) {
+        self.detail_ends("");
         // A step a warning already ended has nothing left to end; a
         // failure is shown on its own.
         let Some(running) = self.running.take() else {
@@ -293,6 +319,7 @@ pub fn begin(title: &str) {
         state.running = Some(Running {
             title: String::from(title),
             detail: String::new(),
+            detail_started: now(),
             percentage: None,
             started: now(),
             frame: 0,
@@ -306,6 +333,7 @@ pub fn begin(title: &str) {
 /// Show how far the running step has come, such as `182 of 484 MB`.
 pub fn progress(detail: &str) {
     with(|state| {
+        state.detail_ends(detail);
         if let Some(running) = state.running.as_mut() {
             running.detail.clear();
             running.detail.push_str(detail);
@@ -321,6 +349,7 @@ pub fn progress(detail: &str) {
 /// total keeps the ordinary moving marker and omits the percentage.
 pub fn progress_fraction(detail: &str, completed: u64, total: u64) {
     with(|state| {
+        state.detail_ends(detail);
         if let Some(running) = state.running.as_mut() {
             running.detail.clear();
             running.detail.push_str(detail);
