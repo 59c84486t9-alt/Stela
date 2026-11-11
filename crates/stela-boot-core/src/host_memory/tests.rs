@@ -204,18 +204,18 @@ fn parked_executors_add_only_their_reserves() {
     assert_eq!(parked.pool, running + 4 * 4 * MIB);
 }
 
-/// The free RAM an 8 GB VM showed the loader with no pack read, as
-/// `HOST MEMORY free=7544M` (eight cores).
-const VM_8_GB: u64 = 7544 * MIB;
+/// The free RAM an 8 GB host with eight cores shows the loader with no pack
+/// read (`HOST MEMORY free=7544M`).
+const HOST_8_GB: u64 = 7544 * MIB;
 
 #[test]
 fn an_8_gb_pc_keeps_a_sixteenth_for_the_pack() {
-    let budget = pack_budget(VM_8_GB, 8, 8);
+    let budget = pack_budget(HOST_8_GB, 8, 8);
     assert_eq!(budget, 470 * MIB);
-    // The 845 MB pack that stopped this VM's boots no longer fits whole,
+    // An 845 MB pack, which stopped such a host's boots, no longer fits whole,
     // and what is read of it leaves the parts and the guest's floor.
     assert!(budget < 845_496_619);
-    let sizes = sizes(VM_8_GB - budget - PACK_MARGIN, 8, 8).unwrap();
+    let sizes = sizes(HOST_8_GB - budget - PACK_MARGIN, 8, 8).unwrap();
     assert!(sizes.guest > GUEST_FLOOR + 200 * MIB, "{sizes:?}");
     assert_eq!(pack_budget(free(8), 8, 8), 496 * MIB);
 }
