@@ -351,3 +351,242 @@ fn quick_float_guards_match_the_reference() {
     }
     assert!(inline > runs / 3, "{inline} of {runs}");
 }
+
+/// FCMP/FCMPE (register and zero) and FCCMP/FCCMPE (condition true and
+/// false) of S and D against `comparison::flags`: NZCV and FPSR of every
+/// inline completion, an unchanged state for every exit, and no exit for an
+/// ordered register pair with traps, FZ, FIZ and AH clear on non-DIT tiers.
+#[test]
+fn quick_compares_match_the_reference() {
+    use crate::aarch64::floating::comparison;
+    let mut inline = 0usize;
+    for target in targets() {
+        for format in [Format::Single, Format::Double] {
+            let all = floats(format);
+            let double = u32::from(format == Format::Double);
+            // (word, signal all NaNs, conditional, zero)
+            let mut forms = Vec::new();
+            for signal in [false, true] {
+                let e = u32::from(signal) << 4;
+                forms.push((
+                    0x1e20_2000 | double << 22 | M << 16 | N << 5 | e,
+                    signal,
+                    false,
+                    false,
+                ));
+                forms.push((0x1e20_2008 | double << 22 | N << 5 | e, signal, false, true));
+                // FCCMP(E) ..., #0b0110, EQ
+                forms.push((
+                    0x1e20_0406 | double << 22 | M << 16 | N << 5 | e,
+                    signal,
+                    true,
+                    false,
+                ));
+            }
+            for (word, signal, conditional, zero) in forms {
+                let code = compile(word, target);
+                for (start, &left) in all.iter().enumerate() {
+                    let right = if zero {
+                        0
+                    } else {
+                        all[(start * 7 + 3) % all.len()]
+                    };
+                    for fpcr in controls() {
+                        for nzcv in [0x6000_0000u32, 0x8000_0000] {
+                            for fpsr in [0, 0x0800_009f] {
+                                let mut initial = GuestState {
+                                    fpcr,
+                                    fpsr,
+                                    nzcv,
+                                    ..GuestState::default()
+                                };
+                                initial.x[30] = RETURN;
+                                initial.v[N as usize] =
+                                    [left | 0x5a5a_0000_0000_0000 & !width(format), 7];
+                                initial.v[M as usize] =
+                                    [right | 0x3c3c_0000_0000_0000 & !width(format), 9];
+                                let mut actual = initial.clone();
+                                let exit = run(&code, &mut actual);
+                                let holds = !conditional || nzcv & 0x4000_0000 != 0;
+                                let ordered = |bits: u64| {
+                                    bits & format.exponent_mask() != format.exponent_mask()
+                                        || bits & ((1u64 << format.fraction_bits()) - 1) == 0
+                                };
+                                if exit == PC.0 {
+                                    assert_eq!(
+                                        actual, initial,
+                                        "{word:08x} {left:x} {right:x} {fpcr:#x} {target:?}"
+                                    );
+                                    let must_inline = holds
+                                        && !zero
+                                        && ordered(left)
+                                        && ordered(right)
+                                        && fpcr
+                                            & (FPCR_FZ
+                                                | FPCR_FIZ
+                                                | FPCR_AH
+                                                | FPCR_EXCEPTION_ENABLE_MASK)
+                                            == 0
+                                        && !target.data_independent_timing();
+                                    assert!(
+                                        !must_inline,
+                                        "ordered compare exited: {word:08x} {left:x} {right:x} {fpcr:#x} {target:?}"
+                                    );
+                                    continue;
+                                }
+                                assert_eq!(exit, RETURN);
+                                let mut expected = initial.clone();
+                                if holds {
+                                    let outcome =
+                                        comparison::flags(format, signal, fpcr, left, right)
+                                            .expect("completed with enabled traps");
+                                    expected.nzcv = outcome.nzcv;
+                                    expected.fpsr |= outcome.exceptions;
+                                } else {
+                                    expected.nzcv = 0x6 << 28;
+                                }
+                                assert_eq!(
+                                    (actual.nzcv, actual.fpsr),
+                                    (expected.nzcv, expected.fpsr),
+                                    "{word:08x} {left:x} {right:x} {fpcr:#x} {nzcv:#x} {target:?}"
+                                );
+                                assert_eq!(actual, expected, "{word:08x} {target:?}");
+                                inline += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(inline > 10_000, "{inline}");
+}
+
+fn width(format: Format) -> u64 {
+    if format == Format::Double {
+        u64::MAX
+    } else {
+        u64::from(u32::MAX)
+    }
+}
+
+/// MXCSR with every status bit set (IE, DE, ZE, OE, UE, PE) and the
+/// power-on control.
+const POLLUTED_MXCSR: u32 = 0x1fbf;
+
+fn load_mxcsr(value: u32) {
+    // SAFETY: a valid MXCSR value (no reserved bits) from a live local.
+    unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &value, options(nostack)) };
+}
+
+fn read_mxcsr() -> u32 {
+    let mut value = 0u32;
+    // SAFETY: stores the four-byte MXCSR into a live local.
+    unsafe { core::arch::asm!("stmxcsr [{}]", in(reg) &mut value, options(nostack)) };
+    value
+}
+
+/// FCMP S1,S2; FMAX V0.4S,V1.4S,V2.4S; FADD V3.4S,V1.4S,V2.4S; MRS X0,FPSR
+/// as one block, entered with every host MXCSR status bit already set and
+/// leaving whatever UCOMISS/CMPUNORDPS/ADDPS add: a completed block's FPSR
+/// and the MRS result are the Arm cumulative flags of the three
+/// instructions (from the references), never the host status. A block that
+/// exits (a NaN operand, which the engine completes in software) stops at
+/// one of the three instructions.
+#[test]
+fn guest_fpsr_ignores_host_mxcsr_status() {
+    use crate::aarch64::floating::{comparison, minmax};
+    const WORDS: [u32; 5] = [
+        0x1e22_2020,
+        0x4e22_f420,
+        0x4e22_d423,
+        0xd53b_4420,
+        0xd65f_03c0,
+    ];
+    let source: Vec<u8> = WORDS.iter().flat_map(|word| word.to_le_bytes()).collect();
+    let values = floats(Format::Single);
+    let mut inline = 0usize;
+    for target in targets() {
+        let code = CompilationPlan::new(&source, PC, &Options::new(BlockProfile::ORDINARY, target))
+            .unwrap()
+            .compile()
+            .unwrap()
+            .native
+            .x86_64_code;
+        for start in 0..values.len() {
+            let mut v1 = [0u64; 2];
+            let mut v2 = [0u64; 2];
+            for at in 0..4 {
+                set_lane(
+                    &mut v1,
+                    Format::Single,
+                    at,
+                    values[(start + at) % values.len()],
+                );
+                set_lane(
+                    &mut v2,
+                    Format::Single,
+                    at,
+                    values[(start * 5 + at * 3 + 1) % values.len()],
+                );
+            }
+            for fpsr in [0, INEXACT, 0x0800_009f] {
+                let mut initial = GuestState {
+                    fpsr,
+                    ..GuestState::default()
+                };
+                initial.x[30] = RETURN;
+                initial.v[1] = v1;
+                initial.v[2] = v2;
+                let mut actual = initial.clone();
+                let before = read_mxcsr();
+                load_mxcsr(POLLUTED_MXCSR);
+                let exit = run(&code, &mut actual);
+                let after = read_mxcsr();
+                load_mxcsr(before);
+                assert_eq!(
+                    after & !0x3f,
+                    POLLUTED_MXCSR & !0x3f,
+                    "MXCSR control {target:?}"
+                );
+                if exit != RETURN {
+                    assert!(
+                        (0..3).any(|index| exit == PC.0 + 4 * index),
+                        "exit {exit:#x} {target:?}"
+                    );
+                    continue;
+                }
+                let mut flags = fpsr;
+                let compare = comparison::flags(
+                    Format::Single,
+                    false,
+                    0,
+                    lane(v1, Format::Single, 0),
+                    lane(v2, Format::Single, 0),
+                )
+                .unwrap();
+                flags |= compare.exceptions;
+                for at in 0..4 {
+                    let (left, right) =
+                        (lane(v1, Format::Single, at), lane(v2, Format::Single, at));
+                    flags |=
+                        minmax::evaluate(Format::Single, MinMaxOperation::Maximum, 0, left, right)
+                            .unwrap()
+                            .exceptions;
+                    flags |=
+                        floating::evaluate(Format::Single, BinaryOperation::Add, 0, left, right)
+                            .unwrap()
+                            .exceptions;
+                }
+                assert_eq!(actual.nzcv, compare.nzcv, "{v1:x?} {v2:x?} {target:?}");
+                assert_eq!(
+                    (actual.fpsr, actual.x[0]),
+                    (flags, u64::from(flags)),
+                    "{v1:x?} {v2:x?} fpsr {fpsr:#x} {target:?}"
+                );
+                inline += 1;
+            }
+        }
+    }
+    assert!(inline > 100, "{inline}");
+}

@@ -378,7 +378,7 @@ pub(super) fn emit_numerical_split(
             complex::emit(code, operand, pc, target)
         }
         crate::aarch64::FloatingPointOperation::Comparison(operand) => {
-            comparison::emit(code, operand, pc)
+            comparison::emit(code, operand, pc, target)
         }
         crate::aarch64::FloatingPointOperation::ExtremaScale(operand) => {
             extrema_scale::emit(code, operand, pc, target);
