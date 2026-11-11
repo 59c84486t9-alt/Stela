@@ -2,9 +2,9 @@ use super::*;
 use crate::Result;
 use stela_contracts::refuse;
 
-struct Buffers {
-    input: Vec<u8>,
-    output: Vec<u8>,
+pub(crate) struct Buffers {
+    pub(crate) input: Vec<u8>,
+    pub(crate) output: Vec<u8>,
 }
 
 impl Payload for Buffers {
@@ -41,7 +41,7 @@ pub(crate) fn message(version: u32, flags: u32, argument: u64, blob: &[u8]) -> V
     bytes
 }
 
-fn frame(command: u8, sequence: u8, length: usize) -> Frame {
+pub(crate) fn frame(command: u8, sequence: u8, length: usize) -> Frame {
     Frame {
         service: ID,
         tag: command,
@@ -574,7 +574,7 @@ fn ask(keystore: &mut KeyStore, frame: Frame, input: Vec<u8>) -> (Result<Frame, 
     })
 }
 
-fn ask_with_entropy(
+pub(crate) fn ask_with_entropy(
     keystore: &mut KeyStore,
     frame: Frame,
     input: Vec<u8>,
@@ -720,7 +720,7 @@ fn device_state_says_unlocked_without_a_passcode_in_both_variants() {
     }
     assert_eq!(
         keystore.diagnostics().collect::<Vec<_>>(),
-        ["SEP keystore: every keybag reports unlocked without a passcode"]
+        ["SEP keystore: every keybag but a loaded user keybag reports unlocked without a passcode"]
     );
     let unknown = request_with(2, &head(&[0; 4]));
     let (reply, _) = ask(
@@ -799,15 +799,18 @@ fn decoded_keybags_and_malformed_bodies_never_publish_success_or_change_environm
             request.extend_from_slice(&body);
             let hash = digest(&request);
             request[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
-            // A complete source-shaped request reaches the semantic
-            // refusal, including create/copy's nonzero variants.
+            // A complete source-shaped request reaches the keybags, which a
+            // keystore without machine roots does not have.
             let (result, output) = ask(
                 &mut keystore,
                 frame(command, 42, request.len()),
                 request.clone(),
             );
             let refusal = result.unwrap_err();
-            assert_eq!(refusal.reason, keybag::UNIMPLEMENTED.into());
+            assert_eq!(
+                refusal.reason,
+                refuse!("SEP keystore requires provisioned machine roots")
+            );
             assert_eq!(
                 refusal.answer.unwrap().frame,
                 failure(frame(command, 42, request.len()))
@@ -828,7 +831,10 @@ fn decoded_keybags_and_malformed_bodies_never_publish_success_or_change_environm
                 let hash = digest(&bad);
                 bad[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&hash);
                 let (result, output) = ask(&mut keystore, frame(command, 42, bad.len()), bad);
-                assert_ne!(result.unwrap_err().reason.what(), keybag::UNIMPLEMENTED);
+                assert_ne!(
+                    result.unwrap_err().reason,
+                    refuse!("SEP keystore requires provisioned machine roots")
+                );
                 assert!(output.is_empty());
                 assert_eq!(keystore.environment(), before);
             }

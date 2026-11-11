@@ -757,3 +757,95 @@ fn unmodeled_inbound_traffic_refuses_without_faking_a_reply() {
     // A malformed shared-memory frame (zero length) is refused.
     assert!(reply(&mut SepOs::new(None), shm(0x1000, 0)).is_err());
 }
+
+/// A user keybag create, variant 4, as `create_keybag` lays it out: session,
+/// type 0, parent -1, the passcode, then empty ACM, extension and
+/// descriptor blobs and flags 0.
+fn keybag_create(passcode: &[u8]) -> Vec<u8> {
+    let mut request = keystore::tests::message(2, 0, 1, &[]);
+    request.truncate(84);
+    request.extend_from_slice(&4u32.to_le_bytes());
+    request.extend_from_slice(&0x1f5u64.to_le_bytes());
+    request.extend_from_slice(&0u32.to_le_bytes());
+    request.extend_from_slice(&u32::MAX.to_le_bytes());
+    for blob in [passcode, &[][..], &[][..], &[][..]] {
+        request.extend_from_slice(&(blob.len() as u32).to_le_bytes());
+        request.extend_from_slice(blob);
+        request.resize(request.len().next_multiple_of(4), 0);
+    }
+    request.extend_from_slice(&0u64.to_le_bytes());
+    use sha2::Digest as _;
+    let hash = sha2::Sha256::digest(&request[20..]);
+    request[4..20].copy_from_slice(&hash[..16]);
+    request
+}
+
+#[test]
+fn a_passcode_create_completes_by_dma_steps_alone_and_holds_later_requests() {
+    // Nothing but the SEP's own DMA steps drives the derivation: no other
+    // frame arrives until it is done, as when every other PE is idle.
+    let mut os = SepOs::new(None).with_services(store(), true, None).unwrap();
+    map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
+    register(&mut os, keystore::ID, 0x8000, 0x8000);
+    let request = keybag_create(b"correct horse 7");
+    let create = Frame {
+        service: keystore::ID,
+        tag: 1,
+        opcode: 21,
+        parameter: 0,
+        data: (request.len() as u32) << 16,
+    };
+    let mut ram = stela_contracts::dma::test_support::Ram::new(0x10_0000, 0x10000);
+    ram.bytes[..request.len()].copy_from_slice(&request);
+    assert!(reply(&mut os, create).unwrap().is_empty());
+    assert!(dma(&mut os, &mut ram).unwrap().is_empty());
+    assert!(os.deriving() && os.dma_pending());
+    // A later request waits in order behind the derivation.
+    let capabilities = keystore::tests::message(2, 0, 1, &[]);
+    let later = Frame {
+        service: keystore::ID,
+        tag: keystore::GET_CAPABILITIES,
+        opcode: 22,
+        parameter: 0,
+        data: (capabilities.len() as u32) << 16,
+    };
+    assert!(reply(&mut os, later).unwrap().is_empty());
+    let mut steps = 1;
+    let answer = loop {
+        let answer = dma(&mut os, &mut ram).unwrap();
+        steps += 1;
+        if !answer.is_empty() {
+            break answer;
+        }
+        assert!(os.dma_pending());
+    };
+    assert_eq!(
+        steps,
+        1 + (keystore::keybag_iterations() - 1).div_ceil(keystore::keybag_slice())
+    );
+    assert_eq!(answer.len(), 1);
+    assert_eq!(
+        (answer[0].tag, answer[0].opcode, answer[0].parameter),
+        (0x81, 21, 0)
+    );
+    assert!(!os.deriving());
+    assert!(os.dma_pending(), "the later request is still queued");
+    ram.bytes[..capabilities.len()].copy_from_slice(&capabilities);
+    let answer = dma(&mut os, &mut ram).unwrap();
+    assert_eq!(answer[0].opcode, 22);
+    assert!(!os.dma_pending());
+    // Observation names the create but withholds its input bytes.
+    let lines = os.observations();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("sks tag=1 op=21") && l.ends_with("=withheld")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l == keystore::keybag_at_rest()),
+        "{lines:?}"
+    );
+    let passcode_hex = observe::hex(b"correct horse");
+    assert!(!lines.iter().any(|l| l.contains(&passcode_hex)));
+}

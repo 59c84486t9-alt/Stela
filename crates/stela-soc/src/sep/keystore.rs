@@ -46,11 +46,11 @@
 //! Its reply carries variant 0 alone.
 //!
 //! This SEP parses both header versions, so it reports version 2, and it
-//! records the environment, which nothing consumes yet. The command-specific
-//! keybag codecs validate the recovered AP layouts, then explicitly refuse
-//! their unresolved security semantics. Keybags need the keystore
-//! lifecycle in docs/research/sep-requirements.md, and no success is
-//! invented for them; [`volume_key`] serves volume, class and per-file keys. The failure answer is the status
+//! records the environment, which nothing consumes yet. [`keybag`] creates,
+//! saves, loads and unloads user keybags; a request that needs a passcode
+//! KEK is answered after its derivation, which runs over later SEP steps
+//! ([`KeyStore::resume`]). [`volume_key`] serves volume, class and per-file
+//! keys. The failure answer is the status
 //! [`FAILURE`], Stela's choice of generic failure: the AP sign-extends
 //! 0xff to -1, then maps it to IOReturn 0xe00002bc (0x2d3a324, table
 //! 0x725990). No sepOS-specific authorization error is invented.
@@ -87,6 +87,17 @@ const LENGTH_SHIFT: u32 = 16;
 const CALL_FLAGS: u32 = 0xffff;
 /// Stela's refusal status: -1, mapped by the AP to generic IOReturn failure.
 pub const FAILURE: u8 = 0xff;
+
+/// Whether `command`'s request can carry a passcode or another secret:
+/// create (0x01), change lock state (0x04), change secret (0x07), make
+/// system (0x0d), the escrow stash (0x13, 0x14), device state transition
+/// (0x18) and verify (0x21). Observation records only their lengths.
+pub fn carries_secret(command: u8) -> bool {
+    matches!(
+        command,
+        0x01 | 0x04 | 0x07 | 0x0d | 0x13 | 0x14 | 0x18 | 0x21
+    )
+}
 
 pub const GET_CAPABILITIES: u8 = 0x4d;
 pub const SET_ENVIRONMENT: u8 = 0x2a;
@@ -156,6 +167,16 @@ pub fn failure(frame: Frame) -> Frame {
     }
 }
 
+/// A keybag refusal's answer: a wrong passcode with
+/// [`keybag::BAD_PASSCODE_STATUS`], anything else with [`FAILURE`].
+fn keybag_refusal(frame: Frame, reason: stela_contracts::Refusal) -> Refusal {
+    let mut answer = failure(frame);
+    if reason.what() == keybag::BAD_PASSCODE {
+        answer.parameter = keybag::BAD_PASSCODE_STATUS;
+    }
+    Refusal::answered(reason, Answer::frame(answer))
+}
+
 /// The environment the kernel set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Environment {
@@ -178,14 +199,78 @@ pub struct KeyStore {
     refused: Vec<u8>,
     /// Whether the unmodeled lock states were reported.
     state_reported: bool,
+    keybags: Option<keybag::Keybags>,
+    /// The request whose passcode derivation is running.
+    deferred: Option<Deferred>,
+}
+
+/// A request answered once its derivation completes: its frame, and its
+/// message's header and variant for the reply. No request secret is kept.
+struct Deferred {
+    frame: Frame,
+    prefix: Vec<u8>,
+    pending: alloc::boxed::Box<keybag::Pending>,
 }
 
 impl KeyStore {
     pub(super) fn with_system_keys(root: Zeroizing<[u8; 32]>) -> Self {
         Self {
+            keybags: Some(keybag::Keybags::new(&root)),
             system_keys: Some(system_key::SystemKeys::new(root)),
             ..Self::default()
         }
+    }
+
+    /// As [`Self::with_system_keys`], with keybags created at `iterations`.
+    #[cfg(test)]
+    pub(super) fn with_keybag_iterations(root: Zeroizing<[u8; 32]>, iterations: u32) -> Self {
+        Self {
+            keybags: Some(keybag::Keybags::with_iterations(&root, iterations)),
+            ..Self::with_system_keys(root)
+        }
+    }
+
+    /// Whether a request's passcode derivation is running: the SEP keeps
+    /// stepping ([`Self::resume`]) and answers nothing else until it ends.
+    pub fn deriving(&self) -> bool {
+        self.deferred.is_some()
+    }
+
+    /// The frame of the request whose derivation is running.
+    pub fn deferred_frame(&self) -> Option<Frame> {
+        self.deferred.as_ref().map(|deferred| deferred.frame)
+    }
+
+    /// Run one bounded slice of the running derivation. When it completes,
+    /// write the reply through `payload` and return the reply frame, or the
+    /// refusal; until then, `None`.
+    pub fn resume(&mut self, payload: &mut dyn Payload) -> Option<Result<Frame, Refusal>> {
+        // A derivation is only ever started by the keybags.
+        let keybags = self.keybags.as_mut()?;
+        let deferred = self.deferred.as_mut()?;
+        let done = keybags.step(&mut deferred.pending)?;
+        for line in keybags.drain() {
+            self.diagnostics.record(line);
+        }
+        let deferred = self.deferred.take()?;
+        let frame = deferred.frame;
+        let refuse = |reason: stela_contracts::Refusal| {
+            Refusal::answered(reason, Answer::frame(failure(frame)))
+        };
+        let result = done
+            .map_err(|reason| keybag_refusal(frame, reason))
+            .and_then(|fields| {
+                let reply = reply_message(&deferred.prefix, &fields);
+                payload.output(&reply).map_err(refuse)?;
+                Ok(Frame {
+                    tag: frame.tag | REPLY,
+                    parameter: 0,
+                    data: (reply.len() as u32) << LENGTH_SHIFT,
+                    ..frame
+                })
+            });
+        self.note_refusal(frame, result.as_ref().err());
+        Some(result)
     }
 
     /// The state dictionary of a keybag: none is ever locked, as
@@ -193,7 +278,7 @@ impl KeyStore {
     /// Handles are not interpreted. Reported once.
     fn device_state(&mut self, variant: u32, fields: &mut Fields<'_>) -> Result<Vec<u8>> {
         let _session = fields.lword()?;
-        let _handle = fields.word()?;
+        let handle = fields.word()? as i32;
         match variant {
             0 => {}
             1 => {
@@ -203,13 +288,15 @@ impl KeyStore {
         }
         let _flags = fields.word()?;
         fields.end()?;
-        if !self.state_reported {
-            self.state_reported = true;
-            self.diagnostics.record(alloc::string::String::from(
-                "SEP keystore: every keybag reports unlocked without a passcode",
-            ));
-        }
         let zero = || dictionary::number(0);
+        // A loaded user keybag answers with its own lock state.
+        let state = match self.keybags.as_ref().and_then(|bags| bags.state(handle)) {
+            Some(state) => state as u8,
+            None => {
+                self.report_unmodeled_state();
+                UNLOCKED_WITHOUT_PASSCODE
+            }
+        };
         Ok(dictionary::dictionary(&[
             (b"sas", zero()),
             (b"sb", zero()),
@@ -221,8 +308,17 @@ impl KeyStore {
             (b"sls", zero()),
             (b"sms", zero()),
             (b"srcd", zero()),
-            (b"ss", dictionary::number(UNLOCKED_WITHOUT_PASSCODE)),
+            (b"ss", dictionary::number(state)),
         ]))
+    }
+
+    fn report_unmodeled_state(&mut self) {
+        if !self.state_reported {
+            self.state_reported = true;
+            self.diagnostics.record(alloc::string::String::from(
+                "SEP keystore: every keybag but a loaded user keybag reports unlocked without a passcode",
+            ));
+        }
     }
 
     /// Name an unimplemented command in the diagnostics, once per command.
@@ -259,16 +355,50 @@ impl KeyStore {
     }
 
     /// Answer one AP request: read its message, write the reply message
-    /// and return the reply frame. The first refusal of each command is
-    /// named in the diagnostics, unless the command reports its own.
+    /// and return the reply frame, or `None` while its passcode derivation
+    /// runs ([`Self::resume`]). The first refusal of each command is named
+    /// in the diagnostics, unless the command reports its own.
+    pub fn begin(
+        &mut self,
+        frame: Frame,
+        payload: &mut dyn Payload,
+        entropy: &mut dyn super::Entropy,
+    ) -> Result<Option<Frame>, Refusal> {
+        let result = if self.deferred.is_some() {
+            Err(Refusal::unanswerable(
+                "SEP keystore request arrived during a derivation",
+            ))
+        } else {
+            self.serve(frame, payload, entropy)
+        };
+        self.note_refusal(frame, result.as_ref().err());
+        result
+    }
+
+    /// [`Self::begin`], then any derivation to its end.
     pub fn request(
         &mut self,
         frame: Frame,
         payload: &mut dyn Payload,
         entropy: &mut dyn super::Entropy,
     ) -> Result<Frame, Refusal> {
-        let result = self.serve(frame, payload, entropy);
-        if let Err(refusal) = &result
+        if let Some(reply) = self.begin(frame, payload, entropy)? {
+            return Ok(reply);
+        }
+        loop {
+            if let Some(result) = self.resume(payload) {
+                return result;
+            }
+            if !self.deriving() {
+                return Err(Refusal::unanswerable(
+                    "SEP keystore derivation ended without an answer",
+                ));
+            }
+        }
+    }
+
+    fn note_refusal(&mut self, frame: Frame, refusal: Option<&Refusal>) {
+        if let Some(refusal) = refusal
             && frame.tag != system_key::PERFORM_OPERATION
             && !self.unimplemented.contains(&frame.tag)
             && !self.refused.contains(&frame.tag)
@@ -280,7 +410,6 @@ impl KeyStore {
                 refusal.reason
             ));
         }
-        result
     }
 
     fn serve(
@@ -288,7 +417,7 @@ impl KeyStore {
         frame: Frame,
         payload: &mut dyn Payload,
         entropy: &mut dyn super::Entropy,
-    ) -> Result<Frame, Refusal> {
+    ) -> Result<Option<Frame>, Refusal> {
         let refuse = |reason: stela_contracts::Refusal| {
             Refusal::answered(reason, Answer::frame(failure(frame)))
         };
@@ -317,7 +446,8 @@ impl KeyStore {
             self.report_unimplemented(command);
             return Err(refuse(refuse!("SEP keystore command is not implemented")));
         }
-        let mut bytes = vec![0; (frame.data >> LENGTH_SHIFT) as usize];
+        // The request may hold a passcode: its bytes are zeroed when dropped.
+        let mut bytes = Zeroizing::new(vec![0; (frame.data >> LENGTH_SHIFT) as usize]);
         payload.input(&mut bytes).map_err(refuse)?;
         let message = Message::parse(&bytes).map_err(refuse)?;
         let mut fields = message.fields();
@@ -350,12 +480,12 @@ impl KeyStore {
             reply_fields.resize(reply_fields.len().next_multiple_of(4), 0);
             let reply = message.reply(&reply_fields);
             payload.output(&reply).map_err(refuse)?;
-            return Ok(Frame {
+            return Ok(Some(Frame {
                 tag: command | REPLY,
                 parameter: 0,
                 data: (reply.len() as u32) << LENGTH_SHIFT,
                 ..frame
-            });
+            }));
         }
         if volume_key::recognizes(command) {
             let keys = self
@@ -374,12 +504,12 @@ impl KeyStore {
                 .map_err(refuse)?;
             let reply = message.reply(&reply_fields);
             payload.output(&reply).map_err(refuse)?;
-            return Ok(Frame {
+            return Ok(Some(Frame {
                 tag: command | REPLY,
                 parameter: 0,
                 data: (reply.len() as u32) << LENGTH_SHIFT,
                 ..frame
-            });
+            }));
         }
         if command == GET_DEVICE_STATE {
             let state = self
@@ -390,12 +520,12 @@ impl KeyStore {
             reply_fields.resize(reply_fields.len().next_multiple_of(4), 0);
             let reply = message.reply(&reply_fields);
             payload.output(&reply).map_err(refuse)?;
-            return Ok(Frame {
+            return Ok(Some(Frame {
                 tag: command | REPLY,
                 parameter: 0,
                 data: (reply.len() as u32) << LENGTH_SHIFT,
                 ..frame
-            });
+            }));
         }
         if command == CLIENT_TERMINATE {
             if message.variant() != 1 {
@@ -407,17 +537,55 @@ impl KeyStore {
             fields.end().map_err(refuse)?;
             let reply = message.reply(&TERMINATED);
             payload.output(&reply).map_err(refuse)?;
-            return Ok(Frame {
+            return Ok(Some(Frame {
                 tag: command | REPLY,
                 parameter: 0,
                 data: (reply.len() as u32) << LENGTH_SHIFT,
                 ..frame
-            });
+            }));
         }
         if keybag::recognizes(command) {
-            keybag::validate(command, message.variant(), &mut fields).map_err(refuse)?;
-            self.report_unimplemented(command);
-            return Err(refuse(keybag::UNIMPLEMENTED.into()));
+            let Some(keybags) = self.keybags.as_mut() else {
+                // The layout is checked first, so a malformed request is
+                // named as such.
+                keybag::Request::parse(command, message.variant(), &mut fields).map_err(refuse)?;
+                return Err(refuse(refuse!(
+                    "SEP keystore requires provisioned machine roots"
+                )));
+            };
+            let diagnostics = &mut self.diagnostics;
+            let outcome = keybags
+                .request(
+                    command,
+                    message.variant(),
+                    &mut fields,
+                    entropy,
+                    &mut |note| diagnostics.record(note),
+                )
+                .map_err(|reason| keybag_refusal(frame, reason))?;
+            for line in keybags.drain() {
+                self.diagnostics.record(line);
+            }
+            return match outcome {
+                keybag::Outcome::Reply(reply_fields) => {
+                    let reply = message.reply(&reply_fields);
+                    payload.output(&reply).map_err(refuse)?;
+                    Ok(Some(Frame {
+                        tag: command | REPLY,
+                        parameter: 0,
+                        data: (reply.len() as u32) << LENGTH_SHIFT,
+                        ..frame
+                    }))
+                }
+                keybag::Outcome::Derive(pending) => {
+                    self.deferred = Some(Deferred {
+                        frame,
+                        prefix: message.prefix().to_vec(),
+                        pending,
+                    });
+                    Ok(None)
+                }
+            };
         }
         if message.variant() != 0 {
             return Err(refuse(refuse!(
@@ -433,12 +601,12 @@ impl KeyStore {
             fields.end().map_err(refuse)?;
             let reply = message.reply(&[]);
             payload.output(&reply).map_err(refuse)?;
-            return Ok(Frame {
+            return Ok(Some(Frame {
                 tag: command | REPLY,
                 parameter: 0,
                 data: (reply.len() as u32) << LENGTH_SHIFT,
                 ..frame
-            });
+            }));
         }
         let blob = fields.blob().map_err(refuse)?;
         fields.end().map_err(refuse)?;
@@ -461,13 +629,31 @@ impl KeyStore {
         if environment.is_some() {
             self.environment = environment;
         }
-        Ok(Frame {
+        Ok(Some(Frame {
             tag: command | REPLY,
             parameter: 0,
             data: (reply.len() as u32) << LENGTH_SHIFT,
             ..frame
-        })
+        }))
     }
+}
+
+/// The production passcode iterations, for tests outside this module.
+#[cfg(test)]
+pub fn keybag_iterations() -> u32 {
+    keybag::ITERATIONS
+}
+
+/// The iterations per SEP step, for tests outside this module.
+#[cfg(test)]
+pub fn keybag_slice() -> u32 {
+    keybag::SLICE
+}
+
+/// The at-rest statement, for tests outside this module.
+#[cfg(test)]
+pub fn keybag_at_rest() -> &'static str {
+    keybag::AT_REST
 }
 
 impl Environment {
@@ -550,16 +736,26 @@ impl<'a> Message<'a> {
         }
     }
 
+    /// The length, header and variant: everything a reply repeats.
+    fn prefix(&self) -> &'a [u8] {
+        &self.bytes[..self.body + VARIANT_BYTES]
+    }
+
     /// The reply: this request's header and variant, then `fields`, with
     /// the digest recomputed over the reply.
     fn reply(&self, fields: &[u8]) -> Vec<u8> {
-        let mut reply = self.bytes[..self.body].to_vec();
-        reply.extend_from_slice(&self.variant().to_le_bytes());
-        reply.extend_from_slice(fields);
-        let digest = digest(&reply);
-        reply[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&digest);
-        reply
+        reply_message(self.prefix(), fields)
     }
+}
+
+/// A reply message: a request's `prefix` ([`Message::prefix`]), then
+/// `fields`, with the digest recomputed over the reply.
+fn reply_message(prefix: &[u8], fields: &[u8]) -> Vec<u8> {
+    let mut reply = prefix.to_vec();
+    reply.extend_from_slice(fields);
+    let digest = digest(&reply);
+    reply[DIGEST_START..DIGEST_START + DIGEST_BYTES].copy_from_slice(&digest);
+    reply
 }
 
 /// The command fields after the variant, read in order.

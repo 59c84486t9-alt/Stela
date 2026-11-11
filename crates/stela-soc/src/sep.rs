@@ -148,6 +148,16 @@ impl Sep {
         self.mailbox.dma_pending()
     }
 
+    /// Whether the SEP runs a passcode derivation: its DMA step is due now,
+    /// whatever else happens, until the derivation answers.
+    pub fn deriving(&self) -> bool {
+        self.mailbox.execution_enabled()
+            && self
+                .mailbox
+                .firmware::<firmware::SepFirmware>()
+                .is_some_and(firmware::SepFirmware::deriving)
+    }
+
     /// The requests answered with an error reply for the first time since
     /// the last call.
     pub fn take_unmodeled(&mut self) -> alloc::vec::Vec<alloc::string::String> {

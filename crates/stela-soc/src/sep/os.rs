@@ -190,9 +190,17 @@ impl SepOs {
         self.services.as_ref().map(|services| &services.keystore)
     }
 
+    /// Whether a keystore request's passcode derivation runs: its next
+    /// slice is due at the next DMA step, with no other traffic to drive it.
+    pub fn deriving(&self) -> bool {
+        self.services
+            .as_ref()
+            .is_some_and(|services| services.keystore.deriving())
+    }
+
     /// Whether application-service requests await the DMA step.
     pub fn dma_pending(&self) -> bool {
-        self.pending_region.is_some() || !self.pending.is_empty()
+        self.pending_region.is_some() || !self.pending.is_empty() || self.deriving()
     }
 
     /// Answer the queued application-service requests through `port`. A
@@ -227,16 +235,29 @@ impl SepOs {
         // earlier committed operation's reply. A failed request may
         // already have committed durable state before output DMA failed;
         // do not replay it or silently discard unrelated later requests.
-        let Some(frame) = self.pending.pop_front() else {
-            return Ok(());
+        //
+        // A keystore request whose passcode derivation runs holds the queue:
+        // each step runs one bounded slice of it, and later requests wait.
+        let deferred = self
+            .services
+            .as_ref()
+            .and_then(|services| services.keystore.deferred_frame());
+        let frame = match deferred {
+            Some(frame) => frame,
+            None => {
+                let Some(frame) = self.pending.pop_front() else {
+                    return Ok(());
+                };
+                if self.observe.is_some()
+                    && let Some(name) = observe::name(frame.service)
+                {
+                    // Record the request: its frame plus a bounded prefix
+                    // of its OOL input.
+                    self.record(name, frame, &mut *port);
+                }
+                frame
+            }
         };
-        if self.observe.is_some()
-            && let Some(name) = observe::name(frame.service)
-        {
-            // Record the request: its frame plus a bounded prefix of its
-            // OOL input.
-            self.record(name, frame, &mut *port);
-        }
         let services = self
             .services
             .as_mut()
@@ -247,8 +268,16 @@ impl SepOs {
             read: 0,
         };
         let result = match frame.service {
+            keystore::ID if deferred.is_some() => match services.keystore.resume(&mut payload) {
+                Some(result) => result,
+                None => return Ok(()),
+            },
             xart::MASTER_ID | xart::SLAVE_ID => services.xart.request(frame, &mut payload, entropy),
-            keystore::ID => services.keystore.request(frame, &mut payload, entropy),
+            keystore::ID => match services.keystore.begin(frame, &mut payload, entropy) {
+                Ok(Some(reply)) => Ok(reply),
+                Ok(None) => return Ok(()),
+                Err(refusal) => Err(refusal),
+            },
             credentials::ID => credentials::request(frame, &mut payload),
             boot_policy::ID => services
                 .xart
@@ -304,8 +333,18 @@ impl SepOs {
             let available = buffers.input_len();
             if available == 0 {
                 line.push_str(" input=unregistered");
+            } else if frame.service == keystore::ID && keystore::carries_secret(frame.tag) {
+                // A passcode is never recorded, not even in part.
+                line.push_str(&format!(" input[{available}]=withheld"));
             } else {
-                let take = available.min(observe::INPUT_PREFIX as u64) as usize;
+                // An `sks` frame names its request's length: bytes past it
+                // are an earlier request's, which may have held a passcode.
+                let request = if frame.service == keystore::ID {
+                    u64::from(frame.data >> 16)
+                } else {
+                    available
+                };
+                let take = available.min(request).min(observe::INPUT_PREFIX as u64) as usize;
                 let mut bytes = alloc::vec![0; take];
                 match buffers.read_input(port, 0, &mut bytes) {
                     Ok(()) => {

@@ -1287,6 +1287,18 @@ impl Devices for AppleDevices {
             })
             .chain(self.native_pmp_dma_deadline())
             .chain(self.native_pmp_services_deadline())
+            // A SEP passcode derivation runs one bounded slice per step,
+            // so it finishes while every PE waits.
+            .chain(
+                self.sep_masters
+                    .iter()
+                    .filter(|master| {
+                        self.bus
+                            .device::<Sep>(master.sep)
+                            .is_some_and(Sep::deriving)
+                    })
+                    .map(|_| 0),
+            )
             // A display's next vblank, while its notification clients pace
             // by it, a swap waits to be latched or a queued flip to be made.
             .chain(self.dcp_masters.iter().filter_map(|master| {

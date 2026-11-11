@@ -116,6 +116,11 @@ impl SepFirmware {
         matches!(&self.phase, Phase::Active(os) if os.os_active_sent())
     }
 
+    /// Whether sepOS runs a keystore passcode derivation ([`SepOs::deriving`]).
+    pub fn deriving(&self) -> bool {
+        matches!(&self.phase, Phase::Active(os) if os.deriving())
+    }
+
     /// Drain the observed `sks`/`pnon`/`scrd` traffic as log lines, if
     /// `--sep-observe` and sepOS is active.
     pub fn drain_observations(&mut self) -> alloc::vec::Vec<alloc::string::String> {
