@@ -645,6 +645,27 @@ fn uac2_selection_keeps_zero_bandwidth_until_explicit_pcm_start() {
 }
 
 #[test]
+fn vendor_class_interfaces_reach_ethernet_only_for_listed_adapters() {
+    // A vendor-class interface without endpoints, as LED controllers have.
+    let configuration = vec![
+        9, 2, 18, 0, 1, 1, 0, 0x80, 50, 9, 4, 0, 0, 0, 0xff, 0xff, 0xff, 0,
+    ];
+    let mut device = device(vec![configuration]);
+    select(&mut device).unwrap();
+    let all = interfaces(&device.configuration);
+    assert_eq!(
+        plan(&device, &all[0], &all).err(),
+        Some("no class driver for this interface")
+    );
+    // A listed RTL815x ID without a revision read keeps its own reason.
+    device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x53, 0x81]);
+    assert_eq!(
+        plan(&device, &all[0], &all).err(),
+        Some("USB Ethernet chip revision not identified")
+    );
+}
+
+#[test]
 fn uac2_board_codec_binds_its_association_and_leaves_hid_to_hid() {
     let configuration = audio::board_codec_configuration();
     assert_eq!(sanitize(&configuration, HIGH_SPEED).unwrap(), configuration);

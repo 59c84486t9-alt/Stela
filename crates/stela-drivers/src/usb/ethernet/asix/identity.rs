@@ -48,17 +48,25 @@ pub(in crate::usb::ethernet) const LEGACY_IDS: &[(u16, u16, Identity)] = &[
     (0x33f7, 0x0004, Identity::Ax88772 { eeprom_mac: true }),
 ];
 
+fn listed_identity(descriptor: &[u8; 18]) -> Option<Identity> {
+    let vid = u16::from_le_bytes([descriptor[8], descriptor[9]]);
+    let pid = u16::from_le_bytes([descriptor[10], descriptor[11]]);
+    IDS.iter()
+        .chain(LEGACY_IDS)
+        .find(|entry| (entry.0, entry.1) == (vid, pid))
+        .map(|entry| entry.2)
+}
+
+/// Whether either ASIX table lists the device, whatever its interfaces.
+pub(in crate::usb::ethernet) fn listed(descriptor: &[u8; 18]) -> bool {
+    listed_identity(descriptor).is_some()
+}
+
 pub(in crate::usb::ethernet) fn identify(
     descriptor: &[u8; 18],
     interface: &Interface,
 ) -> Option<Identity> {
-    let vid = u16::from_le_bytes([descriptor[8], descriptor[9]]);
-    let pid = u16::from_le_bytes([descriptor[10], descriptor[11]]);
-    let found = IDS
-        .iter()
-        .chain(LEGACY_IDS)
-        .find(|entry| (entry.0, entry.1) == (vid, pid))
-        .map(|entry| entry.2)?;
+    let found = listed_identity(descriptor)?;
     match found {
         Identity::Ax88772 { .. } if interface.class == 0xff => Some(found),
         Identity::Ax88772 { .. } => None,

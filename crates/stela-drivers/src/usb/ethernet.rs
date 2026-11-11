@@ -40,6 +40,13 @@ pub use identity::matches;
 use identity::policy;
 use rtl815x::{Chip, Revision};
 
+/// Whether a vendor Ethernet backend's ID table lists the device. Only listed
+/// devices are adapters; other vendor-class interfaces, such as LED or sensor
+/// controllers, belong to no driver here and get no chip identification.
+pub fn listed(descriptor: &[u8; 18]) -> bool {
+    matches(descriptor) || asix::listed(descriptor)
+}
+
 #[cfg(test)]
 pub(crate) fn asix_ids() -> Vec<(u16, u16)> {
     asix::ids().iter().map(|entry| (entry.0, entry.1)).collect()

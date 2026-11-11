@@ -16,7 +16,7 @@ pub(crate) mod model;
 #[cfg(test)]
 pub(crate) use legacy::model::Hardware as LegacyModel;
 mod registers;
-pub(super) use identity::{Identity, identify};
+pub(super) use identity::{Identity, identify, listed};
 use registers::*;
 
 /// One register operation's setup fields and its endpoint-zero data stage.

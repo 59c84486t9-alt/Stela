@@ -234,7 +234,7 @@ pub(super) fn plan_with_controller(
         0xff if bluetooth::broadcom::is_vendor_interface(device, interface) => {
             bluetooth::Binding::new(device, interface).map(Plan::Bluetooth)
         }
-        0xff => {
+        0xff if ethernet::listed(&device.descriptor) => {
             let mut failure = "no supported vendor Ethernet interface setting";
             let mut chosen = None;
             for candidate in all
