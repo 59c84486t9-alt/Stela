@@ -175,7 +175,16 @@ fn exit_transition_costs() {
     // The parts of one transition, at EL1 after an SVC.
     let mut machine = user(false);
     exit(&mut machine, SVC);
-    let parts: [(&str, Round); 6] = [
+    let parts = parts();
+    for (name, part) in parts {
+        let ns = time(&mut machine, 1, part);
+        std::println!("EXITS part={name} ns={ns}");
+    }
+}
+
+/// The parts of one transition, at EL1 after an SVC.
+fn parts() -> [(&'static str, Round); 6] {
+    [
         ("cpu-take+return", |machine| {
             let exception = crate::machine::cpu::Exception::synchronous(
                 crate::machine::exception::Class::SupervisorCall,
@@ -202,11 +211,133 @@ fn exit_transition_costs() {
         ("variant", |machine| {
             machine.current_variant(false, false);
         }),
-    ];
-    for (name, part) in parts {
-        let ns = time(&mut machine, 1, part);
-        std::println!("EXITS part={name} ns={ns}");
+    ]
+}
+
+/// Nanoseconds per transition of `round` (making `transitions`) when each
+/// round starts after `evict` bytes of other data went through the caches,
+/// as native guest code does between two exits: the median of `rounds`
+/// rounds, each timed alone, so the eviction is not counted.
+fn time_cold(
+    machine: &mut Machine<FakeHost, NoDevices>,
+    transitions: u64,
+    evict: &mut [u64],
+    mut round: impl FnMut(&mut Machine<FakeHost, NoDevices>),
+) -> u64 {
+    const ROUNDS: usize = 301;
+    let mut samples = std::vec::Vec::with_capacity(ROUNDS);
+    for index in 0..ROUNDS {
+        // One write per line: the lines are dirty and must leave.
+        for line in evict.iter_mut().step_by(8) {
+            *line = line.wrapping_add(index as u64);
+        }
+        core::hint::black_box(&mut *evict);
+        let started = std::time::Instant::now();
+        round(machine);
+        samples.push(started.elapsed().as_nanos() as u64);
     }
+    samples.sort_unstable();
+    samples[ROUNDS / 2] / transitions
+}
+
+/// `cargo test -p stela-engine --release --lib exit_transition_cold_costs
+/// -- --ignored --nocapture`: [`exit_transition_costs`] with the caches
+/// refilled by other data before every pair, which is how a guest's exits
+/// find them: hot (none), past L2 (2 MiB), past L3 (256 MiB).
+#[test]
+#[ignore = "manual: opt-in timing"]
+fn exit_transition_cold_costs() {
+    for mib in [0usize, 2, 256] {
+        let mut evict = std::vec![0u64; mib * 1024 * 1024 / 8];
+        for host in [false, true] {
+            let mut machine = user(host);
+            let ns = time_cold(&mut machine, 2, &mut evict, system_call);
+            std::println!("EXITS cold_mib={mib} svc+eret host={host} ns_per_transition={ns}");
+        }
+        let mut machine = gxf(stela_contracts::Chip::AppleM2);
+        let at = machine.cpu.pc;
+        let ns = time_cold(&mut machine, 2, &mut evict, |machine| {
+            guarded_call(machine, at)
+        });
+        std::println!("EXITS cold_mib={mib} genter+gexit ns_per_transition={ns}");
+    }
+    // Hot code, cold data: SVC+ERET on each of `count` machines in turn,
+    // so each finds its own state evicted by the others' but the engine's
+    // code warm.
+    for count in [1usize, 64] {
+        let mut machines: std::vec::Vec<_> = (0..count).map(|_| user(true)).collect();
+        let mut samples = std::vec::Vec::new();
+        for pass in 0..8 {
+            for machine in &mut machines {
+                let started = std::time::Instant::now();
+                system_call(machine);
+                if pass > 0 {
+                    samples.push(started.elapsed().as_nanos() as u64);
+                }
+            }
+        }
+        samples.sort_unstable();
+        let ns = samples[samples.len() / 2] / 2;
+        std::println!("EXITS machines={count} svc+eret host=true ns_per_transition={ns}");
+    }
+    // Each half alone, and each part of a transition (at EL1 after an
+    // SVC), past L3.
+    let mut evict = std::vec![0u64; 256 * 1024 * 1024 / 8];
+    for (name, word) in [("svc", SVC), ("eret", ERET)] {
+        let mut machine = user(true);
+        let ns = time_cold(&mut machine, 1, &mut evict, |machine| {
+            machine.cpu.pc = USER;
+            exit(machine, SVC);
+            if word == ERET {
+                // Only the ERET is timed: the SVC before it runs warm and
+                // is taken out by timing it again alone below.
+            }
+        });
+        std::println!("EXITS cold_mib=256 {name}-alone host=true ns={ns}");
+        if word == SVC {
+            continue;
+        }
+        let mut samples = std::vec::Vec::new();
+        for index in 0..301u64 {
+            machine.cpu.pc = USER;
+            exit(&mut machine, SVC);
+            for line in evict.iter_mut().step_by(8) {
+                *line = line.wrapping_add(index);
+            }
+            core::hint::black_box(&mut evict);
+            let started = std::time::Instant::now();
+            exit(&mut machine, ERET);
+            samples.push(started.elapsed().as_nanos() as u64);
+        }
+        samples.sort_unstable();
+        std::println!(
+            "EXITS cold_mib=256 eret-alone host=true ns={}",
+            samples[samples.len() / 2]
+        );
+    }
+    let mut machine = user(false);
+    exit(&mut machine, SVC);
+    for (name, part) in parts() {
+        let ns = time_cold(&mut machine, 1, &mut evict, part);
+        std::println!("EXITS cold_mib=256 part={name} ns={ns}");
+    }
+    // Past L3, then the code warmed by another machine's SVC+ERET: what
+    // is left of the cold cost is the timed machine's own data.
+    let (mut warm, mut timed) = (user(true), user(true));
+    let mut samples = std::vec::Vec::new();
+    for index in 0..301u64 {
+        for line in evict.iter_mut().step_by(8) {
+            *line = line.wrapping_add(index);
+        }
+        core::hint::black_box(&mut evict);
+        system_call(&mut warm);
+        let started = std::time::Instant::now();
+        system_call(&mut timed);
+        samples.push(started.elapsed().as_nanos() as u64);
+    }
+    samples.sort_unstable();
+    let ns = samples[samples.len() / 2] / 2;
+    std::println!("EXITS cold_mib=256 code_warm svc+eret host=true ns_per_transition={ns}");
 }
 
 /// Nanoseconds per SVC or ERET transition of four PEs of one M2 cluster
