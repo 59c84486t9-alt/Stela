@@ -1065,6 +1065,18 @@ impl Hub {
         self.section(pe);
     }
 
+    /// Whether the host work a release of the devices' lock leaves
+    /// ([`Kick::released`]) may run on PE `pe` now: only outside its run
+    /// loop or asleep, where a broadcast does not wait for it
+    /// ([`Self::applied`]). A PE inside its loop would read no mail while
+    /// that work waits on a host device. An unknown PE (`usize::MAX`) or a
+    /// parked one leaves it too.
+    pub(super) fn serves_released(&self, pe: usize) -> bool {
+        self.inboxes.get(pe).is_some_and(|inbox| {
+            inbox.outside.load(Ordering::SeqCst) || inbox.sleeping.load(Ordering::SeqCst)
+        })
+    }
+
     /// Whether the home machine is outside its run loop: it advances the
     /// devices with time only from inside it.
     pub(super) fn home_outside(&self) -> bool {

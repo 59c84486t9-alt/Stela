@@ -1109,6 +1109,54 @@ impl Kick for Ticks {
     }
 }
 
+/// Counts the host work releases of the devices' lock run
+/// ([`Kick::released`]).
+struct Releases(Arc<AtomicUsize>);
+impl Kick for Releases {
+    fn kick(&self, _pe: usize) {}
+    fn released(&self) -> bool {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        false
+    }
+}
+
+/// The host work a release of the devices' lock leaves runs only on a PE
+/// outside its run loop or asleep, where no broadcast waits for it: one
+/// inside its loop, or a call that names no PE, leaves it for later, so a
+/// slow host device never keeps a running PE from its mail.
+#[test]
+fn released_host_work_runs_only_outside_the_run_loop() {
+    let released = Arc::new(AtomicUsize::new(0));
+    let hub = Hub::new(2, Releases(Arc::clone(&released)));
+    for pe in 0..2 {
+        hub.set_live(pe, true);
+    }
+    let home = SharedDevices::new(Signalling::default(), Arc::clone(&hub));
+    released.store(0, Ordering::SeqCst);
+    let mut worker = home.worker();
+
+    // Inside its run loop: the access takes the lock and leaves the work.
+    worker.write(1, 0, 4, 0, 0).unwrap();
+    assert_eq!(released.load(Ordering::SeqCst), 0, "inside the run loop");
+    // A call that names no PE leaves it too.
+    home.with(|_| ());
+    assert_eq!(released.load(Ordering::SeqCst), 0, "no PE named");
+
+    // Outside its run loop, as a device site's access runs, it does it.
+    hub.set_outside(1, true);
+    worker.write(1, 0, 4, 0, 0).unwrap();
+    assert_eq!(released.load(Ordering::SeqCst), 1, "outside");
+    hub.set_outside(1, false);
+
+    // Asleep, as a halted PE serving the host, it does it.
+    hub.inboxes[1].sleeping.store(true, Ordering::SeqCst);
+    worker.write(1, 0, 4, 0, 0).unwrap();
+    assert_eq!(released.load(Ordering::SeqCst), 2, "asleep");
+    hub.inboxes[1].sleeping.store(false, Ordering::SeqCst);
+    worker.write(1, 0, 4, 0, 0).unwrap();
+    assert_eq!(released.load(Ordering::SeqCst), 2, "inside again");
+}
+
 /// What follows a write, [`Devices::settle_write`]: the lock, the DMA
 /// under it, the call and the lock after, in that order, from one board
 /// lock.
