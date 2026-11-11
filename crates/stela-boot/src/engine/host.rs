@@ -57,6 +57,7 @@ use stela_engine::machine::mmu::tlbi::Reach;
 use stela_engine::machine::mmu::translated::Tlb;
 
 mod bare_host;
+pub(crate) mod chain_check;
 mod faults;
 pub(crate) mod pmu;
 mod signals;

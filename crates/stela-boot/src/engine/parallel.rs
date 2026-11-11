@@ -154,6 +154,9 @@ impl Pe {
         // This core's own allocations, which other PEs' leave alone.
         let own = || crate::ALLOCATOR.own().unwrap_or(0);
         let before = own();
+        if step_timing {
+            host::chain_check::run(pe, &mut owner.host());
+        }
         let mut machine = profile
             .start(cpu, owner.host(), devices, pe)
             .unwrap_or_else(|error| output::fatal(error));
