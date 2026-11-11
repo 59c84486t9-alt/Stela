@@ -1237,6 +1237,12 @@ fn install_reads_full_or_streamed_image() {
         "{install}"
     );
     assert!(!install.contains("--install-source"), "{install}");
+    // Status names where a streamed image comes from, not an empty partition.
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(
+        status.contains("(macOS ") && status.contains(", downloads during installation): intact"),
+        "{status}"
+    );
     // Repair makes it full: the IPSW in pieces on the USB.
     let switch = |image| {
         rerun(&f, |c| {
