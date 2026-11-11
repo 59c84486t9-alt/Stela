@@ -15,7 +15,7 @@ use stela_drivers::{
     usb::storage::Data,
 };
 
-const SERIAL: &str = "0123456789ABCDEF";
+const SERIAL: &str = "4A7261F02CC3DD19";
 
 fn ram_disk(blocks: u64, block_size: u32, read_only: bool) -> RamDisk {
     let mut disk = RamDisk::new("host", blocks, block_size);
