@@ -1200,7 +1200,7 @@ mod tests {
     #[test]
     fn nvidia_device_ids_name_chips_with_pinned_firmware() {
         for (device, chip) in [
-            (0x2c02, "gb203"),
+            (0x2c05, "gb203"),
             (0x2b85, "gb202"),
             (0x2684, "ad102"),
             (0x2484, "ga104"),

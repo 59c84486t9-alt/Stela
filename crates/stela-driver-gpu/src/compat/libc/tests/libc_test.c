@@ -114,8 +114,8 @@ static void test_parsing(void)
 	CHECK(sscanf("  7 x", "%d%n", &number, &consumed) == 1 && number == 7 && consumed == 3);
 	CHECK(sscanf("abcdef", "%3s", word) == 1 && !strcmp(word, "abc"));
 	unsigned int high, low;
-	CHECK(sscanf("10de:2c02", "%x:%x", &high, &low) == 2);
-	CHECK(high == 0x10de && low == 0x2c02);
+	CHECK(sscanf("10de:2c05", "%x:%x", &high, &low) == 2);
+	CHECK(high == 0x10de && low == 0x2c05);
 }
 
 static int ascending(const void *a, const void *b)

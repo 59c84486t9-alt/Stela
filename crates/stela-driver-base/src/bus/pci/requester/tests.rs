@@ -49,7 +49,7 @@ impl ConfigSpace for Config {
     }
 }
 fn configure<C: ConfigSpace>(config: &mut C) {
-    config.write32(0, 0x2c02_10de).unwrap();
+    config.write32(0, 0x2c05_10de).unwrap();
     config.write32(8, 0x0300_0000).unwrap();
     config
         .write16(regs::COMMAND, regs::COMMAND_INTX_DISABLE)
@@ -143,7 +143,7 @@ fn binding_keeps_original_config_and_native_root_until_explicit_release() {
     assert_eq!(binding.address(), ADDRESS);
     assert_eq!(binding.requester(), 0xe7ee);
     assert_eq!(binding.check_live(), Ok(()));
-    assert_eq!(function.config().read32(0).unwrap(), 0x2c02_10de);
+    assert_eq!(function.config().read32(0).unwrap(), 0x2c05_10de);
     let mut config = function.into_config();
     assert_eq!(config.matches_binding(&binding), Ok(true));
     // SAFETY: stopped synchronous fixture; Busy must refuse before unmap.
