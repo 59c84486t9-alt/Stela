@@ -2418,10 +2418,15 @@ pub(super) fn slice(ticks: u64) -> u64 {
         Some(since) => {
             let unmasked = since.saturating_add(gpu.tsc_after(DEFER_UNMASKED_NS));
             let longest = since.saturating_add(gpu.tsc_after(DEFER_LONGEST_NS));
+            // Every recheck, so that a boot PE that reaches EL0 or waits
+            // for an interrupt (calm, `pump_due`) pumps then rather than at
+            // the unmasked deadline: a submission or completion waits a
+            // quarter of a millisecond for a calm moment, not the whole one.
+            let recheck = now.saturating_add(gpu.tsc_after(RECHECK_NS));
             if now < unmasked {
-                unmasked
+                recheck.min(unmasked)
             } else {
-                now.saturating_add(gpu.tsc_after(RECHECK_NS)).min(longest)
+                recheck.min(longest)
             }
         }
         None => gpu.next.load(Ordering::Relaxed),
