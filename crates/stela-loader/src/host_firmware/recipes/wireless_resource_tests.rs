@@ -174,3 +174,36 @@ fn approved_downloads_match_recipe_and_license_content_pins() {
         assert!(recipe.image.verify(&altered).is_err());
     }
 }
+
+#[test]
+fn a_wifi_network_requires_the_database_and_a_mediatek_chips_two_images() {
+    for (device, chip) in [
+        (0x7961, "7961"),
+        (0x0608, "7961"),
+        (0x7922, "7922"),
+        (0x0616, "7922"),
+        (0x7925, "7925"),
+        (0x0717, "7925"),
+    ] {
+        let mut inventory = Inventory::default();
+        require_regulatory(&mut inventory).unwrap();
+        assert!(require_wifi(&mut inventory, 0x14c3, device).unwrap());
+        let plan = Plan::select(&inventory).unwrap();
+        assert_eq!(plan.selections().len(), 3, "{device:#x}");
+        for selection in &plan.selections()[1..] {
+            assert_eq!(selection.request.target.driver, "wifi-mt792x");
+            assert_eq!(
+                selection.request.target.hardware,
+                format!("pci:14c3:{chip}")
+            );
+            assert_eq!(selection.request.target.revision, "linux-firmware");
+            assert_eq!(selection.recipe.image.member, selection.request.name);
+        }
+    }
+    // An Intel adapter chooses its files by registers, and Ethernet has none.
+    let mut inventory = Inventory::default();
+    for (vendor, device) in [(0x8086, 0x2725), (0x8086, 0x125c), (0x14c3, 0x7663)] {
+        assert!(!require_wifi(&mut inventory, vendor, device).unwrap());
+    }
+    assert!(inventory.requests().is_empty());
+}

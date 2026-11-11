@@ -741,6 +741,7 @@ impl Request {
                 firmware::provision(firmware::ProvisionOptions {
                     requirements: requirements.as_deref(),
                     gpu: gpu.as_deref(),
+                    wifi: None,
                     destination: &record.esp.join(stela_loader::host_firmware::DIRECTORY),
                     cache: &cache,
                     dry_run: self.dry_run,

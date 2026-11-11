@@ -708,6 +708,66 @@ pub fn require_gsp(inventory: &mut Inventory, chip: &str) -> Result<(), Error> {
     }
 }
 
+/// Requires what a Wi-Fi adapter with these PCI IDs loads, where the IDs
+/// alone name it: a MediaTek chip's two images under the chip's binding
+/// (`stela_drivers::net::wifi::mediatek::identity::Chip::target`). Other
+/// adapters choose their files by registers only a boot of the PC reads.
+/// Returns whether the adapter is one whose files are now required.
+pub fn require_wifi(inventory: &mut Inventory, vendor: u16, device: u16) -> Result<bool, Error> {
+    let (hardware, names) = match (vendor, device) {
+        (0x14c3, 0x7961 | 0x0608) => (
+            "pci:14c3:7961",
+            [
+                "mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin",
+                "mediatek/WIFI_RAM_CODE_MT7961_1.bin",
+            ],
+        ),
+        (0x14c3, 0x7922 | 0x0616) => (
+            "pci:14c3:7922",
+            [
+                "mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin",
+                "mediatek/WIFI_RAM_CODE_MT7922_1.bin",
+            ],
+        ),
+        (0x14c3, 0x7925 | 0x0717) => (
+            "pci:14c3:7925",
+            [
+                "mediatek/mt7925/WIFI_MT7925_PATCH_MCU_1_1_hdr.bin",
+                "mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin",
+            ],
+        ),
+        _ => return Ok(false),
+    };
+    for name in names {
+        inventory.observe(Requirement {
+            name,
+            target: Target {
+                driver: "wifi-mt792x",
+                hardware,
+                revision: "linux-firmware",
+                board: None,
+            },
+            minimum_bytes: 1,
+        })?;
+    }
+    Ok(true)
+}
+
+/// Requires the regulatory database, without which no Wi-Fi adapter scans
+/// (`stela_drivers::net::wifi::regulatory::database::REQUIREMENT`).
+pub fn require_regulatory(inventory: &mut Inventory) -> Result<(), Error> {
+    inventory.observe(Requirement {
+        name: "regulatory.db",
+        target: Target {
+            driver: "wifi-regulatory",
+            hardware: "wireless-regdb",
+            revision: "v20",
+            board: None,
+        },
+        minimum_bytes: 8,
+    })
+}
+
 /// The drivers' request for the version-20 database
 /// (`stela_drivers::net::wifi::regulatory::database::REQUIREMENT`).
 fn select_regulatory(request: &Request) -> Option<&'static Recipe> {

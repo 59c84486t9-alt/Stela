@@ -728,6 +728,9 @@ pub(super) fn plan(
             "host-firmware fetch --gpu CHIP",
         )));
     }
+    if record.wifi.is_some() {
+        notes.extend(firmware::wifi_note(environment.host)?);
+    }
     Ok(Plan {
         record,
         ipsw,
@@ -1089,6 +1092,7 @@ pub(super) fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
         firmware::provision(firmware::ProvisionOptions {
             requirements: None,
             gpu: Some(chip),
+            wifi: None,
             destination: &esp.join(stela_loader::host_firmware::DIRECTORY),
             cache: &super::cache_dir().join("firmware"),
             dry_run: false,
@@ -1101,6 +1105,9 @@ pub(super) fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
                 super::fix(&esp, &format!("host-firmware fetch --gpu {chip}"))
             )
         })?;
+    }
+    if record.wifi.is_some() {
+        firmware::provision_wifi(environment.host, &esp, &plan.efi_image)?;
     }
     Ok(())
 }

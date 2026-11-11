@@ -40,11 +40,13 @@ pub(super) fn whole_disk(name: &str) -> Option<String> {
     Some(format!("disk{}", number.parse::<u32>().ok()?))
 }
 
-/// The PCI device ID in an NVIDIA device's instance ID, such as
+/// The PCI vendor and device IDs in a device's instance ID, such as
 /// `PCI\VEN_10DE&DEV_2786&SUBSYS_...`.
-pub(super) fn nvidia_device(instance: &str) -> Option<u16> {
-    let device = instance.strip_prefix("PCI\\VEN_10DE&DEV_")?.get(..4)?;
-    u16::from_str_radix(device, 16).ok()
+pub(super) fn pci_device(instance: &str) -> Option<(u16, u16)> {
+    let ids = instance.strip_prefix("PCI\\VEN_")?;
+    let vendor = u16::from_str_radix(ids.get(..4)?, 16).ok()?;
+    let device = ids.get(4..)?.strip_prefix("&DEV_")?.get(..4)?;
+    Some((vendor, u16::from_str_radix(device, 16).ok()?))
 }
 
 #[cfg(test)]
@@ -96,12 +98,19 @@ mod tests {
     }
 
     #[test]
-    fn instance_ids_name_nvidia_devices() {
+    fn instance_ids_name_pci_devices() {
         let id = "PCI\\VEN_10DE&DEV_2786&SUBSYS_00000000&REV_A1\\4&0123ABCD&0&0008";
-        assert_eq!(nvidia_device(id), Some(0x2786));
+        assert_eq!(pci_device(id), Some((0x10de, 0x2786)));
         assert_eq!(
-            nvidia_device("PCI\\VEN_1002&DEV_1234&SUBSYS_00000000"),
-            None
+            pci_device("PCI\\VEN_14C3&DEV_7925&SUBSYS_00000000"),
+            Some((0x14c3, 0x7925))
         );
+        for other in [
+            "USB\\VID_0E8D&PID_0616",
+            "PCI\\VEN_10DE",
+            "PCI\\VEN_10DE&DEV_27",
+        ] {
+            assert_eq!(pci_device(other), None, "{other}");
+        }
     }
 }

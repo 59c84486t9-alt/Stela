@@ -276,6 +276,10 @@ pub(super) fn update_stela(
     super::fdr::prepare(&record, false)?;
     efi::add_mount(&esp, &image, None, None)?;
     activate(&mut record, to)?;
+    // A USB whose setup left its Wi-Fi network without firmware gets it now.
+    if record.wifi.is_some() {
+        super::firmware::provision_wifi(environment.host, &esp, &image)?;
+    }
     text.push_str("Done.\n");
     Ok(text)
 }

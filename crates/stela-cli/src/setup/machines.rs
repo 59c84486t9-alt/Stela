@@ -438,6 +438,10 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Request) -> Res
     publish(&mut record)?;
     write_record(&record.esp.clone(), &record)?;
     super::remove_bundles(&record, &removed_bundles)?;
+    if command.wifi.is_some() {
+        let mount_image = fs::read(record.esp.join(super::LOADER_PATH))?;
+        super::firmware::provision_wifi(environment.host, &record.esp, &mount_image)?;
+    }
     let key = record.esp.join(super::wifi::KEY_PATH);
     if command.no_wifi && key.is_file() {
         fs::remove_file(key)?;

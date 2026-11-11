@@ -226,25 +226,39 @@ fn require_system_device(devices: &[Device]) -> Result<()> {
     Ok(())
 }
 
+/// The vendor and device IDs of this computer's PCI devices of base class
+/// `class`.
+fn pci_devices(class: u32) -> Result<Vec<(u16, u16)>> {
+    let hex = |device: &Path, name| {
+        let text = fs::read_to_string(device.join(name)).ok()?;
+        u32::from_str_radix(text.trim().strip_prefix("0x")?, 16).ok()
+    };
+    let mut devices = Vec::new();
+    for device in fs::read_dir("/sys/bus/pci/devices")? {
+        let device = device?.path();
+        if hex(&device, "class").is_some_and(|found| found >> 16 == class)
+            && let (Some(vendor), Some(id)) = (hex(&device, "vendor"), hex(&device, "device"))
+        {
+            devices.push((vendor as u16, id as u16));
+        }
+    }
+    Ok(devices)
+}
+
 impl Host for System {
     fn nvidia_gpus(&self) -> Result<Vec<u16>> {
-        let hex = |device: &Path, name| {
-            let text = fs::read_to_string(device.join(name)).ok()?;
-            u32::from_str_radix(text.trim().strip_prefix("0x")?, 16).ok()
-        };
-        let mut gpus = Vec::new();
-        for device in fs::read_dir("/sys/bus/pci/devices")? {
-            let device = device?.path();
-            // Base class 3 is a display controller; an NVIDIA GPU's audio
-            // function is not one.
-            if hex(&device, "vendor") == Some(0x10de)
-                && hex(&device, "class").is_some_and(|class| class >> 16 == 3)
-                && let Some(id) = hex(&device, "device")
-            {
-                gpus.push(id as u16);
-            }
-        }
-        Ok(gpus)
+        // Base class 3 is a display controller; an NVIDIA GPU's audio
+        // function is not one.
+        Ok(pci_devices(3)?
+            .into_iter()
+            .filter(|&(vendor, _)| vendor == 0x10de)
+            .map(|(_, device)| device)
+            .collect())
+    }
+
+    fn network_adapters(&self) -> Result<Vec<(u16, u16)>> {
+        // Base class 2 is a network controller, wired or wireless.
+        pci_devices(2)
     }
 
     fn volume(&self, path: &Path) -> Result<Volume> {

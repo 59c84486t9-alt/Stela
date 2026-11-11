@@ -125,11 +125,58 @@ pub(super) fn missing(fix: &str) -> String {
     )
 }
 
+/// Add what a Wi-Fi network needs to the firmware on the USB's EFI partition
+/// `esp`, whose boot program is `mount_image`: the regulatory database, and
+/// the files of this computer's Wi-Fi adapters whose PCI IDs name them.
+pub(super) fn provision_wifi(
+    host: &dyn super::host::Host,
+    esp: &Path,
+    mount_image: &[u8],
+) -> Result<()> {
+    // A boot program that reads no firmware from the USB has no Wi-Fi driver
+    // either.
+    if !host_firmware::supports_mount(mount_image) {
+        return Ok(());
+    }
+    provision(ProvisionOptions {
+        requirements: None,
+        gpu: None,
+        wifi: Some(&host.network_adapters()?),
+        destination: &esp.join(host_firmware::DIRECTORY),
+        cache: &super::cache_dir().join("firmware"),
+        dry_run: false,
+        mount_image,
+    })
+    .context("the Wi-Fi network is set, but the USB did not get the Wi-Fi firmware")?;
+    Ok(())
+}
+
+/// A note for a setup with a Wi-Fi network on a computer none of whose
+/// adapters' files setup can add.
+pub(super) fn wifi_note(host: &dyn super::host::Host) -> Result<Option<String>> {
+    let mut inventory = Inventory::default();
+    for (vendor, device) in host.network_adapters()? {
+        if recipes::require_wifi(&mut inventory, vendor, device)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(NO_WIFI_FILES.into()))
+}
+
+/// What [`wifi_note`] says.
+const NO_WIFI_FILES: &str = "this computer has no Wi-Fi adapter whose firmware setup \
+    can add (MediaTek MT7921, MT7922 or MT7925), so the USB has none: the PC needs wired \
+    Ethernet, or run setup on the PC itself";
+
 /// Firmware inputs, cache and destination for one provisioning request.
 pub(super) struct ProvisionOptions<'a> {
     pub(super) requirements: Option<&'a Path>,
     /// A chip to add nouveau's files for, to what the destination holds.
     pub(super) gpu: Option<&'a str>,
+    /// The setup computer's network adapters, when a Wi-Fi network is set:
+    /// add the regulatory database and their files to what the destination
+    /// holds.
+    pub(super) wifi: Option<&'a [(u16, u16)]>,
     pub(super) destination: &'a Path,
     pub(super) cache: &'a Path,
     pub(super) dry_run: bool,
@@ -140,6 +187,7 @@ pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
     let ProvisionOptions {
         requirements,
         gpu,
+        wifi,
         destination,
         cache,
         dry_run,
@@ -156,7 +204,7 @@ pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
             .take(MAX_MANIFEST_BYTES as u64 + 1)
             .read_to_end(&mut bytes)?;
         let previous = host_firmware::Manifest::parse(&bytes)?;
-        if gpu.is_some() {
+        if gpu.is_some() || wifi.is_some() {
             for image in &previous.images {
                 inventory.observe(Requirement {
                     name: image.name,
@@ -187,6 +235,12 @@ pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
     }
     if let Some(chip) = gpu {
         recipes::require_gsp(&mut inventory, chip)?;
+    }
+    if let Some(adapters) = wifi {
+        recipes::require_regulatory(&mut inventory)?;
+        for &(vendor, device) in adapters {
+            recipes::require_wifi(&mut inventory, vendor, device)?;
+        }
     }
     let plan = Plan::select(&inventory)?;
     host_firmware::MountLimits::from_image(mount_image)
@@ -269,6 +323,7 @@ mod tests {
         let text = provision(ProvisionOptions {
             requirements: Some(&inventory),
             gpu: None,
+            wifi: None,
             destination: &destination,
             cache: &cache,
             dry_run: true,
@@ -287,6 +342,7 @@ mod tests {
             provision(ProvisionOptions {
                 requirements: Some(&inventory),
                 gpu: None,
+                wifi: None,
                 destination: &destination,
                 cache: &cache,
                 dry_run: true,
@@ -294,6 +350,37 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_wifi_network_plans_the_regulatory_database_and_the_host_adapters_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = |adapters: &[(u16, u16)]| {
+            provision(ProvisionOptions {
+                requirements: None,
+                gpu: None,
+                wifi: Some(adapters),
+                destination: &dir.path().join("destination"),
+                cache: &dir.path().join("cache"),
+                dry_run: true,
+                mount_image: &host_firmware::MOUNT_CAPABILITY,
+            })
+            .unwrap()
+        };
+        // An Intel Ethernet controller and an MT7925.
+        let text = plan(&[(0x8086, 0x125c), (0x14c3, 0x7925)]);
+        for name in [
+            "regulatory.db",
+            "mediatek/mt7925/WIFI_MT7925_PATCH_MCU_1_1_hdr.bin",
+            "mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin",
+        ] {
+            assert!(text.contains(name), "{name}: {text}");
+        }
+        assert!(text.contains("3 exact observed bindings"), "{text}");
+        // No adapter setup knows: the database alone.
+        let text = plan(&[(0x8086, 0x125c)]);
+        assert!(text.contains("1 exact observed bindings"), "{text}");
+        assert!(!dir.path().join("destination").exists());
     }
 
     #[test]
@@ -368,6 +455,7 @@ mod tests {
             provision(ProvisionOptions {
                 requirements: None,
                 gpu,
+                wifi: None,
                 destination: &destination,
                 cache: &dir.path().join("cache"),
                 dry_run: true,
@@ -410,6 +498,7 @@ mod tests {
         let report = provision(ProvisionOptions {
             requirements: Some(&inventory),
             gpu: None,
+            wifi: None,
             destination: &destination,
             cache: &cache,
             dry_run: false,
@@ -459,6 +548,7 @@ mod tests {
         let again = provision(ProvisionOptions {
             requirements: Some(&inventory),
             gpu: None,
+            wifi: None,
             destination: &destination,
             cache: &cache,
             dry_run: false,

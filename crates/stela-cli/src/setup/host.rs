@@ -244,6 +244,11 @@ pub(crate) trait Host {
     fn nvidia_gpus(&self) -> Result<Vec<u16>> {
         Ok(Vec::new())
     }
+    /// The PCI vendor and device IDs of this computer's network adapters;
+    /// empty where the host cannot list them.
+    fn network_adapters(&self) -> Result<Vec<(u16, u16)>> {
+        Ok(Vec::new())
+    }
     /// Check write access before downloading or signing for a whole USB.
     fn check_erase_access(&self, _disk: &str) -> Result<()> {
         Ok(())

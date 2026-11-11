@@ -7,7 +7,7 @@
 //! its whole disk, with its volumes locked and dismounted.
 use super::{
     Bus, Cpu, Disk, DiskFacts, FileSystem, Host, Partition, PartitionInfo, Volume,
-    drive_names::{self, disk_number, nvidia_device, partition_number},
+    drive_names::{self, disk_number, partition_number, pci_device},
 };
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -547,6 +547,44 @@ impl System {
     }
 }
 
+/// The vendor and device IDs of the present PCI devices of setup class
+/// `class`, which `what` names in an error.
+fn pci_devices(class: &GUID, what: &str) -> Result<Vec<(u16, u16)>> {
+    // SAFETY: `class` outlives the call; the other inputs are optional.
+    let set = unsafe {
+        SetupDiGetClassDevsW(class, std::ptr::null(), std::ptr::null_mut(), DIGCF_PRESENT)
+    };
+    ensure!(
+        set != INVALID_HANDLE_VALUE as isize,
+        "cannot list {what}: {}",
+        std::io::Error::last_os_error()
+    );
+    let mut devices = Vec::new();
+    for index in 0.. {
+        // SAFETY: an all-zero SP_DEVINFO_DATA is valid plain data.
+        let mut device: SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
+        device.cbSize = size_of::<SP_DEVINFO_DATA>() as u32;
+        // SAFETY: `set` is open and `device` declares its size.
+        if unsafe { SetupDiEnumDeviceInfo(set, index, &mut device) } == 0 {
+            break;
+        }
+        let mut id = [0u16; 512];
+        let mut length = 0;
+        // SAFETY: the buffer's length is passed with it, and `device`
+        // came from `set`.
+        let named = unsafe {
+            SetupDiGetDeviceInstanceIdW(set, &device, id.as_mut_ptr(), id.len() as u32, &mut length)
+        };
+        if named != 0 {
+            let end = (length as usize).saturating_sub(1).min(id.len());
+            devices.extend(pci_device(&String::from_utf16_lossy(&id[..end])));
+        }
+    }
+    // SAFETY: `set` is open and not used again.
+    unsafe { SetupDiDestroyDeviceInfoList(set) };
+    Ok(devices)
+}
+
 impl Host for System {
     fn volume(&self, path: &Path) -> Result<Volume> {
         let (name, root) = volume_of(path)?;
@@ -792,49 +830,16 @@ impl Host for System {
         // The display device class, which an NVIDIA GPU's audio function is
         // not in.
         const DISPLAY: GUID = GUID::from_u128(0x4d36e968_e325_11ce_bfc1_08002be10318);
-        // SAFETY: DISPLAY outlives the call; the other inputs are optional.
-        let set = unsafe {
-            SetupDiGetClassDevsW(
-                &DISPLAY,
-                std::ptr::null(),
-                std::ptr::null_mut(),
-                DIGCF_PRESENT,
-            )
-        };
-        ensure!(
-            set != INVALID_HANDLE_VALUE as isize,
-            "cannot list display devices: {}",
-            std::io::Error::last_os_error()
-        );
-        let mut gpus = Vec::new();
-        for index in 0.. {
-            // SAFETY: an all-zero SP_DEVINFO_DATA is valid plain data.
-            let mut device: SP_DEVINFO_DATA = unsafe { std::mem::zeroed() };
-            device.cbSize = size_of::<SP_DEVINFO_DATA>() as u32;
-            // SAFETY: `set` is open and `device` declares its size.
-            if unsafe { SetupDiEnumDeviceInfo(set, index, &mut device) } == 0 {
-                break;
-            }
-            let mut id = [0u16; 512];
-            let mut length = 0;
-            // SAFETY: the buffer's length is passed with it, and `device`
-            // came from `set`.
-            let named = unsafe {
-                SetupDiGetDeviceInstanceIdW(
-                    set,
-                    &device,
-                    id.as_mut_ptr(),
-                    id.len() as u32,
-                    &mut length,
-                )
-            };
-            if named != 0 {
-                let end = (length as usize).saturating_sub(1).min(id.len());
-                gpus.extend(nvidia_device(&String::from_utf16_lossy(&id[..end])));
-            }
-        }
-        // SAFETY: `set` is open and not used again.
-        unsafe { SetupDiDestroyDeviceInfoList(set) };
-        Ok(gpus)
+        Ok(pci_devices(&DISPLAY, "display devices")?
+            .into_iter()
+            .filter(|&(vendor, _)| vendor == 0x10de)
+            .map(|(_, device)| device)
+            .collect())
+    }
+
+    fn network_adapters(&self) -> Result<Vec<(u16, u16)>> {
+        // The network adapter device class, wired and wireless.
+        const NET: GUID = GUID::from_u128(0x4d36e972_e325_11ce_bfc1_08002be10318);
+        pci_devices(&NET, "network adapters")
     }
 }
