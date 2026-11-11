@@ -347,7 +347,7 @@ pub fn local_policies<R: ReadAt>(
 /// The one of `names` that is the Cryptex1 ticket personalized for `ecid`,
 /// `apticket.<board>.<ECID>.im4m`. restored writes the ECID in upper-case
 /// hexadecimal without leading zeros (26A434 `ramrod_splat_write_personalized_ticket`
-/// names ECID 0x123456789abcd `apticket.j775dev.123456789ABCD.im4m`), and
+/// names ECID 0xe9c9c9e095a32 `apticket.j775dev.E9C9C9E095A32.im4m`), and
 /// libignition looks for the same name.
 fn cryptex1_ticket_name<'a>(
     mut names: impl Iterator<Item = &'a str>,
@@ -540,27 +540,27 @@ mod tests {
     fn the_cryptex1_ticket_is_the_one_personalized_for_the_machine() {
         let names = [
             "apticket.j473dev.im4m",
-            "apticket.j473dev.FEDCBA9876543210.im4m",
+            "apticket.j473dev.C118E9349665ABB9.im4m",
             "apticket.j473dev.0000000000000001.im4m",
             "os.dmg",
         ];
         assert_eq!(
-            cryptex1_ticket_name(names.into_iter(), 0xfedc_ba98_7654_3210),
-            Some("apticket.j473dev.FEDCBA9876543210.im4m")
+            cryptex1_ticket_name(names.into_iter(), 0xc118_e934_9665_abb9),
+            Some("apticket.j473dev.C118E9349665ABB9.im4m")
         );
         assert_eq!(cryptex1_ticket_name(names.into_iter(), 2), None);
         // An ECID shorter than 16 digits is named without leading zeros.
         let names = [
             "apticket.j775dev.im4m",
-            "apticket.j775dev.000123456789ABCD.im4m",
-            "apticket.j775dev.123456789ABCD.im4m",
+            "apticket.j775dev.000E9C9C9E095A32.im4m",
+            "apticket.j775dev.E9C9C9E095A32.im4m",
         ];
         assert_eq!(
-            cryptex1_ticket_name(names.into_iter(), 0x1_2345_6789_abcd),
-            Some("apticket.j775dev.123456789ABCD.im4m")
+            cryptex1_ticket_name(names.into_iter(), 0xe_9c9c_9e09_5a32),
+            Some("apticket.j775dev.E9C9C9E095A32.im4m")
         );
         assert_eq!(
-            cryptex1_ticket_model("group/cryptex1/current/apticket.j473dev.FEDCBA9876543210.im4m"),
+            cryptex1_ticket_model("group/cryptex1/current/apticket.j473dev.C118E9349665ABB9.im4m"),
             Some("j473dev")
         );
         assert_eq!(

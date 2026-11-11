@@ -881,8 +881,8 @@ mod tests {
     #[test]
     fn a_64_bit_field_reads_as_its_bits_from_either_integer_kind() {
         // restored's ECID with bit 63 set, as CFBinaryPList encodes it.
-        let ecid = Value::Signed(-111_111_111_111_111_111);
-        assert_eq!(ecid.bits(), Ok(0xfe75_4108_7b9f_8e39));
+        let ecid = Value::Signed(-494_042_649_752_996_581);
+        assert_eq!(ecid.bits(), Ok(0xf924_ced3_dd94_751b));
         assert!(ecid.uint().is_err());
         assert_eq!(Value::Integer(1234).bits(), Ok(1234));
         assert!(Value::Boolean(true).bits().is_err());

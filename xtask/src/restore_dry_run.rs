@@ -46,7 +46,7 @@ use requests::{Outcome, Step, Transfer, Verdict};
 use wire::{CONTROL, Wire};
 
 /// The device the dry run plays; no real machine's identifier.
-const ECID: u64 = 0x0001_2345_6789_abcd;
+const ECID: u64 = 0x000e_9c9c_9e09_5a32;
 /// ASR payload read without `--full`.
 const ASR_PREFIX: u64 = 16 << 20;
 /// A request slower than this natively stalls the guest for far longer under

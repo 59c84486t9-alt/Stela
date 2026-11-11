@@ -61,7 +61,7 @@ fn ready_with_fdr(
                 ("ChipID", Value::Integer(0x8112)),
                 ("BoardID", Value::Integer(0x24)),
                 // An ECID with bit 63 set arrives Signed.
-                ("UniqueChipID", Value::Signed(-111_111_111_111_111_111)),
+                ("UniqueChipID", Value::Signed(-494_042_649_752_996_581)),
                 ("ApNonce", Value::Data(vec![1, 2, 3])),
             ]),
         )]),
@@ -668,7 +668,7 @@ fn fdr_import_is_opt_in_and_preserves_the_original_reply_schema() {
 fn fdr_fixture(store: &Fixture, records: Value) -> super::super::fdr::Diagnostic {
     let input = Value::dict([
         ("DiagnosticVersion", Value::Integer(1)),
-        ("ECID", Value::Signed(-111_111_111_111_111_111)),
+        ("ECID", Value::Signed(-494_042_649_752_996_581)),
         ("ChipID", Value::Integer(0x8112)),
         ("BoardID", Value::Integer(0x24)),
         (

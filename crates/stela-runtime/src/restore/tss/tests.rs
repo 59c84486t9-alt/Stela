@@ -14,7 +14,7 @@ fn args() -> Value {
 #[test]
 fn the_request_carries_exactly_libtatsus_local_policy_tags() {
     let store = super::super::store::tests::fixture(b"x", false);
-    let request = local_policy_request(store.identity(), 0x1122_3344_5566, &args()).unwrap();
+    let request = local_policy_request(store.identity(), 0x5dc4_a8f1_e03b, &args()).unwrap();
     let Value::Dict(fields) = &request else {
         panic!()
     };
@@ -41,7 +41,7 @@ fn the_request_carries_exactly_libtatsus_local_policy_tags() {
     );
     assert_eq!(
         request.required("ApECID").unwrap().uint().unwrap(),
-        0x1122_3344_5566
+        0x5dc4_a8f1_e03b
     );
     assert_eq!(
         request.required("Ap,VolumeUUID").unwrap().data().unwrap()[..4],
@@ -480,7 +480,7 @@ fn cryptex_args(ecid: u64) -> Value {
 #[test]
 fn the_cryptex_request_merges_identity_tags_common_tags_and_the_devices_request() {
     let store = super::super::store::tests::fixture(b"x", false);
-    let ecid = 0xfedc_ba98_7654_3210;
+    let ecid = 0xc118_e934_9665_abb9;
     let request = cryptex_request(store.identity(), ecid, &cryptex_args(ecid)).unwrap();
     let Value::Dict(fields) = &request else {
         panic!()

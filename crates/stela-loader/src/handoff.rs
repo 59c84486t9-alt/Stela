@@ -669,13 +669,13 @@ mod tests {
             tree.set_property(CHOSEN, name, vec![0; bytes])?;
         }
         let (decisions, gaps) =
-            apply_identity(&mut tree, Some(0x1122_3344_5566_7788), Some(0x8112))?;
+            apply_identity(&mut tree, Some(0x3618_0702_d36f_7cf9), Some(0x8112))?;
         assert!(gaps.is_empty());
         assert_eq!(decisions.len(), 3);
         let value = |name: &str| tree.property(CHOSEN, name).unwrap().value.clone();
         assert_eq!(
             value("unique-chip-id"),
-            0x1122_3344_5566_7788u64.to_le_bytes()
+            0x3618_0702_d36f_7cf9u64.to_le_bytes()
         );
         assert_eq!(value("die-id"), value("unique-chip-id"));
         let device = value("unique-device-id");

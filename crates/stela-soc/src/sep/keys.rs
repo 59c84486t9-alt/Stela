@@ -94,7 +94,7 @@ fn derive(
 mod tests {
     use super::*;
 
-    const ECID: u64 = 0x0123_4567_89ab_cdef;
+    const ECID: u64 = 0x0d9d_4b7c_d07c_a9e5;
 
     #[test]
     fn uid_is_stable_machine_bound_and_separate_from_the_group_domain() {
@@ -109,20 +109,20 @@ mod tests {
         assert_ne!(*a.uid(context).unwrap(), *a.uid(b"keybag/class-a").unwrap());
         assert_eq!(a.ecid(), ECID);
         // A different ECID with the same roots yields different keys.
-        let moved = Roots::provisioned([1; 32], [3; 32], 0x1122_3344_5566_7788).unwrap();
+        let moved = Roots::provisioned([1; 32], [3; 32], 0x3618_0702_d36f_7cf9).unwrap();
         assert_ne!(*a.uid(context).unwrap(), *moved.uid(context).unwrap());
         // Independent Python hmac/sha256 vectors for the exact Stela framing.
         assert_eq!(
             hex::encode(*a.uid(context).unwrap()),
-            "802ffdb542bc4b50d73cee71a6d5b3a5b68f7a4b5184570758d689bd850e8518"
+            "4c8f9cac3335f0bc603887b3f22299b80baba0572762527b3fc8ef1b20a55c7d"
         );
         assert_eq!(
             hex::encode(*a.uid(b"keybag/class-a").unwrap()),
-            "03dfc65b3efe14c33652aad5c247643fa482ef32420870a7ca31510ee734ab91"
+            "034ef8d3407da5d401f84fcaa86d497cd8725b440ace3675deb550363b793883"
         );
         assert_eq!(
             hex::encode(*moved.uid(context).unwrap()),
-            "8b6d43a4c22f8bbb44141f9bfcdf66edac4df31577d1be4f79e92096a49b1121"
+            "dfd9ce42df52ec2b05be6146696143af674f3e85f8f6a4333175961babf4792c"
         );
     }
 
