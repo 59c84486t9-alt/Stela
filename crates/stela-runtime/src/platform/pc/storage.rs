@@ -133,18 +133,7 @@ pub fn open(
     devices: &mut Vec<Box<dyn BlockDevice>>,
     target: &Target,
 ) -> Result<PartitionDevice<Box<dyn BlockDevice>>, StorageError> {
-    let index = find(devices, &target.serial)?;
-    let table = gpt::read(&mut *devices[index]).map_err(StorageError::Table)?;
-    let mut partitions = table
-        .partitions
-        .into_iter()
-        .filter(|partition| partition.unique_guid == target.partition);
-    let partition = partitions
-        .next()
-        .ok_or(StorageError::NoPartition(target.partition))?;
-    if partitions.next().is_some() {
-        return Err(StorageError::AmbiguousPartition(target.partition));
-    }
+    let (index, partition) = find_target(devices, target)?;
     if partition.type_guid == Guid::ESP {
         return Err(StorageError::SystemPartition(target.partition));
     }
@@ -224,26 +213,71 @@ fn locate(
 ) -> Result<(usize, gpt::Partition), StorageError> {
     let (index, partition) = match named {
         Named::Unique(guid) | Named::Host(guid) => find_any(devices, *guid)?,
-        Named::Disk(target) => {
-            let index = find(devices, &target.serial)?;
-            let table = gpt::read(&mut *devices[index]).map_err(StorageError::Table)?;
-            let mut matching = table
-                .partitions
-                .into_iter()
-                .filter(|partition| partition.unique_guid == target.partition);
-            let partition = matching
-                .next()
-                .ok_or(StorageError::NoPartition(target.partition))?;
-            if matching.next().is_some() {
-                return Err(StorageError::AmbiguousPartition(target.partition));
-            }
-            (index, partition)
-        }
+        Named::Disk(target) => find_target(devices, target)?,
     };
     if partition.type_guid == Guid::ESP && !matches!(named, Named::Host(_)) {
         return Err(StorageError::SystemPartition(partition.unique_guid));
     }
     Ok((index, partition))
+}
+
+/// The disk and partition `target` names. The serial was read through the
+/// firmware when the target was chosen; Stela's own driver may report the
+/// same disk under another serial (a USB bridge's INQUIRY serial against
+/// its USB string, NVMe padding) or none. When no disk has the serial, the
+/// partition's unique GUID, which the chooser wrote fresh, finds it: on
+/// exactly one disk, and never an EFI system partition.
+fn find_target(
+    devices: &mut [Box<dyn BlockDevice>],
+    target: &Target,
+) -> Result<(usize, gpt::Partition), StorageError> {
+    let index = match find(devices, &target.serial) {
+        Ok(index) => index,
+        Err(error @ StorageError::NoDisk { .. }) => {
+            return match find_unique(devices, target.partition) {
+                Err(StorageError::NoPartition(_)) => Err(error),
+                found => found,
+            };
+        }
+        Err(error) => return Err(error),
+    };
+    let table = gpt::read(&mut *devices[index]).map_err(StorageError::Table)?;
+    let mut matching = table
+        .partitions
+        .into_iter()
+        .filter(|partition| partition.unique_guid == target.partition);
+    let partition = matching
+        .next()
+        .ok_or(StorageError::NoPartition(target.partition))?;
+    if matching.next().is_some() {
+        return Err(StorageError::AmbiguousPartition(target.partition));
+    }
+    Ok((index, partition))
+}
+
+/// Each of `named`'s disk targets that [`find_target`] finds by its
+/// partition GUID on a disk reporting another serial: the serial named and
+/// the one the disk reports, for the log.
+pub fn serial_fallbacks(
+    devices: &mut [Box<dyn BlockDevice>],
+    named: &[Named],
+) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    for named in named {
+        let Named::Disk(target) = named else {
+            continue;
+        };
+        if find(devices, &target.serial).is_ok() {
+            continue;
+        }
+        if let Ok((index, _)) = find_target(devices, target) {
+            found.push((
+                target.serial.clone(),
+                devices[index].identity().serial.clone(),
+            ));
+        }
+    }
+    found
 }
 
 /// The index of the one disk in `devices` whose GPT holds partition `guid`,
@@ -473,7 +507,7 @@ mod tests {
 
         let mut devices = disks();
         assert_eq!(
-            open(&mut devices, &target(&format!("disk-c:{TARGET}"))).err(),
+            open(&mut devices, &target("disk-c:BBBBBBBB-0000-0000-0000-000000000000")).err(),
             Some(StorageError::NoDisk {
                 serial: String::from("disk-c"),
                 found: vec![
@@ -633,6 +667,61 @@ mod tests {
         let waited = wait_late(&late, &mut disks(), &named);
         assert_eq!(waited.missing, Some((0, StorageError::NoPartition(guid))));
         assert!((PATIENCE.total_us..PATIENCE.total_us + 100_000).contains(&waited.waited_us));
+    }
+
+    /// The chooser read the disk's serial through the firmware; Stela's
+    /// driver reports another. The fresh partition GUID still finds it,
+    /// once; on two disks it is refused; on none the serial's error stands.
+    #[test]
+    fn a_target_whose_serial_differs_is_found_by_its_partition_guid_on_one_disk() {
+        let data: Guid = table::DATA.parse().unwrap();
+        const FRESH: &str = "DDDDDDDD-0000-0000-0000-000000000005";
+        let mut devices = disks();
+        devices.push(Box::new(table::formatted(
+            "INQUIRY-SERIAL",
+            &[table::partition(data, FRESH, 40, 139)],
+        )));
+        let chosen = target(&alloc::format!("FIRMWARE-SERIAL:{FRESH}"));
+        let named = [Named::Disk(chosen.clone())];
+        assert_eq!(
+            serial_fallbacks(&mut devices, &named),
+            [(
+                String::from("FIRMWARE-SERIAL"),
+                String::from("INQUIRY-SERIAL")
+            )]
+        );
+        let opened = open_shared(&mut devices, &named).unwrap();
+        assert_eq!(opened[0].identity().blocks, 100);
+        // The same GUID on two disks is refused.
+        let mut devices = disks();
+        for serial in ["one", "two"] {
+            devices.push(Box::new(table::formatted(
+                serial,
+                &[table::partition(data, FRESH, 40, 139)],
+            )));
+        }
+        assert_eq!(
+            open_shared(&mut devices, &named).err(),
+            Some((0, StorageError::AmbiguousPartition(FRESH.parse().unwrap())))
+        );
+        assert!(open(&mut devices, &chosen).is_err());
+        // Neither the serial nor the GUID: the serial's error, with the
+        // serials found, which the account and the wait use.
+        let mut devices = disks();
+        assert!(matches!(
+            open_shared(&mut devices, &named).err(),
+            Some((0, StorageError::NoDisk { .. }))
+        ));
+        assert!(serial_fallbacks(&mut devices, &named).is_empty());
+        // An EFI system partition is never taken by its GUID.
+        let esp = "AAAAAAAA-0000-0000-0000-000000000001";
+        let mut devices = disks();
+        devices.remove(1);
+        let named = [Named::Disk(target(&alloc::format!("other:{esp}")))];
+        assert_eq!(
+            open_shared(&mut devices, &named).err(),
+            Some((0, StorageError::SystemPartition(esp.parse().unwrap())))
+        );
     }
 
     #[test]

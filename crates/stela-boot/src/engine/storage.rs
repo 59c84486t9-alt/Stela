@@ -1133,6 +1133,12 @@ pub unsafe fn open(
             }
         ));
     }
+    // The log only: the serials stay off the screen.
+    for (named, reported) in storage::serial_fallbacks(&mut devices.disks, &required) {
+        output::arguments(format_args!(
+            "HOST DISK no disk reports serial {named:?}; its partition GUID is on the disk reporting {reported:?}, which is taken\n"
+        ));
+    }
     if let Some((at, _)) = &waited.missing {
         let role = role_of(*at, targets.len(), medium.is_some(), preboot.is_some());
         account(&devices, role, waited.waited_us, boot_disk);
