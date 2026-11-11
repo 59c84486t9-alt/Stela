@@ -3,10 +3,9 @@
   Stela
 </h1>
 
-<p align="center">Boots unmodified Apple silicon macOS on x86-64 PCs.</p>
-
-Stela is a UEFI boot program with an arm64-to-x86-64 translator, a Metal
-driver for NVIDIA GPUs and a model of Apple silicon hardware.
+Stela boots unmodified Apple silicon macOS on x86-64 PCs. It is a UEFI boot
+program with an arm64-to-x86-64 translator, a Metal driver for NVIDIA GPUs and
+a model of Apple silicon hardware.
 
 It is very experimental. macOS and most apps start, but it is slow and needs
 much more testing.
