@@ -834,7 +834,7 @@ impl GpuViews {
 }
 
 fn select_firmware(boot0: u32, catalog: Arc<Catalog>) -> Result<PciFirmware, ServiceError> {
-    use stela_loader::host_firmware::{recipes, requirements::Inventory};
+    use stela_loader::host_firmware::{bundle, recipes, requirements::Inventory};
     let chip = gpu::nouveau_chip::Chip::from_boot0(boot0).ok_or(ServiceError::Refused(
         "the GPU's PMC chipset is unsupported",
     ))?;
@@ -856,10 +856,32 @@ fn select_firmware(boot0: u32, catalog: Arc<Catalog>) -> Result<PciFirmware, Ser
     .map_err(|_| ServiceError::Refused("the GPU firmware target is invalid"))?;
     let plan = recipes::Plan::select(&inventory)
         .map_err(|_| ServiceError::Refused("the GPU firmware recipe cannot be selected"))?;
+    // SAFETY: the reference count is never given back, so the catalog
+    // stays allocated for every image borrowed from it for the boot.
+    let stored: &'static Catalog = unsafe { &*Arc::into_raw(catalog.clone()) };
+    let mut bindings = Vec::new();
     let mut available = false;
     for selection in plan.selections() {
         let request = &selection.request;
-        match catalog.load(request.view()) {
+        // An exact binding, else the bundle's file by its pinned digest.
+        let found = match stored.load(request.view()) {
+            Err(error) if error.kind == FirmwareError::Missing => {
+                let name = bundle::name(selection.recipe.image.sha256);
+                match stored.load(stela_drivers::firmware::Requirement {
+                    name: &name,
+                    target: bundle::TARGET,
+                    minimum_bytes: request.minimum_bytes,
+                }) {
+                    Err(stored_error) if stored_error.kind == FirmwareError::Missing => Err(error),
+                    other => other,
+                }
+            }
+            other => other,
+        };
+        if let Ok(image) = found {
+            bindings.push((image, request));
+        }
+        match found {
             Ok(image) => {
                 selection
                     .recipe
@@ -887,11 +909,18 @@ fn select_firmware(boot0: u32, catalog: Arc<Catalog>) -> Result<PciFirmware, Ser
     }
     if !available {
         output::arguments(format_args!(
-            "GPU {name}: `stela setup host-firmware fetch --gpu {name}` supplies the pinned firmware\n"
+            "GPU {name}: the USB's firmware bundle lacks this chip's files; `stela setup repair` \
+             completes it\n"
         ));
         return Err(ServiceError::Refused(NO_FIRMWARE));
     }
-    PciFirmware::new(target, catalog, names.into_boxed_slice())
+    // Each file under the exact name and target nouveau asks for.
+    let catalog = Catalog::rebind_all(bindings.iter().map(|(image, request)| {
+        let view = request.view();
+        (*image, view.name, view.target)
+    }))
+    .map_err(|_| ServiceError::Refused("the GPU firmware cannot be bound to its requests"))?;
+    PciFirmware::new(target, Arc::new(catalog), names.into_boxed_slice())
         .map_err(|_| ServiceError::Refused("the GPU firmware image names are invalid"))
 }
 

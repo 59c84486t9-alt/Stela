@@ -418,10 +418,25 @@ impl Catalog {
     /// when its own catalog was built, so neither is copied nor hashed again.
     /// The provenance stays the image's.
     pub fn rebind(image: Image<'static>, name: &str, target: Target<'_>) -> Result<Self, Error> {
-        validate(name, target)?;
-        let provenance = image.provenance();
-        Ok(Self {
-            entries: alloc::vec![Entry {
+        Self::rebind_all([(image, name, target)])
+    }
+
+    /// [`Self::rebind`] for several images, each under its own name and
+    /// target, which must differ.
+    pub fn rebind_all<'a>(
+        bindings: impl IntoIterator<Item = (Image<'static>, &'a str, Target<'a>)>,
+    ) -> Result<Self, Error> {
+        let mut entries: Vec<Entry> = Vec::new();
+        for (image, name, target) in bindings {
+            validate(name, target)?;
+            if entries
+                .iter()
+                .any(|entry| entry.name == name && entry.target.view() == target)
+            {
+                return Err(error(name, ErrorKind::Duplicate));
+            }
+            let provenance = image.provenance();
+            entries.push(Entry {
                 name: name.into(),
                 target: OwnedTarget {
                     driver: target.driver.into(),
@@ -437,8 +452,9 @@ impl Catalog {
                 },
                 sha256: image.sha256(),
                 bytes: Bytes::Persistent(image.bytes()),
-            }],
-        })
+            });
+        }
+        Ok(Self { entries })
     }
 
     /// Number and total bytes of immutable resources, for boot diagnostics.
