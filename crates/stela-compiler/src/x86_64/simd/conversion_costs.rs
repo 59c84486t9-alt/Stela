@@ -19,32 +19,65 @@ const INPUT: usize = 16;
 const OPERATIONS: u32 = 16;
 const NOP: u32 = 0xd503_201f;
 
-/// (name, word with Rd = 0 and Rn = 16, single-precision inputs).
-const FORMS: &[(&str, u32, bool)] = &[
-    ("fcvtzs x,d", 0x9e78_0200, false),
-    ("fcvtas x,d", 0x9e64_0200, false),
-    ("fcvtau x,d", 0x9e65_0200, false),
-    ("fcvtas w,s", 0x1e24_0200, true),
-    ("fcvtas d,d", 0x5e61_ca00, false),
-    ("fcvt h,s", 0x1e23_c200, true),
-    ("fcvtn 4h", 0x0e21_6a00, true),
-    ("fcvtn2 8h", 0x4e21_6a00, true),
+/// The element type of the input lanes.
+#[derive(Clone, Copy)]
+enum Lanes {
+    Half,
+    Single,
+    Double,
+    /// 16-bit integers: the value's integer part.
+    Word,
+}
+
+/// (name, word with Rd = 0 and Rn = 16, input lanes).
+const FORMS: &[(&str, u32, Lanes)] = &[
+    ("fcvtzs x,d", 0x9e78_0200, Lanes::Double),
+    ("fcvtas x,d", 0x9e64_0200, Lanes::Double),
+    ("fcvtau x,d", 0x9e65_0200, Lanes::Double),
+    ("fcvtas w,s", 0x1e24_0200, Lanes::Single),
+    ("fcvtas d,d", 0x5e61_ca00, Lanes::Double),
+    ("fcvt h,s", 0x1e23_c200, Lanes::Single),
+    ("fcvtn 4h", 0x0e21_6a00, Lanes::Single),
+    ("fcvtn2 8h", 0x4e21_6a00, Lanes::Single),
+    ("fcvtzu 8h", 0x6ef9_ba00, Lanes::Half),
+    ("fcvtzs 8h", 0x4ef9_ba00, Lanes::Half),
+    ("fcvtzu 4h", 0x2ef9_ba00, Lanes::Half),
+    ("fcvtzu h", 0x7ef9_ba00, Lanes::Half),
+    ("ucvtf 8h", 0x6e79_da00, Lanes::Word),
+    ("scvtf 8h", 0x4e79_da00, Lanes::Word),
+    ("ucvtf 4h", 0x2e79_da00, Lanes::Word),
+    ("ucvtf h", 0x7e79_da00, Lanes::Word),
 ];
 
 /// Input classes: a fractional magnitude in [1, 1024) of either sign, or
 /// zero, in every lane of V16.
 const INPUTS: &[(&str, f64)] = &[("+", 300.7), ("-", -300.7), ("0", 0.0)];
 
-fn state(single: bool, value: f64) -> GuestState {
+fn state(lanes: Lanes, value: f64) -> GuestState {
     let mut state = GuestState::default();
     state.x[30] = RETURN;
-    state.v[INPUT] = if single {
-        let lane = u64::from((value as f32).to_bits());
-        [lane | lane << 32; 2]
-    } else {
-        [value.to_bits(); 2]
+    let word = |lane: u16| u64::from(lane) * 0x0001_0001_0001_0001;
+    state.v[INPUT] = match lanes {
+        Lanes::Single => {
+            let lane = u64::from((value as f32).to_bits());
+            [lane | lane << 32; 2]
+        }
+        Lanes::Double => [value.to_bits(); 2],
+        Lanes::Half => [word(half(value)); 2],
+        Lanes::Word => [word(value as i16 as u16); 2],
     };
     state
+}
+
+/// `value` as a Half: its Single with the dropped fraction bits truncated
+/// (the inputs here are well inside the normal range).
+fn half(value: f64) -> u16 {
+    if value == 0.0 {
+        return 0;
+    }
+    let bits = (value as f32).to_bits();
+    let sign = (bits >> 16 & 0x8000) as u16;
+    sign | (((bits & 0x7fff_ffff) - (112 << 23)) >> 13) as u16
 }
 
 /// A block of 16 `word`s with Rd = 0 to 15 (16 NOPs for a NOP), then RET.
@@ -63,9 +96,9 @@ fn compile(word: u32, target: TargetCpu) -> Vec<u8> {
 }
 
 /// ns per run of the block of `word`, or why it does not run through.
-fn block(word: u32, single: bool, value: f64, target: TargetCpu) -> Result<f64, &'static str> {
+fn block(word: u32, lanes: Lanes, value: f64, target: TargetCpu) -> Result<f64, &'static str> {
     let code = compile(word, target);
-    let initial = state(single, value);
+    let initial = state(lanes, value);
     let mut probe = initial.clone();
     match run(&code, &mut probe) {
         RETURN => {}
@@ -88,10 +121,10 @@ fn block(word: u32, single: bool, value: f64, target: TargetCpu) -> Result<f64, 
     Ok(best)
 }
 
-fn measure(word: u32, single: bool, value: f64, target: TargetCpu) -> String {
-    match block(word, single, value, target) {
+fn measure(word: u32, lanes: Lanes, value: f64, target: TargetCpu) -> String {
+    match block(word, lanes, value, target) {
         Ok(ns) => {
-            let empty = block(NOP, single, value, target).unwrap();
+            let empty = block(NOP, lanes, value, target).unwrap();
             format!("{:>5.2}ns", (ns - empty) / f64::from(OPERATIONS))
         }
         Err(why) => format!("{why:>7}"),
@@ -121,11 +154,11 @@ fn conversion_costs() {
         header += &format!(" {name:>7}");
     }
     std::println!("{header}");
-    for &(name, word, single) in FORMS {
+    for &(name, word, lanes) in FORMS {
         for &(label, value) in INPUTS {
             let mut row = format!("{:<13}", format!("{name} {label}"));
             for &(_, target) in &targets {
-                row += &format!(" {}", measure(word, single, value, target));
+                row += &format!(" {}", measure(word, lanes, value, target));
             }
             std::println!("{row}");
         }
