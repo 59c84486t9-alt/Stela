@@ -52,6 +52,12 @@ mod reductions;
 mod refinement;
 mod rounding;
 pub(super) use rounding::kernel as rounding_kernel;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod recipe_tests;
 mod saturating;
 mod sha1;
 pub(super) mod sha256;
@@ -64,6 +70,7 @@ mod sm4;
 mod sqrt;
 mod structure_checked;
 mod structure_memory;
+mod three;
 mod widening;
 
 /// Fixed-width SIMD memory routing; checked bodies never use private-RAM emitters.

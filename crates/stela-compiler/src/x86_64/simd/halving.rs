@@ -148,7 +148,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             return;
         }
         Kind::ShiftLong { upper } => {
-            extend(code, 0, lane, upper, false);
+            extend(code, 0, lane, upper, false, target);
             match lane {
                 1 => Shift::LeftWord,
                 2 => Shift::LeftDword,

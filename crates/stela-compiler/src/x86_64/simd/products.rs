@@ -1,6 +1,8 @@
 //! Integer multiplies, widening arithmetic and absolute differences.
 use super::rearrange::{add_or_subtract, lane_constant};
-use super::{Host, commit, greater, packed, packed_imm, read_vector, rearrange::constant, shuffle};
+use super::{
+    Host, commit, greater, packed, packed_imm, read_vector, rearrange::constant, shuffle, three,
+};
 use crate::x86_64::asm::{Code, Cond, Gpr, Size, resolve, vector_extensions};
 use crate::{
     TargetCpu,
@@ -10,7 +12,31 @@ use crate::{
 
 /// Extend the selected 64-bit input half into doubled-width lanes. XMM3 is the
 /// extension mask; extending one operand never changes the other in XMM0/1.
-pub(super) fn extend(code: &mut Code, xmm: u8, lane: u8, upper: bool, signed: bool) {
+pub(super) fn extend(
+    code: &mut Code,
+    xmm: u8,
+    lane: u8,
+    upper: bool,
+    signed: bool,
+    target: TargetCpu,
+) {
+    if target.supports(TargetCpu::Sse41) && !target.data_independent_timing() {
+        // One PMOVSX/PMOVZX of the low half, after moving the high half down.
+        if upper {
+            Shift::RightBytes.emit(code, xmm, 8);
+        }
+        match (lane, signed) {
+            (1, true) => Host::SignExtendByteToWord,
+            (1, false) => Host::ZeroExtendByteToWord,
+            (2, true) => Host::SignExtendWordToDword,
+            (2, false) => Host::ZeroExtendWordToDword,
+            (4, true) => Host::SignExtendDwordToQword,
+            (4, false) => Host::ZeroExtendDwordToQword,
+            _ => unreachable!(),
+        }
+        .register(code, xmm, xmm, target);
+        return;
+    }
     if upper {
         Shift::RightBytes.emit(code, xmm, 8);
     }
@@ -283,7 +309,7 @@ fn clamp_rounded_accumulate(code: &mut Code, lane: u8, active: u8) {
     if lane == 2 {
         packed(code, Host::PackSignedDwordToWord, 0, 0);
         packed(code, Host::MoveAligned, 2, 0);
-        extend(code, 2, lane, false, true);
+        extend(code, 2, lane, false, true, TargetCpu::Baseline);
         packed(code, Host::MoveAligned, 4, 5);
         packed(code, Host::EqualDword, 4, 2);
     } else {
@@ -384,7 +410,7 @@ fn rounded_accumulate_half(
     }
     packed(code, Host::MoveAligned, 5, 0);
     read_vector(code, operand.destination, 0);
-    extend(code, 0, lane, upper, true);
+    extend(code, 0, lane, upper, true, TargetCpu::Baseline);
     packed(code, add_or_subtract(lane * 2, false), 0, 5);
     clamp_rounded_accumulate(code, lane, active);
 }
@@ -456,8 +482,15 @@ fn high_product(code: &mut Code, operand: &Operand, upper: bool, active: u8, tar
     if let Some(index) = operand.index {
         indexed(code, lane, index);
     }
-    extend(code, 0, lane, upper, true);
-    extend(code, 1, lane, upper && operand.index.is_none(), true);
+    extend(code, 0, lane, upper, true, target);
+    extend(
+        code,
+        1,
+        lane,
+        upper && operand.index.is_none(),
+        true,
+        target,
+    );
     long_product(code, lane, true, target);
     // Compute (product + 2^(n-2)) >> (n-1), avoiding a doubled-product overflow.
     if rounding {
@@ -506,13 +539,14 @@ fn doubling(code: &mut Code, operand: &Operand, target: TargetCpu) {
         if let Some(index) = operand.index {
             indexed(code, lane, index);
         }
-        extend(code, 0, lane, operand.upper, true);
+        extend(code, 0, lane, operand.upper, true, target);
         extend(
             code,
             1,
             lane,
             operand.upper && operand.index.is_none(),
             true,
+            target,
         );
         long_product(code, lane, true, target);
         packed(code, Host::MoveAligned, 1, 0);
@@ -574,8 +608,8 @@ fn polynomial(code: &mut Code, lane: u8, widen: bool, upper: bool, target: Targe
     } else {
         let output_lane = if widen { 2 } else { 1 };
         if widen {
-            extend(code, 0, 1, upper, false);
-            extend(code, 1, 1, upper, false);
+            extend(code, 0, 1, upper, false, target);
+            extend(code, 1, 1, upper, false, target);
         }
         packed(code, Host::Xor, 5, 5);
         lane_constant(code, 4, output_lane, 1);
@@ -609,6 +643,144 @@ fn polynomial(code: &mut Code, lane: u8, widen: bool, upper: bool, target: Targe
     packed(code, Host::MoveAligned, 0, 5);
 }
 
+/// Halfword `index` of XMM1 in every word of XMM1: VPBROADCASTW for lane 0
+/// with VEX, else the two shuffles of [`indexed`].
+fn indexed_word(code: &mut Code, index: u8, target: TargetCpu) {
+    if index == 0 && three::vex(target) {
+        three::broadcast_word(code, 1, 1);
+    } else {
+        indexed(code, 2, index);
+    }
+}
+
+/// Halfword `index` of XMM1, zero-extended, in every dword of XMM1.
+fn indexed_word_pairs(code: &mut Code, index: u8, target: TargetCpu) {
+    if index < 4 {
+        packed_imm(code, Host::ShuffleLowWord, 1, 1, index * 0x55);
+        Host::ZeroExtendWordToDword.register(code, 1, 1, target);
+    } else {
+        indexed(code, 2, index);
+        three::shift(code, Shift::RightDword, 1, 1, 16, target);
+    }
+}
+
+/// SMULL/UMULL/SMLAL/UMLAL/SMLSL/UMLSL of halfwords, by vector or element,
+/// from XMM0 and XMM1; returns the register holding the result. Signed
+/// products pair each halfword with a zero halfword so that one PMADDWD (or
+/// VPDPWSSD, which also adds the accumulator) forms the exact 32-bit
+/// product. Unsigned products and signed upper halves by vector use
+/// PMULLW/PMULH[U]W and one unpack. Clobbers XMM1-XMM2; no EFLAGS.
+fn word_long_product(
+    code: &mut Code,
+    operand: &Operand,
+    signed: bool,
+    operation: Accumulate,
+    target: TargetCpu,
+) -> u8 {
+    let upper = operand.upper;
+    let paired = signed && (operand.index.is_some() || !upper);
+    let mut result = 0;
+    if paired {
+        match operand.index {
+            Some(index) if upper && index < 4 => {
+                indexed_word_pairs(code, index, target);
+                packed(code, Host::UnpackHighWord, 0, 0);
+            }
+            Some(index) => {
+                indexed_word(code, index, target);
+                if upper {
+                    packed(code, Host::UnpackHighWord, 0, 0);
+                    three::shift(code, Shift::RightDword, 0, 0, 16, target);
+                } else {
+                    Host::ZeroExtendWordToDword.register(code, 0, 0, target);
+                }
+            }
+            None => {
+                Host::ZeroExtendWordToDword.register(code, 0, 0, target);
+                packed(code, Host::UnpackLowWord, 1, 1);
+            }
+        }
+        if operation == Accumulate::Add && three::dot_words_supported(target) {
+            read_vector(code, operand.destination, 2);
+            three::dot_words(code, 2, 0, 1, target);
+            return 2;
+        }
+        packed(code, Host::MultiplyAddWords, 0, 1);
+    } else {
+        if let Some(index) = operand.index {
+            indexed_word(code, index, target);
+        }
+        let high = if signed {
+            Host::MultiplyHighSignedWord
+        } else {
+            Host::MultiplyHighUnsignedWord
+        };
+        three::three(code, Host::MultiplyLowWord, 2, 0, 1, target);
+        packed(code, high, 0, 1);
+        let unpack = if upper {
+            Host::UnpackHighWord
+        } else {
+            Host::UnpackLowWord
+        };
+        three::three(code, unpack, 2, 2, 0, target);
+        result = 2;
+    }
+    match operation {
+        Accumulate::None => result,
+        Accumulate::Add => {
+            read_vector(code, operand.destination, 1);
+            three::three(code, Host::AddDword, result, result, 1, target);
+            result
+        }
+        Accumulate::Subtract => {
+            read_vector(code, operand.destination, 1);
+            packed(code, Host::SubDword, 1, result);
+            1
+        }
+    }
+}
+
+/// The products [`word_long_product`] leaves, from XMM0 and XMM1 (an
+/// indexed right operand already broadcast); returns the result register.
+fn product(
+    code: &mut Code,
+    operand: &Operand,
+    signed: bool,
+    widen: bool,
+    operation: Accumulate,
+    target: TargetCpu,
+) -> u8 {
+    let Operand {
+        destination,
+        lane_bytes: lane,
+        bytes,
+        upper,
+        ..
+    } = *operand;
+    if widen && operand.index.is_some() {
+        indexed_long_product(code, lane, upper, signed, target);
+    } else if widen {
+        extend(code, 0, lane, upper, signed, target);
+        extend(code, 1, lane, upper, signed, target);
+        long_product(code, lane, signed, target);
+    } else if operand.index.is_some() {
+        indexed_low_product(code, lane, bytes, target);
+    } else {
+        low_product(code, lane, target);
+    }
+    accumulate(
+        code,
+        destination,
+        if widen { lane * 2 } else { lane },
+        operation,
+    )
+}
+
+/// Whether [`word_long_product`] lowers a halfword long product on `target`.
+fn word_long_product_supported(lane: u8, widen: bool, target: TargetCpu) -> bool {
+    lane == 2 && widen && target.supports(TargetCpu::Sse41) && !target.data_independent_timing()
+}
+
 pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     let Operand {
         kind,
@@ -640,26 +812,14 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             widen,
             accumulate: operation,
         } => {
-            if let Some(index) = operand.index {
-                indexed(code, lane, index);
-            }
-            if widen && operand.index.is_some() {
-                indexed_long_product(code, lane, upper, signed, target);
-            } else if widen {
-                extend(code, 0, lane, upper, signed);
-                extend(code, 1, lane, upper, signed);
-                long_product(code, lane, signed, target);
-            } else if operand.index.is_some() {
-                indexed_low_product(code, lane, bytes, target);
+            if word_long_product_supported(lane, widen, target) {
+                result = word_long_product(code, operand, signed, operation, target);
             } else {
-                low_product(code, lane, target);
+                if let Some(index) = operand.index {
+                    indexed(code, lane, index);
+                }
+                result = product(code, operand, signed, widen, operation, target);
             }
-            result = accumulate(
-                code,
-                destination,
-                if widen { lane * 2 } else { lane },
-                operation,
-            );
         }
         Kind::Arithmetic {
             signed,
@@ -667,9 +827,9 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             subtract,
         } => {
             if !wide_left {
-                extend(code, 0, lane, upper, signed);
+                extend(code, 0, lane, upper, signed, target);
             }
-            extend(code, 1, lane, upper, signed);
+            extend(code, 1, lane, upper, signed, target);
             packed(code, add_or_subtract(lane * 2, subtract), 0, 1);
         }
         Kind::Difference {
@@ -678,8 +838,8 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             accumulate: accumulated,
         } => {
             if widen {
-                extend(code, 0, lane, upper, signed);
-                extend(code, 1, lane, upper, signed);
+                extend(code, 0, lane, upper, signed, target);
+                extend(code, 1, lane, upper, signed, target);
             }
             let output_lane = if widen { lane * 2 } else { lane };
             absolute_difference(code, output_lane, signed, target);
@@ -790,26 +950,27 @@ mod tests {
                     code.windows(opcode.encoding().len())
                         .any(|w| w == opcode.encoding())
                 };
-                let extended_words =
-                    lane == 2 && widen && !operand.upper && target >= TargetCpu::Sse41;
+                // SSE4.1 halfword long products: signed ones pair each word
+                // with zero for one PMADDWD, unsigned ones multiply low and
+                // high halves and unpack.
+                let words = lane == 2 && widen && target >= TargetCpu::Sse41;
                 assert_eq!(
                     has(Host::MultiplyLowDword),
-                    lane == 4 && !widen && target >= TargetCpu::Sse41 || extended_words
+                    lane == 4 && !widen && target >= TargetCpu::Sse41
                 );
                 assert_eq!(
                     has(Host::MultiplySignedDword),
                     lane == 4 && widen && signed && target >= TargetCpu::Sse41
                 );
-                assert_eq!(has(Host::MultiplyLowWord), lane == 2 && !extended_words);
-                assert_eq!(has(Host::SignExtendWordToDword), extended_words && signed);
-                assert_eq!(has(Host::ZeroExtendWordToDword), extended_words && !signed);
+                assert_eq!(has(Host::MultiplyAddWords), words && signed);
+                assert_eq!(has(Host::MultiplyLowWord), lane == 2 && !(words && signed));
                 assert_eq!(
                     has(Host::MultiplyHighSignedWord),
-                    lane == 2 && widen && signed && !extended_words
+                    lane == 2 && widen && signed && !words
                 );
                 assert_eq!(
                     has(Host::MultiplyHighUnsignedWord),
-                    lane == 2 && widen && !signed && !extended_words
+                    lane == 2 && widen && !signed
                 );
                 if lane == 4 && widen {
                     assert!(
