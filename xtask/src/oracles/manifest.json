@@ -4234,7 +4234,7 @@
   {
     "package": "stela-soc",
     "test": "original_libaks_builders_bind_public_selectors_and_uuid_capacity",
-    "source": "crates/stela-soc/src/sep/keystore/keybag.rs",
+    "source": "crates/stela-soc/src/sep/keystore/keybag/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_AKS_TEXT"
@@ -4244,7 +4244,7 @@
   {
     "package": "stela-soc",
     "test": "original_keybag_builders_bind_commands_variants_and_field_helpers",
-    "source": "crates/stela-soc/src/sep/keystore/keybag.rs",
+    "source": "crates/stela-soc/src/sep/keystore/keybag/tests.rs",
     "kind": "oracle",
     "inputs": [
       "STELA_TEST_AKS_KERNEL"
