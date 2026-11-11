@@ -157,8 +157,8 @@ fn every_option_survives_a_round_trip() {
 
 #[test]
 fn usb4_approvals_repeat_and_keep_their_canonical_spelling() {
-    let first = "d0e30f35-5f6a-4b1e-9c00-112233445566";
-    let second = "01234567-89ab-cdef-0123-456789abcdef";
+    let first = "446ab8f0-5aff-47c9-8962-5870641e4d61";
+    let second = "e254fadb-773c-43c3-b00d-4170323c36f8";
     let options = round_trip(&format!(
         "--system --usb4-approve {} --usb4-approve {second}",
         first.to_uppercase()
