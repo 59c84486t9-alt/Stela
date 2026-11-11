@@ -3,14 +3,12 @@
 # So the chain runs: Stela.app (macOS) -> stela.efi (Linux) -> stela for
 # Linux, Windows and macOS -> release.
 #
-# A `v*` tag publishes a release. A manual run builds everything and uploads
-# the archives as workflow artifacts, with no release.
+# Runs only for a pushed `v*` tag, and publishes that tag's release.
 name: release
 
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,7 +25,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   # Stela.app's sources, with their build.sh.
-  APP: apps/stela-macos
+  APP: guest/stela-app
   # The release body and each archive's INSTALL.txt. Plain text that also
   # reads as Markdown.
   ABOUT: |-
@@ -226,10 +224,7 @@ jobs:
 
       - name: Build stela.efi
         run: |
-          # NVK is the default once `--nvk` is gone; older trees need the flag.
-          nvk=
-          if [[ "$(cargo xtask boot build --help)" == *--nvk* ]]; then nvk=--nvk; fi
-          cargo xtask boot build --release $nvk
+          cargo xtask boot build --release
           efi=target/boot/x86_64-unknown-uefi/release/stela-deploy.efi
           [[ "$(head -c 2 "$efi")" == MZ ]] || { echo "::error::$efi is not a PE image"; exit 1; }
           cp "$efi" dist/stela.efi
@@ -415,16 +410,7 @@ jobs:
           } > notes.md
           wc -l notes.md
 
-      - uses: actions/upload-artifact@v4
-        if: github.ref_type != 'tag'
-        with:
-          name: release-dry-run
-          path: |
-            dist/SHA256SUMS
-            notes.md
-
       - name: Publish the release
-        if: github.event_name == 'push' && github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
