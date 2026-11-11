@@ -1798,6 +1798,39 @@ fn same_revision_update_preserves_options() {
 }
 
 #[test]
+fn status_notes_the_spare_the_first_boot_took_and_succeeds() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    let store = record(&f).translations.unwrap();
+    let spare = store.directory().join(translations::SPARE);
+    // The first boot renames the spare into its translator's pack.
+    let pack = store.directory().join(translations::pack_name(&[7; 32]));
+    fs::rename(&spare, &pack).unwrap();
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(status.contains("No problems found."), "{status}");
+    let note = status
+        .lines()
+        .find(|line| line.contains(&store.spare_repair()))
+        .unwrap();
+    assert!(note.trim_start().starts_with("note"), "{status}");
+    assert!(note.contains("`stela setup repair --usb"), "{status}");
+    // Repair prepares the next spare and keeps the pack.
+    rerun(&f, |c| c.action = Action::Repair).unwrap();
+    assert!(store.spare_ready() && pack.is_file());
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(!status.contains(&store.spare_repair()), "{status}");
+    // A spare missing beside no pack, or a short one, is still a problem.
+    fs::remove_file(&pack).unwrap();
+    fs::remove_file(&spare).unwrap();
+    let error = rerun(&f, |c| c.action = Action::Status).unwrap_err();
+    assert!(format!("{error:#}").contains("1 problem"), "{error:#}");
+    fs::write(&pack, [0; 64]).unwrap();
+    fs::write(&spare, [0; 64]).unwrap();
+    assert!(rerun(&f, |c| c.action = Action::Status).is_err());
+}
+
+#[test]
 fn cache_spare_failure_blocks_activation_until_retry() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);

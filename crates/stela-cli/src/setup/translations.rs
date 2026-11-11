@@ -230,11 +230,7 @@ impl Store {
             ));
         }
         if !self.spare_ready() {
-            repairs.push(format!(
-                "prepare {} ({} bytes)",
-                self.directory().join(SPARE).display(),
-                self.pack_bytes
-            ));
+            repairs.push(self.spare_repair());
         }
         if !self.pipelines_ready() {
             repairs.push(format!(
@@ -252,6 +248,23 @@ impl Store {
             ));
         }
         repairs
+    }
+
+    /// The repair that prepares the spare.
+    pub(super) fn spare_repair(&self) -> String {
+        format!(
+            "prepare {} ({} bytes)",
+            self.directory().join(SPARE).display(),
+            self.pack_bytes
+        )
+    }
+
+    /// Whether a translator took the spare for its pack, as the first boot
+    /// of each new `stela.efi` does: the store works, and only the next new
+    /// `stela.efi` would find no spare until setup prepares one. A spare that
+    /// is missing beside no pack, or short, is damage.
+    pub(super) fn spare_taken(&self) -> bool {
+        !self.directory().join(SPARE).exists() && !self.packs().is_empty()
     }
 
     /// Write `store.cfg` again and remove the stale packs.

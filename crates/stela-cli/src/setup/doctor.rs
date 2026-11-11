@@ -165,9 +165,19 @@ fn translations_status(record: &Record, report: &mut Report) {
             format!("{} ({})", pack.path.display(), bytes_text(pack.bytes)),
         );
     }
+    // The first boot renames the spare into its pack by design: a note, with
+    // the repair that prepares the next one.
+    let taken = store.spare_taken().then(|| store.spare_repair());
     for repair in store.repairs() {
         let fix = report.fix("repair");
-        report.problem(format!("translation store: {repair}: {fix}"));
+        let text = format!("translation store: {repair}: {fix}");
+        match taken.as_ref() == Some(&repair) {
+            true => report.line(
+                "note",
+                format!("{text} (the first boot took the spare for its pack, as it should)"),
+            ),
+            false => report.problem(text),
+        }
     }
 }
 
