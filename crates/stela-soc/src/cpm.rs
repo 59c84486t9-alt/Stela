@@ -38,13 +38,19 @@ const NAME: &str = "cpm-power";
 #[derive(Debug, Clone)]
 pub struct Cpm {
     performance: bool,
+    /// The described offsets, sorted: CLPC's samplers read the counters
+    /// thousands of times a second, and a check must not build the list.
+    described: Vec<u64>,
     values: Held,
     counting: bool,
 }
 impl Cpm {
     pub fn new(performance: bool) -> Self {
+        let mut described = stela_soc_data::cpm::offsets(performance);
+        described.sort_unstable();
         Self {
             performance,
+            described,
             values: Held::default(),
             counting: false,
         }
@@ -57,7 +63,7 @@ impl Cpm {
         self.counting
     }
     fn check(&self, o: u64, w: Width) -> Result<()> {
-        if w != Width::Double || !self.offsets().contains(&o) {
+        if w != Width::Double || self.described.binary_search(&o).is_err() {
             Err(refuse!(
                 "CPM register or width has no described power-control contract"
             ))
@@ -129,6 +135,49 @@ mod tests {
                 assert!(c.read(P_THROTTLER, Width::Double, &mut a).is_err());
             }
         }
+    }
+
+    #[test]
+    fn the_described_offsets_are_exactly_the_placed_ones() {
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        for performance in [false, true] {
+            let mut c = Cpm::new(performance);
+            let offsets = c.offsets();
+            // Every word from 0 to past the last described one: described
+            // words answer, every other offset refuses.
+            for o in (0..0x9000).step_by(8) {
+                let read = c.read(o, Width::Double, &mut a);
+                assert_eq!(
+                    read.is_ok(),
+                    offsets.contains(&o) && o != COUNTER_ENABLE,
+                    "{o:#x}"
+                );
+            }
+            assert!(c.read(0x4004, Width::Double, &mut a).is_err());
+        }
+    }
+
+    /// Host cost of a CLPC sampler read: `cargo test -p stela-soc --lib
+    /// cpm::tests::read_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn read_cost() {
+        extern crate std;
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        let mut c = Cpm::new(false);
+        const READS: u64 = 1_000_000;
+        let start = std::time::Instant::now();
+        let mut sum = 0u64;
+        for n in 0..READS {
+            sum = sum.wrapping_add(
+                c.read(0x4000 + (n % 8) * 0x10, Width::Double, &mut a)
+                    .unwrap(),
+            );
+        }
+        let ns = start.elapsed().as_nanos() as u64 / READS;
+        std::println!("cpm read: {ns} ns each ({sum})");
     }
 
     #[test]
