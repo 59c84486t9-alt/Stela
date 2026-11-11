@@ -66,17 +66,14 @@ jobs:
             echo "::error::Cargo.toml has no [workspace.package] version"
             exit 1
           fi
-          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
             echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $version (expected v$version)"
             exit 1
           fi
           for path in LICENSE NOTICE LICENSES; do
             if [[ ! -e "$path" ]]; then
-              if [[ "$GITHUB_REF_TYPE" == tag ]]; then
-                echo "::error::$path is missing; a release ships LICENSE, NOTICE and LICENSES/"
-                exit 1
-              fi
-              echo "::warning::$path is missing; a tagged release would fail here"
+              echo "::error::$path is missing; a release ships LICENSE, NOTICE and LICENSES/"
+              exit 1
             fi
           done
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -337,9 +334,7 @@ jobs:
       - name: Package
         run: |
           printf '%s\n' "$INSTALL" > "$ARCHIVE/INSTALL.txt"
-          cp LICENSE "$ARCHIVE/"
-          if [[ -e NOTICE ]]; then cp NOTICE "$ARCHIVE/"; fi
-          if [[ -d LICENSES ]]; then cp -R LICENSES "$ARCHIVE/"; fi
+          cp -R LICENSE NOTICE LICENSES "$ARCHIVE/"
           if [[ "$RUNNER_OS" == Windows ]]; then
             7z a -tzip -bso0 "$ARCHIVE.zip" "$ARCHIVE"
           else
@@ -379,11 +374,8 @@ jobs:
           count="$(ls dist | wc -l)"
           [[ "$count" == 4 ]] || { echo "::error::expected 3 archives and the source, found $count: $(ls dist)"; exit 1; }
           (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
-          head=HEAD
-          if [[ "$GITHUB_REF_TYPE" == tag ]]; then head="$GITHUB_REF_NAME"; fi
-          previous="$(git describe --tags --abbrev=0 --match 'v*' "$head^" 2>/dev/null || true)"
-          range="${previous:+$previous..}$head"
-          total="$(git rev-list --count --no-merges "$range")"
+          # The first release lists no changes.
+          previous="$(git describe --tags --abbrev=0 --match 'v*' "$GITHUB_REF_NAME^" 2>/dev/null || true)"
           {
             printf '%s\n\n' "$ABOUT"
             echo "Downloads:"
@@ -395,20 +387,19 @@ jobs:
             echo "- SHA256SUMS: each file's SHA-256"
             echo
             printf '%s\n\n' "$INSTALL"
-            echo "License: Stela is GPL-2.0-or-later; the boot program is GPL-2.0-only, as it links code from Linux. Each archive has LICENSE, NOTICE and LICENSES/. The source archive is the complete corresponding source of these binaries."
-            echo
+            echo "License: Stela's code is GPL-2.0-or-later. The boot program stela.efi links code from Linux and is GPL-2.0-only; the stela program is GPL-3.0-or-later. Each archive has LICENSE, NOTICE and LICENSES/. The source archive is the complete corresponding source of these binaries."
             if [[ -n "$previous" ]]; then
+              total="$(git rev-list --count --no-merges "$previous..$GITHUB_REF_NAME")"
+              echo
               echo "Changes since $previous:"
-            else
-              echo "Changes:"
+              echo
+              git log --no-merges --format='- %s' -n 300 "$previous..$GITHUB_REF_NAME"
+              if (( total > 300 )); then
+                echo "- and $((total - 300)) earlier commits"
+              fi
             fi
-            echo
-            git log --no-merges --format='- %s' -n 300 "$range"
-            if (( total > 300 )); then
-              echo "- and $((total - 300)) earlier commits"
-            fi
-          } > notes.md
-          wc -l notes.md
+          } > notes.txt
+          wc -l notes.txt
 
       - name: Publish the release
         env:
@@ -417,4 +408,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" dist/* \
             --verify-tag \
             --title "Stela $GITHUB_REF_NAME" \
-            --notes-file notes.md
+            --notes-file notes.txt
