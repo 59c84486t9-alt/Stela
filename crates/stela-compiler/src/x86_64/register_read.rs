@@ -604,7 +604,7 @@ pub fn interrupt_status_thunk(
 
 /// The count of the reader at `count` into RDX, as [`count_thunk`] reads
 /// it. Clobbers RAX and RCX.
-fn read_count(asm: &mut Asm<'_>, count: Place) {
+pub(super) fn read_count(asm: &mut Asm<'_>, count: Place) {
     use Gpr::{Rax, Rcx, Rdx};
     use Size::Qword;
     let field = |offset| Mem::base_disp8(Rcx, offset);

@@ -234,6 +234,9 @@ pub struct Pmu {
     instruction_deadline: Option<u64>,
     /// The PMI is asserted as of the last synchronization.
     asserted: bool,
+    /// Every counter counts alike in every context but a wait, as of the
+    /// last update: a change of EL or guarded level changes no count.
+    alike: bool,
 }
 
 impl Pmu {
@@ -277,6 +280,7 @@ impl Pmu {
             cycle_deadline: None,
             instruction_deadline: None,
             asserted: false,
+            alike: true,
         }
     }
 
@@ -513,6 +517,12 @@ impl Pmu {
         self.asserted || self.instruction_deadline.is_some()
     }
 
+    /// Whether a change of EL or guarded level leaves every count as it
+    /// was: no enabled counter's filters tell the levels apart.
+    pub fn alike(&self) -> bool {
+        self.alike
+    }
+
     /// The retired instruction count at which the PMI can first assert by
     /// instructions alone.
     pub fn instruction_deadline(&self) -> Option<u64> {
@@ -535,7 +545,26 @@ impl Pmu {
         self.advance(now, retired);
         self.pmcr1_gl1 = value;
         self.context = context;
+        self.refresh_alike();
         self.update();
+    }
+
+    /// [`Self::alike`] for the controls now, which only writes change.
+    fn refresh_alike(&mut self) {
+        let contexts = [Filter::Host, Filter::Guest, Filter::Guarded]
+            .into_iter()
+            .flat_map(|filter| {
+                (0..=2).map(move |el| Context {
+                    el,
+                    filter,
+                    waiting: false,
+                })
+            });
+        self.alike = (0..COUNTERS).all(|n| {
+            let mut counts = contexts.clone().map(|context| self.counts(n, context));
+            let first = counts.next();
+            counts.all(|count| Some(count) == first)
+        });
     }
 
     pub fn read(
@@ -584,6 +613,7 @@ impl Pmu {
         self.advance(now, retired);
         let written = self.store(regime_copy(encoding, context), value);
         self.context = context;
+        self.refresh_alike();
         self.update();
         written
     }

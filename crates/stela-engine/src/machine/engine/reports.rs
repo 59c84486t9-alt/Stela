@@ -535,6 +535,11 @@ pub struct Statistics {
     pub exceptions: u64,
     pub interrupts: u64,
     pub system_exits: u64,
+    /// SVC, ERET, GENTER and GEXIT that native code completed from a
+    /// transition record (`x86_64::transition`), by kind.
+    pub native_transitions: [u64; transition::KINDS],
+    /// Those the engine completed, by the same kinds.
+    pub engine_transitions: [u64; transition::KINDS],
     /// AMX moves completed inside blocks (`x86_64::amx_transfer`) and by
     /// the engine's service.
     pub amx_moves: [u64; 2],
@@ -626,6 +631,8 @@ impl core::ops::AddAssign for Statistics {
             install_ticks,
             due_transfers,
             transfer_ticks,
+            native_transitions,
+            engine_transitions,
             line_queries,
             line_ticks,
             compiled_instructions,
@@ -687,6 +694,12 @@ impl core::ops::AddAssign for Statistics {
             *total += count;
         }
         for (total, count) in self.code_discards.iter_mut().zip(code_discards) {
+            *total += count;
+        }
+        for (total, count) in self.native_transitions.iter_mut().zip(native_transitions) {
+            *total += count;
+        }
+        for (total, count) in self.engine_transitions.iter_mut().zip(engine_transitions) {
             *total += count;
         }
         for (total, count) in self.lookup_misses.iter_mut().zip(lookup_misses) {

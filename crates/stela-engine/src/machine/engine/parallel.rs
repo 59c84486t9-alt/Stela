@@ -359,6 +359,9 @@ pub struct Counts {
     pub lookup_forgets: [u64; 4],
     /// Its ITLB's fills, drops and forgotten contexts by where they came
     /// from ([`super::Statistics::itlb_sources`]).
+    /// GENTER completed natively and by the engine, then GEXIT's
+    /// ([`super::Statistics::native_transitions`]).
+    pub transitions: [u64; 4],
     pub itlb_sources: [u64; 12],
     /// TSC ticks in each engine phase ([`step_timing::Phase`]), while
     /// step timing is enabled.
@@ -1774,6 +1777,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             itlb_drops: statistics.itlb_drops,
             lookup_forgets: statistics.lookup_forgets,
             itlb_sources: statistics.itlb_sources,
+            transitions: [
+                statistics.native_transitions[stela_compiler::x86_64::transition::GUARDED_ENTER],
+                statistics.engine_transitions[stela_compiler::x86_64::transition::GUARDED_ENTER],
+                statistics.native_transitions[stela_compiler::x86_64::transition::GUARDED_EXIT],
+                statistics.engine_transitions[stela_compiler::x86_64::transition::GUARDED_EXIT],
+            ],
             phases: self
                 .step_timing
                 .as_ref()

@@ -194,6 +194,7 @@ impl Bounce {
 /// registers' call describes, or no return at all.
 extern "sysv64" fn translate(saved: &mut Saved) -> u64 {
     let state = state();
+    state.follow_native();
     state.follow_pan(flags_pan());
     let address = saved.rcx;
     // SAFETY: the two bytes the stub placed after its CALL, in the arena.

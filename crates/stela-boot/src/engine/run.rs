@@ -1090,6 +1090,9 @@ impl Heartbeat {
             // regime it translates in (forgetting other regimes' contexts,
             // or none), contexts made, TLBIs its mail merged, and pages
             // walked again at once for contexts made anew.
+            // Per PE: GENTER completed natively and by the engine, then
+            // GEXIT's.
+            let mut transitions = String::from("PES TRANSITIONS genter/engine/gexit/engine");
             let mut itlb_sources = String::from(concat!(
                 "PES ITLBSRC fills_lower/fills_upper/cold_seen/drop_asid/drop_every",
                 "/all_local/all_received/all_forgot/all_kept/made/mail_merged/refilled",
@@ -1211,6 +1214,7 @@ impl Heartbeat {
                     &now.itlb_sources,
                     &before.itlb_sources,
                 );
+                deltas(&mut transitions, pe, &now.transitions, &before.transitions);
                 deltas(
                     &mut store,
                     pe,
@@ -1327,6 +1331,7 @@ impl Heartbeat {
             output::arguments(format_args!("{paths}\n"));
             output::arguments(format_args!("{itlb}\n"));
             output::arguments(format_args!("{itlb_sources}\n"));
+            output::arguments(format_args!("{transitions}\n"));
             output::arguments(format_args!("{store}\n"));
             if machine.step_timing().is_some() {
                 output::arguments(format_args!("{phases}\n"));

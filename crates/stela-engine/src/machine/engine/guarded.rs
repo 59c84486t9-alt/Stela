@@ -1,7 +1,7 @@
 //! Apple GXF instruction exits (`block::system::GuardedOperation`): GENTER
 //! and GEXIT. The contracts and their evidence are in `docs/design/system.md`
 //! (GXF).
-use super::{Devices, Event, Host, Machine, MonitorKind, RequirementKind, Step};
+use super::{Devices, Event, Host, Machine, MonitorKind, RequirementKind, Step, transition};
 use crate::machine::{cpu::ASPSR_GUARDED, hacr};
 use stela_compiler::block::system::GuardedOperation;
 
@@ -29,6 +29,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.degrade(requirement);
         }
         let trace = self.monitor_before(MonitorKind::GuardedEnter { immediate });
+        let start = self.transition_start();
         if self.cpu.guarded_enter(immediate).is_err() {
             return self.undefined();
         }
@@ -40,6 +41,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         });
         self.monitor_after(trace);
         self.transitioned();
+        let aspsr = self.cpu.apple.guarded[usize::from(self.cpu.pstate.el) - 1].aspsr;
+        self.note_transition(transition::GUARDED_ENTER, start, 0, aspsr);
         Ok(())
     }
 
@@ -50,6 +53,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.guest_entry(bank.spsr, bank.aspsr & ASPSR_GUARDED != 0);
         }
         let trace = self.monitor_before(MonitorKind::GuardedExit);
+        let start = self.transition_start();
+        let banked = (self.cpu.pstate.el != 0).then(|| {
+            let bank = &self.cpu.apple.guarded[usize::from(self.cpu.pstate.el) - 1];
+            (bank.spsr, bank.aspsr & ASPSR_GUARDED)
+        });
         match self.cpu.guarded_exit() {
             Err(_) => self.undefined(),
             Ok(Err(reason)) => Err(self.unsupported(RequirementKind::IllegalReturn(reason))),
@@ -63,6 +71,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 });
                 self.monitor_after(trace);
                 self.transitioned();
+                if let Some((spsr, aspsr)) = banked {
+                    self.note_transition(transition::GUARDED_EXIT, start, spsr, aspsr);
+                }
                 Ok(())
             }
         }

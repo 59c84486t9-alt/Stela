@@ -96,6 +96,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             readable: deadline,
             value: self.chain.acknowledged_interrupt(),
         };
+        self.mirrors.lines_until = deadline;
     }
 
     /// The lines the devices drive into PE `pe` at count `now`: the cached

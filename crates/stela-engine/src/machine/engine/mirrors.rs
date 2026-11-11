@@ -91,6 +91,13 @@ pub(super) struct Mirrors {
     /// `value` the interrupt epoch they reflect
     /// ([`Machine::refresh_interrupt_status`]).
     pub(super) interrupt_status: register_read::Cell,
+    /// The records native GENTER and GEXIT complete from
+    /// (`x86_64::transition`), indexed by `state`, which they move.
+    pub(super) transitions: transition::Table,
+    /// The count before which time alone changes no interrupt line, as the
+    /// last step at EL2 found it (0 elsewhere): native GEXIT unmasks only
+    /// before it ([`Machine::refresh_interrupt_status`]).
+    pub(super) lines_until: u64,
 }
 
 /// Where native code finds the cell at `index` of the PE's state.
@@ -199,9 +206,28 @@ impl Default for Mirrors {
             selected: 0,
             fields: [0; 3],
             interrupt_status: register_read::Cell::default(),
+            transitions: transition::Table::default(),
+            lines_until: 0,
         }
     }
 }
+
+/// Where native transitions find the mirrors' words.
+pub(super) const TRANSITIONS: transition::Places = transition::Places {
+    state: Place::new(Anchor::Mirrors, offset_of!(Mirrors, state)),
+    table: Place::new(Anchor::Mirrors, offset_of!(Mirrors, transitions)),
+    selected: SELECTED,
+    fields: Place::new(Anchor::Mirrors, offset_of!(Mirrors, fields)),
+    field_bits: [
+        PSTATE_FIELDS[0].1 as u32,
+        PSTATE_FIELDS[1].1 as u32,
+        PSTATE_FIELDS[2].1 as u32,
+    ],
+    interrupt_status: INTERRUPT_STATUS,
+    lines_until: Place::new(Anchor::Mirrors, offset_of!(Mirrors, lines_until)),
+    count: Place::new(Anchor::Count, 0),
+};
+const _: () = assert!(size_of::<usize>() == size_of::<u64>());
 
 /// The PSTATE fields with registers of their own that a kernel saves and
 /// restores around each exception, which only the engine reads besides
@@ -230,6 +256,7 @@ pub(super) const fn written_cell(index: usize) -> usize {
 
 /// The ELs and GXF states, `Mirrors::banks` per [`mirror_state`].
 pub(super) const MIRROR_STATES: usize = 8;
+const _: () = assert!(MIRROR_STATES == transition::STATES);
 
 pub(super) fn mirror_state(el: u8, guarded: bool) -> usize {
     usize::from(el) | usize::from(guarded) << 2
@@ -239,6 +266,14 @@ impl Mirrors {
     /// The cells of the PE's state, at what [`Anchor::Cells`] holds.
     pub(super) fn cells(&self) -> &[register_read::Cell; CELLS] {
         &self.banks[self.state]
+    }
+
+    /// The state native code left current, which a native transition may
+    /// have moved: its cells may hold open values from now on.
+    pub(super) fn native_state(&mut self) -> usize {
+        self.state &= MIRROR_STATES - 1;
+        self.entered |= 1 << self.state;
+        self.state
     }
 
     /// Native code is entered with PSTATE `pstate`.

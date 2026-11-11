@@ -204,6 +204,8 @@ pub(super) struct ExitsSeen {
     /// `Statistics::lookup_misses` and `lookup_forgets`.
     pub(super) misses: [u64; 5],
     pub(super) forgets: [u64; 4],
+    /// `Statistics::native_transitions`.
+    pub(super) transitions: [u64; 4],
     /// `Machine::device_registers`.
     pub(super) registers: BTreeMap<u64, DeviceRegister>,
     /// `Machine::system_words`.
@@ -279,6 +281,7 @@ impl ExitsSeen {
         let lookups = [statistics.lookups, statistics.lookup_hits];
         let misses = statistics.lookup_misses;
         let forgets = statistics.lookup_forgets;
+        let transitions = statistics.native_transitions;
         let drops = [
             statistics.translation_changes,
             statistics.tlb_maintenance,
@@ -324,6 +327,11 @@ impl ExitsSeen {
         // for a wide TLBI by VA, halves forgotten by anything else.
         for (index, (now, last)) in forgets.iter().zip(&self.forgets).enumerate() {
             let separator = if index == 0 { " forgets=" } else { "," };
+            output::arguments(format_args!("{separator}{}", now - last));
+        }
+        // SVC, ERET, GENTER and GEXIT completed natively.
+        for (index, (now, last)) in transitions.iter().zip(&self.transitions).enumerate() {
+            let separator = if index == 0 { " native=" } else { "," };
             output::arguments(format_args!("{separator}{}", now - last));
         }
         // The share of the exits by word the shown words make up.
@@ -388,6 +396,7 @@ impl ExitsSeen {
             drops,
             misses,
             forgets,
+            transitions,
             registers,
         };
     }

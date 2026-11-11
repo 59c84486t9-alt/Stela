@@ -252,6 +252,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn execute(&mut self, index: usize, budget: u64) -> Step {
         let (budget, sampled) = self.sampled_budget(budget);
         let entry = self.code.blocks[index].code;
+        self.finish_transition(budget);
+        self.refresh_transition_contexts(budget);
+        // A transition may continue in this run unless counters tell the
+        // levels apart (`transitions`).
+        self.mirrors.transitions.chain =
+            u64::from(self.cpu.pmu.as_ref().is_none_or(|pmu| pmu.alike()));
         self.chain.begin(index, budget);
         self.cpu.state.daif = u32::from(self.cpu.pstate.daif);
         self.mirrors.selected = u64::from(self.cpu.pstate.sp);
@@ -264,6 +270,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // SAFETY: installed by this machine since the last discard, for the system-mode block ABI;
         // chained blocks and thunks too.
         let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
+        let transitions = self.mirrors.transitions.take_counts();
+        let transitioned = transitions != [0; transition::KINDS];
+        if transitioned {
+            self.adopt_native_state();
+        }
         let returned = self.timing_charge(step_timing::Phase::Native, entered);
         self.leave_amx_cell();
         self.cpu.pstate.daif = self.cpu.state.daif as u8;
@@ -312,6 +323,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     .retired
                     .wrapping_add(retired)
                     .wrapping_sub(u64::from(skipped));
+                if transitioned {
+                    // The last block's instructions, which its exit counts,
+                    // are the old level's when its transition ended the run.
+                    let ending = if kind == ExitKind::Return as u64 {
+                        u64::from(self.code.blocks[last].instructions)
+                    } else {
+                        0
+                    };
+                    self.adopt_transitions(transitions, ending);
+                }
                 if let Some(btype) = btype {
                     self.cpu.pstate.btype = btype;
                 }
@@ -352,6 +373,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 fault.offset = at.wrapping_sub(self.code.blocks[last].code.0 as u64) as usize;
                 let slot = step_timing::fault_slot(&fault.cause);
                 self.timed_device = None;
+                if transitioned {
+                    self.adopt_transitions(transitions, 0);
+                }
                 let handled = self.native_fault(last, fault, retired, btype);
                 self.timing_exit(slot, returned);
                 handled
@@ -372,7 +396,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let block = &self.code.blocks[index];
         let record = self.code.blocks.record(index);
         let kind = ExitKind::try_from(kind).ok()?;
-        let unlinked = if dynamic_branch(block.terminal).is_some() && kind != ExitKind::Direct {
+        let dynamic = dynamic_branch(block.terminal)
+            .or_else(|| transitions::transition_branch(block.terminal));
+        let unlinked = if dynamic.is_some() && kind != ExitKind::Direct {
             block.dynamic_site.is_some() && record.dynamic_open()
         } else if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) != 0
             && matches!(
@@ -569,7 +595,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }) else {
                 return;
             };
-            let Some((kind, fixed)) = dynamic_branch(block.terminal) else {
+            let Some((kind, fixed)) = dynamic_branch(block.terminal)
+                .or_else(|| transitions::transition_branch(block.terminal))
+            else {
                 return;
             };
             let page = if self.variants[block.variant.0 as usize].guarded_page {

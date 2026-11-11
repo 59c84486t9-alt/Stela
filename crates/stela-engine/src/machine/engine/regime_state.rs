@@ -43,6 +43,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Forget state derived from System registers and PSTATE.
     pub(super) fn derived_changed(&mut self) {
         self.forget_derived();
+        self.mirrors.transitions.forget();
         self.device_lines = None;
         self.mirrors.close_all();
         // Under step timing, the System exit being handled is charged with it.
@@ -89,15 +90,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the device lines.
     pub(super) fn forget_derived(&mut self) {
         self.timers = None;
+        self.mirrors.transitions.forget();
         self.forget_pstate_derived();
     }
 
     fn forget_pstate_derived(&mut self) {
+        self.forget_state_derived();
+        self.reopen_pointers();
+    }
+
+    /// What [`Self::forget_pstate_derived`] forgets but the PAC service.
+    pub(super) fn forget_state_derived(&mut self) {
         self.floating_point = None;
         self.memory_checks = None;
         self.native_system = None;
         self.debug = None;
-        self.reopen_pointers();
     }
 
     /// The PAC service after a derived-state change: what native code had

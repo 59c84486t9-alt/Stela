@@ -179,6 +179,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// An architectural cache epoch must never wrap back to an old permission.
     pub(super) fn advance_translation_generation(&mut self) {
         self.mirrors.close_code_page();
+        self.mirrors.transitions.contexts_moved();
         self.translation_generation = self
             .translation_generation
             .checked_add(1)
@@ -188,6 +189,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// What TTBR0 or its ASID selects may have changed.
     fn advance_table_generation(&mut self) {
         self.mirrors.close_code_page();
+        self.mirrors.transitions.contexts_moved();
         self.table_generation = self
             .table_generation
             .checked_add(1)

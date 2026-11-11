@@ -361,6 +361,7 @@ impl Host for BareHost<'_> {
         let entered = rdtsc();
         // SAFETY: the engine passes installed system-mode block code.
         let exit = unsafe { stela_enter_block(guest, code.0) };
+        state().follow_native();
         state().follow_pan(guest.pan != 0);
         native_return(code, exit, entered)
     }
@@ -408,6 +409,7 @@ impl Host for BareHost<'_> {
 
     fn set_regime(&mut self, regime: &Regime) {
         let state = state();
+        state.follow_native();
         let mut changed_roots = None;
         if let Some(current) = state.regime
             && current.controls != regime.controls
@@ -491,16 +493,7 @@ impl Host for BareHost<'_> {
         }
         state.regime = Some(*regime);
         // EL0, EL1, EL1 with PAN, and the GXF guarded level (GL1).
-        let view = match (
-            regime.requester.el,
-            regime.requester.pan,
-            regime.requester.guarded,
-        ) {
-            (0, _, _) => EL0_VIEW,
-            (_, _, true) => GUARDED_VIEW,
-            (_, false, false) => EL1_VIEW,
-            (_, true, false) => PAN_VIEW,
-        } + if regime.tag_checked() { VIEWS } else { 0 };
+        let view = view_of(regime);
         let root = state.root_of(view);
         let switch_view = root != state.root_of(state.current);
         state.current = view;
@@ -529,6 +522,49 @@ impl Host for BareHost<'_> {
 
     fn pan_in_flags(&self) -> bool {
         state().contexts.pan_flag
+    }
+
+    /// A view of one regime's controls, watchpoints and tag checks whose
+    /// root exists: CR3 in its PCID with the no-flush bit while the context
+    /// holds nothing stale (the record checks the flag), plain CR3 (which
+    /// flushes) without PCIDE; RFLAGS.AC for PAN where SMAP stands for it.
+    fn native_view(&mut self, from: &Regime, to: &Regime) -> Option<NativeView> {
+        use stela_compiler::x86_64::transition::{AC_CLEAR, AC_KEEP, AC_SET};
+        let state = state();
+        if from.controls != to.controls
+            || from.watch != to.watch
+            || from.tag_checks != to.tag_checks
+            || state.regime != Some(*to)
+        {
+            return None;
+        }
+        let view = view_of(to);
+        let root = state.root_of(view);
+        let base = *state.roots.get(root)?;
+        if base == 0 {
+            return None;
+        }
+        let cr3 = if state.contexts.tagged {
+            base | view_context(root) | crate::engine::storage::KEEP_ENTRIES
+        } else {
+            base
+        };
+        let ac = if !state.contexts.pan_flag {
+            AC_KEEP
+        } else if view % VIEWS == PAN_VIEW {
+            AC_CLEAR
+        } else {
+            AC_SET
+        };
+        Some(NativeView {
+            cr3,
+            root_at: &state.roots[root] as *const u64 as u64,
+            root: base,
+            stale_at: &state.contexts.stale[root] as *const bool as u64,
+            view_at: &state.native_view as *const u64 as u64,
+            view: native_view_word(view, to.requester),
+            ac,
+        })
     }
 
     fn invalidate_translations(&mut self) {

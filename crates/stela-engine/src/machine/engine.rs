@@ -7,7 +7,7 @@ mod reports;
 use boundary::*;
 pub use boundary::{
     CodePartitions, CodeWindow, ConsumedPair, DeviceError, Devices, Host, LocalRegisters,
-    LockedMemory, NoDevices, PassiveRegisters, ScalarRead, Settled, Start, UnlockedDma,
+    LockedMemory, NativeView, NoDevices, PassiveRegisters, ScalarRead, Settled, Start, UnlockedDma,
 };
 use compilation::{PENDING_EXITS, PendingExits};
 use mirrors::*;
@@ -55,6 +55,7 @@ mod regime_state;
 mod scheduler;
 mod system_access;
 mod timing;
+mod transitions;
 pub use board::{CodeReport, LockCounts, LockSite, SiteCounts};
 pub use churn::ChurnCounts;
 pub use install_census::InstallCauses;
@@ -149,7 +150,7 @@ use stela_compiler::{
     },
     x86_64::{
         MemoryChecks, NativeSystem, cache_clean, chain, native_exclusive,
-        pointer as x86_64_pointer, register_read, zero_block,
+        pointer as x86_64_pointer, register_read, transition, zero_block,
     },
 };
 pub use stela_contracts::bus::Transition;
@@ -1041,6 +1042,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// The instruction just completed wrote PSTATE.PACM (PACM, or an
     /// exception return), so it does not lapse.
     pacm_written: bool,
+    /// The engine-path transition whose record the next native entry at
+    /// its target makes (`transitions`).
+    transition_note: Option<transitions::Note>,
     /// The instruction the engine is completing, already counted as retired
     /// (`Machine::completing`).
     completing: Option<u64>,
@@ -1391,6 +1395,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             wait_limit: None,
             waited: 0,
             pacm_written: false,
+            transition_note: None,
             completing: None,
             chain: chain_control::Owner::default(),
             block_limit: u64::MAX,

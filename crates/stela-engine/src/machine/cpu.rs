@@ -624,6 +624,29 @@ impl Cpu {
         }
     }
 
+    /// Where the SP of `pstate`'s stack is kept while another is current.
+    pub fn stack_storage(&self, pstate: Pstate) -> u64 {
+        let which = stack(pstate);
+        match (Self::sp_register(which), which) {
+            (Some(register), _) => self.registers.address(register, 0).unwrap_or(0),
+            (None, Stack::Guarded(level)) => &self.apple.guarded[level].sp as *const u64 as u64,
+            (None, _) => 0,
+        }
+    }
+
+    /// Whether PSTATE `a` and `b` select one stack.
+    pub fn same_stack(a: Pstate, b: Pstate) -> bool {
+        stack(a) == stack(b)
+    }
+
+    /// The ESR GENTER #`immediate` banks.
+    pub fn guarded_enter_syndrome(immediate: u8) -> u64 {
+        exception::syndrome(
+            Class::ImplementationDefined,
+            GENTER_ISS | u32::from(immediate & 0x1f),
+        )
+    }
+
     /// Where the stack MSR SPSel, #1 selects at this guarded level lives.
     pub fn guarded_stack(&self) -> u64 {
         let level = usize::from(self.pstate.el.max(1)) - 1;

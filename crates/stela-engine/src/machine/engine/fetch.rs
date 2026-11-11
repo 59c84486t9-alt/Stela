@@ -208,6 +208,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             });
         if evicted.is_some() {
             self.statistics.itlb_drops[2] += 1;
+            // A transition record may name the context that went.
+            self.mirrors.transitions.contexts_moved();
         }
         self.statistics.itlb_sources[ItlbSource::Made as usize] += 1;
         if let Some(pages) = self.pending_refills.remove(&(half, key)) {

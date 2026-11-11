@@ -333,6 +333,14 @@ pub trait Host {
     fn pan_in_flags(&self) -> bool {
         false
     }
+    /// How native code moves the host from `from`, the regime it follows
+    /// now, to `to`, which differs in the requester alone, so that native
+    /// code may continue in `to` (`x86_64::transition`): `None` when this
+    /// host cannot, or not now. The host follows the view word before it
+    /// next resolves a fault of native code or takes a regime.
+    fn native_view(&mut self, _from: &Regime, _to: &Regime) -> Option<NativeView> {
+        None
+    }
     /// The PE invalidated instruction caches (IC IVAU of `Some(page)`, a
     /// physical page; IC IALLU or IALLUIS for `None`), which this machine
     /// already applied to its own compiled code. A host that runs other
@@ -849,4 +857,20 @@ impl Devices for NoDevices {
     fn lines(&mut self, _: usize, _: u64) -> Lines {
         Lines::default()
     }
+}
+
+/// What native code does to move a host to another view of one regime
+/// ([`Host::native_view`]), as `x86_64::transition::Record` keeps it: load
+/// `cr3` while the word at `root_at` is still `root` and the byte at
+/// `stale_at` clear, write `view` to the word at `view_at`, and leave
+/// RFLAGS.AC as `ac` says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeView {
+    pub cr3: u64,
+    pub root_at: u64,
+    pub root: u64,
+    pub stale_at: u64,
+    pub view_at: u64,
+    pub view: u64,
+    pub ac: u64,
 }

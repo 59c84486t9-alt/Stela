@@ -160,6 +160,11 @@ impl Owner {
         // SAFETY: only this Owner or its synchronous native call can write contexts.
         unsafe { core::ptr::addr_of!((*self.storage.control.get()).contexts).read() }
     }
+    /// The ITLB salts of [`Self::contexts`].
+    pub(super) fn salts(&self) -> [u32; 2] {
+        // SAFETY: only this Owner or its synchronous native call can write salts.
+        unsafe { core::ptr::addr_of!((*self.storage.control.get()).salts).read() }
+    }
     pub(super) fn set_contexts(&mut self, contexts: [u64; 2]) {
         // SAFETY: the sole owner writes this non-budget field outside native execution.
         unsafe {

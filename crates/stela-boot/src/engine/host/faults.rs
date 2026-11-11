@@ -217,6 +217,7 @@ pub(crate) fn page_fault(
     if !in_code(state, frame.rip) {
         super::super::interrupts::fatal(frame);
     }
+    state.follow_native();
     state.follow_pan(frame.rflags & RFLAGS_AC == 0);
     let Some(tag_checks) = state.regime.as_ref().map(|regime| regime.tag_checks) else {
         super::super::interrupts::fatal(frame);

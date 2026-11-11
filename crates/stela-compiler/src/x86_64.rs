@@ -150,6 +150,7 @@ mod scalable_matrix;
 pub(crate) mod shared_memory;
 mod simd;
 mod stack_alignment;
+pub mod transition;
 pub(crate) use simd::CheckedMemoryOperand as CheckedFixedMemoryOperand;
 pub mod cache_clean;
 pub mod native_exclusive;

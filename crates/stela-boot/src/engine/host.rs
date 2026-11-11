@@ -42,6 +42,7 @@ use stela_engine::machine::InstallError;
 use stela_engine::machine::NativeCode;
 use stela_engine::machine::NativeExit;
 use stela_engine::machine::NativeFault;
+use stela_engine::machine::NativeView;
 use stela_engine::machine::Regime;
 use stela_engine::machine::engine::GlobalSpan;
 use stela_engine::machine::engine::installed_code::InstalledCodeCache;
@@ -243,6 +244,36 @@ const SHADOW_ROOTS: usize = ROOTS * (BANKS + 1);
 const _: () = assert!(SHADOW_ROOTS <= u64::BITS as usize);
 
 /// Root `view`'s TLB context while PCIDE is set.
+/// Set in a [`State::native_view`] word, with the view in bits 7:0 and the
+/// requester's EL, PAN, guarded level and unprivileged flag above.
+const NATIVE_VIEW: u64 = 1 << 63;
+
+/// The [`State::native_view`] word of `view` for `requester`.
+fn native_view_word(view: usize, requester: mmu::Requester) -> u64 {
+    NATIVE_VIEW
+        | view as u64
+        | u64::from(requester.el) << 8
+        | u64::from(requester.pan) << 10
+        | u64::from(requester.guarded) << 11
+        | u64::from(requester.unprivileged) << 12
+}
+
+/// The view of `regime`: EL0, EL1, EL1 with PAN, or the GXF guarded level,
+/// in the tag-checked set when it checks tags.
+fn view_of(regime: &Regime) -> usize {
+    let view = match (
+        regime.requester.el,
+        regime.requester.pan,
+        regime.requester.guarded,
+    ) {
+        (0, _, _) => EL0_VIEW,
+        (_, _, true) => GUARDED_VIEW,
+        (_, false, false) => EL1_VIEW,
+        (_, true, false) => PAN_VIEW,
+    };
+    view + if regime.tag_checked() { VIEWS } else { 0 }
+}
+
 const fn view_context(view: usize) -> u64 {
     view as u64 + 2
 }
@@ -417,6 +448,10 @@ pub struct State {
     /// translations. Only a complete reset can prove both halves clean again.
     legacy_translations_dirty: bool,
     current: usize,
+    /// The view and requester native code moved to since the host last
+    /// followed it ([`NATIVE_VIEW`]), 0 when none: a native transition
+    /// loads the view's root itself (`Host::native_view`).
+    native_view: u64,
     regime: Option<Regime>,
     /// The halves whose Tagged memory the tag-checked roots keep out.
     tag_checks: [bool; 2],
@@ -640,6 +675,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
             },
             legacy_translations_dirty: false,
             current: usize::MAX,
+            native_view: 0,
             regime: None,
             tag_checks: [false; 2],
             code_virtual: config.code_virtual,
@@ -1118,6 +1154,24 @@ impl State {
             view - PAN_VIEW + EL1_VIEW
         } else {
             view
+        }
+    }
+
+    /// The view and requester a native transition left (`native_view`):
+    /// the walks and the view follow, as the engine's next regime will.
+    fn follow_native(&mut self) {
+        let word = core::mem::take(&mut self.native_view);
+        if word & NATIVE_VIEW == 0 {
+            return;
+        }
+        self.current = (word & 0xff) as usize;
+        if let Some(regime) = &mut self.regime {
+            regime.requester = mmu::Requester {
+                el: (word >> 8 & 3) as u8,
+                pan: word >> 10 & 1 != 0,
+                unprivileged: word >> 12 & 1 != 0,
+                guarded: word >> 11 & 1 != 0,
+            };
         }
     }
 

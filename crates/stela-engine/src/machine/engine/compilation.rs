@@ -924,6 +924,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .unwrap_or_default();
             successors.extend(successor);
             dynamic_site = dynamic_site.or(dynamic);
+            if let Some(exit) =
+                self.complete_transition_natively(code, code_bytes, terminal_pc, terminal)
+            {
+                dynamic_site = dynamic_site.or(Some(exit));
+            }
             successors.extend(self.complete_mirrored_read_natively(
                 code,
                 code_bytes,
