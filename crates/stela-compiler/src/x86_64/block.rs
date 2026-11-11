@@ -121,6 +121,7 @@ pub(crate) fn emit_ordinary_for_target(
             fault_table: false,
             pinned: false,
             frame_loop: None,
+            self_loop: None,
         },
         super::MemoryChecks::DEFAULT,
         super::NativeSystem::NONE,
@@ -145,6 +146,7 @@ pub(crate) fn emit_frame_loop(
             fault_table: false,
             pinned: false,
             frame_loop: Some(entry),
+            self_loop: None,
         },
         super::MemoryChecks::DEFAULT,
         super::NativeSystem::NONE,
@@ -186,6 +188,7 @@ pub(crate) fn emit_for_target(
             fault_table: false,
             pinned: false,
             frame_loop: None,
+            self_loop: None,
         },
         checks,
         super::NativeSystem::NONE,
@@ -221,6 +224,7 @@ pub(crate) fn emit_system_mode(
             fault_table: true,
             pinned: true,
             frame_loop: None,
+            self_loop: SelfLoop::admit(instructions, terminal, native),
         },
         super::MemoryChecks {
             guest_range: true,
@@ -228,6 +232,110 @@ pub(crate) fn emit_system_mode(
         },
         native,
     )
+}
+
+/// A system-mode block whose conditional terminal branches back to its own
+/// first instruction, run as a loop inside its code: each entry runs
+/// iterations until the branch falls through, a side exit leaves, or another
+/// iteration would retire more than [`SelfLoop::LIMIT`] instructions in the
+/// entry, when the taken branch
+/// exits to the block's start as it would without the loop, through its
+/// link and the transfer's budget and interrupt check.
+///
+/// The body is emitted twice. The first copy runs the first iteration of an
+/// entry with every check a block makes. The second runs the later ones and
+/// branches back to itself; its accesses skip the range checks that
+/// `guest_range` would skip in a block holding the body three times, so a
+/// base a skipped access goes through was checked in the first copy and has
+/// moved since by immediates only, within the instructions an entry runs.
+///
+/// `GuestState::loop_retired` counts the instructions of the iterations
+/// before the running one. Every exit adds it to the chain's retired count
+/// (`chain::ChainControl::retired`) and clears it; a fault's settlement does
+/// so in the engine. Exits and faults then count the running iteration's
+/// instructions as a block's do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SelfLoop {
+    /// The instructions of one iteration, its terminal included.
+    instructions: u8,
+}
+
+impl SelfLoop {
+    /// The instructions an entry retires before its taken branch exits,
+    /// at most: a block's own bound, so that an entry polls as often.
+    pub(crate) const LIMIT: i32 = MAX_BLOCK_INSTRUCTIONS as i32;
+    /// The longest body admitted: an entry runs at least two iterations.
+    const MAX_INSTRUCTIONS: usize = 64;
+
+    fn admit(
+        instructions: &[Instruction],
+        terminal: Option<&(GuestAddress, Terminator)>,
+        native: super::NativeSystem,
+    ) -> Option<Self> {
+        let entry = instructions.first()?.pc;
+        let (_, Terminator::Branch(operation)) = terminal? else {
+            return None;
+        };
+        let target = match *operation {
+            Operation::BranchCondition { target, condition } if condition < 14 => target,
+            Operation::BranchZero { target, .. } | Operation::BranchBit { target, .. } => target,
+            _ => return None,
+        };
+        // Code that leaves the block other than through its exits, or
+        // calls a service, is left to links.
+        let admitted = instructions.iter().all(|instruction| {
+            !matches!(
+                instruction.operation,
+                Operation::PointerAuthentication(_)
+                    | Operation::MirroredRead { .. }
+                    | Operation::Amx(_)
+            )
+        });
+        (native.self_loops
+            && target == entry
+            && admitted
+            && instructions.len() < Self::MAX_INSTRUCTIONS)
+            .then(|| Self {
+                instructions: u8::try_from(instructions.len() + 1).expect("bounded body"),
+            })
+    }
+}
+
+/// A [`SelfLoop`]'s jumps to its exits, from both copies of its body.
+#[derive(Default)]
+struct LoopExits {
+    /// Where the second copy starts, and the source rows before it.
+    start: usize,
+    first_rows: usize,
+    /// The back edges' jumps when the branch falls through.
+    fallthrough: Vec<super::asm::Patch>,
+    /// Each branch run past: its jump, target, the rows up to it and the
+    /// locals its copy's run has written there.
+    side: Vec<(super::asm::Patch, GuestAddress, usize, super::pinned::Dirty)>,
+    /// The locals the loop's run has written at its back edge.
+    dirty: super::pinned::Dirty,
+    /// The jump to the taken branch's exit once an entry's share is spent.
+    taken: Option<super::asm::Patch>,
+}
+
+/// `GuestState::loop_retired`.
+const LOOP_RETIRED: u32 = core::mem::offset_of!(crate::GuestState, loop_retired) as u32;
+
+/// Move `GuestState::loop_retired`, less `less`, to the chain's retired
+/// count and clear it, before an exit of a [`SelfLoop`].
+fn settle_loop(asm: &mut Asm, less: u8) {
+    asm.mov_load(Size::Qword, Gpr::Rax, super::frame(LOOP_RETIRED));
+    if less != 0 {
+        asm.alu_imm8(Alu::Sub, Size::Qword, Gpr::Rax, less as i8);
+    }
+    asm.place(Gpr::Rcx, super::chain::CONTROL_PLACE);
+    asm.alu(
+        Alu::Add,
+        Size::Qword,
+        Mem::base(Gpr::Rcx, super::chain::RETIRED_OFFSET),
+        Gpr::Rax,
+    );
+    asm.alu_imm8(Alu::And, Size::Qword, super::frame(LOOP_RETIRED), 0);
 }
 
 /// Selection and recovery policy for register-resident regions.
@@ -238,6 +346,8 @@ struct RegionPolicy {
     /// Keep guest registers in host registers ([`super::pinned`]).
     pinned: bool,
     frame_loop: Option<GuestAddress>,
+    /// Run the block's iterations inside it ([`SelfLoop`]).
+    self_loop: Option<SelfLoop>,
 }
 
 /// The final address of a flagless ADD that overwrites its adjacent ADR(P).
@@ -281,6 +391,7 @@ fn emit_selected(
         fault_table,
         pinned,
         frame_loop,
+        self_loop,
     } = regions;
     let mut fault_recovery = vec![];
     let source_rows = instructions.len() + usize::from(terminal.is_some());
@@ -366,8 +477,37 @@ fn emit_selected(
     let mut stack_rows = [true; MAX_BLOCK_INSTRUCTIONS];
     let stack = &mut stack_rows[..instructions.len()];
     super::stack_alignment::checks(instructions, stack);
+    // A self-loop's second copy of its body: the checks of a block holding
+    // the body three times, the later two copies' ([`SelfLoop`]).
+    let mut loop_rows = [true; MAX_BLOCK_INSTRUCTIONS];
+    let loop_ranges = match self_loop {
+        Some(_) if checks.guest_range => {
+            let count = instructions.len();
+            if !checks.checks_every_access() {
+                let tripled: Vec<Instruction> = instructions
+                    .iter()
+                    .chain(instructions)
+                    .chain(instructions)
+                    .cloned()
+                    .collect();
+                let mut rows = vec![true; tripled.len()];
+                super::guest_range::checks(&tripled, &mut rows);
+                for (index, row) in loop_rows[..count].iter_mut().enumerate() {
+                    *row = rows[count + index] || rows[2 * count + index];
+                }
+            }
+            Some(&loop_rows[..count])
+        }
+        _ => None,
+    };
+    // Which copy of a self-loop's body is being emitted.
+    let second_copy = core::cell::Cell::new(false);
     let checks_at = |index: usize| super::MemoryChecks {
-        guest_range: ranges.is_some_and(|ranges| ranges[index]),
+        guest_range: if second_copy.get() {
+            loop_ranges.is_some_and(|ranges| ranges[index])
+        } else {
+            ranges.is_some_and(|ranges| ranges[index])
+        },
         stack_checked: !stack[index],
         ..checks
     };
@@ -408,477 +548,639 @@ fn emit_selected(
     let mut mirrored_paths = vec![];
     // And those of the AMX moves (`amx_transfer`).
     let mut amx_paths = vec![];
-    while cursor < instructions.len() {
-        let held = core::mem::replace(&mut after, Held::NOTHING);
-        // A group emitted otherwise may have used the slots.
-        if !core::mem::take(&mut emitted_alone) {
-            bases.reset();
-        }
-        // A run keeps the guest registers it uses most in scratch registers
-        // (`pinned::Span`). A fault in its next instruction recovers the
-        // ones it has written from there; its end stores them.
-        if let Some((active, end)) = run.as_mut() {
-            active.emitted(code, &instructions[run_emitted..cursor]);
-            run_emitted = cursor;
-            if cursor >= *end
-                && let Some((active, _)) = run.take()
-            {
-                active.leave(code);
+    // A self-loop's jumps to its exits from both copies of its body, its
+    // body twice for the masked bases' lookahead, and the masked bases its
+    // back edges carry ([`masked_base::Tracker::carriers`]).
+    let mut loop_exits = LoopExits::default();
+    let lookahead: Vec<Instruction> = match self_loop {
+        Some(_) => instructions.iter().chain(instructions).cloned().collect(),
+        None => vec![],
+    };
+    let mut carried = vec![];
+    // Whether one run covers a self-loop's body ([`pinned::Span::plan_loop`]).
+    let mut loop_run = false;
+    for copy in 0..if self_loop.is_some() { 2_usize } else { 1 } {
+        if copy == 0
+            && self_loop.is_some()
+            && runs
+            && let Some(plan) = super::pinned::Span::plan_loop(instructions)
+        {
+            // One run covers the body: its locals stay in their hosts across
+            // the back edges, and the exits store them.
+            if plan.takes_slots() {
+                bases.reset();
             }
+            run = Some((plan.enter_all(code), usize::MAX));
+            next_pinned_span = usize::MAX;
+            loop_run = true;
         }
-        if runs && run.is_none() && cursor >= next_pinned_span {
-            let (count, plan) = super::pinned::Span::plan(&instructions[cursor..]);
-            next_pinned_span = cursor + count.max(1);
-            if let Some(plan) = plan {
-                // Its locals overwrite the slots' kept addresses.
-                if plan.takes_slots() {
-                    bases.reset();
-                }
-                let held_register = match held.rax {
-                    super::Rax::Guest(register) => Some(register),
-                    _ => None,
-                };
-                run = Some((plan.enter(code, held_register), cursor + plan.rows()));
+        if copy == 1 {
+            // The second copy starts where its own back edge lands, with
+            // nothing held and only the loop's run open.
+            second_copy.set(true);
+            loop_exits.start = code.len();
+            loop_exits.first_rows = block.source_map.len();
+            cursor = 0;
+            if !loop_run {
+                next_pinned_span = 0;
+            }
+            run_emitted = 0;
+            after = Held::NOTHING;
+            bases = super::masked_base::Tracker::carried(&carried);
+            emitted_alone = true;
+        }
+        while cursor < instructions.len() {
+            let held = core::mem::replace(&mut after, Held::NOTHING);
+            // A group emitted otherwise may have used the slots.
+            if !core::mem::take(&mut emitted_alone) {
+                bases.reset();
+            }
+            // A run keeps the guest registers it uses most in scratch registers
+            // (`pinned::Span`). A fault in its next instruction recovers the
+            // ones it has written from there; its end stores them.
+            if let Some((active, end)) = run.as_mut() {
+                active.emitted(code, &instructions[run_emitted..cursor]);
                 run_emitted = cursor;
+                if cursor >= *end
+                    && let Some((active, _)) = run.take()
+                {
+                    active.leave(code);
+                }
             }
-        }
-        if fuse_simd
-            && let Some(group) = super::simd::sha256::HashGroup::recognize(&instructions[cursor..])
-        {
-            let (offsets, count, result) = group.emit(code, target);
-            block.source_map.extend(
-                instructions[cursor..cursor + count]
-                    .iter()
-                    .zip(offsets)
-                    .map(|(instruction, offset)| (instruction.pc, offset)),
-            );
-            code.set_instruction(block.source_map.len() - 1);
-            after.xmm0 = result;
-            cursor += count;
-            continue;
-        }
-        if (fuse_aes_rounds || fuse_vaes_rounds)
-            && matches!(
-                instructions[cursor].operation,
-                Operation::Simd(Simd::Aes(_))
-            )
-        {
-            if fuse_vaes_rounds
-                && super::simd::aes::packed_rounds::emit(
-                    code,
-                    &mut block.source_map,
-                    &instructions[cursor..],
-                )
-                .is_some()
+            if runs && run.is_none() && cursor >= next_pinned_span {
+                let (count, plan) = super::pinned::Span::plan(&instructions[cursor..]);
+                next_pinned_span = cursor + count.max(1);
+                if let Some(plan) = plan {
+                    // Its locals overwrite the slots' kept addresses.
+                    if plan.takes_slots() {
+                        bases.reset();
+                    }
+                    let held_register = match held.rax {
+                        super::Rax::Guest(register) => Some(register),
+                        _ => None,
+                    };
+                    run = Some((plan.enter(code, held_register), cursor + plan.rows()));
+                    run_emitted = cursor;
+                }
+            }
+            if fuse_simd
+                && let Some(group) =
+                    super::simd::sha256::HashGroup::recognize(&instructions[cursor..])
             {
-                cursor += 4;
+                let (offsets, count, result) = group.emit(code, target);
+                block.source_map.extend(
+                    instructions[cursor..cursor + count]
+                        .iter()
+                        .zip(offsets)
+                        .map(|(instruction, offset)| (instruction.pc, offset)),
+                );
+                code.set_instruction(block.source_map.len() - 1);
+                after.xmm0 = result;
+                cursor += count;
                 continue;
             }
-            if fuse_aes_rounds
-                && let Some(result) = super::simd::aes::emit_round_pair(
+            if (fuse_aes_rounds || fuse_vaes_rounds)
+                && matches!(
+                    instructions[cursor].operation,
+                    Operation::Simd(Simd::Aes(_))
+                )
+            {
+                if fuse_vaes_rounds
+                    && super::simd::aes::packed_rounds::emit(
+                        code,
+                        &mut block.source_map,
+                        &instructions[cursor..],
+                    )
+                    .is_some()
+                {
+                    cursor += 4;
+                    continue;
+                }
+                if fuse_aes_rounds
+                    && let Some(result) = super::simd::aes::emit_round_pair(
+                        code,
+                        &mut block.source_map,
+                        &instructions[cursor..],
+                        target,
+                    )
+                {
+                    after.xmm0 = Some(result);
+                    cursor += 2;
+                    continue;
+                }
+            }
+            if fuse_ssse3
+                && let Operation::Simd(Simd::Rearrange(operand)) = instructions[cursor].operation
+            {
+                let group = match operand {
+                    Rearrange::Permute { .. } => super::simd::rearrange::emit_reverse_dword_run(
+                        code,
+                        &mut block.source_map,
+                        &instructions[cursor..],
+                        target,
+                    ),
+                    Rearrange::Table {
+                        registers: 1,
+                        preserve: false,
+                        ..
+                    } if fuse_single_table => super::simd::rearrange::emit_single_table_run(
+                        code,
+                        &mut block.source_map,
+                        &instructions[cursor..],
+                        target,
+                    ),
+                    _ => None,
+                };
+                if let Some((count, result)) = group {
+                    after.xmm0 = Some(result);
+                    cursor += count;
+                    continue;
+                }
+            }
+            if fuse_simd
+                && let Some(result) = super::simd::precision::emit_half_widen_pair(
                     code,
                     &mut block.source_map,
                     &instructions[cursor..],
-                    target,
                 )
             {
                 after.xmm0 = Some(result);
                 cursor += 2;
                 continue;
             }
-        }
-        if fuse_ssse3
-            && let Operation::Simd(Simd::Rearrange(operand)) = instructions[cursor].operation
-        {
-            let group = match operand {
-                Rearrange::Permute { .. } => super::simd::rearrange::emit_reverse_dword_run(
+            if pinned
+                && !code.constant_time()
+                && matches!(
+                    instructions[cursor].operation,
+                    Operation::AddSubCarry { flags: true, .. }
+                )
+                && let Some(count) = super::pinned::emit_carry_run(
                     code,
                     &mut block.source_map,
                     &instructions[cursor..],
-                    target,
-                ),
-                Rearrange::Table {
-                    registers: 1,
-                    preserve: false,
-                    ..
-                } if fuse_single_table => super::simd::rearrange::emit_single_table_run(
-                    code,
-                    &mut block.source_map,
-                    &instructions[cursor..],
-                    target,
-                ),
-                _ => None,
-            };
-            if let Some((count, result)) = group {
-                after.xmm0 = Some(result);
+                    held.rax == super::Rax::Nzcv,
+                )
+            {
+                code.set_instruction(block.source_map.len() - 1);
+                after.rax = super::Rax::Nzcv;
                 cursor += count;
                 continue;
             }
-        }
-        if fuse_simd
-            && let Some(result) = super::simd::precision::emit_half_widen_pair(
-                code,
-                &mut block.source_map,
-                &instructions[cursor..],
-            )
-        {
-            after.xmm0 = Some(result);
-            cursor += 2;
-            continue;
-        }
-        if pinned
-            && !code.constant_time()
-            && matches!(
-                instructions[cursor].operation,
-                Operation::AddSubCarry { flags: true, .. }
-            )
-            && let Some(count) = super::pinned::emit_carry_run(
-                code,
-                &mut block.source_map,
-                &instructions[cursor..],
-                held.rax == super::Rax::Nzcv,
-            )
-        {
-            code.set_instruction(block.source_map.len() - 1);
-            after.rax = super::Rax::Nzcv;
-            cursor += count;
-            continue;
-        }
-        // The pair's second fault finds the first's result, which a run's
-        // dirty locals at the pair's start do not hold.
-        if (pinned || fuse_pairs)
-            && run.is_none()
-            && !code.constant_time()
-            && !checks.checks_every_access()
-            && matches!(
-                instructions[cursor].operation,
-                Operation::MemoryRegisterOffset(_)
-            )
-            && super::register_offset::emit_load_store(
-                code,
-                &mut block.source_map,
-                &instructions[cursor..],
-                checks_at(cursor),
-                held.rax,
-            )
-        {
-            cursor += 2;
-            continue;
-        }
-        if fuse_pairs {
-            let group = match instructions[cursor].operation {
-                Operation::Memory {
-                    transfer: super::MemoryTransfer::Load { .. },
-                    mode: super::AddressMode::Offset | super::AddressMode::PostIndex,
-                    ..
-                } => super::memory_recipe::CompareLoads::new(
+            // The pair's second fault finds the first's result, which a run's
+            // dirty locals at the pair's start do not hold.
+            if (pinned || fuse_pairs)
+                && run.is_none()
+                && !code.constant_time()
+                && !checks.checks_every_access()
+                && matches!(
+                    instructions[cursor].operation,
+                    Operation::MemoryRegisterOffset(_)
+                )
+                && super::register_offset::emit_load_store(
+                    code,
+                    &mut block.source_map,
                     &instructions[cursor..],
+                    checks_at(cursor),
                     held.rax,
-                    checks,
-                ),
-                Operation::MemoryPair {
-                    transfer: super::MemoryTransfer::Load { .. },
-                    mode: super::AddressMode::Offset,
-                    ..
-                } => super::memory_recipe::CompareLoads::from_pair(&instructions[cursor..], checks),
-                _ => None,
-            };
-            if let Some(group) = group {
-                let compare = cursor + group.compare_index();
-                after.rax = group.emit(
+                )
+            {
+                cursor += 2;
+                continue;
+            }
+            if fuse_pairs {
+                let group = match instructions[cursor].operation {
+                    Operation::Memory {
+                        transfer: super::MemoryTransfer::Load { .. },
+                        mode: super::AddressMode::Offset | super::AddressMode::PostIndex,
+                        ..
+                    } => super::memory_recipe::CompareLoads::new(
+                        &instructions[cursor..],
+                        held.rax,
+                        checks,
+                    ),
+                    Operation::MemoryPair {
+                        transfer: super::MemoryTransfer::Load { .. },
+                        mode: super::AddressMode::Offset,
+                        ..
+                    } => super::memory_recipe::CompareLoads::from_pair(
+                        &instructions[cursor..],
+                        checks,
+                    ),
+                    _ => None,
+                };
+                if let Some(group) = group {
+                    let compare = cursor + group.compare_index();
+                    after.rax = group.emit(
+                        code,
+                        &mut block.source_map,
+                        &instructions[cursor..],
+                        checks,
+                        native_branch_after(compare),
+                    );
+                    cursor = compare + 1;
+                    continue;
+                }
+            }
+            if (pinned || fuse_pairs)
+                && !code.constant_time()
+                && matches!(instructions[cursor].operation, Operation::IntegerMath(operand)
+                if matches!(operand.kind, integer_math::Kind::Divide { .. }))
+                && super::integer_math::emit_divide_remainder(
                     code,
                     &mut block.source_map,
                     &instructions[cursor..],
-                    checks,
-                    native_branch_after(compare),
-                );
-                cursor = compare + 1;
+                )
+            {
+                cursor += 2;
                 continue;
             }
-        }
-        if (pinned || fuse_pairs)
-            && !code.constant_time()
-            && matches!(instructions[cursor].operation, Operation::IntegerMath(operand)
-                if matches!(operand.kind, integer_math::Kind::Divide { .. }))
-            && super::integer_math::emit_divide_remainder(
-                code,
-                &mut block.source_map,
-                &instructions[cursor..],
-            )
-        {
-            cursor += 2;
-            continue;
-        }
-        // Build the new candidate privately. Rejection leaves both cursor and
-        // output untouched, so the legacy clean-load chunk partition is exact.
-        if optimize_regions
-            && let Ok(Some(region)) = super::region::emit_allocated_prefix(&instructions[cursor..])
-        {
-            let count = region.consumed_instructions;
-            let mut baseline = Code::new();
-            let mut candidate_fixups = vec![];
-            for (index, instruction) in instructions[cursor..cursor + count].iter().enumerate() {
-                super::emit_instruction(
-                    &mut baseline,
-                    instruction,
-                    &mut candidate_fixups,
-                    target,
-                    gate_at(cursor + index),
-                );
-            }
-            if candidate_fixups.is_empty() && super::region::admits_allocated(&region, &baseline) {
-                let offset = code.len();
-                block
-                    .source_map
-                    .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
-                code.append(region.code);
-                // The value allocator emits only GPR operations and saves.
-                after.xmm0 = held.xmm0;
-                after.xmm_pair = held.xmm_pair;
-                cursor += count;
-                continue;
-            }
-        }
-        if optimize_regions
-            && let Ok(region) = super::region::emit_clean_load_prefix_with(
-                &instructions[cursor..],
-                checks,
-                fault_table,
-                ranges.map(|ranges| &ranges[cursor..]),
-            )
-            && region.consumed_instructions != 0
-        {
-            let count = region.consumed_instructions;
-            let chunk = &instructions[cursor..cursor + count];
-            let mut baseline = |checks_at: &dyn Fn(usize) -> super::MemoryChecks| {
-                let mut code = Code::new();
-                let mut map = vec![];
-                let mut fixups = vec![];
-                let mut after = held;
-                for (index, instruction) in chunk.iter().enumerate() {
-                    map.push((instruction.pc, code.len()));
-                    after = emit_single(
-                        &mut code,
-                        &mut scratch,
-                        None,
+            // Build the new candidate privately. Rejection leaves both cursor and
+            // output untouched, so the legacy clean-load chunk partition is exact.
+            if optimize_regions
+                && let Ok(Some(region)) =
+                    super::region::emit_allocated_prefix(&instructions[cursor..])
+            {
+                let count = region.consumed_instructions;
+                let mut baseline = Code::new();
+                let mut candidate_fixups = vec![];
+                for (index, instruction) in instructions[cursor..cursor + count].iter().enumerate()
+                {
+                    super::emit_instruction(
+                        &mut baseline,
                         instruction,
-                        &mut fixups,
-                        SingleOptions {
-                            target,
-                            checks: checks_at(cursor + index),
-                            live_nzcv: native_branch_after(cursor + index),
-                        },
-                        after,
+                        &mut candidate_fixups,
+                        target,
+                        gate_at(cursor + index),
                     );
                 }
-                debug_assert!(fixups.is_empty());
-                (code, map, after)
-            };
-            let offset = code.len();
-            let gate_baseline = baseline(&gate_at);
-            if super::region::admits_ordinary(&region, &gate_baseline.0) {
-                block
-                    .source_map
-                    .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
-                fault_recovery.extend(region.fault_recovery.into_iter().map(|entry| {
-                    crate::block::FaultRecovery {
-                        start: offset + entry.start,
-                        end: offset + entry.end,
-                        retirement: entry
-                            .retirement
-                            .rebased(u16::try_from(cursor).expect("bounded block cursor"))
-                            .expect("bounded block retirement"),
-                        ..entry
-                    }
-                }));
-                code.append(region.code);
-                if (held.xmm0.is_some() || held.xmm_pair.is_some())
-                    && chunk
-                        .iter()
-                        .all(|instruction| preserves_held_vectors(&instruction.operation))
+                if candidate_fixups.is_empty()
+                    && super::region::admits_allocated(&region, &baseline)
                 {
+                    let offset = code.len();
+                    block
+                        .source_map
+                        .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
+                    code.append(region.code);
+                    // The value allocator emits only GPR operations and saves.
                     after.xmm0 = held.xmm0;
                     after.xmm_pair = held.xmm_pair;
+                    cursor += count;
+                    continue;
                 }
-            } else {
-                // Reject the complete eligible chunk. Rescanning its suffix
-                // could bypass the measured cost gate with a different shape.
-                let same_stack_checks = chunk.iter().enumerate().all(|(index, instruction)| {
-                    match instruction.operation {
-                        Operation::Memory { base, .. } | Operation::MemoryPair { base, .. }
-                            if base == Register::Sp =>
-                        {
-                            stack[cursor + index]
-                        }
-                        _ => true,
+            }
+            if optimize_regions
+                && let Ok(region) = super::region::emit_clean_load_prefix_with(
+                    &instructions[cursor..],
+                    checks,
+                    fault_table,
+                    ranges.map(|ranges| &ranges[cursor..]),
+                )
+                && region.consumed_instructions != 0
+            {
+                let count = region.consumed_instructions;
+                let chunk = &instructions[cursor..cursor + count];
+                let mut baseline = |checks_at: &dyn Fn(usize) -> super::MemoryChecks| {
+                    let mut code = Code::new();
+                    let mut map = vec![];
+                    let mut fixups = vec![];
+                    let mut after = held;
+                    for (index, instruction) in chunk.iter().enumerate() {
+                        map.push((instruction.pc, code.len()));
+                        after = emit_single(
+                            &mut code,
+                            &mut scratch,
+                            None,
+                            instruction,
+                            &mut fixups,
+                            SingleOptions {
+                                target,
+                                checks: checks_at(cursor + index),
+                                live_nzcv: native_branch_after(cursor + index),
+                            },
+                            after,
+                        );
                     }
-                });
-                let (baseline_code, baseline_map, baseline_after) = if same_stack_checks {
-                    gate_baseline
-                } else {
-                    baseline(&checks_at)
+                    debug_assert!(fixups.is_empty());
+                    (code, map, after)
                 };
-                block
-                    .source_map
-                    .extend(baseline_map.iter().map(|(pc, at)| (*pc, offset + at)));
-                code.append(baseline_code);
-                after = baseline_after;
+                let offset = code.len();
+                let gate_baseline = baseline(&gate_at);
+                if super::region::admits_ordinary(&region, &gate_baseline.0) {
+                    block
+                        .source_map
+                        .extend(region.source_map.iter().map(|(pc, at)| (*pc, offset + at)));
+                    fault_recovery.extend(region.fault_recovery.into_iter().map(|entry| {
+                        crate::block::FaultRecovery {
+                            start: offset + entry.start,
+                            end: offset + entry.end,
+                            retirement: entry
+                                .retirement
+                                .rebased(u16::try_from(cursor).expect("bounded block cursor"))
+                                .expect("bounded block retirement"),
+                            ..entry
+                        }
+                    }));
+                    code.append(region.code);
+                    if (held.xmm0.is_some() || held.xmm_pair.is_some())
+                        && chunk
+                            .iter()
+                            .all(|instruction| preserves_held_vectors(&instruction.operation))
+                    {
+                        after.xmm0 = held.xmm0;
+                        after.xmm_pair = held.xmm_pair;
+                    }
+                } else {
+                    // Reject the complete eligible chunk. Rescanning its suffix
+                    // could bypass the measured cost gate with a different shape.
+                    let same_stack_checks = chunk.iter().enumerate().all(|(index, instruction)| {
+                        match instruction.operation {
+                            Operation::Memory { base, .. } | Operation::MemoryPair { base, .. }
+                                if base == Register::Sp =>
+                            {
+                                stack[cursor + index]
+                            }
+                            _ => true,
+                        }
+                    });
+                    let (baseline_code, baseline_map, baseline_after) = if same_stack_checks {
+                        gate_baseline
+                    } else {
+                        baseline(&checks_at)
+                    };
+                    block
+                        .source_map
+                        .extend(baseline_map.iter().map(|(pc, at)| (*pc, offset + at)));
+                    code.append(baseline_code);
+                    after = baseline_after;
+                }
+                // Each region wrote back the full register frame, so what follows
+                // sees the ordinary direct-RAM ABI.
+                cursor += count;
+                continue;
             }
-            // Each region wrote back the full register frame, so what follows
-            // sees the ordinary direct-RAM ABI.
-            cursor += count;
-            continue;
-        }
-        let instruction = &instructions[cursor];
-        // System chains only enter and poll at block boundaries. Neither
-        // operation has a guest fault site, and an independent entry at ADD
-        // still compiles from its own source. Preserve both retirement rows.
-        if pinned
-            && !code.constant_time()
-            && let Some(second) = instructions.get(cursor + 1)
-            && instruction.pc.0.checked_add(4) == Some(second.pc.0)
-            && let Some(address) = fold_address_pair(&instruction.operation, &second.operation)
-        {
+            let instruction = &instructions[cursor];
+            // System chains only enter and poll at block boundaries. Neither
+            // operation has a guest fault site, and an independent entry at ADD
+            // still compiles from its own source. Preserve both retirement rows.
+            if pinned
+                && !code.constant_time()
+                && let Some(second) = instructions.get(cursor + 1)
+                && instruction.pc.0.checked_add(4) == Some(second.pc.0)
+                && let Some(address) = fold_address_pair(&instruction.operation, &second.operation)
+            {
+                block.source_map.push((instruction.pc, code.len()));
+                code.set_instruction(block.source_map.len() - 1);
+                code.asm().nop();
+                block.source_map.push((second.pc, code.len()));
+                code.set_instruction(block.source_map.len() - 1);
+                super::pinned::emit_pc_relative(code, address);
+                if code.host(address.destination).is_none() {
+                    after.rax = super::Rax::Guest(address.destination);
+                }
+                bases.after(instruction, None);
+                bases.after(second, None);
+                emitted_alone = true;
+                cursor += 2;
+                continue;
+            }
+            // An ordinary block runs the pair together. A truncated block or
+            // an entry at CLZ still emits its original operation.
+            if fuse_pairs
+                && let Operation::IntegerMath(reverse) = instruction.operation
+                && let integer_math::Kind::ReverseBits { width } = reverse.kind
+                && let Some(second) = instructions.get(cursor + 1)
+                && let Operation::IntegerMath(count) = second.operation
+                && count.kind == (integer_math::Kind::LeadingZeros { width })
+                && reverse.destination != Register::Zero
+                && count.left == reverse.destination
+                && count.destination == reverse.destination
+                && instruction.pc.0.checked_add(4) == Some(second.pc.0)
+            {
+                block.source_map.push((instruction.pc, code.len()));
+                code.set_instruction(block.source_map.len() - 1);
+                code.asm().nop();
+                block.source_map.push((second.pc, code.len()));
+                code.set_instruction(block.source_map.len() - 1);
+                super::integer_unary::emit(
+                    code,
+                    &integer_unary::Operand {
+                        kind: integer_unary::Kind::TrailingZeros,
+                        width,
+                        destination: count.destination,
+                        source: reverse.left,
+                    },
+                    target,
+                );
+                cursor += 2;
+                continue;
+            }
             block.source_map.push((instruction.pc, code.len()));
             code.set_instruction(block.source_map.len() - 1);
-            code.asm().nop();
-            block.source_map.push((second.pc, code.len()));
-            code.set_instruction(block.source_map.len() - 1);
-            super::pinned::emit_pc_relative(code, address);
-            if code.host(address.destination).is_none() {
-                after.rax = super::Rax::Guest(address.destination);
+            if let Some(target) = instruction.operation.conditional_target() {
+                let taken = branch_condition(code, &instruction.operation, held.rax)
+                    .expect("a conditional branch's condition");
+                // A side exit's stub is its link slot and exit alone, which is
+                // where `successor_exits` finds it: what the run has written is
+                // stored before the branch, flags untouched.
+                let mut dirty = super::pinned::Dirty::default();
+                if let Some((active, _)) = run.as_mut() {
+                    if loop_run {
+                        // The exit stores what the run has written.
+                        dirty = active.dirty();
+                    } else {
+                        active.flush(code);
+                    }
+                }
+                let jump = code.asm().jcc(taken);
+                if self_loop.is_some() {
+                    // Both copies' jumps go to one exit, which settles first.
+                    let rows = block.source_map.len() - loop_exits.first_rows * copy;
+                    loop_exits.side.push((jump, target, rows, dirty));
+                } else {
+                    side_exits.push((jump, target, block.source_map.len()));
+                }
+                bases.after(instruction, None);
+                emitted_alone = true;
+                cursor += 1;
+                continue;
             }
-            bases.after(instruction, None);
-            bases.after(second, None);
-            emitted_alone = true;
-            cursor += 2;
-            continue;
-        }
-        // An ordinary block runs the pair together. A truncated block or
-        // an entry at CLZ still emits its original operation.
-        if fuse_pairs
-            && let Operation::IntegerMath(reverse) = instruction.operation
-            && let integer_math::Kind::ReverseBits { width } = reverse.kind
-            && let Some(second) = instructions.get(cursor + 1)
-            && let Operation::IntegerMath(count) = second.operation
-            && count.kind == (integer_math::Kind::LeadingZeros { width })
-            && reverse.destination != Register::Zero
-            && count.left == reverse.destination
-            && count.destination == reverse.destination
-            && instruction.pc.0.checked_add(4) == Some(second.pc.0)
-        {
-            block.source_map.push((instruction.pc, code.len()));
-            code.set_instruction(block.source_map.len() - 1);
-            code.asm().nop();
-            block.source_map.push((second.pc, code.len()));
-            code.set_instruction(block.source_map.len() - 1);
-            super::integer_unary::emit(
+            if let Operation::PointerAuthentication(operation) = instruction.operation {
+                let cells = native
+                    .pointer
+                    .expect("blocks hold PAC instructions only given the service's cells");
+                pointer_paths.push(super::pointer::inline::emit(
+                    code,
+                    operation,
+                    instruction.pc,
+                    cells,
+                ));
+                // A service call may change both masked-base slots.
+                bases.reset();
+                emitted_alone = true;
+                cursor += 1;
+                continue;
+            }
+            if let Operation::MirroredRead { word } = instruction.operation {
+                let cell = native
+                    .mirrored
+                    .cell(word)
+                    .expect("blocks hold mirrored reads only given their cells");
+                mirrored_paths.push(super::mirrored_read::emit(code, word, instruction.pc, cell));
+                // Xt alone changes; its masked base, if any, is gone.
+                bases.after(instruction, None);
+                emitted_alone = true;
+                cursor += 1;
+                continue;
+            }
+            if let Operation::Amx(amx) = instruction.operation {
+                amx_paths.push(super::amx_transfer::emit(code, &amx, checks, target));
+                bases.reset();
+                emitted_alone = true;
+                cursor += 1;
+                continue;
+            }
+            if reuse_bases {
+                // A self-loop's accesses look ahead into the next iteration.
+                let ahead = if self_loop.is_some() {
+                    &lookahead[cursor..]
+                } else {
+                    &instructions[cursor..]
+                };
+                code.set_base_request(bases.plan(ahead));
+            }
+            let frame_bound = pinned && super::pinned::frame_bound(&instruction.operation);
+            if frame_bound {
+                code.set_pinned(false);
+                super::pinned::write_back(code);
+            }
+            after = emit_single(
                 code,
-                &integer_unary::Operand {
-                    kind: integer_unary::Kind::TrailingZeros,
-                    width,
-                    destination: count.destination,
-                    source: reverse.left,
+                &mut scratch,
+                Some(&mut out_of_line),
+                instruction,
+                &mut fixups,
+                SingleOptions {
+                    target,
+                    checks: checks_at(cursor),
+                    live_nzcv: native_branch_after(cursor),
                 },
-                target,
+                held,
             );
-            cursor += 2;
-            continue;
-        }
-        block.source_map.push((instruction.pc, code.len()));
-        code.set_instruction(block.source_map.len() - 1);
-        if let Some(target) = instruction.operation.conditional_target() {
-            let taken = branch_condition(code, &instruction.operation, held.rax)
-                .expect("a conditional branch's condition");
-            // A side exit's stub is its link slot and exit alone, which is
-            // where `successor_exits` finds it: what the run has written is
-            // stored before the branch, flags untouched.
-            if let Some((active, _)) = run.as_mut() {
-                active.flush(code);
+            if frame_bound {
+                super::pinned::reload(code);
+                code.set_pinned(true);
+            } else if after.rax == super::Rax::Nzcv
+                && super::flag_word::dead_after(instructions, cursor)
+                && let Some(start) = block.source_map.last().map(|&(_, start)| start)
+                && let Some(tail) = super::flag_word::captured_tail(code, start)
+            {
+                // The next flag setter defines NZCV again before anything reads
+                // it or the frame must hold it: this capture is dead.
+                super::flag_word::drop_capture(code, tail);
+                after.rax = super::Rax::Unknown;
             }
-            side_exits.push((code.asm().jcc(taken), target, block.source_map.len()));
-            bases.after(instruction, None);
+            let applied = code.finish_base_request();
+            bases.after(instruction, applied);
             emitted_alone = true;
             cursor += 1;
-            continue;
         }
-        if let Operation::PointerAuthentication(operation) = instruction.operation {
-            let cells = native
-                .pointer
-                .expect("blocks hold PAC instructions only given the service's cells");
-            pointer_paths.push(super::pointer::inline::emit(
-                code,
-                operation,
-                instruction.pc,
-                cells,
-            ));
-            // A service call may change both masked-base slots.
-            bases.reset();
-            emitted_alone = true;
-            cursor += 1;
-            continue;
+        if loop_run {
+            if let Some((active, _)) = run.as_mut() {
+                active.emitted(code, &instructions[run_emitted..]);
+                run_emitted = instructions.len();
+                loop_exits.dirty = active.dirty();
+            }
+        } else if let Some((mut active, _)) = run.take() {
+            active.emitted(code, &instructions[run_emitted..]);
+            active.leave(code);
         }
-        if let Operation::MirroredRead { word } = instruction.operation {
-            let cell = native
-                .mirrored
-                .cell(word)
-                .expect("blocks hold mirrored reads only given their cells");
-            mirrored_paths.push(super::mirrored_read::emit(code, word, instruction.pc, cell));
-            // Xt alone changes; its masked base, if any, is gone.
-            bases.after(instruction, None);
-            emitted_alone = true;
-            cursor += 1;
-            continue;
-        }
-        if let Operation::Amx(amx) = instruction.operation {
-            amx_paths.push(super::amx_transfer::emit(code, &amx, checks, target));
-            bases.reset();
-            emitted_alone = true;
-            cursor += 1;
-            continue;
-        }
-        if reuse_bases {
-            code.set_base_request(bases.plan(&instructions[cursor..]));
-        }
-        let frame_bound = pinned && super::pinned::frame_bound(&instruction.operation);
-        if frame_bound {
-            code.set_pinned(false);
-            super::pinned::write_back(code);
-        }
-        after = emit_single(
-            code,
-            &mut scratch,
-            Some(&mut out_of_line),
-            instruction,
-            &mut fixups,
-            SingleOptions {
-                target,
-                checks: checks_at(cursor),
-                live_nzcv: native_branch_after(cursor),
-            },
-            held,
-        );
-        if frame_bound {
-            super::pinned::reload(code);
-            code.set_pinned(true);
-        } else if after.rax == super::Rax::Nzcv
-            && super::flag_word::dead_after(instructions, cursor)
-            && let Some(start) = block.source_map.last().map(|&(_, start)| start)
-            && let Some(tail) = super::flag_word::captured_tail(code, start)
+        if let (Some(self_loop), Some((pc, Terminator::Branch(operation)))) = (self_loop, terminal)
         {
-            // The next flag setter defines NZCV again before anything reads
-            // it or the frame must hold it: this capture is dead.
-            super::flag_word::drop_capture(code, tail);
-            after.rax = super::Rax::Unknown;
+            // The back edge: the iteration's instructions count, and the second
+            // copy runs again until an entry's share is spent.
+            block.source_map.push((*pc, code.len()));
+            code.set_instruction(block.source_map.len() - 1);
+            let flags_live =
+                after.rax == super::Rax::Nzcv && code.ends_with(&nzcv_store(code.is_pinned()));
+            if let Some(taken) = branch_condition_with(code, operation, after.rax, flags_live) {
+                loop_exits.fallthrough.push(code.asm().jcc(taken.negate()));
+            }
+            // Each carried slot moves with its register, which then is its
+            // kept address again at the head; LEA leaves the flags alone.
+            // An entry's iterations move it at most 2^30 from its check
+            // (`masked_base`), or it is not carried. An access through it is
+            // then within 2^31 of the checked address: within the 2^35 that
+            // `guest_range` shows safe, and non-canonical from
+            // `GuestState::UNREACHABLE` after a mispredicted check.
+            if copy == 0 {
+                let iterations = i64::from(SelfLoop::LIMIT) / i64::from(self_loop.instructions) + 1;
+                carried = if reuse_bases && emitted_alone {
+                    bases.carriers()
+                } else {
+                    vec![]
+                };
+                carried
+                    .retain(|&(_, _, offset)| offset.abs().saturating_mul(iterations) <= 1 << 30);
+            } else if !emitted_alone
+                || carried
+                    .iter()
+                    .any(|&(register, host, offset)| bases.offset(register, host) != Some(offset))
+            {
+                // The second copy moved its bases otherwise: emit the block
+                // without the loop.
+                return emit_selected(
+                    instructions,
+                    terminal,
+                    fallthrough,
+                    target,
+                    RegionPolicy {
+                        self_loop: None,
+                        ..regions
+                    },
+                    checks,
+                    native,
+                );
+            }
+            for &(_, host, offset) in &carried {
+                if offset != 0 {
+                    code.asm().lea(
+                        Size::Qword,
+                        host,
+                        Mem::base(host, i32::try_from(offset).expect("bounded offset")),
+                    );
+                }
+            }
+            let mut asm = code.asm();
+            asm.alu_imm8(
+                Alu::Add,
+                Size::Qword,
+                super::frame(LOOP_RETIRED),
+                self_loop.instructions as i8,
+            );
+            if copy == 1 {
+                // Again only while the next iteration keeps the entry within
+                // the limit: a native run then retires no more per transfer
+                // than with blocks, which the engine's bounds assume.
+                asm.alu_imm32(
+                    Alu::Cmp,
+                    Size::Qword,
+                    super::frame(LOOP_RETIRED),
+                    SelfLoop::LIMIT - i32::from(self_loop.instructions) + 1,
+                );
+                let again = asm.jcc(Cond::B);
+                asm.bind_back(again, loop_exits.start);
+                // The share is spent: the taken branch's own exit, which counts
+                // this iteration as a block's would.
+                super::pinned::write_back_locals(code, loop_exits.dirty);
+                let mut asm = code.asm();
+                settle_loop(&mut asm, self_loop.instructions);
+                loop_exits.taken = Some(asm.jmp());
+            }
+            after = Held::NOTHING;
         }
-        let applied = code.finish_base_request();
-        bases.after(instruction, applied);
-        emitted_alone = true;
-        cursor += 1;
     }
-    if let Some((mut active, _)) = run.take() {
-        active.emitted(code, &instructions[run_emitted..]);
-        active.leave(code);
+    if let Some((active, _)) = run.take() {
+        active.forget(code);
     }
     debug_assert!(
         fixups.is_empty(),
@@ -911,7 +1213,63 @@ fn emit_selected(
         block.source_map[0].1 = 0;
         after = Held::NOTHING;
     }
-    if let Some(frame_loop) = frame_loop {
+    // A self-loop's second copy's source rows, which its faults' rows name
+    // as the first copy's.
+    let mut second_rows = vec![];
+    if let (Some(_), Some((_, Terminator::Branch(operation)))) = (self_loop, terminal) {
+        second_rows = block.source_map.split_off(loop_exits.first_rows);
+        let entry = operation
+            .conditional_target()
+            .expect("a self-loop ends with a conditional branch");
+        for jump in loop_exits.fallthrough.drain(..) {
+            code.asm().bind(jump);
+        }
+        super::pinned::write_back_locals(code, loop_exits.dirty);
+        let mut asm = code.asm();
+        settle_loop(&mut asm, 0);
+        let to_fallthrough = asm.jmp();
+        // One exit per branch run past, in their order, for both copies:
+        // each jump stores what its copy's run has written there.
+        let mut rows: Vec<usize> = loop_exits
+            .side
+            .iter()
+            .map(|&(_, _, rows, _)| rows)
+            .collect();
+        rows.dedup();
+        let mut seen = vec![];
+        for row in rows {
+            if seen.contains(&row) {
+                continue;
+            }
+            seen.push(row);
+            let mut target = None;
+            let mut stored = vec![];
+            for &(jump, to, at, dirty) in &loop_exits.side {
+                if at == row {
+                    code.asm().bind(jump);
+                    super::pinned::write_back_locals(code, dirty);
+                    stored.push(code.asm().jmp());
+                    target = Some(to);
+                }
+            }
+            let mut asm = code.asm();
+            for jump in stored {
+                asm.bind(jump);
+            }
+            settle_loop(&mut asm, 0);
+            side_exits.push((asm.jmp(), target.expect("a branch's jumps"), row));
+        }
+        let mut asm = code.asm();
+        asm.bind(to_fallthrough);
+        direct_exit_with(&mut asm, fallthrough, ExitKind::Fallthrough);
+        asm.bind(
+            loop_exits
+                .taken
+                .take()
+                .expect("the second copy's back edge"),
+        );
+        direct_exit_with(&mut asm, entry, ExitKind::Direct);
+    } else if let Some(frame_loop) = frame_loop {
         let Some((pc, Terminator::Branch(operation))) = terminal else {
             unreachable!("a frame loop has a validated direct branch")
         };
@@ -946,7 +1304,44 @@ fn emit_selected(
         direct_exit_with(&mut asm, target, side_exit(instructions_run - run));
     }
     code.place_failures();
-    if fault_table {
+    if fault_table && !second_rows.is_empty() {
+        // Both copies' rows, against the body as often; a second-copy row
+        // retires as many instructions of its iteration as the first's.
+        let first = block.source_map.len();
+        let terminal = terminal.map(|(pc, terminal)| match terminal {
+            Terminator::Branch(operation) => Instruction {
+                pc: *pc,
+                operation: operation.clone(),
+            },
+            _ => unreachable!("a self-loop ends with a branch"),
+        });
+        let source: Vec<Instruction> = instructions
+            .iter()
+            .cloned()
+            .chain(terminal)
+            .chain(instructions.iter().cloned())
+            .collect();
+        let map: Vec<_> = block
+            .source_map
+            .iter()
+            .chain(&second_rows)
+            .cloned()
+            .collect();
+        fault_recovery = recovery::bind(&block.x86_64_code, &map, &source, fault_recovery)
+            .into_iter()
+            .map(|mut row| {
+                let retired = usize::from(row.retirement.retired_before());
+                if retired >= first {
+                    row.retirement = crate::block::RetirementPoint::before(
+                        row.retirement.instruction_pc(),
+                        u16::try_from(retired - first).expect("bounded block"),
+                    )
+                    .expect("a first-copy position");
+                }
+                row
+            })
+            .collect();
+    } else if fault_table {
         fault_recovery = recovery::bind(
             &block.x86_64_code,
             &block.source_map,

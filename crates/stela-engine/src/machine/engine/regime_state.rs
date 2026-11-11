@@ -212,7 +212,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             pointer: Some(super::pointer::CELLS),
             mirrored: inline_mirrored_reads(),
             amx: self.cpu.amx.generation().is_some(),
+            self_loops: self.self_loops,
         })
+    }
+
+    /// Run self-loops inside their blocks ([`NativeSystem::self_loops`]),
+    /// the default, or through their links, from the next compilation on;
+    /// the blocks compiled so far stay. For tests that compare the two.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_self_loops(&mut self, on: bool) {
+        self.self_loops = on;
+        self.native_system = None;
     }
 
     pub(super) fn sync_regime(&mut self) {

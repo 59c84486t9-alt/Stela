@@ -110,6 +110,10 @@ pub struct GuestState {
     /// check compares access addresses with. Set by the engine as it
     /// enters native code; zero fails every such check.
     pub lower_limit: Limit,
+    /// The instructions a native self-loop (`x86_64::block`'s loop mode)
+    /// has retired in the iterations before the one it runs, which its exits
+    /// move to the chain's count and a fault's settlement adds: 0 outside one.
+    pub loop_retired: u64,
 }
 
 /// [`GuestState::lower_limit`]: the host's, no part of the guest's state, so
@@ -150,6 +154,7 @@ impl Default for GuestState {
             pan: 0,
             anchors: Anchors::default(),
             lower_limit: Limit(0),
+            loop_retired: 0,
         }
     }
 }
@@ -163,9 +168,9 @@ mod tests {
     #[test]
     fn layout_matches_native_abi() {
         for profile in [BlockProfile::ORDINARY, BlockProfile::new(Features::LEAF)] {
-            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v12-"));
+            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v13-"));
         }
-        assert_eq!(size_of::<GuestState>(), 896);
+        assert_eq!(size_of::<GuestState>(), 904);
         assert_eq!(align_of::<GuestState>(), 8);
         assert_eq!(offset_of!(GuestState, x), 0);
         assert_eq!(offset_of!(GuestState, sp), 248);
@@ -178,6 +183,7 @@ mod tests {
         assert_eq!(offset_of!(GuestState, unreachable), 808);
         assert_eq!(offset_of!(GuestState, pan), 816);
         assert_eq!(offset_of!(GuestState, lower_limit), 888);
+        assert_eq!(offset_of!(GuestState, loop_retired), 896);
     }
 
     #[test]

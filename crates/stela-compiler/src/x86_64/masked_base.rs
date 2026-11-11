@@ -25,6 +25,7 @@
 //! whose lowerings leave both slots alone; any other forgets every slot.
 use super::{AddressMode, ImmediateAddress, asm::Gpr};
 use crate::aarch64::{Instruction, MemoryTransfer, Operation, Register, Width, simd};
+use alloc::vec::Vec;
 
 /// The registers that keep masked addresses, in order of preference.
 pub(crate) const SLOTS: [Gpr; 2] = [Gpr::R11, Gpr::R10];
@@ -260,6 +261,45 @@ impl Tracker {
     /// Forget every kept address.
     pub(crate) fn reset(&mut self) {
         self.known = [None; 32];
+    }
+
+    /// For a loop's back edge: one guest register per slot in use, the one
+    /// with the lowest number, with the slot and how far the register is
+    /// from the slot's kept address. Moving the slot by that distance makes
+    /// the register the kept address itself ([`Self::carried`]).
+    pub(crate) fn carriers(&self) -> Vec<(usize, Gpr, i64)> {
+        let mut carriers: Vec<(usize, Gpr, i64)> = Vec::new();
+        for (register, known) in self.known.iter().enumerate() {
+            if let Some(known) = known
+                && !carriers
+                    .iter()
+                    .any(|&(_, host, _)| host == SLOTS[usize::from(known.slot)])
+            {
+                carriers.push((register, SLOTS[usize::from(known.slot)], known.offset));
+            }
+        }
+        carriers
+    }
+
+    /// The tracker at a loop's head whose `carriers` were moved onto their
+    /// registers: each register is its slot's kept address.
+    pub(crate) fn carried(carriers: &[(usize, Gpr, i64)]) -> Self {
+        let mut tracker = Self::default();
+        for &(register, host, _) in carriers {
+            let slot = SLOTS
+                .iter()
+                .position(|slot| *slot == host)
+                .expect("a slot register") as u8;
+            tracker.known[register] = Some(Known { slot, offset: 0 });
+        }
+        tracker
+    }
+
+    /// Where `register` is from `host`'s kept address, if the tracker knows.
+    pub(crate) fn offset(&self, register: usize, host: Gpr) -> Option<i64> {
+        self.known[register]
+            .filter(|known| SLOTS[usize::from(known.slot)] == host)
+            .map(|known| known.offset)
     }
 
     fn referenced(&self, slot: u8) -> bool {

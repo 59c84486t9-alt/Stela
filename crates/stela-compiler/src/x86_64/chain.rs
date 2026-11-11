@@ -179,6 +179,10 @@ pub const KEY_STATES: u32 = 1 << (u64::BITS - KEY_STATE_SHIFT);
 
 /// Where a thunk finds the running PE's [`ChainControl`].
 const CONTROL: Place = Place::new(Anchor::Control, 0);
+/// The PE's [`ChainControl`], for code outside the chain's thunks.
+pub(crate) const CONTROL_PLACE: Place = CONTROL;
+/// [`ChainControl::retired`], from the control's address.
+pub(crate) const RETIRED_OFFSET: i32 = RETIRED;
 
 /// A direct exit to a static successor in a block's code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

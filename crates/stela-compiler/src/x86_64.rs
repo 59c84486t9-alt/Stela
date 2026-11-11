@@ -195,6 +195,11 @@ pub struct NativeSystem {
     /// The machine has AMX: its moves complete inside blocks from the PE's
     /// register file rather than ending them (`x86_64::amx_transfer`).
     pub amx: bool,
+    /// A block that branches back to its own start runs its iterations
+    /// inside itself, a bounded number per entry (`x86_64::block`'s loop
+    /// mode), rather than through a link at each one.
+    #[serde(default)]
+    pub self_loops: bool,
 }
 
 impl NativeSystem {
@@ -206,6 +211,7 @@ impl NativeSystem {
         pointer: None,
         mirrored: mirrored_read::Reads::NONE,
         amx: false,
+        self_loops: false,
     };
 }
 

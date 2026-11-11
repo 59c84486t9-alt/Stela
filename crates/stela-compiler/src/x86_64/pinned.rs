@@ -46,7 +46,7 @@ pub(crate) fn host(register: Register) -> Option<Gpr> {
 }
 
 mod span;
-pub(super) use span::{Dirty, Run, Span};
+pub(super) use span::{Dirty, Run, Span, write_back as write_back_locals};
 
 const LOCAL_HOSTS: [Gpr; 4] = [Gpr::R8, Gpr::R9, Gpr::R10, Gpr::R11];
 pub(super) type LocalRegisters = [Option<Register>; LOCAL_HOSTS.len()];

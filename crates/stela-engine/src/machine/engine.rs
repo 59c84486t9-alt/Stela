@@ -938,6 +938,10 @@ pub struct Machine<H: Host, D: Devices> {
     memory_checks: Option<MemoryChecks>,
     /// [`Variant::system`] for the current EL, while valid.
     native_system: Option<NativeSystem>,
+    /// Whether blocks that branch back to their own start run their
+    /// iterations inside themselves (`NativeSystem::self_loops`): on, but
+    /// for tests that compare both forms.
+    self_loops: bool,
     /// The physical count up to which the event streams have set the event
     /// register; `None` before the first sample.
     event_sample: Option<u64>,
@@ -1367,6 +1371,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             floating_point: None,
             memory_checks: None,
             native_system: None,
+            self_loops: true,
             event_sample: None,
             debug: None,
             device_lines: None,

@@ -433,7 +433,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 if transitioned {
                     self.adopt_transitions(transitions, 0);
                 }
-                let handled = self.native_fault(last, fault, retired, btype);
+                // A self-loop's earlier iterations in this entry
+                // (`GuestState::loop_retired`), which only its exits move.
+                let iterations = core::mem::take(&mut self.cpu.state.loop_retired);
+                let handled =
+                    self.native_fault(last, fault, retired.wrapping_add(iterations), btype);
                 self.timing_exit(slot, returned);
                 handled
             }

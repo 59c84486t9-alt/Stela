@@ -2292,3 +2292,47 @@ fn apply_recovery(
         state,
     )
 }
+
+/// A self-loop's second copy of its body reaches memory through the masked
+/// bases its first copy checked, which its back edge carries; its locals
+/// stay in their hosts, so the copy touches no frame slot of a local.
+#[test]
+fn self_loops_check_their_bases_once_per_entry() {
+    let check = crate::x86_64::RangeCheck::FIVE_LEVEL.pinned_code();
+    let count = |code: &[u8]| {
+        code.windows(check.len())
+            .filter(|bytes| *bytes == check)
+            .count()
+    };
+    let compile = |self_loops| {
+        // memcmp's byte loop: ldrb w8,[x0],#1; ldrb w9,[x1],#1;
+        // subs w8,w8,w9; b.ne +3; subs x2,x2,#1; b.ne -5
+        let words = [
+            0x3840_1408_u32,
+            0x3840_1429,
+            0x6b09_0108,
+            0x5400_0061,
+            0xf100_0442,
+            0x54ff_ff61,
+        ];
+        let source: Vec<u8> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
+        let options = crate::Options::new(
+            BlockProfile::new(Features::SYSTEM_MODE),
+            crate::TargetCpu::detect(),
+        )
+        .with_memory_checks(crate::x86_64::MemoryChecks::system(true, false, true, true))
+        .with_native_system(crate::x86_64::NativeSystem {
+            self_loops,
+            ..crate::x86_64::NativeSystem::NONE
+        });
+        crate::compile(&source, GuestAddress(0x1000), &options)
+            .unwrap()
+            .native
+    };
+    let (linked, looped) = (compile(false), compile(true));
+    assert_eq!(count(&linked.x86_64_code), 2);
+    // Both copies are there, and only the first checks.
+    assert!(looped.x86_64_code.len() > linked.x86_64_code.len() * 3 / 2);
+    assert_eq!(count(&looped.x86_64_code), 2);
+    assert_eq!(looped.source_map.len(), linked.source_map.len());
+}

@@ -222,6 +222,7 @@ fn effects(operation: &Operation) -> Option<Effects> {
 
 /// A planned run: how many instructions it covers, its locals, and the ones
 /// it reads before writing.
+#[derive(Clone, Copy)]
 pub(in crate::x86_64) struct Span {
     rows: usize,
     locals: LocalRegisters,
@@ -234,6 +235,18 @@ impl Span {
     /// The run at the start of `instructions`, if one would save frame
     /// accesses, and how many instructions the planner examined.
     pub(in crate::x86_64) fn plan(instructions: &[Instruction]) -> (usize, Option<Self>) {
+        Self::plan_with(instructions, false)
+    }
+
+    /// The run of a self-loop's whole body, whose locals are loaded once
+    /// per entry and stored at its exits: each local saves every access an
+    /// iteration makes. `None` unless the run covers the body.
+    pub(in crate::x86_64) fn plan_loop(instructions: &[Instruction]) -> Option<Self> {
+        let (rows, plan) = Self::plan_with(instructions, true);
+        plan.filter(|_| rows == instructions.len())
+    }
+
+    fn plan_with(instructions: &[Instruction], looped: bool) -> (usize, Option<Self>) {
         let mut rows = 0;
         let mut live_in = 0;
         let mut touched = 0;
@@ -269,6 +282,9 @@ impl Span {
         // the run writes it; it saves every access the run makes.
         let gain = |index: usize| {
             let bit = 1 << index;
+            if looped {
+                return i32::from(uses[index]) * 2;
+            }
             i32::from(uses[index]) - i32::from(live_in & bit != 0) - i32::from(written & bit != 0)
         };
         let mut hosts = [false; LOCAL_HOSTS.len()];
@@ -313,6 +329,16 @@ impl Span {
                 slots,
             }),
         )
+    }
+
+    /// [`Self::enter`] a self-loop's run, loading every local: any exit may
+    /// then store each one the body writes, whatever the iteration has done.
+    pub(in crate::x86_64) fn enter_all(&self, code: &mut Code) -> Run {
+        let all = Self {
+            live_in: u32::MAX,
+            ..*self
+        };
+        all.enter(code, None)
     }
 
     /// The number of instructions the run covers.
@@ -391,6 +417,13 @@ impl Run {
         code.set_dirty_locals(Dirty::default());
     }
 
+    /// Unmap the locals without storing them: the exits a self-loop's
+    /// body jumps to store them ([`write_back`]).
+    pub(in crate::x86_64) fn forget(self, code: &mut Code) {
+        code.set_local_registers(None);
+        code.set_dirty_locals(Dirty::default());
+    }
+
     /// End the run: store the locals it wrote and unmap them. What RAX,
     /// the flags and the vector registers hold is unchanged.
     pub(in crate::x86_64) fn leave(self, code: &mut Code) {
@@ -402,7 +435,7 @@ impl Run {
 }
 
 /// Store `dirty`'s locals into their frame slots.
-fn write_back(code: &mut Code, dirty: Dirty) {
+pub(in crate::x86_64) fn write_back(code: &mut Code, dirty: Dirty) {
     let mut asm = code.asm();
     for (index, host) in dirty.into_iter().flatten() {
         let slot = Mem::base(Gpr::Rdi, i32::from(index) * 8);
