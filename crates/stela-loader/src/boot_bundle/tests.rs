@@ -706,11 +706,7 @@ fn unsupported_build_is_refused_before_image_parsing() {
             panic!("expected an unsupported build, got {error}");
         };
         assert_eq!(error.build, "unsupported-build");
-        assert!(
-            error
-                .supported
-                .contains(&stela_formats::builds::DEFAULT.build)
-        );
+        assert!(error.tested.contains(&stela_formats::builds::DEFAULT.build));
     }
 }
 
