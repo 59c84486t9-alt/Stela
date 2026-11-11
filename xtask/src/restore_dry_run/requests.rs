@@ -1,7 +1,6 @@
 //! The request matrix: every message restored can send this host, with the
 //! Arguments variants each data type takes, in protocol order, and how the
-//! answer is judged. Evidence for each row is in
-//! `docs/research/restore-dry-run.md`.
+//! answer is judged.
 use super::context::{Ctx, SMALL, info, strings};
 use super::image4;
 use anyhow::{Context as _, Result, anyhow, ensure};

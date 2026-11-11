@@ -1098,7 +1098,7 @@ fn sampling(plan: &mut Plan, library: &str) {
                 .map(f32r)
                 .collect();
             // NVIDIA filters snorm's -128 as -128/127 and clamps only the
-            // result, within the snorm bound (metal-device.md).
+            // result, within the snorm bound.
             let mut tol = if nearest && !mipped {
                 Tolerance::ulp(1.0)
             } else {

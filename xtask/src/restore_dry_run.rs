@@ -12,8 +12,6 @@
 //! Apple's stock options, as `stela.efi --install`; the study the firmware
 //! option study's. Signing-service requests get a synthetic, unsigned
 //! ticket; nothing touches the network.
-//!
-//! The matrix and its evidence are in `docs/research/restore-dry-run.md`.
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use plist::{Dictionary, Value};
 use std::{

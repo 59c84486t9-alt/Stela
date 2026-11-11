@@ -775,8 +775,7 @@ fn divergent_levels_and_texels(plan: &mut Plan, library: &str, pos: &[[f64; 4]],
 /// M1 Pro packs a full 8 x 4 block of pixels into one: its 2 x 2 quads in
 /// lanes of four, row by row, four quads to a row. NVIDIA packs a 4 x 8
 /// block, which no lane order turns into Apple's, so the layout is
-/// reported, not asserted (metal-device.md, known hardware precision
-/// differences). What every device keeps is asserted: each quad is four
+/// reported, not asserted, as a known hardware difference. What every device keeps is asserted: each quad is four
 /// lanes in a row, x in bit 0 and y in bit 1, which lane-indexed shuffles
 /// reach.
 fn fragment_simd_layout(plan: &mut Plan, library: &str) {
@@ -811,7 +810,7 @@ fn fragment_simd_layout(plan: &mut Plan, library: &str) {
         )
         .output(Output::new("c", Dtype::F32, Tolerance::exact()).expect_same(f32s(&expected)))
         .informational()
-        .note("fragment SIMD-group layout is the GPU's; see metal-device.md"),
+        .note("fragment SIMD-group layout is the GPU's own"),
     );
     let index = |x: u32, y: u32| f64::from(x + y * 1024);
     let quads: Vec<f64> = pixels()
@@ -1831,8 +1830,7 @@ fn blending(plan: &mut Plan, library: &str) {
             // The same blend against the Mac's rounding within a unit,
             // reported only: Apple GPUs blend the float source, NVIDIA's
             // blend unit the source at the target's 8 bits, which the band
-            // above allows (metal-device.md, known hardware precision
-            // differences).
+            // above allows (a known hardware precision difference).
             plan.add(
                 case(&format!("{name}.reference"), output)
                     .informational()
@@ -2567,8 +2565,8 @@ fn multisampling(plan: &mut Plan, library: &str) {
 /// its joints, and two wireframe triangles their shared edge. Lines through
 /// the corners of pixels' diamonds, where the exit rule ties, and lines
 /// under 4x multisampling, where Apple GPUs cover a parallelogram and
-/// Vulkan a rectangle, are reported, not asserted (metal-device.md, known
-/// hardware precision differences).
+/// Vulkan a rectangle, are reported, not asserted (known hardware
+/// differences).
 fn lines(plan: &mut Plan, library: &str) {
     let quarter = [0.25; 4];
     let state = |primitive: &str, count: usize, fill: bool| {
@@ -2657,7 +2655,7 @@ fn lines(plan: &mut Plan, library: &str) {
             state("line", tied.len(), false),
         )
         .informational()
-        .note("lines through diamond corners tie; see metal-device.md"),
+        .note("lines through diamond corners tie, so either pixel may light"),
     );
     segments.extend(ties);
     let all = cells(&segments);
@@ -2668,7 +2666,7 @@ fn lines(plan: &mut Plan, library: &str) {
     plan.add(
         case("render.lines.list_msaa4", (128, 64), &all, msaa)
             .informational()
-            .note("multisampled lines are Apple's parallelograms; see metal-device.md"),
+            .note("multisampled lines are parallelograms on Apple GPUs, rectangles in Vulkan"),
     );
     let strip = [
         [2.5, 2.5],
@@ -4355,9 +4353,8 @@ pub fn build(plan: &mut Plan) {
     fragment_queries(plan, &library);
     layers_and_clipping(plan, &library);
     plan.add(Case::device("device.properties"));
-    // What the driver claims and leaves unclaimed, by
-    // docs/design/metal-feature-checklist.md: checked on the device compared
-    // with the Mac.
+    // What the driver claims and leaves unclaimed, feature by feature:
+    // checked on the device compared with the Mac.
     plan.add(Case::device("device.policy").set(
         "policy",
         json!({
