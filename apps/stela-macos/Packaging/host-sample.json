@@ -1,0 +1,21 @@
+{
+  "StelaVersion": "0.1.0",
+  "TranslatorID": "3f9a1c2e7b5d4a60",
+  "TranslatorTarget": "x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq+fma+f16c+popcnt+bmi1+aes+sha+avx+avx2+avx512f",
+  "CPUBrand": "AMD Ryzen 9 9950X 16-Core Processor",
+  "CPUVendor": "AuthenticAMD",
+  "CPUFamily": 26,
+  "CPUModel": 68,
+  "CPUStepping": 0,
+  "HostCores": 16,
+  "HostThreads": 32,
+  "HostMemoryBytes": 68406829056,
+  "FirmwareVendor": "American Megatrends",
+  "FirmwareRevision": 327712,
+  "SystemVendor": "ASUS",
+  "SystemModel": "ROG STRIX X870E-E GAMING WIFI",
+  "BoardVendor": "ASUSTeK COMPUTER INC.",
+  "GPU0Chip": "GB203",
+  "GPU0PCIID": "10de:2c02",
+  "GPU0VRAMBytes": 17179869184
+}

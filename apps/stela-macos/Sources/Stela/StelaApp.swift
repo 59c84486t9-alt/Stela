@@ -15,16 +15,22 @@
     var body: some Scene {
       Window("Stela", id: "main") {
         ContentView(model: model)
-          .frame(minWidth: 700, minHeight: 650)
+          .frame(minWidth: 640, minHeight: 600)
           .task {
             NSApplication.shared.applicationIconImage = Brand.icon
             await model.refresh()
             await PreviewRenderer.renderIfRequested(model: model)
           }
       }
-      .defaultSize(width: 820, height: 790)
+      .defaultSize(width: 760, height: 720)
       .windowResizability(.contentMinSize)
+      Window("About This PC", id: AboutThisPC.window) {
+        ThisPCView(model: model).frame(width: 340).fixedSize()
+      }
+      .windowResizability(.contentSize)
+      .defaultPosition(.center)
       .commands {
+        CommandGroup(replacing: .appInfo) { AboutThisPC() }
         CommandGroup(replacing: .newItem) {}
         CommandMenu("System") {
           Button("Refresh System Information") { Task { await model.refresh() } }
@@ -42,6 +48,16 @@
           Button("Open System Information…") { model.openSystemApp("System Information") }
         }
       }
+    }
+  }
+
+  /// The app menu's About item, opening the compact This PC window.
+  struct AboutThisPC: View {
+    static let window = "about-this-pc"
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+      Button("About This PC") { openWindow(id: Self.window) }
     }
   }
 #else

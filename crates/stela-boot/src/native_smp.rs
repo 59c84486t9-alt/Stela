@@ -136,6 +136,11 @@ pub(crate) unsafe fn validate(
         capture.core_count,
         capture.logical_count - capture.core_count,
     ));
+    crate::host_inventory::number(
+        "HostCores",
+        topology::physical_cores(&capture.processors) as u64,
+    );
+    crate::host_inventory::number("HostThreads", capture.logical_count.into());
     let memory_types = memory_types::Image::from_snapshot(&capture.snapshots[0])?;
     for (slot, snapshot) in capture.snapshots[..cores].iter().enumerate() {
         let processor = capture.processors[capture.selected[slot] as usize];

@@ -1,4 +1,5 @@
 #include "StelaGPU.h"
+#include "host_record.h"
 
 #include <IOKit/IOLib.h>
 #include <stela/gate.h>
@@ -21,6 +22,7 @@ StelaGPU::start(IOService *provider)
 	 * none of.
 	 */
 	setProperty("GetGPUMaxPower", 0ULL, 32);
+	publishHost(provider);
 	// Metal loads the plugin the accelerator names, so the accelerator is
 	// published once the plugin is the one this boot trusts.
 	retain();
@@ -33,6 +35,51 @@ StelaGPU::start(IOService *provider)
 	}
 	thread_deallocate(installer);
 	return true;
+}
+
+/* Adds one record entry to the OSDictionary `context`. */
+static void
+addHostEntry(void *context, const char *key, unsigned long keyLength, int isNumber, unsigned long long number,
+    const char *text, unsigned long textLength)
+{
+	char name[STELA_HOST_KEY_BYTES + 1];
+	char value[STELA_HOST_TEXT_BYTES + 1];
+	memcpy(name, key, keyLength);
+	name[keyLength] = 0;
+	OSObject *object = nullptr;
+	if (isNumber) {
+		object = OSNumber::withNumber(number, 64);
+	} else {
+		memcpy(value, text, textLength);
+		value[textLength] = 0;
+		object = OSString::withCString(value);
+	}
+	if (object) {
+		static_cast<OSDictionary *>(context)->setObject(name, object);
+		object->release();
+	}
+}
+
+void
+StelaGPU::publishHost(IOService *provider)
+{
+	auto record = OSDynamicCast(OSData, provider->getProperty(STELA_HOST_PROPERTY));
+	if (!record) {
+		IOLog("StelaGPU: this stela.efi describes no host PC\n");
+		return;
+	}
+	OSDictionary *host = OSDictionary::withCapacity(24);
+	if (!host) {
+		return;
+	}
+	int entries = stela_host_parse(static_cast<const char *>(record->getBytesNoCopy()), record->getLength(),
+	    addHostEntry, host);
+	if (entries < 0) {
+		IOLog("StelaGPU: the host PC's description is in an unknown format\n");
+	} else {
+		setProperty("StelaHost", host);
+	}
+	host->release();
 }
 
 bool

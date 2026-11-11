@@ -1023,6 +1023,13 @@ fn claim(
     }
     let boot0 = registers.read32(0).map_err(ServiceError::Mapping)?;
     let firmware = select_firmware(boot0, catalog)?;
+    if let Some(chip) = gpu::nouveau_chip::Chip::from_boot0(boot0) {
+        crate::host_inventory::text(alloc::format!("GPU{line}Chip"), chip.name);
+    }
+    crate::host_inventory::text(
+        alloc::format!("GPU{line}PCIID"),
+        alloc::format!("10de:{:04x}", adapter.device),
+    );
     let ready = gpu::cold::Cold::new(gpu::cold::Inputs {
         requester,
         views: GpuViews {

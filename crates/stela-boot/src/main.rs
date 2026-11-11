@@ -35,6 +35,7 @@ use stela_boot_core::heap;
 #[cfg(feature = "diagnostics")]
 mod host_check;
 mod host_firmware;
+mod host_inventory;
 mod installer;
 mod la57;
 mod layout;
@@ -133,6 +134,20 @@ fn host_identity() -> alloc::string::String {
         })
         .unwrap_or(0);
     let vendor = alloc::string::String::from(uefi::system::firmware_vendor());
+    let (family, model, stepping) = stela_boot_core::host_identity::signature_parts(signature);
+    let leaf0 = __cpuid(0);
+    host_inventory::text("StelaVersion", env!("CARGO_PKG_VERSION"));
+    host_inventory::text("CPUBrand", cpu.clone());
+    host_inventory::text(
+        "CPUVendor",
+        stela_boot_core::host_identity::vendor([leaf0.ebx, leaf0.edx, leaf0.ecx]),
+    );
+    host_inventory::number("CPUFamily", family.into());
+    host_inventory::number("CPUModel", model.into());
+    host_inventory::number("CPUStepping", stepping.into());
+    host_inventory::number("HostMemoryBytes", ram_bytes);
+    host_inventory::text("FirmwareVendor", vendor.clone());
+    host_inventory::number("FirmwareRevision", uefi::system::firmware_revision().into());
     line(&Identity {
         version: env!("CARGO_PKG_VERSION"),
         cpu: &cpu,

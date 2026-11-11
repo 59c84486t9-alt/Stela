@@ -1,110 +1,125 @@
-// Shared native layout and formatting for the system overview.
+// One set of spacing, shape and type for every view.
 #if os(macOS)
   import SwiftUI
   import StelaSystem
 
+  enum Style {
+    /// Inside every card, on all four edges.
+    static let padding: CGFloat = 14
+    /// Between cards, and between rows inside a card.
+    static let spacing: CGFloat = 10
+    static let radius: CGFloat = 12
+    /// Around a page's content.
+    static let page: CGFloat = 24
+    static let title = Font.system(size: 22, weight: .semibold)
+    static let value = Font.system(size: 13, weight: .medium)
+    static let caption = Font.system(size: 11)
+    static let fill = Color.primary.opacity(0.05)
+  }
+
   enum DisplayFormat {
-    static func bytes(_ bytes: Int64?) -> String {
-      guard let bytes, bytes >= 0 else { return "Not reported" }
-      return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
+    static func bytes(_ bytes: Int64?) -> String? {
+      guard let bytes, bytes > 0 else { return nil }
+      return HostInventory.bytes(UInt64(bytes))
     }
 
-    static func uptime(_ seconds: TimeInterval) -> String {
+    static func uptime(_ seconds: TimeInterval) -> String? {
       let formatter = DateComponentsFormatter()
       formatter.allowedUnits = seconds >= 86400 ? [.day, .hour] : [.hour, .minute]
       formatter.unitsStyle = .abbreviated
       formatter.maximumUnitCount = 2
-      return formatter.string(from: max(0, seconds)) ?? "Not reported"
+      return formatter.string(from: max(0, seconds))
     }
 
-    static func cores(_ system: SystemSnapshot) -> String {
-      let parts = [
-        system.physicalCores.map { "\($0) physical cores" },
-        system.logicalCores.map { "\($0) logical cores" },
-      ]
-      return parts.compactMap { $0 }.joined(separator: " · ")
+    static func counts(cores: Int64?, threads: Int64?) -> String? {
+      let parts = [cores.map { "\($0) cores" }, threads.map { "\($0) threads" }].compactMap { $0 }
+      return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// `27.0` for 27.0.0, `14.6.1` as it is.
+    static func version(_ version: String) -> String {
+      version.hasSuffix(".0") && version.split(separator: ".").count == 3
+        ? String(version.dropLast(2)) : version
     }
   }
 
+  /// A label, a value and an optional detail on the card background.
+  struct Card: View {
+    let label: String
+    let value: String
+    var detail: String?
+
+    var body: some View {
+      VStack(alignment: .leading, spacing: 3) {
+        Text(label).font(Style.caption).foregroundStyle(.secondary)
+        Text(value).font(Style.value).textSelection(.enabled)
+        if let detail {
+          Text(detail).font(Style.caption).foregroundStyle(.secondary)
+        }
+      }
+      // Fills a grid row's height, so cards side by side end together.
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+      .padding(Style.padding)
+      .background(Style.fill, in: RoundedRectangle(cornerRadius: Style.radius, style: .continuous))
+    }
+  }
+
+  /// Rows on one card background, separated by dividers; the card's padding
+  /// is the same on every edge.
   struct Surface<Content: View>: View {
     private let content: Content
     init(@ViewBuilder content: () -> Content) { self.content = content() }
 
     var body: some View {
-      VStack(alignment: .leading, spacing: 0) { content }
+      VStack(alignment: .leading, spacing: Style.spacing) { content }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-          RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .strokeBorder(Color(nsColor: .separatorColor).opacity(0.45), lineWidth: 0.5))
+        .padding(Style.padding)
+        .background(Style.fill, in: RoundedRectangle(cornerRadius: Style.radius, style: .continuous))
     }
   }
 
-  struct SectionHeading: View {
-    let title: String
-    var body: some View {
-      Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
-        .padding(.bottom, 8)
-    }
-  }
-
+  /// A titled value inside a Surface.
   struct InformationRow: View {
     let title: String
     let value: String
     var monospaced = false
 
     var body: some View {
-      HStack(alignment: .firstTextBaseline, spacing: 20) {
-        Text(title).foregroundStyle(.secondary).frame(width: 140, alignment: .leading)
+      HStack(alignment: .firstTextBaseline, spacing: 16) {
+        Text(title).foregroundStyle(.secondary)
+        Spacer(minLength: 8)
         Text(value)
-          .font(monospaced ? .system(size: 12, design: .monospaced) : .system(size: 13))
+          .font(monospaced ? .system(size: 12, weight: .medium, design: .monospaced) : Style.value)
           .textSelection(.enabled)
-          .frame(maxWidth: .infinity, alignment: .trailing)
           .multilineTextAlignment(.trailing)
       }
-      .font(.system(size: 13))
-      .padding(.horizontal, 18).padding(.vertical, 11)
+      .font(Style.value)
     }
   }
 
-  struct SpecificationTile: View {
-    let symbol: String
-    let title: String
-    let value: String
-    let detail: String
+  /// Rows with a divider between each, skipping rows without a value.
+  struct Rows: View {
+    let rows: [(String, String?, Bool)]
 
     var body: some View {
-      Surface {
-        HStack(alignment: .top, spacing: 14) {
-          Image(systemName: symbol)
-            .font(.system(size: 20, weight: .regular))
-            .foregroundStyle(Color.accentColor)
-            .frame(width: 34, height: 38)
-            .accessibilityHidden(true)
-          VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 12)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 17, weight: .semibold)).lineLimit(2)
-            if !detail.isEmpty {
-              Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
-            }
-          }
-          Spacer(minLength: 0)
-        }
-        .padding(18)
-        .frame(minHeight: 112, alignment: .topLeading)
+      let shown = rows.compactMap { row in row.1.map { (row.0, $0, row.2) } }
+      ForEach(Array(shown.enumerated()), id: \.offset) { index, row in
+        if index > 0 { Divider() }
+        InformationRow(title: row.0, value: row.1, monospaced: row.2)
       }
+    }
+  }
+
+  struct SectionTitle: View {
+    let title: String
+    var body: some View {
+      Text(title).font(Style.caption).foregroundStyle(.secondary)
     }
   }
 
   struct SupportBadge: View {
     let support: FeatureSupport
-    private var color: Color {
-      switch support {
-      case .supported: return .green
-      case .unsupported, .notReported: return .secondary
-      }
-    }
+    private var color: Color { support == .supported ? .green : .secondary }
     private var symbol: String {
       switch support {
       case .supported: return "checkmark.circle.fill"
@@ -114,11 +129,10 @@
     }
 
     var body: some View {
-      Label(support.label, systemImage: symbol)
-        .font(.system(size: 11, weight: .medium))
+      Image(systemName: symbol)
+        .font(Style.value)
         .foregroundStyle(color)
-        .padding(.horizontal, 9).padding(.vertical, 5)
-        .background(color.opacity(0.08), in: Capsule())
+        .help(support.label)
         .accessibilityLabel(support.label)
     }
   }

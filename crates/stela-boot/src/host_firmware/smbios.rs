@@ -65,7 +65,7 @@ pub(super) fn capture() -> Capture {
             Some((format, entry.address as u64))
         }))
     });
-    capture_with(selected, read, |bytes| {
+    let capture = capture_with(selected, read, |bytes| {
         let page = boot::allocate_pages(
             boot::AllocateType::AnyPages,
             MemoryType::LOADER_DATA,
@@ -78,5 +78,45 @@ pub(super) fn capture() -> Capture {
         // SAFETY: fresh exclusive allocation, immutable after publication and
         // excluded from guest allocation by the existing LOADER_DATA pipeline.
         Ok(unsafe { core::slice::from_raw_parts_mut(page.as_ptr(), bytes) })
-    })
+    });
+    record_board(&capture);
+    capture
+}
+
+/// Records the system's vendor and product name, model names the user may
+/// show, for the guest's `StelaHost` (`crate::host_inventory`). The serial
+/// number, UUID and asset tag are never read.
+fn record_board(capture: &Capture) {
+    use stela_drivers::firmware::smbios::{Observation, entry, entry_length, identity};
+    let (Some(format), true) = (
+        capture.format,
+        capture.state == stela_boot_core::host_resources::smbios::State::Present,
+    ) else {
+        return;
+    };
+    // SAFETY: the capture's own immutable LOADER_DATA pages, identity mapped.
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            capture.region.physical as *const u8,
+            capture.region.bytes as usize,
+        )
+    };
+    let Ok(length) = entry_length(bytes, format) else {
+        return;
+    };
+    let Some(Ok(parsed)) = bytes.get(..length).map(|raw| entry(raw, format)) else {
+        return;
+    };
+    let Ok(system) = identity(parsed, &bytes[length..]) else {
+        return;
+    };
+    for (key, value) in [
+        ("SystemVendor", system.system_vendor),
+        ("SystemModel", system.product_name),
+        ("BoardVendor", system.board_vendor),
+    ] {
+        if let Observation::Value(value) = value {
+            crate::host_inventory::text(key, alloc::string::String::from_utf8_lossy(value));
+        }
+    }
 }

@@ -7,7 +7,7 @@
 //! gate where this answers.
 use crate::Result;
 use crate::apple_device_tree::{DeviceTree, Node};
-use alloc::{format, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use stela_contracts::{refuse, require};
 
 const ARM_IO: &str = "/arm-io";
@@ -138,6 +138,60 @@ fn gap(start: u64, length: u64, bytes: u64, used: &[(u64, u64)]) -> Option<u64> 
 
 fn word(node: &Node, name: &str) -> Option<u32> {
     node.property(name)?.as_u32()
+}
+
+/// The gate node's property holding what the boot knows of the PC, which the
+/// StelaGPU kext publishes as its `StelaHost` registry dictionary.
+pub const HOST_PROPERTY: &str = "stela-host";
+/// The record's first line, naming its format and version. A reader takes
+/// only the versions it knows; a new field is a new line, not a new version.
+pub const HOST_FORMAT: &str = "stela-host 1";
+/// The longest text value; a longer one is cut there.
+pub const HOST_TEXT_BYTES: usize = 120;
+
+/// One value of the host record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostValue {
+    Text(String),
+    Number(u64),
+}
+
+/// The `stela-host` record: [`HOST_FORMAT`], then a line per entry, `s Key=text`
+/// or `n Key=decimal`, in the order given. Keys are ASCII letters and digits.
+/// Text keeps printable ASCII, other bytes becoming `?`, and is cut to
+/// [`HOST_TEXT_BYTES`]; it never holds a newline.
+pub fn encode_host(entries: &[(String, HostValue)]) -> Result<Vec<u8>> {
+    let mut record = format!("{HOST_FORMAT}\n");
+    for (key, value) in entries {
+        require!(
+            !key.is_empty() && key.len() <= 40 && key.bytes().all(|b| b.is_ascii_alphanumeric()),
+            "a host record key is not ASCII letters and digits"
+        );
+        match value {
+            HostValue::Number(number) => record.push_str(&format!("n {key}={number}\n")),
+            HostValue::Text(text) => {
+                let text: String = text
+                    .trim()
+                    .chars()
+                    .map(|c| {
+                        if c == ' ' || c.is_ascii_graphic() {
+                            c
+                        } else {
+                            '?'
+                        }
+                    })
+                    .take(HOST_TEXT_BYTES)
+                    .collect();
+                record.push_str(&format!("s {key}={text}\n"));
+            }
+        }
+    }
+    Ok(record.into_bytes())
+}
+
+/// Sets GPU `index`'s gate node's [`HOST_PROPERTY`] to `record`.
+pub fn set_host(tree: &mut DeviceTree, index: usize, record: Vec<u8>) -> Result<()> {
+    tree.set_property(&format!("{ARM_IO}/stela-gpu{index}"), HOST_PROPERTY, record)
 }
 
 /// `name`'s value as records of `count` little-endian `u64`s.
@@ -271,5 +325,37 @@ mod tests {
             .unwrap();
         assert!(place_gpu_gate(&mut narrow, 0, WINDOW).is_err());
         assert!(place_gpu_gate(&mut tree(Vec::new()), 0, 0x3000).is_err());
+    }
+
+    #[test]
+    fn the_host_record_is_versioned_typed_lines() {
+        let entries = [
+            (
+                "CPUBrand".into(),
+                HostValue::Text("  AMD Ryzen 9 9950X\n16-Core\u{e9}  ".into()),
+            ),
+            ("HostThreads".into(), HostValue::Number(32)),
+        ];
+        let record = encode_host(&entries).unwrap();
+        assert_eq!(
+            core::str::from_utf8(&record).unwrap(),
+            "stela-host 1\ns CPUBrand=AMD Ryzen 9 9950X?16-Core?\nn HostThreads=32\n"
+        );
+        let long = [("A".into(), HostValue::Text("x".repeat(500)))];
+        assert_eq!(
+            encode_host(&long).unwrap().len(),
+            13 + 4 + HOST_TEXT_BYTES + 1
+        );
+        assert!(encode_host(&[("Bad key".into(), HostValue::Number(1))]).is_err());
+        let mut tree = tree(vec![]);
+        place_gpu_gate(&mut tree, 0, WINDOW).unwrap();
+        set_host(&mut tree, 0, record.clone()).unwrap();
+        assert_eq!(
+            tree.property("/arm-io/stela-gpu0", HOST_PROPERTY)
+                .unwrap()
+                .value,
+            record
+        );
+        assert!(set_host(&mut tree, 1, record).is_err());
     }
 }

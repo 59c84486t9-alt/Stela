@@ -7,6 +7,7 @@
   import UniformTypeIdentifiers
 
   enum AppSection: String, CaseIterable, Identifiable {
+    case thisPC = "This PC"
     case overview = "Overview"
     case cpu = "CPU Features"
     case updates = "Updates"
@@ -15,9 +16,11 @@
 
   @MainActor
   final class AppModel: ObservableObject {
-    @Published var section: AppSection = .overview
+    @Published var section: AppSection = .thisPC
     @Published private(set) var snapshot: SystemSnapshot?
     @Published private(set) var setup: SetupSummary?
+    /// The PC under macOS, from Stela's `StelaHost` (or `STELA_HOST_SAMPLE`).
+    @Published private(set) var host: HostInventory?
     @Published private(set) var refreshing = false
     @Published var error: String?
     @Published var notice: String?
@@ -31,11 +34,26 @@
         ?? "Unpackaged build"
     }
 
+    /// `27.0` style, from the snapshot or this process.
+    var osVersion: String {
+      if let version = snapshot?.osVersion { return DisplayFormat.version(version) }
+      let version = ProcessInfo.processInfo.operatingSystemVersion
+      return DisplayFormat.version(
+        "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)")
+    }
+
+    /// The Mac model and chip macOS believes it runs on.
+    var presented: String? {
+      let parts = [snapshot?.model, snapshot?.processor].compactMap { $0 }
+      return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     func refresh() async {
       guard !refreshing else { return }
       refreshing = true
       notice = nil
       defer { refreshing = false }
+      host = Self.readHost()
       snapshot = await Task.detached(priority: .userInitiated) {
         var system = SystemSnapshot.collect(using: DarwinSystemControl())
         system.graphics = MTLCopyAllDevices().map {
@@ -52,6 +70,23 @@
         }
         return system
       }.value
+    }
+
+    /// `STELA_HOST_SAMPLE` names a JSON file of registry values for layout checks.
+    private static func readHost() -> HostInventory? {
+      if let path = ProcessInfo.processInfo.environment["STELA_HOST_SAMPLE"] {
+        return (try? Data(contentsOf: URL(fileURLWithPath: path)))
+          .flatMap { try? HostInventory.decode(json: $0) }
+      }
+      return HostRegistry.read()
+    }
+
+    func copyThisPC() {
+      let text = (host ?? HostInventory(properties: [:])).summary(
+        osVersion: osVersion, guestMemoryBytes: snapshot?.memoryBytes,
+        presentedModel: snapshot?.model, presentedChip: snapshot?.processor)
+      NSPasteboard.general.clearContents()
+      NSPasteboard.general.setString(text, forType: .string)
     }
 
     func inspectSetup() {
@@ -78,7 +113,8 @@
     private func report() throws -> Data? {
       guard let snapshot else { return nil }
       return try SystemReport(
-        appVersion: appVersion, appBuild: appBuild, system: snapshot, inspectedSetup: setup
+        appVersion: appVersion, appBuild: appBuild, system: snapshot, host: host,
+        inspectedSetup: setup
       ).json()
     }
 

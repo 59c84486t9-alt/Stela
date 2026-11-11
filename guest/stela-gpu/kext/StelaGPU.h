@@ -51,6 +51,11 @@ private:
 	 * load the plugin. A kernel thread's, holding a reference on `parameter`.
 	 */
 	static void installPlugin(void *parameter, wait_result_t);
+	/*
+	 * Publishes the provider's stela-host record (host_record.h) as the
+	 * StelaHost dictionary: what stela.efi knows of the PC.
+	 */
+	void publishHost(IOService *provider);
 	/* Whether stop has closed admission. */
 	bool isStopping();
 	/* Unwires what the gate says the GPU no longer reaches. */

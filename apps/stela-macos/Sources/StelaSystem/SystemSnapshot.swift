@@ -65,21 +65,22 @@ public struct SystemSnapshot: Codable, Sendable {
 }
 
 public struct SystemReport: Encodable {
-  public let schemaVersion = 1
+  public let schemaVersion = 2
   public let appVersion: String
   public let appBuild: String
-  public let scope =
-    "macOS-reported observations; not a native PC inventory or instruction-coverage certification"
-  public let runtimeConnection = "unavailable"
   public let system: SystemSnapshot
+  /// The PC under macOS as Stela describes it; absent on a Mac or older Stela.
+  public let host: HostInventory?
   public let inspectedSetup: SetupSummary?
 
   public init(
-    appVersion: String, appBuild: String, system: SystemSnapshot, inspectedSetup: SetupSummary?
+    appVersion: String, appBuild: String, system: SystemSnapshot, host: HostInventory? = nil,
+    inspectedSetup: SetupSummary?
   ) {
     self.appVersion = appVersion
     self.appBuild = appBuild
     self.system = system
+    self.host = host
     self.inspectedSetup = inspectedSetup
   }
 

@@ -661,6 +661,54 @@ fn start_processors(boot: Boot<'_>, host: &mut OpenedHost) -> Processors {
 /// processors, place the board's devices over its RAM, publish its topology
 /// and run it until it stops. The assigned topology borrows the loaded
 /// source and the roster for the whole run.
+/// Writes what the boot learned of the PC (`crate::host_inventory`) into each
+/// of the `gates` StelaGPU gate nodes' `stela-host` property, which the kext
+/// publishes as `StelaHost`, with the translator's target and identity and
+/// each GPU's VRAM.
+#[cfg(feature = "nvk")]
+fn describe_host(
+    tree: &mut stela_loader::apple_device_tree::DeviceTree,
+    gates: usize,
+    target: TargetCpu,
+) {
+    use crate::host_inventory::{entries, number, text};
+    text("TranslatorTarget", target.id());
+    let id = stela_engine::translations::translator_id();
+    text(
+        "TranslatorID",
+        id.0[..8]
+            .iter()
+            .map(|byte| alloc::format!("{byte:02x}"))
+            .collect::<alloc::string::String>(),
+    );
+    for index in 0..gates {
+        if let Some(bytes) = gpu::client::vram_bytes(index as u32) {
+            number(alloc::format!("GPU{index}VRAMBytes"), bytes);
+        }
+    }
+    let record = match stela_loader::stela_gpu::encode_host(&entries()) {
+        Ok(record) => record,
+        Err(error) => {
+            crate::status::warn(&alloc::format!(
+                "The PC's description has no place: {error}"
+            ));
+            return;
+        }
+    };
+    for index in 0..gates {
+        if let Err(error) = stela_loader::stela_gpu::set_host(tree, index, record.clone()) {
+            crate::status::warn(&alloc::format!(
+                "GPU {index}'s PC description has no place: {error}"
+            ));
+        }
+    }
+    output::arguments(format_args!(
+        "HOST INVENTORY entries={} bytes={}\n",
+        entries().len(),
+        record.len()
+    ));
+}
+
 fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     let Boot {
         handoff,
@@ -766,6 +814,7 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
             if !gates.is_empty() {
                 hidden_devices.extend(stela_loader::devices::hide_agx(&mut assigned.tree));
             }
+            describe_host(&mut assigned.tree, gates.len(), target);
             gates
         })
         .unwrap_or_default();

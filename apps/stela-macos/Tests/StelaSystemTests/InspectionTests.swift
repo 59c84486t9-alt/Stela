@@ -107,18 +107,18 @@ final class InspectionTests: XCTestCase {
     }
   }
 
-  func testReportDoesNotExportPrivateSetupFieldsOrClaimALiveConnection() throws {
+  func testReportDoesNotExportPrivateSetupFieldsAndCarriesTheHost() throws {
     let setup = try SetupSummary.parse(record())
     let report = SystemReport(
       appVersion: "test", appBuild: "test", system: SystemSnapshot.collect(using: Control()),
-      inspectedSetup: setup)
+      host: HostInventory(properties: ["CPUBrand": "Test CPU"]), inspectedSetup: setup)
     let data = try report.json()
     let text = try XCTUnwrap(String(data: data, encoding: .utf8))
     XCTAssertFalse(text.contains("PRIVATE_"))
     XCTAssertFalse(text.contains("\"options\""))
     let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-    XCTAssertEqual(json["schemaVersion"] as? Int, 1)
-    XCTAssertEqual(json["runtimeConnection"] as? String, "unavailable")
+    XCTAssertEqual(json["schemaVersion"] as? Int, 2)
+    XCTAssertEqual((json["host"] as? [String: Any])?["cpuBrand"] as? String, "Test CPU")
     XCTAssertNotNil(json["system"])
   }
 }

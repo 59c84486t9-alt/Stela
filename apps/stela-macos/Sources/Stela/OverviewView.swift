@@ -1,4 +1,4 @@
-// The current guest-visible system and separately identified setup-record versions.
+// What macOS reports about the system it runs on.
 #if os(macOS)
   import SwiftUI
   import StelaSystem
@@ -9,73 +9,54 @@
     let system: SystemSnapshot
 
     var body: some View {
-      VStack(alignment: .leading, spacing: 22) {
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-          SpecificationTile(
-            symbol: "macwindow", title: "Operating system", value: "macOS \(system.osVersion)",
-            detail: system.osBuild.map { "Build \($0)" } ?? "Build not reported")
-          SpecificationTile(
-            symbol: "cpu", title: "Processor", value: system.processor ?? "Not reported",
-            detail: DisplayFormat.cores(system))
-          SpecificationTile(
-            symbol: "memorychip", title: "Memory", value: DisplayFormat.bytes(system.memoryBytes),
-            detail: "Reported to macOS")
-          SpecificationTile(
-            symbol: "display", title: "Graphics",
-            value: system.graphics.first?.name ?? "No Metal device reported", detail: graphicsDetail
-          )
-        }
-
-        VStack(alignment: .leading, spacing: 0) {
-          SectionHeading(title: "System")
-          Surface {
-            InformationRow(title: "Model", value: system.model ?? "Not reported")
-            Divider().padding(.horizontal, 18)
-            InformationRow(
-              title: "Architecture", value: system.architecture ?? "Not reported", monospaced: true)
-            Divider().padding(.horizontal, 18)
-            InformationRow(title: "Uptime", value: DisplayFormat.uptime(system.uptimeSeconds))
-            if let capacity = system.storageTotalBytes {
-              Divider().padding(.horizontal, 18)
-              InformationRow(
-                title: "Data volume",
-                value:
-                  "\(DisplayFormat.bytes(system.storageAvailableBytes)) available of \(DisplayFormat.bytes(capacity))"
-              )
+      VStack(alignment: .leading, spacing: Style.spacing) {
+        let cards = self.cards
+        Grid(horizontalSpacing: Style.spacing, verticalSpacing: Style.spacing) {
+          ForEach(Array(stride(from: 0, to: cards.count, by: 2)), id: \.self) { index in
+            GridRow {
+              cards[index]
+              if index + 1 < cards.count { cards[index + 1] } else { Color.clear }
             }
           }
-          Text(
-            "Reported by macOS. The presented model and processor may differ from the physical PC."
-          )
-          .font(.system(size: 11)).foregroundStyle(.secondary).padding(.top, 9)
         }
-
-        VStack(alignment: .leading, spacing: 0) {
-          SectionHeading(title: "Versions")
-          Surface {
-            InformationRow(title: "Stela app", value: model.appVersion)
-            Divider().padding(.horizontal, 18)
-            InformationRow(title: "Running Stela", value: "Connection unavailable")
-            Divider().padding(.horizontal, 18)
-            InformationRow(
-              title: "Darwin kernel", value: system.kernelVersion ?? "Not reported",
-              monospaced: true)
-            if let setup = model.setup {
-              Divider().padding(.horizontal, 18)
-              InformationRow(
-                title: "Inspected boot version", value: setup.bootVersion ?? "Not recorded",
-                monospaced: true)
-            }
-          }
+        Surface {
+          Rows(rows: [
+            ("Model", system.model, false),
+            ("Architecture", system.architecture, true),
+            ("Kernel", system.kernelVersion, true),
+            ("Uptime", DisplayFormat.uptime(system.uptimeSeconds), false),
+            ("Data volume", dataVolume, false),
+          ])
         }
       }
     }
 
-    private var graphicsDetail: String {
-      guard let first = system.graphics.first else { return "As enumerated by macOS" }
-      if system.graphics.count > 1 { return "\(system.graphics.count) Metal devices reported" }
-      return first.unifiedMemory
-        ? "Unified memory · Metal device" : "Dedicated memory · Metal device"
+    private var cards: [Card] {
+      var cards = [
+        Card(label: "macOS", value: DisplayFormat.version(system.osVersion), detail: system.osBuild)
+      ]
+      if let processor = system.processor {
+        cards.append(
+          Card(
+            label: "Processor", value: processor,
+            detail: DisplayFormat.counts(cores: system.physicalCores, threads: system.logicalCores)))
+      }
+      if let memory = DisplayFormat.bytes(system.memoryBytes) {
+        cards.append(Card(label: "Memory", value: memory))
+      }
+      if let graphics = system.graphics.first {
+        cards.append(
+          Card(
+            label: "Graphics", value: graphics.name,
+            detail: graphics.unifiedMemory ? "Unified memory" : "Dedicated memory"))
+      }
+      return cards
+    }
+
+    private var dataVolume: String? {
+      guard let total = DisplayFormat.bytes(system.storageTotalBytes) else { return nil }
+      guard let free = DisplayFormat.bytes(system.storageAvailableBytes) else { return total }
+      return "\(free) free of \(total)"
     }
   }
 #endif

@@ -27,9 +27,8 @@ pub fn brand(words: [u32; 12]) -> String {
     String::from_utf8_lossy(&bytes[..end]).trim().into()
 }
 
-/// `HOST version=… cpu="…" family=… model=… stepping=… ram=… firmware="…"`.
-pub fn line(identity: &Identity<'_>) -> String {
-    let signature = identity.signature;
+/// The display family, model and stepping of CPUID leaf 1's EAX.
+pub fn signature_parts(signature: u32) -> (u32, u32, u32) {
     let base_family = (signature >> 8) & 0xf;
     let family = if base_family == 0xf {
         base_family + ((signature >> 20) & 0xff)
@@ -41,6 +40,21 @@ pub fn line(identity: &Identity<'_>) -> String {
     } else {
         (signature >> 4) & 0xf
     };
+    (family, model, signature & 0xf)
+}
+
+/// The vendor string CPUID leaf 0 holds in EBX, EDX and ECX.
+pub fn vendor(words: [u32; 3]) -> String {
+    let bytes: alloc::vec::Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
+    String::from_utf8_lossy(&bytes)
+        .trim_end_matches('\0')
+        .into()
+}
+
+/// `HOST version=… cpu="…" family=… model=… stepping=… ram=… firmware="…"`.
+pub fn line(identity: &Identity<'_>) -> String {
+    let (family, model, _) = signature_parts(identity.signature);
+    let signature = identity.signature;
     format!(
         "HOST version={} cpu=\"{}\" family={family:#x} model={model:#x} stepping={} ram={:.1}GB \
          firmware=\"{}\" revision={:#x}\n",
@@ -66,6 +80,13 @@ mod tests {
         }
         let cpu = brand(words);
         assert_eq!(cpu, "Intel(R) Core(TM) i7-12700K");
+        assert_eq!(signature_parts(0x0009_0672), (6, 0x97, 2));
+        // Zen 5: family 0x1a.
+        assert_eq!(signature_parts(0x00b4_0f40).0, 0x1a);
+        assert_eq!(
+            vendor([0x6874_7541, 0x6974_6e65, 0x444d_4163]),
+            "AuthenticAMD"
+        );
         // Alder Lake: family 6, model 0x97, stepping 2.
         let line = line(&Identity {
             version: "0.1.0",

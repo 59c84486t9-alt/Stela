@@ -1204,6 +1204,28 @@ pub(super) fn chipset(index: u32) -> Option<u16> {
     (result == 0).then_some(parameter.value as u16)
 }
 
+/// `NOUVEAU_GETPARAM_FB_SIZE`: the VRAM nouveau makes available.
+const FB_SIZE: u64 = 8;
+
+/// The VRAM bytes of the bound GPU at `index`, for the guest's `StelaHost`.
+pub(in crate::engine) fn vram_bytes(index: u32) -> Option<u64> {
+    let fd = submit(Operation::Open(RENDER_MINOR + index)) as c_int;
+    if fd < 0 {
+        return None;
+    }
+    let mut parameter = GetParam {
+        parameter: FB_SIZE,
+        value: 0,
+    };
+    let result = submit(Operation::Control {
+        fd,
+        request: GET_PARAM,
+        argument: (&raw mut parameter).cast(),
+    });
+    close_descriptor(fd);
+    (result == 0 && parameter.value != 0).then_some(parameter.value)
+}
+
 /// Serve a fault on a mapping that moved, as Linux unmaps a buffer it evicts.
 /// False when `address` is not one a client mapped.
 pub(in crate::engine) fn serve_fault(address: u64, write: bool) -> bool {
