@@ -52,10 +52,10 @@ mod tests {
             missing.contains("`stela setup host-firmware fetch --gpu ga104 --usb USB`"),
             "{missing}"
         );
-        let other = refused("01:00.0", 0x2c02, Reason::Other);
+        let other = refused("03:00.0", 0x2b85, Reason::Other);
         assert_eq!(
             other,
-            "the NVIDIA gb203 GPU at 01:00.0 did not start; the boot log on this USB says why"
+            "the NVIDIA gb202 GPU at 03:00.0 did not start; the boot log on this USB says why"
         );
     }
 
