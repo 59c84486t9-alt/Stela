@@ -1,6 +1,6 @@
 /*
  * What this device does not offer. Each entry answers as Metal does for a
- * missing feature and reports once; `metal/README.md` says why each is absent.
+ * missing feature and reports once.
  */
 #include "Bundle.h"
 
