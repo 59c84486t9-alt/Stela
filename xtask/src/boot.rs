@@ -128,16 +128,13 @@ enum Scenario {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Build `stela.efi`.
+    /// Build `stela.efi` with its NVK GPU stack and guest components.
     Build {
         #[arg(long)]
         release: bool,
         /// Include authored hardware fixtures in the mount.
         #[arg(long)]
         diagnostics: bool,
-        /// Build and include NVIDIA/NVK rendering and the guest components.
-        #[arg(long)]
-        nvk: bool,
     },
     /// Boot `stela.efi` with an ARM image in x86 QEMU.
     Run(Box<Run>),
@@ -566,13 +563,10 @@ pub fn run(command: Command) -> Result<ExitCode> {
         Command::Build {
             release,
             diagnostics,
-            nvk,
         } => {
-            if nvk {
-                crate::gpu::fetch::fetch(false)?;
-                crate::gpu::build_nvk(8)?;
-            }
-            println!("{}", build_for_boot(release, diagnostics, nvk)?.display());
+            crate::gpu::fetch::fetch(false)?;
+            crate::gpu::build_nvk(8)?;
+            println!("{}", build_for_boot(release, diagnostics, true)?.display());
             Ok(ExitCode::SUCCESS)
         }
         Command::Run(arguments) => launch(*arguments),
