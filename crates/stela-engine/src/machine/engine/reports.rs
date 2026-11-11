@@ -535,6 +535,17 @@ pub struct Statistics {
     pub exceptions: u64,
     pub interrupts: u64,
     pub system_exits: u64,
+    /// AMX moves completed inside blocks (`x86_64::amx_transfer`) and by
+    /// the engine's service.
+    pub amx_moves: [u64; 2],
+    /// AMX register operations completed inside blocks
+    /// (`x86_64::amx_routine`) and by the engine's service.
+    pub amx_operations: [u64; 2],
+    /// Those operations by number and path (host kernel, model), and the
+    /// ticks and count of the sampled calls of each
+    /// (`x86_64::amx_transfer::Cell`), added every 2^16 operations.
+    pub amx_kernels: [[u64; 2]; stela_compiler::x86_64::amx_transfer::KINDS],
+    pub amx_sampled: [[[u64; 2]; 2]; stela_compiler::x86_64::amx_transfer::KINDS],
     pub device_accesses: u64,
     /// Discards of every installed block, by [`Discard`] cause.
     pub code_discards: [u64; Discard::ALL.len()],
@@ -621,6 +632,10 @@ impl core::ops::AddAssign for Statistics {
             exceptions,
             interrupts,
             system_exits,
+            amx_moves,
+            amx_operations,
+            amx_kernels,
+            amx_sampled,
             device_accesses,
             code_discards,
             code_evictions,
@@ -646,6 +661,29 @@ impl core::ops::AddAssign for Statistics {
         } = other;
         self.replaced_retired = self.replaced_retired.saturating_add(replaced_retired);
         for (total, count) in self.exit_kinds.iter_mut().zip(exit_kinds) {
+            *total += count;
+        }
+        for (total, count) in self.amx_moves.iter_mut().zip(amx_moves) {
+            *total += count;
+        }
+        for (total, count) in self.amx_operations.iter_mut().zip(amx_operations) {
+            *total += count;
+        }
+        for (total, count) in self
+            .amx_kernels
+            .as_flattened_mut()
+            .iter_mut()
+            .zip(amx_kernels.as_flattened())
+        {
+            *total += count;
+        }
+        for (total, count) in self
+            .amx_sampled
+            .as_flattened_mut()
+            .as_flattened_mut()
+            .iter_mut()
+            .zip(amx_sampled.as_flattened().as_flattened())
+        {
             *total += count;
         }
         for (total, count) in self.code_discards.iter_mut().zip(code_discards) {

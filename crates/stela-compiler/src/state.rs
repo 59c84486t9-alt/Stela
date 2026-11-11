@@ -19,10 +19,14 @@ pub enum Anchor {
     Count,
     /// The storage of SP_EL0.
     StackZero,
+    /// The PE's AMX cell (`x86_64::amx_transfer::Cell`): its live
+    /// registers, or zero when native code must leave AMX words to the
+    /// engine, and the moves native code completed.
+    Amx,
 }
 
 /// The entries of [`Anchors`].
-const ANCHORS: usize = 7;
+const ANCHORS: usize = 8;
 
 /// A PE's pointer for each [`Anchor`]. They are no part of the guest's state:
 /// any two compare equal.
@@ -139,9 +143,9 @@ mod tests {
     #[test]
     fn layout_matches_native_abi() {
         for profile in [BlockProfile::ORDINARY, BlockProfile::new(Features::LEAF)] {
-            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v10-"));
+            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v11-"));
         }
-        assert_eq!(size_of::<GuestState>(), 880);
+        assert_eq!(size_of::<GuestState>(), 888);
         assert_eq!(align_of::<GuestState>(), 8);
         assert_eq!(offset_of!(GuestState, x), 0);
         assert_eq!(offset_of!(GuestState, sp), 248);

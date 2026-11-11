@@ -85,6 +85,8 @@ impl Emitted {
 }
 
 pub mod amx;
+pub mod amx_routine;
+pub mod amx_transfer;
 pub(crate) mod asm;
 mod atomic;
 mod bitfield;
@@ -189,6 +191,9 @@ pub struct NativeSystem {
     /// The System registers whose MRS blocks complete inside themselves from
     /// the engine's cells rather than ending at one (`x86_64::mirrored_read`).
     pub mirrored: mirrored_read::Reads,
+    /// The machine has AMX: its moves complete inside blocks from the PE's
+    /// register file rather than ending them (`x86_64::amx_transfer`).
+    pub amx: bool,
 }
 
 impl NativeSystem {
@@ -199,6 +204,7 @@ impl NativeSystem {
         exclusive: false,
         pointer: None,
         mirrored: mirrored_read::Reads::NONE,
+        amx: false,
     };
 }
 
@@ -1270,6 +1276,9 @@ pub(crate) fn emit_instruction(
         }
         Operation::MirroredRead { .. } => {
             unreachable!("mirrored reads require block emission with their cells")
+        }
+        Operation::Amx(_) => {
+            unreachable!("AMX moves require block emission with the register file")
         }
         Operation::FloatingPointRegister(operand) => fp_register::emit(code, &operand),
         Operation::Simd(operand) => simd::emit_for_target(code, &operand, target, checks),

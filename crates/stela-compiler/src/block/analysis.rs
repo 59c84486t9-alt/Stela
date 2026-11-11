@@ -445,6 +445,17 @@ pub(super) fn parse_admitted(
                     kind: error.kind,
                 })?
         {
+            // The engine's own blocks move AMX rows inside themselves.
+            if native.amx
+                && profile == BlockProfile::new(Features::SYSTEM_MODE)
+                && crate::x86_64::amx_transfer::in_block(decoded.operation)
+            {
+                instructions.push(Instruction {
+                    pc,
+                    operation: Operation::Amx(decoded),
+                });
+                continue;
+            }
             terminal = Some((pc, Terminator::Amx(decoded)));
             break;
         }

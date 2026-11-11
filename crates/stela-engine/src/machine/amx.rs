@@ -106,6 +106,9 @@ pub struct Unit {
     /// `AMX_STATE_T`: 1 between `set` and `clr`.
     state: u64,
     pub registers: Option<Box<AmxRegisters>>,
+    /// What native moves find through `Anchor::Amx`, which the engine sets
+    /// as it enters native code.
+    pub native: stela_compiler::x86_64::amx_transfer::Cell,
 }
 
 /// Preserve the original M2 unit API. CPU construction must use `on(chip)`.
@@ -131,6 +134,7 @@ impl Unit {
             controls: [0; 2],
             state: 0,
             registers: None,
+            native: Default::default(),
         }
     }
 

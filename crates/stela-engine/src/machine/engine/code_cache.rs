@@ -770,6 +770,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             anchors[Anchor::Memo],
             anchors[Anchor::Count],
             anchors[Anchor::StackZero],
+            anchors[Anchor::Amx],
             &self.cpu.state as *const _ as u64,
         ];
         for window in bytes.windows(8) {

@@ -420,3 +420,62 @@ fn native_arithmetic_tier_matches_the_model_through_the_service() {
     }
     assert_eq!(machines[0].cpu.pc, machines[1].cpu.pc);
 }
+
+/// Native moves find the register file only where the service would run a
+/// move on it: live state with AMX enabled for the governing EL. The service
+/// counts the moves it completes.
+#[test]
+fn native_moves_find_the_file_only_where_moves_run() {
+    let mut machine = machine(&[]);
+    assert!(
+        machine.native_system().amx,
+        "an AMX chip's blocks lower moves"
+    );
+    assert_eq!(machine.amx_registers(), 0, "disabled, no state");
+    machine.cpu.state.x[1] = 1 << 63;
+    machine.system_instruction(msr(AMX_CTL_EL1, 1)).unwrap();
+    assert_eq!(machine.amx_registers(), 0, "no live state");
+    machine.amx(SET).unwrap();
+    let file = machine.cpu.amx.registers.as_deref().unwrap() as *const _ as u64;
+    assert_eq!(machine.amx_registers(), file);
+    machine.enter_amx_cell();
+    let cell = machine.cpu.amx.native;
+    assert_eq!(cell.registers, file);
+    assert_eq!(cell.generation, Some(stela_compiler::amx::Generation::M2));
+    assert_eq!(
+        cell.routine,
+        stela_compiler::x86_64::amx_routine::routine as *const () as usize as u64
+    );
+    assert_eq!(
+        machine.anchors()[stela_compiler::Anchor::Amx],
+        &machine.cpu.amx.native as *const _ as u64,
+        "the anchor names the cell the engine refreshes on entry"
+    );
+    machine.cpu.state.x[1] = 0;
+    machine.system_instruction(msr(AMX_CTL_EL1, 1)).unwrap();
+    assert_eq!(machine.amx_registers(), 0, "disabled with live state");
+    machine.cpu.state.x[1] = 1 << 63;
+    machine.system_instruction(msr(AMX_CTL_EL1, 1)).unwrap();
+    machine.cpu.state.x[3] = DATA;
+    machine.amx(LDX | 3).unwrap();
+    machine.amx(FMA32 | 3).unwrap();
+    assert_eq!(machine.statistics.amx_moves, [0, 1]);
+    assert_eq!(machine.statistics.amx_operations, [0, 1]);
+    machine.cpu.amx.native.moves = 3;
+    machine.cpu.amx.native.calls = 5;
+    machine.cpu.amx.native.kernels[12] = [4, 1];
+    machine.leave_amx_cell();
+    machine.fold_amx_kernels();
+    assert_eq!(machine.statistics.amx_kernels[12], [4, 1]);
+    assert_eq!(machine.cpu.amx.native.kernels[12], [0, 0]);
+    assert_eq!(machine.statistics.amx_moves, [3, 1]);
+    assert_eq!(machine.statistics.amx_operations, [5, 1]);
+    machine.amx(CLR).unwrap();
+    assert_eq!(machine.amx_registers(), 0, "cleared");
+    let mut other = machine_on(Chip::AppleM5, &[]);
+    assert!(
+        !other.native_system().amx,
+        "no qualified generation, no lowered moves"
+    );
+    assert_eq!(other.amx_registers(), 0);
+}

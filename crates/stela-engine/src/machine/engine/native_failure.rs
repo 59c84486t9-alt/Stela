@@ -295,6 +295,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let word = self.exit_word(index, pc)?;
             return self.completing(pc, |machine| machine.system_instruction(word));
         }
+        // A native AMX move faulted, or its range check failed, with nothing
+        // changed: the engine's service completes it, delivering the fault
+        // the guest's translation gives it with the AMX syndrome
+        // (`x86_64::amx_transfer`).
+        if pc != terminal && self.block_variant(index).system.amx {
+            let word = self.exit_word(index, pc)?;
+            if stela_compiler::amx::decode(GuestAddress(pc), word)
+                .ok()
+                .flatten()
+                .is_some_and(|amx| stela_compiler::x86_64::amx_transfer::lowers(amx.operation))
+            {
+                return self.completing(pc, |machine| machine.amx(word));
+            }
+        }
         match fault.cause {
             FaultCause::Guest(guest) => {
                 let address = self.tagged_fault_address(index, pc, fault.address);

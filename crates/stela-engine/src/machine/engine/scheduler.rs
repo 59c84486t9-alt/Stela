@@ -243,6 +243,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .registers
             .address(SystemRegister::SP_EL0, 0)
             .expect("SP_EL0 has storage");
+        anchors[Anchor::Amx] = &self.cpu.amx.native as *const _ as u64;
         anchors
     }
 
@@ -257,12 +258,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.mirrors.transition(self.mirror_state());
         self.mirrors.enter(self.cpu.pstate);
         self.cpu.state.pan = u64::from(self.cpu.pstate.pan);
+        self.enter_amx_cell();
         self.cpu.state.anchors = self.anchors();
         let entered = self.timing_start();
         // SAFETY: installed by this machine since the last discard, for the system-mode block ABI;
         // chained blocks and thunks too.
         let exit = unsafe { self.host.execute(entry, &mut self.cpu.state) };
         let returned = self.timing_charge(step_timing::Phase::Native, entered);
+        self.leave_amx_cell();
         self.cpu.pstate.daif = self.cpu.state.daif as u8;
         self.cpu.pstate.sp = self.mirrors.selected != 0;
         self.mirrors.leave(&mut self.cpu.pstate);

@@ -235,6 +235,9 @@ pub enum Operation {
     MirroredRead {
         word: u32,
     },
+    /// An AMX move a system-mode block completes inside itself
+    /// (`x86_64::amx_transfer`); any other AMX word ends its block.
+    Amx(crate::amx::AmxInstruction),
     Exclusive(exclusive::Operand),
     FloatingPoint(FloatingPointOperation),
     FloatingPointRegister(fp_register::Operand),

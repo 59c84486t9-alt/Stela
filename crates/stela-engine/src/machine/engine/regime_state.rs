@@ -198,6 +198,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             exclusive: self.parallel.is_some(),
             pointer: Some(super::pointer::CELLS),
             mirrored: inline_mirrored_reads(),
+            amx: self.cpu.amx.generation().is_some(),
         })
     }
 

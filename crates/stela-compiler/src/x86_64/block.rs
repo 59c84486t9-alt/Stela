@@ -406,6 +406,8 @@ fn emit_selected(
     let mut pointer_paths = vec![];
     // And those of the mirrored reads (`mirrored_read`).
     let mut mirrored_paths = vec![];
+    // And those of the AMX moves (`amx_transfer`).
+    let mut amx_paths = vec![];
     while cursor < instructions.len() {
         let held = core::mem::replace(&mut after, Held::NOTHING);
         // A group emitted otherwise may have used the slots.
@@ -828,6 +830,13 @@ fn emit_selected(
             cursor += 1;
             continue;
         }
+        if let Operation::Amx(amx) = instruction.operation {
+            amx_paths.push(super::amx_transfer::emit(code, &amx, checks, target));
+            bases.reset();
+            emitted_alone = true;
+            cursor += 1;
+            continue;
+        }
         if reuse_bases {
             code.set_base_request(bases.plan(&instructions[cursor..]));
         }
@@ -880,7 +889,7 @@ fn emit_selected(
     // terminal's branch: only the jump over the paths below comes between.
     let flags_live = after.rax == super::Rax::Nzcv && code.ends_with(&nzcv_store(code.is_pinned()));
     // Before the terminal, whose direct exits end the code.
-    if !pointer_paths.is_empty() || !mirrored_paths.is_empty() {
+    if !pointer_paths.is_empty() || !mirrored_paths.is_empty() || !amx_paths.is_empty() {
         let over = code.asm().jmp();
         if let Some(cells) = native.pointer {
             for path in pointer_paths {
@@ -889,6 +898,9 @@ fn emit_selected(
         }
         for path in mirrored_paths {
             super::mirrored_read::place(code, path);
+        }
+        for path in amx_paths {
+            super::amx_transfer::place(code, path);
         }
         code.asm().bind(over);
     }
