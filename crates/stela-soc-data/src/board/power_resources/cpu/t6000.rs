@@ -14,7 +14,7 @@ const AFFINITY_PART_MASK: u32 = 0xff;
 const CLUSTER_SHIFT: u32 = 8;
 const ENABLE_CORE_SELECTOR: u32 = 0x436f_7265;
 
-pub(super) const EVIDENCE: &str = "26A434 mac13j SHA256 5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90; mode1 complex2b16e08/core2b190e4/skip2b19918, enable2b2dcb0; cpu/t6000-core-membership-r1 source receipt";
+pub(super) const EVIDENCE: &str = "26A434 mac13j SHA256 5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90; mode1 complex2b16e08/core2b190e4/skip2b19918, enable2b2dcb0";
 
 pub(super) fn resolve(
     root: &Node<'_>,
