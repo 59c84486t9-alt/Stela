@@ -4164,10 +4164,10 @@ fn the_memory_book_names_freed_ranges_and_their_neighbours() {
     );
 }
 
-/// A CPU-copy upload rides the next commit of any connection. While that
-/// command buffer is held for an event, `completed` passes its serial, and
-/// the texture's own connection may destroy the texture: its CPU copy stays
-/// until the held command buffer that reads it has run. Freed at once, the
+/// A CPU-copy upload rides the next commit of any connection; behind held
+/// work it goes ahead on its own. Once it ran, `completed` passes the held
+/// command buffer's serial, and the texture's own connection may destroy
+/// the texture: its CPU copy stays until the held command buffer is done. Freed at once, the
 /// copy's GPU mapping was gone when the event released the command buffer:
 /// an MMU fault on the copy's last page, which lost the device.
 #[test]
@@ -4209,7 +4209,9 @@ fn uploads_a_held_command_buffer_carries_outlive_their_texture() {
     assert!(device.holds());
     let freed =
         |device: &mut TestDevice| device.backend().destroyed.contains(&Object::Buffer(source));
-    // The writer releases the texture: none of its own work is unfinished.
+    // The upload, submitted ahead, runs; the writer releases the texture:
+    // none of its own work is unfinished.
+    device.backend().finish();
     device.destroy_texture(texture).unwrap();
     device.poll().unwrap();
     assert!(device.completed_serial() >= held);
@@ -4581,4 +4583,143 @@ fn an_events_value_needs_no_driver_query_once_it_reached_every_promise() {
     device.backend().semaphore_error = Some(Error::DeviceLost);
     assert_eq!(device.signaled_value(event), Ok(9));
     device.backend().semaphore_error = None;
+}
+}
+
+/// A managed texture of connection 1 written from the CPU while connection
+/// 2's first command buffer waits for `event`; connection 2 then commits
+/// again, behind its held work. Returns the texture's CPU copy buffer.
+fn upload_behind_held_carrier(device: &mut TestDevice, event: EventId) -> (TextureId, Buffer) {
+    let descriptor = TextureDescriptor {
+        width: 8,
+        height: 4,
+        options: options(StorageMode::Managed),
+        ..texture(PixelFormat::Rgba8Unorm, TextureUsage::SHADER_READ)
+    };
+    let texture = device.new_texture(&descriptor).unwrap();
+    let copy = device.texture_cpu_copy(texture, 0, 0).unwrap().unwrap();
+    let semaphore = device.event_semaphore(event).unwrap();
+    let mut commands = device.new_command_buffer();
+    commands
+        .encode_wait_for_event(&mut device.resolver(), semaphore, 1)
+        .unwrap();
+    device.commit_for(2, commands).unwrap();
+    assert!(device.holds());
+    let region = Region {
+        slice: 0,
+        level: 0,
+        origin: [0, 0, 0],
+        size: [8, 4, 1],
+    };
+    let strides = Strides {
+        bytes_per_row: 32,
+        bytes_per_image: 0,
+    };
+    device
+        .replace_region(texture, &region, &[7; 128], strides)
+        .unwrap();
+    let commands = device.new_command_buffer();
+    device.commit_for(2, commands).unwrap();
+    (texture, copy.buffer.buffer)
+}
+
+/// The first submission that copies `source` to an image.
+fn upload_submission(device: &mut TestDevice, source: Buffer) -> Option<usize> {
+    device.backend().submissions.iter().position(|submission| {
+        submission.iter().any(|segment| {
+            segment.commands.iter().any(|command| {
+                matches!(command, Command::CopyBufferToImage { src, .. } if *src == source)
+            })
+        })
+    })
+}
+
+/// A CPU-copy upload that another connection's held command buffer would
+/// carry is made even when that connection closes before its event
+/// (auditgpu2 finding 1).
+#[test]
+fn cpu_copy_upload_survives_its_held_carrier_closing() {
+    let mut backend = MockBackend::new();
+    backend.physical.as_mut().unwrap().features.host_image_copy = false;
+    let mut device = device_on(backend);
+    let event = device.new_event().unwrap();
+    let (texture, source) = upload_behind_held_carrier(&mut device, event);
+    let commands = device.new_command_buffer();
+    device.commit_for(1, commands).unwrap();
+    let late = upload_submission(&mut device, source).is_none();
+    device.abandon(2);
+    device.backend().finish();
+    device.poll().unwrap();
+    let commands = device.new_command_buffer();
+    device.commit_for(1, commands).unwrap();
+    device.backend().finish();
+    device.poll().unwrap();
+    let made = upload_submission(&mut device, source).is_some();
+    assert!(!late && made, "late: {late}; ever made: {made}");
+    assert!(!device.holds());
+    device.destroy_texture(texture).unwrap();
+}
+
+/// While the carrier is held, the upload is submitted on its own, waiting
+/// for nothing, ahead of the owner's later work; the carrier's own work
+/// still runs once its event arrives, and every command buffer completes.
+#[test]
+fn cpu_copy_upload_precedes_owners_later_work_while_carrier_held() {
+    let mut backend = MockBackend::new();
+    backend.physical.as_mut().unwrap().features.host_image_copy = false;
+    let mut device = device_on(backend);
+    let event = device.new_event().unwrap();
+    let (texture, source) = upload_behind_held_carrier(&mut device, event);
+    let upload = upload_submission(&mut device, source).expect("the upload is submitted");
+    let submission = &device.backend().submissions[upload];
+    assert_eq!(submission.len(), 1);
+    assert!(submission[0].waits.is_empty(), "it waits for nothing");
+    assert!(matches!(
+        submission[0].commands.first(),
+        Some(Command::Barrier(_))
+    ));
+    assert!(matches!(
+        submission[0].commands.last(),
+        Some(Command::Barrier(_))
+    ));
+    let before = device.backend().submissions.len();
+    let commands = device.new_command_buffer();
+    let owner = device.commit_for(1, commands).unwrap();
+    assert!(device.backend().submissions.len() > before);
+    assert!(upload < before, "the upload precedes the owner's work");
+    // The texture's destruction still waits for the carrier.
+    device.destroy_texture(texture).unwrap();
+    device.set_signaled_value(event, 1).unwrap();
+    assert!(device.held_connections().is_empty());
+    device.backend().finish();
+    assert_eq!(device.poll(), Ok(owner));
+    assert!(!device.holds());
+}
+
+/// A GPU signal queued before a higher CPU signal can reach the event
+/// after it, and the driver then answers the lower value until it runs;
+/// the event's value never goes down (auditgpu2 finding 4).
+#[test]
+fn event_value_never_goes_below_a_cpu_signal() {
+    let mut device = device_on(MockBackend::new());
+    let event = device.new_event().unwrap();
+    let semaphore = device.event_semaphore(event).unwrap();
+    let mut commands = device.new_command_buffer();
+    commands
+        .encode_signal_event(&mut device.resolver(), semaphore, 5)
+        .unwrap();
+    device.commit(commands).unwrap();
+    device.set_signaled_value(event, 10).unwrap();
+    assert_eq!(device.signaled_value(event), Ok(10));
+    // A later GPU signal is promised, so the value is queried again.
+    let mut commands = device.new_command_buffer();
+    commands
+        .encode_signal_event(&mut device.resolver(), semaphore, 20)
+        .unwrap();
+    device.commit(commands).unwrap();
+    // The reordered point: the driver answers the unrun signal's chain.
+    device.backend().semaphores.insert(semaphore.0, 0);
+    assert_eq!(device.signaled_value(event), Ok(10));
+    device.backend().finish();
+    assert_eq!(device.signaled_value(event), Ok(20));
 }

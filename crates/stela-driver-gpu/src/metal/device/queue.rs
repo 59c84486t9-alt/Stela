@@ -875,11 +875,31 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         // and outside the command buffer's GPU times. Keep pending copies
         // available for the next commit until preparation succeeds.
         let carried = self.cpu_copy_textures();
-        let uploads = self.take_cpu_copy_uploads();
+        let mut uploads = self.take_cpu_copy_uploads();
         let carries = !uploads.is_empty();
-        held.as_mut_slice()[0].segments[0]
-            .commands
-            .splice(1..1, uploads);
+        // They ride the command buffer only when it reaches the queue now.
+        // Behind held work they go ahead in a submission of their own that
+        // waits for nothing: any connection's later work then follows them,
+        // and closing the carrier's connection cannot drop them.
+        let first = &mut held.as_mut_slice()[0];
+        let leading = if carries && !self.submits_now(first) {
+            uploads.insert(0, Command::Barrier(crate::metal::hazard::FULL));
+            let segment = Segment {
+                commands: uploads,
+                ..Segment::default()
+            };
+            Some(Held {
+                serial,
+                key,
+                queue,
+                step: 0,
+                segments: alloc::vec![segment],
+                mappings: Vec::new(),
+            })
+        } else {
+            first.segments[0].commands.splice(1..1, uploads);
+            None
+        };
         let start = self.timing.since(Phase::CommitUpload, start);
         self.submitted = serial;
         self.apply_plane_changes(planes);
@@ -908,7 +928,13 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
         held.enqueue(&mut self.queue.held);
         self.backend.take_split();
-        let advanced = self.advance();
+        // The uploads' submission marks the command buffer started; a
+        // failed one never signals, so the loss is recorded.
+        let advanced = match leading {
+            Some(leading) => self.submit_held(leading).inspect_err(|_| self.lost = true),
+            None => Ok(()),
+        }
+        .and_then(|()| self.advance());
         // The backend splits its submissions; the rest is submitting.
         let whole = self.timing.now().wrapping_sub(start);
         let [reclaim, record, _] = self.backend.take_split();
@@ -1244,6 +1270,24 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
         }
         Ok(())
+    }
+
+    /// Whether [`Self::advance`] submits `held`'s first segment as soon as
+    /// it is queued: no earlier work of its Metal queue is held, and its
+    /// first segment's waits are promised.
+    fn submits_now(&self, held: &Held) -> bool {
+        let order = [held.key, held.queue];
+        !self.lost
+            && held.step == 0
+            && !self
+                .queue
+                .held
+                .iter()
+                .any(|earlier| [earlier.key, earlier.queue] == order)
+            && held.segments[0]
+                .waits
+                .iter()
+                .all(|&(semaphore, value)| self.promised(semaphore) >= value)
     }
 
     /// How many of held work `index`'s first segments can be submitted:
@@ -1955,7 +1999,10 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
         let value = self.backend.semaphore_value(semaphore)?;
         self.note_reached_event(semaphore, value);
-        Ok(value)
+        // A GPU signal queued before a higher CPU signal can reach the
+        // event after it, and the driver then answers the lower value until
+        // that work runs: the value never goes down.
+        Ok(self.reached_event(semaphore))
     }
 
     fn reached_event(&self, semaphore: Semaphore) -> u64 {
