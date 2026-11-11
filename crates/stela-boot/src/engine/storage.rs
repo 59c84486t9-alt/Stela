@@ -1019,8 +1019,15 @@ pub unsafe fn open(
             serial
         ));
     }
-    // SAFETY: the caller owns the handoff's DMA pages and controllers.
-    let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
+    // The drivers reach their DMA memory through the physmap, which every
+    // engine root keeps in its window, never through the identity map only
+    // the loader root has: a driver call outside the loader root, such as a
+    // transfer timeout's cancel, then reads its context instead of faulting.
+    // SAFETY: the caller owns the handoff's DMA pages and controllers; the
+    // loader refused a DMA range its physmap does not cover (`system::memory`).
+    let mut dma = unsafe {
+        RegionAllocator::with_cpu_offset(handoff.dma.clone(), crate::layout::physical(0))
+    };
     let firmware =
         super::firmware_requests::Requests::new(stela_drivers::probe::handoff_provider(handoff));
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
