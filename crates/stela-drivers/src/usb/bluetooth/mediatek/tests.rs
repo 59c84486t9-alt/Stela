@@ -739,3 +739,67 @@ fn failed_control_read_keeps_typed_errors() {
     assert!(matches!(e, Error::Cleanup { .. }));
     assert_eq!(hci.state(), State::Failed);
 }
+#[test]
+fn linux_7_0_btusb_mediatek_entries_are_candidates_with_wideband_speech() {
+    // Linux 7.0 btusb lists these with BTUSB_MEDIATEK | BTUSB_WIDEBAND_SPEECH;
+    // the live registers still choose the image or refuse the chip.
+    for (vendor, product) in [
+        (0x043e, 0x3109),
+        (0x043e, 0x310c),
+        (0x0489, 0xe134),
+        (0x0489, 0xe135),
+        (0x0489, 0xe158),
+        (0x04ca, 0x3801),
+        (0x13d3, 0x3620),
+        (0x13d3, 0x3621),
+        (0x13d3, 0x3622),
+    ] {
+        let usb = UsbIdentity {
+            vendor,
+            product,
+            revision: 0x100,
+        };
+        assert!(
+            usb.candidate() && usb.wideband_speech(),
+            "{vendor:04x}:{product:04x}"
+        );
+        assert_eq!(
+            Identity::select(usb, 0, 0x7925, 0, 0).unwrap().chip,
+            Chip::Mt7925
+        );
+        // A chip whose ID register reads zero (MT6639 under Linux) has no
+        // image here and is refused, not guessed.
+        assert!(matches!(
+            Identity::select(usb, 0, 0, 0, 0),
+            Err(Error::Unsupported(_))
+        ));
+    }
+    // btusb lists 13d3:3560 without wideband speech; it is not admitted.
+    assert!(
+        !UsbIdentity {
+            vendor: 0x13d3,
+            product: 0x3560,
+            revision: 0x100
+        }
+        .candidate()
+    );
+}
+#[test]
+fn the_bare_metal_mt7925_registers_select_its_image_and_binding() {
+    // Registers a 13d3:3602 controller reported on bare metal.
+    let usb = UsbIdentity {
+        vendor: 0x13d3,
+        product: 0x3602,
+        revision: 0x100,
+    };
+    let identity = Identity::select(usb, 0x4254, 0x7925, 0x4200, 0x310).unwrap();
+    assert_eq!(
+        identity.firmware_name(),
+        "mediatek/mt7925/BT_RAM_CODE_MT7925_1_1_hdr.bin"
+    );
+    assert_eq!(usb.hardware_label(), "usb:13d3:3602:0100");
+    assert_eq!(
+        identity.revision_label(),
+        "mt79xx-v1:legacy-00004254:device-00007925:firmware-00004200:flavor-00000310"
+    );
+}
