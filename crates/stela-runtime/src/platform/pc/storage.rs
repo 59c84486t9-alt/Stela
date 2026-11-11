@@ -507,7 +507,11 @@ mod tests {
 
         let mut devices = disks();
         assert_eq!(
-            open(&mut devices, &target("disk-c:BBBBBBBB-0000-0000-0000-000000000000")).err(),
+            open(
+                &mut devices,
+                &target("disk-c:BBBBBBBB-0000-0000-0000-000000000000")
+            )
+            .err(),
             Some(StorageError::NoDisk {
                 serial: String::from("disk-c"),
                 found: vec![
