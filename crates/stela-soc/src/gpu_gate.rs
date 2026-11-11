@@ -41,6 +41,9 @@ use stela_contracts::{
 const CONNECTIONS: usize = stela_contracts::gate::window::CONNECTIONS as usize;
 
 const NAME: &str = "stela-gpu-gate";
+/// How soon the gate advances again while GPU work is outstanding: 250 us
+/// of the 24 MHz counter, which bounds how late a completion is noticed.
+const COMPLETION_POLL_TICKS: u64 = 6_000;
 
 /// A gate page's state.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -241,7 +244,12 @@ impl MmioDevice for Gate {
             self.status = true;
             access.interrupts.set_level(Wire::Aic(self.irq), true);
         }
-        Ok(None)
+        // While work is outstanding, look again soon: the service reads the
+        // completion the GPU writes, with no host interrupt or Linux work.
+        Ok(self
+            .service
+            .awaits_completion()
+            .then(|| access.now + COMPLETION_POLL_TICKS))
     }
 
     fn name(&self) -> &'static str {
@@ -361,6 +369,7 @@ mod tests {
     #[derive(Default)]
     struct Log {
         signaled: bool,
+        awaiting: bool,
         next: u64,
         disconnected: Vec<u64>,
         served: Vec<(u64, u64, u8)>,
@@ -422,6 +431,10 @@ mod tests {
 
         fn signaled(&self) -> bool {
             core::mem::take(&mut self.0.lock().unwrap().signaled)
+        }
+
+        fn awaits_completion(&self) -> bool {
+            self.0.lock().unwrap().awaiting
         }
 
         fn bundle(&self, report: BundleReport) {
@@ -747,6 +760,20 @@ mod tests {
         gate.write(ACK, Width::Double, 0, &mut Access::new(0, 0, &mut line))
             .unwrap();
         assert_eq!((line.0, load(&mut gate, STATUS)), (Some(false), 0));
+    }
+
+    /// While the service awaits a completion, the gate asks to advance
+    /// again within the poll interval; idle, it asks for nothing.
+    #[test]
+    fn outstanding_work_brings_the_gate_back_soon() {
+        let log = Arc::new(Service(Mutex::default()));
+        let mut gate = gate(&log);
+        let mut line = Line::default();
+        let next = gate.advance(&mut Access::new(0, 100, &mut line)).unwrap();
+        assert_eq!(next, None);
+        log.0.lock().unwrap().awaiting = true;
+        let next = gate.advance(&mut Access::new(0, 100, &mut line)).unwrap();
+        assert_eq!(next, Some(100 + COMPLETION_POLL_TICKS));
     }
 
     #[test]

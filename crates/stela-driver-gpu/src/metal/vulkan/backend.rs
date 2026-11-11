@@ -317,6 +317,22 @@ pub trait Backend {
     /// `vkUpdateDescriptorSets` into heap slot `index`.
     fn write_descriptor(&mut self, index: u32, descriptor: Descriptor);
 
+    /// Whether [`Self::host_word`] gives the host's view of mapped memory,
+    /// so the device keeps a completion marker.
+    fn maps_words(&self) -> bool {
+        false
+    }
+    /// The host's view of the 32-bit word at `offset` of mapped,
+    /// host-coherent `memory`, valid until the memory is freed and readable
+    /// from any processor: the device's completion marker. `None` when the
+    /// memory is not mapped coherently there.
+    fn host_word(
+        &mut self,
+        _memory: Memory,
+        _offset: u64,
+    ) -> Option<core::ptr::NonNull<core::sync::atomic::AtomicU32>> {
+        None
+    }
     /// Copies into mapped memory and flushes it.
     fn write_memory(&mut self, memory: Memory, offset: u64, bytes: &[u8]) -> Result<()>;
     /// Invalidates mapped memory and copies out of it.

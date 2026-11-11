@@ -13,11 +13,28 @@ use super::{
     shader::{Compiler, Refusal},
     timing::{CallPhases, Recorder},
     vulkan::{
+        BufferCreate, BufferUsage, MemoryProperties,
         backend::{Backend, Descriptor, Object, requirements},
-        object::{Memory, Semaphore},
+        object::{Buffer, BufferInfo, Memory, MemoryRequest, Semaphore},
     },
 };
 use alloc::{collections::VecDeque, vec::Vec};
+use core::{ptr::NonNull, sync::atomic::AtomicU32};
+
+/// A word the GPU writes after each submission's work, which the host reads
+/// from any processor ([`Device::completion_word`]).
+struct CompletionMarker {
+    buffer: Buffer,
+    word: NonNull<AtomicU32>,
+}
+
+/// The marker's memory: host-coherent, preferably cached, as the host polls
+/// it and the GPU writes one word a submission.
+const MARKER_MEMORY: MemoryRequest = MemoryRequest {
+    required: MemoryProperties::HOST_VISIBLE.union(MemoryProperties::HOST_COHERENT),
+    preferred: MemoryProperties::HOST_CACHED,
+    mapped: true,
+};
 
 mod execution_sets;
 #[cfg(test)]
@@ -124,6 +141,8 @@ pub struct Device<B: Backend, C: Compiler> {
     descriptors: DescriptorHeap,
     /// The universal queue's timeline: command buffer `n` signals `n`.
     timeline: Semaphore,
+    /// The completion marker, when the backend maps one.
+    marker: Option<CompletionMarker>,
     /// A descriptor of the timeline for the platform to wait on, until it
     /// takes it.
     completion: Option<i32>,
@@ -330,12 +349,14 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let layout = HeapLayout::new(&physical.limits);
         let timeline = backend.create_semaphore(0)?;
         let completion = backend.export_semaphore(timeline);
+        let marker = completion_marker(&mut backend);
         Ok(Self {
             backend,
             compiler,
             capabilities,
             descriptors: DescriptorHeap::new(layout),
             timeline,
+            marker,
             completion,
             submitted: 0,
             completed: 0,
@@ -387,6 +408,24 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// The newest serial submitted.
     pub fn submitted_serial(&self) -> u64 {
         self.submitted
+    }
+
+    /// The low 32 bits of the newest serial whose submission's work the GPU
+    /// finished, as the GPU wrote them after that work with every earlier
+    /// write made visible to the host: readable from any processor without
+    /// the driver, valid while this device lives. `None` without a marker or
+    /// once lost.
+    pub fn completion_word(&self) -> Option<NonNull<AtomicU32>> {
+        self.marker
+            .as_ref()
+            .filter(|_| !self.lost)
+            .map(|marker| marker.word)
+    }
+
+    /// The marker buffer the commands writing serial `serial` write, for the
+    /// submission that signals the timeline's `serial`.
+    fn marker_buffer(&self) -> Option<Buffer> {
+        self.marker.as_ref().map(|marker| marker.buffer)
     }
 
     /// A descriptor of the queue's timeline, which signals each serial as it
@@ -523,3 +562,29 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+/// The completion marker: a small buffer of host-coherent memory the host
+/// maps, zero until the first submission writes it. `None` when the backend
+/// gives no such view; completion is then only the driver's.
+fn completion_marker<B: Backend>(backend: &mut B) -> Option<CompletionMarker> {
+    if !backend.maps_words() {
+        return None;
+    }
+    let info = BufferInfo {
+        size: 256,
+        usage: BufferUsage::TRANSFER_DST,
+        flags: BufferCreate::EMPTY,
+    };
+    let allocation = backend.create_buffer(&info, MARKER_MEMORY).ok()?;
+    match backend.host_word(allocation.memory, 0) {
+        Some(word) => Some(CompletionMarker {
+            buffer: allocation.buffer,
+            word,
+        }),
+        None => {
+            backend.destroy(Object::Buffer(allocation.buffer));
+            backend.destroy(Object::Memory(allocation.memory));
+            None
+        }
+    }
+}

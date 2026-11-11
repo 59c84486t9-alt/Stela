@@ -2731,6 +2731,17 @@ impl Backend for NativeBackend {
         });
     }
 
+    fn maps_words(&self) -> bool {
+        true
+    }
+
+    fn host_word(&mut self, memory: Memory, offset: u64) -> Option<NonNull<AtomicU32>> {
+        let mapped = self.mapping(memory, offset, 4).ok()?;
+        let aligned =
+            (mapped.pointer.as_ptr() as usize).is_multiple_of(core::mem::align_of::<AtomicU32>());
+        (mapped.coherent && aligned).then(|| mapped.pointer.cast())
+    }
+
     fn write_memory(&mut self, memory: Memory, offset: u64, bytes: &[u8]) -> Result<()> {
         let mapped = self.mapping(memory, offset, bytes.len() as u64)?;
         // SAFETY: `mapped` covers the range and the slice is disjoint from

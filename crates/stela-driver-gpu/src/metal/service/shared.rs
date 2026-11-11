@@ -82,7 +82,7 @@ use core::{
     mem::size_of,
     num::NonZeroU64,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering},
 };
 use stela_contracts::gate::{BundleReport, CallerFault, CallerMemory, GateService, MemoryRange};
 
@@ -143,6 +143,11 @@ pub struct SharedService<B: Backend, C: Compiler> {
     /// whether the platform was asked for one; and the ticks each part of
     /// the platform's look may take ([`SharedService::set_look_budget`]).
     outside_seen: Spin<Option<Arc<dyn Outside>>>,
+    /// The device's completion marker as the last turn saw it, null for
+    /// none or a lost device, and the processors reading it now: a turn
+    /// that clears it waits for them, so no read outlives the device.
+    marker: AtomicPtr<AtomicU32>,
+    marker_readers: AtomicU32,
     upkeep_asked: AtomicBool,
     look_budget: AtomicU64,
     /// Refused submissions whose command buffers' connections were not yet
@@ -393,6 +398,11 @@ impl<B: Backend, C: Compiler> Turn<'_, B, C> {
         // processor. A value that shows nothing new still asks the driver,
         // which notices a loss.
         let waited = waited_value(&self.0.waited, &self.0.timeline);
+        // The marker may show more, with no Linux work behind it.
+        let waited = match (waited, self.0.marker_value()) {
+            (Some(waited), Some(marked)) => Some(waited.max(marked)),
+            (waited, marked) => waited.or(marked),
+        };
         // The platform's processor waits for its look: what completed work
         // released is destroyed within the budget, and the rest is left for
         // the next look, which the drop asks for, or a call.
@@ -488,6 +498,7 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
         let device = self.device();
         let submitted = device.submitted_serial();
         let serial = device.completed_serial();
+        let word = device.completion_word();
         // While some connection's work is held or completes on the late
         // timeline, completion differs by connection: the service answers
         // each poll, and no waiter publishes the timeline's value.
@@ -499,6 +510,12 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
         };
         self.time_submissions(submitted, if lost { reached } else { serial });
         self.0.submitted.store(submitted, Ordering::Release);
+        // The marker of a live device, for readers outside the turn; a lost
+        // device's is cleared before anything can replace the device.
+        match word {
+            Some(word) => self.0.marker.store(word.as_ptr(), Ordering::SeqCst),
+            None => self.0.forget_marker(),
+        }
         // Publish one snapshot before making the completion observable. A
         // waiter may have published past what this holder saw; a lost device
         // answers no poll, and its replacement starts again.
@@ -517,6 +534,43 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
         // processor to answer the query on its behalf.
         if self.0.stale.load(Ordering::SeqCst) {
             (self.0.host.wake)();
+        }
+    }
+}
+
+impl<B: Backend, C: Compiler> SharedService<B, C> {
+    /// The newest serial the device's completion marker shows, read from
+    /// the host's view of the word the GPU writes after each submission
+    /// ([`crate::metal::device::Device::completion_word`]): no driver call,
+    /// no interrupt, no Linux work, from any processor. Its 32 bits are
+    /// widened against the newest serial submitted.
+    pub(super) fn marker_value(&self) -> Option<u64> {
+        self.marker_readers.fetch_add(1, Ordering::SeqCst);
+        let word = self.marker.load(Ordering::SeqCst);
+        // SAFETY: a turn clears the pointer and waits for its readers before
+        // the device that owns the word can go (`forget_marker`).
+        let low = (!word.is_null()).then(|| unsafe { (*word).load(Ordering::Acquire) });
+        self.marker_readers.fetch_sub(1, Ordering::SeqCst);
+        let submitted = self.submitted.load(Ordering::Acquire);
+        let value = (submitted & !0xffff_ffff) | u64::from(low?);
+        Some(if value > submitted {
+            value.checked_sub(1 << 32)?
+        } else {
+            value
+        })
+    }
+
+    /// Clears the marker for readers and waits for those reading it.
+    fn forget_marker(&self) {
+        if self
+            .marker
+            .swap(core::ptr::null_mut(), Ordering::SeqCst)
+            .is_null()
+        {
+            return;
+        }
+        while self.marker_readers.load(Ordering::SeqCst) != 0 {
+            core::hint::spin_loop();
         }
     }
 }
@@ -592,6 +646,8 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             outside_stack: AtomicU64::new(0),
             outside_locked: AtomicBool::new(false),
             outside_seen: Spin::new(None),
+            marker: AtomicPtr::new(core::ptr::null_mut()),
+            marker_readers: AtomicU32::new(0),
             upkeep_asked: AtomicBool::new(false),
             look_budget: AtomicU64::new(0),
             refusals,
@@ -951,37 +1007,54 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             self.waited
                 .fetch_max((timeline & 0xffff) << 48 | value, Ordering::AcqRel);
         }
-        if timeline == self.timeline.load(Ordering::Acquire)
-            && self.publishable.load(Ordering::Acquire)
-            && !self.refusing()
-        {
-            let value = value.min(self.submitted.load(Ordering::Acquire));
-            let mut shown = self.reached.load(Ordering::Acquire);
-            while shown != POLL_UNAVAILABLE && shown < value {
-                match self.reached.compare_exchange_weak(
-                    shown,
-                    value,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => {
-                        let now = (self.host.ticks)();
-                        // The newest PENDING serials are those timed.
-                        for serial in shown.max(value.saturating_sub(PENDING as u64)) + 1..=value {
-                            let (published, when) = &self.early[serial as usize % PENDING];
-                            when.store(now, Ordering::Relaxed);
-                            published.store(serial, Ordering::Release);
-                        }
-                        self.completed.store(true, Ordering::Release);
-                        break;
-                    }
-                    Err(now) => shown = now,
-                }
-            }
+        if timeline == self.timeline.load(Ordering::Acquire) {
+            self.publish(value);
         }
         // The look itself is the platform's, outside the waiter's context
         // (`interrupted`): it enters the driver.
         self.stale.store(true, Ordering::SeqCst);
+    }
+
+    /// Publishes every serial through `value` complete, when a waiter or
+    /// the marker may publish: the guest is told at once, whatever holds
+    /// the service.
+    fn publish(&self, value: u64) {
+        if !self.publishable.load(Ordering::Acquire) || self.refusing() {
+            return;
+        }
+        let value = value.min(self.submitted.load(Ordering::Acquire));
+        let mut shown = self.reached.load(Ordering::Acquire);
+        while shown != POLL_UNAVAILABLE && shown < value {
+            match self.reached.compare_exchange_weak(
+                shown,
+                value,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    let now = (self.host.ticks)();
+                    // The newest PENDING serials are those timed.
+                    for serial in shown.max(value.saturating_sub(PENDING as u64)) + 1..=value {
+                        let (published, when) = &self.early[serial as usize % PENDING];
+                        when.store(now, Ordering::Relaxed);
+                        published.store(serial, Ordering::Release);
+                    }
+                    self.completed.store(true, Ordering::Release);
+                    break;
+                }
+                Err(now) => shown = now,
+            }
+        }
+    }
+
+    /// Publishes what the completion marker shows past what is published,
+    /// while work is outstanding.
+    fn publish_marker(&self) {
+        if self.awaits_completion()
+            && let Some(value) = self.marker_value()
+        {
+            self.publish(value);
+        }
     }
 
     /// Submissions seen complete since the last call, the ticks from their
@@ -1027,6 +1100,8 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         {
             return false;
         }
+        // What the GPU finished, as it wrote the marker.
+        self.publish_marker();
         let reached = self.reached.load(Ordering::Acquire);
         // Check membership after acquiring the serial. A close that
         // precedes its publication has already removed that connection.
@@ -1079,7 +1154,12 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
     }
 
     pub(super) fn try_turn(&self) -> Option<Turn<'_, B, C>> {
-        (!self.locked.swap(true, Ordering::SeqCst)).then(|| Turn(self, false))
+        let mut turn = (!self.locked.swap(true, Ordering::SeqCst)).then(|| Turn(self, false))?;
+        // A lost device may be replaced in this turn, its marker with it.
+        if !self.marker.load(Ordering::Relaxed).is_null() && turn.device().is_lost() {
+            self.forget_marker();
+        }
+        Some(turn)
     }
 
     fn turn(&self) -> Turn<'_, B, C> {
@@ -1449,7 +1529,14 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
     }
 
     fn signaled(&self) -> bool {
+        // Whichever processor advances the gate notices what the GPU
+        // finished, as soon as it wrote the marker.
+        self.publish_marker();
         self.completed.swap(false, Ordering::Acquire)
+    }
+
+    fn awaits_completion(&self) -> bool {
+        SharedService::awaits_completion(self)
     }
 
     fn bundle(&self, report: BundleReport) {

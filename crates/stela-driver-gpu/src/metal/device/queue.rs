@@ -855,6 +855,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             let mut held =
                 self.hold(serial, [key, queue], recording.segments, recording.mappings)?;
             times = self.time(held.as_mut_slice())?;
+            if let Some(marker) = self.marker_buffer() {
+                for work in held.as_mut_slice() {
+                    mark_completion(&mut work.segments, completion, marker, serial);
+                }
+            }
             let mut chunks = Vec::with_capacity(recording.uploads.len());
             for (chunk, bytes) in &recording.uploads {
                 let memory = self.chunk_memory(chunk.buffer)?;
@@ -2547,5 +2552,48 @@ impl<B: Backend, C: Compiler> Resolver for DeviceResolver<'_, B, C> {
         // A commit running again would apply the update twice.
         self.device.stop_deferring();
         update(self.device.indirect_command_buffer_mut(id)?)
+    }
+}
+
+/// Has the segment that signals `completion` write `serial`'s low 32 bits to
+/// the completion marker `marker` after all its work: a barrier makes every
+/// earlier write in submission order available to the host first, and one
+/// after the write flushes the word itself. So a host that reads the serial
+/// there may treat every timeline serial through it as complete, as the
+/// timeline's own value would say, without asking the driver. A held
+/// command buffer whose completion later moves to the late timeline still
+/// writes only after everything submitted before it, so a lower value it
+/// writes late claims nothing that is not done.
+fn mark_completion(
+    segments: &mut [Segment],
+    completion: (Semaphore, u64),
+    marker: crate::metal::vulkan::object::Buffer,
+    serial: u64,
+) {
+    use crate::metal::vulkan::{Access, PipelineStages, command::Barrier};
+    for segment in segments
+        .iter_mut()
+        .filter(|segment| segment.signals.contains(&completion))
+    {
+        segment.commands.extend([
+            Command::Barrier(Barrier {
+                src_stages: PipelineStages::ALL_COMMANDS,
+                src_access: Access::MEMORY_WRITE,
+                dst_stages: PipelineStages::ALL_COMMANDS.union(PipelineStages::HOST),
+                dst_access: Access::HOST_READ.union(Access::TRANSFER_WRITE),
+            }),
+            Command::FillBuffer {
+                buffer: marker,
+                offset: 0,
+                size: 4,
+                data: serial as u32,
+            },
+            Command::Barrier(Barrier {
+                src_stages: PipelineStages::ALL_COMMANDS,
+                src_access: Access::TRANSFER_WRITE,
+                dst_stages: PipelineStages::HOST,
+                dst_access: Access::HOST_READ,
+            }),
+        ]);
     }
 }

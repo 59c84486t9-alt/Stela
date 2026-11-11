@@ -12,7 +12,7 @@ use crate::metal::{
 use core::{
     mem::size_of,
     num::NonZeroU64,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 use stela_contracts::gate::{CallerFault, CallerMemory, GateService};
 
@@ -996,4 +996,56 @@ fn upkeep_leaves_the_outside_lock_to_its_holder() {
     assert!(importer.join().unwrap().is_ok());
     assert_eq!(WAKES.load(Ordering::SeqCst), 1, "the import asked after it");
     assert_eq!(shared.upkeep(), 2);
+}
+
+/// With a completion marker, the serial the GPU wrote after a submission's
+/// work is published by whichever processor next advances the gate or polls:
+/// no driver query, no interrupt, no turn. A lost device's marker is read
+/// no more.
+#[test]
+fn the_completion_marker_publishes_without_the_driver_or_an_interrupt() {
+    let mut backend = MockBackend::new();
+    backend.marker = Some(alloc::boxed::Box::new(AtomicU32::new(0)));
+    let shared = SharedService::new(super::service_on(backend), HOST);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let mut memory = Memory::default();
+    let first = gate_call(&mut memory, Operation::Poll, &[], 16);
+    GateService::serve(&shared, connection, first, &mut memory).unwrap();
+    commit_shared(&shared, connection);
+    let marker = {
+        let mut turn = shared.try_turn().unwrap();
+        let backend = turn.device().backend();
+        // The submission ends by writing its serial to the marker.
+        let segments = backend.submissions.last().unwrap();
+        let fill = segments.iter().flat_map(|segment| &segment.commands).rev();
+        assert!(fill.clone().any(|command| matches!(
+            command,
+            crate::metal::vulkan::command::Command::FillBuffer {
+                data: 1,
+                size: 4,
+                ..
+            }
+        )));
+        core::ptr::from_ref(&**backend.marker.as_ref().unwrap())
+    };
+    assert!(GateService::awaits_completion(&shared));
+    assert!(!GateService::signaled(&shared), "the GPU wrote nothing yet");
+    // A query would fail: only the marker can say it completed.
+    shared
+        .try_turn()
+        .unwrap()
+        .device()
+        .backend()
+        .semaphore_error = Some(crate::metal::error::Error::DeviceLost);
+    // SAFETY: the backend's box lives as long as the service.
+    unsafe { &*marker }.store(1, Ordering::SeqCst);
+    assert!(GateService::signaled(&shared), "seen from the marker");
+    assert!(!GateService::awaits_completion(&shared));
+    let woken = gate_call(&mut memory, Operation::Poll, &[], 16);
+    GateService::serve(&shared, connection, woken, &mut memory).unwrap();
+    assert_eq!(polled(&mut memory, woken), 1);
+    // A lost device's marker is cleared before any turn can replace it.
+    shared.try_turn().unwrap().device().mark_lost();
+    drop(shared.try_turn());
+    assert!(shared.marker_value().is_none());
 }

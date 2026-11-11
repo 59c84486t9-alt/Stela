@@ -171,6 +171,9 @@ pub(crate) struct MockBackend {
     pub(crate) imports: BTreeMap<u64, (Vec<MemoryRange>, NonZeroU64)>,
     /// Driver work outside the service's turn, when a test gives it.
     pub(crate) outside: Option<alloc::sync::Arc<MockOutside>>,
+    /// The word a test's GPU writes as the completion marker, when the
+    /// test gives one: every mapped word answers it.
+    pub(crate) marker: Option<Box<core::sync::atomic::AtomicU32>>,
     pub(crate) retired: VecDeque<NonZeroU64>,
     pub(crate) semaphores: BTreeMap<u64, u64>,
     /// The highest value each semaphore's submitted signals reach.
@@ -450,6 +453,16 @@ impl Backend for MockBackend {
     }
     fn write_descriptor(&mut self, index: u32, descriptor: Descriptor) {
         self.descriptors.push((index, descriptor));
+    }
+    fn maps_words(&self) -> bool {
+        self.marker.is_some()
+    }
+    fn host_word(
+        &mut self,
+        _: Memory,
+        _: u64,
+    ) -> Option<core::ptr::NonNull<core::sync::atomic::AtomicU32>> {
+        self.marker.as_deref().map(core::ptr::NonNull::from)
     }
     fn write_memory(&mut self, memory: Memory, offset: u64, bytes: &[u8]) -> Result<()> {
         if let Some(error) = self.write_error.take() {

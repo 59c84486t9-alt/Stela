@@ -62,6 +62,12 @@ pub trait GateService: Send + Sync {
     /// Whether the GPU completed work since this last answered true. Under
     /// the board's lock, so it answers at once.
     fn signaled(&self) -> bool;
+    /// Whether submitted work is not yet seen complete: the gate then
+    /// advances again soon, so that [`Self::signaled`] notices a completion
+    /// the service reads from the GPU's own writes, on whichever PE comes.
+    fn awaits_completion(&self) -> bool {
+        false
+    }
     /// Told what the kext found of the Metal plugin it installs.
     fn bundle(&self, report: BundleReport);
     /// Told that the gate dropped a request its PE's store made before the
