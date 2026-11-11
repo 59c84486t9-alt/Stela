@@ -421,6 +421,8 @@ pub fn machine(
     }
     let mut fixed = identification::derive(chip, target, true, identification::Speculation::NONE);
     fixed.push((encodings::MIDR_EL1, 0x611f_0320));
+    // 64-byte DC ZVA blocks, as an M2's.
+    fixed.push((encodings::DCZID_EL0, 4));
     let profile = CpuProfile {
         name: "bounded native store validation",
         chip,

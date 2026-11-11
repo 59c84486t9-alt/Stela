@@ -191,7 +191,9 @@ fn written(operation: &Operation) -> Option<Register> {
         | Operation::BranchZero { .. }
         | Operation::BranchBit { .. }
         | Operation::Nop
-        | Operation::Prefetch(_) => Register::Zero,
+        | Operation::Prefetch(_)
+        // DC ZVA's lowering keeps to RAX, RCX and RDX.
+        | Operation::ZeroBlock { .. } => Register::Zero,
         _ => return None,
     })
 }

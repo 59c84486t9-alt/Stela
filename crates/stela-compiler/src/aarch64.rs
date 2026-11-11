@@ -238,6 +238,11 @@ pub enum Operation {
     /// An AMX move a system-mode block completes inside itself
     /// (`x86_64::amx_transfer`); any other AMX word ends its block.
     Amx(crate::amx::AmxInstruction),
+    /// DC ZVA of Xt that a system-mode block completes inside itself
+    /// (`x86_64::zero_block`); the engine completes it after a fault.
+    ZeroBlock {
+        rt: u8,
+    },
     Exclusive(exclusive::Operand),
     FloatingPoint(FloatingPointOperation),
     FloatingPointRegister(fp_register::Operand),

@@ -374,6 +374,20 @@ pub(super) fn parse_admitted(
                     });
                     continue;
                 }
+                // DC ZVA completes natively inside the engine's own blocks
+                // (`x86_64::zero_block`) with self-loops on: a loop zeroing
+                // memory stays one block, and runs inside it.
+                if profile == BlockProfile::new(Features::SYSTEM_MODE)
+                    && native.self_loops
+                    && native.zero_block.is_some()
+                    && let Some(rt) = crate::x86_64::zero_block::operand(&decoded)
+                {
+                    instructions.push(Instruction {
+                        pc,
+                        operation: Operation::ZeroBlock { rt },
+                    });
+                    continue;
+                }
                 // The shared lane executes these through the existing typed
                 // all-writer memory service, not the single-agent CPU monitor.
                 let checked = checked_memory

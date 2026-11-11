@@ -185,7 +185,9 @@ fn after(operation: &Operation, bases: u32) -> u32 {
         | Operation::Synchronization(_)
         | Operation::Ordered(ordered::Operand::Barrier { .. })
         | Operation::Nop
-        | Operation::Prefetch(_) => bases,
+        | Operation::Prefetch(_)
+        // DC ZVA writes memory only, after its own check.
+        | Operation::ZeroBlock { .. } => bases,
         _ => 0,
     }
 }

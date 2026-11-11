@@ -7588,6 +7588,9 @@ fn dc_zva_blocks_follow_the_permission_and_faults_complete_in_the_engine() {
     const ADD: u32 = 0x9100_0400; // add x0, x0, #1
     const DC_ZVA: u32 = 0xd50b_7423; // dc zva, x3
     let mut machine = machine(&[ADD, DC_ZVA, ADD]);
+    // The block form: with self-loops DC ZVA stays inside its block, which
+    // `tests/self_loops.rs` compares with this one.
+    machine.set_self_loops(false);
     normal_memory(&mut machine, false);
     let base = machine.cpu.pc;
     machine.cpu.state.x[3] = BASE + 0x108;

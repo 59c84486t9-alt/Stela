@@ -63,6 +63,69 @@ struct Program {
 fn programs() -> Vec<Program> {
     vec![
         Program {
+            name: "kernel bzero by DC ZVA",
+            words: vec![
+                0xd50b_7423, // dc zva, x3
+                0x9101_0063, // add x3,x3,#64
+                0xf101_0042, // subs x2,x2,#64
+                b_cond(HI, -3),
+            ],
+            setup: |rng, base, state, _| {
+                state.x[3] = base + 64 * rng.below(64);
+                state.x[2] = 64 * (1 + rng.below(160));
+            },
+        },
+        Program {
+            name: "strlen to an unconditional back branch",
+            words: vec![
+                0x3840_1408,               // ldrb w8,[x0],#1
+                cbz(false, 8, 2),          // cbz w8, past the loop
+                0x1400_0000 | 0x03ff_fffe, // b -2
+            ],
+            setup: |rng, base, state, data| {
+                let start = rng.below(2 * PAGE);
+                state.x[0] = base + start;
+                for byte in &mut data[start as usize..] {
+                    *byte |= 1;
+                }
+                let end = (start + rng.below(3 * PAGE)).min(BYTES - 1);
+                data[end as usize] = 0;
+            },
+        },
+        Program {
+            name: "count equal bytes past an inner branch",
+            words: vec![
+                0x3840_1408,    // ldrb w8,[x0],#1
+                0x6b09_011f,    // cmp w8,w9
+                b_cond(NE, 2),  // b.ne to the subs
+                0x9100_054a,    // add x10,x10,#1
+                0xf100_0442,    // subs x2,x2,#1
+                b_cond(NE, -5), // b.ne to the ldrb
+            ],
+            setup: |rng, base, state, data| {
+                state.x[0] = base + rng.below(2 * PAGE);
+                state.x[2] = 1 + rng.below(3 * PAGE);
+                state.x[9] = rng.below(4);
+                for byte in data.iter_mut() {
+                    *byte &= 3;
+                }
+            },
+        },
+        Program {
+            name: "sum odd words past a branch to the back edge",
+            words: vec![
+                0xf840_8408,                                       // ldr x8,[x0],#8
+                0xd100_0442,                                       // sub x2,x2,#1
+                0x3600_0048,                                       // tbz x8,#0, to the cbnz
+                0x8b08_014a,                                       // add x10,x10,x8
+                0xb500_0000 | ((-4i32 as u32 & 0x7ffff) << 5) | 2, // cbnz x2, to the ldr
+            ],
+            setup: |rng, base, state, _| {
+                state.x[0] = base + 8 * rng.below(PAGE / 8);
+                state.x[2] = 1 + rng.below(1000);
+            },
+        },
+        Program {
             name: "memcmp bytes",
             words: vec![
                 0x3840_1408, // ldrb w8,[x0],#1
@@ -290,6 +353,12 @@ fn run(
         .cpu
         .registers
         .set_raw(Register::ID_AA64PFR0_EL1, 0, pfr0);
+    // SCTLR_EL1.DZE: EL0 runs DC ZVA.
+    let sctlr = machine.cpu.registers.get(Register::SCTLR_EL1, 0);
+    machine
+        .cpu
+        .registers
+        .set_raw(Register::SCTLR_EL1, 0, sctlr | 1 << 14);
     ensure!(data.write(data.0, contents), "write data");
     if let Some(page) = protected {
         data.protect(page as usize * PAGE as usize, PAGE as usize, false)?;
@@ -328,6 +397,7 @@ fn self_loops_end_where_their_linked_blocks_do() -> Result<()> {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let (mut cases, mut aborts, mut fewer) = (0, 0, 0);
     for program in programs() {
+        let (mut program_cases, mut program_fewer) = (0, 0);
         for prefix in [false, true] {
             let words = [
                 if prefix { vec![PREFIX] } else { vec![] },
@@ -365,8 +435,16 @@ fn self_loops_end_where_their_linked_blocks_do() -> Result<()> {
                 cases += 1;
                 aborts += usize::from(linked.abort.is_some());
                 fewer += usize::from(looped_blocks < linked_blocks);
+                program_cases += 1;
+                program_fewer += usize::from(looped_blocks < linked_blocks);
             }
         }
+        // Each body runs inside its block, the joins and DC ZVA included.
+        assert!(
+            program_fewer > program_cases / 4,
+            "{}: {program_fewer} of {program_cases} ran fewer blocks",
+            program.name
+        );
     }
     // The loops ran inside their blocks in most cases, and faulted in some.
     assert!(fewer > cases / 2, "{fewer} of {cases} ran fewer blocks");
@@ -476,6 +554,88 @@ fn a_rewritten_self_loop_runs_its_new_body() -> Result<()> {
         }
         assert_eq!(outcomes[0], outcomes[1], "case {case}");
         assert!(transfers[1] < transfers[0], "case {case}: {transfers:?}");
+    }
+    Ok(())
+}
+/// An endless loop whose iterations take two paths (a branch skipping one
+/// instruction to the back edge) retires exactly what each path runs, and
+/// still leaves through its link within a block's instructions.
+#[test]
+fn an_endless_loop_with_a_join_counts_each_path_within_its_bound() -> Result<()> {
+    const MAX_BLOCK: u64 = stela_compiler::block::MAX_BLOCK_INSTRUCTIONS as u64;
+    let data = Mapping::new()?;
+    let code = Mapping::new()?;
+    // add x5,x5,#1; tbz x5,#0, to the cbz; add x6,x6,#1; cbz xzr, back:
+    // four instructions on odd x5, three on even.
+    let words = [
+        0x9100_04a5,
+        0x3600_0045,
+        0x9100_04c6,
+        0xb400_0000 | ((-3i32 as u32 & 0x7ffff) << 5) | 31,
+    ];
+    for loops in [false, true] {
+        let mut machine = machine(&code, &data, &words, TargetCpu::detect())?;
+        machine.set_self_loops(loops);
+        machine.cpu.pc = code.0;
+        let (retired, blocks) = (machine.cpu.retired, machine.statistics.blocks);
+        machine.run(blocks + 1000);
+        let (retired, blocks) = (
+            machine.cpu.retired - retired,
+            machine.statistics.blocks - blocks,
+        );
+        let state = &machine.cpu.state;
+        ensure!(blocks >= 1000, "the run spent its budget: {blocks}");
+        ensure!(
+            retired == 3 * state.x[5] + state.x[6] && state.x[6] == state.x[5].div_ceil(2),
+            "loops {loops}: {retired} instructions for x5 {} x6 {}",
+            state.x[5],
+            state.x[6]
+        );
+        ensure!(
+            retired <= blocks * MAX_BLOCK,
+            "loops {loops}: {retired} instructions in {blocks} transfers"
+        );
+        if loops {
+            ensure!(retired >= blocks * (MAX_BLOCK - 4), "{retired} in {blocks}");
+        }
+    }
+    Ok(())
+}
+
+/// The engine counts the self-loops it compiles, and while it profiles,
+/// their entries and what their iterations retired past each entry's first.
+#[test]
+fn self_loops_are_counted_and_entries_only_while_profiling() -> Result<()> {
+    let data = Mapping::new()?;
+    let code = Mapping::new()?;
+    // add x5,x5,#1; add x6,x6,#1; cbz xzr, back to the first add.
+    let words = [
+        0x9100_04a5,
+        0x9100_04c6,
+        0xb400_0000 | ((-2i32 as u32 & 0x7ffff) << 5) | 31,
+    ];
+    for profiling in [false, true] {
+        let mut machine = machine(&code, &data, &words, TargetCpu::detect())?;
+        machine.set_step_timing(profiling);
+        machine.cpu.pc = code.0;
+        let retired = machine.cpu.retired;
+        machine.run(machine.statistics.blocks + 1000);
+        let retired = machine.cpu.retired - retired;
+        let [formed, entries, iterated] = machine.counts().loops;
+        ensure!(formed == 1, "one loop block compiled: {formed}");
+        if profiling {
+            // Each entry retires one iteration of 3 past what it iterated.
+            ensure!(entries > 0 && iterated > 0, "{entries} entries, {iterated}");
+            ensure!(
+                iterated + 3 * entries == retired,
+                "{iterated} iterated in {entries} entries of {retired}"
+            );
+        } else {
+            ensure!(
+                entries == 0 && iterated == 0,
+                "{entries} entries, {iterated}"
+            );
+        }
     }
     Ok(())
 }

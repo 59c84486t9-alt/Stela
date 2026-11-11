@@ -1508,10 +1508,19 @@ impl Heartbeat {
             line.push_str(&format!(" predicted={predicted}"));
             output::arguments(format_args!("{line}\n"));
         }
+        // Self-loops since boot, every PE together: compiled, then with
+        // `--profile` their entries and the instructions their iterations
+        // retired past each entry's first (0/0 without it).
+        let loops = per_pe.iter().fold([0u64; 3], |sum, counts| {
+            core::array::from_fn(|at| sum[at].wrapping_add(counts.loops[at]))
+        });
         output::arguments(format_args!(
-            "GUEST PERFORMANCE retired={retired} interval_retired={instructions} instructions_per_second={} instructions_per_block_milli={}\n",
+            "GUEST PERFORMANCE retired={retired} interval_retired={instructions} instructions_per_second={} instructions_per_block_milli={} loops={}/{}/{}\n",
             instructions.saturating_mul(u128::from(tsc_hz)) / u128::from(elapsed.max(1)),
             instructions.saturating_mul(1000) / u128::from((next.blocks - self.beat.blocks).max(1)),
+            loops[0],
+            loops[1],
+            loops[2],
         ));
         self.retired = retired;
     }

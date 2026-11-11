@@ -226,6 +226,9 @@ pub struct CompiledBlock {
     /// an engine that recovers from a native fault must apply them
     /// ([`FaultRecovery::apply`]) before it reads the frame.
     pub fault_recovery: alloc::vec::Vec<FaultRecovery>,
+    /// The block runs its iterations inside itself (`x86_64::block`'s
+    /// self-loops), for the engine's counts.
+    pub self_loop: bool,
 }
 
 impl CompiledBlock {
@@ -236,6 +239,7 @@ impl CompiledBlock {
             source_bytes,
             direct_exits: alloc::vec::Vec::new(),
             fault_recovery: alloc::vec::Vec::new(),
+            self_loop: false,
         }
     }
 }
@@ -621,8 +625,8 @@ impl CompilationPlan {
             // registers pinned; every other profile keeps the default checks.
             // Every profile keeps the locked recipes: system mode runs its
             // PEs concurrently.
-            let (mut native, fault_recovery) = if profile.has(Features::FULL_SYSTEM) {
-                crate::x86_64::block::emit_system_mode(
+            let (mut native, fault_recovery, self_loop) = if profile.has(Features::FULL_SYSTEM) {
+                crate::x86_64::block::emit_system_mode_looped(
                     &parsed.instructions,
                     parsed.terminal.as_ref(),
                     parsed.next_pc,
@@ -639,6 +643,7 @@ impl CompilationPlan {
                         target,
                     ),
                     alloc::vec::Vec::new(),
+                    false,
                 )
             };
             let linked = profile.has(Features::FULL_SYSTEM).then(|| {
@@ -669,6 +674,7 @@ impl CompilationPlan {
                 source_bytes: parsed.source_bytes,
                 direct_exits,
                 fault_recovery,
+                self_loop,
             });
         };
         Ok(CompiledBlock::unchained(native, parsed.source_bytes))

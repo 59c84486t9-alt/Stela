@@ -213,6 +213,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             mirrored: inline_mirrored_reads(),
             amx: self.cpu.amx.generation().is_some(),
             self_loops: self.self_loops,
+            loop_counts: self.step_timing.is_some(),
         })
     }
 

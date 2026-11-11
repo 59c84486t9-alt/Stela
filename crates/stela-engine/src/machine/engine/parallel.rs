@@ -312,6 +312,10 @@ pub struct Counts {
     /// Blocks it compiled, and blocks another PE compiled that it installed.
     pub compiled: u64,
     pub shared: u64,
+    /// Self-loops it compiled, their entries and the instructions their
+    /// iterations retired past each entry's first ([`super::Statistics::self_loops`],
+    /// `ChainControl::loop_entries`, `loop_iterated`).
+    pub loops: [u64; 3],
     /// Its installs at EL0 and above by where the block came from
     /// ([`super::Statistics::store_sources`]).
     pub store_sources: [[u64; 4]; 2],
@@ -1780,6 +1784,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             retired: self.retired_instructions() as u64,
             compiled: statistics.compiled,
             shared: statistics.shared,
+            loops: {
+                let (entries, iterated) = self.chain.loops();
+                [statistics.self_loops, entries, iterated]
+            },
             store_sources: statistics.store_sources,
             live_blocks: self.code.blocks.live() as u64,
             block_slots: self.code.blocks.len() as u64,

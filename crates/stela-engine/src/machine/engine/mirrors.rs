@@ -675,6 +675,16 @@ pub(super) fn mirrored_read(pc: u64, word: u32) -> Option<(usize, u8)> {
     }
 }
 
+/// Whether `word` at `pc` is a DC ZVA that blocks compiled for `system`
+/// complete natively, inside a block as well as at its end.
+pub(super) fn zeroes_natively(pc: u64, word: u32, system: NativeSystem) -> bool {
+    system.zero_block.is_some()
+        && block::decode_system_mode_instruction(GuestAddress(pc), word)
+            .ok()
+            .flatten()
+            .is_some_and(|instruction| zero_block::operand(&instruction).is_some())
+}
+
 /// Whether `word` at `pc` is a System instruction blocks compiled for
 /// `system` complete natively: DC ZVA, one of its DC clean operations or an
 /// exclusive of one register.

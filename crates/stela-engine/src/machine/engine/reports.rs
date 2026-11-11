@@ -508,6 +508,9 @@ pub struct Statistics {
     /// from, in `ItlbSource`'s order.
     pub itlb_sources: [u64; 12],
     pub compiled: u64,
+    /// Of `compiled`, the blocks that run their iterations inside
+    /// themselves (`CompiledBlock::self_loop`).
+    pub self_loops: u64,
     /// Counter ticks spent analyzing and compiling `compiled`.
     pub compile_ticks: u64,
     /// Blocks taken from the persistent translation store instead of
@@ -640,6 +643,7 @@ impl core::ops::AddAssign for Statistics {
             itlb_drops,
             itlb_sources,
             compiled,
+            self_loops,
             compile_ticks,
             stored,
             offered,
@@ -774,6 +778,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.lookups, lookups),
             (&mut self.lookup_hits, lookup_hits),
             (&mut self.compiled, compiled),
+            (&mut self.self_loops, self_loops),
             (&mut self.compile_ticks, compile_ticks),
             (&mut self.stored, stored),
             (&mut self.offered, offered),

@@ -2336,3 +2336,64 @@ fn self_loops_check_their_bases_once_per_entry() {
     assert_eq!(count(&looped.x86_64_code), 2);
     assert_eq!(looped.source_map.len(), linked.source_map.len());
 }
+
+/// The loop shapes beyond a branch to the block's start: a body with a DC
+/// ZVA in it, one left only by a branch it runs past (an unconditional
+/// branch back), and bodies with a branch skipping forward inside them, to
+/// an instruction of the body or to the back edge.
+#[test]
+fn self_loops_take_dc_zva_unconditional_back_branches_and_joins() {
+    let compile = |words: &[u32], self_loops: bool| {
+        let source: Vec<u8> = words.iter().copied().flat_map(u32::to_le_bytes).collect();
+        let options = crate::Options::new(
+            BlockProfile::new(Features::SYSTEM_MODE),
+            crate::TargetCpu::detect(),
+        )
+        .with_memory_checks(crate::x86_64::MemoryChecks::system(true, false, true, true))
+        .with_native_system(crate::x86_64::NativeSystem {
+            self_loops,
+            zero_block: Some(64),
+            ..crate::x86_64::NativeSystem::NONE
+        });
+        crate::compile(&source, GuestAddress(0x1000), &options).unwrap()
+    };
+    let bodies: [&[u32]; 4] = [
+        // dc zva,x3; add x3,x3,#64; subs x2,x2,#64; b.hi -3
+        &[0xd50b_7423, 0x9101_0063, 0xf101_0042, 0x54ff_ffa8],
+        // ldrb w8,[x0],#1; cbz w8,+2; b -2
+        &[0x3840_1408, 0x3400_0048, 0x17ff_fffe],
+        // ldrb w8,[x0],#1; cmp w8,w9; b.ne +2; add x10,x10,#1;
+        // subs x2,x2,#1; b.ne -5
+        &[
+            0x3840_1408,
+            0x6b09_011f,
+            0x5400_0041,
+            0x9100_054a,
+            0xf100_0442,
+            0x54ff_ff61,
+        ],
+        // ldr x8,[x0],#8; sub x2,x2,#1; tbz x8,#0,+2; add x10,x10,x8;
+        // cbnz x2,-4
+        &[
+            0xf840_8408,
+            0xd100_0442,
+            0x3600_0048,
+            0x8b08_014a,
+            0xb5ff_ff82,
+        ],
+    ];
+    for words in bodies {
+        let (linked, looped) = (compile(words, false), compile(words, true));
+        assert!(!linked.self_loop, "{words:x?}");
+        assert!(looped.self_loop, "{words:x?}");
+        // The whole body is one block either way but for DC ZVA, which
+        // ends a block without the loops.
+        assert_eq!(looped.source_bytes, words.len() * 4);
+        let first = if words[0] == 0xd50b_7423 {
+            4
+        } else {
+            words.len() * 4
+        };
+        assert_eq!(linked.source_bytes, first);
+    }
+}

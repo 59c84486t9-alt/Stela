@@ -110,6 +110,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             source_bytes: INSTRUCTION as usize,
             direct_exits: Vec::new(),
             fault_recovery: Vec::new(),
+            self_loop: false,
         };
         let preparation = self.preparation(variant);
         let emission = Arc::new(super::stored::Emission::new(

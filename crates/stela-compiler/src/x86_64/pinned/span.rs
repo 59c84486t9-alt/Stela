@@ -212,6 +212,13 @@ fn effects(operation: &Operation) -> Option<Effects> {
             prefetch::Address::Register { base, index, .. } => alu(&[base, index], Register::Zero),
             prefetch::Address::Literal(_) => alu(&[], Register::Zero),
         },
+        // DC ZVA reads Xt into RAX and zeroes through RAX, RCX and RDX.
+        Operation::ZeroBlock { rt } => Effects {
+            reads: if rt == 31 { 0 } else { bit(Register::X(rt)) },
+            writes: 0,
+            takes_r8: false,
+            memory: true,
+        },
         Operation::BranchCondition { condition, .. } if condition < 14 => alu(&[], Register::Zero),
         Operation::BranchZero { source, .. } | Operation::BranchBit { source, .. } => {
             alu(&[source], Register::Zero)

@@ -281,6 +281,22 @@ impl Owner {
             cells: unsafe { core::ptr::addr_of!((*control).cells).read() },
             // SAFETY: as for `table`; native code adds to it only within a call.
             heat: unsafe { core::ptr::addr_of!((*control).heat).read() },
+            loop_entries: self.loops().0,
+            loop_iterated: self.loops().1,
+        }
+    }
+
+    /// [`ChainControl::loop_entries`] and [`ChainControl::loop_iterated`]
+    /// since the storage was made.
+    pub(super) fn loops(&self) -> (u64, u64) {
+        let control = self.storage.control.get();
+        // SAFETY: the sole owner reads them outside a native call, the only
+        // time native code writes them.
+        unsafe {
+            (
+                core::ptr::addr_of!((*control).loop_entries).read(),
+                core::ptr::addr_of!((*control).loop_iterated).read(),
+            )
         }
     }
 }

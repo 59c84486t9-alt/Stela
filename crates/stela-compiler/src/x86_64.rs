@@ -200,6 +200,11 @@ pub struct NativeSystem {
     /// mode), rather than through a link at each one.
     #[serde(default)]
     pub self_loops: bool,
+    /// Self-loops count their entries and iterations in the PE's chain
+    /// control (`chain::ChainControl::loop_entries`): only while the engine
+    /// profiles.
+    #[serde(default)]
+    pub loop_counts: bool,
 }
 
 impl NativeSystem {
@@ -212,6 +217,7 @@ impl NativeSystem {
         mirrored: mirrored_read::Reads::NONE,
         amx: false,
         self_loops: false,
+        loop_counts: false,
     };
 }
 
@@ -1352,6 +1358,9 @@ pub(crate) fn emit_instruction(
         }
         Operation::Amx(_) => {
             unreachable!("AMX moves require block emission with the register file")
+        }
+        Operation::ZeroBlock { .. } => {
+            unreachable!("DC ZVA inside a block requires its block size")
         }
         Operation::FloatingPointRegister(operand) => fp_register::emit(code, &operand),
         Operation::Simd(operand) => simd::emit_for_target(code, &operand, target, checks),

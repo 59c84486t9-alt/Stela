@@ -200,6 +200,7 @@ pub(crate) fn emit_for_target(
 /// System instruction natively and fall through: DC ZVA by
 /// zeroing its block (`x86_64::zero_block`) and DC CVAC, DC CVAU and DC
 /// CIVAC by reading the byte at Xt (`x86_64::cache_clean`).
+#[cfg(test)]
 pub(crate) fn emit_system_mode(
     instructions: &[Instruction],
     terminal: Option<&(GuestAddress, Terminator)>,
@@ -208,6 +209,21 @@ pub(crate) fn emit_system_mode(
     checks: super::MemoryChecks,
     native: super::NativeSystem,
 ) -> (NativeBlock, Vec<crate::block::FaultRecovery>) {
+    let (block, recovery, _) =
+        emit_system_mode_looped(instructions, terminal, fallthrough, target, checks, native);
+    (block, recovery)
+}
+
+/// [`emit_system_mode`], and whether the block runs its iterations inside
+/// itself ([`SelfLoop`]).
+pub(crate) fn emit_system_mode_looped(
+    instructions: &[Instruction],
+    terminal: Option<&(GuestAddress, Terminator)>,
+    fallthrough: GuestAddress,
+    target: crate::TargetCpu,
+    checks: super::MemoryChecks,
+    native: super::NativeSystem,
+) -> (NativeBlock, Vec<crate::block::FaultRecovery>, bool) {
     // Guest registers stay in host registers (`x86_64::pinned`), which the
     // engine's fault settlement reads. Pure spans can temporarily keep other
     // values in scratch registers; the ordinary regions use the reserved
@@ -258,6 +274,10 @@ pub(crate) fn emit_system_mode(
 pub(crate) struct SelfLoop {
     /// The instructions of one iteration, its terminal included.
     instructions: u8,
+    /// Whether a branch the body runs past to a later instruction of the
+    /// body jumps there inside the loop ([`loop_joins`]) rather than
+    /// leaving by its side exit.
+    joins: bool,
 }
 
 impl SelfLoop {
@@ -279,6 +299,8 @@ impl SelfLoop {
         let target = match *operation {
             Operation::BranchCondition { target, condition } if condition < 14 => target,
             Operation::BranchZero { target, .. } | Operation::BranchBit { target, .. } => target,
+            // A loop left only by the branches it runs past.
+            Operation::Branch { target } => target,
             _ => return None,
         };
         // Code that leaves the block other than through its exits, or
@@ -297,6 +319,7 @@ impl SelfLoop {
             && instructions.len() < Self::MAX_INSTRUCTIONS)
             .then(|| Self {
                 instructions: u8::try_from(instructions.len() + 1).expect("bounded body"),
+                joins: true,
             })
     }
 }
@@ -309,9 +332,20 @@ struct LoopExits {
     first_rows: usize,
     /// The back edges' jumps when the branch falls through.
     fallthrough: Vec<super::asm::Patch>,
-    /// Each branch run past: its jump, target, the rows up to it and the
-    /// locals its copy's run has written there.
-    side: Vec<(super::asm::Patch, GuestAddress, usize, super::pinned::Dirty)>,
+    /// Each branch run past: its jump (none for a join, whose exit stays for
+    /// `successor_exits`), target, the rows up to it and the locals its
+    /// copy's run has written there.
+    side: Vec<(
+        Option<super::asm::Patch>,
+        GuestAddress,
+        usize,
+        super::pinned::Dirty,
+    )>,
+    /// Each join's jump ([`loop_joins`]): the copy, its landing and the
+    /// instructions it skips.
+    joins: Vec<(super::asm::Patch, usize, usize, u8)>,
+    /// Where each copy's landings start.
+    landings: [Vec<Option<usize>>; 2],
     /// The locals the loop's run has written at its back edge.
     dirty: super::pinned::Dirty,
     /// The jump to the taken branch's exit once an entry's share is spent.
@@ -323,7 +357,7 @@ const LOOP_RETIRED: u32 = core::mem::offset_of!(crate::GuestState, loop_retired)
 
 /// Move `GuestState::loop_retired`, less `less`, to the chain's retired
 /// count and clear it, before an exit of a [`SelfLoop`].
-fn settle_loop(asm: &mut Asm, less: u8) {
+fn settle_loop(asm: &mut Asm, less: u8, counts: bool) {
     asm.mov_load(Size::Qword, Gpr::Rax, super::frame(LOOP_RETIRED));
     if less != 0 {
         asm.alu_imm8(Alu::Sub, Size::Qword, Gpr::Rax, less as i8);
@@ -335,7 +369,69 @@ fn settle_loop(asm: &mut Asm, less: u8) {
         Mem::base(Gpr::Rcx, super::chain::RETIRED_OFFSET),
         Gpr::Rax,
     );
+    // The engine's counts, while it profiles: the entry and what its
+    // iterations retired.
+    if counts {
+        asm.alu(
+            Alu::Add,
+            Size::Qword,
+            Mem::base(Gpr::Rcx, super::chain::LOOP_ITERATED_OFFSET),
+            Gpr::Rax,
+        );
+        asm.alu_imm8(
+            Alu::Add,
+            Size::Qword,
+            Mem::base(Gpr::Rcx, super::chain::LOOP_ENTRIES_OFFSET),
+            1,
+        );
+    }
     asm.alu_imm8(Alu::And, Size::Qword, super::frame(LOOP_RETIRED), 0);
+}
+
+/// A [`SelfLoop`]'s branches that skip forward inside its body: for each,
+/// the branch's index and the index of the instruction it lands on (the
+/// terminal's is the body's length). The taken branch jumps there inside
+/// the loop's copy, after taking the instructions it skips off
+/// `GuestState::loop_retired`, so an iteration's count, a fault's position
+/// and the entry's bound stay exact. At each landing nothing is held: the
+/// emitter forgets what registers held, its masked bases, and the range and
+/// stack checks' known bases, as at a block's start. Only where one run of
+/// locals covers the body, or none runs, so both paths agree on where each
+/// guest register lives.
+fn loop_joins(instructions: &[Instruction]) -> Vec<(usize, usize)> {
+    instructions
+        .iter()
+        .enumerate()
+        .filter_map(|(at, branch)| {
+            let target = branch.operation.conditional_target()?;
+            let landing = instructions[at + 1..]
+                .iter()
+                .position(|instruction| instruction.pc == target)
+                .map(|offset| at + 1 + offset)
+                .or_else(|| {
+                    // The terminal, just past the body.
+                    let end = instructions.last()?.pc.0.checked_add(4)?;
+                    (target.0 == end).then_some(instructions.len())
+                })?;
+            Some((at, landing))
+        })
+        .collect()
+}
+
+/// Run `analysis` (`guest_range::checks`, `stack_alignment::checks`) on
+/// each stretch of `instructions` between the landings in `starts`, each
+/// as if a block started there.
+fn segmented(
+    analysis: fn(&[Instruction], &mut [bool]),
+    instructions: &[Instruction],
+    starts: &[bool],
+    rows: &mut [bool],
+) {
+    let mut begin = 0;
+    for end in (1..=instructions.len()).filter(|&end| end == instructions.len() || starts[end]) {
+        analysis(&instructions[begin..end], &mut rows[begin..end]);
+        begin = end;
+    }
 }
 
 /// Selection and recovery policy for register-resident regions.
@@ -385,7 +481,7 @@ fn emit_selected(
     regions: RegionPolicy,
     checks: super::MemoryChecks,
     native: super::NativeSystem,
-) -> (NativeBlock, Vec<crate::block::FaultRecovery>) {
+) -> (NativeBlock, Vec<crate::block::FaultRecovery>, bool) {
     let RegionPolicy {
         optimize: optimize_regions,
         fault_table,
@@ -463,11 +559,28 @@ fn emit_selected(
         fuse_ssse3 && !super::asm::vector_extensions::table_supported(1, target);
     // The parser bounds the block, so these per-instruction rows stay local
     // to the emitter. Region admission can still borrow a suffix of them.
+    // A self-loop's forward branches inside its body ([`loop_joins`]),
+    // where one run covers the body or none runs, and where they land.
+    let joins = match self_loop {
+        Some(self_loop)
+            if self_loop.joins
+                && (!(pinned && !code.constant_time() && !checks.translated)
+                    || super::pinned::Span::plan_loop(instructions).is_some()) =>
+        {
+            loop_joins(instructions)
+        }
+        _ => vec![],
+    };
+    let mut landing = [false; MAX_BLOCK_INSTRUCTIONS + 1];
+    for &(_, at) in &joins {
+        landing[at] = true;
+    }
+    let landing = &landing[..=instructions.len()];
     let mut range_rows = [true; MAX_BLOCK_INSTRUCTIONS];
     let ranges = if checks.guest_range {
         let rows = &mut range_rows[..instructions.len()];
         if !checks.checks_every_access() {
-            super::guest_range::checks(instructions, rows);
+            segmented(super::guest_range::checks, instructions, landing, rows);
         }
         Some(&rows[..])
     } else {
@@ -476,7 +589,7 @@ fn emit_selected(
     // Which accesses through SP check its alignment (`stack_alignment`).
     let mut stack_rows = [true; MAX_BLOCK_INSTRUCTIONS];
     let stack = &mut stack_rows[..instructions.len()];
-    super::stack_alignment::checks(instructions, stack);
+    segmented(super::stack_alignment::checks, instructions, landing, stack);
     // A self-loop's second copy of its body: the checks of a block holding
     // the body three times, the later two copies' ([`SelfLoop`]).
     let mut loop_rows = [true; MAX_BLOCK_INSTRUCTIONS];
@@ -491,7 +604,8 @@ fn emit_selected(
                     .cloned()
                     .collect();
                 let mut rows = vec![true; tripled.len()];
-                super::guest_range::checks(&tripled, &mut rows);
+                let starts: Vec<bool> = (0..tripled.len()).map(|at| landing[at % count]).collect();
+                segmented(super::guest_range::checks, &tripled, &starts, &mut rows);
                 for (index, row) in loop_rows[..count].iter_mut().enumerate() {
                     *row = rows[count + index] || rows[2 * count + index];
                 }
@@ -589,8 +703,17 @@ fn emit_selected(
             bases = super::masked_base::Tracker::carried(&carried);
             emitted_alone = true;
         }
+        if self_loop.is_some() {
+            loop_exits.landings[copy] = vec![None; instructions.len() + 1];
+        }
         while cursor < instructions.len() {
-            let held = core::mem::replace(&mut after, Held::NOTHING);
+            let mut held = core::mem::replace(&mut after, Held::NOTHING);
+            if landing[cursor] {
+                // A join lands here: nothing held, no base known.
+                held = Held::NOTHING;
+                bases.reset();
+                loop_exits.landings[copy][cursor] = Some(code.len());
+            }
             // A group emitted otherwise may have used the slots.
             if !core::mem::take(&mut emitted_alone) {
                 bases.reset();
@@ -995,7 +1118,13 @@ fn emit_selected(
                 if self_loop.is_some() {
                     // Both copies' jumps go to one exit, which settles first.
                     let rows = block.source_map.len() - loop_exits.first_rows * copy;
-                    loop_exits.side.push((jump, target, rows, dirty));
+                    if let Some(&(at, to)) = joins.iter().find(|&&(at, _)| at == cursor) {
+                        let skipped = u8::try_from(to - at - 1).expect("bounded body");
+                        loop_exits.joins.push((jump, copy, to, skipped));
+                        loop_exits.side.push((None, target, rows, dirty));
+                    } else {
+                        loop_exits.side.push((Some(jump), target, rows, dirty));
+                    }
                 } else {
                     side_exits.push((jump, target, block.source_map.len()));
                 }
@@ -1027,6 +1156,19 @@ fn emit_selected(
                     .expect("blocks hold mirrored reads only given their cells");
                 mirrored_paths.push(super::mirrored_read::emit(code, word, instruction.pc, cell));
                 // Xt alone changes; its masked base, if any, is gone.
+                bases.after(instruction, None);
+                emitted_alone = true;
+                cursor += 1;
+                continue;
+            }
+            if let Operation::ZeroBlock { rt } = instruction.operation {
+                let bytes = native
+                    .zero_block
+                    .expect("blocks hold DC ZVA only given its block size");
+                code.set_base_request(None);
+                super::zero_block::emit(code, rt, bytes, checks_at(cursor));
+                // RAX, RCX, RDX and the flags change; no guest register does.
+                after = Held::NOTHING;
                 bases.after(instruction, None);
                 emitted_alone = true;
                 cursor += 1;
@@ -1098,11 +1240,18 @@ fn emit_selected(
         {
             // The back edge: the iteration's instructions count, and the second
             // copy runs again until an entry's share is spent.
+            if landing[instructions.len()] {
+                after = Held::NOTHING;
+                bases.reset();
+                loop_exits.landings[copy][instructions.len()] = Some(code.len());
+            }
             block.source_map.push((*pc, code.len()));
             code.set_instruction(block.source_map.len() - 1);
             let flags_live =
                 after.rax == super::Rax::Nzcv && code.ends_with(&nzcv_store(code.is_pinned()));
-            if let Some(taken) = branch_condition_with(code, operation, after.rax, flags_live) {
+            if !matches!(operation, Operation::Branch { .. })
+                && let Some(taken) = branch_condition_with(code, operation, after.rax, flags_live)
+            {
                 loop_exits.fallthrough.push(code.asm().jcc(taken.negate()));
             }
             // Each carried slot moves with its register, which then is its
@@ -1113,7 +1262,10 @@ fn emit_selected(
             // `guest_range` shows safe, and non-canonical from
             // `GuestState::UNREACHABLE` after a mispredicted check.
             if copy == 0 {
-                let iterations = i64::from(SelfLoop::LIMIT) / i64::from(self_loop.instructions) + 1;
+                // The shortest iteration skips every join's instructions.
+                let skipped: usize = joins.iter().map(|&(at, to)| to - at - 1).sum();
+                let shortest = (usize::from(self_loop.instructions) - skipped).max(1);
+                let iterations = i64::from(SelfLoop::LIMIT) / shortest as i64 + 1;
                 carried = if reuse_bases && emitted_alone {
                     bases.carriers()
                 } else {
@@ -1173,7 +1325,7 @@ fn emit_selected(
                 // this iteration as a block's would.
                 super::pinned::write_back_locals(code, loop_exits.dirty);
                 let mut asm = code.asm();
-                settle_loop(&mut asm, self_loop.instructions);
+                settle_loop(&mut asm, self_loop.instructions, native.loop_counts);
                 loop_exits.taken = Some(asm.jmp());
             }
             after = Held::NOTHING;
@@ -1181,6 +1333,45 @@ fn emit_selected(
     }
     if let Some((active, _)) = run.take() {
         active.forget(code);
+    }
+    if let Some(self_loop) = self_loop {
+        // A group emitted across a landing leaves it without a start: the
+        // loop then takes those branches' side exits.
+        if loop_exits
+            .joins
+            .iter()
+            .any(|&(_, copy, to, _)| loop_exits.landings[copy][to].is_none())
+        {
+            return emit_selected(
+                instructions,
+                terminal,
+                fallthrough,
+                target,
+                RegionPolicy {
+                    self_loop: Some(SelfLoop {
+                        joins: false,
+                        ..self_loop
+                    }),
+                    ..regions
+                },
+                checks,
+                native,
+            );
+        }
+        // Each join takes the instructions it skips off the loop's count
+        // and lands in its copy; the flags are not held there.
+        for (jump, copy, to, skipped) in core::mem::take(&mut loop_exits.joins) {
+            let mut asm = code.asm();
+            asm.bind(jump);
+            asm.alu_imm8(
+                Alu::Sub,
+                Size::Qword,
+                super::frame(LOOP_RETIRED),
+                skipped as i8,
+            );
+            let land = asm.jmp();
+            asm.bind_back(land, loop_exits.landings[copy][to].expect("a landing"));
+        }
     }
     debug_assert!(
         fixups.is_empty(),
@@ -1218,16 +1409,26 @@ fn emit_selected(
     let mut second_rows = vec![];
     if let (Some(_), Some((_, Terminator::Branch(operation)))) = (self_loop, terminal) {
         second_rows = block.source_map.split_off(loop_exits.first_rows);
-        let entry = operation
-            .conditional_target()
-            .expect("a self-loop ends with a conditional branch");
-        for jump in loop_exits.fallthrough.drain(..) {
-            code.asm().bind(jump);
-        }
-        super::pinned::write_back_locals(code, loop_exits.dirty);
-        let mut asm = code.asm();
-        settle_loop(&mut asm, 0);
-        let to_fallthrough = asm.jmp();
+        let (entry, conditional) = match *operation {
+            Operation::Branch { target } => (target, false),
+            _ => (
+                operation
+                    .conditional_target()
+                    .expect("a self-loop ends with a branch back"),
+                true,
+            ),
+        };
+        // An unconditional loop has no fallthrough exit, as its block has
+        // none (`terminal_exits`).
+        let to_fallthrough = conditional.then(|| {
+            for jump in loop_exits.fallthrough.drain(..) {
+                code.asm().bind(jump);
+            }
+            super::pinned::write_back_locals(code, loop_exits.dirty);
+            let mut asm = code.asm();
+            settle_loop(&mut asm, 0, native.loop_counts);
+            asm.jmp()
+        });
         // One exit per branch run past, in their order, for both copies:
         // each jump stores what its copy's run has written there.
         let mut rows: Vec<usize> = loop_exits
@@ -1246,22 +1447,26 @@ fn emit_selected(
             let mut stored = vec![];
             for &(jump, to, at, dirty) in &loop_exits.side {
                 if at == row {
+                    target = Some(to);
+                    // A join's exit stays, with no jump to it.
+                    let Some(jump) = jump else { continue };
                     code.asm().bind(jump);
                     super::pinned::write_back_locals(code, dirty);
                     stored.push(code.asm().jmp());
-                    target = Some(to);
                 }
             }
             let mut asm = code.asm();
             for jump in stored {
                 asm.bind(jump);
             }
-            settle_loop(&mut asm, 0);
+            settle_loop(&mut asm, 0, native.loop_counts);
             side_exits.push((asm.jmp(), target.expect("a branch's jumps"), row));
         }
         let mut asm = code.asm();
-        asm.bind(to_fallthrough);
-        direct_exit_with(&mut asm, fallthrough, ExitKind::Fallthrough);
+        if let Some(to_fallthrough) = to_fallthrough {
+            asm.bind(to_fallthrough);
+            direct_exit_with(&mut asm, fallthrough, ExitKind::Fallthrough);
+        }
         asm.bind(
             loop_exits
                 .taken
@@ -1349,7 +1554,7 @@ fn emit_selected(
             fault_recovery,
         );
     }
-    (block.into_native(), fault_recovery)
+    (block.into_native(), fault_recovery, self_loop.is_some())
 }
 
 /// The zero test can consume the adjacent frame ALU result's host flags.

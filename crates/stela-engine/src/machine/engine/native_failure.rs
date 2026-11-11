@@ -295,6 +295,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let word = self.exit_word(index, pc)?;
             return self.completing(pc, |machine| machine.system_instruction(word));
         }
+        // A DC ZVA inside the block (`Operation::ZeroBlock`) likewise.
+        let system = self.block_variant(index).system;
+        if pc != terminal && system.zero_block.is_some() {
+            let word = self.word(index, pc)?;
+            if zeroes_natively(pc, word, system) {
+                self.statistics.system_exits += 1;
+                return self.completing(pc, |machine| machine.system_instruction(word));
+            }
+        }
         // A native AMX move faulted, or its range check failed, with nothing
         // changed: the engine's service completes it, delivering the fault
         // the guest's translation gives it with the AMX syndrome

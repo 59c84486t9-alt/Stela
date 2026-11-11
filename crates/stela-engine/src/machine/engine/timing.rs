@@ -62,6 +62,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Time the step loop's phases and exits from now on ([`step_timing`]).
     pub fn set_step_timing(&mut self, on: bool) {
         self.step_timing = on.then(step_timing::StepTiming::default);
+        // Self-loops count their entries only while timing is on.
+        self.native_system = None;
     }
 
     /// The step loop's timing so far, while it is on.

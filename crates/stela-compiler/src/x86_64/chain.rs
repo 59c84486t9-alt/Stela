@@ -183,6 +183,11 @@ const CONTROL: Place = Place::new(Anchor::Control, 0);
 pub(crate) const CONTROL_PLACE: Place = CONTROL;
 /// [`ChainControl::retired`], from the control's address.
 pub(crate) const RETIRED_OFFSET: i32 = RETIRED;
+/// [`ChainControl::loop_entries`] and [`ChainControl::loop_iterated`].
+pub(crate) const LOOP_ENTRIES_OFFSET: i32 =
+    core::mem::offset_of!(ChainControl, loop_entries) as i32;
+pub(crate) const LOOP_ITERATED_OFFSET: i32 =
+    core::mem::offset_of!(ChainControl, loop_iterated) as i32;
 
 /// A direct exit to a static successor in a block's code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,13 +288,19 @@ pub struct ChainControl {
     /// Where cell probes count the transfers through cells past the
     /// stamped ones; nothing reads it.
     pub heat: u64,
+    /// Exits of blocks that ran their iterations inside themselves
+    /// (`x86_64::block`'s self-loops), one per entry, and the instructions
+    /// those entries retired past their first iteration (net of what joins
+    /// skipped): the engine's counts, which only those exits write.
+    pub loop_entries: u64,
+    pub loop_iterated: u64,
 }
 
 // Epoch and observed state are naturally aligned atomic-width words. Capture
 // and storage owners keep the mapped control alive for every embedded address.
 const _: () = assert!(core::mem::offset_of!(ChainControl, interrupt_epoch) == 64);
 const _: () = assert!(core::mem::offset_of!(ChainControl, observed_interrupt_epoch) == 72);
-const _: () = assert!(core::mem::size_of::<ChainControl>() == 128);
+const _: () = assert!(core::mem::size_of::<ChainControl>() == 144);
 
 /// In the block table, one block a fetch at `pc` runs while its page
 /// translates to the frame and fetch state `key` names ([`block_key`]). In
