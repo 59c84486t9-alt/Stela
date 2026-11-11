@@ -100,8 +100,34 @@ use stela_formats::builds;
 use stela_loader::mount_interface::{self, Interface};
 use uninstall::uninstall;
 
+/// The Mac models setup presents, with their names: the M2 Mac mini, the
+/// board the engine is tested on. Other Macs stay listed in the wizard,
+/// greyed out, and are refused by name.
+pub(crate) const SUPPORTED_MODELS: &[(&str, &str)] = &[("Mac14,3", "Mac mini M2")];
 /// The Mac model Stela presents by default.
-pub(crate) const PINNED_MODEL: &str = "MacBookPro18,3";
+pub(crate) const PINNED_MODEL: &str = SUPPORTED_MODELS[0].0;
+
+/// Setup can present Mac `model`.
+pub(crate) fn supported_model(model: &str) -> bool {
+    SUPPORTED_MODELS
+        .iter()
+        .any(|(supported, _)| *supported == model)
+}
+
+/// Refuse a Mac model `models` does not hold, naming the ones it does.
+fn check_model(models: &[(&str, &str)], model: &str) -> Result<()> {
+    if models.iter().any(|(supported, _)| *supported == model) {
+        return Ok(());
+    }
+    let supported: Vec<String> = models
+        .iter()
+        .map(|(model, name)| format!("{model} ({name})"))
+        .collect();
+    bail!(
+        "Mac model {model} is not supported yet; Stela supports {}",
+        supported.join(", ")
+    )
+}
 const RECORD: &str = "EFI/stela/setup.json";
 /// A margin so no volume is filled to its last byte.
 pub(super) const MARGIN: u64 = 64 * 1024 * 1024;
@@ -450,6 +476,9 @@ struct Environment<'a> {
     /// The macOS builds setup prepares (`stela_formats::builds::SUPPORTED`);
     /// tests add their synthetic images' builds.
     builds: &'a [builds::Build],
+    /// The Mac models setup presents ([`SUPPORTED_MODELS`]); tests add
+    /// their synthetic images' model.
+    models: &'a [(&'a str, &'a str)],
 }
 
 impl Environment<'_> {
@@ -568,6 +597,7 @@ impl Request {
             interface: mount_interface::CURRENT,
             bundle_revision: stela_loader::boot_bundle::REVISION,
             builds: builds::SUPPORTED,
+            models: SUPPORTED_MODELS,
         };
         let interactive = self.usb.as_os_str().is_empty();
         // A stela without its stela.efi says so before the wizard asks
@@ -716,6 +746,9 @@ impl Request {
 
     /// Create a setup, or add an install (`--target`) to an existing one.
     fn create(mut self, environment: &Environment<'_>) -> Result<String> {
+        if let Some(model) = &self.model {
+            check_model(environment.models, model)?;
+        }
         // A first setup that was interrupted is resumed by `setup`, not
         // added to.
         let configured = locate_esp(environment.host, &self.usb).is_ok_and(|esp| {

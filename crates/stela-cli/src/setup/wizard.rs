@@ -221,6 +221,16 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 enabled: usb.bytes >= NETWORK_MIN,
             })
             .collect();
+        if !rows.iter().any(|row| row.enabled) {
+            cliclack::note(
+                "USBs found",
+                rows.iter()
+                    .map(|row| format!("{} · {}", row.label, row.hint))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )?;
+            anyhow::bail!("no USB of 8 GB or more found; connect one and run setup again");
+        }
         let initial = choices
             .iter()
             .position(|usb| usb.path() == command.usb)
@@ -319,8 +329,14 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             preferred_build = Some(command.build.clone());
             command.install_image = Some(InstallImage::Offline);
             cliclack::log::info(format!(
-                "macOS {} ({}) · local IPSW",
-                manifest.product_version, manifest.product_build
+                "macOS {} ({}) · local IPSW{}",
+                manifest.product_version,
+                manifest.product_build,
+                if stela_formats::builds::tested(&manifest.product_build) {
+                    ""
+                } else {
+                    " · not tested yet"
+                }
             ))?;
             (manifest.product_version, manifest.supported_models)
         } else {

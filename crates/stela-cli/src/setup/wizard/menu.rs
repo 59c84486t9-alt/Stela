@@ -34,19 +34,9 @@ pub(super) fn submenu(prompt: &str, items: &[Item], initial: usize) -> Result<Op
     })
 }
 fn run(prompt: &str, items: &[Item], initial: usize, submenu: bool) -> Result<usize> {
-    if !items.iter().any(|item| item.enabled) {
-        cliclack::note(
-            prompt,
-            items
-                .iter()
-                .map(|item| format!("{} · {}", item.label, item.hint))
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )?;
-    }
     ensure!(
         items.iter().any(|item| item.enabled),
-        "no suitable USB is available; connect an 8 GB or larger USB with a readable capacity"
+        "{prompt}: nothing here can be chosen"
     );
     let term = Term::stderr();
     term.hide_cursor()?;
@@ -99,13 +89,17 @@ fn run(prompt: &str, items: &[Item], initial: usize, submenu: bool) -> Result<us
         }
         for &index in visible.iter().skip(start).take(rows) {
             let item = &items[index];
-            let label = if submenu && index == selected && !item.hint.is_empty() {
+            // A submenu shows the chosen row's hint, and every greyed-out
+            // row's reason, beside its label; a menu with hint rows shows
+            // them below.
+            let beside = submenu && (index == selected || !item.enabled);
+            let label = if beside && !item.hint.is_empty() {
                 format!(
                     "{}  {}",
                     item.label,
                     Style::new().dim().apply_to(&item.hint)
                 )
-            } else if item.enabled {
+            } else if item.enabled || hints {
                 item.label.clone()
             } else {
                 format!("{} [unavailable]", item.label)
@@ -117,11 +111,7 @@ fn run(prompt: &str, items: &[Item], initial: usize, submenu: bool) -> Result<us
             lines.push(if item.enabled {
                 line
             } else {
-                Style::new()
-                    .dim()
-                    .strikethrough()
-                    .apply_to(line)
-                    .to_string()
+                Style::new().dim().apply_to(line).to_string()
             });
             if hints {
                 lines.push(format!(

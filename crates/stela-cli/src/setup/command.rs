@@ -135,8 +135,9 @@ struct Image {
     /// Where `--fetch` keeps the image.
     #[arg(long)]
     download_dir: Option<PathBuf>,
-    /// The macOS build `--fetch` downloads: the newest supported one by
-    /// default. Maintenance commands download the setup's own build.
+    /// The macOS 27 build `--fetch` downloads, such as 26B123: the newest
+    /// tested one by default. Maintenance commands download the setup's own
+    /// build.
     #[arg(long, default_value = builds::DEFAULT.build)]
     build: String,
 }
@@ -283,10 +284,9 @@ struct Create {
     /// The `stela.efi` to install instead of the one built into `stela`.
     #[arg(long)]
     efi: Option<PathBuf>,
-    /// The Mac model Stela presents (MacBookPro18,3, M1 Pro, by default).
-    /// Preparation checks the selected board's platform requirements and
-    /// refuses unsupported ones. Every install of a setup presents the same model.
-    #[arg(long)]
+    /// The Mac model Stela presents: Mac14,3 (Mac mini M2), the one
+    /// supported now.
+    #[arg(long, hide = true)]
     model: Option<String>,
     /// Show what would change, and change nothing.
     #[arg(long)]

@@ -1,4 +1,6 @@
-//! Group the version and device pickers without changing their compatibility sets.
+//! Group the version and device pickers without changing their compatibility
+//! sets. Versions and Macs Stela does not support yet stay listed, greyed out.
+use super::menu::Item;
 use crate::restore::Image;
 use anyhow::{Result, ensure};
 use std::collections::BTreeMap;
@@ -15,9 +17,29 @@ fn majors(images: &[Image]) -> Vec<(String, Vec<usize>)> {
     groups
 }
 
-/// Whether Stela supports `image`'s build (`stela_formats::builds`).
+/// Why a version or Mac cannot be chosen.
+const NOT_YET: &str = "not supported yet";
+
+/// Whether Stela supports `image`'s build (`stela_formats::builds`): every
+/// macOS 27 build.
 fn supported(image: &Image) -> bool {
     stela_formats::builds::find(&image.build).is_ok()
+}
+
+/// A release's hint: its build, and whether Stela was tested with it.
+fn release_hint(image: &Image) -> String {
+    if !supported(image) {
+        format!("{} · {NOT_YET}", image.build)
+    } else if stela_formats::builds::tested(&image.build) {
+        image.build.clone()
+    } else {
+        format!("{} · not tested yet", image.build)
+    }
+}
+
+/// Whether setup can present Mac `model` (`super::super::SUPPORTED_MODELS`).
+fn supported_model(model: &str) -> bool {
+    super::super::supported_model(model)
 }
 
 /// The major-version group the release picker opens on: `preferred`'s, else
@@ -38,22 +60,32 @@ pub(super) fn release(images: &[Image], preferred: &str) -> Result<usize> {
     let groups = majors(images);
     let mut initial = initial_group(&groups, images, preferred);
     loop {
-        let mut picker = cliclack::select("3 / 8  Choose a macOS version").max_rows(8);
-        for (index, (major, _)) in groups.iter().enumerate() {
-            picker = picker.item(index, format!("macOS {major}"), "");
-        }
-        initial = picker.initial_value(initial).interact()?;
+        let majors: Vec<_> = groups
+            .iter()
+            .enumerate()
+            .map(|(index, (major, entries))| {
+                let enabled = entries.iter().any(|&i| supported(&images[i]));
+                Item {
+                    value: index,
+                    label: format!("macOS {major}"),
+                    hint: if enabled {
+                        "Supported"
+                    } else {
+                        "Not supported yet"
+                    }
+                    .into(),
+                    enabled,
+                }
+            })
+            .collect();
+        initial = super::menu::select("3 / 8  Choose a macOS version", &majors, initial)?;
         let (major, entries) = &groups[initial];
         let rows: Vec<_> = entries
             .iter()
-            .map(|&index| super::menu::Item {
+            .map(|&index| Item {
                 value: index,
                 label: images[index].version.clone(),
-                hint: if supported(&images[index]) {
-                    images[index].build.clone()
-                } else {
-                    format!("{} · unsupported", images[index].build)
-                },
+                hint: release_hint(&images[index]),
                 enabled: supported(&images[index]),
             })
             .collect();
@@ -165,25 +197,44 @@ pub(super) fn model(
     let groups = grouped(models, names)?;
     let (mut initial, preferred_model) = initial(&groups, preferred);
     loop {
-        let mut picker = cliclack::select("4 / 8  Choose a Mac family");
-        for (index, (family, _)) in groups.iter().enumerate() {
-            picker = picker.item(index, family.label(), "");
-        }
-        initial = picker.initial_value(initial).interact()?;
+        let families: Vec<_> = groups
+            .iter()
+            .enumerate()
+            .map(|(index, (family, models))| {
+                let enabled = models.iter().any(|model| supported_model(model));
+                Item {
+                    value: index,
+                    label: family.label().into(),
+                    hint: if enabled {
+                        "Supported"
+                    } else {
+                        "Not supported yet"
+                    }
+                    .into(),
+                    enabled,
+                }
+            })
+            .collect();
+        initial = super::menu::select("4 / 8  Choose a Mac", &families, initial)?;
         let (family, models) = &groups[initial];
         let rows: Vec<_> = models
             .iter()
             .enumerate()
-            .map(|(index, model)| super::menu::Item {
+            .map(|(index, model)| Item {
                 value: index,
                 label: model_name(model, names).into(),
-                hint: String::new(),
-                enabled: true,
+                hint: if supported_model(model) {
+                    model.to_string()
+                } else {
+                    format!("{model} · {NOT_YET}")
+                },
+                enabled: supported_model(model),
             })
             .collect();
         let initial_model = models
             .iter()
             .position(|model| Some(model.as_str()) == preferred_model)
+            .or_else(|| models.iter().position(|model| supported_model(model)))
             .unwrap_or(0);
         if let Some(index) = super::menu::submenu(
             &format!("{} · Choose a chip and model", family.label()),
@@ -238,6 +289,7 @@ fn initial<'a>(
             .iter()
             .position(|(_, models)| models.iter().any(|model| model.as_str() == wanted))
     };
+    let preferred = preferred.filter(|model| supported_model(model));
     for wanted in preferred.into_iter().chain([super::super::PINNED_MODEL]) {
         if let Some(family) = has(wanted) {
             return (family, Some(wanted));
@@ -285,10 +337,31 @@ mod tests {
         let pinned = super::super::super::PINNED_MODEL;
         let (family, model) = initial(&groups, None);
         assert_eq!(model, Some(pinned));
-        assert!(groups[family].1.iter().any(|m| m.as_str() == pinned));
-        assert_eq!(groups[family].0, Family::MacBookPro);
+        assert_eq!(groups[family].0, Family::Mini);
         let (family, model) = initial(&groups, Some("Mac14,3"));
         assert_eq!((groups[family].0, model), (Family::Mini, Some("Mac14,3")));
+        // A Mac that is not supported yet is not preselected.
+        let (family, model) = initial(&groups, Some("MacBookPro18,1"));
+        assert_eq!((groups[family].0, model), (Family::Mini, Some(pinned)));
+    }
+
+    #[test]
+    fn only_the_m2_mac_mini_can_be_chosen_and_other_macs_stay_listed() {
+        let models: Vec<String> = ["Mac13,1", "Mac14,3", "Mac14,14", "MacBookPro18,3"]
+            .map(Into::into)
+            .into();
+        let groups = grouped(&models, &BTreeMap::new()).unwrap();
+        let listed: Vec<&str> = groups
+            .iter()
+            .flat_map(|(_, models)| models.iter().map(|m| m.as_str()))
+            .collect();
+        assert_eq!(listed.len(), 4, "{listed:?}");
+        let chosen: Vec<&str> = listed
+            .iter()
+            .copied()
+            .filter(|m| supported_model(m))
+            .collect();
+        assert_eq!(chosen, ["Mac14,3"]);
     }
 
     #[test]
@@ -310,5 +383,35 @@ mod tests {
         assert_eq!(initial_group(&groups, &images, ""), 1);
         assert_eq!(initial_group(&groups, &images, "28B70"), 0);
         assert!(!super::supported(&images[1]) && super::supported(&images[2]));
+    }
+
+    #[test]
+    fn every_macos_27_release_can_be_chosen_and_others_stay_listed() {
+        let image = |version: &str, build: &str| Image {
+            version: version.into(),
+            build: build.into(),
+            models: vec!["Mac14,3".into()],
+            url: String::new(),
+            sha1: None,
+        };
+        let images = [
+            image("28.0", "27A100"),
+            image("27.4", "26E40"),
+            image("27.3", "26D20a"),
+            image("27.2", "26B123"),
+            image("27.0", "26A300"),
+            image("26.4", "25E50"),
+        ];
+        let groups = majors(&images);
+        let names: Vec<&str> = groups.iter().map(|(major, _)| major.as_str()).collect();
+        assert_eq!(names, ["28", "27", "26"]);
+        for (i, image) in images.iter().enumerate() {
+            let is_27 = image.version.starts_with("27.");
+            assert_eq!(supported(image), is_27, "{}", image.version);
+            let hint = release_hint(image);
+            assert_eq!(hint.ends_with("not supported yet"), !is_27, "{hint}");
+            assert_eq!(hint.ends_with("not tested yet"), is_27 && i != 3, "{hint}");
+        }
+        assert_eq!(initial_group(&groups, &images, ""), 1);
     }
 }

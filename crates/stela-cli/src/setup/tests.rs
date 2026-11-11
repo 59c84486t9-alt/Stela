@@ -346,8 +346,15 @@ fn environment(host: &FakeHost) -> Environment<'_> {
         interface: mount_interface::CURRENT,
         bundle_revision: stela_loader::boot_bundle::REVISION,
         builds: SYNTHETIC_BUILDS,
+        models: SYNTHETIC_MODELS,
     }
 }
+
+/// The synthetic images' model beside the supported ones.
+const SYNTHETIC_MODELS: &[(&str, &str)] = &[
+    (PINNED_MODEL, "Mac mini M2"),
+    (restore::payload::SYNTHETIC_MODEL, "Stela test model"),
+];
 
 /// The synthetic images' builds, as supported ones.
 const SYNTHETIC_BUILDS: &[builds::Build] = &[
@@ -383,6 +390,26 @@ fn preparation_rejects_unsupported_build() {
         "{error}"
     );
     assert!(error.contains(builds::DEFAULT.build), "{error}");
+}
+
+#[test]
+fn other_mac_models_are_refused_naming_the_supported_one() {
+    let f = fixture(64 * GIB, true);
+    let environment = Environment {
+        models: SUPPORTED_MODELS,
+        ..environment(&f.host)
+    };
+    for model in ["MacBookPro18,3", "Mac14,14", "Mac14,2", "Mac16,10"] {
+        let mut request = command(&f, &f.esp);
+        request.model = Some(model.into());
+        let error = request.dispatch(&environment).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            format!("Mac model {model} is not supported yet; Stela supports Mac14,3 (Mac mini M2)")
+        );
+    }
+    assert_eq!(PINNED_MODEL, "Mac14,3");
+    assert!(supported_model("Mac14,3") && !supported_model("MacBookPro18,3"));
 }
 
 /// Stand-ins for the restore and update restore `boot prepare` of a
@@ -1683,7 +1710,7 @@ fn additional_disk_gets_separate_machine_identity() {
     let mut f2 = rerun(&f, |c| {
         c.target = Some(REGION2.into());
         c.nor = Some(NOR2.into());
-        c.model = Some("Mac14,2".into());
+        c.model = Some(PINNED_MODEL.into());
     })
     .unwrap_err()
     .to_string();

@@ -66,10 +66,18 @@ pub(super) fn prepare_restore_bundles(
 }
 
 /// Refuse `ipsw`, of macOS `build`, unless setup supports that build.
+/// A macOS 27 build Stela was not tested with is admitted with a note.
 pub(super) fn supported(environment: &Environment<'_>, ipsw: &Path, build: &str) -> Result<()> {
-    builds::find_in(environment.builds, build)
-        .map(drop)
-        .map_err(|error| anyhow::anyhow!("{}: {error}", ipsw.display()))
+    let entry = builds::find_in(environment.builds, build)
+        .map_err(|error| anyhow::anyhow!("{}: {error}", ipsw.display()))?;
+    if entry.build != build {
+        eprintln!(
+            "note: macOS build {build} is not tested yet; Stela uses build {}'s device \
+             interfaces for it",
+            entry.build
+        );
+    }
+    Ok(())
 }
 
 /// Source identity and personalization choices for one kind of boot bundle.
