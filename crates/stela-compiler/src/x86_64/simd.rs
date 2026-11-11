@@ -179,6 +179,119 @@ fn vector_source(code: &mut Code, vector: u8, scratch: u8) -> u8 {
     scratch
 }
 
+/// Where a recipe writes guest vector `vector`'s new value
+/// ([`vector_destination`], [`vector_accumulator`]): `xmm`, the vector's
+/// home, which the recipe's last instruction writes whole, or the recipe's
+/// scratch register, which [`finish`] commits.
+#[derive(Debug, Clone, Copy)]
+struct Destination {
+    vector: u8,
+    xmm: u8,
+    /// The scratch register the caller offered, distinct from every
+    /// source register it still reads unless equal to `xmm`.
+    scratch: u8,
+}
+
+impl Destination {
+    /// Whether `xmm` is the vector's home.
+    const fn home(&self) -> bool {
+        self.xmm >= super::vector_cache::FIRST_HOST
+    }
+}
+
+/// The register a recipe writes guest vector `vector`'s whole new value to
+/// with its last instruction, after reading every source: its home where
+/// the block keeps vectors in registers (and commits do not go to the
+/// state), else `scratch`. Every source is taken before this call: the
+/// home's old value is gone, and [`super::vector_cache`] refuses to hand
+/// it out again before [`finish`].
+fn vector_destination(code: &mut Code, vector: u8, scratch: u8) -> Destination {
+    let cache = code.vector_cache();
+    let xmm = if cache.active() && !cache.writes_through() {
+        code.begin_vector_write(vector, true)
+    } else {
+        scratch
+    };
+    Destination {
+        vector,
+        xmm,
+        scratch,
+    }
+}
+
+/// [`vector_destination`] holding the vector's current value, for a recipe
+/// that reads and then writes it in place (an accumulator, an inserted
+/// half): its home, loaded if new, else `scratch` loaded.
+fn vector_accumulator(code: &mut Code, vector: u8, scratch: u8) -> Destination {
+    let cache = code.vector_cache();
+    let xmm = if cache.active() && !cache.writes_through() {
+        let loaded = code.vector_cache().peek(vector).is_some();
+        let host = code.begin_vector_write(vector, false);
+        if !loaded {
+            code.asm_unguarded()
+                .sse(Some(0xf3), &[0x0f, 0x6f], host, vector_memory(vector));
+        }
+        host
+    } else {
+        read_vector(code, vector, scratch);
+        scratch
+    };
+    Destination {
+        vector,
+        xmm,
+        scratch,
+    }
+}
+
+/// End the write of `destination`: its home is newer than the state, or
+/// the scratch register is committed.
+fn finish(code: &mut Code, destination: Destination) {
+    if destination.home() {
+        code.end_vector_write(destination.vector);
+    } else {
+        commit(code, destination.vector, destination.xmm);
+    }
+}
+
+/// `destination` = `result`, all 16 bytes (`bytes` 16) or the low 8 with
+/// the high cleared (`bytes` 8), then [`finish`].
+fn finish_from(code: &mut Code, destination: Destination, result: u8, bytes: u8) {
+    if bytes == 8 {
+        packed(code, Host::MoveQword, destination.xmm, result);
+    } else {
+        debug_assert_eq!(bytes, 16);
+        if destination.xmm != result {
+            packed(code, Host::MoveAligned, destination.xmm, result);
+        }
+    }
+    finish(code, destination);
+}
+
+/// `destination` = `left op right` (16 bytes), the last instruction: one
+/// VEX form, or a copy and the SSE form, swapping the sources of a
+/// `commutative` operation that would overwrite its right source, else
+/// through the destination's scratch register.
+fn binary(
+    code: &mut Code,
+    opcode: SimdOpcode,
+    destination: Destination,
+    left: u8,
+    right: u8,
+    commutative: bool,
+    target: crate::TargetCpu,
+) {
+    let xmm = destination.xmm;
+    if three::vex(target) || xmm == left || xmm != right {
+        three::three(code, opcode, xmm, left, right, target);
+    } else if commutative {
+        three::three(code, opcode, xmm, right, left, target);
+    } else {
+        three::three(code, opcode, destination.scratch, left, right, target);
+        packed(code, Host::MoveAligned, xmm, destination.scratch);
+    }
+    finish(code, destination);
+}
+
 /// Guest vector `vector` as a source operand of an instruction that may
 /// take memory without an alignment requirement (VEX, EVEX): its home, if
 /// it has one, else its slot in the state.
@@ -517,6 +630,63 @@ pub(super) fn vector_use(operand: &Operand, target: crate::TargetCpu) -> super::
     }
 }
 
+/// AND, ORR (and MOV, its alias with equal sources), EOR, ADD and SUB from
+/// the sources where they are into the destination: one VEX instruction
+/// writes a 16-byte result to the destination's home.
+#[allow(clippy::too_many_arguments)]
+fn integer_binary(
+    code: &mut Code,
+    operation: IntegerOperation,
+    destination: u8,
+    left: u8,
+    right: u8,
+    bytes: u8,
+    lane_bytes: u8,
+    target: crate::TargetCpu,
+) {
+    use IntegerOperation::*;
+    let left_xmm = vector_source(code, left, 0);
+    if operation == Orr && left == right {
+        let destination = vector_destination(code, destination, 0);
+        finish_from(code, destination, left_xmm, bytes);
+        return;
+    }
+    let right_xmm = vector_source(code, right, 1);
+    let (opcode, commutative) = match operation {
+        And => (Host::And, true),
+        Orr => (Host::Or, true),
+        Eor => (Host::Xor, true),
+        Add => (
+            match lane_bytes {
+                1 => Host::AddByte,
+                2 => Host::AddWord,
+                4 => Host::AddDword,
+                8 => Host::AddQword,
+                _ => unreachable!("reviewed lane size"),
+            },
+            true,
+        ),
+        Sub => (subtract_opcode(lane_bytes), false),
+        _ => unreachable!("a binary integer operation"),
+    };
+    if bytes == 8 {
+        three::three(code, opcode, 0, left_xmm, right_xmm, target);
+        let destination = vector_destination(code, destination, 0);
+        finish_from(code, destination, 0, 8);
+        return;
+    }
+    let destination = vector_destination(code, destination, 0);
+    binary(
+        code,
+        opcode,
+        destination,
+        left_xmm,
+        right_xmm,
+        commutative,
+        target,
+    );
+}
+
 /// [`emit_for_target`] with guest vectors already held whole in XMM0, or
 /// in XMM0 and XMM1 for a pair transfer.
 pub(super) fn emit_after(
@@ -625,6 +795,19 @@ pub(super) fn emit_after(
             use IntegerOperation::*;
             // MOV is the ORR alias with two identical sources.
             let copy = operation == Orr && left == right;
+            if copy || matches!(operation, And | Orr | Eor | Add | Sub) {
+                integer_binary(
+                    code,
+                    operation,
+                    destination,
+                    left,
+                    right,
+                    bytes,
+                    lane_bytes,
+                    target,
+                );
+                return;
+            }
             // Stage the sources before writing any overlapping V register.
             read_vector(code, left, 0);
             let mut result = 0;

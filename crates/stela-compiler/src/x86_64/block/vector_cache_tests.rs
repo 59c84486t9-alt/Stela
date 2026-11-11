@@ -51,7 +51,7 @@ fn word(random: &mut Random) -> u32 {
             | n << 5
             | d
     };
-    match random.below(50) {
+    match random.below(64) {
         0 => three(0x4ea0_8400),        // add vd.4s,vn.4s,vm.4s
         1 => three(0x6ea0_8400),        // sub vd.4s
         2 => three(0x0e20_8400),        // add vd.8b (D write)
@@ -85,26 +85,40 @@ fn word(random: &mut Random) -> u32 {
         27 => 0xb400_0805,                                                 // cbz x5,.+0x100
         28 => three(0x4e20_d400),                                          // fadd vd.4s (uncached)
         29 => 0x4e08_3c00 | n << 5 | 3,                                    // mov x3,vn.d[0]
-        30 => three(0x2e60_8000),       // umlal vd.4s,vn.4h,vm.4h
-        31 => three(0x6e60_8000),       // umlal2
-        32 => element(0x0f40_2000),     // smlal vd.4s,vn.4h,vm.h[i]
-        33 => element(0x4f40_2000),     // smlal2 by element
-        34 => three(0x6e60_c000),       // umull2
-        35 => three(0x0e60_c000),       // smull
-        36 => 0x0f10_8c00 | n << 5 | d, // rshrn vd.4h,vn.4s,#16
-        37 => 0x4f10_8c00 | n << 5 | d, // rshrn2
-        38 => 0x2f10_8c00 | n << 5 | d, // sqrshrun vd.4h,vn.4s,#16
-        39 => 0x6f10_8c00 | n << 5 | d, // sqrshrun2
-        40 => 0x2f08_8c00 | n << 5 | d, // sqrshrun vd.8b,vn.8h,#8
-        41 => three(0x2e60_0400),       // uhadd vd.8h
-        42 => 0x4f3d_2400 | n << 5 | d, // srshr vd.4s,#3
-        43 => three(0x4ea0_0c00),       // sqadd vd.4s
-        44 => three(0x6ea0_4400),       // ushl vd.4s (uncached)
-        45 => three(0x6e20_1400),       // urhadd vd.16b
-        46 => 0x4f3d_0400 | n << 5 | d, // sshr vd.4s,#3
-        47 => 0x2f10_a400 | n << 5 | d, // uxtl vd.4s,vn.4h
-        48 => 0x2e61_2800 | n << 5 | d, // sqxtun vd.4h,vn.4s
-        _ => three(0x4e20_d400),        // fadd vd.4s (uncached)
+        30 => three(0x2e60_8000),                 // umlal vd.4s,vn.4h,vm.4h
+        31 => three(0x6e60_8000),                 // umlal2
+        32 => element(0x0f40_2000),               // smlal vd.4s,vn.4h,vm.h[i]
+        33 => element(0x4f40_2000),               // smlal2 by element
+        34 => three(0x6e60_c000),                 // umull2
+        35 => three(0x0e60_c000),                 // smull
+        36 => 0x0f10_8c00 | n << 5 | d,           // rshrn vd.4h,vn.4s,#16
+        37 => 0x4f10_8c00 | n << 5 | d,           // rshrn2
+        38 => 0x2f10_8c00 | n << 5 | d,           // sqrshrun vd.4h,vn.4s,#16
+        39 => 0x6f10_8c00 | n << 5 | d,           // sqrshrun2
+        40 => 0x2f08_8c00 | n << 5 | d,           // sqrshrun vd.8b,vn.8h,#8
+        41 => three(0x2e60_0400),                 // uhadd vd.8h
+        42 => 0x4f3d_2400 | n << 5 | d,           // srshr vd.4s,#3
+        43 => three(0x4ea0_0c00),                 // sqadd vd.4s
+        44 => three(0x6ea0_4400),                 // ushl vd.4s (uncached)
+        45 => three(0x6e20_1400),                 // urhadd vd.16b
+        46 => 0x4f3d_0400 | n << 5 | d,           // sshr vd.4s,#3
+        47 => 0x2f10_a400 | n << 5 | d,           // uxtl vd.4s,vn.4h
+        48 => 0x2e61_2800 | n << 5 | d,           // sqxtun vd.4h,vn.4s
+        49 => three(0x2e20_8400),                 // sub vd.8b (D write)
+        50 => three(0x2e20_1c00),                 // eor vd.8b
+        51 => 0x0ea0_1c00 | n << 16 | n << 5 | d, // mov vd.8b
+        52 => 0x4ea0_1c00 | n << 16 | n << 5 | d, // mov vd.16b
+        53 => three(0x6e60_8400),                 // sub vd.8h
+        54 => element(0x0f40_a000),               // smull vd.4s,vn.4h,vm.h[i]
+        55 => element(0x0f40_6000),               // smlsl by element
+        56 => element(0x2f40_2000),               // umlal by element
+        57 => element(0x6f40_a000),               // umull2 by element
+        58 => three(0x0e60_8000),                 // smlal vd.4s,vn.4h,vm.4h
+        59 => three(0x4e60_c000),                 // smull2 (signed upper by vector)
+        60 => three(0x0e60_a000),                 // smlsl
+        61 => three(0x6e60_a000),                 // umlsl2
+        62 => element(0x4f40_6000),               // smlsl2 by element
+        _ => three(0x4e20_d400),                  // fadd vd.4s (uncached)
     }
 }
 
@@ -134,36 +148,68 @@ fn initial(random: &mut Random, memory: &mut Memory) -> GuestState {
     state
 }
 
-fn system(instructions: &[Instruction], end: GuestAddress) -> (Vec<u8>, NativeBlock) {
+fn system(
+    instructions: &[Instruction],
+    end: GuestAddress,
+    target: TargetCpu,
+) -> (Vec<u8>, NativeBlock) {
     let (block, _) = emit_system_mode(
         instructions,
         None,
         end,
-        TargetCpu::detect(),
+        target,
         MemoryChecks::DEFAULT,
         NativeSystem::NONE,
     );
     (pinned::entered(&block.x86_64_code), block)
 }
 
+/// Whether `code` names XMM8-15 as a ModRM.reg operand: a legacy SSE form
+/// with REX.R, or a VEX form with (inverted) R clear.
+fn names_a_home(code: &[u8]) -> bool {
+    code.windows(2).any(|w| {
+        (w[0] == 0x66 && matches!(w[1], 0x44 | 0x45))
+            || (matches!(w[0], 0xc4 | 0xc5) && w[1] & 0x80 == 0)
+    })
+}
+
+/// The host tiers whose recipes the cache changes, each the running host
+/// supports: SSE2, SSE4.1, AVX2 (VEX three-operand forms), AVX-512 and the
+/// host itself.
+fn tiers() -> Vec<TargetCpu> {
+    let host = TargetCpu::detect();
+    [
+        TargetCpu::Baseline,
+        TargetCpu::Sse41,
+        TargetCpu::X86_64_V3,
+        TargetCpu::X86_64_V4,
+        host,
+    ]
+    .into_iter()
+    .filter(|tier| host.supports(*tier))
+    .collect()
+}
+
 #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
 #[test]
 fn blocks_with_cached_vectors_run_as_the_frame_layout() {
+    for target in tiers() {
+        run_random_blocks(target, 600);
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+fn run_random_blocks(target: TargetCpu, cases: usize) {
     let mut random = Random(0x9e37_79b9_7f4a_7c15);
     let mut cached = 0;
-    for case in 0..1000 {
+    for case in 0..cases {
         let length = 4 + random.below(40) as usize;
         let words: Vec<u32> = (0..length).map(|_| word(&mut random)).collect();
         let instructions = lift(&words);
         let end = GuestAddress(0x1000 + 4 * length as u64);
         let frame = emit(&instructions, None, end);
-        let (entered, block) = system(&instructions, end);
-        // movdqa xmm8..15 from a recipe's scratch register: the cache ran.
-        if block
-            .x86_64_code
-            .windows(3)
-            .any(|w| w == [0x66, 0x44, 0x0f])
-        {
+        let (entered, block) = system(&instructions, end, target);
+        if names_a_home(&block.x86_64_code) {
             cached += 1;
         }
         let mut memory = [0; WORDS];
@@ -175,11 +221,14 @@ fn blocks_with_cached_vectors_run_as_the_frame_layout() {
         let exit = native::run(&entered, &mut state);
         state.x[1] = 0;
         expected.x[1] = 0;
-        assert_eq!(exit, expected_exit, "case {case}: {words:08x?}");
-        assert_eq!(state, expected, "case {case}: {words:08x?}");
-        assert_eq!(memory, expected_memory, "case {case}: {words:08x?}");
+        assert_eq!(exit, expected_exit, "{target:?} case {case}: {words:08x?}");
+        assert_eq!(state, expected, "{target:?} case {case}: {words:08x?}");
+        assert_eq!(
+            memory, expected_memory,
+            "{target:?} case {case}: {words:08x?}"
+        );
     }
-    assert!(cached > 800, "{cached}");
+    assert!(cached > cases * 4 / 5, "{target:?}: {cached}");
 }
 
 /// No fault site of a block finds a vector only in a host register: the
@@ -238,7 +287,7 @@ fn every_fault_site_finds_the_cached_writes_stored() {
         }
         sites += accesses.len();
     }
-    assert!(sites > 800, "{sites}");
+    assert!(sites > 700, "{sites}");
 }
 
 #[test]

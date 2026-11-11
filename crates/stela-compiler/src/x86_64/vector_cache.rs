@@ -50,6 +50,13 @@ pub(crate) struct VectorCache {
     /// Whether commits go to the state: the next instruction stores or
     /// forgets every home anyway, so a home would cost a second move.
     write_through: bool,
+    /// The home a recipe is writing as its destination
+    /// ([`Code::begin_vector_write`]), which the encoder lets it write, or
+    /// `NONE`.
+    writing: u8,
+    /// Whether that home's old value is gone: a destination written whole,
+    /// whose vector no recipe may read until the write ends.
+    fresh: bool,
 }
 
 impl Default for VectorCache {
@@ -62,6 +69,8 @@ impl Default for VectorCache {
             used: [0; HOSTS],
             clock: 0,
             write_through: false,
+            writing: NONE,
+            fresh: false,
         }
     }
 }
@@ -80,15 +89,21 @@ impl VectorCache {
     pub(crate) const fn has_dirty(&self) -> bool {
         self.dirty != 0
     }
-    /// The pool registers that hold a guest vector: no recipe may write one.
+    /// The pool registers that hold a guest vector: no recipe may write one,
+    /// except the destination home it is writing.
     pub(crate) fn occupied(&self) -> u32 {
-        self.owner
+        let occupied = self
+            .owner
             .iter()
             .enumerate()
             .filter(|(_, owner)| **owner != NONE)
             .fold(0, |mask, (index, _)| {
                 mask | 1 << (usize::from(FIRST_HOST) + index)
-            })
+            });
+        match self.writing {
+            NONE => occupied,
+            host => occupied & !(1 << host),
+        }
     }
     fn touch(&mut self, index: usize) {
         self.clock += 1;
@@ -97,6 +112,10 @@ impl VectorCache {
     /// The home of `vector`, if it has one.
     pub(crate) fn home(&mut self, vector: u8) -> Option<u8> {
         let host = self.home[usize::from(vector)];
+        assert!(
+            !(self.fresh && host != NONE && host == self.writing),
+            "a destination home is read before its write ends"
+        );
         (self.active && host != NONE).then(|| {
             self.touch(usize::from(host - FIRST_HOST));
             host
@@ -160,6 +179,27 @@ impl Code {
         self.vectors.touch(index);
         host
     }
+    /// Let the recipe being emitted write `vector`'s home, which it then
+    /// holds whole (`fresh`: the old value is not read through the cache
+    /// again before [`Self::end_vector_write`]). Only one at a time.
+    pub(crate) fn begin_vector_write(&mut self, vector: u8, fresh: bool) -> u8 {
+        assert_eq!(self.vectors.writing, NONE, "one destination home at a time");
+        let host = self.allocate_vector(vector);
+        self.vectors.writing = host;
+        self.vectors.fresh = fresh;
+        host
+    }
+    /// The recipe wrote `vector`'s home: it is newer than the state.
+    pub(crate) fn end_vector_write(&mut self, vector: u8) {
+        assert_eq!(
+            self.vectors.writing,
+            self.vectors.home[usize::from(vector)],
+            "the destination home being written"
+        );
+        self.vectors.writing = NONE;
+        self.vectors.fresh = false;
+        self.mark_vector_dirty(vector);
+    }
     /// Commit to the state from here on, or to homes.
     pub(crate) fn set_vector_write_through(&mut self, through: bool) {
         self.vectors.write_through = through;
@@ -207,6 +247,10 @@ impl Code {
     /// Store every dirty home: the state block is then current, and the
     /// homes stay valid copies.
     pub(crate) fn flush_vectors(&mut self) {
+        assert_eq!(
+            self.vectors.writing, NONE,
+            "a destination home is written before the cache stores"
+        );
         while self.vectors.dirty != 0 {
             self.store_vector(self.vectors.dirty.trailing_zeros() as u8);
         }

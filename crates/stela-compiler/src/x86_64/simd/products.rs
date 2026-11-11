@@ -1,8 +1,8 @@
 //! Integer multiplies, widening arithmetic and absolute differences.
 use super::rearrange::{add_or_subtract, lane_constant};
 use super::{
-    Host, commit, greater, packed, packed_imm, read_vector, rearrange::constant, shuffle, three,
-    vector_source,
+    Host, binary, commit, finish, greater, packed, packed_imm, read_vector, rearrange::constant,
+    shuffle, three, vector_accumulator, vector_destination, vector_source,
 };
 use crate::x86_64::asm::{Code, Cond, Gpr, Size, resolve, vector_extensions};
 use crate::{
@@ -184,6 +184,11 @@ fn absolute_difference(code: &mut Code, lane: u8, signed: bool, target: TargetCp
 }
 
 fn indexed(code: &mut Code, lane: u8, index: u8) {
+    indexed_from(code, lane, index, 1);
+}
+
+/// [`indexed`] of `source` (a home or XMM1) into XMM1.
+fn indexed_from(code: &mut Code, lane: u8, index: u8, source: u8) {
     if lane == 2 {
         // Halfword shuffles leave the other 64-bit half unchanged. Broadcast
         // one repeated dword from the selected half to complete all eight lanes.
@@ -195,13 +200,13 @@ fn indexed(code: &mut Code, lane: u8, index: u8) {
                 Host::ShuffleHighWord
             },
             1,
-            1,
+            source,
             (index % 4) * 0x55,
         );
         shuffle(code, 1, 1, if index < 4 { 0 } else { 0xaa });
     } else {
         // Select and broadcast the dword in one shuffle.
-        shuffle(code, 1, 1, index * 0x55);
+        shuffle(code, 1, source, index * 0x55);
     }
 }
 
@@ -645,101 +650,123 @@ fn polynomial(code: &mut Code, lane: u8, widen: bool, upper: bool, target: Targe
     packed(code, Host::MoveAligned, 0, 5);
 }
 
-/// Halfword `index` of XMM1 in every word of XMM1: VPBROADCASTW for lane 0
-/// with VEX, else the two shuffles of [`indexed`].
-fn indexed_word(code: &mut Code, index: u8, target: TargetCpu) {
+/// Halfword `index` of `source` (a home or XMM1) in every word of XMM1:
+/// VPBROADCASTW for lane 0 with VEX, else the two shuffles of [`indexed`].
+fn indexed_word(code: &mut Code, source: u8, index: u8, target: TargetCpu) {
     if index == 0 && three::vex(target) {
-        three::broadcast_word(code, 1, 1);
+        three::broadcast_word(code, 1, source);
     } else {
-        indexed(code, 2, index);
+        indexed_from(code, 2, index, source);
     }
 }
 
-/// Halfword `index` of XMM1, zero-extended, in every dword of XMM1.
-fn indexed_word_pairs(code: &mut Code, index: u8, target: TargetCpu) {
+/// Halfword `index` of `source` (a home or XMM1), zero-extended, in every
+/// dword of XMM1.
+fn indexed_word_pairs(code: &mut Code, source: u8, index: u8, target: TargetCpu) {
     if index < 4 {
-        packed_imm(code, Host::ShuffleLowWord, 1, 1, index * 0x55);
+        packed_imm(code, Host::ShuffleLowWord, 1, source, index * 0x55);
         Host::ZeroExtendWordToDword.register(code, 1, 1, target);
     } else {
-        indexed(code, 2, index);
+        indexed_from(code, 2, index, source);
         three::shift(code, Shift::RightDword, 1, 1, 16, target);
     }
 }
 
 /// SMULL/UMULL/SMLAL/UMLAL/SMLSL/UMLSL of halfwords, by vector or element,
-/// from XMM0 and XMM1; returns the register holding the result. Signed
-/// products pair each halfword with a zero halfword so that one PMADDWD (or
-/// VPDPWSSD, which also adds the accumulator) forms the exact 32-bit
-/// product. Unsigned products and signed upper halves by vector use
-/// PMULLW/PMULH[U]W and one unpack. Clobbers XMM1-XMM2; no EFLAGS.
+/// written to the destination: the sources are read where they are (homes,
+/// or XMM0 and XMM1 loaded) and the last instruction writes the
+/// destination's home where it has one. Signed products pair each halfword
+/// with a zero halfword so that one PMADDWD (or VPDPWSSD, which also adds
+/// the accumulator in place) forms the exact 32-bit product. Unsigned
+/// products and signed upper halves by vector use PMULLW/PMULH[U]W and one
+/// unpack. Clobbers XMM0-XMM2; no EFLAGS.
 fn word_long_product(
     code: &mut Code,
     operand: &Operand,
     signed: bool,
     operation: Accumulate,
     target: TargetCpu,
-) -> u8 {
+) {
     let upper = operand.upper;
     let paired = signed && (operand.index.is_some() || !upper);
-    let mut result = 0;
-    if paired {
+    let left = vector_source(code, operand.left, 0);
+    let right = vector_source(code, operand.right, 1);
+    let result = if paired {
         match operand.index {
             Some(index) if upper && index < 4 => {
-                indexed_word_pairs(code, index, target);
-                packed(code, Host::UnpackHighWord, 0, 0);
+                indexed_word_pairs(code, right, index, target);
+                three::three(code, Host::UnpackHighWord, 0, left, left, target);
             }
             Some(index) => {
-                indexed_word(code, index, target);
+                indexed_word(code, right, index, target);
                 if upper {
-                    packed(code, Host::UnpackHighWord, 0, 0);
+                    three::three(code, Host::UnpackHighWord, 0, left, left, target);
                     three::shift(code, Shift::RightDword, 0, 0, 16, target);
                 } else {
-                    Host::ZeroExtendWordToDword.register(code, 0, 0, target);
+                    Host::ZeroExtendWordToDword.register(code, 0, left, target);
                 }
             }
             None => {
-                Host::ZeroExtendWordToDword.register(code, 0, 0, target);
-                packed(code, Host::UnpackLowWord, 1, 1);
+                three::three(code, Host::UnpackLowWord, 1, right, right, target);
+                Host::ZeroExtendWordToDword.register(code, 0, left, target);
             }
         }
         if operation == Accumulate::Add && three::dot_words_supported(target) {
-            read_vector(code, operand.destination, 2);
-            three::dot_words(code, 2, 0, 1, target);
-            return 2;
+            let sum = vector_accumulator(code, operand.destination, 2);
+            three::dot_words(code, sum.xmm, 0, 1, target);
+            finish(code, sum);
+            return;
+        }
+        if operation == Accumulate::None {
+            let destination = vector_destination(code, operand.destination, 0);
+            binary(
+                code,
+                Host::MultiplyAddWords,
+                destination,
+                0,
+                1,
+                true,
+                target,
+            );
+            return;
         }
         packed(code, Host::MultiplyAddWords, 0, 1);
+        0
     } else {
-        if let Some(index) = operand.index {
-            indexed_word(code, index, target);
-        }
+        let right = match operand.index {
+            Some(index) => {
+                indexed_word(code, right, index, target);
+                1
+            }
+            None => right,
+        };
         let high = if signed {
             Host::MultiplyHighSignedWord
         } else {
             Host::MultiplyHighUnsignedWord
         };
-        three::three(code, Host::MultiplyLowWord, 2, 0, 1, target);
-        packed(code, high, 0, 1);
         let unpack = if upper {
             Host::UnpackHighWord
         } else {
             Host::UnpackLowWord
         };
+        three::three(code, Host::MultiplyLowWord, 2, left, right, target);
+        three::three(code, high, 0, left, right, target);
+        if operation == Accumulate::None {
+            let destination = vector_destination(code, operand.destination, 2);
+            binary(code, unpack, destination, 2, 0, false, target);
+            return;
+        }
         three::three(code, unpack, 2, 2, 0, target);
-        result = 2;
-    }
-    match operation {
-        Accumulate::None => result,
-        Accumulate::Add => {
-            let accumulator = vector_source(code, operand.destination, 1);
-            three::three(code, Host::AddDword, result, result, accumulator, target);
-            result
-        }
-        Accumulate::Subtract => {
-            read_vector(code, operand.destination, 1);
-            packed(code, Host::SubDword, 1, result);
-            1
-        }
-    }
+        2
+    };
+    let sum = vector_accumulator(code, operand.destination, 1);
+    let opcode = if operation == Accumulate::Add {
+        Host::AddDword
+    } else {
+        Host::SubDword
+    };
+    binary(code, opcode, sum, sum.xmm, result, false, target);
 }
 
 /// The products [`word_long_product`] leaves, from XMM0 and XMM1 (an
@@ -794,6 +821,16 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
         upper,
         index: _,
     } = *operand;
+    if let Kind::Product {
+        signed,
+        widen,
+        accumulate,
+    } = kind
+        && word_long_product_supported(lane, widen, target)
+    {
+        word_long_product(code, operand, signed, accumulate, target);
+        return;
+    }
     if !matches!(
         kind,
         Kind::Doubling { high: true, .. } | Kind::RoundedDoublingAccumulate { .. }
@@ -814,14 +851,10 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             widen,
             accumulate: operation,
         } => {
-            if word_long_product_supported(lane, widen, target) {
-                result = word_long_product(code, operand, signed, operation, target);
-            } else {
-                if let Some(index) = operand.index {
-                    indexed(code, lane, index);
-                }
-                result = product(code, operand, signed, widen, operation, target);
+            if let Some(index) = operand.index {
+                indexed(code, lane, index);
             }
+            result = product(code, operand, signed, widen, operation, target);
         }
         Kind::Arithmetic {
             signed,
