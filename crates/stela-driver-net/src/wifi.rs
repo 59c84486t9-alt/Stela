@@ -21,6 +21,7 @@ pub mod scan;
 pub mod security;
 pub mod station;
 pub mod supplicant;
+pub mod unsupported;
 
 use core::sync::atomic::{AtomicU64, Ordering};
 

@@ -1030,6 +1030,14 @@ pub unsafe fn probe_with_provider(
                 }
             }
             if function.class[..2] == [2, 0x80] {
+                // A chip Linux drives and no driver here does is named once,
+                // with its Linux driver, and left untouched.
+                if let Some(why) =
+                    crate::net::wifi::unsupported::reason(function.vendor, function.device)
+                {
+                    devices.unsupported.push((address, function.class, why));
+                    continue;
+                }
                 if wifi.is_none()
                     && matches!(
                         native::Kind::of(&function),
