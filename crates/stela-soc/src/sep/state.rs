@@ -2,8 +2,8 @@
 //! ([`super::keys`]) and the anti-replay store ([`super::store`]).
 //!
 //! On an installed machine it is the machine-state partition, after the NOR
-//! image (docs/research/installation.md: one small partition holds the NOR,
-//! NVRAM and the SEP's anti-replay storage). Its first [`ROOTS_BYTES`] hold the
+//! image (one small partition holds the NOR, NVRAM and the SEP's
+//! anti-replay storage). Its first [`ROOTS_BYTES`] hold the
 //! roots record, the rest the store's two banks ([`super::store::persist`]).
 //! An all-zero area is one never used, which the SEP provisions on its first
 //! activation, as a new Mac's SEP has fresh state; any other content must

@@ -170,7 +170,7 @@ fn source_shaped_constructor_returns_reopenable_keys_and_advances_to_attestation
     }
 }
 
-// The build-49 post-sign-in request: {bc: 13, kt: 4, o: "oc"}, no `rko`.
+// A request seen after sign-in: {bc: 13, kt: 4, o: "oc"}, no `rko`.
 const REFERENCE_CREATE_NO_OPTIONS: &[u8] =
     b"\x31\x1b\x30\x07\x0c\x02bc\x02\x01\x0d\x30\x07\x0c\x02kt\x02\x01\x04\x30\x07\x0c\x01o\x0c\x02oc";
 

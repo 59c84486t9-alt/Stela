@@ -8,8 +8,7 @@
 //! no ACM. The proposed/blessed digest getters +0xec7c/+0xe1b4 select 13/16,
 //! and +0xe754/+0xe3c8 the local 11/14; helper +0xe8a8..0xe93c sends 32
 //! bytes and copies exactly 48 after the reply header. Commands 5..7, 12 and
-//! 15 are the remote nonce's, which stays refused. Source SHA-256 and the
-//! Stela policy are in docs/research/sep.md.
+//! 15 are the remote nonce's, which stays refused.
 //!
 //! The native trust policy permits one unauthenticated proposal per nonce
 //! at a time, only for these empty bodies. A proposal belongs to

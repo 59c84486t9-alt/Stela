@@ -3,7 +3,7 @@
 //! Apple's Platform Security "Secure Enclave" describes device-unique UID
 //! and shared GID roots that software cannot read. The restore image contains
 //! neither. Stela requires explicit persistent provisioning and separates the
-//! domains with HMAC-SHA256. docs/research/sep.md defines this Stela policy.
+//! domains with HMAC-SHA256, a Stela policy.
 //! This primitive grants no Image4 trust, AKS wrapping format or keybag state.
 use crate::Result;
 use hmac::{Hmac, Mac};

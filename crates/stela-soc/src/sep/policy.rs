@@ -2,10 +2,10 @@
 //! the installed boot bind to, and the Stela-owned signing of the macOS
 //! default LocalPolicy.
 //!
-//! Two distinct trust owners meet here (docs/research/restore-trust.md):
+//! Two distinct trust owners meet here:
 //!
 //! - The **recoveryOS** LocalPolicy is verified by libbootpolicy against
-//!   Apple's fixed roots, so Stela cannot sign it; the lead's restore client
+//!   Apple's fixed roots, so Stela cannot sign it; Stela's restore client
 //!   obtains it through an opt-in Apple TSS request. The SEP's only part is a
 //!   faithful recoveryOS policy **nonce**: restored drives
 //!   `bootpolicy_update_recoveryos_policy_nonce_begin`,

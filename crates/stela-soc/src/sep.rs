@@ -3,7 +3,6 @@
 //! The J473AP DT uses `iop-sep,ascwrap-v4` and `iop-nub,sep`, not RTBuddy.
 //! `AppleSEPManager::_sendMessageGated` (kernel file 0x2d6ac90) puts the
 //! service ID in its payload; ASC endpoint zero carries it unchanged.
-//! docs/research/sep.md owns the recovered contract and remaining gates.
 //!
 //! The emulated SEP boots: SEPROM accepts the delivered container under
 //! Stela's own explicit, TSS-free trust policy (recording measured evidence),
@@ -13,7 +12,7 @@
 //! (`boot_policy`) and credential manager (`credentials`) services; each
 //! answers the requests whose contract is recovered and refuses the rest
 //! rather than fake a reply, and the other services are not advertised. See
-//! `firmware`/`os`/`control` and docs/research/sep.md.
+//! `firmware`/`os`/`control`.
 pub mod boot_policy;
 pub mod control;
 pub mod credentials;

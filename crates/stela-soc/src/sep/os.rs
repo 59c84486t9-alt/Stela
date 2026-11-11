@@ -23,7 +23,7 @@
 //! the AP's own sends, such as a client's OOL registration; SEP-sent traffic
 //! is not gated. Only services with a native implementation are cataloged:
 //! a guessed advertisement would make the kernel create a nub it then blocks
-//! on. docs/research/sep.md owns the recovered contract.
+//! on.
 //!
 //! Application-service frames wait for the SEP's DMA step, where the service
 //! reads its request from, and writes its result to, the OOL buffers its AP

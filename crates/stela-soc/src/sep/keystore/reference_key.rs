@@ -9,8 +9,8 @@
 //! and cannot authorize a key belonging to another machine or policy.
 //!
 //! Only the standalone class 13 profile with options 1 (libFDR's `rko: 1`) or
-//! none (a request without `rko`, as a post-sign-in caller sends it in
-//! build-49) and P-256 types 4/5 are admitted. The options value is bound
+//! none (a request without `rko`, as a caller sends it after sign-in) and
+//! P-256 types 4/5 are admitted. The options value is bound
 //! into the scalar and descriptor; its sepOS effect is not interpreted. Credential bags, deletion/revocation, attestation,
 //! private export and unsupported key classes remain separate operations.
 use super::super::Entropy;

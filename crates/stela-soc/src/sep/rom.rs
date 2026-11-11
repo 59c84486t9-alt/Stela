@@ -2,7 +2,7 @@
 //!
 //! `AppleSEPBooter::bootSEP` 0x2d738d4..0x2d74030, `_bootAction`
 //! 0x2d72ca8..0x2d7309c and `generateROMNonce` 0x2d74030..0x2d742c4
-//! (26A434 kernel file offsets). See docs/research/sep.md.
+//! (26A434 kernel file offsets).
 //!
 //! Stela hands off a running ROM in state 1, with no nonce. BootTz0
 //! initializes native private state, inaccessible to AP DMA, and reaches

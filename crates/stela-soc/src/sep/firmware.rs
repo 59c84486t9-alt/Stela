@@ -9,8 +9,7 @@
 //! replies 106 (`_bootAction` 0x2d72d68). This records measured evidence; it
 //! does not claim Apple's signature was checked by Apple keys. A malformed
 //! container, a payload type that disagrees with the request, or a DMA fault
-//! refuses without a boot acknowledgement. docs/research/sep.md owns the
-//! contract and the trust-policy boundary.
+//! refuses without a boot acknowledgement.
 use super::super::asc::{Firmware, Message};
 use super::{
     Entropy, SecurityMode, boot_policy, control, credentials,
