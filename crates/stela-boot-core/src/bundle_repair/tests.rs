@@ -101,11 +101,21 @@ fn the_steps_create_the_directories_the_manual_remedy_does() {
     assert!(!commands.iter().any(|command| command.contains("xattr")));
     let chflags = format!("/usr/bin/chflags restricted {all}");
     assert!(commands.contains(&chflags.as_str()));
-    // Only the restricted flag is optional.
+    // Only the restricted flag and the read-only remount after the sync are
+    // optional.
+    let remount = "/sbin/mount -u -r /System/Volumes/Data";
     for step in &steps {
-        assert_eq!(step.required, step.command != chflags, "{}", step.command);
+        assert_eq!(
+            step.required,
+            step.command != chflags && step.command != remount,
+            "{}",
+            step.command
+        );
     }
-    assert_eq!(commands.last(), Some(&"/bin/sync"));
+    assert_eq!(&commands[commands.len() - 2..], ["/bin/sync", remount]);
+    // The restart skips the unmount walk that stalled; the sync stays.
+    assert_eq!(REBOOT, "/sbin/reboot -q");
+    assert!(SYNC_AND_REBOOT.starts_with("/bin/sync; ") && SYNC_AND_REBOOT.ends_with(REBOOT));
     assert!(
         steps
             .iter()
@@ -353,4 +363,48 @@ fn events_read_as_log_lines() {
         })),
         "BUNDLE REPAIR failed: step 5 exited with status 1"
     );
+}
+
+/// A driver whose every step passed and that has typed the restart.
+fn rebooting(now: &mut u64) -> Driver {
+    let mut driver = Driver::new(steps(), *now);
+    let mut console = Console::new();
+    start(&mut driver, now);
+    pump(&mut driver, &mut console, now, &|_| Some(0));
+    assert_eq!(
+        driver.take_events().last(),
+        Some(&Event::Rebooting { repaired: true })
+    );
+    driver
+}
+
+#[test]
+fn a_restart_that_stops_printing_fails_after_the_quiet_bound_and_a_busy_one_at_the_cap() {
+    // A stall after the last console line, as at the xarts unmount.
+    let mut now = 0;
+    let mut driver = rebooting(&mut now);
+    let last = now + 1000;
+    driver.line("unmount(0) /System/Volumes/xarts", last);
+    driver.tick(last + QUIET_SECONDS * 1000 - 1);
+    assert!(!driver.failed());
+    driver.tick(last + QUIET_SECONDS * 1000);
+    assert!(driver.failed());
+    assert_eq!(driver.take_events(), [Event::Failed(Failure::NoRestart)]);
+    assert_eq!(driver.next_byte(), None);
+    // A restart that keeps printing still ends at the cap.
+    let mut now = 0;
+    let mut driver = rebooting(&mut now);
+    let cap = now + RESTART_SECONDS * 1000;
+    while now + 10_000 < cap {
+        now += 10_000;
+        driver.line("IOPlatformHaltRestartAction -> AppleT8112PMGR", now);
+        driver.tick(now);
+        assert!(!driver.failed());
+    }
+    // The restart was typed just before the console's last echo lines.
+    driver.tick(cap - 1000);
+    assert!(!driver.failed());
+    driver.tick(cap);
+    assert!(driver.failed());
+    const { assert!(QUIET_SECONDS < RESTART_SECONDS) };
 }

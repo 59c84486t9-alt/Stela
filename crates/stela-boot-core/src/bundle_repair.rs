@@ -18,7 +18,8 @@
 //! repair by itself. In that boot the engine types [`steps`] at the guest's
 //! root console ([`Driver`]), as the manual remedy does: it mounts the Data
 //! volume, creates the plugin's directories root-owned and 0755, marks them
-//! restricted, syncs and restarts. The next boot's kext then creates the
+//! restricted, syncs, remounts it read-only and restarts quickly
+//! ([`REBOOT`]). The next boot's kext then creates the
 //! files in place. Only mounting and the directories are required: a
 //! failing optional step is logged and the repair goes on. A failed
 //! required step still syncs and restarts, and a repair whose shell stops
@@ -209,13 +210,25 @@ pub fn steps() -> Vec<Step> {
         step(format!("/usr/sbin/chown root:wheel {directories}"), 30),
         optional(format!("/usr/bin/chflags restricted {directories}"), 30),
         step("/bin/sync".into(), 120),
+        // Commits the volume and marks it clean, so the quick restart below
+        // leaves nothing for the next mount to replay. Optional: the sync
+        // already put every change on disk, and a busy volume refuses it.
+        optional("/sbin/mount -u -r /System/Volumes/Data".into(), 60),
     ])
 }
 
 /// The command that ends the repair; the guest's restart restarts the PC.
-pub const REBOOT: &str = "/sbin/reboot";
+///
+/// `-q` is RB_QUICK: XNU's `reboot_kernel` then only syncs and goes to
+/// `PEHaltRestart`, skipping the process kill and `vfs_unmountall`. The
+/// power tree's shutdown still runs there, so the NVMe driver still sends
+/// its shutdown notification and the controller flushes. The full path
+/// stalled in single-user mode: run 20261111-150448 stopped in
+/// `vfs_unmountall(system)` at `unmount(0) /System/Volumes/xarts`, before
+/// APFS began that unmount, until the 300 s bound ran out.
+pub const REBOOT: &str = "/sbin/reboot -q";
 /// What ends a repair whose required step failed: what was written stays.
-pub const SYNC_AND_REBOOT: &str = "/bin/sync; /sbin/reboot";
+pub const SYNC_AND_REBOOT: &str = "/bin/sync; /sbin/reboot -q";
 /// The line the single-user shell's banner starts with.
 pub const BANNER: &str = "*** Single-user boot ***";
 /// How long the single-user banner may take to appear, from the start.
@@ -224,8 +237,11 @@ pub const BANNER_SECONDS: u64 = 1800;
 /// starts the shell after it, and input before the shell reads may be
 /// flushed.
 pub const SETTLE_SECONDS: u64 = 5;
-/// How long the guest may take to restart after [`REBOOT`].
-pub const RESTART_SECONDS: u64 = 300;
+/// How long the guest may take to restart after [`REBOOT`] in all.
+pub const RESTART_SECONDS: u64 = 120;
+/// How long the guest's console may stay silent after [`REBOOT`]: the
+/// restart path logs each stage, and a stalled one prints nothing more.
+pub const QUIET_SECONDS: u64 = 30;
 
 /// Why the repair failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -250,7 +266,10 @@ impl core::fmt::Display for Failure {
             Self::Exit { index, status } => {
                 write!(f, "step {} exited with status {status}", index + 1)
             }
-            Self::NoRestart => write!(f, "macOS did not restart within {RESTART_SECONDS} s"),
+            Self::NoRestart => write!(
+                f,
+                "macOS did not restart (console silent for {QUIET_SECONDS} s, or over {RESTART_SECONDS} s in all)"
+            ),
         }
     }
 }
@@ -280,10 +299,21 @@ pub enum Event {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum State {
-    Banner { deadline: u64 },
-    Settle { until: u64 },
-    Step { index: usize, deadline: u64 },
-    Rebooting { deadline: u64 },
+    Banner {
+        deadline: u64,
+    },
+    Settle {
+        until: u64,
+    },
+    Step {
+        index: usize,
+        deadline: u64,
+    },
+    /// `quiet` moves with each console line, never past `deadline`.
+    Rebooting {
+        quiet: u64,
+        deadline: u64,
+    },
     Failed,
 }
 
@@ -372,6 +402,12 @@ impl Driver {
                 }
                 self.advance(index + 1, now);
             }
+            State::Rebooting { deadline, .. } => {
+                self.state = State::Rebooting {
+                    quiet: deadline.min(now + QUIET_SECONDS * MILLIS),
+                    deadline,
+                };
+            }
             _ => {}
         }
     }
@@ -389,6 +425,7 @@ impl Driver {
         self.input.push(b'\n');
         self.events.push(Event::Rebooting { repaired });
         self.state = State::Rebooting {
+            quiet: now + QUIET_SECONDS * MILLIS,
             deadline: now + RESTART_SECONDS * MILLIS,
         };
     }
@@ -401,7 +438,7 @@ impl Driver {
             State::Step { index, deadline } if now >= deadline => {
                 self.fail(Failure::Timeout { index })
             }
-            State::Rebooting { deadline } if now >= deadline => self.fail(Failure::NoRestart),
+            State::Rebooting { quiet, .. } if now >= quiet => self.fail(Failure::NoRestart),
             _ => {}
         }
     }
