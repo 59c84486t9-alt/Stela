@@ -17,10 +17,56 @@ pub(super) fn relaunch() -> Result<bool> {
     }
     let error = std::process::Command::new("sudo")
         .arg("--")
+        .args(kept_environment(std::env::vars_os()))
         .arg(std::env::current_exe()?)
         .args(std::env::args_os().skip(1))
         .exec();
     Err(error).context("setup writes disks as root, and sudo could not start")
+}
+
+/// The proxy settings that setup's downloads need behind a proxy, as
+/// `NAME=value` words for sudo, which otherwise clears them from the
+/// environment of the command it runs.
+#[cfg(not(windows))]
+fn kept_environment(
+    variables: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<std::ffi::OsString> {
+    const PROXY: [&str; 4] = ["http_proxy", "https_proxy", "all_proxy", "no_proxy"];
+    variables
+        .filter(|(name, value)| {
+            !value.is_empty()
+                && name
+                    .to_str()
+                    .is_some_and(|name| PROXY.contains(&name.to_ascii_lowercase().as_str()))
+        })
+        .map(|(name, value)| {
+            let mut word = name;
+            word.push("=");
+            word.push(value);
+            word
+        })
+        .collect()
+}
+
+#[cfg(all(test, not(windows)))]
+mod unix_tests {
+    #[test]
+    fn sudo_keeps_the_proxy_settings_alone() {
+        let variables = [
+            ("HTTPS_PROXY", "http://proxy.test:3128"),
+            ("no_proxy", "localhost"),
+            ("http_proxy", ""),
+            ("HOME", "/home/someone"),
+            ("PROXY_PASSWORD", "x"),
+        ]
+        .map(|(name, value)| (name.into(), value.into()));
+        let kept = super::kept_environment(variables.into_iter());
+        assert_eq!(
+            kept,
+            ["HTTPS_PROXY=http://proxy.test:3128", "no_proxy=localhost"]
+                .map(std::ffi::OsString::from)
+        );
+    }
 }
 
 #[cfg(not(windows))]
