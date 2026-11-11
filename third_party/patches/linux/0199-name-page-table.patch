@@ -1,0 +1,86 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 19:44:27 -0500
+Subject: [PATCH] feat(nouveau): name page-table takes in a channel's MMU fault
+ report, so the order of a map against an earlier unmap of the same range
+ shows
+
+---
+ drivers/gpu/drm/nouveau/nouveau_uvmm.c | 24 +++++++++++++-----------
+ drivers/gpu/drm/nouveau/nouveau_uvmm.h |  7 ++++---
+ 2 files changed, 17 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/nouveau_uvmm.c b/drivers/gpu/drm/nouveau/nouveau_uvmm.c
+index 19eee08408432909425ceec76ba331a6a5b295ee..307b0766ec8673cc78ac5a9cd18cf88d85135a8d 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_uvmm.c
++++ b/drivers/gpu/drm/nouveau/nouveau_uvmm.c
+@@ -109,16 +109,7 @@ nouveau_uvmm_vmm_sparse_unref(struct nouveau_uvmm *uvmm,
+ 	return nvif_vmm_raw_sparse(vmm, addr, range, false);
+ }
+ 
+-static int
+-nouveau_uvmm_vmm_get(struct nouveau_uvmm *uvmm,
+-		     u64 addr, u64 range, u8 page_shift)
+-{
+-	struct nvif_vmm *vmm = &uvmm->vmm.vmm;
+-
+-	return nvif_vmm_raw_get(vmm, addr, range, page_shift);
+-}
+-
+-/* Notes a page-table unmap or release for nouveau_uvmm_describe_fault(). */
++/* Notes a page-table take, unmap or release for nouveau_uvmm_describe_fault(). */
+ static void
+ nouveau_uvmm_history_add(struct nouveau_uvmm *uvmm, u64 addr, u64 range,
+ 			 u8 page_shift, const char *why)
+@@ -135,6 +126,17 @@ nouveau_uvmm_history_add(struct nouveau_uvmm *uvmm, u64 addr, u64 range,
+ 	spin_unlock(&uvmm->history_lock);
+ }
+ 
++static int
++nouveau_uvmm_vmm_get(struct nouveau_uvmm *uvmm,
++		     u64 addr, u64 range, u8 page_shift)
++{
++	struct nvif_vmm *vmm = &uvmm->vmm.vmm;
++
++	nouveau_uvmm_history_add(uvmm, addr, range, page_shift,
++				 "page tables taken");
++	return nvif_vmm_raw_get(vmm, addr, range, page_shift);
++}
++
+ static int
+ nouveau_uvmm_vmm_put(struct nouveau_uvmm *uvmm,
+ 		     u64 addr, u64 range, u8 page_shift)
+@@ -2026,7 +2028,7 @@ nouveau_uvmm_describe_fault(struct nouveau_cli *cli, int chid)
+ 			  found[i].addr, found[i].addr + found[i].range,
+ 			  found[i].page_shift);
+ 	if (!shown)
+-		NV_PRINTK(err, cli, "  none of the latest %u unmaps or releases covered it\n",
++		NV_PRINTK(err, cli, "  none of the latest %u page-table takes, unmaps or releases covered it\n",
+ 			  kept);
+ }
+ 
+diff --git a/drivers/gpu/drm/nouveau/nouveau_uvmm.h b/drivers/gpu/drm/nouveau/nouveau_uvmm.h
+index 633a459060a1398eb7f939953c07abc43337e345..486f180eea1072d080bce3fd2065e8544bafe615 100644
+--- a/drivers/gpu/drm/nouveau/nouveau_uvmm.h
++++ b/drivers/gpu/drm/nouveau/nouveau_uvmm.h
+@@ -13,8 +13,9 @@ struct nouveau_uvmm {
+ 	struct maple_tree region_mt;
+ 	struct mutex mutex;
+ 
+-	/* The latest page-table unmaps and releases, newest at
+-	 * history_next - 1, for naming what a faulting address last held.
++	/* The latest page-table takes, unmaps and releases, newest at
++	 * history_next - 1, for naming what a faulting address last held
++	 * and in which order.
+ 	 */
+ 	spinlock_t history_lock;
+ 	unsigned int history_next;
+@@ -24,7 +25,7 @@ struct nouveau_uvmm {
+ 		unsigned long jiffies;
+ 		const char *why;
+ 		u8 page_shift;
+-	} history[64];
++	} history[128];
+ };
+ 
+ struct nouveau_uvma_region {

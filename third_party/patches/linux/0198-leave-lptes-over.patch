@@ -1,0 +1,67 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 19:39:30 -0500
+Subject: [PATCH] fix(nouveau): leave LPTEs over referenced SPTEs unmapped when
+ large pages are unmapped, so a queued unmap does not hide a newer small-page
+ mapping of the same range
+
+---
+ drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmm.c | 38 +++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmm.c b/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmm.c
+index 190c082b12c8cfae89c2d3136816accc0c92f298..a329efe6637881c79c65e23f24562c47a404bce2 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmm.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/mmu/vmm.c
+@@ -519,6 +519,41 @@ nvkm_vmm_ref_swpt(struct nvkm_vmm_iter *it, struct nvkm_vmm_pt *pgd, u32 pdei)
+ 	return true;
+ }
+ 
++/* Clear LPTEs, leaving those over referenced SPTEs UNMAPPED.
++ *
++ * An INVALID or SPARSE LPTE stops the MMU from reading the SPTEs below it.
++ * A map with small pages takes its SPTE references (nvkm_vmm_ref_sptes),
++ * which hand the range to the SPTEs, when it is submitted; an earlier
++ * unmap of large pages over the same range may run after that, so it
++ * must not take the range back from them.
++ */
++static void
++nvkm_vmm_clr_lptes(struct nvkm_vmm_iter *it, struct nvkm_vmm_pt *pgt,
++		   struct nvkm_mmu_pt *pt, u32 ptei, u32 ptes,
++		   nvkm_vmm_pxe_func CLR_PTES)
++{
++	const struct nvkm_vmm_desc_func *func = it->desc->func;
++
++	while (ptes) {
++		const bool sptes = !!pgt->pte[ptei].s.sptes;
++		u32 n;
++
++		for (n = 1; n < ptes; n++) {
++			if (!!pgt->pte[ptei + n].s.sptes != sptes)
++				break;
++		}
++
++		if (sptes) {
++			TRA(it, "LPTE %05x: kept U over SPTEs %d PTEs", ptei, n);
++			func->unmap(it->vmm, pt, ptei, n);
++		} else {
++			CLR_PTES(it->vmm, pt, ptei, n);
++		}
++		ptei += n;
++		ptes -= n;
++	}
++}
++
+ static inline u64
+ nvkm_vmm_iter(struct nvkm_vmm *vmm, const struct nvkm_vmm_page *page,
+ 	      u64 addr, u64 size, const char *name, bool ref, bool pfn,
+@@ -587,6 +622,9 @@ nvkm_vmm_iter(struct nvkm_vmm *vmm, const struct nvkm_vmm_page *page,
+ 			if (MAP_PTES || CLR_PTES) {
+ 				if (MAP_PTES)
+ 					MAP_PTES(vmm, pt, ptei, ptes, map);
++				else if (desc->type == LPT && pgt->refs[1])
++					nvkm_vmm_clr_lptes(&it, pgt, pt, ptei,
++							   ptes, CLR_PTES);
+ 				else
+ 					CLR_PTES(vmm, pt, ptei, ptes);
+ 				nvkm_vmm_flush_mark(&it);
