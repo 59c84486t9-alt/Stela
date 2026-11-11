@@ -10,6 +10,7 @@ pub mod boot;
 mod boot_log;
 pub mod efi;
 pub use stela_gpu_maintenance as gpu;
+mod net;
 mod progress;
 pub mod restore;
 mod setup;

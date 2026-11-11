@@ -279,7 +279,8 @@ pub fn fetch_public_key(metadata: &Metadata) -> Result<PublicKey> {
             }
         }))
         .build()?;
-    let response = client.get(url.clone()).send()?.error_for_status()?;
+    let response = crate::net::send("fetching the public AEA key", || client.get(url.clone()))?
+        .error_for_status()?;
     let final_url = response.url().to_string();
     let content_type = response
         .headers()

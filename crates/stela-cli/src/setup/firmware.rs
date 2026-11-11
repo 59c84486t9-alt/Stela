@@ -48,11 +48,16 @@ fn read_cached(path: &Path, artifact: &Artifact) -> Result<Vec<u8>> {
 }
 
 fn download(client: &Client, artifact: &Artifact) -> Result<Vec<u8>> {
-    let mut response = client
-        .get(artifact.url())
-        .header(header::ACCEPT_ENCODING, "identity")
-        .send()?
-        .error_for_status()?;
+    // A minute, and the file at 32 kB/s: a GPU's 64 MB firmware may take
+    // many minutes on a slow network.
+    let timeout = Duration::from_secs(60 + artifact.length as u64 / 32_000);
+    let mut response = crate::net::send(&format!("downloading {}", artifact.member), || {
+        client
+            .get(artifact.url())
+            .header(header::ACCEPT_ENCODING, "identity")
+            .timeout(timeout)
+    })?
+    .error_for_status()?;
     ensure!(
         response.status() == reqwest::StatusCode::OK,
         "firmware source redirected or returned an unexpected status"

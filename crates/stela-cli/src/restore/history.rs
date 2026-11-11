@@ -46,15 +46,18 @@ fn device_name(device: &Device) -> String {
 pub(super) fn load() -> Result<Releases> {
     // One condensed request contains every model and historical release.
     // Avoid one request per model, or downloading any IPSW to discover versions.
-    let response = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(25))
+    // A connection may take a slow resolver, or a fallback from IPv6 to
+    // IPv4, beyond a few seconds.
+    let client = reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(60))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("stela/", env!("CARGO_PKG_VERSION")))
-        .build()?
-        .get(URL)
-        .send()?
-        .error_for_status()?;
+        .build()?;
+    let response = crate::net::send("loading the list of macOS releases (api.ipsw.me)", || {
+        client.get(URL)
+    })?
+    .error_for_status()?;
     let mut bytes = Vec::new();
     response
         .take(32 * 1024 * 1024 + 1)
@@ -67,7 +70,19 @@ pub(super) fn load() -> Result<Releases> {
 }
 
 fn parse(bytes: &[u8]) -> Result<Releases> {
-    let catalog: Catalog = serde_json::from_slice(bytes)?;
+    let catalog: Catalog = serde_json::from_slice(bytes).map_err(|error| {
+        // A network that wants a sign-in first answers with its own page.
+        let page = bytes.trim_ascii_start().starts_with(b"<");
+        anyhow::anyhow!(
+            "the list of macOS releases from api.ipsw.me cannot be read ({error}){}",
+            if page {
+                "; the network answered with a web page instead, as one that wants a sign-in \
+                 first does: sign in to the network and run setup again"
+            } else {
+                ""
+            }
+        )
+    })?;
     let mut images: BTreeMap<(String, String), Image> = BTreeMap::new();
     let mut models = BTreeMap::new();
     for (model, device) in catalog.devices {
@@ -144,6 +159,17 @@ mod tests {
         assert_eq!(images[0].version, "11.0.1");
         assert_eq!(images[0].models, ["MacBookAir10,1", "Macmini9,1"]);
         Ok(())
+    }
+
+    #[test]
+    fn a_web_page_instead_of_the_list_is_named() {
+        let error = parse(b"\n<html><body>Sign in</body></html>")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("answered with a web page"), "{error}");
+        let error = parse(b"{\"devices\": 1}").err().unwrap().to_string();
+        assert!(!error.contains("web page"), "{error}");
     }
 
     #[test]

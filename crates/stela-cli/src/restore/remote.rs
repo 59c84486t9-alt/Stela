@@ -17,8 +17,18 @@ use std::{
 /// Bytes fetched per request: large enough that a member streams at the
 /// connection's speed, small enough that a retry repeats little.
 const CHUNK: u64 = 16 * 1024 * 1024;
-/// Attempts per range before the read fails.
-const ATTEMPTS: u32 = 4;
+/// Attempts per range before the read fails: with waits of 2, 4, 8, 16 and
+/// 30 s between them, a connection that drops for about a minute, as Wi-Fi
+/// changing access points does, pauses the download instead of ending it.
+const ATTEMPTS: u32 = 6;
+/// The longest wait between two attempts.
+const MAX_WAIT: Duration = Duration::from_secs(30);
+/// How long the first request, one byte, may take.
+const OPEN_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long one range may take: a [`CHUNK`] at about 56 kB/s. A connection
+/// that stalls is dropped and the range asked again, rather than waiting on
+/// it for the client's whole-download limit.
+const RANGE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct Remote {
     client: Client,
@@ -34,12 +44,14 @@ pub struct Remote {
 impl Remote {
     /// Open `url`, pinning its ETag and length from a first range answer.
     pub fn open(client: Client, url: &str) -> Result<Self> {
-        let response = client
-            .get(url)
-            .header(header::ACCEPT_ENCODING, "identity")
-            .header(header::RANGE, "bytes=0-0")
-            .send()?
-            .error_for_status()?;
+        let response = crate::net::send(&format!("reading {url}"), || {
+            client
+                .get(url)
+                .header(header::ACCEPT_ENCODING, "identity")
+                .header(header::RANGE, "bytes=0-0")
+                .timeout(OPEN_TIMEOUT)
+        })?
+        .error_for_status()?;
         ensure!(
             response.status() == StatusCode::PARTIAL_CONTENT,
             "{url} does not serve byte ranges (status {}); download the whole image instead",
@@ -83,7 +95,19 @@ impl Remote {
         let mut last = None;
         for attempt in 0..ATTEMPTS {
             if attempt > 0 {
-                std::thread::sleep(Duration::from_secs(1 << attempt));
+                let wait = Duration::from_secs(1 << attempt).min(MAX_WAIT);
+                eprintln!(
+                    "note: bytes {start}-{end} of {}: {}; trying again in {} s",
+                    self.url,
+                    last.as_ref()
+                        .map_or(String::new(), |e: &anyhow::Error| format!("{e:#}")),
+                    wait.as_secs()
+                );
+                std::thread::sleep(if cfg!(test) {
+                    Duration::from_millis(10)
+                } else {
+                    wait
+                });
             }
             match self.try_fetch(start, end) {
                 Ok(chunk) => {
@@ -108,10 +132,11 @@ impl Remote {
             .header(header::ACCEPT_ENCODING, "identity")
             .header(header::RANGE, format!("bytes={start}-{end}"))
             .header(header::IF_RANGE, &self.etag)
+            .timeout(RANGE_TIMEOUT)
             .send()
-            .map_err(|e| Retry::Again(e.into()))?;
+            .map_err(|e| Retry::Again(anyhow::anyhow!(crate::net::explain(&e))))?;
         let status = response.status();
-        if status.is_server_error() {
+        if crate::net::transient_status(status) {
             return Err(Retry::Again(anyhow::anyhow!(
                 "{} answered {status}",
                 self.url
@@ -138,7 +163,7 @@ impl Remote {
         let mut chunk = Vec::with_capacity((end - start + 1) as usize);
         response
             .read_to_end(&mut chunk)
-            .map_err(|e| Retry::Again(e.into()))?;
+            .map_err(|e| Retry::Again(anyhow::anyhow!("{} broke off: {e}", self.url)))?;
         if chunk.len() as u64 != end - start + 1 {
             return Err(Retry::Again(anyhow::anyhow!(
                 "{} sent {} of {} bytes",
@@ -319,6 +344,35 @@ mod tests {
         remote.seek(SeekFrom::End(-1))?;
         let error = remote.read_exact(&mut byte).unwrap_err().to_string();
         assert!(error.contains("the image changed"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_open_or_range_is_asked_again_from_the_same_offset() -> Result<()> {
+        let body: String = (0..100)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        let range = |span: &str, bytes: &str, length: usize| {
+            format!(
+                "HTTP/1.1 206 Partial Content\r\nETag: \"e\"\r\nContent-Range: bytes \
+                 {span}/100\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{bytes}"
+            )
+        };
+        let unavailable =
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let (url, served) = crate::net::tests::serve(vec![
+            unavailable.into(),
+            range("0-0", &body[..1], 1),
+            unavailable.into(),
+            // A range that breaks off part way.
+            range("0-99", &body[..10], 100),
+            range("0-99", &body, 100),
+        ]);
+        let mut remote = Remote::open(Client::new(), &url)?;
+        let mut read = String::new();
+        remote.read_to_string(&mut read)?;
+        assert_eq!(read, body);
+        assert_eq!(served.load(Ordering::SeqCst), 5);
         Ok(())
     }
 

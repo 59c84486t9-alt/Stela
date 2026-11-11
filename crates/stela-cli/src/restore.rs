@@ -386,13 +386,16 @@ fn download_with_client(image: &Image, output: &Path, client: &Client) -> Result
             return publish(image, output, &part, &metadata, offset);
         }
     }
-    let mut request = client
-        .get(&image.url)
-        .header(header::ACCEPT_ENCODING, "identity");
-    if offset > 0 {
-        request = request.header(header::RANGE, format!("bytes={offset}-"));
-    }
-    let mut response = request.send()?.error_for_status()?;
+    let mut response = crate::net::send("downloading macOS", || {
+        let request = client
+            .get(&image.url)
+            .header(header::ACCEPT_ENCODING, "identity");
+        match offset {
+            0 => request,
+            _ => request.header(header::RANGE, format!("bytes={offset}-")),
+        }
+    })?
+    .error_for_status()?;
     let total;
     if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
         total = Some(range_total(
