@@ -645,6 +645,9 @@ static STEPPED: AtomicU64 = AtomicU64::new(0);
 const FALLBACK_MILLIS: u64 = 1;
 /// A completion the disk has not shown is looked for after this long.
 const LOST_MILLIS: u64 = 1;
+/// The time one step takes before it leaves the rest to the next, unless
+/// a single call of the host disk takes longer.
+const STEP_MICROS: u64 = 1000;
 /// How long a fruitless look at a signalling disk excuses the next ones
 /// while no core took a doorbell: a few of an NVMe read's latency.
 const LOOK_WINDOW_MICROS: u64 = 20;
@@ -712,8 +715,11 @@ fn step(worker: &DiskWorker) -> Option<staged_disk::Step> {
     SEEN_DOORBELLS.store(super::host::doorbells(), Ordering::Relaxed);
     let now = super::host::fresh_counter();
     STEPPED.store(now, Ordering::Relaxed);
+    // A step ends once it has had its time: the rest waits for the next.
+    let budget = super::host::COUNTER_HZ / 1_000_000 * STEP_MICROS;
+    let mut over = || super::host::fresh_counter().wrapping_sub(now) >= budget;
     Some(timed(DiskPart::Step, || {
-        worker.step(now, super::host::COUNTER_HZ / 1000 * LOST_MILLIS)
+        worker.step_within(now, super::host::COUNTER_HZ / 1000 * LOST_MILLIS, &mut over)
     }))
 }
 
