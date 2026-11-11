@@ -275,14 +275,11 @@ struct Create {
     usb4_approve: Vec<String>,
     #[command(flatten)]
     addressing: Addressing,
-    /// Where an install reads the macOS restore image: `offline` copies the
-    /// whole IPSW (about 27 GB) onto the USB, and the install still needs
-    /// the internet for Apple's signing server. `online` writes only its
-    /// file list, and `stela.efi` downloads the IPSW from Apple during the
-    /// install over the PC's network (Ethernet, or the Wi-Fi network
-    /// `--wifi` names). A complete local IPSW defaults to offline, including
-    /// for a disk chosen later in stela.efi. An image without the macOS
-    /// system image (`--fetch`) defaults to online.
+    /// Where an install reads macOS: `full` copies the whole IPSW (about
+    /// 27 GB) onto the USB; `online` writes only its file list, and
+    /// stela.efi downloads macOS from Apple during the install. Either way
+    /// the install needs the network for Apple's signing server. A local
+    /// IPSW defaults to full, a download to online.
     #[arg(long, value_enum)]
     install_image: Option<InstallImage>,
     /// The `stela.efi` to install instead of the one built into `stela`.

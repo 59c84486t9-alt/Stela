@@ -1236,11 +1236,11 @@ fn install_reads_full_or_streamed_image() {
     );
     assert!(!install.contains("--install-source"), "{install}");
     // The choice is the setup's.
-    let error = rerun(&f, |c| c.install_image = Some(InstallImage::Offline))
+    let error = rerun(&f, |c| c.install_image = Some(InstallImage::Full))
         .unwrap_err()
         .to_string();
     assert!(error.contains("--install-image goes with"), "{error}");
-    // Repair turns it offline: the IPSW in pieces on the USB.
+    // Repair makes it full: the IPSW in pieces on the USB.
     let switch = |image| {
         rerun(&f, |c| {
             c.action = Action::Repair;
@@ -1250,14 +1250,9 @@ fn install_reads_full_or_streamed_image() {
         .unwrap();
         record(&f).active_medium().cloned().unwrap()
     };
-    let offline = switch(InstallImage::Offline);
-    assert!(
-        !offline.remote && offline.problems().is_empty(),
-        "{offline:?}"
-    );
-    let first_piece = offline
-        .directory()
-        .join(stela_formats::payload::piece_name(0));
+    let full = switch(InstallImage::Full);
+    assert!(!full.remote && full.problems().is_empty(), "{full:?}");
+    let first_piece = full.directory().join(stela_formats::payload::piece_name(0));
     assert!(first_piece.is_file());
     // Back online, the pieces go.
     let online = switch(InstallImage::Online);
@@ -1278,11 +1273,11 @@ fn full_install_requires_system_image() {
     .unwrap();
     assert!(restore::payload::holds_system_image(&f.ipsw).unwrap());
     assert!(!restore::payload::holds_system_image(&recovery).unwrap());
-    let mut offline = installed_command(&f);
-    offline.ipsw = Some(recovery.clone());
-    offline.install_image = Some(InstallImage::Offline);
-    offline.dry_run = true;
-    let error = format!("{:#}", setup(&environment(&f.host), offline).unwrap_err());
+    let mut full = installed_command(&f);
+    full.ipsw = Some(recovery.clone());
+    full.install_image = Some(InstallImage::Full);
+    full.dry_run = true;
+    let error = format!("{:#}", setup(&environment(&f.host), full).unwrap_err());
     assert!(error.contains("only the recovery members"), "{error}");
     // By default such an image streams the install instead.
     let mut default = installed_command(&f);

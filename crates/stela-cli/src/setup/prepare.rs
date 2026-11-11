@@ -223,12 +223,12 @@ pub(crate) fn download_dir() -> PathBuf {
 }
 
 /// Download `--build`'s image, or reuse a complete earlier download: the
-/// whole IPSW for an offline install medium, else its recovery members,
+/// whole IPSW for a full install medium, else its recovery members,
 /// which prepare the boot bundles.
 pub(super) fn fetch(command: &Request) -> Result<PathBuf> {
     let directory = command.download_dir.clone().unwrap_or_else(download_dir);
     match command.install_image {
-        Some(InstallImage::Offline) => fetch_image(&directory, &command.build, command.model()),
+        Some(InstallImage::Full) => fetch_image(&directory, &command.build, command.model()),
         _ => fetch_recovery(&directory, &command.build, command.model()),
     }
 }

@@ -3,7 +3,7 @@
 //! system's life.
 //!
 //! Setup writes the install medium (`setup::medium`) as `--install-image`
-//! says: offline, the whole IPSW on the USB's FAT32 data partition; online,
+//! says: full, the whole IPSW on the USB's FAT32 data partition; online,
 //! only its inventory, and `stela.efi` streams the IPSW from Apple's servers
 //! during the install. It prepares each machine's restore bundle (`stela
 //! boot prepare --restore`) and adds an Install macOS startup choice
@@ -176,9 +176,8 @@ fn rerun(record: &Record, usb: &Path) -> String {
     if record.build != builds::DEFAULT.build {
         let _ = write!(words, " --build {}", record.build);
     }
-    if record.install_image == Some(InstallImage::Offline) || record.media.iter().any(|m| !m.remote)
-    {
-        words.push_str(" --install-image offline");
+    if record.install_image == Some(InstallImage::Full) || record.media.iter().any(|m| !m.remote) {
+        words.push_str(" --install-image full");
     }
     if record.model != PINNED_MODEL {
         let _ = write!(words, " --model {}", record.model);
@@ -277,8 +276,11 @@ fn restore_choice_name(kind: Kind) -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum InstallImage {
-    /// The whole IPSW on the USB: no image download; TSS still needs network.
-    Offline,
+    /// The whole IPSW on the USB: no image download during the install,
+    /// which still needs the network for Apple's signing server. Records
+    /// written before the name changed say `offline`.
+    #[serde(alias = "offline")]
+    Full,
     /// The IPSW on Apple's servers, streamed during the install.
     Online,
 }
@@ -287,7 +289,7 @@ fn image_is_remote(ipsw: &Path, choice: Option<InstallImage>) -> Result<bool> {
     let complete = restore::payload::holds_system_image(ipsw)?;
     match choice {
         Some(InstallImage::Online) => Ok(true),
-        Some(InstallImage::Offline) => {
+        Some(InstallImage::Full) => {
             ensure!(
                 complete,
                 "{} holds only the recovery members, without the macOS system image an \

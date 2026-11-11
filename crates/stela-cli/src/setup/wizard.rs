@@ -19,7 +19,7 @@ mod theme;
 
 // Advertised USB capacity classes; preparation also checks exact image sizes.
 const NETWORK_MIN: u64 = 7 * 1024 * 1024 * 1024;
-const OFFLINE_MIN: u64 = 28 * 1024 * 1024 * 1024;
+const FULL_MIN: u64 = 28 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Usb {
@@ -154,7 +154,7 @@ pub(super) fn resume(command: &mut Request, esp: PathBuf, record: &Record) {
     command.install_image = record.install_image.or_else(|| {
         record.media.first().map(|medium| match medium.remote {
             true => InstallImage::Online,
-            false => InstallImage::Offline,
+            false => InstallImage::Full,
         })
     });
     if command.ipsw.is_none() {
@@ -213,7 +213,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     "Capacity unavailable".into()
                 } else if usb.bytes < NETWORK_MIN {
                     "Too small · Requires an 8 GB or larger USB".into()
-                } else if usb.bytes < OFFLINE_MIN {
+                } else if usb.bytes < FULL_MIN {
                     "Network installer only · Full needs a 32 GB USB".into()
                 } else {
                     "Full or network installer".into()
@@ -256,8 +256,8 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 return Ok(true);
             }
         }
-        let offline = usb.bytes >= OFFLINE_MIN;
-        let prefilled = first && command.ipsw.is_some() && offline;
+        let full = usb.bytes >= FULL_MIN;
+        let prefilled = first && command.ipsw.is_some() && full;
         first = false;
         let source = if prefilled {
             2
@@ -273,7 +273,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     0,
                     "Full installer",
                     "Downloads the full macOS image onto the USB · Requires a 32 GB USB",
-                    offline,
+                    full,
                 ),
                 item(
                     1,
@@ -285,7 +285,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     2,
                     "Use an existing IPSW",
                     "Copies your downloaded image to the USB · Requires a 32 GB USB",
-                    offline,
+                    full,
                 ),
             ];
             let initial = if command.ipsw.is_some() {
@@ -327,7 +327,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             command.fetch = false;
             command.build = manifest.product_build.clone();
             preferred_build = Some(command.build.clone());
-            command.install_image = Some(InstallImage::Offline);
+            command.install_image = Some(InstallImage::Full);
             cliclack::log::info(format!(
                 "macOS {} ({}) · local IPSW{}",
                 manifest.product_version,
@@ -356,7 +356,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             command.ipsw = None;
             command.fetch = true;
             command.install_image = Some(if source == 0 {
-                InstallImage::Offline
+                InstallImage::Full
             } else {
                 InstallImage::Online
             });

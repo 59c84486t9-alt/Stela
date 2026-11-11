@@ -890,7 +890,7 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
     }
     let mut download = None;
     let ipsw = if let Some(temporary) = &temporary
-        && command.install_image == Some(InstallImage::Offline)
+        && command.install_image == Some(InstallImage::Full)
     {
         let image = restore::select(
             &restore::catalog()?,

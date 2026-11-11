@@ -226,9 +226,9 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
 /// The command that puts back the active build's restore files: `--fetch`
 /// downloads that build, the whole image when the medium holds it.
 fn image_fix(record: &Record, report: &Report) -> String {
-    let offline = record.active_medium().is_some_and(|medium| !medium.remote);
-    report.fix(if offline {
-        "repair --fetch --install-image offline"
+    let full = record.active_medium().is_some_and(|medium| !medium.remote);
+    report.fix(if full {
+        "repair --fetch --install-image full"
     } else {
         "repair --fetch"
     })
@@ -741,7 +741,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
                     ""
                 }
             )?;
-            let offline = record.active_medium().is_some_and(|medium| !medium.remote);
+            let full = record.active_medium().is_some_and(|medium| !medium.remote);
             return Err(Reported {
                 report: text,
                 summary: format!(
@@ -750,8 +750,8 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
                     record.build,
                     fix(
                         usb,
-                        if offline {
-                            "repair --fetch --install-image offline"
+                        if full {
+                            "repair --fetch --install-image full"
                         } else {
                             "repair --fetch"
                         }
