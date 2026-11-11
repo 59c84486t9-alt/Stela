@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2006, Red Hat, Inc., Ingo Molnar
 //! Arithmetic of each AP's TSC synchronization with the BSP, after Linux's
 //! `arch/x86/kernel/tsc_sync.c`: how long a round reads, which way a warp
 //! moves the AP's counter, and the counter base an AP corrected in software

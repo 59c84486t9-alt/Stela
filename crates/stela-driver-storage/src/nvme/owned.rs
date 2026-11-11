@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2011-2014, Intel Corporation.
 //! Native NVMe transport and requester-domain memory. No physical
 //! address is interpreted as a CPU pointer or a device IOVA.
 use super::*;

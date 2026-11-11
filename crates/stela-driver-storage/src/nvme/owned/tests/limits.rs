@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2011-2014, Intel Corporation.
 //! Controller command limits and no-data Write Zeroes encoding.
 use super::*;
 

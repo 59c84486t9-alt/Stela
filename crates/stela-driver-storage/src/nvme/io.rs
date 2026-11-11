@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2011-2014, Intel Corporation.
 //! The I/O queue: publishing tagged commands, collecting completions, deadlines
 //! and aborts.
 

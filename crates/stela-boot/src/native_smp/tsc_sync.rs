@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2006, Red Hat, Inc., Ingo Molnar
 //! Each AP's time-stamp counter, brought into agreement with the BSP's
 //! before the AP takes work, after Linux's `arch/x86/kernel/tsc_sync.c`.
 //!

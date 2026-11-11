@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright 2004-2005 Red Hat, Inc.
 //! Command slots: issuing, launching and completing ATA commands and the queued
 //! block commands.
 

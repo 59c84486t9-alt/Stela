@@ -713,6 +713,22 @@ crates/stela-driver-storage/src/: Standard PCI SDHCI and MMC/SD
     drivers/misc/cardreader/ (3 files), drivers/mmc/core/ (5 files),
     drivers/mmc/host/ (6 files), include/linux/ (2 files), include/linux/mmc/
     (2 files), include/uapi/linux/ (2 files)
+crates/stela-driver-storage/src/nvme.rs, nvme/: NVMe error handling,
+  namespace discovery, host memory buffer, shutdown and recovery
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/nvme/host/core.c, drivers/nvme/host/pci.c
+crates/stela-driver-storage/src/ahci.rs, ahci/: AHCI controller setup and
+  libata error handling
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/ata/ahci.c, drivers/ata/libahci.c, drivers/ata/libata-eh.c,
+    include/linux/ata.h
+crates/stela-boot-core/src/tsc/sync.rs, crates/stela-boot/src/native_smp/
+  tsc_sync.rs: TSC synchronization between processors
+    Linux v7.2.12; GPL-2.0-only
+    arch/x86/kernel/tsc_sync.c
+crates/stela-boot-core/src/crs.rs: ACPI extended interrupt resources
+    Linux v7.2.12; GPL-2.0-only
+    drivers/acpi/resource.c
 crates/stela-driver-storage/src/: NVMe retained native requester-domain
   transport
     Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only

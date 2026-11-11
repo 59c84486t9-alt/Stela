@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2011-2014, Intel Corporation.
 //! The admin queue: enabling the controller and running Identify, queue-
 //! creation and log commands.
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright 2004-2005 Red Hat, Inc.
 //! Port start and device (re)configuration: link reset, IDENTIFY revalidation,
 //! log pages, link power and transfer modes.
 

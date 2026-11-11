@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2011-2014, Intel Corporation.
 //! NVMe controllers with one admin and one I/O queue pair. Each active NVM
 //! namespace with plain logical blocks becomes one device. The I/O queue
 //! runs up to [`DEPTH`] commands at once, each copying its data through the

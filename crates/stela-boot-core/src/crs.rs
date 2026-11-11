@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (C) 2012, Intel Corp.
 //! Direct extended _CRS interrupt routes. As in pinned Linux
 //! drivers/acpi/resource.c acpi_dev_get_irqresource, extended resources keep
 //! their own electrical flags; ISA/MADT override policy is separate. Legacy

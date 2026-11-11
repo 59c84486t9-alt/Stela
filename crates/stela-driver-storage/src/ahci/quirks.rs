@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright 2004-2005 Red Hat, Inc.
 //! Linux libata's `__ata_dev_quirks`: device quirks by IDENTIFY model
 //! number and firmware revision, as `ata_dev_quirks` finds them.
 

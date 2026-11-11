@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2011-2014, Intel Corporation.
 //! Controller reset and bring-up, as Linux's timeout and reset work runs them,
 //! and shutdown.
 

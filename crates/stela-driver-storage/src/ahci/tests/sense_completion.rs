@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright 2004-2005 Red Hat, Inc.
 //! AHCI sense completion cases.
 use super::*;
 #[test]

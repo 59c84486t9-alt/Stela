@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright 2004-2005 Red Hat, Inc.
 //! AHCI-only owned controller timing and failed construction custody.
 use super::*;
 use crate::bus::pci::power::{self, Timer};

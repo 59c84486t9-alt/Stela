@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2011-2014, Intel Corporation.
 //! Optional controller features: host options, APST, the host memory buffer and
 //! async events.
 

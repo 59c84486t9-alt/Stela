@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright 2004-2005 Red Hat, Inc.
 //! Private AHCI model time, transition order and actual retained-object checks.
 use super::*;
 use alloc::sync::Arc;

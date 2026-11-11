@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2011-2014, Intel Corporation.
 //! Reuse the independent SQ/PRP/CQ peer with a model hierarchy observer.
 //! This is cfg(test) support, never a native provider or domain-identity proof.
 use super::*;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright 2004-2005 Red Hat, Inc.
 //! AHCI host bus adapters with SATA disks, up to 32 queued commands per port.
 //! Controller setup follows Linux `drivers/ata/ahci.c` and `libahci.c` at
 //! a804c5742bff224d4cb4d25dd383554d598be32b: firmware-programmed capability
