@@ -41,7 +41,17 @@ impl Random {
 fn word(random: &mut Random) -> u32 {
     let (d, n, m) = (random.vector(), random.vector(), random.vector());
     let three = |base: u32| base | m << 16 | n << 5 | d;
-    match random.below(30) {
+    // By element: Vm in 0..15, element h[index] from H:L:M.
+    let index = random.below(8);
+    let element = |base: u32| {
+        base | (index & 1) << 20
+            | (index >> 1 & 1) << 21
+            | (index >> 2) << 11
+            | (m & 15) << 16
+            | n << 5
+            | d
+    };
+    match random.below(50) {
         0 => three(0x4ea0_8400),        // add vd.4s,vn.4s,vm.4s
         1 => three(0x6ea0_8400),        // sub vd.4s
         2 => three(0x0e20_8400),        // add vd.8b (D write)
@@ -71,10 +81,30 @@ fn word(random: &mut Random) -> u32 {
         23 => 0xfd40_0000 | random.below(56) << 10 | 1 << 5 | d,           // ldr dd,[x1,#8k]
         24 => 0x9100_0400,                                                 // add x0,x0,#1
         25 => 0xf940_0022 | random.below(56) << 10,                        // ldr x2,[x1,#8k]
-        26 => three(0x2e60_c000),                                          // umull vd.4s (uncached)
+        26 => three(0x2e60_c000),                                          // umull vd.4s
         27 => 0xb400_0805,                                                 // cbz x5,.+0x100
         28 => three(0x4e20_d400),                                          // fadd vd.4s (uncached)
-        _ => 0x4e08_3c00 | n << 5 | 3,                                     // mov x3,vn.d[0]
+        29 => 0x4e08_3c00 | n << 5 | 3,                                    // mov x3,vn.d[0]
+        30 => three(0x2e60_8000),       // umlal vd.4s,vn.4h,vm.4h
+        31 => three(0x6e60_8000),       // umlal2
+        32 => element(0x0f40_2000),     // smlal vd.4s,vn.4h,vm.h[i]
+        33 => element(0x4f40_2000),     // smlal2 by element
+        34 => three(0x6e60_c000),       // umull2
+        35 => three(0x0e60_c000),       // smull
+        36 => 0x0f10_8c00 | n << 5 | d, // rshrn vd.4h,vn.4s,#16
+        37 => 0x4f10_8c00 | n << 5 | d, // rshrn2
+        38 => 0x2f10_8c00 | n << 5 | d, // sqrshrun vd.4h,vn.4s,#16
+        39 => 0x6f10_8c00 | n << 5 | d, // sqrshrun2
+        40 => 0x2f08_8c00 | n << 5 | d, // sqrshrun vd.8b,vn.8h,#8
+        41 => three(0x2e60_0400),       // uhadd vd.8h
+        42 => 0x4f3d_2400 | n << 5 | d, // srshr vd.4s,#3
+        43 => three(0x4ea0_0c00),       // sqadd vd.4s
+        44 => three(0x6ea0_4400),       // ushl vd.4s (uncached)
+        45 => three(0x6e20_1400),       // urhadd vd.16b
+        46 => 0x4f3d_0400 | n << 5 | d, // sshr vd.4s,#3
+        47 => 0x2f10_a400 | n << 5 | d, // uxtl vd.4s,vn.4h
+        48 => 0x2e61_2800 | n << 5 | d, // sqxtun vd.4h,vn.4s
+        _ => three(0x4e20_d400),        // fadd vd.4s (uncached)
     }
 }
 
@@ -121,7 +151,7 @@ fn system(instructions: &[Instruction], end: GuestAddress) -> (Vec<u8>, NativeBl
 fn blocks_with_cached_vectors_run_as_the_frame_layout() {
     let mut random = Random(0x9e37_79b9_7f4a_7c15);
     let mut cached = 0;
-    for case in 0..400 {
+    for case in 0..1000 {
         let length = 4 + random.below(40) as usize;
         let words: Vec<u32> = (0..length).map(|_| word(&mut random)).collect();
         let instructions = lift(&words);
@@ -149,7 +179,7 @@ fn blocks_with_cached_vectors_run_as_the_frame_layout() {
         assert_eq!(state, expected, "case {case}: {words:08x?}");
         assert_eq!(memory, expected_memory, "case {case}: {words:08x?}");
     }
-    assert!(cached > 300, "{cached}");
+    assert!(cached > 800, "{cached}");
 }
 
 /// No fault site of a block finds a vector only in a host register: the
@@ -204,7 +234,7 @@ fn every_fault_site_finds_the_cached_writes_stored() {
         }
         sites += accesses.len();
     }
-    assert!(sites > 1000, "{sites}");
+    assert!(sites > 800, "{sites}");
 }
 
 #[test]
@@ -225,13 +255,13 @@ fn a_guest_access_after_an_unstored_write_is_refused() {
 #[test]
 fn dirty_vectors_are_stored_where_the_state_must_be_current() {
     // add v0.4s,v1.4s,v2.4s; add v0.4s,v0.4s,v2.4s; ldr x2,[x1];
-    // add v3.4s,v0.4s,v0.4s; umull v4.4s,v3.4h,v0.4h; add v5.4s,v4.4s,v4.4s
+    // add v3.4s,v0.4s,v0.4s; ushl v4.4s,v3.4s,v0.4s; add v5.4s,v4.4s,v4.4s
     let words = [
         0x4ea2_8420,
         0x4ea2_8400,
         0xf940_0022,
         0x4ea0_8403,
-        0x2e60_c064,
+        0x6ea0_4464,
         0x4ea4_8485,
     ];
     let instructions = lift(&words);
@@ -267,7 +297,7 @@ fn dirty_vectors_are_stored_where_the_state_must_be_current() {
     // V0, dirty, is stored once, before the access.
     assert_eq!(stores_of(rows[1]..rows[2]), [0]);
     assert!(stores_of(rows[2]..rows[3]).is_empty());
-    // Before the uncached UMULL: V3.
+    // Before the uncached USHL: V3.
     assert_eq!(stores_of(rows[3]..rows[4]), [3]);
     assert_eq!(stores_of(rows[5]..code.len()), [5]);
 }

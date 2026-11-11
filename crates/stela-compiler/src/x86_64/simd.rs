@@ -487,7 +487,23 @@ pub(super) fn emit_for_target(
 pub(super) fn vector_use(operand: &Operand) -> super::block::VectorUse {
     use super::block::VectorUse::*;
     match operand {
-        Operand::Integer { .. } | Operand::Compare { .. } | Operand::MoveImmediate { .. } => Keep,
+        Operand::Integer { .. }
+        | Operand::Compare { .. }
+        | Operand::MoveImmediate { .. }
+        | Operand::Product(_)
+        | Operand::Saturate(_)
+        | Operand::Halving(_) => Keep,
+        // The register forms and scalar saturating shifts stage lanes
+        // through the state (`shifts::register_shift`).
+        Operand::Shift(shift) => match shift.kind {
+            crate::aarch64::simd::shifts::Kind::Register { .. } => Settle,
+            crate::aarch64::simd::shifts::Kind::SaturatingImmediate { .. }
+                if shift.bytes <= shift.lane_bytes =>
+            {
+                Settle
+            }
+            _ => Keep,
+        },
         Operand::Memory { .. } | Operand::MemoryPair { .. } | Operand::MemoryRegisterOffset(_) => {
             Flush
         }
