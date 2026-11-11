@@ -692,7 +692,7 @@ pub(super) fn power_states(
 
 /// Select the register-bearing implementation of a PMGR interface. On T8152,
 /// `pmgr2,arch` publishes the controller and `pmgr2,t8152` owns the physical
-/// groups and device table (`docs/research/apple-socs.md`, CPU start registers).
+/// groups and device table.
 /// Selection grants neither PSD service-gate semantics nor lifecycle coverage.
 pub(super) fn register_node<'a>(io: &Node<'a>, parent: &Node<'a>) -> Result<Node<'a>> {
     if !parent.compatible(PMGR2_ARCH) {

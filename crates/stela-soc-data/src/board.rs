@@ -301,7 +301,7 @@ pub const ATC_PHY: &str = "atc-phy,t8112";
 /// it as `function-dock_parent`, which `AppleARMFunction::withProvider`
 /// (0xfffffe0008c53aac) resolves through the node's registered platform
 /// nub. With the node hidden, each of those starts stalled about 30 s and
-/// the xHCI then failed to find its PHY (restore study ru-s17).
+/// the xHCI then failed to find its PHY.
 pub const DOCK_PORT: &str = "dock,usb-c";
 /// The SPMI controllers and the Dialog PMUs on them (`spmi`, `pmu`).
 pub const SPMI: &str = "aapl,spmi";
@@ -317,8 +317,7 @@ pub const SEP: &str = "iop-sep,ascwrap-v4";
 pub const SEP_NUB: &str = "iop-nub,sep";
 
 /// The J473AP HDMI display pipeline the engine models at its AP-facing
-/// protocols (`platform::apple::dcp`, `display`,
-/// `docs/research/display-gpu.md` section 8): the `dcpext` coprocessor (the
+/// protocols (`platform::apple::dcp`, `display`): the `dcpext` coprocessor (the
 /// shared ASC [`ASC`] with `role` `DCPEXT`, admitted through [`model_children`])
 /// and the display pipe `dispext0` ([`DISPEXT`], kept so `AppleCLCD2`, an
 /// `IOMobileFramebufferAP`, matches), whose DART `dart-dispext0` the

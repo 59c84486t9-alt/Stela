@@ -54,7 +54,7 @@ pub(in crate::board) const LOCKDOWN: [u64; 2] = [0x5000, 0x9000];
 /// Pro, Max and Ultra, T6031 the M3 Max and Ultra, T6041 the M4 Pro and
 /// Max, T6050 the M5 Pro, Max and Ultra. Each Ultra boots its Max's 26A434
 /// kernel, and each of those kernels' `topology_info` arrays hold exactly
-/// these CPUs and clusters (`docs/research/cpu-topology.md`). Every 26A434
+/// these CPUs and clusters. Every 26A434
 /// board DeviceTree fits its chip's (`topology::KernelLimits`).
 pub(in crate::board) const T8103_LIMITS: KernelLimits = KernelLimits::new(8, 2, 1);
 pub(in crate::board) const T6000_LIMITS: KernelLimits = KernelLimits::new(20, 6, 10);

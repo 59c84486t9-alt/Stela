@@ -26,8 +26,8 @@ use rows::SOCS;
 /// 26A434 iBoot of the SoC writes to `/chosen dram-base` (payload file
 /// offsets: T8103 J274 0x15950 and T8112 J473 0x23904, 0x8_0000_0000; T6000
 /// J314s 0x23e78, T8122 J433 0x2479c, A18 Pro J700 0x20d60, M5 J704 0x24168
-/// and M6 J873g 0x22e38, 0x100_0000_0000, as on every other SoC;
-/// `docs/research/apple-socs.md#dram-base`). It is also the base of carveout
+/// and M6 J873g 0x22e38, 0x100_0000_0000, as on every other SoC). It is
+/// also the base of carveout
 /// 1 in each iBoot's carveout table, the `memory@` node of Linux
 /// `t8103-jxxx.dtsi`, `t8112-jxxx.dtsi`, `t600x-j314-j316.dtsi` and
 /// `t600x-j375.dtsi`, and the M3 and later boards' `/arm-io/mcc dram-base`

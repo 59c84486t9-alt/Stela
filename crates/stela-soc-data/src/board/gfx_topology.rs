@@ -27,7 +27,7 @@ pub struct GfxController {
     /// offsets are relative to `reg[0]`'s base, as `readGFXReg32` takes them:
     /// `reg[0]` is the first bank, and `reg[1]` another unless it lies inside
     /// `reg[0]` (T8112). On the Pro/Max SoCs `reg[0]` is 1 MiB and the
-    /// registers lie in `reg[1]` (docs/research/agx.md §6).
+    /// registers lie in `reg[1]`.
     pub sgx: Vec<(u64, u64, u64)>,
     /// The GPU's TTBAT as the boot stage publishes it (`gptbat-ready`,
     /// `ttbat-phys-addr-base` in 16 KiB pages; the loader sets it to

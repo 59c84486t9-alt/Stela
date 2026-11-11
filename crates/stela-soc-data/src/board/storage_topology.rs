@@ -30,7 +30,7 @@ use stela_contracts::refuse;
 /// lacks: the secure BAR and its alternate register layout (SPTM programs
 /// the queues at `reg[9]` or +0x4000), the transfer-length workaround
 /// (`reg[10..12]` doorbells written on unmap) and the SHA engine
-/// (`reg[14]`). docs/research/ans2.md has the matrix.
+/// (`reg[14]`).
 const UNMODELED_ANS_SPTM: [&str; 4] = [
     "nvme-secure-bar",
     "nvme-secure-reg-layout",

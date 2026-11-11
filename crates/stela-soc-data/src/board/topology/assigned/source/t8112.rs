@@ -1,6 +1,6 @@
 //! T8112 normal-mode source membership, through the existing canonical CPU
-//! association resolver. See apple-socs.md's original J473 power-ownership
-//! proof (26A434 mac14g SHA25606846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d,
+//! association resolver, after the original J473 power-ownership source
+//! (26A434 mac14g SHA25606846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d,
 //! writers2b75078/2b74b40, MPIDR consumer2b81fb4, vtable13500c0/13500c8).
 //! This view supplies neither initial PS state nor a lifecycle/executor owner.
 use super::*;

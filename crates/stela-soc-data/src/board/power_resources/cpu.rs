@@ -2,8 +2,8 @@
 //!
 //! Original 26A434 T8112 normal-mode MPIDR/idle callbacks, T6000 mode1
 //! constructor counters and the T6020 family's per-die mode1 counters
-//! establish separate membership rules. See apple-socs.md's
-//! J473 proof and the T6000 source module. No input hash or board name dispatches
+//! establish separate membership rules ([`CPU_POWER_EVIDENCE`] names the J473
+//! source; see also the T6000 source module). No input hash or board name dispatches
 //! production behavior, and no numeric suffix of a record name selects a PE.
 mod t6000;
 mod t6020;
@@ -67,7 +67,7 @@ pub enum CpuAssociationError {
 pub const CPU_POWER_EVIDENCE: &str = "26A434 kernelcache.mac14g SHA256 \
     06846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d; \
     normal core/CPM writers 0x2b75078/0x2b74b40, MPIDR consumer 0x2b81fb4, \
-    actual T8112 vtable 0x13500c0/0x13500c8; docs/research/apple-socs.md";
+    actual T8112 vtable 0x13500c0/0x13500c8";
 
 const COMPATIBLE: &[u8] = b"pmgr1,t8112\0";
 const CORE_PREFIXES: [&str; 4] = ["CPU", "ECPU", "PCPU", "MCPU"];

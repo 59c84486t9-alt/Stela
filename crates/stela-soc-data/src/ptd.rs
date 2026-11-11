@@ -1,6 +1,6 @@
 //! PTD publication-bank and update-alias geometry from the original AP/PMP
 //! contract. This validates physical extents without granting transport or
-//! controller-effect permission. See `docs/research/apple-mcc.md`.
+//! controller-effect permission.
 use crate::Result;
 use alloc::string::String;
 use stela_contracts::refuse;

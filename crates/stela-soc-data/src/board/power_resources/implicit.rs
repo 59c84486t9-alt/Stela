@@ -2,7 +2,7 @@
 //! gate properties. These facts select physical hardware, never resource names.
 //! Linux a0ff06b3a7bd3aa0cd99d0294e60b3ed28c9bfac, t8112.dtsi and
 //! t8112-pmgr.dtsi independently associate these three apertures with their
-//! power-state registers. See docs/research/pmgr-lifecycle.md for source windows.
+//! power-state registers.
 //! Association does not establish initial state or implement a lifecycle sink.
 use super::{Domain, DomainId, Node, PowerOwner, PowerStates, ResourceInventory};
 use crate::Result;

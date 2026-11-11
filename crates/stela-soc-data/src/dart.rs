@@ -69,8 +69,7 @@ impl Profile {
     /// A 16 KiB window is therefore revision 1.0 and a larger one revision
     /// 2.2, the minimal revision with that register file. The silicon's own
     /// revision is read from PARAMS3 by iBoot, SPTM and the kernel and is not
-    /// recoverable statically, so this is an inference documented in
-    /// `docs/research/dart-iommu.md`.
+    /// recoverable statically, so this is an inference.
     pub fn for_translation_window(self, bytes: u64) -> Option<Self> {
         let profile = match self {
             Self::T8110 | Self::T8110Rev22 if bytes > DAPF_BYTES => Self::T8110Rev22,

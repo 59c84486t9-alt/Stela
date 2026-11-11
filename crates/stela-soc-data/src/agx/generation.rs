@@ -1,7 +1,7 @@
 //! The Apple GPUs 26A434 supports: each SoC's `sgx` compatible, the AGX kext
 //! its kernelcache links, the GFX firmware its BuildManifest names, and the
-//! facts each kext fixes about the AP-visible interface (docs/research/agx.md
-//! §6, the census of all 59 board DeviceTrees and all 13 AGX kexts).
+//! facts each kext fixes about the AP-visible interface (from a census of
+//! all 59 board DeviceTrees and all 13 AGX kexts).
 //!
 //! Known (every 26A434 kernelcache, `AGXAccelerator*::readChipInfo`,
 //! `AGXSecureMonitor*::setupMMUConfig`/`invalidateGPUTTBACache` and
@@ -24,7 +24,7 @@
 //! the dashboard signal it lacks ([`Family::dashboard_signals`]), and G14X,
 //! whose kext and firmware keep the same protocol with its own initdata
 //! magic, shared-object offsets ([`Layout`]), identification words and GPC
-//! block (docs/research/agx.md §6), and G15G, which keeps G14X's protocol
+//! block, and G15G, which keeps G14X's protocol
 //! with its own initdata magic and three shared offsets. Every other family
 //! is named here with the facts recovered so far and stays hidden by the
 //! loader, its refusal naming what is missing. A modeled family's GPU is
@@ -50,7 +50,7 @@ pub enum Identification {
 
 /// Where a firmware interface keeps the shared words the device-control
 /// model writes (`AGXArmFirmware::initFirmwareData` and the firmware's
-/// device-control handlers, docs/research/agx.md §2.1 and §6).
+/// device-control handlers).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Layout {
     /// The handled-entry count in the root's +0xb0 object, which the

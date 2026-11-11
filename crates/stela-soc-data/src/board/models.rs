@@ -22,11 +22,11 @@ pub(super) struct ModelClaim {
 }
 
 /// Whether the GPU (`sgx`, its `gfx-asc` coprocessor and firmware mapper) is
-/// visible. Its kernel window resolves through SPTM's shared L2
-/// (docs/research/agx.md section 3) and the firmware consumes the kext's
-/// device-control ring (section 2), so `AGXAcceleratorG14G::start` completes
-/// on the 26A434 J473AP kext (restore boot agx-obs-9). GPU work commands still
-/// refuse by name until their fields are confirmed (section 5.1a).
+/// visible. Its kernel window resolves through SPTM's shared L2 and the
+/// firmware consumes the kext's device-control ring, so
+/// `AGXAcceleratorG14G::start` completes on the 26A434 J473AP kext in a
+/// restore boot. GPU work commands still refuse by name until their fields
+/// are confirmed.
 pub const GPU_ADMITTED: bool = true;
 /// A child owned by a native coprocessor model and its boot-chain facts.
 /// Properties describe model state, never a guest image or a driver patch.

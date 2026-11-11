@@ -1,5 +1,5 @@
 //! The per-chip facts of iBoot's DeviceTree hand-off that the boot bundle
-//! (`stela_loader::handoff`, `docs/research/iboot-handoff.md`) writes in
+//! (`stela_loader::handoff`) writes in
 //! iBoot's place.
 //!
 //! Every fact was read from the 26A434 `Firmware/all_flash/LLB.<board>` and
