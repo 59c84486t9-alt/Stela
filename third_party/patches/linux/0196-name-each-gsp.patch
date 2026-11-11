@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 17:03:16 -0500
+Subject: [PATCH] feat(nouveau): name each GSP RPC sent or refused while the
+ device stops, with its task and first payload words
+
+---
+ .../gpu/drm/nouveau/include/nvkm/subdev/gsp.h |  4 ++-
+ .../drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c | 28 +++++++++++++------
+ 2 files changed, 23 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h b/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
+index ab761773e979324ccde6b94ca5cb6815ee0f710b..181df7bdce4f0412574323e0115e3daa1a0a78bd 100644
+--- a/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
++++ b/drivers/gpu/drm/nouveau/include/nvkm/subdev/gsp.h
+@@ -205,8 +205,10 @@ struct nvkm_gsp {
+ 	 * unload, which RM never takes. RM's unload frees those objects.
+ 	 */
+ 	struct task_struct *stopper;
+-	/* An RPC from another task was refused during the stop, and reported. */
++	/* An RPC from another task was refused during the stop. */
+ 	bool refused;
++	/* RPCs named in the log since the stop began, up to a bound. */
++	u32 stop_traced;
+ 	/* GSP did not answer in time: later RPCs fail at once. */
+ 	bool dead;
+ 	/* The last RPC function RM answered, for the reports at a stop. */
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
+index b77eac160dc469cfdea92892b173fecdeff91ac0..7e585f454d7882a506a41f16f5566b44e929d793 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c
+@@ -699,18 +699,30 @@ r535_gsp_rpc_push(struct nvkm_gsp *gsp, void *payload,
+ 		goto done;
+ 	}
+ 
++	/*
++	 * Once the device stops, name each RPC in order, up to a bound: sent by
++	 * the stopping task or refused from another, with the task and the
++	 * first three payload words (for GSP_RM_CONTROL: hClient, hObject,
++	 * cmd). Nothing is printed while the device runs.
++	 */
++	if (READ_ONCE(gsp->stopping) && gsp->stop_traced < 32) {
++		const u32 *word = payload;
++
++		gsp->stop_traced++;
++		nvkm_warn(&gsp->subdev,
++			  "stopping: %s fn %u len %u task %s/%d words %08x %08x %08x\n",
++			  READ_ONCE(gsp->stopper) == current ? "sent" : "refused",
++			  rpc->function, payload_size, current->comm, task_pid_nr(current),
++			  payload_size >= 4 ? word[0] : 0, payload_size >= 8 ? word[1] : 0,
++			  payload_size >= 12 ? word[2] : 0);
++	}
++
+ 	/*
+ 	 * The device is stopping on another task: this RPC could reach RM
+-	 * after its unload, which RM never takes. RM's unload frees what it
+-	 * would free. Say so once.
++	 * after its unload, which RM never takes.
+ 	 */
+ 	if (READ_ONCE(gsp->stopping) && READ_ONCE(gsp->stopper) != current) {
+-		if (!gsp->refused) {
+-			gsp->refused = true;
+-			nvkm_warn(&gsp->subdev,
+-				  "stopping: refused fn %u from another task; RM's unload frees its objects\n",
+-				  rpc->function);
+-		}
++		gsp->refused = true;
+ 		kvfree(msg);
+ 		repv = ERR_PTR(-ENODEV);
+ 		goto done;
