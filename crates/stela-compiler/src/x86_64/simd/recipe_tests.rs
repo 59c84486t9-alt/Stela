@@ -248,3 +248,199 @@ mod products {
         }
     }
 }
+
+mod shifts {
+    use super::*;
+    use crate::aarch64::simd::saturating::FPSR_QC;
+    use crate::aarch64::simd::shifts::{Kind, Operand as Shift};
+
+    const D: u8 = 3;
+    const S: u8 = 7;
+
+    fn state(values: &mut Values, lane: u8) -> GuestState {
+        let mut state = GuestState::default();
+        state.v[usize::from(D)] = values.vector(lane);
+        state.v[usize::from(S)] = values.vector(lane);
+        state.fpsr = FPSR_QC & values.next() as u32;
+        state
+    }
+
+    /// `(x + rounding) >> amount` without overflow.
+    fn shifted(x: i128, amount: u8, round: bool) -> i128 {
+        (x + if round { 1i128 << (amount - 1) } else { 0 }) >> amount
+    }
+
+    fn reference(operand: &Shift, state: &GuestState) -> GuestState {
+        let mut expected = state.clone();
+        let source = state.v[usize::from(operand.source)];
+        let old = state.v[usize::from(operand.destination)];
+        let lane = operand.lane_bytes;
+        let mut result = [0u64; 2];
+        match operand.kind {
+            Kind::Right {
+                signed,
+                round,
+                accumulate,
+                insert: false,
+            } => {
+                for i in 0..usize::from(operand.bytes / lane) {
+                    let value = shifted(get(source, lane, i, signed), operand.amount, round);
+                    let value = if accumulate {
+                        value.wrapping_add(get(old, lane, i, false))
+                    } else {
+                        value
+                    };
+                    set(&mut result, lane, i, value);
+                }
+            }
+            Kind::Narrow { round, upper } => {
+                if upper {
+                    result[0] = old[0];
+                }
+                let first = if upper { 8 / usize::from(lane) } else { 0 };
+                for i in 0..8 / usize::from(lane) {
+                    let value = shifted(get(source, lane * 2, i, false), operand.amount, round);
+                    set(&mut result, lane, first + i, value);
+                }
+            }
+            Kind::SaturatingNarrow {
+                signed_source,
+                unsigned_result,
+                round,
+                upper,
+            } => {
+                if upper {
+                    result[0] = old[0];
+                }
+                let bits = u32::from(lane) * 8;
+                let (low, high) = if unsigned_result {
+                    (0i128, (1i128 << bits) - 1)
+                } else {
+                    (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+                };
+                let lanes = if operand.bytes == lane {
+                    1
+                } else {
+                    8 / usize::from(lane)
+                };
+                let first = if upper { 8 / usize::from(lane) } else { 0 };
+                for i in 0..lanes {
+                    let value = shifted(
+                        get(source, lane * 2, i, signed_source),
+                        operand.amount,
+                        round,
+                    );
+                    let clamped = value.clamp(low, high);
+                    if clamped != value {
+                        expected.fpsr |= FPSR_QC;
+                    }
+                    set(&mut result, lane, first + i, clamped);
+                }
+            }
+            _ => unreachable!(),
+        }
+        expected.v[usize::from(operand.destination)] = result;
+        expected
+    }
+
+    fn run(operand: Shift, wide: u8) {
+        check(
+            &alloc::format!("{operand:?}"),
+            &Operand::Shift(operand),
+            40,
+            |values| state(values, wide),
+            |state| reference(&operand, state),
+        );
+    }
+
+    /// SRSHR, URSHR, SRSRA, URSRA (and the unrounded forms) of every lane
+    /// size and amount, both widths.
+    #[test]
+    fn rounding_right_shifts_match_arm_on_every_tier() {
+        for lane in [1u8, 2, 4, 8] {
+            for amount in 1..=lane * 8 {
+                for (signed, round, accumulate) in [
+                    (true, true, false),
+                    (false, true, false),
+                    (true, true, true),
+                    (false, true, true),
+                    (true, false, false),
+                ] {
+                    for bytes in [8u8, 16] {
+                        if lane == 8 && bytes == 8 {
+                            continue;
+                        }
+                        let kind = Kind::Right {
+                            signed,
+                            round,
+                            accumulate,
+                            insert: false,
+                        };
+                        run(
+                            Shift {
+                                kind,
+                                destination: D,
+                                source: S,
+                                lane_bytes: lane,
+                                amount,
+                                bytes,
+                            },
+                            lane,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// RSHRN/SHRN and SQSHRN, SQRSHRN, SQSHRUN, SQRSHRUN, UQSHRN, UQRSHRN
+    /// into either half, vector and scalar, with QC.
+    #[test]
+    fn narrowing_shifts_match_arm_with_qc_on_every_tier() {
+        for lane in [1u8, 2, 4] {
+            for amount in 1..=lane * 8 {
+                for upper in [false, true] {
+                    for round in [false, true] {
+                        run(
+                            Shift {
+                                kind: Kind::Narrow { round, upper },
+                                destination: D,
+                                source: S,
+                                lane_bytes: lane,
+                                amount,
+                                bytes: 16,
+                            },
+                            lane * 2,
+                        );
+                        for (signed_source, unsigned_result) in
+                            [(true, false), (true, true), (false, true)]
+                        {
+                            for bytes in [16, lane] {
+                                if upper && bytes == lane {
+                                    continue;
+                                }
+                                let kind = Kind::SaturatingNarrow {
+                                    signed_source,
+                                    unsigned_result,
+                                    round,
+                                    upper,
+                                };
+                                run(
+                                    Shift {
+                                        kind,
+                                        destination: D,
+                                        source: S,
+                                        lane_bytes: lane,
+                                        amount,
+                                        bytes,
+                                    },
+                                    lane * 2,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

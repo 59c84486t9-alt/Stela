@@ -878,6 +878,41 @@ pub(crate) fn test(
     true
 }
 
+/// Truncate each `source_lane_bytes` lane of `source` to its low half, into
+/// consecutive lanes of the low quadword of `destination`, clearing its high
+/// quadword: VPMOVWB (AVX-512 BW and VL), VPMOVDW or VPMOVQD (F and VL).
+/// The DIT profile keeps its reviewed recipe. No EFLAGS or memory.
+pub(crate) fn truncating_narrow(
+    code: &mut Code,
+    source_lane_bytes: u8,
+    destination: u8,
+    source: u8,
+    target: TargetCpu,
+) -> bool {
+    let required = match source_lane_bytes {
+        2 => TargetCpu::Avx512f.with_avx512vl().with_avx512bw(),
+        4 | 8 => TargetCpu::Avx512f.with_avx512vl(),
+        _ => return false,
+    };
+    if !target.supports(required) || target.data_independent_timing() {
+        return false;
+    }
+    let opcode = match source_lane_bytes {
+        2 => 0x30,
+        4 => 0x33,
+        _ => 0x35,
+    };
+    // ModRM.reg names the wide source and r/m the narrow destination.
+    code.asm().evex(
+        masked(Map::M0f38, Pp::Pf3, false, 0, false),
+        opcode,
+        source,
+        0,
+        Rm::Xmm(destination),
+    );
+    true
+}
+
 /// Saturating narrows of `source_lane_bytes` lanes need AVX-512 VL with BW
 /// for halfword sources (VPMOVSWB) and F for wider ones, the lane compare's
 /// extensions for the saturation mask and SSE4.1 to re-extend.

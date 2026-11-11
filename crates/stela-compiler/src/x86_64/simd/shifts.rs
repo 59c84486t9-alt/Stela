@@ -1,6 +1,6 @@
 //! AdvSIMD shifts by immediate and per-lane register, including width changes.
 use super::{
-    Host, commit, greater, packed, read_vector, rearrange::constant, shuffle, vector_offset,
+    Host, commit, greater, packed, read_vector, rearrange::constant, shuffle, three, vector_offset,
 };
 use crate::x86_64::asm::{Alu, Code, Cond, Gpr, ShiftOp, Size, Unary, vector_extensions};
 use crate::x86_64::simd::encode::guest;
@@ -154,7 +154,18 @@ pub(crate) fn rounded_right(
     round: bool,
     target: TargetCpu,
 ) {
-    if round {
+    if round && lane_bytes > 1 && !target.data_independent_timing() {
+        // The rounding bit, bit amount-1, alone in bit 0 of XMM1: shift it to
+        // the top of the lane, then down to the bottom. No constant.
+        let bits = lane_bytes * BITS_PER_BYTE;
+        let (left, right) = match lane_bytes {
+            2 => (Shift::LeftWord, Shift::RightWord),
+            4 => (Shift::LeftDword, Shift::RightDword),
+            _ => (Shift::LeftQword, Shift::RightQword),
+        };
+        three::shift(code, left, 1, 0, bits - amount, target);
+        three::shift(code, right, 1, 1, bits - 1, target);
+    } else if round {
         packed(code, Host::MoveAligned, 1, 0);
         logical_shift(code, 1, lane_bytes, amount - 1, false, target);
         lane_mask(code, 2, lane_bytes, 1);
@@ -175,7 +186,7 @@ fn narrow(
     target: TargetCpu,
 ) {
     rounded_right(code, lane_bytes * 2, amount, false, round, target);
-    pack_truncated(code, lane_bytes, upper, destination);
+    pack_truncated(code, lane_bytes, upper, destination, target);
 }
 
 /// Shift first, then clamp. Rounding is computed as shifted value plus the
@@ -369,8 +380,17 @@ fn saturating_narrow_qword(
     packed(code, Host::Or, 4, 6);
     shuffle(code, 6, 5, LOW_DWORDS_OF_QWORDS);
 }
-pub(super) fn pack_truncated(code: &mut Code, lane_bytes: u8, upper: bool, destination: u8) {
+pub(super) fn pack_truncated(
+    code: &mut Code,
+    lane_bytes: u8,
+    upper: bool,
+    destination: u8,
+    target: TargetCpu,
+) {
+    // VPMOV{WB,DW,QD} clears the high quadword itself.
+    let cleared = vector_extensions::truncating_narrow(code, lane_bytes * 2, 0, 0, target);
     match lane_bytes {
+        _ if cleared => {}
         1 => {
             lane_mask(code, 2, 2, 0xff);
             packed(code, Host::And, 0, 2);
@@ -391,7 +411,9 @@ pub(super) fn pack_truncated(code: &mut Code, lane_bytes: u8, upper: bool, desti
         packed(code, Host::UnpackLowQword, 1, 0);
         commit(code, destination, 1);
     } else {
-        packed(code, Host::MoveQword, 0, 0);
+        if !cleared {
+            packed(code, Host::MoveQword, 0, 0);
+        }
         commit(code, destination, 0);
     }
 }

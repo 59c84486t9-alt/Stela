@@ -140,11 +140,11 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             read_vector(code, right, 1);
             packed(code, add_or_subtract(lane * 2, subtract), 0, 1);
             rounded_right(code, lane * 2, lane * 8, false, round, target);
-            pack_truncated(code, lane, upper, destination);
+            pack_truncated(code, lane, upper, destination, target);
             return;
         }
         Kind::Truncate { upper } => {
-            pack_truncated(code, lane, upper, destination);
+            pack_truncated(code, lane, upper, destination, target);
             return;
         }
         Kind::ShiftLong { upper } => {
