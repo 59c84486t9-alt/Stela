@@ -2,10 +2,10 @@
 //! a disk of the PC and boot it, and keep it working over the installed
 //! system's life.
 //!
-//! Setup writes the install medium (`setup::medium`) as `--install-image`
-//! says: full, the whole IPSW on the USB's FAT32 data partition; network,
-//! only its inventory, and `stela.efi` streams the IPSW from Apple's servers
-//! during the install. It prepares each machine's restore bundle (`stela
+//! Setup writes the install medium (`setup::medium`): the IPSW's inventory,
+//! from which `stela.efi` streams the IPSW from Apple's servers during the
+//! install. A USB made when setup still offered it holds the whole IPSW on
+//! its FAT32 data partition instead, and keeps doing so. It prepares each machine's restore bundle (`stela
 //! boot prepare --restore`) and adds an Install macOS startup choice
 //! (`stela.efi --install`), which restores macOS and its paired recoveryOS
 //! and System Recovery onto the Mac's internal SSD, as a Mac's erase
@@ -142,10 +142,6 @@ const CHOOSER_SECONDS: u32 = 5;
 const INSTALL_CHOICE: &str = "Install macOS";
 /// The startup choice that updates a setup's one install in place.
 const UPDATE_CHOICE: &str = "Update macOS";
-/// The commands `--install-image` goes with.
-const INSTALL_IMAGE_ACTIONS: &str = "--install-image goes with a new setup or --target; \
-    `stela setup update os` and `stela setup repair` take it with the image they write";
-
 /// `stela setup {words} --usb {usb}` in backticks, as a user types it: every
 /// maintenance command needs `--usb`.
 fn fix(usb: &Path, words: &str) -> String {
@@ -175,9 +171,6 @@ fn rerun(record: &Record, usb: &Path) -> String {
     let mut words = String::new();
     if record.build != builds::DEFAULT.build {
         let _ = write!(words, " --build {}", record.build);
-    }
-    if record.install_image == Some(InstallImage::Full) || record.media.iter().any(|m| !m.remote) {
-        words.push_str(" --install-image full");
     }
     if record.model != PINNED_MODEL {
         let _ = write!(words, " --model {}", record.model);
@@ -272,8 +265,9 @@ fn restore_choice_name(kind: Kind) -> &'static str {
     }
 }
 
-/// Where an install reads the macOS restore image (`--install-image`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+/// Where an install reads the macOS restore image. Every new setup streams
+/// it; a USB made when setup still offered the whole image keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum InstallImage {
     /// The whole IPSW on the USB: no image download during the install,
@@ -294,14 +288,13 @@ fn image_is_remote(ipsw: &Path, choice: Option<InstallImage>) -> Result<bool> {
         Some(InstallImage::Full) => {
             ensure!(
                 complete,
-                "{} holds only the recovery members, without the macOS system image an \
-                 install restores; pass the whole IPSW with --ipsw, leave out --ipsw to download \
-                 it, or use --install-image network to stream it from Apple during the install",
+                "{} holds only the recovery members, without the macOS system image this USB's \
+                 install reads from it; pass the whole IPSW with --ipsw",
                 ipsw.display()
             );
             Ok(false)
         }
-        None => Ok(!complete),
+        None => Ok(true),
     }
 }
 
@@ -673,6 +666,17 @@ impl Request {
         // A maintenance `--fetch` downloads the image of the model the setup
         // presents.
         self.model.get_or_insert_with(|| record.model.clone());
+        // A USB that holds the whole macOS image keeps holding it: its
+        // repairs and updates download whole images.
+        if self.install_image.is_none() {
+            self.install_image = record.install_image.or_else(|| {
+                record
+                    .media
+                    .iter()
+                    .any(|medium| !medium.remote)
+                    .then_some(InstallImage::Full)
+            });
+        }
         // Repair puts back the active build's files, so `--fetch` downloads
         // that build.
         if matches!(action, Action::Repair) {
@@ -777,10 +781,6 @@ impl Request {
             }
             return machines::add(environment, &self);
         }
-        ensure!(
-            !configured || self.install_image.is_none(),
-            "{INSTALL_IMAGE_ACTIONS}"
-        );
         setup(environment, self)
     }
 

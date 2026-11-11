@@ -225,18 +225,13 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
 
 /// The command that puts back the active build's restore files: `--fetch`
 /// downloads that build, the whole image when the medium holds it.
-fn image_fix(record: &Record, report: &Report) -> String {
-    let full = record.active_medium().is_some_and(|medium| !medium.remote);
-    report.fix(if full {
-        "repair --fetch --install-image full"
-    } else {
-        "repair --fetch"
-    })
+fn image_fix(report: &Report) -> String {
+    report.fix("repair --fetch")
 }
 
 fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Report) {
     let repair = report.fix("repair");
-    let image = image_fix(record, report);
+    let image = image_fix(report);
     for kept in &record.bundles {
         let directory = kept.directory(&record.volume);
         let role = if kept.build == record.build && kept.generation() == record.generation() {
@@ -741,21 +736,13 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
                     ""
                 }
             )?;
-            let full = record.active_medium().is_some_and(|medium| !medium.remote);
             return Err(Reported {
                 report: text,
                 summary: format!(
                     "repair needs the macOS {} restore image: run {} (or --ipsw FILE in place \
                      of --fetch)",
                     record.build,
-                    fix(
-                        usb,
-                        if full {
-                            "repair --fetch --install-image full"
-                        } else {
-                            "repair --fetch"
-                        }
-                    )
+                    fix(usb, "repair --fetch")
                 ),
             }
             .into());

@@ -80,8 +80,7 @@ pub(super) struct Record {
     /// Every choice times the engine (`--profile`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(super) profile: bool,
-    /// Where installs read the restore image (`--install-image`); the
-    /// default when absent.
+    /// Where installs read the restore image; streamed when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) install_image: Option<InstallImage>,
     /// The translation store `stela.efi` keeps its packs in, if the USB
@@ -111,12 +110,10 @@ pub(super) const RECORD_KIND: &str = "stela_setup";
 pub(super) const RECORD_SCHEMA: u32 = 9;
 
 impl Record {
-    /// Whether installs stream `ipsw`'s build from Apple's servers
-    /// (`--install-image network`) rather than read it from the USB. An erase
-    /// restore needs the macOS system image, which a recovery archive
-    /// (`restore::payload::trim`) leaves out. A complete local image
-    /// stays local by default, including when the target disk will be
-    /// chosen later on another PC.
+    /// Whether installs stream `ipsw`'s build from Apple's servers rather
+    /// than read it from the USB, as every setup does but one that already
+    /// holds whole images. An erase restore needs the macOS system image,
+    /// which a recovery archive (`restore::payload::trim`) leaves out.
     pub(super) fn remote_install(&self, ipsw: &Path) -> Result<bool> {
         image_is_remote(ipsw, self.install_image)
     }

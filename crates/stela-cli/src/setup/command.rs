@@ -2,7 +2,7 @@
 //! flags, and each action on an existing setup is a subcommand with only
 //! the options it takes, so the parser refuses every other combination.
 //! Each form becomes one [`Request`] for the action it names.
-use super::{Action, InstallImage, NextBoot, Request, builds, ecid::Ecid, wifi};
+use super::{Action, NextBoot, Request, builds, ecid::Ecid, wifi};
 use clap::{Args, Subcommand, builder::TypedValueParser};
 use std::path::PathBuf;
 use stela_boot_core::options::Uuid;
@@ -275,13 +275,6 @@ struct Create {
     usb4_approve: Vec<String>,
     #[command(flatten)]
     addressing: Addressing,
-    /// Where an install reads macOS: `full` copies the whole IPSW (about
-    /// 27 GB) onto the USB; `network` writes only its file list, and
-    /// stela.efi downloads macOS from Apple during the install. Either way
-    /// the install needs the network for Apple's signing server. A local
-    /// IPSW defaults to full, a download to network.
-    #[arg(long, value_enum)]
-    install_image: Option<InstallImage>,
     /// The `stela.efi` to install instead of the one built into `stela`.
     #[arg(long, hide = true)]
     efi: Option<PathBuf>,
@@ -359,7 +352,6 @@ impl Create {
         let mut request = Request {
             action: Action::Create,
             usb: self.usb,
-            install_image: self.install_image,
             efi: self.efi,
             model: self.model,
             dry_run: self.dry_run,
@@ -395,10 +387,6 @@ struct Repair {
     /// again.
     #[arg(long, conflicts_with = "ipsw")]
     fetch: bool,
-    /// Where an install reads the restore image the repaired medium holds
-    /// (with `--ipsw` or `--fetch`).
-    #[arg(long, value_enum)]
-    install_image: Option<InstallImage>,
     /// Erase the other file system an install's SSD partition holds: the
     /// PC's own OS would mount it and clear Stela's machine state.
     #[arg(long)]
@@ -424,7 +412,6 @@ struct Repair {
 impl Repair {
     fn request(self) -> Request {
         let mut request = Request {
-            install_image: self.install_image,
             erase_target: self.erase_target,
             initialize_nor: self.initialize_nor,
             ecid: self.ecid,
@@ -462,7 +449,6 @@ impl Update {
             }
             Self::Os(command) => {
                 let mut request = Request {
-                    install_image: command.install_image,
                     dry_run: command.dry_run,
                     ..command.usb.request(Action::UpdateOs)
                 };
@@ -497,10 +483,6 @@ struct UpdateOs {
     usb: Usb,
     #[command(flatten)]
     image: Image,
-    /// Where an install reads the new build's restore image (see `stela
-    /// setup --help`).
-    #[arg(long, value_enum)]
-    install_image: Option<InstallImage>,
     /// Show what would change, and change nothing.
     #[arg(long)]
     dry_run: bool,

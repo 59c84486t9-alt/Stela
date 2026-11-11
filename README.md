@@ -29,9 +29,9 @@ and Apple7 GPU families.
 - An x86-64-v2 CPU (about 2011 or newer), UEFI with Secure Boot off, 8 GB of
   RAM.
 - An NVIDIA GTX 16 or RTX 20 series GPU or newer.
-- A USB stick: 8 GB for the network installer, 32 GB for the full installer.
+- A USB stick of 8 GB or more.
 - An empty GPT partition of at least 60 GB.
-- Network access during the install.
+- Network access during the install, which downloads macOS.
 
 Stela currently models the Mac mini (M2) and runs macOS 27.
 
@@ -41,7 +41,7 @@ Stela currently models the Mac mini (M2) and runs macOS 27.
    [releases page](https://github.com/tylertms/Stela/releases).
 2. On the PC that will run macOS, run `sudo ./stela setup` (Linux, macOS) or
    double-click `stela.exe` (Windows).
-3. Choose the USB stick, the installer type and the Mac model, then confirm.
+3. Choose the USB stick, the macOS version and the Mac model, then confirm.
    Setup erases the USB stick.
 4. Boot the PC from the USB stick.
 

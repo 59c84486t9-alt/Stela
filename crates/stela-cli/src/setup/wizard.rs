@@ -19,7 +19,6 @@ mod theme;
 
 // Advertised USB capacity classes; preparation also checks exact image sizes.
 const NETWORK_MIN: u64 = 7 * 1024 * 1024 * 1024;
-const FULL_MIN: u64 = 28 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Usb {
@@ -213,10 +212,8 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     "Capacity unavailable".into()
                 } else if usb.bytes < NETWORK_MIN {
                     "Too small · Requires an 8 GB or larger USB".into()
-                } else if usb.bytes < FULL_MIN {
-                    "Network installer only · Full needs a 32 GB USB".into()
                 } else {
-                    "Full or network installer".into()
+                    String::new()
                 },
                 enabled: usb.bytes >= NETWORK_MIN,
             })
@@ -235,7 +232,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             .iter()
             .position(|usb| usb.path() == command.usb)
             .unwrap_or(0);
-        let usb = &choices[menu::select("1 / 7  Choose a USB", &rows, initial)?];
+        let usb = &choices[menu::select("1 / 6  Choose a USB", &rows, initial)?];
         command.usb = usb.path();
         // A setup this USB holds that stopped part way is finished, not
         // erased and begun again.
@@ -256,67 +253,12 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 return Ok(true);
             }
         }
-        let full = usb.bytes >= FULL_MIN;
-        let prefilled = first && command.ipsw.is_some() && full;
+        // A local IPSW named on the command line supplies the boot files;
+        // the install still downloads macOS.
+        let prefilled = first && command.ipsw.is_some();
         first = false;
-        let source = if prefilled {
-            2
-        } else {
-            let item = |value, label: &str, hint: &str, enabled| menu::Item {
-                value,
-                label: label.into(),
-                hint: hint.into(),
-                enabled,
-            };
-            let rows = [
-                item(
-                    0,
-                    "Full installer",
-                    "Downloads the full macOS image onto the USB · Requires a 32 GB USB",
-                    full,
-                ),
-                item(
-                    1,
-                    "Network installer",
-                    "Downloads boot files only · Requires an 8 GB USB; macOS downloads during installation",
-                    true,
-                ),
-                item(
-                    2,
-                    "Use an existing IPSW",
-                    "Copies your downloaded image to the USB · Requires a 32 GB USB",
-                    full,
-                ),
-            ];
-            let initial = if command.ipsw.is_some() {
-                2
-            } else {
-                usize::from(command.install_image == Some(InstallImage::Network))
-            };
-            menu::select("2 / 7  Choose an installer", &rows, initial)?
-        };
-        let (version, models) = if source == 2 {
-            let path = if prefilled {
-                command.ipsw.clone().unwrap()
-            } else {
-                let initial = command
-                    .ipsw
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default();
-                let text: String = cliclack::input("3 / 7  Choose an IPSW file")
-                    .placeholder("Path to the .ipsw file")
-                    .default_input(&initial)
-                    .validate(|s: &String| {
-                        if Path::new(s.trim().trim_matches('"')).is_file() {
-                            Ok(())
-                        } else {
-                            Err("Choose an existing IPSW file")
-                        }
-                    })
-                    .interact()?;
-                PathBuf::from(text.trim().trim_matches('"'))
-            };
+        let (version, models) = if prefilled {
+            let path = command.ipsw.clone().unwrap();
             let progress = Phase::spinner("Reading IPSW metadata");
             let manifest =
                 local_image(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -327,7 +269,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             command.fetch = false;
             command.build = manifest.product_build.clone();
             preferred_build = Some(command.build.clone());
-            command.install_image = Some(InstallImage::Full);
+            command.install_image = Some(InstallImage::Network);
             cliclack::log::info(format!(
                 "macOS {} ({}) · local IPSW{}",
                 manifest.product_version,
@@ -355,11 +297,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             preferred_build = Some(command.build.clone());
             command.ipsw = None;
             command.fetch = true;
-            command.install_image = Some(if source == 0 {
-                InstallImage::Full
-            } else {
-                InstallImage::Network
-            });
+            command.install_image = Some(InstallImage::Network);
             (image.version.clone(), image.models.clone())
         };
         ensure!(
@@ -372,29 +310,13 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         command.model = Some(choices::model(&models, &names, command.model.as_deref())?);
         // Every install needs the network for Apple's signing server; a
         // network installer also downloads macOS over it.
-        cliclack::log::info(stela_runtime::restore::tss::network_reason(
-            command.install_image == Some(InstallImage::Network),
-        ))?;
+        cliclack::log::info(stela_runtime::restore::tss::network_reason(true))?;
         choose_wifi(command)?;
         super::addresses::choose(command)?;
-        let installer = match (source, command.install_image) {
-            (2, _) => format!(
-                "Existing IPSW · {}",
-                command
-                    .ipsw
-                    .as_deref()
-                    .and_then(Path::file_name)
-                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
-            ),
-            (_, Some(InstallImage::Network)) => {
-                "Network · macOS downloads during installation".into()
-            }
-            _ => "Full · the macOS image goes on the USB".into(),
-        };
         cliclack::note(
-            "7 / 7  Review",
+            "6 / 6  Review",
             format!(
-                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\n{}{}{}",
+                "USB        {}\nmacOS      {version} ({}) · downloads during installation\nMac        {}\n{}{}{}",
                 usb.serial.as_ref().map_or_else(
                     || usb.description(),
                     |serial| format!("{} · serial {serial}", usb.description())
@@ -464,7 +386,7 @@ fn choose_wifi(command: &mut Request) -> Result<()> {
     progress.finish();
     const ETHERNET: usize = usize::MAX;
     const TYPED: usize = usize::MAX - 1;
-    let mut select = cliclack::select("5 / 7  Wi-Fi during installation").item(
+    let mut select = cliclack::select("4 / 6  Wi-Fi during installation").item(
         ETHERNET,
         "No Wi-Fi",
         "Connect the PC to Ethernet during installation",

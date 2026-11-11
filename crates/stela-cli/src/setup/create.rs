@@ -961,9 +961,7 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
                 + 4 * MARGIN;
             ensure!(
                 *capacity == 0 || *capacity >= required,
-                "this installer needs a USB of at least {} (this one holds {}): use a larger \
-                 USB, or the network installer (--install-image network), which downloads macOS \
-                 during the install",
+                "this installer needs a USB of at least {} (this one holds {}): use a larger USB",
                 host::bytes_text(required),
                 host::bytes_text(*capacity)
             );

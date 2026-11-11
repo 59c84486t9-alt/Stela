@@ -243,7 +243,9 @@ fn command(f: &Fixture, usb: &Path) -> Request {
         usb: usb.to_path_buf(),
         ipsw: Some(f.ipsw.clone()),
         fetch: false,
-        install_image: None,
+        // Most of these tests exercise a USB that holds the whole image, as
+        // setups made before every install streamed it do.
+        install_image: Some(InstallImage::Full),
         download_dir: None,
         efi: Some(f.efi.clone()),
         model: Some(restore::payload::SYNTHETIC_MODEL.into()),
@@ -1235,11 +1237,6 @@ fn install_reads_full_or_streamed_image() {
         "{install}"
     );
     assert!(!install.contains("--install-source"), "{install}");
-    // The choice is the setup's.
-    let error = rerun(&f, |c| c.install_image = Some(InstallImage::Full))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("--install-image goes with"), "{error}");
     // Repair makes it full: the IPSW in pieces on the USB.
     let switch = |image| {
         rerun(&f, |c| {
@@ -1282,9 +1279,18 @@ fn full_install_requires_system_image() {
     full.dry_run = true;
     let error = format!("{:#}", setup(&environment(&f.host), full).unwrap_err());
     assert!(error.contains("only the recovery members"), "{error}");
-    // By default such an image streams the install instead.
+    // A new setup names no image choice and streams the install, from a
+    // recovery archive and from a whole image alike.
+    for ipsw in [recovery, f.ipsw.clone()] {
+        let mut default = installed_command(&f);
+        default.ipsw = Some(ipsw);
+        default.install_image = None;
+        default.dry_run = true;
+        let report = setup(&environment(&f.host), default).unwrap();
+        assert!(report.contains("file list only"), "{report}");
+    }
     let mut default = installed_command(&f);
-    default.ipsw = Some(recovery);
+    default.install_image = None;
     setup(&environment(&f.host), default).unwrap();
     let record = record(&f);
     assert_eq!(record.install_image, None);

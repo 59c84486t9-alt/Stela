@@ -239,7 +239,7 @@ mod tests {
             &["status"][..],
             &["repair", "--ipsw", "a.ipsw", "--erase-target"],
             &["update", "stela", "--efi", "stela.efi"],
-            &["update", "os", "--install-image", "network"],
+            &["update", "os", "--ipsw", "a.ipsw"],
             &["update", "stela", "--fetch"],
             &["uninstall"],
             &["nvram", "next-boot", "recovery", "--install", "macOS"],
