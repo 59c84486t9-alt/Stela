@@ -81,6 +81,7 @@ pub mod tsc;
 pub mod vtd;
 pub mod work_status;
 pub mod worker_bindings;
+pub mod writeback_placement;
 pub mod xstate;
 
 pub mod firmware_pci;
