@@ -14,6 +14,12 @@ pub(in crate::x86_64) mod encode;
 mod estimate;
 pub(in crate::x86_64) mod exponent_scale;
 mod extrema_scale;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod fast_conversion_tests;
 mod floating;
 mod fused;
 pub(in crate::x86_64) mod half;

@@ -1,10 +1,10 @@
 //! Conversions between FP and integers.
 use super::numerical::jump;
 use super::numerical::{
-    ArithmeticOpcode, Condition, INPUT_MINIMUM_EXPONENT, Rounding, branch, clear_scalar,
-    commit_inexact, emit_opcode, environment_round, exponent_range, prepare_vector_input_range,
-    read_numerical_vector, reject_other_status, resolve, restore_environment, test_control,
-    vector_exponent_range,
+    ArithmeticOpcode, Condition, INPUT_MINIMUM_EXPONENT, MXCSR_INEXACT, Rounding, branch,
+    clear_scalar, commit_inexact, emit_opcode, environment_round, exponent_range,
+    prepare_vector_input_range, read_numerical_vector, reject_other_status, resolve,
+    restore_environment, test_control, vector_exponent_range,
 };
 use super::{Host, commit, packed, read_vector, vector_offset};
 use crate::TargetCpu;
@@ -18,7 +18,8 @@ use crate::{
     aarch64::{
         Register,
         floating::{
-            FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP, Format, INEXACT,
+            FPCR_EXCEPTION_ENABLE_MASK, FPCR_FIZ, FPCR_FZ, FPCR_NEP, FPCR_ROUNDING_MASK,
+            FPCR_ROUNDING_SHIFT, Format, INEXACT,
             integer::{IntegerFormat, IntegerRounding, IntegerWidth},
         },
         simd::{
@@ -29,6 +30,7 @@ use crate::{
     block::ExitKind,
 };
 use Gpr::{Rax, Rcx, Rdx};
+use alloc::vec;
 use alloc::vec::Vec;
 
 const BROADCAST_LOW_SINGLE: u8 = 0;
@@ -253,6 +255,202 @@ fn convert_integer_lane(
     scale(code, operand, Shape::Scalar, -1);
 }
 
+/// SSE4.1 ROUNDSS/ROUNDSD immediate: round toward negative or positive
+/// infinity by the immediate, not MXCSR, without the precision exception.
+const ROUND_TOWARD_NEGATIVE: u8 = 0x9;
+const ROUND_TOWARD_POSITIVE: u8 = 0xa;
+
+/// Leave ECX as MXCSR status with only the inexact flag, set exactly when the
+/// `size` values in RDX and `other` differ. Clobbers RDX.
+fn inexact_unless_equal(code: &mut Code, size: Size, other: Gpr) {
+    let mut asm = code.asm();
+    asm.alu(Alu::Sub, size, Rdx, other);
+    // CF is set exactly when the difference is zero.
+    asm.alu_imm8(Alu::Cmp, size, Rdx, 1);
+    asm.alu(Alu::Sbb, Size::Dword, Rcx, Rcx);
+    asm.alu_imm8(Alu::Add, Size::Dword, Rcx, 1);
+    asm.shift_imm(
+        ShiftOp::Shl,
+        Size::Dword,
+        Rcx,
+        MXCSR_INEXACT.trailing_zeros() as u8,
+    );
+}
+
+/// The largest unbiased input exponent whose conversion stays inside the
+/// integer: below 2^(n-1) for truncation, and one power lower for the rounding
+/// forms, which can round up to the next power of two. Unsigned forms convert
+/// with the signed 64-bit instruction (unsigned W results then fit 32 bits).
+fn fast_exponent_limit(integer: IntegerFormat, truncate: bool) -> u32 {
+    let magnitude_bits = match (integer.signed, integer.width) {
+        (true, width) => width.bits() - 1,
+        (false, IntegerWidth::Bits32) => 32,
+        (false, _) => 63,
+    };
+    magnitude_bits - 1 - u32::from(!truncate)
+}
+
+/// The scalar S/D to W/X conversion without an MXCSR environment, taken
+/// whatever FPSR holds: zeros, and normal and subnormal-free inputs whose
+/// result fits the integer (`fast_exponent_limit`), with no enabled trap.
+/// Then the only status is inexact, which a conversion back finds exactly:
+/// the rounded integer of an S/D input in range is exactly representable in
+/// its format. Truncation and nearest-even (the block ABI's MXCSR rounding,
+/// see `numerical::sticky_inexact`) run on any tier; SSE4.1's ROUNDSS/SD
+/// adds the directed forms. Returns the branches to the full path and to its
+/// completion, which takes RAX and ECX as the full path leaves them; `None`
+/// when the form has no fast path. FJCVTZS (`negative_zero_exact` false)
+/// sends -0, whose Z flag differs, to the full path.
+fn fast_to_integer(
+    code: &mut Code,
+    operand: &IntegerConversion,
+    mode: IntegerRounding,
+    target: TargetCpu,
+    negative_zero_exact: bool,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let integer = operand.integer.format();
+    let directed = matches!(
+        mode,
+        IntegerRounding::TowardPositive | IntegerRounding::TowardNegative
+    );
+    if operand.integer.shape() != Shape::Scalar
+        || operand.frac_bits != 0
+        || operand.format == Format::Half
+        || integer.width == IntegerWidth::Bits16
+        || mode == IntegerRounding::NearestAway
+        || directed && !target.supports(TargetCpu::Sse41)
+        || target.data_independent_timing()
+    {
+        return None;
+    }
+    let format = operand.format;
+    let double = format == Format::Double;
+    let lanes = scalar_lanes(format);
+    let input_size = Size::of(double);
+    let truncate = mode == IntegerRounding::TowardZero;
+    let result_size = width(!(integer.signed && integer.width == IntegerWidth::Bits32));
+    let mut full = Vec::new();
+    test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
+    full.push(branch(code, Condition::NotZero));
+    read_float_lane(code, operand, 0);
+    let mut asm = code.asm();
+    if double {
+        asm.movq_from_xmm(Rcx, RESULT_VECTOR);
+    } else {
+        asm.movd_from_xmm(Rcx, RESULT_VECTOR);
+    }
+    asm.mov(input_size, Rdx, Rcx);
+    asm.shift_one(ShiftOp::Shl, input_size, Rdx);
+    if !negative_zero_exact {
+        asm.test(input_size, Rcx, Rcx);
+    }
+    let zero = branch(code, Condition::Zero);
+    let mut asm = code.asm();
+    if !integer.signed {
+        asm.bit_imm(BitTest::Bt, input_size, Rcx, (format.bits() - 1) as u8);
+        full.push(branch(code, Condition::Below));
+    }
+    let mut asm = code.asm();
+    asm.shift_imm(
+        ShiftOp::Shr,
+        input_size,
+        Rdx,
+        format.fraction_bits() as u8 + 1,
+    );
+    asm.alu_imm8(Alu::Cmp, Size::Dword, Rdx, 1);
+    full.push(branch(code, Condition::Below));
+    let bias = format.exponent_bias();
+    code.asm().alu_imm32(
+        Alu::Cmp,
+        Size::Dword,
+        Rdx,
+        (bias + fast_exponent_limit(integer, truncate)) as i32,
+    );
+    full.push(branch(code, Condition::Above));
+    let source = if directed {
+        let opcode = if double {
+            Host::RoundScalarDouble
+        } else {
+            Host::RoundScalarSingle
+        };
+        let immediate = if mode == IntegerRounding::TowardNegative {
+            ROUND_TOWARD_NEGATIVE
+        } else {
+            ROUND_TOWARD_POSITIVE
+        };
+        opcode.register_imm(code, TEMPORARY_VECTOR, RESULT_VECTOR, immediate, target);
+        TEMPORARY_VECTOR
+    } else {
+        RESULT_VECTOR
+    };
+    let mut asm = code.asm();
+    asm.cvtfloat2si(
+        lanes,
+        truncate || directed,
+        result_size,
+        Rax,
+        Rm::Xmm(source),
+    );
+    asm.cvtsi2float(lanes, result_size, TEMPORARY_VECTOR, Rax);
+    if double {
+        asm.movq_from_xmm(Rdx, TEMPORARY_VECTOR);
+    } else {
+        asm.movd_from_xmm(Rdx, TEMPORARY_VECTOR);
+    }
+    inexact_unless_equal(code, input_size, Rcx);
+    let mut success = vec![jump(code)];
+    let zero_start = code.len();
+    resolve(code, zero, zero_start);
+    let mut asm = code.asm();
+    asm.alu(Alu::Xor, Size::Dword, Rax, Rax);
+    asm.alu(Alu::Xor, Size::Dword, Rcx, Rcx);
+    success.push(jump(code));
+    Some((full, success))
+}
+
+/// The scalar W/X to S/D conversion without an MXCSR environment, under
+/// FPCR's nearest-even rounding (the block ABI's MXCSR rounding) and no
+/// enabled trap. Its only status is inexact, which the truncating
+/// conversion back finds exactly: a result that rounded up to 2^31 or 2^63
+/// converts back to the integer indefinite value, never the input. Unsigned
+/// X inputs from 2^63 take the full path. Returns the branches to the full
+/// path and to its completion, which takes XMM0 and ECX as the full path
+/// leaves them.
+fn fast_from_integer(
+    code: &mut Code,
+    operand: &IntegerConversion,
+    target: TargetCpu,
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let integer = operand.integer.format();
+    if operand.integer.shape() != Shape::Scalar
+        || operand.frac_bits != 0
+        || operand.format == Format::Half
+        || integer.width == IntegerWidth::Bits16
+        || target.data_independent_timing()
+    {
+        return None;
+    }
+    let lanes = scalar_lanes(operand.format);
+    let size = width(integer.width == IntegerWidth::Bits64 || !integer.signed);
+    let mut full = Vec::new();
+    test_control(
+        code,
+        FPCR_EXCEPTION_ENABLE_MASK | FPCR_ROUNDING_MASK << FPCR_ROUNDING_SHIFT,
+    );
+    full.push(branch(code, Condition::NotZero));
+    read_vector(code, operand.float, RESULT_VECTOR);
+    read_integer(code, operand.integer, 0);
+    if !integer.signed && integer.width == IntegerWidth::Bits64 {
+        code.asm().bit_imm(BitTest::Bt, Size::Qword, Rax, SIGN_BIT);
+        full.push(branch(code, Condition::Below));
+    }
+    let mut asm = code.asm();
+    asm.cvtsi2float(lanes, size, RESULT_VECTOR, Rax);
+    asm.cvtfloat2si(lanes, true, size, Rdx, Rm::Xmm(RESULT_VECTOR));
+    inexact_unless_equal(code, size, Rax);
+    Some((full, vec![jump(code)]))
+}
+
 fn pack_integer_lane(code: &mut Code, width: IntegerWidth, lane: u32) {
     lane_to_vector(code, width == IntegerWidth::Bits64, TEMPORARY_VECTOR);
     if lane != 0 {
@@ -347,6 +545,13 @@ pub(in crate::x86_64) fn from_integer(
         helper(code, pc);
         return;
     }
+    let fast = fast_from_integer(code, operand, target);
+    if let Some((full, _)) = &fast {
+        let full_start = code.len();
+        for &patch in full {
+            resolve(code, patch, full_start);
+        }
+    }
     let shape = operand.integer.shape();
     let integer = operand.integer.format();
     test_control(code, FPCR_EXCEPTION_ENABLE_MASK);
@@ -401,6 +606,9 @@ pub(in crate::x86_64) fn from_integer(
     helper(code, pc);
     let success_start = code.len();
     resolve(code, success, success_start);
+    for patch in fast.map(|(_, success)| success).unwrap_or_default() {
+        resolve(code, patch, success_start);
+    }
     finish_float(code, operand);
 }
 
@@ -592,6 +800,17 @@ pub(in crate::x86_64) fn to_integer(
     pc: GuestAddress,
     target: TargetCpu,
 ) {
+    to_integer_with(code, operand, mode, pc, target, true);
+}
+
+fn to_integer_with(
+    code: &mut Code,
+    operand: &IntegerConversion,
+    mode: IntegerRounding,
+    pc: GuestAddress,
+    target: TargetCpu,
+    negative_zero_exact: bool,
+) {
     if operand.format == Format::Half && !half_supported(operand, target)
         || mode == IntegerRounding::NearestAway
     {
@@ -599,6 +818,13 @@ pub(in crate::x86_64) fn to_integer(
         // rounds near half ties; keep the exact integer-core route instead.
         helper(code, pc);
         return;
+    }
+    let fast = fast_to_integer(code, operand, mode, target, negative_zero_exact);
+    if let Some((full, _)) = &fast {
+        let full_start = code.len();
+        for &patch in full {
+            resolve(code, patch, full_start);
+        }
     }
     let shape = operand.integer.shape();
     let integer = operand.integer.format();
@@ -692,6 +918,9 @@ pub(in crate::x86_64) fn to_integer(
     helper(code, pc);
     let success_start = code.len();
     resolve(code, success, success_start);
+    for patch in fast.map(|(_, success)| success).unwrap_or_default() {
+        resolve(code, patch, success_start);
+    }
     finish_integer(code, operand, packed_result);
 }
 
@@ -719,7 +948,14 @@ pub(in crate::x86_64) fn javascript(
     // A normal input whose truncated value fits in 32 bits gives the JavaScript
     // result directly. Other inputs exit to software completion of FJCVTZS,
     // which handles wrapping, special values and zeros.
-    to_integer(code, &operand, IntegerRounding::TowardZero, pc, target);
+    to_integer_with(
+        code,
+        &operand,
+        IntegerRounding::TowardZero,
+        pc,
+        target,
+        false,
+    );
     // commit_inexact leaves only fresh IXC in ECX. Accumulated FPSR.IXC must
     // not clear Z for a later exact input, including a discarded WZR result.
     let shift = match code.is_pinned() {
