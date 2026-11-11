@@ -1,8 +1,9 @@
-<div align="center">
-  <img src="assets/stela-icon.png" alt="Stela" width="140">
-  <h1>Stela</h1>
-  <p>Boots unmodified Apple silicon macOS on x86-64 PCs.</p>
-</div>
+<h1 align="center">
+  <img src="assets/stela-icon.png" alt="" width="96"><br>
+  Stela
+</h1>
+
+<p align="center">Boots unmodified Apple silicon macOS on x86-64 PCs.</p>
 
 Stela is a UEFI boot program with an arm64-to-x86-64 translator, a Metal
 driver for NVIDIA GPUs and a model of Apple silicon hardware.
