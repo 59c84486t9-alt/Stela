@@ -136,8 +136,10 @@ impl<D: Devices> Board<D> {
         if published != dma {
             self.dma.store(dma, Ordering::Release);
         }
+        // The latched pins alone: each PE adds the FIQ its own handle
+        // drives ([`LocalRegisters::fiq`]), which changes without the lock.
         for pe in 0..self.pins.len() {
-            self.publish_pins(pe, devices.pins(pe));
+            self.publish_pins(pe, devices.latched_pins(pe));
         }
         let asleep = devices.waits_on_host();
         if self.asleep.load(Ordering::Relaxed) != asleep {
@@ -229,13 +231,18 @@ impl<D: Devices> Held<'_, D> {
             lines: seen,
         } = &mut **self.state;
         if let Some(own) = seen.get_mut(cpu)
-            && let Some(lines) = devices.pins(cpu)
+            && let Some(lines) = devices.latched_pins(cpu)
         {
             // The caller reads its own lines after the call.
             *own = lines;
         }
+        // PEs whose own FIQ word the call set (a deferred fast IPI that
+        // fired): they read it themselves, so only the epoch tells them.
+        let mut signalled = devices.take_signalled() & !wake_bit(cpu);
         for pe in self.board.hub.others(cpu) {
-            let pins = devices.pins(pe);
+            // The latched pins alone: each PE adds the FIQ it reads itself
+            // ([`LocalRegisters::fiq`]), which changes without the lock.
+            let pins = devices.latched_pins(pe);
             let lines = match pins {
                 Some(lines) => lines,
                 None => devices.lines(pe, now),
@@ -243,7 +250,9 @@ impl<D: Devices> Held<'_, D> {
             // The receiver may read its pins as soon as the epoch changes,
             // before this call releases the devices' lock.
             self.board.publish_pins(pe, pins);
-            if lines != seen[pe] {
+            let bit = wake_bit(pe);
+            if lines != seen[pe] || signalled & bit != 0 {
+                signalled &= !bit;
                 seen[pe] = lines;
                 self.board.hub.lines_changed_unwoken(pe);
                 match wake_bit(pe) {
@@ -509,7 +518,7 @@ impl<D: Devices> SharedDevices<D> {
 
     /// PE `cpu`'s own registers, without the devices' lock once it has its
     /// handle.
-    fn local_registers_of(&mut self, cpu: usize) -> Option<&Arc<dyn LocalRegisters>> {
+    pub(super) fn local_registers_of(&mut self, cpu: usize) -> Option<&Arc<dyn LocalRegisters>> {
         if self.local.len() <= cpu {
             self.local.resize_with(cpu + 1, || None);
         }
@@ -517,6 +526,15 @@ impl<D: Devices> SharedDevices<D> {
             self.local[cpu] = Some(self.with(|devices| devices.local_registers(cpu)));
         }
         self.local[cpu].as_ref()?.as_ref()
+    }
+
+    /// PE `cpu`'s FIQ from its own handle ([`LocalRegisters::fiq`]), held
+    /// low while the SoC sleeps, as the latched pins are.
+    fn signalled_fiq(&mut self, cpu: usize) -> bool {
+        !self.board.asleep.load(Ordering::Acquire)
+            && self
+                .local_registers_of(cpu)
+                .is_some_and(|local| local.fiq())
     }
 
     /// A call that can change devices: run it, then tell every other PE
@@ -673,8 +691,12 @@ impl<D: Devices> Devices for SharedDevices<D> {
         devices.notify(cpu, now);
         lines
     }
+    /// The pins every call left, with the FIQ the PE's own handle drives
+    /// ([`LocalRegisters::fiq`]): an Apple fast IPI sent without the lock.
     fn pins(&mut self, cpu: usize) -> Option<Lines> {
-        unpack(self.board.pins.get(cpu)?.load(Ordering::Acquire))
+        let mut lines = unpack(self.board.pins.get(cpu)?.load(Ordering::Acquire))?;
+        lines.fiq |= self.signalled_fiq(cpu);
+        Some(lines)
     }
     /// The home machine advances the devices with time and tells the other
     /// PEs what that changes ([`Self::notify`]); their machines wait for
@@ -726,6 +748,19 @@ impl<D: Devices> Devices for SharedDevices<D> {
             .and_then(|local| local.register(encoding, write))
         {
             return Some(Ok(value));
+        }
+        // A signal to another PE that needs no lock (an immediate fast
+        // IPI): the target looks at its lines again at once.
+        if let Some(value) = write
+            && let Some(sent) = self
+                .local_registers_of(cpu)
+                .and_then(|local| local.send(encoding, value))
+        {
+            if let Some(pe) = sent {
+                self.board.hub.lines_changed_unwoken(pe);
+                self.board.hub.wake(pe);
+            }
+            return Some(Ok(0));
         }
         if write.is_none() {
             return self.at(Call::Register, now, |devices, now| {

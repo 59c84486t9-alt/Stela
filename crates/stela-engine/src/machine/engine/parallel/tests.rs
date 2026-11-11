@@ -1,3 +1,4 @@
+use super::super::LocalRegisters;
 use super::*;
 use core::sync::atomic::AtomicUsize;
 
@@ -1104,6 +1105,283 @@ fn a_fast_ipi_write_keeps_what_derives_from_the_pes_registers() {
     assert_eq!(machine.devices.with(|devices| devices.register_calls), 1);
     assert_eq!(machine.device_lines, None, "lines are read again");
     assert!(machine.native_system.is_some(), "derived state stays");
+}
+
+/// A board whose PEs signal each other with a word each, as Apple's fast
+/// IPIs do: a write of `SERVED` sets the word of the PE its value names
+/// through the PE's own handle, without the lock, unless the value has bit
+/// 8 set, which takes the lock and raises it there.
+#[derive(Default)]
+struct Signalling {
+    words: Arc<[AtomicU64; 2]>,
+    signalled: u64,
+    register_calls: usize,
+}
+
+struct SignalWords {
+    words: Arc<[AtomicU64; 2]>,
+    pe: usize,
+}
+
+impl LocalRegisters for SignalWords {
+    fn register(&self, _: Encoding, _: Option<u64>) -> Option<u64> {
+        None
+    }
+    fn storage(&self, _: Encoding) -> Option<u64> {
+        None
+    }
+    fn send(&self, encoding: Encoding, value: u64) -> Option<Option<usize>> {
+        if encoding != SERVED || value & 1 << 8 != 0 {
+            return None;
+        }
+        let target = (value & 1) as usize;
+        Some((self.words[target].swap(1, Ordering::AcqRel) == 0).then_some(target))
+    }
+    fn fiq(&self) -> bool {
+        self.words[self.pe].load(Ordering::Acquire) != 0
+    }
+}
+
+impl Devices for Signalling {
+    fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+        Ok(0)
+    }
+    fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+        Ok(())
+    }
+    fn lines(&mut self, pe: usize, _: u64) -> Lines {
+        self.pins(pe).unwrap()
+    }
+    fn pins(&mut self, pe: usize) -> Option<Lines> {
+        Some(Lines {
+            irq: false,
+            fiq: self.words[pe].load(Ordering::Acquire) != 0,
+        })
+    }
+    fn latched_pins(&mut self, _: usize) -> Option<Lines> {
+        Some(Lines::default())
+    }
+    fn take_signalled(&mut self) -> u64 {
+        core::mem::take(&mut self.signalled)
+    }
+    fn system_register(
+        &mut self,
+        _: usize,
+        _: Encoding,
+        write: Option<u64>,
+        _: u64,
+    ) -> Option<Result<u64, &'static str>> {
+        self.register_calls += 1;
+        let target = (write? & 1) as usize;
+        if self.words[target].swap(1, Ordering::AcqRel) == 0 {
+            self.signalled |= 1 << target;
+        }
+        Some(Ok(0))
+    }
+    fn serves_register(&self, encoding: Encoding) -> bool {
+        encoding == SERVED
+    }
+    fn local_registers(&self, pe: usize) -> Option<Arc<dyn LocalRegisters>> {
+        Some(Arc::new(SignalWords {
+            words: Arc::clone(&self.words),
+            pe,
+        }))
+    }
+}
+
+/// A signal its handle completes takes no lock and wakes its target, which
+/// finds the FIQ in its lines beside the published pins; one the board
+/// raises under the lock wakes the target through the call's notification.
+#[test]
+fn a_signal_without_the_lock_wakes_its_target_and_raises_its_fiq() {
+    let (hub, kicks) = hub(2);
+    let home = SharedDevices::new(Signalling::default(), Arc::clone(&hub));
+    let mut sender = home.worker();
+    let mut target = home.worker();
+    // Each handle takes its PE's registers once, under the lock.
+    sender.local_registers_of(0);
+    target.local_registers_of(1);
+    let calls = |devices: &SharedDevices<Signalling>| devices.with(|board| board.register_calls);
+    let epoch = hub.inboxes[1].lines.load(Ordering::SeqCst);
+    hub.inboxes[1].sleeping.store(true, Ordering::SeqCst);
+    let board = Arc::clone(&home.board);
+    let held = board.devices.lock().unwrap();
+    // The lock is held elsewhere: the send must not need it.
+    assert_eq!(sender.system_register(0, SERVED, Some(1), 0), Some(Ok(0)));
+    drop(held);
+    assert_ne!(hub.inboxes[1].lines.load(Ordering::SeqCst), epoch);
+    assert_eq!(kicks.load(Ordering::Relaxed), 1, "the sleeping target");
+    assert!(target.pins(1).unwrap().fiq && target.lines(1, 0).fiq);
+    assert!(!sender.pins(0).unwrap().fiq);
+    assert_eq!(calls(&home), 0);
+    // Pending already: no line changes, no wake.
+    let epoch = hub.inboxes[1].lines.load(Ordering::SeqCst);
+    assert_eq!(sender.system_register(0, SERVED, Some(1), 0), Some(Ok(0)));
+    assert_eq!(hub.inboxes[1].lines.load(Ordering::SeqCst), epoch);
+    assert_eq!(kicks.load(Ordering::Relaxed), 1);
+    // Held low while the SoC sleeps, as the latched pins are.
+    board.asleep.store(true, Ordering::Release);
+    assert!(!target.pins(1).unwrap().fiq);
+    board.asleep.store(false, Ordering::Release);
+    // Under the lock: the call's notification wakes the target, though its
+    // latched pins did not change.
+    home.with(|devices| devices.words[1].store(0, Ordering::Release));
+    let epoch = hub.inboxes[1].lines.load(Ordering::SeqCst);
+    assert_eq!(
+        sender.system_register(0, SERVED, Some(1 << 8 | 1), 0),
+        Some(Ok(0))
+    );
+    assert_eq!(calls(&home), 1);
+    assert_ne!(hub.inboxes[1].lines.load(Ordering::SeqCst), epoch);
+    assert_eq!(kicks.load(Ordering::Relaxed), 2);
+    assert!(target.lines(1, 0).fiq);
+}
+
+/// Invariant: a shared board publishes only latched pins, never a PE's own
+/// signal word, so a PE that clears its word without the lock never reads
+/// a stale FIQ that an unrelated locked call published while the word was
+/// set (`Board::publish` and `Held::notify` use `latched_pins`).
+#[test]
+fn a_signal_cleared_without_the_lock_leaves_no_stale_published_fiq() {
+    let (hub, _) = hub(2);
+    let home = SharedDevices::new(Signalling::default(), Arc::clone(&hub));
+    let mut sender = home.worker();
+    let mut target = home.worker();
+    let words = home.with(|devices| Arc::clone(&devices.words));
+    assert_eq!(sender.system_register(0, SERVED, Some(1), 0), Some(Ok(0)));
+    assert!(target.pins(1).unwrap().fiq);
+    // Unrelated calls under the lock while the word is set: each release
+    // publishes every PE's pins, and a write notifies the others.
+    home.with(|_| ());
+    sender.write(0, 0, 4, 0, 0).unwrap();
+    assert_eq!(
+        home.board.pins[1].load(Ordering::Acquire),
+        shared_devices::pack(Some(Lines::default()))
+    );
+    // The target acknowledges on its own word.
+    words[1].store(0, Ordering::Release);
+    assert!(!target.pins(1).unwrap().fiq && !target.lines(1, 0).fiq);
+}
+
+/// No lost wake-up: a PE that saw no FIQ and halts (`Hub::sleep`) is kicked
+/// by a send that races with its halting, in every interleaving the
+/// rounds reach. Each halt is bounded: a lost wake-up fails the test.
+#[test]
+fn a_signal_racing_with_a_halt_always_wakes_the_target() {
+    struct Flag(Arc<AtomicBool>);
+    impl Kick for Flag {
+        fn kick(&self, _: usize) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    const ROUNDS: usize = 2_000;
+    let kicked = Arc::new(AtomicBool::new(false));
+    let hub = Hub::new(2, Flag(Arc::clone(&kicked)));
+    for pe in 0..2 {
+        hub.set_live(pe, true);
+    }
+    let home = SharedDevices::new(Signalling::default(), Arc::clone(&hub));
+    let mut sender = home.worker();
+    let mut target = home.worker();
+    let words = home.with(|devices| Arc::clone(&devices.words));
+    let start = std::sync::Barrier::new(2);
+    let done = std::sync::Barrier::new(2);
+    let lost = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for round in 0..ROUNDS {
+                start.wait();
+                // Vary where the send lands against the target's halt.
+                for _ in 0..(round * 7) % 64 {
+                    core::hint::spin_loop();
+                }
+                assert_eq!(sender.system_register(0, SERVED, Some(1), 0), Some(Ok(0)));
+                done.wait();
+            }
+        });
+        for _ in 0..ROUNDS {
+            start.wait();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let epoch = hub.inboxes[1].lines.load(Ordering::SeqCst);
+                if target.pins(1).unwrap().fiq {
+                    break;
+                }
+                hub.sleep(1, epoch, || {
+                    while !kicked.swap(false, Ordering::SeqCst) {
+                        if std::time::Instant::now() > deadline {
+                            lost.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                        std::thread::yield_now();
+                    }
+                });
+                if lost.load(Ordering::SeqCst) {
+                    break;
+                }
+            }
+            words[1].store(0, Ordering::Release);
+            kicked.store(false, Ordering::SeqCst);
+            done.wait();
+        }
+    });
+    assert!(
+        !lost.load(Ordering::SeqCst),
+        "a send left its target halted"
+    );
+}
+
+/// `cargo test -p stela-engine --release --lib signal_send_costs --
+/// --ignored --nocapture`: ns per signal sent through the board, under the
+/// devices' lock (as every fast IPI was) or through the sender's handle,
+/// alone and while another thread takes the lock for 2 us in every 4 us as
+/// device accesses do. The target's word is cleared after each send, so
+/// every send raises a line and bumps the target's epoch (no kick: it
+/// does not sleep).
+#[test]
+#[ignore = "manual: opt-in timing"]
+fn signal_send_costs() {
+    const SENDS: u32 = 200_000;
+    for contended in [false, true] {
+        for locked in [true, false] {
+            let (hub, _) = hub(2);
+            let home = SharedDevices::new(Signalling::default(), hub);
+            let mut sender = home.worker();
+            sender.local_registers_of(0);
+            let words = home.with(|devices| Arc::clone(&devices.words));
+            let value = if locked { 1 << 8 | 1 } else { 1 };
+            let stop = AtomicBool::new(false);
+            let ns = std::thread::scope(|scope| {
+                if contended {
+                    scope.spawn(|| {
+                        while !stop.load(Ordering::Relaxed) {
+                            home.with(|_| {
+                                let until =
+                                    std::time::Instant::now() + std::time::Duration::from_micros(2);
+                                while std::time::Instant::now() < until {
+                                    core::hint::spin_loop();
+                                }
+                            });
+                            let until =
+                                std::time::Instant::now() + std::time::Duration::from_micros(2);
+                            while std::time::Instant::now() < until {
+                                core::hint::spin_loop();
+                            }
+                        }
+                    });
+                }
+                let started = std::time::Instant::now();
+                for _ in 0..SENDS {
+                    sender.system_register(0, SERVED, Some(value), 0);
+                    words[1].store(0, Ordering::Release);
+                }
+                let ns = started.elapsed().as_nanos() / u128::from(SENDS);
+                stop.store(true, Ordering::Relaxed);
+                ns
+            });
+            std::println!("SIGNAL contended={contended} locked={locked} ns_per_send={ns}");
+        }
+    }
 }
 
 #[test]

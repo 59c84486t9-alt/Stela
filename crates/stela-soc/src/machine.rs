@@ -755,10 +755,7 @@ impl AppleDevices {
             return Err(());
         }
         self.settle_lifecycle(cpu, now);
-        let deferred = self
-            .ipi
-            .as_mut()
-            .and_then(|ipi| ipi.advance(now, &mut self.latch));
+        let deferred = self.ipi.as_mut().and_then(|ipi| ipi.advance(now));
         let mut access = Access::new(cpu, now, &mut self.latch);
         let advanced = self.bus.advance(&mut access);
         let reset = reset_reason(&access);
@@ -804,46 +801,78 @@ fn reset_reason(access: &Access<'_>) -> Option<Reset> {
     })
 }
 
-/// What a PE reaches of the board's registers outside the devices' lock.
+/// What a PE reaches of the board's registers outside the devices' lock:
+/// its core counters, and the fast IPIs' signals as PE `cpu`.
 struct PeRegisters {
     counters: Option<CoreCounters>,
-    ipi_status: Option<Arc<core::sync::atomic::AtomicU64>>,
+    ipi: Option<(Arc<crate::ipi::Signals>, usize)>,
 }
 
 impl PeRegisters {
-    fn ipi_status(&self, encoding: Encoding) -> Option<&core::sync::atomic::AtomicU64> {
-        let status = stela_engine::machine::fast_ipi::Register::Status;
-        (encoding == status.encoding())
-            .then_some(self.ipi_status.as_deref())
-            .flatten()
+    /// The fast-IPI register `encoding` names, with the signals.
+    fn ipi(
+        &self,
+        encoding: Encoding,
+    ) -> Option<(
+        stela_engine::machine::fast_ipi::Register,
+        &crate::ipi::Signals,
+        usize,
+    )> {
+        let (signals, cpu) = self.ipi.as_ref()?;
+        let register = stela_engine::machine::fast_ipi::Register::decode(encoding)?;
+        Some((register, signals, *cpu))
     }
 }
 
 impl LocalRegisters for PeRegisters {
-    /// IPI_SR reads, and the IPI_SR writes that change nothing: a write
-    /// without PENDING, or one that finds it clear, which a send can only
-    /// set after this load ([`ipi::FastIpi::access`]).
+    /// IPI_SR reads, and IPI_SR writes of 0 or PENDING: an acknowledgement
+    /// clears the PE's word, which is its FIQ from the fast IPIs
+    /// ([`crate::ipi::Signals::send`]).
     fn register(&self, encoding: Encoding, write: Option<u64>) -> Option<u64> {
+        use stela_engine::machine::fast_ipi::Register;
         self.counters
             .as_ref()
             .and_then(|counters| LocalRegisters::register(counters, encoding, write))
             .or_else(|| {
-                let status = self.ipi_status(encoding)?;
-                let pending = status.load(core::sync::atomic::Ordering::Relaxed);
+                let (register, signals, cpu) = self.ipi(encoding)?;
+                if register != Register::Status {
+                    return None;
+                }
                 match write {
-                    None => Some(pending),
+                    None => Some(signals.pending(cpu)),
                     Some(0) => Some(0),
-                    Some(1) if pending == 0 => Some(0),
-                    Some(_) => None,
+                    Some(value) => signals.send(cpu, register, value).map(|_| 0),
                 }
             })
     }
 
+    /// Immediate fast-IPI requests to a CPU with no deferred IPI armed.
+    fn send(&self, encoding: Encoding, value: u64) -> Option<Option<usize>> {
+        use stela_engine::machine::fast_ipi::Register;
+        let (register, signals, cpu) = self.ipi(encoding)?;
+        if register == Register::Status {
+            return None;
+        }
+        signals.send(cpu, register, value)
+    }
+
+    fn fiq(&self) -> bool {
+        self.ipi
+            .as_ref()
+            .is_some_and(|(signals, cpu)| signals.pending(*cpu) != 0)
+    }
+
     fn storage(&self, encoding: Encoding) -> Option<u64> {
+        use stela_engine::machine::fast_ipi::Register;
         self.counters
             .as_ref()
             .and_then(|counters| counters.storage(encoding))
-            .or_else(|| Some(self.ipi_status(encoding)?.as_ptr() as u64))
+            .or_else(|| {
+                let (register, signals, cpu) = self.ipi(encoding)?;
+                (register == Register::Status)
+                    .then(|| signals.storage(cpu))
+                    .flatten()
+            })
     }
 }
 
@@ -1029,7 +1058,7 @@ impl Devices for AppleDevices {
             None => AccessKind::Read,
         };
         Some(
-            ipi.access(cpu, register, kind, now, &mut self.latch)
+            ipi.access(cpu, register, kind, now)
                 .map_err(|error| match error {
                     ipi::IpiError::UnknownCpu(_) => "fast IPI from a PE the board does not have",
                     ipi::IpiError::Unsupported(_, reason) => reason,
@@ -1040,11 +1069,15 @@ impl Devices for AppleDevices {
     fn local_registers(&self, cpu: usize) -> Option<Arc<dyn LocalRegisters>> {
         let device = self.core_counters.get(cpu).copied().flatten();
         let counters = device.and_then(|device| self.bus.device::<CoreCounters>(device));
-        let ipi_status = self.ipi.as_ref().and_then(|ipi| ipi.status(cpu));
-        (counters.is_some() || ipi_status.is_some()).then(|| {
+        let ipi = self
+            .ipi
+            .as_ref()
+            .filter(|ipi| ipi.signals().storage(cpu).is_some())
+            .map(|ipi| (ipi.signals(), cpu));
+        (counters.is_some() || ipi.is_some()).then(|| {
             Arc::new(PeRegisters {
                 counters: counters.cloned(),
-                ipi_status,
+                ipi,
             }) as Arc<dyn LocalRegisters>
         })
     }
@@ -1066,6 +1099,17 @@ impl Devices for AppleDevices {
     /// every PE's pins at once, so another PE's need no advance until a
     /// device changes or its deadline passes.
     fn pins(&mut self, cpu: usize) -> Option<Lines> {
+        let pins = self.latched_pins(cpu)?;
+        let ipi = !self.sleep.asleep && self.ipi.as_ref().is_some_and(|ipi| ipi.fiq(cpu));
+        Some(Lines {
+            irq: pins.irq,
+            fiq: pins.fiq || ipi,
+        })
+    }
+
+    /// The latch alone: a PE's FIQ from the fast IPIs is its IPI_SR, which
+    /// it reads itself ([`LocalRegisters::fiq`]).
+    fn latched_pins(&mut self, cpu: usize) -> Option<Lines> {
         if self.sleep.asleep {
             return Some(Lines::default());
         }
@@ -1074,6 +1118,12 @@ impl Devices for AppleDevices {
             irq: pins.irq,
             fiq: pins.fiq,
         })
+    }
+
+    fn take_signalled(&mut self) -> u64 {
+        self.ipi
+            .as_mut()
+            .map_or(0, crate::ipi::FastIpi::take_raised)
     }
 
     fn deadline(&mut self, now: u64) -> Option<u64> {

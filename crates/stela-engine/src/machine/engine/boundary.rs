@@ -15,6 +15,20 @@ pub trait LocalRegisters: Send + Sync {
     /// The address of the 64-bit word `encoding` reads, for the board's
     /// life, if a plain read of it reads just that.
     fn storage(&self, encoding: Encoding) -> Option<u64>;
+    /// An MSR of `encoding` that signals another PE, completed without the
+    /// devices' lock where it can be: `None` when it must take
+    /// [`Devices::system_register`]; `Some(Some(pe))` when it raised PE
+    /// `pe`'s [`Self::fiq`], whose PE must look at its lines again;
+    /// `Some(None)` when it changed no line.
+    fn send(&self, _encoding: Encoding, _value: u64) -> Option<Option<usize>> {
+        None
+    }
+    /// The FIQ this PE's handle drives without the devices' lock (Apple's
+    /// fast IPIs), which its lines include beside the latched pins
+    /// ([`Devices::latched_pins`]).
+    fn fiq(&self) -> bool {
+        false
+    }
 }
 
 /// Equal, consecutive native code ranges a host reclaims as whole parts.
@@ -546,6 +560,18 @@ pub trait Devices {
     /// can tell. The engine asks after a PE switch, before the deadline.
     fn pins(&mut self, _cpu: usize) -> Option<Lines> {
         None
+    }
+    /// [`Self::pins`] without the FIQ PE `cpu`'s
+    /// [`LocalRegisters::fiq`] drives, which that PE reads itself: what a
+    /// shared board publishes for it.
+    fn latched_pins(&mut self, cpu: usize) -> Option<Lines> {
+        self.pins(cpu)
+    }
+    /// The PEs whose [`LocalRegisters::fiq`] a call under the devices' lock
+    /// raised since the last call, a bit each: they must look at their
+    /// lines again.
+    fn take_signalled(&mut self) -> u64 {
+        0
     }
     /// The next counter value at which a device changes state by itself.
     fn deadline(&mut self, _now: u64) -> Option<u64> {

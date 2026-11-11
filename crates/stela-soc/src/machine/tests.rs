@@ -2610,13 +2610,24 @@ fn fast_ipis_raise_and_clear_the_target_pes_fiq() {
     assert_eq!(devices.system_register(2, status, None, 0), Some(Ok(1)));
     let local = devices.local_registers(2).unwrap();
     assert_eq!(local.register(status, None), Some(1));
-    assert_eq!(local.register(status, Some(1)), None);
+    assert!(local.fiq());
     let word = local.storage(status).unwrap() as *const u64;
     // SAFETY: the board keeps the word for its life.
     assert_eq!(unsafe { word.read_volatile() }, 1);
     assert_eq!(devices.system_register(2, status, Some(1), 0), Some(Ok(0)));
-    assert!(!devices.lines(2, 0).fiq);
+    assert!(!devices.lines(2, 0).fiq && !local.fiq());
     assert_eq!(local.register(status, None), Some(0));
+    // The same send and acknowledgement without the devices' lock: the
+    // sender's handle names the PE to wake, the target's clears its word.
+    let sender = devices.local_registers(0).unwrap();
+    assert_eq!(sender.send(request, 1 << 16), Some(Some(2)));
+    assert_eq!(sender.send(request, 1 << 16), Some(None), "already pending");
+    assert!(devices.lines(2, 0).fiq && local.fiq());
+    assert_eq!(devices.latched_pins(2).map(|pins| pins.fiq), Some(false));
+    assert_eq!(local.register(status, Some(1)), Some(0));
+    assert!(!devices.lines(2, 0).fiq);
+    assert_eq!(devices.take_signalled(), 1 << 2, "the locked send above");
+    assert_eq!(sender.send(status, 1), None, "IPI_SR is the PE's own");
     assert_eq!(
         devices.system_register(0, Encoding::new(3, 5, 15, 2, 0), None, 0),
         None
@@ -2627,11 +2638,11 @@ fn fast_ipis_raise_and_clear_the_target_pes_fiq() {
     ));
 }
 
-/// An IPI_SR write that changes nothing completes on the PE's own word:
-/// one without PENDING, or one that finds PENDING clear. A write that
-/// clears it, or a field the model refuses, reaches the board.
+/// An IPI_SR write completes on the PE's own word: one without PENDING
+/// changes nothing, and one with PENDING clears it and with it the PE's
+/// FIQ. A field the model refuses reaches the board.
 #[test]
-fn ipi_status_writes_that_change_nothing_complete_on_the_pes_word() {
+fn ipi_status_writes_complete_on_the_pes_word() {
     const START: u64 = 0x2_3b73_4000;
     let request = Encoding::new(3, 5, 15, 0, 0);
     let status = Encoding::new(3, 5, 15, 1, 1);
@@ -2644,8 +2655,9 @@ fn ipi_status_writes_that_change_nothing_complete_on_the_pes_word() {
     assert_eq!(devices.system_register(0, request, Some(1), 0), Some(Ok(0)));
     assert!(devices.lines(1, 0).fiq);
     assert_eq!(local.register(status, Some(0)), Some(0));
-    assert_eq!(local.register(status, Some(1)), None, "clears PENDING");
     assert!(devices.lines(1, 0).fiq);
+    assert_eq!(local.register(status, Some(1)), Some(0), "clears PENDING");
+    assert!(!devices.lines(1, 0).fiq);
     // Reports name the model at an address.
     devices.add_cpu_start(START, 1, &[0x8000_0000]).unwrap();
     assert_eq!(devices.device_name(START + 4), Some("cpu-start"));
