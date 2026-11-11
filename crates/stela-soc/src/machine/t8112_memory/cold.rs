@@ -61,8 +61,7 @@ impl Plan {
     /// the complete source graph, never from a failed lookup. Original
     /// 26A434 J473 MCC/arm-io and the shared-reg error-handler alias have no
     /// consumer gate arrays: arm-io gate functions are provider recipes and
-    /// private MCC dynamic gating is a separate protocol (ignored
-    /// mcc-unswitched-r1 holds the exact ADT/AP-driver coordinates). This
+    /// private MCC dynamic gating is a separate protocol. This
     /// does not check private Apple MCC/PMP power transitions.
     pub fn prepare_ap_frontend(
         board: &Board,

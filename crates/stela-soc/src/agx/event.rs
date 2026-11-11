@@ -1,5 +1,5 @@
 //! Firmware-to-AP events: the entries the GFX firmware posts on the firmware
-//! event ring, as the 26A434 kext reads them (docs/research/agx.md §2).
+//! event ring, as the 26A434 kext reads them.
 //!
 //! Known:
 //! - The firmware posts an `AGFIFirmwareEventRingEntry` (0x48 bytes) by
@@ -33,7 +33,7 @@
 //! no recovery (what a UAT fault leaves in the firmware's recovery request
 //! and what the firmware does between the stop states are unrecovered), and
 //! channel errors come only from recovery aborts and from 3D-command words
-//! read at 3D start (docs/research/agx.md FW-14, FW-15).
+//! read at 3D start.
 
 use super::initdata::Root;
 use super::ring::{self, Kind, Shared};

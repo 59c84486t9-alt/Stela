@@ -1,9 +1,7 @@
 //! The Apple AGX GPUs (`sgx`, `gfx-asc`), modeled as a native coprocessor at
 //! their AP-facing firmware protocol, deep enough for Apple's AGX driver to
 //! start and idle. Apple's GFX firmware is not executed and GPU work is not
-//! executed: every GPU-work channel command refuses by name. The chosen
-//! route, the full 26A434 interface inventory and the Known/Inferred/Unknown
-//! status are in docs/research/agx.md; [`generation`] names every SoC's GPU
+//! executed: every GPU-work channel command refuses by name. [`generation`] names every SoC's GPU
 //! and which families the model implements (G14G today).
 //!
 //! Layers, each its own submodule:
@@ -29,8 +27,6 @@
 //!   dashboard signals), run to completion.
 //! - [`event`]: the firmware event ring's producer and the entries the kext
 //!   reads (Flag, shared-event signal, CLPC notice).
-//!
-//! The requirement matrix and its statuses are docs/research/agx.md §5.
 
 pub mod channel;
 pub mod event;

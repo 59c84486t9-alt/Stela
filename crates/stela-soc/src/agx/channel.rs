@@ -1,5 +1,5 @@
 //! A channel's command queue and the firmware command streams it carries, as
-//! the 26A434 kext builds them (docs/research/agx.md §2).
+//! the 26A434 kext builds them.
 //!
 //! Known (`AGXG14G`, kernel file offsets):
 //! - A data-master entry names its channel by the firmware VA of the

@@ -1,9 +1,9 @@
 //! The ASC coprocessor wrapper (`iop,ascwrap-v4`; ADT `/arm-io/<iop>` `reg[0]`):
 //! the CPU control of an RTKit coprocessor and its AP mailbox.
 //!
-//! The coprocessor's own software is emulated natively behind [`Firmware`]
-//! (docs/target.md: RTKit coprocessors are emulated at their AP-facing
-//! protocols); the wrapper only carries 128-bit messages and starts it.
+//! The coprocessor's own software is emulated natively behind [`Firmware`],
+//! at its AP-facing protocol; the wrapper only carries 128-bit messages and
+//! starts it.
 //!
 //! Documented by Linux `drivers/soc/apple/rtkit-helper.c` (`APPLE_ASC_CPU_CONTROL`
 //! 0x44, `RUN` bit 4) and `drivers/mailbox/apple-mailbox.c` (the `asc` variant,
@@ -175,8 +175,8 @@ pub trait Firmware: Any {
         Vec::new()
     }
     /// The coprocessor's own error reply to `message`, a request it does
-    /// not implement (`reason`; docs/design/runtime.md "Unsupported
-    /// operations"). `None`, the default, when its protocol has no error reply for that request: the request is then left
+    /// not implement (`reason`). `None`, the default, when its protocol has
+    /// no error reply for that request: the request is then left
     /// unanswered, so the client's own timeout path runs.
     fn error_reply(&mut self, _message: Message, _reason: &Refusal) -> Option<Vec<Message>> {
         None

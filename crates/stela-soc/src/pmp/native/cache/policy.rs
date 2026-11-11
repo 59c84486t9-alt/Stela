@@ -6,8 +6,7 @@
 //! VA1003924..1003ab4 consumes low12 requests or low32 byte budget >>17;
 //! VA1003ee8..10040b0 rebuilds defaults and allocates by source tier/class.
 //! VA1003cbc..1003ee8 publishes low12 responses and programs scaled targets.
-//! The source report is docs/research/apple-mcc.md, with original windows
-//! in .stela/goal-20261022/memory/t8112-zero-pmp-contract-r1. No firmware runs.
+//! No firmware runs.
 //!
 //! This owner computes policy only. Dirty snapshots describe work; they are
 //! not hardware receipts. The caller must perform programming/publication

@@ -17,7 +17,6 @@
 //! mappings does: [`Medium::erase`] marks its extent in [`Erased`], reads
 //! of a marked block return zeros, and a guest write unmarks what it covers.
 //! The host's bytes are never zeroed, which would write the whole medium.
-//! docs/research/ans2.md owns the design (`Formatting the medium`).
 use super::host::HostDisk;
 use crate::Result;
 use alloc::{collections::BTreeMap, vec::Vec};

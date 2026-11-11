@@ -67,8 +67,7 @@ pub(super) struct DeviceTime {
 }
 
 /// The named refusal for a tunnel request type the 26A434 IONVMeFamily can
-/// build but the die does not serve. docs/research/ans2.md owns the census
-/// (`Tunnel request census`). Each type below either has a builder that
+/// build but the die does not serve. Each type below either has a builder that
 /// J473AP's boot, restore and recovery paths leave idle, or reaches the
 /// controller only through a user client's production tunnel.
 fn unserved_tunnel(kind: u32) -> &'static str {

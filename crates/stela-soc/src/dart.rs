@@ -1,7 +1,6 @@
 //! Native Apple DART generation selection. Chip placement selects an explicit
 //! register/table profile; a compatible string is never a generation alias.
 //! All bus masters keep the same [`Dart`] DMA and lifecycle boundary.
-//! See `docs/research/dart-iommu.md` for evidence and validation limits.
 use crate::Result;
 use stela_contracts::refuse;
 use stela_soc_data::dart::{DAPF_BYTES, TRANSLATION_WINDOW_LIMIT};

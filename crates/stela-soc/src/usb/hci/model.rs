@@ -14,7 +14,7 @@
 //! owner to report: that is the documented degraded response of a controller
 //! without a radio, never a pretence of one.
 //!
-//! macOS bluetoothd (26A J473, `.stela/review/hci/NOTES.md`) sends a command
+//! macOS bluetoothd (26A J473) sends a command
 //! only when its Supported Commands bit is set (command table 0x100b9def8,
 //! gate 0x10019618c), so the bitmap below decides what it asks.
 //!

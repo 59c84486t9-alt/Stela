@@ -153,14 +153,13 @@
 //! as an SMC without it does; a key is added only with its established
 //! size and meaning, never a guessed value. The type codes of `MBSE`,
 //! `NESN`, `MBSW`, `MESS`, `D1Vn`, `aDC#`, `aDC?` and `TP<n>d` are inferred
-//! from their sizes and uses; no client reads them. The 26A434 J473AP census of every key
-//! the kernel's SMC clients and the restore ramdisk use, with the reason
-//! each absent key stays absent, is in docs/research/desktop-requirements.md
-//! (SMC key census).
+//! from their sizes and uses; no client reads them. Every key the 26A434
+//! J473AP kernel's SMC clients and the restore ramdisk use was censused; a key
+//! absent here is one none of them needs.
 //!
 //! A source-declared primary RTC helper can additionally bind CLKM to the
 //! PMU oscillator. Its recovered six-byte hex_ / attributes0x94 key
-//! profile and original/native evidence are in docs/research/smc-rtc-t6000.md.
+//! profile follows the original firmware.
 //! Missing counter publication refuses before SRAM/reply effects; this path
 //! owns no second calendar offset and makes no Apple reset-epoch assumption.
 mod rtc;

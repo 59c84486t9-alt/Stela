@@ -2,7 +2,6 @@
 //! SPMI slave ID, holding the boot-state scratchpads and, on the primary
 //! PMU service, the 32768 Hz real-time clock and its alarm. Secondary PMUs
 //! can own the same register layout without owning the system service.
-//! See `docs/research/pmu-t6000.md` for the independently pinned T6000 contract.
 //!
 //! Evidence (26A434 KC VAs, unslid): `AppleDialogSPMIPMU::_readConfiguration`
 //! 0xfffffe0009dd5014 reads the `info-*` windows; `_readRegs` 0xfffffe0009dd6610

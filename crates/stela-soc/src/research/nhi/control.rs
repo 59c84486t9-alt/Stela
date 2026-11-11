@@ -1,8 +1,7 @@
 //! Thunderbolt control packets at the checksummed raw-frame boundary.
 //!
 //! Original Read/Write constructors at b061518/b06ec98 emit big-endian
-//! fields and CRC32C; Reset and Error use the same framing. See the original
-//! address/source matrix in `docs/research/usb4-acio.md`. This codec supplies
+//! fields and CRC32C; Reset and Error use the same framing. This codec supplies
 //! no register values, routing decisions, reset completion or acknowledgments.
 use alloc::vec::Vec;
 use stela_contracts::crc::crc32c;

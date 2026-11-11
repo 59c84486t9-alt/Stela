@@ -7,9 +7,8 @@
 //! each submitted swap to a host [`scanout::Scanout`]. It never runs
 //! `ipad14dcp` firmware.
 //!
-//! docs/research/display-gpu.md section 8 is the requirement matrix, each
-//! row with its public source (Asahi Linux `drivers/gpu/drm/apple/`, m1n1
-//! `proxyclient/m1n1/fw/dcp/` and `src/dcp/`) and status. The DCPEXT nub is
+//! The public sources are Asahi Linux `drivers/gpu/drm/apple/` and m1n1
+//! `proxyclient/m1n1/fw/dcp/` and `src/dcp/`. The DCPEXT nub is
 //! `quiesced` and `user-power-managed`, so (like the SMC) the coprocessor
 //! acknowledges the AP's wake once RTKit enumeration completes behind the
 //! boot-chain handoff.

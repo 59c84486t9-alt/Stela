@@ -2,7 +2,7 @@
 //! page-table encodings the 26A434 `AGXUATSingleStage` writes and the public
 //! Asahi layout confirms.
 //!
-//! Known (26A434 `AGXUATSingleStage`, unslid VAs; see docs/research/agx.md §3):
+//! Known (26A434 `AGXUATSingleStage`, unslid VAs):
 //! - 16 KiB pages, 8-byte little-endian entries, three levels.
 //! - `encodePTE` (0x1b9f820): `PA & 0xff_ffff_c000 | flags`.
 //! - `encodePDE`/`encodePCE` (0x1b9f830/0x1b9f87c): `table & ~0x3fff | 3`.
@@ -16,7 +16,7 @@
 //! - `isPhysicalAddressValid` (0x1b9f928): bits 63:40 and 13:0 are clear, so a
 //!   valid output address is 14..39 bits. The `AGXG14X` encoders are the
 //!   same instructions, though its SoC's DRAM lies at 1 TiB: the GPU tables
-//!   are SPTM's (docs/research/agx.md §3), not these encoders'.
+//!   are SPTM's, not these encoders'.
 //! - A GPTBAT holds 16 bytes per context (`mapTaskIdIntoGPTBAT` 0x1b9f768):
 //!   entry `2*ctx` is `TTBR0 & ~0x3fff | ctx << 48 | 1`, entry `2*ctx + 1` is
 //!   `TTBR1 & ~0x3fff | ctx << 48 | 1` with the low TTBR0 bits cleared;

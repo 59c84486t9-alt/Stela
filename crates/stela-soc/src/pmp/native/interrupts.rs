@@ -4,8 +4,7 @@
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //! constructor10066f0..10067b8, selected vtable1035608, initialize1026008,
 //! dispatch1026194, signal1026280/10263f8, registry10262b4/1026328.
-//! Fresh static evidence: memory/native-interrupts-r1. Firmware is never
-//! executed. Required device/line/callback owners have no defaults.
+//! Firmware is never executed. Required device/line/callback owners have no defaults.
 mod auxiliary;
 pub mod device;
 mod owner;

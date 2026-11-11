@@ -179,8 +179,8 @@ impl AtcPhy {
     /// bus activity; the core's power, which the SuperSpeed, DP and USB4
     /// lanes use, need not. 26A434's USB2-only bring-ups (the xHCI's start,
     /// and the XDCI's "powering on USB2 only") release the USB2 PHY without
-    /// writing the core's POWER_CTRL or MISC (restore run phywatch-r1,
-    /// 2026-10-24); Linux powers the core for every mode. The separate
+    /// writing the core's POWER_CTRL or MISC (observed in a restore run);
+    /// Linux powers the core for every mode. The separate
     /// pipehandler reset/clamp output holds the controller's ordinary bank
     /// in reset; clock/quiesce pauses do not assert that line.
     pub fn usb2_state(&self) -> Usb2State {

@@ -1,8 +1,7 @@
 //! MxWrap's AP mailbox transport, used by `iop,mxwrap-acio`.
 //!
 //! The original 26A434 `AppleMxWrap` methods establish the register offsets,
-//! eight-entry FIFO pointer encoding and pre-pop receive snapshot; see
-//! `docs/research/usb4-acio.md` for the complete evidence and requirement matrix.
+//! eight-entry FIFO pointer encoding and pre-pop receive snapshot.
 //! [`Firmware`] is the same native AP-facing protocol boundary as ASC v4.
 //! This module does not implement CIO firmware, NHI or a tunnel manager, and
 //! does not cause the loader to admit an ACIO controller.

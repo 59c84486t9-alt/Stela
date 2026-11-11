@@ -1,7 +1,7 @@
 //! Recovered gen3 table/data effects, with explicit context validation.
 //!
-//! The original software walk/leaf builder and fault levels are pinned in
-//! `docs/research/dart-iommu.md`. This is not a gen3 MMIO profile: full VA
+//! The walk, leaf builder and fault levels follow the original software.
+//! This is not a gen3 MMIO profile: full VA
 //! context, untranslated/bypass, security/APF, remap, IRQ and ordering are
 //! still independently required. Explicit software contexts can bind their
 //! recovered bounds/geometry; native out-of-context faults remain unchecked.

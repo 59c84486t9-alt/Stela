@@ -1,8 +1,7 @@
 //! Programmed NHI DMA rings, independently of a host router implementation.
 //!
 //! Original Apple ring writers use sixteen-byte descriptors, POSTED bit22,
-//! COMPLETED bit21 and interrupt-request bit23. The ACIO register layout and
-//! native-frame boundary are documented in `docs/research/usb4-acio.md`.
+//! COMPLETED bit21 and interrupt-request bit23.
 //! A required [`Consumer`] owns router/wire protocol, framing, CRC,
 //! E2E/isochronous behavior and notifications. No successful consumer, router
 //! capability template, CIO readiness or machine admission is supplied here.

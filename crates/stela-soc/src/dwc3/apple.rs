@@ -3,7 +3,7 @@
 //! own space, and the `DRD_USB31_CFG` (reg[1]), `AUSBC_PWR_CTRL_BLK`
 //! (reg[5]) and `AUSBC_CTLREG_BLK` (reg[6]) windows.
 //!
-//! Evidence (`docs/research/xhci.md`, 26A434 KC file offsets):
+//! Evidence (26A434 KC file offsets):
 //! `AppleT8112USBXHCI::reset` (0x4457e68) read-modify-writes the CIO LFPS
 //! and bandwidth negotiation offsets and link timers at core 0xcd38..0xcd40,
 //! clears bit 13 of core 0xc680, polls `RAM0_WR_ACTIVE` (reg[1] +0 bit 15)

@@ -4,7 +4,6 @@
 //! controller. Board facts must place each view and supply root-port
 //! configuration images. Downstream USB-A/Ethernet require real endpoint
 //! models and firmware protocols; adding a config header never creates one.
-//! See `docs/research/apple-pcie.md` for evidence and unsupported boundaries.
 use crate::Result;
 use alloc::{boxed::Box, vec::Vec};
 use stela_contracts::Refusal;

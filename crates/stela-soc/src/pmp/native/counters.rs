@@ -5,7 +5,6 @@
 //! VA100d54c..100d580 resolves row+c blocks to cfg64/68 entry slices;
 //! VA101b3d0..101b464 skips zero selected chunks and copies in64-entry chunks;
 //! VA1012c8c..1012d5c consumes ascending selected entries and reshapes metadata.
-//! Exact windows: memory/counter-frame-producer-r1 in the ignored goal ledger.
 //! No hardware events, lifecycle eligibility, generic provider decode, arrival
 //! mask, IRQ admission, metrics completion or command ACK is supplied here.
 use super::power::DeviceTable;

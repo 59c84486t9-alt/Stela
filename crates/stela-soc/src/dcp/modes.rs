@@ -45,7 +45,7 @@
 //! The timing's standard type (VESA, an EDID base-block timing without a CEA
 //! extension), its being preferred and the color's sRGB colorimetry (the EDID
 //! declares sRGB its default color space) are Inferred from the EDID the
-//! model serves; docs/research/display-gpu.md section 8.6 is the row.
+//! model serves.
 use super::super::scanout::{DEFAULT_REFRESH_MILLIHERTZ, Mode};
 use crate::Result;
 use alloc::string::String;

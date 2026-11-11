@@ -6,7 +6,6 @@
 //! in the name table. G13G/X, G14X and G15G use the same descriptor encoding.
 //! Physical ranges and their firmware mappings are distinct: the latter must
 //! pass the real UAT walk before a concrete native register owner is accessed.
-//! See docs/research/agx.md for the original input and callback matrix.
 
 use crate::Result;
 use crate::agx::ring::Shared;

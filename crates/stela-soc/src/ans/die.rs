@@ -1,6 +1,6 @@
 //! Private controller data chosen by Stela's emulated die. Each populated
 //! field cites its AP consumer; unconsumed output fields have no modeled
-//! private meaning. See docs/research/ans2.md for the complete consumer audit.
+//! private meaning.
 use super::{
     commands::{put16, put32, put64},
     namespace::Medium,

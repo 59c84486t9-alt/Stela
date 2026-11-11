@@ -19,8 +19,7 @@
 //! `iomfb_poweron`, the swap callbacks) and m1n1's method signatures
 //! (`proxyclient/m1n1/fw/dcp/ipc.py`), with this interface's tags and sizes.
 //! The mode, hotplug and swap layouts are the 26A434 AP's own (kernel
-//! fileset offsets, cited per method). docs/research/display-gpu.md section
-//! 8 is the requirement matrix, row by row with its source.
+//! fileset offsets, cited per method).
 //!
 //! `A401 start_signal` nests `D120 start_hardware_boot` into the AP before it
 //! answers, as the firmware does (the AP's D120 handler,

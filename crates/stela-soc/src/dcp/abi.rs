@@ -9,9 +9,8 @@
 //! releases (Asahi Linux `drivers/gpu/drm/apple/iomfb_v12_3.c` and
 //! `iomfb_v13_3.c`; m1n1 `proxyclient/m1n1/fw/dcp/ipc.py`, whose `>= 14.7`
 //! branch has `A406 swap_start_dcp` and `A407 swap_submit_dcp`). The rows
-//! of [`METHODS_211`] are the 26A434 J473AP interface's, transcribed from the
-//! exact-build record in docs/research/display-gpu.md ("Verified method/callback
-//! matrix"); method names follow the public tables where both name one.
+//! of [`METHODS_211`] are the 26A434 J473AP interface's, transcribed from
+//! that exact build; method names follow the public tables where both name one.
 //! [`METHODS_213`] is the 26B123 interface: each AP stub that calls a method
 //! passes its tag and both sizes as immediates, so its rows were recovered by
 //! matching each stub's function between the two kernelcaches. 234 methods keep

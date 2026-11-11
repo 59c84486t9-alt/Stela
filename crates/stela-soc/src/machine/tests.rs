@@ -1771,7 +1771,7 @@ fn pro_max_and_ultra_gfx_keep_their_sparse_original_banks() {
     // 26A434 original ADTs: J314s/c, J375c/d, J414s/c and J180d.
     // arm-io/ranges translates the child bases by 0x2_0000_0000.
     // G13X/G14X use their own callback programs, not G14G's private
-    // wrapper+0x140120 word (docs/research/agx.md, sections 3 and 6).
+    // wrapper+0x140120 word.
     const SGX: u64 = 0x4_0400_0000;
     const WRAPPER: u64 = 0x4_0640_0000;
     for chip in [0x6000, 0x6001, 0x6002, 0x6020, 0x6021, 0x6022] {

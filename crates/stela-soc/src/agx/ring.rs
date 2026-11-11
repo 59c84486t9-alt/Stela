@@ -1,5 +1,5 @@
 //! The shared-memory rings between the AGX kext and the GFX firmware, as the
-//! 26A434 kext lays them out (docs/research/agx.md §2).
+//! 26A434 kext lays them out.
 //!
 //! Known (`AGXG14G`, kernel file offsets):
 //! - Every ring has a 0x30-byte state block and 256 entries. The state holds

@@ -7,8 +7,8 @@
 //! startup2e45ff0..2e46cec saves opaque channel control words unchanged; mode
 //! selection2e48d74..2e48f28 restores them or writes the first alternate word.
 //! Zero initial controls/explicit weights are Stela software policy, not Apple
-//! reset, capacity, timing or completed DRAM programming. Source cacheless
-//! disable_mcc command/waiter evidence is held in t6000-mcc-backend-20261021-1.
+//! reset, capacity, timing or completed DRAM programming. The cacheless
+//! disable_mcc command and waiter follow the original source.
 use super::Prepared;
 use super::cold;
 use super::mcc;

@@ -4,7 +4,7 @@
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //! 102fe64..103031c owns queue registration/dispatch/recursive locks;
 //! 1023624/102380c owns keyed notification/wait;1030250 releases and restores
-//! queue recursion around a wait. Evidence: metrics-backend-destinations-r1.
+//! queue recursion around a wait.
 //!
 //! This executes mandatory native Rust callbacks with kept continuations;
 //! it never runs Apple firmware or invents a source thread pointer. Thread IDs

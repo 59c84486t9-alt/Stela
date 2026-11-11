@@ -437,8 +437,8 @@ impl RtKit {
                 "RTKit quiesced coprocessor takes only the IOP power wake"
             )),
             // The AP starts each system endpoint as its roll-call group
-            // creates it, before answering the group (restore study ru-s58:
-            // the crashlog endpoint's start arrived mid-enumeration).
+            // creates it, before answering the group (in a restore, the
+            // crashlog endpoint's start arrived mid-enumeration).
             (ENDPOINT_CONTROL, Stage::RollCall { .. } | Stage::Ready) => {
                 self.control(fields, outbox)
             }

@@ -4,8 +4,8 @@
 //! 082cf7b48f9827daefcb5a58e7fd0038aae00b3fe6d36db9ff1528ba3f3a3a3b:
 //! builder 0x378d4..0x37a18 declares the aperture, four planes, status and
 //! CTRR-A registers. Original J473 ADT separately places MCC shared/broadcast
-//! windows and DCS/PTD. See docs/research/apple-mcc.md for the source contract
-//! and missing all-access cache accounting. No Apple firmware is executed.
+//! windows and DCS/PTD. All-access cache accounting is missing. No Apple
+//! firmware is executed.
 use super::Prepared;
 use crate::Result;
 use crate::amcc::Amcc;

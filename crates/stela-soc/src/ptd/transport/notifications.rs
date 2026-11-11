@@ -1,7 +1,7 @@
 //! PMP-local PTD source levels on the publication owner. Original
 //! t6000pmp table 0x81300 and IRQ wrappers 0x12618..0x12660 register route r
 //! through RTKit-local IRQ 1+r, encoded in namespace 0x10000. These are not AP
-//! AIC numbers or ASC messages. See docs/research/apple-mcc.md.
+//! AIC numbers or ASC messages.
 use super::{NotificationOwner, Ptd, ROUTES, Range};
 use crate::Result;
 use alloc::rc::Rc;

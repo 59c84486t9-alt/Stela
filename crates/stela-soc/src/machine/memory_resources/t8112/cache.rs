@@ -4,8 +4,7 @@
 //! 06846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d:
 //! generic zero selection file1c71874..1c719d8; T8112 way waiter
 //! 2efd010..2efd234, enable2efd354..2efd5b0, raw flush2efd234..2efd354,
-//! direct quota2eff664..2eff924 and occupancy2effa54..2effb34. Original
-//! windows are held in t8112-cache-contract-r1/contract.json. This is new
+//! direct quota2eff664..2eff924 and occupancy2effa54..2effb34. This is new
 //! software backing, never an Apple reset observation or a nonempty flush.
 //! Native quota views: t8112pmp SHA256
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c,

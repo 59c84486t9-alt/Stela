@@ -3,7 +3,7 @@
 //! Original26A434 T8112 PMP SHA256 b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //! capture101a780..101ab30, postprocess101ab30..101b074, query101b29c,
 //! delta/scaling101b2c4..101b3d0, extract101b8fc..101ba6c.
-//! Fresh static ledger: pmgr/counter-ingestion-r1. No firmware executes here.
+//! No firmware executes here.
 //! Copied/Retained inputs bind storage, not hardware events, lifecycle or an ACK.
 //! This is the generic base; specialized DCS/AMCC/AGX/ANE surrounding hooks
 //! remain separate owners. Provider and auxiliary operations have no default

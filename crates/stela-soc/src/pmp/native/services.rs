@@ -1,8 +1,7 @@
 //! Cooperative native endpoint3/4 and MC destination composition.
 //!
-//! Source: original26A434 T8112 PMP b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c,
-//! pmgr/metrics-backend-destinations-r1 and native-scheduler-r1. No firmware
-//! executes. Mailboxes are paired RTKit slots; mappings keep the real
+//! Source: original26A434 T8112 PMP b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c.
+//! No firmware executes. Mailboxes are paired RTKit slots; mappings keep the real
 //! DMA broker. Startup never supplies an AP allocation or echoes an AP message.
 use super::{dma, platform::owner::Completion, reporting, scheduler, trace};
 use crate::Result;

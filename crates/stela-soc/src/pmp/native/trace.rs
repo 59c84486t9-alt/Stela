@@ -4,8 +4,7 @@
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //! 1006094..60a8 initializes TRCE=1;101f494..f7c4 owns ring selection,
 //! overflow/filter/32-byte records;102d110..d7dc owns endpoint3 and lifecycle.
-//! Source audit: pmgr/metrics-backend-destinations-r1. Source addresses are
-//! provenance only. No firmware executes. Mappings, native thread/clock,
+//! Source addresses are provenance only. No firmware executes. Mappings, native thread/clock,
 //! queue/wait and mailbox effects are mandatory moved-in resources.
 //!
 //! Default AP-buffer initialization is admitted. Alternate native-heap and

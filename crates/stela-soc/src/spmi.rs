@@ -26,7 +26,7 @@
 //! - B+0 status and B+8 pop belong to the independent fault FIFO. Its clean
 //!   handoff is empty (bit24), and an empty pop refuses. Gen2 has B+0x110..11c
 //!   fault latches and 17 counters at B+0x200..224/B+0x25c..274. Gen1 uses
-//!   16 exact offsets in a separate reg[2]; see `config` and spmi-t6000.md.
+//!   16 exact offsets in a separate reg[2]; see `config`.
 //!
 //! A header is `address << 16 | last << 15 | sid << 8 | opcode`, the opcode
 //! carrying the byte count minus one: extended write 0x00 and read 0x20

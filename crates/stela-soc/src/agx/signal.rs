@@ -1,6 +1,6 @@
 //! The channel commands that need no GPU work: remote-node stamps (command
 //! type 7), shared-event signals (9) and dashboard signals (0xc), as the GFX
-//! firmware runs their streams (docs/research/agx.md §2, FW-13).
+//! firmware runs their streams.
 //!
 //! Known (`armfw_g14g` a000 image, firmware VAs less 0xffffff8000000000; the
 //! record dispatcher at +0x13a60 switches on `header & 0x3f` through the

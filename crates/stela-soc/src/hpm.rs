@@ -10,7 +10,7 @@
 //! `getAndClearInterrupts` (0x27c83ec) reads event then writes its clear
 //! register: reading events does not acknowledge them.
 //!
-//! The class-10 startup research (`docs/research/hpm.md`) gives the registers AppleTCControllerType10 reads and their lengths: the
+//! AppleTCControllerType10's startup reads these registers, with these lengths: the
 //! identity, UID (0x05), revision (0x2c), boot flags (0x2d), the firmware
 //! configuration records such as 0x29 and TX Identity 0x47, power state (0x20), data control (0x50), Apple CF/VID status (0x5e)
 //! and 5-byte data status. Event and mask banks keep the public 11-byte TPS
@@ -548,7 +548,7 @@ impl I2cTarget for Hpm {
 /// The bus manager's interrupt summary, a target at its own I2C address.
 /// `AppleHPMBusController`'s interrupt action reads raw register 0x10, four
 /// wire bytes, and notifies die 0x38 + n for each set bit 2n + 1 of
-/// `be16(wire[2..4]) ^ 0xfffe` (`docs/research/hpm.md`): odd bits are the
+/// `be16(wire[2..4]) ^ 0xfffe`: odd bits are the
 /// dies' active-low alerts, sampled from their open-drain interrupt outputs.
 /// Reading does not acknowledge; a die deasserts when its events are
 /// cleared. Stela's register is length-prefixed with three bytes whose

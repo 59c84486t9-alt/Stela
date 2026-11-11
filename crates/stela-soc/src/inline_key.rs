@@ -1,8 +1,7 @@
 //! The inline AES-XTS engine between Stela's SEP and ANS models.
 //!
 //! Apple-silicon Data Protection encrypts the internal SSD in line, with
-//! AES-XTS volume keys only the SEP can unwrap
-//! (docs/research/sep.md "APFS on non-internal disks"). APFS keeps each
+//! AES-XTS volume keys only the SEP can unwrap. APFS keeps each
 //! volume key SEP-wrapped, has the keystore's FileVault commands hand it an
 //! inline-wrapped form, and marks that key `cpx_is_sep_wrapped_key`;
 //! creating a volume on hardware crypto panics without the mark ("HW CRYPTO:

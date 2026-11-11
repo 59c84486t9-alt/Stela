@@ -1,5 +1,5 @@
 //! The initdata root and the objects it names, as the 26A434 kext builds
-//! them (docs/research/agx.md §2). The layout differs from Asahi's 13.x
+//! them. The layout differs from Asahi's 13.x
 //! `InitData` (`unk_buf`, runtime pointers, globals, firmware status, UAT
 //! level info), so nothing here reuses it; each object is named by the kext
 //! field that owns it.

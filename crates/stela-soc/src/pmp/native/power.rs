@@ -4,7 +4,7 @@
 //! _getPMPDeviceIndex reads raw PMGR descriptor byte 3, adds die times the
 //! nub's soc-device-die-offset, then looks up the record ordinal. The
 //! dashboard request/ACK bit is that ordinal, not either source/domain ID.
-//! See docs/research/apple-mcc.md and the pinned original-source tests below.
+//! The tests below pin the original source.
 use crate::Result;
 use alloc::vec::Vec;
 use stela_contracts::refuse;

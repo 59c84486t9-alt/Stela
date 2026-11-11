@@ -156,8 +156,7 @@
 //!   window's end has no recovered register (iBoot's DART driver maps only
 //!   0x4000 or 0xc000 bytes, J604 iBoot VA 0x100c1b90ef0), so it refuses.
 //!
-//! Full family evidence, capability gates and validation gaps are in
-//! `docs/research/dart-iommu.md`. The paired SMMU view exposes the capture
+//! The paired SMMU view exposes the capture
 //! count of this cacheless implementation, not a physical chip's dump.
 use super::descriptor::Format;
 use super::gen3::fault::{Capture, Code, Level, Record};

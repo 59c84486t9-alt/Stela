@@ -4,9 +4,8 @@
 //!1003344..3378 binds work10042b8;1004170..421c registers live counters;
 //!1003c94..3cac submits;102ff00..ff68 dispatches;1004264..42b8 drains;
 //!10042b8..4584 computes callback traces, clears MCpending and notifies.
-//! Evidence: pmgr/cache-metrics-r1. No firmware executes. Samples/arrival and
-//! command ACK remain service-owned. Numeric increments are software DATA.
-//! Shared Work/Invocation binding: pmgr/metrics-shared-work-r1.
+//! No firmware executes. Samples/arrival and command ACK remain
+//! service-owned. Numeric increments are software DATA.
 use super::super::{
     platform::owner::Completion,
     scheduler::{Invocation, Work},

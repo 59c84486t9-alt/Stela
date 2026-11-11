@@ -2,8 +2,7 @@
 //! RTKit application endpoints behind the generic ASC mailbox and RTKit
 //! management ([`super::super::rtkit`]). Apple's `armfw_g14g` is not executed.
 //!
-//! Known (26A434 `AGXG14G`/`AGXFirmwareKextG14GRTBuddy`, unslid VAs; see
-//! docs/research/agx.md §1):
+//! Known (26A434 `AGXG14G`/`AGXFirmwareKextG14GRTBuddy`, unslid VAs):
 //! - The kext matches two services named `GFXEndpoint1` and `GFXEndpoint2`
 //!   (`AGXFirmwareKextRTBuddy::bootFirmware` 0x1ae9c88) and keeps endpoint
 //!   **0x20** as the message endpoint and **0x21** as the doorbell
@@ -222,7 +221,7 @@ const HANDOFF_MICRO_MAGIC: (u64, u64) = (8, 0x4b1d_0000_0000_0002);
 
 // Every modeled interface's original firmware binds root+a8 to this 0x20-byte
 // shared status object. Startup clears ready/generation, publishes powered,
-// then publishes ready after native initialization (docs/research/agx.md).
+// then publishes ready after native initialization.
 const STATUS_POWERED: u64 = 0x10;
 const STATUS_READY: u64 = 0x14;
 const STATUS_GENERATION: u64 = 0x1c;
@@ -918,7 +917,7 @@ fn only(entry: &[u8], fields: &[(usize, usize)]) -> bool {
 /// are those its 26A434 kext builder writes; every other byte is zero, as
 /// the builders zero the entry first. The firmware handlers are the 26A434
 /// dispatcher's (0xffffff8000003a1c, a jump table over types 4..0x3b at
-/// 0xffffff8000004c48); docs/research/agx.md §2 tabulates both sides.
+/// 0xffffff8000004c48).
 fn device_control_entry(entry: &[u8]) -> Result<Command> {
     let word = |at: usize| u32::from_le_bytes(entry[at..at + 4].try_into().unwrap());
     let u64_at = |at: usize| u64::from_le_bytes(entry[at..at + 8].try_into().unwrap());
@@ -1125,8 +1124,8 @@ fn device_control_entry(entry: &[u8]) -> Result<Command> {
             "GFX device control 0x1f updates an app role in the firmware scheduler's context registry, which the model does not keep"
         )),
         // An AFR perf-state override the 26A434 firmware lacks: its handler
-        // only logs a warning, and firmware log records are excluded
-        // (docs/research/agx.md §5.7), so the entry is consumed.
+        // only logs a warning, and firmware log records are excluded, so the
+        // entry is consumed.
         0x24 => form(&[(4, 8)], "GFX AFR perf state has fields beyond its word"),
         0x29 => Err(refuse!(
             "GFX device control 0x29 hands an exiting context to a firmware teardown thread the model does not run"

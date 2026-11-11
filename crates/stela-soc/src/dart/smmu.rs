@@ -13,7 +13,7 @@
 //! No selection or capture data exists; those accesses refuse, as do unknown
 //! registers, writes to identification and non-word reads. Supporting cached
 //! generations requires a different coherent count, selector and payload
-//! implementation. See `docs/research/dart-iommu.md`.
+//! implementation.
 use {
     stela_contracts::bus::Access, stela_contracts::bus::Direction,
     stela_contracts::bus::MmioDevice, stela_contracts::bus::MmioError, stela_contracts::bus::Width,

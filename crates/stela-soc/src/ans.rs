@@ -10,9 +10,9 @@
 //! `AppleANS2CGv2Controller` (file 0x3de4954) whose `GetIOSQES`
 //! (0x3de51d0) returns 6. The register accessors at 0x3ddee24..64 use ANS
 //! `reg[3]`; its `nvme-interrupt-idx` selects the completion interrupt.
-//! docs/research/ans2.md owns the SPTM NVMe validation matrix this
-//! controller's values must satisfy, and the matrix of every register the
-//! drivers reach through restore, boot, sleep, wake and shutdown.
+//! The controller's values must satisfy SPTM's NVMe validation, and cover
+//! every register the drivers reach through restore, boot, sleep, wake and
+//! shutdown.
 //!
 //! Stela's die choices: NVMe 1.3, one I/O queue, explicit linear geometry,
 //! 4/16 KiB queue pages, fixed 4 KiB NVMMU data pages, 4 KiB LBAs, 1 MiB maximum transfer, the

@@ -5,7 +5,6 @@
 //!101b464..101b8fc,101bb08..101c05c. This module does not execute firmware.
 //! Local reads use kept Frames. Shared bank2 reads and concrete
 //! controller/control-loop calls require their owners, never defaults.
-//! Evidence: .stela/goal-20261023/memory/control-tail-r1.
 pub mod controller;
 mod model;
 mod owner;

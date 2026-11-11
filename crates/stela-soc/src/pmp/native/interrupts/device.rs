@@ -4,8 +4,8 @@
 //! b39ef494f808c6db0a2c4feab42497e466d270b0935b2e1e948dadf0b510716c:
 //!1026280/102628c/10263f8,1026194 and10326a0 pin this native protocol.
 //! Generic AIC register facts (paired readback, SW/HW OR, automatic claim mask)
-//! are independently kept from local Asahi aic.md and AIC2 header comments;
-//! no reference implementation is copied. Fresh evidence: native-irq-device-r1.
+//! follow Asahi's `hw/soc/aic.md` and AIC2 header comments; no reference
+//! implementation is copied.
 //!
 //! This is NEW Stela software hardware state, never measured Apple reset state.
 //! All words and relocation are explicit. Real peripheral owners must keep

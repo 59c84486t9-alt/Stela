@@ -2,14 +2,13 @@
 //! are relative to the node's `reg[0]` base, as `readGFXReg32` takes them;
 //! on T8112 `reg[0]` (`0x2_0400_0000` + 64 MiB) spans them all, while on the
 //! Pro/Max SoCs `reg[0]` is 1 MiB and they lie in `reg[1]`
-//! (`0x2_04d0_0000`.., docs/research/agx.md §6). Everything else the GPU
+//! (`0x2_04d0_0000`..). Everything else the GPU
 //! has is driven by the GFX firmware, which Stela models natively, so every
 //! other offset refuses.
 //!
 //! Known (26A434 `AGXG14G`; every AP access goes through
-//! `AGXAccelerator::readGFXReg32` 0x1b7f868 / `writeGFXReg32` 0x1b80ce0,
-//! whose callers are listed in docs/research/agx.md §4; the other families'
-//! readings are in §6 and [`generation`]):
+//! `AGXAccelerator::readGFXReg32` 0x1b7f868 / `writeGFXReg32` 0x1b80ce0;
+//! the other families' readings are in [`generation`]):
 //! - `AGXAcceleratorG14::readChipInfo` (0x1b62f88) reads the identification
 //!   words 0xd04000, 0xd04010, 0xd04014, 0xd04018 and 0xd0401c and the core
 //!   mask at 0xd01500. It requires generation 5 (bits 31:24 of 0xd04000),
