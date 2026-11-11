@@ -190,7 +190,7 @@ fn shuffle(row: &mut Row, shuffle: u64, element_bytes: usize) {
 }
 
 /// `parse_writemask`: a per-byte enable of groups of `group` bytes.
-fn write_mask(value: u64, group: u32, mask_bits: u32) -> u64 {
+pub(crate) fn write_mask(value: u64, group: u32, mask_bits: u32) -> u64 {
     let mut value = value as u32;
     let mode = if mask_bits >= 9 {
         (value >> 6) & 7

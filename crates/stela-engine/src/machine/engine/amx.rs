@@ -9,14 +9,15 @@ use crate::machine::{
     exception::Class,
     mmu::{self, Access, Outcome as Translated},
 };
+use alloc::format;
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
-use alloc::{format, vec::Vec};
 use stela_compiler::{
     GuestAddress,
     amx::{
         AmxOperand, AmxOperation, decode,
         model::{self, AmxError, AmxMemory, MemoryFault},
+        native::Native,
     },
 };
 
@@ -30,8 +31,16 @@ pub const DISABLED_ISS: u32 = 3;
 enum Failure {
     Fault(mmu::Fault),
     Translation(mmu::Unsupported),
-    Device { physical: u64 },
+    Device {
+        physical: u64,
+    },
+    /// More pages than [`PIECES`]: no transfer of the model reaches this.
+    Span,
 }
+
+/// The pages one transfer can touch: it moves at most four 64-byte rows,
+/// which lie in at most two 4 KiB pages.
+const PIECES: usize = 2;
 
 /// Guest virtual memory for the model. Each call translates every 4 KiB
 /// piece first and touches memory only when all are mapped RAM.
@@ -41,22 +50,34 @@ struct Translate<'a, H: Host, D: Devices> {
 }
 
 impl<H: Host, D: Devices> Translate<'_, H, D> {
-    /// (physical, length) pieces of `address..address+bytes`.
+    /// (physical, length) pieces of `address..address+bytes`, and how many
+    /// there are; without a heap allocation, which every transfer made.
     fn pieces(
         &mut self,
         address: u64,
         bytes: usize,
         write: bool,
-    ) -> Result<Vec<(u64, usize)>, MemoryFault> {
+    ) -> Result<([(u64, usize); PIECES], usize), MemoryFault> {
         let access = if write { Access::Write } else { Access::Read };
-        let mut pieces = Vec::new();
+        let mut pieces = [(0, 0); PIECES];
+        let mut count = 0;
         let mut done = 0;
         while done < bytes {
             let virtual_address = address.wrapping_add(done as u64);
             let page_left = (FETCH_PAGE - (virtual_address & (FETCH_PAGE - 1))) as usize;
             let length = page_left.min(bytes - done);
+            if count == PIECES {
+                self.failure = Some(Failure::Span);
+                return Err(MemoryFault {
+                    address: virtual_address,
+                    write,
+                });
+            }
             match self.machine.translate_data(virtual_address, access) {
-                Translated::Mapped(translation) => pieces.push((translation.physical, length)),
+                Translated::Mapped(translation) => {
+                    pieces[count] = (translation.physical, length);
+                    count += 1;
+                }
                 Translated::Fault(fault) => {
                     self.failure = Some(Failure::Fault(fault));
                     return Err(MemoryFault {
@@ -74,7 +95,7 @@ impl<H: Host, D: Devices> Translate<'_, H, D> {
             }
             done += length;
         }
-        Ok(pieces)
+        Ok((pieces, count))
     }
 
     fn device(&mut self, physical: u64, address: u64, write: bool) -> MemoryFault {
@@ -85,9 +106,9 @@ impl<H: Host, D: Devices> Translate<'_, H, D> {
 
 impl<H: Host, D: Devices> AmxMemory for Translate<'_, H, D> {
     fn read(&mut self, address: u64, destination: &mut [u8]) -> Result<(), MemoryFault> {
-        let pieces = self.pieces(address, destination.len(), false)?;
+        let (pieces, count) = self.pieces(address, destination.len(), false)?;
         let mut offset = 0;
-        for (physical, length) in pieces {
+        for &(physical, length) in &pieces[..count] {
             let range = offset..offset + length;
             if !self
                 .machine
@@ -102,11 +123,12 @@ impl<H: Host, D: Devices> AmxMemory for Translate<'_, H, D> {
     }
 
     fn write(&mut self, address: u64, source: &[u8]) -> Result<(), MemoryFault> {
-        let pieces = self.pieces(address, source.len(), true)?;
+        let (pieces, count) = self.pieces(address, source.len(), true)?;
+        let pieces = &pieces[..count];
         // Probe every piece so that nothing is written unless all are RAM.
         let mut offset = 0;
         let mut probe = [0u8; 1];
-        for &(physical, length) in &pieces {
+        for &(physical, length) in pieces {
             if !self.machine.host.read_ram(physical, &mut probe)
                 || !self
                     .machine
@@ -118,7 +140,7 @@ impl<H: Host, D: Devices> AmxMemory for Translate<'_, H, D> {
             offset += length;
         }
         let mut offset = 0;
-        for (physical, length) in pieces {
+        for &(physical, length) in pieces {
             if !self
                 .machine
                 .host
@@ -206,6 +228,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             AmxOperand::Register(index) if index < 31 => self.cpu.state.x[usize::from(index)],
             AmxOperand::Register(_) | AmxOperand::None => 0,
         };
+        // Arithmetic a host path covers completes without the model, which
+        // stays its definition and the fallback (`amx::native`).
+        if !operation.accesses_memory()
+            && let Some(registers) = self.cpu.amx.registers.as_deref_mut()
+            && Native::select(self.target).execute(generation, registers, operation, operand)
+        {
+            return self.next();
+        }
         let mut registers = self.cpu.amx.registers.take().expect("live above");
         let mut memory = Translate {
             machine: self,
@@ -222,6 +252,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Some(Failure::Fault(fault)) => self.data_abort(address, fault, write, false),
                 Some(Failure::Translation(unsupported)) => {
                     Err(self.unsupported(RequirementKind::Translation(unsupported)))
+                }
+                Some(Failure::Span) => {
+                    self.refuse_amx(word, "transfer over more than two 4 KiB pages")
                 }
                 Some(Failure::Device { physical }) => {
                     Err(self.unsupported(RequirementKind::Device {

@@ -12,6 +12,7 @@
 //! NZCV, FPCR or FPSR.
 pub mod decode;
 pub mod model;
+pub mod native;
 pub mod state;
 
 pub use decode::{AmxInstruction, AmxOperand, AmxOperation, decode};

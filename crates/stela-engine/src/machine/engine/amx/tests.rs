@@ -5,6 +5,7 @@ use crate::machine::{
     amx::{AMX_CTL_EL1, AMX_STATE_T, AmxView},
     exception::syndrome,
 };
+use stela_compiler::TargetCpu;
 use stela_contracts::Chip;
 
 fn machine(words: &[u32]) -> Machine<super::super::tests::FakeHost, super::super::NoDevices> {
@@ -364,4 +365,58 @@ fn transfers_outside_ram_stop_without_effects() {
         machine.cpu.amx.registers.as_deref(),
         Some(&stela_compiler::amx::AmxRegisters::zeroed())
     );
+}
+
+/// The service completes covered arithmetic on the host's native tier
+/// (`amx::native`) with the state the model gives on a baseline target.
+#[test]
+fn native_arithmetic_tier_matches_the_model_through_the_service() {
+    let host = TargetCpu::detect();
+    let native = Native::select(host);
+    if native == Native::MODEL {
+        std::eprintln!("AMX native service test skipped: host has no FMA3 tier");
+        return;
+    }
+    let mut machines = [machine(&[]), machine(&[])];
+    machines[1].target = host;
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut fill = stela_compiler::amx::AmxRegisters::zeroed();
+    for byte in fill.as_bytes_mut() {
+        *byte = next() as u8;
+    }
+    for machine in &mut machines {
+        machine.cpu.state.x[1] = (1 << 63) | 0x100;
+        machine.system_instruction(msr(AMX_CTL_EL1, 1)).unwrap();
+        machine.amx(SET).unwrap();
+        **machine.cpu.amx.registers.as_mut().unwrap() = fill.clone();
+    }
+    // fma32, fms32, fma64, fms64 with every field the native tier reads,
+    // including bits 29:27 it leaves to the model, and f16 vecfp.
+    for step in 0..500u64 {
+        let word =
+            [FMA32, FMA32 + 0x20, 0x0020_1140, 0x0020_1160, 0x0020_1260][step as usize % 5] | 6;
+        let operand = if step % 5 == 4 {
+            // f16 type 2, mode 0/1, broadcast Y lane, no shuffle or index.
+            next() & !(0x7 << 54 | 1 << 53 | 0x3e << 47 | 0xf << 42 | 7 << 38 | 1 << 31 | 0xf << 27)
+                | 2 << 42
+                | (step & 8) << 35
+        } else {
+            next() & !(6 << 27) | (step % 3) << 28
+        };
+        for machine in &mut machines {
+            machine.cpu.state.x[6] = operand;
+            machine.amx(word).unwrap();
+        }
+        assert!(
+            machines[0].cpu.amx.registers == machines[1].cpu.amx.registers,
+            "step {step} word {word:#x} operand {operand:#x}"
+        );
+    }
+    assert_eq!(machines[0].cpu.pc, machines[1].cpu.pc);
 }
