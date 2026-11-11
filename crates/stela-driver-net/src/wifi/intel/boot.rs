@@ -456,7 +456,7 @@ impl<'a, Q: BootIo> RomBoot<'a, Q> {
         let (io, profile, awake) = power.into_awake()?;
         let (firmware, image) = staged.into_parts();
         let request = profile.firmware_request();
-        if image.name() != request.name || image.target() != request.requirement().target {
+        if !profile.binds(request.name, &image) {
             return Err(Error::FirmwareBinding);
         }
         let family = profile.family();

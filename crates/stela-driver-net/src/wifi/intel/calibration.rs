@@ -93,13 +93,12 @@ fn external<'a>(
     provider: &'a dyn resources::Provider,
 ) -> Result<resources::Image<'a>, Error> {
     let request = profile.pnvm_request().ok_or(Error::Binding)?;
-    let requirement = request.requirement();
-    let image = provider
-        .load(requirement)
+    let image = profile
+        .load(request.name, provider)
         .map_err(|e| Error::Resource(Box::new(e)))?;
     // A Provider implementation is allowed to be independently supplied;
     // never trust a redirected diagnostic/other-board image as this request.
-    if image.name() != requirement.name || image.target() != requirement.target {
+    if !profile.binds(request.name, &image) {
         return Err(Error::Binding);
     }
     Ok(image)

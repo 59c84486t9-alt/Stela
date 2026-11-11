@@ -438,6 +438,87 @@ impl Profile {
             ),
         }
     }
+    /// The same file under the device's binding, which `stela setup` writes
+    /// for an adapter it knows by PCI IDs alone ([`device_images`]).
+    fn device_request(&self, name: &'static str) -> Request {
+        Request {
+            name,
+            hardware: format!("pci:{INTEL:04x}:{:04x}", self.observed.device),
+            revision: DEVICE_REVISION.into(),
+        }
+    }
+    /// The file `name` under this adapter's observed binding, or else under
+    /// its device's binding when the USB has none for the observed adapter.
+    /// A failure is the observed request's. A Provider may be supplied
+    /// independently, so callers check the image with [`Self::binds`].
+    pub fn load<'a>(
+        &self,
+        name: &'static str,
+        provider: &'a dyn resources::Provider,
+    ) -> Result<resources::Image<'a>, resources::Error> {
+        let mut unbound = None;
+        for request in [self.request(name), self.device_request(name)] {
+            match provider.load(request.requirement()) {
+                Ok(image) => return Ok(image),
+                Err(error)
+                    if matches!(
+                        error.kind,
+                        resources::ErrorKind::Missing | resources::ErrorKind::WrongTarget
+                    ) =>
+                {
+                    unbound.get_or_insert(error);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(unbound.expect("the observed request had no binding"))
+    }
+    /// Whether `image` is the file `name` under one of the two bindings
+    /// [`Self::load`] takes.
+    pub fn binds(&self, name: &'static str, image: &resources::Image<'_>) -> bool {
+        image.name() == name
+            && [self.request(name), self.device_request(name)]
+                .iter()
+                .any(|request| image.target() == request.requirement().target)
+    }
+}
+
+/// The revision of a device binding ([`Profile::load`]).
+pub const DEVICE_REVISION: &str = "linux-firmware";
+
+/// Every image and PNVM [`Profile::select`] can name for the device `id`,
+/// whatever its MAC, radio and steps: what `stela setup` writes under the
+/// device binding (`stela_loader::host_firmware::recipes::require_wifi`
+/// mirrors this table). `iwlwifi-ma-b0-hr-b0-89.ucode` is left out: setup
+/// has no pinned recipe for it, so an MA MAC with an HR radio still needs
+/// the observed inventory.
+pub const fn device_images(id: u16) -> &'static [&'static str] {
+    const QU: &[&str] = &[
+        "iwlwifi-Qu-b0-hr-b0-77.ucode",
+        "iwlwifi-Qu-c0-hr-b0-77.ucode",
+        "iwlwifi-QuZ-a0-hr-b0-77.ucode",
+    ];
+    const SO: &[&str] = &[
+        "iwlwifi-so-a0-hr-b0-89.ucode",
+        "iwlwifi-so-a0-gf-a0-89.ucode",
+        "iwlwifi-so-a0-gf-a0.pnvm",
+        "iwlwifi-ma-b0-gf-a0-89.ucode",
+        "iwlwifi-ma-b0-gf-a0.pnvm",
+    ];
+    match id {
+        AX200 => &["iwlwifi-cc-a0-77.ucode"],
+        AX210 => &["iwlwifi-ty-a0-gf-a0-89.ucode", "iwlwifi-ty-a0-gf-a0.pnvm"],
+        BE200 => &["iwlwifi-gl-c0-fm-c0-c106.ucode", "iwlwifi-gl-c0-fm-c0.pnvm"],
+        _ => match device(id) {
+            Some((Family::Ax200, _)) => QU,
+            Some((Family::Ax210, _)) => SO,
+            Some((Family::Bz, _)) => {
+                &["iwlwifi-bz-b0-fm-c0-c106.ucode", "iwlwifi-bz-b0-fm-c0.pnvm"]
+            }
+            Some((Family::Sc, _)) => &["iwlwifi-sc-a0-fm-c0-c106.ucode"],
+            None => &[],
+        },
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -510,8 +591,8 @@ pub fn stage<'a>(
     provider: &'a dyn resources::Provider,
 ) -> Result<Staged<'a>, StageError> {
     let request = profile.firmware_request();
-    let source = provider
-        .load(request.requirement())
+    let source = profile
+        .load(request.name, provider)
         .map_err(|error| StageError::Resource {
             request: request.clone(),
             error: Box::new(error),
@@ -871,7 +952,115 @@ mod tests {
         assert!(
             matches!(stage(&profile,&provider),Err(StageError::Resource { request,.. }) if request.name=="iwlwifi-ty-a0-gf-a0-89.ucode")
         );
-        assert_eq!(&*provider.names.borrow(), &["iwlwifi-ty-a0-gf-a0-89.ucode"]);
+        // The observed binding, then the device's.
+        assert_eq!(
+            &*provider.names.borrow(),
+            &["iwlwifi-ty-a0-gf-a0-89.ucode"; 2]
+        );
+    }
+
+    fn catalog(name: &'static str, target: resources::Target<'_>, bytes: Vec<u8>) -> Catalog {
+        let hash = Sha256::digest(&bytes).into();
+        Catalog::from_handoff(vec![Resource {
+            name,
+            target,
+            provenance: Provenance {
+                source: "test",
+                revision: "immutable",
+                member: name,
+                license: "BSD",
+            },
+            expected_length: bytes.len(),
+            expected_sha256: hash,
+            bytes,
+        }])
+        .unwrap()
+    }
+
+    #[test]
+    fn an_adapter_with_no_observed_binding_takes_its_devices_file() {
+        let profile = Profile::select(observed(AX210)).unwrap();
+        let name = profile.firmware_request().name;
+        let device = resources::Target {
+            driver: "wifi-intel",
+            hardware: "pci:8086:2725",
+            revision: DEVICE_REVISION,
+            board: None,
+        };
+        let bound = catalog(name, device, firmware(89));
+        let staged = stage(&profile, &bound).unwrap();
+        assert_eq!(staged.source.target(), device);
+        assert!(profile.binds(name, &staged.source));
+        assert!(!profile.binds("iwlwifi-so-a0-gf-a0-89.ucode", &staged.source));
+        // Another device's binding is not this adapter's.
+        let other = catalog(
+            name,
+            resources::Target {
+                hardware: "pci:8086:7af0",
+                ..device
+            },
+            firmware(89),
+        );
+        assert!(matches!(
+            stage(&profile, &other),
+            Err(StageError::Resource { error, .. })
+                if error.kind == resources::ErrorKind::WrongTarget
+        ));
+    }
+
+    /// Every combination of MAC, step, radio and radio step `select` admits
+    /// for every listed device names only files of [`device_images`], and
+    /// each of those files is named by one.
+    #[test]
+    fn device_images_hold_every_file_a_device_can_select() {
+        let macs = [
+            MAC_QU, MAC_CC, MAC_QUZ, MAC_SO, MAC_TY, MAC_SOF, MAC_MA, MAC_BZ, MAC_GL, MAC_SC,
+            MAC_BZ_W,
+        ];
+        let mut devices = 0;
+        for id in 0..=u16::MAX {
+            if device(id).is_none() {
+                assert!(device_images(id).is_empty());
+                continue;
+            }
+            devices += 1;
+            let mut named = Vec::new();
+            for mac in macs {
+                for step in 0..4 {
+                    for radio in [RF_HR2, RF_GF, RF_FM] {
+                        for radio_step in 0..4 {
+                            let o = Observed {
+                                device: id,
+                                subsystem_device: 0x0090,
+                                hardware_revision: mac << 4 | step,
+                                radio_id: radio << 12 | radio_step << 8,
+                                silicon: Silicon {
+                                    crf: 0,
+                                    cnv: step << 24,
+                                    wfpm: 0,
+                                },
+                                ..observed(AX200)
+                            };
+                            let Ok(profile) = Profile::select(o) else {
+                                continue;
+                            };
+                            for name in [Some(profile.firmware), profile.pnvm].into_iter().flatten()
+                            {
+                                if name == "iwlwifi-ma-b0-hr-b0-89.ucode" {
+                                    continue;
+                                }
+                                assert!(device_images(id).contains(&name), "{id:04x}: {name}");
+                                named.push(name);
+                            }
+                        }
+                    }
+                }
+            }
+            for name in device_images(id) {
+                assert!(named.contains(name), "{id:04x} never names {name}");
+            }
+        }
+        assert_eq!(devices, 26);
     }
 
     #[test]
