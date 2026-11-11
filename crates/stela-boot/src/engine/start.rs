@@ -2221,10 +2221,11 @@ fn start_platform(
 ) -> Platform {
     // The owned MMIO permission the host devices' services map through. A
     // host it cannot check is reported, and those services refuse.
-    // SAFETY: this boot's capture, on the installed boot processor before
-    // the other host processors start. Its time is logged: it walks every
-    // mapping the firmware left, which no step's time shows.
+    // Its time is logged: it walks every mapping the firmware left, which
+    // no step's time shows.
     let activating = host::rdtsc();
+    // SAFETY: this boot's capture, on the installed boot processor before
+    // the other host processors start.
     let native_mmio = unsafe { crate::native_mmio::Source::activate(handoff, host_owner) }
         .inspect(|_| {
             output::arguments(format_args!(
