@@ -367,8 +367,8 @@ fn bundle(report: BundleReport) {
         }
         BundleReport::Missing => stop(
             "StelaGPU.bundle is not installed in /Library/GPUBundles, and a kext cannot create \
-             its directories: install it from a single-user maintenance boot \
-             (docs/installation.md)",
+             its directories: boot macOS once with --single-user and run \
+             stela-gpu-maintenance install there",
         ),
         BundleReport::Failed => stop(
             "the StelaGPU kext could not install StelaGPU.bundle; its StelaGPU lines above say why",
