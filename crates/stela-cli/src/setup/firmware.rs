@@ -501,7 +501,24 @@ fn remove_superseded(esp: &Path, volume: &Path, files: &[(&Artifact, &Artifact)]
 pub(super) fn bundle_status(volume: &Path) -> std::result::Result<String, String> {
     let path = volume.join(bundle::MANIFEST);
     let Ok(bytes) = fs::read(&path) else {
-        return Err("the USB has no firmware bundle".into());
+        // Files without the manifest, which setup writes last: a bundle
+        // whose writing stopped.
+        let directory = volume.join(bundle::DIRECTORY);
+        let present = bundle::complete()
+            .iter()
+            .filter(|(object, _)| {
+                fs::metadata(directory.join(bundle::object_path(object.sha256)))
+                    .is_ok_and(|m| m.len() == object.length as u64)
+            })
+            .count();
+        return Err(if present == 0 {
+            "the USB has no firmware bundle".into()
+        } else {
+            format!(
+                "the firmware bundle is incomplete: {present} of {} files are on the USB",
+                bundle::size().0
+            )
+        });
     };
     let parsed = bundle::Bundle::parse(&bytes).map_err(|error| error.0)?;
     let directory = volume.join(bundle::DIRECTORY);
@@ -1006,32 +1023,6 @@ mod tests {
     }
 
     #[test]
-    fn status_names_a_bundle_as_complete_or_what_it_lacks() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(
-            bundle_status(dir.path())
-                .unwrap_err()
-                .contains("no firmware bundle")
-        );
-        // A partial bundle: one real recipe's entry, its file not written.
-        let first = bundle::complete()[0];
-        let directory = dir.path().join(bundle::DIRECTORY);
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(
-            directory.join("bundle.json"),
-            bundle::manifest(&[first]).unwrap(),
-        )
-        .unwrap();
-        let status = bundle_status(dir.path()).unwrap_err();
-        assert!(status.contains("lacks 63 of 64 files"), "{status}");
-        assert!(
-            status.contains("nvidia/ga102/gsp/gsp-570.144.bin"),
-            "{status}"
-        );
-        assert!(status.contains("1 of its files are damaged"), "{status}");
-    }
-
-    #[test]
     fn prefetch_downloads_only_what_neither_the_cache_nor_the_stick_holds() {
         let catalog = synthetic();
         let [(a, a_bytes), (b, b_bytes), (notice, notice_bytes)] = &catalog[..] else {
@@ -1091,6 +1082,52 @@ mod tests {
             !cache.join(a.sha256).exists(),
             "the stick's file was never downloaded"
         );
+    }
+
+    #[test]
+    fn status_names_a_partly_written_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = dir.path().join(bundle::DIRECTORY);
+        fs::create_dir_all(&directory).unwrap();
+        // Three files of a setup whose download stopped, no manifest yet.
+        for (object, _) in bundle::complete().iter().take(3) {
+            fs::write(
+                directory.join(bundle::object_path(object.sha256)),
+                vec![0; object.length],
+            )
+            .unwrap();
+        }
+        let status = bundle_status(dir.path()).unwrap_err();
+        assert_eq!(
+            status,
+            "the firmware bundle is incomplete: 3 of 64 files are on the USB"
+        );
+    }
+
+    #[test]
+    fn status_names_a_bundle_as_complete_or_what_it_lacks() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            bundle_status(dir.path())
+                .unwrap_err()
+                .contains("no firmware bundle")
+        );
+        // A partial bundle: one real recipe's entry, its file not written.
+        let first = bundle::complete()[0];
+        let directory = dir.path().join(bundle::DIRECTORY);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("bundle.json"),
+            bundle::manifest(&[first]).unwrap(),
+        )
+        .unwrap();
+        let status = bundle_status(dir.path()).unwrap_err();
+        assert!(status.contains("lacks 63 of 64 files"), "{status}");
+        assert!(
+            status.contains("nvidia/ga102/gsp/gsp-570.144.bin"),
+            "{status}"
+        );
+        assert!(status.contains("1 of its files are damaged"), "{status}");
     }
 
     #[test]
