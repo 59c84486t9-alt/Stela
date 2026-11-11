@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 /// The protocol version a connection negotiates. A major version changes
 /// records; a minor version only adds operations.
-pub const MAJOR: u32 = 3;
+pub const MAJOR: u32 = 4;
 pub const MINOR: u32 = 0;
 
 /// A fixed-width wire record.
@@ -875,6 +875,14 @@ records! {
         pub start: u64,
         pub end: u64,
     }
+
+    /// The completed serial, and the oldest of the connection's completed
+    /// command buffers whose submission the driver refused, which
+    /// `CommandFailure` answers; zero for none.
+    pub struct PollResponse {
+        pub value: u64,
+        pub refused: u64,
+    }
 }
 
 raw_enum! {
@@ -1241,7 +1249,7 @@ operations! {
     AllocatedSize = 0x0408 => Empty, Value;
     /// Submits ready work and answers the completed serial: every serial
     /// before the connection's oldest command buffer not yet complete.
-    Poll = 0x0409 => Empty, Value;
+    Poll = 0x0409 => Empty, PollResponse;
     /// After a `Poll`, the oldest of the connection's command buffers after
     /// serial `value` that completed before an older one of its own, which
     /// another Metal queue's held work delays; zero for none.
@@ -1257,6 +1265,10 @@ operations! {
     OpenSharedEvent = 0x040e => ShareToken, Handle;
     /// `newSharedTextureWithHandle:`.
     OpenSharedTexture = 0x040f => ShareToken, TextureResponse;
+    /// The failure of the connection's completed command buffer with
+    /// serial `value` whose submission the driver refused, answered once,
+    /// as its commit would have answered it; `Ok` for one that ran.
+    CommandFailure = 0x0410 => Value, Empty;
     NewIndirectCommandBuffer = 0x0501 => NewIndirectRequest, Handle;
     /// `gpuResourceID`, which makes the buffer GPU-resident.
     IndirectResourceId = 0x0502 => Handle, Value;

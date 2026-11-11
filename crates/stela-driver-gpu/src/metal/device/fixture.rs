@@ -61,6 +61,18 @@ pub(crate) struct MockBackend {
     pub(crate) idle_calls: usize,
     pub(crate) idle_error: Option<Error>,
     pub(crate) semaphore_error: Option<Error>,
+    /// Freed semaphores' handles, which `create_semaphore` hands out again
+    /// when `reuse_semaphores` is set.
+    pub(crate) reuse_semaphores: bool,
+    pub(crate) freed_semaphores: Vec<u64>,
+    /// The next submission is refused with this failure while the device
+    /// is kept: its signals are still made, as NVK's refusal makes them.
+    pub(crate) refuse_next: Option<Error>,
+    /// Submissions the driver refused, by each value they signaled, as
+    /// `submit_failure` takes them.
+    pub(crate) refused: Vec<(Semaphore, u64, Error)>,
+    /// The count `count_failures` gave, raised by each refused record.
+    pub(crate) outstanding: Option<alloc::sync::Arc<core::sync::atomic::AtomicU32>>,
     pub(crate) physical: Option<PhysicalDevice>,
     pub(crate) next: u64,
     pub(crate) destroyed: Vec<Object>,
@@ -293,7 +305,11 @@ impl Backend for MockBackend {
         Ok(pool)
     }
     fn create_semaphore(&mut self, initial: u64) -> Result<Semaphore> {
-        let id = self.id();
+        // A driver may hand out a freed semaphore's handle again.
+        let id = match self.reuse_semaphores {
+            true => self.freed_semaphores.pop().unwrap_or_else(|| self.id()),
+            false => self.id(),
+        };
         self.semaphores.insert(id, initial);
         Ok(Semaphore(id))
     }
@@ -333,6 +349,9 @@ impl Backend for MockBackend {
         })
     }
     fn destroy(&mut self, object: Object) {
+        if let Object::Semaphore(Semaphore(id)) = object {
+            self.freed_semaphores.push(id);
+        }
         if let Object::Memory(Memory(id)) = object
             && let Some((_, token)) = self.imports.remove(&id)
         {
@@ -396,6 +415,26 @@ impl Backend for MockBackend {
             .for_each(|(index, result)| *result = index as u64 * 10);
         Ok(self.queries_ready)
     }
+    fn submit_failure(&mut self, semaphore: Semaphore, value: u64) -> Option<Error> {
+        let index = self
+            .refused
+            .iter()
+            .position(|&(refused, at, _)| refused == semaphore && at == value)?;
+        Some(self.refused.remove(index).2)
+    }
+    fn settle_failures(&mut self, mut settled: u32, forget: bool) {
+        if forget {
+            settled += self.refused.len() as u32;
+            self.refused.clear();
+        }
+        if let Some(outstanding) = &self.outstanding {
+            outstanding.fetch_sub(settled, core::sync::atomic::Ordering::AcqRel);
+        }
+    }
+    fn count_failures(&mut self, outstanding: &alloc::sync::Arc<core::sync::atomic::AtomicU32>) {
+        outstanding.store(0, core::sync::atomic::Ordering::Release);
+        self.outstanding = Some(outstanding.clone());
+    }
     fn semaphore_value(&mut self, semaphore: Semaphore) -> Result<u64> {
         if let Some(error) = self.semaphore_error.take() {
             return Err(error);
@@ -421,6 +460,16 @@ impl Backend for MockBackend {
             for &(semaphore, value) in &segment.signals {
                 let promised = self.promised.entry(semaphore.0).or_default();
                 *promised = (*promised).max(value);
+            }
+        }
+        if let Some(error) = self.refuse_next.take() {
+            for segment in segments {
+                for &(semaphore, value) in &segment.signals {
+                    self.refused.push((semaphore, value, error));
+                    if let Some(outstanding) = &self.outstanding {
+                        outstanding.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                    }
+                }
             }
         }
         self.submissions.push(segments.to_vec());

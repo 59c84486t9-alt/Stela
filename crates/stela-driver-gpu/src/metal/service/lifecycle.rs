@@ -34,6 +34,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
                 Operation::Release
                     | Operation::Poll
                     | Operation::CompletedAfter
+                    | Operation::CommandFailure
                     | Operation::AllocatedSize
                     | Operation::CommandBufferTimes
                     | Operation::EventSignaledValue

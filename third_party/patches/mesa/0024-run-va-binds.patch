@@ -1,0 +1,260 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 19:32:29 -0500
+Subject: [PATCH] Revert "nvk: Run VA binds asynchronously on a device timeline
+ that every exec waits for"
+
+This reverts commit 80bf9a983f96a023b8b95e4ecf4bcf6fb0aa1099.
+---
+ .../vulkan/nvkmd/nouveau/nvkmd_nouveau.h      | 16 +----
+ .../vulkan/nvkmd/nouveau/nvkmd_nouveau_ctx.c  | 19 ------
+ .../vulkan/nvkmd/nouveau/nvkmd_nouveau_dev.c  | 11 ----
+ .../vulkan/nvkmd/nouveau/nvkmd_nouveau_va.c   | 66 ++++++-------------
+ 4 files changed, 20 insertions(+), 92 deletions(-)
+
+diff --git a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau.h b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau.h
+index 5461a265a77c0cf5ffd14b18031a310d02f0cd9f..582580a73b35d5c2692fc0c43117559b57bb9bb2 100644
+--- a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau.h
++++ b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau.h
+@@ -51,16 +51,6 @@ struct nvkmd_nouveau_dev {
+    simple_mtx_t heap_mutex;
+    struct util_vma_heap heap;
+    struct util_vma_heap replay_heap;
+-
+-   /* VA binds run asynchronously and signal points of this timeline in
+-    * submission order (bind_mutex keeps the points ordered). Each exec
+-    * waits for the last point it has not waited for, so no push reads a
+-    * mapping that is still being written. Zero means binds stay
+-    * synchronous because the timeline could not be created.
+-    */
+-   simple_mtx_t bind_mutex;
+-   uint32_t bind_syncobj;
+-   uint64_t bind_point;
+ };
+ 
+ NVKMD_DECL_SUBCLASS(dev, nouveau);
+@@ -119,12 +109,8 @@ struct nvkmd_nouveau_exec_ctx {
+ 
+    uint32_t max_push;
+ 
+-   /* The last bind point an exec of this context waited for */
+-   uint64_t bind_waited;
+-
+    struct drm_nouveau_exec req;
+-   /* One more than the limit for the wait on the device's binds */
+-   struct drm_nouveau_sync req_wait[NVKMD_NOUVEAU_MAX_SYNCS + 1];
++   struct drm_nouveau_sync req_wait[NVKMD_NOUVEAU_MAX_SYNCS];
+    struct drm_nouveau_sync req_sig[NVKMD_NOUVEAU_MAX_SYNCS];
+    struct util_dynarray req_push;
+ };
+diff --git a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_ctx.c b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_ctx.c
+index 125d4191bafa0155345a710653f7d9b3610d484d..9f86a66d231ac7805f98dd871419f05c7a296824 100644
+--- a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_ctx.c
++++ b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_ctx.c
+@@ -8,7 +8,6 @@
+ #include "nouveau_bo.h"
+ #include "nouveau_context.h"
+ #include "nouveau_device.h"
+-#include "util/u_atomic.h"
+ #include "vk_drm_syncobj.h"
+ #include "vk_log.h"
+ 
+@@ -144,26 +143,10 @@ nvkmd_nouveau_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+        ctx->req.sig_count == 0)
+       return VK_SUCCESS;
+ 
+-   /* Wait for the device's VA binds submitted so far (req_wait has a slot
+-    * past the limit for it). Execs of one context run in order, so a point
+-    * an earlier exec waited for needs no second wait.
+-    */
+-   struct nvkmd_nouveau_dev *dev = nvkmd_nouveau_dev(ctx->base.dev);
+-   const uint32_t wait_count = ctx->req.wait_count;
+-   const uint64_t bind_point = p_atomic_read(&dev->bind_point);
+-   if (bind_point > ctx->bind_waited) {
+-      ctx->req_wait[ctx->req.wait_count++] = (struct drm_nouveau_sync) {
+-         .flags = DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ,
+-         .handle = dev->bind_syncobj,
+-         .timeline_value = bind_point,
+-      };
+-   }
+-
+    ctx->req.push_ptr = (uintptr_t)util_dynarray_begin(&ctx->req_push);
+    int err = drmCommandWriteRead(ctx->ws_dev->fd, DRM_NOUVEAU_EXEC,
+                                  &ctx->req, sizeof(ctx->req));
+    if (err) {
+-      ctx->req.wait_count = wait_count;
+       VkResult result = VK_ERROR_UNKNOWN;
+       if (err == -ENODEV)
+          result = VK_ERROR_DEVICE_LOST;
+@@ -171,8 +154,6 @@ nvkmd_nouveau_exec_ctx_flush(struct nvkmd_ctx *_ctx,
+    }
+    util_dynarray_clear(&ctx->req_push);
+ 
+-   if (bind_point > ctx->bind_waited)
+-      ctx->bind_waited = bind_point;
+    ctx->req.push_count = 0;
+    ctx->req.wait_count = 0;
+    ctx->req.sig_count = 0;
+diff --git a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_dev.c b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_dev.c
+index 1745cdea4a362c2909db0833be9cb1ddb8f4e66b..ad15c03a95358ed5fa117260e8585a9cc99e3ae1 100644
+--- a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_dev.c
++++ b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_dev.c
+@@ -8,7 +8,6 @@
+ #include "nouveau_device.h"
+ #include "vk_log.h"
+ 
+-#include <stdio.h>
+ #include <xf86drm.h>
+ 
+ VkResult
+@@ -48,12 +47,6 @@ nvkmd_nouveau_create_dev(struct nvkmd_pdev *_pdev,
+ 
+    simple_mtx_init(&dev->heap_mutex, mtx_plain);
+ 
+-   simple_mtx_init(&dev->bind_mutex, mtx_plain);
+-   if (drmSyncobjCreate(dev->ws_dev->fd, 0, &dev->bind_syncobj) != 0) {
+-      fprintf(stderr, "nvk: VA binds stay synchronous: the bind timeline was not created\n");
+-      dev->bind_syncobj = 0;
+-   }
+-
+    STATIC_ASSERT(NVKMD_NOUVEAU_HEAP_START < NVKMD_NOUVEAU_HEAP_END);
+    util_vma_heap_init(&dev->heap, NVKMD_NOUVEAU_HEAP_START,
+                       NVKMD_NOUVEAU_HEAP_END - NVKMD_NOUVEAU_HEAP_START);
+@@ -77,10 +70,6 @@ nvkmd_nouveau_dev_destroy(struct nvkmd_dev *_dev)
+    util_vma_heap_finish(&dev->heap);
+    util_vma_heap_finish(&dev->replay_heap);
+ 
+-   if (dev->bind_syncobj != 0)
+-      drmSyncobjDestroy(dev->ws_dev->fd, dev->bind_syncobj);
+-   simple_mtx_destroy(&dev->bind_mutex);
+-
+    nouveau_ws_device_destroy(dev->ws_dev);
+    FREE(dev);
+ }
+diff --git a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_va.c b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_va.c
+index c62d0a5357bbf2a1f61fae1fa274df79bb2b3adf..a68fd8fee4da91178416b4dcbde2d4877a883cb5 100644
+--- a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_va.c
++++ b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_va.c
+@@ -7,7 +7,6 @@
+ 
+ #include "nouveau_bo.h"
+ #include "util/bitscan.h"
+-#include "util/u_atomic.h"
+ #include "vk_log.h"
+ 
+ #include <inttypes.h>
+@@ -95,48 +94,17 @@ free_heap_addr(struct nvkmd_nouveau_dev *dev,
+    simple_mtx_unlock(&dev->heap_mutex);
+ }
+ 
+-/* Runs the operations as one bind job. With the device's bind timeline the
+- * job runs asynchronously: the kernel validates the operations and updates
+- * the VA space before returning, and the next exec of every context waits
+- * for the signaled point (see nvkmd_nouveau_exec_ctx_flush). Bind jobs of
+- * one device run in submission order, so an unmap followed by a map of the
+- * same range, or a free followed by a reuse of it, stays ordered.
+- */
+ static VkResult MUST_CHECK
+ vm_bind(struct nvkmd_nouveau_dev *dev,
+         struct vk_object_base *log_obj,
+-        uint32_t op_count,
+-        struct drm_nouveau_vm_bind_op *ops)
++        struct drm_nouveau_vm_bind_op *op)
+ {
+    struct drm_nouveau_vm_bind vmbind = {
+-      .op_count = op_count,
+-      .op_ptr = (uint64_t)(uintptr_t)(void *)ops,
+-   };
+-
+-   if (dev->bind_syncobj == 0) {
+-      int err = drmCommandWriteRead(dev->ws_dev->fd, DRM_NOUVEAU_VM_BIND,
+-                                    &vmbind, sizeof(vmbind));
+-      if (err)
+-         return vk_errorf(log_obj, VK_ERROR_UNKNOWN, "vm_bind failed: %m");
+-      return VK_SUCCESS;
+-   }
+-
+-   simple_mtx_lock(&dev->bind_mutex);
+-   const uint64_t point = dev->bind_point + 1;
+-   struct drm_nouveau_sync signal = {
+-      .flags = DRM_NOUVEAU_SYNC_TIMELINE_SYNCOBJ,
+-      .handle = dev->bind_syncobj,
+-      .timeline_value = point,
++      .op_count = 1,
++      .op_ptr = (uint64_t)(uintptr_t)(void *)op,
+    };
+-   vmbind.flags = DRM_NOUVEAU_VM_BIND_RUN_ASYNC;
+-   vmbind.sig_count = 1;
+-   vmbind.sig_ptr = (uint64_t)(uintptr_t)(void *)&signal;
+    int err = drmCommandWriteRead(dev->ws_dev->fd, DRM_NOUVEAU_VM_BIND,
+                                  &vmbind, sizeof(vmbind));
+-   if (!err)
+-      p_atomic_set(&dev->bind_point, point);
+-   simple_mtx_unlock(&dev->bind_mutex);
+-
+    if (err)
+       return vk_errorf(log_obj, VK_ERROR_UNKNOWN, "vm_bind failed: %m");
+ 
+@@ -180,7 +148,7 @@ nvkmd_nouveau_alloc_va(struct nvkmd_dev *_dev,
+          .range = size_B,
+          .flags = DRM_NOUVEAU_VM_BIND_SPARSE,
+       };
+-      result = vm_bind(dev, log_obj, 1, &bind);
++      result = vm_bind(dev, log_obj, &bind);
+       if (result != VK_SUCCESS)
+          goto fail_addr;
+    }
+@@ -210,22 +178,26 @@ nvkmd_nouveau_va_free(struct nvkmd_va *_va)
+    struct nvkmd_nouveau_va *va = nvkmd_nouveau_va(_va);
+    VkResult result = VK_SUCCESS;
+ 
+-   /* The range and its sparse reservation go in one bind job */
+-   struct drm_nouveau_vm_bind_op binds[2] = {
+-      {
++   STATIC_ASSERT(VK_SUCCESS == 0);
++
++   {
++      struct drm_nouveau_vm_bind_op bind = {
+          .op = DRM_NOUVEAU_VM_BIND_OP_UNMAP,
+          .addr = va->base.addr,
+          .range = va->base.size_B,
+-      },
+-      {
++      };
++      result |= vm_bind(dev, NULL, &bind);
++   }
++
++   if (va->base.flags & NVKMD_VA_SPARSE) {
++      struct drm_nouveau_vm_bind_op bind = {
+          .op = DRM_NOUVEAU_VM_BIND_OP_UNMAP,
+          .addr = va->base.addr,
+          .range = va->base.size_B,
+          .flags = DRM_NOUVEAU_VM_BIND_SPARSE,
+-      },
+-   };
+-   const uint32_t bind_count = (va->base.flags & NVKMD_VA_SPARSE) ? 2 : 1;
+-   result = vm_bind(dev, NULL, bind_count, binds);
++      };
++      result |= vm_bind(dev, NULL, &bind);
++   }
+ 
+    /* If unbinding fails, we leak the VA range */
+    if (result == VK_SUCCESS)
+@@ -256,7 +228,7 @@ nvkmd_nouveau_va_bind_mem(struct nvkmd_va *_va,
+       .bo_offset = mem_offset_B,
+       .flags = va->base.pte_kind,
+    };
+-   return vm_bind(dev, log_obj, 1, &bind);
++   return vm_bind(dev, log_obj, &bind);
+ }
+ 
+ static VkResult
+@@ -273,7 +245,7 @@ nvkmd_nouveau_va_unbind(struct nvkmd_va *_va,
+       .addr = va->base.addr + va_offset_B,
+       .range = range_B,
+    };
+-   return vm_bind(dev, log_obj, 1, &bind);
++   return vm_bind(dev, log_obj, &bind);
+ }
+ 
+ const struct nvkmd_va_ops nvkmd_nouveau_va_ops = {

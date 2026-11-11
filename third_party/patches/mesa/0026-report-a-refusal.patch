@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 20:32:32 -0500
+Subject: [PATCH] nvk: report a refusal dropped from a full failure ring once
+ instead of as success, and say when a refusal signals nothing
+
+---
+ src/nouveau/vulkan/nvk_queue.c | 48 +++++++++++++++++++++++++++++-----
+ src/nouveau/vulkan/nvk_queue.h |  9 ++++++-
+ 2 files changed, 50 insertions(+), 7 deletions(-)
+
+diff --git a/src/nouveau/vulkan/nvk_queue.c b/src/nouveau/vulkan/nvk_queue.c
+index 6e0dbc41bbbe75892cc1fe3faf2640f1c79f70ba..dfe9225b8829c10b3d8e1e0710d71f345c08adc8 100644
+--- a/src/nouveau/vulkan/nvk_queue.c
++++ b/src/nouveau/vulkan/nvk_queue.c
+@@ -343,6 +343,14 @@ nvk_queue_name_failure(struct nvk_queue *queue,
+    }
+ 
+    if (submit->signal_count == 0) {
++      /* Stela's device ends every submission with a signal, so a refused
++       * submission without one is an earlier part of the same command
++       * buffer: its next signalling submission names it.
++       */
++      if (queue->unnamed_failure == VK_SUCCESS)
++         fprintf(stderr, "nvk: a refused submission signals nothing; the next "
++                         "one that signals carries its failure (%s)\n",
++                 vk_Result_to_str(result));
+       queue->unnamed_failure = result;
+       return;
+    }
+@@ -351,13 +359,29 @@ nvk_queue_name_failure(struct nvk_queue *queue,
+    simple_mtx_lock(&queue->failures_mutex);
+    for (uint32_t i = 0; i < submit->signal_count; i++) {
+       uint32_t count = queue->failure_count;
+-      /* The oldest goes, settled, when nobody asked for it */
++      /* The oldest goes when nobody asked for it; the next take that
++       * finds no record reports it. Only one is kept so: a second is lost
++       * with its count, and said so.
++       */
+       if (count == NVK_QUEUE_MAX_FAILURES) {
++         const VkResult oldest = queue->failures[0].result;
+          memmove(&queue->failures[0], &queue->failures[1],
+                  (count - 1) * sizeof(queue->failures[0]));
+          count--;
+-         if (queue->failures_outstanding != NULL)
+-            p_atomic_dec(queue->failures_outstanding);
++         if (queue->dropped_failure == VK_SUCCESS) {
++            fprintf(stderr, "nvk: %u refused submissions are unasked; the "
++                            "oldest one's failure (%s) goes to the next take "
++                            "that finds no record\n",
++                    count + 1, vk_Result_to_str(oldest));
++            p_atomic_set((int *)&queue->dropped_failure, oldest);
++         } else {
++            fprintf(stderr, "nvk: %u refused submissions are unasked and one "
++                            "is already dropped; the oldest one's failure (%s) "
++                            "is lost and its command buffer reports success\n",
++                    count + 1, vk_Result_to_str(oldest));
++            if (queue->failures_outstanding != NULL)
++               p_atomic_dec(queue->failures_outstanding);
++         }
+       }
+       if (queue->failures_outstanding != NULL)
+          p_atomic_inc(queue->failures_outstanding);
+@@ -410,12 +434,17 @@ nvk_queue_refuse(struct nvk_queue *queue,
+ uint32_t
+ nvk_queue_forget_failures(struct nvk_queue *queue)
+ {
+-   if (likely(p_atomic_read(&queue->failure_count) == 0))
++   if (likely(p_atomic_read(&queue->failure_count) == 0 &&
++              p_atomic_read((int *)&queue->dropped_failure) == VK_SUCCESS))
+       return 0;
+ 
+    simple_mtx_lock(&queue->failures_mutex);
+-   const uint32_t count = queue->failure_count;
++   uint32_t count = queue->failure_count;
+    p_atomic_set(&queue->failure_count, 0);
++   if (queue->dropped_failure != VK_SUCCESS) {
++      p_atomic_set((int *)&queue->dropped_failure, VK_SUCCESS);
++      count++;
++   }
+    simple_mtx_unlock(&queue->failures_mutex);
+    return count;
+ }
+@@ -424,10 +453,12 @@ VkResult
+ nvk_queue_take_failure(struct nvk_queue *queue,
+                        struct vk_sync *sync, uint64_t value)
+ {
+-   if (likely(p_atomic_read(&queue->failure_count) == 0))
++   if (likely(p_atomic_read(&queue->failure_count) == 0 &&
++              p_atomic_read((int *)&queue->dropped_failure) == VK_SUCCESS))
+       return VK_SUCCESS;
+ 
+    VkResult result = VK_SUCCESS;
++   bool found = false;
+    simple_mtx_lock(&queue->failures_mutex);
+    const uint32_t count = queue->failure_count;
+    for (uint32_t i = 0; i < count; i++) {
+@@ -437,8 +468,13 @@ nvk_queue_take_failure(struct nvk_queue *queue,
+       memmove(&queue->failures[i], &queue->failures[i + 1],
+               (count - i - 1) * sizeof(queue->failures[0]));
+       p_atomic_set(&queue->failure_count, count - 1);
++      found = true;
+       break;
+    }
++   if (!found && queue->dropped_failure != VK_SUCCESS) {
++      result = queue->dropped_failure;
++      p_atomic_set((int *)&queue->dropped_failure, VK_SUCCESS);
++   }
+    simple_mtx_unlock(&queue->failures_mutex);
+    return result;
+ }
+diff --git a/src/nouveau/vulkan/nvk_queue.h b/src/nouveau/vulkan/nvk_queue.h
+index 619e9e0628457381f2f3de028bb1abf31895debe..67b99e25dab8bd7e68121cb936c01a6f1241de3b 100644
+--- a/src/nouveau/vulkan/nvk_queue.h
++++ b/src/nouveau/vulkan/nvk_queue.h
+@@ -45,7 +45,7 @@ struct nvk_queue_failure {
+    VkResult result;
+ };
+ 
+-#define NVK_QUEUE_MAX_FAILURES 16
++#define NVK_QUEUE_MAX_FAILURES 64
+ 
+ struct nvk_queue {
+    struct vk_queue vk;
+@@ -63,6 +63,13 @@ struct nvk_queue {
+     * submission that signals
+     */
+    VkResult unnamed_failure;
++   /* The failure of the oldest record, dropped unasked when the records
++    * were full: the next take that finds no record gets it, so it is
++    * reported once, by its own command buffer or one that completed near
++    * it, never turned into success. Its outstanding count stays raised
++    * until then. Under failures_mutex; read without it to skip the lock.
++    */
++   VkResult dropped_failure;
+ 
+    enum nvkmd_engines engines;
+ 

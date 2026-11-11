@@ -4584,6 +4584,97 @@ fn an_events_value_needs_no_driver_query_once_it_reached_every_promise() {
     assert_eq!(device.signaled_value(event), Ok(9));
     device.backend().semaphore_error = None;
 }
+
+#[test]
+fn a_submission_the_driver_refuses_fails_only_its_command_buffer() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicU32, Ordering};
+    let mut device = device_on(MockBackend::new());
+    let outstanding = Arc::new(AtomicU32::new(7));
+    device.count_failures(&outstanding);
+    assert_eq!(
+        outstanding.load(Ordering::Acquire),
+        0,
+        "counting starts at none"
+    );
+    // The driver refuses the first command buffer's submission but makes
+    // its signals, as NVK's refusal does.
+    device.backend().refuse_next = Some(Error::OutOfMemory);
+    let commands = device.new_command_buffer();
+    let first = device.commit_for(1, commands).unwrap();
+    assert_ne!(
+        outstanding.load(Ordering::Acquire),
+        0,
+        "counted before its signals show"
+    );
+    let commands = device.new_command_buffer();
+    let second = device.commit_for(1, commands).unwrap();
+    let commands = device.new_command_buffer();
+    let other = device.commit_for(2, commands).unwrap();
+    device.backend().finish();
+    assert_eq!(device.poll(), Ok(other), "later command buffers complete");
+    assert!(!device.is_lost(), "the device is kept");
+    assert_eq!(device.submit_failed_for(1), first);
+    assert_eq!(device.submit_failed_for(2), 0);
+    assert_eq!(
+        device.take_submit_failure(1, second),
+        None,
+        "the next one ran"
+    );
+    assert_eq!(
+        device.take_submit_failure(1, first),
+        Some(Error::OutOfMemory),
+        "its commit's failure"
+    );
+    assert_eq!(device.take_submit_failure(1, first), None, "answered once");
+    assert_eq!(device.submit_failed_for(1), 0);
+    assert_eq!(outstanding.load(Ordering::Acquire), 0, "settled");
+    // The device goes on.
+    let commands = device.new_command_buffer();
+    let next = device.commit_for(1, commands).unwrap();
+    device.backend().finish();
+    assert_eq!(device.poll(), Ok(next));
+}
+
+#[test]
+fn a_refusal_no_command_buffer_takes_is_forgotten_once_nothing_is_in_flight() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicU32, Ordering};
+    let mut device = device_on(MockBackend::new());
+    let outstanding = Arc::new(AtomicU32::new(0));
+    device.count_failures(&outstanding);
+    let commands = device.new_command_buffer();
+    let serial = device.commit_for(1, commands).unwrap();
+    // A refusal named by a value no command buffer signals: the device's
+    // own work.
+    let stray = device.backend().create_semaphore(0).unwrap();
+    device
+        .backend()
+        .refused
+        .push((stray, 1, Error::OutOfMemory));
+    outstanding.fetch_add(1, Ordering::AcqRel);
+    device.backend().finish();
+    assert_eq!(device.poll(), Ok(serial));
+    assert_eq!(device.submit_failed_for(1), 0);
+    assert_eq!(outstanding.load(Ordering::Acquire), 0, "forgotten");
+}
+
+#[test]
+fn a_closed_connections_refusals_are_settled() {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicU32, Ordering};
+    let mut device = device_on(MockBackend::new());
+    let outstanding = Arc::new(AtomicU32::new(0));
+    device.count_failures(&outstanding);
+    device.backend().refuse_next = Some(Error::OutOfMemory);
+    let commands = device.new_command_buffer();
+    let first = device.commit_for(1, commands).unwrap();
+    device.backend().finish();
+    assert_eq!(device.poll(), Ok(first));
+    assert_eq!(device.submit_failed_for(1), first);
+    device.abandon(1);
+    assert_eq!(device.submit_failed_for(1), 0);
+    assert_eq!(outstanding.load(Ordering::Acquire), 0);
 }
 
 /// A managed texture of connection 1 written from the CPU while connection
@@ -4722,4 +4813,46 @@ fn event_value_never_goes_below_a_cpu_signal() {
     assert_eq!(device.signaled_value(event), Ok(10));
     device.backend().finish();
     assert_eq!(device.signaled_value(event), Ok(20));
+}
+
+/// A flight that signaled an event completes after the event was destroyed;
+/// the driver then hands the freed semaphore to a new event. The old value
+/// must not answer for the new event before its own signal runs.
+#[test]
+fn a_destroyed_events_late_completion_does_not_answer_for_its_handles_next_event() {
+    let mut backend = MockBackend::new();
+    backend.reuse_semaphores = true;
+    let mut device = device_on(backend);
+    let a = device.new_event().unwrap();
+    let first = device.event_semaphore(a).unwrap();
+    let mut commands = device.new_command_buffer();
+    commands
+        .encode_signal_event(&mut device.resolver(), first, 5)
+        .unwrap();
+    device.commit(commands).unwrap();
+    // Destroyed while the signal is still running.
+    device.destroy_event(a).unwrap();
+    device.backend().finish();
+    device.poll().unwrap();
+    assert!(
+        device
+            .backend()
+            .destroyed
+            .contains(&Object::Semaphore(first)),
+        "freed once its work completed"
+    );
+    let b = device.new_event().unwrap();
+    assert_eq!(
+        device.event_semaphore(b).unwrap(),
+        first,
+        "the handle is reused"
+    );
+    // B's own signal of 3 is submitted, not yet run.
+    let mut commands = device.new_command_buffer();
+    commands
+        .encode_signal_event(&mut device.resolver(), first, 3)
+        .unwrap();
+    device.commit(commands).unwrap();
+    assert_eq!(device.signaled_value(b), Ok(0));
+    assert_eq!(device.wait_event(b, 3, 0), Ok(false));
 }

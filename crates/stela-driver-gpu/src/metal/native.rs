@@ -52,6 +52,7 @@ use alloc::{
     boxed::Box,
     collections::{BTreeMap, VecDeque},
     format,
+    sync::Arc,
     vec::Vec,
 };
 pub use ash::vk;
@@ -62,6 +63,7 @@ use core::{
     mem::ManuallyDrop,
     num::NonZeroU64,
     ptr::NonNull,
+    sync::atomic::{AtomicU32, Ordering},
 };
 use physical::{Extensions, FeatureChain};
 use stela_contracts::gate::MemoryRange;
@@ -77,6 +79,24 @@ pub struct Loader {
     /// them where the driver's kernel runs: `vkQueueSubmit2` then returns once
     /// the work is queued. `None` keeps submissions on the caller.
     pub submit_thread: Option<unsafe extern "C" fn(vk::Queue) -> vk::Result>,
+    /// Submissions the driver refused while keeping the device. `None` for
+    /// a driver that loses the device instead.
+    pub refusals: Option<Refusals>,
+}
+
+/// The driver's record of submissions it refused while keeping the device:
+/// it still made their signals, after their waits.
+#[derive(Clone, Copy)]
+pub struct Refusals {
+    /// Takes the failure of the refused submission that signaled a
+    /// semaphore value; `SUCCESS` for every other.
+    pub take: unsafe extern "C" fn(vk::Queue, vk::Semaphore, u64) -> vk::Result,
+    /// Drops the kept failures nobody will take; answers how many.
+    pub forget: unsafe extern "C" fn(vk::Queue) -> u32,
+    /// Has the queue raise a count by each failure it keeps, before the
+    /// refused submission's signals are made, and lower it by each it drops
+    /// unasked.
+    pub count: unsafe extern "C" fn(vk::Queue, *mut u32),
 }
 
 /// What a device whose CPU reaches only part of its memory (no Resizable
@@ -430,8 +450,13 @@ pub struct NativeBackend {
     /// What each [`Memory`] value names, and the blocks resources share.
     memories: memory::Memories,
     exporter: ManuallyDrop<Box<dyn MemoryExporter>>,
-    /// What each imported memory came from, and its token.
-    imports: BTreeMap<u64, (ExportedMemory, NonZeroU64)>,
+    /// What each imported memory came from, its token and the guest RAM
+    /// it views.
+    imports: BTreeMap<u64, (ExportedMemory, NonZeroU64, Vec<MemoryRange>)>,
+    /// Imports freed lately, oldest first, kept bound: the same guest RAM
+    /// imported again takes one back with no host kernel call
+    /// ([`ImportCache`]).
+    import_cache: ImportCache,
     /// The tokens of imported memory now freed.
     retired: VecDeque<NonZeroU64>,
     /// The memory type imports take, once one import found it: every
@@ -439,6 +464,11 @@ pub struct NativeBackend {
     /// for a descriptor's types imports, maps, unmaps and closes it, five
     /// host kernel calls per import.
     import_type: Option<u32>,
+    /// [`Loader::refusals`].
+    refusals: Option<Refusals>,
+    /// The count the driver raises by each refusal it keeps
+    /// ([`Backend::count_failures`]); kept alive while the queue may.
+    outstanding: Option<Arc<AtomicU32>>,
     /// Images still in `VK_IMAGE_LAYOUT_UNDEFINED`, with their aspects.
     new_images: Vec<(vk::Image, vk::ImageAspectFlags)>,
     /// What new resources take of memory used before, which the host or
@@ -644,9 +674,9 @@ impl NativeBackend {
         let queue = unsafe { device.get_device_queue(family, 0) };
         if let Some(submit_thread) = loader.submit_thread {
             // SAFETY: the queue is the new device's and nothing submitted to
-            // it yet. A failed submission then loses the device, which every
-            // command buffer in flight answers, as Metal reports a commit's
-            // failure through its command buffer.
+            // it yet. A submission the driver refuses still makes its
+            // signals; its command buffer answers the failure
+            // ([`Loader::refusals`]).
             let result = unsafe { submit_thread(queue) };
             if result != vk::Result::SUCCESS {
                 (loader.log)(&alloc::format!(
@@ -679,8 +709,11 @@ impl NativeBackend {
             memories,
             exporter: ManuallyDrop::new(exporter),
             imports: BTreeMap::new(),
+            import_cache: ImportCache::default(),
             retired: VecDeque::new(),
             import_type: None,
+            refusals: loader.refusals,
+            outstanding: None,
             new_images: Vec::new(),
             zeroing,
             bind_timeline: vk::Semaphore::null(),
@@ -1034,11 +1067,29 @@ impl NativeBackend {
     }
 
     /// Frees `memory`: returns a place to its block, or frees a whole
-    /// allocation, ending an import's host mapping.
+    /// allocation. A freed import retires its token and is kept for the
+    /// same guest RAM's next import ([`ImportCache`]).
     fn free_memory(&mut self, memory: Memory) {
         let Some(allocation) = self.memories.remove(memory) else {
             return;
         };
+        if let memory::Allocation::Whole { memory, resource } = allocation
+            && let Some((exported, token, ranges)) = self.imports.remove(&raw(memory))
+        {
+            if resource {
+                self.memories.blocks.release_own();
+            }
+            self.mappings.remove(&raw(memory));
+            self.zeroing.forget(&self.device, memory);
+            self.retired.push_back(token);
+            for evicted in self.import_cache.keep(ranges, memory, exported) {
+                // SAFETY: freed by the Metal device, so nothing the GPU may
+                // still run uses it, and no import took it back.
+                unsafe { self.device.free_memory(evicted.memory, None) };
+                self.exporter.unmap(evicted.exported);
+            }
+            return;
+        }
         let mut source = memory::Allocator {
             device: &self.device,
             types: &self.snapshot.memory.types,
@@ -1056,10 +1107,6 @@ impl NativeBackend {
                     self.memories.blocks.release_own();
                 }
                 source.free(memory);
-                if let Some((exported, token)) = self.imports.remove(&raw(memory)) {
-                    self.exporter.unmap(exported);
-                    self.retired.push_back(token);
-                }
             }
         }
     }
@@ -1527,6 +1574,11 @@ impl Drop for NativeBackend {
         };
         self.memories.blocks.release_all(&mut source);
         self.zeroing.destroy(&self.device);
+        for kept in self.import_cache.drain() {
+            // SAFETY: the device is idle and the import was freed.
+            unsafe { self.device.free_memory(kept.memory, None) };
+            self.exporter.unmap(kept.exported);
+        }
         // SAFETY: after the device idles, nothing uses any object, and each
         // handle is destroyed once; null handles are ignored by Vulkan.
         unsafe {
@@ -1558,6 +1610,68 @@ impl Drop for NativeBackend {
             ManuallyDrop::drop(&mut self.exporter);
             ManuallyDrop::drop(&mut self._entry);
         }
+    }
+}
+
+/// Imports freed lately, oldest first, each still bound with its host
+/// mapping: an import views guest RAM by address, so a freed import of the
+/// same ranges views the same pages, and taking it back skips the export,
+/// the PRIME import, the VA allocation and both binds (an IOSurface the
+/// guest imports again each frame). What it holds is guest RAM the exporter
+/// already maps; nothing reads it while kept.
+#[derive(Default)]
+struct ImportCache {
+    kept: VecDeque<KeptImport>,
+    bytes: u64,
+}
+
+struct KeptImport {
+    ranges: Vec<MemoryRange>,
+    memory: vk::DeviceMemory,
+    exported: ExportedMemory,
+}
+
+impl ImportCache {
+    /// Imports kept at most, and the guest RAM they view at most.
+    const COUNT: usize = 32;
+    const BYTES: u64 = 512 << 20;
+
+    /// Keeps a freed import and answers the oldest ones past the bounds,
+    /// for the caller to free.
+    fn keep(
+        &mut self,
+        ranges: Vec<MemoryRange>,
+        memory: vk::DeviceMemory,
+        exported: ExportedMemory,
+    ) -> Vec<KeptImport> {
+        self.bytes += exported.bytes;
+        self.kept.push_back(KeptImport {
+            ranges,
+            memory,
+            exported,
+        });
+        let mut evicted = Vec::new();
+        while self.kept.len() > Self::COUNT || self.bytes > Self::BYTES {
+            let Some(oldest) = self.kept.pop_front() else {
+                break;
+            };
+            self.bytes -= oldest.exported.bytes;
+            evicted.push(oldest);
+        }
+        evicted
+    }
+
+    /// Takes back the kept import of exactly `ranges`.
+    fn take(&mut self, ranges: &[MemoryRange]) -> Option<KeptImport> {
+        let index = self.kept.iter().position(|kept| kept.ranges == ranges)?;
+        let kept = self.kept.remove(index)?;
+        self.bytes -= kept.exported.bytes;
+        Some(kept)
+    }
+
+    fn drain(&mut self) -> impl Iterator<Item = KeptImport> + '_ {
+        self.bytes = 0;
+        self.kept.drain(..)
     }
 }
 
@@ -1690,6 +1804,24 @@ impl Backend for NativeBackend {
     }
 
     fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<Memory> {
+        // The same guest RAM imported again: a freed import of it views the
+        // same pages, still bound.
+        if let Some(kept) = self.import_cache.take(ranges) {
+            self.mappings.insert(
+                raw(kept.memory),
+                Mapping {
+                    pointer: kept.exported.pointer,
+                    size: kept.exported.bytes,
+                    coherent: true,
+                },
+            );
+            self.imports
+                .insert(raw(kept.memory), (kept.exported, token, kept.ranges));
+            return Ok(self.memories.insert(memory::Allocation::Whole {
+                memory: kept.memory,
+                resource: false,
+            }));
+        }
         let handle_type = DMA_BUF;
         let exported = self.exporter.export(ranges)?;
         let imported = match self.import_type {
@@ -1734,7 +1866,8 @@ impl Backend for NativeBackend {
                 coherent: true,
             },
         );
-        self.imports.insert(raw(memory), (exported, token));
+        self.imports
+            .insert(raw(memory), (exported, token, ranges.to_vec()));
         Ok(self.memories.insert(memory::Allocation::Whole {
             memory,
             resource: false,
@@ -2287,6 +2420,38 @@ impl Backend for NativeBackend {
             Err(vk::Result::NOT_READY) => Ok(false),
             Err(error) => Err(failure(error)),
         }
+    }
+
+    fn submit_failure(&mut self, semaphore: Semaphore, value: u64) -> Option<Error> {
+        let refusals = self.refusals?;
+        // SAFETY: the queue and semaphore are alive; the driver only reads
+        // its own record of refused submissions.
+        let result = unsafe { (refusals.take)(self.queue, handle(semaphore.0), value) };
+        (result != vk::Result::SUCCESS).then(|| failure(result))
+    }
+
+    fn settle_failures(&mut self, mut settled: u32, forget: bool) {
+        let (Some(refusals), Some(outstanding)) = (self.refusals, &self.outstanding) else {
+            return;
+        };
+        if forget {
+            // SAFETY: the queue is alive.
+            settled += unsafe { (refusals.forget)(self.queue) };
+        }
+        if settled > 0 {
+            outstanding.fetch_sub(settled, Ordering::AcqRel);
+        }
+    }
+
+    fn count_failures(&mut self, outstanding: &Arc<AtomicU32>) {
+        let Some(refusals) = self.refusals else {
+            return;
+        };
+        outstanding.store(0, Ordering::Release);
+        // SAFETY: the queue is alive, and the count outlives it: the
+        // backend keeps it.
+        unsafe { (refusals.count)(self.queue, outstanding.as_ptr()) };
+        self.outstanding = Some(outstanding.clone());
     }
 
     fn semaphore_value(&mut self, semaphore: Semaphore) -> Result<u64> {

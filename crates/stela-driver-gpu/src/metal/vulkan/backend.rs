@@ -22,7 +22,11 @@ use super::{
     },
     physical::{Features, PhysicalDevice},
 };
-use crate::metal::{binding::HeapArray, command_buffer::Segment, error::Result};
+use crate::metal::{
+    binding::HeapArray,
+    command_buffer::Segment,
+    error::{Error, Result},
+};
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 use stela_contracts::gate::MemoryRange;
@@ -262,6 +266,22 @@ pub trait Backend {
     fn query_results(&mut self, pool: QueryPool, first: u32, results: &mut [u64]) -> Result<bool>;
 
     fn semaphore_value(&mut self, semaphore: Semaphore) -> Result<u64>;
+    /// The failure of a submission the driver refused while keeping the
+    /// device, named by `value` on `semaphore`, which it still signaled
+    /// after its waits; taken once. `None` for every other submission.
+    fn submit_failure(&mut self, _semaphore: Semaphore, _value: u64) -> Option<Error> {
+        None
+    }
+    /// Lowers the count [`Self::count_failures`] gave by `settled` taken
+    /// failures that were answered and, with `forget`, drops kept ones
+    /// nobody will take.
+    fn settle_failures(&mut self, _settled: u32, _forget: bool) {}
+    /// Has the backend count refused submissions not yet settled in
+    /// `outstanding`, which it resets: raised before a refused
+    /// submission's signals are made, so whoever sees them made sees it
+    /// raised, from any processor. Untouched by a backend that refuses
+    /// none.
+    fn count_failures(&mut self, _outstanding: &alloc::sync::Arc<core::sync::atomic::AtomicU32>) {}
     fn signal_semaphore(&mut self, semaphore: Semaphore, value: u64) -> Result<()>;
     /// Waits until `semaphore` reaches `value` or `timeout` nanoseconds pass.
     fn wait_semaphore(&mut self, semaphore: Semaphore, value: u64, timeout: u64) -> Result<bool>;

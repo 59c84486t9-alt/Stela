@@ -27,7 +27,7 @@ use stela_drivers::gpu::metal::{
     compiler::{self, AirCompiler},
     device::{lifecycle::QuiesceStatus, pass_times},
     error::Error,
-    native::{ExportedMemory, Loader, MemoryExporter, NativeBackend, vk},
+    native::{ExportedMemory, Loader, MemoryExporter, NativeBackend, Refusals, vk},
     nvidia::{
         Attachment,
         open::{Gpu, OpenError, open, reopen},
@@ -60,6 +60,13 @@ unsafe extern "C" {
     fn stela_nvk_nir_options(physical: vk::PhysicalDevice) -> *const c_void;
     /// `compat/mesa/submit_thread.c`.
     fn stela_nvk_submit_thread(queue: vk::Queue) -> vk::Result;
+    fn stela_nvk_submit_failure(
+        queue: vk::Queue,
+        semaphore: vk::Semaphore,
+        value: u64,
+    ) -> vk::Result;
+    fn stela_nvk_forget_failures(queue: vk::Queue) -> u32;
+    fn stela_nvk_count_failures(queue: vk::Queue, outstanding: *mut u32);
 }
 
 /// The compile stacks ([`open_gpu`]), whose jobs [`run`] runs with the
@@ -839,6 +846,12 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
         log: driver_message,
         // A commit's submission runs where Linux does, not on its PE.
         submit_thread: Some(stela_nvk_submit_thread),
+        // A refused submission fails its command buffer, not the device.
+        refusals: Some(Refusals {
+            take: stela_nvk_submit_failure,
+            forget: stela_nvk_forget_failures,
+            count: stela_nvk_count_failures,
+        }),
     };
     // SAFETY: the linked NVK and compiler, which last for the boot.
     let service = unsafe {

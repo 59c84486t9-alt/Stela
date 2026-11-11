@@ -55,14 +55,14 @@ use crate::metal::{
     timing::CallPhases,
     vulkan::{MemoryProperties, backend::Backend},
 };
-use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
     any::Any,
     cell::UnsafeCell,
     mem::size_of,
     num::NonZeroU64,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
 use stela_contracts::gate::{BundleReport, CallerFault, CallerMemory, GateService, MemoryRange};
 
@@ -91,6 +91,10 @@ pub struct SharedService<B: Backend, C: Compiler> {
     /// The newest serial a holder saw submitted, past which nothing is
     /// published.
     submitted: AtomicU64,
+    /// The platform's waiter's newest reading of the completion timeline,
+    /// published or not, with the low 16 bits of its generation above bit
+    /// 48: a look takes it instead of asking the driver.
+    waited: AtomicU64,
     /// Whether a waiter may publish completions without a turn: no
     /// host-visible memory needs an invalidation.
     publishable: AtomicBool,
@@ -107,6 +111,11 @@ pub struct SharedService<B: Backend, C: Compiler> {
     jobs: Spin<Jobs>,
     /// The guest RAM the latest imports named, by a hash of their ranges.
     imported: Spin<RecentImports>,
+    /// Refused submissions whose command buffers' connections were not yet
+    /// told: raised before the refused submission's signals are made, so
+    /// while it is not zero no poll is answered from the published serial,
+    /// which cannot say which command buffer failed.
+    refusals: Arc<AtomicU32>,
     host: ServiceHost,
 }
 
@@ -243,6 +252,16 @@ const PENDING: usize = 64;
 const POLLING: usize = 64;
 /// A lost device or this serial must use the normal poll path.
 const POLL_UNAVAILABLE: u64 = u64::MAX;
+/// Where [`SharedService::waited`] keeps the generation: serials stay below.
+const WAITED_GENERATION: u64 = 1 << 48;
+
+/// The waiter's newest reading of the current timeline, if any.
+fn waited_value(waited: &AtomicU64, timeline: &AtomicU64) -> Option<u64> {
+    let waited = waited.load(Ordering::Acquire);
+    let timeline = timeline.load(Ordering::Acquire);
+    (waited >> 48 == timeline & 0xffff && waited & (WAITED_GENERATION - 1) != 0)
+        .then_some(waited & (WAITED_GENERATION - 1))
+}
 
 /// What the platform does for the shared service.
 #[derive(Clone, Copy)]
@@ -329,9 +348,19 @@ impl<B: Backend, C: Compiler> Turn<'_, B, C> {
     fn look(&mut self) {
         self.0.stale.store(false, Ordering::SeqCst);
         let mut completed = false;
+        // The waiter read the timeline as it woke, in Linux: its value spares
+        // the driver query, a host kernel call that waits for the boot
+        // processor. A value that shows nothing new still asks the driver,
+        // which notices a loss.
+        let waited = waited_value(&self.0.waited, &self.0.timeline);
         // Polling enters Vulkan too. An interrupt can take this path without
         // a guest call's stack switch around it.
-        (self.0.host.run)(self.0.host.stack, &mut || completed = (**self).signaled());
+        (self.0.host.run)(self.0.host.stack, &mut || {
+            completed = match waited {
+                Some(value) => (**self).signaled_reached(value),
+                None => (**self).signaled(),
+            }
+        });
         self.1 |= completed;
     }
 }
@@ -339,11 +368,23 @@ impl<B: Backend, C: Compiler> Turn<'_, B, C> {
 impl<B: Backend, C: Compiler> Turn<'_, B, C> {
     /// Looks at the device when a waiter published past what it last saw,
     /// so the call's answers agree with the completion the guest was told.
+    ///
+    /// The published serial is the waiter's reading of the timeline (or a
+    /// turn's, which never passes it), and nothing is held while one is
+    /// published, so the device takes it as the timeline's value instead of
+    /// asking the driver: on a guest PE that query is a host kernel call the
+    /// boot CPU serves while the PE spins.
     fn catch_up(&mut self) {
         let shown = self.0.reached.load(Ordering::Acquire);
         let device = self.device();
         if shown != POLL_UNAVAILABLE && !device.is_lost() && shown > device.completed_serial() {
-            self.look();
+            // An interrupt's look stays the platform's (`stale`): it may have
+            // seen past what was published.
+            let mut completed = false;
+            (self.0.host.run)(self.0.host.stack, &mut || {
+                completed = (**self).signaled_reached(shown);
+            });
+            self.1 |= completed;
         }
     }
 
@@ -393,6 +434,7 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
         if self.device().is_lost() {
             (self.0.host.run)(self.0.host.stack, &mut || completed |= (**self).signaled());
         }
+        let refusing = self.0.refusals.load(Ordering::Acquire) != 0;
         let device = self.device();
         let submitted = device.submitted_serial();
         let serial = device.completed_serial();
@@ -400,7 +442,7 @@ impl<B: Backend, C: Compiler> Drop for Turn<'_, B, C> {
         // timeline, completion differs by connection: the service answers
         // each poll, and no waiter publishes the timeline's value.
         let lost = device.is_lost();
-        let reached = if lost || device.holds() {
+        let reached = if lost || device.holds() || refusing {
             POLL_UNAVAILABLE
         } else {
             serial
@@ -451,17 +493,24 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             keep_compilations(compiler);
             compiler.compile_lock(host.relax)
         });
-        // A device reopened after a loss keeps them too, under the lock the
-        // jobs hold.
-        if let Some(lock) = compile_lock.clone() {
-            let relax = host.relax;
-            service.prepare_reopened(Box::new(move |device| {
-                if let Some(compiler) = air(device.compiler_mut()) {
-                    keep_compilations(compiler);
-                    compiler.share_compile_lock(lock.clone(), relax);
-                }
-            }));
-        }
+        // Refused submissions not yet answered, which keep polls from the
+        // published serial.
+        let refusals = Arc::new(AtomicU32::new(0));
+        service.device().count_failures(&refusals);
+        // A device reopened after a loss keeps the compilations too, under
+        // the lock the jobs hold, and counts its own refusals from none.
+        let lock = compile_lock.clone();
+        let relax = host.relax;
+        let counted = refusals.clone();
+        service.prepare_reopened(Box::new(move |device| {
+            device.count_failures(&counted);
+            if let Some(lock) = &lock
+                && let Some(compiler) = air(device.compiler_mut())
+            {
+                keep_compilations(compiler);
+                compiler.share_compile_lock(lock.clone(), relax);
+            }
+        }));
         Self {
             service: UnsafeCell::new(service),
             locked: AtomicBool::new(false),
@@ -478,6 +527,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             latency: [const { AtomicU64::new(0) }; 3],
             timeline: AtomicU64::new(0),
             submitted: AtomicU64::new(0),
+            waited: AtomicU64::new(0),
             publishable: AtomicBool::new(publishable),
             early: [const { (AtomicU64::new(0), AtomicU64::new(0)) }; PENDING],
             compile_stack: AtomicU64::new(0),
@@ -488,6 +538,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             },
             jobs: Spin::new(Jobs::default()),
             imported: Spin::new(RecentImports::default()),
+            refusals,
             host,
         }
     }
@@ -706,8 +757,13 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
     /// delays no frame; the platform still looks at the device
     /// ([`Self::interrupted`]) once a turn is free.
     pub fn completed_through(&self, timeline: u64, value: u64) {
+        if timeline == self.timeline.load(Ordering::Acquire) && value < WAITED_GENERATION {
+            self.waited
+                .fetch_max((timeline & 0xffff) << 48 | value, Ordering::AcqRel);
+        }
         if timeline == self.timeline.load(Ordering::Acquire)
             && self.publishable.load(Ordering::Acquire)
+            && !self.refusing()
         {
             let value = value.min(self.submitted.load(Ordering::Acquire));
             let mut shown = self.reached.load(Ordering::Acquire);
@@ -748,6 +804,11 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         )
     }
 
+    /// Whether a refused submission's command buffer is not yet answered.
+    fn refusing(&self) -> bool {
+        self.refusals.load(Ordering::Acquire) != 0
+    }
+
     fn polls(&self, connection: NonZeroU64) -> bool {
         self.polling
             .iter()
@@ -779,11 +840,16 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         let reached = self.reached.load(Ordering::Acquire);
         // Check membership after acquiring the serial. A close that
         // precedes its publication has already removed that connection.
-        if reached == POLL_UNAVAILABLE || !self.polls(connection) {
+        // A refusal counted before its signals showed keeps this serial
+        // from answering for the command buffer that failed.
+        if reached == POLL_UNAVAILABLE || !self.polls(connection) || self.refusing() {
             return false;
         }
-        let value = wire::Value { value: reached };
-        let mut response = [0; size_of::<wire::Value>()];
+        let value = wire::PollResponse {
+            value: reached,
+            refused: 0,
+        };
+        let mut response = [0; size_of::<wire::PollResponse>()];
         wire::write(&value, &mut response).expect("a record of its own size");
         if caller.write(call.response.address, &response).is_err() {
             return false;

@@ -8,8 +8,9 @@ use crate::metal::{
         GuestMemory,
         wire::{
             CommandBufferTimesResponse, CounterSetCode, Empty, EventValueRequest, Handle,
-            NewCounterBufferRequest, Operation, ResolveCountersRequest, ResolveCountersResponse,
-            Status, TimestampsResponse, Value, WaitEventRequest, WaitResponse,
+            NewCounterBufferRequest, Operation, PollResponse, ResolveCountersRequest,
+            ResolveCountersResponse, Status, TimestampsResponse, Value, WaitEventRequest,
+            WaitResponse,
         },
     },
 };
@@ -165,7 +166,7 @@ fn the_queue_answers_its_serials_and_clocks() {
     let mut service = service_on(MockBackend::new());
     let connection = connect(&mut service);
     let memory = &mut Memory::default();
-    let completed: Value =
+    let completed: PollResponse =
         call(&mut service, connection, Operation::Poll, &Empty {}, memory).unwrap();
     assert_eq!(completed.value, 0);
     assert_eq!(
@@ -305,7 +306,7 @@ fn a_command_buffer_that_fails_still_signals_its_events() {
 
 /// What `connection` sees complete.
 fn reached(service: &mut TestService, connection: NonZeroU64) -> u64 {
-    let response: Value = call(
+    let response: PollResponse = call(
         service,
         connection,
         Operation::Poll,
@@ -595,4 +596,58 @@ fn command_buffers_of_two_queues_wait_for_each_others_events() {
     assert_eq!(reached(&mut service, connection), d);
     assert_eq!(after(&mut service, d), 0);
     assert!(!service.device().holds());
+}
+
+/// A submission the driver refuses while keeping the device fails only its
+/// command buffer: the poll names it, `CommandFailure` answers its commit's
+/// failure once, and the connection's later command buffers complete.
+#[test]
+fn a_refused_submission_fails_only_its_command_buffer() {
+    use crate::metal::error::Error;
+    let mut service = service_on(MockBackend::new());
+    let connection = connect(&mut service);
+    service.device().backend().refuse_next = Some(Error::OutOfMemory);
+    let first = commit(&mut service, connection, &Stream::default())
+        .unwrap()
+        .value;
+    let second = commit(&mut service, connection, &Stream::default())
+        .unwrap()
+        .value;
+    service.device().backend().finish();
+    let polled: PollResponse = call(
+        &mut service,
+        connection,
+        Operation::Poll,
+        &Empty {},
+        &mut Memory::default(),
+    )
+    .unwrap();
+    assert_eq!(polled.value, second, "later command buffers complete");
+    assert_eq!(polled.refused, first);
+    let failure = |service: &mut TestService, serial| {
+        call::<_, Empty>(
+            service,
+            connection,
+            Operation::CommandFailure,
+            &Value { value: serial },
+            &mut Memory::default(),
+        )
+    };
+    assert!(failure(&mut service, second).is_ok(), "the second ran");
+    assert_eq!(
+        status(failure(&mut service, first)),
+        Status::OutOfMemory,
+        "the commit's own failure"
+    );
+    assert!(failure(&mut service, first).is_ok(), "answered once");
+    let polled: PollResponse = call(
+        &mut service,
+        connection,
+        Operation::Poll,
+        &Empty {},
+        &mut Memory::default(),
+    )
+    .unwrap();
+    assert_eq!(polled.refused, 0);
+    assert!(!service.device().is_lost());
 }

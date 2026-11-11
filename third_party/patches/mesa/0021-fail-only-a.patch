@@ -1,0 +1,318 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 18:40:56 -0500
+Subject: [PATCH] nvk: Fail only a refused submission, make its signals and
+ keep the failure for the caller
+
+---
+ src/nouveau/vulkan/nvk_queue.c                | 137 ++++++++++++++++++
+ src/nouveau/vulkan/nvk_queue.h                |  31 ++++
+ .../vulkan/nvkmd/nouveau/nvkmd_nouveau_ctx.c  |  12 ++
+ src/nouveau/vulkan/nvkmd/nvkmd.h              |  10 ++
+ 4 files changed, 190 insertions(+)
+
+diff --git a/src/nouveau/vulkan/nvk_queue.c b/src/nouveau/vulkan/nvk_queue.c
+index 1777899e4ce59ef15b077c5d45834fc8842657cb..6e0dbc41bbbe75892cc1fe3faf2640f1c79f70ba 100644
+--- a/src/nouveau/vulkan/nvk_queue.c
++++ b/src/nouveau/vulkan/nvk_queue.c
+@@ -10,6 +10,9 @@
+ #include "nvk_image.h"
+ #include "nvk_physical_device.h"
+ #include "nv_push.h"
++#include "vk_enum_to_str.h"
++
++#include <stdio.h>
+ 
+ #include "nv_push_cl9039.h"
+ #include "nv_push_cl9097.h"
+@@ -284,6 +287,15 @@ fail:
+    return result;
+ }
+ 
++static void
++nvk_queue_name_failure(struct nvk_queue *queue,
++                       struct vk_queue_submit *submit,
++                       VkResult result);
++static VkResult
++nvk_queue_refuse(struct nvk_queue *queue,
++                 struct vk_queue_submit *submit,
++                 VkResult failure);
++
+ static VkResult
+ nvk_queue_submit(struct vk_queue *vk_queue,
+                  struct vk_queue_submit *submit)
+@@ -302,7 +314,13 @@ nvk_queue_submit(struct vk_queue *vk_queue,
+       if (result != VK_SUCCESS)
+          return vk_queue_set_lost(&queue->vk, "Bind operation failed");
+    } else {
++      /* An earlier failure that signaled nothing is kept under this
++       * submission's signals before they are made.
++       */
++      nvk_queue_name_failure(queue, submit, VK_SUCCESS);
+       result = nvk_queue_submit_exec(queue, submit);
++      if (result != VK_SUCCESS)
++         result = nvk_queue_refuse(queue, submit, result);
+       if (result != VK_SUCCESS)
+          return vk_queue_set_lost(&queue->vk, "Submit failed");
+    }
+@@ -310,6 +328,121 @@ nvk_queue_submit(struct vk_queue *vk_queue,
+    return VK_SUCCESS;
+ }
+ 
++/* Keeps a failure for the caller under the submission's signals; one with
++ * none waits for the next submission that signals.
++ */
++static void
++nvk_queue_name_failure(struct nvk_queue *queue,
++                       struct vk_queue_submit *submit,
++                       VkResult result)
++{
++   if (result == VK_SUCCESS) {
++      if (likely(queue->unnamed_failure == VK_SUCCESS))
++         return;
++      result = queue->unnamed_failure;
++   }
++
++   if (submit->signal_count == 0) {
++      queue->unnamed_failure = result;
++      return;
++   }
++   queue->unnamed_failure = VK_SUCCESS;
++
++   simple_mtx_lock(&queue->failures_mutex);
++   for (uint32_t i = 0; i < submit->signal_count; i++) {
++      uint32_t count = queue->failure_count;
++      /* The oldest goes, settled, when nobody asked for it */
++      if (count == NVK_QUEUE_MAX_FAILURES) {
++         memmove(&queue->failures[0], &queue->failures[1],
++                 (count - 1) * sizeof(queue->failures[0]));
++         count--;
++         if (queue->failures_outstanding != NULL)
++            p_atomic_dec(queue->failures_outstanding);
++      }
++      if (queue->failures_outstanding != NULL)
++         p_atomic_inc(queue->failures_outstanding);
++      queue->failures[count] = (struct nvk_queue_failure) {
++         .sync = submit->signals[i].sync,
++         .value = submit->signals[i].signal_value,
++         .result = result,
++      };
++      p_atomic_set(&queue->failure_count, count + 1);
++   }
++   simple_mtx_unlock(&queue->failures_mutex);
++}
++
++/* A submission the driver refused short of losing the device: what of it
++ * was not submitted is dropped, and its signals are made by a submission of
++ * no commands with the same waits on the same context, so they come after
++ * its waits and whatever of it did run. The failure is kept for the caller.
++ */
++static VkResult
++nvk_queue_refuse(struct nvk_queue *queue,
++                 struct vk_queue_submit *submit,
++                 VkResult failure)
++{
++   if (failure == VK_ERROR_DEVICE_LOST)
++      return failure;
++
++   nvkmd_ctx_discard(queue->exec_ctx);
++   /* Kept before the signals are made: whoever sees them sees the failure */
++   nvk_queue_name_failure(queue, submit, failure);
++   if (submit->signal_count == 0)
++      return VK_SUCCESS;
++
++   VkResult result = nvkmd_ctx_wait(queue->exec_ctx, &queue->vk.base,
++                                    submit->wait_count, submit->waits);
++   if (result == VK_SUCCESS) {
++      result = nvkmd_ctx_signal(queue->exec_ctx, &queue->vk.base,
++                                submit->signal_count, submit->signals);
++   }
++   if (result != VK_SUCCESS)
++      return result;
++
++   fprintf(stderr, "nvk: a submission failed (%s); its signals were made "
++                   "and the queue goes on\n", vk_Result_to_str(failure));
++   return VK_SUCCESS;
++}
++
++/* Drops the kept failures nobody will take and answers how many there were,
++ * which the caller's count still holds.
++ */
++uint32_t
++nvk_queue_forget_failures(struct nvk_queue *queue)
++{
++   if (likely(p_atomic_read(&queue->failure_count) == 0))
++      return 0;
++
++   simple_mtx_lock(&queue->failures_mutex);
++   const uint32_t count = queue->failure_count;
++   p_atomic_set(&queue->failure_count, 0);
++   simple_mtx_unlock(&queue->failures_mutex);
++   return count;
++}
++
++VkResult
++nvk_queue_take_failure(struct nvk_queue *queue,
++                       struct vk_sync *sync, uint64_t value)
++{
++   if (likely(p_atomic_read(&queue->failure_count) == 0))
++      return VK_SUCCESS;
++
++   VkResult result = VK_SUCCESS;
++   simple_mtx_lock(&queue->failures_mutex);
++   const uint32_t count = queue->failure_count;
++   for (uint32_t i = 0; i < count; i++) {
++      if (queue->failures[i].sync != sync || queue->failures[i].value != value)
++         continue;
++      result = queue->failures[i].result;
++      memmove(&queue->failures[i], &queue->failures[i + 1],
++              (count - i - 1) * sizeof(queue->failures[0]));
++      p_atomic_set(&queue->failure_count, count - 1);
++      break;
++   }
++   simple_mtx_unlock(&queue->failures_mutex);
++   return result;
++}
++
+ static VkResult
+ nvk_queue_push(struct nvk_queue *queue, const struct nv_push *push)
+ {
+@@ -412,6 +545,8 @@ nvk_queue_create(struct nvk_device *dev,
+    if (!queue)
+       return VK_ERROR_OUT_OF_HOST_MEMORY;
+ 
++   simple_mtx_init(&queue->failures_mutex, mtx_plain);
++
+    result = vk_queue_init(&queue->vk, &dev->vk, pCreateInfo, index_in_family);
+    if (result != VK_SUCCESS)
+       goto fail_alloc;
+@@ -489,6 +624,7 @@ fail_init:
+    nvk_queue_state_finish(dev, &queue->state);
+    vk_queue_finish(&queue->vk);
+ fail_alloc:
++   simple_mtx_destroy(&queue->failures_mutex);
+    vk_free(&dev->vk.alloc, queue);
+ 
+    return result;
+@@ -513,5 +649,6 @@ nvk_queue_destroy(struct nvk_device *dev, struct nvk_queue *queue)
+    if (queue->exec_ctx != NULL)
+       nvkmd_ctx_destroy(queue->exec_ctx);
+    vk_queue_finish(&queue->vk);
++   simple_mtx_destroy(&queue->failures_mutex);
+    vk_free(&dev->vk.alloc, queue);
+ }
+diff --git a/src/nouveau/vulkan/nvk_queue.h b/src/nouveau/vulkan/nvk_queue.h
+index 226d8b12a12738f49602b756c60b88bc98966118..619e9e0628457381f2f3de028bb1abf31895debe 100644
+--- a/src/nouveau/vulkan/nvk_queue.h
++++ b/src/nouveau/vulkan/nvk_queue.h
+@@ -10,6 +10,7 @@
+ 
+ #include "vk_queue.h"
+ #include "nvkmd/nvkmd.h"
++#include "util/simple_mtx.h"
+ 
+ struct nouveau_ws_bo;
+ struct nouveau_ws_context;
+@@ -34,9 +35,35 @@ struct nvk_queue_state {
+    } slm;
+ };
+ 
++/* A submission the driver refused, named by one of its signals. Its signals
++ * were still made, after its waits and the queue's earlier work, so the
++ * queue goes on; the caller asks for the failure when the signal shows.
++ */
++struct nvk_queue_failure {
++   struct vk_sync *sync;
++   uint64_t value;
++   VkResult result;
++};
++
++#define NVK_QUEUE_MAX_FAILURES 16
++
+ struct nvk_queue {
+    struct vk_queue vk;
+ 
++   simple_mtx_t failures_mutex;
++   /* Read without the lock to skip it while nothing failed */
++   uint32_t failure_count;
++   /* The caller's count of failure records it has not settled, taken ones
++    * too, or NULL: raised before the refused submission's signals are
++    * made, so whoever sees them made sees it raised.
++    */
++   uint32_t *failures_outstanding;
++   struct nvk_queue_failure failures[NVK_QUEUE_MAX_FAILURES];
++   /* A refused submission that signaled nothing, given to the next
++    * submission that signals
++    */
++   VkResult unnamed_failure;
++
+    enum nvkmd_engines engines;
+ 
+    struct nvkmd_ctx *bind_ctx;
+@@ -56,6 +83,10 @@ struct nvk_queue {
+    struct nvkmd_mem *fsi_memory;
+ };
+ 
++VkResult nvk_queue_take_failure(struct nvk_queue *queue,
++                                struct vk_sync *sync, uint64_t value);
++uint32_t nvk_queue_forget_failures(struct nvk_queue *queue);
++
+ static inline struct nvk_device *
+ nvk_queue_device(struct nvk_queue *queue)
+ {
+diff --git a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_ctx.c b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_ctx.c
+index 3965d88023fca156868677a7b50ccbc5346468de..125d4191bafa0155345a710653f7d9b3610d484d 100644
+--- a/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_ctx.c
++++ b/src/nouveau/vulkan/nvkmd/nouveau/nvkmd_nouveau_ctx.c
+@@ -300,6 +300,17 @@ nvkmd_nouveau_exec_ctx_sync(struct nvkmd_ctx *_ctx,
+    return VK_SUCCESS;
+ }
+ 
++static void
++nvkmd_nouveau_exec_ctx_discard(struct nvkmd_ctx *_ctx)
++{
++   struct nvkmd_nouveau_exec_ctx *ctx = nvkmd_nouveau_exec_ctx(_ctx);
++
++   util_dynarray_clear(&ctx->req_push);
++   ctx->req.push_count = 0;
++   ctx->req.wait_count = 0;
++   ctx->req.sig_count = 0;
++}
++
+ const struct nvkmd_ctx_ops nvkmd_nouveau_exec_ctx_ops = {
+    .destroy = nvkmd_nouveau_exec_ctx_destroy,
+    .wait = nvkmd_nouveau_exec_ctx_wait,
+@@ -307,6 +318,7 @@ const struct nvkmd_ctx_ops nvkmd_nouveau_exec_ctx_ops = {
+    .signal = nvkmd_nouveau_exec_ctx_signal,
+    .flush = nvkmd_nouveau_exec_ctx_flush,
+    .sync = nvkmd_nouveau_exec_ctx_sync,
++   .discard = nvkmd_nouveau_exec_ctx_discard,
+ };
+ 
+ static VkResult
+diff --git a/src/nouveau/vulkan/nvkmd/nvkmd.h b/src/nouveau/vulkan/nvkmd/nvkmd.h
+index 5e56f4ed36cd5bdd45544bdeb370321f4d0cc3a1..63b2498482443da097a79e5c563001bb09dc7bbf 100644
+--- a/src/nouveau/vulkan/nvkmd/nvkmd.h
++++ b/src/nouveau/vulkan/nvkmd/nvkmd.h
+@@ -348,6 +348,9 @@ struct nvkmd_ctx_ops {
+    /* Implies flush() */
+    VkResult (*sync)(struct nvkmd_ctx *ctx,
+                     struct vk_object_base *log_obj);
++
++   /* Drops what was queued since the last flush; optional */
++   void (*discard)(struct nvkmd_ctx *ctx);
+ };
+ 
+ struct nvkmd_ctx {
+@@ -624,4 +627,11 @@ nvkmd_ctx_sync(struct nvkmd_ctx *ctx,
+    return ctx->ops->sync(ctx, log_obj);
+ }
+ 
++static inline void
++nvkmd_ctx_discard(struct nvkmd_ctx *ctx)
++{
++   if (ctx->ops->discard != NULL)
++      ctx->ops->discard(ctx);
++}
++
+ #endif /* NVKMD_H */

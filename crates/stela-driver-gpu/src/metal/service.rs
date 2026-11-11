@@ -708,8 +708,20 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             }
             Operation::Poll => {
                 self.device.poll()?;
-                let value = self.device.reached_for(call.connection.get());
-                call.reply(&wire::Value { value })
+                let key = call.connection.get();
+                let value = self.device.reached_for(key);
+                let refused = self.device.submit_failed_for(key);
+                call.reply(&wire::PollResponse { value, refused })
+            }
+            Operation::CommandFailure => {
+                let wire::Value { value } = call.request()?;
+                match self
+                    .device
+                    .take_submit_failure(call.connection.get(), value)
+                {
+                    Some(error) => Err(error.into()),
+                    None => call.reply(&wire::Empty {}),
+                }
             }
             Operation::CompletedAfter => {
                 let wire::Value { value } = call.request()?;

@@ -138,6 +138,10 @@ const OPERATIONS: &[(&str, Reach)] = &[
     ("AllocatedSize", Reach::Call("currentAllocatedSize")),
     ("CommandBufferTimes", Reach::Call("GPUStartTime")),
     ("CompletedAfter", Reach::Call("encodeWaitForEvent:")),
+    (
+        "CommandFailure",
+        Reach::Without("only a submission the driver refuses, which no case can cause"),
+    ),
     ("ShareObject", Reach::Call("newSharedTextureHandle]")),
     ("OpenSharedEvent", Reach::Call("newSharedEventWithHandle:")),
     (

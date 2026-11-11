@@ -192,9 +192,23 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     /// Command buffers completed, or the device was lost, since this last
     /// answered true; either wakes the frontend's waiters.
     pub fn signaled(&mut self) -> bool {
+        self.signaled_through(None)
+    }
+
+    /// [`Self::signaled`] with the device's timeline known to have reached
+    /// `timeline`, as the completion waiter read it: no driver query.
+    pub fn signaled_reached(&mut self, timeline: u64) -> bool {
+        self.signaled_through(Some(timeline))
+    }
+
+    fn signaled_through(&mut self, timeline: Option<u64>) -> bool {
         // Any connection's work completing counts, in whatever order: held
         // work of another delays no connection's waiters.
-        let reached = match self.device.poll() {
+        let polled = match timeline {
+            Some(timeline) => self.device.poll_reached(timeline),
+            None => self.device.poll(),
+        };
+        let reached = match polled {
             Ok(_) => self.device.completions(),
             Err(_) => {
                 // A completion query that cannot be trusted must fail every

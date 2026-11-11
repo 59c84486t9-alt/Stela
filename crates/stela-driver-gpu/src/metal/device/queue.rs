@@ -144,6 +144,12 @@ struct InFlight {
     /// The textures whose uploads or decodes it carries: their destruction
     /// waits for it too ([`super::pins`]).
     carried: Vec<TextureId>,
+    /// The event values its submitted segments signal, reached once it is
+    /// done.
+    signals: Vec<(Semaphore, u64)>,
+    /// Every value its submissions signal, completion's included: the
+    /// driver names a submission it refused by one of them.
+    named: Vec<(Semaphore, u64)>,
 }
 
 /// Where a committed command buffer's completion shows.
@@ -342,6 +348,11 @@ pub(super) struct Queue {
     /// read from the driver or signaled by the CPU: once it is what was
     /// promised, the event's value is known without asking the driver.
     reached_events: Vec<(Semaphore, u64)>,
+    /// (connection, serial, failure, the driver's records of it) of
+    /// completed command buffers whose submission the driver refused while
+    /// keeping the device, until the connection asks
+    /// ([`Device::take_submit_failure`]).
+    refused: Vec<(u64, u64, Error, u32)>,
     /// Command buffers seen complete, in any order.
     completions: u64,
     /// (connection, serial) of command buffers retired while an older one
@@ -918,6 +929,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             segments: 0,
             carries,
             carried,
+            signals: Vec::new(),
+            named: Vec::new(),
         });
         if held.as_mut_slice().iter().any(|held| {
             held.segments
@@ -1387,6 +1400,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             flight.track = track;
         }
         let late = self.queue.late;
+        let named = held
+            .segments
+            .iter()
+            .flat_map(|segment| &segment.signals)
+            .copied();
+        if let Some(flight) = self
+            .queue
+            .in_flight
+            .iter_mut()
+            .find(|flight| flight.serial == held.serial)
+        {
+            flight.named.extend(named);
+        }
         let signals: Vec<_> = held
             .segments
             .iter()
@@ -1394,8 +1420,16 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .copied()
             .filter(|&(semaphore, _)| semaphore != timeline && Some(semaphore) != late)
             .collect();
-        for (semaphore, value) in signals {
+        for &(semaphore, value) in &signals {
             self.promise(semaphore, value);
+        }
+        if let Some(flight) = self
+            .queue
+            .in_flight
+            .iter_mut()
+            .find(|flight| flight.serial == held.serial)
+        {
+            flight.signals.extend(signals);
         }
         Ok(())
     }
@@ -1465,6 +1499,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             flight.submits += 1;
             flight.segments += held.segments.len() as u64;
         }
+        // NVK names a refused segment's failure by the next signal it
+        // submits, so a submission must end with one: a refusal then always
+        // lands on this command buffer, never on the next one's.
+        debug_assert!(
+            held.segments
+                .last()
+                .is_some_and(|segment| !segment.signals.is_empty()),
+            "a submission ends with a signal"
+        );
         self.backend.submit(&held.segments)
     }
 
@@ -1559,7 +1602,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// Submits ready held work, retires completed command buffers and
     /// returns the completed serial.
     pub fn poll(&mut self) -> Result<u64> {
-        let result = self.poll_inner();
+        let result = self.poll_inner(None);
+        if result == Err(Error::DeviceLost) {
+            self.mark_lost();
+        }
+        result
+    }
+
+    /// [`Self::poll`] with the queue's timeline known to have reached
+    /// `timeline`, as the completion waiter read it: no driver query (a host
+    /// kernel call) unless work completes on the late timeline. The answer
+    /// may lag the GPU, never lead it.
+    pub fn poll_reached(&mut self, timeline: u64) -> Result<u64> {
+        let result = self.poll_inner(Some(timeline));
         if result == Err(Error::DeviceLost) {
             self.mark_lost();
         }
@@ -1614,6 +1669,41 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// completed while an older one of its own has not, after a
     /// [`Self::poll`]; zero for none. Another Metal queue's held work
     /// delays [`Self::reached_for`], not these.
+    /// The oldest of connection `key`'s completed command buffers whose
+    /// submission the driver refused, not yet taken; zero for none.
+    pub fn submit_failed_for(&self, key: u64) -> u64 {
+        self.queue
+            .refused
+            .iter()
+            .filter(|&&(refused, ..)| refused == key)
+            .map(|&(_, serial, ..)| serial)
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// Takes the failure of connection `key`'s command buffer `serial`,
+    /// which completed without running all of its commands; `None` for one
+    /// that ran them all.
+    pub fn take_submit_failure(&mut self, key: u64, serial: u64) -> Option<Error> {
+        let index = self
+            .queue
+            .refused
+            .iter()
+            .position(|&(refused, at, ..)| refused == key && at == serial)?;
+        let (_, _, error, records) = self.queue.refused.remove(index);
+        self.backend.settle_failures(records, false);
+        Some(error)
+    }
+
+    /// [`Backend::count_failures`]: `outstanding` counts the refusals not
+    /// yet answered, readable without the device.
+    pub fn count_failures(
+        &mut self,
+        outstanding: &alloc::sync::Arc<core::sync::atomic::AtomicU32>,
+    ) {
+        self.backend.count_failures(outstanding);
+    }
+
     pub fn completed_after(&self, key: u64, serial: u64) -> u64 {
         self.queue
             .early
@@ -1645,9 +1735,19 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             };
         }
         self.queue.early.retain(|&(early, _)| early != key);
+        let mut settled = 0;
+        self.queue.refused.retain(|&(refused, _, _, records)| {
+            if refused == key {
+                settled += records;
+            }
+            refused != key
+        });
+        if settled > 0 {
+            self.backend.settle_failures(settled, false);
+        }
     }
 
-    fn poll_inner(&mut self) -> Result<u64> {
+    fn poll_inner(&mut self, known: Option<u64>) -> Result<u64> {
         self.advance()?;
         if self.lost {
             return Err(Error::DeviceLost);
@@ -1658,8 +1758,15 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             return Ok(self.completed);
         }
         let lost = |error: &Error| *error == Error::DeviceLost;
-        let timeline = self.backend.semaphore_value(self.timeline);
-        let timeline = timeline.inspect_err(|error| self.lost |= lost(error))?;
+        let timeline = match known {
+            // A value that shows no progress may hide a loss, which only the
+            // driver's answer says.
+            Some(timeline) if !self.late_in_flight() && timeline > self.completed => timeline,
+            _ => {
+                let timeline = self.backend.semaphore_value(self.timeline);
+                timeline.inspect_err(|error| self.lost |= lost(error))?
+            }
+        };
         let late = match self.queue.late {
             Some(late) if self.late_in_flight() => {
                 let value = self.backend.semaphore_value(late);
@@ -1667,11 +1774,38 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             }
             _ => 0,
         };
+        let mut reached_events = Vec::new();
+        let mut done = Vec::new();
         for flight in &mut self.queue.in_flight {
             match flight.track {
                 Track::Timeline if flight.serial <= timeline => flight.track = Track::Done,
                 Track::Late(value) if value <= late => flight.track = Track::Done,
-                _ => {}
+                _ => continue,
+            }
+            // What it signaled is reached: an event read needs no query.
+            reached_events.append(&mut flight.signals);
+            done.push((
+                flight.key,
+                flight.serial,
+                core::mem::take(&mut flight.named),
+            ));
+        }
+        for (semaphore, value) in reached_events {
+            self.note_reached_event(semaphore, value);
+        }
+        // A submission the driver refused still signaled, after its waits
+        // and what of it ran: its command buffer fails, the device goes on.
+        for (key, serial, named) in done {
+            let mut refusal = None;
+            let mut records = 0;
+            for (semaphore, value) in named {
+                if let Some(error) = self.backend.submit_failure(semaphore, value) {
+                    refusal = refusal.or(Some(error));
+                    records += 1;
+                }
+            }
+            if let Some(error) = refusal {
+                self.queue.refused.push((key, serial, error, records));
             }
         }
         // Everything through the first command buffer whose submitted work
@@ -1690,6 +1824,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             })
             .map_or(self.submitted, |flight| flight.serial - 1);
         self.retire(completed)?;
+        // With nothing in flight, a refusal no command buffer took names
+        // only the device's own work: nobody will ask for it.
+        if self.queue.in_flight.is_empty() {
+            self.backend.settle_failures(0, true);
+        }
         // Out of order completions the connection now reaches in order.
         let mut early = core::mem::take(&mut self.queue.early);
         early.retain(|&(key, serial)| serial > self.reached_for(key));
@@ -2013,7 +2152,20 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .map_or(0, |&(_, value)| value)
     }
 
+    /// Notes that event semaphore `semaphore` reached `value`. Only a live
+    /// event's: a destroyed event's semaphore has no promise, and a flight
+    /// that signaled it may complete after it was destroyed; noted then,
+    /// the value would answer for the next event that gets the freed handle
+    /// before its own signal ran.
     fn note_reached_event(&mut self, semaphore: Semaphore, value: u64) {
+        if !self
+            .queue
+            .promised
+            .iter()
+            .any(|&(promised, _)| promised == semaphore)
+        {
+            return;
+        }
         match self
             .queue
             .reached_events
@@ -2031,8 +2183,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         let current = self.event_value(semaphore)?;
         if value > current {
             self.backend.signal_semaphore(semaphore, value)?;
-            self.note_reached_event(semaphore, value);
+            // Promised first: only a promised event's value is noted.
             self.promise(semaphore, value);
+            self.note_reached_event(semaphore, value);
             // Work held for the value goes to the queue now.
             self.advance()?;
         }

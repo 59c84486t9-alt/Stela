@@ -253,7 +253,7 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 {
 	_seen = count;
 	StelaEmpty nothing = {};
-	StelaValue reached = {};
+	StelaPollResponse reached = {};
 	StelaFailure failure;
 	bool lost = STELA_CALL(&_gate, Poll, &nothing, &reached, &failure) != StelaStatusOk;
 	NSMutableArray *done = [NSMutableArray arrayWithCapacity:8];
@@ -291,7 +291,17 @@ static void tile_span(NSUInteger start, NSUInteger length, NSUInteger tile, NSUI
 	NSArray *settling = [_settling copy];
 	os_unfair_lock_unlock(&_lock);
 	for (NSUInteger i = 0; i < done.count; i++) {
-		[[done objectAtIndex:i] didCompleteWith:lost ? &failure : NULL];
+		StelaGPUCommandBuffer *buffer = [done objectAtIndex:i];
+		/* The service names the oldest completed buffer whose submission
+		 * the driver refused: it and later ones answer whether theirs was. */
+		StelaFailure refusal;
+		bool refused = false;
+		if (!lost && reached.refused != 0 && buffer->_serial >= reached.refused) {
+			StelaValue serial = {.value = buffer->_serial};
+			refused = STELA_CALL(&_gate, CommandFailure, &serial, &nothing, &refusal) !=
+				  StelaStatusOk;
+		}
+		[buffer didCompleteWith:lost ? &failure : refused ? &refusal : NULL];
 	}
 	[self publishSettling:settling lost:lost];
 	[self releaseDeferredReaching:lost ? UINT64_MAX : reached.value];

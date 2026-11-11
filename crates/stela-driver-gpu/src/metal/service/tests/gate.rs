@@ -1,3 +1,5 @@
+extern crate std;
+
 use super::{Memory, MockBackend, MockCompiler, Stream, commit, connect, service};
 use crate::metal::{
     capabilities::block::Block,
@@ -230,7 +232,7 @@ fn polled(memory: &mut Memory, record: u64) -> u64 {
     let call = completed(memory, record);
     assert_eq!(call.status, Status::Ok.raw());
     let bytes = GuestMemory::read(memory, call.response).unwrap();
-    let wire::Value { value } = wire::read(&bytes).unwrap();
+    let wire::PollResponse { value, .. } = wire::read(&bytes).unwrap();
     value
 }
 
@@ -243,12 +245,12 @@ fn a_poll_while_another_call_holds_the_service_answers_what_completed() {
     complete(&shared);
     shared.interrupted();
     // The service answers the connection's first poll itself.
-    let first = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let first = gate_call(&mut memory, Operation::Poll, &[], 16);
     GateService::serve(&shared, connection, first, &mut memory).unwrap();
     assert_eq!(polled(&mut memory, first), 1);
     // `HOST.relax` panics, so a poll that waited for this holder would fail.
     let held = shared.try_turn().unwrap();
-    let busy = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let busy = gate_call(&mut memory, Operation::Poll, &[], 16);
     GateService::serve(&shared, connection, busy, &mut memory).unwrap();
     assert_eq!(polled(&mut memory, busy), 1);
     drop(held);
@@ -259,7 +261,7 @@ fn only_a_connection_the_service_answered_polls_while_it_is_held() {
     let shared = SharedService::new(service(), HOST);
     let connection = connect(&mut shared.try_turn().unwrap());
     let mut memory = Memory::default();
-    let record = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let record = gate_call(&mut memory, Operation::Poll, &[], 16);
     let held = shared.try_turn().unwrap();
     assert!(!shared.poll_published(connection, record, &mut memory));
     assert_eq!(
@@ -284,11 +286,11 @@ fn a_busy_poll_with_a_nonempty_request_takes_the_normal_validation_path() {
     let shared = SharedService::new(service(), HOST);
     let connection = connect(&mut shared.try_turn().unwrap());
     let mut memory = Memory::default();
-    let first = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let first = gate_call(&mut memory, Operation::Poll, &[], 16);
     GateService::serve(&shared, connection, first, &mut memory).unwrap();
     assert_eq!(polled(&mut memory, first), 0);
 
-    let malformed = gate_call(&mut memory, Operation::Poll, &[0], 8);
+    let malformed = gate_call(&mut memory, Operation::Poll, &[0], 16);
     let held = shared.try_turn().unwrap();
     assert!(!shared.poll_published(connection, malformed, &mut memory));
     assert_eq!(completed(&mut memory, malformed).status, u32::MAX);
@@ -306,13 +308,13 @@ fn a_busy_poll_falls_back_after_the_device_loss_notification() {
     let shared = SharedService::new(service(), HOST);
     let connection = connect(&mut shared.try_turn().unwrap());
     let mut memory = Memory::default();
-    let first = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let first = gate_call(&mut memory, Operation::Poll, &[], 16);
     GateService::serve(&shared, connection, first, &mut memory).unwrap();
     assert_eq!(polled(&mut memory, first), 0);
 
     shared.try_turn().unwrap().device().mark_lost();
     assert!(shared.signaled());
-    let busy = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let busy = gate_call(&mut memory, Operation::Poll, &[], 16);
     let held = shared.try_turn().unwrap();
     assert!(!shared.poll_published(connection, busy, &mut memory));
     drop(held);
@@ -346,7 +348,7 @@ fn a_poll_that_cannot_write_its_status_does_not_enroll_the_connection() {
     let shared = SharedService::new(service(), HOST);
     let connection = connect(&mut shared.try_turn().unwrap());
     let mut memory = Memory::default();
-    let record = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let record = gate_call(&mut memory, Operation::Poll, &[], 16);
     let mut caller = DenyStatus {
         memory: &mut memory,
         record,
@@ -357,7 +359,7 @@ fn a_poll_that_cannot_write_its_status_does_not_enroll_the_connection() {
     );
 
     let held = shared.try_turn().unwrap();
-    let busy = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let busy = gate_call(&mut memory, Operation::Poll, &[], 16);
     assert!(!shared.poll_published(connection, busy, &mut memory));
     drop(held);
 }
@@ -456,7 +458,7 @@ fn a_calls_device_loss_signals_waiters_without_an_interrupt() {
 fn device_loss_is_latched_and_wakes_waiters_only_once() {
     use super::{
         call,
-        wire::{Empty, Operation, Status, Value},
+        wire::{Empty, Operation, Status},
     };
     let mut service = service();
     let connection = connect(&mut service);
@@ -480,7 +482,7 @@ fn device_loss_is_latched_and_wakes_waiters_only_once() {
     // must not make this device's old identities usable again.
     assert_eq!(service.connect().unwrap_err().status, Status::DeviceLost);
     let mut memory = Memory::default();
-    let response: Result<Value, _> = call(
+    let response: Result<wire::PollResponse, _> = call(
         &mut service,
         connection,
         Operation::Poll,
@@ -528,7 +530,7 @@ fn the_platform_times_each_call_by_its_operation_and_status() {
         size_of::<Block>(),
     );
     GateService::serve(&shared, connection, record, &mut memory).unwrap();
-    let poll = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let poll = gate_call(&mut memory, Operation::Poll, &[], 16);
     let lost = GateCall {
         request: Span {
             address: 0x10,
@@ -563,7 +565,7 @@ fn a_poll_on_a_free_service_answers_what_was_published_without_asking_the_device
     let shared = SharedService::new(service(), HOST);
     let connection = connect(&mut shared.try_turn().unwrap());
     let mut memory = Memory::default();
-    let first = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let first = gate_call(&mut memory, Operation::Poll, &[], 16);
     GateService::serve(&shared, connection, first, &mut memory).unwrap();
     assert_eq!(polled(&mut memory, first), 0);
     commit_shared(&shared, connection);
@@ -575,7 +577,7 @@ fn a_poll_on_a_free_service_answers_what_was_published_without_asking_the_device
         .device()
         .backend()
         .semaphore_error = Some(crate::metal::error::Error::DeviceLost);
-    let free = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let free = gate_call(&mut memory, Operation::Poll, &[], 16);
     GateService::serve(&shared, connection, free, &mut memory).unwrap();
     assert_eq!(
         polled(&mut memory, free),
@@ -591,7 +593,7 @@ fn a_poll_on_a_free_service_answers_what_was_published_without_asking_the_device
     // The interrupt's look publishes it before the kext wakes the frontend.
     shared.interrupted();
     assert!(shared.signaled());
-    let woken = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let woken = gate_call(&mut memory, Operation::Poll, &[], 16);
     GateService::serve(&shared, connection, woken, &mut memory).unwrap();
     assert_eq!(polled(&mut memory, woken), 1);
 }
@@ -654,7 +656,7 @@ fn poll_paths_cost() {
     let shared = SharedService::new(service(), HOST);
     let connection = connect(&mut shared.try_turn().unwrap());
     let mut memory = Memory::default();
-    let record = gate_call(&mut memory, Operation::Poll, &[], 8);
+    let record = gate_call(&mut memory, Operation::Poll, &[], 16);
     GateService::serve(&shared, connection, record, &mut memory).unwrap();
     // Work in flight, so a turn's poll asks the device.
     commit_shared(&shared, connection);
@@ -676,4 +678,36 @@ fn poll_paths_cost() {
         started.elapsed().as_nanos() / u128::from(CALLS)
     };
     std::println!("poll ns per call: published={published} turn={turn}");
+}
+
+/// A look after the waiter's reading takes that reading, with no driver
+/// query; a reading that shows nothing new still asks the driver, which is
+/// how a loss is noticed.
+#[test]
+fn a_look_takes_the_waiters_reading_instead_of_asking_the_driver() {
+    let shared = SharedService::new(service(), HOST);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    commit_shared(&shared, connection);
+    complete(&shared);
+    // A driver query would answer a loss.
+    shared
+        .try_turn()
+        .unwrap()
+        .device()
+        .backend()
+        .semaphore_error = Some(crate::metal::error::Error::DeviceLost);
+    shared.completed_through(0, 1);
+    shared.interrupted();
+    {
+        let mut turn = shared.try_turn().unwrap();
+        assert!(!turn.device().is_lost(), "no query");
+        assert_eq!(turn.device().completed_serial(), 1);
+    }
+    // Work outstanding, and a reading that shows nothing new.
+    commit_shared(&shared, connection);
+    shared.interrupted();
+    assert!(
+        shared.try_turn().unwrap().device().is_lost(),
+        "nothing new: the driver was asked"
+    );
 }

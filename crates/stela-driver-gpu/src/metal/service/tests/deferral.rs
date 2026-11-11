@@ -204,7 +204,7 @@ fn run_deferred(
         &mut memory_b,
         Operation::Poll,
         &Empty {},
-        size_of::<Value>(),
+        size_of::<crate::metal::service::wire::PollResponse>(),
     );
     shared.serve(b, poll, &mut memory_b).unwrap();
     assert_eq!(status(&mut memory_b, poll), Status::Ok);

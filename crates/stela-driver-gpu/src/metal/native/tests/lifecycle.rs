@@ -170,8 +170,11 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         memories: crate::metal::native::memory::Memories::new(1024),
         exporter: ManuallyDrop::new(Box::new(Exporter(drops.clone()))),
         imports: BTreeMap::new(),
+        import_cache: crate::metal::native::ImportCache::default(),
         retired: VecDeque::new(),
         import_type: None,
+        refusals: None,
+        outstanding: None,
         new_images: Vec::new(),
         zeroing: crate::metal::native::zero::Zeroing::new(1 << 32, |_| {}),
         bind_timeline: vk::Semaphore::null(),
@@ -378,4 +381,63 @@ fn inline_and_owned_buffers_retire_once_in_queue_order() {
     assert_eq!(calls.queries.get(), queries);
     // SAFETY: the fixture has no Vulkan resources and the list is empty.
     unsafe { ManuallyDrop::drop(&mut backend.exporter) };
+}
+
+#[test]
+fn a_freed_import_is_taken_back_for_the_same_guest_ram_only() {
+    use crate::metal::native::{ExportedMemory, ImportCache};
+    use stela_contracts::gate::MemoryRange;
+    let mut page = [0u8; 64];
+    let pointer = core::ptr::NonNull::new(page.as_mut_ptr()).unwrap();
+    let exported = |bytes| ExportedMemory {
+        fd: -1,
+        pointer,
+        bytes,
+    };
+    let range = |address| MemoryRange {
+        address,
+        bytes: 4096,
+    };
+    let mut cache = ImportCache::default();
+    assert!(
+        cache
+            .keep(
+                alloc::vec![range(0x1000)],
+                vk::DeviceMemory::from_raw(1),
+                exported(4096)
+            )
+            .is_empty()
+    );
+    assert!(cache.take(&[range(0x2000)]).is_none(), "other guest RAM");
+    assert!(
+        cache.take(&[range(0x1000), range(0x3000)]).is_none(),
+        "more guest RAM"
+    );
+    let kept = cache.take(&[range(0x1000)]).expect("the same guest RAM");
+    assert_eq!(kept.memory, vk::DeviceMemory::from_raw(1));
+    assert!(cache.take(&[range(0x1000)]).is_none(), "taken once");
+    // Past the bounds the oldest go, for the caller to free.
+    let mut evicted = 0;
+    for index in 0..ImportCache::COUNT as u64 + 2 {
+        evicted += cache
+            .keep(
+                alloc::vec![range(index << 12)],
+                vk::DeviceMemory::from_raw(index + 2),
+                exported(4096),
+            )
+            .len();
+    }
+    assert_eq!(evicted, 2);
+    assert!(cache.take(&[range(0)]).is_none(), "the oldest went");
+    let big = cache.keep(
+        alloc::vec![range(1 << 40)],
+        vk::DeviceMemory::from_raw(99),
+        exported(ImportCache::BYTES),
+    );
+    assert_eq!(
+        big.len(),
+        ImportCache::COUNT,
+        "every older one goes for the bytes"
+    );
+    assert_eq!(cache.drain().count(), 1);
 }
