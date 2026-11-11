@@ -1025,6 +1025,23 @@ impl Blocks {
             .expect("a slot that was given")
     }
 
+    /// `slot`'s record, if it has one yet: for a walk of every slot below
+    /// [`Self::len`]. [`Self::take`] counts a slot as given before it
+    /// allocates the record chunk of a slot that begins one, and gives the
+    /// slot back without one when the heap has no room, so a slot below
+    /// `len` may have no record (build 69: a heartbeat's exit walk met one
+    /// 20 s into boot and stopped the machine).
+    pub(super) fn try_record(&self, slot: usize) -> Option<&Record> {
+        self.records.get(u32::try_from(slot).ok()?)
+    }
+
+    /// A slot given as [`Self::take`] gives it, without its record yet:
+    /// what another PE sees between the two.
+    #[cfg(test)]
+    pub(super) fn take_without_record(&self, grace: &Grace) -> Option<usize> {
+        self.slots.take(grace, None).map(|slot| slot as usize)
+    }
+
     /// The blocks' fault recovery, each under its slot's lock.
     pub(super) fn recovery(&self) -> Recoveries<'_> {
         Recoveries(self)

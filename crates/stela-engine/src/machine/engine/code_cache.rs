@@ -1573,7 +1573,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             for step in (0..slots).step_by(EVICT_STEP) {
                 let mut cache = code.cache_at(board::LockSite::Discard);
                 for slot in step..slots.min(step + EVICT_STEP) {
-                    if code.blocks.record(slot).live() {
+                    if code
+                        .blocks
+                        .try_record(slot)
+                        .is_some_and(|record| record.live())
+                    {
                         let bytes = code
                             .blocks
                             .recovery()

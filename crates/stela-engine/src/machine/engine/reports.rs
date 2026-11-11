@@ -956,7 +956,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let blocks = &self.code.blocks;
         let words = &mut walk.words;
         walk.slots.step(blocks, more, |slot| {
-            let record = blocks.record(slot);
+            // A slot just given may have no record yet.
+            let Some(record) = blocks.try_record(slot) else {
+                return;
+            };
             let taken = record.taken.load(Ordering::Relaxed);
             if taken != 0
                 && record.live()
@@ -990,6 +993,39 @@ impl<H: Host, D: Devices> Machine<H, D> {
 mod walk_tests {
     use super::super::tests::{BASE, machine};
     use super::*;
+
+    /// A slot another PE was just given, whose record chunk it has not
+    /// allocated yet, is counted among the given slots: the walks pass it
+    /// by (build 69 stopped 20 s into boot at `record()` in the heartbeat's
+    /// exit walk).
+    #[test]
+    fn the_walks_pass_a_given_slot_that_has_no_record_yet() {
+        const RET: u32 = 0xd65f_03c0;
+        let mut machine = machine(&[RET]);
+        assert!(matches!(
+            machine.fetch_block(BASE, false),
+            Ok(Fetched::Block(_))
+        ));
+        let (grace, _) = machine.grace();
+        // Slots of the first record chunk have records once one of them
+        // took its block; the first slot of the next has none.
+        let bare = loop {
+            let slot = machine
+                .code
+                .blocks
+                .take_without_record(grace)
+                .expect("a slot");
+            if machine.code.blocks.try_record(slot).is_none() {
+                break slot;
+            }
+        };
+        assert!(bare < machine.code.blocks.len());
+        let mut walk = ExitWordsWalk::default();
+        while !machine.exit_words_step(&mut walk, || true) {}
+        let mut walk = FootprintWalk::default();
+        while !machine.footprint_step(&mut walk, || true) {}
+        assert!(!machine.board_slot(bare).live);
+    }
 
     /// The walks in steps of one chunk each give what the walks of every
     /// block at once give.
