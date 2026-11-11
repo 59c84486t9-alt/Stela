@@ -83,3 +83,1010 @@ Copyright notices for these components are in their source files, which the
 corresponding source above includes. Device firmware is not part of Stela;
 `stela setup` downloads it from the vendors' own releases, under the vendors'
 terms.
+
+Notices kept in full
+--------------------
+
+The SD and MMC host drivers in crates/stela-driver-storage use constants from
+Linux include/linux/mmc/mmc.h, whose notice reads:
+
+    Header for MultiMediaCard (MMC)
+
+    Copyright 2002 Hewlett-Packard Company
+
+    Use consistent with the GNU GPL is permitted,
+    provided that this copyright notice is
+    preserved in its entirety in all copies and derived works.
+
+    HEWLETT-PACKARD COMPANY MAKES NO WARRANTIES, EXPRESSED OR IMPLIED,
+    AS TO THE USEFULNESS OR CORRECTNESS OF THIS CODE OR ITS
+    FITNESS FOR ANY PARTICULAR PURPOSE.
+
+    Many thanks to Alessandro Rubini and Jonathan Corbet!
+
+    Based strongly on code by:
+
+    Author: Yong-iL Joh <tolkien@mizi.com>
+
+    Author:  Andrew Christian
+             15 May 2002
+
+The USB audio driver in crates/stela-drivers/src/usb/audio uses the
+descriptor and status layouts of Linux include/uapi/linux/usb/audio.h
+(GPL-2.0 WITH Linux-syscall-note), Copyright (C) 2006 Thumtronics Pty Ltd.,
+developed for Thumtronics by Grey Innovation, Ben Williamson.
+
+The SHA-1 and SHA-256 x86 code in crates/stela-crypto follows
+RustCrypto/hashes sha1/src/compress/x86.rs at commit
+0b32162344ab2bbc3749889370927ae49137d4ae and sha2 at commit
+82c36a428f8d6f05f3bfccdedb243e9d1f85359d (MIT OR Apache-2.0, MIT used).
+
+Ported sources
+--------------
+
+The drivers and Linux support code below are ports or adaptations of the named
+upstream files. Linux revisions are commits of torvalds/linux. Each entry
+gives the Stela path and component, the upstream project, revision and
+licenses, then the upstream files. "see source headers" means the Stela files
+carry the license line of each upstream file.
+
+crates/stela-driver-audio/src/: Standard HD Audio command, codec graph and PCM
+  core
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/pci/pci.c, include/linux/pci_ids.h, include/sound/ (2 files),
+    include/uapi/linux/pci_regs.h, sound/hda/codecs/realtek/ (3 files),
+    sound/hda/common/ (3 files), sound/hda/controllers/intel.c,
+    sound/hda/core/ (5 files), sound/hda/core/ext/controller.c,
+    sound/pci/hda/hda_intel.c
+crates/stela-driver-audio/src/: Conexant standard analog ownership and EAPD
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    sound/hda/codecs/conexant.c, sound/hda/codecs/generic.c
+crates/stela-driver-audio/src/: CX11880/SN6140 cold recognition and explicit
+  jack polling
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    sound/hda/core/device.c
+crates/stela-driver-audio/src/: CX20561 physical minimum-gain mute
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    include/sound/hda_regmap.h, sound/hda/core/regmap.c
+crates/stela-driver-audio/src/: SigmaTel STAC9200 and STAC9202/925x standard
+  analog startup
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    sound/hda/codecs/sigmatel.c
+crates/stela-driver-audio/src/: IDT 92HD83xxx amplifier mode and seven-port
+  power map
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    sound/hda/codecs/sigmatel.c
+crates/stela-driver-audio/src/: Cirrus CS4206/CS4207 held-D0 analog startup
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    sound/hda/codecs/cirrus/cs420x.c
+crates/stela-driver-audio/src/: CS4210 pinmux, errata, DAC range and live
+  speaker boost
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    sound/hda/codecs/cirrus/cs421x.c
+crates/stela-driver-audio/src/: AMD ACP6x direct PDM capture
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0+
+    sound/soc/amd/yc/acp6x-mach.c, sound/soc/amd/yc/acp6x-pdm-dma.c,
+    sound/soc/amd/yc/acp6x.h, sound/soc/amd/yc/acp6x_chip_offset_byte.h,
+    sound/soc/amd/yc/pci-acp6x.c
+crates/stela-driver-audio/src/: AMD Renoir ACP3.1 direct PDM capture
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0+ ; GPL-2.0-only OR
+    BSD-3-Clause
+    sound/soc/amd/acp-config.c, sound/soc/amd/renoir/acp3x-pdm-dma.c,
+    sound/soc/amd/renoir/acp3x-rn.c, sound/soc/amd/renoir/rn-pci-acp3x.c,
+    sound/soc/amd/renoir/rn_acp3x.h,
+    sound/soc/amd/renoir/rn_chip_offset_byte.h
+crates/stela-driver-audio/src/: Corrected shared ACP ATU command and DMA
+  retirement semantics
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause ;
+    GPL-2.0-only
+    sound/soc/sof/amd/acp-loader.c, sound/soc/sof/amd/acp-stream.c,
+    sound/soc/sof/amd/acp.h
+crates/stela-driver-audio/src/: AMD ACP63 dedicated Pink Sardine direct PDM
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause ; GPL-2.0+ ;
+    GPL-2.0-only
+    include/sound/acp63_chip_offset_byte.h, sound/soc/amd/acp-config.c,
+    sound/soc/amd/acp/, sound/soc/amd/ps/ (5 files)
+crates/stela-driver-audio/src/: AMD ACP70/71/72 dedicated PS direct PDM
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    include/sound/acp63_chip_offset_byte.h
+crates/stela-driver-audio/src/: AMD Raven ACP3x and Vangogh ACP5x serial I²S
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0+
+    sound/soc/amd/raven/ (5 files), sound/soc/amd/vangogh/ (5 files)
+crates/stela-driver-audio/src/: NVIDIA legacy HDMI/DisplayPort digital codec
+  owner
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-or-later
+    ; MIT
+    include/drm/drm_eld.h, include/sound/ (3 files), sound/core/pcm_drm_eld.c,
+    sound/hda/codecs/hdmi/ (4 files), sound/hda/controllers/intel.c,
+    sound/hda/core/ (2 files)
+crates/stela-driver-audio/src/: Remaining conventional Intel profiles and
+  retained PCI power
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    include/sound/hdaudio.h
+crates/stela-driver-audio/src/: Intel cAVS2.5 SOF IPC3 cold boot and bounded
+  DMIC capture
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause ; GPL-2.0 ;
+    GPL-2.0-only
+    include/linux/pci_ids.h, include/sound/ (2 files), include/sound/sof/ (8
+    files), include/uapi/sound/asoc.h, include/uapi/sound/sof/ (2 files),
+    sound/soc/sof/ (3 files), sound/soc/sof/intel/ (9 files)
+crates/stela-driver-audio/src/: HDMI/DisplayPort codec discovery and ELD
+  observations
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ;
+    GPL-2.0-or-later ; MIT
+    include/drm/drm_eld.h, include/sound/ (2 files), sound/core/pcm_drm_eld.c,
+    sound/hda/codecs/hdmi/ (3 files), sound/hda/common/codec.c
+crates/stela-driver-audio/src/: Conventional analog HDA unsolicited jack
+  notifications
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only ;
+    GPL-2.0-or-later ; MIT
+    include/sound/hda_verbs.h, include/sound/hdaudio.h,
+    sound/hda/common/jack.c, sound/hda/core/bus.c, sound/hda/core/controller.c
+crates/stela-driver-audio/src/: Retained Realtek capture input gain and mute
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 ; GPL-2.0-only ;
+    GPL-2.0-or-later
+    include/sound/hda_regmap.h, include/sound/hda_verbs.h,
+    sound/hda/codecs/generic.c, sound/hda/codecs/realtek/realtek.c,
+    sound/hda/common/hda_local.h, sound/hda/core/regmap.c
+crates/stela-driver-base/src/bus/: AMD ordinary SPI opcode/FIFO engine
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 OR BSD-3-Clause ;
+    GPL-2.0-only OR BSD-3-Clause
+    drivers/spi/spi-amd.c
+crates/stela-driver-base/src/bus/: AMD V1/V2 index-mode memory operations
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only ;
+    GPL-2.0-or-later ; GPL-2.0-or-later WITH Linux-syscall-note
+    drivers/spi/spi-amd.h, drivers/spi/spi-mem.c, include/linux/spi/spi-mem.h,
+    include/uapi/linux/spi/spi.h
+crates/stela-driver-base/src/bus/: Intel LPSS/PXA2xx SSP and retained PCI
+  resources
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 ; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/clk/ (2 files), drivers/mfd/ (2 files), drivers/spi/ (2 files),
+    include/linux/pxa2xx_ssp.h
+crates/stela-driver-base/src/bus/: Synopsys DesignWare I²C master
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/i2c/busses
+crates/stela-driver-base/src/bus/: Intel I801 SMBus host
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b,
+    cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
+    drivers/i2c/busses/i2c-i801.c
+crates/stela-driver-base/src/bus/: PIIX4-compatible SMBus hosts
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/i2c/busses/i2c-piix4.c
+crates/stela-driver-base/src/bus/: PCI configuration header registers
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    include/uapi/linux/pci_regs.h
+crates/stela-driver-base/src/bus/: Native PCI MSI-X configuration
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b,
+    cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 ; GPL-2.0-only
+    drivers/pci/msi/msi.c, include/uapi/linux/pci_regs.h
+crates/stela-driver-base/src/bus/: AMD MP2 I²C firmware mailbox
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only OR
+    BSD-3-Clause
+    drivers/i2c/busses/i2c-amd-mp2-pci.c,
+    drivers/i2c/busses/i2c-amd-mp2-plat.c, drivers/i2c/busses/i2c-amd-mp2.h
+crates/stela-driver-base/src/bus/: Intel Sunrisepoint LPSS I²C resources
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/acpi/x86/lpss.c, drivers/i2c/busses/i2c-designware-common.c,
+    drivers/mfd/ (4 files), include/linux/designware_i2c.h
+crates/stela-driver-base/src/bus/: Intel Volume Management Device host bridge
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/pci/controller/vmd.c, include/uapi/linux/pci_regs.h
+crates/stela-driver-base/src/bus/: AMD chipset GPIO/pinctrl register protocols
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/pinctrl/pinctrl-amd.c
+crates/stela-driver-base/src/bus/: PCI hot-add
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    drivers/pci/probe.c, drivers/pci/setup-bus.c
+crates/stela-driver-base/src/bus/gpio/: Modern Intel communities
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0
+    drivers/pinctrl/intel/pinctrl-intel.c
+crates/stela-driver-base/src/bus/gpio/: Native resource and GPIO OpRegion
+  adapter
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0
+    drivers/gpio/gpiolib-acpi-core.c
+crates/stela-driver-base/src/bus/gpio/: Original-source software comparison
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    include/linux/pinctrl/pinconf-generic.h, include/vdso/time64.h
+crates/stela-driver-base/src/bus/soundwire/: Cadence SoundWire messages
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 OR BSD-3-Clause ;
+    GPL-2.0-only
+    drivers/soundwire/bus.h, drivers/soundwire/cadence_master.c,
+    include/linux/soundwire/sdw.h, include/linux/soundwire/sdw_registers.h
+crates/stela-driver-base/src/bus/soundwire/: AMD ACP SoundWire immediate
+  commands
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 OR BSD-3-Clause ;
+    GPL-2.0-only OR BSD-3-Clause
+    drivers/soundwire/amd_manager.c, drivers/soundwire/amd_manager.h,
+    drivers/soundwire/bus.h, include/linux/iopoll.h,
+    include/linux/soundwire/sdw.h, include/linux/soundwire/sdw_registers.h
+crates/stela-driver-base/src/bus/thunderbolt/: Native PC Thunderbolt/USB4 NHI
+  control transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/thunderbolt/ (14 files), include/linux/thunderbolt.h
+crates/stela-driver-base/src/bus/thunderbolt/: Native PCI NHI controller
+  preparation
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    include/linux/pci_ids.h
+crates/stela-driver-base/src/bus/thunderbolt/: Firmware ICM host transport and
+  protocol parameters
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/thunderbolt/acpi.c
+crates/stela-driver-base/src/bus/thunderbolt/: Software connection manager
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/thunderbolt/ (7 files)
+crates/stela-driver-base/src/bus/thunderbolt/: Native cold NHI and retained
+  transport owner
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/pci/pci.c, drivers/pci/quirks.c, include/linux/pci_ids.h
+crates/stela-driver-base/src/platform/: EC-SMBus host transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/acpi/sbshc.c, drivers/acpi/sbshc.h
+crates/stela-driver-base/src/platform/: ACPICA
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause ;
+    BSD-3-Clause OR GPL-2.0 ; GPL-2.0-or-later
+    drivers/acpi/acpica
+crates/stela-driver-base/src/platform/: Shared PCI single-message MSI
+  configuration
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 WITH
+    Linux-syscall-note ; GPL-2.0-only
+    drivers/pci/msi/msi.c, include/uapi/linux/pci_regs.h,
+    include/uapi/linux/virtio_pci.h
+crates/stela-driver-base/src/platform/: Native Intel VT-d platform backend
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/iommu/intel/dmar.c, drivers/iommu/intel/iommu.c,
+    drivers/iommu/intel/iommu.h, include/acpi/actbl1.h
+crates/stela-driver-base/src/platform/: Shared AMD-Vi formats and IVRS
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    drivers/iommu/amd/amd_iommu.h, drivers/iommu/amd/amd_iommu_types.h,
+    drivers/iommu/amd/init.c, drivers/iommu/amd/iommu.c,
+    drivers/iommu/generic_pt/fmt/amdv1.h
+crates/stela-driver-base/src/platform/: Retained stopped PCI requesters
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 ; GPL-2.0 WITH
+    Linux-syscall-note ; GPL-2.0-only
+    drivers/pci/ats.c, drivers/pci/iov.c, include/uapi/linux/pci_regs.h
+crates/stela-driver-base/src/platform/: Native IOAPIC and ACPI electrical
+  routing
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ;
+    GPL-2.0-or-later
+    arch/x86/include/asm/io_apic.h, arch/x86/kernel/acpi/boot.c,
+    arch/x86/kernel/apic/io_apic.c
+crates/stela-driver-base/src/platform/: PCIe ASPM L1.2 disable service
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/pci/pcie/aspm.c, include/linux/pci.h,
+    include/uapi/linux/pci_regs.h
+crates/stela-driver-base/src/platform/: Physical-host SMBIOS observation
+  layouts
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    firmware/smbios.rs
+crates/stela-driver-base/src/platform/: ACPI embedded controller
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/acpi/ec.c
+crates/stela-driver-base/src/platform/: Native ACPI control-method battery
+  transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/acpi/battery.c, drivers/acpi/bus.c
+crates/stela-driver-base/src/platform/: Smart Battery System native SMBus
+  transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/acpi/sbs.c
+crates/stela-driver-gpu/src/: GPU sources and patch series
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; Apache-2.0 ; Apache-2.0
+    WITH LLVM-exception ; BSD-3-Clause OR GPL-2.0 ; GPL-2.0-only ;
+    GPL-2.0-or-later ; MIT
+    lib/Makefile, lib/find_bit.c, lib/find_random_bit.c, lib/scatterlist*.c
+crates/stela-driver-gpu/src/intel/wopcm/storage/: GuC firmware backing
+  reference
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; MIT
+    drivers/gpu/drm/xe/xe_bo.c, drivers/gpu/drm/xe/xe_uc_fw.c
+crates/stela-driver-net/src/: Intel 82574L Ethernet
+    FreeBSD a804c5742bff224d4cb4d25dd383554d598be32b,
+    c6d7a2478c9eeb38ed1284e4ee1ff64c75ca8b09; BSD-3-Clause ; GPL-2.0-only
+    drivers/net/ethernet/intel/e1000e, sys/dev/e1000
+crates/stela-driver-net/src/: Intel igb copper Ethernet
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/net/ethernet/intel/igb
+crates/stela-driver-net/src/: Realtek RTL8169/RTL8168 copper Ethernet
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/net/ethernet/realtek, drivers/net/ethernet/realtek/ (5 files),
+    drivers/net/phy/phy_device.c, drivers/net/phy/realtek/realtek_main.c
+crates/stela-driver-net/src/: Intel I225/I226 checked copper initialization
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/net/ethernet/intel/igc/
+crates/stela-driver-net/src/: Integrated Intel PCH PHY register transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/net/ethernet/intel/e1000e/
+crates/stela-driver-net/src/: Exact MTP/ARL/LNP and PTP/NVL cold profiles
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only
+    drivers/firmware/dmi_scan.c, include/linux/device-id/dmi.h
+crates/stela-driver-net/src/aqtion/: AQtion Ethernet source adaptation
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/net/ethernet/aquantia/atlantic/
+crates/stela-driver-net/src/tg3/: Broadcom Tigon3 source adaptation
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only ;
+    ISC
+    drivers/net/ethernet/broadcom/tg3.c, drivers/net/ethernet/broadcom/tg3.h
+crates/stela-driver-net/src/tg3/: Retained copper PHY low power
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    include/uapi/linux/mii.h
+crates/stela-driver-net/src/tg3/: Negotiated 10/100 half duplex
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    include/uapi/linux/ethtool.h
+crates/stela-driver-net/src/tg3/: Complete read-DMA mode initialization
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    include/uapi/linux/if_ether.h
+crates/stela-driver-net/src/tg3/: Native receive filtering and retained policy
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    lib/crc/crc32-main.c
+crates/stela-driver-net/src/wifi/: Shared native Wi-Fi frame and replay
+  boundary
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only
+    include/linux/ieee80211.h, include/net/mac80211.h, net/mac80211/ (5
+    files), net/wireless/util.c
+crates/stela-driver-net/src/wifi/: Native Wi-Fi management state and OS
+  controlled port
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    include/linux/ieee80211.h, net/mac80211/key.c, net/mac80211/mlme.c,
+    net/mac80211/rx.c, net/mac80211/util.c
+crates/stela-driver-net/src/wifi/: Channel switch announcements
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    net/mac80211/mlme.c, net/mac80211/parse.c, net/mac80211/spectmgmt.c,
+    net/wireless/chan.c, net/wireless/util.c
+crates/stela-driver-net/src/wifi/: Michael
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    net/wireless/michael-mic.c
+crates/stela-driver-net/src/wifi/: Static WEP and shared-key authentication
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    net/mac80211/wep.c
+crates/stela-driver-net/src/wifi/: Native Wi-Fi transmit packet-number
+  ownership
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/net/wireless/realtek/rtw88/mac80211.c,
+    drivers/net/wireless/realtek/rtw89/cam.c,
+    drivers/net/wireless/realtek/rtw89/rtw8852b.c, include/net/mac80211.h
+crates/stela-driver-net/src/wifi/: Native Wi-Fi single-MSDU data and EAPOL
+  boundary
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/net/wireless/intel/iwlwifi/fw/api/tx.h,
+    drivers/net/wireless/intel/iwlwifi/mvm/tx.c,
+    drivers/net/wireless/mediatek/mt76/mt76_connac_mac.c,
+    drivers/net/wireless/mediatek/mt76/mt7925/mac.c,
+    drivers/net/wireless/realtek/rtw88/tx.c,
+    drivers/net/wireless/realtek/rtw89/core.c, net/mac80211/rx.c,
+    net/wireless/util.c
+crates/stela-driver-net/src/wifi/: Native Wi-Fi hardware-scan request and
+  observation boundary
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only
+    include/linux/ieee80211-ht.h, include/net/cfg80211.h, net/mac80211/scan.c,
+    net/wireless/scan.c
+crates/stela-driver-net/src/wifi/: Native Wi-Fi channel-authority admission
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; ISC
+    include/net/cfg80211.h, net/wireless/chan.c, net/wireless/reg.c,
+    net/wireless/scan.c
+crates/stela-driver-net/src/wifi/: Shared modern Wi-Fi PHY observations and
+  negotiation
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear ;
+    GPL-2.0-only
+    drivers/net/wireless/mediatek/mt76/mac80211.c, include/linux/ (4 files),
+    net/mac80211/ (4 files)
+crates/stela-driver-net/src/wifi/: Current-association modern configuration
+  and operating channel
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    net/mac80211/mlme.c, net/mac80211/util.c, net/wireless/chan.c
+crates/stela-driver-net/src/wifi/: Unselected AP Multi-Link advertisement on
+  ordinary single-link association
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    net/mac80211/mlme.c, net/mac80211/parse.c, net/wireless/mlme.c
+crates/stela-driver-net/src/wifi/: Multi-link setup with an AP MLD
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    include/linux/ (2 files), net/mac80211/ (4 files), net/wireless/scan.c
+crates/stela-driver-net/src/wifi/: Normal hardware association Basic-MCS
+  compatibility and local HE source words
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear
+    drivers/net/wireless/mediatek/mt76/mac80211.c, include/net/ (2 files),
+    net/mac80211/ (2 files), net/wireless/scan.c, security/aggregate.rs
+crates/stela-driver-net/src/wifi/: Single-link receive Block Ack and generic
+  ACTION IE parsing
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    include/linux/ieee80211-mesh.h, net/mac80211/agg-rx.c,
+    net/mac80211/agg-tx.c, net/mac80211/ieee80211_i.h, net/mac80211/parse.c,
+    net/wifi/station/ba.rs
+crates/stela-driver-net/src/wifi/: Explicit 6GHz passive scan observations
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    include/linux/ieee80211-he.h
+crates/stela-driver-net/src/wifi/: Pinned regulatory database input
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; ISC
+    include/net/regulatory.h, net/wireless/reg.c
+crates/stela-driver-net/src/wifi/: Source station WMM queue restriction
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    net/mac80211/util.c
+crates/stela-driver-net/src/wifi/: Source replay index for mixed ordinary data
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/net/wireless/mediatek/mt76/mac80211.c, net/mac80211/rx.c
+crates/stela-driver-net/src/wifi/: Hardware-verified unicast management
+  receive
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/net/wireless/mediatek/mt76/mac80211.c, net/mac80211/rx.c,
+    net/mac80211/wpa.c, security/unicast_management.rs
+crates/stela-driver-net/src/wifi/: MT7925 OS-supplicant SAE transport boundary
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    include/net/cfg80211.h, net/mac80211/mlme.c, net/mac80211/util.c
+crates/stela-driver-net/src/wifi/: Explicit bounded native PMF association
+  policy
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    include/linux/ieee80211.h, include/net/cfg80211.h, net/mac80211/mlme.c,
+    net/mac80211/rx.c
+crates/stela-driver-net/src/wifi/: Station connection: suites, channel mode
+  and a kept connection
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    net/mac80211/main.c, net/mac80211/mlme.c, net/mac80211/util.c,
+    net/wireless/chan.c
+crates/stela-driver-net/src/wifi/: Intel station runtime
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 OR BSD-3-Clause ;
+    GPL-2.0-only
+    drivers/net/wireless/intel/iwlwifi/iwl-nvm-parse.c,
+    drivers/net/wireless/intel/iwlwifi/fw/file.h,
+    drivers/net/wireless/intel/iwlwifi/fw/api/ (8 files),
+    drivers/net/wireless/intel/iwlwifi/mvm/ (15 files),
+    drivers/net/wireless/intel/iwlwifi/pcie/gen1_2/ (2 files),
+    net/mac80211/rx.c
+crates/stela-driver-net/src/wifi/: Transmit power envelopes
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    include/linux/ieee80211-he.h, net/mac80211/mlme.c, net/mac80211/parse.c
+crates/stela-driver-net/src/wifi/: Intel firmware beacon statistics
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 OR BSD-3-Clause
+    drivers/net/wireless/intel/iwlwifi/fw/api/mac.h,
+    drivers/net/wireless/intel/iwlwifi/fw/api/stats.h,
+    drivers/net/wireless/intel/iwlwifi/fw/img.c,
+    drivers/net/wireless/intel/iwlwifi/mvm/rx.c,
+    drivers/net/wireless/intel/iwlwifi/mvm/utils.c
+crates/stela-driver-net/src/wifi/: AP MLD removal countdowns
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    net/mac80211/mlme.c
+crates/stela-driver-net/src/wifi/intel/: Intel standalone Wi-Fi firmware and
+  AX200 ROM context
+    Linux 59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01; GPL-2.0 OR BSD-3-Clause
+    drivers/net/wireless/intel/iwlwifi
+crates/stela-driver-net/src/wifi/intel/: Selected MLD link and station
+  continuations
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 OR BSD-3-Clause ;
+    GPL-2.0-only
+    include/linux/netdevice.h, net/core/dev.c, net/mac80211/ (5 files)
+crates/stela-driver-net/src/wifi/intel/: MLD association
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 OR BSD-3-Clause ;
+    GPL-2.0-only
+    net/mac80211/mlme.c
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek MT792x identity and
+  firmware download
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b,
+    59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01; BSD-3-Clause-Clear
+    drivers/net/wireless/mediatek/mt76/
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek ordinary station-key
+  requests
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear ;
+    GPL-2.0
+    include/linux/ieee80211.h, include/net/mac80211.h,
+    net/wifi/mediatek/mcu/key.rs
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek native key command
+  ownership
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    net/wifi/mediatek/mailbox/key.rs
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek initial station
+  device/BSS requests
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear
+    net/wifi/mediatek/mcu/device.rs
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek initial native interface
+  ownership
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    net/wifi/mediatek/mailbox/device.rs
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek actual NIC capability
+  request and observations
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear
+    net/wifi/mediatek/mcu/capabilities.rs
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek CLC country request plans
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear ; ISC
+    include/net/regulatory.h
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek channel-domain wire
+  helper
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear ;
+    GPL-2.0-only
+    include/net/cfg80211.h
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek retained full-queue PCIe
+  bootstrap
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear
+    net/wifi/mediatek/bootstrap.rs
+crates/stela-driver-net/src/wifi/mediatek/: MT7925 retained legacy client
+  lifecycle
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear ;
+    GPL-2.0-only
+    net/wifi/mediatek/bootstrap/client.rs
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek MT7925 startup contract
+  correction
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/bluetooth/btmtk.c,
+    drivers/net/wireless/mediatek/mt76/mt792x_core.c
+crates/stela-driver-net/src/wifi/mediatek/: MT7925 initial WLAN WFSYS reset
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear
+    drivers/net/wireless/mediatek/mt76/
+crates/stela-driver-net/src/wifi/mediatek/: MediaTek receive Block Ack reorder
+  queue
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear ;
+    GPL-2.0-only
+    drivers/net/wireless/mediatek/mt76/agg-rx.c,
+    drivers/net/wireless/mediatek/mt76/mt76.h, include/linux/ieee80211-ht.h,
+    include/linux/ieee80211.h, net/wifi/mediatek/reorder.rs
+crates/stela-driver-net/src/wifi/mediatek/: MT7925 current modern client and
+  complete-parent packet composition
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear ;
+    GPL-2.0-only
+    net/mac80211/rx.c, net/wireless/util.c
+crates/stela-driver-net/src/wifi/mediatek/: MT7925 prepared 6GHz RNR scan and
+  actual per-band probes
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; BSD-3-Clause-Clear ;
+    GPL-2.0-only
+    net/mac80211/util.c, net/wireless/chan.c
+crates/stela-driver-net/src/wifi/mediatek/: GTK-bound BIP-CMAC128
+  authentication and replay
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    net/mac80211/aes_gmac.c, security/management.rs
+crates/stela-driver-net/src/wifi/mediatek/: Native protected-management
+  transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    include/linux/ieee80211.h
+crates/stela-driver-net/src/wifi/mediatek/: Associated MT7925 channel switch
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/net/wireless/mediatek/mt76/mt7925/main.c, net/mac80211/mlme.c
+crates/stela-driver-net/src/wifi/mediatek/: Associated MT7925 action frames
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    net/mac80211/rx.c, net/mac80211/spectmgmt.c
+crates/stela-driver-net/src/wifi/mediatek/: MT7925 hardware A-MSDU
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/net/wireless/mediatek/mt76/mt7925/mac.c
+crates/stela-driver-net/src/wifi/mediatek/: Associated MT7925 power save
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/net/wireless/mediatek/mt76/mt7925/mcu.c, net/mac80211/mlme.c
+crates/stela-driver-net/src/wifi/mediatek/: Associated MT7925 WMM/EDCA queue
+  updates
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/net/wireless/mediatek/mt76/mt7925/mcu.c, net/mac80211/mlme.c
+crates/stela-driver-net/src/wifi/mediatek/: Native live MT7925 IGTK receive
+  windows
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    net/mac80211/key.c, net/mac80211/rx.c
+crates/stela-driver-net/src/wifi/mediatek/: MT7925 station MLD links
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/net/wireless/mediatek/mt76/mt7925/mcu.c, net/mac80211/mlme.c,
+    net/mac80211/rx.c
+crates/stela-driver-net/src/wifi/realtek/: Realtek PCIe Wi-Fi firmware and
+  identity primitives
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b,
+    59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01; GPL-2.0 OR BSD-3-Clause
+    drivers/net/wireless/realtek/, drivers/net/wireless/realtek/rtw88/,
+    drivers/net/wireless/realtek/rtw89/
+crates/stela-driver-net/src/wifi/realtek/: RTL8822C native download/control
+  slice
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/net/wireless/realtek/
+crates/stela-driver-net/src/wifi/realtek/: RTL8822C native beacon DMA slice
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/net/wireless/realtek/
+crates/stela-driver-net/src/wifi/realtek/: RTL8822C native raw receive ring
+  slice
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/net/wireless/realtek/
+crates/stela-driver-net/src/wifi/realtek/: RTL8822C native indexed TX rings
+  and general-info H2C slice
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; MIT
+    drivers/net/wireless/realtek/
+crates/stela-driver-net/src/wifi/realtek/: RTL8822C physical efuse, logical
+  map and immutable raw board slice
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/net/wireless/realtek/
+crates/stela-driver-net/src/wifi/realtek/: Realtek RTL8822C initial thermal
+  and beamforming PHY tail
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0 OR
+    BSD-3-Clause
+    include/linux/average.h
+crates/stela-driver-net/src/wifi/realtek/: Realtek RTL8822C native firmware
+  mailboxes and initial IQK
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 OR BSD-3-Clause ;
+    GPL-2.0-only
+    include/linux/iopoll.h
+crates/stela-driver-net/src/wifi/realtek/: Realtek RTL8822C station
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    net/mac80211/scan.c, net/mac80211/wpa.c, net/wireless/reg.c
+crates/stela-driver-storage/src/: Genesys Logic GL9750 native SDHCI
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
+    drivers/mmc/host/sdhci-pci-gli.c, drivers/pci/setup-res.c
+crates/stela-driver-storage/src/: Standard SDHCI SD UHS-I electrical and
+  tuning path
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/mmc/core/core.c, drivers/mmc/host/sdhci.c,
+    drivers/mmc/host/sdhci.h, include/linux/mmc/host.h
+crates/stela-driver-storage/src/: Standard PCI SDHCI and MMC/SD
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/misc/cardreader/ (3 files), drivers/mmc/core/ (5 files),
+    drivers/mmc/host/ (6 files), include/linux/ (2 files), include/linux/mmc/
+    (2 files), include/uapi/linux/ (2 files)
+crates/stela-driver-storage/src/: NVMe retained native requester-domain
+  transport
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    drivers/nvme/host/core.c, drivers/nvme/host/pci.c, include/linux/nvme.h
+crates/stela-driver-storage/src/: GL9755 retained PCI PHY/PLL and ordinary SD
+  transport
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
+    drivers/mmc/host/sdhci-pci-gli.c, drivers/mmc/host/sdhci-uhs2.h
+crates/stela-driver-storage/src/: GL9767 ordinary SD/UHS-I retained hardware
+  path
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; see source headers
+    include/linux/iopoll.h, include/linux/pci.h
+crates/stela-driver-storage/src/: GL9763E embedded MMC legacy path
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/misc/cardreader/rts5229.c, drivers/mmc/core/host.c,
+    drivers/mmc/host/cqhci-core.c, drivers/mmc/host/rtsx_pci_sdmmc.c,
+    include/linux/mmc/host.h, include/linux/rtsx_common.h
+crates/stela-drivers/src/bluetooth/: Intel PCIe DMA/MMIO command transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/bluetooth/btintel.c, drivers/bluetooth/btintel.h,
+    drivers/bluetooth/btintel_pcie.c, drivers/bluetooth/btintel_pcie.h
+crates/stela-drivers/src/bluetooth/: Broadcom 4377/4378/4387/4388 PCIe library
+  transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only OR MIT ; MIT
+    drivers/bluetooth/hci_bcm4377.c, include/net/bluetooth/hci.h
+crates/stela-drivers/src/bluetooth/: Broadcom PCIe controller initialization
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only ;
+    MIT
+    net/bluetooth/hci_sync.c
+crates/stela-drivers/src/bluetooth/: Explicit Broadcom PCIe native attachment
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0 WITH
+    Linux-syscall-note ; GPL-2.0-only ; MIT ; MIT AND GPL-2.0-only
+    drivers/pci/pci.c, include/uapi/linux/pci_regs.h
+crates/stela-drivers/src/input/: Cypress PIP calibration and explicit
+  low-power scan controls
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    drivers/input/mouse/cyapa.c, drivers/input/mouse/cyapa.h,
+    drivers/input/mouse/cyapa_gen5.c, drivers/input/mouse/cyapa_gen6.c
+crates/stela-drivers/src/input/: i8042, AT keyboard and standard PS/2 mouse
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/keyboard/atkbd.c, drivers/input/mouse/psmouse-base.c,
+    drivers/input/serio/i8042.c, drivers/input/serio/libps2.c,
+    include/linux/i8042.h
+crates/stela-drivers/src/input/: Protocol probe
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/input/mouse/elantech.c, drivers/input/mouse/psmouse-base.c,
+    drivers/input/mouse/synaptics.c, drivers/input/serio/i8042-acpipnpio.h,
+    drivers/pnp/pnpacpi/core.c
+crates/stela-drivers/src/input/: SMBus companions
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/input/mouse/elantech.c, drivers/input/mouse/elantech.h,
+    drivers/input/mouse/psmouse-smbus.c, drivers/input/mouse/synaptics.c,
+    drivers/input/mouse/synaptics.h, drivers/input/rmi4/rmi_smbus.c
+crates/stela-drivers/src/input/: Conventional Synaptics absolute PS/2
+  operation
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    drivers/input/mouse/psmouse-base.c, drivers/input/mouse/psmouse.h,
+    drivers/input/mouse/synaptics.c, drivers/input/mouse/synaptics.h,
+    drivers/input/serio/libps2.c
+crates/stela-drivers/src/input/: Elantech PS/2 v4 operation
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    drivers/input/input-mt.c, include/linux/input/mt.h
+crates/stela-drivers/src/input/: Native input timer admission
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; see source headers
+    drivers/input/mouse/elantech.c, drivers/input/mouse/elantech.h
+crates/stela-drivers/src/input/: Standard HID-over-I2C
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/hid/hid-ids.h, drivers/hid/i2c-hid/i2c-hid-core.c
+crates/stela-drivers/src/input/: RMI4 transport and F01 control substrate
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/rmi4/rmi_bus.h, drivers/input/rmi4/rmi_driver.c,
+    drivers/input/rmi4/rmi_driver.h, drivers/input/rmi4/rmi_f01.c,
+    drivers/input/rmi4/rmi_i2c.c, drivers/input/rmi4/rmi_smbus.c
+crates/stela-drivers/src/input/: RMI F12 contact input
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/rmi4/rmi_f12.c
+crates/stela-drivers/src/input/: RMI F11 ordinary contact and relative input
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/rmi4/rmi_f11.c
+crates/stela-drivers/src/input/: RMI F1A buttons
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/rmi4/rmi_f1a.c
+crates/stela-drivers/src/input/: RMI F03 PS/2 passthrough
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/rmi4/rmi_f03.c
+crates/stela-drivers/src/input/: RMI F30 GPIO buttons
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/rmi4/rmi_f30.c
+crates/stela-drivers/src/input/: RMI F3A GPIO buttons
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/rmi4/rmi_f3a.c
+crates/stela-drivers/src/input/: ELAN proprietary I2C touchpads
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/mouse/elan_i2c.h, drivers/input/mouse/elan_i2c_core.c,
+    drivers/input/mouse/elan_i2c_i2c.c
+crates/stela-drivers/src/input/: ELAN ordinary SMBus touchpads
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/mouse/elan_i2c_smbus.c
+crates/stela-drivers/src/input/: Cypress APA Gen3 I2C touchpads
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/input/mouse/cyapa.c, drivers/input/mouse/cyapa.h,
+    drivers/input/mouse/cyapa_gen3.c
+crates/stela-drivers/src/input/: Cypress Gen5 PIP I2C physical input engine
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/input/mouse/cyapa_gen5.c, drivers/input/mouse/cyapa_gen6.c
+crates/stela-drivers/src/input/: AMD SFH v2
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/hid/amd-sfh-hid/ (6 files),
+    drivers/hid/amd-sfh-hid/hid_descriptor/ (3 files)
+crates/stela-drivers/src/input/ish/: Intel ISH resident-firmware transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/hid/intel-ish-hid/, include/linux/intel-ish-client-if.h
+crates/stela-drivers/src/usb/: USB SuperSpeed endpoint contexts
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only
+    drivers/usb/host/xhci-mem.c, include/uapi/linux/usb/ch9.h
+crates/stela-drivers/src/usb/: SCSI-transparent USB BOT logical units and
+  command ownership
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/usb/storage/scsiglue.c, drivers/usb/storage/transport.c,
+    include/linux/usb/storage.h
+crates/stela-drivers/src/usb/: Native UAS command transport and enclosure
+  policy
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/scsi/ (2 files), drivers/usb/storage/ (3 files),
+    include/linux/usb/uas.h, include/scsi/scsi_proto.h
+crates/stela-drivers/src/usb/: xHCI primary bulk streams
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/usb/host/ (6 files), include/linux/pci_ids.h,
+    include/uapi/linux/usb/ch9.h
+crates/stela-drivers/src/usb/: Native UAS logical-unit discovery and shared
+  USB block services
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ;
+    GPL-2.0-only AND GPL-2.0-or-later
+    drivers/scsi/scsi_scan.c
+crates/stela-drivers/src/usb/: Bounded root-attached UAS reset and fresh
+  binding
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/usb/core/hub.c, drivers/usb/host/xhci-hub.c,
+    drivers/usb/host/xhci-ring.c, drivers/usb/host/xhci.c,
+    drivers/usb/host/xhci.h
+crates/stela-drivers/src/usb/: Retained BOT/UAS removable-media rescan
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/scsi/ (4 files), drivers/usb/storage/ (3 files)
+crates/stela-drivers/src/usb/: Native SuperSpeed hub cold enumeration
+    Linux see section; GPL-2.0-only
+    drivers/usb/core/hub.c, include/uapi/linux/usb/ch11.h
+crates/stela-drivers/src/usb/: Generation-bound USB consumer ownership
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/usb/core/hub.c, drivers/usb/host/xhci.c
+crates/stela-drivers/src/usb/: xHCI controller save/restore, PCI quirks and
+  standard SuperSpeed ISO
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only
+    drivers/usb/host/pci-quirks.c, drivers/usb/host/xhci-mem.c,
+    drivers/usb/host/xhci-pci.c, drivers/usb/host/xhci-ring.c,
+    drivers/usb/host/xhci.c
+crates/stela-drivers/src/usb/: Renesas uPD720201/202 volatile firmware
+  initialization
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0
+    drivers/usb/host/xhci-pci-renesas.c
+crates/stela-drivers/src/usb/: External hub selective suspend and complete
+  USB2 port contracts
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/usb/core/hub.c, include/linux/usb.h, include/uapi/linux/usb/ch11.h
+crates/stela-drivers/src/usb/: Ordinary xHCI transfer identity and completion
+  retirement
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only
+    drivers/usb/host/xhci-ring.c, drivers/usb/host/xhci.h
+crates/stela-drivers/src/usb/: Native topology suspend and fresh resume
+  consumers
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/usb/core/hub.c, drivers/usb/host/xhci-hub.c,
+    drivers/usb/host/xhci.c
+crates/stela-drivers/src/usb/: Descriptor-bound BOT bridge policies and
+  retained recovery service
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/scsi/sd.c, drivers/usb/storage/unusual_devs.h,
+    drivers/usb/storage/unusual_uas.h, drivers/usb/storage/usb.c,
+    include/linux/usb_usual.h
+crates/stela-drivers/src/usb/: Descriptor-qualified USB HID transport and
+  native consumers
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/hid/hid-core.c, drivers/hid/hid-input.c,
+    drivers/hid/hid-multitouch.c, drivers/hid/usbhid/hid-core.c
+crates/stela-drivers/src/usb/: Generic native USB forwarding
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0
+    drivers/usb/core/message.c, drivers/usb/core/urb.c
+crates/stela-drivers/src/usb/: Opt-in serialized UAS ABORT TASK (source only)
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0
+    drivers/usb/gadget/function/f_tcm.c, include/linux/usb/uas.h
+crates/stela-drivers/src/usb/: Opt-in single-Finger hybrid touch frames
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/hid/hid-multitouch.c
+crates/stela-drivers/src/usb/: Exact legacy keyboard Array selection
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/hid/hid-core.c
+crates/stela-drivers/src/usb/: Logitech c539 native HID++ receiver
+  side-channel
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/hid/hid-ids.h, drivers/hid/hid-logitech-dj.c,
+    drivers/hid/hid-logitech-hidpp.c
+crates/stela-drivers/src/usb/: EHCI root enumeration and Bulk-Only storage
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/usb/core/hub.c, drivers/usb/core/message.c
+crates/stela-drivers/src/usb/audio/: Native USB2 isochronous transport
+    Linux see section; GPL-2.0 ; GPL-2.0-only
+    drivers/usb/host/pci-quirks.c, include/linux/pci_ids.h
+crates/stela-drivers/src/usb/audio/: Native USB Audio Class 2 for this PC
+    Linux see section; GPL-2.0 WITH Linux-syscall-note ; GPL-2.0-only ;
+    GPL-2.0-or-later
+    include/linux/usb/audio-v2.h, include/uapi/linux/usb/audio.h, sound/usb/
+    (10 files)
+crates/stela-drivers/src/usb/audio/: USB Audio Class 1 Type-I PCM
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 WITH
+    Linux-syscall-note ; GPL-2.0-or-later
+    include/uapi/linux/usb/audio.h, sound/usb/clock.c, sound/usb/endpoint.c,
+    sound/usb/format.c, sound/usb/mixer.c
+crates/stela-drivers/src/usb/audio/: Standard UAC1/UAC2 mixer units
+    Linux see section; GPL-2.0-or-later
+    sound/usb/mixer.c
+crates/stela-drivers/src/usb/audio/: UAC3 Basic Audio Device Definition
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 ; GPL-2.0-only ;
+    GPL-2.0-or-later
+    include/linux/usb/audio-v3.h, sound/usb/pcm.c, sound/usb/power.c,
+    sound/usb/power.h, sound/usb/stream.c
+crates/stela-drivers/src/usb/audio/: Optional native UAC2 AudioControl status
+  notifications
+    Linux see section; GPL-2.0-or-later
+    sound/usb/mixer.c
+crates/stela-drivers/src/usb/audio/: Native UAC1 AudioControl status endpoint
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 WITH
+    Linux-syscall-note ; GPL-2.0-or-later
+    include/linux/usb/audio-v2.h, include/uapi/linux/usb/audio.h,
+    sound/usb/mixer.c
+crates/stela-drivers/src/usb/audio/: Standard scalar USB feature controls
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    sound/usb/mixer.c, sound/usb/mixer.h
+crates/stela-drivers/src/usb/audio/: Native UAC2 terminal connector
+  observations
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
+    include/linux/usb/audio-v2.h, sound/usb/mixer.c
+crates/stela-drivers/src/usb/bluetooth/: Realtek USB2 CVSD SCO extension
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
+    drivers/bluetooth/btusb.c
+crates/stela-drivers/src/usb/bluetooth/: Realtek queued wideband SCO and
+  native timing admission
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; see source headers
+    drivers/bluetooth/btrtl.c
+crates/stela-drivers/src/usb/bluetooth/: USB Bluetooth legacy HCI transport
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
+    drivers/bluetooth/btusb.c, include/net/bluetooth/hci.h
+crates/stela-drivers/src/usb/bluetooth/: Intel USB Bluetooth legacy RSA
+  initialization
+    Linux 711d3297bac870af42088a467459a0634c1970ca; GPL-2.0-or-later ; MIT
+    drivers/bluetooth/btintel.c, drivers/bluetooth/btintel.h,
+    drivers/gpu/drm/i915/gt/uc/intel_uc_fw_abi.h
+crates/stela-drivers/src/usb/bluetooth/: Realtek Bluetooth EPATCH v1 staging
+    Linux 59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01; GPL-2.0-or-later
+    drivers/bluetooth/btrtl.c
+crates/stela-drivers/src/usb/bluetooth/: MediaTek MT79xx Bluetooth firmware
+  staging
+    Linux 59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01,
+    2d70539375587a68bdef08fec2e0e1a51698c93a; ISC
+    drivers/bluetooth/btmtk.c
+crates/stela-drivers/src/usb/bluetooth/: MediaTek native MT7921/MT7922/MT7925
+  USB initialization
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later ; ISC
+    lib/bluetooth.c, net/bluetooth/hci_sync.c
+crates/stela-drivers/src/usb/bluetooth/: Exact MT7925 USB Bluetooth media
+  transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later ; ISC
+    drivers/bluetooth/btusb.c
+crates/stela-drivers/src/usb/bluetooth/: MT7925 ordinary HCI Reset and idle
+  SCO schedule retirement
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; see source headers
+    net/bluetooth/hci_sync.c
+crates/stela-drivers/src/usb/bluetooth/: Broadcom/Cypress USB PatchRAM
+  initialization
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/bluetooth/btbcm.c
+crates/stela-drivers/src/usb/bluetooth/: Qualcomm Rome / WCN USB DFU
+  initialization
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/bluetooth/btusb.c
+crates/stela-drivers/src/usb/bluetooth/: Atheros AR3011 / AR3012 pre-HCI USB
+  bootloader
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/bluetooth/ath3k.c
+crates/stela-drivers/src/usb/bluetooth/: Intel GfP2 / GaP bulk HCI ISO
+  transport
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
+    drivers/bluetooth/btintel.c, drivers/bluetooth/btusb.c,
+    include/net/bluetooth/hci.h, include/net/bluetooth/hci_core.h
+crates/stela-drivers/src/usb/bluetooth/: Broadcom LM_DIAG native USB records
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
+    drivers/bluetooth/btusb.c, include/net/bluetooth/hci.h
+crates/stela-drivers/src/usb/ehci/: EHCI implementation references
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/usb/host/ehci-hcd.c, drivers/usb/host/ehci-pci.c,
+    drivers/usb/host/ehci-q.c, drivers/usb/host/ehci.h,
+    include/linux/usb/ehci_def.h
+crates/stela-drivers/src/usb/ehci/: Held-D0 root suspend and resume
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b,
+    cc9de5d4b5ab6459f5774946aa3195ad51236fa8; see source headers
+    drivers/usb/host/ehci-hub.c, include/linux/usb.h
+crates/stela-drivers/src/usb/ehci/: Managed configuration deactivation
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b,
+    cc9de5d4b5ab6459f5774946aa3195ad51236fa8; see source headers
+    drivers/usb/core/message.c
+crates/stela-drivers/src/usb/ethernet/: Realtek RTL815x USB Ethernet
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/net/usb/r8152.c, include/linux/usb/r8152.h
+crates/stela-drivers/src/usb/ethernet/: CDC Ethernet transfer review
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ;
+    GPL-2.0-or-later AND GPL-2.0-only
+    drivers/net/usb/cdc_ether.c, drivers/net/usb/cdc_ncm.c,
+    drivers/net/usb/usbnet.c, include/uapi/linux/usb/cdc.h
+crates/stela-drivers/src/usb/ethernet/: RTL8156A revision-specific startup
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 WITH
+    Linux-syscall-note
+    include/uapi/linux/mdio.h
+crates/stela-drivers/src/usb/ethernet/: ASIX AX88179/178A USB Ethernet
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 WITH
+    Linux-syscall-note ; GPL-2.0-or-later
+    drivers/net/mii.c, drivers/net/usb/ax88179_178a.c,
+    drivers/net/usb/usbnet.c, include/linux/usb/usbnet.h,
+    include/uapi/linux/mii.h
+crates/stela-drivers/src/usb/ethernet/: ASIX AX88772/A/B USB Ethernet
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-or-later
+    drivers/net/phy/ax88796b.c, drivers/net/phy/phy-core.c,
+    drivers/net/phy/phy_device.c, drivers/net/usb/asix.h,
+    drivers/net/usb/asix_common.c, drivers/net/usb/asix_devices.c
+crates/stela-drivers/src/usb/typec/: Native UCSI Type-C controller and ACPI
+  mailbox
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/usb/typec/ucsi/ucsi.c, drivers/usb/typec/ucsi/ucsi.h,
+    drivers/usb/typec/ucsi/ucsi_acpi.c
+crates/stela-drivers/src/usb/typec/: Cypress CCGx native HPI transport
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ; ISC
+    drivers/usb/typec/ucsi/ucsi_ccg.c
+crates/stela-drivers/src/usb/typec/: TI TPS6598x native PD controller
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ;
+    GPL-2.0-or-later ; ISC
+    drivers/usb/typec/tipd/core.c, drivers/usb/typec/tipd/tps6598x.h,
+    include/linux/usb/typec.h
+crates/stela-drivers/src/usb/typec/: Native Type-C signal switches and
+  retimers
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only ;
+    GPL-2.0-or-later
+    drivers/usb/typec/mux/nb7vpq904m.c, drivers/usb/typec/mux/pi3usb30532.c,
+    drivers/usb/typec/mux/ps883x.c, drivers/usb/typec/mux/tusb1046.c,
+    include/linux/usb/
+crates/stela-drivers/src/usb/typec/: Intel native PMC/IOM Type-C mux and SCU
+  IPC
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
+    drivers/platform/x86/intel_scu_ipc.c,
+    drivers/platform/x86/intel_scu_pcidrv.c,
+    drivers/platform/x86/intel_scu_pltdrv.c,
+    drivers/usb/typec/mux/intel_pmc_mux.c,
+    include/linux/platform_data/x86/intel_scu_ipc.h
+crates/stela-drivers/src/usb/typec/: UCSI native CAM and DisplayPort
+  coordination
+    Linux a804c5742bff224d4cb4d25dd383554d598be32b; see source headers
+    drivers/usb/typec/altmodes/displayport.c,
+    drivers/usb/typec/ucsi/displayport.c, include/linux/usb/typec_dp.h
+crates/stela-linux/: Shared Linux random API
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0 OR BSD-3-Clause
+    drivers/char/random.c
+crates/stela-linux/: Shared Linux ACPI DSM helpers
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
+    drivers/acpi/utils.c
+crates/stela-linux/: Original Tiny SRCU
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
+    kernel/rcu/srcutiny.c, kernel/rcu/update.c, kernel/rcu/wakeme.c
