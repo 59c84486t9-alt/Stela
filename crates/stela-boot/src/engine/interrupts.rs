@@ -501,6 +501,13 @@ fn cr2() -> u64 {
     value
 }
 
+fn cr3() -> u64 {
+    let value;
+    // SAFETY: reading CR3 has no side effects.
+    unsafe { asm!("mov {}, cr3", out(reg) value, options(nomem, nostack, preserves_flags)) };
+    value
+}
+
 pub(crate) extern "sysv64" fn interrupt(frame: &mut Frame, saved: &SavedState<'_>) {
     if crate::native_irq::dispatch(frame.vector as u8) {
         return;
@@ -612,14 +619,25 @@ pub fn fatal(frame: &Frame) -> ! {
     unsafe extern "C" {
         static __ImageBase: u8;
     }
+    // The root says which page tables the fault saw, and the drivers' lock
+    // whether this processor was inside a host driver call, which runs in
+    // the loader's root.
+    let drivers = if super::storage::host_drivers_held_here() {
+        "here"
+    } else if super::storage::host_drivers_taken() {
+        "elsewhere"
+    } else {
+        "free"
+    };
     output::fatal(format_args!(
         "unexpected x86 exception in the system engine: vector={} error={:#x} rip={:#x} \
-         (image+{:#x}) cr2={:#x} stack={callers}",
+         (image+{:#x}) cr2={:#x} cr3={:#x} drivers={drivers} stack={callers}",
         frame.vector,
         frame.error,
         frame.rip,
         frame.rip.wrapping_sub(&raw const __ImageBase as u64),
-        cr2()
+        cr2(),
+        cr3()
     ))
 }
 
