@@ -1,5 +1,5 @@
-# Format, lint and unit tests of the stela command on Linux and Windows.
-# Neither needs a built stela.efi: build.rs only embeds one when STELA_EFI
+# Format, lint and unit tests of the stela command on Linux, Windows and
+# macOS. None needs a built stela.efi: build.rs only embeds one when STELA_EFI
 # names it, so this stays far cheaper than the release workflow.
 name: ci
 
@@ -42,6 +42,9 @@ jobs:
             skip: >-
               --skip repair_recovers_interrupted_bundle_rename
               --skip repair_restores_recorded_state
+          - system: macos
+            os: macos-26
+            skip: ""
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
