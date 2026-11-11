@@ -339,8 +339,10 @@ struct Descriptor {
 
 static mut IDT: [Gate; 256] = [Gate::MISSING; 256];
 
-/// Terminal handlers: report one letter on the UART, exit QEMU and halt. They
-/// never enter Rust, allocate, take a lock or resume native code.
+/// Terminal handlers: report one letter on the UART, write stop code 0x12 to
+/// the hypervisor exit port when CPUID reports a hypervisor
+/// ([`stela_boot_core::exit_port`]) and halt. They never enter Rust,
+/// allocate, take a lock or resume native code.
 macro_rules! fatal_handler {
     ($name:ident, $letter:literal) => {
         #[unsafe(naked)]
@@ -349,12 +351,18 @@ macro_rules! fatal_handler {
                 concat!("mov al, ", $letter),
                 "mov dx, 0x3f8",
                 "out dx, al",
+                "mov eax, 1",
+                "cpuid",
+                "bt ecx, {hypervisor}",
+                "jnc 2f",
                 "mov eax, 0x12",
-                "mov dx, 0xf4",
+                "mov dx, {port}",
                 "out dx, eax",
                 "2: cli",
                 "hlt",
                 "jmp 2b",
+                hypervisor = const stela_boot_core::exit_port::HYPERVISOR_BIT,
+                port = const stela_boot_core::exit_port::PORT,
             )
         }
     };

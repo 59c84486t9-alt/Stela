@@ -23,9 +23,7 @@ use core::{
 use stela_drivers::block::{BlockDevice, BlockError, Submission};
 use stela_runtime::pc::boot_log::{PENDING_BYTES, Pending, Unkept, Writer};
 
-/// `isa-debug-exit` under QEMU; an unused port on a PC.
 mod terminal;
-use terminal::EXIT_PORT;
 pub(crate) use terminal::{panic, print_stack_at};
 
 /// One engine-wide value. The mount runs on one processor and its handlers
@@ -860,19 +858,22 @@ pub fn arguments(args: fmt::Arguments<'_>) {
     }
 }
 
-/// Report `code` to QEMU's `isa-debug-exit`, which ends a harness run
-/// there; on a PC the port is unused and execution continues.
+/// Report `code` on the hypervisor exit port, which may end a virtual
+/// machine's run there; a PC without a hypervisor gets no write, and
+/// execution continues.
 pub fn debug_exit(code: u32) {
     // The run may end here: whatever waits for the serial port goes first.
     unqueue_serial();
-    // SAFETY: an otherwise unused PC port.
-    unsafe {
-        asm!("out dx, eax", in("dx") EXIT_PORT, in("eax") code, options(nostack, preserves_flags));
-    }
+    terminal::exit(code);
 }
 
-/// Report `code` to QEMU, then halt. On a PC the screen keeps the output
-/// until the machine is powered off.
+/// Whether CPUID reports a hypervisor, whose exit port takes stop codes.
+pub fn hypervisor_exit_port() -> bool {
+    terminal::exit_port().is_some()
+}
+
+/// Report `code` on the hypervisor exit port, then halt. On a PC the screen
+/// keeps the output until the machine is powered off.
 pub fn terminate(code: u32) -> ! {
     arguments(format_args!(
         "STELA STOPPED code={code:#x}; power off to continue\n"

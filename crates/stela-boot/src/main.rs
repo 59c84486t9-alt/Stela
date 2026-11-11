@@ -250,6 +250,11 @@ fn main() -> Status {
     firmware::start_ticker();
     let log = log_file::open();
     output::arguments(format_args!("{}", host_identity()));
+    if output::hypervisor_exit_port() {
+        output::arguments(format_args!(
+            "HOST hypervisor present: stop codes also go to its exit port\n"
+        ));
+    }
     status::begin("Connecting the firmware's drivers to every device");
     let handles = firmware::connect_all();
     output::arguments(format_args!("FIRMWARE connected {handles} handles\n"));

@@ -2,9 +2,10 @@
 //! host's, through its ACPI fixed hardware (`stela_runtime::pc::power`),
 //! and the host's power button becomes the guest's.
 //!
-//! Each transition first writes the stop code to `isa-debug-exit`, so a
-//! QEMU harness run still ends with that code; on other machines the port
-//! is unused and the transition follows.
+//! Each transition first writes the stop code to the hypervisor exit port
+//! under a hypervisor ([`stela_boot_core::exit_port`]), so a virtual
+//! machine's run can end with that code; a PC without a hypervisor gets no
+//! write, and the transition follows.
 //!
 //! - Restart: the FADT's reset register, then the 8042 keyboard
 //!   controller's reset pulse (command 0xfe, the PC/AT reset line), then a
@@ -32,7 +33,7 @@ use stela_runtime::pc::power::{
 };
 use stela_soc::machine::AppleDevices;
 
-/// The stop codes `isa-debug-exit` reports.
+/// The stop codes the hypervisor exit port reports.
 pub const RESTART_CODE: u32 = 0x15;
 pub const POWER_OFF_CODE: u32 = 0x17;
 

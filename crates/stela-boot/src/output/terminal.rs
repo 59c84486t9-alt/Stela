@@ -4,12 +4,40 @@ use core::{
     arch::asm,
     fmt::Write,
     panic::PanicInfo,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
-/// QEMU's raw debug-exit port; no queued/logging output is invoked before it.
-pub(super) const EXIT_PORT: u16 = 0xf4;
+/// Whether the hypervisor exit port is written: 0 before CPUID is read,
+/// then 1 without a hypervisor and 2 under one.
+static EXIT_PORT: AtomicU8 = AtomicU8::new(0);
 static PRINTING: AtomicBool = AtomicBool::new(false);
+
+/// The hypervisor exit port ([`stela_boot_core::exit_port`]) under a
+/// hypervisor, `None` on a PC without one. CPUID is read once; no
+/// queued/logging output is invoked.
+pub(super) fn exit_port() -> Option<u16> {
+    let present = match EXIT_PORT.load(Ordering::Relaxed) {
+        0 => {
+            let present =
+                stela_boot_core::exit_port::port(core::arch::x86_64::__cpuid(1).ecx).is_some();
+            EXIT_PORT.store(1 + u8::from(present), Ordering::Relaxed);
+            present
+        }
+        state => state == 2,
+    };
+    present.then_some(stela_boot_core::exit_port::PORT)
+}
+
+/// Write `code` to the hypervisor exit port, where there is one.
+pub(super) fn exit(code: u32) {
+    if let Some(port) = exit_port() {
+        // SAFETY: the debug-exit port of the hypervisor CPUID reports; a
+        // write the hypervisor does not own is discarded.
+        unsafe {
+            asm!("out dx, eax", in("dx") port, in("eax") code, options(nostack, preserves_flags));
+        }
+    }
+}
 
 /// The stack words that lie in this image, as offsets from its base: the
 /// return addresses among them name the caller, as `stela.pdb` resolves them.
@@ -84,13 +112,10 @@ pub(crate) fn panic(info: &PanicInfo<'_>) -> ! {
         }
         print_stack();
         let _ = writeln!(Serial, "STELA STOPPED code=0x11; power off to continue");
-        // SAFETY: native panic executes at CPL0, with the configured raw exit
-        // port. No heap/log/runtime code may run between this report and halt.
-        unsafe {
-            asm!("out dx, eax", in("dx") EXIT_PORT, in("eax") 0x11u32, options(nostack, preserves_flags));
-        }
+        // No heap/log/runtime code may run between this report and halt.
+        exit(0x11);
     }
-    // Other panicking CPUs must not exit the VM before the first report ends.
+    // Other panicking CPUs must not end the run before the first report ends.
     loop {
         // SAFETY: terminal CPL0 path, no continuation or resource release.
         unsafe {
