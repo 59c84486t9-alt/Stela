@@ -120,6 +120,14 @@ pub const ENABLED: usize = 0x14c;
 /// layer still drawing stays clear until `io_fence_notify` names its surface.
 pub const READY: usize = 0x150;
 pub const BACKGROUND: usize = 0x154;
+/// The background color's color bits. The high byte is read as alpha: every
+/// recorded swap, layerless ones included, sends 0 or 0xff000000.
+const BACKGROUND_COLOR: u32 = 0x00ff_ffff;
+
+/// Whether a swap's background color is black at any alpha.
+pub fn black_background(background: u32) -> bool {
+    background & BACKGROUND_COLOR == 0
+}
 /// Linux `DCP_REMOVE_LAYERS`.
 pub const REMOVE_LAYERS: u32 = 1 << 31;
 

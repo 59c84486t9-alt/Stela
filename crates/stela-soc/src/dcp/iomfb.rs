@@ -1627,9 +1627,13 @@ impl Methods {
             Ok(shown) => shown,
             Err(reason) => return self.refuse(tag, reason),
         };
-        // WindowServer retries a failed swap forever, and its layers cover the
-        // screen: a background color is a recorded gap, shown black.
-        if submission.background != 0 {
+        // Uncovered regions show the background, which scanout composes as
+        // black. Every recorded WindowServer swap sends 0 or 0xff000000,
+        // including its first, layerless one, so the high byte is read as
+        // alpha (or unused) and black at any alpha is exact. The channel
+        // order of any other color is not recorded; WindowServer retries a
+        // failed swap forever, so it is a reported gap, shown black.
+        if !swap::black_background(submission.background) {
             self.report_unmodeled(
                 tag,
                 Degraded::Ignored("the background is shown black"),

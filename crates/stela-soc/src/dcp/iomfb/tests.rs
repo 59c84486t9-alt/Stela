@@ -930,22 +930,67 @@ fn refreshes_keep_the_monitors_rate_and_phase_when_looked_at_late() {
     assert_eq!((rate + 0x8000) >> 16, 144);
 }
 
+/// Present a swap on the 4x2 test screen whose one layer, a single pixel at
+/// (0, 0) read as 0x10 bytes, leaves the rest uncovered, with `background`.
+fn present_uncovered(background: u32) -> (Methods, Vec<u8>) {
+    let screen = TestScreen(Rc::default(), Some(MODE));
+    let frames = screen.0.clone();
+    let mut methods = Methods::new(Box::new(screen), interface());
+    let id = start_swap(&mut methods);
+    let mut input = submission(id, &[(0, 1, 1, 0x1000)]);
+    input[swap::BACKGROUND..swap::BACKGROUND + 4].copy_from_slice(&background.to_le_bytes());
+    returned(methods.call(*b"A407", &input, 0xc));
+    methods
+        .present(0, |_, bytes| {
+            bytes.fill(0x10);
+            true
+        })
+        .unwrap();
+    let frame = frames.borrow()[0].clone();
+    (methods, frame)
+}
+
+#[test]
+fn uncovered_regions_show_a_black_background_exactly() {
+    // Every recorded WindowServer swap sends 0 or 0xff000000: black, with
+    // the high byte alpha or unused, and black is what scanout composes.
+    for background in [0, 0xff00_0000, 0x8000_0000] {
+        let (mut methods, frame) = present_uncovered(background);
+        let mut want = [0, 0, 0, 0xff].repeat(8);
+        want[0..4].copy_from_slice(&[0x10, 0x10, 0x10, 0xff]);
+        assert_eq!(frame, want, "{background:#x}");
+        assert!(methods.unmodeled.is_empty(), "{background:#x}");
+        let reported = methods.take_unmodeled();
+        assert!(
+            !reported.iter().any(|line| line.contains("unmodeled")),
+            "{reported:?}"
+        );
+    }
+}
+
 #[test]
 fn a_background_color_is_a_recorded_gap_shown_black() {
-    let mut methods = methods();
-    let id = start_swap(&mut methods);
-    let mut input = submission(id, &[]);
-    input[swap::BACKGROUND] = 0xff;
-    returned(methods.call(*b"A407", &input, 0xc));
-    assert_eq!(methods.frames.back().unwrap().swap_id, id);
+    // The channel order of a non-black background is not recorded: the
+    // uncovered pixels stay black and the swap is reported once.
+    let (mut methods, frame) = present_uncovered(0xff);
+    assert_eq!(&frame[4..], [0, 0, 0, 0xff].repeat(7));
     assert!(methods.unmodeled.contains(&(*b"A407", None)));
     let reported = methods.take_unmodeled();
-    assert_eq!(reported.len(), 1);
+    let unmodeled: Vec<_> = reported
+        .iter()
+        .filter(|line| line.contains("unmodeled"))
+        .collect();
+    assert_eq!(unmodeled.len(), 1, "{reported:?}");
     assert!(
-        reported[0].contains("answered success, value ignored")
-            && reported[0].contains("background is shown black"),
+        unmodeled[0].contains("answered success, value ignored")
+            && unmodeled[0].contains("background is shown black"),
         "{reported:?}"
     );
+    let id = start_swap(&mut methods);
+    let mut again = submission(id, &[]);
+    again[swap::BACKGROUND] = 0xff;
+    returned(methods.call(*b"A407", &again, 0xc));
+    assert!(methods.take_unmodeled().is_empty());
 }
 
 #[test]
