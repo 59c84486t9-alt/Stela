@@ -29,25 +29,24 @@ env:
   # The release body and each archive's INSTALL.txt. Plain text that also
   # reads as Markdown.
   ABOUT: |-
-    Stela runs macOS for Apple silicon on an x86-64 PC. It boots from UEFI and translates the whole guest system. It is experimental.
+    Stela boots unmodified Apple silicon macOS on x86-64 PCs. It is very experimental.
 
     Requirements:
 
-    - An x86-64-v2 PC (Intel Nehalem, AMD Bulldozer or newer) with UEFI, Secure Boot off and 8 GB of RAM or more.
-    - An NVIDIA GeForce GTX 16 or RTX 20, 30, 40 or 50 series GPU. macOS needs it: Stela has no software renderer.
+    - An x86-64-v2 CPU (about 2011 or newer), UEFI with Secure Boot off, 8 GB of RAM.
+    - An NVIDIA GTX 16 or RTX 20 series GPU or newer.
     - A USB stick: 8 GB for the network installer, 32 GB for the full installer.
-    - An empty GPT partition of at least 60 GB for macOS.
-    - Supported profile: Mac mini (M2) with macOS 27.x. Setup shows other Macs and versions greyed out.
+    - An empty GPT partition of at least 60 GB.
+    - Network access during the install.
   INSTALL: |-
     Install:
 
-    1. Unpack the archive for your system. The stela program has the boot program, the GPU driver and Stela.app built in.
-    2. Run it on the PC that will run macOS, so it adds the firmware for that PC's GPU: sudo ./stela setup (Linux, macOS). On Windows, double-click stela.exe.
-    3. Pick the USB, the installer type and the Mac model, check the named disk, and confirm. Setup erases the USB.
-    4. Boot the PC from the USB. The first install needs the network once (Ethernet or Wi-Fi) for Apple's signing server.
-    5. Later: stela setup status --usb <USB> and stela setup update stela --usb <USB>.
+    1. Unpack the archive for your system.
+    2. On the PC that will run macOS, run sudo ./stela setup (Linux, macOS) or double-click stela.exe (Windows).
+    3. Choose the USB stick, the installer type and the Mac model, then confirm. Setup erases the USB stick.
+    4. Boot the PC from the USB stick.
 
-    The programs are not signed by Apple or Microsoft. On macOS run xattr -d com.apple.quarantine stela after a browser download; on Windows SmartScreen asks once.
+    You are responsible for following Apple's software license agreement and terms of use.
 
 jobs:
   version:
