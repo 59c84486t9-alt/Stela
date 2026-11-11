@@ -583,17 +583,28 @@ fn bind_body(handle: i32, special: i32, secret: &[u8], flags: u64) -> Vec<u8> {
     bytes
 }
 
+/// Change lock state v1: session, handle, operation, secret, flags 0 (as
+/// every selector but sel 12, and sel 12 for `aks_unlock_bag`, send it).
 fn lock_body(handle: i32, operation: u32, secret: &[u8]) -> Vec<u8> {
+    lock_body_with(handle, operation, secret, 0)
+}
+
+fn lock_body_with(handle: i32, operation: u32, secret: &[u8], flags: u64) -> Vec<u8> {
     let mut bytes = handle_body(handle);
     bytes.extend_from_slice(&operation.to_le_bytes());
     blob(&mut bytes, secret);
+    bytes.extend_from_slice(&flags.to_le_bytes());
     bytes
 }
 
 fn transition_body(handle: i32, transition: u32, secret: &[u8]) -> Vec<u8> {
+    transition_body_with(handle, transition, 0, secret)
+}
+
+fn transition_body_with(handle: i32, transition: u32, argument: u64, secret: &[u8]) -> Vec<u8> {
     let mut bytes = handle_body(handle);
     bytes.extend_from_slice(&transition.to_le_bytes());
-    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.extend_from_slice(&argument.to_le_bytes());
     blob(&mut bytes, secret);
     bytes
 }
@@ -775,7 +786,25 @@ fn bind_lock_state_and_transition_refuse_shapes_outside_the_login_calls() {
         (CHANGE_LOCK_STATE, 1, lock_body(handle, 2, &[])),
         (CHANGE_LOCK_STATE, 1, lock_body(handle, QUERY, b"s")),
         (CHANGE_LOCK_STATE, 1, lock_body(handle, LOCK, b"s")),
-        (DEVICE_STATE_TRANSITION, 0, transition_body(handle, 1, &[])),
+        (
+            CHANGE_LOCK_STATE,
+            1,
+            lock_body_with(handle, QUERY, &[], 0x100),
+        ),
+        (
+            CHANGE_LOCK_STATE,
+            1,
+            lock_body_with(handle, UNLOCK, &[], 0x800),
+        ),
+        (DEVICE_STATE_TRANSITION, 0, transition_body(handle, 10, &[])),
+        (DEVICE_STATE_TRANSITION, 0, transition_body(handle, 2, &[])),
+        (DEVICE_STATE_TRANSITION, 0, transition_body(handle, 1, b"s")),
+        (DEVICE_STATE_TRANSITION, 0, transition_body(handle, 5, b"s")),
+        (
+            DEVICE_STATE_TRANSITION,
+            0,
+            transition_body_with(handle, 1, 1, &[]),
+        ),
     ] {
         assert!(sep.ask(2, command, variant, &body).is_err());
     }
@@ -1015,4 +1044,23 @@ fn a_change_runs_both_derivations_in_bounded_slices() {
         buffers.output[buffers.output.len() - 8..],
         [1, 0, 0, 0, 0, 0, 0, 0]
     );
+}
+
+/// Change lock state as the 26A434 and 26B123 codecs lay it out: the
+/// secret is followed by the u64 flags word, so the shape without it (the
+/// one build-57 parsed, which refused every guest request with "bytes
+/// after its fields") and any trailer are refused.
+#[test]
+fn change_lock_state_carries_the_trailing_flags_word() {
+    let full = lock_body(SESSION_BAG, QUERY, &[]);
+    let decode = |bytes: &[u8]| {
+        Request::parse(CHANGE_LOCK_STATE, 1, &mut Fields { bytes, at: 0 }).map(|_| ())
+    };
+    assert_eq!(decode(&full), Ok(()));
+    for end in 0..full.len() {
+        assert!(decode(&full[..end]).is_err(), "prefix {end}");
+    }
+    let mut trailing = full.clone();
+    trailing.extend_from_slice(&[0; 4]);
+    assert!(decode(&trailing).is_err());
 }

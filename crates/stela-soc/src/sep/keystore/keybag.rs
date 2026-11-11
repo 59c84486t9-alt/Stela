@@ -1,4 +1,5 @@
-//! User keybags: create, save, load, unload and UUID.
+//! User keybags: create, save, load, unload and UUID; session binding, lock
+//! state, unlock and passcode change.
 //!
 //! **Callers.** At login `applekeystored` (26A434 `/usr/libexec/applekeystored`,
 //! x86_64 slice 0x100031f87..0x1000320c9; the arm64e slice has the same calls)
@@ -53,11 +54,17 @@ pub(super) const LOAD: u8 = 3;
 pub(super) const UNLOAD: u8 = 5;
 pub(super) const UUID: u8 = 6;
 /// `__ipc_change_lock_state_v1` (VA 0xfffffe0009d5c8f8): session, handle,
-/// operation, secret; reply u32 and u64 (`change_lock_state` VA
-/// 0xfffffe0009d28870 passes the u64 to `handle_device_state_return`).
-/// Operations from the callers: -1 asks whether a bag is bound (sel 14,
-/// `aks_get_system`, VA 0xfffffe0009d37f68), 0 unlocks with the secret
-/// (`aks_unlock_bag` 0x187d7398c), 1 locks (`aks_lock_bag` 0x187d73ec0).
+/// operation, secret, then a u64 of flags; reply u32 and u64
+/// (`change_lock_state` VA 0xfffffe0009d28870 passes the u64 to
+/// `handle_device_state_return`). The flags are 0x100 and 0x800 from the
+/// function's two Booleans (0xfffffe0009d288a4..0xfffffe0009d288b4); every
+/// selector but sel 12 passes both false, and sel 12 takes them from its
+/// fifth scalar, which `aks_unlock_bag` (0x187d7398c) sends as 0. The
+/// 26B123 kernel the guest runs (`_code_ipc_change_lock_state` VA
+/// 0xfffffe0009d5c1ac) has the same layout. Operations from the callers:
+/// -1 asks whether a bag is bound (sel 14, `aks_get_system`, VA
+/// 0xfffffe0009d37f68), 0 unlocks with the secret (`aks_unlock_bag`), 1
+/// locks (`aks_lock_bag` 0x187d73ec0).
 pub(super) const CHANGE_LOCK_STATE: u8 = 4;
 /// `__ipc_make_system_keybag_v1` (VA 0xfffffe0009d3e72c from
 /// `set_device_keybag` VA 0xfffffe0009d2a694): session, the bag's handle,
@@ -192,6 +199,7 @@ pub(super) enum Request<'a> {
         handle: i32,
         operation: u32,
         secret: &'a [u8],
+        flags: u64,
     },
     Bind {
         handle: i32,
@@ -269,11 +277,13 @@ impl<'a> Request<'a> {
                 handle: handle(fields)?,
             },
             // _code_ipc_change_lock_state v1 (VA 0xfffffe0009d41544): u64,
-            // u32, u32, blob; reply u32, u64.
+            // u32, u32, blob, u64 (0xfffffe0009d416a8..0xfffffe0009d41770);
+            // reply u32, u64. Variant 0 has no trailing u64 and is not sent.
             CHANGE_LOCK_STATE => Self::LockState {
                 handle: handle(fields)?,
                 operation: fields.word()?,
                 secret: fields.blob()?,
+                flags: fields.lword()?,
             },
             // _code_ipc_make_system_keybag v1 (VA 0xfffffe0009d42b7c): u64,
             // u32, u32, blob, u64; no reply fields.
@@ -844,7 +854,9 @@ impl Keybags {
                 handle,
                 operation,
                 secret,
+                flags,
             } => match operation {
+                _ if flags != 0 => Err(self.refuse_shape("lock-state flags", flags, note)),
                 QUERY | LOCK if !secret.is_empty() => {
                     Err(self.refuse_shape("lock-state secret length", secret.len() as u64, note))
                 }
