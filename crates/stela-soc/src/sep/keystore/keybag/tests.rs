@@ -655,7 +655,7 @@ const UNLOCKED_SINCE_LOAD: u32 = BEEN_UNLOCKED;
 fn a_first_login_creates_saves_binds_and_unlocks_and_the_next_boot_loads_and_unlocks() {
     let mut sep = Sep::new(ROOT);
     // Before the login, the session handle has no bag: today's answer.
-    assert_eq!(sep.ss(SESSION_BAG), 0b1010);
+    assert_eq!(sep.ss(SESSION_BAG), 0b0110);
     assert!(sep.lock_state(QUERY, &[]).is_err());
     let handle = sep.create(2, SECRET);
     let saved = sep.save(2, handle);
@@ -672,7 +672,7 @@ fn a_first_login_creates_saves_binds_and_unlocks_and_the_next_boot_loads_and_unl
         sep.lock_state(UNLOCK, SECRET),
         Ok((UNLOCKED_SINCE_LOAD, NOTIFY_LOCK_STATE))
     );
-    assert_eq!(sep.ss(SESSION_BAG), 8);
+    assert_eq!(sep.ss(SESSION_BAG), BEEN_UNLOCKED as u8);
     assert_eq!(sep.lock_state(UNLOCK, SECRET), Ok((UNLOCKED_SINCE_LOAD, 0)));
     // applekeystored then unloads its creation handle; the bound bag stays.
     assert!(
@@ -680,7 +680,7 @@ fn a_first_login_creates_saves_binds_and_unlocks_and_the_next_boot_loads_and_unl
             .unwrap()
             .is_empty()
     );
-    assert_eq!(sep.ss(SESSION_BAG), 8);
+    assert_eq!(sep.ss(SESSION_BAG), BEEN_UNLOCKED as u8);
     // Lock, then loginwindow's unlock transition with the passcode.
     assert_eq!(
         sep.lock_state(LOCK, &[]),
@@ -696,7 +696,7 @@ fn a_first_login_creates_saves_binds_and_unlocks_and_the_next_boot_loads_and_unl
         .unwrap();
     assert_eq!(fields[..8], NOTIFY_LOCK_STATE.to_le_bytes());
     assert_eq!(fields[8..], [0; 8]);
-    assert_eq!(sep.ss(SESSION_BAG), 8);
+    assert_eq!(sep.ss(SESSION_BAG), BEEN_UNLOCKED as u8);
     let refusal = sep
         .ask(
             2,
@@ -717,7 +717,7 @@ fn a_first_login_creates_saves_binds_and_unlocks_and_the_next_boot_loads_and_unl
     );
     // Binding the same bag again changes nothing.
     next.bind(loaded).unwrap();
-    assert_eq!(next.ss(SESSION_BAG), 8);
+    assert_eq!(next.ss(SESSION_BAG), BEEN_UNLOCKED as u8);
     // applekeystored's reset (the user's passcode no longer opens the old
     // bag, after a password change the SEP was not told of): a new bag,
     // bound over the old one, locked until the new passcode opens it.
@@ -756,12 +756,12 @@ fn without_its_saved_bag_the_next_boot_answers_as_before_keybags() {
         // Either way, until applekeystored binds a bag, the session
         // handle answers as before.
         let _ = next.load(&saved);
-        assert_eq!(next.ss(SESSION_BAG), 0b1010);
+        assert_eq!(next.ss(SESSION_BAG), 0b0110);
         assert!(next.lock_state(QUERY, &[]).is_err());
         assert!(next.lock_state(UNLOCK, SECRET).is_err());
     }
     let mut fresh = Sep::new(ROOT);
-    assert_eq!(fresh.ss(SESSION_BAG), 0b1010);
+    assert_eq!(fresh.ss(SESSION_BAG), 0b0110);
     assert!(fresh.lock_state(QUERY, &[]).is_err());
     // The next login simply creates a new bag.
     let handle = fresh.create(2, SECRET);
@@ -876,7 +876,7 @@ fn a_password_change_rewraps_the_bag_so_only_the_new_passcode_unlocks_it() {
     // applekeystored: change on the session's bag, then save and write.
     assert_eq!(sep.change(SESSION_BAG, SECRET, NEW_SECRET), Ok(1));
     // The bound bag stays unlocked: its seed did not change.
-    assert_eq!(sep.ss(SESSION_BAG), 8);
+    assert_eq!(sep.ss(SESSION_BAG), BEEN_UNLOCKED as u8);
     let saved = sep.save(2, SESSION_BAG);
     assert!(!saved.windows(NEW_SECRET.len()).any(|w| w == NEW_SECRET));
     // Locked again, only the new passcode opens it.
@@ -1111,12 +1111,12 @@ fn lock_assertions_defer_a_lock_until_the_last_drop() {
     assert_eq!(session(&mut sep, HOLD_ASSERTION), Ok(0));
     // The lock waits for the assertions; the bag stays open.
     assert_eq!(session(&mut sep, LOCK_TRANSITION), Ok(0));
-    assert_eq!(sep.ss(SESSION_BAG), 8);
+    assert_eq!(sep.ss(SESSION_BAG), 4);
     assert_eq!(session(&mut sep, DROP_ASSERTION), Ok(0));
-    assert_eq!(sep.ss(SESSION_BAG), 8);
+    assert_eq!(sep.ss(SESSION_BAG), 4);
     // The last drop applies the lock and asks the kernel to notify it.
     assert_eq!(session(&mut sep, DROP_ASSERTION), Ok(NOTIFY_LOCK_STATE));
-    assert_eq!(sep.ss(SESSION_BAG), 9);
+    assert_eq!(sep.ss(SESSION_BAG), 5);
     assert!(session(&mut sep, DROP_ASSERTION).is_err());
     // The passcode opens it again; a lock without assertions is at once.
     sep.lock_state(UNLOCK, SECRET).unwrap();
@@ -1128,7 +1128,7 @@ fn lock_assertions_defer_a_lock_until_the_last_drop() {
     assert_eq!(sep.lock_state(LOCK, &[]), Ok((UNLOCKED_SINCE_LOAD, 0)));
     sep.lock_state(UNLOCK, SECRET).unwrap();
     assert_eq!(session(&mut sep, DROP_ASSERTION), Ok(0));
-    assert_eq!(sep.ss(SESSION_BAG), 8);
+    assert_eq!(sep.ss(SESSION_BAG), 4);
     // The creation handle is its own instance: it holds no assertion.
     assert!(transition(&mut sep, handle, DROP_ASSERTION).is_err());
     // A bag without a passcode never locks.

@@ -714,9 +714,9 @@ fn device_state_says_unlocked_without_a_passcode_in_both_variants() {
         let mut fields = parsed.fields();
         let state = fields.blob().unwrap();
         fields.end().unwrap();
-        // The state, after every key below `ss`: SET, SEQUENCE, "ss", 10.
+        // The state, after every key below `ss`: SET, SEQUENCE, "ss", 6.
         assert_eq!(state[0], 0x31);
-        assert_eq!(state[state.len() - 9..], *b"\x30\x07\x0c\x02ss\x02\x01\x0a");
+        assert_eq!(state[state.len() - 9..], *b"\x30\x07\x0c\x02ss\x02\x01\x06");
     }
     assert_eq!(
         keystore.diagnostics().collect::<Vec<_>>(),

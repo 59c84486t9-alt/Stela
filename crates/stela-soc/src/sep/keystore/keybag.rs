@@ -151,7 +151,7 @@ const HAS_PASSCODE: u32 = 1;
 const HEADER_BYTES: usize = 4 + 4 + 4 + 4 + UUID_BYTES + 4 + 4 + SALT_BYTES;
 const MAC_BYTES: usize = 32;
 const NO_PIN: u32 = 1 << 1;
-const BEEN_UNLOCKED: u32 = 1 << 3;
+const BEEN_UNLOCKED: u32 = 1 << 2;
 /// `handle_device_state_return` bit 2: notify a lock-state change (device
 /// state 5) on the handle (VA 0xfffffe0009d263b8..0xfffffe0009d263d8).
 const NOTIFY_LOCK_STATE: u64 = 1 << 2;
@@ -546,7 +546,7 @@ struct Bag {
 
 impl Bag {
     /// The keybag state flags (`ss`): `keybag_state_locked` (bit 0),
-    /// `keybag_state_no_pin` (bit 1), `keybag_state_been_unlocked` (bit 3).
+    /// `keybag_state_no_pin` (bit 1), `keybag_state_been_unlocked` (bit 2).
     fn state(&self) -> u32 {
         let locked = self.passcode.is_none();
         u32::from(locked)

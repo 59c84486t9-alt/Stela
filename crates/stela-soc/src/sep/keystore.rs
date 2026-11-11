@@ -128,8 +128,12 @@ const TERMINATED: [u8; 20] = {
     fields
 };
 /// `ss`: never locked and no passcode, from the keybag state flags
-/// `keybag_state_no_pin` (bit 1) and `keybag_state_been_unlocked` (bit 3).
-const UNLOCKED_WITHOUT_PASSCODE: u8 = 0b1010;
+/// `keybag_state_no_pin` (bit 1) and `keybag_state_been_unlocked` (bit 2).
+/// The kernel passes `ss` unchanged as selector 7's scalar
+/// (`handleUserClientSelector` case 7 stores `decode_extended_state` field 0,
+/// `der_key_state_state` = "ss"), and `MKBDeviceUnlockedSinceBoot`,
+/// `MKBUserUnlockedSinceBoot` and secd's "Keybag never unlocked" test bit 2.
+const UNLOCKED_WITHOUT_PASSCODE: u8 = 0b0110;
 
 const LENGTH_BYTES: usize = 4;
 const DIGEST_START: usize = 4;
