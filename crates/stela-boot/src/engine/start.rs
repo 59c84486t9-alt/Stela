@@ -2685,6 +2685,7 @@ fn start_devices(
             let medium_partition = options.install_source;
             let log_partition = handoff.log_partition.map(Guid);
             let usb4_approved = options.usb4_approved.clone();
+            let boot_disk = handoff.boot_disk().map(alloc::string::String::from);
             let work = kernel_work
                 .unwrap_or_else(|| output::fatal("native probe requires an owned continuation"));
             // Each PCI function's start has its own budget
@@ -2717,6 +2718,7 @@ fn start_devices(
                             usb_disks: &owned_usb,
                             wifi: owned_wifi.as_ref(),
                             external,
+                            boot_disk: boot_disk.as_deref(),
                         },
                     )
                 }

@@ -973,6 +973,9 @@ pub struct Selection<'a> {
     /// With `--external-disks`, the guest hub's free ports, which every disk
     /// left over fills in probe order.
     pub external: Option<usize>,
+    /// Where the firmware found the disk Stela started from
+    /// (`Handoff::boot_disk`), for the account of a failed search.
+    pub boot_disk: Option<&'a str>,
 }
 
 /// Open the explicitly selected partitions in the loader's identity root
@@ -1004,6 +1007,7 @@ pub unsafe fn open(
         usb_disks,
         wifi,
         external,
+        boot_disk,
     } = *selection;
     if let Some(serial) = usb_disks
         .iter()
@@ -1057,6 +1061,82 @@ pub unsafe fn open(
     // HD Audio controllers stay attached for the boot; no guest audio device
     // consumes them yet.
     Vec::leak(core::mem::take(&mut devices.hda_hosts));
+    // A USB device can connect, train its link and answer its first
+    // commands after its controller's start looked at the ports: the
+    // partitions this boot needs are waited for while the USB hosts report
+    // news, as Linux finds such a device later through a port change.
+    let required: Vec<Named> = targets
+        .iter()
+        .map(|target| Named::Disk((*target).clone()))
+        .chain(medium.map(Named::Unique))
+        .chain(preboot.map(|target| Named::Disk(target.clone())))
+        .chain(fdr.map(Named::Host))
+        .collect();
+    let waited = {
+        let clock = handoff.clock;
+        let mut late = Vec::new();
+        let usb_hosts = &mut devices.usb_hosts;
+        let dma = &mut dma;
+        let mut announced = false;
+        let waited = storage::wait_for_named(
+            &mut devices.disks,
+            &required,
+            storage::PATIENCE,
+            &mut || clock.now_us(),
+            &mut || {
+                if !announced {
+                    announced = true;
+                    output::arguments(format_args!(
+                        "HOST DISKS waiting for a partition this boot needs\n"
+                    ));
+                    crate::status::progress("waiting for the USB devices");
+                }
+                let mut arrival = storage::Arrival::default();
+                for host in usb_hosts.iter_mut() {
+                    let mut changes = host.poll(&mut *dma, firmware);
+                    firmware.report();
+                    for device in &changes.removed {
+                        output::arguments(format_args!("USB removed {}\n", device.location));
+                    }
+                    for device in &changes.added.devices {
+                        output::arguments(format_args!("USB added {}\n", device.location));
+                    }
+                    arrival.news |= !changes.removed.is_empty()
+                        || !changes.added.devices.is_empty()
+                        || !changes.added.failures.is_empty();
+                    arrival.disks.extend(
+                        core::mem::take(&mut changes.added.disks)
+                            .into_iter()
+                            .map(|disk| Box::new(disk) as Box<dyn BlockDevice>),
+                    );
+                    late.push(changes.added);
+                }
+                arrival
+            },
+            &mut |us| clock.delay(us),
+        );
+        for found in late {
+            devices.absorb_usb(None, found, firmware);
+        }
+        waited
+    };
+    if waited.looks != 0 {
+        output::arguments(format_args!(
+            "HOST DISKS waited {} ms, {} looks, {} disks arrived, {}\n",
+            waited.waited_us / 1000,
+            waited.looks,
+            waited.arrived,
+            if waited.missing.is_none() {
+                "all found"
+            } else {
+                "still missing"
+            }
+        ));
+    }
+    if let Some((at, _)) = &waited.missing {
+        let role = role_of(*at, targets.len(), medium.is_some(), preboot.is_some());
+        account(&devices, role, waited.waited_us, boot_disk);
+    }
     for host in &devices.usb4_hosts {
         let usb4::Connection::Firmware { icm, ready, early } = host.connection() else {
             continue;
@@ -1326,6 +1406,110 @@ pub unsafe fn open(
         disks: host_disks,
         power: core::mem::take(&mut devices.power),
     })
+}
+
+/// What the required partition at `at` of `open`'s list is for.
+fn role_of(at: usize, targets: usize, medium: bool, preboot: bool) -> &'static str {
+    let medium_at = targets;
+    let preboot_at = medium_at + usize::from(medium);
+    let fdr_at = preboot_at + usize::from(preboot);
+    match at {
+        at if at < targets => "the partition chosen for the Mac's SSD",
+        at if medium && at == medium_at => "the USB stick's data partition (install files)",
+        at if preboot && at == preboot_at => "the installed macOS system",
+        at if at == fdr_at => "the stick's FDR storage partition",
+        _ => "a partition this boot needs",
+    }
+}
+
+/// The few lines a failed disk search leaves on the screen, its only
+/// record then: what is missing, where the firmware had found the stick,
+/// each controller and disk Stela's drivers found. No serial numbers.
+fn account(
+    devices: &stela_drivers::probe::Devices,
+    role: &str,
+    waited_us: u64,
+    boot_disk: Option<&str>,
+) {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Not found after {} s: {role}.",
+        waited_us.div_ceil(1_000_000)
+    ));
+    match boot_disk {
+        Some(at) => lines.push(format!("The firmware started Stela from {at}.")),
+        None => lines.push(String::from(
+            "Where the firmware found the stick is unknown.",
+        )),
+    }
+    let mut controllers: Vec<(stela_drivers::bus::pci::Address, Vec<u8>, usize)> = Vec::new();
+    for (address, probe) in &devices.usb_port_probes {
+        let at = match controllers.iter().position(|(a, ..)| a == address) {
+            Some(at) => at,
+            None => {
+                controllers.push((*address, Vec::new(), 0));
+                controllers.len() - 1
+            }
+        };
+        if probe.connected {
+            controllers[at].1.push(probe.port);
+        } else {
+            controllers[at].2 += 1;
+        }
+    }
+    for (address, connected, empty) in &controllers {
+        let ports: Vec<String> = connected.iter().map(|port| format!("{port}")).collect();
+        lines.push(format!(
+            "USB {address}: devices on ports [{}], {empty} empty.",
+            ports.join(" ")
+        ));
+    }
+    for (address, error) in &devices.failures {
+        if crate::storage::may_hold_disks(error) {
+            lines.push(format!("{address} failed: {error}."));
+        }
+    }
+    for (address, class, why) in &devices.unsupported {
+        if class[0] == 0x01 || class[..2] == [0x0c, 0x03] {
+            lines.push(format!("{address} not driven: {why}."));
+        }
+    }
+    if let Some((location, error)) = devices.usb_failures.first() {
+        lines.push(format!(
+            "USB failures: {}, first {location}: {}.",
+            devices.usb_failures.len(),
+            stela_drivers::usb::xhci::explain(error)
+        ));
+    }
+    let disks: Vec<String> = devices
+        .disks
+        .iter()
+        .map(|disk| {
+            let identity = disk.identity();
+            let bytes = identity
+                .blocks
+                .saturating_mul(u64::from(identity.block_size));
+            format!(
+                "{:?} {} {} GB {}-byte blocks",
+                identity.transport,
+                identity.model.trim(),
+                bytes / 1_000_000_000,
+                identity.block_size
+            )
+        })
+        .collect();
+    if disks.is_empty() {
+        lines.push(String::from("Disks found: none."));
+    } else {
+        lines.push(format!("Disks found: {}.", disks.join("; ")));
+    }
+    lines.push(String::from(
+        "The boot log on the USB stick does not have this part; this screen is its only record.",
+    ));
+    for line in &lines {
+        output::arguments(format_args!("HOST DISKS {line}\n"));
+        crate::status::info(line);
+    }
 }
 
 /// A partition [`open`] leaves out when it cannot be opened.

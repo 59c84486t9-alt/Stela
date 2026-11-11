@@ -734,6 +734,51 @@ impl Drop for DeviceStart<'_> {
 }
 
 impl Devices {
+    /// Take up what an xHCI controller brought, at its start or later
+    /// through a port change: disks, inputs, links, audio and Bluetooth,
+    /// failures and the owners that keep them.
+    pub fn absorb_usb(
+        &mut self,
+        address: Option<Address>,
+        found: xhci::Found,
+        firmware: &dyn crate::firmware::Provider,
+    ) {
+        self.disks.extend(
+            found
+                .disks
+                .into_iter()
+                .map(|d| Box::new(d) as Box<dyn BlockDevice>),
+        );
+        self.inputs.extend(
+            found
+                .inputs
+                .into_iter()
+                .map(|input| InputDevice::Usb(Box::new(input))),
+        );
+        self.usb_devices.extend(found.devices);
+        self.usb_hosts.extend(found.hosts);
+        self.usb_storage.extend(found.storage);
+        self.audio.extend(found.audio);
+        self.bluetooth_bootloaders.extend(found.bootloaders);
+        for mut device in found.bluetooth {
+            // The kept result owns its evidence/errors;
+            // no catalog borrow or firmware bytes escape.
+            let _ = device
+                .initialize_with_provider(firmware, self.bluetooth_platform.platform_inputs());
+            self.bluetooth.push(device);
+        }
+        self.nics.extend(found.links.into_iter().map(Adapter::Usb));
+        self.nics
+            .extend(found.vendor_links.into_iter().map(Adapter::UsbVendor));
+        self.usb_failures.extend(found.failures);
+        self.usb_vendor_failures.extend(found.vendor_failures);
+        self.usb_unused.extend(found.unused);
+        if let Some(address) = address {
+            self.usb_port_probes
+                .extend(found.probes.into_iter().map(|probe| (address, probe)));
+        }
+    }
+
     /// Failures from attempted native vendor initialization, USB and PCIe,
     /// and USB controllers no vendor setup here takes, each named once: no
     /// consumer runs them, so they stay off.
@@ -1307,46 +1352,7 @@ pub unsafe fn probe_with_provider(
                     firmware,
                     minimum.clone(),
                 ) {
-                    Ok(found) => {
-                        devices.disks.extend(
-                            found
-                                .disks
-                                .into_iter()
-                                .map(|d| Box::new(d) as Box<dyn BlockDevice>),
-                        );
-                        devices.inputs.extend(
-                            found
-                                .inputs
-                                .into_iter()
-                                .map(|input| InputDevice::Usb(Box::new(input))),
-                        );
-                        devices.usb_devices.extend(found.devices);
-                        devices.usb_hosts.extend(found.hosts);
-                        devices.usb_storage.extend(found.storage);
-                        devices.audio.extend(found.audio);
-                        devices.bluetooth_bootloaders.extend(found.bootloaders);
-                        for mut device in found.bluetooth {
-                            // The kept result owns its evidence/errors;
-                            // no catalog borrow or firmware bytes escape.
-                            let _ = device.initialize_with_provider(
-                                firmware,
-                                devices.bluetooth_platform.platform_inputs(),
-                            );
-                            devices.bluetooth.push(device);
-                        }
-                        devices
-                            .nics
-                            .extend(found.links.into_iter().map(Adapter::Usb));
-                        devices
-                            .nics
-                            .extend(found.vendor_links.into_iter().map(Adapter::UsbVendor));
-                        devices.usb_failures.extend(found.failures);
-                        devices.usb_vendor_failures.extend(found.vendor_failures);
-                        devices.usb_unused.extend(found.unused);
-                        devices
-                            .usb_port_probes
-                            .extend(found.probes.into_iter().map(|probe| (address, probe)));
-                    }
+                    Ok(found) => devices.absorb_usb(Some(address), found, firmware),
                     Err(error) => {
                         start.quiesce(&mut function);
                         devices.failures.push((address, error.into()));
