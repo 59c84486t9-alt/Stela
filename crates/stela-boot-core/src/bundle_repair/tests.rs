@@ -96,10 +96,15 @@ fn the_steps_create_the_directories_the_manual_remedy_does() {
                /System/Volumes/Data/Library/GPUBundles/StelaGPU.bundle/Contents/MacOS";
     assert!(commands.contains(&format!("/bin/mkdir -p -m 0755 {all}").as_str()));
     assert!(commands.contains(&format!("/usr/sbin/chown root:wheel {all}").as_str()));
-    assert!(commands.contains(
-        &format!("/usr/bin/xattr -w com.apple.rootless KernelExtensionManagement {all}").as_str()
-    ));
-    assert!(commands.contains(&format!("/usr/bin/chflags restricted {all}").as_str()));
+    // The rootless attribute fails with EPERM even with protection off,
+    // and Metal loads the plugin without it.
+    assert!(!commands.iter().any(|command| command.contains("xattr")));
+    let chflags = format!("/usr/bin/chflags restricted {all}");
+    assert!(commands.contains(&chflags.as_str()));
+    // Only the restricted flag is optional.
+    for step in &steps {
+        assert_eq!(step.required, step.command != chflags, "{}", step.command);
+    }
     assert_eq!(commands.last(), Some(&"/bin/sync"));
     assert!(
         steps
@@ -199,7 +204,7 @@ fn the_driver_types_each_step_after_the_last_succeeded_then_restarts() {
     assert_eq!(console.lines, expected);
     let events = driver.take_events();
     assert_eq!(events.first(), Some(&Event::Shell));
-    assert_eq!(events.last(), Some(&Event::Rebooting));
+    assert_eq!(events.last(), Some(&Event::Rebooting { repaired: true }));
     assert_eq!(
         events
             .iter()
@@ -213,24 +218,52 @@ fn the_driver_types_each_step_after_the_last_succeeded_then_restarts() {
 }
 
 #[test]
-fn a_failing_step_stops_the_script_there() {
+fn a_failing_required_step_syncs_and_restarts_without_the_rest() {
     let mut now = 0;
     let mut driver = Driver::new(steps(), now);
     let mut console = Console::new();
     start(&mut driver, &mut now);
     let status = |command: &str| Some(u32::from(command.starts_with("/sbin/mount -P 2")) * 66);
     pump(&mut driver, &mut console, &mut now, &status);
-    assert!(driver.failed());
-    assert_eq!(console.lines.len(), 3);
-    assert!(driver.take_events().contains(&Event::Failed(Failure::Exit {
+    // The guest restarts itself, so the engine need not.
+    assert!(!driver.failed());
+    assert_eq!(console.lines.len(), 4);
+    assert_eq!(console.lines[3], SYNC_AND_REBOOT);
+    let events = driver.take_events();
+    assert!(events.contains(&Event::Failed(Failure::Exit {
         index: 2,
         status: 66
     })));
-    // Nothing more is typed, whatever the console prints.
+    assert_eq!(events.last(), Some(&Event::Rebooting { repaired: false }));
+    // A later status line types nothing more.
     driver.line("STELA-REPAIR-4-rc=0", now);
-    driver.tick(now + 1_000_000);
     assert_eq!(driver.next_byte(), None);
     assert!(driver.take_events().is_empty());
+    // No restart in time: the engine restarts the PC.
+    driver.tick(now + RESTART_SECONDS * 1000);
+    assert!(driver.failed());
+    assert_eq!(driver.take_events(), [Event::Failed(Failure::NoRestart)]);
+}
+
+#[test]
+fn a_failing_optional_step_is_logged_and_the_repair_goes_on() {
+    let mut now = 0;
+    let mut driver = Driver::new(steps(), now);
+    let mut console = Console::new();
+    start(&mut driver, &mut now);
+    let status = |command: &str| Some(u32::from(command.starts_with("/usr/bin/chflags")));
+    pump(&mut driver, &mut console, &mut now, &status);
+    assert!(!driver.failed());
+    let chflags = steps().iter().position(|step| !step.required).unwrap();
+    let events = driver.take_events();
+    assert!(events.contains(&Event::Skipped {
+        index: chflags,
+        status: 1
+    }));
+    assert!(!events.iter().any(|event| matches!(event, Event::Failed(_))));
+    assert_eq!(events.last(), Some(&Event::Rebooting { repaired: true }));
+    assert_eq!(console.lines.len(), steps().len() + 1);
+    assert_eq!(console.lines.last().map(String::as_str), Some(REBOOT));
 }
 
 #[test]

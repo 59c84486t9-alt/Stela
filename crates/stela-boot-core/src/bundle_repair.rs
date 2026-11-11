@@ -17,11 +17,23 @@
 //! boots, so neither a failure nor a power loss in the middle repeats the
 //! repair by itself. In that boot the engine types [`steps`] at the guest's
 //! root console ([`Driver`]), as the manual remedy does: it mounts the Data
-//! volume, creates the plugin's directories root-owned, 0755, with the
-//! `KernelExtensionManagement` rootless class and the restricted flag, and
-//! restarts. The next boot's kext then creates the files in place. A boot
-//! that finds the plugin installed removes the record; one that finds it
-//! missing after an attempt stops with the manual remedy ([`decide`]).
+//! volume, creates the plugin's directories root-owned and 0755, marks them
+//! restricted, syncs and restarts. The next boot's kext then creates the
+//! files in place. Only mounting and the directories are required: a
+//! failing optional step is logged and the repair goes on. A failed
+//! required step still syncs and restarts, and a repair whose shell stops
+//! answering restarts the PC, so the next normal boot always tries the kext
+//! once. A boot that finds the plugin installed removes the record; one
+//! that finds it missing after an attempt stops with the manual remedy
+//! ([`decide`]).
+//!
+//! The manual remedy's `xattr -w com.apple.rootless ...` is not a step: it
+//! failed with EPERM in every manual installation (runs 20261106-070021,
+//! 20261106-083218, 20261107-060417, and in this repair's first run), even
+//! with filesystem protection off, and Metal loaded the plugin each time
+//! without it. Whether Metal needs the restricted flag is unproven: every
+//! manual installation set it, so the repair tries it but does not depend
+//! on it.
 use alloc::{
     format,
     string::{String, ToString},
@@ -163,6 +175,9 @@ pub fn decide(report: Report, boot: Boot, record: Record, persistent: bool) -> D
 pub struct Step {
     pub command: String,
     pub seconds: u64,
+    /// A failure ends the repair; otherwise it is logged and the next step
+    /// goes on.
+    pub required: bool,
 }
 
 /// The repair's commands, in order, each answered by its exit status.
@@ -172,7 +187,16 @@ pub fn steps() -> Vec<Step> {
         .map(|directory| format!("{PLUGINS}/{directory}"))
         .collect::<Vec<_>>()
         .join(" ");
-    let step = |command: String, seconds| Step { command, seconds };
+    let step = |command: String, seconds| Step {
+        command,
+        seconds,
+        required: true,
+    };
+    let optional = |command: String, seconds| Step {
+        command,
+        seconds,
+        required: false,
+    };
     Vec::from([
         // The Data volume, as the single-user banner says for a machine
         // with a SEP.
@@ -183,17 +207,15 @@ pub fn steps() -> Vec<Step> {
         // Each named last, so `-m` gives each its mode.
         step(format!("/bin/mkdir -p -m 0755 {directories}"), 30),
         step(format!("/usr/sbin/chown root:wheel {directories}"), 30),
-        step(
-            format!("/usr/bin/xattr -w com.apple.rootless KernelExtensionManagement {directories}"),
-            30,
-        ),
-        step(format!("/usr/bin/chflags restricted {directories}"), 30),
+        optional(format!("/usr/bin/chflags restricted {directories}"), 30),
         step("/bin/sync".into(), 120),
     ])
 }
 
 /// The command that ends the repair; the guest's restart restarts the PC.
 pub const REBOOT: &str = "/sbin/reboot";
+/// What ends a repair whose required step failed: what was written stays.
+pub const SYNC_AND_REBOOT: &str = "/bin/sync; /sbin/reboot";
 /// The line the single-user shell's banner starts with.
 pub const BANNER: &str = "*** Single-user boot ***";
 /// How long the single-user banner may take to appear, from the start.
@@ -237,9 +259,22 @@ impl core::fmt::Display for Failure {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     Shell,
-    Sent { index: usize, command: String },
-    Passed { index: usize },
-    Rebooting,
+    Sent {
+        index: usize,
+        command: String,
+    },
+    Passed {
+        index: usize,
+    },
+    /// An optional step failed; the repair goes on.
+    Skipped {
+        index: usize,
+        status: u32,
+    },
+    /// The restart was typed; `repaired` when every required step passed.
+    Rebooting {
+        repaired: bool,
+    },
     Failed(Failure),
 }
 
@@ -324,10 +359,17 @@ impl Driver {
                 let Ok(status) = digits.parse::<u32>() else {
                     return;
                 };
-                if status != 0 {
-                    return self.fail(Failure::Exit { index, status });
+                if status == 0 {
+                    self.events.push(Event::Passed { index });
+                } else if self.steps[index].required {
+                    // The shell answers: keep what was written and restart,
+                    // so the next boot tries the kext.
+                    self.events
+                        .push(Event::Failed(Failure::Exit { index, status }));
+                    return self.reboot(SYNC_AND_REBOOT, false, now);
+                } else {
+                    self.events.push(Event::Skipped { index, status });
                 }
-                self.events.push(Event::Passed { index });
                 self.advance(index + 1, now);
             }
             _ => {}
@@ -339,9 +381,13 @@ impl Driver {
         if index < self.steps.len() {
             return self.send(index, now);
         }
-        self.input.extend_from_slice(REBOOT.as_bytes());
+        self.reboot(REBOOT, true, now);
+    }
+
+    fn reboot(&mut self, command: &str, repaired: bool, now: u64) {
+        self.input.extend_from_slice(command.as_bytes());
         self.input.push(b'\n');
-        self.events.push(Event::Rebooting);
+        self.events.push(Event::Rebooting { repaired });
         self.state = State::Rebooting {
             deadline: now + RESTART_SECONDS * MILLIS,
         };
@@ -379,7 +425,9 @@ impl Driver {
         core::mem::take(&mut self.events)
     }
 
-    /// Whether the repair failed.
+    /// Whether the repair stopped without a guest restart on its way: the
+    /// shell did not answer or macOS did not restart. The engine then
+    /// restarts the PC itself.
     pub fn failed(&self) -> bool {
         self.state == State::Failed
     }
@@ -393,7 +441,16 @@ pub fn describe(event: &Event) -> String {
             format!("BUNDLE REPAIR step {} sent: {command}", index + 1)
         }
         Event::Passed { index } => format!("BUNDLE REPAIR step {} ok", index + 1),
-        Event::Rebooting => "BUNDLE REPAIR directories created; restarting".to_string(),
+        Event::Skipped { index, status } => format!(
+            "BUNDLE REPAIR step {} exited with status {status}; optional, going on",
+            index + 1
+        ),
+        Event::Rebooting { repaired: true } => {
+            "BUNDLE REPAIR directories created; restarting".to_string()
+        }
+        Event::Rebooting { repaired: false } => {
+            "BUNDLE REPAIR syncing and restarting; the next boot tries the kext once".to_string()
+        }
         Event::Failed(failure) => format!("BUNDLE REPAIR failed: {failure}"),
     }
 }
