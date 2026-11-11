@@ -1155,8 +1155,26 @@ impl Heartbeat {
                     u128::from(times[index].longest) * 1_000_000 / u128::from(host::COUNTER_HZ),
                 ));
             }
+            // By call since the last beat: the calls that changed another
+            // PE's lines, and the microseconds they spent waking those PEs
+            // after releasing the lock (a sleeping PE's core takes an
+            // interrupt), which the calling PE's exit pays.
+            let mut wakes = String::from("DEVICE WAKES calls/us");
+            for (index, call) in Call::ALL.iter().enumerate() {
+                wakes.push_str(&format!(
+                    " {}={}/{}",
+                    call.name(),
+                    times[index]
+                        .woken
+                        .wrapping_sub(self.lock_times[index].woken),
+                    u128::from(times[index].wake.wrapping_sub(self.lock_times[index].wake))
+                        * 1_000_000
+                        / u128::from(host::COUNTER_HZ),
+                ));
+            }
             self.lock_times = times;
             output::arguments(format_args!("{locks}\n"));
+            output::arguments(format_args!("{wakes}\n"));
             self.lock_waits = waits;
             output::arguments(format_args!("{shares}\n"));
             output::arguments(format_args!("{fetches}\n"));

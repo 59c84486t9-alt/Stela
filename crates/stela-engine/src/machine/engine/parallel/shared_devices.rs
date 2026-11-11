@@ -15,6 +15,11 @@ pub(super) struct Board<D> {
     pub(super) waited: [AtomicU64; Call::ALL.len()],
     pub(super) held: [AtomicU64; Call::ALL.len()],
     pub(super) longest: [AtomicU64; Call::ALL.len()],
+    /// By [`Call`], the calls that changed another PE's lines and the host
+    /// ticks they spent waking those PEs once the lock was released
+    /// ([`wake_after`]): a sleeping PE's host core takes an interrupt.
+    pub(super) woken: [AtomicU64; Call::ALL.len()],
+    pub(super) wake_ticks: [AtomicU64; Call::ALL.len()],
     /// The latest count any machine passed, which every later call sees at
     /// least: the PEs' counters agree only to within their reads.
     pub(super) now: AtomicU64,
@@ -298,7 +303,14 @@ impl<D: Devices> Drop for Held<'_, D> {
         }
         // SAFETY: dropped once, here, and not used after.
         unsafe { ManuallyDrop::drop(&mut self.state) };
-        wake_after(&self.board.hub, self.wakes);
+        if self.wakes != 0 {
+            let hub = &self.board.hub;
+            let start = hub.ticks();
+            wake_after(hub, self.wakes);
+            let spent = hub.ticks().wrapping_sub(start);
+            self.board.woken[call].fetch_add(1, Ordering::Relaxed);
+            self.board.wake_ticks[call].fetch_add(spent, Ordering::Relaxed);
+        }
         // Host work completed outside the lock: the home machine takes its
         // next transfer at once, which publishes the real deadline again.
         if self.board.hub.kick.released() {
@@ -324,6 +336,9 @@ pub struct LockTimes {
     pub waited: u64,
     pub held: u64,
     pub longest: u64,
+    /// Calls that changed another PE's lines, and the ticks waking those PEs.
+    pub woken: u64,
+    pub wake: u64,
 }
 
 /// The board's devices, shared by every PE's machine.
@@ -359,6 +374,8 @@ impl<D: Devices> SharedDevices<D> {
             waited: Default::default(),
             held: Default::default(),
             longest: Default::default(),
+            woken: Default::default(),
+            wake_ticks: Default::default(),
             now: AtomicU64::new(0),
             pins: (0..pes).map(|_| AtomicU8::new(UNLATCHED)).collect(),
             dma: AtomicU64::new(u64::MAX),
@@ -471,6 +488,8 @@ impl<D: Devices> SharedDevices<D> {
         core::array::from_fn(|call| LockTimes {
             waited: self.board.waited[call].load(Ordering::Relaxed),
             held: self.board.held[call].load(Ordering::Relaxed),
+            woken: self.board.woken[call].load(Ordering::Relaxed),
+            wake: self.board.wake_ticks[call].load(Ordering::Relaxed),
             longest: self.board.longest[call].swap(0, Ordering::Relaxed),
         })
     }
