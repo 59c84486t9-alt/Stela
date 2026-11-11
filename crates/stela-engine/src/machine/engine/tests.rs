@@ -7190,6 +7190,107 @@ fn count_reads_complete_natively_where_the_host_counts_its_tsc() {
     }
 }
 
+/// MRS ISR_EL1 gets the native read where the host counts its TSC, and at
+/// EL2 what that read answers from (the waiting masks of the step, while
+/// the epoch and count it checks hold) is what the engine's read gives:
+/// no line, a device's IRQ until its deadline, a virtual timer before and
+/// after its compare. Below EL2, or with the PMI near, it is closed.
+#[test]
+fn interrupt_status_reads_complete_natively_as_the_engine_reads_them() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const MRS: u32 = 0xd538_c109; // mrs x9, isr_el1
+    for tsc in [None, Some((5, 7))] {
+        let mut machine = machine(&[ADD, MRS, ADD]);
+        machine.cpu.pstate = Pstate::reset(2);
+        machine.derived_changed();
+        machine.host.tsc_counter = tsc;
+        let base = machine.cpu.pc;
+        machine.host.exits = vec![NativeExit::Exit {
+            next_pc: base + 8,
+            kind: ExitKind::Fallthrough as u64,
+        }];
+        machine.step().unwrap();
+        let epoch = Place::new(
+            Anchor::Control,
+            core::mem::offset_of!(ChainControl, interrupt_epoch),
+        );
+        let count = Place::new(Anchor::Count, 0);
+        let thunk = register_read::interrupt_status_thunk(
+            GuestAddress(base + 4),
+            9,
+            INTERRUPT_STATUS,
+            epoch,
+            count,
+        );
+        assert_eq!(
+            machine.host.installed.last() == Some(&thunk.code),
+            tsc.is_some()
+        );
+    }
+    let mut machine = machine_on(one_timer_bank(), &[MRS]);
+    let base = machine.cpu.pc;
+    machine.cpu.pstate = Pstate::reset(2);
+    machine.derived_changed();
+    // What the thunk completes with, if it does, at the host's count.
+    let native = |machine: &mut Machine<FakeHost, NoDevices>| {
+        let status = machine.mirrors.interrupt_status;
+        let now = machine.host.now;
+        (status.readable != 0
+            && status.value == machine.chain.snapshot().interrupt_epoch
+            && (status.readable == u64::MAX || now < status.readable))
+            .then(|| u64::from(machine.cpu.state.pending & 0b11) << 6)
+    };
+    let engine = |machine: &mut Machine<FakeHost, NoDevices>| {
+        machine.cpu.pc = base;
+        machine.system_instruction(MRS).unwrap();
+        machine.cpu.state.x[9]
+    };
+    let check = |machine: &mut Machine<FakeHost, NoDevices>, deadline: u64, isr: u64| {
+        assert!(!machine.deliver_interrupts(), "every interrupt is masked");
+        assert_eq!(machine.mirrors.interrupt_status.readable, deadline);
+        assert_eq!(native(machine), Some(isr));
+        assert_eq!(engine(machine), isr);
+    };
+    machine.host.now = 5;
+    check(&mut machine, u64::MAX, 0);
+    // A device's IRQ, cached until count 50.
+    let irq = Lines {
+        irq: true,
+        fiq: false,
+    };
+    machine.device_lines = Some((irq, 50, machine.current));
+    check(&mut machine, 50, 0x80);
+    // At the device deadline the native read stops; the engine asks again.
+    machine.host.now = 50;
+    assert_eq!(native(&mut machine), None);
+    machine.device_lines = None;
+    // A virtual timer due at count 70: no FIQ before it, the FIQ after.
+    for (register, value) in [
+        (SystemRegister::CNTV_CVAL_EL0, 70),
+        (SystemRegister::CNTV_CTL_EL0, 1),
+    ] {
+        machine.cpu.registers.set(register, 0, value);
+    }
+    machine.timers = None;
+    machine.host.now = 60;
+    check(&mut machine, 70, 0);
+    machine.host.now = 70;
+    assert_eq!(native(&mut machine), None, "the compare passed");
+    check(&mut machine, u64::MAX, 0x40);
+    // An interrupt epoch past the step's closes it until the next step.
+    machine.chain.weak_storage().upgrade().unwrap().notify();
+    assert_eq!(native(&mut machine), None);
+    // Drained (`Machine::read_mail`), the next step reads it.
+    let drained = machine.chain.snapshot().interrupt_epoch;
+    machine.chain.acknowledge_interrupt(drained);
+    check(&mut machine, u64::MAX, 0x40);
+    // Below EL2 the register can read virtual lines: no native read.
+    machine.cpu.pstate = Pstate::reset(1);
+    machine.derived_changed();
+    machine.deliver_interrupts();
+    assert_eq!(machine.mirrors.interrupt_status.readable, 0);
+}
+
 /// Native accesses check and mask their own addresses at every access
 /// exactly where ID_AA64PFR0_EL1.CSV3 discloses FEAT_CSV3.
 #[test]

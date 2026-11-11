@@ -513,6 +513,12 @@ impl Pmu {
         self.asserted || self.instruction_deadline.is_some()
     }
 
+    /// The retired instruction count at which the PMI can first assert by
+    /// instructions alone.
+    pub fn instruction_deadline(&self) -> Option<u64> {
+        self.instruction_deadline
+    }
+
     /// The earliest system count at which the PMI can assert without
     /// another instruction retiring.
     pub fn deadline(&self) -> Option<u64> {

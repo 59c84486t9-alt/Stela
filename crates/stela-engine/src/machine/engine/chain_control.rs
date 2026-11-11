@@ -132,6 +132,15 @@ impl Owner {
                 .write(epoch.min(u64::MAX - 1));
         }
     }
+    /// The epoch the owner last acknowledged: every notification up to it
+    /// has been drained ([`Self::acknowledge_interrupt`]).
+    pub(super) fn acknowledged_interrupt(&self) -> u64 {
+        // SAFETY: only this owner writes the observed field, outside native
+        // execution; notifiers touch the separate epoch.
+        unsafe {
+            core::ptr::addr_of!((*self.storage.control.get()).observed_interrupt_epoch).read()
+        }
+    }
     pub(super) fn set_table(&mut self, table: u64, itlb: u64, masks: [u32; 2]) {
         // SAFETY: the sole owner writes these non-budget fields outside native execution.
         unsafe {

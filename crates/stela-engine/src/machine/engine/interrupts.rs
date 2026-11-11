@@ -3,6 +3,11 @@
 
 use super::*;
 
+/// More instructions than one native run retires: [`CHAIN_LIMIT`] chained
+/// blocks of at most [`block::MAX_BLOCK_INSTRUCTIONS`], each with a thunk
+/// that completes one more.
+const NATIVE_RUN_INSTRUCTIONS: u64 = (CHAIN_LIMIT + 1) * (block::MAX_BLOCK_INSTRUCTIONS as u64 + 1);
+
 impl<H: Host, D: Devices> Machine<H, D> {
     /// The system counter's count (`clock`).
     pub(super) fn now(&mut self) -> u64 {
@@ -10,12 +15,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     pub(super) fn lines(&mut self) -> Lines {
+        self.counted_lines().0
+    }
+
+    /// [`Self::lines`] and the count they were read at, 0 where no answer
+    /// could change with the count.
+    fn counted_lines(&mut self) -> (Lines, u64) {
         // The count is read only when an answer can change with it alone: a
         // device answer with a deadline, a timer's or a PMI's. Every exit
         // asks, and a raw validation PE has none of them.
         let Some((_, devices, pe)) = self.device_lines else {
             let now = self.now();
-            return self.lines_at(now);
+            return (self.lines_at(now), now);
         };
         let timer = self.timer_deadline();
         let monitor = self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline());
@@ -32,7 +43,59 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         };
         let device = self.device_lines_of(self.current, now);
-        self.merge_lines(device, now, timer)
+        (self.merge_lines(device, now, timer), now)
+    }
+
+    /// The count before which time alone leaves the running PE's lines as
+    /// they were read at `now`: the devices' next deadline, and a timer's or
+    /// the PMI's that has not passed (a timer that signals goes on signalling
+    /// until a System register write). 0 when no such count holds for a whole
+    /// native run: the PMI may be asserted, or instructions alone may raise
+    /// it before a run could end.
+    fn lines_steady_until(&mut self, now: u64) -> u64 {
+        let devices = match self.device_lines {
+            Some((_, until, pe)) if pe == self.current => until,
+            _ => return 0,
+        };
+        let timer = self
+            .timer_deadline()
+            .filter(|&deadline| deadline > now)
+            .unwrap_or(u64::MAX);
+        let monitor = match &self.cpu.pmu {
+            None => u64::MAX,
+            Some(monitor) => {
+                let retired = self.cpu.retired;
+                if monitor.deadline().is_some_and(|deadline| deadline <= now)
+                    || monitor.instruction_deadline().is_some_and(|deadline| {
+                        deadline.saturating_sub(retired) <= NATIVE_RUN_INSTRUCTIONS
+                    })
+                {
+                    return 0;
+                }
+                monitor.deadline().unwrap_or(u64::MAX)
+            }
+        };
+        devices.min(timer).min(monitor)
+    }
+
+    /// Let native code read ISR_EL1 from [`GuestState::pending`] while the
+    /// lines it was set from hold (`Mirrors::interrupt_status`): at EL2,
+    /// where the register reads the physical lines alone, until the count
+    /// [`Self::lines_steady_until`] gives or a line change moves the
+    /// interrupt epoch past the one this step's lines reflect. Native code
+    /// itself changes no line: device accesses and every System register
+    /// write that could exit, and every step sets it again before native
+    /// code runs.
+    fn refresh_interrupt_status(&mut self, now: u64) {
+        let deadline = if self.cpu.pstate.el == 2 {
+            self.lines_steady_until(now)
+        } else {
+            0
+        };
+        self.mirrors.interrupt_status = register_read::Cell {
+            readable: deadline,
+            value: self.chain.acknowledged_interrupt(),
+        };
     }
 
     /// The lines the devices drive into PE `pe` at count `now`: the cached
@@ -151,7 +214,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// lines routed by HCR_EL2.{TGE,IMO,FMO}, then the virtual IRQ, FIQ and
     /// SError that HCR_EL2.{VI,VF,VSE} hold for EL1 and EL0 outside the host.
     pub(super) fn deliver_interrupts(&mut self) -> bool {
-        let lines = self.lines();
+        let (lines, now) = self.counted_lines();
         let virtual_pending = if self.cpu.pstate.el == 2 {
             0
         } else {
@@ -162,6 +225,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else {
             u32::from(if lines.irq { DAIF_I } else { 0 } | if lines.fiq { DAIF_F } else { 0 })
         };
+        self.refresh_interrupt_status(now);
         if !lines.irq && !lines.fiq && virtual_pending == 0 {
             return false;
         }

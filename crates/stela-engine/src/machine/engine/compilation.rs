@@ -1128,6 +1128,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             } else {
                 register_read::thunk(GuestAddress(pc), rt, cell)
             }
+        } else if let Some(rt) = interrupt_status_read(word) {
+            self.clock.native(self.host.tsc_counter()?);
+            let epoch = core::mem::offset_of!(chain::ChainControl, interrupt_epoch);
+            let (epoch, count) = (
+                Place::new(Anchor::Control, epoch),
+                Place::new(Anchor::Count, 0),
+            );
+            register_read::interrupt_status_thunk(
+                GuestAddress(pc),
+                rt,
+                INTERRUPT_STATUS,
+                epoch,
+                count,
+            )
         } else if let Some(access) = mrs_access(pc, word) {
             self.stored_read_thunk(pc, access)?
         } else {

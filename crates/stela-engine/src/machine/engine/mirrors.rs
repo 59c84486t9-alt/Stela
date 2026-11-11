@@ -84,6 +84,13 @@ pub(super) struct Mirrors {
     /// [`PSTATE_FIELDS`] order, while native code runs: their reads and
     /// writes complete here ([`pstate_field`]).
     pub(super) fields: [u64; 3],
+    /// What a native ISR_EL1 read checks
+    /// (`x86_64::register_read::interrupt_status_thunk`): `readable` the
+    /// count before which time alone leaves the interrupt lines of the last
+    /// step as they were (0 while the read is not the lines' alone),
+    /// `value` the interrupt epoch they reflect
+    /// ([`Machine::refresh_interrupt_status`]).
+    pub(super) interrupt_status: register_read::Cell,
 }
 
 /// Where native code finds the cell at `index` of the PE's state.
@@ -93,6 +100,18 @@ pub(super) const fn cell_place(index: usize) -> Place {
 
 /// Where native code finds [`Mirrors::selected`].
 pub(super) const SELECTED: Place = Place::new(Anchor::Mirrors, offset_of!(Mirrors, selected));
+
+/// Where native code finds [`Mirrors::interrupt_status`].
+pub(super) const INTERRUPT_STATUS: Place =
+    Place::new(Anchor::Mirrors, offset_of!(Mirrors, interrupt_status));
+
+/// MRS ISR_EL1 to Xt, Rt in bits 4:0.
+pub(super) const READ_INTERRUPT_STATUS: u32 = 0xd538_c100;
+
+/// Xt of the MRS ISR_EL1 `word`, if it is one.
+pub(super) fn interrupt_status_read(word: u32) -> Option<u8> {
+    (word & !31 == READ_INTERRUPT_STATUS).then_some((word & 31) as u8)
+}
 
 /// The cell of MSR SPSel, open once one completed plainly in the state:
 /// its `value` is the address of the stack SPSel 1 selects there.
@@ -179,6 +198,7 @@ impl Default for Mirrors {
             entered: 1,
             selected: 0,
             fields: [0; 3],
+            interrupt_status: register_read::Cell::default(),
         }
     }
 }

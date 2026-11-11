@@ -58,6 +58,9 @@
 //! A [`send_event_thunk`] sets the event register byte the cell's `value`
 //! names, and an [`event_wait_thunk`] consumes a set one; both clobber RCX
 //! and RDX.
+//!
+//! An [`interrupt_status_thunk`] reads ISR_EL1 from the interrupts waiting
+//! at entry while no line changed since; it clobbers RCX and RDX.
 use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, Rm, ShiftOp, Size, Unary};
 use super::pointer::Thunk;
 use crate::{GuestAddress, GuestState, Place, aarch64::Register, block::ExitKind};
@@ -554,6 +557,49 @@ pub fn energy_thunk(pc: GuestAddress, rt: u8, cell: Place, count: Place) -> Thun
         asm.mov_store(Qword, register(rt), Rax);
     }
     finish_unless(code, [miss, wide], pc)
+}
+
+/// The thunk completing `MRS Xt, ISR_EL1` at `pc` where the register reads
+/// the physical IRQ and FIQ lines alone (EL2): from the masks of the
+/// interrupts waiting when native code was entered ([`GuestState::pending`],
+/// I in bit 1 and F in bit 0, ISR's bits 7 and 6), while the lines are still
+/// those. The cell at `cell` says so: open (`readable` nonzero), the epoch at
+/// `epoch` still its `value` (no line changed since it was read), and the
+/// count of the reader at `count` below its `readable` (no timer or device
+/// deadline passed; `u64::MAX` names none and reads no count). Else it exits
+/// at `pc`. It also clobbers RCX and RDX.
+pub fn interrupt_status_thunk(
+    pc: GuestAddress,
+    rt: u8,
+    cell: Place,
+    epoch: Place,
+    count: Place,
+) -> Thunk {
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::{Dword, Qword};
+    /// ISR_EL1.F, the lowest of the bits [`GuestState::pending`] gives.
+    const ISR_SHIFT: u8 = 6;
+    let (mut code, closed) = open(cell);
+    let mut asm = Asm::new(&mut code);
+    asm.place(Rcx, epoch);
+    asm.mov_load(Qword, Rdx, Mem::base(Rcx, 0));
+    asm.alu_load(Alu::Cmp, Qword, Rdx, Mem::base_disp8(Rax, VALUE));
+    let changed = asm.jcc(Cond::Ne);
+    asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rax, 0), -1);
+    let timeless = asm.jcc(Cond::E);
+    read_count(&mut asm, count);
+    asm.place(Rax, cell);
+    asm.alu_load(Alu::Cmp, Qword, Rdx, Mem::base(Rax, 0));
+    let due = asm.jcc(Cond::Ae);
+    asm.bind(timeless);
+    if rt != 31 {
+        let pending = frame_field(core::mem::offset_of!(GuestState, pending));
+        asm.mov_load(Dword, Rax, pending);
+        asm.alu_imm8(Alu::And, Dword, Rax, 0b11);
+        asm.shift_imm(ShiftOp::Shl, Dword, Rax, ISR_SHIFT);
+        asm.mov_store(Qword, register(rt), Rax);
+    }
+    finish_unless(code, [closed, changed, due], pc)
 }
 
 /// The count of the reader at `count` into RDX, as [`count_thunk`] reads
@@ -1119,5 +1165,58 @@ mod tests {
         energy.scale = u64::MAX;
         energy.frequency = 50;
         assert_eq!(run(&read.code, &mut state), MISS);
+    }
+
+    /// ISR_EL1 reads the waiting I and F masks as bits 7 and 6 while the
+    /// cell is open, the epoch is the cell's and the count is below its
+    /// deadline, and leaves every other case, Xt untouched, to the engine.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn interrupt_status_thunks_read_the_waiting_lines_while_nothing_changed() {
+        use crate::GuestState;
+        use core::sync::atomic::Ordering::Relaxed;
+        const EPOCH: Place = Place::new(Anchor::Control, 0);
+        let mut cell = alloc::boxed::Box::new(Cell::default());
+        let mut epoch = alloc::boxed::Box::new(7u64);
+        let published = alloc::boxed::Box::new(CountState::default());
+        published.offset.store(100, Relaxed);
+        published.ceiling.store(u64::MAX, Relaxed);
+        let mut count = alloc::boxed::Box::new(Count {
+            state: &*published as *const CountState as u64,
+            ..Count::default()
+        });
+        let mut state = GuestState::default();
+        state.anchors[Anchor::Mirrors] = &mut *cell as *mut Cell as u64;
+        state.anchors[Anchor::Control] = &mut *epoch as *mut u64 as u64;
+        state.anchors[Anchor::Count] = &mut *count as *mut Count as u64;
+        let read = interrupt_status_thunk(PC, 5, CELL, EPOCH, READER).code;
+        let mut expect = |cell_now: Cell, pending: u32, exit: Exit, x5: u64| {
+            *cell = cell_now;
+            state.pending = pending;
+            state.x[5] = 0xdead;
+            assert_eq!(run(&read, &mut state), exit, "{cell_now:?} {pending:#x}");
+            assert_eq!(state.x[5], x5, "{cell_now:?} {pending:#x}");
+        };
+        let open = |deadline: u64, value: u64| Cell {
+            readable: deadline,
+            value,
+        };
+        // No deadline: no count is read, every mask combination reads.
+        for (pending, isr) in [(0, 0), (0b01, 0x40), (0b10, 0x80), (0b11, 0xc0)] {
+            expect(open(u64::MAX, 7), pending, NEXT, isr);
+        }
+        // The count (100: `per_tsc` is 0) is below 101, not below 100.
+        expect(open(101, 7), 0b10, NEXT, 0x80);
+        expect(open(100, 7), 0b10, MISS, 0xdead);
+        // Closed, or a line changed since: the engine reads.
+        expect(Cell::default(), 0b01, MISS, 0xdead);
+        expect(open(u64::MAX, 6), 0b01, MISS, 0xdead);
+        *epoch = 6;
+        expect(open(u64::MAX, 6), 0b01, NEXT, 0x40);
+        // XZR reads nothing.
+        let discard = interrupt_status_thunk(PC, 31, CELL, EPOCH, READER).code;
+        let before = state.x;
+        assert_eq!(run(&discard, &mut state), NEXT);
+        assert_eq!(state.x, before);
     }
 }
