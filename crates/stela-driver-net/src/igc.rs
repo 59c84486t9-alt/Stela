@@ -489,6 +489,9 @@ impl Igc {
 impl Drop for Igc {
     /// Linux igc_down then igc_release_hw_control. The rings are freed only
     /// once the controller verifiably stopped; otherwise they stay allocated.
+    ///
+    /// This drives the controller's registers, so the owner drops it where
+    /// its MMIO window is mapped; anywhere else the first read faults.
     fn drop(&mut self) {
         if self.stop().is_ok() {
             let _ =
@@ -579,6 +582,7 @@ use crate::Clock;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::rc::Rc;
 
     /// An I225 over modeled registers and DMA memory, both rings started
     /// and the link up.
@@ -878,6 +882,118 @@ mod tests {
             assert_eq!(net.transmit.buffer(tail), before);
             assert_eq!(net.transmit.descriptors.bytes(), descriptors);
         }
+    }
+
+    /// Registers of the stop sequence, private to `hardware`.
+    const CTRL: usize = 0;
+    const EECD: usize = 0x10;
+    const CTRL_EXT: usize = 0x18;
+    const IMC: usize = 0x150c;
+    const EIMC: usize = 0x1528;
+    const MASTER_DISABLE: u32 = 1 << 2;
+    const MAC_RESET: u32 = 1 << 26;
+    const AUTO_READ_DONE: u32 = 1 << 9;
+    const DRV_LOAD: u32 = 1 << 28;
+
+    /// A minimum-delay model whose waits stand for the controller: a MAC
+    /// reset completes, and reloads the NVM, during the next wait. The
+    /// first time it completes one it records RCTL, TCTL and CTRL.
+    struct Resetting {
+        registers: *mut u32,
+        before_reset: Rc<core::cell::Cell<Option<[u32; 3]>>>,
+    }
+    // SAFETY: isolated virtual-time model over the fixture's register
+    // vector, which outlives every wait; no hardware wait is granted.
+    unsafe impl crate::bus::pci::power::Timer for Resetting {
+        fn check(&self) -> Result<(), crate::bus::pci::power::Error> {
+            Ok(())
+        }
+        fn wait_us(&self, _: u64) -> Result<(), crate::bus::pci::power::Error> {
+            let register = |offset: usize| self.registers.wrapping_add(offset / 4);
+            // SAFETY: offsets inside the fixture's live register vector.
+            unsafe {
+                let control = register(CTRL).read_volatile();
+                if control & MAC_RESET != 0 {
+                    if self.before_reset.get().is_none() {
+                        self.before_reset.set(Some([
+                            register(RCTL).read_volatile(),
+                            register(TCTL).read_volatile(),
+                            control,
+                        ]));
+                    }
+                    register(CTRL).write_volatile(control & !MAC_RESET);
+                    let eecd = register(EECD).read_volatile();
+                    register(EECD).write_volatile(eecd | AUTO_READ_DONE);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Dropping a running adapter is Linux igc_down and
+    /// igc_release_hw_control: receive and transmit off and the bus master
+    /// drained before the MAC reset, every interrupt masked, and the
+    /// controller handed back to firmware only after the reset completed.
+    #[test]
+    fn dropping_a_running_adapter_stops_it_before_releasing_control() {
+        let mut fixture = Fixture::new();
+        let before_reset = Rc::new(core::cell::Cell::new(None));
+        fixture.net.clock = crate::timing::Timing::checked(
+            Clock {
+                ticks_per_microsecond: 1,
+            },
+            Rc::new(Resetting {
+                registers: fixture.registers.as_mut_ptr(),
+                before_reset: before_reset.clone(),
+            }),
+        )
+        .unwrap();
+        fixture.registers[CTRL_EXT / 4] = DRV_LOAD | 1;
+        assert_ne!(fixture.registers[RCTL / 4] & RCTL_EN, 0);
+        assert_ne!(fixture.registers[TCTL / 4] & TCTL_EN, 0);
+        let Fixture {
+            net,
+            registers,
+            _backing,
+        } = fixture;
+        drop(net);
+        let [rctl, tctl, control] = before_reset.get().expect("a MAC reset was requested");
+        assert_eq!(rctl & RCTL_EN, 0);
+        assert_eq!(tctl & TCTL_EN, 0);
+        assert_ne!(control & MASTER_DISABLE, 0);
+        assert_eq!(registers[IMC / 4], u32::MAX);
+        assert_eq!(registers[EIMC / 4], u32::MAX);
+        assert_eq!(registers[CTRL_EXT / 4], 1);
+    }
+
+    /// A reset that never completes is no stop: the controller may still
+    /// write its rings, so it keeps them and firmware is not handed control.
+    #[test]
+    fn dropping_an_adapter_whose_reset_never_completes_keeps_control() {
+        let mut fixture = Fixture::new();
+        fixture.registers[CTRL_EXT / 4] = DRV_LOAD;
+        let Fixture {
+            net,
+            registers,
+            _backing,
+        } = fixture;
+        drop(net);
+        assert_ne!(registers[CTRL / 4] & MAC_RESET, 0);
+        assert_eq!(registers[CTRL_EXT / 4], DRV_LOAD);
+    }
+
+    /// A function that is gone reads all ones: dropping it writes nothing.
+    #[test]
+    fn dropping_a_lost_adapter_writes_no_register() {
+        let mut fixture = Fixture::new();
+        fixture.registers.fill(u32::MAX);
+        let Fixture {
+            net,
+            registers,
+            _backing,
+        } = fixture;
+        drop(net);
+        assert!(registers.iter().all(|&value| value == u32::MAX));
     }
 
     #[test]
