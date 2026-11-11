@@ -51,8 +51,8 @@ enum Task {
     /// kext's objects, against `third_party/xnu`, carrying the newest
     /// Stela.app package (or `STELA_APP`'s) when there is one.
     Guest,
-    /// Build Stela.app (`apps/stela-macos`) on this Mac or, over ssh, on the
-    /// Mac `--mac` or `STELA_MAC` names, into `target/stela-macos`, where
+    /// Build Stela.app (`guest/stela-app`) on this Mac or, over ssh, on the
+    /// Mac `--mac` or `STELA_MAC` names, into `target/stela-app`, where
     /// `cargo xtask guest` finds it.
     App {
         /// The Mac's ssh name (default: `STELA_MAC`).

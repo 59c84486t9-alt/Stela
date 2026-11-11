@@ -1,9 +1,9 @@
-//! Stela.app, the macOS utility in `apps/stela-macos`, as the StelaGPU kext
+//! Stela.app, the macOS utility in `guest/stela-app`, as the StelaGPU kext
 //! delivers it to `/Applications` (`guest/stela-gpu/kext/app_delivery.h`).
 //!
 //! SwiftUI does not cross-build on Linux, so the app comes prebuilt: the
 //! bundle `STELA_APP` names, else the newest
-//! `target/stela-macos/package.*/Stela.app` that `apps/stela-macos/build.sh`
+//! `target/stela-app/package.*/Stela.app` that `guest/stela-app/build.sh`
 //! or [`build`] left. Without one the guest build still succeeds and the
 //! kext reports that its build carries no app. A package is checked against
 //! its own code signature, then written to `stela/app.h` as the kext embeds
@@ -70,7 +70,7 @@ fn locate_in(root: &Path, given: Option<OsString>) -> Result<Option<PathBuf>> {
         );
         return Ok(Some(path));
     }
-    let packages = root.join("target/stela-macos");
+    let packages = root.join("target/stela-app");
     if !packages.is_dir() {
         return Ok(None);
     }
@@ -390,22 +390,22 @@ fn job() -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// The sources `apps/stela-macos/build.sh` reads, relative to the root.
+/// The sources `guest/stela-app/build.sh` reads, relative to the root.
 const SOURCES: [&str; 7] = [
     "Cargo.toml",
     "assets/stela-icon.png",
-    "apps/stela-macos/Package.swift",
-    "apps/stela-macos/build.sh",
-    "apps/stela-macos/Packaging",
-    "apps/stela-macos/Sources",
-    "apps/stela-macos/Tests",
+    "guest/stela-app/Package.swift",
+    "guest/stela-app/build.sh",
+    "guest/stela-app/Packaging",
+    "guest/stela-app/Sources",
+    "guest/stela-app/Tests",
 ];
 /// The Mac's working directory for the build, under its home.
 const REMOTE_DIR: &str = "stela-app";
 
-/// Builds Stela.app with `apps/stela-macos/build.sh`: here on macOS without
+/// Builds Stela.app with `guest/stela-app/build.sh`: here on macOS without
 /// `host`, else on the Mac `host` names over ssh, whose package lands in
-/// `target/stela-macos/package.<time>-mac`. Answers the app's path.
+/// `target/stela-app/package.<time>-mac`. Answers the app's path.
 pub fn build(root: &Path, host: Option<&str>) -> Result<PathBuf> {
     let Some(host) = host else {
         ensure!(
@@ -413,7 +413,7 @@ pub fn build(root: &Path, host: Option<&str>) -> Result<PathBuf> {
             "Stela.app builds only on macOS: pass --mac or set {}",
             crate::tools::MAC_VARIABLE
         );
-        crate::tools::exec(Command::new("bash").arg(root.join("apps/stela-macos/build.sh")))?;
+        crate::tools::exec(Command::new("bash").arg(root.join("guest/stela-app/build.sh")))?;
         return locate_in(root, None)?.context("build.sh left no package");
     };
     let revision = revision(root)?;
@@ -426,7 +426,7 @@ pub fn build(root: &Path, host: Option<&str>) -> Result<PathBuf> {
             &format!("rm -rf {REMOTE_DIR} && mkdir -p {REMOTE_DIR} && tar -C {REMOTE_DIR} -xf -"),
         ),
     )?;
-    let output = root.join("target/stela-macos").join(format!(
+    let output = root.join("target/stela-app").join(format!(
         "package.{}-mac",
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)?
@@ -441,11 +441,11 @@ pub fn build(root: &Path, host: Option<&str>) -> Result<PathBuf> {
         ssh(
             host,
             &format!(
-                "cd {REMOTE_DIR} && rm -rf target/stela-macos && \
+                "cd {REMOTE_DIR} && rm -rf target/stela-app && \
                  {{ [ ! -d /Applications/Xcode.app/Contents/Developer ] || \
                  export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer; }} && \
-                 STELA_SOURCE_REVISION={revision} bash apps/stela-macos/build.sh >&2 && \
-                 cd target/stela-macos/package.* && COPYFILE_DISABLE=1 tar -cf - Stela.app"
+                 STELA_SOURCE_REVISION={revision} bash guest/stela-app/build.sh >&2 && \
+                 cd target/stela-app/package.* && COPYFILE_DISABLE=1 tar -cf - Stela.app"
             ),
         ),
         receive,
@@ -478,7 +478,7 @@ fn revision(root: &Path) -> Result<String> {
         "--porcelain",
         "--untracked-files=normal",
         "--",
-        "apps/stela-macos",
+        "guest/stela-app",
         "assets",
         "Cargo.toml",
     ])?;

@@ -15,7 +15,7 @@ case "$architecture" in arm64|x86_64) ;; *) echo "STELA_APP_ARCH must be arm64 o
 swift test --package-path "$package"
 swift build --package-path "$package" --configuration release --arch "$architecture" --product Stela
 binary_directory="$(swift build --package-path "$package" --configuration release --arch "$architecture" --show-bin-path)"
-output="$repository/target/stela-macos"
+output="$repository/target/stela-app"
 mkdir -p "$output"
 stage="$(mktemp -d "$output/package.XXXXXX")"
 app="$stage/Stela.app"
@@ -32,7 +32,7 @@ if [[ -n "${STELA_SOURCE_REVISION:-}" ]]; then
     revision="$STELA_SOURCE_REVISION"
 elif git -C "$repository" rev-parse --git-dir >/dev/null 2>&1; then
     revision="$(git -C "$repository" rev-parse --short=12 HEAD)"
-    if [[ -n "$(git -C "$repository" status --porcelain --untracked-files=normal -- apps/stela-macos assets Cargo.toml)" ]]; then
+    if [[ -n "$(git -C "$repository" status --porcelain --untracked-files=normal -- guest/stela-app assets Cargo.toml)" ]]; then
         revision="$revision-modified"
     fi
 else

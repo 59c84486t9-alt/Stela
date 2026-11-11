@@ -7,5 +7,5 @@ if [[ "$(uname -s)" == Darwin ]]; then
     swift build --package-path "$package" -Xswiftc -warnings-as-errors --product Stela
     binary_directory="$(swift build --package-path "$package" --show-bin-path)"
     repository="$(cd -- "$package/../.." && pwd)"
-    "$binary_directory/Stela" --render-previews "$repository/target/stela-macos/previews"
+    "$binary_directory/Stela" --render-previews "$repository/target/stela-app/previews"
 fi

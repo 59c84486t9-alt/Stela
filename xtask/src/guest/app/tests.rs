@@ -356,7 +356,7 @@ fn the_kext_reads_the_records_stela_efi_writes() {
 fn the_newest_package_is_found_unless_one_is_named() {
     let root = tempfile::tempdir().unwrap();
     assert!(locate_in(root.path(), None).unwrap().is_none());
-    let packages = root.path().join("target/stela-macos");
+    let packages = root.path().join("target/stela-app");
     let mut found = Vec::new();
     for (name, age) in [("package.old", 60), ("package.new", 0), ("other", 0)] {
         let directory = packages.join(name);
