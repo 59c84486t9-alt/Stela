@@ -16,6 +16,33 @@ fn shared_part(code: &board::Code, at: NativeCode) -> u8 {
 /// more than a few mean the ring is broken.
 const REDONE_INSTALLS: u32 = 64;
 
+/// Put `target`, block `index`'s entry for a fetch at `pc`, in slot `slot`
+/// of the block table, under the board's lock (`cache`), if the block is
+/// still the indexed one: a retirement or an IC IVAU takes a block out of
+/// the index and its entries out of the table in one hold, so an entry put
+/// in after would outlive its block. Whether the table took it.
+fn insert_target(
+    code: &board::Code,
+    cache: &mut board::Cache,
+    pc: u64,
+    index: usize,
+    slot: usize,
+    target: chain::LookupEntry,
+) -> bool {
+    let block = &code.blocks[index];
+    if cache
+        .index
+        .get(&code.blocks, pc, block.physical, block.variant)
+        != Some(index)
+    {
+        cache.targets_raced += 1;
+        return false;
+    }
+    cache.targets.insert(slot, target);
+    cache.targets_inserted += 1;
+    true
+}
+
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn fetch_block(&mut self, pc: u64, single: bool) -> Result<Fetched, Stop> {
         let context = self.current_variant(single, false);
@@ -132,7 +159,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 // The ring may choose a part to go at this install.
                 self.flush_entered();
                 self.reclaim_for_memory();
+                self.publishing_target = (!single).then_some(pc);
                 let (compiled, mail) = self.compile_aside(pc, physical, variant);
+                self.publishing_target = None;
                 let compiled = compiled?;
                 // What came meanwhile may undo this fetch's translation or
                 // the code it compiled; the block stays for the next one.
@@ -316,28 +345,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// entry: one it holds already, in either place of its set, stays where
     /// it is, and keeps its neighbour.
     pub(super) fn remember_target(&mut self, pc: u64, index: usize) -> bool {
+        let Some((slot, target)) = self.target_entry(pc, index) else {
+            return false;
+        };
         let block = &self.code.blocks[index];
-        let variant = &self.variants[block.variant.0 as usize];
-        if variant.single || self.traces.binary_search(&pc).is_ok() {
-            return false;
-        }
-        let targets = match variant.guarded_page {
-            true => block.landing.targets(&self.cpu) | 1,
-            false => 0b1111,
-        };
         let (physical, variant_id) = (block.physical, block.variant);
-        let key = self.block_key(block.physical, block.variant);
-        let slot = self.code.table.slot(pc, key);
-        let target = chain::LookupEntry {
-            pc,
-            key,
-            entry: block.code.0 as u64,
-            block: index as u32,
-            targets,
-        };
-        if self.code.table.find(slot, pc, key) == target {
-            return false;
-        }
         // Only an indexed block takes an entry: one an IC IVAU forgot (that
         // a PE's jump cache still names until it reads the post) or one
         // retired since it was found would be reachable again, and links
@@ -358,13 +370,32 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return false;
         }
         let mut cache = code.cache_at(board::LockSite::Target);
-        if cache.index.get(&code.blocks, pc, physical, variant_id) != Some(index) {
-            cache.targets_raced += 1;
-            return false;
+        insert_target(code, &mut cache, pc, index, slot, target)
+    }
+
+    /// The block table slot and entry a fetch at `pc` of block `index`
+    /// would add for lookup dispatchers ([`Self::remember_target`]), or
+    /// none when the block takes none or the table holds it already.
+    fn target_entry(&self, pc: u64, index: usize) -> Option<(usize, chain::LookupEntry)> {
+        let block = &self.code.blocks[index];
+        let variant = &self.variants[block.variant.0 as usize];
+        if variant.single || self.traces.binary_search(&pc).is_ok() {
+            return None;
         }
-        cache.targets.insert(slot, target);
-        cache.targets_inserted += 1;
-        true
+        let targets = match variant.guarded_page {
+            true => block.landing.targets(&self.cpu) | 1,
+            false => 0b1111,
+        };
+        let key = self.block_key(block.physical, block.variant);
+        let slot = self.code.table.slot(pc, key);
+        let target = chain::LookupEntry {
+            pc,
+            key,
+            entry: block.code.0 as u64,
+            block: index as u32,
+            targets,
+        };
+        (self.code.table.find(slot, pc, key) != target).then_some((slot, target))
     }
 
     /// Whether lookups of `half` may still run in context `number`: one no
@@ -1013,6 +1044,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(replaced) = cache.index.insert(&shared.blocks, slot) {
             // Only indexed blocks are reached, which eviction relies on.
             self.detach(&mut cache, &[replaced as u32]);
+        }
+        // The fetch that compiled the block would take the lock again for
+        // its block table entry right after; it takes it in this hold,
+        // unless a direct exit waits to link it instead
+        // ([`Self::remember_or_link`]).
+        if self.publishing_target == Some(pc)
+            && !self
+                .direct_exit
+                .is_some_and(|(_, _, target, _)| target == pc)
+            && let Some((at, target)) = self.target_entry(pc, slot)
+            && shared.blocks.record(slot).remember()
+        {
+            insert_target(&shared, &mut cache, pc, slot, at, target);
         }
         drop(cache);
         self.mirrors.close_code_page();

@@ -1004,6 +1004,11 @@ pub struct Machine<H: Host, D: Devices> {
     /// of the block, forgets it.
     /// The block's slot incarnation is kept with it.
     direct_exit: Option<(usize, u32, u64, ExitWord)>,
+    /// The PC whose fetch compiles its block now and takes its block table
+    /// entry in the install's hold of the board's lock, not in a hold of
+    /// its own after ([`Self::remember_target`]); none outside such a
+    /// fetch.
+    publishing_target: Option<u64>,
     /// Maintenance for the other PEs that this PE's next DSB sends
     /// ([`Self::send_outgoing`]).
     outgoing: Vec<parallel::Maintenance>,
@@ -1384,6 +1389,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             deferred_code: Vec::new(),
             posted: Vec::new(),
             direct_exit: None,
+            publishing_target: None,
             outgoing: Vec::new(),
             lines_epoch: 0,
             pending_device_read: None,

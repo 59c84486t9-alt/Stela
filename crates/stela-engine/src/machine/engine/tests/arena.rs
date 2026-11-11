@@ -895,11 +895,11 @@ fn a_page_with_a_long_index_list_retires_in_steps_of_bounded_work() {
     }
 }
 
-/// The code lock work an install takes: the install's own hold and the
-/// block table entry of the fetch that compiled it. A fetch of a block
-/// another PE installed takes none.
+/// The code lock work an install takes: one hold, in which the fetch that
+/// compiled the block also puts in its block table entry. A fetch of a
+/// block another PE installed takes none.
 #[test]
-fn an_install_takes_the_code_lock_twice_and_a_found_block_never() {
+fn an_install_takes_the_code_lock_once_and_a_found_block_never() {
     const BLOCKS: u64 = 64;
     let mut memory = vec![0u8; 4 << 18];
     let (mut first, mut second, _hub) = shared_pair_of(&linked_groups(1), &mut memory);
@@ -914,11 +914,15 @@ fn an_install_takes_the_code_lock_twice_and_a_found_block_never() {
     }
     // One `cache()` read per call of `total`.
     let taken = total(&first) - before - 1;
-    assert_eq!(
-        taken,
-        2 * BLOCKS,
-        "{taken} acquisitions for {BLOCKS} installs"
-    );
+    assert_eq!(taken, BLOCKS, "{taken} acquisitions for {BLOCKS} installs");
+    assert_eq!(acquired(&first, board::LockSite::Target), 0);
+    for group in 0..BLOCKS {
+        let pc = base + 16 * group;
+        let key = target_key(&first, pc);
+        let entry = first.code.table.find(target_slot(&first, pc), pc, key);
+        assert_eq!((entry.pc, entry.key), (pc, key));
+    }
+    assert_eq!(first.code.report().targets.inserted, BLOCKS);
     let before = total(&second);
     for group in 0..BLOCKS {
         assert!(matches!(
