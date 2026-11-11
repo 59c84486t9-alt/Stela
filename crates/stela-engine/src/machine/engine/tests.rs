@@ -9273,6 +9273,7 @@ mod context_id;
 mod cycles_native;
 mod exits;
 mod floating_point_traps;
+mod instructions_native;
 mod native_exceptions;
 mod one_sided;
 mod permission_kept;

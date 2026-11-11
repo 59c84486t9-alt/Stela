@@ -111,6 +111,11 @@ pub(super) struct Mirrors {
     /// ([`Machine::enter_cycles`]), from which a cycle counter read computes
     /// the count where only its cell's value went stale.
     pub(super) cycles: register_read::CycleCounter,
+    /// The performance monitor's instruction counter as native code is
+    /// entered ([`Machine::enter_cycles`]), from which an instruction
+    /// counter read computes the count where only its cell's value went
+    /// stale.
+    pub(super) instructions: register_read::InstructionCounter,
 }
 
 /// Where native code finds the cell at `index` of the PE's state.
@@ -227,6 +232,15 @@ pub(super) const CYCLES_PLAIN: usize = TIMER_CONTROL + 1;
 /// Where native code finds [`Mirrors::cycles`].
 pub(super) const CYCLES: Place = Place::new(Anchor::Mirrors, offset_of!(Mirrors, cycles));
 
+/// The cell that says the instruction counter's read is plain in the state
+/// (`x86_64::register_read::instruction_counter_thunk`), as
+/// [`CYCLES_PLAIN`] is the cycle counter's.
+pub(super) const INSTRUCTIONS_PLAIN: usize = CYCLES_PLAIN + 1;
+
+/// Where native code finds [`Mirrors::instructions`].
+pub(super) const INSTRUCTION_COUNTER: Place =
+    Place::new(Anchor::Mirrors, offset_of!(Mirrors, instructions));
+
 /// The cells of MSR SPRR_PERM_EL0 and MSR SPRR_PERM_EL1
 /// (`x86_64::register_read::unchanged_write_thunk`), open on the storage a
 /// plain write reached in the state: a write of the value the register
@@ -235,7 +249,7 @@ pub(super) const CYCLES: Place = Place::new(Anchor::Mirrors, offset_of!(Mirrors,
 /// user permissions at each return to a thread and the kernel ones around
 /// each write of protected data, mostly with the value they hold. A write
 /// whose model refused it closes them ([`Machine::register_refused`]).
-pub(super) const PERMISSION_KEPT: [usize; 2] = [CYCLES_PLAIN + 1, CYCLES_PLAIN + 2];
+pub(super) const PERMISSION_KEPT: [usize; 2] = [INSTRUCTIONS_PLAIN + 1, INSTRUCTIONS_PLAIN + 2];
 
 /// The [`PERMISSION_KEPT`] cell of the MSR `word`, and Rt, if it writes
 /// SPRR_PERM_EL0 or SPRR_PERM_EL1.
@@ -354,6 +368,7 @@ impl Default for Mirrors {
             switches: register_read::SwitchLog::default(),
             monitor: 0,
             cycles: register_read::CycleCounter::default(),
+            instructions: register_read::InstructionCounter::default(),
         }
     }
 }

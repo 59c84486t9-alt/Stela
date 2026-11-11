@@ -393,10 +393,12 @@ impl Pmu {
     /// synchronization, which no read changes, so the count at `now` is
     /// `counters[0]` plus the floor of the ticks since, scaled with the
     /// carried remainder, and nothing while PMC0 does not count there.
+    /// Closed while PMC0's PMI is armed: a read then leaves the crossing of
+    /// the overflow bit to the engine.
     pub fn native_cycles(&self) -> stela_compiler::x86_64::register_read::CycleCounter {
         let counting = self.counts(CYCLES, self.context);
         stela_compiler::x86_64::register_read::CycleCounter {
-            open: 1,
+            open: u64::from(!self.armed(CYCLES)),
             counter: self.counters[CYCLES],
             synced: self.synced_count,
             remainder: self.remainder[CYCLES],
@@ -404,6 +406,42 @@ impl Pmu {
             frequency: self.frequency,
             mask: self.layout.width.mask(),
         }
+    }
+
+    /// PMC1 as a read finds it after `retired` instructions retired in
+    /// `context`, the PE's context as native code is entered, plus the
+    /// instructions native code retires since: [`Self::read`] counts the
+    /// instructions since `synced_retired` in the context of the last
+    /// synchronization, which every change of context brings up to date
+    /// (`Machine::sync_monitor`), so the count is `counters[1]` plus them
+    /// while PMC1 counts there. It is closed while PMC1's PMI is armed, so
+    /// that a read never decides on the crossing of the overflow bit, and
+    /// where `context` counts otherwise than the synchronized one.
+    pub fn native_instructions(
+        &self,
+        retired: u64,
+        context: Context,
+    ) -> stela_compiler::x86_64::register_read::InstructionCounter {
+        let counting = self.counts(INSTRUCTIONS, self.context);
+        if self.armed(INSTRUCTIONS) || counting != self.counts(INSTRUCTIONS, context) {
+            return Default::default();
+        }
+        let since = if counting {
+            retired.wrapping_sub(self.synced_retired)
+        } else {
+            0
+        };
+        stela_compiler::x86_64::register_read::InstructionCounter {
+            open: 1,
+            base: self.counters[INSTRUCTIONS].wrapping_add(since),
+            step: if counting { u64::MAX } else { 0 },
+            mask: self.layout.width.mask(),
+        }
+    }
+
+    /// Whether counter `n`'s PMI is armed: PMCR0 selects FIQ and enables it.
+    fn armed(&self, n: usize) -> bool {
+        self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ && self.pmcr0 & counter_bit(12, 44, n) != 0
     }
 
     /// Whether an enabled event depends on the core clock.

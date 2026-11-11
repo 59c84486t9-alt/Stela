@@ -60,7 +60,9 @@
 //! and RDX.
 //!
 //! A [`cycle_counter_thunk`] computes a cycle counter at the count where
-//! its cell went stale but the read stays plain, and opens the cell on it.
+//! its cell went stale but the read stays plain, and opens the cell on it;
+//! an [`instruction_counter_thunk`] does the same for a retired-instruction
+//! counter from the instructions native code retired before it.
 //!
 //! An [`interrupt_status_thunk`] reads ISR_EL1 from the interrupts waiting
 //! at entry while no line changed since; it clobbers RCX and RDX.
@@ -797,6 +799,104 @@ pub fn cycle_counter_thunk(
         asm.mov_store(Qword, register(rt), Rdx);
     }
     finish_unless(code, [unplain, closed, wide], pc)
+}
+
+/// What an [`instruction_counter_thunk`] computes a retired-instruction
+/// counter from, as the engine's performance monitor counts it: `base`,
+/// the count as native code was entered, plus the instructions retired
+/// since, masked by `step` (all ones while the counter counts, 0 while it
+/// does not), the sum wrapped to `mask`. `open` is nonzero while these are
+/// the monitor's.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct InstructionCounter {
+    pub open: u64,
+    pub base: u64,
+    pub step: u64,
+    pub mask: u64,
+}
+
+impl InstructionCounter {
+    /// The counter after native code retired `retired` instructions, `None`
+    /// where the thunk exits (closed).
+    pub fn at(&self, retired: u64) -> Option<u64> {
+        (self.open != 0).then(|| self.base.wrapping_add(retired & self.step) & self.mask)
+    }
+}
+
+/// The thunk completing `MRS Xt, <instruction counter>` at `pc`, the
+/// instruction after `before` others of its block. While the cell at `cell`
+/// is open it reads its `value`. While it is closed but the cell at `plain`
+/// is open (only the value went stale, at a native transition), it computes
+/// the count from the [`InstructionCounter`] at `counter`
+/// ([`InstructionCounter::at`]) with the instructions native code retired
+/// before this one: the chain's count of the blocks it left
+/// (`ChainControl::retired`) and `before`. It opens `cell` on it, as an
+/// engine read does, and completes with it. Else it exits at `pc`. It also
+/// clobbers RCX and RDX.
+pub fn instruction_counter_thunk(
+    pc: GuestAddress,
+    rt: u8,
+    cell: Place,
+    plain: Place,
+    counter: Place,
+    before: u32,
+) -> Option<Thunk> {
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::Qword;
+    let before = i32::try_from(before).ok()?;
+    let field = |offset: usize| Mem::base_disp8(Rcx, offset as i8);
+    let mut code = Vec::with_capacity(160);
+    let mut asm = Asm::new(&mut code);
+    asm.place(Rax, cell);
+    asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rax, 0), 0);
+    let stale = asm.jcc(Cond::E);
+    asm.mov_load(Qword, Rdx, Mem::base_disp8(Rax, VALUE));
+    let read = asm.jmp();
+    asm.bind(stale);
+    asm.place(Rax, plain);
+    asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rax, 0), 0);
+    let unplain = asm.jcc(Cond::E);
+    asm.place(Rcx, counter);
+    asm.alu_imm8(
+        Alu::Cmp,
+        Qword,
+        field(core::mem::offset_of!(InstructionCounter, open)),
+        0,
+    );
+    let closed = asm.jcc(Cond::E);
+    asm.place(Rax, super::chain::CONTROL_PLACE);
+    asm.mov_load(Qword, Rdx, Mem::base(Rax, super::chain::RETIRED_OFFSET));
+    if before != 0 {
+        asm.alu_imm32(Alu::Add, Qword, Rdx, before);
+    }
+    asm.alu_load(
+        Alu::And,
+        Qword,
+        Rdx,
+        field(core::mem::offset_of!(InstructionCounter, step)),
+    );
+    asm.alu_load(
+        Alu::Add,
+        Qword,
+        Rdx,
+        field(core::mem::offset_of!(InstructionCounter, base)),
+    );
+    asm.alu_load(
+        Alu::And,
+        Qword,
+        Rdx,
+        field(core::mem::offset_of!(InstructionCounter, mask)),
+    );
+    asm.place(Rax, cell);
+    asm.mov_store(Qword, Mem::base_disp8(Rax, VALUE), Rdx);
+    asm.mov_imm32(Rcx, 1);
+    asm.mov_store(Qword, Mem::base(Rax, 0), Rcx);
+    asm.bind(read);
+    if rt != 31 {
+        asm.mov_store(Qword, register(rt), Rdx);
+    }
+    Some(finish_unless(code, [unplain, closed], pc))
 }
 
 /// The thunk completing `MRS Xt, ISR_EL1` at `pc` where the register reads
@@ -1762,6 +1862,102 @@ mod tests {
         unsafe { (*reader).last = 0 };
         assert_eq!(run(&discard.code, &mut state), NEXT);
         assert_eq!((state.x[3], cells.cell.value), (0xdead, 1_024));
+    }
+
+    /// An instruction counter read takes an open cell's value; with the
+    /// cell closed but the read plain it adds the chain's retired count and
+    /// the instructions before it in its block to the base, as
+    /// [`InstructionCounter::at`] does, wrapping to the mask, and opens the
+    /// cell on it; anything else exits with Xt untouched.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn instruction_counter_thunks_add_what_native_code_retired() {
+        use crate::GuestState;
+        use crate::x86_64::chain::ChainControl;
+        #[repr(C)]
+        struct Cells {
+            cell: Cell,
+            plain: Cell,
+            counter: InstructionCounter,
+        }
+        const PLAIN: Place = Place::new(Anchor::Mirrors, size_of::<Cell>());
+        const COUNTER: Place = Place::new(Anchor::Mirrors, 2 * size_of::<Cell>());
+        let mut cells = alloc::boxed::Box::new(Cells {
+            cell: Cell::default(),
+            plain: Cell::default(),
+            counter: InstructionCounter {
+                open: 1,
+                base: 1_000,
+                step: u64::MAX,
+                mask: u64::MAX >> 16,
+            },
+        });
+        let mut control = alloc::boxed::Box::new(ChainControl {
+            retired: 40,
+            ..ChainControl::default()
+        });
+        let read = instruction_counter_thunk(PC, 3, CELL, PLAIN, COUNTER, 5).unwrap();
+        let mut state = GuestState::default();
+        state.anchors[Anchor::Mirrors] = &mut *cells as *mut Cells as u64;
+        state.anchors[Anchor::Control] = &mut *control as *mut ChainControl as u64;
+        // Closed and not plain: the engine.
+        state.x[3] = 0xdead;
+        assert_eq!(run(&read.code, &mut state), MISS);
+        assert_eq!(state.x[3], 0xdead);
+        // Plain: 40 chained and 5 before it past 1000, the cell opens.
+        cells.plain.readable = 1;
+        assert_eq!(run(&read.code, &mut state), NEXT);
+        assert_eq!(state.x[3], 1_045);
+        assert_eq!(cells.counter.at(45), Some(1_045));
+        assert_eq!(
+            cells.cell,
+            Cell {
+                readable: 1,
+                value: 1_045
+            }
+        );
+        // Open: its value until the cell closes again.
+        control.retired = 400;
+        assert_eq!(run(&read.code, &mut state), NEXT);
+        assert_eq!(state.x[3], 1_045);
+        cells.cell.readable = 0;
+        for retired in [0, 1, 400, 1 << 40] {
+            control.retired = retired;
+            assert_eq!(run(&read.code, &mut state), NEXT, "{retired}");
+            assert_eq!(Some(state.x[3]), cells.counter.at(retired + 5), "{retired}");
+            cells.cell.readable = 0;
+        }
+        // Wrapped to the counter's width.
+        control.retired = 0;
+        cells.counter.base = u64::MAX >> 16;
+        assert_eq!(run(&read.code, &mut state), NEXT);
+        assert_eq!(state.x[3], 4);
+        cells.cell.readable = 0;
+        // Not counting: the count as it stands.
+        cells.counter.step = 0;
+        control.retired = 1 << 40;
+        assert_eq!(run(&read.code, &mut state), NEXT);
+        assert_eq!(state.x[3], u64::MAX >> 16);
+        cells.cell.readable = 0;
+        // The monitor's view closed.
+        cells.counter.open = 0;
+        state.x[3] = 0xdead;
+        assert_eq!(run(&read.code, &mut state), MISS);
+        assert_eq!(cells.counter.at(0), None);
+        assert_eq!((state.x[3], cells.cell.readable), (0xdead, 0));
+        // XZR discards it but the cell still opens; the first instruction
+        // of its block adds no immediate.
+        cells.counter = InstructionCounter {
+            open: 1,
+            base: 1_000,
+            step: u64::MAX,
+            mask: u64::MAX,
+        };
+        control.retired = 7;
+        let discard = instruction_counter_thunk(PC, 31, CELL, PLAIN, COUNTER, 0).unwrap();
+        assert!(discard.code.len() < read.code.len());
+        assert_eq!(run(&discard.code, &mut state), NEXT);
+        assert_eq!((state.x[3], cells.cell.value), (0xdead, 1_007));
     }
 
     /// ISR_EL1 reads the waiting I and F masks as bits 7 and 6 while the

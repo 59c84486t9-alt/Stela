@@ -430,8 +430,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         if let (Ok(()), true, Some(value)) = (&step, after == before, value) {
             self.mirrors[index] = register_read::Cell { readable: 1, value };
-            if index == COUNTER_MIRRORS[0] {
-                self.mirrors[CYCLES_PLAIN] = register_read::Cell {
+            let plain = match index {
+                _ if index == COUNTER_MIRRORS[0] => Some(CYCLES_PLAIN),
+                _ if index == COUNTER_MIRRORS[1] => Some(INSTRUCTIONS_PLAIN),
+                _ => None,
+            };
+            if let Some(plain) = plain {
+                self.mirrors[plain] = register_read::Cell {
                     readable: 1,
                     value: 0,
                 };
@@ -440,18 +445,35 @@ impl<H: Host, D: Devices> Machine<H, D> {
         step
     }
 
-    /// Fill [`Mirrors::cycles`] as native code is entered: the monitor's
-    /// PMC0, which no native code changes, unless a read of it answers a
-    /// degraded value instead of the count.
+    /// Fill [`Mirrors::cycles`] and [`Mirrors::instructions`] as native code
+    /// is entered: the monitor's PMC0 and PMC1, which no native code
+    /// changes, PMC1 at the instructions retired so far, each unless a read
+    /// of it answers a degraded value instead of the count.
     pub(super) fn enter_cycles(&mut self) {
-        let degraded = !self.cpu.degraded.is_empty()
-            && self
-                .cpu
-                .degraded
-                .contains_key(&MIRRORED[COUNTER_MIRRORS[0]].selector());
-        self.mirrors.cycles = match &self.cpu.pmu {
-            Some(pmu) if !degraded => pmu.native_cycles(),
-            _ => register_read::CycleCounter::default(),
+        let degraded = |index: usize| {
+            !self.cpu.degraded.is_empty()
+                && self
+                    .cpu
+                    .degraded
+                    .contains_key(&MIRRORED[COUNTER_MIRRORS[index]].selector())
+        };
+        let (cycles_degraded, instructions_degraded) = (degraded(0), degraded(1));
+        let context = self.cpu.pmu_context(false);
+        let retired = self.cpu.retired;
+        (self.mirrors.cycles, self.mirrors.instructions) = match &self.cpu.pmu {
+            Some(pmu) => (
+                if cycles_degraded {
+                    Default::default()
+                } else {
+                    pmu.native_cycles()
+                },
+                if instructions_degraded {
+                    Default::default()
+                } else {
+                    pmu.native_instructions(retired, context)
+                },
+            ),
+            None => Default::default(),
         };
     }
 

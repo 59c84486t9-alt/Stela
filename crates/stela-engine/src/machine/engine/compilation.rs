@@ -1029,6 +1029,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 code_bytes,
                 terminal_pc,
                 terminal,
+                (last / INSTRUCTION as usize) as u32,
             ));
         }
         // The record keeps a bit per successor; any more stay exits.
@@ -1324,13 +1325,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// `code`, through a thunk that completes `word` at `pc`, if it is MRS
     /// of a [`MIRRORED`] register, from its cell in [`Self::mirrors`] while
     /// it is readable (`x86_64::register_read`); the thunk's direct exit to
-    /// the next instruction.
+    /// the next instruction. `before` instructions of the block precede it.
     pub(super) fn complete_mirrored_read_natively(
         &mut self,
         code: NativeCode,
         native: &[u8],
         pc: u64,
         word: u32,
+        before: u32,
     ) -> Option<Successor> {
         let site = native.len().checked_sub(chain::DIRECT_EXIT_BYTES)?;
         if !chain::is_direct_exit(&native[site..], GuestAddress(pc), ExitKind::System) {
@@ -1395,6 +1397,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 let count = Place::new(Anchor::Count, 0);
                 let plain = cell_place(CYCLES_PLAIN);
                 register_read::cycle_counter_thunk(GuestAddress(pc), rt, cell, plain, CYCLES, count)
+            } else if index == COUNTER_MIRRORS[1] {
+                // Its block's instructions before it have retired, and the
+                // chain counts the blocks native code left: what the
+                // engine's exit here would retire before it reads.
+                let plain = cell_place(INSTRUCTIONS_PLAIN);
+                register_read::instruction_counter_thunk(
+                    GuestAddress(pc),
+                    rt,
+                    cell,
+                    plain,
+                    INSTRUCTION_COUNTER,
+                    before,
+                )?
             } else if index == DAIF_MIRROR && self.native_system().exclusive {
                 register_read::mask_read_thunk(GuestAddress(pc), rt, cell)
             } else {
