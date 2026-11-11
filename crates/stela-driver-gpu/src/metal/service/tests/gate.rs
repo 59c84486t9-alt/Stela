@@ -1,6 +1,7 @@
 extern crate std;
 
 use super::{Memory, MockBackend, MockCompiler, Stream, commit, connect, service};
+use crate::metal::service::shared::UPKEEP_PIECES;
 use crate::metal::{
     capabilities::block::Block,
     service::{
@@ -911,4 +912,88 @@ fn frees_run_after_the_calls_turn() {
     assert_eq!(outside.ran.load(Ordering::SeqCst), 1);
     assert!(!outside.frees_pending_now());
     assert!(shared.try_turn().is_some(), "no turn kept");
+}
+
+/// Work a call's turn leaves for after it (frees, released semaphores,
+/// semaphores made ahead) asks the platform once for an upkeep, which runs
+/// it holding no turn, a bounded piece at a time.
+#[test]
+fn upkeep_runs_where_the_platform_asks_holding_no_turn_and_bounded() {
+    use crate::metal::device::fixture::MockOutside;
+    use alloc::sync::Arc;
+    use core::sync::atomic::AtomicUsize;
+    static WAKES: AtomicUsize = AtomicUsize::new(0);
+    let outside = Arc::new(MockOutside::default());
+    let mut service = service();
+    service.device().backend().outside = Some(outside.clone());
+    let shared = SharedService::new(
+        service,
+        ServiceHost {
+            wake: || {
+                WAKES.fetch_add(1, Ordering::SeqCst);
+            },
+            ..HOST
+        },
+    );
+    let connection = connect(&mut shared.try_turn().unwrap());
+    assert_eq!(shared.upkeep(), 0, "no call saw the outside work yet");
+    shared.set_outside_stack(0x8000);
+    outside.chores.store(UPKEEP_PIECES + 4, Ordering::SeqCst);
+    let mut memory = Memory::default();
+    let call = gate_call(&mut memory, Operation::AllocatedSize, &[], 8);
+    GateService::serve(&shared, connection, call, &mut memory).unwrap();
+    GateService::serve(&shared, connection, call, &mut memory).unwrap();
+    assert_eq!(WAKES.load(Ordering::SeqCst), 1, "asked once");
+    assert_eq!(outside.upkept.load(Ordering::SeqCst), 0, "not in the call");
+    // The platform's upkeep while a call holds the turn.
+    let held = shared.try_turn().unwrap();
+    assert_eq!(shared.upkeep(), UPKEEP_PIECES);
+    assert_eq!(WAKES.load(Ordering::SeqCst), 2, "what is left asks again");
+    assert_eq!(shared.upkeep(), 4);
+    assert_eq!(shared.upkeep(), 0);
+    drop(held);
+    assert_eq!(WAKES.load(Ordering::SeqCst), 2, "nothing left to ask for");
+}
+
+/// The platform's upkeep does nothing while another caller holds the
+/// outside lock; that caller asks again once it leaves.
+#[test]
+fn upkeep_leaves_the_outside_lock_to_its_holder() {
+    use crate::metal::device::fixture::MockOutside;
+    use alloc::sync::Arc;
+    use core::sync::atomic::AtomicUsize;
+    static WAKES: AtomicUsize = AtomicUsize::new(0);
+    let outside = Arc::new(MockOutside::default());
+    let mut service = service();
+    service.device().backend().outside = Some(outside.clone());
+    let shared = Arc::new(SharedService::new(
+        service,
+        ServiceHost {
+            relax: std::thread::yield_now,
+            wake: || {
+                WAKES.fetch_add(1, Ordering::SeqCst);
+            },
+            ..HOST
+        },
+    ));
+    shared.set_outside_stack(0x8000);
+    let kext = shared.connect().unwrap();
+    outside.hold.store(true, Ordering::SeqCst);
+    let importer = {
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            let range = stela_contracts::gate::MemoryRange {
+                address: 0x8_0000_0000,
+                bytes: 4096,
+            };
+            GateService::import(&*shared, kext, &[range], NonZeroU64::new(5).unwrap())
+        })
+    };
+    wait_until(|| outside.preparing.load(Ordering::SeqCst));
+    outside.chores.store(2, Ordering::SeqCst);
+    assert_eq!(shared.upkeep(), 0, "the import holds the outside lock");
+    outside.hold.store(false, Ordering::SeqCst);
+    assert!(importer.join().unwrap().is_ok());
+    assert_eq!(WAKES.load(Ordering::SeqCst), 1, "the import asked after it");
+    assert_eq!(shared.upkeep(), 2);
 }

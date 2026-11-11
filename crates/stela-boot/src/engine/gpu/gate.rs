@@ -164,6 +164,11 @@ const FORCE_JOB_MILLIS: u64 = 30;
 /// switched off its CPU within half a second.
 const WAIT_BOUND_MILLIS: u64 = 2;
 
+/// How long the boot CPU's upkeep of a service takes at most a pump
+/// (`SharedService::upkeep`): frees and semaphores the turns left, done where
+/// a host kernel call needs no posting, without stalling the boot PE's guest.
+const UPKEEP_MICROS: u64 = 1000;
+
 /// A single gate exit this long or longer is reported once a boot
 /// (`GPU LONG EXIT`): 100 ms.
 const LONG_EXIT_MILLIS: u64 = 100;
@@ -1027,9 +1032,11 @@ fn open_gpu(
                 service.set_compile_stack(compiling.top());
                 core::mem::forget(compiling);
                 // Imports' exports and driver imports run after their turn
-                // on a stack of their own; without one they stay in it.
+                // on a stack of their own; without one they stay in it. So
+                // do the frees and semaphores the boot CPU's look keeps up.
                 if let Some(outside) = Stack::map(gpu.window, STACK_BYTES) {
                     service.set_outside_stack(outside.top());
+                    service.set_upkeep_budget(gpu.tsc_hz / 1_000_000 * UPKEEP_MICROS);
                     core::mem::forget(outside);
                 }
             } else {

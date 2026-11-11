@@ -174,6 +174,7 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         outside: Arc::new(crate::metal::native::NativeOutside::new(
             outside_device,
             exporter,
+            false,
             || {},
         )),
         imports: BTreeMap::new(),

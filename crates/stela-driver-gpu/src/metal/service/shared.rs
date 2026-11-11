@@ -138,6 +138,12 @@ pub struct SharedService<B: Backend, C: Compiler> {
     /// then stays in the turn), and the lock its user holds.
     outside_stack: AtomicU64,
     outside_locked: AtomicBool,
+    /// The backend's outside work as the last turn saw it, for the
+    /// platform's upkeep ([`SharedService::upkeep`]), which takes no turn;
+    /// whether the platform was asked for one; and the ticks one may take.
+    outside_seen: Spin<Option<Arc<dyn Outside>>>,
+    upkeep_asked: AtomicBool,
+    upkeep_budget: AtomicU64,
     /// Refused submissions whose command buffers' connections were not yet
     /// told: raised before the refused submission's signals are made, so
     /// while it is not zero no poll is answered from the published serial,
@@ -351,6 +357,9 @@ pub struct Served {
 unsafe impl<B: Backend + Send, C: Compiler + Send> Sync for SharedService<B, C> {}
 // SAFETY: every field is, given the bounds.
 unsafe impl<B: Backend + Send, C: Compiler + Send> Send for SharedService<B, C> {}
+
+/// Pieces of outside work one upkeep does at most ([`SharedService::upkeep`]).
+pub(super) const UPKEEP_PIECES: usize = 16;
 
 /// A turn at the service.
 /// The service held, and whether a look in this turn found work completed.
@@ -571,6 +580,9 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             imported: Spin::new(RecentImports::default()),
             outside_stack: AtomicU64::new(0),
             outside_locked: AtomicBool::new(false),
+            outside_seen: Spin::new(None),
+            upkeep_asked: AtomicBool::new(false),
+            upkeep_budget: AtomicU64::new(0),
             refusals,
             host,
         }
@@ -633,16 +645,84 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         self.outside_locked.store(false, Ordering::Release);
     }
 
-    /// The backend's outside work and stack when it has frees to run
-    /// after this turn; tells the backend a service runs them.
-    fn outside_frees(&self, turn: &mut Turn<'_, B, C>) -> Option<(Arc<dyn Outside>, u64)> {
+    /// The backend's outside work and stack, for after this turn; tells
+    /// the backend a service runs it, and keeps it for the platform's
+    /// upkeep.
+    fn after_turn(&self, turn: &mut Turn<'_, B, C>) -> Option<(Arc<dyn Outside>, u64)> {
         let stack = self.outside_stack.load(Ordering::Acquire);
         if stack == 0 {
             return None;
         }
         let outside = turn.device().outside()?;
         outside.enable();
-        outside.frees_pending().then_some((outside, stack))
+        self.outside_seen.with(|seen| {
+            let same = seen
+                .as_ref()
+                .is_some_and(|seen| core::ptr::addr_eq(Arc::as_ptr(seen), Arc::as_ptr(&outside)));
+            if !same {
+                *seen = Some(outside.clone());
+            }
+        });
+        Some((outside, stack))
+    }
+
+    /// Asks the platform for an upkeep ([`Self::upkeep`]) when the outside
+    /// work has some and none was asked for yet.
+    fn ask_upkeep(&self, outside: &dyn Outside) {
+        if outside.upkeep_due() && !self.upkeep_asked.swap(true, Ordering::AcqRel) {
+            (self.host.wake)();
+        }
+    }
+
+    /// Bounds one upkeep to `ticks` ([`Self::upkeep`]); zero bounds it by
+    /// its count of pieces alone.
+    pub fn set_upkeep_budget(&self, ticks: u64) {
+        self.upkeep_budget.store(ticks, Ordering::Release);
+    }
+
+    /// The backend's work after its turns ([`Outside::upkeep`]): frees,
+    /// destruction of released semaphores and semaphores made ahead, which
+    /// the platform runs where a host kernel call costs least, on the
+    /// outside stack and holding no turn. Bounded by [`UPKEEP_PIECES`] and
+    /// the budget; what is left asks for the next. Nothing when another
+    /// caller holds the outside lock: it asks again once it leaves.
+    /// Answers the pieces done.
+    pub fn upkeep(&self) -> usize {
+        let stack = self.outside_stack.load(Ordering::Acquire);
+        let Some(outside) = self.outside_seen.with(|seen| seen.clone()) else {
+            return 0;
+        };
+        if stack == 0 || !outside.upkeep_due() {
+            self.upkeep_asked.store(false, Ordering::Release);
+            return 0;
+        }
+        let locked =
+            self.outside_locked
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed);
+        self.upkeep_asked.store(false, Ordering::Release);
+        if locked.is_err() {
+            return 0;
+        }
+        let (budget, began) = (
+            self.upkeep_budget.load(Ordering::Acquire),
+            (self.host.ticks)(),
+        );
+        let mut done = 0;
+        let mut pieces = 0;
+        (self.host.run)(stack, &mut || {
+            done = outside.upkeep(&mut || {
+                pieces += 1;
+                pieces <= UPKEEP_PIECES
+                    && (budget == 0 || (self.host.ticks)().wrapping_sub(began) < budget)
+            });
+        });
+        self.outside_locked.store(false, Ordering::Release);
+        // A piece that cannot be done (a semaphore the driver refuses) asks
+        // for no upkeep after it: the turns then make their own.
+        if done != 0 {
+            self.ask_upkeep(&*outside);
+        }
+        done
     }
 
     /// Bounds how long a job waits for a processor whose guest waits: once
@@ -1059,6 +1139,11 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         if let Some(mut turn) = self.try_turn() {
             turn.look();
         }
+        // The platform looks where a host kernel call costs least, which is
+        // where the work after the turns costs least too.
+        if self.upkeep_asked.load(Ordering::Acquire) {
+            self.upkeep();
+        }
     }
 
     /// Closes admission while holding the same turn as guest calls, so a
@@ -1229,7 +1314,7 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
         }
         let progress = turn.device().progress();
         let phases = turn.device().take_phases();
-        let outside = self.outside_frees(&mut turn);
+        let outside = self.after_turn(&mut turn);
         drop(turn);
         let left = (self.host.ticks)();
         (self.host.served)(Served {
@@ -1250,9 +1335,13 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
         if let Some(text) = noted {
             (self.host.note)(&text);
         }
-        // The frees the call's turn let go of, holding no turn.
+        // The frees the call's turn let go of, holding no turn, when the
+        // platform's upkeep fell behind; the rest is the upkeep's.
         if let Some((outside, stack)) = outside {
-            self.try_outside_frees(&*outside, stack);
+            if outside.frees_pending() {
+                self.try_outside_frees(&*outside, stack);
+            }
+            self.ask_upkeep(&*outside);
         }
         served
     }
@@ -1293,12 +1382,15 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
                 None => turn.import(connection, ranges, token),
             });
         });
-        let outside = self.outside_frees(&mut turn);
+        let outside = self.after_turn(&mut turn);
         drop(turn);
         let imported = imported.expect("the platform runs what it is given");
         // Frees the turn let go of, after it too.
         if let Some((outside, stack)) = outside {
-            self.outside(stack, || outside.run_frees());
+            if outside.frees_pending() {
+                self.outside(stack, || outside.run_frees());
+            }
+            self.ask_upkeep(&*outside);
         }
         // The kext's import holds the turn as a frontend call does, and its
         // host kernel calls are its own in the platform's count

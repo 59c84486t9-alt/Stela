@@ -45,8 +45,21 @@ pub trait Outside: Send + Sync {
     /// allocations a call so that one call's exit stays short; answers how
     /// many.
     fn run_frees(&self) -> usize;
-    /// Whether [`Self::run_frees`] has anything to free.
+    /// Whether so much waits to be freed that a frontend call should run
+    /// [`Self::run_frees`]; below that [`Self::upkeep`] frees it.
     fn frees_pending(&self) -> bool;
+    /// The work the backend left for after its turns, one piece at a time
+    /// while `more` answers true: frees, destruction of released
+    /// semaphores, and new semaphores made ahead for the turns to take.
+    /// The platform runs it where a host kernel call costs least (the boot
+    /// processor, which runs Linux itself). Answers the pieces done.
+    fn upkeep(&self, _more: &mut dyn FnMut() -> bool) -> usize {
+        0
+    }
+    /// Whether [`Self::upkeep`] has work.
+    fn upkeep_due(&self) -> bool {
+        false
+    }
     /// Told that a service runs [`Self::run_frees`] after its calls'
     /// turns; until then the backend frees in its turn.
     fn enable(&self);

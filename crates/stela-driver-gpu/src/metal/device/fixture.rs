@@ -70,6 +70,9 @@ pub(crate) struct MockOutside {
     pub(crate) pending: core::sync::atomic::AtomicUsize,
     pub(crate) ran: core::sync::atomic::AtomicUsize,
     pub(crate) enabled: core::sync::atomic::AtomicBool,
+    /// Pieces of upkeep waiting, and those done.
+    pub(crate) chores: core::sync::atomic::AtomicUsize,
+    pub(crate) upkept: core::sync::atomic::AtomicUsize,
 }
 
 impl MockOutside {
@@ -102,6 +105,19 @@ impl Outside for MockOutside {
     }
     fn frees_pending(&self) -> bool {
         self.pending.load(core::sync::atomic::Ordering::SeqCst) != 0
+    }
+    fn upkeep(&self, more: &mut dyn FnMut() -> bool) -> usize {
+        use core::sync::atomic::Ordering;
+        let mut done = 0;
+        while self.chores.load(Ordering::SeqCst) != 0 && more() {
+            self.chores.fetch_sub(1, Ordering::SeqCst);
+            self.upkept.fetch_add(1, Ordering::SeqCst);
+            done += 1;
+        }
+        done
+    }
+    fn upkeep_due(&self) -> bool {
+        self.chores.load(core::sync::atomic::Ordering::SeqCst) != 0
     }
     fn enable(&self) {
         self.enabled

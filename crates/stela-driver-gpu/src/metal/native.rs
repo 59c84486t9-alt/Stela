@@ -695,6 +695,7 @@ impl NativeBackend {
         let outside = Arc::new(NativeOutside::new(
             device.clone(),
             exporter.clone(),
+            fns.external_semaphore_fd.is_some(),
             loader.relax,
         ));
         let mut backend = Self {
@@ -1636,7 +1637,17 @@ impl Drop for NativeBackend {
             memory: kept.memory,
             exported: Some(kept.exported),
         });
-        for freed in kept.collect::<Vec<_>>().into_iter().chain(deferred) {
+        let Upkeep {
+            frees,
+            spares,
+            doomed,
+        } = deferred;
+        for semaphore in spares.into_iter().chain(doomed) {
+            // SAFETY: the device is idle; spares were never used, and doomed
+            // ones were released by the Metal device.
+            unsafe { self.device.destroy_semaphore(semaphore, None) };
+        }
+        for freed in kept.collect::<Vec<_>>().into_iter().chain(frees) {
             // SAFETY: the device is idle and the Metal device freed it.
             unsafe { self.device.free_memory(freed.memory, None) };
             if let Some(exported) = freed.exported {
@@ -1763,15 +1774,25 @@ struct Freed {
 }
 
 // SAFETY: as for `MadeImport`; frees pass between processors only through
-// `NativeOutside::frees`.
+// `NativeOutside::state`.
 unsafe impl Send for Freed {}
 
+/// What [`NativeOutside`] keeps for work after the turn: whole allocations
+/// to free, fresh event semaphores made ahead, and semaphores to destroy.
+#[derive(Default)]
+struct Upkeep {
+    frees: Vec<Freed>,
+    spares: Vec<vk::Semaphore>,
+    doomed: Vec<vk::Semaphore>,
+}
+
 /// [`Outside`] of a native backend: the device handle and exporter, which
-/// Vulkan lets any thread allocate and free memory with, the memory type
-/// imports take, and the kept imports the backend evicted, to free. A
-/// backend closing waits for the calls inside before it destroys anything
-/// (`users`, `closed`), relaxing as the platform's waits do, since such a
-/// call may wait for the boot processor's Linux.
+/// Vulkan lets any thread allocate and free memory and create and destroy
+/// semaphores with, the memory type imports take, and the work the backend
+/// leaves for after its turn ([`Upkeep`]). A backend closing waits for the
+/// calls inside before it destroys anything (`users`, `closed`), relaxing as
+/// the platform's waits do, since such a call may wait for the boot
+/// processor's Linux.
 pub(crate) struct NativeOutside {
     device: ash::Device,
     exporter: Arc<dyn MemoryExporter>,
@@ -1780,41 +1801,63 @@ pub(crate) struct NativeOutside {
     /// NVK for a descriptor's types imports, maps, unmaps and closes it,
     /// five host kernel calls per import.
     import_type: AtomicU32,
+    /// Whether semaphores are made exportable, as the backend makes them.
+    exportable: bool,
     users: AtomicU32,
     closed: AtomicBool,
     relax: fn(),
-    /// Evicted kept imports to free, and the lock on them.
-    frees: UnsafeCell<Vec<Freed>>,
-    frees_locked: AtomicBool,
+    /// The work left for after the turn, its lock, and its lengths.
+    state: UnsafeCell<Upkeep>,
+    locked: AtomicBool,
     frees_count: AtomicU32,
-    /// A service runs the frees after its calls' turns.
+    spares_count: AtomicU32,
+    doomed_count: AtomicU32,
+    /// A service runs the work after its calls' turns.
     enabled: AtomicBool,
 }
 
-// SAFETY: `frees` is touched only under `frees_locked`; the rest is atomic,
-// immutable, or a Vulkan device whose memory allocation and freeing need no
-// external synchronization.
+// SAFETY: `state` is touched only under `locked`; the rest is atomic,
+// immutable, or a Vulkan device whose memory allocation and freeing and
+// semaphore creation and destruction need no external synchronization.
 unsafe impl Sync for NativeOutside {}
-// SAFETY: as above; kept imports are `Send`.
+// SAFETY: as above; kept imports are `Send`, semaphores plain handles.
 unsafe impl Send for NativeOutside {}
 
 impl NativeOutside {
     /// Frees it holds at most; past it the backend frees in its turn.
     const FREES: u32 = 64;
-    /// Frees one call runs after its turn at most.
+    /// Frees one frontend call runs after its turn at most, and the count
+    /// waiting from which it runs any: below it the boot processor's
+    /// upkeep runs them, where a host kernel call needs no posting.
     const FREES_A_CALL: usize = 4;
+    const FREES_BACKLOG: u32 = Self::FREES / 2;
+    /// Fresh event semaphores kept made, and the count below which upkeep
+    /// is due.
+    const SPARES: u32 = 32;
+    const SPARES_LOW: u32 = 16;
+    /// Semaphores waiting for destruction at most; past it the backend
+    /// destroys in its turn.
+    const DOOMED: u32 = 256;
 
-    fn new(device: ash::Device, exporter: Arc<dyn MemoryExporter>, relax: fn()) -> Self {
+    fn new(
+        device: ash::Device,
+        exporter: Arc<dyn MemoryExporter>,
+        exportable: bool,
+        relax: fn(),
+    ) -> Self {
         Self {
             device,
             exporter,
             import_type: AtomicU32::new(u32::MAX),
+            exportable,
             users: AtomicU32::new(0),
             closed: AtomicBool::new(false),
             relax,
-            frees: UnsafeCell::new(Vec::new()),
-            frees_locked: AtomicBool::new(false),
+            state: UnsafeCell::new(Upkeep::default()),
+            locked: AtomicBool::new(false),
             frees_count: AtomicU32::new(0),
+            spares_count: AtomicU32::new(0),
+            doomed_count: AtomicU32::new(0),
             enabled: AtomicBool::new(false),
         }
     }
@@ -1851,6 +1894,23 @@ impl NativeOutside {
         }
     }
 
+    /// A timeline semaphore at `initial`, exportable when the device's
+    /// semaphores can be.
+    fn create_semaphore(&self, initial: u64) -> Result<vk::Semaphore> {
+        let mut timeline = vk::SemaphoreTypeCreateInfo::default()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(initial);
+        // Every timeline can be exported: NVK's are DRM syncobjs either way.
+        let mut export = vk::ExportSemaphoreCreateInfo::default()
+            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
+        let mut create = vk::SemaphoreCreateInfo::default().push_next(&mut timeline);
+        if self.exportable {
+            create = create.push_next(&mut export);
+        }
+        // SAFETY: the create info and its chain outlive the call.
+        unsafe { self.device.create_semaphore(&create, None) }.map_err(failure)
+    }
+
     /// Runs `body` unless the backend closed; the backend's close waits
     /// for it.
     fn inside<T>(&self, body: impl FnOnce() -> T) -> Option<T> {
@@ -1861,47 +1921,92 @@ impl NativeOutside {
     }
 
     /// Stops calls from entering, waits for those inside, and answers the
-    /// evicted imports not yet freed, for the backend to free.
-    fn close(&self) -> Vec<Freed> {
+    /// work not yet done, for the backend to finish once the device idles.
+    fn close(&self) -> Upkeep {
         self.closed.store(true, Ordering::SeqCst);
         while self.users.load(Ordering::SeqCst) != 0 {
             (self.relax)();
         }
-        self.with_frees(core::mem::take)
+        self.with_state(core::mem::take)
     }
 
-    fn with_frees<T>(&self, body: impl FnOnce(&mut Vec<Freed>) -> T) -> T {
+    fn with_state<T>(&self, body: impl FnOnce(&mut Upkeep) -> T) -> T {
         while self
-            .frees_locked
+            .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
             core::hint::spin_loop();
         }
         // SAFETY: the lock is held.
-        let result = body(unsafe { &mut *self.frees.get() });
-        // SAFETY: the lock is held.
-        let count = unsafe { &*self.frees.get() }.len() as u32;
-        self.frees_count.store(count, Ordering::Release);
-        self.frees_locked.store(false, Ordering::Release);
+        let state = unsafe { &mut *self.state.get() };
+        let result = body(state);
+        self.frees_count
+            .store(state.frees.len() as u32, Ordering::Release);
+        self.spares_count
+            .store(state.spares.len() as u32, Ordering::Release);
+        self.doomed_count
+            .store(state.doomed.len() as u32, Ordering::Release);
+        self.locked.store(false, Ordering::Release);
         result
     }
 
     /// Takes `kept` to free after the turn, or gives it back when nobody
-    /// runs the frees ([`Outside::enable`]) or enough wait already.
+    /// runs the work ([`Outside::enable`]) or enough wait already.
     fn defer_free(&self, kept: Freed) -> Option<Freed> {
         if !self.enabled.load(Ordering::Acquire) {
             return Some(kept);
         }
-        self.with_frees(|frees| {
-            if frees.len() as u32 >= Self::FREES {
+        self.with_state(|state| {
+            if state.frees.len() as u32 >= Self::FREES {
                 Some(kept)
             } else {
-                frees.push(kept);
+                state.frees.push(kept);
                 None
             }
         })
     }
+
+    /// A fresh timeline semaphore at zero made ahead, if one is kept.
+    fn take_spare(&self) -> Option<vk::Semaphore> {
+        if self.spares_count.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        self.with_state(|state| state.spares.pop())
+    }
+
+    /// Takes `semaphore` to destroy after the turn, or gives it back when
+    /// nobody runs the work or enough wait already.
+    fn defer_destroy(&self, semaphore: vk::Semaphore) -> Option<vk::Semaphore> {
+        if !self.enabled.load(Ordering::Acquire) {
+            return Some(semaphore);
+        }
+        self.with_state(|state| {
+            if state.doomed.len() as u32 >= Self::DOOMED {
+                Some(semaphore)
+            } else {
+                state.doomed.push(semaphore);
+                None
+            }
+        })
+    }
+
+    /// Frees `freed`.
+    fn free(&self, freed: Freed) {
+        // SAFETY: the Metal device freed it after the GPU finished with it,
+        // and no import took it back.
+        unsafe { self.device.free_memory(freed.memory, None) };
+        if let Some(exported) = freed.exported {
+            self.exporter.unmap(exported);
+        }
+    }
+}
+
+/// One piece of upkeep, taken under the lock and done outside it.
+enum Chore {
+    Free(Freed),
+    Destroy(vk::Semaphore),
+    Make,
 }
 
 impl Outside for NativeOutside {
@@ -1927,29 +2032,61 @@ impl Outside for NativeOutside {
     }
 
     fn run_frees(&self) -> usize {
-        // The oldest few: each free waits for the boot processor's Linux
-        // (unbind and close), about 1.5-3 ms a host kernel call.
-        let frees = self.with_frees(|frees| {
-            let count = frees.len().min(Self::FREES_A_CALL);
-            frees.drain(..count).collect::<Vec<_>>()
+        // The oldest few: on a guest processor each free waits for the boot
+        // processor's Linux (unbind and close), about 1.5-3 ms a host kernel
+        // call.
+        let frees = self.with_state(|state| {
+            let count = state.frees.len().min(Self::FREES_A_CALL);
+            state.frees.drain(..count).collect::<Vec<_>>()
         });
         let count = frees.len();
         // Closed, the device's destruction frees what it holds.
-        self.inside(|| {
-            for freed in frees {
-                // SAFETY: the Metal device freed it after the GPU finished
-                // with it, and no import took it back.
-                unsafe { self.device.free_memory(freed.memory, None) };
-                if let Some(exported) = freed.exported {
-                    self.exporter.unmap(exported);
-                }
-            }
-        });
+        self.inside(|| frees.into_iter().for_each(|freed| self.free(freed)));
         count
     }
 
     fn frees_pending(&self) -> bool {
-        self.frees_count.load(Ordering::Acquire) != 0
+        self.frees_count.load(Ordering::Acquire) >= Self::FREES_BACKLOG
+    }
+
+    fn upkeep(&self, more: &mut dyn FnMut() -> bool) -> usize {
+        let mut done = 0;
+        self.inside(|| {
+            while more() {
+                let chore = self.with_state(|state| {
+                    if let Some(freed) = state.frees.pop() {
+                        Some(Chore::Free(freed))
+                    } else if let Some(semaphore) = state.doomed.pop() {
+                        Some(Chore::Destroy(semaphore))
+                    } else {
+                        ((state.spares.len() as u32) < Self::SPARES).then_some(Chore::Make)
+                    }
+                });
+                match chore {
+                    None => break,
+                    Some(Chore::Free(freed)) => self.free(freed),
+                    Some(Chore::Destroy(semaphore)) => {
+                        // SAFETY: the Metal device destroys a semaphore only
+                        // after every submission that uses it completed.
+                        unsafe { self.device.destroy_semaphore(semaphore, None) };
+                    }
+                    Some(Chore::Make) => match self.create_semaphore(0) {
+                        Ok(semaphore) => self.with_state(|state| state.spares.push(semaphore)),
+                        // A turn makes its own, and reports a failure.
+                        Err(_) => break,
+                    },
+                }
+                done += 1;
+            }
+        });
+        done
+    }
+
+    fn upkeep_due(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+            && (self.frees_count.load(Ordering::Acquire) != 0
+                || self.doomed_count.load(Ordering::Acquire) != 0
+                || self.spares_count.load(Ordering::Acquire) < Self::SPARES_LOW)
     }
 
     fn enable(&self) {
@@ -2460,20 +2597,19 @@ impl Backend for NativeBackend {
     }
 
     fn create_semaphore(&mut self, initial: u64) -> Result<Semaphore> {
-        let mut timeline = vk::SemaphoreTypeCreateInfo::default()
-            .semaphore_type(vk::SemaphoreType::TIMELINE)
-            .initial_value(initial);
-        // Every timeline can be exported: NVK's are DRM syncobjs either way.
-        let mut export = vk::ExportSemaphoreCreateInfo::default()
-            .handle_types(vk::ExternalSemaphoreHandleTypeFlags::OPAQUE_FD);
-        let mut create = vk::SemaphoreCreateInfo::default().push_next(&mut timeline);
-        if self.fns.external_semaphore_fd.is_some() {
-            create = create.push_next(&mut export);
-        }
-        // SAFETY: the create info and its chain outlive the call.
-        unsafe { self.device.create_semaphore(&create, None) }
-            .map(|semaphore| Semaphore(raw(semaphore)))
-            .map_err(failure)
+        // One made ahead after a turn is the same as a new one: a timeline
+        // at zero, exportable alike. Creating one in the turn is a host
+        // kernel call a guest processor waits for the boot processor for.
+        let spare = if initial == 0 {
+            self.outside.take_spare()
+        } else {
+            None
+        };
+        let made = match spare {
+            Some(spare) => spare,
+            None => self.outside.create_semaphore(initial)?,
+        };
+        Ok(Semaphore(raw(made)))
     }
 
     fn export_semaphore(&mut self, semaphore: Semaphore) -> Option<i32> {
@@ -2574,7 +2710,11 @@ impl Backend for NativeBackend {
                 }
                 Object::QueryPool(pool) => self.device.destroy_query_pool(handle(pool.0), None),
                 Object::Semaphore(semaphore) => {
-                    self.device.destroy_semaphore(handle(semaphore.0), None);
+                    // After the turn when the outside work takes it, as the
+                    // destruction is a host kernel call.
+                    if let Some(semaphore) = self.outside.defer_destroy(handle(semaphore.0)) {
+                        self.device.destroy_semaphore(semaphore, None);
+                    }
                 }
                 Object::Memory(_) => {}
                 Object::IndirectCommandsLayout(layout) => self.generated().destroy_layout(layout.0),
