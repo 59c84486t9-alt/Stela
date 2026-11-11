@@ -171,6 +171,7 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         exporter: ManuallyDrop::new(Box::new(Exporter(drops.clone()))),
         imports: BTreeMap::new(),
         retired: VecDeque::new(),
+        import_type: None,
         new_images: Vec::new(),
         zeroing: crate::metal::native::zero::Zeroing::new(1 << 32, |_| {}),
         bind_timeline: vk::Semaphore::null(),

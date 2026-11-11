@@ -111,13 +111,14 @@ const SKIPPED: [&str; 11] = [
     "wsi_common_display",
 ];
 /// Stela's stand-ins, under `compat/mesa`, built with an NVK unit's flags.
-const STAND_INS: [&str; 6] = [
+const STAND_INS: [&str; 7] = [
     "nvkcl",
     "build_id",
     "nv_cubin",
     "drm",
     "soft_float",
     "nir_options",
+    "submit_thread",
 ];
 /// The Metal compiler service, under `compiler`, built with an NVK unit's flags.
 const AIR: [&str; 16] = [

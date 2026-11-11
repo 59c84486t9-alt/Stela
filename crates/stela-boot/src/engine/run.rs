@@ -166,6 +166,28 @@ fn device_exits_report<H: Host>(
         ));
     }
     output::arguments(format_args!("{line}\n"));
+    // The same pages by the model mapped there: a model of many pages, such
+    // as a gate for each Metal connection, counts once.
+    let mut models: Vec<(&'static str, u64, u64)> = Vec::new();
+    for exit in &pages {
+        let name = machine.devices.with(|devices| {
+            stela_engine::machine::Devices::device_name(devices, u64::from(exit.page) << 12)
+        });
+        let name = name.unwrap_or("unmapped");
+        match models.iter_mut().find(|(model, ..)| *model == name) {
+            Some((_, count, ticks)) => {
+                *count += exit.count;
+                *ticks += exit.ticks;
+            }
+            None => models.push((name, exit.count, exit.ticks)),
+        }
+    }
+    models.sort_unstable_by_key(|&(_, _, ticks)| core::cmp::Reverse(ticks));
+    let mut line = String::from("PES DEVICE MODELS count/ns");
+    for &(name, count, ticks) in models.iter().take(SHOWN) {
+        line.push_str(&format!(" {name}={count}/{}", nanos(ticks)));
+    }
+    output::arguments(format_args!("{line}\n"));
 }
 
 /// `DEVICE TRANSFERS calls/us/longest_us`: since the last beat, each part

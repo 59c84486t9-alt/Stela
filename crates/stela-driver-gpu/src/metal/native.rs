@@ -73,6 +73,10 @@ pub struct Loader {
     /// Told each error and warning the driver reports, such as why a call
     /// failed with only a generic result.
     pub log: fn(&str),
+    /// Puts a queue's submissions on the driver's submit thread, which makes
+    /// them where the driver's kernel runs: `vkQueueSubmit2` then returns once
+    /// the work is queued. `None` keeps submissions on the caller.
+    pub submit_thread: Option<unsafe extern "C" fn(vk::Queue) -> vk::Result>,
 }
 
 /// What a device whose CPU reaches only part of its memory (no Resizable
@@ -430,6 +434,11 @@ pub struct NativeBackend {
     imports: BTreeMap<u64, (ExportedMemory, NonZeroU64)>,
     /// The tokens of imported memory now freed.
     retired: VecDeque<NonZeroU64>,
+    /// The memory type imports take, once one import found it: every
+    /// dma-buf the exporter makes is guest RAM of one kind, and asking NVK
+    /// for a descriptor's types imports, maps, unmaps and closes it, five
+    /// host kernel calls per import.
+    import_type: Option<u32>,
     /// Images still in `VK_IMAGE_LAYOUT_UNDEFINED`, with their aspects.
     new_images: Vec<(vk::Image, vk::ImageAspectFlags)>,
     /// What new resources take of memory used before, which the host or
@@ -633,6 +642,19 @@ impl NativeBackend {
         }
         // SAFETY: the device was created with one queue in `family`.
         let queue = unsafe { device.get_device_queue(family, 0) };
+        if let Some(submit_thread) = loader.submit_thread {
+            // SAFETY: the queue is the new device's and nothing submitted to
+            // it yet. A failed submission then loses the device, which every
+            // command buffer in flight answers, as Metal reports a commit's
+            // failure through its command buffer.
+            let result = unsafe { submit_thread(queue) };
+            if result != vk::Result::SUCCESS {
+                (loader.log)(&alloc::format!(
+                    "submissions stay on the committing processor: the driver's submit thread \
+                     did not start ({result:?})"
+                ));
+            }
+        }
         let memories = memory::Memories::new(snapshot.limits.buffer_image_granularity);
         let zeroing = zero::Zeroing::new(snapshot.limits.max_buffer_size, loader.log);
         let mut backend = Self {
@@ -658,6 +680,7 @@ impl NativeBackend {
             exporter: ManuallyDrop::new(exporter),
             imports: BTreeMap::new(),
             retired: VecDeque::new(),
+            import_type: None,
             new_images: Vec::new(),
             zeroing,
             bind_timeline: vk::Semaphore::null(),
@@ -982,6 +1005,32 @@ impl NativeBackend {
             Err(Some(error)) => Err(failure(error)),
             Err(None) => Err(Error::Invalid("no memory type suits the resource")),
         }
+    }
+
+    /// The memory type an import of the dma-buf `fd` takes: the first of
+    /// NVK's types for it that prefers coherent memory.
+    fn import_memory_type(&self, fd: i32) -> Result<u32> {
+        let bits = self
+            .fns
+            .external_memory_fd
+            .as_ref()
+            .ok_or(Error::Unsupported("memory import"))
+            .and_then(|fns| {
+                let mut properties = vk::MemoryFdPropertiesKHR::default();
+                // SAFETY: the descriptor is the dma-buf just exported.
+                unsafe { fns.get_memory_fd_properties(DMA_BUF, fd, &mut properties) }
+                    .map_err(failure)?;
+                Ok(properties.memory_type_bits)
+            })?;
+        let request = MemoryRequest {
+            required: super::vulkan::MemoryProperties::EMPTY,
+            preferred: super::vulkan::MemoryProperties::HOST_COHERENT,
+            mapped: false,
+        };
+        objects::memory_candidates(&self.snapshot.memory, bits, request)
+            .first()
+            .copied()
+            .ok_or(Error::Unsupported("a memory type of imported memory"))
     }
 
     /// Frees `memory`: returns a place to its block, or frees a whole
@@ -1643,29 +1692,10 @@ impl Backend for NativeBackend {
     fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<Memory> {
         let handle_type = DMA_BUF;
         let exported = self.exporter.export(ranges)?;
-        let bits = self
-            .fns
-            .external_memory_fd
-            .as_ref()
-            .ok_or(Error::Unsupported("memory import"))
-            .and_then(|fns| {
-                let mut properties = vk::MemoryFdPropertiesKHR::default();
-                // SAFETY: the descriptor is the dma-buf just exported.
-                unsafe { fns.get_memory_fd_properties(handle_type, exported.fd, &mut properties) }
-                    .map_err(failure)?;
-                Ok(properties.memory_type_bits)
-            });
-        let request = MemoryRequest {
-            required: super::vulkan::MemoryProperties::EMPTY,
-            preferred: super::vulkan::MemoryProperties::HOST_COHERENT,
-            mapped: false,
+        let imported = match self.import_type {
+            Some(index) => Ok(index),
+            None => self.import_memory_type(exported.fd),
         };
-        let imported = bits.and_then(|bits| {
-            objects::memory_candidates(&self.snapshot.memory, bits, request)
-                .first()
-                .copied()
-                .ok_or(Error::Unsupported("a memory type of imported memory"))
-        });
         let index = match imported {
             Ok(index) => index,
             Err(error) => {
@@ -1688,9 +1718,12 @@ impl Backend for NativeBackend {
             Ok(memory) => memory,
             Err(error) => {
                 self.exporter.close(exported);
+                // The next import asks for its descriptor's types again.
+                self.import_type = None;
                 return Err(failure(error));
             }
         };
+        self.import_type = Some(index);
         // The host reaches the memory through a mapping of its own: Linux has
         // no pages to map for an imported buffer.
         self.mappings.insert(

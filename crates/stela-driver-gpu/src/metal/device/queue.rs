@@ -338,6 +338,10 @@ pub(super) struct Queue {
     /// The highest value submitted work or the CPU signals on each
     /// semaphore: a wait on no more than it is safe to submit.
     promised: Vec<(Semaphore, u64)>,
+    /// The highest value each event's semaphore is known to have reached,
+    /// read from the driver or signaled by the CPU: once it is what was
+    /// promised, the event's value is known without asking the driver.
+    reached_events: Vec<(Semaphore, u64)>,
     /// Command buffers seen complete, in any order.
     completions: u64,
     /// (connection, serial) of command buffers retired while an older one
@@ -1934,15 +1938,53 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// `signaledValue` of a shared event.
     pub fn signaled_value(&mut self, id: EventId) -> Result<u64> {
         let semaphore = self.event_semaphore(id)?;
-        self.backend.semaphore_value(semaphore)
+        self.event_value(semaphore)
+    }
+
+    /// The value of event semaphore `semaphore`. Only submitted work and
+    /// the CPU's signals raise it, and both promise their values first, so
+    /// it never passes what was promised: once it is known to have reached
+    /// that, the answer needs no driver query (a host kernel call).
+    fn event_value(&mut self, semaphore: Semaphore) -> Result<u64> {
+        if self.lost {
+            return Err(Error::DeviceLost);
+        }
+        let promised = self.promised(semaphore);
+        if self.reached_event(semaphore) >= promised {
+            return Ok(promised);
+        }
+        let value = self.backend.semaphore_value(semaphore)?;
+        self.note_reached_event(semaphore, value);
+        Ok(value)
+    }
+
+    fn reached_event(&self, semaphore: Semaphore) -> u64 {
+        self.queue
+            .reached_events
+            .iter()
+            .find(|&&(reached, _)| reached == semaphore)
+            .map_or(0, |&(_, value)| value)
+    }
+
+    fn note_reached_event(&mut self, semaphore: Semaphore, value: u64) {
+        match self
+            .queue
+            .reached_events
+            .iter_mut()
+            .find(|(reached, _)| *reached == semaphore)
+        {
+            Some((_, reached)) => *reached = (*reached).max(value),
+            None => self.queue.reached_events.push((semaphore, value)),
+        }
     }
 
     /// `setSignaledValue:` from the CPU; timeline values only increase.
     pub fn set_signaled_value(&mut self, id: EventId, value: u64) -> Result<()> {
         let semaphore = self.event_semaphore(id)?;
-        let current = self.backend.semaphore_value(semaphore)?;
+        let current = self.event_value(semaphore)?;
         if value > current {
             self.backend.signal_semaphore(semaphore, value)?;
+            self.note_reached_event(semaphore, value);
             self.promise(semaphore, value);
             // Work held for the value goes to the queue now.
             self.advance()?;
@@ -1957,13 +1999,17 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             return Err(Error::DeviceLost);
         }
         let semaphore = self.event_semaphore(id)?;
-        if self.backend.semaphore_value(semaphore)? >= value {
+        if self.event_value(semaphore)? >= value {
             return Ok(true);
         }
         if !self.submit_held_through(self.submitted, timeout)? {
             return Ok(false);
         }
-        self.backend.wait_semaphore(semaphore, value, timeout)
+        let reached = self.backend.wait_semaphore(semaphore, value, timeout)?;
+        if reached {
+            self.note_reached_event(semaphore, value);
+        }
+        Ok(reached)
     }
 
     pub fn destroy_event(&mut self, id: EventId) -> Result<()> {
@@ -1971,6 +2017,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.queue
             .promised
             .retain(|&(promised, _)| promised != semaphore);
+        self.queue
+            .reached_events
+            .retain(|&(reached, _)| reached != semaphore);
         self.defer(Object::Semaphore(semaphore));
         Ok(())
     }

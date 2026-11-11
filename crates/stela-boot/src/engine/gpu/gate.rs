@@ -58,6 +58,8 @@ static SERVICES: AtomicPtr<Vec<Arc<Shared>>> = AtomicPtr::new(ptr::null_mut());
 
 unsafe extern "C" {
     fn stela_nvk_nir_options(physical: vk::PhysicalDevice) -> *const c_void;
+    /// `compat/mesa/submit_thread.c`.
+    fn stela_nvk_submit_thread(queue: vk::Queue) -> vk::Result;
 }
 
 /// The compile stacks ([`open_gpu`]), whose jobs [`run`] runs with the
@@ -835,6 +837,8 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
     let loader = Loader {
         get_instance_proc_addr: entry,
         log: driver_message,
+        // A commit's submission runs where Linux does, not on its PE.
+        submit_thread: Some(stela_nvk_submit_thread),
     };
     // SAFETY: the linked NVK and compiler, which last for the boot.
     let service = unsafe {

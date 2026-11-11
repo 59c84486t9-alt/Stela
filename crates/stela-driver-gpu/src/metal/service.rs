@@ -38,7 +38,7 @@ use core::{
 };
 use identity::{DeviceEpoch, ObjectHandle, ObjectTable, TableError};
 use libraries::LibraryNames;
-pub use shared::{Served, ServiceHost, SharedService};
+pub use shared::{IMPORT_AGAIN_OPERATION, IMPORT_OPERATION, Served, ServiceHost, SharedService};
 use stela_contracts::gate::MemoryRange;
 use wire::{Fault, Handle, NegotiateRequest, NegotiateResponse, Operation, Record, Span, Status};
 

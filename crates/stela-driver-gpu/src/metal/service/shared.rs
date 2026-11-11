@@ -105,6 +105,8 @@ pub struct SharedService<B: Backend, C: Compiler> {
     force_after: AtomicU64,
     job_lock: JobLock,
     jobs: Spin<Jobs>,
+    /// The guest RAM the latest imports named, by a hash of their ranges.
+    imported: Spin<RecentImports>,
     host: ServiceHost,
 }
 
@@ -150,6 +152,51 @@ pub struct JobReport {
     /// Jobs no waiting processor took within the bound, which their
     /// caller's processor ran when it asked again.
     pub forced: u64,
+}
+
+/// The operation [`Served`] names for the kext's import of wired memory,
+/// which no frontend operation is: past every protocol operation's code.
+pub const IMPORT_OPERATION: u32 = 0xff01;
+/// The operation [`Served`] names for an import of the same guest RAM as one
+/// of the [`RECENT_IMPORTS`] before it, such as a surface's pages each time a
+/// texture is made of them: what keeping an import for its pages would save.
+pub const IMPORT_AGAIN_OPERATION: u32 = 0xff02;
+
+/// How many imports [`IMPORT_AGAIN_OPERATION`] looks back over.
+const RECENT_IMPORTS: usize = 64;
+
+/// The latest imports' ranges, each as an FNV-1a hash of its addresses and
+/// lengths, oldest overwritten first.
+struct RecentImports {
+    hashes: [u64; RECENT_IMPORTS],
+    next: usize,
+}
+
+impl Default for RecentImports {
+    fn default() -> Self {
+        Self {
+            hashes: [0; RECENT_IMPORTS],
+            next: 0,
+        }
+    }
+}
+
+impl RecentImports {
+    /// Notes an import of `ranges`: whether one of the latest named the
+    /// same.
+    fn again(&mut self, ranges: &[MemoryRange]) -> bool {
+        let hash = ranges
+            .iter()
+            .flat_map(|range| [range.address, range.bytes])
+            .flat_map(u64::to_le_bytes)
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x100_0000_01b3)
+            });
+        let again = self.hashes.contains(&hash);
+        self.hashes[self.next] = hash;
+        self.next = (self.next + 1) % RECENT_IMPORTS;
+        again
+    }
 }
 
 /// A lock for short bookkeeping, which spins.
@@ -440,6 +487,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
                 relax: host.relax,
             },
             jobs: Spin::new(Jobs::default()),
+            imported: Spin::new(RecentImports::default()),
             host,
         }
     }
@@ -699,9 +747,9 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
 
     /// Answers `connection`'s `Poll` at `record` from `reached`, or leaves
     /// the call to the service: any other operation or record, a connection
-    /// the service never answered a poll for, a lost device, or a span out
-    /// of the caller's reach.
-    pub(super) fn poll_while_held(
+    /// the service never answered a poll for, a lost device, held work, or
+    /// a span out of the caller's reach.
+    pub(super) fn poll_published(
         &self,
         connection: NonZeroU64,
         record: u64,
@@ -891,14 +939,16 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
             served_at_once(operation, Status::Pending);
             return Ok(());
         }
-        let mut turn = match self.try_turn() {
-            Some(turn) => turn,
-            None if self.poll_while_held(connection, record, caller) => {
-                served_at_once(Operation::Poll.raw(), Status::Ok);
-                return Ok(());
-            }
-            None => self.turn(),
-        };
+        // A poll answers from the completion a turn or the waiter published,
+        // whether or not a call holds the service: a turn would ask the
+        // device again, a timeline query the host's Linux environment
+        // serves while this PE spins, and every completion is published
+        // before the kext wakes a frontend to poll.
+        if self.poll_published(connection, record, caller) {
+            served_at_once(Operation::Poll.raw(), Status::Ok);
+            return Ok(());
+        }
+        let mut turn = self.turn();
         let entered = (self.host.ticks)();
         let waited = entered.wrapping_sub(rang);
         let deferring =
@@ -1002,15 +1052,46 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
         ranges: &[MemoryRange],
         token: NonZeroU64,
     ) -> Result<NonZeroU64, &'static str> {
-        self.call(|service| service.import(connection, ranges, token))
-            .map_err(|fault| {
-                let bytes: u64 = ranges.iter().map(|range| range.bytes).sum();
-                (self.host.report)(&alloc::format!(
-                    "{fault} in an import of {} ranges, {bytes} bytes",
-                    ranges.len()
-                ));
-                fault.reason
-            })
+        let rang = (self.host.ticks)();
+        let again = self.imported.with(|recent| recent.again(ranges));
+        let mut turn = self.turn();
+        let entered = (self.host.ticks)();
+        turn.catch_up();
+        let mut imported = None;
+        (self.host.run)(self.host.stack, &mut || {
+            imported = Some(turn.import(connection, ranges, token));
+        });
+        drop(turn);
+        let imported = imported.expect("the platform runs what it is given");
+        // The kext's import holds the turn as a frontend call does, and its
+        // host kernel calls are its own in the platform's count
+        // (`GPU CALLS`, 0xff01 and 0xff02).
+        let left = (self.host.ticks)();
+        (self.host.served)(Served {
+            operation: if again {
+                IMPORT_AGAIN_OPERATION
+            } else {
+                IMPORT_OPERATION
+            },
+            status: imported
+                .as_ref()
+                .map_or_else(|fault| fault.status, |_| Status::Ok),
+            waited: entered.wrapping_sub(rang),
+            held: left.wrapping_sub(entered),
+            progress: None,
+            phases: None,
+            compiled: 0,
+            deferrals: 0,
+            longest_wait: entered.wrapping_sub(rang),
+        });
+        imported.map_err(|fault| {
+            let bytes: u64 = ranges.iter().map(|range| range.bytes).sum();
+            (self.host.report)(&alloc::format!(
+                "{fault} in an import of {} ranges, {bytes} bytes",
+                ranges.len()
+            ));
+            fault.reason
+        })
     }
 
     fn retired(&self) -> Option<NonZeroU64> {

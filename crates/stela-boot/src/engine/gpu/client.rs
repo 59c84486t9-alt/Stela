@@ -758,6 +758,9 @@ pub(super) fn start(gpu: &Installed) -> Result<(), WorkError> {
     CHILDREN_STALE.store(false, Ordering::Relaxed);
     join_children(gpu);
     let service = &gpu.service;
+    if WAKE_ASKED.swap(false, Ordering::AcqRel) {
+        service.wake(true);
+    }
     let mut request = REQUESTS
         .swap(ptr::null_mut(), Ordering::Acquire)
         .cast_const();
@@ -1043,11 +1046,12 @@ pub(super) fn posted_waiting() -> bool {
 static CHILDREN_STALE: AtomicBool = AtomicBool::new(true);
 
 /// Whether a pump's first pass retires tasks and runs [`start`]: a call is
-/// posted, a task waits for a wake, calls wait for workers, or steps ran
+/// posted, a PE asked for a wake, a task waits for a wake, calls wait for workers, or steps ran
 /// since the last look, which may have ended a child. Without any, both
 /// would find nothing.
 pub(super) fn start_due() -> bool {
     posted_waiting()
+        || WAKE_ASKED.load(Ordering::Relaxed)
         || CHILDREN_STALE.load(Ordering::Relaxed)
         || installed().is_some_and(|gpu| {
             let service = &gpu.service;
@@ -1333,10 +1337,29 @@ extern "C" fn stela_libc_wake(word: *const c_uint) {
     // Against a sleeper's mark before it reads the word.
     fence(Ordering::SeqCst);
     let asleep = |slot: &AtomicPtr<c_uint>| slot.load(Ordering::SeqCst).cast_const() == word;
-    if SLEEPING.iter().any(asleep) {
-        submit(Operation::Wake);
+    if !SLEEPING.iter().any(asleep) {
+        return;
     }
+    // A guest PE goes on at once: the boot CPU's next pump wakes the
+    // sleepers, which look at their words again. A sleeper that has not
+    // slept yet finds its word changed and does not.
+    if let Some(gpu) = installed()
+        && host::processor() != BOOT_CPU.load(Ordering::Relaxed)
+    {
+        WAKE_ASKED.store(true, Ordering::Release);
+        if let Err(error) = gpu.events.notify() {
+            output::fatal(format_args!(
+                "the host's Linux environment failed: {error:?}"
+            ));
+        }
+        return;
+    }
+    submit(Operation::Wake);
 }
+
+/// A guest PE asked to wake the C library's sleepers ([`stela_libc_wake`]):
+/// the next [`start`] does.
+static WAKE_ASKED: AtomicBool = AtomicBool::new(false);
 
 #[unsafe(no_mangle)]
 extern "C" fn stela_libc_drm_open(minor: c_uint) -> c_int {

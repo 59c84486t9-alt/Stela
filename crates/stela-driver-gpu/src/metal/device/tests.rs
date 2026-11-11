@@ -4549,3 +4549,36 @@ fn descriptors_last_10000_frames_under_another_connections_hold() {
     assert_eq!(memory.deferred, 0);
     assert!(device.holds());
 }
+
+#[test]
+fn an_events_value_needs_no_driver_query_once_it_reached_every_promise() {
+    let mut device = device_on(MockBackend::new());
+    let event = device.new_event().unwrap();
+    let semaphore = device.event_semaphore(event).unwrap();
+    // A query would fail.
+    device.backend().semaphore_error = Some(Error::DeviceLost);
+    assert_eq!(device.signaled_value(event), Ok(0), "nothing signals it");
+    device.backend().semaphore_error = None;
+    let mut commands = device.new_command_buffer();
+    commands
+        .encode_signal_event(&mut device.resolver(), semaphore, 3)
+        .unwrap();
+    device.commit(commands).unwrap();
+    // Submitted, not yet run: the driver answers.
+    assert_eq!(device.signaled_value(event), Ok(0));
+    device.backend().finish();
+    assert_eq!(device.signaled_value(event), Ok(3));
+    device.backend().semaphore_error = Some(Error::DeviceLost);
+    assert_eq!(
+        device.signaled_value(event),
+        Ok(3),
+        "reached what was promised"
+    );
+    assert_eq!(device.wait_event(event, 3, 0), Ok(true));
+    device.backend().semaphore_error = None;
+    // The CPU's own signal is known at once.
+    device.set_signaled_value(event, 9).unwrap();
+    device.backend().semaphore_error = Some(Error::DeviceLost);
+    assert_eq!(device.signaled_value(event), Ok(9));
+    device.backend().semaphore_error = None;
+}
