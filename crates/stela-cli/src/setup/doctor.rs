@@ -9,8 +9,10 @@
 //! manifest and pieces, and for each install its
 //! partitions (still the recorded ones), the systems on its Apple region,
 //! its NVRAM (what the next boot will be, and a failed update's
-//! `ota-result`) and whether its SEP state is provisioned. Each problem
-//! names the command that fixes it, and any problem fails the command.
+//! `ota-result`) and whether its SEP state is provisioned, and the firmware
+//! the newest inventory in the USB's boot log asks for and the USB lacks.
+//! Each problem names the command that fixes it, and any problem fails the
+//! command.
 //!
 //! Repair puts back what the record says: `stela.cfg` and the startup
 //! choices, and, from the active build's restore image (`--ipsw` or
@@ -22,7 +24,9 @@
 //! missing or foreign `stela.efi` is `update stela`'s to replace: no copy of
 //! it is kept. With `--initialize-nor` it replaces machine state `stela.efi`
 //! would refuse (`installed::reinitialize`), blanking a foreign SEP area
-//! only for a machine that never booted.
+//! only for a machine that never booted. It adds the pinned firmware the
+//! last boot asked for and the USB lacks (`firmware::requested`), keeping
+//! what the USB holds, and names files without a pinned source.
 use super::{
     CHOICES_PATH, Environment, LOADER_PATH, RECORD, Record, Reported, Request, apply_install,
     bundle, check_bundle_revision, describe_install, ecid::Ecid, fix, host::Host, host::bytes_text,
@@ -220,6 +224,43 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
         )),
         Ok(_) => {}
         Err(error) => report.problem(format!("the startup choices: {error:#}")),
+    }
+}
+
+/// The firmware the newest inventory in the USB's boot log asks for and the
+/// USB lacks: files `repair` adds are problems, the others are named.
+fn firmware_status(record: &Record, report: &mut Report) {
+    let Ok(tool) = fs::read(record.esp.join(LOADER_PATH)) else {
+        return;
+    };
+    let requested = match super::firmware::requested(&record.esp, &tool) {
+        Ok(requested) => requested,
+        Err(error) => {
+            report.problem(format!("the USB's host firmware: {error:#}"));
+            return;
+        }
+    };
+    if let Some(why) = &requested.unreadable {
+        report.line(
+            "firmware",
+            format!("the boot log's newest firmware request is unreadable: {why}"),
+        );
+    }
+    for request in &requested.unpinned {
+        report.line(
+            "firmware",
+            format!(
+                "the last boot asked for {}, which Stela has no pinned source for",
+                super::firmware::describe(request)
+            ),
+        );
+    }
+    let repair = report.fix("repair");
+    for request in &requested.pinned {
+        report.problem(format!(
+            "the last boot asked for firmware {}, which the USB lacks: {repair} adds it",
+            super::firmware::describe(request)
+        ));
     }
 }
 
@@ -522,6 +563,7 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
     report.line("model", &record.model);
     report.line("macOS build", &record.build);
     efi_status(environment, &record, &mut report);
+    firmware_status(&record, &mut report);
     bundle_status(environment, &record, &mut report);
     translations_status(&record, &mut report);
     for install in &record.installs {
@@ -573,6 +615,8 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
         );
     }
     update::check_firmware_support(&esp, &tool)?;
+    // The firmware the last boot asked for and the USB lacks.
+    let requested = super::firmware::requested(&esp, &tool)?;
     // Machines without an ECID get one; their bundles are prepared again.
     let ipsw = command.optional_image()?;
     if ipsw.is_some() {
@@ -752,6 +796,9 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
         text,
         "  boot loader    stela.efi, stela.cfg and the startup choices as recorded"
     )?;
+    for line in requested.lines() {
+        writeln!(text, "  firmware       {line}")?;
+    }
     // Machine state stela.efi would refuse: replaced with
     // --initialize-nor, else named.
     // A disk that is not connected keeps its machine state as it is; the
@@ -863,6 +910,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
         update::prune(&mut record)?;
         write_record(&esp, &record)?;
     }
+    requested.provision(&esp, &tool)?;
     writeln!(text, "Done. Check it with {}", fix(usb, "status"))?;
     Ok(text)
 }

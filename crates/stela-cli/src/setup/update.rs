@@ -133,6 +133,12 @@ pub(super) fn update_stela(
     let mut text = String::new();
     writeln!(text, "Stela update on {}:", esp.display())?;
     text.push_str(&super::fdr::prepare(&record, true)?);
+    // The firmware the last boot asked for and the USB lacks, which every
+    // update that changes something adds.
+    let requested = super::firmware::requested(&esp, &image)?;
+    for line in requested.lines() {
+        writeln!(text, "  firmware       {line}")?;
+    }
     if from == to && from_generation == to_generation {
         if !dry_run {
             super::fdr::prepare(&record, false)?;
@@ -156,21 +162,29 @@ pub(super) fn update_stela(
                 store.publish()?;
             }
             activate(&mut record, to)?;
+            requested.provision(&esp, &image)?;
             text.push_str("Done.\n");
             return Ok(text);
         }
         writeln!(text, "  stela.efi      version {to} is already installed")?;
-        if let Some(store) = &record.translations
-            && (!store.config_intact() || !store.spare_ready())
-        {
+        let spare = record
+            .translations
+            .as_ref()
+            .filter(|store| !store.config_intact() || !store.spare_ready());
+        if spare.is_some() {
             writeln!(
                 text,
                 "  translations   prepare the cache configuration and spare"
             )?;
+        }
+        if spare.is_some() || !requested.is_empty() {
             if dry_run {
                 text.push_str("Dry run: nothing was changed.\n");
             } else {
-                store.publish()?;
+                if let Some(store) = spare {
+                    store.publish()?;
+                }
+                requested.provision(&esp, &image)?;
             }
         }
         return Ok(text);
@@ -280,6 +294,7 @@ pub(super) fn update_stela(
     if record.wifi.is_some() {
         super::firmware::provision_wifi(environment.host, &esp, &image)?;
     }
+    requested.provision(&esp, &image)?;
     text.push_str("Done.\n");
     Ok(text)
 }

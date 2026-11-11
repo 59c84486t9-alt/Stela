@@ -4072,3 +4072,75 @@ fn the_wizard_resumes_an_interrupted_setup_on_the_chosen_usb() {
     assert_eq!(command.build, found.build);
     assert_eq!(command.model.as_deref(), Some(found.model.as_str()));
 }
+
+#[test]
+fn status_and_repair_name_the_firmware_the_last_boot_asked_for() {
+    use stela_loader::host_firmware::{DIRECTORY, MOUNT_CAPABILITY, requirements::LOG_LINE};
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    let aware = f._dir.path().join("firmware-aware.efi");
+    let mut image = efi_image(b"firmware-aware");
+    image.extend_from_slice(&MOUNT_CAPABILITY);
+    fs::write(&aware, image).unwrap();
+    rerun(&f, |c| {
+        c.action = Action::UpdateStela;
+        c.efi = Some(aware.clone());
+    })
+    .unwrap();
+    rerun(&f, |c| c.action = Action::Status).unwrap();
+    let log = |requests: serde_json::Value| {
+        let line = format!(
+            "[    4.000] {LOG_LINE}{}\n",
+            serde_json::json!({"schema":1,"complete":true,"requirements":requests})
+        );
+        fs::write(
+            f.esp.join(efi::BOOT_LOG),
+            crate::boot_log::tests::region(&[&line]),
+        )
+        .unwrap();
+    };
+    // A file Stela has no source for is named and fails nothing.
+    log(serde_json::json!([{"name":"brcm/synthetic.bin","target":{
+        "driver":"synthetic-bluetooth","hardware":"pci:14e4:5fa0","revision":"c0","board":null},
+        "minimum_bytes":1}]));
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(
+        status.contains("asked for brcm/synthetic.bin (synthetic-bluetooth"),
+        "{status}"
+    );
+    let report = rerun(&f, |c| c.action = Action::Repair).unwrap();
+    assert!(
+        report.contains("asked for brcm/synthetic.bin (synthetic-bluetooth pci:14e4:5fa0 c0), which Stela has no pinned source for"),
+        "{report}"
+    );
+    assert!(!f.esp.join(DIRECTORY).exists());
+    // A file setup can add is a problem status names with its fix, and a
+    // dry run of repair plans it without a download or a write.
+    log(
+        serde_json::json!([{"name":"rtl_nic/rtl8168d-1.fw","target":{
+        "driver":"realtek","hardware":"10ec:8168","revision":"xid-281","board":null},
+        "minimum_bytes":4}]),
+    );
+    let error = format!(
+        "{:#}",
+        rerun(&f, |c| c.action = Action::Status).unwrap_err()
+    );
+    assert!(
+        error.contains("asked for firmware rtl_nic/rtl8168d-1.fw (realtek 10ec:8168 xid-281)"),
+        "{error}"
+    );
+    assert!(error.contains("repair --usb"), "{error}");
+    let before = snapshot(&f.esp);
+    let report = rerun(&f, |c| {
+        c.action = Action::Repair;
+        c.dry_run = true;
+    })
+    .unwrap();
+    assert!(
+        report.contains("firmware       add rtl_nic/rtl8168d-1.fw"),
+        "{report}"
+    );
+    assert!(report.contains("Dry run"), "{report}");
+    assert_eq!(snapshot(&f.esp), before);
+}

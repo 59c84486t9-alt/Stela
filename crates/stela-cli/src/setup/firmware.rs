@@ -12,7 +12,7 @@ use stela_drivers::firmware::{Requirement, Target};
 use stela_loader::host_firmware::{
     self, MAX_MANIFEST_BYTES,
     recipes::{self, Artifact, Plan},
-    requirements::Inventory,
+    requirements::{self, Inventory, Request},
 };
 
 pub(super) fn read_inventory(path: &Path) -> Result<Inventory> {
@@ -183,28 +183,169 @@ pub(super) struct ProvisionOptions<'a> {
     pub(super) mount_image: &'a [u8],
 }
 
-pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
-    let ProvisionOptions {
-        requirements,
-        gpu,
-        wifi,
-        destination,
-        cache,
-        dry_run,
-        mount_image,
-    } = options;
-    let mut inventory = match requirements {
-        Some(path) => read_inventory(path)?,
-        None => Inventory::default(),
-    };
+/// The firmware manifest in `destination`, when it has one.
+fn installed_manifest(destination: &Path) -> Result<Option<Vec<u8>>> {
     let previous = destination.join("manifest.json");
-    if previous.try_exists()? {
-        let mut bytes = Vec::new();
-        File::open(&previous)?
-            .take(MAX_MANIFEST_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)?;
+    if !previous.try_exists()? {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    File::open(&previous)?
+        .take(MAX_MANIFEST_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    Ok(Some(bytes))
+}
+
+/// Whether `image` is the exact binding `request` asks for.
+fn binds(image: &host_firmware::Image<'_>, request: &Request) -> bool {
+    request.name == image.name
+        && request.target.driver == image.target.driver
+        && request.target.hardware == image.target.hardware
+        && request.target.revision == image.target.revision
+        && request.target.board.as_deref() == image.target.board
+}
+
+/// What the newest firmware inventory in a USB's boot log asks for that the
+/// USB's firmware lacks: files with a pinned source, which `repair` and
+/// `update stela` add, and files without one, which they name.
+#[derive(Debug, Default)]
+pub(super) struct Requested {
+    pub(super) pinned: Vec<Request>,
+    pub(super) unpinned: Vec<Request>,
+    /// Why the newest inventory line holds none.
+    pub(super) unreadable: Option<String>,
+}
+
+/// A missing file as the reports name it: its name and the driver's target.
+pub(super) fn describe(request: &Request) -> String {
+    let target = &request.target;
+    let board = target
+        .board
+        .as_deref()
+        .map(|board| format!(" board {board}"))
+        .unwrap_or_default();
+    format!(
+        "{} ({} {} {}{board})",
+        request.name, target.driver, target.hardware, target.revision
+    )
+}
+
+impl Requested {
+    pub(super) fn is_empty(&self) -> bool {
+        self.pinned.is_empty() && self.unpinned.is_empty() && self.unreadable.is_none()
+    }
+
+    /// The lines `repair` and `update stela` report.
+    pub(super) fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(why) = &self.unreadable {
+            lines.push(format!(
+                "the boot log's newest firmware request is unreadable: {why}"
+            ));
+        }
+        for request in &self.pinned {
+            lines.push(format!(
+                "add {}, which the last boot asked for",
+                describe(request)
+            ));
+        }
+        for request in &self.unpinned {
+            lines.push(format!(
+                "the last boot asked for {}, which Stela has no pinned source for; the device \
+                 stays off",
+                describe(request)
+            ));
+        }
+        lines
+    }
+
+    /// Download the pinned files and publish them with what the USB's
+    /// firmware on `esp` already holds.
+    pub(super) fn provision(&self, esp: &Path, mount_image: &[u8]) -> Result<()> {
+        self.plan(
+            esp,
+            mount_image,
+            &super::cache_dir().join("firmware"),
+            false,
+        )
+        .context("the USB did not get the firmware the last boot asked for")?;
+        Ok(())
+    }
+
+    /// [`Self::provision`] through `cache`; a dry run only plans.
+    fn plan(
+        &self,
+        esp: &Path,
+        mount_image: &[u8],
+        cache: &Path,
+        dry_run: bool,
+    ) -> Result<Option<String>> {
+        if self.pinned.is_empty() {
+            return Ok(None);
+        }
+        let destination = esp.join(host_firmware::DIRECTORY);
+        let mut inventory = Inventory::default();
+        for request in &self.pinned {
+            inventory.observe(request.view())?;
+        }
+        keep_installed(&mut inventory, &destination, true)?;
+        publish_plan(&inventory, &destination, cache, dry_run, mount_image).map(Some)
+    }
+}
+
+/// What the newest inventory in the boot log on `esp` asks for that the
+/// USB's firmware lacks, for a boot program `mount_image`. A USB without a
+/// log or without such a line, and a boot program that reads no firmware
+/// from the USB, need nothing.
+pub(super) fn requested(esp: &Path, mount_image: &[u8]) -> Result<Requested> {
+    if !host_firmware::supports_mount(mount_image) {
+        return Ok(Requested::default());
+    }
+    let Some(log) = fs::read(esp.join(crate::efi::BOOT_LOG))
+        .ok()
+        .and_then(|region| stela_runtime::pc::boot_log::read(&region).ok())
+    else {
+        return Ok(Requested::default());
+    };
+    let inventory = match requirements::newest(&log.stream) {
+        None => return Ok(Requested::default()),
+        Some(Ok(inventory)) => inventory,
+        Some(Err(error)) => {
+            return Ok(Requested {
+                unreadable: Some(error.0),
+                ..Requested::default()
+            });
+        }
+    };
+    let manifest = installed_manifest(&esp.join(host_firmware::DIRECTORY))?;
+    let installed = manifest
+        .as_deref()
+        .map(host_firmware::Manifest::parse)
+        .transpose()?;
+    let mut requested = Requested::default();
+    for request in inventory.requests() {
+        if requirements::read_by_boot(&request.view().target)
+            || installed
+                .as_ref()
+                .is_some_and(|manifest| manifest.images.iter().any(|image| binds(image, request)))
+        {
+            continue;
+        }
+        if recipes::recipe(request).is_some() {
+            requested.pinned.push(request.clone());
+        } else {
+            requested.unpinned.push(request.clone());
+        }
+    }
+    Ok(requested)
+}
+
+/// Require what the firmware in `destination` holds, when `add` says the
+/// inventory adds to it; refuse an inventory that would remove a binding.
+fn keep_installed(inventory: &mut Inventory, destination: &Path, add: bool) -> Result<()> {
+    if let Some(bytes) = installed_manifest(destination)? {
         let previous = host_firmware::Manifest::parse(&bytes)?;
-        if gpu.is_some() || wifi.is_some() {
+        if add {
             for image in &previous.images {
                 inventory.observe(Requirement {
                     name: image.name,
@@ -223,16 +364,30 @@ pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
                 inventory
                     .requests()
                     .iter()
-                    .any(|request| request.name == image.name
-                        && request.target.driver == image.target.driver
-                        && request.target.hardware == image.target.hardware
-                        && request.target.revision == image.target.revision
-                        && request.target.board.as_deref() == image.target.board),
+                    .any(|request| binds(image, request)),
                 "observed requirements do not cover installed firmware binding {}; refusing to remove it",
                 image.name
             );
         }
     }
+    Ok(())
+}
+
+pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
+    let ProvisionOptions {
+        requirements,
+        gpu,
+        wifi,
+        destination,
+        cache,
+        dry_run,
+        mount_image,
+    } = options;
+    let mut inventory = match requirements {
+        Some(path) => read_inventory(path)?,
+        None => Inventory::default(),
+    };
+    keep_installed(&mut inventory, destination, gpu.is_some() || wifi.is_some())?;
     if let Some(chip) = gpu {
         recipes::require_gsp(&mut inventory, chip)?;
     }
@@ -242,7 +397,19 @@ pub(super) fn provision(options: ProvisionOptions<'_>) -> Result<String> {
             recipes::require_wifi(&mut inventory, vendor, device)?;
         }
     }
-    let plan = Plan::select(&inventory)?;
+    publish_plan(&inventory, destination, cache, dry_run, mount_image)
+}
+
+/// Plan `inventory`'s pinned files and, unless `dry_run`, download them into
+/// `cache` and publish them to `destination`.
+fn publish_plan(
+    inventory: &Inventory,
+    destination: &Path,
+    cache: &Path,
+    dry_run: bool,
+    mount_image: &[u8],
+) -> Result<String> {
+    let plan = Plan::select(inventory)?;
     host_firmware::MountLimits::from_image(mount_image)
         .context("stela.efi has no supported host firmware mount capability")?
         .check_lengths(
@@ -467,6 +634,111 @@ mod tests {
         assert!(report.contains("nvidia/tu104/gsp/gsp-570.144.bin"));
         assert!(provision(None).is_err(), "nothing covers what is installed");
         assert!(provision(Some("gp104")).is_err());
+    }
+
+    /// A boot log on `esp` whose boots print `lines`.
+    fn boot_log(esp: &Path, boots: &[&str]) {
+        fs::create_dir_all(esp.join("EFI/stela")).unwrap();
+        fs::write(
+            esp.join(crate::efi::BOOT_LOG),
+            crate::boot_log::tests::region(boots),
+        )
+        .unwrap();
+    }
+
+    /// One inventory line as stela.efi prints it, of these requests.
+    fn requests_line(requests: &[serde_json::Value]) -> String {
+        format!(
+            "[    3.250] {}{}\n",
+            requirements::LOG_LINE,
+            serde_json::json!({"schema":1,"complete":true,"requirements":requests})
+        )
+    }
+
+    fn realtek(name: &str, xid: &str) -> serde_json::Value {
+        serde_json::json!({"name":name,"target":{"driver":"realtek","hardware":"10ec:8168",
+            "revision":xid,"board":null},"minimum_bytes":4})
+    }
+
+    #[test]
+    fn the_boot_log_s_newest_requests_split_into_what_setup_adds_and_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let esp = dir.path().join("esp");
+        let destination = esp.join(host_firmware::DIRECTORY);
+        fs::create_dir_all(&destination).unwrap();
+        // The USB holds one Realtek file already.
+        let manifest = serde_json::json!({"schema":1,"images":[{
+            "name":"rtl_nic/rtl8168e-3.fw", "path":"rtl/one.bin",
+            "target":{"driver":"realtek","hardware":"10ec:8168","revision":"xid-2c8","board":null},
+            "provenance":{"source":"synthetic-fixture","revision":"v1","member":"one.bin","license":"CC0-1.0"},
+            "length":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]});
+        fs::write(
+            destination.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let image = host_firmware::MOUNT_CAPABILITY;
+        // No log, or a log without requests: nothing.
+        assert!(requested(&esp, &image).unwrap().is_empty());
+        boot_log(&esp, &["CHOICE 1 (macOS)\n"]);
+        assert!(requested(&esp, &image).unwrap().is_empty());
+        let unpinned = serde_json::json!({"name":"brcm/synthetic.bin","target":{
+            "driver":"synthetic-bluetooth","hardware":"pci:14e4:5fa0","revision":"c0",
+            "board":null},"minimum_bytes":1});
+        let variable = serde_json::json!({"name":"intel/wifi/uefi/UefiCnvWlanUATS.bin",
+            "target":{"driver":"wifi-intel","hardware":"uefi:92daaf2f-c02b-455b-b2ec-f5a3594f4aea",
+            "revision":"CnvUefiWlanUATS","board":null},"minimum_bytes":1});
+        let older = requests_line(&[realtek("rtl_nic/rtl8168f-1.fw", "xid-480")]);
+        let newer = requests_line(&[
+            realtek("rtl_nic/rtl8168e-3.fw", "xid-2c8"),
+            realtek("rtl_nic/rtl8168d-1.fw", "xid-281"),
+            unpinned,
+            variable,
+        ]);
+        boot_log(
+            &esp,
+            &[&older, &format!("USB added 1-4\n{newer}HOST WARNING x\n")],
+        );
+        let found = requested(&esp, &image).unwrap();
+        let names = |requests: &[Request]| -> Vec<String> {
+            requests
+                .iter()
+                .map(|request| request.name.clone())
+                .collect()
+        };
+        assert_eq!(names(&found.pinned), ["rtl_nic/rtl8168d-1.fw"]);
+        assert_eq!(names(&found.unpinned), ["brcm/synthetic.bin"]);
+        assert!(found.unreadable.is_none());
+        let lines = found.lines().join("\n");
+        assert!(
+            lines.contains("add rtl_nic/rtl8168d-1.fw (realtek 10ec:8168 xid-281)"),
+            "{lines}"
+        );
+        assert!(
+            lines.contains("brcm/synthetic.bin (synthetic-bluetooth pci:14e4:5fa0 c0), which Stela has no pinned source for"),
+            "{lines}"
+        );
+        // The plan keeps what the USB holds and downloads nothing in a dry run.
+        let cache = dir.path().join("cache");
+        let plan = found.plan(&esp, &image, &cache, true).unwrap().unwrap();
+        assert!(plan.contains("2 exact observed bindings"), "{plan}");
+        assert!(plan.contains("rtl_nic/rtl8168e-3.fw"), "{plan}");
+        assert!(plan.contains("rtl_nic/rtl8168d-1.fw"), "{plan}");
+        assert!(plan.contains("Dry run"), "{plan}");
+        assert!(!cache.exists());
+        // Unpinned requests alone plan nothing.
+        let only = Requested {
+            pinned: Vec::new(),
+            ..found
+        };
+        assert!(only.plan(&esp, &image, &cache, true).unwrap().is_none());
+        only.provision(&esp, &image).unwrap();
+        // A boot program that reads no firmware from the USB asked for none.
+        assert!(requested(&esp, b"no marker").unwrap().is_empty());
+        // A line cut short is named, not followed.
+        boot_log(&esp, &[&newer[..60]]);
+        let cut = requested(&esp, &image).unwrap();
+        assert!(cut.pinned.is_empty() && cut.unreadable.is_some(), "{cut:?}");
     }
 
     #[test]
