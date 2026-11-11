@@ -4630,6 +4630,16 @@
     "reason": "requires original J314s LLB; complete native SEP command table and mailbox phases"
   },
   {
+    "package": "stela-runtime",
+    "test": "a_recorded_run_rebuilds_from_its_own_files",
+    "source": "crates/stela-runtime/src/restore/tss/staged/tests.rs",
+    "kind": "oracle",
+    "inputs": [
+      "STELA_TSS_RUN"
+    ],
+    "reason": "requires a recorded install run's private files (BuildManifest, AP ticket, ECID and the guest's request arguments); rebuilds the three staged signing requests byte for byte"
+  },
+  {
     "package": "stela-compiler",
     "test": "all_half_conversions_match_quad",
     "source": "crates/stela-compiler/src/aarch64/floating/integer/half.rs",

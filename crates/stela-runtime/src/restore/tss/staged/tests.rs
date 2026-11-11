@@ -111,7 +111,7 @@ fn the_recorded_install_requests_rebuild_byte_for_byte_from_setup_values() {
 /// `ecid` (hex), `cryptex.plist` and `policy.plist` (the recorded
 /// arguments) and `sent` (the three POST sizes: root, cryptex, policy).
 #[test]
-#[ignore = "needs a recorded run's private files"]
+#[ignore = "oracle: STELA_TSS_RUN"]
 fn a_recorded_run_rebuilds_from_its_own_files() {
     extern crate std;
     let Some(dir) = std::env::var_os("STELA_TSS_RUN") else {
