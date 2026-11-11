@@ -235,6 +235,11 @@ const PREDICTION_RESTRICTION: &str = "CFP, DVP, CPP and (FEAT_SPECRES2) COSP RCT
 /// zero or subnormal product input exits. Unadvertised, as on the M1, guest
 /// libraries keep their single-precision paths.
 const BF16_STEERING: &str = "no host tier lowers BF16 natively (AVX512-BF16 is unused)";
+/// FJCVTZS completes natively only for a normal input whose truncation fits
+/// 32 bits; minus zero, special and wrapping inputs exit. Unadvertised, a JIT
+/// truncates with FCVTZS and its own native wrap.
+const JSCVT_STEERING: &str = "FJCVTZS exits for minus zero, special and out-of-range inputs";
+
 /// Every ID register the table defines; all their other fields read 0.
 pub const REGISTERS: &[Encoding] = &[
     ID_AA64PFR0_EL1,
@@ -767,7 +772,7 @@ pub const TABLE: &[Row] = &[
         12,
         1,
         "FEAT_JSCVT",
-        Basis::Instructions(&[0x1e7e_0020]),
+        Basis::Steered(&[0x1e7e_0020], None, JSCVT_STEERING),
     ),
     feature(
         ID_AA64ISAR1_EL1,

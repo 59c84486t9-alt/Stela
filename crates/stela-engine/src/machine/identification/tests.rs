@@ -666,13 +666,21 @@ fn steered_features_follow_their_native_tier_and_stay_admitted() {
     for target in [TargetCpu::X86_64_V2, TargetCpu::X86_64_V3, richest] {
         // No host tier lowers BF16 natively, so no host advertises it.
         assert_eq!(field(Chip::AppleM2, target, ID_AA64ISAR1_EL1, 44), 0);
+        assert_eq!(field(Chip::AppleM2, target, ID_AA64ISAR1_EL1, 12), 0);
         assert_eq!(
             steering(Chip::AppleM2, target),
-            [Steering {
-                feature: "FEAT_BF16",
-                advertised: false,
-                reason: BF16_STEERING,
-            }]
+            [
+                Steering {
+                    feature: "FEAT_JSCVT",
+                    advertised: false,
+                    reason: JSCVT_STEERING,
+                },
+                Steering {
+                    feature: "FEAT_BF16",
+                    advertised: false,
+                    reason: BF16_STEERING,
+                },
+            ]
         );
         // The PE still runs BFDOT for code that uses it unprobed.
         let fixed = derive(Chip::AppleM2, target, true, Speculation::NONE);
@@ -684,7 +692,13 @@ fn steered_features_follow_their_native_tier_and_stay_admitted() {
         );
     }
     // A chip without the feature reports no steering for it.
-    assert!(steering(Chip::AppleM1, richest).is_empty());
+    assert!(
+        steering(Chip::AppleM1, richest)
+            .iter()
+            .all(|entry| entry.feature != "FEAT_BF16")
+    );
+    // FJCVTZS still compiles and runs for code that uses it unprobed.
+    assert!(compiles(&[0x1e7e_0020], TargetCpu::X86_64_V2));
     // A steered row with a native tier advertises only where the host has it.
     assert!(!steered_holds(
         &[BFDOT],
