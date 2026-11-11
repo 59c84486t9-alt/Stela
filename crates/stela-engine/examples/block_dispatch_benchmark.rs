@@ -1,6 +1,6 @@
 //! Native timing of the block dispatcher over a translated counting loop.
 //!
-//! `cargo run --release -p stela-runtime --example block_dispatch_benchmark`
+//! `cargo run --release -p stela-engine --example block_dispatch_benchmark`
 //! prints the cold compile, disk-cache load and warm dispatch costs as JSON.
 use anyhow::{Result, ensure};
 use std::time::Instant;
