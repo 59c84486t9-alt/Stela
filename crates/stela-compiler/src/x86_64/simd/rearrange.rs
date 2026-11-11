@@ -85,7 +85,30 @@ pub(in crate::x86_64) fn emit_reverse_dword_run(
     last
 }
 
+/// Load the 16 `bytes` into `xmm` without a constant pool (clobbers RCX and
+/// XMM7). Zero, and a run of ones at either end of every word, dword or
+/// qword lane, come from PXOR or PCMPEQD and one shift; equal halves take one
+/// MOVQ.
 pub(super) fn constant(code: &mut Code, xmm: u8, bytes: [u8; 16]) {
+    if bytes == [0; 16] {
+        packed(code, Host::Xor, xmm, xmm);
+        return;
+    }
+    if let Some((shift, amount)) = ones_run(&bytes) {
+        packed(code, Host::EqualDword, xmm, xmm);
+        if let Some(shift) = shift {
+            shift.emit(code, xmm, amount);
+        }
+        return;
+    }
+    let (low, high) = bytes.split_at(8);
+    if low == high {
+        let limb = u64::from_le_bytes(low.try_into().expect("an eight-byte limb"));
+        code.asm().mov_imm64(Rcx, limb);
+        packed(code, Host::MoveGprQword, xmm, 1);
+        packed(code, Host::UnpackLowQword, xmm, xmm);
+        return;
+    }
     // MOVQ from a GPR followed by PUNPCKLQDQ avoids constant-pool relocations.
     for (register, limb) in [(xmm, &bytes[..8]), (7, &bytes[8..])] {
         let limb = u64::from_le_bytes(limb.try_into().expect("an eight-byte limb"));
@@ -93,6 +116,37 @@ pub(super) fn constant(code: &mut Code, xmm: u8, bytes: [u8; 16]) {
         packed(code, Host::MoveGprQword, register, 1);
     }
     packed(code, Host::UnpackLowQword, xmm, 7);
+}
+
+/// The shift that turns all ones into `bytes`, when every word, dword or
+/// qword lane of `bytes` holds the same run of ones at its low or high end:
+/// `None` for all ones.
+fn ones_run(bytes: &[u8; 16]) -> Option<(Option<ShiftOpcode>, u8)> {
+    for (lane, right, left) in [
+        (2, ShiftOpcode::RightWord, ShiftOpcode::LeftWord),
+        (4, ShiftOpcode::RightDword, ShiftOpcode::LeftDword),
+        (8, ShiftOpcode::RightQword, ShiftOpcode::LeftQword),
+    ] {
+        if bytes.chunks(lane).any(|chunk| chunk != &bytes[..lane]) {
+            continue;
+        }
+        let mut value = [0; 8];
+        value[..lane].copy_from_slice(&bytes[..lane]);
+        let value = u64::from_le_bytes(value);
+        let bits = lane as u32 * 8;
+        let ones = value.count_ones();
+        let full = u64::MAX >> (64 - bits);
+        if value == full {
+            return Some((None, 0));
+        }
+        if value == full >> (bits - ones) {
+            return Some((Some(right), (bits - ones) as u8));
+        }
+        if value == (full << (bits - ones)) & full {
+            return Some((Some(left), (bits - ones) as u8));
+        }
+    }
+    None
 }
 
 /// Load `value` repeated in each `lane`-byte lane of `xmm` (clobbers RCX and XMM7).
