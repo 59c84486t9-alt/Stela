@@ -436,6 +436,106 @@ impl Level {
     }
 }
 
+/// Where native code was when a sampled run's transfer budget ran out, under
+/// step timing (`Machine::execute`): one run in [`HOT_SAMPLE_EVERY`] gets a
+/// budget drawn uniformly from 1..=[`HOT_SAMPLE_SPAN`], so a run of `n`
+/// transfers is sampled with a chance in proportion to `n` and at a uniformly
+/// chosen one of them: each transfer of native code is equally likely to be
+/// the sample, which ranks blocks by the native work in them rather than by
+/// where they exit. A sample is the entered block's guest PC and [`Level`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HotBlocks {
+    /// Open-addressed `(pc, level, count)` entries, [`HOT_BLOCKS`] of them
+    /// once the first sample is added; samples past them are in `other`.
+    pub entries: alloc::vec::Vec<HotBlock>,
+    /// Samples by [`Level`], and those that found the table full.
+    pub samples: [u64; Level::COUNT],
+    pub other: u64,
+}
+
+/// One block's samples.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HotBlock {
+    pub pc: u64,
+    pub level: u8,
+    pub count: u64,
+}
+
+/// The blocks [`HotBlocks`] holds apart.
+pub const HOT_BLOCKS: usize = 8192;
+/// One run in this many is sampled.
+pub const HOT_SAMPLE_EVERY: u32 = 16;
+/// A sampled run's budget is at most this many transfers.
+pub const HOT_SAMPLE_SPAN: u64 = 4096;
+
+impl HotBlocks {
+    /// Count `count` samples of the block at `pc` at `level`.
+    pub fn add(&mut self, pc: u64, level: Level, count: u64) {
+        if self.entries.is_empty() {
+            self.entries = alloc::vec![HotBlock::default(); HOT_BLOCKS];
+        }
+        self.samples[level as usize] += count;
+        let key = pc ^ (level as u64) << 62;
+        let start =
+            (key.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (u64::BITS - HOT_BLOCKS.ilog2())) as usize;
+        for probe in 0..HOT_BLOCKS / 8 {
+            let entry = &mut self.entries[(start + probe) % HOT_BLOCKS];
+            if entry.count == 0 {
+                *entry = HotBlock {
+                    pc,
+                    level: level as u8,
+                    count: 0,
+                };
+            }
+            if entry.pc == pc && entry.level == level as u8 {
+                entry.count += count;
+                return;
+            }
+        }
+        self.other += count;
+    }
+
+    /// Add every sample `hot` holds.
+    pub fn merge(&mut self, hot: &Self) {
+        for entry in hot.counted() {
+            let level =
+                [Level::User, Level::Kernel, Level::Guarded][usize::from(entry.level).min(2)];
+            self.add(entry.pc, level, entry.count);
+        }
+        self.other += hot.other;
+        // `add` counted the table's samples by level; the others only here.
+        for (level, samples) in self.samples.iter_mut().enumerate() {
+            let counted: u64 = hot
+                .counted()
+                .filter(|e| usize::from(e.level) == level)
+                .map(|e| e.count)
+                .sum();
+            *samples += hot.samples[level] - counted;
+        }
+    }
+
+    /// The blocks with samples.
+    pub fn counted(&self) -> impl Iterator<Item = &HotBlock> {
+        self.entries.iter().filter(|entry| entry.count != 0)
+    }
+
+    /// The `shown` blocks of `level` with the most samples, most first.
+    pub fn top(&self, level: Level, shown: usize) -> alloc::vec::Vec<HotBlock> {
+        let mut blocks: alloc::vec::Vec<HotBlock> = self
+            .counted()
+            .filter(|e| e.level == level as u8)
+            .copied()
+            .collect();
+        blocks.sort_unstable_by(|a, b| b.count.cmp(&a.count).then(a.pc.cmp(&b.pc)));
+        blocks.truncate(shown);
+        blocks
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.iter().all(|&n| n == 0)
+    }
+}
+
 /// Where a PE's busy time goes in guest terms, under step timing: every
 /// phase but [`Phase::Schedule`] charged by the guest's state at the charge
 /// (an exit after its handling: an exception entry counts as the level it
@@ -567,6 +667,114 @@ mod tests {
     use super::*;
 
     const FAULT_SLOT: usize = FAULT_SLOTS + 1;
+
+    #[test]
+    fn hot_blocks_rank_by_samples_per_level_and_merge() {
+        let mut hot = HotBlocks::default();
+        assert!(hot.is_empty());
+        hot.add(0x1000, Level::Kernel, 3);
+        hot.add(0x2000, Level::Kernel, 5);
+        // The same PC at another level is another block.
+        hot.add(0x1000, Level::User, 7);
+        let top = hot.top(Level::Kernel, 8);
+        assert_eq!(
+            top.iter()
+                .map(|b| (b.pc, b.count))
+                .collect::<alloc::vec::Vec<_>>(),
+            [(0x2000, 5), (0x1000, 3)]
+        );
+        assert_eq!(hot.top(Level::User, 8)[0].count, 7);
+        assert_eq!(hot.samples, [7, 8, 0]);
+        let mut merged = HotBlocks::default();
+        merged.add(0x2000, Level::Kernel, 1);
+        merged.merge(&hot);
+        assert_eq!(
+            merged.top(Level::Kernel, 1)[0],
+            HotBlock {
+                pc: 0x2000,
+                level: Level::Kernel as u8,
+                count: 6
+            }
+        );
+        assert_eq!(merged.samples, [7, 9, 0]);
+    }
+
+    /// One run in HOT_SAMPLE_EVERY gets a drawn budget; a sampled run whose
+    /// budget ran out names the block it ended in, and nothing is sampled
+    /// without step timing.
+    #[test]
+    fn a_sampled_run_whose_budget_ran_out_names_its_last_block() {
+        use super::super::{NativeExit, chain::ChainControl};
+        use stela_compiler::block::ExitKind;
+        const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+        let mut machine = super::super::tests::machine(&[ADD, 0x1400_0002, 0, ADD, 0x17ff_fffc]);
+        let base = machine.cpu.pc;
+        let direct = |next_pc| NativeExit::Exit {
+            next_pc,
+            kind: ExitKind::Direct as u64,
+        };
+        let run = |machine: &mut crate::machine::Machine<
+            super::super::tests::FakeHost,
+            crate::machine::NoDevices,
+        >,
+                   runs: u32| {
+            for _ in 0..runs {
+                let next = if machine.cpu.pc == base {
+                    base + 12
+                } else {
+                    base
+                };
+                let current = machine.chain.snapshot();
+                machine.host.chained = Some((
+                    machine.chain.address() as *mut ChainControl,
+                    ChainControl {
+                        budget: u64::MAX,
+                        block: 1,
+                        ..current
+                    },
+                ));
+                machine.host.exits = alloc::vec![direct(next)];
+                machine.step().unwrap();
+            }
+        };
+        // Both blocks compiled, then runs that all spend their budget.
+        machine.slice_end = u64::MAX;
+        machine.block_limit = u64::MAX;
+        machine.host.exits = alloc::vec![direct(base + 12), direct(base)];
+        machine.step().unwrap();
+        machine.step().unwrap();
+        run(&mut machine, 2 * HOT_SAMPLE_EVERY);
+        assert!(!machine.has_hot_samples(), "no samples without step timing");
+        machine.set_step_timing(true);
+        run(&mut machine, 2 * HOT_SAMPLE_EVERY);
+        let mut hot = HotBlocks::default();
+        machine.take_hot_samples(&mut hot);
+        let total: u64 = hot.samples.iter().sum();
+        assert_eq!(total, 2);
+        let pcs: alloc::vec::Vec<u64> = hot.counted().map(|block| block.pc).collect();
+        assert_eq!(pcs, [base + 12]);
+        assert!(!machine.has_hot_samples());
+        // Draws stay within the span and below the run's own budget.
+        for _ in 0..1000 {
+            let (budget, sampled) = machine.sampled_budget(HOT_SAMPLE_SPAN + 1);
+            assert!((1..=HOT_SAMPLE_SPAN + 1).contains(&budget));
+            assert_eq!(sampled, budget <= HOT_SAMPLE_SPAN);
+        }
+    }
+
+    #[test]
+    fn hot_blocks_count_what_the_table_cannot_hold_as_other() {
+        let mut hot = HotBlocks::default();
+        for pc in 0..(HOT_BLOCKS as u64 + 100) {
+            hot.add(pc * 4, Level::Kernel, 1);
+        }
+        let held: u64 = hot.counted().map(|e| e.count).sum();
+        assert_eq!(held + hot.other, HOT_BLOCKS as u64 + 100);
+        assert_eq!(hot.samples[Level::Kernel as usize], HOT_BLOCKS as u64 + 100);
+        let mut merged = HotBlocks::default();
+        merged.merge(&hot);
+        assert_eq!(merged.samples, hot.samples);
+    }
 
     #[test]
     fn system_keys_drop_registers_and_name_the_instruction() {

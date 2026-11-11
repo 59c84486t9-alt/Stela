@@ -256,6 +256,9 @@ impl Pe {
             hub.publish(pe, machine.counts());
             if machine.step_timing().is_some() {
                 hub.add_system_exits(pe, &machine.take_system_exits());
+                if machine.has_hot_samples() {
+                    hub.add_hot_samples(|hot| machine.take_hot_samples(hot));
+                }
             }
             super::run::host_work(&mut machine, |_| output::drain_some());
         }
@@ -407,6 +410,21 @@ pub(crate) fn counts<H: Host>(home: &Machine<H, Board>) -> Vec<Counts> {
             }
         })
         .collect()
+}
+
+/// The hot-block samples of every PE since the last call, under step
+/// timing: the home machine's own and those the others added
+/// (`Hub::add_hot_samples`).
+pub(crate) fn hot_samples<H: Host>(
+    home: &mut Machine<H, Board>,
+) -> stela_engine::machine::engine::step_timing::HotBlocks {
+    let mut hot = if home.runs_parallel() {
+        home.devices.hub().take_hot_samples()
+    } else {
+        Default::default()
+    };
+    home.take_hot_samples(&mut hot);
+    hot
 }
 
 /// The System exits of every PE since the last call, under step timing:

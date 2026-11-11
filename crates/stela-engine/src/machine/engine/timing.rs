@@ -213,6 +213,41 @@ impl<H: Host, D: Devices> Machine<H, D> {
         core::mem::take(&mut *self.system_exits)
     }
 
+    /// Whether hot-block samples wait to be taken ([`Self::take_hot_samples`]).
+    pub fn has_hot_samples(&self) -> bool {
+        !self.hot_samples.is_empty()
+    }
+
+    /// Add the hot-block samples since the last call to `hot`
+    /// ([`step_timing::HotBlocks`]).
+    pub fn take_hot_samples(&mut self, hot: &mut step_timing::HotBlocks) {
+        for (pc, level) in self.hot_samples.drain(..) {
+            hot.add(pc, level, 1);
+        }
+    }
+
+    /// The transfer budget of the next native run: `budget`, or under step
+    /// timing for one run in [`step_timing::HOT_SAMPLE_EVERY`] a uniform draw
+    /// from 1..=[`step_timing::HOT_SAMPLE_SPAN`] when that is smaller, with
+    /// whether the run is sampled ([`step_timing::HotBlocks`]).
+    pub(super) fn sampled_budget(&mut self, budget: u64) -> (u64, bool) {
+        if self.step_timing.is_none() || budget == 0 {
+            return (budget, false);
+        }
+        self.hot_countdown -= 1;
+        if self.hot_countdown != 0 {
+            return (budget, false);
+        }
+        self.hot_countdown = step_timing::HOT_SAMPLE_EVERY;
+        let mut x = self.hot_seed;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.hot_seed = x;
+        let drawn = 1 + x % step_timing::HOT_SAMPLE_SPAN;
+        (budget.min(drawn), drawn < budget)
+    }
+
     /// The architectural system count and each generic timer's `(CTL, CVAL)`
     /// in [`timer::CHANNELS`] order, sampled at that count, of the bank that
     /// counts it: the Apple generic timer's from the M3 on, where the kernel

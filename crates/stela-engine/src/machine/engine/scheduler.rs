@@ -249,6 +249,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// Run compiled block `index` and the blocks it chains into, up to
     /// `budget` of them, and complete the last one's exit or fault.
     pub(super) fn execute(&mut self, index: usize, budget: u64) -> Step {
+        let (budget, sampled) = self.sampled_budget(budget);
         let entry = self.code.blocks[index].code;
         self.chain.begin(index, budget);
         self.cpu.state.daif = u32::from(self.cpu.pstate.daif);
@@ -284,6 +285,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && self.code.blocks.get(last).is_none()
         {
             return Err(self.fail_native(index, fault, NativeFailureReason::UnknownCode));
+        }
+        // A sampled run whose budget ran out was in `last` at a uniformly
+        // chosen transfer (`step_timing::HotBlocks`).
+        if sampled
+            && remaining > budget
+            && let Some(block) = self.code.blocks.get(last)
+        {
+            let level = step_timing::Level::of(self.cpu.pstate.el, self.cpu.pstate.guarded);
+            self.hot_samples.push((block.pc, level));
         }
         self.statistics.blocks += 1 + chained;
         self.statistics.chained += chained;

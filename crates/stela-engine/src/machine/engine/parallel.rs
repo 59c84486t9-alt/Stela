@@ -418,6 +418,9 @@ pub struct Hub {
     /// The home machine's code, when its host gives the engine a code
     /// window: every PE whose host gives the same window joins it.
     code: Mutex<Option<Arc<super::board::Code>>>,
+    /// Every PE's hot-block samples since the home machine last took them
+    /// ([`Hub::add_hot_samples`]).
+    hot: Mutex<step_timing::HotBlocks>,
 }
 
 /// Which physical fetch pages any PE may have compiled from, as a filter:
@@ -510,6 +513,7 @@ impl Hub {
             code_pages: CodePages::new(),
             source_observations: AtomicBool::new(false),
             installs: super::install_census::Live::default(),
+            hot: Mutex::new(step_timing::HotBlocks::default()),
             board: super::board::Board::new(pes),
             code: Mutex::new(None),
         })
@@ -869,6 +873,17 @@ impl Hub {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .merge(exits);
+    }
+
+    /// Add the hot-block samples `take` puts in the board's table
+    /// (`Machine::take_hot_samples`), for the home machine's reports.
+    pub fn add_hot_samples(&self, take: impl FnOnce(&mut step_timing::HotBlocks)) {
+        take(&mut self.hot.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+
+    /// Every PE's hot-block samples added since the last call.
+    pub fn take_hot_samples(&self) -> step_timing::HotBlocks {
+        core::mem::take(&mut *self.hot.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// PE `pe`'s System exits added since the last call.

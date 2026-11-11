@@ -753,6 +753,12 @@ pub struct Machine<H: Host, D: Devices> {
     /// System exits by key since they were last taken, under step timing
     /// ([`Self::take_system_exits`]).
     system_exits: Box<step_timing::SystemExits>,
+    /// Hot-block samples not yet taken, under step timing
+    /// ([`step_timing::HotBlocks`], [`Self::take_hot_samples`]), the runs
+    /// until the next sampled one and the generator of sampled budgets.
+    hot_samples: Vec<(u64, step_timing::Level)>,
+    hot_countdown: u32,
+    hot_seed: u64,
     #[cfg(all(feature = "std", feature = "native-profile"))]
     floating_profile: Option<alloc::boxed::Box<floating_profile::Sampler>>,
     #[cfg(all(feature = "std", feature = "native-profile"))]
@@ -1267,6 +1273,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             timed_word: None,
             timed_closed: false,
             system_exits: Box::default(),
+            hot_samples: Vec::new(),
+            hot_countdown: step_timing::HOT_SAMPLE_EVERY,
+            hot_seed: 0x9e37_79b9_7f4a_7c15,
             #[cfg(all(feature = "std", feature = "native-profile"))]
             floating_profile: None,
             #[cfg(all(feature = "std", feature = "native-profile"))]

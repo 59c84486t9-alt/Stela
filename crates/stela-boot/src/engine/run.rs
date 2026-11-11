@@ -1357,6 +1357,7 @@ impl Heartbeat {
             system_exits_report(&exits, tsc_hz);
             device_exits_report(machine, &exits.devices, tsc_hz);
             transfer_times_report(machine, tsc_hz);
+            hot_blocks_report(machine);
         }
         output::arguments(format_args!(
             "GUEST PERFORMANCE retired={retired} interval_retired={instructions} instructions_per_second={} instructions_per_block_milli={}\n",
