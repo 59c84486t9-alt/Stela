@@ -3,6 +3,9 @@ name = "stela-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Stela's source here is GPL-2.0-or-later. The `stela` binary links Apache-2.0
+# crates and no GPL-2.0-only code, so it is distributed as a whole under
+# GPL-3.0-or-later (NOTICE).
 description = "The stela command: prepares the USB installer that boots macOS on a PC through Stela"
 repository.workspace = true
 rust-version.workspace = true

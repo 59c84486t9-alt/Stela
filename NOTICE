@@ -9,10 +9,13 @@ LICENSES/.
 
 Some shipped programs also contain code that is licensed under GPL-2.0-only,
 mostly Linux kernel code and Rust ports of Linux drivers. A program that
-contains such code is distributed as a whole under GPL-2.0-only:
+contains such code is distributed as a whole under GPL-2.0-only. A program
+without it that links Apache-2.0 code is distributed under GPL-3.0-or-later
+(LICENSES/GPL-3.0-or-later.txt), as the "or later" option allows:
 
   stela.efi             GPL-2.0-only (contains Linux code)
-  stela (CLI)           GPL-2.0-only (contains Linux-derived driver code)
+  stela (CLI)           GPL-3.0-or-later (links Apache-2.0 crates and no
+                        GPL-2.0-only code)
   stela-gpu-maintenance GPL-2.0-or-later
   Stela.app             GPL-2.0-or-later
   StelaGPU.kext         GPL-2.0-or-later
@@ -33,7 +36,7 @@ Third-party components in the shipped programs
 
 Component                          License                            Where
 Linux kernel v7.2.12 (source in    GPL-2.0-only, GPL-2.0-or-later,    stela.efi
-third_party/linux, Rust ports in   MIT, GPL-2.0 OR BSD-3-Clause and   stela (ports)
+third_party/linux, Rust ports in   MIT, GPL-2.0 OR BSD-3-Clause and
 crates/stela-driver*/,             other per-file terms
 stela-linux, stela-boot-core)
 FreeBSD e1000 driver               BSD-3-Clause                       stela.efi
