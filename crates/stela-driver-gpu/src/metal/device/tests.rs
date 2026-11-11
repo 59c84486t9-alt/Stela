@@ -3518,6 +3518,35 @@ fn command_buffers_are_timed_from_their_first_command_to_their_last() {
 }
 
 #[test]
+fn a_command_buffer_without_written_timestamps_is_told_apart_from_an_evicted_one() {
+    let mut device = device();
+    // Its timestamps were never written, as when it ends in an error: zeros,
+    // reported once.
+    let errored = submit(&mut device);
+    complete(&mut device, errored);
+    assert_eq!(device.command_buffer_times(errored), Ok([0, 0]));
+    assert!(
+        device
+            .take_unsupported()
+            .is_some_and(|what| what.contains("ended without them"))
+    );
+    assert_eq!(device.command_buffer_times(errored), Ok([0, 0]));
+    assert_eq!(device.take_unsupported(), None);
+    // Past the kept window, a timed one is no longer kept: still refused.
+    device.backend().queries_ready = true;
+    for _ in 0..super::queue::TIMES_KEPT {
+        let serial = submit(&mut device);
+        complete(&mut device, serial);
+    }
+    assert_eq!(
+        device.command_buffer_times(errored),
+        Err(Error::Invalid(
+            "the command buffer's GPU times are no longer kept"
+        ))
+    );
+}
+
+#[test]
 fn completion_query_pools_reuse_two_slots_after_retirement() {
     let mut device = device();
     device

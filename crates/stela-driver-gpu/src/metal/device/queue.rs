@@ -90,7 +90,7 @@ const COMPLETION_QUERIES: u32 = PASS_MARKS + 2;
 const PASS_MARKS: u32 = 30;
 
 /// Completed command buffers whose GPU times are kept.
-const TIMES_KEPT: usize = 1024;
+pub(super) const TIMES_KEPT: usize = 1024;
 
 /// Render pass targets the profile remembers by attachment view.
 const TARGETS_KEPT: usize = 1024;
@@ -342,8 +342,9 @@ pub(super) struct Queue {
     /// them: another Metal queue's held work never delays their completion.
     early: Vec<(u64, u64)>,
     /// GPU start and end ticks of the latest completed command buffers, by
-    /// serial, oldest first.
-    times: VecDeque<(u64, [u64; 2])>,
+    /// serial, oldest first; none for one whose timestamps were not written
+    /// (it ended in an error).
+    times: VecDeque<(u64, Option<[u64; 2]>)>,
     /// Where retired command buffers' time went, for the platform's report.
     clock: GpuClock,
     /// Per-pass timing without `--profile`'s global switch, for tests.
@@ -1020,7 +1021,9 @@ impl<B: Backend, C: Compiler> Device<B, C> {
 
     /// `GPUStartTime` and `GPUEndTime` of the completed command buffer with
     /// `serial`, in timestamp ticks; the latest [`TIMES_KEPT`] are kept.
-    pub fn command_buffer_times(&self, serial: u64) -> Result<[u64; 2]> {
+    /// One whose timestamps were never written is answered zeros, reported
+    /// once: what a Mac answers for it is not recorded.
+    pub fn command_buffer_times(&mut self, serial: u64) -> Result<[u64; 2]> {
         let running = self
             .queue
             .in_flight
@@ -1033,9 +1036,18 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         require(self.capabilities.timestamp_frequency != 0, "GPU times")?;
         let times = &self.queue.times;
         let found = times.binary_search_by_key(&serial, |&(serial, _)| serial);
-        found
-            .map(|index| times[index].1)
-            .map_err(|_| Error::Invalid("the command buffer's GPU times are no longer kept"))
+        match found.map(|index| times[index].1) {
+            Ok(Some(times)) => Ok(times),
+            Ok(None) => {
+                self.unsupported(
+                    "GPU times of a command buffer that ended without them, answered zeros",
+                );
+                Ok([0, 0])
+            }
+            Err(_) => Err(Error::Invalid(
+                "the command buffer's GPU times are no longer kept",
+            )),
+        }
     }
 
     /// Drops a command buffer that will not be committed.
@@ -1675,7 +1687,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 match self.backend.query_results(pool, 0, read) {
                     Ok(true) => {
                         let times = [read[0], read[read.len() - 1]];
-                        self.keep_times(flight.serial, times);
+                        self.keep_times(flight.serial, Some(times));
                         let frequency = u128::from(self.capabilities.timestamp_frequency);
                         let ns =
                             |ticks: u64| (u128::from(ticks) * 1_000_000_000 / frequency) as u64;
@@ -1740,8 +1752,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                             spans,
                         );
                     }
-                    Ok(false) => {}
-                    Err(error) => outcome = outcome.and(Err(error)),
+                    Ok(false) => self.keep_times(flight.serial, None),
+                    Err(error) => {
+                        self.keep_times(flight.serial, None);
+                        outcome = outcome.and(Err(error));
+                    }
                 }
                 self.retire_query_pool(pool, QueryType::Timestamp, marks.queries);
             }
@@ -1838,7 +1853,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
     }
 
-    fn keep_times(&mut self, serial: u64, times: [u64; 2]) {
+    fn keep_times(&mut self, serial: u64, times: Option<[u64; 2]>) {
         let kept = &mut self.queue.times;
         if kept.len() == TIMES_KEPT {
             kept.pop_front();
