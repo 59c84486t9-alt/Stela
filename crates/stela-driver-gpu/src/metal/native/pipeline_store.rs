@@ -370,6 +370,11 @@ impl Store {
         }
     }
 
+    /// The serialized NIR of `key` that [`Self::add_nir`] kept this boot.
+    pub fn recall_nir(&self, key: &[u8; 32]) -> Option<Vec<u8>> {
+        self.nir.get(key).cloned()
+    }
+
     /// The store for a backend of `gpu`. A newer backend of the same key
     /// replaces the holder, as a reopened device does; another GPU's while
     /// one holds it, or any after [`Self::take`], has none.
@@ -525,6 +530,11 @@ pub fn add_nir(key: &[u8; 32], blob: &[u8]) {
             store.add_nir(*key, blob);
         }
     });
+}
+
+/// The serialized NIR of `key` compiled this boot, while the store keeps it.
+pub fn recall_nir(key: &[u8; 32]) -> Option<Vec<u8>> {
+    with_store(|slot| slot.as_ref()?.recall_nir(key))
 }
 
 /// The cache a backend's compiled pipelines read and fill, seeded from the

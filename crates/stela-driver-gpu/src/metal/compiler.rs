@@ -56,6 +56,7 @@ use super::{
     vulkan::{object::ShaderCode, physical::PhysicalDevice},
 };
 use alloc::{
+    borrow::Cow,
     boxed::Box,
     collections::BTreeMap,
     ffi::CString,
@@ -309,18 +310,39 @@ pub struct AirCompiler {
     /// boot's compilations go for the next ([`AirCompiler::persist`]).
     stored: BTreeMap<[u8; 32], &'static [u8]>,
     persist: Option<Persist>,
-    /// Stored NIR deserialized in place of a compilation.
+    /// Where this boot's serialized compilations are found again: an
+    /// evicted compilation deserializes instead of lowering AIR again.
+    recall: Option<Recall>,
+    /// Stored NIR deserialized in place of a compilation, and this boot's
+    /// recalled.
     restored: u64,
+    recalled: u64,
 }
 
 /// Where a compilation's serialized NIR goes for the next boot, by key.
 pub type Persist = fn(&[u8; 32], &[u8]);
+
+/// The serialized NIR of a key that [`Persist`] took this boot, if kept.
+pub type Recall = fn(&[u8; 32]) -> Option<Vec<u8>>;
 
 /// The NIR budget of a device's compiled shaders.
 pub const NIR_BUDGET: usize = 96 << 20;
 
 // SAFETY: the target's NIR options are the driver's, read from any thread.
 unsafe impl Send for AirCompiler {}
+
+impl Drop for AirCompiler {
+    /// Releases the NIR the cache holds and no one borrows, as the compiler
+    /// of a device lost and replaced goes.
+    fn drop(&mut self) {
+        let codes = self.nir.as_mut().map(NirCache::take_unlent);
+        for code in codes.into_iter().flatten() {
+            // SAFETY: a cached shader no one holds; the service outlives
+            // the compiler.
+            unsafe { (self.service.release)(code.0 as usize as *mut c_void) };
+        }
+    }
+}
 
 impl AirCompiler {
     /// A compiler for the Vulkan device `device` describes.
@@ -385,31 +407,57 @@ impl AirCompiler {
             deferrals: 0,
             stored: BTreeMap::new(),
             persist: None,
+            recall: None,
             restored: 0,
+            recalled: 0,
         }
     }
 
     /// Takes `stored`, NIR an earlier boot's compilations serialized by key,
-    /// and gives this boot's compilations to `persist`: a compilation it
-    /// holds deserializes instead of lowering AIR again.
+    /// and gives this boot's compilations to `persist`, which `recall` finds
+    /// again: a compilation either holds deserializes instead of lowering
+    /// AIR again, so one the NIR cache evicted is not compiled twice.
     pub fn persist(
         &mut self,
         stored: impl IntoIterator<Item = ([u8; 32], &'static [u8])>,
         persist: Persist,
+        recall: Recall,
     ) {
         if self.nir.is_none() || !nir_serialization() {
             return;
         }
         self.stored.extend(stored);
         self.persist = Some(persist);
+        self.recall = Some(recall);
     }
 
-    /// The stored NIR of `job`, deserialized, as its compilation would make.
+    /// The serialized NIR of `key`: an earlier boot's, else this boot's.
+    fn serialized(&self, key: &[u8; 32]) -> Option<(Cow<'static, [u8]>, bool)> {
+        if let Some(&blob) = self.stored.get(key) {
+            return Some((Cow::Borrowed(blob), false));
+        }
+        let blob = (self.recall?)(key)?;
+        Some((Cow::Owned(blob), true))
+    }
+
+    /// The serialized NIR of `job`, deserialized, as its compilation would
+    /// make.
     fn restore(&mut self, job: &CompileJob) -> Option<(CompiledShader, usize)> {
-        let blob = self.stored.get(&job.key?)?;
-        let shader = deserialize(blob, self.target.nir)?;
-        self.restored += 1;
+        let (blob, recalled) = self.serialized(&job.key?)?;
+        let shader = deserialize(&blob, self.target.nir)?;
+        if recalled {
+            self.recalled += 1;
+        } else {
+            self.restored += 1;
+        }
         Some(job.finish(shader))
+    }
+
+    /// Uses `lock`, the compile lock of the compiler this one replaces, as a
+    /// device reopened after a loss does: jobs the platform runs hold it.
+    pub fn share_compile_lock(&mut self, lock: alloc::sync::Arc<CompileLock>, relax: fn()) {
+        self.lock = lock;
+        self.relax = relax;
     }
 
     /// Gives a compilation's serialized NIR to the next boot, unless it
@@ -545,10 +593,11 @@ impl AirCompiler {
     }
 
     /// `GPU COMPILER reflected=… reflections=… nir_hits=… nir_misses=…
-    /// compiled=… restored=…/stored deferred=… nir=entries/MiB evicted=…`,
-    /// since the device opened: reflections and compilations the service
-    /// ran, cache hits and misses, stored NIR deserialized of what the
-    /// store held, calls that compiled outside the lock, and the cache.
+    /// compiled=… restored=…/stored deferred=… nir=entries/MiB evicted=…
+    /// recalled=…`, since the device opened: reflections and compilations
+    /// the service ran, cache hits and misses, stored NIR deserialized of
+    /// what the store held, calls that compiled outside the lock, the cache,
+    /// and evicted compilations of this boot deserialized again.
     pub fn report(&self) -> String {
         let (hits, misses, entries, bytes, evicted) =
             self.nir.as_ref().map_or((0, 0, 0, 0, 0), |nir| {
@@ -562,7 +611,8 @@ impl AirCompiler {
             });
         alloc::format!(
             "GPU COMPILER reflected={} reflections={} nir_hits={hits} nir_misses={misses} \
-             compiled={} restored={}/{} deferred={} nir={entries}/{}M evicted={evicted}",
+             compiled={} restored={}/{} deferred={} nir={entries}/{}M evicted={evicted} \
+             recalled={}",
             self.reflected,
             self.reflections.as_ref().map_or(0, ReflectionCache::len),
             self.compiled,
@@ -570,6 +620,7 @@ impl AirCompiler {
             self.stored.len(),
             self.deferrals,
             bytes >> 20,
+            self.recalled,
         )
     }
 

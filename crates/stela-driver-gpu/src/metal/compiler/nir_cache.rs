@@ -211,6 +211,21 @@ impl NirCache {
         core::mem::take(&mut self.doomed)
     }
 
+    /// Empties the cache as its compiler goes, as with its device after a
+    /// loss: what no one holds, for the caller to release. A shader still
+    /// lent stays with its lender.
+    pub(super) fn take_unlent(&mut self) -> Vec<ShaderCode> {
+        let mut codes = self.take_doomed();
+        for held in core::mem::take(&mut self.held).into_values() {
+            if held.lent == 0 {
+                codes.push(held.shader.code);
+            }
+        }
+        self.codes.clear();
+        self.bytes = 0;
+        codes
+    }
+
     pub(super) fn entries(&self) -> usize {
         self.held.len()
     }
@@ -354,6 +369,33 @@ mod tests {
         cache.insert([6; 32], shader(0x60), 100, false);
         assert_eq!(cache.take_doomed(), [ShaderCode(0x20)]);
         assert_eq!(cache.bytes(), 400);
+    }
+
+    #[test]
+    fn eviction_takes_the_least_recently_used_not_the_first_inserted() {
+        let mut cache = NirCache::new(400);
+        for key in 1..=4u8 {
+            cache.insert([key; 32], shader(u64::from(key) << 4), 100, false);
+        }
+        cache.unpin();
+        // The first inserted is used again, so the second is the coldest.
+        assert!(cache.lend(&[1; 32]).is_some());
+        assert_eq!(cache.release(ShaderCode(0x10)), Returned::Kept);
+        cache.unpin();
+        cache.insert([5; 32], shader(0x50), 100, false);
+        assert_eq!(cache.take_doomed(), [ShaderCode(0x20)]);
+        assert!(cache.lend(&[1; 32]).is_some());
+        assert_eq!(cache.lend(&[2; 32]), None);
+        assert_eq!(cache.evictions, 1);
+    }
+
+    #[test]
+    fn a_closing_cache_gives_back_what_no_one_holds() {
+        let mut cache = NirCache::new(1000);
+        cache.insert([1; 32], shader(0x10), 100, true);
+        cache.insert([2; 32], shader(0x20), 100, false);
+        assert_eq!(cache.take_unlent(), [ShaderCode(0x20)]);
+        assert_eq!((cache.entries(), cache.bytes()), (0, 0));
     }
 
     #[test]

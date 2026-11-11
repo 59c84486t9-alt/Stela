@@ -55,7 +55,7 @@ use crate::metal::{
     timing::CallPhases,
     vulkan::{MemoryProperties, backend::Backend},
 };
-use alloc::{collections::VecDeque, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::{
     any::Any,
     cell::UnsafeCell,
@@ -401,15 +401,20 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         // The AIR compiler keeps what it reflects and compiles for the boot,
         // and defers its compilations once the platform runs jobs.
         let compile_lock = air(service.device().compiler_mut()).map(|compiler| {
-            compiler.keep_compilations(compiler::NIR_BUDGET);
-            // A warm boot deserializes the NIR the pipeline store kept.
-            #[cfg(feature = "metal-vulkan")]
-            {
-                use crate::metal::native::pipeline_store;
-                compiler.persist(pipeline_store::stored_nir(), pipeline_store::add_nir);
-            }
+            keep_compilations(compiler);
             compiler.compile_lock(host.relax)
         });
+        // A device reopened after a loss keeps them too, under the lock the
+        // jobs hold.
+        if let Some(lock) = compile_lock.clone() {
+            let relax = host.relax;
+            service.prepare_reopened(Box::new(move |device| {
+                if let Some(compiler) = air(device.compiler_mut()) {
+                    keep_compilations(compiler);
+                    compiler.share_compile_lock(lock.clone(), relax);
+                }
+            }));
+        }
         Self {
             service: UnsafeCell::new(service),
             locked: AtomicBool::new(false),
@@ -1033,6 +1038,22 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
 /// can run outside the lock.
 fn air<C: Compiler + 'static>(compiler: &mut C) -> Option<&mut AirCompiler> {
     (compiler as &mut dyn Any).downcast_mut::<AirCompiler>()
+}
+
+/// Makes `compiler` keep what it reflects and compiles for the boot; a warm
+/// boot deserializes the NIR the pipeline store kept, and an evicted
+/// compilation of this boot what the store took from it.
+fn keep_compilations(compiler: &mut AirCompiler) {
+    compiler.keep_compilations(compiler::NIR_BUDGET);
+    #[cfg(feature = "metal-vulkan")]
+    {
+        use crate::metal::native::pipeline_store;
+        compiler.persist(
+            pipeline_store::stored_nir(),
+            pipeline_store::add_nir,
+            pipeline_store::recall_nir,
+        );
+    }
 }
 
 /// The call record at `record`, unless it is out of the caller's reach.

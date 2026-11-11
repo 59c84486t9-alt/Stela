@@ -60,6 +60,9 @@ pub mod wire;
 /// Opens a new device for the GPU after a loss.
 pub type Reopen<B, C> = Box<dyn FnMut() -> Result<Device<B, C>, Error> + Send>;
 
+/// What the platform sets up on a device [`Reopen`] made, before it serves.
+pub type Prepare<B, C> = Box<dyn FnMut(&mut Device<B, C>) + Send>;
+
 /// The enumeration value `raw` decodes to, or a fault naming `name` and
 /// `raw` when it is not one.
 fn decode<R: Copy + Into<u64>, T>(
@@ -329,6 +332,7 @@ pub struct Service<B: Backend, C: Compiler> {
     /// Whether a refusal named the work the device was lost running.
     loss_described: bool,
     reopen: Option<Reopen<B, C>>,
+    prepare: Option<Prepare<B, C>>,
 }
 
 impl<B: Backend, C: Compiler> Service<B, C> {
@@ -347,6 +351,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             served: (0, Status::Ok),
             loss_described: false,
             reopen: None,
+            prepare: None,
         }
     }
 
@@ -354,6 +359,12 @@ impl<B: Backend, C: Compiler> Service<B, C> {
     pub fn with_reopen(mut self, reopen: Reopen<B, C>) -> Self {
         self.reopen = Some(reopen);
         self
+    }
+
+    /// Runs `prepare` on each reopened device before it serves, as the
+    /// platform set up the first.
+    pub fn prepare_reopened(&mut self, prepare: Prepare<B, C>) {
+        self.prepare = Some(prepare);
     }
 
     pub fn device(&mut self) -> &mut Device<B, C> {
@@ -424,7 +435,10 @@ impl<B: Backend, C: Compiler> Service<B, C> {
             return;
         };
         match reopen() {
-            Ok(device) => {
+            Ok(mut device) => {
+                if let Some(prepare) = self.prepare.as_mut() {
+                    prepare(&mut device);
+                }
                 let clock = self.device.clock();
                 self.device = device;
                 self.device.set_clock(clock);

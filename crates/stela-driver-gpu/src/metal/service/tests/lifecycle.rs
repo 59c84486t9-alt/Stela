@@ -174,9 +174,15 @@ fn failed_idle_does_not_close_the_connection_or_release_its_imports() {
 #[test]
 fn a_lost_device_reopens_once_its_last_connection_closes() {
     static REOPENED: AtomicUsize = AtomicUsize::new(0);
+    static PREPARED: AtomicUsize = AtomicUsize::new(0);
     let mut service = service().with_reopen(Box::new(|| {
         REOPENED.fetch_add(1, Ordering::Relaxed);
         Ok(device_on(MockBackend::new()))
+    }));
+    // The platform's setup of the first device runs on the reopened one.
+    service.prepare_reopened(Box::new(|device| {
+        assert!(!device.is_lost());
+        PREPARED.fetch_add(1, Ordering::Relaxed);
     }));
     let first = connect(&mut service);
     let second = connect(&mut service);
@@ -191,6 +197,7 @@ fn a_lost_device_reopens_once_its_last_connection_closes() {
     assert_eq!(REOPENED.load(Ordering::Relaxed), 0);
     service.disconnect(first).unwrap();
     assert_eq!(REOPENED.load(Ordering::Relaxed), 1);
+    assert_eq!(PREPARED.load(Ordering::Relaxed), 1);
     assert!(!service.device().is_lost());
     let next = connect(&mut service);
     cpu_buffer(&mut service, next, 4096, StorageMode::Shared);

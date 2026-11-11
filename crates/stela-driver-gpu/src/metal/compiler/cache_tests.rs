@@ -378,3 +378,22 @@ fn a_failed_try_leaves_the_holders_lock_held() {
     assert!(lock.try_hold().is_some());
     assert!(!lock.is_held());
 }
+
+#[test]
+fn an_evicted_compilation_is_found_again_in_what_this_boot_serialized() {
+    fn recall(key: &[u8; 32]) -> Option<Vec<u8>> {
+        (key == &[2; 32]).then(|| vec![2, 2])
+    }
+    static STORED: [u8; 1] = [1];
+    let (mut compiler, _) = caching();
+    // As `persist` sets them where the image serializes NIR.
+    compiler.stored.insert([1; 32], &STORED);
+    compiler.recall = Some(recall);
+    // An earlier boot's comes first, then this boot's, else none.
+    let earlier = compiler.serialized(&[1; 32]).unwrap();
+    assert_eq!((&*earlier.0, earlier.1), (&[1u8][..], false));
+    let recalled = compiler.serialized(&[2; 32]).unwrap();
+    assert_eq!((&*recalled.0, recalled.1), (&[2u8, 2][..], true));
+    assert!(compiler.serialized(&[3; 32]).is_none());
+    assert!(compiler.report().ends_with("recalled=0"));
+}
