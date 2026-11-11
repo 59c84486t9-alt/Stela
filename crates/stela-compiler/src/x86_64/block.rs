@@ -673,6 +673,11 @@ fn emit_selected(
     let mut carried = vec![];
     // Whether one run covers a self-loop's body ([`pinned::Span::plan_loop`]).
     let mut loop_run = false;
+    // Guest vectors stay in host registers between the instructions that
+    // only compute ([`super::vector_cache`]): in system-mode blocks, whose
+    // faults the fault table settles from the state block the cache keeps
+    // current at every fault site and exit.
+    let vectors = pinned && fault_table && !code.constant_time() && !checks.translated;
     for copy in 0..if self_loop.is_some() { 2_usize } else { 1 } {
         if copy == 0
             && self_loop.is_some()
@@ -691,6 +696,7 @@ fn emit_selected(
         if copy == 1 {
             // The second copy starts where its own back edge lands, with
             // nothing held and only the loop's run open.
+            code.forget_vectors();
             second_copy.set(true);
             loop_exits.start = code.len();
             loop_exits.first_rows = block.source_map.len();
@@ -707,6 +713,30 @@ fn emit_selected(
             loop_exits.landings[copy] = vec![None; instructions.len() + 1];
         }
         while cursor < instructions.len() {
+            if vectors {
+                if landing[cursor] {
+                    // A join lands here from a point that stored them all.
+                    code.settle_vectors();
+                }
+                let mut class = vector_use(&instructions[cursor].operation);
+                // A fused group addresses the state itself.
+                if fuse_simd
+                    && super::simd::sha256::HashGroup::recognize(&instructions[cursor..]).is_some()
+                {
+                    class = VectorUse::Settle;
+                }
+                match class {
+                    VectorUse::Keep => code.set_vector_cache(true),
+                    VectorUse::Flush => {
+                        code.set_vector_cache(true);
+                        code.flush_vectors();
+                    }
+                    VectorUse::Settle => {
+                        code.settle_vectors();
+                        code.set_vector_cache(false);
+                    }
+                }
+            }
             let mut held = core::mem::replace(&mut after, Held::NOTHING);
             if landing[cursor] {
                 // A join lands here: nothing held, no base known.
@@ -1226,6 +1256,8 @@ fn emit_selected(
             emitted_alone = true;
             cursor += 1;
         }
+        // The back edge, the terminal and their exits read the state.
+        code.flush_vectors();
         if loop_run {
             if let Some((active, _)) = run.as_mut() {
                 active.emitted(code, &instructions[run_emitted..]);
@@ -1241,6 +1273,7 @@ fn emit_selected(
             // The back edge: the iteration's instructions count, and the second
             // copy runs again until an entry's share is spent.
             if landing[instructions.len()] {
+                code.forget_vectors();
                 after = Held::NOTHING;
                 bases.reset();
                 loop_exits.landings[copy][instructions.len()] = Some(code.len());
@@ -1334,6 +1367,7 @@ fn emit_selected(
     if let Some((active, _)) = run.take() {
         active.forget(code);
     }
+    code.set_vector_cache(false);
     if let Some(self_loop) = self_loop {
         // A group emitted across a landing leaves it without a start: the
         // loop then takes those branches' side exits.
@@ -1612,6 +1646,49 @@ impl Held {
         xmm0: None,
         xmm_pair: None,
     };
+}
+
+/// What an instruction asks of the guest vectors kept in host registers
+/// ([`super::vector_cache`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum VectorUse {
+    /// It neither faults nor leaves, reaches V only through the cache's
+    /// operand layer and writes no pool register: the homes stay.
+    Keep,
+    /// As [`Self::Keep`], but it can fault or leave: the dirty homes are
+    /// stored first, and stay as clean copies.
+    Flush,
+    /// Anything else: every home is stored and forgotten, and the
+    /// instruction is emitted without the cache.
+    Settle,
+}
+
+fn vector_use(operation: &Operation) -> VectorUse {
+    match operation {
+        Operation::AddSub { .. }
+        | Operation::AddSubRegister { .. }
+        | Operation::AddSubExtended { .. }
+        | Operation::AddSubCarry { .. }
+        | Operation::LogicalImmediate { .. }
+        | Operation::LogicalRegister { .. }
+        | Operation::MoveWide { .. }
+        | Operation::Bitfield(_)
+        | Operation::PcRelative(_)
+        | Operation::ConditionalSelect(_)
+        | Operation::ConditionalCompare(_)
+        | Operation::IntegerMath(_)
+        | Operation::IntegerMinMax(_)
+        | Operation::IntegerUnary(_)
+        | Operation::Nop => VectorUse::Keep,
+        Operation::Memory { .. }
+        | Operation::MemoryPair { .. }
+        | Operation::MemoryRegisterOffset(_)
+        | Operation::BranchCondition { .. }
+        | Operation::BranchZero { .. }
+        | Operation::BranchBit { .. } => VectorUse::Flush,
+        Operation::Simd(operand) => super::simd::vector_use(operand),
+        _ => VectorUse::Settle,
+    }
 }
 
 /// These recipes only touch GPRs, flags and their frame slots. A memory
@@ -2305,3 +2382,5 @@ fn branch_condition_with(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vector_cache_tests;
