@@ -3,7 +3,7 @@
 // Copyright (C) Tom Long Nguyen (tom.l.nguyen@intel.com)
 // Copyright (C) 2016 Christoph Hellwig
 // Copyright (C) 2026 Stela contributors
-// The prior Stela peripheral fixture is MIT (repository LICENSE); this combined
+// The prior Stela peripheral fixture is GPL-2.0-or-later (LICENSE); this combined
 // file keeps the GPL-2.0-only legacy owner oracle and its original notices.
 // Includes the unchanged pre-indexed GPL-2.0-only owner as a legacy trace oracle.
 extern crate std;

@@ -1,4 +1,4 @@
-/* Checked opaque crypto adapter. Original Stela glue, MIT.
+/* Checked opaque crypto adapter. Original Stela glue, GPL-2.0-or-later.
  * No primitive implementation: all group, scalar, point and ECDH operations
  * call checked public Mbed TLS 3.6.7 APIs with a mandatory fallible RNG. */
 #include "stela_mbed_kx.h"

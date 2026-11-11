@@ -1,4 +1,4 @@
-/* Checked opaque crypto adapter. Original Stela glue, MIT. */
+/* Checked opaque crypto adapter. Original Stela glue, GPL-2.0-or-later. */
 #ifndef STELA_MBED_KX_H
 #define STELA_MBED_KX_H
 #include <stddef.h>

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT AND GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later AND GPL-2.0-only
 // NCM mode negotiation adapted from Linux cdc_ncm.c:
 // Copyright (C) ST-Ericsson 2010-2012
 // Original author: Hans Petter Selasky <hans.petter.selasky@stericsson.com>

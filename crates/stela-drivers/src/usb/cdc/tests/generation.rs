@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT AND GPL-2.0-only
+// SPDX-License-Identifier: GPL-2.0-or-later AND GPL-2.0-only
 //! Configured native peers for the xHCI generation admission regressions.
 use super::super::*;
 use crate::usb::xhci::{Found, model::bind};
