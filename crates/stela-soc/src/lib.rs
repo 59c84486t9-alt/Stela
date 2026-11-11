@@ -22,8 +22,6 @@ use stela_contracts::interrupt;
 pub type Result<T, E = Refusal> = core::result::Result<T, E>;
 
 pub mod machine;
-#[cfg(test)]
-mod research;
 pub mod usb;
 
 pub mod aes;

@@ -9,8 +9,6 @@ pub mod gen3;
 mod irq;
 mod legacy;
 mod legacy_umms;
-#[cfg(test)]
-pub mod research;
 pub mod smmu;
 mod t8110;
 

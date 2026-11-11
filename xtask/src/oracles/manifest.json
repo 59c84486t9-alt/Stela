@@ -3785,16 +3785,6 @@
   },
   {
     "package": "stela-soc",
-    "test": "original_ap_mailbox_and_rtpc_producers_are_source_pinned",
-    "source": "crates/stela-soc/src/research/hpm_spmi.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_TEST_HPM_SPMI_KC_ROOT"
-    ],
-    "reason": "requires unchanged 26A434 mac15g/mac15j/mac16g/mac17g KCs via STELA_TEST_HPM_SPMI_KC_ROOT"
-  },
-  {
-    "package": "stela-soc",
     "test": "original_t6000_opaque_control_save_and_restore_consumers",
     "source": "crates/stela-soc/src/mcc/configuration.rs",
     "kind": "oracle",
@@ -3802,16 +3792,6 @@
       "STELA_TEST_MCC_KERNELCACHE"
     ],
     "reason": "requires the immutable original 26A434 mac13j kernelcache"
-  },
-  {
-    "package": "stela-soc",
-    "test": "original_msi_vector_delegation_and_port_decoder_are_pinned",
-    "source": "crates/stela-soc/src/research/pcie/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_PCIE_KERNELCACHE"
-    ],
-    "reason": "requires STELA_PCIE_KERNELCACHE naming the pinned original 26A434 Mach-O"
   },
   {
     "package": "stela-soc-data",
@@ -4291,36 +4271,6 @@
     "programs": [
       "/usr/bin/openssl"
     ]
-  },
-  {
-    "package": "stela-soc",
-    "test": "original_firmware_proves_typed_tunable_rows_and_conditional_physical_writes",
-    "source": "crates/stela-soc/src/research/sio_dma/setup/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_TEST_SIO_FIRMWARE"
-    ],
-    "reason": "requires pinned original J473 26A434 SIO firmware; no Apple image is committed"
-  },
-  {
-    "package": "stela-soc",
-    "test": "original_controller_proves_pool_header_segments_and_terminal_report_layout",
-    "source": "crates/stela-soc/src/research/sio_dma/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_TEST_SIO_KERNELCACHE"
-    ],
-    "reason": "requires pinned original J473 26A434 kernelcache; no Apple image is committed"
-  },
-  {
-    "package": "stela-soc",
-    "test": "original_firmware_excludes_undelivered_fifo_bytes_from_tx_stop_report",
-    "source": "crates/stela-soc/src/research/sio_dma/tests.rs",
-    "kind": "oracle",
-    "inputs": [
-      "STELA_TEST_SIO_FIRMWARE"
-    ],
-    "reason": "requires pinned original J473 26A434 SIO firmware; no Apple image is committed"
   },
   {
     "package": "stela-soc",
