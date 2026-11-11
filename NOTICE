@@ -1,0 +1,77 @@
+Stela
+=====
+
+Stela's own code is licensed under the GNU General Public License, version 2
+or (at your option) any later version (SPDX: GPL-2.0-or-later). The license
+text is in LICENSE. Files that say otherwise in their SPDX line or copyright
+header keep their own terms; every license named below has its text in
+LICENSES/.
+
+Some shipped programs also contain code that is licensed under GPL-2.0-only,
+mostly Linux kernel code and Rust ports of Linux drivers. A program that
+contains such code is distributed as a whole under GPL-2.0-only:
+
+  stela.efi             GPL-2.0-only (contains Linux code)
+  stela (CLI)           GPL-2.0-only (contains Linux-derived driver code;
+                        also carries stela.efi as a separate program)
+  stela-gpu-maintenance GPL-2.0-or-later
+  Stela.app             GPL-2.0-or-later
+  StelaGPU.kext         GPL-2.0-or-later
+  StelaGPU.bundle       GPL-2.0-or-later
+
+If you redistribute these programs in binary form, you must also offer their
+complete corresponding source under the terms of the GPL: this repository at
+the same revision, every submodule in third_party/ at the commit it pins with
+the patches in third_party/patches/ applied, and the build scripts. Keep this
+file, LICENSE and LICENSES/ with every copy.
+
+Third-party components in the shipped programs
+-----------------------------------------------
+
+Component                          License                            Where
+Linux kernel v7.2.12 (source in    GPL-2.0-only, GPL-2.0-or-later,    stela.efi
+third_party/linux, Rust ports in   MIT, GPL-2.0 OR BSD-3-Clause and   stela (ports)
+crates/stela-driver*/,             other per-file terms
+stela-linux, stela-boot-core)
+FreeBSD e1000 driver               BSD-3-Clause                       stela.efi
+MediaTek mt76 Wi-Fi and wireless   BSD-3-Clause-Clear, ISC            stela.efi
+regulatory ports
+Asahi Linux bcm4377, NXP, Intel    MIT                                stela.efi
+drm_eld.h and WOPCM sources
+Mesa 26.2.5 (NVK, NIR, NAK,        MIT; Vulkan headers Apache-2.0;    stela.efi
+Vulkan runtime)                    c11 threads BSL-1.0
+libdrm 2.4.133 headers             MIT                                stela.efi
+LLVM 23.1.4 libraries, libc++      Apache-2.0 WITH LLVM-exception     stela.efi
+                                   (legacy parts also NCSA)
+  xxHash (Yann Collet)             BSD-2-Clause                       stela.efi
+  regex (Henry Spencer, The        BSD-3-Clause                       stela.efi
+  Regents of the University of
+  California)
+  ConvertUTF (Unicode, Inc.)       Unicode-DFS-2015                   stela.efi
+  BLAKE3                           CC0-1.0 OR Apache-2.0              stela.efi
+Mbed TLS 3.6.7                     Apache-2.0 OR GPL-2.0-or-later     stela.efi
+                                   (used under GPL-2.0-or-later)
+smoltcp 0.14.0 (smoltcp            0BSD                               stela.efi, stela
+contributors)
+Spleen 2.1.0 font (Frederic        BSD-2-Clause                       stela.efi
+Cambus)
+Arm AARCHMRS data (Arm Limited)    BSD-3-Clause                       stela.efi, stela
+corsix/amx (Peter Cawley)          MIT                                stela.efi, stela
+Rust standard library and          MIT OR Apache-2.0 (MIT used)       stela.efi, stela
+RustCrypto portions in
+stela-crypto (Graydon Hoare,
+Mozilla Foundation, RustCrypto)
+xnu headers                        APSL-2.0 and per-file notices      StelaGPU.kext
+Rust crates from crates.io         MIT, MIT OR Apache-2.0, ISC,       stela.efi, stela,
+(Cargo.lock lists them)            BSD-3-Clause, 0BSD, Zlib,          stela-gpu-maintenance
+                                   Unicode-3.0, MPL-2.0 (ucs2),
+                                   CDLA-Permissive-2.0
+                                   (webpki-roots), BSL-1.0 OR
+                                   Apache-2.0 (ryu), Apache-2.0
+                                   (zopfli, sync_wrapper), Apache-2.0
+                                   AND ISC (ring)
+
+Copyright notices for these components are in their source files, which the
+corresponding source above includes. Device firmware is not part of Stela;
+`stela setup` downloads it from the vendors' own releases, under the vendors'
+terms.
