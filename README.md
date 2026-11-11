@@ -39,8 +39,8 @@ Stela currently models the Mac mini (M2) and runs macOS 27.
 
 1. Download `stela` from the
    [releases page](https://github.com/tylertms/Stela/releases).
-2. On the PC that will run macOS, run `sudo ./stela setup` (Linux, macOS) or
-   double-click `stela.exe` (Windows).
+2. Run `sudo ./stela setup` (Linux, macOS) or double-click `stela.exe`
+   (Windows).
 3. Choose the USB stick, the macOS version and the Mac model, then confirm.
    Setup erases the USB stick.
 4. Boot the PC from the USB stick.
