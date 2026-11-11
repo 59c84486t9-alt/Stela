@@ -36,8 +36,7 @@ pub(super) fn request_shutdown(force: bool) {
 }
 
 /// Stop the guest and restart the PC: what NVRAM records at the stop
-/// chooses the next boot. Only the GPU gate's plugin repair asks.
-#[cfg(feature = "nvk")]
+/// chooses the next boot: the Metal plugin repair's.
 pub(super) fn request_restart() {
     SHUTDOWN.request(Shutdown::Restart);
 }

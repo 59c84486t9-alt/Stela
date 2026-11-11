@@ -534,30 +534,29 @@ impl GuestConsole {
         }
     }
 
-    /// Log what the driver did; a failure stops the machine with the manual
-    /// remedy, once, and the driver types nothing more.
+    /// Log what the driver did. A repair whose shell stopped answering, or
+    /// whose guest did not restart, restarts the PC, once: the next normal
+    /// boot tries the kext, and NVRAM's record makes a still missing plugin
+    /// stop there with the manual remedy instead of repairing again. A
+    /// failed step the shell answered restarts the guest itself.
     fn report_repair(&mut self) {
         let Some(driver) = self.repair() else {
             return;
         };
         let events = driver.take_events();
-        let failed = events
-            .iter()
-            .any(|event| matches!(event, stela_boot_core::bundle_repair::Event::Failed(_)));
+        let restart = driver.failed();
         for event in &events {
             output::arguments(format_args!(
                 "{}\n",
                 stela_boot_core::bundle_repair::describe(event)
             ));
         }
-        if failed {
+        if restart {
             self.repair = ConsoleRepair::Off;
-            output::stopping(
-                "the automatic single-user repair could not create StelaGPU.bundle's \
-                 directories (its BUNDLE REPAIR lines say where it stopped): boot macOS once \
-                 with --single-user and install it there by hand",
-            );
-            service::request_shutdown(true);
+            output::arguments(format_args!(
+                "BUNDLE REPAIR restarting the PC; the next boot tries the kext once\n"
+            ));
+            service::request_restart();
         }
     }
 }
