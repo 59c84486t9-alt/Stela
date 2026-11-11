@@ -1,8 +1,8 @@
 //! The tagged variant's strip of an access address's top byte (Arm
 //! `AddrTop`, TCR_ELx.TBI0 and TBI1), before the guest range check
 //! ([`super::RangeCheck`]). The engine compiles a fetch page in this
-//! variant once an access of the page had a top byte the regime ignores
-//! (docs/design/system.md, "Host placement"): every other page keeps the
+//! variant once an access of the page had a top byte the regime ignores:
+//! every other page keeps the
 //! plain check, and so its bytes and its cost.
 use super::asm::{self, Code};
 

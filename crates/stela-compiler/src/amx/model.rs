@@ -7,7 +7,7 @@
 //! hardware: round to nearest even, no flushing and default NaN (FPCR.DN).
 //! It is computed with Stela's Arm evaluators. FPSR is not updated. A bounded
 //! M1 Pro native corpus confirms that behavior under RMode/DN/FZ/FZ16/AHP;
-//! other fields and later-generation hardware remain unverified (docs/research/amx.md).
+//! other fields and later-generation hardware remain unverified.
 //!
 //! Memory operations stage a complete transfer before any register or memory
 //! effect. M1 pair transfers outside 128-byte alignment raise an alignment

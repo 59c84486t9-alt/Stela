@@ -416,10 +416,9 @@ pub struct MemoryChecks {
     /// since ([`stack_alignment::checks`]): an access through SP relies on
     /// [`Self::stack_alignment`] without its own check.
     pub(crate) stack_checked: bool,
-    /// The guest's native ranges on this host's placement
-    /// (docs/design/system.md, "Host placement").
+    /// The guest's native ranges on this host's placement.
     pub range: RangeCheck,
-    /// The translated variant (docs/design/system.md, "Host placement"):
+    /// The translated variant:
     /// every access checks its address, as with
     /// [`Self::every_access_masked`], and a failed check calls the engine's
     /// translation helper through [`Self::translation_helper`] in place of
@@ -520,7 +519,7 @@ fn plain_ordering(target: crate::TargetCpu, _checks: MemoryChecks) -> bool {
 
 /// The system-mode check of the access address in RAX against the guest's
 /// native ranges, the only parts of the host address space its shadow
-/// tables map (docs/design/system.md, "Host placement"):
+/// tables map:
 ///
 /// ```text
 /// mov rcx,rax; sar rcx,shift; add ecx,bias (inc ecx for 1); cmp ecx,bound
@@ -724,7 +723,7 @@ impl RangeCheck {
     /// helper whose address the slot at `helper` holds, with the guest
     /// address in RCX and `access` in the two bytes after the call; the
     /// helper returns past them with the host address of the access in RAX,
-    /// which skips the mask (docs/design/system.md, "Host placement").
+    /// which skips the mask.
     pub(crate) fn emit_translated(self, code: &mut Code, helper: u64, access: Access) {
         use asm::{
             Gpr::{Rax, Rcx},

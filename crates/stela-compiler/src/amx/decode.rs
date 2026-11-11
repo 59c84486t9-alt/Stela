@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn published_accelerate_examples_decode() {
-        // SET (docs/research/amx.md), CLR and FMA32 X10.
+        // SET, CLR and FMA32 X10.
         let set = decode(PC, 0x0020_1220).unwrap().unwrap();
         assert_eq!(set.operation, AmxOperation::Set);
         let clear = decode(PC, 0x0020_1221).unwrap().unwrap();
