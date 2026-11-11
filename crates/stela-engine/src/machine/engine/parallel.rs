@@ -363,6 +363,9 @@ pub struct Counts {
     /// GENTER completed natively and by the engine, then GEXIT's
     /// ([`super::Statistics::native_transitions`]).
     pub transitions: [u64; 4],
+    /// Why GENTER, then GEXIT, took the engine path
+    /// ([`super::Statistics::transition_misses`]).
+    pub transition_misses: [u64; 2 * super::transitions::miss::REASONS],
     pub itlb_sources: [u64; 12],
     /// Its stamped transfers ([`chain::StampCount`]'s order), the exits it
     /// gave a stamped tail, then how many exits had one when it last looked.
@@ -1810,6 +1813,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 statistics.native_transitions[stela_compiler::x86_64::transition::GUARDED_EXIT],
                 statistics.engine_transitions[stela_compiler::x86_64::transition::GUARDED_EXIT],
             ],
+            transition_misses: {
+                let mut misses = [0; 2 * super::transitions::miss::REASONS];
+                misses.copy_from_slice(statistics.transition_misses.as_flattened());
+                misses
+            },
             stamped: {
                 let mut stamped = [0; chain::STAMP_COUNTS + 2];
                 stamped[..chain::STAMP_COUNTS].copy_from_slice(&self.chain.stamp_counts());

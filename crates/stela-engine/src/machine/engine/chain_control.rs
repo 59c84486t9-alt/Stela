@@ -141,6 +141,11 @@ impl Owner {
             core::ptr::addr_of!((*self.storage.control.get()).observed_interrupt_epoch).read()
         }
     }
+    /// Whether a notification came since the owner last acknowledged one,
+    /// as a native GEXIT compares them.
+    pub(super) fn interrupt_moved(&self) -> bool {
+        self.storage.interrupt_epoch().load(Ordering::Acquire) != self.acknowledged_interrupt()
+    }
     pub(super) fn set_table(&mut self, table: u64, itlb: u64, masks: [u32; 2]) {
         // SAFETY: the sole owner writes these non-budget fields outside native execution.
         unsafe {

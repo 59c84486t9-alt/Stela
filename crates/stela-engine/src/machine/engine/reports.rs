@@ -546,6 +546,9 @@ pub struct Statistics {
     pub native_transitions: [u64; transition::KINDS],
     /// Those the engine completed, by the same kinds.
     pub engine_transitions: [u64; transition::KINDS],
+    /// Why GENTER, then GEXIT, at EL2 took the engine path, by
+    /// `transitions::miss` reason.
+    pub transition_misses: [[u64; super::transitions::miss::REASONS]; 2],
     /// AMX moves completed inside blocks (`x86_64::amx_transfer`) and by
     /// the engine's service.
     pub amx_moves: [u64; 2],
@@ -645,6 +648,7 @@ impl core::ops::AddAssign for Statistics {
             transfer_ticks,
             native_transitions,
             engine_transitions,
+            transition_misses,
             line_queries,
             line_ticks,
             compiled_instructions,
@@ -713,6 +717,14 @@ impl core::ops::AddAssign for Statistics {
             *total += count;
         }
         for (total, count) in self.engine_transitions.iter_mut().zip(engine_transitions) {
+            *total += count;
+        }
+        for (total, count) in self
+            .transition_misses
+            .as_flattened_mut()
+            .iter_mut()
+            .zip(transition_misses.as_flattened())
+        {
             *total += count;
         }
         for (total, count) in self.lookup_misses.iter_mut().zip(lookup_misses) {

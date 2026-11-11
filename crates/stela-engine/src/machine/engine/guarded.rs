@@ -27,6 +27,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             });
             self.degrade(requirement);
         }
+        self.note_transition_miss(transition::GUARDED_ENTER);
         let trace = self.monitor_before(MonitorKind::GuardedEnter { immediate });
         let start = self.transition_start();
         if self.cpu.guarded_enter(immediate).is_err() {
@@ -51,6 +52,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let bank = &self.cpu.apple.guarded[usize::from(self.cpu.pstate.el) - 1];
             self.guest_entry(bank.spsr, bank.aspsr & ASPSR_GUARDED != 0);
         }
+        self.note_transition_miss(transition::GUARDED_EXIT);
         let trace = self.monitor_before(MonitorKind::GuardedExit);
         let start = self.transition_start();
         let banked = (self.cpu.pstate.el != 0).then(|| {

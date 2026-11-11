@@ -27,6 +27,26 @@ pub(super) fn transition_word(word: u32) -> Option<(usize, u8)> {
     }
 }
 
+/// Why GENTER or GEXIT took the engine path, as its thunk would have
+/// decided there ([`Machine::note_transition_miss`]): no record was ever made
+/// from the state; one was, but the table's generation moved since; it was
+/// made for another frame or stack selection; a deadline was due or none
+/// was known (GEXIT); an interrupt notification came (GEXIT); the operands
+/// the record fixes differ; an interrupt waiting would be unmasked (GEXIT);
+/// or the record held, so no thunk ran (none installed, the block ran in
+/// the engine, or the host's root moved).
+pub mod miss {
+    pub const NEVER: usize = 0;
+    pub const FORGOTTEN: usize = 1;
+    pub const FRAME: usize = 2;
+    pub const DEADLINE: usize = 3;
+    pub const EPOCH: usize = 4;
+    pub const CHECK: usize = 5;
+    pub const INTERRUPT: usize = 6;
+    pub const OTHER: usize = 7;
+    pub const REASONS: usize = 8;
+}
+
 /// [`dynamic_branch`] of a block ending with a native transition: its
 /// thunk's exit to the target, which sets no BTYPE.
 pub(super) fn transition_branch(word: u32) -> Option<(ExitKind, Option<u8>)> {
@@ -57,6 +77,69 @@ pub(super) struct Start {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
+    /// GENTER (`kind` [`GUARDED_ENTER`]) or GEXIT is about to take the
+    /// engine path: count why ([`miss`]), in
+    /// [`Statistics::transition_misses`], GENTER's first. Only EL2's make
+    /// records, so only theirs count.
+    pub(super) fn note_transition_miss(&mut self, kind: usize) {
+        if self.cpu.pstate.el != 2 {
+            return;
+        }
+        let exit = kind == GUARDED_EXIT;
+        let table = &self.mirrors.transitions;
+        let record = table.records[self.mirror_state()][kind];
+        let frame = &self.cpu.state as *const GuestState as u64;
+        let reason = if record.generation == 0 {
+            miss::NEVER
+        } else if record.generation != table.generation {
+            miss::FORGOTTEN
+        } else if record.frame != frame || record.selected != u64::from(self.cpu.pstate.sp) {
+            miss::FRAME
+        } else if exit
+            && self.mirrors.lines_until != u64::MAX
+            && (self.mirrors.lines_until == 0 || self.now() >= self.mirrors.lines_until)
+        {
+            miss::DEADLINE
+        } else if exit && self.chain.interrupt_moved() {
+            miss::EPOCH
+        } else if self.transition_operands_differ(&record, exit) {
+            miss::CHECK
+        } else if exit && self.transition_unmasks() {
+            miss::INTERRUPT
+        } else {
+            miss::OTHER
+        };
+        self.statistics.transition_misses[usize::from(exit)][reason] += 1;
+    }
+
+    /// Whether the operands `record` fixes differ from the PE's, as the
+    /// thunk checks them: GEXIT's ASPSR guarded bit and SPSR's fixed bits,
+    /// GENTER's PAN.
+    fn transition_operands_differ(&self, record: &Record, exit: bool) -> bool {
+        if !exit {
+            return u64::from(self.cpu.pstate.pan) != record.check;
+        }
+        let Some(bank) = usize::from(self.cpu.pstate.el)
+            .checked_sub(1)
+            .and_then(|level| self.cpu.apple.guarded.get(level))
+        else {
+            return true;
+        };
+        bank.aspsr & 1 != record.aspsr_value || bank.spsr & record.check_mask != record.check
+    }
+
+    /// Whether GEXIT would unmask an interrupt waiting at native entry.
+    fn transition_unmasks(&self) -> bool {
+        let Some(bank) = usize::from(self.cpu.pstate.el)
+            .checked_sub(1)
+            .and_then(|level| self.cpu.apple.guarded.get(level))
+        else {
+            return false;
+        };
+        let masks = bank.spsr >> 6 & 3;
+        u64::from(self.cpu.state.pending) & 3 & !masks != 0
+    }
+
     pub(super) fn transition_start(&self) -> Start {
         Start {
             pstate: self.cpu.pstate,
@@ -435,6 +518,47 @@ pub(super) mod tests {
         machine.cpu.pstate.dit = true;
         machine.cpu.state.sp = 0xffff_fe00_1234_5670;
         machine.cpu.apple.guarded[1].sp = 0xffff_fe00_0777_0000;
+    }
+
+    /// Engine-path GEXITs count why their thunk would not have completed
+    /// them: no record yet, a record forgotten, a deadline, a notification,
+    /// a changed operand, or none (no thunk ran).
+    #[test]
+    fn engine_path_transitions_count_their_miss() {
+        let pc = BASE + 0x100;
+        let mut machine = gxf2();
+        prepare(&mut machine, pc);
+        let gexit = |machine: &mut Machine<FakeHost, NoDevices>| {
+            machine.cpu.pc = pc;
+            machine.system_instruction(GENTER_WORD).unwrap();
+            machine.finish_transition(1);
+            machine.system_instruction(GEXIT).unwrap();
+            machine.finish_transition(1);
+            machine.statistics.transition_misses[1]
+        };
+        let mut expected = [0; miss::REASONS];
+        expected[miss::NEVER] += 1;
+        assert_eq!(gexit(&mut machine), expected);
+        assert_eq!(
+            machine.statistics.transition_misses[0][miss::NEVER],
+            1,
+            "GENTER too"
+        );
+        machine.mirrors.lines_until = u64::MAX;
+        expected[miss::OTHER] += 1;
+        assert_eq!(gexit(&mut machine), expected);
+        machine.mirrors.lines_until = 0;
+        expected[miss::DEADLINE] += 1;
+        assert_eq!(gexit(&mut machine), expected);
+        machine.mirrors.lines_until = u64::MAX;
+        machine.chain.weak_storage().upgrade().unwrap().notify();
+        expected[miss::EPOCH] += 1;
+        assert_eq!(gexit(&mut machine), expected);
+        let epoch = machine.chain.snapshot().interrupt_epoch;
+        machine.chain.acknowledge_interrupt(epoch);
+        machine.mirrors.transitions.forget();
+        expected[miss::FORGOTTEN] += 1;
+        assert_eq!(gexit(&mut machine), expected);
     }
 
     /// Native GENTER and GEXIT from the records the engine path left change
