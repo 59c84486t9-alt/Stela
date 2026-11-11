@@ -213,7 +213,7 @@ fn a_base_system_root_needs_a_file_image_boot_argument() {
 #[test]
 fn a_memory_device_root_cannot_pivot_to_an_image() {
     let image = "rp0=file:///usr/standalone/firmware/arm64eBaseSystem.dmg";
-    // The rec-r5 boot-args: APFS took md0 again for the image root.
+    // Boot-args a recoveryOS boot used: APFS took md0 again for the image root.
     let error = require_image_boot(&format!("-v rd=md0 {image}"))
         .unwrap_err()
         .to_string();
