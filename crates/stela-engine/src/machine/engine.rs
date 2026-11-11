@@ -75,6 +75,7 @@ pub use device_write::{
 };
 mod block_index;
 mod board;
+mod page_sets;
 mod processors;
 mod recovery;
 mod scalable;
@@ -82,7 +83,6 @@ mod shared_memory;
 pub mod step_timing;
 mod stored;
 mod system;
-mod tagged_pages;
 mod tags;
 mod unprivileged;
 mod watch;

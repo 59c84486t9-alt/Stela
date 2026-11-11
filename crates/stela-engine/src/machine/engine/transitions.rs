@@ -366,6 +366,7 @@ mod tests {
         machine.mirrors.enter(machine.cpu.pstate);
         machine.cpu.state.pan = u64::from(machine.cpu.pstate.pan);
         machine.cpu.state.anchors = machine.anchors();
+        machine.cpu.state.lower_limit = machine.lower_limit();
         let code = stela_compiler::x86_64::pinned::entered(code);
         assert!(code.len() <= PAGE);
         // SAFETY: private anonymous memory, RX after the copy, unmapped after
@@ -399,12 +400,14 @@ mod tests {
     /// Everything a transition changes, for comparison.
     fn observed(machine: &Machine<FakeHost, NoDevices>) -> alloc::string::String {
         let cpu = &machine.cpu;
-        // The frame's copies of DAIF and PAN and its anchors serve native
-        // runs alone: PSTATE holds the masks and PAN between them.
+        // The frame's copies of DAIF and PAN, its anchors and its lower
+        // limit serve native runs alone: PSTATE holds the masks and PAN
+        // between them, and the placement holds the limit.
         let state = GuestState {
             daif: 0,
             pan: 0,
             anchors: Default::default(),
+            lower_limit: Default::default(),
             ..cpu.state.clone()
         };
         alloc::format!(

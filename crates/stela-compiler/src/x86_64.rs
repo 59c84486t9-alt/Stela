@@ -222,6 +222,11 @@ fn frame(offset: u32) -> asm::Mem {
     asm::Mem::base_disp32(asm::Gpr::Rdi, offset as i32)
 }
 
+/// The frame's end of the native lower range ([`RangeCheck::one_sided`]).
+fn lower_limit() -> asm::Mem {
+    frame(core::mem::offset_of!(crate::GuestState, lower_limit) as u32)
+}
+
 /// `[rax]`: the access address the memory emitters compute.
 fn accessed() -> asm::Mem {
     asm::Mem::base(asm::Gpr::Rax, 0)
@@ -547,6 +552,10 @@ pub struct RangeCheck {
     pub shift: u8,
     pub bias: u8,
     pub bound: u8,
+    /// The EL0 form ([`Self::one_sided`]): `cmp rax,[lower_limit]` and the
+    /// mask on above-or-equal, passing the lower range alone.
+    #[serde(default)]
+    pub one_sided: bool,
 }
 
 /// A four-level check's slices of 2 TiB.
@@ -563,6 +572,7 @@ impl RangeCheck {
         shift: 48,
         bias: 1,
         bound: 1,
+        one_sided: false,
     };
 
     /// Four-level paging with Stela's window and guard in the `slices`
@@ -578,7 +588,42 @@ impl RangeCheck {
             shift: SLICE_SHIFT,
             bias: HALF_SLICES - slices,
             bound: IMM8_MAX - slices,
+            one_sided: false,
         }
+    }
+
+    /// The end of the native lower range, `[0, limit)`: 2^48 with LA57
+    /// (PML5 entry 0), 2^47 on a four-level host (its 64 slices of the
+    /// lower half). Every address below it passes the two-sided check.
+    pub const fn lower_limit(self) -> u64 {
+        if self.shift == SLICE_SHIFT {
+            (HALF_SLICES as u64) << SLICE_SHIFT
+        } else {
+            1 << self.shift
+        }
+    }
+
+    /// This check in its EL0 form if `el0`: an address passes only below
+    /// [`Self::lower_limit`], which the engine keeps in the frame
+    /// (`GuestState::lower_limit`), so one compare with the frame and the
+    /// mask replace the copy, shift, bias and compare. It passes a subset
+    /// of what the two-sided check passes, so no access reaches more than
+    /// before; an EL0 access to the upper range fails it, and the engine
+    /// takes its fault or runs its page with the two-sided check.
+    pub const fn one_sided(self, el0: bool) -> Self {
+        Self {
+            one_sided: el0,
+            ..self
+        }
+    }
+
+    /// Whether [`Self::emit`] passes `address`.
+    pub const fn passes(self, address: u64) -> bool {
+        if self.one_sided {
+            return address < self.lower_limit();
+        }
+        let slice = ((address as i64) >> self.shift) as u32;
+        slice.wrapping_add(self.bias as u32) <= self.bound as u32
     }
 
     /// Whether the fields fit the check's encoding: a shift of an address
@@ -609,6 +654,11 @@ impl RangeCheck {
     pub(crate) fn emit_base(self, code: &mut Code, base: asm::Gpr) {
         use asm::{Alu, Gpr::Rcx, ShiftOp, Size};
         let mut asm = code.asm();
+        if self.one_sided {
+            asm.alu_load(Alu::Cmp, Size::Qword, base, lower_limit());
+            code.check_failure(asm::Cond::Ae);
+            return;
+        }
         asm.mov(Size::Qword, Rcx, base);
         asm.shift_imm(ShiftOp::Sar, Size::Qword, Rcx, self.shift);
         if self.bias == OPCODE_INC {
@@ -642,6 +692,23 @@ impl RangeCheck {
     /// more than a move. Elsewhere it fails by UD2.
     pub(crate) fn emit(self, code: &mut Code) {
         let mut asm = code.asm();
+        if self.one_sided {
+            // `cmp rax,[lower_limit]; cmovae rax,[unreachable]`, with the
+            // UD2 between them outside pinned code.
+            asm.alu_load(
+                asm::Alu::Cmp,
+                asm::Size::Qword,
+                asm::Gpr::Rax,
+                lower_limit(),
+            );
+            if !asm.is_pinned() {
+                let passed = asm.jcc8(asm::Cond::B);
+                asm.guest_check();
+                asm.bind(passed);
+            }
+            unreachable_if(&mut asm, asm::Cond::Ae);
+            return;
+        }
         if asm.is_pinned() {
             self.compare(&mut asm);
             unreachable_if(&mut asm, asm::Cond::A);
@@ -1507,5 +1574,7 @@ impl Emitter {
     }
 }
 
+#[cfg(test)]
+mod range_check_tests;
 #[cfg(test)]
 mod tests;

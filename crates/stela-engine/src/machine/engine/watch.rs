@@ -418,6 +418,38 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     }
                 };
             }
+            // An EL0 block's one-sided check passes the lower range alone
+            // (`RangeCheck::one_sided`): an access to the upper one faults
+            // as its translation says, or its page runs again with the
+            // two-sided check.
+            let variant = self.block_variant(index);
+            let range = variant.checks.range;
+            if range.one_sided
+                && !variant.translated
+                && variant.checks.top_byte.strip(access.address) >= range.lower_limit()
+            {
+                let kind = if write {
+                    mmu::Access::Write
+                } else {
+                    mmu::Access::Read
+                };
+                return match self.translate_data(access.address, kind) {
+                    mmu::Outcome::Fault(fault) => {
+                        self.timed_check(step_timing::Check::Abort);
+                        self.data_abort(access.address, fault, write, false)
+                    }
+                    mmu::Outcome::Unsupported(unsupported) => {
+                        Err(self.unsupported(RequirementKind::Translation(unsupported)))
+                    }
+                    mmu::Outcome::Mapped(_) => {
+                        let block = &self.code.blocks[index];
+                        let physical = block.physical.wrapping_add(pc.wrapping_sub(block.pc));
+                        self.learn_two_sided_page(physical, true);
+                        self.timed_check(step_timing::Check::Translated);
+                        Ok(())
+                    }
+                };
+            }
         }
         Err(self.unsupported(RequirementKind::Native(
             "a native address check failed where no access faults",

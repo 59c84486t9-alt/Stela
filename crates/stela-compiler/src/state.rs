@@ -105,7 +105,26 @@ pub struct GuestState {
     pub pan: u64,
     /// Set by the engine as it enters native code.
     pub anchors: Anchors,
+    /// The end of the guest's native lower range on the host's placement
+    /// (`x86_64::RangeCheck::lower_limit`), which an EL0 block's one-sided
+    /// check compares access addresses with. Set by the engine as it
+    /// enters native code; zero fails every such check.
+    pub lower_limit: Limit,
 }
+
+/// [`GuestState::lower_limit`]: the host's, no part of the guest's state, so
+/// any two compare equal.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Limit(pub u64);
+
+impl PartialEq for Limit {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Limit {}
 
 impl GuestState {
     /// Non-canonical at either paging depth, with room for what a check's
@@ -130,6 +149,7 @@ impl Default for GuestState {
             unreachable: Self::UNREACHABLE,
             pan: 0,
             anchors: Anchors::default(),
+            lower_limit: Limit(0),
         }
     }
 }
@@ -143,9 +163,9 @@ mod tests {
     #[test]
     fn layout_matches_native_abi() {
         for profile in [BlockProfile::ORDINARY, BlockProfile::new(Features::LEAF)] {
-            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v11-"));
+            assert!(profile.abi().starts_with("x86_64-sysv-guest-state-v12-"));
         }
-        assert_eq!(size_of::<GuestState>(), 888);
+        assert_eq!(size_of::<GuestState>(), 896);
         assert_eq!(align_of::<GuestState>(), 8);
         assert_eq!(offset_of!(GuestState, x), 0);
         assert_eq!(offset_of!(GuestState, sp), 248);
@@ -157,6 +177,7 @@ mod tests {
         assert_eq!(offset_of!(GuestState, fpsr), 780);
         assert_eq!(offset_of!(GuestState, unreachable), 808);
         assert_eq!(offset_of!(GuestState, pan), 816);
+        assert_eq!(offset_of!(GuestState, lower_limit), 888);
     }
 
     #[test]

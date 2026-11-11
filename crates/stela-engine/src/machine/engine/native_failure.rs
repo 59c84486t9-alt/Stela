@@ -1,7 +1,7 @@
 //! Faults and terminal failures of native code, and translated-access fallback
 //! runs.
 
-use super::tagged_pages::Inserted;
+use super::page_sets::Inserted;
 use super::*;
 use stela_compiler::x86_64::TopByte;
 
@@ -406,7 +406,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if self.page_tagged(physical) {
             variant.checks = variant.checks.with_top_byte(self.regime_top_byte());
         }
+        if variant.checks.range.one_sided && self.code.two_sided.contains(physical) {
+            variant.checks.range = variant.checks.range.one_sided(false);
+        }
         variant
+    }
+
+    /// An EL0 access of the fetch page holding `physical`, by a block of
+    /// the one-sided check if `one_sided`, reached the upper range, which
+    /// that check refuses and its translation maps: the page goes in the
+    /// board's two-sided set and its blocks go, so its next fetch compiles
+    /// them with the two-sided check (`RangeCheck::one_sided`). A page the
+    /// set holds already loses its blocks again only for a one-sided block.
+    pub(super) fn learn_two_sided_page(&mut self, physical: u64, one_sided: bool) {
+        let page = physical & !(FETCH_PAGE - 1);
+        match self.code.two_sided.insert(page) {
+            Inserted::New => self.statistics.two_sided_pages += 1,
+            Inserted::Present if one_sided => {}
+            Inserted::Present | Inserted::Full => return,
+        }
+        self.invalidate_code_page(page);
     }
 
     /// The halves whose data addresses the current translation regime
@@ -428,7 +447,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// (`stela_compiler::x86_64::TopByte`) and so stay native. A page the
     /// set holds already loses its blocks again only for a plain block,
     /// which a PE compiled from a fetch that came before the set took the
-    /// page. Past the set's capacity (`tagged_pages::CAPACITY`) a tagged
+    /// page. Past the set's capacity (`page_sets::CAPACITY`) a tagged
     /// access keeps its retry.
     pub(super) fn learn_tagged_page(&mut self, physical: u64, plain: bool) {
         let page = physical & !(FETCH_PAGE - 1);

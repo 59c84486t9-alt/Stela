@@ -3034,6 +3034,16 @@ fn hot_exits_out_of_the_page_get_stamped_tails() {
         kind: kind as u64,
     };
     machine.host.exits = vec![exit(far, ExitKind::Direct), exit(base, ExitKind::Return)];
+    // Other exits hold the first cells, so this exit's cell number takes a
+    // 32-bit displacement in its stamp's address, as a booted guest's do.
+    {
+        let mut cache = machine.code.cache();
+        for other in 0..300 {
+            cache
+                .targets
+                .link_cell(0x7_0000 + 8 * other, 0x40_0000, None);
+        }
+    }
     machine.step().unwrap();
     machine.step().unwrap();
     let first = &machine.code.blocks[0];
@@ -3046,6 +3056,7 @@ fn hot_exits_out_of_the_page_get_stamped_tails() {
             cache.targets.stamped_cells(),
         )
     };
+    assert!(number > 256, "{number}");
     // Cold: the sweep leaves it.
     let patches = machine.host.patches.len();
     for _ in 0..chain::STAMPED_CELLS / 256 {
@@ -8873,6 +8884,7 @@ fn upper_occupancy_lists_the_mapped_level_one_ranges_and_outermost_blocks() {
 mod arena;
 mod exits;
 mod floating_point_traps;
+mod one_sided;
 mod process_switching;
 mod pstate_features;
 mod recovery;

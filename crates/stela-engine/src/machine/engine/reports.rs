@@ -590,6 +590,10 @@ pub struct Statistics {
     /// Fetch pages that went to the tagged variant: an access of theirs
     /// had a top byte the regime ignores ([`Machine::learn_tagged_page`]).
     pub tagged_pages: u64,
+    /// Fetch pages that went to the two-sided range check at EL0: an EL0
+    /// access of theirs reached a mapped upper-range address
+    /// ([`Machine::learn_two_sided_page`]).
+    pub two_sided_pages: u64,
     /// Operations answered with a degraded response; each distinct one is
     /// also reported once ([`Machine::take_unmodeled`]).
     pub degraded: u64,
@@ -666,6 +670,7 @@ impl core::ops::AddAssign for Statistics {
             prediction_isolations,
             translated_pages,
             tagged_pages,
+            two_sided_pages,
             degraded,
             sleep_ticks,
             spin_ticks,
@@ -782,6 +787,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.prediction_isolations, prediction_isolations),
             (&mut self.translated_pages, translated_pages),
             (&mut self.tagged_pages, tagged_pages),
+            (&mut self.two_sided_pages, two_sided_pages),
             (&mut self.degraded, degraded),
             (&mut self.sleep_ticks, sleep_ticks),
             (&mut self.spin_ticks, spin_ticks),

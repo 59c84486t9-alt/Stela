@@ -7,17 +7,17 @@ use crate::machine::mmu;
 use stela_compiler::block::{ExitKind, RecoverySiteKind};
 use stela_compiler::x86_64::TopByte;
 
-const LDR: u32 = 0xf940_0020; // ldr x0, [x1]
-const ADD: u32 = 0x9100_0400; // add x0, x0, #1
-const TCR_TBI0: u64 = 1 << 37;
-const DATA: u64 = BASE + 0x1000;
-const TAG: u64 = 0x5a << 56;
+pub(super) const LDR: u32 = 0xf940_0020; // ldr x0, [x1]
+pub(super) const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+pub(super) const TCR_TBI0: u64 = 1 << 37;
+pub(super) const DATA: u64 = BASE + 0x1000;
+pub(super) const TAG: u64 = 0x5a << 56;
 /// Past the 1 GiB block `normal_memory` maps: a level 1 Translation fault.
 const UNMAPPED: u64 = BASE + 0x4000_0010;
 /// A Data Abort at the current EL, read, Translation fault at level 1.
 const TRANSLATION_L1_READ: u64 = 0x9600_0005;
 /// `mov rcx,rax; shl rcx,8; sar rcx,8; and rax,rcx`: TBI0's strip.
-const LOWER_STRIP: [u8; 14] = [
+pub(super) const LOWER_STRIP: [u8; 14] = [
     0x48, 0x89, 0xc1, 0x48, 0xc1, 0xe1, 8, 0x48, 0xc1, 0xf9, 8, 0x48, 0x21, 0xc8,
 ];
 
@@ -38,7 +38,7 @@ fn setup(tbi0: bool) -> Machine<FakeHost, NoDevices> {
     machine
 }
 
-fn end(next_pc: u64) -> NativeExit {
+pub(super) fn end(next_pc: u64) -> NativeExit {
     NativeExit::Exit {
         next_pc,
         kind: ExitKind::Fallthrough as u64,
@@ -46,7 +46,7 @@ fn end(next_pc: u64) -> NativeExit {
 }
 
 /// The native fault of the access at `offset` of the block at BASE.
-fn fault(offset: usize, cause: FaultCause, address: u64) -> NativeExit {
+pub(super) fn fault(offset: usize, cause: FaultCause, address: u64) -> NativeExit {
     NativeExit::Fault(NativeFault {
         origin: crate::machine::NativeFaultOrigin::Exception,
         trap: if matches!(cause, FaultCause::NonCanonical) {
@@ -66,7 +66,7 @@ fn fault(offset: usize, cause: FaultCause, address: u64) -> NativeExit {
 
 /// Run from BASE with X1 = `base`, the host answering with `exits`, all of
 /// which the step must take.
-fn run(machine: &mut Machine<FakeHost, NoDevices>, base: u64, exits: Vec<NativeExit>) {
+pub(super) fn run(machine: &mut Machine<FakeHost, NoDevices>, base: u64, exits: Vec<NativeExit>) {
     machine.cpu.pc = BASE;
     machine.cpu.state.x[1] = base;
     machine.host.exits = exits;
@@ -76,7 +76,9 @@ fn run(machine: &mut Machine<FakeHost, NoDevices>, base: u64, exits: Vec<NativeE
 
 /// The block at BASE, its variant's top byte, its access's fault offset and
 /// its installed code.
-fn block_at_base(machine: &mut Machine<FakeHost, NoDevices>) -> (TopByte, usize, Vec<u8>) {
+pub(super) fn block_at_base(
+    machine: &mut Machine<FakeHost, NoDevices>,
+) -> (TopByte, usize, Vec<u8>) {
     let offset = native_fault_site(machine, BASE, RecoverySiteKind::GuestAccess);
     let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
         panic!("block")
@@ -92,7 +94,7 @@ fn has_strip(code: &[u8]) -> bool {
 }
 
 /// The syndrome and fault address of the exception the last step took.
-fn taken(machine: &Machine<FakeHost, NoDevices>) -> (u64, u64) {
+pub(super) fn taken(machine: &Machine<FakeHost, NoDevices>) -> (u64, u64) {
     (
         machine.cpu.read(SystemRegister::ESR_EL1),
         machine.cpu.read(SystemRegister::FAR_EL1),

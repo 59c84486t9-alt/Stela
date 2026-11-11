@@ -188,7 +188,10 @@ pub(super) struct Code {
     /// ([`super::code_cache::STEP_VISITS`]; tests take fewer).
     pub(super) step_visits: u64,
     /// The fetch pages its PEs compile in the tagged variant.
-    pub(super) tagged: super::tagged_pages::TaggedPages,
+    pub(super) tagged: super::page_sets::PageSet,
+    /// The fetch pages its PEs compile with the two-sided range check at
+    /// EL0.
+    pub(super) two_sided: super::page_sets::PageSet,
 }
 
 /// A part's blocks being taken away page by page, in steps of bounded
@@ -643,6 +646,7 @@ impl Code {
             retire_pending: AtomicBool::new(false),
             step_visits: super::code_cache::STEP_VISITS,
             tagged: Default::default(),
+            two_sided: Default::default(),
         }
     }
 

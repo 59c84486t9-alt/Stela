@@ -1,20 +1,21 @@
-//! The fetch pages a board compiles in the tagged variant
-//! (`Machine::learn_tagged_page`): one set for every PE of the board, so
-//! the first PE whose access had a top byte the regime ignores switches the
-//! page for all of them, and the page's blocks are forgotten once. Fetches
-//! read it without a lock: an open-addressed table of physical frame
-//! numbers, filled by compare-and-swap, never emptied.
+//! Sets of fetch pages a board compiles in a variant of their own: the
+//! tagged variant (`Machine::learn_tagged_page`) and the two-sided range
+//! check at EL0 (`Machine::learn_two_sided_page`). One set for every PE of
+//! the board, so the first PE that needs the variant switches the page for
+//! all of them, and the page's blocks are forgotten once. Fetches read it
+//! without a lock: an open-addressed table of physical frame numbers,
+//! filled by compare-and-swap, never emptied.
 use alloc::{boxed::Box, vec::Vec};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-/// The most pages the set takes; past them a tagged access keeps its retry.
+/// The most pages a set takes; past them an access keeps its engine path.
 pub(super) const CAPACITY: usize = 1 << 14;
 /// Slots: twice the capacity, so probes stay short.
 const SLOTS: usize = CAPACITY * 2;
 /// The page size the set keys by (the fetch page).
 const PAGE_SHIFT: u32 = 12;
 
-/// What [`TaggedPages::insert`] did.
+/// What [`PageSet::insert`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Inserted {
     /// The page is new to the set.
@@ -25,14 +26,14 @@ pub(super) enum Inserted {
     Full,
 }
 
-pub(super) struct TaggedPages {
+pub(super) struct PageSet {
     /// Frame number plus one; 0 is an empty slot.
     slots: Box<[AtomicU64]>,
     /// Pages held, read first so a board with none pays one load.
     count: AtomicUsize,
 }
 
-impl Default for TaggedPages {
+impl Default for PageSet {
     fn default() -> Self {
         Self {
             slots: (0..SLOTS)
@@ -44,7 +45,7 @@ impl Default for TaggedPages {
     }
 }
 
-impl TaggedPages {
+impl PageSet {
     fn key(physical: u64) -> u64 {
         (physical >> PAGE_SHIFT) + 1
     }
@@ -112,7 +113,7 @@ mod tests {
 
     #[test]
     fn pages_go_in_once_and_the_set_stops_at_its_capacity() {
-        let pages = TaggedPages::default();
+        let pages = PageSet::default();
         assert!(!pages.contains(0x1000));
         assert_eq!(pages.insert(0x1234), Inserted::New);
         // Keyed by the 4 KiB page.
@@ -132,7 +133,7 @@ mod tests {
 
     #[test]
     fn pes_racing_on_one_page_see_one_new_insert() {
-        let pages = std::sync::Arc::new(TaggedPages::default());
+        let pages = std::sync::Arc::new(PageSet::default());
         for round in 0..64u64 {
             let page = round << PAGE_SHIFT;
             let threads: Vec<_> = (0..4)

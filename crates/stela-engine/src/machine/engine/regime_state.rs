@@ -187,7 +187,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     .field(SystemRegister::ID_AA64PFR0_EL1, CSV3_SHIFT, 4)
                     != 0,
             )
-            .with_range(self.host.placement().check())
+            // EL0's one-sided check: EL0 code addresses the lower range.
+            .with_range(
+                self.host
+                    .placement()
+                    .check()
+                    .one_sided(self.cpu.pstate.el == 0 && !self.cpu.pstate.guarded),
+            )
         })
     }
 

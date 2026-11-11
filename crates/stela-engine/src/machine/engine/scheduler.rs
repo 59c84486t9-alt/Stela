@@ -234,6 +234,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .min(self.block_limit.saturating_sub(next))
     }
 
+    /// The end of the native lower range, which EL0 blocks' one-sided
+    /// checks compare with (`GuestState::lower_limit`).
+    pub(super) fn lower_limit(&self) -> stela_compiler::Limit {
+        stela_compiler::Limit(self.host.placement().check().lower_limit())
+    }
+
     /// What native code finds this PE's data through.
     pub(super) fn anchors(&self) -> Anchors {
         let (pointer, memo) = self.pointer.anchors();
@@ -272,6 +278,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.state.pan = u64::from(self.cpu.pstate.pan);
         self.enter_amx_cell();
         self.cpu.state.anchors = self.anchors();
+        self.cpu.state.lower_limit = self.lower_limit();
         let entered = self.timing_start();
         // SAFETY: installed by this machine since the last discard, for the system-mode block ABI;
         // chained blocks and thunks too.
