@@ -38,12 +38,11 @@ const VERSION: &str = "libauthinstall-1104.0.9";
 pub const LOCAL_POLICY: [u8; 22] = stela_formats::local_policy::PAYLOAD;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
-/// Why an install needs the network, as setup and the boot screen say it.
-/// Every install does, even with macOS on the USB: the AP root ticket is
-/// signed during setup, but the Cryptex1 ticket and the recoveryOS
-/// LocalPolicy bind nonces the guest draws during the restore, and the
-/// LocalPolicy also binds the new Recovery volume's UUID, so no setup can
-/// ask for them ahead.
+/// Why an install without a complete set of staged answers ([`staged`])
+/// needs the network, as setup and the boot screen say it: the restore asks
+/// Apple's signing server for the recoveryOS root ticket, the Cryptex1
+/// ticket and the recoveryOS LocalPolicy, and a stick holds Apple's answers
+/// to them only when setup fetched them.
 pub fn network_reason(remote_image: bool) -> &'static str {
     match remote_image {
         false => {
@@ -55,9 +54,10 @@ pub fn network_reason(remote_image: bool) -> &'static str {
     }
 }
 
-/// The install's stop when the host network did not open: no install can
-/// finish without the signing server, so it stops before the restore
-/// changes the Mac's disk instead of at its first signing request.
+/// The install's stop when the host network did not open and the stick has
+/// no complete staged set: such an install cannot finish without the
+/// signing server, so it stops before the restore changes the Mac's disk
+/// instead of at its first signing request.
 pub fn no_network(remote_image: bool, problem: &str) -> String {
     format!(
         "{} {problem} The install did not start.",
@@ -576,6 +576,8 @@ fn guid(seed: &[u8]) -> String {
         &hex[20..32]
     )
 }
+
+pub mod staged;
 
 #[cfg(test)]
 mod tests;

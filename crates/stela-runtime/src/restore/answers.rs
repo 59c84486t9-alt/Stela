@@ -316,21 +316,7 @@ impl<R: ReadAt> Answers<R> {
         self.recovery_identity()
     }
     fn recovery_identity(&self) -> Result<Identity> {
-        let current = self.store.identity();
-        let matches: Vec<_> = self
-            .store
-            .identities()
-            .iter()
-            .filter(|i| {
-                i.variant().ok() == Some("macOS Customer")
-                    && i.number("ApChipID").ok() == current.number("ApChipID").ok()
-                    && i.number("ApBoardID").ok() == current.number("ApBoardID").ok()
-            })
-            .collect();
-        let [identity] = matches.as_slice() else {
-            return Err(Error::Invalid("recovery identity is missing/ambiguous"));
-        };
-        Ok((*identity).clone())
+        installed_identity(self.store.identities(), self.store.identity())
     }
     fn global_path_name(&self, identity: &Identity, args: &Value, cryptex: bool) -> Result<String> {
         let variant = manifest_variant(identity.info()?, args)?;
@@ -1127,6 +1113,22 @@ fn framed_binary(v: &Streamed) -> Result<Vec<Segment>> {
     segments.push(Segment::Bytes(tail));
     segments.insert(0, Segment::Bytes(length.to_be_bytes().to_vec()));
     Ok(segments)
+}
+/// The identity a restore installs and its recoveryOS requests name: the one
+/// `macOS Customer` identity of the restore identity's chip and board.
+pub fn installed_identity(identities: &[Identity], restore: &Identity) -> Result<Identity> {
+    let matches: Vec<_> = identities
+        .iter()
+        .filter(|i| {
+            i.variant().ok() == Some("macOS Customer")
+                && i.number("ApChipID").ok() == restore.number("ApChipID").ok()
+                && i.number("ApBoardID").ok() == restore.number("ApBoardID").ok()
+        })
+        .collect();
+    let [identity] = matches.as_slice() else {
+        return Err(Error::Invalid("recovery identity is missing/ambiguous"));
+    };
+    Ok((*identity).clone())
 }
 /// Whether a request is for the recoveryOS (`IsRecoveryOS`).
 fn recovery_os(args: &Value) -> Result<bool> {
