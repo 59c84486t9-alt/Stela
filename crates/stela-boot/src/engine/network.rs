@@ -19,7 +19,7 @@ use crate::Refusal;
 use crate::Result;
 use crate::output;
 use alloc::{format, rc::Rc, string::String, sync::Arc, vec::Vec};
-use core::cell::RefCell;
+use core::{cell::RefCell, mem::ManuallyDrop};
 use stela_contracts::refuse;
 use stela_drivers::{
     Clock,
@@ -42,14 +42,57 @@ const NO_ADAPTER: &str = "No supported network adapter. Connect wired Ethernet (
 const NO_LEASE: &str = "No automatic network address. Connect Ethernet or Wi-Fi to a network with DHCPv4 or IPv6 router advertisements, or set an address with `stela setup configure --ipv4 ADDRESS/PREFIX --usb USB` on another computer. Stateful DHCPv6 is unsupported.";
 
 /// The host's network adapters and the loader root they are reached in.
+/// Adapters left in it are dropped in that root.
 pub struct Links {
     pub devices: Vec<Adapter>,
     pub root: u64,
 }
 
+impl Drop for Links {
+    fn drop(&mut self) {
+        let devices = core::mem::take(&mut self.devices);
+        if !devices.is_empty() {
+            in_loader_root(self.root, || drop(devices));
+        }
+    }
+}
+
+/// Run `release` in the loader's root, the only root that maps the
+/// adapters' registers and DMA pages: dropping an adapter can drive its
+/// device (`Igc` stops its controller), and outside that root its first
+/// register access faults. A processor already inside the host drivers
+/// (`storage::open`'s probe) is in that root and holds their lock.
+fn in_loader_root(root: u64, release: impl FnOnce()) {
+    let _root = (!super::storage::host_drivers_held_here()).then(|| {
+        // SAFETY: the loader root `storage::open` captured, which maps the
+        // adapters; the processor's pinned record is active, as for every
+        // `RootLink` call.
+        unsafe { RestoreRoot::enter(root) }
+    });
+    release();
+}
+
 struct RootLink {
-    device: Adapter,
+    /// Dropped only in the loader's root ([`in_loader_root`]).
+    device: ManuallyDrop<Adapter>,
     root: u64,
+}
+
+impl RootLink {
+    fn new(device: Adapter, root: u64) -> Self {
+        Self {
+            device: ManuallyDrop::new(device),
+            root,
+        }
+    }
+}
+
+impl Drop for RootLink {
+    fn drop(&mut self) {
+        // SAFETY: taken once, here; the field is never used again.
+        let device = unsafe { ManuallyDrop::take(&mut self.device) };
+        in_loader_root(self.root, || drop(device));
+    }
 }
 
 impl Link for RootLink {
@@ -120,7 +163,7 @@ impl HostNetwork {
     /// Try each native adapter until DHCPv4 or IPv6 SLAAC provides a usable
     /// address. A failed adapter keeps its diagnostic while the next is tried.
     pub fn open(
-        links: Links,
+        mut links: Links,
         clock: Clock,
         handoff: &crate::handoff::Handoff,
         options: &stela_boot_core::options::System,
@@ -135,26 +178,22 @@ impl HostNetwork {
             }
         }
         let mut failures = Vec::new();
-        for device in links.devices {
-            let driver = device.driver();
-            let location = String::from(device.location());
+        // Each adapter is owned by a `RootLink` or still by `links` on every
+        // path out, so it is dropped in the loader's root.
+        while !links.devices.is_empty() {
+            let link = RootLink::new(links.devices.remove(0), links.root);
+            let driver = link.device.driver();
+            let location = String::from(link.device.location());
             output::arguments(format_args!(
                 "NETWORK candidate driver={driver} adapter={location} mac={}\n",
-                device.mac()
+                link.mac()
             ));
             crate::status::progress(&format!("adapter {location}"));
             let mut seed = [0u8; 8];
             crate::random::fill(&mut seed)
                 .map_err(|_| refuse!("secure host entropy is unavailable for the network stack"))?;
-            let mut stack = Stack::new(
-                RootLink {
-                    device,
-                    root: links.root,
-                },
-                Ticking(clock),
-                u64::from_le_bytes(seed),
-            )
-            .map_err(|error| refuse!("host network stack: {error}", %error))?;
+            let mut stack = Stack::new(link, Ticking(clock), u64::from_le_bytes(seed))
+                .map_err(|error| refuse!("host network stack: {error}", %error))?;
             if let Some(ipv4) = options.ipv4 {
                 stack
                     .set_ipv4(ipv4.address, ipv4.prefix, options.ipv4_gateway)
@@ -182,15 +221,9 @@ impl HostNetwork {
                 Err(error) => {
                     output::arguments(format_args!("NETWORK adapter {location} failed: {error}\n"));
                     failures.push(format!("{location}: {error}"));
-                    // Its driver's stop sequence is not proven on hardware:
-                    // on a PC an I226 without a cable ended it in an x86
-                    // exception, before the next adapter was tried. The
-                    // adapter keeps its rings and stays as it is, unused.
-                    output::arguments(format_args!(
-                        "UNSUPPORTED NETWORK adapter {location} is left initialized: stopping \
-                         an adapter that got no address is not supported\n"
-                    ));
-                    core::mem::forget(stack);
+                    // Its driver stops it, in the loader's root (`RootLink`).
+                    drop(stack);
+                    output::arguments(format_args!("NETWORK adapter {location} released\n"));
                 }
             }
         }
@@ -466,10 +499,7 @@ impl GuestNetwork {
             device.mac()
         ));
         Ok(Self {
-            link: RootLink {
-                device,
-                root: links.root,
-            },
+            link: RootLink::new(device, links.root),
             up: None,
             refused: false,
             received: alloc::collections::VecDeque::new(),
