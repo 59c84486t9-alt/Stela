@@ -1,6 +1,6 @@
 //! A small Clack-style front end to the same setup command used by scripts.
 use super::{
-    InstallImage, RECORD, Request, firmware,
+    InstallImage, Request, firmware,
     host::{self, Disk, Host, Removal},
     record::{self, Record},
     wifi,
@@ -138,7 +138,7 @@ pub(super) fn interrupted(host: &dyn Host, usb: &Disk) -> Option<(PathBuf, Recor
         Some(mount) => mount.clone(),
         None => host.mount(&partition.identifier).ok()?,
     };
-    let record = record::interrupted(&esp.join(RECORD))?;
+    let record = record::interrupted(host, &esp, &esp)?;
     Some((esp, record))
 }
 

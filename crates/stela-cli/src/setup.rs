@@ -766,7 +766,8 @@ impl Request {
         // A first setup that was interrupted is resumed by `setup`, not
         // added to.
         let configured = locate_esp(environment.host, &self.usb).is_ok_and(|esp| {
-            esp.join(RECORD).is_file() && record::interrupted(&esp.join(RECORD)).is_none()
+            esp.join(RECORD).is_file()
+                && record::interrupted(environment.host, &esp, &self.usb).is_none()
         });
         if configured && self.target.is_some() {
             ensure!(

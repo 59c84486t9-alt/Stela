@@ -2501,6 +2501,59 @@ fn interrupted_first_setup_prepares_a_damaged_bundle_again() {
     assert!(status.contains("No problems found."), "{status}");
 }
 
+/// Rewrite the record on the USB as another computer would have written it,
+/// with the USB's partitions mounted at `old_esp` and `old_volume`.
+fn written_elsewhere(f: &Fixture, old_esp: &Path, old_volume: &Path) {
+    let path = f.esp.join(RECORD);
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace(
+            stela_volume(f).to_str().unwrap(),
+            old_volume.to_str().unwrap(),
+        )
+        .replace(f.esp.to_str().unwrap(), old_esp.to_str().unwrap());
+    fs::write(&path, text).unwrap();
+}
+
+#[test]
+fn an_interrupted_setup_follows_the_usb_to_where_it_is_mounted_now() {
+    let mut f = fixture(64 * GIB, false);
+    add_installed_disk(&mut f, &[], &[]);
+    setup(&environment(&f.host), installed_command(&f)).unwrap();
+    let done = record(&f);
+    let old = f._dir.path().join("elsewhere");
+    let (old_esp, old_volume) = (old.join("EFI"), old.join("STELA"));
+    // Another USB's files where this one was mounted, which nothing touches.
+    for directory in [
+        bundle::BOOT_DIRECTORY,
+        "stela/install",
+        translations::DIRECTORY,
+    ] {
+        fs::create_dir_all(old_volume.join(directory).join(&done.build)).unwrap();
+        fs::write(old_volume.join(directory).join("other"), b"other").unwrap();
+    }
+    let decoy = snapshot(&old);
+    interrupt_setup(&f);
+    written_elsewhere(&f, &old_esp, &old_volume);
+    let mut dry = installed_command(&f);
+    dry.dry_run = true;
+    let plan = setup(&environment(&f.host), dry).unwrap();
+    assert!(plan.contains("resumes the setup interrupted"), "{plan}");
+    assert!(!plan.contains(old.to_str().unwrap()), "{plan}");
+    setup(&environment(&f.host), installed_command(&f)).unwrap();
+    let resumed = record(&f);
+    assert!(resumed.complete);
+    assert_eq!(resumed.volume, stela_volume(&f));
+    assert_eq!(resumed.media, done.media);
+    // Undone from another mount, it removes this USB's files only.
+    interrupt_setup(&f);
+    written_elsewhere(&f, &old_esp, &old_volume);
+    uninstall(&environment(&f.host), &f.esp, false).unwrap();
+    assert!(!stela_volume(&f).join("stela").exists());
+    assert!(!f.esp.join(RECORD).exists());
+    assert_eq!(snapshot(&old), decoy);
+}
+
 #[test]
 fn interrupted_disk_add_is_finished_by_repair_initialize_nor() {
     use stela_runtime::pc::boot_log::{LOG_BYTES, OFFSET};

@@ -525,7 +525,7 @@ pub(super) fn plan(
     // An interrupted first setup is resumed; any other is refused.
     let previous = match esp.join(RECORD).exists() {
         false => None,
-        true => match super::record::interrupted(&esp.join(RECORD)) {
+        true => match super::record::interrupted(host, &esp, &command.usb) {
             Some(previous) => Some(previous),
             None => bail!(
                 "{} is already set up ({}). Update it with {} or {}, or remove it with {} first",

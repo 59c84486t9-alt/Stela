@@ -21,7 +21,7 @@ pub(super) fn uninstall(
     let record: Option<Record> = esp
         .join(RECORD)
         .is_file()
-        .then(|| read_any_record(&esp.join(RECORD)))
+        .then(|| read_any_record(environment.host, &esp, usb))
         .transpose()?;
     let mut text = String::new();
     let mut removals: Vec<PathBuf> = Vec::new();

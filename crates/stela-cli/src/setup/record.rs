@@ -4,6 +4,7 @@ use super::{
     CHOICES_PATH, CHOOSER_SECONDS, Environment, InstallImage, LOADER_PATH, RECORD, addresses,
     bundle::{self, Kind},
     ecid::Ecid,
+    host::Host,
     image_is_remote, installed, locate_esp, machines, medium, restore_choice_name, translations,
     wifi,
 };
@@ -470,7 +471,11 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
         usb.display()
     );
     let mut value = header;
-    rebase(&mut value, &esp, usb);
+    rebase(
+        &mut value,
+        &esp,
+        &current_volume(environment.host, &esp, usb),
+    );
     let record: Record = serde_json::from_value(value)
         .with_context(|| format!("cannot read setup record {}", path.display()))?;
     ensure!(
@@ -482,11 +487,22 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
     Ok(record)
 }
 
+/// Where the data partition of the USB whose EFI partition is `esp` is
+/// mounted now: `usb` when it names it, else the FAT32 data partition beside
+/// the EFI partition, else the EFI partition itself, as for a setup with one
+/// partition.
+pub(super) fn current_volume(host: &dyn Host, esp: &Path, usb: &Path) -> PathBuf {
+    if usb != esp {
+        return usb.to_path_buf();
+    }
+    medium::locate(host, esp, None).map_or_else(|_| esp.to_path_buf(), |(volume, _)| volume)
+}
+
 /// Move every path of the record `value` to where the USB is mounted now:
-/// `esp`, and the data partition at `usb`. The record holds the paths of the
-/// computer and user that wrote it, and another user, computer or system
-/// mounts the same USB somewhere else.
-fn rebase(value: &mut serde_json::Value, esp: &Path, usb: &Path) {
+/// `esp`, and the data partition at `volume` ([`current_volume`]). The record
+/// holds the paths of the computer and user that wrote it, and another user,
+/// computer or system mounts the same USB somewhere else.
+fn rebase(value: &mut serde_json::Value, esp: &Path, volume: &Path) {
     let text = |key: &str| value[key].as_str().map(str::to_owned);
     let (Some(old_esp), Some(old_volume)) = (
         text("esp"),
@@ -495,11 +511,11 @@ fn rebase(value: &mut serde_json::Value, esp: &Path, usb: &Path) {
         return;
     };
     // A setup with one partition keeps everything on its EFI partition. With
-    // two, `--usb` names the data partition unless it names the EFI one,
-    // which leaves the data partition's paths as they were.
+    // two, the data partition's paths stay as they were only when no data
+    // partition is mounted now.
     let mut moves = Vec::new();
-    if old_volume != old_esp && usb != esp {
-        moves.push((old_volume, usb));
+    if old_volume != old_esp && volume != esp {
+        moves.push((old_volume, volume));
     }
     moves.push((old_esp, esp));
     fn walk(value: &mut serde_json::Value, moves: &[(String, &Path)]) {
@@ -541,8 +557,11 @@ fn rebase(value: &mut serde_json::Value, esp: &Path, usb: &Path) {
 /// which this `stela` has no kind for; their build directories are removed
 /// with the rest. Before schema 9 the data partition's files were under
 /// `EFI/`, which the record's volumes then gain, so every directory derived
-/// from them is where that setup wrote it.
-pub(super) fn read_any_record(path: &Path) -> Result<Record> {
+/// from them is where that setup wrote it. Its paths follow the USB to where
+/// it is mounted now ([`rebase`]): the EFI partition `esp`, and the data
+/// partition `usb` names or beside it.
+pub(super) fn read_any_record(host: &dyn Host, esp: &Path, usb: &Path) -> Result<Record> {
+    let path = &esp.join(RECORD);
     let mut value: serde_json::Value = stela_engine::read_json(path)?;
     let schema = value["schema_version"].as_u64().unwrap_or(0);
     ensure!(
@@ -550,6 +569,7 @@ pub(super) fn read_any_record(path: &Path) -> Result<Record> {
         "{} is not a setup record this version understands",
         path.display()
     );
+    rebase(&mut value, esp, &current_volume(host, esp, usb));
     if schema < 8
         && let Some(bundles) = value
             .get_mut("bundles")
@@ -577,10 +597,15 @@ pub(super) fn read_any_record(path: &Path) -> Result<Record> {
     Ok(record)
 }
 
-/// The record at `path` when it is this schema's and its first setup was
-/// interrupted (`complete` is false): what `create::plan` resumes.
-pub(super) fn interrupted(path: &Path) -> Option<Record> {
-    stela_engine::read_json::<Record>(path)
+/// The record on the EFI partition `esp` when it is this schema's and its
+/// first setup was interrupted (`complete` is false): what `create::plan`
+/// resumes. Its paths follow the USB to where it is mounted now, as
+/// [`read_record`]'s do: a USB taken out part way is often mounted somewhere
+/// else when setup runs again.
+pub(super) fn interrupted(host: &dyn Host, esp: &Path, usb: &Path) -> Option<Record> {
+    let mut value: serde_json::Value = stela_engine::read_json(&esp.join(RECORD)).ok()?;
+    rebase(&mut value, esp, &current_volume(host, esp, usb));
+    serde_json::from_value::<Record>(value)
         .ok()
         .filter(|record| record.schema_version == RECORD_SCHEMA && !record.complete)
 }
