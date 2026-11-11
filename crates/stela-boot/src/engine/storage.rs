@@ -1504,6 +1504,24 @@ fn account(
             )
         })
         .collect();
+    let firmware_block = boot_disk
+        .and_then(|at| at.rsplit_once(" block="))
+        .and_then(|(_, block)| block.parse::<u32>().ok());
+    let usb: Vec<u32> = devices
+        .disks
+        .iter()
+        .map(|disk| disk.identity())
+        .filter(|identity| matches!(identity.transport, stela_drivers::block::Transport::Usb))
+        .map(|identity| identity.block_size)
+        .collect();
+    if let Some(block) = firmware_block
+        && !usb.is_empty()
+        && !usb.contains(&block)
+    {
+        lines.push(format!(
+            "The firmware read the stick with {block}-byte blocks; no USB disk found here uses them."
+        ));
+    }
     if disks.is_empty() {
         lines.push(String::from("Disks found: none."));
     } else {
