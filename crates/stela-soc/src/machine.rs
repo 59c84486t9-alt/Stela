@@ -476,6 +476,9 @@ pub struct SepProvisioning {
     /// Observe (`--sep-observe`): advertise and log `sks`/`pnon`/`scrd`.
     pub observe: bool,
     pub state: sep::state::Location,
+    /// The recoveryOS policy nonce its first proposal takes, from an install
+    /// bundle's staged signing answers; every other one is drawn.
+    pub recovery_policy_nonce: Option<[u8; 32]>,
 }
 
 /// The DCPEXT coprocessor's ASC, the DART stream it masters its shared

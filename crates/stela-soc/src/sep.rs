@@ -135,6 +135,16 @@ impl Sep {
         self
     }
 
+    /// Propose `nonce` at sepOS's first recoveryOS policy nonce `begin`: an
+    /// install whose recoveryOS LocalPolicy setup had Apple sign for it.
+    pub fn with_recovery_policy_nonce(mut self, nonce: Option<[u8; 32]>) -> Self {
+        self.mailbox
+            .firmware_mut::<firmware::SepFirmware>()
+            .expect("SEP owns its firmware engine")
+            .set_recovery_policy_nonce(nonce);
+        self
+    }
+
     /// Drain the `sks`/`pnon`/`scrd` traffic observed this run (`--sep-observe`).
     pub fn observations(&mut self) -> alloc::vec::Vec<alloc::string::String> {
         self.mailbox

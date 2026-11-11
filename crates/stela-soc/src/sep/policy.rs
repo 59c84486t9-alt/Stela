@@ -66,6 +66,16 @@ pub fn begin(which: PolicyNonce, entropy: &mut dyn Entropy) -> Result<Update> {
     Ok(Update { which, proposed })
 }
 
+/// `begin` with a nonce chosen ahead instead of drawn: the first recoveryOS
+/// proposal of an install whose recoveryOS LocalPolicy setup had Apple sign
+/// for this nonce's digest. Every other proposal draws its own.
+pub fn begin_with(which: PolicyNonce, nonce: &[u8; POLICY_NONCE_BYTES]) -> Update {
+    Update {
+        which,
+        proposed: Zeroizing::new(*nonce),
+    }
+}
+
 /// `bootpolicy_update_..._nonce_end`: commit the proposed nonce as the durable
 /// policy nonce. The old nonce is replaced only here, so a failed or reset
 /// update never advances it.

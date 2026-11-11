@@ -338,3 +338,38 @@ fn uncertain_end_or_reset_poison_the_shared_store_without_an_acknowledgement() {
         }
     }
 }
+
+#[test]
+fn only_the_first_recovery_proposal_takes_the_staged_nonce() {
+    use sha2::{Digest, Sha384};
+    let staged = [0x3c; 32];
+    let mut drawn = [0; 32];
+    entropy(&mut drawn).unwrap();
+    let mut policy = BootPolicy::default();
+    policy.set_first_recovery_nonce(staged);
+    let mut store = store();
+    // The local nonce never takes it.
+    success(&mut policy, &mut store, LOCAL.begin);
+    assert_eq!(
+        success(&mut policy, &mut store, LOCAL.proposed)[HEADER_BYTES..],
+        Sha384::digest(drawn)[..]
+    );
+    success(&mut policy, &mut store, LOCAL.reset);
+    // A begin whose reply fails proposes nothing and keeps it.
+    let mut failed = command(BEGIN);
+    failed.fail_output = true;
+    assert!(ask(&mut policy, &mut store, &mut failed).is_err());
+    success(&mut policy, &mut store, BEGIN);
+    assert_eq!(
+        success(&mut policy, &mut store, PROPOSED_DIGEST)[HEADER_BYTES..],
+        Sha384::digest(staged)[..]
+    );
+    success(&mut policy, &mut store, END);
+    assert_eq!(store.policy_nonce(PolicyNonce::Recovery), Ok(Some(staged)));
+    // Every later proposal is drawn.
+    success(&mut policy, &mut store, BEGIN);
+    assert_eq!(
+        success(&mut policy, &mut store, PROPOSED_DIGEST)[HEADER_BYTES..],
+        Sha384::digest(drawn)[..]
+    );
+}

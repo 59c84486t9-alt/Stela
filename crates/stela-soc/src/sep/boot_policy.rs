@@ -126,6 +126,13 @@ impl BootPolicy {
         }
     }
 
+    /// Propose `nonce` at the next recoveryOS policy nonce `begin` instead
+    /// of drawing one, once: the install boot whose recoveryOS LocalPolicy
+    /// setup had Apple sign for this nonce. Every later proposal is drawn.
+    pub fn set_first_recovery_nonce(&mut self, nonce: [u8; crate::sep::store::POLICY_NONCE_BYTES]) {
+        self.nonces.set_first_recovery(nonce);
+    }
+
     /// Read one AP command and write its reply using the same machine store
     /// as xART. A durable or uncertain mutation is never automatically retried
     /// and cannot receive a failure acknowledgement.

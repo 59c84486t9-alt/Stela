@@ -94,6 +94,9 @@ pub struct Inputs<'f> {
     pub sep_state: Option<sep_state::Location>,
     /// Advertise and log the SEP `sks`/`pnon`/`scrd` services.
     pub sep_observe: bool,
+    /// The recoveryOS policy nonce the SEP proposes first: an install
+    /// bundle's, whose staged LocalPolicy answer binds its digest.
+    pub sep_recovery_policy_nonce: Option<[u8; 32]>,
     pub entropy: Box<dyn SepEntropy>,
     /// A restore host on the first USB-C connector.
     pub restore: bool,
@@ -145,6 +148,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
         backing,
         sep_state,
         sep_observe,
+        sep_recovery_policy_nonce,
         entropy,
         restore,
         input,
@@ -213,6 +217,7 @@ pub fn devices_with_memory<C: ConsoleSink + 'static>(
                 entropy,
                 state: sep_state,
                 observe: sep_observe,
+                recovery_policy_nonce: sep_recovery_policy_nonce,
             },
             log,
         )?;
@@ -644,6 +649,7 @@ struct Sep {
     state: Option<sep_state::Location>,
     /// Advertise and log the `sks`/`pnon`/`scrd` services.
     observe: bool,
+    recovery_policy_nonce: Option<[u8; 32]>,
 }
 
 /// The SEP, mastering through the sole TRAD of its DART group.
@@ -687,6 +693,15 @@ fn add_sep(
             sep_state::Location::Volatile
         }
     };
+    if let Some(nonce) = &host.recovery_policy_nonce {
+        use sha2::Digest;
+        // The digest the staged LocalPolicy request binds as
+        // `Ap,RecoveryOSPolicyNonceHash`; the nonce itself stays secret.
+        log(format_args!(
+            "SEP first recoveryOS policy nonce from the install bundle: digest={}\n",
+            hex::encode(sha2::Sha384::digest(nonce))
+        ));
+    }
     devices.add_sep(
         ranges,
         lines,
@@ -698,6 +713,7 @@ fn add_sep(
             kexts: sep.kexts,
             observe: host.observe,
             state,
+            recovery_policy_nonce: host.recovery_policy_nonce,
         },
     )
 }

@@ -67,6 +67,8 @@ pub struct SepFirmware {
     inline: crate::inline_key::Engine,
     /// The kext grant sepOS's macOS LocalPolicies carry.
     kexts: Option<stela_formats::local_policy::Kexts>,
+    /// The recoveryOS policy nonce sepOS proposes first, once.
+    recovery_policy_nonce: Option<[u8; 32]>,
 }
 
 impl SepFirmware {
@@ -87,7 +89,13 @@ impl SepFirmware {
             state: Some(state),
             inline: crate::inline_key::Engine::default(),
             kexts: None,
+            recovery_policy_nonce: None,
         }
+    }
+
+    /// Propose `nonce` at sepOS's first recoveryOS policy nonce `begin`.
+    pub fn set_recovery_policy_nonce(&mut self, nonce: Option<[u8; 32]>) {
+        self.recovery_policy_nonce = nonce;
     }
 
     /// Grant `kexts` on the macOS LocalPolicies sepOS creates.
@@ -250,6 +258,7 @@ impl Firmware for SepFirmware {
         let os = SepOs::new(self.security)
             .with_services(store, self.observe, self.kexts)?
             .with_volume_keys(self.inline.clone(), self.rom.entropy())?
+            .with_recovery_policy_nonce(self.recovery_policy_nonce.take())
             .with_booted_manifest(
                 evidence
                     .manifest

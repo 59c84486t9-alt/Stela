@@ -1464,6 +1464,14 @@ fn place_devices(
             backing: placement.backing,
             sep_state: placement.sep_state,
             sep_observe: options.sep_observe,
+            // The install's first recoveryOS policy nonce is the one its
+            // staged LocalPolicy answer binds.
+            sep_recovery_policy_nonce: options
+                .install
+                .is_some()
+                .then(|| restore::staged_answers(handoff))
+                .flatten()
+                .and_then(|set| set.policy_nonce),
             entropy: alloc::boxed::Box::new(bundle::entropy),
             restore: options.restore || options.install.is_some(),
             input: options.input,

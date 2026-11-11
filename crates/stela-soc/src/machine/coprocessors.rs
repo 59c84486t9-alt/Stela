@@ -318,6 +318,7 @@ impl AppleDevices {
             kexts,
             observe,
             state,
+            recovery_policy_nonce,
         } = provisioning;
         if wrapper.bytes < asc::WRAPPER_BYTES || auxiliary.bytes == 0 {
             return Err(refuse!("SEP register apertures are incomplete"));
@@ -335,7 +336,8 @@ impl AppleDevices {
         let device = self.bus.add(Box::new(
             Sep::new(entropy, lines, security, ecid, observe, state)?
                 .with_inline_engine(self.inline_keys.clone())
-                .with_kexts(kexts),
+                .with_kexts(kexts)
+                .with_recovery_policy_nonce(recovery_policy_nonce),
         ));
         self.bus
             .map(device, wrapper.physical, wrapper.bytes, 0)

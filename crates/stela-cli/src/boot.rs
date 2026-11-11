@@ -319,6 +319,7 @@ fn mount(
             }),
             sep_state: None,
             sep_observe: false,
+            sep_recovery_policy_nonce: None,
             entropy: Box::new(|bytes: &mut [u8]| {
                 bytes.fill(0);
                 Ok(())

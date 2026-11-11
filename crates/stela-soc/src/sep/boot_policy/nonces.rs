@@ -21,10 +21,11 @@ use crate::sep::{
     Entropy,
     message::Frame,
     policy::{self, Update},
-    store::{Backend, Nonces, PolicyNonce},
+    store::{Backend, Nonces, POLICY_NONCE_BYTES, PolicyNonce},
     transaction::{Payload, Refusal},
 };
 use stela_contracts::refuse;
+use zeroize::Zeroizing;
 
 const MUTATION_BYTES: usize = 0x124;
 const DIGEST_REPLY_BYTES: usize = HEADER_BYTES + policy::DIGEST_BYTES;
@@ -82,6 +83,9 @@ struct Proposal {
 pub(super) struct PolicyNonces {
     local: Option<Proposal>,
     recovery: Option<Proposal>,
+    /// The nonce the next recoveryOS `begin` proposes instead of drawing
+    /// one, used once ([`PolicyNonces::set_first_recovery`]).
+    first_recovery: Option<Zeroizing<[u8; POLICY_NONCE_BYTES]>>,
 }
 
 impl PolicyNonces {
@@ -90,6 +94,12 @@ impl PolicyNonces {
             PolicyNonce::MacOs => &mut self.local,
             PolicyNonce::Recovery => &mut self.recovery,
         }
+    }
+
+    /// Propose `nonce` at the next recoveryOS `begin` only: an install boot
+    /// whose recoveryOS LocalPolicy setup had Apple sign for its digest.
+    pub(super) fn set_first_recovery(&mut self, nonce: [u8; POLICY_NONCE_BYTES]) {
+        self.first_recovery = Some(Zeroizing::new(nonce));
     }
 
     /// The digest of the local nonce update in progress, which a policy made
@@ -143,19 +153,30 @@ impl PolicyNonces {
         }
         let generation = store.generation().map_err(unsupported)?;
         let header = reply_header(SUCCESS);
-        let proposal = self.proposal(nonce.which);
         if command == nonce.begin {
-            if proposal.is_some() {
+            if self.proposal(nonce.which).is_some() {
                 return Err(unsupported(refuse!(
                     "SEP policy nonce update is already in progress"
                 )));
             }
-            let update = policy::begin(nonce.which, entropy).map_err(unsupported)?;
-            // Output failure does not leave an invisible new proposal.
+            let chosen = match nonce.which {
+                PolicyNonce::Recovery => self.first_recovery.clone(),
+                PolicyNonce::MacOs => None,
+            };
+            let update = match &chosen {
+                Some(chosen) => policy::begin_with(nonce.which, chosen),
+                None => policy::begin(nonce.which, entropy).map_err(unsupported)?,
+            };
+            // Output failure does not leave an invisible new proposal, nor
+            // spend the chosen nonce.
             payload.output(&header).map_err(unsupported)?;
-            *proposal = Some(Proposal { generation, update });
+            if chosen.is_some() {
+                self.first_recovery = None;
+            }
+            *self.proposal(nonce.which) = Some(Proposal { generation, update });
         } else if command == nonce.end {
-            let proposal = proposal
+            let proposal = self
+                .proposal(nonce.which)
                 .take()
                 .ok_or_else(|| unsupported(refuse!("SEP policy nonce end has no proposal")))?;
             if proposal.generation != generation {
@@ -170,12 +191,13 @@ impl PolicyNonces {
         } else if command == nonce.reset {
             // Withdraw the policy nonce and discard the live proposal. The
             // store owns uncertain commit poisoning, including failed reset.
-            *proposal = None;
+            *self.proposal(nonce.which) = None;
             policy::reset(store, nonce.which).map_err(Refusal::unanswerable)?;
             payload.output(&header).map_err(Refusal::unanswerable)?;
         } else {
             let digest = if command == nonce.proposed {
-                let proposal = proposal
+                let proposal = self
+                    .proposal(nonce.which)
                     .as_ref()
                     .ok_or_else(|| unsupported(refuse!("SEP policy nonce has no proposal")))?;
                 if proposal.generation != generation {

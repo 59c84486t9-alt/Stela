@@ -156,6 +156,15 @@ impl SepOs {
         Ok(self)
     }
 
+    /// Propose `nonce` at the first recoveryOS policy nonce `begin` of this
+    /// start ([`BootPolicy::set_first_recovery_nonce`]).
+    pub fn with_recovery_policy_nonce(mut self, nonce: Option<[u8; 32]>) -> Self {
+        if let (Some(services), Some(nonce)) = (self.services.as_mut(), nonce) {
+            services.boot_policy.set_first_recovery_nonce(nonce);
+        }
+        self
+    }
+
     /// Record the booted sepOS's manifest hash for xART manifest commits.
     pub fn with_booted_manifest(mut self, manifest: Option<[u8; 48]>) -> Self {
         if let Some(services) = self.services.as_mut() {
