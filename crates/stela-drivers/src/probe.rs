@@ -594,20 +594,14 @@ pub struct Devices {
 }
 
 impl Devices {
-    /// Failures from attempted native vendor initialization, USB and PCIe.
-    /// Unknown USB vendors remain raw, unverified transports; they are not
-    /// failed attempts of a backend implemented here.
+    /// Failures from attempted native vendor initialization, USB and PCIe,
+    /// and USB controllers no vendor setup here takes, each named once: no
+    /// consumer runs them, so they stay off.
     pub fn bluetooth_failures(&self) -> impl Iterator<Item = (&str, &dyn fmt::Display)> {
         let usb = self.bluetooth.iter().filter_map(|device| {
             let Err(error) = device.initialization()? else {
                 return None;
             };
-            if matches!(
-                error,
-                crate::usb::bluetooth::InitializationError::UnsupportedDevice { .. }
-            ) {
-                return None;
-            }
             Some((
                 device.binding().device().location.as_str(),
                 error as &dyn fmt::Display,

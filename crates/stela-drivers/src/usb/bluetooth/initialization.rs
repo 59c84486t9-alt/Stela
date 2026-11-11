@@ -36,8 +36,54 @@ pub enum InitializationError {
 }
 impl fmt::Display for InitializationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "native USB Bluetooth initialization {self:?}")
+        match *self {
+            Self::UnsupportedDevice {
+                vendor,
+                product,
+                revision,
+            } => {
+                write!(
+                    f,
+                    "unsupported USB Bluetooth controller {vendor:04x}:{product:04x} \
+                     revision {revision:04x}"
+                )?;
+                if let Some(name) = vendor_name(vendor) {
+                    write!(f, " ({name})")?;
+                }
+                f.write_str(": no vendor setup here takes it, so it stays off")
+            }
+            _ => write!(f, "native USB Bluetooth initialization {self:?}"),
+        }
     }
+}
+
+/// The USB vendors whose IDs Bluetooth controllers commonly carry: chip
+/// makers and the module makers whose IDs Linux btusb lists.
+fn vendor_name(vendor: u16) -> Option<&'static str> {
+    Some(match vendor {
+        0x03f0 => "HP",
+        0x043e => "LG",
+        0x0489 => "Foxconn",
+        0x04ca => "Lite-On",
+        0x04f2 => "Chicony",
+        0x050d => "Belkin",
+        0x05ac => "Apple",
+        0x0930 => "Toshiba",
+        0x0a12 => "Cambridge Silicon Radio",
+        0x0a5c => "Broadcom",
+        0x0b05 => "ASUS",
+        0x0bda => "Realtek",
+        0x0cf3 => "Qualcomm Atheros",
+        0x0e8d => "MediaTek",
+        0x105b => "Foxconn",
+        0x13d3 => "IMC Networks",
+        0x1286 => "Marvell",
+        0x2357 => "TP-Link",
+        0x33fa => "Actions",
+        0x413c => "Dell",
+        0x8087 => "Intel",
+        _ => return None,
+    })
 }
 impl core::error::Error for InitializationError {}
 
@@ -115,5 +161,35 @@ impl<B: Io> Hci<B> {
         intel::initialize_with_platform(self, provider, platform)
             .map(|report| InitializationReport::Intel(report.into()))
             .map_err(InitializationError::Intel)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InitializationError;
+    use alloc::string::ToString;
+
+    #[test]
+    fn an_unsupported_controller_is_named_by_its_ids_and_vendor() {
+        let error = InitializationError::UnsupportedDevice {
+            vendor: 0x0a12,
+            product: 0x0001,
+            revision: 0x8891,
+        };
+        assert_eq!(
+            error.to_string(),
+            "unsupported USB Bluetooth controller 0a12:0001 revision 8891 \
+             (Cambridge Silicon Radio): no vendor setup here takes it, so it stays off"
+        );
+        let unknown = InitializationError::UnsupportedDevice {
+            vendor: 0x1234,
+            product: 0x5678,
+            revision: 0x0100,
+        };
+        assert_eq!(
+            unknown.to_string(),
+            "unsupported USB Bluetooth controller 1234:5678 revision 0100: no vendor setup \
+             here takes it, so it stays off"
+        );
     }
 }
