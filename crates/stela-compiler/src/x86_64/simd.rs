@@ -10,6 +10,12 @@ pub(super) mod arithmetic;
 pub(in crate::x86_64) mod bfloat16;
 mod comparison;
 mod complex;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod conversion_costs;
 pub(in crate::x86_64) mod encode;
 mod estimate;
 pub(in crate::x86_64) mod exponent_scale;
