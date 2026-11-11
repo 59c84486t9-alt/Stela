@@ -45,6 +45,10 @@ Stela currently models the Mac mini (M2) and runs macOS 27.
    Setup erases the USB stick.
 4. Boot the PC from the USB stick.
 
+To update a USB stick made with an older version, download the new `stela`,
+plug the stick in and run `sudo ./stela setup update stela` (Linux, macOS) or
+`stela.exe setup update stela` (Windows).
+
 ## Build
 
 You need [Rust](https://rustup.rs) and LLVM with Clang 21 or newer.

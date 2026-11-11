@@ -46,6 +46,8 @@ env:
     3. Choose the USB stick, the macOS version and the Mac model, then confirm. Setup erases the USB stick.
     4. Boot the PC from the USB stick.
 
+    To update a USB stick made with an older version, plug it in and run sudo ./stela setup update stela (Linux, macOS) or stela.exe setup update stela (Windows).
+
     You are responsible for following Apple's software license agreement and terms of use.
 
 jobs:
