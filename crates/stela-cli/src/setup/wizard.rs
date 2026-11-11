@@ -210,8 +210,10 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     "Capacity unavailable".into()
                 } else if usb.bytes < NETWORK_MIN {
                     "Too small · Requires an 8 GB or larger USB".into()
+                } else if usb.bytes < super::FULL_MIN {
+                    "Network installer · macOS downloads during installation".into()
                 } else {
-                    String::new()
+                    "Full installer · macOS goes on the USB".into()
                 },
                 enabled: usb.bytes >= NETWORK_MIN,
             })
@@ -251,8 +253,11 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 return Ok(true);
             }
         }
-        // A local IPSW named on the command line supplies the boot files;
-        // the install still downloads macOS.
+        // A USB of 32 GB or more takes the whole macOS image, so the
+        // install needs no network; a smaller one gets the network
+        // installer. A local IPSW named on the command line supplies the
+        // boot files, and macOS too when it holds the whole image.
+        let mut install_image = super::default_install_image(usb.bytes);
         let prefilled = first && command.ipsw.is_some();
         first = false;
         let (version, models) = if prefilled {
@@ -267,7 +272,10 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             command.fetch = false;
             command.build = manifest.product_build.clone();
             preferred_build = Some(command.build.clone());
-            command.install_image = Some(InstallImage::Network);
+            if !crate::restore::payload::holds_system_image(command.ipsw.as_deref().unwrap())? {
+                install_image = InstallImage::Network;
+            }
+            command.install_image = Some(install_image);
             cliclack::log::info(format!(
                 "macOS {} ({}) · local IPSW{}",
                 manifest.product_version,
@@ -295,7 +303,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             preferred_build = Some(command.build.clone());
             command.ipsw = None;
             command.fetch = true;
-            command.install_image = Some(InstallImage::Network);
+            command.install_image = Some(install_image);
             (image.version.clone(), image.models.clone())
         };
         ensure!(
@@ -306,19 +314,26 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         models.sort();
         models.dedup();
         command.model = Some(choices::model(&models, &names, command.model.as_deref())?);
-        // Every install needs the network for Apple's signing server; a
-        // network installer also downloads macOS over it.
-        cliclack::log::info(stela_runtime::restore::tss::network_reason(true))?;
+        // What the install needs the network for, and what is not known
+        // about the installed system's first start.
+        let full = install_image == InstallImage::Full;
+        for note in super::create::network_notes(!full, full) {
+            cliclack::log::info(note)?;
+        }
         choose_wifi(command)?;
         super::addresses::choose(command)?;
         cliclack::note(
             "6 / 6  Review",
             format!(
-                "USB        {}\nmacOS      {version} ({}) · downloads during installation\nMac        {}\n{}{}{}",
+                "USB        {}\nInstaller  {}\nmacOS      {version} ({})\nMac        {}\n{}{}{}",
                 usb.serial.as_ref().map_or_else(
                     || usb.description(),
                     |serial| format!("{} · serial {serial}", usb.description())
                 ),
+                match full {
+                    true => "Full · macOS goes on the USB, the install needs no network",
+                    false => "Network · macOS downloads during installation",
+                },
                 command.build,
                 names
                     .get(command.model())

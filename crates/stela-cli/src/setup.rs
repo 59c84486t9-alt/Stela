@@ -2,10 +2,10 @@
 //! a disk of the PC and boot it, and keep it working over the installed
 //! system's life.
 //!
-//! Setup writes the install medium (`setup::medium`): the IPSW's inventory,
-//! from which `stela.efi` streams the IPSW from Apple's servers during the
-//! install. A USB made when setup still offered it holds the whole IPSW on
-//! its FAT32 data partition instead, and keeps doing so. It prepares each machine's restore bundle (`stela
+//! Setup writes the install medium (`setup::medium`): on a USB of 32 GB or
+//! more the whole IPSW on its FAT32 data partition, else the IPSW's
+//! inventory, from which `stela.efi` streams the IPSW from Apple's servers
+//! during the install ([`default_install_image`]). It prepares each machine's restore bundle (`stela
 //! boot prepare --restore`) and adds an Install macOS startup choice
 //! (`stela.efi --install`), which restores macOS and its paired recoveryOS
 //! and System Recovery onto the Mac's internal SSD, as a Mac's erase
@@ -13,8 +13,10 @@
 //! download's recovery members (`restore::payload::trim`) only prepare the
 //! boot bundles. The macOS choice
 //! boots the installed system afterwards. The restore personalizes its root
-//! tickets and the recoveryOS LocalPolicy with Apple's signing server
-//! (TSS).
+//! tickets, its Cryptex1 ticket and the recoveryOS LocalPolicy with Apple's
+//! signing server (TSS); setup asks for them while it prepares the bundle
+//! (`boot::ticket::staged`), so an install with macOS on the USB needs no
+//! network.
 //!
 //! One command checks the USB and the restore image without writing
 //! anything, prepares the restore bundle on this computer, then copies it
@@ -265,20 +267,34 @@ fn restore_choice_name(kind: Kind) -> &'static str {
     }
 }
 
-/// Where an install reads the macOS restore image. Every new setup streams
-/// it; a USB made when setup still offered the whole image keeps it.
+/// Where an install reads the macOS restore image: on the USB when it is
+/// large enough ([`default_install_image`]), else streamed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum InstallImage {
-    /// The whole IPSW on the USB: no image download during the install,
-    /// which still needs the network for Apple's signing server. Records
-    /// written before the name changed say `offline`.
+    /// The whole IPSW on the USB: with the signing answers setup fetched,
+    /// the install needs no network. Records written before the name
+    /// changed say `offline`.
     #[serde(alias = "offline")]
     Full,
     /// The IPSW on Apple's servers, streamed during the install. Records
     /// written before the name changed say `online`.
     #[serde(alias = "online")]
     Network,
+}
+
+/// The smallest USB, as the PC reports it, that a full installer is made
+/// on: a stick sold as 32 GB holds about 28.6 GiB.
+pub(super) const FULL_MIN: u64 = 28 * 1024 * 1024 * 1024;
+
+/// A new setup's installer for a USB of `capacity` bytes (0 when unknown):
+/// the whole macOS image on a USB of 32 GB or more, so the install needs no
+/// network, and the network installer on a smaller one.
+pub(super) fn default_install_image(capacity: u64) -> InstallImage {
+    match capacity >= FULL_MIN {
+        true => InstallImage::Full,
+        false => InstallImage::Network,
+    }
 }
 
 fn image_is_remote(ipsw: &Path, choice: Option<InstallImage>) -> Result<bool> {

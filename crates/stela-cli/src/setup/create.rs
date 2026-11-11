@@ -492,7 +492,34 @@ impl Resume {
 /// before setup writes the USB.
 pub(super) const SIGNING_NOTE: &str = "Apple's signing service (gs.apple.com) receives this \
     machine's ECID, the restore's nonces and its component hashes, to sign the restore's root \
-    tickets and the recoveryOS LocalPolicy.";
+    tickets, its Cryptex1 ticket and the recoveryOS LocalPolicy: setup asks while it prepares \
+    the boot files, and the install asks only for what the USB lacks.";
+
+/// The full installer's promise, and its limit.
+pub(super) const OFFLINE_NOTE: &str = "Full installer: macOS is on the USB, the install needs \
+    no network.";
+/// What is not known yet about the installed system without a network.
+pub(super) const FIRST_START_NOTE: &str = "After the install, macOS may ask for a network the \
+    first time it starts: whether Setup Assistant's activation finishes without one is not \
+    tested yet.";
+
+/// Whether the restore bundle in `directory` holds Apple's answers to every
+/// signing request its install makes (`tss::staged`).
+fn staged(directory: &Path) -> bool {
+    fs::read(directory.join(stela_runtime::restore::tss::staged::FILE))
+        .ok()
+        .and_then(|bytes| stela_runtime::restore::tss::staged::Set::decode(&bytes).ok())
+        .is_some_and(|set| set.complete())
+}
+
+/// What the plan says about the network: none needed for the install with
+/// macOS and every signing answer on the USB, else why it is needed.
+pub(super) fn network_notes(remote: bool, offline: bool) -> Vec<String> {
+    match offline {
+        true => vec![OFFLINE_NOTE.into(), FIRST_START_NOTE.into()],
+        false => vec![stela_runtime::restore::tss::network_reason(remote).into()],
+    }
+}
 
 /// The checks' result: everything setup will write, and where.
 pub(super) struct Plan {
@@ -713,9 +740,24 @@ pub(super) fn plan(
     }
     record.options = record.options_text()?;
     record.choices_text()?;
-    // Said up front: an install needs the network even with macOS on the USB.
+    // Said up front: whether the install needs the network, and what is
+    // not known about the installed system's first start.
     let remote = install.medium.as_ref().is_some_and(|medium| medium.remote);
-    notes.push(stela_runtime::restore::tss::network_reason(remote).into());
+    let restore_bundles: Vec<PathBuf> = prepared
+        .iter()
+        .filter(|bundle| bundle.kind == Kind::Restore)
+        .map(Prepared::path)
+        .chain(
+            record
+                .bundles
+                .iter()
+                .filter(|bundle| bundle.kind == Kind::Restore)
+                .map(|bundle| bundle.directory(&record.volume)),
+        )
+        .collect();
+    let offline =
+        !remote && !restore_bundles.is_empty() && restore_bundles.iter().all(|b| staged(b));
+    notes.extend(network_notes(remote, offline));
     notes.push(SIGNING_NOTE.into());
     notes.extend(installed.notes.iter().cloned());
     // The firmware of this computer's GPU; a USB made elsewhere gets none,
@@ -884,6 +926,10 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
         if !command.confirmed && std::io::stdin().is_terminal() {
             confirm_erase(host, &found)?;
         }
+        // A new setup puts macOS on a USB large enough for it.
+        command
+            .install_image
+            .get_or_insert(super::default_install_image(found.bytes));
         erase = Some((disk, found.name, found.bytes, identity));
     }
     // Downloaded boot archives are kept in one place until setup finishes,

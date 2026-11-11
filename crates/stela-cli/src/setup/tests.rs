@@ -4258,3 +4258,59 @@ fn status_and_repair_name_the_firmware_the_last_boot_asked_for() {
     assert!(report.contains("Dry run"), "{report}");
     assert_eq!(snapshot(&f.esp), before);
 }
+
+/// `boot prepare --restore` whose bundle holds Apple's answers to every
+/// signing request of its install, as the AP ticket's step leaves it.
+fn staged_prepare_restore(options: prepare::RamdiskOptions<'_>) -> Result<()> {
+    use stela_runtime::restore::tss::staged::{FILE, Kind, Set};
+    let output = options.output.to_path_buf();
+    fake_prepare_restore(options)?;
+    let mut set = Set::default();
+    for (kind, body) in Kind::ALL.into_iter().zip([b"a", b"b", b"c"]) {
+        set.insert(kind, body, b"answer".to_vec())
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+    }
+    set.policy_nonce = Some([1; 32]);
+    let bytes = set.encode().map_err(|error| anyhow::anyhow!("{error}"))?;
+    fs::write(output.join(FILE), bytes)?;
+    Ok(())
+}
+
+#[test]
+fn a_full_installer_with_every_signing_answer_says_the_install_needs_no_network() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    let staged = Environment {
+        prepare_restore: &staged_prepare_restore,
+        ..environment(&f.host)
+    };
+    let mut dry = command(&f, &f.esp);
+    dry.dry_run = true;
+    let plan = setup(&staged, dry).unwrap();
+    assert!(plan.contains(create::OFFLINE_NOTE), "{plan}");
+    // What is not known is said too.
+    assert!(plan.contains(create::FIRST_START_NOTE), "{plan}");
+    assert!(
+        !plan.contains(stela_runtime::restore::tss::network_reason(false)),
+        "{plan}"
+    );
+    // Without the answers the same USB's install needs the network.
+    let mut dry = command(&f, &f.esp);
+    dry.dry_run = true;
+    let plan = setup(&environment(&f.host), dry).unwrap();
+    assert!(!plan.contains(create::OFFLINE_NOTE), "{plan}");
+    assert!(
+        plan.contains(stela_runtime::restore::tss::network_reason(false)),
+        "{plan}"
+    );
+}
+
+#[test]
+fn a_new_setup_puts_macos_on_a_usb_of_32_gb_or_more() {
+    assert_eq!(default_install_image(0), InstallImage::Network);
+    assert_eq!(default_install_image(8_000_000_000), InstallImage::Network);
+    assert_eq!(default_install_image(16_000_000_000), InstallImage::Network);
+    // A stick sold as 32 GB.
+    assert_eq!(default_install_image(31_000_000_000), InstallImage::Full);
+    assert_eq!(default_install_image(64 * GIB), InstallImage::Full);
+}
