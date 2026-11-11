@@ -319,10 +319,12 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
                 operand.format == Format::Half && !half_integer::from_integer_inline(operand)
             }
             Operand::ToInteger { operand, rounding } => {
-                operand.format == Format::Half
-                    && !half_integer::to_integer_inline(operand, *rounding)
-                    || *rounding == IntegerRounding::NearestAway
+                if operand.format == Format::Half {
+                    !half_integer::to_integer_inline(operand)
+                } else {
+                    *rounding == IntegerRounding::NearestAway
                         && !integer_conversion::nearest_away_inline(operand)
+                }
             }
             Operand::JavaScript { .. } => false,
         },
