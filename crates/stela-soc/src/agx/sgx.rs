@@ -8,7 +8,7 @@
 //!
 //! Known (26A434 `AGXG14G`; every AP access goes through
 //! `AGXAccelerator::readGFXReg32` 0x1b7f868 / `writeGFXReg32` 0x1b80ce0;
-//! the other families' readings are in [`generation`]):
+//! the other families' readings are in [`super::generation`]):
 //! - `AGXAcceleratorG14::readChipInfo` (0x1b62f88) reads the identification
 //!   words 0xd04000, 0xd04010, 0xd04014, 0xd04018 and 0xd0401c and the core
 //!   mask at 0xd01500. It requires generation 5 (bits 31:24 of 0xd04000),
