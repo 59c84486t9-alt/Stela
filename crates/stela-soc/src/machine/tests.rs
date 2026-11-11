@@ -1594,7 +1594,7 @@ fn mailbox_drain(devices: &mut AppleDevices, wrapper: u64) -> Vec<(u64, u64)> {
     messages
 }
 
-/// The AP side of the RTKit start-up handshake restore boot s25 logged
+/// The AP side of the RTKit start-up handshake a restore boot logged
 /// for a coprocessor listing one application endpoint 0x20, word for
 /// word, up to the client driver's STARTEP of it, except that group 0
 /// now also lists the crashlog endpoint. The coprocessor must end

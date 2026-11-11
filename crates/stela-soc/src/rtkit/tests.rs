@@ -334,7 +334,7 @@ fn kept_cpu_halt_requires_sleep_and_resumes_without_enumeration() {
 
 #[test]
 fn the_restore_boot_pmp_handshake_ends_with_the_power_on_announcement() {
-    // The AP's side of restore boot s25's PMP mailbox log, word for
+    // The AP's side of a restore boot's PMP mailbox log, word for
     // word: the AP waited 20 s for running after its last answer.
     let mut rtkit = RtKit::new(
         vec![(0x20, Box::new(Complement) as Box<dyn Endpoint>)],
