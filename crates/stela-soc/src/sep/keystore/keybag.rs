@@ -1,5 +1,5 @@
 //! User keybags: create, save, load, unload and UUID; session binding, lock
-//! state, unlock, lock and lock assertions, passcode change.
+//! state, unlock, lock and lock assertions, passcode verify and change.
 //!
 //! **Callers.** At login `applekeystored` (26A434 `/usr/libexec/applekeystored`,
 //! x86_64 slice 0x100031f87..0x1000320c9; the arm64e slice has the same calls)
@@ -89,6 +89,15 @@ pub(super) const MAKE_SYSTEM: u8 = 0x0d;
 /// timeout itself (`handleLockAssertion` arms its own timer), so the reply's
 /// deadline stays 0.
 pub(super) const DEVICE_STATE_TRANSITION: u8 = 0x18;
+/// `__ipc_verify_secret_v1` (26B123 VA 0xfffffe0009d5a02c from
+/// `verify_password` VA 0xfffffe0009d43718), variant 1 (codec VA
+/// 0xfffffe0009d60924): session, handle, the secret, the ACM blob, then a
+/// u64 of flags (0x80, 0x100 and 0x200 from the function's three Booleans;
+/// sel 42 always sets the third, VA 0xfffffe0009d530bc); reply one u64,
+/// which `verify_password` passes to `handle_device_state_return` as flags.
+pub(super) const VERIFY: u8 = 0x21;
+/// Verify's flags from sel 42 with its two optional Booleans clear.
+const VERIFY_FLAGS: u64 = 0x200;
 /// Unlock with the passcode.
 const UNLOCK_TRANSITION: u32 = 0;
 /// Lock now.
@@ -174,6 +183,7 @@ pub(super) const LOADED: &str = "SEP keybag: loaded a saved user keybag";
 pub(super) const BOUND: &str = "SEP keybag: bound a user keybag to its session";
 pub(super) const UNLOCKED: &str = "SEP keybag: the passcode unlocked a user keybag";
 pub(super) const CHANGED: &str = "SEP keybag: a user keybag's passcode was changed";
+pub(super) const VERIFIED: &str = "SEP keybag: a passcode was verified against a user keybag";
 pub(super) const REPLACED: &str = "SEP keybag: a new user keybag replaced a session's bound keybag";
 const UNOPENABLE: &str = "SEP keybag: a saved keybag does not open under this machine's keys; it is refused and nothing replaces it";
 
@@ -189,6 +199,7 @@ pub(super) fn recognizes(command: u8) -> bool {
             | MAKE_SYSTEM
             | DEVICE_STATE_TRANSITION
             | CHANGE_SECRET
+            | VERIFY
     )
 }
 
@@ -223,6 +234,12 @@ pub(super) enum Request<'a> {
         secret: &'a [u8],
         flags: u64,
     },
+    Verify {
+        handle: i32,
+        secret: &'a [u8],
+        acm: &'a [u8],
+        flags: u64,
+    },
     Bind {
         handle: i32,
         special: i32,
@@ -253,7 +270,7 @@ impl<'a> Request<'a> {
             CREATE => 4,
             COPY => 1,
             LOAD | UNLOAD | UUID | DEVICE_STATE_TRANSITION => 0,
-            CHANGE_LOCK_STATE | MAKE_SYSTEM => 1,
+            CHANGE_LOCK_STATE | MAKE_SYSTEM | VERIFY => 1,
             CHANGE_SECRET => 3,
             _ => {
                 return Err(refuse!(
@@ -305,6 +322,14 @@ impl<'a> Request<'a> {
                 handle: handle(fields)?,
                 operation: fields.word()?,
                 secret: fields.blob()?,
+                flags: fields.lword()?,
+            },
+            // _code_ipc_verify_secret v1 (26B123 VA 0xfffffe0009d60a8c..
+            // 0xfffffe0009d60b1c): u64, u32, blob, blob, u64; reply u64.
+            VERIFY => Self::Verify {
+                handle: handle(fields)?,
+                secret: fields.blob()?,
+                acm: fields.blob()?,
                 flags: fields.lword()?,
             },
             // _code_ipc_make_system_keybag v1 (VA 0xfffffe0009d42b7c): u64,
@@ -408,6 +433,9 @@ enum Then {
         uuid: [u8; UUID_BYTES],
         reply: Unlocked,
     },
+    /// Check the secret against the bag at `handle`; its lock state is
+    /// unchanged.
+    Verify { handle: i32, uuid: [u8; UUID_BYTES] },
     /// The old secret's KEK is derived: open the passcode seed with it, then
     /// derive the new secret's KEK over `salt`.
     ChangeOld {
@@ -924,6 +952,37 @@ impl Keybags {
                 UNLOCK => self.unlock(handle, secret, Unlocked::LockState),
                 _ => Err(self.refuse_shape("lock-state operation", operation.into(), note)),
             },
+            Request::Verify {
+                handle,
+                secret,
+                acm,
+                flags,
+            } => {
+                if flags != VERIFY_FLAGS {
+                    return Err(self.refuse_shape("verify flags", flags, note));
+                }
+                if !acm.is_empty() {
+                    return Err(self.refuse_shape(
+                        "verify ACM blob length",
+                        acm.len() as u64,
+                        note,
+                    ));
+                }
+                let bag = self.find(handle)?;
+                if !bag.header.has_passcode() {
+                    if !secret.is_empty() {
+                        return Err(BAD_PASSCODE.into());
+                    }
+                    return Ok(Outcome::Reply(0u64.to_le_bytes().to_vec()));
+                }
+                Ok(Outcome::Derive(alloc::boxed::Box::new(Pending {
+                    derivation: self.derivation(&bag.header, secret),
+                    then: Some(Then::Verify {
+                        handle,
+                        uuid: bag.header.uuid,
+                    }),
+                })))
+            }
             Request::ChangeSecret {
                 handle,
                 old,
@@ -1143,6 +1202,24 @@ impl Keybags {
                     state,
                     if changed { NOTIFY_LOCK_STATE } else { 0 },
                 )))
+            }
+            Then::Verify { handle, uuid } => {
+                let kek = kek.ok_or(refuse!("SEP keybag verify has no KEK"))?;
+                let bag = self.find(handle)?;
+                if bag.header.uuid != uuid {
+                    return Err(refuse!("SEP keybag handle changed during its verify"));
+                }
+                // The opened seed is dropped at once: verify changes nothing.
+                open(
+                    &self.passcode_key(&bag.header, Some(kek)),
+                    PASSCODE_DOMAIN,
+                    &bag.header.bytes(),
+                    &bag.passcode_sealed,
+                )
+                .map_err(|_| stela_contracts::Refusal::from(BAD_PASSCODE))?;
+                self.progress(VERIFIED);
+                // No state change to notify.
+                Ok(Outcome::Reply(0u64.to_le_bytes().to_vec()))
             }
             Then::ChangeOld {
                 handle,

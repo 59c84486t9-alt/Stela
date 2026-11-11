@@ -1063,6 +1063,17 @@ fn change_lock_state_carries_the_trailing_flags_word() {
     let mut trailing = full.clone();
     trailing.extend_from_slice(&[0; 4]);
     assert!(decode(&trailing).is_err());
+    let verify = verify_body(SESSION_BAG, SECRET, &[], VERIFY_FLAGS);
+    let decode = |bytes: &[u8]| Request::parse(VERIFY, 1, &mut Fields { bytes, at: 0 }).map(|_| ());
+    assert_eq!(decode(&verify), Ok(()));
+    for end in 0..verify.len() {
+        assert!(decode(&verify[..end]).is_err(), "verify prefix {end}");
+    }
+    let mut fields = Fields {
+        bytes: &verify,
+        at: 0,
+    };
+    assert!(Request::parse(VERIFY, 0, &mut fields).is_err());
 }
 
 /// The device state transitions the kernel sends besides unlock: sel 8's
@@ -1119,4 +1130,57 @@ fn lock_assertions_defer_a_lock_until_the_last_drop() {
     let open = sep.create(2, b"");
     assert_eq!(transition(&mut sep, open, LOCK_TRANSITION), Ok(0));
     assert_eq!(sep.ss(open), (NO_PIN | BEEN_UNLOCKED) as u8);
+}
+
+fn verify_body(handle: i32, secret: &[u8], acm: &[u8], flags: u64) -> Vec<u8> {
+    let mut bytes = handle_body(handle);
+    blob(&mut bytes, secret);
+    blob(&mut bytes, acm);
+    bytes.extend_from_slice(&flags.to_le_bytes());
+    bytes
+}
+
+/// Verify (0x21) checks the passcode through the same derivation as an
+/// unlock and changes nothing: a locked bag stays locked.
+#[test]
+fn verify_checks_the_passcode_without_unlocking() {
+    let mut sep = Sep::new(ROOT);
+    let handle = sep.create(2, SECRET);
+    sep.bind(handle).unwrap();
+    let verify = |sep: &mut Sep, handle: i32, secret: &[u8], acm: &[u8], flags: u64| {
+        sep.ask(2, VERIFY, 1, &verify_body(handle, secret, acm, flags))
+    };
+    assert_eq!(
+        verify(&mut sep, SESSION_BAG, SECRET, &[], VERIFY_FLAGS),
+        Ok(vec![0; 8])
+    );
+    assert_eq!(sep.ss(SESSION_BAG), 1);
+    let refusal = verify(&mut sep, SESSION_BAG, b"wrong horse", &[], VERIFY_FLAGS).unwrap_err();
+    assert_eq!(refusal.answer.unwrap().frame.parameter, BAD_PASSCODE_STATUS);
+    for (acm, flags) in [
+        (&[][..], 0),
+        (&[][..], VERIFY_FLAGS | 0x80),
+        (&[][..], VERIFY_FLAGS | 0x100),
+        (&b"acm"[..], VERIFY_FLAGS),
+    ] {
+        let refusal = verify(&mut sep, SESSION_BAG, SECRET, acm, flags).unwrap_err();
+        assert_eq!(refusal.answer.unwrap().frame.parameter, FAILURE);
+    }
+    // No bag at the handle: refused, as before keybags.
+    assert!(verify(&mut sep, -502, SECRET, &[], VERIFY_FLAGS).is_err());
+    // A bag without a passcode verifies only the empty secret.
+    let open = sep.create(2, b"");
+    assert_eq!(
+        verify(&mut sep, open, &[], &[], VERIFY_FLAGS),
+        Ok(vec![0; 8])
+    );
+    let refusal = verify(&mut sep, open, b"x", &[], VERIFY_FLAGS).unwrap_err();
+    assert_eq!(refusal.answer.unwrap().frame.parameter, BAD_PASSCODE_STATUS);
+    let notes = sep.notes();
+    assert!(!notes.iter().any(|n| n.contains("horse")), "{notes:?}");
+    assert_eq!(
+        notes.iter().filter(|n| *n == VERIFIED).count(),
+        1,
+        "{notes:?}"
+    );
 }
