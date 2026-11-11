@@ -37,12 +37,14 @@ third_party/linux, Rust ports in   MIT, GPL-2.0 OR BSD-3-Clause and   stela (por
 crates/stela-driver*/,             other per-file terms
 stela-linux, stela-boot-core)
 FreeBSD e1000 driver               BSD-3-Clause                       stela.efi
-MediaTek mt76 Wi-Fi and wireless   BSD-3-Clause-Clear, ISC            stela.efi
-regulatory ports
-Asahi Linux bcm4377, NXP, Intel    MIT                                stela.efi
-drm_eld.h and WOPCM sources
-Mesa 26.2.5 (NVK, NIR, NAK,        MIT; Vulkan headers Apache-2.0;    stela.efi
-Vulkan runtime)                    c11 threads BSL-1.0
+MediaTek mt76 Wi-Fi, btmtk and     BSD-3-Clause-Clear, ISC            stela.efi
+wireless regulatory ports
+Asahi Linux hci_bcm4377            GPL-2.0-only OR MIT (MIT used)     stela.efi
+Intel drm_eld.h definitions        MIT                                stela.efi
+Mesa 26.2.5 (NVK, NIR, NAK,        MIT; c11 threads BSL-1.0           stela.efi
+Vulkan runtime)
+Vulkan headers (The Khronos Group, Apache-2.0 (generated from the     stela.efi
+in Mesa's include/)                Apache-2.0 OR MIT vk.xml registry)
 libdrm 2.4.133 headers             MIT                                stela.efi
 LLVM 23.1.4 libraries, libc++      Apache-2.0 WITH LLVM-exception     stela.efi
                                    (legacy parts also NCSA)
