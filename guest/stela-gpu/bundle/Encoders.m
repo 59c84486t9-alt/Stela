@@ -3,7 +3,7 @@
  * An encoder writes one entry per call. `useResource:`, `useHeap:` and fences
  * write none: every resource is resident and the hazard tracker orders the
  * queue. Residency declarations still keep the declared objects alive on
- * command buffers with retained references. See docs/design/metal-device.md.
+ * command buffers with retained references.
  */
 #include "Bundle.h"
 

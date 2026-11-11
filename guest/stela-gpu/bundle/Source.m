@@ -1,6 +1,6 @@
 /*
  * Metal source compiles in the process that asks for it, through the compiler
- * macOS ships. Its C entry points (`docs/research/metal-compiler.md`) make AIR
+ * macOS ships. Its C entry points (MTLCompiler's) make AIR
  * with no GPU's back end, and the service makes that a library. A build's
  * directory names its version, so nothing here follows one build.
  */

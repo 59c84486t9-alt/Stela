@@ -1,6 +1,6 @@
 /*
  * The Metal plugin: Metal's objects over the native service, through the gate
- * page the kext maps into the task. See docs/design/metal-device.md.
+ * page the kext maps into the task.
  *
  * Objects hold the service's handles; encoders write the command stream a
  * commit replays, and nothing else crosses. What a CPU reaches is the task's
