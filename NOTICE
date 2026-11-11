@@ -405,6 +405,9 @@ crates/stela-driver-net/src/: Exact MTP/ARL/LNP and PTP/NVL cold profiles
 crates/stela-driver-net/src/aqtion/: AQtion Ethernet source adaptation
     Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0-only
     drivers/net/ethernet/aquantia/atlantic/
+crates/stela-driver-net/src/alx/: Qualcomm Atheros AR816x/AR817x Ethernet
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later ; ISC
+    drivers/net/ethernet/atheros/alx/ (4 files)
 crates/stela-driver-net/src/tg3/: Broadcom Tigon3 source adaptation
     Linux a804c5742bff224d4cb4d25dd383554d598be32b; GPL-2.0 ; GPL-2.0-only ;
     ISC

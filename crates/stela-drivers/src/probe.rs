@@ -12,6 +12,7 @@ use crate::{
     input::{self, InputDevice, virtio::VirtioInput},
     net::{
         self, Link, LinkError, Mac,
+        alx::Alx,
         e1000e::{E1000e, pch::cold::attach as pch},
         igb::Igb,
         igc::Igc,
@@ -236,6 +237,7 @@ pub enum Adapter {
     /// An Intel 82579, I217/I218 or I219 integrated MAC.
     Pch(Box<pch::Pch>),
     Igb(Igb),
+    Alx(Alx),
     Realtek(Realtek),
     Usb(UsbNet),
     UsbVendor(UsbEthernet),
@@ -255,6 +257,7 @@ impl Adapter {
             Self::Igc(_) => "igc",
             Self::E1000e(_) | Self::Pch(_) => "e1000e",
             Self::Igb(_) => "igb",
+            Self::Alx(_) => "alx",
             Self::Realtek(_) => "realtek",
             Self::Usb(_) => "usb-cdc",
             Self::Tg3(_) => "tg3",
@@ -275,6 +278,7 @@ impl Adapter {
             Self::E1000e(device) => &device.location,
             Self::Pch(device) => &device.location,
             Self::Igb(device) => &device.location,
+            Self::Alx(device) => &device.location,
             Self::Realtek(device) => &device.location,
             Self::Usb(device) => &device.location,
             Self::UsbVendor(device) => &device.location,
@@ -296,6 +300,7 @@ impl Link for Adapter {
             Self::E1000e(device) => device.mac(),
             Self::Pch(device) => device.mac(),
             Self::Igb(device) => device.mac(),
+            Self::Alx(device) => device.mac(),
             Self::Realtek(device) => device.mac(),
             Self::Usb(device) => device.mac(),
             Self::UsbVendor(device) => device.mac(),
@@ -314,6 +319,7 @@ impl Link for Adapter {
             Self::E1000e(device) => device.carrier(),
             Self::Pch(device) => device.carrier(),
             Self::Igb(device) => device.carrier(),
+            Self::Alx(device) => device.carrier(),
             Self::Realtek(device) => device.carrier(),
             Self::Usb(device) => device.carrier(),
             Self::UsbVendor(device) => device.carrier(),
@@ -332,6 +338,7 @@ impl Link for Adapter {
             Self::E1000e(device) => device.signals(),
             Self::Pch(device) => device.signals(),
             Self::Igb(device) => device.signals(),
+            Self::Alx(device) => device.signals(),
             Self::Realtek(device) => device.signals(),
             Self::Usb(device) => device.signals(),
             Self::UsbVendor(device) => device.signals(),
@@ -359,6 +366,7 @@ impl Link for Adapter {
             Self::E1000e(device) => device.transmit(frame),
             Self::Pch(device) => device.transmit(frame),
             Self::Igb(device) => device.transmit(frame),
+            Self::Alx(device) => device.transmit(frame),
             Self::Realtek(device) => device.transmit(frame),
             Self::Usb(device) => device.transmit(frame),
             Self::UsbVendor(device) => device.transmit(frame),
@@ -377,6 +385,7 @@ impl Link for Adapter {
             Self::E1000e(device) => device.receive(),
             Self::Pch(device) => device.receive(),
             Self::Igb(device) => device.receive(),
+            Self::Alx(device) => device.receive(),
             Self::Realtek(device) => device.receive(),
             Self::Usb(device) => device.receive(),
             Self::UsbVendor(device) => device.receive(),
@@ -395,6 +404,7 @@ impl Link for Adapter {
             Self::E1000e(device) => device.receive_reusing(frame),
             Self::Pch(device) => device.receive_reusing(frame),
             Self::Igb(device) => device.receive_reusing(frame),
+            Self::Alx(device) => device.receive_reusing(frame),
             Self::Realtek(device) => device.receive_reusing(frame),
             Self::Usb(device) => device.receive_reusing(frame),
             Self::UsbVendor(device) => device.receive_reusing(frame),
@@ -425,6 +435,7 @@ pub fn claims_identity(function: &crate::bus::pci::Identity) -> bool {
         || net::e1000e::matches_identity(function)
         || pch::matches_identity(function)
         || net::igb::matches_identity(function)
+        || net::alx::matches_identity(function)
         || realtek::matches_identity(function)
         || crate::audio::hda::pci::identify_identity(function).is_ok()
         || function.class == nvme::CLASS
@@ -1241,6 +1252,12 @@ pub unsafe fn probe_with_provider(
                     }
                 }
                 attach_link!(attached, Adapter::Igb);
+            } else if net::alx::matches(&function) {
+                let minimum = minimum_for_function!().clone();
+                // SAFETY: as for e1000e, the caller granted exclusive ownership
+                // of the mapped PCI functions and their controllers.
+                let attached = unsafe { Alx::new(&mut function, handoff, dma, minimum.clone()) };
+                attach_link!(attached, Adapter::Alx);
             } else if realtek::matches(&function) {
                 let minimum = minimum_for_function!().clone();
                 // SAFETY: the caller granted exclusive post-EBS ownership of
