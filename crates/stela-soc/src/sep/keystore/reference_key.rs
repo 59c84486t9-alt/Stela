@@ -8,8 +8,10 @@
 //! Thus the exported reference contains no private scalar, survives reopen,
 //! and cannot authorize a key belonging to another machine or policy.
 //!
-//! Only the source-observed standalone class 13 / option 1 profile and P-256
-//! types 4/5 are admitted. Credential bags, deletion/revocation, attestation,
+//! Only the standalone class 13 profile with options 1 (libFDR's `rko: 1`) or
+//! none (a request without `rko`, as a post-sign-in caller sends it in
+//! build-49) and P-256 types 4/5 are admitted. The options value is bound
+//! into the scalar and descriptor; its sepOS effect is not interpreted. Credential bags, deletion/revocation, attestation,
 //! private export and unsupported key classes remain separate operations.
 use super::super::Entropy;
 use super::dictionary::{dictionary, number, tagged};
@@ -31,7 +33,8 @@ use stela_formats::der::{self, Cursor};
 use zeroize::Zeroizing;
 
 pub(super) const CLASS: u32 = 13;
-pub(super) const OPTIONS: u32 = 1;
+/// `rko` values admitted: none (0, the parameter absent) and libFDR's 1.
+pub(super) const OPTIONS: [u32; 2] = [0, 1];
 const VERSION: u8 = 1;
 const SEED_BYTES: usize = 32;
 const SCALAR_DOMAIN: &[u8] = b"Stela SEP reference P-256 scalar v1\0";
@@ -45,24 +48,32 @@ pub(super) struct ReferenceKey {
 }
 
 impl ReferenceKey {
-    pub(super) fn create(root: &[u8; 32], kind: u32, entropy: &mut dyn Entropy) -> Result<Vec<u8>> {
+    pub(super) fn create(
+        root: &[u8; 32],
+        kind: u32,
+        options: u32,
+        entropy: &mut dyn Entropy,
+    ) -> Result<Vec<u8>> {
         if !matches!(kind, 4 | 5) {
             return Err(refuse!("SEP reference-key type is not implemented"));
+        }
+        if !OPTIONS.contains(&options) {
+            return Err(refuse!("SEP reference-key options are not implemented"));
         }
         let mut seed = [0; SEED_BYTES];
         entropy.fill(&mut seed)?;
         let key = Self {
-            secret: derive(root, kind, &seed)?,
+            secret: derive(root, kind, options, &seed)?,
         };
         let public = key.compact_public();
-        let metadata = metadata(kind, &seed, &public);
+        let metadata = metadata(kind, options, &seed, &public);
         let mac = authenticator(root, &metadata).finalize().into_bytes();
         let descriptor = dictionary(&[
             (b"bc", number(CLASS as u8)),
             (b"kt", number(kind as u8)),
             (b"mac", tagged(4, &mac)),
             (b"pub", tagged(4, &public)),
-            (b"rko", number(OPTIONS as u8)),
+            (b"rko", number(options as u8)),
             (b"salt", tagged(4, &seed)),
             (b"v", number(VERSION)),
         ]);
@@ -88,9 +99,11 @@ impl ReferenceKey {
         };
         let mac = field(&mut fields, b"mac", 4)?;
         let public = field(&mut fields, b"pub", 4)?;
-        if der::unsigned(field(&mut fields, b"rko", 2)?)? != [OPTIONS as u8] {
-            return Err(refuse!("SEP reference-key options are not implemented"));
-        }
+        let options = match der::unsigned(field(&mut fields, b"rko", 2)?)? {
+            [0] => 0,
+            [1] => 1,
+            _ => return Err(refuse!("SEP reference-key options are not implemented")),
+        };
         let seed: [u8; SEED_BYTES] = field(&mut fields, b"salt", 4)?
             .try_into()
             .map_err(|_| refuse!("SEP reference-key seed has the wrong length"))?;
@@ -103,11 +116,11 @@ impl ReferenceKey {
                 "SEP reference-key point or MAC has the wrong length"
             ));
         }
-        authenticator(root, &metadata(kind, &seed, public))
+        authenticator(root, &metadata(kind, options, &seed, public))
             .verify_slice(mac)
             .map_err(|_| refuse!("SEP reference-key authentication failed"))?;
         let key = Self {
-            secret: derive(root, kind, &seed)?,
+            secret: derive(root, kind, options, &seed)?,
         };
         if key.compact_public() != public {
             return Err(refuse!(
@@ -144,13 +157,13 @@ impl ReferenceKey {
     }
 }
 
-fn derive(root: &[u8; 32], kind: u32, seed: &[u8; SEED_BYTES]) -> Result<SecretKey> {
+fn derive(root: &[u8; 32], kind: u32, options: u32, seed: &[u8; SEED_BYTES]) -> Result<SecretKey> {
     for counter in 0..MAX_ATTEMPTS {
         let mut mac = Hmac::<Sha256>::new_from_slice(root).expect("HMAC accepts 256-bit roots");
         mac.update(SCALAR_DOMAIN);
         mac.update(&CLASS.to_be_bytes());
         mac.update(&kind.to_be_bytes());
-        mac.update(&OPTIONS.to_be_bytes());
+        mac.update(&options.to_be_bytes());
         mac.update(seed);
         mac.update(&counter.to_be_bytes());
         let candidate = Zeroizing::new(<[u8; 32]>::from(mac.finalize().into_bytes()));
@@ -181,12 +194,12 @@ fn authenticator(root: &[u8; 32], metadata: &[u8]) -> Hmac<Sha256> {
     mac
 }
 
-fn metadata(kind: u32, seed: &[u8; SEED_BYTES], public: &[u8]) -> Vec<u8> {
+fn metadata(kind: u32, options: u32, seed: &[u8; SEED_BYTES], public: &[u8]) -> Vec<u8> {
     dictionary(&[
         (b"bc", number(CLASS as u8)),
         (b"kt", number(kind as u8)),
         (b"pub", tagged(4, public)),
-        (b"rko", number(OPTIONS as u8)),
+        (b"rko", number(options as u8)),
         (b"salt", tagged(4, seed)),
         (b"v", number(VERSION)),
     ])
@@ -286,7 +299,7 @@ pub(super) mod tests {
     #[test]
     fn compact_key_matches_independent_openssl_and_survives_authenticated_reopen() {
         let root = [1; 32];
-        let encoded = ReferenceKey::create(&root, 5, &mut |bytes: &mut [u8]| {
+        let encoded = ReferenceKey::create(&root, 5, 1, &mut |bytes: &mut [u8]| {
             bytes.fill(2);
             Ok(())
         })
@@ -311,7 +324,7 @@ pub(super) mod tests {
                 .any(|w| w == key.secret.to_bytes().as_slice())
         );
         assert!(ReferenceKey::open(&[2; 32], &encoded).is_err());
-        let another = ReferenceKey::create(&root, 5, &mut |bytes: &mut [u8]| {
+        let another = ReferenceKey::create(&root, 5, 1, &mut |bytes: &mut [u8]| {
             bytes.fill(3);
             Ok(())
         })
@@ -328,7 +341,7 @@ pub(super) mod tests {
     #[test]
     fn all_descriptor_bytes_are_bound_and_truncation_or_other_metadata_cannot_reopen() {
         let root = [1; 32];
-        let encoded = ReferenceKey::create(&root, 5, &mut |bytes: &mut [u8]| {
+        let encoded = ReferenceKey::create(&root, 5, 1, &mut |bytes: &mut [u8]| {
             bytes.fill(2);
             Ok(())
         })
@@ -345,7 +358,7 @@ pub(super) mod tests {
         let mut trailing = encoded.clone();
         trailing.push(0);
         assert!(ReferenceKey::open(&root, &trailing).is_err());
-        let kind4 = ReferenceKey::create(&root, 4, &mut |bytes: &mut [u8]| {
+        let kind4 = ReferenceKey::create(&root, 4, 1, &mut |bytes: &mut [u8]| {
             bytes.fill(2);
             Ok(())
         })
@@ -363,7 +376,7 @@ pub(super) mod tests {
         use p256::ecdsa::signature::{Verifier, hazmat::PrehashVerifier};
         use sha2::Digest;
         let root = [1; 32];
-        let blob = ReferenceKey::create(&root, 5, &mut |bytes: &mut [u8]| {
+        let blob = ReferenceKey::create(&root, 5, 1, &mut |bytes: &mut [u8]| {
             bytes.fill(2);
             Ok(())
         })
@@ -395,7 +408,7 @@ pub(super) mod tests {
     fn reference_signature_verifies_with_openssl() {
         use sha2::Digest;
         let root = [1; 32];
-        let blob = ReferenceKey::create(&root, 5, &mut |bytes: &mut [u8]| {
+        let blob = ReferenceKey::create(&root, 5, 1, &mut |bytes: &mut [u8]| {
             bytes.fill(2);
             Ok(())
         })
@@ -441,6 +454,51 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn absent_options_bind_a_distinct_reopenable_key() {
+        let root = [1; 32];
+        let seed = |bytes: &mut [u8]| -> Result<()> {
+            bytes.fill(2);
+            Ok(())
+        };
+        let none = ReferenceKey::create(&root, 4, 0, &mut { seed }).unwrap();
+        let one = ReferenceKey::create(&root, 4, 1, &mut { seed }).unwrap();
+        let opened = ReferenceKey::open(&root, &none).unwrap();
+        // The same seed under other options derives another scalar.
+        assert_ne!(
+            opened.secret.to_bytes(),
+            ReferenceKey::open(&root, &one).unwrap().secret.to_bytes()
+        );
+        // The descriptor carries rko 0; flipping it to 1 fails the MAC.
+        let marker = b"\x0c\x03rko\x02\x01\x00";
+        let at = none
+            .windows(marker.len())
+            .position(|w| w == marker)
+            .unwrap();
+        let mut forged = none.clone();
+        forged[at + marker.len() - 1] = 1;
+        assert_eq!(
+            ReferenceKey::open(&root, &forged).err().unwrap(),
+            refuse!("SEP reference-key authentication failed")
+        );
+        forged[at + marker.len() - 1] = 2;
+        assert_eq!(
+            ReferenceKey::open(&root, &forged).err().unwrap(),
+            refuse!("SEP reference-key options are not implemented")
+        );
+        let mut calls = 0;
+        let mut counted = |bytes: &mut [u8]| -> Result<()> {
+            calls += 1;
+            bytes.fill(2);
+            Ok(())
+        };
+        assert_eq!(
+            ReferenceKey::create(&root, 4, 2, &mut counted).unwrap_err(),
+            refuse!("SEP reference-key options are not implemented")
+        );
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
     fn unsupported_type_and_entropy_failures_cannot_publish_a_reference() {
         let mut calls = 0;
         let mut entropy = |bytes: &mut [u8]| {
@@ -448,9 +506,9 @@ pub(super) mod tests {
             bytes.fill(7);
             Err(refuse!("injected entropy failure"))
         };
-        assert!(ReferenceKey::create(&[1; 32], 7, &mut entropy).is_err());
+        assert!(ReferenceKey::create(&[1; 32], 7, 1, &mut entropy).is_err());
         assert_eq!(
-            ReferenceKey::create(&[1; 32], 5, &mut entropy).unwrap_err(),
+            ReferenceKey::create(&[1; 32], 5, 1, &mut entropy).unwrap_err(),
             refuse!("injected entropy failure")
         );
         assert_eq!(calls, 1);

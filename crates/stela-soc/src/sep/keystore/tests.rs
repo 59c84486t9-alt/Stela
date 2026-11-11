@@ -170,13 +170,56 @@ fn source_shaped_constructor_returns_reopenable_keys_and_advances_to_attestation
     }
 }
 
+// The build-49 post-sign-in request: {bc: 13, kt: 4, o: "oc"}, no `rko`.
+const REFERENCE_CREATE_NO_OPTIONS: &[u8] =
+    b"\x31\x1b\x30\x07\x0c\x02bc\x02\x01\x0d\x30\x07\x0c\x02kt\x02\x01\x04\x30\x07\x0c\x01o\x0c\x02oc";
+
+#[test]
+fn constructor_without_options_returns_a_key_bound_to_no_options() {
+    for version in [1, 2] {
+        let root = Zeroizing::new([1; 32]);
+        let mut keystore = KeyStore::with_system_keys(root.clone());
+        let request = system_request_with_operation(version, 0, REFERENCE_CREATE_NO_OPTIONS);
+        let sent = frame(system_key::PERFORM_OPERATION, 33, request.len());
+        let (reply, output) =
+            ask_with_entropy(&mut keystore, sent, request, &mut |bytes: &mut [u8]| {
+                bytes.fill(2);
+                Ok(())
+            });
+        let reply = reply.unwrap();
+        assert_eq!((reply.tag, reply.parameter), (sent.tag | REPLY, 0));
+        assert_eq!(reply.data as usize >> LENGTH_SHIFT, output.len());
+        let parsed = Message::parse(&output).unwrap();
+        let mut fields = parsed.fields();
+        let blob = fields.blob().unwrap();
+        fields.end().unwrap();
+        let key = reference_key::ReferenceKey::open(&root, blob).unwrap();
+        assert_eq!(key.public()[0], 4);
+        assert!(blob.windows(8).any(|w| w == b"\x0c\x03rko\x02\x01\x00"));
+        assert_eq!(keystore.diagnostics().count(), 0);
+        // An options value outside {absent, 0, 1} still refuses.
+        let mut two = REFERENCE_CREATE.to_vec();
+        *two.last_mut().unwrap() = 2;
+        let request = system_request_with_operation(version, 0, &two);
+        let sent = frame(system_key::PERFORM_OPERATION, 34, request.len());
+        let (reply, output) = ask(&mut keystore, sent, request);
+        let refusal = reply.unwrap_err();
+        assert_eq!(
+            refusal.reason,
+            refuse!("SEP reference-key options are not implemented")
+        );
+        assert_eq!(refusal.answer.unwrap().frame, failure(sent));
+        assert!(output.is_empty());
+    }
+}
+
 #[test]
 fn reference_signing_roundtrips_original_dictionary_in_both_ipc_versions() {
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
     use sha2::Digest;
     for version in [1, 2] {
         let root = Zeroizing::new([1; 32]);
-        let blob = reference_key::ReferenceKey::create(&root, 5, &mut |bytes: &mut [u8]| {
+        let blob = reference_key::ReferenceKey::create(&root, 5, 1, &mut |bytes: &mut [u8]| {
             bytes.fill(2);
             Ok(())
         })
@@ -286,8 +329,9 @@ fn creation_rejects_bad_dictionary_and_public_query_transport_before_semantics()
     unsorted[2..11].copy_from_slice(&REFERENCE_CREATE[11..20]);
     unsorted[11..20].copy_from_slice(&REFERENCE_CREATE[2..11]);
     bad.push(unsorted);
-    let mut missing = REFERENCE_CREATE[..29].to_vec();
-    missing[1] = 27;
+    // Without its class; a missing `rko` alone is admitted as no options.
+    let mut missing = vec![0x31, 28];
+    missing.extend_from_slice(&REFERENCE_CREATE[11..]);
     bad.push(missing);
     for index in [10, 19, 38] {
         // negative class/type/options are not u32

@@ -38,6 +38,7 @@ pub(super) enum Operation<'a> {
     PublicLocalSigning,
     CreateReference {
         kind: u32,
+        options: u32,
     },
     AttestReference {
         blob: &'a [u8],
@@ -95,7 +96,9 @@ impl SystemKeys {
         match operation {
             Operation::PublicIdentity => Ok(self.public(PublicQuery::Identity)?.to_vec()),
             Operation::PublicLocalSigning => Ok(self.public(PublicQuery::LocalSigning)?.to_vec()),
-            Operation::CreateReference { kind } => ReferenceKey::create(&self.root, kind, entropy),
+            Operation::CreateReference { kind, options } => {
+                ReferenceKey::create(&self.root, kind, options, entropy)
+            }
             Operation::SignReference { blob, digest } => {
                 let reference = ReferenceKey::open(&self.root, blob)?;
                 reference.sign_digest(digest)
@@ -252,11 +255,13 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
     let reference_fields = [reference_class, reference_type, reference_options];
     match operation {
         Some(ParameterOperation::CreateReference) => {
+            // `rko` is optional: libFDR sends 1, another caller none.
             if key_type.is_some()
                 || generation.is_some()
                 || reference_blob.is_some()
                 || digest.is_some()
-                || reference_fields.iter().any(Option::is_none)
+                || reference_class.is_none()
+                || reference_type.is_none()
             {
                 return Err(refuse!(
                     "SEP reference-key create dictionary is incomplete or mixed"
@@ -270,14 +275,15 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
             if reference_class != Some(reference_key::CLASS) {
                 return Err(refuse!("SEP reference-key class is not implemented"));
             }
-            if reference_options != Some(reference_key::OPTIONS) {
+            let options = reference_options.unwrap_or(0);
+            if !reference_key::OPTIONS.contains(&options) {
                 return Err(refuse!("SEP reference-key options are not implemented"));
             }
             let kind = reference_type.unwrap();
             if !matches!(kind, 4 | 5) {
                 return Err(refuse!("SEP reference-key type is not implemented"));
             }
-            Ok(Operation::CreateReference { kind })
+            Ok(Operation::CreateReference { kind, options })
         }
         Some(ParameterOperation::SignReference) => {
             if transport_operation != 0
@@ -308,7 +314,7 @@ pub(super) fn operation<'a>(variant: u32, fields: &mut Fields<'a>) -> Result<Ope
                 || generation.is_some()
                 || reference_class.is_some()
                 || reference_type.is_some()
-                || reference_options.is_some_and(|v| v != reference_key::OPTIONS)
+                || reference_options.is_some_and(|v| !reference_key::OPTIONS.contains(&v))
             {
                 return Err(refuse!(
                     "SEP reference-key attestation parameters are not implemented"
