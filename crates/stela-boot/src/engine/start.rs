@@ -6,8 +6,7 @@ use crate::Result;
 use alloc::string::ToString;
 use stela_contracts::refuse;
 
-/// How long XNU's debugger cross-call waits for every PE (`debug-ack`).
-const DEBUG_ACK_SECONDS: u64 = 10;
+use stela_boot_core::guest_timeouts::DEBUG_ACK_SECONDS;
 
 /// The boot-args that scale XNU's lock timeouts for this host, each with a
 /// leading space. They assume the modeled chip's cores; a slower host's
@@ -44,7 +43,8 @@ fn from_disk(
     // stackshot: AppleM68Buttons' diagnostic chord (`stackshot-mask`, which
     // J473's tree leaves to the default, its one button). XNU's default is
     // 1,440,000 ticks (60 ms), short for PEs that answer at their next
-    // exit, so this gives 10 s. Machine timeout boot-args are in picoseconds
+    // exit, so this gives `DEBUG_ACK_SECONDS`, well inside the watchdog
+    // mechanism a panic arms (`guest_timeouts`). Machine timeout boot-args are in picoseconds
     // (osfmk/kern/startup.h), converted to ticks only when overridden.
     // System sleep is not modeled, so `noidle` stops the idle timer that
     // would ask for it.
