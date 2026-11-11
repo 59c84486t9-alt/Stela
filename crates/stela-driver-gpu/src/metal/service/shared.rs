@@ -104,6 +104,9 @@ pub struct SharedService<B: Backend, C: Compiler> {
     /// The stack jobs run on, zero while the platform runs none, and the
     /// lock they run under.
     compile_stack: AtomicU64,
+    /// The longest a frontend call waits for the turn before it is answered
+    /// `Pending`, in ticks; 0 waits for as long as the holder holds it.
+    wait_bound: AtomicU64,
     /// Ticks a job may wait for a waiting processor before its caller's
     /// runs it ([`Self::set_force_after`]).
     force_after: AtomicU64,
@@ -314,6 +317,9 @@ pub struct Served {
     pub deferrals: u32,
     /// The longest one of the call's waits for a turn.
     pub longest_wait: u64,
+    /// Answered `Pending` once its wait for the turn passed the bound
+    /// ([`SharedService::set_wait_bound`]).
+    pub gave_up: bool,
 }
 
 // SAFETY: the lock gives one PE at a time the service, which `Send` lets move
@@ -531,6 +537,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             publishable: AtomicBool::new(publishable),
             early: [const { (AtomicU64::new(0), AtomicU64::new(0)) }; PENDING],
             compile_stack: AtomicU64::new(0),
+            wait_bound: AtomicU64::new(0),
             force_after: AtomicU64::new(u64::MAX),
             job_lock: JobLock {
                 lock: compile_lock.unwrap_or_default(),
@@ -548,6 +555,14 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
     /// [`Self::run_job`].
     pub fn set_compile_stack(&self, stack: u64) {
         self.compile_stack.store(stack, Ordering::Release);
+    }
+
+    /// Bounds a frontend call's wait for the turn to `ticks`: a call that
+    /// waited so long ran nothing, so it is answered `Pending` and the
+    /// frontend makes it again with its processor back in the guest, which
+    /// takes no interrupt while it waits here.
+    pub fn set_wait_bound(&self, ticks: u64) {
+        self.wait_bound.store(ticks, Ordering::Release);
     }
 
     /// Bounds how long a job waits for a processor whose guest waits: once
@@ -901,6 +916,21 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         }
     }
 
+    /// The turn, unless the wait bound ([`Self::set_wait_bound`]) passes
+    /// first, counted from `rang`.
+    fn turn_within(&self, rang: u64) -> Option<Turn<'_, B, C>> {
+        let bound = self.wait_bound.load(Ordering::Acquire);
+        loop {
+            if let Some(turn) = self.try_turn() {
+                return Some(turn);
+            }
+            if bound != 0 && (self.host.ticks)().wrapping_sub(rang) >= bound {
+                return None;
+            }
+            (self.host.relax)();
+        }
+    }
+
     /// Runs `call` on the service in a turn of its own.
     fn call<R>(&self, call: impl FnOnce(&mut Service<B, C>) -> R) -> R {
         let mut turn = self.turn();
@@ -1007,6 +1037,7 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
                 compiled: 0,
                 deferrals: u32::from(status == Status::Pending),
                 longest_wait: 0,
+                gave_up: false,
             });
         };
         if self.still_pending(connection, record, caller) {
@@ -1023,7 +1054,26 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
             served_at_once(Operation::Poll.raw(), Status::Ok);
             return Ok(());
         }
-        let mut turn = self.turn();
+        let Some(mut turn) = self.turn_within(rang) else {
+            // Nothing of the call ran: it is made again once the frontend
+            // has had its processor back.
+            let call = read_record(record, caller)?;
+            answer_pending(record, call, caller)?;
+            let left = (self.host.ticks)();
+            (self.host.served)(Served {
+                operation: call.operation,
+                status: Status::Pending,
+                waited: left.wrapping_sub(rang),
+                held: 0,
+                progress: None,
+                phases: None,
+                compiled: 0,
+                deferrals: 0,
+                longest_wait: left.wrapping_sub(rang),
+                gave_up: true,
+            });
+            return Ok(());
+        };
         let entered = (self.host.ticks)();
         let waited = entered.wrapping_sub(rang);
         let deferring =
@@ -1111,6 +1161,7 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
             compiled: 0,
             deferrals: u32::from(status == Status::Pending),
             longest_wait: waited,
+            gave_up: false,
         });
         for reason in &refused {
             (self.host.report)(reason);
@@ -1158,6 +1209,7 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
             compiled: 0,
             deferrals: 0,
             longest_wait: entered.wrapping_sub(rang),
+            gave_up: false,
         });
         imported.map_err(|fault| {
             let bytes: u64 = ranges.iter().map(|range| range.bytes).sum();

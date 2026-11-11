@@ -158,6 +158,22 @@ const BOOT_JOB_MILLIS: u64 = 100;
 /// benchmark, no call waits forever.
 const FORCE_JOB_MILLIS: u64 = 30;
 
+/// How long a frontend call waits for the turn before it is answered
+/// `Pending` and made again (`SharedService::set_wait_bound`): its PE takes
+/// no guest interrupt while it waits, and XNU panics when a thread cannot be
+/// switched off its CPU within half a second.
+const WAIT_BOUND_MILLIS: u64 = 2;
+
+/// A single gate exit this long or longer is reported once a boot
+/// (`GPU LONG EXIT`): 100 ms.
+const LONG_EXIT_MILLIS: u64 = 100;
+
+/// The longest single exit since the last report, in ticks, and its
+/// operation; the frontend calls answered `Pending` at the wait bound.
+static LONGEST_EXIT: AtomicU64 = AtomicU64::new(0);
+static LONGEST_EXIT_OPERATION: AtomicU32 = AtomicU32::new(0);
+static GAVE_UP: AtomicU64 = AtomicU64::new(0);
+
 /// A turn held this long or longer is reported once for each operation and
 /// phase: no turn should come near it.
 const LONG_TURN_MILLIS: u64 = 50;
@@ -420,6 +436,7 @@ static UNREACHED: AtomicU64 = AtomicU64::new(0);
 /// it returns, so a call that holds the service long is guest time lost.
 fn served(served: Served) {
     report_long_turn(&served);
+    note_exit(&served);
     // A record out of reach names no operation and leaves the call closed.
     if served.operation == 0 && served.status == Status::Closed {
         UNREACHED.fetch_add(1, Ordering::Relaxed);
@@ -468,6 +485,35 @@ fn served(served: Served) {
     calls
         .deferrals
         .fetch_add(u64::from(served.deferrals), Ordering::Relaxed);
+}
+
+/// Keeps the longest single exit, and says once a boot when one reached
+/// [`LONG_EXIT_MILLIS`]: `GPU LONG EXIT operation=… status=… waited_us=…
+/// held_us=…`.
+fn note_exit(served: &Served) {
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    if served.gave_up {
+        GAVE_UP.fetch_add(1, Ordering::Relaxed);
+    }
+    let exit = served.waited.wrapping_add(served.held);
+    if LONGEST_EXIT.fetch_max(exit, Ordering::Relaxed) < exit {
+        LONGEST_EXIT_OPERATION.store(served.operation, Ordering::Relaxed);
+    }
+    let tsc_hz = installed().map_or(0, |gpu| gpu.tsc_hz);
+    if tsc_hz == 0
+        || exit < tsc_hz / 1000 * LONG_EXIT_MILLIS
+        || REPORTED.swap(true, Ordering::Relaxed)
+    {
+        return;
+    }
+    let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz);
+    output::arguments(format_args!(
+        "GPU LONG EXIT operation={:#x} status={:?} waited_us={} held_us={} (once a boot)\n",
+        served.operation,
+        served.status,
+        micros(served.waited),
+        micros(served.held),
+    ));
 }
 
 /// `GPU LONG TURN operation=… phase=… held_us=…`, once for each operation
@@ -660,6 +706,15 @@ pub(in crate::engine) fn report_calls(tsc_hz: u64) {
         }
     }
     report_lock(tsc_hz);
+    let longest = LONGEST_EXIT.swap(0, Ordering::Relaxed);
+    let gave_up = GAVE_UP.swap(0, Ordering::Relaxed);
+    if longest != 0 || gave_up != 0 {
+        output::arguments(format_args!(
+            "GPU EXIT longest_us={}@{:#x} gave_up={gave_up}\n",
+            micros(longest),
+            LONGEST_EXIT_OPERATION.load(Ordering::Relaxed),
+        ));
+    }
     let mut taken: Vec<_> = CALLS
         .iter()
         .filter_map(|calls| {
@@ -958,6 +1013,7 @@ fn open_gpu(
     match opened? {
         Ok(service) => {
             // Without a second stack, every compilation stays in its turn.
+            service.set_wait_bound(gpu.tsc_hz / 1000 * WAIT_BOUND_MILLIS);
             if let Some(compiling) = Stack::map(gpu.window, STACK_BYTES) {
                 service.set_force_after(gpu.tsc_hz / 1000 * FORCE_JOB_MILLIS);
                 if let Some(free) = COMPILE_STACKS

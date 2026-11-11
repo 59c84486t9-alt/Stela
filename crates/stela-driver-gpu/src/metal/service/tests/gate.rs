@@ -711,3 +711,71 @@ fn a_look_takes_the_waiters_reading_instead_of_asking_the_driver() {
         "nothing new: the driver was asked"
     );
 }
+
+#[test]
+fn a_call_that_waits_past_the_bound_for_the_turn_runs_nothing_and_is_answered_pending() {
+    use core::sync::atomic::{AtomicBool, AtomicU64};
+    static TICKS: AtomicU64 = AtomicU64::new(0);
+    static GAVE_UP: AtomicBool = AtomicBool::new(false);
+    let host = ServiceHost {
+        relax: || {},
+        ticks: || TICKS.fetch_add(1, Ordering::Relaxed),
+        served: |served| {
+            if served.gave_up {
+                assert_eq!(served.status, Status::Pending);
+                assert_eq!(served.held, 0, "it never held the service");
+                GAVE_UP.store(true, Ordering::Relaxed);
+            }
+        },
+        ..HOST
+    };
+    let shared = SharedService::new(service(), host);
+    shared.set_wait_bound(5);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let mut memory = Memory::default();
+    // Another call holds the service past the bound.
+    let held = shared.try_turn().unwrap();
+    let waiting = gate_call(&mut memory, Operation::AllocatedSize, &[], 8);
+    GateService::serve(&shared, connection, waiting, &mut memory).unwrap();
+    let call = completed(&mut memory, waiting);
+    assert_eq!(call.status, Status::Pending.raw());
+    assert_eq!(call.reason_length, 0);
+    let response = GuestMemory::read(&mut memory, call.response).unwrap();
+    assert!(response.iter().all(|&byte| byte == 0), "nothing answered");
+    assert!(GAVE_UP.load(Ordering::Relaxed));
+    // Made again once the holder has left, it runs.
+    drop(held);
+    let again = gate_call(&mut memory, Operation::AllocatedSize, &[], 8);
+    GateService::serve(&shared, connection, again, &mut memory).unwrap();
+    assert_eq!(completed(&mut memory, again).status, Status::Ok.raw());
+}
+
+#[test]
+fn without_a_bound_a_call_waits_for_the_holder() {
+    use core::sync::atomic::AtomicU64;
+    static TICKS: AtomicU64 = AtomicU64::new(0);
+    let host = ServiceHost {
+        relax: || {},
+        ticks: || TICKS.fetch_add(1_000_000, Ordering::Relaxed),
+        ..HOST
+    };
+    let shared = std::sync::Arc::new(SharedService::new(service(), host));
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let held = shared.try_turn().unwrap();
+    let waiter = {
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            let mut memory = Memory::default();
+            let record = gate_call(&mut memory, Operation::AllocatedSize, &[], 8);
+            GateService::serve(&*shared, connection, record, &mut memory).unwrap();
+            completed(&mut memory, record).status
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    assert!(
+        !waiter.is_finished(),
+        "it waits however long the holder holds"
+    );
+    drop(held);
+    assert_eq!(waiter.join().unwrap(), Status::Ok.raw());
+}
