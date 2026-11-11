@@ -279,6 +279,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.mirrors.enter(self.cpu.pstate);
         self.cpu.state.pan = u64::from(self.cpu.pstate.pan);
         self.enter_amx_cell();
+        self.enter_cycles();
         self.cpu.state.anchors = self.anchors();
         self.cpu.state.lower_limit = self.lower_limit();
         let entered = self.timing_start();

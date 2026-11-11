@@ -107,6 +107,10 @@ pub(super) struct Mirrors {
     /// canonical memory, set as native code is entered: native ERET then
     /// leaves clearing and signalling them to the engine.
     pub(super) monitor: u64,
+    /// The performance monitor's cycle counter as native code is entered
+    /// ([`Machine::enter_cycles`]), from which a cycle counter read computes
+    /// the count where only its cell's value went stale.
+    pub(super) cycles: register_read::CycleCounter,
 }
 
 /// Where native code finds the cell at `index` of the PE's state.
@@ -212,8 +216,19 @@ pub(super) enum TimerWord {
     ControlRead,
 }
 
+/// The cell that says the cycle counter's read is plain in the state
+/// (`x86_64::register_read::cycle_counter_thunk`): it opens with the
+/// counter's own cell ([`COUNTER_MIRRORS`]) and closes only with every cell,
+/// as plainness follows from System registers and PSTATE alone, while a
+/// native transition closes the counter's cell because its value, the
+/// count, went stale.
+pub(super) const CYCLES_PLAIN: usize = TIMER_CONTROL + 1;
+
+/// Where native code finds [`Mirrors::cycles`].
+pub(super) const CYCLES: Place = Place::new(Anchor::Mirrors, offset_of!(Mirrors, cycles));
+
 /// The cell of the first of the [`STORED_WRITES`].
-const STORED_WRITE_CELLS: usize = TIMER_CONTROL + 1;
+const STORED_WRITE_CELLS: usize = CYCLES_PLAIN + 1;
 
 /// The IMPLEMENTATION DEFINED registers that a store completes writes of
 /// that get a cell of their own the first time code naming them is installed
@@ -315,6 +330,7 @@ impl Default for Mirrors {
             lines_until: 0,
             switches: register_read::SwitchLog::default(),
             monitor: 0,
+            cycles: register_read::CycleCounter::default(),
         }
     }
 }

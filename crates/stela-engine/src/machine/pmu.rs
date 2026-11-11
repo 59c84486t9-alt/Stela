@@ -388,6 +388,24 @@ impl Pmu {
         (self.pmcr0 & counter_bit(0, 32, n) == 0).then(|| &self.counters[n] as *const u64 as u64)
     }
 
+    /// PMC0 as a read at a later system count finds it: [`Self::read`]
+    /// counts from `synced_count` in the context of the last
+    /// synchronization, which no read changes, so the count at `now` is
+    /// `counters[0]` plus the floor of the ticks since, scaled with the
+    /// carried remainder, and nothing while PMC0 does not count there.
+    pub fn native_cycles(&self) -> stela_compiler::x86_64::register_read::CycleCounter {
+        let counting = self.counts(CYCLES, self.context);
+        stela_compiler::x86_64::register_read::CycleCounter {
+            open: 1,
+            counter: self.counters[CYCLES],
+            synced: self.synced_count,
+            remainder: self.remainder[CYCLES],
+            clock: if counting { self.clock } else { 0 },
+            frequency: self.frequency,
+            mask: self.layout.width.mask(),
+        }
+    }
+
     /// Whether an enabled event depends on the core clock.
     pub fn timed(&self) -> bool {
         (0..COUNTERS).any(|n| {

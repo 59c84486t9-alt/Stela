@@ -59,6 +59,9 @@
 //! names, and an [`event_wait_thunk`] consumes a set one; both clobber RCX
 //! and RDX.
 //!
+//! A [`cycle_counter_thunk`] computes a cycle counter at the count where
+//! its cell went stale but the read stays plain, and opens the cell on it.
+//!
 //! An [`interrupt_status_thunk`] reads ISR_EL1 from the interrupts waiting
 //! at entry while no line changed since; it clobbers RCX and RDX.
 use super::asm::{Alu, Asm, Cond, Gpr, Mem, Patch, Rm, ShiftOp, Size, Unary};
@@ -672,6 +675,128 @@ pub fn energy_thunk(pc: GuestAddress, rt: u8, cell: Place, count: Place) -> Thun
         asm.mov_store(Qword, register(rt), Rax);
     }
     finish_unless(code, [miss, wide], pc)
+}
+
+/// What a [`cycle_counter_thunk`] computes a cycle counter from, as the
+/// engine's performance monitor counts it: `counter` at system count
+/// `synced` with `remainder` of a cycle in 1/`frequency` units, then
+/// `clock` cycles a `frequency` ticks (0 while the counter does not count),
+/// the sum wrapped to `mask`; `remainder` is below `frequency`. `open` is nonzero while these are the
+/// monitor's; `frequency` is never 0 then.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CycleCounter {
+    pub open: u64,
+    pub counter: u64,
+    pub synced: u64,
+    pub remainder: u64,
+    pub clock: u64,
+    pub frequency: u64,
+    pub mask: u64,
+}
+
+impl CycleCounter {
+    /// The counter at system count `now`, `None` where the thunk exits
+    /// (closed, or a quotient that does not fit in 64 bits).
+    pub fn at(&self, now: u64) -> Option<u64> {
+        if self.open == 0 || self.frequency == 0 {
+            return None;
+        }
+        let ticks = now.saturating_sub(self.synced);
+        let scaled = u128::from(ticks) * u128::from(self.clock) + u128::from(self.remainder);
+        let increment = u64::try_from(scaled / u128::from(self.frequency)).ok()?;
+        Some(self.counter.wrapping_add(increment) & self.mask)
+    }
+}
+
+/// The thunk completing `MRS Xt, <cycle counter>` at `pc`. While the cell
+/// at `cell` is open it reads its `value` (the count the engine or this
+/// thunk last took in the PE's state). While it is closed but the cell at
+/// `plain` is open (the read is plain in the state: only the value went
+/// stale, at a native transition), it computes the count at the reader at
+/// `count` from the [`CycleCounter`] at `cycles` ([`CycleCounter::at`]),
+/// opens `cell` on it, as an engine read does, and completes with it. Else
+/// it exits at `pc`. It also clobbers RCX and RDX.
+pub fn cycle_counter_thunk(
+    pc: GuestAddress,
+    rt: u8,
+    cell: Place,
+    plain: Place,
+    cycles: Place,
+    count: Place,
+) -> Thunk {
+    use Gpr::{Rax, Rcx, Rdx};
+    use Size::{Dword, Qword};
+    let field = |offset: usize| Mem::base_disp8(Rcx, offset as i8);
+    let mut code = Vec::with_capacity(256);
+    let mut asm = Asm::new(&mut code);
+    asm.place(Rax, cell);
+    asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rax, 0), 0);
+    let stale = asm.jcc(Cond::E);
+    asm.mov_load(Qword, Rdx, Mem::base_disp8(Rax, VALUE));
+    let read = asm.jmp();
+    asm.bind(stale);
+    asm.place(Rax, plain);
+    asm.alu_imm8(Alu::Cmp, Qword, Mem::base(Rax, 0), 0);
+    let unplain = asm.jcc(Cond::E);
+    asm.place(Rcx, cycles);
+    asm.alu_imm8(
+        Alu::Cmp,
+        Qword,
+        field(core::mem::offset_of!(CycleCounter, open)),
+        0,
+    );
+    let closed = asm.jcc(Cond::E);
+    read_count(&mut asm, count);
+    asm.place(Rcx, cycles);
+    // The ticks since the monitor's count, none before it.
+    asm.mov(Qword, Rax, Rdx);
+    asm.alu(Alu::Xor, Dword, Rdx, Rdx);
+    asm.alu_load(
+        Alu::Sub,
+        Qword,
+        Rax,
+        field(core::mem::offset_of!(CycleCounter, synced)),
+    );
+    asm.cmov(Cond::B, Qword, Rax, Rdx);
+    asm.unary(
+        Unary::Mul,
+        Qword,
+        field(core::mem::offset_of!(CycleCounter, clock)),
+    );
+    asm.alu_load(
+        Alu::Add,
+        Qword,
+        Rax,
+        field(core::mem::offset_of!(CycleCounter, remainder)),
+    );
+    asm.alu_imm8(Alu::Adc, Qword, Rdx, 0);
+    let frequency = field(core::mem::offset_of!(CycleCounter, frequency));
+    asm.alu_load(Alu::Cmp, Qword, Rdx, frequency);
+    let wide = asm.jcc(Cond::Ae);
+    asm.unary(Unary::Div, Qword, frequency);
+    asm.alu_load(
+        Alu::Add,
+        Qword,
+        Rax,
+        field(core::mem::offset_of!(CycleCounter, counter)),
+    );
+    asm.alu_load(
+        Alu::And,
+        Qword,
+        Rax,
+        field(core::mem::offset_of!(CycleCounter, mask)),
+    );
+    asm.mov(Qword, Rdx, Rax);
+    asm.place(Rax, cell);
+    asm.mov_store(Qword, Mem::base_disp8(Rax, VALUE), Rdx);
+    asm.mov_imm32(Rcx, 1);
+    asm.mov_store(Qword, Mem::base(Rax, 0), Rcx);
+    asm.bind(read);
+    if rt != 31 {
+        asm.mov_store(Qword, register(rt), Rdx);
+    }
+    finish_unless(code, [unplain, closed, wide], pc)
 }
 
 /// The thunk completing `MRS Xt, ISR_EL1` at `pc` where the register reads
@@ -1532,6 +1657,111 @@ mod tests {
         energy.scale = u64::MAX;
         energy.frequency = 50;
         assert_eq!(run(&read.code, &mut state), MISS);
+    }
+
+    /// A cycle counter read takes an open cell's value; with the cell
+    /// closed but the read plain it computes the count as
+    /// [`CycleCounter::at`] does, carrying the remainder and wrapping to the
+    /// mask, and opens the cell on it; anything else, and a quotient too
+    /// wide, exits with Xt untouched.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn cycle_counter_thunks_compute_the_count_where_only_the_value_went_stale() {
+        use crate::GuestState;
+        use core::sync::atomic::Ordering::Relaxed;
+        #[repr(C)]
+        struct Cells {
+            cell: Cell,
+            plain: Cell,
+            cycles: CycleCounter,
+        }
+        const PLAIN: Place = Place::new(Anchor::Mirrors, size_of::<Cell>());
+        const CYCLES: Place = Place::new(Anchor::Mirrors, 2 * size_of::<Cell>());
+        let mut cells = alloc::boxed::Box::new(Cells {
+            cell: Cell::default(),
+            plain: Cell::default(),
+            cycles: CycleCounter {
+                open: 1,
+                counter: 1_000,
+                synced: 90,
+                remainder: 2,
+                clock: 7,
+                frequency: 3,
+                mask: u64::MAX >> 16,
+            },
+        });
+        let published = alloc::boxed::Box::new(CountState::default());
+        published.ceiling.store(u64::MAX, Relaxed);
+        let mut count = alloc::boxed::Box::new(Count {
+            state: &*published as *const CountState as u64,
+            ..Count::default()
+        });
+        let read = cycle_counter_thunk(PC, 3, CELL, PLAIN, CYCLES, READER);
+        let mut state = GuestState::default();
+        state.anchors[Anchor::Mirrors] = &mut *cells as *mut Cells as u64;
+        state.anchors[Anchor::Count] = &mut *count as *mut Count as u64;
+        // The reader never reads below its last count: each read starts
+        // afresh at `now`.
+        let reader = &mut *count as *mut Count;
+        let run_at = |_: &mut Cells, now: u64, state: &mut GuestState| {
+            published.offset.store(now, Relaxed);
+            // SAFETY: the test's reader, which no thunk runs over meanwhile.
+            unsafe { (*reader).last = 0 };
+            run(&read.code, state)
+        };
+        // Closed and not plain: the engine.
+        state.x[3] = 0xdead;
+        assert_eq!(run_at(&mut cells, 100, &mut state), MISS);
+        assert_eq!(state.x[3], 0xdead);
+        // Plain: (10 * 7 + 2) / 3 = 24 cycles past 1000, the cell opens.
+        cells.plain.readable = 1;
+        assert_eq!(run_at(&mut cells, 100, &mut state), NEXT);
+        assert_eq!(state.x[3], 1_024);
+        assert_eq!(cells.cycles.at(100), Some(1_024));
+        assert_eq!(
+            cells.cell,
+            Cell {
+                readable: 1,
+                value: 1_024
+            }
+        );
+        // Open: its value until the cell closes again.
+        assert_eq!(run_at(&mut cells, 400, &mut state), NEXT);
+        assert_eq!(state.x[3], 1_024);
+        cells.cell.readable = 0;
+        for now in [0, 89, 90, 91, 92, 400, 1 << 40] {
+            assert_eq!(run_at(&mut cells, now, &mut state), NEXT, "{now}");
+            assert_eq!(Some(state.x[3]), cells.cycles.at(now), "{now}");
+            cells.cell.readable = 0;
+        }
+        // Wrapped to the counter's width.
+        cells.cycles.counter = u64::MAX >> 16;
+        assert_eq!(run_at(&mut cells, 100, &mut state), NEXT);
+        assert_eq!(state.x[3], 23);
+        cells.cell.readable = 0;
+        // Not counting: the count as it stands.
+        cells.cycles.clock = 0;
+        assert_eq!(run_at(&mut cells, 1 << 40, &mut state), NEXT);
+        assert_eq!(state.x[3], u64::MAX >> 16);
+        cells.cell.readable = 0;
+        // Too wide for one division, and the monitor's view closed.
+        cells.cycles.clock = u64::MAX;
+        state.x[3] = 0xdead;
+        assert_eq!(run_at(&mut cells, u64::MAX, &mut state), MISS);
+        assert_eq!(cells.cycles.at(u64::MAX), None);
+        cells.cycles.clock = 7;
+        cells.cycles.open = 0;
+        assert_eq!(run_at(&mut cells, 100, &mut state), MISS);
+        assert_eq!((state.x[3], cells.cell.readable), (0xdead, 0));
+        // XZR discards it but the cell still opens.
+        cells.cycles.open = 1;
+        cells.cycles.counter = 1_000;
+        let discard = cycle_counter_thunk(PC, 31, CELL, PLAIN, CYCLES, READER);
+        published.offset.store(100, Relaxed);
+        // SAFETY: as above.
+        unsafe { (*reader).last = 0 };
+        assert_eq!(run(&discard.code, &mut state), NEXT);
+        assert_eq!((state.x[3], cells.cell.value), (0xdead, 1_024));
     }
 
     /// ISR_EL1 reads the waiting I and F masks as bits 7 and 6 while the

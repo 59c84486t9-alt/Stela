@@ -430,8 +430,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
         };
         if let (Ok(()), true, Some(value)) = (&step, after == before, value) {
             self.mirrors[index] = register_read::Cell { readable: 1, value };
+            if index == COUNTER_MIRRORS[0] {
+                self.mirrors[CYCLES_PLAIN] = register_read::Cell {
+                    readable: 1,
+                    value: 0,
+                };
+            }
         }
         step
+    }
+
+    /// Fill [`Mirrors::cycles`] as native code is entered: the monitor's
+    /// PMC0, which no native code changes, unless a read of it answers a
+    /// degraded value instead of the count.
+    pub(super) fn enter_cycles(&mut self) {
+        let degraded = !self.cpu.degraded.is_empty()
+            && self
+                .cpu
+                .degraded
+                .contains_key(&MIRRORED[COUNTER_MIRRORS[0]].selector());
+        self.mirrors.cycles = match &self.cpu.pmu {
+            Some(pmu) if !degraded => pmu.native_cycles(),
+            _ => register_read::CycleCounter::default(),
+        };
     }
 
     /// MRS or MSR of a [`GUARDED_MIRRORS`] register: in a guarded level, one

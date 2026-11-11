@@ -1382,6 +1382,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.clock.native(self.host.tsc_counter()?);
                 let count = Place::new(Anchor::Count, 0);
                 register_read::count_thunk(GuestAddress(pc), rt, cell, count)
+            } else if index == COUNTER_MIRRORS[0]
+                && let Some(tsc) = self.host.tsc_counter()
+            {
+                self.clock.native(tsc);
+                let count = Place::new(Anchor::Count, 0);
+                let plain = cell_place(CYCLES_PLAIN);
+                register_read::cycle_counter_thunk(GuestAddress(pc), rt, cell, plain, CYCLES, count)
             } else if index == DAIF_MIRROR && self.native_system().exclusive {
                 register_read::mask_read_thunk(GuestAddress(pc), rt, cell)
             } else {
