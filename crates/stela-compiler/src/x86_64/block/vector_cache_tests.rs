@@ -51,7 +51,7 @@ fn word(random: &mut Random) -> u32 {
             | n << 5
             | d
     };
-    match random.below(100) {
+    match random.below(124) {
         0 => three(0x4ea0_8400),        // add vd.4s,vn.4s,vm.4s
         1 => three(0x6ea0_8400),        // sub vd.4s
         2 => three(0x0e20_8400),        // add vd.8b (D write)
@@ -152,6 +152,31 @@ fn word(random: &mut Random) -> u32 {
         94 => three(0x0e20_0000),                 // saddl vd.8h,vn.8b,vm.8b
         95 => three(0x4ea0_3000),                 // ssubw2 vd.2d,vn.2d,vm.4s
         96 => three(0x2e60_2000),                 // usubl vd.4s,vn.4h,vm.4h
+        97 => 0x4ea0_9800 | n << 5 | d,           // cmeq vd.4s,#0
+        98 => 0x4ea0_8800 | n << 5 | d,           // cmgt vd.4s,#0
+        99 => 0x4e60_a800 | n << 5 | d,           // cmlt vd.8h,#0
+        100 => 0x0e20_9800 | n << 5 | d,          // cmeq vd.8b,#0 (D write)
+        101 => three(0x4ea0_6400),                // smax vd.4s
+        102 => three(0x6e20_6c00),                // umin vd.16b
+        103 => three(0x0e60_6c00),                // smin vd.4h (D write)
+        104 => three(0x6e60_6400),                // umax vd.8h
+        105 => 0x2f0d_0400 | n << 5 | d,          // ushr vd.8b,#3
+        106 => 0x2f3b_1400 | n << 5 | d,          // usra vd.2s,#5
+        107 => three(0x2e20_c000),                // umull vd.8h,vn.8b,vm.8b
+        108 => three(0x6e20_8000),                // umlal2 vd.8h
+        109 => three(0x0e20_a000),                // smlsl vd.8h,vn.8b,vm.8b
+        110 => 0x4e0c_0400 | n << 5 | d,          // dup vd.4s,vn.s[1]
+        111 => 0x4e02_0400 | n << 5 | d,          // dup vd.8h,vn.h[0]
+        112 => 0x4e0e_0400 | n << 5 | d,          // dup vd.8h,vn.h[3]
+        113 => 0x4e01_0c00 | 2 << 5 | d,          // dup vd.16b,w2
+        114 => 0x4e08_0c00 | 3 << 5 | d,          // dup vd.2d,x3
+        115 => 0x4e14_1c00 | 2 << 5 | d,          // ins vd.s[2],w2
+        116 => 0x4e0b_1c00 | 2 << 5 | d,          // ins vd.b[5],w2
+        117 => 0x6e18_0400 | n << 5 | d,          // ins vd.d[1],vn.d[0]
+        118 => 0x6e06_3400 | n << 5 | d,          // ins vd.h[1],vn.h[3]
+        119 => 0x0e16_3c00 | n << 5 | 3,          // umov w3,vn.h[5]
+        120 => three(0x6e20_8c00),                // cmeq vd.16b (register)
+        121 => three(0x0ea0_3400),                // cmgt vd.2s (D write)
         _ => three(0x4e20_d400),                  // fadd vd.4s (uncached)
     }
 }
@@ -359,7 +384,7 @@ fn every_fault_site_finds_the_cached_writes_stored() {
         0xf940_0422,     // ldr x2,[x1,#8]
     ];
     let mut sites = 0;
-    for case in 0..500 {
+    for case in 0..700 {
         let words: Vec<u32> = if case == 0 {
             fixed.to_vec()
         } else {

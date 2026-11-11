@@ -780,11 +780,19 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
         accumulate,
         insert: false,
     } = kind
-        && bytes == 16
     {
         // From the source where it is into the destination's home.
         let source = vector_source(code, source, 0);
-        if accumulate {
+        if bytes == 8 {
+            rounded_right_from(code, 0, source, lane_bytes, amount, signed, round, target);
+            if accumulate {
+                let old = vector_source(code, destination, 1);
+                let add = super::rearrange::add_or_subtract(lane_bytes, false);
+                packed(code, add, 0, old);
+            }
+            let destination = vector_destination(code, destination, 0);
+            finish_from(code, destination, 0, 8);
+        } else if accumulate {
             rounded_right_from(code, 0, source, lane_bytes, amount, signed, round, target);
             let sum = vector_accumulator(code, destination, 1);
             let add = super::rearrange::add_or_subtract(lane_bytes, false);

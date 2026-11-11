@@ -1,6 +1,6 @@
 //! Lane moves and permutes. All inputs are read before the destination is written.
 use super::{Host, commit, packed, packed_imm, read_vector, vector_offset};
-use crate::x86_64::asm::{Alu, Code, Cond, Disp, Gpr, Mem, ShiftOp, Size, vector_extensions};
+use crate::x86_64::asm::{Alu, Code, Cond, Disp, Gpr, Mem, Rm, ShiftOp, Size, vector_extensions};
 use crate::x86_64::isa::ShiftOpcode;
 use crate::x86_64::simd::encode::guest;
 use crate::{
@@ -179,8 +179,25 @@ pub(super) fn add_or_subtract(lane: u8, subtract: bool) -> Host {
     }
 }
 
-fn load_lane(code: &mut Code, source: LaneSource, bytes: u8) {
+fn load_lane(code: &mut Code, source: LaneSource, bytes: u8, target: TargetCpu) {
     use crate::aarch64::Register;
+    if let LaneSource::Vector { register, byte } = source
+        && let Some(home) = code.vector_cache().peek(register)
+        && (bytes == 2 || target >= TargetCpu::Sse41)
+    {
+        // The lane straight from the home, zero-extended into RAX: no
+        // store of a newer home first. The home is only read (ModRM.reg
+        // names it in PEXTRB/D/Q).
+        let lane = byte / bytes;
+        let mut asm = code.asm_unguarded();
+        match bytes {
+            1 => asm.sse_imm(Some(0x66), &[0x0f, 0x3a, 0x14], home, Rm::Reg(Rax), lane),
+            2 => asm.pextrw(Rax, home, lane),
+            4 => asm.pextrd(Rax, home, lane),
+            _ => asm.pextrq(Rax, home, lane),
+        }
+        return;
+    }
     if let LaneSource::Vector { register, .. } = source {
         // The lane is read from the slot: store a newer home first.
         code.write_back_vector(register);
@@ -212,7 +229,7 @@ fn load_lane(code: &mut Code, source: LaneSource, bytes: u8) {
 /// UMOV, SMOV and FMOV to a general register ([`Operand::Extract`]),
 /// which ends with the destination's store from RAX. With `held`, XMM0
 /// holds the source vector whole and the lane is its lowest.
-pub(super) fn extract(code: &mut Code, operand: &Operand, held: bool) {
+pub(super) fn extract(code: &mut Code, operand: &Operand, held: bool, target: TargetCpu) {
     let Operand::Extract {
         destination,
         source,
@@ -245,6 +262,7 @@ pub(super) fn extract(code: &mut Code, operand: &Operand, held: bool) {
                 byte,
             },
             lane_bytes,
+            target,
         );
     }
     if signed {
@@ -261,7 +279,38 @@ pub(super) fn extract(code: &mut Code, operand: &Operand, held: bool) {
     super::super::store(code, destination);
 }
 
-fn insert_lane(code: &mut Code, destination: u8, byte: u8, bytes: u8) {
+fn insert_lane(code: &mut Code, destination: u8, byte: u8, bytes: u8, target: TargetCpu) {
+    let cache = code.vector_cache();
+    if cache.active() && !cache.writes_through() && (bytes == 2 || target >= TargetCpu::Sse41) {
+        // RAX's lane straight into the destination's home: one PINSR.
+        let home = super::vector_accumulator(code, destination, 1);
+        let lane = byte / bytes;
+        let mut asm = code.asm();
+        match bytes {
+            1 => asm.sse_imm(
+                Some(0x66),
+                &[0x0f, 0x3a, 0x20],
+                home.xmm,
+                Rm::Reg(Rax),
+                lane,
+            ),
+            2 => asm.pinsrw(home.xmm, Rm::Reg(Rax), lane),
+            4 => asm.pinsrd(home.xmm, Rm::Reg(Rax), lane),
+            _ => {
+                asm.legacy(
+                    Size::Qword,
+                    Some(0x66),
+                    &[0x0f, 0x3a, 0x22],
+                    home.xmm,
+                    false,
+                    Rm::Reg(Rax),
+                );
+                asm.data(&[lane]);
+            }
+        }
+        super::finish(code, home);
+        return;
+    }
     // Only the selected lane changes; even scalar-size INS preserves all others.
     let size = match bytes {
         1 => Size::Byte,
@@ -709,7 +758,81 @@ pub(in crate::x86_64) fn vector_use(
     }
 }
 
+/// DUP of a 16-byte vector into the destination's home: one VPBROADCAST
+/// from a general register's slot or a vector's low element, or one PSHUFD
+/// of a vector's dword or qword element. Returns whether it emitted it.
+fn duplicate_direct(
+    code: &mut Code,
+    destination: u8,
+    source: LaneSource,
+    lane: u8,
+    target: TargetCpu,
+) -> bool {
+    use crate::aarch64::Register;
+    use crate::x86_64::asm::Rm;
+    if !super::three::vex(target) || !code.vector_cache().active() {
+        return false;
+    }
+    match source {
+        LaneSource::General(register @ Register::X(_)) => {
+            let storage = code.asm().guest(register).expect("X0..X30 have storage");
+            let from = match storage {
+                Rm::Reg(gpr) => {
+                    let mut asm = code.asm();
+                    if lane == 8 {
+                        asm.movq_to_xmm(0, gpr);
+                    } else {
+                        asm.movd_to_xmm(0, gpr);
+                    }
+                    Rm::Xmm(0)
+                }
+                storage => storage,
+            };
+            let destination = super::vector_destination(code, destination, 0);
+            super::three::broadcast(code, lane, destination.xmm, from);
+            super::finish(code, destination);
+            true
+        }
+        LaneSource::Vector { register, byte } if byte == 0 || lane >= 4 => {
+            let from = super::vector_source(code, register, 0);
+            let destination = super::vector_destination(code, destination, 0);
+            let index = byte / lane;
+            match lane {
+                8 => packed_imm(
+                    code,
+                    Host::ShuffleDword,
+                    destination.xmm,
+                    from,
+                    [0x44, 0xee][usize::from(index)],
+                ),
+                4 => packed_imm(
+                    code,
+                    Host::ShuffleDword,
+                    destination.xmm,
+                    from,
+                    index * 0x55,
+                ),
+                _ => super::three::broadcast(code, lane, destination.xmm, Rm::Xmm(from)),
+            }
+            super::finish(code, destination);
+            true
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu, held: Option<u8>) {
+    if let Operand::Duplicate {
+        destination,
+        source,
+        lane_bytes,
+        bytes: 16,
+    } = *operand
+        && lane_bytes < 16
+        && duplicate_direct(code, destination, source, lane_bytes, target)
+    {
+        return;
+    }
     match *operand {
         Operand::Duplicate {
             destination,
@@ -729,7 +852,7 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu, held: 
             lane_bytes,
             bytes,
         } => {
-            load_lane(code, source, lane_bytes);
+            load_lane(code, source, lane_bytes, target);
             packed(code, Host::MoveGprQword, 0, 0);
             // Unpacks broadcast the low element without SSE3+ requirements.
             if bytes > lane_bytes {
@@ -756,10 +879,10 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu, held: 
             byte,
             lane_bytes,
         } => {
-            load_lane(code, source, lane_bytes);
-            insert_lane(code, destination, byte, lane_bytes);
+            load_lane(code, source, lane_bytes, target);
+            insert_lane(code, destination, byte, lane_bytes, target);
         }
-        Operand::Extract { .. } => extract(code, operand, false),
+        Operand::Extract { .. } => extract(code, operand, false, target),
         Operand::ByteExtract(operand) => byte_extract(code, operand, target, held),
         Operand::Permute {
             destination,

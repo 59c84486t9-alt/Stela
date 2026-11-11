@@ -633,6 +633,69 @@ pub(super) fn vector_use(operand: &Operand, target: crate::TargetCpu) -> super::
     }
 }
 
+/// CMEQ, CMGT (by register or zero) and CMLT #0 that one PCMPEQ/PCMPGT
+/// computes, from the sources where they are into the destination; returns
+/// whether it emitted the comparison.
+#[allow(clippy::too_many_arguments)]
+fn single_compare(
+    code: &mut Code,
+    operation: Comparison,
+    destination: u8,
+    left: u8,
+    right: Option<u8>,
+    bytes: u8,
+    lane_bytes: u8,
+    target: crate::TargetCpu,
+) -> bool {
+    let opcode = match (operation, lane_bytes) {
+        (Comparison::Equal, 1) => Host::EqualByte,
+        (Comparison::Equal, 2) => Host::EqualWord,
+        (Comparison::Equal, 4) => Host::EqualDword,
+        (Comparison::Equal, _) => Host::EqualQword,
+        (Comparison::Greater | Comparison::LessZero, 1) => Host::GreaterByte,
+        (Comparison::Greater | Comparison::LessZero, 2) => Host::GreaterWord,
+        (Comparison::Greater | Comparison::LessZero, 4) => Host::GreaterDword,
+        (Comparison::Greater | Comparison::LessZero, _) => Host::GreaterQword,
+        _ => return false,
+    };
+    if target < opcode.requires() {
+        return false;
+    }
+    let left_xmm = vector_source(code, left, 0);
+    let right_xmm = match right {
+        Some(right) => vector_source(code, right, 1),
+        None => {
+            packed(code, Host::Xor, 1, 1);
+            1
+        }
+    };
+    // CMLT #0 is 0 > x.
+    let (first, second) = if operation == Comparison::LessZero {
+        (right_xmm, left_xmm)
+    } else {
+        (left_xmm, right_xmm)
+    };
+    let commutative = operation == Comparison::Equal;
+    if bytes == 8 {
+        three::three(code, opcode, 2, first, second, target);
+        let destination = vector_destination(code, destination, 2);
+        finish_from(code, destination, 2, 8);
+        return true;
+    }
+    // XMM2 is free and distinct from both sources.
+    let destination = vector_destination(code, destination, 2);
+    binary(
+        code,
+        opcode,
+        destination,
+        first,
+        second,
+        commutative,
+        target,
+    );
+    true
+}
+
 /// AND, ORR (and MOV, its alias with equal sources), EOR, ADD and SUB from
 /// the sources where they are into the destination: one VEX instruction
 /// writes a 16-byte result to the destination's home.
@@ -726,7 +789,7 @@ pub(super) fn emit_after(
             ref lane @ crate::aarch64::simd::rearrange::Operand::Extract {
                 source, byte: 0, ..
             },
-        ) if xmm0 == Some(source) => rearrange::extract(code, lane, true),
+        ) if xmm0 == Some(source) => rearrange::extract(code, lane, true, target),
         Operand::Immediate(ref operand) => immediates::emit(code, operand, target),
         Operand::Halving(ref operand) => halving::emit(code, operand, target),
         Operand::Product(ref operand) => products::emit(code, operand, target),
@@ -743,6 +806,18 @@ pub(super) fn emit_after(
             lane_bytes,
         } => {
             use Comparison::*;
+            if single_compare(
+                code,
+                operation,
+                destination,
+                left,
+                right,
+                bytes,
+                lane_bytes,
+                target,
+            ) {
+                return;
+            }
             // AVX-512 compares unsigned lanes without a bias (CMHI through
             // `greater`) and tests lanes directly. Signed relations keep one
             // SSE compare, inverted where needed: a mask round trip is slower.

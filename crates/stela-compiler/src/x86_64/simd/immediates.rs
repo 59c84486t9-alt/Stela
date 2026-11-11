@@ -21,8 +21,9 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
     };
     let dword = value as u32;
     let bytes16: [u8; 16] = core::array::from_fn(|i| value.to_le_bytes()[i % 8]);
-    if bytes == 16 && operation != ConstantOperation::BitClear {
-        // The constant straight into the destination's home, or ORR into it.
+    if bytes == 16 && (operation != ConstantOperation::BitClear || super::three::vex(target)) {
+        // The constant straight into the destination's home, or ORR or BIC
+        // into it.
         let destination = match operation {
             ConstantOperation::Move => super::vector_destination(code, destination, 0),
             _ => super::vector_accumulator(code, destination, 1),
@@ -48,18 +49,18 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
             packed(code, Host::MoveGprQword, xmm, 1);
             packed(code, Host::UnpackLowQword, xmm, xmm);
         }
-        if operation == ConstantOperation::Move {
-            super::finish(code, destination);
-        } else {
-            super::binary(
-                code,
-                Host::Or,
-                destination,
-                destination.xmm,
-                0,
-                true,
-                target,
-            );
+        match operation {
+            ConstantOperation::Move => super::finish(code, destination),
+            ConstantOperation::Or => {
+                let xmm = destination.xmm;
+                super::binary(code, Host::Or, destination, xmm, 0, true, target);
+            }
+            ConstantOperation::BitClear => {
+                // destination = ~constant & destination: VPANDN in place.
+                let xmm = destination.xmm;
+                super::three::three(code, Host::AndNot, xmm, 0, xmm, target);
+                super::finish(code, destination);
+            }
         }
         return;
     }

@@ -931,6 +931,28 @@ fn direct(code: &mut Code, operand: &Operand, target: TargetCpu) -> bool {
             }
             true
         }
+        Kind::Product {
+            widen: true,
+            signed,
+            accumulate,
+        } if index.is_none() && lane == 1 && sse41 => {
+            // Byte long products: both halves widened to words in place,
+            // one PMULLW.
+            let left = vector_source(code, left, 0);
+            extend_from(code, 0, left, 1, upper, signed, target);
+            let right = vector_source(code, right, 1);
+            extend_from(code, 1, right, 1, upper, signed, target);
+            if accumulate == Accumulate::None {
+                let destination = vector_destination(code, destination, 0);
+                binary(code, Host::MultiplyLowWord, destination, 0, 1, true, target);
+            } else {
+                packed(code, Host::MultiplyLowWord, 0, 1);
+                let sum = vector_accumulator(code, destination, 1);
+                let opcode = add_or_subtract(2, accumulate == Accumulate::Subtract);
+                binary(code, opcode, sum, sum.xmm, 0, false, target);
+            }
+            true
+        }
         Kind::Arithmetic {
             signed,
             wide_left,
