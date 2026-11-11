@@ -182,6 +182,15 @@ impl HostNetwork {
                 Err(error) => {
                     output::arguments(format_args!("NETWORK adapter {location} failed: {error}\n"));
                     failures.push(format!("{location}: {error}"));
+                    // Its driver's stop sequence is not proven on hardware:
+                    // on a PC an I226 without a cable ended it in an x86
+                    // exception, before the next adapter was tried. The
+                    // adapter keeps its rings and stays as it is, unused.
+                    output::arguments(format_args!(
+                        "UNSUPPORTED NETWORK adapter {location} is left initialized: stopping \
+                         an adapter that got no address is not supported\n"
+                    ));
+                    core::mem::forget(stack);
                 }
             }
         }
