@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Compiles every entry point of AIR modules the way the Metal device does,
  * with NAK's NIR options, and reports each one's outcome: the shader
- * coverage sweep of metal-device.md's bring-up plan. Each argument is an
+ * coverage sweep of the Metal device's bring-up. Each argument is an
  * .air module from Apple's `metal -c`; the inputs are never committed.
  *
  *   stela_metal_corpus [--sm SM] [--fill BYTE] MODULE.air...

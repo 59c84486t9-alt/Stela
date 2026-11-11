@@ -97,7 +97,7 @@ impl SizeAndAlign {
 /// other, which the device answers with its own layout.
 ///
 /// Measured on an M1 Pro (macOS 27) over those formats, sizes 1 to 512 in
-/// each dimension and both mip counts (`docs/design/metal-device.md`). A
+/// each dimension and both mip counts. A
 /// level whose dimensions both reach the format's 16 KiB tile (128x128 at
 /// one byte, 128x64 at two, 64x64 at four, 64x32 at eight, 32x32 at
 /// sixteen) pads its ceiling-halved size to whole tiles; the first level

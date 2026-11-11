@@ -1,6 +1,6 @@
 //! Host GPU discovery. An entry is a PCI inventory item, not an initialized
 //! accelerator or a Metal device. The native vendor ports live under this
-//! module; see `docs/design/gpu.md` for their platform and language boundary.
+//! module.
 #![no_std]
 extern crate alloc;
 

@@ -725,8 +725,7 @@ pub fn storage_attachments(
 /// code within the codes' range, as Apple GPUs do, where the blend unit
 /// would keep values past them. A device without framebuffer reads, or a
 /// function that cannot let the pipeline test fragments first, leaves
-/// them to the blend unit (metal-device.md, known hardware precision
-/// differences).
+/// them to the blend unit, a known hardware precision difference.
 fn blended_extended_range(
     capabilities: &Capabilities,
     fragment: &Interface,

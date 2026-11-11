@@ -1,5 +1,4 @@
-//! Compiled pipelines kept across boots (`docs/design/metal-device.md`,
-//! "Pipeline store").
+//! Compiled pipelines kept across boots: the pipeline store.
 //!
 //! The boot reads the store's file before the device opens and hands its
 //! bytes here ([`provide`]). The first backend to open claims it and, when
