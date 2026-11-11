@@ -375,6 +375,122 @@ impl Maximum {
     }
 }
 
+/// The guest states [`Levels::ticks`] splits busy time by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(usize)]
+pub enum Level {
+    /// EL0.
+    User,
+    /// EL1 or EL2 outside guarded mode.
+    Kernel,
+    /// Apple GXF guarded mode at any level.
+    Guarded,
+}
+
+impl Level {
+    pub const COUNT: usize = Self::Guarded as usize + 1;
+
+    pub fn of(el: u8, guarded: bool) -> Self {
+        match (guarded, el) {
+            (true, _) => Self::Guarded,
+            (false, 0) => Self::User,
+            (false, _) => Self::Kernel,
+        }
+    }
+}
+
+/// Where a PE's busy time goes in guest terms, under step timing: every
+/// phase but [`Phase::Schedule`] charged by the guest's state at the charge
+/// (an exit after its handling: an exception entry counts as the level it
+/// entered), and the PE's waits for interrupt and event. What the guest's
+/// own CPU accounting cannot see apart: its idle path between WFIs and its
+/// interrupt handlers run on busy host time too.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Levels {
+    /// Ticks by [`Level`].
+    pub ticks: [u64; Level::COUNT],
+    /// IRQs and FIQs taken, and the ticks charged from taking one until the
+    /// next exception return: handlers, and the switch to another thread
+    /// when one returns through it.
+    pub interrupts: u64,
+    pub interrupt_ticks: u64,
+    /// WFIs, and those that completed at once with an interrupt pending.
+    pub wfi: u64,
+    pub wfi_at_once: u64,
+    /// WFEs that reached the engine, and those that completed at once with
+    /// the event register set (native code completes some itself).
+    pub wfe: u64,
+    pub wfe_at_once: u64,
+    /// At each WFI, the kernel ticks charged since the PE last ran EL0 code
+    /// or reached a WFI: wake-ups that found nothing for user code, idle
+    /// paths and kernel threads.
+    pub kernel_before_wfi: u64,
+    /// Between an interrupt's entry and the next exception return.
+    pub in_interrupt: bool,
+    /// Kernel ticks charged since the PE last ran EL0 code or reached a WFI.
+    pub kernel_run: u64,
+}
+
+impl Levels {
+    /// Charge `spent` busy ticks at `level`.
+    #[inline]
+    pub(super) fn charge(&mut self, level: Level, spent: u64) {
+        self.ticks[level as usize] += spent;
+        if self.in_interrupt {
+            self.interrupt_ticks += spent;
+        }
+        if level == Level::User {
+            self.kernel_run = 0;
+        } else {
+            self.kernel_run += spent;
+        }
+    }
+
+    pub(super) fn interrupt_taken(&mut self) {
+        self.interrupts += 1;
+        self.in_interrupt = true;
+    }
+
+    /// A WFI, which completed at once if `at_once`.
+    pub(super) fn wait_for_interrupt(&mut self, at_once: bool) {
+        self.wfi += 1;
+        self.wfi_at_once += u64::from(at_once);
+        self.kernel_before_wfi += core::mem::take(&mut self.kernel_run);
+    }
+
+    /// A WFE, which completed at once if `at_once`.
+    pub(super) fn wait_for_event(&mut self, at_once: bool) {
+        self.wfe += 1;
+        self.wfe_at_once += u64::from(at_once);
+    }
+
+    /// The counts since `earlier`; the state is this one's.
+    pub fn since(&self, earlier: &Self) -> Self {
+        let mut ticks = self.ticks;
+        for (now, then) in ticks.iter_mut().zip(earlier.ticks) {
+            *now = now.wrapping_sub(then);
+        }
+        Self {
+            ticks,
+            interrupts: self.interrupts.wrapping_sub(earlier.interrupts),
+            interrupt_ticks: self.interrupt_ticks.wrapping_sub(earlier.interrupt_ticks),
+            wfi: self.wfi.wrapping_sub(earlier.wfi),
+            wfi_at_once: self.wfi_at_once.wrapping_sub(earlier.wfi_at_once),
+            wfe: self.wfe.wrapping_sub(earlier.wfe),
+            wfe_at_once: self.wfe_at_once.wrapping_sub(earlier.wfe_at_once),
+            kernel_before_wfi: self
+                .kernel_before_wfi
+                .wrapping_sub(earlier.kernel_before_wfi),
+            ..*self
+        }
+    }
+}
+
+/// Whether `word` is ERET, ERETAA or ERETAB.
+pub fn exception_return(word: u32) -> bool {
+    matches!(word, 0xd69f_03e0 | 0xd69f_0bff | 0xd69f_0fff)
+}
+
 /// Host ticks spent so far, by phase and by exit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StepTiming {
@@ -388,6 +504,8 @@ pub struct StepTiming {
     /// What the native check fault being handled found, which its exit is
     /// charged to ([`Check`]).
     pub check: Option<Check>,
+    /// Busy time in guest terms ([`Levels`]).
+    pub levels: Levels,
 }
 
 impl StepTiming {
@@ -402,6 +520,7 @@ impl StepTiming {
         for (now, then) in delta.exits.iter_mut().zip(earlier.exits) {
             *now = (now.0.wrapping_sub(then.0), now.1.wrapping_sub(then.1));
         }
+        delta.levels = self.levels.since(&earlier.levels);
         delta
     }
 }
@@ -512,6 +631,73 @@ mod tests {
         assert_eq!((key(0xd538_d080).count, key(0xd538_d080).closes), (1, 0));
         assert_eq!((key(0xd518_c000).count, key(0xd518_c000).closes), (1, 1));
         assert!(machine.take_system_exits().is_empty());
+    }
+
+    /// Busy phases go to the guest level they were charged at, the kernel
+    /// run before a WFI is kept at it, and an interrupt's ticks end with
+    /// its exception return, whose own ticks count.
+    #[test]
+    fn busy_time_is_split_by_level_wait_and_interrupt() {
+        use super::super::tests::{machine_on, one_timer_bank};
+        const WFI: u32 = 0xd503_207f;
+        let mut machine = machine_on(one_timer_bank(), &[]);
+        machine.set_step_timing(true);
+        machine.cpu.pstate.el = 0;
+        machine.host.now = 10;
+        machine.timing_charge(Phase::Native, 0);
+        machine.cpu.pstate.el = 1;
+        machine.host.now = 30;
+        machine.timing_charge(Phase::Fetch, 10);
+        machine.host.now = 100;
+        machine.timing_charge(Phase::Schedule, 30);
+        machine.cpu.pstate.guarded = true;
+        machine.host.now = 105;
+        machine.timing_charge(Phase::Native, 100);
+        machine.cpu.pstate.guarded = false;
+        let levels = machine.step_timing().unwrap().levels;
+        assert_eq!(levels.ticks, [10, 20, 5]);
+        assert_eq!(levels.kernel_run, 25);
+        // Nothing pending: the WFI waits, and takes the kernel run.
+        machine.lines();
+        machine.system_instruction(WFI).unwrap();
+        assert!(machine.waiting.is_some());
+        machine.waiting = None;
+        let levels = machine.step_timing().unwrap().levels;
+        assert_eq!((levels.wfi, levels.wfi_at_once), (1, 0));
+        assert_eq!((levels.kernel_before_wfi, levels.kernel_run), (25, 0));
+        // An expired virtual timer's FIQ, taken, then its handler's return.
+        machine.cpu.state.x[0] = 1500;
+        machine.system_instruction(0xd51b_e300).unwrap(); // msr cntv_tval_el0, x0
+        machine.cpu.state.x[0] = 1;
+        machine.system_instruction(0xd51b_e320).unwrap(); // msr cntv_ctl_el0, x0
+        machine.host.now = 2000;
+        machine.lines();
+        // Pending though masked: a WFI completes at once.
+        machine.cpu.pstate.daif = 0xf;
+        machine.system_instruction(WFI).unwrap();
+        assert!(machine.waiting.is_none());
+        machine.cpu.pstate.daif = 0;
+        assert!(machine.deliver_interrupts());
+        machine.host.now = 2007;
+        machine.timing_charge(Phase::Native, 2000);
+        machine.timed_word = Some(0xd69f_03e0);
+        machine.host.now = 2010;
+        machine.timing_exit(stela_compiler::block::ExitKind::System as usize, 2007);
+        machine.host.now = 2050;
+        machine.timing_charge(Phase::Native, 2010);
+        let levels = machine.step_timing().unwrap().levels;
+        assert_eq!((levels.wfi, levels.wfi_at_once), (2, 1));
+        assert_eq!((levels.interrupts, levels.interrupt_ticks), (1, 10));
+        assert!(!levels.in_interrupt);
+        // A delta keeps the state and subtracts the counts.
+        let delta = levels.since(&Levels {
+            wfi: 1,
+            ticks: [10, 0, 0],
+            ..Levels::default()
+        });
+        assert_eq!((delta.wfi, delta.ticks[0]), (1, 0));
+        assert_eq!(delta.kernel_run, levels.kernel_run);
+        assert!(exception_return(0xd69f_0bff) && !exception_return(0xd65f_03c0));
     }
 
     #[test]

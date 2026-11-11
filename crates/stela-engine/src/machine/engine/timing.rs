@@ -105,6 +105,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.cpu.pstate.el,
                 self.cpu.pstate.daif,
             );
+            if phase != step_timing::Phase::Schedule {
+                let level = step_timing::Level::of(self.cpu.pstate.el, self.cpu.pstate.guarded);
+                timing.levels.charge(level, spent);
+            }
         }
         now
     }
@@ -135,7 +139,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 let page = step_timing::device_page(physical);
                 self.system_exits.devices.add(page, 1, spent, waited);
             }
+            let level = step_timing::Level::of(self.cpu.pstate.el, self.cpu.pstate.guarded);
+            timing.levels.charge(level, spent);
             if let Some(word) = self.timed_word.take() {
+                // The interrupt's handler ends with this return, whose own
+                // ticks were its last.
+                if step_timing::exception_return(word) {
+                    timing.levels.in_interrupt = false;
+                }
                 let timed = self.system_words.entry(word).or_default();
                 timed.accesses += 1;
                 timed.ticks += spent;

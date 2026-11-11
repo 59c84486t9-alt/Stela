@@ -1008,6 +1008,17 @@ impl Heartbeat {
             // With `--profile`: the exits of every PE together, by kind, as
             // `PROFILE exits` gives the home machine's.
             let mut exits = [(0u64, 0u64); step_timing::EXIT_SLOTS];
+            // Per PE with `--profile`: its busy time (every phase but
+            // schedule) at EL0, in the kernel and in guarded mode, in
+            // interrupt handlers (an IRQ or FIQ until the next exception
+            // return) and in kernel spans that reached a WFI without running
+            // EL0 code (idle paths, wake-ups with nothing for user code,
+            // kernel threads), as shares of the interval; then its WFIs and
+            // those that completed at once, its WFEs that reached the engine
+            // and those that completed at once, and its interrupts.
+            let mut levels = String::from(
+                "PES LEVELS user%/kernel%/guarded%/irq%/before_wfi% wfi/wfi_now/wfe/wfe_now/interrupts",
+            );
             let mut totals = parallel::Counts::default();
             for (pe, (now, before)) in per_pe.iter().zip(&mut self.pe_counts).enumerate() {
                 let rate = u128::from(now.retired.saturating_sub(before.retired))
@@ -1085,6 +1096,20 @@ impl Heartbeat {
                     }
                     phases.push_str(&format!("{}", tsc_percent(now.saturating_sub(before))));
                 }
+                let level = now.levels.since(&before.levels);
+                levels.push_str(&format!(
+                    " {pe}:{}/{}/{}/{}/{}/{}/{}/{}/{}/{}",
+                    tsc_percent(level.ticks[step_timing::Level::User as usize]),
+                    tsc_percent(level.ticks[step_timing::Level::Kernel as usize]),
+                    tsc_percent(level.ticks[step_timing::Level::Guarded as usize]),
+                    tsc_percent(level.interrupt_ticks),
+                    tsc_percent(level.kernel_before_wfi),
+                    level.wfi,
+                    level.wfi_at_once,
+                    level.wfe,
+                    level.wfe_at_once,
+                    level.interrupts,
+                ));
                 for (total, (now, before)) in
                     exits.iter_mut().zip(now.exits.iter().zip(before.exits))
                 {
@@ -1146,6 +1171,7 @@ impl Heartbeat {
             output::arguments(format_args!("{itlb}\n"));
             if machine.step_timing().is_some() {
                 output::arguments(format_args!("{phases}\n"));
+                output::arguments(format_args!("{levels}\n"));
                 output::arguments(format_args!("{installs}\n"));
                 let mut slots: Vec<usize> =
                     (0..exits.len()).filter(|&slot| exits[slot].0 > 0).collect();

@@ -209,6 +209,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.cpu.registers.set(SystemRegister::HCR_EL2, 0, hcr);
         }
         self.statistics.interrupts += 1;
+        if vector != Vector::SError
+            && let Some(timing) = &mut self.step_timing
+        {
+            timing.levels.interrupt_taken();
+        }
         if vector == Vector::Fiq {
             let now = self.clock.last();
             if self
@@ -308,7 +313,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             WaitKind::Event => {
                 let now = self.now();
                 self.sample_events(now);
-                if self.cpu.consume_event() {
+                let at_once = self.cpu.consume_event();
+                if let Some(timing) = &mut self.step_timing {
+                    timing.levels.wait_for_event(at_once);
+                }
+                if at_once {
                     // The WFE of a spin-wait ends the PE's time slice: the PE
                     // it waits for runs next instead of after the slice.
                     self.slice_end = self.statistics.blocks;
@@ -323,7 +332,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 Some(now)
             }
             WaitKind::Interrupt => {
-                if self.interrupt_pending() {
+                let at_once = self.interrupt_pending();
+                if let Some(timing) = &mut self.step_timing {
+                    timing.levels.wait_for_interrupt(at_once);
+                }
+                if at_once {
                     return self.next();
                 }
                 None

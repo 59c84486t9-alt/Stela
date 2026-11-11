@@ -316,6 +316,9 @@ pub struct Counts {
     /// [`step_timing::StepTiming::exits`]' slots, while step timing is
     /// enabled.
     pub exits: [(u64, u64); step_timing::EXIT_SLOTS],
+    /// Its busy time in guest terms and its waits, while step timing is
+    /// enabled ([`step_timing::Levels`]).
+    pub levels: step_timing::Levels,
     /// Its installs and evictions ([`super::InstallCauses`]).
     pub installs: super::InstallCauses,
 }
@@ -1690,6 +1693,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .step_timing
                 .as_ref()
                 .map_or([(0, 0); step_timing::EXIT_SLOTS], |timing| timing.exits),
+            levels: self
+                .step_timing
+                .as_ref()
+                .map_or_else(Default::default, |timing| timing.levels),
             installs: self.install_causes(),
         }
     }
