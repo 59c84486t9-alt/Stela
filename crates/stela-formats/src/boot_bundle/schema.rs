@@ -1,5 +1,5 @@
 //! `bundle.json`, as `stela-dev boot prepare` writes it and the UEFI mount reads
-//! it (`docs/design/runtime.md#kernel-boot-bundle`). Fields that only the
+//! it. Fields that only the
 //! preparation report uses default when absent, so hand-authored bundles
 //! need only what the mount reads.
 use alloc::{collections::BTreeMap, string::String, vec::Vec};
