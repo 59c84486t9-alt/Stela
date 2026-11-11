@@ -88,7 +88,7 @@ pub(crate) struct PrepareLeaf {
     input: PathBuf,
     #[arg(long, default_value = "0x100000", value_parser = parse_address)]
     guest_base: u64,
-    #[arg(long, default_value = ".stela/cache/leaf-v1")]
+    #[arg(long, default_value = "target/cache/leaf-v1")]
     cache_dir: PathBuf,
 }
 

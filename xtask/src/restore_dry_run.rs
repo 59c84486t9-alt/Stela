@@ -69,12 +69,12 @@ pub struct RestoreDryRun {
     /// The restore IPSW.
     #[arg(
         long,
-        default_value = ".stela/images/UniversalMac_27.0.1_26A434_Restore.ipsw"
+        default_value = "target/images/UniversalMac_27.0.1_26A434_Restore.ipsw"
     )]
     ipsw: PathBuf,
     /// The payload inventory (`stela-dev image-manifest --payload-manifest`);
     /// the block hashes it names are read from beside it.
-    #[arg(long, default_value = ".stela/restore-dryrun/payload.json")]
+    #[arg(long, default_value = "target/restore-dry-run/payload.json")]
     payload: PathBuf,
     /// BuildManifest index of the erase identity; default: the inventory's
     /// only erase identity.

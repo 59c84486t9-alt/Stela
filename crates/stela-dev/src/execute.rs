@@ -21,7 +21,7 @@ pub(crate) struct RunBlocks {
     state: Option<PathBuf>,
     #[arg(long, default_value_t = 10000)]
     block_budget: usize,
-    #[arg(long, default_value = ".stela/cache/blocks-v1")]
+    #[arg(long, default_value = "target/cache/blocks-v1")]
     cache_dir: PathBuf,
     /// Enable software IB/SP authentication with the given {low, high} key.
     #[arg(long)]

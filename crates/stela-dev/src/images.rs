@@ -17,7 +17,7 @@ pub(crate) enum ImagesCommand {
         build: Option<String>,
         #[arg(long)]
         model: Option<String>,
-        #[arg(long, default_value = ".stela/images")]
+        #[arg(long, default_value = "target/images")]
         output_dir: PathBuf,
         /// Resolve the image and destination without downloading it.
         #[arg(long)]
@@ -30,7 +30,7 @@ pub(crate) enum ImagesCommand {
         build: String,
         #[arg(long)]
         model: String,
-        #[arg(long, default_value = ".stela/images")]
+        #[arg(long, default_value = "target/images")]
         output_dir: PathBuf,
     },
     /// Write the `payload.json` and `blocks.bin` of an install `stela.efi`
