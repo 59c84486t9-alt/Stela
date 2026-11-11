@@ -2078,7 +2078,7 @@ fn passive_registers_are_read_without_the_devices_lock() {
 /// that settled the write, after it released the devices' lock, each once,
 /// with PEs settling at once; and what each came to is published by a
 /// transfer on that PE before its call returns, with no other PE or tick
-/// coming by (build-50: a completion waited for an idle home machine).
+/// coming by (otherwise a completion can wait for an idle home machine).
 #[test]
 fn transfers_leave_their_copies_to_run_outside_the_lock() {
     use super::super::{LockedMemory, Memory, UnlockedDma};

@@ -1,5 +1,5 @@
 //! Where a system-mode host places the guest's address space beside its
-//! own (`docs/design/system.md#host-placement`). Native code addresses guest
+//! own. Native code addresses guest
 //! virtual memory directly, so the guest's natively covered ranges and
 //! Stela's window share each x86 root, and every guest access checks its
 //! address against those ranges first (`stela_compiler::x86_64`'s guest

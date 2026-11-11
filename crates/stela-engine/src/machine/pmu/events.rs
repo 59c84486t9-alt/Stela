@@ -1,5 +1,5 @@
 //! Checked events and counter affinities, independent of event names on
-//! later generations. Source pins are in `docs/research/core-pmu.md`.
+//! later generations.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Event {

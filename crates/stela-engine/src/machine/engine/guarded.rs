@@ -1,6 +1,5 @@
 //! Apple GXF instruction exits (`block::system::GuardedOperation`): GENTER
-//! and GEXIT. The contracts and their evidence are in `docs/design/system.md`
-//! (GXF).
+//! and GEXIT.
 use super::{Devices, Event, Host, Machine, MonitorKind, RequirementKind, Step, transition};
 use crate::machine::{cpu::ASPSR_GUARDED, hacr};
 use stela_compiler::block::system::GuardedOperation;

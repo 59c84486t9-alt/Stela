@@ -1,8 +1,7 @@
 //! Native GENTER and GEXIT (`x86_64::transition`): the record an engine-path
 //! transition leaves for the next native entry at its target, the thunks
 //! that complete the instructions from records, and what the engine takes
-//! back of a native run that made transitions. The contract is in
-//! `docs/design/system.md` (Native transitions).
+//! back of a native run that made transitions.
 use super::*;
 use crate::machine::cpu::Cpu;
 use stela_compiler::x86_64::transition::{GUARDED_ENTER, GUARDED_EXIT, KINDS, Record};

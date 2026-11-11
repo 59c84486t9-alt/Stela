@@ -27,7 +27,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The policy point for an operation this machine cannot carry out in
-    /// full (docs/design/runtime.md "Unsupported operations"): count it
+    /// full: count it
     /// (`Statistics::degraded`) and report it the first time (device
     /// accesses once per register, direction and refusal); the caller then
     /// gives the degraded response of its tier.

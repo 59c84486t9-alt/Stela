@@ -9,8 +9,7 @@
 //! syscall validation policy is not a register's architectural behavior.
 //!
 //! The original 26A434 M2–M6 kernels save/restore the pair and the matching
-//! SPTMs save, clear and restore CTL (coordinates and immutable input hashes in
-//! `docs/research/objc-predictor.md`). M1 has no original accesses and keeps
+//! SPTMs save, clear and restore CTL. M1 has no original accesses and keeps
 //! the existing census-based unallocated inference, not a hardware claim.
 
 /// Address bits [55:0].
@@ -31,4 +30,4 @@ pub(super) const EVIDENCE: &str = "Apple XNU xnu-12377.121.6 apple_arm64_regs.h:
     kernels save/restore the pair and SPTMs save/clear/restore control. Only named \
     fields are preserved; other bits refuse. Per-PE prediction hint, with no \
     architectural result, access-permission or speculative-timing enforcement \
-    claim; reset zero is a model inference. See docs/research/objc-predictor.md";
+    claim; reset zero is a model inference";

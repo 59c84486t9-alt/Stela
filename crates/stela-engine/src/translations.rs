@@ -1,5 +1,4 @@
-//! The persistent translation store's format
-//! (`docs/design/runtime.md#persistent-translation-store`): page records of
+//! The persistent translation store's format: page records of
 //! block translations keyed by the SHA-256 of their guest fetch page, with
 //! guest addresses in the native code stored relative to the page, and the
 //! proof that a block's code depends on its address only through them.

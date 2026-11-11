@@ -358,8 +358,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// Run the instruction at `pc` of block `index`, whose access to the
-    /// guest's mapped `address` lies outside the host's native ranges
-    /// (`docs/design/system.md#host-placement`), again in the translated
+    /// guest's mapped `address` lies outside the host's native ranges, again in the translated
     /// variant: its fetch page's blocks are compiled again so that every
     /// access calls the host's translation helper outside those ranges,
     /// which translates it, delivers its fault or completes it. `GuestState`

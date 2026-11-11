@@ -2,7 +2,6 @@
 //! separately checked M1–M6 layouts (`layout`). XNU xnu-12377.121.6 H13
 //! supplies M1's 48-bit width, H14–H17 supply M2–M5's 64-bit width, and
 //! original 26A434 mac18g supplies M6's distinct 15-counter mapping.
-//! See `docs/research/core-pmu.md` for source hashes and validation limits.
 //!
 //! - PMC0 counts cycles and PMC1 retired instructions. M1/M2 also count
 //!   source-checked programmable events (`events`): NONE and active

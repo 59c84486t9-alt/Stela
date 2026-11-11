@@ -1,6 +1,5 @@
 //! What the board's PEs share of compiled code, and the rules for taking
-//! some of it away while other PEs may still hold it (stages 4 and 5 of
-//! the shared code arena, `docs/design/compiler.md`):
+//! some of it away while other PEs may still hold it:
 //!
 //! - [`Grace`]: a word per PE that says whether it is inside a section that
 //!   may hold what is being taken away, and how often it left one. What a

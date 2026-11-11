@@ -162,7 +162,7 @@ impl Preparation {
 
     /// The entry context of blocks prepared with this in the page at
     /// `page`: everything besides their bytes and offset that shapes their
-    /// compilation (`docs/design/runtime.md#persistent-translation-store`).
+    /// compilation.
     pub fn context(&self, page: u64) -> Digest {
         let class = translations::address_class(page);
         match HALVES.iter().position(|&half| half == class) {

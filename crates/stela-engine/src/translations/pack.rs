@@ -1,5 +1,4 @@
-//! The pack container `stela.efi` keeps its translations in
-//! (`docs/design/runtime.md#persistent-translation-store`), and the store a
+//! The pack container `stela.efi` keeps its translations in, and the store a
 //! boot reads from it and plans the next pack with.
 //!
 //! A pack is one file per translator id: a header, an index sorted by page

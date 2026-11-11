@@ -31,7 +31,7 @@
 //!   for host work in the kernel (`Clock::leave`) sets its own limit.
 //!   Normal host work takes a few milliseconds and never reaches it.
 //! - A slow PE got more timer interrupts per unit of its work: the EL0
-//!   release experiment (run 20261109-182019) counted 34 guest seconds
+//!   release experiment counted 34 guest seconds
 //!   where a paced count counted 16, with every PE in timer interrupts. A
 //!   comparator signals once however late it is, and XNU expires every due
 //!   timer call in one interrupt, so no flood follows a long stop; what can

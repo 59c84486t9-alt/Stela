@@ -1,7 +1,6 @@
 //! Software TLBs for translated accesses and device translations.
 //!
-//! The translated variant
-//! (`docs/design/system.md#host-placement`): blocks that access guest
+//! The translated variant: blocks that access guest
 //! addresses outside the host's native ranges ([`super::placement`]) call a
 //! host helper for each such access, which looks the page up here and
 //! returns where the host reaches it. A miss, or a write to a page filled

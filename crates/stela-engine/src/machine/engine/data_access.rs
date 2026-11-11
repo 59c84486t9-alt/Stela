@@ -550,8 +550,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(())
     }
 
-    /// A device access the devices refused or no device answers
-    /// (docs/design/runtime.md#unsupported-operations): `None` when it
+    /// A device access the devices refused or no device answers: `None` when it
     /// completes degraded, reading 0 or dropping the write, else the step
     /// the instruction ends with. A survey answers every register access so
     /// and records it ([`Self::begin_survey`]); otherwise [`Self::degrade`]

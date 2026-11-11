@@ -1,7 +1,6 @@
 //! Apple implementation-defined registers that the kernelcaches,
 //! SPTMs and TXM of the Apple silicon chips access, each listed with its
-//! consumer and the behavior that consumer needs (the census is in
-//! `docs/research/j473-kernel.md#system-registers`). Registers with an
+//! consumer and the behavior that consumer needs. Registers with an
 //! architectural or modeled effect have their own owners (`machine::registers`,
 //! `pmu`, `amx`, `ctrr` and the board's fast-IPI registers); every encoding
 //! neither lists refuses when a censused component accesses it, and is
@@ -60,7 +59,7 @@
 //! entries cite the consumer on the chips whose components they were
 //! established from; on another chip whose census shows the encoding, the same
 //! behavior is an inference, except for the separately checked predictor
-//! pair ([`objc`], `docs/research/objc-predictor.md`). Entries span CRn 15
+//! pair ([`objc`]). Entries span CRn 15
 //! and CRn 11 (the M5 and M6 PL2 error records and M6 uncore selections).
 //! An encoding the chip's components never access is not looked up: without
 //! a model of its own it is UNDEFINED, Arm's behavior for an unallocated
@@ -539,7 +538,7 @@ const JIT_BOX_MODE_EVIDENCE: &str = "no public name; 26A434 XNU's JIT box (jitbo
     EXC_BAD_INSTRUCTION (0xfffffe000bd77d14). SPTM 26A434 writes 2 at boot (__text+0x40e4) and \
     saves it, clears bit 0 and restores it around its own execution with SCTLR_EL1 and TCR_EL1 \
     (__text+0x2124, __text+0x28ec): bit 0 enables the box (inference). Every value is held. \
-    What an enabled box enforces is not documented (docs/research/j473-kernel.md#jit-box), \
+    What an enabled box enforces is not documented, \
     so a value with bit 0 set is reported once as unmodeled";
 
 /// What an enabled JIT box would need: its enforcement.
@@ -563,7 +562,7 @@ const XNU_THREAD_CONTROL: &str = "26A434 XNU saves it in every exception frame a
 
 const XNU_AMX_CONTEXT: &str = "26A434 XNU CPU initialization writes MPIDR.Aff0 to it \
     under one boot configuration (0xfffffe000bd80f44) and reads it nowhere; m1n1 cpu_regs.h names \
-    it AMX_CTX_EL1 beside AMX_CTL_EL1 (docs/research/amx.md), while m1n1's apple_regs.json calls \
+    it AMX_CTX_EL1 beside AMX_CTL_EL1, while m1n1's apple_regs.json calls \
     it CORE_INDEX and Asahi's documentation says it is written with the core's index in its \
     cluster during initialization, which the value fits. Nothing reads it, so it is stored";
 
@@ -604,7 +603,7 @@ const SIQ_CFG: &str = "m1n1 cpu_regs.h names it SIQ_CFG_EL1, and Asahi's documen
     before a power-down, and clears it elsewhere (0xfffffe000bd70b74). Modes 0/2 admit IRQs \
     and mode 3 keeps an AICv2 or AICv3 from sending the PE IRQs. Only these modes with zero \
     upper bits are held; mode 1 and upper-bit effects lack qualification and refuse before \
-    mutation (docs/research/cpu-topology.md, AICv2/v3 target and SIQ qualification)";
+    mutation";
 
 const XNU_THREAD_KEYS: &str = "26A434 XNU's context switch writes it with the thread's \
     APIBKey value plus 4 or 5, after APIBKey and APDBKey (0xfffffe000bb9bd38), and reads it \
@@ -724,11 +723,10 @@ const AON_FOURTH_EVIDENCE: &str = "no public name; the CorePerfSampler of AppleT
 /// What a running sampler's counters lack here.
 const CORE_COUNTERS_UNMODELED: &str = "core performance counters enabled; events not counted: \
     CLPC reads zero work from them, which only lowers its DVFS and shared-resource placement \
-    inputs (docs/research/j473-kernel.md, CLPC samplers)";
+    inputs";
 
 const MEM_STALL_UNMODELED: &str = "memory-stall counters started; events not counted: CLPC \
-    reads no stalls, which only changes its efficiency-stall DVFS caps \
-    (docs/research/j473-kernel.md, CLPC samplers)";
+    reads no stalls, which only changes its efficiency-stall DVFS caps";
 
 const MEM_STALL_SELECT_EVIDENCE: &str = "no public name; AppleT8112CLPC's \
     CoreMemStallSampler::enableCore writes two 32-bit selectors into each of S3_1_C15_C0_3 \

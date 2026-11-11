@@ -120,11 +120,10 @@ const ACTLR_ICDSB: u64 = 1 << 9;
 const ACTLR_IC_IVAU_ASID: u64 = 1 << 12;
 
 /// The ACTLR_ELx bits that refuse by name, from XNU `proc_reg.h`: controls
-/// of Apple features this machine's AIDR_EL1 does not advertise
-/// (docs/design/system.md, "IMPLEMENTATION DEFINED architectural
-/// registers"). The 26A434 kernel sets them only in translated x86-64
-/// threads, and it executes an x86-64 image only when AIDR_EL1 advertises
-/// TSO and APFLG, so no component sets them here.
+/// of Apple features this machine's AIDR_EL1 does not advertise. The 26A434
+/// kernel sets them only in translated x86-64 threads, and it executes an
+/// x86-64 image only when AIDR_EL1 advertises TSO and APFLG, so no
+/// component sets them here.
 const ACTLR_REFUSED: [(u64, &str); 3] = [
     (
         1 << 4,
@@ -142,8 +141,8 @@ const ACTLR_REFUSED: [(u64, &str); 3] = [
 
 /// Why a write that sets these bits of a register whose whole contents Arm
 /// leaves IMPLEMENTATION DEFINED stops, or `None` when it completes (also
-/// for every other register). The 26A434 census (docs/design/system.md)
-/// gives each bit its treatment:
+/// for every other register). The 26A434 census gives each bit its
+/// treatment:
 ///
 /// - AFSRn_ELx report additional fault status. This machine records none,
 ///   so exceptions leave them unchanged, and every bit holds what software

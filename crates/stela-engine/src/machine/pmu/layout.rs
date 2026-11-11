@@ -1,6 +1,6 @@
 //! Source-checked CPMU coordinates, independent of PE clocks and events.
-//! H13–H17 definitions and original 26A434 consumers are pinned in
-//! `docs/research/core-pmu.md`; M6 uses its own original accessor tables.
+//! H13–H17 follow their definitions and the original 26A434 consumers; M6
+//! uses its own original accessor tables.
 use super::{Chip, Encoding, Width, events, monitor};
 
 pub(super) const MAX_COUNTERS: usize = 15;

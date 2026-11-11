@@ -1,4 +1,4 @@
-//! VMSAv8-64 translation (docs/design/system.md, "Memory translation").
+//! VMSAv8-64 translation.
 //!
 //! One software walker serves instruction fetch, shadow-page fills, AT and
 //! fault reporting, so every consumer sees the same translation and the same

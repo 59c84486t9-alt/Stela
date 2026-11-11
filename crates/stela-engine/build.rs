@@ -1,7 +1,6 @@
 //! Fingerprint what decides the code a block translation holds: with the
 //! compiler's own fingerprint it makes the persistent translation store's
-//! translator id (`translations::translator_id`,
-//! `docs/design/runtime.md#persistent-translation-store`).
+//! translator id (`translations::translator_id`).
 //!
 //! A stored entry is the compiler's output for its admitted input bytes, PC
 //! and entry context. The context describes every preparation input

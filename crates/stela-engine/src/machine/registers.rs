@@ -482,7 +482,7 @@ const SPR_LOCK_COMMIT_BITS: u64 = 0b11;
 /// EHID4 with HID4 (inference: 26A434 XNU writes it on E cores after the
 /// lockdown). HID8, which XNU's test shows locked, is UNDEFINED here
 /// already: no 26A434 component accesses it. Other registers' groups are not
-/// public, so the lockdown leaves them writable (docs/design/system.md).
+/// public, so the lockdown leaves them writable.
 const SPR_LOCK_GROUPS: [(Encoding, u32); 6] = [
     (impdef::HID1, 1),
     (impdef::EHID1, 1),

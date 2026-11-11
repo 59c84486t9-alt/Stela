@@ -1,7 +1,6 @@
 //! WKDMC and WKDMD (`SystemOperation::Compression`): one 16 KiB page
 //! compressed or decompressed through translated guest memory, in this
-//! machine's format (`stela_compiler::wkdm::codec`). The contract and its
-//! evidence are in `docs/design/system.md#apple-extensions`.
+//! machine's format (`stela_compiler::wkdm::codec`).
 //!
 //! The instruction reads its whole source before it writes, and translates
 //! every destination piece before writing any, so a fault leaves memory and

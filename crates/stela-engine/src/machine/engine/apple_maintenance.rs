@@ -1,7 +1,6 @@
 //! Apple maintenance word exits (`block::system::AppleMaintenance`): DC
 //! INCPA4K and the three undocumented words beside it that the M4 and later
-//! SPTMs execute. The contracts and their evidence are in
-//! `docs/design/system.md` (GXF).
+//! SPTMs execute.
 use super::{Devices, Host, Machine, RequirementKind, Step};
 use stela_compiler::block::system::AppleMaintenance;
 use {
