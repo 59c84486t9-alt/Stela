@@ -327,21 +327,46 @@ impl Requests {
         }
     }
     /// Both exact resources are requested before returning a missing member,
-    /// making setup requirements observable without any device mutation.
+    /// making setup requirements observable without any device mutation. A
+    /// file with no binding to this adapter's observed revision is taken from
+    /// its chip's binding ([`Chip::target`]), which setup writes for a PC it
+    /// has not seen boot.
     pub fn load<'a>(&self, provider: &'a dyn Provider) -> Result<Prepared<'a>, LoadError> {
         let load = |patch| {
-            let requirement = self.requirement(patch);
-            let image = provider.load(requirement)?;
-            // Catalog enforces this contract, but a safe custom Provider can
-            // redirect to another valid Catalog Image. Validate the
-            // returned identity before parsing or publishing private Prepared.
-            if image.name() != requirement.name || image.target() != requirement.target {
-                return Err(resources::Error {
-                    name: requirement.name.into(),
-                    kind: resources::ErrorKind::WrongTarget,
-                });
+            let observed = self.requirement(patch);
+            let chip = Requirement {
+                target: self.chip.target(),
+                ..observed
+            };
+            let mut unbound = None;
+            for requirement in [observed, chip] {
+                let image = match provider.load(requirement) {
+                    Ok(image) => image,
+                    // No file of this name, or none bound to this target.
+                    Err(error)
+                        if matches!(
+                            error.kind,
+                            resources::ErrorKind::Missing | resources::ErrorKind::WrongTarget
+                        ) =>
+                    {
+                        unbound.get_or_insert(error);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                // Catalog enforces this contract, but a safe custom Provider
+                // can redirect to another valid Catalog Image. Validate the
+                // returned identity before parsing or publishing private
+                // Prepared.
+                if image.name() != requirement.name || image.target() != requirement.target {
+                    return Err(resources::Error {
+                        name: requirement.name.into(),
+                        kind: resources::ErrorKind::WrongTarget,
+                    });
+                }
+                return Ok(image);
             }
-            Ok(image)
+            Err(unbound.expect("the observed request had no binding"))
         };
         let patch = load(true);
         let ram = load(false);
@@ -505,6 +530,55 @@ pub(crate) mod tests {
                 .iter()
                 .all(|e| e.kind == resources::ErrorKind::WrongTarget)
         );
+    }
+    #[test]
+    fn a_chip_binding_serves_an_adapter_no_boot_observed() {
+        // What setup writes for a chip: the same files, bound to the chip.
+        let chip = Requests {
+            chip: Chip::Mt7925,
+            hardware: Chip::Mt7925.target().hardware.into(),
+            revision: Chip::Mt7925.target().revision.into(),
+        };
+        let provider = catalog(&chip, patch_bytes(), ram_bytes());
+        let observed = requests(Chip::Mt7925);
+        let prepared = observed.load(&provider).unwrap();
+        assert_eq!(prepared.requests(), &observed);
+        assert_eq!(prepared.ram_image().target(), Chip::Mt7925.target());
+        // Another chip's adapter asks for other names and gets nothing.
+        let LoadError::Resources { errors, .. } =
+            requests(Chip::Mt7922).load(&provider).unwrap_err()
+        else {
+            panic!()
+        };
+        assert_eq!(errors.len(), 2);
+        // An observed binding, where the catalog has one, comes first.
+        let both = {
+            use sha2::{Digest, Sha256};
+            let mut entries = Vec::new();
+            for requests in [&observed, &chip] {
+                for (is_patch, bytes) in [(true, patch_bytes()), (false, ram_bytes())] {
+                    let req = requests.requirement(is_patch);
+                    entries.push(resources::Resource {
+                        name: req.name,
+                        target: req.target,
+                        provenance: resources::Provenance {
+                            source: "https://kernel.googlesource.com/pub/scm/linux/kernel/git/firmware/linux-firmware",
+                            revision: "59f9fc2ef8d1e312d2a613d4e1ffad2ff31a0a01",
+                            member: req.name,
+                            license: "LICENCE.mediatek",
+                        },
+                        expected_length: bytes.len(),
+                        expected_sha256: Sha256::digest(&bytes).into(),
+                        bytes,
+                    });
+                }
+            }
+            resources::Catalog::from_handoff(entries)
+        };
+        if let Ok(both) = both {
+            let prepared = observed.load(&both).unwrap();
+            assert_eq!(prepared.ram_image().target().hardware, observed.hardware);
+        }
     }
     #[test]
     fn firmware_sections_keep_their_attributes() {

@@ -2,6 +2,7 @@
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! Exact PCI candidates and kept chip observations. This is not
 //! controller admission; callers still need mapped/owned PCI and WFDMA setup.
+use crate::firmware::Target;
 use alloc::{format, string::String};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -17,6 +18,33 @@ impl Chip {
             Self::Mt7921 => "mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin",
             Self::Mt7922 => "mediatek/WIFI_MT7922_patch_mcu_1_1_hdr.bin",
             Self::Mt7925 => "mediatek/mt7925/WIFI_MT7925_PATCH_MCU_1_1_hdr.bin",
+        }
+    }
+
+    /// The binding of this chip's two images before any boot observed the
+    /// adapter. The chip alone selects them, as in Linux's mt792x, which
+    /// names one patch and one RAM image per chip, so setup can supply them
+    /// for a PC it never ran on.
+    pub fn target(self) -> Target<'static> {
+        Target {
+            driver: "wifi-mt792x",
+            hardware: match self {
+                Self::Mt7921 => "pci:14c3:7961",
+                Self::Mt7922 => "pci:14c3:7922",
+                Self::Mt7925 => "pci:14c3:7925",
+            },
+            revision: "linux-firmware",
+            board: None,
+        }
+    }
+
+    /// The chip of the PCI device ID `device` of vendor 14c3.
+    pub fn of_pci(device: u16) -> Option<Self> {
+        match device {
+            0x7961 | 0x0608 => Some(Self::Mt7921),
+            0x7922 | 0x0616 => Some(Self::Mt7922),
+            0x7925 | 0x0717 => Some(Self::Mt7925),
+            _ => None,
         }
     }
 
@@ -50,12 +78,7 @@ impl PciIdentity {
         if self.vendor != 0x14c3 {
             return None;
         }
-        match self.device {
-            0x7961 | 0x0608 => Some(Chip::Mt7921),
-            0x7922 | 0x0616 => Some(Chip::Mt7922),
-            0x7925 | 0x0717 => Some(Chip::Mt7925),
-            _ => None,
-        }
+        Chip::of_pci(self.device)
     }
 }
 
