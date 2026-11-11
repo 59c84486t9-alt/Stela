@@ -221,6 +221,8 @@ pub struct AppleDevices {
     /// by PE number.
     core_counters: Vec<Option<DeviceId>>,
     pc_samplers: Vec<(usize, u64, DeviceId)>,
+    /// The SoC watchdogs, whose mechanism writes the reports show.
+    watchdogs: Vec<DeviceId>,
     starts: Vec<Start>,
     selects: Vec<SelectWire>,
     /// The AP GPIO bank's base and the board nets on its input pins.
@@ -657,6 +659,7 @@ impl AppleDevices {
             reset_vectors: Vec::new(),
             core_counters: Vec::new(),
             pc_samplers: Vec::new(),
+            watchdogs: Vec::new(),
             starts: Vec::new(),
             selects: Vec::new(),
             gpio: None,

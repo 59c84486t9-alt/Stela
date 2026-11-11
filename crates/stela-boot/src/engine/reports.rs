@@ -514,6 +514,56 @@ pub(super) fn stack_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
     text_report(machine);
 }
 
+/// The format strings another PE's stack points to, from its last
+/// materialized SP up: a PE inside `panic` keeps the panic's format and
+/// arguments in its frames even when the console never prints them (a PE
+/// that never answers the debugger cross-call holds it back). Only words
+/// that point to at least 12 printable characters with a `%` are shown,
+/// three per PE from 128 words.
+pub(super) fn stack_text_report<H: Host>(
+    machine: &mut Machine<H, parallel::Board>,
+    pe: usize,
+    sp: u64,
+) {
+    const WORDS: u64 = 128;
+    const SHOWN: usize = 3;
+    const LIMIT: usize = 160;
+    let mut shown = 0;
+    for word in 0..WORDS {
+        let mut value = [0u8; 8];
+        if !machine.read_virtual(sp.wrapping_add(word * 8), &mut value) {
+            break;
+        }
+        let address = u64::from_le_bytes(value);
+        if address >> 48 != 0xffff {
+            continue;
+        }
+        let mut text = Vec::new();
+        'read: while text.len() < LIMIT {
+            let mut byte = [0u8; 1];
+            if !machine.read_virtual(address.wrapping_add(text.len() as u64), &mut byte) {
+                break;
+            }
+            let byte = byte[0];
+            if byte == 0 || !(byte.is_ascii_graphic() || b" \t\n".contains(&byte)) {
+                break 'read;
+            }
+            text.push(byte);
+        }
+        if text.len() >= 12 && text.contains(&b'%') {
+            let text = core::str::from_utf8(&text).expect("ASCII");
+            output::arguments(format_args!(
+                "PE {pe} STACK TEXT sp+{:#x} {address:#x}: {text:?}\n",
+                word * 8
+            ));
+            shown += 1;
+            if shown == SHOWN {
+                break;
+            }
+        }
+    }
+}
+
 /// The text a general-purpose register points to, when it reads as at least
 /// eight printable characters: a guest's panic message often sits in one at
 /// a stop, while the console that would print it is off.
@@ -557,6 +607,9 @@ pub(super) struct Drained {
     pub(super) smc: Vec<stela_soc::machine::SmcWriteLog>,
     pub(super) display: Vec<stela_soc::machine::DisplayLog>,
     pub(super) power: Vec<stela_soc::machine::PowerLog>,
+    /// The watchdog mechanism's arms and disarms, and how many more were
+    /// not kept.
+    pub(super) watchdog: (Vec<stela_soc::wdt::MechanismEvent>, u32),
 }
 
 impl Drained {
@@ -589,7 +642,37 @@ impl Drained {
             smc: core::iter::from_fn(|| devices.take_smc_log()).collect(),
             display: core::iter::from_fn(|| devices.take_display_log()).collect(),
             power: core::iter::from_fn(|| devices.take_power_log()).collect(),
+            watchdog: devices.take_watchdog_mechanism_log(),
         }
+    }
+}
+
+/// One line per watchdog mechanism write: XNU arms it on its halt, restart
+/// and panic path, so the arm dates the start of a reset that follows. The
+/// writing PE's pc and lr are its last materialized ones, close to the write
+/// but not exact.
+pub(super) fn watchdog_report<H: Host>(
+    machine: &Machine<H, parallel::Board>,
+    (events, dropped): (Vec<stela_soc::wdt::MechanismEvent>, u32),
+) {
+    let hub = machine.devices.hub();
+    for event in events {
+        let (pc, lr) = hub
+            .source_observation(event.cpu)
+            .map_or((0, 0), |observed| (observed.source.pc, observed.source.lr));
+        match event.deadline {
+            Some(seconds) => output::arguments(format_args!(
+                "WDT MECHANISM armed deadline_s={seconds} counter={} pe={} source_pc={pc:#x} source_lr={lr:#x}\n",
+                event.at, event.cpu
+            )),
+            None => output::arguments(format_args!(
+                "WDT MECHANISM disarmed counter={} pe={} source_pc={pc:#x} source_lr={lr:#x}\n",
+                event.at, event.cpu
+            )),
+        }
+    }
+    if dropped > 0 {
+        output::arguments(format_args!("WDT MECHANISM writes_not_kept={dropped}\n"));
     }
 }
 

@@ -596,6 +596,7 @@ pub(super) fn report_drained<H: Host>(
     crate::status::stream(lines.iter().map(String::as_str));
     crate::status::tick();
     unmodeled_report(machine, drained.unmodeled);
+    watchdog_report(machine, drained.watchdog);
     for line in drained.sep {
         output::arguments(format_args!("SEP OBSERVE {line}\n"));
     }

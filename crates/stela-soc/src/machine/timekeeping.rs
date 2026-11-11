@@ -87,7 +87,23 @@ impl AppleDevices {
         now: u64,
     ) -> Result<(), MapError> {
         let device = self.bus.add(Box::new(AppleWdt::new(irq, now)));
+        self.watchdogs.push(device);
         self.map(device, ranges)
+    }
+
+    /// Every watchdog's mechanism writes since the last call, and how many
+    /// more were not kept.
+    pub fn take_watchdog_mechanism_log(&mut self) -> (Vec<crate::wdt::MechanismEvent>, u32) {
+        let mut events = Vec::new();
+        let mut dropped = 0u32;
+        for &device in &self.watchdogs {
+            if let Some(watchdog) = self.bus.device_mut::<AppleWdt>(device) {
+                let (log, more) = watchdog.take_mechanism_log();
+                events.extend(log);
+                dropped = dropped.saturating_add(more);
+            }
+        }
+        (events, dropped)
     }
 
     /// The main watchdog and its independently DT-placed optional side words.
@@ -162,6 +178,7 @@ impl AppleDevices {
             model = model.with_shared_panic_flags();
         }
         let device = self.bus.add(Box::new(model));
+        self.watchdogs.push(device);
         self.map(device, &[range])
             .map_err(|error| refuse!("watchdog placement: {error}", ?error))?;
         let offsets = [

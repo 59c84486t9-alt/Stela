@@ -1177,6 +1177,7 @@ fn finish<H: Host>(
         host.guard_faults,
         EVENTS.load(Ordering::Relaxed),
     ));
+    watchdog_report(machine, drained.watchdog);
     for line in drained.sep {
         output::arguments(format_args!("SEP OBSERVE {line}\n"));
     }
@@ -1339,11 +1340,14 @@ fn machine_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
             .filter(|&pe| pe != machine.processor())
             .filter_map(|pe| Some((pe, hub.source_observation(pe)?.source)))
             .filter(|(_, source)| source.el > 0)
-            .map(|(pe, source)| (pe, source.fp))
+            .map(|(pe, source)| (pe, source.fp, source.sp))
             .collect::<Vec<_>>()
     };
-    for (pe, frame) in sources {
+    for &(pe, frame, _) in &sources {
         frames(machine, &alloc::format!("PE {pe} SOURCE FRAME"), frame);
+    }
+    for (pe, _, sp) in sources {
+        stack_text_report(machine, pe, sp);
     }
     let cpu = &machine.cpu;
     for (entry, reads, writes) in cpu.apple.impdef.used() {
