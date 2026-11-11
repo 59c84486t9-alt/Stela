@@ -214,9 +214,9 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 } else if usb.bytes < NETWORK_MIN {
                     "Too small · Requires an 8 GB or larger USB".into()
                 } else if usb.bytes < OFFLINE_MIN {
-                    "Network installer only · Offline needs a 32 GB USB".into()
+                    "Network installer only · Full needs a 32 GB USB".into()
                 } else {
-                    "Offline or network installer".into()
+                    "Full or network installer".into()
                 },
                 enabled: usb.bytes >= NETWORK_MIN,
             })
@@ -271,7 +271,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             let rows = [
                 item(
                     0,
-                    "Offline installer",
+                    "Full installer",
                     "Downloads the full macOS image onto the USB · Requires a 32 GB USB",
                     offline,
                 ),
@@ -372,6 +372,9 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         command.model = Some(choices::model(&models, &names, command.model.as_deref())?);
         // Every install needs the network for Apple's signing server; a
         // network installer also downloads macOS over it.
+        cliclack::log::info(stela_runtime::restore::tss::network_reason(
+            command.install_image == Some(InstallImage::Online),
+        ))?;
         choose_wifi(command)?;
         super::addresses::choose(command)?;
         cliclack::set_theme(theme::Stela { extras: true });
@@ -394,7 +397,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             (_, Some(InstallImage::Online)) => {
                 "Network · macOS downloads during installation".into()
             }
-            _ => "Offline · the full macOS image goes on the USB".into(),
+            _ => "Full · the macOS image goes on the USB".into(),
         };
         cliclack::note(
             "8 / 8  Review",

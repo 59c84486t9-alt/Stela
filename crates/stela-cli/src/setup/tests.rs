@@ -497,6 +497,10 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
     assert!(plan.contains("Dry run: nothing was changed."), "{plan}");
     assert!(plan.contains("ECID           0x"), "{plan}");
     assert!(plan.contains("gs.apple.com"), "{plan}");
+    // macOS is on the USB, and the plan still says the install needs the
+    // network, for the signing server alone.
+    let local = stela_runtime::restore::tss::network_reason(false);
+    assert!(plan.contains(local), "{plan}");
     assert!(plan.contains("restore        "), "{plan}");
     assert!(!plan.contains("recoveryOS     "), "{plan}");
     assert_eq!(
@@ -1215,6 +1219,8 @@ fn install_reads_offline_or_streamed_image() {
     online.install_image = Some(InstallImage::Online);
     let report = setup(&environment(&f.host), online).unwrap();
     assert!(report.contains("file list only"), "{report}");
+    let remote = stela_runtime::restore::tss::network_reason(true);
+    assert!(report.contains(remote), "{report}");
     let written = record(&f);
     assert_eq!(written.install_image, Some(InstallImage::Online));
     let medium = written.active_medium().cloned().unwrap();

@@ -713,6 +713,9 @@ pub(super) fn plan(
     }
     record.options = record.options_text()?;
     record.choices_text()?;
+    // Said up front: an install needs the network even with macOS on the USB.
+    let remote = install.medium.as_ref().is_some_and(|medium| medium.remote);
+    notes.push(stela_runtime::restore::tss::network_reason(remote).into());
     notes.push(SIGNING_NOTE.into());
     notes.extend(installed.notes.iter().cloned());
     // The firmware of this computer's GPU; a USB made elsewhere gets none,
