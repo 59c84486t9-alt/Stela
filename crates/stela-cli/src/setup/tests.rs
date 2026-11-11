@@ -1894,6 +1894,65 @@ fn status_notes_the_spare_the_first_boot_took_and_succeeds() {
 }
 
 #[test]
+fn status_notes_a_stale_chosen_disk_without_a_problem() {
+    let mut f = fixture(64 * GIB, false);
+    add_stela(&mut f);
+    setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+    assert!(record(&f).installs[0].disk.is_chosen());
+    const GUID: &str = "5e1a0000-0000-4000-8000-0000000000c1";
+    f.host.serials.insert("disk0".into(), "HOSTDISK".into());
+    f.host.partitions.insert(
+        "disk0s2".into(),
+        (
+            PartitionInfo {
+                identifier: "disk0s2".into(),
+                disk: "disk0".into(),
+                guid: GUID.into(),
+                bytes: 100 * GIB,
+                content: "Apple_APFS".into(),
+                mount: None,
+                container: None,
+            },
+            f._dir.path().join("disk0s2.img"),
+        ),
+    );
+    let disk_cfg = f.esp.join("EFI/stela/disk.cfg");
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(!status.contains("chosen disk"), "{status}");
+    for (chosen, words) in [
+        (
+            "GONE:".to_owned() + GUID,
+            "no disk on this PC has the chosen serial",
+        ),
+        (
+            "HOSTDISK:5E1A0000-0000-4000-8000-0000000000c2".into(),
+            "no longer has the chosen partition",
+        ),
+    ] {
+        fs::write(&disk_cfg, format!("{chosen}\n")).unwrap();
+        let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+        assert!(status.contains("No problems found."), "{status}");
+        let note = status.lines().find(|line| line.contains(words)).unwrap();
+        assert!(note.trim_start().starts_with("note"), "{status}");
+        assert!(
+            note.contains("Install macOS will ask for a disk again"),
+            "{status}"
+        );
+    }
+    fs::write(
+        &disk_cfg,
+        format!("HOSTDISK:{}\n", GUID.to_ascii_uppercase()),
+    )
+    .unwrap();
+    let status = rerun(&f, |c| c.action = Action::Status).unwrap();
+    assert!(
+        status.contains("the chosen disk is in this computer"),
+        "{status}"
+    );
+    assert!(!status.contains("will ask for a disk again"), "{status}");
+}
+
+#[test]
 fn cache_spare_failure_blocks_activation_until_retry() {
     let mut f = fixture(64 * GIB, false);
     add_stela(&mut f);

@@ -39,6 +39,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use stela_boot_core::chosen_disk::{Search, Stale};
 use stela_loader::{boot_selection, mount_interface, recovery};
 use {
     stela_formats::apfs, stela_formats::apfs::Container,
@@ -397,6 +398,67 @@ fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Re
     }
 }
 
+/// What this computer holds of the partition Install macOS chose
+/// (`disk.cfg`, `SERIAL:GUID`), as `stela.efi` searches for it
+/// (`chosen_disk::Search`); `None` when the record cannot be read or this
+/// computer cannot list its disks.
+fn chosen_search(host: &dyn Host, chosen: &str) -> Option<Search> {
+    let (serial, guid) = chosen.trim().rsplit_once(':')?;
+    let disks = host.disks().ok().filter(|disks| !disks.is_empty())?;
+    let with_serial: Vec<_> = disks
+        .iter()
+        .filter(|d| host.serial(&d.identifier).ok().flatten().as_deref() == Some(serial))
+        .collect();
+    let disk = match with_serial[..] {
+        [] => return Some(Search::NoDisk),
+        [disk] => disk,
+        _ => return Some(Search::SeveralDisks),
+    };
+    if disk.partitions.is_empty() {
+        return Some(Search::NoTable);
+    }
+    let matching: Vec<_> = disk
+        .partitions
+        .iter()
+        .filter(|p| {
+            host.partition(&p.identifier)
+                .is_ok_and(|info| info.guid.eq_ignore_ascii_case(guid))
+        })
+        .collect();
+    Some(match matching[..] {
+        [] => Search::NoPartition,
+        [partition] if partition.content == "EFI" => Search::EspPartition,
+        [_] => Search::Found,
+        _ => Search::SeveralPartitions,
+    })
+}
+
+/// The partition Install macOS chose, when it chose one: one that is not
+/// on this computer is a note, not a problem. This may not be the PC that
+/// runs macOS, and on that PC a stale record only makes Install macOS ask
+/// for a disk again.
+fn chosen_status(host: &dyn Host, record: &Record, report: &mut Report) {
+    let Ok(chosen) = fs::read_to_string(record.esp.join("EFI/stela/disk.cfg")) else {
+        return;
+    };
+    match chosen_search(host, &chosen) {
+        Some(Search::Found) => report.line("", "the chosen disk is in this computer"),
+        Some(search) => {
+            if let Some(stale) = Stale::of(search) {
+                report.line(
+                    "",
+                    format!(
+                        "note: {}: if this is the PC that runs macOS, Install macOS will ask \
+                         for a disk again",
+                        stale.case()
+                    ),
+                );
+            }
+        }
+        None => {}
+    }
+}
+
 /// `--install NAME` when the setup has several installs, for a fix that
 /// acts on one.
 fn install_words(record: &Record, install: &machines::Install) -> String {
@@ -436,6 +498,7 @@ fn install_status(
     // computer's reach.
     if disk.is_chosen() {
         report.line("Mac's SSD", "a PC disk chosen at Install macOS");
+        chosen_status(host, record, report);
         return;
     }
     match installed::confirm(host, disk, installed::Role::AppleRegion, None) {
