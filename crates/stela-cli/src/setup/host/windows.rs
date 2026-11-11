@@ -5,7 +5,10 @@
 //! are read and written through the physical drive, a sector at a time as
 //! Windows requires, and a USB is erased by writing setup's own layout to
 //! its whole disk, with its volumes locked and dismounted.
-use super::{Bus, Cpu, Disk, DiskFacts, FileSystem, Host, Partition, PartitionInfo, Volume};
+use super::{
+    Bus, Cpu, Disk, DiskFacts, FileSystem, Host, Partition, PartitionInfo, Volume,
+    drive_names::{self, disk_number, nvidia_device, partition_number},
+};
 use anyhow::{Context, Result, ensure};
 use std::{
     ffi::OsStr,
@@ -155,24 +158,6 @@ fn guid_text(guid: &GUID) -> String {
 
 fn same_guid(a: &GUID, b: &GUID) -> bool {
     (a.data1, a.data2, a.data3, a.data4) == (b.data1, b.data2, b.data3, b.data4)
-}
-
-/// `diskN` → N; `diskNpM` → (N, M).
-fn disk_number(identifier: &str) -> Result<u32> {
-    identifier
-        .strip_prefix("disk")
-        .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        .and_then(|n| n.parse().ok())
-        .with_context(|| format!("{identifier} is not a whole disk such as disk2"))
-}
-
-fn partition_number(identifier: &str) -> Result<(u32, u32)> {
-    identifier
-        .strip_prefix("disk")
-        .and_then(|rest| rest.split_once('p'))
-        .and_then(|(disk, partition)| Some((disk.parse().ok()?, partition.parse().ok()?)))
-        .filter(|(_, partition)| *partition > 0)
-        .with_context(|| format!("{identifier} is not a partition such as disk2p1"))
 }
 
 fn drive_path(disk: u32) -> String {
@@ -789,19 +774,9 @@ impl Host for System {
         if usb.is_dir() {
             return Ok(None);
         }
-        let Some(name) = usb.to_str() else {
+        let Some(identifier) = usb.to_str().and_then(drive_names::whole_disk) else {
             return Ok(None);
         };
-        let name = name.to_ascii_lowercase();
-        let name = name.strip_prefix(r"\\.\").unwrap_or(&name);
-        let Some(number) = name
-            .strip_prefix("physicaldrive")
-            .or_else(|| name.strip_prefix("disk"))
-            .filter(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-        else {
-            return Ok(None);
-        };
-        let identifier = format!("disk{number}");
         Ok(self
             .disks()?
             .into_iter()
@@ -861,27 +836,5 @@ impl Host for System {
         // SAFETY: `set` is open and not used again.
         unsafe { SetupDiDestroyDeviceInfoList(set) };
         Ok(gpus)
-    }
-}
-
-/// The PCI device ID in an NVIDIA device's instance ID, such as
-/// `PCI\VEN_10DE&DEV_2C02&SUBSYS_...`.
-fn nvidia_device(instance: &str) -> Option<u16> {
-    let device = instance.strip_prefix("PCI\\VEN_10DE&DEV_")?.get(..4)?;
-    u16::from_str_radix(device, 16).ok()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::nvidia_device;
-
-    #[test]
-    fn instance_ids_name_nvidia_devices() {
-        let id = "PCI\\VEN_10DE&DEV_2C02&SUBSYS_88921043&REV_A1\\4&1A2B3C4D&0&0019";
-        assert_eq!(nvidia_device(id), Some(0x2c02));
-        assert_eq!(
-            nvidia_device("PCI\\VEN_1002&DEV_164E&SUBSYS_88771043"),
-            None
-        );
     }
 }

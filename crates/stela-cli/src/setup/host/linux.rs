@@ -23,6 +23,17 @@ const ESP_TYPES: [&str; 2] = ["c12a7328-f81f-11d2-ba4b-00a0c93ec93b", "0xef"];
 /// `lsblk`'s columns, for [`Device`].
 const COLUMNS: &str =
     "NAME,TYPE,SIZE,MODEL,TRAN,RM,RO,MOUNTPOINT,MOUNTPOINTS,PARTTYPE,PARTUUID,PKNAME";
+/// The mount points of the running system's volumes, and swap's.
+const SYSTEM_MOUNTS: [&str; 8] = [
+    "/",
+    "/boot",
+    "/boot/efi",
+    "/efi",
+    "/usr",
+    "/var",
+    "/home",
+    "[SWAP]",
+];
 /// The `BLKRRPART` ioctl: reread the partition table.
 const BLKRRPART: u64 = 0x125f;
 
@@ -59,16 +70,27 @@ struct Device {
 }
 
 impl Device {
-    /// Whether it, or a device on it, is mounted at `/`.
-    fn holds_root(&self) -> bool {
-        self.mountpoint.as_deref() == Some("/")
-            || self
-                .mountpoints
+    /// Its mount points: `mountpoints`, or `mountpoint` from an older lsblk.
+    fn mounts(&self) -> impl Iterator<Item = &str> {
+        self.mountpoint.as_deref().into_iter().chain(
+            self.mountpoints
                 .iter()
                 .flatten()
                 .flatten()
-                .any(|mount| mount == "/")
-            || self.children.iter().any(Device::holds_root)
+                .map(String::as_str),
+        )
+    }
+
+    /// Whether it, or a device on it, is mounted at `/`.
+    fn holds_root(&self) -> bool {
+        self.mounts().any(|mount| mount == "/") || self.children.iter().any(Device::holds_root)
+    }
+
+    /// Whether it, or a device on it, holds part of the running system: the
+    /// root, boot, EFI, `/usr`, `/var` or `/home` volume, or active swap.
+    fn holds_system(&self) -> bool {
+        self.mounts().any(|mount| SYSTEM_MOUNTS.contains(&mount))
+            || self.children.iter().any(Device::holds_system)
     }
 
     /// What decides whether setup may erase this whole disk.
@@ -281,7 +303,7 @@ impl Host for System {
             .filter(|d| d.kind == "disk" || d.kind == "loop" && !d.ro && d.size > 0)
             .map(|d| Disk {
                 removal: d.facts().removal(),
-                system: d.holds_root(),
+                system: d.holds_system(),
                 bytes: d.size,
                 name: match d.model.as_deref().map(str::trim) {
                     Some(model) if !model.is_empty() => model.to_owned(),
@@ -547,7 +569,8 @@ mod tests {
                  "parttype": "0x83", "partuuid": null, "pkname": "sda"}]}]}"#;
         let new: Listing = serde_json::from_str(new).unwrap();
         let usb = &new.blockdevices[0];
-        assert!(usb.rm && !usb.holds_root());
+        // Its active swap makes it part of the running system.
+        assert!(usb.rm && !usb.holds_root() && usb.holds_system());
         assert_eq!(usb.children[0].content(), "EFI");
         assert_eq!(
             usb.children[0].mount(),
@@ -558,7 +581,7 @@ mod tests {
         let old: Listing = serde_json::from_str(old).unwrap();
         let ssd = &old.blockdevices[0];
         assert_eq!(ssd.size, 500_107_862_016);
-        assert!(!ssd.rm && ssd.holds_root());
+        assert!(!ssd.rm && ssd.holds_root() && ssd.holds_system());
         assert_eq!(ssd.children[0].content(), "0x83");
         assert_eq!(usb.facts().removal(), Removal::Usb);
         assert_eq!(ssd.facts().removal(), Removal::Fixed);
@@ -578,6 +601,26 @@ mod tests {
         listing.blockdevices[0].mountpoints = None;
         assert!(require_system_device(&listing.blockdevices).is_err());
         assert!(require_system_device(&[]).is_err());
+    }
+
+    #[test]
+    fn a_disk_holding_boot_home_or_swap_is_never_offered() {
+        let source = r#"{"blockdevices": [
+            {"name":"nvme0n1","type":"disk","tran":"nvme","mountpoint":null,"children":[
+                {"name":"nvme0n1p2","type":"part","mountpoint":"/"}]},
+            {"name":"sdb","type":"disk","tran":"usb","rm":true,"mountpoint":null,"children":[
+                {"name":"sdb1","type":"part","mountpoint":"/boot/efi"}]},
+            {"name":"sdc","type":"disk","tran":"usb","rm":true,"mountpoint":null,"children":[
+                {"name":"sdc1","type":"part","mountpoints":["/home"]}]},
+            {"name":"sdd","type":"disk","tran":"usb","rm":true,"mountpoint":null,"children":[
+                {"name":"sdd1","type":"part","mountpoint":"/media/me/STELA"}]}]}"#;
+        let listing: Listing = serde_json::from_str(source).unwrap();
+        let system: Vec<bool> = listing
+            .blockdevices
+            .iter()
+            .map(Device::holds_system)
+            .collect();
+        assert_eq!(system, [true, true, true, false]);
     }
 
     #[test]
