@@ -29,7 +29,7 @@ use super::{
     error::Error,
     indirect::IndirectCommandBufferId,
     shader::Compiler,
-    vulkan::backend::Backend,
+    vulkan::backend::{Backend, PreparedImport},
 };
 use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
 use core::{
@@ -493,6 +493,18 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         ranges: &[MemoryRange],
         token: NonZeroU64,
     ) -> Result<NonZeroU64, Fault> {
+        self.import_with(connection, ranges, token, None)
+    }
+
+    /// [`Self::import`] of memory the backend made outside the turn when
+    /// `prepared` holds it; a refusal frees it.
+    pub fn import_with(
+        &mut self,
+        connection: NonZeroU64,
+        ranges: &[MemoryRange],
+        token: NonZeroU64,
+        prepared: Option<PreparedImport>,
+    ) -> Result<NonZeroU64, Fault> {
         self.connection(connection)?;
         self.device.ensure_admission()?;
         let held = self.connections.get_mut(&connection).ok_or(Fault::CLOSED)?;
@@ -504,7 +516,7 @@ impl<B: Backend, C: Compiler> Service<B, C> {
         // publication storage first: a failed insertion after import would
         // otherwise also queue a retirement token for that same descriptor.
         let reserved = held.objects.reserve(connection, self.epoch)?;
-        let memory = self.device.import_memory(ranges, token)?;
+        let memory = self.device.import_memory_with(ranges, token, prepared)?;
         let bytes = self.device.import_bytes(memory);
         let handle = reserved.insert(Entry {
             object: Object::Memory(memory),

@@ -35,7 +35,8 @@ use super::{
     vulkan::{
         SampleCounts,
         backend::{
-            Backend, BufferAllocation, Descriptor, MemoryBlocks, Object, Requirements, requirements,
+            Backend, BufferAllocation, Descriptor, MemoryBlocks, Object, Outside, PreparedImport,
+            Requirements, requirements,
         },
         command::{BufferImageCopy, Command, Subresource},
         object::{
@@ -59,11 +60,13 @@ pub use ash::vk;
 use ash::{ext, khr};
 use blocks::{Candidate, Needs, Purpose, Resident, Source, Tiling};
 use core::{
+    any::Any,
+    cell::UnsafeCell,
     ffi::{CStr, c_void},
     mem::ManuallyDrop,
     num::NonZeroU64,
     ptr::NonNull,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use physical::{Extensions, FeatureChain};
 use stela_contracts::gate::MemoryRange;
@@ -82,6 +85,9 @@ pub struct Loader {
     /// Submissions the driver refused while keeping the device. `None` for
     /// a driver that loses the device instead.
     pub refusals: Option<Refusals>,
+    /// Waits a moment, as the platform's waits do: a call outside the
+    /// service's turn may wait for the boot processor.
+    pub relax: fn(),
 }
 
 /// The driver's record of submissions it refused while keeping the device:
@@ -249,7 +255,7 @@ const DMA_BUF: vk::ExternalMemoryHandleTypeFlags = vk::ExternalMemoryHandleTypeF
 
 /// A host mapping of a `VkDeviceMemory`.
 /// Memory the platform holds, for the driver to import.
-pub trait MemoryExporter: Send {
+pub trait MemoryExporter: Send + Sync {
     /// `ranges` for the driver, and a mapping of them for the host.
     fn export(&self, ranges: &[MemoryRange]) -> Result<ExportedMemory>;
     /// Undoes an export the driver did not import, which leaves it the
@@ -449,7 +455,10 @@ pub struct NativeBackend {
     mappings: BTreeMap<u64, Mapping>,
     /// What each [`Memory`] value names, and the blocks resources share.
     memories: memory::Memories,
-    exporter: ManuallyDrop<Box<dyn MemoryExporter>>,
+    exporter: ManuallyDrop<Arc<dyn MemoryExporter>>,
+    /// The driver work calls do outside the service's turn: imports'
+    /// exports and allocations, and frees of evicted kept imports.
+    outside: Arc<NativeOutside>,
     /// What each imported memory came from, its token and the guest RAM
     /// it views.
     imports: BTreeMap<u64, (ExportedMemory, NonZeroU64, Vec<MemoryRange>)>,
@@ -459,11 +468,6 @@ pub struct NativeBackend {
     import_cache: ImportCache,
     /// The tokens of imported memory now freed.
     retired: VecDeque<NonZeroU64>,
-    /// The memory type imports take, once one import found it: every
-    /// dma-buf the exporter makes is guest RAM of one kind, and asking NVK
-    /// for a descriptor's types imports, maps, unmaps and closes it, five
-    /// host kernel calls per import.
-    import_type: Option<u32>,
     /// [`Loader::refusals`].
     refusals: Option<Refusals>,
     /// The count the driver raises by each refusal it keeps
@@ -687,6 +691,12 @@ impl NativeBackend {
         }
         let memories = memory::Memories::new(snapshot.limits.buffer_image_granularity);
         let zeroing = zero::Zeroing::new(snapshot.limits.max_buffer_size, loader.log);
+        let exporter: Arc<dyn MemoryExporter> = Arc::from(exporter);
+        let outside = Arc::new(NativeOutside::new(
+            device.clone(),
+            exporter.clone(),
+            loader.relax,
+        ));
         let mut backend = Self {
             _entry: ManuallyDrop::new(entry),
             instance,
@@ -707,11 +717,11 @@ impl NativeBackend {
             unsignaled: Vec::new(),
             mappings: BTreeMap::new(),
             memories,
+            outside,
             exporter: ManuallyDrop::new(exporter),
             imports: BTreeMap::new(),
             import_cache: ImportCache::default(),
             retired: VecDeque::new(),
-            import_type: None,
             refusals: loader.refusals,
             outstanding: None,
             new_images: Vec::new(),
@@ -1066,6 +1076,31 @@ impl NativeBackend {
             .ok_or(Error::Unsupported("a memory type of imported memory"))
     }
 
+    /// Takes an imported `VkDeviceMemory` as [`Memory`]: the host reaches it
+    /// through the export's mapping (Linux has no pages to map for an
+    /// imported buffer), and freeing it retires `token`.
+    fn own_import(
+        &mut self,
+        memory: vk::DeviceMemory,
+        exported: ExportedMemory,
+        token: NonZeroU64,
+        ranges: Vec<MemoryRange>,
+    ) -> Memory {
+        self.mappings.insert(
+            raw(memory),
+            Mapping {
+                pointer: exported.pointer,
+                size: exported.bytes,
+                coherent: true,
+            },
+        );
+        self.imports.insert(raw(memory), (exported, token, ranges));
+        self.memories.insert(memory::Allocation::Whole {
+            memory,
+            resource: false,
+        })
+    }
+
     /// Frees `memory`: returns a place to its block, or frees a whole
     /// allocation. A freed import retires its token and is kept for the
     /// same guest RAM's next import ([`ImportCache`]).
@@ -1083,11 +1118,23 @@ impl NativeBackend {
             self.zeroing.forget(&self.device, memory);
             self.retired.push_back(token);
             for evicted in self.import_cache.keep(ranges, memory, exported) {
-                // SAFETY: freed by the Metal device, so nothing the GPU may
-                // still run uses it, and no import took it back.
-                unsafe { self.device.free_memory(evicted.memory, None) };
-                self.exporter.unmap(evicted.exported);
+                self.free_after_turn(Freed {
+                    memory: evicted.memory,
+                    exported: Some(evicted.exported),
+                });
             }
+            return;
+        }
+        if let memory::Allocation::Whole { memory, resource } = allocation {
+            if resource {
+                self.memories.blocks.release_own();
+            }
+            self.mappings.remove(&raw(memory));
+            self.zeroing.forget(&self.device, memory);
+            self.free_after_turn(Freed {
+                memory,
+                exported: None,
+            });
             return;
         }
         let mut source = memory::Allocator {
@@ -1102,11 +1149,20 @@ impl NativeBackend {
             memory::Allocation::Placed(place) => {
                 self.memories.blocks.release(&mut source, place);
             }
-            memory::Allocation::Whole { memory, resource } => {
-                if resource {
-                    self.memories.blocks.release_own();
-                }
-                source.free(memory);
+            memory::Allocation::Whole { .. } => unreachable!("freed above"),
+        }
+    }
+
+    /// Frees a whole allocation the Metal device freed, so nothing the GPU
+    /// may still run uses it: after the turn when the outside work takes
+    /// it, as the free's host kernel calls wait for the boot processor,
+    /// else now.
+    fn free_after_turn(&mut self, freed: Freed) {
+        if let Some(freed) = self.outside.defer_free(freed) {
+            // SAFETY: as above; nothing else holds it.
+            unsafe { self.device.free_memory(freed.memory, None) };
+            if let Some(exported) = freed.exported {
+                self.exporter.unmap(exported);
             }
         }
     }
@@ -1555,8 +1611,10 @@ impl NativeBackend {
 
 impl Drop for NativeBackend {
     fn drop(&mut self) {
-        // A deferred pipeline job uses the device outside any turn.
+        // A deferred pipeline job uses the device outside any turn, and so
+        // does a call's import after its turn.
         self.deferral.retire();
+        let deferred = self.outside.close();
         // An error is not evidence that queued DMA stopped. Keep every native
         // handle, the driver's code and the exporter on that uncertain path.
         // SAFETY: the device belongs to this backend and no caller uses it now.
@@ -1574,10 +1632,16 @@ impl Drop for NativeBackend {
         };
         self.memories.blocks.release_all(&mut source);
         self.zeroing.destroy(&self.device);
-        for kept in self.import_cache.drain() {
-            // SAFETY: the device is idle and the import was freed.
-            unsafe { self.device.free_memory(kept.memory, None) };
-            self.exporter.unmap(kept.exported);
+        let kept = self.import_cache.drain().map(|kept| Freed {
+            memory: kept.memory,
+            exported: Some(kept.exported),
+        });
+        for freed in kept.collect::<Vec<_>>().into_iter().chain(deferred) {
+            // SAFETY: the device is idle and the Metal device freed it.
+            unsafe { self.device.free_memory(freed.memory, None) };
+            if let Some(exported) = freed.exported {
+                self.exporter.unmap(exported);
+            }
         }
         // SAFETY: after the device idles, nothing uses any object, and each
         // handle is destroyed once; null handles are ignored by Vulkan.
@@ -1661,6 +1725,11 @@ impl ImportCache {
         evicted
     }
 
+    /// Whether it keeps an import of exactly `ranges`.
+    fn holds(&self, ranges: &[MemoryRange]) -> bool {
+        self.kept.iter().any(|kept| kept.ranges == ranges)
+    }
+
     /// Takes back the kept import of exactly `ranges`.
     fn take(&mut self, ranges: &[MemoryRange]) -> Option<KeptImport> {
         let index = self.kept.iter().position(|kept| kept.ranges == ranges)?;
@@ -1672,6 +1741,235 @@ impl ImportCache {
     fn drain(&mut self) -> impl Iterator<Item = KeptImport> + '_ {
         self.bytes = 0;
         self.kept.drain(..)
+    }
+}
+
+/// An import [`NativeOutside::prepare_import`] made, for
+/// [`NativeBackend::adopt_import`].
+struct MadeImport {
+    memory: vk::DeviceMemory,
+    exported: ExportedMemory,
+    ranges: Vec<MemoryRange>,
+}
+
+// SAFETY: the export's pointer is the host's mapping of guest RAM, which
+// any processor may hold; only the backend that adopts it, or the exporter
+// when it is discarded, uses it.
+unsafe impl Send for MadeImport {}
+/// A whole allocation to free after the turn, and the export it viewed.
+struct Freed {
+    memory: vk::DeviceMemory,
+    exported: Option<ExportedMemory>,
+}
+
+// SAFETY: as for `MadeImport`; frees pass between processors only through
+// `NativeOutside::frees`.
+unsafe impl Send for Freed {}
+
+/// [`Outside`] of a native backend: the device handle and exporter, which
+/// Vulkan lets any thread allocate and free memory with, the memory type
+/// imports take, and the kept imports the backend evicted, to free. A
+/// backend closing waits for the calls inside before it destroys anything
+/// (`users`, `closed`), relaxing as the platform's waits do, since such a
+/// call may wait for the boot processor's Linux.
+pub(crate) struct NativeOutside {
+    device: ash::Device,
+    exporter: Arc<dyn MemoryExporter>,
+    /// The memory type imports take, `u32::MAX` until an import found it:
+    /// every dma-buf the exporter makes is guest RAM of one kind, and asking
+    /// NVK for a descriptor's types imports, maps, unmaps and closes it,
+    /// five host kernel calls per import.
+    import_type: AtomicU32,
+    users: AtomicU32,
+    closed: AtomicBool,
+    relax: fn(),
+    /// Evicted kept imports to free, and the lock on them.
+    frees: UnsafeCell<Vec<Freed>>,
+    frees_locked: AtomicBool,
+    frees_count: AtomicU32,
+    /// A service runs the frees after its calls' turns.
+    enabled: AtomicBool,
+}
+
+// SAFETY: `frees` is touched only under `frees_locked`; the rest is atomic,
+// immutable, or a Vulkan device whose memory allocation and freeing need no
+// external synchronization.
+unsafe impl Sync for NativeOutside {}
+// SAFETY: as above; kept imports are `Send`.
+unsafe impl Send for NativeOutside {}
+
+impl NativeOutside {
+    /// Frees it holds at most; past it the backend frees in its turn.
+    const FREES: u32 = 64;
+    /// Frees one call runs after its turn at most.
+    const FREES_A_CALL: usize = 4;
+
+    fn new(device: ash::Device, exporter: Arc<dyn MemoryExporter>, relax: fn()) -> Self {
+        Self {
+            device,
+            exporter,
+            import_type: AtomicU32::new(u32::MAX),
+            users: AtomicU32::new(0),
+            closed: AtomicBool::new(false),
+            relax,
+            frees: UnsafeCell::new(Vec::new()),
+            frees_locked: AtomicBool::new(false),
+            frees_count: AtomicU32::new(0),
+            enabled: AtomicBool::new(false),
+        }
+    }
+
+    fn import_type(&self) -> Option<u32> {
+        let index = self.import_type.load(Ordering::Acquire);
+        (index != u32::MAX).then_some(index)
+    }
+
+    /// Has the driver import `exported` as memory type `index`; on failure
+    /// the export is closed and the next import asks for its type again.
+    fn allocate_import(&self, exported: &ExportedMemory, index: u32) -> Result<vk::DeviceMemory> {
+        let mut from_fd = vk::ImportMemoryFdInfoKHR::default()
+            .handle_type(DMA_BUF)
+            .fd(exported.fd);
+        let mut flags =
+            vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+        let allocate = vk::MemoryAllocateInfo::default()
+            .allocation_size(exported.bytes)
+            .memory_type_index(index)
+            .push_next(&mut flags)
+            .push_next(&mut from_fd);
+        // SAFETY: the allocate info and its chain outlive the call.
+        match unsafe { self.device.allocate_memory(&allocate, None) } {
+            Ok(memory) => {
+                self.import_type.store(index, Ordering::Release);
+                Ok(memory)
+            }
+            Err(error) => {
+                self.exporter.close(*exported);
+                self.import_type.store(u32::MAX, Ordering::Release);
+                Err(failure(error))
+            }
+        }
+    }
+
+    /// Runs `body` unless the backend closed; the backend's close waits
+    /// for it.
+    fn inside<T>(&self, body: impl FnOnce() -> T) -> Option<T> {
+        self.users.fetch_add(1, Ordering::SeqCst);
+        let result = (!self.closed.load(Ordering::SeqCst)).then(body);
+        self.users.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    /// Stops calls from entering, waits for those inside, and answers the
+    /// evicted imports not yet freed, for the backend to free.
+    fn close(&self) -> Vec<Freed> {
+        self.closed.store(true, Ordering::SeqCst);
+        while self.users.load(Ordering::SeqCst) != 0 {
+            (self.relax)();
+        }
+        self.with_frees(core::mem::take)
+    }
+
+    fn with_frees<T>(&self, body: impl FnOnce(&mut Vec<Freed>) -> T) -> T {
+        while self
+            .frees_locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // SAFETY: the lock is held.
+        let result = body(unsafe { &mut *self.frees.get() });
+        // SAFETY: the lock is held.
+        let count = unsafe { &*self.frees.get() }.len() as u32;
+        self.frees_count.store(count, Ordering::Release);
+        self.frees_locked.store(false, Ordering::Release);
+        result
+    }
+
+    /// Takes `kept` to free after the turn, or gives it back when nobody
+    /// runs the frees ([`Outside::enable`]) or enough wait already.
+    fn defer_free(&self, kept: Freed) -> Option<Freed> {
+        if !self.enabled.load(Ordering::Acquire) {
+            return Some(kept);
+        }
+        self.with_frees(|frees| {
+            if frees.len() as u32 >= Self::FREES {
+                Some(kept)
+            } else {
+                frees.push(kept);
+                None
+            }
+        })
+    }
+}
+
+impl Outside for NativeOutside {
+    fn prepare_import(self: Arc<Self>, ranges: &[MemoryRange]) -> Result<Option<PreparedImport>> {
+        let made = self.inside(|| -> Result<Option<MadeImport>> {
+            let Some(index) = self.import_type() else {
+                // The first import finds the type in the turn.
+                return Ok(None);
+            };
+            let exported = self.exporter.export(ranges)?;
+            let memory = self.allocate_import(&exported, index)?;
+            Ok(Some(MadeImport {
+                memory,
+                exported,
+                ranges: ranges.to_vec(),
+            }))
+        });
+        let made = made.ok_or(Error::DeviceLost)??;
+        Ok(made.map(|made| PreparedImport {
+            outside: self as Arc<dyn Outside>,
+            made: Some(Box::new(made)),
+        }))
+    }
+
+    fn run_frees(&self) -> usize {
+        // The oldest few: each free waits for the boot processor's Linux
+        // (unbind and close), about 1.5-3 ms a host kernel call.
+        let frees = self.with_frees(|frees| {
+            let count = frees.len().min(Self::FREES_A_CALL);
+            frees.drain(..count).collect::<Vec<_>>()
+        });
+        let count = frees.len();
+        // Closed, the device's destruction frees what it holds.
+        self.inside(|| {
+            for freed in frees {
+                // SAFETY: the Metal device freed it after the GPU finished
+                // with it, and no import took it back.
+                unsafe { self.device.free_memory(freed.memory, None) };
+                if let Some(exported) = freed.exported {
+                    self.exporter.unmap(exported);
+                }
+            }
+        });
+        count
+    }
+
+    fn frees_pending(&self) -> bool {
+        self.frees_count.load(Ordering::Acquire) != 0
+    }
+
+    fn enable(&self) {
+        self.enabled.store(true, Ordering::Release);
+    }
+
+    fn discard(&self, made: Box<dyn Any + Send>) {
+        let Ok(made) = made.downcast::<MadeImport>() else {
+            return;
+        };
+        let MadeImport {
+            memory, exported, ..
+        } = *made;
+        self.inside(|| {
+            // SAFETY: no import adopted it, so nothing uses it.
+            unsafe { self.device.free_memory(memory, None) };
+        });
+        // The driver took the descriptor; the host's mapping is the
+        // exporter's either way.
+        self.exporter.unmap(exported);
     }
 }
 
@@ -1822,9 +2120,8 @@ impl Backend for NativeBackend {
                 resource: false,
             }));
         }
-        let handle_type = DMA_BUF;
         let exported = self.exporter.export(ranges)?;
-        let imported = match self.import_type {
+        let imported = match self.outside.import_type() {
             Some(index) => Ok(index),
             None => self.import_memory_type(exported.fd),
         };
@@ -1835,43 +2132,34 @@ impl Backend for NativeBackend {
                 return Err(error);
             }
         };
-        let mut from_fd = vk::ImportMemoryFdInfoKHR::default()
-            .handle_type(handle_type)
-            .fd(exported.fd);
-        let mut flags =
-            vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
-        let allocate = vk::MemoryAllocateInfo::default()
-            .allocation_size(exported.bytes)
-            .memory_type_index(index)
-            .push_next(&mut flags)
-            .push_next(&mut from_fd);
-        // SAFETY: the allocate info and its chain outlive the call.
-        let memory = match unsafe { self.device.allocate_memory(&allocate, None) } {
-            Ok(memory) => memory,
-            Err(error) => {
-                self.exporter.close(exported);
-                // The next import asks for its descriptor's types again.
-                self.import_type = None;
-                return Err(failure(error));
-            }
-        };
-        self.import_type = Some(index);
-        // The host reaches the memory through a mapping of its own: Linux has
-        // no pages to map for an imported buffer.
-        self.mappings.insert(
-            raw(memory),
-            Mapping {
-                pointer: exported.pointer,
-                size: exported.bytes,
-                coherent: true,
-            },
-        );
-        self.imports
-            .insert(raw(memory), (exported, token, ranges.to_vec()));
-        Ok(self.memories.insert(memory::Allocation::Whole {
+        let memory = self.outside.allocate_import(&exported, index)?;
+        Ok(self.own_import(memory, exported, token, ranges.to_vec()))
+    }
+
+    fn keeps_import(&self, ranges: &[MemoryRange]) -> bool {
+        self.import_cache.holds(ranges)
+    }
+
+    fn outside(&self) -> Option<Arc<dyn Outside>> {
+        Some(self.outside.clone())
+    }
+
+    fn adopt_import(&mut self, mut prepared: PreparedImport, token: NonZeroU64) -> Result<Memory> {
+        let outside: Arc<dyn Outside> = self.outside.clone();
+        if !prepared.made_by(&outside) {
+            // Another device's: freed as the preparation drops.
+            return Err(Error::DeviceLost);
+        }
+        let made = prepared
+            .take()
+            .and_then(|made| made.downcast::<MadeImport>().ok())
+            .ok_or(Error::Invalid("an import this backend did not make"))?;
+        let MadeImport {
             memory,
-            resource: false,
-        }))
+            exported,
+            ranges,
+        } = *made;
+        Ok(self.own_import(memory, exported, token, ranges))
     }
 
     fn retired(&mut self) -> Option<NonZeroU64> {

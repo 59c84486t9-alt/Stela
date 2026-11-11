@@ -36,6 +36,23 @@
 //! its turn ([`Compiler::stop_deferring`]). Until its job has run, a call
 //! made again is answered `Pending` without a turn.
 //!
+//! Driver work that needs no service state runs after the call's turn, so
+//! that its host kernel calls, which wait for the boot processor's Linux,
+//! hold no other connection's call: an import's export and the driver's
+//! import of it, and frees of evicted kept imports
+//! ([`crate::metal::vulkan::backend::Outside`]). It runs one call at a time
+//! on a stack of its own ([`SharedService::set_outside_stack`]) under the
+//! outside lock. Lock order: the turn and the outside lock are never held
+//! together (a call drops its turn before it takes the outside lock, and
+//! takes the turn again only after releasing it); the compile lock is taken
+//! inside a turn or by a job, never with the outside lock; the recent-import
+//! hashes' and jobs' spin locks are leaves. What stays under the turn: the
+//! connections' object tables, the device's resource and queue state, the
+//! Vulkan queue and command pools, and the backend's import bookkeeping,
+//! which an outside import joins in a second, short turn. The Linux layer is
+//! unchanged: posted calls go on its lock-free list from any processor, and
+//! only the boot processor runs Linux.
+//!
 //! The platform runs the jobs ([`SharedService::run_job`]) where it allows
 //! long host work, one at a time on a stack of their own
 //! ([`SharedService::set_compile_stack`]) under the compile lock, which AIR
@@ -53,7 +70,10 @@ use crate::metal::{
     deferred::{Done, Job, JobLock, Owner},
     shader::Compiler,
     timing::CallPhases,
-    vulkan::{MemoryProperties, backend::Backend},
+    vulkan::{
+        MemoryProperties,
+        backend::{Backend, Outside},
+    },
 };
 use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
@@ -114,6 +134,10 @@ pub struct SharedService<B: Backend, C: Compiler> {
     jobs: Spin<Jobs>,
     /// The guest RAM the latest imports named, by a hash of their ranges.
     imported: Spin<RecentImports>,
+    /// The stack driver work outside the turn runs on, zero for none (it
+    /// then stays in the turn), and the lock its user holds.
+    outside_stack: AtomicU64,
+    outside_locked: AtomicBool,
     /// Refused submissions whose command buffers' connections were not yet
     /// told: raised before the refused submission's signals are made, so
     /// while it is not zero no poll is answered from the published serial,
@@ -545,6 +569,8 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             },
             jobs: Spin::new(Jobs::default()),
             imported: Spin::new(RecentImports::default()),
+            outside_stack: AtomicU64::new(0),
+            outside_locked: AtomicBool::new(false),
             refusals,
             host,
         }
@@ -563,6 +589,60 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
     /// takes no interrupt while it waits here.
     pub fn set_wait_bound(&self, ticks: u64) {
         self.wait_bound.store(ticks, Ordering::Release);
+    }
+
+    /// Runs imports' driver work outside the turn on `stack`, a stack as
+    /// deep as the service's own ([`crate::metal::vulkan::backend::Outside`]).
+    pub fn set_outside_stack(&self, stack: u64) {
+        self.outside_stack.store(stack, Ordering::Release);
+    }
+
+    /// Runs `body` on the outside stack under the outside lock, holding no
+    /// turn. Waiting for the lock relaxes, as a wait for the turn does.
+    fn outside<R>(&self, stack: u64, body: impl FnOnce() -> R) -> R {
+        while self
+            .outside_locked
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            (self.host.relax)();
+        }
+        let (mut body, mut result) = (Some(body), None);
+        (self.host.run)(stack, &mut || {
+            result = body.take().map(|body| body());
+        });
+        self.outside_locked.store(false, Ordering::Release);
+        result.expect("the platform runs what it is given")
+    }
+
+    /// Runs the frees a frontend call's turn let go of, unless another
+    /// caller holds the outside lock: a frontend call waits for nothing
+    /// but its bounded turn, and the frees wait for the next call (the
+    /// backend frees in its turn past its queue's bound).
+    fn try_outside_frees(&self, outside: &dyn Outside, stack: u64) {
+        if self
+            .outside_locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        (self.host.run)(stack, &mut || {
+            outside.run_frees();
+        });
+        self.outside_locked.store(false, Ordering::Release);
+    }
+
+    /// The backend's outside work and stack when it has frees to run
+    /// after this turn; tells the backend a service runs them.
+    fn outside_frees(&self, turn: &mut Turn<'_, B, C>) -> Option<(Arc<dyn Outside>, u64)> {
+        let stack = self.outside_stack.load(Ordering::Acquire);
+        if stack == 0 {
+            return None;
+        }
+        let outside = turn.device().outside()?;
+        outside.enable();
+        outside.frees_pending().then_some((outside, stack))
     }
 
     /// Bounds how long a job waits for a processor whose guest waits: once
@@ -1149,6 +1229,7 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
         }
         let progress = turn.device().progress();
         let phases = turn.device().take_phases();
+        let outside = self.outside_frees(&mut turn);
         drop(turn);
         let left = (self.host.ticks)();
         (self.host.served)(Served {
@@ -1169,6 +1250,10 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
         if let Some(text) = noted {
             (self.host.note)(&text);
         }
+        // The frees the call's turn let go of, holding no turn.
+        if let Some((outside, stack)) = outside {
+            self.try_outside_frees(&*outside, stack);
+        }
         served
     }
 
@@ -1183,12 +1268,38 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
         let mut turn = self.turn();
         let entered = (self.host.ticks)();
         turn.catch_up();
+        // An import nothing kept is exported and imported by the driver
+        // after the turn: those host kernel calls wait for the boot
+        // processor, and no other connection's call should wait with them.
+        let stack = self.outside_stack.load(Ordering::Acquire);
+        let mut prepared = None;
+        let mut away = 0;
+        if stack != 0
+            && let Some(outside) = turn.device().import_outside(ranges)
+        {
+            drop(turn);
+            let left = (self.host.ticks)();
+            prepared = Some(self.outside(stack, || outside.prepare_import(ranges)));
+            turn = self.turn();
+            away = (self.host.ticks)().wrapping_sub(left);
+            turn.catch_up();
+        }
         let mut imported = None;
         (self.host.run)(self.host.stack, &mut || {
-            imported = Some(turn.import(connection, ranges, token));
+            imported = Some(match prepared.take() {
+                // An import the driver refused, or a device that closed.
+                Some(Err(error)) => Err(error.into()),
+                Some(Ok(made)) => turn.import_with(connection, ranges, token, made),
+                None => turn.import(connection, ranges, token),
+            });
         });
+        let outside = self.outside_frees(&mut turn);
         drop(turn);
         let imported = imported.expect("the platform runs what it is given");
+        // Frees the turn let go of, after it too.
+        if let Some((outside, stack)) = outside {
+            self.outside(stack, || outside.run_frees());
+        }
         // The kext's import holds the turn as a frontend call does, and its
         // host kernel calls are its own in the platform's count
         // (`GPU CALLS`, 0xff01 and 0xff02).
@@ -1203,7 +1314,8 @@ impl<B: Backend + Send, C: Compiler + Send + 'static> GateService for SharedServ
                 .as_ref()
                 .map_or_else(|fault| fault.status, |_| Status::Ok),
             waited: entered.wrapping_sub(rang),
-            held: left.wrapping_sub(entered),
+            // The driver work outside the turn held nothing.
+            held: left.wrapping_sub(entered).wrapping_sub(away),
             progress: None,
             phases: None,
             compiled: 0,

@@ -27,9 +27,59 @@ use crate::metal::{
     command_buffer::Segment,
     error::{Error, Result},
 };
-use alloc::vec::Vec;
-use core::num::NonZeroU64;
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::{any::Any, num::NonZeroU64};
 use stela_contracts::gate::MemoryRange;
+
+/// Driver work that needs no service state, which a call does after its
+/// turn so that its host kernel calls, which wait for the boot processor,
+/// hold no other connection's call. It is callable from any processor, one
+/// caller at a time (the service's outside lock), never while that caller
+/// holds the turn; a closed backend answers [`Error::DeviceLost`] and does
+/// nothing else.
+pub trait Outside: Send + Sync {
+    /// Exports `ranges` and has the driver import them. `None` when it
+    /// cannot yet: the import is made in the turn.
+    fn prepare_import(self: Arc<Self>, ranges: &[MemoryRange]) -> Result<Option<PreparedImport>>;
+    /// Frees memory the backend let go of in its turn, at most a few
+    /// allocations a call so that one call's exit stays short; answers how
+    /// many.
+    fn run_frees(&self) -> usize;
+    /// Whether [`Self::run_frees`] has anything to free.
+    fn frees_pending(&self) -> bool;
+    /// Told that a service runs [`Self::run_frees`] after its calls'
+    /// turns; until then the backend frees in its turn.
+    fn enable(&self);
+    /// Frees a preparation no import adopted.
+    fn discard(&self, prepared: Box<dyn Any + Send>);
+}
+
+/// An import [`Outside::prepare_import`] made, for
+/// [`Backend::adopt_import`]. Dropped unadopted, its memory is freed.
+pub struct PreparedImport {
+    pub(crate) outside: Arc<dyn Outside>,
+    pub(crate) made: Option<Box<dyn Any + Send>>,
+}
+
+impl PreparedImport {
+    /// Whether `outside` made it.
+    pub fn made_by(&self, outside: &Arc<dyn Outside>) -> bool {
+        core::ptr::addr_eq(Arc::as_ptr(&self.outside), Arc::as_ptr(outside))
+    }
+
+    /// What the backend made, which the backend now owns.
+    pub fn take(&mut self) -> Option<Box<dyn Any + Send>> {
+        self.made.take()
+    }
+}
+
+impl Drop for PreparedImport {
+    fn drop(&mut self) {
+        if let Some(made) = self.made.take() {
+            self.outside.discard(made);
+        }
+    }
+}
 
 /// `VkMemoryRequirements`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,6 +188,24 @@ pub trait Backend {
     /// The wired guest RAM of `ranges`, which the GPU reaches where it is.
     /// Destroying the memory lets [`Self::retired`] answer `token`.
     fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<Memory>;
+    /// Whether an import of exactly `ranges` takes back memory kept from
+    /// an earlier one, with no driver call.
+    fn keeps_import(&self, _ranges: &[MemoryRange]) -> bool {
+        false
+    }
+    /// The driver work the backend does outside the service's turn
+    /// ([`Outside`]); `None` keeps all of it in the turn.
+    fn outside(&self) -> Option<alloc::sync::Arc<dyn Outside>> {
+        None
+    }
+    /// [`Self::import_memory`] of memory [`Outside::prepare_import`] made.
+    /// Memory another device made is refused, and freed when the refused
+    /// preparation drops.
+    fn adopt_import(&mut self, _prepared: PreparedImport, _token: NonZeroU64) -> Result<Memory> {
+        Err(Error::Unsupported(
+            "an import made outside the service's turn",
+        ))
+    }
     /// The token of imported memory now destroyed.
     fn retired(&mut self) -> Option<NonZeroU64>;
     /// Whether [`Self::retired`] has an answer.

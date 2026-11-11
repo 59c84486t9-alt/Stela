@@ -27,7 +27,7 @@ use crate::metal::{
     vulkan::{
         BufferCreate, BufferUsage, Format, ImageAspects, ImageCreate, ImageTiling, ImageType,
         ImageUsage, ImageViewType, MemoryProperties, SampleCounts,
-        backend::{Backend, BufferAllocation, Descriptor, Object},
+        backend::{Backend, BufferAllocation, Descriptor, Object, Outside, PreparedImport},
         command::{BufferImageCopy, Command, SparseBind},
         object::{
             Buffer, BufferInfo, BufferView, Image, ImageInfo, ImageView, ImageViewInfo, Memory,
@@ -38,6 +38,7 @@ use crate::metal::{
 use alloc::{
     collections::{BTreeMap, VecDeque},
     format,
+    sync::Arc,
     vec::Vec,
 };
 use core::{num::NonZeroU64, ops::Range};
@@ -288,9 +289,23 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     /// The wired guest RAM of `ranges`, which the GPU reaches where it is. The
     /// kernel keeps it wired until [`Self::retired`] answers `token`.
     pub fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<MemoryId> {
+        self.import_memory_with(ranges, token, None)
+    }
+
+    /// [`Self::import_memory`], of memory the backend made outside the
+    /// service's turn when `prepared` holds it.
+    pub fn import_memory_with(
+        &mut self,
+        ranges: &[MemoryRange],
+        token: NonZeroU64,
+        prepared: Option<PreparedImport>,
+    ) -> Result<MemoryId> {
         self.ensure_admission()?;
         let bytes = ranges.iter().map(|range| range.bytes).sum();
-        let memory = self.backend.import_memory(ranges, token)?;
+        let memory = match prepared {
+            Some(prepared) => self.backend.adopt_import(prepared, token)?,
+            None => self.backend.import_memory(ranges, token)?,
+        };
         self.allocated += bytes;
         self.book_memory(memory, bytes, || {
             format!("imported memory of {bytes} bytes")
@@ -300,6 +315,21 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 .imports
                 .insert(ImportObject { memory, bytes }),
         ))
+    }
+
+    /// The backend's work outside the turn for an import of `ranges`:
+    /// `None` when the backend keeps an import of them, taken back in the
+    /// turn with no driver call, or does all of it in the turn.
+    pub fn import_outside(&self, ranges: &[MemoryRange]) -> Option<Arc<dyn Outside>> {
+        if self.backend.keeps_import(ranges) {
+            return None;
+        }
+        self.backend.outside()
+    }
+
+    /// The backend's work outside the turn, whatever it is.
+    pub fn outside(&self) -> Option<Arc<dyn Outside>> {
+        self.backend.outside()
     }
 
     /// Imported memory no object took.

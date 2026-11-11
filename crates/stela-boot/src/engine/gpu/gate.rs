@@ -907,6 +907,8 @@ fn service(gpu: &Gpu, stack: u64) -> Result<Arc<Shared>, OpenError> {
             forget: stela_nvk_forget_failures,
             count: stela_nvk_count_failures,
         }),
+        // An import's driver work after its turn may wait for Linux here.
+        relax,
     };
     // SAFETY: the linked NVK and compiler, which last for the boot.
     let service = unsafe {
@@ -1024,6 +1026,12 @@ fn open_gpu(
                 }
                 service.set_compile_stack(compiling.top());
                 core::mem::forget(compiling);
+                // Imports' exports and driver imports run after their turn
+                // on a stack of their own; without one they stay in it.
+                if let Some(outside) = Stack::map(gpu.window, STACK_BYTES) {
+                    service.set_outside_stack(outside.top());
+                    core::mem::forget(outside);
+                }
             } else {
                 output::arguments(format_args!(
                     "GPU {}: no memory for a compile stack; compilations hold the service\n",

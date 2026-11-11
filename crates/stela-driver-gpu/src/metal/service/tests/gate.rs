@@ -779,3 +779,136 @@ fn without_a_bound_a_call_waits_for_the_holder() {
     drop(held);
     assert_eq!(waiter.join().unwrap(), Status::Ok.raw());
 }
+
+/// Waits, boundedly, until `ready` holds.
+fn wait_until(ready: impl Fn() -> bool) {
+    let start = std::time::Instant::now();
+    while !ready() {
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "timed out"
+        );
+        std::thread::yield_now();
+    }
+}
+
+/// While an import's export and driver import wait (for the boot
+/// processor's Linux, on the real platform), another connection's calls take
+/// turns: the import holds none.
+#[test]
+fn an_imports_driver_work_holds_no_other_connections_call() {
+    use crate::metal::device::fixture::MockOutside;
+    use alloc::sync::Arc;
+    let outside = Arc::new(MockOutside::default());
+    let mut service = service();
+    service.device().backend().outside = Some(outside.clone());
+    let shared = Arc::new(SharedService::new(
+        service,
+        ServiceHost {
+            relax: std::thread::yield_now,
+            ..HOST
+        },
+    ));
+    shared.set_outside_stack(0x8000);
+    let kext = shared.connect().unwrap();
+    let app = connect(&mut shared.try_turn().unwrap());
+    outside.hold.store(true, Ordering::SeqCst);
+    let importer = {
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            let range = stela_contracts::gate::MemoryRange {
+                address: 0x8_0000_0000,
+                bytes: 4096,
+            };
+            GateService::import(&*shared, kext, &[range], NonZeroU64::new(5).unwrap())
+        })
+    };
+    wait_until(|| outside.preparing.load(Ordering::SeqCst));
+    // The other connection commits and polls while the import waits, and
+    // leaves frees waiting rather than wait for the outside lock.
+    outside.pending.store(2, Ordering::SeqCst);
+    commit_shared(&shared, app);
+    let mut memory = Memory::default();
+    let poll = gate_call(&mut memory, Operation::Poll, &[], 16);
+    GateService::serve(&*shared, app, poll, &mut memory).unwrap();
+    assert_eq!(completed(&mut memory, poll).status, Status::Ok.raw());
+    assert_eq!(outside.ran.load(Ordering::SeqCst), 0, "the import holds it");
+    assert!(outside.frees_pending_now());
+    outside.hold.store(false, Ordering::SeqCst);
+    let imported = importer.join().unwrap();
+    assert!(imported.is_ok());
+    assert_eq!(outside.prepared.load(Ordering::SeqCst), 1);
+    assert_eq!(outside.discarded.load(Ordering::SeqCst), 0);
+    let mut turn = shared.try_turn().unwrap();
+    assert_eq!(
+        turn.device().backend().imports.len(),
+        1,
+        "adopted in the turn"
+    );
+}
+
+/// An import whose connection closed while its driver work ran is refused,
+/// and the memory made for it is freed.
+#[test]
+fn an_import_made_outside_for_a_closed_connection_is_freed() {
+    use crate::metal::device::fixture::MockOutside;
+    use alloc::sync::Arc;
+    let outside = Arc::new(MockOutside::default());
+    let mut service = service();
+    service.device().backend().outside = Some(outside.clone());
+    let shared = Arc::new(SharedService::new(
+        service,
+        ServiceHost {
+            relax: std::thread::yield_now,
+            report: |_| {},
+            ..HOST
+        },
+    ));
+    shared.set_outside_stack(0x8000);
+    let kext = shared.connect().unwrap();
+    outside.hold.store(true, Ordering::SeqCst);
+    let importer = {
+        let shared = shared.clone();
+        std::thread::spawn(move || {
+            let range = stela_contracts::gate::MemoryRange {
+                address: 0x8_0000_0000,
+                bytes: 4096,
+            };
+            GateService::import(&*shared, kext, &[range], NonZeroU64::new(5).unwrap())
+        })
+    };
+    wait_until(|| outside.preparing.load(Ordering::SeqCst));
+    GateService::disconnect(&*shared, kext);
+    outside.hold.store(false, Ordering::SeqCst);
+    assert!(importer.join().unwrap().is_err());
+    assert_eq!(outside.discarded.load(Ordering::SeqCst), 1);
+    let mut turn = shared.try_turn().unwrap();
+    assert!(turn.device().backend().imports.is_empty());
+}
+
+/// Frees a call's turn let go of run after the turn, and only when some
+/// wait; the backend learns a service runs them.
+#[test]
+fn frees_run_after_the_calls_turn() {
+    use crate::metal::device::fixture::MockOutside;
+    use alloc::sync::Arc;
+    let outside = Arc::new(MockOutside::default());
+    let mut service = service();
+    service.device().backend().outside = Some(outside.clone());
+    let shared = SharedService::new(service, HOST);
+    let connection = connect(&mut shared.try_turn().unwrap());
+    let mut memory = Memory::default();
+    // A call that takes a turn (a poll may be answered without one).
+    let poll = gate_call(&mut memory, Operation::AllocatedSize, &[], 8);
+    GateService::serve(&shared, connection, poll, &mut memory).unwrap();
+    assert_eq!(outside.ran.load(Ordering::SeqCst), 0, "no outside stack");
+    shared.set_outside_stack(0x8000);
+    GateService::serve(&shared, connection, poll, &mut memory).unwrap();
+    assert!(outside.enabled.load(Ordering::SeqCst));
+    assert_eq!(outside.ran.load(Ordering::SeqCst), 0, "nothing waits");
+    outside.pending.store(2, Ordering::SeqCst);
+    GateService::serve(&shared, connection, poll, &mut memory).unwrap();
+    assert_eq!(outside.ran.load(Ordering::SeqCst), 1);
+    assert!(!outside.frees_pending_now());
+    assert!(shared.try_turn().is_some(), "no turn kept");
+}

@@ -136,6 +136,8 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         )
     };
     let conditional = ext::conditional_rendering::Device::new(&instance, &device);
+    let exporter: Arc<dyn MemoryExporter> = Arc::new(Exporter(drops.clone()));
+    let outside_device = device.clone();
     NativeBackend {
         _entry: ManuallyDrop::new(entry),
         instance,
@@ -168,11 +170,15 @@ fn backend(device: ash::Device, drops: &Arc<AtomicUsize>) -> NativeBackend {
         unsignaled: Vec::new(),
         mappings: BTreeMap::new(),
         memories: crate::metal::native::memory::Memories::new(1024),
-        exporter: ManuallyDrop::new(Box::new(Exporter(drops.clone()))),
+        exporter: ManuallyDrop::new(exporter.clone()),
+        outside: Arc::new(crate::metal::native::NativeOutside::new(
+            outside_device,
+            exporter,
+            || {},
+        )),
         imports: BTreeMap::new(),
         import_cache: crate::metal::native::ImportCache::default(),
         retired: VecDeque::new(),
-        import_type: None,
         refusals: None,
         outstanding: None,
         new_images: Vec::new(),

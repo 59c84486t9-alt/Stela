@@ -21,7 +21,9 @@ use crate::metal::{
     },
     stitching::StitchedGraph,
     vulkan::{
-        backend::{Backend, BufferAllocation, Descriptor, Object, Requirements},
+        backend::{
+            Backend, BufferAllocation, Descriptor, Object, Outside, PreparedImport, Requirements,
+        },
         command::BufferImageCopy,
         object::{
             Buffer, BufferInfo, BufferView, BufferViewInfo, ComputePipelineInfo, ExecutionSet,
@@ -54,6 +56,61 @@ fn gated_job(key: u8, owner: Owner, gate: Arc<AtomicBool>) -> Job {
         }
         Box::new(()) as Made
     })
+}
+
+/// [`Outside`] of the mock: a preparation waits while `hold` is set, as the
+/// driver's import waits for the boot processor, and counts what it did.
+#[derive(Default)]
+pub(crate) struct MockOutside {
+    pub(crate) hold: core::sync::atomic::AtomicBool,
+    pub(crate) preparing: core::sync::atomic::AtomicBool,
+    pub(crate) prepared: core::sync::atomic::AtomicUsize,
+    pub(crate) discarded: core::sync::atomic::AtomicUsize,
+    /// Frees waiting, and how many times they ran.
+    pub(crate) pending: core::sync::atomic::AtomicUsize,
+    pub(crate) ran: core::sync::atomic::AtomicUsize,
+    pub(crate) enabled: core::sync::atomic::AtomicBool,
+}
+
+impl MockOutside {
+    pub(crate) fn frees_pending_now(&self) -> bool {
+        self.pending.load(core::sync::atomic::Ordering::SeqCst) != 0
+    }
+}
+
+impl Outside for MockOutside {
+    fn prepare_import(
+        self: alloc::sync::Arc<Self>,
+        ranges: &[MemoryRange],
+    ) -> Result<Option<PreparedImport>> {
+        use core::sync::atomic::Ordering;
+        self.preparing.store(true, Ordering::SeqCst);
+        while self.hold.load(Ordering::SeqCst) {
+            core::hint::spin_loop();
+        }
+        self.preparing.store(false, Ordering::SeqCst);
+        self.prepared.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(PreparedImport {
+            outside: self as alloc::sync::Arc<dyn Outside>,
+            made: Some(Box::new(ranges.to_vec())),
+        }))
+    }
+    fn run_frees(&self) -> usize {
+        use core::sync::atomic::Ordering;
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        self.pending.swap(0, Ordering::SeqCst)
+    }
+    fn frees_pending(&self) -> bool {
+        self.pending.load(core::sync::atomic::Ordering::SeqCst) != 0
+    }
+    fn enable(&self) {
+        self.enabled
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+    }
+    fn discard(&self, _: Box<dyn core::any::Any + Send>) {
+        self.discarded
+            .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[derive(Default)]
@@ -96,6 +153,8 @@ pub(crate) struct MockBackend {
     pub(crate) invalidated: Vec<(Memory, u64, u64)>,
     /// Host memory each imported memory is, by memory.
     pub(crate) imports: BTreeMap<u64, (Vec<MemoryRange>, NonZeroU64)>,
+    /// Driver work outside the service's turn, when a test gives it.
+    pub(crate) outside: Option<alloc::sync::Arc<MockOutside>>,
     pub(crate) retired: VecDeque<NonZeroU64>,
     pub(crate) semaphores: BTreeMap<u64, u64>,
     /// The highest value each semaphore's submitted signals reach.
@@ -196,6 +255,20 @@ impl Backend for MockBackend {
     fn import_memory(&mut self, ranges: &[MemoryRange], token: NonZeroU64) -> Result<Memory> {
         let id = self.id();
         self.imports.insert(id, (ranges.to_vec(), token));
+        Ok(Memory(id))
+    }
+    fn outside(&self) -> Option<alloc::sync::Arc<dyn Outside>> {
+        self.outside
+            .clone()
+            .map(|outside| outside as alloc::sync::Arc<dyn Outside>)
+    }
+    fn adopt_import(&mut self, mut prepared: PreparedImport, token: NonZeroU64) -> Result<Memory> {
+        let ranges = prepared
+            .take()
+            .and_then(|made| made.downcast::<Vec<MemoryRange>>().ok())
+            .ok_or(Error::Invalid("an import this backend did not make"))?;
+        let id = self.id();
+        self.imports.insert(id, (*ranges, token));
         Ok(Memory(id))
     }
     fn retired(&mut self) -> Option<NonZeroU64> {
