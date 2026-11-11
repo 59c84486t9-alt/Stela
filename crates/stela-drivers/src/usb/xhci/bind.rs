@@ -1,6 +1,20 @@
 //! Binding each interface of a configured device to its class driver.
 use super::*;
 
+/// The advertised audio alternates and controls a bound function leaves
+/// out, one unused entry each, so the boot reports every one once.
+fn audio_unsupported<'a>(
+    location: &'a str,
+    unsupported: &'a [(u8, u8, &'static str)],
+) -> impl Iterator<Item = (String, &'static str)> + 'a {
+    unsupported.iter().map(move |&(interface, alternate, why)| {
+        (
+            format!("{location} interface {interface} alternate {alternate}"),
+            why,
+        )
+    })
+}
+
 /// Binds every interface of `device` a driver here takes: one
 /// configuration, its endpoints configured together.
 #[cfg(test)]
@@ -138,7 +152,13 @@ pub(crate) fn bind_with_provider(
                 Ok(())
             }
             Plan::Audio(binding) => audio::UsbAudio::attach(shared.clone(), &device, binding, dma)
-                .map(|owner| found.audio.push(owner)),
+                .map(|owner| {
+                    found.unused.extend(audio_unsupported(
+                        &device.location,
+                        &owner.binding().unsupported,
+                    ));
+                    found.audio.push(owner);
+                }),
             Plan::BluetoothBootloader(binding) => {
                 bluetooth::ath3k::UsbBootloader::attach(shared.clone(), binding, dma).map(
                     |mut owner| {
@@ -202,5 +222,34 @@ impl Plan {
             Self::Bluetooth(binding) => binding.endpoints(),
             Self::BluetoothBootloader(binding) => binding.endpoints(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_left_out_audio_alternate_is_one_unused_entry() {
+        let unsupported = [
+            (6, 11, "IEC 61937 Type III alternate"),
+            (0, 0, "unit controls are not exposed"),
+        ];
+        let entries: Vec<_> =
+            audio_unsupported("xhci 0000:0a:00.0 port 11", &unsupported).collect();
+        assert_eq!(
+            entries,
+            [
+                (
+                    String::from("xhci 0000:0a:00.0 port 11 interface 6 alternate 11"),
+                    "IEC 61937 Type III alternate"
+                ),
+                (
+                    String::from("xhci 0000:0a:00.0 port 11 interface 0 alternate 0"),
+                    "unit controls are not exposed"
+                ),
+            ]
+        );
+        assert_eq!(audio_unsupported("x", &[]).count(), 0);
     }
 }
