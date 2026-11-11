@@ -25,6 +25,7 @@ use crate::{
 };
 use alloc::{boxed::Box, rc::Rc, string::String, sync::Arc, vec::Vec};
 use core::fmt;
+use stela_driver_base::budget;
 
 #[cfg(feature = "native-acpi")]
 mod companion;
@@ -678,6 +679,58 @@ pub struct Devices {
     /// Storage, network, audio and USB functions no driver here takes, with
     /// their class and why.
     pub unsupported: Vec<(Address, [u8; 3], &'static str)>,
+    /// Functions whose start ran past [`DEVICE_START_US`]: their waits then
+    /// ended at once, the driver gave up, and the function was left with
+    /// bus mastering and interrupts off where the probe still held it.
+    pub abandoned: Vec<(Address, budget::Expiry)>,
+}
+
+/// The longest one PCI function's start may take. Linux's own per-step
+/// bounds are smaller: xHCI commands 5 s (`XHCI_CMD_DEFAULT_TIMEOUT`), USB
+/// control transfers 5 s (`USB_CTRL_GET_TIMEOUT`), AHCI port reset 1 s,
+/// the NVMe admin queue 60 s but CC.RDY by CAP.TO, which drives already
+/// started by the firmware meet in a few seconds. A device that answers
+/// starts far inside this; one that stops answering is given up here even
+/// when a driver's per-step bounds would add up to more.
+pub const DEVICE_START_US: u64 = 30_000_000;
+
+/// One function's start under its [`DEVICE_START_US`] budget; a passed
+/// budget is recorded as the function's abandonment when the start ends.
+struct DeviceStart<'a> {
+    address: Address,
+    budget: Option<budget::Budget>,
+    abandoned: &'a mut Vec<(Address, budget::Expiry)>,
+}
+
+impl<'a> DeviceStart<'a> {
+    fn begin(
+        address: Address,
+        clock: Clock,
+        abandoned: &'a mut Vec<(Address, budget::Expiry)>,
+    ) -> Self {
+        Self {
+            address,
+            budget: budget::Budget::start(clock, DEVICE_START_US).ok(),
+            abandoned,
+        }
+    }
+
+    /// Turn off a function whose budget passed while the probe still holds
+    /// it, so a device left half started neither writes memory nor
+    /// interrupts.
+    fn quiesce<C: crate::bus::pci::ConfigSpace>(&self, function: &mut Function<C>) {
+        if self.budget.as_ref().is_some_and(|b| b.expired().is_some()) {
+            let _ = function.abandon();
+        }
+    }
+}
+
+impl Drop for DeviceStart<'_> {
+    fn drop(&mut self) {
+        if let Some(expiry) = self.budget.as_ref().and_then(budget::Budget::expired) {
+            self.abandoned.push((self.address, expiry));
+        }
+    }
 }
 
 impl Devices {
@@ -1057,6 +1110,7 @@ pub unsafe fn probe_with_provider(
     // every device before its fixups: the Intel xHCI port switch asks
     // whether an Intel EHCI exists anywhere.
     let (scanned, pci_scan_complete) = scan(handoff, &mut devices);
+    let mut abandoned = Vec::new();
     let intel_ehci = scanned.iter().flatten().any(|function| {
         function.vendor == 0x8086
             && usb::handoff::Kind::of(function.class) == Some(usb::handoff::Kind::Ehci)
@@ -1149,6 +1203,7 @@ pub unsafe fn probe_with_provider(
                 continue;
             }
             crate::working(&alloc::format!("PCI {address}"));
+            let start = DeviceStart::begin(address, handoff.clock, &mut abandoned);
             #[cfg(feature = "native-acpi")]
             if smbus::matches(&function) {
                 smbus_functions.push(address);
@@ -1219,11 +1274,19 @@ pub unsafe fn probe_with_provider(
                 continue;
             } else if virtio::matches(&function) {
                 let minimum = minimum_for_function!().clone();
-                virtio::VirtioBlk::new(&mut function, handoff, dma, minimum.as_ref())
-                    .map(|device| vec![Box::new(device) as Box<dyn BlockDevice>])
+                let attached =
+                    virtio::VirtioBlk::new(&mut function, handoff, dma, minimum.as_ref());
+                if attached.is_err() {
+                    start.quiesce(&mut function);
+                }
+                attached.map(|device| vec![Box::new(device) as Box<dyn BlockDevice>])
             } else if function.class == nvme::CLASS {
                 let minimum = minimum_for_function!().clone();
-                nvme::attach(&mut function, handoff, dma, minimum.as_ref()).map(|attached| {
+                let attached = nvme::attach(&mut function, handoff, dma, minimum.as_ref());
+                if attached.is_err() {
+                    start.quiesce(&mut function);
+                }
+                attached.map(|attached| {
                     devices
                         .device_failures
                         .extend(attached.failures.into_iter().map(|(namespace, error)| {
@@ -1284,26 +1347,36 @@ pub unsafe fn probe_with_provider(
                             .usb_port_probes
                             .extend(found.probes.into_iter().map(|probe| (address, probe)));
                     }
-                    Err(error) => devices.failures.push((address, error.into())),
+                    Err(error) => {
+                        start.quiesce(&mut function);
+                        devices.failures.push((address, error.into()));
+                    }
                 }
                 continue;
             } else if net::virtio::matches(&function) {
                 let minimum = minimum_for_function!().clone();
-                attach_link!(
-                    VirtioNet::new(&mut function, handoff, dma, minimum.as_ref()),
-                    Adapter::Virtio
-                );
+                let attached = VirtioNet::new(&mut function, handoff, dma, minimum.as_ref());
+                if attached.is_err() {
+                    start.quiesce(&mut function);
+                }
+                attach_link!(attached, Adapter::Virtio);
             } else if net::igc::matches(&function) {
                 let minimum = minimum_for_function!().clone();
                 // SAFETY: the caller grants exclusive post-EBS controller,
                 // segment configuration and firmware/ASPM policy ownership.
                 let attached = unsafe { Igc::new(&mut function, handoff, dma, minimum.clone()) };
+                if attached.is_err() {
+                    start.quiesce(&mut function);
+                }
                 attach_link!(attached, Adapter::Igc);
             } else if net::e1000e::matches(&function) {
                 let minimum = minimum_for_function!().clone();
                 // SAFETY: the caller granted exclusive ownership of all mapped PCI
                 // functions and controllers after ExitBootServices.
                 let attached = unsafe { E1000e::new(&mut function, handoff, dma, minimum.clone()) };
+                if attached.is_err() {
+                    start.quiesce(&mut function);
+                }
                 attach_link!(attached, Adapter::E1000e);
             } else if pch::matches(&function) {
                 let minimum = minimum_for_function!().clone();
@@ -1340,18 +1413,27 @@ pub unsafe fn probe_with_provider(
                         ));
                     }
                 }
+                if attached.is_err() {
+                    start.quiesce(&mut function);
+                }
                 attach_link!(attached, Adapter::Igb);
             } else if net::alx::matches(&function) {
                 let minimum = minimum_for_function!().clone();
                 // SAFETY: as for e1000e, the caller granted exclusive ownership
                 // of the mapped PCI functions and their controllers.
                 let attached = unsafe { Alx::new(&mut function, handoff, dma, minimum.clone()) };
+                if attached.is_err() {
+                    start.quiesce(&mut function);
+                }
                 attach_link!(attached, Adapter::Alx);
             } else if net::atl1c::matches(&function) {
                 let minimum = minimum_for_function!().clone();
                 // SAFETY: as for alx, the caller granted exclusive ownership
                 // of the mapped PCI functions and their controllers.
                 let attached = unsafe { Atl1c::new(&mut function, handoff, dma, minimum.clone()) };
+                if attached.is_err() {
+                    start.quiesce(&mut function);
+                }
                 attach_link!(attached, Adapter::Atl1c);
             } else if realtek::matches(&function) {
                 let minimum = minimum_for_function!().clone();
@@ -1361,6 +1443,9 @@ pub unsafe fn probe_with_provider(
                     unsafe { Realtek::new(&mut function, handoff, dma, firmware, minimum.clone()) };
                 if let Ok(Some(warning)) = attached.as_ref().map(Realtek::warning) {
                     devices.warnings.push((address, Warning::Realtek(warning)));
+                }
+                if attached.is_err() {
+                    start.quiesce(&mut function);
                 }
                 attach_link!(attached, Adapter::Realtek);
             } else if input::virtio::matches(&function) {
@@ -1469,6 +1554,7 @@ pub unsafe fn probe_with_provider(
             }
         }
     }
+    devices.abandoned = abandoned;
     let companions_released = pci_scan_complete
         && !usb_handoff_failures
             .iter()
@@ -2058,6 +2144,41 @@ fn attach_platform(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A function whose device never answers spends its whole budget and
+    /// is recorded abandoned, with the wait it stopped at; the next
+    /// function then starts with a fresh budget and answers normally.
+    #[test]
+    fn a_dead_function_is_abandoned_and_the_next_one_still_starts() {
+        let _clock = crate::test_clock::virtualize();
+        let clock = Clock {
+            ticks_per_microsecond: 1,
+        };
+        let at = |bus| Address {
+            segment: 0,
+            bus,
+            device: 0,
+            function: 0,
+        };
+        let mut abandoned = Vec::new();
+        let started = Clock::ticks();
+        {
+            let _start = DeviceStart::begin(at(0x0b), clock, &mut abandoned);
+            // A driver step whose own bound is a minute: the budget ends it.
+            assert!(!clock.wait(60_000_000, || false));
+        }
+        assert!(Clock::ticks() - started < DEVICE_START_US + 1_000);
+        {
+            let _start = DeviceStart::begin(at(0x0c), clock, &mut abandoned);
+            assert!(!clock.deadline(1_000_000).passed());
+            assert!(clock.wait(1_000_000, || true));
+        }
+        assert_eq!(abandoned.len(), 1);
+        let (address, expiry) = abandoned[0];
+        assert_eq!(address, at(0x0b));
+        assert_eq!(expiry.budget_us, DEVICE_START_US);
+        assert!(expiry.at.unwrap().file().ends_with("probe.rs"));
+    }
     use crate::firmware::{
         self, Catalog, HandoffProvider, Provenance, Provider, Requirement, Resource, Target,
     };

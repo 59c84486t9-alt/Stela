@@ -1077,6 +1077,17 @@ pub unsafe fn open(
     for (address, error) in &devices.failures {
         crate::storage::report_failure(*address, error);
     }
+    for (address, expiry) in &devices.abandoned {
+        let at = expiry
+            .at
+            .map_or(alloc::string::String::from("unknown"), |at| {
+                alloc::format!("{}:{}", at.file(), at.line())
+            });
+        output::arguments(format_args!(
+            "HOST DEVICE pci={address} abandoned after {} ms at step {at}\n",
+            expiry.budget_us / 1000
+        ));
+    }
     for (location, error) in &devices.platform_failures {
         output::arguments(format_args!("PLATFORM FAILED {location}: {error}\n"));
     }

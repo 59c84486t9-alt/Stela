@@ -175,6 +175,14 @@ struct Started {
     native_processors: Option<&'static crate::native_smp::firmware::Capture>,
 }
 
+/// A driver starts on `device`: the boot log names it before the start
+/// begins, so a start that never ends leaves its culprit in the record the
+/// USB log receives when it resumes, and the screen's step shows it.
+fn device_starting(device: &str) {
+    output::arguments(format_args!("HOST DEVICE {device} start\n"));
+    crate::status::progress(device);
+}
+
 fn start(handoff: u64) -> Started {
     output::disable_firmware_console();
     // SAFETY: the first engine code; interrupts are off and nothing else runs.
@@ -227,7 +235,7 @@ fn start(handoff: u64) -> Started {
     );
     crate::status::set_clock(handoff.tsc_hz);
     stela_drivers::on_wait(crate::status::tick);
-    stela_drivers::on_work(crate::status::progress);
+    stela_drivers::on_work(device_starting);
     crate::status::take_screen(
         handoff
             .screen
@@ -2679,7 +2687,11 @@ fn start_devices(
             let usb4_approved = options.usb4_approved.clone();
             let work = kernel_work
                 .unwrap_or_else(|| output::fatal("native probe requires an owned continuation"));
-            let opened = work.call_owned(60_000_000, move || {
+            // Each PCI function's start has its own budget
+            // (`stela_drivers::probe::DEVICE_START_US`) and is given up past
+            // it; this whole bound only catches a stall outside every
+            // function's start, so it leaves room for several given up.
+            let opened = work.call_owned(300_000_000, move || {
                 let native = mmio.map(|mmio| {
                     services::Services::new(mmio, remappers, host_acpi, heap, tsc_hz, usb4_approved)
                 });
