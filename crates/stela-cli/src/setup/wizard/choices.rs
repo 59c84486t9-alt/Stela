@@ -20,16 +20,24 @@ fn majors(images: &[Image]) -> Vec<(String, Vec<usize>)> {
 /// Why a version or Mac cannot be chosen.
 const NOT_YET: &str = "not supported yet";
 
-/// Whether Stela supports `image`'s build (`stela_formats::builds`): every
-/// macOS 27 build.
+/// Whether Stela supports `image`: a macOS 27 build
+/// (`stela_formats::builds`) made for a Mac that setup can present. Apple
+/// publishes several images of one version, each for its own Macs.
 fn supported(image: &Image) -> bool {
-    stela_formats::builds::find(&image.build).is_ok()
+    stela_formats::builds::find(&image.build).is_ok() && for_supported_mac(image)
+}
+
+/// Whether `image` is made for a Mac that setup can present.
+fn for_supported_mac(image: &Image) -> bool {
+    image.models.iter().any(|model| supported_model(model))
 }
 
 /// A release's hint: its build, and whether Stela was tested with it.
 fn release_hint(image: &Image) -> String {
-    if !supported(image) {
+    if stela_formats::builds::find(&image.build).is_err() {
         format!("{} · {NOT_YET}", image.build)
+    } else if !for_supported_mac(image) {
+        format!("{} · for other Macs", image.build)
     } else if stela_formats::builds::tested(&image.build) {
         image.build.clone()
     } else {
@@ -369,7 +377,7 @@ mod tests {
         let image = |version: &str, build: &str| Image {
             version: version.into(),
             build: build.into(),
-            models: vec!["MacBookPro18,3".into()],
+            models: vec!["Mac14,3".into()],
             url: String::new(),
             sha1: None,
         };
@@ -383,6 +391,23 @@ mod tests {
         assert_eq!(initial_group(&groups, &images, ""), 1);
         assert_eq!(initial_group(&groups, &images, "28B70"), 0);
         assert!(!super::supported(&images[1]) && super::supported(&images[2]));
+    }
+
+    #[test]
+    fn a_build_made_for_other_macs_is_listed_but_cannot_be_chosen() {
+        let image = |build: &str, model: &str| Image {
+            version: "27.2".into(),
+            build: build.into(),
+            models: vec![model.into()],
+            url: String::new(),
+            sha1: None,
+        };
+        let images = [image("26C101", "Mac17,1"), image("26C100", "Mac14,3")];
+        assert!(!supported(&images[0]) && supported(&images[1]));
+        assert!(release_hint(&images[0]).ends_with("for other Macs"));
+        let groups = majors(&images);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(initial_group(&groups, &images, "26C101"), 0);
     }
 
     #[test]
