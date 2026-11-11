@@ -1,5 +1,5 @@
 // The physical PC as stela.efi describes it in the StelaGPU kext's `StelaHost`
-// registry dictionary (docs/design/updates.md#host-inventory). Model names and
+// registry dictionary. Model names and
 // counts only: the record carries no serial numbers, addresses or user data.
 import Foundation
 
