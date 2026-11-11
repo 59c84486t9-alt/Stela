@@ -167,5 +167,14 @@ pub(crate) fn copy(from: &Path, to: &Path, progress: &Phase) -> io::Result<()> {
         output.write_all(&buffer[..count])?;
         progress.advance(count as u64);
     }
-    output.sync_all()
+    output.sync_all()?;
+    // Drop the written pages from the cache, so a check that reads the copy
+    // back reads what the disk holds rather than what was written.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: an advice call on a descriptor `output` keeps open.
+        unsafe { libc::posix_fadvise(output.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
+    }
+    Ok(())
 }

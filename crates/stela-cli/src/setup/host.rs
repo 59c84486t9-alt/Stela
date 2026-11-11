@@ -249,6 +249,11 @@ pub(crate) trait Host {
     fn network_adapters(&self) -> Result<Vec<(u16, u16)>> {
         Ok(Vec::new())
     }
+    /// Write everything the volume at `path` still caches to its disk, so
+    /// that a USB taken out after setup holds what setup wrote.
+    fn flush(&self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
     /// Check write access before downloading or signing for a whole USB.
     fn check_erase_access(&self, _disk: &str) -> Result<()> {
         Ok(())

@@ -799,6 +799,17 @@ impl Host for System {
             .context(format!("{disk} was erased, but its volume is not mounted"))
     }
 
+    fn flush(&self, path: &Path) -> Result<()> {
+        // FlushFileBuffers on a volume handle writes out every file of the
+        // volume; it takes write access, which an administrator has.
+        let (name, _) = volume_of(path)?;
+        let volume = open(name.trim_end_matches('\\'), GENERIC_READ | GENERIC_WRITE)
+            .with_context(|| format!("cannot open the volume of {} ({ADMIN})", path.display()))?;
+        volume
+            .sync_all()
+            .with_context(|| format!("cannot write out {}", path.display()))
+    }
+
     fn check_erase_access(&self, disk: &str) -> Result<()> {
         open(
             &drive_path(disk_number(disk)?),

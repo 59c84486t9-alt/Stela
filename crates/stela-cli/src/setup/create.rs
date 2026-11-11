@@ -987,7 +987,12 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
         return Ok(report);
     }
     let disk = plan.installed.disk.clone();
+    let volumes = [plan.record.esp.clone(), plan.record.volume.clone()];
     apply(environment, plan)?;
+    // Before "Done": a USB taken out right after holds everything.
+    for volume in &volumes {
+        host.flush(volume)?;
+    }
     if let Some(temporary) = &temporary {
         // The boot files are on the USB now.
         let _ = fs::remove_dir_all(temporary);
@@ -1012,8 +1017,8 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
     };
     writeln!(
         report,
-        "Done. Boot the PC from this USB (the firmware's boot menu lists it as a UEFI USB \
-         device): {start}.\nCheck it with {}\nUndo it with {}",
+        "Done. Eject the USB before you unplug it. Boot the PC from this USB (the firmware's \
+         boot menu lists it as a UEFI USB device): {start}.\nCheck it with {}\nUndo it with {}",
         super::fix(&command.usb, "status"),
         super::fix(&command.usb, "uninstall")
     )?;

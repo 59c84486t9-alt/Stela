@@ -152,6 +152,14 @@ impl Host for System {
         Ok(())
     }
 
+    fn flush(&self, _path: &Path) -> Result<()> {
+        // macOS has no per-volume sync; each file setup wrote is already
+        // synced with F_FULLFSYNC, and this writes out the rest.
+        // SAFETY: sync takes no arguments.
+        unsafe { libc::sync() };
+        Ok(())
+    }
+
     fn cpu(&self) -> Result<Cpu> {
         super::cpu()
     }

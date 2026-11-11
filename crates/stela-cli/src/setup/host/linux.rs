@@ -453,6 +453,19 @@ impl Host for System {
             .with_context(|| format!("{device} was mounted nowhere"))
     }
 
+    fn flush(&self, path: &Path) -> Result<()> {
+        use std::os::unix::io::AsRawFd;
+        let directory =
+            fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
+        // SAFETY: syncfs takes an open descriptor, which `directory` keeps
+        // open through the call.
+        if unsafe { libc::syncfs(directory.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("cannot write out {}", path.display()));
+        }
+        Ok(())
+    }
+
     fn check_erase_access(&self, disk: &str) -> Result<()> {
         fs::OpenOptions::new()
             .read(true)
