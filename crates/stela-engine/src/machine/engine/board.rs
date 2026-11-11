@@ -247,6 +247,9 @@ pub(super) enum PagePhase {
     Retire(usize),
 }
 
+/// What [`Block::part`] holds for code outside the board's arena.
+pub(super) const NO_PART: u8 = u8::MAX;
+
 /// The parts an [`Arena`] is cut into: what one retirement takes away.
 const ARENA_PARTS: usize = 32;
 
@@ -483,6 +486,11 @@ pub struct CodeReport {
     pub retired: u64,
     pub forced: u64,
     pub lost: u64,
+    /// Installs done again because a retirement chose their part before
+    /// they published, and links refused because their thunk's or tail's
+    /// part was chosen before the reference was noted.
+    pub redone: u64,
+    pub refused: u64,
     /// Waits for a part's grace, and those that ran out.
     pub grace_waits: u64,
     pub overdue: u64,
@@ -525,6 +533,10 @@ pub(super) struct Events {
     pub(super) retired: AtomicU64,
     pub(super) forced: AtomicU64,
     pub(super) lost: AtomicU64,
+    /// Installs whose part a retirement chose before they published, done
+    /// again; references into a part already chosen, refused.
+    pub(super) redone: AtomicU64,
+    pub(super) refused: AtomicU64,
     pub(super) grace_waits: AtomicU64,
     pub(super) overdue: AtomicU64,
     /// The longest whole retirement since the last report: the TSC ticks
@@ -713,6 +725,8 @@ impl Code {
             retired: count(&self.events.retired),
             forced: count(&self.events.forced),
             lost: count(&self.events.lost),
+            redone: count(&self.events.redone),
+            refused: count(&self.events.refused),
             grace_waits: count(&self.events.grace_waits),
             overdue: count(&self.events.overdue),
             retire_ticks: self.events.retire_ticks.swap(0, Ordering::Relaxed),

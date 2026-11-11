@@ -584,7 +584,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Install native `bytes`: in the board's arena when it has one, else
     /// in the host's. `retire` lets a full ring take away its oldest part's
-    /// code to make room, for a caller outside the board's lock.
+    /// code to make room, for a caller outside the board's lock: a block's
+    /// install ([`Self::place`]), which keeps its places until it publishes
+    /// ([`Self::release_places`]), so that their parts are not opened again
+    /// meanwhile. An install it makes for the block (a thunk) holds the
+    /// block's place, so it never waits for a grace or a part another
+    /// install holds: it finds the arena full instead. Without `retire` the
+    /// caller holds the board's lock from the take to its last write, and
+    /// the lock keeps the part, as no retirement ends without it.
     pub(super) fn install_native(
         &mut self,
         bytes: &[u8],
@@ -605,12 +612,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if retire {
             self.retire_steps(self.retire_budget());
         }
+        let holding = !self.held_places.is_empty();
         loop {
             let full = match arena.ring.take(stream, bytes.len(), 16) {
                 Ok(place) => {
                     let address = arena.address(place);
                     arena.write(address, bytes);
                     self.host.serialize_code();
+                    if retire {
+                        self.held_places.push(place);
+                    } else {
+                        arena.ring.release(place);
+                    }
                     return Ok(NativeCode(address));
                 }
                 Err(full) => full,
@@ -621,7 +634,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let (grace, skip) = self.grace();
             match arena.ring.advance(stream, full, grace, skip) {
                 board::Advance::Moved => {}
-                // The next part is still being taken away: help.
+                // A PE that waits on another's install while holding a
+                // place could be the one that install waits on.
+                board::Advance::Busy | board::Advance::Wait(_) if holding => {
+                    return Err(InstallError::Full);
+                }
+                // The next part is still being taken away or written: help.
                 board::Advance::Busy => {
                     self.retire_steps(self.retire_budget());
                     self.host.relax();
@@ -700,14 +718,31 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .unwrap_or(board::YOUNG)
     }
 
-    /// Code at `from` now jumps to `to`: `to`'s part stays while `from`'s
-    /// does. Under the board's lock, or before `from`'s block is published.
-    pub(super) fn note_reference(&self, from: u64, to: u64) {
+    /// Code at `from` is about to jump to `to`, which the caller just
+    /// installed and still holds: `to`'s part stays while `from`'s does.
+    /// False when `to`'s part was chosen to go meanwhile: the caller makes
+    /// no jump, and its exit stays an exit to the engine. Under the board's
+    /// lock, or before `from`'s block is published.
+    #[must_use]
+    pub(super) fn note_reference(&self, from: u64, to: u64) -> bool {
         if let Some(arena) = &self.code.arena
             && let (Some(from), Some(to)) =
                 (arena.part_of(from as usize), arena.part_of(to as usize))
+            && !arena.ring.refer(from, to)
         {
-            arena.ring.refer(from, to);
+            board::Events::count(&self.code.events.refused);
+            return false;
+        }
+        true
+    }
+
+    /// The places this PE's install took ([`Self::install_native`]) are
+    /// published or given up: their parts may be opened again.
+    pub(super) fn release_places(&mut self) {
+        if let Some(arena) = &self.code.arena {
+            for place in self.held_places.drain(..) {
+                arena.ring.release(place);
+            }
         }
     }
 
@@ -719,14 +754,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// fetches would write. The choice needs only the parts' order by
     /// heat, which a batch of at most that many fetches per PE leaves.
     pub(super) fn entered(&mut self, slot: usize) {
-        let Some(arena) = &self.code.arena else {
+        let part = self.code.blocks[slot].part;
+        if part == board::NO_PART {
             return;
-        };
-        let Some(part) = arena.part_of(self.code.blocks[slot].code.0) else {
-            return;
-        };
+        }
+        let part = usize::from(part);
         if self.entered_pending.len() <= part {
-            self.entered_pending.resize(arena.ring.parts as usize, 0);
+            self.entered_pending.resize(part + 1, 0);
         }
         self.entered_pending[part] += 1;
         self.entered_total += 1;
@@ -1193,14 +1227,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             .unwrap_or(0);
             self.census_evicted(cache, slot, bytes, now);
-            let taken = code.blocks.record(slot).taken.load(Ordering::Relaxed);
+            // Retired first: a PE adding its kept exits checks the block's
+            // incarnation and liveness, so it adds them here before the
+            // swap or by word after (but for one that checked just before).
+            code.blocks.retire(slot);
+            let taken = code.blocks.record(slot).taken.swap(0, Ordering::Relaxed);
             if taken != 0 {
                 *self
                     .exit_words
                     .entry(code.blocks[slot].terminal)
                     .or_default() += u64::from(taken);
             }
-            code.blocks.retire(slot);
         }
     }
 
@@ -1398,7 +1435,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     pub(super) fn discard_code(&mut self, cause: Discard) {
         self.flush_exits();
-        self.exit_words = self.exit_words();
+        // A machine alone clears its records below: their exits are kept
+        // by word. A board's records stay, and their blocks' retirement
+        // adds them: kept here too they would count twice.
+        let shared = self.code_hub.is_some() || Arc::get_mut(&mut self.code).is_none();
+        if !shared {
+            self.exit_words = self.exit_words();
+        }
         let code = Arc::clone(&self.code);
         let counted =
             self.census.is_some() || code.cache_at(board::LockSite::Discard).census.is_some();

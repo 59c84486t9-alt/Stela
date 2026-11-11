@@ -1311,13 +1311,27 @@ fn pes_that_look_up_and_link_never_meet_a_block_a_concurrent_retirement_took() {
         assert!(checked > 0, "lookups were checked");
         assert!(linked > 0, "links were checked");
     });
-    // Once the retirements end, no live block chains into one that went.
+    // Once the retirements end, no live block chains into one that went,
+    // and every indexed block's code lies in a part that still holds it.
     let mut machine = make(0);
     machine.retire_steps(u64::MAX);
+    let arena = code.arena.as_ref().expect("an arena");
     for slot in 0..code.blocks.len() {
         let Some(block) = code.blocks.installed(slot) else {
             continue;
         };
+        if code.find(block.pc, block.physical, block.variant) == Some(slot) {
+            let part = arena.part_of(block.code.0).expect("code in the window");
+            let held = board::Place {
+                generation: arena.ring.holds(part),
+                part: part as u32,
+                offset: 0,
+            };
+            assert!(
+                arena.ring.live(held),
+                "indexed block {slot} lies in part {part}, which went"
+            );
+        }
         let record = code.blocks.record(slot);
         for (position, exit) in block.successors.iter().enumerate() {
             if record.chained(position) {
@@ -1469,7 +1483,9 @@ fn hot_blocks_survive_many_turns_of_cold_code_in_the_tenured_generation() {
 /// once whatever part that chose: the parts chosen and why.
 fn turn(ring: &board::Ring, grace: &board::Grace, stream: usize) -> Vec<(u32, board::Why)> {
     let mut chosen = Vec::new();
-    while ring.take(stream, 64, 16).is_ok() {}
+    while let Ok(place) = ring.take(stream, 64, 16) {
+        ring.release(place);
+    }
     let full = ring.head(stream);
     loop {
         match ring.advance(stream, full, grace, None) {
@@ -1598,4 +1614,136 @@ fn a_part_another_part_jumps_into_waits_for_it() {
             .iter()
             .any(|&(part, _)| part as usize == third)
     );
+}
+
+/// A tenured part that stayed open while young code turned the ring past
+/// the age cap is old when a block takes its last bytes. The block's own
+/// PAC thunk then finds the part full and opens the next, and that advance
+/// chooses a part to go: never the one the block's install still writes,
+/// which a choice by age counted from the part's opening took (finding 1
+/// of the engine audit: the block was then published into a part already
+/// taken away, and later ran another block's bytes).
+#[test]
+fn a_block_whose_thunk_fills_its_part_is_published_in_a_part_that_stays() {
+    const RETAA: u32 = 0xd65f_0bff;
+    let words = [RETAA, RET].repeat(2 * FETCH_PAGE as usize / 8);
+    // The block's code as a machine alone compiles it, and its frame.
+    let (block_bytes, physical) = {
+        let mut memory = vec![0u8; 8 * 4096];
+        let mut probe = arena_machine_over(&words, &mut memory);
+        let base = probe.cpu.pc;
+        let slot = fetched(&mut probe, base);
+        let recovery = probe.code.blocks.recovery();
+        let bytes = recovery.get(&slot).map(|owner| owner.code_bytes());
+        (bytes.expect("rows"), probe.code.blocks[slot].physical)
+    };
+    let mut memory = vec![0u8; 8 * 4096];
+    let mut machine = arena_machine_over(&words, &mut memory);
+    let code = Arc::clone(&machine.code);
+    let arena = code.arena.as_ref().expect("an arena");
+    let ring = &arena.ring;
+    assert_eq!(ring.parts, 8);
+    let grace = board::Grace::new(1);
+    // The tenured generation opens; young code turns the ring past its age.
+    let none = ring.head(board::TENURED);
+    assert_eq!(
+        ring.advance(board::TENURED, none, &grace, None),
+        board::Advance::Moved
+    );
+    let tenured = open_part(ring, board::TENURED);
+    let opened = ring.holds(tenured);
+    while ring.generation() < opened + board::AGE_TURNS * ring.parts {
+        turn(ring, &grace, board::YOUNG);
+    }
+    // All of the tenured part but the block's bytes is taken.
+    let block_at = arena.part_bytes - block_bytes.next_multiple_of(16);
+    let filler = ring.take(board::TENURED, block_at, 16).expect("room");
+    ring.release(filler);
+    // The ring took the block lately: it is compiled tenured.
+    let pc = machine.cpu.pc;
+    let context = machine.current_variant(false, false);
+    let guarded_page = machine.fetch_guarded(pc);
+    let variant = machine.page_variant(
+        Variant {
+            guarded_page,
+            ..context
+        },
+        physical,
+    );
+    let id = machine.variant_id(variant);
+    let identity = super::super::churn::identity(pc, physical, id.0);
+    let gone = super::super::churn::Gone::Ring;
+    code.ghosts.gone(identity, 0, ring.generation(), gone);
+    let outs: u64 = ring.outs().iter().sum();
+    let slot = fetched(&mut machine, pc);
+    let block = &code.blocks[slot];
+    let part = arena.part_of(block.code.0).expect("code in the window");
+    assert_eq!(part, tenured, "the block took the tenured part");
+    assert_eq!(block.code.0 - arena.range(part as u32).start, block_at);
+    // Its thunk moved the ring on, which chose a part to go, not this one.
+    assert_eq!(ring.outs().iter().sum::<u64>(), outs + 1);
+    let held = board::Place {
+        generation: ring.holds(part),
+        part: part as u32,
+        offset: 0,
+    };
+    assert_eq!(ring.retired_through(part), 0, "the block's part went");
+    assert!(ring.live(held), "the block's part was chosen to go");
+    assert_eq!(code.report().redone, 0);
+    assert_eq!(machine.code.find(pc, physical, id), Some(slot));
+}
+
+/// Another PE's advance chooses a block's part between the block's take
+/// and its publish, and the part is taken away: its retirement listed the
+/// part's blocks without this one, so the block is not published there
+/// but installed again, in a part that stays.
+#[test]
+fn a_block_whose_part_is_chosen_before_it_publishes_is_installed_again() {
+    let mut memory = vec![0u8; WINDOW];
+    let mut machine = arena_machine(&mut memory);
+    let code = Arc::clone(&machine.code);
+    let other = Arc::clone(&code);
+    let chosen = Arc::new(core::sync::atomic::AtomicU32::new(u32::MAX));
+    let noted = Arc::clone(&chosen);
+    // The first install's write: another PE fills the part, moves the ring
+    // on and chooses the part, then retires it (it holds no listed block).
+    machine.host.on_serialize = Some(Box::new(move |count| {
+        if count != 1 {
+            return;
+        }
+        let ring = &other.arena.as_ref().expect("an arena").ring;
+        let grace = board::Grace::new(1);
+        let part = open_part(ring, board::YOUNG) as u32;
+        while let Ok(place) = ring.take(board::YOUNG, 16, 16) {
+            ring.release(place);
+        }
+        let full = ring.head(board::YOUNG);
+        assert_eq!(
+            ring.advance(board::YOUNG, full, &grace, None),
+            board::Advance::Moved
+        );
+        assert!(ring.choose_part(part));
+        ring.retired(part, grace.snapshot());
+        noted.store(part, Ordering::Relaxed);
+    }));
+    let pc = machine.cpu.pc;
+    let slot = fetched(&mut machine, pc);
+    let gone = chosen.load(Ordering::Relaxed);
+    assert_ne!(gone, u32::MAX, "the hook ran");
+    let arena = code.arena.as_ref().expect("an arena");
+    let part = arena
+        .part_of(code.blocks[slot].code.0)
+        .expect("code in the window");
+    assert_ne!(
+        part as u32, gone,
+        "a block published into a part taken away"
+    );
+    assert_eq!(code.report().redone, 1);
+    let block = &code.blocks[slot];
+    assert_eq!(
+        code.find(pc, block.physical, block.variant),
+        Some(slot),
+        "the block installed again is the one indexed"
+    );
+    assert_eq!(live_codes(&machine), [block.code.0]);
 }

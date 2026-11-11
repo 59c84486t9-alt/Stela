@@ -134,6 +134,8 @@ fn ring_moves_on_and_retires_one_ahead() {
     assert_eq!(ring.young_parts, 0);
     grace.enter(0);
     let first = ring.take(YOUNG, 200, 16).unwrap();
+    // Each install publishes before the ring needs its part again.
+    ring.release(first);
     assert_eq!(
         first,
         Place {
@@ -146,8 +148,10 @@ fn ring_moves_on_and_retires_one_ahead() {
     assert_eq!(ring.take(TENURED, 100, 16), Err(full));
     // Parts 1 and 2 never held code: nothing to retire yet.
     assert_eq!(ring.advance(YOUNG, full, &grace, Some(0)), Advance::Moved);
+    let place = ring.take(YOUNG, 64, 16).unwrap();
+    ring.release(place);
     assert_eq!(
-        ring.take(YOUNG, 64, 16).unwrap(),
+        place,
         Place {
             generation: 1,
             part: 1,
@@ -163,7 +167,9 @@ fn ring_moves_on_and_retires_one_ahead() {
     );
     assert!(!ring.live(first));
     let third = ring.head(YOUNG);
-    assert_eq!(ring.take(YOUNG, 256, 16).unwrap().part, 2);
+    let place = ring.take(YOUNG, 256, 16).unwrap();
+    ring.release(place);
+    assert_eq!(place.part, 2);
     // Until it is retired another advance waits for the retirer.
     assert_eq!(ring.advance(YOUNG, third, &grace, Some(0)), Advance::Busy);
     ring.retired(0, grace.snapshot());
@@ -178,8 +184,10 @@ fn ring_moves_on_and_retires_one_ahead() {
         ring.advance(YOUNG, third, &grace, None),
         Advance::Retire(1, Why::Young)
     );
+    let place = ring.take(YOUNG, 16, 16).unwrap();
+    ring.release(place);
     assert_eq!(
-        ring.take(YOUNG, 16, 16).unwrap(),
+        place,
         Place {
             generation: 3,
             part: 0,
@@ -191,93 +199,290 @@ fn ring_moves_on_and_retires_one_ahead() {
     grace.leave(0);
 }
 
-/// PEs install records into a small ring and publish them in a table;
-/// the others read published records, as cores run code, and check they
-/// stay whole while held. Parts turn over thousands of times, so PEs meet
-/// full parts, retire the oldest and wait for grace periods all at once.
+/// Take what is left of `stream`'s open part in small places, published
+/// at once, and give its head.
+fn fill(ring: &Ring, stream: usize) -> u32 {
+    while let Ok(place) = ring.take(stream, 16, 16) {
+        ring.release(place);
+    }
+    ring.head(stream)
+}
+
+/// A part an install still writes may be chosen when nothing else can go,
+/// but is not opened again until the install gives its place back: its
+/// writes would land in the part's next code.
 #[test]
-fn ring_reuses_parts_only_after_readers_left() {
+fn a_part_an_install_still_writes_is_not_opened_again() {
+    let grace = Grace::new(1);
+    let ring = Ring::new(3, 256);
+    let held = ring.take(YOUNG, 200, 16).unwrap();
+    assert_eq!(
+        ring.advance(YOUNG, fill(&ring, YOUNG), &grace, None),
+        Advance::Moved
+    );
+    // Part 0 alone is settled: the last resort chooses it, writer and all.
+    let full = fill(&ring, YOUNG);
+    assert_eq!(
+        ring.advance(YOUNG, full, &grace, None),
+        Advance::Retire(0, Why::Young)
+    );
+    assert!(!ring.live(held));
+    ring.retired(0, grace.snapshot());
+    let full = fill(&ring, YOUNG);
+    assert_eq!(ring.advance(YOUNG, full, &grace, None), Advance::Busy);
+    ring.release(held);
+    assert_eq!(
+        ring.advance(YOUNG, full, &grace, None),
+        Advance::Retire(1, Why::Young)
+    );
+    let place = ring.take(YOUNG, 16, 16).unwrap();
+    assert_eq!((place.part, place.generation), (0, 3));
+    ring.release(place);
+}
+
+/// A part with a writer is passed over while another can go.
+#[test]
+fn a_part_an_install_still_writes_goes_after_the_others() {
+    let grace = Grace::new(1);
+    let ring = Ring::new(4, 256);
+    let held = ring.take(YOUNG, 200, 16).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            ring.advance(YOUNG, fill(&ring, YOUNG), &grace, None),
+            Advance::Moved
+        );
+    }
+    // Parts 0 and 1 are settled; 0, the oldest, is still written.
+    let full = fill(&ring, YOUNG);
+    assert_eq!(
+        ring.advance(YOUNG, full, &grace, None),
+        Advance::Retire(1, Why::Young)
+    );
+    assert!(ring.live(held));
+    ring.release(held);
+}
+
+/// A reference into a part already chosen to go is refused, and noted
+/// into a live part it holds that part.
+#[test]
+fn a_reference_into_a_part_already_chosen_is_refused() {
+    let grace = Grace::new(1);
+    let ring = Ring::new(3, 256);
+    assert_eq!(
+        ring.advance(YOUNG, fill(&ring, YOUNG), &grace, None),
+        Advance::Moved
+    );
+    let full = fill(&ring, YOUNG);
+    assert_eq!(
+        ring.advance(YOUNG, full, &grace, None),
+        Advance::Retire(0, Why::Young)
+    );
+    assert!(!ring.refer(1, 0), "into a part going");
+    assert!(ring.refer(0, 1), "from a part going, into a full one");
+    assert!(ring.refer(2, 2));
+    ring.retired(0, grace.snapshot());
+    assert!(!ring.refer(1, 0), "into a free part");
+}
+
+/// A tenured part that stayed open while young code turned the ring past
+/// the age cap is old when it fills, but has only just filled: installs
+/// that took its last bytes may still be publishing, so the advance that
+/// closes it chooses another part (the audit's ring-level repro of
+/// finding 1, where it chose that part at once).
+#[test]
+fn a_tenured_part_is_not_chosen_the_moment_it_fills() {
+    const PART: usize = 256;
+    let grace = Grace::new(1);
+    let ring = Ring::new(8, PART);
+    assert_eq!(ring.young_parts, 2);
+    let step = |stream: usize, full: u32| match ring.advance(stream, full, &grace, None) {
+        Advance::Retire(part, why) => {
+            ring.retired(part, grace.snapshot());
+            Some((part, why))
+        }
+        _ => None,
+    };
+    step(TENURED, ring.head(TENURED));
+    let first = ring.take(TENURED, 16, 16).unwrap();
+    ring.release(first);
+    let tenured = first.part;
+    while ring.generation() < ring.holds(tenured as usize) + AGE_TURNS * 8 {
+        step(YOUNG, fill(&ring, YOUNG));
+    }
+    let in_flight = ring.take(TENURED, PART - 16, 16).unwrap();
+    assert_eq!(in_flight.part, tenured);
+    let full = ring.take(TENURED, 16, 16).unwrap_err();
+    let chosen = step(TENURED, full).expect("a part chosen");
+    assert_ne!(chosen.0, tenured, "the part just filled was chosen");
+    assert!(ring.live(in_flight));
+    ring.release(in_flight);
+    // A quarter turn later it goes, by age.
+    let mut outs = Vec::new();
+    while !outs.iter().any(|&(part, _)| part == tenured) {
+        outs.extend(step(YOUNG, fill(&ring, YOUNG)));
+    }
+    assert!(outs.contains(&(tenured, Why::Aged)));
+}
+
+/// PEs install records into a small ring and publish them in a table as
+/// the engine publishes blocks: a record's place is taken (and the ring
+/// moved on, a part retired or a grace waited for as needed), written, and
+/// a thunk's place taken for it as an install holding the record's place
+/// does (never waiting), and the record is published under the lock only
+/// while its place's part is live ([`Ring::live`]), then the places are
+/// released. Half the PEs install outside their section, as a compile
+/// does. The others read published records, as cores run code, and check
+/// that each still holds what its install wrote for that place: a record
+/// published after its part's retirement, or written into a part opened
+/// again, fails. Parts turn over thousands of times.
+fn ring_reuses_parts_only_after_readers_left(parts: usize) {
     const PES: usize = 6;
-    const PARTS: usize = 3;
     const PART: usize = 512;
     const RECORD: usize = 64;
+    const THUNK: usize = 32;
     const PUBLISHED: usize = 32;
     let grace = Arc::new(Grace::new(PES));
-    let ring = Arc::new(Ring::new(PARTS, PART));
+    let ring = Arc::new(Ring::new(parts, PART));
     let arena: Arc<Vec<AtomicU64>> =
-        Arc::new((0..PARTS * PART / 8).map(|_| AtomicU64::new(0)).collect());
+        Arc::new((0..parts * PART / 8).map(|_| AtomicU64::new(0)).collect());
     // Published places plus one; the lock is the retirer's and installers'.
     let table: Arc<Vec<AtomicU64>> = Arc::new((0..PUBLISHED).map(|_| AtomicU64::new(0)).collect());
     let lock = Arc::new(std::sync::Mutex::new(()));
     let waits = Arc::new(AtomicU32::new(0));
+    let redone = Arc::new(AtomicU32::new(0));
     let started = Instant::now();
+    fn word(place: Place) -> usize {
+        (place.part as usize * PART + place.offset as usize) / 8
+    }
+    fn pack(place: Place) -> u64 {
+        u64::from(place.generation) << 40 | u64::from(place.part) << 32 | u64::from(place.offset)
+    }
+    fn unpack(packed: u64) -> Place {
+        Place {
+            generation: (packed >> 40) as u32,
+            part: (packed >> 32) as u32 & 0xff,
+            offset: packed as u32,
+        }
+    }
+    // What a retirement does under the lock: its part's records go.
+    fn retire(table: &[AtomicU64], lock: &std::sync::Mutex<()>, part: u32) {
+        let _held = lock.lock().unwrap();
+        for entry in table.iter() {
+            let held = entry.load(Ordering::Relaxed);
+            if held != 0 && unpack(held - 1).part == part {
+                entry.store(0, Ordering::Relaxed);
+            }
+        }
+    }
     let threads: Vec<_> = (0..PES)
         .map(|pe| {
-            let (grace, ring, arena, table, lock, waits) = (
+            let (grace, ring, arena, table, lock, waits, redone) = (
                 grace.clone(),
                 ring.clone(),
                 arena.clone(),
                 table.clone(),
                 lock.clone(),
                 waits.clone(),
+                redone.clone(),
             );
             thread::spawn(move || {
-                let word = |place: Place| (place.part as usize * PART + place.offset as usize) / 8;
-                let pack = |place: Place| {
-                    u64::from(place.generation) << 40
-                        | u64::from(place.part) << 32
-                        | u64::from(place.offset)
-                };
-                let unpack = |packed: u64| Place {
-                    generation: (packed >> 40) as u32,
-                    part: (packed >> 32) as u32 & 0xff,
-                    offset: packed as u32,
-                };
                 let mut seed = pe as u64 * 0x9e37_79b9 + 1;
                 let mut installed = 0u64;
+                let outside = pe % 3 == 0;
+                let write = |place: Place, bytes: usize| {
+                    let first = word(place);
+                    for index in first..first + bytes / 8 {
+                        arena[index].store(pack(place) | (pe as u64) << 56, Ordering::Relaxed);
+                    }
+                };
                 grace.enter(pe);
-                for sequence in 1..=20_000u64 {
+                for _ in 1..=20_000u64 {
+                    if outside {
+                        grace.leave(pe);
+                    }
+                    let skip = (!outside).then_some(pe);
+                    // Tenured records are few: their parts stay open long
+                    // and are old when they fill, as the guest's hot code.
+                    let stream = match pe % 2 == 1 && next(&mut seed).is_multiple_of(16) {
+                        true => TENURED,
+                        false => YOUNG,
+                    };
                     // Install a record.
                     let place = loop {
-                        match ring.take(YOUNG, RECORD, 16) {
+                        match ring.take(stream, RECORD, 16) {
                             Ok(place) => break place,
-                            Err(full) => match ring.advance(YOUNG, full, &grace, Some(pe)) {
-                                Advance::Moved | Advance::Busy => {}
+                            Err(full) => match ring.advance(stream, full, &grace, skip) {
+                                Advance::Moved => {}
+                                Advance::Busy => thread::yield_now(),
                                 Advance::Retire(part, _) => {
-                                    {
-                                        let _held = lock.lock().unwrap();
-                                        for entry in table.iter() {
-                                            let held = entry.load(Ordering::Relaxed);
-                                            if held != 0 && unpack(held - 1).part == part {
-                                                entry.store(0, Ordering::Relaxed);
-                                            }
-                                        }
-                                    }
+                                    retire(&table, &lock, part);
                                     ring.retired(part, grace.snapshot());
                                 }
                                 Advance::Wait(snapshot) => {
                                     waits.fetch_add(1, Ordering::Relaxed);
-                                    assert!(
-                                        grace.wait(pe, &snapshot, give_up(started)),
-                                        "a part's grace never passed"
-                                    );
+                                    let passed = match outside {
+                                        true => loop {
+                                            if grace.passed(&snapshot, None) {
+                                                break true;
+                                            }
+                                            if give_up(started)() {
+                                                break false;
+                                            }
+                                            thread::yield_now();
+                                        },
+                                        false => grace.wait(pe, &snapshot, give_up(started)),
+                                    };
+                                    assert!(passed, "a part's grace never passed");
                                 }
                             },
                         }
                     };
-                    let tag = (pe as u64) << 48 | sequence;
-                    let first = word(place);
-                    for index in first..first + RECORD / 8 {
-                        arena[index].store(tag, Ordering::Relaxed);
+                    // All but its last word, which the jump to its thunk
+                    // patches after the thunk is installed.
+                    write(place, RECORD - 8);
+                    // Its thunk, which may close the record's part and
+                    // choose a part to go, but waits for nothing.
+                    let mut thunk = None;
+                    if next(&mut seed).is_multiple_of(2) {
+                        for _ in 0..2 {
+                            match ring.take(stream, THUNK, 16) {
+                                Ok(taken) => {
+                                    write(taken, THUNK);
+                                    thunk = Some(taken);
+                                    break;
+                                }
+                                Err(full) => match ring.advance(stream, full, &grace, skip) {
+                                    Advance::Moved => {}
+                                    Advance::Retire(part, _) => {
+                                        retire(&table, &lock, part);
+                                        ring.retired(part, grace.snapshot());
+                                    }
+                                    Advance::Busy | Advance::Wait(_) => break,
+                                },
+                            }
+                        }
                     }
+                    for _ in 0..next(&mut seed) % 64 {
+                        core::hint::spin_loop();
+                    }
+                    arena[word(place) + RECORD / 8 - 1]
+                        .store(pack(place) | (pe as u64) << 56, Ordering::Relaxed);
                     {
                         let _held = lock.lock().unwrap();
                         if ring.live(place) {
                             let slot = next(&mut seed) as usize % PUBLISHED;
-                            let packed = pack(place) + 1;
-                            table[slot].store(packed, Ordering::Release);
+                            table[slot].store(pack(place) + 1, Ordering::Release);
                             installed += 1;
+                        } else {
+                            redone.fetch_add(1, Ordering::Relaxed);
                         }
+                    }
+                    ring.release(place);
+                    if let Some(thunk) = thunk {
+                        ring.release(thunk);
+                    }
+                    if outside {
+                        grace.enter(pe);
                     }
                     // Run a few published records.
                     for _ in 0..4 {
@@ -286,10 +491,15 @@ fn ring_reuses_parts_only_after_readers_left() {
                         if held == 0 {
                             continue;
                         }
-                        let first = word(unpack(held - 1));
+                        let place = unpack(held - 1);
+                        let first = word(place);
                         let tag = arena[first].load(Ordering::Relaxed);
-                        assert_ne!(tag, 0);
-                        for _ in 0..256 {
+                        assert_eq!(
+                            tag & ((1 << 56) - 1),
+                            pack(place),
+                            "a published record holds another install's bytes"
+                        );
+                        for _ in 0..64 {
                             for index in first..first + RECORD / 8 {
                                 assert_eq!(
                                     arena[index].load(Ordering::Relaxed),
@@ -299,10 +509,7 @@ fn ring_reuses_parts_only_after_readers_left() {
                             }
                         }
                     }
-                    if sequence.is_multiple_of(8) {
-                        grace.leave(pe);
-                        grace.enter(pe);
-                    }
+                    grace.pass(pe);
                 }
                 grace.leave(pe);
                 installed
@@ -314,13 +521,26 @@ fn ring_reuses_parts_only_after_readers_left() {
         .map(|thread| thread.join().unwrap())
         .sum();
     assert!(installed > 0);
-    // Six PEs over three parts of 8 records each turn the ring constantly.
-    assert!(ring.generation() as usize > 10 * PARTS);
+    // Six PEs over a few parts of 8 records each turn the ring constantly.
+    assert!(ring.generation() as usize > 10 * parts);
     std::eprintln!(
-        "ring: {} generations, {installed} installs, {} waits",
+        "ring of {parts}: {} generations, {installed} installs, {} redone, {} waits",
         ring.generation(),
+        redone.load(Ordering::Relaxed),
         waits.load(Ordering::Relaxed)
     );
+}
+
+#[test]
+fn ring_reuses_parts_only_after_readers_left_and_publishes_only_live_parts() {
+    ring_reuses_parts_only_after_readers_left(MIN_PARTS);
+}
+
+/// The same with a tenured generation, whose parts stay open long and are
+/// old when they fill.
+#[test]
+fn a_tenured_ring_reuses_parts_only_after_readers_left_and_publishes_only_live_parts() {
+    ring_reuses_parts_only_after_readers_left(8);
 }
 
 #[test]

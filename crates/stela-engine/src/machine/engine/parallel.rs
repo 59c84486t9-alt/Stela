@@ -1386,9 +1386,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .is_some_and(|wait| wait.kind == super::WaitKind::Event && !wait.down)
     }
 
-    /// Compile the block at `pc`, and whether mail reached this PE meanwhile,
-    /// which it reads before it runs anything. A compile takes far longer
-    /// than a maintenance broadcast should wait, and runs no guest code.
+    /// Compile the block at `pc`, and whether the caller fetches again: mail
+    /// reached this PE meanwhile, which it reads before it runs anything, or
+    /// the block went. A compile takes far longer than a maintenance
+    /// broadcast should wait, and runs no guest code.
+    ///
+    /// It runs outside the board's grace section, so a retirement does not
+    /// wait for it: the block it published may have gone, and its slot been
+    /// given to another block, before this PE is back inside. Once inside
+    /// the slot is checked again: still live and the block of `pc`, it stays
+    /// so until this PE passes its loop's top.
     pub(super) fn compile_aside(
         &mut self,
         pc: u64,
@@ -1401,7 +1408,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         hub.set_outside(self.current, true);
         let compiled = self.compile(pc, physical, variant);
         hub.set_outside(self.current, false);
-        (compiled, hub.pending(self.current))
+        let gone = match &compiled {
+            Ok(Fetched::Block(slot)) => {
+                let id = self.known_variant(variant);
+                !self.code.blocks.installed(*slot).is_some_and(|block| {
+                    (block.pc, block.physical, Some(block.variant)) == (pc, physical, id)
+                })
+            }
+            _ => false,
+        };
+        (compiled, gone || hub.pending(self.current))
     }
 
     /// Run `work`, which uses no translation this PE may hold and can take

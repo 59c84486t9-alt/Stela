@@ -145,6 +145,10 @@ pub(super) struct FakeHost {
     /// as a processor waiting on this one would.
     pub(super) relaxes: usize,
     pub(super) on_relax: Option<Box<dyn FnMut(usize)>>,
+    /// What runs at each [`Host::serialize_code`], after an install's
+    /// write: the count of them so far.
+    pub(super) on_serialize: Option<Box<dyn FnMut(usize)>>,
+    serializes: usize,
     /// Counts the counter moves on after each read.
     pub(super) counter_step: u64,
     pub(super) execute_ticks: u64,
@@ -369,6 +373,13 @@ impl Host for FakeHost {
         self.now += self.counter_step;
         now
     }
+    fn serialize_code(&mut self) {
+        core::sync::atomic::fence(Ordering::SeqCst);
+        self.serializes += 1;
+        if let Some(on_serialize) = &mut self.on_serialize {
+            on_serialize(self.serializes);
+        }
+    }
     fn relax(&mut self) {
         self.relaxes += 1;
         if let Some(on_relax) = &mut self.on_relax {
@@ -556,6 +567,8 @@ pub(super) fn board_on<D: Devices>(
         counter_reads: 0,
         relaxes: 0,
         on_relax: None,
+        on_serialize: None,
+        serializes: 0,
         counter_step: 0,
         execute_ticks: 0,
         timers: Vec::new(),

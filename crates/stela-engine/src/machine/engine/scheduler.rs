@@ -501,7 +501,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return false;
         };
         let at = thunk.0 as u64;
-        self.note_reference(point, at);
+        // The thunk's part was chosen meanwhile: the exit stays unlinked.
+        if !self.note_reference(point, at) {
+            return false;
+        }
         let (Some(bytes), Some(jump)) = (
             chain::thunk(at, retired, target as u32, entry, fallback),
             chain::jump(point, at),
@@ -694,7 +697,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let tail = self
             .install_native(&[0; chain::CELL_TAIL_BYTES][..bytes], false)
             .ok()?;
-        self.note_reference(site, tail.0 as u64);
+        // The tail's part was chosen meanwhile: the exit stays as it is.
+        if !self.note_reference(site, tail.0 as u64) {
+            return None;
+        }
         let part_of = |address: usize| ((address - arena.window.exec) / arena.part_bytes) as u32;
         let part = part_of(tail.0);
         let at = match cache.dispatchers.iter().position(|&(held, _)| held == part) {

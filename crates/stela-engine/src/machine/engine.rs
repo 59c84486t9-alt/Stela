@@ -458,6 +458,9 @@ struct Block {
     source_hash: u64,
     /// The PE that compiled it, for [`StaleCode`].
     installer: u8,
+    /// The board's arena part holding its code, or [`board::NO_PART`]:
+    /// what a fetch counts ([`Machine::entered`]) without a division.
+    part: u8,
     /// A device site's stub ([`Machine::install_device_stub`]): its System
     /// exit is the site's access, on whichever PE runs it, whether or not
     /// that PE learnt the site.
@@ -761,6 +764,9 @@ pub struct Machine<H: Host, D: Devices> {
     /// ([`board::YOUNG`] unless its caller says otherwise; each install
     /// takes it back to young).
     install_stream: usize,
+    /// The ring places the block install under way took, held until it
+    /// publishes ([`Self::install_native`], [`Self::release_places`]).
+    held_places: Vec<board::Place>,
     /// A grace of no PE: what a machine that keeps its code alone releases
     /// slots with ([`Self::grace`]).
     alone: board::Grace,
@@ -1242,6 +1248,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             known_keys: Vec::new(),
             install_causes: InstallCauses::default(),
             install_stream: board::YOUNG,
+            held_places: Vec::new(),
             census: None,
             native_failure: None,
             variants: numbering.variants,

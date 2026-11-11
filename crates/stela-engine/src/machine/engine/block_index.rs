@@ -480,6 +480,7 @@ mod tests {
             terminal: 0,
             source_hash: 0,
             installer: 0,
+            part: super::super::board::NO_PART,
             device_stub: false,
         }
     }

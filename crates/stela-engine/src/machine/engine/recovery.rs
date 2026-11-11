@@ -13,6 +13,7 @@ use stela_compiler::x86_64::chain::DirectExit;
 /// The process's shared emission or a record's entry, relocated, borrowed
 /// through installation. A stored block keeps only its origin once
 /// installed.
+#[derive(Clone)]
 pub(super) enum Template<'a> {
     Compiled(Arc<Emission>),
     Stored {

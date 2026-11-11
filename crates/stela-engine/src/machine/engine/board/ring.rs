@@ -8,23 +8,41 @@
 //! an install takes no lock. When an open part is full its generation
 //! opens a free part, under the ring's plan lock (once per part), and when
 //! that leaves no free part the plan chooses the part to take away next,
-//! one ahead of its reuse, so no PE waits in the usual case:
+//! one ahead of its reuse, so no PE waits in the usual case. Of the full
+//! parts that fit (free of references, filled at least a quarter turn ago,
+//! and written by no install), it chooses:
 //!
 //! - a part whose blocks mostly left the index already (IC IVAU holes);
-//! - else the oldest tenured part once it outlived [`AGE_TURNS`] turns;
+//! - else the oldest tenured part once it outlived [`AGE_TURNS`] turns
+//!   since it opened;
 //! - else the oldest young part while young code holds more than its share
 //!   ([`Ring::young_parts`]) or no tenured part is full: young code goes
 //!   first in first out, as all code did before;
 //! - else the tenured part entered least since the last such choice: a
-//!   fetch the engine makes counts its block's part ([`Ring::entered`]),
-//!   which chained native code never does.
+//!   fetch the engine makes counts its block's part ([`Ring::entered_by`],
+//!   in batches per PE), which chained native code never does;
+//! - else, when none fits, the oldest settled part free of references, or
+//!   the oldest part.
 //!
 //! A part code of another part jumps into (a thunk or a tail, which go in
 //! the part the referring block's generation fills) is never chosen while
-//! that part is live ([`Ring::refer`]); references go from older parts to
-//! newer ones, so the oldest full part is always free to go. A part filled
-//! within the last quarter turn is never chosen either: installs may still
-//! be publishing into it, as the first in first out ring relied on a turn.
+//! that part is live: [`Ring::refer`] notes the reference before the jump
+//! is written, and refuses one into a part already chosen. References go
+//! from older parts to newer ones of one generation, so the oldest full
+//! part is always free to go, and of the parts that filled a quarter turn
+//! ago (at least one, as at most a quarter turn of parts filled since) the
+//! oldest is too.
+//!
+//! The margins keep installs from meeting a retirement; what makes one
+//! harmless is two rules. A place a take hands out counts as a writer of
+//! its part until its install gives it back ([`Ring::release`]), and a part
+//! with writers is not opened again, so no install writes into a part's
+//! next code. And a block is published only while its part still holds
+//! the generation its place was taken in ([`Ring::live`], checked under the
+//! board's code lock, under which a retirement lists the part's blocks
+//! after choosing it), so every published block is one its part's
+//! retirement takes away; an install that finds its part gone is done
+//! again.
 use super::{Grace, Snapshot};
 use crate::platform::sync::Mutex;
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -121,6 +139,11 @@ struct Plan {
 #[derive(Default)]
 struct Entered(AtomicU32);
 
+/// A part's count of unfinished installs, on a cache line of its own.
+#[repr(align(64))]
+#[derive(Default)]
+struct Writers(AtomicU32);
+
 pub(in crate::machine::engine) struct Ring {
     part_bytes: u32,
     pub(in crate::machine::engine) parts: u32,
@@ -149,6 +172,11 @@ pub(in crate::machine::engine) struct Ring {
     dropped: Box<[AtomicU32]>,
     /// Per part: a bit per part whose code jumps into it.
     refs: Box<[AtomicU64]>,
+    /// Per part: the generation given when it filled (its next part's).
+    filled: Box<[AtomicU32]>,
+    /// Per part: places taken in it whose installs are not published yet
+    /// ([`Ring::take`], [`Ring::release`]).
+    writers: Box<[Writers]>,
     /// Parts chosen to go, by [`Why`].
     outs: [AtomicU64; 4],
 }
@@ -196,6 +224,8 @@ impl Ring {
             installed: atomics(parts),
             dropped: atomics(parts),
             refs: atomics(parts),
+            filled: atomics(parts),
+            writers: atomics(parts),
             outs: Default::default(),
         };
         ring.live[0].store(true, Ordering::Relaxed);
@@ -219,7 +249,9 @@ impl Ring {
     }
 
     /// `bytes` at `align` (a power of two) in `stream`'s open part, or the
-    /// head of its full part, which [`Self::advance`] takes.
+    /// head of its full part, which [`Self::advance`] takes. The place
+    /// counts as a writer of its part until the caller gives it back
+    /// ([`Self::release`]): the part is not opened again meanwhile.
     pub(in crate::machine::engine) fn take(
         &self,
         stream: usize,
@@ -236,20 +268,29 @@ impl Ring {
             if top == NONE || end > self.part_bytes as usize {
                 return Err(top);
             }
+            let part = top & (MAX_PARTS as u32 - 1);
+            // A writer before the take: the advance that closes the part
+            // swaps the cursor after this compare-exchange, so whatever
+            // reopens the part later sees the count.
+            let writers = &self.writers[part as usize].0;
+            writers.fetch_add(1, Ordering::SeqCst);
             match at.compare_exchange_weak(
                 current,
                 cursor(top, end as u32),
-                Ordering::AcqRel,
+                Ordering::SeqCst,
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
                     return Ok(Place {
                         generation: top >> PART_BITS,
-                        part: top & (MAX_PARTS as u32 - 1),
+                        part,
                         offset: start as u32,
                     });
                 }
-                Err(now) => current = now,
+                Err(now) => {
+                    writers.fetch_sub(1, Ordering::Release);
+                    current = now;
+                }
             }
         }
     }
@@ -288,13 +329,19 @@ impl Ring {
                 return Advance::Wait(snapshot.clone());
             }
         }
+        // An install that took its place in the part before it went has
+        // not given it back: its writes would land in the part's next code.
+        if self.writers[next as usize].0.load(Ordering::SeqCst) != 0 {
+            return Advance::Busy;
+        }
         plan.free.pop_front();
+        let generation = self.opened.fetch_add(1, Ordering::AcqRel);
         if full != NONE {
             let old = full & (MAX_PARTS as u32 - 1);
             plan.state[old as usize] = State::Full;
             plan.full[stream].push_back(old);
+            self.filled[old as usize].store(generation, Ordering::Relaxed);
         }
-        let generation = self.opened.fetch_add(1, Ordering::AcqRel);
         assert!(generation < NONE >> PART_BITS, "ring generations exhausted");
         let part = next as usize;
         self.holds[part].store(generation, Ordering::Release);
@@ -305,7 +352,9 @@ impl Ring {
         self.refs[part].store(0, Ordering::Relaxed);
         self.live[part].store(true, Ordering::Release);
         plan.state[part] = State::Open;
-        self.cursors[stream].store(cursor(head(generation, next), 0), Ordering::Release);
+        // A swap, not a store: it reads the last take's compare-exchange,
+        // and with it every writer counted before one.
+        self.cursors[stream].swap(cursor(head(generation, next), 0), Ordering::SeqCst);
         if plan.free.is_empty()
             && plan.retiring.is_none()
             && let Some((part, why)) = self.choose(&mut plan)
@@ -324,10 +373,12 @@ impl Ring {
             .fold(0, |bits, part| bits | 1 << part);
         let free =
             |part: u32| self.refs[part as usize].load(Ordering::Acquire) & live & !(1 << part) == 0;
-        let settled = |part: u32| {
-            self.holds[part as usize].load(Ordering::Acquire) + (parts / 4).max(1) <= latest
+        let settled = |part: u32| self.settled(part, latest);
+        // Free of references, filled a while ago, and written by no
+        // install: what every choice but the last resort takes.
+        let fit = |part: u32| {
+            free(part) && settled(part) && self.writers[part as usize].0.load(Ordering::SeqCst) == 0
         };
-        let fit = |part: u32| free(part) && settled(part);
         let holey = |part: u32| {
             let (installed, dropped) = (
                 self.installed[part as usize].load(Ordering::Relaxed),
@@ -347,13 +398,14 @@ impl Ring {
                 let &oldest = tenured.front()?;
                 let aged = self.holds[oldest as usize].load(Ordering::Acquire) + AGE_TURNS * parts
                     <= latest;
-                (aged && free(oldest)).then_some((oldest, Why::Aged))
+                (aged && fit(oldest)).then_some((oldest, Why::Aged))
             })
             .or_else(|| {
-                let &oldest = young.front()?;
                 let first =
                     self.young_parts == 0 || tenured.is_empty() || young_owned > self.young_parts;
-                (first && free(oldest)).then_some((oldest, Why::Young))
+                // The oldest that fits: first in, first out.
+                let oldest = young.iter().copied().find(|&part| first && fit(part))?;
+                Some((oldest, Why::Young))
             })
             .or_else(|| {
                 let coldest = tenured
@@ -369,22 +421,35 @@ impl Ring {
                 Some((coldest, Why::Cold))
             })
             .or_else(|| {
-                // Nothing else fits: the oldest full part, which no live
-                // part refers to.
-                young
-                    .iter()
-                    .chain(tenured)
-                    .copied()
-                    .min_by_key(|&part| self.holds[part as usize].load(Ordering::Acquire))
-                    .map(|part| {
-                        let why = match self.kind[part as usize].load(Ordering::Relaxed) {
-                            0 => Why::Young,
-                            _ => Why::Aged,
-                        };
-                        (part, why)
-                    })
+                // Nothing else fits: the oldest settled full part free of
+                // references (one always is, as references go from older
+                // parts to newer ones and a quarter turn of parts at most
+                // filled recently), else the oldest, which no live part
+                // refers to. An install still writing into it finds its
+                // part gone when it publishes, and installs again.
+                let oldest = |settled: bool| {
+                    young
+                        .iter()
+                        .chain(tenured)
+                        .copied()
+                        .filter(|&part| !settled || (self.settled(part, latest) && free(part)))
+                        .min_by_key(|&part| self.holds[part as usize].load(Ordering::Acquire))
+                };
+                oldest(true).or_else(|| oldest(false)).map(|part| {
+                    let why = match self.kind[part as usize].load(Ordering::Relaxed) {
+                        0 => Why::Young,
+                        _ => Why::Aged,
+                    };
+                    (part, why)
+                })
             })?;
         let (part, why) = chosen;
+        self.going(plan, part, why);
+        Some((part, why))
+    }
+
+    /// Mark full `part` going for `why`.
+    fn going(&self, plan: &mut Plan, part: u32, why: Why) {
         for list in &mut plan.full {
             list.retain(|&held| held != part);
         }
@@ -392,7 +457,35 @@ impl Ring {
         plan.retiring = Some(part);
         self.live[part as usize].store(false, Ordering::Release);
         self.outs[why as usize].fetch_add(1, Ordering::Relaxed);
-        Some((part, why))
+    }
+
+    /// Choose `part` to go, as [`Advance::Retire`] would, if it is full and
+    /// no part is going: what an install meets when another PE's advance
+    /// chose its part between its take and its publish.
+    #[cfg(test)]
+    pub(in crate::machine::engine) fn choose_part(&self, part: u32) -> bool {
+        let mut plan = self.plan.lock().unwrap_or_else(|error| error.into_inner());
+        if plan.state[part as usize] != State::Full || plan.retiring.is_some() {
+            return false;
+        }
+        self.going(&mut plan, part, Why::Aged);
+        true
+    }
+
+    /// Whether `part` filled at least a quarter turn before generation
+    /// `latest`: installs that took their places in it before it filled
+    /// have had that long to publish.
+    fn settled(&self, part: u32, latest: u32) -> bool {
+        self.filled[part as usize].load(Ordering::Relaxed) + (self.parts / 4).max(1) <= latest
+    }
+
+    /// The install that took `place` published its code, or gave it up: the
+    /// place no longer holds its part from being opened again.
+    pub(in crate::machine::engine) fn release(&self, place: Place) {
+        let before = self.writers[place.part as usize]
+            .0
+            .fetch_sub(1, Ordering::Release);
+        debug_assert!(before != 0, "a place released once");
     }
 
     /// The caller of [`Advance::Retire`] took away `part`'s code, and
@@ -422,7 +515,6 @@ impl Ring {
     }
 
     /// The generation of `part`'s last opening.
-    #[cfg(test)]
     pub(in crate::machine::engine) fn holds(&self, part: usize) -> u32 {
         self.holds[part].load(Ordering::Acquire)
     }
@@ -433,8 +525,9 @@ impl Ring {
     }
 
     /// Whether `place`'s part still holds its generation's code: false from
-    /// the choice that takes it away on.
-    #[cfg(test)]
+    /// the choice that takes it away on. A publish checks it under the
+    /// board's code lock: a retirement chooses its part before it lists the
+    /// part's blocks under that lock, so a block it did not list sees it.
     pub(in crate::machine::engine) fn live(&self, place: Place) -> bool {
         let part = place.part as usize;
         self.live[part].load(Ordering::Acquire) && self.holds(part) == place.generation
@@ -464,12 +557,22 @@ impl Ring {
         self.dropped[part].fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Code of part `from` jumps into part `to`: `to` does not go while
-    /// `from` holds code.
-    pub(in crate::machine::engine) fn refer(&self, from: usize, to: usize) {
-        if from != to {
-            self.refs[to].fetch_or(1 << from, Ordering::AcqRel);
+    /// Code of part `from` is about to jump into part `to`: `to` does not go
+    /// while `from` holds code. False, and nothing noted, when `to` was
+    /// chosen to go already: the caller makes no such jump. Under the plan
+    /// lock, which every choice holds, so no choice comes between the check
+    /// and the note. The caller holds its place in `to` (or the code lock),
+    /// so a live `to` is the generation it took its place in.
+    pub(in crate::machine::engine) fn refer(&self, from: usize, to: usize) -> bool {
+        if from == to {
+            return true;
         }
+        let plan = self.plan.lock().unwrap_or_else(|error| error.into_inner());
+        if !matches!(plan.state[to], State::Open | State::Full) {
+            return false;
+        }
+        self.refs[to].fetch_or(1 << from, Ordering::AcqRel);
+        true
     }
 
     /// The parts each generation holds (open or full).

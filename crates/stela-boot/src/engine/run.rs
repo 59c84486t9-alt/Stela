@@ -1349,7 +1349,8 @@ fn board_code(
         outs[3],
     );
     format!(
-        " board={}M/{}/{} retired={} forced={} lost={} grace_waits={}/{}{churn} \
+        " board={}M/{}/{} retired={} forced={} lost={} redone/refused={}/{} \
+         grace_waits={}/{}{churn} \
          retire_longest=us/steps:{}/{}{targets} \
          lock=acquired/contended/waited_us/longest_us:{}/{}/{}/{}{sites}",
         now.window >> 20,
@@ -1358,6 +1359,8 @@ fn board_code(
         now.retired.saturating_sub(was.retired),
         now.forced.saturating_sub(was.forced),
         now.lost.saturating_sub(was.lost),
+        now.redone.saturating_sub(was.redone),
+        now.refused.saturating_sub(was.refused),
         now.grace_waits.saturating_sub(was.grace_waits),
         now.overdue.saturating_sub(was.overdue),
         micros(now.retire_ticks),

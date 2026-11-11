@@ -3,6 +3,19 @@
 
 use super::*;
 
+/// The board's arena part holding `code`, or [`board::NO_PART`].
+fn shared_part(code: &board::Code, at: NativeCode) -> u8 {
+    code.arena
+        .as_ref()
+        .and_then(|arena| arena.part_of(at.0))
+        .map_or(board::NO_PART, |part| part as u8)
+}
+
+/// Installs of a block in a row whose part a retirement chose before they
+/// published: each needs another retirement of the part it just took, so
+/// more than a few mean the ring is broken.
+const REDONE_INSTALLS: u32 = 64;
+
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn fetch_block(&mut self, pc: u64, single: bool) -> Result<Fetched, Stop> {
         let context = self.current_variant(single, false);
@@ -645,19 +658,38 @@ impl<H: Host, D: Devices> Machine<H, D> {
         compiled: recovery::Template<'_>,
     ) -> Result<Fetched, Stop> {
         let started = self.host.counter();
-        let installed = self.place(pc, physical, variant, source, compiled);
+        // A retirement may choose the part of an install before it
+        // publishes: the install is done again, in a part that stays.
+        let mut tries = 0;
+        let installed = loop {
+            let placed = self.place(pc, physical, variant, source, &compiled);
+            self.release_places();
+            match placed {
+                Ok(Some(fetched)) => break Ok(fetched),
+                Err(stop) => break Err(stop),
+                Ok(None) => {}
+            }
+            tries += 1;
+            if tries >= REDONE_INSTALLS {
+                break Err(self.unsupported(RequirementKind::Native(
+                    "every install of a block lost its arena part before it published",
+                )));
+            }
+        };
         self.statistics.install_ticks += self.host.counter().wrapping_sub(started);
         installed
     }
 
+    /// Install `compiled` once: the block, or none when a retirement chose
+    /// its part before it published ([`board::Ring::live`]).
     fn place(
         &mut self,
         pc: u64,
         physical: u64,
         variant: Variant,
         source: &[u8],
-        compiled: recovery::Template<'_>,
-    ) -> Result<Fetched, Stop> {
+        compiled: &recovery::Template<'_>,
+    ) -> Result<Option<Fetched>, Stop> {
         let single = variant.single;
         if compiled.portable_requires_unavailable_capture() {
             return Err(self.unsupported(RequirementKind::Native(
@@ -688,24 +720,35 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // part above, whose slots serve first.
         let (code, slot) = match self.take_slot() {
             Some(slot) => (code, slot),
-            // A board's ring gives slots back by taking its oldest parts
-            // away, which may be the one `code` went to.
-            None if self.code.arena.is_some()
-                && let Some(slot) = self.retire_for_slot() =>
-            {
-                self.install_stream = stream;
-                (self.install_code(code_bytes)?, slot)
-            }
             None => {
-                self.discard_code(Discard::Table);
-                self.install_stream = stream;
-                let code = self.install_code(code_bytes)?;
-                let slot = self.take_slot().ok_or_else(|| {
-                    self.unsupported(RequirementKind::Native("no block slot is left"))
-                })?;
-                (code, slot)
+                // The code is installed again after: its place goes, and
+                // this PE holds none while the ring moves on.
+                self.release_places();
+                // A board's ring gives slots back by taking its oldest
+                // parts away, which may be the one `code` went to.
+                let retired = match self.code.arena.is_some() {
+                    true => self.retire_for_slot(),
+                    false => None,
+                };
+                match retired {
+                    Some(slot) => {
+                        self.install_stream = stream;
+                        (self.install_code(code_bytes)?, slot)
+                    }
+                    None => {
+                        self.discard_code(Discard::Table);
+                        self.install_stream = stream;
+                        let code = self.install_code(code_bytes)?;
+                        let slot = self.take_slot().ok_or_else(|| {
+                            self.unsupported(RequirementKind::Native("no block slot is left"))
+                        })?;
+                        (code, slot)
+                    }
+                }
             }
         };
+        // The block's place in the board's arena, its install's first.
+        let taken = self.held_places.first().copied();
         let installed_bytes = code_bytes.len();
         let terminal_pc = pc + last as u64;
         let direct_exits = compiled.direct_exits();
@@ -780,12 +823,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             terminal,
             source_hash: source_hash(&source[..source_bytes]),
             installer: self.current as u8,
+            part: shared_part(&self.code, code),
             device_stub: self.installing_stub,
         };
         let shared = Arc::clone(&self.code);
         shared.blocks.fill(slot, block);
         // The slot is this PE's until published: its rows go in first.
-        shared.blocks.recovery().insert(slot, compiled.installed());
+        shared
+            .blocks
+            .recovery()
+            .insert(slot, compiled.clone().installed());
         let mut cache = shared.cache_at(board::LockSite::Install);
         self.census_installed(&mut cache, pc, physical, variant, installed_bytes);
         // Another PE installed the block meanwhile: the first install wins,
@@ -802,7 +849,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
             drop(cache);
             self.statistics.lost_installs += 1;
             board::Events::count(&shared.events.lost);
-            return Ok(Fetched::Block(held));
+            return Ok(Some(Fetched::Block(held)));
+        }
+        // A retirement chose the code's part since its place was taken:
+        // it listed the part's blocks without this one, so the block is
+        // never published. Its code is reached by nothing (its thunks only
+        // from it) and goes with its part, and the install is done again.
+        if let (Some(arena), Some(place)) = (&shared.arena, taken)
+            && !arena.ring.live(place)
+        {
+            shared.blocks.record(slot).mark_lost();
+            shared.blocks.recovery().remove(&slot);
+            shared.blocks.retire(slot);
+            let (grace, _) = self.grace();
+            shared
+                .blocks
+                .release(alloc::vec![slot as u32], grace.snapshot());
+            drop(cache);
+            board::Events::count(&shared.events.redone);
+            return Ok(None);
         }
         self.note_churn(&mut cache, slot);
         cache.code_slots.record(code.0, slot, || {
@@ -818,7 +883,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         drop(cache);
         self.mirrors.close_code_page();
-        Ok(Fetched::Block(slot))
+        Ok(Some(Fetched::Block(slot)))
     }
 
     /// Install `bytes` of a block, reclaiming the arena's oldest part
@@ -976,7 +1041,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let site = code.0 as u64 + site as u64;
         // The block is not reachable yet: any bytes may change.
         let jump = chain::jump(site, installed.0 as u64)?;
-        self.note_reference(site, installed.0 as u64);
+        // Its part was chosen meanwhile: the instruction stays an exit.
+        if !self.note_reference(site, installed.0 as u64) {
+            return None;
+        }
         self.patch_native(NativeCode(site as usize), &jump);
         let at = installed.0 as u64;
         let successor = thunk
@@ -1078,7 +1146,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let installed = self.install_native(&thunk.code, true).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
-        self.note_reference(site, installed.0 as u64);
+        // Its part was chosen meanwhile: the instruction stays an exit.
+        if !self.note_reference(site, installed.0 as u64) {
+            return None;
+        }
         self.patch_native(NativeCode(site as usize), &jump);
         let at = installed.0 as u64;
         thunk
