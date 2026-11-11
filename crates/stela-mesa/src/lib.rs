@@ -1,5 +1,4 @@
-//! NVK, NIR and NAK, linked into `stela.efi`
-//! (`docs/design/metal-device.md`).
+//! NVK, NIR and NAK, linked into `stela.efi` for its Metal device.
 //!
 //! The C is the archive `cargo xtask gpu nvk` builds; the Rust is NAK and NIL
 //! as dependencies of this crate. Nothing but the drivers' loader entries and

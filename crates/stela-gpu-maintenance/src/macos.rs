@@ -1,6 +1,7 @@
 //! macOS owns APFS writes, directory trust and the native arm64e disk link.
 //! Private ABI declarations are bounded by the 26A434 libbootpolicy and
-//! libsystem_sandbox evidence recorded in docs/research/gpu-maintenance.md.
+//! libsystem_sandbox binaries; the sandbox's rootless calls are the ones
+//! Apple's open-source kext_tools `staging.m` declares and uses.
 use super::{
     BUNDLE_PATH, Install, KEXT, PLUGIN, Payload, executable, policy,
     publication::{Publication, RECEIPT},
