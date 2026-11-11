@@ -601,8 +601,11 @@ fn front_slot(group: u64) -> usize {
 /// A group's list starts compacting at this many sets.
 const GRANULE_SETS: usize = 8;
 
-/// The fewest groups [`LookupTable::sweep`] runs at.
+/// The fewest groups [`LookupTable::sweep_step`] begins a sweep at.
 const SWEEP_GRANULES: usize = 1 << 12;
+/// The sets of groups' lists one step of a sweep looks at, each a read of
+/// a table set that is likely a cache miss: about 20 microseconds.
+const SWEEP_STEP_SETS: usize = 256;
 
 /// Cells in one allocation of [`LookupTable::link_cell`]'s, which never moves.
 const CELL_CHUNK: usize = 256;
@@ -738,9 +741,12 @@ pub struct LookupTable {
     /// The group [`Self::set`] indexed last and its list: the blocks of a
     /// page go in one after another.
     last: Option<(u64, u32)>,
-    /// The groups indexed at which [`Self::set`] sweeps: twice those left
-    /// by the last sweep.
+    /// The groups indexed at which [`Self::set`] begins a sweep: half again
+    /// those left by the last sweep.
     sweep_at: usize,
+    /// The next group of the sweep under way, which [`Self::set`] takes in
+    /// bounded steps ([`Self::sweep_step`]).
+    sweep_from: Option<u64>,
     /// The cells of direct exits out of their pages ([`Self::link_cell`]),
     /// in chunks that never move, as code names their addresses.
     cells: Vec<Slots>,
@@ -823,6 +829,7 @@ impl LookupTable {
             free: Vec::new(),
             last: None,
             sweep_at: SWEEP_GRANULES,
+            sweep_from: None,
             cells: Vec::new(),
             free_cells: Vec::new(),
             cell_pcs: BTreeSet::new(),
@@ -925,6 +932,7 @@ impl LookupTable {
         self.free.clear();
         self.last = None;
         self.sweep_at = SWEEP_GRANULES;
+        self.sweep_from = None;
         for &(pc, cell) in &self.cell_pcs {
             let empty = LookupEntry {
                 pc,
@@ -1286,8 +1294,8 @@ impl LookupTable {
         let place = match self.last {
             Some((last, place)) if last == group => place,
             _ => {
-                if self.granules.len() >= self.sweep_at {
-                    self.sweep();
+                if self.sweep_from.is_some() || self.granules.len() >= self.sweep_at {
+                    self.sweep_step();
                 }
                 let front = front_slot(group);
                 let place = match self.front[front] {
@@ -1333,11 +1341,28 @@ impl LookupTable {
     /// the place of leave their groups listed, which only a sweep finds:
     /// the groups a stream of new PCs (processes of new layouts) reaches
     /// would grow the index on, while the table holds a bounded number.
-    fn sweep(&mut self) {
+    ///
+    /// One step visits the groups from where the last stopped until it
+    /// looked at [`SWEEP_STEP_SETS`] of their sets (at least one group):
+    /// a board's block table is written under its code lock, and a whole
+    /// sweep of a table of millions of entries read a set of each at
+    /// random for tens of milliseconds while every PE waited (run
+    /// 20261111-025825: `target` holds of 88 ms, all PEs stalled 190 ms).
+    /// Each step looks at more groups than the insert that took it adds,
+    /// so a sweep ends; the next begins at half again what it left.
+    fn sweep_step(&mut self) {
+        let from = self.sweep_from.take().unwrap_or(0);
         let (sets, grouping) = (&self.sets, self.grouping);
         let mut emptied = Vec::new();
-        for (&group, &place) in &self.granules {
+        let mut visited = 0;
+        let mut next = None;
+        for (&group, &place) in self.granules.range(from..) {
+            if visited >= SWEEP_STEP_SETS {
+                next = Some(group);
+                break;
+            }
             let listed = &mut self.lists[place as usize];
+            visited += listed.sets.len().max(1);
             listed.sets.sort_unstable();
             listed.sets.dedup();
             listed.sets.retain(|&set| holds(sets, set, grouping, group));
@@ -1347,7 +1372,22 @@ impl LookupTable {
             }
         }
         self.release(emptied);
-        self.sweep_at = (2 * self.granules.len()).max(SWEEP_GRANULES);
+        match next {
+            Some(group) => self.sweep_from = Some(group),
+            None => {
+                let left = self.granules.len();
+                self.sweep_at = (left + left / 2).max(SWEEP_GRANULES);
+            }
+        }
+    }
+
+    /// A whole sweep at once ([`Self::sweep_step`] until it ends).
+    #[cfg(test)]
+    fn sweep(&mut self) {
+        self.sweep_step();
+        while self.sweep_from.is_some() {
+            self.sweep_step();
+        }
     }
 
     /// Let the `emptied` groups' lists go to the free lists.
@@ -2876,6 +2916,60 @@ mod tests {
         assert!(table.forget_frames(0..=key_frame(u64::MAX), |_| true));
         assert!(table.is_empty());
         assert!(table.granules.is_empty());
+    }
+
+    /// A sweep of the index is taken in bounded steps by the inserts after
+    /// the one that began it: no insert looks at every group's list, and
+    /// the sweep still ends and drops the groups no set holds.
+    #[test]
+    fn a_sweep_of_the_index_is_taken_in_bounded_steps() {
+        let mut table = LookupTable::with_entries(MIN_LOOKUP_ENTRIES);
+        let mask = table.mask;
+        let entry = |frame: u64| {
+            let pc = 0x1_0000_0000 + (frame << PAGE_SHIFT);
+            let key = block_key((0x10_0000 + frame) << PAGE_SHIFT, 1);
+            (
+                super::lookup_slot(pc, key, mask),
+                LookupEntry {
+                    pc,
+                    key,
+                    entry: 1,
+                    block: 0,
+                    targets: 1,
+                },
+            )
+        };
+        let mut frame = 0;
+        while table.sweep_from.is_none() {
+            let (slot, held) = entry(frame);
+            table.insert(slot, held);
+            frame += 1;
+        }
+        let begun = table.granules.len();
+        assert!(begun >= SWEEP_GRANULES);
+        // The insert that began it looked at one step's sets.
+        let swept = table
+            .granules
+            .range(..table.sweep_from.expect("under way"))
+            .count();
+        assert!(swept <= SWEEP_STEP_SETS, "{swept} groups in one step");
+        let mut steps = 0;
+        while table.sweep_from.is_some() {
+            let (slot, held) = entry(frame);
+            table.insert(slot, held);
+            frame += 1;
+            steps += 1;
+            assert!(steps <= begun, "the sweep ends");
+        }
+        assert!(steps > 1);
+        // Groups whose entries were put out after their step stay listed
+        // until the next sweep; the rest hold an entry each.
+        let left = table.granules.len();
+        assert!(left <= MIN_LOOKUP_ENTRIES + steps, "{left} groups");
+        table.sweep();
+        assert!(table.granules.len() <= left);
+        assert!(table.granules.len() <= MIN_LOOKUP_ENTRIES);
+        assert!(table.sweep_from.is_none());
     }
 
     /// A frame's entries go wherever their keys put them, of every state
