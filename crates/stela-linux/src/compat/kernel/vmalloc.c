@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* Linux's virtually contiguous memory, with the interface of Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 mm/vmalloc.c. Linux code under
  * Stela owns no address space, so the owner maps the pages (map_pages); this

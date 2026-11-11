@@ -1,4 +1,9 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
+/* Parts are adapted from the Linux files named below, whose notices are:
+ * Copyright(C) 2005-2006, Linutronix GmbH, Thomas Gleixner <tglx@kernel.org>
+ * Copyright(C) 2005-2007, Red Hat, Inc., Ingo Molnar
+ * Copyright(C) 2006-2007  Timesys Corp., Thomas Gleixner
+ */
 /* Linux's high-resolution timers, with the interface of Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 kernel/time/hrtimer.c. Every timer
  * counts in an actual supplied clock domain. Qualified service delivery uses

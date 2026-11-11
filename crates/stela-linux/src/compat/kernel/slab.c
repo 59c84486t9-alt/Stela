@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* Linux's kmalloc over the platform heap. Each object keeps its size and
  * alignment just below it, as a slab keeps them in its cache. Alignment is
  * kmalloc's: at least the greatest power-of-two divisor of the size and

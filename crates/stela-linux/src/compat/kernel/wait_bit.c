@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* Linux's bit and variable waits, following Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 kernel/sched/wait_bit.c: waiters
  * on a bit or a variable share a queue hashed from its address, and each

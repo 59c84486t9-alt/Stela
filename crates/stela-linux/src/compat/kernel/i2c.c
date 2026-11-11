@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
+/* Parts are adapted from the Linux files named below, whose notices are:
+ * Copyright (C) 1995-99 Simon G. Vogl
+ * Copyright (C) 2013-2017 Wolfram Sang <wsa@kernel.org>
+ */
 /* Linux's I2C core: adapters, transfers and client devices, following Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 drivers/i2c/i2c-core-base.c. No
  * I2C drivers run here, so a client stays unbound, which is what a Linux

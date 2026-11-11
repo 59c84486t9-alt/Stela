@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* Linux's formatted output, as lib/vsprintf.c defines it for this
  * configuration: without KALLSYMS a symbol prints as its address, without
  * SYMBOLIC_ERRNAME an error pointer as its number, and pointers print

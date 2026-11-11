@@ -1,4 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
+/* Parts are adapted from the Linux files named below, whose notices are:
+ * Copyright (c) 2006  SUSE Linux Products GmbH
+ * Copyright (c) 2006  Tejun Heo <teheo@suse.de>
+ */
 /* Linux's DMA mapping API, following Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 kernel/dma/mapping.c. Every device
  * maps through the dma_map_ops its owner attached (set_dma_ops); there is no

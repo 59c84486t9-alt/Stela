@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* Serialized caches behind Linux's public opaque handle. Object storage is
  * retained catalog-backed RAM; neither an in-object free pointer nor a heap
  * wrapper may overwrite constructor/RCU-visible contents. No SLUB-private

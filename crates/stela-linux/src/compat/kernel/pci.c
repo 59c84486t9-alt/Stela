@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* Linux's PCI core. Stela's own PCI owners enumerate, power and map
  * functions; Linux drivers match against their tables and reach the function
  * through the pci_ops the owner gives its bus. */

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* The video command line options DRM reads, from drivers/video/cmdline.c and
  * nomodeset.c, which Stela has no command line to set. */
 #include <video/cmdline.h>

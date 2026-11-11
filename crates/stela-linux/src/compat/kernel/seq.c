@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* What Linux's text buffers need beyond fs/seq_output.c, following Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 lib/seq_buf.c and fs/seq_file.c. */
 #include <linux/seq_buf.h>

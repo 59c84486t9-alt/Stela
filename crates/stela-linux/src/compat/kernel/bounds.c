@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* Kbuild generates generated/bounds.h by compiling Linux's kernel/bounds.c.
  * Stela keeps the header and checks it here against the definitions that
  * file reports. */

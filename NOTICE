@@ -1090,3 +1090,18 @@ crates/stela-linux/: Shared Linux ACPI DSM helpers
 crates/stela-linux/: Original Tiny SRCU
     Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-or-later
     kernel/rcu/srcutiny.c, kernel/rcu/update.c, kernel/rcu/wakeme.c
+crates/stela-linux/src/compat/kernel/: Linux kernel services for the unchanged
+  Linux driver code (timers, waits, memory, files, PCI, device core)
+    Linux cc9de5d4b5ab6459f5774946aa3195ad51236fa8; GPL-2.0-only
+    drivers/base/core.c, drivers/i2c/i2c-core-base.c, drivers/pci/access.c,
+    drivers/pci/pci-driver.c, drivers/pci/pci.c, drivers/pci/rom.c,
+    drivers/video/cmdline.c, drivers/video/nomodeset.c, fs/anon_inodes.c,
+    fs/char_dev.c, fs/file.c, fs/file_table.c, fs/libfs.c, fs/seq_file.c,
+    fs/seq_output.c, kernel/bounds.c, kernel/dma/mapping.c,
+    kernel/irq/manage.c, kernel/irq_work.c, kernel/locking/rwsem.c,
+    kernel/pid.c, kernel/reboot.c, kernel/sched/core.c, kernel/sched/sched.h,
+    kernel/sched/wait_bit.c, kernel/sys.c, kernel/task.c,
+    kernel/time/hrtimer.c, kernel/time/timer.c, kernel/user.c, lib/kstrtox.c,
+    lib/list_sort.c, lib/seq_buf.c, lib/sort.c, lib/usercopy.c,
+    lib/vsprintf.c, mm/interval_tree.c, mm/memory.c, mm/mmap.c, mm/slab.h,
+    mm/slub.c, mm/util.c, mm/vmalloc.c

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* Linux's reader-writer semaphores, with the interface of Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 kernel/locking/rwsem.c. Linux code
  * runs in one context at a time, so count needs no atomicity of its own: it

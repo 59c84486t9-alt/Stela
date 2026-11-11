@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* Linux's interrupt requests, with the interface of Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 kernel/irq/manage.c. A platform
  * ISR runs no Linux code: it raises the line on the owner's service, which

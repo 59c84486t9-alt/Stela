@@ -1,4 +1,8 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
+/* Parts are adapted from the Linux files named below, whose notices are:
+ * Copyright (C) 1991-2002  Linus Torvalds
+ * Copyright (C) 1998-2024  Ingo Molnar, Red Hat
+ */
 /* Original Linux task metadata bound to actual retained Runtime continuations.
  * This implements identity/lease transitions, not a substitute Linux scheduler. */
 #include <linux/errno.h>

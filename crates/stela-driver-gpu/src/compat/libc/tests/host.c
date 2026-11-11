@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* The host a test of the C library's users runs on: Linux, by its system calls,
  * with one processor. */
 #include "host.h"

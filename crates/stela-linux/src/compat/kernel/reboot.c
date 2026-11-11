@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
+// SPDX-License-Identifier: GPL-2.0-only
 /* Linux's orderly_poweroff, following Linux
  * cc9de5d4b5ab6459f5774946aa3195ad51236fa8 kernel/reboot.c. Its callers hold
  * atomic contexts, so the request runs as work. Linux's work starts
