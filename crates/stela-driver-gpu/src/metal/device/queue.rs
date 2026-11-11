@@ -1754,7 +1754,11 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         }
         // Nothing outstanding can have completed, and this runs on every pump
         // of the boot processor: asking would enter the driver for nothing.
+        // What a bounded retirement left is destroyed now.
         if self.queue.in_flight.is_empty() {
+            if self.destruction_left {
+                self.retire(self.completed)?;
+            }
             return Ok(self.completed);
         }
         let lost = |error: &Error| *error == Error::DeviceLost;
@@ -1877,7 +1881,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             .in_flight
             .iter()
             .any(|flight| flight.track == Track::Done);
-        if !done && completed <= self.completed {
+        if !done && completed <= self.completed && !self.destruction_left {
             return Ok(());
         }
         let seen = self.timing.now();
@@ -2001,24 +2005,32 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.completed = self.completed.max(completed);
         // Each release waits only for the command buffers that may read it
         // (`pins`): another connection's held work does not keep it.
-        let (mut freed, mut pinned) = (Vec::new(), 0);
-        let (queue, completed) = (&self.queue, self.completed);
-        self.deferred.retain(|(release, object, allocated)| {
-            let frees = !queue.reads(release);
+        // A bounded retirement (the boot processor's look, whose guest
+        // waits meanwhile) stops destroying once its budget is spent and
+        // leaves the rest, in order, for the next.
+        let (budget, began) = (self.destruction_budget, self.timing.now());
+        let mut pinned = 0;
+        self.destruction_left = false;
+        let mut kept = VecDeque::with_capacity(self.deferred.len());
+        for (release, object, allocated) in core::mem::take(&mut self.deferred) {
+            let frees = !self.queue.reads(&release);
+            let spent = budget != 0 && self.timing.now().wrapping_sub(began) >= budget;
+            if frees && !spent {
+                self.destroy_now(object);
+                self.allocated -= allocated;
+                continue;
+            }
             if frees {
-                freed.push((*object, *allocated));
-            } else if release.serial <= completed {
+                self.destruction_left = true;
+            } else if release.serial <= self.completed {
                 // Everything running at its release is done: held work
                 // keeps it.
-                pinned += *allocated;
+                pinned += allocated;
             }
-            !frees
-        });
-        self.peak_pinned = self.peak_pinned.max(pinned);
-        for (object, allocated) in freed {
-            self.destroy_now(object);
-            self.allocated -= allocated;
+            kept.push_back((release, object, allocated));
         }
+        self.deferred = kept;
+        self.peak_pinned = self.peak_pinned.max(pinned);
         self.descriptors
             .retire_with(|release| !self.queue.reads(release));
         self.execution_sets.retire(self.freeable());

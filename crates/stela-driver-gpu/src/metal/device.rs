@@ -136,6 +136,11 @@ pub struct Device<B: Backend, C: Compiler> {
     /// allocation bytes charged until their backend memory is destroyed.
     /// Entries follow release order.
     deferred: VecDeque<(pins::Release, Object, u64)>,
+    /// Ticks the next retirement may spend destroying what it frees, zero
+    /// for no bound ([`Self::bound_destruction`]), and whether one left
+    /// freeable objects for the next.
+    destruction_budget: u64,
+    destruction_left: bool,
     /// Who may read what is released now ([`Self::release_for`]).
     scope: pins::Scope,
     /// The most deferred bytes that only held work kept ([`DeviceMemory`]).
@@ -223,6 +228,26 @@ impl<B: Backend, C: Compiler> Device<B, C> {
     pub fn set_clock(&mut self, ticks: fn() -> u64) {
         self.timing.set_clock(ticks);
         self.backend.set_clock(ticks);
+    }
+
+    /// Bounds the destruction of released objects in the retirements until
+    /// [`Self::unbound_destruction`] to `ticks` each (by the platform's
+    /// clock, [`Self::set_clock`]): a retirement past it leaves what it has
+    /// not destroyed for the next ([`Self::destruction_left`]), which any
+    /// look or call makes. Each object is still destroyed only once every
+    /// command buffer that may read it is done, as before, only later.
+    pub fn bound_destruction(&mut self, ticks: u64) {
+        self.destruction_budget = ticks;
+    }
+
+    /// Ends [`Self::bound_destruction`].
+    pub fn unbound_destruction(&mut self) {
+        self.destruction_budget = 0;
+    }
+
+    /// Whether a bounded retirement left freeable objects undestroyed.
+    pub fn destruction_left(&self) -> bool {
+        self.destruction_left
     }
 
     /// The tick counter the platform gave.
@@ -317,6 +342,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
             lost: false,
             quiesce: None,
             deferred: VecDeque::new(),
+            destruction_budget: 0,
+            destruction_left: false,
             scope: pins::Scope::DEVICE,
             peak_pinned: 0,
             allocated: 0,

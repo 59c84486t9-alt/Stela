@@ -147,6 +147,49 @@ fn destruction_waits_for_submitted_work() {
     assert_eq!(device.current_allocated_size(), 0);
 }
 
+/// A retirement bounded in time (the boot processor's look) destroys what it
+/// can in release order and leaves the rest charged for the next one, even
+/// with nothing left in flight.
+#[test]
+fn a_bounded_retirement_leaves_what_it_has_not_destroyed_for_the_next() {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    let mut device = device();
+    device.set_clock(|| NOW.fetch_add(1, Ordering::SeqCst));
+    let buffers: Vec<_> = (0..4)
+        .map(|_| {
+            device
+                .new_buffer(4096, options(StorageMode::Shared))
+                .unwrap()
+        })
+        .collect();
+    let first = device.buffer(buffers[0]).unwrap().buffer;
+    let serial = submit(&mut device);
+    for &buffer in &buffers {
+        device.destroy_buffer(buffer).unwrap();
+    }
+    // Each reading of the clock advances it: the first object fits.
+    device.bound_destruction(2);
+    complete(&mut device, serial);
+    device.unbound_destruction();
+    assert!(device.destruction_left());
+    assert!(device.backend().destroyed.contains(&Object::Buffer(first)));
+    let left = |device: &mut TestDevice| {
+        let destroyed = &device.backend().destroyed;
+        let buffers = destroyed.iter();
+        4 - buffers
+            .filter(|object| matches!(object, Object::Buffer(_)))
+            .count()
+    };
+    assert!(left(&mut device) > 0);
+    assert!(device.current_allocated_size() > 0, "still charged");
+    // Nothing is in flight; the next look or call destroys the rest.
+    assert_eq!(device.poll(), Ok(serial));
+    assert!(!device.destruction_left());
+    assert_eq!(left(&mut device), 0);
+    assert_eq!(device.current_allocated_size(), 0);
+}
+
 #[test]
 fn allocations_are_charged_until_their_own_retirement_serial() {
     let mut device = device();

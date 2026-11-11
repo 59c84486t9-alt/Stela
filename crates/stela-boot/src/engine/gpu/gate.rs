@@ -164,10 +164,12 @@ const FORCE_JOB_MILLIS: u64 = 30;
 /// switched off its CPU within half a second.
 const WAIT_BOUND_MILLIS: u64 = 2;
 
-/// How long the boot CPU's upkeep of a service takes at most a pump
-/// (`SharedService::upkeep`): frees and semaphores the turns left, done where
-/// a host kernel call needs no posting, without stalling the boot PE's guest.
-const UPKEEP_MICROS: u64 = 1000;
+/// About how long each part of the boot CPU's look at a service takes at
+/// most (`SharedService::set_look_budget`): the destruction of what completed
+/// work released, and the upkeep of the frees and semaphores the turns left,
+/// done where a host kernel call needs no posting. The boot PE's guest waits
+/// meanwhile; one look destroying a burst of releases stalled it 99-300 ms.
+const LOOK_MICROS: u64 = 1000;
 
 /// A single gate exit this long or longer is reported once a boot
 /// (`GPU LONG EXIT`): 100 ms.
@@ -1021,6 +1023,7 @@ fn open_gpu(
         Ok(service) => {
             // Without a second stack, every compilation stays in its turn.
             service.set_wait_bound(gpu.tsc_hz / 1000 * WAIT_BOUND_MILLIS);
+            service.set_look_budget(gpu.tsc_hz / 1_000_000 * LOOK_MICROS);
             if let Some(compiling) = Stack::map(gpu.window, STACK_BYTES) {
                 service.set_force_after(gpu.tsc_hz / 1000 * FORCE_JOB_MILLIS);
                 if let Some(free) = COMPILE_STACKS
@@ -1036,7 +1039,6 @@ fn open_gpu(
                 // do the frees and semaphores the boot CPU's look keeps up.
                 if let Some(outside) = Stack::map(gpu.window, STACK_BYTES) {
                     service.set_outside_stack(outside.top());
-                    service.set_upkeep_budget(gpu.tsc_hz / 1_000_000 * UPKEEP_MICROS);
                     core::mem::forget(outside);
                 }
             } else {

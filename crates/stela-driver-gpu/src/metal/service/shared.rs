@@ -140,10 +140,11 @@ pub struct SharedService<B: Backend, C: Compiler> {
     outside_locked: AtomicBool,
     /// The backend's outside work as the last turn saw it, for the
     /// platform's upkeep ([`SharedService::upkeep`]), which takes no turn;
-    /// whether the platform was asked for one; and the ticks one may take.
+    /// whether the platform was asked for one; and the ticks each part of
+    /// the platform's look may take ([`SharedService::set_look_budget`]).
     outside_seen: Spin<Option<Arc<dyn Outside>>>,
     upkeep_asked: AtomicBool,
-    upkeep_budget: AtomicU64,
+    look_budget: AtomicU64,
     /// Refused submissions whose command buffers' connections were not yet
     /// told: raised before the refused submission's signals are made, so
     /// while it is not zero no poll is answered from the published serial,
@@ -392,6 +393,11 @@ impl<B: Backend, C: Compiler> Turn<'_, B, C> {
         // processor. A value that shows nothing new still asks the driver,
         // which notices a loss.
         let waited = waited_value(&self.0.waited, &self.0.timeline);
+        // The platform's processor waits for its look: what completed work
+        // released is destroyed within the budget, and the rest is left for
+        // the next look, which the drop asks for, or a call.
+        let budget = self.0.look_budget.load(Ordering::Acquire);
+        self.device().bound_destruction(budget);
         // Polling enters Vulkan too. An interrupt can take this path without
         // a guest call's stack switch around it.
         (self.0.host.run)(self.0.host.stack, &mut || {
@@ -400,6 +406,11 @@ impl<B: Backend, C: Compiler> Turn<'_, B, C> {
                 None => (**self).signaled(),
             }
         });
+        let device = self.device();
+        device.unbound_destruction();
+        if device.destruction_left() {
+            self.0.stale.store(true, Ordering::SeqCst);
+        }
         self.1 |= completed;
     }
 }
@@ -582,7 +593,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             outside_locked: AtomicBool::new(false),
             outside_seen: Spin::new(None),
             upkeep_asked: AtomicBool::new(false),
-            upkeep_budget: AtomicU64::new(0),
+            look_budget: AtomicU64::new(0),
             refusals,
             host,
         }
@@ -674,10 +685,14 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         }
     }
 
-    /// Bounds one upkeep to `ticks` ([`Self::upkeep`]); zero bounds it by
-    /// its count of pieces alone.
-    pub fn set_upkeep_budget(&self, ticks: u64) {
-        self.upkeep_budget.store(ticks, Ordering::Release);
+    /// Bounds what the platform's look ([`Self::interrupted`]) does on its
+    /// processor, whose guest waits meanwhile, to about `ticks` per part:
+    /// the destruction of released objects its retirement frees (the rest
+    /// waits for the next look or call) and its upkeep ([`Self::upkeep`]).
+    /// Zero bounds the upkeep by its count of pieces alone and leaves the
+    /// destruction unbounded.
+    pub fn set_look_budget(&self, ticks: u64) {
+        self.look_budget.store(ticks, Ordering::Release);
     }
 
     /// The backend's work after its turns ([`Outside::upkeep`]): frees,
@@ -704,7 +719,7 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
             return 0;
         }
         let (budget, began) = (
-            self.upkeep_budget.load(Ordering::Acquire),
+            self.look_budget.load(Ordering::Acquire),
             (self.host.ticks)(),
         );
         let mut done = 0;
