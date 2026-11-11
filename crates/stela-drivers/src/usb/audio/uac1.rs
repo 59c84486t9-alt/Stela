@@ -180,7 +180,8 @@ fn graph(control: &Interface) -> Result<(Graph, Vec<u8>), Error> {
                     controls,
                 })
             }
-            _ => return Err(Error::Unsupported("UAC1 processing/extension entity")),
+            7 | 8 => Some(super::descriptors::processing_unit(d, UAC1, d[2] == 8)?),
+            _ => return Err(Error::Unsupported("reserved UAC1 AC descriptor subtype")),
         };
         if let Some(entity) = entity {
             if entity.id() == 0 || entities.iter().any(|e: &Entity| e.id() == entity.id()) {
@@ -470,7 +471,9 @@ pub(super) fn binding(
         }
     }
     let mut formats = Vec::new();
-    let mut unsupported = Vec::new();
+    let mut unsupported: Vec<_> = super::descriptors::unexposed_controls(&graph)
+        .into_iter()
+        .collect();
     for interface in all
         .iter()
         .filter(|i| collection.contains(&i.number) && i.alternate != 0)

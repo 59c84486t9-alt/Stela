@@ -73,6 +73,22 @@ pub enum Entity {
         sources: Vec<u8>,
         controls: u8,
     },
+    /// Effect, processing, extension and sample rate converter units. Like
+    /// Linux `check_input_term`, the signal passes through them; their
+    /// controls stay at the device defaults and are not exposed.
+    Processing {
+        id: u8,
+        /// The class-specific descriptor subtype of the unit.
+        subtype: u8,
+        sources: Vec<u8>,
+        /// Converter input and output clocks; empty for other units.
+        clocks: Vec<u8>,
+        /// The declared output cluster; `None` keeps the source cluster, as
+        /// effect units and sample rate converters do.
+        cluster: Option<(u8, u32)>,
+        /// Whether the unit advertises any control.
+        controls: bool,
+    },
 }
 impl Entity {
     pub fn id(&self) -> u8 {
@@ -84,9 +100,65 @@ impl Entity {
             | Self::Output { id, .. }
             | Self::Mixer { id, .. }
             | Self::Feature { id, .. }
-            | Self::Selector { id, .. } => *id,
+            | Self::Selector { id, .. }
+            | Self::Processing { id, .. } => *id,
         }
     }
+}
+
+/// Parse a UAC1 or UAC2 processing or extension unit. Both declare `p`
+/// source pins at byte 7 and their own output cluster after them; UAC1 then
+/// has a sized control bitmap, UAC2 a fixed one. Processing units may carry
+/// process-specific bytes after the string index; extension units do not.
+pub(super) fn processing_unit(d: &[u8], protocol: u8, extension: bool) -> Result<Entity, Error> {
+    let short = || Error::Descriptor("short/invalid USB audio processing unit");
+    let pins = usize::from(*d.get(6).ok_or_else(short)?);
+    let after = 7 + pins;
+    let (cluster, controls, end) = if protocol == super::UAC1 {
+        // bNrChannels, wChannelConfig, iChannelNames, bControlSize.
+        let size = usize::from(*d.get(after + 4).ok_or_else(short)?);
+        let bitmap = d.get(after + 5..after + 5 + size).ok_or_else(short)?;
+        (
+            (d[after], u32::from(le16(d, after + 1))),
+            bitmap.iter().any(|byte| *byte != 0),
+            after + 6 + size,
+        )
+    } else {
+        // bNrChannels, bmChannelConfig, iChannelNames, then bmControls
+        // (two bytes for processing units, one for extension units).
+        let width = if extension { 1 } else { 2 };
+        let bitmap = d.get(after + 6..after + 6 + width).ok_or_else(short)?;
+        (
+            (d[after], le32(d, after + 1)),
+            bitmap.iter().any(|byte| *byte != 0),
+            after + 7 + width,
+        )
+    };
+    if d.len() < end || (extension && d.len() != end) {
+        return Err(short());
+    }
+    Ok(Entity::Processing {
+        id: d[3],
+        subtype: d[2],
+        sources: d[7..after].to_vec(),
+        clocks: Vec::new(),
+        cluster: Some(cluster),
+        controls,
+    })
+}
+
+/// Units whose controls are left at the device defaults, reported once per
+/// function at its control interface.
+pub(super) fn unexposed_controls(graph: &Graph) -> Option<(u8, u8, &'static str)> {
+    graph
+        .entities
+        .iter()
+        .any(|entity| matches!(entity, Entity::Processing { controls: true, .. }))
+        .then_some((
+            graph.control_interface,
+            0,
+            "USB audio processing/extension unit controls left at device defaults",
+        ))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +204,9 @@ impl Graph {
                 Entity::ClockSelector { sources, .. }
                 | Entity::Selector { sources, .. }
                 | Entity::Mixer { sources, .. } => sources.clone(),
+                Entity::Processing {
+                    sources, clocks, ..
+                } => sources.iter().chain(clocks).copied().collect(),
                 Entity::ClockMultiplier { source, .. } | Entity::Feature { source, .. } => {
                     vec![*source]
                 }
@@ -173,7 +248,8 @@ impl Graph {
         let sources: &[u8] = match self.entity(id)? {
             Entity::ClockSelector { sources, .. }
             | Entity::Selector { sources, .. }
-            | Entity::Mixer { sources, .. } => sources,
+            | Entity::Mixer { sources, .. }
+            | Entity::Processing { sources, .. } => sources,
             Entity::ClockMultiplier { source, .. }
             | Entity::Feature { source, .. }
             | Entity::Output { source, .. } => core::slice::from_ref(source),
@@ -380,11 +456,37 @@ fn graph(control: &Interface) -> Result<Graph, Error> {
                     controls: d[5],
                 })
             }
-            _ => {
-                return Err(Error::Unsupported(
-                    "UAC2 effect/processing/extension entity",
-                ));
+            7 => {
+                // bSourceID, then a four-byte control bitmap for the master
+                // channel and each channel, then iEffects.
+                if d.len() < 12 || !(d.len() - 8).is_multiple_of(4) {
+                    return Err(short());
+                }
+                Some(Entity::Processing {
+                    id: d[3],
+                    subtype: d[2],
+                    sources: vec![d[6]],
+                    clocks: Vec::new(),
+                    cluster: None,
+                    controls: d[7..d.len() - 1].iter().any(|byte| *byte != 0),
+                })
             }
+            8 | 9 => Some(processing_unit(d, UAC2, d[2] == 9)?),
+            13 => {
+                // bSourceID, bCSourceInID, bCSourceOutID, iSRC.
+                if d.len() != 8 {
+                    return Err(short());
+                }
+                Some(Entity::Processing {
+                    id: d[3],
+                    subtype: d[2],
+                    sources: vec![d[4]],
+                    clocks: vec![d[5], d[6]],
+                    cluster: None,
+                    controls: false,
+                })
+            }
+            _ => return Err(Error::Unsupported("reserved UAC2 AC descriptor subtype")),
         };
         if let Some(entity) = entity {
             if entity.id() == 0 || entities.iter().any(|e: &Entity| e.id() == entity.id()) {
@@ -730,7 +832,7 @@ impl Binding {
         let scope = scope(configuration, control.number, all, UAC2)?;
         let graph = graph(control)?;
         let mut formats = Vec::new();
-        let mut unsupported = Vec::new();
+        let mut unsupported: Vec<_> = unexposed_controls(&graph).into_iter().collect();
         for interface in all.iter().filter(|i| {
             scope.contains(&u16::from(i.number))
                 && i.class == CLASS
@@ -808,3 +910,6 @@ impl Binding {
         settings
     }
 }
+
+#[cfg(test)]
+pub(crate) mod tests;

@@ -63,6 +63,18 @@ impl Graph {
                 channel_config,
                 ..
             } => Ok((*channels, *channel_config)),
+            Entity::Processing {
+                cluster: Some(cluster),
+                ..
+            } => Ok(*cluster),
+            Entity::Processing {
+                cluster: None,
+                sources,
+                ..
+            } => match sources.as_slice() {
+                [source] => self.cluster(*source, visited),
+                _ => Err(Error::Descriptor("pass-through unit needs one source")),
+            },
             Entity::Feature { source, .. } | Entity::Output { source, .. } => {
                 self.cluster(*source, visited)
             }

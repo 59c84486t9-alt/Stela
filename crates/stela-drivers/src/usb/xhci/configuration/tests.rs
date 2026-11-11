@@ -644,6 +644,24 @@ fn uac2_selection_keeps_zero_bandwidth_until_explicit_pcm_start() {
     active_settings(&all, &selected.settings(0)).unwrap();
 }
 
+#[test]
+fn uac2_board_codec_binds_its_association_and_leaves_hid_to_hid() {
+    let configuration = audio::board_codec_configuration();
+    assert_eq!(sanitize(&configuration, HIGH_SPEED).unwrap(), configuration);
+    let mut device = device(vec![configuration]);
+    device.speed = HIGH_SPEED;
+    select(&mut device).unwrap();
+    let all = interfaces(&device.configuration);
+    let selected = plan(&device, &all[0], &all).unwrap();
+    assert!(matches!(selected, Plan::Audio(_)));
+    assert!(selected.endpoints().is_empty());
+    let settings = selected.settings(0);
+    assert_eq!(settings, (0..7).map(|n| (n, 0)).collect::<Vec<_>>());
+    active_settings(&all, &settings).unwrap();
+    let hid = all.iter().find(|i| i.number == 7 && primary(i)).unwrap();
+    assert!(matches!(plan(&device, hid, &all), Ok(Plan::Hid(..))));
+}
+
 fn storage_modes(value: u8, superspeed: bool, bot: bool, uas: bool) -> Vec<u8> {
     let mut bytes = vec![9, 2, 0, 0, 1, value, 0, 0x80, 50];
     let packet = if superspeed { 1024u16 } else { 512u16 };

@@ -125,6 +125,8 @@ pub(super) fn plan(
 pub use stream::{AudioDevice, MixerState, Progress};
 
 #[cfg(test)]
+pub(crate) use descriptors::tests::board_codec as board_codec_configuration;
+#[cfg(test)]
 pub(crate) use stream::tests::configuration as test_configuration;
 
 #[cfg(test)]
