@@ -9,11 +9,11 @@
 //! [`SKIPPED`] cuts what would reach past those needs at its root, and
 //! `compat/llvm` answers what is left of those units.
 use super::{
-    nvidia::Toolchain,
     nvk::{
         LIBC, LIBC_TEST_FLAGS, TARGET_FLAGS, Unit, compile, gather_constructors, resource_directory,
     },
     support::{NATIVE_TARGET, build_directory, gpu, third_party},
+    toolchain::Toolchain,
 };
 use crate::tools::exec;
 use anyhow::{Context, Result, ensure};

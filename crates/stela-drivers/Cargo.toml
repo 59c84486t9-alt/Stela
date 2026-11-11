@@ -18,7 +18,6 @@ workspace = true
 native-acpi = ["stela-driver-base/native-acpi", "stela-driver-net/native-acpi"]
 ram-disk = ["stela-driver-base/ram-disk"]
 irq-diagnostics = ["stela-driver-base/irq-diagnostics"]
-nvidia-port = ["stela-driver-gpu/nvidia-port"]
 nouveau-port = ["stela-driver-gpu/nouveau-port"]
 metal = ["stela-driver-gpu/metal"]
 metal-vulkan = ["stela-driver-gpu/metal-vulkan"]

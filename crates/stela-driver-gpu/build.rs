@@ -1,7 +1,7 @@
 #[cfg(feature = "nouveau-port")]
 #[path = "build/kbuild.rs"]
 mod kbuild;
-#[cfg(any(feature = "nvidia-port", feature = "linux-kernel"))]
+#[cfg(feature = "linux-kernel")]
 #[path = "build/native.rs"]
 mod native;
 #[cfg(feature = "nouveau-port")]
@@ -9,9 +9,6 @@ mod native;
 mod nouveau;
 #[path = "build/nouveau_firmware.rs"]
 mod nouveau_firmware;
-#[cfg(feature = "nvidia-port")]
-#[path = "build/nvidia.rs"]
-mod nvidia;
 
 fn main() {
     nouveau_firmware::validate();
@@ -33,8 +30,6 @@ fn main() {
     );
     #[cfg(feature = "linux-kernel")]
     linux.tests(&mut tests);
-    #[cfg(feature = "nvidia-port")]
-    nvidia::port();
     #[cfg(feature = "nouveau-port")]
     let mut linux = linux;
     #[cfg(feature = "nouveau-port")]

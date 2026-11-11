@@ -18,8 +18,6 @@ workspace = true
 [features]
 # Common native Linux kernel services; selecting this attaches no GPU.
 linux-kernel = ["dep:cc", "dep:stela-c-build", "stela-c-build/linux", "dep:stela-linux", "stela-linux/kernel"]
-# Build the implemented native NVIDIA OS hooks, not a complete GPU driver.
-nvidia-port = ["dep:cc", "dep:stela-c-build", "stela-c-build/native"]
 # nouveau's hardware resource manager (NVKM), compiled unchanged; it reaches
 # no device until the kernel services it imports are supplied.
 nouveau-port = ["linux-kernel", "stela-c-build/linux-registry"]
@@ -50,7 +48,3 @@ sha2 = { version = "0.10", default-features = false }
 object = { version = "0.37", default-features = false, features = ["read"] }
 cc = { version = "1", optional = true }
 stela-c-build = { path = "../stela-c-build", optional = true }
-
-[[test]]
-name = "nvidia_mmio"
-required-features = ["nvidia-port"]

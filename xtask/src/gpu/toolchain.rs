@@ -1,10 +1,15 @@
 //! The pinned tools the GPU builds run, installed under `.tools/gpu`: Meson,
 //! Ninja and Mesa's Python generator modules in a virtual environment, and the
 //! Rust binding generators NAK's build calls.
+use super::support::capture;
 use crate::tools::{self, exec};
 use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 /// Mesa 26.2 needs Python 3.10 or newer for its generators.
 const PYTHON_MINOR: u32 = 10;
@@ -186,4 +191,43 @@ fn standalone_python() -> Result<PathBuf> {
     fs::remove_file(&archive)?;
     ensure!(python.is_file(), "{name} has no bin/python3");
     Ok(python)
+}
+
+/// The host's Clang and the active Rust toolchain's LLVM linker and archiver.
+pub(super) struct Toolchain {
+    pub(super) clang: PathBuf,
+    pub(super) clangxx: PathBuf,
+    pub(super) linker: PathBuf,
+    pub(super) archiver: PathBuf,
+}
+
+impl Toolchain {
+    pub(super) fn discover() -> Result<Self> {
+        let rustc = tools::which("rustc").context("rustc is not in PATH")?;
+        let sysroot = capture(Command::new(&rustc).args(["--print", "sysroot"]))?;
+        let version = capture(Command::new(&rustc).arg("-vV"))?;
+        let host = version
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .context("rustc did not report its host target")?;
+        let directory = Path::new(sysroot.trim())
+            .join("lib/rustlib")
+            .join(host)
+            .join("bin");
+        let tool = |name: &str| directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        let toolchain = Self {
+            clang: tools::which("clang").context("install Clang")?,
+            clangxx: tools::which("clang++").context("install Clang's C++ compiler")?,
+            linker: tool("gcc-ld/ld.lld"),
+            archiver: tool("llvm-ar"),
+        };
+        for path in [&toolchain.linker, &toolchain.archiver] {
+            ensure!(
+                path.is_file(),
+                "{} is missing; install llvm-tools-preview for the active Rust toolchain",
+                path.display()
+            );
+        }
+        Ok(toolchain)
+    }
 }

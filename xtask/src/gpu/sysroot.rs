@@ -4,9 +4,9 @@
 //! they find is true of the image, and no build host chooses its contents.
 use super::{
     llvm,
-    nvidia::Toolchain,
     nvk::{LIBC, LIBC_TEST_FLAGS, REGEX, Unit, compile, resource_directory},
     support::{gpu, slashed, third_party},
+    toolchain::Toolchain,
 };
 use anyhow::Result;
 use std::{

@@ -11,14 +11,10 @@ use stela_c_build::{
 };
 #[cfg(feature = "linux-kernel")]
 pub const LINUX: &str = "../../third_party/linux";
-#[cfg(feature = "nvidia-port")]
-pub const NVIDIA: &str = "../../third_party/nvidia";
 
 pub fn require_sources() {
     #[cfg(feature = "linux-kernel")]
     require_source(LINUX);
-    #[cfg(feature = "nvidia-port")]
-    require_source(NVIDIA);
 }
 fn require_source(source: &str) {
     assert!(

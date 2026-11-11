@@ -55,11 +55,6 @@ pub fn which(name: impl AsRef<OsStr>) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// `llvm-objdump` from the Rust toolchain's `llvm-tools`.
-pub fn toolchain_objdump() -> Option<PathBuf> {
-    toolchain_llvm_tool("llvm-objdump")
-}
-
 /// Locate a tool bundled with the active Rust toolchain.
 pub fn toolchain_llvm_tool(name: &str) -> Option<PathBuf> {
     let output = Command::new(env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))

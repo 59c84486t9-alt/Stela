@@ -93,15 +93,6 @@ pub enum Command {
         #[arg(long, num_args = 2, requires = "llvm_library", value_names = ["TRIANGLE", "TEXTURE"])]
         render_inputs: Vec<PathBuf>,
     },
-    /// Compile NVIDIA's resource-manager and display cores for native Stela
-    /// or as Linux reference objects, keeping unresolved platform imports.
-    Nvidia {
-        #[arg(long, value_enum, default_value_t = nvidia::Target::Stela)]
-        target: nvidia::Target,
-        /// Maximum parallel native compiler processes.
-        #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..))]
-        jobs: u16,
-    },
     /// Compile NVK, NIR and NAK's C for `stela.efi` against Stela's C library,
     /// and generate the sources of Mesa's Rust crates.
     Nvk {
@@ -149,11 +140,10 @@ pub fn run(command: Command) -> Result<()> {
             threadgroup_inputs: &threadgroup_inputs,
             render_inputs: &render_inputs,
         }),
-        Command::Nvidia { jobs, target } => nvidia::build(jobs, target),
         // `stela.efi` carries the kext it links against each boot's kernel.
         Command::Nvk { jobs } => build_nvk(jobs),
         Command::MetalSuite(command) => metal_suite::run(command),
-        Command::Llvm { jobs, test } => llvm::build(&nvidia::Toolchain::discover()?, jobs, test),
+        Command::Llvm { jobs, test } => llvm::build(&toolchain::Toolchain::discover()?, jobs, test),
     }
 }
 

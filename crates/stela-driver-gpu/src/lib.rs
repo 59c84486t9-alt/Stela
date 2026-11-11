@@ -8,9 +8,6 @@ use stela_driver_base::bus;
 
 use crate::bus::pci::{Address, ConfigSpace, Function};
 
-#[cfg(feature = "nvidia-port")]
-pub mod nvidia;
-
 #[cfg(feature = "metal")]
 pub mod metal;
 
