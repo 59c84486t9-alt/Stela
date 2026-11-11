@@ -224,6 +224,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         for (pc, level) in self.hot_samples.drain(..) {
             hot.add(pc, level, 1);
         }
+        hot.add_dynamic(&self.dynamic_samples);
+        self.dynamic_samples.clear();
     }
 
     /// The transfer budget of the next native run: `budget`, or under step

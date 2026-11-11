@@ -205,23 +205,32 @@ fn device_exits_report<H: Host>(
     }
 }
 
-/// `PES HOT level=samples/other vbar=...`: where native code ran since the
-/// last beat, from every PE's sampled runs (`step_timing::HotBlocks`: each
+/// `PES HOT level samples=N other=M`: where native code ran since the last
+/// beat, from every PE's sampled runs (`step_timing::HotBlocks`: each
 /// transfer of native code equally likely), by level, the most sampled
-/// blocks first as `pc:count`. EL1 and guarded PCs are given relative to
-/// VBAR_EL1 (`v+offset`, `v-offset`), which moves with the kernel's slide, so
-/// runs compare across slides; EL0 PCs as they are.
-fn hot_blocks_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
+/// blocks first as `pc:count`. EL1 and guarded PCs are offsets from the
+/// sampling PE's vector base (`v+offset`, `v-offset`), which moves with the
+/// kernel's slide, so runs compare across slides; EL0 PCs as they are.
+/// Every [`HOT_TOTAL_BEATS`] beats, the samples since the first beat
+/// ([`hot_total_report`]).
+fn hot_blocks_report<H: Host>(
+    machine: &mut Machine<H, parallel::Board>,
+    dynamic: &mut step_timing::DynamicSites,
+    total: &mut step_timing::HotBlocks,
+    whole: bool,
+) {
     use stela_engine::machine::engine::step_timing::Level;
     const SHOWN: usize = 24;
     let hot = parallel::hot_samples(machine);
+    dynamic.add(&hot.dynamic);
+    dynamic.untracked += hot.dynamic_other;
+    total.merge(&hot);
+    if whole {
+        hot_total_report(total);
+    }
     if hot.is_empty() {
         return;
     }
-    let vbar = machine
-        .cpu
-        .registers
-        .get(stela_engine::machine::system::Register::VBAR_EL1, 0);
     for (level, name) in [
         (Level::Kernel, "kernel"),
         (Level::Guarded, "guarded"),
@@ -231,21 +240,94 @@ fn hot_blocks_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
         if samples == 0 {
             continue;
         }
-        let mut line = format!(
-            "PES HOT {name} samples={samples} other={} vbar={vbar:#x}",
-            hot.other
-        );
+        let mut line = format!("PES HOT {name} samples={samples} other={}", hot.other);
         for block in hot.top(level, SHOWN) {
-            if level == Level::User {
-                line.push_str(&format!(" {:#x}:{}", block.pc, block.count));
-            } else if block.pc >= vbar {
-                line.push_str(&format!(" v+{:#x}:{}", block.pc - vbar, block.count));
-            } else {
-                line.push_str(&format!(" v-{:#x}:{}", vbar - block.pc, block.count));
-            }
+            push_hot_block(&mut line, level, &block);
         }
         output::arguments(format_args!("{line}\n"));
     }
+}
+
+/// Beats between [`hot_total_report`]s.
+const HOT_TOTAL_BEATS: u64 = 16;
+
+/// ` pc:count` for a [`hot_blocks_report`] line.
+fn push_hot_block(line: &mut String, level: step_timing::Level, block: &step_timing::HotBlock) {
+    if level == step_timing::Level::User {
+        line.push_str(&format!(" {:#x}:{}", block.pc, block.count));
+    } else if (block.pc as i64) >= 0 {
+        line.push_str(&format!(" v+{:#x}:{}", block.pc, block.count));
+    } else {
+        line.push_str(&format!(
+            " v-{:#x}:{}",
+            block.pc.wrapping_neg(),
+            block.count
+        ));
+    }
+}
+
+/// `PES HOT SHARE level samples=N blocks=B top24= top100= top1000= top8192=`
+/// in per mille of the level's samples since the first beat, then
+/// `PES HOT TOTAL level` with its most sampled blocks: how concentrated
+/// native time is, which the per-beat lines cannot show. Samples that found
+/// the table full count in `samples` and in no top share.
+fn hot_total_report(total: &step_timing::HotBlocks) {
+    use stela_engine::machine::engine::step_timing::Level;
+    const SHOWN: usize = 128;
+    for (level, name) in [
+        (Level::Kernel, "kernel"),
+        (Level::Guarded, "guarded"),
+        (Level::User, "user"),
+    ] {
+        let samples = total.samples[level as usize];
+        if samples == 0 {
+            continue;
+        }
+        let blocks = total.top(level, usize::MAX);
+        let mut line = format!(
+            "PES HOT SHARE {name} samples={samples} other={} blocks={}",
+            total.other,
+            blocks.len()
+        );
+        for shown in [24, 100, 1000, step_timing::HOT_BLOCKS] {
+            let counted: u64 = blocks.iter().take(shown).map(|block| block.count).sum();
+            line.push_str(&format!(" top{shown}={}", counted * 1000 / samples));
+        }
+        output::arguments(format_args!("{line}\n"));
+        let mut line = format!("PES HOT TOTAL {name}");
+        for block in blocks.iter().take(SHOWN) {
+            push_hot_block(&mut line, level, block);
+        }
+        output::arguments(format_args!("{line}\n"));
+    }
+}
+
+/// The end of the `PES STAMPED` line under step timing: for RET, BLR, BR
+/// and their PAC forms, the sites sampled at least twice since the first beat, those
+/// that had one target in every sample, and the samples of each group, as
+/// `form=sites/mono/samples/mono_samples`, then the samples of sites past
+/// those tracked: whether one-target inline caches would serve the hot
+/// sites.
+fn dynamic_sites(dynamic: &step_timing::DynamicSites) -> String {
+    use step_timing::DynamicForm;
+    let mut line = String::new();
+    for form in DynamicForm::ALL {
+        let seen = dynamic.seen(form);
+        let name = match form {
+            DynamicForm::Ret => "ret",
+            DynamicForm::Blr => "blr",
+            DynamicForm::Br => "br",
+            DynamicForm::Reta => "reta",
+            DynamicForm::Blra => "blra",
+            DynamicForm::Bra => "bra",
+        };
+        line.push_str(&format!(
+            " {name}={}/{}/{}/{}",
+            seen.sites, seen.monomorphic, seen.samples, seen.monomorphic_samples
+        ));
+    }
+    line.push_str(&format!(" untracked={}", dynamic.untracked));
+    line
 }
 
 /// `DEVICE TRANSFERS calls/us/longest_us`: since the last beat, each part
@@ -737,6 +819,11 @@ pub(super) struct Heartbeat {
     pub(super) cost: BeatCost,
     /// The hardware counters at the last `PES PMU` line (`host::pmu`).
     pub(super) pmu: host::pmu::Seen,
+    /// The RET, BLR and BR sites sampled since the first beat
+    /// (`hot_blocks_report`).
+    pub(super) dynamic: step_timing::DynamicSites,
+    /// The hot blocks sampled since the first beat (`hot_total_report`).
+    pub(super) hot_total: step_timing::HotBlocks,
 }
 
 /// The heartbeat's reports after its first part ([`Heartbeat::beat`]), in
@@ -798,6 +885,8 @@ impl Heartbeat {
             stage: None,
             cost: BeatCost::new(),
             pmu: host::pmu::Seen::new(),
+            dynamic: Default::default(),
+            hot_total: Default::default(),
         }
     }
 
@@ -1031,6 +1120,13 @@ impl Heartbeat {
             .map(|counts| u128::from(counts.retired))
             .sum::<u128>();
         let instructions = retired.saturating_sub(self.retired);
+        // Per PE: its stamped transfers ([`stela_compiler::x86_64::chain::StampCount`]):
+        // hits, misses by cause (ITLB drop epoch or none yet, context,
+        // interruption), stamps written and cells found changed since their
+        // link, then exits it gave a stamped tail; after every PE, the most
+        // exits any PE saw with one, and the RET/BLR/BR sites
+        // `hot_blocks_report` sampled.
+        let mut stamped_line = None;
         if per_pe.len() > 1 {
             let interval_ticks =
                 u128::from(elapsed.max(1)) * u128::from(host::COUNTER_HZ) / u128::from(tsc_hz);
@@ -1105,6 +1201,10 @@ impl Heartbeat {
                 "PES STORE user_compiled/user_unstorable/user_pack/user_shared",
                 "/kernel_compiled/kernel_unstorable/kernel_pack/kernel_shared",
             ));
+            let mut stamped = String::from(
+                "PES STAMPED hits/miss_epoch/miss_context/miss_interrupt/restamped/changed/promoted",
+            );
+            let mut stamped_in_use = 0;
             let deltas = |line: &mut String, pe: usize, now: &[u64], before: &[u64]| {
                 line.push_str(&format!(" {pe}:"));
                 for (slot, (now, before)) in now.iter().zip(before).enumerate() {
@@ -1215,6 +1315,14 @@ impl Heartbeat {
                     &before.itlb_sources,
                 );
                 deltas(&mut transitions, pe, &now.transitions, &before.transitions);
+                let promoted = stela_compiler::x86_64::chain::STAMP_COUNTS + 1;
+                deltas(
+                    &mut stamped,
+                    pe,
+                    &now.stamped[..promoted],
+                    &before.stamped[..promoted],
+                );
+                stamped_in_use = stamped_in_use.max(now.stamped[promoted]);
                 deltas(
                     &mut store,
                     pe,
@@ -1333,6 +1441,8 @@ impl Heartbeat {
             output::arguments(format_args!("{itlb_sources}\n"));
             output::arguments(format_args!("{transitions}\n"));
             output::arguments(format_args!("{store}\n"));
+            stamped.push_str(&format!(" in_use={stamped_in_use}"));
+            stamped_line = Some(stamped);
             if machine.step_timing().is_some() {
                 output::arguments(format_args!("{phases}\n"));
                 output::arguments(format_args!("{levels}\n"));
@@ -1362,7 +1472,18 @@ impl Heartbeat {
             system_exits_report(&exits, tsc_hz);
             device_exits_report(machine, &exits.devices, tsc_hz);
             transfer_times_report(machine, tsc_hz);
-            hot_blocks_report(machine);
+            hot_blocks_report(
+                machine,
+                &mut self.dynamic,
+                &mut self.hot_total,
+                self.beats.is_multiple_of(HOT_TOTAL_BEATS),
+            );
+        }
+        if let Some(mut line) = stamped_line {
+            if machine.step_timing().is_some() {
+                line.push_str(&dynamic_sites(&self.dynamic));
+            }
+            output::arguments(format_args!("{line}\n"));
         }
         output::arguments(format_args!(
             "GUEST PERFORMANCE retired={retired} interval_retired={instructions} instructions_per_second={} instructions_per_block_milli={}\n",

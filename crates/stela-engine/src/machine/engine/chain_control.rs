@@ -5,7 +5,7 @@ use core::{
     marker::PhantomData,
     sync::atomic::{AtomicU64, Ordering},
 };
-use stela_compiler::x86_64::chain::{ChainControl, itlb_salt};
+use stela_compiler::x86_64::chain::{self, ChainControl, itlb_salt};
 
 /// The salts of `contexts` in an ITLB of the set mask in `masks`.
 fn salts(contexts: [u64; 2], masks: [u32; 2]) -> [u32; 2] {
@@ -152,6 +152,25 @@ impl Owner {
             core::ptr::addr_of_mut!((*control).salts).write(salts(contexts, masks));
         }
     }
+    /// This PE's stamps and the board's stamped cells, which stamped tails
+    /// and the cell probe use ([`stela_compiler::x86_64::chain::stamped_tail`]).
+    pub(super) fn set_stamps(&mut self, stamps: u64, cells: u64) {
+        // SAFETY: the sole owner writes these non-budget fields outside native execution.
+        unsafe {
+            let control = self.storage.control.get();
+            core::ptr::addr_of_mut!((*control).stamps).write(stamps);
+            core::ptr::addr_of_mut!((*control).cells).write(cells);
+        }
+    }
+    /// What this PE's stamped tails and stamping cell probe counted
+    /// ([`chain::StampCount`]).
+    pub(super) fn stamp_counts(&self) -> [u64; chain::STAMP_COUNTS] {
+        // SAFETY: the sole owner reads this non-budget field outside native execution.
+        let stamps = unsafe { core::ptr::addr_of!((*self.storage.control.get()).stamps).read() };
+        // SAFETY: `set_stamps` stored 0 or the board's table's stamps for
+        // this PE, which live as long as the board.
+        unsafe { chain::stamp_counts(stamps) }
+    }
     fn masks(&self) -> [u32; 2] {
         // SAFETY: only this Owner writes the masks, outside native execution.
         unsafe { core::ptr::addr_of!((*self.storage.control.get()).masks).read() }
@@ -240,6 +259,12 @@ impl Owner {
             observed_interrupt_epoch: unsafe {
                 core::ptr::addr_of!((*control).observed_interrupt_epoch).read()
             },
+            // SAFETY: as for `table`.
+            stamps: unsafe { core::ptr::addr_of!((*control).stamps).read() },
+            // SAFETY: as for `table`.
+            cells: unsafe { core::ptr::addr_of!((*control).cells).read() },
+            // SAFETY: as for `table`; native code adds to it only within a call.
+            heat: unsafe { core::ptr::addr_of!((*control).heat).read() },
         }
     }
 }

@@ -758,6 +758,13 @@ pub struct Machine<H: Host, D: Devices> {
     /// ([`step_timing::HotBlocks`], [`Self::take_hot_samples`]), the runs
     /// until the next sampled one and the generator of sampled budgets.
     hot_samples: Vec<(u64, step_timing::Level)>,
+    /// The sampled runs among those whose last transfer was their block's
+    /// RET, BLR or BR form's ([`step_timing::HotBlocks::dynamic`]).
+    dynamic_samples: Vec<step_timing::DynamicSample>,
+    /// Native runs since the engine started, and the stamped cell the next
+    /// promotion step looks at ([`scheduler`]'s `promote_hot_exits`).
+    promotion_runs: u32,
+    promotion_cursor: u32,
     hot_countdown: u32,
     hot_seed: u64,
     #[cfg(all(feature = "std", feature = "native-profile"))]
@@ -1278,6 +1285,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             timed_closed: false,
             system_exits: Box::default(),
             hot_samples: Vec::new(),
+            dynamic_samples: Vec::new(),
+            promotion_runs: 0,
+            promotion_cursor: 0,
             hot_countdown: step_timing::HOT_SAMPLE_EVERY,
             hot_seed: 0x9e37_79b9_7f4a_7c15,
             #[cfg(all(feature = "std", feature = "native-profile"))]
@@ -1417,6 +1427,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             machine.itlb.address(),
             [machine.code.table.mask(), machine.itlb.mask()],
         );
+        {
+            let code = Arc::clone(&machine.code);
+            let mut cache = code.cache_at(board::LockSite::Other);
+            let cells = cache.targets.stamped_cells();
+            let stamps = cache.targets.new_stamps();
+            drop(cache);
+            machine.chain.set_stamps(stamps, cells);
+        }
         machine.peers = processors::boot(&machine.profile, boot_processor);
         machine.load_profile();
         machine.sync_regime();

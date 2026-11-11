@@ -3,6 +3,12 @@
 
 use super::*;
 
+/// Native runs between two promotion steps, and the stamped cells each
+/// looks at: every stamped cell once in 256 steps, a lock and 256 loads
+/// in 1024 runs.
+const PROMOTION_RUNS: u32 = 1024;
+const PROMOTION_CELLS: u32 = 256;
+
 impl<H: Host, D: Devices> Machine<H, D> {
     /// Run until a stop. `budget` limits executed blocks (0 = unlimited).
     pub fn run(&mut self, budget: u64) -> Stop {
@@ -286,6 +292,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let remaining = self.chain.budget().load(Ordering::Relaxed);
         let (block, retired, hits, _) = self.chain.completed();
+        self.promotion_runs = self.promotion_runs.wrapping_add(1);
+        if self.promotion_runs.is_multiple_of(PROMOTION_RUNS) {
+            self.promote_hot_exits();
+        }
         // A link spends a transfer and counts nothing else.
         let chained = if remaining > budget {
             budget
@@ -307,7 +317,42 @@ impl<H: Host, D: Devices> Machine<H, D> {
             && let Some(block) = self.code.blocks.get(last)
         {
             let level = step_timing::Level::of(self.cpu.pstate.el, self.cpu.pstate.guarded);
-            self.hot_samples.push((block.pc, level));
+            // Kernel and guarded PCs as offsets from this PE's vector base
+            // at its EL, which moves with the kernel's slide.
+            let pc = if level == step_timing::Level::User {
+                block.pc
+            } else {
+                let vbar = if self.cpu.pstate.el == 2 {
+                    SystemRegister::VBAR_EL2
+                } else {
+                    SystemRegister::VBAR_EL1
+                };
+                block.pc.wrapping_sub(self.cpu.read(vbar) & !0x7ff)
+            };
+            self.hot_samples.push((pc, level));
+            // Its RET, BLR or BR form's transfer, at most as many as the
+            // hot samples a take would keep.
+            if let NativeExit::Exit { next_pc, kind } = exit
+                && let Some((form, _)) = super::dynamic_branch(block.terminal)
+                && ExitWord::split(kind).0 == form as u64
+                && self.dynamic_samples.len() < step_timing::DYNAMIC_SAMPLES
+            {
+                // Bit 11 selects a PAC form.
+                let pac = block.terminal & 1 << 11 != 0;
+                let form = match (form, pac) {
+                    (ExitKind::Return, false) => step_timing::DynamicForm::Ret,
+                    (ExitKind::Call, false) => step_timing::DynamicForm::Blr,
+                    (_, false) => step_timing::DynamicForm::Br,
+                    (ExitKind::Return, true) => step_timing::DynamicForm::Reta,
+                    (ExitKind::Call, true) => step_timing::DynamicForm::Blra,
+                    (_, true) => step_timing::DynamicForm::Bra,
+                };
+                self.dynamic_samples.push(step_timing::DynamicSample {
+                    form,
+                    site: block.pc,
+                    target: next_pc,
+                });
+            }
         }
         self.statistics.blocks += 1 + chained;
         self.statistics.chained += chained;
@@ -684,8 +729,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !chain::patchable(site) {
             return false;
         }
-        let Some((probe, tail)) = self.probe_and_tail(cache, site, 0, chain::CELL_TAIL_BYTES)
-        else {
+        // An exit whose cell probe transfers made it hot gets a stamped
+        // tail ([`chain::stamped_tail`]); every other a cell tail.
+        let hot = cache
+            .targets
+            .site_cell_number(site)
+            .is_some_and(|cell| cache.targets.cell_heat(cell) >= chain::HOT_CELL);
+        let bytes = if hot {
+            chain::STAMPED_TAIL_BYTES
+        } else {
+            chain::CELL_TAIL_BYTES
+        };
+        let Some((probe, tail)) = self.probe_and_tail(cache, site, 0, bytes) else {
             return false;
         };
         let current = self.current_key(next_pc).and_then(|key| {
@@ -695,19 +750,76 @@ impl<H: Host, D: Devices> Machine<H, D> {
             (held.pc == next_pc && held.key == key).then_some(held)
         });
         let cell = cache.targets.link_cell(site, next_pc, current);
+        let number = cache.targets.site_cell_number(site);
+        if let Some(number) = number {
+            let link = chain::CellLink {
+                site,
+                pc: next_pc,
+                retired,
+                word,
+            };
+            cache.targets.note_link(number, link);
+        }
         let at = tail.0 as u64;
         let entry = probe + chain::CELL_PROBE_ENTRY as u64;
-        let (Some(code), Some(jump)) = (
-            chain::cell_tail(at, cell, word, retired, entry),
-            chain::jump(site, at),
-        ) else {
+        let stamped = hot
+            .then(|| {
+                let (current, number) = (current?, number?);
+                chain::stamped_tail(
+                    at,
+                    cell,
+                    number,
+                    next_pc,
+                    word,
+                    retired,
+                    current.block,
+                    current.entry,
+                    probe + chain::STAMPING_PROBE_ENTRY as u64,
+                )
+                .map(|code| (code, number))
+            })
+            .flatten();
+        let stamped_cell = stamped.map(|(_, number)| number);
+        let code = match stamped {
+            Some((code, _)) => Some(code.to_vec()),
+            None => chain::cell_tail(at, cell, word, retired, entry).map(|code| code.to_vec()),
+        };
+        let (Some(code), Some(jump)) = (code, chain::jump(site, at)) else {
             cache.targets.release_cells(site..=site);
             return false;
         };
+        if let Some(number) = stamped_cell {
+            cache.targets.note_stamped(number);
+            self.statistics.stamped_tails += 1;
+        }
         self.patch_native(tail, &code);
         self.patch_point(NativeCode(site as usize), jump);
         self.statistics.links += 1;
         true
+    }
+
+    /// Give the exits of the next [`PROMOTION_CELLS`] stamped cells whose
+    /// cell probe transfers made them hot a stamped tail
+    /// ([`chain::stamped_tail`]): a bounded step every [`PROMOTION_RUNS`]
+    /// native runs, sweeping every stamped cell in turn.
+    pub(super) fn promote_hot_exits(&mut self) {
+        let from = self.promotion_cursor;
+        let to = from + PROMOTION_CELLS;
+        self.promotion_cursor = if to as usize >= chain::STAMPED_CELLS {
+            0
+        } else {
+            to
+        };
+        let code = Arc::clone(&self.code);
+        let mut cache = code.cache_at(board::LockSite::Link);
+        for link in cache.targets.hot_links(from..to) {
+            if let Some(cell) = cache.targets.site_cell_number(link.site) {
+                // Hot once: tried now whatever the link finds.
+                cache.targets.settle_heat(cell);
+            }
+            self.link_through_cell(&mut cache, link.site, link.pc, link.retired, link.word);
+        }
+        self.statistics.stamped_in_use = cache.targets.stamped_tails() as u64;
     }
 
     /// The probes of `btype` and room for a tail of `bytes` that calls
@@ -727,7 +839,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let probe = self.lookup_dispatcher(btype)?;
             let tail = self
                 .host
-                .install(&[0; chain::CELL_TAIL_BYTES][..bytes])
+                .install(&[0; chain::STAMPED_TAIL_BYTES][..bytes])
                 .ok()?;
             return Some((probe, tail));
         };
@@ -736,7 +848,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let stream = self.stream_at(site);
         self.install_stream = stream;
         let tail = self
-            .install_native(&[0; chain::CELL_TAIL_BYTES][..bytes], false)
+            .install_native(&[0; chain::STAMPED_TAIL_BYTES][..bytes], false)
             .ok()?;
         // The tail's part was chosen meanwhile: the exit stays as it is.
         if !self.note_reference(site, tail.0 as u64) {

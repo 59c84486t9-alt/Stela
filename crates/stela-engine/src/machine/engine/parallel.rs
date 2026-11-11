@@ -48,6 +48,7 @@ use alloc::{
 };
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use stela_compiler::aarch64::system::registers::Encoding;
+use stela_compiler::x86_64::chain;
 use stela_contracts::refuse;
 
 mod shared_devices;
@@ -363,6 +364,9 @@ pub struct Counts {
     /// ([`super::Statistics::native_transitions`]).
     pub transitions: [u64; 4],
     pub itlb_sources: [u64; 12],
+    /// Its stamped transfers ([`chain::StampCount`]'s order), the exits it
+    /// gave a stamped tail, then how many exits had one when it last looked.
+    pub stamped: [u64; chain::STAMP_COUNTS + 2],
     /// TSC ticks in each engine phase ([`step_timing::Phase`]), while
     /// step timing is enabled.
     pub phases: [u64; step_timing::Phase::COUNT],
@@ -1783,6 +1787,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 statistics.native_transitions[stela_compiler::x86_64::transition::GUARDED_EXIT],
                 statistics.engine_transitions[stela_compiler::x86_64::transition::GUARDED_EXIT],
             ],
+            stamped: {
+                let mut stamped = [0; chain::STAMP_COUNTS + 2];
+                stamped[..chain::STAMP_COUNTS].copy_from_slice(&self.chain.stamp_counts());
+                stamped[chain::STAMP_COUNTS] = statistics.stamped_tails;
+                stamped[chain::STAMP_COUNTS + 1] = statistics.stamped_in_use;
+                stamped
+            },
             phases: self
                 .step_timing
                 .as_ref()

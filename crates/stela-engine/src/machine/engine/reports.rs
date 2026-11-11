@@ -449,6 +449,12 @@ pub struct Statistics {
     pub chained: u64,
     /// Direct exits redirected into their successors.
     pub links: u64,
+    /// Exits out of their page given a stamped tail
+    /// ([`stela_compiler::x86_64::chain::stamped_tail`]).
+    pub stamped_tails: u64,
+    /// How many exits had a stamped tail when this PE last looked (every
+    /// promotion step): a level, which adding keeps the larger of.
+    pub stamped_in_use: u64,
     /// Links undone, as the blocks they chained into went.
     pub unlinks: u64,
     /// Exits redirected through a lookup of their target (returns and
@@ -608,6 +614,8 @@ impl core::ops::AddAssign for Statistics {
             replaced_retired,
             chained,
             links,
+            stamped_tails,
+            stamped_in_use,
             unlinks,
             lookups,
             lookup_hits,
@@ -726,6 +734,7 @@ impl core::ops::AddAssign for Statistics {
         for (total, count) in self.itlb_sources.iter_mut().zip(itlb_sources) {
             *total += count;
         }
+        self.stamped_in_use = self.stamped_in_use.max(stamped_in_use);
         for (total, count) in self
             .store_sources
             .as_flattened_mut()
@@ -738,6 +747,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.blocks, blocks),
             (&mut self.chained, chained),
             (&mut self.links, links),
+            (&mut self.stamped_tails, stamped_tails),
             (&mut self.unlinks, unlinks),
             (&mut self.lookups, lookups),
             (&mut self.lookup_hits, lookup_hits),

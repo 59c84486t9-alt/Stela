@@ -451,11 +451,123 @@ pub struct HotBlocks {
     /// Samples by [`Level`], and those that found the table full.
     pub samples: [u64; Level::COUNT],
     pub other: u64,
+    /// The samples that were a block's RET, BLR or BR form's transfer, at
+    /// most [`DYNAMIC_SAMPLES`]; those past them are in `dynamic_other`.
+    pub dynamic: alloc::vec::Vec<DynamicSample>,
+    pub dynamic_other: u64,
+}
+
+/// A sampled transfer of a block's RET, BLR or BR form ([`HotBlocks`]):
+/// the form and the block's PC, which stands for its site, and the target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DynamicSample {
+    pub form: DynamicForm,
+    pub site: u64,
+    pub target: u64,
+}
+
+/// A branch to a register's value: RET, BLR, BR, then their PAC forms
+/// (RETA*, BLRA*, BRA*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum DynamicForm {
+    Ret,
+    Blr,
+    Br,
+    Reta,
+    Blra,
+    Bra,
+}
+
+impl DynamicForm {
+    pub const ALL: [Self; 6] = [
+        Self::Ret,
+        Self::Blr,
+        Self::Br,
+        Self::Reta,
+        Self::Blra,
+        Self::Bra,
+    ];
+}
+
+/// The [`DynamicSample`]s one [`HotBlocks`] holds.
+pub const DYNAMIC_SAMPLES: usize = 1 << 16;
+
+/// The sites of sampled RET, BLR and BR transfers since the first sample
+/// ([`HotBlocks::dynamic`]), each with the first target seen there and
+/// whether another followed: whether a one-target inline cache would serve
+/// the hot ones. At most [`DYNAMIC_SITES`] sites; samples of further ones
+/// are in `untracked`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DynamicSites {
+    sites: alloc::collections::BTreeMap<(DynamicForm, u64), DynamicSite>,
+    pub untracked: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DynamicSite {
+    target: u64,
+    samples: u64,
+    targets_differ: bool,
+}
+
+/// The sites [`DynamicSites`] tells apart.
+pub const DYNAMIC_SITES: usize = 1 << 15;
+
+/// One form's sites with at least two samples ([`DynamicSites::seen`]):
+/// how many, how many had one target in every sample, and the samples of
+/// each group.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DynamicSeen {
+    pub sites: u64,
+    pub monomorphic: u64,
+    pub samples: u64,
+    pub monomorphic_samples: u64,
+}
+
+impl DynamicSites {
+    pub fn add(&mut self, samples: &[DynamicSample]) {
+        for sample in samples {
+            let key = (sample.form, sample.site);
+            if let Some(site) = self.sites.get_mut(&key) {
+                site.samples += 1;
+                site.targets_differ |= site.target != sample.target;
+            } else if self.sites.len() < DYNAMIC_SITES {
+                self.sites.insert(
+                    key,
+                    DynamicSite {
+                        target: sample.target,
+                        samples: 1,
+                        targets_differ: false,
+                    },
+                );
+            } else {
+                self.untracked += 1;
+            }
+        }
+    }
+
+    /// The sites of `form` sampled at least twice.
+    pub fn seen(&self, form: DynamicForm) -> DynamicSeen {
+        let mut seen = DynamicSeen::default();
+        let sites = self.sites.range((form, 0)..=(form, u64::MAX));
+        for site in sites.map(|(_, site)| site).filter(|site| site.samples >= 2) {
+            seen.sites += 1;
+            seen.samples += site.samples;
+            if !site.targets_differ {
+                seen.monomorphic += 1;
+                seen.monomorphic_samples += site.samples;
+            }
+        }
+        seen
+    }
 }
 
 /// One block's samples.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HotBlock {
+    /// An EL0 block's PC; a kernel or guarded block's PC less the
+    /// sampling PE's vector base (wrapping), which moves with the slide.
     pub pc: u64,
     pub level: u8,
     pub count: u64,
@@ -512,6 +624,16 @@ impl HotBlocks {
                 .sum();
             *samples += hot.samples[level] - counted;
         }
+        self.add_dynamic(&hot.dynamic);
+        self.dynamic_other += hot.dynamic_other;
+    }
+
+    /// Keep `samples` of dynamic transfers, as many as fit.
+    pub fn add_dynamic(&mut self, samples: &[DynamicSample]) {
+        let room = DYNAMIC_SAMPLES.saturating_sub(self.dynamic.len());
+        let kept = samples.len().min(room);
+        self.dynamic.extend_from_slice(&samples[..kept]);
+        self.dynamic_other += (samples.len() - kept) as u64;
     }
 
     /// The blocks with samples.
@@ -745,6 +867,20 @@ mod tests {
         machine.step().unwrap();
         run(&mut machine, 2 * HOT_SAMPLE_EVERY);
         assert!(!machine.has_hot_samples(), "no samples without step timing");
+        // Kernel PCs are kept as offsets from the vector base of their EL.
+        const VBAR: u64 = 0x800;
+        for register in [
+            crate::machine::system::Register::VBAR_EL1,
+            crate::machine::system::Register::VBAR_EL2,
+        ] {
+            machine.cpu.registers.set(register, 0, VBAR);
+        }
+        let expected =
+            if Level::of(machine.cpu.pstate.el, machine.cpu.pstate.guarded) == Level::User {
+                base + 12
+            } else {
+                (base + 12).wrapping_sub(VBAR)
+            };
         machine.set_step_timing(true);
         run(&mut machine, 2 * HOT_SAMPLE_EVERY);
         let mut hot = HotBlocks::default();
@@ -752,7 +888,7 @@ mod tests {
         let total: u64 = hot.samples.iter().sum();
         assert_eq!(total, 2);
         let pcs: alloc::vec::Vec<u64> = hot.counted().map(|block| block.pc).collect();
-        assert_eq!(pcs, [base + 12]);
+        assert_eq!(pcs, [expected]);
         assert!(!machine.has_hot_samples());
         // Draws stay within the span and below the run's own budget.
         for _ in 0..1000 {
@@ -760,6 +896,51 @@ mod tests {
             assert!((1..=HOT_SAMPLE_SPAN + 1).contains(&budget));
             assert_eq!(sampled, budget <= HOT_SAMPLE_SPAN);
         }
+    }
+
+    /// Sites sampled once are not judged; a site whose samples all named
+    /// one target is monomorphic; the forms are counted apart; a merge
+    /// keeps the samples of both, as many as fit.
+    #[test]
+    fn dynamic_sites_tell_one_target_sites_apart() {
+        let sample = |form, site, target| DynamicSample { form, site, target };
+        let mut hot = HotBlocks::default();
+        hot.add_dynamic(&[
+            sample(DynamicForm::Ret, 0x100, 0x500),
+            sample(DynamicForm::Ret, 0x100, 0x500),
+            sample(DynamicForm::Ret, 0x100, 0x500),
+            sample(DynamicForm::Ret, 0x200, 0x600),
+            sample(DynamicForm::Ret, 0x200, 0x604),
+            sample(DynamicForm::Ret, 0x300, 0x700),
+            sample(DynamicForm::Blr, 0x100, 0x800),
+            sample(DynamicForm::Blr, 0x100, 0x800),
+        ]);
+        let mut merged = HotBlocks::default();
+        merged.merge(&hot);
+        assert_eq!(merged.dynamic, hot.dynamic);
+        let mut sites = DynamicSites::default();
+        sites.add(&merged.dynamic);
+        let seen = |sites: &DynamicSites, form| {
+            let seen = sites.seen(form);
+            [
+                seen.sites,
+                seen.monomorphic,
+                seen.samples,
+                seen.monomorphic_samples,
+            ]
+        };
+        assert_eq!(seen(&sites, DynamicForm::Ret), [2, 1, 5, 3]);
+        assert_eq!(seen(&sites, DynamicForm::Blr), [1, 1, 2, 2]);
+        assert_eq!(seen(&sites, DynamicForm::Br), [0; 4]);
+        let mut full = HotBlocks {
+            dynamic: alloc::vec![sample(DynamicForm::Br, 0, 0); DYNAMIC_SAMPLES - 1],
+            ..HotBlocks::default()
+        };
+        full.add_dynamic(&hot.dynamic[..2]);
+        assert_eq!(
+            (full.dynamic.len(), full.dynamic_other),
+            (DYNAMIC_SAMPLES, 1)
+        );
     }
 
     #[test]

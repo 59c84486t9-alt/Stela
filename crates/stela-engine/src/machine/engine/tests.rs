@@ -3019,6 +3019,82 @@ fn a_direct_exit_waiting_for_its_target_goes_with_its_block() {
 /// returns with neither changed. The cell takes the entry of its target
 /// the fetch records, outlives a TLBI and goes with the frame's entries.
 #[test]
+fn hot_exits_out_of_the_page_get_stamped_tails() {
+    const ADD: u32 = 0x9100_0400; // add x0, x0, #1
+    const RET: u32 = 0xd65f_03c0;
+    let mut words = vec![0; 1026];
+    words[0] = 0x1400_0400; // b .+0x1000
+    words[1024] = ADD;
+    words[1025] = RET;
+    let mut machine = machine(&words);
+    let base = machine.cpu.pc;
+    let far = base + 0x1000;
+    let exit = |next_pc, kind: ExitKind| NativeExit::Exit {
+        next_pc,
+        kind: kind as u64,
+    };
+    machine.host.exits = vec![exit(far, ExitKind::Direct), exit(base, ExitKind::Return)];
+    machine.step().unwrap();
+    machine.step().unwrap();
+    let first = &machine.code.blocks[0];
+    let code = &machine.host.installed[first.code.0 / NATIVE_CODE_STRIDE - 1];
+    let site = chain::direct_patch((first.code.0 + code.len() - chain::DIRECT_EXIT_BYTES) as u64);
+    let (number, cells) = {
+        let mut cache = machine.code.cache();
+        (
+            cache.targets.site_cell_number(site).expect("a cell"),
+            cache.targets.stamped_cells(),
+        )
+    };
+    // Cold: the sweep leaves it.
+    let patches = machine.host.patches.len();
+    for _ in 0..chain::STAMPED_CELLS / 256 {
+        machine.promote_hot_exits();
+    }
+    assert_eq!(machine.host.patches.len(), patches);
+    // Hot, as its cell probe would count: the sweep gives it a stamped tail
+    // jumping straight to the block of `far`, and the site's jump to it.
+    let heat = (cells as usize + chain::CELL_HEAT + 4 * number as usize)
+        as *const core::sync::atomic::AtomicU32;
+    // SAFETY: the board's stamped cells live while it does; the word is an atomic.
+    unsafe { &*heat }.store(chain::HOT_CELL, Ordering::Relaxed);
+    // One full sweep of the stamped cells, a bounded step at a time.
+    for _ in 0..chain::STAMPED_CELLS / 256 {
+        machine.promote_hot_exits();
+    }
+    assert_eq!(machine.host.patches.len(), patches + 2);
+    let (tail, bytes) = machine.host.patches[patches].clone();
+    let cache = machine.code.cache();
+    let number = cache.targets.site_cell_number(site).expect("a cell");
+    let held = cache.targets.site_cell(site).expect("a cell");
+    assert_eq!(held.pc, far);
+    assert_eq!(bytes.len(), chain::STAMPED_TAIL_BYTES);
+    let target = machine.code.blocks[1].code.0 as u64;
+    assert_eq!(held.entry, target);
+    // A direct jump in it reaches the block.
+    let direct = (0..bytes.len() - 5).any(|at| {
+        bytes[at] == 0xe9 && {
+            let relative = i32::from_le_bytes(bytes[at + 1..at + 5].try_into().unwrap());
+            (tail as u64 + at as u64 + 5).wrapping_add(relative as i64 as u64) == target
+        }
+    });
+    assert!(direct, "no direct jump to the block");
+    let jump = chain::jump(site, tail as u64).unwrap();
+    assert_eq!(
+        machine.host.patches[patches + 1],
+        (site as usize, jump.to_vec())
+    );
+    // Settled: hot no more.
+    assert!(
+        cache
+            .targets
+            .hot_links(0..chain::STAMPED_CELLS as u32)
+            .is_empty()
+    );
+    let _ = number;
+}
+
+#[test]
 fn returns_and_exits_out_of_the_page_go_through_lookup_dispatchers() {
     const ADD: u32 = 0x9100_0400; // add x0, x0, #1
     const RET: u32 = 0xd65f_03c0;

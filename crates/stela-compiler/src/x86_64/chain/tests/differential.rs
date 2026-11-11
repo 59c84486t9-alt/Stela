@@ -198,7 +198,7 @@ const PAGE: usize = 4096;
 /// Per variant: the entry stub and tail at 0, the four dispatchers from
 /// [`PROBES`]; the blocks are in a page of their own both enter.
 const PROBES: usize = 512;
-const DISPATCHER_BYTES: usize = 1024;
+const DISPATCHER_BYTES: usize = 1536;
 const REGION: usize = 2 * PAGE;
 const BLOCKS: usize = 8;
 const CONTEXTS: [u64; 3] = [
@@ -449,6 +449,8 @@ fn probes_without_the_stack_transfer_as_the_probes_before_them() {
             ra, rb,
             "trial {trial}: target {target:#x} cell {through_cell} btype {btype}"
         );
+        // Only today's cell probes count heat.
+        a.heat = 0;
         assert_eq!(a, b, "trial {trial}: the controls differ");
         if ra.1 == 99 {
             entered += 1;

@@ -270,13 +270,22 @@ pub struct ChainControl {
     /// The block table's slot mask and the ITLB's set mask
     /// ([`LookupTable::mask`]): both tables are sized from host memory.
     pub masks: [u32; 2],
+    /// The host address of this PE's stamps ([`STAMP_TABLE_BYTES`]), which
+    /// [`stamped_tail`]s check, or 0.
+    pub stamps: u64,
+    /// The host address of the block table's first [`STAMPED_CELLS`] cells
+    /// ([`LookupTable::stamped_cells`]), or 0.
+    pub cells: u64,
+    /// Where cell probes count the transfers through cells past the
+    /// stamped ones; nothing reads it.
+    pub heat: u64,
 }
 
 // Epoch and observed state are naturally aligned atomic-width words. Capture
 // and storage owners keep the mapped control alive for every embedded address.
 const _: () = assert!(core::mem::offset_of!(ChainControl, interrupt_epoch) == 64);
 const _: () = assert!(core::mem::offset_of!(ChainControl, observed_interrupt_epoch) == 72);
-const _: () = assert!(core::mem::size_of::<ChainControl>() == 104);
+const _: () = assert!(core::mem::size_of::<ChainControl>() == 128);
 
 /// In the block table, one block a fetch at `pc` runs while its page
 /// translates to the frame and fetch state `key` names ([`block_key`]). In
@@ -376,6 +385,9 @@ const _: () =
 /// other cores read while their writer writes: shared, never uniquely
 /// borrowed.
 struct Slots {
+    /// The first slot; a header of [`HEADER_SLOTS`] ([`Slots::header`])
+    /// precedes it, so the slots keep the allocation's 64-byte alignment,
+    /// which a probe's set of two needs.
     base: core::ptr::NonNull<Slot>,
     len: usize,
 }
@@ -394,13 +406,34 @@ impl Slots {
     }
 
     fn zeroed(len: usize) -> Self {
-        let layout = Self::layout(len);
+        let layout = Self::layout(len + HEADER_SLOTS);
         // SAFETY: a nonzero size; all-zero bytes are a valid Slot (atomics).
-        let base = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut Slot;
-        let Some(base) = core::ptr::NonNull::new(base) else {
+        let start = unsafe { alloc::alloc::alloc_zeroed(layout) } as *mut Slot;
+        let Some(start) = core::ptr::NonNull::new(start) else {
             alloc::alloc::handle_alloc_error(layout);
         };
+        // SAFETY: the header slots are the allocation's first.
+        let base = unsafe { start.add(HEADER_SLOTS) };
         Self { base, len }
+    }
+
+    /// The first four words of the header ([`ITLB_DROPS`]).
+    fn header(&self) -> &[AtomicU64; 4] {
+        // SAFETY: the header is in the live allocation, aligned bytes of
+        // atomics.
+        unsafe { &*(self.base.as_ptr().sub(HEADER_SLOTS) as *const [AtomicU64; 4]) }
+    }
+
+    /// The word at byte `offset` after the first slot, which a [`Slots`]
+    /// made with room for it holds ([`LookupTable::stamped_cells`]).
+    fn word(&self, offset: usize) -> &AtomicU32 {
+        assert!(
+            offset + 4 <= self.len * size_of::<Slot>(),
+            "a word of the table"
+        );
+        // SAFETY: in bounds of the live, zero-initialized allocation, and
+        // 4-aligned as `offset` is.
+        unsafe { &*((self.base.as_ptr() as *const u8).add(offset) as *const AtomicU32) }
     }
 
     #[inline]
@@ -421,8 +454,13 @@ impl Slots {
 
 impl Drop for Slots {
     fn drop(&mut self) {
-        // SAFETY: allocated in `zeroed` with this layout.
-        unsafe { alloc::alloc::dealloc(self.base.as_ptr() as *mut u8, Self::layout(self.len)) };
+        // SAFETY: allocated in `zeroed` with this layout, from the header.
+        unsafe {
+            alloc::alloc::dealloc(
+                self.base.as_ptr().sub(HEADER_SLOTS) as *mut u8,
+                Self::layout(self.len + HEADER_SLOTS),
+            )
+        };
     }
 }
 
@@ -569,6 +607,87 @@ const SWEEP_GRANULES: usize = 1 << 12;
 /// Cells in one allocation of [`LookupTable::link_cell`]'s, which never moves.
 const CELL_CHUNK: usize = 256;
 
+/// Cells that [`stamped_tail`]s can name: the first cells of a block table,
+/// in one array ([`LookupTable::stamped_cells`]) followed by a `live` and
+/// a `heat` word per cell. Later cells come in chunks of [`CELL_CHUNK`].
+pub const STAMPED_CELLS: usize = 1 << 16;
+/// Byte offset of a stamped cell's `live` word from the array: nonzero
+/// while the cell holds what it held when its exit was linked.
+pub const CELL_LIVE: usize = STAMPED_CELLS * size_of::<LookupEntry>();
+/// Byte offset of a stamped cell's `heat` word: cell probe transfers
+/// through it since it was linked.
+pub const CELL_HEAT: usize = CELL_LIVE + STAMPED_CELLS * 4;
+/// Cell probe transfers through a cell after which its exit is worth a
+/// [`stamped_tail`] ([`LookupTable::hot_links`]).
+pub const HOT_CELL: u32 = 256;
+/// A stamped cell's `heat` once its exit has a stamped tail, or was found
+/// unable to take one: never hot again before it wraps.
+const SETTLED: u32 = 1 << 31;
+/// Bytes of one PE's stamp of one stamped cell: the context, then the ITLB
+/// drop epoch of the target's half, in which the PE's cell probe found the
+/// cell's target ([`stamped_tail`]).
+pub const STAMP_BYTES: usize = 16;
+/// Bytes of one PE's stamps.
+pub const STAMP_TABLE_BYTES: usize = STAMPED_CELLS * STAMP_BYTES;
+/// Bytes of the counts in front of one PE's stamps ([`StampCount`]).
+pub const STAMP_COUNTS_BYTES: usize = 64;
+
+/// What one PE's stamped tails and stamping cell probe count, a word each
+/// in front of its stamps, which only that PE's native code writes
+/// ([`stamp_counts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StampCount {
+    /// Transfers a stamp sent straight to their block.
+    Hits,
+    /// Misses for another ITLB drop epoch of the target's half (or no stamp).
+    Epoch,
+    /// Misses for another context of the target's half.
+    Context,
+    /// Misses for an interruption.
+    Interrupted,
+    /// Stamps the stamping cell probe wrote.
+    Restamped,
+    /// Stamping cell probe transfers through a cell changed since its link,
+    /// which no stamp names until the exit is linked again.
+    Changed,
+}
+
+/// How many [`StampCount`]s there are.
+pub const STAMP_COUNTS: usize = 6;
+
+impl StampCount {
+    /// Its word's offset from the stamps.
+    const fn offset(self) -> i32 {
+        8 * self as i32 - STAMP_COUNTS_BYTES as i32
+    }
+}
+
+const _: () = assert!(8 * STAMP_COUNTS <= STAMP_COUNTS_BYTES);
+
+/// The [`StampCount`]s of the stamps at `stamps` ([`LookupTable::new_stamps`]),
+/// or zeros for none, read by the PE whose native code counts them.
+///
+/// # Safety
+///
+/// `stamps` is 0 or an address `new_stamps` returned, whose table lives.
+pub unsafe fn stamp_counts(stamps: u64) -> [u64; STAMP_COUNTS] {
+    if stamps == 0 {
+        return [0; STAMP_COUNTS];
+    }
+    core::array::from_fn(|count| {
+        let word = (stamps as usize - STAMP_COUNTS_BYTES + 8 * count) as *mut u64;
+        // SAFETY: the caller's: `new_stamps` made the counts in front of
+        // `stamps` as atomics, which live while their table does.
+        unsafe { AtomicU64::from_ptr(word) }.load(Ordering::Relaxed)
+    })
+}
+/// Byte offset from an ITLB's address ([`LookupTable::address`]) of its
+/// drop epochs, one 64-bit word per half: each grows when an entry of the
+/// half leaves or changes, never at a capacity eviction; they start at 1.
+pub const ITLB_DROPS: i32 = -((HEADER_SLOTS * size_of::<Slot>()) as i32);
+/// Slots before a table's first: one cache line.
+const HEADER_SLOTS: usize = 2;
+
 /// Buckets of [`LookupTable`]'s count of held cells by PC.
 const CELL_BUCKETS: usize = 1 << 16;
 
@@ -576,6 +695,17 @@ const CELL_BUCKETS: usize = 1 << 16;
 /// mixed with the high bits, so one page's PCs spread out.
 fn cell_bucket(pc: u64) -> usize {
     ((pc >> 2).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 48) as usize % CELL_BUCKETS
+}
+
+/// What an exit through a stamped cell was linked with
+/// ([`LookupTable::note_link`]): its patch point, its target, the
+/// instructions its block ran and its word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellLink {
+    pub site: u64,
+    pub pc: u64,
+    pub retired: u32,
+    pub word: ExitWord,
 }
 
 /// A table of [`LookupEntry`]s in two-entry sets, by slot, and an index of
@@ -628,6 +758,16 @@ pub struct LookupTable {
     cell_counts: Box<[u32]>,
     /// Each held cell by the host address of the exit holding it.
     cell_sites: BTreeMap<u64, u32>,
+    /// The host address of each PE's stamps ([`Self::new_stamps`]), whose
+    /// stamps of a stamped cell go when the cell changes.
+    stamp_tables: Vec<u64>,
+    /// The stamps those addresses name, which never move.
+    stamp_store: Vec<Box<[AtomicU64]>>,
+    /// The link of each stamped cell an exit holds, for its promotion
+    /// ([`Self::hot_links`]).
+    cell_links: Vec<Option<CellLink>>,
+    /// The stamped cells whose exits have a stamped tail.
+    stamped: BTreeSet<u32>,
     /// The state of [`Self::insert`]'s victim choice (xorshift).
     victims: u64,
     /// Entries [`Self::insert`] put out of a full set: the slot's resident,
@@ -669,8 +809,12 @@ impl LookupTable {
     }
 
     fn with(entries: usize, mask: u32, grouping: Grouping) -> Self {
+        let sets = Arc::new(Slots::zeroed(entries));
+        for drops in &sets.header()[..2] {
+            drops.store(1, Ordering::Relaxed);
+        }
         Self {
-            sets: Arc::new(Slots::zeroed(entries)),
+            sets,
             mask,
             grouping,
             granules: BTreeMap::new(),
@@ -685,6 +829,10 @@ impl LookupTable {
             cell_frames: BTreeSet::new(),
             cell_counts: Box::default(),
             cell_sites: BTreeMap::new(),
+            stamp_tables: Vec::new(),
+            stamp_store: Vec::new(),
+            stamped: BTreeSet::new(),
+            cell_links: Vec::new(),
             victims: 0x9e37_79b9_7f4a_7c15,
             evicted: [0; 2],
         }
@@ -745,7 +893,8 @@ impl LookupTable {
             // A B-tree entry and its share of a node about half full.
             + self.granules.len() * 2 * size_of::<(u64, u32)>()
             + self.front.len() * size_of::<(u64, u32)>()
-            + self.cells.len() * CELL_CHUNK * size_of::<LookupEntry>()
+            + self.cells.iter().map(|cells| cells.len).sum::<usize>() * size_of::<LookupEntry>()
+            + self.stamp_store.len() * (STAMP_COUNTS_BYTES + STAMP_TABLE_BYTES)
             + self.free_cells.capacity() * size_of::<u32>()
             + self.cell_counts.len() * size_of::<u32>()
             + (self.cell_pcs.len() + self.cell_frames.len() + self.cell_sites.len())
@@ -777,12 +926,21 @@ impl LookupTable {
         self.last = None;
         self.sweep_at = SWEEP_GRANULES;
         for &(pc, cell) in &self.cell_pcs {
-            Self::cell_slot(&self.cells, cell).store(LookupEntry {
+            let empty = LookupEntry {
                 pc,
                 ..LookupEntry::default()
-            });
+            };
+            put_cell(
+                &self.cells,
+                &mut self.cell_frames,
+                &self.stamp_tables,
+                cell,
+                empty,
+            );
         }
         self.cell_frames.clear();
+        self.dropped(0);
+        self.dropped(1 << 55);
     }
 
     /// Whether every entry is empty, and no cell holds one.
@@ -806,7 +964,13 @@ impl LookupTable {
     pub fn link_cell(&mut self, site: u64, pc: u64, current: Option<LookupEntry>) -> u64 {
         self.release_cells(site..=site);
         let cell = self.free_cells.pop().unwrap_or_else(|| {
-            let cell = (self.cells.len() * CELL_CHUNK) as u32;
+            if self.cells.is_empty() {
+                self.stamped_cells();
+                if let Some(cell) = self.free_cells.pop() {
+                    return cell;
+                }
+            }
+            let cell = (STAMPED_CELLS + (self.cells.len() - 1) * CELL_CHUNK) as u32;
             self.cells.push(Slots::zeroed(CELL_CHUNK));
             self.free_cells
                 .extend((cell + 1..cell + CELL_CHUNK as u32).rev());
@@ -818,7 +982,24 @@ impl LookupTable {
                 pc,
                 ..LookupEntry::default()
             });
-        put_cell(&self.cells, &mut self.cell_frames, cell, entry);
+        put_cell(
+            &self.cells,
+            &mut self.cell_frames,
+            &self.stamp_tables,
+            cell,
+            entry,
+        );
+        if (cell as usize) < STAMPED_CELLS {
+            let words = &self.cells[0];
+            words
+                .word(CELL_HEAT + 4 * cell as usize)
+                .store(0, Ordering::Relaxed);
+            // After the entry: a probe that finds the word set read the
+            // entry it was linked with.
+            words
+                .word(CELL_LIVE + 4 * cell as usize)
+                .store(1, Ordering::Release);
+        }
         self.cell_pcs.insert((pc, cell));
         if self.cell_counts.is_empty() {
             self.cell_counts = vec![0; CELL_BUCKETS].into_boxed_slice();
@@ -851,6 +1032,10 @@ impl LookupTable {
         for _ in 0..most {
             let (&site, &cell) = self.cell_sites.range(from..=*sites.end()).next()?;
             self.cell_sites.remove(&site);
+            if let Some(link) = self.cell_links.get_mut(cell as usize) {
+                *link = None;
+            }
+            self.stamped.remove(&cell);
             let pc = self.cell(cell).pc;
             if self.cell_pcs.remove(&(pc, cell)) {
                 self.cell_counts[cell_bucket(pc)] -= 1;
@@ -858,6 +1043,7 @@ impl LookupTable {
             put_cell(
                 &self.cells,
                 &mut self.cell_frames,
+                &self.stamp_tables,
                 cell,
                 LookupEntry::default(),
             );
@@ -885,7 +1071,134 @@ impl LookupTable {
     }
 
     fn cell_slot(cells: &[Slots], cell: u32) -> &Slot {
-        cells[cell as usize / CELL_CHUNK].get(cell as usize % CELL_CHUNK)
+        match (cell as usize).checked_sub(STAMPED_CELLS) {
+            None => cells[0].get(cell as usize),
+            Some(later) => cells[1 + later / CELL_CHUNK].get(later % CELL_CHUNK),
+        }
+    }
+
+    /// The host address of the stamped cells ([`STAMPED_CELLS`]), for
+    /// `ChainControl::cells`, made with their `live` and `heat` words on
+    /// first use.
+    pub fn stamped_cells(&mut self) -> u64 {
+        if self.cells.is_empty() {
+            self.cells
+                .push(Slots::zeroed(STAMPED_CELLS + STAMPED_CELLS / 4));
+            // Cell 0 counts the transfers of cells past the stamped ones.
+            self.free_cells.extend((1..STAMPED_CELLS as u32).rev());
+        }
+        self.cells[0].address()
+    }
+
+    /// New zeroed stamps for one PE ([`STAMP_TABLE_BYTES`]) after their
+    /// counts ([`STAMP_COUNTS_BYTES`]), for `ChainControl::stamps`, which
+    /// the table keeps while it lives and zeroes a cell's stamps in when
+    /// the cell changes.
+    pub fn new_stamps(&mut self) -> u64 {
+        let stamps: Box<[AtomicU64]> = (0..(STAMP_COUNTS_BYTES + STAMP_TABLE_BYTES) / 8)
+            .map(|_| AtomicU64::new(0))
+            .collect();
+        let address = stamps.as_ptr() as u64 + STAMP_COUNTS_BYTES as u64;
+        self.stamp_store.push(stamps);
+        self.stamp_tables.push(address);
+        address
+    }
+
+    /// Note what the exit holding stamped cell `cell` ran and its word, for
+    /// a promotion of the exit ([`Self::hot_links`]).
+    pub fn note_link(&mut self, cell: u32, link: CellLink) {
+        if (cell as usize) < STAMPED_CELLS {
+            if self.cell_links.len() <= cell as usize {
+                self.cell_links.resize(cell as usize + 1, None);
+            }
+            self.cell_links[cell as usize] = Some(link);
+        }
+    }
+
+    /// Keep stamped cell `cell` from making its exit hot again: its exit
+    /// has a stamped tail now.
+    pub fn settle_heat(&mut self, cell: u32) {
+        if (cell as usize) < STAMPED_CELLS {
+            self.cells[0]
+                .word(CELL_HEAT + 4 * cell as usize)
+                .store(SETTLED, Ordering::Relaxed);
+        }
+    }
+
+    /// Note that the exit holding stamped cell `cell` has a stamped tail
+    /// now, until it releases the cell, and [`Self::settle_heat`].
+    pub fn note_stamped(&mut self, cell: u32) {
+        if (cell as usize) < STAMPED_CELLS {
+            self.settle_heat(cell);
+            self.stamped.insert(cell);
+        }
+    }
+
+    /// How many exits have a stamped tail ([`Self::note_stamped`]).
+    pub fn stamped_tails(&self) -> usize {
+        self.stamped.len()
+    }
+
+    /// The cell number of the exit at host address `site`, if it holds one.
+    pub fn site_cell_number(&self, site: u64) -> Option<u32> {
+        self.cell_sites.get(&site).copied()
+    }
+
+    /// The links of the exits holding stamped cells `cells` whose cell
+    /// probe transfers made them hot ([`HOT_CELL`]) since they were linked:
+    /// each to get a stamped tail, after which [`Self::settle_heat`].
+    pub fn hot_links(&self, cells: core::ops::Range<u32>) -> Vec<CellLink> {
+        let Some(words) = self.cells.first() else {
+            return Vec::new();
+        };
+        let end = cells.end.min(STAMPED_CELLS as u32);
+        (cells.start.max(1)..end)
+            .filter(|&cell| {
+                let heat = words
+                    .word(CELL_HEAT + 4 * cell as usize)
+                    .load(Ordering::Relaxed);
+                (HOT_CELL..SETTLED).contains(&heat)
+            })
+            .filter_map(|cell| {
+                let link = (*self.cell_links.get(cell as usize)?)?;
+                (self.cell_sites.get(&link.site) == Some(&cell)).then_some(link)
+            })
+            .collect()
+    }
+
+    /// Transfers cell probes made through stamped cell `cell` since it was
+    /// linked, or [`SETTLED`] and beyond once its exit took a stamped tail.
+    pub fn cell_heat(&self, cell: u32) -> u32 {
+        if cell as usize >= STAMPED_CELLS {
+            return 0;
+        }
+        self.cells[0]
+            .word(CELL_HEAT + 4 * cell as usize)
+            .load(Ordering::Relaxed)
+    }
+
+    /// A drop when either slot of `slot`'s set holds `entry`'s page and
+    /// context with another block key: the page's translation changes,
+    /// whichever slot the new entry or a moved resident then takes.
+    fn note_rekey(&self, slot: usize, entry: &LookupEntry) {
+        let changed = |at: usize| {
+            let held = self.sets.get(at);
+            held.key() == entry.key && entry.key != 0 && {
+                let held = held.load();
+                held.pc == entry.pc && held.key == entry.key && held != *entry
+            }
+        };
+        if changed(slot) || changed(neighbour(slot)) {
+            self.dropped(entry.pc);
+        }
+    }
+
+    /// Grow the drop epoch of `pc`'s half: an ITLB entry there left or
+    /// changed ([`ITLB_DROPS`]).
+    fn dropped(&self, pc: u64) {
+        if self.grouping == Grouping::Pc {
+            self.sets.header()[half(pc)].fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// The entry of `pc` with `key` in the set of `slot`, as a probe would
@@ -909,6 +1222,9 @@ impl LookupTable {
     /// while a third that nothing reaches stayed: a random victim leaves
     /// that third the one out after a few rounds.
     pub fn insert(&mut self, slot: usize, entry: LookupEntry) {
+        if self.grouping == Grouping::Pc {
+            self.note_rekey(slot, &entry);
+        }
         let resident = self.entry(slot);
         if resident == entry {
             return;
@@ -935,13 +1251,28 @@ impl LookupTable {
 
     /// Put `entry` in `slot` alone, and in every cell of its PC.
     pub fn set(&mut self, slot: usize, entry: LookupEntry) {
+        if self.grouping == Grouping::Pc {
+            // A page of a context that leaves: a drop. Another page put
+            // out of the slot is not one; its translation still holds.
+            let resident = self.sets.get(slot).load();
+            if resident.key != 0 && entry.key == 0 {
+                self.dropped(resident.pc);
+            }
+            self.note_rekey(slot, &entry);
+        }
         self.sets.get(slot).store(entry);
         if entry.key == 0 {
             return;
         }
         if !self.cell_counts.is_empty() && self.cell_counts[cell_bucket(entry.pc)] != 0 {
             for &(_, cell) in self.cell_pcs.range((entry.pc, 0)..=(entry.pc, u32::MAX)) {
-                put_cell(&self.cells, &mut self.cell_frames, cell, entry);
+                put_cell(
+                    &self.cells,
+                    &mut self.cell_frames,
+                    &self.stamp_tables,
+                    cell,
+                    entry,
+                );
             }
         }
         let set = (slot / 2) as u32;
@@ -1096,7 +1427,13 @@ impl LookupTable {
                 pc,
                 ..LookupEntry::default()
             };
-            put_cell(&self.cells, &mut self.cell_frames, cell, empty);
+            put_cell(
+                &self.cells,
+                &mut self.cell_frames,
+                &self.stamp_tables,
+                cell,
+                empty,
+            );
             found = true;
         }
         found
@@ -1129,7 +1466,13 @@ impl LookupTable {
                     pc,
                     ..LookupEntry::default()
                 };
-                put_cell(&self.cells, &mut self.cell_frames, cell, empty);
+                put_cell(
+                    &self.cells,
+                    &mut self.cell_frames,
+                    &self.stamp_tables,
+                    cell,
+                    empty,
+                );
             }
         }
         visited
@@ -1143,9 +1486,22 @@ impl LookupTable {
         mut forget: impl FnMut(&LookupEntry) -> bool,
     ) -> bool {
         let grouping = self.grouping;
-        let sets = &self.sets;
         let mut emptied = Vec::new();
         let mut found = false;
+        // A TLBI of the span: its halves' epochs grow even where this ITLB
+        // holds none of its pages, as an evicted page may come back with
+        // the translation the TLBI made way for.
+        if grouping == Grouping::Pc {
+            let (first, last) = (
+                *groups.start() << GRANULE_SHIFT,
+                *groups.end() << GRANULE_SHIFT,
+            );
+            self.dropped(first);
+            if half(first) != half(last) {
+                self.dropped(last);
+            }
+        }
+        let sets = &self.sets;
         for (&group, &place) in self.granules.range(groups) {
             found = true;
             let listed = &mut self.lists[place as usize];
@@ -1173,13 +1529,41 @@ impl LookupTable {
 
 /// Put `entry` in `cell`, keeping `frames`, the cells by the frame their
 /// keys name, in step.
-fn put_cell(cells: &[Slots], frames: &mut BTreeSet<(u64, u32)>, cell: u32, entry: LookupEntry) {
+fn put_cell(
+    cells: &[Slots],
+    frames: &mut BTreeSet<(u64, u32)>,
+    stamps: &[u64],
+    cell: u32,
+    entry: LookupEntry,
+) {
     let held = LookupTable::cell_slot(cells, cell);
+    // The entry it holds already: nothing changes, and its stamps hold.
+    if held.load() == entry {
+        return;
+    }
     let key = held.key();
     if key != 0 {
         frames.remove(&(key_frame(key), cell));
     }
+    // A stamped cell's `live` word goes before the entry changes, so a
+    // probe that reads the new entry finds it clear; then every PE's
+    // stamps of it, so no stamped tail enters the block it held.
+    let live = ((cell as usize) < STAMPED_CELLS)
+        .then(|| cells[0].word(CELL_LIVE + 4 * cell as usize))
+        .filter(|live| live.load(Ordering::Relaxed) != 0);
+    if let Some(live) = live {
+        live.store(0, Ordering::Relaxed);
+    }
     held.store(entry);
+    if live.is_some() {
+        for &table in stamps {
+            let stamp = (table as usize + STAMP_BYTES * cell as usize) as *const [AtomicU64; 2];
+            // SAFETY: `add_stamps`'s contract: live stamps of atomics.
+            for word in unsafe { &*stamp } {
+                word.store(0, Ordering::Relaxed);
+            }
+        }
+    }
     if entry.key != 0 {
         frames.insert((key_frame(entry.key), cell));
     }
@@ -1255,6 +1639,9 @@ const TABLE: i32 = core::mem::offset_of!(ChainControl, table) as i32;
 const ITLB: i32 = core::mem::offset_of!(ChainControl, itlb) as i32;
 const MASKS: i32 = core::mem::offset_of!(ChainControl, masks) as i32;
 const HITS: i32 = core::mem::offset_of!(ChainControl, hits) as i32;
+const STAMPS: i32 = core::mem::offset_of!(ChainControl, stamps) as i32;
+const CELLS: i32 = core::mem::offset_of!(ChainControl, cells) as i32;
+const HEAT: i32 = core::mem::offset_of!(ChainControl, heat) as i32;
 #[cfg(all(test, target_arch = "x86_64", target_os = "linux"))]
 const LINKED: i32 = core::mem::offset_of!(ChainControl, linked) as i32;
 const INTERRUPT_EPOCH: i32 = core::mem::offset_of!(ChainControl, interrupt_epoch) as i32;
@@ -1742,12 +2129,15 @@ fn link_body(
 }
 
 /// Bytes of the cell probe of a [`lookup_dispatcher`], which comes first.
-pub const CELL_PROBE_BYTES: usize = 256;
+pub const CELL_PROBE_BYTES: usize = 384;
 /// Where a [`lookup_dispatcher`]'s cell probe begins.
 pub const CELL_PROBE_ENTRY: usize = 0;
 /// Where a [`lookup_dispatcher`]'s table probe begins: after the cell
 /// probe.
 pub const PROBE_ENTRY: usize = CELL_PROBE_BYTES;
+/// Where a [`lookup_dispatcher`]'s stamping cell probe begins, after the
+/// table probe: a [`stamped_tail`]'s miss takes it.
+pub const STAMPING_PROBE_ENTRY: usize = PROBE_ENTRY + 512;
 /// Bytes in a [`lookup_tail`]: `mov edx, word` and `jmp probe`.
 pub const TAIL_BYTES: usize = 5 + 5;
 /// Bytes in a [`cell_tail`].
@@ -1782,46 +2172,7 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
         return None;
     }
     let mut code = Code::new();
-    // The cell probe, R9 at the cell; R10 keeps it across the translation.
-    let mut asm = code.asm();
-    asm.place(Rcx, CONTROL);
-    let mut misses = Vec::new();
-    if let Some(interrupted) = far_interruption_gate(&mut asm, policy, R8) {
-        misses.push(interrupted);
-    }
-    asm.mov(Qword, R10, R9);
-    translate(&mut asm, &mut misses);
-    // The cell is the target's with its page's key, or the table decides.
-    // R11D = the cell's last word before its fields ([`Slot`]).
-    asm.mov_load(Dword, R11, Mem::base(R10, ENTRY_TARGETS));
-    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(R10, 0));
-    let stale = asm.jcc8(Cond::Ne);
-    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R10, ENTRY_KEY));
-    let other = asm.jcc8(Cond::Ne);
-    asm.mov_load(Dword, R8, Mem::base(R10, ENTRY_BLOCK));
-    asm.mov_load(Qword, R9, Mem::base(R10, ENTRY_CODE));
-    let torn = seqlock_check(&mut asm, R10);
-    spend_budget(&mut asm, policy);
-    misses.push(asm.jcc(Cond::B));
-    asm.shift_imm(ShiftOp::Shr, Dword, Rdx, ExitWord::RAN_SHIFT as u8);
-    asm.alu(Alu::Add, Qword, Mem::base(Rcx, RETIRED), Rdx);
-    asm.mov_store(Qword, Mem::base(Rcx, BLOCK), R8);
-    found(&mut asm);
-    for miss in misses {
-        asm.bind(miss);
-    }
-    missed(&mut asm);
-    // A cell written while it was read: R8 holds the cell's block by now,
-    // so the table probe starts over from the target in RAX.
-    for miss in torn {
-        asm.bind(miss);
-    }
-    let to_probe = asm.jmp();
-    // Another PC or key leaves the target to the table, with the key still
-    // in R8 and the control in RCX.
-    asm.bind(stale);
-    asm.bind(other);
-    let to_table = asm.jmp();
+    let (to_table, to_probe) = cell_probe(&mut code, policy, false);
     let padding = CELL_PROBE_BYTES
         .checked_sub(code.len())
         .expect("the cell probe fits its bytes");
@@ -1892,7 +2243,269 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
     missed(&mut asm);
     crate::x86_64::asm::resolve(&mut code, to_table, table);
     crate::x86_64::asm::resolve(&mut code, to_probe, PROBE_ENTRY);
+    // The stamping cell probe, which a stamped tail's miss takes.
+    let padding = STAMPING_PROBE_ENTRY
+        .checked_sub(code.len())
+        .expect("the table probe fits its bytes");
+    for _ in 0..padding {
+        code.asm().int3();
+    }
+    let (to_table, to_probe) = cell_probe(&mut code, policy, true);
+    crate::x86_64::asm::resolve(&mut code, to_table, table);
+    crate::x86_64::asm::resolve(&mut code, to_probe, PROBE_ENTRY);
     Some(code.into_bytes())
+}
+
+/// A cell probe at the end of `code`, R9 at the cell (R10 keeps it across
+/// the translation); a `stamping` one stamps the cell when it enters its
+/// block ([`stamp`]). Every one counts the transfers through a stamped
+/// cell in its `heat` word without a branch: the host's indirect predictor
+/// tells the sites of the shared jump apart by the branches since each
+/// tail's jump, and one more costs a misprediction a transfer. The jumps to
+/// the table probe with the key in R8, and to its start for a torn read.
+fn cell_probe(
+    code: &mut Code,
+    policy: Interruption,
+    stamping: bool,
+) -> (crate::x86_64::asm::Patch, crate::x86_64::asm::Patch) {
+    let mut asm = code.asm();
+    asm.place(Rcx, CONTROL);
+    let mut misses = Vec::new();
+    if let Some(interrupted) = far_interruption_gate(&mut asm, policy, R8) {
+        misses.push(interrupted);
+    }
+    asm.mov(Qword, R10, R9);
+    translate(&mut asm, &mut misses);
+    // The cell is the target's with its page's key, or the table decides.
+    // R11D = the cell's last word before its fields ([`Slot`]).
+    asm.mov_load(Dword, R11, Mem::base(R10, ENTRY_TARGETS));
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(R10, 0));
+    let stale = asm.jcc(Cond::Ne);
+    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R10, ENTRY_KEY));
+    let other = asm.jcc(Cond::Ne);
+    asm.mov_load(Dword, R8, Mem::base(R10, ENTRY_BLOCK));
+    asm.mov_load(Qword, R9, Mem::base(R10, ENTRY_CODE));
+    let torn = seqlock_check(&mut asm, R10);
+    // R11 = the cell's `heat` word, 4 bytes a cell; a cell past the
+    // stamped ones, or none (`ChainControl::cells` 0), counts in the
+    // control's `heat`.
+    asm.mov(Qword, R11, R10);
+    asm.alu_load(Alu::Sub, Qword, R11, Mem::base(Rcx, CELLS));
+    asm.shift_imm(ShiftOp::Shr, Qword, R11, 3);
+    asm.alu_imm32(Alu::Cmp, Qword, R11, (CELL_LIVE / 8) as i32);
+    asm.mov_load(Qword, R10, Mem::base(Rcx, CELLS));
+    asm.lea(Qword, R11, Mem::indexed(R10, R11, 1, CELL_HEAT as i32));
+    asm.lea(Qword, R10, Mem::base(Rcx, HEAT));
+    asm.cmov(Cond::Ae, Qword, R11, R10);
+    asm.alu_imm8(Alu::Add, Dword, Mem::base(R11, 0), 1);
+    spend_budget(&mut asm, policy);
+    misses.push(asm.jcc(Cond::B));
+    asm.shift_imm(ShiftOp::Shr, Dword, Rdx, ExitWord::RAN_SHIFT as u8);
+    asm.alu(Alu::Add, Qword, Mem::base(Rcx, RETIRED), Rdx);
+    asm.mov_store(Qword, Mem::base(Rcx, BLOCK), R8);
+    if stamping {
+        stamp(&mut asm);
+    }
+    found(&mut asm);
+    for miss in misses {
+        asm.bind(miss);
+    }
+    missed(&mut asm);
+    // A cell written while it was read: R8 holds the cell's block by now,
+    // so the table probe starts over from the target in RAX.
+    for miss in torn {
+        asm.bind(miss);
+    }
+    let to_probe = asm.jmp();
+    // Another PC or key leaves the target to the table, with the key still
+    // in R8 and the control in RCX.
+    asm.bind(stale);
+    asm.bind(other);
+    let to_table = asm.jmp();
+    (to_table, to_probe)
+}
+
+/// A cell probe's stamp, after its transfer is counted, of the stamped cell
+/// whose words R11 points at less CELL_LIVE (R11 = 0: none): this PE's
+/// context of the target's half and its ITLB's drop epoch there, while the
+/// cell still holds the entry it was linked with ([`stamped_tail`]). The
+/// epoch goes in by a locked exchange, and the `live` word is read again
+/// after it: a writer that cleared it meanwhile also zeroes the stamp, or
+/// this does. It counts the stamps it writes and the cells it finds
+/// changed ([`StampCount`]). Clobbers RDX, R8, R10, R11.
+fn stamp(asm: &mut crate::x86_64::asm::Asm) {
+    // R11 back to the cell's words less CELL_LIVE, or the control's heat.
+    asm.lea(Qword, R11, Mem::base(R11, -(CELL_HEAT as i32)));
+    asm.mov(Qword, R10, R11);
+    asm.alu_load(Alu::Sub, Qword, R10, Mem::base(Rcx, CELLS));
+    asm.alu_imm32(Alu::Cmp, Qword, R10, (CELL_LIVE / 8) as i32);
+    let none = asm.jcc8(Cond::Ae);
+    asm.mov_load(Qword, R8, Mem::base(Rcx, STAMPS));
+    asm.test(Qword, R8, R8);
+    let unstamped = asm.jcc8(Cond::E);
+    asm.alu_imm8(Alu::Cmp, Dword, Mem::base(R11, CELL_LIVE as i32), 0);
+    let live = asm.jcc8(Cond::Ne);
+    asm.alu_imm8(
+        Alu::Add,
+        Qword,
+        Mem::base(R8, StampCount::Changed.offset()),
+        1,
+    );
+    let changed = asm.jmp8();
+    asm.bind(live);
+    asm.alu_imm8(
+        Alu::Add,
+        Qword,
+        Mem::base(R8, StampCount::Restamped.offset()),
+        1,
+    );
+    // RDX = this PE's stamp of the cell.
+    asm.mov(Qword, Rdx, R11);
+    asm.alu_load(Alu::Sub, Qword, Rdx, Mem::base(Rcx, CELLS));
+    asm.shift_imm(ShiftOp::Shl, Qword, Rdx, 2);
+    asm.alu(Alu::Add, Qword, Rdx, R8);
+    asm.mov(Qword, R8, Rax);
+    asm.shift_imm(ShiftOp::Shr, Qword, R8, 55);
+    asm.alu_imm8(Alu::And, Dword, R8, 1);
+    asm.mov_load(Qword, R10, Mem::indexed(Rcx, R8, 8, CONTEXTS));
+    asm.mov_store(Qword, Mem::base(Rdx, 0), R10);
+    asm.mov_load(Qword, R10, Mem::base(Rcx, ITLB));
+    asm.mov_load(Qword, R10, Mem::indexed(R10, R8, 8, ITLB_DROPS));
+    // xchg [rdx + 8], r10
+    asm.fixed(&[0x4c, 0x87, 0x52, 0x08]);
+    asm.alu_imm8(Alu::Cmp, Dword, Mem::base(R11, CELL_LIVE as i32), 0);
+    let kept = asm.jcc8(Cond::Ne);
+    asm.mov_rm_imm32(Qword, Mem::base(Rdx, 8), 0);
+    asm.bind(none);
+    asm.bind(changed);
+    asm.bind(unstamped);
+    asm.bind(kept);
+}
+
+/// Bytes in a [`stamped_tail`].
+pub const STAMPED_TAIL_BYTES: usize = 128;
+
+/// The tail at host address `at` of a hot direct exit to `target` out of
+/// its page, whose stamped cell `number` at `cell` held `block`, entered at
+/// `entry`, when it was linked: while this PE's stamp of the cell names the
+/// context it runs in and its ITLB's drop epoch of the target's half, the
+/// transfer is counted, `block` named and `entry` entered by a direct jump,
+/// without a translation or a probe; else, as for an interruption, it is
+/// the [`cell_tail`] after it, whose cell probe stamps the cell when it
+/// enters its block. A budget spent returns with `word`, as a probe would.
+///
+/// A stamp exists only while the cell holds what it held at the link
+/// (`live`, [`put_cell`] clears it and zeroes every PE's stamps first), and
+/// it names the context and drop epoch in which this PE's probe found the
+/// target's page translating to that entry's key; any ITLB entry of the
+/// half leaving or changing on this PE grows the epoch ([`ITLB_DROPS`]),
+/// and context numbers are never reused. `None` as for a [`cell_tail`], or
+/// for a cell that is not stamped.
+#[allow(clippy::too_many_arguments)]
+pub fn stamped_tail(
+    at: u64,
+    cell: u64,
+    number: u32,
+    target: u64,
+    word: impl Into<ExitWord>,
+    ran: u32,
+    block: u32,
+    entry: u64,
+    probe: u64,
+) -> Option<[u8; STAMPED_TAIL_BYTES]> {
+    stamped_with_policy(
+        at,
+        cell,
+        number,
+        target,
+        word.into(),
+        ran,
+        block,
+        entry,
+        probe,
+        Interruption::Epoch,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stamped_with_policy(
+    at: u64,
+    cell: u64,
+    number: u32,
+    target: u64,
+    word: ExitWord,
+    ran: u32,
+    block: u32,
+    entry: u64,
+    probe: u64,
+    policy: Interruption,
+) -> Option<[u8; STAMPED_TAIL_BYTES]> {
+    if number as usize >= STAMPED_CELLS || ran >= 1 << (u32::BITS - ExitWord::RAN_SHIFT) {
+        return None;
+    }
+    let block = i32::try_from(block).ok()?;
+    let half = half(target) as i32;
+    let stamp = (STAMP_BYTES * number as usize) as i32;
+    let mut code = Code::new();
+    let mut asm = code.asm();
+    asm.place(Rcx, CONTROL);
+    // R10 = this PE's stamps, its counts in front ([`StampCount`]).
+    asm.mov_load(Qword, R8, Mem::base(Rcx, ITLB));
+    asm.mov_load(Qword, R9, Mem::base(R8, ITLB_DROPS + 8 * half));
+    asm.mov_load(Qword, R10, Mem::base(Rcx, STAMPS));
+    asm.alu_load(Alu::Cmp, Qword, R9, Mem::base(R10, stamp + 8));
+    let epoch = asm.jcc8(Cond::Ne);
+    asm.mov_load(Qword, R9, Mem::base(Rcx, CONTEXTS + 8 * half));
+    asm.alu_load(Alu::Cmp, Qword, R9, Mem::base(R10, stamp));
+    let context = asm.jcc8(Cond::Ne);
+    let interrupted = gate(&mut asm, policy, R8, false);
+    asm.alu_imm8(
+        Alu::Add,
+        Qword,
+        Mem::base(R10, StampCount::Hits.offset()),
+        1,
+    );
+    spend_budget(&mut asm, policy);
+    let exhausted = asm.jcc8(Cond::B);
+    asm.alu_imm32(
+        Alu::Add,
+        Qword,
+        Mem::base(Rcx, RETIRED),
+        i32::try_from(ran).ok()?,
+    );
+    asm.mov_rm_imm32(Qword, Mem::base(Rcx, BLOCK), block);
+    let transfer = asm.jmp();
+    let distance = relative(at + transfer.end() as u64, entry)?;
+    code.patch(transfer.offset(), distance.to_le_bytes());
+    let mut asm = code.asm();
+    asm.bind(exhausted);
+    asm.mov_imm32(Rdx, word.encoded() | ran << ExitWord::RAN_SHIFT);
+    asm.ret();
+    // A miss counts its cause and takes the cell tail.
+    let mut to_tail = Vec::new();
+    for (miss, count) in [
+        (Some(epoch), StampCount::Epoch),
+        (Some(context), StampCount::Context),
+        (interrupted, StampCount::Interrupted),
+    ] {
+        let Some(miss) = miss else {
+            continue;
+        };
+        asm.bind(miss);
+        asm.alu_imm8(Alu::Add, Qword, Mem::base(R10, count.offset()), 1);
+        to_tail.push(asm.jmp8());
+    }
+    let tail_at = code.len();
+    for patch in to_tail {
+        crate::x86_64::asm::resolve(&mut code, patch, tail_at);
+    }
+    let cell_code = cell_tail(at + tail_at as u64, cell, word, ran, probe)?;
+    code.asm().fixed(&cell_code);
+    let padding = STAMPED_TAIL_BYTES.checked_sub(code.len())?;
+    for _ in 0..padding {
+        code.asm().int3();
+    }
+    code.try_into().ok()
 }
 
 /// The check that ends a probe's read of the entry at `entry`, whose last
@@ -1900,9 +2513,9 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
 /// and no writer was in it ([`Slot`]). The jumps of a torn read.
 fn seqlock_check(asm: &mut crate::x86_64::asm::Asm, entry: Gpr) -> [crate::x86_64::asm::Patch; 2] {
     asm.alu_load(Alu::Cmp, Dword, R11, Mem::base(entry, ENTRY_TARGETS));
-    let changed = asm.jcc8(Cond::Ne);
+    let changed = asm.jcc(Cond::Ne);
     asm.test_imm(Dword, R11, META_BUSY as i32);
-    let busy = asm.jcc8(Cond::Ne);
+    let busy = asm.jcc(Cond::Ne);
     [changed, busy]
 }
 
@@ -2501,8 +3114,8 @@ mod tests {
         const MAP_ANONYMOUS: i32 = 0x1000;
         #[cfg(target_os = "linux")]
         const MAP_ANONYMOUS: i32 = 0x20;
-        const PAGE: usize = 4096;
-        const BLOCK_AT: usize = 3072;
+        const PAGE: usize = 8192;
+        const BLOCK_AT: usize = 6144;
         const TARGET: u64 = 0xffff_fe00_0123_4568;
         const KEY: u64 = block_key(0x8_0123_4000, 1);
         let mut table = LookupTable::new();
@@ -3108,6 +3721,8 @@ mod tests {
     mod patching;
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     mod shared;
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    mod stamped;
 
     /// A block's entry goes from its set and from the cells of its PC by
     /// its PC, key and block alone: another block's entry of the PC and
