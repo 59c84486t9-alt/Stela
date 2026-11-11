@@ -1256,7 +1256,10 @@ fn install_reads_full_or_streamed_image() {
     assert!(first_piece.is_file());
     // Back to the network, the pieces go.
     let network = switch(InstallImage::Network);
-    assert!(network.remote && network.problems().is_empty(), "{network:?}");
+    assert!(
+        network.remote && network.problems().is_empty(),
+        "{network:?}"
+    );
     assert!(!first_piece.exists());
 }
 

@@ -331,6 +331,8 @@ fn speculation_controls() -> (u64, alloc::string::String, u64) {
     };
     let cr4: u64;
     // SAFETY: reading CR4 at CPL0 has no effect.
-    unsafe { core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags))
+    };
     (efer, spec_ctrl, cr4)
 }
