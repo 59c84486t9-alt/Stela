@@ -496,6 +496,9 @@ pub struct Statistics {
     /// of their accesses reached a guest address outside the host's native
     /// ranges.
     pub translated_pages: u64,
+    /// Fetch pages that went to the tagged variant: an access of theirs
+    /// had a top byte the regime ignores ([`Machine::learn_tagged_page`]).
+    pub tagged_pages: u64,
     /// Operations answered with a degraded response; each distinct one is
     /// also reported once ([`Machine::take_unmodeled`]).
     pub degraded: u64,
@@ -562,6 +565,7 @@ impl core::ops::AddAssign for Statistics {
             table_base_changes,
             prediction_isolations,
             translated_pages,
+            tagged_pages,
             degraded,
             sleep_ticks,
             spin_ticks,
@@ -634,6 +638,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.table_base_changes, table_base_changes),
             (&mut self.prediction_isolations, prediction_isolations),
             (&mut self.translated_pages, translated_pages),
+            (&mut self.tagged_pages, tagged_pages),
             (&mut self.degraded, degraded),
             (&mut self.sleep_ticks, sleep_ticks),
             (&mut self.spin_ticks, spin_ticks),

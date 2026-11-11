@@ -395,8 +395,11 @@ fn emit_selected(
     let mut side_exits = vec![];
     // Accesses that address memory from an earlier access's masked address
     // (`masked_base`), which the instructions emitted alone keep track of.
-    let reuse_bases =
-        pinned && checks.guest_range && checks.every_access_masked && !checks.translated;
+    let reuse_bases = pinned
+        && checks.guest_range
+        && checks.every_access_masked
+        && !checks.translated
+        && !checks.strips();
     let mut bases = super::masked_base::Tracker::default();
     let mut emitted_alone = true;
     // The out-of-line paths of the PAC instructions completed inline.

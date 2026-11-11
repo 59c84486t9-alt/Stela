@@ -546,7 +546,7 @@ fn native_accesses_to_checked_tagged_memory_exit_to_the_tag_check() {
             BASE,
             stela_compiler::block::RecoverySiteKind::GuestAccess,
         );
-        let exit = |cause| {
+        let exit_at = |offset, cause| {
             NativeExit::Fault(NativeFault {
                 origin: crate::machine::NativeFaultOrigin::Exception,
                 trap: if matches!(cause, FaultCause::NonCanonical) {
@@ -557,12 +557,13 @@ fn native_accesses_to_checked_tagged_memory_exit_to_the_tag_check() {
                 error_code: 0,
                 spills: stela_compiler::block::HostSpillSnapshot::new(),
                 registers: stela_compiler::block::HostGprSnapshot::legacy([0; 16]),
-                offset: access_offset,
+                offset,
                 address: DATA,
                 write: false,
                 cause,
             })
         };
+        let exit = |cause| exit_at(access_offset, cause);
         // A mismatch faults.
         set_x(&mut machine, &[(1, DATA)]);
         machine.cpu.pc = BASE;
@@ -597,10 +598,38 @@ fn native_accesses_to_checked_tagged_memory_exit_to_the_tag_check() {
                 .iter()
                 .any(|regime| regime.watch.pass[0] == Some(DATA))
         );
-        // A mismatching tagged pointer faults before the retry.
+        // The retry put the page in the tagged variant: a tagged access
+        // reaches the checked page natively and passes it untagged.
+        assert_eq!(machine.statistics.tagged_pages, 1);
+        let tagged_offset = super::super::tests::native_fault_site(
+            &mut machine,
+            BASE,
+            stela_compiler::block::RecoverySiteKind::GuestAccess,
+        );
+        machine.host.regimes.clear();
+        machine.cpu.pc = BASE;
+        machine.host.exits = vec![
+            exit_at(tagged_offset, FaultCause::TagChecked),
+            NativeExit::Exit {
+                next_pc: BASE + 4,
+                kind: ExitKind::Fallthrough as u64,
+            },
+        ];
+        machine.step().unwrap();
+        assert!(machine.host.exits.is_empty());
+        assert_eq!(machine.cpu.pc, BASE + 4);
+        assert_eq!(machine.cpu.state.x[1], tagged_pointer(0xa, DATA));
+        assert!(
+            machine
+                .host
+                .regimes
+                .iter()
+                .any(|regime| regime.watch.pass[0] == Some(DATA))
+        );
+        // A mismatching tagged pointer faults at its tag check.
         set_x(&mut machine, &[(1, tagged_pointer(0xb, DATA + 8))]);
         machine.cpu.pc = BASE;
-        machine.host.exits = vec![exit(FaultCause::NonCanonical)];
+        machine.host.exits = vec![exit_at(tagged_offset, FaultCause::TagChecked)];
         machine.step().unwrap();
         assert_eq!(
             fault(&machine),

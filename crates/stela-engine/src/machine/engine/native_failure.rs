@@ -1,7 +1,9 @@
 //! Faults and terminal failures of native code, and translated-access fallback
 //! runs.
 
+use super::tagged_pages::Inserted;
 use super::*;
+use stela_compiler::x86_64::TopByte;
 
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn latch_canonical_native_failure(&mut self) {
@@ -294,13 +296,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return self.completing(pc, |machine| machine.system_instruction(word));
         }
         match fault.cause {
-            FaultCause::Guest(guest) => self.data_abort(fault.address, guest, fault.write, false),
+            FaultCause::Guest(guest) => {
+                let address = self.tagged_fault_address(index, pc, fault.address);
+                self.data_abort(address, guest, fault.write, false)
+            }
             FaultCause::Device { physical } => {
                 let word = self.word(index, pc)?;
                 let site = self.device_site_of(index, pc);
+                let address = self.tagged_fault_address(index, pc, fault.address);
                 let step = self.outside_run(|machine| {
                     machine.completing(pc, |machine| {
-                        machine.device_access(word, fault.address, physical, fault.write)
+                        machine.device_access(word, address, physical, fault.write)
                     })
                 });
                 // Its next run ends its block before it and completes it
@@ -384,7 +390,84 @@ impl<H: Host, D: Devices> Machine<H, D> {
             variant.translated = true;
             variant.checks = variant.checks.with_translation(helper);
         }
+        if self.page_tagged(physical) {
+            variant.checks = variant.checks.with_top_byte(self.regime_top_byte());
+        }
         variant
+    }
+
+    /// The halves whose data addresses the current translation regime
+    /// ignores the top byte of: TCR_ELx.TBI0 and TBI1 (Arm `AddrTop`; every
+    /// EL here uses two VA ranges, and TBID concerns only instruction
+    /// addresses).
+    pub(super) fn regime_top_byte(&self) -> TopByte {
+        const TCR_TBI0: u64 = 1 << 37;
+        const TCR_TBI1: u64 = 1 << 38;
+        let tcr = self.cpu.regime_tcr();
+        TopByte::of(tcr & TCR_TBI0 != 0, tcr & TCR_TBI1 != 0)
+    }
+
+    /// An access of the fetch page holding `physical`, by a block of the
+    /// plain variant if `plain`, had a top byte the regime ignores, which
+    /// the shadow does not map: the page goes in the board's tagged set and
+    /// its blocks go, so every PE's next fetch compiles them for the tagged
+    /// variant, whose accesses clear that byte before their check
+    /// (`stela_compiler::x86_64::TopByte`) and so stay native. A page the
+    /// set holds already loses its blocks again only for a plain block,
+    /// which a PE compiled from a fetch that came before the set took the
+    /// page. Past the set's capacity (`tagged_pages::CAPACITY`) a tagged
+    /// access keeps its retry.
+    pub(super) fn learn_tagged_page(&mut self, physical: u64, plain: bool) {
+        let page = physical & !(FETCH_PAGE - 1);
+        match self.code.tagged.insert(page) {
+            Inserted::New => self.statistics.tagged_pages += 1,
+            Inserted::Present if plain => {}
+            Inserted::Present | Inserted::Full => return,
+        }
+        self.invalidate_code_page(page);
+    }
+
+    /// Whether blocks of the fetch page holding `physical` run in the
+    /// tagged variant.
+    pub(super) fn page_tagged(&self, physical: u64) -> bool {
+        self.code.tagged.contains(physical)
+    }
+
+    /// The data address a guest fault or device access at host `address`
+    /// names for the instruction at `pc` of block `index`. A tagged
+    /// variant's access ran with its top byte cleared; the guest's address
+    /// keeps it, as the engine's own walk of the access reports it. A host
+    /// address inside the stripped access keeps its offset; one below it
+    /// in its first page (a translation helper names the page it missed)
+    /// is the access's own address; one in its last page, that page's
+    /// address with the tag.
+    pub(super) fn tagged_fault_address(&mut self, index: usize, pc: u64, address: u64) -> u64 {
+        const LOW: u64 = (1 << 56) - 1;
+        let top_byte = self.block_variant(index).checks.top_byte;
+        if top_byte == TopByte::Kept {
+            return address;
+        }
+        let Ok(word) = self.word(index, pc) else {
+            return address;
+        };
+        let Ok(accesses) = self.data_accesses(pc, word) else {
+            return address;
+        };
+        let page = |address: u64| address & !(FETCH_PAGE - 1);
+        for (access, _) in &accesses {
+            let start = top_byte.strip(access.address);
+            let last = start.wrapping_add(access.size.max(1) - 1);
+            if address.wrapping_sub(start) <= last.wrapping_sub(start) {
+                return (address & LOW) | (access.address & !LOW);
+            }
+            if page(address) == page(start) {
+                return access.address;
+            }
+            if page(address) == page(last) {
+                return (address & LOW) | (access.address & !LOW);
+            }
+        }
+        address
     }
 
     /// Whether blocks of the fetch page holding `physical` run in the

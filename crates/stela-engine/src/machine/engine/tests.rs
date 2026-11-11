@@ -8692,6 +8692,7 @@ mod pstate_features;
 mod recovery;
 mod sharing;
 mod stage2_syndrome;
+mod tagged;
 
 #[test]
 fn host_work_holds_the_shared_count_only_for_a_pe_stopped_in_the_kernel() {

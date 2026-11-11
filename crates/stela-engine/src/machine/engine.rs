@@ -80,6 +80,7 @@ mod shared_memory;
 pub mod step_timing;
 mod stored;
 mod system;
+mod tagged_pages;
 mod tags;
 mod unprivileged;
 mod watch;

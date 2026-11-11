@@ -385,6 +385,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     // untagged addresses only. A tagged base runs again
                     // with its tag cleared.
                     mmu::Outcome::Mapped(_) => {
+                        let block = &self.code.blocks[index];
+                        let physical = block.physical.wrapping_add(pc.wrapping_sub(block.pc));
+                        let plain = self.block_variant(index).checks.top_byte
+                            == stela_compiler::x86_64::TopByte::Kept;
                         // The retry's accesses are untagged: their
                         // watchpoints and tags are checked here first.
                         if in_guest_range(without_tag(access.address))
@@ -400,6 +404,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                             // After the retry's own run, whose exit is
                             // charged apart.
                             self.timed_check(step_timing::Check::Tagged);
+                            // Its page's later runs stay native.
+                            if step.is_ok() && self.regime_top_byte().ignores(access.address) {
+                                self.learn_tagged_page(physical, plain);
+                            }
                             return step;
                         }
                         let mut requirement = self.requirement(RequirementKind::Native(
@@ -543,8 +551,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     fn pass_watched(&mut self, pc: u64, accesses: &[Access]) -> Step {
         let mut pages: Vec<u64> = Vec::new();
         for access in accesses {
-            let last = access.address.wrapping_add(access.size.max(1) - 1);
-            for page in [access.address & !(PAGE - 1), last & !(PAGE - 1)] {
+            // The page native code reached: a tagged variant's access has
+            // its top byte cleared, and an untagged address is canonical.
+            let address = without_tag(access.address);
+            let last = address.wrapping_add(access.size.max(1) - 1);
+            for page in [address & !(PAGE - 1), last & !(PAGE - 1)] {
                 let tag_checked = self.tag_checks[usize::from(page >> 55 & 1 != 0)];
                 if (self.watch.blocks(page) || tag_checked) && !pages.contains(&page) {
                     pages.push(page);

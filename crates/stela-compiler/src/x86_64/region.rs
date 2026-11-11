@@ -545,6 +545,7 @@ impl Emitter<'_> {
             range: self.checks.range,
             translated: self.checks.translated,
             translation_helper: self.checks.translation_helper,
+            top_byte: self.checks.top_byte,
             ..super::MemoryChecks::DEFAULT
         }
     }

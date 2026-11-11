@@ -155,6 +155,8 @@ pub(crate) mod sme;
 pub(crate) mod sve;
 mod system;
 mod tag_arithmetic;
+mod top_byte;
+pub use top_byte::TopByte;
 pub mod mirrored_read;
 mod unprivileged;
 pub mod zero_block;
@@ -414,6 +416,11 @@ pub struct MemoryChecks {
     /// The address of the slot holding the translation helper's address,
     /// for the translated variant.
     pub translation_helper: u64,
+    /// The tagged variant: every access checks its address, as with
+    /// [`Self::every_access_masked`], after clearing the top byte its
+    /// translation regime ignores ([`TopByte`]).
+    #[serde(default)]
+    pub top_byte: TopByte,
 }
 
 impl MemoryChecks {
@@ -429,6 +436,7 @@ impl MemoryChecks {
         range: RangeCheck::FIVE_LEVEL,
         translated: false,
         translation_helper: 0,
+        top_byte: TopByte::Kept,
     };
     /// SCTLR_ELx's checks, as the system-mode engine selects them, and
     /// whether every access masks its address
@@ -449,6 +457,7 @@ impl MemoryChecks {
             range: RangeCheck::FIVE_LEVEL,
             translated: false,
             translation_helper: 0,
+            top_byte: TopByte::Kept,
         }
     }
 
@@ -468,10 +477,22 @@ impl MemoryChecks {
         }
     }
 
+    /// These checks in the tagged variant, whose accesses ignore the top
+    /// byte of the halves `top_byte` selects ([`Self::top_byte`]).
+    pub const fn with_top_byte(self, top_byte: TopByte) -> Self {
+        Self { top_byte, ..self }
+    }
+
     /// Whether every access checks the guest range, none left to an earlier
     /// check through the same base.
     pub(crate) const fn checks_every_access(self) -> bool {
-        self.every_access_masked || self.translated
+        self.every_access_masked || self.translated || self.strips()
+    }
+
+    /// Whether accesses clear a top byte before their check (the tagged
+    /// variant).
+    pub(crate) const fn strips(self) -> bool {
+        !matches!(self.top_byte, TopByte::Kept)
     }
 }
 
@@ -829,8 +850,10 @@ pub(crate) const STACK_ALIGNMENT_CHECK: [u8; 6] = [0xa8, 15, 0x74, 2, 0x0f, 0x0b
 pub(crate) const STACK_ALIGNMENT_CHECK_ENDS: [usize; 3] = [2, 4, 6];
 
 /// The guest range check of `access`'s address in RAX, in the variant
-/// `checks` selects.
+/// `checks` selects, after the tagged variant's strip of its top byte
+/// ([`TopByte`]), which leaves RAX the address the access then makes.
 pub(crate) fn range_check(code: &mut Code, checks: MemoryChecks, access: Access) {
+    checks.top_byte.emit(code);
     if checks.translated {
         checks
             .range

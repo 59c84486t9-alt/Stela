@@ -188,6 +188,8 @@ pub(super) struct Code {
     /// Units of work a retirement step takes under the lock
     /// ([`super::code_cache::STEP_VISITS`]; tests take fewer).
     pub(super) step_visits: u64,
+    /// The fetch pages its PEs compile in the tagged variant.
+    pub(super) tagged: super::tagged_pages::TaggedPages,
 }
 
 /// A part's blocks being taken away page by page, in steps of bounded
@@ -641,6 +643,7 @@ impl Code {
             retiring: Mutex::new(None),
             retire_pending: AtomicBool::new(false),
             step_visits: super::code_cache::STEP_VISITS,
+            tagged: Default::default(),
         }
     }
 

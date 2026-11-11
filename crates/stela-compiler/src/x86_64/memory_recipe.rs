@@ -185,7 +185,9 @@ fn direct_writeback(code: &mut Code, host: Gpr, address: ImmediateAddress) {
 
 /// The masked-base plan offered for the access at `address`
 /// ([`super::masked_base`]), in pinned code whose every access checks its
-/// masked address and outside a recipe, whose spans regions rearrange.
+/// masked address and outside a recipe, whose spans regions rearrange. Not
+/// in the tagged variant: a kept stripped address plus a delta may cross
+/// into a half whose top byte is not ignored.
 fn base_plan(
     code: &Code,
     checks: MemoryChecks,
@@ -196,9 +198,10 @@ fn base_plan(
         && code.is_pinned()
         && checks.guest_range
         && checks.every_access_masked
-        && !checks.translated)
-        .then(|| code.base_plan(address))
-        .flatten()
+        && !checks.translated
+        && !checks.strips())
+    .then(|| code.base_plan(address))
+    .flatten()
 }
 
 /// The slot and displacement a [`Plan::Reuse`] access addresses directly,
