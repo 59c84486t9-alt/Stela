@@ -325,6 +325,7 @@ fn sticky_path(code: &mut Code, operand: &Operand, entry: Entry, target: TargetC
         operand.shape,
         LEFT_VECTOR,
         exact_tiny(operand.operation),
+        target,
     );
     let resume = code.len();
     result_sign(code, operand);

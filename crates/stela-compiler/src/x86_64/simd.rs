@@ -26,6 +26,12 @@ mod extrema_scale;
     any(target_os = "macos", target_os = "linux")
 ))]
 mod fast_conversion_tests;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod fast_float_tests;
 mod floating;
 mod fused;
 pub(in crate::x86_64) mod half;

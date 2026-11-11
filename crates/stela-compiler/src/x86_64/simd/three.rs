@@ -189,3 +189,35 @@ pub(super) fn broadcast_general(code: &mut Code, destination: u8, source: Gpr, q
         Rm::Reg(source),
     );
 }
+
+/// VEX.128 `destination = left op right` for packed S/D lanes (VADDPS,
+/// VSUBPD, ...): the non-destructive form of [`Asm::float`].
+///
+/// [`Asm::float`]: crate::x86_64::asm::Asm::float
+pub(super) fn float(
+    code: &mut Code,
+    op: crate::x86_64::asm::FloatOp,
+    lanes: crate::x86_64::asm::FloatLanes,
+    destination: u8,
+    left: u8,
+    right: u8,
+) {
+    use crate::x86_64::asm::FloatLanes;
+    let pp = match lanes {
+        FloatLanes::PackedSingle => Pp::None,
+        FloatLanes::PackedDouble => Pp::P66,
+        _ => unreachable!("packed S/D lanes"),
+    };
+    code.asm().vex(
+        Vex {
+            map: Map::M0f,
+            pp,
+            w: false,
+            l: false,
+        },
+        op as u8,
+        destination,
+        left,
+        Rm::Xmm(right),
+    );
+}

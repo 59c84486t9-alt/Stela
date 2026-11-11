@@ -58,6 +58,8 @@ pub(in crate::x86_64) enum Condition {
     Zero,
     NotZero,
     Above,
+    /// PF set: an unordered UCOMISS/UCOMISD.
+    Parity,
 }
 
 impl Condition {
@@ -68,6 +70,7 @@ impl Condition {
             Self::Zero => Cond::E,
             Self::NotZero => Cond::Ne,
             Self::Above => Cond::A,
+            Self::Parity => Cond::P,
         }
     }
 }
@@ -386,7 +389,16 @@ pub(super) fn sticky_result_check(
     shape: Shape,
     source: u8,
     exact_tiny: bool,
+    target: crate::TargetCpu,
 ) -> usize {
+    if exact_tiny && shape != Shape::Scalar && quick_finite_supported(target) {
+        quick_finite(code, format, shape, source, target);
+        return classified_rejection(code, format, shape, source, exact_tiny);
+    }
+    if !exact_tiny && shape == Shape::Vector128 && quick_normal_supported(target) {
+        quick_normal(code, format, source);
+        return classified_rejection(code, format, shape, source, exact_tiny);
+    }
     if shape == Shape::Scalar {
         let minimum = if exact_tiny {
             0
@@ -400,6 +412,20 @@ pub(super) fn sticky_result_check(
         }
         return branch(code, Condition::AboveOrEqual);
     }
+    vector_result_classification(code, format, shape, source, exact_tiny)
+}
+
+/// The full lane classification of [`sticky_result_check`] for a vector:
+/// the branch to the rejection path, which finds the range constants in
+/// XMM4 (and XMM5 for products) and the accepted-lane mask in
+/// EXPONENT_VECTOR ([`zero_product_check`] completes from it).
+fn vector_result_classification(
+    code: &mut Code,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    exact_tiny: bool,
+) -> usize {
     prepare_vector_maximum(code, format);
     if exact_tiny {
         vector_below_maximum(code, format, shape, source);
@@ -408,6 +434,144 @@ pub(super) fn sticky_result_check(
         vector_exponent_range(code, format, shape, source);
     }
     branch(code, Condition::NotZero)
+}
+
+/// After a quick classification that set ZF exactly when it accepts every
+/// lane: accepted vectors branch past the full classification, which the
+/// others then run to leave the registers its rejection path reads. Both
+/// reject the same lanes, so the returned branch is always taken there.
+fn classified_rejection(
+    code: &mut Code,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    exact_tiny: bool,
+) -> usize {
+    let accepted = branch(code, Condition::Zero);
+    let rejected = vector_result_classification(code, format, shape, source, exact_tiny);
+    let end = code.len();
+    resolve(code, accepted, end);
+    rejected
+}
+
+/// Whether [`quick_finite`] runs on `target`: PTEST (SSE4.1). The DIT
+/// profile keeps its reviewed classification.
+fn quick_finite_supported(target: crate::TargetCpu) -> bool {
+    super::three::test_zero_supported(target) && !target.data_independent_timing()
+}
+
+/// ZF clear when an active S/D lane of the vector in `source` is NaN or
+/// infinite: `x - x` in the entry MXCSR (nearest, no DAZ) is +0 for
+/// every finite lane and NaN otherwise, so one PTEST of the difference
+/// classifies every lane. An 8-byte vector's inactive high qword is cleared
+/// first. Clobbers EXPONENT_VECTOR and the entry MXCSR's status, which is
+/// never read.
+fn quick_finite(
+    code: &mut Code,
+    format: Format,
+    shape: Shape,
+    source: u8,
+    target: crate::TargetCpu,
+) {
+    let lanes = if format == Format::Double {
+        FloatLanes::PackedDouble
+    } else {
+        FloatLanes::PackedSingle
+    };
+    let held = if shape == Shape::Vector64 {
+        packed(code, Host::MoveQword, EXPONENT_VECTOR, source);
+        EXPONENT_VECTOR
+    } else {
+        source
+    };
+    if super::three::vex(target) {
+        super::three::float(code, FloatOp::Sub, lanes, EXPONENT_VECTOR, held, held);
+    } else {
+        if held != EXPONENT_VECTOR {
+            packed(code, Host::MoveAligned, EXPONENT_VECTOR, held);
+        }
+        code.asm().float(
+            FloatOp::Sub,
+            lanes,
+            EXPONENT_VECTOR,
+            Rm::Xmm(EXPONENT_VECTOR),
+        );
+    }
+    super::three::test_zero(code, EXPONENT_VECTOR, target);
+}
+
+/// Whether [`quick_normal`] runs on `target`: AVX-512 F, VL and DQ
+/// (VFPCLASS). The DIT profile keeps its reviewed classification.
+fn quick_normal_supported(target: crate::TargetCpu) -> bool {
+    use crate::TargetCpu;
+    target.supports(TargetCpu::Avx512f.with_avx512vl().with_avx512dq())
+        && !target.data_independent_timing()
+}
+
+/// ZF clear when a lane of the 16-byte S/D vector in `source` is NaN,
+/// infinite or below twice the minimum normal (zero included), the
+/// lanes [`sticky_result_check`] rejects for a product: half of each lane
+/// in the entry MXCSR (nearest, no DAZ or FTZ) is zero, subnormal,
+/// infinite or NaN exactly for those lanes (an exponent field of 0, 1 or
+/// all ones; halving is exact above exponent 1, and a subnormal half stays
+/// subnormal or rounds to zero), which one VFPCLASS tells. Clobbers RAX,
+/// EXPONENT_VECTOR, k1 and the entry MXCSR's status, which is never read.
+fn quick_normal(code: &mut Code, format: Format, source: u8) {
+    const ZERO_SUBNORMAL_INFINITE_NAN: u8 = 0xbf;
+    const VFPCLASS: u8 = 0x66;
+    const KORTESTW: u8 = 0x98;
+    const MASK: u8 = 1;
+    let double = format == Format::Double;
+    let lanes = if double {
+        FloatLanes::PackedDouble
+    } else {
+        FloatLanes::PackedSingle
+    };
+    let mut asm = code.asm();
+    if double {
+        asm.mov_imm64(Rax, 0.5f64.to_bits());
+    } else {
+        asm.mov_imm32(Rax, 0.5f32.to_bits());
+    }
+    super::three::broadcast_general(code, EXPONENT_VECTOR, Rax, double);
+    super::three::float(
+        code,
+        FloatOp::Mul,
+        lanes,
+        EXPONENT_VECTOR,
+        EXPONENT_VECTOR,
+        source,
+    );
+    let mut asm = code.asm();
+    asm.evex(
+        crate::x86_64::asm::Evex {
+            map: Map::M0f3a,
+            pp: Pp::P66,
+            w: double,
+            length: 0,
+            mask: 0,
+            zeroing: false,
+            broadcast: false,
+            scale: 16,
+        },
+        VFPCLASS,
+        MASK,
+        0,
+        Rm::Xmm(EXPONENT_VECTOR),
+    );
+    asm.data(&[ZERO_SUBNORMAL_INFINITE_NAN]);
+    asm.vex(
+        Vex {
+            map: Map::M0f,
+            pp: Pp::None,
+            w: false,
+            l: false,
+        },
+        KORTESTW,
+        MASK,
+        0,
+        Rm::Xmm(MASK),
+    );
 }
 
 /// [`exponent_range`] of a Single in `source` (XMM0 or XMM1) with one

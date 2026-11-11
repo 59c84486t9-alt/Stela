@@ -286,7 +286,7 @@ fn sticky_path(code: &mut Code, operand: &Operand, target: TargetCpu, entry: Ent
         prepare_right(code, operand);
     }
     emit_checked_fma(code, operand, target);
-    let rejected = sticky_result_check(code, operand.format, operand.shape, LEFT, false);
+    let rejected = sticky_result_check(code, operand.format, operand.shape, LEFT, false, target);
     let resume = code.len();
     if operand.shape == Shape::Vector64 {
         packed(code, Host::MoveQword, LEFT, LEFT);

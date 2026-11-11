@@ -201,6 +201,58 @@ fn input_guard(code: &mut Code, format: Format, shape: Shape, source: u8, helper
     }
 }
 
+/// Whether [`quick_guard`] runs on `target`: PTEST (SSE4.1). The DIT
+/// profile keeps its reviewed classification.
+fn quick_guard_supported(target: TargetCpu) -> bool {
+    super::three::test_zero_supported(target) && !target.data_independent_timing()
+}
+
+/// With FZ, FIZ and AH clear no S/D input is flushed and a subnormal input
+/// raises no IDC (AH=1 reports it), and the selection is exact for every
+/// ordered pair (subnormals and infinities included, without status): only
+/// a NaN in either operand needs the full Arm rules. One
+/// unordered compare (UCOMIS for a scalar, CMPUNORD and PTEST over both
+/// whole registers for a vector, whose 8-byte form has its high qword clear)
+/// sends it to the helper. Returns the branch past the full classification
+/// that follows, which handles FZ, FIZ or AH set.
+fn quick_guard(
+    code: &mut Code,
+    shape: Shape,
+    format: Format,
+    helper: &mut Vec<usize>,
+    target: TargetCpu,
+) -> usize {
+    use crate::aarch64::floating::{FPCR_FIZ, FPCR_FZ};
+    const UNORDERED: u8 = 3;
+    test_control(code, FPCR_FZ | FPCR_FIZ | FPCR_AH);
+    let flushing = branch(code, Condition::NotZero);
+    let double = format == Format::Double;
+    if shape == Shape::Scalar {
+        let mut asm = code.asm();
+        if double {
+            asm.ucomisd(RESULT_VECTOR, Rm::Xmm(RIGHT_VECTOR));
+        } else {
+            asm.ucomiss(RESULT_VECTOR, Rm::Xmm(RIGHT_VECTOR));
+        }
+        helper.push(branch(code, Condition::Parity));
+    } else {
+        let lanes = if double {
+            FloatLanes::PackedDouble
+        } else {
+            FloatLanes::PackedSingle
+        };
+        packed(code, Host::MoveAligned, SELECTION_SCRATCH, RESULT_VECTOR);
+        code.asm()
+            .float_compare(lanes, SELECTION_SCRATCH, Rm::Xmm(RIGHT_VECTOR), UNORDERED);
+        super::three::test_zero(code, SELECTION_SCRATCH, target);
+        helper.push(branch(code, Condition::NotZero));
+    }
+    let unflushed = jump(code);
+    let end = code.len();
+    resolve(code, flushing, end);
+    unflushed
+}
+
 fn shuffle(code: &mut Code, opcode: Host, destination: u8, source: u8, control: u8) {
     packed_imm(code, opcode, destination, source, control);
 }
@@ -363,11 +415,17 @@ fn binary(code: &mut Code, operand: &Operand, pc: GuestAddress, target: TargetCp
     exception_guard(code, &mut helper);
     read_numerical_vector(code, shape, left, RESULT_VECTOR);
     read_numerical_vector(code, shape, right, RIGHT_VECTOR);
+    let unflushed = (format != Format::Half && quick_guard_supported(target))
+        .then(|| quick_guard(code, shape, format, &mut helper, target));
     if shape != Shape::Scalar {
         prepare_vector_input_range(code, format);
     }
     input_guard(code, format, shape, RESULT_VECTOR, &mut helper);
     input_guard(code, format, shape, RIGHT_VECTOR, &mut helper);
+    if let Some(unflushed) = unflushed {
+        let end = code.len();
+        resolve(code, unflushed, end);
+    }
     helper_section(code, &helper, pc);
     if format == Format::Half {
         if shape == Shape::Scalar {
