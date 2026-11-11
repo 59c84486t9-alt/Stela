@@ -19,7 +19,23 @@ pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu) {
         }
         return;
     };
-    if value == 0 {
+    let dword = value as u32;
+    let bytes16: [u8; 16] = core::array::from_fn(|i| value.to_le_bytes()[i % 8]);
+    if bytes == 16 && (value == 0 || rearrange::ones_constant(&bytes16)) {
+        // PXOR, or PCMPEQD and at most one shift.
+        rearrange::constant(code, 0, bytes16);
+    } else if bytes == 16 && super::three::broadcast_general_supported(target) {
+        // One immediate move and one EVEX broadcast; a dword-periodic value
+        // takes the short MOV r32 form.
+        let periodic = value == u64::from(dword) * 0x1_0000_0001;
+        let mut asm = code.asm();
+        if periodic {
+            asm.mov_imm32(crate::x86_64::asm::Gpr::Rcx, dword);
+        } else {
+            asm.mov_imm64(crate::x86_64::asm::Gpr::Rcx, value);
+        }
+        super::three::broadcast_general(code, 0, crate::x86_64::asm::Gpr::Rcx, !periodic);
+    } else if value == 0 {
         packed(code, Host::Xor, 0, 0);
     } else {
         // The expanded low 64 bits.

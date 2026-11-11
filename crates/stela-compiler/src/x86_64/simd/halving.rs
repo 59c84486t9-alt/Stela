@@ -6,6 +6,7 @@ use super::{
     read_vector,
     rearrange::constant,
     shifts::{pack_truncated, right_shift, rounded_right},
+    three::three,
 };
 use crate::x86_64::asm::Code;
 use crate::{
@@ -36,8 +37,7 @@ fn half(code: &mut Code, lane: u8, signed: bool, subtract: bool, round: bool, ta
         }
     } else if subtract {
         // floor((a-b)/2) = floor(a/2)-floor(b/2)-((~a & b) & 1).
-        packed(code, Host::MoveAligned, 2, 0);
-        packed(code, Host::AndNot, 2, 1);
+        three(code, Host::AndNot, 2, 0, 1, target);
         lane_constant(code, 3, lane, 1);
         packed(code, Host::And, 2, 3);
         right_shift(code, 0, lane, 1, signed, target);
@@ -46,11 +46,13 @@ fn half(code: &mut Code, lane: u8, signed: bool, subtract: bool, round: bool, ta
         packed(code, add_or_subtract(lane, true), 0, 2);
     } else {
         // floor average: (a&b)+((a^b)>>1). Ceil average: (a|b)-((a^b)>>1).
-        packed(code, Host::MoveAligned, 2, 0);
-        packed(code, if round { Host::Or } else { Host::And }, 2, 1);
+        let both = if round { Host::Or } else { Host::And };
+        three(code, both, 2, 0, 1, target);
         packed(code, Host::Xor, 0, 1);
         right_shift(code, 0, lane, 1, signed, target);
-        if round {
+        if round && super::three::vex(target) {
+            three(code, add_or_subtract(lane, true), 0, 2, 0, target);
+        } else if round {
             packed(code, add_or_subtract(lane, true), 2, 0);
             packed(code, Host::MoveAligned, 0, 2);
         } else {

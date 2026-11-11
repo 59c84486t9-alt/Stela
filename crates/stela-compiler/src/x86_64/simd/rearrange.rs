@@ -118,6 +118,11 @@ pub(super) fn constant(code: &mut Code, xmm: u8, bytes: [u8; 16]) {
     packed(code, Host::UnpackLowQword, xmm, 7);
 }
 
+/// Whether [`constant`] loads `bytes` with PCMPEQD and at most one shift.
+pub(super) fn ones_constant(bytes: &[u8; 16]) -> bool {
+    ones_run(bytes).is_some()
+}
+
 /// The shift that turns all ones into `bytes`, when every word, dword or
 /// qword lane of `bytes` holds the same run of ones at its low or high end:
 /// `None` for all ones.
@@ -591,8 +596,107 @@ fn table(code: &mut Code, operand: &Operand, target: TargetCpu) {
     commit_halves(code, destination);
 }
 
+/// Every 16-byte lane of XMM0 = the `lane`-byte element of `source`. A
+/// general source is read in place (its frame slot or host register), a
+/// vector source with [`read_vector`]. AVX2 broadcasts with one VPBROADCAST;
+/// SSE2 shuffles. Returns whether an eight-byte result has its high qword
+/// zero already (ZR, and the SSE2 forms of a general source).
+fn duplicate(code: &mut Code, source: LaneSource, lane: u8, bytes: u8, target: TargetCpu) -> bool {
+    use crate::aarch64::Register;
+    use crate::x86_64::asm::Rm;
+    let avx2 = super::three::vex(target);
+    match source {
+        LaneSource::General(Register::Zero) => {
+            packed(code, Host::Xor, 0, 0);
+            true
+        }
+        LaneSource::General(register @ Register::X(_)) => {
+            let storage = code.asm().guest(register).expect("X0..X30 have storage");
+            if avx2 && matches!(storage, Rm::Mem(_)) {
+                super::three::broadcast(code, lane, 0, storage);
+                return false;
+            }
+            let mut asm = code.asm();
+            match (lane, storage) {
+                (8, Rm::Reg(gpr)) => asm.movq_to_xmm(0, gpr),
+                // MOVQ xmm, m64 (F3 0F 7E).
+                (8, storage) => asm.sse(Some(0xf3), &[0x0f, 0x7e], 0, storage),
+                (_, storage) => asm.movd_to_xmm(0, storage),
+            }
+            if avx2 {
+                super::three::broadcast(code, lane, 0, Rm::Xmm(0));
+                return false;
+            }
+            // MOVD cleared bytes 4..15 (MOVQ bytes 8..15): the low qword is
+            // filled first, and only a 16-byte vector copies it up.
+            match lane {
+                1 => {
+                    packed(code, Host::UnpackLowByte, 0, 0);
+                    packed_imm(code, Host::ShuffleLowWord, 0, 0, 0);
+                }
+                2 => packed_imm(code, Host::ShuffleLowWord, 0, 0, 0),
+                4 if bytes <= 8 => packed_imm(code, Host::ShuffleDword, 0, 0, 0x50),
+                4 => packed_imm(code, Host::ShuffleDword, 0, 0, 0),
+                _ => {}
+            }
+            if bytes == 16 && lane != 4 {
+                packed(code, Host::UnpackLowQword, 0, 0);
+            }
+            true
+        }
+        LaneSource::General(Register::Sp) => unreachable!("lane transfers use ZR, not SP"),
+        LaneSource::Vector { register, byte } => {
+            read_vector(code, register, 0);
+            let index = byte / lane;
+            match lane {
+                8 => packed_imm(
+                    code,
+                    Host::ShuffleDword,
+                    0,
+                    0,
+                    [0x44, 0xee][usize::from(index)],
+                ),
+                4 => packed_imm(code, Host::ShuffleDword, 0, 0, index * 0x55),
+                2 if index < 4 => {
+                    packed_imm(code, Host::ShuffleLowWord, 0, 0, index * 0x55);
+                    packed(code, Host::UnpackLowQword, 0, 0);
+                }
+                2 => {
+                    packed_imm(code, Host::ShuffleHighWord, 0, 0, (index - 4) * 0x55);
+                    packed(code, Host::UnpackHighQword, 0, 0);
+                }
+                _ => {
+                    if byte != 0 {
+                        ShiftOpcode::RightBytes.emit(code, 0, byte);
+                    }
+                    if avx2 {
+                        super::three::broadcast(code, 1, 0, Rm::Xmm(0));
+                    } else {
+                        packed(code, Host::UnpackLowByte, 0, 0);
+                        packed_imm(code, Host::ShuffleLowWord, 0, 0, 0);
+                        packed(code, Host::UnpackLowQword, 0, 0);
+                    }
+                }
+            }
+            false
+        }
+    }
+}
+
 pub(super) fn emit(code: &mut Code, operand: &Operand, target: TargetCpu, held: Option<u8>) {
     match *operand {
+        Operand::Duplicate {
+            destination,
+            source,
+            lane_bytes,
+            bytes,
+        } if bytes > lane_bytes && !target.data_independent_timing() => {
+            let high_zero = duplicate(code, source, lane_bytes, bytes, target);
+            if bytes <= 8 && !high_zero {
+                packed(code, Host::MoveQword, 0, 0);
+            }
+            commit(code, destination, 0);
+        }
         Operand::Duplicate {
             destination,
             source,

@@ -4,7 +4,7 @@
 //! None of these touches EFLAGS, MXCSR or memory.
 use super::{Host, packed};
 use crate::TargetCpu;
-use crate::x86_64::asm::{Code, Map, Pp, Rm, Vex};
+use crate::x86_64::asm::{Code, Gpr, Map, Pp, Rm, Vex};
 use crate::x86_64::isa::{ShiftOpcode as Shift, SimdOpcode};
 
 /// Whether recipes use VEX three-operand forms on `target`: AVX2 hosts
@@ -126,14 +126,22 @@ pub(super) fn dot_words(code: &mut Code, sum: u8, left: u8, right: u8, target: T
 
 /// VPBROADCASTW: word 0 of `source` in every word of `destination` (AVX2).
 pub(super) fn broadcast_word(code: &mut Code, destination: u8, source: u8) {
-    const VPBROADCASTW: u8 = 0x79;
-    code.asm().vex(
-        vex128(Map::M0f38),
-        VPBROADCASTW,
-        destination,
-        0,
-        Rm::Xmm(source),
-    );
+    broadcast(code, 2, destination, Rm::Xmm(source));
+}
+
+/// VPBROADCASTB/W/D/Q (AVX2): the low `lane`-byte element of `source`, a
+/// register or memory, in every lane of `destination`. A memory source
+/// reads exactly `lane` bytes.
+pub(super) fn broadcast(code: &mut Code, lane: u8, destination: u8, source: Rm) {
+    let opcode = match lane {
+        1 => 0x78,
+        2 => 0x79,
+        4 => 0x58,
+        8 => 0x59,
+        _ => unreachable!("lane of 1, 2, 4 or 8 bytes"),
+    };
+    code.asm()
+        .vex(vex128(Map::M0f38), opcode, destination, 0, source);
 }
 /// Whether ZF after [`test_zero`] says every bit of the register is zero:
 /// PTEST, SSE4.1.
@@ -152,4 +160,32 @@ pub(super) fn test_zero(code: &mut Code, xmm: u8, target: TargetCpu) {
         code.asm()
             .sse(Some(0x66), &[0x0f, 0x38, PTEST], xmm, Rm::Xmm(xmm));
     }
+}
+
+/// Whether [`broadcast_general`] runs on `target`: AVX-512 F with VL. The DIT
+/// profile keeps its reviewed constant loads.
+pub(super) fn broadcast_general_supported(target: TargetCpu) -> bool {
+    target.supports(TargetCpu::Avx512f.with_avx512vl()) && !target.data_independent_timing()
+}
+
+/// EVEX VPBROADCASTD/Q xmm, r32/r64: the low dword (or qword) of `source`
+/// in every lane of `destination`.
+pub(super) fn broadcast_general(code: &mut Code, destination: u8, source: Gpr, qword: bool) {
+    const VPBROADCAST_GPR: u8 = 0x7c;
+    code.asm().evex(
+        crate::x86_64::asm::Evex {
+            map: Map::M0f38,
+            pp: Pp::P66,
+            w: qword,
+            length: 0,
+            mask: 0,
+            zeroing: false,
+            broadcast: false,
+            scale: 1,
+        },
+        VPBROADCAST_GPR,
+        destination,
+        0,
+        Rm::Reg(source),
+    );
 }

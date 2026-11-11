@@ -444,3 +444,225 @@ mod shifts {
         }
     }
 }
+
+/// DUP (general and element) on every tier, from frame slots and from
+/// pinned host registers; UHADD/URHADD/SHADD/SRHADD/UHSUB/SHSUB; MOVI and
+/// ORR/BIC by vector immediate.
+mod lanes {
+    use super::*;
+    use crate::aarch64::Register;
+    use crate::aarch64::simd::halving::{Kind as Halving, Operand as Half};
+    use crate::aarch64::simd::immediates::{ConstantOperation, Operand as Immediate};
+    use crate::aarch64::simd::rearrange::{LaneSource, Operand as Lane};
+
+    const D: u8 = 4;
+    const L: u8 = 11;
+    const R: u8 = 30;
+
+    fn state(values: &mut Values, lane: u8) -> GuestState {
+        let mut state = GuestState::default();
+        for v in &mut state.v {
+            *v = values.vector(lane);
+        }
+        for x in &mut state.x {
+            *x = values.vector(lane)[0];
+        }
+        state.fpsr = values.next() as u32 & 0xf800_009f;
+        state
+    }
+
+    /// [`check`] for frame code and for pinned code, whose general
+    /// registers live in host registers.
+    fn check_pinned(
+        name: &str,
+        operand: &Operand,
+        states: &[GuestState],
+        reference: impl Fn(&GuestState) -> GuestState,
+    ) {
+        for target in tiers() {
+            let mut frame = Code::new();
+            emit_for_target(&mut frame, operand, target, MemoryChecks::DEFAULT);
+            let mut pinned = Code::pinned();
+            emit_for_target(&mut pinned, operand, target, MemoryChecks::DEFAULT);
+            pinned.asm().ret();
+            let pinned = crate::x86_64::pinned::entered(&pinned);
+            for initial in states {
+                let expected = reference(initial);
+                for bytes in [&frame[..], &pinned[..]] {
+                    let mut state = initial.clone();
+                    crate::x86_64::native::run(bytes, &mut state);
+                    assert_eq!(
+                        (state.v, state.x, state.fpsr, state.fpcr),
+                        (expected.v, expected.x, expected.fpsr, expected.fpcr),
+                        "{name} on {target:?} from {:x?}",
+                        initial.v
+                    );
+                }
+            }
+        }
+    }
+
+    fn duplicated(value: i128, lane: u8, bytes: u8) -> [u64; 2] {
+        let mut result = [0u64; 2];
+        for i in 0..usize::from(bytes / lane) {
+            set(&mut result, lane, i, value);
+        }
+        result
+    }
+
+    #[test]
+    fn duplicates_match_arm_on_every_tier() {
+        let mut values = Values::new();
+        for lane in [1u8, 2, 4, 8] {
+            let states: Vec<GuestState> = (0..24).map(|_| state(&mut values, lane)).collect();
+            // `bytes == lane` is the scalar form (DUP <V>d, Vn.T[i] and
+            // MOV <V>d, Vn.T[i]): one element, the rest zero.
+            let mut sizes = alloc::vec![lane, 8, 16];
+            sizes.dedup();
+            for bytes in sizes {
+                let generals = (0..31).map(Register::X).chain([Register::Zero]);
+                for register in generals {
+                    let operand = Operand::Rearrange(Lane::Duplicate {
+                        destination: D,
+                        source: LaneSource::General(register),
+                        lane_bytes: lane,
+                        bytes,
+                    });
+                    check_pinned("DUP general", &operand, &states, |state| {
+                        let value = match register {
+                            Register::X(n) => i128::from(state.x[usize::from(n)]),
+                            _ => 0,
+                        };
+                        let mut expected = state.clone();
+                        expected.v[usize::from(D)] = duplicated(value, lane, bytes);
+                        expected
+                    });
+                }
+                for source in [D, L] {
+                    for index in 0..16 / lane {
+                        let operand = Operand::Rearrange(Lane::Duplicate {
+                            destination: D,
+                            source: LaneSource::Vector {
+                                register: source,
+                                byte: index * lane,
+                            },
+                            lane_bytes: lane,
+                            bytes,
+                        });
+                        check_pinned("DUP element", &operand, &states, |state| {
+                            let value = get(
+                                state.v[usize::from(source)],
+                                lane,
+                                usize::from(index),
+                                false,
+                            );
+                            let mut expected = state.clone();
+                            expected.v[usize::from(D)] = duplicated(value, lane, bytes);
+                            expected
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn halving_adds_and_subtracts_match_arm_on_every_tier() {
+        for lane in [1u8, 2, 4] {
+            for signed in [false, true] {
+                for (subtract, round) in [(false, false), (false, true), (true, false)] {
+                    for bytes in [8u8, 16] {
+                        for (left, right) in [(L, R), (D, R), (L, D), (L, L)] {
+                            let operand = Half {
+                                kind: Halving::Half {
+                                    signed,
+                                    subtract,
+                                    round,
+                                },
+                                destination: D,
+                                left,
+                                right,
+                                lane_bytes: lane,
+                                bytes,
+                            };
+                            check(
+                                &alloc::format!("{:?}", operand.kind),
+                                &Operand::Halving(operand),
+                                32,
+                                |values| state(values, lane),
+                                |state| {
+                                    let mut result = [0u64; 2];
+                                    for i in 0..usize::from(bytes / lane) {
+                                        let a = get(state.v[usize::from(left)], lane, i, signed);
+                                        let b = get(state.v[usize::from(right)], lane, i, signed);
+                                        let value = if subtract {
+                                            (a - b) >> 1
+                                        } else {
+                                            (a + b + i128::from(round)) >> 1
+                                        };
+                                        set(&mut result, lane, i, value);
+                                    }
+                                    let mut expected = state.clone();
+                                    expected.v[usize::from(D)] = result;
+                                    expected
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn vector_immediates_match_arm_on_every_tier() {
+        let mut values = Values::new();
+        let mut constants = alloc::vec![
+            0u64,
+            u64::MAX,
+            0x0008_0000_0008_0000,
+            0x00ff_00ff_00ff_00ff,
+            0xff00_ff00_ff00_ff00,
+            0xffff_0000_ffff_0000,
+            0x0000_ffff_ffff_ffff,
+            0x8080_8080_8080_8080,
+            0x0001_0001_0001_0001,
+            0xffff_ff00_ffff_ff00,
+            0x0000_00ff_0000_00ff,
+            0x7fff_ffff_7fff_ffff,
+            0xff00_00ff_00ff_ff00,
+        ];
+        constants.extend((0..8).map(|_| values.next()));
+        let states: Vec<GuestState> = (0..8).map(|_| state(&mut values, 8)).collect();
+        for value in constants {
+            for bytes in [8u8, 16] {
+                for operation in [
+                    ConstantOperation::Move,
+                    ConstantOperation::Or,
+                    ConstantOperation::BitClear,
+                ] {
+                    let operand = Operand::Immediate(Immediate::Constant {
+                        destination: D,
+                        value,
+                        bytes,
+                        operation,
+                    });
+                    check_pinned("MOVI", &operand, &states, |state| {
+                        let old = state.v[usize::from(D)];
+                        let mut result = old.map(|limb| match operation {
+                            ConstantOperation::Move => value,
+                            ConstantOperation::Or => limb | value,
+                            ConstantOperation::BitClear => limb & !value,
+                        });
+                        if bytes == 8 {
+                            result[1] = 0;
+                        }
+                        let mut expected = state.clone();
+                        expected.v[usize::from(D)] = result;
+                        expected
+                    });
+                }
+            }
+        }
+    }
+}
