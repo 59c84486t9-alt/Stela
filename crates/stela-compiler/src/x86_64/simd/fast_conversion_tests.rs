@@ -169,10 +169,13 @@ const TO_INTEGER: &[(u32, IntegerRounding, bool, bool)] = &[
     (0x1e30_0000, IntegerRounding::TowardNegative, true, true),
     (0x1e31_0000, IntegerRounding::TowardNegative, false, true),
     (0x1e24_0000, IntegerRounding::NearestAway, true, true),
+    (0x1e25_0000, IntegerRounding::NearestAway, false, true),
     (0x5ea1_b800, IntegerRounding::TowardZero, true, false),
     (0x7ea1_b800, IntegerRounding::TowardZero, false, false),
     (0x5e21_a800, IntegerRounding::NearestEven, true, false),
     (0x5ea1_a800, IntegerRounding::TowardPositive, true, false),
+    (0x5e21_c800, IntegerRounding::NearestAway, true, false),
+    (0x7e21_c800, IntegerRounding::NearestAway, false, false),
 ];
 
 #[test]
@@ -205,11 +208,12 @@ fn environment_free_float_to_integer_matches_the_reference() {
                         signed,
                     };
                     let code = compile(word, target);
-                    let fast = rounding != IntegerRounding::NearestAway
-                        && (matches!(
-                            rounding,
-                            IntegerRounding::TowardZero | IntegerRounding::NearestEven
-                        ) || target.supports(TargetCpu::Sse41));
+                    let fast = matches!(
+                        rounding,
+                        IntegerRounding::TowardZero
+                            | IntegerRounding::NearestEven
+                            | IntegerRounding::NearestAway
+                    ) || target.supports(TargetCpu::Sse41);
                     for &bits in &floats(format) {
                         for fpcr in controls() {
                             for fpsr in [0, INEXACT] {

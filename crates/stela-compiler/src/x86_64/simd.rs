@@ -282,7 +282,9 @@ pub(super) fn numerical_always_exits(operation: &crate::aarch64::FloatingPointOp
             Operand::Precision(operand) => operand.mode.destination_format() == Format::Half,
             Operand::FromInteger(operand) => operand.format == Format::Half,
             Operand::ToInteger { operand, rounding } => {
-                operand.format == Format::Half || *rounding == IntegerRounding::NearestAway
+                operand.format == Format::Half
+                    || *rounding == IntegerRounding::NearestAway
+                        && !integer_conversion::nearest_away_inline(operand)
             }
             Operand::JavaScript { .. } => false,
         },
@@ -760,6 +762,7 @@ mod tests {
 
         const FCVT_H_S: u32 = 0x1e23c020;
         const SCVTF_H_W: u32 = 0x1ee20020;
+        const FCVTAS_4S: u32 = 0x4e21c820;
         const FCVTAS_W_S: u32 = 0x1e240020;
         const FJCVTZS_W_D: u32 = 0x1e7e0020;
         const FCVT_S_H: u32 = 0x1ee24020;
@@ -769,7 +772,7 @@ mod tests {
 
         #[test]
         fn terminal_conversions_do_not_consume_or_validate_an_unreached_suffix() {
-            for word in [FCVT_H_S, SCVTF_H_W, FCVTAS_W_S] {
+            for word in [FCVT_H_S, SCVTF_H_W, FCVTAS_4S] {
                 let bytes: Vec<u8> = [word, UNSUPPORTED_SUFFIX]
                     .iter()
                     .flat_map(|word| word.to_le_bytes())
@@ -778,7 +781,8 @@ mod tests {
                 assert_eq!(compiled.source_bytes, size_of::<u32>());
                 assert_eq!(compiled.native.source_map, [(GuestAddress(0x1000), 0)]);
             }
-            for word in [FCVT_S_H, SCVTF_S_W, FCVTL_4S_4H, FJCVTZS_W_D] {
+            // Inline on every target: the block continues into the suffix.
+            for word in [FCVT_S_H, SCVTF_S_W, FCVTL_4S_4H, FJCVTZS_W_D, FCVTAS_W_S] {
                 let bytes: Vec<u8> = [word, UNSUPPORTED_SUFFIX]
                     .iter()
                     .flat_map(|word| word.to_le_bytes())

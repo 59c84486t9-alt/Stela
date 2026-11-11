@@ -297,10 +297,14 @@ fn fast_exponent_limit(integer: IntegerFormat, truncate: bool) -> u32 {
 /// the rounded integer of an S/D input in range is exactly representable in
 /// its format. Truncation and nearest-even (the block ABI's MXCSR rounding,
 /// see `numerical::sticky_inexact`) run on any tier; SSE4.1's ROUNDSS/SD
-/// adds the directed forms. Returns the branches to the full path and to its
-/// completion, which takes RAX and ECX as the full path leaves them; `None`
-/// when the form has no fast path. FJCVTZS (`negative_zero_exact` false)
-/// sends -0, whose Z flag differs, to the full path.
+/// adds the directed forms. Ties away from zero (FCVTAS/FCVTAU) runs on any
+/// tier: it truncates the exact double 2x to t and takes
+/// (t + 1 + (t < 0 ? -1 : 0)) >> 1 arithmetically, which is x rounded half
+/// away from zero; the rounding limit keeps 2x inside the integer. Returns
+/// the branches to the full path and to its completion, which takes RAX and
+/// ECX as the full path leaves them; `None` when the form has no fast path.
+/// FJCVTZS (`negative_zero_exact` false) sends -0, whose Z flag differs, to
+/// the full path.
 fn fast_to_integer(
     code: &mut Code,
     operand: &IntegerConversion,
@@ -317,7 +321,6 @@ fn fast_to_integer(
         || operand.frac_bits != 0
         || operand.format == Format::Half
         || integer.width == IntegerWidth::Bits16
-        || mode == IntegerRounding::NearestAway
         || directed && !target.supports(TargetCpu::Sse41)
         || target.data_independent_timing()
     {
@@ -383,14 +386,37 @@ fn fast_to_integer(
     } else {
         RESULT_VECTOR
     };
-    let mut asm = code.asm();
-    asm.cvtfloat2si(
+    let away = mode == IntegerRounding::NearestAway;
+    if away {
+        // 2x is exact and normal: the input is normal and below the limit.
+        emit_opcode(
+            code,
+            format,
+            Shape::Scalar,
+            ArithmeticOpcode::Add,
+            RESULT_VECTOR,
+        );
+    }
+    // Ties away works on 64 bits: t + 1 can leave a signed W result.
+    code.asm().cvtfloat2si(
         lanes,
-        truncate || directed,
-        result_size,
+        truncate || directed || away,
+        if away { Size::Qword } else { result_size },
         Rax,
         Rm::Xmm(source),
     );
+    let mut asm = code.asm();
+    if away {
+        // RDX is -1 for a negative t and 0 otherwise.
+        asm.mov(Size::Qword, Rdx, Rax);
+        asm.shift_imm(ShiftOp::Sar, Size::Qword, Rdx, SIGN_BIT);
+        asm.alu(Alu::Add, Size::Qword, Rax, Rdx);
+        asm.alu_imm8(Alu::Add, Size::Qword, Rax, 1);
+        asm.shift_one(ShiftOp::Sar, Size::Qword, Rax);
+        if result_size == Size::Dword {
+            asm.mov(Size::Dword, Rax, Rax);
+        }
+    }
     asm.cvtsi2float(lanes, result_size, TEMPORARY_VECTOR, Rax);
     if double {
         asm.movq_from_xmm(Rdx, TEMPORARY_VECTOR);
@@ -750,6 +776,15 @@ fn convert_float_lane(
     }
 }
 
+/// Whether ties-away FP-to-integer `operand` has an inline path on some
+/// target (`fast_to_integer`); other forms always take the exact core.
+pub(super) fn nearest_away_inline(operand: &IntegerConversion) -> bool {
+    operand.integer.shape() == Shape::Scalar
+        && operand.frac_bits == 0
+        && operand.format != Format::Half
+        && operand.integer.format().width != IntegerWidth::Bits16
+}
+
 fn finish_integer(code: &mut Code, operand: &IntegerConversion, packed_result: bool) {
     commit_inexact(code);
     match operand.integer {
@@ -811,15 +846,31 @@ fn to_integer_with(
     target: TargetCpu,
     negative_zero_exact: bool,
 ) {
-    if operand.format == Format::Half && !half_supported(operand, target)
-        || mode == IntegerRounding::NearestAway
-    {
-        // SSE2 has no ties-away control. Adding 0.5 before truncation double
-        // rounds near half ties; keep the exact integer-core route instead.
+    if operand.format == Format::Half && !half_supported(operand, target) {
         helper(code, pc);
         return;
     }
     let fast = fast_to_integer(code, operand, mode, target, negative_zero_exact);
+    if mode == IntegerRounding::NearestAway {
+        // SSE2 has no ties-away control, and adding 0.5 before truncation
+        // double rounds near half ties: inputs outside the fast path take
+        // the exact integer-core route.
+        let Some((full, success)) = fast else {
+            helper(code, pc);
+            return;
+        };
+        let helper_start = code.len();
+        for patch in full {
+            resolve(code, patch, helper_start);
+        }
+        helper(code, pc);
+        let success_start = code.len();
+        for patch in success {
+            resolve(code, patch, success_start);
+        }
+        finish_integer(code, operand, false);
+        return;
+    }
     if let Some((full, _)) = &fast {
         let full_start = code.len();
         for &patch in full {
