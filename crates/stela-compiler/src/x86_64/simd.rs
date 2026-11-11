@@ -52,6 +52,12 @@ pub(crate) mod memory_checked;
 mod minmax;
 pub(in crate::x86_64) mod numerical;
 pub(in crate::x86_64) mod precision;
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "macos", target_os = "linux")
+))]
+mod product_nan_tests;
 mod products;
 pub(super) mod rearrange;
 mod reductions;

@@ -358,7 +358,9 @@ fn sticky_path(code: &mut Code, operand: &Operand, entry: Entry, target: TargetC
     resolve(code, rejected, check);
     // With FPSR.UFC set too, a tiny or zero product adds no status, and its
     // value is the host's: the entry MXCSR flushes nothing. Only a NaN or
-    // infinite lane needs more.
+    // infinite lane needs more: the full path, which applies Arm's NaN
+    // selection, DN and IOC. (The zero-product check cannot take it: its
+    // accepted-lane mask is the one the nonfinite test has just replaced.)
     let known = fpsr_has(code, FPSR_UNDERFLOW);
     let unknown = jump(code);
     let finite_check = code.len();
@@ -374,11 +376,11 @@ fn sticky_path(code: &mut Code, operand: &Operand, entry: Entry, target: TargetC
     resolve(code, finite, resume);
     crossing.push(finite);
     let zero_check = code.len();
-    resolve(code, nonfinite, zero_check);
     resolve(code, unknown, zero_check);
     // Other rejected products take the full path, which completes tiny
     // results ([`tiny_product_status`]).
     let mut full = full;
+    full.push(nonfinite);
     full.extend(zero_product_check(
         code,
         &ZeroProduct {
