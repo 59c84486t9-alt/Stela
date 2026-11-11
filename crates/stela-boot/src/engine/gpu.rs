@@ -1,5 +1,5 @@
-//! The host's Linux environment and the NVIDIA GPUs nouveau drives in it
-//! (`docs/design/metal-device.md`).
+//! The host's Linux environment and the NVIDIA GPUs nouveau drives in it,
+//! which back the guest's Metal device.
 //!
 //! It lives on the boot CPU and takes time from the boot PE as Linux steals it
 //! from an interrupted thread. A GPU's MSI targets that CPU, which takes it
@@ -1363,7 +1363,7 @@ fn environment_error(error: WorkError) -> kernel_work::Error {
 }
 
 /// Why this boot gives macOS no Metal device, if it does not. WindowServer
-/// aborts without one (docs/research/display-gpu.md section 2) and watchdogd
+/// aborts without one and watchdogd
 /// then panics the system, so a boot of macOS stops here instead.
 pub(super) fn no_metal_device() -> Option<&'static str> {
     #[cfg(feature = "nvk")]

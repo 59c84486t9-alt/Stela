@@ -56,7 +56,7 @@ pub(super) fn timer_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
 }
 
 /// Whether the guest has yet been seen to reach addresses outside the
-/// host's native ranges (`docs/design/system.md#host-placement`).
+/// host's native ranges.
 #[derive(Default)]
 pub(super) struct TranslatedSeen {
     pub(super) reported: bool,

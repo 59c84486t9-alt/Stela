@@ -6,8 +6,7 @@
 //! engine's memory, builds its page tables (five-level under LA57, else
 //! four-level), releases the pristine copy, and leaves boot services. It
 //! loads the tables through the LA57 trampoline when five-level and calls
-//! the engine phase in the window. See
-//! `docs/design/system.md#host-placement`.
+//! the engine phase in the window.
 use crate::Result;
 use crate::{
     console::Framebuffer,

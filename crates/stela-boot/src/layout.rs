@@ -1,5 +1,5 @@
 //! Where the system-mode engine lives once the guest owns the x86 address
-//! space, for the host's placement (`docs/design/system.md#host-placement`).
+//! space, for the host's placement.
 //! Under LA57, PML5 entry 0 holds the guest's TTBR0 range, entry 511 its
 //! TTBR1 range, and Stela's window is entry 64. On a four-level host the
 //! window starts at the upper half's bottom, PML4 entry 256, and fills the

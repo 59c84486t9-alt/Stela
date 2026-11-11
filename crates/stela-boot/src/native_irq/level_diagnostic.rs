@@ -30,7 +30,7 @@ use stela_runtime::pc::acpi;
 
 // Separately evaluated 8098-byte DSDTs from the Q35/TCG single-BSP fixture,
 // using -cpu max and max,vendor=GenuineIntel respectively. Keep the original
-// capture binding; docs/design/host-drivers.md records the new input's evidence.
+// capture binding.
 // ACPICA returns unique _PRT entry [0x2ffff,0,Reference(\_SB_.GSIG),0]
 // and GSIG._CRS [89,06,00,09,01,16,00,00,00,79,00]: high/shared/level GSI22.
 const DSDT_HASH: [u8; 32] = [
@@ -49,7 +49,6 @@ const OWNED_CONFIG_DSDT_HASH: [u8; 32] = [
     0x94, 0xb0, 0x99, 0x81, 0x65, 0x80, 0x8a, 0xae, 0x0e, 0x88, 0x79, 0x22, 0x68, 0xcc, 0x3d, 0xb4,
 ];
 // QEMU 10.2.1 Q35/TCG acceptance input, captured and evaluated independently.
-// See docs/research/native-owned-pci-config-route-2026-10-29.md.
 const QEMU_10_DSDT_HASH: [u8; 32] = [
     0x37, 0x2c, 0xa3, 0x72, 0xdf, 0x1e, 0x4f, 0xa4, 0x45, 0x11, 0x1b, 0x4f, 0x82, 0xb8, 0xbc, 0x66,
     0x85, 0xe2, 0x5e, 0x5a, 0xa6, 0x4c, 0x6e, 0xd0, 0x4b, 0xd6, 0x59, 0xc3, 0xb9, 0x2a, 0x4f, 0x4d,

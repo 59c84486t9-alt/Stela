@@ -4,7 +4,7 @@
 //! regions and their zero tails into guest DRAM, and fills the patch slots
 //! only the running machine knows; this supplies the machine's side: guest
 //! RAM through the engine's host, seeded host entropy and the timebase.
-//! The format is `docs/design/runtime.md#kernel-boot-bundle`.
+//! The format is `stela_formats::boot_bundle`'s.
 //!
 //! [`read`] runs before boot services end and reads the files into their own
 //! `LOADER_DATA` pages, so a restore ramdisk does not have to fit the heap.

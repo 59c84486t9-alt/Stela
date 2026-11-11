@@ -872,8 +872,8 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
     // (SPTM installs its vectors through VBAR_EL1 before it ORs TGE and E2H
     // into HCR_EL2, which reaches VBAR_EL2 only with E2H already set); the
     // other HCR_EL2 bits reset to 0. Every other image starts there too:
-    // the canonical memory owner admits MMU-off execution at EL2 alone
-    // (`docs/design/runtime.md`), and Stela's test kernel makes itself a
+    // the canonical memory owner admits MMU-off execution at EL2 alone,
+    // and Stela's test kernel makes itself a
     // VHE host as XNU does.
     let el = 2;
     output::arguments(format_args!(

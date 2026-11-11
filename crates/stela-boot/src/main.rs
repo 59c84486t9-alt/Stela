@@ -4,7 +4,7 @@
 //! loader `\EFI\BOOT\BOOTX64.EFI`. It connects every controller to its
 //! drivers and reads `\EFI\stela\stela.cfg` from its own volume. A
 //! `stela.cfg` that starts with `--system` runs the guest on the system-mode
-//! engine (`docs/design/system.md#system-mode-execution`); one that starts
+//! engine; one that starts
 //! with `--host-check` reports on the PC (`host_check`). Any other line runs
 //! no ARM code: install mode (`payload`), or the host storage check
 //! (`storage`), which leaves boot services and installs Stela's own page

@@ -1,5 +1,4 @@
-//! The Metal device's pipeline store (`docs/design/metal-device.md`,
-//! "Pipeline store"): `stela/store/pipeline.bin`, a file `stela setup`
+//! The Metal device's pipeline store: `stela/store/pipeline.bin`, a file `stela setup`
 //! preallocates beside the translation packs.
 //!
 //! Before boot services end, [`read`] reads the stored pipelines from the

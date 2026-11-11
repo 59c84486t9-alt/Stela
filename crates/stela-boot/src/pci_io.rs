@@ -174,7 +174,7 @@ pub(crate) fn framebuffer_source(
 /// QEMU's standard VGA (`hw/display/vga-pci.c`), vendor and device.
 const QEMU_VGA: u32 = 0x1111_1234;
 /// Its MMIO BAR, whose first bytes hold the EDID with `edid=on`
-/// (`docs/specs/standard-vga.rst`: 0x0000..0x0400 "edid data blob").
+/// (QEMU's `docs/specs/standard-vga.rst`: 0x0000..0x0400 "edid data blob").
 const QEMU_VGA_MMIO_BAR: u8 = 2;
 const EDID_BYTES: usize = 128;
 
@@ -207,7 +207,7 @@ pub(crate) fn qemu_vga_edid(handle: Handle) -> Option<Vec<u8>> {
 }
 
 /// The Bochs DISPI registers in QEMU's standard VGA's MMIO BAR, 16 bits
-/// each (`docs/specs/standard-vga.rst`: 0x0500..0x0516), by index
+/// each (QEMU's `docs/specs/standard-vga.rst`: 0x0500..0x0516), by index
 /// (`include/hw/display/bochs-vbe.h`).
 pub(crate) const DISPI_REGISTERS: u64 = 0x500;
 pub(crate) const DISPI_VIRT_WIDTH: u64 = 6;

@@ -1,5 +1,4 @@
-//! `stela.efi`'s translation store (`docs/design/runtime.md`, "Persistent
-//! translation store"): the pack `stela setup` makes room for in
+//! `stela.efi`'s persistent translation store: the pack `stela setup` makes room for in
 //! `stela/store` on the boot USB's FAT32 data partition.
 //!
 //! Before boot services end, [`read`] finds the volume with `store.cfg`,

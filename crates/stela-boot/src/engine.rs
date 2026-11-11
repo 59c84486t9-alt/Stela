@@ -361,8 +361,7 @@ unsafe fn enable_doit() -> bool {
 /// Back guest DRAM with every free host range, lowest first, and report
 /// the backed bytes as the Mac's DRAM, so kernel and user-space policies
 /// size themselves from memory that exists
-/// (`stela_boot_core::host_memory::guest_dram`,
-/// `docs/design/system.md#memory-sizing`).
+/// (`stela_boot_core::host_memory::guest_dram`).
 fn guest_ram(handoff: &Handoff, options: &mut Options) -> Result<Vec<RamRange>> {
     let mut ranges = Vec::new();
     let mut assigned = 0;

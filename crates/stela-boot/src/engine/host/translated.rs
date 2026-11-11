@@ -1,6 +1,5 @@
 //! The translation helper that blocks of the translated variant call for
-//! each access outside the host's native ranges
-//! (`docs/design/system.md#host-placement`). It runs inside native code, as
+//! each access outside the host's native ranges. It runs inside native code, as
 //! the #PF handler does: it looks the access up in the software TLB
 //! (`mmu::translated`), fills a missing page from the same software walk of
 //! the guest's tables as a shadow fill ([`super::resolve`]), and returns
