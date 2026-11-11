@@ -143,7 +143,8 @@ pub struct AttachmentInputs {
     pub follows_depth: Option<FollowedStencil>,
     /// The storage copy of each color attachment whose raw texels no view
     /// of its own reads, an A8Unorm texture's or a 3D texture's depth
-    /// planes ([`Device::color_copy`](super::device::Device::color_copy)),
+    /// planes, or that a backend may render through a shadow, a linear
+    /// image ([`Device::color_copy`](super::device::Device::color_copy)),
     /// which its `textures` entry then accesses.
     pub color_copies: [Option<TestedCopy>; MAX_COLOR_ATTACHMENTS],
     /// The second plane of each two-plane color attachment the pass

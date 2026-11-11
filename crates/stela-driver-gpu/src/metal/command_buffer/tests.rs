@@ -294,7 +294,7 @@ fn shader(stage: Stage, edit: impl FnOnce(&mut Interface)) -> CompiledShader {
     }
 }
 
-fn render_state(amplification: u64) -> RenderPipelineState {
+pub(crate) fn render_state(amplification: u64) -> RenderPipelineState {
     let vertex = shader(Stage::Vertex, |_| {});
     let fragment = shader(Stage::Fragment, |_| {});
     let layout = VertexDescriptor {

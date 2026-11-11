@@ -1326,12 +1326,36 @@ impl<B: Backend, C: Compiler> Device<B, C> {
         self.storage_copy(id, view, aspect, format, encoding)
     }
 
+    /// Whether framebuffer reads of the texture as a color attachment go
+    /// through its storage copy ([`color_copy`](Self::color_copy)) though a
+    /// raw view reads its texels: a one-plane linear image over a buffer's
+    /// rows, an IOSurface's. A backend may render such an image through a
+    /// tiled shadow while a pass instance lasts, as NVK does unless every
+    /// attachment of the instance is linear: a storage view of the image
+    /// then reads what the instance began with, and the shadow's store
+    /// where it ends overwrites the storage writes.
+    pub fn reads_attachment_through_copy(&self, id: TextureId) -> Result<bool> {
+        let mut texture = self.resources.textures.get(id.0)?;
+        let mut root = id;
+        while let Some(parent) = texture.parent {
+            root = parent;
+            texture = self.resources.textures.get(parent.0)?;
+        }
+        Ok(matches!(texture.backing, Backing::Buffer(_))
+            && texture.image.is_some()
+            && texture.second_plane.is_none()
+            && !self.has_extended_planes(id)
+            && !self.has_extended_planes(root))
+    }
+
     /// The storage copy of an attached color subresource that has no raw
     /// texel storage view of its own, an A8Unorm texture's or a 3D
-    /// texture's depth planes, created on first use and kept with the
-    /// texture: an image of its raw texels with the view's layers (or
-    /// planes) and the texture's samples, which image copies fill from the
-    /// attachment and return to it, as [`tested_copy`](Self::tested_copy)'s.
+    /// texture's depth planes, or whose reads go through a copy
+    /// ([`reads_attachment_through_copy`](Self::reads_attachment_through_copy)),
+    /// created on first use and kept with the texture: an image of its raw
+    /// texels with the view's layers (or planes) and the texture's samples,
+    /// which image copies fill from the attachment and return to it, as
+    /// [`tested_copy`](Self::tested_copy)'s.
     pub fn color_copy(&mut self, id: TextureId, view: AttachmentView<()>) -> Result<TestedCopy> {
         let texture = self.resources.textures.get(id.0)?;
         if let Some(object) = texture

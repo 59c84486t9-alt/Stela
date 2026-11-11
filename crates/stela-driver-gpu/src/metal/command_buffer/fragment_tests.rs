@@ -13,7 +13,8 @@
 //!
 //!
 //! A color attachment no storage view of which reads its raw texels, an
-//! A8Unorm texture's or a 3D texture's depth planes, likewise lives in a
+//! A8Unorm texture's or a 3D texture's depth planes, or which a backend may
+//! render through a shadow of its own, a linear image, likewise lives in a
 //! storage copy ([`AttachmentInputs::color_copies`]) while draws access it
 //! as storage, and returns to the attachment before a draw renders it
 //! through the blend unit and where the pass ends.

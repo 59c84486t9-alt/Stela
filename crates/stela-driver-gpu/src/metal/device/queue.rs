@@ -558,7 +558,8 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 self.extended_pass_planes(attached.view.texture, view, plan.extent, actions)?;
         }
         // Framebuffer reads access each color attachment's raw texels, of
-        // the attachment or, where no view of it reads them, of its copy.
+        // the attachment or, where no view of it reads them or the backend
+        // may render it through a shadow (a linear image), of its copy.
         if self.capabilities.framebuffer_reads {
             for (index, color) in plan.color.iter().enumerate() {
                 let Some(color) = color else { continue };
@@ -578,6 +579,7 @@ impl<B: Backend, C: Compiler> Device<B, C> {
                 let viewed = texture.texture_type != crate::metal::abi::TextureType::D3
                     && crate::metal::resource::raw_texel_format(format).is_some();
                 let texture = color.view.texture;
+                let viewed = viewed && !self.reads_attachment_through_copy(texture)?;
                 if viewed {
                     plan.inputs.textures[index] = self.attachment_storage(texture, view)?;
                 } else if crate::metal::resource::raw_texel_bytes_format(format).is_some() {

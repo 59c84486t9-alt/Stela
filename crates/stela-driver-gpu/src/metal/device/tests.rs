@@ -2695,6 +2695,118 @@ fn compute_and_mesh_variants_compile_per_shape() {
     complete(&mut device, serial);
 }
 
+/// A color attachment over a buffer's rows, as an IOSurface's texture is,
+/// shares its pass with a memoryless attachment, as Core Animation's passes
+/// do: NVK renders the linear image through a tiled shadow, so draws that
+/// read the framebuffer access a storage copy the image fills before them
+/// and which returns before a draw renders through the blend unit and where
+/// the pass ends. An optimal image's draws access its own texels.
+#[test]
+fn framebuffer_reads_of_a_linear_attachment_run_on_its_copy() {
+    let mut device = device();
+    assert!(device.capabilities().framebuffer_reads);
+    let shared = options(StorageMode::Shared);
+    let buffer = device.new_buffer(1 << 16, shared).unwrap();
+    let mut descriptor = texture(
+        PixelFormat::Rgba8Unorm,
+        TextureUsage::RENDER_TARGET | TextureUsage::SHADER_READ,
+    );
+    descriptor.width = 64;
+    descriptor.height = 32;
+    descriptor.options = shared;
+    let linear = device
+        .new_texture_from_buffer(buffer, &descriptor, 0, 256)
+        .unwrap();
+    descriptor.options = options(StorageMode::Private);
+    let optimal = device.new_texture(&descriptor).unwrap();
+    descriptor.options = options(StorageMode::Memoryless);
+    descriptor.usage = TextureUsage::RENDER_TARGET;
+    let memoryless = device.new_texture(&descriptor).unwrap();
+    let vertices = device.new_buffer(256, shared).unwrap();
+    let vertices = device.buffer(vertices).unwrap();
+    let attachment = |texture, load_action, store_action| AttachmentRequest {
+        texture,
+        level: 0,
+        slice: 0,
+        depth_plane: 0,
+        resolve: None,
+        load_action,
+        store_action,
+        store_action_options: StoreActionOptions::EMPTY,
+        clear: [0.0; 4],
+        surface: None,
+    };
+    let copies = |device: &mut TestDevice, target| {
+        let mut colors = [None; MAX_COLOR_ATTACHMENTS];
+        colors[0] = Some(attachment(target, LoadAction::Load, StoreAction::Store));
+        colors[1] = Some(attachment(
+            memoryless,
+            LoadAction::DontCare,
+            StoreAction::DontCare,
+        ));
+        let request = RenderPassRequest {
+            color_attachments: colors,
+            depth_attachment: None,
+            depth_resolve_filter: MultisampleDepthResolveFilter::Sample0,
+            stencil_attachment: None,
+            stencil_resolve_filter: MultisampleStencilResolveFilter::Sample0,
+            visibility_result_buffer: None,
+            visibility_result_type: VisibilityResultType::Reset,
+            render_target_array_length: 0,
+            render_target_width: 0,
+            render_target_height: 0,
+            default_raster_sample_count: 0,
+            tile_memory: Default::default(),
+            sample_positions: Vec::new(),
+            rasterization_rate_map: false,
+            counter_samples: Vec::new(),
+        };
+        let mut reads = crate::metal::command_buffer::tests::render_state(1);
+        reads.plan.color_formats[1] = None;
+        reads.interfaces[1].storage_attachments = 1;
+        let mut blended = crate::metal::command_buffer::tests::render_state(1);
+        blended.plan.color_formats[1] = None;
+        let mut commands = device.new_command_buffer();
+        device.begin_render(&mut commands, &request).unwrap();
+        commands
+            .set_render_buffer(Stage::Vertex, Some(vertices), 0, 2)
+            .unwrap();
+        for state in [&reads, &blended, &reads] {
+            commands.set_render_pipeline_state(state).unwrap();
+            commands
+                .draw_primitives(&mut device.resolver(), PrimitiveType::Triangle, 0, 3, 1, 0)
+                .unwrap();
+        }
+        commands.end_encoding(&mut device.resolver()).unwrap();
+        let serial = device.commit(commands).unwrap();
+        let mut order = String::new();
+        let mut pairs = Vec::new();
+        for command in &device.backend().submissions.last().unwrap()[0].commands {
+            match command {
+                Command::CopyImage { src, dst, .. } => {
+                    order.push('c');
+                    pairs.push((*src, *dst));
+                }
+                Command::BeginRendering(_) => order.push('b'),
+                Command::EndRendering => order.push('e'),
+                _ => {}
+            }
+        }
+        complete(device, serial);
+        (order, pairs)
+    };
+    let (order, pairs) = copies(&mut device, linear);
+    // In, back before the blended draw, in again, back where the pass
+    // ends; each between pass instances, after an instance's store has
+    // brought what it rendered to the image and before the next loads it.
+    assert_eq!(order, "becbecbecbecbe");
+    assert_eq!(pairs.len(), 4);
+    let (to, from) = (pairs[0], (pairs[0].1, pairs[0].0));
+    assert_eq!(pairs, [to, from, to, from]);
+    let (order, pairs) = copies(&mut device, optimal);
+    assert_eq!((order.as_str(), pairs.len()), ("be", 0));
+}
+
 #[test]
 fn render_passes_resolve_cached_attachment_views() {
     let mut device = device();
