@@ -33,7 +33,7 @@
 use alloc::{boxed::Box, sync::Arc};
 use core::sync::atomic::{
     AtomicBool, AtomicU64,
-    Ordering::{AcqRel, Acquire, Release},
+    Ordering::{AcqRel, Acquire, Release, SeqCst},
 };
 use stela_engine::system::access::AccessKind;
 
@@ -131,16 +131,23 @@ impl Signals {
             }
             Register::RequestLocal | Register::RequestGlobal => {
                 let target = self.immediate_target(cpu, register, value)?;
-                let was = self.words[target].pending.fetch_or(SR_PENDING, AcqRel);
-                Some((was == 0).then_some(target))
+                Some(self.raise(target).then_some(target))
             }
             _ => None,
         }
     }
 
     /// Clear `cpu`'s IPI_SR: its FIQ from the fast IPIs goes.
+    ///
+    /// A read-modify-write, not a store: a send whose `fetch_or` found the
+    /// word still set (and so raised and woke nothing) is then ordered
+    /// before the clear, which synchronizes with it, so the CPU's reads
+    /// after the acknowledgement (its handler's mailbox) see what the
+    /// sender wrote before the send. A plain store could sit in this host
+    /// core's store buffer while those reads ran, and lose that IPI. The
+    /// word holds PENDING alone, so the clear takes nothing else.
     pub fn acknowledge(&self, cpu: CpuIndex) -> Option<()> {
-        self.words.get(cpu)?.pending.store(0, Release);
+        self.words.get(cpu)?.pending.swap(0, SeqCst);
         Some(())
     }
 
@@ -170,19 +177,20 @@ pub struct FastIpi {
     /// The global IPI_CR value.
     countdown: Option<u64>,
     /// CPUs whose FIQ a locked access or advance raised since
-    /// [`Self::take_raised`], a bit each (CPUs past 63 are not kept: their
-    /// PEs find their lines at their next look).
-    raised: u64,
+    /// [`Self::take_raised`] took theirs: bit `cpu % 64` of word `cpu / 64`,
+    /// for every CPU of the machine.
+    raised: Vec<u64>,
 }
 impl FastIpi {
     pub fn new(cpus: Vec<Affinity>) -> Self {
         let words = cpus.iter().map(|_| Word::default()).collect();
         let deferred = cpus.iter().map(|_| None).collect();
+        let raised = vec![0; cpus.len().div_ceil(64)];
         Self {
             signals: Arc::new(Signals { cpus, words }),
             deferred,
             countdown: None,
-            raised: 0,
+            raised,
         }
     }
     /// What every CPU reaches without the lock.
@@ -193,10 +201,15 @@ impl FastIpi {
     pub fn fiq(&self, cpu: CpuIndex) -> bool {
         self.signals.pending(cpu) != 0
     }
-    /// The CPUs whose FIQ a locked access or advance raised since the last
-    /// call, a bit each.
-    pub fn take_raised(&mut self) -> u64 {
-        core::mem::take(&mut self.raised)
+    /// Whether a locked access or advance raised `cpu`'s FIQ since the
+    /// last call for it.
+    pub fn take_raised(&mut self, cpu: CpuIndex) -> bool {
+        let bit = 1u64 << (cpu % 64);
+        self.raised.get_mut(cpu / 64).is_some_and(|word| {
+            let raised = *word & bit != 0;
+            *word &= !bit;
+            raised
+        })
     }
     fn arm(&mut self, cpu: CpuIndex, deadline: Option<u64>) {
         self.deferred[cpu] = deadline;
@@ -206,7 +219,7 @@ impl FastIpi {
     }
     fn raise(&mut self, cpu: CpuIndex) {
         if self.signals.raise(cpu) {
-            self.raised |= 1u64.checked_shl(cpu as u32).unwrap_or(0);
+            self.raised[cpu / 64] |= 1 << (cpu % 64);
         }
     }
     /// One MRS or MSR by `cpu` at counter value `now`. Returns the value read,
@@ -381,10 +394,10 @@ mod tests {
         assert!(!ipi.fiq(2) && ipi.fiq(7));
         assert_eq!(ipi.access(2, Register::Status, AccessKind::Read, 0), Ok(0));
         // Nothing raised under the lock: the senders woke the targets.
-        assert_eq!(ipi.take_raised(), 0);
+        assert!((0..8).all(|cpu| !ipi.take_raised(cpu)));
         write(&mut ipi, 0, Register::RequestLocal, 1, 0);
-        assert_eq!(ipi.take_raised(), 1 << 1);
-        assert_eq!(ipi.take_raised(), 0);
+        assert!(ipi.take_raised(1));
+        assert!((0..8).all(|cpu| !ipi.take_raised(cpu)));
     }
 
     /// What the signals leave to the lock: refused requests, deferred,
@@ -426,11 +439,44 @@ mod tests {
         assert_eq!(signals.send(0, Register::RequestLocal, 1), Some(Some(1)));
         // A deferred IPI that fires sets IPI_SR and reports its CPU.
         signals.acknowledge(1);
-        ipi.take_raised();
+        ipi.take_raised(1);
         write(&mut ipi, 0, Register::RequestLocal, 2 << 28 | 1, 2000);
         assert_eq!(ipi.advance(2240), None);
         assert!(ipi.fiq(1));
-        assert_eq!(ipi.take_raised(), 1 << 1);
+        assert!(ipi.take_raised(1));
+    }
+
+    /// Every CPU's raise is kept, however many the machine has: a deferred
+    /// IPI that fires for CPU 64 or above wakes its PE as for any other.
+    #[test]
+    fn deferred_ipis_raise_every_cpu_of_a_large_machine() {
+        let mut ipi = FastIpi::new(
+            (0..130)
+                .map(|index: u8| Affinity {
+                    cluster: index / 16,
+                    cpu: index % 16,
+                })
+                .collect(),
+        );
+        write(&mut ipi, 0, Register::Countdown, 10, 0);
+        for cpu in [63, 64, 129] {
+            let target = cpu as u64;
+            write(
+                &mut ipi,
+                0,
+                Register::RequestGlobal,
+                (2 << 28) | ((target / 16) << 16) | (target % 16),
+                0,
+            );
+        }
+        assert_eq!(ipi.advance(10), None);
+        for cpu in 0..130 {
+            let fired = [63, 64, 129].contains(&cpu);
+            assert_eq!(ipi.fiq(cpu), fired, "CPU {cpu}");
+            assert_eq!(ipi.take_raised(cpu), fired, "CPU {cpu}");
+            assert!(!ipi.take_raised(cpu), "taken once: CPU {cpu}");
+        }
+        assert!(!ipi.take_raised(130), "no such CPU");
     }
 
     #[test]
@@ -465,5 +511,85 @@ mod tests {
             ipi.access(8, Register::Status, AccessKind::Read, 0),
             Err(IpiError::UnknownCpu(8))
         );
+    }
+
+    /// No lost IPI: an acknowledgement racing a send that finds IPI_SR still
+    /// set (so raises and wakes nothing) leaves the receiver, which reads its
+    /// mailbox after the acknowledgement, seeing the sender's mailbox write.
+    /// The store-buffer litmus test with the sender's locked RMW on one side:
+    /// a plain store on the other lets the receiver read the mailbox before
+    /// its clear is visible. Rounds run for at most 1.5 s.
+    #[test]
+    fn an_acknowledgement_racing_a_send_never_loses_it() {
+        use std::{
+            thread,
+            time::{Duration, Instant},
+        };
+        let ipi = t8112();
+        let signals = ipi.signals();
+        let mailbox = Arc::new(AtomicU64::new(0));
+        let arrived = Arc::new(AtomicU64::new(0));
+        let raised = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        // Both threads arrive at barrier `n` before either goes on.
+        let meet = |arrived: &AtomicU64, n: u64| {
+            arrived.fetch_add(1, SeqCst);
+            while arrived.load(SeqCst) < 2 * n {
+                core::hint::spin_loop();
+            }
+        };
+        signals.words[1].pending.store(SR_PENDING, SeqCst);
+        let sender = {
+            let (signals, mailbox, arrived, raised, stop) = (
+                Arc::clone(&signals),
+                Arc::clone(&mailbox),
+                Arc::clone(&arrived),
+                Arc::clone(&raised),
+                Arc::clone(&stop),
+            );
+            thread::spawn(move || {
+                for round in 1u64.. {
+                    meet(&arrived, 2 * round - 1);
+                    if stop.load(SeqCst) {
+                        return;
+                    }
+                    // What a lock-free send does once it has decoded its
+                    // target ([`Signals::send`]).
+                    mailbox.store(round, SeqCst);
+                    raised.store(signals.raise(1), SeqCst);
+                    meet(&arrived, 2 * round);
+                }
+            })
+        };
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        let mut lost = 0u64;
+        let mut rounds = 0u64;
+        for round in 1u64.. {
+            let last = Instant::now() >= deadline || lost != 0;
+            if last {
+                stop.store(true, SeqCst);
+            }
+            meet(&arrived, 2 * round - 1);
+            if last {
+                break;
+            }
+            // A varying delay lines the acknowledgement up with the send
+            // in some rounds whatever the two paths cost in this build.
+            for _ in 0..round % 251 {
+                core::hint::spin_loop();
+            }
+            signals.acknowledge(1);
+            let seen = mailbox.load(SeqCst);
+            meet(&arrived, 2 * round);
+            // Neither the receiver saw the mail nor is its FIQ pending
+            // again for it: the IPI is gone.
+            if seen != round && !raised.load(SeqCst) && signals.words[1].pending.load(SeqCst) == 0 {
+                lost += 1;
+            }
+            signals.words[1].pending.store(SR_PENDING, SeqCst);
+            rounds = round;
+        }
+        sender.join().unwrap();
+        assert_eq!(lost, 0, "IPIs lost in {rounds} rounds");
     }
 }

@@ -1116,6 +1116,8 @@ struct Signalling {
     words: Arc<[AtomicU64; 2]>,
     signalled: u64,
     register_calls: usize,
+    /// The SoC sleeps ([`Devices::waits_on_host`]).
+    asleep: bool,
 }
 
 struct SignalWords {
@@ -1161,8 +1163,10 @@ impl Devices for Signalling {
     fn latched_pins(&mut self, _: usize) -> Option<Lines> {
         Some(Lines::default())
     }
-    fn take_signalled(&mut self) -> u64 {
-        core::mem::take(&mut self.signalled)
+    fn take_signalled(&mut self, pe: usize) -> bool {
+        let raised = self.signalled & 1 << pe != 0;
+        self.signalled &= !(1 << pe);
+        raised
     }
     fn system_register(
         &mut self,
@@ -1180,6 +1184,9 @@ impl Devices for Signalling {
     }
     fn serves_register(&self, encoding: Encoding) -> bool {
         encoding == SERVED
+    }
+    fn waits_on_host(&self) -> bool {
+        self.asleep
     }
     fn local_registers(&self, pe: usize) -> Option<Arc<dyn LocalRegisters>> {
         Some(Arc::new(SignalWords {
@@ -1235,6 +1242,148 @@ fn a_signal_without_the_lock_wakes_its_target_and_raises_its_fiq() {
     assert_ne!(hub.inboxes[1].lines.load(Ordering::SeqCst), epoch);
     assert_eq!(kicks.load(Ordering::Relaxed), 2);
     assert!(target.lines(1, 0).fiq);
+}
+
+/// A board that signals CPUs by number, which may name one no PE runs: a
+/// write of `SERVED` with bit 8 clear completes on the sender's handle for
+/// the CPU its low byte names; with bit 8 set it raises that CPU under the
+/// lock.
+struct Numbered {
+    raised: Vec<bool>,
+}
+
+struct NumberedHandle;
+
+impl LocalRegisters for NumberedHandle {
+    fn register(&self, _: Encoding, _: Option<u64>) -> Option<u64> {
+        None
+    }
+    fn storage(&self, _: Encoding) -> Option<u64> {
+        None
+    }
+    fn send(&self, encoding: Encoding, value: u64) -> Option<Option<usize>> {
+        (encoding == SERVED && value & 1 << 8 == 0).then_some(Some((value & 0xff) as usize))
+    }
+}
+
+impl Devices for Numbered {
+    fn read(&mut self, _: usize, _: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+        Ok(0)
+    }
+    fn write(&mut self, _: usize, _: u64, _: u8, _: u64, _: u64) -> Result<(), DeviceError> {
+        Ok(())
+    }
+    fn lines(&mut self, _: usize, _: u64) -> Lines {
+        Lines::default()
+    }
+    fn latched_pins(&mut self, _: usize) -> Option<Lines> {
+        Some(Lines::default())
+    }
+    fn take_signalled(&mut self, pe: usize) -> bool {
+        self.raised.get_mut(pe).is_some_and(core::mem::take)
+    }
+    fn system_register(
+        &mut self,
+        _: usize,
+        _: Encoding,
+        write: Option<u64>,
+        _: u64,
+    ) -> Option<Result<u64, &'static str>> {
+        self.raised[(write? & 0xff) as usize] = true;
+        Some(Ok(0))
+    }
+    fn serves_register(&self, encoding: Encoding) -> bool {
+        encoding == SERVED
+    }
+    fn local_registers(&self, _: usize) -> Option<Arc<dyn LocalRegisters>> {
+        Some(Arc::new(NumberedHandle))
+    }
+}
+
+/// A signal without the lock to a CPU the board has but no PE runs is
+/// refused (the engine reports it once and goes on) and wakes no one; it
+/// does not index past the PEs. One to a PE still wakes it.
+#[test]
+fn a_signal_to_a_cpu_without_a_pe_is_refused_and_dropped() {
+    let (hub, kicks) = hub(2);
+    let home = SharedDevices::new(
+        Numbered {
+            raised: vec![false; 8],
+        },
+        Arc::clone(&hub),
+    );
+    let mut sender = home.worker();
+    for pe in 0..2 {
+        hub.inboxes[pe].sleeping.store(true, Ordering::SeqCst);
+    }
+    let epochs = |hub: &Hub| -> Vec<u64> {
+        hub.inboxes
+            .iter()
+            .map(|inbox| inbox.lines.load(Ordering::SeqCst))
+            .collect()
+    };
+    let before = epochs(&hub);
+    assert!(matches!(
+        sender.system_register(0, SERVED, Some(5), 0),
+        Some(Err(_))
+    ));
+    assert_eq!(kicks.load(Ordering::Relaxed), 0);
+    assert_eq!(epochs(&hub), before);
+    let woken = |home: &SharedDevices<Numbered>| {
+        home.board.woken[Call::Register as usize].load(Ordering::Relaxed)
+    };
+    assert_eq!(woken(&home), 0);
+    assert_eq!(sender.system_register(0, SERVED, Some(1), 0), Some(Ok(0)));
+    assert_eq!(kicks.load(Ordering::Relaxed), 1);
+    assert_eq!(woken(&home), 1, "counted in DEVICE WAKES register=");
+}
+
+/// A PE numbered past 63 whose FIQ a locked call raised is told and woken
+/// as any other: the board keeps a raise for every PE.
+#[test]
+fn a_locked_signal_wakes_a_pe_past_63() {
+    let (hub, kicks) = hub(70);
+    let home = SharedDevices::new(
+        Numbered {
+            raised: vec![false; 70],
+        },
+        Arc::clone(&hub),
+    );
+    let mut sender = home.worker();
+    hub.inboxes[66].sleeping.store(true, Ordering::SeqCst);
+    let epoch = hub.inboxes[66].lines.load(Ordering::SeqCst);
+    assert_eq!(
+        sender.system_register(0, SERVED, Some(1 << 8 | 66), 0),
+        Some(Ok(0))
+    );
+    assert_ne!(hub.inboxes[66].lines.load(Ordering::SeqCst), epoch);
+    assert_eq!(kicks.load(Ordering::Relaxed), 1);
+    assert!(!home.with(|devices| devices.raised[66]), "taken once");
+}
+
+/// A signal still pending when the SoC wakes reaches its PE: its FIQ was
+/// held low while the SoC slept, so the PE, asleep in WFI, is told and woken
+/// when the SoC's sleep ends, though no latched pin changed.
+#[test]
+fn a_signal_pending_when_the_soc_wakes_wakes_its_target() {
+    let (hub, kicks) = hub(2);
+    let home = SharedDevices::new(Signalling::default(), Arc::clone(&hub));
+    let mut sender = home.worker();
+    let mut target = home.worker();
+    home.with(|devices| devices.asleep = true);
+    assert_eq!(sender.system_register(0, SERVED, Some(1), 0), Some(Ok(0)));
+    assert!(
+        !target.pins(1).unwrap().fiq,
+        "held low while the SoC sleeps"
+    );
+    // The target looked at its lines and sleeps again.
+    let epoch = hub.inboxes[1].lines.load(Ordering::SeqCst);
+    hub.inboxes[1].sleeping.store(true, Ordering::SeqCst);
+    let before = kicks.load(Ordering::Relaxed);
+    home.with(|devices| devices.asleep = false);
+    assert_ne!(hub.inboxes[1].lines.load(Ordering::SeqCst), epoch);
+    assert_eq!(kicks.load(Ordering::Relaxed), before + 1);
+    assert!(target.pins(1).unwrap().fiq);
 }
 
 /// Invariant: a shared board publishes only latched pins, never a PE's own

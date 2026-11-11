@@ -2626,7 +2626,8 @@ fn fast_ipis_raise_and_clear_the_target_pes_fiq() {
     assert_eq!(devices.latched_pins(2).map(|pins| pins.fiq), Some(false));
     assert_eq!(local.register(status, Some(1)), Some(0));
     assert!(!devices.lines(2, 0).fiq);
-    assert_eq!(devices.take_signalled(), 1 << 2, "the locked send above");
+    assert!(devices.take_signalled(2), "the locked send above");
+    assert!(!devices.take_signalled(2) && !devices.take_signalled(0));
     assert_eq!(sender.send(status, 1), None, "IPI_SR is the PE's own");
     assert_eq!(
         devices.system_register(0, Encoding::new(3, 5, 15, 2, 0), None, 0),

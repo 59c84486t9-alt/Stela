@@ -1120,10 +1120,8 @@ impl Devices for AppleDevices {
         })
     }
 
-    fn take_signalled(&mut self) -> u64 {
-        self.ipi
-            .as_mut()
-            .map_or(0, crate::ipi::FastIpi::take_raised)
+    fn take_signalled(&mut self, cpu: usize) -> bool {
+        self.ipi.as_mut().is_some_and(|ipi| ipi.take_raised(cpu))
     }
 
     fn deadline(&mut self, now: u64) -> Option<u64> {

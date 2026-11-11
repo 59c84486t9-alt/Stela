@@ -567,11 +567,11 @@ pub trait Devices {
     fn latched_pins(&mut self, cpu: usize) -> Option<Lines> {
         self.pins(cpu)
     }
-    /// The PEs whose [`LocalRegisters::fiq`] a call under the devices' lock
-    /// raised since the last call, a bit each: they must look at their
-    /// lines again.
-    fn take_signalled(&mut self) -> u64 {
-        0
+    /// Whether a call under the devices' lock raised PE `cpu`'s
+    /// [`LocalRegisters::fiq`] since the last call for it: it must look at
+    /// its lines again. Kept for every PE the board has.
+    fn take_signalled(&mut self, _cpu: usize) -> bool {
+        false
     }
     /// The next counter value at which a device changes state by itself.
     fn deadline(&mut self, _now: u64) -> Option<u64> {

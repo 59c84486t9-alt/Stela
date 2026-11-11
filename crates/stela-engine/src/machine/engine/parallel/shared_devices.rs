@@ -144,6 +144,16 @@ impl<D: Devices> Board<D> {
         let asleep = devices.waits_on_host();
         if self.asleep.load(Ordering::Relaxed) != asleep {
             self.asleep.store(asleep, Ordering::Release);
+            if !asleep {
+                // Each PE's own FIQ ([`LocalRegisters::fiq`]) was held low
+                // while the SoC slept, and no latched pin tells it that one
+                // set meanwhile is now up: every PE looks at its lines
+                // again. Woken under the lock, as the SoC wakes rarely.
+                for pe in 0..self.hub.pes() {
+                    self.hub.lines_changed_unwoken(pe);
+                    self.hub.wake(pe);
+                }
+            }
         }
         if devices.take_host_service() {
             self.hub.request_service();
@@ -238,7 +248,8 @@ impl<D: Devices> Held<'_, D> {
         }
         // PEs whose own FIQ word the call set (a deferred fast IPI that
         // fired): they read it themselves, so only the epoch tells them.
-        let mut signalled = devices.take_signalled() & !wake_bit(cpu);
+        // The caller reads its own after the call.
+        devices.take_signalled(cpu);
         for pe in self.board.hub.others(cpu) {
             // The latched pins alone: each PE adds the FIQ it reads itself
             // ([`LocalRegisters::fiq`]), which changes without the lock.
@@ -250,9 +261,8 @@ impl<D: Devices> Held<'_, D> {
             // The receiver may read its pins as soon as the epoch changes,
             // before this call releases the devices' lock.
             self.board.publish_pins(pe, pins);
-            let bit = wake_bit(pe);
-            if lines != seen[pe] || signalled & bit != 0 {
-                signalled &= !bit;
+            let signalled = devices.take_signalled(pe);
+            if lines != seen[pe] || signalled {
                 seen[pe] = lines;
                 self.board.hub.lines_changed_unwoken(pe);
                 match wake_bit(pe) {
@@ -750,15 +760,31 @@ impl<D: Devices> Devices for SharedDevices<D> {
             return Some(Ok(value));
         }
         // A signal to another PE that needs no lock (an immediate fast
-        // IPI): the target looks at its lines again at once.
+        // IPI): the target looks at its lines again at once. One to a CPU
+        // the board has but no PE runs (a DeviceTree listing more CPUs than
+        // PEs) is refused, which the engine reports once and goes on: no PE
+        // reads that CPU's word, so the signal is dropped, as a locked one
+        // is ([`Held::notify`] reaches only PEs).
         if let Some(value) = write
             && let Some(sent) = self
                 .local_registers_of(cpu)
                 .and_then(|local| local.send(encoding, value))
         {
             if let Some(pe) = sent {
-                self.board.hub.lines_changed_unwoken(pe);
-                self.board.hub.wake(pe);
+                if pe >= self.board.hub.pes() {
+                    return Some(Err("signal to a CPU that no PE runs is dropped"));
+                }
+                let hub = &self.board.hub;
+                hub.lines_changed_unwoken(pe);
+                // Timed as a locked call's wakes are (`DEVICE WAKES
+                // register=`): a sleeping target's core takes an interrupt,
+                // which this exit pays.
+                let start = hub.ticks();
+                hub.wake(pe);
+                let spent = hub.ticks().wrapping_sub(start);
+                let call = Call::Register as usize;
+                self.board.woken[call].fetch_add(1, Ordering::Relaxed);
+                self.board.wake_ticks[call].fetch_add(spent, Ordering::Relaxed);
             }
             return Some(Ok(0));
         }
