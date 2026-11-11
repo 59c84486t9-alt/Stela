@@ -32,6 +32,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
+        with:
+          # No later step pushes, and a pull request's code runs here.
+          persist-credentials: false
 
       - name: Install Rust
         run: |
@@ -69,6 +72,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v5
+        with:
+          # No later step pushes, and a pull request's code runs here.
+          persist-credentials: false
 
       - name: Put LLVM on PATH
         run: |
