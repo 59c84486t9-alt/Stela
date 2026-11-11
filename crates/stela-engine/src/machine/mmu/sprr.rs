@@ -22,10 +22,10 @@ pub struct Sprr {
     /// `S3_6_C15_C3_0` and `S3_6_C15_C3_1`: no public name. Each holds sixteen
     /// 2-bit fields, field `index` at bits `2*index+1:2*index`, indexed by the
     /// same SPRR permission index: the 26A434 kernel's pmap reads
-    /// `S3_6_C15_C3_0` that way. A field of 1 keeps that index's EL field
-    /// writable after the locks, `S3_6_C15_C3_1` in SPRR_PERM_EL1 and
-    /// `S3_6_C15_C3_0` in SPRR_PERM_EL0 ([`sprr_unlocked`]). They do not
-    /// change an access.
+    /// `S3_6_C15_C3_0` that way. Bit `k` of a field keeps bit `k` of that
+    /// index's EL field writable after the locks, `S3_6_C15_C3_1` in
+    /// SPRR_PERM_EL1 and `S3_6_C15_C3_0` in SPRR_PERM_EL0
+    /// ([`sprr_unlocked`]). They do not change an access.
     pub fields: [u64; 2],
 }
 
@@ -43,30 +43,36 @@ impl Sprr {
     }
 }
 
-/// A field bit that keeps index's EL half (bits 1:0) of its SPRR_PERM
-/// nibble writable after the locks.
-const UNLOCK_EL: u64 = 1;
-/// A field bit that keeps the index's GL half (bits 3:2) writable.
-const UNLOCK_GL: u64 = 2;
-
 /// The SPRR_PERM bits that stay writable after the locks under `fields`
-/// (`S3_6_C15_C3_1` for SPRR_PERM_EL1, `S3_6_C15_C3_0` for SPRR_PERM_EL0).
-/// SPTM 26A434 sets fields 2 and 9 of `S3_6_C15_C3_1` to 1 before locking
-/// SPRR (`__text+0xbe2c`), and every SPRR_PERM_EL1 write of the 26A434
-/// kernel changes only the EL half of index 2 (`0xa` to `0xb`,
-/// `0xfffffe000bd68db4`) or of index 9 (`0x2` to `0x3`,
-/// `0xfffffe000bd72344`): bit 0 unlocks the EL half. SPTM writes
-/// `S3_6_C15_C3_0` per thread and the kernel rewrites SPRR_PERM_EL0 per
-/// thread (inference from that pairing; no public description). Under
-/// `-restore` SPTM writes `0x40800` there, field 5 = 2; bit 1 is taken to
-/// unlock the GL half, the other half of the same nibble (inference: the
-/// two field bits match the nibble's two permission halves).
+/// (`S3_6_C15_C3_1` for SPRR_PERM_EL1, `S3_6_C15_C3_0` for SPRR_PERM_EL0):
+/// bit `k` of field `index` keeps bit `k` of that index's EL field, bit
+/// `4*index+k`, writable; no field bit unlocks a GL field. Each observed
+/// toggle changes exactly the bit its field names:
+/// - SPTM 26A434 sets fields 2 and 9 of `S3_6_C15_C3_1` to 1 before locking
+///   SPRR (`__text+0xbe2c`), and every SPRR_PERM_EL1 write of the 26A434
+///   kernel turns index 2 from `0xa` to `0xb` (`0xfffffe000bd68db4`) or
+///   index 9 from `0x2` to `0x3` (`0xfffffe000bd72344`): `r--` to `rw-`,
+///   EL bit 0.
+/// - SPTM 26B123 (T8112, file `0x109480`) writes `S3_6_C15_C3_0` on an
+///   address-space switch as field 5 = 2 for one flag of the space and
+///   field 9 = 1 for another (`0x40800` both, as under `-restore`), after
+///   it resets SPRR_PERM_EL0 to its default `0x2010_0020_3010_0000` (file
+///   `0xcc89c`, from GL2) and `S3_6_C15_C3_0` to 0 (file `0x1091d8`). That
+///   default holds index 5 = `r-x` and index 9 = `r--`. JavaScriptCore's
+///   JIT write toggle (26B123 `0x1a15d0a08`) inserts nibble 5 of the
+///   commpage word at `0xfffffc110` into SPRR_PERM_EL0, `r-x` to `rw-`,
+///   EL bit 1; dyld's TPRO toggle writes SPRR_PERM_EL0 from the commpage,
+///   index 9 `r--` to `rw-`, EL bit 0. The kernel's thread switch
+///   (26B123 `0xfffffe000bdacb4c`) restores a thread's saved SPRR_PERM_EL0
+///   after the address-space switch.
+///
+/// That a field bit unlocks the same bit of the EL field, rather than the
+/// whole EL field, is an inference from those pairs (field 1: `r--`/`rw-`,
+/// field 2: `r-x`/`rw-`); no public description exists.
 pub fn sprr_unlocked(fields: u64) -> u64 {
     (0..16).fold(0, |mask, index| {
         let field = (fields >> (2 * index)) & 3;
-        let el = if field & UNLOCK_EL != 0 { 3 } else { 0 };
-        let gl = if field & UNLOCK_GL != 0 { 3 << 2 } else { 0 };
-        mask | (el | gl) << (4 * index)
+        mask | field << (4 * index)
     })
 }
 
@@ -188,13 +194,23 @@ mod tests {
     }
 
     #[test]
-    fn unlock_fields_keep_the_el_and_gl_halves_of_their_index() {
+    fn unlock_field_bits_keep_the_same_bits_of_their_index_el_field() {
         assert_eq!(sprr_unlocked(0), 0);
-        assert_eq!(sprr_unlocked(1 << 4), 0x3 << 8);
-        assert_eq!(sprr_unlocked(2 << 10), 0xc << 20);
-        assert_eq!(sprr_unlocked(3 << 30), 0xf << 60);
-        // SPTM's restore-mode value: field 5 GL, field 9 EL.
-        assert_eq!(sprr_unlocked(0x40800), 0xc << 20 | 0x3 << 36);
+        assert_eq!(sprr_unlocked(1 << 4), 0x1 << 8);
+        assert_eq!(sprr_unlocked(2 << 10), 0x2 << 20);
+        assert_eq!(sprr_unlocked(3 << 30), 0x3 << 60);
+        // SPTM's per-space value: field 5 = 2 (the JIT toggle, r-x to rw-),
+        // field 9 = 1 (the TPRO toggle, r-- to rw-).
+        let unlocked = sprr_unlocked(0x40800);
+        assert_eq!(unlocked, 0x2 << 20 | 0x1 << 36);
+        let default = 0x2010_0020_3010_0000_u64;
+        let jit = default & !(0xf << 20) | 0x3 << 20;
+        let tpro = default & !(0xf << 36) | 0x3 << 36;
+        assert_eq!((default ^ jit) & !unlocked, 0);
+        assert_eq!((default ^ tpro) & !unlocked, 0);
+        // Index 5's GL field, and index 5 to ---, stay locked.
+        assert_ne!((default ^ (default | 0x4 << 20)) & !unlocked, 0);
+        assert_ne!((default ^ (default & !(0xf << 20))) & !unlocked, 0);
     }
 
     #[test]

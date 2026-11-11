@@ -923,28 +923,44 @@ fn sprr_locks_bind_outside_the_guarded_level() {
             "{value:#x}"
         );
     }
-    // SPRR_PERM_EL0 follows S3_6_C15_C3_0, here field 9 only.
+    // SPRR_PERM_EL0 follows S3_6_C15_C3_0, here field 9 = 1 only: from
+    // SPTM's default value, the TPRO toggle (index 9 r-- to rw-) passes.
+    const DEFAULT_EL0: u64 = 0x2010_0020_3010_0000;
+    const TPRO_RW: u64 = DEFAULT_EL0 | 1 << 36;
+    const JIT_RW: u64 = DEFAULT_EL0 | 2 << 20;
+    cpu.pstate.guarded = true;
+    write(&mut cpu, SPRR_PERM_EL0, DEFAULT_EL0);
+    cpu.pstate.guarded = false;
     assert!(matches!(
-        write(&mut cpu, SPRR_PERM_EL0, 3 << 36),
+        write(&mut cpu, SPRR_PERM_EL0, TPRO_RW),
         Outcome::Written(_)
     ));
     assert!(matches!(
-        write(&mut cpu, SPRR_PERM_EL0, 3 << 36 | 1),
+        write(&mut cpu, SPRR_PERM_EL0, TPRO_RW & !(2 << 36)),
         Outcome::Refused(_)
     ));
-    // A field of 2 (SPTM's restore-mode field 5) unlocks only the GL
-    // half of its index.
+    assert!(matches!(
+        write(&mut cpu, SPRR_PERM_EL0, JIT_RW),
+        Outcome::Refused(_)
+    ));
+    // SPTM's value for a JIT space adds field 5 = 2: the JIT write toggle
+    // (index 5 r-x to rw-) passes both ways, index 5's other EL bit and
+    // its GL field stay locked.
     cpu.pstate.guarded = true;
     write(&mut cpu, SPRR_FIELDS_0, 2 << 10 | 1 << 18);
     cpu.pstate.guarded = false;
-    assert!(matches!(
-        write(&mut cpu, SPRR_PERM_EL0, 3 << 36 | 0xc << 20),
-        Outcome::Written(_)
-    ));
-    assert!(matches!(
-        write(&mut cpu, SPRR_PERM_EL0, 3 << 36 | 0xf << 20),
-        Outcome::Refused(_)
-    ));
+    for (value, allowed) in [
+        (JIT_RW, true),
+        (DEFAULT_EL0, true),
+        (DEFAULT_EL0 & !(1 << 20), false),
+        (DEFAULT_EL0 | 4 << 20, false),
+    ] {
+        assert_eq!(
+            matches!(write(&mut cpu, SPRR_PERM_EL0, value), Outcome::Written(_)),
+            allowed,
+            "{value:#x}"
+        );
+    }
 }
 
 #[test]
