@@ -522,6 +522,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
             {
                 return false;
             }
+            // An exit in the page to a PC without a block yet, as the
+            // finder says without the lock: it waits for the fetch that
+            // compiles the block, which links it under the lock and checks
+            // it all again there ([`Self::link_direct_exit`]). In a launch
+            // nearly every new block is reached so, and the lock taken here
+            // found nothing to do.
+            if (next_pc ^ block.pc) & !(FETCH_PAGE - 1) == 0 {
+                let physical = block.physical.wrapping_add(next_pc.wrapping_sub(block.pc));
+                let code = &self.code;
+                if code
+                    .finder
+                    .find(&code.blocks, next_pc, physical, block.variant)
+                    == Some(None)
+                {
+                    let incarnation = code.blocks.record(index).incarnation();
+                    self.direct_exit = Some((index, incarnation, next_pc, word));
+                    return false;
+                }
+            }
         }
         let code = Arc::clone(&self.code);
         let block = &code.blocks[index];

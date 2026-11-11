@@ -933,6 +933,54 @@ fn an_install_takes_the_code_lock_once_and_a_found_block_never() {
     assert_eq!(total(&second) - before - 1, 0);
 }
 
+/// A direct exit within its page to a PC that has no block yet waits for
+/// the fetch that compiles it without taking the code lock (the finder
+/// says so); that fetch's install and its link take one hold each, and the
+/// block, which only the link enters, takes no block table entry. An exit
+/// to a PC that has a block links at once, in one hold.
+#[test]
+fn an_exit_to_a_pc_without_a_block_waits_for_it_without_the_code_lock() {
+    let mut memory = vec![0u8; 4 << 18];
+    let (mut first, _second, _hub) = shared_pair_of(&linked_groups(1), &mut memory);
+    let base = first.cpu.pc;
+    let Ok(Fetched::Block(from)) = first.fetch_block(base, false) else {
+        panic!("a block")
+    };
+    let total = |machine: &Machine<FakeHost, NoDevices>| machine.code.cache().lock.acquired;
+    let before = total(&first);
+    assert!(!first.link(from, base + 8, ExitKind::Direct));
+    assert_eq!(total(&first) - before - 1, 0);
+    assert!(
+        first
+            .direct_exit
+            .is_some_and(|(block, _, target, _)| block == from && target == base + 8)
+    );
+    let before = total(&first);
+    let Ok(Fetched::Block(to)) = first.fetch_block(base + 8, false) else {
+        panic!("a block")
+    };
+    assert_eq!(
+        total(&first) - before - 1,
+        2,
+        "the install's and the link's"
+    );
+    assert!(first.code.blocks.record(from).chained(0));
+    let pc = base + 8;
+    let key = target_key(&first, pc);
+    let entry = first.code.table.find(target_slot(&first, pc), pc, key);
+    assert!(!(entry.pc == pc && entry.block as usize == to));
+    let Ok(Fetched::Block(again)) = first.fetch_block(base + 16, false) else {
+        panic!("a block")
+    };
+    assert!(matches!(
+        first.fetch_block(base + 24, false),
+        Ok(Fetched::Block(_))
+    ));
+    let before = acquired(&first, board::LockSite::Link);
+    assert!(first.link(again, base + 24, ExitKind::Direct));
+    assert_eq!(acquired(&first, board::LockSite::Link), before + 1);
+}
+
 /// A link that a retirement cut, whose target went, and that another PE
 /// made again from the same block to the target compiled anew enters the
 /// new block, as its bytes say: the source keeps its incarnation and is
