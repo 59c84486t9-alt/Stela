@@ -563,3 +563,26 @@ fn a_cell_changed_on_another_core_ends_its_stamps_there() {
         assert!(after > 100, "{after}");
     });
 }
+
+/// Every stamped cell's tail fits, whatever its number's displacement, the
+/// instructions it ran and how far its block is.
+#[test]
+fn stamped_tails_fit_for_every_cell_number() {
+    let max_ran = (1 << (u32::BITS - ExitWord::RAN_SHIFT)) - 1;
+    for number in [0, 1, 7, 8, 255, 4096, STAMPED_CELLS as u32 - 1] {
+        for (ran, entry) in [(1, 0x1_0400), (max_ran, 0x7000_0000)] {
+            let tail = stamped_tail(
+                0x1_0000,
+                0x2_0000,
+                number,
+                0x3000,
+                ExitKind::Direct,
+                ran,
+                7,
+                entry,
+                0x1_0800,
+            );
+            assert!(tail.is_some(), "cell {number} ran {ran}");
+        }
+    }
+}

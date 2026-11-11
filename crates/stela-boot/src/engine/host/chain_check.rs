@@ -3,20 +3,25 @@
 //! (`stela_compiler::x86_64::chain`) on this core's stack, heap and code
 //! arena, and nothing else of the engine's.
 //!
-//! Three rings of 32 stub blocks, each block only its exit, alternate between
+//! Four rings of 32 stub blocks, each block only its exit, alternate between
 //! two guest pages as far transfers do:
 //! - `near`: thunks ([`chain::thunk`]): the budget, the gate and a jump, as
 //!   direct exits in their page take;
 //! - `cell`: cell tails ([`chain::cell_tail`]) through the cell probe, as
 //!   direct exits out of their page take;
 //! - `table`: lookup tails ([`chain::lookup_tail`]) through the table probe,
-//!   as RET, BR and BLR take.
+//!   as RET, BR and BLR take;
+//! - `stamped`: stamped tails ([`chain::stamped_tail`]), as hot direct exits
+//!   out of their page take: a direct jump while this PE's stamp holds, after
+//!   the first transfer's stamping cell probe.
 //!
-//! Each runs until its budget of transfers is spent; the line gives the best
-//! of three runs in ns per transfer, then the pieces of a probe transfer
-//! apart ([`RAW`]). The same code in a Linux process on a Ryzen 7 9800X3D
-//! takes 1.4, 2.4 and 2.5 ns, so a line well above that places a cost in
-//! this machine's environment rather than in the engine's state.
+//! Each runs until its budget of transfers is spent; the line
+//! (`stela_boot_core::chain_check::transfer_line`) gives the best of three
+//! runs in ns per transfer, the share of the stamped ring's transfers its
+//! stamps sent straight on, each transfer as a multiple of this core's own
+//! host CALL and RET pair, then the pieces of a probe transfer apart
+//! ([`RAW`]). Every figure is measured here, so the line needs no outside
+//! baseline.
 use super::local;
 use crate::{apic::rdtsc, output};
 use alloc::vec::Vec;
@@ -35,7 +40,8 @@ const BLOCKS: usize = 32;
 /// Transfers per timed run.
 const TRANSFERS: u64 = 1 << 20;
 /// Bytes per stub block, per tail and per thunk.
-const STRIDE: usize = 64;
+const STRIDE: usize = 256;
+const _: () = assert!(STRIDE >= chain::STAMPED_TAIL_BYTES);
 const PAGES: [u64; 2] = [0x1_8000_0000, 0x1_8000_1000];
 const DISPATCHER: usize = 0;
 const ENTRY: usize = 0x1000;
@@ -91,6 +97,7 @@ enum Ring {
     Near,
     Cell,
     Table,
+    Stamped,
 }
 
 fn pc(block: usize) -> u64 {
@@ -135,6 +142,25 @@ fn ring_code(ring: Ring, base: u64, table: &mut LookupTable, key: u64) -> Option
                 let probe = base + (DISPATCHER + chain::PROBE_ENTRY) as u64;
                 chain::lookup_tail(tail, word, 1, probe)?.to_vec()
             }
+            Ring::Stamped => {
+                let current = table.find(table.slot(pc(next), key), pc(next), key);
+                let cell = table.link_cell(tail, pc(next), Some(current));
+                let number = table.site_cell_number(tail)?;
+                table.note_stamped(number);
+                let probe = base + (DISPATCHER + chain::STAMPING_PROBE_ENTRY) as u64;
+                chain::stamped_tail(
+                    tail,
+                    cell,
+                    number,
+                    pc(next),
+                    word,
+                    1,
+                    next as u32,
+                    block_at(next),
+                    probe,
+                )?
+                .to_vec()
+            }
         };
         put(TAILS_AT + block * STRIDE, &tail_code);
     }
@@ -152,13 +178,19 @@ pub(crate) fn run(pe: usize, host: &mut impl Host) {
         ));
         return;
     };
-    let mut results = [0.0_f64; 3];
-    for (slot, ring) in [Ring::Near, Ring::Cell, Ring::Table]
+    let mut results = [0.0_f64; 4];
+    let mut stamped_hits = 0;
+    for (slot, ring) in [Ring::Near, Ring::Cell, Ring::Table, Ring::Stamped]
         .into_iter()
         .enumerate()
     {
         match measure(ring, host, installed) {
-            Some(ns) => results[slot] = ns,
+            Some((ns, hits)) => {
+                results[slot] = ns;
+                if matches!(ring, Ring::Stamped) {
+                    stamped_hits = hits;
+                }
+            }
             None => {
                 output::arguments(format_args!(
                     "CHAIN CHECK pe={pe} unavailable: an emitter refused\n"
@@ -167,7 +199,7 @@ pub(crate) fn run(pe: usize, host: &mut impl Host) {
             }
         }
     }
-    let mut raw = alloc::string::String::new();
+    let mut raw = Vec::new();
     for (kernel, (name, _)) in RAW.iter().enumerate() {
         let code = raw_code(kernel);
         let mut bytes = alloc::vec![0xcc_u8; BYTES];
@@ -198,21 +230,26 @@ pub(crate) fn run(pe: usize, host: &mut impl Host) {
             burst = burst.min(rdtsc().wrapping_sub(started));
         }
         let burst = burst as f64 * 1e9 / hz as f64 / (BURST_LOOPS * 8) as f64;
-        raw.push_str(&alloc::format!(" {name}={ns:.2}/{burst:.2}"));
+        raw.push((*name, ns, burst));
     }
     let (efer, spec_ctrl, cr4) = speculation_controls();
     output::arguments(format_args!(
         "CHAIN CHECK pe={pe} code={:#x} efer={efer:#x} spec_ctrl={spec_ctrl} cr4={cr4:#x}\n",
         installed.0
     ));
-    output::arguments(format_args!(
-        "CHAIN CHECK pe={pe} ns/transfer near={:.2} cell={:.2} table={:.2} (a Ryzen 9800X3D host: 1.4 / 2.4 / 2.5); ns/op long/burst{raw} (host: callret=0.8 push=0.4 rmw=0.2 jump=0.3)\n",
-        results[0], results[1], results[2]
-    ));
+    let transfers = [
+        ("near", results[0]),
+        ("cell", results[1]),
+        ("table", results[2]),
+        ("stamped", results[3]),
+    ];
+    let line = stela_boot_core::chain_check::transfer_line(pe, &transfers, stamped_hits, &raw);
+    output::arguments(format_args!("{line}\n"));
 }
 
-/// One ring's best ns per transfer, in the region `installed`.
-fn measure(ring: Ring, host: &mut impl Host, installed: NativeCode) -> Option<f64> {
+/// One ring's best ns per transfer, in the region `installed`, and the
+/// percentage of its transfers that stamps sent straight on.
+fn measure(ring: Ring, host: &mut impl Host, installed: NativeCode) -> Option<(f64, u64)> {
     let base = installed.0 as u64;
     let mut table = LookupTable::with_entries(chain::MIN_LOOKUP_ENTRIES);
     let mut itlb = LookupTable::itlb();
@@ -233,6 +270,9 @@ fn measure(ring: Ring, host: &mut impl Host, installed: NativeCode) -> Option<f6
             LookupEntry::page(pc(block) & !0xfff, context, key),
         );
     }
+    // As the engine runs: the cell probe counts in the stamped cells.
+    let cells = table.stamped_cells();
+    let stamps = table.new_stamps();
     let code = ring_code(ring, base, &mut table, key)?;
     host.patch(installed, &code);
     let mut control = alloc::boxed::Box::new(ChainControl {
@@ -241,6 +281,8 @@ fn measure(ring: Ring, host: &mut impl Host, installed: NativeCode) -> Option<f6
         table: table.address(),
         itlb: itlb.address(),
         masks: [table.mask(), itlb.mask()],
+        stamps,
+        cells,
         ..ChainControl::default()
     });
     let mut state = alloc::boxed::Box::new(GuestState::default());
@@ -259,8 +301,13 @@ fn measure(ring: Ring, host: &mut impl Host, installed: NativeCode) -> Option<f6
         core::hint::black_box(unsafe { entry(&raw mut *state) });
         best = best.min(rdtsc().wrapping_sub(started));
     }
+    // SAFETY: `stamps` is the table's, which lives.
+    let hits = unsafe { chain::stamp_counts(stamps) }[chain::StampCount::Hits as usize];
     drop((table, itlb));
-    Some(best as f64 * 1e9 / hz as f64 / TRANSFERS as f64)
+    Some((
+        best as f64 * 1e9 / hz as f64 / TRANSFERS as f64,
+        hits * 100 / (3 * TRANSFERS),
+    ))
 }
 
 /// EFER (AutoIBRS is bit 21), IA32_SPEC_CTRL (IBRS bit 0, STIBP 1, SSBD 2,
@@ -284,8 +331,6 @@ fn speculation_controls() -> (u64, alloc::string::String, u64) {
     };
     let cr4: u64;
     // SAFETY: reading CR4 at CPL0 has no effect.
-    unsafe {
-        core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags))
-    };
+    unsafe { core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack, preserves_flags)) };
     (efer, spec_ctrl, cr4)
 }

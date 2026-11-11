@@ -2382,8 +2382,9 @@ fn stamp(asm: &mut crate::x86_64::asm::Asm) {
     asm.bind(kept);
 }
 
-/// Bytes in a [`stamped_tail`].
-pub const STAMPED_TAIL_BYTES: usize = 128;
+/// Bytes in a [`stamped_tail`]: 130 at most, with a 32-bit displacement
+/// for the stamp of a cell numbered 8 or above.
+pub const STAMPED_TAIL_BYTES: usize = 144;
 
 /// The tail at host address `at` of a hot direct exit to `target` out of
 /// its page, whose stamped cell `number` at `cell` held `block`, entered at

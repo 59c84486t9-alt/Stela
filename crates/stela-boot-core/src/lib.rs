@@ -18,6 +18,7 @@ pub mod audio_check_samples;
 pub mod bluetooth_dsbr;
 pub mod boot_progress;
 pub mod bundle;
+pub mod chain_check;
 pub mod console_lines;
 #[cfg(feature = "native-acpi")]
 pub mod crs;
