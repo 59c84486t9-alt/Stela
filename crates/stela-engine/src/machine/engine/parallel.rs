@@ -364,12 +364,12 @@ pub struct Counts {
     pub lookup_forgets: [u64; 4],
     /// Its ITLB's fills, drops and forgotten contexts by where they came
     /// from ([`super::Statistics::itlb_sources`]).
-    /// GENTER completed natively and by the engine, then GEXIT's, SVC's
-    /// and ERET's ([`super::Statistics::native_transitions`]).
-    pub transitions: [u64; 8],
-    /// Why SVC, ERET, GENTER and GEXIT took the engine path, in kind order
+    /// GENTER completed natively and by the engine, then GEXIT's
+    /// ([`super::Statistics::native_transitions`]).
+    pub transitions: [u64; 4],
+    /// Why GENTER, then GEXIT, took the engine path
     /// ([`super::Statistics::transition_misses`]).
-    pub transition_misses: [u64; 4 * super::transitions::miss::REASONS],
+    pub transition_misses: [u64; 2 * super::transitions::miss::REASONS],
     pub itlb_sources: [u64; 12],
     /// Its stamped transfers ([`chain::StampCount`]'s order), the exits it
     /// gave a stamped tail, how many exits had one when it last looked, then
@@ -1821,13 +1821,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 statistics.engine_transitions[stela_compiler::x86_64::transition::GUARDED_ENTER],
                 statistics.native_transitions[stela_compiler::x86_64::transition::GUARDED_EXIT],
                 statistics.engine_transitions[stela_compiler::x86_64::transition::GUARDED_EXIT],
-                statistics.native_transitions[stela_compiler::x86_64::transition::SUPERVISOR_CALL],
-                statistics.engine_transitions[stela_compiler::x86_64::transition::SUPERVISOR_CALL],
-                statistics.native_transitions[stela_compiler::x86_64::transition::EXCEPTION_RETURN],
-                statistics.engine_transitions[stela_compiler::x86_64::transition::EXCEPTION_RETURN],
             ],
             transition_misses: {
-                let mut misses = [0; 4 * super::transitions::miss::REASONS];
+                let mut misses = [0; 2 * super::transitions::miss::REASONS];
                 misses.copy_from_slice(statistics.transition_misses.as_flattened());
                 misses
             },
