@@ -184,7 +184,7 @@ pub fn typed_partitions<R: ReadAt>(
 /// from the factory or the restore that creates it (`restored_external`), and
 /// recoveryOS needs it: `apfs_boot_util`'s `mount_phase_one` ignores a missing
 /// Update volume but aborts the boot without xART (`xART volume mount failed`,
-/// recoveryOS boot rec-r7).
+/// seen in a recoveryOS boot).
 pub fn require_system_container<R: ReadAt>(namespace: &mut R) -> Result<()> {
     let isc = gpt::Guid::parse(ISC_PARTITION_TYPE).expect("constant GUID");
     let missing =
