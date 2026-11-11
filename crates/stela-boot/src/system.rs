@@ -756,7 +756,6 @@ fn load(
         image,
         placement,
         screen,
-        apic_base,
         resident,
         ..
     } = image;
@@ -803,7 +802,6 @@ fn load(
     let capture = unsafe {
         crate::native_smp::firmware::Capture::read(native_processors.physical as *const u8)
     };
-    let sender = crate::apic::Apic::new(apic_base, apic_base & crate::apic::BASE_ADDRESS);
     crate::status::begin("Taking control of the other processors");
     crate::output::leave_boot_services();
     // SAFETY: no protocol or pool allocation outlives this call; every page
@@ -831,6 +829,21 @@ fn load(
     // guest RAM, including workers that will later receive their owned SIPI.
     // The BSP alone sends ICR commands, with firmware IRQ handlers excluded.
     unsafe { asm!("cli", options(nomem, nostack)) };
+    // x2APIC whenever CPUID offers it, from here on: the firmware no longer
+    // runs on this processor, and every later APIC handle is made from the
+    // base returned here (the handoff's) or read afresh. The APs take the
+    // same mode as they enter Stela (`native_smp::executor`).
+    // SAFETY: CPL0, interrupts masked, no APIC handle of this processor made.
+    let apic_base = unsafe { crate::apic::prefer_x2apic() };
+    let sender = crate::apic::Apic::new(apic_base, apic_base & crate::apic::BASE_ADDRESS);
+    output::arguments(format_args!(
+        "HOST APIC {}\n",
+        if sender.is_x2apic() {
+            "x2APIC"
+        } else {
+            "xAPIC (no x2APIC offered)"
+        }
+    ));
     // SAFETY: interrupts are masked, the BSP alone sends ICR commands, and `capture` lists the
     // enabled firmware APs.
     let deliveries = match unsafe {

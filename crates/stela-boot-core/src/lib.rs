@@ -22,6 +22,7 @@ pub mod console_lines;
 #[cfg(feature = "native-acpi")]
 pub mod crs;
 pub mod dmar;
+pub mod doorbell;
 pub mod early_fault;
 pub mod entropy;
 pub mod firmware_state;

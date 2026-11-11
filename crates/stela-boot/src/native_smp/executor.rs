@@ -225,7 +225,19 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         observed
             .same_memory_types(&source)
             .map_err(|_| refuse!("AP memory types differ"))?;
-        config.apic_base = observed.apic_base;
+        // The BSP's APIC mode, which `config.apic_base` carries: an AP
+        // takes x2APIC when the BSP did, before any APIC handle of it.
+        config.apic_base = if config.apic_base & apic::X2APIC_MODE != 0 {
+            // SAFETY: CPL0 on this AP with interrupts off; its host state,
+            // the first APIC handle, is installed below from this base.
+            let base = unsafe { apic::prefer_x2apic() };
+            if base & apic::X2APIC_MODE == 0 {
+                return Err(refuse!("AP offers no x2APIC, which the BSP runs"));
+            }
+            base
+        } else {
+            observed.apic_base
+        };
         let loader_root = config.window_root;
         // SAFETY: configured pool/arena/bounce entries belong only to this AP;
         // tables/local record remain pinned through every native call and park.
@@ -501,7 +513,10 @@ pub(crate) unsafe fn start(
                 }),
                 tsc_base,
                 tsc_hz: handoff.tsc_hz,
-                apic_base: capture.snapshots[slot].apic_base,
+                // As the firmware left it, in the BSP's APIC mode, which
+                // the AP takes at entry.
+                apic_base: capture.snapshots[slot].apic_base
+                    | handoff.apic_base & apic::X2APIC_MODE,
                 placement: handoff.placement,
                 bounce: Some((
                     layout::bounce() + slot as u64 * 2 * PAGE,

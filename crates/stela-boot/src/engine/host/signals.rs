@@ -77,6 +77,14 @@ pub(crate) fn sleep_for(micros: u64) {
     unsafe { crate::native_idle::wait(|| Some(u64::from(ticks) * 1_000_000 / state.apic_hz)) };
     let slept = ticks - state.apic.read(apic::CURRENT);
     state.apic.write(apic::LVT_TIMER, lvt);
+    // Ours again only if it was ours before: the hand-back count read now
+    // is the one the host's own write would have seen.
+    state.timer_lvt = state
+        .timer_lvt
+        .filter(|_| lvt == u32::from(TIMER_VECTOR))
+        .filter(|&seen| {
+            seen == crate::native_clock::TIMER_HANDOVERS.load(core::sync::atomic::Ordering::Acquire)
+        });
     // A count that ran out during the sleep fires at once.
     state.apic.write(
         apic::INITIAL,

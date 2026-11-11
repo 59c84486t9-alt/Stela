@@ -646,7 +646,9 @@ impl Host for BareHost<'_> {
         let now = self.counter();
         let state = state();
         let Some(deadline) = deadline else {
-            if !crate::native_clock::arm_guest(None) {
+            if crate::native_clock::arm_guest(None) {
+                state.timer_lvt = None;
+            } else {
                 state.apic.write(apic::INITIAL, 0);
             }
             return;
@@ -654,8 +656,18 @@ impl Host for BareHost<'_> {
         let guest = deadline.saturating_sub(now).max(1);
         let ticks = u128::from(guest) * u128::from(state.apic_hz) / u128::from(COUNTER_HZ);
         let ticks = ticks.clamp(1, u128::from(u32::MAX)) as u32;
-        if !crate::native_clock::arm_guest(Some(ticks)) {
-            state.apic.write(apic::LVT_TIMER, u32::from(TIMER_VECTOR));
+        if crate::native_clock::arm_guest(Some(ticks)) {
+            // The native clock owns the timer and may set its own mode.
+            state.timer_lvt = None;
+        } else {
+            // One APIC write per arm where the LVT already holds ours: each
+            // is a WRMSR (x2APIC) or uncached store, and a VM exit in a VM.
+            let handovers =
+                crate::native_clock::TIMER_HANDOVERS.load(core::sync::atomic::Ordering::Acquire);
+            if state.timer_lvt != Some(handovers) {
+                state.apic.write(apic::LVT_TIMER, u32::from(TIMER_VECTOR));
+                state.timer_lvt = Some(handovers);
+            }
             state.apic.write(apic::INITIAL, ticks);
         }
     }
@@ -681,8 +693,10 @@ impl Host for BareHost<'_> {
             (state.apic_hz != 0 && state.apic.read(apic::LVT_TIMER) & MASKED == 0 && remaining != 0)
                 .then(|| u64::from(remaining) * 1_000_000 / state.apic_hz)
         };
-        // SAFETY: interrupts are disabled and the host IDT takes the wake.
-        unsafe { crate::native_idle::wait(budget) };
+        let ring = state().ring;
+        // SAFETY: interrupts are disabled and the host IDT takes the wake;
+        // the ring is this processor's.
+        unsafe { crate::native_idle::wait_with(budget, ring) };
     }
 
     fn relax(&mut self) {

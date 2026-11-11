@@ -20,7 +20,6 @@ pub(super) struct EngineImage {
     pub resident: crate::native_image::ResidentImage,
     pub ram: Vec<(usize, usize)>,
     pub screen: Option<Framebuffer>,
-    pub apic_base: u64,
     pub apic: u64,
     pub placement: Placement,
 }
@@ -95,7 +94,6 @@ pub(super) fn prepare_image(snapshot: &Snapshot) -> Result<EngineImage> {
         resident,
         ram,
         screen,
-        apic_base,
         apic,
         placement,
     })

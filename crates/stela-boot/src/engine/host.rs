@@ -450,6 +450,15 @@ pub struct State {
     apic: Apic,
     /// The APIC timer's ticks per second at divide-by-one.
     apic_hz: u64,
+    /// LVT_TIMER holds the engine's unmasked one-shot `TIMER_VECTOR`, as
+    /// `arm_timer` last wrote it, since the native clock's handover count
+    /// ([`crate::native_clock::TIMER_HANDOVERS`]) was this: while it is
+    /// unchanged an arm writes only the count. `signals::sleep_for`, the
+    /// other writer here, keeps it true.
+    timer_lvt: Option<u64>,
+    /// This processor's doorbell, when it waits with MWAIT on one
+    /// (`native_idle::Ring`): a PE's wake is then a store, not an IPI.
+    ring: Option<crate::native_idle::Ring>,
     pub fills: u64,
     pub resets: u64,
     /// Resets because a half's shadow frames ran out.
@@ -608,6 +617,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
         config.apic_base,
         layout::physical(config.apic_base & apic::BASE_ADDRESS),
     );
+    let ring = crate::native_idle::Ring::of(apic.id());
     // SAFETY: this processor owns its disjoint host state until the owner drops.
     let owner = unsafe {
         local::install(State {
@@ -654,6 +664,8 @@ pub unsafe fn install(config: Config) -> Result<HostOwner> {
             .expect("the TSC is faster than the 24 MHz counter"),
             apic,
             apic_hz: 0,
+            timer_lvt: None,
+            ring,
             fills: 0,
             native_ticks: 0,
             #[cfg(feature = "native-profile")]

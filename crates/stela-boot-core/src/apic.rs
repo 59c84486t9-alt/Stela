@@ -1,14 +1,24 @@
 //! The boot processor's local APIC: the xAPIC register page through the
-//! address it is mapped at, or the x2APIC MSRs when the firmware left the
-//! APIC in x2APIC mode (Intel SDM Vol. 3A chapter 11; AMD APM Vol. 2
-//! chapter 16). Its timer is measured against the TSC.
+//! address it is mapped at, or the x2APIC MSRs when the APIC is in x2APIC
+//! mode (Intel SDM Vol. 3A chapter 11; AMD APM Vol. 2 chapter 16). Its timer
+//! is measured against the TSC.
+//!
+//! Two tiers, chosen once per processor at bring-up ([`prefer_x2apic`]):
+//! x2APIC whenever CPUID offers it, else the xAPIC page. In x2APIC mode
+//! every access is one RDMSR/WRMSR (no uncached load or store, no
+//! instruction a hypervisor must decode), the ICR is one 64-bit write with
+//! a 32-bit destination, and it has no delivery status to wait for.
 use crate::msr;
 use core::arch::asm;
 
 pub mod startup;
 
 /// IA32_APIC_BASE: x2APIC mode enabled.
-const X2APIC_MODE: u64 = 1 << 10;
+pub const X2APIC_MODE: u64 = 1 << 10;
+/// IA32_APIC_BASE: the APIC is enabled.
+const APIC_ENABLED: u64 = 1 << 11;
+/// CPUID.1:ECX: the processor offers x2APIC mode.
+const CPUID_X2APIC: u32 = 1 << 21;
 /// IA32_APIC_BASE: the register page's physical address.
 pub const BASE_ADDRESS: u64 = 0x000f_ffff_ffff_f000;
 
@@ -110,6 +120,59 @@ pub fn base_msr() -> u64 {
     unsafe { msr::APIC_BASE.read() }
 }
 
+/// The IA32_APIC_BASE value that moves an enabled xAPIC to x2APIC mode,
+/// when the processor `offers` it (CPUID.1:ECX[21]): `None` when it stays
+/// as it is (already x2APIC, disabled, or no x2APIC). Intel SDM Vol. 3A
+/// 11.12.5: xAPIC to x2APIC is one write setting EXTD with EN set, and
+/// keeps the APIC's state.
+pub fn x2apic_base(base: u64, offers: bool) -> Option<u64> {
+    (offers && base & APIC_ENABLED != 0 && base & X2APIC_MODE == 0).then_some(base | X2APIC_MODE)
+}
+
+/// Put this processor's APIC in x2APIC mode when CPUID offers it, and
+/// return IA32_APIC_BASE as it then is. The xAPIC page stays the fallback
+/// tier, chosen automatically where x2APIC is not offered.
+///
+/// # Safety
+/// CPL0 with interrupts disabled, and no [`Apic`] of this processor made
+/// from the earlier IA32_APIC_BASE is used afterwards: its accesses would
+/// go to a page the APIC no longer decodes.
+pub unsafe fn prefer_x2apic() -> u64 {
+    let base = base_msr();
+    let offers = core::arch::x86_64::__cpuid(1).ecx & CPUID_X2APIC != 0;
+    match x2apic_base(base, offers) {
+        Some(x2) => {
+            // SAFETY: the caller's contract; EN is set and CPUID offers
+            // x2APIC, so the transition is architectural.
+            unsafe { msr::APIC_BASE.write(x2) };
+            base_msr()
+        }
+        None => base,
+    }
+}
+
+/// How one ICR command is written in each mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IcrWrite {
+    /// x2APIC: one 64-bit write, the 32-bit destination in the high half.
+    X2(u64),
+    /// xAPIC: the high word (destination in bits 31:24), then the low.
+    X { high: u32, low: u32 },
+}
+
+fn icr_write(x2: bool, destination: u32, command: u32) -> Result<IcrWrite, StartupError> {
+    Ok(if x2 {
+        IcrWrite::X2(u64::from(destination) << 32 | u64::from(command))
+    } else {
+        let destination =
+            u8::try_from(destination).map_err(|_| StartupError::DestinationTooWide)?;
+        IcrWrite::X {
+            high: u32::from(destination) << 24,
+            low: command,
+        }
+    })
+}
+
 pub struct Apic {
     x2: bool,
     /// Where the xAPIC register page is mapped, uncached.
@@ -161,6 +224,11 @@ impl Apic {
     }
 
     fn wait_delivery(&self, tsc_hz: u64) -> Result<(), StartupError> {
+        // x2APIC has no delivery status (Intel SDM Vol. 3A 11.12.9: the bit
+        // is removed): a write is accepted when the APIC can take it.
+        if self.x2 {
+            return Ok(());
+        }
         let started = rdtsc();
         let limit = tsc_hz
             .div_ceil(MICROSECONDS_PER_SECOND)
@@ -184,23 +252,19 @@ impl Apic {
 
     /// Write the ICR, which the last command left idle.
     fn command(&self, destination: u32, command: u32) -> Result<(), StartupError> {
-        if self.x2 {
+        match icr_write(self.x2, destination, command)? {
             // SAFETY: the local x2APIC ICR, with a physical destination and
             // an explicitly constructed command. A WRMSR to an x2APIC
             // register is not serializing, so without the fences the IPI
             // could reach its destination before the stores announcing its
             // work: Linux's `weak_wrmsr_fence` before `x2apic_send_IPI`.
-            unsafe {
-                msr::write_fenced(
-                    msr::X2APIC.at(ICR_LOW >> 4),
-                    u64::from(destination) << 32 | u64::from(command),
-                );
+            IcrWrite::X2(value) => unsafe {
+                msr::write_fenced(msr::X2APIC.at(ICR_LOW >> 4), value);
+            },
+            IcrWrite::X { high, low } => {
+                self.write(ICR_HIGH, high);
+                self.write(ICR_LOW, low);
             }
-        } else {
-            let destination =
-                u8::try_from(destination).map_err(|_| StartupError::DestinationTooWide)?;
-            self.write(ICR_HIGH, u32::from(destination) << 24);
-            self.write(ICR_LOW, command);
         }
         Ok(())
     }
@@ -323,6 +387,46 @@ impl Apic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tier choice: x2APIC exactly when an enabled xAPIC's processor
+    /// offers it; every other bit of IA32_APIC_BASE kept.
+    #[test]
+    fn x2apic_is_chosen_whenever_offered_and_xapic_stays_the_fallback() {
+        let xapic = 0xfee0_0000 | APIC_ENABLED | 1 << 8;
+        assert_eq!(x2apic_base(xapic, true), Some(xapic | X2APIC_MODE));
+        assert_eq!(x2apic_base(xapic, false), None, "not offered");
+        assert_eq!(x2apic_base(xapic | X2APIC_MODE, true), None, "already");
+        assert_eq!(x2apic_base(0xfee0_0000, true), None, "disabled");
+        let x2 = Apic::new(xapic | X2APIC_MODE, 0);
+        let x = Apic::new(xapic, 0xfee0_0000);
+        assert!(x2.is_x2apic() && !x.is_x2apic());
+    }
+
+    /// The same ICR command in both tiers: x2APIC one write with a 32-bit
+    /// destination, xAPIC the destination in ICR_HIGH[31:24] and no wider.
+    #[test]
+    fn icr_commands_match_in_both_modes() {
+        let command = ICR_STARTUP | 0x9a;
+        assert_eq!(
+            icr_write(true, 0x1_0203, command),
+            Ok(IcrWrite::X2(0x1_0203 << 32 | u64::from(command)))
+        );
+        assert_eq!(
+            icr_write(false, 0x23, command),
+            Ok(IcrWrite::X {
+                high: 0x23 << 24,
+                low: command
+            })
+        );
+        assert_eq!(
+            icr_write(false, 0x100, command),
+            Err(StartupError::DestinationTooWide)
+        );
+        assert_eq!(
+            icr_write(true, 0x23, command),
+            Ok(IcrWrite::X2(0x23 << 32 | u64::from(command)))
+        );
+    }
 
     #[test]
     fn directed_init_excludes_bsp_and_broadcast_for_both_apic_modes() {

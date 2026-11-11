@@ -56,8 +56,13 @@ impl Doorbells {
 }
 
 impl Kick for Doorbells {
+    /// A store to the core's doorbell when it waits on one with MWAIT
+    /// (`native_idle::Doorbell`), else its interrupt. Neither waits for the
+    /// target.
     fn kick(&self, pe: usize) {
-        if let Some(&Some(destination)) = self.destinations.get(pe) {
+        if let Some(&Some(destination)) = self.destinations.get(pe)
+            && !crate::native_idle::doorbell(destination).is_some_and(|doorbell| doorbell.ring())
+        {
             host::ring(destination);
         }
     }

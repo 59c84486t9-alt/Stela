@@ -53,6 +53,40 @@ static PROCESSORS: AtomicPtr<Vec<Processor>> = AtomicPtr::new(ptr::null_mut());
 struct Line([u8; 64]);
 static LINE: Line = Line([0; 64]);
 
+pub(crate) use stela_boot_core::doorbell::Doorbell;
+
+/// One doorbell per xAPIC-range APIC ID; a CPU past it is woken by its
+/// interrupt alone.
+static DOORBELLS: [Doorbell; 256] = [const { Doorbell::new() }; 256];
+
+/// The doorbell of the CPU with APIC ID `apic`.
+pub(crate) fn doorbell(apic: u32) -> Option<&'static Doorbell> {
+    DOORBELLS.get(usize::try_from(apic).ok()?)
+}
+
+/// This CPU's MWAIT hint for a wait on its doorbell
+/// (`stela_boot_core::doorbell::hint`), or none for HLT.
+fn doorbell_hint() -> Option<u32> {
+    let max_leaf = __cpuid(0).eax;
+    let leaf5 = if max_leaf >= 5 {
+        __cpuid(5)
+    } else {
+        __cpuid(0)
+    };
+    let identity = __cpuid(0);
+    let leaf1 = __cpuid(1);
+    stela_boot_core::doorbell::hint(stela_boot_core::doorbell::Cpuid {
+        max_leaf,
+        // "GenuineIntel".
+        intel: (identity.ebx, identity.edx, identity.ecx)
+            == (0x756e_6547, 0x4965_6e69, 0x6c65_746e),
+        leaf1_eax: leaf1.eax,
+        leaf1_ecx: leaf1.ecx,
+        leaf5_ecx: leaf5.ecx,
+        leaf5_edx: leaf5.edx,
+    })
+}
+
 /// The processor capabilities to declare to the firmware, from the
 /// bootstrap processor's CPUID as Linux reads `cpu_data(0)`.
 pub(crate) fn capabilities() -> u32 {
@@ -172,7 +206,41 @@ fn describe(state: &Admitted) -> String {
 /// Interrupts are disabled, and this CPU's IDT takes the interrupt that
 /// ends the wait.
 pub(crate) unsafe fn wait(budget_us: impl FnOnce() -> Option<u64>) {
-    let admission = admission();
+    // SAFETY: the caller's contract.
+    unsafe { wait_with(budget_us, None) }
+}
+
+/// This CPU's doorbell and the MWAIT hint it waits on it with
+/// ([`doorbell_hint`]), found once per CPU by its owner.
+#[derive(Clone, Copy)]
+pub(crate) struct Ring {
+    pub(crate) doorbell: &'static Doorbell,
+    pub(crate) hint: u32,
+    /// This CPU's APIC ID, which finds its admission without CPUID.
+    pub(crate) apic: u32,
+}
+
+impl Ring {
+    /// The ring of the CPU with APIC ID `apic`, run on that CPU: none past
+    /// the doorbells or without a C1 MWAIT ([`doorbell_hint`]).
+    pub(crate) fn of(apic: u32) -> Option<Self> {
+        Some(Self {
+            doorbell: doorbell(apic)?,
+            hint: doorbell_hint()?,
+            apic,
+        })
+    }
+}
+
+/// [`wait`], on this CPU's doorbell when it has one: a wait in an admitted
+/// MWAIT state, or with no admitted state at all, monitors the doorbell, so
+/// that a [`Doorbell::ring`] ends it as an interrupt would.
+///
+/// # Safety
+///
+/// As [`wait`]; `ring` is this CPU's own.
+pub(crate) unsafe fn wait_with(budget_us: impl FnOnce() -> Option<u64>, ring: Option<Ring>) {
+    let admission = admission(ring.map(|ring| ring.apic));
     let enter = admission.and_then(|admission| {
         // SAFETY: this CPU's own history, interrupts disabled (`Admission`).
         let typical = unsafe { &*admission.history.get() }.typical_us();
@@ -183,8 +251,33 @@ pub(crate) unsafe fn wait(budget_us: impl FnOnce() -> Option<u64>) {
         let state = processor::select(&admission.states, budget)?;
         Some((state.enter, admission.flush_monitor))
     });
+    // No admitted state: a C1 MWAIT on the doorbell where the CPU has one,
+    // in place of HLT.
+    let enter = enter.or_else(|| {
+        let ring = ring.filter(|_| admission.is_none())?;
+        Some((Enter::Mwait(ring.hint), false))
+    });
     let began = admission.map(|_| rdtsc());
     match enter {
+        Some((Enter::Mwait(hint), flush_monitor)) if ring.is_some() => {
+            let doorbell = ring.map(|ring| ring.doorbell).expect("checked");
+            let word = doorbell.word();
+            let seen = doorbell.prepare();
+            // SAFETY: as below, on the doorbell's write-back line. A ring
+            // after `monitoring` changed the word before the check, or after
+            // MONITOR armed it, which ends the MWAIT.
+            unsafe {
+                if flush_monitor {
+                    asm!("mfence", "clflush [{line}]", "mfence", line = in(reg) word, options(nostack));
+                }
+                asm!("monitor", in("rax") word, in("ecx") 0, in("edx") 0, options(nostack));
+                if doorbell.unchanged(seen) {
+                    asm!("mwait", in("eax") hint, in("ecx") 1, options(nostack));
+                }
+                asm!("sti", "nop", "cli", options(nostack));
+            }
+            doorbell.finish();
+        }
         Some((Enter::Mwait(hint), flush_monitor)) => {
             let line = LINE.0.as_ptr();
             // SAFETY: the line is mapped write-back memory MONITOR may arm.
@@ -220,11 +313,12 @@ fn rdtsc() -> u64 {
 
 /// This CPU's admitted states, admitted on its first wait from its own
 /// CPUID, as `acpi_processor_ffh_cstate_probe` probes on the target CPU.
-fn admission() -> Option<&'static Admission> {
+/// `apic`, when given, is this CPU's APIC ID, which then takes no CPUID.
+fn admission(apic: Option<u32>) -> Option<&'static Admission> {
     let processors = PROCESSORS.load(Ordering::Acquire);
     // SAFETY: published once, leaked, never written again.
     let processors = unsafe { processors.as_ref() }?;
-    let apic = apic_id();
+    let apic = apic.unwrap_or_else(apic_id);
     let index = processors
         .binary_search_by_key(&apic, |processor| processor.apic)
         .ok()?;

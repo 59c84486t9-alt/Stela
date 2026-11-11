@@ -46,6 +46,11 @@ static ACTIVE: AtomicPtr<State> = AtomicPtr::new(ptr::null_mut());
 // every timer arm and interrupt: unlike CPUID it never exits to a hypervisor,
 // and unlike a legacy APIC ID no remote CPU can collide with it.
 static ACTIVE_GS: AtomicU64 = AtomicU64::new(0);
+/// Counts the native clock's takeovers and hand-backs of the local APIC
+/// timer, after which its LVT may not be what the engine's host last wrote
+/// (a hand-back with no guest deadline leaves it masked): the host keeps
+/// its LVT write only while this is unchanged (`bare_host::arm_timer`).
+pub(crate) static TIMER_HANDOVERS: AtomicU64 = AtomicU64::new(0);
 
 fn processor_id() -> u32 {
     let highest = core::arch::x86_64::__cpuid(0).eax;
@@ -983,6 +988,7 @@ impl Installed {
             // removal is same-CPU IRQ-excluded and precedes from_raw release.
             ACTIVE_GS.store(state.cpu.gs, Ordering::Release);
             ACTIVE.store(Arc::into_raw(state.clone()).cast_mut(), Ordering::Release);
+            TIMER_HANDOVERS.fetch_add(1, Ordering::Release);
             let clock: Arc<dyn Clock> = Arc::new(NativeClock(state.clone()));
             let idle: Arc<dyn Idle> = Arc::new(NativeIdle {
                 state: state.clone(),
@@ -1237,6 +1243,7 @@ impl Installed {
             apic.write(apic::LVT_TIMER, u32::from(interrupts::TIMER_VECTOR));
             apic.write(apic::INITIAL, ticks);
         }
+        TIMER_HANDOVERS.fetch_add(1, Ordering::Release);
         self.state.cpu.closed.store(true, Ordering::Release);
         // SAFETY: the ISR is excluded; the raw Arc belongs to this registration.
         let registration = unsafe { Arc::from_raw(pointer) };
