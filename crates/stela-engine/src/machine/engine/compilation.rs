@@ -1367,6 +1367,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let cell = cell_place(TABLE_BASE_KEPT);
             let written = self.register_fixed_bits(SystemRegister::TTBR0_EL1);
             register_read::unchanged_write_thunk(GuestAddress(pc), rt, cell, written)
+        } else if let Some((kept, rt)) = permission_write_word(word) {
+            let all = register_read::Written {
+                keep: u64::MAX,
+                set: 0,
+            };
+            register_read::unchanged_write_thunk(GuestAddress(pc), rt, cell_place(kept), all)
         } else if let Some((index, rt)) = guarded_written_register(pc, word) {
             let cell = cell_place(index);
             let all = register_read::Written {

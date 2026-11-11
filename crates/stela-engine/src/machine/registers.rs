@@ -1309,7 +1309,12 @@ impl Apple {
                     );
                 }
                 apple.sprr_perm[index] = value;
-                changes.permissions = true;
+                // The value the register held changes no access.
+                if changed == 0 {
+                    changes.stored = true;
+                } else {
+                    changes.permissions = true;
+                }
             }
             // The fields gate later SPRR_PERM writes, which the engine
             // completes, and change no access (`mmu::sprr_unlocked`): nothing

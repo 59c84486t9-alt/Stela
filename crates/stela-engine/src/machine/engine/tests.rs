@@ -9275,6 +9275,7 @@ mod exits;
 mod floating_point_traps;
 mod native_exceptions;
 mod one_sided;
+mod permission_kept;
 mod process_switching;
 mod pstate_features;
 mod recovery;

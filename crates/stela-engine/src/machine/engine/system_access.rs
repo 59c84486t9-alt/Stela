@@ -674,7 +674,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .collect();
         let before = self.completion_point();
         let step = self.register_access(word, access);
-        if step.is_err() || reopen.is_empty() || self.position() != before {
+        let plain = step.is_ok() && self.position() == before;
+        if plain {
+            self.keep_permission(word, access);
+        }
+        if !plain || reopen.is_empty() {
             return step;
         }
         let read = decode_register(word | MRS_READ).expect("MSR has an MRS form");
@@ -702,8 +706,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
             for (bank, cell) in self.mirrors.banks.iter_mut().zip(cells) {
                 bank[SPRR_PERM_MIRROR] = cell;
             }
+            self.keep_permission(word, access);
         }
         step
+    }
+
+    /// After a plain MSR SPRR_PERM_EL0 or SPRR_PERM_EL1: open its
+    /// [`PERMISSION_KEPT`] cell on the storage the write reached in the
+    /// state, which a read there returns, so a later write of the value it
+    /// holds completes natively.
+    fn keep_permission(&mut self, word: u32, access: RegisterAccess) {
+        let Some((kept, _)) = permission_write_word(word) else {
+            return;
+        };
+        if self
+            .cpu
+            .degraded
+            .contains_key(&access.encoding().selector())
+        {
+            return;
+        }
+        if let Some(value) = self.cpu.apple_read_storage(access.encoding()) {
+            self.mirrors[kept] = register_read::Cell { readable: 1, value };
+        }
     }
 
     /// The PC, EL, GXF state and exception count of the PE, which an
@@ -1022,6 +1047,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             } else {
                 let value = if rt == 31 { 0 } else { self.cpu.state.x[rt] };
                 self.cpu.degraded.insert(key, value);
+                // A read now answers what the write held, not the storage.
+                for kept in PERMISSION_KEPT {
+                    self.mirrors.close(kept);
+                }
             }
         }
         self.next()

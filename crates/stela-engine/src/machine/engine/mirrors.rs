@@ -227,8 +227,31 @@ pub(super) const CYCLES_PLAIN: usize = TIMER_CONTROL + 1;
 /// Where native code finds [`Mirrors::cycles`].
 pub(super) const CYCLES: Place = Place::new(Anchor::Mirrors, offset_of!(Mirrors, cycles));
 
+/// The cells of MSR SPRR_PERM_EL0 and MSR SPRR_PERM_EL1
+/// (`x86_64::register_read::unchanged_write_thunk`), open on the storage a
+/// plain write reached in the state: a write of the value the register
+/// holds completes natively and changes nothing (no access changes, as the
+/// engine's own write of it finds), any other exits. A kernel writes the
+/// user permissions at each return to a thread and the kernel ones around
+/// each write of protected data, mostly with the value they hold. A write
+/// whose model refused it closes them ([`Machine::register_refused`]).
+pub(super) const PERMISSION_KEPT: [usize; 2] = [CYCLES_PLAIN + 1, CYCLES_PLAIN + 2];
+
+/// The [`PERMISSION_KEPT`] cell of the MSR `word`, and Rt, if it writes
+/// SPRR_PERM_EL0 or SPRR_PERM_EL1.
+pub(super) fn permission_write_word(word: u32) -> Option<(usize, u8)> {
+    const MSR_SPRR_PERM_EL0: u32 = 0xd51e_f1a0;
+    const MSR_SPRR_PERM_EL1: u32 = 0xd51e_f1c0;
+    let kept = match word & !31 {
+        MSR_SPRR_PERM_EL0 => PERMISSION_KEPT[0],
+        MSR_SPRR_PERM_EL1 => PERMISSION_KEPT[1],
+        _ => return None,
+    };
+    Some((kept, (word & 31) as u8))
+}
+
 /// The cell of the first of the [`STORED_WRITES`].
-const STORED_WRITE_CELLS: usize = CYCLES_PLAIN + 1;
+const STORED_WRITE_CELLS: usize = PERMISSION_KEPT[1] + 1;
 
 /// The IMPLEMENTATION DEFINED registers that a store completes writes of
 /// that get a cell of their own the first time code naming them is installed
