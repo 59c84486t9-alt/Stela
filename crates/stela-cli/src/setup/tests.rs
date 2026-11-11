@@ -4314,3 +4314,20 @@ fn a_new_setup_puts_macos_on_a_usb_of_32_gb_or_more() {
     assert_eq!(default_install_image(31_000_000_000), InstallImage::Full);
     assert_eq!(default_install_image(64 * GIB), InstallImage::Full);
 }
+
+#[test]
+fn a_usb_named_by_its_mounted_volume_gets_the_installer_its_size_allows() {
+    for (bytes, full) in [(16_000_000_000, false), (32_000_000_000, true)] {
+        let mut f = fixture(64 * GIB, false);
+        add_stela(&mut f);
+        for disk in f.host.disks.iter_mut().filter(|d| d.identifier == "disk5") {
+            disk.bytes = bytes;
+        }
+        let volume = stela_volume(&f);
+        let mut dry = command(&f, &volume);
+        dry.install_image = None;
+        dry.dry_run = true;
+        let plan = setup(&environment(&f.host), dry).unwrap();
+        assert_eq!(!plan.contains("file list only"), full, "{bytes}: {plan}");
+    }
+}

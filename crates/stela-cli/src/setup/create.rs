@@ -927,10 +927,19 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
             confirm_erase(host, &found)?;
         }
         // A new setup puts macOS on a USB large enough for it.
-        command
-            .install_image
-            .get_or_insert(super::default_install_image(found.bytes));
+        if command.install_image.is_none() {
+            command.install_image = Some(default_image(found.bytes, command.ipsw.as_deref())?);
+        }
         erase = Some((disk, found.name, found.bytes, identity));
+    } else if command.install_image.is_none() && command.target.is_none() {
+        // A USB named by one of its mounted volumes is set up as the same
+        // USB erased by setup would be: macOS goes on it when it is large
+        // enough. An interrupted setup it holds keeps its own choice.
+        let esp = super::locate_esp(host, &command.usb)?;
+        if !esp.join(RECORD).exists() {
+            let capacity = usb_capacity(host, &command.usb)?;
+            command.install_image = Some(default_image(capacity, command.ipsw.as_deref())?);
+        }
     }
     // Downloaded boot archives are kept in one place until setup finishes,
     // so a setup run again after a stop reuses them, and removed once it
@@ -1073,6 +1082,34 @@ pub(super) fn setup(environment: &Environment<'_>, mut command: Request) -> Resu
         super::fix(&command.usb, "uninstall")
     )?;
     Ok(report)
+}
+
+/// A new setup's installer for a USB of `capacity` bytes: macOS goes on a
+/// large enough USB (`super::default_install_image`), unless the local IPSW
+/// holds only the recovery members, which prepare the boot files alone.
+fn default_image(capacity: u64, ipsw: Option<&Path>) -> Result<InstallImage> {
+    let image = super::default_install_image(capacity);
+    match ipsw {
+        Some(ipsw)
+            if image == InstallImage::Full && !restore::payload::holds_system_image(ipsw)? =>
+        {
+            Ok(InstallImage::Network)
+        }
+        _ => Ok(image),
+    }
+}
+
+/// The bytes of the whole disk holding the mounted volume `usb`, as the
+/// host lists it; 0 when the host names no such disk.
+fn usb_capacity(host: &dyn Host, usb: &Path) -> Result<u64> {
+    let Some(disk) = host.volume(usb)?.disk else {
+        return Ok(0);
+    };
+    Ok(host
+        .disks()?
+        .into_iter()
+        .find(|listed| listed.identifier == disk)
+        .map_or(0, |listed| listed.bytes))
 }
 
 /// Ask before erasing `disk` at a terminal: a mistyped disk name would
