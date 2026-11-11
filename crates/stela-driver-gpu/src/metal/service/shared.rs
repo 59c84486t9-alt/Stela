@@ -691,6 +691,15 @@ impl<B: Backend, C: Compiler + 'static> SharedService<B, C> {
         Some((fd, self.timeline.fetch_add(1, Ordering::AcqRel) + 1))
     }
 
+    /// Whether work was submitted that is not yet published complete: a
+    /// waiter whose wait times out then has the platform look at the device,
+    /// which notices a loss the stalled timeline never signals. Not once
+    /// polls are unavailable: the loss is already known.
+    pub fn awaits_completion(&self) -> bool {
+        let reached = self.reached.load(Ordering::Acquire);
+        reached != POLL_UNAVAILABLE && self.submitted.load(Ordering::Acquire) > reached
+    }
+
     /// The platform's waiter saw the completion timeline of generation
     /// `timeline` reach `value`, every serial through it complete. Published
     /// at once when a waiter may publish, so a call holding the service
@@ -1231,6 +1240,21 @@ mod tests {
         assert!(!shared.signaled());
         assert!(shared.stale.load(Ordering::Acquire));
         drop(held);
+    }
+
+    #[test]
+    fn only_unpublished_submissions_await_completion() {
+        let shared = shared();
+        // Idle: nothing submitted past what was published.
+        assert!(!shared.awaits_completion());
+        shared.submitted.store(3, Ordering::Release);
+        assert!(shared.awaits_completion());
+        shared.reached.store(3, Ordering::Release);
+        assert!(!shared.awaits_completion());
+        // A known loss needs no look.
+        shared.submitted.store(4, Ordering::Release);
+        shared.reached.store(POLL_UNAVAILABLE, Ordering::Release);
+        assert!(!shared.awaits_completion());
     }
 
     #[test]

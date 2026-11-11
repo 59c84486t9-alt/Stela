@@ -13,12 +13,17 @@
 //! Each point it sees signaled goes straight to the device's service
 //! (`SharedService::completed_through`), which tells the guest at once even
 //! while a call, such as a compile, holds the service.
+//!
+//! Its file is a nouveau client with RM objects (device, subdevice, VA
+//! space). The GPU's stop waits for every waiter to close it
+//! ([`wait_gone`]): frees that reach nouveau after the stop began are refused,
+//! and GSP-RM is then asked to unload with that client still allocated.
 use super::{client, gate, look_again};
 use alloc::boxed::Box;
 use core::{
-    ffi::{c_int, c_void},
+    ffi::{c_int, c_uint, c_void},
     ptr,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
 };
 
 /// The waiters' generation: a waiter of another one leaves.
@@ -26,6 +31,25 @@ static GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// The generation of the waiter that waits on its timeline now, 0 for none.
 static WATCHING: AtomicU64 = AtomicU64::new(0);
+
+/// Waiters started that have not yet closed their file.
+static RUNNING: AtomicU32 = AtomicU32::new(0);
+
+/// Counts a waiter as running until it is dropped, after its file closed.
+struct Running;
+
+impl Running {
+    fn start() -> Self {
+        RUNNING.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        RUNNING.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 /// Whether the newest waiter waits on its timeline: every fence of it that
 /// signals, in an interrupt or not, ends its wait and has the services look.
@@ -88,6 +112,7 @@ struct Watch {
     generation: u64,
     service: usize,
     timeline: u64,
+    _running: Running,
 }
 
 /// Waits on `fd`, the completion timeline `timeline` of service `service`'s
@@ -100,6 +125,7 @@ pub(super) fn start(fd: c_int, service: usize, timeline: u64) {
         generation,
         service,
         timeline,
+        _running: Running::start(),
     }));
     if client::spawn(run, watch.cast()) != 0 {
         // SAFETY: the thread was refused, so the box is still ours.
@@ -111,6 +137,26 @@ pub(super) fn start(fd: c_int, service: usize, timeline: u64) {
 /// Every waiter leaves within [`WAIT_NS`]: the GPUs stop.
 pub(super) fn stop() {
     GENERATION.fetch_add(1, Ordering::AcqRel);
+}
+
+/// The longest the stop waits for the waiters to close their files: one
+/// wait of [`WAIT_NS`], its syncobj's destruction and the file's release.
+const GONE_NS: u64 = 500_000_000;
+
+/// Has every waiter leave and waits, within [`GONE_NS`], until each closed
+/// its file, so its nouveau client is freed before the GPU stops; says
+/// whether they did. On a Linux task that may sleep.
+pub(super) fn wait_gone() -> bool {
+    unsafe extern "C" {
+        fn msleep(msecs: c_uint);
+    }
+    stop();
+    let deadline = client::now_ns().saturating_add(GONE_NS);
+    while RUNNING.load(Ordering::Acquire) != 0 && client::now_ns() < deadline {
+        // SAFETY: Linux's sleep, on the caller's task, which may sleep.
+        unsafe { msleep(1) };
+    }
+    RUNNING.load(Ordering::Acquire) == 0
 }
 
 unsafe extern "C" fn run(argument: *mut c_void) {
@@ -173,7 +219,15 @@ fn wait(file: c_int, handle: u32, watch: &Watch) {
                 gate::completed_through(watch.service, watch.timeline, reached);
                 look_again();
             }
-            result if result == -ETIME || result == -EINTR => failures = 0,
+            result if result == -ETIME || result == -EINTR => {
+                failures = 0;
+                // A stalled timeline with work outstanding, as after a
+                // failed threaded submission: the device look notices the
+                // loss no point or interrupt will signal. Never while idle.
+                if result == -ETIME && gate::awaits_completion(watch.service) {
+                    look_again();
+                }
+            }
             _ => failures += 1,
         }
     }

@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tyler Smith <74526874+tylertms@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 19:32:28 -0500
+Subject: [PATCH] fix(nouveau): unload GSP at power-off as a PM transition to
+ level 3, as nouveau's suspend path does
+
+---
+ drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+index 7e8727ac2288bd72cc975a65b9682eae45ce912d..7f49dd8220a029468e23cd9e4ae3c2659da3d742 100644
+--- a/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
++++ b/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/gsp.c
+@@ -1866,7 +1866,15 @@ r535_gsp_fini(struct nvkm_gsp *gsp, enum nvkm_suspend_state suspend)
+ 	if (READ_ONCE(gsp->dead))
+ 		return -ENODEV;
+ 
+-	ret = r535_gsp_rpc_unloading_guest_driver(gsp, suspend);
++	/*
++	 * A power-off unloads as a PM transition to level 3, the arguments
++	 * nouveau's shutdown sent through nouveau_do_suspend() before it
++	 * unloaded at power-off directly; nothing is saved to resume from.
++	 * GSP-RM never answered a level-0 unload sent with the device and its
++	 * channels still initialised (level 0 is what upstream sends only on
++	 * driver removal, after every engine and client is torn down).
++	 */
++	ret = r535_gsp_rpc_unloading_guest_driver(gsp, true);
+ 	if (WARN_ON(ret))
+ 		return ret;
+ 

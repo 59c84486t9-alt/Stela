@@ -407,6 +407,13 @@ unsafe fn perform(gpu: &Installed, operation: Operation) -> i64 {
             }
             Operation::Shutdown => {
                 let gpu = installed().expect("requests are posted to a running environment");
+                // A completion waiter's file is a nouveau client: freed after
+                // the stop began, its RM objects outlive GSP's unload.
+                if !super::waiter::wait_gone() {
+                    output::arguments(format_args!(
+                        "GPU completion waiter still open at the stop\n"
+                    ));
+                }
                 gpu.start
                     ._attached
                     .iter()

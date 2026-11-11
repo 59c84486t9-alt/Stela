@@ -994,6 +994,13 @@ pub(super) fn watch_completions() {
     }
 }
 
+/// Whether service `index` has submitted work not yet published complete.
+pub(super) fn awaits_completion(index: usize) -> bool {
+    shared()
+        .get(index)
+        .is_some_and(|service| service.awaits_completion())
+}
+
 /// Service `index`'s completion timeline `timeline` reached `value`.
 pub(super) fn completed_through(index: usize, timeline: u64, value: u64) {
     if let Some(service) = shared().get(index) {
