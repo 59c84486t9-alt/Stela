@@ -48,12 +48,6 @@ pub mod native_irq;
 pub mod native_memory;
 pub(crate) mod native_mmio;
 mod native_smp;
-#[cfg(feature = "diagnostics")]
-mod native_stack_check;
-#[cfg(feature = "diagnostics")]
-mod native_stacks;
-#[cfg(feature = "diagnostics")]
-mod native_work_check;
 mod output;
 mod paging;
 mod payload;

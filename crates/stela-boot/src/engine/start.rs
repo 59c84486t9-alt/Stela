@@ -245,37 +245,6 @@ fn start(handoff: u64) -> Started {
     {
         output::fatal("native bootstrap check needs an explicit processor count");
     }
-    // Refuse physical and implicit persistent-device setup before translation
-    // stores, FDR placement, storage::open or any independent native driver.
-    if options.native_clock_check
-        && (handoff.native_resources.cores != 1
-            || handoff.storage.present
-            || handoff.files[..handoff.file_count]
-                .iter()
-                .any(|file| file.name() == translations::FILE)
-            || restore::inventory_file(handoff, stela_runtime::restore::fdr::FILE).is_some())
-    {
-        output::arguments(format_args!(
-            "CHECK native-clock FAIL unsupported physical or persistent resources\n"
-        ));
-        output::fatal("native clock fixture requires one exclusive processor and volatile input");
-    }
-    #[cfg(feature = "diagnostics")]
-    if options.native_memory_check {
-        output::arguments(format_args!(
-            "CHECK native-memory heap cpu={heap:#x} physical={:#x} bytes={:#x}\n",
-            handoff.heap.physical, handoff.heap.bytes,
-        ));
-        match crate::native_memory::verify() {
-            Ok(()) => output::arguments(format_args!(
-                "CHECK native-memory PASS WB native pages: zero/read/write, CPU pin lifetime/reclaim, cache/alignment/bounds refusal; Linux PFN/refcount/compound/split/retirement\n"
-            )),
-            Err(error) => {
-                output::arguments(format_args!("CHECK native-memory FAIL {error:?}\n"));
-                output::fatal("native pinned RAM verification failed");
-            }
-        }
-    }
     Started {
         handoff,
         options,
@@ -2139,45 +2108,6 @@ fn install_host(handoff: &'static Handoff, options: &Options, ram: &[RamRange]) 
     }
     let apic_hz = host::statistics().apic_hz;
     crate::status::done("");
-    #[cfg(feature = "diagnostics")]
-    if options.native_clock_check {
-        // SAFETY: explicit original UP/controller ownership; HPET uses the
-        // production Source, or absent HPET preserves the bounded PM
-        // fixture's complete <=1second gap contract. No driver is published.
-        unsafe { crate::native_mmio::diagnostic::clock(handoff, &mut host_owner) }.unwrap_or_else(
-            |error| {
-                output::arguments(format_args!("CHECK native-clock FAIL {error}\n"));
-                output::fatal("native clock fixture failed")
-            },
-        );
-        stop_here("bounded native clock fixture complete", 0x10);
-    }
-    #[cfg(feature = "diagnostics")]
-    if options.native_mmio_check {
-        if handoff.inactive_firmware_units.original_units().is_none() {
-            output::arguments(format_args!(
-                "CHECK native-mmio REFUSED stage=original-notification-owner error=Unavailable\n"
-            ));
-            output::fatal("native MMIO original notification owner unavailable");
-        }
-        // SAFETY: this explicit UP entry owns the task pool for the boot it
-        // stops. It retires every view before the MMIO phases and never
-        // activates a second permission or publishes a service.
-        unsafe { kernel_work::check_mixed(handoff, &mut host_owner) }.unwrap_or_else(|error| {
-            output::arguments(format_args!("CHECK native-mixed32 FAIL {error}\n"));
-            output::fatal("mixed32 native stack qualification failed")
-        });
-        // SAFETY: explicit bounded native diagnostic on the original kept
-        // handoff/owner. Success stops before guest entry; permanent mapping
-        // and IRQ registries keep this exact physical root until VM shutdown.
-        unsafe { crate::native_mmio::diagnostic::check(handoff, &mut host_owner) }.unwrap_or_else(
-            |error| {
-                output::arguments(format_args!("CHECK native-mmio FAIL {error:?}\n"));
-                output::fatal("native MMIO root qualification failed")
-            },
-        );
-        stop_here("native MMIO root qualification complete", 0x10);
-    }
     InstalledHost {
         owner: host_owner,
         apic_hz,

@@ -75,13 +75,6 @@ impl ParseState<'_> {
                 }
                 options.guest_pes = Some(count);
             }
-            "--native-memory-check" => options.native_memory_check = true,
-            "--native-clock-check" => {
-                flag(&mut options.native_clock_check, Error::DuplicateNativeClock)?
-            }
-            "--native-mmio-check" => {
-                flag(&mut options.native_mmio_check, Error::DuplicateNativeMmio)?
-            }
             "--restore-study" => options.restore = true,
             "--restore-source" => {
                 let target = value()

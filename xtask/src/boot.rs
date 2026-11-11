@@ -260,49 +260,9 @@ pub struct Run {
     #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "duplex",
         conflicts_with_all = ["module", "usb_image", "payload", "storage_check"])]
     audio_check: Option<audio_check::Mode>,
-    /// Controlled QEMU EDU/VT-d DMA roundtrip, stale-IOVA fault and teardown.
-    #[arg(long, conflicts_with_all = [
-        "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
-        "storage_check", "storage_disk", "network", "usb_network", "input",
-        "usb_input", "usb_host", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
-    ])]
-    native_dma_check: bool,
-    /// Two isolated EDU domains, same IOVAs and a matched wrong-domain fault.
-    #[arg(long, conflicts_with_all = [
-        "native_dma_check", "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
-        "storage_check", "storage_disk", "network", "usb_network", "input",
-        "usb_input", "usb_host", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
-    ])]
-    native_dma_isolation_check: bool,
-    /// Check BSP deferred-work contexts, ABI/control/IRQ flags and guards.
-    #[arg(long, conflicts_with_all = [
-        "native_dma_check", "native_dma_isolation_check", "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
-        "storage_check", "storage_disk", "network", "usb_network", "input",
-        "usb_input", "usb_host", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
-    ])]
-    native_work_check: bool,
-    /// Check EDU MSI admission into the native BSP work executor.
-    #[arg(long, conflicts_with_all = [
-        "native_dma_check", "native_dma_isolation_check", "native_work_check", "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
-        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input", "usb_host", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
-    ])]
-    native_irq_work_check: bool,
-    /// Check single-BSP MMIO mapping, context refusal, retirement and reuse.
-    /// The root's wall time is an owned HPET, so it passes only with `--hpet`;
-    /// without one the mount refuses at `stage=hpet-wholeblock`.
-    #[arg(long, group = "owned_clock_check", conflicts_with_all = [
-        "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check",
-        "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
-        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input", "usb_host",
-        "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check",
-        "gdb", "monitor", "icount"
-    ])]
-    native_mmio_check: bool,
     /// Give the PC an IOMMU, which the mount takes over for the requesters
     /// its policy allows: Intel VT-d or AMD-Vi.
-    #[arg(long, value_enum, conflicts_with_all = [
-        "native_dma_check", "native_dma_isolation_check", "native_irq_work_check"
-    ])]
+    #[arg(long, value_enum)]
     iommu: Option<Iommu>,
     /// Hand the mount a physical GPU through VFIO: this PCI function of the
     /// host (such as `0000:01:00.0`) and the other functions of its slot, in
@@ -311,18 +271,6 @@ pub struct Run {
     /// takes the display. `xtask/scripts/vfio-gpu.sh` binds it for a run.
     #[arg(long, requires = "kvm", conflicts_with = "iommu", value_parser = parse_pci_function)]
     vfio_gpu: Option<String>,
-    /// Expose QEMU's HPET to the owned MMIO or native-clock check.
-    #[arg(long, requires = "owned_clock_check")]
-    hpet: bool,
-    /// Check bounded PM or owned HPET/LAPIC clock, IRQ progress and retirement.
-    #[arg(long, group = "owned_clock_check", conflicts_with_all = [
-        "native_dma_check", "native_dma_isolation_check", "native_work_check", "native_irq_work_check", "native_mmio_check",
-        "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
-        "storage_check", "storage_disk", "network", "usb_network", "input", "usb_input", "usb_host",
-        "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check",
-        "gdb", "monitor", "icount"
-    ])]
-    native_clock_check: bool,
     /// Boot an existing USB disk image, such as a copy of a stick `stela
     /// setup` prepared, from its removable-media boot loader, attached as a
     /// USB mass-storage device; writes go to a temporary overlay unless
@@ -751,7 +699,7 @@ fn qemu_machine(keyboard: &str, hpet: bool) -> String {
     format!("q35,smm=off,sata=off,usb=off,smbus=off,hpet={hpet},i8042={keyboard},vmport=off")
 }
 
-fn native_root_preflight(arguments: &Run) -> Result<()> {
+fn usb_hpet_preflight(arguments: &Run) -> Result<()> {
     if arguments.usb_hpet_handoff() {
         let text = arguments.append.as_deref().unwrap_or_default();
         ensure!(
@@ -761,38 +709,16 @@ fn native_root_preflight(arguments: &Run) -> Result<()> {
             ) && text
                 .split_ascii_whitespace()
                 .any(|word| matches!(word, "--usb-reset-check" | "--usb-media-check"))
-                && !arguments.host_check()
                 && arguments.icount.is_none(),
             "USB HPET ownership requires standalone USB diagnostics with the ordinary QEMU clock"
-        );
-    }
-    // Clap conflicts can supersede `requires`; enforce the HPET mode before work.
-    ensure!(
-        !arguments.hpet || arguments.native_mmio_check || arguments.native_clock_check,
-        "--hpet requires --native-mmio-check or --native-clock-check"
-    );
-    if arguments.native_mmio_check || arguments.native_clock_check {
-        ensure!(
-            arguments.host_cores == 1
-                && arguments.host_threads == 1
-                && matches!(arguments.display, Display::None),
-            "native root fixture requires one headless BSP"
         );
     }
     Ok(())
 }
 
-fn native_mmio_options() -> String {
-    format!("{KERNEL_OPTIONS} --native-mmio-check")
-}
-
-fn native_clock_options() -> String {
-    format!("{KERNEL_OPTIONS} --native-clock-check --native-cores 1")
-}
-
 fn launch(arguments: Run) -> Result<ExitCode> {
-    // Refuse an incompatible diagnostic topology before building or opening inputs.
-    native_root_preflight(&arguments)?;
+    // Refuse an incompatible diagnostic before building or opening inputs.
+    usb_hpet_preflight(&arguments)?;
     let limit = if arguments.usb_image.is_some() || arguments.bundle.is_some() {
         MAX_LONG_TIMEOUT_SECONDS
     } else {
@@ -919,7 +845,6 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     storage::attach_usb_disks(&arguments, &mut command);
     machine::attach_console(&arguments, &paths.serial, &mut command);
     storage::attach_storage_disks(&attached, arguments.storage_mdts, &mut command);
-    machine::attach_iommu(&arguments, &mut command);
     machine::attach_debugger(&arguments, &mut command);
     let command_line: Vec<String> = std::iter::once(command.get_program())
         .chain(command.get_args())
@@ -999,20 +924,12 @@ impl Run {
     }
 
     fn hpet_enabled(&self) -> bool {
-        self.hpet || self.audio_check.is_some() || self.usb_hpet_handoff()
+        self.audio_check.is_some() || self.usb_hpet_handoff()
     }
 
-    /// A native host fixture: the mount runs a host check, not a guest.
-    fn host_check(&self) -> bool {
-        self.native_dma_check
-            || self.native_dma_isolation_check
-            || self.native_work_check
-            || self.native_irq_work_check
-    }
-
-    /// Install mode, the storage check and the host checks run no guest.
+    /// Install mode and the storage check run no guest.
     fn guestless(&self) -> bool {
-        self.host_check() || self.payload.is_some() || self.storage_check
+        self.payload.is_some() || self.storage_check
     }
 }
 
@@ -1021,9 +938,7 @@ impl Run {
 /// guest) and `stela.cfg`'s first options.
 fn guest(arguments: &Run, preboot: Option<&preboot::Preboot>) -> Result<(Vec<u8>, String)> {
     let append = arguments.append.clone();
-    let (bytes, mut options) = match (&arguments.module, arguments.scenario) {
-        _ if arguments.native_mmio_check => (kernel()?, native_mmio_options()),
-        _ if arguments.native_clock_check => (kernel()?, native_clock_options()),
+    let (bytes, options) = match (&arguments.module, arguments.scenario) {
         _ if preboot.is_some() => (Vec::new(), preboot.unwrap().options()),
         _ if arguments.bundle.is_some() => {
             (Vec::new(), append.unwrap_or_else(|| BUNDLE_OPTIONS.into()))
@@ -1037,22 +952,6 @@ fn guest(arguments: &Run, preboot: Option<&preboot::Preboot>) -> Result<(Vec<u8>
             (kernel()?, append.unwrap_or_else(|| KERNEL_OPTIONS.into()))
         }
     };
-    if arguments.host_check() {
-        ensure!(
-            matches!(arguments.display, Display::None),
-            "native fixture uses a headless single-BSP topology"
-        );
-        let mode = if arguments.native_irq_work_check {
-            "--native-irq-work-check"
-        } else if arguments.native_work_check {
-            "--native-work-check"
-        } else if arguments.native_dma_isolation_check {
-            "--native-dma-isolation-check"
-        } else {
-            "--native-dma-check"
-        };
-        options = format!("--host-check {mode} --deadline 5 --key-seconds 1");
-    }
     Ok((bytes, options))
 }
 
@@ -1237,309 +1136,6 @@ fn fat_image(volume: &Path, output: &Path) -> Result<PathBuf> {
     let image = output.join("volume.img");
     fat32::write(volume, &image, size, "STELA")?;
     Ok(image)
-}
-
-fn native_irq_work_verified(serial: &str) -> bool {
-    serial.lines().any(|line| {
-        line.starts_with("CHECK native-irq-work PASS ")
-            && [
-                "roundtrip=verified",
-                "teardown=IOTLB+TE-off-ack",
-                "actual_cause=0x1",
-                "IRQ_depth=real",
-                "interrupted_SP=owned-foreground",
-                "ISR_SP=separate-IST",
-                "current_id=IRQ-refused",
-                "enqueue=owned/noninline",
-                "worker=owned-distinct-context",
-                "async_FXSAVE=IRQ-poison-restored",
-                "async_GPR+RSP+DF=restored",
-                "heap=aligned-zeroed-read-write-reclaimed",
-                "heap_IF=off/on-preserved",
-                "mask+hardware+IRR/ISR+inflight+work=drained",
-                "late_delivery=absent",
-                "stack_leases=4-released",
-                "BSP_device_owner=!Send",
-            ]
-            .iter()
-            .all(|s| line.contains(s))
-    }) && !serial
-        .lines()
-        .any(|line| line.starts_with("CHECK native-irq-work FAIL "))
-}
-
-fn native_work_verified(serial: &str) -> bool {
-    serial.lines().any(|line| {
-        line.starts_with("CHECK native-work PASS ")
-            && [
-                "foreground=owned-stack",
-                "ids=distinct/stable",
-                "execute=deferred",
-                "Notify=FIFO",
-                "general=yield/resume",
-                "Win64-shadow+all-GPR+XMM6-15=task+dispatcher-verified",
-                "MXCSR+x87=preserved",
-                "IF=off/on/clear-yield/exact",
-                "guards=8-absent",
-                "RW+NX+WB=verified",
-                "idle_stack_leases=4-released",
-                "pending_runtime+stacks=quarantined",
-                "overflow+close=refused",
-                "drain_cycles=refused",
-                "source_IRQ_enqueue=not-qualified",
-            ]
-            .iter()
-            .all(|marker| line.contains(marker))
-    }) && !serial
-        .lines()
-        .any(|line| line.starts_with("CHECK native-work FAIL "))
-}
-
-/// Preserve the existing bounded fixture's raw observation, after quiet retire.
-fn native_clock_proof(serial: &str) -> Option<&str> {
-    if serial
-        .lines()
-        .any(|line| line.starts_with("CHECK native-clock FAIL"))
-    {
-        return None;
-    }
-    let mut proofs = serial
-        .lines()
-        .filter(|line| line.starts_with("CHECK native-clock PASS "));
-    let line = proofs.next()?;
-    if proofs.next().is_some() {
-        return None;
-    }
-    let observation = line
-        .split_once(" source=Observation { ")?
-        .1
-        .strip_suffix(" }; authored UP fixture, original Linux and hardware unqualified")?;
-    let (digest_key, source_fields): (&str, &[(&str, u64)]) =
-        if observation.starts_with("fadt_sha256: [") {
-            (
-                "fadt_sha256: [",
-                &[
-                    ("pm_port: ", u64::from(u16::MAX)),
-                    ("pm_mask: ", u64::from(u32::MAX)),
-                    ("pm_hz: ", u64::MAX),
-                ],
-            )
-        } else if observation.starts_with("hpet_sha256: [") {
-            (
-                "hpet_sha256: [",
-                &[
-                    ("hpet_base: ", u64::MAX),
-                    ("hpet_block_id: ", u64::from(u32::MAX)),
-                    ("hpet_number: ", u64::from(u8::MAX)),
-                    ("hpet_period_fs: ", u64::from(u32::MAX)),
-                ],
-            )
-        } else {
-            return None;
-        };
-    let (digest, rest) = observation.strip_prefix(digest_key)?.split_once("], ")?;
-    let digest = digest.split(", ").collect::<Vec<_>>();
-    if digest.len() != 32 || digest.iter().any(|byte| byte.parse::<u8>().is_err()) {
-        return None;
-    }
-    let common_fields = [
-        ("apic_hz: ", u64::MAX),
-        ("cpu: ", u64::from(u32::MAX)),
-        ("root: ", u64::MAX),
-        ("idt: ", u64::MAX),
-        ("gs: ", u64::MAX),
-        ("max_cpuid: ", u64::from(u32::MAX)),
-        ("thermal_eax: ", u64::from(u32::MAX)),
-    ];
-    let observed = rest.split(", ").collect::<Vec<_>>();
-    if observed.len() != source_fields.len() + common_fields.len()
-        || !observed
-            .iter()
-            .zip(source_fields.iter().chain(&common_fields))
-            .all(|(field, &(key, max))| {
-                field
-                    .strip_prefix(key)
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .is_some_and(|v| v <= max)
-            })
-    {
-        return None;
-    }
-    let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
-    let value = |key: &str| {
-        let mut matches = fields.iter().filter_map(|field| field.strip_prefix(key));
-        let first = matches.next()?;
-        matches.next().is_none().then_some(first)
-    };
-    (value("busy_jiffies=")
-        .and_then(|v| v.parse::<u64>().ok())
-        .is_some_and(|v| v >= 8)
-        && value("idle_waits=")
-            .and_then(|v| v.parse::<u64>().ok())
-            .is_some_and(|v| v > 0)
-        && value("guest_mux=") == Some("elapsed")
-        && value("detach=") == Some("quiet")
-        && value("source=") == Some("Observation"))
-    .then_some(line)
-}
-
-/// The existing diagnostic owns its exact mapping and refusal observations.
-/// Its early stop does not claim that a guest system kernel completed.
-fn native_mmio_verified(serial: &str) -> bool {
-    native_mmio_observation(serial).is_some()
-}
-
-fn native_stack_observation(serial: &str) -> Option<&str> {
-    let mut lines = serial
-        .lines()
-        .filter(|line| line.starts_with("CHECK native-stack "));
-    let line = lines.next()?;
-    if lines.next().is_some() {
-        return None;
-    }
-    let pair = line
-        .strip_prefix("CHECK native-stack finite=4 actual_rsp=")?
-        .strip_suffix(" source=retired parent=clear+TLB; no Linux owner or CPU-time grant")?;
-    let (first, second) = pair.split_once(',')?;
-    let address = |text: &str| u64::from_str_radix(text.strip_prefix("0x")?, 16).ok();
-    let (first, second) = (address(first)?, address(second)?);
-    (first != 0 && second != 0 && first != second).then_some(line)
-}
-
-fn native_mixed32_observation(serial: &str) -> Option<&str> {
-    let mut proofs = serial
-        .lines()
-        .filter(|line| line.starts_with("CHECK native-mixed32"));
-    let line = proofs.next()?;
-    (proofs.next().is_none() && line == "CHECK native-mixed32 PASS contexts=32 kernel=21 rust=11 raw_bytes=1798144 payload_bytes=1785856 alignment_padding=12288 guards=all-roots holes=absent cache=WB retire=32-views raw=whole-boot-owned refusals=wrong-inventory+allocation-capacity; no C-current, Clock or provider grant")
-        .then_some(line)
-}
-
-fn native_mmio_observation(serial: &str) -> Option<&str> {
-    if serial
-        .lines()
-        .any(|line| line.starts_with("CHECK native-mmio FAIL"))
-    {
-        return None;
-    }
-    let mut proofs = serial
-        .lines()
-        .filter(|line| line.starts_with("CHECK native-mmio PASS "));
-    let line = proofs.next()?;
-    if proofs.next().is_some() {
-        return None;
-    }
-    if !line.ends_with("; bounded authored diagnostic, Linux and physical hardware unqualified") {
-        return None;
-    }
-    let mixed32 = native_mixed32_observation(serial)?;
-    let stack = native_stack_observation(serial)?;
-    let position = |proof: &str| serial.lines().position(|candidate| candidate == proof);
-    let order = position(mixed32)? < position(stack)? && position(stack)? < position(line)?;
-    let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
-    let value = |key: &str| {
-        let mut values = fields.iter().filter_map(|field| field.strip_prefix(key));
-        let first = values.next()?;
-        values.next().is_none().then_some(first)
-    };
-    let hex = |key| {
-        value(key)
-            .and_then(|text| text.trim_end_matches(';').strip_prefix("0x"))
-            .and_then(|text| u64::from_str_radix(text, 16).ok())
-    };
-    let bus = |text: &str| {
-        (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
-            .then(|| text.parse::<u8>().ok())
-            .flatten()
-    };
-    let buses = value("buses=")
-        .and_then(|text| text.split_once("..="))
-        .and_then(|(start, end)| Some((bus(start)?, bus(end)?)))
-        .is_some_and(|(start, end)| start <= end);
-    ([
-        ("authority=", "actual"),
-        ("roots=", "all"),
-        ("native_cpus=", "1"),
-        ("effective_cache=", "Intel-UC"),
-        ("aperture=", "owned-PTE"),
-        ("map=", "published"),
-        ("retire=", "actual-clear+TLB"),
-        ("reuse=", "readback"),
-        ("foreign-root=", "refused"),
-        ("WC=", "refused"),
-        ("clock=", "HPET64"),
-        ("retained_hpet=", "1"),
-        ("root_lifetime=", "kernel-image"),
-    ]
-    .iter()
-    .all(|(key, expected)| value(key) == Some(*expected))
-        && value("ioapics=")
-            .and_then(|text| text.parse::<usize>().ok())
-            .is_some_and(|count| count > 0)
-        && hex("MCFG=").is_some()
-        && hex("vendor=").is_some_and(|vendor| vendor > 0 && vendor < u64::from(u32::MAX))
-        && buses
-        && order)
-        .then_some(line)
-}
-
-/// Old single-requester output never checks the two-context fixture.
-fn native_isolation_verified(serial: &str) -> bool {
-    serial.lines().any(|line| {
-        let reason = line
-            .split("wrong_domain_reason=0x")
-            .nth(1)
-            .and_then(|v| v.split_ascii_whitespace().next())
-            .and_then(|v| u8::from_str_radix(v, 16).ok());
-        line.starts_with("CHECK native-dma-isolation PASS ")
-            && reason.is_some_and(|v| v != 0)
-            && [
-                "rid_a=0x0010 did_a=1 rid_b=0x0018 did_b=2",
-                "same_iova=disjoint-ram",
-                "roundtrip_a=verified",
-                "roundtrip_b=verified",
-                "wrong_domain_rid=0x0018",
-                "wrong_domain_address=0x3000",
-                "wrong_domain_reason=0x",
-                "retained_ram=unchanged",
-                "owner_access=verified",
-                "other_context_after_detach=verified",
-                "teardown=context+IOTLB+TE-off-ack",
-            ]
-            .iter()
-            .all(|marker| line.contains(marker))
-    }) && !serial.lines().any(|line| {
-        line.starts_with("CHECK native-dma FAIL ")
-            || line.starts_with("CHECK native-dma-isolation FAIL ")
-    })
-}
-
-/// An older MSI-only EFI cannot satisfy the extended level-IRQ fixture.
-fn native_level_verified(serial: &str) -> bool {
-    serial.lines().any(|line| {
-        line.starts_with("CHECK native-irq PASS ")
-            && line.split_whitespace().any(|field| {
-                [
-                    "DSDT=ed48c9772aee854066c14b36ce8f787bb69d279afa15dea729b8ba2f9b77256d",
-                    "DSDT=dfe8afc13a175262e7bf69710bf7738c11d22051998d20d820685f373e31cf80",
-                    "DSDT=20c176c76ddccc1f5022ced494275c3694b0998165808aae0e88792268cc3db4",
-                    "DSDT=372ca372df1e4fa445111b4f82b8bc6685e25e5aa64c6ed04bd659c3b92a4f4d",
-                ]
-                .contains(&field)
-            })
-            && [
-                "INTx gsi=22 high+shared+level",
-                "first=2 second=1",
-                "hold→EOI→retrigger=verified",
-                "RemoteIRR=observed/drained",
-                "group_refs=released",
-                "late_delivery=absent",
-            ]
-            .iter()
-            .all(|marker| line.contains(marker))
-    }) && !serial.lines().any(|line| {
-        line.starts_with("CHECK native-irq FAIL ") || line.starts_with("CHECK native-dma FAIL ")
-    })
 }
 
 #[cfg(test)]

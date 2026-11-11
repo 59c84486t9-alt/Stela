@@ -30,10 +30,6 @@ use stela_drivers::{
 /// Jobs the BSP's queue admits: one for every stack of its pool, and as many
 /// again waiting, which covers the firmware's protected pending events.
 pub(super) const SLOTS: usize = 2 * native_smp::resources::TASK_STACKS;
-#[cfg(feature = "diagnostics")]
-mod clock;
-#[cfg(feature = "diagnostics")]
-pub(crate) use clock::check_native_clock_domain;
 mod firmware;
 mod pages;
 pub(super) use pages::KernelPages;
@@ -42,10 +38,6 @@ mod plan;
 mod task_data;
 pub(crate) use firmware::FirmwareContext;
 use plan::Plan;
-#[cfg(feature = "diagnostics")]
-mod mixed;
-#[cfg(feature = "diagnostics")]
-pub(super) use mixed::check as check_mixed;
 #[derive(Debug)]
 pub(crate) enum Error {
     Inventory,

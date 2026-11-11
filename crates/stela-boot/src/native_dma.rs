@@ -1,14 +1,10 @@
 //! Native IOMMU backends. Discovery/ownership must supply a checked unit;
 //! there is no identity-mapping substitute for an unavailable domain.
-#[cfg(feature = "diagnostics")]
-pub(crate) mod diagnostic;
 use crate::Result;
 pub use stela_boot_core::dmar;
 pub use stela_boot_core::firmware_state;
-use stela_contracts::refuse;
-#[cfg(feature = "diagnostics")]
-mod isolation_diagnostic;
 pub use stela_boot_core::{requester, vtd};
+use stela_contracts::refuse;
 
 use crate::output;
 use firmware_state::{Found, Kind, TableError, Units, Window};

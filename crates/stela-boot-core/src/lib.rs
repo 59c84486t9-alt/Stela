@@ -75,7 +75,6 @@ pub mod topology;
 pub mod tsc;
 #[cfg(target_arch = "x86_64")]
 pub mod vtd;
-pub mod work_check_fixture;
 pub mod worker_bindings;
 pub mod xstate;
 

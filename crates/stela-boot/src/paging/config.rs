@@ -2,14 +2,6 @@
 //! The one native Permission keeps real firmware/root reservations. Captured
 //! MCFG observations alone cannot construct this Source.
 #[cfg(feature = "diagnostics")]
-mod fixture_config;
-#[cfg(feature = "diagnostics")]
-pub(crate) use fixture_config::FixtureConfig;
-#[cfg(feature = "diagnostics")]
-mod fixture_registers;
-#[cfg(feature = "diagnostics")]
-pub(crate) use fixture_registers::FixtureRegisters;
-#[cfg(feature = "diagnostics")]
 mod hpet;
 mod inventory;
 mod platform;

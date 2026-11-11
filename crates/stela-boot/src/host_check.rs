@@ -169,10 +169,6 @@ impl Timing {
 struct Machine {
     /// Activated table/catalog owner; no hardware grant from metadata.
     active_tables: Option<paging::ActivatedTables>,
-    config_prepared: Option<paging::config::Prepared>,
-    config_source: Option<paging::config::Source>,
-    native_dma: Option<crate::native_dma::diagnostic::Prepared>,
-    native_work: Option<crate::native_work_check::Prepared>,
     options: HostCheck,
     timing: Timing,
     screen: Option<Framebuffer>,
@@ -239,10 +235,6 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables)> {
     let tsc_hz = crate::firmware::tsc_hz();
     let mut machine = Machine {
         active_tables: None,
-        config_prepared: None,
-        config_source: None,
-        native_dma: None,
-        native_work: None,
         timing: Timing {
             tsc_hz,
             started,
@@ -285,66 +277,12 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables)> {
         Ok(handoff) => machine.storage = Some(handoff),
         Err(error) => machine.record("storage", Verdict::Fail, format!("no PCI access: {error}")),
     }
-    if machine.options.native_dma_check
-        || machine.options.native_dma_isolation_check
-        || machine.options.native_irq_work_check
-    {
-        machine.config_prepared = Some(paging::config::Prepared::capture().map_err(|error| {
-            output::arguments(format_args!(
-                "native configuration capture refused: {error}\n"
-            ));
-            "native configuration capture failed"
-        })?);
-        let handoff = machine
-            .storage
-            .as_ref()
-            .ok_or(refuse!("native DMA fixture needs PCI discovery"))?;
-        // This is now scoped protocol discovery and copied DATA only. Keep
-        // application TPL: PCI_IO/handle/pool services may allocate internally.
-        // Destructive BAR sizing moved after EBS and device quiescence.
-        let prepared = crate::native_dma::diagnostic::Prepared::prepare(
-            handoff,
-            machine.options.native_dma_isolation_check,
-        );
-        match prepared {
-            Ok(prepared) => machine.native_dma = Some(prepared),
-            Err(error) => {
-                machine.record("native-dma", Verdict::Fail, error.to_string());
-                return Err(refuse!("native DMA fixture preparation failed"));
-            }
-        }
-    }
-    if machine.options.native_work_check || machine.options.native_irq_work_check {
-        let clock = machine
-            .storage
-            .as_ref()
-            .ok_or(refuse!("native work proof needs native clock"))?
-            .clock;
-        machine.native_work = Some(crate::native_work_check::Prepared::prepare(clock)?);
-    }
     let guard = firmware::pages(firmware::STACK_PAGES + 1)?;
     machine.stack_top = guard + (firmware::STACK_PAGES + 1) * PAGE;
     let image = firmware::Image::loaded()?;
-    let work_arenas: Vec<_> = machine.native_work.iter().map(|p| p.arena()).collect();
-    let mut tables = firmware::tables(&image, [0, guard], &work_arenas, machine.screen.as_ref())?;
-    if let Some(prepared) = &machine.native_work {
-        prepared.map(&mut tables)?;
-    }
-    if let Some(prepared) = &mut machine.config_prepared {
-        prepared.map(&mut tables).map_err(|error| {
-            output::arguments(format_args!(
-                "native configuration aperture refused: {error}\n"
-            ));
-            "native configuration aperture failed"
-        })?;
-    }
+    let mut tables = firmware::tables(&image, [0, guard], machine.screen.as_ref())?;
     for range in machine.storage.iter().flat_map(|handoff| &handoff.mapped) {
         tables.device(range.start as usize, range.end as usize)?;
-    }
-    if let Some(prepared) = &machine.native_dma {
-        for range in prepared.mappings() {
-            tables.device(range.start as usize, range.end as usize)?;
-        }
     }
     let registers = (machine.apic_base & apic::BASE_ADDRESS) as usize;
     tables.device(registers, registers + PAGE)?;
@@ -376,94 +314,6 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
     // SAFETY: interrupts are disabled and nothing else uses the tables.
     unsafe { interrupts::install(interrupt) };
     APIC_BASE.store(machine.apic_base, Ordering::Relaxed);
-    if let Some(prepared) = machine.native_dma.take() {
-        let capture = machine
-            .config_prepared
-            .take()
-            .unwrap_or_else(|| output::fatal("native config capture missing"));
-        let root = machine
-            .active_tables
-            .as_ref()
-            .unwrap_or_else(|| output::fatal("actual native root missing"));
-        // SAFETY: this exact bounded TCG HostCheck path owns the kept
-        // root and firmware-transferred config/controller inventory; no AP or
-        // guest executes, and every pre-EBS accessor has ended.
-        let source =
-            unsafe { paging::config::Source::activate(root, capture) }.unwrap_or_else(|error| {
-                output::arguments(format_args!(
-                    "native configuration activation refused: {error}\n"
-                ));
-                output::fatal("native configuration activation failed")
-            });
-        let prepared = prepared.bind(&source).unwrap_or_else(|error| {
-            output::arguments(format_args!(
-                "native configuration binding refused: {error}\n"
-            ));
-            output::fatal("native configuration binding failed")
-        });
-        machine.config_source = Some(source);
-        let result = if machine.options.native_irq_work_check {
-            match machine.native_work.take() {
-                Some(work) => prepared.run_irq_work(work),
-                None => Err(refuse!("IRQ work stacks missing")),
-            }
-        } else {
-            prepared.run()
-        };
-        if result.is_ok() {
-            machine
-                .config_source
-                .as_ref()
-                .unwrap()
-                .verify_retired()
-                .unwrap_or_else(|error| {
-                    output::arguments(format_args!(
-                        "native config final retirement refused: {error}\n"
-                    ));
-                    output::fatal("native configuration retained uncertain owners")
-                });
-        }
-        if result.is_ok() {
-            output::arguments(format_args!(
-                "CHECK native-config PASS root=actual-ActivatedTables inventory=revalidated config=original-OwnedConfig registers=owned-complete-spans retirement=registry-empty+actual-PTE-clear+TLB no-driver-service-grant\n"
-            ));
-        }
-        match result {
-            Ok(crate::native_dma::diagnostic::Report::IrqWork(proof)) => {
-                machine.record("native-irq-work", Verdict::Pass, proof);
-            }
-            Ok(crate::native_dma::diagnostic::Report::Single(dma, irq)) => {
-                machine.record("native-dma", Verdict::Pass, dma);
-                machine.record("native-irq", Verdict::Pass, irq);
-            }
-            Ok(crate::native_dma::diagnostic::Report::Isolation(proof)) => {
-                machine.record("native-dma-isolation", Verdict::Pass, proof);
-            }
-            Err(error) => {
-                machine.record(
-                    if machine.options.native_irq_work_check {
-                        "native-irq-work"
-                    } else {
-                        "native-dma"
-                    },
-                    Verdict::Fail,
-                    error.to_string(),
-                );
-                // The unit/requester may be in an uncertain DMA state. Unit
-                // and lease Drop kept its resources; do not resume probe.
-                output::fatal("native DMA fixture failed; normal probing inhibited");
-            }
-        }
-    }
-    if let Some(prepared) = machine.native_work.take() {
-        match prepared.run() {
-            Ok(proof) => machine.record("native-work", Verdict::Pass, proof),
-            Err(error) => {
-                machine.record("native-work", Verdict::Fail, error.to_string());
-                output::fatal("native work failed; pending contexts retained");
-            }
-        }
-    }
     match crate::native_memory::verify() {
         Ok(()) => machine.record(
             "native-memory",

@@ -90,7 +90,7 @@ pub(super) fn command(arguments: &Run, options: MachineOptions<'_>) -> Process {
             .as_deref()
             .or(arguments.kvm.then_some("host,+invtsc")),
         arguments.no_la57,
-        usb || system || arguments.host_check(),
+        usb || system,
     );
     let keyboard = if usb { "on" } else { "off" };
     let memory = arguments.memory.clone().unwrap_or_else(|| {
@@ -352,21 +352,6 @@ fn attach_uart(arguments: &Run, serial: &Path, command: &mut Process) {
             .arg(format!("vc,id=uart,logfile={}", option_path(serial)))
             .args(["-serial", "chardev:uart"]),
     };
-}
-
-/// The IOMMU and `edu` devices the native DMA and IRQ fixtures drive.
-pub(super) fn attach_iommu(arguments: &Run, command: &mut Process) {
-    if arguments.native_dma_check
-        || arguments.native_dma_isolation_check
-        || arguments.native_irq_work_check
-    {
-        command.args(["-device", "intel-iommu,intremap=off,caching-mode=on"]);
-        if arguments.native_dma_isolation_check {
-            command.args(["-device", "edu,addr=2", "-device", "edu,addr=3"]);
-        } else {
-            command.args(["-device", "edu"]);
-        }
-    }
 }
 
 /// `--gdb`: a paused machine waiting for the debugger.

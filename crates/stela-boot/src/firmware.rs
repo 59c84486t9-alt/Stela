@@ -12,7 +12,6 @@ use core::{
     time::Duration,
 };
 use stela_contracts::refuse;
-use stela_engine::freestanding::BootArena;
 use uefi::{
     CStr16, Event,
     boot::{self, AllocateType, EventType, MemoryType, TimerTrigger, Tpl},
@@ -230,12 +229,10 @@ pub(crate) fn ram() -> Result<Vec<(usize, usize)>> {
 
 /// Identity-map RAM and the framebuffer RW+NX with 2 MiB pages where they
 /// fill a whole chunk and 4 KiB pages elsewhere. Page zero and the stack
-/// guard stay unmapped; the image gets its section rights, and each arena an
-/// empty table.
+/// guard stay unmapped; the image gets its section rights.
 pub(crate) fn tables(
     image: &Image,
     holes: [usize; 2],
-    arenas: &[BootArena],
     screen: Option<&Framebuffer>,
 ) -> Result<Tables> {
     let mut ram = ram()?;
@@ -246,15 +243,10 @@ pub(crate) fn tables(
     }
     let covered = |start: usize, end: usize| ram.iter().any(|r| r.0 <= start && end <= r.1);
     let overlaps = |start: usize, end: usize| ram.iter().any(|r| r.0 < end && start < r.1);
-    let arena_chunks: Vec<usize> = arenas.iter().map(|a| a.base.as_ptr() as usize).collect();
     let mut tables = Tables::new()?;
     let top = ram.last().map_or(0, |r| r.1).max(image.end);
     for chunk in (0..top).step_by(LARGE_PAGE) {
         let end = chunk + LARGE_PAGE;
-        if arena_chunks.contains(&chunk) {
-            tables.small(chunk)?;
-            continue;
-        }
         let special = holes.iter().any(|&hole| (chunk..end).contains(&hole))
             || (image.start < end && chunk < image.end);
         if covered(chunk, end) && !special {
@@ -301,7 +293,7 @@ pub fn take_over(
     let guard = pages(STACK_PAGES + 1)?;
     let image = Image::loaded()?;
     let screen = Framebuffer::from_firmware();
-    let mut tables = tables(&image, [0, guard], &[], screen.as_ref())?;
+    let mut tables = tables(&image, [0, guard], screen.as_ref())?;
     storage.map(&mut tables)?;
     crate::output::leave_boot_services();
     // SAFETY: no protocol or pool allocation outlives this call; the heap,

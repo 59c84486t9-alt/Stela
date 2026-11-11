@@ -4,8 +4,6 @@
 //! host drivers request routes through [`service`], and the engine takes
 //! their interrupts in its wait windows. Interrupt remapping is off.
 use crate::apic::{self, Apic};
-#[cfg(feature = "diagnostics")]
-use alloc::boxed::Box;
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     arch::asm,
@@ -14,20 +12,11 @@ use core::{
 use stela_drivers::bus::irq::{
     FIRST_VECTOR, IrqController, IrqError, Platform, Registry, Target, Trigger, VECTOR_COUNT,
 };
-use stela_drivers::platform::work::Cpu;
 
 use stela_boot_core::irq_context as context;
-#[cfg(feature = "diagnostics")]
-pub(crate) mod diagnostic;
 pub(crate) mod direct;
 pub use stela_boot_core::ioapic;
-#[cfg(feature = "diagnostics")]
-pub(crate) mod level_diagnostic;
 pub mod madt;
-#[cfg(feature = "diagnostics")]
-pub(crate) mod root;
-#[cfg(feature = "diagnostics")]
-pub(crate) mod work_diagnostic;
 
 static CONTEXT: context::Context = context::Context::new();
 static READY: AtomicBool = AtomicBool::new(false);
@@ -35,12 +24,6 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 static REGISTERS: AtomicU64 = AtomicU64::new(0);
 static BSP: AtomicU32 = AtomicU32::new(0);
 static TIMEOUT: AtomicU64 = AtomicU64::new(0);
-// The clock's CPU view that the diagnostics' IRQ root adopts, permanently
-// kept with this static registry. Never moves HostOwner itself.
-#[cfg(feature = "diagnostics")]
-static ROOT_ADAPTER: AtomicPtr<crate::native_clock::IrqAdapter> =
-    AtomicPtr::new(core::ptr::null_mut());
-
 static MOUNTED_CPU: AtomicPtr<crate::engine::host::RootIdentity> =
     AtomicPtr::new(core::ptr::null_mut());
 
@@ -51,75 +34,11 @@ fn mounted_cpu() -> Option<&'static crate::engine::host::RootIdentity> {
     unsafe { identity.as_ref() }
 }
 
-#[cfg(feature = "diagnostics")]
-fn root_adapter() -> Option<&'static crate::native_clock::IrqAdapter> {
-    let adapter = ROOT_ADAPTER.load(Ordering::Acquire);
-    // SAFETY: publication leaks this exact Box for the permanent registry
-    // lifetime. No path removes it, including failed source retirement.
-    unsafe { adapter.as_ref() }
-}
-#[cfg(feature = "diagnostics")]
-fn root_cpu() -> Option<&'static Arc<dyn Cpu>> {
-    root_adapter().map(|adapter| &adapter.cpu)
-}
-/// Only the diagnostics' IRQ root adopts a clock CPU view.
-#[cfg(not(feature = "diagnostics"))]
-fn root_cpu() -> Option<&'static Arc<dyn Cpu>> {
-    None
-}
-/// Check this CPU against the adopted clock view, else the mounted identity.
+/// Check this CPU against the mounted identity.
 fn check_irq_cpu() -> Result<(), IrqError> {
-    #[cfg(feature = "diagnostics")]
-    if let Some(adapter) = root_adapter() {
-        return adapter.check_irq_cpu().map_err(|_| IrqError::WrongCpu);
-    }
     mounted_cpu().map_or(Ok(()), |identity| {
         identity.check_irq_cpu().map_err(|_| IrqError::WrongCpu)
     })
-}
-
-/// Join main's existing physical CPU/IDT/APIC owner for external device IRQs.
-/// No local timer register or engine vector is changed.
-///
-/// # Safety
-/// Post-EBS main owns the installed 0x50..0x5f IDT stubs and exclusively
-/// hands those routes to this registry. Physical delivery/remapping policy is
-/// checked; no firmware/SMM/other CPU owns these routes. The root and
-/// descriptor allocations remain held through this permanent registration.
-/// Active external routes must be stopped before leaving their checked root
-/// execution scope; the CPU view refuses unsupported root/context changes.
-#[cfg(feature = "diagnostics")]
-pub(crate) unsafe fn adopt(
-    execution: &crate::native_clock::DriverExecution<'_>,
-) -> Result<(), IrqError> {
-    let adapter = execution.irq_adapter().map_err(|_| IrqError::Unavailable)?;
-    if READY.load(Ordering::Acquire) {
-        return match root_cpu() {
-            Some(cpu)
-                if Arc::ptr_eq(cpu, &adapter.cpu)
-                    && BASE.load(Ordering::Relaxed) == adapter.base
-                    && REGISTERS.load(Ordering::Relaxed) == adapter.registers =>
-            {
-                NativePlatform(()).check_cpu()
-            }
-            _ => Err(IrqError::Unavailable),
-        };
-    }
-    let adapter = Box::new(adapter);
-    let saved = adapter.cpu.save_disable().map_err(|_| IrqError::WrongCpu)?;
-    // SAFETY: typed main-owned APIC mapping, installed IDT/CPU grant
-    // and explicit external-route handoff required above. Deadline units for
-    // this adopted path are fixed PM-clock monotonic nanoseconds.
-    let result = unsafe { initialize(adapter.base, adapter.registers, 2_000_000_000) };
-    if result.is_ok() {
-        ROOT_ADAPTER.store(Box::into_raw(adapter), Ordering::Release);
-        // SAFETY: the original same-CPU view is now permanently kept.
-        unsafe { root_cpu().unwrap().restore(saved) };
-    } else {
-        // SAFETY: enclosing CPU save, no switch or publication occurred.
-        unsafe { adapter.cpu.restore(saved) };
-    }
-    result
 }
 
 /// # Safety
@@ -352,14 +271,6 @@ unsafe impl Platform for NativePlatform {
         if current_context()?.is_some() {
             return Err(IrqError::WrongCpu);
         }
-        if let Some(cpu) = root_cpu() {
-            cpu.check_cpu().map_err(|_| IrqError::WrongCpu)?;
-            if cpu.in_interrupt() {
-                return Err(IrqError::WrongCpu);
-            }
-        }
-        // Without root_adapter this is only the original explicit early boot
-        // diagnostic grant; it creates no remapper/native delivery capability.
         Ok(())
     }
     fn save_and_disable(&self) -> u64 {
@@ -419,7 +330,7 @@ unsafe impl Platform for NativePlatform {
         })
     }
     fn ticks(&self) -> u64 {
-        root_cpu().map_or_else(apic::rdtsc, |cpu| cpu.ticks())
+        apic::rdtsc()
     }
     fn timeout_ticks(&self) -> u64 {
         TIMEOUT.load(Ordering::Relaxed)

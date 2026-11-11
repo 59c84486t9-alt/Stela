@@ -30,8 +30,6 @@ pub(crate) mod install;
 pub(crate) mod interrupts;
 mod kernel_work;
 pub(crate) use kernel_work::FirmwareContext;
-#[cfg(feature = "diagnostics")]
-pub(crate) use kernel_work::check_native_clock_domain;
 mod network;
 pub(crate) mod nor;
 mod parallel;

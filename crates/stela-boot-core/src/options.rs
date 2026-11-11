@@ -265,12 +265,6 @@ pub struct System {
     /// Cable the native USB keyboard and pointer to the last USB-C
     /// controller and feed it the host's virtio-input devices (`--input`).
     pub input: bool,
-    /// Diagnostic of native pinned RAM in the shared window.
-    pub native_memory_check: bool,
-    /// Native MMIO/root/cache diagnostic; stops before guest entry.
-    pub native_mmio_check: bool,
-    /// Short native PM/LAPIC/IRQ fixture; stops before guest entry.
-    pub native_clock_check: bool,
     /// Explicit native executors and guest PEs (`--native-cores N`), one per
     /// logical processor; SMT siblings count after every physical core.
     pub native_cores: Option<usize>,
@@ -388,9 +382,6 @@ impl Default for System {
             survey: false,
             idle_skip: false,
             input: false,
-            native_memory_check: false,
-            native_mmio_check: false,
-            native_clock_check: false,
             native_cores: None,
             guest_pes: None,
             native_bootstrap_check: false,
@@ -640,9 +631,6 @@ impl System {
     /// before taking over hardware.
     pub fn diagnostic_option(&self) -> Option<&'static str> {
         [
-            (self.native_memory_check, "--native-memory-check"),
-            (self.native_mmio_check, "--native-mmio-check"),
-            (self.native_clock_check, "--native-clock-check"),
             (self.native_bootstrap_check, "--native-bootstrap-check"),
             (self.native_shared_check, "--native-shared-check"),
             (self.audio_check.is_some(), "--audio-check"),
@@ -812,9 +800,6 @@ impl fmt::Display for System {
         line.value(GUEST_PES, self.guest_pes)?;
         line.flag("--native-rounds", self.native_rounds)?;
         line.flag("--native-artifacts", self.native_artifacts)?;
-        line.flag("--native-memory-check", self.native_memory_check)?;
-        line.flag("--native-mmio-check", self.native_mmio_check)?;
-        line.flag("--native-clock-check", self.native_clock_check)?;
         line.flag("--native-bootstrap-check", self.native_bootstrap_check)?;
         line.flag("--native-shared-check", self.native_shared_check)?;
         let implied_serial =
@@ -863,10 +848,6 @@ const DEFAULT_KEY_SECONDS: u64 = 60;
 /// and its diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostCheck {
-    pub native_dma_check: bool,
-    pub native_work_check: bool,
-    pub native_irq_work_check: bool,
-    pub native_dma_isolation_check: bool,
     /// Read the NOR image from this FAT32 partition's file (`--nor-file
     /// GUID:/PATH`).
     pub nor_file: Option<(Guid, String)>,
@@ -879,10 +860,6 @@ pub struct HostCheck {
 impl Default for HostCheck {
     fn default() -> Self {
         Self {
-            native_dma_check: false,
-            native_work_check: false,
-            native_irq_work_check: false,
-            native_dma_isolation_check: false,
             nor_file: None,
             deadline: None,
             key_seconds: DEFAULT_KEY_SECONDS,
@@ -906,10 +883,6 @@ impl HostCheck {
         let mut options = Self::default();
         while let Some(word) = words.next() {
             match word {
-                "--native-irq-work-check" => options.native_irq_work_check = true,
-                "--native-work-check" => options.native_work_check = true,
-                "--native-dma-check" => options.native_dma_check = true,
-                "--native-dma-isolation-check" => options.native_dma_isolation_check = true,
                 "--nor-file" => {
                     let (guid, path) = words
                         .next()
@@ -928,14 +901,6 @@ impl HostCheck {
                 _ => return Err(Error::UnknownHostOption),
             }
         }
-        if u8::from(options.native_dma_check)
-            + u8::from(options.native_dma_isolation_check)
-            + u8::from(options.native_work_check)
-            + u8::from(options.native_irq_work_check)
-            > 1
-        {
-            return Err(Error::Constraint(Constraint::HostDiagnosticExclusive));
-        }
         Ok(options)
     }
 }
@@ -944,13 +909,6 @@ impl fmt::Display for HostCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(HOST_CHECK)?;
         let mut line = Line(f);
-        line.flag("--native-dma-check", self.native_dma_check)?;
-        line.flag(
-            "--native-dma-isolation-check",
-            self.native_dma_isolation_check,
-        )?;
-        line.flag("--native-work-check", self.native_work_check)?;
-        line.flag("--native-irq-work-check", self.native_irq_work_check)?;
         if let Some((guid, path)) = &self.nor_file {
             write!(line.0, " --nor-file {guid}:{path}")?;
         }

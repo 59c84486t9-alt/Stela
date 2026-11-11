@@ -12,15 +12,11 @@ pub(crate) mod shootdown;
 mod window;
 use ecam::RootWindow;
 #[cfg(feature = "diagnostics")]
-pub(crate) mod diagnostic;
-#[cfg(feature = "diagnostics")]
 mod platform;
 
 pub(crate) use capture::{CaptureHandoff, Prepared, Wire};
 #[cfg(feature = "diagnostics")]
-pub(crate) use platform::{
-    ExclusiveHpet, HpetMapping, QualifiedRam, RootPublication, ScopedSource,
-};
+pub(crate) use platform::{ExclusiveHpet, HpetMapping};
 pub(crate) use shared::{
     ContainedPci, ContainmentError, InitialPciLines, IoapicRegisters, ModePin, NativeExclusiveHpet,
     NativeHpetMapping, PROCESSORS, Source,

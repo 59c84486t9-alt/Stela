@@ -336,12 +336,6 @@ unsafe impl MappingPlatform for Platform {
             .is_some_and(|owner| {
                 core::ptr::eq(self, owner.platform.as_ref()) && owner.span == span
             });
-        #[cfg(feature = "diagnostics")]
-        let owner = owner
-            || resource
-                .backing()
-                .downcast_ref::<super::fixture_config::Backing>()
-                .is_some_and(|owner| owner.matches(self, span));
         if !owner {
             return Err(unchanged(owned::Error::OutsideResource));
         }

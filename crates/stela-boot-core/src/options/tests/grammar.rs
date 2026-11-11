@@ -61,14 +61,13 @@ fn unknown_options_still_parse_their_numeric_value_first() {
 
 #[test]
 fn raw_string_values_and_ascii_word_boundaries_are_preserved() {
-    let options = System::parse(
-        "--system\t--wifi\n--native-memory-check --wifi-key --profile --bundle --input",
-    )
-    .unwrap();
-    assert_eq!(options.ssid.as_deref(), Some("--native-memory-check"));
+    let options =
+        System::parse("--system\t--wifi\n--audio-own-hpet --wifi-key --profile --bundle --input")
+            .unwrap();
+    assert_eq!(options.ssid.as_deref(), Some("--audio-own-hpet"));
     assert_eq!(options.wifi_key.as_deref(), Some("--profile"));
     assert_eq!(options.bundle_directory.as_deref(), Some("--input"));
-    assert!(!options.native_memory_check && !options.profile && !options.input);
+    assert!(!options.profile && !options.input);
     assert_eq!(
         System::parse("--system\u{a0}--profile"),
         Err(Error::SystemPrefix)
@@ -163,9 +162,9 @@ fn producer_errors_keep_the_argument_that_failed() {
 }
 
 #[test]
-fn host_repeats_overwrite_but_late_value_errors_precede_exclusivity() {
+fn host_repeats_overwrite_and_late_value_errors_refuse() {
     let options = HostCheck::parse(
-        "--host-check --native-dma-check --native-dma-check --deadline 1 --deadline 2 \
+        "--host-check --deadline 1 --deadline 2 \
          --key-seconds 3 --key-seconds 4 \
          --nor-file 11111111-2222-3333-4444-555555555555:/a \
          --nor-file 11111111-2222-3333-4444-555555555555:/b",
@@ -175,12 +174,8 @@ fn host_repeats_overwrite_but_late_value_errors_precede_exclusivity() {
     assert_eq!(options.key_seconds, 4);
     assert_eq!(options.nor_file.unwrap().1, "/b");
     assert_eq!(
-        HostCheck::parse("--host-check --native-dma-check --native-work-check --deadline 0"),
+        HostCheck::parse("--host-check --deadline 0"),
         Err(Error::HostSeconds)
-    );
-    assert_eq!(
-        HostCheck::parse("--host-check --native-dma-check --native-work-check"),
-        Err(Error::Constraint(Constraint::HostDiagnosticExclusive))
     );
 }
 

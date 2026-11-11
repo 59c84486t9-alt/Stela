@@ -8,15 +8,11 @@ pub(super) fn system(options: &System) -> Result<(), Error> {
     install(options)?;
     boot_selection(options)?;
     dram(options)?;
-    clock(options)?;
     if options.audio_own_hpet && options.audio_check.is_none() {
         return Err(Error::Constraint(Constraint::AudioHpetDependency));
     }
     if options.native_pci_own_ioapic
         && (options.audio_check.is_some()
-            || options.native_clock_check
-            || options.native_mmio_check
-            || options.native_memory_check
             || options.native_bootstrap_check
             || options.native_shared_check)
     {
@@ -112,36 +108,6 @@ fn boot_selection(options: &System) -> Result<(), Error> {
 fn dram(options: &System) -> Result<(), Error> {
     if !options.dram_base.is_multiple_of(LARGE) {
         return Err(Error::Constraint(Constraint::DramAlignment));
-    }
-    Ok(())
-}
-
-fn clock(options: &System) -> Result<(), Error> {
-    if options.native_clock_check {
-        if options.native_cores != Some(1) {
-            return Err(Error::Constraint(Constraint::ClockCoreCount));
-        }
-        if options.native_mmio_check
-            || options.native_memory_check
-            || options.native_bootstrap_check
-            || options.native_shared_check
-            || options.native_rounds
-            || options.audio_check.is_some()
-            || options.network_check.is_some()
-            || options.storage.is_some()
-            || options.storage_ram.is_some()
-            || options.preboot.is_some()
-            || options.nor.is_some()
-            || options.input
-            || options.guest_network
-            || options.ssid.is_some()
-            || options.external_disks
-            || !options.usb_storage.is_empty()
-            || options.install.is_some()
-            || options.restore
-        {
-            return Err(Error::Constraint(Constraint::ClockExclusive));
-        }
     }
     Ok(())
 }

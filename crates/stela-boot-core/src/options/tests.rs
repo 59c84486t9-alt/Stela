@@ -18,7 +18,7 @@ fn native_pci_ioapic_handoff_round_trips_and_refuses_diagnostic_paths() {
         Error::DuplicateNativePciIoapic
     );
     assert_eq!(
-        System::parse("--system --native-pci-own-ioapic --native-mmio-check").unwrap_err(),
+        System::parse("--system --native-pci-own-ioapic --audio-check duplex").unwrap_err(),
         Error::Constraint(Constraint::NativePciIoapicExclusive)
     );
 }
@@ -27,16 +27,10 @@ use alloc::{format, string::ToString, vec};
 
 #[test]
 fn diagnostic_options_are_typed() {
-    for text in ["--system", "--system --wifi --native-memory-check"] {
+    for text in ["--system", "--system --wifi --audio-own-hpet"] {
         assert_eq!(System::parse(text).unwrap().diagnostic_option(), None);
     }
     for (text, flag) in [
-        ("--system --native-memory-check", "--native-memory-check"),
-        (
-            "--system --native-cores 1 --native-clock-check",
-            "--native-clock-check",
-        ),
-        ("--system --native-mmio-check", "--native-mmio-check"),
         (
             "--system --native-cores 2 --native-bootstrap-check",
             "--native-bootstrap-check",
@@ -51,8 +45,8 @@ fn diagnostic_options_are_typed() {
 }
 
 #[test]
-fn host_check_lines_round_trip_and_refuse_combined_fixtures() {
-    let line = "--host-check --native-dma-check \
+fn host_check_lines_round_trip_and_refuse_bad_values() {
+    let line = "--host-check \
                 --nor-file 11111111-2222-3333-4444-555555555555:/stela/nor.bin --deadline 30 \
                 --key-seconds 5";
     let options = HostCheck::parse(line).unwrap();
@@ -61,7 +55,7 @@ fn host_check_lines_round_trip_and_refuse_combined_fixtures() {
     assert_eq!(HostCheck::parse("--host-check"), Ok(HostCheck::default()));
     for text in [
         "--system",
-        "--host-check --native-dma-check --native-work-check",
+        "--host-check --native-dma-check",
         "--host-check --deadline 0",
         "--host-check --nor-file x",
         "--host-check --unknown",

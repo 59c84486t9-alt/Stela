@@ -98,8 +98,6 @@ pub enum Error {
     WifiNetwork,
     DuplicateNativeShared,
     DuplicateNativeBootstrap,
-    DuplicateNativeClock,
-    DuplicateNativeMmio,
     Constraint(Constraint),
     Target {
         argument: TargetArgument,
@@ -132,9 +130,6 @@ pub enum Constraint {
     UpgradeSelection,
     RecoverySafeMode,
     DramAlignment,
-    ClockCoreCount,
-    ClockExclusive,
-    HostDiagnosticExclusive,
     AudioHpetDependency,
     NativePciIoapicExclusive,
 }
@@ -223,8 +218,6 @@ impl Error {
             Self::WifiNetwork => "--wifi needs a 1 to 32 byte network name, with %XX escapes",
             Self::DuplicateNativeShared => "duplicate native shared check",
             Self::DuplicateNativeBootstrap => "duplicate native bootstrap check",
-            Self::DuplicateNativeClock => "duplicate native clock check",
-            Self::DuplicateNativeMmio => "duplicate native MMIO check",
             Self::Constraint(rule) => rule.message(),
             Self::Target { source, .. } | Self::Guid { source, .. } => source,
             Self::BootCommandOrigin { source, .. } => source,
@@ -259,11 +252,6 @@ impl Constraint {
             Self::UpgradeSelection => "--upgrade is neither a safe-mode boot nor a recoveryOS",
             Self::RecoverySafeMode => "a recoveryOS boot is not a safe-mode boot",
             Self::DramAlignment => "guest DRAM base must be 2 MiB aligned",
-            Self::ClockCoreCount => "native clock check requires --native-cores 1",
-            Self::ClockExclusive => "native clock check requires an exclusive diagnostic mode",
-            Self::HostDiagnosticExclusive => {
-                "host check: native diagnostic fixture modes are exclusive"
-            }
             Self::AudioHpetDependency => "--audio-own-hpet requires --audio-check",
             Self::NativePciIoapicExclusive => {
                 "--native-pci-own-ioapic requires the normal system platform path"
