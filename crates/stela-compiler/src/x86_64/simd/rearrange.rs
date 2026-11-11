@@ -181,6 +181,10 @@ pub(super) fn add_or_subtract(lane: u8, subtract: bool) -> Host {
 
 fn load_lane(code: &mut Code, source: LaneSource, bytes: u8) {
     use crate::aarch64::Register;
+    if let LaneSource::Vector { register, .. } = source {
+        // The lane is read from the slot: store a newer home first.
+        code.write_back_vector(register);
+    }
     let mut asm = code.asm();
     let storage = match source {
         LaneSource::General(Register::Zero) => {
@@ -266,6 +270,8 @@ fn insert_lane(code: &mut Code, destination: u8, byte: u8, bytes: u8) {
         8 => Size::Qword,
         _ => unreachable!("reviewed lane size"),
     };
+    // The lane is written to the slot: the home, stored if newer, goes.
+    code.evict_vector(destination);
     code.asm().mov_store(
         size,
         guest(vector_offset(destination) + u32::from(byte)),
@@ -680,6 +686,26 @@ fn duplicate(code: &mut Code, source: LaneSource, lane: u8, bytes: u8, target: T
             }
             false
         }
+    }
+}
+
+/// Whether `operand` keeps the block's vector homes
+/// ([`super::vector_use`]): lane moves store or give up the home of the
+/// vector whose slot they address; the SSSE3 permutation and the byte
+/// extraction use the operand layer alone; tables and the scalar byte
+/// gather address slots.
+pub(in crate::x86_64) fn vector_use(
+    operand: &Operand,
+    target: TargetCpu,
+) -> crate::x86_64::block::VectorUse {
+    use crate::x86_64::block::VectorUse::{Keep, Settle};
+    match *operand {
+        Operand::Duplicate { .. }
+        | Operand::Insert { .. }
+        | Operand::Extract { .. }
+        | Operand::ByteExtract(_) => Keep,
+        Operand::Permute { .. } if target >= TargetCpu::Ssse3 => Keep,
+        Operand::Permute { .. } | Operand::Table { .. } => Settle,
     }
 }
 

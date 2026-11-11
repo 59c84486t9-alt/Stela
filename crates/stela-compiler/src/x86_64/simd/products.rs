@@ -2,6 +2,7 @@
 use super::rearrange::{add_or_subtract, lane_constant};
 use super::{
     Host, commit, greater, packed, packed_imm, read_vector, rearrange::constant, shuffle, three,
+    vector_source,
 };
 use crate::x86_64::asm::{Code, Cond, Gpr, Size, resolve, vector_extensions};
 use crate::{
@@ -137,12 +138,13 @@ fn accumulate(code: &mut Code, destination: u8, lane: u8, operation: Accumulate)
     if operation == Accumulate::None {
         return 0;
     }
-    read_vector(code, destination, 1);
     if operation == Accumulate::Subtract {
+        read_vector(code, destination, 1);
         packed(code, add_or_subtract(lane, true), 1, 0);
         1
     } else {
-        packed(code, add_or_subtract(lane, false), 0, 1);
+        let accumulator = vector_source(code, destination, 1);
+        packed(code, add_or_subtract(lane, false), 0, accumulator);
         0
     }
 }
@@ -728,8 +730,8 @@ fn word_long_product(
     match operation {
         Accumulate::None => result,
         Accumulate::Add => {
-            read_vector(code, operand.destination, 1);
-            three::three(code, Host::AddDword, result, result, 1, target);
+            let accumulator = vector_source(code, operand.destination, 1);
+            three::three(code, Host::AddDword, result, result, accumulator, target);
             result
         }
         Accumulate::Subtract => {

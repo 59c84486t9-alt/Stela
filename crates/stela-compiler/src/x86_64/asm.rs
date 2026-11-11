@@ -222,6 +222,19 @@ impl<'a> Asm<'a> {
         assert!(!matches!(rm, Rm::Xmm(register) if register >= 16));
         self.legacy(Size::Dword, prefix, opcode, xmm, false, rm);
     }
+    /// [`Self::sse`] of a form whose ModRM.reg register is a source (a
+    /// store), which may name a register holding a guest vector.
+    pub(crate) fn sse_reading(
+        &mut self,
+        prefix: Option<u8>,
+        opcode: &[u8],
+        xmm: u8,
+        rm: impl Into<Rm>,
+    ) {
+        let guarded = core::mem::replace(&mut self.guarded, 0);
+        self.sse(prefix, opcode, xmm, rm);
+        self.guarded = guarded;
+    }
     /// [`Self::sse`] with an 8-bit immediate.
     pub(crate) fn sse_imm(
         &mut self,

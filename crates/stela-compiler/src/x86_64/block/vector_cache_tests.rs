@@ -225,10 +225,14 @@ fn every_fault_site_finds_the_cached_writes_stored() {
             // cached results are stored before it.
             let load = accesses[0];
             assert_eq!(load.retirement.position().unwrap().retired_instructions, 3);
+            // The last is written straight to its slot from the recipe's
+            // register, since the access follows it.
             let code = &block.x86_64_code[block.source_map[2].1..load.start];
-            let stores = code
-                .windows(4)
-                .filter(|w| *w == [0xf3, 0x44, 0x0f, 0x7f])
+            let stores = (0..code.len().saturating_sub(4))
+                .filter(|&at| {
+                    code[at..at + 4] == [0xf3, 0x44, 0x0f, 0x7f]
+                        || code[at..at + 3] == [0xf3, 0x0f, 0x7f] && code[at + 3] & 0xc7 == 0x87
+                })
                 .count();
             assert_eq!(stores, 3);
         }
@@ -251,7 +255,8 @@ fn a_guest_access_after_an_unstored_write_is_refused() {
 }
 
 /// The cache stores the dirty homes before an access, a side exit, an
-/// uncached instruction and the terminal, and only there.
+/// uncached instruction and the terminal, and only there; a result the
+/// next of those follows goes straight to its slot.
 #[test]
 fn dirty_vectors_are_stored_where_the_state_must_be_current() {
     // add v0.4s,v1.4s,v2.4s; add v0.4s,v0.4s,v2.4s; ldr x2,[x1];
@@ -279,12 +284,18 @@ fn dirty_vectors_are_stored_where_the_state_must_be_current() {
     // movdqu [rdi+0x108+16v],xmm8..15: a home stored to V`v`'s slot.
     let stores_of = |range: core::ops::Range<usize>| -> Vec<u8> {
         let bytes = &code[range];
-        (0..bytes.len().saturating_sub(4))
-            .filter(|&at| {
-                bytes[at..at + 4] == [0xf3, 0x44, 0x0f, 0x7f] && bytes[at + 4] & 0xc7 == 0x87
+        // From a home (REX.R) or straight from a recipe's register.
+        (0..bytes.len().saturating_sub(7))
+            .filter_map(|at| {
+                let rex = usize::from(bytes[at + 1] == 0x44);
+                (at + 8 + rex <= bytes.len()
+                    && bytes[at] == 0xf3
+                    && bytes[at + 1 + rex..at + 3 + rex] == [0x0f, 0x7f]
+                    && bytes[at + 3 + rex] & 0xc7 == 0x87)
+                    .then_some(at + 4 + rex)
             })
             .map(|at| {
-                let offset = u32::from_le_bytes(bytes[at + 5..at + 9].try_into().unwrap());
+                let offset = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
                 ((offset - 0x108) / 16) as u8
             })
             .collect()

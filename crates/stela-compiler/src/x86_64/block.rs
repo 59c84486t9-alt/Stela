@@ -718,13 +718,23 @@ fn emit_selected(
                     // A join lands here from a point that stored them all.
                     code.settle_vectors();
                 }
-                let mut class = vector_use(&instructions[cursor].operation);
                 // A fused group addresses the state itself.
-                if fuse_simd
-                    && super::simd::sha256::HashGroup::recognize(&instructions[cursor..]).is_some()
-                {
-                    class = VectorUse::Settle;
-                }
+                let class_at = |at: usize| {
+                    if fuse_simd
+                        && super::simd::sha256::HashGroup::recognize(&instructions[at..]).is_some()
+                    {
+                        VectorUse::Settle
+                    } else {
+                        vector_use(&instructions[at].operation, target)
+                    }
+                };
+                let class = class_at(cursor);
+                // Where the next instruction stores or forgets the homes
+                // anyway, results go straight to the state.
+                let next_keeps = cursor + 1 < instructions.len()
+                    && !landing[cursor + 1]
+                    && class_at(cursor + 1) == VectorUse::Keep;
+                code.set_vector_write_through(!next_keeps);
                 match class {
                     VectorUse::Keep => code.set_vector_cache(true),
                     VectorUse::Flush => {
@@ -1663,7 +1673,7 @@ pub(super) enum VectorUse {
     Settle,
 }
 
-fn vector_use(operation: &Operation) -> VectorUse {
+fn vector_use(operation: &Operation, target: crate::TargetCpu) -> VectorUse {
     match operation {
         Operation::AddSub { .. }
         | Operation::AddSubRegister { .. }
@@ -1686,7 +1696,7 @@ fn vector_use(operation: &Operation) -> VectorUse {
         | Operation::BranchCondition { .. }
         | Operation::BranchZero { .. }
         | Operation::BranchBit { .. } => VectorUse::Flush,
-        Operation::Simd(operand) => super::simd::vector_use(operand),
+        Operation::Simd(operand) => super::simd::vector_use(operand, target),
         _ => VectorUse::Settle,
     }
 }
@@ -1761,7 +1771,10 @@ fn emit_single(
         super::simd::emit_after(code, operand, target, checks, held.xmm0, held.xmm_pair);
         // A first load of the vector XMM0 holds changes nothing.
         if let Some(vector) = held.xmm0 {
-            let load = super::simd::xmm0_load(scratch, vector);
+            let load = match code.vector_cache().peek(vector) {
+                Some(host) => super::simd::xmm0_home_load(scratch, host),
+                None => super::simd::xmm0_load(scratch, vector),
+            };
             if code[start..].starts_with(load) && code.len() > start + load.len() {
                 code.remove_instruction(start..start + load.len());
             }
@@ -1933,9 +1946,13 @@ fn emit_single(
     });
     let keep_vectors = !code.constant_time() && preserves_held_vectors(&instruction.operation);
     let xmm0 = match &instruction.operation {
-        Operation::Simd(operand) => {
-            super::simd::xmm0_after(scratch, operand, &code[start..], held.xmm0)
-        }
+        Operation::Simd(operand) => super::simd::xmm0_after(
+            scratch,
+            operand,
+            &code[start..],
+            held.xmm0,
+            code.vector_cache(),
+        ),
         _ if keep_vectors => held.xmm0,
         _ => None,
     };

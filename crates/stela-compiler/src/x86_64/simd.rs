@@ -132,7 +132,9 @@ fn vector_memory(vector: u8) -> Mem {
 /// Write guest vector `vector` from `xmm`: to its home where the block
 /// keeps vectors in registers ([`super::vector_cache`]), else to the state.
 fn commit(code: &mut Code, vector: u8, xmm: u8) {
-    if code.vector_cache().active() {
+    if code.vector_cache().writes_through() {
+        code.discard_vector(vector);
+    } else if code.vector_cache().active() {
         let host = code.allocate_vector(vector);
         if host != xmm {
             code.asm_unguarded().sse(
@@ -484,7 +486,7 @@ pub(super) fn emit_for_target(
 /// [`read_vector`], [`vector_source`], [`vector_operand`] and [`commit`] and
 /// names only the scratch registers XMM0 to XMM7. Accesses store the dirty
 /// homes before their fault sites.
-pub(super) fn vector_use(operand: &Operand) -> super::block::VectorUse {
+pub(super) fn vector_use(operand: &Operand, target: crate::TargetCpu) -> super::block::VectorUse {
     use super::block::VectorUse::*;
     match operand {
         Operand::Integer { .. }
@@ -492,7 +494,11 @@ pub(super) fn vector_use(operand: &Operand) -> super::block::VectorUse {
         | Operand::MoveImmediate { .. }
         | Operand::Product(_)
         | Operand::Saturate(_)
-        | Operand::Halving(_) => Keep,
+        | Operand::Halving(_)
+        | Operand::Reduce(_)
+        | Operand::Immediate(crate::aarch64::simd::immediates::Operand::Constant { .. }) => Keep,
+        Operand::Immediate(crate::aarch64::simd::immediates::Operand::LaneMove(lane))
+        | Operand::Rearrange(lane) => rearrange::vector_use(lane, target),
         // The register forms and scalar saturating shifts stage lanes
         // through the state (`shifts::register_shift`).
         Operand::Shift(shift) => match shift.kind {
@@ -828,10 +834,21 @@ pub(super) fn xmm0_after(
     operand: &Operand,
     code: &[u8],
     held: Option<u8>,
+    homes: &super::vector_cache::VectorCache,
 ) -> Option<u8> {
+    let cached = homes.active();
     let mut committed = |vector: u8| {
         scratch.clear();
-        commit(scratch, vector, 0);
+        match homes.peek(vector) {
+            // The commit to a home from XMM0.
+            Some(host) => scratch.asm_unguarded().sse(
+                Some(0x66),
+                &[0x0f, 0x6f],
+                host,
+                crate::x86_64::asm::Rm::Xmm(0),
+            ),
+            None => commit(scratch, vector, 0),
+        }
         code.ends_with(scratch).then_some(vector)
     };
     match *operand {
@@ -850,6 +867,8 @@ pub(super) fn xmm0_after(
             destination,
             ..
         }) => committed(destination),
+        // With vectors in host registers, a transfer may use the home.
+        Operand::Memory { .. } | Operand::MemoryRegisterOffset(_) if cached => None,
         Operand::Memory {
             load,
             bytes,
@@ -869,6 +888,13 @@ pub(super) fn xmm0_after(
 pub(super) fn xmm0_load(scratch: &mut Code, vector: u8) -> &[u8] {
     scratch.clear();
     read_vector(scratch, vector, 0);
+    scratch
+}
+
+/// [`read_vector`]'s bytes for a vector whose home is `host` into XMM0.
+pub(super) fn xmm0_home_load(scratch: &mut Code, host: u8) -> &[u8] {
+    scratch.clear();
+    packed(scratch, Host::MoveAligned, 0, host);
     scratch
 }
 

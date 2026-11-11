@@ -47,6 +47,9 @@ pub(crate) struct VectorCache {
     /// The last use of each pool register, for the least recently used spill.
     used: [u32; HOSTS],
     clock: u32,
+    /// Whether commits go to the state: the next instruction stores or
+    /// forgets every home anyway, so a home would cost a second move.
+    write_through: bool,
 }
 
 impl Default for VectorCache {
@@ -58,6 +61,7 @@ impl Default for VectorCache {
             dirty: 0,
             used: [0; HOSTS],
             clock: 0,
+            write_through: false,
         }
     }
 }
@@ -98,8 +102,17 @@ impl VectorCache {
             host
         })
     }
+    /// The home of `vector`, without counting a use.
+    pub(crate) fn peek(&self, vector: u8) -> Option<u8> {
+        let host = self.home[usize::from(vector)];
+        (self.active && host != NONE).then_some(host)
+    }
     pub(crate) fn is_dirty(&self, vector: u8) -> bool {
         self.dirty & 1 << vector != 0
+    }
+    /// Whether a commit goes to the state rather than to a home.
+    pub(crate) const fn writes_through(&self) -> bool {
+        self.active && self.write_through
     }
 }
 
@@ -147,6 +160,27 @@ impl Code {
         self.vectors.touch(index);
         host
     }
+    /// Commit to the state from here on, or to homes.
+    pub(crate) fn set_vector_write_through(&mut self, through: bool) {
+        self.vectors.write_through = through;
+    }
+    /// Give up `vector`'s home without storing it: the caller writes the
+    /// whole register to the state next.
+    pub(crate) fn discard_vector(&mut self, vector: u8) {
+        let host = self.vectors.home[usize::from(vector)];
+        if host != NONE {
+            self.vectors.dirty &= !(1 << vector);
+            self.vectors.home[usize::from(vector)] = NONE;
+            self.vectors.owner[usize::from(host - FIRST_HOST)] = NONE;
+        }
+    }
+    /// Store `vector` if its home is dirty, keeping the home: for a
+    /// recipe that then reads part of its slot.
+    pub(crate) fn write_back_vector(&mut self, vector: u8) {
+        if self.vectors.home[usize::from(vector)] != NONE && self.vectors.is_dirty(vector) {
+            self.store_vector(vector);
+        }
+    }
     /// `vector`'s home holds a value the state block lacks.
     pub(crate) fn mark_vector_dirty(&mut self, vector: u8) {
         debug_assert_ne!(self.vectors.home[usize::from(vector)], NONE);
@@ -186,6 +220,7 @@ impl Code {
         let active = self.vectors.active;
         self.vectors = VectorCache {
             active,
+            write_through: self.vectors.write_through,
             clock: self.vectors.clock,
             ..VectorCache::default()
         };
