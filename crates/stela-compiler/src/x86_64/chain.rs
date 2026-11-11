@@ -66,7 +66,7 @@
 //! block's first instruction would.
 use crate::x86_64::asm::{
     Alu, BitTest, Code, Cond,
-    Gpr::{self, R8, R9, Rax, Rcx, Rdx},
+    Gpr::{self, R8, R9, R10, R11, Rax, Rcx, Rdx},
     Mem, ShiftOp,
     Size::{self, Dword, Qword},
 };
@@ -1748,13 +1748,13 @@ pub const CELL_PROBE_ENTRY: usize = 0;
 /// Where a [`lookup_dispatcher`]'s table probe begins: after the cell
 /// probe.
 pub const PROBE_ENTRY: usize = CELL_PROBE_BYTES;
-/// Bytes in a [`lookup_tail`].
-pub const TAIL_BYTES: usize = 5 + 11;
+/// Bytes in a [`lookup_tail`]: `mov edx, word` and `jmp probe`.
+pub const TAIL_BYTES: usize = 5 + 5;
 /// Bytes in a [`cell_tail`].
 pub const CELL_TAIL_BYTES: usize = 10 + TAIL_BYTES;
 
 /// The probes the per-site tails of the exits of branches that set `btype`
-/// call ([`lookup_tail`]): the target in RAX, the tail's word in EDX.
+/// jump to ([`lookup_tail`]): the target in RAX, the tail's word in EDX.
 /// `None` when `btype` is not a BTYPE.
 ///
 /// Both translate the target through the ITLB first: the entry of its page
@@ -1763,17 +1763,17 @@ pub const CELL_TAIL_BYTES: usize = 10 + TAIL_BYTES;
 /// target's entry of that key in the block table; the cell probe
 /// ([`CELL_PROBE_ENTRY`]) the one entry of a [`LookupTable::link_cell`] cell
 /// in R9, and the table when the cell does not hold the target with that
-/// key. Each returns to its tail with ZF set, R9 at the entered block's
-/// code, the transfer counted and `block` named, or with ZF clear and RAX
-/// and RDX as the exit left them, which then returns them to the engine.
+/// key. Each enters the block it found, the transfer counted and `block`
+/// named, or returns to the engine with RAX and RDX as the exit left them.
+/// Neither touches the stack: R10 and R11, free between blocks, hold what
+/// a probe keeps.
 /// Other cores write the table and cells meanwhile: a probe takes an entry
 /// only when its last word, read before its fields, was not busy and is
-/// unchanged after them ([`Slot`]); a cell read torn leaves the target to
-/// the table, a table entry read torn to the engine. A tail is a few bytes
-/// of each exit's own ([`lookup_tail`], [`cell_tail`]): the probe's work is
-/// shared, and the indirect jump into the found block is the site's, so the
-/// host predicts each site's targets apart. The call and its return pair on
-/// the host's return stack.
+/// unchanged after them ([`Slot`]); a cell read torn starts the table
+/// probe over, a table entry read torn leaves the target to the engine. A tail is a few bytes
+/// of each exit's own ([`lookup_tail`], [`cell_tail`]); the probe's work,
+/// and its indirect jump into the found block, are shared: the host's
+/// indirect predictor tells sites apart by the path into it.
 pub fn lookup_dispatcher(btype: u8) -> Option<Vec<u8>> {
     dispatcher_with_policy(btype, Interruption::Epoch)
 }
@@ -1782,31 +1782,25 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
         return None;
     }
     let mut code = Code::new();
-    // The cell probe, R9 at the cell.
+    // The cell probe, R9 at the cell; R10 keeps it across the translation.
     let mut asm = code.asm();
     asm.place(Rcx, CONTROL);
     let mut misses = Vec::new();
     if let Some(interrupted) = far_interruption_gate(&mut asm, policy, R8) {
         misses.push(interrupted);
     }
-    asm.push(R9);
-    let mut untranslated = Vec::new();
-    translate(&mut asm, &mut untranslated);
-    asm.pop(R9);
+    asm.mov(Qword, R10, R9);
+    translate(&mut asm, &mut misses);
     // The cell is the target's with its page's key, or the table decides.
-    // ECX = the cell's last word before its fields ([`Slot`]).
-    asm.mov_load(Dword, Rcx, Mem::base(R9, ENTRY_TARGETS));
-    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(R9, 0));
+    // R11D = the cell's last word before its fields ([`Slot`]).
+    asm.mov_load(Dword, R11, Mem::base(R10, ENTRY_TARGETS));
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(R10, 0));
     let stale = asm.jcc8(Cond::Ne);
-    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R9, ENTRY_KEY));
+    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R10, ENTRY_KEY));
     let other = asm.jcc8(Cond::Ne);
-    asm.push_rm(Mem::base(R9, ENTRY_BLOCK));
-    asm.push_rm(Mem::base(R9, ENTRY_CODE));
-    let torn = seqlock_check(&mut asm);
-    asm.pop(R9);
-    asm.pop(R8);
-    asm.mov(Dword, R8, R8);
-    asm.place(Rcx, CONTROL);
+    asm.mov_load(Dword, R8, Mem::base(R10, ENTRY_BLOCK));
+    asm.mov_load(Qword, R9, Mem::base(R10, ENTRY_CODE));
+    let torn = seqlock_check(&mut asm, R10);
     spend_budget(&mut asm, policy);
     misses.push(asm.jcc(Cond::B));
     asm.shift_imm(ShiftOp::Shr, Dword, Rdx, ExitWord::RAN_SHIFT as u8);
@@ -1817,20 +1811,16 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
         asm.bind(miss);
     }
     missed(&mut asm);
-    for miss in untranslated {
-        asm.bind(miss);
-    }
-    asm.pop(R9);
-    missed(&mut asm);
-    // A cell written while it was read leaves the target to the table too,
-    // with the key still in R8 and the control in RCX again.
+    // A cell written while it was read: R8 holds the cell's block by now,
+    // so the table probe starts over from the target in RAX.
     for miss in torn {
         asm.bind(miss);
     }
-    asm.alu_imm8(Alu::Add, Qword, Gpr::Rsp, 16);
+    let to_probe = asm.jmp();
+    // Another PC or key leaves the target to the table, with the key still
+    // in R8 and the control in RCX.
     asm.bind(stale);
     asm.bind(other);
-    asm.place(Rcx, CONTROL);
     let to_table = asm.jmp();
     let padding = CELL_PROBE_BYTES
         .checked_sub(code.len())
@@ -1849,43 +1839,41 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
     translate(&mut asm, &mut misses);
     let table = code.len();
     let mut asm = code.asm();
-    // R9 = the target's entry of the key in R8.
-    asm.mov(Dword, R9, Rax);
-    asm.shift_imm(ShiftOp::Shr, Dword, R9, LOOKUP_BITS as u8);
-    asm.alu(Alu::Xor, Dword, R9, Rax);
-    asm.shift_imm(ShiftOp::Shr, Dword, R9, 2);
-    asm.alu(Alu::Xor, Dword, R9, R8);
-    asm.alu_load(Alu::And, Dword, R9, Mem::base(Rcx, MASKS));
-    asm.shift_imm(ShiftOp::Shl, Dword, R9, 5);
-    asm.alu_load(Alu::Add, Qword, R9, Mem::base(Rcx, TABLE));
-    // ECX = each entry's last word before its fields ([`Slot`]).
-    asm.mov_load(Dword, Rcx, Mem::base(R9, ENTRY_TARGETS));
-    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(R9, 0));
+    // R10 = the target's entry of the key in R8.
+    asm.mov(Dword, R10, Rax);
+    asm.shift_imm(ShiftOp::Shr, Dword, R10, LOOKUP_BITS as u8);
+    asm.alu(Alu::Xor, Dword, R10, Rax);
+    asm.shift_imm(ShiftOp::Shr, Dword, R10, 2);
+    asm.alu(Alu::Xor, Dword, R10, R8);
+    asm.alu_load(Alu::And, Dword, R10, Mem::base(Rcx, MASKS));
+    asm.shift_imm(ShiftOp::Shl, Dword, R10, 5);
+    asm.alu_load(Alu::Add, Qword, R10, Mem::base(Rcx, TABLE));
+    // R11D = each entry's last word before its fields ([`Slot`]).
+    asm.mov_load(Dword, R11, Mem::base(R10, ENTRY_TARGETS));
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(R10, 0));
     let other_pc = asm.jcc8(Cond::Ne);
-    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R9, ENTRY_KEY));
+    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R10, ENTRY_KEY));
     let hit = asm.jcc8(Cond::E);
     asm.bind(other_pc);
     asm.alu_imm8(
         Alu::Xor,
         Qword,
-        R9,
+        R10,
         core::mem::size_of::<LookupEntry>() as i8,
     );
-    asm.mov_load(Dword, Rcx, Mem::base(R9, ENTRY_TARGETS));
-    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(R9, 0));
+    asm.mov_load(Dword, R11, Mem::base(R10, ENTRY_TARGETS));
+    asm.alu_load(Alu::Cmp, Qword, Rax, Mem::base(R10, 0));
     misses.push(asm.jcc(Cond::Ne));
-    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R9, ENTRY_KEY));
+    asm.alu_load(Alu::Cmp, Qword, R8, Mem::base(R10, ENTRY_KEY));
     misses.push(asm.jcc(Cond::Ne));
     asm.bind(hit);
     if btype != 0 {
-        asm.test_imm(Size::Byte, Rcx, 1 << btype);
+        asm.test_imm(Size::Byte, R11, 1 << btype);
         misses.push(asm.jcc(Cond::E));
     }
-    asm.mov_load(Dword, R8, Mem::base(R9, ENTRY_BLOCK));
-    asm.push_rm(Mem::base(R9, ENTRY_CODE));
-    let torn = seqlock_check(&mut asm);
-    asm.pop(R9);
-    asm.place(Rcx, CONTROL);
+    asm.mov_load(Dword, R8, Mem::base(R10, ENTRY_BLOCK));
+    asm.mov_load(Qword, R9, Mem::base(R10, ENTRY_CODE));
+    misses.extend(seqlock_check(&mut asm, R10));
     spend_budget(&mut asm, policy);
     misses.push(asm.jcc(Cond::B));
     asm.shift_imm(ShiftOp::Shr, Dword, Rdx, ExitWord::RAN_SHIFT as u8);
@@ -1898,25 +1886,22 @@ fn dispatcher_with_policy(btype: u8, policy: Interruption) -> Option<Vec<u8>> {
     }
     asm.mov_store(Qword, Mem::base(Rcx, BLOCK), R8);
     found(&mut asm);
-    for miss in torn {
-        asm.bind(miss);
-    }
-    asm.pop(R9);
     for miss in misses {
         asm.bind(miss);
     }
     missed(&mut asm);
     crate::x86_64::asm::resolve(&mut code, to_table, table);
+    crate::x86_64::asm::resolve(&mut code, to_probe, PROBE_ENTRY);
     Some(code.into_bytes())
 }
 
-/// The check that ends a probe's read of the entry at R9, whose last word
-/// it read into ECX before the fields: the entry's word is unchanged and
-/// no writer was in it ([`Slot`]). The jumps of a torn read.
-fn seqlock_check(asm: &mut crate::x86_64::asm::Asm) -> [crate::x86_64::asm::Patch; 2] {
-    asm.alu_load(Alu::Cmp, Dword, Rcx, Mem::base(R9, ENTRY_TARGETS));
+/// The check that ends a probe's read of the entry at `entry`, whose last
+/// word it read into R11D before the fields: the entry's word is unchanged
+/// and no writer was in it ([`Slot`]). The jumps of a torn read.
+fn seqlock_check(asm: &mut crate::x86_64::asm::Asm, entry: Gpr) -> [crate::x86_64::asm::Patch; 2] {
+    asm.alu_load(Alu::Cmp, Dword, R11, Mem::base(entry, ENTRY_TARGETS));
     let changed = asm.jcc8(Cond::Ne);
-    asm.test_imm(Dword, Rcx, META_BUSY as i32);
+    asm.test_imm(Dword, R11, META_BUSY as i32);
     let busy = asm.jcc8(Cond::Ne);
     [changed, busy]
 }
@@ -1968,24 +1953,23 @@ fn translate(asm: &mut crate::x86_64::asm::Asm, misses: &mut Vec<crate::x86_64::
     asm.place(Rcx, CONTROL);
 }
 
-/// A probe's return to its tail after a transfer: ZF set.
+/// A probe's transfer, counted: into the block at R9.
 fn found(asm: &mut crate::x86_64::asm::Asm) {
-    asm.alu(Alu::Cmp, Qword, R8, R8);
-    asm.ret();
+    asm.jmp_rm(R9);
 }
 
-/// A probe's return to its tail without one: ZF clear, as RSP is never zero.
+/// A probe's exit to the engine, with RAX and EDX as the tail left them: the
+/// return of the native run, as the tail jumped to the probe.
 fn missed(asm: &mut crate::x86_64::asm::Asm) {
-    asm.test(Qword, Gpr::Rsp, Gpr::Rsp);
     asm.ret();
 }
 
 /// The tail at host address `at` that an exit's patch point jumps to once
 /// the exit is redirected through a lookup: EDX the exit's `word` with the
-/// `ran` instructions of the block it leaves, which only a probe reads, a
-/// call of the probe at `probe`, then the jump into the block it found or
-/// the return to the engine. `None` when `ran` exceeds its field or `probe`
-/// is out of a 32-bit call's reach.
+/// `ran` instructions of the block it leaves, which only a probe reads,
+/// then a jump to the probe at `probe`, which enters the block it finds or
+/// returns to the engine. `None` when `ran` exceeds its field or `probe` is
+/// out of a 32-bit jump's reach.
 pub fn lookup_tail(
     at: u64,
     word: impl Into<ExitWord>,
@@ -2020,13 +2004,9 @@ fn tail(code: &mut Code, at: u64, word: ExitWord, ran: u32, probe: u64) -> Optio
     }
     let mut asm = code.asm();
     asm.mov_imm32(Rdx, word.encoded() | ran << ExitWord::RAN_SHIFT);
-    let call = asm.call();
-    let exit = asm.jcc8(Cond::Ne);
-    asm.jmp_rm(R9);
-    asm.bind(exit);
-    asm.ret();
-    let relative = relative(at + call.end() as u64, probe)?;
-    code.patch(call.offset(), relative.to_le_bytes());
+    let jump = asm.jmp();
+    let relative = relative(at + jump.end() as u64, probe)?;
+    code.patch(jump.offset(), relative.to_le_bytes());
     Some(())
 }
 
@@ -2069,11 +2049,7 @@ fn lookup_with_policy(
     if let Some(cell) = cell {
         asm.mov_imm64(R9, cell);
     }
-    let call = asm.call();
-    let exit = asm.jcc8(Cond::Ne);
-    asm.jmp_rm(R9);
-    asm.bind(exit);
-    asm.ret();
+    let call = asm.jmp();
     let probes = code.len();
     let entry = match (cell, target) {
         (Some(_), Some(_)) => CELL_PROBE_ENTRY,
@@ -2817,21 +2793,19 @@ mod tests {
     /// Each tail calls its probe and jumps through R9 itself: the site's own
     /// indirect jump. A probe set's pieces keep their places in every policy.
     #[test]
-    fn tails_call_the_probes_and_jump_from_the_site() {
+    fn tails_jump_to_the_probes() {
         let tail = lookup_tail(0x1000, ExitKind::Return, 3, 0x2000).unwrap();
-        // EDX the word with the instructions run, then the call.
+        // EDX the word with the instructions run, then the jump.
         let mut expected = vec![0xba];
         expected.extend((ExitKind::Return as u32 | 3 << ExitWord::RAN_SHIFT).to_le_bytes());
-        expected.push(0xe8);
+        expected.push(0xe9);
         expected.extend((0x2000i32 - 0x100a).to_le_bytes());
-        expected.extend([0x75, 0x03, 0x41, 0xff, 0xe1, 0xc3]);
         assert_eq!(tail.to_vec(), expected);
         let cell = cell_tail(0x1000, 0xdead_beef_0000, ExitKind::Return, 3, 0x2000).unwrap();
         assert_eq!(&cell[..2], &[0x49, 0xb9]);
         assert_eq!(&cell[2..10], &0xdead_beef_0000u64.to_le_bytes());
         assert_eq!(&cell[10..15], &expected[..5]);
-        assert_eq!(&cell[15..20], &[0xe8, 0xec, 0x0f, 0, 0]);
-        assert_eq!(&cell[20..], &expected[10..]);
+        assert_eq!(&cell[15..20], &[0xe9, 0xec, 0x0f, 0, 0]);
         assert!(lookup_tail(0, ExitKind::Return, 0, 1 << 40).is_none());
         assert!(lookup_tail(0, ExitKind::Return, 1 << 12, 0).is_none());
         for btype in 0..4 {
@@ -2983,6 +2957,17 @@ mod tests {
                 assert_eq!(exit(run(frame)), (target, ExitKind::Call as u64));
                 assert_eq!(control.budget, 5);
                 control.contexts[half] = context;
+                // A cell a writer holds (or changed while it was read): the
+                // table probe looks the target up anew by its key and finds
+                // the table's entry, never a key made of the cell's block.
+                *(cell as *mut LookupEntry) = LookupEntry {
+                    targets: 1 | META_BUSY,
+                    ..cell_entry
+                };
+                assert_eq!(exit(run(frame)), (0x5122, 99));
+                assert_eq!((control.budget, control.hits, control.block), (4, 3, 43));
+                *(cell as *mut LookupEntry) = cell_entry;
+                control.budget = 5;
                 // A pending interruption: nothing spent or counted.
                 control.interrupt_epoch = 1;
                 let prior = (control.budget, control.retired, control.hits, control.block);
@@ -3117,6 +3102,8 @@ mod tests {
 
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     mod budget;
+    #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
+    mod differential;
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
     mod patching;
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
