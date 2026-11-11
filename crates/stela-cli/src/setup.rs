@@ -676,21 +676,11 @@ impl Request {
             } else {
                 ""
             };
-            let gpu = match firmware::host_chips(environment.host) {
-                Ok((chips, _)) if chips.is_empty() => format!(
-                    "\nBefore that, {}.",
-                    firmware::missing(
-                        "`stela setup host-firmware fetch --gpu CHIP --usb USB` (USB: the \
-                         installer's STELA volume)"
-                    )
-                ),
-                _ => String::new(),
-            };
             cliclack::note(
                 "Next steps",
                 format!(
                     "Boot the target PC from this USB and choose Install macOS.\nThe install \
-                     needs the internet for Apple's signing server.{gpu}{profile}"
+                     needs the internet for Apple's signing server.{profile}"
                 ),
             )?;
             cliclack::outro("Your installer USB is ready")?;
@@ -802,6 +792,34 @@ impl Request {
                     .host_firmware_cache
                     .clone()
                     .unwrap_or_else(|| cache_dir().join("firmware"));
+                // Older instructions name a GPU chip: the bundle holds every
+                // chip's files, so this brings the USB to the full bundle.
+                if requirements.is_none() && stela_loader::host_firmware::reads_bundle(&mount_image)
+                {
+                    let mut report = format!(
+                        "Host firmware: the USB's bundle holds {}{}.\n",
+                        firmware::bundle_summary(),
+                        if gpu.is_some() {
+                            ", every GPU chip included, so --gpu is no longer needed"
+                        } else {
+                            ""
+                        }
+                    );
+                    if self.dry_run {
+                        report.push_str("Dry run: nothing was changed.\n");
+                        return Ok(report);
+                    }
+                    for note in firmware::provision_bundle(
+                        environment.host,
+                        &record.volume,
+                        &record.esp,
+                        &mount_image,
+                    )? {
+                        report.push_str(&format!("Note: {note}\n"));
+                    }
+                    report.push_str("Done.\n");
+                    return Ok(report);
+                }
                 firmware::provision(firmware::ProvisionOptions {
                     requirements: requirements.as_deref(),
                     gpu: gpu.as_deref(),

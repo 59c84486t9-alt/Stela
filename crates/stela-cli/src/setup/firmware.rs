@@ -10,7 +10,7 @@ use std::{
 };
 use stela_drivers::firmware::{Requirement, Target};
 use stela_loader::host_firmware::{
-    self, MAX_MANIFEST_BYTES,
+    self, MAX_MANIFEST_BYTES, bundle,
     recipes::{self, Artifact, Plan},
     requirements::{self, Inventory, Request},
 };
@@ -100,124 +100,268 @@ fn cached(client: &Client, directory: &Path, artifact: &Artifact) -> Result<Vec<
     read_cached(&path, artifact)
 }
 
-/// The chips of this computer's NVIDIA GPUs, whose firmware setup adds to
-/// the USB, and a note for each NVIDIA GPU Stela cannot run.
-pub(super) fn host_chips(host: &dyn super::host::Host) -> Result<(Vec<&'static str>, Vec<String>)> {
-    let mut chips = Vec::new();
+/// Notes about this computer's NVIDIA GPUs, for information only: the USB
+/// holds every supported GPU's firmware whatever this computer has.
+pub(super) fn host_notes(host: &dyn super::host::Host) -> Result<Vec<String>> {
     let mut notes = Vec::new();
     for device in host.nvidia_gpus()? {
-        match recipes::nvidia_chip(device) {
-            Some(chip) if !chips.contains(&chip) => chips.push(chip),
-            Some(_) => {}
-            None => notes.push(format!(
-                "this computer's NVIDIA GPU (device {device:04x}) is not one Stela supports: \
-                 Stela needs {}",
+        if recipes::nvidia_chip(device).is_none() {
+            notes.push(format!(
+                "this computer's NVIDIA GPU (device {device:04x}) is not one Stela supports \
+                 ({}); the USB still works on a PC that has one",
                 stela_boot_core::gpu_status::SUPPORTED
-            )),
+            ));
         }
     }
-    Ok((chips, notes))
+    Ok(notes)
 }
 
-/// Why a USB made on this computer has no GPU firmware, and how to add it:
-/// `fix` is the command, with CHIP for the chip the PC's boot screen names.
-pub(super) fn missing(fix: &str) -> String {
+/// The firmware line of a setup plan.
+pub(super) fn bundle_summary() -> String {
+    let (count, bytes) = bundle::size();
     format!(
-        "this computer has no NVIDIA GPU Stela supports, so the USB gets no GPU firmware, and \
-         macOS cannot start without it. Run setup on the PC itself, or add the firmware later: \
-         boot the PC from the USB, which names its GPU chip (such as ga104) when its firmware \
-         is missing, then run {fix} on this computer"
+        "every supported device: {count} files, {:.1} MiB (each PC loads only its own)",
+        bytes as f64 / MIB as f64
     )
 }
 
-/// Add what a Wi-Fi network needs to the firmware on the USB's EFI partition
-/// `esp`, whose boot program is `mount_image`: the regulatory database, and
-/// the files of this computer's Wi-Fi adapters whose PCI IDs name them.
-pub(super) fn provision_wifi(
-    host: &dyn super::host::Host,
-    esp: &Path,
-    mount_image: &[u8],
-) -> Result<()> {
-    // A boot program that reads no firmware from the USB has no Wi-Fi driver
-    // either.
-    if !host_firmware::supports_mount(mount_image) {
-        return Ok(());
+const MIB: u64 = 1024 * 1024;
+/// Room a volume short of space keeps free beside the bundle.
+const MARGIN: u64 = 16 * MIB;
+
+/// The bundle's files that go on a volume with `free` bytes left (`None`:
+/// no limit) beside `present` bytes the bundle already holds there, in
+/// [`bundle::FAMILIES`] order, and the files left out.
+pub(super) fn bundle_plan(
+    free: Option<u64>,
+    present: u64,
+) -> (
+    Vec<(&'static Artifact, &'static Artifact)>,
+    Vec<&'static Artifact>,
+) {
+    let mut room = free.map(|free| (free + present).saturating_sub(MARGIN));
+    let mut kept = Vec::new();
+    let mut left = Vec::new();
+    for (object, notice) in bundle::complete() {
+        let length = (object.length + notice.length) as u64;
+        match &mut room {
+            Some(room) if *room < length => left.push(object),
+            Some(room) => {
+                *room -= length;
+                kept.push((object, notice));
+            }
+            None => kept.push((object, notice)),
+        }
     }
-    provision(ProvisionOptions {
-        requirements: None,
-        gpu: None,
-        wifi: Some(&host.network_adapters()?),
-        destination: &esp.join(host_firmware::DIRECTORY),
-        cache: &super::cache_dir().join("firmware"),
-        dry_run: false,
-        mount_image,
-    })
-    .context("the Wi-Fi network is set, but the USB did not get the Wi-Fi firmware")?;
+    (kept, left)
+}
+
+/// Whether `path` holds `artifact`'s exact bytes.
+fn holds(path: &Path, artifact: &Artifact) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() == artifact.length as u64)
+        && read_cached(path, artifact).is_ok()
+}
+
+/// Bytes of `files` that `directory` already holds.
+fn present_bytes(directory: &Path) -> u64 {
+    bundle::complete()
+        .iter()
+        .flat_map(|(object, notice)| {
+            [
+                (bundle::object_path(object.sha256), object.length),
+                (bundle::notice_path(notice.sha256), notice.length),
+            ]
+        })
+        .filter_map(|(path, length)| {
+            fs::metadata(directory.join(path))
+                .is_ok_and(|m| m.len() == length as u64)
+                .then_some(length as u64)
+        })
+        .sum()
+}
+
+/// Write `files` and their notices to the bundle on `volume`, each fetched
+/// through `fetch` unless the volume holds it already, then its manifest,
+/// and remove files no longer listed.
+pub(super) fn publish_bundle(
+    volume: &Path,
+    files: &[(&Artifact, &Artifact)],
+    fetch: &mut dyn FnMut(&Artifact) -> Result<Vec<u8>>,
+) -> Result<()> {
+    let directory = volume.join(bundle::DIRECTORY);
+    fs::create_dir_all(directory.join("licenses"))?;
+    let mut kept = vec![directory.join("bundle.json")];
+    for (object, notice) in files {
+        for (artifact, path) in [
+            (*object, bundle::object_path(object.sha256)),
+            (*notice, bundle::notice_path(notice.sha256)),
+        ] {
+            let path = directory.join(path);
+            if !kept.contains(&path) && !holds(&path, artifact) {
+                let bytes = fetch(artifact)?;
+                artifact.verify(&bytes)?;
+                let parent = path.parent().context("bundle path has no directory")?;
+                let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+                temporary.write_all(&bytes)?;
+                temporary.as_file().sync_all()?;
+                temporary.persist(&path)?;
+            }
+            kept.push(path);
+        }
+    }
+    let manifest = bundle::manifest(files)?;
+    let path = directory.join("bundle.json");
+    if fs::read(&path).ok().as_deref() != Some(manifest.as_slice()) {
+        let mut temporary = tempfile::NamedTempFile::new_in(&directory)?;
+        temporary.write_all(&manifest)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(&path)?;
+    }
+    for listing in [directory.clone(), directory.join("licenses")] {
+        for entry in fs::read_dir(&listing)? {
+            let path = entry?.path();
+            if path.is_file() && !kept.contains(&path) {
+                fs::remove_file(path)?;
+            }
+        }
+    }
     Ok(())
 }
 
-/// A note for a setup with a Wi-Fi network on a computer none of whose
-/// adapters' files setup can add.
-pub(super) fn wifi_note(host: &dyn super::host::Host) -> Result<Option<String>> {
-    let mut inventory = Inventory::default();
-    for (vendor, device) in host.network_adapters()? {
-        if recipes::require_wifi(&mut inventory, vendor, device)? {
-            return Ok(None);
+/// Put the complete bundle on the USB's data volume `volume`, beside the
+/// EFI partition `esp` whose boot program is `mount_image`, downloading
+/// what the cache lacks. A volume short of room gets what fits, in
+/// [`bundle::FAMILIES`] order, and the notes name what was left out. Once
+/// the bundle holds every file of an older per-PC set on the EFI partition,
+/// that set is removed. Nothing depends on this computer's devices.
+pub(super) fn provision_bundle(
+    host: &dyn super::host::Host,
+    volume: &Path,
+    esp: &Path,
+    mount_image: &[u8],
+) -> Result<Vec<String>> {
+    if !host_firmware::reads_bundle(mount_image) {
+        return Ok(Vec::new());
+    }
+    let directory = volume.join(bundle::DIRECTORY);
+    let free = host.volume(volume)?.free_bytes;
+    let (files, left) = bundle_plan(Some(free), present_bytes(&directory));
+    let bytes: usize = files.iter().map(|(object, _)| object.length).sum();
+    eprintln!(
+        "Firmware for every supported device: {} files, {:.1} MiB, to {}",
+        files.len(),
+        bytes as f64 / MIB as f64,
+        directory.display()
+    );
+    let client = client()?;
+    let cache = super::cache_dir().join("firmware");
+    let total = files.len() * 2;
+    let mut done = 0;
+    publish_bundle(volume, &files, &mut |artifact| {
+        done += 1;
+        if fs::symlink_metadata(cache.join(artifact.sha256)).is_err() {
+            eprintln!(
+                "  downloading {} ({:.1} MiB), file {done} of at most {total}",
+                artifact.member,
+                artifact.length as f64 / MIB as f64
+            );
         }
-    }
-    Ok(Some(NO_WIFI_FILES.into()))
-}
-
-/// A note for each of this computer's Bluetooth controllers. Setup adds no
-/// Bluetooth firmware itself: every vendor setup chooses its files by
-/// registers only a boot of the PC reads, whose log then names them for
-/// `repair`, the command that adds them.
-pub(super) fn bluetooth_notes(host: &dyn super::host::Host, repair: &str) -> Result<Vec<String>> {
-    Ok(describe_bluetooth(&host.bluetooth_controllers()?, repair))
-}
-
-/// What [`bluetooth_notes`] says for `controllers`.
-fn describe_bluetooth(controllers: &[super::host::UsbBluetooth], repair: &str) -> Vec<String> {
-    use stela_drivers::usb::bluetooth::Setup;
+        cached(&client, &cache, artifact)
+    })
+    .context("the USB did not get the complete firmware bundle")?;
     let mut notes = Vec::new();
-    for controller in controllers {
-        let ids = format!("USB {:04x}:{:04x}", controller.vendor, controller.product);
-        let setup = Setup::of(
-            controller.vendor,
-            controller.product,
-            controller.vendor_interface,
-        );
-        notes.push(match setup {
-            // Recipes pin images for these setups' drivers only
-            // (`recipes::MEDIATEK_BLUETOOTH`, `recipes::INTEL_RSA`).
-            Some(setup @ (Setup::MediaTek | Setup::Intel)) => format!(
-                "this computer's Bluetooth controller ({}, {ids}) loads firmware that its \
-                 registers choose, so the USB has none yet: boot the PC from the USB once, \
-                 then run {repair} on a computer with internet, which adds the file the boot \
-                 asked for when Stela has a pinned source for it",
-                setup.name()
-            ),
-            Some(setup) => format!(
-                "this computer's Bluetooth controller ({}, {ids}) needs firmware Stela has no \
-                 pinned source for, so it stays off",
-                setup.name()
-            ),
-            // A vendor-class interface no setup takes is no HCI.
-            None if controller.vendor_interface => continue,
-            None => format!(
-                "this computer's Bluetooth controller ({ids}) is not one Stela has a setup for, \
-                 so it stays off"
-            ),
-        });
+    if !left.is_empty() {
+        notes.push(format!(
+            "{} has no room for {} of the firmware bundle's files, so PCs that need them \
+             lack them: {}",
+            volume.display(),
+            left.len(),
+            left.iter()
+                .map(|artifact| artifact.member)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
-    notes
+    remove_superseded(esp, volume, &files)?;
+    Ok(notes)
 }
 
-/// What [`wifi_note`] says.
-const NO_WIFI_FILES: &str = "this computer has no Wi-Fi adapter whose firmware setup \
-    can add (Intel AX200 to BE200, Realtek RTL8822C, MediaTek MT7921, MT7922 or MT7925), \
-    so the USB has none: the PC needs wired \
-    Ethernet, or run setup on the PC itself";
+/// Remove the older per-PC firmware on the EFI partition when the bundle on
+/// another volume holds every one of its files.
+fn remove_superseded(esp: &Path, volume: &Path, files: &[(&Artifact, &Artifact)]) -> Result<()> {
+    let old = esp.join(host_firmware::DIRECTORY);
+    if esp == volume {
+        return Ok(());
+    }
+    let Some(bytes) = installed_manifest(&old)? else {
+        return Ok(());
+    };
+    let manifest = host_firmware::Manifest::parse(&bytes)?;
+    if manifest.images.iter().all(|image| {
+        files
+            .iter()
+            .any(|(object, _)| object.sha256 == image.sha256)
+    }) {
+        fs::remove_dir_all(&old)?;
+    }
+    Ok(())
+}
+
+/// What `setup status` says of the bundle on `volume`.
+pub(super) fn bundle_status(volume: &Path) -> std::result::Result<String, String> {
+    let path = volume.join(bundle::MANIFEST);
+    let Ok(bytes) = fs::read(&path) else {
+        return Err("the USB has no firmware bundle".into());
+    };
+    let parsed = bundle::Bundle::parse(&bytes).map_err(|error| error.0)?;
+    let directory = volume.join(bundle::DIRECTORY);
+    let damaged = parsed
+        .objects
+        .iter()
+        .filter(|object| {
+            fs::metadata(directory.join(object.path))
+                .map_or(true, |m| m.len() != object.length as u64)
+        })
+        .count();
+    let missing = parsed.missing();
+    let (count, bytes) = bundle::size();
+    if missing.is_empty() && damaged == 0 {
+        return Ok(format!(
+            "complete: {count} files, {:.1} MiB",
+            bytes as f64 / MIB as f64
+        ));
+    }
+    Err(format!(
+        "the bundle lacks {} of {count} files{}{}",
+        missing.len(),
+        if missing.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " ({})",
+                missing
+                    .iter()
+                    .map(|artifact| artifact.member)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        },
+        if damaged == 0 {
+            String::new()
+        } else {
+            format!(" and {damaged} of its files are damaged")
+        }
+    ))
+}
+
+fn client() -> Result<Client> {
+    Ok(Client::builder()
+        .user_agent(concat!("stela/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(120))
+        .redirect(Policy::none())
+        .build()?)
+}
 
 /// Firmware inputs, cache and destination for one provisioning request.
 pub(super) struct ProvisionOptions<'a> {
@@ -383,7 +527,10 @@ pub(super) fn requested(esp: &Path, mount_image: &[u8]) -> Result<Requested> {
             continue;
         }
         if recipes::recipe(request).is_some() {
-            requested.pinned.push(request.clone());
+            // The bundle holds every pinned file: `repair` completes it.
+            if !host_firmware::reads_bundle(mount_image) {
+                requested.pinned.push(request.clone());
+            }
         } else {
             requested.unpinned.push(request.clone());
         }
@@ -488,12 +635,7 @@ fn publish_plan(
         report.push_str("Dry run: no downloads or writes.\n");
         return Ok(report);
     }
-    let client = Client::builder()
-        .user_agent(concat!("stela/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(120))
-        .redirect(Policy::none())
-        .build()?;
+    let client = client()?;
     let package = plan.package(|artifact| {
         cached(&client, cache, artifact)
             .map_err(|e| host_firmware::Error(format!("firmware provisioning: {e:#}")))
@@ -508,42 +650,229 @@ fn publish_plan(
 mod tests {
     use super::*;
     #[test]
-    fn each_bluetooth_controller_is_named_with_what_a_boot_and_repair_do() {
-        use super::super::host::UsbBluetooth;
-        let controller = |vendor, product, vendor_interface| UsbBluetooth {
-            vendor,
-            product,
-            vendor_interface,
+    fn the_bundle_plan_holds_every_recipe_whatever_the_computer() {
+        let (files, left) = bundle_plan(None, 0);
+        assert!(left.is_empty());
+        for recipe in bundle::recipes() {
+            assert!(
+                files
+                    .iter()
+                    .any(|(object, notice)| object.sha256 == recipe.image.sha256
+                        && notice.sha256 == recipe.license.sha256),
+                "{}",
+                recipe.image.member
+            );
+        }
+        let manifest = bundle::manifest(&files).unwrap();
+        let parsed = bundle::Bundle::parse(&manifest).unwrap();
+        assert!(parsed.missing().is_empty());
+        assert_eq!(parsed.objects.len(), 64);
+        assert!(bundle_summary().starts_with("every supported device: 64 files, 115.7 MiB"));
+        // A volume short of room keeps the small files and leaves the large
+        // GPU images out, by name.
+        let (files, left) = bundle_plan(Some(MARGIN + 40 * MIB), 0);
+        assert!(
+            files
+                .iter()
+                .any(|(object, _)| object.member == "regulatory.db")
+        );
+        let left: Vec<_> = left.iter().map(|artifact| artifact.member).collect();
+        assert!(
+            left.contains(&"nvidia/ga102/gsp/gsp-570.144.bin"),
+            "{left:?}"
+        );
+        assert!(
+            left.contains(&"nvidia/tu102/gsp/gsp-570.144.bin"),
+            "{left:?}"
+        );
+        assert!(!left.contains(&"regulatory.db"));
+        // Files the volume already holds count as room.
+        let (_, left) = bundle_plan(Some(MARGIN), 200 * MIB);
+        assert!(left.is_empty());
+    }
+
+    /// A synthetic catalog: files whose digests these tests can satisfy.
+    fn synthetic() -> Vec<(Artifact, Vec<u8>)> {
+        use sha2::{Digest, Sha256};
+        let artifact = |member: &'static str, bytes: &[u8]| {
+            let sha256: &'static str =
+                Box::leak(hex::encode(Sha256::digest(bytes)).into_boxed_str());
+            (
+                Artifact {
+                    source: "https://vendor.invalid",
+                    revision: "synthetic",
+                    member,
+                    length: bytes.len(),
+                    sha256,
+                },
+                bytes.to_vec(),
+            )
         };
-        let notes = describe_bluetooth(
-            &[
-                controller(0x13d3, 0x3602, false),
-                controller(0x0bda, 0x8771, false),
-                controller(0x0a12, 0x0001, false),
-                // A vendor-class interface no setup takes is no controller.
-                controller(0x0bda, 0x8153, true),
-            ],
-            "`stela setup repair --usb E:`",
-        );
-        assert_eq!(notes.len(), 3, "{notes:?}");
+        vec![
+            artifact("vendor/a.bin", b"first file"),
+            artifact("vendor/b.bin", b"second file"),
+            artifact("LICENSES/LICENCE.vendor", b"notice"),
+        ]
+    }
+
+    fn snapshot(directory: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut files = Vec::new();
+        for entry in walk(directory) {
+            files.push((
+                entry.strip_prefix(directory).unwrap().display().to_string(),
+                fs::read(&entry).unwrap(),
+            ));
+        }
+        files.sort();
+        files
+    }
+
+    fn walk(directory: &Path) -> Vec<std::path::PathBuf> {
+        let mut found = Vec::new();
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                found.extend(walk(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn the_bundle_is_the_same_on_every_computer_and_stores_a_shared_file_once() {
+        use super::super::{host::Host, tests::FakeHost};
+        let catalog = synthetic();
+        let [(a, a_bytes), (b, b_bytes), (notice, notice_bytes)] = &catalog[..] else {
+            unreachable!()
+        };
+        // Two names for the first file's content.
+        let alias = Artifact {
+            member: "vendor/alias.bin",
+            ..*a
+        };
+        let mut files: Vec<(&Artifact, &Artifact)> = Vec::new();
+        for object in [a, &alias, b] {
+            if !files.iter().any(|(seen, _)| seen.sha256 == object.sha256) {
+                files.push((object, notice));
+            }
+        }
+        let fetches = std::cell::Cell::new(0);
+        let mut fetch = |artifact: &Artifact| -> Result<Vec<u8>> {
+            fetches.set(fetches.get() + 1);
+            Ok([a_bytes, b_bytes, notice_bytes]
+                .into_iter()
+                .zip([a, b, notice])
+                .find(|(_, candidate)| candidate.sha256 == artifact.sha256)
+                .unwrap()
+                .0
+                .clone())
+        };
+        // A computer with an NVIDIA GPU and Wi-Fi, and one with neither.
+        let with = FakeHost::new(Default::default(), Vec::new());
+        with.nvidia_gpus.replace(vec![0x2c02]);
+        let without = FakeHost::new(Default::default(), Vec::new());
+        let mut snapshots = Vec::new();
+        for host in [&with as &dyn Host, &without] {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(host.nvidia_gpus().is_ok());
+            publish_bundle(dir.path(), &files, &mut fetch).unwrap();
+            snapshots.push(snapshot(dir.path()));
+            // A second publication fetches nothing.
+            let before = fetches.get();
+            publish_bundle(dir.path(), &files, &mut fetch).unwrap();
+            assert_eq!(fetches.get(), before);
+        }
+        assert_eq!(snapshots[0], snapshots[1]);
+        // Two files and one notice: the shared content once.
+        let names: Vec<_> = snapshots[0].iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names.len(), 4, "{names:?}");
+        assert!(names.contains(&"stela/firmware/bundle.json"));
+        let manifest = &snapshots[0]
+            .iter()
+            .find(|(name, _)| name == "stela/firmware/bundle.json")
+            .unwrap()
+            .1;
+        let parsed = bundle::Bundle::parse(manifest).unwrap();
+        assert_eq!(parsed.objects.len(), 2);
+        assert_eq!(parsed.notices.len(), 1);
+        // A damaged file is fetched again; a file no longer listed goes.
+        let dir = tempfile::tempdir().unwrap();
+        publish_bundle(dir.path(), &files, &mut fetch).unwrap();
+        let stored = dir
+            .path()
+            .join(bundle::DIRECTORY)
+            .join(bundle::object_path(a.sha256));
+        fs::write(&stored, b"first filX").unwrap();
+        publish_bundle(dir.path(), &files[..1], &mut fetch).unwrap();
+        assert_eq!(fs::read(&stored).unwrap(), *a_bytes);
         assert!(
-            notes[0].starts_with("this computer's Bluetooth controller (MediaTek, USB 13d3:3602)")
-                && notes[0].contains(
-                    "boot the PC from the USB once, then run `stela setup repair --usb E:`"
-                ),
-            "{}",
-            notes[0]
+            !dir.path()
+                .join(bundle::DIRECTORY)
+                .join(bundle::object_path(b.sha256))
+                .exists()
         );
+    }
+
+    #[test]
+    fn status_names_a_bundle_as_complete_or_what_it_lacks() {
+        let dir = tempfile::tempdir().unwrap();
         assert!(
-            notes[1].contains("(Realtek, USB 0bda:8771) needs firmware Stela has no pinned source"),
-            "{}",
-            notes[1]
+            bundle_status(dir.path())
+                .unwrap_err()
+                .contains("no firmware bundle")
         );
+        // A partial bundle: one real recipe's entry, its file not written.
+        let first = bundle::complete()[0];
+        let directory = dir.path().join(bundle::DIRECTORY);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("bundle.json"),
+            bundle::manifest(&[first]).unwrap(),
+        )
+        .unwrap();
+        let status = bundle_status(dir.path()).unwrap_err();
+        assert!(status.contains("lacks 63 of 64 files"), "{status}");
         assert!(
-            notes[2].contains("(USB 0a12:0001) is not one Stela has a setup for"),
-            "{}",
-            notes[2]
+            status.contains("nvidia/ga102/gsp/gsp-570.144.bin"),
+            "{status}"
         );
+        assert!(status.contains("1 of its files are damaged"), "{status}");
+    }
+
+    #[test]
+    fn an_older_per_pc_set_goes_once_the_bundle_holds_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let esp = dir.path().join("esp");
+        let volume = dir.path().join("volume");
+        let old = esp.join(host_firmware::DIRECTORY);
+        fs::create_dir_all(&old).unwrap();
+        let image = recipes::REGULATORY[0].image;
+        let manifest = serde_json::json!({"schema":1,"images":[{
+            "name":"regulatory.db", "path":"0.bin",
+            "target":{"driver":"wifi-regulatory","hardware":"wireless-regdb","revision":"v20","board":null},
+            "provenance":{"source":image.source,"revision":image.revision,"member":image.member,"license":"x"},
+            "length":image.length,"sha256":image.sha256}]});
+        fs::write(
+            old.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        // A bundle without that file keeps the set.
+        let files = bundle::complete();
+        let without: Vec<_> = files
+            .iter()
+            .copied()
+            .filter(|(object, _)| object.sha256 != image.sha256)
+            .collect();
+        remove_superseded(&esp, &volume, &without).unwrap();
+        assert!(old.exists());
+        // The same volume as the EFI partition keeps it too.
+        remove_superseded(&esp, &esp, &files).unwrap();
+        assert!(old.exists());
+        remove_superseded(&esp, &volume, &files).unwrap();
+        assert!(!old.exists());
     }
 
     #[test]
@@ -778,7 +1107,9 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-        let image = host_firmware::MOUNT_CAPABILITY;
+        // A stela.efi before the bundle, which reads exact per-PC files.
+        let mut image = host_firmware::MOUNT_CAPABILITY;
+        image[20] = 3;
         // No log, or a log without requests: nothing.
         assert!(requested(&esp, &image).unwrap().is_empty());
         boot_log(&esp, &["CHOICE 1 (macOS)\n"]);
@@ -810,6 +1141,11 @@ mod tests {
         assert_eq!(names(&found.pinned), ["rtl_nic/rtl8168d-1.fw"]);
         assert_eq!(names(&found.unpinned), ["brcm/synthetic.bin"]);
         assert!(found.unreadable.is_none());
+        // A stela.efi that reads the bundle needs no file added: the bundle
+        // holds every pinned one. The unpinned stay named.
+        let bundled = requested(&esp, &host_firmware::MOUNT_CAPABILITY).unwrap();
+        assert!(bundled.pinned.is_empty());
+        assert_eq!(names(&bundled.unpinned), ["brcm/synthetic.bin"]);
         let lines = found.lines().join("\n");
         assert!(
             lines.contains("add rtl_nic/rtl8168d-1.fw (realtek 10ec:8168 xid-281)"),

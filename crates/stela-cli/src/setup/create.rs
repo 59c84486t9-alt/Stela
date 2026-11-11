@@ -571,8 +571,6 @@ pub(super) struct Plan {
     pub(super) notes: Vec<String>,
     /// The key file's passphrase, for `--wifi`.
     pub(super) wifi_passphrase: Option<String>,
-    /// The chips of this computer's NVIDIA GPUs, whose firmware setup adds.
-    pub(super) gpu_chips: Vec<&'static str>,
 }
 
 pub(super) fn plan(
@@ -792,23 +790,9 @@ pub(super) fn plan(
     notes.extend(network_notes(remote, offline(remote, &restore_bundles)));
     notes.push(SIGNING_NOTE.into());
     notes.extend(installed.notes.iter().cloned());
-    // The firmware of this computer's GPU; a USB made elsewhere gets none,
-    // which the PC's boot screen names, so say how to add it.
-    let (gpu_chips, gpu_notes) = firmware::host_chips(environment.host)?;
-    notes.extend(gpu_notes);
-    if gpu_chips.is_empty() {
-        notes.push(firmware::missing(&super::fix(
-            &command.usb,
-            "host-firmware fetch --gpu CHIP",
-        )));
-    }
-    if record.wifi.is_some() {
-        notes.extend(firmware::wifi_note(environment.host)?);
-    }
-    notes.extend(firmware::bluetooth_notes(
-        environment.host,
-        &super::fix(&command.usb, "repair"),
-    )?);
+    // The USB holds every supported device's firmware, whatever this
+    // computer has; its own devices only earn a note.
+    notes.extend(firmware::host_notes(environment.host)?);
     Ok(Plan {
         record,
         ipsw,
@@ -819,7 +803,6 @@ pub(super) fn plan(
         install,
         notes,
         wifi_passphrase: command.wifi_passphrase.clone(),
-        gpu_chips,
     })
 }
 
@@ -833,8 +816,8 @@ pub(super) fn describe(plan: &Plan) -> Result<String> {
     )?;
     writeln!(text, "  restore image  {}", plan.ipsw.display())?;
     writeln!(text, "  EFI partition  {}", record.esp.display())?;
-    if !plan.gpu_chips.is_empty() {
-        writeln!(text, "  GPU firmware   {}", plan.gpu_chips.join(", "))?;
+    if stela_loader::host_firmware::reads_bundle(&plan.efi_image) {
+        writeln!(text, "  firmware       {}", firmware::bundle_summary())?;
     }
     let install = &record.installs[0];
     writeln!(
@@ -1223,26 +1206,15 @@ pub(super) fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
     publish(&mut record)?;
     record.complete = true;
     write_record(&esp, &record)?;
-    for chip in plan.gpu_chips {
-        firmware::provision(firmware::ProvisionOptions {
-            requirements: None,
-            gpu: Some(chip),
-            wifi: None,
-            destination: &esp.join(stela_loader::host_firmware::DIRECTORY),
-            cache: &super::cache_dir().join("firmware"),
-            dry_run: false,
-            mount_image: &plan.efi_image,
-        })
+    for note in firmware::provision_bundle(environment.host, &record.volume, &esp, &plan.efi_image)
         .with_context(|| {
             format!(
-                "the USB is set up, but without {chip}'s GPU firmware, which macOS needs: add \
-                 it with {}",
-                super::fix(&esp, &format!("host-firmware fetch --gpu {chip}"))
+                "the USB is set up, but without its complete firmware bundle: add it with {}",
+                super::fix(&esp, "repair")
             )
-        })?;
-    }
-    if record.wifi.is_some() {
-        firmware::provision_wifi(environment.host, &esp, &plan.efi_image)?;
+        })?
+    {
+        eprintln!("Note: {note}");
     }
     Ok(())
 }

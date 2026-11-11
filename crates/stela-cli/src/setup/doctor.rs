@@ -243,6 +243,16 @@ fn firmware_status(record: &Record, report: &mut Report) {
     let Ok(tool) = fs::read(record.esp.join(LOADER_PATH)) else {
         return;
     };
+    if stela_loader::host_firmware::reads_bundle(&tool) {
+        match super::firmware::bundle_status(&record.volume) {
+            Ok(complete) => report.line("firmware", format!("bundle {complete}")),
+            Err(missing) => {
+                report.problem(format!("{missing}: {} adds the rest", report.fix("repair")))
+            }
+        }
+        // Every file a boot asks for that a recipe pins is in the bundle.
+        return;
+    }
     let requested = match super::firmware::requested(&record.esp, &tool) {
         Ok(requested) => requested,
         Err(error) => {
@@ -937,7 +947,13 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Request) -> Result
         update::prune(&mut record)?;
         write_record(&esp, &record)?;
     }
-    requested.provision(&esp, &tool)?;
+    // The complete firmware bundle, which an older USB lacks.
+    for note in super::firmware::provision_bundle(environment.host, &record.volume, &esp, &tool)? {
+        writeln!(text, "  firmware       {note}")?;
+    }
+    if !stela_loader::host_firmware::reads_bundle(&tool) {
+        requested.provision(&esp, &tool)?;
+    }
     writeln!(text, "Done. Check it with {}", fix(usb, "status"))?;
     Ok(text)
 }

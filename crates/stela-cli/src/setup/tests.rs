@@ -75,7 +75,7 @@ pub(super) struct FakeHost {
 }
 
 impl FakeHost {
-    fn new(
+    pub(super) fn new(
         volumes: BTreeMap<PathBuf, (FileSystem, u64, Option<&'static str>)>,
         disks: Vec<Disk>,
     ) -> Self {
@@ -208,6 +208,14 @@ fn disk(id: &str, contents: &[(&str, Option<&Path>)]) -> Disk {
 }
 
 /// A `stela.efi` stand-in with this tree's mount interface.
+/// The host firmware marker of a stela.efi before the bundle, which reads
+/// exact per-PC files from the EFI partition.
+fn per_pc_marker() -> [u8; 21] {
+    let mut marker = stela_loader::host_firmware::MOUNT_CAPABILITY;
+    marker[20] = 3;
+    marker
+}
+
 fn efi_image(tag: &[u8]) -> Vec<u8> {
     let mut image = b"MZ".to_vec();
     image.extend_from_slice(tag);
@@ -524,7 +532,8 @@ fn setup_installs_from_the_usb_and_uninstall_restores_it() {
     host.nvidia_gpus.replace(vec![0x2c02, 0x2c05, 0x9999]);
     let plan = setup(&environment(host), dry).unwrap();
     host.nvidia_gpus.take();
-    assert!(plan.contains("GPU firmware   gb203\n"), "{plan}");
+    // No firmware follows this computer's GPUs; an unsupported one is a note.
+    assert!(!plan.contains("gb203"), "{plan}");
     assert!(plan.contains("NVIDIA GPU (device 9999)"), "{plan}");
     assert!(plan.contains("Dry run: nothing was changed."), "{plan}");
     assert!(plan.contains("ECID           0x"), "{plan}");
@@ -3847,7 +3856,7 @@ fn legacy_operations_reject_oversized_firmware() {
     }
     let current = f._dir.path().join("firmware-v2.efi");
     let mut image = efi_image(b"firmware-v2");
-    image.extend_from_slice(&MOUNT_CAPABILITY);
+    image.extend_from_slice(&per_pc_marker());
     fs::write(&current, image).unwrap();
     rerun(&f, |c| {
         c.action = Action::UpdateStela;
@@ -3965,7 +3974,7 @@ fn host_firmware_publication_preserves_guest_bundles() {
     let firmware_before = snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY));
     let new_efi = f._dir.path().join("firmware-test-update.efi");
     let mut image = efi_image(b"firmware-test-update");
-    image.extend_from_slice(&stela_loader::host_firmware::MOUNT_CAPABILITY);
+    image.extend_from_slice(&per_pc_marker());
     fs::write(&new_efi, image).unwrap();
     rerun(&f, |c| {
         c.action = Action::UpdateStela;
@@ -4212,22 +4221,35 @@ fn a_damaged_boot_log_is_not_taken_for_a_machine_that_never_booted() {
 }
 
 #[test]
-fn a_usb_made_without_an_nvidia_gpu_says_how_to_add_its_firmware() {
+fn a_usb_made_without_an_nvidia_gpu_needs_no_firmware_step() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
+    // The plan of a stela.efi that reads the bundle names the whole bundle,
+    // the same with or without a GPU on this computer.
+    let bundled = f._dir.path().join("bundled.efi");
+    let mut image = efi_image(b"bundled");
+    image.extend_from_slice(&stela_loader::host_firmware::MOUNT_CAPABILITY);
+    fs::write(&bundled, image).unwrap();
+    let mut lines = Vec::new();
+    for gpus in [vec![], vec![0x2c02]] {
+        f.host.nvidia_gpus.replace(gpus);
+        let mut dry = installed_command(&f);
+        dry.efi = Some(bundled.clone());
+        dry.dry_run = true;
+        let plan = setup(&environment(&f.host), dry).unwrap();
+        let line = plan
+            .lines()
+            .find(|line| line.starts_with("  firmware       "))
+            .unwrap_or_else(|| panic!("{plan}"))
+            .to_string();
+        lines.push(line);
+    }
+    assert_eq!(lines[0], lines[1]);
+    assert!(lines[0].contains("64 files, 115.7 MiB"), "{}", lines[0]);
     f.host.nvidia_gpus.borrow_mut().clear();
     let report = setup(&environment(&f.host), installed_command(&f)).unwrap();
-    assert!(
-        report.contains("this computer has no NVIDIA GPU Stela supports"),
-        "{report}"
-    );
-    assert!(
-        report.contains(&format!(
-            "`stela setup host-firmware fetch --gpu CHIP --usb {}`",
-            f.esp.display()
-        )),
-        "{report}"
-    );
+    assert!(!report.contains("NVIDIA"), "{report}");
+    assert!(!report.contains("host-firmware"), "{report}");
 }
 
 #[test]
@@ -4269,7 +4291,10 @@ fn status_and_repair_name_the_firmware_the_last_boot_asked_for() {
     setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
     let aware = f._dir.path().join("firmware-aware.efi");
     let mut image = efi_image(b"firmware-aware");
-    image.extend_from_slice(&MOUNT_CAPABILITY);
+    // A stela.efi before the bundle, which reads exact per-PC files.
+    let mut marker = MOUNT_CAPABILITY;
+    marker[20] = 3;
+    image.extend_from_slice(&marker);
     fs::write(&aware, image).unwrap();
     rerun(&f, |c| {
         c.action = Action::UpdateStela;

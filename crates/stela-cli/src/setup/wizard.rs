@@ -354,15 +354,8 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                 },
             ),
         )?;
-        let (chips, notes) = firmware::host_chips(host)?;
-        for note in notes {
-            cliclack::log::warning(note)?;
-        }
-        if chips.is_empty() {
-            cliclack::log::warning(firmware::missing(
-                "`stela setup host-firmware fetch --gpu CHIP --usb USB` (USB: the installer's \
-                 STELA volume)",
-            ))?;
+        for note in firmware::host_notes(host)? {
+            cliclack::log::info(note)?;
         }
         cliclack::log::info(super::create::SIGNING_NOTE)?;
         cliclack::log::warning(format!("Everything on {} will be erased.", usb.short()))?;
