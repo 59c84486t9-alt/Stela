@@ -1,7 +1,7 @@
 //! Class lifetime and permanent per-publication media validity.
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux sd.c::sd_check_events/media_not_present/sd_revalidate_disk and
-// scsi_lib.c::scsi_io_completion_action. See THIRD_PARTY.md.
+// scsi_lib.c::scsi_io_completion_action. See NOTICE.
 use super::*;
 
 pub(super) fn no_media(sense: &Sense) -> bool {

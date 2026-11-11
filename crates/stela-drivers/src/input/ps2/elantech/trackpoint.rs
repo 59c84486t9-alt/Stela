@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original notices are held in ../elantech.rs and input/THIRD_PARTY.md.
+// Original notices are held in ../elantech.rs and NOTICE.
 //! Integrated pointing-stick I/O under the shared native byte owner.
 use super::*;
 

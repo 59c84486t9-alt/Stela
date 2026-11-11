@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Adapted from pinned Linux net/mac80211/mlme.c; full source notices in
-// THIRD_PARTY.md. The connection policy follows wpa_supplicant's behavior.
+// NOTICE. The connection policy follows wpa_supplicant's behavior.
 //! One station kept connected to the configured network, as wpa_supplicant
 //! and mac80211 keep one, over any vendor's [`Radio`]: a scan of every band,
 //! 6 GHz last as cfg80211 splits it, the strongest BSS of the network whose

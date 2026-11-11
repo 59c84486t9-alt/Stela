@@ -3,7 +3,7 @@
 //!
 //! Copyright (c) 2012 Benjamin Tissoires, Ecole Nationale de l'Aviation Civile
 //! and Red Hat, Inc. Notices and upstream source hashes are in
-//! input/THIRD_PARTY.md. This is a native Stela backend, not a Linux shim.
+//! NOTICE. This is a native Stela backend, not a Linux shim.
 //!
 //! The platform supplies an exclusively owned, powered I2C attachment, the ACPI
 //! descriptor register and the interrupt pin. The CPU route stays masked

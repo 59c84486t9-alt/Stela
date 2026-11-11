@@ -5,7 +5,7 @@
 //! indicators. Each transmitted HCI packet is one USB transfer. Receive framing
 //! tolerates split/coalesced USB completions, as Linux btusb does. Reference:
 //! Bluetooth Core 6.2, Vol 4 Part B sections 2–4 and pinned Linux btusb.c (see
-//! bluetooth/THIRD_PARTY.md). No Linux source code is incorporated in this
+//! NOTICE). No Linux source code is incorporated in this
 //! native transport.
 //!
 //! Attachment opens a **raw transport** and always leaves firmware initialization

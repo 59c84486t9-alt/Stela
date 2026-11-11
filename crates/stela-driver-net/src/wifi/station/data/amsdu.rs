@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright 2002-2005, Instant802 Networks, Inc.; 2005-2006, Devicescape
 // Software, Inc.; 2006-2007 Jiri Benc; 2007 Johannes Berg; 2013-2014 Intel
-// Mobile Communications GmbH; 2018-2026 Intel Corporation. See THIRD_PARTY.md.
+// Mobile Communications GmbH; 2018-2026 Intel Corporation. See NOTICE.
 //! A transmitted A-MSDU, built in place over a waiting QoS MPDU as
 //! `ieee80211_amsdu_prepare_head` and `ieee80211_amsdu_aggregate` do, for a
 //! device that keeps the MAC header and encrypts the MPDU itself. Behind the

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original notices are held in ../elantech.rs and input/THIRD_PARTY.md.
+// Original notices are held in ../elantech.rs and NOTICE.
 //! Protected hardware-register mutation for the source exposed controls.
 use super::*;
 

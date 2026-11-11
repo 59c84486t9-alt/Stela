@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Logitech/Google/Red Hat HID++ reference notices: receiver.rs and THIRD_PARTY.md.
+// Logitech/Google/Red Hat HID++ reference notices: receiver.rs and NOTICE.
 //! Private admission from native class owners, never a raw second owner.
 use super::*;
 

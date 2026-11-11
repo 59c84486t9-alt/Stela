@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original Synaptics source notices: ../synaptics.rs and input/THIRD_PARTY.md.
+// Original Synaptics source notices: ../synaptics.rs and NOTICE.
 //! Source-checked extended button data, including its target and validity.
 use super::Capabilities;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

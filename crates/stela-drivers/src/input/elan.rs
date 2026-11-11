@@ -4,7 +4,7 @@
 //! CPU interrupt delivery stays masked while the physical pin is polled.
 //! Firmware flashing, GPIO/rail sequencing and
 //! guest contact/trackpoint routing remain separate requirements.
-//! Pinned donor sources and kept copyrights are in input/THIRD_PARTY.md.
+//! Pinned donor sources and kept copyrights are in NOTICE.
 pub use super::hid_i2c::{Interrupt, InterruptError};
 use crate::bus::i2c::{self, Address, Bus, Timer};
 mod device;

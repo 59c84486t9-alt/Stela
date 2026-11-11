@@ -2,7 +2,7 @@
 // Adapted from Linux net/mac80211/scan.c and net/wireless/scan.c.
 // Copyright 2003 Jouni Malinen; 2008 Johannes Berg;
 // 2013-2015 Intel Mobile Communications GmbH; 2016-2017 Intel Deutschland GmbH;
-// 2018-2026 Intel Corporation. Full source notices in THIRD_PARTY.md.
+// 2018-2026 Intel Corporation. Full source notices in NOTICE.
 //! Observed beacon/probe responses, not authenticated or connectable BSS claims.
 
 use super::{Error, Policy, Ticket};

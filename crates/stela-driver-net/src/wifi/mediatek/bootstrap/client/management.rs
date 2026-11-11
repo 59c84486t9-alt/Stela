@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 // Native key/TX ownership follows the existing MediaTek client. Robust frame,
 // SA Query and firmware CCMP rules follow the pinned Linux mac80211/mt7925
-// sources and original notices kept in mediatek/THIRD_PARTY.md.
+// sources and original notices kept in NOTICE.
 //! Key-bound protected-management transport for a real OS management service.
 //! This is not PMF negotiation or a station management policy:
 //! authenticated observations never disconnect, open a port or admit 6GHz.

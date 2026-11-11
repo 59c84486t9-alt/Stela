@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original Synaptics notices: ../synaptics.rs and input/THIRD_PARTY.md.
+// Original Synaptics notices: ../synaptics.rs and NOTICE.
 //! Physical source passthrough fields. Parent command acknowledgement never
 //! invents child acknowledgement, identity, activation or input ownership.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -2,7 +2,7 @@
 // Linux HID reference: Copyright (c) 1999 Andreas Gal;
 // 2000-2005 Vojtech Pavlik; 2005 Michael Haboustak for Concept2, Inc;
 // 2006-2012 Jiri Kosina; 2007-2008 Oliver Neukum.
-// Source identities and adaptation scope: ../THIRD_PARTY.md.
+// Source identities and adaptation scope: NOTICE.
 //! Usage-driven native consumers of HID frames. The descriptor remains
 //! authoritative; no VID/PID, device name or caller-supplied capability selects
 //! a control. Touch packets keep count/time and contact IDs; hybrid packets

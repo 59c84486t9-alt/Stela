@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native adaptation of rtsx_pcr.c, rts5227.c and rtsx_pci_sdmmc.c.
 // Copyright(c) 2009-2013 Realtek Semiconductor Corp. All rights reserved.
-// Authors: Wei WANG, Roger Tseng. See ../THIRD_PARTY.md.
+// Authors: Wei WANG, Roger Tseng. See NOTICE.
 //! Native RTS5227/RTS522A/RTS5229 SD/MMC with HAIMR and ping-pong PIO.
 //! RTS522A has separate UHS hooks. Command/data DMA, Memory Stick, remaining
 //! profile timing modes and global PM require their own native implementations.

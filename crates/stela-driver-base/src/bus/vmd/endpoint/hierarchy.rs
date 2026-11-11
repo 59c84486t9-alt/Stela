@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // PCI encodings follow Linux include/uapi/linux/pci_regs.h, copyright
-// 1994 Drew Eckhardt and 1997-1999 Martin Mares; see bus/THIRD_PARTY.md.
+// 1994 Drew Eckhardt and 1997-1999 Martin Mares; see NOTICE.
 //! Immutable firmware topology, exclusive child config and ordered Command I/O.
 use super::{capabilities::Capabilities, *};
 use crate::bus::pci::regs;

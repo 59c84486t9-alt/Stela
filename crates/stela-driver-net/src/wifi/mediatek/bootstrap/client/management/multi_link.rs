@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 // Per-link BIP ownership follows pinned Linux mt7925_set_link_key and
-// mt7925_mcu_add_key; original source notices are in wifi/THIRD_PARTY.md.
+// mt7925_mcu_add_key; original source notices are in NOTICE.
 //! Per-link management key publication and delayed receive validation.
 use super::*;
 use wifi::regulatory::{AssociationAdmission, AssociationUse, HardwarePolicy, OsPolicy, Owner};

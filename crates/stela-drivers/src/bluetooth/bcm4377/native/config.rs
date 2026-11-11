@@ -2,7 +2,7 @@
 // Copyright 1993 -- 1997 Drew Eckhardt, Frederic Potter, David Mosberger-Tang
 // Copyright 1997 -- 2000 Martin Mares <mj@ucw.cz>
 // PCI register/reset sequence adapted from pinned Linux drivers/pci/pci.c and
-// include/uapi/linux/pci_regs.h. See ../../THIRD_PARTY.md.
+// include/uapi/linux/pci_regs.h. See NOTICE.
 //! Supported endpoint FLR, D0 and native command/control writes.
 use super::{Configuration, Error, Time};
 use crate::bus::pci::regs;

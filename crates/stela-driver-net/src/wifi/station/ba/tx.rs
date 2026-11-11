@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright 2007-2010, 2018-2026 Intel Corporation;
-// 2015-2017 Intel Deutschland GmbH. See THIRD_PARTY.md for full source notices.
+// 2015-2017 Intel Deutschland GmbH. See NOTICE for full source notices.
 //! Ordinary single-link TX Block Ack, adapted from mac80211 agg-tx.c.
 //!
 //! The native owner holds and preserves this TID's pending packets from Prepare

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Synaptics source copyrights and adaptation scope: ../synaptics.rs and
-// input/THIRD_PARTY.md.
+// NOTICE.
 //! Secondary-contact/count records from the source advanced gesture mode.
 //! Native sequence numbers preserve interleaving with ordinary touch records;
 //! they are host ordering tokens, never device timestamps or scan identifiers.

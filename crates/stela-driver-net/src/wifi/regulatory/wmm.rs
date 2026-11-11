@@ -3,7 +3,7 @@
 // Copyright 2002-2005 Instant802 Networks, Inc.; 2005-2006 Devicescape Software;
 // 2006-2007 Jiri Benc; 2007 Johannes Berg;
 // 2013-2014 Intel Mobile Communications GmbH; 2015-2017 Intel Deutschland GmbH;
-// 2018-2026 Intel Corporation. See THIRD_PARTY.md.
+// 2018-2026 Intel Corporation. See NOTICE.
 //! Effective local queue parameters, separate from unchanged AP negotiation
 //! observations. Pure clamping is not native publication or radio permission.
 use super::database::Wmm;

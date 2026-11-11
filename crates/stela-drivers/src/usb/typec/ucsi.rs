@@ -4,7 +4,7 @@
 //! Serialized UCSI PPM command, reset and connector observation engine.
 //!
 //! Adapted from Linux ucsi.c/ucsi.h at
-//! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md for source
+//! a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE for source
 //! hashes. Polling uses the transport, including ACPI _DSM refreshes;
 //! an interrupt notification is not treated as command completion by itself.
 //! Platform ACPI discovery, SCI/EC service, mux/retimer programming and policy

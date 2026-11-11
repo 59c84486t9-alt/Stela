@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Raw scan-set-2 framing and the Linux atkbd set-2 keycode table.
-//! Copyright (c) 1999–2002 Vojtech Pavlik. See input/THIRD_PARTY.md.
+//! Copyright (c) 1999–2002 Vojtech Pavlik. See NOTICE.
 use super::{ErrorKind, Input, Port};
 use alloc::vec::Vec;
 

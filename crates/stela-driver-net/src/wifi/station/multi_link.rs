@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Multi-link setup adapted from Linux net/mac80211/mlme.c
 // (ieee80211_mgd_assoc, ieee80211_assoc_success); source notices in
-// wifi/THIRD_PARTY.md.
+// NOTICE.
 //! A non-AP MLD's multi-link setup with one AP MLD, as mac80211 keeps it in
 //! its association data: the two MLDs, the link the setup runs on and the
 //! station's address there, and each other link it requests with the AP's

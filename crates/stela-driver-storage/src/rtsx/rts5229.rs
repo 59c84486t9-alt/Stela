@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native adaptation of rts5229.c, Copyright 2009-2013 Realtek Semiconductor Corp.
-// Author: Wei WANG. See ../THIRD_PARTY.md.
+// Author: Wei WANG. See NOTICE.
 //! RTS5229 drive mux and revision-selected socket electrical behavior.
 use super::*;
 

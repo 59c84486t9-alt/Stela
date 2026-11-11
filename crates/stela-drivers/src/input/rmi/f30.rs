@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native RMI F30 GPIO button controls and active-low data records.
-//! Pinned source and kept copyright are in input/THIRD_PARTY.md.
+//! Pinned source and kept copyright are in NOTICE.
 use super::{
     Error, Function,
     transport::{Transport, buffer},

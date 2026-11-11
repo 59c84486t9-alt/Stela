@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! CS4206/CS4207 fixed errata and shared-pin setup from the pinned cs420x.c.
-//! Copyright (c) 2009 Takashi Iwai <tiwai@suse.de>. See audio/THIRD_PARTY.md.
+//! Copyright (c) 2009 Takashi Iwai <tiwai@suse.de>. See NOTICE.
 use super::super::{CodecGraph, Controller, PinConnection, Registers, Verb, WidgetKind};
 use super::{Authority, CirrusCoefficient, CirrusProfile, DIGITAL};
 use crate::{Error, Timer};

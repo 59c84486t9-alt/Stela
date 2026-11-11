@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-only
 # Source notices: Intel Corporation (2014,2015); Canonical Ltd (2010-2011),
-# Mike Turquette / Linaro Ltd (2011-2012). See bus/THIRD_PARTY.md.
+# Mike Turquette / Linaro Ltd (2011-2012). See NOTICE.
 """Compile unchanged PCI SPI inventory, private reset and clock functions."""
 import argparse
 import hashlib

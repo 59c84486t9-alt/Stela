@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Bounded ELD/CTA SAD fields adapted from Linux sound/core/pcm_drm_eld.c
 //! (GPL-2.0-only), include/drm/drm_eld.h (MIT, Copyright © 2023 Intel
-//! Corporation), and sound/hda/codecs/hdmi/eld.c. See audio/THIRD_PARTY.md.
+//! Corporation), and sound/hda/codecs/hdmi/eld.c. See NOTICE.
 use super::{DigitalError, PIN_DP, PIN_HDMI};
 use crate::PcmFormat;
 use alloc::vec::Vec;

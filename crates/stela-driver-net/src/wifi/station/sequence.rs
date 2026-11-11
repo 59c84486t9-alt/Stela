@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux net/mac80211/tx.c ieee80211_tx_next_seq/ieee80211_tx_h_sequence.
-// Original mac80211 notices are held in THIRD_PARTY.md.
+// Original mac80211 notices are held in NOTICE.
 //! Per-station software QoS sequence input, independent of on-air assignment.
 
 use super::{AssociationContext, Error, Phase, Station};

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Realtek Semiconductor Corp. All rights reserved.
-//! Register encodings from pinned Linux r8152.c; see THIRD_PARTY.md.
+//! Register encodings from pinned Linux r8152.c; see NOTICE.
 pub(super) const PLA_IDR: u32 = 0xc000;
 pub(super) const PLA_BACKUP: u32 = 0xd000;
 pub(super) const PLA_RCR: u32 = 0xc010;
@@ -308,7 +308,7 @@ pub(super) const PHYSTATUS_1000: u32 = 0x10;
 pub(super) const PHYSTATUS_FLOW: u32 = (1 << 6) | (1 << 5);
 // Standard MDIO bit values cross-checked against Linux UAPI mdio.h:
 // SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note
-// Copyright 2006-2009 Solarflare Communications Inc. (see THIRD_PARTY.md).
+// Copyright 2006-2009 Solarflare Communications Inc. (see NOTICE).
 pub(super) const MDIO_ADV_2500: u32 = 0x0080;
 pub(super) const MDIO_ADV_MULTIGIG_MASK: u32 = 0x0080 | 0x0100 | 0x1000;
 pub(super) const MDIO_EEE_2500_5000: u32 = 0x0003;

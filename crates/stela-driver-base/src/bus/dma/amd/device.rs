@@ -3,7 +3,7 @@
 // Author: Joerg Roedel <jroedel@suse.de>
 //         Leo Duran <leo.duran@amd.com>
 // DTE policy and host update ordering adapted from Linux drivers/iommu/amd
-// at cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See platform/THIRD_PARTY.md.
+// at cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See NOTICE.
 //! One PCI segment's device table in RAM, kept for the units that use it,
 //! and its atomic entry updates.
 mod atomic;

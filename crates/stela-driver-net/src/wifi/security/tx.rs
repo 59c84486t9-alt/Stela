@@ -2,7 +2,7 @@
 // Packet-number increment and CCMP/GCMP header layout adapt Linux
 // net/mac80211/wpa.c, Copyright 2002-2004 Instant802 Networks, Inc.;
 // 2008 Jouni Malinen; 2016-2017 Intel Deutschland GmbH;
-// 2020-2023 Intel Corporation. See THIRD_PARTY.md.
+// 2020-2023 Intel Corporation. See NOTICE.
 //! Explicit transmit PN ownership. Cipher/MIC execution remains in hardware.
 
 use super::{Error, KeyIdentity, KeySlot, PacketNumber, State};

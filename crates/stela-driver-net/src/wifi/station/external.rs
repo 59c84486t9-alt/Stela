@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // SAE authentication transport follows Linux net/mac80211/{mlme,util}.c;
-// source notices and pin are held in wifi/THIRD_PARTY.md.
+// source notices and pin are held in NOTICE.
 //! Bounded OS-supplicant SAE transport. Commit/confirm/token/group/H2E bytes
 //! remain opaque to this layer; as `ieee80211_rx_mgmt_auth` does, it follows
 //! only the exchange's order and status codes, so the AP's successful confirm

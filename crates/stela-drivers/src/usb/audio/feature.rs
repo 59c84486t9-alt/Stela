@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Descriptor-checked scalar feature controls, adapted from Linux mixer.c.
 //! Copyright (c) 2002 Takashi Iwai; original audio.c contributions by Alan Cox
-//! and Thomas Sailer. See audio/THIRD_PARTY.md for exact donor and limits.
+//! and Thomas Sailer. See NOTICE for exact donor and limits.
 use super::{
     Control, Error, Graph, MixerRange, UAC1, UAC2, UAC3,
     control::{self, Width},

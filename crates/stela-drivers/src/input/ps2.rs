@@ -2,7 +2,7 @@
 //! Polled PC i8042, raw-set-2 AT keyboards and ordinary/IntelliMouse/Explorer PS/2 mice.
 //!
 //! Linux `i8042.c`, `libps2.c`, `atkbd.c` and `psmouse-base.c` are the protocol
-//! references; see [`../THIRD_PARTY.md`](../THIRD_PARTY.md). Vojtech Pavlik
+//! references; see NOTICE. Vojtech Pavlik
 //! (1999–2002) and Dmitry Torokhov (2003–2004) keep their upstream copyrights.
 //!
 //! The platform must establish ACPI/PnP presence, remove USB legacy emulation,

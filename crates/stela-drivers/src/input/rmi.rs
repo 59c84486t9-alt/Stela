@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native RMI4 transport, function discovery and F01 device-control substrate.
-//! Based on Linux rmi4; notices are in input/THIRD_PARTY.md.
+//! Based on Linux rmi4; notices are in NOTICE.
 //!
 //! Control readiness is distinct from a usable touchpad. F11/F12
 //! contacts, buttons, passthrough and other function engines must configure their

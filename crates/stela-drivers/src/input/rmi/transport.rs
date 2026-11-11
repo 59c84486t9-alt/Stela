@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! RMI paged I2C and SMBus 2/3 mapping-table transports. Linux kept notices
-//! and exact pinned donor hashes are in input/THIRD_PARTY.md.
+//! and exact pinned donor hashes are in NOTICE.
 use super::{Error, State};
 use crate::bus::{i2c, smbus};
 use alloc::vec::Vec;

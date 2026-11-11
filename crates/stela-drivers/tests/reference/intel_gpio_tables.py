@@ -45,7 +45,7 @@ def number(token, definitions):
 
 
 def generate(reference):
-    output = ["// SPDX-License-Identifier: GPL-2.0", "// Copyright (C) 2015-2022 Intel Corporation", "// Generated numeric tables: tests/reference/intel_gpio_tables.py.", f"// Linux {PIN}; original family-specific notices in ../THIRD_PARTY.md.", "use super::{Community, Group, Profile};", ""]
+    output = ["// SPDX-License-Identifier: GPL-2.0", "// Copyright (C) 2015-2022 Intel Corporation", "// Generated numeric tables: tests/reference/intel_gpio_tables.py.", f"// Linux {PIN}; original family-specific notices in NOTICE.", "use super::{Community, Group, Profile};", ""]
     joins = []
     manifest = []
     for family in FAMILIES:

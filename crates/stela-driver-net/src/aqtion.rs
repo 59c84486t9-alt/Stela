@@ -5,7 +5,7 @@
 //! AQtion PCIe Ethernet. Linux atlantic at a804c5742bff224d4cb4d25dd383554d598be32b.
 //! One polled queue, full Ethernet frames, no checksum/VLAN/segmentation offloads.
 //! Firmware must be provisioned in the controller's NVM; host firmware download
-//! is explicitly unsupported, as in the pinned donor. See `aqtion/THIRD_PARTY.md`.
+//! is explicitly unsupported, as in the pinned donor. See NOTICE.
 use super::{HEADER, Link, LinkError, MAX_FRAME, MIN_FRAME, Mac, check_frame};
 use crate::bus::{
     dma::{

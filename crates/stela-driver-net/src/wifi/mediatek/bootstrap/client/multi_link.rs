@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 // Link lifecycle follows pinned Linux mt7925/main.c (mt7925_change_vif_links,
 // mt7925_mac_link_bss_add, mt7925_mac_link_sta_add, mt7925_set_mlo_roc);
-// source notices in wifi/THIRD_PARTY.md.
+// source notices in NOTICE.
 //! A station MLD association on the MT7925, as mt7925 runs one: the
 //! interface rebound to the setup link's own address for authentication,
 //! each other link on an interface of its own once the setup link is

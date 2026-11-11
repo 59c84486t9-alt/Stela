@@ -3,7 +3,7 @@
 // Register definitions and legacy invalidation/context sequencing adapted from
 // Linux drivers/iommu/intel/{iommu.h,iommu.c,dmar.c}, commit
 // a804c5742bff224d4cb4d25dd383554d598be32b. Source hashes and license terms:
-// crates/stela-driver-base/src/platform/THIRD_PARTY.md and LICENSES/GPL-2.0-only.txt.
+// NOTICE and LICENSES/GPL-2.0-only.txt.
 //! Exclusive legacy VT-d unit with distinct owned requester contexts/domains.
 //! Requesters start blocked or in the explicitly supplied initial window
 //! domain (DID 1). Attaching a requester moves it to its own domain.

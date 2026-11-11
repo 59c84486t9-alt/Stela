@@ -2,7 +2,7 @@
 // Adapted from Linux net/wireless/scan.c (cfg80211_scan, cfg80211_scan_6ghz,
 // cfg80211_parse_colocated_ap): Copyright 2008 Johannes Berg;
 // 2013-2014 Intel Mobile Communications GmbH; 2016 Intel Deutschland GmbH;
-// 2018-2025 Intel Corporation. See THIRD_PARTY.md.
+// 2018-2025 Intel Corporation. See NOTICE.
 //! The split 6 GHz scan of WIPHY_FLAG_SPLIT_SCAN_6GHZ drivers such as mt7925:
 //! the other bands first, then the 6 GHz channels the known BSSes' Reduced
 //! Neighbor Reports and the PSC rule select.

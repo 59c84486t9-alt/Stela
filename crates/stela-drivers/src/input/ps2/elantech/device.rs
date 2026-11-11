@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original Elantech notices are held in ../elantech.rs and input/THIRD_PARTY.md.
+// Original Elantech notices are held in ../elantech.rs and NOTICE.
 //! Elantech touchpad commands and register access over the PS/2 auxiliary port.
 use super::*;
 impl<R: Registers, T: Timer> Controller<R, T> {

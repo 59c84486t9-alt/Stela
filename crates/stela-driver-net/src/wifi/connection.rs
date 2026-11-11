@@ -2,7 +2,7 @@
 // Adapted from pinned Linux net/mac80211/mlme.c. Copyright 2002-2005,
 // Instant802 Networks, Inc.; 2005-2006, Devicescape Software, Inc.; 2006-2010
 // Johannes Berg; 2018-2026 Intel Corporation. Full source notices in
-// THIRD_PARTY.md.
+// NOTICE.
 //! What the OS decides for one WPA-Personal station connection, apart from
 //! any adapter: the network's [`security`] suites and RSN element, the
 //! association's PHY [`mode`] and channel, and the association request's

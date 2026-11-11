@@ -2,7 +2,7 @@
 // Adapted from Linux net/wireless/scan.c, net/mac80211/parse.c and
 // include/net/cfg80211.h. Copyright 2003 Jouni Malinen; 2008 Johannes Berg;
 // 2013-2015 Intel Mobile Communications GmbH; 2016-2017 Intel Deutschland GmbH;
-// 2018-2026 Intel Corporation. Full source notices in THIRD_PARTY.md.
+// 2018-2026 Intel Corporation. Full source notices in NOTICE.
 //! The nontransmitted BSSes of a Multiple BSSID set: `cfg80211_parse_mbssid_data`
 //! makes a record of each one a frame names, on the elements `cfg80211_gen_new_ie`
 //! inherits for it, and `ieee802_11_find_bssid_profile` finds a joined BSS's own

@@ -4,7 +4,7 @@
 // Copyright (C) 2015-2017 Intel Deutschland GmbH
 // Frequency conversion: Copyright 2007-2009 Johannes Berg;
 // 2013-2014 Intel Mobile Communications GmbH; 2017 Intel Deutschland GmbH;
-// 2018-2023, 2025-2026 Intel Corporation. See THIRD_PARTY.md.
+// 2018-2023, 2025-2026 Intel Corporation. See NOTICE.
 //! CPU-owned RX normalization following rxmq.c. Hardware crypto observations
 //! remain unauthenticated: no copied status can manufacture an installed key,
 //! association, software replay check or authenticated shared MPDU.

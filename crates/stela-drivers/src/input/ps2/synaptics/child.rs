@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original Synaptics/libps2/psmouse notices: ../synaptics.rs and input/THIRD_PARTY.md.
+// Original Synaptics/libps2/psmouse notices: ../synaptics.rs and NOTICE.
 //! One negotiated standard/IntelliMouse/Explorer passthrough mouse.
 //! Input remains separate from the parent touchpad, under its i8042
 //! owner. Vendor child protocols and guest/frontend attachment are separate.

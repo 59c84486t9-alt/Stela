@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! CS4210 startup, DAC range and speaker boost adapted from Linux
 //! sound/hda/codecs/cirrus/cs421x.c at
-//! a804c5742bff224d4cb4d25dd383554d598be32b. See audio/THIRD_PARTY.md.
+//! a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //! GPL version2 combines the upstream GPL-2.0-or-later codec with native HDA.
 use super::super::{CodecGraph, Controller, PinConnection, PinDevice, Registers, Verb, WidgetKind};
 use super::{CirrusCoefficient, CirrusOutputAmplifier, CirrusProfile, GROUP};

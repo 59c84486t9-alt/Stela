@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original notices are held in ../elantech.rs and input/THIRD_PARTY.md.
+// Original notices are held in ../elantech.rs and NOTICE.
 // Input Multitouch Library: Copyright (c) 2008-2010 Henrik Rydberg.
 //! V4 contact state and the source input-MT flags=0 pointer policy.
 use super::*;

@@ -9,7 +9,7 @@
 // CMAC subkeys/stream/finalization adapt Linux lib/crypto/aes.c:
 // Copyright 2026 Google LLC. BIP-GMAC nonce and AAD follow Linux
 // net/mac80211/aes_gmac.c: Copyright 2015, Qualcomm Atheros, Inc.
-// Original notices and source pin in THIRD_PARTY.md.
+// Original notices and source pin in NOTICE.
 //! Group robust-management authentication under an IGTK.
 //! Authentication is not PMF negotiation, current-association/port permission,
 //! physical key completion or permission to act on a delayed management frame.

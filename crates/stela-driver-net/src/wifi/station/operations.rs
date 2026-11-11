@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Adapted from pinned Linux mac80211/util.c, wireless/chan.c and IEEE headers.
 // Copyright 2009 Johannes Berg; 2013-2014 Intel Mobile Communications GmbH;
-// 2018-2026 Intel Corporation. Full source notices in THIRD_PARTY.md.
+// 2018-2026 Intel Corporation. Full source notices in NOTICE.
 //! Single-link AP BSS operation observations, never radio/TX permission.
 //! Unselected AP Multi-Link IEs do not select another link's operation. Their
 //! opaque bytes remain in peer Capabilities and the original beacon/response;

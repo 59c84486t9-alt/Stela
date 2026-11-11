@@ -3,7 +3,7 @@
 //! Verb/capability layouts adapt Linux include/sound/hda_verbs.h and common
 //! codec control sequencing from sound/hda/common/codec.c, and physical minimum-
 //! gain mute encoding from sound/hda/core/regmap.c at
-//! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+//! a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //!
 //! Explicit pin/converter choices and electrical options belong to platform
 //! policy. No vendor fixup, GPIO amplifier, jack policy or digital route is

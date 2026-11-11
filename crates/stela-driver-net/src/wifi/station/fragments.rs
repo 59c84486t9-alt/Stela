@@ -2,7 +2,7 @@
 // Copyright 2002-2005, Instant802 Networks, Inc.; 2005-2006, Devicescape
 // Software, Inc.; 2006-2007 Jiri Benc; 2007-2010 Johannes Berg; 2013-2014 Intel
 // Mobile Communications GmbH; 2015-2017 Intel Deutschland GmbH; 2018-2026 Intel
-// Corporation. See THIRD_PARTY.md.
+// Corporation. See NOTICE.
 //! MSDU reassembly, as `ieee80211_rx_h_defragment`. Fragments of a protected
 //! MSDU must carry consecutive packet numbers under one key, which keeps out
 //! the mixed key and fragment cache attacks. A frame that fails this is dropped.

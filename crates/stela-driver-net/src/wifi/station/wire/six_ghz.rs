@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// RSN/RSNX layouts follow pinned Linux IEEE headers; see wifi/THIRD_PARTY.md.
+// RSN/RSNX layouts follow pinned Linux IEEE headers; see NOTICE.
 //! The OS's 6 GHz SAE selection: any RSN the PMF selection takes with an SAE
 //! AKM, and any RSNX it carries, as mac80211 passes the supplicant's elements
 //! through. Parsed bytes are policy inputs, never authenticated SAE, a key,

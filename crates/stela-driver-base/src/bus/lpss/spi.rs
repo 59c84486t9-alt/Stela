@@ -4,7 +4,7 @@
 // Clock gates: Copyright (C) 2010-2011 Canonical Ltd, Jeremy Kerr;
 // Copyright (C) 2011-2012 Mike Turquette, Linaro Ltd.
 // Intel LPSS PCI SPI resources adapted from intel-lpss.c/intel-lpss-pci.c;
-// same source pin and notices as the parent LPSS owner. See ../THIRD_PARTY.md.
+// same source pin and notices as the parent LPSS owner. See NOTICE.
 //! PCI LPSS reset/remap/clock resources composed with SSP PIO.
 //! Source root clocks are distinct from the observed fractional SSP input.
 use super::{Identity, NativeRegisters, NativeResources, Registers, Retired};

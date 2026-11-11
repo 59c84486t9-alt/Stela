@@ -6,7 +6,7 @@
 //! adapts hdmi.c/common/codec.c: Copyright(c) 2008-2010 Intel Corporation;
 //! Copyright (c) 2006 ATI Technologies Inc.; Copyright (c) 2008 NVIDIA Corp.
 //! All rights reserved.; Copyright (c) 2008 Wei Ni <wni@nvidia.com>;
-//! Copyright (c) 2004 Takashi Iwai <tiwai@suse.de>. See audio/THIRD_PARTY.md.
+//! Copyright (c) 2004 Takashi Iwai <tiwai@suse.de>. See NOTICE.
 //!
 //! Observations are not display-link/sink-generation ownership. No stream,
 //! converter, DIP, pin-enable, protection or GPU power state is programmed.

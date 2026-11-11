@@ -2,7 +2,7 @@
 // Adapted from pinned Linux mac80211/spectmgmt.c and parse.c, and
 // wireless/util.c and chan.c. Copyright 2007-2008 Intel Corporation;
 // 2008 Johannes Berg; 2018-2026 Intel Corporation. Full source notices in
-// THIRD_PARTY.md.
+// NOTICE.
 //! The current AP's channel switch announcements, parsed as mac80211's
 //! `ieee80211_parse_ch_switch_ie` does. A parsed switch is an observation:
 //! the new channel still needs the regulatory owner's admission.

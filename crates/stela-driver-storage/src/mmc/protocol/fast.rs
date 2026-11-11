@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Native adaptation of Linux MMC mmc.c/mmc_ops.c; see ../../THIRD_PARTY.md.
+// Native adaptation of Linux MMC mmc.c/mmc_ops.c; see NOTICE.
 // Copyright 2003-2004 Russell King, 2005-2007 Pierre Ossman;
 // MMCv4 support Copyright 2006 Philip Langdale. All Rights Reserved.
 //! MMC HS200/HS400 transitions preserve the card/host command ordering.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Optional UAC1/UAC2 AudioControl status interrupts. Layout/receive/requeue reference:
 //! Linux sound/usb/mixer.c, Copyright (c) 2002 Takashi Iwai, and original audio.c
-//! contributions by Alan Cox and Thomas Sailer. See audio/THIRD_PARTY.md.
+//! contributions by Alan Cox and Thomas Sailer. See NOTICE.
 //! Notifications invalidate observations; they never supply a new control value.
 use super::{Binding, Entity, Error, Graph, UAC1, UAC2};
 use crate::{

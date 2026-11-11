@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // I801 hardware PEC adapted from Linux i2c-i801.c at
-// a804c5742bff224d4cb4d25dd383554d598be32b (see bus/THIRD_PARTY.md).
+// a804c5742bff224d4cb4d25dd383554d598be32b (see NOTICE).
 // Copyright (c) 1998-2002 Frodo Looijaard, Philip Edelbrock,
 // Mark D. Studebaker; (c) 2007-2014 Jean Delvare; (c) 2010 Intel Corporation,
 // David Woodhouse.

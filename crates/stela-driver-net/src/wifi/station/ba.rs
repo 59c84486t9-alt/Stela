@@ -2,7 +2,7 @@
 // Copyright 2003 Jouni Malinen; 2002-2005 Instant802 Networks, Inc.;
 // 2005-2006 Devicescape Software, Inc.; 2006-2007 Jiri Benc;
 // 2007 Michael Wu; 2007-2010, 2018-2026 Intel Corporation;
-// 2015-2017 Intel Deutschland GmbH. See THIRD_PARTY.md.
+// 2015-2017 Intel Deutschland GmbH. See NOTICE.
 //! Current single-link receive Block Ack agreements for driver-owned reorder.
 //!
 //! Protocol plans do not establish firmware/radio permission. The native owner

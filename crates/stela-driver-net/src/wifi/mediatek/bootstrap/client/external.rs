@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 // Native peer and ROC programming follows the existing source-checked client;
-// external SAE transport follows Linux mac80211, documented in THIRD_PARTY.md.
+// external SAE transport follows Linux mac80211, documented in NOTICE.
 //! Preassociation SAE management transport for an OS supplicant. There
 //! is no boolean completion API or transition to associated.
 

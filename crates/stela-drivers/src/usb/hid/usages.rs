@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Linux HID reference: see ../THIRD_PARTY.md.
+// Linux HID reference: see NOTICE.
 //! Local Usage environment shared by the complete and legacy report readers.
 //! Like Linux hid_parser_local, branch zero and the first delimiter branch
 //! form the selected interpretation. Later branches are validated, never merged.

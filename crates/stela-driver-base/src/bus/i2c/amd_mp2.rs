@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only OR BSD-3-Clause
 // AMD MP2 I2C protocol adapted from Linux; Authors: Shyam Sundar S K,
-// Elie Morisse, Nehal Bakulchandra Shah. See ../THIRD_PARTY.md.
+// Elie Morisse, Nehal Bakulchandra Shah. See NOTICE.
 //! Serialized AMD 1022:15e6 MP2 firmware mailbox and AMDI0011 bus engines.
 //!
 //! The two buses share one payload mailbox and are owned by one Controller.

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Linux notices: Frodo Looijaard, Philip Edelbrock, Mark D. Studebaker;
-# Jean Delvare; Intel Corporation, David Woodhouse (see bus/THIRD_PARTY.md).
+# Jean Delvare; Intel Corporation, David Woodhouse (see NOTICE).
 """Execute complete pinned I801 simple/access, polling and PEC/error functions.
 
 Ordered registers, time, peripheral completion and runtime/locking are services;

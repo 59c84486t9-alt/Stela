@@ -3,7 +3,7 @@
 // Copyright 2003 Jouni Malinen; 2004 Instant802 Networks, Inc.;
 // 2005 Devicescape Software, Inc.; 2006-2007 Jiri Benc; 2007 Michael Wu;
 // 2013-2015 Intel Mobile Communications GmbH; 2016-2017 Intel Deutschland GmbH;
-// 2018-2025 Intel Corporation. See THIRD_PARTY.md.
+// 2018-2025 Intel Corporation. See NOTICE.
 //! Bounded hardware-scan request lifetime. A request/command acknowledgement
 //! never means scan completion. Cancellation/timeout keeps ownership until
 //! the completion and radio/request retirement are both established.

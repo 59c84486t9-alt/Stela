@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! CS4208 input stereo/gain corrections and startup from the pinned cs420x.c.
-//! Copyright (c) 2009 Takashi Iwai <tiwai@suse.de>. See audio/THIRD_PARTY.md.
+//! Copyright (c) 2009 Takashi Iwai <tiwai@suse.de>. See NOTICE.
 use super::super::{CodecGraph, Controller, Registers, WidgetKind, codec::widget_channels};
 use super::{CirrusCoefficient, CirrusInputAmplifier, CirrusProfile, GROUP};
 use crate::{Error, Timer};

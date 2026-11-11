@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear AND GPL-2.0-only
 // Copyright (C) 2020-2023 MediaTek Inc.
-// Channel geometry/policy follows Linux cfg80211/mac80211; see THIRD_PARTY.md.
+// Channel geometry/policy follows Linux cfg80211/mac80211; see NOTICE.
 //! Concrete policy owner for the MT7925 controller. The normal
 //! OS/setup input is a pinned database and explicit country/environment. This
 //! wrapper owns the only client and exposes no raw mutable escape. Every method

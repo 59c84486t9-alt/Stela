@@ -5,7 +5,7 @@
 // net/mac80211/util.c (ieee80211_fragment_element); request profiles and
 // response answers follow net/mac80211/mlme.c (ieee80211_assoc_add_ml_elem,
 // ieee80211_add_non_inheritance_elem, ieee80211_assoc_config_link). Source
-// notices in wifi/THIRD_PARTY.md.
+// notices in NOTICE.
 //! The Basic Multi-Link element (IEEE 802.11be-2024 9.4.2.321.2) of an AP
 //! MLD and of a non-AP MLD's authentication and association, its per-STA
 //! profiles with their inheritance, and the affiliated APs a Reduced

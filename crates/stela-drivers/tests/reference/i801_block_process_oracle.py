@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Linux I801 authors/notices are retained in bus/THIRD_PARTY.md.
+# Linux I801 authors/notices are retained in NOTICE.
 """Execute eleven unchanged Linux I801 E32B block-process/PEC algorithms.
 
 Hash-bound declaration services are shared with the process-call fixture;

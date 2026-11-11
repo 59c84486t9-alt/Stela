@@ -5,7 +5,7 @@
 //! Legacy IOAPIC ownership and redirection ordering. Protocol references:
 //! Linux a804c5742bff224d4cb4d25dd383554d598be32b, arch/x86/kernel/apic/io_apic.c
 //! and arch/x86/include/asm/io_apic.h (Ingo Molnar and contributors), recorded
-//! in stela-drivers/src/platform/THIRD_PARTY.md. CPU/IDT/AP bootstrap is never
+//! in NOTICE. CPU/IDT/AP bootstrap is never
 //! owned here.
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{

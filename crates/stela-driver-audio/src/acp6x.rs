@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native ACP6x Yellow Carp direct PDM capture. Register sequencing adapts AMD
 //! Linux sound/soc/amd/yc/{pci-acp6x.c,acp6x-pdm-dma.c,acp6x-mach.c,acp6x.h}
-//! at a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+//! at a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //! Copyright (C) 2021 Advanced Micro Devices, Inc. All rights reserved.
 //!
 //! This is the held-D0 direct path, not SOF firmware/IPC, ACP3x/5x, I2S or an

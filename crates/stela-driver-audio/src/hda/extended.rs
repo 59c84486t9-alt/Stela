@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Bounded Intel HDA capability/link setup adapted from Linux
 //! sound/hda/core/controller.c, core/ext/controller.c and controllers/intel.c
-//! at a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+//! at a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //! Copyright (C) 2014-2015 Intel Corp; Author Jeeja KP <jeeja.kp@intel.com>
 //! Copyright(c) 2004 Intel Corporation
 //! Copyright (c) 2004 Takashi Iwai <tiwai@suse.de>

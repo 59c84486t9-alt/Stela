@@ -2,7 +2,7 @@
 // Follows pinned Linux net/mac80211/mlme.c (ieee80211_ml_reconfiguration,
 // ieee80211_ml_reconf_work, ieee80211_process_adv_ttlm,
 // ieee80211_tid_to_link_map_work, ieee80211_ttlm_set_links). Source notices in
-// wifi/THIRD_PARTY.md.
+// NOTICE.
 //! What an AP MLD does to its links under an association that stays: a link it
 //! removes goes for good, and one its advertised mapping leaves out takes no
 //! traffic until the mapping ends.

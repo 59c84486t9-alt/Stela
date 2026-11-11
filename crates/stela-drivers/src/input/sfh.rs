@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //! Native AMD SFH v2 (PCI 1022:15e4, ACS dialect 2). This is distinct
 //! from AMD MP2 I²C 15e6, legacy SFH and SFH1.1 164a. Linux donor provenance,
-//! notices and report limitations are recorded in input/THIRD_PARTY.md.
+//! notices and report limitations are recorded in NOTICE.
 //! Copyright 2020-2021 Advanced Micro Devices, Inc.
 //! Authors: Shyam Sundar S K, Sandeep Singh, Basavaraj Natikar,
 //! Nehal Bakulchandra Shah.

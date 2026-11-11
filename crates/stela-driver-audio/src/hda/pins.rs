@@ -2,7 +2,7 @@
 //! Standard pin metadata, analog endpoint discovery and polled jack sense.
 //! Encodings and trigger ordering adapt Linux include/sound/hda_verbs.h and
 //! sound/hda/common/{auto_parser,jack}.c at
-//! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+//! a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //! Copyright (c) 2011-2012 Takashi Iwai <tiwai@suse.de>
 //!
 //! Firmware defaults describe candidates, not permission to infer electrical,

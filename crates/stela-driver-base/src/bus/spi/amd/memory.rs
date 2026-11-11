@@ -2,7 +2,7 @@
 // Copyright (c) 2020, Advanced Micro Devices, Inc.
 // Source author: Sanjay R Mehta <sanju.mehta@amd.com>
 // SPI memory policy references: Copyright 2018 Exceet Electronics GmbH and
-// Bootlin; author Boris Brezillon. See ../../THIRD_PARTY.md.
+// Bootlin; author Boris Brezillon. See NOTICE.
 //! AMD V1/V2 index-mode memory operations, using the original controller owner.
 //!
 //! Address bytes are sent most significant first; read dummy bytes are 0xff.

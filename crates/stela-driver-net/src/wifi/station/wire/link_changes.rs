@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Layouts follow pinned Linux include/linux/ieee80211-eht.h; the readings
 // follow net/mac80211/mlme.c (ieee80211_ml_reconfiguration,
-// ieee80211_parse_adv_t2l). Source notices in wifi/THIRD_PARTY.md.
+// ieee80211_parse_adv_t2l). Source notices in NOTICE.
 //! What an AP MLD's elements say of its links: the Reconfiguration Multi-Link
 //! element and advertised TID-to-Link Mapping (IEEE 802.11be-2024 9.4.2.321.4
 //! and 9.4.2.314).

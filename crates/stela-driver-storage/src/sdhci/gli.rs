@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native adaptation of Linux sdhci-pci-gli.c, Copyright 2019 Genesys Logic,
-// Inc.; author Ben Chuang. See ../../THIRD_PARTY.md.
+// Inc.; author Ben Chuang. See NOTICE.
 //! GL9750 protected PHY, direct PLL clocks and two-polarity hardware tuning.
 use super::*;
 pub(super) mod dma;

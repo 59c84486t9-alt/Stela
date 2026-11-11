@@ -3,7 +3,7 @@
 // Copyright 2002-2005, Instant802 Networks, Inc.; 2005-2006, Devicescape
 // Software, Inc.; 2006-2010 Johannes Berg; 2013-2014 Intel Mobile
 // Communications GmbH; 2018-2026 Intel Corporation. Full source notices in
-// THIRD_PARTY.md.
+// NOTICE.
 //! The PHY mode and channel a non-STRICT single-link station associates
 //! with: `ieee80211_determine_our_sta_mode` bounds them by the station's own
 //! capabilities and `ieee80211_determine_chan_mode` by the AP's operation

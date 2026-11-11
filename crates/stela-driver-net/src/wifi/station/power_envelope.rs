@@ -2,7 +2,7 @@
 // Adapted from pinned Linux mac80211/parse.c, mac80211/mlme.c and
 // linux/ieee80211-he.h: Copyright 2007-2010 Johannes Berg;
 // 2013-2014 Intel Mobile Communications GmbH; 2018-2026 Intel Corporation.
-// Full source notices in THIRD_PARTY.md.
+// Full source notices in NOTICE.
 //! What a 6 GHz AP's Transmit Power Envelopes limit, `struct
 //! ieee80211_parsed_tpe`. An observation, never permission to transmit.
 

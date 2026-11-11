@@ -3,7 +3,7 @@
 //! adapted from Linux sound/hda/codecs/sigmatel.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Copyright (c) 2005 Embedded Alley Solutions, Inc., Matt Porter.
-//! Copyright (c) 2004 Takashi Iwai. See audio/THIRD_PARTY.md.
+//! Copyright (c) 2004 Takashi Iwai. See NOTICE.
 use super::super::{CodecGraph, Controller, Registers, Verb, WidgetKind};
 use super::{SigmatelGpio, port_power};
 use crate::{Error, Timer};

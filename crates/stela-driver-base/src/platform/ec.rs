@@ -5,7 +5,7 @@
 //! policy and exclusive native ownership. This is a polled engine, not GPE
 //! installation or vendor-specific EC RAM interpretation. Query receipts can
 //! evaluate native AML after releasing transaction/firmware locks.
-//! Commands follow pinned Linux `drivers/acpi/ec.c`; see `THIRD_PARTY.md`.
+//! Commands follow pinned Linux `drivers/acpi/ec.c`; see NOTICE.
 #[cfg(feature = "native-acpi")]
 pub mod binding;
 #[cfg(feature = "native-acpi")]

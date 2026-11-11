@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Linux USB HID lifecycle/control reference and kept notices:
-// usb/THIRD_PARTY.md and the parent HID module.
+// NOTICE and the parent HID module.
 //! Descriptor-checked synchronous HID class controls through owned EP0.
 use super::*;
 

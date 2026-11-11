@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux HID++/receiver reference: Copyright (c) 2011 Logitech;
-// 2012-2013 Google; 2013-2014 Red Hat Inc. Exact identities: ../THIRD_PARTY.md.
+// 2012-2013 Google; 2013-2014 Red Hat Inc. Exact identities: NOTICE.
 //! Descriptor-checked c539 HID++ side-channel on the existing native HID owner.
 //! Standard input remains canonical and has no invented paired-slot identity.
 use super::*;

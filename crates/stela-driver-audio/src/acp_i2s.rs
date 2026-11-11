@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native Raven ACP3x (rev00) and Vangogh ACP5x (rev50) serial-I2S DMA.
 //! Adapted from pinned Linux sound/soc/amd/{raven,vangogh}/ PCI/I2S/PCM donors
-//! at a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+//! at a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //! Copyright (C) 2016, 2021, 2023 Advanced Micro Devices, Inc.
 //!
 //! One kept whole-function controller, four native stream slots. Firmware,

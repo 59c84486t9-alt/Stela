@@ -2,7 +2,7 @@
 // Linux HID reference: Copyright (c) 1999 Andreas Gal;
 // 2000-2005 Vojtech Pavlik; 2005 Michael Haboustak for Concept2, Inc;
 // 2006-2012 Jiri Kosina; 2007-2008 Oliver Neukum.
-// Source identities and adaptation scope: usb/THIRD_PARTY.md.
+// Source identities and adaptation scope: NOTICE.
 //! Native USB HID report transport and descriptor-checked input.
 //!
 //! The original report descriptor and every received report keep IDs,

@@ -2,9 +2,9 @@
 //! Copyright(c) 2008 Intel Corporation
 //! Copyright (c) 2013 Anssi Hannula <anssi.hannula@iki.fi>
 //! ELD header fields: Copyright © 2023 Intel Corporation (MIT).
-//! See audio/THIRD_PARTY.md for the MIT permission/warranty notice.
+//! See NOTICE for the MIT permission/warranty notice.
 //! ELD/SAD constraints from Linux pcm_drm_eld.c and HDMI eld.c at
-//! a804c5742bff224d4cb4d25dd383554d598be32b. See audio/THIRD_PARTY.md.
+//! a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 use crate::{Error, PcmFormat};
 use alloc::vec::Vec;
 

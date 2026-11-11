@@ -2,7 +2,7 @@
 // Copyright (c) 2020, Advanced Micro Devices, Inc.
 // Author: Sanjay R Mehta <sanju.mehta@amd.com>
 // Adapted from Linux drivers/spi/spi-amd.c at
-// cc9de5d4b5ab6459f5774946aa3195ad51236fa8; see ../THIRD_PARTY.md.
+// cc9de5d4b5ab6459f5774946aa3195ad51236fa8; see NOTICE.
 //! Serialized AMD opcode/FIFO PIO, mode 0, eight-bit words, one data line.
 //!
 //! A command sends one opcode, optional TX bytes, then optional RX bytes in

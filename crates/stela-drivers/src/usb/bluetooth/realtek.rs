@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2015 Endless Mobile, Inc.
 //! Realtek USB firmware staging adapted from pinned Linux `btrtl.c`/`btrtl.h`.
-//! See THIRD_PARTY.md for exact provenance and limits. Explicit initialization
+//! See NOTICE for exact provenance and limits. Explicit initialization
 //! observes an exact USB/HCI/ROM/security profile, stages exact Provider images
 //! and requires real download completions and post-upload version/address.
 //! This establishes observed protocol execution, never vendor authentication,

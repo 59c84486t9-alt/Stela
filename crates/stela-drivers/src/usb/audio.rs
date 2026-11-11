@@ -2,7 +2,7 @@
 //! USB Audio Class 1/2/3 PCM and UAC3 BADD, on native isochronous transport.
 //! Mixer adaptation keeps Copyright (c) 2002 Takashi Iwai; original audio.c
 //! contributions by Alan Cox and Thomas Sailer. UAC2 layout reference keeps
-//! Copyright (c) 2010 Daniel Mack. See audio/THIRD_PARTY.md.
+//! Copyright (c) 2010 Daniel Mack. See NOTICE.
 //! Control/rate/feedback sequencing adapts Linux sound/usb/{clock,format,
 //! endpoint,pcm,mixer}.c at a804c5742bff224d4cb4d25dd383554d598be32b.
 //! Like snd-usb-audio, standard UAC1/UAC2 control interfaces bind by class; their

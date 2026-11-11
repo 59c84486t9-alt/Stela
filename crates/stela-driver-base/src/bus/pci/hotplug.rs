@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // PCI bus scanning and resource assignment follow Linux drivers/pci/probe.c
 // and setup-bus.c, copyright David Mosberger, Martin Mares, Ivan Kokshaysky
-// and others; see bus/THIRD_PARTY.md.
+// and others; see NOTICE.
 //! Functions that arrive below a hot-plug bridge after firmware numbered the
 //! buses: Linux's `pci_scan_bridge`, `pbus_size_mem`, `__pci_bus_assign_resources`
 //! and `pci_configure_mps`, within the bus range and windows the bridge has.

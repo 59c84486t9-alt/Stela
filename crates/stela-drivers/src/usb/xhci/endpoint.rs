@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Interval/burst mapping follows Linux xhci-mem.c, pinned in THIRD_PARTY.md.
+// Interval/burst mapping follows Linux xhci-mem.c, pinned in NOTICE.
 // Copyright (C) 2008 Intel Corp. Author: Sarah Sharp.
 //! Validated bulk/interrupt and root-direct USB2 isochronous context fields. Validate before allocating or
 //! publishing DMA: invalid descriptors cannot partially configure a device.

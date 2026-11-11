@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux Synaptics reference: Copyright (c) 1997 C. Scott Ananian;
 // 1998-2000 Bruce Kalk; 2001 Stefan Gmeiner; 2003 Peter Osterlund,
-// Dmitry Torokhov. Source identities and scope: input/THIRD_PARTY.md.
+// Dmitry Torokhov. Source identities and scope: NOTICE.
 //! Conventional Synaptics absolute PS/2 operation under the existing i8042 owner.
 //! Firmware queries and six-byte packets keep their bytes, including
 //! acknowledged advanced/image-mode secondary-contact/count records.

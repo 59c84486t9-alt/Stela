@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // 802.11/802.3 and controlled-port rules adapt Linux net/wireless/util.c
-// and net/mac80211/{rx.c,tx.c,wpa.c}. Original notices in THIRD_PARTY.md.
+// and net/mac80211/{rx.c,tx.c,wpa.c}. Original notices in NOTICE.
 //! Single-MSDU data/control-port framing. TX output is an explicit hardware
 //! work plan: its MPDU is plaintext, and required hardware cipher/MIC work must
 //! be completed by the selected vendor path before successful TX.

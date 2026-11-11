@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // RSN suite/MFP forms follow Linux include/linux/ieee80211.h and
-// net/mac80211/mlme.c. See wifi/THIRD_PARTY.md for the pinned source.
+// net/mac80211/mlme.c. See NOTICE for the pinned source.
 //! Bounded explicit OS-selected PMF profile. This is parsed policy input,
 //! never an authenticated handshake, installed key or publication permission.
 use super::{Error, cipher, elements, take, word};

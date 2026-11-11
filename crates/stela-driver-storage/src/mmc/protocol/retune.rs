@@ -2,7 +2,7 @@
 // Linux MMC core, Copyright 2003-2004 Russell King, 2005-2007 Pierre Ossman;
 // MMCv4 support Copyright 2006 Philip Langdale. All Rights Reserved.
 // Host retuning: Copyright 2003 Russell King, 2007-2008 Pierre Ossman,
-// 2010 Linus Walleij. See ../../THIRD_PARTY.md.
+// 2010 Linus Walleij. See NOTICE.
 //! Explicit HS200 tuning and ordinary HS400 downgrade/tune/restore.
 use super::*;
 #[cfg(test)]

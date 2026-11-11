@@ -2,7 +2,7 @@
 // Adapted from pinned Linux mac80211/mlme.c: Copyright 2004, Instant802
 // Networks, Inc.; 2005, Devicescape Software, Inc.; 2006-2007 Jiri Benc;
 // 2007, Michael Wu; 2013-2014 Intel Mobile Communications GmbH; 2018-2026
-// Intel Corporation. Full source notices in THIRD_PARTY.md.
+// Intel Corporation. Full source notices in NOTICE.
 //! mac80211's watch on a connection for hardware that keeps none: the beacon
 //! monitor, the connection monitor, and the nullfunc probe either one starts.
 //! A frame leaving a ring proves nothing of the AP, so only what is heard and

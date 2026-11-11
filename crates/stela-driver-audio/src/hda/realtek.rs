@@ -3,7 +3,7 @@
 //! sound/hda/codecs/realtek/{realtek,alc882,alc662,alc269}.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b (GPL-2.0-or-later).
 //! This explicitly scoped setup does not select OEM fixups or establish board,
-//! GPIO, companion-amplifier, headset or speaker readiness. See THIRD_PARTY.md.
+//! GPIO, companion-amplifier, headset or speaker readiness. See NOTICE.
 use super::{CodecGraph, Controller, Registers, Verb};
 use crate::{Error, Timer};
 use alloc::vec::Vec;

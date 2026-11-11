@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Michael adapted from Linux net/wireless/michael-mic.c; source notices in
-// THIRD_PARTY.md.
+// NOTICE.
 //! Michael, TKIP's message check, for a device that decrypts TKIP and leaves
 //! the check to the host.
 

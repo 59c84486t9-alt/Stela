@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native adaptation of Linux sdhci-pci-gli.c, Copyright 2019 Genesys Logic,
-// Inc.; author Ben Chuang. See ../../THIRD_PARTY.md.
+// Inc.; author Ben Chuang. See NOTICE.
 //! GL9767 protected PCI and ordinary SD/UHS-I hardware operations.
 use super::*;
 use gl9755::ClockFailure;

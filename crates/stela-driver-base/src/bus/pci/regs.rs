@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // PCI encodings follow Linux include/uapi/linux/pci_regs.h, copyright
-// 1994 Drew Eckhardt and 1997-1999 Martin Mares; see bus/THIRD_PARTY.md.
+// 1994 Drew Eckhardt and 1997-1999 Martin Mares; see NOTICE.
 //! The configuration header registers every function shares, and their bits.
 
 pub const VENDOR_ID: u16 = 0x00;

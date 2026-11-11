@@ -4,7 +4,7 @@
 // follows drivers/pci/ats.c, Copyright (C) 2009 Intel Corporation,
 // Yu Zhao <yu.zhao@intel.com>, Copyright (C) 2011 Advanced Micro Devices,
 // PRI and PASID additions by Joerg Roedel <joerg.roedel@amd.com>, at commit
-// cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See platform/THIRD_PARTY.md.
+// cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See NOTICE.
 //! Stopped PCI endpoints. A claim grants neither alias isolation nor
 //! a remapping-unit takeover. Engine/IRQ/work drainage and physical
 //! function identity are unsafe producer obligations, not config-bit inferences.

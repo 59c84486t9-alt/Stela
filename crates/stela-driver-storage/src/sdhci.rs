@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Native adaptation of Linux sdhci.c/h, Copyright 2005-2008 Pierre Ossman;
-// MMC/SD protocol sequencing keeps the source notices in THIRD_PARTY.md.
+// MMC/SD protocol sequencing keeps the source notices in NOTICE.
 //! Native polled SDHCI storage with kept host and generation-bound cards.
 //! SD/SDHC/SDXC and eMMC user-area access share the command engine.
 use crate::{

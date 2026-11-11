@@ -10,7 +10,7 @@
 //! function-zero NIC wiring and recognized NVM; its original CLKREQ setting
 //! selects the source per-speed send-BD workaround. These
 //! bounded source-reviewed packet profiles have native model validation;
-//! hardware remains unchecked. See `tg3/THIRD_PARTY.md`. Managed, SerDes and
+//! hardware remains unchecked. See NOTICE. Managed, SerDes and
 //! all other ASIC/revision profiles explicitly refuse.
 //!
 //! All named chips have an APE window. MDIO takes the per-function APE

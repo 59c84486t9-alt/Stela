@@ -2,7 +2,7 @@
 // Copyright (c) 2002 Takashi Iwai
 //! UAC2 terminal connector status from descriptor access and GET_CUR.
 //! Linux sound/usb/mixer.c::get_connector_value and audio-v2.h at
-//! cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See THIRD_PARTY.md.
+//! cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See NOTICE.
 use super::{Binding, Control, Entity, Error, UAC2, control};
 use alloc::vec::Vec;
 

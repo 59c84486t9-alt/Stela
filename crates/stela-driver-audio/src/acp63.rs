@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! ACP6.3 dedicated Pink Sardine direct-PDM driver (AMD1022:15e2 revision63).
 //! Adapted from Linux sound/soc/amd/ps/{pci-ps,ps-common,ps-pdm-dma}.c and
-//! acp63.h at a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+//! acp63.h at a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //! Copyright (C) 2022, 2023, 2025 Advanced Micro Devices, Inc.
 //!
 //! This is the selector-zero dedicated PDM path, not the separately selected

@@ -3,7 +3,7 @@
 // Copyright (C) 2013-2015 Intel Mobile Communications GmbH
 // Copyright (C) 2015-2017 Intel Deutschland GmbH
 // Statistics layouts and signal conversion follow pinned iwlwifi
-// fw/api/stats.h and mvm/rx.c; source notices are in wifi/THIRD_PARTY.md.
+// fw/api/stats.h and mvm/rx.c; source notices are in NOTICE.
 //! Firmware beacon-filter energy for AX200/AX210 Bluetooth coexistence.
 //! Both families use the multi-queue RX API. The older statistics layout
 //! therefore uses v11, while NEW_RX_STATS selects the v13 layout.

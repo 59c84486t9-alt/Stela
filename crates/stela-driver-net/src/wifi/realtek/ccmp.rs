@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // CCMP nonce and AAD follow Linux net/mac80211/wpa.c: Copyright 2002-2004
 // Instant802 Networks, Inc.; 2008 Jouni Malinen; 2016-2017 Intel Deutschland
-// GmbH; 2020-2023 Intel Corporation. See THIRD_PARTY.md.
+// GmbH; 2020-2023 Intel Corporation. See NOTICE.
 //! CCMP-128 sealing of a robust management frame, which rtw88 leaves to
 //! mac80211 with `IEEE80211_KEY_FLAG_SW_MGMT_TX`, and opening one hardware
 //! left sealed.

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Capability layouts and intersections adapt pinned Linux mac80211
-// {ht,vht,he,eht}.c and ieee80211-{ht,vht,he,eht}.h; see THIRD_PARTY.md.
+// {ht,vht,he,eht}.c and ieee80211-{ht,vht,he,eht}.h; see NOTICE.
 //! Validated single-link PHY negotiation inputs and directional rate bounds.
 //!
 //! These are observations/negotiation results, never radio, key or association

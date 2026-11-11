@@ -3,7 +3,7 @@
 //! generation while the old raw hardware-slot fence remains permanent.
 // SPDX-License-Identifier: GPL-2.0-only
 // Linux a804c574 usb/core/hub.c and usb/host/xhci.c/xhci-hub.c;
-// Intel xHCI1.2b4.5.3.3,4.6.4,4.19.5,5.4.8. See THIRD_PARTY.md.
+// Intel xHCI1.2b4.5.3.3,4.6.4,4.19.5,5.4.8. See NOTICE.
 use super::*;
 
 pub(super) const DISABLE_SLOT: u32 = 10;

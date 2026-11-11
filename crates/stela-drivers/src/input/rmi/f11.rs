@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Ordinary five-byte F11 absolute/relative reports and native controls.
-//! Pinned source and kept copyrights are in input/THIRD_PARTY.md.
+//! Pinned source and kept copyrights are in NOTICE.
 use super::{
     Error, Function,
     transport::{Transport, buffer},

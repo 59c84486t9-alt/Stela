@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// Original Synaptics notices: ../synaptics.rs and input/THIRD_PARTY.md.
+// Original Synaptics notices: ../synaptics.rs and NOTICE.
 //! Source PnP/board coordinate corrections, separate from observed firmware data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Bounds {

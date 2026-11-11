@@ -2,7 +2,7 @@
 // I801 fixed-length I2C block sequencing adapted from Linux i2c-i801.c.
 // Copyright (c) 1998-2002 Frodo Looijaard, Philip Edelbrock,
 // Mark D. Studebaker; (c) 2007-2014 Jean Delvare; (c) 2010 Intel Corporation,
-// David Woodhouse. See bus/THIRD_PARTY.md.
+// David Woodhouse. See NOTICE.
 //! Fixed-length I²C blocks with kept PCI host-configuration permission.
 use super::*;
 use crate::bus::{

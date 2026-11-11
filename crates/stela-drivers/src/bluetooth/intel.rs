@@ -2,7 +2,7 @@
 // Copyright (C) 2015 Intel Corporation
 //! Shared Intel legacy RSA and TLV RSA/ECDSA/LMS initializer over real USB or PCIe
 //! command transports, adapted from Linux btintel.c/btusb.c at
-//! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+//! a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //!
 //! Supported: the exact USB IDs in identity.rs, platform 0x37 and legacy
 //! variants 0x0b/0x0c/0x11–0x14 with secure boot and per-fragment completions.

@@ -4,7 +4,7 @@
 //! This is structural parsing, separate from association/security policy.
 //! The source wrapper uses HIGHEST (UHR), BSS=NULL and link_id=-1. Any generic
 //! parse error suppresses the extension; it does not refuse the base request.
-//! See THIRD_PARTY.md for the pinned parser and mesh size helpers.
+//! See NOTICE for the pinned parser and mesh size helpers.
 
 const ADDBA_EXTENSION: u8 = 159;
 const ADDRESS_EXTENSION: u8 = 0x40;

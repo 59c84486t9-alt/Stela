@@ -2,7 +2,7 @@
 //! Intel cAVS 2.5 SOF IPC3 hardware backend.
 //!
 //! Linux SOF at a804c5742bff224d4cb4d25dd383554d598be32b supplies the
-//! register, ROM, mailbox and DMA recipes; see audio/THIRD_PARTY.md. Firmware
+//! register, ROM, mailbox and DMA recipes; see NOTICE. Firmware
 //! remains an original external catalog image. SST, AVS, IPC4 and ACE are
 //! different protocols and are explicitly outside this profile.
 //! Copyright(c) 2018, 2020 Intel Corporation

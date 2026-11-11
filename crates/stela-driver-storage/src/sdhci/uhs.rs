@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Native adaptation of Linux sdhci.c, Copyright 2005-2008 Pierre Ossman;
 // CMD11 adapts MMC core.c, Copyright 2003-2004 Russell King, 2004 Ian Molton,
-// 2005-2008 Pierre Ossman and 2006 Philip Langdale. See ../THIRD_PARTY.md.
+// 2005-2008 Pierre Ossman and 2006 Philip Langdale. See NOTICE.
 //! Standard v3 Host Control 2 operations with DAT/clock observations.
 use super::*;
 use crate::mmc::{SdUhsModes, wire::SD_SEND_TUNING};

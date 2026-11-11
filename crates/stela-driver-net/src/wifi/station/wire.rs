@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Layouts adapted from Linux include/linux/ieee80211.h and
-// net/mac80211/{util.c,mlme.c}; source notices in THIRD_PARTY.md.
+// net/mac80211/{util.c,mlme.c}; source notices in NOTICE.
 //! Open-system, shared-key, static WEP and RSN wire forms, and the multi-link
 //! setup an EHT PMF request carries. Legacy constructors refuse PMF; the
 //! explicit modern PMF profile requires separate OS permission.

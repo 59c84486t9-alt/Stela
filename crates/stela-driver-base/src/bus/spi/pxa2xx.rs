@@ -3,7 +3,7 @@
 // Copyright (C) 2013, 2021 Intel Corporation
 // SSP register interface: Copyright (C) 2003 Russell King, All Rights Reserved.
 // LPSS/PXA2xx SSP protocol adapted from Linux spi-pxa2xx.c at
-// cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See ../THIRD_PARTY.md.
+// cc9de5d4b5ab6459f5774946aa3195ad51236fa8. See NOTICE.
 //! Intel LPSS SSP native polled full-duplex master and manual chip selects.
 //!
 //! All six LPSS register layouts use the SSP wire engine. Transfers

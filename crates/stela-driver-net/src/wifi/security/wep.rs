@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // WEP framing adapted from Linux net/mac80211/wep.c; source notices in
-// THIRD_PARTY.md.
+// NOTICE.
 //! Software WEP for the shared-key authentication challenge response, which
 //! mac80211 encrypts itself before any key reaches the hardware.
 

@@ -6,7 +6,7 @@
 //! Native Stela adaptation of Linux's `drivers/net/ethernet/intel/igb` at
 //! `a804c5742bff224d4cb4d25dd383554d598be32b`. Reset, EEPROM/iNVM,
 //! firmware synchronization, PHY and PLL algorithms keep the GPL terms;
-//! source hashes and supported subsets are in `THIRD_PARTY.md`.
+//! source hashes and supported subsets are in NOTICE.
 //!
 //! One polled advanced-descriptor queue, ordinary Ethernet frames, no
 //! offloads, SR-IOV, timestamping, EEE, fiber, SerDes or SGMII. Matching a

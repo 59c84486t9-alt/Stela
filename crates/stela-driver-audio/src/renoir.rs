@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! AMD Renoir ACP3.1 direct PDM capture, PCI 1022:15e2 revision01 class048000.
 //! Adapted from Linux sound/soc/amd/renoir and amd/acp-config.c at
-//! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+//! a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //! Copyright (C) 2020 Advanced Micro Devices, Inc.
 //!
 //! Explicit held-D0, polled continuous capture: 48kHz stereo S32_LE. The source PCM

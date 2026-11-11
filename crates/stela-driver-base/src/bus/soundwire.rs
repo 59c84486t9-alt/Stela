@@ -2,7 +2,7 @@
 //! SoundWire controller protocols. Link resources, frame clocks, reset,
 //! firmware arbitration, discovery and audio streams require their original
 //! platform owner; a command engine or controller identity grants none of them.
-//! Source attribution and finite evidence limits: `soundwire/THIRD_PARTY.md`.
+//! Source attribution and finite evidence limits: NOTICE.
 pub mod amd;
 pub mod cadence;
 

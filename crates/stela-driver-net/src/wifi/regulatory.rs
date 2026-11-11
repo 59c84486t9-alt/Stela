@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Channel-definition checks follow Linux net/wireless/chan.c:
 // Copyright 2009 Johannes Berg; 2013-2014 Intel Mobile Communications GmbH;
-// 2018-2026 Intel Corporation. See THIRD_PARTY.md.
+// 2018-2026 Intel Corporation. See NOTICE.
 //! Shared channel admission; the hardware and OS keep their own policy data.
 //!
 //! The distinction between disabled channels, no-IR, DFS and indoor constraints
-//! follows pinned Linux cfg80211/mac80211 semantics; see THIRD_PARTY.md.
+//! follows pinned Linux cfg80211/mac80211 semantics; see NOTICE.
 //! Database inputs are explicitly content-pinned and country-selected by the
 //! normal OS/setup source. No country, DFS exception, default rate or power is
 //! inferred. Parsed vendor receipts and channel flags alone are observations;

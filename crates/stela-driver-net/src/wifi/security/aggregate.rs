@@ -2,7 +2,7 @@
 // Parent-group PN/injection behavior adapts mt76/mac80211.c,
 // Copyright (C) 2016 Felix Fietkau <nbd@nbd.name> (BSD-3-Clause-Clear).
 // Common protected-data replay uses the GPL2 Linux-derived implementation in
-// security.rs; its original copyright notices remain there and in THIRD_PARTY.
+// security.rs; its original copyright notices remain there and in NOTICE.
 //! One post-order replay decision for a complete MPDU.
 //! Source ownership, grouping and BA/reorder execution remain with the backend.
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // The power type follows pinned Linux include/net/cfg80211.h and
-// net/wireless/scan.c; full source notices in THIRD_PARTY.md.
+// net/wireless/scan.c; full source notices in NOTICE.
 //! Fresh held board and OS permission for finite6GHz SAE transport only.
 //! None of these observations authenticate SAE or permit an association.
 use super::{

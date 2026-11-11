@@ -1323,7 +1323,7 @@
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
     ],
-    "reason": "requires actual AX210 firmware and PNVM assets; see THIRD_PARTY.md"
+    "reason": "requires actual AX210 firmware and PNVM assets"
   },
   {
     "package": "stela-driver-net",
@@ -1333,7 +1333,7 @@
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
     ],
-    "reason": "requires pinned actual AX210 firmware; see THIRD_PARTY.md"
+    "reason": "requires pinned actual AX210 firmware"
   },
   {
     "package": "stela-driver-net",
@@ -1343,7 +1343,7 @@
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
     ],
-    "reason": "requires pinned actual AX200 firmware; see THIRD_PARTY.md"
+    "reason": "requires pinned actual AX200 firmware"
   },
   {
     "package": "stela-driver-net",
@@ -1363,7 +1363,7 @@
     "inputs": [
       "STELA_IWLWIFI_COMMAND_ORACLE"
     ],
-    "reason": "requires pinned unchanged Linux command helper oracle; see THIRD_PARTY.md"
+    "reason": "requires pinned unchanged Linux command helper oracle"
   },
   {
     "package": "stela-driver-net",
@@ -1374,7 +1374,7 @@
       "STELA_IWLWIFI_CONTEXT_ORACLE",
       "STELA_IWLWIFI_IMAGES"
     ],
-    "reason": "requires pinned Linux context trace and AX200 firmware; see THIRD_PARTY.md"
+    "reason": "requires pinned Linux context trace and AX200 firmware"
   },
   {
     "package": "stela-driver-net",
@@ -1385,7 +1385,7 @@
       "STELA_IWLWIFI_CONTEXT_V2_ORACLE",
       "STELA_IWLWIFI_IMAGES"
     ],
-    "reason": "requires pinned actual AX210 image and unchanged context-v2 oracle; see THIRD_PARTY.md"
+    "reason": "requires pinned actual AX210 image and unchanged context-v2 oracle"
   },
   {
     "package": "stela-driver-net",
@@ -1395,7 +1395,7 @@
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
     ],
-    "reason": "requires pinned actual Intel firmware; see THIRD_PARTY.md"
+    "reason": "requires pinned actual Intel firmware"
   },
   {
     "package": "stela-driver-net",
@@ -1405,7 +1405,7 @@
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
     ],
-    "reason": "requires pinned redistributable Intel firmware; see THIRD_PARTY.md"
+    "reason": "requires pinned redistributable Intel firmware"
   },
   {
     "package": "stela-driver-net",
@@ -1465,7 +1465,7 @@
     "inputs": [
       "STELA_IWLWIFI_STEP_ORACLE"
     ],
-    "reason": "requires pinned unchanged Linux STEP helper trace; see THIRD_PARTY.md"
+    "reason": "requires pinned unchanged Linux STEP helper trace"
   },
   {
     "package": "stela-driver-net",
@@ -1475,7 +1475,7 @@
     "inputs": [
       "STELA_IWLWIFI_UEFI_ORACLE"
     ],
-    "reason": "requires unchanged Linux UEFI helper trace; see THIRD_PARTY.md"
+    "reason": "requires unchanged Linux UEFI helper trace"
   },
   {
     "package": "stela-driver-net",
@@ -1486,7 +1486,7 @@
       "STELA_IWLWIFI_IMAGES",
       "STELA_IWLWIFI_PNVM_ORACLE"
     ],
-    "reason": "requires pinned PNVM asset and unchanged Linux selector trace; see THIRD_PARTY.md"
+    "reason": "requires pinned PNVM asset and unchanged Linux selector trace"
   },
   {
     "package": "stela-driver-net",
@@ -1496,7 +1496,7 @@
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
     ],
-    "reason": "requires pinned actual PNVM asset; see THIRD_PARTY.md"
+    "reason": "requires pinned actual PNVM asset"
   },
   {
     "package": "stela-driver-net",
@@ -1507,7 +1507,7 @@
       "STELA_IWLWIFI_IMAGES",
       "STELA_IWLWIFI_PNVM_DMA_ORACLE"
     ],
-    "reason": "requires actual PNVM and unchanged Linux payload/setter helper oracle; see THIRD_PARTY.md"
+    "reason": "requires actual PNVM and unchanged Linux payload/setter helper oracle"
   },
   {
     "package": "stela-driver-net",
@@ -1517,7 +1517,7 @@
     "inputs": [
       "STELA_IWLWIFI_POWER_ORACLE"
     ],
-    "reason": "requires unchanged pinned Linux power-helper trace; see THIRD_PARTY.md"
+    "reason": "requires unchanged pinned Linux power-helper trace"
   },
   {
     "package": "stela-driver-net",
@@ -1647,7 +1647,7 @@
     "inputs": [
       "STELA_IWLWIFI_IMAGES"
     ],
-    "reason": "requires pinned actual firmware; see THIRD_PARTY.md"
+    "reason": "requires pinned actual firmware"
   },
   {
     "package": "stela-driver-net",
@@ -1657,7 +1657,7 @@
     "inputs": [
       "STELA_IWLWIFI_RECEIVE_ORACLE"
     ],
-    "reason": "requires pinned unchanged donor struct layout trace; see THIRD_PARTY.md"
+    "reason": "requires pinned unchanged donor struct layout trace"
   },
   {
     "package": "stela-driver-net",
@@ -2769,7 +2769,7 @@
     "inputs": [
       "STELA_RTL815X_FIRMWARE"
     ],
-    "reason": "requires seven immutable linux-firmware fixtures; see THIRD_PARTY.md"
+    "reason": "requires seven immutable linux-firmware fixtures"
   },
   {
     "package": "stela-drivers",
@@ -2799,7 +2799,7 @@
     "inputs": [
       "STELA_RTL815X_FIRMWARE"
     ],
-    "reason": "requires pinned real RTL8153A firmware fixtures; see THIRD_PARTY.md"
+    "reason": "requires pinned real RTL8153A firmware fixtures"
   },
   {
     "package": "stela-drivers",
@@ -2889,7 +2889,7 @@
     "inputs": [
       "STELA_RTL815X_FIRMWARE"
     ],
-    "reason": "requires pinned real RTL8153/8156 firmware fixtures; see THIRD_PARTY.md"
+    "reason": "requires pinned real RTL8153/8156 firmware fixtures"
   },
   {
     "package": "stela-drivers",

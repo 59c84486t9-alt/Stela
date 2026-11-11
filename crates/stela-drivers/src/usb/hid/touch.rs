@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Pinned Linux hid-multitouch.c reference and primary wire contracts:
-// ../THIRD_PARTY.md. No vendor quirks or implicit contact releases are used.
+// NOTICE. No vendor quirks or implicit contact releases are used.
 //! Conservative, opt-in single-Finger hybrid report assembly.
 use super::{BlockError, Poll, ReportType, UsbInput, descriptor::*, events};
 use alloc::vec::Vec;

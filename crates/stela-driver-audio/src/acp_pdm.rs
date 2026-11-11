@@ -2,7 +2,7 @@
 //! Shared owned direct-PDM PCM, deadline and DMA lifecycle. Hardware profiles
 //! keep their own source admission and register facts. Adapted from
 //! AMD Linux yc (2021), renoir (2020) and ps (2022/2025), at
-//! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+//! a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //! Copyright (C) 2020, 2021, 2022, 2023, 2025 Advanced Micro Devices, Inc.
 use alloc::sync::Arc;
 use core::sync::atomic::{Ordering, fence};

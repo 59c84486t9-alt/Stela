@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Polled standard HD Audio transport and PCM DMA, adapted from Linux
 //! `sound/hda/core/{controller,stream,device}.c` at
-//! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
+//! a804c5742bff224d4cb4d25dd383554d598be32b. See NOTICE.
 //!
 //! This is the conventional HDA MMIO core. The `pci` module prepares a bounded
 //! conventional Intel/ATI/AMD subset. Intel DSP/firmware ownership, other vendor quirks, ACPI

@@ -4,7 +4,7 @@
 // Copyright (C) 2006 James Painter <jamie.painter@iname.com>
 // Copyright (C) 2002-2003 TiVo Inc.
 // Numeric MII fields: Copyright (C) 1996, 1999, 2001 David S. Miller;
-// GPL-2.0 WITH Linux-syscall-note, as recorded in THIRD_PARTY.md.
+// GPL-2.0 WITH Linux-syscall-note, as recorded in NOTICE.
 //! Pinned asix.h, asix_devices.c and standard MII encodings.
 pub(super) const SET_SW_MII: u8 = 0x06;
 pub(super) const READ_MII: u8 = 0x07;

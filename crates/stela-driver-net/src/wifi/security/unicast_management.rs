@@ -2,7 +2,7 @@
 // CCMP receive replay follows Linux net/mac80211/{rx,wpa}.c and mt76/mac80211.c.
 // Copyright 2002-2004 Instant802 Networks, Inc.; 2008 Jouni Malinen;
 // Copyright (C) 2016-2017 Intel Deutschland GmbH;
-// Copyright (C) 2020-2023 Intel Corporation. See THIRD_PARTY.md.
+// Copyright (C) 2020-2023 Intel Corporation. See NOTICE.
 //! Hardware-verified unicast robust-management CCMP/GCMP receive authentication.
 //! This is a selected-key crypto boundary, not PMF negotiation, software CCMP
 //! decryption or current-station delivery. Vendor status must come from

@@ -5,7 +5,7 @@
 // 2016-2017 Intel Deutschland GmbH; 2018-2026 Intel Corporation.
 // Header length: Copyright 2007-2009 Johannes Berg;
 // 2013-2014 Intel Mobile Communications GmbH; 2017 Intel Deutschland GmbH;
-// 2018-2023, 2025-2026 Intel Corporation. See THIRD_PARTY.md.
+// 2018-2023, 2025-2026 Intel Corporation. See NOTICE.
 //! Bounded normalized MPDUs and the pinned Linux header-length rules.
 
 use super::{Aggregation, RadioStatus, security::SecurityStatus};
