@@ -262,6 +262,16 @@ struct Inbox {
     /// compiles: it runs no guest code until it reads its mail again, so a
     /// broadcast need not wait for it, as for one that sleeps.
     outside: AtomicBool,
+    /// Odd while its machine acts on a fetched block: runs it natively
+    /// (with the translations its host and chained blocks keep) and
+    /// completes its exit, or takes the fetch's exception or checked
+    /// instruction. Even between, at its run loop's top, scheduling and
+    /// fetching, where it uses no translation it keeps beyond the fetch,
+    /// and enters again only through [`Hub::enter_active`], which sends it
+    /// back to read mail posted meanwhile. Only the PE writes it; each
+    /// change adds one, so a broadcast also sees an exit and entry it did
+    /// not catch.
+    active: AtomicU64,
     /// Stable native chaining allocation, kept even between PE owners.
     chain: Arc<chain_control::Storage>,
     /// Unique owner epoch; zero is free and u64::MAX is detaching.
@@ -505,6 +515,7 @@ impl Hub {
                     translating: AtomicU32::new(ANY_CONTEXT),
                     lower_globals: Arc::new(GlobalSpan::new()),
                     outside: AtomicBool::new(false),
+                    active: AtomicU64::new(0),
                     chain: chain_control::Storage::new(),
                     owner: AtomicU64::new(0),
                     parked: AtomicBool::new(false),
@@ -849,6 +860,16 @@ impl Hub {
     /// reading mail, or sleeps or is outside its run loop, from which it
     /// reads its mail before it runs again; the others stay in `posted`,
     /// interrupted.
+    ///
+    /// A PE between two fetched blocks ([`Inbox::active`] even) counts as
+    /// having applied it too: it holds no translation it will use before
+    /// its next [`Self::enter_active`], which finds the mail and sends it
+    /// back to read it first. The two cannot miss each other: the post
+    /// stores `pending` and then this loads `active`; the entry stores
+    /// `active` and then loads `pending`; all four are SeqCst, so in their
+    /// single order either this load sees the entry (and waits for the PE
+    /// to apply the mail or leave again) or the entry's load sees the post
+    /// (and the PE does not enter).
     pub(super) fn applied(&self, posted: &mut Vec<(usize, u64)>) -> bool {
         posted.retain(|&(pe, serial)| {
             let inbox = &self.inboxes[pe];
@@ -856,8 +877,39 @@ impl Hub {
                 && inbox.live.load(Ordering::Acquire)
                 && !inbox.sleeping.load(Ordering::SeqCst)
                 && !inbox.outside.load(Ordering::SeqCst)
+                && inbox.active.load(Ordering::SeqCst) & 1 != 0
         });
         posted.is_empty()
+    }
+
+    /// PE `pe` is about to act on the block it fetched ([`Inbox::active`]):
+    /// whether it may. Not when mail came since its last read: it then
+    /// stays between blocks, reads the mail and fetches again, as what it
+    /// fetched may have used a translation the mail removes. See
+    /// [`Self::applied`] for why no post can be missed.
+    pub(super) fn enter_active(&self, pe: usize) -> bool {
+        let inbox = &self.inboxes[pe];
+        let active = inbox.active.load(Ordering::Relaxed);
+        debug_assert!(active & 1 == 0, "entered twice");
+        inbox.active.store(active.wrapping_add(1), Ordering::SeqCst);
+        if inbox.pending.load(Ordering::SeqCst) {
+            inbox
+                .active
+                .store(active.wrapping_add(2), Ordering::Release);
+            return false;
+        }
+        true
+    }
+
+    /// PE `pe` is done with its fetched block and is between blocks again.
+    pub(super) fn leave_active(&self, pe: usize) {
+        let inbox = &self.inboxes[pe];
+        let active = inbox.active.load(Ordering::Relaxed);
+        if active & 1 != 0 {
+            inbox
+                .active
+                .store(active.wrapping_add(1), Ordering::Release);
+        }
     }
 
     fn pending(&self, pe: usize) -> bool {

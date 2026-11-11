@@ -190,7 +190,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let fetching = self.timing_start();
         let fetched = self.fetch_block(pc, single);
         self.timing_charge(step_timing::Phase::Fetch, fetching);
-        let index = match fetched? {
+        let fetched = fetched?;
+        // Between blocks a broadcast does not wait for this PE
+        // (`Hub::applied`): mail that came meanwhile is read first, and the
+        // block fetched again.
+        let Some(hub) = self.parallel.clone() else {
+            return self.act_on(fetched, pc, single, pacm);
+        };
+        if !hub.enter_active(self.current) {
+            return Ok(());
+        }
+        let step = self.act_on(fetched, pc, single, pacm);
+        hub.leave_active(self.current);
+        step
+    }
+
+    /// Run the block a fetch found, or take its exception or checked
+    /// instruction.
+    fn act_on(&mut self, fetched: Fetched, pc: u64, single: bool, pacm: bool) -> Step {
+        let index = match fetched {
             Fetched::Block(index) => index,
             Fetched::Exception(exception) => {
                 self.cpu.step_advance = false;

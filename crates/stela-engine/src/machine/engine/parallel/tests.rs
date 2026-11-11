@@ -15,6 +15,11 @@ fn hub(pes: usize) -> (Arc<Hub>, Arc<AtomicUsize>) {
     for pe in 0..pes {
         hub.set_live(pe, true);
     }
+    // Every PE but the first, which a test's machine may be, runs a block
+    // (`Hub::enter_active`): a broadcast waits for it.
+    for pe in 1..pes {
+        assert!(hub.enter_active(pe));
+    }
     (hub, kicks)
 }
 
@@ -626,10 +631,13 @@ fn maintenance_waits_for_the_dsb_and_reaches_a_pe_in_one_piece_of_mail() {
 fn a_broadcast_passes_by_a_pe_outside_its_run() {
     let (hub, _) = hub(2);
     let mut machine = first_of_two(&[], &hub);
+    // PE 0 runs a block.
+    assert!(hub.enter_active(0));
     let posted = hub.broadcast(1, &[Maintenance::Code(None)]);
     assert!(!hub.applied(&mut posted.clone()));
     machine.outside_run(|_| assert!(hub.applied(&mut posted.clone())));
     assert!(!hub.applied(&mut posted.clone()));
+    hub.leave_active(0);
 }
 
 #[test]
@@ -2582,4 +2590,143 @@ fn home_reuses_its_lines_deadline_until_another_pe_reaches_the_devices() {
     assert_eq!(advances(&machine), before);
     assert_eq!(machine.next_deadline(60), None);
     assert_eq!(advances(&machine), before + 1);
+}
+
+/// Quiescent maintenance: the post-then-entry order. Mail posted while a
+/// PE is between blocks counts as applied at once, and the PE's next entry
+/// finds it and does not enter until it has read it.
+#[test]
+fn mail_posted_between_blocks_is_applied_at_once_and_blocks_the_next_entry() {
+    let (hub, _) = hub(2);
+    hub.leave_active(1);
+    let mut posted = hub.broadcast(0, &[Maintenance::Code(None)]);
+    assert_eq!(posted.len(), 1, "reached and interrupted");
+    assert!(
+        hub.applied(&mut posted),
+        "a PE between blocks is not waited for"
+    );
+    assert!(!hub.enter_active(1), "the entry finds the mail");
+    assert_eq!(hub.inboxes[1].active.load(Ordering::SeqCst) & 1, 0);
+    let mail = hub.take(1).unwrap();
+    hub.acknowledge(1, mail.serial);
+    assert!(hub.enter_active(1), "read, it enters");
+}
+
+/// The entry-then-post order: a PE running a block is waited for until it
+/// applies the mail or leaves the block, whichever is first.
+#[test]
+fn mail_posted_while_a_pe_runs_a_block_waits_for_it_to_apply_or_leave() {
+    let (hub, _) = hub(3);
+    let mut posted = hub.broadcast(0, &[Maintenance::Code(None)]);
+    assert_eq!(posted.len(), 2);
+    assert!(!hub.applied(&mut posted));
+    // PE 1 applies it while it runs; PE 2 leaves its block without it.
+    let mail = hub.take(1).unwrap();
+    hub.acknowledge(1, mail.serial);
+    assert!(!hub.applied(&mut posted));
+    assert_eq!(posted, [(2, 1)]);
+    hub.leave_active(2);
+    assert!(hub.applied(&mut posted));
+    // Left without reading it, PE 2 reads it before its next block.
+    assert!(!hub.enter_active(2));
+    let mail = hub.take(2).unwrap();
+    hub.acknowledge(2, mail.serial);
+    assert!(hub.enter_active(2));
+}
+
+/// A broadcast's DSB does not wait for a PE between blocks, however long
+/// it stays there (fetching, compiling, scheduling): the wait takes no
+/// turn at all, and the mail stays for the PE's next entry.
+#[test]
+fn a_completion_does_not_wait_for_a_pe_between_blocks() {
+    let (hub, _) = hub(2);
+    hub.leave_active(1);
+    let mut machine = first_of_two(&[], &hub);
+    machine.post(Maintenance::Code(Some(0x4000)));
+    machine.send_outgoing();
+    machine.complete_maintenance().unwrap();
+    assert_eq!(machine.host.relaxes, 0, "no turn of the wait");
+    assert!(machine.posted.is_empty());
+    assert!(hub.pending(1));
+    assert!(!hub.enter_active(1));
+}
+
+/// A machine that mail reached after its fetch does not run what it
+/// fetched: it reads the mail first and fetches again, so it never runs
+/// a block the mail retired.
+#[test]
+fn a_machine_reads_mail_that_came_after_its_fetch_before_it_runs_the_block() {
+    use super::super::tests::BASE;
+    use stela_compiler::block::ExitKind;
+    let (hub, _) = hub(2);
+    // NOP; NOP.
+    let mut machine = first_of_two(&[0xd503_201f, 0xd503_201f], &hub);
+    let exit = |next_pc| super::super::NativeExit::Exit {
+        next_pc,
+        kind: ExitKind::Direct as u64,
+    };
+    // The block runs once and comes back to itself: it stays installed.
+    machine.host.exits = vec![exit(BASE), exit(BASE + 8)];
+    machine.step().unwrap();
+    assert_eq!(machine.cpu.pc, BASE);
+    // PE 1 discards every block while PE 0 is between blocks; PE 0's next
+    // fetch still finds the old block.
+    let mut posted = hub.broadcast(1, &[Maintenance::Code(None)]);
+    let posted_serial = posted[0].1;
+    assert!(hub.applied(&mut posted));
+    machine.step().unwrap();
+    assert_eq!(machine.cpu.pc, BASE, "nothing ran");
+    assert_eq!(machine.host.exits.len(), 1);
+    assert_eq!(hub.inboxes[0].active.load(Ordering::SeqCst) & 1, 0);
+    // Its schedule reads the mail, and the next step runs a fresh block.
+    machine.read_mail().unwrap();
+    assert!(!hub.pending(0));
+    assert_eq!(hub.inboxes[0].applied.load(Ordering::SeqCst), posted_serial);
+    machine.step().unwrap();
+    assert_eq!(machine.cpu.pc, BASE + 8);
+    assert!(machine.host.exits.is_empty());
+    assert_eq!(hub.inboxes[0].active.load(Ordering::SeqCst) & 1, 0);
+}
+
+/// Racing posts against a PE that enters and leaves blocks: whenever the
+/// broadcaster has counted a post as applied, the PE, inside any block it
+/// runs, has applied it. Bounded by counts, not by time.
+#[test]
+fn a_pe_inside_a_block_has_applied_every_post_counted_as_applied() {
+    const POSTS: u64 = 5_000;
+    let (hub, _) = hub(2);
+    hub.leave_active(1);
+    let required = AtomicU64::new(0);
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut applied = 0;
+            let mut entries = 0u64;
+            while !done.load(Ordering::SeqCst) {
+                if let Some(mail) = hub.take(1) {
+                    applied = mail.serial;
+                    hub.acknowledge(1, mail.serial);
+                    continue;
+                }
+                if hub.enter_active(1) {
+                    entries += 1;
+                    assert!(required.load(Ordering::SeqCst) <= applied);
+                    for _ in 0..(entries % 16) {
+                        core::hint::spin_loop();
+                    }
+                    assert!(required.load(Ordering::SeqCst) <= applied);
+                    hub.leave_active(1);
+                }
+            }
+        });
+        for page in 1..=POSTS {
+            let mut posted = hub.broadcast(0, &[Maintenance::Code(Some(page << 14))]);
+            let serial = posted[0].1;
+            while !hub.applied(&mut posted) {
+                std::thread::yield_now();
+            }
+            required.store(serial, Ordering::SeqCst);
+        }
+        done.store(true, Ordering::SeqCst);
+    });
 }
