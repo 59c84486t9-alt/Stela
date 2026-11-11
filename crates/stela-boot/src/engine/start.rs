@@ -360,7 +360,7 @@ fn open_host(
         acpi: host_acpi,
         mmio: native_mmio,
         remappers,
-        _work: kernel_work,
+        work: kernel_work,
     } = start_platform(handoff, &mut host_owner, options);
     // The signing service is asked only during an install, so a boot that
     // installs nothing leaves the adapter to the guest. An install without a
@@ -404,7 +404,10 @@ fn open_host(
         host_acpi,
         &native_mmio,
         remappers,
-        kernel_work,
+        kernel_work
+            .as_ref()
+            .copied()
+            .map_err(alloc::string::String::as_str),
     );
     remappers.report_faults();
     // An install without staged signing answers cannot finish without
@@ -1311,8 +1314,9 @@ fn open_gpus(
     };
     let Some(mmio) = mmio else { return false };
     if let Err(error) = work.service_clock().and_then(|clock| clock.epoch()) {
-        crate::status::warn(&format!(
-            "the GPU requires an owned continuous HPET clock: {error:?}"
+        crate::status::warn(&stela_boot_core::work_status::gpu_without_clock(
+            crate::cpu::INVARIANT_TSC.present(),
+            &format!("{error:?}"),
         ));
         return false;
     }
@@ -2230,7 +2234,8 @@ struct Platform {
     remappers: &'static remapping::Remappers,
     /// Affine runtime/source remain held through paused/quarantined frames.
     /// Its producer services require their own complete admission graph.
-    _work: Option<&'static kernel_work::KernelWork>,
+    /// Without it, the screen's reason why.
+    work: core::result::Result<&'static kernel_work::KernelWork, alloc::string::String>,
 }
 
 /// # Safety
@@ -2496,11 +2501,13 @@ fn start_platform(
             output::arguments(format_args!(
                 "NATIVE WORK owned stacks=32 foreground=verified services=unpublished\n"
             ));
-            Some(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(work)))
+            Ok(&*alloc::boxed::Box::leak(alloc::boxed::Box::new(work)))
         }
+        // The record keeps this line until the USB log opens again, which
+        // the devices' start on the boot stack (`start_devices`) reaches.
         Err(error) => {
             output::arguments(format_args!("NATIVE WORK unavailable: {error}\n"));
-            None
+            Err(error.reason())
         }
     };
     let host_acpi = aml::HostAcpi::start(
@@ -2514,7 +2521,7 @@ fn start_platform(
         native_mmio,
         handoff.tsc_hz,
         prepared_sci,
-        work,
+        work.as_ref().ok().copied(),
     );
     crate::native_idle::install(
         host_acpi.and_then(|acpi| acpi.processor_idle(crate::native_idle::capabilities())),
@@ -2523,7 +2530,7 @@ fn start_platform(
         acpi: host_acpi,
         mmio: native_mmio,
         remappers: alloc::boxed::Box::leak(alloc::boxed::Box::new(remappers)),
-        _work: work,
+        work,
     }
 }
 
@@ -2579,6 +2586,23 @@ fn wifi_network(
     })
 }
 
+/// The whole disk and USB start's bound, which only a stall outside every
+/// PCI function's own budget reaches.
+const DEVICES_START_US: u64 = 300_000_000;
+
+/// The fail line for a disk and USB start the owned call did not complete.
+fn devices_failed(error: &kernel_work::Error) -> alloc::string::String {
+    let timed_out = matches!(
+        error,
+        kernel_work::Error::Work(stela_drivers::platform::work::WorkError::TimedOut)
+    );
+    stela_boot_core::work_status::devices_failed(
+        timed_out,
+        DEVICES_START_US / 1_000_000,
+        &error.to_string(),
+    )
+}
+
 /// What the host devices are opened for.
 struct Wanted<'a> {
     firmware: Option<alloc::sync::Arc<stela_drivers::firmware::Catalog>>,
@@ -2614,7 +2638,7 @@ fn start_devices(
     host_acpi: Option<&'static aml::HostAcpi>,
     native_mmio: &Option<&'static crate::native_mmio::Source>,
     remappers: &'static remapping::Remappers,
-    kernel_work: Option<&'static kernel_work::KernelWork>,
+    kernel_work: core::result::Result<&'static kernel_work::KernelWork, &str>,
 ) -> HostDevices {
     let &Wanted {
         firmware: ref host_firmware,
@@ -2653,7 +2677,7 @@ fn start_devices(
             let mut storage_handoff = handoff
                 .storage
                 .handoff()
-                .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+                .unwrap_or_else(|| output::fatal(stela_boot_core::work_status::NO_DEVICE_ACCESS));
             storage_handoff.firmware = host_firmware.clone();
             // Disks that can signal their completions wake the BSP, which
             // runs the engine's devices.
@@ -2664,6 +2688,12 @@ fn start_devices(
             if options.audio_check.is_some() {
                 // The audio check keeps the final slice even after shutdown.
                 storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
+            }
+            if let Err(reason) = kernel_work {
+                output::arguments(format_args!(
+                    "NATIVE WORK degraded: devices start on the boot stack, without ACPI methods or a GPU\n"
+                ));
+                crate::status::info(&stela_boot_core::work_status::foreground(reason));
             }
             crate::status::begin("Starting the PC's disks and USB devices");
             // Every admitted input is owned or a boot owner.
@@ -2686,20 +2716,20 @@ fn start_devices(
             let log_partition = handoff.log_partition.map(Guid);
             let usb4_approved = options.usb4_approved.clone();
             let boot_disk = handoff.boot_disk().map(alloc::string::String::from);
-            let work = kernel_work
-                .unwrap_or_else(|| output::fatal("native probe requires an owned continuation"));
             // Each PCI function's start has its own budget
             // (`stela_drivers::probe::DEVICE_START_US`) and is given up past
             // it; this whole bound only catches a stall outside every
             // function's start, so it leaves room for several given up.
-            let opened = work.call_owned(300_000_000, move || {
+            let open = move || {
                 let native = mmio.map(|mmio| {
                     services::Services::new(mmio, remappers, host_acpi, heap, tsc_hz, usb4_approved)
                 });
                 let targets: Vec<_> = owned_targets.iter().collect();
                 // SAFETY: one admitted foreground task under the work
-                // dispatcher's loader-root/driver guard. Owned handoff, inputs
-                // and kept services survive completion or quarantine.
+                // dispatcher's loader-root/driver guard, or the boot stack
+                // under the same guard when no owned stack exists. Owned
+                // handoff, inputs and kept services survive completion or
+                // quarantine.
                 unsafe {
                     storage::open(
                         &storage_handoff,
@@ -2722,7 +2752,23 @@ fn start_devices(
                         },
                     )
                 }
-            });
+            };
+            let opened = match kernel_work {
+                Ok(work) => work
+                    .call_owned(DEVICES_START_US, open)
+                    .map_err(|error| devices_failed(&error)),
+                // Without owned stacks the start runs here, on the boot
+                // stack, under the same host-driver guard the owned call
+                // takes. Each function keeps its own start budget, whose
+                // waits are the drivers' own; only the whole bound, which
+                // needs a continuation to leave, is not there.
+                Err(_) => {
+                    // SAFETY: the loader's live root on the BSP, with no
+                    // driver guard held; nothing else runs the drivers.
+                    let _root = unsafe { storage::RestoreRoot::enter(root) };
+                    Ok(open())
+                }
+            };
             let storage::Opened {
                 services,
                 medium,
@@ -2739,9 +2785,7 @@ fn start_devices(
                 disks,
                 power,
             } = opened
-                .unwrap_or_else(|error| {
-                    Err(refuse!("native probe admission failed: {error}", %error))
-                })
+                .unwrap_or_else(|error| output::fatal(error))
                 .unwrap_or_else(|error| {
                     output::arguments(format_args!("host storage refusal: {error}\n"));
                     output::fatal(format_args!("host storage could not be opened: {error}"))
@@ -2772,7 +2816,13 @@ fn start_devices(
             if let Some(log) = log {
                 crate::log_file::resume(log);
             }
+            let work = kernel_work.inspect_err(|reason| {
+                if options.boots_macos() {
+                    crate::status::warn(&stela_boot_core::work_status::gpu_without_work(reason));
+                }
+            });
             if options.boots_macos()
+                && let Ok(work) = work
                 && open_gpus(work, mmio, remappers, handoff, host_firmware, gpus)
             {
                 gpu::serve(handoff.screen.map_or((0, 0), |screen| screen.resolution()));

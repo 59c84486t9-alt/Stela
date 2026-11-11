@@ -77,6 +77,27 @@ impl core::fmt::Display for Error {
         }
     }
 }
+impl Error {
+    /// The screen's reason for this refusal, with its log detail.
+    pub(crate) fn reason(&self) -> alloc::string::String {
+        use stela_boot_core::work_status::{Cause, reason};
+        let cause = match self {
+            Self::Inventory
+            | Self::Geometry
+            | Self::AlreadyOwned
+            | Self::NoKernelStacks
+            | Self::Pages(_) => Cause::Records,
+            Self::WrongCpu => Cause::Processor,
+            Self::Clock => Cause::Clock,
+            Self::Allocation => Cause::Memory,
+            Self::Mapping(_) => Cause::Mapping,
+            Self::Cache(_) => Cause::Cache,
+            Self::Image(_) => Cause::Code,
+            Self::Work(_) | Self::Qualification => Cause::Continuation,
+        };
+        reason(cause, &alloc::format!("{self}"))
+    }
+}
 struct Reservation {
     identity: Arc<RootIdentity>,
     _wire: &'static native_mmio::Wire,

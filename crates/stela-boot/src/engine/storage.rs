@@ -987,9 +987,10 @@ pub struct Selection<'a> {
 /// # Safety
 /// The handoff describes this running machine, only this service uses its
 /// reserved DMA pages, `root` is the loader's root, and it and the window
-/// remain live for the boot. The owned work dispatcher already holds
-/// its RestoreRoot/host-driver guard and this is a real admitted continuation;
-/// acquiring that non-reentrant guard again is forbidden.
+/// remain live for the boot. The caller already holds the
+/// RestoreRoot/host-driver guard: the owned work dispatcher in a real admitted
+/// continuation, or the boot processor on its own stack when no owned stack
+/// exists; acquiring that non-reentrant guard again is forbidden.
 pub unsafe fn open(
     handoff: &Handoff,
     captures: PlatformCaptures,
