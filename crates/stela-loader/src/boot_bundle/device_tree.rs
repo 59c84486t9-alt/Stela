@@ -45,8 +45,8 @@ pub(super) struct CpuIdentity {
 }
 
 /// Original 26A434 ADTs encode cluster-type as E/P/M plus NUL, reg as u32
-/// and state as running/waiting plus NUL. See the pinned source matrix in
-/// iboot-handoff.md. These are source identities, not inferred CPU ordinals.
+/// and state as running/waiting plus NUL. These are source identities, not
+/// inferred CPU ordinals.
 pub(super) fn cpu_identities(tree: &DeviceTree) -> Result<Vec<CpuIdentity>> {
     let cpus = tree
         .node("/cpus")
@@ -169,7 +169,7 @@ pub(super) fn select_boot_cpu(
 /// original iBoot publishes running at 26A434 J314s 0x3abd4..0x3abf8. The
 /// first CPU is required by the kernel's own CPU numbering: 26A434 T8112 PMGR
 /// indexes its per-core register table by the topology's (cluster, core) and
-/// panics for an E-core once a P-core boots first (docs/research/cpu-topology.md).
+/// panics for an E-core once a P-core boots first.
 pub(super) fn mark_boot_cpu(tree: &mut DeviceTree, selected: &BootCpu) -> Result<()> {
     let cpus = cpu_identities(tree)?;
     require!(
@@ -306,11 +306,7 @@ pub(super) fn shape_device_tree(
             .into(),
     );
     unresolved.push("preoslog: iBoot log region omitted".into());
-    unresolved.push(
-        "other rows iBoot writes stay as the template ships them or absent \
-         (docs/research/iboot-handoff.md lists each with its reason)"
-            .into(),
-    );
+    unresolved.push("other rows iBoot writes stay as the template ships them or absent".into());
     Ok(unresolved)
 }
 

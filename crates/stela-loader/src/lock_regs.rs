@@ -11,8 +11,7 @@
 //! the others stay empty, as it leaves them.
 //!
 //! Every SoC's map comes from its own iBoot's `harr` builder, run over the
-//! decoded image ([`FAMILIES`]; builders, emulation and checks in
-//! docs/research/iboot-handoff.md, "Memory-controller lock registers"). The
+//! decoded image ([`FAMILIES`]). The
 //! M4 and later fill all four AMCC groups, CTRR-B to D with zero limits. The
 //! publisher writes only into the nodes the template carries, so a group or
 //! controller it describes without one (IOA-B and later everywhere, the whole
@@ -403,8 +402,7 @@ pub struct Family {
     pub ioa: Option<MemoryController>,
 }
 
-/// Every SoC's description, as its iBoot's `harr` builder makes it
-/// (docs/research/iboot-handoff.md, "Memory-controller lock registers").
+/// Every SoC's description, as its iBoot's `harr` builder makes it.
 #[rustfmt::skip]
 pub const FAMILIES: [Family; 20] = [
     Family { chips: &[0x8103], amcc: m1_amcc(&[0x2_0000_0000], 0x10_4000), ioa: None },

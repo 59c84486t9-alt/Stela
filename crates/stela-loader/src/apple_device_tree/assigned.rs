@@ -181,7 +181,7 @@ fn check_range(node: &Node, name: &str, base: u64, size: u64) -> Result<()> {
     Ok(())
 }
 /// T8112's original normal-mode MPIDR/CPU association contract supplies these
-/// coordinates from raw reg (apple-socs.md, original J473 CPU power ownership).
+/// coordinates from raw reg (original J473 CPU power ownership).
 /// The original templates omit the three fields; never add them to the ADT.
 fn t8112_coordinates(node: &Node, soc: u32) -> Result<Option<[u32; 3]>> {
     if soc != 0x8112 {

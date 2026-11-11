@@ -4,7 +4,7 @@
 //! appends 24-byte records at `0xf830c`, and migrates its 16 KiB buffer to
 //! carveout 55 at `0xf83a4`. A record holds a counter, native callsite,
 //! four-character tag and argument. The header's last word is the counter
-//! frequency. See `docs/research/installer-warnings.md#boot-stage-trace`.
+//! frequency.
 use crate::Result;
 use crate::{apple_device_tree::DeviceTree, carveouts::MEMORY_MAP};
 use alloc::{vec, vec::Vec};

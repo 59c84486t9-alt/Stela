@@ -23,8 +23,7 @@
 //! the J473 iBoot names the image and the BaseSystem trust cache by path
 //! (`base-system-path`, `bs-tc-path`).
 //!
-//! The boot is iBoot's route B for recoveryOS
-//! (docs/research/iboot-handoff.md, rows 14 and 17): the first root is the
+//! The boot is iBoot's route B for recoveryOS: the first root is the
 //! on-disk Recovery volume, named in `/chosen` (`associated-volume-group`
 //! and `boot-uuid` for the paired copy, `boot-uuid` alone for System
 //! Recovery, and `boot-objects-path`), with no `rd=`, and XNU's imageboot

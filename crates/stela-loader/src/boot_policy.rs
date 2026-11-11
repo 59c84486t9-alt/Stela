@@ -6,8 +6,7 @@
 //! `/chosen/manifest-properties`, and records the SEP load decision. With
 //! them go the chip's fused state (`certificate-*`, `chip-epoch`, the unit
 //! flags) and the rows iBoot derives from the LocalPolicy
-//! (`kernel-ctrr-to-be-enabled`, `/product allow-hactivation`); the full
-//! contract is `docs/research/iboot-handoff.md`. The names
+//! (`kernel-ctrr-to-be-enabled`, `/product allow-hactivation`). The names
 //! are those SPTM, TXM and the kernel read (their own strings); LocalPolicy
 //! fields and types follow Apple Platform Security, "Contents of a LocalPolicy
 //! file for a Mac with Apple silicon". Integers are 8 bytes, as m1n1 writes

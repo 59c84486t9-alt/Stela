@@ -2,8 +2,7 @@
 //! ([`crate::boot_policy`]) nor root selection ([`crate::root_selection`]):
 //! the values iBoot's DeviceTree finalizer (26A434 J473 iBoot 0x22fb0, with
 //! its CPU and `arm-io` pass 0x39600) derives from the template itself, and
-//! the explicit list of rows Stela cannot yet produce. The whole contract,
-//! row by row, is `docs/research/iboot-handoff.md`.
+//! the explicit list of rows Stela cannot yet produce.
 use crate::Result;
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec, vec::Vec};

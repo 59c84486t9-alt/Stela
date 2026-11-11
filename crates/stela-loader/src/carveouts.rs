@@ -6,9 +6,8 @@
 //! `iommu_bootstrap_register_io_range` refuses a managed page, an unaligned
 //! or empty range, or one of 64K pages or more.
 //!
-//! The tables come from the original 26A434 iBoot of every board
-//! (`docs/research/iboot-handoff.md#carveout-tables` gives each board's table
-//! offset, record count and hash). Each iBoot names its table once, in a
+//! The tables come from the original 26A434 iBoot of every board. Each
+//! iBoot names its table once, in a
 //! descriptor that returns its bounds and record count (J473 file offset
 //! 0x3b22c, J314s 0x3c7e8), and the region lookup the sgx setup calls compares
 //! the region ID at +0x18 at the table's stride. Records are 64 bytes, 40 on
@@ -35,7 +34,7 @@
 //! `gPanicBase` (0xfffffe000ca640b0) and `panic_info` (0xfffffe000ca640b8),
 //! and `debug_log_init` puts the panic log 0x331 bytes in, past the panic
 //! header. Without them `panic_info` stays NULL and the panic path faults
-//! writing the header (`docs/research/iboot-handoff.md#panic-region`).
+//! writing the header.
 //!
 //! The GPU's UAT regions come from four of them. iBoot's sgx setup (26A434
 //! iBoot `0xd9328`) looks up regions 8, 0x34, 0xd9 and 0x38 and writes their

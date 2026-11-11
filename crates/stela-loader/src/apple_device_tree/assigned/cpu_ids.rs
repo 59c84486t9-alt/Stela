@@ -13,7 +13,6 @@ pub enum CpuIdRecipe<'a> {
     Preserve,
     /// Original AppleARMCPU indexes max_cpus by cpu-id; the watchdog selects
     /// a 16-byte record by that ID after translating reg to a logical PE.
-    /// See iboot-handoff.md for the independently pinned original consumers.
     /// Each CPU's `function-enable_core` mask is its kernel CPU number's bit
     /// (`ApplePMGR::enableCPUCores` tests the core entry's CPU number, 26B123
     /// mac14j 0xfffffe0009b7037c), so it moves with the projected ID.

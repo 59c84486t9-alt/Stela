@@ -107,7 +107,7 @@ const NO_PMU: &str = "no-pmu";
 const IGNORE: &str = "AAPL,ignore";
 /// Consumers that use these physical classes as service advertisements even
 /// after `compatible` is removed: raw DeviceTree readers of the display
-/// classes (`installer-warnings.md#display-service-admission`), and the
+/// classes, and the
 /// `IONameMatch` of `AppleThunderboltHALType5` and the
 /// `AppleATCDP*Port` drivers, which match the type alone. Only audited class
 /// identities are retired; unknown `device_type` metadata stays intact.

@@ -8,8 +8,7 @@
 //! kernels: the monitors and the kernel collection are split by segment and
 //! placed in the order SPTM requires, and execution starts at SPTM's entry
 //! with x0 holding the `boot_args` address. `boot_args` values follow m1n1
-//! `_write_boot_args`. The format is specified in
-//! `docs/design/runtime.md#kernel-boot-bundle`.
+//! `_write_boot_args`. The format is `stela_formats::boot_bundle`'s.
 use crate::Result;
 use crate::aic;
 use crate::apple_device_tree::DeviceTree;
