@@ -63,10 +63,10 @@ fn a_16_gib_host_takes_a_sixteenth_for_its_window_and_raises_the_heap_floor() {
     assert!(sizes.guest > 10 * GIB);
 }
 
-/// The test VM (12 GiB, `HOST MEMORY free=11514M`) takes a 704 MiB window,
+/// A 12 GiB host with 8 cores (11514 MiB free) takes a 704 MiB window,
 /// 192 MiB more than 64 MiB per runner gave, and as much more heap.
 #[test]
-fn the_test_vm_takes_a_larger_window_and_heap_from_its_guest() {
+fn a_12_gib_8_core_host_takes_a_larger_window_and_heap_from_its_guest() {
     let sizes = sizes(11514 * MIB, 8, 8).unwrap();
     assert_eq!(
         [sizes.heap, sizes.code.bytes, sizes.pool, sizes.guest].map(|b| b / MIB),
