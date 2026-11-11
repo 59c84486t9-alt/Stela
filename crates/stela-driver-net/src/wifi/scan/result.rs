@@ -366,7 +366,7 @@ mod tests {
             }
         }
         // Fresh unchanged full cfg80211 selector + HE size/offset helpers,
-        // 16,384 cases under ASan/UBSan; receipt under .stela/oracle/scan6-channel.
+        // 16,384 cases under ASan/UBSan.
         assert_eq!(
             <[u8; 32]>::from(hash.finalize()),
             [
