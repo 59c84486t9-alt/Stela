@@ -93,7 +93,7 @@ impl UsbIdentity {
             revision: u16::from_le_bytes([p[12], p[13]]),
         }
     }
-    pub(super) fn candidate(self) -> bool {
+    pub(crate) fn candidate(self) -> bool {
         self.vendor == 0x0e8d || CANDIDATES.contains(&(self.vendor, self.product))
     }
     /// Every explicit btusb MediaTek entry Stela admits carries

@@ -168,6 +168,51 @@ pub(super) fn wifi_note(host: &dyn super::host::Host) -> Result<Option<String>> 
     Ok(Some(NO_WIFI_FILES.into()))
 }
 
+/// A note for each of this computer's Bluetooth controllers. Setup adds no
+/// Bluetooth firmware itself: every vendor setup chooses its files by
+/// registers only a boot of the PC reads, whose log then names them for
+/// `repair`, the command that adds them.
+pub(super) fn bluetooth_notes(host: &dyn super::host::Host, repair: &str) -> Result<Vec<String>> {
+    Ok(describe_bluetooth(&host.bluetooth_controllers()?, repair))
+}
+
+/// What [`bluetooth_notes`] says for `controllers`.
+fn describe_bluetooth(controllers: &[super::host::UsbBluetooth], repair: &str) -> Vec<String> {
+    use stela_drivers::usb::bluetooth::Setup;
+    let mut notes = Vec::new();
+    for controller in controllers {
+        let ids = format!("USB {:04x}:{:04x}", controller.vendor, controller.product);
+        let setup = Setup::of(
+            controller.vendor,
+            controller.product,
+            controller.vendor_interface,
+        );
+        notes.push(match setup {
+            // Recipes pin images for these setups' drivers only
+            // (`recipes::MEDIATEK_BLUETOOTH`, `recipes::INTEL_RSA`).
+            Some(setup @ (Setup::MediaTek | Setup::Intel)) => format!(
+                "this computer's Bluetooth controller ({}, {ids}) loads firmware that its \
+                 registers choose, so the USB has none yet: boot the PC from the USB once, \
+                 then run {repair} on a computer with internet, which adds the file the boot \
+                 asked for when Stela has a pinned source for it",
+                setup.name()
+            ),
+            Some(setup) => format!(
+                "this computer's Bluetooth controller ({}, {ids}) needs firmware Stela has no \
+                 pinned source for, so it stays off",
+                setup.name()
+            ),
+            // A vendor-class interface no setup takes is no HCI.
+            None if controller.vendor_interface => continue,
+            None => format!(
+                "this computer's Bluetooth controller ({ids}) is not one Stela has a setup for, \
+                 so it stays off"
+            ),
+        });
+    }
+    notes
+}
+
 /// What [`wifi_note`] says.
 const NO_WIFI_FILES: &str = "this computer has no Wi-Fi adapter whose firmware setup \
     can add (Intel AX200 to BE200, Realtek RTL8822C, MediaTek MT7921, MT7922 or MT7925), \
@@ -462,6 +507,45 @@ fn publish_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn each_bluetooth_controller_is_named_with_what_a_boot_and_repair_do() {
+        use super::super::host::UsbBluetooth;
+        let controller = |vendor, product, vendor_interface| UsbBluetooth {
+            vendor,
+            product,
+            vendor_interface,
+        };
+        let notes = describe_bluetooth(
+            &[
+                controller(0x13d3, 0x3602, false),
+                controller(0x0bda, 0x8771, false),
+                controller(0x0a12, 0x0001, false),
+                // A vendor-class interface no setup takes is no controller.
+                controller(0x0bda, 0x8153, true),
+            ],
+            "`stela setup repair --usb E:`",
+        );
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(
+            notes[0].starts_with("this computer's Bluetooth controller (MediaTek, USB 13d3:3602)")
+                && notes[0].contains(
+                    "boot the PC from the USB once, then run `stela setup repair --usb E:`"
+                ),
+            "{}",
+            notes[0]
+        );
+        assert!(
+            notes[1].contains("(Realtek, USB 0bda:8771) needs firmware Stela has no pinned source"),
+            "{}",
+            notes[1]
+        );
+        assert!(
+            notes[2].contains("(USB 0a12:0001) is not one Stela has a setup for"),
+            "{}",
+            notes[2]
+        );
+    }
+
     #[test]
     fn cache_reuse_rechecks_exact_length_hash_and_symlink_identity() {
         let dir = tempfile::tempdir().unwrap();

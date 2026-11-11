@@ -6,7 +6,7 @@
 //! Windows requires, and a USB is erased by writing setup's own layout to
 //! its whole disk, with its volumes locked and dismounted.
 use super::{
-    Bus, Cpu, Disk, DiskFacts, FileSystem, Host, Partition, PartitionInfo, Volume,
+    Bus, Cpu, Disk, DiskFacts, FileSystem, Host, Partition, PartitionInfo, UsbBluetooth, Volume,
     drive_names::{self, disk_number, partition_number, pci_device},
 };
 use anyhow::{Context, Result, ensure};
@@ -26,8 +26,9 @@ use std::{
 use windows_sys::{
     Win32::{
         Devices::DeviceAndDriverInstallation::{
-            DIGCF_PRESENT, SP_DEVINFO_DATA, SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo,
-            SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
+            DIGCF_PRESENT, SP_DEVINFO_DATA, SPDRP_COMPATIBLEIDS, SetupDiDestroyDeviceInfoList,
+            SetupDiEnumDeviceInfo, SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW,
+            SetupDiGetDeviceRegistryPropertyW,
         },
         Foundation::{
             ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA, ERROR_NO_MORE_FILES, GENERIC_READ,
@@ -550,6 +551,15 @@ impl System {
 /// The vendor and device IDs of the present PCI devices of setup class
 /// `class`, which `what` names in an error.
 fn pci_devices(class: &GUID, what: &str) -> Result<Vec<(u16, u16)>> {
+    Ok(class_devices(class, what)?
+        .iter()
+        .filter_map(|(instance, _)| pci_device(instance))
+        .collect())
+}
+
+/// The instance and compatible IDs of the present devices of setup class
+/// `class`, which `what` names in an error.
+fn class_devices(class: &GUID, what: &str) -> Result<Vec<(String, Vec<String>)>> {
     // SAFETY: `class` outlives the call; the other inputs are optional.
     let set = unsafe {
         SetupDiGetClassDevsW(class, std::ptr::null(), std::ptr::null_mut(), DIGCF_PRESENT)
@@ -575,10 +585,38 @@ fn pci_devices(class: &GUID, what: &str) -> Result<Vec<(u16, u16)>> {
         let named = unsafe {
             SetupDiGetDeviceInstanceIdW(set, &device, id.as_mut_ptr(), id.len() as u32, &mut length)
         };
-        if named != 0 {
-            let end = (length as usize).saturating_sub(1).min(id.len());
-            devices.extend(pci_device(&String::from_utf16_lossy(&id[..end])));
+        if named == 0 {
+            continue;
         }
+        let end = (length as usize).saturating_sub(1).min(id.len());
+        let instance = String::from_utf16_lossy(&id[..end]);
+        let mut compatible = [0u16; 1024];
+        let mut bytes = 0;
+        // SAFETY: the buffer's length in bytes is passed with it, `device`
+        // came from `set`, and the type output may be null.
+        let read = unsafe {
+            SetupDiGetDeviceRegistryPropertyW(
+                set,
+                &device,
+                SPDRP_COMPATIBLEIDS,
+                ptr::null_mut(),
+                compatible.as_mut_ptr().cast(),
+                size_of_val(&compatible) as u32,
+                &mut bytes,
+            )
+        };
+        // A REG_MULTI_SZ: strings each ended by a NUL, then another NUL.
+        let compatible = if read != 0 {
+            let units = (bytes as usize / 2).min(compatible.len());
+            compatible[..units]
+                .split(|&unit| unit == 0)
+                .filter(|id| !id.is_empty())
+                .map(String::from_utf16_lossy)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        devices.push((instance, compatible));
     }
     // SAFETY: `set` is open and not used again.
     unsafe { SetupDiDestroyDeviceInfoList(set) };
@@ -852,5 +890,26 @@ impl Host for System {
         // The network adapter device class, wired and wireless.
         const NET: GUID = GUID::from_u128(0x4d36e972_e325_11ce_bfc1_08002be10318);
         pci_devices(&NET, "network adapters")
+    }
+
+    fn bluetooth_controllers(&self) -> Result<Vec<UsbBluetooth>> {
+        // The Bluetooth device class: radios, whose USB ones are named by
+        // their device or interface instance, and enumerated services,
+        // which are not USB devices.
+        const BLUETOOTH: GUID = GUID::from_u128(0xe0cbf06c_cd8b_4647_bb8a_263b43f0f974);
+        let mut found = Vec::new();
+        for (instance, compatible) in class_devices(&BLUETOOTH, "Bluetooth radios")? {
+            if let Some((vendor, product)) = drive_names::usb_device(&instance) {
+                let controller = UsbBluetooth {
+                    vendor,
+                    product,
+                    vendor_interface: drive_names::vendor_hci_interface(&compatible),
+                };
+                if !found.contains(&controller) {
+                    found.push(controller);
+                }
+            }
+        }
+        Ok(found)
     }
 }

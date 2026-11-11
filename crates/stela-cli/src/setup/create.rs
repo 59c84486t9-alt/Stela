@@ -731,6 +731,10 @@ pub(super) fn plan(
     if record.wifi.is_some() {
         notes.extend(firmware::wifi_note(environment.host)?);
     }
+    notes.extend(firmware::bluetooth_notes(
+        environment.host,
+        &super::fix(&command.usb, "repair"),
+    )?);
     Ok(Plan {
         record,
         ipsw,

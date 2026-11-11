@@ -35,9 +35,17 @@ pub fn is_vendor_interface(device: &Device, interface: &Interface) -> bool {
     interface.number == 0
         && interface.alternate == 0
         && (interface.class, interface.subclass, interface.protocol) == (0xff, 1, 1)
-        && ((usb.vendor, usb.product) == (0x19ff, 0x0239)
-            || matches!(
-                usb.vendor,
+        && listed(usb.vendor, usb.product, true)
+}
+
+/// Whether a controller with these IDs is a btusb BCM_PATCHRAM entry when
+/// its interface 0 is of vendor class FF/01/01 (`vendor_interface`) or the
+/// standard E0/01/01.
+pub(crate) fn listed(vendor: u16, product: u16, vendor_interface: bool) -> bool {
+    (vendor, product) == (0x19ff, 0x0239)
+        || vendor_interface
+            && matches!(
+                vendor,
                 0x105b
                     | 0x0bb4
                     | 0x0489
@@ -48,19 +56,21 @@ pub fn is_vendor_interface(device: &Device, interface: &Interface) -> bool {
                     | 0x13d3
                     | 0x413c
                     | 0x0930
-            ))
+            )
 }
 
 pub(super) fn is_candidate(device: &Device) -> bool {
-    let usb = UsbIdentity::read(device);
     crate::usb::descriptor::interfaces(&device.configuration)
         .iter()
         .any(|i| {
             is_vendor_interface(device, i)
-                || ((usb.vendor, usb.product) == (0x19ff, 0x0239)
-                    && i.number == 0
+                || (i.number == 0
                     && i.alternate == 0
-                    && (i.class, i.subclass, i.protocol) == (0xe0, 1, 1))
+                    && (i.class, i.subclass, i.protocol) == (0xe0, 1, 1)
+                    && {
+                        let usb = UsbIdentity::read(device);
+                        listed(usb.vendor, usb.product, false)
+                    })
         })
 }
 

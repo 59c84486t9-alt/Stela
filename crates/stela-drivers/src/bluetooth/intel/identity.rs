@@ -27,10 +27,16 @@ impl Identity {
         let d = &device.descriptor;
         let vendor = u16::from_le_bytes([d[8], d[9]]);
         let product = u16::from_le_bytes([d[10], d[11]]);
-        // Exact pinned combined USB IDs; HCI identity and platform requirements
-        // independently decide which initialization path is supported.
-        if vendor != 0x8087
-            || !matches!(
+        if !Self::listed(vendor, product) {
+            return Err(Error::Unsupported("Intel combined USB identity"));
+        }
+        Ok((vendor, product, u16::from_le_bytes([d[12], d[13]])))
+    }
+    /// Exact pinned combined USB IDs; HCI identity and platform requirements
+    /// independently decide which initialization path is supported.
+    pub(crate) fn listed(vendor: u16, product: u16) -> bool {
+        vendor == 0x8087
+            && matches!(
                 product,
                 0x0a2b
                     | 0x0aaa
@@ -46,10 +52,6 @@ impl Identity {
                     | 0x0039
                     | 0x0040
             )
-        {
-            return Err(Error::Unsupported("Intel combined USB identity"));
-        }
-        Ok((vendor, product, u16::from_le_bytes([d[12], d[13]])))
     }
     #[cfg(test)]
     #[expect(

@@ -12,6 +12,7 @@ mod patch;
 
 use super::{FirmwareReceipt, Hci, Io, Packet};
 use alloc::{boxed::Box, vec::Vec};
+pub(crate) use identity::listed;
 pub use identity::{Identity, LocalVersion, UsbIdentity, is_vendor_interface};
 pub use patch::{Hcd, Record};
 

@@ -56,7 +56,7 @@ impl UsbIdentity {
             revision: identity.revision,
         }
     }
-    pub(super) fn project(self) -> Option<Project> {
+    pub(crate) fn project(self) -> Option<Project> {
         match (self.vendor, self.product) {
             // Explicit btusb 8761BU/8761BUV entries; no vendor-wide expansion.
             (0x0bda, 0xa728 | 0x8771) | (0x0b05, 0x190e) => Some(Project::Rtl8761Bu),

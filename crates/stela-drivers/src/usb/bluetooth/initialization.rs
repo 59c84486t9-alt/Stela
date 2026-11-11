@@ -87,6 +87,78 @@ fn vendor_name(vendor: u16) -> Option<&'static str> {
 }
 impl core::error::Error for InitializationError {}
 
+/// The vendor setup a USB Bluetooth controller gets here, chosen by its IDs
+/// as initialization chooses it. Its live registers still choose the
+/// firmware, or refuse the chip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Setup {
+    Atheros,
+    Qualcomm,
+    Broadcom,
+    Realtek,
+    MediaTek,
+    Intel,
+}
+impl Setup {
+    /// The setup for a controller with these IDs, whose interface 0 is of
+    /// vendor class FF/01/01 (`vendor_interface`) rather than E0/01/01;
+    /// `None` for one no setup here takes.
+    pub fn of(vendor: u16, product: u16, vendor_interface: bool) -> Option<Self> {
+        if ath3k::SOURCE_USB_IDS
+            .iter()
+            .any(|&(v, p, _)| (v, p) == (vendor, product))
+        {
+            return Some(Self::Atheros);
+        }
+        if qca::SOURCE_USB_IDS
+            .iter()
+            .any(|&(v, p, _)| (v, p) == (vendor, product))
+        {
+            return Some(Self::Qualcomm);
+        }
+        if broadcom::listed(vendor, product, vendor_interface) {
+            return Some(Self::Broadcom);
+        }
+        // The others take only the standard HCI interface.
+        if vendor_interface {
+            return None;
+        }
+        if (realtek::UsbIdentity {
+            vendor,
+            product,
+            revision: 0,
+        })
+        .project()
+        .is_some()
+        {
+            Some(Self::Realtek)
+        } else if (mediatek::UsbIdentity {
+            vendor,
+            product,
+            revision: 0,
+        })
+        .candidate()
+        {
+            Some(Self::MediaTek)
+        } else if crate::bluetooth::intel::Identity::listed(vendor, product) {
+            Some(Self::Intel)
+        } else {
+            None
+        }
+    }
+    /// The chip maker's name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Atheros => "Qualcomm Atheros AR3011/AR3012",
+            Self::Qualcomm => "Qualcomm",
+            Self::Broadcom => "Broadcom",
+            Self::Realtek => "Realtek",
+            Self::MediaTek => "MediaTek",
+            Self::Intel => "Intel",
+        }
+    }
+}
+
 impl<B: Io> Hci<B> {
     /// Explicitly initialize an attached native controller against exact supplied
     /// resources. A provider/catalog is borrowed only for this call; the stored
@@ -166,8 +238,35 @@ impl<B: Io> Hci<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::InitializationError;
+    use super::{InitializationError, Setup};
     use alloc::string::ToString;
+
+    #[test]
+    fn controller_ids_choose_the_setup_initialization_runs() {
+        for (vendor, product, vendor_interface, setup) in [
+            (0x13d3, 0x3602, false, Some(Setup::MediaTek)),
+            (0x0e8d, 0x7922, false, Some(Setup::MediaTek)),
+            (0x0bda, 0x8771, false, Some(Setup::Realtek)),
+            (0x8087, 0x0029, false, Some(Setup::Intel)),
+            (0x0cf3, 0xe300, false, Some(Setup::Qualcomm)),
+            (0x0cf3, 0x3000, false, Some(Setup::Atheros)),
+            (0x0a5c, 0x21e8, true, Some(Setup::Broadcom)),
+            (0x19ff, 0x0239, false, Some(Setup::Broadcom)),
+            // A Broadcom module maker's ID on the standard interface, and a
+            // MediaTek ID on a vendor-class one.
+            (0x0a5c, 0x21e8, false, None),
+            (0x0e8d, 0x7922, true, None),
+            // Intel's legacy-ROM controllers and generic ones.
+            (0x8087, 0x0a2a, false, None),
+            (0x0a12, 0x0001, false, None),
+        ] {
+            assert_eq!(
+                Setup::of(vendor, product, vendor_interface),
+                setup,
+                "{vendor:04x}:{product:04x}"
+            );
+        }
+    }
 
     #[test]
     fn an_unsupported_controller_is_named_by_its_ids_and_vendor() {

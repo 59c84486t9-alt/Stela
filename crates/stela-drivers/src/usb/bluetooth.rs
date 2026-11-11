@@ -55,7 +55,7 @@ pub mod realtek;
 pub use binding::{Binding, CLASS};
 pub use firmware::FirmwareReceipt;
 pub use host::Host;
-pub use initialization::{InitializationError, InitializationReport};
+pub use initialization::{InitializationError, InitializationReport, Setup};
 
 use crate::block::BlockError;
 use alloc::{boxed::Box, vec::Vec};
