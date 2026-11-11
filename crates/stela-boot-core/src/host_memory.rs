@@ -1,7 +1,6 @@
 //! The parts of Stela's memory sized from the host RAM free at boot (the
 //! engine heap, native code arena and shadow page-table pool), the share
-//! left for the guest, and what is left of it for the translation pack
-//! (`docs/design/system.md#memory-sizing`).
+//! left for the guest, and what is left of it for the translation pack.
 use crate::Result;
 use crate::native_resources::{
     CodeReservation, SMALL_WINDOW_PER_RUNNER, WINDOW_PER_RUNNER, code_reservation_per_runner,

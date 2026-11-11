@@ -144,8 +144,7 @@ const WINDOW_SHARE: u64 = 16;
 /// The window per runner where the host's memory allows it. A sign-in on 8
 /// PEs with 512 MiB (64 MiB per runner) compiled 45% of its installs again
 /// within one turn of the ring, the code lock waited 3.5 s per 10 s, and
-/// each part the ring took cost about 0.75 s of PE time
-/// (`.stela/review/storm/STATUS.md`).
+/// each part the ring took cost about 0.75 s of PE time.
 pub const WINDOW_PER_RUNNER: u64 = 128 * MIB;
 /// The window per runner when [`WINDOW_PER_RUNNER`] would leave the guest
 /// under its floor ([`crate::host_memory::sizes`] falls back to it).

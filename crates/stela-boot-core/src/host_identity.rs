@@ -175,8 +175,8 @@ mod tests {
 
     #[test]
     fn smbios_text_drops_the_terminator_and_padding() {
-        // The table walk keeps each string's NUL (QEMU's type 1 gave
-        // "QEMU?" in build-54's record).
+        // The table walk keeps each string's NUL (QEMU's type 1 string
+        // otherwise reads back as "QEMU?").
         assert_eq!(smbios_text(b"QEMU\0"), Some(&b"QEMU"[..]));
         assert_eq!(
             smbios_text(b"Standard PC (Q35 + ICH9, 2009)\0"),

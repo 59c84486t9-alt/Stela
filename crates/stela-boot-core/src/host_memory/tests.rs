@@ -205,7 +205,7 @@ fn parked_executors_add_only_their_reserves() {
 }
 
 /// The free RAM an 8 GB VM showed the loader with no pack read, as
-/// `HOST MEMORY free=7544M` (run 20261109-163216, eight cores).
+/// `HOST MEMORY free=7544M` (eight cores).
 const VM_8_GB: u64 = 7544 * MIB;
 
 #[test]
