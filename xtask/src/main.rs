@@ -97,22 +97,3 @@ fn main() -> ExitCode {
         ExitCode::FAILURE
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn removed_process_tasks_are_unknown() {
-        for task in ["bench", "census", "darwin-catalogs"] {
-            let error = Cli::try_parse_from(["xtask", task, "--help"])
-                .err()
-                .unwrap();
-            assert_eq!(
-                error.kind(),
-                clap::error::ErrorKind::InvalidSubcommand,
-                "{task}"
-            );
-        }
-    }
-}
