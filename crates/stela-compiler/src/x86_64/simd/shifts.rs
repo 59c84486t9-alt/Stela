@@ -226,6 +226,14 @@ fn saturating_narrow(
             _ => unreachable!("allocated in-range narrowing width"),
         }
         packed(code, Host::MoveAligned, 6, 0);
+    } else if operand.bytes != lane
+        && quick_qc_supported(wide, signed_source, unsigned_result, target)
+    {
+        rounded_right(code, wide, operand.amount, signed_source, round, target);
+        quick_qc_narrow(code, wide, signed_source, unsigned_result, target);
+        let cleared = cleared_by(wide, signed_source, unsigned_result);
+        finish_saturating_narrow(code, operand, upper, cleared);
+        return;
     } else {
         rounded_right(code, wide, operand.amount, signed_source, round, target);
         if !vector_extensions::saturating_narrow(
@@ -248,6 +256,14 @@ fn saturating_narrow(
     if may_saturate {
         super::saturating::publish_qc(code, if scalar { wide } else { VECTOR_BYTES });
     }
+    finish_saturating_narrow(code, operand, upper, false);
+}
+
+/// Commit the narrowed XMM6: into the upper half of the destination, or
+/// alone with the rest cleared (already, where `cleared`).
+fn finish_saturating_narrow(code: &mut Code, operand: &Operand, upper: bool, cleared: bool) {
+    let lane = operand.lane_bytes;
+    let scalar = operand.bytes == lane;
     if upper {
         read_vector(code, operand.destination, 1);
         packed(code, Host::UnpackLowQword, 1, 6);
@@ -260,11 +276,98 @@ fn saturating_narrow(
                 core::array::from_fn(|i| if i < usize::from(lane) { u8::MAX } else { 0 }),
             );
             packed(code, Host::And, 6, 1);
-        } else {
+        } else if !cleared {
             packed(code, Host::MoveQword, 6, 6);
         }
         commit(code, operand.destination, 6);
     }
+}
+
+/// Whether [`quick_qc_narrow`] narrows `wide` lanes on `target`: one host
+/// pack (signed sources of H and S lanes) or an AVX-512 saturating
+/// down-convert, and PTEST (SSE4.1) for QC. The DIT profile keeps the
+/// branch-free recipe.
+fn quick_qc_supported(
+    wide: u8,
+    signed_source: bool,
+    unsigned_result: bool,
+    target: TargetCpu,
+) -> bool {
+    three::test_zero_supported(target)
+        && !target.data_independent_timing()
+        && ((signed_source && wide <= 4)
+            || vector_extensions::saturating_narrow_supported(wide, target))
+        && (signed_source || unsigned_result)
+}
+
+/// Whether [`quick_qc_narrow`] leaves the high quadword of XMM6 clear.
+fn cleared_by(wide: u8, signed_source: bool, _unsigned_result: bool) -> bool {
+    !(signed_source && wide <= 4)
+}
+
+/// Saturate every `wide` lane of XMM0 to half width into the low quadword of
+/// XMM6 and set FPSR.QC when any lane saturated. Signed sources of H and S
+/// lanes use one PACKSS/PACKUS (both halves alike); other narrows one
+/// VPMOVS/VPMOVUS. QC: a lane saturated exactly when its bits above the
+/// unsigned result width are not all zero (negative sources included), or
+/// when the sign-extended signed result differs from the source; one PTEST
+/// of that difference, a branch over one sticky OR into FPSR. Clobbers
+/// XMM1 and EFLAGS (as the branch-free recipe did); writes only FPSR.
+fn quick_qc_narrow(
+    code: &mut Code,
+    wide: u8,
+    signed_source: bool,
+    unsigned_result: bool,
+    target: TargetCpu,
+) {
+    if signed_source && wide <= 4 {
+        let pack = match (wide, unsigned_result) {
+            (2, true) => Host::PackUnsignedWordToByte,
+            (2, false) => Host::PackSignedWordToByte,
+            (4, true) => Host::PackUnsignedDwordToWord,
+            (_, false) => Host::PackSignedDwordToWord,
+            _ => unreachable!(),
+        };
+        three::three(code, pack, 6, 0, 0, target);
+    } else {
+        let narrowed = vector_extensions::saturating_narrow(
+            code,
+            wide,
+            [signed_source, !unsigned_result],
+            6,
+            0,
+            None,
+            target,
+        );
+        assert!(narrowed, "checked by quick_qc_supported");
+    }
+    if unsigned_result {
+        let high = match wide {
+            2 => Shift::RightWord,
+            4 => Shift::RightDword,
+            _ => Shift::RightQword,
+        };
+        three::shift(code, high, 1, 0, wide * BITS_PER_BYTE / 2, target);
+    } else {
+        match wide {
+            2 => Host::SignExtendByteToWord,
+            4 => Host::SignExtendWordToDword,
+            _ => Host::SignExtendDwordToQword,
+        }
+        .register(code, 1, 6, target);
+        three::three(code, Host::Xor, 1, 1, 0, target);
+    }
+    three::test_zero(code, 1, target);
+    let mut asm = code.asm();
+    let none = asm.jcc8(Cond::E);
+    // Sticky QC, preserving every other bit.
+    asm.alu_imm32(
+        Alu::Or,
+        Size::Dword,
+        guest(core::mem::offset_of!(crate::GuestState, fpsr) as u32),
+        crate::aarch64::simd::saturating::FPSR_QC as i32,
+    );
+    asm.bind(none);
 }
 
 /// Native packs clamp H/S sources. Reconstructing the result and comparing it

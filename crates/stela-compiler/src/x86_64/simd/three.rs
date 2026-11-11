@@ -135,3 +135,21 @@ pub(super) fn broadcast_word(code: &mut Code, destination: u8, source: u8) {
         Rm::Xmm(source),
     );
 }
+/// Whether ZF after [`test_zero`] says every bit of the register is zero:
+/// PTEST, SSE4.1.
+pub(super) fn test_zero_supported(target: TargetCpu) -> bool {
+    target.supports(TargetCpu::Sse41)
+}
+
+/// PTEST `xmm`, `xmm` (VPTEST with VEX): ZF = `xmm` is zero. Writes EFLAGS.
+pub(super) fn test_zero(code: &mut Code, xmm: u8, target: TargetCpu) {
+    const PTEST: u8 = 0x17;
+    if vex(target) {
+        code.asm()
+            .vex(vex128(Map::M0f38), PTEST, xmm, 0, Rm::Xmm(xmm));
+    } else {
+        assert!(test_zero_supported(target), "PTEST needs SSE4.1");
+        code.asm()
+            .sse(Some(0x66), &[0x0f, 0x38, PTEST], xmm, Rm::Xmm(xmm));
+    }
+}
