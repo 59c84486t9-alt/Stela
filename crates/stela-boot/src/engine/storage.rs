@@ -134,14 +134,23 @@ const DISK_PARTS: [&str; 6] = ["wait", "root", "start", "finish", "posted", "ste
 /// The longest of each [`DiskPart`] since the last report, in TSC ticks.
 static DISK_TIMES: [AtomicU64; DISK_PARTS.len()] = [const { AtomicU64::new(0) }; DISK_PARTS.len()];
 
-/// Run `call`, keeping the longest it took as `part`.
+/// Each [`DiskPart`]'s calls and TSC ticks in all since the last report:
+/// with the longest, what a call costs on average.
+static DISK_TOTALS: [[AtomicU64; 2]; DISK_PARTS.len()] =
+    [const { [const { AtomicU64::new(0) }; 2] }; DISK_PARTS.len()];
+
+/// Count a call of `part` that took `ticks`.
+fn record(part: DiskPart, ticks: u64) {
+    DISK_TIMES[part as usize].fetch_max(ticks, Ordering::Relaxed);
+    DISK_TOTALS[part as usize][0].fetch_add(1, Ordering::Relaxed);
+    DISK_TOTALS[part as usize][1].fetch_add(ticks, Ordering::Relaxed);
+}
+
+/// Run `call`, counting what it took as `part`.
 fn timed<T>(part: DiskPart, call: impl FnOnce() -> T) -> T {
     let started = super::host::rdtsc();
     let result = call();
-    DISK_TIMES[part as usize].fetch_max(
-        super::host::rdtsc().wrapping_sub(started),
-        Ordering::Relaxed,
-    );
+    record(part, super::host::rdtsc().wrapping_sub(started));
     result
 }
 
@@ -258,7 +267,7 @@ impl RestoreRoot {
     #[track_caller]
     pub(super) unsafe fn enter(root: u64) -> Self {
         let waited = lock_host_drivers();
-        DISK_TIMES[DiskPart::Wait as usize].fetch_max(waited, Ordering::Relaxed);
+        record(DiskPart::Wait, waited);
         // SAFETY: the caller supplies the live root, and this core holds the lock.
         unsafe { Self::enter_locked(root) }
     }
@@ -342,8 +351,7 @@ impl RestoreRoot {
         // SAFETY: live roots with the same engine code/stack/window.
         unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack, preserves_flags)) };
         let entered = super::host::rdtsc();
-        DISK_TIMES[DiskPart::Root as usize]
-            .fetch_max(entered.wrapping_sub(switching), Ordering::Relaxed);
+        record(DiskPart::Root, entered.wrapping_sub(switching));
         Self {
             root: previous,
             flags,
@@ -593,6 +601,11 @@ fn wake_staged() {
 /// Steps taken, and those given up because another core was inside the
 /// host drivers, since the last report.
 static STEPS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// The steps [`released`] took, and their TSC ticks in all: what a board
+/// call (a guest's device access, a doorbell's mostly, or the home
+/// machine's transfer) spent after it giving the host disk its commands and
+/// taking its completions.
+static RELEASED_STEPS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
 /// After a device call released the devices' lock, outside it: the step its
 /// staged disk commands left, on the processor whose guest made them, as
@@ -611,8 +624,16 @@ pub(super) fn released() -> bool {
     let mut finished = false;
     for worker in staged_workers() {
         if worker.work() {
+            let started = super::host::rdtsc();
             match step(worker) {
-                Some(step) => finished |= step.finished != 0,
+                Some(step) => {
+                    finished |= step.finished != 0;
+                    RELEASED_STEPS[0].fetch_add(1, Ordering::Relaxed);
+                    RELEASED_STEPS[1].fetch_add(
+                        super::host::rdtsc().wrapping_sub(started),
+                        Ordering::Relaxed,
+                    );
+                }
                 None => STEP_DUE.store(true, Ordering::Release),
             }
         }
@@ -781,6 +802,21 @@ impl HostDisks {
                 micros(longest.swap(0, Ordering::Relaxed))
             ));
         }
+        // Then each part's calls and microseconds in all, and the steps
+        // board calls took after releasing the devices' lock.
+        line.push_str(" calls/total_us");
+        for (name, [calls, ticks]) in DISK_PARTS.iter().zip(&DISK_TOTALS) {
+            line.push_str(&format!(
+                " {name}={}/{}",
+                calls.swap(0, Ordering::Relaxed),
+                micros(ticks.swap(0, Ordering::Relaxed))
+            ));
+        }
+        line.push_str(&format!(
+            " after_calls={}/{}",
+            RELEASED_STEPS[0].swap(0, Ordering::Relaxed),
+            micros(RELEASED_STEPS[1].swap(0, Ordering::Relaxed))
+        ));
         output::arguments(format_args!("{line}\n"));
     }
 

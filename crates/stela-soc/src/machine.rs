@@ -11,7 +11,9 @@ mod power;
 mod processors;
 pub mod t6000_pmgr;
 mod timekeeping;
+mod transfer_times;
 mod usb;
+pub use transfer_times::{PartTime, TRANSFER_PARTS};
 
 use crate::Result;
 pub use crate::pmu::RtcEpoch;
@@ -248,6 +250,8 @@ pub struct AppleDevices {
     /// The board's ECID once the SEP is placed: the modeled Bluetooth
     /// controller's address derives from it.
     ecid: u64,
+    /// Each transfer part's host time, while the host gives a clock.
+    transfer_times: transfer_times::TransferTimes,
 }
 
 /// The host polls its USB sessions once a high-speed microframe, in which
@@ -645,7 +649,20 @@ impl AppleDevices {
             time_regression: Cell::new(None),
             inline_keys: crate::inline_key::Engine::default(),
             ecid: 0,
+            transfer_times: transfer_times::TransferTimes::default(),
         }
+    }
+
+    /// Time each part of every transfer ([`TRANSFER_PARTS`]) with `clock`,
+    /// the host's counter, from now on; `None` stops.
+    pub fn time_transfers(&mut self, clock: Option<fn() -> u64>) {
+        self.transfer_times.set_clock(clock);
+    }
+
+    /// Each transfer part's calls, host ticks and longest call since the
+    /// last call, by [`TRANSFER_PARTS`].
+    pub fn take_transfer_times(&mut self) -> [PartTime; TRANSFER_PARTS.len()] {
+        self.transfer_times.take()
     }
 
     /// The NOR sectors the guest changed since the last call, as (offset,
@@ -1205,21 +1222,28 @@ impl Devices for AppleDevices {
         memory: &mut dyn Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
+        let mut lap = self.transfer_times.lap();
         self.observe_time(now, "transfer");
         self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
+        lap.end(&mut self.transfer_times, 0);
         // A master's refused work stops only that master: the others and the
         // devices' timers go on, and the first refusal is what is reported.
-        let results = [
-            self.transfer_pmp(cpu, memory, now),
-            self.transfer_aes(cpu, memory, now),
-            self.transfer_storage(cpu, memory, now),
-            self.transfer_gfx(cpu, memory, now),
-            self.transfer_sep(cpu, memory, now),
-            self.transfer_dcp(cpu, memory, now),
-            self.transfer_usb(cpu, memory, now),
-        ];
+        let mut results = [const { Ok(()) }; 7];
+        for (index, result) in results.iter_mut().enumerate() {
+            *result = match index {
+                0 => self.transfer_pmp(cpu, memory, now),
+                1 => self.transfer_aes(cpu, memory, now),
+                2 => self.transfer_storage(cpu, memory, now),
+                3 => self.transfer_gfx(cpu, memory, now),
+                4 => self.transfer_sep(cpu, memory, now),
+                5 => self.transfer_dcp(cpu, memory, now),
+                _ => self.transfer_usb(cpu, memory, now),
+            };
+            lap.end(&mut self.transfer_times, index + 1);
+        }
         let settled = self.settle(cpu, now, None);
+        lap.end(&mut self.transfer_times, 8);
         results.into_iter().find(Result::is_err).unwrap_or(settled)
     }
 }

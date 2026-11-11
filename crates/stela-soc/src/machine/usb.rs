@@ -376,8 +376,21 @@ impl AppleDevices {
                     .peripheral
                     .as_ref()
                     .map_or_else(String::new, |hub| format!(" hub=[{}]", hub.summary()));
+                // The USB Ethernet adapter's frames since it was made: what
+                // its bulk transfers and their events carry.
+                let net = master
+                    .peripheral
+                    .as_ref()
+                    .and_then(|hub| hub.ports.network.as_ref())
+                    .map_or_else(String::new, |ecm| {
+                        let c = ecm.counters();
+                        format!(
+                            " net=[to_guest={} to_host={} filtered={} overflowed={} oversized={}]",
+                            c.to_guest, c.to_host, c.filtered, c.overflowed, c.oversized
+                        )
+                    });
                 format!(
-                    "port={} attached={}{why}{host}{hub}",
+                    "port={} attached={}{why}{host}{hub}{net}",
                     master.number,
                     master.attached || master.peripheral.is_some()
                 )

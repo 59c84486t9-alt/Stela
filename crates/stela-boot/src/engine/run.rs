@@ -168,6 +168,32 @@ fn device_exits_report<H: Host>(
     output::arguments(format_args!("{line}\n"));
 }
 
+/// `DEVICE TRANSFERS calls/us/longest_us`: since the last beat, each part
+/// of the board's transfers (`stela_soc::machine::TRANSFER_PARTS`), which
+/// run under the devices' lock after every device write and at the home
+/// machine's DMA deadline. The first beat starts the clock and reports
+/// nothing.
+fn transfer_times_report<H: Host>(machine: &Machine<H, parallel::Board>, tsc_hz: u64) {
+    let times = machine.devices.with(|devices| {
+        devices.time_transfers(Some(host::rdtsc));
+        devices.take_transfer_times()
+    });
+    if times.iter().all(|time| time.calls == 0) {
+        return;
+    }
+    let micros = |ticks: u64| u128::from(ticks) * 1_000_000 / u128::from(tsc_hz.max(1));
+    let mut line = String::from("DEVICE TRANSFERS calls/us/longest_us");
+    for (name, time) in stela_soc::machine::TRANSFER_PARTS.iter().zip(&times) {
+        line.push_str(&format!(
+            " {name}={}/{}/{}",
+            time.calls,
+            micros(time.ticks),
+            micros(time.longest)
+        ));
+    }
+    output::arguments(format_args!("{line}\n"));
+}
+
 /// Completed intervals of this owned home machine only. Other PEs' state
 /// is not inspected; an unfinished phase has no completed maximum yet.
 pub(super) fn profile_lifetime_maxima(timing: &step_timing::StepTiming, tsc_hz: u64, report: &str) {
@@ -1215,6 +1241,7 @@ impl Heartbeat {
             let exits = parallel::system_exits(machine);
             system_exits_report(&exits, tsc_hz);
             device_exits_report(machine, &exits.devices, tsc_hz);
+            transfer_times_report(machine, tsc_hz);
         }
         output::arguments(format_args!(
             "GUEST PERFORMANCE retired={retired} interval_retired={instructions} instructions_per_second={} instructions_per_block_milli={}\n",
