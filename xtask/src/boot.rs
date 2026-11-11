@@ -565,7 +565,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
             diagnostics,
         } => {
             crate::gpu::fetch::fetch(false)?;
-            crate::gpu::build_nvk(8)?;
+            crate::gpu::build_nvk(crate::gpu::default_jobs())?;
             println!("{}", build_for_boot(release, diagnostics, true)?.display());
             Ok(ExitCode::SUCCESS)
         }
@@ -575,7 +575,7 @@ pub fn run(command: Command) -> Result<ExitCode> {
 
 pub fn build(release: bool, nvk: bool) -> Result<PathBuf> {
     if nvk {
-        crate::gpu::build_nvk(8)?;
+        crate::gpu::build_nvk(crate::gpu::default_jobs())?;
     }
     build_with_diagnostics(release, false, nvk)
 }

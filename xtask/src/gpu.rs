@@ -147,6 +147,12 @@ pub fn run(command: Command) -> Result<()> {
     }
 }
 
+/// Parallel compiler processes for a build that names none: one per CPU, at
+/// most 8, so a small build machine does not run out of memory.
+pub fn default_jobs() -> u16 {
+    std::thread::available_parallelism().map_or(1, |cpus| cpus.get().min(8) as u16)
+}
+
 /// Prepare the complete native rendering archive and its guest components.
 pub fn build_nvk(jobs: u16) -> Result<()> {
     nvk::build(jobs)?;
