@@ -1225,7 +1225,7 @@ mod tests {
 
     #[test]
     fn ecid_requires_nonzero_hex() {
-        assert_eq!(parse_ecid("0x1a2b3c4d5e6f7081"), Ok(0x1a2b_3c4d_5e6f_7081));
+        assert_eq!(parse_ecid("0x700cde23bbf1c97d"), Ok(0x700c_de23_bbf1_c97d));
         assert_eq!(parse_ecid("ABCDEF"), Ok(0xab_cdef));
         assert!(parse_ecid("0").is_err());
         assert!(parse_ecid("0x").is_err());
