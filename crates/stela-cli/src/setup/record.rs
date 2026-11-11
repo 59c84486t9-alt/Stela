@@ -472,7 +472,10 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
         },
         usb.display()
     );
-    let record: Record = stela_engine::read_json(&path)?;
+    let mut value = header;
+    rebase(&mut value, &esp, usb);
+    let record: Record = serde_json::from_value(value)
+        .with_context(|| format!("cannot read setup record {}", path.display()))?;
     ensure!(
         !record.installs.is_empty(),
         "{} names no install; run `stela setup uninstall --usb {}` and set the USB up again",
@@ -480,6 +483,60 @@ pub(super) fn read_record(environment: &Environment<'_>, usb: &Path) -> Result<R
         usb.display()
     );
     Ok(record)
+}
+
+/// Move every path of the record `value` to where the USB is mounted now:
+/// `esp`, and the data partition at `usb`. The record holds the paths of the
+/// computer and user that wrote it, and another user, computer or system
+/// mounts the same USB somewhere else.
+fn rebase(value: &mut serde_json::Value, esp: &Path, usb: &Path) {
+    let text = |key: &str| value[key].as_str().map(str::to_owned);
+    let (Some(old_esp), Some(old_volume)) = (
+        text("esp"),
+        text("volume").or_else(|| text("payload_volume")),
+    ) else {
+        return;
+    };
+    // A setup with one partition keeps everything on its EFI partition. With
+    // two, `--usb` names the data partition unless it names the EFI one,
+    // which leaves the data partition's paths as they were.
+    let mut moves = Vec::new();
+    if old_volume != old_esp && usb != esp {
+        moves.push((old_volume, usb));
+    }
+    moves.push((old_esp, esp));
+    fn walk(value: &mut serde_json::Value, moves: &[(String, &Path)]) {
+        match value {
+            serde_json::Value::String(text) => {
+                for (old, new) in moves {
+                    let Some(rest) = text.strip_prefix(old.as_str()) else {
+                        continue;
+                    };
+                    // The whole old path, not another one that starts alike.
+                    let separator = |c: char| c == '/' || c == '\\';
+                    if !(rest.is_empty() || rest.starts_with(separator) || old.ends_with(separator))
+                    {
+                        continue;
+                    }
+                    let mut path = new.to_path_buf();
+                    path.extend(rest.split(separator).filter(|part| !part.is_empty()));
+                    *text = path.to_string_lossy().into_owned();
+                    break;
+                }
+            }
+            serde_json::Value::Array(values) => values.iter_mut().for_each(|v| walk(v, moves)),
+            serde_json::Value::Object(fields) => {
+                for (key, value) in fields {
+                    // The boot options name UEFI paths, which do not move.
+                    if key != "options" {
+                        walk(value, moves);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(value, &moves);
 }
 
 /// Any schema's record, for `uninstall`: the bundles of an older
@@ -542,4 +599,63 @@ pub(super) fn write_record(esp: &Path, record: &Record) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(&record)?;
     bytes.push(b'\n');
     efi::write_atomic(&path, &bytes, false)
+}
+
+#[cfg(test)]
+mod rebase_tests {
+    use super::*;
+
+    #[test]
+    fn a_record_follows_the_usb_to_where_it_is_mounted_now() {
+        let mut value = serde_json::json!({
+            "esp": "/run/media/root/EFI",
+            "volume": "/run/media/root/STELA",
+            "bundle_directory": "/run/media/root/STELA/stela/boot/27A1",
+            "created_directories": ["/run/media/root/STELA/stela", "/run/media/root/STELATE"],
+            "options": "--bundle \\stela\\boot /run/media/root/STELA",
+            "media": [{"volume": "/run/media/root/STELA"}],
+            "translations": {"volume": "/run/media/root/STELA", "pack_bytes": 1},
+        });
+        rebase(
+            &mut value,
+            Path::new("/media/user/EFI"),
+            Path::new("/media/user/STELA1"),
+        );
+        assert_eq!(value["esp"], "/media/user/EFI");
+        assert_eq!(value["volume"], "/media/user/STELA1");
+        assert_eq!(
+            value["bundle_directory"],
+            "/media/user/STELA1/stela/boot/27A1"
+        );
+        assert_eq!(value["created_directories"][0], "/media/user/STELA1/stela");
+        // Another path that only starts alike, and the boot options, stay.
+        assert_eq!(value["created_directories"][1], "/run/media/root/STELATE");
+        assert_eq!(
+            value["options"],
+            "--bundle \\stela\\boot /run/media/root/STELA"
+        );
+        assert_eq!(value["media"][0]["volume"], "/media/user/STELA1");
+        assert_eq!(value["translations"]["volume"], "/media/user/STELA1");
+        // A record written on Windows, read where `/` separates.
+        let mut value = serde_json::json!({
+            "esp": "E:\\",
+            "volume": "F:\\",
+            "bundle_directory": "F:\\stela\\boot\\27A1",
+        });
+        rebase(&mut value, Path::new("/mnt/efi"), Path::new("/mnt/data"));
+        assert_eq!(value["esp"], "/mnt/efi");
+        assert_eq!(
+            Path::new(value["bundle_directory"].as_str().unwrap()),
+            Path::new("/mnt/data/stela/boot/27A1")
+        );
+        // One partition: everything follows the EFI partition.
+        let mut value = serde_json::json!({
+            "esp": "/a",
+            "volume": "/a",
+            "bundle_directory": "/a/stela/boot/27A1",
+        });
+        rebase(&mut value, Path::new("/b"), Path::new("/b"));
+        assert_eq!(value["volume"], "/b");
+        assert_eq!(value["bundle_directory"], "/b/stela/boot/27A1");
+    }
 }
