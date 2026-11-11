@@ -1776,8 +1776,10 @@ struct PumpCounts {
     step_serving: [AtomicU32; 4],
     /// Linux steps the pumps ran.
     steps: AtomicU64,
-    /// Ticks the pumps spent by part ([`PumpPart`]).
+    /// Ticks the pumps spent by part ([`PumpPart`]), and the longest one
+    /// part took in a pump: what a long pump spent its time in.
     parts: [AtomicU64; PumpPart::COUNT],
+    part_longest: [AtomicU64; PumpPart::COUNT],
 }
 
 /// The parts of a pump, timed for [`pump_report`].
@@ -1802,6 +1804,7 @@ impl PumpPart {
 
     fn add(self, ticks: u64) {
         PUMPS.parts[self as usize].fetch_add(ticks, Ordering::Relaxed);
+        PUMPS.part_longest[self as usize].fetch_max(ticks, Ordering::Relaxed);
     }
 }
 
@@ -1846,6 +1849,7 @@ static PUMPS: PumpCounts = PumpCounts {
     step_serving: [const { AtomicU32::new(0) }; 4],
     steps: AtomicU64::new(0),
     parts: [const { AtomicU64::new(0) }; PumpPart::COUNT],
+    part_longest: [const { AtomicU64::new(0) }; PumpPart::COUNT],
 };
 
 /// Ticks the boot CPU spent in posted pumps ([`pump_posted`]).
@@ -2086,7 +2090,8 @@ fn pump_waiting() {
 /// Linux step, the shootdowns during it and the posted calls being performed
 /// as it began (`-` for none), and `unmaps=device/pages/files/stacks`
 /// ([`UNMAPS`]), and `total_us=enter/children/steps/leave/look:…` the
-/// pumps' time by [`PumpPart`]. Then `\nGPU LINUX timers=… works=… sleepers=… timeouts=…
+/// pumps' time by [`PumpPart`], then `part_longest_us=…` the longest each
+/// part took in one pump. Then `\nGPU LINUX timers=… works=… sleepers=… timeouts=…
 /// steps=…` ([`linux_report`]).
 pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
     let gpu = installed()?;
@@ -2145,10 +2150,16 @@ pub(super) fn pump_report(tsc_hz: u64) -> Option<String> {
         .iter()
         .map(|part| format!("{}", micros(take(part))))
         .collect();
+    let longest: Vec<String> = PUMPS
+        .part_longest
+        .iter()
+        .map(|part| format!("{}", micros(take(part))))
+        .collect();
     let pumps = format!(
-        "{pumps} total_us={}/{}",
-        PumpPart::NAMES.join("/"),
-        parts.join("/")
+        "{pumps} total_us={names}/{} part_longest_us={names}/{}",
+        parts.join("/"),
+        longest.join("/"),
+        names = PumpPart::NAMES.join("/"),
     );
     let linux = linux_report(take(&PUMPS.steps));
     Some(pumps + &linux + &nvkm)

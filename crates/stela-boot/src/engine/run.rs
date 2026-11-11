@@ -188,6 +188,64 @@ fn device_exits_report<H: Host>(
         line.push_str(&format!(" {name}={count}/{}", nanos(ticks)));
     }
     output::arguments(format_args!("{line}\n"));
+    // A device write's exit, split ([`step_timing::DeviceWrites`]).
+    let writes = exits.writes;
+    if writes.count != 0 {
+        let each = |ticks: u64| nanos(ticks) / u128::from(writes.count);
+        let parts = writes.access + writes.settle + writes.call;
+        output::arguments(format_args!(
+            "PES DEVICE WRITES count={} ns_each exit={} access={} settle={} call={} rest={}\n",
+            writes.count,
+            each(writes.exit),
+            each(writes.access),
+            each(writes.settle),
+            each(writes.call),
+            each(writes.exit.saturating_sub(parts)),
+        ));
+    }
+}
+
+/// `PES HOT level=samples/other vbar=...`: where native code ran since the
+/// last beat, from every PE's sampled runs (`step_timing::HotBlocks`: each
+/// transfer of native code equally likely), by level, the most sampled
+/// blocks first as `pc:count`. EL1 and guarded PCs are given relative to
+/// VBAR_EL1 (`v+offset`, `v-offset`), which moves with the kernel's slide, so
+/// runs compare across slides; EL0 PCs as they are.
+fn hot_blocks_report<H: Host>(machine: &mut Machine<H, parallel::Board>) {
+    use stela_engine::machine::engine::step_timing::Level;
+    const SHOWN: usize = 24;
+    let hot = parallel::hot_samples(machine);
+    if hot.is_empty() {
+        return;
+    }
+    let vbar = machine
+        .cpu
+        .registers
+        .get(stela_engine::machine::system::Register::VBAR_EL1, 0);
+    for (level, name) in [
+        (Level::Kernel, "kernel"),
+        (Level::Guarded, "guarded"),
+        (Level::User, "user"),
+    ] {
+        let samples = hot.samples[level as usize];
+        if samples == 0 {
+            continue;
+        }
+        let mut line = format!(
+            "PES HOT {name} samples={samples} other={} vbar={vbar:#x}",
+            hot.other
+        );
+        for block in hot.top(level, SHOWN) {
+            if level == Level::User {
+                line.push_str(&format!(" {:#x}:{}", block.pc, block.count));
+            } else if block.pc >= vbar {
+                line.push_str(&format!(" v+{:#x}:{}", block.pc - vbar, block.count));
+            } else {
+                line.push_str(&format!(" v-{:#x}:{}", vbar - block.pc, block.count));
+            }
+        }
+        output::arguments(format_args!("{line}\n"));
+    }
 }
 
 /// `DEVICE TRANSFERS calls/us/longest_us`: since the last beat, each part

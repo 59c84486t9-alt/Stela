@@ -53,6 +53,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
+        let started = self
+            .step_timing
+            .is_some()
+            .then(|| self.host.profile_ticks());
         let result = if self.serial_hold.is_some() {
             self.serial_write_canonical(physical, bytes, value, now)
         } else if self.parallel.is_some() {
@@ -67,8 +71,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let (devices, processors) = self.processor_write_parts();
             devices.write_with_processors(current, physical, bytes, value, now, processors)
         };
+        if let Some(started) = started {
+            let spent = self.host.profile_ticks().wrapping_sub(started);
+            self.timed_write = Some([spent, 0, 0]);
+        }
         self.watch(physical, bytes, result.is_ok().then_some(value), true);
         result
+    }
+
+    /// Add the ticks since `started` to part `part` of the device write
+    /// being timed ([`step_timing::DeviceWrites`]).
+    fn time_write(&mut self, part: usize, started: Option<u64>) {
+        if let Some(started) = started {
+            let spent = self.host.profile_ticks().wrapping_sub(started);
+            if let Some(parts) = &mut self.timed_write {
+                parts[part] += spent;
+            }
+        }
     }
 
     /// Native DMA/session service errors cannot become unknown-register
@@ -92,13 +111,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
             host: &mut self.host,
             lock: self.cpu.memory_lock,
         };
+        let timed = self
+            .timed_write
+            .is_some()
+            .then(|| memory.host.profile_ticks());
         let settled = self.devices.settle_write(self.current, now, &mut memory);
+        self.time_write(1, timed);
         // The call is this step's store's whatever other devices' DMA came
         // to: the caller reads its answer at the next instruction, and a call
         // left pending would run at a later step, on a record its stack has
         // since reused.
         if let Some(call) = settled.call {
+            let timed = self
+                .timed_write
+                .is_some()
+                .then(|| self.host.profile_ticks());
             self.run_gate_call(call, work, settled.lock);
+            self.time_write(2, timed);
         }
         let result = match settled.transfer {
             Ok(()) => Ok(()),

@@ -139,6 +139,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 let page = step_timing::device_page(physical);
                 self.system_exits.devices.add(page, 1, spent, waited);
             }
+            if let Some(parts) = self.timed_write.take() {
+                self.system_exits.devices.writes.add(spent, parts);
+            }
             let level = step_timing::Level::of(self.cpu.pstate.el, self.cpu.pstate.guarded);
             timing.levels.charge(level, spent);
             if let Some(word) = self.timed_word.take() {

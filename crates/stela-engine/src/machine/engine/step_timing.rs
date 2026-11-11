@@ -262,6 +262,40 @@ impl DeviceExit {
 /// The device pages [`DeviceExits`] holds apart.
 pub const DEVICE_PAGES: usize = 64;
 
+/// Device writes the engine completed, and the ticks of their exits split:
+/// the whole exit, the device access call (the devices' lock, the model's
+/// write, the publication of what it changed and the PEs it woke), the
+/// settle after it (the lock again, every master's transfer, the
+/// publication and the host work after) and a gate call it made. The rest
+/// of the exit is the engine's own: leaving and entering the guest, decode,
+/// routing and watching.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeviceWrites {
+    pub count: u64,
+    pub exit: u64,
+    pub access: u64,
+    pub settle: u64,
+    pub call: u64,
+}
+
+impl DeviceWrites {
+    pub fn add(&mut self, exit: u64, parts: [u64; 3]) {
+        self.count += 1;
+        self.exit += exit;
+        self.access += parts[0];
+        self.settle += parts[1];
+        self.call += parts[2];
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.count += other.count;
+        self.exit += other.exit;
+        self.access += other.access;
+        self.settle += other.settle;
+        self.call += other.call;
+    }
+}
+
 /// Device accesses the engine completed, from native faults and device
 /// sites, by [`device_page`], under step timing: an open-addressed table,
 /// with the pages past its size in `other`; and the accesses forwarded to
@@ -272,6 +306,7 @@ pub struct DeviceExits {
     pub other: DeviceExit,
     pub forwarded: u64,
     pub forwarded_ticks: u64,
+    pub writes: DeviceWrites,
 }
 
 impl Default for DeviceExits {
@@ -281,6 +316,7 @@ impl Default for DeviceExits {
             other: DeviceExit::default(),
             forwarded: 0,
             forwarded_ticks: 0,
+            writes: DeviceWrites::default(),
         }
     }
 }
@@ -310,6 +346,7 @@ impl DeviceExits {
         self.other.add(other.count, other.ticks, other.waited);
         self.forwarded += exits.forwarded;
         self.forwarded_ticks += exits.forwarded_ticks;
+        self.writes.merge(&exits.writes);
     }
 
     /// The pages with accesses.

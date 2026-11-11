@@ -742,6 +742,10 @@ pub struct Machine<H: Host, D: Devices> {
     /// The register the native fault being handled reached, which its
     /// exit's ticks are charged to ([`Self::timing_exit`]).
     timed_device: Option<u64>,
+    /// Under step timing, the device write being handled: the ticks of its
+    /// access call, its settle (the DMA after it) and its gate call
+    /// ([`step_timing::DeviceWrites`]).
+    timed_write: Option<[u64; 3]>,
     /// System exits by instruction word, with their handling time under step
     /// timing ([`Self::system_words`]).
     system_words: BTreeMap<u32, DeviceRegister>,
@@ -1227,6 +1231,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             entered_total: 0,
             device_registers: BTreeMap::new(),
             timed_device: None,
+            timed_write: None,
             system_words: BTreeMap::new(),
             timed_word: None,
             timed_closed: false,
