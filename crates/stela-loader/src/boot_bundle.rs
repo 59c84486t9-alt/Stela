@@ -54,7 +54,7 @@ use patches::*;
 
 /// The revision of the content [`prepare`] writes within its schema; a
 /// bundle of another revision is prepared again (`stela setup update stela`).
-pub const REVISION: u32 = 38;
+pub const REVISION: u32 = 39;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -198,9 +198,16 @@ impl Bundle {
         bytes: Vec<u8>,
         source: Source,
     ) -> Result<()> {
+        self.append_file(name, bytes, source)
+    }
+
+    /// Append a file the engine reads by name (such as the staged signing
+    /// answers of an install, `tss-answers.plist`), with its source receipt;
+    /// it is not a guest memory region.
+    pub fn append_file(&mut self, name: String, bytes: Vec<u8>, source: Source) -> Result<()> {
         require!(
             name.len() <= MAX_FILE_NAME && !self.files.iter().any(|(file, _)| file == &name),
-            "board firmware name {name} is too long or already a bundle file",
+            "bundle file name {name} is too long or already a bundle file",
             ?name
         );
         self.manifest.files.push(File {

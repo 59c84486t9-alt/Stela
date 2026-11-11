@@ -1,14 +1,20 @@
-//! The restore's AP root ticket from Apple's signing service (TSS).
+//! The restore's tickets from Apple's signing service (TSS).
 //! Stela plays the boot ROM and the SEP ROM, so it draws their nonces here;
 //! the bundle boots under the ticket Apple personalizes for them, and the
 //! restore host answers restored's `RootTicket` with it, whose SHA-384
 //! `update_ticket` requires to be `/chosen/boot-manifest-hash`.
+//!
+//! An erase install's other three requests (the recoveryOS root ticket, the
+//! Cryptex1 ticket and the recoveryOS LocalPolicy) bind only values known
+//! here once the AP ticket is signed, and a recoveryOS policy nonce the
+//! install's SEP takes from the bundle; setup asks for them too
+//! ([`staged`]), so the install needs no network.
 use anyhow::{Context, Result, anyhow};
 use reqwest::blocking::Client;
 use std::time::Duration;
 use stela_contracts::refuse;
 use stela_runtime::restore::{
-    self, plist,
+    self, answers, plist,
     plist::{Limits, Value},
     store::Identity,
     ticket::Ticket,
@@ -79,14 +85,22 @@ fn signing_answer(host: &str, bytes: &[u8]) -> Result<(), String> {
     ))
 }
 
-/// Apple's AP root ticket for build identity `index` of the BuildManifest
-/// `manifest` and the machine `ecid`, under nonces drawn from the OS.
-pub fn personalized(manifest: &[u8], index: u32, ecid: u64) -> Result<Vec<u8>> {
-    let index = usize::try_from(index)?;
+fn apple() -> Result<Box<dyn tss::Transport>> {
+    Ok(Box::new(Apple(Client::builder().timeout(TIMEOUT).build()?)))
+}
+
+/// Build identity `index` of the BuildManifest `manifest`, and every
+/// `macOS Customer` identity, among which is the one it installs.
+fn identities(manifest: &[u8], index: usize) -> Result<(Identity, Vec<Identity>)> {
     let mut selected = None;
+    let mut customers = Vec::new();
     let mut sink = |at: usize, value: Value| {
+        let identity = Identity { index: at, value };
+        if identity.variant().ok() == Some("macOS Customer") {
+            customers.push(identity.clone());
+        }
         if at == index {
-            selected = Some(value);
+            selected = Some(identity);
         }
         Ok(())
     };
@@ -103,62 +117,83 @@ pub fn personalized(manifest: &[u8], index: u32, ecid: u64) -> Result<Vec<u8>> {
         },
     )
     .map_err(|error| anyhow!("BuildManifest: {error}"))?;
-    let identity = Identity {
-        index,
-        value: selected.with_context(|| format!("BuildManifest has no identity {index}"))?,
-    };
+    let selected = selected.with_context(|| format!("BuildManifest has no identity {index}"))?;
+    Ok((selected, customers))
+}
+
+/// Apple's AP root ticket for build identity `index` of the BuildManifest
+/// `manifest` and the machine `ecid`, under nonces drawn from the OS.
+pub fn personalized(manifest: &[u8], index: u32, ecid: u64) -> Result<Vec<u8>> {
+    personalized_with(manifest, index, ecid, &mut *apple()?)
+}
+
+fn personalized_with(
+    manifest: &[u8],
+    index: u32,
+    ecid: u64,
+    transport: &mut dyn tss::Transport,
+) -> Result<Vec<u8>> {
+    let (identity, _) = identities(manifest, usize::try_from(index)?)?;
     let mut nonces = tss::Nonces {
         ap: [0; 32],
         sep: [0; 20],
     };
     getrandom::getrandom(&mut nonces.ap).context("the system's random generator failed")?;
     getrandom::getrandom(&mut nonces.sep).context("the system's random generator failed")?;
-    let mut signer = tss::Signer {
-        ecid,
-        nonces: nonces.clone(),
-        transport: Box::new(Apple(Client::builder().timeout(TIMEOUT).build()?)),
-    };
-    let bytes = tss::request_root_ticket(&mut signer, &identity, tss::Root::Ap)
+    let request = tss::root_ticket_request(&identity, ecid, &nonces, tss::Root::Ap)
         .map_err(|error| anyhow!("Apple's signing service: {error}"))?;
+    let body = plist::encode_xml(&request, Limits::default())
+        .map_err(|error| anyhow!("the AP ticket request: {error}"))?;
+    let response = transport
+        .exchange(
+            tss::HOST,
+            tss::PATH,
+            &tss::HEADERS,
+            tss::CONTENT_TYPE,
+            &body,
+        )
+        .map_err(|error| anyhow!("Apple's signing service: {error}"))?
+        .context("Apple's signing service gave no answer")?;
+    let bytes =
+        tss::ticket(&response).map_err(|error| anyhow!("Apple's signing service: {error}"))?;
     Ticket::personalized(bytes.clone(), &identity, ecid, Some(&nonces))
         .map_err(|error| anyhow!("Apple's root ticket: {error}"))?;
     Ok(bytes)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use stela_runtime::restore::tss::Transport as _;
-
-    #[test]
-    fn signing_requests_are_asked_again_and_a_sign_in_page_is_named() {
-        let tss = "STATUS=0&MESSAGE=SUCCESS&REQUEST_STRING=<?xml version=\"1.0\"?>";
-        let reply = |status: &str, body: &str| {
-            format!(
-                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-        };
-        let (url, _) = crate::net::tests::serve(vec![
-            reply("502 Bad Gateway", ""),
-            reply("200 OK", tss),
-            reply("200 OK", "<html><body>Sign in to Guest Wi-Fi</body></html>"),
-        ]);
-        let host = url
-            .strip_prefix("http://")
-            .and_then(|rest| rest.split('/').next())
-            .unwrap()
-            .to_owned();
-        let mut apple = Apple(Client::new());
-        let answer = apple
-            .exchange(&host, "/TSS/controller", &[], "text/xml", b"<plist/>")
-            .unwrap();
-        assert_eq!(answer.as_deref(), Some(tss.as_bytes()));
-        let error = apple
-            .exchange(&host, "/TSS/controller", &[], "text/xml", b"<plist/>")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("sign in to the network"), "{error}");
-        assert!(error.contains("a web page"), "{error}");
-    }
+/// Apple's answers to the erase install's recoveryOS root ticket, Cryptex1
+/// ticket and recoveryOS LocalPolicy requests for the machine `ecid` booted
+/// under `ap_ticket` with build identity `index`, and the recoveryOS policy
+/// nonce they bind, drawn from the OS: the bundle file
+/// [`tss::staged::FILE`].
+pub fn staged(manifest: &[u8], index: u32, ecid: u64, ap_ticket: &[u8]) -> Result<Vec<u8>> {
+    staged_with(manifest, index, ecid, ap_ticket, &mut *apple()?)
 }
+
+fn staged_with(
+    manifest: &[u8],
+    index: u32,
+    ecid: u64,
+    ap_ticket: &[u8],
+    transport: &mut dyn tss::Transport,
+) -> Result<Vec<u8>> {
+    let (restore, customers) = identities(manifest, usize::try_from(index)?)?;
+    let installed = answers::installed_identity(&customers, &restore)
+        .map_err(|error| anyhow!("BuildManifest: {error}"))?;
+    let mut policy_nonce = [0; 32];
+    getrandom::getrandom(&mut policy_nonce).context("the system's random generator failed")?;
+    let set = tss::staged::Setup {
+        restore: &restore,
+        installed: &installed,
+        ecid,
+        ap_ticket,
+        policy_nonce: &policy_nonce,
+    }
+    .stage(transport)
+    .map_err(|error| anyhow!("Apple's signing service: {error}"))?;
+    set.encode()
+        .map_err(|error| anyhow!("the staged signing answers: {error}"))
+}
+
+#[cfg(test)]
+mod tests;

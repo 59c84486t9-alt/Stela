@@ -909,6 +909,7 @@ impl Prepare {
         // A restore for a named machine boots under the AP root ticket
         // Apple's signing service (TSS) personalizes for its ECID; the
         // install answers restored's RootTicket with the same ticket.
+        let mut staged = None;
         let boot_manifest = match (self.restore, self.ecid) {
             (true, Some(ecid)) => {
                 let manifest = restore::archive::read_member(
@@ -921,6 +922,20 @@ impl Prepare {
                      signing service (gs.apple.com) for the restore's AP root ticket"
                 );
                 let bytes = ticket::personalized(&manifest, identity.index, ecid)?;
+                // An erase install's other signing requests bind only values
+                // known now: their answers go on the stick, so the install
+                // needs no network.
+                if !self.update {
+                    eprintln!(
+                        "Sending the same ECID and the install's recoveryOS and Cryptex1 \
+                         requests to Apple's signing service, so the install needs no network"
+                    );
+                    staged = ticket::staged(&manifest, identity.index, ecid, &bytes)
+                        .inspect_err(|error| {
+                            eprintln!("note: {error:#}; installing macOS will need a network")
+                        })
+                        .ok();
+                }
                 let digest = stela_formats::sha256(&bytes);
                 Some(Decoded {
                     source: Source {
@@ -1062,6 +1077,25 @@ impl Prepare {
             }
             None => boot_bundle::prepare(&inputs, &options)?,
         };
+        if let Some(bytes) = staged {
+            let digest = stela_formats::sha256(&bytes);
+            let source = Source {
+                component: "Signing answers".into(),
+                member: "gs.apple.com staged install answers".into(),
+                container_sha256: digest.clone(),
+                payload_type: "plist".into(),
+                description: "Apple's answers to the install's recoveryOS root ticket, \
+                              Cryptex1 and recoveryOS LocalPolicy requests"
+                    .into(),
+                decoded_bytes: bytes.len() as u64,
+                decoded_sha256: digest,
+            };
+            bundle.append_file(
+                stela_runtime::restore::tss::staged::FILE.into(),
+                bytes,
+                source,
+            )?;
+        }
         let mut unresolved = vec![];
         // The board the bundle's DeviceTree describes names its images, each
         // die the one its own node or its flash's names; the same IPSW's
