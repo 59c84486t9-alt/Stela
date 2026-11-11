@@ -99,7 +99,7 @@ fn measure(word: u32, single: bool, value: f64, target: TargetCpu) -> String {
 }
 
 #[test]
-#[ignore = "manual: opt-in cost report"]
+#[ignore = "manual: opt-in"]
 fn conversion_costs() {
     let host = TargetCpu::detect();
     let mut targets = alloc::vec![
