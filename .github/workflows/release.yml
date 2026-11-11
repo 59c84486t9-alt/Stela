@@ -88,7 +88,7 @@ jobs:
         run: |
           swift --version
           # build.sh prints the bundle's path last.
-          app="$("$APP/build.sh" | tee /dev/stderr | tail -1)"
+          app="$(bash "$APP/build.sh" | tee /dev/stderr | tail -1)"
           [[ -f "$app/Contents/Info.plist" ]] || { echo "::error::$APP/build.sh named no app bundle: $app"; exit 1; }
           # tar keeps the bundle's modes and code signature byte for byte.
           tar -C "$(dirname "$app")" -cf Stela.app.tar Stela.app
