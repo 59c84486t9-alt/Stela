@@ -113,6 +113,15 @@ const LOGGED_INPUT: usize = 64;
 const DUMPED_SWAPS: u32 = 2;
 /// How many new layer shapes are logged ([`Log::Placement`]).
 const PLACEMENTS: u32 = 64;
+/// How many distinct swap surface layouts are reported and remembered; one
+/// line says when later ones are left out.
+const LAYOUTS: usize = 64;
+/// How many degraded answers, by method and parameter, are reported and
+/// remembered; one line says when later ones are left out.
+const UNMODELED_REPORTS: usize = 256;
+/// The submitted swaps the model holds for presentation: past this many a
+/// submit refuses. The deepest queue measured was 32.
+const QUEUED_SWAPS: usize = 256;
 /// Report progress once this many swaps have reached the scanout.
 const PRESENT_SUMMARY_INTERVAL: u64 = 256;
 /// The started swaps kept for submission. A client that dies between
@@ -411,12 +420,18 @@ pub struct Methods {
     /// The interface's methods answered without a model, each reported once
     /// per method and, where the method names one, per parameter.
     unmodeled: BTreeSet<([u8; 4], Option<u32>)>,
+    /// Whether one past [`UNMODELED_REPORTS`] was seen, which is reported
+    /// once.
+    unlisted_unmodeled: bool,
     /// Those reports, not yet taken ([`Self::take_unmodeled`]).
     reported: Vec<String>,
     /// The methods called so far: each one's first call is logged.
     called: BTreeSet<[u8; 4]>,
-    /// The swap surface layouts seen so far, each reported once.
+    /// The swap surface layouts seen so far, each reported once
+    /// ([`LAYOUTS`] at most).
     layouts: BTreeSet<swap::SurfaceLayout>,
+    /// Whether a layout past [`LAYOUTS`] was seen, which is reported once.
+    unlisted_layouts: bool,
     /// The layer shapes logged so far ([`PLACEMENTS`] at most).
     placements: u32,
     /// The current call, when its log entry was left out; a refusal logs it.
@@ -544,7 +559,9 @@ impl Methods {
             advertised,
             last_refusal: None,
             unmodeled: BTreeSet::new(),
+            unlisted_unmodeled: false,
             layouts: BTreeSet::new(),
+            unlisted_layouts: false,
             placements: 0,
             reported: Vec::new(),
             called: BTreeSet::new(),
@@ -923,6 +940,15 @@ impl Methods {
     /// `detail` (a parameter the method names, where one tells requests
     /// apart), in the display log and as an `UNMODELED` line.
     fn report_unmodeled(&mut self, tag: [u8; 4], answer: Degraded, detail: Option<u32>) {
+        if self.unmodeled.len() >= UNMODELED_REPORTS && !self.unmodeled.contains(&(tag, detail)) {
+            if !self.unlisted_unmodeled {
+                self.unlisted_unmodeled = true;
+                self.reported.push(format!(
+                    "IOMFB unmodeled answers after the first {UNMODELED_REPORTS} are not listed"
+                ));
+            }
+            return;
+        }
         if self.unmodeled.insert((tag, detail)) {
             let name = self.name(&tag);
             let entry = Log::Unmodeled {
@@ -1603,8 +1629,16 @@ impl Methods {
         };
         // Each new surface layout once, before the model shows or refuses it.
         for layer in submission.layers.iter().flatten() {
-            if self.layouts.insert(layer.record.layout) {
-                self.reported.push(layer.record.layout.to_string());
+            let layout = layer.record.layout;
+            if self.layouts.len() < LAYOUTS {
+                if self.layouts.insert(layout) {
+                    self.reported.push(layout.to_string());
+                }
+            } else if !self.unlisted_layouts && !self.layouts.contains(&layout) {
+                self.unlisted_layouts = true;
+                self.reported.push(format!(
+                    "SURFACE layouts after the first {LAYOUTS} are not listed"
+                ));
             }
         }
         let swap_id = submission.swap_id;
@@ -1614,6 +1648,12 @@ impl Methods {
                 refuse!("swap_submit_dcp names a swap that is not started"),
             );
         };
+        if self.frames.len() >= QUEUED_SWAPS {
+            return self.refuse(
+                tag,
+                refuse!("swap_submit_dcp queues more swaps than the model holds"),
+            );
+        }
         if self.trace_swap(swap_id) {
             self.record_log(Log::Submitted {
                 swap_id,

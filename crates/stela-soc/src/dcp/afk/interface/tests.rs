@@ -408,3 +408,20 @@ fn bad_framing_or_dma_faults_do_not_execute_a_service() {
     );
     assert_eq!(effects.borrow().calls, 0);
 }
+
+#[test]
+fn a_dma_request_longer_than_a_service_takes_refuses_before_allocating() {
+    let mut memory = Memory::default();
+    memory.write(0x5000, &[0x5a; 0x1000]).unwrap();
+    for (length, served) in [(0x1000u32, true), (0x1001, false), (u32::MAX, false)] {
+        let mut packet = alloc::vec![0u8; 8 + 24];
+        packet[0] = 1;
+        packet[16..24].copy_from_slice(&0x5000u64.to_le_bytes());
+        packet[28..32].copy_from_slice(&length.to_le_bytes());
+        let command = Command::decode(&packet, &mut memory, None);
+        assert_eq!(command.is_ok(), served, "{length:#x}");
+        if let Ok(command) = command {
+            assert_eq!(command.payload, [0x5a; 0x1000]);
+        }
+    }
+}

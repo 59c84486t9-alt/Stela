@@ -1972,3 +1972,58 @@ fn a_scaled_layer_damages_the_screen_rows_its_destination_covers() {
     methods.present(2 * period, |_, _| true).unwrap();
     assert_eq!(*presented.borrow(), [None, Some(3..13), Some(9..13)]);
 }
+
+#[test]
+fn surface_layouts_are_reported_once_up_to_a_bound() {
+    let mut methods = methods();
+    let mut surfaces = Vec::new();
+    for width in (1..=LAYOUTS as u32 + 6).chain([1, 2]) {
+        let id = start_swap(&mut methods);
+        returned(methods.call(*b"A407", &submission(id, &[(0, width, 1, 0x1000)]), 0xc));
+        surfaces.extend(
+            methods
+                .take_unmodeled()
+                .into_iter()
+                .filter(|line| line.contains("SURFACE")),
+        );
+    }
+    assert_eq!(surfaces.len(), LAYOUTS + 1, "{surfaces:?}");
+    assert!(
+        surfaces[LAYOUTS - 1].starts_with(&format!("SURFACE format=BGRA (0x42475241) {LAYOUTS}x1"))
+    );
+    assert_eq!(
+        surfaces[LAYOUTS],
+        format!("SURFACE layouts after the first {LAYOUTS} are not listed")
+    );
+    assert_eq!(methods.layouts.len(), LAYOUTS);
+}
+
+#[test]
+fn degraded_answers_are_reported_once_up_to_a_bound() {
+    let mut methods = methods();
+    let mut lines = Vec::new();
+    for mode in (1..=UNMODELED_REPORTS as u32 + 3).chain([1]) {
+        let reply = returned(methods.call(*b"A426", &mode.to_le_bytes(), 4));
+        assert_eq!(status(&reply, 0), LINK_UNSUPPORTED);
+        lines.extend(methods.take_unmodeled());
+    }
+    assert_eq!(lines.len(), UNMODELED_REPORTS + 1);
+    assert_eq!(
+        lines[UNMODELED_REPORTS],
+        format!("IOMFB unmodeled answers after the first {UNMODELED_REPORTS} are not listed")
+    );
+    assert_eq!(methods.unmodeled.len(), UNMODELED_REPORTS);
+}
+
+#[test]
+fn a_submit_past_the_held_swaps_refuses_and_keeps_its_swap_started() {
+    let mut methods = methods();
+    for _ in 0..QUEUED_SWAPS {
+        let id = start_swap(&mut methods);
+        returned(methods.call(*b"A407", &submission(id, &[]), 0xc));
+    }
+    let id = start_swap(&mut methods);
+    assert!(methods.call(*b"A407", &submission(id, &[]), 0xc).is_err());
+    assert_eq!(methods.frames.len(), QUEUED_SWAPS);
+    assert!(methods.started.iter().any(|&(started, _)| started == id));
+}

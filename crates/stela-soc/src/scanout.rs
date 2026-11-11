@@ -316,6 +316,12 @@ impl Rect {
     }
 }
 
+/// How many source bytes a scaled layer's row may span for each byte it
+/// shows before its pixels are read one at a time: a narrowing this strong
+/// reads only the source pixels its screen columns take, so a row's reads
+/// stay bounded by the screen whatever the layer's ratio.
+const SPAN_PER_SHOWN: usize = 4;
+
 /// One layer of a composed frame: a source rectangle of a surface shown in
 /// a destination rectangle of the screen, its colour premultiplied by its
 /// alpha or not.
@@ -387,21 +393,24 @@ impl Layer {
                 })
     }
 
-    /// Reads source row `from_y` into `out`, in [`PixelFormat::row_format`]:
-    /// a two-plane extended-range row is converted, its alpha read from its
-    /// plane unless `opaque` (a premultiplied bottom layer, which shows
-    /// over black whatever its alpha).
+    /// Reads source row `from_y` from its pixel `skip` into `out`, in
+    /// [`PixelFormat::row_format`]: a two-plane extended-range row is
+    /// converted, its alpha read from its plane unless `opaque` (a
+    /// premultiplied bottom layer, which shows over black whatever its
+    /// alpha).
     fn read_row(
         &self,
         from_y: u64,
+        skip: u64,
         out: &mut [u8],
         read: &mut impl FnMut(u64, &mut [u8]) -> bool,
         opaque: bool,
     ) -> Result<()> {
         let y = u64::from(self.source.y) + from_y;
+        let x = u64::from(self.source.x) + skip;
         let iova = y
             .checked_mul(self.surface.stride.into())
-            .and_then(|offset| offset.checked_add(u64::from(self.source.x) * 4))
+            .and_then(|offset| offset.checked_add(x * 4))
             .and_then(|offset| self.surface.iova.checked_add(offset))
             .ok_or(refuse!("layer row address overflows"))?;
         if !read(iova, out) {
@@ -420,7 +429,7 @@ impl Layer {
         }
         let mut iova = y
             .checked_mul(alpha_stride.into())
-            .and_then(|offset| offset.checked_add(u64::from(self.source.x)))
+            .and_then(|offset| offset.checked_add(x))
             .and_then(|offset| alpha.checked_add(offset))
             .ok_or(refuse!("layer row address overflows"))?;
         let mut bytes = [0u8; 256];
@@ -437,12 +446,14 @@ impl Layer {
         Ok(())
     }
 
-    /// Reads source row `from_y` as the surface holds it into `out`, its
-    /// color row then, for a two-plane extended-range surface whose
-    /// `alpha` counts, its alpha row: [`Self::source_row_bytes`] bytes.
+    /// Reads the first `width` pixels of source row `from_y` as the
+    /// surface holds them into `out`, its color then, for a two-plane
+    /// extended-range surface whose `alpha` counts, its alpha:
+    /// [`Self::row_bytes`] bytes.
     fn read_source(
         &self,
         from_y: u64,
+        width: usize,
         out: &mut [u8],
         alpha: bool,
         read: &mut impl FnMut(u64, &mut [u8]) -> bool,
@@ -455,7 +466,7 @@ impl Layer {
                 .and_then(|offset| base.checked_add(offset))
                 .ok_or(refuse!("layer row address overflows"))
         };
-        let (pixels, rest) = out.split_at_mut(self.source.width as usize * 4);
+        let (pixels, rest) = out.split_at_mut(width * 4);
         if !read(
             address(self.surface.iova, self.surface.stride, x * 4)?,
             pixels,
@@ -474,10 +485,10 @@ impl Layer {
         Ok(())
     }
 
-    /// The bytes [`Self::read_source`] reads of a source row.
-    fn source_row_bytes(&self, alpha: bool) -> usize {
-        let width = self.source.width as usize;
-        match self.surface.format {
+    /// The bytes [`Self::read_source`] reads of `width` pixels of a
+    /// `format` source row.
+    fn row_bytes(width: usize, alpha: bool, format: PixelFormat) -> usize {
+        match format {
             PixelFormat::Xr10A8 { .. } if alpha => width * 5,
             _ => width * 4,
         }
@@ -659,26 +670,52 @@ pub struct Composed {
     scratch: Vec<u8>,
 }
 
-/// A layer's source rows as the frame on screen shows them.
+/// The most layers whose source rows [`refine`] keeps: the DCP's four
+/// slots. Higher layers are composed whole wherever damage names them.
+const KEPT_LAYERS: usize = 4;
+/// The bytes of kept source rows a screen pixel allows, all layers
+/// together: two screens of 32-bit pixels, enough for a full-screen
+/// two-plane layer (5 bytes a pixel) with small layers over it or for two
+/// full-screen 32-bit layers. A layer past the bound is composed whole
+/// wherever damage names it, as a scaled one is.
+const KEPT_BYTES_PER_PIXEL: usize = 8;
+
+/// A layer's source rows as the frame on screen shows them: only its
+/// on-screen part, which for an unscaled layer is the first `width`
+/// pixels of its first rows.
 #[derive(Debug)]
 struct Shown {
     /// The layer's [`Layer::shape`].
     shape: Layer,
-    /// Whether its alpha plane counts ([`Layer::source_row_bytes`]).
+    /// Whether its alpha plane counts ([`Layer::row_bytes`]).
     alpha: bool,
+    /// Whether its rows are kept and compared; otherwise every row it
+    /// covers, before and after, changed.
+    kept: bool,
+    /// The on-screen pixels of each row kept.
+    width: usize,
+    /// `width` color pixels a row, then, when `alpha` counts, `width`
+    /// alpha bytes; one row for each on-screen row of the layer.
     rows: Vec<u8>,
 }
 
 impl Shown {
-    /// Keeps the bytes `read` filled at `iova` that lie in a source row of
-    /// `layer`, in its color plane or a counted alpha plane.
+    /// The bytes of a kept row.
+    fn row_bytes(&self) -> usize {
+        Layer::row_bytes(self.width, self.alpha, self.shape.surface.format)
+    }
+
+    /// Keeps the bytes `read` filled at `iova` while composing `layer`
+    /// that lie in the kept part of one of its source rows, in its color
+    /// plane or a counted alpha plane.
     fn keep(&mut self, layer: &Layer, iova: u64, bytes: &[u8]) {
-        let source = layer.source;
-        let width = u64::from(source.width);
         if self.rows.is_empty() {
             return;
         }
-        let row_bytes = layer.source_row_bytes(self.alpha);
+        let source = layer.source;
+        let row_bytes = self.row_bytes();
+        let height = (self.rows.len() / row_bytes) as u64;
+        let width = self.width as u64;
         let mut planes = [
             (layer.surface.iova, u64::from(layer.surface.stride), 4, 0),
             (0, 0, 0, 0),
@@ -701,14 +738,14 @@ impl Shown {
             let Some(from_y) = y.checked_sub(source.y.into()) else {
                 continue;
             };
-            if from_y >= u64::from(source.height)
-                || column < start
-                || column - start + bytes.len() as u64 > width * size
-            {
+            let limit = width * size;
+            if from_y >= height || column < start || column - start >= limit {
                 continue;
             }
-            let into = from_y as usize * row_bytes + (at + column - start) as usize;
-            self.rows[into..][..bytes.len()].copy_from_slice(bytes);
+            let skip = column - start;
+            let count = (bytes.len() as u64).min(limit - skip) as usize;
+            let into = from_y as usize * row_bytes + (at + skip) as usize;
+            self.rows[into..][..count].copy_from_slice(&bytes[..count]);
             return;
         }
     }
@@ -721,24 +758,40 @@ impl Shown {
 /// damages need not be read twice, converted or copied again. Rows are
 /// compared as the surfaces hold them, before conversion, from the top and
 /// from the bottom up to the first that changed: the rows between are
-/// composed, and kept as [`present`] reads them. Only while every layer is
-/// unscaled and shaped as before; otherwise every row is composed, and
-/// kept, for the next swap. `alpha` says which layers' alpha counts.
+/// composed, and kept as [`present`] reads them. Only the on-screen part of
+/// each unscaled layer is kept, within [`KEPT_LAYERS`] and
+/// [`KEPT_BYTES_PER_PIXEL`]; the rows of any other layer, and of one moved,
+/// resized or reshaped, are composed. `alpha` says which layers' alpha
+/// counts.
 fn refine(
     layers: &[Layer],
+    mode: Mode,
     damage: Option<Range<usize>>,
     alpha: impl Fn(usize) -> bool,
     read: &mut impl FnMut(u64, &mut [u8]) -> bool,
     composed: &mut Composed,
 ) -> Result<Option<Range<usize>>> {
-    // A scaled layer's rows are not compared: they always changed.
-    let unscaled = |layer: &Layer| {
-        layer.source.width == layer.destination.width
-            && layer.source.height == layer.destination.height
-    };
+    // Each layer's kept pixels a row and rows, `None` when its rows are
+    // not kept: a scaled layer's always changed.
+    let mut budget = mode.width as usize * mode.height as usize * KEPT_BYTES_PER_PIXEL;
+    let kept: Vec<Option<(usize, usize)>> = layers
+        .iter()
+        .enumerate()
+        .map(|(index, layer)| {
+            if index >= KEPT_LAYERS || !layer.unscaled() {
+                return None;
+            }
+            let (width, height) = on_screen(layer.destination, mode.width, mode.height)
+                .map_or((0, 0), |(xs, ys)| (xs[1] - xs[0], ys[1] - ys[0]));
+            let bytes = Layer::row_bytes(width, alpha(index), layer.surface.format) * height;
+            budget = budget.checked_sub(bytes)?;
+            Some((width, height))
+        })
+        .collect();
     let fits = |index: usize, shown: &Shown| {
-        unscaled(&layers[index])
-            && shown.shape == layers[index].shape()
+        kept[index].is_some_and(|(width, height)| {
+            shown.kept && shown.width == width && shown.rows.len() == shown.row_bytes() * height
+        }) && shown.shape == layers[index].shape()
             && shown.alpha == alpha(index)
     };
     let counted = composed.shown.len() == layers.len();
@@ -749,21 +802,21 @@ fn refine(
             continue;
         }
         // Megabytes a heap shared with the engine may lack: without them,
-        // frames present the damage they are given.
+        // the layer is composed whole wherever damage names it.
         let mut rows = Vec::new();
-        let bytes = if unscaled(layer) {
-            layer.source_row_bytes(alpha(index)) * layer.source.height as usize
-        } else {
-            0
-        };
-        if rows.try_reserve_exact(bytes).is_err() {
-            composed.shown.clear();
-            return Ok(damage);
+        let (width, bytes) = kept[index].map_or((0, 0), |(width, height)| {
+            let row = Layer::row_bytes(width, alpha(index), layer.surface.format);
+            (width, row * height)
+        });
+        let reserved = rows.try_reserve_exact(bytes).is_ok();
+        if reserved {
+            rows.resize(bytes, 0);
         }
-        rows.resize(bytes, 0);
         let shown = Shown {
             shape: layer.shape(),
             alpha: alpha(index),
+            kept: kept[index].is_some() && reserved,
+            width,
             rows,
         };
         if counted {
@@ -781,8 +834,10 @@ fn refine(
     let Some(lines) = damage.filter(|_| counted) else {
         return Ok(None);
     };
-    let widest = (0..layers.len())
-        .map(|index| layers[index].source_row_bytes(alpha(index)))
+    let widest = composed
+        .shown
+        .iter()
+        .map(Shown::row_bytes)
         .max()
         .unwrap_or(0);
     if composed.scratch.len() < widest {
@@ -799,13 +854,12 @@ fn refine(
         }
         for (layer, shown) in layers.iter().zip(&mut composed.shown) {
             let top = layer.destination.y as usize;
-            if shown.rows.is_empty() || !(top..top + layer.destination.height as usize).contains(&y)
-            {
+            let row_bytes = shown.row_bytes();
+            if row_bytes == 0 || !(top..top + shown.rows.len() / row_bytes).contains(&y) {
                 continue;
             }
-            let row_bytes = layer.source_row_bytes(shown.alpha);
             let scratch = &mut composed.scratch[..row_bytes];
-            layer.read_source((y - top) as u64, scratch, shown.alpha, read)?;
+            layer.read_source((y - top) as u64, shown.width, scratch, shown.alpha, read)?;
             // A changed row is composed, and kept, whole.
             if shown.rows[(y - top) * row_bytes..][..row_bytes] != *scratch {
                 return Ok(true);
@@ -856,7 +910,7 @@ pub(crate) fn present(
     // its alpha, which it does not read.
     let direct_base = rows.direct_base;
     let alpha = |index: usize| !(index == 0 && direct_base && layers[0].premultiplied);
-    let damage = match refine(layers, damage, alpha, &mut read, composed) {
+    let damage = match refine(layers, mode, damage, alpha, &mut read, composed) {
         Ok(damage) => damage,
         Err(error) => {
             composed.shown.clear();
@@ -866,15 +920,15 @@ pub(crate) fn present(
     if damage.as_ref().is_some_and(Range::is_empty) {
         return Ok(());
     }
-    // The rows composed are kept as they are read; they are those of the
-    // frame on screen only once it is.
+    // The rows composed are kept as they are read, each only for the layer
+    // it is read for: another layer showing the same memory elsewhere on
+    // screen may not be recomposed. They are those of the frame on screen
+    // only once it is.
     let mut shown = core::mem::take(&mut composed.shown);
-    let keeping = |iova: u64, bytes: &mut [u8]| {
+    let keeping = |index: usize, iova: u64, bytes: &mut [u8]| {
         let reached = read(iova, bytes);
-        if reached {
-            for (layer, shown) in layers.iter().zip(&mut shown) {
-                shown.keep(layer, iova, bytes);
-            }
+        if reached && let Some(shown) = shown.get_mut(index) {
+            shown.keep(&layers[index], iova, bytes);
         }
         reached
     };
@@ -890,7 +944,7 @@ fn present_rows(
     sink: &mut dyn Scanout,
     rows: &mut Rows<'_>,
     damage: Option<Range<usize>>,
-    mut read: impl FnMut(u64, &mut [u8]) -> bool,
+    mut read: impl FnMut(usize, u64, &mut [u8]) -> bool,
     composed: &mut Composed,
 ) -> Result<()> {
     let mode = sink.mode();
@@ -956,6 +1010,7 @@ pub fn compose_into(
     let mut rows = Rows::new(layers, mode)?;
     let row_bytes = mode.width as usize * 4;
     frame.resize(row_bytes * mode.height as usize, 0);
+    let mut read = |_: usize, iova: u64, bytes: &mut [u8]| read(iova, bytes);
     for (y, out) in frame.chunks_exact_mut(row_bytes.max(1)).enumerate() {
         rows.compose(y, out, &mut read)?;
     }
@@ -980,6 +1035,9 @@ struct Rows<'a> {
     /// For each scaled layer, the byte offset in its source row of the
     /// pixel each on-screen column takes; empty for an unscaled layer.
     columns: Vec<Vec<u32>>,
+    /// Each column's offset in a row of one pixel a column, as a strongly
+    /// narrowed layer's is read.
+    dense: Vec<u32>,
 }
 
 impl<'a> Rows<'a> {
@@ -999,7 +1057,12 @@ impl<'a> Rows<'a> {
                 Some((xs, _)) if !layer.unscaled() => layer.columns(*xs),
                 _ => Vec::new(),
             })
-            .collect();
+            .collect::<Vec<Vec<u32>>>();
+        let dense = if columns.iter().any(|columns| !columns.is_empty()) {
+            (0..mode.width).map(|x| x * 4).collect()
+        } else {
+            Vec::new()
+        };
         Ok(Self {
             layers,
             placed,
@@ -1010,15 +1073,17 @@ impl<'a> Rows<'a> {
             drawn: Vec::new(),
             scratch: Vec::new(),
             columns,
+            dense,
         })
     }
 
-    /// Compose row `y` into `out`, the mode's width of pixels.
+    /// Compose row `y` into `out`, the mode's width of pixels, reading
+    /// each layer's source through `read` with the layer's index.
     fn compose(
         &mut self,
         y: usize,
         out: &mut [u8],
-        read: &mut impl FnMut(u64, &mut [u8]) -> bool,
+        read: &mut impl FnMut(usize, u64, &mut [u8]) -> bool,
     ) -> Result<()> {
         if !self.direct_base {
             out.as_chunks_mut::<4>().0.fill([0, 0, 0, 0xff]);
@@ -1043,15 +1108,31 @@ impl<'a> Rows<'a> {
             let from_y = (2 * (y as u64 - u64::from(destination.y)) + 1) * u64::from(source.height)
                 / (2 * u64::from(destination.height));
             let out = &mut out[xs[0] * 4..xs[1] * 4];
+            let read = &mut |iova: u64, bytes: &mut [u8]| read(index, iova, bytes);
             if index == 0 && self.direct_base {
-                layer.read_row(from_y, out, read, layer.premultiplied)?;
+                layer.read_row(from_y, 0, out, read, layer.premultiplied)?;
                 make_opaque(out, layer.premultiplied);
                 continue;
             }
-            self.scratch.resize(source.width as usize * 4, 0);
+            let mut columns = &self.columns[index][..];
+            // Only the source pixels on screen are read: an unscaled
+            // layer's first pixels, a scaled one's up to its last column's,
+            // or, narrowed strongly, each column's own pixel.
+            let span = match columns.last() {
+                Some(&last) => last as usize + 4,
+                None => out.len(),
+            };
+            if span > out.len() * SPAN_PER_SHOWN {
+                self.scratch.resize(out.len(), 0);
+                for (pixel, &at) in self.scratch.as_chunks_mut::<4>().0.iter_mut().zip(columns) {
+                    layer.read_row(from_y, u64::from(at / 4), pixel, read, false)?;
+                }
+                columns = &self.dense[..columns.len()];
+            } else {
+                self.scratch.resize(span, 0);
+                layer.read_row(from_y, 0, &mut self.scratch, read, false)?;
+            }
             let row = &mut self.scratch[..];
-            layer.read_row(from_y, row, read, false)?;
-            let columns = &self.columns[index];
             if !columns.is_empty() {
                 // Scaled: each column takes the source pixel its map names.
                 let first = columns[0] as usize;
@@ -1645,7 +1726,8 @@ mod tests {
                 reader(&memory)(iova, bytes)
             })
             .unwrap();
-            assert_eq!(reads, [(44, 16), (76, 16), (112, 8)]);
+            // The overlay's one on-screen pixel is all of it that is read.
+            assert_eq!(reads, [(44, 16), (76, 16), (112, 4)]);
             assert_eq!(
                 outputs[..2],
                 [frame.as_ptr(), frame.as_ptr().wrapping_add(16)]
@@ -2072,5 +2154,481 @@ mod tests {
         // No layer: opaque black.
         let frame = compose(&[], MODE, |_, _| panic!("no surface is read")).unwrap();
         assert!(frame.chunks(4).all(|pixel| pixel == [0, 0, 0, 0xff]));
+    }
+
+    /// Two layers over one surface: a row read while composing one is not
+    /// what the other shows on screen. Layer 0 shows surface rows 0..2 on
+    /// screen rows 0..2 and layer 1 the same rows on screen rows 4..6; a
+    /// swap that changes surface row 1 but damages only layer 0's rows
+    /// leaves layer 1's stale, and the next swap that damages them must
+    /// find them changed.
+    #[test]
+    fn a_row_read_for_one_layer_is_not_kept_for_another_over_the_same_memory() {
+        let (mode, mut memory, _, _) = cursor_scene();
+        let layer = |y: u32| {
+            Layer::new(
+                surface(4, 2, 16, 0x100),
+                Rect::whole(4, 2),
+                Rect {
+                    y,
+                    ..Rect::whole(4, 2)
+                },
+                true,
+            )
+            .unwrap()
+        };
+        let layers = [layer(0), layer(4)];
+        let mut sink = Hidden {
+            mode: Some(mode),
+            ..Hidden::default()
+        };
+        let mut composed = Composed::default();
+        present(&mut sink, &layers, None, reader(&memory), &mut composed).unwrap();
+        memory[0x110..0x120].fill(0x99);
+        present(
+            &mut sink,
+            &layers,
+            Some(0..2),
+            reader(&memory),
+            &mut composed,
+        )
+        .unwrap();
+        present(
+            &mut sink,
+            &layers,
+            Some(0..8),
+            reader(&memory),
+            &mut composed,
+        )
+        .unwrap();
+        assert_eq!(
+            sink.visible,
+            compose(&layers, mode, reader(&memory)).unwrap()
+        );
+    }
+
+    /// Random swaps of up to three layers, most of them over one surface,
+    /// moved, cropped, clipped by the screen or scaled, while random bytes
+    /// of their memory change: after every present each row its damage
+    /// names shows what composing the whole frame gives, on a sink with a
+    /// hidden buffer and on one without. The small screen also takes the
+    /// kept rows over their bound.
+    #[test]
+    fn every_damaged_row_shows_the_composed_frame_through_random_swaps() {
+        let mut hidden = Hidden {
+            mode: Some(MODE_4X8),
+            ..Hidden::default()
+        };
+        random_swaps(&mut hidden, |sink| sink.visible.clone());
+        let screen = TestSink::new(MODE_4X8);
+        random_swaps(&mut screen.clone(), |_| {
+            screen.0.borrow().last().cloned().unwrap_or_default()
+        });
+    }
+
+    /// What a layer's kept rows hold is bounded by the screen, not by
+    /// its surface: a guest's huge layer keeps and reads only its on-screen
+    /// part, and layers past [`KEPT_BYTES_PER_PIXEL`] or a screen whose
+    /// size changes are composed, not compared.
+    #[test]
+    fn kept_rows_are_bounded_by_the_screen_and_layers_past_the_bound_are_composed() {
+        const HUGE: u32 = 1_000_000;
+        let synthetic = |iova: u64, bytes: &mut [u8]| {
+            for (offset, byte) in bytes.iter_mut().enumerate() {
+                *byte = ((iova + offset as u64).wrapping_mul(0x9e37_79b9) >> 7) as u8 | 1;
+            }
+            true
+        };
+        let huge = Layer::new(
+            surface(HUGE, HUGE, HUGE * 4, 0),
+            Rect::whole(HUGE, HUGE),
+            Rect::whole(HUGE, HUGE),
+            false,
+        )
+        .unwrap();
+        let mut sink = Hidden {
+            mode: Some(MODE_4X8),
+            ..Hidden::default()
+        };
+        let mut composed = Composed::default();
+        let mut longest = 0;
+        for damage in [None, Some(0..8)] {
+            present(
+                &mut sink,
+                &[huge],
+                damage,
+                |iova, bytes| {
+                    longest = longest.max(bytes.len());
+                    synthetic(iova, bytes)
+                },
+                &mut composed,
+            )
+            .unwrap();
+        }
+        assert_eq!(longest, 16);
+        assert!(composed.shown[0].kept);
+        assert_eq!(composed.shown[0].rows.len(), 4 * 8 * 4);
+        assert_eq!(sink.visible, compose(&[huge], MODE_4X8, synthetic).unwrap());
+
+        // A 4x2 screen keeps 64 bytes: two full-screen 32-bit layers, not
+        // a third.
+        let mode = Mode {
+            width: 4,
+            height: 2,
+            ..MODE_4X8
+        };
+        let mut memory: Vec<u8> = (0..0x200u32).map(|i| (i * 7) as u8 | 1).collect();
+        let layer = |iova| {
+            Layer::new(
+                surface(4, 2, 16, iova),
+                Rect::whole(4, 2),
+                Rect::whole(4, 2),
+                false,
+            )
+            .unwrap()
+        };
+        let layers = [layer(0), layer(0x40), layer(0x80)];
+        let mut sink = Hidden {
+            mode: Some(mode),
+            ..Hidden::default()
+        };
+        let mut composed = Composed::default();
+        present(&mut sink, &layers, None, reader(&memory), &mut composed).unwrap();
+        let kept: Vec<bool> = composed.shown.iter().map(|shown| shown.kept).collect();
+        assert_eq!(kept, [true, true, false]);
+        assert!(composed.shown[2].rows.is_empty());
+        // The third layer's rows always changed.
+        memory[0x94] = 0x55;
+        present(
+            &mut sink,
+            &layers,
+            Some(0..2),
+            reader(&memory),
+            &mut composed,
+        )
+        .unwrap();
+        assert_eq!(sink.asked[1], [0, 1]);
+        assert_eq!(
+            sink.visible,
+            compose(&layers, mode, reader(&memory)).unwrap()
+        );
+
+        // The same layers on a smaller screen keep fewer rows.
+        sink.mode = Some(Mode { height: 1, ..mode });
+        present(
+            &mut sink,
+            &layers[..1],
+            None,
+            reader(&memory),
+            &mut composed,
+        )
+        .unwrap();
+        sink.mode = Some(mode);
+        memory[0x14] = 0x66;
+        present(
+            &mut sink,
+            &layers[..1],
+            Some(0..2),
+            reader(&memory),
+            &mut composed,
+        )
+        .unwrap();
+        assert_eq!(composed.shown[0].rows.len(), 2 * 16);
+        assert_eq!(
+            sink.visible,
+            compose(&layers[..1], mode, reader(&memory)).unwrap()
+        );
+    }
+
+    /// However narrow a scaled layer is shown, it composes as every other
+    /// does, from the source pixel under each column's centre: a strong
+    /// narrowing reads only those pixels, so its reads stay bounded by the
+    /// screen.
+    #[test]
+    fn a_strongly_narrowed_layer_composes_from_bounded_reads() {
+        let mode = Mode {
+            width: 64,
+            height: 2,
+            format: PixelFormat::Bgra8888,
+        };
+        let memory: Vec<u8> = (0..2560u32 * 4 * 3)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8)
+            .collect();
+        for (source, destination) in [
+            (Rect::whole(2560, 3), Rect::whole(64, 2)),
+            (Rect::whole(200, 3), Rect::whole(64, 2)),
+            (
+                Rect {
+                    x: 7,
+                    ..Rect::whole(2553, 2)
+                },
+                Rect {
+                    x: 40,
+                    ..Rect::whole(30, 2)
+                },
+            ),
+        ] {
+            for premultiplied in [false, true] {
+                let base = Layer::new(
+                    surface(16, 1, 64, 0),
+                    Rect::whole(16, 1),
+                    Rect::whole(64, 2),
+                    true,
+                )
+                .unwrap();
+                let narrow = Layer::new(
+                    surface(2560, 3, 2560 * 4, 0),
+                    source,
+                    destination,
+                    premultiplied,
+                )
+                .unwrap();
+                let layers = [base, narrow];
+                let mut longest = 0;
+                let frame = compose(&layers, mode, |iova, bytes| {
+                    longest = longest.max(bytes.len());
+                    reader(&memory)(iova, bytes)
+                })
+                .unwrap();
+                assert_eq!(frame, reference(&layers, mode, &memory), "{source:?}");
+                assert!(longest <= 64 * 4 * SPAN_PER_SHOWN, "{longest}");
+            }
+        }
+        // A half-billion-pixel row shown in four columns reads four pixels.
+        let huge = Layer::new(
+            surface(1 << 29, 1, 1 << 31, 0),
+            Rect::whole(1 << 29, 1),
+            Rect::whole(4, 2),
+            true,
+        )
+        .unwrap();
+        let mut reads = Vec::new();
+        compose(&[huge], MODE, |iova, bytes| {
+            reads.push((iova, bytes.len()));
+            bytes.fill(0x7f);
+            true
+        })
+        .unwrap();
+        assert_eq!(reads.len(), 8);
+        assert!(reads.iter().all(|&(_, length)| length == 4));
+    }
+
+    const MODE_4X8: Mode = Mode {
+        width: 4,
+        height: 8,
+        format: PixelFormat::Bgra8888,
+    };
+
+    fn random_swaps<S: Scanout>(sink: &mut S, shown: impl Fn(&S) -> Vec<u8>) {
+        let mode = MODE_4X8;
+        let row_bytes = mode.width as usize * 4;
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: u32| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 33) % u64::from(bound)) as u32
+        };
+        // Two 6x4 surfaces at a 32-byte stride, at 0x100 and 0x200.
+        let mut memory: Vec<u8> = (0..0x300u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8 | 1)
+            .collect();
+        let place = |next: &mut dyn FnMut(u32) -> u32| {
+            let iova = if next(8) == 0 { 0x200 } else { 0x100 };
+            let (x, y) = (u32::from(next(4) == 0), next(3));
+            let (width, height) = (1 + next(6 - x).min(3), 1 + next(4 - y));
+            let scale = if next(5) == 0 { 2 } else { 1 };
+            Layer::new(
+                surface(6, 4, 32, iova),
+                Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+                Rect {
+                    x: next(4),
+                    y: next(8),
+                    width: width * scale,
+                    height,
+                },
+                next(2) == 0,
+            )
+            .unwrap()
+        };
+        let mut composed = Composed::default();
+        let mut layers: Vec<Layer> = Vec::new();
+        for step in 0..20_000 {
+            let before = layers.clone();
+            if layers.is_empty() || next(16) == 0 {
+                let count = 1 + next(3) as usize;
+                layers = (0..count).map(|_| place(&mut next)).collect();
+            } else if next(3) == 0 {
+                let index = next(layers.len() as u32) as usize;
+                layers[index] = place(&mut next);
+            }
+            for _ in 0..next(3) {
+                let span = if next(4) == 0 { 0x200 } else { 0x80 };
+                let at = 0x100 + next(span) as usize;
+                memory[at] = next(256) as u8 | 1;
+            }
+            // The rows of the layers that changed or that the swap sets,
+            // before and after, as the DCP names them; at times every row.
+            let rows = |layer: &Layer| {
+                let rect = layer.destination;
+                rect.y as usize..(rect.y + rect.height) as usize
+            };
+            let damage = if before.len() != layers.len() || next(8) == 0 {
+                None
+            } else {
+                let mut damage = 0..0;
+                for (old, new) in before.iter().zip(&layers) {
+                    if old != new || next(3) == 0 {
+                        damage = union(union(damage, rows(old)), rows(new));
+                    }
+                }
+                Some(damage)
+            };
+            present(
+                sink,
+                &layers,
+                damage.clone(),
+                reader(&memory),
+                &mut composed,
+            )
+            .unwrap();
+            let expected = compose(&layers, mode, reader(&memory)).unwrap();
+            let frame = shown(sink);
+            let lines = damage.unwrap_or(0..mode.height as usize);
+            for y in lines.start.min(8)..lines.end.min(8) {
+                assert_eq!(
+                    frame[y * row_bytes..][..row_bytes],
+                    expected[y * row_bytes..][..row_bytes],
+                    "step {step} row {y}"
+                );
+            }
+        }
+    }
+
+    /// A sink with a hidden buffer that fills the rows a present asks for
+    /// in place, for timing.
+    struct Timed {
+        mode: Mode,
+        rows: Vec<u8>,
+    }
+
+    impl Scanout for Timed {
+        fn mode(&self) -> Mode {
+            self.mode
+        }
+
+        fn present(&mut self, rows: &[u8]) -> Result<()> {
+            self.rows.copy_from_slice(rows);
+            Ok(())
+        }
+
+        fn try_present_rows(
+            &mut self,
+            damage: Option<Range<usize>>,
+            fill: &mut dyn FnMut(usize, &mut [u8]) -> Result<()>,
+        ) -> Result<bool> {
+            let row_bytes = self.mode.width as usize * 4;
+            for y in damage.unwrap_or(0..self.mode.height as usize) {
+                fill(y, &mut self.rows[y * row_bytes..][..row_bytes])?;
+            }
+            Ok(true)
+        }
+    }
+
+    /// Release timings of [`present`] at 2560x1440 for swaps that alternate
+    /// two surfaces holding the same pixels, differing in a 72-row band, or
+    /// differing in every row. Run with
+    /// `cargo test -p stela-soc --release --lib refine_timings -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing, release only"]
+    fn refine_timings() {
+        const WIDTH: usize = 2560;
+        const HEIGHT: usize = 1440;
+        const SURFACE: usize = WIDTH * HEIGHT * 5;
+        let mode = Mode {
+            width: WIDTH as u32,
+            height: HEIGHT as u32,
+            format: PixelFormat::Bgra8888,
+        };
+        let whole = Rect::whole(WIDTH as u32, HEIGHT as u32);
+        let screen = |index: usize, extended: bool| {
+            let iova = (index * SURFACE) as u64;
+            Surface {
+                format: if extended {
+                    PixelFormat::Xr10A8 {
+                        alpha: iova + (WIDTH * HEIGHT * 4) as u64,
+                        alpha_stride: WIDTH as u32,
+                    }
+                } else {
+                    PixelFormat::Bgra8888
+                },
+                ..surface(WIDTH as u32, HEIGHT as u32, WIDTH as u32 * 4, iova)
+            }
+        };
+        let cursor_at = 2 * SURFACE;
+        let mut memory = alloc::vec![0u8; 2 * SURFACE + 32 * 32 * 4];
+        for (index, byte) in memory.iter_mut().enumerate() {
+            *byte = (index as u32).wrapping_mul(2_654_435_761).to_le_bytes()[3] | 0x40;
+        }
+        let first = memory[..SURFACE].to_vec();
+        for extended in [false, true] {
+            for cursor in [false, true] {
+                for (case, rows) in [("same", 0..0), ("band", 700..772), ("all", 0..HEIGHT)] {
+                    memory[SURFACE..2 * SURFACE].copy_from_slice(&first);
+                    for y in rows {
+                        memory[SURFACE + y * WIDTH * 4 + 8] ^= 0x10;
+                    }
+                    let layers = |index: usize| {
+                        let mut layers = alloc::vec![
+                            Layer::new(screen(index, extended), whole, whole, false).unwrap()
+                        ];
+                        if cursor {
+                            layers.push(
+                                Layer::new(
+                                    surface(32, 32, 128, cursor_at as u64),
+                                    Rect::whole(32, 32),
+                                    Rect {
+                                        x: 600,
+                                        y: 300,
+                                        ..Rect::whole(32, 32)
+                                    },
+                                    false,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                        layers
+                    };
+                    let mut sink = Timed {
+                        mode,
+                        rows: alloc::vec![0; WIDTH * HEIGHT * 4],
+                    };
+                    let mut composed = Composed::default();
+                    present(&mut sink, &layers(0), None, reader(&memory), &mut composed).unwrap();
+                    const SWAPS: usize = 60;
+                    let start = std::time::Instant::now();
+                    for swap in 1..=SWAPS {
+                        present(
+                            &mut sink,
+                            &layers(swap % 2),
+                            Some(0..HEIGHT),
+                            reader(&memory),
+                            &mut composed,
+                        )
+                        .unwrap();
+                    }
+                    let each = start.elapsed().as_secs_f64() * 1000.0 / SWAPS as f64;
+                    std::println!(
+                        "refine {} cursor={cursor} {case}: {each:.3} ms",
+                        if extended { "&b38" } else { "BGRA" }
+                    );
+                }
+            }
+        }
     }
 }

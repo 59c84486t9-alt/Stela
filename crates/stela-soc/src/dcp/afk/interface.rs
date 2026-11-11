@@ -22,6 +22,11 @@ const CLOSE: u8 = 0x13;
 const TERMINATE: u8 = 0x14;
 const OFFLINE: i32 = 0xe000_02d7u32 as i32;
 const OVERRUN: i32 = 0xe000_02e1u32 as i32;
+/// The largest command request read through its DMA descriptor: a page,
+/// 36 times the largest request the one modeled service takes (DCPAVIPC,
+/// a 0x40-byte header and at most 0x30 bytes). A longer one is refused
+/// before anything is allocated for it.
+const REQUEST_BYTES: u32 = 0x1000;
 
 /// A complete logical command, after AFKEPV2 framing and command-buffer DMA.
 /// An error is a missing model effect; an i32 is an original wire status.
@@ -484,6 +489,11 @@ impl Command {
                 .try_into()
                 .expect("buffers");
             let request_bytes = u32::from_le_bytes(buffers[20..24].try_into().expect("length"));
+            if request_bytes > REQUEST_BYTES {
+                return Err(refuse!(
+                    "DCP AFKEPV2 command DMA request is longer than the 4 KiB a modeled service takes"
+                ));
+            }
             if request_bytes != 0 {
                 payload = Vec::new();
                 payload
