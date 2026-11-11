@@ -281,19 +281,6 @@ fn quick_float_guards_match_the_reference() {
                             set_lane(&mut m, format, index, all[other]);
                         }
                         for fpcr in controls() {
-                            // The products' full path still returns the
-                            // quieted input NaN under DN (a separate defect,
-                            // on every tier); their sticky paths send NaNs
-                            // there, so DN adds nothing to their check here.
-                            if fpcr & FPCR_DN != 0
-                                && matches!(
-                                    op,
-                                    Op::Binary(BinaryOperation::Multiply | BinaryOperation::Divide)
-                                        | Op::Fused(_)
-                                )
-                            {
-                                continue;
-                            }
                             for fpsr in [0, INEXACT, 0x0800_009f] {
                                 let mut initial = GuestState {
                                     fpcr,
