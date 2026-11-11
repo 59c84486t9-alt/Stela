@@ -8,18 +8,24 @@
 //! native runs are counted again apart (`fill`); `native` includes them.
 //!
 //! RDPMC may trap under a hypervisor. [`start`] times it, and reads take at
-//! most 0.2% of a PE's time (`READ_SHARE`; the line prints the beat's
-//! estimate as `overhead=`). A cheap read reads the counters around one
-//! charged interval at most every `2 * READ_SHARE` read costs
-//! (`method=interval:GKticks`); every interval's TSC ticks are kept, and the
-//! line scales each phase's counts by its ticks over its sampled ticks. A
-//! trapped read would bias short intervals (each starts with the cache and
-//! predictor refill after the trap), so the core instead reads at most once
-//! per window of 2 ms or more (`method=window`): the whole PE takes every
-//! window, and a phase only the windows it held 90% of. Counter MSRs are written only
-//! at [`start`] and when the event set rotates, once a beat: with more events
-//! than counters the two fixed events (cycles, instructions) stay and the
-//! others rotate in sets (`set=S/N`), each beat reporting the set it ran.
+//! most 0.2% of a PE's time (`READ_SHARE`): every read of the set and every
+//! reprogramming is timed with the TSC (which does not trap), and a core
+//! reads again only while its measured reading time stays within
+//! 1/`READ_SHARE` of the TSC ticks since its start; the line prints the
+//! beat's measured share as `overhead=`. The bound holds whatever a read
+//! costs at the time (a trapped read's cost varies with the hypervisor's
+//! load), on every core, and covers the reads around shadow fills. A cheap
+//! read reads the counters around one charged interval at most every
+//! `2 * READ_SHARE` read costs (`method=interval:GKticks`); every interval's
+//! TSC ticks are kept, and the line scales each phase's counts by its ticks
+//! over its sampled ticks. A trapped read would bias short intervals (each
+//! starts with the cache and predictor refill after the trap), so the core
+//! instead reads at most once per window of 2 ms or more (`method=window`):
+//! the whole PE takes every window, and a phase only the windows it held 90%
+//! of. Counter MSRs are written only at [`start`] and when the event set
+//! rotates, once a beat: with more events than counters the two fixed events
+//! (cycles, instructions) stay and the others rotate in sets (`set=S/N`),
+//! each beat reporting the set it ran.
 //!
 //! Events: AMD families 19h and 1Ah (Zen 3 to 5) from the PPR for family 1Ah
 //! (PMCx076 cycles not halted, PMCx0C0 retired instructions, PMCx0C3 retired
@@ -54,9 +60,11 @@ const REPORT_ORDER: [usize; BUCKETS] = [3, 5, 2, 4, 0, 1];
 const MAX_SETS: usize = 4;
 const MAX_CORES: usize = 256;
 /// Reading the counters may take at most 1/READ_SHARE of a PE's time
-/// (0.2%): a core reads the set again only READ_SHARE read costs after its
-/// previous read. A trapped read (about 50 us under KVM) then allows one
-/// read per 25 ms; a native one (tens of cycles) dense sampling.
+/// (0.2%), measured: a core reads the set only while its reads and
+/// reprogrammings so far, plus the next read at its last measured cost, fit
+/// in 1/READ_SHARE of the TSC ticks since its start ([`Own::affords`]). A
+/// trapped read (about 100 us under KVM) then allows one read per 50 ms; a
+/// native one (tens of cycles) dense sampling.
 const READ_SHARE: u64 = 500;
 /// A read of the set dearer than this (RDPMC trapped by a hypervisor)
 /// switches the core to windows: reading around short intervals would
@@ -324,7 +332,15 @@ struct Own {
     next_sample: u64,
     /// Ticks between sampled interval starts at least: two reads each.
     gap: u64,
-    fill: Option<(u64, [u64; MAX_COUNTERS])>,
+    /// The TSC at a shadow fill's start, and the counters then if the fill
+    /// is sampled.
+    fill: Option<(u64, Option<[u64; MAX_COUNTERS]>)>,
+    /// The TSC at [`start`]: the core's reading budget grows from it.
+    started: u64,
+    /// TSC ticks spent reading and programming the counters since [`start`].
+    spent: u64,
+    /// What the last read of the set cost, in TSC ticks.
+    cost: u64,
     /// TSC ticks a window lasts at least; 0 reads around sampled intervals.
     window: u64,
     window_start: u64,
@@ -339,8 +355,8 @@ struct Core {
     buckets: [[Bucket; BUCKETS]; MAX_SETS],
     /// Window mode: every closed window's counts and ticks, per set.
     whole: [Bucket; MAX_SETS],
-    /// Reads of the set since start, for the overhead estimate.
-    reads: AtomicU64,
+    /// [`Own::spent`], for the line's measured overhead.
+    spent: AtomicU64,
 }
 
 // SAFETY: `own` is touched only by the owner core, from its boundaries and
@@ -355,8 +371,6 @@ static SET: AtomicU32 = AtomicU32::new(0);
 static SETS: AtomicU32 = AtomicU32::new(1);
 /// The longest interval-sampling gap any core uses, in TSC ticks.
 static GAP: AtomicU64 = AtomicU64::new(0);
-/// The dearest read of the set any core measured, in TSC ticks.
-static COST: AtomicU64 = AtomicU64::new(0);
 /// The longest window any core uses, in TSC ticks; 0 while every core
 /// samples intervals.
 static WINDOW: AtomicU64 = AtomicU64::new(0);
@@ -447,7 +461,6 @@ pub(crate) fn start(pe: usize) {
         }
     }
     let cost = crate::apic::rdtsc().wrapping_sub(before) / 4;
-    COST.fetch_max(cost, Relaxed);
     let gap = 2 * cost * READ_SHARE;
     let window = if cost > WINDOW_READ_TICKS {
         WINDOW_TICKS.max(cost * READ_SHARE)
@@ -478,14 +491,19 @@ pub(crate) fn start(pe: usize) {
             layout.described
         ));
     }
+    let started = crate::apic::rdtsc();
     let own = Own {
         set: SET.load(Relaxed) as usize % layout.sets(),
         read,
-        last: crate::apic::rdtsc(),
+        last: started,
         gap,
         window,
-        window_start: crate::apic::rdtsc(),
-        snap: read_all(None, read),
+        window_start: started,
+        snap: read_all(read),
+        started,
+        // The probe's reads and the first snapshot count against the budget.
+        spent: cost * 5,
+        cost,
         ..Own::default()
     };
     let record = Box::into_raw(Box::new(Core {
@@ -493,21 +511,56 @@ pub(crate) fn start(pe: usize) {
         own: UnsafeCell::new(own),
         buckets: Default::default(),
         whole: Default::default(),
-        reads: AtomicU64::new(0),
+        spent: AtomicU64::new(cost * 5),
     }));
     CORES[slot].store(record, Relaxed);
 }
 
-/// Read the set, counting the read on `core` if it has a record yet.
-fn read_all(core: Option<&Core>, read: usize) -> [u64; MAX_COUNTERS] {
-    if let Some(core) = core {
-        add(&core.reads, 1);
-    }
+/// Read the set.
+fn read_all(read: usize) -> [u64; MAX_COUNTERS] {
     let mut values = [0; MAX_COUNTERS];
     for (counter, value) in values.iter_mut().enumerate().take(read) {
         *value = rdpmc(counter as u32);
     }
     values
+}
+
+impl Own {
+    /// Whether `reads` more reads of the set at the last measured cost keep
+    /// the core's reading time within 1/READ_SHARE of its ticks since
+    /// [`start`] at TSC `now`.
+    fn affords(&self, now: u64, reads: u64) -> bool {
+        let elapsed = now.wrapping_sub(self.started);
+        self.spent
+            .saturating_add(self.cost.saturating_mul(reads))
+            .saturating_mul(READ_SHARE)
+            <= elapsed
+    }
+
+    /// Charge `ticks` of reading or programming to the core's budget.
+    fn charge(&mut self, core: &Core, ticks: u64) {
+        self.spent = self.spent.wrapping_add(ticks);
+        core.spent.store(self.spent, Relaxed);
+    }
+}
+
+/// Read the set, timing the read: its cost is the core's next estimate and
+/// counts against its budget.
+fn read_timed(core: &Core, own: &mut Own) -> [u64; MAX_COUNTERS] {
+    let before = crate::apic::rdtsc();
+    let values = read_all(own.read);
+    let cost = crate::apic::rdtsc().wrapping_sub(before);
+    own.cost = cost;
+    own.charge(core, cost);
+    values
+}
+
+/// Program `set`, timing the counter MSR writes against the core's budget.
+fn reprogram(core: &Core, own: &mut Own, layout: &Layout, set: usize) {
+    let before = crate::apic::rdtsc();
+    own.read = program(layout, set);
+    own.set = set;
+    own.charge(core, crate::apic::rdtsc().wrapping_sub(before));
 }
 
 /// Add to a counter only its core writes.
@@ -540,16 +593,17 @@ pub(crate) fn boundary(phase: Phase, now: u64) {
             && let Some(layout) = shared_layout()
         {
             // The open window counted the old set: drop it.
-            own.read = program(layout, wanted);
-            own.set = wanted;
+            reprogram(core, own, layout, wanted);
             open_window(core, own);
-        } else if now.wrapping_sub(own.window_start) >= own.window {
+        } else if now.wrapping_sub(own.window_start) >= own.window && own.affords(now, 1) {
+            // A window the budget cannot close yet stays open: it only
+            // grows, and its counts and ticks stay matched.
             close_window(core, own);
         }
         return;
     }
     if own.sampling {
-        let values = read_all(Some(core), own.read);
+        let values = read_timed(core, own);
         for (counter, value) in values.iter().enumerate().take(own.read) {
             add(&bucket.counts[counter], delta(*value, own.snap[counter]));
         }
@@ -561,19 +615,19 @@ pub(crate) fn boundary(phase: Phase, now: u64) {
     if wanted != own.set
         && let Some(layout) = shared_layout()
     {
-        own.read = program(layout, wanted);
-        own.set = wanted;
+        reprogram(core, own, layout, wanted);
     }
-    if now.wrapping_sub(own.next_sample) < 1 << 63 {
+    // A sampled interval reads at both ends.
+    if now.wrapping_sub(own.next_sample) < 1 << 63 && own.affords(now, 2) {
         own.next_sample = now.wrapping_add(own.gap);
-        own.snap = read_all(Some(core), own.read);
+        own.snap = read_timed(core, own);
         own.sampling = true;
         own.sample_start = crate::apic::rdtsc();
     }
 }
 
 fn open_window(core: &Core, own: &mut Own) {
-    own.snap = read_all(Some(core), own.read);
+    own.snap = read_timed(core, own);
     own.window_ticks = [0; BUCKETS];
     own.window_start = crate::apic::rdtsc();
 }
@@ -581,7 +635,7 @@ fn open_window(core: &Core, own: &mut Own) {
 /// Credit the window that ends now to the whole PE, and to the bucket that
 /// holds most of its ticks if one does, then open the next.
 fn close_window(core: &Core, own: &mut Own) {
-    let values = read_all(Some(core), own.read);
+    let values = read_timed(core, own);
     let ticks: u64 = own.window_ticks.iter().sum();
     if ticks == 0 {
         return;
@@ -617,11 +671,10 @@ pub(crate) fn fill_begin() {
     };
     // SAFETY: the owner core; its boundary code is not running.
     let own = unsafe { &mut *core.own.get() };
-    let values = if own.sampling {
-        read_all(Some(core), own.read)
-    } else {
-        [0; MAX_COUNTERS]
-    };
+    let now = crate::apic::rdtsc();
+    // A fill inside a sampled interval is read at both ends while the
+    // budget allows; else the interval's `nat` sample still holds it.
+    let values = (own.sampling && own.affords(now, 2)).then(|| read_timed(core, own));
     own.fill = Some((crate::apic::rdtsc(), values));
 }
 
@@ -639,8 +692,8 @@ pub(crate) fn fill_end() {
     let bucket = &core.buckets[own.set][FILL];
     let ticks = crate::apic::rdtsc().wrapping_sub(then);
     add(&bucket.ticks, ticks);
-    if own.sampling {
-        let values = read_all(Some(core), own.read);
+    if let Some(before) = before {
+        let values = read_timed(core, own);
         for (counter, value) in values.iter().enumerate().take(own.read) {
             add(&bucket.counts[counter], delta(*value, before[counter]));
         }
@@ -652,15 +705,15 @@ pub(crate) fn fill_end() {
 /// beat, per set.
 pub(crate) struct Seen {
     totals: Vec<[[[u64; MAX_COUNTERS + 2]; BUCKETS + 1]; MAX_SETS]>,
-    /// Each core's reads of the set at the last beat.
-    reads: Vec<u64>,
+    /// Each core's reading and programming ticks at the last beat.
+    spent: Vec<u64>,
 }
 
 impl Seen {
     pub(crate) const fn new() -> Self {
         Self {
             totals: Vec::new(),
-            reads: Vec::new(),
+            spent: Vec::new(),
         }
     }
 }
@@ -690,8 +743,9 @@ fn totals(core: &Core) -> [[[u64; MAX_COUNTERS + 2]; BUCKETS + 1]; MAX_SETS] {
 /// millions, the other events in thousands. `nat` includes `fill`. A
 /// bucket with no sampled interval shows `-`.
 ///
-/// `overhead=`: the beat's reads times the dearest read cost over the
-/// PEs' charged ticks.
+/// `overhead=`: the TSC ticks the PEs spent reading and programming the
+/// counters in the beat, each read and write timed, over their charged
+/// ticks.
 ///
 /// `method=interval:GKticks`: each bucket from the intervals read at both
 /// ends. `method=window:NMticks` (RDPMC trapped): a leading `pe=` is the
@@ -718,15 +772,15 @@ pub(crate) fn report(seen: &mut Seen) {
     if seen.totals.len() < pes {
         seen.totals
             .resize(pes, [[[0; MAX_COUNTERS + 2]; BUCKETS + 1]; MAX_SETS]);
-        seen.reads.resize(pes, 0);
+        seen.spent.resize(pes, 0);
     }
-    // What the beat's reads cost: reads times the dearest measured read,
-    // over every PE's charged ticks (all sets; `fill` is inside `nat`).
-    let (mut reads, mut ticks) = (0u64, 0u64);
+    // What the beat's reads cost, as timed, over every PE's charged ticks
+    // (all sets; `fill` is inside `nat`).
+    let (mut spent, mut ticks) = (0u64, 0u64);
     for core in &cores {
-        let now = core.reads.load(Relaxed);
-        reads += now.wrapping_sub(seen.reads[core.pe]);
-        seen.reads[core.pe] = now;
+        let now = core.spent.load(Relaxed);
+        spent += now.wrapping_sub(seen.spent[core.pe]);
+        seen.spent[core.pe] = now;
         let before = &seen.totals[core.pe];
         for (set, buckets) in core.buckets.iter().enumerate() {
             for (bucket, values) in buckets.iter().enumerate().take(Phase::COUNT) {
@@ -737,7 +791,7 @@ pub(crate) fn report(seen: &mut Seen) {
             }
         }
     }
-    let overhead = (u128::from(reads) * u128::from(COST.load(Relaxed)) * 10_000)
+    let overhead = (u128::from(spent) * 10_000)
         .checked_div(u128::from(ticks))
         .unwrap_or(0) as u64;
     let refused = REFUSED.load(Relaxed) >> (set * MAX_COUNTERS);
