@@ -553,6 +553,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     return Ok(None);
                 }
                 self.statistics.stored += 1;
+                self.count_store_source(StoreSource::Pack);
                 let origin = self.stored_origin(physical, page, *key, *context, &preparation);
                 let installed = self
                     .install(
@@ -582,6 +583,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 if matches {
                     self.statistics.shared += 1;
+                    self.count_store_source(StoreSource::Shared);
                     self.statistics.shared_ticks += self.host.counter().wrapping_sub(looking);
                     return self
                         .install(
@@ -642,6 +644,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         };
         self.statistics.compiled += 1;
+        self.count_store_source(if stored.is_some() {
+            StoreSource::Compiled
+        } else {
+            StoreSource::Unstorable
+        });
         self.statistics.compiled_instructions += (compiled.source_bytes as u64) / INSTRUCTION;
         self.statistics.compile_ticks += self.host.counter().wrapping_sub(started);
         let emission = Arc::new(super::stored::Emission::new(
@@ -681,6 +688,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             recovery::Template::compiled(emission),
         )
         .map(Some)
+    }
+
+    /// Count an install from `source` at the PE's level: EL0, or above.
+    fn count_store_source(&mut self, source: StoreSource) {
+        let level = usize::from(self.cpu.pstate.el != 0);
+        self.statistics.store_sources[level][source as usize] += 1;
     }
 
     /// How the next fetch compiles its block, in the PE's current state:

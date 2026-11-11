@@ -495,3 +495,65 @@ fn with_memory_low_pages_stay_and_nothing_is_offered() {
     assert_eq!(machine.statistics.offered, 1);
     assert_eq!(machine.host.store.as_ref().unwrap().offers.len(), 1);
 }
+
+/// `PES STORE`: every install counts once, at its level, by where its
+/// block came from: compiled with a store page, compiled without one,
+/// relocated from the pack, or taken from another PE.
+#[test]
+fn installs_count_where_their_block_came_from_at_their_level() {
+    use super::super::StoreSource;
+    const USER: usize = 0;
+    const KERNEL: usize = 1;
+    let count = |source: StoreSource| source as usize;
+    // adr x0, #8; add x0, x0, #1; svc #0
+    let words = [0x1000_0040, 0x9100_0400, 0xd400_0001];
+    let mut first = machine(&words);
+    first.host.store = Some(MemoryStore::default());
+    assert!(first.fetch_block(BASE + 4, false).is_ok());
+    let mut sources = [[0; StoreSource::COUNT]; 2];
+    sources[KERNEL][count(StoreSource::Compiled)] = 1;
+    assert_eq!(first.statistics.store_sources, sources);
+
+    let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
+    let mut record = Record::new(translations::translator_id(), offer.key);
+    record.insert(proven(&offer));
+    let mut store = MemoryStore::default();
+    store.records.insert(offer.key, Arc::new(record));
+    store
+        .prepared
+        .insert((offer.key, BASE + 8, offer.context), {
+            let input = offer.input()[4..].to_vec();
+            Offer::compile(
+                offer.key,
+                offer.page,
+                BASE + 8,
+                offer.context,
+                input,
+                Arc::clone(offer.preparation()),
+            )
+            .unwrap()
+            .shared()
+        });
+    let mut second = machine(&words);
+    second.host.store = Some(store);
+    assert!(second.fetch_block(BASE + 4, false).is_ok());
+    assert!(second.fetch_block(BASE + 8, false).is_ok());
+    let mut sources = [[0; StoreSource::COUNT]; 2];
+    sources[KERNEL][count(StoreSource::Pack)] = 1;
+    sources[KERNEL][count(StoreSource::Shared)] = 1;
+    assert_eq!(second.statistics.store_sources, sources);
+    assert_eq!((second.statistics.stored, second.statistics.shared), (1, 1));
+
+    // Without a store no page is keyed; at EL0 the counts go to the user row.
+    let mut user = machine(&words);
+    super::super::tests::normal_memory(&mut user, true);
+    user.cpu.pstate.el = 0;
+    assert!(matches!(
+        user.fetch_block(BASE + 4, false),
+        Ok(Fetched::Block(_))
+    ));
+    let mut sources = [[0; StoreSource::COUNT]; 2];
+    sources[USER][count(StoreSource::Unstorable)] = 1;
+    assert_eq!(user.statistics.store_sources, sources);
+    assert_eq!(user.statistics.compiled, 1);
+}

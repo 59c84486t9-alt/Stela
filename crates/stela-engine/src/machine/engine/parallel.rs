@@ -311,6 +311,9 @@ pub struct Counts {
     /// Blocks it compiled, and blocks another PE compiled that it installed.
     pub compiled: u64,
     pub shared: u64,
+    /// Its installs at EL0 and above by where the block came from
+    /// ([`super::Statistics::store_sources`]).
+    pub store_sources: [[u64; 4]; 2],
     /// Blocks it holds, the slots its block table has, the pages its
     /// index finds blocks in, and the parts of its code arena it released
     /// for heap pressure.
@@ -1728,6 +1731,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             retired: self.retired_instructions() as u64,
             compiled: statistics.compiled,
             shared: statistics.shared,
+            store_sources: statistics.store_sources,
             live_blocks: self.code.blocks.live() as u64,
             block_slots: self.code.blocks.len() as u64,
             indexed_pages: self.code.indexed_pages() as u64,

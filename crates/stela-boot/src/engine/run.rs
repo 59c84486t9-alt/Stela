@@ -1094,6 +1094,14 @@ impl Heartbeat {
                 "PES ITLBSRC fills_lower/fills_upper/cold_seen/drop_asid/drop_every",
                 "/all_local/all_received/all_forgot/all_kept/made/mail_merged/refilled",
             ));
+            // Per PE: its installs at EL0 and then above EL0 by where the
+            // block came from: compiled in a page the store keys (offered
+            // to it), compiled where it keys none (one instruction, a
+            // device-site page), taken from the pack, taken from another PE.
+            let mut store = String::from(concat!(
+                "PES STORE user_compiled/user_unstorable/user_pack/user_shared",
+                "/kernel_compiled/kernel_unstorable/kernel_pack/kernel_shared",
+            ));
             let deltas = |line: &mut String, pe: usize, now: &[u64], before: &[u64]| {
                 line.push_str(&format!(" {pe}:"));
                 for (slot, (now, before)) in now.iter().zip(before).enumerate() {
@@ -1202,6 +1210,12 @@ impl Heartbeat {
                     pe,
                     &now.itlb_sources,
                     &before.itlb_sources,
+                );
+                deltas(
+                    &mut store,
+                    pe,
+                    now.store_sources.as_flattened(),
+                    before.store_sources.as_flattened(),
                 );
                 let (cause, was) = (&now.installs, &before.installs);
                 installs.push_str(&format!(
@@ -1313,6 +1327,7 @@ impl Heartbeat {
             output::arguments(format_args!("{paths}\n"));
             output::arguments(format_args!("{itlb}\n"));
             output::arguments(format_args!("{itlb_sources}\n"));
+            output::arguments(format_args!("{store}\n"));
             if machine.step_timing().is_some() {
                 output::arguments(format_args!("{phases}\n"));
                 output::arguments(format_args!("{levels}\n"));

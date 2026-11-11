@@ -357,6 +357,26 @@ impl FetchPath {
 
 const _: () = assert!(FetchPath::Single as usize + 1 == FetchPath::COUNT);
 
+/// Where an installed block came from, for [`Statistics::store_sources`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum StoreSource {
+    /// Compiled in a page the store keys: offered to it.
+    Compiled,
+    /// Compiled where the store keys no page: a one-instruction block, a
+    /// page with a device site or a host breakpoint, or no store at all.
+    Unstorable,
+    /// Relocated from a record of the pack the boot read.
+    Pack,
+    /// Compiled by another PE of this boot and installed here.
+    Shared,
+}
+
+impl StoreSource {
+    pub(super) const COUNT: usize = 4;
+}
+
+const _: () = assert!(StoreSource::Shared as usize + 1 == StoreSource::COUNT);
+
 /// Why the ITLB lacked a page it then took ([`Statistics::itlb_misses`]): a
 /// fill of another page took its entry's place, a TLBI by VA dropped it,
 /// its context was forgotten (an entry of the page in a forgotten context
@@ -488,6 +508,12 @@ pub struct Statistics {
     /// Blocks another thread of the process (or its ahead-of-time
     /// translation) had prepared, installed instead of compiled.
     pub shared: u64,
+    /// Installs by where their block came from, at EL0 (`[0]`) and above
+    /// (`[1]`), in [`StoreSource`]'s order: compiled with a store page
+    /// (offered or lent to the store), compiled without one (one
+    /// instruction, a device-site page, a host breakpoint, no store),
+    /// taken from the pack, taken from another PE.
+    pub store_sources: [[u64; StoreSource::COUNT]; 2],
     /// Counter ticks spent, for blocks not yet installed, reading, hashing
     /// and looking up their fetch pages; finding `shared` blocks; and
     /// installing every block.
@@ -616,6 +642,7 @@ impl core::ops::AddAssign for Statistics {
             broadcasts,
             forwards,
             sync_ticks,
+            store_sources,
         } = other;
         self.replaced_retired = self.replaced_retired.saturating_add(replaced_retired);
         for (total, count) in self.exit_kinds.iter_mut().zip(exit_kinds) {
@@ -646,6 +673,14 @@ impl core::ops::AddAssign for Statistics {
             *total += count;
         }
         for (total, count) in self.itlb_sources.iter_mut().zip(itlb_sources) {
+            *total += count;
+        }
+        for (total, count) in self
+            .store_sources
+            .as_flattened_mut()
+            .iter_mut()
+            .zip(store_sources.as_flattened())
+        {
             *total += count;
         }
         for (total, count) in [
