@@ -246,7 +246,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Request) -> Result<St
     let Some(ipsw) = command.optional_image()? else {
         bail!(
             "install \"{name}\" (ECID {ecid}) needs a restore bundle of its own, prepared from \
-             the macOS {} restore image: add --fetch, or --ipsw FILE",
+             the macOS {} restore image: leave out --ipsw to download it, or pass --ipsw FILE",
             record.build
         );
     };

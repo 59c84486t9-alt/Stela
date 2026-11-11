@@ -16,10 +16,16 @@ mod setup;
 
 pub use setup::InstallMedium;
 
-const EXAMPLES: &str = "Examples:
-  stela setup --usb DIR --fetch Prepare a USB that boots Stela to install macOS
-
-The research and development commands are stela-dev's (docs/development.md).";
+/// The help's examples, with this computer's spelling of a whole disk.
+fn examples() -> String {
+    let disk = setup::host::DISK_EXAMPLE;
+    format!(
+        "Examples:
+  stela setup                       Create a macOS installer USB, step by step
+  stela setup --usb {disk:<15} Erase that USB and write the installer, downloading macOS
+  stela setup status --usb VOLUME   Check an installer USB by its mounted STELA volume"
+    )
+}
 const ABOUT: &str = "Prepare a USB that boots Stela to install macOS on a PC";
 
 #[derive(Parser)]
@@ -27,7 +33,7 @@ const ABOUT: &str = "Prepare a USB that boots Stela to install macOS on a PC";
     name = "stela",
     version,
     about = ABOUT,
-    after_help = EXAMPLES,
+    after_help = examples(),
     arg_required_else_help = true
 )]
 #[cfg_attr(
@@ -231,10 +237,10 @@ mod tests {
         let usb = ["--usb", "/Volumes/STELA"];
         for words in [
             &["status"][..],
-            &["doctor"],
             &["repair", "--ipsw", "a.ipsw", "--erase-target"],
             &["update", "stela", "--efi", "stela.efi"],
-            &["update", "os", "--fetch", "--install-image", "online"],
+            &["update", "os", "--install-image", "online"],
+            &["update", "stela", "--fetch"],
             &["uninstall"],
             &["nvram", "next-boot", "recovery", "--install", "macOS"],
             &["nvram", "reset", "--nor", "sdc3"],
@@ -263,6 +269,9 @@ mod tests {
             &["state", "backup", "state.bin", "--chooser-timeout", "0"],
             &["--target", "sdc2", "status"],
             &["status", "repair"],
+            &["--fetch"],
+            &["update", "os", "--fetch"],
+            &["doctor"],
         ] {
             let line = ["stela", "setup"].into_iter().chain(words.iter().copied());
             assert!(Cli::try_parse_from(line.chain(usb)).is_err(), "{words:?}");

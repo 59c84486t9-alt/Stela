@@ -22,9 +22,7 @@ const CORNER_TOP_RIGHT: &str = "╮";
 const CORNER_BOTTOM_RIGHT: &str = "╯";
 
 #[derive(Default)]
-pub(super) struct Stela {
-    pub extras: bool,
-}
+pub(super) struct Stela;
 
 pub(super) fn accent() -> Style {
     Style::new().true_color(215, 135, 95)
@@ -173,9 +171,6 @@ impl Theme for Stela {
 
     fn format_footer_with_message(&self, state: &ThemeState, message: &str) -> String {
         let text = match state {
-            ThemeState::Active if self.extras => {
-                "↑/↓ move · Space toggle · Enter continue · Esc cancel"
-            }
             ThemeState::Active if message.is_empty() => "↑/↓ move · Enter choose · Esc cancel",
             ThemeState::Active => message,
             ThemeState::Cancel => "Operation cancelled.",
@@ -392,7 +387,7 @@ mod tests {
     fn prompts_use_unicode_glyphs_outside_windows_terminal() {
         console::set_colors_enabled_stderr(false);
         console::set_colors_enabled(false);
-        let theme = Stela::default();
+        let theme = Stela;
         assert_eq!(
             theme.format_header(&ThemeState::Active, "Pick"),
             "♦  Pick\n"

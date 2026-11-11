@@ -778,13 +778,13 @@ pub(super) fn lost_keys(install: &super::machines::Install, usb: &Path, several:
         format!(
             "remove the install with {}, then add the disk again with {}",
             fix(&format!("configure --remove-install {name}")),
-            fix(&format!("{target} --initialize-nor --fetch"))
+            fix(&format!("{target} --initialize-nor"))
         )
     } else {
         format!(
             "remove the setup with {}, then set it up again with {}",
             fix("uninstall"),
-            fix(&format!("{target} --initialize-nor --fetch"))
+            fix(&format!("{target} --initialize-nor"))
         )
     };
     format!(

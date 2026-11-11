@@ -35,7 +35,6 @@ impl Setup {
 enum Command {
     /// Report everything about the setup and check it, changing nothing;
     /// fails when something needs fixing.
-    #[command(visible_alias = "doctor")]
     Status(Usb),
     /// Put back what the setup record says (stela.cfg, the startup choices,
     /// damaged boot files); with `--fetch` or `--ipsw`, also prepare the
@@ -122,30 +121,35 @@ impl Plain {
     }
 }
 
-/// Where the restore image comes from.
+/// Where the restore image comes from: `--ipsw`, or else a download from
+/// Apple.
 #[derive(Args)]
 struct Image {
-    /// The macOS restore image (IPSW) of a supported build.
-    #[arg(long, conflicts_with = "fetch")]
-    ipsw: Option<PathBuf>,
-    /// Download the restore image from Apple instead: its recovery members,
-    /// or the whole IPSW with `--install-image offline`.
+    /// A macOS 27 restore image (IPSW) on this computer. Without it, setup
+    /// downloads the image from Apple.
     #[arg(long)]
-    fetch: bool,
-    /// Where `--fetch` keeps the image.
+    ipsw: Option<PathBuf>,
+    /// Where downloaded images are kept.
     #[arg(long)]
     download_dir: Option<PathBuf>,
-    /// The macOS 27 build `--fetch` downloads, such as 26B123: the newest
-    /// tested one by default. Maintenance commands download the setup's own
-    /// build.
+    /// The macOS 27 build to download, such as 26B123: the newest tested
+    /// one by default. Maintenance commands download the setup's own build.
     #[arg(long, default_value = builds::DEFAULT.build)]
     build: String,
 }
 
 impl Image {
+    /// A command that always needs the image downloads it without `--ipsw`.
     fn apply(self, request: &mut Request) {
+        request.fetch = self.ipsw.is_none();
+        self.apply_optional(request, false);
+    }
+
+    /// A command that needs the image only for some repairs downloads it
+    /// with `--fetch`.
+    fn apply_optional(self, request: &mut Request, fetch: bool) {
+        request.fetch |= fetch;
         request.ipsw = self.ipsw;
-        request.fetch = self.fetch;
         request.download_dir = self.download_dir;
         request.build = self.build;
     }
@@ -282,7 +286,7 @@ struct Create {
     #[arg(long, value_enum)]
     install_image: Option<InstallImage>,
     /// The `stela.efi` to install instead of the one built into `stela`.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     efi: Option<PathBuf>,
     /// The Mac model Stela presents: Mac14,3 (Mac mini M2), the one
     /// supported now.
@@ -333,7 +337,7 @@ struct Create {
     /// Have every startup choice time the engine (its `--profile`): each
     /// heartbeat of the boot log then reports where the engine's time goes
     /// between translated blocks, by phase and by exit kind.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     profile: bool,
     /// Have the install refuse an IPSW without recorded block hashes, which
     /// it otherwise reads whole before the restore starts; with them it
@@ -341,11 +345,6 @@ struct Create {
     /// engine's `--verify-on-read` to the Install macOS choice.
     #[arg(long, requires = "target", hide = true)]
     verify_on_read: bool,
-    /// The USB's FAT32 data partition, when it has several, for the boot
-    /// bundles, the install medium (the full IPSW in pieces or its
-    /// inventory) and the translation store; the first one by default.
-    #[arg(long, hide = true)]
-    install_volume: Option<PathBuf>,
     /// The bound of each translation pack `stela.efi` keeps on the USB, in
     /// bytes (64 MiB to the FAT32 file limit; 0 for none). Defaults to 1 GiB
     /// or what fits. The mount uses up to 1 GiB of each allocation.
@@ -377,7 +376,6 @@ impl Create {
             new_ecid: self.new_ecid,
             profile: self.profile,
             verify_on_read: self.verify_on_read,
-            install_volume: self.install_volume,
             translation_store_bytes: self.translation_store_bytes,
             confirm_disk: self.confirm_disk,
             ..Request::default()
@@ -396,6 +394,10 @@ struct Repair {
     usb: Usb,
     #[command(flatten)]
     image: Image,
+    /// Download the restore image from Apple to prepare the restore files
+    /// again.
+    #[arg(long, conflicts_with = "ipsw")]
+    fetch: bool,
     /// Where an install reads the restore image the repaired medium holds
     /// (with `--ipsw` or `--fetch`).
     #[arg(long, value_enum)]
@@ -433,7 +435,7 @@ impl Repair {
             dry_run: self.dry_run,
             ..self.usb.request(Action::Repair)
         };
-        self.image.apply(&mut request);
+        self.image.apply_optional(&mut request, self.fetch);
         request
     }
 }
@@ -458,7 +460,7 @@ impl Update {
                     dry_run: command.dry_run,
                     ..command.usb.request(Action::UpdateStela)
                 };
-                command.image.apply(&mut request);
+                command.image.apply_optional(&mut request, command.fetch);
                 request
             }
             Self::Os(command) => {
@@ -479,10 +481,14 @@ struct UpdateStela {
     #[command(flatten)]
     usb: Usb,
     /// The `stela.efi` to install instead of the one built into `stela`.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     efi: Option<PathBuf>,
     #[command(flatten)]
     image: Image,
+    /// Download the restore image from Apple, to prepare the boot files
+    /// again when the new stela.efi needs it.
+    #[arg(long, conflicts_with = "ipsw")]
+    fetch: bool,
     /// Show what would change, and change nothing.
     #[arg(long)]
     dry_run: bool,
@@ -611,10 +617,10 @@ struct Configure {
     #[arg(long, value_name = "SECONDS|auto", value_parser = wait)]
     chooser_timeout: Option<Wait>,
     /// Turn the engine profile on for every startup choice.
-    #[arg(long, conflicts_with = "no_profile")]
+    #[arg(long, conflicts_with = "no_profile", hide = true)]
     profile: bool,
     /// Turn the engine profile off.
-    #[arg(long)]
+    #[arg(long, hide = true)]
     no_profile: bool,
     #[command(flatten)]
     wifi: Wifi,

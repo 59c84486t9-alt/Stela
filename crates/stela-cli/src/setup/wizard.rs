@@ -115,7 +115,7 @@ fn local_image(path: &Path) -> Result<LocalImage> {
 pub(super) fn configure(command: &mut Request, host: &dyn Host) -> Result<bool> {
     ensure!(
         std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
-        "interactive setup needs a terminal; scripts should pass --usb and --ipsw or --fetch"
+        "interactive setup needs a terminal; scripts pass --usb, and --ipsw for a local image"
     );
     match configure_inner(command, host) {
         Err(error)
@@ -180,7 +180,7 @@ pub(super) fn resume(command: &mut Request, esp: PathBuf, record: &Record) {
 }
 
 fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
-    cliclack::set_theme(theme::Stela::default());
+    cliclack::set_theme(theme::Stela);
     crate::progress::follow(theme::rail());
     cliclack::intro(
         theme::accent()
@@ -235,7 +235,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             .iter()
             .position(|usb| usb.path() == command.usb)
             .unwrap_or(0);
-        let usb = &choices[menu::select("1 / 8  Choose a USB", &rows, initial)?];
+        let usb = &choices[menu::select("1 / 7  Choose a USB", &rows, initial)?];
         command.usb = usb.path();
         // A setup this USB holds that stopped part way is finished, not
         // erased and begun again.
@@ -293,7 +293,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             } else {
                 usize::from(command.install_image == Some(InstallImage::Online))
             };
-            menu::select("2 / 8  Choose an installer", &rows, initial)?
+            menu::select("2 / 7  Choose an installer", &rows, initial)?
         };
         let (version, models) = if source == 2 {
             let path = if prefilled {
@@ -304,7 +304,7 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_default();
-                let text: String = cliclack::input("3 / 8  Choose an IPSW file")
+                let text: String = cliclack::input("3 / 7  Choose an IPSW file")
                     .placeholder("Path to the .ipsw file")
                     .default_input(&initial)
                     .validate(|s: &String| {
@@ -377,14 +377,6 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
         ))?;
         choose_wifi(command)?;
         super::addresses::choose(command)?;
-        cliclack::set_theme(theme::Stela { extras: true });
-        let extras = cliclack::multiselect("7 / 8  Choose extras")
-            .item(0, "Profiling", "Save translation timing in the boot log")
-            .initial_values(if command.profile { vec![0] } else { vec![] })
-            .required(false)
-            .interact()?;
-        cliclack::set_theme(theme::Stela::default());
-        command.profile = extras.contains(&0);
         let installer = match (source, command.install_image) {
             (2, _) => format!(
                 "Existing IPSW · {}",
@@ -400,9 +392,9 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
             _ => "Full · the macOS image goes on the USB".into(),
         };
         cliclack::note(
-            "8 / 8  Review",
+            "7 / 7  Review",
             format!(
-                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\n{}{}Profiling  {}",
+                "USB        {}\nInstaller  {installer}\nmacOS      {version} ({})\nMac        {}\n{}{}{}",
                 usb.serial.as_ref().map_or_else(
                     || usb.description(),
                     |serial| format!("{} · serial {serial}", usb.description())
@@ -416,7 +408,12 @@ fn configure_inner(command: &mut Request, host: &dyn Host) -> Result<bool> {
                     None => "Wi-Fi      None (Ethernet)\n".into(),
                 },
                 super::addresses::review(command),
-                if command.profile { "On" } else { "Off" },
+                // Only a scripted --profile turns it on.
+                if command.profile {
+                    "Profiling  On\n"
+                } else {
+                    ""
+                },
             ),
         )?;
         let (chips, notes) = firmware::host_chips(host)?;
@@ -467,7 +464,7 @@ fn choose_wifi(command: &mut Request) -> Result<()> {
     progress.finish();
     const ETHERNET: usize = usize::MAX;
     const TYPED: usize = usize::MAX - 1;
-    let mut select = cliclack::select("5 / 8  Wi-Fi during installation").item(
+    let mut select = cliclack::select("5 / 7  Wi-Fi during installation").item(
         ETHERNET,
         "No Wi-Fi",
         "Connect the PC to Ethernet during installation",

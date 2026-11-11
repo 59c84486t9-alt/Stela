@@ -41,7 +41,7 @@ fn run(prompt: &str, items: &[Item], initial: usize, submenu: bool) -> Result<us
     let term = Term::stderr();
     term.hide_cursor()?;
     let _cursor = Cursor(term.clone());
-    let theme = super::theme::Stela::default();
+    let theme = super::theme::Stela;
     let hints = !submenu && items.iter().any(|item| !item.hint.is_empty());
     let mut query = String::new();
     let mut chosen = initial;

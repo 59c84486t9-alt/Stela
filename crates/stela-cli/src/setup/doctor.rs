@@ -1,4 +1,4 @@
-//! `status` (also `doctor`) and `repair`.
+//! `status` and `repair`.
 //!
 //! Status reads everything a setup consists of and changes nothing: the
 //! record, the installed `stela.efi` against the recorded version and this

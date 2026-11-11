@@ -149,8 +149,13 @@ const INSTALL_IMAGE_ACTIONS: &str = "--install-image goes with a new setup or --
 /// `stela setup {words} --usb {usb}` in backticks, as a user types it: every
 /// maintenance command needs `--usb`.
 fn fix(usb: &Path, words: &str) -> String {
+    let words = if words.is_empty() {
+        String::new()
+    } else {
+        format!("{words} ")
+    };
     format!(
-        "`stela setup {words} --usb {}`",
+        "`stela setup {words}--usb {}`",
         quoted(&usb.display().to_string())
     )
 }
@@ -167,7 +172,7 @@ fn quoted(word: &str) -> String {
 /// The command that finishes the interrupted first setup `record` describes:
 /// the same setup run again resumes it (`create::plan`).
 fn rerun(record: &Record, usb: &Path) -> String {
-    let mut words = String::from("--fetch");
+    let mut words = String::new();
     if record.build != builds::DEFAULT.build {
         let _ = write!(words, " --build {}", record.build);
     }
@@ -215,14 +220,14 @@ fn rerun(record: &Record, usb: &Path) -> String {
     if record.verify_on_read {
         words.push_str(" --verify-on-read");
     }
-    fix(usb, &words)
+    fix(usb, words.trim_start())
 }
 
 /// What to do about an interrupted first setup on `usb`.
 fn interrupted_text(record: &Record, usb: &Path) -> String {
     format!(
-        "the first setup on {} was interrupted. To finish it, run it again: {} (or --ipsw FILE in \
-         place of --fetch). To start over: {}",
+        "the first setup on {} was interrupted. To finish it, run it again: {} (add --ipsw FILE \
+         to use a local image). To start over: {}",
         record.esp.display(),
         rerun(record, usb),
         fix(usb, "uninstall")
@@ -286,8 +291,8 @@ fn image_is_remote(ipsw: &Path, choice: Option<InstallImage>) -> Result<bool> {
             ensure!(
                 complete,
                 "{} holds only the recovery members, without the macOS system image an \
-                 install restores; pass the whole IPSW with --ipsw, use --fetch to download \
-                 it, or --install-image online to stream it from Apple during the install",
+                 install restores; pass the whole IPSW with --ipsw, leave out --ipsw to download \
+                 it, or use --install-image online to stream it from Apple during the install",
                 ipsw.display()
             );
             Ok(false)
@@ -824,14 +829,14 @@ impl Request {
         Ok(text)
     }
 
-    /// The restore image: `--ipsw`, or the build `--fetch` downloads.
+    /// The restore image: `--ipsw`, or the build setup downloads.
     fn image(&self) -> Result<PathBuf> {
         match (&self.ipsw, self.fetch) {
             (Some(path), false) => Ok(path.clone()),
             (None, true) if self.dry_run => {
                 bail!(
-                    "--dry-run with --fetch needs the image first; download it without \
-                     --dry-run, or pass --ipsw"
+                    "a dry run needs the image first: pass --ipsw, or run once without \
+                     --dry-run to download it"
                 )
             }
             (None, true) => fetch(self),

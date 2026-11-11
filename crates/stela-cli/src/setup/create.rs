@@ -532,7 +532,7 @@ pub(super) fn plan(
                 esp.display(),
                 esp.join(RECORD).display(),
                 super::fix(&command.usb, "update stela"),
-                super::fix(&command.usb, "update os --fetch"),
+                super::fix(&command.usb, "update os"),
                 super::fix(&command.usb, "uninstall")
             ),
         },

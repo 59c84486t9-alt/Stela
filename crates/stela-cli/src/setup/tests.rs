@@ -1210,7 +1210,7 @@ fn install_and_repair_unmount_target_filesystems() {
 }
 
 #[test]
-fn install_reads_offline_or_streamed_image() {
+fn install_reads_full_or_streamed_image() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     // Online: the USB holds the inventory alone, and the Install choice
@@ -1266,7 +1266,7 @@ fn install_reads_offline_or_streamed_image() {
 }
 
 #[test]
-fn offline_install_requires_system_image() {
+fn full_install_requires_system_image() {
     let mut f = fixture(64 * GIB, false);
     add_installed_disk(&mut f, &[], &[]);
     let recovery = f._dir.path().join("Recovery.ipsw");
@@ -3847,7 +3847,7 @@ fn interrupted_first_setup_status_names_the_command_that_finishes_it() {
     assert!(
         reported
             .report
-            .contains("To finish it, run it again: `stela setup --fetch ")
+            .contains("To finish it, run it again: `stela setup --build STELA1 ")
             && reported
                 .report
                 .contains(&format!("--target {REGION} --nor {NOR} --usb {usb}`")),

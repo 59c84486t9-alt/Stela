@@ -22,7 +22,7 @@
 //!   upgrade`, which `stela.efi` boots from that volume as iBEC would
 //!   (`stela_loader::upgrade`), and every later boot builds from the
 //!   Preboot volume's new objects. `update os` brings the setup's Install
-//!   macOS to a new build offline: the build's install medium and each
+//!   macOS to a new build: the build's install medium and each
 //!   machine's restore bundles, so the USB needs room for both while it runs.
 //!
 //! Neither touches the installed disks' partitions.
@@ -332,7 +332,7 @@ pub(super) fn update_os(
         "macOS {build} is already the build this setup installs"
     );
     // The build's install medium and restore bundles, so Install macOS
-    // restores the new build offline.
+    // restores the new build.
     let install = plan_install(
         environment,
         &record,
