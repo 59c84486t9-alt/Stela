@@ -15,6 +15,8 @@
     static let value = Font.system(size: 13, weight: .medium)
     static let caption = Font.system(size: 11)
     static let fill = Color.primary.opacity(0.05)
+    /// The main window's first size: This PC's five cards without scrolling.
+    static let window = CGSize(width: 760, height: 820)
   }
 
   enum DisplayFormat {
@@ -57,6 +59,8 @@
           Text(detail).font(Style.caption).foregroundStyle(.secondary)
         }
       }
+      // Long names wrap rather than truncate.
+      .fixedSize(horizontal: false, vertical: true)
       // Fills a grid row's height, so cards side by side end together.
       .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
       .padding(Style.padding)

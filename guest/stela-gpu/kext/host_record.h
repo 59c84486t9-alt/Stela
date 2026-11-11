@@ -10,7 +10,7 @@
 #pragma once
 
 #define STELA_HOST_PROPERTY "stela-host"
-#define STELA_HOST_TEXT_BYTES 120
+#define STELA_HOST_TEXT_BYTES 255
 #define STELA_HOST_KEY_BYTES 40
 
 /* One entry: its key, and its number or its text, neither NUL-terminated. */

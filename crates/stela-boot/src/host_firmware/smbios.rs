@@ -110,12 +110,20 @@ fn record_board(capture: &Capture) {
     let Ok(system) = identity(parsed, &bytes[length..]) else {
         return;
     };
+    let table = &bytes[length..];
+    let observed = |value| match value {
+        Observation::Value(value) => Some(value),
+        _ => None,
+    };
+    use stela_boot_core::host_identity::{smbios_string, smbios_text};
     for (key, value) in [
-        ("SystemVendor", system.system_vendor),
-        ("SystemModel", system.product_name),
-        ("BoardVendor", system.board_vendor),
+        ("SystemVendor", observed(system.system_vendor)),
+        ("SystemModel", observed(system.product_name)),
+        ("BoardVendor", observed(system.board_vendor)),
+        ("BoardModel", smbios_string(table, 2, 5)),
+        ("FirmwareVersion", smbios_string(table, 0, 5)),
     ] {
-        if let Observation::Value(value) = value {
+        if let Some(value) = value.and_then(smbios_text) {
             crate::host_inventory::text(key, alloc::string::String::from_utf8_lossy(value));
         }
     }

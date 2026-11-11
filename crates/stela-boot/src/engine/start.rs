@@ -211,6 +211,7 @@ fn start(handoff: u64) -> Started {
             .map(|screen| screen.relocated(layout::physical(screen.base as u64) as usize)),
     );
     crate::status::replay(&handoff.history[..handoff.history_bytes]);
+    crate::host_inventory::restore(&handoff.host[..handoff.host_bytes.min(handoff.host.len())]);
     output::arguments(format_args!(
         "STELA SYSTEM ENGINE window={:#x} placement={:?} tsc_hz={} guest_ranges={} \
          heap={}M code={}M pool={}M\n",
@@ -814,7 +815,6 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
             if !gates.is_empty() {
                 hidden_devices.extend(stela_loader::devices::hide_agx(&mut assigned.tree));
             }
-            describe_host(&mut assigned.tree, gates.len(), target);
             gates
         })
         .unwrap_or_default();
@@ -830,6 +830,13 @@ fn run_guest(boot: Boot<'_>, mut host: OpenedHost, mut storage: Storage) -> ! {
         )
     }
     .unwrap_or_else(|error| output::fatal(error));
+    // The translator compiles for the canonical RAM's target (the BSP's live
+    // features under the common worker ceiling), not the board profile's
+    // ID-register list in `target`.
+    #[cfg(feature = "nvk")]
+    if let Some(assigned) = &mut assigned {
+        describe_host(&mut assigned.tree, gpu_gates.len(), canonical_ram.target());
+    }
     if let Some(assigned) = &assigned {
         board = Some(assigned_board(
             handoff,

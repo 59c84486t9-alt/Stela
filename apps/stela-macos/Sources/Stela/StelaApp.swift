@@ -22,7 +22,7 @@
             await PreviewRenderer.renderIfRequested(model: model)
           }
       }
-      .defaultSize(width: 760, height: 720)
+      .defaultSize(Style.window)
       .windowResizability(.contentMinSize)
       Window("About This PC", id: AboutThisPC.window) {
         ThisPCView(model: model).frame(width: 340).fixedSize()

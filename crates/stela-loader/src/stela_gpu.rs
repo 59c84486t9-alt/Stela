@@ -147,7 +147,7 @@ pub const HOST_PROPERTY: &str = "stela-host";
 /// only the versions it knows; a new field is a new line, not a new version.
 pub const HOST_FORMAT: &str = "stela-host 1";
 /// The longest text value; a longer one is cut there.
-pub const HOST_TEXT_BYTES: usize = 120;
+pub const HOST_TEXT_BYTES: usize = 255;
 
 /// One value of the host record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,8 +170,9 @@ pub fn encode_host(entries: &[(String, HostValue)]) -> Result<Vec<u8>> {
         match value {
             HostValue::Number(number) => record.push_str(&format!("n {key}={number}\n")),
             HostValue::Text(text) => {
+                // C strings keep their terminator; it is not part of the text.
                 let text: String = text
-                    .trim()
+                    .trim_matches(|c: char| c.is_whitespace() || c == '\0')
                     .chars()
                     .map(|c| {
                         if c == ' ' || c.is_ascii_graphic() {
@@ -187,6 +188,32 @@ pub fn encode_host(entries: &[(String, HostValue)]) -> Result<Vec<u8>> {
         }
     }
     Ok(record.into_bytes())
+}
+
+/// The entries of a record [`encode_host`] wrote, in order. A record of
+/// another version is refused; a malformed line is skipped.
+pub fn decode_host(record: &[u8]) -> Result<Vec<(String, HostValue)>> {
+    let text = core::str::from_utf8(record).map_err(|_| refuse!("a host record is not text"))?;
+    let mut lines = text.lines();
+    require!(
+        lines.next() == Some(HOST_FORMAT),
+        "a host record is not version 1"
+    );
+    Ok(lines
+        .filter_map(|line| {
+            let (kind, rest) = line.split_at_checked(2)?;
+            let (key, value) = rest.split_once('=')?;
+            if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                return None;
+            }
+            let value = match kind {
+                "n " => HostValue::Number(value.parse().ok()?),
+                "s " => HostValue::Text(value.into()),
+                _ => return None,
+            };
+            Some((key.into(), value))
+        })
+        .collect())
 }
 
 /// Sets GPU `index`'s gate node's [`HOST_PROPERTY`] to `record`.
@@ -341,12 +368,37 @@ mod tests {
             core::str::from_utf8(&record).unwrap(),
             "stela-host 1\ns CPUBrand=AMD Ryzen 9 9950X?16-Core?\nn HostThreads=32\n"
         );
+        // A kept C terminator is dropped, not shown as a replacement mark.
+        assert_eq!(
+            encode_host(&[("SystemVendor".into(), HostValue::Text("QEMU\0".into()))]).unwrap(),
+            b"stela-host 1\ns SystemVendor=QEMU\n"
+        );
+        // A full translator target fits whole.
+        let target = "x86_64-baseline+ssse3+sse4.1+sse4.2+pclmulqdq+fma+f16c+popcnt+bmi1+aes+sha\
+                      +atomic-load16+cx8+cx16+avx2+lzcnt+bmi2+fast-pdep+movbe+gfni+avx512f+avx512bw";
+        let entry = [("TranslatorTarget".into(), HostValue::Text(target.into()))];
+        assert_eq!(decode_host(&encode_host(&entry).unwrap()).unwrap(), entry);
         let long = [("A".into(), HostValue::Text("x".repeat(500)))];
         assert_eq!(
             encode_host(&long).unwrap().len(),
             13 + 4 + HOST_TEXT_BYTES + 1
         );
         assert!(encode_host(&[("Bad key".into(), HostValue::Number(1))]).is_err());
+        assert_eq!(
+            decode_host(&record).unwrap(),
+            [
+                (
+                    "CPUBrand".into(),
+                    HostValue::Text("AMD Ryzen 9 9950X?16-Core?".into())
+                ),
+                ("HostThreads".into(), HostValue::Number(32)),
+            ]
+        );
+        assert!(decode_host(b"stela-host 2\nn A=1\n").is_err());
+        assert_eq!(
+            decode_host(b"stela-host 1\nn A=x\nq B=1\ns =1\ns C=ok\n").unwrap(),
+            [("C".into(), HostValue::Text("ok".into()))]
+        );
         let mut tree = tree(vec![]);
         place_gpu_gate(&mut tree, 0, WINDOW).unwrap();
         set_host(&mut tree, 0, record.clone()).unwrap();

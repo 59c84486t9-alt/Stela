@@ -27,6 +27,8 @@
         guard let main = NSApp.windows.first(where: { $0.isVisible && $0 !== about }) else {
           throw RenderError.noWindow
         }
+        // At the size a first launch gets, so a cut-off page shows.
+        main.setContentSize(Style.window)
         for (theme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
           NSApp.appearance = NSAppearance(named: appearance)
           for window in [main, about] { window.appearance = NSAppearance(named: appearance) }

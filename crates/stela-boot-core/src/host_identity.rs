@@ -51,6 +51,45 @@ pub fn vendor(words: [u32; 3]) -> String {
         .into()
 }
 
+/// An SMBIOS string as text: without the NUL terminator the table walk keeps
+/// and without padding spaces, or `None` when nothing is left.
+pub fn smbios_text(value: &[u8]) -> Option<&[u8]> {
+    let end = value
+        .iter()
+        .rposition(|&byte| byte != 0 && !byte.is_ascii_whitespace())?
+        + 1;
+    let start = value
+        .iter()
+        .position(|&byte| byte != 0 && !byte.is_ascii_whitespace())?;
+    Some(&value[start..end])
+}
+
+/// The string at byte `offset` of the first SMBIOS structure of type `kind`
+/// in `table` (DSP0134 §6.1.3), or `None` when there is none or the table
+/// ends early. Callers name only model and version fields: type 0's BIOS
+/// version (offset 5), type 2's product (offset 5); never serial numbers,
+/// UUIDs or asset tags.
+pub fn smbios_string(table: &[u8], kind: u8, offset: usize) -> Option<&[u8]> {
+    let mut at = 0usize;
+    while let Some(head) = table.get(at..at + 4) {
+        let length = usize::from(head[1]);
+        let strings = table.get(at + length..)?;
+        let end = strings.windows(2).position(|pair| pair == [0, 0])?;
+        if head[0] == kind {
+            let index = usize::from(*table.get(at + offset).filter(|_| offset < length)?);
+            return strings[..end]
+                .split(|&byte| byte == 0)
+                .nth(index.checked_sub(1)?)
+                .filter(|value| !value.is_empty());
+        }
+        if head[0] == 127 {
+            return None;
+        }
+        at += length + end + 2;
+    }
+    None
+}
+
 /// `HOST version=… cpu="…" family=… model=… stepping=… ram=… firmware="…"`.
 pub fn line(identity: &Identity<'_>) -> String {
     let (family, model, _) = signature_parts(identity.signature);
@@ -114,5 +153,37 @@ mod tests {
             }
         });
         assert!(zen.contains("family=0x19 model=0x61 stepping=2"), "{zen}");
+    }
+
+    #[test]
+    fn smbios_strings_are_read_by_structure_type_and_offset() {
+        // Type 0 with vendor and version strings, type 2 with a product but no
+        // version, then the end structure.
+        let mut table = alloc::vec![0, 0x18, 0, 0, 1, 2, 0, 0];
+        table.resize(0x18, 0);
+        table.extend(b"AMI\x002.02\x00\x00");
+        table.extend([2, 8, 1, 0, 1, 2, 0, 0]);
+        table.extend(b"ASUSTeK\x00ROG STRIX\x00\x00");
+        table.extend([127, 4, 2, 0, 0, 0]);
+        assert_eq!(smbios_string(&table, 0, 5), Some(&b"2.02"[..]));
+        assert_eq!(smbios_string(&table, 2, 5), Some(&b"ROG STRIX"[..]));
+        assert_eq!(smbios_string(&table, 2, 6), None);
+        assert_eq!(smbios_string(&table, 2, 9), None);
+        assert_eq!(smbios_string(&table, 3, 4), None);
+        assert_eq!(smbios_string(&table[..20], 2, 5), None);
+    }
+
+    #[test]
+    fn smbios_text_drops_the_terminator_and_padding() {
+        // The table walk keeps each string's NUL (QEMU's type 1 gave
+        // "QEMU?" in build-54's record).
+        assert_eq!(smbios_text(b"QEMU\0"), Some(&b"QEMU"[..]));
+        assert_eq!(
+            smbios_text(b"Standard PC (Q35 + ICH9, 2009)\0"),
+            Some(&b"Standard PC (Q35 + ICH9, 2009)"[..])
+        );
+        assert_eq!(smbios_text(b"  ASUS  \0\0"), Some(&b"ASUS"[..]));
+        assert_eq!(smbios_text(b" \0"), None);
+        assert_eq!(smbios_text(b""), None);
     }
 }

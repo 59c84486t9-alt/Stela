@@ -27,9 +27,11 @@ public struct HostInventory: Codable, Equatable, Sendable {
   public var hostThreads: UInt64?
   public var hostMemoryBytes: UInt64?
   public var firmwareVendor: String?
+  public var firmwareVersion: String?
   public var systemVendor: String?
   public var systemModel: String?
   public var boardVendor: String?
+  public var boardModel: String?
   public var gpus: [HostGPU] = []
 
   /// Reads the registry dictionary, whose values are strings and numbers.
@@ -55,9 +57,11 @@ public struct HostInventory: Codable, Equatable, Sendable {
     hostThreads = number("HostThreads")
     hostMemoryBytes = number("HostMemoryBytes")
     firmwareVendor = text("FirmwareVendor")
+    firmwareVersion = text("FirmwareVersion")
     systemVendor = text("SystemVendor")
     systemModel = text("SystemModel")
     boardVendor = text("BoardVendor")
+    boardModel = text("BoardModel")
     var index = 0
     while text("GPU\(index)Chip") != nil || text("GPU\(index)PCIID") != nil {
       gpus.append(
@@ -76,27 +80,75 @@ public struct HostInventory: Codable, Equatable, Sendable {
     return HostInventory(properties: properties)
   }
 
+  private var targetFeatures: Set<String> {
+    Set((translatorTarget ?? "").split(separator: "+").map(String.init))
+  }
+
   /// The widest vector extension the translator emits, from its target id
   /// (`x86_64-baseline+ssse3+…+avx2+…`).
   public var instructionTier: String? {
-    guard let translatorTarget else { return nil }
-    let features = Set(translatorTarget.split(separator: "+").map(String.init))
+    guard translatorTarget != nil else { return nil }
     let tiers: [(String, String)] = [
       ("avx512f", "AVX-512"), ("avx2", "AVX2"), ("avx", "AVX"), ("sse4.2", "SSE4.2"),
       ("sse4.1", "SSE4.1"), ("ssse3", "SSSE3"),
     ]
-    return tiers.first { features.contains($0.0) }?.1 ?? "SSE2"
+    return tiers.first { targetFeatures.contains($0.0) }?.1 ?? "SSE2"
   }
 
-  /// The system's maker and model, falling back to the board's maker.
+  /// The translator's level in the words x86 users know: the widest vector
+  /// tier, with FMA when fused multiply-add is in use (`AVX2, FMA`).
+  public var translationLevel: String? {
+    guard let instructionTier else { return nil }
+    return targetFeatures.contains("fma") ? "\(instructionTier), FMA" : instructionTier
+  }
+
+  /// The other notable extensions the translator emits, by their usual names.
+  public var notableExtensions: [String] {
+    let features = targetFeatures
+    let names: [(String, String)] = [
+      ("f16c", "F16C"), ("aes", "AES-NI"), ("sha", "SHA"), ("pclmulqdq", "PCLMUL"),
+      ("bmi2", "BMI2"), ("lzcnt", "LZCNT"), ("popcnt", "POPCNT"), ("movbe", "MOVBE"),
+      ("gfni", "GFNI"),
+    ]
+    var found = names.filter { features.contains($0.0) }.map(\.1)
+    if !features.contains("bmi2") && features.contains("bmi1") {
+      found.insert("BMI1", at: found.firstIndex(of: "LZCNT") ?? found.firstIndex(of: "POPCNT") ?? found.count)
+    }
+    return found
+  }
+
+  /// The system's maker and model; a board model when the system's is a
+  /// placeholder, as on most self-built PCs.
   public var system: String? {
-    let maker = systemVendor ?? boardVendor
-    switch (maker, systemModel) {
+    let (maker, model) =
+      systemModel != nil
+      ? (systemVendor ?? boardVendor, systemModel)
+      : (systemVendor ?? boardVendor, boardModel)
+    switch (maker.map(Self.brand), model) {
     case let (maker?, model?): return model.hasPrefix(maker) ? model : "\(maker) \(model)"
     case let (maker?, nil): return maker
     case let (nil, model?): return model
     default: return nil
     }
+  }
+
+  /// A maker's brand without its company form (`ASUSTeK COMPUTER INC.`
+  /// becomes `ASUSTeK`).
+  static func brand(_ maker: String) -> String {
+    let forms = [
+      " computer inc.", " computer inc", " corporation", " corp.", ", inc.", " inc.", " inc",
+      " co., ltd.", " co.,ltd.", " co., ltd", " ltd.", " gmbh",
+    ]
+    for form in forms where maker.lowercased().hasSuffix(form) && maker.count > form.count {
+      return String(maker.dropLast(form.count)).trimmingCharacters(in: .whitespaces)
+    }
+    return maker
+  }
+
+  /// The firmware's vendor and version, as far as reported.
+  public var firmware: String? {
+    let parts = [firmwareVendor, firmwareVersion].compactMap { $0 }
+    return parts.isEmpty ? nil : parts.joined(separator: " ")
   }
 
   /// Firmware tables often hold placeholders instead of names.
@@ -144,8 +196,14 @@ public struct HostInventory: Codable, Equatable, Sendable {
       lines.append("Memory: \(Self.bytes(hostMemoryBytes))\(guest)")
     }
     if let system { lines.append("System: \(system)") }
-    if let firmwareVendor { lines.append("Firmware: \(firmwareVendor)") }
-    if let instructionTier { lines.append("Translation: \(instructionTier)") }
+    if let firmware { lines.append("Firmware: \(firmware)") }
+    if let translationLevel {
+      lines.append("Translation: \(translationLevel)")
+      if !notableExtensions.isEmpty {
+        lines.append("Extensions: \(notableExtensions.joined(separator: ", "))")
+      }
+    }
+    if let translatorTarget { lines.append("Target: \(translatorTarget)") }
     if let stelaVersion { lines.append("Stela \(stelaVersion)") }
     let presented = [presentedModel, presentedChip].compactMap { $0 }
     if !presented.isEmpty { lines.append("Presented as \(presented.joined(separator: ", "))") }

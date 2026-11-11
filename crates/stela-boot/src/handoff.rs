@@ -40,6 +40,10 @@ pub struct Handoff {
     /// with (`status::replay`).
     pub history: [u8; crate::status::HISTORY_BYTES],
     pub history_bytes: usize,
+    /// The loader's facts about the PC, as a host record, which the engine
+    /// takes up (`host_inventory::restore`).
+    pub host: [u8; crate::host_inventory::HANDOFF_BYTES],
+    pub host_bytes: usize,
     /// The partition holding the USB's boot log the loader keeps
     /// (`log_file`), which the engine writes on to.
     pub log_partition: Option<[u8; 16]>,

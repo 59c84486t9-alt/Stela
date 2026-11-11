@@ -65,11 +65,17 @@
           label: "Memory", value: HostInventory.bytes(memory),
           detail: DisplayFormat.bytes(model.snapshot?.memoryBytes).map { "\($0) for macOS" })
       }
-      if let system = host.system {
-        Card(label: "System", value: system, detail: host.firmwareVendor.map { "\($0) firmware" })
+      if let level = host.translationLevel {
+        let extensions = host.notableExtensions
+        // A no-break space keeps each dot after its name when the line wraps.
+        Card(
+          label: "Translation", value: level,
+          detail: extensions.isEmpty ? nil : extensions.joined(separator: "\u{00A0}· ")
+        )
+        .help(host.translatorTarget ?? "")
       }
-      if let tier = host.instructionTier {
-        Card(label: "Translation", value: tier)
+      if let system = host.system {
+        Card(label: "System", value: system, detail: host.firmware.map { "Firmware \($0)" })
       }
     }
   }

@@ -335,7 +335,7 @@ fn the_kext_reads_the_records_stela_efi_writes() {
         ),
         ("HostThreads".into(), HostValue::Number(32)),
         ("HostMemoryBytes".into(), HostValue::Number(u64::MAX)),
-        ("SystemModel".into(), HostValue::Text("x".repeat(300))),
+        ("SystemModel".into(), HostValue::Text("x".repeat(400))),
     ])
     .unwrap();
     let file = built.path().join("record");
@@ -347,7 +347,7 @@ fn the_kext_reads_the_records_stela_efi_writes() {
         format!(
             "CPUBrand|s|AMD Ryzen 9 9950X 16-Core Processor\nHostThreads|n|32\n\
              HostMemoryBytes|n|18446744073709551615\nSystemModel|s|{}\n",
-            "x".repeat(120)
+            "x".repeat(stela_loader::stela_gpu::HOST_TEXT_BYTES)
         )
     );
 }
